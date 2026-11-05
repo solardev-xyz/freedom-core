@@ -63,6 +63,41 @@ const SECTION_COST: usize = 512;
 /// A held shard's map entry, beside its CID and block.
 const MAP_ENTRY: usize = 128;
 
+/// Where reading a CAR stands.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Read {
+    /// Read as far as it can for now.
+    On,
+    /// No room to read on, and nothing that will give it back: the CAR
+    /// gives way to raw blocks.
+    GiveWay,
+}
+
+/// Room for the body bytes that using `need`'s block of `len` bytes copies
+/// out while the block is held: its part of the body's range (all of a
+/// block the file isn't known for yet), and before the head the sniffed
+/// bytes, kept and then released.
+fn copy_room(file: Option<&File>, need: &Need, len: usize) -> usize {
+    let Some(f) = file else {
+        return len;
+    };
+    let part = match need.what {
+        What::File {
+            start, len: size, ..
+        } => {
+            let lo = f.a.max(start);
+            let hi = (f.b + 1).min(start.saturating_add(size));
+            usize::try_from(hi.saturating_sub(lo)).unwrap_or(usize::MAX)
+        }
+        _ => len,
+    };
+    let early = match f.sniff {
+        Some(end) if !f.headed => usize::try_from(end + 1).unwrap_or(usize::MAX),
+        _ => 0,
+    };
+    part.min(len) + 2 * early.min(len)
+}
+
 /// What a piece or a job is for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Tag {
@@ -426,7 +461,7 @@ impl Walk {
         body: Vec<u8>,
     ) {
         self.stop(core);
-        if !core.fits(body.len()) {
+        if !self.fits(core, body.len()) {
             return core.fail(Failure::Memory);
         }
         core.head(status, headers, self.label);
@@ -466,7 +501,32 @@ impl Walk {
     }
 
     fn close_car(&mut self, core: &mut Core) {
-        if let Some(c) = self.car.take() {
+        Self::release_car(self.car.take(), core);
+    }
+
+    /// Whether `n` more bytes fit the request's memory, the CAR given up
+    /// first when they don't: its reading room is a shortcut's, and raw
+    /// blocks carry the walk on without it.
+    fn fits(&mut self, core: &mut Core, n: usize) -> bool {
+        Self::fits_beside(&mut self.car, &mut self.raw_only, core, n)
+    }
+
+    /// [`Walk::fits`], for a caller holding another part of the walk.
+    fn fits_beside(
+        car: &mut Option<CarStream>,
+        raw_only: &mut bool,
+        core: &mut Core,
+        n: usize,
+    ) -> bool {
+        if !core.fits(n) && car.is_some() {
+            Self::release_car(car.take(), core);
+            *raw_only = true;
+        }
+        core.fits(n)
+    }
+
+    fn release_car(car: Option<CarStream>, core: &mut Core) {
+        if let Some(c) = car {
             if c.open {
                 core.cancel_piece(c.id);
             }
@@ -604,7 +664,7 @@ impl Walk {
         } else {
             0
         };
-        if !core.fits(grown.saturating_add(cids)) {
+        if !self.fits(core, grown.saturating_add(cids)) {
             return false;
         }
         core.hold(grown + cids);
@@ -698,6 +758,18 @@ impl Walk {
         let Some(c) = self.car.as_mut() else {
             return false;
         };
+        // Using a block copies its body bytes out while it is held. Room
+        // for them comes back as the page reads the body: until then the
+        // block waits its turn.
+        let copy = match (c.verdicts.get(&c.done), self.needs.front()) {
+            (Some((_, block, Ok(()))), Some(front)) => {
+                copy_room(self.file.as_ref(), front, block.len())
+            }
+            _ => 0,
+        };
+        if !core.fits(copy) && core.awaiting() > 0 {
+            return false;
+        }
         let Some((cid, block, verdict)) = c.verdicts.remove(&c.done) else {
             return false;
         };
@@ -719,6 +791,18 @@ impl Walk {
             // Not the block the walk needs next: the CAR stops being
             // useful, and the rest comes as raw blocks.
             core.unhold(held);
+            self.close_car(core);
+            self.raw_only = true;
+            return true;
+        }
+        if !core.fits(copy) {
+            // Nothing will give the room back while the CAR's reading room
+            // is held: the CAR gives way, and the block, verified, is used
+            // as a raw block is, in the room the CAR held.
+            if let Some(front) = self.needs.front() {
+                self.arrived.insert(front.seq, block);
+            }
+            core.unhold(cid.len() + SECTION_COST);
             self.close_car(core);
             self.raw_only = true;
             return true;
@@ -774,7 +858,11 @@ impl Walk {
             let reserve = block_room + need.cid.len();
             let first = self.needs.front().is_some_and(|f| f.seq == need.seq);
             if !core.fits(reserve + super::STREAM_WINDOW) {
-                if first && self.raw.is_empty() {
+                // Room comes back as blocks, jobs and cancelled pieces end
+                // and as the body is read; with none of them left, it never
+                // will.
+                let waiting = core.hashing() || core.cancelling() || core.awaiting() > 0;
+                if first && self.raw.is_empty() && !waiting {
                     return self.end(core, Failure::Memory);
                 }
                 break;
@@ -995,7 +1083,7 @@ impl Walk {
                 let named = |l: &dagpb::Link<'_>| l.name.is_some_and(|n| !n.is_empty());
                 let n = node.links().filter(named).count();
                 let held = n.saturating_mul(std::mem::size_of::<gateway::Entry<'_>>());
-                if !core.fits(held) {
+                if !self.fits(core, held) {
                     return Err(Failure::Memory);
                 }
                 core.hold(held);
@@ -1014,7 +1102,7 @@ impl Walk {
             }
             Kind::HamtShard => {
                 let held = block.len() + cid.len() + MAP_ENTRY;
-                if !core.fits(held) {
+                if !self.fits(core, held) {
                     return Err(Failure::Memory);
                 }
                 core.hold(held);
@@ -1173,7 +1261,7 @@ impl Walk {
         // A shard linked twice is held once.
         if !h.shards.contains_key(cid) {
             let held = block.len() + cid.len() + MAP_ENTRY;
-            if !core.fits(held) {
+            if !Self::fits_beside(&mut self.car, &mut self.raw_only, core, held) {
                 return Err(Failure::Memory);
             }
             core.hold(held);
@@ -1234,7 +1322,7 @@ impl Walk {
         let held = n
             .saturating_mul(std::mem::size_of::<gateway::Entry<'_>>())
             .saturating_add(owned);
-        if !core.fits(held) {
+        if !self.fits(core, held) {
             core.unhold(h.held);
             return self.end(core, Failure::Memory);
         }
@@ -1256,7 +1344,7 @@ impl Walk {
     /// before they are built; false when the request can't hold them.
     fn reserve_path(&mut self, core: &mut Core, n: usize, bytes: usize) -> bool {
         let need = bytes.saturating_add(n.saturating_mul(std::mem::size_of::<String>()));
-        if !core.fits(need) {
+        if !self.fits(core, need) {
             return false;
         }
         core.hold(need);
@@ -1355,7 +1443,7 @@ impl Walk {
         };
         gateway::sort_listing(&mut entries);
         let len = gateway::listing_len(&title, &base, &entries);
-        if !core.fits(len) {
+        if !self.fits(core, len) {
             drop(entries);
             core.unhold(held);
             return self.end(core, Failure::Memory);
@@ -1656,9 +1744,20 @@ impl Walk {
         let Some(c) = self.car.as_mut() else {
             return;
         };
-        if let Err(failure) = Self::push_frames(c, core) {
-            Self::break_car(c, core, failure);
-            return self.car_settled(core);
+        match Self::push_frames(c, core) {
+            Ok(Read::On) => {}
+            // The CAR is a shortcut: without room to read it on, the rest
+            // comes as raw blocks, and only a raw block that can't fit
+            // either ends the walk for its memory.
+            Ok(Read::GiveWay) => {
+                self.close_car(core);
+                self.raw_only = true;
+                return self.pump(core);
+            }
+            Err(failure) => {
+                Self::break_car(c, core, failure);
+                return self.car_settled(core);
+            }
         }
         if c.finished && !c.ended && c.stash.is_empty() {
             match c.reader.finish() {
@@ -1690,16 +1789,17 @@ impl Walk {
     /// of each as can complete no more sections than may still wait, each
     /// counted with its job's structures; and only while the request has
     /// room for what those bytes can complete: the section being read and
-    /// the bytes themselves.
-    fn push_frames(c: &mut CarStream, core: &mut Core) -> Result<(), Failure> {
+    /// the bytes themselves. Without that room, and nothing that will give
+    /// it back, the CAR gives way to raw blocks.
+    fn push_frames(c: &mut CarStream, core: &mut Core) -> Result<Read, Failure> {
         while c.finished || core.awaiting() < QUEUE_LIMIT {
             let starts = PENDING_LIMIT.saturating_sub(c.pending) / SECTION_COST;
             if starts == 0 {
                 // The sections waiting free room as their verdicts are used.
-                return Ok(());
+                return Ok(Read::On);
             }
             let Some(frame) = c.stash.front_mut() else {
-                return Ok(());
+                return Ok(Read::On);
             };
             // The item being read completes with the bytes it wants; each
             // further section takes at least MIN_SECTION.
@@ -1713,9 +1813,9 @@ impl Walk {
                 // Room comes back as sections are used and the body is
                 // read; with neither waiting, it never will.
                 if c.pending == 0 && core.awaiting() == 0 {
-                    return Err(Failure::Memory);
+                    return Ok(Read::GiveWay);
                 }
-                return Ok(());
+                return Ok(Read::On);
             }
             let pushed = c.reader.push(&frame[..take]);
             frame.drain(..take);
@@ -1728,17 +1828,20 @@ impl Walk {
                 core.consumed(c.id, take);
             }
             for section in pushed.sections {
-                let n = c.sent;
-                c.sent += 1;
                 // The section's own buffer, the CID moved out of its front.
                 let (mut block, cid_len) = section.into_parts();
                 let cid = block.drain(..cid_len).collect::<Vec<u8>>();
                 let size = cid.len() + block.len();
-                // The section's bytes were in the reader's room and the
-                // frame's; its job's own structures need room of their own.
-                if !core.fits(SECTION_COST) {
-                    return Err(Failure::Memory);
+                // The section's bytes leave the reader for the job, which
+                // holds them beside the reader's room, with its own
+                // structures. Without room for both, the section, out of
+                // the reader, can't wait: it and the rest come as raw
+                // blocks.
+                if !core.fits(size + SECTION_COST) {
+                    return Ok(Read::GiveWay);
                 }
+                let n = c.sent;
+                c.sent += 1;
                 c.pending += size + SECTION_COST;
                 core.hold(size + SECTION_COST);
                 core.hash(Tag::Section(n), Work::Block { cid, block });
@@ -1747,7 +1850,7 @@ impl Walk {
                 return Err(refusal(r));
             }
         }
-        Ok(())
+        Ok(Read::On)
     }
 
     fn car_end(&mut self, core: &mut Core) {
@@ -1991,8 +2094,9 @@ impl super::Events<Tag> for Walk {
             }
             (Tag::Section(n), Verdict::Block(result), Work::Block { cid, block }) => {
                 let Some(c) = self.car.as_mut() else {
+                    // The CAR gave way: its room goes to the raw blocks.
                     core.unhold(cid.len() + block.len());
-                    return;
+                    return self.pump(core);
                 };
                 c.verdicts.insert(n, (cid, block, result));
                 self.pump(core);

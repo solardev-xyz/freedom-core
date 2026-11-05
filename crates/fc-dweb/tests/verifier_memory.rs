@@ -690,8 +690,61 @@ fn flood() -> (Vec<u8>, World) {
 }
 
 /// Every case in one test, so no other test's allocations meet the cap.
+/// The IPNS sequence floors fully occupied (0009, Bounds): 1,024 names in
+/// the profile's partition and in each of eight private ones, each name an
+/// Ed25519 libp2p-key CID as the walk keys it: CIDv1, the libp2p-key codec,
+/// the identity multihash and the 36-byte `PublicKey` protobuf, 40 bytes.
+/// They arrive in order, which leaves the floors' B-trees least full: the
+/// most of the orders measured (uniform keys, in no order, hold about
+/// 2.02 MB). What the allocator holds for them past the store and its
+/// partitions, and with them.
+fn floors_fully_occupied() -> (usize, usize) {
+    use fc_dweb::store::{FLOOR_NAMES, FloorCheck, PRIVATE_PARTITIONS, Store};
+    let start = PeakAlloc.current_usage();
+    let mut store = Store::new();
+    let partitions: Vec<Option<String>> = std::iter::once(None)
+        .chain((0..PRIVATE_PARTITIONS).map(|i| Some(format!("private-{i}"))))
+        .collect();
+    let tickets: Vec<_> = partitions
+        .iter()
+        .map(|p| store.begin(p.as_deref()))
+        .collect();
+    let base = PeakAlloc.current_usage();
+    let mut name = [0u8; 40];
+    name[..8].copy_from_slice(&[0x01, 0x72, 0x00, 0x24, 0x08, 0x01, 0x12, 0x20]);
+    for (t, ticket) in tickets.iter().enumerate() {
+        for i in 0..FLOOR_NAMES {
+            name[8] = t as u8;
+            name[9..17].copy_from_slice(&(i as u64).to_be_bytes());
+            let check = store.floor(ticket, &name, 1, i64::MAX, 0);
+            assert_eq!(check, FloorCheck::Accepted);
+        }
+    }
+    for p in &partitions {
+        assert_eq!(store.floors(p.as_deref()), FLOOR_NAMES, "{p:?}");
+    }
+    let now = PeakAlloc.current_usage();
+    drop((store, tickets, partitions));
+    (now - base, now - start)
+}
+
 #[test]
 fn dense_structure_stays_within_the_budget() {
+    // The IPNS floors, fully occupied, within their 3 MiB reserve beside
+    // the structure cache, and the 2.18 MB 0009 states for them.
+    let (held, with_setup) = floors_fully_occupied();
+    {
+        use std::io::Write;
+        let _ = writeln!(
+            std::io::stderr(),
+            "floors: {held} bytes, {with_setup} with the store's setup"
+        );
+    }
+    assert!(with_setup <= 3 << 20, "{with_setup}");
+    assert!(
+        (2_175_000..2_185_000).contains(&held),
+        "{held}: 0009 states 2.18 MB"
+    );
     // A directory of 65,536 entries whose names escape and encode longer:
     // its entries fit, its page (about 10 MB) doesn't.
     let (root, world) = directory(65_536);

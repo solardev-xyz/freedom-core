@@ -509,6 +509,17 @@ impl<T: Copy> Core<T> {
         self.queued + self.sent.saturating_sub(self.credited)
     }
 
+    /// Hash jobs out: their bytes come back with their results.
+    pub(crate) fn hashing(&self) -> bool {
+        !self.jobs.is_empty()
+    }
+
+    /// Pieces cancelled whose terminal hasn't come: the room main may
+    /// still fill on them comes back with it.
+    pub(crate) fn cancelling(&self) -> bool {
+        self.pieces.values().any(|p| p.cancelled)
+    }
+
     /// The walk is over: the terminal output is out, or follows what is
     /// queued.
     pub(crate) fn ended(&self) -> bool {
@@ -969,7 +980,8 @@ pub(crate) trait Events<T> {
     fn stream_end(&mut self, core: &mut Core<T>, tag: T, id: PieceId);
     fn failed(&mut self, core: &mut Core<T>, tag: T, failure: PieceFailure);
     fn hashed(&mut self, core: &mut Core<T>, tag: T, verdict: jobs::Verdict, work: jobs::Work);
-    /// Main's credit made room in the body's queue.
+    /// Room came back: main's credit made room in the body's queue, or a
+    /// cancelled piece ended.
     fn room(&mut self, _core: &mut Core<T>) {}
     /// The floor's verdict on the record the walk asked about; false when
     /// it asked about none.
@@ -1042,9 +1054,14 @@ impl<T: Copy, W: Events<T>> Machine<T, W> {
             s.headed = true;
         }
         if cancelled {
-            // A cancelled piece's late input is dropped, as read.
+            // A cancelled piece's late input is dropped, as read. Its
+            // terminal gives back the room main might have filled, which
+            // a walk waiting for room may use.
             if terminal {
                 self.core.pieces.remove(&id);
+                if let Some(walk) = self.walk.as_mut() {
+                    walk.room(&mut self.core);
+                }
             }
             self.settle();
             return Ok(());

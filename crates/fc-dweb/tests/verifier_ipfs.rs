@@ -24,7 +24,8 @@ use serde_json::Value as Json;
 
 mod common;
 use common::{
-    Answer, Ending, Expected, Opts, Order, b64, check_body, content, load, pairs, run, run_shared,
+    Answer, Ending, Expected, Opts, Order, Run, b64, check_body, content, load, pairs, run,
+    run_shared,
 };
 
 /// A block's identity: its codec and multihash, so a CIDv0 link and its
@@ -1018,10 +1019,80 @@ fn leaf(blocks: &Blocks, n: usize) -> String {
     ipfs_cid::to_text(&ipfs_cid::parse(cid).unwrap())
 }
 
+/// A request at a budget: its answer, which is the answer with room, or a
+/// refusal for its memory, with the budget's own text and nothing else.
+fn answered(label: &str, got: &Run, honest: &Run) -> bool {
+    match &got.ending {
+        Some(Ending::End) => {
+            assert_eq!(got.head, honest.head, "{label}");
+            assert_eq!(got.body, honest.body, "{label}");
+            true
+        }
+        Some(Ending::Error(502, m) | Ending::Abort(_, m)) => {
+            assert_eq!(m, fc_dweb::verifier::MEMORY, "{label}");
+            false
+        }
+        other => panic!("{label}: {other:?}"),
+    }
+}
+
+/// `p` at each of `budgets`, in increasing order, through raw blocks and
+/// through CARs, the driver taking its actions in `order`. Each answer is the answer with room; each refusal is for
+/// memory; more room never turns an answer into a refusal; and a CAR, a
+/// shortcut, never refuses what raw blocks answer at the same budget. The
+/// driver checks at every step that nothing holds past the budget. How
+/// many budgets answered and were refused, raw then CAR.
+fn budget_sweep(
+    world: &Gateway,
+    p: &Verify,
+    budgets: &[usize],
+    order: Order,
+) -> [(usize, usize); 2] {
+    let honest = run("budget", p, Method::Get, world, opts(true, 0));
+    assert_eq!(honest.ending, Some(Ending::End), "{:?} {}", p.root, p.path);
+    let mut counts = [(0, 0); 2];
+    let mut first_answer = [None; 2];
+    for &budget in budgets {
+        let mut now = [false; 2];
+        for (i, car) in [false, true].into_iter().enumerate() {
+            let label = format!("budget {budget} {} car={car} {order:?}", p.path);
+            let got = run(
+                &label,
+                p,
+                Method::Get,
+                world,
+                Opts {
+                    budget,
+                    order,
+                    ..opts(car, 0)
+                },
+            );
+            now[i] = answered(&label, &got, &honest);
+            if now[i] {
+                counts[i].0 += 1;
+                first_answer[i].get_or_insert(budget);
+            } else {
+                counts[i].1 += 1;
+                assert!(
+                    first_answer[i].is_none(),
+                    "{label}: refused, though {:?} answered",
+                    first_answer[i]
+                );
+            }
+        }
+        assert!(
+            now[1] || !now[0],
+            "budget {budget} {} {order:?}: the CAR refused what raw blocks answer",
+            p.path
+        );
+    }
+    counts
+}
+
 /// Every reservation short of what the walk needs, through CARs and raw
 /// blocks: each request either answers as it does with room, or is
-/// `unverifiable`, and never holds past its budget (the driver checks
-/// that at every step).
+/// refused for its memory, only below the least budget that answers it,
+/// and with CARs only where raw blocks are refused too.
 #[test]
 fn budgets_exhausted_at_each_reservation() {
     let blocks = Blocks::new(&load("dweb-verify.json"));
@@ -1031,53 +1102,144 @@ fn budgets_exhausted_at_each_reservation() {
     };
     let window = fc_dweb::verifier::STREAM_WINDOW;
     let car_room = fc_ipfs::car::MAX_SECTION + fc_ipfs::car::MAX_HEADER;
-    let plans = [
-        ranged(SITE, "/style.css", None),
-        ranged(SITE, "/", None),
-        ranged(HAMT, "/", None),
-        ranged(FILE_10M, "/", Some("bytes=300000-600000")),
+    let budgets = [
+        0,
+        100,
+        3000,
+        64 << 10,
+        window,
+        window + LEAF,
+        window + car_room - 1,
+        window + car_room,
+        2 * window + car_room,
+        3 << 20,
+        4 << 20,
+        6 << 20,
     ];
-    for p in &plans {
-        for car in [true, false] {
-            let o = opts(car, 0);
-            let honest = run("budget", p, Method::Get, &world, o);
-            assert_eq!(honest.ending, Some(Ending::End), "{:?} {}", p.root, p.path);
-            let (mut ended, mut refused) = (0, 0);
-            for budget in [
-                0,
-                100,
-                3000,
-                64 << 10,
-                window,
-                window + LEAF,
-                window + car_room - 1,
-                window + car_room,
-                2 * window + car_room,
-                3 << 20,
-                4 << 20,
-                6 << 20,
-            ] {
-                let label = format!("budget {budget} {} car={car}", p.path);
-                let got = run(&label, p, Method::Get, &world, Opts { budget, ..o });
-                match &got.ending {
-                    Some(Ending::End) => {
-                        assert_eq!(got.body, honest.body, "{budget}");
-                        assert_eq!(got.head, honest.head, "{budget}");
-                        ended += 1;
-                    }
-                    // Refused for its memory, with the budget's own text:
-                    // never another cause.
-                    Some(Ending::Error(502, m)) | Some(Ending::Abort(_, m)) => {
-                        assert_eq!(m, fc_dweb::verifier::MEMORY, "{budget}");
-                        refused += 1;
-                    }
-                    other => panic!("{budget}: {other:?}"),
-                }
-            }
+    for p in &budget_plans() {
+        for (car, (ended, refused)) in
+            [false, true]
+                .into_iter()
+                .zip(budget_sweep(&world, p, &budgets, Order::Fifo))
+        {
             // Room enough answers.
             assert!(ended > 0 && refused > 0, "{:?} {} {car}", p.root, p.path);
         }
     }
+}
+
+/// The plans the budget tests run: a file below a directory, a directory's
+/// index, a HAMT's, and a range of the 10 MiB file.
+fn budget_plans() -> [Verify; 4] {
+    [
+        ranged(SITE, "/style.css", None),
+        ranged(SITE, "/", None),
+        ranged(HAMT, "/", None),
+        ranged(FILE_10M, "/", Some("bytes=300000-600000")),
+    ]
+}
+
+/// More room never turns an answer into a refusal, through CARs or raw
+/// blocks, and a CAR answers wherever raw blocks do: at every KiB up to
+/// 3 MiB, where the plans' least answering budgets and the CAR's room are,
+/// then every 8 KiB to 4 MiB; with the driver's actions in order, and last
+/// first, so jobs and cancelled pieces end in either order.
+#[test]
+fn more_memory_never_refuses() {
+    let blocks = Blocks::new(&load("dweb-verify.json"));
+    let world = Gateway {
+        blocks: &blocks,
+        changes: vec![],
+    };
+    let budgets: Vec<usize> = (0..3 << 10)
+        .map(|k| k << 10)
+        .chain((0..=128).map(|i| (3 << 20) + (i << 13)))
+        .collect();
+    for p in &budget_plans() {
+        for order in [Order::Fifo, Order::Lifo] {
+            let [(raw, _), (car, _)] = budget_sweep(&world, p, &budgets, order);
+            assert!(
+                raw > 0 && car >= raw,
+                "{:?} {}: {raw} {car}",
+                p.root,
+                p.path
+            );
+        }
+    }
+}
+
+/// A directory's listing whose entries need more room than its block: the
+/// CAR's reading room gives way to them where they don't fit beside it, so
+/// a CAR answers wherever raw blocks do.
+#[test]
+fn a_cars_room_gives_way_to_the_walks_structure() {
+    let mut blocks = Blocks::new(&load("dweb-verify.json"));
+    let empty = cid_of(0x55, b"", true);
+    let names: Vec<String> = (0..5_000).map(|i| format!("e{i:05}")).collect();
+    let links: Vec<(&[u8], &str)> = names
+        .iter()
+        .map(|n| (empty.as_slice(), n.as_str()))
+        .collect();
+    let dir = directory_node(&links);
+    let root = cid_of(0x70, &dir, false);
+    blocks.blocks.insert(key(&root), dir);
+    let world = Gateway {
+        blocks: &blocks,
+        changes: vec![],
+    };
+    let p = ranged(&text(&root), "/", None);
+    let budgets: Vec<usize> = (0..=96).map(|i| (2 << 20) + (i << 14)).collect();
+    for order in [Order::Fifo, Order::Lifo] {
+        let [(raw, _), (car, _)] = budget_sweep(&world, &p, &budgets, order);
+        assert!(raw > 0 && car >= raw, "{raw} {car}");
+    }
+}
+
+/// A CAR the request has no room to read on, with nothing that will give
+/// room back, gives way to raw blocks: the 10 MiB file's range at room for
+/// two windows and the CAR's reading room answers as raw blocks alone do,
+/// after asking for the CAR.
+#[test]
+fn a_car_without_room_gives_way_to_raw_blocks() {
+    let blocks = Blocks::new(&load("dweb-verify.json"));
+    let world = Gateway {
+        blocks: &blocks,
+        changes: vec![],
+    };
+    let window = fc_dweb::verifier::STREAM_WINDOW;
+    let car_room = fc_ipfs::car::MAX_SECTION + fc_ipfs::car::MAX_HEADER;
+    let budget = 2 * window + car_room;
+    let p = ranged(FILE_10M, "/", Some("bytes=300000-600000"));
+    let raw = run(
+        "raw",
+        &p,
+        Method::Get,
+        &world,
+        Opts {
+            budget,
+            ..opts(false, 0)
+        },
+    );
+    let car = run(
+        "car",
+        &p,
+        Method::Get,
+        &world,
+        Opts {
+            budget,
+            ..opts(true, 0)
+        },
+    );
+    assert_eq!(raw.ending, Some(Ending::End), "{:?}", raw.ending);
+    assert_eq!(car.ending, raw.ending, "{:?}", car.ending);
+    assert_eq!(car.head, raw.head);
+    assert_eq!(car.body, raw.body);
+    let asked = |what: &str| car.pieces.iter().any(|r| r.path.contains(what));
+    assert!(
+        asked("format=car") && asked("format=raw"),
+        "{:?}",
+        car.pieces
+    );
 }
 
 /// A cancel at every step, through CARs and raw blocks: before the head
@@ -1291,6 +1453,26 @@ fn file_node(links: &[(&[u8], u64)], filesize: u64, blocksizes: &[u64]) -> Vec<u
     out.push(0x0a);
     varint(data.len() as u64, &mut out);
     out.extend_from_slice(&data);
+    out
+}
+
+/// A UnixFS directory in canonical dag-pb: its links (CID, name, Tsize 0),
+/// then `Data { Type: Directory }`.
+fn directory_node(links: &[(&[u8], &str)]) -> Vec<u8> {
+    let mut out = Vec::new();
+    for (cid, name) in links {
+        let mut l = vec![0x0a];
+        varint(cid.len() as u64, &mut l);
+        l.extend_from_slice(cid);
+        l.push(0x12);
+        varint(name.len() as u64, &mut l);
+        l.extend_from_slice(name.as_bytes());
+        l.extend_from_slice(&[0x18, 0x00]);
+        out.push(0x12);
+        varint(l.len() as u64, &mut out);
+        out.extend_from_slice(&l);
+    }
+    out.extend_from_slice(&[0x0a, 0x02, 0x08, 0x01]);
     out
 }
 
