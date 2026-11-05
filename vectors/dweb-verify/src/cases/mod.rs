@@ -77,6 +77,8 @@ pub fn fail(code: &str) -> Value {
 
 pub async fn build() -> Result<Value, Err> {
     crate::murmur3::self_check()?;
+    let requests = requests::build().await?;
+    let answers = answers(&requests)?;
     Ok(json!({
         "meta": {
             "generator": "vectors/dweb-verify (cargo run --release -- cases; generate and check include it)",
@@ -92,8 +94,59 @@ pub async fn build() -> Result<Value, Err> {
         "swarm": swarm::build().await?,
         "ipfs": ipfs::build().await?,
         "ipns": ipns::build()?,
-        "requests": requests::build().await?,
+        "requests": requests,
+        "answers": answers,
     }))
+}
+
+/// The request cases whose answers `answers` writes out on the wire: for
+/// each node, a bundled node's own 404, proven, beside a 404 the core
+/// writes itself.
+const ANSWERS: [&str; 4] = [
+    "swarm/path-not-found",
+    "swarm/piece-404",
+    "ipfs/name-not-found",
+    "ipfs/piece-404",
+];
+
+/// `dweb.verify`'s two answers (0009, `dweb.verify`, amendment 1), as the
+/// core sends them for [`ANSWERS`]' cases: a head's result and its body, or
+/// an error plan's.
+fn answers(requests: &Value) -> Result<Value, Err> {
+    let cases = requests.as_array().ok_or("requests")?;
+    let mut out = Vec::new();
+    for id in ANSWERS {
+        let case = cases
+            .iter()
+            .find(|c| c["id"] == id)
+            .ok_or_else(|| format!("answers: no case {id}"))?;
+        let expect = &case["expect"];
+        let answer = if let Some(head) = expect.get("head") {
+            json!({
+                "case": id,
+                "result": {
+                    "status": head["status"],
+                    "headers": head["headers"],
+                    "body": case["method"] == "GET",
+                    "trust": head["trust"],
+                },
+                "body": expect["body"],
+            })
+        } else if let Some(error) = expect.get("error") {
+            let body = &error["body"];
+            if body["code"] != error["status"] || !body["message"].is_string() {
+                return Err(format!("answers: {id}'s error isn't an error plan's").into());
+            }
+            json!({
+                "case": id,
+                "result": { "error": { "status": error["status"], "code": body["code"], "message": body["message"] } },
+            })
+        } else {
+            return Err(format!("answers: {id} has neither a head nor an error").into());
+        };
+        out.push(answer);
+    }
+    Ok(Value::Array(out))
 }
 
 fn formats() -> Value {
@@ -115,6 +168,7 @@ fn formats() -> Value {
         "requests_world": "the node the verifier's pieces reach: the honest node of dweb-verify.json, with the case's own chunks (chunks: address → bytes) or blocks (blocks: CID → bytes, which the honest gateway holds beside dweb-verify.json's), and changes applied to the pieces they name. The honest Ant answers /chunks/<address> with 200 and the chunk's wire (dweb-verify.json's swarm.chunks, the case's chunks, or a data leaf rebuilt from its content), or 404; /bytes/<reference> with the file's bytes, as Ant's joiner reads them, 206 with exactly the requested single range and Content-Range bytes a-b/size, or 200 whole without one; /feeds/<owner>/<topic> with 200 and swarm-feed-index, the latest update's index in 16 hex digits. The honest gateway (gateway.car: whether the probe found CARs; false means every block is fetched raw) answers a CAR request as a conforming trustless gateway does (the path's blocks root first, then the entity, depth-first with duplicates, only the blocks covering entity-bytes; ipfs.kubo holds Kubo's answers, which it must reproduce), a raw block request with the block, a record request with the change's record. Retries happen in main: a status in a world is the piece's final answer",
         "requests_changes": "a world's changes: each names its piece and what differs. chunk {address}: flip (wire offset, the byte XORed with 1), wire (bytes answered instead), or status and body. bytes {reference}: flip (file offset, in whatever the stream carries), answer whole (200 with the whole file, Range ignored), answer at_zero (200 holding the range's bytes at offset 0, and nothing else), end_after (the body ends after n bytes), content_range (the 206 names this instead), stall_after (n bytes, then nothing: main's body idle timer ends the piece), body (bytes answered as an exact 206). car: flip {cid, offset} (that block, wherever a CAR carries it), answer whole_dag (the whole DAG, entity-bytes ignored), no_dups (each block once, its Content-Type saying dups=n), no_dups_unannounced (each block once, its Content-Type still saying dups=y), reversed (the blocks in reverse order), {path_as} (the path resolved as another), end_after_sections (n whole sections, then the end, with boxo's marker when marker is true, or end_inside bytes of the next section), header_version (the header's version), after_sections and insert (bytes inserted after n sections), or status and body. raw {cid}: as (another block's bytes), or status and body. record {name}: record (the bytes answered; a world may serve several names)",
         "requests_expect": "a request's expect, what the page gets. {head, body}: the head (status, headers, and trust {name, content}; from names the bundled node's answer it copies, less meta.ant.node_headers) and the whole body. {error: {status, body}}: before the head, the core's {code, message} with that status. {head, truncated: {released, abort: {code, message}}}: the head, then exactly the released bytes, then the core's abort. Bodies are as dweb-verify.json's exchanges write them. Every case also ends with the request's reservations back at zero",
+        "answers": "dweb.verify's two answers on the wire (0009, dweb.verify: Answers), for request cases above: case; result, dweb.verify's result as the core sends it, either a head {status, headers, body, trust} (body true for a GET: the verified body, below, follows as the stream) or 0006's error plan {error: {status, code, message}}, the core's own failure before a head, code the status; and body, a head's whole body. Each node has a pair at the same 404: the bundled node's own answer, proven (Ant's JSON, GatewayCore's HTML), is a head with its trust and the node's body, never an error plan; a 404 the core writes is an error plan, the node's body dropped. Main tells them apart by the result's members, not by a status or a body",
         "ipns_records": "an IPNS record as /ipns/<name>?format=ipns-record answers it: name, record, now (unix seconds), expect {ok: {value, sequence, validity, ttl_ns}} or {fail}",
     })
 }

@@ -53,6 +53,10 @@ pub enum Deadline {
     /// A naming or chain session's: 120 s, or the caller's shorter
     /// `deadline_ms` where the method takes one (designs 0004 and 0005).
     Session,
+    /// A verified fetch's, to its head: 360 s, or main's `deadline_ms`
+    /// (design 0009, Bounds: time to the head). After the head there is
+    /// none.
+    Head,
 }
 
 impl Deadline {
@@ -62,6 +66,7 @@ impl Deadline {
             Deadline::Immediate => None,
             Deadline::Vault => Some(30_000),
             Deadline::Session => Some(120_000),
+            Deadline::Head => Some(360_000),
         }
     }
 }
@@ -75,6 +80,10 @@ pub struct Method {
     /// identities): design 0001's mutations, serialized and reconcilable.
     pub mutates: bool,
     pub deadline: Deadline,
+    /// The protocol version from which the core serves it: 1, or
+    /// [`crate::PROTOCOL_VERSION_STREAMS`] for the methods whose bodies are
+    /// streams (design 0009). On an older connection it is unknown.
+    pub since: u32,
 }
 
 const fn row(name: &'static str, callers: Callers, mutates: bool, deadline: Deadline) -> Method {
@@ -83,11 +92,20 @@ const fn row(name: &'static str, callers: Callers, mutates: bool, deadline: Dead
         callers,
         mutates,
         deadline,
+        since: crate::PROTOCOL_VERSION,
+    }
+}
+
+/// A row served from protocol 2 on.
+const fn row_v2(name: &'static str, callers: Callers, mutates: bool, deadline: Deadline) -> Method {
+    Method {
+        since: crate::PROTOCOL_VERSION_STREAMS,
+        ..row(name, callers, mutates, deadline)
     }
 }
 
 use Callers::{ChromeOrShell as CS, Shell as SHELL};
-use Deadline::{Immediate as NOW, Session as SESSION, Vault as VAULT};
+use Deadline::{Head as HEAD, Immediate as NOW, Session as SESSION, Vault as VAULT};
 
 /// Every method, in `core.hello`'s capability order, then the `chain.*`
 /// methods.
@@ -132,6 +150,9 @@ pub const METHODS: &[Method] = &[
     row("naming.invalidate_content", CS, false, NOW),
     row("naming.invalidate_tezos", CS, false, NOW),
     row("dweb.open", SHELL, false, SESSION),
+    // Design 0009: verified fetches, whose bodies stream; protocol 2 only.
+    row_v2("dweb.verify", SHELL, false, HEAD),
+    row_v2("dweb.forget", SHELL, false, NOW),
     row("chain.configure", CS, false, NOW),
     row("chain.availability", CS, false, NOW),
     row("chain.request", CS, false, SESSION),
@@ -156,16 +177,21 @@ pub enum Admission {
     Forbidden,
 }
 
-/// Checks a request's method and caller against the table.
-pub fn admit(name: &str, caller: CallerKind) -> Admission {
+/// Checks a request's method and caller against the table, on a
+/// connection at `protocol`: a method served only from a later version is
+/// unknown.
+pub fn admit(name: &str, caller: CallerKind, protocol: u32) -> Admission {
     match method(name) {
+        Some(row) if row.since > protocol => Admission::Unknown,
         None => Admission::Unknown,
         Some(row) if row.callers.allow(caller) => Admission::Allowed(row),
         Some(_) => Admission::Forbidden,
     }
 }
 
-/// `protocol/schema.json`: the table as JSON, one method per line.
+/// `protocol/schema.json`: the table as JSON, one method per line. A
+/// method served only from a later version than `protocol` carries its
+/// own `"protocol"`.
 pub fn schema_json() -> String {
     let mut out = String::from("{\n  \"protocol\": ");
     out.push_str(&crate::PROTOCOL_VERSION.to_string());
@@ -181,12 +207,18 @@ pub fn schema_json() -> String {
             .deadline
             .default_ms()
             .map_or("null".to_owned(), |ms| ms.to_string());
+        let since = if m.since > crate::PROTOCOL_VERSION {
+            format!(", \"protocol\": {}", m.since)
+        } else {
+            String::new()
+        };
         out.push_str(&format!(
-            "    {{ \"name\": \"{}\", \"callers\": [{}], \"mutates\": {}, \"deadline_ms\": {} }}",
+            "    {{ \"name\": \"{}\", \"callers\": [{}], \"mutates\": {}, \"deadline_ms\": {}{} }}",
             m.name,
             callers.join(", "),
             m.mutates,
-            deadline
+            deadline,
+            since
         ));
         out.push_str(if i + 1 < METHODS.len() { ",\n" } else { "\n" });
     }
@@ -197,6 +229,8 @@ pub fn schema_json() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const V2: u32 = crate::PROTOCOL_VERSION_STREAMS;
 
     #[test]
     fn names_are_unique_and_core_is_shell_only() {
@@ -214,28 +248,59 @@ mod tests {
             "dweb.open",
         ] {
             assert_eq!(
-                admit(name, CallerKind::Chrome),
+                admit(name, CallerKind::Chrome, V2),
                 Admission::Forbidden,
                 "{name}"
             );
             assert!(matches!(
-                admit(name, CallerKind::Shell),
+                admit(name, CallerKind::Shell, V2),
                 Admission::Allowed(_)
             ));
         }
         for m in METHODS {
-            assert_eq!(admit(m.name, CallerKind::Page), Admission::Forbidden);
+            assert_eq!(admit(m.name, CallerKind::Page, V2), Admission::Forbidden);
             if m.name.starts_with("compat.") {
                 assert_eq!(m.callers, Callers::Shell, "{}", m.name);
             }
         }
         assert_eq!(
-            admit("vault.unlock", CallerKind::Chrome),
+            admit("vault.unlock", CallerKind::Chrome, V2),
             Admission::Allowed(&METHODS[5])
         );
         assert_eq!(
-            admit("compat.secret", CallerKind::Shell),
+            admit("compat.secret", CallerKind::Shell, V2),
             Admission::Unknown
+        );
+    }
+
+    /// Design 0009: the streamed methods exist from protocol 2 on; on a
+    /// protocol-1 connection they are unknown, as before.
+    #[test]
+    fn the_streamed_methods_are_protocol_2() {
+        for name in ["dweb.verify", "dweb.forget"] {
+            assert_eq!(
+                admit(name, CallerKind::Shell, 1),
+                Admission::Unknown,
+                "{name}"
+            );
+            assert!(matches!(
+                admit(name, CallerKind::Shell, V2),
+                Admission::Allowed(Method { since: 2, .. })
+            ));
+            assert_eq!(admit(name, CallerKind::Chrome, V2), Admission::Forbidden);
+        }
+        // Every other method is the same at either version.
+        for m in METHODS.iter().filter(|m| m.since == 1) {
+            assert_eq!(
+                admit(m.name, CallerKind::Shell, 1),
+                admit(m.name, CallerKind::Shell, V2),
+                "{}",
+                m.name
+            );
+        }
+        assert_eq!(
+            method("dweb.verify").map(|m| m.deadline.default_ms()),
+            Some(Some(360_000))
         );
     }
 

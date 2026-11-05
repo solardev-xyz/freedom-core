@@ -71,6 +71,9 @@ fc-chain = { path = "../fc-chain" }
 # dweb.open's planning (design 0006), on the naming thread.
 fc-dweb = { path = "../fc-dweb" }
 fc-evm = { path = "../fc-evm" }
+# The JavaScript-semantics JSON reader fc-dweb's plans are written with:
+# dweb.verify's plan reads back as dweb.open wrote it (design 0009).
+fc-json = { path = "../fc-json" }
 fc-keys = { path = "../fc-keys" }
 fc-naming = { path = "../fc-naming" }
 fc-protocol = { path = "../fc-protocol" }
