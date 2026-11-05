@@ -74,7 +74,7 @@ fn reassemble(wires: &[Wire]) -> Value {
                 assert!(!bytes.is_empty() && bytes.len() <= MIB);
                 payload.extend_from_slice(bytes);
             }
-            Wire::Message(_) | Wire::Credit => {}
+            Wire::Message(_) | Wire::Credit | Wire::Stream { .. } => {}
         }
     }
     assert_eq!(Some(payload.len()), declared);

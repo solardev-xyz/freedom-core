@@ -62,6 +62,10 @@ pub enum Wire {
     Last(Vec<u8>),
     /// `0x13`: the core returned main's bulk credit.
     Credit,
+    /// A stream frame (design 0009, Streams in the core): `0x02` data,
+    /// `0x03` end, `0x04` abort or `0x05` credit, for stream `id`, and the
+    /// rest of its payload.
+    Stream { kind: u8, id: u64, rest: Vec<u8> },
 }
 
 /// Fragments show their size only: a megabyte doesn't belong in a panic.
@@ -73,10 +77,21 @@ impl std::fmt::Debug for Wire {
             Wire::Fragment(bytes) => write!(f, "Fragment({} bytes)", bytes.len()),
             Wire::Last(bytes) => write!(f, "Last({} bytes)", bytes.len()),
             Wire::Credit => f.write_str("Credit"),
+            Wire::Stream { kind, id, rest } => {
+                write!(
+                    f,
+                    "Stream {{ kind: {kind:#04x}, id: {id}, {} bytes }}",
+                    rest.len()
+                )
+            }
         }
     }
 }
 
+pub const KIND_DATA: u8 = 0x02;
+pub const KIND_END: u8 = 0x03;
+pub const KIND_ABORT: u8 = 0x04;
+pub const KIND_STREAM_CREDIT: u8 = 0x05;
 pub const KIND_FRAGMENT: u8 = 0x10;
 pub const KIND_LAST: u8 = 0x11;
 pub const KIND_BEGIN: u8 = 0x12;
@@ -190,6 +205,15 @@ pub fn spawn_env(
                 KIND_FRAGMENT => Output::Wire(Wire::Fragment(payload)),
                 KIND_LAST => Output::Wire(Wire::Last(payload)),
                 KIND_CREDIT if payload.is_empty() => Output::Wire(Wire::Credit),
+                kind @ KIND_DATA..=KIND_STREAM_CREDIT if payload.len() >= 8 => {
+                    let mut id = [0u8; 8];
+                    id.copy_from_slice(&payload[..8]);
+                    Output::Wire(Wire::Stream {
+                        kind,
+                        id: u64::from_be_bytes(id),
+                        rest: payload[8..].to_vec(),
+                    })
+                }
                 kind => Output::Malformed(format!("frame kind {kind:#04x}")),
             };
             // Paused before the test sees the begin, so a resume that
@@ -244,6 +268,14 @@ pub fn raw_frame(kind: u8, payload: &[u8]) -> Vec<u8> {
 
 /// A fragmented response: its begin, then `pieces` fragments of about equal
 /// size, the last of kind 0x11.
+/// A stream frame of `kind` for stream `id` (design 0007, Frames): the ID
+/// as 8 bytes, big-endian, then `rest`.
+pub fn stream_frame(kind: u8, id: u64, rest: &[u8]) -> Vec<u8> {
+    let mut payload = id.to_be_bytes().to_vec();
+    payload.extend_from_slice(rest);
+    raw_frame(kind, &payload)
+}
+
 pub fn fragmented(message: &Value, pieces: usize) -> Vec<Vec<u8>> {
     let payload = serde_json::to_vec(message).unwrap();
     let id = message["id"].as_u64().unwrap();
