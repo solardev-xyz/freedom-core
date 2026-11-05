@@ -49,7 +49,7 @@
 use std::collections::{BTreeMap, VecDeque};
 
 use super::{
-    Abort, AbortCode, MAX_DATA, SMALL_FRAME, StreamError, StreamFrame, WINDOW, put_header,
+    Abort, AbortCode, Codes, MAX_DATA, SMALL_FRAME, StreamError, StreamFrame, WINDOW, put_header,
 };
 use crate::frame::{FrameError, KIND_ABORT, KIND_DATA, KIND_END, KIND_JSON, MAX_PAYLOAD};
 use crate::message::check_id;
@@ -82,6 +82,11 @@ pub enum SendError {
     /// 2^64 bytes.
     #[error("too large")]
     TooLarge,
+    /// An abort with a code this sender's streams never end with
+    /// ([`Codes`]): a 0009 code on a service connection, or 0007's own on
+    /// the core's verified bodies.
+    #[error("an abort code this side doesn't send")]
+    Code,
     /// The connection failed with a protocol error.
     #[error("the connection failed")]
     Closed,
@@ -98,6 +103,7 @@ impl SendError {
             SendError::Ended => "ended",
             SendError::TooLarge => "too_large",
             SendError::Closed => "closed",
+            SendError::Code => "code",
         }
     }
 }
@@ -287,6 +293,9 @@ pub struct Sender {
     rotation: VecDeque<u64>,
     held: usize,
     failed: Option<StreamError>,
+    /// The codes its streams may end with: a service's, unless made for
+    /// the core's verified bodies.
+    codes: Codes,
 }
 
 impl Default for Sender {
@@ -313,7 +322,14 @@ impl Sender {
             rotation: VecDeque::new(),
             held: 0,
             failed: None,
+            codes: Codes::Service,
         }
+    }
+
+    /// The same sender, its streams ending only with `codes`.
+    pub fn with_codes(mut self, codes: Codes) -> Self {
+        self.codes = codes;
+        self
     }
 
     // ---- main's frames ---------------------------------------------------
@@ -500,9 +516,13 @@ impl Sender {
 
     /// Aborts stream `id`: its queued bytes and end are dropped, and the
     /// abort is queued with the control frames, behind its head if that is
-    /// unwritten.
+    /// unwritten. A code its streams never end with ([`Codes`]) is refused
+    /// with [`SendError::Code`], and the stream stays as it was.
     pub fn abort(&mut self, id: u64, abort: &Abort) -> Result<(), SendError> {
         self.usable()?;
+        if !self.codes.allows(abort.code) {
+            return Err(SendError::Code);
+        }
         let json = abort.to_json().map_err(|_| SendError::TooLarge)?;
         let body = match self.requests.get_mut(&id) {
             Some(
@@ -540,8 +560,15 @@ impl Sender {
     ///   its `end` if queued, and is queued with the control frames;
     /// - **settled already** (a reply queued or written, an abort queued,
     ///   its `end` written), or never held: nothing changes.
+    ///
+    /// An `abort` whose code this sender's streams never end with
+    /// ([`Codes`]) is refused with [`SendError::Code`], whatever the state,
+    /// and nothing changes.
     pub fn settle(&mut self, id: u64, json: Vec<u8>, abort: &Abort) -> Result<Settled, SendError> {
         self.usable()?;
+        if !self.codes.allows(abort.code) {
+            return Err(SendError::Code);
+        }
         if json.len() > MAX_PAYLOAD {
             return Err(SendError::TooLarge);
         }
@@ -1155,6 +1182,62 @@ mod tests {
         );
         assert_eq!(s.live(), 0);
         assert!(s.control_entries() == 0 && s.rotation_entries() == 0);
+    }
+
+    #[test]
+    fn aborts_and_settles_keep_to_the_senders_codes() {
+        assert_eq!(Sender::default().codes, Codes::Service);
+        for (codes, outside, inside) in [
+            (
+                Codes::Service,
+                AbortCode::VerificationFailed,
+                AbortCode::Internal,
+            ),
+            (Codes::CoreBody, AbortCode::Internal, AbortCode::PieceFailed),
+            (Codes::Piece, AbortCode::Busy, AbortCode::Stalled),
+        ] {
+            let mut s = Sender::new().with_codes(codes);
+            let (outside, inside) = (Abort::new(outside, "x"), Abort::new(inside, "y"));
+            // No head yet: the settle is refused, and doesn't reply.
+            s.request(1).unwrap();
+            assert_eq!(
+                s.settle(1, internal_reply(1), &outside),
+                Err(SendError::Code)
+            );
+            assert_eq!(s.control_entries(), 0);
+            // An open stream: neither ends it, and its bytes stay queued.
+            s.head(1, b"{}".to_vec(), true).unwrap();
+            assert_eq!(s.push(1, &[7; 100]).unwrap(), 100);
+            assert_eq!(s.abort(1, &outside), Err(SendError::Code));
+            assert_eq!(
+                s.settle(1, internal_reply(1), &outside),
+                Err(SendError::Code)
+            );
+            assert_eq!(s.held(), 100);
+            s.abort(1, &inside).unwrap();
+            assert_eq!(
+                drain(&mut s),
+                [
+                    Written::Head { id: 1 },
+                    Written::Abort {
+                        id: 1,
+                        code: inside.code
+                    }
+                ]
+            );
+            // A cancel's own abort is every sender's.
+            s.request(2).unwrap();
+            s.head(2, b"{}".to_vec(), true).unwrap();
+            drain(&mut s);
+            assert_eq!(s.cancel(2), Ok(Cancel::Cancelled));
+            assert_eq!(
+                drain(&mut s),
+                [Written::Abort {
+                    id: 2,
+                    code: AbortCode::Cancelled
+                }]
+            );
+        }
     }
 
     #[test]
