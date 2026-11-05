@@ -63,6 +63,11 @@ pub enum ErrorCode {
     /// A start step that needs the node's identity came before
     /// `rad.identity` succeeded.
     NoIdentity,
+    /// `rad.reconcile` failed outside any one repository: the dirty marker,
+    /// the storage directory, the progress state or the quarantine record,
+    /// or a temporary clone that can't be removed. `message` names the
+    /// step.
+    RecoveryFailed,
 }
 
 /// The `error` member of a response: a closed shape, so a member it
@@ -142,6 +147,7 @@ mod tests {
             (ErrorCode::KeyFilePresent, "key_file_present"),
             (ErrorCode::BadSealedKey, "bad_sealed_key"),
             (ErrorCode::NoIdentity, "no_identity"),
+            (ErrorCode::RecoveryFailed, "recovery_failed"),
         ] {
             assert_eq!(
                 serde_json::to_value(code).ok(),

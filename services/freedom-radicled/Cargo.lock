@@ -993,6 +993,7 @@ dependencies = [
  "fc-service",
  "fc-sys",
  "getrandom 0.4.3",
+ "libc",
  "libradicle",
  "radicle",
  "rand_core 0.10.1",
@@ -2011,7 +2012,7 @@ checksum = "b6d2cec3eae94f9f509c767b45932f1ada8350c4bdb85af2fcab4a3c14807981"
 [[package]]
 name = "libradicle"
 version = "0.8.0"
-source = "git+https://github.com/solardev-xyz/libradicle?rev=84557e831a3cd3cc8e76bf158d7b443a2b6fdac3#84557e831a3cd3cc8e76bf158d7b443a2b6fdac3"
+source = "git+https://github.com/solardev-xyz/libradicle?rev=b7d62b951b313061fb9e4d5145193341e5ad7b15#b7d62b951b313061fb9e4d5145193341e5ad7b15"
 dependencies = [
  "ed25519-dalek",
  "getrandom 0.4.3",

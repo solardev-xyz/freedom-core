@@ -7,6 +7,8 @@
 //!
 //! - `FREEDOM_RADICLED_TEST_IDENTITY_DEADLINE_MS` replaces the 30 s within
 //!   which `rad.identity` must follow `rad.hello`'s reply.
+//! - `FREEDOM_RADICLED_TEST_RECONCILE_CUTOFF_MS` replaces the 240 s after
+//!   `rad.reconcile`'s admission past which no unit starts.
 //! - `FREEDOM_RADICLED_TEST_THREADS=1` logs, at the confinement point, how
 //!   many threads the process has (`/proc/self/task`), and what each
 //!   descriptor above stderr is (its `/proc/self/fd` link: a test may log a
@@ -23,6 +25,15 @@ fn millis(name: &str) -> Option<u64> {
 pub fn identity_deadline(default: Duration) -> Duration {
     #[cfg(feature = "testhooks")]
     if let Some(ms) = millis("FREEDOM_RADICLED_TEST_IDENTITY_DEADLINE_MS") {
+        return Duration::from_millis(ms);
+    }
+    default
+}
+
+/// How long after `rad.reconcile`'s admission units may start.
+pub fn reconcile_cutoff(default: Duration) -> Duration {
+    #[cfg(feature = "testhooks")]
+    if let Some(ms) = millis("FREEDOM_RADICLED_TEST_RECONCILE_CUTOFF_MS") {
         return Duration::from_millis(ms);
     }
     default
