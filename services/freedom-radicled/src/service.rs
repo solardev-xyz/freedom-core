@@ -33,6 +33,7 @@ use crate::build_info;
 use crate::confine::Grant;
 use crate::identity::{self, Identity};
 use crate::reconcile;
+use crate::units;
 
 /// How the process ends after a start step it answered with an error
 /// (0008: "the service answers with the error and then exits"). Main read
@@ -85,18 +86,22 @@ pub struct RadicleService {
     confinement: Value,
     /// `rad.identity`'s deadline, armed by `rad.hello`'s reply.
     deadline: Mutex<Option<Watchdog>>,
+    /// The repair units' watchdog, its thread started with the service:
+    /// reconciliation's at a start, and the online repair's (a later step).
+    units: Arc<units::UnitWatch>,
     /// main's proof that libgit2 reads no git configuration outside a
     /// repository, for reconciliation.
     git_config: libradicle::GitConfigIsolated,
 }
 
 impl RadicleService {
-    /// The service for `grant`'s home, with the key for this start; `None`
-    /// if the OS's randomness fails.
+    /// The service for `grant`'s home, with the key for this start, and
+    /// `units` the repair units' watch; `None` if the OS's randomness fails.
     pub fn new(
         grant: Grant,
         network: &fc_service::network::NetworkPolicy,
         confinement: Value,
+        units: Arc<units::UnitWatch>,
         git_config: libradicle::GitConfigIsolated,
     ) -> Option<Self> {
         let identity = Identity::new(&grant.home)?;
@@ -108,6 +113,7 @@ impl RadicleService {
             network: network.to_json(),
             confinement,
             deadline: Mutex::new(None),
+            units,
             git_config,
         })
     }
@@ -174,6 +180,8 @@ impl RadicleService {
         let reconciliation = self.reconciliation.clone();
         let owed = conn.clone();
         let id = request.id;
+        // Each unit's time limit, from outside the worker.
+        let watch = self.units.clone();
         let git_config = self.git_config;
         let spawned = std::thread::Builder::new()
             .name("reconcile".into())
@@ -190,7 +198,7 @@ impl RadicleService {
                 // restarts, and whose next start reconciles again.
                 let outcome = fc_service::panic::with_kind(
                     fc_service::panic::TaskKind::named("reconcile"),
-                    || reconcile::run(&run, &(), git_config),
+                    || reconcile::run(&run, &*watch, git_config),
                 );
                 drop(signer);
                 match outcome {
