@@ -10,9 +10,14 @@
 //! - **`rad.identity { ephemeral: true }`,** on a profile without a vault,
 //!   makes a throwaway key from the OS's randomness, never written.
 //! - **Either way,** `keys/radicle` is checked first (0008, "The switch"):
-//!   anything there, as `lstat` sees it, is `key_file_present`. The key
-//!   goes straight into a [`libradicle::HostKey`], which a later step hands
-//!   to `Embedded::start_with_key`; the reply is `{ did, nid, ephemeral }`.
+//!   anything there, as `lstat` sees it, is `key_file_present`. The reply
+//!   is `{ did, nid, ephemeral }`.
+//! - **The key is held** as its 32-byte seed, in zeroizing memory, until the
+//!   node's start takes it: reconciliation signs with it first (0008: "The
+//!   key in the service: reconciliation signs with it"), each signer it
+//!   makes wiping itself on drop. A later step makes the
+//!   [`libradicle::HostKey`] from it for `Embedded::start_with_key`, and the
+//!   service keeps no copy after that.
 //! - **Once per process,** within 30 s of `rad.hello`'s reply. Every failure
 //!   ends the process after its reply, a second `rad.identity` included.
 
@@ -50,16 +55,10 @@ struct Sealed {
 
 /// The node's identity, once `rad.identity` has succeeded.
 pub struct NodeIdentity {
-    /// The key, for the node's start (a later step consumes it). It wipes
-    /// on drop.
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "rad.start hands it to start_with_key, a later step"
-        )
-    )]
-    key: Option<libradicle::HostKey>,
+    /// The key's seed, until the node's start takes it. It wipes on drop.
+    seed: Option<Zeroizing<[u8; 32]>>,
+    /// The node ID, as reconciliation names it.
+    pub id: radicle::prelude::NodeId,
     pub did: String,
     pub nid: String,
     pub ephemeral: bool,
@@ -78,7 +77,21 @@ impl NodeIdentity {
     /// Whether the key is still held: until the node's start takes it.
     #[cfg(test)]
     pub fn holds_key(&self) -> bool {
-        self.key.is_some()
+        self.seed.is_some()
+    }
+
+    /// What signs for this identity before the node starts: reconciliation's
+    /// re-signing of its own namespace (0008, "Reconciliation"). `None` for
+    /// a throwaway key, which owns no namespace and signs nothing, or once
+    /// the node's start has taken the key. The signer wipes itself on drop.
+    pub fn signer(&self) -> Option<radicle::crypto::SigningKey> {
+        if self.ephemeral {
+            return None;
+        }
+        let seed = self.seed.as_ref()?;
+        Some(radicle::crypto::SigningKey::from(
+            ed25519_dalek::SigningKey::from_bytes(seed),
+        ))
     }
 }
 
@@ -88,13 +101,7 @@ enum State {
     /// An attempt was made and failed: the process is ending.
     Failed,
     /// `rad.identity` succeeded.
-    Known(
-        #[cfg_attr(
-            not(test),
-            expect(dead_code, reason = "the node's start reads it, a later step")
-        )]
-        NodeIdentity,
-    ),
+    Known(NodeIdentity),
 }
 
 /// Why `rad.identity` failed: its reply, after which the process ends.
@@ -134,7 +141,6 @@ impl Identity {
     }
 
     /// Runs `f` on the identity, once known.
-    #[cfg(test)]
     pub fn with<R>(&self, f: impl FnOnce(&NodeIdentity) -> R) -> Option<R> {
         match &*self.state() {
             State::Known(identity) => Some(f(identity)),
@@ -193,7 +199,7 @@ fn establish(
         )));
     }
     let ephemeral = sealed.is_none();
-    let mut seed = match sealed {
+    let seed = match sealed {
         Some(sealed) => open(recipient, &sealed)?,
         None => {
             drop(recipient);
@@ -203,11 +209,11 @@ fn establish(
     let public = ed25519_dalek::SigningKey::from_bytes(&seed)
         .verifying_key()
         .to_bytes();
-    let key = libradicle::HostKey::from_bytes(seed.as_mut_slice())
-        .ok_or_else(|| Failure(ErrorBody::new(ErrorCode::Internal, "Internal error")))?;
-    let nid = radicle::crypto::PublicKey::from_bytes(public).to_human();
+    let id = radicle::prelude::NodeId::from_bytes(public);
+    let nid = id.to_human();
     Ok(NodeIdentity {
-        key: Some(key),
+        seed: Some(seed),
+        id,
         did: format!("did:key:{nid}"),
         nid,
         ephemeral,

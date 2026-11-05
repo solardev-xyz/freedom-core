@@ -34,23 +34,39 @@ fc-service = { path = "../../crates/fc-service" }
 # The sealed release of the node key (0008, "The sealed release"): the
 # service's X25519 key for one start, and opening what the core sealed to it.
 fc-seal = { path = "../../crates/fc-seal" }
-# libradicle at `integration/rust-core` (84557e8), built with `no-spawn`,
+# libradicle at `integration/rust-core` (b7d62b9), built with `no-spawn`,
 # explicitly (0008, "Spawn and lock"): serving runs in process and `git gc`
 # is skipped. It carries the upstream changes 0008 lists for the service's
 # first steps: the routing, `isolated` and `control_socket` options, the
 # bounded reads and shutdown, the node's health, the host key
 # (`HostKey`, `start_with_key`), and heartwood at 6b2dc16f, whose
 # reconciliation driver `rad.reconcile` runs on. It also has the shipped
-# seeds for a main-network profile only, and an isolated node with no proxy,
-# onion, I2P or external-address route. Pinned by commit until those changes
-# are released (deny.toml allows solardev-xyz).
+# seeds for a main-network profile only, an isolated node with no proxy,
+# onion, I2P or external-address route, `isolate_git_config` (called first
+# thing in src/main.rs) and `Options::seeding_policy`. Pinned by commit until
+# those changes are released (deny.toml allows solardev-xyz).
 # src/build_info.rs reports the same commit.
-libradicle = { git = "https://github.com/solardev-xyz/libradicle", rev = "84557e831a3cd3cc8e76bf158d7b443a2b6fdac3", features = ["no-spawn"] }
+libradicle = { git = "https://github.com/solardev-xyz/libradicle", rev = "b7d62b951b313061fb9e4d5145193341e5ad7b15", features = ["no-spawn"] }
 # heartwood's `radicle`, at the commit libradicle pins, so that both resolve
 # to one package (build_info's test holds them to one commit): the node
 # identity's public forms (`did:key`, the node ID), and, from the next step,
 # the reconciliation driver. Already in libradicle's graph.
 radicle = { git = "https://github.com/solardev-xyz/heartwood", rev = "6b2dc16fa657bbcb03c34eaee922d354fb1fe66e" }
+# The dial gate's address policy (0008, "The address policy": "one table and
+# one classifier serve both services"): 0007's target classification, its
+# table of refused blocks and the configured-target exemption, as
+# freedom-ipfs-addr, the gate's pure half with no network stack (freedom-ipfs
+# #55). At freedom-ipfsd's freedom-ipfs pin, which fc-nat64 also takes it at,
+# so that it is one package.
+freedom-ipfs-addr = { git = "https://github.com/solardev-xyz/freedom-ipfs", rev = "af98afa939c4f2d479c562f1c4e280107e6552b0" }
+# `socks5` mode's names, resolved through Arti's RESOLVE (0008, "Modes"): the
+# SOCKS5 client's byte layer with its blocking driver, which heartwood's
+# resolver thread runs (freedom-ipfs #56). Its only dependencies are
+# freedom-ipfs-addr and thiserror.
+freedom-ipfs-socks = { git = "https://github.com/solardev-xyz/freedom-ipfs", rev = "af98afa939c4f2d479c562f1c4e280107e6552b0" }
+# `direct` mode's NAT64 prefixes, learned as freedom-ipfsd learns them (0008,
+# "The address policy"): shared by the services, by path.
+fc-nat64 = { path = "../nat64" }
 # The public key of a node key, as libradicle computes it (ed25519-dalek 2,
 # libradicle's own version, already in its graph).
 ed25519-dalek = { version = "2", default-features = false, features = ["zeroize"] }
@@ -63,6 +79,11 @@ serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["raw_value"] }
 zeroize = "1"
 
+# The dirty marker's opens (src/marker.rs): `O_NOFOLLOW` and `O_NONBLOCK`.
+# Already in libradicle's graph.
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 [dev-dependencies]
 tempfile = "3"
 
@@ -72,8 +93,14 @@ tempfile = "3"
 fc-sys = { path = "../../crates/fc-sys" }
 
 # The core's workspace lints, copied: workspace lints don't cross workspaces.
+# Except `unsafe_code`, which is `deny` here, as in fc-sys, not `forbid`
+# (AGENTS.md rule 6): the one unsafe call, `libradicle::isolate_git_config`
+# first thing in src/main.rs, carries its own reviewed `#[allow(unsafe_code)]`
+# and a `SAFETY` comment, and every other unsafe block still fails to
+# compile. tests/unsafe_code.rs fails if any other line lifts the lint.
 [lints.rust]
-unsafe_code = "forbid"
+unsafe_code = "deny"
+unsafe_op_in_unsafe_fn = "deny"
 
 [lints.clippy]
 all = { level = "warn", priority = -1 }
@@ -85,6 +112,8 @@ unimplemented = "warn"
 dbg_macro = "warn"
 print_stdout = "warn"
 print_stderr = "warn"
+undocumented_unsafe_blocks = "deny"
+multiple_unsafe_ops_per_block = "deny"
 
 # Dependencies carry no debug info in dev and test builds: libradicle's graph
 # is large, and its debug info is most of a target directory.
