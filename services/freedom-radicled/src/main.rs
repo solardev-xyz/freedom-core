@@ -61,6 +61,7 @@ mod identity;
 mod marker;
 mod nat64;
 mod node;
+mod pools;
 mod reconcile;
 mod service;
 mod testhooks;
@@ -248,7 +249,20 @@ fn serve(
             return Exit::Internal;
         }
     };
-    let service = match RadicleService::new(grant, &network, confinement, units, git_config) {
+    // The read pool, the network pool and the write queue: their threads
+    // wait for `RUNNING`. One that can't be started fails the start too.
+    let pools = match pools::Pools::start() {
+        Ok(pools) => Arc::new(pools),
+        Err(e) => {
+            log::error(
+                "cannot start the pools",
+                json!({ "error": e.kind().to_string() }),
+            );
+            return Exit::Internal;
+        }
+    };
+    let service = match RadicleService::new(grant, &network, confinement, units, pools, git_config)
+    {
         Some(service) => Arc::new(service),
         None => {
             log::error("the OS random number generator failed", json!({}));
