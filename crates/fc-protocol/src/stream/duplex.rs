@@ -49,7 +49,6 @@ pub enum Wrote {
 }
 
 /// The core's streams on one connection, in both directions.
-#[derive(Default)]
 pub struct Duplex {
     sender: Sender,
     inbound: Inbound,
@@ -65,6 +64,12 @@ pub struct Duplex {
     failed: Option<StreamError>,
 }
 
+impl Default for Duplex {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Duplex {
     /// The core's streams: its verified bodies end only with 0009's codes,
     /// and main's pieces only with a piece's ([`Codes`]).
@@ -77,7 +82,11 @@ impl Duplex {
     pub fn with_data_cap(data_cap: usize) -> Self {
         Self {
             sender: Sender::with_data_cap(data_cap).with_codes(Codes::CoreBody),
-            ..Self::default()
+            inbound: Inbound::new(),
+            owed: BTreeMap::new(),
+            order: BTreeMap::new(),
+            next_place: 0,
+            failed: None,
         }
     }
 

@@ -14,7 +14,9 @@ use std::time::{Duration, Instant};
 
 use fc_protocol::error::{ErrorBody, ErrorCode};
 use fc_protocol::frame::{Decoder, Frame, KIND_JSON, Kinds};
-use fc_protocol::stream::{Abort, AbortCode, Delivery, Receiver, Side, StreamFrame, credit_frame};
+use fc_protocol::stream::{
+    Abort, AbortCode, Delivery, Receiver, Replied, Side, StreamError, StreamFrame, credit_frame,
+};
 use fc_service::Exit;
 use fc_service::conn::{self, Connection, End, Headed, Hello, Options, Request, Service};
 use serde_json::{Value, json};
@@ -220,6 +222,36 @@ impl Service for Toy {
                 );
                 conn.reply(request.id, &json!({ "settled": format!("{settled:?}") }))
                     .unwrap();
+            }
+            // Tries to end another request's open stream with each code
+            // in `codes`, by an abort and by a settle, then ends it with
+            // `internal`: what each call returned.
+            "t.abort_codes" => {
+                let target = params["id"].as_u64().unwrap();
+                let error = ErrorBody::new(ErrorCode::Internal, "internal");
+                let tried: Vec<Value> = params["codes"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|name| {
+                        let code = AbortCode::ALL
+                            .into_iter()
+                            .find(|code| code.as_str() == name)
+                            .unwrap();
+                        let abort = Abort::new(code, "never sent");
+                        json!({
+                            "code": name,
+                            "abort": format!("{:?}", conn.abort(target, &abort)),
+                            "settle": format!("{:?}", conn.settle(target, &error, &abort)),
+                        })
+                    })
+                    .collect();
+                let ended = conn.abort(target, &Abort::new(AbortCode::Internal, "internal"));
+                conn.reply(
+                    request.id,
+                    &json!({ "tried": tried, "ended": format!("{ended:?}") }),
+                )
+                .unwrap();
             }
             // Reports, as an event, once another request is settled on the
             // wire.
@@ -1026,6 +1058,124 @@ fn a_cancel_aborts_an_open_stream_and_reaches_the_service() {
     assert_eq!(*main.toy.cancels.lock().unwrap(), [2]);
     main.close();
     assert_eq!(main.exit(), Exit::Ok);
+}
+
+/// The abort codes design 0009 adds, for the core's verified bodies and
+/// main's pieces: every code but 0007's five.
+fn later_codes() -> Vec<AbortCode> {
+    const SERVICE: [&str; 5] = [
+        "cancelled",
+        "internal",
+        "body_stream_error",
+        "stopped",
+        "busy",
+    ];
+    let later: Vec<_> = AbortCode::ALL
+        .into_iter()
+        .filter(|code| !SERVICE.contains(&code.as_str()))
+        .collect();
+    assert_eq!(later.len(), AbortCode::ALL.len() - SERVICE.len());
+    later
+}
+
+/// A service connection carries only 0007's abort codes (design 0009,
+/// amendment 5): the service's side refuses to send one of 0009's, by an
+/// abort or a settle, and its stream stays open; main's side takes one as
+/// a protocol error; and the service never takes an abort at all.
+#[test]
+fn a_service_connection_never_carries_a_later_abort_code() {
+    let later = later_codes();
+    let mut main = start(options());
+    main.hello();
+    let mut receiver = Receiver::new();
+    receiver.request(2).unwrap();
+    main.request(2, "t.hang", Value::Null);
+    assert_eq!(main.message()["result"]["body"], true);
+    assert_eq!(receiver.reply(2, true), Ok(Replied::Deliver));
+    let first = main.frame().unwrap();
+    assert!(matches!(
+        receiver.receive(StreamFrame::from_frame(&first).unwrap()),
+        Ok(Delivery::Data { id: 2, .. })
+    ));
+
+    // The service's side: each is refused, and `internal` ends the stream.
+    let names: Vec<_> = later.iter().map(|code| code.as_str()).collect();
+    main.request(3, "t.abort_codes", json!({ "id": 2, "codes": names }));
+    let (mut reply, mut aborted) = (None, None);
+    while reply.is_none() || aborted.is_none() {
+        let frame = main.frame().expect("the reply and the abort");
+        if frame.kind == KIND_JSON {
+            reply = Some(serde_json::from_slice::<Value>(&frame.payload).unwrap());
+        } else {
+            aborted = Some(
+                receiver
+                    .receive(StreamFrame::from_frame(&frame).unwrap())
+                    .unwrap(),
+            );
+        }
+    }
+    let reply = reply.unwrap();
+    let tried: Vec<_> = names
+        .iter()
+        .map(|name| json!({ "code": name, "abort": "Err(Code)", "settle": "Err(Code)" }))
+        .collect();
+    assert_eq!(
+        reply["result"],
+        json!({ "tried": tried, "ended": "Ok(())" }),
+        "{reply}"
+    );
+    match aborted.unwrap() {
+        Delivery::Abort { id: 2, abort } => assert_eq!(abort.code, AbortCode::Internal),
+        other => panic!("{other:?}"),
+    }
+
+    // Main's side: a service's abort with one of them decodes, and is a
+    // protocol error.
+    main.request(4, "t.hang", Value::Null);
+    assert_eq!(main.message()["result"]["body"], true);
+    let first = main.frame().unwrap();
+    for code in &later {
+        let mut receiver = Receiver::new();
+        receiver.request(4).unwrap();
+        assert_eq!(receiver.reply(4, true), Ok(Replied::Deliver));
+        receiver
+            .receive(StreamFrame::from_frame(&first).unwrap())
+            .unwrap();
+        let mut out = Vec::new();
+        StreamFrame::Abort {
+            id: 4,
+            abort: Abort::new(*code, "m"),
+        }
+        .encode(&mut out)
+        .unwrap();
+        let mut decoder = Decoder::with_kinds(Kinds::service(Side::Receiver));
+        assert_eq!(decoder.push(&out).unwrap(), out.len());
+        let frame = decoder.pop().unwrap();
+        let got = receiver.receive(StreamFrame::from_frame(&frame).unwrap());
+        assert_eq!(got, Err(StreamError::AbortCode(4)), "{code:?}");
+        assert_eq!(got.unwrap_err().category(), "abort_code");
+    }
+    main.close();
+    assert_eq!(main.exit(), Exit::Ok);
+
+    // The service's side never takes an abort, whatever its code: main's
+    // abort frame is refused at its header.
+    for code in later {
+        let mut main = start(options());
+        main.hello();
+        main.request(2, "t.hang", Value::Null);
+        assert_eq!(main.message()["result"]["body"], true);
+        let mut out = Vec::new();
+        StreamFrame::Abort {
+            id: 2,
+            abort: Abort::new(code, "m"),
+        }
+        .encode(&mut out)
+        .unwrap();
+        main.send(&out);
+        assert_eq!(main.exit(), Exit::Protocol, "{code:?}");
+        assert_eq!(main.ends(), [End::Protocol("stream_direction")]);
+    }
 }
 
 #[test]

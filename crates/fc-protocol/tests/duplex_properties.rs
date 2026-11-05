@@ -24,8 +24,8 @@ use std::collections::{BTreeMap, VecDeque};
 use fc_protocol::frame::{Decoder, Frame, KIND_JSON, Kinds};
 use fc_protocol::message::Message;
 use fc_protocol::stream::{
-    Arrived, Delivery, Duplex, Received, Receiver, Replied, SendError, Sender, StreamFrame, WINDOW,
-    Wrote, credit_frame,
+    Arrived, Codes, Delivery, Duplex, Received, Receiver, Replied, SendError, Sender, StreamFrame,
+    WINDOW, Wrote, credit_frame,
 };
 
 /// xorshift64*: the same pseudo-random cases on every run.
@@ -137,8 +137,11 @@ impl Pipe {
         Pipe {
             rng,
             core: Duplex::new(),
-            receiver: Receiver::new(),
-            sender: Sender::new(),
+            // Main's side of the core's connection: the core's verified
+            // bodies end only with 0009's codes, and main's pieces only with
+            // a piece's.
+            receiver: Receiver::for_core_bodies(),
+            sender: Sender::new().with_codes(Codes::Piece),
             mains,
             cores,
             to_core: VecDeque::new(),

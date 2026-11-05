@@ -734,7 +734,11 @@ fn duplex() {
     // codes standing for one of the verified body's; but for the service's
     // own code rule, which the duplex cases state for the core.
     for case in cases(&v, "sender") {
-        if case["id"].as_str().unwrap().starts_with("service-never-sends-") {
+        if case["id"]
+            .as_str()
+            .unwrap()
+            .starts_with("service-never-sends-")
+        {
             continue;
         }
         play(case, true, true);

@@ -35,6 +35,12 @@
 //!   which. The core holds no ring: data goes straight to the stream's
 //!   consumer, which holds it in room it reserved, and its credit is sent,
 //!   ahead of the sender's frames, once the consumer lets the bytes go.
+//! - **The abort codes** ([`AbortCode`], [`Codes`]): every code decodes,
+//!   and which a stream may end with depends on who sends it. A service's
+//!   bodies keep 0007's five; the core's verified bodies end only with
+//!   0009's, and main's pieces only with `cancelled`, `stalled` or
+//!   `body_stream_error`. The sender refuses any other, and the receiving
+//!   side takes any other as a protocol error.
 //!
 //! Sans-I/O, like the rest of the crate: the caller feeds frames and events
 //! in and takes frames and deliveries out. `vectors/streams.json` holds the
@@ -222,7 +228,7 @@ pub enum AbortCode {
 
 impl AbortCode {
     /// Every code: 0007's, then 0009's.
-    const ALL: [AbortCode; 10] = [
+    pub const ALL: [AbortCode; 10] = [
         AbortCode::Cancelled,
         AbortCode::Internal,
         AbortCode::BodyStreamError,
@@ -292,6 +298,7 @@ pub enum Codes {
 }
 
 impl Codes {
+    /// Whether a stream sent under these rules may end with `code`.
     pub fn allows(self, code: AbortCode) -> bool {
         use AbortCode as C;
         match self {
@@ -713,6 +720,43 @@ mod tests {
         }
         assert_eq!(AbortCode::from_name("Busy"), None);
         assert_eq!(ABORT_CODE_NAMES, AbortCode::ALL.map(AbortCode::as_str));
+    }
+
+    #[test]
+    fn each_connection_and_direction_has_its_codes() {
+        let names = |codes: Codes| {
+            AbortCode::ALL
+                .into_iter()
+                .filter(|code| codes.allows(*code))
+                .map(AbortCode::as_str)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(Codes::default(), Codes::Service);
+        assert_eq!(
+            names(Codes::Service),
+            [
+                "cancelled",
+                "internal",
+                "body_stream_error",
+                "stopped",
+                "busy"
+            ]
+        );
+        assert_eq!(
+            names(Codes::CoreBody),
+            [
+                "cancelled",
+                "busy",
+                "verification_failed",
+                "unverifiable",
+                "malformed",
+                "piece_failed"
+            ]
+        );
+        assert_eq!(
+            names(Codes::Piece),
+            ["cancelled", "body_stream_error", "stalled"]
+        );
     }
 
     #[test]

@@ -88,9 +88,11 @@ def protocol_seeds():
     write('protocol_frames', 'service', bytes([2]) + service + frame(0x01, message('cancel', id=3)))
     # The core at protocol 2 (design 0009): credit for the bodies it sends,
     # and the bodies main sends for the core's own requests, under the same
-    # IDs, with whole messages and fragments between.
+    # IDs, with whole messages and fragments between. Main ends a piece only
+    # with cancelled, stalled or body_stream_error.
+    stalled = json.dumps({'code': 'stalled', 'message': 'the body stalled'})
     both = (service + frame(0x02, stream_id(1) + b'hello') + frame(0x03, stream_id(1))
-            + frame(0x02, stream_id(2) + b'x' * 300) + frame(0x04, stream_id(2) + abort.encode())
+            + frame(0x02, stream_id(2) + b'x' * 300) + frame(0x04, stream_id(2) + stalled.encode())
             + frame(0x01, request) + frame(0x12, begin) + frame(0x10, body[:10]) + frame(0x11, body[10:]))
     write('protocol_frames', 'core-streams', bytes([3]) + both)
     write('protocol_frames', 'core-streams-small-reads', bytes([4 * 6 + 3]) + both)

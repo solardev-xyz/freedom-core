@@ -137,7 +137,8 @@ pub struct Receiver {
     highest: u64,
     entries: BTreeMap<u64, Entry>,
     failed: Option<StreamError>,
-    /// The codes the other side may end a stream with: a service's.
+    /// The codes the other side may end a stream with: a service's, unless
+    /// made for the core's verified bodies.
     codes: Codes,
 }
 
@@ -419,6 +420,7 @@ impl Ring {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::stream::AbortCode;
 
     #[test]
     fn the_ring_wraps_and_keeps_order() {
@@ -435,5 +437,34 @@ mod tests {
         assert_eq!(out[..WINDOW - 90_000], bytes[90_000..]);
         assert_eq!(out[WINDOW - 90_000..], bytes[..90_000]);
         assert!(ring.pull(1).is_empty());
+    }
+
+    /// Main's side of a service connection, and of the core's: an abort
+    /// with a code the other side never sends is a protocol error, and the
+    /// rest end the stream.
+    #[test]
+    fn aborts_keep_to_the_connections_codes() {
+        let made: [(Codes, fn() -> Receiver); 2] = [
+            (Codes::Service, Receiver::new),
+            (Codes::CoreBody, Receiver::for_core_bodies),
+        ];
+        for (codes, make) in made {
+            for code in AbortCode::ALL {
+                let mut r = make();
+                r.request(1).unwrap();
+                assert_eq!(r.reply(1, true), Ok(Replied::Deliver));
+                let abort = Abort::new(code, "m");
+                let got = r.receive(StreamFrame::Abort {
+                    id: 1,
+                    abort: abort.clone(),
+                });
+                if codes.allows(code) {
+                    assert_eq!(got, Ok(Delivery::Abort { id: 1, abort }), "{code:?}");
+                } else {
+                    assert_eq!(got, Err(StreamError::AbortCode(1)), "{code:?}");
+                    assert_eq!(got.unwrap_err().category(), "abort_code");
+                }
+            }
+        }
     }
 }
