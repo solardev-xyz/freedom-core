@@ -673,6 +673,47 @@ mod tests {
         assert_eq!(core.walk_held.faults(), 0);
     }
 
+    #[test]
+    fn room_joins_a_value_and_its_measure_follows_it() {
+        let mut core = core();
+        // Nothing yet, then room for what it is to hold, then charged what
+        // it holds once it is changed.
+        let mut v: Charged<Vec<u8>> = Charged::nothing(&core);
+        assert_eq!(v.cost(), 0);
+        v.absorb(Charged::room(&mut core, 64).unwrap());
+        assert_eq!(v.cost(), 64);
+        v.change(&mut core, |v| {
+            v.reserve_exact(16);
+            v.extend_from_slice(&[1; 16]);
+        });
+        assert_eq!(v.cost(), v.capacity());
+        assert_eq!(core.walk_held.get(), v.cost());
+        // A buffer longer than its bytes: the charge past them as a room of
+        // its own, the two together the buffer's.
+        let mut b = Charged::make(&mut core, 100, || Vec::with_capacity(100)).unwrap();
+        b.get_mut().extend_from_slice(&[2; 40]);
+        let spare = b.spare();
+        assert_eq!((b.cost(), spare.cost()), (40, 60));
+        assert_eq!(core.walk_held.get(), v.cost() + 100);
+        b.release(&mut core);
+        spare.release(&mut core);
+        v.release(&mut core);
+        assert_eq!(core.walk_held.get(), 0);
+        assert_eq!(core.walk_held.faults(), 0);
+    }
+
+    /// A value changed past its charge grew before its hold.
+    #[cfg(feature = "memory-probe")]
+    #[test]
+    fn a_change_past_the_charge_is_memory_past_the_count() {
+        let mut core = core();
+        let mut v: Charged<Vec<u8>> = Charged::nothing(&core);
+        v.change(&mut core, |v| v.extend_from_slice(&[0; 32]));
+        assert_eq!(core.walk_held.get(), v.cost());
+        assert!(core.walk_held.faults() > 0);
+        v.release(&mut core);
+    }
+
     /// Round 4's reproduction, as the walk can still write it: the wire's
     /// charge released by the raw count while the wire is live.
     #[cfg(feature = "memory-probe")]
