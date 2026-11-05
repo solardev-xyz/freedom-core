@@ -70,22 +70,30 @@ def protocol_seeds():
     write('protocol_message', 'cancel', message('cancel', id=7))
     write('protocol_message', 'secret-token', '"' + secret + '"')
 
-    # protocol_frames: the first byte picks the connection (% 3) and the
-    # read size (/ 3 % 64 + 1): 0 is a core connection read a byte at a time.
+    # protocol_frames: the first byte picks the connection (% 4) and the
+    # read size (/ 4 % 64 + 1): 0 is a core connection read a byte at a time.
     body = message('response', id=1, result={'ok': True}).encode()
     begin = json.dumps({'id': 1, 'bytes': len(body)}).encode()
     core = (frame(0x01, request) + frame(0x12, begin) + frame(0x10, body[:10])
             + frame(0x11, body[10:]) + frame(0x13, b''))
     write('protocol_frames', 'core', bytes([0]) + core)
-    write('protocol_frames', 'core-64-byte-reads', bytes([3 * 63]) + core)
+    write('protocol_frames', 'core-64-byte-reads', bytes([4 * 63]) + core)
     head = message('response', id=1, result={'status': 200, 'headers': [], 'body': True})
     abort = json.dumps({'code': 'internal', 'message': 'freedom-ipfs native gateway error'})
     main = (frame(0x01, head) + frame(0x02, stream_id(1) + b'hello') + frame(0x03, stream_id(1))
             + frame(0x02, stream_id(2) + b'x' * 300) + frame(0x04, stream_id(2) + abort.encode()))
     write('protocol_frames', 'main', bytes([1]) + main)
-    write('protocol_frames', 'main-small-reads', bytes([3 * 4 + 1]) + main)
+    write('protocol_frames', 'main-small-reads', bytes([4 * 4 + 1]) + main)
     service = b''.join(frame(0x05, stream_id(n) + struct.pack('>I', 4096)) for n in (1, 2, 3, 4))
     write('protocol_frames', 'service', bytes([2]) + service + frame(0x01, message('cancel', id=3)))
+    # The core at protocol 2 (design 0009): credit for the bodies it sends,
+    # and the bodies main sends for the core's own requests, under the same
+    # IDs, with whole messages and fragments between.
+    both = (service + frame(0x02, stream_id(1) + b'hello') + frame(0x03, stream_id(1))
+            + frame(0x02, stream_id(2) + b'x' * 300) + frame(0x04, stream_id(2) + abort.encode())
+            + frame(0x01, request) + frame(0x12, begin) + frame(0x10, body[:10]) + frame(0x11, body[10:]))
+    write('protocol_frames', 'core-streams', bytes([3]) + both)
+    write('protocol_frames', 'core-streams-small-reads', bytes([4 * 6 + 3]) + both)
 
 
 def vault_file(plaintext, password, iterations, key_metadata=True):

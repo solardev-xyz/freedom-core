@@ -32,7 +32,7 @@ use fc_ipfs::unixfs::{self, Kind};
 
 use super::gateway::{self, Cache, RangeError};
 use super::jobs::{Verdict, Work};
-use super::{Ask, Failure, PieceFailure, PieceId};
+use super::{Ask, Failure, Holding, PieceFailure, PieceId};
 use crate::plan::{ContentTrust, Root};
 use crate::validate::Refusal as PlanRefusal;
 

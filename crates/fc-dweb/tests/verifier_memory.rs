@@ -17,6 +17,13 @@
 //! be within a fixed allowance for the machine and the driver, measured on
 //! a small manifest. Every release must match a hold
 //! ([`Verifier::over_released`]).
+//!
+//! With the `memory-probe` feature, the Swarm walk's requests read the
+//! allocator at every release of the walk's memory, inside each input: what
+//! is live then must be within the machine's reservation and the same
+//! allowance, so a buffer whose charge goes before it does is caught where
+//! it happens, not only between inputs. (The IPFS walk doesn't hold to
+//! that yet: its requests keep the cap alone.)
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
@@ -40,6 +47,23 @@ static ALLOC: Cap<PeakAlloc> = Cap::new(PeakAlloc, usize::MAX);
 static PEAK: AtomicUsize = AtomicUsize::new(0);
 /// What the allocator held when the last request started.
 static BASE: AtomicUsize = AtomicUsize::new(0);
+/// The most the allocator held past the machine's reservation at any
+/// release of the walk's memory, in the last request, and the reservation
+/// then.
+static AT_RELEASE: AtomicUsize = AtomicUsize::new(0);
+static AT_RELEASE_RESERVED: AtomicUsize = AtomicUsize::new(0);
+
+/// At a release of the walk's memory: what is live past the reservation.
+#[cfg(feature = "memory-probe")]
+fn at_release(reserved: usize) {
+    let now = PeakAlloc
+        .current_usage()
+        .saturating_sub(BASE.load(Ordering::Relaxed));
+    let past = now.saturating_sub(reserved);
+    if past > AT_RELEASE.fetch_max(past, Ordering::Relaxed) {
+        AT_RELEASE_RESERVED.store(reserved, Ordering::Relaxed);
+    }
+}
 
 /// What the driver and the machine's fixed structures may take beside the
 /// request's budget.
@@ -298,6 +322,12 @@ fn capped<R>(
     PeakAlloc.reset_peak_usage();
     let base = PeakAlloc.current_usage();
     BASE.store(base, Ordering::Relaxed);
+    AT_RELEASE.store(0, Ordering::Relaxed);
+    AT_RELEASE_RESERVED.store(0, Ordering::Relaxed);
+    #[cfg(feature = "memory-probe")]
+    if p.node == Node::Ant {
+        fc_dweb::verifier::probe::at_release(Some(at_release));
+    }
     let (got, reserved) = {
         let mut v = Verifier::new(
             1,
@@ -315,8 +345,18 @@ fn capped<R>(
         assert_eq!(v.over_released(), 0, "{case}: released without a hold");
         (got, v.peak())
     };
+    #[cfg(feature = "memory-probe")]
+    fc_dweb::verifier::probe::at_release(None);
     let allocated = PeakAlloc.peak_usage().saturating_sub(base);
     ALLOC.set_limit(usize::MAX).unwrap();
+    // Within each input too, at every release: nothing the walk released
+    // was still live past the allowance.
+    let past = AT_RELEASE.load(Ordering::Relaxed);
+    assert!(
+        past <= MACHINE,
+        "{case}: at a release, {past} allocated past the reservation {}",
+        AT_RELEASE_RESERVED.load(Ordering::Relaxed)
+    );
     (
         got,
         Measured {
@@ -780,5 +820,16 @@ fn dense_structure_stays_within_the_budget() {
         "{got:?}"
     );
     assert!(waited);
+    assert!(m.allocated <= m.reserved + MACHINE, "{m:?}");
+    // The same entry, its file's root chunk missing: the request ends on
+    // the 404, and the entry goes before its charge does.
+    let (root, mut chunks, file_root) = found_manifest();
+    chunks.remove(&file_root);
+    let p = swarm_plan(&root, "/a/b");
+    let (got, m) = capped("manifest, a 65,000-byte entry, no file", &p, 2 << 20, |v| {
+        swarm_drive(v, &chunks)
+    });
+    assert_eq!(got.0, None, "{got:?}");
+    assert!(got.2.starts_with("error "), "{got:?}");
     assert!(m.allocated <= m.reserved + MACHINE, "{m:?}");
 }
