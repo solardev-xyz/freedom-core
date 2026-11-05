@@ -872,11 +872,17 @@ fn flood() -> (Vec<u8>, World) {
         &data,
     );
     let root = sha256_cid(0x70, &block);
+    let mut world = HashMap::new();
+    // The root raw too, for a CAR that gives way before its first section
+    // is used.
+    world.insert(
+        format!("/ipfs/{}?format=raw", text(&root)),
+        Arc::new(block.clone()),
+    );
     let mut sections = vec![(root.clone(), block)];
     for _ in 0..400_000 {
         sections.push((identity(b""), Vec::new()));
     }
-    let mut world = HashMap::new();
     world.insert(car_path(&root), Arc::new(car(&sections)));
     world.insert(format!("/ipfs/{}?format=raw", text(&la)), Arc::new(a));
     world.insert(format!("/ipfs/{}?format=raw", text(&lb)), Arc::new(b));
@@ -1720,5 +1726,31 @@ fn an_uncharged_ipfs_value_shows_past_the_reservation() {
                 past[0]
             );
         }
+    }
+}
+
+/// The flood's CAR at budgets that run out while its sections pile up,
+/// their jobs held back: one push into the reader completes up to 64 of
+/// them, and room for one of a push's sections, with its job's structures,
+/// can run out after the push's own check passed. The 64 budgets, 517
+/// bytes apart, put that point at each place in a push. There the section
+/// can't wait out of the reader, so the CAR gives way, and raw blocks
+/// answer within the budget.
+#[test]
+fn a_section_without_room_gives_the_car_way() {
+    let _one = ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
+    let (root, world) = flood();
+    for i in 0..64 {
+        let budget = (3 << 20) + i * 517;
+        let case = format!("CAR of 400,000 empty sections at {budget}");
+        let (got, m) = capped(&case, &plan(&root), budget, |v| {
+            drive_paged(v, &world, true, MAX_FRAME, true, Poll::Each)
+        });
+        assert_eq!(
+            (got.0, got.1, got.2.as_str()),
+            (Some(200), 200, "end"),
+            "{case}: {got:?}"
+        );
+        assert!(m.reserved <= budget, "{case}: {m:?}");
     }
 }
