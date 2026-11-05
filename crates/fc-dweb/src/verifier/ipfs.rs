@@ -19,6 +19,17 @@
 //! source. Each block is hashed, then must be the block the walk needs
 //! next; one that isn't ends the CAR, and the walk fetches the rest as raw
 //! blocks. So does a gateway without ordered CARs, from the start.
+//!
+//! **Its memory** (0009, What a grant covers) is all [`Charged`] values,
+//! as the Swarm walk's is: the walk doesn't import the raw hold and release
+//! ([`super::Holding`]), so a charge goes only with its value, after it.
+//! What the walk answers (a page, a listing, a head with nothing after it,
+//! the end, a failure) waits in [`Walk::answer`] until the input is done
+//! with the block it came from ([`Walk::conclude`]): by then everything the
+//! walk held has gone, each value before its charge, and the core may drop
+//! the walk's holding. The walk's copies of the request's path and name
+//! are charged too; only its range and tag ([`Asked`]), which the machine
+//! takes from the plan's headers, are the machine's.
 
 use std::borrow::Cow;
 use std::collections::{BTreeMap, VecDeque};
@@ -30,9 +41,10 @@ use fc_ipfs::dagpb;
 use fc_ipfs::hamt::{self, Step};
 use fc_ipfs::unixfs::{self, Kind};
 
+use super::charged::Charged;
 use super::gateway::{self, Cache, RangeError};
 use super::jobs::{Verdict, Work};
-use super::{Ask, Failure, Holding, PieceFailure, PieceId, STREAM_WINDOW, Stash};
+use super::{Ask, Failure, PieceFailure, PieceId, STREAM_WINDOW, Stash};
 use crate::plan::{ContentTrust, Root};
 use crate::validate::Refusal as PlanRefusal;
 
@@ -61,7 +73,27 @@ const CAR_ROOM: usize = car::MAX_SECTION + car::MAX_HEADER;
 /// is used: the job and its output, the result, and their map entries.
 const SECTION_COST: usize = 512;
 /// A held shard's map entry, beside its CID and block.
-const MAP_ENTRY: usize = 128;
+pub(super) const MAP_ENTRY: usize = 128;
+/// The most sections one push into the CAR reader completes: the vector
+/// it gives them in stays within [`SECTIONS_ROOM`].
+const PUSH_SECTIONS: usize = 64;
+/// Room for the reader's vector of sections while they are given out: at
+/// most [`PUSH_SECTIONS`] slots, and the half as many it moved from as it
+/// grew.
+const SECTIONS_ROOM: usize =
+    (PUSH_SECTIONS + PUSH_SECTIONS / 2) * std::mem::size_of::<car::Section>();
+/// A head's headers beside its type and tag: their names, the fixed and
+/// numeric values, a sniffed type and the vector's slots.
+const HEAD_ROOM: usize = 1024;
+/// A type by its extension while it is made, and as it is kept.
+const MIME_ROOM: usize = 256;
+/// An error page's fixed text, its title and its status.
+const PAGE_TEXT: usize = 512;
+
+/// Bytes the walk holds, under their charge.
+type Bytes = Charged<Vec<u8>>;
+/// A head's headers.
+type Headers = Vec<(String, String)>;
 
 /// Where reading a CAR stands.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -172,8 +204,10 @@ fn header<'h>(headers: &'h [(String, String)], name: &str) -> Option<&'h str> {
 }
 
 /// Whether a CAR's type is the one asked for: `version=1`, `order=dfs`,
-/// `dups=y`, in any order.
+/// `dups=y`, in any order, each once, and no other parameter. Read in
+/// place: the gateway's header makes nothing the walk would hold.
 fn car_type_ok(value: &str) -> bool {
+    const WANTED: [(&str, &str); 3] = [("dups", "y"), ("order", "dfs"), ("version", "1")];
     let mut parts = value.split(';').map(str::trim);
     if !parts
         .next()
@@ -181,18 +215,21 @@ fn car_type_ok(value: &str) -> bool {
     {
         return false;
     }
-    let mut params: Vec<(String, String)> = parts
+    let mut seen = [false; 3];
+    for (k, v) in parts
         .filter(|p| !p.is_empty())
         .filter_map(|p| p.split_once('='))
-        .map(|(k, v)| (k.trim().to_ascii_lowercase(), v.trim().to_ascii_lowercase()))
-        .collect();
-    params.sort();
-    params
-        == [
-            ("dups".to_owned(), "y".to_owned()),
-            ("order".to_owned(), "dfs".to_owned()),
-            ("version".to_owned(), "1".to_owned()),
-        ]
+    {
+        let (k, v) = (k.trim(), v.trim());
+        let at = WANTED
+            .iter()
+            .position(|(wk, wv)| k.eq_ignore_ascii_case(wk) && v.eq_ignore_ascii_case(wv));
+        match at {
+            Some(i) if !seen[i] => seen[i] = true,
+            _ => return false,
+        }
+    }
+    seen == [true; 3]
 }
 
 /// A CID's text in a record's value: a CIDv0 in base58, or a CIDv1 in
@@ -212,9 +249,32 @@ fn cid_from_text(text: &str) -> Option<Vec<u8>> {
     ipfs_cid::parse(&bytes).map(|c| c.bytes.to_vec())
 }
 
+/// A CID decoded from `text` by `decode`, made within room for all that
+/// decoding holds at once (the text's copy, its bytes, and their copy as
+/// they are checked: each at most the text's length), and charged what it
+/// holds: `Ok(None)`, its room gone, when the text isn't one, and `Err`
+/// when the room doesn't fit.
+fn charged_cid(
+    core: &mut Core,
+    text: &str,
+    decode: impl FnOnce(&str) -> Option<Vec<u8>>,
+) -> Result<Option<Bytes>, Failure> {
+    let room = Charged::room(core, 3 * text.len()).ok_or(Failure::Memory)?;
+    Ok(room
+        .try_map(core, |()| decode(text))
+        .map(|cid| cid.remake(core, |cid| cid)))
+}
+
 /// A CID as `GatewayCore` shows it: a CIDv0 in base58, a CIDv1 in base32.
 fn display(cid: &[u8]) -> String {
     ipfs_cid::parse(cid).map_or_else(String::new, |c| ipfs_cid::to_text(&c))
+}
+
+/// Room for a CID's text ([`display`]) while it is made: base32 or base58
+/// takes under twice the CID's bytes, its string at most twice that as it
+/// grows.
+fn text_room(cid: &[u8]) -> usize {
+    4 * cid.len() + 16
 }
 
 /// `GatewayCore`'s `is_traversal_segment`: `.` or `..`, as written or
@@ -250,12 +310,6 @@ fn traversal(segment: &str) -> bool {
     matches!(&out[..n], b"." | b"..")
 }
 
-/// What strings hold on the heap: their bytes and the vector's slots.
-#[allow(clippy::ptr_arg)]
-fn strings_cost(v: &Vec<String>) -> usize {
-    v.iter().map(String::capacity).sum::<usize>() + v.capacity() * std::mem::size_of::<String>()
-}
-
 /// A path's segments, each decoded once; `None` when one is refused.
 fn segments(path: &str) -> Option<Vec<String>> {
     let below = path.strip_prefix('/').unwrap_or(path);
@@ -263,6 +317,43 @@ fn segments(path: &str) -> Option<Vec<String>> {
         return Some(Vec::new());
     }
     fc_ipfs::path::decode_segments(below)
+}
+
+/// Room for a file's tag ([`gateway::etag`]) while it is made: the root's
+/// text and the served path percent-encoded, and the string at most twice
+/// that as it grows, beside the encoded path.
+fn etag_room(root_text: &str, served: &[String]) -> usize {
+    let encoded = 3 * served.iter().map(String::len).sum::<usize>() + served.len();
+    2 * (root_text.len() + encoded + 32) + encoded
+}
+
+/// Room for an error page with `detail`: its body (the fixed text and the
+/// detail escaped, at most six bytes a byte), at most twice that as it
+/// grows, beside the escaped detail as it is made; and its headers.
+fn page_room(detail: &str) -> usize {
+    HEAD_ROOM + 2 * (PAGE_TEXT + 6 * detail.len()) + 12 * detail.len()
+}
+
+/// `name` made valid UTF-8 as `String::from_utf8_lossy` makes it, in a
+/// string of exactly its length: [`Walk::hamt_done`] counted it.
+fn lossy(name: &[u8]) -> String {
+    let len = name
+        .utf8_chunks()
+        .map(|c| c.valid().len() + if c.invalid().is_empty() { 0 } else { 3 })
+        .sum::<usize>();
+    let mut out = String::with_capacity(len);
+    for c in name.utf8_chunks() {
+        out.push_str(c.valid());
+        if !c.invalid().is_empty() {
+            out.push(char::REPLACEMENT_CHARACTER);
+        }
+    }
+    out
+}
+
+/// `slot`'s value gives way to `value`: the old one goes, then its charge.
+fn put<T>(core: &mut Core, slot: &mut Charged<T>, value: Charged<T>) {
+    std::mem::replace(slot, value).release(core);
 }
 
 /// What the walk needs a block for.
@@ -280,10 +371,20 @@ enum What {
     File { start: u64, len: u64, depth: usize },
 }
 
-#[derive(Debug, Clone)]
-struct Need {
+/// A block the walk needs, in the needs' queue: the queue is charged its
+/// slots, and the CIDs together beside it ([`Walk::cids`]).
+#[derive(Debug)]
+pub(super) struct Need {
     seq: u64,
     cid: Vec<u8>,
+    what: What,
+}
+
+/// A need taken from the queue, its CID now under a charge of its own.
+#[derive(Debug)]
+struct Taken {
+    seq: u64,
+    cid: Bytes,
     what: What,
 }
 
@@ -291,55 +392,83 @@ struct Need {
 #[derive(Debug)]
 struct RawPiece {
     id: PieceId,
-    /// The block's buffer ([`RawPiece::next_size`]): made at its first
-    /// byte, within the room held for it and the piece's window.
-    buf: Vec<u8>,
     /// Its length is known: a leaf whose entry gives it.
     exact: bool,
-    /// Room held for the buffer: the block's bound, or the buffer's
-    /// capacity once that is more. Once the block is the job's, what the
-    /// buffer has past the block's bytes, if it couldn't be given back.
-    room: usize,
-    /// The CID's length, held for the hash job.
-    cid_len: usize,
-    hashing: bool,
+    state: Raw,
+}
+
+/// Where a raw block stands.
+#[derive(Debug)]
+enum Raw {
+    /// Its bytes are coming in. `buf` is the block's buffer
+    /// ([`next_size`]), made at its first byte, charged the room held for
+    /// it: the block's bound, or the buffer's capacity once that is more.
+    /// `cid` is room for the CID its job will hold.
+    Reading { buf: Bytes, cid: Charged<()> },
+    /// The block is its job's: what its buffer has past its bytes, when it
+    /// couldn't be given back at its end, stays here until the job's
+    /// result comes.
+    Hashing { spare: Charged<()> },
 }
 
 impl RawPiece {
-    /// What it holds of the request's memory.
-    fn held(&self) -> usize {
-        self.room + self.cid_len
-    }
-
-    /// The buffer's next size, for `len` bytes. A leaf's is its length,
-    /// made once. A block of unknown length (a node, read into a block's
-    /// bound) starts at a frame's, then takes half its room and its window,
-    /// and only past that all its room: each move, the old buffer beside
-    /// the new and main's frame, fits the room and the window but the
-    /// last, whose rest is held for it ([`Walk::raw_data`]); and a buffer
-    /// cut to its block's length at its end fits them too, up to the half.
-    fn next_size(&self, len: usize) -> usize {
-        let cap = self.buf.capacity();
-        let half = (self.room + STREAM_WINDOW) / 2;
-        let next = if self.exact || cap >= half.min(self.room) {
-            self.room
-        } else if cap == 0 {
-            super::MAX_FRAME.min(self.room)
-        } else {
-            half.min(self.room)
-        };
-        next.max(len)
+    /// It goes with all it holds.
+    fn release(self, core: &mut Core) {
+        match self.state {
+            Raw::Reading { buf, cid } => {
+                buf.release(core);
+                cid.release(core);
+            }
+            Raw::Hashing { spare } => spare.release(core),
+        }
     }
 }
 
-/// A section judged: its CID, its block and the verdict.
-type Judged = (Vec<u8>, Vec<u8>, Result<(), BlockRefusal>);
+/// A block buffer's next size, for `len` bytes. A leaf's is its length,
+/// made once. A block of unknown length (a node, read into a block's
+/// bound) starts at a frame's, then takes half its room and its window,
+/// and only past that all its room: each move, the old buffer beside the
+/// new and main's frame, fits the room and the window but the last, whose
+/// rest is held for it ([`Walk::raw_data`]); and a buffer cut to its
+/// block's length at its end fits them too, up to the half.
+fn next_size(buf: &Bytes, exact: bool, len: usize) -> usize {
+    let (cap, room) = (buf.capacity(), buf.cost());
+    let half = (room + STREAM_WINDOW) / 2;
+    let next = if exact || cap >= half.min(room) {
+        room
+    } else if cap == 0 {
+        super::MAX_FRAME.min(room)
+    } else {
+        half.min(room)
+    };
+    next.max(len)
+}
+
+/// A section judged: its CID, its block, its job's structures' room, and
+/// the verdict.
+#[derive(Debug)]
+struct Judged {
+    cid: Bytes,
+    block: Bytes,
+    cost: Charged<()>,
+    verdict: Result<(), BlockRefusal>,
+}
+
+impl Judged {
+    fn release(self, core: &mut Core) {
+        self.cid.release(core);
+        self.block.release(core);
+        self.cost.release(core);
+    }
+}
 
 /// The CAR being read.
 #[derive(Debug)]
 struct CarStream {
     id: PieceId,
     reader: car::Reader,
+    /// The reader's room ([`CAR_ROOM`]).
+    room: Charged<()>,
     headed: bool,
     open: bool,
     /// Bytes not yet given to the reader, while the body waits for credit:
@@ -373,37 +502,92 @@ struct File {
     /// The head is out.
     headed: bool,
     /// The bytes the sniff waits for, then released.
-    early: Vec<u8>,
-    mime: Option<String>,
-    etag: String,
+    early: Bytes,
+    /// The type by the served path's extension, and the tag.
+    mime: Charged<Option<String>>,
+    etag: Charged<String>,
+    /// Room for the head's headers, until the head has them.
+    head: Option<Charged<()>>,
     range: Option<(u64, u64)>,
+}
+
+impl File {
+    fn release(self, core: &mut Core) {
+        self.early.release(core);
+        self.mime.release(core);
+        self.etag.release(core);
+        if let Some(h) = self.head {
+            h.release(core);
+        }
+    }
 }
 
 /// Where the walk stands.
 #[derive(Debug)]
 enum Stage {
-    /// The record of `name` asked for; `hop` resolutions so far.
+    /// The record of `name` asked for; `hop` resolutions so far. Once the
+    /// record is hashing, `result` is room for what its job's result holds
+    /// (the record's value and validity, each a part of it).
     Record {
-        name: String,
+        name: Charged<String>,
         hop: usize,
+        result: Option<Charged<()>>,
     },
     /// The record passed; its value waits for the partition's floor.
     Floor {
         hop: usize,
-        value: String,
+        value: Charged<String>,
     },
     Dag,
     Done,
 }
 
 /// The directory reached, when it is a HAMT: its shards, for the
-/// `index.html` lookup by hash, then the listing.
+/// `index.html` lookup by hash, then the listing. Charged as `charged.rs`
+/// measures it.
 #[derive(Debug, Default)]
-struct Hamt {
-    root: Vec<u8>,
-    shards: BTreeMap<Vec<u8>, Vec<u8>>,
-    /// What the shards hold of the request's memory.
-    held: usize,
+pub(super) struct Hamt {
+    pub(super) root: Vec<u8>,
+    pub(super) shards: BTreeMap<Vec<u8>, Vec<u8>>,
+}
+
+/// What the walk answers, given to the core once the input is done with
+/// the block it came from ([`Walk::conclude`]).
+#[derive(Debug)]
+enum Answer {
+    /// The walk fails: an error before the head, an abort after.
+    Fail(Failure),
+    /// `GatewayCore`'s page for an error the walk proved, made then.
+    Page { status: u16, detail: &'static str },
+    /// A head made within `room`, and the body that is all there is, or
+    /// none: a listing, a 304, a HEAD's file.
+    Head {
+        status: u16,
+        headers: Headers,
+        room: Charged<()>,
+        body: Option<Bytes>,
+    },
+    /// The body is complete.
+    Finish,
+}
+
+impl Answer {
+    /// An answer that came second: it goes, and its charges.
+    fn release(self, core: &mut Core) {
+        if let Self::Head {
+            headers,
+            room,
+            body,
+            ..
+        } = self
+        {
+            drop(headers);
+            room.release(core);
+            if let Some(b) = body {
+                b.release(core);
+            }
+        }
+    }
 }
 
 /// The request's IPFS walk.
@@ -411,41 +595,43 @@ struct Hamt {
 pub(crate) struct Walk {
     asked: Asked,
     /// The request path below the root or name, as written.
-    raw_path: String,
+    raw_path: Charged<String>,
     /// For IPNS: the name the request asked for, and its path's segments.
-    ipns: Option<String>,
-    rest: Vec<String>,
+    ipns: Option<Charged<String>>,
+    rest: Charged<Vec<String>>,
     stage: Stage,
-    /// The resolved root, its text as `GatewayCore` shows it, and the
+    /// The resolved root's text as `GatewayCore` shows it, and the
     /// segments below it.
-    root: Vec<u8>,
-    root_text: String,
-    segments: Vec<String>,
+    root_text: Charged<String>,
+    segments: Charged<Vec<String>>,
     cache: Cache,
     label: ContentTrust,
-    needs: VecDeque<Need>,
-    /// The needs' buffer, held: its capacity in slots.
-    needs_slots: usize,
+    /// The blocks the walk needs, in order: the queue charged its slots,
+    /// and room for their CIDs, each CID's capacity, beside it. A need
+    /// taken out takes its CID's part of the room with it.
+    needs: Charged<VecDeque<Need>>,
+    cids: Charged<()>,
     next_seq: u64,
-    /// What the path's strings hold (the request's, the records', the
-    /// served path's).
-    path_held: usize,
-    /// Blocks checked, waiting for their turn: by need.
-    arrived: BTreeMap<u64, Vec<u8>>,
-    /// What a raw block's buffer, arrived or hashing, holds past its bytes
-    /// when it couldn't give that back at its end: held with it, by need.
-    spares: BTreeMap<u64, usize>,
+    /// Blocks checked, waiting for their turn: by need, each charged its
+    /// buffer, all of it.
+    arrived: BTreeMap<u64, Bytes>,
     raw: BTreeMap<u64, RawPiece>,
     /// Raw blocks only, from here on.
     raw_only: bool,
     car: Option<CarStream>,
-    hamt: Option<Hamt>,
+    /// The structures of the CAR sections' jobs out ([`SECTION_COST`]
+    /// each), whose results haven't come: each goes with its verdict, even
+    /// once the CAR has.
+    sections: Charged<()>,
+    hamt: Option<Charged<Hamt>>,
     file: Option<File>,
     /// The served path's segments (the index document's, for a directory).
-    served: Vec<String>,
+    served: Charged<Vec<String>>,
     /// Room held for the body bytes the block in use copies out, until they
     /// are copied ([`Walk::draw`]).
-    copy_left: usize,
+    copy: Option<Charged<()>>,
+    /// What the walk answers, once the input is done ([`Walk::conclude`]).
+    answer: Option<Answer>,
 }
 
 impl Walk {
@@ -458,114 +644,220 @@ impl Walk {
         let raw_only = !asked.car;
         let mut walk = Self {
             asked,
-            raw_path: path.strip_prefix('/').unwrap_or(path).to_owned(),
+            raw_path: Charged::nothing(core),
             ipns: None,
-            rest: Vec::new(),
+            rest: Charged::nothing(core),
             stage: Stage::Done,
-            root: Vec::new(),
-            root_text: String::new(),
-            segments: Vec::new(),
+            root_text: Charged::nothing(core),
+            segments: Charged::nothing(core),
             cache: Cache::Immutable,
             label: ContentTrust::Verified,
-            needs: VecDeque::new(),
-            needs_slots: 0,
+            needs: Charged::nothing(core),
+            cids: Charged::new(core, (), 0),
             next_seq: 0,
-            path_held: 0,
             arrived: BTreeMap::new(),
-            spares: BTreeMap::new(),
             raw: BTreeMap::new(),
             raw_only,
             car: None,
+            sections: Charged::new(core, (), 0),
             hamt: None,
             file: None,
-            served: Vec::new(),
-            copy_left: 0,
+            served: Charged::nothing(core),
+            copy: None,
+            answer: None,
         };
-        // The request's segments: their room held before they are built,
-        // an empty one's slot included, which the walk drops later.
+        let begun = walk.begin(core, root, path);
+        walk.conclude(core);
+        begun.map(|()| walk)
+    }
+
+    fn begin(&mut self, core: &mut Core, root: &Root, path: &str) -> Result<(), PlanRefusal> {
+        // The request's segments and its path as written: their room held
+        // before they are built, an empty segment's slot included, which
+        // the walk drops later.
         let n = path.split('/').filter(|s| !s.is_empty()).count();
         if n > MAX_SEGMENTS {
-            core.fail(Failure::Unverifiable);
-            return Ok(walk);
+            self.end(core, Failure::Unverifiable);
+            return Ok(());
         }
         let slots = path.split('/').count();
+        let below = path.strip_prefix('/').unwrap_or(path);
         // Nothing is out yet: room that doesn't fit never will.
-        if walk.reserve_path(core, slots, path.len()).is_err() {
-            core.fail(Failure::Memory);
-            return Ok(walk);
-        }
-        let Some(rest) = segments(path) else {
-            walk.page(core, 400, "path traversal segments are not allowed");
-            return Ok(walk);
+        let Ok(mut room) = self.path_room(core, slots, path.len() + below.len()) else {
+            self.end(core, Failure::Memory);
+            return Ok(());
         };
+        let raw = room.split(below.len()).map(|()| below.to_owned());
+        put(core, &mut self.raw_path, raw);
+        let Some(rest) = segments(path) else {
+            room.release(core);
+            self.page(core, 400, "path traversal segments are not allowed");
+            return Ok(());
+        };
+        let rest = room.remake(core, |()| rest);
         match root {
-            Root::Ipfs(text) => {
-                let cid = ipfs_cid::from_base32(text).ok_or(PlanRefusal::Root)?;
-                walk.resolved(core, cid, rest);
-            }
+            Root::Ipfs(text) => match charged_cid(core, text, ipfs_cid::from_base32) {
+                Ok(Some(cid)) => self.resolved(core, cid, rest),
+                Ok(None) => {
+                    rest.release(core);
+                    return Err(PlanRefusal::Root);
+                }
+                Err(f) => {
+                    rest.release(core);
+                    self.end(core, f);
+                }
+            },
             Root::Ipns(name) => {
-                walk.ipns = Some(name.clone());
-                walk.rest = rest;
-                walk.settle_path(core);
-                walk.cache = Cache::Mutable;
-                walk.label = ContentTrust::LatestAsserted;
-                walk.ask_record(core, name.clone(), 1);
+                put(core, &mut self.rest, rest);
+                self.cache = Cache::Mutable;
+                self.label = ContentTrust::LatestAsserted;
+                // The name the request asked for, and the first record's.
+                let Some(mut room) = Charged::room(core, 2 * name.len()) else {
+                    self.end(core, Failure::Memory);
+                    return Ok(());
+                };
+                self.ipns = Some(room.split(name.len()).map(|()| name.clone()));
+                self.ask_record(core, room.map(|()| name.clone()), 1);
             }
-            Root::Swarm(_) => return Err(PlanRefusal::Root),
+            Root::Swarm(_) => {
+                rest.release(core);
+                return Err(PlanRefusal::Root);
+            }
         }
-        Ok(walk)
+        Ok(())
     }
 
     /// `GatewayCore`'s page for an error the walk proves, once every source
-    /// is dropped. It never waits for room: nothing is out before the DAG,
-    /// and in it the page (under 1 KiB) is proved from the one block the
-    /// walk needs, which came with more room beside it than that, a raw
-    /// block's window or the CAR's reading room, free by now.
-    fn page(&mut self, core: &mut Core, status: u16, detail: &str) {
-        self.stop(core);
-        let (h, body) = gateway::error_page(status, detail);
-        if !core.fits(body.len()) {
-            return core.fail(Failure::Memory);
-        }
-        core.head(status, h, self.label);
-        core.hold(body.len());
-        core.body(body, None);
-        core.finish();
+    /// is dropped ([`Answer::Page`]). It never waits for room: nothing is
+    /// out before the DAG, and in it the page (under 1 KiB) is proved from
+    /// the one block the walk needs, which came with more room beside it
+    /// than that, a raw block's window or the CAR's reading room, free by
+    /// the time the page is made.
+    fn page(&mut self, core: &mut Core, status: u16, detail: &'static str) {
+        self.answer(core, Answer::Page { status, detail });
     }
 
     fn end(&mut self, core: &mut Core, failure: Failure) {
-        self.stop(core);
-        core.fail(failure);
+        self.answer(core, Answer::Fail(failure));
     }
 
-    /// Drops every source and what it holds.
-    fn stop(&mut self, core: &mut Core) {
-        self.stage = Stage::Done;
-        let cids: usize = self.needs.iter().map(|n| n.cid.len()).sum();
-        core.unhold(cids + self.needs_slots);
-        self.needs = VecDeque::new();
-        self.needs_slots = 0;
-        for (_, b) in std::mem::take(&mut self.arrived) {
-            let n = b.len();
-            drop(b);
-            core.unhold(n);
+    /// The walk's answer: every source goes now, with what it holds, and
+    /// the answer waits for the input's end ([`Walk::conclude`]). The first
+    /// answer stands.
+    fn answer(&mut self, core: &mut Core, answer: Answer) {
+        self.stop(core);
+        if self.answer.is_none() {
+            self.answer = Some(answer);
+        } else {
+            answer.release(core);
         }
-        let spares: usize = std::mem::take(&mut self.spares).into_values().sum();
-        core.unhold(spares);
+    }
+
+    /// The walk has answered, or the request has ended.
+    fn over(&self, core: &Core) -> bool {
+        self.answer.is_some() || core.ended()
+    }
+
+    /// At the end of each input, the walk's answer goes to the core: the
+    /// block it came from, and everything else the walk held, are gone by
+    /// then, so the core may drop the walk's holding as the request ends.
+    fn conclude(&mut self, core: &mut Core) {
+        let Some(answer) = self.answer.take() else {
+            return;
+        };
+        match answer {
+            Answer::Fail(failure) => core.fail(failure),
+            Answer::Finish => core.finish(),
+            Answer::Page { status, detail } => {
+                let Some(mut room) = Charged::room(core, page_room(detail)) else {
+                    return core.fail(Failure::Memory);
+                };
+                let (headers, body) = gateway::error_page(status, detail);
+                let body = room.split(body.capacity()).map(|()| body);
+                self.head(core, status, headers, room, Some(body));
+            }
+            Answer::Head {
+                status,
+                headers,
+                room,
+                body,
+            } => self.head(core, status, headers, room, body),
+        }
+    }
+
+    /// A head and the body that is all there is. For a HEAD the body goes
+    /// first, as the head ends the request.
+    fn head(
+        &self,
+        core: &mut Core,
+        status: u16,
+        headers: Headers,
+        room: Charged<()>,
+        body: Option<Bytes>,
+    ) {
+        let body = match body {
+            Some(b) if core.head_only => {
+                b.release(core);
+                None
+            }
+            body => body,
+        };
+        core.head_charged(status, headers, self.label, room);
+        if let Some(body) = body {
+            core.body_charged(body, None);
+        }
+        core.finish();
+    }
+
+    /// Drops every source and what it holds, and the path: once the walk
+    /// answers, nothing of it is left but the answer.
+    fn stop(&mut self, core: &mut Core) {
+        match std::mem::replace(&mut self.stage, Stage::Done) {
+            Stage::Record { name, result, .. } => {
+                name.release(core);
+                if let Some(r) = result {
+                    r.release(core);
+                }
+            }
+            Stage::Floor { value, .. } => value.release(core),
+            Stage::Dag | Stage::Done => {}
+        }
+        let mut needs = std::mem::replace(&mut self.needs, Charged::nothing(core));
+        needs.get_mut().clear();
+        let cids = std::mem::replace(&mut self.cids, Charged::new(core, (), 0));
+        cids.release(core);
+        needs.release(core);
+        for (_, b) in std::mem::take(&mut self.arrived) {
+            b.release(core);
+        }
         for (_, r) in std::mem::take(&mut self.raw) {
-            core.unhold(r.held());
-            if !r.hashing {
-                core.cancel_piece(r.id);
+            let (id, reading) = (r.id, matches!(r.state, Raw::Reading { .. }));
+            r.release(core);
+            if reading {
+                core.cancel_piece(id);
             }
         }
         self.close_car(core);
+        let sections = std::mem::replace(&mut self.sections, Charged::new(core, (), 0));
+        sections.release(core);
         if let Some(h) = self.hamt.take() {
-            core.unhold(h.held);
+            h.release(core);
         }
         if let Some(f) = self.file.take() {
-            core.unhold(f.early.len());
+            f.release(core);
         }
         self.drop_copy(core);
+        for path in [&mut self.rest, &mut self.segments, &mut self.served] {
+            let none = Charged::nothing(core);
+            put(core, path, none);
+        }
+        for text in [&mut self.root_text, &mut self.raw_path] {
+            let none = Charged::nothing(core);
+            put(core, text, none);
+        }
+        if let Some(name) = self.ipns.take() {
+            name.release(core);
+        }
     }
 
     fn close_car(&mut self, core: &mut Core) {
@@ -616,27 +908,52 @@ impl Walk {
         }
     }
 
-    /// A need whose block waits for room: back at the front (its slot is
-    /// the one it left), its block, still held, among those arrived.
-    fn park(&mut self, need: Need, block: Option<Vec<u8>>) {
-        if let Some(b) = block {
-            self.arrived.insert(need.seq, b);
-        }
-        self.needs.push_front(need);
+    /// [`Walk::make_room`], the room then held for what is to be made.
+    fn reserve(&mut self, core: &mut Core, n: usize) -> Result<Charged<()>, Halt> {
+        self.make_room(core, n)?;
+        Charged::room(core, n).ok_or(Halt::Fail(Failure::Memory))
     }
 
-    /// `n` bytes of body copied out of the block in use, from the room held
-    /// for them ([`Walk::copy_bound`]).
-    fn draw(&mut self, core: &mut Core, n: usize) {
-        let from = n.min(self.copy_left);
-        debug_assert_eq!(from, n, "a body copy past the room held for it");
-        self.copy_left -= from;
-        core.hold(n - from);
+    /// A need whose block waits for room: back at the front (its slot is
+    /// the one it left), its CID's charge back with the queue's, its block,
+    /// still held, among those arrived.
+    fn park(&mut self, need: Taken, block: Option<Bytes>) {
+        let Taken { seq, cid, what } = need;
+        if let Some(b) = block {
+            self.arrived.insert(seq, b);
+        }
+        let needs = &mut self.needs;
+        let back = cid.map(|cid| needs.get_mut().push_front(Need { seq, cid, what }));
+        self.cids.absorb(back);
+    }
+
+    /// Room for `n` bytes of body copied out of the block in use, from the
+    /// room held for them ([`Walk::copy_bound`]).
+    fn draw(&mut self, core: &mut Core, n: usize) -> Charged<()> {
+        let mut room = match self.copy.as_mut() {
+            Some(copy) => copy.split(n),
+            None => Charged::new(core, (), 0),
+        };
+        debug_assert_eq!(room.cost(), n, "a body copy past the room held for it");
+        if room.cost() < n {
+            let more = n - room.cost();
+            room.absorb(Charged::new(core, (), more));
+        }
+        room
+    }
+
+    /// Room for the copies of the block in use, which [`Walk::draw`] takes
+    /// from.
+    fn hold_copy(&mut self, core: &mut Core, room: Charged<()>) {
+        self.drop_copy(core);
+        self.copy = Some(room);
     }
 
     /// What is left of the room held for the copies goes.
     fn drop_copy(&mut self, core: &mut Core) {
-        core.unhold(std::mem::take(&mut self.copy_left));
+        if let Some(copy) = self.copy.take() {
+            copy.release(core);
+        }
     }
 
     /// Room for the body bytes that content of `n` bytes at `start` copies
@@ -673,7 +990,7 @@ impl Walk {
     fn copy_out(&self) -> usize {
         let mut left = self.raw.len() + self.arrived.len();
         let mut most = 0;
-        for n in &self.needs {
+        for n in self.needs.iter() {
             if left == 0 {
                 break;
             }
@@ -689,27 +1006,41 @@ impl Walk {
     }
 
     fn release_car(car: Option<CarStream>, core: &mut Core) {
-        if let Some(mut c) = car {
-            if c.open {
-                core.cancel_piece(c.id);
+        if let Some(c) = car {
+            let CarStream {
+                id,
+                reader,
+                room,
+                open,
+                mut stash,
+                verdicts,
+                ..
+            } = c;
+            if open {
+                core.cancel_piece(id);
             }
-            c.stash.free(core);
-            core.unhold(CAR_ROOM);
-            // Sections still hashing: their jobs' bytes and structures come
-            // back with their results, and go then, with their costs.
-            for (_, (cid, block, _)) in c.verdicts {
-                let n = cid.len() + block.len() + SECTION_COST;
-                drop((cid, block));
-                core.unhold(n);
+            stash.free(core);
+            // The reader goes, then its room.
+            drop(reader);
+            room.release(core);
+            // Sections still hashing: their jobs' bytes come back with their
+            // results, and go then, with their structures' room.
+            for (_, j) in verdicts {
+                j.release(core);
             }
         }
     }
 
     // IPNS.
 
-    fn ask_record(&mut self, core: &mut Core, name: String, hop: usize) {
-        let path = format!("/ipns/{name}?format=ipns-record");
+    fn ask_record(&mut self, core: &mut Core, name: Charged<String>, hop: usize) {
+        let path = format!("/ipns/{}?format=ipns-record", name.as_str());
         let headers = vec![("accept".to_owned(), RECORD_ACCEPT.to_owned())];
+        self.stage = Stage::Record {
+            name,
+            hop,
+            result: None,
+        };
         if core
             .fetch(
                 Tag::Record,
@@ -719,9 +1050,8 @@ impl Walk {
             )
             .is_none()
         {
-            return core.fail(Failure::Memory);
+            self.end(core, Failure::Memory);
         }
-        self.stage = Stage::Record { name, hop };
     }
 
     fn record_value(&mut self, core: &mut Core, value: &str, hop: usize) {
@@ -730,18 +1060,30 @@ impl Walk {
             return self.end(core, Failure::VerificationFailed);
         };
         let below = parts.next().unwrap_or("");
+        // The CID within room for it. Nothing is out before the DAG: room
+        // that doesn't fit never will.
         let cid = match ns {
-            "ipfs" => match cid_from_text(target) {
-                Some(cid) => Some(cid),
-                None => return self.end(core, Failure::Unverifiable),
+            "ipfs" => match charged_cid(core, target, cid_from_text) {
+                Ok(Some(cid)) => Some(cid),
+                Ok(None) => return self.end(core, Failure::Unverifiable),
+                Err(f) => return self.end(core, f),
             },
             "ipns" => None,
             _ => return self.end(core, Failure::VerificationFailed),
+        };
+        let fail = |walk: &mut Self, core: &mut Core, cid: Option<Bytes>, f: Failure| {
+            if let Some(cid) = cid {
+                cid.release(core);
+            }
+            walk.end(core, f);
         };
         // `GatewayCore` matches a value's segments as written, decoding
         // none, and refuses one that is `.` or `..`, as written or
         // percent-encoded, with its 400; a name's too (split_name_path).
         if (cid.is_none() && traversal(target)) || below.split('/').any(traversal) {
+            if let Some(cid) = cid {
+                cid.release(core);
+            }
             return self.page(core, 400, "path traversal segments are not allowed");
         }
         // The value's segments ahead of the request's: at most 256 in all,
@@ -749,22 +1091,24 @@ impl Walk {
         let n = below.split('/').filter(|s| !s.is_empty()).count();
         let total = n + self.rest.len();
         if total > MAX_SEGMENTS {
-            return self.end(core, Failure::Unverifiable);
+            return fail(self, core, cid, Failure::Unverifiable);
         }
-        // Nothing is out before the DAG: room that doesn't fit never will.
-        if self.reserve_path(core, total, below.len()).is_err() {
-            return self.end(core, Failure::Memory);
-        }
-        let mut inner = Vec::with_capacity(total);
-        inner.extend(
-            below
-                .split('/')
-                .filter(|s| !s.is_empty())
-                .map(str::to_owned),
-        );
-        let mut old = std::mem::take(&mut self.rest);
-        inner.append(&mut old);
-        drop(old);
+        let Ok(room) = self.path_room(core, total, below.len()) else {
+            return fail(self, core, cid, Failure::Memory);
+        };
+        let old = std::mem::replace(&mut self.rest, Charged::nothing(core));
+        let inner = old.join(room).remake(core, |(mut old, ())| {
+            let mut inner = Vec::with_capacity(total);
+            inner.extend(
+                below
+                    .split('/')
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_owned),
+            );
+            inner.append(&mut old);
+            drop(old);
+            inner
+        });
         match cid {
             Some(cid) => self.resolved(core, cid, inner),
             None => {
@@ -774,11 +1118,14 @@ impl Walk {
                     crate::verify::ipns_name_kind(target),
                     crate::verify::NameKind::Ed25519 | crate::verify::NameKind::Sha256
                 ) {
+                    inner.release(core);
                     return self.end(core, Failure::Unverifiable);
                 }
-                self.rest = inner;
-                self.settle_path(core);
-                self.ask_record(core, target.to_owned(), hop + 1);
+                put(core, &mut self.rest, inner);
+                match Charged::make(core, target.len(), || target.to_owned()) {
+                    Some(name) => self.ask_record(core, name, hop + 1),
+                    None => self.end(core, Failure::Memory),
+                }
             }
         }
     }
@@ -786,36 +1133,52 @@ impl Walk {
     // The DAG.
 
     /// The root is known: walk its path.
-    fn resolved(&mut self, core: &mut Core, root: Vec<u8>, inner: Vec<String>) {
-        let Some(cid) = ipfs_cid::parse(&root) else {
-            return self.end(core, Failure::VerificationFailed);
-        };
-        if cid.hash != SHA2_256 && cid.hash != IDENTITY {
+    fn resolved(&mut self, core: &mut Core, root: Bytes, inner: Charged<Vec<String>>) {
+        let refused = match ipfs_cid::parse(&root) {
+            None => Some(Failure::VerificationFailed),
             // A hash the native node doesn't verify (blake3, say).
-            return self.end(core, Failure::Unverifiable);
+            Some(c) if c.hash != SHA2_256 && c.hash != IDENTITY => Some(Failure::Unverifiable),
+            Some(c) if c.codec != ipfs_cid::DAG_PB && c.codec != ipfs_cid::RAW => {
+                Some(Failure::Unverifiable)
+            }
+            Some(_) => None,
+        };
+        if let Some(f) = refused {
+            root.release(core);
+            inner.release(core);
+            return self.end(core, f);
         }
-        if cid.codec != ipfs_cid::DAG_PB && cid.codec != ipfs_cid::RAW {
-            return self.end(core, Failure::Unverifiable);
-        }
-        self.root_text = display(&root);
-        let mut inner = inner;
-        inner.retain(|s| !s.is_empty());
-        self.segments = inner;
-        self.settle_path(core);
-        self.stage = Stage::Dag;
         // Nothing is out yet: room that doesn't fit never will.
-        if self.needs_room(core, 1, root.len()).is_err() {
+        let Some(room) = Charged::room(core, text_room(&root)) else {
+            root.release(core);
+            inner.release(core);
             return self.end(core, Failure::Memory);
+        };
+        let text = room.remake(core, |()| display(&root));
+        put(core, &mut self.root_text, text);
+        let segments = inner.remake(core, |mut inner| {
+            inner.retain(|s| !s.is_empty());
+            inner
+        });
+        put(core, &mut self.segments, segments);
+        self.stage = Stage::Dag;
+        // The root's CID is the first need's.
+        match self.needs_room(core, 1, 0) {
+            Ok(room) => room.release(core),
+            Err(_) => {
+                root.release(core);
+                return self.end(core, Failure::Memory);
+            }
         }
-        self.add_need(&root, What::Path(0));
-        self.root = root;
+        self.push_need(root, What::Path(0));
         self.pump(core);
     }
 
-    /// Room for `n` more needs whose CIDs hold `cids` bytes, reserved
-    /// before the deque grows (its new buffer beside the old one while it
-    /// moves).
-    fn needs_room(&mut self, core: &mut Core, n: usize, cids: usize) -> Result<(), Halt> {
+    /// Room for `n` more needs whose CIDs hold `cids` bytes: the queue
+    /// grows within it (its new buffer beside the old one while it moves,
+    /// charged what it holds after), and the CIDs' room is what is left
+    /// ([`Walk::add_need`]).
+    fn needs_room(&mut self, core: &mut Core, n: usize, cids: usize) -> Result<Charged<()>, Halt> {
         let slot = std::mem::size_of::<Need>();
         let cap = self.needs.capacity();
         let want = self.needs.len().saturating_add(n);
@@ -824,52 +1187,56 @@ impl Walk {
         } else {
             0
         };
-        self.make_room(core, grown.saturating_add(cids))?;
-        core.hold(grown + cids);
+        let mut room = self.reserve(core, grown.saturating_add(cids))?;
         if want > cap {
-            self.needs.reserve_exact(n);
-            let now = self.needs.capacity().saturating_mul(slot);
-            // What the allocator gave past the ask; then the old buffer,
-            // freed.
-            core.hold(now.saturating_sub(grown));
-            core.unhold(self.needs_slots);
-            self.needs_slots = now;
+            self.needs.absorb(room.split(grown));
+            self.needs.change(core, |needs| needs.reserve_exact(n));
         }
-        Ok(())
+        Ok(room)
     }
 
-    /// A need at the back, its room made ([`Walk::needs_room`]).
-    fn add_need(&mut self, cid: &[u8], what: What) {
+    /// A need at the back, its CID copied within `room`, from
+    /// [`Walk::needs_room`].
+    fn add_need(&mut self, room: &mut Charged<()>, cid: &[u8], what: What) {
+        let cid = room.split(cid.len()).map(|()| cid.to_vec());
+        self.push_need(cid, what);
+    }
+
+    /// A need at the back, in a slot [`Walk::needs_room`] made: its CID's
+    /// charge joins the CIDs' room.
+    fn push_need(&mut self, cid: Bytes, what: What) {
         let seq = self.next_seq;
         self.next_seq += 1;
-        self.needs.push_back(Need {
-            seq,
-            cid: cid.to_vec(),
-            what,
-        });
+        let needs = &mut self.needs;
+        let queued = cid.map(|cid| needs.get_mut().push_back(Need { seq, cid, what }));
+        self.cids.absorb(queued);
     }
 
     /// One need ahead of the rest.
     fn push_first(&mut self, core: &mut Core, cid: &[u8], what: What) -> Result<(), Halt> {
-        self.needs_room(core, 1, cid.len())?;
-        self.add_need(cid, what);
-        self.needs.rotate_right(1);
+        let mut room = self.needs_room(core, 1, cid.len())?;
+        self.add_need(&mut room, cid, what);
+        room.release(core);
+        self.needs.get_mut().rotate_right(1);
         Ok(())
     }
 
-    /// The need at the front, taken; its CID's hold goes once the caller
-    /// has used it.
-    fn take_need(&mut self) -> Option<Need> {
-        self.needs.pop_front()
+    /// The need at the front, taken, its CID with its part of the CIDs'
+    /// room; the CID goes once the caller has used it.
+    fn take_need(&mut self) -> Option<Taken> {
+        let Need { seq, cid, what } = self.needs.get_mut().pop_front()?;
+        let cid = self.cids.split(cid.capacity()).map(|()| cid);
+        Some(Taken { seq, cid, what })
     }
 
     /// Moves the walk on: identity blocks resolved in place, blocks that
     /// came read in order, the sources fed. A block that waits for room
     /// ([`Halt::Wait`]) stops it, and nothing more is asked for: what comes
-    /// back is the block's.
+    /// back is the block's. A block in use goes before the walk's answer
+    /// does ([`Walk::conclude`]).
     fn pump(&mut self, core: &mut Core) {
         loop {
-            if !matches!(self.stage, Stage::Dag) || core.ended() {
+            if !matches!(self.stage, Stage::Dag) || self.over(core) {
                 return;
             }
             let Some(front) = self.needs.front() else {
@@ -889,43 +1256,43 @@ impl Walk {
                 .map(|c| c.digest.len());
             let seq = front.seq;
             if let Some(len) = identity {
-                match self.room_for(core, len) {
-                    Room::Fits => {}
-                    Room::Wait => return,
-                    Room::No => return self.end(core, Failure::Memory),
-                }
-                let Some(need) = self.take_need() else {
-                    return;
+                let room = match self.reserve(core, len) {
+                    Ok(room) => room,
+                    Err(Halt::Wait) => return,
+                    Err(Halt::Fail(f)) => return self.end(core, f),
                 };
-                core.hold(len);
-                let block = ipfs_cid::parse(&need.cid)
-                    .map(|c| c.digest.to_vec())
-                    .unwrap_or_default();
+                let Some(need) = self.take_need() else {
+                    return room.release(core);
+                };
+                let block = room.map(|()| {
+                    ipfs_cid::parse(&need.cid)
+                        .map(|c| c.digest.to_vec())
+                        .unwrap_or_default()
+                });
                 let used = self.consume(core, &need, &block);
-                drop(block);
-                core.unhold(len);
-                match used {
-                    Err(Halt::Wait) => return self.park(need, None),
-                    Err(Halt::Fail(f)) => self.end(core, f),
-                    Ok(()) => {}
+                block.release(core);
+                if used == Err(Halt::Wait) {
+                    return self.park(need, None);
                 }
-                let n = need.cid.len();
-                drop(need);
-                core.unhold(n);
+                need.cid.release(core);
+                if let Err(Halt::Fail(f)) = used {
+                    self.end(core, f);
+                }
                 continue;
             }
             if let Some(block) = self.arrived.remove(&seq) {
                 let Some(need) = self.take_need() else {
-                    return;
+                    return block.release(core);
                 };
-                match self.consume(core, &need, &block) {
-                    Err(Halt::Wait) => return self.park(need, Some(block)),
-                    Err(Halt::Fail(f)) => self.end(core, f),
-                    Ok(()) => {}
+                let used = self.consume(core, &need, &block);
+                if used == Err(Halt::Wait) {
+                    return self.park(need, Some(block));
                 }
-                let n = need.cid.len() + block.len() + self.spares.remove(&seq).unwrap_or(0);
-                drop((need, block));
-                core.unhold(n);
+                block.release(core);
+                need.cid.release(core);
+                if let Err(Halt::Fail(f)) = used {
+                    self.end(core, f);
+                }
                 continue;
             }
             match self.car_verdicts(core) {
@@ -944,19 +1311,20 @@ impl Walk {
         let Some(c) = self.car.as_mut() else {
             return Turn::None;
         };
-        let Some((cid, block, verdict)) = c.verdicts.remove(&c.done) else {
+        let Some(judged) = c.verdicts.remove(&c.done) else {
             return Turn::None;
         };
         c.done += 1;
-        let held = cid.len() + block.len() + SECTION_COST;
-        c.pending = c.pending.saturating_sub(held);
-        if let Err(r) = verdict {
-            core.unhold(held);
+        c.pending = c
+            .pending
+            .saturating_sub(judged.cid.len() + judged.block.len() + SECTION_COST);
+        if let Err(r) = judged.verdict {
+            judged.release(core);
             self.end(core, refusal(r));
             return Turn::Used;
         }
         let same = self.needs.front().is_some_and(|front| {
-            match (ipfs_cid::parse(&cid), ipfs_cid::parse(&front.cid)) {
+            match (ipfs_cid::parse(&judged.cid), ipfs_cid::parse(&front.cid)) {
                 (Some(a), Some(b)) => a.same_block(&b),
                 _ => false,
             }
@@ -965,34 +1333,42 @@ impl Walk {
         let Some(need) = need else {
             // Not the block the walk needs next: the CAR stops being
             // useful, and the rest comes as raw blocks.
-            core.unhold(held);
+            judged.release(core);
             self.close_car(core);
             self.raw_only = true;
             return Turn::Used;
         };
         // The section's CID and its job's structures are done with: the
-        // block is used as a raw block is, in the room it holds.
-        let n = cid.len();
-        drop(cid);
-        core.unhold(n + SECTION_COST);
+        // block is used as a raw block is, in the room it holds, its
+        // buffer exactly its bytes ([`Walk::push_frames`]).
+        let Judged {
+            cid, block, cost, ..
+        } = judged;
+        cid.release(core);
+        cost.release(core);
+        let block = block.remake(core, |block| block);
         match self.consume(core, &need, &block) {
             Err(Halt::Wait) => {
                 // The block, verified, waits for room as a raw block does.
                 self.park(need, Some(block));
                 return Turn::Parked;
             }
-            Err(Halt::Fail(f)) => self.end(core, f),
+            Err(Halt::Fail(f)) => {
+                block.release(core);
+                need.cid.release(core);
+                self.end(core, f);
+                return Turn::Used;
+            }
             Ok(()) => {}
         }
-        let n = need.cid.len() + block.len();
-        drop((need, block));
-        core.unhold(n);
+        block.release(core);
+        need.cid.release(core);
         Turn::Used
     }
 
     /// Asks for what the walk needs: a CAR, or raw blocks.
     fn feed(&mut self, core: &mut Core) {
-        if !matches!(self.stage, Stage::Dag) || core.ended() {
+        if !matches!(self.stage, Stage::Dag) || self.over(core) {
             return;
         }
         self.feed_car(core);
@@ -1005,32 +1381,38 @@ impl Walk {
         if core.awaiting() >= QUEUE_LIMIT {
             return;
         }
-        let pending: Vec<Need> = self
-            .needs
-            .iter()
-            .filter(|n| {
-                !self.raw.contains_key(&n.seq)
-                    && !self.arrived.contains_key(&n.seq)
-                    && ipfs_cid::parse(&n.cid).is_some_and(|c| c.hash != IDENTITY)
-            })
-            .take(MAX_RAW_PIECES)
-            .cloned()
-            .collect();
+        // The needs to ask for, by their place in the queue, which nothing
+        // here moves.
+        let mut pending = [0usize; MAX_RAW_PIECES];
+        let mut count = 0;
+        for (at, n) in self.needs.iter().enumerate() {
+            if count == MAX_RAW_PIECES {
+                break;
+            }
+            if !self.raw.contains_key(&n.seq)
+                && !self.arrived.contains_key(&n.seq)
+                && ipfs_cid::parse(&n.cid).is_some_and(|c| c.hash != IDENTITY)
+            {
+                pending[count] = at;
+                count += 1;
+            }
+        }
         // Each block copies body out when it is used, in room held then: a
         // block asked for past the front leaves room for the largest copy
         // of those out, so the blocks asked ahead never take the room the
         // front needs to be used.
         let mut copies = self.copy_out();
-        for need in pending {
+        for &at in &pending[..count] {
             if self.raw.len() >= MAX_RAW_PIECES {
                 break;
             }
-            let room = block_room(&need);
-            let reserve = room + need.cid.len();
-            let first = self.needs.front().is_some_and(|f| f.seq == need.seq);
-            let copy = self.copy_estimate(&need, room);
+            let need = &self.needs[at];
+            let (seq, cid_len, exact) = (need.seq, need.cid.len(), block_len(need).is_some());
+            let room = block_room(need);
+            let copy = self.copy_estimate(need, room);
+            let first = at == 0;
             let ahead = if first { 0 } else { copies.max(copy) };
-            if !core.fits(reserve + super::STREAM_WINDOW + ahead) {
+            if !core.fits(room + cid_len + super::STREAM_WINDOW + ahead) {
                 // Room comes back as blocks, jobs and cancelled pieces end
                 // and as the body is read; with none of them left, it never
                 // will.
@@ -1039,28 +1421,22 @@ impl Walk {
                 }
                 break;
             }
-            let path = format!("/ipfs/{}?format=raw", display(&need.cid));
+            let path = format!("/ipfs/{}?format=raw", display(&self.needs[at].cid));
             let headers = vec![("accept".to_owned(), RAW_ACCEPT.to_owned())];
             let Some(id) = core.fetch(
-                Tag::Raw(need.seq),
+                Tag::Raw(seq),
                 path,
                 headers,
                 Ask::Stream(Some(fc_ipfs::block::MAX_BLOCK)),
             ) else {
                 break;
             };
-            core.hold(reserve);
-            self.raw.insert(
-                need.seq,
-                RawPiece {
-                    id,
-                    buf: Vec::new(),
-                    exact: block_len(&need).is_some(),
-                    room,
-                    cid_len: need.cid.len(),
-                    hashing: false,
-                },
-            );
+            // Within the room just checked.
+            let state = Raw::Reading {
+                buf: Charged::new(core, Vec::new(), room),
+                cid: Charged::new(core, (), cid_len),
+            };
+            self.raw.insert(seq, RawPiece { id, exact, state });
             copies = copies.max(copy);
         }
     }
@@ -1075,7 +1451,7 @@ impl Walk {
             return;
         };
         let target = match front.what {
-            What::Path(0) => format!("/ipfs/{}{}", self.root_text, self.car_path()),
+            What::Path(0) => format!("/ipfs/{}{}", self.root_text.as_str(), self.car_path()),
             What::Index => format!("/ipfs/{}", display(&front.cid)),
             // A CAR ended before the walk did: raw from here.
             _ => {
@@ -1097,11 +1473,12 @@ impl Walk {
             self.raw_only = true;
             return self.feed(core);
         };
-        core.hold(CAR_ROOM);
         self.car = Some(CarStream {
             finished: false,
             id,
             reader: car::Reader::new(),
+            // Within the room just checked.
+            room: Charged::new(core, (), CAR_ROOM),
             headed: false,
             open: true,
             stash: Stash::default(),
@@ -1118,7 +1495,7 @@ impl Walk {
     /// value's path and the request's, below the resolved root.
     fn car_path(&self) -> String {
         if self.ipns.is_none() {
-            let p = &self.raw_path;
+            let p = self.raw_path.as_str();
             return if p.is_empty() {
                 String::new()
             } else {
@@ -1126,7 +1503,7 @@ impl Walk {
             };
         }
         let mut out = String::new();
-        for s in &self.segments {
+        for s in self.segments.iter() {
             out.push('/');
             out.push_str(&gateway::encode_path(&[s]));
         }
@@ -1168,25 +1545,23 @@ impl Walk {
         if let Some(n) = early {
             // A file shorter than its sniff: the type from what it has, and
             // its bytes copied out within room held for them.
-            match self.room_for(core, n) {
-                Room::Fits => {}
-                Room::Wait => return,
-                Room::No => return self.end(core, Failure::Memory),
-            }
-            core.hold(n);
-            self.copy_left = n;
+            let room = match self.reserve(core, n) {
+                Ok(room) => room,
+                Err(Halt::Wait) => return,
+                Err(Halt::Fail(f)) => return self.end(core, f),
+            };
+            self.hold_copy(core, room);
             self.head_file(core);
             self.drop_copy(core);
         }
-        if core.ended() {
+        if self.over(core) {
             return;
         }
-        self.stop(core);
-        core.finish();
+        self.answer(core, Answer::Finish);
     }
 
     /// A block the walk needed, checked, in its turn.
-    fn consume(&mut self, core: &mut Core, need: &Need, block: &[u8]) -> Result<(), Halt> {
+    fn consume(&mut self, core: &mut Core, need: &Taken, block: &[u8]) -> Result<(), Halt> {
         match need.what {
             What::Path(seg) => self.node(core, seg, &need.cid, block),
             What::PathShard { seg, level } => self.path_shard(core, seg, level, block),
@@ -1214,14 +1589,16 @@ impl Walk {
             }
             let node = dagpb::decode(block).map_err(refusal)?;
             let data = unixfs::decode(&node).map_err(refusal)?;
-            let name = self.segments[seg].clone();
             match data.kind {
-                Kind::Directory => match node.links().find(|l| l.name == Some(name.as_str())) {
-                    Some(link) => self.push_first(core, link.cid.bytes, What::Path(seg + 1))?,
-                    None => self.page(core, 404, "not found"),
-                },
+                Kind::Directory => {
+                    let name = self.segments[seg].as_str();
+                    match node.links().find(|l| l.name == Some(name)) {
+                        Some(link) => self.push_first(core, link.cid.bytes, What::Path(seg + 1))?,
+                        None => self.page(core, 404, "not found"),
+                    }
+                }
                 Kind::HamtShard => {
-                    self.hamt_step(core, seg, 0, &node, data.data.unwrap_or(&[]), &name)?;
+                    self.hamt_step(core, seg, 0, &node, data.data.unwrap_or(&[]))?;
                 }
                 Kind::File | Kind::Raw => {
                     self.page(
@@ -1255,37 +1632,38 @@ impl Walk {
                 let named = |l: &dagpb::Link<'_>| l.name.is_some_and(|n| !n.is_empty());
                 let n = node.links().filter(named).count();
                 let held = n.saturating_mul(std::mem::size_of::<gateway::Entry<'_>>());
-                self.make_room(core, held)?;
-                core.hold(held);
-                let mut entries = Vec::with_capacity(n);
+                let room = self.reserve(core, held)?;
+                let mut entries = room.map(|()| Vec::with_capacity(n));
                 for (at, l) in node.links().enumerate() {
                     if let Some(name) = l.name.filter(|n| !n.is_empty()) {
-                        entries.push(gateway::Entry {
+                        entries.get_mut().push(gateway::Entry {
                             name: Cow::Borrowed(name),
                             size: l.tsize,
                             at,
                         });
                     }
                 }
-                self.listing(core, entries, held)
+                self.listing(core, entries)
             }
             Kind::HamtShard => {
-                let held = block.len() + cid.len() + MAP_ENTRY;
-                self.make_room(core, held)?;
-                core.hold(held);
-                let mut h = Hamt {
-                    root: cid.to_vec(),
-                    held,
-                    ..Hamt::default()
-                };
-                h.shards.insert(cid.to_vec(), block.to_vec());
-                self.hamt = Some(h);
+                // The root's CID, and the shard's with its block.
+                let room = self.reserve(core, block.len() + 2 * cid.len() + MAP_ENTRY)?;
+                let h = room.remake(core, |()| {
+                    let mut h = Hamt {
+                        root: cid.to_vec(),
+                        ..Hamt::default()
+                    };
+                    h.shards.insert(cid.to_vec(), block.to_vec());
+                    h
+                });
+                if let Some(old) = self.hamt.replace(h) {
+                    old.release(core);
+                }
                 let pushed = self.push_shards(core, &node, 1);
                 if pushed == Err(Halt::Wait) {
                     // Built again when the block is used again.
                     if let Some(h) = self.hamt.take() {
-                        drop(h.shards);
-                        core.unhold(h.held);
+                        h.release(core);
                     }
                 }
                 pushed
@@ -1298,12 +1676,12 @@ impl Walk {
     }
 
     fn unsupported(&mut self, core: &mut Core, kind: Kind) {
-        let n = if kind == Kind::Symlink { 4 } else { 3 };
-        self.page(
-            core,
-            502,
-            &format!("unixfs error: unsupported unixfs node type {n}"),
-        );
+        let detail = if kind == Kind::Symlink {
+            "unixfs error: unsupported unixfs node type 4"
+        } else {
+            "unixfs error: unsupported unixfs node type 3"
+        };
+        self.page(core, 502, detail);
     }
 
     /// A shard's sub-shards (links named by the bucket's two digits alone),
@@ -1320,11 +1698,12 @@ impl Walk {
             n += 1;
             cids += l.cid.bytes.len();
         }
-        self.needs_room(core, n, cids)?;
+        let mut room = self.needs_room(core, n, cids)?;
         for l in node.links().filter(sub) {
-            self.add_need(l.cid.bytes, What::EntityShard { level });
+            self.add_need(&mut room, l.cid.bytes, What::EntityShard { level });
         }
-        self.needs.rotate_right(n);
+        room.release(core);
+        self.needs.get_mut().rotate_right(n);
         Ok(())
     }
 
@@ -1355,6 +1734,7 @@ impl Walk {
         }
     }
 
+    /// Segment `seg`'s next step in the HAMT shard `node`, at `level`.
     fn hamt_step(
         &mut self,
         core: &mut Core,
@@ -1362,12 +1742,12 @@ impl Walk {
         level: usize,
         node: &dagpb::Node<'_>,
         bitfield: &[u8],
-        name: &str,
     ) -> Result<(), Halt> {
         if level >= hamt::MAX_LEVELS {
             return Err(Failure::Unverifiable.into());
         }
-        match hamt::step(node, bitfield, name, level) {
+        let step = hamt::step(node, bitfield, &self.segments[seg], level);
+        match step {
             Step::Entry(link) => self.push_first(core, link.cid.bytes, What::Path(seg + 1)),
             Step::Shard(link) => self.push_first(
                 core,
@@ -1401,8 +1781,7 @@ impl Walk {
             );
             return Ok(());
         }
-        let name = self.segments[seg].clone();
-        self.hamt_step(core, seg, level, &node, data.data.unwrap_or(&[]), &name)
+        self.hamt_step(core, seg, level, &node, data.data.unwrap_or(&[]))
     }
 
     fn entity_shard(
@@ -1431,12 +1810,15 @@ impl Walk {
         // A shard linked twice is held once; so is a shard whose block
         // waited for room after it was taken in.
         if !h.shards.contains_key(cid) {
-            let held = block.len() + cid.len() + MAP_ENTRY;
-            self.make_room(core, held)?;
-            core.hold(held);
-            if let Some(h) = self.hamt.as_mut() {
-                h.held += held;
-                h.shards.insert(cid.to_vec(), block.to_vec());
+            let room = self.reserve(core, block.len() + cid.len() + MAP_ENTRY)?;
+            match self.hamt.as_mut() {
+                Some(h) => {
+                    h.absorb(room);
+                    h.change(core, |h| {
+                        h.shards.insert(cid.to_vec(), block.to_vec());
+                    });
+                }
+                None => room.release(core),
             }
         }
         self.push_shards(core, &node, level + 1)
@@ -1448,10 +1830,10 @@ impl Walk {
         let Some(h) = self.hamt.take() else {
             return Ok(());
         };
-        let mut at = h.root.clone();
+        let mut at: &[u8] = &h.root;
         let mut found = None;
         for level in 0..hamt::MAX_LEVELS {
-            let Some(block) = h.shards.get(&at) else {
+            let Some(block) = h.shards.get(at) else {
                 break;
             };
             let Ok(node) = dagpb::decode(block) else {
@@ -1462,22 +1844,19 @@ impl Walk {
             };
             match hamt::step(&node, data.data.unwrap_or(&[]), "index.html", level) {
                 Step::Entry(link) => {
-                    found = Some(link.cid.bytes.to_vec());
+                    found = Some(link.cid.bytes);
                     break;
                 }
-                Step::Shard(link) => at = link.cid.bytes.to_vec(),
+                Step::Shard(link) => at = link.cid.bytes,
                 Step::Absent => break,
             }
         }
-        drop(at);
         if let Some(cid) = found {
-            if let Err(e) = self.push_first(core, &cid, What::Index) {
+            if let Err(e) = self.push_first(core, cid, What::Index) {
                 self.hamt = Some(h);
                 return Err(e);
             }
-            let held = h.held;
-            drop(h);
-            core.unhold(held);
+            h.release(core);
             return Ok(());
         }
         // The entries, borrowed from the shards: their slots, and any name
@@ -1495,50 +1874,35 @@ impl Walk {
         let held = n
             .saturating_mul(std::mem::size_of::<gateway::Entry<'_>>())
             .saturating_add(owned);
-        if let Err(e) = self.make_room(core, held) {
-            self.hamt = Some(h);
-            return Err(e);
-        }
-        core.hold(held);
-        let mut entries = Vec::with_capacity(n);
+        let room = match self.reserve(core, held) {
+            Ok(room) => room,
+            Err(e) => {
+                self.hamt = Some(h);
+                return Err(e);
+            }
+        };
+        let mut entries = room.map(|()| Vec::with_capacity(n));
         Self::hamt_entries(&h.shards, &h.root, 0, &mut |name, size| {
             let name = match std::str::from_utf8(name) {
                 Ok(s) => Cow::Borrowed(s),
-                Err(_) => Cow::Owned(String::from_utf8_lossy(name).into_owned()),
+                Err(_) => Cow::Owned(lossy(name)),
             };
             let at = entries.len();
-            entries.push(gateway::Entry { name, size, at });
+            entries.get_mut().push(gateway::Entry { name, size, at });
         });
-        if let Err(e) = self.listing(core, entries, held) {
+        if let Err(e) = self.listing(core, entries) {
             self.hamt = Some(h);
             return Err(e);
         }
-        let held = h.held;
-        drop(h);
-        core.unhold(held);
+        h.release(core);
         Ok(())
     }
 
     /// Room for path strings of at most `bytes` in `n` segments, held
     /// before they are built.
-    fn reserve_path(&mut self, core: &mut Core, n: usize, bytes: usize) -> Result<(), Halt> {
+    fn path_room(&mut self, core: &mut Core, n: usize, bytes: usize) -> Result<Charged<()>, Halt> {
         let need = bytes.saturating_add(n.saturating_mul(std::mem::size_of::<String>()));
-        self.make_room(core, need)?;
-        core.hold(need);
-        self.path_held += need;
-        Ok(())
-    }
-
-    /// The path strings' hold, brought to what they hold now.
-    fn settle_path(&mut self, core: &mut Core) {
-        let now =
-            strings_cost(&self.rest) + strings_cost(&self.segments) + strings_cost(&self.served);
-        if now < self.path_held {
-            core.unhold(self.path_held - now);
-        } else {
-            core.hold(now - self.path_held);
-        }
-        self.path_held = now;
+        self.reserve(core, need)
     }
 
     /// The served path: the walked segments, and the index document's name
@@ -1546,12 +1910,15 @@ impl Walk {
     fn serve_path(&mut self, core: &mut Core, last: Option<&str>) -> Result<(), Halt> {
         let n = self.segments.len() + usize::from(last.is_some());
         let bytes = self.segments.iter().map(String::len).sum::<usize>() + last.map_or(0, str::len);
-        self.reserve_path(core, n, bytes)?;
-        let mut served = Vec::with_capacity(n);
-        served.extend(self.segments.iter().cloned());
-        served.extend(last.map(str::to_owned));
-        self.served = served;
-        self.settle_path(core);
+        let room = self.path_room(core, n, bytes)?;
+        let segments = &self.segments;
+        let served = room.remake(core, |()| {
+            let mut served = Vec::with_capacity(n);
+            served.extend(segments.iter().cloned());
+            served.extend(last.map(str::to_owned));
+            served
+        });
+        put(core, &mut self.served, served);
         Ok(())
     }
 
@@ -1576,18 +1943,17 @@ impl Walk {
     }
 
     /// `GatewayCore`'s listing of the directory reached, from its entries,
-    /// which hold `held` bytes of the request's memory. The page is counted,
-    /// its room held, then written into a buffer of exactly that length.
+    /// charged as they were taken. Its title and links' base are made
+    /// within room for them; the page is counted, its room and its
+    /// headers' held, then written into a buffer of exactly that length.
     /// While it waits for room, the entries go, made again on the next try.
     fn listing(
         &mut self,
         core: &mut Core,
-        mut entries: Vec<gateway::Entry<'_>>,
-        held: usize,
+        mut entries: Charged<Vec<gateway::Entry<'_>>>,
     ) -> Result<(), Halt> {
         if self.asked.range.is_some() {
-            drop(entries);
-            core.unhold(held);
+            entries.release(core);
             self.page(
                 core,
                 400,
@@ -1595,50 +1961,82 @@ impl Walk {
             );
             return Ok(());
         }
-        let (title, base) = match &self.ipns {
+        let names = match self.reserve(core, self.names_room()) {
+            Ok(room) => room.remake(core, |()| self.title_and_base()),
+            Err(e) => {
+                entries.release(core);
+                return Err(e);
+            }
+        };
+        gateway::sort_listing(entries.get_mut());
+        let len = gateway::listing_len(&names.0, &names.1, &entries);
+        let mut room = match self.reserve(core, len.saturating_add(HEAD_ROOM)) {
+            Ok(room) => room,
+            Err(e) => {
+                entries.release(core);
+                names.release(core);
+                return Err(e);
+            }
+        };
+        let (headers, body) = gateway::listing(&names.0, &names.1, &entries, len);
+        let body = room.split(len).map(|()| body);
+        entries.release(core);
+        names.release(core);
+        self.answer(
+            core,
+            Answer::Head {
+                status: 200,
+                headers,
+                room,
+                body: Some(body),
+            },
+        );
+        Ok(())
+    }
+
+    /// Room for a listing's title and its links' base while they are made
+    /// ([`Walk::title_and_base`]): the root's text or the name, and the
+    /// request's path, decoded and percent-encoded, each string at most
+    /// twice its length as it grows, beside the segments they are made
+    /// from.
+    fn names_room(&self) -> usize {
+        let p = self.raw_path.len();
+        let text = self.root_text.len() + self.ipns.as_ref().map_or(0, |n| n.len());
+        16 * (p + text + 16) + 2 * (p + 2) * std::mem::size_of::<String>()
+    }
+
+    /// A listing's title, the request's path decoded below its root or
+    /// name, and the base its links are written below.
+    fn title_and_base(&self) -> (String, String) {
+        match &self.ipns {
             None => {
                 let shown = self.shown_path();
                 let title = if shown.is_empty() {
-                    format!("/ipfs/{}", self.root_text)
+                    format!("/ipfs/{}", self.root_text.as_str())
                 } else {
-                    format!("/ipfs/{}/{shown}", self.root_text)
+                    format!("/ipfs/{}/{shown}", self.root_text.as_str())
                 };
-                let enc = gateway::encode_path(&self.segments);
+                let enc = gateway::encode_path(&self.segments[..]);
                 let base = if enc.is_empty() {
-                    format!("/ipfs/{}", self.root_text)
+                    format!("/ipfs/{}", self.root_text.as_str())
                 } else {
-                    format!("/ipfs/{}/{enc}", self.root_text)
+                    format!("/ipfs/{}/{enc}", self.root_text.as_str())
                 };
                 (title, base)
             }
             Some(name) => {
+                let name = name.as_str();
                 let shown = self.shown_path();
                 let title = if shown.is_empty() {
                     format!("/ipns/{name}")
                 } else {
                     format!("/ipns/{name}/{shown}")
                 };
-                let mut segs = vec![name.clone()];
+                let mut segs = vec![name.to_owned()];
                 segs.extend(self.rest_segments());
                 (title, format!("/ipns/{}", gateway::encode_path(&segs)))
             }
-        };
-        gateway::sort_listing(&mut entries);
-        let len = gateway::listing_len(&title, &base, &entries);
-        if let Err(e) = self.make_room(core, len) {
-            drop(entries);
-            core.unhold(held);
-            return Err(e);
         }
-        core.hold(len);
-        let (h, body) = gateway::listing(&title, &base, &entries, len);
-        drop(entries);
-        core.unhold(held);
-        self.stop(core);
-        core.head(200, h, self.label);
-        core.body(body, None);
-        core.finish();
-        Ok(())
     }
 
     /// The request's path as written, each segment decoded.
@@ -1652,7 +2050,7 @@ impl Walk {
     }
 
     fn rest_segments(&self) -> Vec<String> {
-        segments(&format!("/{}", self.raw_path))
+        segments(&format!("/{}", self.raw_path.as_str()))
             .unwrap_or_default()
             .into_iter()
             .filter(|s| !s.is_empty())
@@ -1661,8 +2059,9 @@ impl Walk {
 
     // The file.
 
-    /// The file's root is in: the tag, the conditional, the range, then
-    /// its content.
+    /// The file's root is in: the range, the tag and the conditional, then
+    /// its content. The tag, the type by extension and room for the head's
+    /// headers are reserved before they are made, and the file keeps them.
     fn start_file(
         &mut self,
         core: &mut Core,
@@ -1673,19 +2072,6 @@ impl Walk {
             None => block.len() as u64,
             Some((_, d)) => d.filesize.ok_or(Failure::Malformed)?,
         };
-        let etag = gateway::etag(&self.root_text, &self.served, len);
-        if self.asked.range.is_none()
-            && self
-                .asked
-                .if_none_match
-                .as_deref()
-                .is_some_and(|v| gateway::if_none_match(v, &etag))
-        {
-            self.stop(core);
-            core.head(304, gateway::not_modified(&etag, self.cache), self.label);
-            core.finish();
-            return Ok(());
-        }
         let range = match self.asked.range.as_deref() {
             None => None,
             Some(v) => match gateway::parse_range(v, len) {
@@ -1700,7 +2086,39 @@ impl Walk {
                 }
             },
         };
-        let mime = gateway::type_by_extension(&self.served);
+        let tag_room = etag_room(&self.root_text, &self.served);
+        let mut room = self.reserve(core, 2 * (tag_room + MIME_ROOM) + HEAD_ROOM)?;
+        let (root_text, served) = (&self.root_text, &self.served);
+        let etag = room
+            .split(tag_room)
+            .remake(core, |()| gateway::etag(root_text, &served[..], len));
+        let mime = room
+            .split(MIME_ROOM)
+            .remake(core, |()| gateway::type_by_extension(&served[..]));
+        // The head's headers copy the tag and the type.
+        let head = room.split(HEAD_ROOM + etag.cost() + mime.cost());
+        room.release(core);
+        if range.is_none()
+            && self
+                .asked
+                .if_none_match
+                .as_deref()
+                .is_some_and(|v| gateway::if_none_match(v, &etag))
+        {
+            let headers = gateway::not_modified(&etag, self.cache);
+            etag.release(core);
+            mime.release(core);
+            self.answer(
+                core,
+                Answer::Head {
+                    status: 304,
+                    headers,
+                    room: head,
+                    body: None,
+                },
+            );
+            return Ok(());
+        }
         let sniff = if mime.is_none() {
             gateway::sniff_end(len, range)
         } else {
@@ -1712,17 +2130,21 @@ impl Walk {
             (Some((s, e)), _) => (s, e),
             (None, _) => (0, len.saturating_sub(1)),
         };
-        self.file = Some(File {
+        let file = File {
             a,
             b,
             len,
             sniff,
             headed: false,
-            early: Vec::new(),
+            early: Charged::nothing(core),
             mime,
             etag,
+            head: Some(head),
             range,
-        });
+        };
+        if let Some(old) = self.file.replace(file) {
+            old.release(core);
+        }
         // A HEAD, or an empty file, whose type isn't sniffed: the head is
         // all there is. Otherwise it goes once the content's room is held
         // ([`Walk::content`]), or with the bytes its type is sniffed from.
@@ -1735,12 +2157,15 @@ impl Walk {
         let r = self.content(core, block, node, 0, len, 0);
         if r == Err(Halt::Wait) {
             // Started again when the block is used again.
-            self.file = None;
+            if let Some(f) = self.file.take() {
+                f.release(core);
+            }
         }
         r
     }
 
-    /// The head of the file being served.
+    /// The head of the file being served, its headers made within the
+    /// room the file kept for them. For a HEAD it is the answer.
     fn head_file(&mut self, core: &mut Core) {
         let Some(f) = self.file.as_mut() else {
             return;
@@ -1749,28 +2174,43 @@ impl Walk {
             return;
         }
         f.headed = true;
-        let mime = match &f.mime {
-            Some(m) => m.clone(),
-            None => gateway::sniffed(&f.early),
-        };
-        let headers = match f.range {
-            Some((s, e)) => gateway::partial(&mime, s, e, f.len, &f.etag, self.cache),
-            None => gateway::whole(&mime, f.len, &f.etag, self.cache),
+        let headers = {
+            let sniffed;
+            let mime = match f.mime.as_deref() {
+                Some(m) => m,
+                None => {
+                    sniffed = gateway::sniffed(&f.early);
+                    &sniffed
+                }
+            };
+            match f.range {
+                Some((s, e)) => gateway::partial(mime, s, e, f.len, &f.etag, self.cache),
+                None => gateway::whole(mime, f.len, &f.etag, self.cache),
+            }
         };
         let status = if f.range.is_some() { 206 } else { 200 };
-        let early = std::mem::take(&mut f.early);
-        core.head(status, headers, self.label);
-        if core.ended() {
+        let early = std::mem::replace(&mut f.early, Charged::nothing(core));
+        let room = f.head.take();
+        let room = room.unwrap_or_else(|| Charged::new(core, (), 0));
+        if core.head_only {
             // A HEAD: nothing past the head.
-            core.unhold(early.len());
-            self.stop(core);
+            early.release(core);
+            self.answer(
+                core,
+                Answer::Head {
+                    status,
+                    headers,
+                    room,
+                    body: None,
+                },
+            );
             return;
         }
+        core.head_charged(status, headers, self.label, room);
         self.release(core, &early, 0);
-        core.unhold(early.len());
+        early.release(core);
         if self.file.as_ref().is_some_and(|f| f.len == 0) {
-            self.stop(core);
-            core.finish();
+            self.answer(core, Answer::Finish);
         }
     }
 
@@ -1825,13 +2265,15 @@ impl Walk {
             return Err(Failure::Unverifiable.into());
         }
         let copy = self.copy_bound(start, inline.len());
-        self.make_room(core, copy)?;
-        core.hold(copy);
-        self.copy_left = copy;
-        if let Err(e) = self.needs_room(core, n, cids) {
-            self.drop_copy(core);
-            return Err(e);
-        }
+        let room = self.reserve(core, copy)?;
+        self.hold_copy(core, room);
+        let mut room = match self.needs_room(core, n, cids) {
+            Ok(room) => room,
+            Err(e) => {
+                self.drop_copy(core);
+                return Err(e);
+            }
+        };
         // A file whose type isn't sniffed has its head now.
         if self
             .file
@@ -1840,15 +2282,17 @@ impl Walk {
         {
             self.head_file(core);
         }
-        if !core.ended() {
+        if !self.over(core) {
             self.emit(core, start, inline);
         }
         self.drop_copy(core);
-        if core.ended() || self.file.is_none() {
+        if self.over(core) || self.file.is_none() {
+            room.release(core);
             return Ok(());
         }
         for (link, child, size) in within() {
             self.add_need(
+                &mut room,
                 link.cid.bytes,
                 What::File {
                     start: child,
@@ -1857,7 +2301,8 @@ impl Walk {
                 },
             );
         }
-        self.needs.rotate_right(n);
+        room.release(core);
+        self.needs.get_mut().rotate_right(n);
         Ok(())
     }
 
@@ -1895,16 +2340,23 @@ impl Walk {
             let keep = usize::try_from(end + 1 - start)
                 .unwrap_or(usize::MAX)
                 .min(bytes.len());
-            self.draw(core, keep);
-            if let Some(f) = self.file.as_mut() {
-                f.early.extend_from_slice(&bytes[..keep]);
+            let room = self.draw(core, keep);
+            match self.file.as_mut() {
+                Some(f) => {
+                    f.early.absorb(room);
+                    f.early.change(core, |early| {
+                        early.reserve_exact(keep);
+                        early.extend_from_slice(&bytes[..keep]);
+                    });
+                }
+                None => room.release(core),
             }
         }
         let past = end + 1;
         if start + bytes.len() as u64 >= past {
             self.head_file(core);
             // The rest of this slice, past the sniffed bytes.
-            if self.file.as_ref().is_some_and(|f| f.headed) && !core.ended() {
+            if self.file.as_ref().is_some_and(|f| f.headed) && !self.over(core) {
                 let from = usize::try_from(past.saturating_sub(start)).unwrap_or(usize::MAX);
                 if let Some(tail) = bytes.get(from..).filter(|t| !t.is_empty()) {
                     self.release(core, tail, start.max(past));
@@ -1930,8 +2382,8 @@ impl Walk {
         let Some(part) = bytes.get(from..to) else {
             return;
         };
-        self.draw(core, part.len());
-        core.body(part.to_vec(), None);
+        let room = self.draw(core, part.len());
+        core.body_charged(room.map(|()| part.to_vec()), None);
     }
 
     // The sources' events.
@@ -1954,7 +2406,7 @@ impl Walk {
         let Some(c) = self.car.as_mut() else {
             return;
         };
-        match Self::push_frames(c, core) {
+        match Self::push_frames(c, &mut self.sections, core) {
             Ok(Read::On) => {}
             // The CAR is a shortcut: without room to read it on, the rest
             // comes as raw blocks, and only a raw block that can't fit
@@ -1995,12 +2447,17 @@ impl Walk {
 
     /// Frames into the reader while the body the page hasn't read has room
     /// (any once the stream has ended: nothing is held back then), as much
-    /// of each as can complete no more sections than may still wait, each
-    /// counted with its job's structures; and only while the request has
-    /// room for what those bytes can complete: the section being read and
-    /// the bytes themselves. Without that room, and nothing that will give
-    /// it back, the CAR gives way to raw blocks.
-    fn push_frames(c: &mut CarStream, core: &mut Core) -> Result<Read, Failure> {
+    /// of each as can complete no more sections than may still wait, nor
+    /// more than [`PUSH_SECTIONS`] at once, each counted with its job's
+    /// structures; and only while the request has room for what those
+    /// bytes can complete (the section being read, the bytes themselves
+    /// and the vector the sections come in). Without that room, and
+    /// nothing that will give it back, the CAR gives way to raw blocks.
+    fn push_frames(
+        c: &mut CarStream,
+        sections: &mut Charged<()>,
+        core: &mut Core,
+    ) -> Result<Read, Failure> {
         while c.finished || core.awaiting() < QUEUE_LIMIT {
             let starts = PENDING_LIMIT.saturating_sub(c.pending) / SECTION_COST;
             if starts == 0 {
@@ -2013,13 +2470,14 @@ impl Walk {
             }
             // The item being read completes with the bytes it wants; each
             // further section takes at least MIN_SECTION.
+            let starts = starts.min(PUSH_SECTIONS);
             let wanting = c.reader.wanting();
             let further = if wanting > 0 { starts - 1 } else { starts };
             let most = wanting
                 .saturating_add(further.saturating_mul(car::MIN_SECTION))
                 .saturating_add(car::MIN_SECTION - 1);
             let take = frame.len().min(most);
-            if !core.fits(c.reader.holding() + take) {
+            if !core.fits(c.reader.holding() + take + SECTIONS_ROOM) {
                 // Room comes back as sections are used and the body is
                 // read; with neither waiting, it never will.
                 if c.pending == 0 && core.awaiting() == 0 {
@@ -2027,6 +2485,8 @@ impl Walk {
                 }
                 return Ok(Read::On);
             }
+            // Within the room just checked.
+            let list = Charged::new(core, (), SECTIONS_ROOM);
             let pushed = c.reader.push(&frame[..take]);
             // The bytes are the reader's now, within its room; their place
             // in the window is main's again.
@@ -2034,6 +2494,7 @@ impl Walk {
             if c.open {
                 core.consumed(c.id, take);
             }
+            let mut give_way = false;
             for section in pushed.sections {
                 // The section's own buffer, the CID moved out of its front.
                 let (mut block, cid_len) = section.into_parts();
@@ -2044,14 +2505,23 @@ impl Walk {
                 // structures. Without room for both, the section, out of
                 // the reader, can't wait: it and the rest come as raw
                 // blocks.
-                if !core.fits(size + SECTION_COST) {
-                    return Ok(Read::GiveWay);
-                }
+                let Some(mut room) = Charged::room(core, size + SECTION_COST) else {
+                    give_way = true;
+                    break;
+                };
+                // The buffer gives the CID's bytes back, shrunk in place, so
+                // the block holds what a raw block's exact buffer does.
+                block.shrink_to_fit();
                 let n = c.sent;
                 c.sent += 1;
                 c.pending += size + SECTION_COST;
-                core.hold(size + SECTION_COST);
-                core.hash(Tag::Section(n), Work::Block { cid, block });
+                let work = room.split(size).map(|()| Work::Block { cid, block });
+                core.hash_charged(Tag::Section(n), work);
+                sections.absorb(room);
+            }
+            list.release(core);
+            if give_way {
+                return Ok(Read::GiveWay);
             }
             if let Some(r) = pushed.error {
                 return Err(refusal(r));
@@ -2098,107 +2568,213 @@ impl Walk {
         let Some(r) = self.raw.get_mut(&seq) else {
             return;
         };
+        let exact = r.exact;
+        let id = r.id;
+        let Raw::Reading { buf, .. } = &mut r.state else {
+            return;
+        };
         let n = bytes.len();
-        let len = r.buf.len() + n;
-        if len > r.buf.capacity() {
+        let have = buf.len();
+        let len = have + n;
+        if len > buf.capacity() {
             // The buffer moves to its next size within the room held for it
             // and the piece's window, which holds nothing past main's frame
             // (its bytes are credited as they are copied). What the move
             // needs past them is held while it is made, and bytes past the
             // room (a node longer than a leaf's entry) keep their room.
-            let next = r.next_size(len);
-            let grow = next.saturating_sub(r.room);
-            let over = (r.buf.capacity() + next + n).saturating_sub(r.room + grow + STREAM_WINDOW);
-            if !core.fits(grow + over) {
+            let next = next_size(buf, exact, len);
+            let grow = next.saturating_sub(buf.cost());
+            let over =
+                (buf.capacity() + next + n).saturating_sub(buf.cost() + grow + STREAM_WINDOW);
+            let Some(mut room) = Charged::room(core, grow + over) else {
                 return self.end(core, Failure::Memory);
-            }
-            core.hold(grow + over);
-            r.buf.reserve_exact(next - r.buf.len());
-            core.unhold(over);
-            r.room += grow;
+            };
+            let over = room.split(over);
+            buf.absorb(room);
+            buf.get_mut().reserve_exact(next - have);
+            over.release(core);
         }
-        r.buf.extend_from_slice(&bytes);
+        buf.get_mut().extend_from_slice(&bytes);
         drop(bytes);
-        core.consumed(r.id, n);
+        core.consumed(id, n);
     }
 
     fn raw_end(&mut self, core: &mut Core, seq: u64) {
-        let Some(need) = self.needs.iter().find(|n| n.seq == seq).cloned() else {
+        let Some(at) = self.needs.iter().position(|n| n.seq == seq) else {
             if let Some(r) = self.raw.remove(&seq) {
-                let n = r.held();
-                drop(r);
-                core.unhold(n);
+                r.release(core);
             }
             return core.window_done();
         };
         let Some(r) = self.raw.get_mut(&seq) else {
             return core.window_done();
         };
-        r.hashing = true;
-        let mut block = std::mem::take(&mut r.buf);
-        let len = block.len();
+        let Raw::Reading { .. } = r.state else {
+            return core.window_done();
+        };
+        let hashing = Raw::Hashing {
+            spare: Charged::new(core, (), 0),
+        };
+        let Raw::Reading { buf, cid } = std::mem::replace(&mut r.state, hashing) else {
+            return core.window_done();
+        };
         // A buffer longer than its block (a node of unknown length) is cut
         // to it: a copy, at most, beside the buffer, made within its room
         // and the window the block came through, which the walk holds
         // until this end is done, and room held past them. Without that
         // room the buffer is kept whole, and its room with it, until it
         // goes. Room never made into the buffer goes.
-        if block.capacity() > len {
-            let over = (block.capacity() + len).saturating_sub(r.room + STREAM_WINDOW);
-            if core.fits(over) {
-                core.hold(over);
-                block.shrink_to_fit();
-                core.unhold(over);
+        let len = buf.len();
+        let over = if buf.capacity() > len {
+            let over = (buf.capacity() + len).saturating_sub(buf.cost() + STREAM_WINDOW);
+            Charged::room(core, over)
+        } else {
+            None
+        };
+        let cut = over.is_some();
+        let mut block = buf.remake(core, |mut b| {
+            if cut {
+                b.shrink_to_fit();
             }
+            b
+        });
+        if let Some(over) = over {
+            over.release(core);
         }
-        core.unhold(r.room - block.capacity());
-        r.room = block.capacity();
         core.window_done();
-        // The block and its CID are the job's now; the buffer's room past
-        // its bytes, if any, stays with the piece.
-        r.room -= len;
-        r.cid_len = 0;
-        core.hash(
-            Tag::Raw(seq),
-            Work::Block {
-                cid: need.cid,
-                block,
-            },
-        );
+        // The block and a copy of its CID are the job's now; what the
+        // buffer has past the block's bytes, if any, stays with the piece.
+        let spare = block.spare();
+        if let Some(Raw::Hashing { spare: s }) = self.raw.get_mut(&seq).map(|r| &mut r.state) {
+            put(core, s, spare);
+        } else {
+            spare.release(core);
+        }
+        let cid = cid.map(|()| self.needs[at].cid.to_vec());
+        let work = cid
+            .join(block)
+            .map(|(cid, block)| Work::Block { cid, block });
+        core.hash_charged(Tag::Raw(seq), work);
     }
 
-    fn whole_record(&mut self, core: &mut Core, status: u16, body: Vec<u8>) {
+    fn whole_record(&mut self, core: &mut Core, status: u16, body: Bytes) {
         let Stage::Record { name, .. } = &self.stage else {
-            core.unhold(body.len());
-            return;
+            return body.release(core);
         };
         if status != 200 {
-            core.unhold(body.len());
+            body.release(core);
             return self.end(core, Failure::Status(status));
         }
-        let Some(cid) = ipfs_cid::from_key_text(name) else {
-            core.unhold(body.len());
+        // The name's CID beside the record, for its job, and room for what
+        // the job's result holds: the record's value and validity, each a
+        // part of it. Nothing else is out: room that doesn't fit never
+        // will.
+        let cid = match charged_cid(core, name, ipfs_cid::from_key_text) {
+            Ok(Some(cid)) => cid,
+            Ok(None) => {
+                body.release(core);
+                return self.end(core, Failure::Unverifiable);
+            }
+            Err(f) => {
+                body.release(core);
+                return self.end(core, f);
+            }
+        };
+        let Some(room) = Charged::room(core, body.len()) else {
+            cid.release(core);
+            body.release(core);
+            return self.end(core, Failure::Memory);
+        };
+        if let Stage::Record { result, .. } = &mut self.stage
+            && let Some(old) = result.replace(room)
+        {
+            old.release(core);
+        }
+        let now = self.asked.now;
+        let work = cid
+            .join(body)
+            .map(|(name, record)| Work::Record { name, record, now });
+        core.hash_charged(Tag::Record, work);
+    }
+
+    /// The record's verdict: its value waits for the partition's floor,
+    /// in the room held for it, and its name goes to main with the floor's
+    /// question.
+    fn record_hashed(
+        &mut self,
+        core: &mut Core,
+        result: Result<fc_ipfs::ipns::Record, BlockRefusal>,
+        name: Bytes,
+        record: Bytes,
+    ) {
+        let room = match &mut self.stage {
+            Stage::Record { result, .. } => result.take(),
+            _ => None,
+        };
+        let Stage::Record { hop, .. } = self.stage else {
+            name.release(core);
+            record.release(core);
+            if let Some(room) = room {
+                room.release(core);
+            }
+            return;
+        };
+        let (value, sequence, until) = match result {
+            Ok(r) => {
+                let fc_ipfs::ipns::Record {
+                    value,
+                    sequence,
+                    validity,
+                    ..
+                } = r;
+                let until = fc_ipfs::rfc3339::parse(&validity);
+                drop(validity);
+                (value, sequence, until)
+            }
+            Err(e) => {
+                name.release(core);
+                record.release(core);
+                if let Some(room) = room {
+                    room.release(core);
+                }
+                return self.end(core, refusal(e));
+            }
+        };
+        record.release(core);
+        let value = match room {
+            Some(room) => room.remake(core, |()| value),
+            None => Charged::measured(core, value),
+        };
+        let Some((secs, nanos)) = until else {
+            value.release(core);
+            name.release(core);
             return self.end(core, Failure::Unverifiable);
         };
-        // The name's CID beside the record, for its job. Nothing else is
-        // out: room that doesn't fit never will.
-        if !core.fits(cid.len()) {
-            core.unhold(body.len());
-            return self.end(core, Failure::Memory);
+        // Held to the partition's floor before its value is followed (0009,
+        // IPNS and DNSLink).
+        let valid_until = secs.saturating_add(i64::from(nanos > 0));
+        if let Stage::Record { name, result, .. } =
+            std::mem::replace(&mut self.stage, Stage::Floor { hop, value })
+        {
+            name.release(core);
+            if let Some(r) = result {
+                r.release(core);
+            }
         }
-        core.hold(cid.len());
-        core.hash(
-            Tag::Record,
-            Work::Record {
-                name: cid,
-                record: body,
-                now: self.asked.now,
-            },
-        );
+        name.hand_over(core, |core, name| {
+            core.ask_floor(name, sequence, valid_until);
+        });
     }
 }
 
+/// The machine's inputs, each value under the charge the machine took for
+/// it as it came. Each ends with the walk's answer, if it has one, given
+/// to the core ([`Walk::conclude`]).
 impl super::Events<Tag> for Walk {
+    fn audit(&self, core: &mut Core) {
+        core.audit_charged();
+    }
+
     fn whole(
         &mut self,
         core: &mut Core,
@@ -2207,10 +2783,13 @@ impl super::Events<Tag> for Walk {
         _headers: &[(String, String)],
         body: Vec<u8>,
     ) {
+        let n = body.len();
+        let body = Charged::arrived(core, body, n);
         match tag {
             Tag::Record => self.whole_record(core, status, body),
-            _ => core.unhold(body.len()),
+            _ => body.release(core),
         }
+        self.conclude(core);
     }
 
     fn stream_head(
@@ -2223,33 +2802,33 @@ impl super::Events<Tag> for Walk {
     ) {
         match tag {
             Tag::Car => {
-                let Some(c) = self.car.as_mut() else {
-                    return;
-                };
-                c.headed = true;
-                let typed = header(headers, "content-type").is_some_and(car_type_ok);
-                if status == 200 && typed {
-                    return;
+                if let Some(c) = self.car.as_mut() {
+                    c.headed = true;
+                    let typed = header(headers, "content-type").is_some_and(car_type_ok);
+                    if status == 200 && typed {
+                    } else if status == 200 {
+                        // Another type or parameters (`dups=n` among them):
+                        // not read; the walk's blocks come raw.
+                        self.close_car(core);
+                        self.raw_only = true;
+                        self.pump(core);
+                    } else {
+                        // Any other status is the gateway's final answer.
+                        self.end(core, Failure::Status(status));
+                    }
                 }
-                if status == 200 {
-                    // Another type or parameters (`dups=n` among them):
-                    // not read; the walk's blocks come raw.
-                    self.close_car(core);
-                    self.raw_only = true;
-                    return self.pump(core);
-                }
-                // Any other status is the gateway's final answer.
-                self.end(core, Failure::Status(status));
             }
             Tag::Raw(seq) if status != 200 => {
                 if let Some(r) = self.raw.remove(&seq) {
-                    core.unhold(r.held());
-                    core.cancel_piece(r.id);
+                    let id = r.id;
+                    r.release(core);
+                    core.cancel_piece(id);
                 }
                 self.end(core, Failure::Status(status));
             }
             _ => {}
         }
+        self.conclude(core);
     }
 
     fn stream_data(&mut self, core: &mut Core, tag: Tag, _id: PieceId, bytes: Vec<u8>) {
@@ -2258,6 +2837,7 @@ impl super::Events<Tag> for Walk {
             Tag::Raw(seq) => self.raw_data(core, seq, bytes),
             _ => drop(bytes),
         }
+        self.conclude(core);
     }
 
     fn floor(&mut self, core: &mut Core, check: crate::store::FloorCheck) -> bool {
@@ -2276,12 +2856,15 @@ impl super::Events<Tag> for Walk {
             }
             crate::store::FloorCheck::Accepted => self.record_value(core, &value, hop),
         }
+        value.release(core);
+        self.conclude(core);
         true
     }
 
     fn room(&mut self, core: &mut Core) {
         self.read_car(core);
         self.pump(core);
+        self.conclude(core);
     }
 
     fn stream_end(&mut self, core: &mut Core, tag: Tag, _id: PieceId) {
@@ -2290,93 +2873,108 @@ impl super::Events<Tag> for Walk {
             Tag::Raw(seq) => self.raw_end(core, seq),
             _ => {}
         }
+        self.conclude(core);
     }
 
     fn failed(&mut self, core: &mut Core, tag: Tag, failure: PieceFailure) {
         if let Tag::Raw(seq) = tag {
             if let Some(r) = self.raw.remove(&seq) {
-                let n = r.held();
-                drop(r);
-                core.unhold(n);
+                r.release(core);
             }
             core.window_done();
         }
-        if tag == Tag::Car {
-            let Some(c) = self.car.as_mut() else {
+        match (tag, self.car.as_mut()) {
+            (Tag::Car, None) => {
                 core.window_done();
-                return self.end(core, Failure::Piece(failure));
-            };
-            // The sections it sent before failing are still used, and what
-            // it stashed is still read, in the window kept for it.
-            c.open = false;
-            c.ended = true;
-            c.broken = Some(Failure::Piece(failure));
-            c.stash.keep(core);
-            return self.car_settled(core);
+                self.end(core, Failure::Piece(failure));
+            }
+            (Tag::Car, Some(c)) => {
+                // The sections it sent before failing are still used, and
+                // what it stashed is still read, in the window kept for it.
+                c.open = false;
+                c.ended = true;
+                c.broken = Some(Failure::Piece(failure));
+                c.stash.keep(core);
+                self.car_settled(core);
+            }
+            _ => self.end(core, Failure::Piece(failure)),
         }
-        self.end(core, Failure::Piece(failure));
+        self.conclude(core);
     }
 
     fn hashed(&mut self, core: &mut Core, tag: Tag, verdict: Verdict, work: Work) {
         match (tag, verdict, work) {
             (Tag::Record, Verdict::Record(result), Work::Record { name, record, .. }) => {
-                core.unhold(name.len() + record.len());
-                let Stage::Record { hop, .. } = self.stage else {
-                    return;
-                };
-                match result {
-                    // Held to the partition's floor before its value is
-                    // followed (0009, IPNS and DNSLink).
-                    Ok(r) => {
-                        let Some((secs, nanos)) = fc_ipfs::rfc3339::parse(&r.validity) else {
-                            return self.end(core, Failure::Unverifiable);
-                        };
-                        let valid_until = secs.saturating_add(i64::from(nanos > 0));
-                        self.stage = Stage::Floor {
-                            hop,
-                            value: r.value,
-                        };
-                        core.ask_floor(name, r.sequence, valid_until);
-                    }
-                    Err(e) => self.end(core, refusal(e)),
-                }
+                let (n, m) = (name.len(), record.len());
+                let name = Charged::arrived(core, name, n);
+                let record = Charged::arrived(core, record, m);
+                self.record_hashed(core, result, name, record);
             }
             (Tag::Section(n), Verdict::Block(result), Work::Block { cid, block }) => {
-                let Some(c) = self.car.as_mut() else {
-                    // The CAR gave way: the section's room, and its job's
-                    // structures' cost, go to the raw blocks.
-                    let n = cid.len() + block.len() + SECTION_COST;
-                    drop((cid, block));
-                    core.unhold(n);
-                    return self.pump(core);
+                let (c, b) = (cid.len(), block.len());
+                let cid = Charged::arrived(core, cid, c);
+                let block = Charged::arrived(core, block, b);
+                let cost = self.sections.split(SECTION_COST);
+                let judged = Judged {
+                    cid,
+                    block,
+                    cost,
+                    verdict: result,
                 };
-                c.verdicts.insert(n, (cid, block, result));
-                self.pump(core);
-                if self.car.is_some() {
-                    self.car_settled(core);
+                match self.car.as_mut() {
+                    // The CAR gave way: the section's room, and its job's
+                    // structures' room, go to the raw blocks.
+                    None => {
+                        judged.release(core);
+                        self.pump(core);
+                    }
+                    Some(c) => {
+                        c.verdicts.insert(n, judged);
+                        self.pump(core);
+                        if self.car.is_some() {
+                            self.car_settled(core);
+                        }
+                    }
                 }
             }
             (Tag::Raw(seq), Verdict::Block(result), Work::Block { cid, block }) => {
-                core.unhold(cid.len());
-                let spare = self.raw.remove(&seq).map_or(0, |r| r.room);
-                let n = block.len() + spare;
-                if let Err(r) = result {
-                    drop(block);
-                    core.unhold(n);
-                    return self.end(core, refusal(r));
-                }
-                if self.needs.iter().any(|n| n.seq == seq) {
-                    self.arrived.insert(seq, block);
-                    if spare > 0 {
-                        self.spares.insert(seq, spare);
+                let (c, b) = (cid.len(), block.len());
+                Charged::arrived(core, cid, c).release(core);
+                let block = Charged::arrived(core, block, b);
+                // The block's buffer whole again: its bytes and what it has
+                // past them.
+                let spare = match self.raw.remove(&seq) {
+                    Some(RawPiece {
+                        state: Raw::Hashing { spare },
+                        ..
+                    }) => spare,
+                    Some(r) => {
+                        r.release(core);
+                        Charged::new(core, (), 0)
                     }
-                } else {
-                    drop(block);
-                    core.unhold(n);
+                    None => Charged::new(core, (), 0),
+                };
+                let block = block.join(spare).remake(core, |(block, ())| block);
+                match result {
+                    Err(r) => {
+                        block.release(core);
+                        self.end(core, refusal(r));
+                    }
+                    Ok(()) => {
+                        if self.needs.iter().any(|n| n.seq == seq) {
+                            self.arrived.insert(seq, block);
+                        } else {
+                            block.release(core);
+                        }
+                        self.pump(core);
+                    }
                 }
-                self.pump(core);
             }
-            (_, _, work) => core.unhold(work.size()),
+            (_, _, work) => {
+                let n = work.size();
+                Charged::arrived(core, work, n).release(core);
+            }
         }
+        self.conclude(core);
     }
 }

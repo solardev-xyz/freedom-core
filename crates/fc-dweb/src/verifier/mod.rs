@@ -23,7 +23,9 @@
 //!   2 MiB for Swarm, 8 MiB for IPFS. Everything it holds counts against
 //!   its budget ([`budget`]), the grant less a fixed allowance for the few
 //!   bounded allocations the count doesn't follow ([`SWARM_ALLOWANCE`],
-//!   [`IPFS_ALLOWANCE`]), and is reserved before it is allocated. A walk
+//!   [`IPFS_ALLOWANCE`], the same), and is reserved before it is allocated:
+//!   each walk holds its memory only as values under their charges
+//!   ([`charged`]). A walk
 //!   that can't fit and has no other way on ends with the budget's own text
 //!   ([`MEMORY`]). A streamed piece's 128 KiB window is reserved when the
 //!   piece is asked for, held whole while the piece is open, and is the
@@ -72,12 +74,12 @@ pub const IPFS_GRANT: usize = 8 << 20;
 /// manifest inside the limit needs 2,002,470 bytes, so it can be at most
 /// about 94 KiB.
 pub const SWARM_ALLOWANCE: usize = 64 << 10;
-/// What an IPFS request allocates beside what its budget counts: Swarm's
-/// allowance, and the values the IPFS walk doesn't charge yet (its error
-/// page, the head's headers, the ETag and type strings, and an IPNS
-/// record's value while it waits for the floor, at most
-/// `fc_ipfs::ipns::MAX_RECORD`), until its walk is charged as Swarm's is.
-pub const IPFS_ALLOWANCE: usize = 128 << 10;
+/// What an IPFS request allocates beside what its budget counts: the same
+/// as a Swarm request, as its walk charges every value it keeps as the
+/// Swarm walk does (its pages, heads, tags and types, and an IPNS record's
+/// value while it waits for the floor among them). Measured in the same
+/// tests, which fail past it.
+pub const IPFS_ALLOWANCE: usize = SWARM_ALLOWANCE;
 /// A Swarm request's budget: its grant less its allowance.
 pub const SWARM_BUDGET: usize = SWARM_GRANT - SWARM_ALLOWANCE;
 /// An IPFS request's budget: its grant less its allowance.
@@ -718,8 +720,8 @@ impl<T: Copy> Core<T> {
         self.released();
     }
 
-    /// After an input, for a walk whose memory is all [`Charged`] (the
-    /// Swarm walk's): what it holds is what its live values are charged
+    /// After an input (each walk's memory is all [`Charged`]): what the
+    /// walk holds is what its live values are charged
     /// ([`charged::Held::audit`]).
     pub(crate) fn audit_charged(&mut self) {
         self.walk_held.audit();
@@ -831,13 +833,7 @@ impl<T: Copy> Core<T> {
         });
     }
 
-    pub(crate) fn hash(&mut self, tag: T, work: jobs::Work) {
-        let size = work.size();
-        self.queue_job(tag, work);
-        self.unhold(size);
-    }
-
-    /// [`Core::hash`] for charged work: the job has it, counted as its
+    /// Work for the hashing pool, charged: the job has it, counted as its
     /// size, before the walk's charge goes.
     pub(crate) fn hash_charged(&mut self, tag: T, work: Charged<jobs::Work>) {
         work.hand_over(self, |core, work| core.queue_job(tag, work));
@@ -865,12 +861,7 @@ impl<T: Copy> Core<T> {
     }
 
     /// Sends the head. For a HEAD, or a GET with no body, nothing follows.
-    pub(crate) fn head(
-        &mut self,
-        status: u16,
-        headers: Vec<(String, String)>,
-        content: ContentTrust,
-    ) {
+    fn head(&mut self, status: u16, headers: Vec<(String, String)>, content: ContentTrust) {
         if self.phase != Phase::Walking {
             return;
         }
@@ -888,17 +879,9 @@ impl<T: Copy> Core<T> {
         }
     }
 
-    /// Verified bytes for the body, from the walk's holding; `from` is the
-    /// streamed piece they came from.
-    pub(crate) fn body(&mut self, bytes: Vec<u8>, from: Option<PieceId>) {
-        let n = bytes.len();
-        self.enqueue(bytes, from);
-        self.unhold(n);
-        self.pump();
-    }
-
-    /// [`Core::body`] for charged bytes: the queue has them, shrunk to
-    /// their length, which it counts, before the walk's charge goes.
+    /// Verified bytes for the body, charged; `from` is the streamed piece
+    /// they came from. The queue has them, shrunk to their length, which
+    /// it counts, before the walk's charge goes.
     pub(crate) fn body_charged(&mut self, bytes: Charged<Vec<u8>>, from: Option<PieceId>) {
         bytes.hand_over(self, |core, mut bytes| {
             bytes.shrink_to_fit();
@@ -1180,9 +1163,9 @@ impl<T: Copy> Core<T> {
     }
 }
 
-/// The walk's raw hold and release, by count. The machine and the IPFS
-/// walk use them; the Swarm walk doesn't import them, and holds its memory
-/// only as [`Charged`] values. With the probe, a release that leaves a live
+/// The walk's raw hold and release, by count. The machine uses them, for
+/// what it takes in for the walk; neither walk imports them, and each holds
+/// its memory only as [`Charged`] values. With the probe, a release that leaves a live
 /// `Charged` value uncovered is a fault at that release
 /// ([`charged::Held::take`]).
 pub(crate) trait Holding {
@@ -1655,7 +1638,7 @@ impl Verifier {
     /// the `memory-probe` feature, memory it still had once its charge had
     /// gone counts too, at every release and as its holding goes at the
     /// end, and so does any difference, after each input, between what the
-    /// Swarm walk holds and what its live values are charged.
+    /// walk holds and what its live values are charged.
     pub fn over_released(&self) -> usize {
         match &self.inner {
             Inner::Swarm(m) => m.core.walk_held.faults(),

@@ -21,10 +21,9 @@
 //! the new holder has the value before the walk's charge goes.
 //!
 //! The walk's holding itself is [`Held`], whose count only this module
-//! writes. The raw hold and release ([`super::Holding`]) are the machine's
-//! and the IPFS walk's; the Swarm walk doesn't import them, and with the
-//! probe any release that leaves a live value uncovered is caught at that
-//! release.
+//! writes. The raw hold and release ([`super::Holding`]) are the
+//! machine's; neither walk imports them, and with the probe any release
+//! that leaves a live value uncovered is caught at that release.
 //!
 //! What the type can't follow is a value a closure takes out of its
 //! `Charged` and keeps elsewhere, or memory never charged at all: the
@@ -36,12 +35,15 @@
 //! With the `memory-probe` feature, a ledger beside the count adds up what
 //! the live values are charged. Every release checks that the walk still
 //! holds that much, a value measured past its charge counts as memory past
-//! the count, and each input ends with the Swarm walk's holding equal to the
+//! the count, and each input ends with the walk's holding equal to the
 //! ledger ([`super::Verifier::over_released`]).
+
+use std::collections::VecDeque;
 
 use fc_swarm::manifest::{self, Lookup};
 
 use super::ant::Entry;
+use super::ipfs::{self, Hamt, Need};
 use super::{Core, Holding};
 
 /// A value the walk holds and the bytes charged for it.
@@ -93,6 +95,14 @@ impl<T> Charged<T> {
     /// The value, to change in place without growing past its charge.
     pub(crate) fn get_mut(&mut self) -> &mut T {
         &mut self.value
+    }
+
+    /// `room` joins the value's charge, for what the value is to grow by
+    /// in place ([`Charged::get_mut`], [`Charged::change`]).
+    pub(crate) fn absorb(&mut self, room: Charged<()>) {
+        let Charged { cost, tally, .. } = room;
+        self.cost += cost;
+        self.tally.absorb(tally);
     }
 
     /// The value goes, then its charge.
@@ -200,6 +210,28 @@ impl<T: Measured> Charged<T> {
         let cost = value.held();
         Self::new(core, value, cost)
     }
+
+    /// A value that holds nothing yet (an empty buffer, path or queue),
+    /// charged nothing: what it is to hold comes with room joined to it
+    /// ([`Charged::absorb`]).
+    pub(crate) fn nothing<X>(core: &Core<X>) -> Self
+    where
+        T: Default,
+    {
+        let value = T::default();
+        debug_assert_eq!(value.held(), 0);
+        Self::arrived(core, value, 0)
+    }
+
+    /// The value changed in place by `f`, then charged what it holds as
+    /// this module measures it, as [`Charged::remake`] does: what it gave
+    /// back is released after it went, and what it grew by past its charge
+    /// is memory past the count.
+    pub(crate) fn change<X: Copy>(&mut self, core: &mut Core<X>, f: impl FnOnce(&mut T)) {
+        f(&mut self.value);
+        let cost = self.value.held();
+        self.set_cost(core, cost);
+    }
 }
 
 impl Charged<()> {
@@ -233,6 +265,21 @@ impl Charged<Vec<u8>> {
 
     pub(crate) fn bytes_mut(&mut self) -> &mut [u8] {
         &mut self.value
+    }
+
+    /// The charge past the buffer's bytes, as a room of its own: what a
+    /// buffer longer than its block holds past it, which stays with the
+    /// walk while the bytes go to a holder that counts their length only
+    /// (a hash job). The two together still cover the buffer.
+    pub(crate) fn spare(&mut self) -> Charged<()> {
+        let n = self.cost.saturating_sub(self.value.len());
+        self.cost -= n;
+        let tally = self.tally.split(n);
+        Charged {
+            value: (),
+            cost: n,
+            tally,
+        }
     }
 
     /// Only bytes `from..to` stay (those it has), cut in place and the
@@ -318,6 +365,64 @@ impl Measured for Entry {
     }
 }
 
+impl sealed::Sealed for String {}
+
+impl Measured for String {
+    /// Its whole buffer, as a byte buffer's.
+    fn held(&self) -> usize {
+        self.capacity()
+    }
+}
+
+impl sealed::Sealed for Vec<String> {}
+
+impl Measured for Vec<String> {
+    /// Its strings and its slots.
+    fn held(&self) -> usize {
+        self.iter().map(String::capacity).sum::<usize>()
+            + self.capacity() * std::mem::size_of::<String>()
+    }
+}
+
+impl sealed::Sealed for VecDeque<Need> {}
+
+impl Measured for VecDeque<Need> {
+    /// Its slots: the needs' CIDs are charged together beside it.
+    fn held(&self) -> usize {
+        self.capacity() * std::mem::size_of::<Need>()
+    }
+}
+
+impl sealed::Sealed for Hamt {}
+
+impl Measured for Hamt {
+    /// Its root's CID, and each shard's CID and block with its map entry.
+    fn held(&self) -> usize {
+        self.root.capacity()
+            + self
+                .shards
+                .iter()
+                .map(|(cid, block)| cid.capacity() + block.capacity() + ipfs::MAP_ENTRY)
+                .sum::<usize>()
+    }
+}
+
+impl<T: Measured> sealed::Sealed for Option<T> {}
+
+impl<T: Measured> Measured for Option<T> {
+    fn held(&self) -> usize {
+        self.as_ref().map_or(0, T::held)
+    }
+}
+
+impl<A: Measured, B: Measured> sealed::Sealed for (A, B) {}
+
+impl<A: Measured, B: Measured> Measured for (A, B) {
+    fn held(&self) -> usize {
+        self.0.held() + self.1.held()
+    }
+}
+
 impl<A: Measured, E: Copy> sealed::Sealed for Result<A, E> {}
 
 impl<A: Measured, E: Copy> Measured for Result<A, E> {
@@ -375,10 +480,9 @@ impl Held {
         self.check_live();
     }
 
-    /// After an input, for a walk whose memory is all [`Charged`] (the
-    /// Swarm walk's): what it holds is what its live values are charged,
-    /// no less (memory past the count) and no more (a charge whose value
-    /// went without it).
+    /// After an input (each walk's memory is all [`Charged`]): what it
+    /// holds is what its live values are charged, no less (memory past the
+    /// count) and no more (a charge whose value went without it).
     pub(super) fn audit(&mut self) {
         #[cfg(feature = "memory-probe")]
         {
@@ -457,9 +561,13 @@ mod ledger {
             self.n = n;
         }
 
-        pub(super) fn join(mut self, mut other: Tally) -> Tally {
-            self.n += std::mem::take(&mut other.n);
+        pub(super) fn join(mut self, other: Tally) -> Tally {
+            self.absorb(other);
             self
+        }
+
+        pub(super) fn absorb(&mut self, mut other: Tally) {
+            self.n += std::mem::take(&mut other.n);
         }
 
         pub(super) fn split(&mut self, n: usize) -> Tally {
@@ -500,6 +608,8 @@ mod none {
         pub(super) fn join(self, _other: Tally) -> Tally {
             self
         }
+
+        pub(super) fn absorb(&mut self, _other: Tally) {}
 
         pub(super) fn split(&mut self, _n: usize) -> Tally {
             Self

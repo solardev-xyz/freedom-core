@@ -18,12 +18,13 @@
 //! a small manifest. Every release must match a hold
 //! ([`Verifier::over_released`]).
 //!
-//! With the `memory-probe` feature, the Swarm walk's requests read the
-//! allocator at every release of the walk's memory, inside each input: what
-//! is live then must be within the machine's reservation and the same
-//! allowance, so a buffer whose charge goes before it does is caught where
-//! it happens, not only between inputs. (The IPFS walk doesn't hold to
-//! that yet: its requests keep the cap alone.)
+//! With the `memory-probe` feature, every request reads the allocator at
+//! every release of its walk's memory, inside each input: what is live
+//! then must be within the machine's reservation and the same allowance,
+//! so a buffer whose charge goes before it does is caught where it
+//! happens, not only between inputs. Each input also ends with the walk's
+//! holding equal to what its live values are charged
+//! ([`Verifier::over_released`]).
 //!
 //! `allocations_stay_within_the_grant` holds requests to their grant
 //! (0009, What a grant covers): between inputs, within each input (the
@@ -148,10 +149,10 @@ fn at_release(reserved: usize) {
 /// What the driver and the machine's fixed structures may take beside the
 /// request's budget.
 const SLACK: usize = 256 << 10;
-/// What the Swarm walk's machine and its driver allocate beside what the
-/// machine reserves: its own structures, the outputs it queues and the
-/// driver's queues. Measured on a manifest of small nodes, and held to for
-/// the large ones.
+/// What a walk's machine and its driver allocate beside what the machine
+/// reserves: its own structures, the outputs it queues and the driver's
+/// queues. Measured on a manifest of small nodes, and held to for the large
+/// ones and for every IPFS request.
 const MACHINE: usize = 48 << 10;
 const CAR_TYPE: &str = "application/vnd.ipld.car; version=1; order=dfs; dups=y";
 const RAW_TYPE: &str = "application/vnd.ipld.raw";
@@ -344,8 +345,12 @@ fn drive_paged(
             }
         }
         between(v);
+        // A job runs as the pool runs it, then its result is the machine's
+        // input: the pool's own work (an IPNS record's signed data, copied
+        // for its check) is the pool's, not the request's.
         if !slow_pool && let Some(job) = next_job(&mut jobs) {
-            input(v, |v| v.hashed(job.run())).unwrap();
+            let result = job.run();
+            input(v, |v| v.hashed(result)).unwrap();
             continue;
         }
         if let Some(r) = asked.pop_front() {
@@ -353,6 +358,10 @@ fn drive_paged(
                 .get(&r.path)
                 .unwrap_or_else(|| panic!("{}", r.path))
                 .clone();
+            if r.path.ends_with("format=ipns-record") {
+                input(v, |v| v.piece_whole(r.id, 200, vec![], answer.to_vec())).unwrap();
+                continue;
+            }
             let kind = if r.path.ends_with("format=raw") {
                 RAW_TYPE
             } else {
@@ -399,7 +408,8 @@ fn drive_paged(
         }
         if !moved {
             if let Some(job) = next_job(&mut jobs) {
-                input(v, |v| v.hashed(job.run())).unwrap();
+                let result = job.run();
+                input(v, |v| v.hashed(result)).unwrap();
                 continue;
             }
             if !taken {
@@ -475,9 +485,7 @@ fn capped_with<R>(
     AT_RELEASE.store(0, Ordering::Relaxed);
     AT_RELEASE_RESERVED.store(0, Ordering::Relaxed);
     #[cfg(feature = "memory-probe")]
-    if p.node == Node::Ant {
-        fc_dweb::verifier::probe::at_release(Some(at_release));
-    }
+    fc_dweb::verifier::probe::at_release(Some(at_release));
     let (got, reserved) = {
         let mut v = Verifier::new(1, p, Method::Get, None, false, options).unwrap();
         let got = drive(&mut v);
@@ -1271,10 +1279,11 @@ fn within_allowance(case: &str, m: Measured, allowance: usize) {
         let _ = writeln!(
             std::io::stderr(),
             "{case}: allocated {} at peak, reserved {}, past it between inputs {between}, \
-             within one {}, credits waiting at once {}",
+             within one {}, at a release {}, credits waiting at once {}",
             m.allocated,
             m.reserved,
             IN_INPUT.load(Ordering::Relaxed),
+            AT_RELEASE.load(Ordering::Relaxed),
             CREDITS_WAITING.load(Ordering::Relaxed)
         );
     }
@@ -1531,4 +1540,180 @@ fn a_window_of_one_byte_frames_unpolled_stays_within_the_grant() {
     assert_eq!(CREDITS_WAITING.load(Ordering::Relaxed), 1, "{case}");
     within_allowance(case, m, SWARM_ALLOWANCE);
     assert!(m.allocated <= SWARM_GRANT, "{case}: {m:?}");
+}
+
+// ---------------------------------------------------------------------------
+// The IPFS walk's values, each charged.
+
+/// An Ed25519 IPNS name from a seed, and its signer.
+fn ipns_key(seed: u8) -> (ed25519_dalek::SigningKey, String) {
+    let key = ed25519_dalek::SigningKey::from_bytes(&[seed; 32]);
+    let mut name = vec![0x01, 0x72, 0x00, 0x24, 0x08, 0x01, 0x12, 0x20];
+    name.extend_from_slice(key.verifying_key().as_bytes());
+    (key, text(&name))
+}
+
+fn cbor_head(major: u8, n: u64, out: &mut Vec<u8>) {
+    let m = major << 5;
+    if n < 24 {
+        out.push(m | n as u8);
+    } else if n <= 0xff {
+        out.extend_from_slice(&[m | 24, n as u8]);
+    } else if n <= 0xffff {
+        out.push(m | 25);
+        out.extend_from_slice(&(n as u16).to_be_bytes());
+    } else if n <= 0xffff_ffff {
+        out.push(m | 26);
+        out.extend_from_slice(&(n as u32).to_be_bytes());
+    } else {
+        out.push(m | 27);
+        out.extend_from_slice(&n.to_be_bytes());
+    }
+}
+
+/// A V2-only record naming `value`, valid until 2099, its signed data in
+/// DAG-CBOR's canonical key order.
+fn ipns_record(key: &ed25519_dalek::SigningKey, value: &str) -> Vec<u8> {
+    use ed25519_dalek::Signer;
+    let mut data = Vec::new();
+    cbor_head(5, 5, &mut data);
+    let field = |k: &str, data: &mut Vec<u8>| {
+        cbor_head(3, k.len() as u64, data);
+        data.extend_from_slice(k.as_bytes());
+    };
+    field("TTL", &mut data);
+    cbor_head(0, 60_000_000_000, &mut data);
+    field("Value", &mut data);
+    cbor_head(2, value.len() as u64, &mut data);
+    data.extend_from_slice(value.as_bytes());
+    field("Sequence", &mut data);
+    cbor_head(0, 1, &mut data);
+    field("Validity", &mut data);
+    let eol = b"2099-01-01T00:00:00Z";
+    cbor_head(2, eol.len() as u64, &mut data);
+    data.extend_from_slice(eol);
+    field("ValidityType", &mut data);
+    cbor_head(0, 0, &mut data);
+    let mut message = b"ipns-signature:".to_vec();
+    message.extend_from_slice(&data);
+    let mut out = vec![0x42, 64];
+    out.extend_from_slice(&key.sign(&message).to_bytes());
+    out.push(0x4a);
+    varint(data.len() as u64, &mut out);
+    out.extend_from_slice(&data);
+    out
+}
+
+/// A name whose record names a raw leaf with `pad` bytes of path below
+/// it: the record's value waits for the floor, then the path meets a file
+/// (`GatewayCore`'s 502).
+fn ipns_value_of(pad: usize) -> (Verify, World) {
+    let leaf = b"a raw leaf".to_vec();
+    let root = sha256_cid(0x55, &leaf);
+    let (key, name) = ipns_key(7);
+    let value = format!("/ipfs/{}/{}", text(&root), "s".repeat(pad));
+    let mut world = HashMap::new();
+    world.insert(format!("/ipfs/{}?format=raw", text(&root)), Arc::new(leaf));
+    world.insert(
+        format!("/ipns/{name}?format=ipns-record"),
+        Arc::new(ipns_record(&key, &value)),
+    );
+    let mut p = plan(&root);
+    p.root = Root::Ipns(name);
+    (p, world)
+}
+
+/// A directory with one entry named `pad` bytes long: a 2,000-byte raw
+/// leaf, asked for by its name, whose type is sniffed. Its tag and head
+/// carry the path.
+fn file_named(pad: usize) -> (Verify, World) {
+    let leaf: Vec<u8> = (0..2_000).map(|i| (i % 251) as u8).collect();
+    let leaf_cid = sha256_cid(0x55, &leaf);
+    let name = format!("f{}", "a".repeat(pad));
+    let mut data = Vec::new();
+    field_varint(1, 1, &mut data);
+    let dir = pb_node(&[(leaf_cid.clone(), name.clone(), 2_000)], &data);
+    let root = sha256_cid(0x70, &dir);
+    let mut world = HashMap::new();
+    world.insert(format!("/ipfs/{}?format=raw", text(&root)), Arc::new(dir));
+    world.insert(
+        format!("/ipfs/{}?format=raw", text(&leaf_cid)),
+        Arc::new(leaf),
+    );
+    let mut p = plan(&root);
+    p.path = format!("/{name}");
+    (p, world)
+}
+
+/// A directory with one entry named `pad` bytes long, a directory of two
+/// entries, listed: its title and its links' base carry the path.
+fn listing_named(pad: usize) -> (Verify, World) {
+    let (sub, block) = names_block(2);
+    let name = format!("d{}", "a".repeat(pad));
+    let mut data = Vec::new();
+    field_varint(1, 1, &mut data);
+    let dir = pb_node(&[(sub.clone(), name.clone(), 0)], &data);
+    let root = sha256_cid(0x70, &dir);
+    let mut world = HashMap::new();
+    world.insert(format!("/ipfs/{}?format=raw", text(&root)), Arc::new(dir));
+    world.insert(format!("/ipfs/{}?format=raw", text(&sub)), Arc::new(block));
+    let mut p = plan(&root);
+    p.path = format!("/{name}/");
+    (p, world)
+}
+
+/// The most a request allocated past its reservation: between inputs,
+/// within one, and at any release of its walk's memory.
+fn past_the_reservation() -> [usize; 3] {
+    [&BETWEEN, &IN_INPUT, &AT_RELEASE].map(|n| n.load(Ordering::Relaxed))
+}
+
+/// A probe for a value the IPFS walk keeps without its charge: each request
+/// runs with a value of a few bytes and again with one 8,000 bytes longer,
+/// and a value the walk kept uncharged would show as that much more memory
+/// past the reservation, at a release of the walk's memory (the record's
+/// value is live at every release while it waits for the floor and is
+/// followed) or between inputs. Charged, the long run passes it by no more
+/// than the short one, within 2 KiB on each measure: the record's value; a
+/// file's path, tag, type and head; a listing's path, title and base.
+/// Before the walk was charged as the Swarm walk is, these were the IPFS
+/// part of the grant's allowance.
+#[test]
+fn an_uncharged_ipfs_value_shows_past_the_reservation() {
+    let _one = ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
+    let options = || Options {
+        budget: IPFS_BUDGET,
+        car: false,
+        ..Options::default()
+    };
+    type Case = (&'static str, fn(usize) -> (Verify, World), u16);
+    let cases: [Case; 3] = [
+        ("an IPNS record's value", ipns_value_of, 502),
+        ("a file at a long path", file_named, 200),
+        ("a listing at a long path", listing_named, 200),
+    ];
+    for (what, case, status) in cases {
+        let mut past = [[0; 3]; 2];
+        for (i, pad) in [8, 8_008].into_iter().enumerate() {
+            let label = format!("{what}, {pad} bytes");
+            let (p, world) = case(pad);
+            let (got, m) = capped_with(&label, &p, options(), |v| drive(v, &world, false));
+            assert_eq!(
+                (got.0, got.2.as_str()),
+                (Some(status), "end"),
+                "{label}: {got:?}"
+            );
+            past[i] = past_the_reservation();
+            within_allowance(&label, m, IPFS_ALLOWANCE);
+        }
+        for (long, short) in past[1].into_iter().zip(past[0]) {
+            assert!(
+                long <= short + (2 << 10),
+                "{what}: past the reservation (between inputs, within one, at a \
+                 release) {:?} with 8,000 bytes more, {:?} without",
+                past[1],
+                past[0]
+            );
+        }
+    }
 }
