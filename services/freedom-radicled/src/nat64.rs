@@ -4,7 +4,7 @@
 //! ([`dial::Nat64`]).
 //!
 //! It runs only while a lease is held: the node's start in `direct` mode
-//! (a later step) holds one for the node's life. Until a round settles,
+//! holds one for the node's life ([`crate::node`]). Until a round settles,
 //! the gate's state is pending, and IPv6 outside the fixed forms waits.
 
 use std::sync::Arc;
@@ -58,6 +58,10 @@ impl Discovery {
     }
 
     /// What `rad.stats` will report of it.
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "rad.stats reports it, a later step")
+    )]
     pub fn stats(&self) -> serde_json::Value {
         self.inner.stats()
     }

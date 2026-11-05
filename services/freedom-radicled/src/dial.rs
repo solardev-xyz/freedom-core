@@ -65,10 +65,6 @@ impl Nat64 {
     }
 
     /// Publishes `state`, discovery's latest.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "rad.start runs discovery, a later step")
-    )]
     pub fn publish(&self, state: Nat64State) {
         *self.0.write().unwrap_or_else(|p| p.into_inner()) = state;
     }

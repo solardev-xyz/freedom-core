@@ -15,9 +15,9 @@
 //! - **The key is held** as its 32-byte seed, in zeroizing memory, until the
 //!   node's start takes it: reconciliation signs with it first (0008: "The
 //!   key in the service: reconciliation signs with it"), each signer it
-//!   makes wiping itself on drop. A later step makes the
-//!   [`libradicle::HostKey`] from it for `Embedded::start_with_key`, and the
-//!   service keeps no copy after that.
+//!   makes wiping itself on drop. `rad.start` then moves it into the
+//!   [`libradicle::HostKey`] for `Embedded::start_with_key`
+//!   ([`Identity::take_key`]), and the service keeps no copy after that.
 //! - **Once per process,** within 30 s of `rad.hello`'s reply. Every failure
 //!   ends the process after its reply, a second `rad.identity` included.
 
@@ -78,6 +78,16 @@ impl NodeIdentity {
     #[cfg(test)]
     pub fn holds_key(&self) -> bool {
         self.seed.is_some()
+    }
+
+    /// The key for `Embedded::start_with_key`, once: `rad.start` takes it,
+    /// and the service keeps no copy after (0008, "The key in the service").
+    /// The seed is moved into the [`libradicle::HostKey`], which zeroes what
+    /// it copies from, and the seed's own buffer wipes as it drops here.
+    /// `None` once taken.
+    pub fn take_key(&mut self) -> Option<libradicle::HostKey> {
+        let mut seed = self.seed.take()?;
+        libradicle::HostKey::from_bytes(seed.as_mut_slice())
     }
 
     /// What signs for this identity before the node starts: reconciliation's
@@ -144,6 +154,15 @@ impl Identity {
     pub fn with<R>(&self, f: impl FnOnce(&NodeIdentity) -> R) -> Option<R> {
         match &*self.state() {
             State::Known(identity) => Some(f(identity)),
+            _ => None,
+        }
+    }
+
+    /// The node's key, for its start ([`NodeIdentity::take_key`]): `None`
+    /// before `rad.identity` has succeeded, or once taken.
+    pub fn take_key(&self) -> Option<libradicle::HostKey> {
+        match &mut *self.state() {
+            State::Known(identity) => identity.take_key(),
             _ => None,
         }
     }

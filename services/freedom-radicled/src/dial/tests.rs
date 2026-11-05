@@ -364,6 +364,7 @@ fn socks5_routing_on_an_isolated_node_reaches_no_proxy() {
             routing: Some(routing),
             seeding_policy: None,
             isolated: true,
+            repositories: None,
         },
         libradicle::HostKey::from_bytes(&mut seed).unwrap(),
     )
