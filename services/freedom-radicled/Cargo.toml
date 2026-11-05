@@ -34,24 +34,27 @@ fc-service = { path = "../../crates/fc-service" }
 # The sealed release of the node key (0008, "The sealed release"): the
 # service's X25519 key for one start, and opening what the core sealed to it.
 fc-seal = { path = "../../crates/fc-seal" }
-# libradicle at `integration/rust-core` (b7d62b9), built with `no-spawn`,
+# libradicle at `integration/rust-core` (2ac9f7f), built with `no-spawn`,
 # explicitly (0008, "Spawn and lock"): serving runs in process and `git gc`
 # is skipped. It carries the upstream changes 0008 lists for the service's
 # first steps: the routing, `isolated` and `control_socket` options, the
 # bounded reads and shutdown, the node's health, the host key
-# (`HostKey`, `start_with_key`), and heartwood at 6b2dc16f, whose
-# reconciliation driver `rad.reconcile` runs on. It also has the shipped
-# seeds for a main-network profile only, an isolated node with no proxy,
-# onion, I2P or external-address route, `isolate_git_config` (called first
-# thing in src/main.rs) and `Options::seeding_policy`. Pinned by commit until
+# (`HostKey`, `start_with_key`), and heartwood at 003fd9ca, whose
+# reconciliation driver `rad.reconcile` runs on, with its seed gate and its
+# host failures (`driver::Error::Host`). It also has the shipped seeds for a
+# main-network profile only, an isolated node with no proxy, onion, I2P or
+# external-address route, `isolate_git_config` (called first thing in
+# src/main.rs), `Options::seeding_policy`, and the host's repository gate
+# (`Options::repositories`), the online repair signed with the node's key
+# and `remove_quarantined` (libradicle item 9a). Pinned by commit until
 # those changes are released (deny.toml allows solardev-xyz).
 # src/build_info.rs reports the same commit.
-libradicle = { git = "https://github.com/solardev-xyz/libradicle", rev = "b7d62b951b313061fb9e4d5145193341e5ad7b15", features = ["no-spawn"] }
+libradicle = { git = "https://github.com/solardev-xyz/libradicle", rev = "2ac9f7fa1687f36d37f8a70f36333f70c65bed4d", features = ["no-spawn"] }
 # heartwood's `radicle`, at the commit libradicle pins, so that both resolve
 # to one package (build_info's test holds them to one commit): the node
 # identity's public forms (`did:key`, the node ID), and, from the next step,
 # the reconciliation driver. Already in libradicle's graph.
-radicle = { git = "https://github.com/solardev-xyz/heartwood", rev = "6b2dc16fa657bbcb03c34eaee922d354fb1fe66e" }
+radicle = { git = "https://github.com/solardev-xyz/heartwood", rev = "003fd9ca59d1269e4b81fb696bec3bdb4068fe67" }
 # The dial gate's address policy (0008, "The address policy": "one table and
 # one classifier serve both services"): 0007's target classification, its
 # table of refused blocks and the configured-target exemption, as
@@ -86,6 +89,10 @@ libc = "0.2"
 
 [dev-dependencies]
 tempfile = "3"
+# tests/start.rs reads the node's stored announcements from its database, as
+# heartwood writes them: SQLite at the version heartwood and libradicle use,
+# already in the graph.
+sqlite = "0.37"
 
 # tests/process.rs: the kernel's Landlock ABI, which the report must name
 # (design 0010, Tests: a silent downgrade fails).

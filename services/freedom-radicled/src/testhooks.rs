@@ -17,6 +17,32 @@
 //!   many threads the process has (`/proc/self/task`), and what each
 //!   descriptor above stderr is (its `/proc/self/fd` link: a test may log a
 //!   path). Linux only.
+//! - `FREEDOM_RADICLED_TEST_START_DEADLINE_MS` replaces `rad.start`'s 30 s.
+//! - `FREEDOM_RADICLED_TEST_SHUTDOWN_WITHIN_MS` replaces how long the
+//!   shutdown waits for the node to stop ([`crate::service`]'s 3 s).
+//! - `FREEDOM_RADICLED_TEST_STOP_NODE=1` asks the node to stop right after
+//!   `rad.start` has answered, behind the stop's back: the node thread ends
+//!   as one that failed would, and the node's watch, or the stop, finds it.
+//! - `FREEDOM_RADICLED_TEST_HOLD_DOWN=1` holds the node's watch once it has
+//!   published `Down`, before it claims exit 70: it logs `test hook: the
+//!   watch holds the node down` and never goes on, so only a stop that takes
+//!   the `Down` node can end the process with 70.
+//!
+//! **Hermetic by construction:** a build with the feature never reaches
+//! off this host, whatever a test asks of it.
+//! - **The node's dial gate** ([`dial_gate`]) holds the service's own gate
+//!   to loopback. An address off this host that the service's policy would
+//!   let the node dial, or take into its address book, ends the process at
+//!   once with a message naming it, before any socket: exit 101, as a
+//!   failed test ends. What the policy refuses stays refused. In `direct`
+//!   mode no name is resolved at all, so no DNS query leaves: a name is
+//!   refused before the system's resolver sees it. In `socks5` mode names
+//!   go to the proxy, which must be on loopback, as must its answers to be
+//!   let through.
+//! - **NAT64 discovery** ([`nat64_source`]) asks only the resolvers a test
+//!   names in `FREEDOM_RADICLED_TEST_NAT64_RESOLVERS` (comma-separated
+//!   socket addresses, each on loopback; anything else is a resolver that
+//!   can't be asked), and none by default.
 
 use std::time::Duration;
 
@@ -91,5 +117,164 @@ pub fn at_confinement_point() {
             "confinement point",
             serde_json::json!({ "threads": threads, "descriptors": descriptors }),
         );
+    }
+}
+
+/// How long `rad.start` may take.
+pub fn start_deadline(default: Duration) -> Duration {
+    #[cfg(feature = "testhooks")]
+    if let Some(ms) = millis("FREEDOM_RADICLED_TEST_START_DEADLINE_MS") {
+        return Duration::from_millis(ms);
+    }
+    default
+}
+
+/// How long the shutdown waits for the node to stop.
+pub fn shutdown_within(default: Duration) -> Duration {
+    #[cfg(feature = "testhooks")]
+    if let Some(ms) = millis("FREEDOM_RADICLED_TEST_SHUTDOWN_WITHIN_MS") {
+        return Duration::from_millis(ms);
+    }
+    default
+}
+
+/// Whether the node is to be asked to stop right after `rad.start` has
+/// answered.
+pub fn stop_node() -> bool {
+    #[cfg(feature = "testhooks")]
+    if std::env::var_os("FREEDOM_RADICLED_TEST_STOP_NODE").is_some() {
+        return true;
+    }
+    false
+}
+
+/// After the node's watch has published `Down`, before it claims the exit:
+/// holds it there for good, if asked.
+pub fn at_node_down() {
+    #[cfg(feature = "testhooks")]
+    if std::env::var_os("FREEDOM_RADICLED_TEST_HOLD_DOWN").is_some() {
+        fc_service::log::info(
+            "test hook: the watch holds the node down",
+            serde_json::json!({}),
+        );
+        loop {
+            std::thread::park();
+        }
+    }
+}
+
+/// NAT64 discovery's resolvers: the OS's (`None`), or, with the feature,
+/// only those `FREEDOM_RADICLED_TEST_NAT64_RESOLVERS` names, none by
+/// default.
+pub fn nat64_source() -> Option<crate::nat64::Source> {
+    #[cfg(feature = "testhooks")]
+    {
+        use fc_nat64::resolvers::Learned;
+        let list = std::env::var("FREEDOM_RADICLED_TEST_NAT64_RESOLVERS").unwrap_or_default();
+        let learned: Vec<Learned> = list
+            .split(',')
+            .map(str::trim)
+            .filter(|item| !item.is_empty())
+            .map(|item| match item.parse::<std::net::SocketAddr>() {
+                Ok(addr) if addr.ip().to_canonical().is_loopback() => Learned::Ask(addr),
+                _ => Learned::Unaskable(item.to_string()),
+            })
+            .collect();
+        Some(std::sync::Arc::new(move || learned.clone()))
+    }
+    #[cfg(not(feature = "testhooks"))]
+    {
+        None
+    }
+}
+
+/// The node's routing: with the feature, its gate held to loopback, and a
+/// proxy off this host ends the process (see the module's doc).
+pub fn routing(routing: libradicle::Routing) -> libradicle::Routing {
+    #[cfg(feature = "testhooks")]
+    {
+        let mut routing = routing;
+        let onion = match routing.onion {
+            radicle::node::config::AddressConfig::Proxy { address } => Some(address),
+            _ => None,
+        };
+        for proxy in routing.proxy.iter().chain(onion.iter()) {
+            if !proxy.ip().to_canonical().is_loopback() {
+                hermetic::off_host(format_args!("the proxy at {proxy}"));
+            }
+        }
+        routing.gate = std::sync::Arc::new(hermetic::LoopbackOnly {
+            inner: routing.gate,
+            names: routing.proxy.is_some(),
+        });
+        routing
+    }
+    #[cfg(not(feature = "testhooks"))]
+    routing
+}
+
+#[cfg(feature = "testhooks")]
+mod hermetic {
+    use std::io;
+    use std::net::SocketAddr;
+    use std::sync::Arc;
+
+    use freedom_ipfs_addr::{Target, classify_host};
+    use radicle::node::Address;
+    use radicle::node::dial::Gate;
+
+    /// The service's gate, held to loopback.
+    #[derive(Debug)]
+    pub struct LoopbackOnly {
+        pub inner: Arc<dyn Gate>,
+        /// Whether names may be resolved: through the proxy, in `socks5`
+        /// mode, and never through the system's resolver.
+        pub names: bool,
+    }
+
+    pub fn off_host(what: std::fmt::Arguments<'_>) -> ! {
+        use std::io::Write as _;
+        let _ = writeln!(
+            std::io::stderr(),
+            "the node tried to reach {what}, off this host: a build with the test hooks \
+             reaches loopback only (services/freedom-radicled/src/testhooks.rs)"
+        );
+        std::process::exit(101)
+    }
+
+    fn on_host(addr: &SocketAddr) -> bool {
+        addr.ip().to_canonical().is_loopback()
+    }
+
+    impl Gate for LoopbackOnly {
+        fn allows(&self, target: &Address, addr: &SocketAddr) -> bool {
+            let allowed = self.inner.allows(target, addr);
+            if allowed && !on_host(addr) {
+                off_host(format_args!("{target} at {addr}"));
+            }
+            allowed
+        }
+
+        fn resolve(&self, host: &str, port: u16) -> io::Result<Vec<SocketAddr>> {
+            if !self.names && matches!(classify_host(host), Ok(Target::Name(_))) {
+                return Err(io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    "the test hooks resolve no name through the system",
+                ));
+            }
+            self.inner.resolve(host, port)
+        }
+
+        fn resolve_timeout(&self) -> std::time::Duration {
+            self.inner.resolve_timeout()
+        }
+
+        fn proxy_resolves_names(&self) -> bool {
+            self.inner.proxy_resolves_names()
+        }
+
+        fn isolates_streams(&self) -> bool {
+            self.inner.isolates_streams()
+        }
     }
 }

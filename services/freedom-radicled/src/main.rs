@@ -32,11 +32,10 @@
 //!    watchdogs: the handshake, `rad.hello`, and what follows.
 //!
 //! **This build** answers `rad.hello`, `rad.identity` (0008, "The sealed
-//! release" and "Profiles without a vault") and `rad.reconcile` (0008,
-//! "Reconciliation"). The node itself and every read and write come with
-//! later steps; until then the process never reaches `RUNNING`, so every
-//! other method 0008 lists answers `stopped`, as 0008 says of a process
-//! before `RUNNING`.
+//! release" and "Profiles without a vault"), `rad.reconcile` (0008,
+//! "Reconciliation") and `rad.start`, which runs the node until the
+//! connection ends ([`node`]). Every read and write comes with later steps;
+//! until then every other method 0008 lists answers `stopped`.
 //!
 //! **No child processes:** libradicle is built with `no-spawn`, and the
 //! service starts none.
@@ -44,8 +43,9 @@
 //! **Exit codes** (0001's, and 0008's): 0 after `rad.shutdown`, stdin EOF,
 //! the parent gone, or a failed start step answered first; 64 for usage,
 //! including an environment main should have cleared; 70 for a panic
-//! outside a request, a repair unit's overrun (`unit_overrun`), or a
-//! service that can't start (libgit2's search paths, the OS's randomness,
+//! outside a request, a repair unit's overrun (`unit_overrun`), the node
+//! thread's end while the node should run (`node_down`), or a service that
+//! can't start (libgit2's search paths, the OS's randomness,
 //! or the unit watchdog's thread); 74 for storage; 75 when the gate is
 //! held; 76 for a protocol error, the handshake's deadline, `rad.identity`'s
 //! deadline or the writer stall; 77 when confinement refuses the process
@@ -55,22 +55,12 @@
 mod args;
 mod build_info;
 mod confine;
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "rad.start gives the node this routing, a later step"
-    )
-)]
 mod dial;
 mod env;
 mod identity;
 mod marker;
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "rad.start runs discovery, a later step")
-)]
 mod nat64;
+mod node;
 mod reconcile;
 mod service;
 mod testhooks;

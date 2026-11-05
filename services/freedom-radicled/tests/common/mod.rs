@@ -90,6 +90,8 @@ pub struct Radicled {
     /// Messages read while waiting for another.
     pending: VecDeque<Value>,
     stderr: Option<std::thread::JoinHandle<String>>,
+    /// stderr so far, as its reader has it.
+    log: std::sync::Arc<std::sync::Mutex<String>>,
     next_id: u64,
 }
 
@@ -131,7 +133,7 @@ impl Radicled {
         };
         let stdin = child.stdin.take();
         let mut stdout = child.stdout.take().unwrap();
-        let mut stderr = child.stderr.take().unwrap();
+        let stderr = child.stderr.take().unwrap();
         let (tx, frames) = mpsc::channel();
         std::thread::spawn(move || {
             loop {
@@ -156,17 +158,27 @@ impl Radicled {
                 }
             }
         });
-        let stderr = std::thread::spawn(move || {
-            let mut all = String::new();
-            let _ = stderr.read_to_string(&mut all);
-            all
-        });
+        let log = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
+        let stderr = {
+            let log = log.clone();
+            std::thread::spawn(move || {
+                let mut lines = BufReader::new(stderr);
+                let mut line = Vec::new();
+                while let Ok(1..) = lines.read_until(b'\n', &mut line) {
+                    let text = String::from_utf8_lossy(&line);
+                    log.lock().unwrap().push_str(&text);
+                    line.clear();
+                }
+                log.lock().unwrap().clone()
+            })
+        };
         Radicled {
             child,
             stdin,
             frames,
             pending: VecDeque::new(),
             stderr: Some(stderr),
+            log,
             next_id: 1,
         }
     }
@@ -224,6 +236,23 @@ impl Radicled {
         self.stdin.take();
     }
 
+    /// The start, as main runs it, as `SEED`'s identity: `rad.hello`,
+    /// `rad.identity` with the key sealed, `rad.reconcile`, then `rad.start`,
+    /// whose reply it returns.
+    pub fn start(&mut self) -> Value {
+        let hello = self.hello();
+        let identity = self.call("rad.identity", sealed_to(&hello, &SEED));
+        assert!(identity["result"].is_object(), "{identity}");
+        let reconciled = self.call("rad.reconcile", json!({}));
+        assert!(reconciled["result"].is_object(), "{reconciled}");
+        self.call("rad.start", json!({ "alias": "started" }))
+    }
+
+    /// `rad.shutdown`, as main sends it; the process then exits.
+    pub fn shutdown(&mut self) {
+        self.request("rad.shutdown", json!({}));
+    }
+
     /// The exit code, once it exits within `timeout`; `None` past it, or
     /// for an exit by signal.
     pub fn exit_code(&mut self, timeout: Duration) -> Option<i32> {
@@ -233,6 +262,19 @@ impl Radicled {
     /// stderr, once the process has exited.
     pub fn stderr(&mut self) -> String {
         self.stderr.take().unwrap().join().unwrap()
+    }
+
+    /// Waits up to `within` for a stderr line containing `needle`, while
+    /// the process runs.
+    pub fn logs(&self, needle: &str, within: Duration) -> bool {
+        let until = Instant::now() + within;
+        while !self.log.lock().unwrap().contains(needle) {
+            if Instant::now() >= until {
+                return false;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        true
     }
 }
 
@@ -310,6 +352,23 @@ fn wait(child: &mut Child, timeout: Duration) -> Option<i32> {
         }
         std::thread::sleep(Duration::from_millis(10));
     }
+}
+
+/// Writes `home`'s `config.json` for a node that reaches no one by itself:
+/// the test network, no preferred seeds (one would bring the shipped seed
+/// book after it), a static peer set and no `connect` peers. `node`'s
+/// members add to its node configuration, or replace these.
+pub fn configure(home: &std::path::Path, node: Value) {
+    std::fs::create_dir_all(home).unwrap();
+    let mut fields = json!({ "alias": "quiet", "network": "test", "peers": { "type": "static" } });
+    for (key, value) in node.as_object().unwrap() {
+        fields[key] = value.clone();
+    }
+    std::fs::write(
+        home.join("config.json"),
+        json!({ "preferredSeeds": [], "node": fields }).to_string(),
+    )
+    .unwrap();
 }
 
 /// RFC 8032's first Ed25519 test key, and the node ID of its public key.

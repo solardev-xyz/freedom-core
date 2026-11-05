@@ -1,9 +1,10 @@
 //! The service's side of the connection (design 0008, "The protocol").
 //!
-//! **This build:** `rad.hello`, `rad.identity` (0008, "Keys") and
-//! `rad.reconcile` ([`crate::reconcile`]). The node never starts here, so
-//! the process never reaches `RUNNING`, and every other method 0008 lists
-//! answers as a process before `RUNNING` does:
+//! **This build:** the start, in order: `rad.hello`, `rad.identity` (0008,
+//! "Keys"), `rad.reconcile` ([`crate::reconcile`]) and `rad.start`
+//! ([`crate::node`]), and the node's life until the connection ends. Every
+//! other method 0008 lists comes with later steps, and answers `stopped`, as
+//! before `RUNNING`:
 //! - `rad.reconcile` and `rad.start` before `rad.identity` has succeeded:
 //!   `no_identity`, and the process ends;
 //! - otherwise `stopped`.
@@ -15,23 +16,34 @@
 //! does. `rad.shutdown`, or the connection's end, stops it after the unit
 //! in progress.
 //!
-//! `rad.shutdown` is the connection's own ([`fc_service::conn`]). A method
-//! 0008 doesn't list is `unknown_method`.
+//! **`rad.start`** is admitted once, after `rad.reconcile` has succeeded,
+//! with `{ alias }`, an alias heartwood takes. Anything else is
+//! `invalid_argument`: before `rad.reconcile` has succeeded, a second
+//! `rad.start`, or other params. Like every failed start step, it ends the
+//! process after its reply.
+//!
+//! `rad.shutdown` is the connection's own ([`fc_service::conn`]): its end
+//! stops the node ([`crate::node::Node::stop`]). A method 0008 doesn't list
+//! is `unknown_method`.
 
 use std::path::PathBuf;
+use std::str::FromStr as _;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use fc_protocol::error::{ErrorBody, ErrorCode};
 use fc_service::conn::{Connection, End, Hello, Request, Service};
+use fc_service::network::NetworkPolicy;
 use fc_service::watchdog::Watchdog;
 use fc_service::{Exit, log};
+use serde::Deserialize;
 use serde_json::{Map, Value, json};
 
 use crate::build_info;
 use crate::confine::Grant;
 use crate::identity::{self, Identity};
+use crate::node::{self, Node};
 use crate::reconcile;
 use crate::units;
 
@@ -45,7 +57,6 @@ const FAILED_START: Exit = Exit::Ok;
 const LATER: &[&str] = &[
     "rad.quarantine_list",
     "rad.remove_repo",
-    "rad.start",
     "rad.stats",
     "rad.read",
     "rad.blob",
@@ -66,11 +77,18 @@ enum Reconciliation {
     /// Running, or ended in a failure that ends the process.
     Running,
     /// Done: the home is consistent. The repositories whose own namespace
-    /// was re-signed are announced once the node runs (a later step).
+    /// was re-signed are announced once the node runs: heartwood's start
+    /// queues a refs announcement for each ([`crate::node`]).
     Done {
-        #[expect(dead_code, reason = "rad.start announces them, a later step")]
         resigned: Vec<radicle::prelude::RepoId>,
     },
+}
+
+/// `rad.start`'s params.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StartParams {
+    alias: String,
 }
 
 pub struct RadicleService {
@@ -80,7 +98,9 @@ pub struct RadicleService {
     reconciliation: Arc<Mutex<Reconciliation>>,
     /// Stops reconciliation between units: set by the connection's end.
     stopping: Arc<AtomicBool>,
-    /// `rad.hello`'s `network`: the process's policy (`--network`).
+    /// The process's policy (`--network`), which the node runs under.
+    policy: NetworkPolicy,
+    /// `rad.hello`'s `network`: the policy, as it reports it.
     network: Value,
     /// `rad.hello`'s `confinement`: what `confine` reported (design 0010).
     confinement: Value,
@@ -92,6 +112,8 @@ pub struct RadicleService {
     /// main's proof that libgit2 reads no git configuration outside a
     /// repository, for reconciliation.
     git_config: libradicle::GitConfigIsolated,
+    /// The node, from `rad.start` until the connection ends.
+    node: Arc<Node>,
 }
 
 impl RadicleService {
@@ -110,11 +132,13 @@ impl RadicleService {
             identity,
             reconciliation: Arc::new(Mutex::new(Reconciliation::Waiting)),
             stopping: Arc::new(AtomicBool::new(false)),
+            policy: *network,
             network: network.to_json(),
             confinement,
             deadline: Mutex::new(None),
             units,
             git_config,
+            node: Arc::new(Node::new()),
         })
     }
 
@@ -230,10 +254,66 @@ impl RadicleService {
             );
         }
     }
+
+    /// `rad.start`: admitted once, after `rad.reconcile` has succeeded, and
+    /// run on a thread of its own ([`crate::node`]).
+    fn start(&self, conn: &Connection, request: &Request<'_>) {
+        let invalid = |message: &str| {
+            fail_start(
+                conn,
+                request.id,
+                &ErrorBody::new(ErrorCode::InvalidArgument, message),
+            );
+        };
+        let resigned = {
+            let phase = self
+                .reconciliation
+                .lock()
+                .unwrap_or_else(|p| p.into_inner());
+            match &*phase {
+                Reconciliation::Done { resigned } => resigned.len(),
+                Reconciliation::Waiting | Reconciliation::Running => {
+                    drop(phase);
+                    return invalid("rad.reconcile has not succeeded");
+                }
+            }
+        };
+        let Some(params) = request
+            .params
+            .and_then(|raw| serde_json::from_str::<StartParams>(raw.get()).ok())
+        else {
+            return invalid("rad.start takes { alias }");
+        };
+        if radicle::node::Alias::from_str(&params.alias).is_err() {
+            return invalid("the alias isn't one Radicle takes");
+        }
+        if !self.node.admit() {
+            return invalid("rad.start was already called");
+        }
+        // The start takes the key: the service keeps no copy of it.
+        let Some(key) = self.identity.take_key() else {
+            return fail_start(
+                conn,
+                request.id,
+                &ErrorBody::new(ErrorCode::Internal, "Internal error"),
+            );
+        };
+        log::info("starting the node", json!({ "resigned": resigned }));
+        self.node.start(
+            conn,
+            request.id,
+            node::Start {
+                home: self.home.clone(),
+                alias: params.alias,
+                network: self.policy,
+                key,
+            },
+        );
+    }
 }
 
 /// Answers `error`, then ends the process (0008: a failed start step).
-fn fail_start(conn: &Connection, id: u64, error: &ErrorBody) {
+pub(crate) fn fail_start(conn: &Connection, id: u64, error: &ErrorBody) {
     log::error(
         "a start step failed",
         json!({ "code": serde_json::to_value(error.code).unwrap_or(Value::Null) }),
@@ -270,6 +350,8 @@ impl Service for RadicleService {
         let method = request.method;
         if method == "rad.reconcile" && self.identity.known() {
             self.reconcile(conn, &request);
+        } else if method == "rad.start" && self.identity.known() {
+            self.start(conn, &request);
         } else if method == "rad.identity" {
             match self
                 .identity
@@ -304,10 +386,12 @@ impl Service for RadicleService {
         // Every request is answered at once: nothing runs to cancel.
     }
 
-    fn end(&self, _conn: &Connection, end: End) {
+    fn end(&self, conn: &Connection, end: End) {
         self.disarm_deadline();
         // Reconciliation stops after the unit in progress.
         self.stopping.store(true, Ordering::Release);
+        // The node stops, within the connection's 5 s exit.
+        self.node.stop(conn, &self.home, end);
         log::info("connection ended", json!({ "end": end.name() }));
     }
 }

@@ -160,8 +160,8 @@ fn units_that_return_in_time_never_fire() {
     let mut radicled = identified(&dirs, &[("FREEDOM_RADICLED_TEST_UNIT_LIMIT_MS", "5000")]);
     let reply = radicled.call("rad.reconcile", json!({}));
     assert_eq!(reply["result"]["repaired"]["resigned"], 1, "{reply}");
-    // Past the limit, the process is still here.
+    // Past the limit, the process is still here, and starts its node.
     std::thread::sleep(Duration::from_millis(5_500));
     let reply = radicled.call("rad.start", json!({ "alias": "x" }));
-    assert_eq!(reply["error"]["code"], "stopped", "{reply}");
+    assert!(reply["result"].is_object(), "{reply}");
 }
