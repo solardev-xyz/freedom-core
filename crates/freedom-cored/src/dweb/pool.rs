@@ -15,6 +15,12 @@
 //!   until its result comes back (0009, Bounds: "jobs queue in the dweb
 //!   thread, under the request's memory"). So the pool holds at most two
 //!   jobs and their two results.
+//! - **The FIFO gives back its room as it drains.** A job's slot counts
+//!   against its request while the job is out; room the FIFO kept for jobs
+//!   that have gone would count against none. So past [`KEPT`] slots, once
+//!   fewer than a quarter are taken, it shrinks to twice what it holds, as
+//!   the verifier's memory tests' FIFO does: at most [`KEPT`] slots idle,
+//!   and otherwise at most four per job waiting, whose request is running.
 //! - **Results** wait in the pool until the dweb thread takes them
 //!   ([`Pool::take`]), and a slot frees only then. Room for a result is held
 //!   from its job's dispatch, so a thread never waits to hand one over.
@@ -48,6 +54,9 @@ use crate::transport::DeathNotice;
 
 /// The hashing threads (0009, Bounds: "hashing pool: 2 threads").
 pub const THREADS: usize = 2;
+/// Slots the dweb thread's FIFO keeps however few jobs wait: 64 jobs' worth,
+/// 7 KiB (a job is 112 bytes on 64-bit targets).
+pub const KEPT: usize = 64;
 
 struct State<T, R> {
     /// Jobs handed over that no thread has started.
@@ -304,12 +313,22 @@ impl<T: Send + 'static, R: Send + 'static> Queue<T, R> {
         self.pool.shutdown();
     }
 
+    /// Slots the FIFO holds room for, taken or not.
+    #[allow(dead_code)] // the tests', and 5d's gates'
+    pub fn room(&self) -> usize {
+        self.waiting.capacity()
+    }
+
     fn pump(&mut self) {
         while let Some(job) = self.waiting.pop_front() {
             if let Err(job) = self.pool.try_run(job) {
                 self.waiting.push_front(job);
-                return;
+                break;
             }
+        }
+        let (len, room) = (self.waiting.len(), self.waiting.capacity());
+        if room > KEPT && len * 4 < room {
+            self.waiting.shrink_to(len * 2);
         }
     }
 }
@@ -483,6 +502,37 @@ mod tests {
         assert_eq!((q.running(), q.waiting()), (1, 59));
         take_n(&mut q, &woken, jobs.len());
         assert_eq!(*order.lock().unwrap(), jobs);
+        q.shutdown();
+    }
+
+    #[test]
+    fn the_fifo_gives_back_its_room_as_it_drains() {
+        // One slot, its result taken one at a time: the FIFO fills to a
+        // burst's depth, then drains, keeping at most four slots per job
+        // still waiting, and KEPT once none waits.
+        let (events, _gone) = events();
+        let (wake, woken) = waker();
+        let pool = Pool::spawn("test-pool", 1, |n: u32| n, wake, events).unwrap();
+        let mut q = Queue::new(pool);
+        let burst = 10_000;
+        for n in 0..burst {
+            q.submit(n);
+            assert!(q.room() <= KEPT.max(4 * q.waiting()));
+        }
+        let peak = q.room();
+        assert!(peak >= burst as usize - 1);
+        for _ in 0..burst {
+            take_n(&mut q, &woken, 1);
+            assert!(q.room() <= KEPT.max(4 * q.waiting()), "{}", q.room());
+        }
+        assert_eq!(q.waiting(), 0);
+        assert!(q.room() <= KEPT);
+        // A second burst grows it again, from what it kept.
+        for n in 0..burst {
+            q.submit(n);
+        }
+        take_n(&mut q, &woken, burst as usize);
+        assert!(q.room() <= KEPT);
         q.shutdown();
     }
 
