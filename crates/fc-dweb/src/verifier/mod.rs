@@ -59,11 +59,13 @@ pub const SWARM_GRANT: usize = 2 << 20;
 /// or raw blocks of up to 2 MiB, and a directory's or a HAMT's structure.
 pub const IPFS_GRANT: usize = 8 << 20;
 /// What a Swarm request allocates beside what its budget counts, at most
-/// (0009, Bounds): a frame of main's being copied in or one of the body's
-/// being made for main ([`MAX_FRAME`]), the body queue's joined tail and
-/// its slots, the outputs main hasn't taken (a verified chunk's copy for
-/// the cache, piece requests, credit) and the machine's own structures.
-/// Measured in the tests (`verifier_memory`), which fail past it.
+/// (0009, Bounds): the body frame being made for main ([`MAX_FRAME`]) and
+/// the outputs main hasn't taken (piece requests, credit, a verified
+/// chunk's copy for the cache), the body queue's joined tail and the
+/// queue's and outputs' slots, and the machine's own structures. Measured
+/// in the tests (`verifier_memory`), which fail past it. The Swarm vectors'
+/// manifest inside the limit needs 2,002,470 bytes, so it can be at most
+/// about 94 KiB.
 pub const SWARM_ALLOWANCE: usize = 64 << 10;
 /// What an IPFS request allocates beside what its budget counts: Swarm's
 /// allowance, and the values the IPFS walk doesn't charge yet (its error
@@ -1574,6 +1576,13 @@ impl Verifier {
             Inner::Swarm(m) => m.core.peak,
             Inner::Ipfs(m) => m.core.peak,
         }
+    }
+
+    /// The peak starts again from what the request reserves now: a test's
+    /// look at one input's peak beside the allocator's.
+    #[cfg(feature = "memory-probe")]
+    pub fn reset_peak(&mut self) {
+        machine!(self, m => m.core.peak = m.core.reserved());
     }
 
     /// Bytes the walk released without holding them: zero unless its

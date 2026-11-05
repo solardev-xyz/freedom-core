@@ -24,6 +24,13 @@
 //! allowance, so a buffer whose charge goes before it does is caught where
 //! it happens, not only between inputs. (The IPFS walk doesn't hold to
 //! that yet: its requests keep the cap alone.)
+//!
+//! `allocations_stay_within_the_grant` holds requests to their grant
+//! (0009, What a grant covers): between inputs, within each input (the
+//! allocator's peak in it beside the machine's) and at the request's peak,
+//! what is allocated passes the reservation by no more than the scheme's
+//! allowance, for streams in 1-byte and 64 KiB frames, raw blocks of known
+//! and unknown length, and small body slices.
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
@@ -68,6 +75,37 @@ fn next_job(jobs: &mut VecDeque<Job>) -> Option<Job> {
         jobs.shrink_to(jobs.len() * 2);
     }
     job
+}
+
+/// The allocator's and the machine's peaks before the last input, which
+/// [`input`] starts again for each.
+static ALLOC_BEFORE: AtomicUsize = AtomicUsize::new(0);
+static LEDGER_BEFORE: AtomicUsize = AtomicUsize::new(0);
+/// The most the allocator reached within one input past the most the
+/// machine reserved within it, in the last request.
+static IN_INPUT: AtomicUsize = AtomicUsize::new(0);
+
+/// One input, with the memory probe: what the allocator reached within it
+/// is held to what the machine reserved at most within it, so a buffer
+/// moved or cut without room for the old one beside it is caught, though
+/// the request's own peak lies elsewhere.
+fn input<R>(v: &mut Verifier, f: impl FnOnce(&mut Verifier) -> R) -> R {
+    #[cfg(feature = "memory-probe")]
+    {
+        ALLOC_BEFORE.fetch_max(PeakAlloc.peak_usage(), Ordering::Relaxed);
+        LEDGER_BEFORE.fetch_max(v.peak(), Ordering::Relaxed);
+        PeakAlloc.reset_peak_usage();
+        v.reset_peak();
+    }
+    let r = f(v);
+    #[cfg(feature = "memory-probe")]
+    {
+        let reached = PeakAlloc
+            .peak_usage()
+            .saturating_sub(BASE.load(Ordering::Relaxed));
+        IN_INPUT.fetch_max(reached.saturating_sub(v.peak()), Ordering::Relaxed);
+    }
+    r
 }
 
 /// Between inputs, the outputs taken: what is live past the reservation.
@@ -255,14 +293,16 @@ fn drive_paged(
                 }
                 Output::Hash(job) => jobs.push_back(job),
                 Output::Remember { .. } => {}
-                Output::Floor { .. } => v.floor(fc_dweb::store::FloorCheck::Accepted).unwrap(),
+                Output::Floor { .. } => {
+                    input(v, |v| v.floor(fc_dweb::store::FloorCheck::Accepted)).unwrap()
+                }
                 Output::Head(h) => head = Some(h.status),
                 Output::Body(b) => {
                     body += b.len();
                     let n = b.len();
                     drop(b);
                     if reads {
-                        v.body_credit(n).unwrap();
+                        input(v, |v| v.body_credit(n)).unwrap();
                     }
                 }
                 Output::End => return (head, body, "end".to_owned()),
@@ -277,7 +317,7 @@ fn drive_paged(
         }
         between(v);
         if !slow_pool && let Some(job) = next_job(&mut jobs) {
-            v.hashed(job.run()).unwrap();
+            input(v, |v| v.hashed(job.run())).unwrap();
             continue;
         }
         if let Some(r) = asked.pop_front() {
@@ -290,11 +330,13 @@ fn drive_paged(
             } else {
                 CAR_TYPE
             };
-            v.piece_head(
-                r.id,
-                200,
-                vec![("content-type".to_owned(), kind.to_owned())],
-            )
+            input(v, |v| {
+                v.piece_head(
+                    r.id,
+                    200,
+                    vec![("content-type".to_owned(), kind.to_owned())],
+                )
+            })
             .unwrap();
             streams.push(Stream {
                 id: r.id,
@@ -309,7 +351,7 @@ fn drive_paged(
         let mut moved = false;
         for s in streams.iter_mut().filter(|s| !s.done) {
             if s.cancelled || s.sent == s.body.len() {
-                v.piece_end(s.id).unwrap();
+                input(v, |v| v.piece_end(s.id)).unwrap();
                 s.done = true;
                 moved = true;
                 break;
@@ -319,15 +361,17 @@ fn drive_paged(
                 continue;
             }
             let n = room.min(frame).min(s.body.len() - s.sent);
-            v.piece_data(s.id, s.body[s.sent..s.sent + n].to_vec())
-                .unwrap();
+            input(v, |v| {
+                v.piece_data(s.id, s.body[s.sent..s.sent + n].to_vec())
+            })
+            .unwrap();
             s.sent += n;
             moved = true;
             break;
         }
         if !moved {
             if let Some(job) = next_job(&mut jobs) {
-                v.hashed(job.run()).unwrap();
+                input(v, |v| v.hashed(job.run())).unwrap();
                 continue;
             }
             return (head, body, "stalled".to_owned());
@@ -387,6 +431,9 @@ fn capped_with<R>(
     let _ = writeln!(std::io::stderr(), "dense case: {case}, budget {budget}");
     PEAK.store(0, Ordering::Relaxed);
     BETWEEN.store(0, Ordering::Relaxed);
+    IN_INPUT.store(0, Ordering::Relaxed);
+    ALLOC_BEFORE.store(0, Ordering::Relaxed);
+    LEDGER_BEFORE.store(0, Ordering::Relaxed);
     let before = ALLOC.allocated();
     ALLOC.set_limit(before + budget + SLACK).unwrap();
     PeakAlloc.reset_peak_usage();
@@ -402,11 +449,14 @@ fn capped_with<R>(
         let mut v = Verifier::new(1, p, Method::Get, None, false, options).unwrap();
         let got = drive(&mut v);
         assert_eq!(v.over_released(), 0, "{case}: released without a hold");
-        (got, v.peak())
+        (got, v.peak().max(LEDGER_BEFORE.load(Ordering::Relaxed)))
     };
     #[cfg(feature = "memory-probe")]
     fc_dweb::verifier::probe::at_release(None);
-    let allocated = PeakAlloc.peak_usage().saturating_sub(base);
+    let allocated = PeakAlloc
+        .peak_usage()
+        .max(ALLOC_BEFORE.load(Ordering::Relaxed))
+        .saturating_sub(base);
     ALLOC.set_limit(usize::MAX).unwrap();
     // Within each input too, at every release: nothing the walk released
     // was still live past the allowance.
@@ -671,8 +721,14 @@ fn directory_block(n: usize) -> (Vec<u8>, Vec<u8>) {
 /// A directory of `n` entries named `f` and five digits, linking the
 /// empty identity CID: its root and block.
 fn names_block(n: usize) -> (Vec<u8>, Vec<u8>) {
+    names_block_padded(n, 0)
+}
+
+/// [`names_block`], each name followed by `pad` `x`s.
+fn names_block_padded(n: usize, pad: usize) -> (Vec<u8>, Vec<u8>) {
+    let x = "x".repeat(pad);
     let links: Vec<_> = (0..n)
-        .map(|i| (identity(b""), format!("f{i:05}"), 0))
+        .map(|i| (identity(b""), format!("f{i:05}{x}"), 0))
         .collect();
     let mut data = Vec::new();
     field_varint(1, 1, &mut data);
@@ -971,21 +1027,22 @@ fn dense_structure_stays_within_the_budget() {
 // What a request allocates past what its budget counts: within its grant's
 // allowance, however main frames its streams.
 
-/// A Swarm file streamed through `/bytes`, its tree's second level-1 chunk
-/// held back: a range from the last leaf under the first, so once that
-/// leaf is in, the stream's bytes wait in its stash for the held chunk.
-/// The manifest's root, Ant's chunks, the file, the held chunk's path and
-/// the range's start.
-fn stashed_swarm_file() -> (String, World, Vec<u8>, String, usize) {
-    let data: Vec<u8> = (0..3 * 128 * 4096u32).map(|i| (i % 251) as u8).collect();
+/// A Swarm file of `leaves` 4 KiB leaves streamed through `/bytes`, its
+/// tree's second level-1 chunk held back: a range from the last leaf under
+/// the first, so once that leaf is in, the stream's bytes wait in its stash
+/// for the held chunk. The manifest's root, Ant's chunks, the file, the
+/// held chunk's path and the range's start.
+fn stashed_swarm_file(leaves: usize) -> (String, World, Vec<u8>, String, usize) {
+    let data: Vec<u8> = (0..leaves * 4096).map(|i| (i % 251) as u8).collect();
     let mut chunks = HashMap::new();
     let file = swarm_file(&data, &mut chunks);
     let leaves: Vec<[u8; 32]> = data
         .chunks(4096)
         .map(|l| fc_swarm::chunk_address(l.len() as u64, l).unwrap())
         .collect();
-    let payload: Vec<u8> = leaves[128..256].iter().flat_map(|a| a.to_vec()).collect();
-    let second = fc_swarm::chunk_address(128 * 4096, &payload).unwrap();
+    let second_leaves = &leaves[128..leaves.len().min(256)];
+    let payload: Vec<u8> = second_leaves.iter().flat_map(|a| a.to_vec()).collect();
+    let second = fc_swarm::chunk_address(second_leaves.len() as u64 * 4096, &payload).unwrap();
     let value = swarm_file(&mantaray(&file, &[]), &mut chunks);
     let meta = Some(r#"{"Content-Type":"application/octet-stream"}"#.to_owned());
     let root = mantaray(&[0; 32], &[(b"a".to_vec(), value, meta)]);
@@ -1045,7 +1102,7 @@ fn swarm_stream_drive(
                     body += b.len();
                     let n = b.len();
                     drop(b);
-                    v.body_credit(n).unwrap();
+                    input(v, |v| v.body_credit(n)).unwrap();
                 }
                 Output::End => return (head, body, "end".to_owned()),
                 Output::Error(e) => {
@@ -1060,7 +1117,7 @@ fn swarm_stream_drive(
         }
         between(v);
         if let Some(job) = next_job(&mut jobs) {
-            v.hashed(job.run()).unwrap();
+            input(v, |v| v.hashed(job.run())).unwrap();
             continue;
         }
         if let Some(r) = asked.pop_front() {
@@ -1074,8 +1131,10 @@ fn swarm_stream_drive(
                     .unwrap();
                 let (at, end): (usize, usize) = (a.parse().unwrap(), b.parse().unwrap());
                 let content_range = format!("bytes {at}-{end}/{}", file.len());
-                v.piece_head(r.id, 206, vec![("content-range".to_owned(), content_range)])
-                    .unwrap();
+                input(v, |v| {
+                    v.piece_head(r.id, 206, vec![("content-range".to_owned(), content_range)])
+                })
+                .unwrap();
                 stream = Some(Bytes {
                     id: r.id,
                     at,
@@ -1087,29 +1146,33 @@ fn swarm_stream_drive(
             } else if r.path == held {
                 waiting = Some(r);
             } else {
-                v.piece_whole(r.id, 200, vec![], chunks[&r.path].to_vec())
-                    .unwrap();
+                input(v, |v| {
+                    v.piece_whole(r.id, 200, vec![], chunks[&r.path].to_vec())
+                })
+                .unwrap();
             }
             continue;
         }
         if let Some(s) = stream.as_mut() {
             if s.cancelled || s.at > s.end {
-                v.piece_end(s.id).unwrap();
+                input(v, |v| v.piece_end(s.id)).unwrap();
                 stream = None;
                 continue;
             }
             let room = STREAM_WINDOW - (s.sent - s.credited);
             if room > 0 {
                 let n = room.min(frame).min(s.end + 1 - s.at);
-                v.piece_data(s.id, file[s.at..s.at + n].to_vec()).unwrap();
+                input(v, |v| v.piece_data(s.id, file[s.at..s.at + n].to_vec())).unwrap();
                 s.at += n;
                 s.sent += n;
                 continue;
             }
         }
         if let Some(r) = waiting.take() {
-            v.piece_whole(r.id, 200, vec![], chunks[&r.path].to_vec())
-                .unwrap();
+            input(v, |v| {
+                v.piece_whole(r.id, 200, vec![], chunks[&r.path].to_vec())
+            })
+            .unwrap();
             continue;
         }
         return (head, body, "stalled".to_owned());
@@ -1145,14 +1208,21 @@ fn within_allowance(case: &str, m: Measured, allowance: usize) {
         use std::io::Write;
         let _ = writeln!(
             std::io::stderr(),
-            "{case}: allocated {} at peak, reserved {}, past it between inputs {between}",
+            "{case}: allocated {} at peak, reserved {}, past it between inputs {between}, \
+             within one {}",
             m.allocated,
-            m.reserved
+            m.reserved,
+            IN_INPUT.load(Ordering::Relaxed)
         );
     }
     assert!(
         between <= allowance,
         "{case}: {between} past the reservation"
+    );
+    let in_input = IN_INPUT.load(Ordering::Relaxed);
+    assert!(
+        in_input <= allowance,
+        "{case}: {in_input} past the reservation within an input"
     );
     assert!(
         m.allocated <= m.reserved + allowance,
@@ -1192,7 +1262,7 @@ fn allocations_stay_within_the_grant() {
     );
     // The Swarm walk's stream the same, its stash filling for the chunk
     // held back.
-    let (root, chunks, file, held, from) = stashed_swarm_file();
+    let (root, chunks, file, held, from) = stashed_swarm_file(3 * 128);
     let mut p = swarm_plan(&root, "/a");
     p.headers = vec![("range".to_owned(), format!("bytes={from}-"))];
     let mut at = Vec::new();
@@ -1213,6 +1283,21 @@ fn allocations_stay_within_the_grant() {
         at[0].0.allocated <= at[1].0.allocated + (16 << 10),
         "{at:?}"
     );
+    // A stream that ends with bytes still in its stash, 80 KiB of them
+    // waiting for the chunk held back: its window stays held for them.
+    let (root, chunks, file, held, from) = stashed_swarm_file(148);
+    let mut p = swarm_plan(&root, "/a");
+    p.headers = vec![("range".to_owned(), format!("bytes={from}-"))];
+    let case = "Swarm stream ended with its stash full";
+    let (got, m) = capped(case, &p, SWARM_BUDGET, |v| {
+        swarm_stream_drive(v, &chunks, &file, &held, MAX_FRAME)
+    });
+    assert_eq!(
+        (got.0, got.1, got.2.as_str()),
+        (Some(206), file.len() - from, "end"),
+        "{got:?}"
+    );
+    within_allowance(case, m, SWARM_ALLOWANCE);
     // Raw leaves of 1,800,000 bytes in 64 KiB frames: each buffer is made
     // once, at the leaf's length.
     let (root, world) = raw_file(&[1_800_000; 4]);
@@ -1265,6 +1350,23 @@ fn allocations_stay_within_the_grant() {
     p.path = "/f00001".to_owned();
     let case = "one name in a directory's block of 1.15 MB";
     let (got, m) = capped_with(case, &p, raw(REQUEST_BUDGET), |v| drive(v, &world, false));
+    assert_eq!(
+        (got.0, got.1, got.2.as_str()),
+        (Some(200), 0, "end"),
+        "{got:?}"
+    );
+    within_allowance(case, m, MACHINE);
+    // A block of unknown length near its bound, whose buffer moves to the
+    // bound but has no room to be cut at its end: it keeps its buffer, and
+    // the buffer's room, until it goes.
+    let (root, block) = names_block_padded(48_000, 22);
+    assert!(block.len() > 1_900_000, "{}", block.len());
+    let mut world = HashMap::new();
+    world.insert(format!("/ipfs/{}?format=raw", text(&root)), Arc::new(block));
+    let mut p = plan(&root);
+    p.path = format!("/f00001{}", "x".repeat(22));
+    let case = "one name in a directory block of 1.92 MB, no room to cut it";
+    let (got, m) = capped_with(case, &p, raw(7 << 19), |v| drive(v, &world, false));
     assert_eq!(
         (got.0, got.1, got.2.as_str()),
         (Some(200), 0, "end"),
