@@ -5,8 +5,9 @@
 //! (step 5c) gives it main's messages and the hashing pool's results, and
 //! it acts through an [`Io`], which the tests fake.
 //!
-//! - **Grants.** A request runs only once its whole budget, by its scheme
-//!   (2 MiB for Swarm, 8 MiB for IPFS: `fc_dweb::verifier::budget`), fits
+//! - **Grants.** A request runs only once its whole grant, by its scheme
+//!   (2 MiB for Swarm, 8 MiB for IPFS: `fc_dweb::verifier::grant`, its
+//!   verifier's budget and the allowance beside it), fits
 //!   what is left of the thread's grants: the 128 MiB less the structure
 //!   cache's 24 MiB and the IPNS floors' 3 MiB ([`GRANTS`]). At most
 //!   [`RUNNING`] run at once. The rest wait in order, at most [`WAITING`],
@@ -510,7 +511,7 @@ impl Engine {
     /// Starts what waits, in order, while the front's grant fits.
     fn admit(&mut self, io: &mut dyn Io, now: Ms) {
         while let Some(front) = self.waiting.front() {
-            let grant = verifier::budget(&front.request.plan.root);
+            let grant = verifier::grant(&front.request.plan.root);
             if self.running.len() >= self.bounds.running
                 || self.granted.saturating_add(grant) > self.bounds.grants
             {
@@ -533,7 +534,7 @@ impl Engine {
             req.partition.as_deref(),
             req.private,
             Options {
-                budget: grant,
+                budget: verifier::budget(&req.plan.root),
                 now: io.wall(),
                 car: req.car,
             },
@@ -1422,7 +1423,7 @@ mod tests {
         settle(&mut e, &mut f, &w, 0);
         // 101 MiB holds twelve 8 MiB grants.
         assert_eq!(e.counts(), (12, 2));
-        assert_eq!(e.granted(), 12 * verifier::IPFS_BUDGET);
+        assert_eq!(e.granted(), 12 * verifier::IPFS_GRANT);
         // A Swarm request behind them waits too, in order, though its
         // 2 MiB would fit.
         e.verify(&mut f, 0, 15, swarm(SITE_A, "/index.html"));
