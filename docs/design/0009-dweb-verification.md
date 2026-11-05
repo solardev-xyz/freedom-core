@@ -922,12 +922,12 @@ As 0006's 4.7 did, the tests land before the code. Every case pins its failure s
   - the verified body, each segment of its queue whole until main has taken all of it: a frame is made, at its length, only as main takes it;
   - the head's headers until main takes the head.
 - **The allowance, a fixed part of the grant, tested.** What the count doesn't follow, each bounded:
-  - the body frame being made for main, at most 64 KiB, and the outputs main hasn't taken yet: piece requests, credit, a verified chunk's copy for the cache;
+  - the body frame being made for main, at most 64 KiB, and the outputs main hasn't taken yet, however seldom it polls: a request for each open piece (main may answer only the pieces it has taken), one credit for each stream, which carries all the stream is owed when main takes it, and at most four verified chunks' copies for the cache (past them, a chunk isn't given to the cache);
   - the body queue's joined tail, which grows to 16 KiB at most and gives back its room when it stops being the tail, and the queue's and the outputs' slots;
   - the machine's own structures;
   - for IPFS only, the values its walk doesn't charge yet: the error page (under 1 KiB), the head's headers and its ETag and type strings, and an IPNS record's value while it waits for the floor (at most 10 KiB).
 
-  The tests measure it with a counting allocator (`verifier_memory`): between inputs and at each request's peak, nothing allocated passes the reservation by more than the allowance, for streams in 1-byte and 64 KiB frames, raw leaves of 1.8 MB, a 1.15 MB block of unknown length, many small body slices and a page that doesn't read. A request's allowance comes out of its grant, so the 128 MiB, the 101 MiB of grants and the 12 IPFS or 50 Swarm requests stay as stated. The IPFS allowance's last part stays until the IPFS walk is charged as the Swarm walk is, value by value; that follow-up replaces it with exact charges.
+  The tests measure it with a counting allocator (`verifier_memory`): between inputs and at each request's peak, nothing allocated passes the reservation by more than the allowance, for streams in 1-byte and 64 KiB frames, raw leaves of 1.8 MB, a 1.15 MB block of unknown length, many small body slices and a page that doesn't read, with main taking the outputs after every input or only once nothing moves without them (a stream's whole window sent in 1-byte frames before main polls). A request's allowance comes out of its grant, so the 128 MiB, the 101 MiB of grants and the 12 IPFS or 50 Swarm requests stay as stated. The IPFS allowance's last part stays until the IPFS walk is charged as the Swarm walk is, value by value; that follow-up replaces it with exact charges.
 
 **Why 2 MiB for a Swarm request.**
 - **The file phase holds little:**

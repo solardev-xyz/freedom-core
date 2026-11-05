@@ -990,6 +990,33 @@ fn hash_results_it_did_not_ask_for_are_refused() {
     assert_eq!(v.body_credit(1), Err(Misuse::BodyCredit));
 }
 
+/// A piece whose request main hasn't taken is one main wasn't asked for:
+/// its answer is refused and changes nothing, so the walk never asks on
+/// for pieces main hasn't seen, however seldom main polls.
+#[test]
+fn a_piece_main_has_not_taken_is_refused() {
+    let doc = load("dweb-verify.json");
+    let store = Store::new(&doc);
+    let world = Antd::honest(&store);
+    let p = plan(SITE_A, "/style.css", "", vec![]);
+    let mut v = Verifier::new(3, &p, Method::Get, None, false, Options::default()).unwrap();
+    let before = v.reserved();
+    assert_eq!(
+        v.piece_whole(PieceId(0), 200, vec![], vec![]),
+        Err(Misuse::UnknownPiece)
+    );
+    assert_eq!(v.reserved(), before);
+    let Some(Output::Piece(req)) = v.poll() else {
+        panic!("the root, still asked")
+    };
+    assert_eq!(req.id, PieceId(0));
+    let Answer::Whole { body, .. } = world.answer(&req) else {
+        panic!()
+    };
+    v.piece_whole(req.id, 200, vec![], body).unwrap();
+    assert!(matches!(v.poll(), Some(Output::Hash(_))));
+}
+
 /// A stream's data within its window only, its head first, frames in
 /// bounds.
 #[test]
