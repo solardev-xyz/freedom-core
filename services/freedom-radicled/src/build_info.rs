@@ -4,9 +4,8 @@
 
 /// The libradicle version the pinned commit carries.
 pub const LIBRADICLE_VERSION: &str = "0.8.0";
-/// The pinned commit: `claude/isolate-git-config-checked`, libradicle's
-/// checked `isolate_git_config`, on `integration/rust-core` at #28's merge.
-pub const LIBRADICLE_COMMIT: &str = "3817c7c63012090086d5c6772030ac7b1d730af4";
+/// The pinned commit: `integration/rust-core` at libradicle#28's merge.
+pub const LIBRADICLE_COMMIT: &str = "b7d62b951b313061fb9e4d5145193341e5ad7b15";
 
 #[cfg(test)]
 mod tests {

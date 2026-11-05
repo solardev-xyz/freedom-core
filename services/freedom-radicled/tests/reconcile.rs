@@ -344,12 +344,12 @@ fn a_throwaway_run_keeps_the_real_identitys_name_for_its_next_run() {
     assert_eq!(fixture::marked(&dirs.home), Some(vec![NID.to_owned()]));
 }
 
-/// The process starts, `main`'s checked
-/// `libradicle::isolate_git_config_single_threaded` finding one thread, and
-/// reconciliation runs with the token it returned: the repository's open
-/// reads no git configuration outside the repository. A malformed
-/// `.gitconfig` and XDG configuration in the service's `HOME` would fail
-/// the open, and quarantine the repository at its unit's `begin`.
+/// The process starts, `main` having called `libradicle::isolate_git_config`
+/// while it had one thread, and reconciliation runs with the token that
+/// returned: the repository's open reads no git configuration outside the
+/// repository. A malformed `.gitconfig` and XDG configuration in the
+/// service's `HOME` would fail the open, and quarantine the repository at
+/// its unit's `begin`.
 #[test]
 fn reconciliation_reads_no_git_configuration_from_home() {
     let dirs = Dirs::new();

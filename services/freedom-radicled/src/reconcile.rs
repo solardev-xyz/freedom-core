@@ -121,8 +121,7 @@ impl Paths {
 
 /// Runs the reconciliation of `run.home`, telling `watch` of each unit.
 ///
-/// Only after `libradicle::isolate_git_config`, which `_git_config` proves:
-/// `main` calls it through `isolate_git_config_single_threaded`.
+/// Only after `libradicle::isolate_git_config`, which `_git_config` proves.
 /// Otherwise libgit2 would look for the system's git configuration with
 /// every repository it opens, and confinement leaves an `/etc/gitconfig`
 /// unreadable: every open would fail, and every repository would be

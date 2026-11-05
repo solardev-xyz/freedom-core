@@ -1033,7 +1033,7 @@ The source research for this design found four ways the node gives away more tha
 9. **An in-process import:**
    - `import_repo` (`lr:1012`) creates the repository in storage, fetches the working copy's branch into the node's namespace with libgit2's local transport, and signs the refs;
    - it replaces `rad::init`'s `git push` (`hw/radicle/src/rad.rs:107`–`120`);
-   - libgit2's configuration search paths are emptied, so no global or system git configuration applies: libradicle's `isolate_git_config` (solardev-xyz/libradicle#27). The service calls it first thing in `main`, while it has one thread, through its safe, checked form `isolate_git_config_single_threaded`, which counts the process's threads and refuses unless there is one, so the service keeps `unsafe_code` forbidden. libradicle's starts don't call it, so the add-on and UniFFI keep their host's paths.
+   - libgit2's configuration search paths are emptied, so no global or system git configuration applies: libradicle's `isolate_git_config` (solardev-xyz/libradicle#27), which the service calls first thing in `main`, while it has one thread. That call is the service's one `unsafe` block (AGENTS.md rule 6): libgit2's search paths are process-wide options with no sound safe setter. libradicle's starts don't call it, so the add-on and UniFFI keep their host's paths.
 
 9a. **The host's repository gate, and repairs with the host's key.** Found when the service was built (step 4): heartwood's gate (item 14) and its online repair (item 13) need a way in from the host.
 - `Options` takes the host's repository gate. Without one, the node gets an always-open gate, as the add-on and UniFFI always have.
