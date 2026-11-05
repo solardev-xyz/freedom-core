@@ -9,6 +9,10 @@
 //!   which `rad.identity` must follow `rad.hello`'s reply.
 //! - `FREEDOM_RADICLED_TEST_RECONCILE_CUTOFF_MS` replaces the 240 s after
 //!   `rad.reconcile`'s admission past which no unit starts.
+//! - `FREEDOM_RADICLED_TEST_UNIT_LIMIT_MS` replaces a repair unit's 30 s.
+//! - `FREEDOM_RADICLED_TEST_HANG_UNIT=<kind>` makes the first repair unit of
+//!   that kind (`cache`, `namespace`, … as heartwood's driver names them)
+//!   never return, once its watchdog is armed: a unit that hangs.
 //! - `FREEDOM_RADICLED_TEST_THREADS=1` logs, at the confinement point, how
 //!   many threads the process has (`/proc/self/task`), and what each
 //!   descriptor above stderr is (its `/proc/self/fd` link: a test may log a
@@ -37,6 +41,27 @@ pub fn reconcile_cutoff(default: Duration) -> Duration {
         return Duration::from_millis(ms);
     }
     default
+}
+
+/// A repair unit's time limit.
+pub fn unit_limit(default: Duration) -> Duration {
+    #[cfg(feature = "testhooks")]
+    if let Some(ms) = millis("FREEDOM_RADICLED_TEST_UNIT_LIMIT_MS") {
+        return Duration::from_millis(ms);
+    }
+    default
+}
+
+/// As a repair unit of `kind` starts, its watchdog armed: hangs, if asked.
+pub fn at_unit_start(kind: &str) {
+    #[cfg(feature = "testhooks")]
+    if std::env::var("FREEDOM_RADICLED_TEST_HANG_UNIT").is_ok_and(|hang| hang == kind) {
+        loop {
+            std::thread::park();
+        }
+    }
+    #[cfg(not(feature = "testhooks"))]
+    let _ = kind;
 }
 
 /// At the confinement point: logs the process's thread count when asked.

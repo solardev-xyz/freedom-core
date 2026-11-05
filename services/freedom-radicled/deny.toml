@@ -26,6 +26,18 @@ ignore = [
     # service makes no ECDSA private-key operation, since its only key is the
     # Ed25519 node key from `rad.identity`.
     { id = "RUSTSEC-2026-0387", reason = "no ECDSA private-key operation is ever made: the node key is Ed25519 from rad.identity, and no agent is reachable" },
+    # hickory-proto 0.25.2, through fc-nat64 alone: `direct` mode's NAT64
+    # discovery (../nat64/src/query.rs), which encodes its one
+    # `ipv4only.arpa` query and decodes the answers. The NSEC3 loop is in
+    # DNSSEC validation, which needs hickory's `dnssec-ring` or
+    # `dnssec-aws-lc-rs` feature: fc-nat64 builds it with `std` alone. As
+    # freedom-ipfsd's deny.toml has it, which pins the same hickory-proto
+    # until a libp2p-dns release takes 0.26.
+    { id = "RUSTSEC-2026-0118", reason = "DNSSEC validation only; hickory-proto is built without its dnssec features" },
+    # Same crate and path. The quadratic name compression is in message
+    # encoding: discovery encodes only its own one-question query, and
+    # decodes the answers.
+    { id = "RUSTSEC-2026-0119", reason = "encoding only: discovery encodes its own query, never a received message" },
 ]
 
 [licenses]
@@ -68,8 +80,11 @@ unknown-registry = "deny"
 unknown-git = "deny"
 allow-registry = ["https://github.com/rust-lang/crates.io-index"]
 # libradicle and heartwood (the `freedom/embed` fork libradicle pins), each
-# pinned to a commit until a release carries 0008's upstream changes.
+# pinned to a commit until a release carries 0008's upstream changes; and
+# freedom-ipfs, for the dial gate's address policy and SOCKS5 client, at
+# freedom-ipfsd's pin.
 allow-git = [
     "https://github.com/solardev-xyz/libradicle",
     "https://github.com/solardev-xyz/heartwood",
+    "https://github.com/solardev-xyz/freedom-ipfs",
 ]
