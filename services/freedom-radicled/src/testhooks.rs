@@ -2,7 +2,8 @@
 //! through the binary, with test hooks behind a feature"). **Only with the
 //! `testhooks` feature, in a debug or test build:** without it every hook
 //! is a no-op and no variable is read, and a release build with it doesn't
-//! compile.
+//! compile: build.rs refuses the feature in any release-profile or optimized
+//! build, by Cargo's profile, not by `debug_assertions`.
 //!
 //! - `FREEDOM_RADICLED_TEST_IDENTITY_DEADLINE_MS` replaces the 30 s within
 //!   which `rad.identity` must follow `rad.hello`'s reply.
@@ -10,9 +11,6 @@
 //!   many threads the process has (`/proc/self/task`), and what each
 //!   descriptor above stderr is (its `/proc/self/fd` link: a test may log a
 //!   path). Linux only.
-
-#[cfg(all(feature = "testhooks", not(debug_assertions)))]
-compile_error!("the `testhooks` feature is for debug and test builds only, never a release build");
 
 use std::time::Duration;
 

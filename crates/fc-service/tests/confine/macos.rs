@@ -40,6 +40,8 @@ struct Paths {
     socket: PathBuf,
     allowed_port: u16,
     other_port: u16,
+    /// A UDP echo on loopback, outside.
+    udp_port: u16,
     /// A process outside, with a canary in its environment.
     target_pid: i32,
 }
@@ -53,6 +55,7 @@ fn paths() -> Paths {
         socket: var("FC_SOCKET").into(),
         allowed_port: var("FC_PORT").parse().unwrap(),
         other_port: var("FC_OTHER_PORT").parse().unwrap(),
+        udp_port: var("FC_UDP_PORT").parse().unwrap(),
         target_pid: var("FC_TARGET_PID").parse().unwrap(),
     }
 }
@@ -188,6 +191,31 @@ fn child(case: &str) {
             refused(confine::confine(&policy(&p, network, registered)));
             return;
         }
+        "resolv-conf" => {
+            // A service's own resolver (freedom-ipfsd's): resolv.conf and
+            // /etc/hosts open by the names it uses, through their links
+            // (/etc, and resolv.conf's own), and nothing else of /etc.
+            let present: Vec<&str> = ["/etc/resolv.conf", "/etc/hosts"]
+                .into_iter()
+                .filter(|file| std::fs::read(file).is_ok())
+                .collect();
+            let other = std::fs::read("/etc/services").is_ok();
+            let mut own = policy(&p, network, registered);
+            own.resolver = confine::Resolver::ResolvConf;
+            let report = confine::confine(&own).unwrap();
+            println!("REPORT {}", report.to_json());
+            for file in present {
+                check(&format!("{file} readable"), std::fs::read(file).is_ok());
+            }
+            if other {
+                check(
+                    "/etc/services refused",
+                    std::fs::read("/etc/services").is_err(),
+                );
+            }
+            drop(held);
+            return;
+        }
         "ephemeral" => {
             let mut ephemeral = policy(&p, network, Vec::new());
             ephemeral.read_write.clear();
@@ -256,7 +284,7 @@ fn policy(p: &Paths, network: Network, descriptors: Vec<i32>) -> Policy {
         refer: false,
         min_abi: 1,
         network,
-        system_resolver: true,
+        resolver: confine::Resolver::System,
         descriptors,
         interface_index: false,
     }
@@ -473,6 +501,30 @@ fn tcp(p: &Paths, case: &str) {
         "direct" => {
             check("the proxy port", to(p.allowed_port));
             check("another port", to(p.other_port));
+            // A UDP reply reaches the socket that asked, connected (as
+            // NAT64 discovery's) and unconnected (as hickory's and QUIC's).
+            let echo = ("127.0.0.1", p.udp_port);
+            let reply = |connected: bool| {
+                let socket = std::net::UdpSocket::bind("0.0.0.0:0")?;
+                socket.set_read_timeout(Some(std::time::Duration::from_secs(2)))?;
+                let mut buffer = [0u8; 8];
+                if connected {
+                    socket.connect(echo)?;
+                    socket.send(b"ping")?;
+                    socket.recv(&mut buffer)
+                } else {
+                    socket.send_to(b"ping", echo)?;
+                    socket.recv_from(&mut buffer).map(|(read, _)| read)
+                }
+            };
+            check(
+                "a UDP reply, connected",
+                reply(true).is_ok_and(|read| read == 4),
+            );
+            check(
+                "a UDP reply, unconnected",
+                reply(false).is_ok_and(|read| read == 4),
+            );
         }
         "socks5" | "lan" => {
             check("the proxy port", to(p.allowed_port));
@@ -512,6 +564,8 @@ struct World {
     socket: PathBuf,
     allowed: TcpListener,
     other: TcpListener,
+    /// Echoes each datagram to its sender.
+    udp: std::net::UdpSocket,
     _unix: UnixListener,
     /// A process with a canary in its environment, outside.
     target: std::process::Child,
@@ -549,6 +603,17 @@ fn world() -> World {
         socket,
         allowed: TcpListener::bind("127.0.0.1:0").unwrap(),
         other: TcpListener::bind("127.0.0.1:0").unwrap(),
+        udp: {
+            let socket = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+            let echo = socket.try_clone().unwrap();
+            std::thread::spawn(move || {
+                let mut buffer = [0u8; 64];
+                while let Ok((read, from)) = echo.recv_from(&mut buffer) {
+                    let _ = echo.send_to(&buffer[..read], from);
+                }
+            });
+            socket
+        },
         _unix: unix,
         target: {
             let (key, value) = canary_env();
@@ -578,6 +643,10 @@ fn command(world: &World, case: &str) -> Command {
         .env(
             "FC_OTHER_PORT",
             world.other.local_addr().unwrap().port().to_string(),
+        )
+        .env(
+            "FC_UDP_PORT",
+            world.udp.local_addr().unwrap().port().to_string(),
         )
         .env_remove(confine::REEXEC_MARKER);
     command
@@ -681,6 +750,7 @@ fn parent() {
         "refer",
         "sysctl",
         "exec-direct",
+        "resolv-conf",
     ] {
         let output = run(&world, case);
         let report = report_json(&output);

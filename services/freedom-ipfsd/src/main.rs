@@ -40,6 +40,7 @@ mod args;
 mod budget;
 mod build_info;
 mod confinement;
+mod dns;
 mod instances;
 mod nat64;
 mod network;
@@ -141,14 +142,14 @@ fn run(started: Instant, entry: &confine::Entry) -> Exit {
             };
             let policy =
                 confinement::policy(vec![gate.data_dir.clone()], &network, gate.descriptors());
-            let confinement = match confined(&policy) {
-                Ok(report) => report,
+            let (confinement, dns) = match confined(&policy, &network) {
+                Ok(confined) => confined,
                 Err(exit) => return exit,
             };
             let kind = Kind::Persistent {
                 store: gate.data_dir.join(STORE_FILE),
             };
-            let exit = serve(kind, network, confinement, parent_pid, started);
+            let exit = serve(kind, network, confinement, dns, parent_pid, started);
             drop(gate);
             exit
         }
@@ -158,22 +159,38 @@ fn run(started: Instant, entry: &confine::Entry) -> Exit {
             parent_pid,
         } => {
             // No lock and no directory: nothing writable, nothing kept.
-            let confinement = match confined(&confinement::policy(Vec::new(), &network, Vec::new()))
-            {
-                Ok(report) => report,
+            let policy = confinement::policy(Vec::new(), &network, Vec::new());
+            let (confinement, dns) = match confined(&policy, &network) {
+                Ok(confined) => confined,
                 Err(exit) => return exit,
             };
-            serve(Kind::Ephemeral, network, confinement, parent_pid, started)
+            serve(
+                Kind::Ephemeral,
+                network,
+                confinement,
+                dns,
+                parent_pid,
+                started,
+            )
         }
     }
 }
 
 /// Confines the process to `policy`, on the main thread while it is the
-/// only one. A refusal is exit 77, which main doesn't restart.
-fn confined(policy: &confine::Policy) -> Result<Value, Exit> {
+/// only one, then reads its DNS configuration under `network`, confined
+/// (`dns.rs`): the report, with what resolves names, and that
+/// configuration. A refusal is exit 77, which main doesn't restart.
+fn confined(
+    policy: &confine::Policy,
+    network: &NetworkPolicy,
+) -> Result<(Value, Option<dns::Dns>), Exit> {
     testhooks::at_confinement_point();
     match confine::confine(policy) {
-        Ok(report) => Ok(report.to_json()),
+        Ok(mut report) => {
+            let dns = dns::read(network);
+            dns::report(&mut report, dns.as_ref());
+            Ok((report.to_json(), dns))
+        }
         Err(invalid) => {
             log::error(
                 "confinement refused the process",
@@ -191,6 +208,7 @@ fn serve(
     kind: Kind,
     network: NetworkPolicy,
     confinement: Value,
+    dns: Option<dns::Dns>,
     parent_pid: Option<u32>,
     started: Instant,
 ) -> Exit {
@@ -243,6 +261,7 @@ fn serve(
         requests.clone(),
         budgets.clone(),
         discovery,
+        dns,
     );
     let stats = Stats::new(
         runtime.handle().clone(),

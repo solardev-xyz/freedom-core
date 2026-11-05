@@ -33,6 +33,20 @@ jobs:
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       - run: cargo fmt --all --check
       - run: cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
+      # freedom-cored as the release builds it: without its test hooks.
+      - run: cargo clippy --locked -p freedom-cored --all-targets -- -D warnings
+      # The test hooks never build into a release binary
+      # (crates/freedom-cored/src/testhooks.rs): build.rs refuses them by
+      # Cargo's profile, debug assertions or not.
+      - name: A release build with the test hooks doesn't compile
+        run: |
+          for config in "" "--config profile.release.debug-assertions=true"; do
+            if cargo check --locked --release -p freedom-cored --features testhooks $config 2> testhooks-release.err; then
+              echo "a release build compiled with the testhooks feature ($config)" >&2
+              exit 1
+            fi
+            grep -F "the \`testhooks\` feature is for debug and test builds only" testhooks-release.err
+          done
 
   clippy-macos:
     # Confinement's macOS code (design 0010): fc-sys's Seatbelt and libproc
