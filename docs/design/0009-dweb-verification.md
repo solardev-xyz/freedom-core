@@ -177,17 +177,25 @@ Chromium ◀─body── main ◀─verified body (stream)── freedom-cored
 
 | Method | Params | Result |
 |---|---|---|
-| `dweb.verify` | `{ plan, method, partition, private, deadline_ms }` | a head `{ status, headers, body, trust }`, then the verified body as a stream when `body` is true |
+| `dweb.verify` | `{ plan, method, partition, private, deadline_ms }`, and `car` for an IPFS plan | a head `{ status, headers, body, trust }`, then the verified body as a stream when `body` is true; or 0006's error plan `{ error: { status, code, message } }` |
 | `dweb.forget` | `{ partition }` | `{}`, once the partition's cached structure and IPNS floors are gone; sent when a private partition closes |
 
 - **`plan`** is the `{ verify }` plan as `dweb.open` returned it and main validated it. The core checks it again, against `method` and itself. First it bounds the plan's path and query together, and each header's value, at 8 KiB ([Bounds](#bounds)): a longer one is refused before any copy of it is made.
 - **`method`** is GET or HEAD, as main read it. A HEAD answers the same head with `body: false`.
 - **`partition`** is an opaque name for the request's session: `null` for the profile's default session, a private partition's name otherwise. Only the [structure cache](#the-structure-cache) reads it. **`private`** marks a private window's request, so the core never logs its references.
 - **`deadline_ms`** bounds the time to the head: 360 s, about today's worst case for one `bzz:` request through its ten attempts (an estimate). After the head there is no core deadline; main's body idle timer ends a stalled body.
+- **`car`** (amendment 2) is a boolean, required for an IPFS plan and refused for an Ant plan (`invalid_argument` either way): whether the probe found the gateway serving ordered CARs ([Modes](#modes)), as main captured it with the backend. Main is trusted for it, because a wrong value costs efficiency, never verification: a wrong `true` asks for a CAR the gateway doesn't serve, which the core cancels and replaces with raw blocks ([The CAR request](#the-car-request)), and a wrong `false` fetches every block raw.
+- **Strictly read:** any other member, a missing one, or a value of another type is `invalid_argument`, as is a `dweb.forget` with anything but `partition`.
 - **Caller kinds:** `shell` only, as `dweb.open`.
 - **The head** is the core's, built from verified data ([Heads](#heads)). Main runs the plan's response operations on it, the security operations always, then hands Chromium a `Response` whose body reads the stream.
 - **`trust`** is `{ name, content }`: the plan's name trust and the final content label.
-- **Errors:** `busy` and `deadline` before the head; `cancelled`. Every outcome that reaches the page as HTTP, a verification failure included, is a head with a status, not an error reply ([Failures](#failures)).
+- **Answers** (amendment 1). `dweb.verify`'s result is one of two forms, which main tells apart by their members, never by a status or a body:
+  - **a head,** `{ status, headers, body, trust }`: the core's, from verified data, whatever its status. A bundled node's own error answer that the core reproduces, such as Ant's 404 JSON for a path the verified manifest doesn't hold or `GatewayCore`'s 404 HTML, is a head with its trust and the node's body, which the page gets as content;
+  - **an error plan,** 0006's `{ error: { status, code, message } }`, with `code` the status: every failure before the head that the core writes itself ([Failures](#failures)), the deadline's 504 included. Main answers it as it answers any error plan, and a navigation gets the [error page](#the-error-page).
+
+  `vectors/dweb-verify-cases.json`'s `answers` write both forms out for the same node and the same 404 status: `swarm/path-not-found`'s head, Ant's own JSON with `verified` trust, beside `swarm/piece-404`'s error plan, and the gateway's pair.
+- **Errors:** a protocol error reply is only `busy` (the thread is full, or the grant didn't come in time), `cancelled` (main's cancel, before the head) or `invalid_argument` (the params, above). Every other outcome is a head or an error plan.
+- **Method rows** (amendment 3): `dweb.verify`, with the `head` deadline kind of 360 s (the time to the head, [Bounds](#bounds)), and `dweb.forget`, with none. Both carry `"protocol": 2` in `protocol/schema.json`, the only rows that do: on a protocol-1 connection they are `unknown_method`, and absent from `core.hello`'s capabilities.
 - **Thread:** the **dweb thread**, a new thread beside naming's and chain's, runs one sans-I/O machine per request (`fc-dweb`'s verifier). A pool of two hashing threads computes BMT roots and SHA-256 digests, and checks RSA signatures, for it.
 
 ### `shell.dweb_get`
@@ -208,8 +216,9 @@ What the core asks main for while a `dweb.verify` runs.
   - IPFS: `accept`, at exactly `application/vnd.ipld.car; version=1; order=dfs; dups=y`, `application/vnd.ipld.raw` or `application/vnd.ipfs.ipns-record`, and never `range`.
 - **`stream`:** false for chunks, feed lookups and IPNS records, whose bodies main reads whole up to `max_bytes` (at most 64 KiB) and returns as base64 in one frame; true for `/bytes`, CARs and raw blocks, whose bodies stream under the core's credit. A streamed piece's `max_bytes` bounds it too: 2 MiB for a raw block; none for `/bytes` and CARs, which the core ends itself when its walk is done.
 - **Executing it:** `plan-executor.js`'s dial with the plan's retry, delays and header deadline, on the backend's transport, with the Ant guard's announcement for a non-loopback Ant. A retried attempt's body is cancelled before the next. The body idle timer runs while the core has credit outstanding and no bytes come.
-- **The reply's `headers`** are only those the core reads: `content-type`, `content-length`, `content-range` and `swarm-feed-index`, at most 8, each at most 8 KiB, as 0005 bounds Blockscout's.
-- **`failed`** is the dial's failure class, which the core maps with `fc-dweb`'s `failure::after_dial` as today: `unreachable` (`ECONNREFUSED`, `ECONNRESET`, `ENOTFOUND`), `error`, or `aborted`.
+- **The reply's `headers`** are only those the core reads: `content-type`, `content-length`, `content-range` and `swarm-feed-index`, at most 8, each name and value at most 8 KiB, as 0005 bounds Blockscout's.
+- **`failed`** is the dial's failure class, which the core maps with `fc-dweb`'s `failure::after_dial` as today: `unreachable` (`ECONNREFUSED`, `ECONNRESET`, `ENOTFOUND`), `error`, `aborted`, or `too_large` (a whole piece past its `max_bytes`). The set is closed (amendment 4): `stalled` is only a stream's abort code, never a `failed`, and any other value is a protocol error.
+- **Read strictly, both ways** (amendment 4): main answers a `shell.dweb_get` with a member it doesn't know, or a value of another type, `invalid_argument`. The core takes a reply that isn't exactly one of the three forms (an unknown member, a status outside 100–599, a header outside the four or past the bounds below, base64 that doesn't decode) as a protocol error. An error reply (a `for` that has ended, say) fails the piece as `error`.
 - **Cancel:** the core sends 0001's `cancel` for a piece it no longer needs, and main aborts the dial or answers the open stream with `abort { code: "cancelled" }`.
 - **A streamed piece's abort** has one of three codes: `cancelled` (the core's cancel), `stalled` (main's body idle timer) or `body_stream_error` (the node's body failed). Main sends no other, and any other from main is a protocol error ([Streams in the core](#streams-in-the-core), abort codes).
 
@@ -218,6 +227,7 @@ What the core asks main for while a `dweb.verify` runs.
 0001 reserved frame kinds `0x02`–`0x0F` for Phase 4's streams, to come with protocol version 2. 0007 defined four of them for service connections, and #72 implements them in `fc-protocol`. The core adopts the same four frames, unchanged, with one generalization: **a stream is the body of a response, sent by whichever side answers the request.**
 
 - **The handshake:** `core.hello` carries `protocol: 2`, main offers `frames: ["fragment", "stream"]`, and the core's capabilities gain `streams`. Main and the core ship together, so neither falls back to version 1.
+  - **Transitional: the core still accepts protocol 1.** Until step 6 is in freedom-browser's integration branch, the browser speaks protocol 1, and a core that refused it couldn't be pinned there to be tested. So the core answers a protocol-1 hello as before: exactly the capabilities and methods it had, no `streams`, no stream frames (one is `unknown_frame_kind`), and `dweb.verify` and `dweb.forget` are `unknown_method`. A protocol-2 hello that doesn't offer `stream` is refused. The fallback ends before any browser release that ships the step-6 core: a short follow-up PR removes protocol 1 once step 6 is in the integration branch, and RELEASING's step 5b holds every signed browser release until the pinned core refuses it.
 - **Who sends what:**
   - the responder sends data, `end` and `abort`; the requester sends credit;
   - the stream ID is the request's envelope ID, in the requester's ID space;
@@ -882,10 +892,11 @@ As 0006's 4.7 did, the tests land before the code. Every case pins its failure s
 | pieces in flight, per request; outstanding `shell.dweb_get`, all requests | 8; 256 | the machine waits for one to end; the piece waits in the dweb thread's FIFO |
 | incoming streams with credit, all requests | 128 | the request waits for one to end |
 | a whole piece; a raw block | 64 KiB; 2 MiB | `failed: "too_large"`, a verification failure |
-| a piece reply's headers | 8, each ≤ 8 KiB | a malformed reply: the piece fails, logged as a fault in main |
+| a piece reply's headers | 8, each ≤ 8 KiB | a malformed reply, past these or otherwise not one of the three forms: a protocol error (`dweb_get_reply`), and the connection ends (amendment 4); a well-formed error reply fails the piece as `error` |
 | a verify plan's path and query, together; each of its headers' values | 8 KiB (`MAX_PATH`), checked as the core checks the plan again ([`dweb.verify`](#dwebverify)). The check copies the path about five times before the request's machine exists, 41,101 bytes at the bound with nothing yet reserved, and the machine keeps a Swarm request's path, query and range and an IPFS request's range and tag uncounted: 8 KiB keeps all of them within the grant's 64 KiB allowance. 0006's URL bound, 64 KiB of UTF-16 code units, and more once the path is percent-encoded, would not. Common servers refuse request lines past about 8 KiB (nginx's default buffer, Apache's 8,190 bytes) | the plan is refused (`path`, `query` or `header`) before anything is made of it: 502, a logged core fault, as a refused plan |
 | stream window, each direction | 128 KiB; data frames ≤ 64 KiB | the sender waits for credit |
 | node bytes in flight to the core | 128 streams × 128 KiB = 16 MiB | not reachable: credit |
+| stream frames the reader holds for the dweb thread | coalesced, one entry per stream (a piece's data joined, with its terminal; a body's credit summed), each charged its buffers and 2,048 B, so a peer within credit stays within it whatever its framing: (128 streams + 1 being handled) × (a 128 KiB window, as its buffer grows by powers of two, + its largest terminal, an abort of 8 + 1,024 B, + 2,048) + 256 bodies main can credit (one per fetch it holds) × 2,048 = 17,829,896 B (16 MiB + 1,052,680 B); at most 16,384 entries, a defence only (a peer within credit has at most 385) | a protocol error (`stream_backlog`), never reached within credit; main reaches it past its credit, or with a flood of terminals or of other bodies' credit, while the dweb thread is behind |
 | rings in main | one per admitted fetch's body, verified or from 0007's service, kept until drained or cancelled: 256 × 128 KiB = 32 MiB | not reachable: fetch admission (256 active, 512 waiting, then 503) |
 | the dweb writer | 8 MiB of unwritten data | the machines wait for credit |
 | memory, per request | its grant, 2 MiB for Swarm and 8 MiB for IPFS, granted whole from the dweb thread's grants when the request starts: its budget, reserved before allocation (its windows, leaves and blocks in flight, the walk's parsed nodes and what it keeps of them, its queue of blocks to fetch, a directory's entries and its listing's page, each CAR section's hash job, the path's strings, its body until main takes it), and a fixed allowance, 64 KiB for either scheme ([What a grant covers](#what-a-grant-covers)) | fewer pieces in flight; a CAR gives way to raw blocks; a walk that can't fit at all is `unverifiable`, with the memory text ([Failures](#failures)) |
@@ -1042,13 +1053,18 @@ As 0006's 4.7 did, the tests land before the code. Every case pins its failure s
 5. **`freedom-cored`:** the dweb thread and hashing pool, `dweb.verify`, `shell.dweb_get`, `dweb.forget`, admission, budgets and cancel, with tests through the binary.
 6. **freedom-browser:**
    - verify plans in validation and the handler, `dweb-shell.js`, and stream frames on the core's connection;
+   - the handler takes `dweb.verify`'s two answers by their members: a head, with its trust, or an error plan, with the error page for a navigation (amendment 1); `MEMORY`'s refusal gets a plain-words line of its own on the error page;
+   - `car` in `dweb.verify`'s params, from the probe's result in the captured backend, for IPFS plans only (amendment 2);
+   - the schema-proxy check tolerates a row's `"protocol": 2`, and the methods it marks, before main adopts protocol 2 (amendment 3);
+   - `shell.dweb_get`'s params read strictly, each reply one of the three forms, `failed` from its closed set, and only the four headers within their bounds (amendment 4);
    - the decoder accepts 0009's abort codes only on the core's protocol-2 connection, each in its direction ([Streams in the core](#streams-in-the-core), abort codes); a service connection still takes only 0007's, and one of 0009's there is the protocol error `abort_code`;
    - the verification setting, on by default, and the probe;
    - strict mode: the profile setting, off by default, and `strict` in the captured backend;
    - the error page for a failed navigation;
    - `dweb.forget` when a private window's partition closes;
    - the labels and the nodes panel;
-   - then the [gates](#gates).
+   - then the [gates](#gates);
+   - then the core's follow-up PR that removes protocol 1 (the handshake's transitional note).
 7. **The default:** on for every external backend (decided, 1). Verification ships on once the gates pass; a gate that fails brings the default back to the user with its numbers.
 8. **freedom-ipfs:** pull requests of its own, into its integration branch, that adopt `fc-ipfs`'s bounded reader once the reader has merged here (decided, 11; [Upstream](#upstream)).
 9. **Later, if real content needs it:** a Swarm request refused for its memory (`request-memory`) is tried once more at an IPFS request's 8 MiB grant, admitted again under the same 128 MiB. Not built: real manifests stay far inside the limit.

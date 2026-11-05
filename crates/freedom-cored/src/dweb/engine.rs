@@ -144,6 +144,8 @@ pub enum Refusal {
 }
 
 impl Refusal {
+    /// Its error code, as the protocol writes it.
+    #[allow(dead_code)]
     pub fn code(self) -> &'static str {
         match self {
             Self::Busy => "busy",
@@ -472,9 +474,11 @@ impl Engine {
     pub fn room(&mut self, io: &mut dyn Io, now: Ms) {
         self.dispatch(io, now);
     }
+}
 
-    // ---- what the tests and the thread read -------------------------------
-
+/// What the tests read, and 5d's gates will.
+#[allow(dead_code)]
+impl Engine {
     /// Requests running, and waiting for their grant.
     pub fn counts(&self) -> (usize, usize) {
         (self.running.len(), self.waiting.len())
@@ -509,7 +513,9 @@ impl Engine {
     pub fn is_running(&self, id: u64) -> bool {
         self.running.contains_key(&id)
     }
+}
 
+impl Engine {
     // ---- inside ------------------------------------------------------------
 
     /// Starts what waits, in order, while the front's grant fits. It runs
@@ -1734,6 +1740,24 @@ mod tests {
         settle(&mut e, &mut f, &w, 10_000);
         assert!(!e.is_running(2));
         assert_eq!((e.granted(), e.streams()), (0, 0));
+    }
+
+    /// The wire refuses a `deadline_ms` past 360 s; the engine's sums
+    /// saturate all the same, so no deadline wraps to the past.
+    #[test]
+    fn a_deadline_at_the_clock_s_end_saturates() {
+        let mut w = World::new();
+        w.hold = Some("/chunks/".into());
+        let mut e = Engine::new(Bounds::default());
+        let mut f = Fake::new(256);
+        let mut r = swarm(SITE_A, "/index.html");
+        r.deadline_ms = Ms::MAX;
+        e.verify(&mut f, 1_000, 1, r);
+        settle(&mut e, &mut f, &w, 1_000);
+        assert_eq!(e.next_due(), Some(Ms::MAX));
+        e.tick(&mut f, 2_000);
+        assert_eq!(f.ending(1), None);
+        assert!(e.is_running(1));
     }
 
     #[test]

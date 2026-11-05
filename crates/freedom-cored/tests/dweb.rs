@@ -2,6 +2,8 @@
 //! documents, the real binary with the test playing main. Main answers the
 //! core's `shell.*` requests from scripts: naming's from the `quorum-agree`
 //! replay scenario's recordings, chain data's from the documents below.
+//! Design 0009's `dweb.verify`, at protocol 2 with streams, is in
+//! the `verify` module.
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
@@ -637,7 +639,7 @@ fn reply_to(core: &mut Core, id: u64, seen: Vec<Wire>) -> (Value, Vec<Value>) {
                 return (message, passed);
             }
             Wire::Message(message) => passed.push(message),
-            Wire::Credit => {}
+            Wire::Credit | Wire::Stream { .. } => {}
         }
     }
 }
@@ -830,4 +832,877 @@ fn the_chain_budget_ends_it() {
     answer_request(&mut core, &rpc, rpc_ok(&html_answer(b"<p>small</p>")));
     let (reply, _) = reply_to(&mut core, 4, Vec::new());
     assert!(reply["result"]["html_base64"].is_string(), "{reply}");
+}
+
+// ---------------------------------------------------------------------------
+// dweb.verify (design 0009): the dweb thread through the binary
+
+/// Design 0009 end to end: `dweb.verify`, `dweb.forget` and
+/// `shell.dweb_get`, the real binary at protocol 2 with the test playing
+/// main. Main answers the core's pieces as the honest nodes of
+/// vectors/dweb-verify.json do (Ant's chunks and files, the gateway's
+/// blocks), with the changes a test makes, and reads the verified bodies
+/// the core streams back.
+mod verify {
+    use std::collections::{BTreeMap, HashMap};
+
+    use sha2::{Digest, Sha256};
+
+    use super::common::{KIND_ABORT, KIND_DATA, KIND_END, KIND_STREAM_CREDIT, stream_frame};
+    use super::*;
+
+    const WINDOW: usize = 128 << 10;
+    const MAX_DATA: usize = 64 << 10;
+    const SITE_A: &str = "3c8b9184787f719e7184f51b5c595a950d8cec49c765dc0e5a8f1c253e54591c";
+    const SITE_V1: &str = "bafybeiguwjmddvr4iiah6ekgvrovb5zfb6eg5c6loikxvxlxzlwea5dabm";
+    /// file-524288-rs0's single-file manifest: `/file.bin`, 512 KiB.
+    const FILE_512K: &str = "eee70ccdb4cff5547504369812f82dcb20d77ab263fe38ae77f4ca29b4e00e66";
+    const INDEX_HTML: &[u8] = b"<!doctype html><title>site</title><p>index</p>\n";
+
+    fn vectors(name: &str) -> Value {
+        let path = format!("{}/../../vectors/{name}", env!("CARGO_MANIFEST_DIR"));
+        serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap()
+    }
+
+    fn unb64(v: &Value) -> Vec<u8> {
+        base64::engine::general_purpose::STANDARD
+            .decode(v.as_str().unwrap())
+            .unwrap()
+    }
+
+    /// The vectors' content: SHA-256(seed ‖ u64_be(i)), concatenated, cut.
+    fn content(seed: &str, n: usize) -> Vec<u8> {
+        let mut out = Vec::with_capacity(n + 32);
+        let mut i = 0u64;
+        while out.len() < n {
+            let mut h = Sha256::new();
+            h.update(seed.as_bytes());
+            h.update(i.to_be_bytes());
+            out.extend_from_slice(&h.finalize());
+            i += 1;
+        }
+        out.truncate(n);
+        out
+    }
+
+    /// How main answers a piece.
+    #[derive(Clone)]
+    enum Answer {
+        Whole(u16, Vec<(String, String)>, Vec<u8>),
+        /// A stream: its head, its body, and, with `cut`, an abort with that
+        /// code after that many bytes instead of its end.
+        Stream {
+            status: u16,
+            headers: Vec<(String, String)>,
+            body: Vec<u8>,
+            cut: Option<(usize, &'static str)>,
+        },
+        /// Never answered until the core cancels it.
+        Hold,
+    }
+
+    /// The honest nodes of dweb-verify.json: Ant's chunks and files, the
+    /// gateway's blocks. Read once, for every test.
+    struct Honest {
+        chunks: HashMap<String, Vec<u8>>,
+        files: HashMap<String, Vec<u8>>,
+        blocks: HashMap<String, Vec<u8>>,
+    }
+
+    fn honest() -> &'static Honest {
+        static HONEST: std::sync::OnceLock<Honest> = std::sync::OnceLock::new();
+        HONEST.get_or_init(Honest::read)
+    }
+
+    /// The honest nodes, and the answers a test changes, by path prefix.
+    /// Its gateway serves raw blocks only.
+    struct World {
+        honest: &'static Honest,
+        changes: Vec<(String, Answer)>,
+        /// Streams whose path starts so are cut after that many bytes, with
+        /// that abort code.
+        cuts: Vec<(String, usize, &'static str)>,
+    }
+
+    impl Honest {
+        fn read() -> Self {
+            let d = vectors("dweb-verify.json");
+            let mut chunks = HashMap::new();
+            for (a, w) in d["swarm"]["chunks"].as_object().unwrap() {
+                chunks.insert(a.clone(), unb64(w));
+            }
+            let mut files = HashMap::new();
+            for f in d["swarm"]["files"].as_array().unwrap() {
+                let size = f["size"].as_u64().unwrap() as usize;
+                let seed = f["seed"].as_str().unwrap();
+                files.insert(f["root"].as_str().unwrap().to_owned(), content(seed, size));
+            }
+            for m in d["swarm"]["manifests"].as_array().unwrap() {
+                for e in m["entries"].as_array().unwrap() {
+                    if let (Some(r), Some(seed)) = (e["data_ref"].as_str(), e["seed"].as_str()) {
+                        let size = e["size"].as_u64().unwrap() as usize;
+                        files.insert(r.to_owned(), content(seed, size));
+                    }
+                }
+            }
+            let mut blocks = HashMap::new();
+            for (c, b) in d["ipfs"]["blocks"].as_object().unwrap() {
+                blocks.insert(c.clone(), unb64(b));
+            }
+            for dir in d["ipfs"]["directories"].as_array().unwrap() {
+                for e in dir["entries"].as_array().unwrap() {
+                    let size = e["size"].as_u64().unwrap() as usize;
+                    let bytes = match (e["text"].as_str(), e["seed"].as_str()) {
+                        (Some(t), _) => t.as_bytes().to_vec(),
+                        (None, Some(seed)) => content(seed, size),
+                        _ => continue,
+                    };
+                    for l in e["leaves"].as_array().unwrap() {
+                        let from = l["from"].as_u64().unwrap() as usize;
+                        let len = l["length"].as_u64().unwrap() as usize;
+                        blocks
+                            .entry(l["cid"].as_str().unwrap().to_owned())
+                            .or_insert_with(|| bytes[from..from + len].to_vec());
+                    }
+                }
+            }
+            Self {
+                chunks,
+                files,
+                blocks,
+            }
+        }
+    }
+
+    impl World {
+        fn new() -> Self {
+            Self {
+                honest: honest(),
+                changes: Vec::new(),
+                cuts: Vec::new(),
+            }
+        }
+
+        fn cut(mut self, prefix: &str, after: usize, code: &'static str) -> Self {
+            self.cuts.push((prefix.to_owned(), after, code));
+            self
+        }
+
+        fn change(mut self, prefix: &str, answer: Answer) -> Self {
+            self.changes.push((prefix.to_owned(), answer));
+            self
+        }
+
+        fn stream(status: u16, headers: Vec<(String, String)>, body: Vec<u8>) -> Answer {
+            Answer::Stream {
+                status,
+                headers,
+                body,
+                cut: None,
+            }
+        }
+
+        fn answer(&self, path: &str, headers: &[(String, String)]) -> Answer {
+            let mut answer = self.honest(path, headers);
+            if let Answer::Stream { cut, .. } = &mut answer
+                && let Some((_, after, code)) = self.cuts.iter().find(|(p, ..)| path.starts_with(p))
+            {
+                *cut = Some((*after, *code));
+            }
+            answer
+        }
+
+        fn honest(&self, path: &str, headers: &[(String, String)]) -> Answer {
+            if let Some((_, a)) = self.changes.iter().find(|(p, _)| path.starts_with(p)) {
+                return a.clone();
+            }
+            // The gateway serves no CARs: a CAR request gets a 200 that
+            // isn't one, as a gateway that ignores `format=car` answers.
+            if path.contains("format=car") {
+                let html = ("content-type".to_owned(), "text/html".to_owned());
+                return Self::stream(200, vec![html], b"<p>not a CAR</p>".to_vec());
+            }
+            let not_found = || Answer::Whole(404, vec![], b"{}".to_vec());
+            if let Some(a) = path.strip_prefix("/chunks/") {
+                return match self.honest.chunks.get(a) {
+                    Some(w) => Answer::Whole(200, vec![], w.clone()),
+                    None => not_found(),
+                };
+            }
+            if let Some(r) = path.strip_prefix("/bytes/") {
+                let Some(file) = self.honest.files.get(r) else {
+                    return Self::stream(404, vec![], vec![]);
+                };
+                let range = headers.iter().find(|(n, _)| n == "range").unwrap();
+                let (a, b) = range
+                    .1
+                    .strip_prefix("bytes=")
+                    .unwrap()
+                    .split_once('-')
+                    .unwrap();
+                let (a, b): (usize, usize) = (a.parse().unwrap(), b.parse().unwrap());
+                let b = b.min(file.len() - 1);
+                let cr = format!("bytes {a}-{b}/{}", file.len());
+                return Self::stream(
+                    206,
+                    vec![("content-range".into(), cr)],
+                    file[a..=b].to_vec(),
+                );
+            }
+            let cid = path
+                .strip_prefix("/ipfs/")
+                .unwrap()
+                .split('?')
+                .next()
+                .unwrap();
+            match self.honest.blocks.get(cid) {
+                Some(b) => Self::stream(
+                    200,
+                    vec![("content-type".into(), "application/vnd.ipld.raw".into())],
+                    b.clone(),
+                ),
+                None => Self::stream(404, vec![], vec![]),
+            }
+        }
+    }
+
+    /// A piece main is streaming: what is left of it, and the core's credit.
+    struct Flow {
+        body: Vec<u8>,
+        at: usize,
+        room: usize,
+        cut: Option<(usize, &'static str)>,
+    }
+
+    /// What a `dweb.verify` got.
+    #[derive(Default, Debug)]
+    struct Got {
+        result: Option<Value>,
+        body: Vec<u8>,
+        ended: bool,
+        abort: Option<Value>,
+    }
+
+    impl Got {
+        fn done(&self) -> bool {
+            match &self.result {
+                None => false,
+                Some(m) if m.get("error").is_some() => true,
+                Some(m) if m["result"]["body"] == true => self.ended || self.abort.is_some(),
+                Some(_) => true,
+            }
+        }
+    }
+
+    /// The test as main: the core at protocol 2 and the world it reaches.
+    struct Main {
+        _dir: tempfile::TempDir,
+        core: Core,
+        world: World,
+        next_id: u64,
+        flows: BTreeMap<u64, Flow>,
+        /// Every `shell.dweb_get` the core sent: its ID and params.
+        asked: Vec<(u64, Value)>,
+        held: Vec<u64>,
+        /// The core's cancels of its pieces.
+        cancels: Vec<u64>,
+        got: BTreeMap<u64, Got>,
+        /// Whether main credits the verified bodies as they come.
+        credits_bodies: bool,
+        /// The most data main puts in one of a piece's frames.
+        frame_size: usize,
+        /// The most bytes main credits in one frame.
+        credit_step: usize,
+    }
+
+    impl Main {
+        fn new(world: World) -> Self {
+            let (dir, data, locks) = dirs();
+            let mut core = spawn("serve", &data, &locks, &[]);
+            let hello = core.hello_streams();
+            assert_eq!(hello["result"]["protocol"], 2, "{hello}");
+            let caps = hello["result"]["capabilities"].as_array().unwrap();
+            assert!(caps.contains(&json!("dweb.verify")), "{hello}");
+            Self {
+                _dir: dir,
+                core,
+                world,
+                next_id: 2,
+                flows: BTreeMap::new(),
+                asked: Vec::new(),
+                held: Vec::new(),
+                cancels: Vec::new(),
+                got: BTreeMap::new(),
+                credits_bodies: true,
+                frame_size: MAX_DATA,
+                credit_step: usize::MAX,
+            }
+        }
+
+        /// Sends `method` with `params`; its ID.
+        fn call(&mut self, method: &str, params: Value) -> u64 {
+            let id = self.next_id;
+            self.next_id += 1;
+            self.core.send(&shell_request(id, method, params));
+            self.got.insert(id, Got::default());
+            id
+        }
+
+        fn verify(&mut self, params: Value) -> u64 {
+            self.call("dweb.verify", params)
+        }
+
+        /// Writes what the core's credit allows of each piece, ending or
+        /// cutting a piece once its bytes have gone. True if it wrote.
+        fn send_pieces(&mut self) -> bool {
+            let mut wrote = false;
+            let mut ended = Vec::new();
+            for (&id, f) in self.flows.iter_mut() {
+                let stop = f.cut.map_or(f.body.len(), |(n, _)| n.min(f.body.len()));
+                while f.at < stop && f.room > 0 {
+                    let n = f.room.min(self.frame_size).min(stop - f.at);
+                    let frame = stream_frame(KIND_DATA, id, &f.body[f.at..f.at + n]);
+                    self.core.send_raw(&frame);
+                    f.at += n;
+                    f.room -= n;
+                    wrote = true;
+                }
+                if f.at == stop {
+                    match f.cut {
+                        Some((_, code)) => {
+                            let abort = json!({ "code": code, "message": "cut" }).to_string();
+                            self.core
+                                .send_raw(&stream_frame(KIND_ABORT, id, abort.as_bytes()));
+                        }
+                        None => self.core.send_raw(&stream_frame(KIND_END, id, b"")),
+                    }
+                    ended.push(id);
+                    wrote = true;
+                }
+            }
+            for id in ended {
+                self.flows.remove(&id);
+            }
+            wrote
+        }
+
+        fn respond(&mut self, id: u64, result: Value) {
+            self.core
+                .send(&json!({ "type": "response", "id": id, "result": result }));
+        }
+
+        /// A `shell.dweb_get`, answered as the world answers it.
+        fn piece(&mut self, request: &Value) {
+            let id = request["id"].as_u64().unwrap();
+            let params = request["params"].clone();
+            let path = params["path"].as_str().unwrap().to_owned();
+            let headers: Vec<(String, String)> = params["headers"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|h| (h[0].as_str().unwrap().into(), h[1].as_str().unwrap().into()))
+                .collect();
+            self.asked.push((id, params.clone()));
+            let pairs = |h: &[(String, String)]| -> Value {
+                h.iter()
+                    .map(|(n, v)| json!([n, v]))
+                    .collect::<Vec<_>>()
+                    .into()
+            };
+            match self.world.answer(&path, &headers) {
+                Answer::Whole(status, headers, body) => self.respond(
+                    id,
+                    json!({ "status": status, "headers": pairs(&headers), "body_base64": b64(body) }),
+                ),
+                Answer::Stream {
+                    status,
+                    headers,
+                    body,
+                    cut,
+                } => {
+                    assert_eq!(params["stream"], true, "{path}");
+                    self.respond(
+                        id,
+                        json!({ "status": status, "headers": pairs(&headers), "body": true }),
+                    );
+                    self.flows.insert(
+                        id,
+                        Flow {
+                            body,
+                            at: 0,
+                            room: WINDOW,
+                            cut,
+                        },
+                    );
+                }
+                Answer::Hold => self.held.push(id),
+            }
+        }
+
+        /// One frame from the core, handled as main handles it.
+        fn take(&mut self, wire: Wire) {
+            match wire {
+                Wire::Message(m) if m["type"] == "request" => {
+                    assert_eq!(m["method"], "shell.dweb_get", "{m}");
+                    self.piece(&m);
+                }
+                Wire::Message(m) if m["type"] == "cancel" => {
+                    let id = m["id"].as_u64().unwrap();
+                    self.cancels.push(id);
+                    if self.flows.remove(&id).is_some() {
+                        let abort = json!({ "code": "cancelled", "message": "Cancelled" });
+                        self.core.send_raw(&stream_frame(
+                            KIND_ABORT,
+                            id,
+                            abort.to_string().as_bytes(),
+                        ));
+                    } else if let Some(at) = self.held.iter().position(|h| *h == id) {
+                        self.held.remove(at);
+                        self.respond(id, json!({ "failed": "aborted" }));
+                    }
+                }
+                Wire::Message(m) if m["type"] == "response" => {
+                    let id = m["id"].as_u64().unwrap();
+                    let got = self.got.get_mut(&id).expect("a response to main's request");
+                    assert!(got.result.is_none(), "a second response: {m}");
+                    got.result = Some(m);
+                }
+                Wire::Stream { kind, id, rest } => match kind {
+                    KIND_DATA => {
+                        let got = self.got.get_mut(&id).expect("a body of main's request");
+                        assert!(!got.ended && got.abort.is_none());
+                        got.body.extend_from_slice(&rest);
+                        let mut left = if self.credits_bodies { rest.len() } else { 0 };
+                        while left > 0 {
+                            let n = left.min(self.credit_step);
+                            let credit = u32::try_from(n).unwrap().to_be_bytes();
+                            self.core
+                                .send_raw(&stream_frame(KIND_STREAM_CREDIT, id, &credit));
+                            left -= n;
+                        }
+                    }
+                    KIND_END => self.got.get_mut(&id).unwrap().ended = true,
+                    KIND_ABORT => {
+                        self.got.get_mut(&id).unwrap().abort =
+                            Some(serde_json::from_slice(&rest).unwrap());
+                    }
+                    KIND_STREAM_CREDIT => {
+                        let n = u32::from_be_bytes(rest[..4].try_into().unwrap()) as usize;
+                        if let Some(f) = self.flows.get_mut(&id) {
+                            f.room += n;
+                        }
+                    }
+                    other => panic!("stream kind {other:#04x}"),
+                },
+                other => panic!("unexpected from the core: {other:?}"),
+            }
+        }
+
+        /// Runs main until `done`, or until nothing has moved for `quiet`.
+        fn run_until(&mut self, quiet: Duration, done: impl Fn(&Self) -> bool) -> bool {
+            loop {
+                if done(self) {
+                    return true;
+                }
+                let wrote = self.send_pieces();
+                let wait = if wrote {
+                    Duration::from_millis(1)
+                } else {
+                    quiet
+                };
+                match self.core.recv_wire_within(wait) {
+                    Some(wire) => self.take(wire),
+                    None if !wrote => return done(self),
+                    None => {}
+                }
+            }
+        }
+
+        /// Runs main until each of `ids` is answered whole.
+        fn settle(&mut self, ids: &[u64]) {
+            let ok = self.run_until(Duration::from_secs(20), |m| {
+                ids.iter().all(|id| m.got[id].done())
+            });
+            assert!(
+                ok,
+                "{:?}",
+                ids.iter().map(|id| &self.got[id]).collect::<Vec<_>>()
+            );
+        }
+
+        fn result(&self, id: u64) -> &Value {
+            &self.got[&id].result.as_ref().unwrap()["result"]
+        }
+
+        fn error_code(&self, id: u64) -> &Value {
+            &self.got[&id].result.as_ref().unwrap()["error"]["code"]
+        }
+    }
+
+    /// A verify plan for `root` and `path`, the backend's retry, timers,
+    /// response and trust as dweb.open writes them (dweb-verify-plans.json).
+    fn plan(root: Value, path: &str, headers: Value) -> Value {
+        let node = if root.get("swarm").is_some() {
+            "ant"
+        } else {
+            "ipfs"
+        };
+        let plans = vectors("dweb-verify-plans.json");
+        let mut plan = plans["requests"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|r| r["plan"]["verify"]["node"] == node)
+            .unwrap()["plan"]
+            .clone();
+        let v = &mut plan["verify"];
+        v["root"] = root;
+        v["path"] = path.into();
+        v["query"] = "".into();
+        v["headers"] = headers;
+        plan
+    }
+
+    fn params(plan: Value, method: &str, car: Option<bool>) -> Value {
+        let mut p = json!({
+            "plan": plan, "method": method, "partition": null, "private": false, "deadline_ms": 360_000,
+        });
+        if let Some(car) = car {
+            p["car"] = car.into();
+        }
+        p
+    }
+
+    fn swarm(path: &str) -> Value {
+        params(
+            plan(json!({ "swarm": SITE_A }), path, json!([])),
+            "GET",
+            None,
+        )
+    }
+
+    fn ipfs(path: &str, car: bool) -> Value {
+        params(
+            plan(json!({ "ipfs": SITE_V1 }), path, json!([])),
+            "GET",
+            Some(car),
+        )
+    }
+
+    #[test]
+    fn gets_and_heads_for_swarm_and_ipfs() {
+        let mut m = Main::new(World::new());
+        let a = m.verify(swarm("/index.html"));
+        let b = m.verify(swarm("/style.css"));
+        let c = m.verify(ipfs("/index.html", false));
+        let mut head = swarm("/style.css");
+        head["method"] = "HEAD".into();
+        let d = m.verify(head);
+        let mut head = ipfs("/index.html", false);
+        head["method"] = "HEAD".into();
+        let e = m.verify(head);
+        m.settle(&[a, b, c, d, e]);
+        for id in [a, b, c] {
+            assert_eq!(m.result(id)["status"], 200, "{:?}", m.got[&id]);
+            assert_eq!(m.result(id)["body"], true);
+            assert_eq!(m.result(id)["trust"]["content"], "verified");
+            assert!(m.got[&id].ended, "{id}");
+        }
+        assert_eq!(m.got[&a].body, content("site-index", 300));
+        assert_eq!(m.got[&b].body, content("site-style", 5000));
+        assert_eq!(m.got[&c].body, INDEX_HTML);
+        // A HEAD's head is the GET's, as the bundled node answers a HEAD
+        // (Ant's has no `accept-ranges`), with no body and no stream.
+        for (get, head) in [(b, d), (c, e)] {
+            let (g, h) = (m.result(get), m.result(head));
+            assert_eq!((&h["status"], &h["trust"]), (&g["status"], &g["trust"]));
+            assert_eq!(h["body"], false);
+            for header in h["headers"].as_array().unwrap() {
+                assert!(g["headers"].as_array().unwrap().contains(header), "{h} {g}");
+            }
+            assert!(m.got[&head].body.is_empty() && !m.got[&head].ended);
+        }
+    }
+
+    /// Main may frame its pieces and its credit as it likes within credit:
+    /// pieces in one-byte data frames, and each body's credit a byte at a
+    /// time, join their streams' entries in the core's reader, and the
+    /// bodies verify the same.
+    #[test]
+    fn pieces_and_credits_in_one_byte_frames_verify_the_same() {
+        let mut m = Main::new(World::new());
+        m.frame_size = 1;
+        m.credit_step = 1;
+        let a = m.verify(swarm("/style.css"));
+        let c = m.verify(ipfs("/index.html", false));
+        m.settle(&[a, c]);
+        for id in [a, c] {
+            assert_eq!(m.result(id)["status"], 200, "{:?}", m.got[&id]);
+            assert_eq!(m.result(id)["trust"]["content"], "verified");
+            assert!(m.got[&id].ended, "{id}");
+        }
+        assert_eq!(m.got[&a].body, content("site-style", 5000));
+        assert_eq!(m.got[&c].body, INDEX_HTML);
+        assert!(
+            m.asked.iter().any(|(_, p)| p["stream"] == true),
+            "a streamed piece"
+        );
+    }
+
+    #[test]
+    fn a_range_is_an_exact_206() {
+        let mut m = Main::new(World::new());
+        let ranged = plan(
+            json!({ "swarm": SITE_A }),
+            "/style.css",
+            json!([["range", "bytes=100-199"]]),
+        );
+        let id = m.verify(params(ranged, "GET", None));
+        m.settle(&[id]);
+        assert_eq!(m.result(id)["status"], 206);
+        assert_eq!(m.got[&id].body, content("site-style", 5000)[100..200]);
+    }
+
+    /// Amendment 1's vectors: for each node, the bundled node's own 404,
+    /// proven, is a head with its trust and the node's body; the core's own
+    /// 404 is an error plan. Each is exactly what dweb-verify-cases.json's
+    /// `answers` writes.
+    #[test]
+    fn a_nodes_own_404_is_a_head_and_the_cores_is_an_error_plan() {
+        let cases = vectors("dweb-verify-cases.json");
+        let requests = cases["requests"].as_array().unwrap();
+        for answer in cases["answers"].as_array().unwrap() {
+            let case = requests.iter().find(|c| c["id"] == answer["case"]).unwrap();
+            let mut world = World::new();
+            for change in case["world"]["changes"].as_array().unwrap() {
+                let body = unb64(&change["body"]["base64"]);
+                let status = change["status"].as_u64().unwrap() as u16;
+                world = match change["piece"].as_str().unwrap() {
+                    "chunk" => {
+                        let path = format!("/chunks/{}", change["address"].as_str().unwrap());
+                        world.change(&path, Answer::Whole(status, vec![], body))
+                    }
+                    "car" => world.change("/ipfs/", World::stream(status, vec![], body)),
+                    other => panic!("{other}"),
+                };
+            }
+            let p = &case["plan"];
+            let plan = plan(
+                p["root"].clone(),
+                p["path"].as_str().unwrap(),
+                p["headers"].clone(),
+            );
+            let car = (p["node"] == "ipfs").then(|| case["world"]["gateway"]["car"] == true);
+            let mut m = Main::new(world);
+            let id = m.verify(params(plan, case["method"].as_str().unwrap(), car));
+            m.settle(&[id]);
+            assert_eq!(m.result(id), &answer["result"], "{}", answer["case"]);
+            if let Some(body) = answer.get("body") {
+                assert_eq!(
+                    m.got[&id].body,
+                    unb64(&body["base64"]),
+                    "{}",
+                    answer["case"]
+                );
+                assert!(m.got[&id].ended);
+            }
+        }
+    }
+
+    #[test]
+    fn a_cancel_before_the_head_is_cancelled_and_frees_its_pieces() {
+        let mut m = Main::new(World::new().change("/chunks/", Answer::Hold));
+        let id = m.verify(swarm("/index.html"));
+        assert!(m.run_until(Duration::from_secs(10), |m| !m.held.is_empty()));
+        m.core.send(&json!({ "type": "cancel", "id": id }));
+        m.settle(&[id]);
+        assert_eq!(m.error_code(id), "cancelled");
+        // Its piece was cancelled at main, and answered `aborted`.
+        assert!(m.run_until(Duration::from_secs(10), |m| m.held.is_empty()));
+        assert!(!m.cancels.is_empty());
+        // The core goes on.
+        m.world.changes.clear();
+        let next = m.verify(swarm("/index.html"));
+        m.settle(&[next]);
+        assert_eq!(m.got[&next].body, content("site-index", 300));
+    }
+
+    #[test]
+    fn a_cancel_mid_body_aborts_it_cancelled() {
+        let mut m = Main::new(World::new());
+        // The page reads nothing: the core sends one window of the body,
+        // then waits for credit.
+        m.credits_bodies = false;
+        let id = m.verify(ipfs("/img/photo.jpg", false));
+        m.run_until(Duration::from_secs(2), |m| m.got[&id].body.len() >= WINDOW);
+        assert_eq!(m.result(id)["status"], 200);
+        assert_eq!(m.got[&id].body.len(), WINDOW);
+        m.core.send(&json!({ "type": "cancel", "id": id }));
+        m.settle(&[id]);
+        assert_eq!(m.got[&id].abort.as_ref().unwrap()["code"], "cancelled");
+        assert!(!m.got[&id].ended);
+        // Nothing of its pieces is left open at main.
+        m.run_until(Duration::from_secs(2), |m| m.flows.is_empty());
+        assert!(m.flows.is_empty() && m.held.is_empty());
+        let next = m.verify(ipfs("/index.html", false));
+        m.credits_bodies = true;
+        m.settle(&[next]);
+        assert_eq!(m.got[&next].body, INDEX_HTML);
+    }
+
+    #[test]
+    fn dweb_forget_drops_the_partitions_structure() {
+        let mut m = Main::new(World::new());
+        let chunks = |m: &Main| {
+            m.asked
+                .iter()
+                .filter(|(_, p)| p["path"].as_str().unwrap().starts_with("/chunks/"))
+                .count()
+        };
+        let mut counts = Vec::new();
+        for step in 0..3 {
+            if step == 2 {
+                let id = m.call("dweb.forget", json!({ "partition": null }));
+                m.settle(&[id]);
+                assert_eq!(m.result(id), &json!({}));
+            }
+            let before = chunks(&m);
+            let id = m.verify(swarm("/index.html"));
+            m.settle(&[id]);
+            assert_eq!(m.got[&id].body, content("site-index", 300));
+            counts.push(chunks(&m) - before);
+        }
+        // The second read the manifest from the partition's cache; once
+        // forgotten, the third fetched it again.
+        assert!(counts[1] < counts[0], "{counts:?}");
+        assert_eq!(counts[2], counts[0], "{counts:?}");
+        // Its params are read strictly.
+        let bad = m.call("dweb.forget", json!({ "partition": null, "extra": 1 }));
+        m.settle(&[bad]);
+        assert_eq!(m.error_code(bad), "invalid_argument");
+    }
+
+    #[test]
+    fn verify_params_are_read_strictly() {
+        let mut m = Main::new(World::new());
+        let mut wrong = Vec::new();
+        // `car` is the IPFS plan's own: required there, refused for Ant.
+        let mut p = swarm("/index.html");
+        p["car"] = true.into();
+        wrong.push(m.verify(p));
+        let mut p = ipfs("/index.html", false);
+        p.as_object_mut().unwrap().remove("car");
+        wrong.push(m.verify(p));
+        let mut p = swarm("/index.html");
+        p["extra"] = 1.into();
+        wrong.push(m.verify(p));
+        m.settle(&wrong);
+        for id in wrong {
+            assert_eq!(m.error_code(id), "invalid_argument", "{:?}", m.got[&id]);
+        }
+    }
+
+    #[test]
+    fn a_stalled_piece_truncates_the_body_piece_failed() {
+        // style.css's /bytes piece stalls after 1,000 bytes, inside its first
+        // leaf: main's body idle timer ends it (as `stall-before-needed`).
+        let world = World::new().cut("/bytes/", 1000, "stalled");
+        let mut m = Main::new(world);
+        let id = m.verify(swarm("/style.css"));
+        m.settle(&[id]);
+        assert_eq!(
+            m.result(id)["status"],
+            200,
+            "{:?} {:?}",
+            m.got[&id],
+            m.asked
+        );
+        assert!(m.got[&id].body.is_empty());
+        assert_eq!(
+            m.got[&id].abort,
+            Some(
+                json!({ "code": "piece_failed", "message": "The external Swarm node stopped sending" })
+            )
+        );
+    }
+
+    #[test]
+    fn a_wrong_car_true_falls_back_to_raw_blocks() {
+        // The gateway serves no CARs, though main says it does: it answers
+        // a CAR request with a 200 that isn't one.
+        let mut m = Main::new(World::new());
+        let id = m.verify(ipfs("/index.html", true));
+        m.settle(&[id]);
+        assert_eq!(m.result(id)["status"], 200);
+        assert_eq!(m.got[&id].body, INDEX_HTML);
+        // The CAR went first; each CAR was cancelled, and raw blocks carried
+        // the walk.
+        let path = |p: &Value| p["path"].as_str().unwrap().to_owned();
+        assert!(path(&m.asked[0].1).contains("format=car"), "{:?}", m.asked);
+        for (get, p) in &m.asked {
+            if path(p).contains("format=car") {
+                assert!(m.cancels.contains(get), "{:?}", m.asked);
+            }
+        }
+        assert!(
+            m.asked
+                .iter()
+                .any(|(_, p)| path(p).ends_with("?format=raw"))
+        );
+    }
+
+    #[test]
+    fn a_stream_frame_past_credit_is_a_protocol_error() {
+        // The page reads nothing, so the core credits a piece only as its
+        // bytes leave in the body: once that waits, so does the piece.
+        let mut m = Main::new(World::new());
+        m.credits_bodies = false;
+        let id = m.verify(params(
+            plan(json!({ "swarm": FILE_512K }), "/file.bin", json!([])),
+            "GET",
+            None,
+        ));
+        m.run_until(Duration::from_secs(2), |_| false);
+        assert!(m.got[&id].body.len() <= WINDOW);
+        // A piece still open, its credit spent or not: one byte past it.
+        let (&get, f) = m
+            .flows
+            .iter_mut()
+            .find(|(_, f)| f.body.len() - f.at > f.room)
+            .unwrap_or_else(|| panic!("no piece waits for credit: {:?} {:?}", m.got[&id], m.asked));
+        let n = f.room + 1;
+        let bytes = f.body[f.at..f.at + n].to_vec();
+        f.at += n;
+        for part in bytes.chunks(MAX_DATA) {
+            m.core.send_raw(&stream_frame(KIND_DATA, get, part));
+        }
+        assert_eq!(m.core.exit_code(Duration::from_secs(10)), 76);
+        let stderr = m.core.stderr();
+        assert!(stderr.contains("window_overrun"), "{stderr}");
+    }
+
+    #[test]
+    fn main_gone_mid_body_ends_the_core() {
+        let mut m = Main::new(World::new());
+        m.credits_bodies = false;
+        let id = m.verify(ipfs("/img/photo.jpg", false));
+        m.run_until(Duration::from_secs(2), |m| m.got[&id].body.len() >= WINDOW);
+        assert_eq!(m.got[&id].body.len(), WINDOW);
+        // Main crashes: stdin closes with a body half sent and pieces open.
+        // The core stops its dweb thread and hashing pool and exits.
+        m.core.close_stdin();
+        assert_eq!(m.core.exit_code(Duration::from_secs(10)), 0);
+    }
+
+    #[test]
+    fn at_protocol_1_stream_frames_and_dweb_methods_are_unknown() {
+        let (_dir, data, locks) = dirs();
+        let mut core = spawn("serve", &data, &locks, &[]);
+        core.hello();
+        let reply = core.call_shell(2, "dweb.verify", swarm("/index.html"));
+        assert_eq!(reply["error"]["code"], "unknown_method", "{reply}");
+        core.send_raw(&stream_frame(KIND_STREAM_CREDIT, 2, &1u32.to_be_bytes()));
+        assert_eq!(core.exit_code(Duration::from_secs(10)), 76);
+        assert!(core.stderr().contains("unknown_frame_kind"));
+    }
 }

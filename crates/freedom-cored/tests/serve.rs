@@ -129,13 +129,14 @@ fn handshake_rules() {
     core.send(&json!({ "type": "cancel", "id": 1 }));
     assert_eq!(core.exit_code(Duration::from_secs(5)), 76);
 
-    // A protocol mismatch is answered, then the core exits.
+    // A protocol mismatch is answered, then the core exits. (Protocol 2
+    // is the streams' version, design 0009.)
     let (_root, data, locks) = dirs();
     let mut core = spawn("serve", &data, &locks, &[]);
     let reply = core.call_shell(
         1,
         "core.hello",
-        json!({ "protocol": 2, "shell_version": "t", "auto_lock_ms": 0 }),
+        json!({ "protocol": 3, "shell_version": "t", "auto_lock_ms": 0 }),
     );
     assert_eq!(reply["error"]["code"], "protocol_mismatch");
     assert_eq!(core.exit_code(Duration::from_secs(5)), 76);
@@ -549,4 +550,107 @@ fn hello_waits_for_the_snapshot() {
         core.call(2, "vault.status", json!({}))["result"]["exists"],
         false
     );
+}
+
+/// Design 0009: protocol 1 is accepted, with exactly today's capabilities
+/// and methods, until the browser speaks 2; protocol 2 adds the streamed
+/// methods and `streams`. Any other version is a mismatch, and protocol 2
+/// without stream frames is refused.
+#[test]
+fn protocol_1_keeps_its_surface_and_protocol_2_adds_streams() {
+    let today: Vec<&str> = vec![
+        "core.hello",
+        "core.shutdown",
+        "vault.status",
+        "vault.lock",
+        "vault.touch",
+        "vault.unlock",
+        "vault.verify_password",
+        "vault.change_password",
+        "vault.delete",
+        "vault.export_mnemonic",
+        "vault.export_private_key",
+        "vault.create",
+        "vault.import",
+        "vault.reconcile",
+        "nodes.write_identity",
+        "nodes.op_status",
+        "nodes.seal_radicle_key",
+        "keys.generate_mnemonic",
+        "keys.validate_mnemonic",
+        "keys.addresses",
+        "keys.radicle_did",
+        "compat.private_key",
+        "compat.bee_wallet_key",
+        "compat.publisher_key",
+        "sign.transaction",
+        "sign.message",
+        "sign.typed_data",
+        "swarm.sign_soc",
+        "typed_data.hash",
+        "naming.configure",
+        "naming.availability",
+        "naming.resolve_content",
+        "naming.resolve_address",
+        "naming.resolve_reverse",
+        "naming.resolve_tezos",
+        "naming.invalidate_content",
+        "naming.invalidate_tezos",
+        "dweb.open",
+        "fragments",
+        "myotis_refusal_codes",
+        "exclude_sources",
+        "colibri_faults",
+    ];
+    let names = |hello: &serde_json::Value| -> Vec<String> {
+        hello["result"]["capabilities"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|c| c.as_str().unwrap().to_owned())
+            .collect()
+    };
+    let (_root, data, locks) = dirs();
+    let mut core = spawn("serve", &data, &locks, &[]);
+    let hello = core.hello();
+    assert_eq!(hello["result"]["protocol"], 1);
+    assert_eq!(names(&hello), today);
+    for (id, method) in [(2, "dweb.verify"), (3, "dweb.forget")] {
+        let reply = core.call_shell(id, method, json!({}));
+        assert_eq!(
+            reply["error"]["code"], "unknown_method",
+            "{method}: {reply}"
+        );
+    }
+    core.call_shell(4, "core.shutdown", json!({}));
+    assert_eq!(core.exit_code(Duration::from_secs(5)), 0);
+
+    let mut core = spawn("serve", &data, &locks, &[]);
+    let hello = core.hello_streams();
+    assert_eq!(hello["result"]["protocol"], 2);
+    let mut v2: Vec<String> = today.iter().map(|s| (*s).to_owned()).collect();
+    let at = v2.iter().position(|c| c == "dweb.open").unwrap() + 1;
+    v2.splice(at..at, ["dweb.verify".to_owned(), "dweb.forget".to_owned()]);
+    v2.push("streams".to_owned());
+    assert_eq!(names(&hello), v2);
+    core.call_shell(2, "core.shutdown", json!({}));
+    assert_eq!(core.exit_code(Duration::from_secs(5)), 0);
+
+    // Protocol 3: a mismatch naming the core's highest.
+    let mut core = spawn("serve", &data, &locks, &[]);
+    let reply = core.call_shell(
+        1,
+        "core.hello",
+        json!({ "protocol": 3, "shell_version": "test", "auto_lock_ms": 900_000 }),
+    );
+    assert_eq!(reply["error"]["code"], "protocol_mismatch", "{reply}");
+    assert_eq!(reply["error"]["data"]["core"], 2, "{reply}");
+    // Protocol 2 without stream frames.
+    let mut core = spawn("serve", &data, &locks, &[]);
+    let reply = core.call_shell(
+        1,
+        "core.hello",
+        json!({ "protocol": 2, "shell_version": "test", "auto_lock_ms": 900_000, "frames": ["fragment"] }),
+    );
+    assert_eq!(reply["error"]["code"], "invalid_argument", "{reply}");
 }

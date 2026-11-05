@@ -39,6 +39,8 @@
     { "name": "naming.invalidate_content", "callers": ["chrome", "shell"], "mutates": false, "deadline_ms": null },
     { "name": "naming.invalidate_tezos", "callers": ["chrome", "shell"], "mutates": false, "deadline_ms": null },
     { "name": "dweb.open", "callers": ["shell"], "mutates": false, "deadline_ms": 120000 },
+    { "name": "dweb.verify", "callers": ["shell"], "mutates": false, "deadline_ms": 360000, "protocol": 2 },
+    { "name": "dweb.forget", "callers": ["shell"], "mutates": false, "deadline_ms": null, "protocol": 2 },
     { "name": "chain.configure", "callers": ["chrome", "shell"], "mutates": false, "deadline_ms": null },
     { "name": "chain.availability", "callers": ["chrome", "shell"], "mutates": false, "deadline_ms": null },
     { "name": "chain.request", "callers": ["chrome", "shell"], "mutates": false, "deadline_ms": 120000 },
