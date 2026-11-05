@@ -23,6 +23,12 @@
 //!   long as the test needs.
 //! - `FREEDOM_CORED_TEST_CHAIN_TOTAL_BYTES` replaces the chain total's
 //!   256 MiB (design 0005, Bounds), so a test can bring it near full.
+//! - `FREEDOM_CORED_TEST_DWEB_GRANTS_BYTES` replaces the dweb thread's
+//!   101 MiB of grants, and `FREEDOM_CORED_TEST_DWEB_STREAMS` its 128
+//!   streamed pieces (design 0009, Bounds). The grants alone keep the
+//!   running requests below the 64 admission allows, their streams below
+//!   128 and their pieces below main's 256, so a test that pins one of
+//!   those bounds lifts the ones in front of it.
 //! - `FREEDOM_CORED_TEST_NAMING_MARKER` names a file the naming thread
 //!   appends a line to for each reply it makes (`reply`), and at its end
 //!   for the waiting frames it hands to the writer (`drain <count>`), so
@@ -122,6 +128,17 @@ pub fn chain_bounds(mut bounds: fc_chain::machine::Bounds) -> fc_chain::machine:
 }
 
 #[cfg(feature = "testhooks")]
+pub fn dweb_bounds(mut bounds: crate::dweb::engine::Bounds) -> crate::dweb::engine::Bounds {
+    if let Some(grants) = millis("FREEDOM_CORED_TEST_DWEB_GRANTS_BYTES") {
+        bounds.grants = usize::try_from(grants).unwrap_or(usize::MAX);
+    }
+    if let Some(streams) = millis("FREEDOM_CORED_TEST_DWEB_STREAMS") {
+        bounds.streams = usize::try_from(streams).unwrap_or(usize::MAX);
+    }
+    bounds
+}
+
+#[cfg(feature = "testhooks")]
 fn naming_mark(line: &str) {
     use std::io::Write as _;
     if let Some(marker) = std::env::var_os("FREEDOM_CORED_TEST_NAMING_MARKER") {
@@ -210,5 +227,10 @@ pub fn naming_drain(_frames: usize) {}
 
 #[cfg(not(feature = "testhooks"))]
 pub fn chain_bounds(bounds: fc_chain::machine::Bounds) -> fc_chain::machine::Bounds {
+    bounds
+}
+
+#[cfg(not(feature = "testhooks"))]
+pub fn dweb_bounds(bounds: crate::dweb::engine::Bounds) -> crate::dweb::engine::Bounds {
     bounds
 }

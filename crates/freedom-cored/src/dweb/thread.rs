@@ -168,7 +168,7 @@ pub fn spawn(
                 stop: None,
             };
             let thread = Thread {
-                engine: Engine::new(Bounds::default()),
+                engine: Engine::new(crate::testhooks::dweb_bounds(Bounds::default())),
                 wire,
                 started: Instant::now(),
             };
