@@ -62,6 +62,9 @@ const MAX_RESOLUTIONS: usize = 3;
 /// asked for: the page holds the gateway back.
 const QUEUE_LIMIT: usize = 512 << 10;
 const CAR_ACCEPT: &str = "application/vnd.ipld.car; version=1; order=dfs; dups=y";
+/// A CAR request's query, then its range's, if any.
+const CAR_QUERY: &str = "?format=car&dag-scope=entity";
+const ENTITY_BYTES: &str = "&entity-bytes=";
 const RAW_ACCEPT: &str = "application/vnd.ipld.raw";
 const RECORD_ACCEPT: &str = "application/vnd.ipfs.ipns-record";
 /// Sections hashing or waiting their turn past which the CAR isn't read
@@ -1448,26 +1451,41 @@ impl Walk {
         let Some(front) = self.needs.front() else {
             return;
         };
-        let target = match front.what {
-            What::Path(0) => format!("/ipfs/{}{}", self.root_text.as_str(), self.car_path()),
-            What::Index => format!("/ipfs/{}", display(&front.cid)),
+        let index = match front.what {
+            What::Path(0) => None,
+            What::Index => Some(display(&front.cid)),
             // A CAR ended before the walk did: raw from here.
             _ => {
                 self.raw_only = true;
                 return self.feed(core);
             }
         };
-        if !core.fits(CAR_ROOM + STREAM_WINDOW + super::MAX_FRAME) {
+        // The request's path is made once, at its length, within room held
+        // for it, and counted with its headers until main takes it.
+        let bytes = self.entity_bytes(core.head_only);
+        let n = self.car_target_len(index.as_deref())
+            + CAR_QUERY.len()
+            + bytes.as_ref().map_or(0, |b| ENTITY_BYTES.len() + b.len());
+        let headers = vec![("accept".to_owned(), CAR_ACCEPT.to_owned())];
+        let asked = n + super::headers_cost(&headers);
+        if !core.fits(CAR_ROOM + STREAM_WINDOW + super::MAX_FRAME + asked) {
             self.raw_only = true;
             return self.feed(core);
         }
-        let mut path = format!("{target}?format=car&dag-scope=entity");
-        if let Some(bytes) = self.entity_bytes(core.head_only) {
-            path.push_str("&entity-bytes=");
-            path.push_str(&bytes);
-        }
-        let headers = vec![("accept".to_owned(), CAR_ACCEPT.to_owned())];
-        let Some(id) = core.fetch(Tag::Car, path, headers, Ask::Stashed) else {
+        let made = Charged::make(core, n, || {
+            let mut path = String::with_capacity(n);
+            self.push_car_target(&mut path, index.as_deref());
+            path.push_str(CAR_QUERY);
+            if let Some(b) = &bytes {
+                path.push_str(ENTITY_BYTES);
+                path.push_str(b);
+            }
+            debug_assert_eq!(path.len(), n);
+            path
+        });
+        let Some(id) =
+            made.and_then(|path| core.fetch_charged(Tag::Car, path, headers, Ask::Stashed))
+        else {
             self.raw_only = true;
             return self.feed(core);
         };
@@ -1489,23 +1507,48 @@ impl Walk {
         });
     }
 
-    /// The path a CAR resolves: the request's below an IPFS root; an IPNS
-    /// value's path and the request's, below the resolved root.
-    fn car_path(&self) -> String {
+    /// What a CAR resolves, written to `out` in place: the index
+    /// document's CID; or the root and the path below it, the request's
+    /// below an IPFS root, an IPNS value's path and the request's below
+    /// the resolved root.
+    fn push_car_target(&self, out: &mut String, index: Option<&str>) {
+        out.push_str("/ipfs/");
+        if let Some(cid) = index {
+            return out.push_str(cid);
+        }
+        out.push_str(self.root_text.as_str());
         if self.ipns.is_none() {
             let p = self.raw_path.as_str();
-            return if p.is_empty() {
-                String::new()
-            } else {
-                format!("/{p}")
-            };
+            if !p.is_empty() {
+                out.push('/');
+                out.push_str(p);
+            }
+            return;
         }
-        let mut out = String::new();
         for s in self.segments.iter() {
             out.push('/');
-            out.push_str(&gateway::encode_path(&[s]));
+            gateway::push_encoded(out, s);
         }
-        out
+    }
+
+    /// The length [`Walk::push_car_target`] writes.
+    fn car_target_len(&self, index: Option<&str>) -> usize {
+        "/ipfs/".len()
+            + match index {
+                Some(cid) => cid.len(),
+                None if self.ipns.is_none() => {
+                    let p = self.raw_path.len();
+                    self.root_text.len() + if p == 0 { 0 } else { 1 + p }
+                }
+                None => {
+                    self.root_text.len()
+                        + self
+                            .segments
+                            .iter()
+                            .map(|s| 1 + gateway::encoded_len(s))
+                            .sum::<usize>()
+                }
+            }
     }
 
     /// `entity-bytes` for the request's range, read as the gateway reads

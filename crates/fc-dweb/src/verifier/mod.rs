@@ -116,6 +116,13 @@ pub const MAX_FRAME: usize = 64 << 10;
 pub const MAX_WHOLE: usize = 64 << 10;
 /// Chunk requests a Swarm walk has open at once (0009, Leaves).
 pub const MAX_CHUNK_PIECES: usize = 4;
+/// The most bytes a verify plan's path and query hold together, and each
+/// of its headers' values (0009, Bounds). A longer one is refused before
+/// anything is made of it: the plan's check copies the path a few times,
+/// uncounted, before the request's machine exists, and the machine keeps a
+/// Swarm request's path, query and range and an IPFS request's range and
+/// tag within the grant's allowance.
+pub const MAX_PATH: usize = 8 << 10;
 
 /// The request's method, as main read it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -452,6 +459,9 @@ struct Piece<T> {
     /// Main has taken its request ([`Output::Piece`]): only then may main
     /// answer it.
     asked: bool,
+    /// What its request holds while it waits for main, when it is counted
+    /// ([`Core::fetch_charged`]).
+    request: usize,
 }
 
 /// A segment of verified body: sent as main's credit allows, and kept,
@@ -574,6 +584,9 @@ pub(crate) struct Core<T> {
     /// The head's headers, once the walk made them within its room, until
     /// main takes the head ([`Core::head_charged`]).
     head_held: usize,
+    /// The pieces' requests counted while they wait for main
+    /// ([`Core::fetch_charged`]).
+    asking: usize,
     queue: VecDeque<Queued>,
     /// Body not yet sent.
     queued: usize,
@@ -621,6 +634,7 @@ impl<T: Copy> Core<T> {
             walk_held: charged::Held::default(),
             peak: 0,
             head_held: 0,
+            asking: 0,
             queue: VecDeque::new(),
             queued: 0,
             queue_len: 0,
@@ -655,6 +669,7 @@ impl<T: Copy> Core<T> {
             + self.walk_held.get()
             + self.queue_len
             + self.head_held
+            + self.asking
     }
 
     /// A streamed piece that ended has had its last bytes used or dropped:
@@ -736,14 +751,53 @@ impl<T: Copy> Core<T> {
         headers: Vec<(String, String)>,
         ask: Ask,
     ) -> Option<PieceId> {
-        let room = match ask {
-            Ask::Whole(max) => max,
-            Ask::Stream(_) => STREAM_WINDOW,
-            Ask::Stashed => STREAM_WINDOW + MAX_FRAME,
-        };
-        if !self.fits(room) || self.ended() {
+        if !self.fits(piece_room(ask)) || self.ended() {
             return None;
         }
+        let id = self.ask(tag, path, headers, ask, 0);
+        self.grew();
+        Some(id)
+    }
+
+    /// [`Core::fetch`] for a request whose path the walk made within its
+    /// charge: the request counts what its path and headers hold until main
+    /// takes it ([`Verifier::poll`]), and the walk's charge goes after the
+    /// request has the path. `None`, the path gone and then its charge, when
+    /// the piece's room and the headers don't fit.
+    pub(crate) fn fetch_charged(
+        &mut self,
+        tag: T,
+        path: Charged<String>,
+        headers: Vec<(String, String)>,
+        ask: Ask,
+    ) -> Option<PieceId> {
+        let held = headers_cost(&headers);
+        if !self.fits(piece_room(ask).saturating_add(held)) || self.ended() {
+            drop(headers);
+            path.release(self);
+            return None;
+        }
+        let mut id = None;
+        path.hand_over(self, |core, path| {
+            let cost = held + path.capacity();
+            core.asking += cost;
+            id = Some(core.ask(tag, path, headers, ask, cost));
+        });
+        self.grew();
+        id
+    }
+
+    /// The piece and its request for main, its room within the request's
+    /// memory; `request` is what the request holds, counted until main
+    /// takes it.
+    fn ask(
+        &mut self,
+        tag: T,
+        path: String,
+        headers: Vec<(String, String)>,
+        ask: Ask,
+        request: usize,
+    ) -> PieceId {
         let id = PieceId(self.next_piece);
         self.next_piece += 1;
         let (kind, stream, max_bytes) = match ask {
@@ -771,6 +825,7 @@ impl<T: Copy> Core<T> {
                 kind,
                 cancelled: false,
                 asked: false,
+                request,
             },
         );
         self.outputs.push_back(Output::Piece(PieceRequest {
@@ -780,8 +835,7 @@ impl<T: Copy> Core<T> {
             stream,
             max_bytes,
         }));
-        self.grew();
-        Some(id)
+        id
     }
 
     /// The walk no longer needs the piece.
@@ -1048,6 +1102,7 @@ impl<T: Copy> Core<T> {
                 Output::Piece(r) => {
                     if let Some(p) = self.pieces.get_mut(&r.id) {
                         p.asked = true;
+                        self.asking -= std::mem::take(&mut p.request);
                     }
                     break Some(Output::Piece(r));
                 }
@@ -1190,6 +1245,16 @@ impl<T: Copy> Holding for Core<T> {
         let running = !self.ended();
         self.walk_held.take(n, running);
         self.released();
+    }
+}
+
+/// A piece's room in the request's memory: a whole piece's bound, or a
+/// stream's window, and for a stashed stream a frame beside it.
+fn piece_room(ask: Ask) -> usize {
+    match ask {
+        Ask::Whole(max) => max,
+        Ask::Stream(_) => STREAM_WINDOW,
+        Ask::Stashed => STREAM_WINDOW + MAX_FRAME,
     }
 }
 
@@ -1737,7 +1802,17 @@ fn check_plan(plan: &Verify) -> Result<(), Refusal> {
     if !crate::verify::root_in_form(&plan.root) {
         return Err(Refusal::Root);
     }
+    // Lengths first, before any copy is made.
     let path = &plan.path;
+    if path.len() > MAX_PATH {
+        return Err(Refusal::Path);
+    }
+    if path.len() + plan.query.len() > MAX_PATH {
+        return Err(Refusal::Query);
+    }
+    if plan.headers.iter().any(|(_, v)| v.len() > MAX_PATH) {
+        return Err(Refusal::Header);
+    }
     if !(path.is_empty() || path.starts_with('/')) || path.contains(['?', '#']) {
         return Err(Refusal::Path);
     }
@@ -1809,6 +1884,35 @@ mod tests {
         core.flush_credit();
         core.cancel_piece(id);
         assert!(matches!(core.take_output(), Some(Output::CancelPiece(p)) if p == id));
+        assert!(core.take_output().is_none());
+    }
+
+    /// A request whose path the walk made within its charge counts the
+    /// path and its headers until main takes it, the walk's charge gone
+    /// once the request has the path; one that doesn't fit releases the
+    /// path's charge after the path.
+    #[test]
+    fn a_requests_path_is_counted_until_main_takes_it() {
+        let mut core: Core<()> = Core::new(1, Node::Ipfs, false, None, IPFS_BUDGET);
+        let path = Charged::make(&mut core, MAX_PATH, || "a".repeat(MAX_PATH)).unwrap();
+        let headers = vec![("accept".to_owned(), "x".repeat(60))];
+        let held = headers_cost(&headers);
+        let id = core.fetch_charged((), path, headers, Ask::Stashed).unwrap();
+        assert_eq!(core.walk_held.get(), 0);
+        let room = STREAM_WINDOW + MAX_FRAME;
+        assert_eq!(core.reserved(), room + MAX_PATH + held);
+        assert_eq!(core.peak, room + MAX_PATH + held);
+        assert!(matches!(core.take_output(), Some(Output::Piece(r)) if r.id == id));
+        assert_eq!(core.reserved(), room);
+        // Room for the path, but not for the piece beside it.
+        let mut core: Core<()> = Core::new(1, Node::Ipfs, false, None, room + MAX_PATH);
+        let path = Charged::make(&mut core, MAX_PATH, || "a".repeat(MAX_PATH)).unwrap();
+        let headers = vec![("accept".to_owned(), "x".to_owned())];
+        assert!(
+            core.fetch_charged((), path, headers, Ask::Stashed)
+                .is_none()
+        );
+        assert_eq!((core.reserved(), core.walk_held.faults()), (0, 0));
         assert!(core.take_output().is_none());
     }
 
