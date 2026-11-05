@@ -1385,8 +1385,13 @@ mod tests {
     fn stream(kind: u8, id: u64, rest: &[u8]) -> Vec<u8> {
         let mut payload = id.to_be_bytes().to_vec();
         payload.extend_from_slice(rest);
-        let mut out = Vec::new();
-        fc_protocol::frame::encode(kind, &payload, &mut out).unwrap();
+        // `frame::encode` writes only the kinds the core sends whole.
+        let mut out = u32::try_from(payload.len() + 1)
+            .unwrap()
+            .to_be_bytes()
+            .to_vec();
+        out.push(kind);
+        out.extend_from_slice(&payload);
         out
     }
 
