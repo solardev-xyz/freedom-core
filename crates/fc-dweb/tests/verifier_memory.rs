@@ -502,6 +502,11 @@ fn capped_with<R>(
     // Within each input too, at every release: nothing the walk released
     // was still live past the allowance.
     let past = AT_RELEASE.load(Ordering::Relaxed);
+    let _ = writeln!(
+        std::io::stderr(),
+        "  {case}: at a release, {past} allocated past the reservation {}",
+        AT_RELEASE_RESERVED.load(Ordering::Relaxed)
+    );
     assert!(
         past <= MACHINE,
         "{case}: at a release, {past} allocated past the reservation {}",
