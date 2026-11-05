@@ -478,7 +478,9 @@ impl<T: Copy> Core<T> {
         }
     }
 
-    /// Every byte the request holds or has room reserved for.
+    /// Every byte the request holds or has room reserved for. The queue's
+    /// front segment is held whole until it is all sent, its sent part
+    /// included.
     fn reserved(&self) -> usize {
         let pieces: usize = self
             .pieces
@@ -490,7 +492,8 @@ impl<T: Copy> Core<T> {
                 }
             })
             .sum();
-        pieces + self.jobs_held + self.walk_held.get() + self.queued + self.head_held
+        let sent_front = self.queue.front().map_or(0, |q| q.at);
+        pieces + self.jobs_held + self.walk_held.get() + self.queued + sent_front + self.head_held
     }
 
     /// Notes a reservation's growth in the request's peak.

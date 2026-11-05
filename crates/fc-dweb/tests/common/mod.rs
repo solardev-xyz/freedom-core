@@ -82,6 +82,8 @@ pub struct Run {
     pub jobs: usize,
     /// The most the request held or had reserved at once.
     pub peak: usize,
+    /// What it had reserved when the driver stopped: nothing once it ended.
+    pub reserved: usize,
     /// For each answer held back: the streams open when it went out.
     pub held_after: Vec<usize>,
     /// Pieces the partition's cache answered, and chunks given back for it.
@@ -477,6 +479,7 @@ pub fn run_shared(
     }
     if opts.page == Some(0) {
         // Stalled on the page: what it asked for is the test's question.
+        out.reserved = v.reserved();
         return out;
     }
     assert!(
