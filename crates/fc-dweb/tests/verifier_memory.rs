@@ -30,7 +30,9 @@
 //! allocator's peak in it beside the machine's) and at the request's peak,
 //! what is allocated passes the reservation by no more than the scheme's
 //! allowance, for streams in 1-byte and 64 KiB frames, raw blocks of known
-//! and unknown length, and small body slices.
+//! and unknown length, and small body slices, main taking the outputs after
+//! every input or only once nothing moves without them
+//! ([`Poll::WhenStuck`]).
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
@@ -40,8 +42,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use cap::Cap;
 use fc_dweb::verifier::{
-    IPFS_ALLOWANCE, Job, MAX_FRAME, Method, Options, Output, PieceId, REQUEST_BUDGET,
-    STREAM_WINDOW, SWARM_ALLOWANCE, SWARM_BUDGET, Verifier,
+    IPFS_ALLOWANCE, IPFS_BUDGET, IPFS_GRANT, Job, MAX_FRAME, Method, Options, Output, PieceId,
+    REQUEST_BUDGET, STREAM_WINDOW, SWARM_ALLOWANCE, SWARM_BUDGET, SWARM_GRANT, Verifier,
 };
 use fc_dweb::{Backend, ContentTrust, Ipfs, Node, ResponseOp, Root, Trust, Verify, retry, timers};
 use peak_alloc::PeakAlloc;
@@ -65,6 +67,21 @@ static AT_RELEASE_RESERVED: AtomicUsize = AtomicUsize::new(0);
 static BETWEEN: AtomicUsize = AtomicUsize::new(0);
 /// The tests here one at a time: the allocator's counts are the process's.
 static ONE_AT_A_TIME: std::sync::Mutex<()> = std::sync::Mutex::new(());
+/// The most credits main took with no input between them, in the last
+/// request: what waited among the outputs at once.
+static CREDITS_WAITING: AtomicUsize = AtomicUsize::new(0);
+
+/// When main takes the machine's outputs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Poll {
+    /// All of them after every input.
+    Each,
+    /// Only once it can't go on without them: it sends all it has room
+    /// for (a stream's whole window, in its frames), answers the pieces
+    /// and runs the jobs it has, and polls only then. Nothing in the
+    /// machine's contract asks main to poll between inputs.
+    WhenStuck,
+}
 
 /// The hashing pool's next job. Its queue gives back its slots as it
 /// drains: room it keeps for jobs that came back is the pool's, not the
@@ -260,25 +277,32 @@ fn drive_framed(
     slow_pool: bool,
     frame: usize,
 ) -> (Option<u16>, usize, String) {
-    drive_paged(v, world, slow_pool, frame, true)
+    drive_paged(v, world, slow_pool, frame, true, Poll::Each)
 }
 
 /// [`drive_framed`]; without `reads`, a page that never reads, so the
-/// request stalls once its body's window is out.
+/// request stalls once its body's window is out; main taking the outputs
+/// as `poll` says.
 fn drive_paged(
     v: &mut Verifier,
     world: &World,
     slow_pool: bool,
     frame: usize,
     reads: bool,
+    poll: Poll,
 ) -> (Option<u16>, usize, String) {
     let mut jobs = VecDeque::new();
     let mut asked = VecDeque::new();
     let mut streams: Vec<Stream> = Vec::new();
     let (mut head, mut body) = (None, 0);
+    // Main takes the outputs now; it took them since its last input.
+    let mut take = true;
     loop {
         PEAK.fetch_max(v.reserved(), Ordering::Relaxed);
-        while let Some(o) = v.poll() {
+        let taken = take || poll == Poll::Each;
+        take = false;
+        let mut credits = 0;
+        while taken && let Some(o) = v.poll() {
             match o {
                 Output::Piece(r) => asked.push_back(r),
                 Output::CancelPiece(id) => {
@@ -287,6 +311,8 @@ fn drive_paged(
                     }
                 }
                 Output::Credit { piece, bytes } => {
+                    credits += 1;
+                    CREDITS_WAITING.fetch_max(credits, Ordering::Relaxed);
                     if let Some(s) = streams.iter_mut().find(|s| s.id == piece) {
                         s.credited += bytes;
                     }
@@ -294,6 +320,7 @@ fn drive_paged(
                 Output::Hash(job) => jobs.push_back(job),
                 Output::Remember { .. } => {}
                 Output::Floor { .. } => {
+                    credits = 0;
                     input(v, |v| v.floor(fc_dweb::store::FloorCheck::Accepted)).unwrap()
                 }
                 Output::Head(h) => head = Some(h.status),
@@ -302,6 +329,7 @@ fn drive_paged(
                     let n = b.len();
                     drop(b);
                     if reads {
+                        credits = 0;
                         input(v, |v| v.body_credit(n)).unwrap();
                     }
                 }
@@ -374,6 +402,10 @@ fn drive_paged(
                 input(v, |v| v.hashed(job.run())).unwrap();
                 continue;
             }
+            if !taken {
+                take = true;
+                continue;
+            }
             return (head, body, "stalled".to_owned());
         }
     }
@@ -431,6 +463,7 @@ fn capped_with<R>(
     let _ = writeln!(std::io::stderr(), "dense case: {case}, budget {budget}");
     PEAK.store(0, Ordering::Relaxed);
     BETWEEN.store(0, Ordering::Relaxed);
+    CREDITS_WAITING.store(0, Ordering::Relaxed);
     IN_INPUT.store(0, Ordering::Relaxed);
     ALLOC_BEFORE.store(0, Ordering::Relaxed);
     LEDGER_BEFORE.store(0, Ordering::Relaxed);
@@ -616,22 +649,29 @@ fn swarm_plan(root: &str, path: &str) -> Verify {
 /// A Swarm request through main, the hashing pool and a page that reads at
 /// once, against an Ant that answers `/chunks` from `chunks`: as `drive`.
 fn swarm_drive(v: &mut Verifier, chunks: &World) -> (Option<u16>, usize, String) {
-    swarm_drive_watching(v, chunks, |_, _| {})
+    swarm_drive_watching(v, chunks, Poll::Each, false, |_, _| {})
 }
 
-/// [`swarm_drive`], calling `asked` with each piece as it is asked for.
+/// [`swarm_drive`], main taking the outputs as `poll` says, with
+/// `slow_pool` running jobs only once no piece can move, and calling `asked`
+/// with each piece as it is asked for.
 fn swarm_drive_watching(
     v: &mut Verifier,
     chunks: &World,
+    poll: Poll,
+    slow_pool: bool,
     mut asked_for: impl FnMut(&fc_dweb::verifier::PieceRequest, &Verifier),
 ) -> (Option<u16>, usize, String) {
     let mut jobs = VecDeque::new();
     let mut asked = VecDeque::new();
     let (mut head, mut body) = (None, 0);
+    let mut take = true;
     loop {
         PEAK.fetch_max(v.reserved(), Ordering::Relaxed);
         assert_eq!(v.over_released(), 0, "released without a hold");
-        while let Some(o) = v.poll() {
+        let taken = take || poll == Poll::Each;
+        take = false;
+        while taken && let Some(o) = v.poll() {
             match o {
                 Output::Piece(r) => {
                     asked_for(&r, v);
@@ -664,16 +704,25 @@ fn swarm_drive_watching(
         let now = PeakAlloc
             .current_usage()
             .saturating_sub(BASE.load(Ordering::Relaxed));
-        assert!(
-            now <= v.reserved() + MACHINE,
-            "allocated {now}, reserved {}",
-            v.reserved()
-        );
-        if let Some(job) = next_job(&mut jobs) {
+        if poll == Poll::Each {
+            assert!(
+                now <= v.reserved() + MACHINE,
+                "allocated {now}, reserved {}",
+                v.reserved()
+            );
+        }
+        between(v);
+        if (!slow_pool || asked.is_empty())
+            && let Some(job) = next_job(&mut jobs)
+        {
             v.hashed(job.run()).unwrap();
             continue;
         }
         let Some(r) = asked.pop_front() else {
+            if !taken {
+                take = true;
+                continue;
+            }
             return (head, body, "stalled".to_owned());
         };
         assert!(!r.stream, "{}", r.path);
@@ -993,7 +1042,7 @@ fn dense_structure_stays_within_the_budget() {
     let p = swarm_plan(&root, "/a/b");
     let mut waited = false;
     let (got, m) = capped("manifest, a 65,000-byte entry", &p, SWARM_BUDGET, |v| {
-        swarm_drive_watching(v, &chunks, |piece, v| {
+        swarm_drive_watching(v, &chunks, Poll::Each, false, |piece, v| {
             if piece.path == file_root {
                 assert!(v.reserved() >= 65_000, "the entry: {}", v.reserved());
                 waited = true;
@@ -1059,13 +1108,15 @@ fn stashed_swarm_file(leaves: usize) -> (String, World, Vec<u8>, String, usize) 
 /// A Swarm request through main, the hashing pool and a page that reads at
 /// once, against an Ant that answers `/chunks` from `chunks`, holding
 /// `held`'s answer back until nothing else moves, and `/bytes` from `file`
-/// in frames of at most `frame` bytes: as `drive`.
+/// in frames of at most `frame` bytes, main taking the outputs as `poll`
+/// says: as `drive`.
 fn swarm_stream_drive(
     v: &mut Verifier,
     chunks: &World,
     file: &[u8],
     held: &str,
     frame: usize,
+    poll: Poll,
 ) -> (Option<u16>, usize, String) {
     struct Bytes {
         id: PieceId,
@@ -1080,10 +1131,14 @@ fn swarm_stream_drive(
     let mut waiting = None;
     let mut stream: Option<Bytes> = None;
     let (mut head, mut body) = (None, 0);
+    let mut take = true;
     loop {
         PEAK.fetch_max(v.reserved(), Ordering::Relaxed);
         assert_eq!(v.over_released(), 0, "released without a hold");
-        while let Some(o) = v.poll() {
+        let taken = take || poll == Poll::Each;
+        take = false;
+        let mut credits = 0;
+        while taken && let Some(o) = v.poll() {
             match o {
                 Output::Piece(r) => asked.push_back(r),
                 Output::CancelPiece(id) => {
@@ -1092,6 +1147,8 @@ fn swarm_stream_drive(
                     }
                 }
                 Output::Credit { piece, bytes } => {
+                    credits += 1;
+                    CREDITS_WAITING.fetch_max(credits, Ordering::Relaxed);
                     if let Some(s) = stream.as_mut().filter(|s| s.id == piece) {
                         s.credited += bytes;
                     }
@@ -1102,6 +1159,7 @@ fn swarm_stream_drive(
                     body += b.len();
                     let n = b.len();
                     drop(b);
+                    credits = 0;
                     input(v, |v| v.body_credit(n)).unwrap();
                 }
                 Output::End => return (head, body, "end".to_owned()),
@@ -1168,11 +1226,15 @@ fn swarm_stream_drive(
                 continue;
             }
         }
-        if let Some(r) = waiting.take() {
+        if taken && let Some(r) = waiting.take() {
             input(v, |v| {
                 v.piece_whole(r.id, 200, vec![], chunks[&r.path].to_vec())
             })
             .unwrap();
+            continue;
+        }
+        if !taken {
+            take = true;
             continue;
         }
         return (head, body, "stalled".to_owned());
@@ -1209,10 +1271,11 @@ fn within_allowance(case: &str, m: Measured, allowance: usize) {
         let _ = writeln!(
             std::io::stderr(),
             "{case}: allocated {} at peak, reserved {}, past it between inputs {between}, \
-             within one {}",
+             within one {}, credits waiting at once {}",
             m.allocated,
             m.reserved,
-            IN_INPUT.load(Ordering::Relaxed)
+            IN_INPUT.load(Ordering::Relaxed),
+            CREDITS_WAITING.load(Ordering::Relaxed)
         );
     }
     assert!(
@@ -1238,51 +1301,68 @@ fn allocations_stay_within_the_grant() {
         car: false,
         ..Options::default()
     };
-    // Main frames a stream as it likes: one byte a frame holds what 64 KiB
-    // frames do. The CAR of 400,000 empty sections, its jobs held back, so
-    // its stream waits in the stash until credit stops it.
+    // Main frames a stream as it likes, and polls as seldom as it likes:
+    // one byte a frame holds what 64 KiB frames do, whether main takes the
+    // outputs after every input or only once nothing moves without them.
+    // The CAR of 400,000 empty sections, its jobs held back, so its stream
+    // waits in the stash until credit stops it.
     let (root, world) = flood();
-    let mut at = Vec::new();
-    for frame in [1, MAX_FRAME] {
-        let case = format!("CAR of 400,000 empty sections, {frame}-byte frames");
-        let (got, m) = capped(&case, &plan(&root), REQUEST_BUDGET, |v| {
-            drive_framed(v, &world, true, frame)
-        });
-        assert_eq!(
-            (got.0, got.1, got.2.as_str()),
-            (Some(200), 200, "end"),
-            "{got:?}"
+    for poll in [Poll::Each, Poll::WhenStuck] {
+        let mut at = Vec::new();
+        for frame in [1, MAX_FRAME] {
+            let case = format!("CAR of 400,000 empty sections, {frame}-byte frames, {poll:?}");
+            let (got, m) = capped(&case, &plan(&root), REQUEST_BUDGET, |v| {
+                drive_paged(v, &world, true, frame, true, poll)
+            });
+            assert_eq!(
+                (got.0, got.1, got.2.as_str()),
+                (Some(200), 200, "end"),
+                "{got:?}"
+            );
+            within_allowance(&case, m, IPFS_ALLOWANCE);
+            at.push((m, BETWEEN.load(Ordering::Relaxed)));
+        }
+        assert!(
+            at[0].0.allocated <= at[1].0.allocated + (16 << 10),
+            "{at:?}"
         );
-        within_allowance(&case, m, IPFS_ALLOWANCE);
-        at.push((m, BETWEEN.load(Ordering::Relaxed)));
     }
-    assert!(
-        at[0].0.allocated <= at[1].0.allocated + (16 << 10),
-        "{at:?}"
-    );
     // The Swarm walk's stream the same, its stash filling for the chunk
     // held back.
     let (root, chunks, file, held, from) = stashed_swarm_file(3 * 128);
     let mut p = swarm_plan(&root, "/a");
     p.headers = vec![("range".to_owned(), format!("bytes={from}-"))];
-    let mut at = Vec::new();
-    for frame in [1, MAX_FRAME] {
-        let case = format!("Swarm stream into its stash, {frame}-byte frames");
-        let (got, m) = capped(&case, &p, SWARM_BUDGET, |v| {
-            swarm_stream_drive(v, &chunks, &file, &held, frame)
-        });
-        assert_eq!(
-            (got.0, got.1, got.2.as_str()),
-            (Some(206), file.len() - from, "end"),
-            "{got:?}"
+    for poll in [Poll::Each, Poll::WhenStuck] {
+        let mut at = Vec::new();
+        for frame in [1, MAX_FRAME] {
+            let case = format!("Swarm stream into its stash, {frame}-byte frames, {poll:?}");
+            let (got, m) = capped(&case, &p, SWARM_BUDGET, |v| {
+                swarm_stream_drive(v, &chunks, &file, &held, frame, poll)
+            });
+            assert_eq!(
+                (got.0, got.1, got.2.as_str()),
+                (Some(206), file.len() - from, "end"),
+                "{got:?}"
+            );
+            within_allowance(&case, m, SWARM_ALLOWANCE);
+            at.push((m, BETWEEN.load(Ordering::Relaxed)));
+        }
+        assert!(
+            at[0].0.allocated <= at[1].0.allocated + (16 << 10),
+            "{at:?}"
         );
-        within_allowance(&case, m, SWARM_ALLOWANCE);
-        at.push((m, BETWEEN.load(Ordering::Relaxed)));
     }
-    assert!(
-        at[0].0.allocated <= at[1].0.allocated + (16 << 10),
-        "{at:?}"
-    );
+    // A lookup whose jobs main holds back and then runs back to back
+    // without polling: of the verified chunks for the cache, at most four
+    // copies wait for it.
+    let (root, chunks, _, _) = big_manifest();
+    let p = swarm_plan(&root, "/a/q");
+    let case = "manifest, nodes of 420 KB, jobs held and run unpolled";
+    let (got, m) = capped(case, &p, SWARM_BUDGET, |v| {
+        swarm_drive_watching(v, &chunks, Poll::WhenStuck, true, |_, _| {})
+    });
+    assert_eq!((got.0, got.2.as_str()), (Some(404), "end"), "{got:?}");
+    within_allowance(case, m, SWARM_ALLOWANCE);
     // A stream that ends with bytes still in its stash, 80 KiB of them
     // waiting for the chunk held back: its window stays held for them.
     let (root, chunks, file, held, from) = stashed_swarm_file(148);
@@ -1290,7 +1370,7 @@ fn allocations_stay_within_the_grant() {
     p.headers = vec![("range".to_owned(), format!("bytes={from}-"))];
     let case = "Swarm stream ended with its stash full";
     let (got, m) = capped(case, &p, SWARM_BUDGET, |v| {
-        swarm_stream_drive(v, &chunks, &file, &held, MAX_FRAME)
+        swarm_stream_drive(v, &chunks, &file, &held, MAX_FRAME, Poll::Each)
     });
     assert_eq!(
         (got.0, got.1, got.2.as_str()),
@@ -1382,7 +1462,7 @@ fn allocations_stay_within_the_grant() {
     let (root, world) = raw_file(&lens);
     let case = "leaves of 8,200 and 100 bytes, a page that doesn't read";
     let (got, m) = capped_with(case, &plan(&root), raw(REQUEST_BUDGET), |v| {
-        drive_paged(v, &world, false, MAX_FRAME, false)
+        drive_paged(v, &world, false, MAX_FRAME, false, Poll::Each)
     });
     assert_eq!((got.0, got.2.as_str()), (Some(200), "stalled"), "{got:?}");
     within_allowance(case, m, IPFS_ALLOWANCE);
@@ -1399,4 +1479,56 @@ fn allocations_stay_within_the_grant() {
         "{got:?}"
     );
     within_allowance(case, m, IPFS_ALLOWANCE);
+}
+
+/// A stream's whole first window in one-byte frames, main not polling
+/// until it has sent them all (each frame is within the window main was
+/// given): every frame owes the stream credit, and the credit waits for
+/// main as one output carrying all of it, so the request stays within its
+/// scheme's grant. Before, each frame queued a credit of its own: 131,072
+/// outputs, 23 MB allocated beside 2.2 MB reserved. IPFS: a raw block of
+/// unknown length, read raw, at the IPFS budget. Swarm: a file's `/bytes`
+/// stream, at the Swarm budget.
+#[test]
+fn a_window_of_one_byte_frames_unpolled_stays_within_the_grant() {
+    let _one = ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
+    let block: Vec<u8> = (0..3 * STREAM_WINDOW + 1_000)
+        .map(|i| (i % 251) as u8)
+        .collect();
+    let root = sha256_cid(0x55, &block);
+    let len = block.len();
+    let mut world = HashMap::new();
+    world.insert(format!("/ipfs/{}?format=raw", text(&root)), Arc::new(block));
+    let options = Options {
+        budget: IPFS_BUDGET,
+        car: false,
+        ..Options::default()
+    };
+    let case = "a raw block of unknown length, one-byte frames, unpolled";
+    let (got, m) = capped_with(case, &plan(&root), options, |v| {
+        drive_paged(v, &world, false, 1, true, Poll::WhenStuck)
+    });
+    assert_eq!(
+        (got.0, got.1, got.2.as_str()),
+        (Some(200), len, "end"),
+        "{got:?}"
+    );
+    assert_eq!(CREDITS_WAITING.load(Ordering::Relaxed), 1, "{case}");
+    within_allowance(case, m, IPFS_ALLOWANCE);
+    assert!(m.allocated <= IPFS_GRANT, "{case}: {m:?}");
+
+    let (root, chunks, file, _, _) = stashed_swarm_file(3 * 128);
+    let p = swarm_plan(&root, "/a");
+    let case = "a Swarm file's stream, one-byte frames, unpolled";
+    let (got, m) = capped(case, &p, SWARM_BUDGET, |v| {
+        swarm_stream_drive(v, &chunks, &file, "", 1, Poll::WhenStuck)
+    });
+    assert_eq!(
+        (got.0, got.1, got.2.as_str()),
+        (Some(200), file.len(), "end"),
+        "{got:?}"
+    );
+    assert_eq!(CREDITS_WAITING.load(Ordering::Relaxed), 1, "{case}");
+    within_allowance(case, m, SWARM_ALLOWANCE);
+    assert!(m.allocated <= SWARM_GRANT, "{case}: {m:?}");
 }
