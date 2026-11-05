@@ -89,6 +89,9 @@ pub struct RadicleService {
     /// The repair units' watchdog, its thread started with the service:
     /// reconciliation's at a start, and the online repair's (a later step).
     units: Arc<units::UnitWatch>,
+    /// main's proof that libgit2 reads no git configuration outside a
+    /// repository, for reconciliation.
+    git_config: libradicle::GitConfigIsolated,
 }
 
 impl RadicleService {
@@ -99,6 +102,7 @@ impl RadicleService {
         network: &fc_service::network::NetworkPolicy,
         confinement: Value,
         units: Arc<units::UnitWatch>,
+        git_config: libradicle::GitConfigIsolated,
     ) -> Option<Self> {
         let identity = Identity::new(&grant.home)?;
         Some(Self {
@@ -110,6 +114,7 @@ impl RadicleService {
             confinement,
             deadline: Mutex::new(None),
             units,
+            git_config,
         })
     }
 
@@ -177,6 +182,7 @@ impl RadicleService {
         let id = request.id;
         // Each unit's time limit, from outside the worker.
         let watch = self.units.clone();
+        let git_config = self.git_config;
         let spawned = std::thread::Builder::new()
             .name("reconcile".into())
             .spawn(move || {
@@ -192,7 +198,7 @@ impl RadicleService {
                 // restarts, and whose next start reconciles again.
                 let outcome = fc_service::panic::with_kind(
                     fc_service::panic::TaskKind::named("reconcile"),
-                    || reconcile::run(&run, &*watch),
+                    || reconcile::run(&run, &*watch, git_config),
                 );
                 drop(signer);
                 match outcome {

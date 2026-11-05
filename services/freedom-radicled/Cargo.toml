@@ -34,18 +34,19 @@ fc-service = { path = "../../crates/fc-service" }
 # The sealed release of the node key (0008, "The sealed release"): the
 # service's X25519 key for one start, and opening what the core sealed to it.
 fc-seal = { path = "../../crates/fc-seal" }
-# libradicle at `integration/rust-core` (84557e8), built with `no-spawn`,
+# libradicle at `integration/rust-core` (b7d62b9), built with `no-spawn`,
 # explicitly (0008, "Spawn and lock"): serving runs in process and `git gc`
 # is skipped. It carries the upstream changes 0008 lists for the service's
 # first steps: the routing, `isolated` and `control_socket` options, the
 # bounded reads and shutdown, the node's health, the host key
 # (`HostKey`, `start_with_key`), and heartwood at 6b2dc16f, whose
 # reconciliation driver `rad.reconcile` runs on. It also has the shipped
-# seeds for a main-network profile only, and an isolated node with no proxy,
-# onion, I2P or external-address route. Pinned by commit until those changes
-# are released (deny.toml allows solardev-xyz).
+# seeds for a main-network profile only, an isolated node with no proxy,
+# onion, I2P or external-address route, `isolate_git_config` (called first
+# thing in src/main.rs) and `Options::seeding_policy`. Pinned by commit until
+# those changes are released (deny.toml allows solardev-xyz).
 # src/build_info.rs reports the same commit.
-libradicle = { git = "https://github.com/solardev-xyz/libradicle", rev = "84557e831a3cd3cc8e76bf158d7b443a2b6fdac3", features = ["no-spawn"] }
+libradicle = { git = "https://github.com/solardev-xyz/libradicle", rev = "b7d62b951b313061fb9e4d5145193341e5ad7b15", features = ["no-spawn"] }
 # heartwood's `radicle`, at the commit libradicle pins, so that both resolve
 # to one package (build_info's test holds them to one commit): the node
 # identity's public forms (`did:key`, the node ID), and, from the next step,
@@ -92,8 +93,14 @@ tempfile = "3"
 fc-sys = { path = "../../crates/fc-sys" }
 
 # The core's workspace lints, copied: workspace lints don't cross workspaces.
+# Except `unsafe_code`, which is `deny` here, as in fc-sys, not `forbid`
+# (AGENTS.md rule 6): the one unsafe call, `libradicle::isolate_git_config`
+# first thing in src/main.rs, carries its own reviewed `#[allow(unsafe_code)]`
+# and a `SAFETY` comment, and every other unsafe block still fails to
+# compile. tests/unsafe_code.rs fails if any other line lifts the lint.
 [lints.rust]
-unsafe_code = "forbid"
+unsafe_code = "deny"
+unsafe_op_in_unsafe_fn = "deny"
 
 [lints.clippy]
 all = { level = "warn", priority = -1 }
@@ -105,6 +112,8 @@ unimplemented = "warn"
 dbg_macro = "warn"
 print_stdout = "warn"
 print_stderr = "warn"
+undocumented_unsafe_blocks = "deny"
+multiple_unsafe_ops_per_block = "deny"
 
 # Dependencies carry no debug info in dev and test builds: libradicle's graph
 # is large, and its debug info is most of a target directory.

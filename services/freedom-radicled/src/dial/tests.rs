@@ -362,6 +362,7 @@ fn socks5_routing_on_an_isolated_node_reaches_no_proxy() {
             listen: vec![],
             control_socket: true,
             routing: Some(routing),
+            seeding_policy: None,
             isolated: true,
         },
         libradicle::HostKey::from_bytes(&mut seed).unwrap(),

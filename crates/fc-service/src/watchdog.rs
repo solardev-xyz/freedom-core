@@ -17,7 +17,9 @@
 //! A firing watchdog never waits on stderr: its line has at most 150 ms,
 //! under a bound armed before it is written.
 
+use std::cell::Cell;
 use std::sync::{Arc, Condvar, Mutex};
+use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use crate::exit::Exit;
@@ -81,10 +83,17 @@ impl Watchdog {
 /// A watchdog on one thread of its own for its whole life, armed for one
 /// bound after another. Arming it replaces the bound before; [`Armed`] names
 /// the bound, so standing down a bound that was replaced does nothing.
-/// Dropping it ends its thread once no bound is armed: a bound still armed
-/// is kept, and fires.
+///
+/// Dropping it waits for its thread to end. With no bound armed, that is at
+/// once. A bound still armed is kept, and fires: the drop never returns,
+/// because the process ends first. The one exception is a thread already
+/// ending the process ([`crate::exit::claim`]): a bound firing then would
+/// wait for that thread, so its drop returns at once, and the exit it began
+/// ends the thread with the process.
 pub struct Standing {
     shared: Arc<Shared>,
+    /// The thread, until the drop joins it.
+    worker: Option<JoinHandle<()>>,
 }
 
 /// A bound [`Standing::arm`] armed: its generation.
@@ -119,10 +128,16 @@ impl Standing {
             wake: Condvar::new(),
         });
         let state = shared.clone();
-        std::thread::Builder::new()
+        let worker = std::thread::Builder::new()
             .name(reason.into())
-            .spawn(move || state.watch(reason, exit))?;
-        Ok(Standing { shared })
+            .spawn(move || {
+                let _ = WORKER.try_with(|worker| worker.set(true));
+                state.watch(reason, exit);
+            })?;
+        Ok(Standing {
+            shared,
+            worker: Some(worker),
+        })
     }
 
     /// Arms it to end the process `after` from now, replacing the bound
@@ -149,10 +164,30 @@ impl Standing {
     }
 }
 
+thread_local! {
+    // Set on a standing watchdog's thread. No destructor, so it stays
+    // readable while thread-locals are torn down.
+    static WORKER: Cell<bool> = const { Cell::new(false) };
+}
+
 impl Drop for Standing {
     fn drop(&mut self) {
+        // Two threads must not wait here. One ending the process: a bound
+        // that fires then parks for that exit holding the lock
+        // (`exit::claim`), so neither the lock nor the join would return.
+        // And a watchdog's own thread, which can't join itself. It runs only
+        // its loop and holds no `Standing`, so that one is a guard.
+        if crate::exit::ending_here() || WORKER.try_with(Cell::get).unwrap_or(false) {
+            return;
+        }
+        // The lock is released before the join, so the thread can see it.
         self.shared.lock().dropped = true;
         self.shared.wake.notify_all();
+        if let Some(worker) = self.worker.take() {
+            // With no bound armed, the thread returns at once. With one, it
+            // fires, and the process ends during the join.
+            let _ = worker.join();
+        }
     }
 }
 
@@ -259,14 +294,43 @@ mod tests {
                 std::thread::sleep(Duration::from_secs(10));
             }
             "standing-dropped" => {
-                // A bound still armed when the watchdog is dropped is kept.
+                // A bound still armed when the watchdog is dropped is kept,
+                // and the drop doesn't return: the bound ends the process.
                 let standing = Standing::start("unit_overrun", Exit::Internal).unwrap();
                 standing.arm(Duration::from_millis(100));
                 drop(standing);
+                mark(DROP_RETURNED);
                 std::thread::sleep(Duration::from_secs(10));
+            }
+            "standing-dropped-exiting" => {
+                // This thread ends the process, so no drop waits on a bound.
+                crate::exit::claim();
+                // One that has fired, and parks for this thread's exit
+                // holding the watchdog's lock.
+                let fired = Standing::start("unit_overrun", Exit::Internal).unwrap();
+                fired.arm(Duration::from_millis(50));
+                std::thread::sleep(Duration::from_millis(300));
+                drop(fired);
+                mark("dropped fired");
+                // One still armed, and one idle.
+                let armed = Standing::start("unit_overrun", Exit::Internal).unwrap();
+                armed.arm(Duration::from_secs(10));
+                drop(armed);
+                mark("dropped armed");
+                drop(Standing::start("unit_overrun", Exit::Internal).unwrap());
+                mark("dropped idle");
             }
             other => panic!("unknown mode {other}"),
         }
+    }
+
+    /// What the child writes once `drop` has returned on an armed watchdog.
+    const DROP_RETURNED: &str = "the drop returned";
+
+    /// Writes `marker` to stderr, as its own line.
+    fn mark(marker: &str) {
+        use std::io::Write;
+        let _ = writeln!(std::io::stderr(), "{marker}");
     }
 
     /// How many threads the process has; `None` where `/proc` doesn't list
@@ -275,8 +339,12 @@ mod tests {
         Some(std::fs::read_dir("/proc/self/task").ok()?.count())
     }
 
+    /// Runs the child in `mode`; its exit code (`None` for a signal) and
+    /// stderr, or a panic past 10 s, which a hang would hit.
     fn run_child(mode: &str) -> (Option<i32>, String) {
-        let output = Command::new(std::env::current_exe().unwrap())
+        use std::io::Read;
+        let within = Duration::from_secs(10);
+        let mut child = Command::new(std::env::current_exe().unwrap())
             .args([
                 "--exact",
                 "watchdog::tests::child",
@@ -284,12 +352,29 @@ mod tests {
                 "--test-threads=1",
             ])
             .env(CHILD, mode)
-            .output()
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
             .unwrap();
-        (
-            output.status.code(),
-            String::from_utf8_lossy(&output.stderr).into_owned(),
-        )
+        let mut pipe = child.stderr.take().unwrap();
+        let reader = std::thread::spawn(move || {
+            let mut stderr = Vec::new();
+            let _ = pipe.read_to_end(&mut stderr);
+            stderr
+        });
+        let deadline = Instant::now() + within;
+        let status = loop {
+            if let Some(status) = child.try_wait().unwrap() {
+                break status;
+            }
+            if Instant::now() >= deadline {
+                let _ = child.kill();
+                panic!("the {mode} child did not exit within {within:?}");
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        };
+        let stderr = String::from_utf8_lossy(&reader.join().unwrap()).into_owned();
+        (status.code(), stderr)
     }
 
     #[test]
@@ -313,7 +398,7 @@ mod tests {
 
     #[test]
     fn a_standing_watchdog_fires_when_its_bound_runs_out() {
-        for mode in ["standing-fire", "standing-replaced", "standing-dropped"] {
+        for mode in ["standing-fire", "standing-replaced"] {
             let started = Instant::now();
             let (code, stderr) = run_child(mode);
             assert_eq!(code, Some(70), "{mode}: {stderr}");
@@ -323,6 +408,29 @@ mod tests {
             );
             assert!(started.elapsed() < Duration::from_secs(5), "{mode}");
         }
+    }
+
+    #[test]
+    fn dropping_an_armed_standing_watchdog_waits_for_its_bound() {
+        let started = Instant::now();
+        let (code, stderr) = run_child("standing-dropped");
+        assert_eq!(code, Some(70), "{stderr}");
+        assert!(stderr.contains(r#""reason":"unit_overrun""#), "{stderr}");
+        assert!(!stderr.contains(DROP_RETURNED), "{stderr}");
+        assert!(started.elapsed() < Duration::from_secs(5));
+    }
+
+    #[test]
+    fn a_thread_ending_the_process_drops_a_standing_watchdog_at_once() {
+        let started = Instant::now();
+        let (code, stderr) = run_child("standing-dropped-exiting");
+        assert_eq!(code, Some(0), "{stderr}");
+        for marker in ["dropped fired", "dropped armed", "dropped idle"] {
+            assert!(stderr.contains(marker), "{marker}: {stderr}");
+        }
+        // The bound that fired parked: this thread's exit ends the process.
+        assert!(!stderr.contains("watchdog ends"), "{stderr}");
+        assert!(started.elapsed() < Duration::from_secs(5));
     }
 
     #[test]
@@ -338,14 +446,7 @@ mod tests {
         let shared = Arc::downgrade(&standing.shared);
         standing.disarm(standing.arm(Duration::from_secs(10)));
         drop(standing);
-        // The thread held the last reference.
-        let started = Instant::now();
-        while shared.strong_count() > 0 {
-            assert!(
-                started.elapsed() < Duration::from_secs(5),
-                "the thread ended"
-            );
-            std::thread::sleep(Duration::from_millis(10));
-        }
+        // The drop joined the thread, which held the last reference.
+        assert_eq!(shared.strong_count(), 0, "the thread ended");
     }
 }

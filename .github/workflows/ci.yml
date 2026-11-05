@@ -61,6 +61,23 @@ jobs:
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       - run: cargo clippy --locked -p fc-sys -p fc-service --all-targets --all-features -- -D warnings
 
+  release-targets-linux:
+    # The Release workflow builds freedom-cored for musl, where the `libc`
+    # crate's tables differ from glibc's (0.9.0's tag failed on
+    # aarch64-unknown-linux-musl: no `libc::SYS_kexec_file_load`). Check both
+    # musl targets here, so a tag never finds that first.
+    name: check (Linux musl release targets)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - run: rustup toolchain install
+      - run: rustup target add aarch64-unknown-linux-musl x86_64-unknown-linux-musl
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - run: cargo check --locked -p freedom-cored --target aarch64-unknown-linux-musl
+      - run: cargo check --locked -p freedom-cored --target x86_64-unknown-linux-musl
+
   test:
     name: test (${{ matrix.os }})
     strategy:
