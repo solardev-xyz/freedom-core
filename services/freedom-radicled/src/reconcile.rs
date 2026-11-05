@@ -120,7 +120,17 @@ impl Paths {
 }
 
 /// Runs the reconciliation of `run.home`, telling `watch` of each unit.
-pub fn run(run: &Run<'_>, watch: &dyn Watch) -> Result<Outcome, Failure> {
+///
+/// Only after `libradicle::isolate_git_config`, which `_git_config` proves.
+/// Otherwise libgit2 would look for the system's git configuration with
+/// every repository it opens, and confinement leaves an `/etc/gitconfig`
+/// unreadable: every open would fail, and every repository would be
+/// quarantined at its unit's `begin`.
+pub fn run(
+    run: &Run<'_>,
+    watch: &dyn Watch,
+    _git_config: libradicle::GitConfigIsolated,
+) -> Result<Outcome, Failure> {
     let found = marker::read(run.home).map_err(|e| failed("the dirty marker", e))?;
     // Named only for an identity that can sign: see the module's doc.
     let named = match (run.signer, found.clone().unwrap_or_default()) {

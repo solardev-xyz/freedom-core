@@ -892,7 +892,7 @@ checksum = "da7c62ceae207dd37ea5b845da6a0696c799f85e97da1ab5b7910be3c1c80223"
 
 [[package]]
 name = "fc-protocol"
-version = "0.9.0"
+version = "0.9.1"
 dependencies = [
  "base64 0.22.1",
  "serde",
@@ -903,7 +903,7 @@ dependencies = [
 
 [[package]]
 name = "fc-seal"
-version = "0.9.0"
+version = "0.9.1"
 dependencies = [
  "aes-gcm 0.11.1",
  "hpke",
@@ -914,7 +914,7 @@ dependencies = [
 
 [[package]]
 name = "fc-service"
-version = "0.9.0"
+version = "0.9.1"
 dependencies = [
  "fc-protocol",
  "fc-sys",
@@ -929,7 +929,7 @@ dependencies = [
 
 [[package]]
 name = "fc-sys"
-version = "0.9.0"
+version = "0.9.1"
 dependencies = [
  "libc",
  "windows-sys 0.61.2",
@@ -2012,7 +2012,7 @@ checksum = "b6d2cec3eae94f9f509c767b45932f1ada8350c4bdb85af2fcab4a3c14807981"
 [[package]]
 name = "libradicle"
 version = "0.8.0"
-source = "git+https://github.com/solardev-xyz/libradicle?rev=84557e831a3cd3cc8e76bf158d7b443a2b6fdac3#84557e831a3cd3cc8e76bf158d7b443a2b6fdac3"
+source = "git+https://github.com/solardev-xyz/libradicle?rev=b7d62b951b313061fb9e4d5145193341e5ad7b15#b7d62b951b313061fb9e4d5145193341e5ad7b15"
 dependencies = [
  "ed25519-dalek",
  "getrandom 0.4.3",
