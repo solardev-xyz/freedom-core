@@ -35,6 +35,16 @@ const SYS_SETXATTRAT: i64 = 463;
 const SYS_REMOVEXATTRAT: i64 = 466;
 const SYS_FILE_SETATTR: i64 = 469;
 
+/// `kexec_file_load`, which `libc` lists for glibc but not for musl on
+/// AArch64: the release's `aarch64-unknown-linux-musl` build has no
+/// `libc::SYS_kexec_file_load`. The numbers are the kernel's own.
+#[cfg(target_arch = "x86_64")]
+const SYS_KEXEC_FILE_LOAD: i64 = 320;
+#[cfg(target_arch = "aarch64")]
+const SYS_KEXEC_FILE_LOAD: i64 = 294;
+#[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+const SYS_KEXEC_FILE_LOAD: i64 = libc::SYS_kexec_file_load;
+
 /// `__X32_SYSCALL_BIT`.
 pub const X32_SYSCALL_BIT: u32 = 0x4000_0000;
 
@@ -110,7 +120,7 @@ fn denied() -> Vec<i64> {
         libc::SYS_finit_module,
         libc::SYS_delete_module,
         libc::SYS_kexec_load,
-        libc::SYS_kexec_file_load,
+        SYS_KEXEC_FILE_LOAD,
         libc::SYS_mount,
         libc::SYS_umount2,
         libc::SYS_pivot_root,
