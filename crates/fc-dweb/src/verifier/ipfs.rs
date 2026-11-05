@@ -32,7 +32,7 @@ use fc_ipfs::unixfs::{self, Kind};
 
 use super::gateway::{self, Cache, RangeError};
 use super::jobs::{Verdict, Work};
-use super::{Ask, Failure, Holding, PieceFailure, PieceId};
+use super::{Ask, Failure, Holding, PieceFailure, PieceId, STREAM_WINDOW, Stash};
 use crate::plan::{ContentTrust, Root};
 use crate::validate::Refusal as PlanRefusal;
 
@@ -62,6 +62,75 @@ const CAR_ROOM: usize = car::MAX_SECTION + car::MAX_HEADER;
 const SECTION_COST: usize = 512;
 /// A held shard's map entry, beside its CID and block.
 const MAP_ENTRY: usize = 128;
+
+/// Where reading a CAR stands.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Read {
+    /// Read as far as it can for now.
+    On,
+    /// No room to read on, and nothing that will give it back: the CAR
+    /// gives way to raw blocks.
+    GiveWay,
+}
+
+/// Whether `n` more bytes have room.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Room {
+    Fits,
+    /// Not now: room comes back as the page reads the body, a job's result
+    /// or a piece's end comes, and the walk tries again then.
+    Wait,
+    /// Nothing out will give room back.
+    No,
+}
+
+/// Why using a block stopped short.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Halt {
+    /// The walk ends with this.
+    Fail(Failure),
+    /// The block waits for room ([`Room::Wait`]): it and its need are
+    /// kept, and used again once room comes back. Nothing it did before
+    /// stopping has gone out.
+    Wait,
+}
+
+impl From<Failure> for Halt {
+    fn from(f: Failure) -> Self {
+        Self::Fail(f)
+    }
+}
+
+/// What came of the CAR's next verdict.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Turn {
+    /// None is in its turn.
+    None,
+    /// Used, or the CAR ended by it.
+    Used,
+    /// Its block waits for room ([`Halt::Wait`]).
+    Parked,
+}
+
+/// The room held for a block asked for: a raw leaf at its `blocksizes`
+/// entry, which its length must equal; any other block at the limit (0009,
+/// Raw blocks).
+fn block_room(need: &Need) -> usize {
+    block_len(need).unwrap_or(fc_ipfs::block::MAX_BLOCK)
+}
+
+/// A raw leaf's length, as its entry gives it.
+fn block_len(need: &Need) -> Option<usize> {
+    let leaf = ipfs_cid::parse(&need.cid).is_some_and(|c| c.codec == ipfs_cid::RAW);
+    match need.what {
+        What::File { len, .. } if leaf => Some(
+            usize::try_from(len)
+                .unwrap_or(fc_ipfs::block::MAX_BLOCK)
+                .min(fc_ipfs::block::MAX_BLOCK),
+        ),
+        _ => None,
+    }
+}
 
 /// What a piece or a job is for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -222,9 +291,15 @@ struct Need {
 #[derive(Debug)]
 struct RawPiece {
     id: PieceId,
+    /// The block's buffer ([`RawPiece::next_size`]): made at its first
+    /// byte, within the room held for it and the piece's window.
     buf: Vec<u8>,
-    /// Room held for bytes yet to come.
-    reserved: usize,
+    /// Its length is known: a leaf whose entry gives it.
+    exact: bool,
+    /// Room held for the buffer: the block's bound, or the buffer's
+    /// capacity once that is more. Once the block is the job's, what the
+    /// buffer has past the block's bytes, if it couldn't be given back.
+    room: usize,
     /// The CID's length, held for the hash job.
     cid_len: usize,
     hashing: bool,
@@ -233,7 +308,27 @@ struct RawPiece {
 impl RawPiece {
     /// What it holds of the request's memory.
     fn held(&self) -> usize {
-        self.buf.len() + self.reserved + self.cid_len
+        self.room + self.cid_len
+    }
+
+    /// The buffer's next size, for `len` bytes. A leaf's is its length,
+    /// made once. A block of unknown length (a node, read into a block's
+    /// bound) starts at a frame's, then takes half its room and its window,
+    /// and only past that all its room: each move, the old buffer beside
+    /// the new and main's frame, fits the room and the window but the
+    /// last, whose rest is held for it ([`Walk::raw_data`]); and a buffer
+    /// cut to its block's length at its end fits them too, up to the half.
+    fn next_size(&self, len: usize) -> usize {
+        let cap = self.buf.capacity();
+        let half = (self.room + STREAM_WINDOW) / 2;
+        let next = if self.exact || cap >= half.min(self.room) {
+            self.room
+        } else if cap == 0 {
+            super::MAX_FRAME.min(self.room)
+        } else {
+            half.min(self.room)
+        };
+        next.max(len)
     }
 }
 
@@ -247,8 +342,9 @@ struct CarStream {
     reader: car::Reader,
     headed: bool,
     open: bool,
-    /// Bytes not yet given to the reader, while the body waits for credit.
-    stash: VecDeque<Vec<u8>>,
+    /// Bytes not yet given to the reader, while the body waits for credit:
+    /// in one buffer of the stream's window.
+    stash: Stash,
     /// Sections given to the hashing pool, in order, and those whose
     /// verdict came, waiting for the ones before them.
     sent: u64,
@@ -336,6 +432,9 @@ pub(crate) struct Walk {
     path_held: usize,
     /// Blocks checked, waiting for their turn: by need.
     arrived: BTreeMap<u64, Vec<u8>>,
+    /// What a raw block's buffer, arrived or hashing, holds past its bytes
+    /// when it couldn't give that back at its end: held with it, by need.
+    spares: BTreeMap<u64, usize>,
     raw: BTreeMap<u64, RawPiece>,
     /// Raw blocks only, from here on.
     raw_only: bool,
@@ -344,6 +443,9 @@ pub(crate) struct Walk {
     file: Option<File>,
     /// The served path's segments (the index document's, for a directory).
     served: Vec<String>,
+    /// Room held for the body bytes the block in use copies out, until they
+    /// are copied ([`Walk::draw`]).
+    copy_left: usize,
 }
 
 impl Walk {
@@ -370,12 +472,14 @@ impl Walk {
             next_seq: 0,
             path_held: 0,
             arrived: BTreeMap::new(),
+            spares: BTreeMap::new(),
             raw: BTreeMap::new(),
             raw_only,
             car: None,
             hamt: None,
             file: None,
             served: Vec::new(),
+            copy_left: 0,
         };
         // The request's segments: their room held before they are built,
         // an empty one's slot included, which the walk drops later.
@@ -385,7 +489,8 @@ impl Walk {
             return Ok(walk);
         }
         let slots = path.split('/').count();
-        if !walk.reserve_path(core, slots, path.len()) {
+        // Nothing is out yet: room that doesn't fit never will.
+        if walk.reserve_path(core, slots, path.len()).is_err() {
             core.fail(Failure::Memory);
             return Ok(walk);
         }
@@ -411,25 +516,18 @@ impl Walk {
         Ok(walk)
     }
 
-    /// `GatewayCore`'s page for an error the walk proves.
+    /// `GatewayCore`'s page for an error the walk proves, once every source
+    /// is dropped. It never waits for room: nothing is out before the DAG,
+    /// and in it the page (under 1 KiB) is proved from the one block the
+    /// walk needs, which came with more room beside it than that, a raw
+    /// block's window or the CAR's reading room, free by now.
     fn page(&mut self, core: &mut Core, status: u16, detail: &str) {
-        let (h, body) = gateway::error_page(status, detail);
-        self.answer(core, status, h, body);
-    }
-
-    /// A proven answer with a fixed body.
-    fn answer(
-        &mut self,
-        core: &mut Core,
-        status: u16,
-        headers: Vec<(String, String)>,
-        body: Vec<u8>,
-    ) {
         self.stop(core);
+        let (h, body) = gateway::error_page(status, detail);
         if !core.fits(body.len()) {
             return core.fail(Failure::Memory);
         }
-        core.head(status, headers, self.label);
+        core.head(status, h, self.label);
         core.hold(body.len());
         core.body(body, None);
         core.finish();
@@ -448,8 +546,12 @@ impl Walk {
         self.needs = VecDeque::new();
         self.needs_slots = 0;
         for (_, b) in std::mem::take(&mut self.arrived) {
-            core.unhold(b.len());
+            let n = b.len();
+            drop(b);
+            core.unhold(n);
         }
+        let spares: usize = std::mem::take(&mut self.spares).into_values().sum();
+        core.unhold(spares);
         for (_, r) in std::mem::take(&mut self.raw) {
             core.unhold(r.held());
             if !r.hashing {
@@ -463,26 +565,142 @@ impl Walk {
         if let Some(f) = self.file.take() {
             core.unhold(f.early.len());
         }
+        self.drop_copy(core);
     }
 
     fn close_car(&mut self, core: &mut Core) {
-        if let Some(c) = self.car.take() {
+        Self::release_car(self.car.take(), core);
+    }
+
+    /// Whether room the request holds can still come back: a raw block's
+    /// window as it ends, a job's bytes (a section's, dropped once its CAR
+    /// is gone), a cancelled piece's window at its end, the body as the page
+    /// reads it.
+    fn room_returns(&self, core: &Core) -> bool {
+        !self.raw.is_empty() || core.hashing() || core.cancelling() || core.awaiting() > 0
+    }
+
+    /// Room for `n` more bytes. The CAR's reading room is a shortcut's:
+    /// when `n` doesn't fit beside it, the walk waits while the page has
+    /// body to read, and otherwise the CAR gives way, raw blocks carrying
+    /// the walk on without it. Past the CAR, the walk waits while anything
+    /// out can give room back ([`Walk::room_returns`]); with nothing out,
+    /// the room never comes.
+    fn room_for(&mut self, core: &mut Core, n: usize) -> Room {
+        if core.fits(n) {
+            return Room::Fits;
+        }
+        if self.car.is_some() {
+            if core.awaiting() > 0 {
+                return Room::Wait;
+            }
+            self.close_car(core);
+            self.raw_only = true;
+            if core.fits(n) {
+                return Room::Fits;
+            }
+        }
+        if self.room_returns(core) {
+            Room::Wait
+        } else {
+            Room::No
+        }
+    }
+
+    /// [`Walk::room_for`], as a step of the walk: on, or halted.
+    fn make_room(&mut self, core: &mut Core, n: usize) -> Result<(), Halt> {
+        match self.room_for(core, n) {
+            Room::Fits => Ok(()),
+            Room::Wait => Err(Halt::Wait),
+            Room::No => Err(Failure::Memory.into()),
+        }
+    }
+
+    /// A need whose block waits for room: back at the front (its slot is
+    /// the one it left), its block, still held, among those arrived.
+    fn park(&mut self, need: Need, block: Option<Vec<u8>>) {
+        if let Some(b) = block {
+            self.arrived.insert(need.seq, b);
+        }
+        self.needs.push_front(need);
+    }
+
+    /// `n` bytes of body copied out of the block in use, from the room held
+    /// for them ([`Walk::copy_bound`]).
+    fn draw(&mut self, core: &mut Core, n: usize) {
+        let from = n.min(self.copy_left);
+        debug_assert_eq!(from, n, "a body copy past the room held for it");
+        self.copy_left -= from;
+        core.hold(n - from);
+    }
+
+    /// What is left of the room held for the copies goes.
+    fn drop_copy(&mut self, core: &mut Core) {
+        core.unhold(std::mem::take(&mut self.copy_left));
+    }
+
+    /// Room for the body bytes that content of `n` bytes at `start` copies
+    /// out: its part of the body's range, and before the head the sniffed
+    /// bytes twice (kept, then sent).
+    fn copy_bound(&self, start: u64, n: usize) -> usize {
+        let Some(f) = self.file.as_ref() else {
+            return 0;
+        };
+        let lo = f.a.max(start);
+        let hi = (f.b + 1).min(start.saturating_add(n as u64));
+        let part = usize::try_from(hi.saturating_sub(lo)).unwrap_or(usize::MAX);
+        let early = match f.sniff {
+            Some(end) if !f.headed => usize::try_from(end + 1).unwrap_or(usize::MAX),
+            _ => 0,
+        };
+        part.saturating_add(early.saturating_mul(2))
+    }
+
+    /// [`Walk::copy_bound`] for `need`'s block of at most `len` bytes, when
+    /// it is a file node's. The walk's other blocks copy nothing out beside
+    /// blocks asked after them: a path's, a shard's, and the entity's, which
+    /// is asked alone.
+    fn copy_estimate(&self, need: &Need, len: usize) -> usize {
+        match need.what {
+            What::File {
+                start, len: size, ..
+            } => self.copy_bound(start, len.min(usize::try_from(size).unwrap_or(usize::MAX))),
+            _ => 0,
+        }
+    }
+
+    /// The most that any block asked for and not yet used will copy out.
+    fn copy_out(&self) -> usize {
+        let mut left = self.raw.len() + self.arrived.len();
+        let mut most = 0;
+        for n in &self.needs {
+            if left == 0 {
+                break;
+            }
+            let len = match self.arrived.get(&n.seq) {
+                Some(b) => b.len(),
+                None if self.raw.contains_key(&n.seq) => block_room(n),
+                None => continue,
+            };
+            left -= 1;
+            most = most.max(self.copy_estimate(n, len));
+        }
+        most
+    }
+
+    fn release_car(car: Option<CarStream>, core: &mut Core) {
+        if let Some(mut c) = car {
             if c.open {
                 core.cancel_piece(c.id);
             }
+            c.stash.free(core);
             core.unhold(CAR_ROOM);
-            core.unhold(c.stash.iter().map(Vec::len).sum());
-            // Sections still hashing: their jobs' bytes come back with
-            // their results, and are dropped then; their costs go now.
-            let judged = c.verdicts.len() as u64;
-            let hashing = c.sent.saturating_sub(c.done).saturating_sub(judged);
-            core.unhold(
-                usize::try_from(hashing)
-                    .unwrap_or(usize::MAX)
-                    .saturating_mul(SECTION_COST),
-            );
+            // Sections still hashing: their jobs' bytes and structures come
+            // back with their results, and go then, with their costs.
             for (_, (cid, block, _)) in c.verdicts {
-                core.unhold(cid.len() + block.len() + SECTION_COST);
+                let n = cid.len() + block.len() + SECTION_COST;
+                drop((cid, block));
+                core.unhold(n);
             }
         }
     }
@@ -533,7 +751,8 @@ impl Walk {
         if total > MAX_SEGMENTS {
             return self.end(core, Failure::Unverifiable);
         }
-        if !self.reserve_path(core, total, below.len()) {
+        // Nothing is out before the DAG: room that doesn't fit never will.
+        if self.reserve_path(core, total, below.len()).is_err() {
             return self.end(core, Failure::Memory);
         }
         let mut inner = Vec::with_capacity(total);
@@ -584,7 +803,8 @@ impl Walk {
         self.segments = inner;
         self.settle_path(core);
         self.stage = Stage::Dag;
-        if !self.needs_room(core, 1, root.len()) {
+        // Nothing is out yet: room that doesn't fit never will.
+        if self.needs_room(core, 1, root.len()).is_err() {
             return self.end(core, Failure::Memory);
         }
         self.add_need(&root, What::Path(0));
@@ -594,8 +814,8 @@ impl Walk {
 
     /// Room for `n` more needs whose CIDs hold `cids` bytes, reserved
     /// before the deque grows (its new buffer beside the old one while it
-    /// moves); false when the request can't hold them.
-    fn needs_room(&mut self, core: &mut Core, n: usize, cids: usize) -> bool {
+    /// moves).
+    fn needs_room(&mut self, core: &mut Core, n: usize, cids: usize) -> Result<(), Halt> {
         let slot = std::mem::size_of::<Need>();
         let cap = self.needs.capacity();
         let want = self.needs.len().saturating_add(n);
@@ -604,9 +824,7 @@ impl Walk {
         } else {
             0
         };
-        if !core.fits(grown.saturating_add(cids)) {
-            return false;
-        }
+        self.make_room(core, grown.saturating_add(cids))?;
         core.hold(grown + cids);
         if want > cap {
             self.needs.reserve_exact(n);
@@ -617,7 +835,7 @@ impl Walk {
             core.unhold(self.needs_slots);
             self.needs_slots = now;
         }
-        true
+        Ok(())
     }
 
     /// A need at the back, its room made ([`Walk::needs_room`]).
@@ -631,14 +849,12 @@ impl Walk {
         });
     }
 
-    /// One need ahead of the rest; false when it can't be held.
-    fn push_first(&mut self, core: &mut Core, cid: &[u8], what: What) -> bool {
-        if !self.needs_room(core, 1, cid.len()) {
-            return false;
-        }
+    /// One need ahead of the rest.
+    fn push_first(&mut self, core: &mut Core, cid: &[u8], what: What) -> Result<(), Halt> {
+        self.needs_room(core, 1, cid.len())?;
         self.add_need(cid, what);
         self.needs.rotate_right(1);
-        true
+        Ok(())
     }
 
     /// The need at the front, taken; its CID's hold goes once the caller
@@ -648,7 +864,9 @@ impl Walk {
     }
 
     /// Moves the walk on: identity blocks resolved in place, blocks that
-    /// came read in order, the sources fed.
+    /// came read in order, the sources fed. A block that waits for room
+    /// ([`Halt::Wait`]) stops it, and nothing more is asked for: what comes
+    /// back is the block's.
     fn pump(&mut self, core: &mut Core) {
         loop {
             if !matches!(self.stage, Stage::Dag) || core.ended() {
@@ -656,50 +874,78 @@ impl Walk {
             }
             let Some(front) = self.needs.front() else {
                 if self.hamt.is_some() {
-                    self.hamt_done(core);
-                    continue;
+                    match self.hamt_done(core) {
+                        Ok(()) => continue,
+                        Err(Halt::Wait) => return,
+                        Err(Halt::Fail(f)) => return self.end(core, f),
+                    }
                 }
                 return self.done(core);
             };
-            // An identity CID carries its block.
+            // An identity CID carries its block: copied out, within room
+            // held for it.
             let identity = ipfs_cid::parse(&front.cid)
                 .filter(|c| c.hash == IDENTITY)
-                .map(|c| c.digest.to_vec());
+                .map(|c| c.digest.len());
             let seq = front.seq;
-            if let Some(block) = identity {
-                if let Some(need) = self.take_need() {
-                    let n = need.cid.len();
-                    self.consume(core, need, block);
-                    core.unhold(n);
+            if let Some(len) = identity {
+                match self.room_for(core, len) {
+                    Room::Fits => {}
+                    Room::Wait => return,
+                    Room::No => return self.end(core, Failure::Memory),
                 }
+                let Some(need) = self.take_need() else {
+                    return;
+                };
+                core.hold(len);
+                let block = ipfs_cid::parse(&need.cid)
+                    .map(|c| c.digest.to_vec())
+                    .unwrap_or_default();
+                let used = self.consume(core, &need, &block);
+                drop(block);
+                core.unhold(len);
+                match used {
+                    Err(Halt::Wait) => return self.park(need, None),
+                    Err(Halt::Fail(f)) => self.end(core, f),
+                    Ok(()) => {}
+                }
+                let n = need.cid.len();
+                drop(need);
+                core.unhold(n);
                 continue;
             }
             if let Some(block) = self.arrived.remove(&seq) {
-                if let Some(need) = self.take_need() {
-                    let n = need.cid.len() + block.len();
-                    self.consume(core, need, block);
-                    core.unhold(n);
+                let Some(need) = self.take_need() else {
+                    return;
+                };
+                match self.consume(core, &need, &block) {
+                    Err(Halt::Wait) => return self.park(need, Some(block)),
+                    Err(Halt::Fail(f)) => self.end(core, f),
+                    Ok(()) => {}
                 }
+                let n = need.cid.len() + block.len() + self.spares.remove(&seq).unwrap_or(0);
+                drop((need, block));
+                core.unhold(n);
                 continue;
             }
-            if self.car_verdicts(core) {
+            match self.car_verdicts(core) {
                 // Room for more of the CAR.
-                self.read_car(core);
-                continue;
+                Turn::Used => self.read_car(core),
+                Turn::Parked => return,
+                Turn::None => break,
             }
-            break;
         }
         self.feed(core);
     }
 
-    /// The CAR's sections whose verdicts came, in order: each must be the
-    /// block needed next. Whether any was used.
-    fn car_verdicts(&mut self, core: &mut Core) -> bool {
+    /// The CAR's next section, when its verdict came: it must be the block
+    /// needed next.
+    fn car_verdicts(&mut self, core: &mut Core) -> Turn {
         let Some(c) = self.car.as_mut() else {
-            return false;
+            return Turn::None;
         };
         let Some((cid, block, verdict)) = c.verdicts.remove(&c.done) else {
-            return false;
+            return Turn::None;
         };
         c.done += 1;
         let held = cid.len() + block.len() + SECTION_COST;
@@ -707,7 +953,7 @@ impl Walk {
         if let Err(r) = verdict {
             core.unhold(held);
             self.end(core, refusal(r));
-            return true;
+            return Turn::Used;
         }
         let same = self.needs.front().is_some_and(|front| {
             match (ipfs_cid::parse(&cid), ipfs_cid::parse(&front.cid)) {
@@ -715,21 +961,33 @@ impl Walk {
                 _ => false,
             }
         });
-        if !same {
+        let need = if same { self.take_need() } else { None };
+        let Some(need) = need else {
             // Not the block the walk needs next: the CAR stops being
             // useful, and the rest comes as raw blocks.
             core.unhold(held);
             self.close_car(core);
             self.raw_only = true;
-            return true;
+            return Turn::Used;
+        };
+        // The section's CID and its job's structures are done with: the
+        // block is used as a raw block is, in the room it holds.
+        let n = cid.len();
+        drop(cid);
+        core.unhold(n + SECTION_COST);
+        match self.consume(core, &need, &block) {
+            Err(Halt::Wait) => {
+                // The block, verified, waits for room as a raw block does.
+                self.park(need, Some(block));
+                return Turn::Parked;
+            }
+            Err(Halt::Fail(f)) => self.end(core, f),
+            Ok(()) => {}
         }
-        if let Some(need) = self.take_need() {
-            let n = need.cid.len();
-            self.consume(core, need, block);
-            core.unhold(n);
-        }
-        core.unhold(held);
-        true
+        let n = need.cid.len() + block.len();
+        drop((need, block));
+        core.unhold(n);
+        Turn::Used
     }
 
     /// Asks for what the walk needs: a CAR, or raw blocks.
@@ -758,23 +1016,25 @@ impl Walk {
             .take(MAX_RAW_PIECES)
             .cloned()
             .collect();
+        // Each block copies body out when it is used, in room held then: a
+        // block asked for past the front leaves room for the largest copy
+        // of those out, so the blocks asked ahead never take the room the
+        // front needs to be used.
+        let mut copies = self.copy_out();
         for need in pending {
             if self.raw.len() >= MAX_RAW_PIECES {
                 break;
             }
-            // A raw leaf at its `blocksizes` entry, which its length must
-            // equal; any other block at the limit (0009, Raw blocks).
-            let leaf = ipfs_cid::parse(&need.cid).is_some_and(|c| c.codec == ipfs_cid::RAW);
-            let block_room = match need.what {
-                What::File { len, .. } if leaf => usize::try_from(len)
-                    .unwrap_or(fc_ipfs::block::MAX_BLOCK)
-                    .min(fc_ipfs::block::MAX_BLOCK),
-                _ => fc_ipfs::block::MAX_BLOCK,
-            };
-            let reserve = block_room + need.cid.len();
+            let room = block_room(&need);
+            let reserve = room + need.cid.len();
             let first = self.needs.front().is_some_and(|f| f.seq == need.seq);
-            if !core.fits(reserve + super::STREAM_WINDOW) {
-                if first && self.raw.is_empty() {
+            let copy = self.copy_estimate(&need, room);
+            let ahead = if first { 0 } else { copies.max(copy) };
+            if !core.fits(reserve + super::STREAM_WINDOW + ahead) {
+                // Room comes back as blocks, jobs and cancelled pieces end
+                // and as the body is read; with none of them left, it never
+                // will.
+                if first && !self.room_returns(core) {
                     return self.end(core, Failure::Memory);
                 }
                 break;
@@ -795,11 +1055,13 @@ impl Walk {
                 RawPiece {
                     id,
                     buf: Vec::new(),
-                    reserved: block_room,
+                    exact: block_len(&need).is_some(),
+                    room,
                     cid_len: need.cid.len(),
                     hashing: false,
                 },
             );
+            copies = copies.max(copy);
         }
     }
 
@@ -821,7 +1083,7 @@ impl Walk {
                 return self.feed(core);
             }
         };
-        if !core.fits(CAR_ROOM + super::STREAM_WINDOW) {
+        if !core.fits(CAR_ROOM + STREAM_WINDOW + super::MAX_FRAME) {
             self.raw_only = true;
             return self.feed(core);
         }
@@ -831,7 +1093,7 @@ impl Walk {
             path.push_str(&bytes);
         }
         let headers = vec![("accept".to_owned(), CAR_ACCEPT.to_owned())];
-        let Some(id) = core.fetch(Tag::Car, path, headers, Ask::Stream(None)) else {
+        let Some(id) = core.fetch(Tag::Car, path, headers, Ask::Stashed) else {
             self.raw_only = true;
             return self.feed(core);
         };
@@ -842,7 +1104,7 @@ impl Walk {
             reader: car::Reader::new(),
             headed: false,
             open: true,
-            stash: VecDeque::new(),
+            stash: Stash::default(),
             sent: 0,
             done: 0,
             verdicts: BTreeMap::new(),
@@ -898,9 +1160,23 @@ impl Walk {
 
     /// The needs are met.
     fn done(&mut self, core: &mut Core) {
-        if self.file.as_ref().is_some_and(|f| !f.headed) {
-            // A file shorter than its sniff: the type from what it has.
+        let early = self
+            .file
+            .as_ref()
+            .filter(|f| !f.headed)
+            .map(|f| f.early.len());
+        if let Some(n) = early {
+            // A file shorter than its sniff: the type from what it has, and
+            // its bytes copied out within room held for them.
+            match self.room_for(core, n) {
+                Room::Fits => {}
+                Room::Wait => return,
+                Room::No => return self.end(core, Failure::Memory),
+            }
+            core.hold(n);
+            self.copy_left = n;
             self.head_file(core);
+            self.drop_copy(core);
         }
         if core.ended() {
             return;
@@ -910,31 +1186,22 @@ impl Walk {
     }
 
     /// A block the walk needed, checked, in its turn.
-    fn consume(&mut self, core: &mut Core, need: Need, block: Vec<u8>) {
-        let r = match need.what {
-            What::Path(seg) => self.node(core, seg, &need.cid, &block),
-            What::PathShard { seg, level } => self.path_shard(core, seg, level, &block),
-            What::EntityShard { level } => self.entity_shard(core, level, &need.cid, &block),
-            What::Index => self.index(core, &need.cid, &block),
+    fn consume(&mut self, core: &mut Core, need: &Need, block: &[u8]) -> Result<(), Halt> {
+        match need.what {
+            What::Path(seg) => self.node(core, seg, &need.cid, block),
+            What::PathShard { seg, level } => self.path_shard(core, seg, level, block),
+            What::EntityShard { level } => self.entity_shard(core, level, &need.cid, block),
+            What::Index => self.index(core, &need.cid, block),
             What::File { start, len, depth } => {
-                self.file_node(core, &need.cid, &block, start, len, depth)
+                self.file_node(core, &need.cid, block, start, len, depth)
             }
-        };
-        if let Err(f) = r {
-            self.end(core, f);
         }
     }
 
     /// The node reached after `seg` segments.
-    fn node(
-        &mut self,
-        core: &mut Core,
-        seg: usize,
-        cid: &[u8],
-        block: &[u8],
-    ) -> Result<(), Failure> {
+    fn node(&mut self, core: &mut Core, seg: usize, cid: &[u8], block: &[u8]) -> Result<(), Halt> {
         let Some(c) = ipfs_cid::parse(cid) else {
-            return Err(Failure::VerificationFailed);
+            return Err(Failure::VerificationFailed.into());
         };
         if seg < self.segments.len() {
             if c.codec == ipfs_cid::RAW {
@@ -950,15 +1217,11 @@ impl Walk {
             let name = self.segments[seg].clone();
             match data.kind {
                 Kind::Directory => match node.links().find(|l| l.name == Some(name.as_str())) {
-                    Some(link) => {
-                        if !self.push_first(core, link.cid.bytes, What::Path(seg + 1)) {
-                            return Err(Failure::Memory);
-                        }
-                    }
+                    Some(link) => self.push_first(core, link.cid.bytes, What::Path(seg + 1))?,
                     None => self.page(core, 404, "not found"),
                 },
                 Kind::HamtShard => {
-                    self.hamt_step(core, seg, 0, &node, data.data.unwrap_or(&[]), &name);
+                    self.hamt_step(core, seg, 0, &node, data.data.unwrap_or(&[]), &name)?;
                 }
                 Kind::File | Kind::Raw => {
                     self.page(
@@ -985,19 +1248,14 @@ impl Walk {
             }
             Kind::Directory => {
                 if let Some(link) = node.links().find(|l| l.name == Some("index.html")) {
-                    if !self.push_first(core, link.cid.bytes, What::Index) {
-                        return Err(Failure::Memory);
-                    }
-                    return Ok(());
+                    return self.push_first(core, link.cid.bytes, What::Index);
                 }
                 // The entries, borrowed from the block: their slots held
                 // before they are taken.
                 let named = |l: &dagpb::Link<'_>| l.name.is_some_and(|n| !n.is_empty());
                 let n = node.links().filter(named).count();
                 let held = n.saturating_mul(std::mem::size_of::<gateway::Entry<'_>>());
-                if !core.fits(held) {
-                    return Err(Failure::Memory);
-                }
+                self.make_room(core, held)?;
                 core.hold(held);
                 let mut entries = Vec::with_capacity(n);
                 for (at, l) in node.links().enumerate() {
@@ -1009,14 +1267,11 @@ impl Walk {
                         });
                     }
                 }
-                self.listing(core, entries, held);
-                Ok(())
+                self.listing(core, entries, held)
             }
             Kind::HamtShard => {
                 let held = block.len() + cid.len() + MAP_ENTRY;
-                if !core.fits(held) {
-                    return Err(Failure::Memory);
-                }
+                self.make_room(core, held)?;
                 core.hold(held);
                 let mut h = Hamt {
                     root: cid.to_vec(),
@@ -1025,10 +1280,15 @@ impl Walk {
                 };
                 h.shards.insert(cid.to_vec(), block.to_vec());
                 self.hamt = Some(h);
-                if !self.push_shards(core, &node, 1) {
-                    return Err(Failure::Memory);
+                let pushed = self.push_shards(core, &node, 1);
+                if pushed == Err(Halt::Wait) {
+                    // Built again when the block is used again.
+                    if let Some(h) = self.hamt.take() {
+                        drop(h.shards);
+                        core.unhold(h.held);
+                    }
                 }
-                Ok(())
+                pushed
             }
             Kind::Symlink | Kind::Metadata => {
                 self.unsupported(core, data.kind);
@@ -1048,22 +1308,24 @@ impl Walk {
 
     /// A shard's sub-shards (links named by the bucket's two digits alone),
     /// in link order, ahead of the rest: each read whole for the listing.
-    /// False when they can't be held.
-    fn push_shards(&mut self, core: &mut Core, node: &dagpb::Node<'_>, level: usize) -> bool {
+    fn push_shards(
+        &mut self,
+        core: &mut Core,
+        node: &dagpb::Node<'_>,
+        level: usize,
+    ) -> Result<(), Halt> {
         let sub = |l: &dagpb::Link<'_>| l.name.is_some_and(|n| n.len() == 2);
         let (mut n, mut cids) = (0, 0);
         for l in node.links().filter(sub) {
             n += 1;
             cids += l.cid.bytes.len();
         }
-        if !self.needs_room(core, n, cids) {
-            return false;
-        }
+        self.needs_room(core, n, cids)?;
         for l in node.links().filter(sub) {
             self.add_need(l.cid.bytes, What::EntityShard { level });
         }
         self.needs.rotate_right(n);
-        true
+        Ok(())
     }
 
     /// The listing's entries in every shard below `cid`, depth-first in
@@ -1101,11 +1363,11 @@ impl Walk {
         node: &dagpb::Node<'_>,
         bitfield: &[u8],
         name: &str,
-    ) {
+    ) -> Result<(), Halt> {
         if level >= hamt::MAX_LEVELS {
-            return self.end(core, Failure::Unverifiable);
+            return Err(Failure::Unverifiable.into());
         }
-        let pushed = match hamt::step(node, bitfield, name, level) {
+        match hamt::step(node, bitfield, name, level) {
             Step::Entry(link) => self.push_first(core, link.cid.bytes, What::Path(seg + 1)),
             Step::Shard(link) => self.push_first(
                 core,
@@ -1117,11 +1379,8 @@ impl Walk {
             ),
             Step::Absent => {
                 self.page(core, 404, "not found");
-                true
+                Ok(())
             }
-        };
-        if !pushed {
-            self.end(core, Failure::Memory);
         }
     }
 
@@ -1131,7 +1390,7 @@ impl Walk {
         seg: usize,
         level: usize,
         block: &[u8],
-    ) -> Result<(), Failure> {
+    ) -> Result<(), Halt> {
         let node = dagpb::decode(block).map_err(refusal)?;
         let data = unixfs::decode(&node).map_err(refusal)?;
         if data.kind != Kind::HamtShard {
@@ -1143,8 +1402,7 @@ impl Walk {
             return Ok(());
         }
         let name = self.segments[seg].clone();
-        self.hamt_step(core, seg, level, &node, data.data.unwrap_or(&[]), &name);
-        Ok(())
+        self.hamt_step(core, seg, level, &node, data.data.unwrap_or(&[]), &name)
     }
 
     fn entity_shard(
@@ -1153,9 +1411,9 @@ impl Walk {
         level: usize,
         cid: &[u8],
         block: &[u8],
-    ) -> Result<(), Failure> {
+    ) -> Result<(), Halt> {
         if level >= hamt::MAX_LEVELS {
-            return Err(Failure::Unverifiable);
+            return Err(Failure::Unverifiable.into());
         }
         let node = dagpb::decode(block).map_err(refusal)?;
         let data = unixfs::decode(&node).map_err(refusal)?;
@@ -1167,29 +1425,28 @@ impl Walk {
             );
             return Ok(());
         }
-        let Some(h) = self.hamt.as_mut() else {
-            return Err(Failure::Unverifiable);
+        let Some(h) = self.hamt.as_ref() else {
+            return Err(Failure::Unverifiable.into());
         };
-        // A shard linked twice is held once.
+        // A shard linked twice is held once; so is a shard whose block
+        // waited for room after it was taken in.
         if !h.shards.contains_key(cid) {
             let held = block.len() + cid.len() + MAP_ENTRY;
-            if !core.fits(held) {
-                return Err(Failure::Memory);
-            }
+            self.make_room(core, held)?;
             core.hold(held);
-            h.held += held;
-            h.shards.insert(cid.to_vec(), block.to_vec());
+            if let Some(h) = self.hamt.as_mut() {
+                h.held += held;
+                h.shards.insert(cid.to_vec(), block.to_vec());
+            }
         }
-        if !self.push_shards(core, &node, level + 1) {
-            return Err(Failure::Memory);
-        }
-        Ok(())
+        self.push_shards(core, &node, level + 1)
     }
 
-    /// Every shard is in: `index.html` by its hash, or the listing.
-    fn hamt_done(&mut self, core: &mut Core) {
+    /// Every shard is in: `index.html` by its hash, or the listing. While
+    /// it waits for room, the shards are kept for the next try.
+    fn hamt_done(&mut self, core: &mut Core) -> Result<(), Halt> {
         let Some(h) = self.hamt.take() else {
-            return;
+            return Ok(());
         };
         let mut at = h.root.clone();
         let mut found = None;
@@ -1212,12 +1469,16 @@ impl Walk {
                 Step::Absent => break,
             }
         }
+        drop(at);
         if let Some(cid) = found {
-            core.unhold(h.held);
-            if !self.push_first(core, &cid, What::Index) {
-                self.end(core, Failure::Memory);
+            if let Err(e) = self.push_first(core, &cid, What::Index) {
+                self.hamt = Some(h);
+                return Err(e);
             }
-            return;
+            let held = h.held;
+            drop(h);
+            core.unhold(held);
+            return Ok(());
         }
         // The entries, borrowed from the shards: their slots, and any name
         // that must be made valid UTF-8, held before they are taken.
@@ -1234,9 +1495,9 @@ impl Walk {
         let held = n
             .saturating_mul(std::mem::size_of::<gateway::Entry<'_>>())
             .saturating_add(owned);
-        if !core.fits(held) {
-            core.unhold(h.held);
-            return self.end(core, Failure::Memory);
+        if let Err(e) = self.make_room(core, held) {
+            self.hamt = Some(h);
+            return Err(e);
         }
         core.hold(held);
         let mut entries = Vec::with_capacity(n);
@@ -1248,20 +1509,24 @@ impl Walk {
             let at = entries.len();
             entries.push(gateway::Entry { name, size, at });
         });
-        self.listing(core, entries, held);
-        core.unhold(h.held);
+        if let Err(e) = self.listing(core, entries, held) {
+            self.hamt = Some(h);
+            return Err(e);
+        }
+        let held = h.held;
+        drop(h);
+        core.unhold(held);
+        Ok(())
     }
 
     /// Room for path strings of at most `bytes` in `n` segments, held
-    /// before they are built; false when the request can't hold them.
-    fn reserve_path(&mut self, core: &mut Core, n: usize, bytes: usize) -> bool {
+    /// before they are built.
+    fn reserve_path(&mut self, core: &mut Core, n: usize, bytes: usize) -> Result<(), Halt> {
         let need = bytes.saturating_add(n.saturating_mul(std::mem::size_of::<String>()));
-        if !core.fits(need) {
-            return false;
-        }
+        self.make_room(core, need)?;
         core.hold(need);
         self.path_held += need;
-        true
+        Ok(())
     }
 
     /// The path strings' hold, brought to what they hold now.
@@ -1278,12 +1543,10 @@ impl Walk {
 
     /// The served path: the walked segments, and the index document's name
     /// for a directory.
-    fn serve_path(&mut self, core: &mut Core, last: Option<&str>) -> Result<(), Failure> {
+    fn serve_path(&mut self, core: &mut Core, last: Option<&str>) -> Result<(), Halt> {
         let n = self.segments.len() + usize::from(last.is_some());
         let bytes = self.segments.iter().map(String::len).sum::<usize>() + last.map_or(0, str::len);
-        if !self.reserve_path(core, n, bytes) {
-            return Err(Failure::Memory);
-        }
+        self.reserve_path(core, n, bytes)?;
         let mut served = Vec::with_capacity(n);
         served.extend(self.segments.iter().cloned());
         served.extend(last.map(str::to_owned));
@@ -1292,7 +1555,7 @@ impl Walk {
         Ok(())
     }
 
-    fn index(&mut self, core: &mut Core, cid: &[u8], block: &[u8]) -> Result<(), Failure> {
+    fn index(&mut self, core: &mut Core, cid: &[u8], block: &[u8]) -> Result<(), Halt> {
         self.serve_path(core, Some("index.html"))?;
         if ipfs_cid::parse(cid).is_some_and(|c| c.codec == ipfs_cid::RAW) {
             return self.start_file(core, block, None);
@@ -1315,15 +1578,22 @@ impl Walk {
     /// `GatewayCore`'s listing of the directory reached, from its entries,
     /// which hold `held` bytes of the request's memory. The page is counted,
     /// its room held, then written into a buffer of exactly that length.
-    fn listing(&mut self, core: &mut Core, mut entries: Vec<gateway::Entry<'_>>, held: usize) {
+    /// While it waits for room, the entries go, made again on the next try.
+    fn listing(
+        &mut self,
+        core: &mut Core,
+        mut entries: Vec<gateway::Entry<'_>>,
+        held: usize,
+    ) -> Result<(), Halt> {
         if self.asked.range.is_some() {
             drop(entries);
             core.unhold(held);
-            return self.page(
+            self.page(
                 core,
                 400,
                 "Range requests are not supported for directory listings",
             );
+            return Ok(());
         }
         let (title, base) = match &self.ipns {
             None => {
@@ -1355,10 +1625,10 @@ impl Walk {
         };
         gateway::sort_listing(&mut entries);
         let len = gateway::listing_len(&title, &base, &entries);
-        if !core.fits(len) {
+        if let Err(e) = self.make_room(core, len) {
             drop(entries);
             core.unhold(held);
-            return self.end(core, Failure::Memory);
+            return Err(e);
         }
         core.hold(len);
         let (h, body) = gateway::listing(&title, &base, &entries, len);
@@ -1368,6 +1638,7 @@ impl Walk {
         core.head(200, h, self.label);
         core.body(body, None);
         core.finish();
+        Ok(())
     }
 
     /// The request's path as written, each segment decoded.
@@ -1397,7 +1668,7 @@ impl Walk {
         core: &mut Core,
         block: &[u8],
         node: Option<(&dagpb::Node<'_>, &unixfs::Data<'_>)>,
-    ) -> Result<(), Failure> {
+    ) -> Result<(), Halt> {
         let len = match node {
             None => block.len() as u64,
             Some((_, d)) => d.filesize.ok_or(Failure::Malformed)?,
@@ -1452,17 +1723,21 @@ impl Walk {
             etag,
             range,
         });
-        // Nothing more is needed for the head: send it now. Otherwise the
-        // first bytes come first.
-        if sniff.is_none() {
+        // A HEAD, or an empty file, whose type isn't sniffed: the head is
+        // all there is. Otherwise it goes once the content's room is held
+        // ([`Walk::content`]), or with the bytes its type is sniffed from.
+        if sniff.is_none() && (core.head_only || len == 0) {
             self.head_file(core);
-            if core.ended() || len == 0 {
-                return Ok(());
-            }
+            return Ok(());
         }
         // The needs below the root are the file's only: what the path's
         // CAR or the index's carries next.
-        self.content(core, block, node, 0, len, 0)
+        let r = self.content(core, block, node, 0, len, 0);
+        if r == Err(Halt::Wait) {
+            // Started again when the block is used again.
+            self.file = None;
+        }
+        r
     }
 
     /// The head of the file being served.
@@ -1500,7 +1775,9 @@ impl Walk {
     }
 
     /// A file node's content: its own data at `start`, then its children
-    /// within the body, read in turn.
+    /// within the body, read in turn. Room for the data's copy into the
+    /// body and for the children is held first, before the head or any of
+    /// its bytes go out, so the block can wait for it whole.
     fn content(
         &mut self,
         core: &mut Core,
@@ -1509,21 +1786,19 @@ impl Walk {
         start: u64,
         len: u64,
         depth: usize,
-    ) -> Result<(), Failure> {
-        let Some((node, data)) = node else {
+    ) -> Result<(), Halt> {
+        let inline = match node {
             // A raw leaf: the block is the content, and its length is the
             // one its parent declared (deviation `unixfs-sizes`).
-            if block.len() as u64 != len {
-                return Err(Failure::Malformed);
+            None if block.len() as u64 != len => return Err(Failure::Malformed.into()),
+            None => block,
+            Some((_, data))
+                if !matches!(data.kind, Kind::File | Kind::Raw) || data.filesize != Some(len) =>
+            {
+                return Err(Failure::Malformed.into());
             }
-            self.emit(core, start, block);
-            return Ok(());
+            Some((_, data)) => data.data.unwrap_or(&[]),
         };
-        if !matches!(data.kind, Kind::File | Kind::Raw) || data.filesize != Some(len) {
-            return Err(Failure::Malformed);
-        }
-        let inline = data.data.unwrap_or(&[]);
-        self.emit(core, start, inline);
         let Some(f) = self.file.as_ref() else {
             return Ok(());
         };
@@ -1533,8 +1808,8 @@ impl Walk {
         // their room held, then queued ahead of what follows the node.
         let within = || {
             let mut at = first;
-            node.links()
-                .zip(data.blocksizes())
+            node.into_iter()
+                .flat_map(|(node, data)| node.links().zip(data.blocksizes()))
                 .filter_map(move |(link, size)| {
                     let child = at;
                     at += size;
@@ -1547,10 +1822,30 @@ impl Walk {
             cids += link.cid.bytes.len();
         }
         if n > 0 && depth + 1 >= MAX_FILE_DEPTH {
-            return Err(Failure::Unverifiable);
+            return Err(Failure::Unverifiable.into());
         }
-        if !self.needs_room(core, n, cids) {
-            return Err(Failure::Memory);
+        let copy = self.copy_bound(start, inline.len());
+        self.make_room(core, copy)?;
+        core.hold(copy);
+        self.copy_left = copy;
+        if let Err(e) = self.needs_room(core, n, cids) {
+            self.drop_copy(core);
+            return Err(e);
+        }
+        // A file whose type isn't sniffed has its head now.
+        if self
+            .file
+            .as_ref()
+            .is_some_and(|f| !f.headed && f.sniff.is_none())
+        {
+            self.head_file(core);
+        }
+        if !core.ended() {
+            self.emit(core, start, inline);
+        }
+        self.drop_copy(core);
+        if core.ended() || self.file.is_none() {
+            return Ok(());
         }
         for (link, child, size) in within() {
             self.add_need(
@@ -1574,7 +1869,7 @@ impl Walk {
         start: u64,
         len: u64,
         depth: usize,
-    ) -> Result<(), Failure> {
+    ) -> Result<(), Halt> {
         if ipfs_cid::parse(cid).is_some_and(|c| c.codec == ipfs_cid::RAW) {
             return self.content(core, block, None, start, len, depth);
         }
@@ -1584,36 +1879,38 @@ impl Walk {
     }
 
     /// Content at `start`: before the head, what the sniff waits for; after
-    /// it, what the body's range holds.
+    /// it, what the body's range holds. Each copy is within the room held
+    /// for the block's ([`Walk::draw`]).
     fn emit(&mut self, core: &mut Core, start: u64, bytes: &[u8]) {
-        let Some(f) = self.file.as_mut() else {
+        let Some(f) = self.file.as_ref() else {
             return;
         };
-        if !f.headed {
-            // Only bytes 0 to the sniff's end are kept for the type, as
-            // `GatewayCore` reads no more; the head goes once they're in.
-            let end = f.sniff.unwrap_or(0);
-            if start <= end {
-                let keep = usize::try_from(end + 1 - start)
-                    .unwrap_or(usize::MAX)
-                    .min(bytes.len());
-                core.hold(keep);
+        if f.headed {
+            return self.release(core, bytes, start);
+        }
+        // Only bytes 0 to the sniff's end are kept for the type, as
+        // `GatewayCore` reads no more; the head goes once they're in.
+        let end = f.sniff.unwrap_or(0);
+        if start <= end {
+            let keep = usize::try_from(end + 1 - start)
+                .unwrap_or(usize::MAX)
+                .min(bytes.len());
+            self.draw(core, keep);
+            if let Some(f) = self.file.as_mut() {
                 f.early.extend_from_slice(&bytes[..keep]);
             }
-            let past = end + 1;
-            if start + bytes.len() as u64 >= past {
-                self.head_file(core);
-                // The rest of this slice, past the sniffed bytes.
-                if self.file.as_ref().is_some_and(|f| f.headed) && !core.ended() {
-                    let from = usize::try_from(past.saturating_sub(start)).unwrap_or(usize::MAX);
-                    if let Some(tail) = bytes.get(from..).filter(|t| !t.is_empty()) {
-                        self.release(core, tail, start.max(past));
-                    }
+        }
+        let past = end + 1;
+        if start + bytes.len() as u64 >= past {
+            self.head_file(core);
+            // The rest of this slice, past the sniffed bytes.
+            if self.file.as_ref().is_some_and(|f| f.headed) && !core.ended() {
+                let from = usize::try_from(past.saturating_sub(start)).unwrap_or(usize::MAX);
+                if let Some(tail) = bytes.get(from..).filter(|t| !t.is_empty()) {
+                    self.release(core, tail, start.max(past));
                 }
             }
-            return;
         }
-        self.release(core, bytes, start);
     }
 
     /// The body's part of `bytes` at `start`: blocks come depth-first, so
@@ -1633,7 +1930,7 @@ impl Walk {
         let Some(part) = bytes.get(from..to) else {
             return;
         };
-        core.hold(part.len());
+        self.draw(core, part.len());
         core.body(part.to_vec(), None);
     }
 
@@ -1641,10 +1938,11 @@ impl Walk {
 
     fn car_data(&mut self, core: &mut Core, bytes: Vec<u8>) {
         let Some(c) = self.car.as_mut() else {
-            core.unhold(bytes.len());
             return;
         };
-        c.stash.push_back(bytes);
+        // Copied into the stream's buffer, and the frame goes.
+        c.stash.push(&bytes);
+        drop(bytes);
         self.read_car(core);
         self.pump(core);
     }
@@ -1656,9 +1954,20 @@ impl Walk {
         let Some(c) = self.car.as_mut() else {
             return;
         };
-        if let Err(failure) = Self::push_frames(c, core) {
-            Self::break_car(c, core, failure);
-            return self.car_settled(core);
+        match Self::push_frames(c, core) {
+            Ok(Read::On) => {}
+            // The CAR is a shortcut: without room to read it on, the rest
+            // comes as raw blocks, and only a raw block that can't fit
+            // either ends the walk for its memory.
+            Ok(Read::GiveWay) => {
+                self.close_car(core);
+                self.raw_only = true;
+                return self.pump(core);
+            }
+            Err(failure) => {
+                Self::break_car(c, core, failure);
+                return self.car_settled(core);
+            }
         }
         if c.finished && !c.ended && c.stash.is_empty() {
             match c.reader.finish() {
@@ -1679,8 +1988,7 @@ impl Walk {
             c.open = false;
             core.cancel_piece(c.id);
         }
-        core.unhold(c.stash.iter().map(Vec::len).sum());
-        c.stash.clear();
+        c.stash.free(core);
         c.ended = true;
         c.broken.get_or_insert(failure);
     }
@@ -1690,17 +1998,19 @@ impl Walk {
     /// of each as can complete no more sections than may still wait, each
     /// counted with its job's structures; and only while the request has
     /// room for what those bytes can complete: the section being read and
-    /// the bytes themselves.
-    fn push_frames(c: &mut CarStream, core: &mut Core) -> Result<(), Failure> {
+    /// the bytes themselves. Without that room, and nothing that will give
+    /// it back, the CAR gives way to raw blocks.
+    fn push_frames(c: &mut CarStream, core: &mut Core) -> Result<Read, Failure> {
         while c.finished || core.awaiting() < QUEUE_LIMIT {
             let starts = PENDING_LIMIT.saturating_sub(c.pending) / SECTION_COST;
             if starts == 0 {
                 // The sections waiting free room as their verdicts are used.
-                return Ok(());
+                return Ok(Read::On);
             }
-            let Some(frame) = c.stash.front_mut() else {
-                return Ok(());
-            };
+            let frame = c.stash.front();
+            if frame.is_empty() {
+                return Ok(Read::On);
+            }
             // The item being read completes with the bytes it wants; each
             // further section takes at least MIN_SECTION.
             let wanting = c.reader.wanting();
@@ -1713,32 +2023,32 @@ impl Walk {
                 // Room comes back as sections are used and the body is
                 // read; with neither waiting, it never will.
                 if c.pending == 0 && core.awaiting() == 0 {
-                    return Err(Failure::Memory);
+                    return Ok(Read::GiveWay);
                 }
-                return Ok(());
+                return Ok(Read::On);
             }
             let pushed = c.reader.push(&frame[..take]);
-            frame.drain(..take);
-            if frame.is_empty() {
-                c.stash.pop_front();
-            }
-            // The bytes are the reader's now, within its room.
-            core.unhold(take);
+            // The bytes are the reader's now, within its room; their place
+            // in the window is main's again.
+            c.stash.consume(core, take);
             if c.open {
                 core.consumed(c.id, take);
             }
             for section in pushed.sections {
-                let n = c.sent;
-                c.sent += 1;
                 // The section's own buffer, the CID moved out of its front.
                 let (mut block, cid_len) = section.into_parts();
                 let cid = block.drain(..cid_len).collect::<Vec<u8>>();
                 let size = cid.len() + block.len();
-                // The section's bytes were in the reader's room and the
-                // frame's; its job's own structures need room of their own.
-                if !core.fits(SECTION_COST) {
-                    return Err(Failure::Memory);
+                // The section's bytes leave the reader for the job, which
+                // holds them beside the reader's room, with its own
+                // structures. Without room for both, the section, out of
+                // the reader, can't wait: it and the rest come as raw
+                // blocks.
+                if !core.fits(size + SECTION_COST) {
+                    return Ok(Read::GiveWay);
                 }
+                let n = c.sent;
+                c.sent += 1;
                 c.pending += size + SECTION_COST;
                 core.hold(size + SECTION_COST);
                 core.hash(Tag::Section(n), Work::Block { cid, block });
@@ -1747,16 +2057,17 @@ impl Walk {
                 return Err(refusal(r));
             }
         }
-        Ok(())
+        Ok(Read::On)
     }
 
     fn car_end(&mut self, core: &mut Core) {
         let Some(c) = self.car.as_mut() else {
-            return;
+            return core.window_done();
         };
         c.open = false;
-        // What it stashed is read first.
+        // What it stashed is read first, in the window kept for it.
         c.finished = true;
+        c.stash.keep(core);
         self.read_car(core);
     }
 
@@ -1785,40 +2096,68 @@ impl Walk {
 
     fn raw_data(&mut self, core: &mut Core, seq: u64, bytes: Vec<u8>) {
         let Some(r) = self.raw.get_mut(&seq) else {
-            core.unhold(bytes.len());
             return;
         };
         let n = bytes.len();
-        // The block's room was held; its bytes take it as they come. Bytes
-        // past it (a node longer than a leaf's entry) need room of their
-        // own.
-        let take = n.min(r.reserved);
-        if n > take && !core.fits(n - take) {
-            core.unhold(n);
-            return self.end(core, Failure::Memory);
+        let len = r.buf.len() + n;
+        if len > r.buf.capacity() {
+            // The buffer moves to its next size within the room held for it
+            // and the piece's window, which holds nothing past main's frame
+            // (its bytes are credited as they are copied). What the move
+            // needs past them is held while it is made, and bytes past the
+            // room (a node longer than a leaf's entry) keep their room.
+            let next = r.next_size(len);
+            let grow = next.saturating_sub(r.room);
+            let over = (r.buf.capacity() + next + n).saturating_sub(r.room + grow + STREAM_WINDOW);
+            if !core.fits(grow + over) {
+                return self.end(core, Failure::Memory);
+            }
+            core.hold(grow + over);
+            r.buf.reserve_exact(next - r.buf.len());
+            core.unhold(over);
+            r.room += grow;
         }
         r.buf.extend_from_slice(&bytes);
-        r.reserved -= take;
-        core.unhold(take);
+        drop(bytes);
         core.consumed(r.id, n);
     }
 
     fn raw_end(&mut self, core: &mut Core, seq: u64) {
         let Some(need) = self.needs.iter().find(|n| n.seq == seq).cloned() else {
             if let Some(r) = self.raw.remove(&seq) {
-                core.unhold(r.held());
+                let n = r.held();
+                drop(r);
+                core.unhold(n);
             }
-            return;
+            return core.window_done();
         };
         let Some(r) = self.raw.get_mut(&seq) else {
-            return;
+            return core.window_done();
         };
         r.hashing = true;
-        core.unhold(r.reserved);
-        r.reserved = 0;
-        // The block and its CID are the job's now.
+        let mut block = std::mem::take(&mut r.buf);
+        let len = block.len();
+        // A buffer longer than its block (a node of unknown length) is cut
+        // to it: a copy, at most, beside the buffer, made within its room
+        // and the window the block came through, which the walk holds
+        // until this end is done, and room held past them. Without that
+        // room the buffer is kept whole, and its room with it, until it
+        // goes. Room never made into the buffer goes.
+        if block.capacity() > len {
+            let over = (block.capacity() + len).saturating_sub(r.room + STREAM_WINDOW);
+            if core.fits(over) {
+                core.hold(over);
+                block.shrink_to_fit();
+                core.unhold(over);
+            }
+        }
+        core.unhold(r.room - block.capacity());
+        r.room = block.capacity();
+        core.window_done();
+        // The block and its CID are the job's now; the buffer's room past
+        // its bytes, if any, stays with the piece.
+        r.room -= len;
         r.cid_len = 0;
-        let block = std::mem::take(&mut r.buf);
         core.hash(
             Tag::Raw(seq),
             Work::Block {
@@ -1841,6 +2180,12 @@ impl Walk {
             core.unhold(body.len());
             return self.end(core, Failure::Unverifiable);
         };
+        // The name's CID beside the record, for its job. Nothing else is
+        // out: room that doesn't fit never will.
+        if !core.fits(cid.len()) {
+            core.unhold(body.len());
+            return self.end(core, Failure::Memory);
+        }
         core.hold(cid.len());
         core.hash(
             Tag::Record,
@@ -1911,7 +2256,7 @@ impl super::Events<Tag> for Walk {
         match tag {
             Tag::Car => self.car_data(core, bytes),
             Tag::Raw(seq) => self.raw_data(core, seq, bytes),
-            _ => core.unhold(bytes.len()),
+            _ => drop(bytes),
         }
     }
 
@@ -1948,18 +2293,25 @@ impl super::Events<Tag> for Walk {
     }
 
     fn failed(&mut self, core: &mut Core, tag: Tag, failure: PieceFailure) {
-        if let Tag::Raw(seq) = tag
-            && let Some(r) = self.raw.remove(&seq)
-        {
-            core.unhold(r.held());
+        if let Tag::Raw(seq) = tag {
+            if let Some(r) = self.raw.remove(&seq) {
+                let n = r.held();
+                drop(r);
+                core.unhold(n);
+            }
+            core.window_done();
         }
-        if tag == Tag::Car
-            && let Some(c) = self.car.as_mut()
-        {
-            // The sections it sent before failing are still used.
+        if tag == Tag::Car {
+            let Some(c) = self.car.as_mut() else {
+                core.window_done();
+                return self.end(core, Failure::Piece(failure));
+            };
+            // The sections it sent before failing are still used, and what
+            // it stashed is still read, in the window kept for it.
             c.open = false;
             c.ended = true;
             c.broken = Some(Failure::Piece(failure));
+            c.stash.keep(core);
             return self.car_settled(core);
         }
         self.end(core, Failure::Piece(failure));
@@ -1991,8 +2343,12 @@ impl super::Events<Tag> for Walk {
             }
             (Tag::Section(n), Verdict::Block(result), Work::Block { cid, block }) => {
                 let Some(c) = self.car.as_mut() else {
-                    core.unhold(cid.len() + block.len());
-                    return;
+                    // The CAR gave way: the section's room, and its job's
+                    // structures' cost, go to the raw blocks.
+                    let n = cid.len() + block.len() + SECTION_COST;
+                    drop((cid, block));
+                    core.unhold(n);
+                    return self.pump(core);
                 };
                 c.verdicts.insert(n, (cid, block, result));
                 self.pump(core);
@@ -2002,15 +2358,21 @@ impl super::Events<Tag> for Walk {
             }
             (Tag::Raw(seq), Verdict::Block(result), Work::Block { cid, block }) => {
                 core.unhold(cid.len());
-                self.raw.remove(&seq);
+                let spare = self.raw.remove(&seq).map_or(0, |r| r.room);
+                let n = block.len() + spare;
                 if let Err(r) = result {
-                    core.unhold(block.len());
+                    drop(block);
+                    core.unhold(n);
                     return self.end(core, refusal(r));
                 }
                 if self.needs.iter().any(|n| n.seq == seq) {
                     self.arrived.insert(seq, block);
+                    if spare > 0 {
+                        self.spares.insert(seq, spare);
+                    }
                 } else {
-                    core.unhold(block.len());
+                    drop(block);
+                    core.unhold(n);
                 }
                 self.pump(core);
             }
