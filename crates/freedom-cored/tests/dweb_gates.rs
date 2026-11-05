@@ -28,6 +28,8 @@
 //! The tests that pin the 64 running, the 128 streams, the 256 pieces and
 //! the 64 bodies' windows lift the bounds in front of them with
 //! `FREEDOM_CORED_TEST_DWEB_GRANTS_BYTES` and `FREEDOM_CORED_TEST_DWEB_STREAMS`.
+//! 0009's vault gate counts the 50 bodies the grants admit (the release
+//! run); the 64-body runs are stress checks.
 //!
 //! **Resident memory** is read from `/proc` (`VmRSS`, `VmHWM`), as
 //! `vault`'s tests read it: Linux only. Elsewhere it is not measured.

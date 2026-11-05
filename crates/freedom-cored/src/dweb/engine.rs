@@ -306,6 +306,8 @@ impl Engine {
             io.refuse(id, Refusal::Cancelled);
         }
         // Otherwise the request has ended already: nothing to do.
+        // A waiter that left the front may let those behind it start.
+        self.admit(io, now);
         self.dispatch(io, now);
     }
 
@@ -516,7 +518,13 @@ impl Engine {
 impl Engine {
     // ---- inside ------------------------------------------------------------
 
-    /// Starts what waits, in order, while the front's grant fits.
+    /// Starts what waits, in order, while the front's grant fits. It runs
+    /// after each change that could let the front start: an arrival
+    /// ([`Engine::verify`]), a waiter leaving ([`Engine::cancel`],
+    /// [`Engine::tick`]) and a grant given back (`settle`, the one place
+    /// grants and running places free). So the front never fits while it
+    /// waits. A waiter that ends at its start (a refused plan, a deadline
+    /// passed) takes no grant, and the next is tried.
     fn admit(&mut self, io: &mut dyn Io, now: Ms) {
         while let Some(front) = self.waiting.front() {
             let grant = verifier::grant(&front.request.plan.root);
@@ -1062,11 +1070,14 @@ mod tests {
         credits: VecDeque<(u64, usize)>,
         jobs: VecDeque<Job>,
         got: BTreeMap<u64, Got>,
+        /// The gate refuses the next this many pieces.
+        refuse: usize,
     }
 
     impl Fake {
         fn new(cap: usize) -> Self {
             Self {
+                refuse: 0,
                 next: 1,
                 cap,
                 out: Vec::new(),
@@ -1085,6 +1096,10 @@ mod tests {
 
     impl Io for Fake {
         fn get(&mut self, request: u64, piece: &PieceRequest) -> Get {
+            if self.refuse > 0 {
+                self.refuse -= 1;
+                return Get::Refused;
+            }
             if self.out.len() >= self.cap {
                 return Get::Full;
             }
@@ -1470,6 +1485,139 @@ mod tests {
         assert_eq!(e.granted(), 50 * verifier::SWARM_GRANT);
     }
 
+    /// Room for one IPFS grant and one Swarm grant, not two IPFS.
+    fn mixed() -> Bounds {
+        Bounds {
+            grants: verifier::IPFS_GRANT + verifier::SWARM_GRANT,
+            ..Bounds::default()
+        }
+    }
+
+    /// An IPFS request running, holding its piece; an IPFS request waiting
+    /// at the front, whose grant doesn't fit beside it; and `behind`, a
+    /// Swarm request whose grant would.
+    fn ipfs_then_a_front_then_swarm(
+        e: &mut Engine,
+        f: &mut Fake,
+        front: Request,
+        behind: Ms,
+    ) -> World {
+        let mut w = World::new();
+        w.hold = Some("/".into());
+        e.verify(f, 0, 1, ipfs(SITE_V1, "/index.html"));
+        e.verify(f, 0, 2, front);
+        e.verify(f, behind, 3, swarm(SITE_A, "/index.html"));
+        settle(e, f, &w, behind);
+        assert_eq!(e.counts(), (1, 2));
+        assert_eq!(e.granted(), verifier::IPFS_GRANT);
+        assert!(!f.sent.iter().any(|(r, _)| *r == 3), "it waits in order");
+        w
+    }
+
+    /// The Swarm request behind the front has started, and its piece gone.
+    fn the_swarm_behind_started(e: &Engine, f: &Fake) {
+        assert!(e.is_running(3));
+        assert!(f.sent.iter().any(|(r, _)| *r == 3));
+        assert_eq!(e.counts(), (2, 0));
+        assert_eq!(e.granted(), verifier::IPFS_GRANT + verifier::SWARM_GRANT);
+    }
+
+    #[test]
+    fn cancelling_the_front_waiter_starts_what_fits_behind_it() {
+        let mut e = Engine::new(mixed());
+        let mut f = Fake::new(256);
+        let _w = ipfs_then_a_front_then_swarm(&mut e, &mut f, ipfs(SITE_V1, "/index.html"), 0);
+        e.cancel(&mut f, 1, 2);
+        assert_eq!(f.ending(2), Some("cancelled"));
+        // At once: not at the Swarm request's 10 s, as busy.
+        the_swarm_behind_started(&e, &f);
+        assert_eq!(e.next_due(), Some(360_000));
+    }
+
+    #[test]
+    fn a_front_waiter_the_clock_ends_starts_what_fits_behind_it() {
+        // Its deadline passes while it waits: a 504.
+        let mut e = Engine::new(mixed());
+        let mut f = Fake::new(256);
+        let mut front = ipfs(SITE_V1, "/index.html");
+        front.deadline_ms = 500;
+        let _w = ipfs_then_a_front_then_swarm(&mut e, &mut f, front, 0);
+        e.tick(&mut f, 500);
+        assert_eq!(f.ending(2), Some("error 504 Deadline passed"));
+        the_swarm_behind_started(&e, &f);
+        // Its 10 s pass, but not those of the Swarm request, which came
+        // 5 s later: busy.
+        let mut e = Engine::new(mixed());
+        let mut f = Fake::new(256);
+        let _w = ipfs_then_a_front_then_swarm(&mut e, &mut f, ipfs(SITE_V1, "/index.html"), 5_000);
+        e.tick(&mut f, GRANT_WAIT_MS);
+        assert_eq!(f.ending(2), Some("busy"));
+        the_swarm_behind_started(&e, &f);
+    }
+
+    #[test]
+    fn a_request_that_fails_starts_what_fits_and_skips_what_ends_at_its_start() {
+        let mut e = Engine::new(mixed());
+        let mut f = Fake::new(256);
+        // The front's plan the core refuses on its second check.
+        let mut front = ipfs(SITE_V1, "/index.html");
+        front.plan.query = "x".into();
+        let w = ipfs_then_a_front_then_swarm(&mut e, &mut f, front, 0);
+        // Behind them, an IPFS request whose deadline passes before any
+        // tick, then a Swarm request.
+        let mut late = ipfs(SITE_V1, "/index.html");
+        late.deadline_ms = 500;
+        e.verify(&mut f, 0, 4, late);
+        e.verify(&mut f, 0, 5, swarm(SITE_A, "/index.html"));
+        assert_eq!(e.counts(), (1, 4));
+        // The running request's piece fails at main: it ends with an error
+        // plan and gives its grant back.
+        let (get, _, _) = f.out[0].clone();
+        f.out.clear();
+        e.reply(&mut f, 1_000, get, Reply::Failed(PieceFailure::Error))
+            .unwrap();
+        assert!(f.ending(1).is_some_and(|s| s.starts_with("error 5")));
+        // The front is refused at its start (502), and the IPFS request
+        // past its deadline is a 504 at its start: neither takes a grant,
+        // and both Swarm requests start.
+        assert_eq!(
+            f.ending(2),
+            Some(format!("error 502 {REFUSED_PLAN}").as_str())
+        );
+        assert_eq!(f.ending(4), Some("error 504 Deadline passed"));
+        assert!(e.is_running(3) && e.is_running(5));
+        assert_eq!(e.counts(), (2, 0));
+        assert_eq!(e.granted(), 2 * verifier::SWARM_GRANT);
+        let _ = w;
+    }
+
+    #[test]
+    fn a_piece_the_gate_refuses_ends_its_request_and_starts_what_fits() {
+        let w = World::new();
+        let mut e = Engine::new(mixed());
+        // The gate full: the running request's piece waits for it.
+        let mut f = Fake::new(0);
+        e.verify(&mut f, 0, 1, ipfs(SITE_V1, "/index.html"));
+        e.verify(&mut f, 0, 2, ipfs(SITE_V1, "/index.html"));
+        e.verify(&mut f, 0, 3, swarm(SITE_A, "/index.html"));
+        assert_eq!((e.counts(), e.queued()), ((1, 2), (1, 0)));
+        // The gate opens and refuses that piece: its request fails, and
+        // both behind it start in the same pass, their pieces sent.
+        f.cap = 256;
+        f.refuse = 1;
+        e.room(&mut f, 0);
+        assert!(f.ending(1).is_some_and(|s| s.starts_with("error 5")));
+        assert!(e.is_running(2) && e.is_running(3));
+        assert_eq!(e.counts(), (2, 0));
+        assert_eq!(e.granted(), verifier::IPFS_GRANT + verifier::SWARM_GRANT);
+        assert_eq!(e.queued(), (0, 0));
+        let sent: Vec<u64> = f.sent.iter().map(|(r, _)| *r).collect();
+        assert_eq!(sent, [2, 3]);
+        settle(&mut e, &mut f, &w, 0);
+        assert_eq!((f.ending(2), f.ending(3)), (Some("end"), Some("end")));
+        assert_eq!(e.granted(), 0);
+    }
+
     #[test]
     fn past_the_waiting_bound_is_busy_at_once() {
         let mut w = World::new();
@@ -1592,6 +1740,24 @@ mod tests {
         settle(&mut e, &mut f, &w, 10_000);
         assert!(!e.is_running(2));
         assert_eq!((e.granted(), e.streams()), (0, 0));
+    }
+
+    /// The wire refuses a `deadline_ms` past 360 s; the engine's sums
+    /// saturate all the same, so no deadline wraps to the past.
+    #[test]
+    fn a_deadline_at_the_clock_s_end_saturates() {
+        let mut w = World::new();
+        w.hold = Some("/chunks/".into());
+        let mut e = Engine::new(Bounds::default());
+        let mut f = Fake::new(256);
+        let mut r = swarm(SITE_A, "/index.html");
+        r.deadline_ms = Ms::MAX;
+        e.verify(&mut f, 1_000, 1, r);
+        settle(&mut e, &mut f, &w, 1_000);
+        assert_eq!(e.next_due(), Some(Ms::MAX));
+        e.tick(&mut f, 2_000);
+        assert_eq!(f.ending(1), None);
+        assert!(e.is_running(1));
     }
 
     #[test]

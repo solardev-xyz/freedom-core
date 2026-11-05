@@ -93,7 +93,12 @@ pub fn verify_params(params: Option<&str>) -> Result<Request, &'static str> {
     let JsValue::Bool(private) = *private else {
         return Err(INVALID);
     };
-    let deadline_ms: Ms = integer(deadline_ms).ok_or(INVALID)?;
+    // At most the method's own 360 s to the head (design 0009, Bounds), as
+    // the session methods refuse more than their 120 s.
+    let longest = fc_protocol::methods::Deadline::Head.default_ms();
+    let deadline_ms: Ms = integer(deadline_ms)
+        .filter(|ms| longest.is_some_and(|longest| *ms <= longest))
+        .ok_or(INVALID)?;
     // An IPFS plan says whether its gateway serves ordered CARs; an Ant
     // plan has nothing to say.
     let car = match (&plan.node, car) {
@@ -269,6 +274,16 @@ mod tests {
             (Method::Get, false, 360_000)
         );
         assert!(ok(&params(Node::Ipfs, Some(true))).unwrap().car);
+        // `deadline_ms`: up to the method's 360 s, refused past it.
+        let mut p = params(Node::Ant, None);
+        for fine in [0, 1, 359_999, 360_000] {
+            p["deadline_ms"] = fine.into();
+            assert_eq!(ok(&p).unwrap().deadline_ms, fine);
+        }
+        for past in [360_001, 4_294_967_296, 9_007_199_254_740_991_u64] {
+            p["deadline_ms"] = past.into();
+            assert!(ok(&p).is_err(), "{past}");
+        }
         assert!(!ok(&params(Node::Ant, None)).unwrap().car);
         // `car` is the IPFS plan's own: required there, refused for Ant.
         assert!(ok(&params(Node::Ipfs, None)).is_err());
@@ -288,6 +303,8 @@ mod tests {
             |p: &mut serde_json::Value| p["method"] = "POST".into(),
             |p: &mut serde_json::Value| p["private"] = 0.into(),
             |p: &mut serde_json::Value| p["deadline_ms"] = (-1).into(),
+            |p: &mut serde_json::Value| p["deadline_ms"] = 1.5.into(),
+            |p: &mut serde_json::Value| p["deadline_ms"] = 9_007_199_254_740_992_u64.into(),
             |p: &mut serde_json::Value| p["partition"] = 3.into(),
             |p: &mut serde_json::Value| p["plan"]["verify"]["node"] = "bee".into(),
             |p: &mut serde_json::Value| {

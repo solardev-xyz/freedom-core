@@ -787,7 +787,7 @@ RSA signature checks for IPNS records, in release builds on the same server at a
 Measured before verification ships on by default (decision 1), on linux-x64, macOS arm64 and win-x64, verified against unverified on the same node:
 - **Swarm, loopback Ant, cached content:** a 1 KB file, a 10 MiB file and a seek into it, at 1, 50 and 200 concurrent requests, for a plain tree and erasure coding at levels 1 and 4. For plain and level-1 trees, verified time to first byte within 10 ms of unverified at p50 one at a time, and throughput of at least 40 MiB/s for the 10 MiB file. Level 4 is measured and reported against those figures.
 - **IPFS, loopback Kubo:** the same shapes. Verified throughput at least 80 % of unverified.
-- **The vault under load:** with 64 verified bodies streaming at full speed, a `vault.lock` is acknowledged within 50 ms at p99.
+- **The vault under load:** with 50 streaming bodies (the most the grants admit) at full speed, a `vault.lock` is acknowledged within 50 ms at p99. Stress tests lift the grants to stream 64 bodies and to reach the 64 running, the 128 streams and the 256 pieces.
 - **A real page load** of a Swarm site and an IPFS site, verified against unverified, in Chromium.
 
 If a gate fails, the default ([Decisions](#decisions), 1) and the [service alternative](#where-verification-runs) go back to the user with the numbers.
@@ -892,9 +892,10 @@ As 0006's 4.7 did, the tests land before the code. Every case pins its failure s
 | pieces in flight, per request; outstanding `shell.dweb_get`, all requests | 8; 256 | the machine waits for one to end; the piece waits in the dweb thread's FIFO |
 | incoming streams with credit, all requests | 128 | the request waits for one to end |
 | a whole piece; a raw block | 64 KiB; 2 MiB | `failed: "too_large"`, a verification failure |
-| a piece reply's headers | 8, each ≤ 8 KiB | a malformed reply: the piece fails, logged as a fault in main |
+| a piece reply's headers | 8, each ≤ 8 KiB | a malformed reply, past these or otherwise not one of the three forms: a protocol error (`dweb_get_reply`), and the connection ends (amendment 4); a well-formed error reply fails the piece as `error` |
 | stream window, each direction | 128 KiB; data frames ≤ 64 KiB | the sender waits for credit |
 | node bytes in flight to the core | 128 streams × 128 KiB = 16 MiB | not reachable: credit |
+| stream frames the reader holds for the dweb thread | coalesced, one entry per stream (a piece's data joined, with its terminal; a body's credit summed), each charged its buffers and 2,048 B, so a peer within credit stays within it whatever its framing: (128 streams + 1 being handled) × (a 128 KiB window, as its buffer grows by powers of two, + its largest terminal, an abort of 8 + 1,024 B, + 2,048) + 256 bodies main can credit (one per fetch it holds) × 2,048 = 17,829,896 B (16 MiB + 1,052,680 B); at most 16,384 entries, a defence only (a peer within credit has at most 385) | a protocol error (`stream_backlog`), never reached within credit; main reaches it past its credit, or with a flood of terminals or of other bodies' credit, while the dweb thread is behind |
 | rings in main | one per admitted fetch's body, verified or from 0007's service, kept until drained or cancelled: 256 × 128 KiB = 32 MiB | not reachable: fetch admission (256 active, 512 waiting, then 503) |
 | the dweb writer | 8 MiB of unwritten data | the machines wait for credit |
 | memory, per request | its grant, 2 MiB for Swarm and 8 MiB for IPFS, granted whole from the dweb thread's grants when the request starts: its budget, reserved before allocation (its windows, leaves and blocks in flight, the walk's parsed nodes and what it keeps of them, its queue of blocks to fetch, a directory's entries and its listing's page, each CAR section's hash job, the path's strings, its body until main takes it), and a fixed allowance, 64 KiB for Swarm and 128 KiB for IPFS ([What a grant covers](#what-a-grant-covers)) | fewer pieces in flight; a CAR gives way to raw blocks; a walk that can't fit at all is `unverifiable`, with the memory text ([Failures](#failures)) |
@@ -921,12 +922,12 @@ As 0006's 4.7 did, the tests land before the code. Every case pins its failure s
   - the verified body, each segment of its queue whole until main has taken all of it: a frame is made, at its length, only as main takes it;
   - the head's headers until main takes the head.
 - **The allowance, a fixed part of the grant, tested.** What the count doesn't follow, each bounded:
-  - the body frame being made for main, at most 64 KiB, and the outputs main hasn't taken yet: piece requests, credit, a verified chunk's copy for the cache;
+  - the body frame being made for main, at most 64 KiB, and the outputs main hasn't taken yet, however seldom it polls: a request for each open piece (main may answer only the pieces it has taken), one credit for each stream, which carries all the stream is owed when main takes it, and at most four verified chunks' copies for the cache (past them, a chunk isn't given to the cache);
   - the body queue's joined tail, which grows to 16 KiB at most and gives back its room when it stops being the tail, and the queue's and the outputs' slots;
   - the machine's own structures;
   - for IPFS only, the values its walk doesn't charge yet: the error page (under 1 KiB), the head's headers and its ETag and type strings, and an IPNS record's value while it waits for the floor (at most 10 KiB).
 
-  The tests measure it with a counting allocator (`verifier_memory`): between inputs and at each request's peak, nothing allocated passes the reservation by more than the allowance, for streams in 1-byte and 64 KiB frames, raw leaves of 1.8 MB, a 1.15 MB block of unknown length, many small body slices and a page that doesn't read. A request's allowance comes out of its grant, so the 128 MiB, the 101 MiB of grants and the 12 IPFS or 50 Swarm requests stay as stated. The IPFS allowance's last part stays until the IPFS walk is charged as the Swarm walk is, value by value; that follow-up replaces it with exact charges.
+  The tests measure it with a counting allocator (`verifier_memory`): between inputs and at each request's peak, nothing allocated passes the reservation by more than the allowance, for streams in 1-byte and 64 KiB frames, raw leaves of 1.8 MB, a 1.15 MB block of unknown length, many small body slices and a page that doesn't read, with main taking the outputs after every input or only once nothing moves without them (a stream's whole window sent in 1-byte frames before main polls). A request's allowance comes out of its grant, so the 128 MiB, the 101 MiB of grants and the 12 IPFS or 50 Swarm requests stay as stated. The IPFS allowance's last part stays until the IPFS walk is charged as the Swarm walk is, value by value; that follow-up replaces it with exact charges.
 
 **Why 2 MiB for a Swarm request.**
 - **The file phase holds little:**

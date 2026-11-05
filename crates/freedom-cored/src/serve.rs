@@ -130,11 +130,14 @@ pub enum Event {
     /// The writer has room again in the loop's share: the frames waiting
     /// here can go, then the requests that waited for them.
     Room,
-    /// A stream frame (design 0009, Streams in the core), read after a
-    /// protocol-2 hello, for the dweb thread: outside the frame credits,
-    /// under the reader's stream cap.
-    Stream(Frame, transport::StreamHold),
+    /// A stream's entry of frames (design 0009, Streams in the core), read
+    /// after a protocol-2 hello, for the dweb thread: outside the frame
+    /// credits, under the reader's stream cap.
+    Stream(transport::StreamMark),
 }
+
+// A stream mark's slot here is within what the reader charges its entry.
+const _: () = assert!(transport::stream_slot_fits(std::mem::size_of::<Event>()));
 
 /// The methods `core.hello`'s capabilities name: every method this build
 /// implements but the `chain.*` methods (design 0006's `chain.html`
@@ -472,13 +475,13 @@ pub fn run(options: &Options) -> Exit {
             }
             // On to the dweb thread at once, in the order read, so a piece's
             // data follows its head there.
-            Ok(Event::Stream(frame, hold)) => {
+            Ok(Event::Stream(mark)) => {
                 let Some(thread) = core.dweb.as_ref() else {
                     // The reader takes stream frames only after a protocol-2
                     // hello, which starts the thread.
                     break Exit::Internal;
                 };
-                if !thread.send(dweb::In::Stream { frame, hold }, None) {
+                if !thread.send(dweb::In::Stream(mark), None) {
                     break Exit::Internal;
                 }
             }

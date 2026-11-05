@@ -346,6 +346,10 @@ pub struct Main {
     pub got: BTreeMap<u64, Got>,
     /// Whether main credits the verified bodies as they come.
     pub credits_bodies: bool,
+    /// The most data main puts in one of a piece's frames.
+    pub frame_size: usize,
+    /// The most bytes main credits in one frame.
+    pub credit_step: usize,
     /// Whether main keeps the verified bodies' bytes, or only counts them.
     pub keep_bodies: bool,
     /// The core's events.
@@ -389,6 +393,8 @@ impl Main {
             cancels: Vec::new(),
             got: BTreeMap::new(),
             credits_bodies: true,
+            frame_size: MAX_DATA,
+            credit_step: usize::MAX,
             keep_bodies: true,
             events: Vec::new(),
             pieces: BTreeMap::new(),
@@ -452,7 +458,7 @@ impl Main {
         for (&id, f) in self.flows.iter_mut() {
             let stop = f.cut.map_or(f.body.len(), |(n, _)| n.min(f.body.len()));
             while f.at < stop && f.room > 0 {
-                let n = f.room.min(MAX_DATA).min(stop - f.at);
+                let n = f.room.min(self.frame_size).min(stop - f.at);
                 let frame = stream_frame(KIND_DATA, id, &f.body[f.at..f.at + n]);
                 self.core.send_raw(&frame);
                 f.at += n;
@@ -617,10 +623,13 @@ impl Main {
                     if self.keep_bodies {
                         got.body.extend_from_slice(&rest);
                     }
-                    if self.credits_bodies {
-                        let n = u32::try_from(rest.len()).unwrap().to_be_bytes();
+                    let mut left = if self.credits_bodies { rest.len() } else { 0 };
+                    while left > 0 {
+                        let n = left.min(self.credit_step);
+                        let credit = u32::try_from(n).unwrap().to_be_bytes();
                         self.core
-                            .send_raw(&stream_frame(KIND_STREAM_CREDIT, id, &n));
+                            .send_raw(&stream_frame(KIND_STREAM_CREDIT, id, &credit));
+                        left -= n;
                     }
                 }
                 KIND_END => {

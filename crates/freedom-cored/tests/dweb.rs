@@ -885,6 +885,31 @@ mod verify {
         }
     }
 
+    /// Main may frame its pieces and its credit as it likes within credit:
+    /// pieces in one-byte data frames, and each body's credit a byte at a
+    /// time, join their streams' entries in the core's reader, and the
+    /// bodies verify the same.
+    #[test]
+    fn pieces_and_credits_in_one_byte_frames_verify_the_same() {
+        let mut m = Main::new(World::new());
+        m.frame_size = 1;
+        m.credit_step = 1;
+        let a = m.verify(swarm("/style.css"));
+        let c = m.verify(ipfs("/index.html", false));
+        m.settle(&[a, c]);
+        for id in [a, c] {
+            assert_eq!(m.result(id)["status"], 200, "{:?}", m.got[&id]);
+            assert_eq!(m.result(id)["trust"]["content"], "verified");
+            assert!(m.got[&id].ended, "{id}");
+        }
+        assert_eq!(m.got[&a].body, content("site-style", 5000));
+        assert_eq!(m.got[&c].body, INDEX_HTML);
+        assert!(
+            m.asked.iter().any(|(_, p)| p["stream"] == true),
+            "a streamed piece"
+        );
+    }
+
     #[test]
     fn a_range_is_an_exact_206() {
         let mut m = Main::new(World::new());
