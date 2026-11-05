@@ -1786,3 +1786,64 @@ fn check_plan(plan: &Verify) -> Result<(), Refusal> {
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used, clippy::panic)]
+
+    use super::*;
+
+    /// However many inputs a stream's credit comes due over, one credit
+    /// waits for main, and it carries all of it when main takes it; a
+    /// credit still waiting when its stream is cancelled goes with it.
+    #[test]
+    fn a_stream_has_one_credit_waiting_carrying_all_it_is_owed() {
+        let mut core: Core<()> = Core::new(1, Node::Ipfs, false, None, IPFS_BUDGET);
+        let id = core
+            .fetch((), "/ipfs/x".to_owned(), vec![], Ask::Stream(None))
+            .unwrap();
+        assert!(matches!(core.take_output(), Some(Output::Piece(r)) if r.id == id));
+        for _ in 0..1_000 {
+            core.consumed(id, 1);
+            core.flush_credit();
+        }
+        assert_eq!(core.outputs.len(), 1);
+        match (core.take_output(), core.take_output()) {
+            (Some(Output::Credit { piece, bytes }), None) => {
+                assert_eq!((piece, bytes), (id, 1_000))
+            }
+            other => panic!("{other:?}"),
+        }
+        core.consumed(id, 5);
+        core.flush_credit();
+        core.consumed(id, 7);
+        core.flush_credit();
+        assert!(matches!(
+            core.take_output(),
+            Some(Output::Credit { bytes: 12, .. })
+        ));
+        core.consumed(id, 3);
+        core.flush_credit();
+        core.cancel_piece(id);
+        assert!(matches!(core.take_output(), Some(Output::CancelPiece(p)) if p == id));
+        assert!(core.take_output().is_none());
+    }
+
+    /// At most four verified chunks' copies wait for the structure cache:
+    /// past them a chunk isn't given to it, until main takes them.
+    #[test]
+    fn at_most_four_copies_wait_for_the_cache() {
+        let mut core: Core<()> = Core::new(1, Node::Ant, false, None, SWARM_BUDGET);
+        let remembered = |core: &mut Core<()>| {
+            std::iter::from_fn(|| core.take_output())
+                .filter(|o| matches!(o, Output::Remember { .. }))
+                .count()
+        };
+        for i in 0..6 {
+            core.remember([i; 32], &[i; 4_104]);
+        }
+        assert_eq!(remembered(&mut core), REMEMBER_WAITING);
+        core.remember([9; 32], &[9; 8]);
+        assert_eq!(remembered(&mut core), 1);
+    }
+}
