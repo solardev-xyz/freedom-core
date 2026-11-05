@@ -174,6 +174,27 @@ pub fn write(home: &Path, names: &Names) -> Result<(), Error> {
     Ok(())
 }
 
+/// Removes the marker from `home`, durably: once this returns, it is gone
+/// from disk (0008: "It is cleared only after a proven clean stop", which
+/// the caller proves). The entry is unlinked, never opened, so a symlink's
+/// target is untouched; a directory there is an error, and is left, as is
+/// anything when the removal fails. No marker is no error.
+pub fn remove(home: &Path) -> Result<(), Error> {
+    let path = path(home);
+    match fs::symlink_metadata(&path) {
+        Ok(metadata) if metadata.file_type().is_dir() => return Err(Error::NotAFile),
+        Ok(_) => match fs::remove_file(&path) {
+            Ok(()) => {}
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(()),
+            Err(e) => return Err(e.into()),
+        },
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(e.into()),
+    }
+    sync_dir(&home.join("node"))?;
+    Ok(())
+}
+
 /// Removes what a killed write left at `staging`, which was never the
 /// marker, without opening it: a symlink is unlinked, and its target is
 /// untouched. A directory there is an error, and is left.
@@ -483,5 +504,37 @@ mod tests {
         write(home.path(), &Names::of([id(3)])).unwrap();
         assert_eq!(read(home.path()).unwrap(), Some(Names::of([id(3)])));
         assert!(!staging(home.path()).exists());
+    }
+
+    #[test]
+    fn a_removed_marker_is_gone_and_removing_none_is_fine() {
+        let home = tempfile::tempdir().unwrap();
+        remove(home.path()).unwrap();
+        write(home.path(), &Names::of([id(1)])).unwrap();
+        remove(home.path()).unwrap();
+        assert_eq!(read(home.path()).unwrap(), None);
+        assert!(home.path().join("node").is_dir(), "its directory stays");
+        remove(home.path()).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_marker_symlink_is_unlinked_and_its_target_kept() {
+        let home = tempfile::tempdir().unwrap();
+        fs::create_dir_all(home.path().join("node")).unwrap();
+        let target = home.path().join("elsewhere");
+        fs::write(&target, b"keep me").unwrap();
+        std::os::unix::fs::symlink(&target, path(home.path())).unwrap();
+        remove(home.path()).unwrap();
+        assert!(fs::symlink_metadata(path(home.path())).is_err());
+        assert_eq!(fs::read(&target).unwrap(), b"keep me");
+    }
+
+    #[test]
+    fn a_marker_directory_is_refused_and_left() {
+        let home = tempfile::tempdir().unwrap();
+        fs::create_dir_all(path(home.path())).unwrap();
+        assert!(matches!(remove(home.path()), Err(Error::NotAFile)));
+        assert!(path(home.path()).is_dir());
     }
 }
