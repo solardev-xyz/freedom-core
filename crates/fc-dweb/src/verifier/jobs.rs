@@ -62,7 +62,9 @@ impl Work {
             Self::Chunk { wire, .. } | Self::FeedUpdate { wire, .. } => wire.len(),
             Self::Leaf { bytes, .. } => bytes.len(),
             Self::LeafChunk { bytes, wire, .. } => bytes.len() + wire.len(),
-            Self::Block { cid, block } => cid.len() + block.len(),
+            // A block's whole buffer: a raw block's is longer than its bytes
+            // when the walk had no room to cut it.
+            Self::Block { cid, block } => cid.len() + block.capacity(),
             Self::Record { name, record, .. } => name.len() + record.len(),
         }
     }

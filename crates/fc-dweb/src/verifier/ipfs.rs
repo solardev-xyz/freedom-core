@@ -405,10 +405,8 @@ enum Raw {
     /// it: the block's bound, or the buffer's capacity once that is more.
     /// `cid` is room for the CID its job will hold.
     Reading { buf: Bytes, cid: Charged<()> },
-    /// The block is its job's: what its buffer has past its bytes, when it
-    /// couldn't be given back at its end, stays here until the job's
-    /// result comes.
-    Hashing { spare: Charged<()> },
+    /// The block, its whole buffer, is its job's, which counts it.
+    Hashing,
 }
 
 impl RawPiece {
@@ -419,7 +417,7 @@ impl RawPiece {
                 buf.release(core);
                 cid.release(core);
             }
-            Raw::Hashing { spare } => spare.release(core),
+            Raw::Hashing => {}
         }
     }
 }
@@ -2612,10 +2610,7 @@ impl Walk {
         let Raw::Reading { .. } = r.state else {
             return core.window_done();
         };
-        let hashing = Raw::Hashing {
-            spare: Charged::new(core, (), 0),
-        };
-        let Raw::Reading { buf, cid } = std::mem::replace(&mut r.state, hashing) else {
+        let Raw::Reading { buf, cid } = std::mem::replace(&mut r.state, Raw::Hashing) else {
             return core.window_done();
         };
         // A buffer longer than its block (a node of unknown length) is cut
@@ -2632,7 +2627,7 @@ impl Walk {
             None
         };
         let cut = over.is_some();
-        let mut block = buf.remake(core, |mut b| {
+        let block = buf.remake(core, |mut b| {
             if cut {
                 b.shrink_to_fit();
             }
@@ -2642,14 +2637,8 @@ impl Walk {
             over.release(core);
         }
         core.window_done();
-        // The block and a copy of its CID are the job's now; what the
-        // buffer has past the block's bytes, if any, stays with the piece.
-        let spare = block.spare();
-        if let Some(Raw::Hashing { spare: s }) = self.raw.get_mut(&seq).map(|r| &mut r.state) {
-            put(core, s, spare);
-        } else {
-            spare.release(core);
-        }
+        // The block, its whole buffer, and a copy of its CID are the job's
+        // now, which counts them all.
         let cid = cid.map(|()| self.needs[at].cid.to_vec());
         let work = cid
             .join(block)
@@ -2911,7 +2900,7 @@ impl super::Events<Tag> for Walk {
                 self.record_hashed(core, result, name, record);
             }
             (Tag::Section(n), Verdict::Block(result), Work::Block { cid, block }) => {
-                let (c, b) = (cid.len(), block.len());
+                let (c, b) = (cid.len(), block.capacity());
                 let cid = Charged::arrived(core, cid, c);
                 let block = Charged::arrived(core, block, b);
                 let cost = self.sections.split(SECTION_COST);
@@ -2938,23 +2927,14 @@ impl super::Events<Tag> for Walk {
                 }
             }
             (Tag::Raw(seq), Verdict::Block(result), Work::Block { cid, block }) => {
-                let (c, b) = (cid.len(), block.len());
+                // The job counted the block's whole buffer, and so does the
+                // walk now.
+                let (c, b) = (cid.len(), block.capacity());
                 Charged::arrived(core, cid, c).release(core);
                 let block = Charged::arrived(core, block, b);
-                // The block's buffer whole again: its bytes and what it has
-                // past them.
-                let spare = match self.raw.remove(&seq) {
-                    Some(RawPiece {
-                        state: Raw::Hashing { spare },
-                        ..
-                    }) => spare,
-                    Some(r) => {
-                        r.release(core);
-                        Charged::new(core, (), 0)
-                    }
-                    None => Charged::new(core, (), 0),
-                };
-                let block = block.join(spare).remake(core, |(block, ())| block);
+                if let Some(r) = self.raw.remove(&seq) {
+                    r.release(core);
+                }
                 match result {
                     Err(r) => {
                         block.release(core);

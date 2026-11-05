@@ -267,21 +267,6 @@ impl Charged<Vec<u8>> {
         &mut self.value
     }
 
-    /// The charge past the buffer's bytes, as a room of its own: what a
-    /// buffer longer than its block holds past it, which stays with the
-    /// walk while the bytes go to a holder that counts their length only
-    /// (a hash job). The two together still cover the buffer.
-    pub(crate) fn spare(&mut self) -> Charged<()> {
-        let n = self.cost.saturating_sub(self.value.len());
-        self.cost -= n;
-        let tally = self.tally.split(n);
-        Charged {
-            value: (),
-            cost: n,
-            tally,
-        }
-    }
-
     /// Only bytes `from..to` stay (those it has), cut in place and the
     /// buffer shrunk to them; then the charge of what went is released.
     pub(crate) fn keep<X: Copy>(self, core: &mut Core<X>, from: usize, to: usize) -> Self {
@@ -688,15 +673,6 @@ mod tests {
         });
         assert_eq!(v.cost(), v.capacity());
         assert_eq!(core.walk_held.get(), v.cost());
-        // A buffer longer than its bytes: the charge past them as a room of
-        // its own, the two together the buffer's.
-        let mut b = Charged::make(&mut core, 100, || Vec::with_capacity(100)).unwrap();
-        b.get_mut().extend_from_slice(&[2; 40]);
-        let spare = b.spare();
-        assert_eq!((b.cost(), spare.cost()), (40, 60));
-        assert_eq!(core.walk_held.get(), v.cost() + 100);
-        b.release(&mut core);
-        spare.release(&mut core);
         v.release(&mut core);
         assert_eq!(core.walk_held.get(), 0);
         assert_eq!(core.walk_held.faults(), 0);
