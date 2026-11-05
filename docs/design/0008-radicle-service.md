@@ -219,9 +219,9 @@ Each ref is renamed into place atomically, but the steps together aren't. So bef
 **The dirty marker** (`node/dirty`) records that the home may hold a partial mutation:
 - **It is set before any mutation can run.** `rad.reconcile` writes it durably (the file, then its directory, flushed) before it changes anything. It stays present for the whole run, and every mutation of the home happens while it is present: COB writes, `unseed`, the import, clones, and heartwood's own fetches.
 - **It names the writers.** It holds the node IDs (public keys, so public data) of every identity that may have left a partial mutation:
-  - `rad.reconcile` adds the running identity's before it changes anything;
+  - `rad.reconcile` adds the running identity's before it changes anything. A throwaway key's isn't added: it owns no namespace and signs nothing ([Profiles without a vault](#profiles-without-a-vault)), so a check of it would find nothing, and successive throwaway starts that each reach the deadline would only grow the marker;
   - an earlier identity stays named until its namespace has been checked, whatever key later processes run with. Its vault may have been deleted or replaced since. The [switch](#the-switch) names the identity whose key file it removes in the same way;
-  - once every earlier identity's namespace is checked or its repository quarantined, `rad.reconcile` rewrites the marker durably to name only the running identity, before it replies.
+  - once every earlier identity's namespace is checked or its repository quarantined, `rad.reconcile` rewrites the marker durably to name only the running identity (none, for a throwaway key), before it replies.
 - **It is kept after anything that may be partial:** a write that ends `outcome_unknown`, or a clone or fetch that is cancelled or cut off.
 - **It is cleared only after a proven clean stop.** At `rad.shutdown`, it is removed (durably) only when all of these hold:
   - the write queue is empty, and the executing writer, if any, has returned;
@@ -950,7 +950,7 @@ The service sets these through an [upstream](#upstream-changes) `Options` change
     - **The credentials:** a fixed username, and a password derived from the remote's node ID and a per-process secret: 128 random bits from the operating system, made at start, never written or logged.
     - **No fallback:** only username/password authentication is offered, so a proxy that won't take it fails the dial rather than sharing circuits silently.
     - **Built upstream:** heartwood's SOCKS5 client (`socks5-client` 0.4, through cyphernet) offers no authentication, so heartwood has an RFC 1929 state machine of its own in `Wire::dial` ([upstream](#upstream-changes)): solardev-xyz/heartwood#19, merged.
-    - **Asked for by the dial gate:** in that change, heartwood isolates only for a gate whose `isolates_streams` says so, and otherwise keeps no authentication, as upstream always has. The service's routing gate is to say so under `socks5`, in libradicle, which is still to come.
+    - **Asked for by the dial gate:** in that change, heartwood isolates only for a gate whose `isolates_streams` says so, and otherwise keeps no authentication, as upstream always has. libradicle's routing says so under `socks5`, for the service's gate (solardev-xyz/libradicle#20, merged), and the service's node runs with it from `rad.start`.
     - **The Arti check:** the Arti qualification gains an `isolation` check, that distinct credentials get distinct circuits (solardev-xyz/freedom-browser#964, merged into the browser's integration branch). A proxy that ignores credentials is exceedingly unlikely to pass it by chance: at most (1/12) × (1/24)^5, under one in 90 million. That bound assumes the proxy picks each connection's exit without knowing which credentials it carries, and can't predict the order the check draws at random from the operating system's generator. Against the pinned Arti 2.7.0, on the live Tor network, three runs of three qualified. It applies to 0007's per-instance credentials too (freedom-ipfsd v0.2.1), which had never been qualified for distinct circuits.
 - **`isolated`:** the node reaches no one.
   - Its peer set is static, with no `connect` peers, so it takes no bootstrap nodes and dials no one.
@@ -986,13 +986,17 @@ The source research for this design found four ways the node gives away more tha
 | 1 | An onion `Forward` without a proxy leaks onion names to DNS | **Covered.** The service sets `onion` in memory, never `Forward` ([Network policy](#network-policy)), and the dial gate refuses an onion name before any socket in `direct` mode (heartwood change 11). It stays open in the shipped add-on until libradicle `main` moves to these changes |
 | 2 | Each connection gets the node's signed inventory, tied to its node ID | **The user's decision** ([Open questions](#open-questions), 12) |
 | 3 | A node meant to reach no one still takes Iris and Rosa, and dials gossip peers | **Built upstream:** the `isolated` mode ([Modes](#modes)). Heartwood change 15 (solardev-xyz/heartwood#17) and libradicle's `Options::isolated` (solardev-xyz/libradicle#18) are both merged. The service's use of it is still to come |
-| 4 | SOCKS has no stream isolation, so every peer shares Arti's circuits | **Decided, and partly built:** isolation per remote node ([Modes](#modes)). Heartwood change 16 is built upstream (solardev-xyz/heartwood#19, merged). The Arti isolation check (solardev-xyz/freedom-browser#964, merged into the browser's integration branch) qualified the pinned Arti live. libradicle's routing gate under `socks5`, and the service, are still to come |
+| 4 | SOCKS has no stream isolation, so every peer shares Arti's circuits | **Decided, and partly built:** isolation per remote node ([Modes](#modes)). Heartwood change 16 is built upstream (solardev-xyz/heartwood#19, merged). The Arti isolation check (solardev-xyz/freedom-browser#964, merged into the browser's integration branch) qualified the pinned Arti live. libradicle's routing gate under `socks5` is built (solardev-xyz/libradicle#20, merged), and the service's node runs with it from `rad.start` |
 
 ### Seeding and serving
 
 - **This is Radicle's model, unchanged:**
   - a seeded repository is announced in the node's signed inventory and served to peers that ask for it;
   - seeding happens only on an explicit seed, clone or sync, and on the default repository at start.
+- **The default seeding policy is `block`** (decided 2026-11-04).
+  - heartwood's default is `block`, but `config.json` can change it: `node.seedingPolicy.default` can be `allow`, and the deprecated `node.policy` and `node.scope` override it.
+  - So the service forces `block` in memory, as it does the routing fields, through a new libradicle `Options` field ([Upstream changes](#upstream-changes), libradicle item 9b). That field is solardev-xyz/libradicle#28, merged, and `rad.start` passes it, the first step to start the node.
+  - With it, no repository is seeded but by an explicit seed, clone or sync, and a repository that is unseeded, or removed from quarantine, stays unseeded until one.
 - **Browsing through `rad:`** reads local storage and announces nothing.
 - **What peers learn:** each connection receives the node's signed inventory of the repositories it seeds, tied to its node ID, which is derived from the vault. Whether to offer a setting that announces none, while still serving on request, is the user's decision ([Open questions](#open-questions), 12).
 - **No listening socket:**
@@ -1029,7 +1033,18 @@ The source research for this design found four ways the node gives away more tha
 9. **An in-process import:**
    - `import_repo` (`lr:1012`) creates the repository in storage, fetches the working copy's branch into the node's namespace with libgit2's local transport, and signs the refs;
    - it replaces `rad::init`'s `git push` (`hw/radicle/src/rad.rs:107`–`120`);
-   - at start, libradicle empties libgit2's configuration search paths, so no global or system git configuration applies.
+   - libgit2's configuration search paths are emptied, so no global or system git configuration applies: libradicle's `isolate_git_config` (solardev-xyz/libradicle#27), which the service calls early in `main`, before any thread starts. That call is the service's one `unsafe` block (AGENTS.md rule 6): libgit2's search paths are process-wide options with no sound safe setter. libradicle's starts don't call it, so the add-on and UniFFI keep their host's paths.
+
+9a. **The host's repository gate, and repairs with the host's key.** Found when the service was built (step 4): heartwood's gate (item 14) and its online repair (item 13) need a way in from the host.
+- `Options` takes the host's repository gate. Without one, the node gets an always-open gate, as the add-on and UniFFI always have.
+- `Embedded` steps one online repair unit (heartwood's `Repair::online`), signed with the key the node runs as. So after `rad.start` the service keeps no copy of the key ([The sealed release](#the-sealed-release)). Before the start, reconciliation signs with the key `rad.identity` delivered.
+- `Embedded` removes a quarantined repository (heartwood's `remove_repo`): it unseeds it through the node, then deletes it with the profile's policy store and COB cache.
+
+9b. **The default seeding policy in `Options`** (solardev-xyz/libradicle#28). Found when the service was built (step 4): heartwood loads the default seeding policy from `config.json`, so nothing else holds the node to `block` ([Seeding and serving](#seeding-and-serving)).
+- `Options` takes `seeding_policy: Option<DefaultSeedingPolicy>`.
+- With `Some`, `run` sets it on the node's configuration, in memory, just before `Runtime::init`: after the profile is loaded, with the deprecated fields' override, and after the routing. It sets it on the profile too, so that libradicle's own policy reads agree with the node. Nothing is written to `config.json`.
+- With `None`, `config.json`'s policy applies, as today. The add-on and UniFFI pass `None`.
+- The service passes `Some(Block)`.
 
 **heartwood** (the `freedom/embed` fork):
 
@@ -1334,7 +1349,7 @@ Measured against the add-on on linux-x64, macOS arm64 and win-x64:
 
 1. **Tests first,** in freedom-browser: the contract suite, the fixture repository and golden vectors from the v0.8.0 add-on.
 2. **Upstream:**
-   - libradicle items 1, 2 and 4–9 (item 3 needs nothing now);
+   - libradicle items 1, 2 and 4–9 (item 3 needs nothing now), and 9a and 9b, which step 4 found it needs;
    - heartwood items 10–14, on the `freedom/embed` fork.
 
    The service can start on items 1, 2, 4, 9, 10 and 13.

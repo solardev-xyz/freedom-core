@@ -99,6 +99,26 @@ fn a_sealed_key_gives_its_identity() {
 }
 
 #[test]
+fn the_start_takes_the_key_once_and_nothing_signs_after() {
+    let home = home();
+    let identity = Identity::new(home.path()).unwrap();
+    assert!(identity.take_key().is_none(), "no key before rad.identity");
+    let params = sealed_params(&identity, &seed());
+    identity.establish(Some(&params)).unwrap();
+    assert!(identity.with(NodeIdentity::signer).unwrap().is_some());
+
+    let key = identity.take_key();
+    assert!(key.is_some());
+    // The service keeps no copy: neither the seed nor a signer from it.
+    assert_eq!(identity.with(NodeIdentity::holds_key), Some(false));
+    assert!(identity.with(NodeIdentity::signer).unwrap().is_none());
+    assert!(identity.take_key().is_none(), "taken once");
+    // The identity itself stays known, for the start's reply.
+    assert!(identity.known());
+    assert_eq!(identity.with(|i| i.nid.clone()).unwrap(), RFC8032_NID);
+}
+
+#[test]
 fn a_second_call_is_invalid_and_keeps_the_identity() {
     let home = home();
     let identity = Identity::new(home.path()).unwrap();

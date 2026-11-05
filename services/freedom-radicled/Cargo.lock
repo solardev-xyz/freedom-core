@@ -3,15 +3,6 @@
 version = 4
 
 [[package]]
-name = "addr2line"
-version = "0.25.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1b5d307320b3181d6d7954e663bd7c774a838b8220fe0593c86d9fb09f498b4b"
-dependencies = [
- "gimli",
-]
-
-[[package]]
 name = "adler2"
 version = "2.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -160,25 +151,21 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d92bec98840b8f03a5ff5413de5293bfcd8bf96467cf5452609f939ec6f5de16"
 
 [[package]]
+name = "async-trait"
+version = "0.1.92"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "82f6aeea286b8eb4dd3431a1be1b59d290ace00f5bfd8e2a159bc2a05e2c1667"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 3.0.3",
+]
+
+[[package]]
 name = "autocfg"
 version = "1.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f2032f911046de80f0a198e0901378627c33f59ea0ac00e363d481118bd70a53"
-
-[[package]]
-name = "backtrace"
-version = "0.3.76"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bb531853791a215d7c62a30daf0dde835f381ab5de4589cfe7c649d2cbe92bd6"
-dependencies = [
- "addr2line",
- "cfg-if",
- "libc",
- "miniz_oxide",
- "object",
- "rustc-demangle",
- "windows-link",
-]
 
 [[package]]
 name = "base-x"
@@ -452,6 +439,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2f421161cb492475f1661ddc9815a745a1c894592070661180fdec3d4872e9c3"
 
 [[package]]
+name = "core-foundation"
+version = "0.9.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "91e195e091a93c46f7102ec7818a2aa394e1e1771c3ab4825963fa03e45afb8f"
+dependencies = [
+ "core-foundation-sys",
+ "libc",
+]
+
+[[package]]
 name = "core-foundation-sys"
 version = "0.8.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -489,6 +486,12 @@ checksum = "9481c1c90cbf2ac953f07c8d4a58aa3945c425b7185c9154d67a65e4230da511"
 dependencies = [
  "cfg-if",
 ]
+
+[[package]]
+name = "critical-section"
+version = "1.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "790eea4361631c5e7d22598ecd5723ff611904e3344ce8720784c93e3d83d40b"
 
 [[package]]
 name = "crossbeam-channel"
@@ -846,6 +849,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "enum-as-inner"
+version = "0.6.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a1e6a265c649f3f5979b601d26f1d05ada116434c87741c9493cb56218f76cbc"
+dependencies = [
+ "heck",
+ "proc-macro2",
+ "quote",
+ "syn 2.0.119",
+]
+
+[[package]]
 name = "enumflags2"
 version = "0.7.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -915,8 +930,23 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "da7c62ceae207dd37ea5b845da6a0696c799f85e97da1ab5b7910be3c1c80223"
 
 [[package]]
+name = "fc-nat64"
+version = "0.1.0"
+dependencies = [
+ "fc-service",
+ "freedom-ipfs-addr",
+ "hickory-proto",
+ "if-addrs",
+ "ipconfig",
+ "rustix",
+ "serde_json",
+ "system-configuration",
+ "windows-registry",
+]
+
+[[package]]
 name = "fc-protocol"
-version = "0.9.0"
+version = "0.9.1"
 dependencies = [
  "base64 0.22.1",
  "serde",
@@ -927,7 +957,7 @@ dependencies = [
 
 [[package]]
 name = "fc-seal"
-version = "0.9.0"
+version = "0.9.1"
 dependencies = [
  "aes-gcm 0.11.1",
  "hpke",
@@ -938,7 +968,7 @@ dependencies = [
 
 [[package]]
 name = "fc-service"
-version = "0.9.0"
+version = "0.9.1"
 dependencies = [
  "fc-protocol",
  "fc-sys",
@@ -953,7 +983,7 @@ dependencies = [
 
 [[package]]
 name = "fc-sys"
-version = "0.9.0"
+version = "0.9.1"
 dependencies = [
  "libc",
  "windows-sys 0.61.2",
@@ -1007,23 +1037,56 @@ dependencies = [
 ]
 
 [[package]]
+name = "freedom-ipfs-addr"
+version = "0.4.6"
+source = "git+https://github.com/solardev-xyz/freedom-ipfs?rev=af98afa939c4f2d479c562f1c4e280107e6552b0#af98afa939c4f2d479c562f1c4e280107e6552b0"
+dependencies = [
+ "data-encoding",
+ "thiserror 2.0.20",
+ "url",
+]
+
+[[package]]
+name = "freedom-ipfs-socks"
+version = "0.4.6"
+source = "git+https://github.com/solardev-xyz/freedom-ipfs?rev=af98afa939c4f2d479c562f1c4e280107e6552b0#af98afa939c4f2d479c562f1c4e280107e6552b0"
+dependencies = [
+ "freedom-ipfs-addr",
+ "thiserror 2.0.20",
+]
+
+[[package]]
 name = "freedom-radicled"
 version = "0.1.0"
 dependencies = [
  "base64 0.22.1",
  "ed25519-dalek",
+ "fc-nat64",
  "fc-protocol",
  "fc-seal",
  "fc-service",
  "fc-sys",
+ "freedom-ipfs-addr",
+ "freedom-ipfs-socks",
  "getrandom 0.4.3",
+ "libc",
  "libradicle",
- "radicle-crypto",
+ "radicle",
  "rand_core 0.10.1",
  "serde",
  "serde_json",
+ "sqlite",
  "tempfile",
  "zeroize",
+]
+
+[[package]]
+name = "futures-channel"
+version = "0.3.34"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b1f9e3d69d39e4862ffed03ed071a76f9a13ba1d9109d355b0f0aa6b15e393c4"
+dependencies = [
+ "futures-core",
 ]
 
 [[package]]
@@ -1031,6 +1094,12 @@ name = "futures-core"
 version = "0.3.34"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "92d699e522242e69e3003b94ecc1f960f3a5e015aa7c5d7486e65ad01dd94f5e"
+
+[[package]]
+name = "futures-io"
+version = "0.3.34"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "53c0fa8157de1303bfffdaa1cc2a673bfffb60102f76b0ef4441659124373fed"
 
 [[package]]
 name = "futures-task"
@@ -1118,12 +1187,6 @@ dependencies = [
  "polyval 0.7.3",
  "zeroize",
 ]
-
-[[package]]
-name = "gimli"
-version = "0.32.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e629b9b98ef3dd8afe6ca2bd0f89306cec16d43d907889945bc5d6687f2f13c7"
 
 [[package]]
 name = "git2"
@@ -1688,6 +1751,36 @@ dependencies = [
 ]
 
 [[package]]
+name = "heck"
+version = "0.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2304e00983f87ffb38b55b444b5e3b60a884b5d30c0fca7d82fe33449bbe55ea"
+
+[[package]]
+name = "hickory-proto"
+version = "0.25.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f8a6fe56c0038198998a6f217ca4e7ef3a5e51f46163bd6dd60b5c71ca6c6502"
+dependencies = [
+ "async-trait",
+ "cfg-if",
+ "data-encoding",
+ "enum-as-inner",
+ "futures-channel",
+ "futures-io",
+ "futures-util",
+ "idna",
+ "ipnet",
+ "once_cell",
+ "rand 0.9.5",
+ "ring",
+ "thiserror 2.0.20",
+ "tinyvec",
+ "tracing",
+ "url",
+]
+
+[[package]]
 name = "hkdf"
 version = "0.13.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1869,6 +1962,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "if-addrs"
+version = "0.15.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c0a05c691e1fae256cf7013d99dad472dc52d5543322761f83ec8d47eab40d2b"
+dependencies = [
+ "libc",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
 name = "indexmap"
 version = "2.14.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1898,6 +2001,25 @@ checksum = "3b5cf4372d022092674a83b8febf5865f7a573cc0c5baec5e49c879b6a20978f"
 dependencies = [
  "hybrid-array",
 ]
+
+[[package]]
+name = "ipconfig"
+version = "0.3.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4d40460c0ce33d6ce4b0630ad68ff63d6661961c48b6dba35e5a4d81cfb48222"
+dependencies = [
+ "socket2 0.6.5",
+ "widestring",
+ "windows-registry",
+ "windows-result 0.4.1",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "ipnet"
+version = "2.12.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "791930b43c0d5973160d90a8f3894509f2b273430f5c5c73b668636d0287c5c0"
 
 [[package]]
 name = "itoa"
@@ -2041,7 +2163,7 @@ checksum = "b6d2cec3eae94f9f509c767b45932f1ada8350c4bdb85af2fcab4a3c14807981"
 [[package]]
 name = "libradicle"
 version = "0.8.0"
-source = "git+https://github.com/solardev-xyz/libradicle?rev=e5b137e429cecabd0d0b45c2b5f36f2917853eab#e5b137e429cecabd0d0b45c2b5f36f2917853eab"
+source = "git+https://github.com/solardev-xyz/libradicle?rev=2ac9f7fa1687f36d37f8a70f36333f70c65bed4d#2ac9f7fa1687f36d37f8a70f36333f70c65bed4d"
 dependencies = [
  "ed25519-dalek",
  "getrandom 0.4.3",
@@ -2051,6 +2173,9 @@ dependencies = [
  "radicle-node",
  "radicle-signals",
  "radicle-surf",
+ "serde",
+ "serde_json",
+ "sqlite",
  "thiserror 2.0.20",
  "zeroize",
 ]
@@ -2093,10 +2218,6 @@ name = "log"
 version = "0.4.33"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0ceec5bc11778974d1bcb055b18002eba7f4b3518b6a0081b3af5f21666da9ad"
-dependencies = [
- "serde_core",
- "value-bag",
-]
 
 [[package]]
 name = "match-lookup"
@@ -2216,7 +2337,7 @@ dependencies = [
  "num-integer",
  "num-iter",
  "num-traits",
- "rand",
+ "rand 0.8.7",
  "smallvec",
  "zeroize",
 ]
@@ -2251,19 +2372,14 @@ dependencies = [
 ]
 
 [[package]]
-name = "object"
-version = "0.37.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ff76201f031d8863c38aa7f905eca4f53abbfa15f609db4277d44cd8938f33fe"
-dependencies = [
- "memchr",
-]
-
-[[package]]
 name = "once_cell"
 version = "1.21.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9f7c3e4beb33f85d45ae3e3a1792185706c8e16d043238c593331cc7cd313b50"
+dependencies = [
+ "critical-section",
+ "portable-atomic",
+]
 
 [[package]]
 name = "opaque-debug"
@@ -2509,7 +2625,7 @@ checksum = "f8dcc9c7d52a811697d2151c701e0d08956f92b0e24136cf4cf27b57a6a0d9bf"
 [[package]]
 name = "radicle"
 version = "0.25.1"
-source = "git+https://github.com/solardev-xyz/heartwood?rev=c208df3ac7626402db60752f1f38d31465731f01#c208df3ac7626402db60752f1f38d31465731f01"
+source = "git+https://github.com/solardev-xyz/heartwood?rev=003fd9ca59d1269e4b81fb696bec3bdb4068fe67#003fd9ca59d1269e4b81fb696bec3bdb4068fe67"
 dependencies = [
  "base64 0.21.7",
  "bytesize",
@@ -2517,9 +2633,12 @@ dependencies = [
  "dunce",
  "fast-glob",
  "fastrand",
+ "getrandom 0.4.3",
  "git2",
+ "gix-date",
  "indexmap",
  "libc",
+ "libgit2-sys",
  "log",
  "multibase",
  "nonempty 0.9.0",
@@ -2530,6 +2649,7 @@ dependencies = [
  "radicle-git-ref-format",
  "radicle-localtime",
  "radicle-oid",
+ "rustix",
  "serde",
  "serde-untagged",
  "serde_json",
@@ -2543,7 +2663,7 @@ dependencies = [
 [[package]]
 name = "radicle-cob"
 version = "0.21.1"
-source = "git+https://github.com/solardev-xyz/heartwood?rev=c208df3ac7626402db60752f1f38d31465731f01#c208df3ac7626402db60752f1f38d31465731f01"
+source = "git+https://github.com/solardev-xyz/heartwood?rev=003fd9ca59d1269e4b81fb696bec3bdb4068fe67#003fd9ca59d1269e4b81fb696bec3bdb4068fe67"
 dependencies = [
  "fastrand",
  "git2",
@@ -2562,7 +2682,7 @@ dependencies = [
 [[package]]
 name = "radicle-core"
 version = "0.4.1"
-source = "git+https://github.com/solardev-xyz/heartwood?rev=c208df3ac7626402db60752f1f38d31465731f01#c208df3ac7626402db60752f1f38d31465731f01"
+source = "git+https://github.com/solardev-xyz/heartwood?rev=003fd9ca59d1269e4b81fb696bec3bdb4068fe67#003fd9ca59d1269e4b81fb696bec3bdb4068fe67"
 dependencies = [
  "git2",
  "multibase",
@@ -2577,7 +2697,7 @@ dependencies = [
 [[package]]
 name = "radicle-crypto"
 version = "0.19.0"
-source = "git+https://github.com/solardev-xyz/heartwood?rev=c208df3ac7626402db60752f1f38d31465731f01#c208df3ac7626402db60752f1f38d31465731f01"
+source = "git+https://github.com/solardev-xyz/heartwood?rev=003fd9ca59d1269e4b81fb696bec3bdb4068fe67#003fd9ca59d1269e4b81fb696bec3bdb4068fe67"
 dependencies = [
  "curve25519-dalek 4.1.3",
  "cyphernet",
@@ -2598,7 +2718,7 @@ dependencies = [
 [[package]]
 name = "radicle-dag"
 version = "0.10.0"
-source = "git+https://github.com/solardev-xyz/heartwood?rev=c208df3ac7626402db60752f1f38d31465731f01#c208df3ac7626402db60752f1f38d31465731f01"
+source = "git+https://github.com/solardev-xyz/heartwood?rev=003fd9ca59d1269e4b81fb696bec3bdb4068fe67#003fd9ca59d1269e4b81fb696bec3bdb4068fe67"
 dependencies = [
  "fastrand",
 ]
@@ -2606,7 +2726,7 @@ dependencies = [
 [[package]]
 name = "radicle-fetch"
 version = "0.21.1"
-source = "git+https://github.com/solardev-xyz/heartwood?rev=c208df3ac7626402db60752f1f38d31465731f01#c208df3ac7626402db60752f1f38d31465731f01"
+source = "git+https://github.com/solardev-xyz/heartwood?rev=003fd9ca59d1269e4b81fb696bec3bdb4068fe67#003fd9ca59d1269e4b81fb696bec3bdb4068fe67"
 dependencies = [
  "bstr",
  "either",
@@ -2625,7 +2745,7 @@ dependencies = [
 [[package]]
 name = "radicle-git-metadata"
 version = "0.2.1"
-source = "git+https://github.com/solardev-xyz/heartwood?rev=c208df3ac7626402db60752f1f38d31465731f01#c208df3ac7626402db60752f1f38d31465731f01"
+source = "git+https://github.com/solardev-xyz/heartwood?rev=003fd9ca59d1269e4b81fb696bec3bdb4068fe67#003fd9ca59d1269e4b81fb696bec3bdb4068fe67"
 dependencies = [
  "git2",
  "thiserror 2.0.20",
@@ -2634,7 +2754,7 @@ dependencies = [
 [[package]]
 name = "radicle-git-ref-format"
 version = "0.2.0"
-source = "git+https://github.com/solardev-xyz/heartwood?rev=c208df3ac7626402db60752f1f38d31465731f01#c208df3ac7626402db60752f1f38d31465731f01"
+source = "git+https://github.com/solardev-xyz/heartwood?rev=003fd9ca59d1269e4b81fb696bec3bdb4068fe67#003fd9ca59d1269e4b81fb696bec3bdb4068fe67"
 dependencies = [
  "bstr",
  "serde",
@@ -2644,7 +2764,7 @@ dependencies = [
 [[package]]
 name = "radicle-localtime"
 version = "0.1.0"
-source = "git+https://github.com/solardev-xyz/heartwood?rev=c208df3ac7626402db60752f1f38d31465731f01#c208df3ac7626402db60752f1f38d31465731f01"
+source = "git+https://github.com/solardev-xyz/heartwood?rev=003fd9ca59d1269e4b81fb696bec3bdb4068fe67#003fd9ca59d1269e4b81fb696bec3bdb4068fe67"
 dependencies = [
  "serde",
 ]
@@ -2652,7 +2772,7 @@ dependencies = [
 [[package]]
 name = "radicle-log"
 version = "0.2.0"
-source = "git+https://github.com/solardev-xyz/heartwood?rev=c208df3ac7626402db60752f1f38d31465731f01#c208df3ac7626402db60752f1f38d31465731f01"
+source = "git+https://github.com/solardev-xyz/heartwood?rev=003fd9ca59d1269e4b81fb696bec3bdb4068fe67#003fd9ca59d1269e4b81fb696bec3bdb4068fe67"
 dependencies = [
  "chrono",
  "colored",
@@ -2663,9 +2783,8 @@ dependencies = [
 [[package]]
 name = "radicle-node"
 version = "0.21.1"
-source = "git+https://github.com/solardev-xyz/heartwood?rev=c208df3ac7626402db60752f1f38d31465731f01#c208df3ac7626402db60752f1f38d31465731f01"
+source = "git+https://github.com/solardev-xyz/heartwood?rev=003fd9ca59d1269e4b81fb696bec3bdb4068fe67#003fd9ca59d1269e4b81fb696bec3bdb4068fe67"
 dependencies = [
- "backtrace",
  "bytes",
  "crossbeam-channel",
  "cyphernet",
@@ -2674,6 +2793,7 @@ dependencies = [
  "getrandom 0.4.3",
  "git2",
  "gix-packetline",
+ "hmac 0.12.1",
  "indexmap",
  "lexopt",
  "log",
@@ -2684,22 +2804,23 @@ dependencies = [
  "radicle-log",
  "radicle-protocol",
  "radicle-signals",
- "radicle-systemd",
  "radicle-windows",
+ "rustix",
  "serde",
  "serde_json",
  "sha1",
- "socket2",
- "structured-logger",
+ "sha2 0.10.9",
+ "socket2 0.5.10",
  "tempfile",
  "thiserror 2.0.20",
  "uds_windows",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
 name = "radicle-oid"
 version = "0.2.2"
-source = "git+https://github.com/solardev-xyz/heartwood?rev=c208df3ac7626402db60752f1f38d31465731f01#c208df3ac7626402db60752f1f38d31465731f01"
+source = "git+https://github.com/solardev-xyz/heartwood?rev=003fd9ca59d1269e4b81fb696bec3bdb4068fe67#003fd9ca59d1269e4b81fb696bec3bdb4068fe67"
 dependencies = [
  "git2",
  "gix-hash",
@@ -2709,7 +2830,7 @@ dependencies = [
 [[package]]
 name = "radicle-protocol"
 version = "0.9.1"
-source = "git+https://github.com/solardev-xyz/heartwood?rev=c208df3ac7626402db60752f1f38d31465731f01#c208df3ac7626402db60752f1f38d31465731f01"
+source = "git+https://github.com/solardev-xyz/heartwood?rev=003fd9ca59d1269e4b81fb696bec3bdb4068fe67#003fd9ca59d1269e4b81fb696bec3bdb4068fe67"
 dependencies = [
  "bloomy",
  "bytes",
@@ -2730,7 +2851,7 @@ dependencies = [
 [[package]]
 name = "radicle-signals"
 version = "0.12.1"
-source = "git+https://github.com/solardev-xyz/heartwood?rev=c208df3ac7626402db60752f1f38d31465731f01#c208df3ac7626402db60752f1f38d31465731f01"
+source = "git+https://github.com/solardev-xyz/heartwood?rev=003fd9ca59d1269e4b81fb696bec3bdb4068fe67#003fd9ca59d1269e4b81fb696bec3bdb4068fe67"
 dependencies = [
  "libc",
  "signals_receipts",
@@ -2740,7 +2861,7 @@ dependencies = [
 [[package]]
 name = "radicle-surf"
 version = "0.29.0"
-source = "git+https://github.com/solardev-xyz/heartwood?rev=c208df3ac7626402db60752f1f38d31465731f01#c208df3ac7626402db60752f1f38d31465731f01"
+source = "git+https://github.com/solardev-xyz/heartwood?rev=003fd9ca59d1269e4b81fb696bec3bdb4068fe67#003fd9ca59d1269e4b81fb696bec3bdb4068fe67"
 dependencies = [
  "base64 0.21.7",
  "git2",
@@ -2755,18 +2876,9 @@ dependencies = [
 ]
 
 [[package]]
-name = "radicle-systemd"
-version = "0.13.0"
-source = "git+https://github.com/solardev-xyz/heartwood?rev=c208df3ac7626402db60752f1f38d31465731f01#c208df3ac7626402db60752f1f38d31465731f01"
-dependencies = [
- "log",
- "systemd-journal-logger",
-]
-
-[[package]]
 name = "radicle-windows"
 version = "0.1.0"
-source = "git+https://github.com/solardev-xyz/heartwood?rev=c208df3ac7626402db60752f1f38d31465731f01#c208df3ac7626402db60752f1f38d31465731f01"
+source = "git+https://github.com/solardev-xyz/heartwood?rev=003fd9ca59d1269e4b81fb696bec3bdb4068fe67#003fd9ca59d1269e4b81fb696bec3bdb4068fe67"
 dependencies = [
  "thiserror 2.0.20",
  "windows 0.62.2",
@@ -2779,8 +2891,18 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "22f6172bdec972074665ed81ed53b71da00bfc44b65a753cfde883ec4c702a1a"
 dependencies = [
  "libc",
- "rand_chacha",
+ "rand_chacha 0.3.1",
  "rand_core 0.6.4",
+]
+
+[[package]]
+name = "rand"
+version = "0.9.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b9ef1d0d795eb7d84685bca4f72f3649f064e6641543d3a8c415898726a57b41"
+dependencies = [
+ "rand_chacha 0.9.0",
+ "rand_core 0.9.5",
 ]
 
 [[package]]
@@ -2794,12 +2916,31 @@ dependencies = [
 ]
 
 [[package]]
+name = "rand_chacha"
+version = "0.9.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d3022b5f1df60f26e1ffddd6c66e8aa15de382ae63b3a0c1bfc0e4d3e3f325cb"
+dependencies = [
+ "ppv-lite86",
+ "rand_core 0.9.5",
+]
+
+[[package]]
 name = "rand_core"
 version = "0.6.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ec0be4795e2f6a28069bec0b5ff3e2ac9bafc99e6a9a7dc3547996c5c816922c"
 dependencies = [
  "getrandom 0.2.17",
+]
+
+[[package]]
+name = "rand_core"
+version = "0.9.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "76afc826de14238e6e8c374ddcc1fa19e374fd8dd986b0d2af0d02377261d83c"
+dependencies = [
+ "getrandom 0.3.4",
 ]
 
 [[package]]
@@ -2854,6 +2995,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "ring"
+version = "0.17.14"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a4689e6c2294d81e88dc6261c768b63bc4fcdb852be6d1352498b114f61383b7"
+dependencies = [
+ "cc",
+ "cfg-if",
+ "getrandom 0.2.17",
+ "libc",
+ "untrusted",
+ "windows-sys 0.52.0",
+]
+
+[[package]]
 name = "rsa"
 version = "0.9.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2873,12 +3028,6 @@ dependencies = [
  "subtle",
  "zeroize",
 ]
-
-[[package]]
-name = "rustc-demangle"
-version = "0.1.28"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b74b56ffa8bb2830709a538c2cbcae9aa062db0d2a42563bfb09bdaae44020eb"
 
 [[package]]
 name = "rustc_version"
@@ -2907,12 +3056,6 @@ name = "rustversion"
 version = "1.0.23"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cf54715a573b99ac80df0bc206da022bcd442c974952c7b9720069370852e21f"
-
-[[package]]
-name = "ryu"
-version = "1.0.23"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9774ba4a74de5f7b1c1451ed6cd5285a32eddb5cccb8cc655a4e50009e06477f"
 
 [[package]]
 name = "salsa20"
@@ -3078,15 +3221,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "serde_fmt"
-version = "1.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6e497af288b3b95d067a23a4f749f2861121ffcb2f6d8379310dcda040c345ed"
-dependencies = [
- "serde_core",
-]
-
-[[package]]
 name = "serde_json"
 version = "1.0.151"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3234,6 +3368,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "socket2"
+version = "0.6.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c3d1e2c7f27f8d4cb10542a02c49005dbd6e93095799d6f3be745fae9f8fedd4"
+dependencies = [
+ "libc",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
 name = "socks5-client"
 version = "0.4.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3361,102 +3505,10 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6ce2be8dc25455e1f91df71bfa12ad37d7af1092ae736f3a6cd0e37bc7810596"
 
 [[package]]
-name = "structured-logger"
-version = "1.0.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d5e5db98a0b69a45a1f8604185fd4c2a5900b640118530b82c4ce74e12c5c9ab"
-dependencies = [
- "log",
- "parking_lot",
- "serde",
- "serde_json",
- "tokio",
-]
-
-[[package]]
 name = "subtle"
 version = "2.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "13c2bddecc57b384dee18652358fb23172facb8a2c51ccc10d74c157bdea3292"
-
-[[package]]
-name = "sval"
-version = "2.21.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ec4a2a7d92fa86fcc6222e4c3845f8486cff899d9db32480b26c91a5dbf2e22d"
-
-[[package]]
-name = "sval_buffer"
-version = "2.21.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f4324db9ac500c609d659b752edf9c8abbf2233f8afd61a503fd6f88ed625032"
-dependencies = [
- "sval",
- "sval_ref",
- "zerocopy",
-]
-
-[[package]]
-name = "sval_dynamic"
-version = "2.21.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4046add0eecf55e680b9e207edf5fc7737b18a1d950db363d97e7f1b2d7c629c"
-dependencies = [
- "sval",
-]
-
-[[package]]
-name = "sval_fmt"
-version = "2.21.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "911a3486b5984a0a4f25edefcf2c2dba23654c29f63e75493b671d338bf24243"
-dependencies = [
- "itoa",
- "ryu",
- "sval",
-]
-
-[[package]]
-name = "sval_json"
-version = "2.21.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "da53aae7c737b5b5f1be4bcb0ff20e057bf6b2ee4e9d025560075c5830d09f95"
-dependencies = [
- "itoa",
- "ryu",
- "sval",
-]
-
-[[package]]
-name = "sval_nested"
-version = "2.21.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "df24df43cbdc4bb8c9f5ed19d0d57dc8f60a1a4259cdce52d597fe774ad3a71f"
-dependencies = [
- "sval",
- "sval_buffer",
- "sval_ref",
-]
-
-[[package]]
-name = "sval_ref"
-version = "2.21.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2bebc17f0f1fad060e57b778728d41ef87627e9111a6365d7463472cb58fc1b3"
-dependencies = [
- "sval",
-]
-
-[[package]]
-name = "sval_serde"
-version = "2.21.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9f26fe3f6a68b40e6c8d654ea48c00e4316272fddf68c80493714c1b034ae70b"
-dependencies = [
- "serde_core",
- "sval",
- "sval_nested",
-]
 
 [[package]]
 name = "syn"
@@ -3509,13 +3561,24 @@ dependencies = [
 ]
 
 [[package]]
-name = "systemd-journal-logger"
-version = "2.2.2"
+name = "system-configuration"
+version = "0.7.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7266304d24ca5a4b230545fc558c80e18bd3e1d2eb1be149b6bcd04398d3e79c"
+checksum = "a13f3d0daba03132c0aa9767f98351b3488edc2c100cda2d2ec2b04f3d8d3c8b"
 dependencies = [
- "log",
- "rustix",
+ "bitflags 2.13.1",
+ "core-foundation",
+ "system-configuration-sys",
+]
+
+[[package]]
+name = "system-configuration-sys"
+version = "0.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8e1d1b10ced5ca923a1fcb8d03e96b8d3268065d724548c0211415ff6ac6bac4"
+dependencies = [
+ "core-foundation-sys",
+ "libc",
 ]
 
 [[package]]
@@ -3597,14 +3660,22 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1f3ccbac311fea05f86f61904b462b55fb3df8837a366dfc601a0161d0532f20"
 
 [[package]]
-name = "tokio"
-version = "1.54.1"
+name = "tracing"
+version = "0.1.44"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b52fd3255258d26fac7264ab5a76b53c13367136dc011d3d6ad4f8ed070396a3"
+checksum = "63e71662fa4b2a2c3a26f570f037eb95bb1f85397f3cd8076caed2f026a6d100"
 dependencies = [
- "bytes",
- "parking_lot",
  "pin-project-lite",
+ "tracing-core",
+]
+
+[[package]]
+name = "tracing-core"
+version = "0.1.36"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "db97caf9d906fbde555dd62fa95ddba9eecfd14cb388e4f491a66d74cd5fb79a"
+dependencies = [
+ "once_cell",
 ]
 
 [[package]]
@@ -3666,6 +3737,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "untrusted"
+version = "0.9.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8ecb6da28b8a351d773b68d5825ac39017e680750f980f3a1a85cd8dd28a47c1"
+
+[[package]]
 name = "url"
 version = "2.5.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3683,42 +3760,6 @@ name = "utf8_iter"
 version = "1.0.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b6c140620e7ffbb22c2dee59cafe6084a59b5ffc27a8859a5f0d494b5d52b6be"
-
-[[package]]
-name = "value-bag"
-version = "1.13.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "068e763e8279de7ab94b6afebded2cb701678af094feb1c12ccb061b4783c1be"
-dependencies = [
- "value-bag-serde1",
- "value-bag-sval2",
-]
-
-[[package]]
-name = "value-bag-serde1"
-version = "1.13.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "417d6197dd0ee696783d6be4276ac6ea74b985e00024c85ccfb37aff4f2bed82"
-dependencies = [
- "erased-serde",
- "serde_core",
- "serde_fmt",
-]
-
-[[package]]
-name = "value-bag-sval2"
-version = "1.13.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c61f7251ecde2c9ed431bbe0659853e7991753447447bbf1ae59d8b31c578d4e"
-dependencies = [
- "sval",
- "sval_buffer",
- "sval_dynamic",
- "sval_fmt",
- "sval_json",
- "sval_ref",
- "sval_serde",
-]
 
 [[package]]
 name = "vcpkg"
@@ -3801,6 +3842,12 @@ checksum = "7ef64dbcc55df09c7e5a46182d181c2cfa3e925f3da937ea764728b4bbb9dcbf"
 dependencies = [
  "unicode-ident",
 ]
+
+[[package]]
+name = "widestring"
+version = "1.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "72069c3113ab32ab29e5584db3c6ec55d416895e60715417b5b883a357c3e471"
 
 [[package]]
 name = "winapi-util"
@@ -3937,6 +3984,17 @@ checksum = "6e2e40844ac143cdb44aead537bbf727de9b044e107a0f1220392177d15b0f26"
 dependencies = [
  "windows-core 0.62.2",
  "windows-link",
+]
+
+[[package]]
+name = "windows-registry"
+version = "0.6.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "02752bf7fbdcce7f2a27a742f798510f3e5ad88dbe84871e5168e2120c3d5720"
+dependencies = [
+ "windows-link",
+ "windows-result 0.4.1",
+ "windows-strings 0.5.1",
 ]
 
 [[package]]
@@ -4084,7 +4142,7 @@ checksum = "1ccf671d62d1bd0c913d9059e69bb4a6b51f7a4c899ab83c62d921e35f206053"
 dependencies = [
  "defer-heavy",
  "log",
- "rand",
+ "rand 0.8.7",
  "sync-ptr",
  "windows 0.58.0",
 ]

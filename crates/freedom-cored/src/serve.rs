@@ -66,7 +66,7 @@ use crate::transport::{self, Allowance, Credits, Link, Pending};
 use crate::vault::{FileSnapshot, Finished, NodeRecovery, Out, Vault};
 use crate::worker::Worker;
 use crate::{chain, gate, hardening, log, naming};
-#[cfg(debug_assertions)]
+#[cfg(feature = "testhooks")]
 use crate::{testhooks, testmethods};
 
 /// How long the writer may take to flush on exit.
@@ -135,8 +135,8 @@ pub enum Event {
 /// included), which design 0005 doesn't add to them (it adds features
 /// only). Every method, these and the chain methods, is a row of
 /// fc-protocol's method table, which says who may call it (#101); a test
-/// keeps the two in step. Only the table's names, and in debug builds the
-/// test methods', are ever logged; anything else is logged as `<unknown>`.
+/// keeps the two in step. Only the table's names, and with the `testhooks`
+/// feature the test methods', are ever logged; anything else is logged as `<unknown>`.
 const CAPABILITIES: &[&str] = &[
     "core.hello",
     "core.shutdown",
@@ -281,7 +281,7 @@ pub fn run(options: &Options) -> Exit {
     ) else {
         return Exit::Internal;
     };
-    #[cfg(debug_assertions)]
+    #[cfg(feature = "testhooks")]
     let test = if testhooks::test_methods() {
         match testmethods::spawn(writer.queue.clone(), Arc::clone(&link), events_tx.clone()) {
             Ok(test) => Some(test),
@@ -338,7 +338,7 @@ pub fn run(options: &Options) -> Exit {
         requests,
         naming,
         chain,
-        #[cfg(debug_assertions)]
+        #[cfg(feature = "testhooks")]
         test,
     };
     let hello_deadline = options.started + options.hello_timeout;
@@ -576,7 +576,7 @@ struct Core {
     chain: chain::Handle,
     /// The `test.*` methods' thread, when the test hooks enable it (debug
     /// builds only).
-    #[cfg(debug_assertions)]
+    #[cfg(feature = "testhooks")]
     test: Option<testmethods::Handle>,
 }
 
@@ -681,7 +681,7 @@ fn loggable(method: &str) -> &'static str {
     if let Some(row) = methods::method(method) {
         return row.name;
     }
-    #[cfg(debug_assertions)]
+    #[cfg(feature = "testhooks")]
     if let Some(name) = testmethods::METHODS.iter().find(|m| **m == method) {
         return name;
     }
@@ -689,8 +689,8 @@ fn loggable(method: &str) -> &'static str {
 }
 
 /// Whether `caller` may call `method` (#101): fc-protocol's method table,
-/// checked once for every request before anything is dispatched, and in
-/// debug builds the test methods, when their hook enables them. `Err` is
+/// checked once for every request before anything is dispatched, and with
+/// the `testhooks` feature the test methods, when their hook enables them. `Err` is
 /// the refusal: a method the table doesn't list is unknown; one it lists,
 /// but not for this caller, is forbidden.
 fn admitted(
@@ -706,7 +706,7 @@ fn admitted(
             "not callable by this caller",
         )),
         Admission::Unknown => {
-            #[cfg(debug_assertions)]
+            #[cfg(feature = "testhooks")]
             if test_methods && testmethods::handles(method) && caller != CallerKind::Page {
                 return Ok(());
             }
@@ -1090,9 +1090,9 @@ impl Core {
         context: &Context,
     ) -> Flow {
         let started = Instant::now();
-        #[cfg(debug_assertions)]
+        #[cfg(feature = "testhooks")]
         let test_methods = self.test.is_some();
-        #[cfg(not(debug_assertions))]
+        #[cfg(not(feature = "testhooks"))]
         let test_methods = false;
         if let Err(refusal) = admitted(method, context.caller, test_methods, self.protocol) {
             return self.error(id, refusal);
@@ -1149,7 +1149,7 @@ impl Core {
                     Flow::Exit(Exit::Internal)
                 }
             }
-            #[cfg(debug_assertions)]
+            #[cfg(feature = "testhooks")]
             method if testmethods::handles(method) && self.test.is_some() => {
                 let params = match params.map(|p| RawValue::from_string(p.to_owned())) {
                     Some(Ok(params)) => Some(params),

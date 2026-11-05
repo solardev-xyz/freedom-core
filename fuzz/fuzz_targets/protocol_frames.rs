@@ -17,7 +17,10 @@
 //! - what the core's consumers hold stays within the window, and its owed
 //!   credit within its open streams;
 //! - frames the sender writes, the duplex's credit among them, decode on
-//!   main's side.
+//!   main's side;
+//! - an abort is delivered only with a code its connection and direction
+//!   allow ([`stream::Codes`]): a service's on a service connection, a
+//!   piece's on the core's.
 
 #![no_main]
 
@@ -183,9 +186,11 @@ impl Connection {
                         .expect("a consumer releases what it holds");
                 }
             }
-            Ok(stream::Received::Arrived(
-                stream::Arrived::End { id } | stream::Arrived::Abort { id, .. },
-            )) => {
+            Ok(stream::Received::Arrived(stream::Arrived::End { id })) => {
+                self.held.remove(&id);
+            }
+            Ok(stream::Received::Arrived(stream::Arrived::Abort { id, abort })) => {
+                assert!(stream::Codes::Piece.allows(abort.code));
                 self.held.remove(&id);
             }
             Ok(_) => {}
@@ -230,6 +235,9 @@ impl Connection {
                 if self.data_frames.is_multiple_of(2) {
                     let _ = self.receiver.pull(id, stream::MAX_PULL);
                 }
+            }
+            Ok(stream::Delivery::Abort { abort, .. }) => {
+                assert!(stream::Codes::Service.allows(abort.code));
             }
             Ok(_) => {}
             Err(_) => return false,

@@ -2,10 +2,11 @@
 //! (design 0008, "Methods"): the version and commit of the crate in
 //! `Cargo.lock`, which a test holds to these constants.
 
-/// The libradicle release the pinned commit is.
+/// The libradicle version the pinned commit carries.
 pub const LIBRADICLE_VERSION: &str = "0.8.0";
-/// The pinned commit: v0.8.0, the release freedom-browser pins.
-pub const LIBRADICLE_COMMIT: &str = "e5b137e429cecabd0d0b45c2b5f36f2917853eab";
+/// The pinned commit: `integration/rust-core` at libradicle#23's merge, with
+/// #22 (the host's repository gate) and #28 (`Options::seeding_policy`).
+pub const LIBRADICLE_COMMIT: &str = "2ac9f7fa1687f36d37f8a70f36333f70c65bed4d";
 
 #[cfg(test)]
 mod tests {
@@ -43,6 +44,36 @@ mod tests {
                     "git+https://github.com/solardev-xyz/libradicle?rev={LIBRADICLE_COMMIT}#{LIBRADICLE_COMMIT}"
                 )
             )]
+        );
+    }
+
+    /// The commits the lockfile resolves `repo`'s packages to.
+    fn locked_commits(repo: &str) -> std::collections::BTreeSet<String> {
+        let prefix = format!("source = \"git+https://github.com/solardev-xyz/{repo}?rev=");
+        include_str!("../Cargo.lock")
+            .lines()
+            .filter_map(|line| line.strip_prefix(&prefix))
+            .map(|rest| rest.split(['#', '"']).next().unwrap_or_default().to_owned())
+            .collect()
+    }
+
+    #[test]
+    fn one_heartwood_commit_throughout() {
+        // libradicle's, which the service's own `radicle` takes too: two
+        // would be two sets of `radicle` types, which don't match.
+        let commits = locked_commits("heartwood");
+        assert_eq!(commits.len(), 1, "heartwood is locked at {commits:?}");
+        let commit = commits.first().cloned().unwrap_or_default();
+        let manifest = include_str!("../Cargo.toml");
+        assert!(
+            manifest.contains(&format!(
+                "radicle = {{ git = \"https://github.com/solardev-xyz/heartwood\", rev = \"{commit}\""
+            )),
+            "the manifest's radicle isn't at {commit}"
+        );
+        assert_eq!(
+            locked_commits("libradicle"),
+            [LIBRADICLE_COMMIT.to_owned()].into()
         );
     }
 

@@ -211,6 +211,7 @@ What the core asks main for while a `dweb.verify` runs.
 - **The reply's `headers`** are only those the core reads: `content-type`, `content-length`, `content-range` and `swarm-feed-index`, at most 8, each at most 8 KiB, as 0005 bounds Blockscout's.
 - **`failed`** is the dial's failure class, which the core maps with `fc-dweb`'s `failure::after_dial` as today: `unreachable` (`ECONNREFUSED`, `ECONNRESET`, `ENOTFOUND`), `error`, or `aborted`.
 - **Cancel:** the core sends 0001's `cancel` for a piece it no longer needs, and main aborts the dial or answers the open stream with `abort { code: "cancelled" }`.
+- **A streamed piece's abort** has one of three codes: `cancelled` (the core's cancel), `stalled` (main's body idle timer) or `body_stream_error` (the node's body failed). Main sends no other, and any other from main is a protocol error ([Streams in the core](#streams-in-the-core), abort codes).
 
 ### Streams in the core
 
@@ -223,6 +224,11 @@ What the core asks main for while a `dweb.verify` runs.
   - so data reaching a side names one of its own requests, and credit reaching it names a request it answered. Each side's IDs strictly increase (0001), so 0007's rules that rely on it (late credit needs no table; a frame for an ID never issued is a protocol error) hold in each direction.
 - **Which methods:** `dweb.verify`'s head opens a stream from the core to main; `shell.dweb_get` with `stream: true` opens one from main to the core. Any other stream is a protocol error.
 - **0007's rules, per stream:** the head first, then data, then exactly one terminal; `end` only after the last data; `abort` jumps the queue and purges; a cancel against an unwritten head drops it; a 128 KiB window; data frames of 1 to 65,536 bytes, coalesced below 4 KiB; the same protocol errors.
+- **Abort codes, by connection and direction:** one set of codes, 0007's five and 0009's five more (`verification_failed`, `unverifiable`, `malformed`, `piece_failed`, `stalled`), and every one decodes. Which a stream may end with depends on who sends it. The sending side refuses to write any other, and the receiving side takes any other as a protocol error, `abort_code`, which fails the connection.
+  - **Service connections** keep exactly 0007's five: `cancelled`, `internal`, `body_stream_error`, `stopped` and `busy`. A service never sends one of 0009's, and main's side of a service connection never accepts one.
+  - **The core's verified bodies** end only with [Failures](#failures)' six: `verification_failed`, `unverifiable`, `malformed`, `piece_failed`, `busy` and `cancelled`.
+  - **Main's pieces** end only with `cancelled`, `stalled` or `body_stream_error` ([`shell.dweb_get`](#shelldweb_get)).
+  - `fc-protocol`'s `Codes` holds the three sets; `vectors/streams.json` covers every allowed and every refused pair, and fc-service's connection test checks that a service never sends or takes a 0009 code.
 - **The global bound** that 0001 promised:
   - **Credit is granted only for room already reserved,** by the side that will hold the bytes.
   - **Into the core:** at most 128 incoming streams have credit at once, across all requests; a request whose next piece would be the 129th waits for one to end ([Admission](#admission-deadlines-and-cancel)). So at most 16 MiB of node bytes are in flight to the core.
@@ -657,7 +663,7 @@ The core builds every head from verified data, by the bundled node's rules. The 
 | [strict mode](#strict-mode) refuses unverified content (an error plan, before `dweb.verify`) | 403 | strict mode's, by cause |
 | main refuses the plan ([Verify plans](#verify-plans), Validation), a verify plan whose root isn't in its canonical form included; never an unverified fallback | 502, a logged core fault, as 0006's refused plans | 0006's |
 
-**After the head,** the body is truncated: the core sends `abort { code, message }`, and main errors the body, as a node's mid-body failure is surfaced today (0006). The codes are `verification_failed`, `unverifiable`, `malformed`, `piece_failed`, `busy` and `cancelled`. A walk past its memory after the head aborts `unverifiable`, with the memory row's text.
+**After the head,** the body is truncated: the core sends `abort { code, message }`, and main errors the body, as a node's mid-body failure is surfaced today (0006). The codes are `verification_failed`, `unverifiable`, `malformed`, `piece_failed`, `busy` and `cancelled`, and only these: the core never ends a verified body with another, and main takes another as a protocol error ([Streams in the core](#streams-in-the-core), abort codes). A walk past its memory after the head aborts `unverifiable`, with the memory row's text.
 
 - **Each code's message** is its cause's text in the table above. A piece that fails after the head (its body ends early or stalls, its 206 names another interval, or a CAR ends broken) is `piece_failed`, with "The external Swarm node stopped sending" or "The external IPFS gateway stopped sending".
 
@@ -1013,6 +1019,7 @@ As 0006's 4.7 did, the tests land before the code. Every case pins its failure s
 5. **`freedom-cored`:** the dweb thread and hashing pool, `dweb.verify`, `shell.dweb_get`, `dweb.forget`, admission, budgets and cancel, with tests through the binary.
 6. **freedom-browser:**
    - verify plans in validation and the handler, `dweb-shell.js`, and stream frames on the core's connection;
+   - the decoder accepts 0009's abort codes only on the core's protocol-2 connection, each in its direction ([Streams in the core](#streams-in-the-core), abort codes); a service connection still takes only 0007's, and one of 0009's there is the protocol error `abort_code`;
    - the verification setting, on by default, and the probe;
    - strict mode: the profile setting, off by default, and `strict` in the captured backend;
    - the error page for a failed navigation;

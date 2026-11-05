@@ -14,49 +14,6 @@ use base64::engine::general_purpose::STANDARD;
 use common::*;
 use serde_json::{Value, json};
 
-/// RFC 8032's first Ed25519 test key, and the node ID of its public key.
-const SEED: [u8; 32] = [
-    0x9d, 0x61, 0xb1, 0x9d, 0xef, 0xfd, 0x5a, 0x60, 0xba, 0x84, 0x4a, 0xf4, 0x92, 0xec, 0x2c, 0xc4,
-    0x44, 0x49, 0xc5, 0x69, 0x7b, 0x32, 0x69, 0x19, 0x70, 0x3b, 0xac, 0x03, 0x1c, 0xae, 0x7f, 0x60,
-];
-const NID: &str = "z6MktwupdmLXVVqTzCw4i46r4uGyosGXRnR3XjN4Zq7oMMsw";
-
-struct OsRng;
-
-impl rand_core::TryRng for OsRng {
-    type Error = getrandom::Error;
-    fn try_next_u32(&mut self) -> Result<u32, Self::Error> {
-        let mut b = [0u8; 4];
-        self.try_fill_bytes(&mut b)?;
-        Ok(u32::from_le_bytes(b))
-    }
-    fn try_next_u64(&mut self) -> Result<u64, Self::Error> {
-        let mut b = [0u8; 8];
-        self.try_fill_bytes(&mut b)?;
-        Ok(u64::from_le_bytes(b))
-    }
-    fn try_fill_bytes(&mut self, dst: &mut [u8]) -> Result<(), Self::Error> {
-        getrandom::fill(dst)
-    }
-}
-
-impl rand_core::TryCryptoRng for OsRng {}
-
-/// What the core's `nodes.seal_radicle_key` returns for `key`, sealed to
-/// the recipient `rad.hello` named.
-fn sealed_to(hello: &Value, key: &[u8; 32]) -> Value {
-    let recipient: [u8; 32] = STANDARD
-        .decode(hello["result"]["recipient"].as_str().unwrap())
-        .unwrap()
-        .try_into()
-        .unwrap();
-    let sealed = fc_seal::seal(&recipient, key, &mut OsRng).unwrap();
-    json!({ "sealed": {
-        "enc": STANDARD.encode(sealed.enc),
-        "ciphertext": STANDARD.encode(sealed.ciphertext),
-    } })
-}
-
 #[test]
 fn hello_names_this_starts_recipient_and_the_libradicle_it_links() {
     let dirs = Dirs::new();
@@ -67,7 +24,7 @@ fn hello_names_this_starts_recipient_and_the_libradicle_it_links() {
     assert_eq!(result["service_version"], env!("CARGO_PKG_VERSION"));
     assert_eq!(
         result["libradicle"],
-        json!({ "version": "0.8.0", "git_commit": "e5b137e429cecabd0d0b45c2b5f36f2917853eab" })
+        json!({ "version": "0.8.0", "git_commit": "2ac9f7fa1687f36d37f8a70f36333f70c65bed4d" })
     );
     let recipient = STANDARD
         .decode(result["recipient"].as_str().unwrap())
@@ -191,8 +148,9 @@ fn a_key_file_refuses_the_start() {
 }
 
 /// Before `rad.identity`, the steps that need the identity end the process;
-/// every other method 0008 lists is `stopped` (no node runs in this build),
-/// and a method 0008 doesn't list is `unknown_method`.
+/// every other method 0008 lists is `stopped` (no read or write is served
+/// in this build), and a method 0008 doesn't list is `unknown_method`.
+/// `rad.start` itself is tests/start.rs's.
 #[test]
 fn methods_before_running() {
     let dirs = Dirs::new();
@@ -225,14 +183,15 @@ fn methods_before_running() {
     assert_eq!(reply["error"]["code"], "no_identity", "{reply}");
     assert_eq!(radicled.exit_code(EXIT_TIMEOUT), Some(0));
 
-    // With the identity, they wait for steps this build doesn't have.
+    // With the identity, the home reconciles, and the methods are still
+    // `stopped`.
     let mut radicled = Radicled::serve(&dirs, &[]);
     radicled.hello();
     radicled.call("rad.identity", json!({ "ephemeral": true }));
-    for method in ["rad.reconcile", "rad.start"] {
-        let reply = radicled.call(method, json!({}));
-        assert_eq!(reply["error"]["code"], "stopped", "{method}: {reply}");
-    }
+    let reply = radicled.call("rad.reconcile", json!({}));
+    assert_eq!(reply["result"]["was_dirty"], false, "{reply}");
+    let reply = radicled.call("rad.read", json!({}));
+    assert_eq!(reply["error"]["code"], "stopped", "{reply}");
 }
 
 /// No `rad.identity` within its deadline after `rad.hello`'s reply: the
