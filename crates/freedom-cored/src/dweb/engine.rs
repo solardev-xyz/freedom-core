@@ -142,6 +142,8 @@ pub enum Refusal {
 }
 
 impl Refusal {
+    /// Its error code, as the protocol writes it.
+    #[allow(dead_code)]
     pub fn code(self) -> &'static str {
         match self {
             Self::Busy => "busy",
@@ -468,9 +470,11 @@ impl Engine {
     pub fn room(&mut self, io: &mut dyn Io, now: Ms) {
         self.dispatch(io, now);
     }
+}
 
-    // ---- what the tests and the thread read -------------------------------
-
+/// What the tests read, and 5d's gates will.
+#[allow(dead_code)]
+impl Engine {
     /// Requests running, and waiting for their grant.
     pub fn counts(&self) -> (usize, usize) {
         (self.running.len(), self.waiting.len())
@@ -505,7 +509,9 @@ impl Engine {
     pub fn is_running(&self, id: u64) -> bool {
         self.running.contains_key(&id)
     }
+}
 
+impl Engine {
     // ---- inside ------------------------------------------------------------
 
     /// Starts what waits, in order, while the front's grant fits.

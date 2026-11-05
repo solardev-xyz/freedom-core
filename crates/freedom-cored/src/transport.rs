@@ -16,6 +16,16 @@
 //!     claims it. A response read whole retires its request too, and a
 //!     whole response for the request in reassembly is a duplicate: either
 //!     way each request gets one response, as 0001 requires.
+//!   - **Stream frames** (design 0009, Streams in the core) are decoded on
+//!     every connection (`Kinds::CORE_STREAMS`), and taken only once a
+//!     protocol-2 hello has set the link's streams flag ([`Link::streams`]);
+//!     before that, or at protocol 1, one is `unknown_frame_kind`, as it
+//!     always was. They go on in the order read, with the whole messages,
+//!     to the dweb thread, outside the frame credits: the reader never
+//!     waits on dweb data. Main's credit bounds the data in flight at
+//!     16 MiB, so the reader holds a hard cap instead ([`StreamHold`]):
+//!     past [`MAX_QUEUED_STREAM_BYTES`] not yet handled, main has sent past
+//!     its credit, and the connection ends (`stream_backlog`).
 //! - **Writer thread:** one serialized writer for stdout. Each producer has
 //!   its own [`Allowance`] of queued frames, so naming traffic can't take
 //!   the vault loop's room (0001's reserved control capacity).
@@ -80,7 +90,7 @@ use std::time::Instant;
 
 use fc_protocol::error::{ErrorBody, ErrorCode};
 use fc_protocol::fragment::{self, Delivery, FragmentError, Reassembler, Splitter};
-use fc_protocol::frame::{Decoder, MAX_MESSAGE, MAX_PAYLOAD};
+use fc_protocol::frame::{Decoder, Kinds, MAX_MESSAGE, MAX_PAYLOAD};
 use fc_protocol::message;
 use zeroize::{Zeroize, Zeroizing};
 
@@ -108,6 +118,17 @@ pub const MAX_QUEUED_CHAIN_CONTROL_BYTES: usize = 4 * 1024 * 1024;
 /// The most whole frames the writer writes between two fragments of a
 /// response, so a steady stream of small frames can't stall it.
 const MAX_WHOLE_BETWEEN_FRAGMENTS: usize = 64;
+/// Stream frames read and not yet handled by the dweb thread (design 0009,
+/// Streams in the core): the 16 MiB of data main's credit allows in flight
+/// (128 streams, each a 128 KiB window), and one frame beside it for the
+/// terminals and credit frames. A data frame counts its data; any other
+/// stream frame its payload.
+pub const MAX_QUEUED_STREAM_BYTES: usize = 16 * 1024 * 1024 + MAX_PAYLOAD;
+/// The dweb thread's frames handed to the writer and not yet written: a
+/// few frames' worth. Its bodies wait in its own sender instead, within
+/// 0009's 8 MiB writer allowance, where its control frames (credit,
+/// heads, replies, cancels) still go first.
+pub const MAX_QUEUED_DWEB_BYTES: usize = 1024 * 1024;
 
 /// Counts frames read and not yet handled, and their bytes.
 #[derive(Default)]
@@ -344,6 +365,10 @@ pub struct Link {
     control: Arc<Allowance>,
     /// When the writer last wrote and flushed a frame, whole or a fragment.
     last_write: Mutex<Option<Instant>>,
+    /// A protocol-2 hello settled: the reader takes stream frames.
+    streams: AtomicBool,
+    /// Stream frames' bytes read and not yet handled ([`StreamHold`]).
+    stream_bytes: Mutex<usize>,
 }
 
 impl Link {
@@ -355,7 +380,42 @@ impl Link {
             writer: Mutex::new(None),
             control: Allowance::new(usize::MAX, usize::MAX),
             last_write: Mutex::new(None),
+            streams: AtomicBool::new(false),
+            stream_bytes: Mutex::new(0),
         })
+    }
+
+    /// The hello settled protocol 2 (design 0009): from now on the reader
+    /// takes stream frames. Set before the hello's reply is queued, so no
+    /// stream frame main sends after reading it can be refused.
+    pub fn enable_streams(&self) {
+        self.streams.store(true, Ordering::SeqCst);
+    }
+
+    /// Whether the reader takes stream frames.
+    pub fn streams(&self) -> bool {
+        self.streams.load(Ordering::SeqCst)
+    }
+
+    /// A stream frame of `len` counted bytes, read: its place under
+    /// [`MAX_QUEUED_STREAM_BYTES`], or `None` past it.
+    fn hold_stream(self: &Arc<Self>, len: usize) -> Option<StreamHold> {
+        let mut held = self.stream_bytes.lock().ok()?;
+        let next = held.checked_add(len)?;
+        if next > MAX_QUEUED_STREAM_BYTES {
+            return None;
+        }
+        *held = next;
+        Some(StreamHold {
+            link: Arc::clone(self),
+            len,
+        })
+    }
+
+    /// Stream frames' bytes read and not yet handled.
+    #[cfg(test)]
+    pub fn stream_bytes(&self) -> usize {
+        self.stream_bytes.lock().map_or(0, |held| *held)
     }
 
     /// When the writer last wrote a frame: its progress, which moves only
@@ -441,6 +501,40 @@ impl Link {
         let hold = self.control.force(frame.len());
         self.send(Out::Frame { frame, hold });
     }
+}
+
+/// A stream frame's place in what the reader may hold for the dweb thread
+/// ([`MAX_QUEUED_STREAM_BYTES`]), freed once the thread has handled it.
+pub struct StreamHold {
+    link: Arc<Link>,
+    len: usize,
+}
+
+impl Drop for StreamHold {
+    fn drop(&mut self) {
+        if let Ok(mut held) = self.link.stream_bytes.lock() {
+            *held = held.saturating_sub(self.len);
+        }
+    }
+}
+
+/// What a stream frame counts against [`MAX_QUEUED_STREAM_BYTES`]: a data
+/// frame its data, which credit bounds; any other its payload.
+fn stream_charge(frame: &fc_protocol::frame::Frame) -> usize {
+    if frame.kind == fc_protocol::frame::KIND_DATA {
+        frame
+            .payload
+            .len()
+            .saturating_sub(fc_protocol::stream::ID_LEN)
+    } else {
+        frame.payload.len()
+    }
+}
+
+/// Whether `kind` is one of the four stream frames' (design 0007).
+fn is_stream_kind(kind: u8) -> bool {
+    use fc_protocol::frame::{KIND_ABORT, KIND_DATA, KIND_END, KIND_STREAM_CREDIT};
+    matches!(kind, KIND_DATA | KIND_END | KIND_ABORT | KIND_STREAM_CREDIT)
 }
 
 /// The core's own requests to main whose response hasn't started arriving:
@@ -537,7 +631,9 @@ pub fn spawn_reader(
                 credits,
                 link,
                 pending,
-                decoder: Decoder::new(),
+                // Every kind a protocol-2 connection reads; stream frames
+                // are refused in `deliver` until the hello settles 2.
+                decoder: Decoder::with_kinds(Kinds::CORE_STREAMS),
                 // The core always offers fragments: the handshake grants
                 // main its credit. No begin can name a pending request
                 // before then.
@@ -662,6 +758,9 @@ impl Reader {
         if self.link.took_return() {
             self.reassembler.grant();
         }
+        if is_stream_kind(frame.kind) {
+            return self.deliver_stream(frame);
+        }
         let pending = &self.pending;
         match self.reassembler.push(frame, |id| pending.take(id)) {
             Ok(Delivery::Message { frame, answers }) => {
@@ -701,12 +800,29 @@ impl Reader {
     }
 }
 
+impl Reader {
+    /// A stream frame: refused until a protocol-2 hello, as an unknown kind;
+    /// then on to the dweb thread, in order with the whole messages, under
+    /// the stream cap rather than the frame credits.
+    fn deliver_stream(&mut self, frame: fc_protocol::frame::Frame) -> bool {
+        if !self.link.streams() {
+            let _ = self.events.send(Event::ProtocolError("unknown_frame_kind"));
+            return false;
+        }
+        let Some(hold) = self.link.hold_stream(stream_charge(&frame)) else {
+            let _ = self.events.send(Event::ProtocolError("stream_backlog"));
+            return false;
+        };
+        self.events.send(Event::Stream(frame, hold)).is_ok()
+    }
+}
+
 fn frame_category(error: &fc_protocol::frame::FrameError) -> &'static str {
     match error {
         fc_protocol::frame::FrameError::BadLength(_) => "bad_frame_length",
         fc_protocol::frame::FrameError::UnknownKind(_) => "unknown_frame_kind",
-        // Stream frames' checks: the core's decoder takes no stream kinds
-        // (design 0007), so these never arise here.
+        // A stream frame's length or direction (design 0007's checks),
+        // read on every connection (`Kinds::CORE_STREAMS`).
         other => other.category(),
     }
 }
@@ -1260,10 +1376,78 @@ mod tests {
             credits: Arc::new(Credits::default()),
             link,
             pending: ids,
-            decoder: Decoder::new(),
+            decoder: Decoder::with_kinds(Kinds::CORE_STREAMS),
             reassembler: Reassembler::new(),
         };
         (reader, received)
+    }
+
+    fn stream(kind: u8, id: u64, rest: &[u8]) -> Vec<u8> {
+        let mut payload = id.to_be_bytes().to_vec();
+        payload.extend_from_slice(rest);
+        let mut out = Vec::new();
+        fc_protocol::frame::encode(kind, &payload, &mut out).unwrap();
+        out
+    }
+
+    /// Design 0009: a stream frame before a protocol-2 hello is an unknown
+    /// kind, as it always was; after it, it goes on, in order with the
+    /// whole messages and outside the frame credits.
+    #[test]
+    fn stream_frames_go_on_only_after_a_protocol_2_hello() {
+        use fc_protocol::frame::{KIND_DATA, KIND_STREAM_CREDIT};
+        let (mut before, received) = reader(Link::new(), &[]);
+        assert!(!before.feed(&mut stream(KIND_STREAM_CREDIT, 2, &[0, 0, 0, 1])));
+        assert!(matches!(
+            received.try_recv(),
+            Ok(Event::ProtocolError("unknown_frame_kind"))
+        ));
+
+        let link = Link::new();
+        link.enable_streams();
+        let (mut reader, received) = reader(Arc::clone(&link), &[]);
+        let mut input = Vec::new();
+        input.extend_from_slice(&frame(br#"{"type":"cancel","id":1}"#).unwrap());
+        input.extend_from_slice(&stream(KIND_DATA, 3, &[7; 100]));
+        assert!(reader.feed(&mut input));
+        assert!(matches!(received.try_recv(), Ok(Event::Frame(..))));
+        let Ok(Event::Stream(data, hold)) = received.try_recv() else {
+            panic!("the data frame, after the message");
+        };
+        assert_eq!((data.kind, data.payload.len()), (KIND_DATA, 108));
+        // Its data counts until the dweb thread has handled it.
+        assert_eq!(link.stream_bytes(), 100);
+        drop(hold);
+        assert_eq!(link.stream_bytes(), 0);
+    }
+
+    /// Past 16 MiB and a frame of stream bytes not yet handled, main has
+    /// sent past its credit: the connection ends.
+    #[test]
+    fn stream_bytes_past_the_cap_end_the_connection() {
+        use fc_protocol::frame::KIND_DATA;
+        let link = Link::new();
+        link.enable_streams();
+        let (mut reader, received) = reader(Arc::clone(&link), &[]);
+        let full = stream(KIND_DATA, 3, &[0; 64 << 10]);
+        let fits = MAX_QUEUED_STREAM_BYTES / (64 << 10);
+        let mut held = Vec::new();
+        for _ in 0..fits {
+            assert!(reader.feed(&mut full.clone()));
+            let Ok(Event::Stream(_, hold)) = received.try_recv() else {
+                panic!("a frame within the cap");
+            };
+            held.push(hold);
+        }
+        assert_eq!(link.stream_bytes(), fits * (64 << 10));
+        assert!(!reader.feed(&mut full.clone()));
+        assert!(matches!(
+            received.try_recv(),
+            Ok(Event::ProtocolError("stream_backlog"))
+        ));
+        // Handled frames give their room back.
+        held.clear();
+        assert_eq!(link.stream_bytes(), 0);
     }
 
     /// #79: the chunk a frame was read into holds nothing of it once the

@@ -2,14 +2,14 @@
 //! fetches from external Swarm and IPFS nodes, one `fc-dweb` verifier per
 //! request, and the hashing pool beside it.
 //!
-//! Built in parts (0009, step 5): the hashing pool, then the engine (the
-//! thread's logic, behind an `Io`). The event loop starts the thread once
-//! the core speaks protocol 2.
+//! - [`engine`]: the thread's logic, behind an `Io`: admission, grants,
+//!   pieces, the structure cache and floors, deadlines and cancel;
+//! - [`pool`]: the hashing pool;
+//! - [`wire`]: the messages, read strictly and written;
+//! - [`thread`]: the thread itself, which the event loop starts once a
+//!   hello settles protocol 2.
 
-// Unused until the thread is started (step 5c).
-#[allow(dead_code)]
 pub mod engine;
-#[allow(dead_code)]
 pub mod pool;
-#[allow(dead_code)]
+pub mod thread;
 pub mod wire;

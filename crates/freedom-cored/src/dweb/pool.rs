@@ -169,6 +169,7 @@ impl<T: Send + 'static, R: Send + 'static> Pool<T, R> {
     }
 
     /// Slots taken.
+    #[allow(dead_code)] // the tests', and 5d's gates'
     pub fn busy(&self) -> usize {
         lock(&self.shared).busy
     }
@@ -287,11 +288,13 @@ impl<T: Send + 'static, R: Send + 'static> Queue<T, R> {
     }
 
     /// Jobs waiting for a slot.
+    #[allow(dead_code)] // the tests', and 5d's gates'
     pub fn waiting(&self) -> usize {
         self.waiting.len()
     }
 
     /// Jobs in the pool: running, handed over, or with a result not taken.
+    #[allow(dead_code)] // the tests', and 5d's gates'
     pub fn running(&self) -> usize {
         self.pool.busy()
     }

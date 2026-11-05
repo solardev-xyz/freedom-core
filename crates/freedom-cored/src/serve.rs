@@ -18,7 +18,8 @@
 //! - **The loop never blocks on the writer, nor polls it.** Freed room
 //!   wakes it ([`Event::Room`]). Meanwhile it runs its timers and handles
 //!   its worker's results, lifecycle events, and whatever else main sends:
-//!   responses (for naming and chain), cancels and events.
+//!   responses (for naming, chain and dweb), stream frames, cancels and
+//!   events.
 //! - **The auto-lock fires on time,** whatever the room: it wipes the
 //!   secrets and revokes admitted work at once. Only its event and the
 //!   revoked requests' replies wait, and they carry no secret.
@@ -60,6 +61,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::value::RawValue;
 use zeroize::Zeroizing;
 
+use crate::dweb::thread as dweb;
 use crate::exit::Exit;
 use crate::requests::{self, Owner, Requests};
 use crate::transport::{self, Allowance, Credits, Link, Pending};
@@ -128,6 +130,10 @@ pub enum Event {
     /// The writer has room again in the loop's share: the frames waiting
     /// here can go, then the requests that waited for them.
     Room,
+    /// A stream frame (design 0009, Streams in the core), read after a
+    /// protocol-2 hello, for the dweb thread: outside the frame credits,
+    /// under the reader's stream cap.
+    Stream(Frame, transport::StreamHold),
 }
 
 /// The methods `core.hello`'s capabilities name: every method this build
@@ -306,7 +312,7 @@ pub fn run(options: &Options) -> Exit {
             options.lock_dir.clone(),
             events_tx.clone(),
         )
-        || !spawn_parent_watch(options.parent_pid, events_tx)
+        || !spawn_parent_watch(options.parent_pid, events_tx.clone())
     {
         log::error("cannot start a thread", serde_json::json!({}));
         return Exit::Internal;
@@ -317,7 +323,7 @@ pub fn run(options: &Options) -> Exit {
         node_recovery: None,
         pending_hello: None,
         outbox: Outbox::new(
-            writer.queue,
+            writer.queue.clone(),
             allowance,
             Arc::clone(&link),
             crate::testhooks::stall(STALL),
@@ -338,6 +344,11 @@ pub fn run(options: &Options) -> Exit {
         requests,
         naming,
         chain,
+        dweb: None,
+        dweb_start: Some(DwebStart {
+            out: writer.queue.clone(),
+            events: events_tx,
+        }),
         #[cfg(feature = "testhooks")]
         test,
     };
@@ -455,6 +466,18 @@ pub fn run(options: &Options) -> Exit {
                     break exit;
                 }
             }
+            // On to the dweb thread at once, in the order read, so a piece's
+            // data follows its head there.
+            Ok(Event::Stream(frame, hold)) => {
+                let Some(thread) = core.dweb.as_ref() else {
+                    // The reader takes stream frames only after a protocol-2
+                    // hello, which starts the thread.
+                    break Exit::Internal;
+                };
+                if !thread.send(dweb::In::Stream { frame, hold }, None) {
+                    break Exit::Internal;
+                }
+            }
             Err(RecvTimeoutError::Timeout) => {}
             Err(RecvTimeoutError::Disconnected) => break Exit::Ok,
         }
@@ -470,6 +493,11 @@ pub fn run(options: &Options) -> Exit {
     };
     // No more requests to main, whatever ended the loop.
     core.requests.close();
+    // The dweb thread stops: it hands the writer the frames it made, drops
+    // the bodies still queued (main fails them as it closes), and joins its
+    // hashing pool.
+    drop(core.dweb.take());
+    core.dweb_start = None;
     // Wipe the vault and revoke pre-commit work. Work past its commit point
     // finishes and replies before exit (bounded). Then let the writer flush
     // what's queued, but never wait on a peer that stopped reading: exiting
@@ -574,10 +602,20 @@ struct Core {
     requests: Arc<Requests>,
     naming: naming::Handle,
     chain: chain::Handle,
+    /// The dweb thread, once a hello has settled protocol 2 (design 0009).
+    dweb: Option<dweb::Handle>,
+    /// What starts it; taken when it starts.
+    dweb_start: Option<DwebStart>,
     /// The `test.*` methods' thread, when the test hooks enable it (debug
     /// builds only).
     #[cfg(feature = "testhooks")]
     test: Option<testmethods::Handle>,
+}
+
+/// What the dweb thread starts with: the writer, and the loop's events.
+struct DwebStart {
+    out: Sender<transport::Out>,
+    events: Sender<Event>,
 }
 
 #[derive(Deserialize)]
@@ -951,10 +989,14 @@ impl Core {
                 );
                 Flow::Exit(Exit::Protocol)
             }
-            // A cancel names a vault request, a naming one or a chain one;
-            // each ignores IDs it doesn't hold.
+            // A cancel names a vault request, a naming one, a chain one or a
+            // dweb one; each ignores IDs it doesn't hold.
             Message::Cancel { id } => {
                 if !self.chain.send(chain::In::Cancel { id }, None)
+                    || self
+                        .dweb
+                        .as_ref()
+                        .is_some_and(|thread| !thread.send(dweb::In::Cancel { id }, None))
                     || !self
                         .naming
                         .send(naming::In::Cancel { id }, self.credit.take())
@@ -1074,6 +1116,18 @@ impl Core {
                 },
                 self.credit.take(),
             ),
+            // The dweb thread reads its piece's reply where it lies, as the
+            // chain thread does.
+            (Owner::Dweb, outcome) => self.dweb.as_ref().is_some_and(|thread| {
+                thread.send(
+                    dweb::In::Response {
+                        id,
+                        message,
+                        outcome,
+                    },
+                    self.credit.take(),
+                )
+            }),
         };
         if sent {
             Flow::Continue
@@ -1149,6 +1203,29 @@ impl Core {
                     Flow::Exit(Exit::Internal)
                 }
             }
+            // Admitted only at protocol 2, whose hello started the thread.
+            method if dweb::handles(method) => {
+                let params = match params.map(|p| RawValue::from_string(p.to_owned())) {
+                    Some(Ok(params)) => Some(params),
+                    Some(Err(_)) => return Flow::Exit(Exit::Internal),
+                    None => None,
+                };
+                let sent = self.dweb.as_ref().is_some_and(|thread| {
+                    thread.send(
+                        dweb::In::Request {
+                            id,
+                            method: loggable(method),
+                            params,
+                        },
+                        self.credit.take(),
+                    )
+                });
+                if sent {
+                    Flow::Continue
+                } else {
+                    Flow::Exit(Exit::Internal)
+                }
+            }
             #[cfg(feature = "testhooks")]
             method if testmethods::handles(method) && self.test.is_some() => {
                 let params = match params.map(|p| RawValue::from_string(p.to_owned())) {
@@ -1219,6 +1296,21 @@ impl Core {
             );
         }
         self.protocol = params.protocol;
+        // The dweb thread, and stream frames from now on: before the reply,
+        // so nothing main sends after reading it is refused.
+        if streams {
+            let Some(start) = self.dweb_start.take() else {
+                return Flow::Exit(Exit::Internal);
+            };
+            match dweb::spawn(start.out, start.events, Arc::clone(&self.requests)) {
+                Ok(handle) => self.dweb = Some(handle),
+                Err(_) => {
+                    log::error("cannot start a thread", serde_json::json!({}));
+                    return Flow::Exit(Exit::Internal);
+                }
+            }
+            self.link.enable_streams();
+        }
         self.vault.set_auto_lock_ms(params.auto_lock_ms);
         spawn_adoption(params.node_roots.map(NodeRoots::valid).unwrap_or_default());
         // Granted with the handshake: main holds the core's credit from now

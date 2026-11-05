@@ -1,5 +1,5 @@
-//! The core's own requests to main (`shell.*`, designs 0004 and 0005): one
-//! gate for the naming and chain threads.
+//! The core's own requests to main (`shell.*`, designs 0004, 0005 and
+//! 0009): one gate for the naming, chain and dweb threads.
 //!
 //! - **One ID counter.** Main requires the core's request IDs to increase
 //!   in the order it reads them (`reused_id` in `core-client.js`). Each ID
@@ -7,9 +7,9 @@
 //!   lock: the writer's queue sees requests in ID order, whichever thread
 //!   sends them, and writes whole frames in the order they come.
 //! - **One limit.** Main holds at most [`MAX_OUTSTANDING`] of the core's
-//!   requests at a time, naming's and chain's together (0004, Bounds:
-//!   Work). A thread that finds none free keeps its requests queued, and is
-//!   woken once one is answered.
+//!   requests at a time, every thread's together (0004, Bounds: Work). A
+//!   thread that finds none free keeps its requests queued, and is woken
+//!   once one is answered.
 //! - **One registry.** Each request's owner, so the event loop routes main's
 //!   response to the thread that asked, and a response that answers no
 //!   request is unsolicited. The reader's [`Pending`] set is filled at the
@@ -44,6 +44,8 @@ pub const MAX_OUTSTANDING: usize = 256;
 pub enum Owner {
     Naming,
     Chain,
+    /// The dweb thread's `shell.dweb_get` pieces (design 0009).
+    Dweb,
 }
 
 /// What became of a request offered to [`Requests::send`].
