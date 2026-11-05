@@ -1109,6 +1109,10 @@ mod verify {
         got: BTreeMap<u64, Got>,
         /// Whether main credits the verified bodies as they come.
         credits_bodies: bool,
+        /// The most data main puts in one of a piece's frames.
+        frame_size: usize,
+        /// The most bytes main credits in one frame.
+        credit_step: usize,
     }
 
     impl Main {
@@ -1130,6 +1134,8 @@ mod verify {
                 cancels: Vec::new(),
                 got: BTreeMap::new(),
                 credits_bodies: true,
+                frame_size: MAX_DATA,
+                credit_step: usize::MAX,
             }
         }
 
@@ -1154,7 +1160,7 @@ mod verify {
             for (&id, f) in self.flows.iter_mut() {
                 let stop = f.cut.map_or(f.body.len(), |(n, _)| n.min(f.body.len()));
                 while f.at < stop && f.room > 0 {
-                    let n = f.room.min(MAX_DATA).min(stop - f.at);
+                    let n = f.room.min(self.frame_size).min(stop - f.at);
                     let frame = stream_frame(KIND_DATA, id, &f.body[f.at..f.at + n]);
                     self.core.send_raw(&frame);
                     f.at += n;
@@ -1266,10 +1272,13 @@ mod verify {
                         let got = self.got.get_mut(&id).expect("a body of main's request");
                         assert!(!got.ended && got.abort.is_none());
                         got.body.extend_from_slice(&rest);
-                        if self.credits_bodies {
-                            let n = u32::try_from(rest.len()).unwrap().to_be_bytes();
+                        let mut left = if self.credits_bodies { rest.len() } else { 0 };
+                        while left > 0 {
+                            let n = left.min(self.credit_step);
+                            let credit = u32::try_from(n).unwrap().to_be_bytes();
                             self.core
-                                .send_raw(&stream_frame(KIND_STREAM_CREDIT, id, &n));
+                                .send_raw(&stream_frame(KIND_STREAM_CREDIT, id, &credit));
+                            left -= n;
                         }
                     }
                     KIND_END => self.got.get_mut(&id).unwrap().ended = true,
@@ -1413,6 +1422,31 @@ mod verify {
             }
             assert!(m.got[&head].body.is_empty() && !m.got[&head].ended);
         }
+    }
+
+    /// Main may frame its pieces and its credit as it likes within credit:
+    /// pieces in one-byte data frames, and each body's credit a byte at a
+    /// time, join their streams' entries in the core's reader, and the
+    /// bodies verify the same.
+    #[test]
+    fn pieces_and_credits_in_one_byte_frames_verify_the_same() {
+        let mut m = Main::new(World::new());
+        m.frame_size = 1;
+        m.credit_step = 1;
+        let a = m.verify(swarm("/style.css"));
+        let c = m.verify(ipfs("/index.html", false));
+        m.settle(&[a, c]);
+        for id in [a, c] {
+            assert_eq!(m.result(id)["status"], 200, "{:?}", m.got[&id]);
+            assert_eq!(m.result(id)["trust"]["content"], "verified");
+            assert!(m.got[&id].ended, "{id}");
+        }
+        assert_eq!(m.got[&a].body, content("site-style", 5000));
+        assert_eq!(m.got[&c].body, INDEX_HTML);
+        assert!(
+            m.asked.iter().any(|(_, p)| p["stream"] == true),
+            "a streamed piece"
+        );
     }
 
     #[test]

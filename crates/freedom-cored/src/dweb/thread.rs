@@ -66,7 +66,7 @@ use super::wire;
 use crate::log;
 use crate::requests::{self, Dispatch, Owner, Requests, Start};
 use crate::serve::Event;
-use crate::transport::{self, Allowance, Credit, Out, StreamHold};
+use crate::transport::{self, Allowance, Credit, Out, StreamEntry, StreamMark};
 
 /// The methods this thread serves, from protocol 2 on (design 0009).
 pub const METHODS: &[&str] = &["dweb.verify", "dweb.forget"];
@@ -101,11 +101,9 @@ pub enum In {
         message: Zeroizing<Vec<u8>>,
         outcome: Result<Range<usize>, Range<usize>>,
     },
-    /// A stream frame, and its place under the reader's stream cap.
-    Stream {
-        frame: Frame,
-        hold: StreamHold,
-    },
+    /// A stream's entry of frames, coalesced under the reader's stream
+    /// cap: taken here, and charged until handled.
+    Stream(StreamMark),
     /// Room in the writer, a free slot at main, or a hashing result.
     Drained,
 }
@@ -114,7 +112,7 @@ pub enum In {
 /// until it is handled.
 type Mail = (In, Option<Credit>);
 
-// A stream frame's slot here is within what the reader charges it.
+// A stream mark's slot here is within what the reader charges its entry.
 const _: () = assert!(transport::stream_slot_fits(std::mem::size_of::<Mail>()));
 
 /// The event loop's side of the dweb thread. The wake-ups hold only weak
@@ -277,9 +275,10 @@ impl Thread {
                 message,
                 outcome,
             } => self.response(now, id, &message, outcome)?,
-            In::Stream { frame, hold } => {
-                self.stream(now, &frame)?;
-                drop(hold);
+            In::Stream(mark) => {
+                if let Some(taken) = mark.take() {
+                    self.stream(now, taken.entry())?;
+                }
             }
             In::Drained => self.engine.room(&mut self.wire, now),
         }
@@ -363,12 +362,39 @@ impl Thread {
         }
     }
 
-    /// A stream frame from main.
-    fn stream(&mut self, now: Ms, frame: &Frame) -> Flow {
-        let parsed = read(frame)?;
-        let credit = match &parsed {
-            StreamFrame::Credit { bytes, .. } => Some(*bytes),
-            _ => None,
+    /// A stream's entry from main: a piece's data in frames the duplex
+    /// takes (at most 64 KiB each), then its terminal; or a body's credit,
+    /// summed.
+    fn stream(&mut self, now: Ms, entry: &StreamEntry) -> Flow {
+        match entry {
+            StreamEntry::Piece { id, data, terminal } => {
+                for bytes in data.chunks(fc_protocol::stream::MAX_DATA) {
+                    self.frame(now, StreamFrame::Data { id: *id, bytes })?;
+                }
+                match terminal {
+                    Some(frame) => self.frame(now, read(frame)?),
+                    None => Ok(()),
+                }
+            }
+            // Past a `u32`, credit is past any window: refused as such, or
+            // late either way.
+            StreamEntry::Credit { id, bytes } => self.frame(
+                now,
+                StreamFrame::Credit {
+                    id: *id,
+                    bytes: u32::try_from(*bytes).unwrap_or(u32::MAX),
+                },
+            ),
+        }
+    }
+
+    /// One stream frame from main.
+    fn frame(&mut self, now: Ms, parsed: StreamFrame<'_>) -> Flow {
+        let kind = parsed.kind();
+        let (credit, data) = match &parsed {
+            StreamFrame::Credit { bytes, .. } => (Some(*bytes), None),
+            StreamFrame::Data { bytes, .. } => (None, Some(*bytes)),
+            _ => (None, None),
         };
         let received = self
             .wire
@@ -384,7 +410,7 @@ impl Thread {
             }
             Received::Credited(Credited::Late) => Ok(()),
             Received::Arrived(Arrived::Data { id, .. }) => {
-                let StreamFrame::Data { bytes, .. } = read(frame)? else {
+                let Some(bytes) = data else {
                     return Ok(());
                 };
                 self.engine
@@ -409,7 +435,7 @@ impl Thread {
             // A withdrawn piece's frame: its data goes, and its terminal
             // ends it for the engine.
             Received::Arrived(Arrived::Dropped { id }) => {
-                if matches!(frame.kind, KIND_END | KIND_ABORT) {
+                if matches!(kind, KIND_END | KIND_ABORT) {
                     self.withdrawn_end(now, id)
                 } else {
                     Ok(())

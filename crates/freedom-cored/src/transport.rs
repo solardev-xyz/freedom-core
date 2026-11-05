@@ -23,13 +23,11 @@
 //!     always was. They go on in the order read, with the whole messages,
 //!     to the dweb thread, outside the frame credits: the reader never
 //!     waits on dweb data. Main's credit bounds the data in flight at
-//!     16 MiB, not the frames that carry it, so the reader holds a hard
-//!     memory cap instead ([`StreamHold`]): each frame counts its payload
-//!     and its place in the queues ([`STREAM_FRAME_COST`]). The cap holds
-//!     the most main can send within credit in full frames, with every
-//!     stream's terminal; past [`MAX_QUEUED_STREAM_BYTES`] or
-//!     [`MAX_QUEUED_STREAM_FRAMES`] not yet handled, the connection ends
-//!     (`stream_backlog`).
+//!     16 MiB, not the frames that carry it, so the reader coalesces them,
+//!     one entry per stream ([`StreamMark`]), under a hard memory cap that
+//!     holds the most a peer within credit can send, whatever its framing:
+//!     past [`MAX_QUEUED_STREAM_BYTES`] (or [`MAX_QUEUED_STREAM_ENTRIES`],
+//!     a defence) not yet handled, the connection ends (`stream_backlog`).
 //! - **Writer thread:** one serialized writer for stdout. Each producer has
 //!   its own [`Allowance`] of queued frames, so naming traffic can't take
 //!   the vault loop's room (0001's reserved control capacity).
@@ -84,7 +82,7 @@
 //! credit, and a `password_b64` mustn't wait in the chunk meanwhile, nor
 //! for a later read to cover it.
 
-use std::collections::{BTreeSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fs::File;
 use std::io::{Read, Write};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -123,56 +121,80 @@ pub const MAX_QUEUED_CHAIN_CONTROL_BYTES: usize = 4 * 1024 * 1024;
 /// response, so a steady stream of small frames can't stall it.
 const MAX_WHOLE_BETWEEN_FRAGMENTS: usize = 64;
 /// Stream frames read and not yet handled by the dweb thread (design 0009,
-/// Streams in the core), as the memory they hold: the most main can have
-/// in flight within credit, in full frames. That is each of the 128
-/// incoming streams' 128 KiB window as two full data frames, then its
-/// terminal at its largest, an abort with all of its 1 KiB of JSON:
-/// 128 × (2 × 65,800 + 1,288) = 17,009,664 bytes, 16 MiB and 232,448
-/// (design 0009, Bounds). Every frame counts its whole cost
-/// ([`stream_charge`]), data or not, so no mix of frames holds more.
-pub const MAX_QUEUED_STREAM_BYTES: usize = crate::dweb::engine::STREAMS * CREDITED_STREAM_CHARGE;
-/// One full data frame's charge: its ID, 64 KiB of data, and its place.
-const FULL_DATA_CHARGE: usize =
-    fc_protocol::stream::ID_LEN + fc_protocol::stream::MAX_DATA + STREAM_FRAME_COST;
-/// The largest terminal's charge: an abort with all of its JSON (an `end`
-/// is its ID alone).
-const TERMINAL_CHARGE: usize =
-    fc_protocol::stream::ID_LEN + fc_protocol::stream::MAX_ABORT + STREAM_FRAME_COST;
-/// The most one incoming stream has queued within credit: its window in
-/// full data frames, and its terminal.
-const CREDITED_STREAM_CHARGE: usize = fc_protocol::stream::WINDOW / fc_protocol::stream::MAX_DATA
-    * FULL_DATA_CHARGE
-    + TERMINAL_CHARGE;
-// The window is whole frames; the figure is 0009's; and the frames of that
-// most are well within the frame bound.
-const _: () = assert!(fc_protocol::stream::WINDOW.is_multiple_of(fc_protocol::stream::MAX_DATA));
-const _: () = assert!(MAX_QUEUED_STREAM_BYTES == 16 * 1024 * 1024 + 232_448);
-const _: () = assert!(
-    crate::dweb::engine::STREAMS
-        * (fc_protocol::stream::WINDOW / fc_protocol::stream::MAX_DATA + 1)
-        <= MAX_QUEUED_STREAM_FRAMES
-);
-/// The most stream frames read and not yet handled: credit's 16 MiB in
-/// 1 KiB frames. Frames that average more meet the byte cap first; a flood
-/// of the smallest (an `end`'s 8 bytes) stops here, at about 4.3 MB.
-pub const MAX_QUEUED_STREAM_FRAMES: usize = 16 * 1024;
-/// What a queued stream frame holds beyond its payload's bytes: its slot in
-/// the event loop's channel or the dweb thread's mailbox, whichever it is
-/// in (the message and std's state word), and the allocator's header and
-/// rounding for the payload ([`STREAM_ALLOC_SLACK`]). `serve::Event` and
-/// the dweb thread's mail are checked against it where they are defined
-/// ([`stream_slot_fits`]).
-pub const STREAM_FRAME_COST: usize = 256;
-/// The allocator's header and rounding for one payload: glibc's malloc adds
-/// at most 24 bytes to a request (an 8-byte header, 16-byte steps, 32-byte
-/// chunks at least).
+/// Streams in the core), as the memory they hold. They wait coalesced, one
+/// entry per stream ([`StreamMark`]): a piece's data joined in the order
+/// read, with its terminal, or main's credit for one of the core's bodies,
+/// summed. Each entry is charged [`STREAM_ENTRY_COST`] and its buffers, so
+/// the cap is the most a peer within credit can make them hold, whatever
+/// its framing:
+/// - each of the 128 incoming streams ([`STREAMS`]) a whole 128 KiB window
+///   of data (its buffer grows by powers of two, so to the window at most)
+///   and its terminal at its largest, an abort with all of its 1 KiB of
+///   JSON;
+/// - one more such stream's worth: the entry the dweb thread is handling
+///   while the same stream's next one gathers;
+/// - a credit entry for each body main can credit ([`MAIN_FETCHES`]).
+///
+/// 129 × (131,072 + 1,032 + 2,048) + 256 × 2,048 = 17,829,896 bytes,
+/// 16 MiB and 1,052,680 (design 0009, Bounds).
+pub const MAX_QUEUED_STREAM_BYTES: usize =
+    (STREAMS + 1) * PIECE_ENTRY_MOST + MAIN_FETCHES * STREAM_ENTRY_COST;
+/// The incoming streams with credit at once (the engine's bound).
+const STREAMS: usize = crate::dweb::engine::STREAMS;
+/// The bodies main can credit at once: only one whose fetch it holds, and
+/// it holds at most 256 fetches (design 0009, Bounds: fetch admission).
+/// A credit past a body's end is late, and main sends none after reading
+/// the end.
+pub const MAIN_FETCHES: usize = 256;
+/// The most a piece's entry holds within credit: its window's data, its
+/// largest terminal, and the entry itself.
+const PIECE_ENTRY_MOST: usize = fc_protocol::stream::WINDOW
+    + fc_protocol::stream::ID_LEN
+    + fc_protocol::stream::MAX_ABORT
+    + STREAM_ENTRY_COST;
+/// The most entries waiting at once: a defence only, which a peer within
+/// credit can't reach (it has at most one entry per stream, and one being
+/// handled). The byte cap stops a flood of entries first, at about 8,700.
+pub const MAX_QUEUED_STREAM_ENTRIES: usize = 16 * 1024;
+/// What an entry holds beyond its buffers: its mark's slot in the event
+/// loop's channel or the dweb thread's mailbox ([`STREAM_SLOT`]), its place
+/// in the backlog's two maps (a whole B-tree node of each, since a map has
+/// no more nodes than entries), and the allocator's slack for its two
+/// buffers. Checked below.
+pub const STREAM_ENTRY_COST: usize = 2048;
+/// A mark's slot in a channel: the message and std's state word beside it.
+/// `serve::Event` and the dweb thread's mail are checked against it where
+/// they are defined ([`stream_slot_fits`]).
+pub const STREAM_SLOT: usize = 256;
+/// The allocator's header and rounding for one allocation: glibc's malloc
+/// adds at most 24 bytes to a request (an 8-byte header, 16-byte steps,
+/// 32-byte chunks at least).
 pub const STREAM_ALLOC_SLACK: usize = 32;
+/// What one node of a std B-tree map with `kv`-byte entries takes, at most:
+/// its 11 keys and values, 12 edges, its parent link and lengths, and the
+/// allocator's slack.
+const fn btree_node(kv: usize) -> usize {
+    11 * kv + 12 * 8 + 32 + STREAM_ALLOC_SLACK
+}
+/// One node of each of the backlog's maps ([`Backlog`]).
+const PENDING_NODE: usize =
+    btree_node(std::mem::size_of::<u64>() + std::mem::size_of::<(StreamEntry, usize)>());
+const OPEN_NODE: usize = btree_node(std::mem::size_of::<StreamKey>() + std::mem::size_of::<u64>());
+const _: () =
+    assert!(STREAM_SLOT + PENDING_NODE + OPEN_NODE + 2 * STREAM_ALLOC_SLACK <= STREAM_ENTRY_COST);
+// The window is a power of two, so a buffer grown by powers of two to hold
+// it is the window; the figure is 0009's; and a peer within credit (one
+// entry per stream and body, and one being handled) is within the entry
+// bound.
+const _: () = assert!(fc_protocol::stream::WINDOW.is_power_of_two());
+const _: () = assert!(MAX_QUEUED_STREAM_BYTES == 16 * 1024 * 1024 + 1_052_680);
+const _: () = assert!(STREAMS + 1 + MAIN_FETCHES <= MAX_QUEUED_STREAM_ENTRIES);
 
-/// Whether a channel message of `size` bytes that carries a stream frame is
-/// within [`STREAM_FRAME_COST`]: its slot, the message and the state word
-/// std's channels keep beside it, with the payload's allocator slack.
+/// Whether a channel message of `size` bytes that carries a stream mark is
+/// within [`STREAM_SLOT`], with the state word std's channels keep beside
+/// it.
 pub const fn stream_slot_fits(size: usize) -> bool {
-    size + std::mem::size_of::<usize>() + STREAM_ALLOC_SLACK <= STREAM_FRAME_COST
+    size + std::mem::size_of::<usize>() <= STREAM_SLOT
 }
 /// The dweb thread's frames handed to the writer and not yet written: a
 /// few frames' worth. Its bodies wait in its own sender instead, within
@@ -417,16 +439,8 @@ pub struct Link {
     last_write: Mutex<Option<Instant>>,
     /// A protocol-2 hello settled: the reader takes stream frames.
     streams: AtomicBool,
-    /// Stream frames read and not yet handled ([`StreamHold`]).
+    /// Stream frames read and not yet handled, coalesced ([`StreamMark`]).
     stream_backlog: Mutex<Backlog>,
-}
-
-/// Stream frames read and not yet handled: their charge
-/// ([`stream_charge`]) and how many.
-#[derive(Default)]
-struct Backlog {
-    bytes: usize,
-    frames: usize,
 }
 
 impl Link {
@@ -455,29 +469,69 @@ impl Link {
         self.streams.load(Ordering::SeqCst)
     }
 
-    /// A stream frame charged `len` bytes, read: its place under
-    /// [`MAX_QUEUED_STREAM_BYTES`] and [`MAX_QUEUED_STREAM_FRAMES`], or
-    /// `None` past either.
-    fn hold_stream(self: &Arc<Self>, len: usize) -> Option<StreamHold> {
-        let mut held = self.stream_backlog.lock().ok()?;
-        let bytes = held.bytes.checked_add(len)?;
-        if bytes > MAX_QUEUED_STREAM_BYTES || held.frames >= MAX_QUEUED_STREAM_FRAMES {
-            return None;
+    /// A stream frame, read: it joins its stream's entry, or starts one,
+    /// whose mark goes to the dweb thread. A refusal is the protocol error:
+    /// the frame's own, or `stream_backlog` past the cap.
+    fn push_stream(
+        self: &Arc<Self>,
+        frame: fc_protocol::frame::Frame,
+    ) -> Result<Option<StreamMark>, &'static str> {
+        use fc_protocol::stream::StreamFrame;
+        enum Kind {
+            Data,
+            Terminal,
+            Credit(u32),
         }
-        held.bytes = bytes;
-        held.frames += 1;
-        Some(StreamHold {
-            link: Arc::clone(self),
-            len,
-        })
+        let (id, kind) = match StreamFrame::from_frame(&frame).map_err(|e| e.category())? {
+            StreamFrame::Data { id, .. } => (id, Kind::Data),
+            StreamFrame::End { id } | StreamFrame::Abort { id, .. } => (id, Kind::Terminal),
+            StreamFrame::Credit { id, bytes } => (id, Kind::Credit(bytes)),
+        };
+        let mut backlog = self.stream_backlog.lock().map_err(|_| BACKLOG)?;
+        match kind {
+            Kind::Data => {
+                let data = frame
+                    .payload
+                    .get(fc_protocol::stream::ID_LEN..)
+                    .unwrap_or_default();
+                backlog.data(self, id, data)
+            }
+            Kind::Terminal => backlog.terminal(self, id, frame),
+            Kind::Credit(bytes) => backlog.credit(self, id, bytes),
+        }
     }
 
-    /// Stream frames read and not yet handled: their charge, and how many.
+    /// Stream frames read and not yet handled: their charge, and how many
+    /// entries hold them.
     #[cfg(test)]
     pub fn stream_backlog(&self) -> (usize, usize) {
         self.stream_backlog
             .lock()
-            .map_or((0, 0), |held| (held.bytes, held.frames))
+            .map_or((0, 0), |held| (held.bytes, held.entries))
+    }
+
+    /// What the waiting entries hold, counted from them: each mark's slot
+    /// as an `Event`, the buffers as allocated with the allocator's slack,
+    /// and a node of each map per entry (a map has no more nodes).
+    #[cfg(test)]
+    pub fn stream_memory(&self) -> usize {
+        let Ok(held) = self.stream_backlog.lock() else {
+            return 0;
+        };
+        let slot = std::mem::size_of::<crate::serve::Event>() + std::mem::size_of::<usize>();
+        let buffers: usize = held
+            .pending
+            .values()
+            .map(|(entry, _)| match entry {
+                StreamEntry::Piece { data, terminal, .. } => {
+                    data.capacity() + terminal.as_ref().map_or(0, |f| f.payload.capacity())
+                }
+                StreamEntry::Credit { .. } => 0,
+            })
+            .sum();
+        held.pending.len() * (slot + 2 * STREAM_ALLOC_SLACK + PENDING_NODE)
+            + held.open.len() * OPEN_NODE
+            + buffers
     }
 
     /// When the writer last wrote a frame: its progress, which moves only
@@ -565,27 +619,255 @@ impl Link {
     }
 }
 
-/// A stream frame's place in what the reader may hold for the dweb thread
-/// ([`MAX_QUEUED_STREAM_BYTES`]), freed once the thread has handled it.
-pub struct StreamHold {
-    link: Arc<Link>,
-    len: usize,
+/// The protocol error past the stream cap.
+const BACKLOG: &str = "stream_backlog";
+
+/// A stream's place in the backlog: main's frames for the core's pieces
+/// (data and terminals) and its credit for the core's bodies name two sets
+/// of streams.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum StreamKey {
+    Piece(u64),
+    Body(u64),
 }
 
-impl Drop for StreamHold {
+/// One stream's frames, read and not yet handled, coalesced.
+pub enum StreamEntry {
+    /// A piece's data, joined in the order read, and its terminal (`end` or
+    /// `abort`, as read) once it has come: nothing joins after it.
+    Piece {
+        id: u64,
+        data: Vec<u8>,
+        terminal: Option<fc_protocol::frame::Frame>,
+    },
+    /// Main's credit for one of the core's bodies, summed.
+    Credit { id: u64, bytes: u64 },
+}
+
+/// The stream frames read and not yet handled ([`MAX_QUEUED_STREAM_BYTES`]).
+/// An entry is made by its stream's first frame, whose mark goes to the
+/// dweb thread in the order read, with the whole messages; the stream's
+/// next frames join it until the thread takes it. So a piece's head, a
+/// message read before its first frame, still reaches the thread first,
+/// and its terminal comes after its data. A frame that joins an entry is
+/// handled with it, before messages read between them: none of those is
+/// about that stream's data (a cancel of the request only drops it).
+#[derive(Default)]
+struct Backlog {
+    /// The entries' charge, and how many there are.
+    bytes: usize,
+    entries: usize,
+    /// The next entry's number.
+    next: u64,
+    /// The entries not yet taken, by number, each with its charge.
+    pending: BTreeMap<u64, (StreamEntry, usize)>,
+    /// The entry each stream's next frame joins. A piece's entry leaves
+    /// here at its terminal, and any entry once taken.
+    open: BTreeMap<StreamKey, u64>,
+}
+
+/// A buffer's size for `len` bytes: the next power of two, so a window's
+/// data takes the window at most, and joining frames one by one copies
+/// each byte about twice.
+fn room_for(len: usize) -> Result<usize, &'static str> {
+    len.checked_next_power_of_two().ok_or(BACKLOG)
+}
+
+impl Backlog {
+    /// Takes `bytes` more under the cap, and one entry more if `entry`.
+    fn admit(&mut self, bytes: usize, entry: bool) -> Result<(), &'static str> {
+        let total = self
+            .bytes
+            .checked_add(bytes)
+            .filter(|total| *total <= MAX_QUEUED_STREAM_BYTES)
+            .ok_or(BACKLOG)?;
+        if entry && self.entries >= MAX_QUEUED_STREAM_ENTRIES {
+            return Err(BACKLOG);
+        }
+        self.bytes = total;
+        self.entries += usize::from(entry);
+        Ok(())
+    }
+
+    /// Gives back an entry's charge, once it has been handled or dropped.
+    fn release(&mut self, charge: usize) {
+        self.bytes = self.bytes.saturating_sub(charge);
+        self.entries = self.entries.saturating_sub(1);
+    }
+
+    fn insert(
+        &mut self,
+        link: &Arc<Link>,
+        open: Option<StreamKey>,
+        entry: StreamEntry,
+        charge: usize,
+    ) -> StreamMark {
+        let seq = self.next;
+        self.next += 1;
+        self.pending.insert(seq, (entry, charge));
+        if let Some(key) = open {
+            self.open.insert(key, seq);
+        }
+        StreamMark {
+            link: Arc::clone(link),
+            seq,
+        }
+    }
+
+    /// A piece's data: joined to its open entry, grown by powers of two, or
+    /// a new one.
+    fn data(
+        &mut self,
+        link: &Arc<Link>,
+        id: u64,
+        data: &[u8],
+    ) -> Result<Option<StreamMark>, &'static str> {
+        let key = StreamKey::Piece(id);
+        if let Some(seq) = self.open.get(&key).copied() {
+            let Some((StreamEntry::Piece { data: buffer, .. }, _)) = self.pending.get(&seq) else {
+                return Err(BACKLOG);
+            };
+            let need = buffer.len().checked_add(data.len()).ok_or(BACKLOG)?;
+            let room = room_for(need)?.max(buffer.capacity());
+            let more = room - buffer.capacity();
+            self.admit(more, false)?;
+            if let Some((StreamEntry::Piece { data: buffer, .. }, charge)) =
+                self.pending.get_mut(&seq)
+            {
+                buffer.reserve_exact(room - buffer.len());
+                buffer.extend_from_slice(data);
+                *charge += more;
+            }
+            return Ok(None);
+        }
+        let room = room_for(data.len())?;
+        let charge = STREAM_ENTRY_COST + room;
+        self.admit(charge, true)?;
+        let mut buffer = Vec::with_capacity(room);
+        buffer.extend_from_slice(data);
+        let entry = StreamEntry::Piece {
+            id,
+            data: buffer,
+            terminal: None,
+        };
+        Ok(Some(self.insert(link, Some(key), entry, charge)))
+    }
+
+    /// A piece's `end` or `abort`: it closes its open entry, or comes alone.
+    fn terminal(
+        &mut self,
+        link: &Arc<Link>,
+        id: u64,
+        frame: fc_protocol::frame::Frame,
+    ) -> Result<Option<StreamMark>, &'static str> {
+        let key = StreamKey::Piece(id);
+        let size = frame.payload.capacity();
+        if let Some(seq) = self.open.get(&key).copied() {
+            self.admit(size, false)?;
+            self.open.remove(&key);
+            if let Some((StreamEntry::Piece { terminal, .. }, charge)) = self.pending.get_mut(&seq)
+            {
+                *terminal = Some(frame);
+                *charge += size;
+            }
+            return Ok(None);
+        }
+        let charge = STREAM_ENTRY_COST + size;
+        self.admit(charge, true)?;
+        let entry = StreamEntry::Piece {
+            id,
+            data: Vec::new(),
+            terminal: Some(frame),
+        };
+        Ok(Some(self.insert(link, None, entry, charge)))
+    }
+
+    /// Main's credit for a body: summed into its open entry, or a new one.
+    fn credit(
+        &mut self,
+        link: &Arc<Link>,
+        id: u64,
+        bytes: u32,
+    ) -> Result<Option<StreamMark>, &'static str> {
+        let key = StreamKey::Body(id);
+        if let Some(seq) = self.open.get(&key).copied() {
+            if let Some((StreamEntry::Credit { bytes: sum, .. }, _)) = self.pending.get_mut(&seq) {
+                *sum = sum.saturating_add(u64::from(bytes));
+            }
+            return Ok(None);
+        }
+        self.admit(STREAM_ENTRY_COST, true)?;
+        let entry = StreamEntry::Credit {
+            id,
+            bytes: u64::from(bytes),
+        };
+        Ok(Some(self.insert(link, Some(key), entry, STREAM_ENTRY_COST)))
+    }
+
+    /// Entry `seq`, out of the backlog: its stream's next frame starts a
+    /// new one.
+    fn take(&mut self, seq: u64) -> Option<(StreamEntry, usize)> {
+        let (entry, charge) = self.pending.remove(&seq)?;
+        let key = match &entry {
+            StreamEntry::Piece { id, .. } => StreamKey::Piece(*id),
+            StreamEntry::Credit { id, .. } => StreamKey::Body(*id),
+        };
+        if self.open.get(&key) == Some(&seq) {
+            self.open.remove(&key);
+        }
+        Some((entry, charge))
+    }
+}
+
+/// An entry's mark, on its way to the dweb thread with the whole messages.
+/// Dropped untaken (the thread gone), it frees its entry.
+pub struct StreamMark {
+    link: Arc<Link>,
+    seq: u64,
+}
+
+impl StreamMark {
+    /// The dweb thread takes the entry. Its charge stays until the
+    /// [`Taken`] is dropped, once the thread has handled it.
+    pub fn take(self) -> Option<Taken> {
+        let (entry, charge) = self.link.stream_backlog.lock().ok()?.take(self.seq)?;
+        Some(Taken {
+            link: Arc::clone(&self.link),
+            entry,
+            charge,
+        })
+    }
+}
+
+impl Drop for StreamMark {
     fn drop(&mut self) {
-        if let Ok(mut held) = self.link.stream_backlog.lock() {
-            held.bytes = held.bytes.saturating_sub(self.len);
-            held.frames = held.frames.saturating_sub(1);
+        if let Ok(mut backlog) = self.link.stream_backlog.lock()
+            && let Some((_, charge)) = backlog.take(self.seq)
+        {
+            backlog.release(charge);
         }
     }
 }
 
-/// What a stream frame counts against [`MAX_QUEUED_STREAM_BYTES`], data or
-/// not: its payload as allocated, ID included, and [`STREAM_FRAME_COST`]
-/// for the rest of what it holds while queued.
-fn stream_charge(frame: &fc_protocol::frame::Frame) -> usize {
-    frame.payload.capacity().saturating_add(STREAM_FRAME_COST)
+/// An entry the dweb thread has taken, still charged while it handles it.
+pub struct Taken {
+    link: Arc<Link>,
+    entry: StreamEntry,
+    charge: usize,
+}
+
+impl Taken {
+    pub fn entry(&self) -> &StreamEntry {
+        &self.entry
+    }
+}
+
+impl Drop for Taken {
+    fn drop(&mut self) {
+        if let Ok(mut backlog) = self.link.stream_backlog.lock() {
+            backlog.release(self.charge);
+        }
+    }
 }
 
 /// Whether `kind` is one of the four stream frames' (design 0007).
@@ -866,11 +1148,14 @@ impl Reader {
             let _ = self.events.send(Event::ProtocolError("unknown_frame_kind"));
             return false;
         }
-        let Some(hold) = self.link.hold_stream(stream_charge(&frame)) else {
-            let _ = self.events.send(Event::ProtocolError("stream_backlog"));
-            return false;
-        };
-        self.events.send(Event::Stream(frame, hold)).is_ok()
+        match self.link.push_stream(frame) {
+            Ok(None) => true,
+            Ok(Some(mark)) => self.events.send(Event::Stream(mark)).is_ok(),
+            Err(category) => {
+                let _ = self.events.send(Event::ProtocolError(category));
+                false
+            }
+        }
     }
 }
 
@@ -1465,195 +1750,313 @@ mod tests {
             Ok(Event::ProtocolError("unknown_frame_kind"))
         ));
 
-        let link = Link::new();
-        link.enable_streams();
-        let (mut reader, received) = reader(Arc::clone(&link), &[]);
+        let (link, mut reader, received) = streaming();
         let mut input = Vec::new();
         input.extend_from_slice(&frame(br#"{"type":"cancel","id":1}"#).unwrap());
         input.extend_from_slice(&stream(KIND_DATA, 3, &[7; 100]));
         assert!(reader.feed(&mut input));
         assert!(matches!(received.try_recv(), Ok(Event::Frame(..))));
-        let Ok(Event::Stream(data, hold)) = received.try_recv() else {
-            panic!("the data frame, after the message");
+        let Ok(Event::Stream(mark)) = received.try_recv() else {
+            panic!("the data's mark, after the message");
         };
-        assert_eq!((data.kind, data.payload.len()), (KIND_DATA, 108));
-        // It counts until the dweb thread has handled it.
-        assert_eq!(link.stream_backlog(), (108 + STREAM_FRAME_COST, 1));
-        drop(hold);
+        // Its entry counts until the dweb thread has handled it.
+        assert_eq!(link.stream_backlog(), (128 + STREAM_ENTRY_COST, 1));
+        let taken = mark.take().unwrap();
+        assert!(matches!(
+            taken.entry(),
+            StreamEntry::Piece { id: 3, data, terminal: None } if data == &[7u8; 100]
+        ));
+        assert_eq!(link.stream_backlog(), (128 + STREAM_ENTRY_COST, 1));
+        drop(taken);
         assert_eq!(link.stream_backlog(), (0, 0));
     }
 
-    /// What a queued stream frame holds, counted from the event itself: the
-    /// event's slot in the loop's channel and std's state word beside it,
-    /// its payload as allocated, and the allocator's slack. The same frame
-    /// in the dweb thread's mailbox holds less (`Mail` is the smaller).
-    fn in_memory(frame: &fc_protocol::frame::Frame) -> usize {
-        std::mem::size_of::<Event>()
-            + std::mem::size_of::<usize>()
-            + frame.payload.capacity()
-            + STREAM_ALLOC_SLACK
-    }
-
-    /// Stream frames the reader queued, each with its place under the cap.
-    type Queued = Vec<(fc_protocol::frame::Frame, StreamHold)>;
-
-    /// Feeds `frames` one at a time, none of them handled, until the reader
-    /// refuses one: the frames it queued, and the error it ended with.
-    fn flood(frames: impl Iterator<Item = Vec<u8>>) -> (Arc<Link>, Queued, &'static str) {
+    /// A reader past a protocol-2 hello.
+    fn streaming() -> (Arc<Link>, Reader, Receiver<Event>) {
         let link = Link::new();
         link.enable_streams();
-        let (mut reader, received) = reader(Arc::clone(&link), &[]);
-        let mut queued = Vec::new();
+        let (reader, received) = reader(Arc::clone(&link), &[]);
+        (link, reader, received)
+    }
+
+    /// The marks the reader sent, and the protocol error it ended with.
+    fn drain(received: &Receiver<Event>) -> (Vec<StreamMark>, Option<&'static str>) {
+        let mut marks = Vec::new();
+        while let Ok(event) = received.try_recv() {
+            match event {
+                Event::Stream(mark) => marks.push(mark),
+                Event::ProtocolError(category) => return (marks, Some(category)),
+                _ => panic!("only stream frames are fed"),
+            }
+        }
+        (marks, None)
+    }
+
+    /// Feeds `frames` one at a time, none of them handled, until the reader
+    /// refuses one or they run out: the marks, and the error.
+    fn flood(
+        frames: impl Iterator<Item = Vec<u8>>,
+    ) -> (Arc<Link>, Vec<StreamMark>, Option<&'static str>) {
+        let (link, mut reader, received) = streaming();
+        let mut all = Vec::new();
         for mut frame in frames {
             let fed = reader.feed(&mut frame);
-            while let Ok(event) = received.try_recv() {
-                match event {
-                    Event::Stream(frame, hold) => queued.push((frame, hold)),
-                    Event::ProtocolError(category) => return (link, queued, category),
-                    _ => panic!("only stream frames are fed"),
-                }
+            let (marks, error) = drain(&received);
+            all.extend(marks);
+            if !fed {
+                return (link, all, error);
             }
-            assert!(fed, "refused without an error");
         }
-        panic!("the reader took every frame");
+        (link, all, None)
     }
 
-    /// The cap is memory: every frame counts its payload and its place in
-    /// the queues. Full data frames alone stop at 258, credit's 256 and
-    /// the room its 128 terminals would have had. Before, 272 were taken
-    /// (data only, under 16 MiB and a 1 MiB frame's slack).
-    #[test]
-    fn stream_frames_past_the_cap_end_the_connection() {
-        use fc_protocol::frame::KIND_DATA;
-        use fc_protocol::stream::{ID_LEN, MAX_DATA};
-        let full = stream(KIND_DATA, 3, &[0; MAX_DATA]);
-        let (link, mut queued, error) = flood(std::iter::repeat_n(full, 259));
-        assert_eq!(error, "stream_backlog");
-        let charge = ID_LEN + MAX_DATA + STREAM_FRAME_COST;
-        assert_eq!(queued.len(), MAX_QUEUED_STREAM_BYTES / charge);
-        assert_eq!(queued.len(), 258);
-        assert_eq!(link.stream_backlog(), (258 * charge, 258));
-        let held: usize = queued.iter().map(|(frame, _)| in_memory(frame)).sum();
-        assert!(held <= MAX_QUEUED_STREAM_BYTES, "{held}");
-        // Handled frames give their room back.
-        queued.clear();
-        assert_eq!(link.stream_backlog(), (0, 0));
+    /// The charge is within the cap and the entry bound, and what the
+    /// waiting entries hold, counted from them, within the charge.
+    fn within_bounds(link: &Link) {
+        let (charged, entries) = link.stream_backlog();
+        assert!(charged <= MAX_QUEUED_STREAM_BYTES, "{charged}");
+        assert!(entries <= MAX_QUEUED_STREAM_ENTRIES, "{entries}");
+        let held = link.stream_memory();
+        assert!(held <= charged, "{held} > {charged}");
     }
 
-    /// The most main can send within credit, none of it handled: each of
-    /// the 128 incoming streams' window as two full data frames, then its
-    /// terminal at its largest, an abort with all of its 1 KiB of JSON. It
-    /// fits exactly; one frame more, or one byte more, is `stream_backlog`.
-    #[test]
-    fn the_most_main_can_send_within_credit_fits_exactly() {
-        use crate::dweb::engine::STREAMS;
-        use fc_protocol::frame::{KIND_ABORT, KIND_DATA, KIND_END};
-        use fc_protocol::stream::{Abort, MAX_ABORT, MAX_DATA, WINDOW};
-        let head = br#"{"code":"body_stream_error","message":""#;
-        let mut abort = head.to_vec();
-        abort.resize(MAX_ABORT - 2, b'x');
+    /// A valid abort of exactly `len` bytes of JSON (41 at least).
+    fn abort_json(len: usize) -> Vec<u8> {
+        let mut abort = br#"{"code":"body_stream_error","message":""#.to_vec();
+        assert!(len >= abort.len() + 2);
+        abort.resize(len - 2, b'x');
         abort.extend_from_slice(br#""}"#);
-        assert_eq!(abort.len(), MAX_ABORT);
-        assert!(Abort::from_json(&abort).is_ok());
-        let most = |last: &[u8]| {
-            let mut frames = Vec::new();
-            for n in 0..STREAMS as u64 {
-                let id = 2 * n + 1;
-                for _ in 0..WINDOW / MAX_DATA {
-                    frames.push(stream(KIND_DATA, id, &[0; MAX_DATA]));
-                }
-                let terminal = if n == 0 { last } else { &abort[..] };
-                frames.push(stream(KIND_ABORT, id, terminal));
-            }
-            frames
-        };
-        let feed = |frames: Vec<Vec<u8>>| {
-            let link = Link::new();
-            link.enable_streams();
-            let (mut reader, received) = reader(Arc::clone(&link), &[]);
-            let mut queued = Vec::new();
-            let mut taken = true;
-            for mut frame in frames {
-                taken = reader.feed(&mut frame);
-                if !taken {
-                    break;
-                }
-                let Ok(Event::Stream(frame, hold)) = received.try_recv() else {
-                    panic!("a stream frame");
-                };
-                queued.push((frame, hold));
-            }
-            (link, queued, taken, received)
-        };
+        assert!(fc_protocol::stream::Abort::from_json(&abort).is_ok());
+        abort
+    }
 
-        let (link, queued, taken, received) = feed(most(&abort));
-        assert!(taken);
-        let count = STREAMS * (WINDOW / MAX_DATA + 1);
-        assert_eq!(link.stream_backlog(), (MAX_QUEUED_STREAM_BYTES, count));
-        let held: usize = queued.iter().map(|(frame, _)| in_memory(frame)).sum();
-        assert!(held <= MAX_QUEUED_STREAM_BYTES, "{held}");
-        assert!(received.try_recv().is_err());
-        // One frame more: another stream's `end`.
-        let mut more = most(&abort);
-        more.push(stream(KIND_END, 2 * STREAMS as u64 + 1, &[]));
-        let (link, _queued, taken, received) = feed(more);
-        assert!(!taken);
-        assert_eq!(link.stream_backlog(), (MAX_QUEUED_STREAM_BYTES, count));
-        assert!(matches!(
-            received.try_recv(),
-            Ok(Event::ProtocolError("stream_backlog"))
-        ));
-        // One byte more: the first stream ends with an `end` instead, and
-        // a data frame takes the 1,024 bytes that frees, then one past it.
-        for (extra, fits) in [
-            (1024 - 8 - STREAM_FRAME_COST, true),
-            (1024 - 7 - STREAM_FRAME_COST, false),
-        ] {
-            let mut frames = most(&[]);
-            frames[2] = stream(KIND_END, 1, &[]);
-            frames.push(stream(KIND_DATA, 1, &vec![0; extra]));
-            let (link, _queued, taken, received) = feed(frames);
-            assert_eq!(taken, fits, "{extra}");
-            if fits {
-                assert_eq!(link.stream_backlog(), (MAX_QUEUED_STREAM_BYTES, count + 1));
-            } else {
-                assert!(matches!(
-                    received.try_recv(),
-                    Ok(Event::ProtocolError("stream_backlog"))
+    /// Main may send a window as 131,072 one-byte data frames, within
+    /// credit, while the dweb thread is held: they join one entry, in
+    /// order, with the terminal after them, and a message read before the
+    /// first is still ahead of it. A frame after the terminal, or after the
+    /// thread has taken the entry, starts another, which comes after.
+    #[test]
+    fn a_window_of_one_byte_frames_is_one_entry_in_order() {
+        use fc_protocol::frame::{KIND_DATA, KIND_END};
+        use fc_protocol::stream::{ID_LEN, WINDOW};
+        let (link, mut reader, received) = streaming();
+        let mut input = Vec::new();
+        input.extend_from_slice(&frame(br#"{"type":"cancel","id":1}"#).unwrap());
+        for i in 0..WINDOW {
+            input.extend_from_slice(&stream(KIND_DATA, 3, &[(i % 251) as u8]));
+        }
+        input.extend_from_slice(&stream(KIND_END, 3, &[]));
+        assert!(reader.feed(&mut input));
+        assert!(matches!(received.try_recv(), Ok(Event::Frame(..))));
+        let (mut marks, error) = drain(&received);
+        assert_eq!((marks.len(), error), (1, None));
+        let entry = WINDOW + ID_LEN + STREAM_ENTRY_COST;
+        assert_eq!(link.stream_backlog(), (entry, 1));
+        within_bounds(&link);
+
+        assert!(reader.feed(&mut stream(KIND_DATA, 3, &[1])));
+        marks.extend(drain(&received).0);
+        assert_eq!(link.stream_backlog(), (entry + 1 + STREAM_ENTRY_COST, 2));
+        let mut marks = marks.into_iter();
+        let taken = marks.next().unwrap().take().unwrap();
+        let StreamEntry::Piece {
+            id: 3,
+            data,
+            terminal: Some(end),
+        } = taken.entry()
+        else {
+            panic!("the window and its end");
+        };
+        assert!(data.iter().enumerate().all(|(i, b)| *b == (i % 251) as u8));
+        assert_eq!(
+            (data.len(), data.capacity(), end.kind),
+            (WINDOW, WINDOW, KIND_END)
+        );
+        let after = marks.next().unwrap().take().unwrap();
+        assert!(
+            matches!(after.entry(), StreamEntry::Piece { id: 3, data, terminal: None } if data == &[1u8])
+        );
+        drop((taken, after));
+
+        assert!(reader.feed(&mut stream(KIND_DATA, 5, &[1; 10])));
+        let (marks, _) = drain(&received);
+        let taken = marks.into_iter().next().unwrap().take().unwrap();
+        assert!(reader.feed(&mut stream(KIND_DATA, 5, &[2; 10])));
+        assert_eq!(drain(&received).0.len(), 1);
+        drop(taken);
+    }
+
+    /// A burst of one-byte credits for every body main can credit, 512
+    /// each, while the dweb thread is held: one entry per body, summed. A
+    /// mark dropped untaken (the thread gone) frees its entry.
+    #[test]
+    fn a_burst_of_tiny_credits_is_one_entry_per_body() {
+        use fc_protocol::frame::KIND_STREAM_CREDIT;
+        let (link, mut reader, received) = streaming();
+        let mut input = Vec::new();
+        for _ in 0..512 {
+            for body in 0..MAIN_FETCHES as u64 {
+                input.extend_from_slice(&stream(
+                    KIND_STREAM_CREDIT,
+                    2 * body + 2,
+                    &1u32.to_be_bytes(),
                 ));
             }
         }
+        assert!(reader.feed(&mut input));
+        let (marks, error) = drain(&received);
+        assert_eq!((marks.len(), error), (MAIN_FETCHES, None));
+        let all = MAIN_FETCHES * STREAM_ENTRY_COST;
+        assert_eq!(link.stream_backlog(), (all, MAIN_FETCHES));
+        within_bounds(&link);
+        let mut marks = marks.into_iter();
+        for body in 0..MAIN_FETCHES as u64 - 1 {
+            let taken = marks.next().unwrap().take().unwrap();
+            assert!(matches!(
+                taken.entry(),
+                StreamEntry::Credit { id, bytes: 512 } if *id == 2 * body + 2
+            ));
+        }
+        assert_eq!(link.stream_backlog(), (STREAM_ENTRY_COST, 1));
+        drop(marks);
+        assert_eq!(link.stream_backlog(), (0, 0));
     }
 
-    /// A flood of the smallest stream frames, none of them handled (an
-    /// `end` is 8 bytes, a credit 12): it stops at the frame bound, long
-    /// before the bytes, and what the queued events hold stays within the
-    /// cap. Before the fix 2,228,224 `end`s were taken, about 425 MiB of
-    /// events.
+    /// The most a peer within credit can make the backlog hold, in frames
+    /// of many sizes: every incoming stream's window, in 64 KiB, 4 KiB,
+    /// 1,000- or 333-byte frames, each ending with a 1 KiB abort; one
+    /// stream's entry taken by the thread while its next one gathers; and
+    /// every body's credit. All of it is taken, within the derived bounds.
+    #[test]
+    fn the_most_main_can_send_within_credit_fits() {
+        use fc_protocol::frame::{KIND_ABORT, KIND_DATA, KIND_STREAM_CREDIT};
+        use fc_protocol::stream::{ID_LEN, MAX_ABORT, MAX_DATA, WINDOW};
+        let abort = abort_json(MAX_ABORT);
+        let (link, mut reader, received) = streaming();
+        let mut input = stream(KIND_DATA, 1, &[0; MAX_DATA]);
+        input.extend_from_slice(&stream(KIND_DATA, 1, &[0; 1]));
+        assert!(reader.feed(&mut input));
+        let taken = drain(&received).0.remove(0).take().unwrap();
+
+        let mut input = stream(KIND_DATA, 1, &[0; MAX_DATA - 1]);
+        input.extend_from_slice(&stream(KIND_ABORT, 1, &abort));
+        for n in 1..STREAMS as u64 {
+            let size = [MAX_DATA, 4096, 1000, 333][n as usize % 4];
+            let mut left = WINDOW;
+            while left > 0 {
+                let len = size.min(left);
+                input.extend_from_slice(&stream(KIND_DATA, 2 * n + 1, &vec![0; len]));
+                left -= len;
+            }
+            input.extend_from_slice(&stream(KIND_ABORT, 2 * n + 1, &abort));
+        }
+        for _ in 0..3 {
+            for body in 0..MAIN_FETCHES as u64 {
+                input.extend_from_slice(&stream(
+                    KIND_STREAM_CREDIT,
+                    2 * body + 2,
+                    &7u32.to_be_bytes(),
+                ));
+            }
+        }
+        assert!(reader.feed(&mut input));
+        let (marks, error) = drain(&received);
+        assert_eq!((marks.len(), error), (STREAMS + MAIN_FETCHES, None));
+        let terminal = ID_LEN + MAX_ABORT;
+        let expected = (WINDOW + STREAM_ENTRY_COST)
+            + (MAX_DATA + terminal + STREAM_ENTRY_COST)
+            + (STREAMS - 1) * (WINDOW + terminal + STREAM_ENTRY_COST)
+            + MAIN_FETCHES * STREAM_ENTRY_COST;
+        assert_eq!(
+            link.stream_backlog(),
+            (expected, STREAMS + 1 + MAIN_FETCHES)
+        );
+        assert!(expected <= MAX_QUEUED_STREAM_BYTES);
+        within_bounds(&link);
+        drop((taken, marks));
+        assert_eq!(link.stream_backlog(), (0, 0));
+    }
+
+    /// Past the cap the connection ends. One stream's full data frames join
+    /// one entry: 256 fit (16 MiB), and the 257th would grow its buffer
+    /// past the cap. Each on its own stream, they stop at the cap's share
+    /// of entries. Before, 272 frames were taken (data only, under 16 MiB
+    /// and a 1 MiB frame's slack).
+    #[test]
+    fn stream_frames_past_the_cap_end_the_connection() {
+        use fc_protocol::frame::KIND_DATA;
+        use fc_protocol::stream::MAX_DATA;
+        let full = stream(KIND_DATA, 3, &[0; MAX_DATA]);
+        let (link, marks, error) = flood(std::iter::repeat_n(full, 257));
+        assert_eq!((marks.len(), error), (1, Some("stream_backlog")));
+        assert_eq!(
+            link.stream_backlog(),
+            (16 * 1024 * 1024 + STREAM_ENTRY_COST, 1)
+        );
+        within_bounds(&link);
+        drop(marks);
+        assert_eq!(link.stream_backlog(), (0, 0));
+
+        let each = (1..).map(|n: u64| stream(KIND_DATA, 2 * n + 1, &[0; MAX_DATA]));
+        let (link, marks, error) = flood(each);
+        let fits = MAX_QUEUED_STREAM_BYTES / (MAX_DATA + STREAM_ENTRY_COST);
+        assert_eq!(
+            (marks.len(), error, fits),
+            (fits, Some("stream_backlog"), 263)
+        );
+        within_bounds(&link);
+    }
+
+    /// A flood of the smallest frames, none of them handled. Terminals each
+    /// make an entry (a terminal closes its stream's), and so do credits
+    /// for distinct bodies: the cap stops them, below the entry bound, with
+    /// what they hold within it. Credits for one body only sum. Before the
+    /// fix, 2,228,224 `end`s were taken, about 425 MiB of events.
     #[test]
     fn a_flood_of_small_stream_frames_stays_within_the_cap() {
         use fc_protocol::frame::{KIND_ABORT, KIND_END, KIND_STREAM_CREDIT};
-        let abort = br#"{"code":"stalled"}"#;
-        for (kind, rest) in [
-            (KIND_END, &[][..]),
-            (KIND_STREAM_CREDIT, &[0, 0, 0, 1][..]),
-            (KIND_ABORT, &abort[..]),
+        use fc_protocol::stream::ID_LEN;
+        let abort = abort_json(48);
+        let credit = 1u32.to_be_bytes();
+        for (kind, rest, one) in [
+            (KIND_END, &[][..], true),
+            (KIND_END, &[][..], false),
+            (KIND_STREAM_CREDIT, &credit[..], false),
+            (KIND_ABORT, &abort[..], false),
         ] {
-            let frames = (0u64..).map(|id| stream(kind, 2 * id + 1, rest));
-            let (link, queued, error) = flood(frames);
-            assert_eq!(error, "stream_backlog");
-            assert_eq!(queued.len(), MAX_QUEUED_STREAM_FRAMES);
-            let charged: usize = queued.iter().map(|(frame, _)| stream_charge(frame)).sum();
-            assert_eq!(link.stream_backlog(), (charged, MAX_QUEUED_STREAM_FRAMES));
-            let held: usize = queued.iter().map(|(frame, _)| in_memory(frame)).sum();
-            assert!(held <= charged && charged <= MAX_QUEUED_STREAM_BYTES);
-            assert!(held < 5 << 20, "{held}");
+            let ids = (0u64..).map(|n| if one { 1 } else { 2 * n + 1 });
+            let (link, marks, error) = flood(ids.map(|id| stream(kind, id, rest)));
+            assert_eq!(error, Some("stream_backlog"));
+            let charge = match kind {
+                KIND_STREAM_CREDIT => STREAM_ENTRY_COST,
+                _ => STREAM_ENTRY_COST + ID_LEN + rest.len(),
+            };
+            assert_eq!(marks.len(), MAX_QUEUED_STREAM_BYTES / charge);
+            assert!(marks.len() < MAX_QUEUED_STREAM_ENTRIES);
+            within_bounds(&link);
         }
+        let mut input = Vec::new();
+        for _ in 0..100_000 {
+            input.extend_from_slice(&stream(KIND_STREAM_CREDIT, 2, &credit));
+        }
+        let (link, mut reader, received) = streaming();
+        assert!(reader.feed(&mut input));
+        let (marks, error) = drain(&received);
+        assert_eq!((marks.len(), error), (1, None));
+        assert_eq!(link.stream_backlog(), (STREAM_ENTRY_COST, 1));
+        let taken = marks.into_iter().next().unwrap().take().unwrap();
+        assert!(matches!(
+            taken.entry(),
+            StreamEntry::Credit {
+                id: 2,
+                bytes: 100_000
+            }
+        ));
     }
 
-    /// Any mix of stream frames, none of them handled: the reader refuses
-    /// exactly the first that would pass either bound, and what it queued
-    /// stays within the cap.
+    /// Any mix of stream frames over a few streams, none of them handled:
+    /// the reader ends the connection at the cap, and what the entries hold
+    /// stays within their charge, the charge within the cap.
     #[test]
     fn no_mix_of_stream_frames_holds_more_than_the_cap() {
         use fc_protocol::frame::{KIND_ABORT, KIND_DATA, KIND_END, KIND_STREAM_CREDIT};
@@ -1666,36 +2069,22 @@ mod tests {
                     .wrapping_add(1442695040888963407);
                 (state >> 33) as usize
             };
-            let mut sizes = Vec::new();
-            let frames = std::iter::from_fn(|| {
+            let frames = std::iter::from_fn(move || {
                 let pick = next();
-                let frame = match pick % 8 {
-                    0 => stream(KIND_END, 1, &[]),
-                    1 => stream(KIND_STREAM_CREDIT, 1, &[0, 0, 0, 1]),
-                    2 => stream(KIND_ABORT, 1, &vec![b' '; 1 + next() % MAX_ABORT]),
-                    3 | 4 => stream(KIND_DATA, 1, &vec![0; MAX_DATA]),
-                    5 => stream(KIND_DATA, 1, &vec![0; 1 + next() % 64]),
-                    _ => stream(KIND_DATA, 1, &vec![0; 1 + next() % MAX_DATA]),
-                };
-                sizes.push(frame.len() - 5);
-                Some(frame)
+                let id = 1 + 2 * (next() % 8) as u64;
+                Some(match pick % 8 {
+                    0 => stream(KIND_END, id, &[]),
+                    1 => stream(KIND_STREAM_CREDIT, id + 1, &[0, 0, 0, 1]),
+                    2 => stream(KIND_ABORT, id, &abort_json(48 + next() % (MAX_ABORT - 48))),
+                    3 | 4 => stream(KIND_DATA, id, &vec![0; MAX_DATA]),
+                    5 => stream(KIND_DATA, id, &vec![0; 1 + next() % 64]),
+                    _ => stream(KIND_DATA, id, &vec![0; 1 + next() % MAX_DATA]),
+                })
             });
-            let (link, queued, error) = flood(frames);
-            assert_eq!(error, "stream_backlog");
-            let charged: usize = queued.iter().map(|(frame, _)| stream_charge(frame)).sum();
-            assert_eq!(link.stream_backlog(), (charged, queued.len()));
-            let held: usize = queued.iter().map(|(frame, _)| in_memory(frame)).sum();
-            assert!(
-                held <= charged && charged <= MAX_QUEUED_STREAM_BYTES,
-                "seed {seed}"
-            );
-            // The refused frame was the first past a bound.
-            let refused = sizes[queued.len()] + STREAM_FRAME_COST;
-            assert!(
-                charged + refused > MAX_QUEUED_STREAM_BYTES
-                    || queued.len() == MAX_QUEUED_STREAM_FRAMES,
-                "seed {seed}"
-            );
+            let (link, marks, error) = flood(frames);
+            assert_eq!(error, Some("stream_backlog"), "seed {seed}");
+            assert_eq!(link.stream_backlog().1, marks.len(), "seed {seed}");
+            within_bounds(&link);
         }
     }
 
