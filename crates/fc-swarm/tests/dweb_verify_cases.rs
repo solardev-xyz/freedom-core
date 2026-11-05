@@ -381,7 +381,7 @@ fn manifest_lookups() {
                     Step::Need(r) if r.len() == 64 => break None,
                     Step::Need(r) => {
                         let bytes = join_node(chunks, &r.try_into().unwrap());
-                        step = lookup.node(&bytes);
+                        step = lookup.node(bytes);
                     }
                 }
             };
