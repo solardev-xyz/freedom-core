@@ -318,12 +318,16 @@ pub fn run(options: &Options) -> Exit {
         return Exit::Internal;
     }
 
+    // The dweb thread's share of the writer, for a protocol-2 hello. The
+    // writer's own handle goes to the outbox: once the producers' handles
+    // are gone, the writer ends.
+    let dweb_out = writer.queue.clone();
     let mut core = Core {
         snapshot_ready: false,
         node_recovery: None,
         pending_hello: None,
         outbox: Outbox::new(
-            writer.queue.clone(),
+            writer.queue,
             allowance,
             Arc::clone(&link),
             crate::testhooks::stall(STALL),
@@ -346,7 +350,7 @@ pub fn run(options: &Options) -> Exit {
         chain,
         dweb: None,
         dweb_start: Some(DwebStart {
-            out: writer.queue.clone(),
+            out: dweb_out,
             events: events_tx,
         }),
         #[cfg(feature = "testhooks")]

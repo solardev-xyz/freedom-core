@@ -129,13 +129,14 @@ fn handshake_rules() {
     core.send(&json!({ "type": "cancel", "id": 1 }));
     assert_eq!(core.exit_code(Duration::from_secs(5)), 76);
 
-    // A protocol mismatch is answered, then the core exits.
+    // A protocol mismatch is answered, then the core exits. (Protocol 2
+    // is the streams' version, design 0009.)
     let (_root, data, locks) = dirs();
     let mut core = spawn("serve", &data, &locks, &[]);
     let reply = core.call_shell(
         1,
         "core.hello",
-        json!({ "protocol": 2, "shell_version": "t", "auto_lock_ms": 0 }),
+        json!({ "protocol": 3, "shell_version": "t", "auto_lock_ms": 0 }),
     );
     assert_eq!(reply["error"]["code"], "protocol_mismatch");
     assert_eq!(core.exit_code(Duration::from_secs(5)), 76);

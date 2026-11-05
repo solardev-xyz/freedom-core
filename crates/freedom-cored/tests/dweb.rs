@@ -901,20 +901,31 @@ mod verify {
         Hold,
     }
 
-    /// The honest nodes of dweb-verify.json, and the answers a test
-    /// changes, by path prefix. Its gateway serves raw blocks only.
-    struct World {
+    /// The honest nodes of dweb-verify.json: Ant's chunks and files, the
+    /// gateway's blocks. Read once, for every test.
+    struct Honest {
         chunks: HashMap<String, Vec<u8>>,
         files: HashMap<String, Vec<u8>>,
         blocks: HashMap<String, Vec<u8>>,
+    }
+
+    fn honest() -> &'static Honest {
+        static HONEST: std::sync::OnceLock<Honest> = std::sync::OnceLock::new();
+        HONEST.get_or_init(Honest::read)
+    }
+
+    /// The honest nodes, and the answers a test changes, by path prefix.
+    /// Its gateway serves raw blocks only.
+    struct World {
+        honest: &'static Honest,
         changes: Vec<(String, Answer)>,
         /// Streams whose path starts so are cut after that many bytes, with
         /// that abort code.
         cuts: Vec<(String, usize, &'static str)>,
     }
 
-    impl World {
-        fn new() -> Self {
+    impl Honest {
+        fn read() -> Self {
             let d = vectors("dweb-verify.json");
             let mut chunks = HashMap::new();
             for (a, w) in d["swarm"]["chunks"].as_object().unwrap() {
@@ -959,6 +970,14 @@ mod verify {
                 chunks,
                 files,
                 blocks,
+            }
+        }
+    }
+
+    impl World {
+        fn new() -> Self {
+            Self {
+                honest: honest(),
                 changes: Vec::new(),
                 cuts: Vec::new(),
             }
@@ -1005,13 +1024,13 @@ mod verify {
             }
             let not_found = || Answer::Whole(404, vec![], b"{}".to_vec());
             if let Some(a) = path.strip_prefix("/chunks/") {
-                return match self.chunks.get(a) {
+                return match self.honest.chunks.get(a) {
                     Some(w) => Answer::Whole(200, vec![], w.clone()),
                     None => not_found(),
                 };
             }
             if let Some(r) = path.strip_prefix("/bytes/") {
-                let Some(file) = self.files.get(r) else {
+                let Some(file) = self.honest.files.get(r) else {
                     return Self::stream(404, vec![], vec![]);
                 };
                 let range = headers.iter().find(|(n, _)| n == "range").unwrap();
@@ -1036,7 +1055,7 @@ mod verify {
                 .split('?')
                 .next()
                 .unwrap();
-            match self.blocks.get(cid) {
+            match self.honest.blocks.get(cid) {
                 Some(b) => Self::stream(
                     200,
                     vec![("content-type".into(), "application/vnd.ipld.raw".into())],
