@@ -892,9 +892,10 @@ As 0006's 4.7 did, the tests land before the code. Every case pins its failure s
 | pieces in flight, per request; outstanding `shell.dweb_get`, all requests | 8; 256 | the machine waits for one to end; the piece waits in the dweb thread's FIFO |
 | incoming streams with credit, all requests | 128 | the request waits for one to end |
 | a whole piece; a raw block | 64 KiB; 2 MiB | `failed: "too_large"`, a verification failure |
-| a piece reply's headers | 8, each ≤ 8 KiB | a malformed reply: the piece fails, logged as a fault in main |
+| a piece reply's headers | 8, each ≤ 8 KiB | a malformed reply, past these or otherwise not one of the three forms: a protocol error (`dweb_get_reply`), and the connection ends (amendment 4); a well-formed error reply fails the piece as `error` |
 | stream window, each direction | 128 KiB; data frames ≤ 64 KiB | the sender waits for credit |
 | node bytes in flight to the core | 128 streams × 128 KiB = 16 MiB | not reachable: credit |
+| stream frames the reader holds for the dweb thread | 16 MiB and one 64 KiB data frame, as memory: each frame its payload and 256 bytes for its place in the queues; at most 16,384 frames | a protocol error (`stream_backlog`): main sent past its credit, or kept it in flight in small frames, or flooded other frames, while the dweb thread was behind |
 | rings in main | one per admitted fetch's body, verified or from 0007's service, kept until drained or cancelled: 256 × 128 KiB = 32 MiB | not reachable: fetch admission (256 active, 512 waiting, then 503) |
 | the dweb writer | 8 MiB of unwritten data | the machines wait for credit |
 | memory, per request | its grant, 2 MiB for Swarm and 8 MiB for IPFS, granted whole from the dweb thread's grants when the request starts: its budget, reserved before allocation (its windows, leaves and blocks in flight, the walk's parsed nodes and what it keeps of them, its queue of blocks to fetch, a directory's entries and its listing's page, each CAR section's hash job, the path's strings, its body until main takes it), and a fixed allowance, 64 KiB for Swarm and 128 KiB for IPFS ([What a grant covers](#what-a-grant-covers)) | fewer pieces in flight; a CAR gives way to raw blocks; a walk that can't fit at all is `unverifiable`, with the memory text ([Failures](#failures)) |

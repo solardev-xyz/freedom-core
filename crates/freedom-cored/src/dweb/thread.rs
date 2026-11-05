@@ -114,6 +114,9 @@ pub enum In {
 /// until it is handled.
 type Mail = (In, Option<Credit>);
 
+// A stream frame's slot here is within what the reader charges it.
+const _: () = assert!(transport::stream_slot_fits(std::mem::size_of::<Mail>()));
+
 /// The event loop's side of the dweb thread. The wake-ups hold only weak
 /// references, so dropping this ends the thread.
 pub struct Handle {

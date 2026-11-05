@@ -136,6 +136,9 @@ pub enum Event {
     Stream(Frame, transport::StreamHold),
 }
 
+// A stream frame's slot here is within what the reader charges it.
+const _: () = assert!(transport::stream_slot_fits(std::mem::size_of::<Event>()));
+
 /// The methods `core.hello`'s capabilities name: every method this build
 /// implements but the `chain.*` methods (design 0006's `chain.html`
 /// included), which design 0005 doesn't add to them (it adds features

@@ -23,9 +23,11 @@
 //!     always was. They go on in the order read, with the whole messages,
 //!     to the dweb thread, outside the frame credits: the reader never
 //!     waits on dweb data. Main's credit bounds the data in flight at
-//!     16 MiB, so the reader holds a hard cap instead ([`StreamHold`]):
-//!     past [`MAX_QUEUED_STREAM_BYTES`] not yet handled, main has sent past
-//!     its credit, and the connection ends (`stream_backlog`).
+//!     16 MiB, not the frames that carry it, so the reader holds a hard
+//!     memory cap instead ([`StreamHold`]): each frame counts its payload
+//!     and its place in the queues ([`STREAM_FRAME_COST`]); past
+//!     [`MAX_QUEUED_STREAM_BYTES`] or [`MAX_QUEUED_STREAM_FRAMES`] not yet
+//!     handled, the connection ends (`stream_backlog`).
 //! - **Writer thread:** one serialized writer for stdout. Each producer has
 //!   its own [`Allowance`] of queued frames, so naming traffic can't take
 //!   the vault loop's room (0001's reserved control capacity).
@@ -119,11 +121,35 @@ pub const MAX_QUEUED_CHAIN_CONTROL_BYTES: usize = 4 * 1024 * 1024;
 /// response, so a steady stream of small frames can't stall it.
 const MAX_WHOLE_BETWEEN_FRAGMENTS: usize = 64;
 /// Stream frames read and not yet handled by the dweb thread (design 0009,
-/// Streams in the core): the 16 MiB of data main's credit allows in flight
-/// (128 streams, each a 128 KiB window), and one frame beside it for the
-/// terminals and credit frames. A data frame counts its data; any other
-/// stream frame its payload.
-pub const MAX_QUEUED_STREAM_BYTES: usize = 16 * 1024 * 1024 + MAX_PAYLOAD;
+/// Streams in the core), as the memory they hold: the 16 MiB of data main's
+/// credit allows in flight (128 streams, each a 128 KiB window), and one
+/// data frame beside it. Every frame counts its whole cost
+/// ([`stream_charge`]), data or not, so no mix of frames holds more. 255
+/// full data frames fit, a little under credit's 16 MiB, which only all
+/// 128 streams' windows full at once would reach.
+pub const MAX_QUEUED_STREAM_BYTES: usize = 16 * 1024 * 1024 + fc_protocol::stream::MAX_DATA;
+/// The most stream frames read and not yet handled: credit's 16 MiB in
+/// 1 KiB frames. Frames that average more meet the byte cap first; a flood
+/// of the smallest (an `end`'s 8 bytes) stops here, at about 4.3 MB.
+pub const MAX_QUEUED_STREAM_FRAMES: usize = 16 * 1024;
+/// What a queued stream frame holds beyond its payload's bytes: its slot in
+/// the event loop's channel or the dweb thread's mailbox, whichever it is
+/// in (the message and std's state word), and the allocator's header and
+/// rounding for the payload ([`STREAM_ALLOC_SLACK`]). `serve::Event` and
+/// the dweb thread's mail are checked against it where they are defined
+/// ([`stream_slot_fits`]).
+pub const STREAM_FRAME_COST: usize = 256;
+/// The allocator's header and rounding for one payload: glibc's malloc adds
+/// at most 24 bytes to a request (an 8-byte header, 16-byte steps, 32-byte
+/// chunks at least).
+pub const STREAM_ALLOC_SLACK: usize = 32;
+
+/// Whether a channel message of `size` bytes that carries a stream frame is
+/// within [`STREAM_FRAME_COST`]: its slot, the message and the state word
+/// std's channels keep beside it, with the payload's allocator slack.
+pub const fn stream_slot_fits(size: usize) -> bool {
+    size + std::mem::size_of::<usize>() + STREAM_ALLOC_SLACK <= STREAM_FRAME_COST
+}
 /// The dweb thread's frames handed to the writer and not yet written: a
 /// few frames' worth. Its bodies wait in its own sender instead, within
 /// 0009's 8 MiB writer allowance, where its control frames (credit,
@@ -367,8 +393,16 @@ pub struct Link {
     last_write: Mutex<Option<Instant>>,
     /// A protocol-2 hello settled: the reader takes stream frames.
     streams: AtomicBool,
-    /// Stream frames' bytes read and not yet handled ([`StreamHold`]).
-    stream_bytes: Mutex<usize>,
+    /// Stream frames read and not yet handled ([`StreamHold`]).
+    stream_backlog: Mutex<Backlog>,
+}
+
+/// Stream frames read and not yet handled: their charge
+/// ([`stream_charge`]) and how many.
+#[derive(Default)]
+struct Backlog {
+    bytes: usize,
+    frames: usize,
 }
 
 impl Link {
@@ -381,7 +415,7 @@ impl Link {
             control: Allowance::new(usize::MAX, usize::MAX),
             last_write: Mutex::new(None),
             streams: AtomicBool::new(false),
-            stream_bytes: Mutex::new(0),
+            stream_backlog: Mutex::new(Backlog::default()),
         })
     }
 
@@ -397,25 +431,29 @@ impl Link {
         self.streams.load(Ordering::SeqCst)
     }
 
-    /// A stream frame of `len` counted bytes, read: its place under
-    /// [`MAX_QUEUED_STREAM_BYTES`], or `None` past it.
+    /// A stream frame charged `len` bytes, read: its place under
+    /// [`MAX_QUEUED_STREAM_BYTES`] and [`MAX_QUEUED_STREAM_FRAMES`], or
+    /// `None` past either.
     fn hold_stream(self: &Arc<Self>, len: usize) -> Option<StreamHold> {
-        let mut held = self.stream_bytes.lock().ok()?;
-        let next = held.checked_add(len)?;
-        if next > MAX_QUEUED_STREAM_BYTES {
+        let mut held = self.stream_backlog.lock().ok()?;
+        let bytes = held.bytes.checked_add(len)?;
+        if bytes > MAX_QUEUED_STREAM_BYTES || held.frames >= MAX_QUEUED_STREAM_FRAMES {
             return None;
         }
-        *held = next;
+        held.bytes = bytes;
+        held.frames += 1;
         Some(StreamHold {
             link: Arc::clone(self),
             len,
         })
     }
 
-    /// Stream frames' bytes read and not yet handled.
+    /// Stream frames read and not yet handled: their charge, and how many.
     #[cfg(test)]
-    pub fn stream_bytes(&self) -> usize {
-        self.stream_bytes.lock().map_or(0, |held| *held)
+    pub fn stream_backlog(&self) -> (usize, usize) {
+        self.stream_backlog
+            .lock()
+            .map_or((0, 0), |held| (held.bytes, held.frames))
     }
 
     /// When the writer last wrote a frame: its progress, which moves only
@@ -512,23 +550,18 @@ pub struct StreamHold {
 
 impl Drop for StreamHold {
     fn drop(&mut self) {
-        if let Ok(mut held) = self.link.stream_bytes.lock() {
-            *held = held.saturating_sub(self.len);
+        if let Ok(mut held) = self.link.stream_backlog.lock() {
+            held.bytes = held.bytes.saturating_sub(self.len);
+            held.frames = held.frames.saturating_sub(1);
         }
     }
 }
 
-/// What a stream frame counts against [`MAX_QUEUED_STREAM_BYTES`]: a data
-/// frame its data, which credit bounds; any other its payload.
+/// What a stream frame counts against [`MAX_QUEUED_STREAM_BYTES`], data or
+/// not: its payload as allocated, ID included, and [`STREAM_FRAME_COST`]
+/// for the rest of what it holds while queued.
 fn stream_charge(frame: &fc_protocol::frame::Frame) -> usize {
-    if frame.kind == fc_protocol::frame::KIND_DATA {
-        frame
-            .payload
-            .len()
-            .saturating_sub(fc_protocol::stream::ID_LEN)
-    } else {
-        frame.payload.len()
-    }
+    frame.payload.capacity().saturating_add(STREAM_FRAME_COST)
 }
 
 /// Whether `kind` is one of the four stream frames' (design 0007).
@@ -1420,39 +1453,141 @@ mod tests {
             panic!("the data frame, after the message");
         };
         assert_eq!((data.kind, data.payload.len()), (KIND_DATA, 108));
-        // Its data counts until the dweb thread has handled it.
-        assert_eq!(link.stream_bytes(), 100);
+        // It counts until the dweb thread has handled it.
+        assert_eq!(link.stream_backlog(), (108 + STREAM_FRAME_COST, 1));
         drop(hold);
-        assert_eq!(link.stream_bytes(), 0);
+        assert_eq!(link.stream_backlog(), (0, 0));
     }
 
-    /// Past 16 MiB and a frame of stream bytes not yet handled, main has
-    /// sent past its credit: the connection ends.
-    #[test]
-    fn stream_bytes_past_the_cap_end_the_connection() {
-        use fc_protocol::frame::KIND_DATA;
+    /// What a queued stream frame holds, counted from the event itself: the
+    /// event's slot in the loop's channel and std's state word beside it,
+    /// its payload as allocated, and the allocator's slack. The same frame
+    /// in the dweb thread's mailbox holds less (`Mail` is the smaller).
+    fn in_memory(frame: &fc_protocol::frame::Frame) -> usize {
+        std::mem::size_of::<Event>()
+            + std::mem::size_of::<usize>()
+            + frame.payload.capacity()
+            + STREAM_ALLOC_SLACK
+    }
+
+    /// Stream frames the reader queued, each with its place under the cap.
+    type Queued = Vec<(fc_protocol::frame::Frame, StreamHold)>;
+
+    /// Feeds `frames` one at a time, none of them handled, until the reader
+    /// refuses one: the frames it queued, and the error it ended with.
+    fn flood(frames: impl Iterator<Item = Vec<u8>>) -> (Arc<Link>, Queued, &'static str) {
         let link = Link::new();
         link.enable_streams();
         let (mut reader, received) = reader(Arc::clone(&link), &[]);
-        let full = stream(KIND_DATA, 3, &[0; 64 << 10]);
-        let fits = MAX_QUEUED_STREAM_BYTES / (64 << 10);
-        let mut held = Vec::new();
-        for _ in 0..fits {
-            assert!(reader.feed(&mut full.clone()));
-            let Ok(Event::Stream(_, hold)) = received.try_recv() else {
-                panic!("a frame within the cap");
-            };
-            held.push(hold);
+        let mut queued = Vec::new();
+        for mut frame in frames {
+            let fed = reader.feed(&mut frame);
+            while let Ok(event) = received.try_recv() {
+                match event {
+                    Event::Stream(frame, hold) => queued.push((frame, hold)),
+                    Event::ProtocolError(category) => return (link, queued, category),
+                    _ => panic!("only stream frames are fed"),
+                }
+            }
+            assert!(fed, "refused without an error");
         }
-        assert_eq!(link.stream_bytes(), fits * (64 << 10));
-        assert!(!reader.feed(&mut full.clone()));
-        assert!(matches!(
-            received.try_recv(),
-            Ok(Event::ProtocolError("stream_backlog"))
-        ));
+        panic!("the reader took every frame");
+    }
+
+    /// The cap is memory: every frame counts its payload and its place in
+    /// the queues, so full data frames stop at 255. Before, 272 were taken
+    /// (data only, under 16 MiB and a 1 MiB frame's slack); 16 MiB and one
+    /// 64 KiB data frame would take 257 by data alone, and never a 258th.
+    #[test]
+    fn stream_frames_past_the_cap_end_the_connection() {
+        use fc_protocol::frame::KIND_DATA;
+        use fc_protocol::stream::{ID_LEN, MAX_DATA};
+        let full = stream(KIND_DATA, 3, &[0; MAX_DATA]);
+        let (link, mut queued, error) = flood(std::iter::repeat_n(full, 257));
+        assert_eq!(error, "stream_backlog");
+        let charge = ID_LEN + MAX_DATA + STREAM_FRAME_COST;
+        assert_eq!(queued.len(), MAX_QUEUED_STREAM_BYTES / charge);
+        assert_eq!(queued.len(), 255);
+        assert_eq!(link.stream_backlog(), (255 * charge, 255));
+        let held: usize = queued.iter().map(|(frame, _)| in_memory(frame)).sum();
+        assert!(held <= MAX_QUEUED_STREAM_BYTES, "{held}");
         // Handled frames give their room back.
-        held.clear();
-        assert_eq!(link.stream_bytes(), 0);
+        queued.clear();
+        assert_eq!(link.stream_backlog(), (0, 0));
+    }
+
+    /// A flood of the smallest stream frames, none of them handled (an
+    /// `end` is 8 bytes, a credit 12): it stops at the frame bound, long
+    /// before the bytes, and what the queued events hold stays within the
+    /// cap. Before the fix 2,228,224 `end`s were taken, about 425 MiB of
+    /// events.
+    #[test]
+    fn a_flood_of_small_stream_frames_stays_within_the_cap() {
+        use fc_protocol::frame::{KIND_ABORT, KIND_END, KIND_STREAM_CREDIT};
+        let abort = br#"{"code":"stalled"}"#;
+        for (kind, rest) in [
+            (KIND_END, &[][..]),
+            (KIND_STREAM_CREDIT, &[0, 0, 0, 1][..]),
+            (KIND_ABORT, &abort[..]),
+        ] {
+            let frames = (0u64..).map(|id| stream(kind, 2 * id + 1, rest));
+            let (link, queued, error) = flood(frames);
+            assert_eq!(error, "stream_backlog");
+            assert_eq!(queued.len(), MAX_QUEUED_STREAM_FRAMES);
+            let charged: usize = queued.iter().map(|(frame, _)| stream_charge(frame)).sum();
+            assert_eq!(link.stream_backlog(), (charged, MAX_QUEUED_STREAM_FRAMES));
+            let held: usize = queued.iter().map(|(frame, _)| in_memory(frame)).sum();
+            assert!(held <= charged && charged <= MAX_QUEUED_STREAM_BYTES);
+            assert!(held < 5 << 20, "{held}");
+        }
+    }
+
+    /// Any mix of stream frames, none of them handled: the reader refuses
+    /// exactly the first that would pass either bound, and what it queued
+    /// stays within the cap.
+    #[test]
+    fn no_mix_of_stream_frames_holds_more_than_the_cap() {
+        use fc_protocol::frame::{KIND_ABORT, KIND_DATA, KIND_END, KIND_STREAM_CREDIT};
+        use fc_protocol::stream::{MAX_ABORT, MAX_DATA};
+        for seed in 1..=8u64 {
+            let mut state = seed;
+            let mut next = move || {
+                state = state
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407);
+                (state >> 33) as usize
+            };
+            let mut sizes = Vec::new();
+            let frames = std::iter::from_fn(|| {
+                let pick = next();
+                let frame = match pick % 8 {
+                    0 => stream(KIND_END, 1, &[]),
+                    1 => stream(KIND_STREAM_CREDIT, 1, &[0, 0, 0, 1]),
+                    2 => stream(KIND_ABORT, 1, &vec![b' '; 1 + next() % MAX_ABORT]),
+                    3 | 4 => stream(KIND_DATA, 1, &vec![0; MAX_DATA]),
+                    5 => stream(KIND_DATA, 1, &vec![0; 1 + next() % 64]),
+                    _ => stream(KIND_DATA, 1, &vec![0; 1 + next() % MAX_DATA]),
+                };
+                sizes.push(frame.len() - 5);
+                Some(frame)
+            });
+            let (link, queued, error) = flood(frames);
+            assert_eq!(error, "stream_backlog");
+            let charged: usize = queued.iter().map(|(frame, _)| stream_charge(frame)).sum();
+            assert_eq!(link.stream_backlog(), (charged, queued.len()));
+            let held: usize = queued.iter().map(|(frame, _)| in_memory(frame)).sum();
+            assert!(
+                held <= charged && charged <= MAX_QUEUED_STREAM_BYTES,
+                "seed {seed}"
+            );
+            // The refused frame was the first past a bound.
+            let refused = sizes[queued.len()] + STREAM_FRAME_COST;
+            assert!(
+                charged + refused > MAX_QUEUED_STREAM_BYTES
+                    || queued.len() == MAX_QUEUED_STREAM_FRAMES,
+                "seed {seed}"
+            );
+        }
     }
 
     /// #79: the chunk a frame was read into holds nothing of it once the
