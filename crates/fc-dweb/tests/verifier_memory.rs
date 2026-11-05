@@ -1997,6 +1997,33 @@ fn a_plan_past_its_path_bound_is_refused_before_it_is_copied() {
     }
 }
 
+/// A CAR's request carries the request's path: the machine counts it,
+/// with its headers, from when it makes it until main takes it, by what
+/// they hold.
+#[test]
+fn a_cars_request_is_counted_until_main_takes_it() {
+    let _one = ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
+    let (p, _) = file_named_car(MAX_PATH - 2);
+    let mut v = Verifier::new(1, &p, Method::Get, None, false, Options::default()).unwrap();
+    let before = v.reserved();
+    let Some(Output::Piece(r)) = v.poll() else {
+        panic!("no request")
+    };
+    assert!(
+        r.path.ends_with("?format=car&dag-scope=entity"),
+        "{}",
+        r.path
+    );
+    let held = r.path.capacity()
+        + r.headers.capacity() * std::mem::size_of::<(String, String)>()
+        + r.headers
+            .iter()
+            .map(|(n, v)| n.capacity() + v.capacity())
+            .sum::<usize>();
+    assert!(held > MAX_PATH, "{held}");
+    assert_eq!(before - v.reserved(), held);
+}
+
 /// The flood's CAR at budgets that run out while its sections pile up,
 /// their jobs held back: one push into the reader completes up to 64 of
 /// them, and room for one of a push's sections, with its job's structures,
