@@ -1048,7 +1048,7 @@ fn budget_sweep(
     budgets: &[usize],
     order: Order,
 ) -> [(usize, usize); 2] {
-    let honest = run("budget", p, Method::Get, world, opts(true, 0));
+    let honest = run("budget", p, Method::Get, world, roomy(true));
     assert_eq!(honest.ending, Some(Ending::End), "{:?} {}", p.root, p.path);
     let mut counts = [(0, 0); 2];
     let mut first_answer = [None; 2];
@@ -1270,9 +1270,17 @@ fn insert_after(n: usize, block: &[u8]) -> Json {
     })
 }
 
+/// The answer with room: at four grants.
+fn roomy(car: bool) -> Opts {
+    Opts {
+        budget: 4 * fc_dweb::verifier::IPFS_GRANT,
+        ..opts(car, 0)
+    }
+}
+
 /// The least budget at which `p` answers through raw blocks.
 fn least_raw_budget(world: &Gateway, p: &Verify, mut lo: usize, mut hi: usize) -> usize {
-    let honest = run("honest", p, Method::Get, world, opts(false, 0));
+    let honest = run("honest", p, Method::Get, world, roomy(false));
     while lo + 1 < hi {
         let mid = lo + (hi - lo) / 2;
         let label = format!("least {mid}");
@@ -1299,8 +1307,10 @@ fn least_raw_budget(world: &Gateway, p: &Verify, mut lo: usize, mut hi: usize) -
 /// window its cancelled stream keeps until main ends it, waits for that
 /// window. Codex's directory of 37,614 links, its CAR still streaming
 /// (a 1.9 MB block follows it) when the listing is built, answers through
-/// the CAR in either order wherever raw blocks answer it, the scheme's
-/// budget among them; raw blocks need more than the budget less a window.
+/// the CAR in either order wherever raw blocks answer it, from two windows
+/// below the least budget raw blocks answer at to two above. That budget
+/// is past the scheme's now, which keeps the grant's allowance: there both
+/// modes refuse it for its memory.
 #[test]
 fn a_structure_waits_for_the_cars_window() {
     let mut blocks = Blocks::new(&load("dweb-verify.json"));
@@ -1311,19 +1321,22 @@ fn a_structure_waits_for_the_cars_window() {
     };
     let p = ranged(&text(&root), "/", None);
     let window = fc_dweb::verifier::STREAM_WINDOW;
-    let budget = fc_dweb::verifier::IPFS_BUDGET;
-    // Two windows below the budget, then up to it, in quarter windows.
-    let budgets: Vec<usize> = (0..=8)
-        .map(|i| budget - 2 * window + i * (window / 4))
+    let least = least_raw_budget(&world, &p, 6 << 20, 10 << 20);
+    assert!(least > fc_dweb::verifier::IPFS_BUDGET, "{least}");
+    // Two windows below it, then two above, in quarter windows.
+    let budgets: Vec<usize> = (0..=16)
+        .map(|i| least - 2 * window + i * (window / 4))
         .collect();
     for order in [Order::Fifo, Order::Lifo] {
         let [(raw, raw_refused), (car, _)] = budget_sweep(&world, &p, &budgets, order);
-        // Refused through the budget less a window, then answered.
         assert!(
-            raw_refused >= 5 && raw > 0,
+            raw_refused >= 1 && raw > 0,
             "{order:?}: {raw} {raw_refused}"
         );
         assert!(car >= raw, "{order:?}: {raw} {car}");
+        let [(raw, _), (car, _)] =
+            budget_sweep(&world, &p, &[fc_dweb::verifier::IPFS_BUDGET], order);
+        assert_eq!((raw, car), (0, 0), "{order:?}");
     }
 }
 
@@ -1719,7 +1732,8 @@ fn a_slow_page_keeps_the_car_its_blocks_wait_for() {
     let p = ranged(FILE_10M, "/", Some("bytes=300000-2000000"));
     let want = &content(FILE_10M_SEED, 2_000_001)[300_000..];
     for k in [10, 11] {
-        let budget = (2 << 20) + 300_000 + k * (64 << 10);
+        // The CAR's room holds a frame beside its window.
+        let budget = (2 << 20) + 300_000 + fc_dweb::verifier::MAX_FRAME + k * (64 << 10);
         for order in [Order::Fifo, Order::Lifo] {
             let got = run(
                 "slow page",
@@ -2375,4 +2389,67 @@ fn a_floor_after_a_forget_leaves_nothing() {
         forgotten += 1;
     }
     assert!(forgotten > 3, "{forgotten}");
+}
+
+/// An identity CID's block is copied out of the CID within room held for
+/// it, as every other reservation is: at every budget, byte by byte, the
+/// walk's peak is within it, whether the block is a raw leaf, a file node
+/// over identity leaves, or a directory, listed or on the served path, and
+/// none of them needs a body copy for itself. Nothing is fetched: the
+/// walk's reservation when it uses the block is small, so the sweep
+/// reaches the budgets within its digest (at most 128 bytes) of it.
+#[test]
+fn identity_blocks_are_copied_within_the_budget() {
+    let blocks = Blocks::new(&load("dweb-verify.json"));
+    let world = Gateway {
+        blocks: &blocks,
+        changes: vec![],
+    };
+    let leaf = cid_of(0x55, b"an identity leaf", true);
+    let (a, b) = (cid_of(0x55, b"abc", true), cid_of(0x55, b"defg", true));
+    let file = cid_of(
+        0x70,
+        &data_file_node(b"", &[(&a, 3), (&b, 4)], &[3, 4]),
+        true,
+    );
+    let dir = cid_of(0x70, &directory_node(&[(&leaf, "f")]), true);
+    for cid in [&leaf, &file, &dir] {
+        assert_eq!(cid[2], 0x00, "an identity CID");
+        assert!(cid.len() <= 128 + 4, "{}", cid.len());
+    }
+    let cases = [
+        ("a raw leaf", ranged(&text(&leaf), "/", None)),
+        (
+            "a file node over identity leaves",
+            ranged(&text(&file), "/", None),
+        ),
+        ("a directory's entry", ranged(&text(&dir), "/f", None)),
+        ("a directory listed", ranged(&text(&dir), "/", None)),
+    ];
+    for (name, p) in &cases {
+        for car in [false, true] {
+            let honest = run(name, p, Method::Get, &world, roomy(car));
+            assert_eq!(honest.ending, Some(Ending::End), "{name}");
+            let mut refused = 0;
+            for budget in 0..=4096 {
+                let label = format!("{name}, car={car}, at {budget}");
+                // The driver checks after every input that the walk's peak
+                // is within the budget.
+                let got = run(
+                    &label,
+                    p,
+                    Method::Get,
+                    &world,
+                    Opts {
+                        budget,
+                        ..opts(car, 0)
+                    },
+                );
+                if !answered(&label, &got, &honest) {
+                    refused += 1;
+                }
+            }
+            assert!((1..4097).contains(&refused), "{name}, car={car}: {refused}");
+        }
+    }
 }

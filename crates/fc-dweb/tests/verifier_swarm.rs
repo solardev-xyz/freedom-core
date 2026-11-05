@@ -1278,9 +1278,12 @@ fn a_slow_page_backpressures_the_stream() {
     assert_eq!(got.ending, Some(Ending::End));
     assert_eq!(got.body, content("file-524288", 524_288));
     assert_eq!(got.pieces.iter().filter(|r| r.stream).count(), 1);
-    // The stream's window, a few chunk pieces and the tree: what waits for
-    // the page is inside the window.
-    assert!(got.peak <= STREAM_WINDOW + 32 * 1024, "{}", got.peak);
+    // The stream's room (its window, its bytes waiting in it, and a frame
+    // beside it), the bytes it sent waiting for the page in their leaves
+    // and the body's queue (they are credited only once they go out, so at
+    // most a window), a few chunk pieces and the tree.
+    let room = STREAM_WINDOW + fc_dweb::verifier::MAX_FRAME;
+    assert!(got.peak <= room + STREAM_WINDOW + 32 * 1024, "{}", got.peak);
 }
 
 /// A stream that ends early, while the bytes it sent last wait for their
