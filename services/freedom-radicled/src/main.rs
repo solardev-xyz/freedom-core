@@ -14,22 +14,29 @@
 //! recommendation", step 1):
 //! 1. the panic hook, before any other work, and the entry's one re-exec if
 //!    a descriptor is inherited (`fc_service::confine::clean_entry`);
-//! 2. hardening, and the arguments, `--network` among them;
-//! 3. the environment main cleared, checked ([`env`]);
-//! 4. the gate, `<lock-dir>/radicle-<sha256(canonical home)>.lock`, before
+//! 2. hardening;
+//! 3. libgit2's configuration search paths emptied
+//!    (`libradicle::isolate_git_config`, libradicle item 9), while the
+//!    process has one thread: no git configuration outside a repository
+//!    applies, and confinement, which leaves `/etc/gitconfig` unreadable,
+//!    fails no repository's open;
+//! 4. the arguments, `--network` among them;
+//! 5. the environment main cleared, checked ([`env`]);
+//! 6. the gate, `<lock-dir>/radicle-<sha256(canonical home)>.lock`, before
 //!    anything opens the home;
-//! 5. the home and the service's own `HOME` directory, opened;
-//! 6. **confinement** ([`confine`]), while the process has one thread: the
+//! 7. the home and the service's own `HOME` directory, opened;
+//! 8. **confinement** ([`confine`]), while the process has one thread: the
 //!    two directories read-write, with `refer`; the network policy; the lock
 //!    as the one descriptor it keeps;
-//! 7. only then logging's writer, the connection's threads and the
+//! 9. only then logging's writer, the connection's threads and the
 //!    watchdogs: the handshake, `rad.hello`, and what follows.
 //!
-//! **This build** answers `rad.hello` and `rad.identity` (0008, "The sealed
-//! release" and "Profiles without a vault"). The node itself, its
-//! reconciliation and every read and write come with later steps; until
-//! then the process never reaches `RUNNING`, so every other method 0008
-//! lists answers `stopped`, as 0008 says of a process before `RUNNING`.
+//! **This build** answers `rad.hello`, `rad.identity` (0008, "The sealed
+//! release" and "Profiles without a vault") and `rad.reconcile` (0008,
+//! "Reconciliation"). The node itself and every read and write come with
+//! later steps; until then the process never reaches `RUNNING`, so every
+//! other method 0008 lists answers `stopped`, as 0008 says of a process
+//! before `RUNNING`.
 //!
 //! **No child processes:** libradicle is built with `no-spawn`, and the
 //! service starts none.
@@ -37,19 +44,37 @@
 //! **Exit codes** (0001's, and 0008's): 0 after `rad.shutdown`, stdin EOF,
 //! the parent gone, or a failed start step answered first; 64 for usage,
 //! including an environment main should have cleared; 70 for a panic
-//! outside a request; 74 for storage; 75 when the gate is held; 76 for a
-//! protocol error, the handshake's deadline, `rad.identity`'s deadline or
-//! the writer stall; 77 when confinement refuses the process
+//! outside a request, a repair unit's overrun (`unit_overrun`), or a
+//! service that can't start (libgit2's search paths, the OS's randomness,
+//! or the unit watchdog's thread); 74 for storage; 75 when the gate is
+//! held; 76 for a protocol error, the handshake's deadline, `rad.identity`'s
+//! deadline or the writer stall; 77 when confinement refuses the process
 //! (`confinement`: a thread or descriptor it didn't expect, or its own rules
 //! refused).
 
 mod args;
 mod build_info;
 mod confine;
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "rad.start gives the node this routing, a later step"
+    )
+)]
+mod dial;
 mod env;
 mod identity;
+mod marker;
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "rad.start runs discovery, a later step")
+)]
+mod nat64;
+mod reconcile;
 mod service;
 mod testhooks;
+mod units;
 
 use std::process::ExitCode;
 use std::sync::Arc;
@@ -79,7 +104,34 @@ fn main() -> ExitCode {
     // nothing needed dropping, or this is the one re-exec, or it failed.
     let entry = fc_service::confine::clean_entry();
     fc_service::hardening::harden();
-    let exit = run(started, &entry);
+    // The process's one unsafe call (AGENTS.md rule 6, and Cargo.toml's
+    // lints; tests/unsafe_code.rs holds the crate to it). libgit2's search
+    // paths are process-wide options with no sound safe setter. After
+    // `clean_entry`, not before, so that libgit2's initialization, which can
+    // open `/dev/urandom` for its seed, comes after the check for inherited
+    // descriptors.
+    //
+    // `remove_git_config_env`, its companion, isn't needed: `serve` refuses
+    // every `GIT_*` variable (`env::check`) before anything opens a
+    // repository, and nothing here opens one from the environment.
+    #[allow(unsafe_code)]
+    // SAFETY: `isolate_git_config` must run before any thread can use
+    // libgit2. None can: no other thread of this program exists yet, and
+    // nothing has called libgit2. The panic hook, the entry's re-exec and
+    // hardening, all that runs before this, start no thread and don't touch
+    // libgit2, and every thread the process starts, logging's writer and
+    // reconciliation's among them, starts from `serve`, after this returns.
+    let isolated = unsafe { libradicle::isolate_git_config() };
+    let exit = match isolated {
+        Ok(git_config) => run(started, &entry, git_config),
+        Err(e) => {
+            log::error(
+                "cannot isolate libgit2 from git configuration",
+                json!({ "error": e.to_string() }),
+            );
+            Exit::Internal
+        }
+    };
     // The process's exit is this thread's from here, unless a hook's or a
     // watchdog's has begun: that one ends the process first.
     fc_service::exit::claim();
@@ -87,7 +139,11 @@ fn main() -> ExitCode {
     ExitCode::from(exit.code())
 }
 
-fn run(started: Instant, entry: &fc_service::confine::Entry) -> Exit {
+fn run(
+    started: Instant,
+    entry: &fc_service::confine::Entry,
+    git_config: libradicle::GitConfigIsolated,
+) -> Exit {
     let Some(command) = args::parse(std::env::args_os().skip(1)) else {
         log::error(args::USAGE, json!({}));
         return Exit::Usage;
@@ -145,7 +201,14 @@ fn run(started: Instant, entry: &fc_service::confine::Entry) -> Exit {
             };
             let exit = match confine::Grant::open(&gate.data_dir, &own_home) {
                 Ok(grant) => match confine::confine(&grant, &network, gate.descriptors()) {
-                    Ok(report) => serve(grant, network, report.to_json(), parent_pid, started),
+                    Ok(report) => serve(
+                        grant,
+                        network,
+                        report.to_json(),
+                        parent_pid,
+                        started,
+                        git_config,
+                    ),
                     Err(invalid) => {
                         log::error(
                             "confinement refused the process",
@@ -176,13 +239,26 @@ fn serve(
     confinement: Value,
     parent_pid: Option<u32>,
     started: Instant,
+    git_config: libradicle::GitConfigIsolated,
 ) -> Exit {
     log::init();
     log::info(
         "serving",
         json!({ "network": network.to_json(), "confinement": confinement }),
     );
-    let service = match RadicleService::new(grant, &network, confinement) {
+    // The repair units' watchdog: one thread for the service's lifetime. One
+    // that can't be started fails the start, before any unit runs.
+    let units = match units::UnitWatch::start(testhooks::unit_limit(units::UNIT_LIMIT)) {
+        Ok(watch) => Arc::new(watch),
+        Err(e) => {
+            log::error(
+                "cannot start the unit watchdog",
+                json!({ "error": e.kind().to_string() }),
+            );
+            return Exit::Internal;
+        }
+    };
+    let service = match RadicleService::new(grant, &network, confinement, units, git_config) {
         Some(service) => Arc::new(service),
         None => {
             log::error("the OS random number generator failed", json!({}));

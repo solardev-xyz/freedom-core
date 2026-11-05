@@ -1337,13 +1337,14 @@ impl Swarm {
 
     /// Leaves Ant accepts that a simple reader wouldn't.
     /// Two manifests at the edge of a Swarm request's memory (0009,
-    /// Bounds: a Swarm request's 2 MiB). Each is a small root whose fork
-    /// `a/` leads to one node packed with the metadata the walk keeps: a
-    /// `Filename` of 60,000 bytes on each of its forks, each fork naming a
-    /// value node for the same small file. The request's lookup holds the
+    /// Bounds: a Swarm request's budget, its 2 MiB grant less its 64 KiB
+    /// allowance). Each is a small root whose fork `a/` leads to one node
+    /// packed with the metadata the walk keeps: a `Filename` of 60,000 bytes
+    /// on each of its forks, each fork naming a value node for the same
+    /// small file. The request's lookup holds the
     /// root while that node is joined and parsed, so the node can be about
-    /// 880 KB. One manifest's node is about 5% under that (14 forks), the
-    /// other's about 9% over (16 forks), both under the 1 MiB node cap.
+    /// 850 KB. One manifest's node is about 1% under that (14 forks), the
+    /// other's about 13% over (16 forks), both under the 1 MiB node cap.
     /// Ant's writer makes no node past one chunk, so the generator writes
     /// them, as `big-node`'s. Ant serves both; the core answers the first
     /// and refuses the second for its memory (deviation `request-memory`).

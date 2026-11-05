@@ -105,13 +105,16 @@ jobs:
       - run: cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
       # The test hooks never build into a release binary: some take the
       # address table away or pick discovery's resolvers (src/testhooks.rs).
+      # build.rs refuses them by Cargo's profile, debug assertions or not.
       - name: A release build with the test hooks doesn't compile
         run: |
-          if cargo check --locked --release --features testhooks 2> testhooks-release.err; then
-            echo "a release build compiled with the testhooks feature" >&2
-            exit 1
-          fi
-          grep -F "the \`testhooks\` feature is for debug and test builds only" testhooks-release.err
+          for config in "" "--config profile.release.debug-assertions=true"; do
+            if cargo check --locked --release --features testhooks $config 2> testhooks-release.err; then
+              echo "a release build compiled with the testhooks feature ($config)" >&2
+              exit 1
+            fi
+            grep -F "the \`testhooks\` feature is for debug and test builds only" testhooks-release.err
+          done
 
   ipfsd-test:
     name: freedom-ipfsd test (${{ matrix.os }})
@@ -185,13 +188,16 @@ jobs:
       - run: cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
       - run: cargo clippy --locked --workspace --all-targets -- -D warnings
       # The test hooks never build into a release binary (src/testhooks.rs).
+      # build.rs refuses them by Cargo's profile, debug assertions or not.
       - name: A release build with the test hooks doesn't compile
         run: |
-          if cargo check --locked --release --features testhooks 2> testhooks-release.err; then
-            echo "a release build compiled with the testhooks feature" >&2
-            exit 1
-          fi
-          grep -F "the \`testhooks\` feature is for debug and test builds only" testhooks-release.err
+          for config in "" "--config profile.release.debug-assertions=true"; do
+            if cargo check --locked --release --features testhooks $config 2> testhooks-release.err; then
+              echo "a release build compiled with the testhooks feature ($config)" >&2
+              exit 1
+            fi
+            grep -F "the \`testhooks\` feature is for debug and test builds only" testhooks-release.err
+          done
 
   radicled-test:
     name: freedom-radicled test (${{ matrix.os }})

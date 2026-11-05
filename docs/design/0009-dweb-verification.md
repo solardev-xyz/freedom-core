@@ -54,7 +54,7 @@ This design adds a **verified mode** for those backends. In it, the core proves 
 - **The core opens no sockets** (0003–0006), and main keeps 0006's data path to the node and to Chromium.
 - **Parity:** a verified response is what the bundled node would answer for the same request over the same content ([Parity](#parity)). Unverified mode stays exactly today's.
 - **One place:** the verifier is sans-I/O in `fc-dweb`, `fc-swarm` and a new `fc-ipfs`, so the Chromium build (Stage 2) and mobile can run it in process.
-- **Bounded resources:** every byte the core holds is reserved first, decoders included, which count what a block declares before they build anything ([Bounded decoding](#bounded-decoding)). Every bound has a defined result when exhausted ([Bounds](#bounds)).
+- **Bounded resources:** every byte the core holds is reserved first, decoders included, which count what a block declares before they build anything ([Bounded decoding](#bounded-decoding)). A request's grant bounds what it allocates: its budget's count and a fixed allowance for the few bounded allocations the count doesn't follow ([What a grant covers](#what-a-grant-covers)). Every bound has a defined result when exhausted ([Bounds](#bounds)).
 
 **Non-goals**
 - **The bundled nodes.** The bundled Ant validates the chunks it retrieves, and the native IPFS node hash-checks blocks. Their content stays `node_asserted`; the core doesn't check it again ([Decisions](#decisions), 6).
@@ -211,6 +211,7 @@ What the core asks main for while a `dweb.verify` runs.
 - **The reply's `headers`** are only those the core reads: `content-type`, `content-length`, `content-range` and `swarm-feed-index`, at most 8, each at most 8 KiB, as 0005 bounds Blockscout's.
 - **`failed`** is the dial's failure class, which the core maps with `fc-dweb`'s `failure::after_dial` as today: `unreachable` (`ECONNREFUSED`, `ECONNRESET`, `ENOTFOUND`), `error`, or `aborted`.
 - **Cancel:** the core sends 0001's `cancel` for a piece it no longer needs, and main aborts the dial or answers the open stream with `abort { code: "cancelled" }`.
+- **A streamed piece's abort** has one of three codes: `cancelled` (the core's cancel), `stalled` (main's body idle timer) or `body_stream_error` (the node's body failed). Main sends no other, and any other from main is a protocol error ([Streams in the core](#streams-in-the-core), abort codes).
 
 ### Streams in the core
 
@@ -223,6 +224,11 @@ What the core asks main for while a `dweb.verify` runs.
   - so data reaching a side names one of its own requests, and credit reaching it names a request it answered. Each side's IDs strictly increase (0001), so 0007's rules that rely on it (late credit needs no table; a frame for an ID never issued is a protocol error) hold in each direction.
 - **Which methods:** `dweb.verify`'s head opens a stream from the core to main; `shell.dweb_get` with `stream: true` opens one from main to the core. Any other stream is a protocol error.
 - **0007's rules, per stream:** the head first, then data, then exactly one terminal; `end` only after the last data; `abort` jumps the queue and purges; a cancel against an unwritten head drops it; a 128 KiB window; data frames of 1 to 65,536 bytes, coalesced below 4 KiB; the same protocol errors.
+- **Abort codes, by connection and direction:** one set of codes, 0007's five and 0009's five more (`verification_failed`, `unverifiable`, `malformed`, `piece_failed`, `stalled`), and every one decodes. Which a stream may end with depends on who sends it. The sending side refuses to write any other, and the receiving side takes any other as a protocol error, `abort_code`, which fails the connection.
+  - **Service connections** keep exactly 0007's five: `cancelled`, `internal`, `body_stream_error`, `stopped` and `busy`. A service never sends one of 0009's, and main's side of a service connection never accepts one.
+  - **The core's verified bodies** end only with [Failures](#failures)' six: `verification_failed`, `unverifiable`, `malformed`, `piece_failed`, `busy` and `cancelled`.
+  - **Main's pieces** end only with `cancelled`, `stalled` or `body_stream_error` ([`shell.dweb_get`](#shelldweb_get)).
+  - `fc-protocol`'s `Codes` holds the three sets; `vectors/streams.json` covers every allowed and every refused pair, and fc-service's connection test checks that a service never sends or takes a 0009 code.
 - **The global bound** that 0001 promised:
   - **Credit is granted only for room already reserved,** by the side that will hold the bytes.
   - **Into the core:** at most 128 incoming streams have credit at once, across all requests; a request whose next piece would be the 129th waits for one to end ([Admission](#admission-deadlines-and-cancel)). So at most 16 MiB of node bytes are in flight to the core.
@@ -241,7 +247,7 @@ What the core asks main for while a `dweb.verify` runs.
 
 - **Admission in the core:** at most 64 running `dweb.verify` requests and 256 waiting; beyond that, `busy`, which main answers 503. Main's own admission (256 active dweb fetches, 0006) applies first; a verified request holds its slot until its body ends.
 - **Memory, granted whole when a request starts** ([Bounds](#bounds)):
-  - **The grant is the scheme's budget:** 2 MiB for a Swarm request, 8 MiB for an IPFS one. It comes out of the dweb thread's 101 MiB of grants, the 128 MiB less the structure cache's 24 MiB and the IPNS floors' 3 MiB reserve.
+  - **The grant is the most the request allocates:** 2 MiB for a Swarm request, 8 MiB for an IPFS one. It is the request's budget, which counts everything the request holds, reserved before it is allocated, and a fixed allowance out of it, 64 KiB for Swarm and 128 KiB for IPFS, for the bounded allocations the count doesn't follow ([What a grant covers](#what-a-grant-covers)). It comes out of the dweb thread's 101 MiB of grants, the 128 MiB less the structure cache's 24 MiB and the IPNS floors' 3 MiB reserve.
   - **A request runs only once its grant fits.** Otherwise it waits, in order, among the 256 waiting, so the grants never pass their total and no walk waits for memory once it runs.
   - **The price is concurrency:** at most 12 IPFS or 50 Swarm requests run at once, or a mix in between, fewer than the 64 the running bound allows.
   - **A grant is held for the request's whole life,** so a long stream holds its grant until its body ends.
@@ -471,7 +477,8 @@ The 2 MiB block limit bounds a block's bytes, not what decoding it allocates: a 
 - **When:** for every block when the gateway has no ordered CAR support ([Modes](#modes)), and for the rest of a walk whose CAR stopped being useful.
 - **Why it is always there:** raw blocks are the only response type the trustless spec requires of a gateway. A gateway that serves them can always be verified, if slowly.
 - **Cost:** one request per block, up to 8 at once per request; with Kubo's default 256 KiB chunks, four per MiB, and one per path segment or HAMT level before the first byte.
-- **Memory:** a raw leaf is reserved at its `blocksizes` entry, which its length must equal; any other block at 2 MiB, until it arrives.
+- **Memory:** a raw leaf is reserved at its `blocksizes` entry, which its length must equal; any other block at 2 MiB, until it arrives. Using a block copies its part of the body out, in room held before the copy; a block asked for past the next one leaves room for the largest copy of the blocks out, so blocks fetched ahead never take the room the next one needs.
+  - **A block's buffer is made within its room:** a raw leaf's once, at its length. A block of unknown length starts at a frame's size, then takes half its room and its window, then all its room; each move, the old buffer beside the new and main's frame, fits the room and the window, but the last, which holds the rest while it is made. At the block's end its buffer is cut to its length, the copy within the room and the window, or room held past them; without that room the buffer keeps its room until it goes. Bytes past a leaf's room (a block longer than its entry) need room of their own.
 
 ### The IPFS walk
 
@@ -646,7 +653,7 @@ The core builds every head from verified data, by the bundled node's rules. The 
 |---|---|---|
 | a chunk, block, manifest node, directory, CAR or record fails its check (an IPNS record's key or signature outside libp2p's rules included) | 502 | `Swarm content verification failed` / `IPFS content verification failed` |
 | content the core can't check: an unsupported hash function, codec or node type; a single-owner chunk off the feed path; an encrypted reference inside a walk; a Swarm leaf shorter than its logical length; a manifest node over 1 MiB; an IPNS record whose key is neither Ed25519 nor RSA; structure past the decoders' caps; a walk past its [bounds](#bounds) | 502 | `This content can't be verified with the external Swarm node` / `… IPFS gateway` |
-| a walk that needs more than its request's memory and has no other way on: what it must hold at once doesn't fit, and nothing it holds will go first. Where a walk has another way, it takes it: a CAR that doesn't fit gives way to raw blocks, and a raw block or a chunk waits while another is in flight | 502 | `This content needs more memory to verify than one request may use`, for either scheme: the core's limit, not the node's or the content's, so a page and a report tell it apart |
+| a walk that needs more than its request's memory and has no other way on: what it must hold at once doesn't fit, and nothing it holds will go first. Where a walk has another way, it takes it: a CAR gives way to raw blocks wherever its room is what doesn't fit, at its start or midway, once the page has read the body; a block, its body's copy and what the walk builds from it (its needs, a directory's entries, a listing) wait while something that will give room back is still out (another block, a hash job, a cancelled piece, body the page hasn't read); and a chunk waits while another is in flight | 502 | `This content needs more memory to verify than one request may use`, for either scheme: the core's limit, not the node's or the content's, so a page and a report tell it apart |
 | content that passes its hashes but can't be decoded or is inconsistent: a dag-pb node or UnixFS `Data` the [bounded decoders](#bounded-decoding) refuse (a link without a hash, a group, an over-long varint, a length past the end), a UnixFS file whose sizes disagree (deviation `unixfs-sizes`) | 502 | `This IPFS content is malformed` |
 | the path isn't in a verified manifest or directory | 404, through the bundled node's rules ([Heads](#heads)) | the bundled node's |
 | a piece's final answer is 404 | 404 | `Not found on the external Swarm node` / `… IPFS gateway` (node-asserted) |
@@ -657,7 +664,7 @@ The core builds every head from verified data, by the bundled node's rules. The 
 | [strict mode](#strict-mode) refuses unverified content (an error plan, before `dweb.verify`) | 403 | strict mode's, by cause |
 | main refuses the plan ([Verify plans](#verify-plans), Validation), a verify plan whose root isn't in its canonical form included; never an unverified fallback | 502, a logged core fault, as 0006's refused plans | 0006's |
 
-**After the head,** the body is truncated: the core sends `abort { code, message }`, and main errors the body, as a node's mid-body failure is surfaced today (0006). The codes are `verification_failed`, `unverifiable`, `malformed`, `piece_failed`, `busy` and `cancelled`. A walk past its memory after the head aborts `unverifiable`, with the memory row's text.
+**After the head,** the body is truncated: the core sends `abort { code, message }`, and main errors the body, as a node's mid-body failure is surfaced today (0006). The codes are `verification_failed`, `unverifiable`, `malformed`, `piece_failed`, `busy` and `cancelled`, and only these: the core never ends a verified body with another, and main takes another as a protocol error ([Streams in the core](#streams-in-the-core), abort codes). A walk past its memory after the head aborts `unverifiable`, with the memory row's text.
 
 - **Each code's message** is its cause's text in the table above. A piece that fails after the head (its body ends early or stalls, its 206 names another interval, or a CAR ends broken) is `piece_failed`, with "The external Swarm node stopped sending" or "The external IPFS gateway stopped sending".
 
@@ -880,9 +887,9 @@ As 0006's 4.7 did, the tests land before the code. Every case pins its failure s
 | node bytes in flight to the core | 128 streams × 128 KiB = 16 MiB | not reachable: credit |
 | rings in main | one per admitted fetch's body, verified or from 0007's service, kept until drained or cancelled: 256 × 128 KiB = 32 MiB | not reachable: fetch admission (256 active, 512 waiting, then 503) |
 | the dweb writer | 8 MiB of unwritten data | the machines wait for credit |
-| memory, per request | 2 MiB for Swarm, 8 MiB for IPFS, granted whole from the dweb thread's grants when the request starts, and reserved before allocation: its windows, leaves and blocks in flight, the walk's parsed nodes and what it keeps of them, its queue of blocks to fetch, a directory's entries and its listing's page, each CAR section's hash job, the path's strings | fewer pieces in flight; a CAR gives way to raw blocks; a walk that can't fit at all is `unverifiable`, with the memory text ([Failures](#failures)) |
+| memory, per request | its grant, 2 MiB for Swarm and 8 MiB for IPFS, granted whole from the dweb thread's grants when the request starts: its budget, reserved before allocation (its windows, leaves and blocks in flight, the walk's parsed nodes and what it keeps of them, its queue of blocks to fetch, a directory's entries and its listing's page, each CAR section's hash job, the path's strings, its body until main takes it), and a fixed allowance, 64 KiB for Swarm and 128 KiB for IPFS ([What a grant covers](#what-a-grant-covers)) | fewer pieces in flight; a CAR gives way to raw blocks; a walk that can't fit at all is `unverifiable`, with the memory text ([Failures](#failures)) |
 | memory, the dweb thread | 128 MiB in all: the structure cache's 24 MiB, a 3 MiB reserve for the IPNS floors, and 101 MiB of grants. So at most 12 IPFS or 50 Swarm requests run at once, and a long stream holds its grant until its body ends | a request waits for its grant, in order, among the 256 waiting; after 10 s it ends `busy` (503), before its head, since nothing runs without its grant |
-| a Swarm request's manifest | its lookup's nodes within the 2 MiB: the root node, and twice the largest other node, counted as the bytes the walk keeps, together at most about 1.72 MB (measured) | `unverifiable`, with the memory text (deviation `request-memory`) |
+| a Swarm request's manifest | its lookup's nodes within its budget: the root node, and twice the largest other node, counted as the bytes the walk keeps, together at most about 1.66 MB (measured) | `unverifiable`, with the memory text (deviation `request-memory`) |
 | the structure cache | one per partition, each its own LRU: the profile's 8 MiB; each private window's 2 MiB, for at most 8 private windows at once (16 MiB); 24 MiB in all | least recently used first, within the partition only; a private window past the eighth has none until one closes; `dweb.forget` drops a partition's |
 | an IPFS block | 2 MiB (freedom-ipfs's limit) | `verification_failed` |
 | a Swarm manifest node | 1 MiB (Ant: 32 MiB) | `unverifiable` |
@@ -892,17 +899,33 @@ As 0006's 4.7 did, the tests land before the code. Every case pins its failure s
 | decoded structure | 65,536 links, and as many `blocksizes` entries, per dag-pb node; CBOR nested 8 levels; 256 forks per mantaray node | `unverifiable` |
 | an IPNS record | 10 KiB | `verification_failed` |
 | an IPNS record's RSA key | a modulus of 2,048 to 8,192 bits; an odd exponent from 3 to 2^33 − 1; one signature check per record | `verification_failed` |
-| IPNS sequence floors | 1,024 names per partition, in memory: the profile's, and each of at most 8 private windows', so at most 9,216 names. Fully occupied with names of a libp2p key's length they hold 2.17 MB (measured with a counting allocator), inside their 3 MiB reserve | least recently used first, within the partition only; a ninth private window keeps none; `dweb.forget` drops a partition's |
+| IPNS sequence floors | 1,024 names per partition, in memory: the profile's, and each of at most 8 private windows', so at most 9,216 names. Fully occupied with 40-byte names, an Ed25519 libp2p key's CID, they hold 2,184,048 bytes (2.18 MB) when the names arrive in order, which leaves their B-trees least full, and about 2.02 MB in no order: inside their 3 MiB reserve. Measured with a counting allocator past the store and its nine partitions, whose setup adds about 2.6 KB; a test checks it | least recently used first, within the partition only; a ninth private window keeps none; `dweb.forget` drops a partition's |
 | hashing pool | 2 threads | jobs queue in the dweb thread, under the request's memory |
+
+**What a grant covers.** A request's grant is the most it allocates, by the allocator's count. It is two parts:
+- **The budget, an exact count.** Everything below is reserved before it is allocated, and released only once it is gone:
+  - each piece's room: a whole piece's bound; a streamed piece's 128 KiB window, held whole while it is open; for a stream whose bytes wait in a stash (a CAR, a `/bytes` stream), one frame beside it, for main's frame while it is copied in;
+  - a stash: one buffer of its stream's window, made at its first frame and never grown, so main's framing adds nothing. Once its stream ends with bytes still in it, the stream's window stays held for them until they are used;
+  - a raw block's buffer, at its room or at its capacity, whichever is more ([Raw blocks](#raw-blocks)); the room a move to a larger buffer needs past it, while it is made; and a buffer longer than its block, until it is cut or goes;
+  - the walk's parsed structure and what it keeps, each job's bytes and, for a CAR's section, its job's structures until the job's result comes back;
+  - the verified body, each segment of its queue whole until main has taken all of it: a frame is made, at its length, only as main takes it;
+  - the head's headers until main takes the head.
+- **The allowance, a fixed part of the grant, tested.** What the count doesn't follow, each bounded:
+  - the body frame being made for main, at most 64 KiB, and the outputs main hasn't taken yet: piece requests, credit, a verified chunk's copy for the cache;
+  - the body queue's joined tail, which grows to 16 KiB at most and gives back its room when it stops being the tail, and the queue's and the outputs' slots;
+  - the machine's own structures;
+  - for IPFS only, the values its walk doesn't charge yet: the error page (under 1 KiB), the head's headers and its ETag and type strings, and an IPNS record's value while it waits for the floor (at most 10 KiB).
+
+  The tests measure it with a counting allocator (`verifier_memory`): between inputs and at each request's peak, nothing allocated passes the reservation by more than the allowance, for streams in 1-byte and 64 KiB frames, raw leaves of 1.8 MB, a 1.15 MB block of unknown length, many small body slices and a page that doesn't read. A request's allowance comes out of its grant, so the 128 MiB, the 101 MiB of grants and the 12 IPFS or 50 Swarm requests stay as stated. The IPFS allowance's last part stays until the IPFS walk is charged as the Swarm walk is, value by value; that follow-up replaces it with exact charges.
 
 **Why 2 MiB for a Swarm request.**
 - **The file phase holds little:**
-  - one `/bytes` stream's 128 KiB window;
+  - one `/bytes` stream's 128 KiB window and a frame beside it, and what its bytes become while they wait for the page, at most another window;
   - four chunk pieces of at most 4,104 bytes;
   - at most eight levels of intermediate frames, two level-1 chunks ahead;
   - what the stream stashed, which its window bounds.
 
-  Every Swarm exchange and request case of the vectors passes at 2 MiB, and the most any holds between inputs is 155,736 bytes, a 67 MB file's range.
+  Every Swarm exchange and request case of the vectors passes within the budget.
 - **The largest holding is a manifest lookup** at the moment the next node is parsed:
   - the root node, parsed;
   - the followed fork's metadata;
@@ -910,15 +933,15 @@ As 0006's 4.7 did, the tests land before the code. Every case pins its failure s
   - and, while the step runs, 194 KiB for the metadata it copies.
 
   A parsed node holds at most its bytes on the wire, by its strings' capacities, so the lookup costs about the root plus twice the next node, plus about 0.37 MiB.
-- **The limit, measured:**
-  - two equal nodes packed with `Filename` metadata pass at 573 KB each and are refused at 583 KB;
-  - so a Swarm request holds a manifest whose root node and twice its largest other node, counted as kept content, come to at most about 1.72 MB.
+- **The limit, measured,** at the budget, the 2 MiB grant less its 64 KiB allowance:
+  - two equal nodes packed with `Filename` metadata (ten forks of 55,000 bytes) pass at 551 KB each and are refused at 552 KB;
+  - so a Swarm request holds a manifest whose root node and twice its largest other node, counted as kept content, come to at most about 1.66 MB.
 - **The worst case the 1 MiB node cap admits** is about 3.7 MiB: two nodes at the cap, packed with metadata the walk keeps.
   - at the next node's parse the walk holds the parsed root (up to 1.17 MiB), the followed fork's metadata and the phases (about 0.13 MiB), the joined bytes (1 MiB), their parse (up to 1.17 MiB) and the step's room (0.19 MiB);
   - between inputs, while the second node is joined, about 2.4 MiB.
 
   Such a manifest is `unverifiable`, with the memory text, where Ant would serve it (deviation `request-memory`). Real manifest nodes are tens of KB: 256 forks with ordinary metadata come to about 40 KB.
-- **The vectors pin the edge:** two manifests whose fork `a/` leads to a node of 60,000-byte `Filename`s. The one with 14 forks, about 5% inside, is served. The one with 16, about 9% outside, is refused for its memory.
+- **The vectors pin the edge:** two manifests whose fork `a/` leads to a node of 60,000-byte `Filename`s. The one with 14 forks, about 1% inside, is served: it needs about 2.00 MB of the 2,031,616-byte budget. The one with 16, about 13% outside, is refused for its memory.
 
 ## Upstream
 
@@ -983,7 +1006,7 @@ As 0006's 4.7 did, the tests land before the code. Every case pins its failure s
 | `structure-cache` | the core holds no content | verified Swarm structure in a cache per partition, each with its own LRU: 8 MiB for the profile, 2 MiB for each of at most 8 private windows, 24 MiB in all | no partition's loads evict another's entries; a ninth private window loads uncached |
 | `multi-range` | Ant answers several ranges with `multipart/byteranges` | 200 with the whole body | only clients that ask for several ranges see it |
 | `manifest-node-cap` | Ant loads a manifest node of up to 32 MiB | 1 MiB | a manifest with a larger node is `unverifiable` |
-| `request-memory` | Ant serves a manifest whatever its nodes hold | a Swarm request's lookup fits its 2 MiB: the root node and twice its largest other node, as kept content, at most about 1.72 MB ([Bounds](#bounds)) | a manifest past that, which only nodes near the 1 MiB cap packed with metadata reach, is `unverifiable` with the memory text |
+| `request-memory` | Ant serves a manifest whatever its nodes hold | a Swarm request's lookup fits its budget, the 2 MiB grant less its allowance: the root node and twice its largest other node, as kept content, at most about 1.66 MB ([Bounds](#bounds)) | a manifest past that, which only nodes near the 1 MiB cap packed with metadata reach, is `unverifiable` with the memory text |
 | `encrypted-in-walk` | an external node serves the encrypted reference a manifest node or a feed update names | a verified walk that meets one is `unverifiable`; a 128-hex reference in the URL keeps today's fetch, `unverified` | content with encrypted parts below a plain root or a feed doesn't load in verified mode |
 | `ipns-floor` | the gateway resolves an IPNS name as it likes | a record below the highest sequence verified in the session is refused while that one is valid | a gateway that rolls a name back within a session gets a 502 |
 | `soc-references` | an external node may answer a reference with a single-owner chunk, and what it serves then rests on that chunk | the core accepts one only as a feed update; elsewhere it is `unverifiable` | content reached through a SOC outside a feed doesn't load in verified mode |
@@ -1013,6 +1036,7 @@ As 0006's 4.7 did, the tests land before the code. Every case pins its failure s
 5. **`freedom-cored`:** the dweb thread and hashing pool, `dweb.verify`, `shell.dweb_get`, `dweb.forget`, admission, budgets and cancel, with tests through the binary.
 6. **freedom-browser:**
    - verify plans in validation and the handler, `dweb-shell.js`, and stream frames on the core's connection;
+   - the decoder accepts 0009's abort codes only on the core's protocol-2 connection, each in its direction ([Streams in the core](#streams-in-the-core), abort codes); a service connection still takes only 0007's, and one of 0009's there is the protocol error `abort_code`;
    - the verification setting, on by default, and the probe;
    - strict mode: the profile setting, off by default, and `strict` in the captured backend;
    - the error page for a failed navigation;
