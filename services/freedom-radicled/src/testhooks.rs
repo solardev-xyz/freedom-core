@@ -23,6 +23,10 @@
 //! - `FREEDOM_RADICLED_TEST_STOP_NODE=1` asks the node to stop right after
 //!   `rad.start` has answered, behind the stop's back: the node thread ends
 //!   as one that failed would, and the node's watch, or the stop, finds it.
+//! - `FREEDOM_RADICLED_TEST_HOLD_DOWN=1` holds the node's watch once it has
+//!   published `Down`, before it claims exit 70: it logs `test hook: the
+//!   watch holds the node down` and never goes on, so only a stop that takes
+//!   the `Down` node can end the process with 70.
 //!
 //! **Hermetic by construction:** a build with the feature never reaches
 //! off this host, whatever a test asks of it.
@@ -142,6 +146,21 @@ pub fn stop_node() -> bool {
         return true;
     }
     false
+}
+
+/// After the node's watch has published `Down`, before it claims the exit:
+/// holds it there for good, if asked.
+pub fn at_node_down() {
+    #[cfg(feature = "testhooks")]
+    if std::env::var_os("FREEDOM_RADICLED_TEST_HOLD_DOWN").is_some() {
+        fc_service::log::info(
+            "test hook: the watch holds the node down",
+            serde_json::json!({}),
+        );
+        loop {
+            std::thread::park();
+        }
+    }
 }
 
 /// NAT64 discovery's resolvers: the OS's (`None`), or, with the feature,

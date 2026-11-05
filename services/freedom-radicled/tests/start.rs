@@ -228,6 +228,47 @@ fn a_shutdown_right_after_the_node_ended_behind_it_is_node_down() {
     assert_eq!(fixture::marked(&dirs.home), Some(vec![NID.to_owned()]));
 }
 
+/// The watch has published `Down`, and the test hook holds it there for
+/// good, before it claims the exit; then `end` ends the connection. The stop
+/// that takes the `Down` node claims exit 70 itself, and the marker stays.
+fn ended_while_the_watch_holds_the_node_down(end: impl FnOnce(&mut Radicled)) {
+    let dirs = Dirs::new();
+    configure(&dirs.home, json!({}));
+    let mut radicled = Radicled::serve(
+        &dirs,
+        &[
+            ("FREEDOM_RADICLED_TEST_STOP_NODE", "1"),
+            ("FREEDOM_RADICLED_TEST_HOLD_DOWN", "1"),
+        ],
+    );
+    assert!(radicled.start()["result"].is_object());
+    assert!(
+        radicled.logs("test hook: the watch holds the node down", EXIT_TIMEOUT),
+        "the watch didn't publish Down"
+    );
+    end(&mut radicled);
+    assert_eq!(radicled.exit_code(EXIT_TIMEOUT), Some(70));
+    let log = radicled.stderr();
+    assert!(
+        log.contains("the node was down; the dirty marker stays"),
+        "{log}"
+    );
+    assert!(!log.contains("the dirty marker is cleared"), "{log}");
+    assert_eq!(fixture::marked(&dirs.home), Some(vec![NID.to_owned()]));
+}
+
+/// `rad.shutdown` between the watch's `Down` and its claim of the exit.
+#[test]
+fn a_shutdown_while_the_watch_holds_the_node_down_is_node_down() {
+    ended_while_the_watch_holds_the_node_down(Radicled::shutdown);
+}
+
+/// EOF between the watch's `Down` and its claim of the exit.
+#[test]
+fn an_eof_while_the_watch_holds_the_node_down_is_node_down() {
+    ended_while_the_watch_holds_the_node_down(Radicled::close_stdin);
+}
+
 /// A node that doesn't stop within the shutdown's bound: the process still
 /// exits, and the marker stays, since the stop isn't proven clean.
 #[test]

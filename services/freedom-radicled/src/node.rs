@@ -67,6 +67,11 @@
 //! a thread that has ended. The stop finds a request before its own, or a
 //! node thread that ended with an error, which is how a node that ended by
 //! itself always ends.
+//! - **Whoever finds the node down claims exit 70 itself.** The watch fails
+//!   the connection only after it has published `Down` and let go of the
+//!   lock, so a stop that takes a `Down` node fails it too: otherwise a
+//!   watch held up between the two would let the stop's teardown end 0.
+//!   `Connection::fail` is idempotent, and 70, once set, stays.
 //!
 //! **The dirty marker is cleared only after a proven clean stop**
 //! ("Reconciliation"): `rad.shutdown` ended the connection, and this stop
@@ -310,6 +315,9 @@ impl Node {
                     }
                     drop(phase);
                     self.changed.notify_all();
+                    // Between publishing `Down` and claiming the exit: a
+                    // stop may take the node here (see the module's doc).
+                    testhooks::at_node_down();
                     return node_down(conn);
                 }
                 // Still starting, or over.
@@ -334,7 +342,8 @@ impl Node {
         self.changed.notify_all();
         let (mut running, watched) = match previous {
             Phase::Running(running) => (running, false),
-            // The watch found its thread ended, and has ended the process.
+            // The watch found its thread ended. It may not have claimed the
+            // exit yet: this stop claims it too, below.
             Phase::Down(running) => (running, true),
             Phase::Waiting | Phase::Starting | Phase::Over => return,
         };
@@ -364,10 +373,15 @@ impl Node {
                 "the node stopped; the dirty marker stays",
                 json!({ "end": end.name() }),
             ),
-            Ending::Down if watched => log::info(
-                "the node was down; the dirty marker stays",
-                json!({ "end": end.name() }),
-            ),
+            // The watch logs `node_down`; the exit is claimed here as well,
+            // whether or not the watch has claimed it yet.
+            Ending::Down if watched => {
+                log::info(
+                    "the node was down; the dirty marker stays",
+                    json!({ "end": end.name() }),
+                );
+                conn.fail(Exit::Internal);
+            }
             Ending::Down => node_down(conn),
             Ending::Unproven(why) => log::error(
                 "the node didn't stop cleanly; the dirty marker stays",

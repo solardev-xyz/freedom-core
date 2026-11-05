@@ -90,6 +90,8 @@ pub struct Radicled {
     /// Messages read while waiting for another.
     pending: VecDeque<Value>,
     stderr: Option<std::thread::JoinHandle<String>>,
+    /// stderr so far, as its reader has it.
+    log: std::sync::Arc<std::sync::Mutex<String>>,
     next_id: u64,
 }
 
@@ -131,7 +133,7 @@ impl Radicled {
         };
         let stdin = child.stdin.take();
         let mut stdout = child.stdout.take().unwrap();
-        let mut stderr = child.stderr.take().unwrap();
+        let stderr = child.stderr.take().unwrap();
         let (tx, frames) = mpsc::channel();
         std::thread::spawn(move || {
             loop {
@@ -156,17 +158,27 @@ impl Radicled {
                 }
             }
         });
-        let stderr = std::thread::spawn(move || {
-            let mut all = String::new();
-            let _ = stderr.read_to_string(&mut all);
-            all
-        });
+        let log = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
+        let stderr = {
+            let log = log.clone();
+            std::thread::spawn(move || {
+                let mut lines = BufReader::new(stderr);
+                let mut line = Vec::new();
+                while let Ok(1..) = lines.read_until(b'\n', &mut line) {
+                    let text = String::from_utf8_lossy(&line);
+                    log.lock().unwrap().push_str(&text);
+                    line.clear();
+                }
+                log.lock().unwrap().clone()
+            })
+        };
         Radicled {
             child,
             stdin,
             frames,
             pending: VecDeque::new(),
             stderr: Some(stderr),
+            log,
             next_id: 1,
         }
     }
@@ -250,6 +262,19 @@ impl Radicled {
     /// stderr, once the process has exited.
     pub fn stderr(&mut self) -> String {
         self.stderr.take().unwrap().join().unwrap()
+    }
+
+    /// Waits up to `within` for a stderr line containing `needle`, while
+    /// the process runs.
+    pub fn logs(&self, needle: &str, within: Duration) -> bool {
+        let until = Instant::now() + within;
+        while !self.log.lock().unwrap().contains(needle) {
+            if Instant::now() >= until {
+                return false;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        true
     }
 }
 
