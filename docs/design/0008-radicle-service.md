@@ -219,9 +219,9 @@ Each ref is renamed into place atomically, but the steps together aren't. So bef
 **The dirty marker** (`node/dirty`) records that the home may hold a partial mutation:
 - **It is set before any mutation can run.** `rad.reconcile` writes it durably (the file, then its directory, flushed) before it changes anything. It stays present for the whole run, and every mutation of the home happens while it is present: COB writes, `unseed`, the import, clones, and heartwood's own fetches.
 - **It names the writers.** It holds the node IDs (public keys, so public data) of every identity that may have left a partial mutation:
-  - `rad.reconcile` adds the running identity's before it changes anything;
+  - `rad.reconcile` adds the running identity's before it changes anything. A throwaway key's isn't added: it owns no namespace and signs nothing ([Profiles without a vault](#profiles-without-a-vault)), so a check of it would find nothing, and successive throwaway starts that each reach the deadline would only grow the marker;
   - an earlier identity stays named until its namespace has been checked, whatever key later processes run with. Its vault may have been deleted or replaced since. The [switch](#the-switch) names the identity whose key file it removes in the same way;
-  - once every earlier identity's namespace is checked or its repository quarantined, `rad.reconcile` rewrites the marker durably to name only the running identity, before it replies.
+  - once every earlier identity's namespace is checked or its repository quarantined, `rad.reconcile` rewrites the marker durably to name only the running identity (none, for a throwaway key), before it replies.
 - **It is kept after anything that may be partial:** a write that ends `outcome_unknown`, or a clone or fetch that is cancelled or cut off.
 - **It is cleared only after a proven clean stop.** At `rad.shutdown`, it is removed (durably) only when all of these hold:
   - the write queue is empty, and the executing writer, if any, has returned;
@@ -1033,7 +1033,7 @@ The source research for this design found four ways the node gives away more tha
 9. **An in-process import:**
    - `import_repo` (`lr:1012`) creates the repository in storage, fetches the working copy's branch into the node's namespace with libgit2's local transport, and signs the refs;
    - it replaces `rad::init`'s `git push` (`hw/radicle/src/rad.rs:107`–`120`);
-   - at start, libradicle empties libgit2's configuration search paths, so no global or system git configuration applies.
+   - libgit2's configuration search paths are emptied, so no global or system git configuration applies: libradicle's `isolate_git_config` (solardev-xyz/libradicle#27), which the service calls early in `main`, before any thread starts. That call is the service's one `unsafe` block (AGENTS.md rule 6): libgit2's search paths are process-wide options with no sound safe setter. libradicle's starts don't call it, so the add-on and UniFFI keep their host's paths.
 
 9a. **The host's repository gate, and repairs with the host's key.** Found when the service was built (step 4): heartwood's gate (item 14) and its online repair (item 13) need a way in from the host.
 - `Options` takes the host's repository gate. Without one, the node gets an always-open gate, as the add-on and UniFFI always have.
