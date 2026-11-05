@@ -22,13 +22,15 @@ use std::time::{Duration, Instant};
 use common::fixture::{self, OTHER_SEED};
 use common::*;
 use radicle::node::address::Store as _;
+use radicle::prelude::RepoId;
+use radicle::storage::git::reconcile::quarantine;
 use serde_json::json;
 
 /// An onion v3 name: no route reaches it here.
 const ONION: &str = "xmrhfasfg5suueegrnc4gsgyi2tyclcy5oz7f5drnrodmdtob6t2ioyd.onion";
 
 /// Waits up to `within` for `done`.
-fn eventually(within: Duration, done: impl Fn() -> bool) -> bool {
+fn eventually(within: Duration, mut done: impl FnMut() -> bool) -> bool {
     let until = Instant::now() + within;
     while !done() {
         if Instant::now() >= until {
@@ -86,8 +88,20 @@ struct Peer {
 
 impl Peer {
     fn new() -> Self {
+        Self::with_seeds(&[])
+    }
+
+    /// A peer whose `config.json` names `seeds` as its preferred seeds:
+    /// libradicle's clone then asks one it is connected to even when no
+    /// inventory names it.
+    fn with_seeds(seeds: &[String]) -> Self {
         let home = tempfile::tempdir().unwrap();
         configure(home.path(), json!({ "alias": "peer" }));
+        let config = home.path().join("config.json");
+        let mut fields: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&config).unwrap()).unwrap();
+        fields["preferredSeeds"] = json!(seeds);
+        std::fs::write(&config, fields.to_string()).unwrap();
         let addr = SocketAddr::from((Ipv4Addr::LOCALHOST, free_port()));
         let mut seed = OTHER_SEED;
         let node = libradicle::Embedded::start_with_key(
@@ -121,6 +135,21 @@ impl Peer {
 
     fn connected(&self) -> usize {
         self.node.as_ref().unwrap().connected_peers().unwrap()
+    }
+
+    /// How many nodes the peer's routing table says seed `rid`: those whose
+    /// inventory, as they announced it, holds it.
+    fn seeders(&mut self, rid: RepoId) -> usize {
+        self.node.as_mut().unwrap().seeders(rid).unwrap()
+    }
+
+    /// Seeds `rid` and fetches it from a node that seeds it, or from a
+    /// connected preferred seed.
+    fn clone_repo(&mut self, rid: RepoId) -> Result<(), libradicle::Error> {
+        self.node
+            .as_mut()
+            .unwrap()
+            .clone_repo(rid, Duration::from_secs(30))
     }
 }
 
@@ -416,6 +445,50 @@ fn untrusted_addresses_the_policy_refuses_are_never_dialled() {
         !canary.touched(),
         "an untrusted loopback address was dialled"
     );
+    radicled.shutdown();
+    assert_eq!(radicled.exit_code(EXIT_TIMEOUT), Some(0));
+}
+
+/// A repository the quarantine record holds for a namespace stays closed on
+/// the running node: `rad.start` hands the node the repository gate it
+/// closed (0008, "The repository gate"). Its inventory, as the peer learns
+/// it, leaves the repository out, and a fetch of it from the node is
+/// refused, while an open repository beside it is announced and served.
+#[test]
+fn a_quarantined_repository_is_neither_announced_nor_served() {
+    let mut peer = Peer::with_seeds(&[format!("{NID}@127.0.0.1:{}", free_port())]);
+    let dirs = Dirs::new();
+    configure(
+        &dirs.home,
+        json!({ "connect": [format!("{}@{}", peer.nid(), peer.addr)] }),
+    );
+    // Made by a third identity, seeded by the node: imported, each is
+    // seeded explicitly.
+    let creator = [9; 32];
+    let open = fixture::repository(&dirs.home, &creator, "open");
+    let closed = fixture::repository(&dirs.home, &creator, "closed");
+    fixture::quarantine(&dirs.home, closed, quarantine::Kind::Namespace);
+
+    let mut radicled = Radicled::serve(&dirs, &[]);
+    assert!(radicled.start()["result"].is_object());
+    // The node's inventory has reached the peer: the open repository is in
+    // it, the quarantined one isn't.
+    assert!(
+        eventually(Duration::from_secs(30), || peer.seeders(open) > 0),
+        "the peer never learned the node's inventory"
+    );
+    assert_eq!(
+        peer.seeders(closed),
+        0,
+        "the quarantined repository was announced"
+    );
+    // The node serves the open repository, and refuses the quarantined one:
+    // the peer asks it, its connected preferred seed, all the same.
+    peer.clone_repo(open).unwrap();
+    match peer.clone_repo(closed) {
+        Err(libradicle::Error::FetchFailed(rid, _)) => assert_eq!(rid, closed),
+        other => panic!("the quarantined repository's fetch: {other:?}"),
+    }
     radicled.shutdown();
     assert_eq!(radicled.exit_code(EXIT_TIMEOUT), Some(0));
 }

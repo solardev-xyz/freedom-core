@@ -209,6 +209,25 @@ fn a_node_thread_that_ends_is_node_down() {
     assert_eq!(fixture::marked(&dirs.home), Some(vec![NID.to_owned()]));
 }
 
+/// The node is asked to stop behind the service's back as `rad.start`
+/// answers, and `rad.shutdown` follows at once: whichever of the node's
+/// watch and the stop takes the node first, it is `node_down`, exit 70, and
+/// the marker stays. The stop doesn't take a node already stopping for one
+/// it stopped itself.
+#[test]
+fn a_shutdown_right_after_the_node_ended_behind_it_is_node_down() {
+    let dirs = Dirs::new();
+    configure(&dirs.home, json!({}));
+    let mut radicled = Radicled::serve(&dirs, &[("FREEDOM_RADICLED_TEST_STOP_NODE", "1")]);
+    assert!(radicled.start()["result"].is_object());
+    radicled.shutdown();
+    assert_eq!(radicled.exit_code(EXIT_TIMEOUT), Some(70));
+    let log = radicled.stderr();
+    assert!(log.contains(r#""reason":"node_down""#), "{log}");
+    assert!(!log.contains("the dirty marker is cleared"), "{log}");
+    assert_eq!(fixture::marked(&dirs.home), Some(vec![NID.to_owned()]));
+}
+
 /// A node that doesn't stop within the shutdown's bound: the process still
 /// exits, and the marker stays, since the stop isn't proven clean.
 #[test]

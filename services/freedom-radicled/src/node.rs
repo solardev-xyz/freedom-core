@@ -42,11 +42,38 @@
 //!
 //! **The stop** ([`Node::stop`], at the connection's end): the node is asked
 //! to stop and waited for, for at most 3 s ([`SHUTDOWN_WITHIN`]), inside the
-//! connection's 5 s exit. **The dirty marker is cleared only after a proven
-//! clean stop** ("Reconciliation"): `rad.shutdown` ended the connection, the
-//! node was running, not down, and `Embedded::shutdown_within` returned
-//! `Ok`, so heartwood's workers have finished their fetches. This build has
-//! no writes, so no write is queued, running or uncertain. Anything else
+//! connection's 5 s exit.
+//!
+//! **How the node ended is one decision,** whichever of the watch and the
+//! stop comes first:
+//! - **Both decide under the phase's lock.** The watch marks a node whose
+//!   thread has ended `Down`; the stop takes the node out of the phase.
+//! - **The service asks the node to stop in one place,**
+//!   [`Running::ask_stop`], which records the request, and only where no
+//!   other thread can reach the node: under the phase's lock, or once the
+//!   stop has taken the node out of the phase. Dropping a node asks too, but
+//!   only one the phase never held, or after the stop. So a stop that takes
+//!   a node with no request recorded is the first to ask it, and the only
+//!   one.
+//! - **heartwood's run ends `Ok` only once it was asked to stop** (its
+//!   `Runtime::run` at the pinned commit). Its reactor ends on its
+//!   controller's `Shutdown`, on a fatal error of heartwood's service, which
+//!   the run returns, or on a panic, which is an error too. libradicle asks
+//!   through that controller only from its own stop calls. The node has no
+//!   control socket, and libradicle sends its signal channel nothing.
+//!
+//! So a node that ended, or began to stop, behind the stop is `node_down`,
+//! exit 70, with the marker kept, whichever thread finds it. The watch finds
+//! a thread that has ended. The stop finds a request before its own, or a
+//! node thread that ended with an error, which is how a node that ended by
+//! itself always ends.
+//!
+//! **The dirty marker is cleared only after a proven clean stop**
+//! ("Reconciliation"): `rad.shutdown` ended the connection, and this stop
+//! asked a node nothing had asked before. `Embedded::shutdown_within`
+//! returned `Ok` in time, so the node stopped because this stop asked it,
+//! and heartwood's workers have finished their fetches. This build has no
+//! writes, so no write is queued, running or uncertain. Anything else
 //! leaves the marker, and the next start runs the full repair.
 
 use std::path::{Path, PathBuf};
@@ -81,6 +108,9 @@ const PAGE: usize = 64;
 /// A running node, and what runs with it.
 struct Running {
     embedded: libradicle::Embedded,
+    /// Whether the node has been asked to stop: only [`Running::ask_stop`]
+    /// asks (see the module's doc).
+    asked: bool,
     /// The host's half of the node's repository gate: the online repair and
     /// quarantine's removal (later steps) open and close repositories
     /// through it.
@@ -88,6 +118,15 @@ struct Running {
     /// NAT64 discovery, running while its lease is held: `direct` mode's,
     /// for the node's life (`rad.stats` reads it, a later step).
     nat64: Option<(nat64::Discovery, nat64::Lease)>,
+}
+
+impl Running {
+    /// Asks the node to stop, and waits up to `within` for it
+    /// (`Embedded::shutdown_within`): the one place the service asks.
+    fn ask_stop(&mut self, within: Duration) -> Result<(), libradicle::Error> {
+        self.asked = true;
+        self.embedded.shutdown_within(within)
+    }
 }
 
 /// Where the node stands.
@@ -249,7 +288,10 @@ impl Node {
             id,
             &json!({ "did": identity.did, "nid": identity.nid, "alias": identity.alias }),
         );
-        testhooks::after_start(&mut running.embedded);
+        if testhooks::stop_node() {
+            // No time to wait: the node is asked, and its thread ends after.
+            let _ = running.ask_stop(Duration::ZERO);
+        }
         *phase = Phase::Running(running);
         drop(phase);
         self.changed.notify_all();
@@ -268,10 +310,7 @@ impl Node {
                     }
                     drop(phase);
                     self.changed.notify_all();
-                    log::error("the node thread ended", json!({ "reason": "node_down" }));
-                    // Nothing else is in flight in this build to answer.
-                    conn.fail(Exit::Internal);
-                    return;
+                    return node_down(conn);
                 }
                 // Still starting, or over.
                 Phase::Waiting | Phase::Starting => {}
@@ -285,26 +324,33 @@ impl Node {
     }
 
     /// The connection ended with `end`: stops the node, if one runs, and
-    /// clears the dirty marker in `home` after a proven clean stop (see the
+    /// clears the dirty marker in `home` after a proven clean stop. A node
+    /// that ended, or began to stop, behind it is `node_down` (see the
     /// module's doc). Nothing starts after this.
-    pub fn stop(&self, home: &Path, end: End) {
+    pub fn stop(&self, conn: &Connection, home: &Path, end: End) {
+        // The node is taken under the phase's lock, where the watch marks it
+        // down: whichever comes first decides.
         let previous = std::mem::replace(&mut *self.lock(), Phase::Over);
         self.changed.notify_all();
-        let (running, down) = match previous {
+        let (mut running, watched) = match previous {
             Phase::Running(running) => (running, false),
+            // The watch found its thread ended, and has ended the process.
             Phase::Down(running) => (running, true),
             Phase::Waiting | Phase::Starting | Phase::Over => return,
         };
+        // Read before this stop asks: nothing else can reach the node now.
+        let asked = running.asked;
+        let stopped = running.ask_stop(testhooks::shutdown_within(SHUTDOWN_WITHIN));
         let Running {
-            mut embedded,
+            embedded,
             repositories,
             nat64,
+            ..
         } = running;
-        let stopped = embedded.shutdown_within(testhooks::shutdown_within(SHUTDOWN_WITHIN));
         drop(nat64);
         drop(repositories);
-        match stopped {
-            Ok(()) if !down && end == End::Shutdown => match marker::remove(home) {
+        match ending(watched || asked, &stopped, end) {
+            Ending::Clean => match marker::remove(home) {
                 Ok(()) => log::info(
                     "the node stopped cleanly; the dirty marker is cleared",
                     json!({}),
@@ -314,13 +360,18 @@ impl Node {
                     json!({ "error": e.to_string() }),
                 ),
             },
-            Ok(()) => log::info(
+            Ending::Stopped => log::info(
                 "the node stopped; the dirty marker stays",
-                json!({ "end": end.name(), "down": down }),
+                json!({ "end": end.name() }),
             ),
-            Err(e) => log::error(
+            Ending::Down if watched => log::info(
+                "the node was down; the dirty marker stays",
+                json!({ "end": end.name() }),
+            ),
+            Ending::Down => node_down(conn),
+            Ending::Unproven(why) => log::error(
                 "the node didn't stop cleanly; the dirty marker stays",
-                json!({ "error": stop_error(&e) }),
+                json!({ "error": why }),
             ),
         }
         // A node that didn't stop in time is waited for once more as it
@@ -329,13 +380,43 @@ impl Node {
     }
 }
 
-/// A stop's failure, without its details: a node thread's error can name a
-/// path.
-fn stop_error(e: &libradicle::Error) -> &'static str {
-    match e {
-        libradicle::Error::ShutdownTimeout(_) => "it didn't stop in time",
-        libradicle::Error::NodeThread(_) => "its thread ended with an error",
-        _ => "its home wasn't let go of",
+/// The node thread ended while the node should run, or the node began to
+/// stop behind the service: the process ends with 70, a crash, and the
+/// marker stays. Nothing else is in flight in this build to answer.
+fn node_down(conn: &Connection) {
+    log::error("the node thread ended", json!({ "reason": "node_down" }));
+    conn.fail(Exit::Internal);
+}
+
+/// How a stop left the node.
+#[derive(Debug, PartialEq, Eq)]
+enum Ending {
+    /// `rad.shutdown`'s stop asked a node nothing had asked before, and it
+    /// stopped in time: the marker is cleared.
+    Clean,
+    /// The same, but the connection ended otherwise: the marker stays.
+    Stopped,
+    /// The node ended, or began to stop, behind the stop: `node_down`.
+    Down,
+    /// It didn't stop in time, or its home wasn't let go of, and why: the
+    /// marker stays.
+    Unproven(&'static str),
+}
+
+/// How the stop that asked the node itself left it, from `stopped`, its
+/// request's outcome. `behind`: the node was found down, or asked to stop
+/// before. heartwood's run ends `Ok` only once it was asked, so a node
+/// thread that ended by itself is `NodeThread`, before this request or
+/// after it, as is one that panicked.
+fn ending(behind: bool, stopped: &Result<(), libradicle::Error>, end: End) -> Ending {
+    match stopped {
+        _ if behind => Ending::Down,
+        Err(libradicle::Error::NodeThread(_)) => Ending::Down,
+        // Without the details: a node thread's error can name a path.
+        Err(libradicle::Error::ShutdownTimeout(_)) => Ending::Unproven("it didn't stop in time"),
+        Err(_) => Ending::Unproven("its home wasn't let go of"),
+        Ok(()) if end == End::Shutdown => Ending::Clean,
+        Ok(()) => Ending::Stopped,
     }
 }
 
@@ -389,6 +470,7 @@ fn run(start: Start) -> Result<Running, ErrorBody> {
     .map_err(|e| start_failed(e.to_string()))?;
     Ok(Running {
         embedded,
+        asked: false,
         repositories,
         nat64,
     })
@@ -484,6 +566,37 @@ mod tests {
             assert_eq!(gate.state(&rid(byte)), RepoState::Quarantined(kind));
         }
         assert!(gate.state(&rid(200)).is_open());
+    }
+
+    /// A stop clears the marker only for a node it alone asked, stopped in
+    /// time, at `rad.shutdown`; a node found down, asked before, or whose
+    /// thread ended with an error is `node_down`, whatever the stop's end.
+    #[test]
+    fn only_the_stop_that_alone_asked_a_live_node_is_clean() {
+        use libradicle::Error::{NodeThread, ShutdownTimeout};
+        let thread = || Err(NodeThread("ended".into()));
+        let late = || Err(ShutdownTimeout(Duration::ZERO));
+        assert_eq!(ending(false, &Ok(()), End::Shutdown), Ending::Clean);
+        assert_eq!(ending(false, &Ok(()), End::Eof), Ending::Stopped);
+        assert_eq!(ending(false, &thread(), End::Shutdown), Ending::Down);
+        assert_eq!(ending(false, &thread(), End::Eof), Ending::Down);
+        assert_eq!(
+            ending(false, &late(), End::Shutdown),
+            Ending::Unproven("it didn't stop in time")
+        );
+        assert_eq!(
+            ending(
+                false,
+                &Err(std::io::Error::other("lock").into()),
+                End::Shutdown
+            ),
+            Ending::Unproven("its home wasn't let go of")
+        );
+        for stopped in [Ok(()), thread(), late()] {
+            for end in [End::Shutdown, End::Eof] {
+                assert_eq!(ending(true, &stopped, end), Ending::Down, "{stopped:?}");
+            }
+        }
     }
 
     #[test]

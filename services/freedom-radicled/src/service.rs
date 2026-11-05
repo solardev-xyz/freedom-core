@@ -386,12 +386,12 @@ impl Service for RadicleService {
         // Every request is answered at once: nothing runs to cancel.
     }
 
-    fn end(&self, _conn: &Connection, end: End) {
+    fn end(&self, conn: &Connection, end: End) {
         self.disarm_deadline();
         // Reconciliation stops after the unit in progress.
         self.stopping.store(true, Ordering::Release);
         // The node stops, within the connection's 5 s exit.
-        self.node.stop(&self.home, end);
+        self.node.stop(conn, &self.home, end);
         log::info("connection ended", json!({ "end": end.name() }));
     }
 }

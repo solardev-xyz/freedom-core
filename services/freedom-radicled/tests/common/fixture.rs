@@ -139,6 +139,21 @@ pub fn sigrefs(home: &Path, rid: RepoId, namespace: &str) -> git2::Oid {
         .unwrap()
 }
 
+/// Quarantines `rid` in `home`'s quarantine record for `kind`, as
+/// `rad.reconcile` leaves a repository it couldn't repair.
+pub fn quarantine(
+    home: &Path,
+    rid: RepoId,
+    kind: radicle::storage::git::reconcile::quarantine::Kind,
+) {
+    use radicle::storage::git::reconcile::quarantine::{QUARANTINE_DB_FILE, Quarantine};
+    std::fs::create_dir_all(home.join("node")).unwrap();
+    Quarantine::open(home.join("node").join(QUARANTINE_DB_FILE))
+        .unwrap()
+        .quarantine(rid, kind, "namespace", None, "", Default::default())
+        .unwrap();
+}
+
 /// The dirty marker, as the core's switch or a killed process leaves it.
 pub fn mark(home: &Path, node_ids: &[&str]) {
     std::fs::create_dir_all(home.join("node")).unwrap();

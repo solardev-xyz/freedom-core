@@ -21,8 +21,8 @@
 //! - `FREEDOM_RADICLED_TEST_SHUTDOWN_WITHIN_MS` replaces how long the
 //!   shutdown waits for the node to stop ([`crate::service`]'s 3 s).
 //! - `FREEDOM_RADICLED_TEST_STOP_NODE=1` asks the node to stop right after
-//!   `rad.start` has answered, behind the service's back: the node thread
-//!   ends as one that failed would, and the node's watch sees it.
+//!   `rad.start` has answered, behind the stop's back: the node thread ends
+//!   as one that failed would, and the node's watch, or the stop, finds it.
 //!
 //! **Hermetic by construction:** a build with the feature never reaches
 //! off this host, whatever a test asks of it.
@@ -134,15 +134,14 @@ pub fn shutdown_within(default: Duration) -> Duration {
     default
 }
 
-/// After `rad.start` has answered: asks the node to stop, if asked.
-pub fn after_start(node: &mut libradicle::Embedded) {
+/// Whether the node is to be asked to stop right after `rad.start` has
+/// answered.
+pub fn stop_node() -> bool {
     #[cfg(feature = "testhooks")]
     if std::env::var_os("FREEDOM_RADICLED_TEST_STOP_NODE").is_some() {
-        // No time to wait: the node is asked, and its thread ends after.
-        let _ = node.shutdown_within(Duration::ZERO);
+        return true;
     }
-    #[cfg(not(feature = "testhooks"))]
-    let _ = node;
+    false
 }
 
 /// NAT64 discovery's resolvers: the OS's (`None`), or, with the feature,
