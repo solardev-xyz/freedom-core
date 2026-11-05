@@ -32,7 +32,7 @@ use fc_swarm::verify::{Chunk, FeedUpdate, MAX_CHUNK_WIRE, Refusal, SPAN_SIZE};
 use super::ant::{self, Entry, Feed, NotFound, Ranges};
 use super::charged::Charged;
 use super::jobs::{Verdict, Work};
-use super::{Ask, Failure, MAX_CHUNK_PIECES, PieceFailure, PieceId};
+use super::{Ask, Failure, MAX_CHUNK_PIECES, PieceFailure, PieceId, Stash};
 
 /// The machine's bookkeeping, with the Swarm walk's tags. The walk holds
 /// its memory only as [`Charged`] values, whose charges only `charged.rs`
@@ -458,7 +458,7 @@ impl Tree {
             if fetch_chunk(core, Tag::Inter(start, depth), &w.address).is_none() {
                 self.ahead.remove(&(start, depth));
                 if w.blocking {
-                    return Err(Failure::Unverifiable);
+                    return Err(Failure::Memory);
                 }
                 break;
             }
@@ -567,7 +567,7 @@ enum Progress {
 
 impl Load {
     fn start(core: &mut Core, address: [u8; 32]) -> Result<Self, Failure> {
-        fetch_chunk(core, Tag::NodeRoot, &address).ok_or(Failure::Unverifiable)?;
+        fetch_chunk(core, Tag::NodeRoot, &address).ok_or(Failure::Memory)?;
         Ok(Self {
             address,
             state: LoadState::Root,
@@ -638,7 +638,7 @@ impl Load {
                 continue;
             }
             if fetch_chunk(core, Tag::Sniff, &child).is_none() {
-                return Progress::Failed(Failure::Unverifiable);
+                return Progress::Failed(Failure::Memory);
             }
             self.state = LoadState::Sniff { depth, child };
             return Progress::Pending;
@@ -664,11 +664,11 @@ impl Load {
             // The node's bytes, copied within room reserved for them.
             return match Charged::make(core, size, || bytes.to_vec()) {
                 Some(bytes) => Progress::Loaded(Loaded::Node(bytes)),
-                None => Progress::Failed(Failure::Unverifiable),
+                None => Progress::Failed(Failure::Memory),
             };
         }
         let Some(buf) = Charged::make(core, size, || vec![0; size]) else {
-            return Progress::Failed(Failure::Unverifiable);
+            return Progress::Failed(Failure::Memory);
         };
         let tree = match Tree::new(core, root, len, 0, len, u64::MAX) {
             Ok(t) => t,
@@ -714,7 +714,7 @@ impl Load {
                             continue;
                         }
                         if fetch_chunk(core, Tag::JoinLeaf(start), &address).is_none() {
-                            return Progress::Failed(Failure::Unverifiable);
+                            return Progress::Failed(Failure::Memory);
                         }
                         join.leaves.insert(start, (address, len));
                     }
@@ -876,35 +876,13 @@ struct ByteStream {
     id: PieceId,
     /// The file offset of the stream's next byte.
     pos: u64,
-    /// The frames as they came, each whole under its charge until all its
-    /// bytes are used.
-    stash: VecDeque<Bytes>,
-    /// How much of the stash's first frame is used.
-    front_at: usize,
-    /// Of those, the bytes skipped, not given to a leaf: their credit goes
-    /// back with the frame.
-    front_skipped: usize,
+    /// The bytes no leaf has taken yet, in one buffer of the stream's
+    /// window. A byte given to a leaf is credited once it is sent, and
+    /// until then its place in the window stays held.
+    stash: Stash,
     headed: bool,
     /// Still open: not ended, failed or cancelled.
     open: bool,
-}
-
-impl ByteStream {
-    /// The first frame, once all its bytes are used, goes, then its
-    /// charge; the bytes it skipped are credited back.
-    fn used(&mut self, core: &mut Core) {
-        if !self.stash.front().is_some_and(|f| self.front_at >= f.len()) {
-            return;
-        }
-        if let Some(frame) = self.stash.pop_front() {
-            frame.release(core);
-        }
-        self.front_at = 0;
-        let skipped = std::mem::take(&mut self.front_skipped);
-        if skipped > 0 {
-            core.consumed(self.id, skipped);
-        }
-    }
 }
 
 #[derive(Debug)]
@@ -1010,15 +988,13 @@ impl Body {
                 Tag::Bytes,
                 format!("/bytes/{}", ant::hex(&self.reference)),
                 headers,
-                Ask::Stream(None),
+                Ask::Stashed,
             )
-            .ok_or(Failure::Unverifiable)?;
+            .ok_or(Failure::Memory)?;
         self.stream = Some(ByteStream {
             id,
             pos: self.fs,
-            stash: VecDeque::new(),
-            front_at: 0,
-            front_skipped: 0,
+            stash: Stash::default(),
             headed: false,
             open: true,
         });
@@ -1031,7 +1007,7 @@ impl Body {
         // A leaf's length is at most a chunk's.
         let len = usize::try_from(len).unwrap_or(CHUNK_SIZE);
         let Some(bytes) = Charged::make(core, len, || Vec::with_capacity(len)) else {
-            self.stopped = Some(Failure::Unverifiable);
+            self.stopped = Some(Failure::Memory);
             return;
         };
         self.leaves.push_back(Leaf {
@@ -1043,7 +1019,7 @@ impl Body {
         });
     }
 
-    /// Stops the stream: cancelled, its frames dropped and the bytes no
+    /// Stops the stream: cancelled, its buffer dropped and the bytes no
     /// leaf took credited back.
     fn close_stream(&mut self, core: &mut Core) {
         if let Some(s) = self.stream.as_mut() {
@@ -1051,12 +1027,8 @@ impl Body {
                 s.open = false;
                 core.cancel_piece(s.id);
             }
-            let used = std::mem::take(&mut s.front_at);
-            let mut credit = std::mem::take(&mut s.front_skipped);
-            for (i, frame) in s.stash.drain(..).enumerate() {
-                credit += frame.len().saturating_sub(if i == 0 { used } else { 0 });
-                frame.release(core);
-            }
+            let credit = s.stash.len();
+            s.stash.free(core);
             core.consumed(s.id, credit);
         }
     }
@@ -1067,10 +1039,10 @@ impl Body {
             let Some(s) = self.stream.as_mut() else {
                 return;
             };
-            let Some(front) = s.stash.front() else {
+            let avail = s.stash.front().len();
+            if avail == 0 {
                 break;
-            };
-            let avail = front.len() - s.front_at;
+            }
             if s.pos > self.fe || self.stopped.is_some() {
                 // Past what is needed, or past a failure: dropped.
                 self.close_stream(core);
@@ -1080,10 +1052,9 @@ impl Body {
                 // A 200's bytes before the first needed leaf: unread.
                 let gap = usize::try_from(self.fs - s.pos).unwrap_or(usize::MAX);
                 let n = gap.min(avail);
-                s.front_at += n;
-                s.front_skipped += n;
+                s.stash.consume(core, n);
                 s.pos += n as u64;
-                s.used(core);
+                core.consumed(s.id, n);
                 continue;
             }
             let pos = s.pos;
@@ -1123,18 +1094,13 @@ impl Body {
                 self.stopped = Some(Failure::Unverifiable);
                 continue;
             }
-            let Some(front) = s.stash.front() else {
-                break;
-            };
+            let front = s.stash.front();
             let want = leaf.len - bytes.len();
-            let end = s.front_at + want.min(front.len() - s.front_at);
-            // Copied into the leaf's own buffer: the frame stays whole, and
-            // charged, until all its bytes are used.
-            let n = bytes.fill_from(&front[s.front_at..end]);
+            // Copied into the leaf's own buffer, out of the stash's.
+            let n = bytes.fill_from(&front[..want.min(front.len())]);
             let full = bytes.len() == leaf.len;
-            s.front_at += n;
+            s.stash.consume(core, n);
             s.pos += n as u64;
-            s.used(core);
             if full {
                 leaf.state = LeafState::Hashing;
                 if let Some(bytes) = leaf.bytes.take() {
@@ -1164,8 +1130,7 @@ impl Body {
             if core.whole_pieces() >= MAX_CHUNK_PIECES {
                 break;
             }
-            fetch_chunk(core, Tag::Fallback(leaf.start), &leaf.address)
-                .ok_or(Failure::Unverifiable)?;
+            fetch_chunk(core, Tag::Fallback(leaf.start), &leaf.address).ok_or(Failure::Memory)?;
             leaf.state = LeafState::Fallback;
         }
         Ok(())
@@ -1324,18 +1289,22 @@ impl Body {
                     leaf.state = LeafState::Failed(Failure::Piece(failure));
                 }
             }
-            Tag::Bytes => self.stream_stopped(Failure::Piece(failure)),
+            Tag::Bytes => self.stream_stopped(core, Failure::Piece(failure)),
             _ => {}
         }
         self.pump(core)
     }
 
-    fn stream_stopped(&mut self, failure: Failure) {
-        if let Some(s) = self.stream.as_mut() {
-            s.open = false;
-            if s.pos <= self.fe && self.ended.is_none() {
-                self.ended = Some(failure);
-            }
+    /// The stream has ended: what it stashed still fills leaves, in the
+    /// window kept for it.
+    fn stream_stopped(&mut self, core: &mut Core, failure: Failure) {
+        let Some(s) = self.stream.as_mut() else {
+            return core.window_done();
+        };
+        s.open = false;
+        s.stash.keep(core);
+        if s.pos <= self.fe && self.ended.is_none() {
+            self.ended = Some(failure);
         }
     }
 
@@ -1369,21 +1338,19 @@ impl Body {
         self.pump(core)
     }
 
-    fn stream_data(&mut self, core: &mut Core, bytes: Bytes) -> Result<bool, Failure> {
+    fn stream_data(&mut self, core: &mut Core, bytes: Vec<u8>) -> Result<bool, Failure> {
         match self.stream.as_mut() {
-            Some(s) if s.open && s.headed => s.stash.push_back(bytes),
-            Some(s) => {
-                let n = bytes.len();
-                bytes.release(core);
-                core.consumed(s.id, n);
-            }
-            None => bytes.release(core),
+            // Copied into the stream's buffer, and the frame goes.
+            Some(s) if s.open && s.headed => s.stash.push(&bytes),
+            Some(s) => core.consumed(s.id, bytes.len()),
+            None => {}
         }
+        drop(bytes);
         self.pump(core)
     }
 
     fn stream_end(&mut self, core: &mut Core) -> Result<bool, Failure> {
-        self.stream_stopped(Failure::Stopped);
+        self.stream_stopped(core, Failure::Stopped);
         self.pump(core)
     }
 
@@ -1604,7 +1571,7 @@ impl Walk {
     fn start_lookup(&mut self, core: &mut Core, node: Charged<manifest::Node>) {
         let Some(room) = Charged::room(core, manifest::lookup_room(&self.path)) else {
             node.release(core);
-            return self.end(core, Failure::Unverifiable);
+            return self.end(core, Failure::Memory);
         };
         let path = &self.path;
         let taken = node.join(room).map(|(node, ())| {
@@ -1638,7 +1605,7 @@ impl Walk {
                 drop(headers);
                 drop(body);
                 cover.release(core);
-                return core.fail(Failure::Unverifiable);
+                return core.fail(Failure::Memory);
             }
         }
         let n = body.len();
@@ -1747,7 +1714,7 @@ impl Walk {
                 };
                 let Some(room) = Charged::room(core, parse_room + manifest::STEP_ROOM) else {
                     loaded.release(core);
-                    return self.end(core, Failure::Unverifiable);
+                    return self.end(core, Failure::Memory);
                 };
                 let Some(lookup) = self.lookup.take() else {
                     loaded.release(core);
@@ -1808,7 +1775,7 @@ impl Walk {
                     .fetch(Tag::Feed, path, headers, Ask::Whole(super::MAX_WHOLE))
                     .is_none()
                 {
-                    return self.end(core, Failure::Unverifiable);
+                    return self.end(core, Failure::Memory);
                 }
                 self.stage = Stage::FeedIndex { owner, topic };
             }
@@ -1898,7 +1865,7 @@ impl Walk {
         };
         let Some(room) = Charged::room(core, self.path.len()) else {
             found.release(core);
-            return self.end(core, Failure::Unverifiable);
+            return self.end(core, Failure::Memory);
         };
         let (path, feed) = (&self.path, self.feed);
         let entry = found.join(room).remake(core, |((_, mut metadata), ())| {
@@ -1917,7 +1884,7 @@ impl Walk {
         // Staged first, so an end from here releases the entry.
         self.stage = Stage::FileRoot { entry };
         if fetch_chunk(core, Tag::FileRoot, &reference).is_none() {
-            self.end(core, Failure::Unverifiable);
+            self.end(core, Failure::Memory);
         }
     }
 
@@ -1948,7 +1915,7 @@ impl Walk {
         let Some(room) = Charged::room(core, 2 * entry.cost() + HEAD_ROOM) else {
             entry.release(core);
             wire.release(core);
-            return self.end(core, Failure::Unverifiable);
+            return self.end(core, Failure::Memory);
         };
         // A raw root's sniffed chunks go to its body.
         let known = std::mem::take(&mut self.known);
@@ -2120,7 +2087,7 @@ impl Walk {
                 };
                 let address = fc_swarm::verify::feed_update_address(&owner, &topic, index);
                 if fetch_chunk(core, Tag::Update, &address).is_none() {
-                    return self.end(core, Failure::Unverifiable);
+                    return self.end(core, Failure::Memory);
                 }
                 self.stage = Stage::FeedUpdate {
                     owner,
@@ -2168,8 +2135,15 @@ impl Walk {
                 let r = b.failed(core, tag, failure);
                 self.body_result(core, r);
             }
-            Stage::Done => {}
-            _ => self.end(core, Failure::Piece(failure)),
+            stage => {
+                let done = matches!(stage, Stage::Done);
+                if tag == Tag::Bytes {
+                    core.window_done();
+                }
+                if !done {
+                    self.end(core, Failure::Piece(failure));
+                }
+            }
         }
     }
 
@@ -2187,21 +2161,23 @@ impl Walk {
         }
     }
 
-    pub(crate) fn stream_data(&mut self, core: &mut Core, tag: Tag, id: PieceId, bytes: Bytes) {
+    pub(crate) fn stream_data(&mut self, core: &mut Core, tag: Tag, id: PieceId, bytes: Vec<u8>) {
         if let (Stage::Body(b), Tag::Bytes) = (&mut self.stage, tag) {
             let r = b.stream_data(core, bytes);
             self.body_result(core, r);
         } else {
-            let n = bytes.len();
-            bytes.release(core);
-            core.consumed(id, n);
+            core.consumed(id, bytes.len());
         }
     }
 
     pub(crate) fn stream_end(&mut self, core: &mut Core, tag: Tag, _id: PieceId) {
-        if let (Stage::Body(b), Tag::Bytes) = (&mut self.stage, tag) {
-            let r = b.stream_end(core);
-            self.body_result(core, r);
+        match (&mut self.stage, tag) {
+            (Stage::Body(b), Tag::Bytes) => {
+                let r = b.stream_end(core);
+                self.body_result(core, r);
+            }
+            (_, Tag::Bytes) => core.window_done(),
+            _ => {}
         }
     }
 
@@ -2352,7 +2328,7 @@ fn parse(
 ) -> Result<Result<Charged<manifest::Node>, NodeError>, Failure> {
     let Some(room) = Charged::room(core, manifest::parse_room(bytes.len())) else {
         bytes.release(core);
-        return Err(Failure::Unverifiable);
+        return Err(Failure::Memory);
     };
     Ok(bytes
         .join(room)
@@ -2435,8 +2411,6 @@ impl super::Events<Tag> for Walk {
     }
 
     fn stream_data(&mut self, core: &mut Core, tag: Tag, id: PieceId, bytes: Vec<u8>) {
-        let n = bytes.len();
-        let bytes = Charged::arrived(core, bytes, n);
         Walk::stream_data(self, core, tag, id, bytes);
     }
 

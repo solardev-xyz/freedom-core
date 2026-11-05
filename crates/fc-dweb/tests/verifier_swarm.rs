@@ -523,6 +523,9 @@ enum Kind {
     Encrypted,
     /// A feed with no update: the node's 404, with the core's message.
     NodeMiss,
+    /// A manifest node past what a Swarm request's 2 MiB holds beside its
+    /// root: the budget's 502 (deviation `request-memory`).
+    Memory,
 }
 
 fn kind_of(e: &Json) -> Kind {
@@ -535,6 +538,7 @@ fn kind_of(e: &Json) -> Kind {
     match case {
         "feed-encrypted" | "encrypted-below-plain-root" => Kind::Encrypted,
         "feed-empty" => Kind::NodeMiss,
+        "memory-limit-outside" => Kind::Memory,
         _ => Kind::Same,
     }
 }
@@ -554,11 +558,12 @@ fn big(case: &str, id: &str, part: usize) -> bool {
 #[test]
 fn bzz_exchanges() {
     let n = replay(|case, _| !case.starts_with("file-67108865-"));
-    assert_eq!(n.total, 675, "{n:?}");
+    assert_eq!(n.total, 677, "{n:?}");
     assert_eq!(n.unplanned, 2, "{n:?}");
     assert_eq!(n.kinds[&Kind::MultiRange], 21, "{n:?}");
     assert_eq!(n.kinds.get(&Kind::Encrypted), Some(&8), "{n:?}");
     assert_eq!(n.kinds.get(&Kind::NodeMiss), Some(&7), "{n:?}");
+    assert_eq!(n.kinds.get(&Kind::Memory), Some(&1), "{n:?}");
     assert!(n.runs > 400, "{n:?}");
 }
 
@@ -751,6 +756,13 @@ fn replay_warm(choose: impl Fn(&str, &str) -> bool, warm: bool) -> Replayed {
                     "{id}"
                 );
             }
+            Kind::Memory => {
+                assert_eq!(
+                    got.ending,
+                    Some(Ending::Error(502, fc_dweb::verifier::MEMORY.to_owned())),
+                    "{id}"
+                );
+            }
         }
     }
     for id in &unplanned {
@@ -893,7 +905,7 @@ fn every_swarm_request_case() {
             n += 1;
         }
     }
-    assert_eq!(n, 33, "{n}");
+    assert_eq!(n, 35, "{n}");
 }
 
 /// The same cases with replies and hash results out of order, and a page
@@ -976,6 +988,33 @@ fn hash_results_it_did_not_ask_for_are_refused() {
         Err(Misuse::EndedPiece)
     );
     assert_eq!(v.body_credit(1), Err(Misuse::BodyCredit));
+}
+
+/// A piece whose request main hasn't taken is one main wasn't asked for:
+/// its answer is refused and changes nothing, so the walk never asks on
+/// for pieces main hasn't seen, however seldom main polls.
+#[test]
+fn a_piece_main_has_not_taken_is_refused() {
+    let doc = load("dweb-verify.json");
+    let store = Store::new(&doc);
+    let world = Antd::honest(&store);
+    let p = plan(SITE_A, "/style.css", "", vec![]);
+    let mut v = Verifier::new(3, &p, Method::Get, None, false, Options::default()).unwrap();
+    let before = v.reserved();
+    assert_eq!(
+        v.piece_whole(PieceId(0), 200, vec![], vec![]),
+        Err(Misuse::UnknownPiece)
+    );
+    assert_eq!(v.reserved(), before);
+    let Some(Output::Piece(req)) = v.poll() else {
+        panic!("the root, still asked")
+    };
+    assert_eq!(req.id, PieceId(0));
+    let Answer::Whole { body, .. } = world.answer(&req) else {
+        panic!()
+    };
+    v.piece_whole(req.id, 200, vec![], body).unwrap();
+    assert!(matches!(v.poll(), Some(Output::Hash(_))));
 }
 
 /// A stream's data within its window only, its head first, frames in
@@ -1087,8 +1126,9 @@ fn budgets_exhausted_at_each_reservation() {
                     assert_eq!(got.body, honest.body, "{budget}");
                     assert_eq!(got.head, honest.head, "{budget}");
                 }
+                // Refused for its memory, with the budget's own text.
                 Some(Ending::Error(502, m)) | Some(Ending::Abort(_, m)) => {
-                    assert_eq!(m, fc_dweb::verifier::SWARM_UNVERIFIABLE, "{budget}");
+                    assert_eq!(m, fc_dweb::verifier::MEMORY, "{budget}");
                 }
                 other => panic!("{budget}: {other:?}"),
             }
@@ -1265,9 +1305,12 @@ fn a_slow_page_backpressures_the_stream() {
     assert_eq!(got.ending, Some(Ending::End));
     assert_eq!(got.body, content("file-524288", 524_288));
     assert_eq!(got.pieces.iter().filter(|r| r.stream).count(), 1);
-    // The stream's window, a few chunk pieces and the tree: what waits for
-    // the page is inside the window.
-    assert!(got.peak <= STREAM_WINDOW + 32 * 1024, "{}", got.peak);
+    // The stream's room (its window, its bytes waiting in it, and a frame
+    // beside it), the bytes it sent waiting for the page in their leaves
+    // and the body's queue (they are credited only once they go out, so at
+    // most a window), a few chunk pieces and the tree.
+    let room = STREAM_WINDOW + fc_dweb::verifier::MAX_FRAME;
+    assert!(got.peak <= room + STREAM_WINDOW + 32 * 1024, "{}", got.peak);
 }
 
 /// A stream that ends early, while the bytes it sent last wait for their
@@ -1334,7 +1377,7 @@ fn bytes_stashed_before_an_early_end_are_still_used() {
 #[test]
 fn bzz_exchanges_with_a_warm_cache() {
     let n = replay_warm(|case, _| !case.starts_with("file-67108865-"), true);
-    assert_eq!(n.total, 675, "{n:?}");
+    assert_eq!(n.total, 677, "{n:?}");
     assert!(n.cached > 100, "{n:?}");
 }
 

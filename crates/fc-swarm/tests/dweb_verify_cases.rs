@@ -451,14 +451,11 @@ fn join_node(chunks: &Value, address: &[u8; 32]) -> Vec<u8> {
     let node = fc_swarm::tree::intermediate(&chunk, len).unwrap();
     let mut out = Vec::new();
     for i in 0..node.len() {
-        let (child, child_len) = node.child(i).unwrap();
-        let w = b64
-            .decode(chunks[hex::encode(child)].as_str().unwrap())
-            .unwrap();
-        let c = check_chunk(&child, &w).unwrap();
-        assert!(fc_swarm::tree::is_leaf(child_len));
-        out.extend_from_slice(&c.payload[..child_len as usize]);
+        // A node past 512 KiB has intermediates below its root.
+        let (child, _) = node.child(i).unwrap();
+        out.extend_from_slice(&join_node(chunks, &child));
     }
+    assert_eq!(out.len() as u64, len);
     out
 }
 

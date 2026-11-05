@@ -1336,6 +1336,97 @@ impl Swarm {
     }
 
     /// Leaves Ant accepts that a simple reader wouldn't.
+    /// Two manifests at the edge of a Swarm request's memory (0009,
+    /// Bounds: a Swarm request's budget, its 2 MiB grant less its 64 KiB
+    /// allowance). Each is a small root whose fork `a/` leads to one node
+    /// packed with the metadata the walk keeps: a `Filename` of 60,000 bytes
+    /// on each of its forks, each fork naming a value node for the same
+    /// small file. The request's lookup holds the
+    /// root while that node is joined and parsed, so the node can be about
+    /// 850 KB. One manifest's node is about 1% under that (14 forks), the
+    /// other's about 13% over (16 forks), both under the 1 MiB node cap.
+    /// Ant's writer makes no node past one chunk, so the generator writes
+    /// them, as `big-node`'s. Ant serves both; the core answers the first
+    /// and refuses the second for its memory (deviation `request-memory`).
+    fn memory_limit(&mut self) -> Result<(), Err> {
+        const SEED: &str = "memory-limit-file";
+        const SIZE: usize = 12;
+        let target = self.site_file(SEED, SIZE)?;
+        let leaf = Node {
+            obfuscation_key: [0; 32],
+            ref_size: 32,
+            entry: target.to_vec(),
+            forks: Vec::new(),
+        }
+        .marshal();
+        let (leaf_addr, leaf_wire) = cac_wire(leaf.len() as u64, &leaf)?;
+        self.hold(leaf_addr, leaf_wire, true);
+        for (id, count) in [("memory-limit-inside", 14u8), ("memory-limit-outside", 16)] {
+            let mut forks = Vec::new();
+            let mut entries = Vec::new();
+            for i in 0..count {
+                let name = char::from(b'b' + i).to_string();
+                let filename = name.repeat(60_000);
+                forks.push(Fork {
+                    node_type: mantaray::TYPE_VALUE | mantaray::TYPE_WITH_METADATA,
+                    prefix: name.clone().into_bytes(),
+                    child: leaf_addr.to_vec(),
+                    metadata: Some(mantaray::metadata(&[
+                        ("Content-Type", "text/plain"),
+                        ("Filename", &filename),
+                    ])),
+                });
+                entries.push(json!({ "path": format!("a/{name}"), "data_ref": h(&target), "content_type": "text/plain", "seed": SEED, "size": SIZE }));
+            }
+            let child = Node {
+                obfuscation_key: [0; 32],
+                ref_size: 32,
+                entry: vec![0; 32],
+                forks,
+            }
+            .marshal();
+            let split = split_bytes(&child);
+            let mut nodes = Vec::new();
+            for c in split.chunks {
+                nodes.push(Value::String(h(&c.address)));
+                self.hold(c.address, c.wire, true);
+            }
+            let root = Node {
+                obfuscation_key: [0; 32],
+                ref_size: 32,
+                entry: vec![0; 32],
+                forks: vec![Fork {
+                    node_type: mantaray::TYPE_EDGE | mantaray::TYPE_PATH_SEPARATOR,
+                    prefix: b"a/".to_vec(),
+                    child: split.root.to_vec(),
+                    metadata: None,
+                }],
+            }
+            .marshal();
+            let (root_addr, root_wire) = cac_wire(root.len() as u64, &root)?;
+            self.hold(root_addr, root_wire, true);
+            nodes.insert(0, Value::String(h(&root_addr)));
+            self.manifests.push(json!({
+                "id": id,
+                "root": h(&root_addr),
+                "writer": format!("the generator: a root whose fork a/ leads to a node of {count} forks, each with a 60,000-byte Filename, stored as a file"),
+                "node_bytes": child.len(),
+                "nodes": nodes,
+                "entries": entries,
+                "lookups": ["a/b", "a/q"],
+            }));
+            self.plan(
+                id,
+                "GET",
+                format!("/bzz/{}/a/b", h(&root_addr)),
+                swarm_headers(&[]),
+                Some((SEED.to_string(), SIZE, 0)),
+                "a file below a node packed with kept metadata",
+            );
+        }
+        Ok(())
+    }
+
     fn shapes(&mut self) -> Result<(), Err> {
         // A two-leaf file of 4096 + 60 bytes whose second leaf's payload
         // is 100 bytes: Ant serves the 60 its parent gives it.
@@ -1614,6 +1705,7 @@ pub async fn build() -> Result<Value, Err> {
     let site_b: Addr = site_b.try_into().map_err(|_| "site B root")?;
     s.feed_set(site_a, site_b).await?;
     s.shapes()?;
+    s.memory_limit()?;
     s.resolve_lookups().await?;
     let exchanges = s.run().await?;
     let chunks: Map<String, Value> = s

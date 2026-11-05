@@ -14,13 +14,24 @@
 //!   [`Verifier::deadline`].
 //! - **Outputs** ([`Verifier::poll`]): pieces to fetch and cancel, credit
 //!   for the streamed pieces, hash jobs, then either an error before the
-//!   head or the head, the verified body and its end or abort.
-//! - **Memory:** everything the request holds counts against its 8 MiB
-//!   ([`REQUEST_BUDGET`]), reserved before it is asked for. A streamed
-//!   piece's 128 KiB window is reserved when the piece is asked for, and
-//!   credit goes back only for bytes that have left the machine, released
-//!   or dropped, so a piece never has more in flight than its window.
-//!   The verified body goes out within main's credit ([`BODY_WINDOW`]).
+//!   head or the head, the verified body and its end or abort. Main may
+//!   take them as seldom as it likes and what waits stays bounded: one
+//!   credit at most for each stream, carrying all it is owed, and four
+//!   chunks for the structure cache at most. Main answers only the pieces
+//!   it has taken.
+//! - **Memory:** a request runs within its scheme's grant ([`grant`]):
+//!   2 MiB for Swarm, 8 MiB for IPFS. Everything it holds counts against
+//!   its budget ([`budget`]), the grant less a fixed allowance for the few
+//!   bounded allocations the count doesn't follow ([`SWARM_ALLOWANCE`],
+//!   [`IPFS_ALLOWANCE`]), and is reserved before it is allocated. A walk
+//!   that can't fit and has no other way on ends with the budget's own text
+//!   ([`MEMORY`]). A streamed piece's 128 KiB window is reserved when the
+//!   piece is asked for, held whole while the piece is open, and is the
+//!   one buffer its bytes wait in ([`Stash`]); credit goes back only for
+//!   bytes that have left the machine, released or dropped, so a piece
+//!   never has more in flight than its window. The verified body goes out
+//!   within main's credit ([`BODY_WINDOW`]), and stays counted until main
+//!   takes each frame ([`Verifier::poll`]).
 //! - **Release:** a byte reaches [`Output::Body`] only once the chunk it
 //!   came from passed its check; after a failure, the page has a prefix of
 //!   the right content and then the abort.
@@ -43,9 +54,55 @@ use charged::Charged;
 use crate::plan::{Backend, ContentTrust, ErrorPlan, Node, ResponseOp, Root, Trust, Verify};
 use crate::validate::Refusal;
 
-/// A request's memory: its piece windows, the pieces and blocks it holds,
-/// its jobs' bytes and its queued body (0009, Bounds).
-pub const REQUEST_BUDGET: usize = 8 << 20;
+/// A Swarm request's grant (0009, Bounds): what admission reserves for it,
+/// and the most it allocates. Its largest holding is a manifest lookup, the
+/// root node parsed beside the next node's join and parse; a file's leaves
+/// stream through one 128 KiB window.
+pub const SWARM_GRANT: usize = 2 << 20;
+/// An IPFS request's grant: a CAR's reading room and its sections' jobs,
+/// or raw blocks of up to 2 MiB, and a directory's or a HAMT's structure.
+pub const IPFS_GRANT: usize = 8 << 20;
+/// What a Swarm request allocates beside what its budget counts, at most
+/// (0009, Bounds): the body frame being made for main ([`MAX_FRAME`]) and
+/// the outputs main hasn't taken, however seldom it polls (a request for
+/// each open piece, a credit for each open stream, at most four verified
+/// chunks' copies for the cache), the body queue's joined tail and the
+/// queue's and outputs' slots, and the machine's own structures. Measured
+/// in the tests (`verifier_memory`), which fail past it. The Swarm vectors'
+/// manifest inside the limit needs 2,002,470 bytes, so it can be at most
+/// about 94 KiB.
+pub const SWARM_ALLOWANCE: usize = 64 << 10;
+/// What an IPFS request allocates beside what its budget counts: Swarm's
+/// allowance, and the values the IPFS walk doesn't charge yet (its error
+/// page, the head's headers, the ETag and type strings, and an IPNS
+/// record's value while it waits for the floor, at most
+/// `fc_ipfs::ipns::MAX_RECORD`), until its walk is charged as Swarm's is.
+pub const IPFS_ALLOWANCE: usize = 128 << 10;
+/// A Swarm request's budget: its grant less its allowance.
+pub const SWARM_BUDGET: usize = SWARM_GRANT - SWARM_ALLOWANCE;
+/// An IPFS request's budget: its grant less its allowance.
+pub const IPFS_BUDGET: usize = IPFS_GRANT - IPFS_ALLOWANCE;
+/// The larger budget, IPFS's.
+pub const REQUEST_BUDGET: usize = IPFS_BUDGET;
+
+/// A request's grant by its plan's root: what admission reserves for it
+/// (0009, Bounds), its budget and its allowance together.
+pub fn grant(root: &Root) -> usize {
+    match root {
+        Root::Swarm(_) => SWARM_GRANT,
+        Root::Ipfs(_) | Root::Ipns(_) => IPFS_GRANT,
+    }
+}
+
+/// A request's budget by its plan's root ([`Options::budget`]): its piece
+/// windows, the pieces and blocks it holds, its parsed structure, its jobs'
+/// bytes and its body until main takes it (0009, Bounds).
+pub fn budget(root: &Root) -> usize {
+    match root {
+        Root::Swarm(_) => SWARM_BUDGET,
+        Root::Ipfs(_) | Root::Ipns(_) => IPFS_BUDGET,
+    }
+}
 /// A streamed piece's window, each direction (0007).
 pub const STREAM_WINDOW: usize = 128 << 10;
 /// The verified body's window: how far the body may run ahead of main's
@@ -222,6 +279,9 @@ pub const IPFS_UNVERIFIABLE: &str = "This content can't be verified with the ext
 pub const IPFS_MALFORMED: &str = "This IPFS content is malformed";
 pub const IPFS_NOT_FOUND: &str = "Not found on the external IPFS gateway";
 pub const IPFS_STOPPED: &str = "The external IPFS gateway stopped sending";
+/// A walk that needs more memory than its request's budget, where it has
+/// no other way on: the core's limit, not the node's or the content's.
+pub const MEMORY: &str = "This content needs more memory to verify than one request may use";
 pub const DEADLINE_PASSED: &str = "Deadline passed";
 pub const TOO_MANY_REQUESTS: &str = "Too many requests";
 pub const CANCELLED: &str = "The request was cancelled";
@@ -233,6 +293,11 @@ pub(crate) enum Failure {
     VerificationFailed,
     /// Content the core can't check, or a walk past its bounds.
     Unverifiable,
+    /// A reservation that doesn't fit the request's memory, where the walk
+    /// has no other way on: no fallback (raw blocks for a CAR) and nothing
+    /// to wait for. Its own text ([`MEMORY`]), so a page and a report tell
+    /// the core's limit from content it can't check.
+    Memory,
     /// Authentic content that can't be decoded or is inconsistent (IPFS).
     Malformed,
     /// A piece's final answer was this status.
@@ -282,6 +347,7 @@ impl Failure {
                 ErrorPlan::new(502, t.verification_failed)
             }
             Self::Unverifiable => ErrorPlan::new(502, t.unverifiable),
+            Self::Memory => ErrorPlan::new(502, MEMORY),
             Self::Malformed => ErrorPlan::new(502, IPFS_MALFORMED),
             Self::Status(404) => ErrorPlan::new(404, t.not_found),
             Self::Status(status) => {
@@ -319,6 +385,7 @@ impl Failure {
                 (AbortCode::VerificationFailed, t.verification_failed)
             }
             Self::Unverifiable => (AbortCode::Unverifiable, t.unverifiable),
+            Self::Memory => (AbortCode::Unverifiable, MEMORY),
             Self::Malformed => (AbortCode::Malformed, IPFS_MALFORMED),
             Self::Status(_)
             | Self::Piece(_)
@@ -336,6 +403,10 @@ pub(crate) enum Ask {
     Whole(usize),
     /// Streamed under credit; main ends it past this many bytes, if any.
     Stream(Option<usize>),
+    /// Streamed under credit, its bytes waiting in a [`Stash`]: its room is
+    /// its window and one frame beside it, for main's frame while it is
+    /// copied in.
+    Stashed,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -353,11 +424,16 @@ enum Phase {
 
 #[derive(Debug)]
 struct Stream {
+    /// Its bytes wait in a stash ([`Ask::Stashed`]).
+    stashed: bool,
     headed: bool,
     received: usize,
     credited: usize,
-    /// Credit not yet sent: flushed once per input.
+    /// Credit main hasn't taken: the one [`Output::Credit`] waiting for the
+    /// stream carries all of it, as main takes it.
     owed: usize,
+    /// A credit for the stream waits among the outputs.
+    credit_waits: bool,
 }
 
 #[derive(Debug)]
@@ -371,15 +447,102 @@ struct Piece<T> {
     tag: T,
     kind: Kind,
     cancelled: bool,
+    /// Main has taken its request ([`Output::Piece`]): only then may main
+    /// answer it.
+    asked: bool,
 }
 
-/// A segment of verified body waiting for main's credit, and the piece its
-/// bytes came from, which gets their credit once they are sent.
+/// A segment of verified body: sent as main's credit allows, and kept,
+/// counted, until main has taken all of it in its frames
+/// ([`Verifier::poll`]); `from` is the piece its bytes came from, which
+/// gets their credit once they are sent.
 #[derive(Debug)]
 struct Queued {
     bytes: Vec<u8>,
+    /// Bytes sent, against main's credit.
     at: usize,
+    /// Bytes main has taken, in its frames.
+    taken: usize,
+    /// What the queue counts for it ([`Core::reserved`]).
+    held: usize,
     from: Option<PieceId>,
+}
+
+/// The most of small body slices a queue segment joins (0009, Bounds):
+/// the tail grows to it at most, and its room past its bytes is the
+/// allowance's.
+const SEGMENT: usize = 16 << 10;
+/// The outputs' slots kept once main has taken them all.
+const OUTPUTS_KEPT: usize = 16;
+/// Verified chunks' copies for the structure cache waiting for main, at
+/// most: past them, a chunk isn't given to the cache until main takes them,
+/// so however seldom main polls, the copies stay within the allowance.
+const REMEMBER_WAITING: usize = 4;
+
+/// A stream's bytes the walk hasn't used yet, in one buffer of the stream's
+/// window (design 0009, Bounds): made at the stream's first frame and never
+/// grown, so what a stream holds is its window however main frames it.
+/// Each frame is copied in and goes at once. The buffer is the window's
+/// room while the piece is open; once the piece ends with bytes still
+/// here, the machine keeps the window for them until they are used or
+/// dropped ([`Core::window_done`]).
+#[derive(Debug, Default)]
+pub(crate) struct Stash {
+    bytes: VecDeque<u8>,
+    /// The piece has ended, and its window is kept for these bytes.
+    kept: bool,
+}
+
+impl Stash {
+    /// A frame's bytes, within the window: main never sends past its
+    /// credit, and a byte is credited only once it has left the stash.
+    pub(crate) fn push(&mut self, frame: &[u8]) {
+        if self.bytes.capacity() == 0 {
+            self.bytes.reserve_exact(STREAM_WINDOW);
+        }
+        debug_assert!(self.bytes.len() + frame.len() <= STREAM_WINDOW);
+        self.bytes.extend(frame);
+    }
+
+    /// The first bytes in order: all of them, or up to where the buffer
+    /// wraps.
+    pub(crate) fn front(&self) -> &[u8] {
+        self.bytes.as_slices().0
+    }
+
+    pub(crate) fn len(&self) -> usize {
+        self.bytes.len()
+    }
+
+    pub(crate) fn is_empty(&self) -> bool {
+        self.bytes.is_empty()
+    }
+
+    /// The first `n` bytes are used; once the piece has ended and none are
+    /// left, the buffer and its window go.
+    pub(crate) fn consume<T: Copy>(&mut self, core: &mut Core<T>, n: usize) {
+        self.bytes.drain(..n.min(self.bytes.len()));
+        if self.kept && self.bytes.is_empty() {
+            self.free(core);
+        }
+    }
+
+    /// The piece has ended: the bytes left keep its window, or with none
+    /// left it goes.
+    pub(crate) fn keep<T: Copy>(&mut self, core: &mut Core<T>) {
+        self.kept = true;
+        if self.bytes.is_empty() {
+            self.free(core);
+        }
+    }
+
+    /// The buffer goes, then any window kept for it.
+    pub(crate) fn free<T: Copy>(&mut self, core: &mut Core<T>) {
+        self.bytes = VecDeque::new();
+        if std::mem::take(&mut self.kept) {
+            core.window_done();
+        }
+    }
 }
 
 /// The machine's bookkeeping, which the walk drives; `T` is the walk's
@@ -410,7 +573,21 @@ pub(crate) struct Core<T> {
     /// main takes the head ([`Core::head_charged`]).
     head_held: usize,
     queue: VecDeque<Queued>,
+    /// Body not yet sent.
     queued: usize,
+    /// Every byte the queue holds, sent or not, until main has taken it.
+    queue_len: usize,
+    /// [`Output::Remember`]s main hasn't taken ([`REMEMBER_WAITING`]).
+    remembering: usize,
+    /// The segment being sent: those before it are sent, waiting for main.
+    sending: usize,
+    /// The body frames waiting for main, by length: each is made from the
+    /// queue, at its length, as main takes it.
+    frames: VecDeque<usize>,
+    /// Streamed pieces that ended while the walk still holds bytes of
+    /// theirs: each keeps its window until the walk lets it go
+    /// ([`Core::window_done`]).
+    kept_windows: usize,
     /// The verified body sent, and main's credit for it.
     sent: usize,
     credited: usize,
@@ -444,25 +621,45 @@ impl<T: Copy> Core<T> {
             head_held: 0,
             queue: VecDeque::new(),
             queued: 0,
+            queue_len: 0,
+            remembering: 0,
+            sending: 0,
+            frames: VecDeque::new(),
+            kept_windows: 0,
             sent: 0,
             credited: 0,
             end_after_queue: false,
         }
     }
 
-    /// Every byte the request holds or has room reserved for.
+    /// Every byte the request holds or has room reserved for. A streamed
+    /// piece holds its whole window while it is open, its bytes in the
+    /// stash included, and after its end while the walk still has bytes of
+    /// it; the body's queue holds each segment whole until main has taken
+    /// all of it.
     fn reserved(&self) -> usize {
         let pieces: usize = self
             .pieces
             .values()
             .map(|p| match &p.kind {
                 Kind::Whole { max } => *max,
-                Kind::Stream(s) => {
-                    STREAM_WINDOW.saturating_sub(s.received.saturating_sub(s.credited))
-                }
+                Kind::Stream(s) if s.stashed => STREAM_WINDOW + MAX_FRAME,
+                Kind::Stream(_) => STREAM_WINDOW,
             })
             .sum();
-        pieces + self.jobs_held + self.walk_held.get() + self.queued + self.head_held
+        pieces
+            + self.kept_windows * STREAM_WINDOW
+            + self.jobs_held
+            + self.walk_held.get()
+            + self.queue_len
+            + self.head_held
+    }
+
+    /// A streamed piece that ended has had its last bytes used or dropped:
+    /// the window kept for them goes.
+    pub(crate) fn window_done(&mut self) {
+        self.kept_windows = self.kept_windows.saturating_sub(1);
+        self.released();
     }
 
     /// Notes a reservation's growth in the request's peak.
@@ -479,6 +676,17 @@ impl<T: Copy> Core<T> {
     /// credited.
     pub(crate) fn awaiting(&self) -> usize {
         self.queued + self.sent.saturating_sub(self.credited)
+    }
+
+    /// Hash jobs out: their bytes come back with their results.
+    pub(crate) fn hashing(&self) -> bool {
+        !self.jobs.is_empty()
+    }
+
+    /// Pieces cancelled whose terminal hasn't come: the room main may
+    /// still fill on them comes back with it.
+    pub(crate) fn cancelling(&self) -> bool {
+        self.pieces.values().any(|p| p.cancelled)
     }
 
     /// The walk is over: the terminal output is out, or follows what is
@@ -506,6 +714,7 @@ impl<T: Copy> Core<T> {
     /// charged may still be live.
     fn drop_walk_held(&mut self) {
         self.walk_held.clear();
+        self.kept_windows = 0;
         self.released();
     }
 
@@ -528,6 +737,7 @@ impl<T: Copy> Core<T> {
         let room = match ask {
             Ask::Whole(max) => max,
             Ask::Stream(_) => STREAM_WINDOW,
+            Ask::Stashed => STREAM_WINDOW + MAX_FRAME,
         };
         if !self.fits(room) || self.ended() {
             return None;
@@ -536,15 +746,20 @@ impl<T: Copy> Core<T> {
         self.next_piece += 1;
         let (kind, stream, max_bytes) = match ask {
             Ask::Whole(max) => (Kind::Whole { max }, false, Some(max)),
-            Ask::Stream(max) => (
+            Ask::Stream(_) | Ask::Stashed => (
                 Kind::Stream(Stream {
+                    stashed: ask == Ask::Stashed,
                     headed: false,
                     received: 0,
                     credited: 0,
                     owed: 0,
+                    credit_waits: false,
                 }),
                 true,
-                max,
+                match ask {
+                    Ask::Stream(max) => max,
+                    _ => None,
+                },
             ),
         };
         self.pieces.insert(
@@ -553,6 +768,7 @@ impl<T: Copy> Core<T> {
                 tag,
                 kind,
                 cancelled: false,
+                asked: false,
             },
         );
         self.outputs.push_back(Output::Piece(PieceRequest {
@@ -605,6 +821,10 @@ impl<T: Copy> Core<T> {
     }
 
     pub(crate) fn remember(&mut self, address: [u8; 32], wire: &[u8]) {
+        if self.remembering >= REMEMBER_WAITING {
+            return;
+        }
+        self.remembering += 1;
         self.outputs.push_back(Output::Remember {
             address,
             wire: wire.to_vec(),
@@ -703,12 +923,37 @@ impl<T: Copy> Core<T> {
             return;
         }
         self.queued += n;
-        // Small pieces without a stream to credit join the queue's tail.
+        self.queue_len += n;
+        // Small pieces without a stream to credit join the queue's tail, up
+        // to a segment: its room grows by doubling to that at most, and a
+        // tail that stops being one gives back the room it didn't use.
+        let last = self.queue.len().wrapping_sub(1);
         match self.queue.back_mut() {
-            Some(t) if from.is_none() && t.from.is_none() && t.bytes.len() + n <= MAX_FRAME => {
+            Some(t) if from.is_none() && t.from.is_none() && t.bytes.len() + n <= SEGMENT => {
+                let len = t.bytes.len();
+                if len + n > t.bytes.capacity() {
+                    let room = (t.bytes.capacity() * 2).max(len + n).min(SEGMENT);
+                    t.bytes.reserve_exact(room - len);
+                }
+                if t.at == len {
+                    // It was all sent: it is the one being sent again.
+                    self.sending = last;
+                }
                 t.bytes.extend_from_slice(&bytes);
+                t.held += n;
             }
-            _ => self.queue.push_back(Queued { bytes, at: 0, from }),
+            t => {
+                if let Some(t) = t {
+                    t.bytes.shrink_to_fit();
+                }
+                self.queue.push_back(Queued {
+                    bytes,
+                    at: 0,
+                    taken: 0,
+                    held: n,
+                    from,
+                });
+            }
         }
     }
 
@@ -773,20 +1018,114 @@ impl<T: Copy> Core<T> {
         for id in open {
             self.cancel_piece(id);
         }
-        while let Some(q) = self.queue.pop_front() {
-            if let Some(id) = q.from {
-                self.consumed(id, q.bytes.len() - q.at);
+        // What isn't sent goes, its credit given back; what is sent stays,
+        // counted, until main takes it.
+        while self.queue.len() > self.sending {
+            let Some(q) = self.queue.back_mut() else {
+                break;
+            };
+            let (from, unsent, at) = (q.from, q.bytes.len() - q.at, q.at);
+            if at == 0 {
+                if let Some(q) = self.queue.pop_back() {
+                    self.queue_len -= q.held;
+                }
+            } else {
+                q.bytes.truncate(at);
+                self.sending += 1;
+            }
+            if let Some(id) = from {
+                self.consumed(id, unsent);
             }
         }
         self.queued = 0;
         self.drop_walk_held();
     }
 
+    /// The next output for main. A body frame is made here, at its length,
+    /// from the sent part of the queue, and the segments it takes the last
+    /// of go; the head's headers are main's now. A credit carries what its
+    /// stream is owed now, and none goes once the stream is cancelled or
+    /// has ended.
+    fn take_output(&mut self) -> Option<Output> {
+        let out = loop {
+            let Some(next) = self.outputs.pop_front() else {
+                break None;
+            };
+            match next {
+                Output::Body(_) => break Some(Output::Body(self.take_frame())),
+                Output::Head(h) => {
+                    self.head_held = 0;
+                    break Some(Output::Head(h));
+                }
+                Output::Credit { piece, .. } => {
+                    if let Some(bytes) = self.take_credit(piece) {
+                        break Some(Output::Credit { piece, bytes });
+                    }
+                }
+                Output::Piece(r) => {
+                    if let Some(p) = self.pieces.get_mut(&r.id) {
+                        p.asked = true;
+                    }
+                    break Some(Output::Piece(r));
+                }
+                Output::Remember { address, wire } => {
+                    self.remembering -= 1;
+                    break Some(Output::Remember { address, wire });
+                }
+                other => break Some(other),
+            }
+        };
+        if self.outputs.is_empty() && self.outputs.capacity() > 4 * OUTPUTS_KEPT {
+            self.outputs.shrink_to(OUTPUTS_KEPT);
+        }
+        out
+    }
+
+    /// What a stream is owed as main takes its credit, if anything.
+    fn take_credit(&mut self, piece: PieceId) -> Option<usize> {
+        let Some(Piece {
+            kind: Kind::Stream(s),
+            ..
+        }) = self.pieces.get_mut(&piece)
+        else {
+            return None;
+        };
+        s.credit_waits = false;
+        Some(std::mem::take(&mut s.owed)).filter(|&n| n > 0)
+    }
+
+    fn take_frame(&mut self) -> Vec<u8> {
+        let n = self.frames.pop_front().unwrap_or(0);
+        let mut frame = Vec::with_capacity(n);
+        while frame.len() < n {
+            let Some(q) = self.queue.front_mut() else {
+                break;
+            };
+            let k = (n - frame.len()).min(q.at - q.taken);
+            if k == 0 {
+                debug_assert!(false, "a frame past what is sent");
+                break;
+            }
+            frame.extend_from_slice(&q.bytes[q.taken..q.taken + k]);
+            q.taken += k;
+            if q.taken == q.bytes.len()
+                && let Some(q) = self.queue.pop_front()
+            {
+                self.queue_len -= q.held;
+                self.sending = self.sending.saturating_sub(1);
+            }
+        }
+        if self.queue.is_empty() && self.queue.capacity() > 4 * OUTPUTS_KEPT {
+            self.queue.shrink_to(OUTPUTS_KEPT);
+        }
+        frame
+    }
+
     /// Sends what main's credit allows.
     fn pump(&mut self) {
         while matches!(self.phase, Phase::Headed | Phase::Draining(..)) {
             let room = BODY_WINDOW - (self.sent - self.credited);
-            let Some(front) = self.queue.front_mut() else {
+            let Some(front) = self.queue.get_mut(self.sending) else {
                 if let Phase::Draining(code, message) = self.phase {
                     self.outputs.push_back(Output::Abort { code, message });
                     self.close();
@@ -801,20 +1140,20 @@ impl<T: Copy> Core<T> {
             }
             let left = front.bytes.len() - front.at;
             let n = left.min(room).min(MAX_FRAME);
-            let part = &front.bytes[front.at..front.at + n];
-            // Small pieces of body coalesce into the frame main hasn't
-            // taken yet, so a walk that releases many small slices sends
-            // few frames.
-            match self.outputs.back_mut() {
-                Some(Output::Body(last)) if last.len() + n <= MAX_FRAME => {
-                    last.extend_from_slice(part);
-                }
-                _ => self.outputs.push_back(Output::Body(part.to_vec())),
-            }
             front.at += n;
             let from = front.from;
             if front.at == front.bytes.len() {
-                self.queue.pop_front();
+                self.sending += 1;
+            }
+            // Small pieces of body join the frame main hasn't taken yet, so
+            // a walk that releases many small slices sends few frames. The
+            // frame is made only as main takes it ([`Core::take_output`]).
+            match (self.outputs.back(), self.frames.back_mut()) {
+                (Some(Output::Body(_)), Some(last)) if *last + n <= MAX_FRAME => *last += n,
+                _ => {
+                    self.outputs.push_back(Output::Body(Vec::new()));
+                    self.frames.push_back(n);
+                }
             }
             self.queued -= n;
             self.sent += n;
@@ -824,18 +1163,19 @@ impl<T: Copy> Core<T> {
         }
     }
 
+    /// A stream owed credit gets one [`Output::Credit`], unless one waits
+    /// for it already: what it carries is counted as main takes it
+    /// ([`Core::take_output`]). So however seldom main polls, the outputs
+    /// hold one credit at most for each stream, not one for each input.
     fn flush_credit(&mut self) {
-        let mut credit = Vec::new();
-        for (id, p) in &mut self.pieces {
+        for (&piece, p) in &mut self.pieces {
             if let Kind::Stream(s) = &mut p.kind
                 && s.owed > 0
+                && !s.credit_waits
             {
-                credit.push((*id, s.owed));
-                s.owed = 0;
+                s.credit_waits = true;
+                self.outputs.push_back(Output::Credit { piece, bytes: 0 });
             }
-        }
-        for (piece, bytes) in credit {
-            self.outputs.push_back(Output::Credit { piece, bytes });
         }
     }
 }
@@ -937,11 +1277,16 @@ pub(crate) trait Events<T> {
         status: u16,
         headers: &[(String, String)],
     );
+    /// A frame within the piece's window, which its bytes stay in: the walk
+    /// copies them into its stash or block buffer and drops the frame.
     fn stream_data(&mut self, core: &mut Core<T>, tag: T, id: PieceId, bytes: Vec<u8>);
+    /// A streamed piece's end, and its failure: its window is kept until
+    /// the walk lets it go ([`Core::window_done`]), once for each.
     fn stream_end(&mut self, core: &mut Core<T>, tag: T, id: PieceId);
     fn failed(&mut self, core: &mut Core<T>, tag: T, failure: PieceFailure);
     fn hashed(&mut self, core: &mut Core<T>, tag: T, verdict: jobs::Verdict, work: jobs::Work);
-    /// Main's credit made room in the body's queue.
+    /// Room came back: main's credit made room in the body's queue, or a
+    /// cancelled piece ended.
     fn room(&mut self, _core: &mut Core<T>) {}
     /// The floor's verdict on the record the walk asked about; false when
     /// it asked about none.
@@ -968,6 +1313,11 @@ impl<T: Copy, W: Events<T>> Machine<T, W> {
         let Some(piece) = self.core.pieces.get_mut(&id) else {
             return Err(Misuse::EndedPiece);
         };
+        // Main answers only what it was asked: a request it hasn't taken
+        // has nothing of main's yet.
+        if !piece.asked {
+            return Err(Misuse::UnknownPiece);
+        }
         // Main reads a whole piece up to its bound; past it is `too_large`.
         let event = match (&piece.kind, event) {
             (Kind::Whole { max }, PieceEvent::Whole { body, .. }) if body.len() > *max => {
@@ -1006,6 +1356,7 @@ impl<T: Copy, W: Events<T>> Machine<T, W> {
         }
         let tag = piece.tag;
         let cancelled = piece.cancelled;
+        let stream = matches!(piece.kind, Kind::Stream(_));
         let terminal = matches!(
             event,
             PieceEvent::Whole { .. } | PieceEvent::End | PieceEvent::Failed(_)
@@ -1014,9 +1365,14 @@ impl<T: Copy, W: Events<T>> Machine<T, W> {
             s.headed = true;
         }
         if cancelled {
-            // A cancelled piece's late input is dropped, as read.
+            // A cancelled piece's late input is dropped, as read. Its
+            // terminal gives back the room main might have filled, which
+            // a walk waiting for room may use.
             if terminal {
                 self.core.pieces.remove(&id);
+                if let Some(walk) = self.walk.as_mut() {
+                    walk.room(&mut self.core);
+                }
             }
             self.settle();
             return Ok(());
@@ -1029,6 +1385,12 @@ impl<T: Copy, W: Events<T>> Machine<T, W> {
         }
         if let Some(walk) = self.walk.as_mut() {
             let core = &mut self.core;
+            if stream && terminal {
+                // The piece's window stays held for the bytes the walk
+                // still has of it, until it lets them go
+                // ([`Core::window_done`]).
+                core.kept_windows += 1;
+            }
             match event {
                 PieceEvent::Whole {
                     status,
@@ -1041,10 +1403,8 @@ impl<T: Copy, W: Events<T>> Machine<T, W> {
                 PieceEvent::Head { status, headers } => {
                     walk.stream_head(core, tag, id, status, &headers);
                 }
-                PieceEvent::Data(bytes) => {
-                    core.hold(bytes.len());
-                    walk.stream_data(core, tag, id, bytes);
-                }
+                // A frame's bytes are within its piece's window.
+                PieceEvent::Data(bytes) => walk.stream_data(core, tag, id, bytes),
                 PieceEvent::End => walk.stream_end(core, tag, id),
                 PieceEvent::Failed(failure) => walk.failed(core, tag, failure),
             }
@@ -1124,7 +1484,7 @@ impl<T: Copy, W: Events<T>> Machine<T, W> {
     }
 
     /// After each input: a walk that has ended is dropped with what it
-    /// held, and credit owed goes out.
+    /// held, and a stream owed credit has a credit waiting for main.
     fn settle(&mut self) {
         if let Some(walk) = self.walk.as_ref() {
             walk.audit(&mut self.core);
@@ -1163,8 +1523,8 @@ macro_rules! machine {
 /// What a request runs under, beside its plan.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Options {
-    /// The request's memory bound ([`REQUEST_BUDGET`]; smaller in tests of
-    /// budgets exhausted at each reservation).
+    /// The request's memory bound ([`budget`] for its scheme; smaller in
+    /// tests of budgets exhausted at each reservation).
     pub budget: usize,
     /// The wall clock, in Unix seconds, for an IPNS record's validity.
     pub now: i64,
@@ -1263,14 +1623,7 @@ impl Verifier {
 
     /// The next output, if any.
     pub fn poll(&mut self) -> Option<Output> {
-        machine!(self, m => {
-            let out = m.core.outputs.pop_front();
-            // The head is main's now, and its headers' charge goes.
-            if matches!(out, Some(Output::Head(_))) {
-                m.core.head_held = 0;
-            }
-            out
-        })
+        machine!(self, m => m.core.take_output())
     }
 
     /// Bytes the request holds or has reserved.
@@ -1288,6 +1641,13 @@ impl Verifier {
             Inner::Swarm(m) => m.core.peak,
             Inner::Ipfs(m) => m.core.peak,
         }
+    }
+
+    /// The peak starts again from what the request reserves now: a test's
+    /// look at one input's peak beside the allocator's.
+    #[cfg(feature = "memory-probe")]
+    pub fn reset_peak(&mut self) {
+        machine!(self, m => m.core.peak = m.core.reserved());
     }
 
     /// Bytes the walk released without holding them: zero unless its
@@ -1425,4 +1785,65 @@ fn check_plan(plan: &Verify) -> Result<(), Refusal> {
         return Err(Refusal::Trust);
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used, clippy::panic)]
+
+    use super::*;
+
+    /// However many inputs a stream's credit comes due over, one credit
+    /// waits for main, and it carries all of it when main takes it; a
+    /// credit still waiting when its stream is cancelled goes with it.
+    #[test]
+    fn a_stream_has_one_credit_waiting_carrying_all_it_is_owed() {
+        let mut core: Core<()> = Core::new(1, Node::Ipfs, false, None, IPFS_BUDGET);
+        let id = core
+            .fetch((), "/ipfs/x".to_owned(), vec![], Ask::Stream(None))
+            .unwrap();
+        assert!(matches!(core.take_output(), Some(Output::Piece(r)) if r.id == id));
+        for _ in 0..1_000 {
+            core.consumed(id, 1);
+            core.flush_credit();
+        }
+        assert_eq!(core.outputs.len(), 1);
+        match (core.take_output(), core.take_output()) {
+            (Some(Output::Credit { piece, bytes }), None) => {
+                assert_eq!((piece, bytes), (id, 1_000))
+            }
+            other => panic!("{other:?}"),
+        }
+        core.consumed(id, 5);
+        core.flush_credit();
+        core.consumed(id, 7);
+        core.flush_credit();
+        assert!(matches!(
+            core.take_output(),
+            Some(Output::Credit { bytes: 12, .. })
+        ));
+        core.consumed(id, 3);
+        core.flush_credit();
+        core.cancel_piece(id);
+        assert!(matches!(core.take_output(), Some(Output::CancelPiece(p)) if p == id));
+        assert!(core.take_output().is_none());
+    }
+
+    /// At most four verified chunks' copies wait for the structure cache:
+    /// past them a chunk isn't given to it, until main takes them.
+    #[test]
+    fn at_most_four_copies_wait_for_the_cache() {
+        let mut core: Core<()> = Core::new(1, Node::Ant, false, None, SWARM_BUDGET);
+        let remembered = |core: &mut Core<()>| {
+            std::iter::from_fn(|| core.take_output())
+                .filter(|o| matches!(o, Output::Remember { .. }))
+                .count()
+        };
+        for i in 0..6 {
+            core.remember([i; 32], &[i; 4_104]);
+        }
+        assert_eq!(remembered(&mut core), REMEMBER_WAITING);
+        core.remember([9; 32], &[9; 8]);
+        assert_eq!(remembered(&mut core), 1);
+    }
 }
