@@ -54,13 +54,17 @@
 //! stop comes first:
 //! - **Both decide under the phase's lock.** The watch marks a node whose
 //!   thread has ended `Down`; the stop takes the node out of the phase.
-//! - **The service asks the node to stop in one place,**
-//!   [`Running::ask_stop`], which records the request, and only where no
-//!   other thread can reach the node: under the phase's lock, or once the
-//!   stop has taken the node out of the phase. Dropping a node asks too, but
-//!   only one the phase never held, or after the stop. So a stop that takes
-//!   a node with no request recorded is the first to ask it, and the only
-//!   one.
+//! - **libradicle records who asked the node to stop.** Every stop call of
+//!   its `Embedded` records its request, and `Embedded::shutdown_within`'s
+//!   `Shutdown` says, from the same check that sends its own:
+//!   `Asked::ThisCall` if it was the first to ask, while the node's thread
+//!   ran; `Asked::Earlier` if a stop call had asked before; `Asked::Never`
+//!   if the thread had ended before any asked. The service makes its stop
+//!   calls only through [`Running::ask_stop`], and only where no other
+//!   thread can reach the node: under the phase's lock, or once the stop
+//!   has taken the node out of the phase. Dropping a node asks too, but
+//!   only one the phase never held, or after the stop. So a stop that finds
+//!   `Asked::ThisCall` is the first to ask the node, and the only one.
 //! - **heartwood's run ends `Ok` only once it was asked to stop** (its
 //!   `Runtime::run` at the pinned commit). Its reactor ends on its
 //!   controller's `Shutdown`, on a fatal error of heartwood's service, which
@@ -70,9 +74,11 @@
 //!
 //! So a node that ended, or began to stop, behind the stop is `node_down`,
 //! exit 70, with the marker kept, whichever thread finds it. The watch finds
-//! a thread that has ended. The stop finds a request before its own, or a
-//! node thread that ended with an error, which is how a node that ended by
-//! itself always ends.
+//! a thread that has ended. The stop finds `Asked::Earlier` or
+//! `Asked::Never`, or a thread that ended with an error
+//! (`ThreadEnd::Failed`), which is how a node that ended by itself always
+//! ends. libradicle reports the thread's end apart from the home, so a name
+//! lookup that still holds the home past the deadline doesn't hide it.
 //! - **Whoever finds the node down claims exit 70 itself.** The watch fails
 //!   the connection only after it has published `Down` and let go of the
 //!   lock, so a stop that takes a `Down` node fails it too: otherwise a
@@ -80,13 +86,16 @@
 //!   `Connection::fail` is idempotent, and 70, once set, stays.
 //!
 //! **The dirty marker is cleared only after a proven clean stop**
-//! ("Reconciliation"): `rad.shutdown` ended the connection, and this stop
-//! asked a node nothing had asked before. `Embedded::shutdown_within`
-//! returned `Ok` in time, so the node stopped because this stop asked it,
-//! and heartwood's workers have finished their fetches. The pools' drain was
-//! complete before it: every pool thread ended, so no write is queued or
-//! running, and this build has no write that could be uncertain. Anything
-//! else leaves the marker, and the next start runs the full repair.
+//! ("Reconciliation"): `rad.shutdown` ended the connection; the pools'
+//! drain was complete before the node's stop, so every pool thread ended,
+//! no write is queued or running, and this build has no write that could
+//! be uncertain; and the stop's `Shutdown` is `Asked::ThisCall`,
+//! `ThreadEnd::Stopped` and `HomeLock::Released`, within the time the drain
+//! left. So the node stopped because this stop asked it, it let go of its
+//! home, and heartwood's workers have finished their fetches. A node down
+//! behind the stop is `node_down` whatever the drain; otherwise an
+//! incomplete drain leaves the stop unproven. Anything else leaves the
+//! marker, and the next start runs the full repair.
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
@@ -122,9 +131,6 @@ const PAGE: usize = 64;
 /// A running node, and what runs with it.
 struct Running {
     embedded: libradicle::Embedded,
-    /// Whether the node has been asked to stop: only [`Running::ask_stop`]
-    /// asks (see the module's doc).
-    asked: bool,
     /// The host's half of the node's repository gate: the online repair and
     /// quarantine's removal (later steps) open and close repositories
     /// through it.
@@ -137,8 +143,9 @@ struct Running {
 impl Running {
     /// Asks the node to stop, and waits up to `within` for it
     /// (`Embedded::shutdown_within`): the one place the service asks.
-    fn ask_stop(&mut self, within: Duration) -> Result<(), libradicle::Error> {
-        self.asked = true;
+    /// libradicle records the request, and the outcome says who asked
+    /// first (see the module's doc).
+    fn ask_stop(&mut self, within: Duration) -> libradicle::Shutdown {
         self.embedded.shutdown_within(within)
     }
 }
@@ -366,9 +373,9 @@ impl Node {
             Phase::Down(running) => (running, true),
             Phase::Waiting | Phase::Starting | Phase::Over => return,
         };
-        // Read before this stop asks: nothing else can reach the node now.
-        let asked = running.asked;
-        // In the time the drain left, if any: asked all the same.
+        // Nothing else can reach the node now: the outcome says whether
+        // this stop was the first to ask it. In the time the drain left, if
+        // any: asked all the same.
         let stopped = running.ask_stop(deadline.saturating_duration_since(Instant::now()));
         let Running {
             embedded,
@@ -378,7 +385,7 @@ impl Node {
         } = running;
         drop(nat64);
         drop(repositories);
-        match ending(watched || asked, drained, &stopped, end) {
+        match ending(watched, drained, &stopped, end) {
             Ending::Clean => match marker::remove(home) {
                 Ok(()) => log::info(
                     "the node stopped cleanly; the dirty marker is cleared",
@@ -425,39 +432,49 @@ fn node_down(conn: &Connection) {
 /// How a stop left the node.
 #[derive(Debug, PartialEq, Eq)]
 enum Ending {
-    /// `rad.shutdown`'s stop asked a node nothing had asked before, and it
-    /// stopped in time: the marker is cleared.
+    /// After a complete drain, `rad.shutdown`'s stop was the first to ask
+    /// a running node, and it stopped and let go of its home in time: the
+    /// marker is cleared.
     Clean,
     /// The same, but the connection ended otherwise: the marker stays.
     Stopped,
-    /// The node ended, or began to stop, behind the stop: `node_down`.
+    /// The node ended, or began to stop, behind the stop, or its thread
+    /// ended with an error: `node_down`.
     Down,
-    /// It didn't stop in time, or its home wasn't let go of, and why: the
-    /// marker stays.
+    /// Work was still running past the drain, or this stop asked the node
+    /// but it didn't stop, or let go of its home, in time, or its home's
+    /// lock failed, and why: the marker stays.
     Unproven(&'static str),
 }
 
-/// How the stop that asked the node itself left it, from `stopped`, its
-/// request's outcome. `behind`: the node was found down, or asked to stop
-/// before. heartwood's run ends `Ok` only once it was asked, so a node
-/// thread that ended by itself is `NodeThread`, before this request or
-/// after it, as is one that panicked. `drained`: the pools' drain was
-/// complete; work still running leaves nothing proven.
-fn ending(
-    behind: bool,
-    drained: bool,
-    stopped: &Result<(), libradicle::Error>,
-    end: End,
-) -> Ending {
-    match stopped {
-        _ if behind => Ending::Down,
-        Err(libradicle::Error::NodeThread(_)) => Ending::Down,
+/// How the stop left the node, from `stopped`, its call's outcome;
+/// `watched`: the watch found the node down first; and `drained`: the
+/// pools' drain was complete. heartwood's run ends `Ok` only once it was
+/// asked, so a node thread that ended by itself is `ThreadEnd::Failed`,
+/// before this request or after it, as is one that panicked; libradicle
+/// reports it whatever the home. A node down behind the stop is `Down`
+/// whatever the drain; otherwise work still running leaves nothing proven.
+fn ending(watched: bool, drained: bool, stopped: &libradicle::Shutdown, end: End) -> Ending {
+    use libradicle::{Asked, HomeLock, ThreadEnd};
+    match (stopped.asked, &stopped.thread, &stopped.home) {
+        _ if watched => Ending::Down,
+        // Whatever the home and whoever asked: a held home doesn't hide it.
+        (_, ThreadEnd::Failed(_), _) => Ending::Down,
+        (Asked::Earlier | Asked::Never, _, _) => Ending::Down,
+        // Only after the `Down` arms: an incomplete drain hides no crash.
         _ if !drained => Ending::Unproven("work was still running"),
-        // Without the details: a node thread's error can name a path.
-        Err(libradicle::Error::ShutdownTimeout(_)) => Ending::Unproven("it didn't stop in time"),
-        Err(_) => Ending::Unproven("its home wasn't let go of"),
-        Ok(()) if end == End::Shutdown => Ending::Clean,
-        Ok(()) => Ending::Stopped,
+        (Asked::ThisCall, ThreadEnd::Running, _) => Ending::Unproven("it didn't stop in time"),
+        (Asked::ThisCall, ThreadEnd::Stopped, HomeLock::Held) => {
+            Ending::Unproven("it didn't let go of its home in time")
+        }
+        // Without the error: it can name a path.
+        (Asked::ThisCall, ThreadEnd::Stopped, HomeLock::Unknown(_)) => {
+            Ending::Unproven("its home's lock failed")
+        }
+        (Asked::ThisCall, ThreadEnd::Stopped, HomeLock::Released) if end == End::Shutdown => {
+            Ending::Clean
+        }
+        (Asked::ThisCall, ThreadEnd::Stopped, HomeLock::Released) => Ending::Stopped,
     }
 }
 
@@ -511,7 +528,6 @@ fn run(start: Start) -> Result<Running, ErrorBody> {
     .map_err(|e| start_failed(e.to_string()))?;
     Ok(Running {
         embedded,
-        asked: false,
         repositories,
         nat64,
     })
@@ -609,54 +625,112 @@ mod tests {
         assert!(gate.state(&rid(200)).is_open());
     }
 
-    /// A stop clears the marker only for a node it alone asked, stopped in
-    /// time, at `rad.shutdown`, after a complete drain; a node found down,
-    /// asked before, or whose thread ended with an error is `node_down`,
-    /// whatever the stop's end and the drain.
+    /// A stop clears the marker only for a node it alone asked, stopped and
+    /// let go of its home in time, at `rad.shutdown`, after a complete
+    /// drain. A node found down, asked before, ended before any asked, or
+    /// whose thread failed is `node_down`, whatever its home, the stop's end
+    /// and the drain; any other stop after an incomplete drain is unproven.
+    /// Every `Asked` x `ThreadEnd` x `HomeLock` x end row is checked with
+    /// both drain states, watched and not.
     #[test]
     fn only_the_stop_that_alone_asked_a_live_node_after_a_drain_is_clean() {
-        use libradicle::Error::{NodeThread, ShutdownTimeout};
-        let thread = || Err(NodeThread("ended".into()));
-        let late = || Err(ShutdownTimeout(Duration::ZERO));
-        assert_eq!(ending(false, true, &Ok(()), End::Shutdown), Ending::Clean);
-        assert_eq!(ending(false, true, &Ok(()), End::Eof), Ending::Stopped);
-        assert_eq!(ending(false, true, &thread(), End::Shutdown), Ending::Down);
-        assert_eq!(ending(false, true, &thread(), End::Eof), Ending::Down);
-        assert_eq!(
-            ending(false, true, &late(), End::Shutdown),
-            Ending::Unproven("it didn't stop in time")
-        );
-        assert_eq!(
-            ending(
-                false,
-                true,
-                &Err(std::io::Error::other("lock").into()),
-                End::Shutdown
-            ),
-            Ending::Unproven("its home wasn't let go of")
-        );
-        // Work still running past the drain: nothing is proven.
-        for stopped in [Ok(()), late()] {
-            for end in [End::Shutdown, End::Eof] {
+        use libradicle::{Asked, HomeLock, Shutdown, ThreadEnd};
+        let stop = |asked, thread, home| Shutdown {
+            asked,
+            thread,
+            home,
+            within: Duration::ZERO,
+        };
+        let failed = || ThreadEnd::Failed("ended".into());
+        let unknown = || HomeLock::Unknown(std::io::Error::other("lock"));
+        let homes = || [HomeLock::Released, HomeLock::Held, unknown()];
+        let threads = || [ThreadEnd::Running, ThreadEnd::Stopped, failed()];
+        let ends = [End::Shutdown, End::Eof];
+        let running = "work was still running";
+
+        let clean = || stop(Asked::ThisCall, ThreadEnd::Stopped, HomeLock::Released);
+        assert_eq!(ending(false, true, &clean(), End::Shutdown), Ending::Clean);
+        assert_eq!(ending(false, true, &clean(), End::Eof), Ending::Stopped);
+        for end in ends {
+            // Work still running past the drain: nothing is proven.
+            assert_eq!(
+                ending(false, false, &clean(), end),
+                Ending::Unproven(running)
+            );
+            for home in homes() {
+                let late = stop(Asked::ThisCall, ThreadEnd::Running, home);
                 assert_eq!(
-                    ending(false, false, &stopped, end),
-                    Ending::Unproven("work was still running"),
-                    "{stopped:?}"
+                    ending(false, true, &late, end),
+                    Ending::Unproven("it didn't stop in time")
                 );
+                assert_eq!(ending(false, false, &late, end), Ending::Unproven(running));
             }
-        }
-        assert_eq!(ending(false, false, &thread(), End::Shutdown), Ending::Down);
-        for stopped in [Ok(()), thread(), late()] {
-            for end in [End::Shutdown, End::Eof] {
+            let held = stop(Asked::ThisCall, ThreadEnd::Stopped, HomeLock::Held);
+            assert_eq!(
+                ending(false, true, &held, end),
+                Ending::Unproven("it didn't let go of its home in time")
+            );
+            assert_eq!(ending(false, false, &held, end), Ending::Unproven(running));
+            let lock = stop(Asked::ThisCall, ThreadEnd::Stopped, unknown());
+            assert_eq!(
+                ending(false, true, &lock, end),
+                Ending::Unproven("its home's lock failed")
+            );
+            assert_eq!(ending(false, false, &lock, end), Ending::Unproven(running));
+            // A thread that failed while a name lookup held the home past
+            // the deadline, after this stop asked or before any did, whether
+            // or not the drain was complete.
+            for asked in [Asked::ThisCall, Asked::Never] {
                 for drained in [true, false] {
                     assert_eq!(
-                        ending(true, drained, &stopped, end),
+                        ending(false, drained, &stop(asked, failed(), HomeLock::Held), end),
                         Ending::Down,
-                        "{stopped:?}"
+                        "{asked:?} drained {drained}"
                     );
                 }
             }
         }
+        // Every row, both drain states, watched and not: a failed thread,
+        // a node another stop asked or none did, and every node the watch
+        // found down, are `Down` before the drain counts; the rest above.
+        let mut rows = 0;
+        for asked in [Asked::ThisCall, Asked::Earlier, Asked::Never] {
+            for thread in threads() {
+                let behind = asked != Asked::ThisCall || matches!(thread, ThreadEnd::Failed(_));
+                for home in homes() {
+                    let stopped = stop(asked, thread.clone(), home);
+                    for end in ends {
+                        for drained in [true, false] {
+                            if behind {
+                                assert_eq!(
+                                    ending(false, drained, &stopped, end),
+                                    Ending::Down,
+                                    "{stopped:?} drained {drained}"
+                                );
+                            } else if !drained {
+                                assert_eq!(
+                                    ending(false, drained, &stopped, end),
+                                    Ending::Unproven(running),
+                                    "{stopped:?}"
+                                );
+                            } else {
+                                assert!(
+                                    !matches!(ending(false, drained, &stopped, end), Ending::Down),
+                                    "{stopped:?}"
+                                );
+                            }
+                            assert_eq!(
+                                ending(true, drained, &stopped, end),
+                                Ending::Down,
+                                "{stopped:?} drained {drained}"
+                            );
+                            rows += 1;
+                        }
+                    }
+                }
+            }
+        }
+        assert_eq!(rows, 3 * 3 * 3 * 2 * 2);
     }
 
     #[test]

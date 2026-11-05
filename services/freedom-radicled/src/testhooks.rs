@@ -21,8 +21,9 @@
 //! - `FREEDOM_RADICLED_TEST_SHUTDOWN_WITHIN_MS` replaces how long the stop
 //!   takes, the pools' drain and then the node's ([`crate::node`]'s 3 s).
 //! - `FREEDOM_RADICLED_TEST_STOP_NODE=1` asks the node to stop right after
-//!   `rad.start` has answered, behind the stop's back: the node thread ends
-//!   as one that failed would, and the node's watch, or the stop, finds it.
+//!   `rad.start` has answered, behind the stop's back: the node thread ends,
+//!   and the node's watch finds it, or the stop does, as a request before
+//!   its own (libradicle's `Asked::Earlier`).
 //! - `FREEDOM_RADICLED_TEST_HOLD_DOWN=1` holds the node's watch once it has
 //!   published `Down`, before it claims exit 70: it logs `test hook: the
 //!   watch holds the node down` and never goes on, so only a stop that takes
