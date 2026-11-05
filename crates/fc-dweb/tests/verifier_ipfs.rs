@@ -1298,7 +1298,7 @@ fn least_raw_budget(world: &Gateway, p: &Verify, mut lo: usize, mut hi: usize) -
 /// A structure that doesn't fit beside the CAR's room, nor beside the
 /// window its cancelled stream keeps until main ends it, waits for that
 /// window. Codex's directory of 37,614 links, its CAR still streaming
-/// (another block follows it) when the listing is built, answers through
+/// (a 1.9 MB block follows it) when the listing is built, answers through
 /// the CAR in either order wherever raw blocks answer it, the scheme's
 /// budget among them; raw blocks need more than the budget less a window.
 #[test]
@@ -1307,7 +1307,7 @@ fn a_structure_waits_for_the_cars_window() {
     let root = wide_directory(&mut blocks, 37_614, None);
     let world = Gateway {
         blocks: &blocks,
-        changes: vec![insert_after(1, &content("after-the-directory", 256 << 10))],
+        changes: vec![insert_after(1, &content("after-the-directory", 1_900_000))],
     };
     let p = ranged(&text(&root), "/", None);
     let window = fc_dweb::verifier::STREAM_WINDOW;
@@ -1363,6 +1363,154 @@ fn a_late_section_wakes_the_walk_waiting_for_its_room() {
         assert!(answered(&label, &got, &honest), "{label}");
         assert!(got.pieces[0].path.contains("format=car"), "{label}");
     }
+}
+
+/// A UnixFS file node in canonical dag-pb with data of its own: its links
+/// (CID, Tsize), then `Data { Type: File, Data, filesize, blocksizes }`.
+fn data_file_node(data: &[u8], links: &[(&[u8], u64)], blocksizes: &[u64]) -> Vec<u8> {
+    let filesize = data.len() as u64 + blocksizes.iter().sum::<u64>();
+    let mut d = vec![0x08, 0x02, 0x12];
+    varint(data.len() as u64, &mut d);
+    d.extend_from_slice(data);
+    d.push(0x18);
+    varint(filesize, &mut d);
+    for b in blocksizes {
+        d.push(0x20);
+        varint(*b, &mut d);
+    }
+    let mut out = Vec::new();
+    for (cid, tsize) in links {
+        let mut l = vec![0x0a];
+        varint(cid.len() as u64, &mut l);
+        l.extend_from_slice(cid);
+        l.extend_from_slice(&[0x12, 0x00, 0x18]);
+        varint(*tsize, &mut l);
+        out.push(0x12);
+        varint(l.len() as u64, &mut out);
+        out.extend_from_slice(&l);
+    }
+    out.push(0x0a);
+    varint(d.len() as u64, &mut out);
+    out.extend_from_slice(&d);
+    out
+}
+
+/// A file node of `data` and one-byte leaves in identity CIDs, which carry
+/// their blocks: each child takes room as a need, and none is fetched.
+fn identity_leaves(blocks: &mut Blocks, data: &[u8], leaves: &[u8]) -> Vec<u8> {
+    let ids: Vec<Vec<u8>> = leaves.chunks(1).map(|b| cid_of(0x55, b, true)).collect();
+    let refs: Vec<(&[u8], u64)> = ids.iter().map(|c| (&c[..], 1)).collect();
+    let node = data_file_node(data, &refs, &vec![1; ids.len()]);
+    let cid = cid_of(0x70, &node, false);
+    blocks.blocks.insert(key(&cid), node);
+    cid
+}
+
+/// A node's children wait for the room a block in flight gives back. A
+/// file of two nodes: the first with 60,000 one-byte leaves (4.1 MB of
+/// needs), the second a 1.05 MB block, 600,000 bytes of its own data and
+/// 30,000 leaves, which is asked for with the first at a dag-pb block's
+/// 2 MiB and comes after it. The first's children fit only once the second
+/// has come and given back the room it didn't take: with the wait the file
+/// answers from 6 MiB, through raw blocks and CARs, in either order.
+#[test]
+fn a_nodes_children_wait_for_a_block_in_flight() {
+    let mut blocks = Blocks::new(&load("dweb-verify.json"));
+    let first = content("first-leaves", 60_000);
+    let (data, rest) = (
+        content("second-data", 600_000),
+        content("second-leaves", 30_000),
+    );
+    let a = identity_leaves(&mut blocks, b"", &first);
+    let b = identity_leaves(&mut blocks, &data, &rest);
+    let sizes = [first.len() as u64, (data.len() + rest.len()) as u64];
+    let root = data_file_node(b"", &[(&a, sizes[0]), (&b, sizes[1])], &sizes);
+    let root_cid = cid_of(0x70, &root, false);
+    blocks.blocks.insert(key(&root_cid), root);
+    let world = Gateway {
+        blocks: &blocks,
+        changes: vec![],
+    };
+    let p = ranged(&text(&root_cid), "", None);
+    let body = [first, data, rest].concat();
+    for budget in [6 << 20, (27 << 20) / 4] {
+        for car in [false, true] {
+            for order in [Order::Fifo, Order::Lifo] {
+                let label = format!("{budget} car={car} {order:?}");
+                let got = run(
+                    &label,
+                    &p,
+                    Method::Get,
+                    &world,
+                    Opts {
+                        budget,
+                        order,
+                        ..opts(car, 0)
+                    },
+                );
+                assert_eq!(got.ending, Some(Ending::End), "{label}");
+                assert!(got.body == body, "{label}");
+            }
+        }
+    }
+}
+
+/// A node's children wait for the page to read the body before them: a
+/// file of a node with two 256 KiB raw leaves, then a node with 40,000
+/// one-byte leaves (2.8 MB of needs). A page reading 16 KiB a step answers
+/// wherever a page reading at once does.
+#[test]
+fn a_nodes_children_wait_for_the_page() {
+    let mut blocks = Blocks::new(&load("dweb-verify.json"));
+    let big = content("two-leaves", 2 * LEAF);
+    let leaves: Vec<Vec<u8>> = big.chunks(LEAF).map(raw_cid).collect();
+    for (c, b) in leaves.iter().zip(big.chunks(LEAF)) {
+        blocks.blocks.insert(key(c), b.to_vec());
+    }
+    let refs: Vec<(&[u8], u64)> = leaves.iter().map(|c| (&c[..], LEAF as u64)).collect();
+    let two = file_node(&refs, big.len() as u64, &[LEAF as u64; 2]);
+    let two_cid = cid_of(0x70, &two, false);
+    blocks.blocks.insert(key(&two_cid), two);
+    let tiny = content("one-byte-leaves", 40_000);
+    let many = identity_leaves(&mut blocks, b"", &tiny);
+    let sizes = [big.len() as u64, tiny.len() as u64];
+    let root = file_node(
+        &[(&two_cid, sizes[0]), (&many, sizes[1])],
+        sizes[0] + sizes[1],
+        &sizes,
+    );
+    let root_cid = cid_of(0x70, &root, false);
+    blocks.blocks.insert(key(&root_cid), root);
+    let world = Gateway {
+        blocks: &blocks,
+        changes: vec![],
+    };
+    let p = ranged(&text(&root_cid), "", None);
+    let body = [big, tiny].concat();
+    let mut answered = 0;
+    for i in 0..=12 {
+        let budget = (3 << 20) + (i << 18);
+        let at = |page| {
+            run(
+                "children after body",
+                &p,
+                Method::Get,
+                &world,
+                Opts {
+                    budget,
+                    page,
+                    ..opts(false, 0)
+                },
+            )
+        };
+        if at(None).ending == Some(Ending::End) {
+            answered += 1;
+            let slow = at(Some(16 << 10));
+            assert_eq!(slow.ending, Some(Ending::End), "{budget}");
+            assert!(slow.body == body, "{budget}");
+        }
+    }
+    assert!(answered > 0);
 }
 
 /// A file node whose children's needs don't fit beside the CAR's room,
