@@ -14,7 +14,11 @@
 //!   [`Verifier::deadline`].
 //! - **Outputs** ([`Verifier::poll`]): pieces to fetch and cancel, credit
 //!   for the streamed pieces, hash jobs, then either an error before the
-//!   head or the head, the verified body and its end or abort.
+//!   head or the head, the verified body and its end or abort. Main may
+//!   take them as seldom as it likes and what waits stays bounded: one
+//!   credit at most for each stream, carrying all it is owed, and four
+//!   chunks for the structure cache at most. Main answers only the pieces
+//!   it has taken.
 //! - **Memory:** a request runs within its scheme's grant ([`grant`]):
 //!   2 MiB for Swarm, 8 MiB for IPFS. Everything it holds counts against
 //!   its budget ([`budget`]), the grant less a fixed allowance for the few
@@ -60,8 +64,9 @@ pub const SWARM_GRANT: usize = 2 << 20;
 pub const IPFS_GRANT: usize = 8 << 20;
 /// What a Swarm request allocates beside what its budget counts, at most
 /// (0009, Bounds): the body frame being made for main ([`MAX_FRAME`]) and
-/// the outputs main hasn't taken (piece requests, credit, a verified
-/// chunk's copy for the cache), the body queue's joined tail and the
+/// the outputs main hasn't taken, however seldom it polls (a request for
+/// each open piece, a credit for each open stream, at most four verified
+/// chunks' copies for the cache), the body queue's joined tail and the
 /// queue's and outputs' slots, and the machine's own structures. Measured
 /// in the tests (`verifier_memory`), which fail past it. The Swarm vectors'
 /// manifest inside the limit needs 2,002,470 bytes, so it can be at most
@@ -424,8 +429,11 @@ struct Stream {
     headed: bool,
     received: usize,
     credited: usize,
-    /// Credit not yet sent: flushed once per input.
+    /// Credit main hasn't taken: the one [`Output::Credit`] waiting for the
+    /// stream carries all of it, as main takes it.
     owed: usize,
+    /// A credit for the stream waits among the outputs.
+    credit_waits: bool,
 }
 
 #[derive(Debug)]
@@ -439,6 +447,9 @@ struct Piece<T> {
     tag: T,
     kind: Kind,
     cancelled: bool,
+    /// Main has taken its request ([`Output::Piece`]): only then may main
+    /// answer it.
+    asked: bool,
 }
 
 /// A segment of verified body: sent as main's credit allows, and kept,
@@ -463,6 +474,10 @@ struct Queued {
 const SEGMENT: usize = 16 << 10;
 /// The outputs' slots kept once main has taken them all.
 const OUTPUTS_KEPT: usize = 16;
+/// Verified chunks' copies for the structure cache waiting for main, at
+/// most: past them, a chunk isn't given to the cache until main takes them,
+/// so however seldom main polls, the copies stay within the allowance.
+const REMEMBER_WAITING: usize = 4;
 
 /// A stream's bytes the walk hasn't used yet, in one buffer of the stream's
 /// window (design 0009, Bounds): made at the stream's first frame and never
@@ -562,6 +577,8 @@ pub(crate) struct Core<T> {
     queued: usize,
     /// Every byte the queue holds, sent or not, until main has taken it.
     queue_len: usize,
+    /// [`Output::Remember`]s main hasn't taken ([`REMEMBER_WAITING`]).
+    remembering: usize,
     /// The segment being sent: those before it are sent, waiting for main.
     sending: usize,
     /// The body frames waiting for main, by length: each is made from the
@@ -605,6 +622,7 @@ impl<T: Copy> Core<T> {
             queue: VecDeque::new(),
             queued: 0,
             queue_len: 0,
+            remembering: 0,
             sending: 0,
             frames: VecDeque::new(),
             kept_windows: 0,
@@ -735,6 +753,7 @@ impl<T: Copy> Core<T> {
                     received: 0,
                     credited: 0,
                     owed: 0,
+                    credit_waits: false,
                 }),
                 true,
                 match ask {
@@ -749,6 +768,7 @@ impl<T: Copy> Core<T> {
                 tag,
                 kind,
                 cancelled: false,
+                asked: false,
             },
         );
         self.outputs.push_back(Output::Piece(PieceRequest {
@@ -801,6 +821,10 @@ impl<T: Copy> Core<T> {
     }
 
     pub(crate) fn remember(&mut self, address: [u8; 32], wire: &[u8]) {
+        if self.remembering >= REMEMBER_WAITING {
+            return;
+        }
+        self.remembering += 1;
         self.outputs.push_back(Output::Remember {
             address,
             wire: wire.to_vec(),
@@ -1019,20 +1043,55 @@ impl<T: Copy> Core<T> {
 
     /// The next output for main. A body frame is made here, at its length,
     /// from the sent part of the queue, and the segments it takes the last
-    /// of go; the head's headers are main's now.
+    /// of go; the head's headers are main's now. A credit carries what its
+    /// stream is owed now, and none goes once the stream is cancelled or
+    /// has ended.
     fn take_output(&mut self) -> Option<Output> {
-        let out = match self.outputs.pop_front()? {
-            Output::Body(_) => Output::Body(self.take_frame()),
-            Output::Head(h) => {
-                self.head_held = 0;
-                Output::Head(h)
+        let out = loop {
+            let Some(next) = self.outputs.pop_front() else {
+                break None;
+            };
+            match next {
+                Output::Body(_) => break Some(Output::Body(self.take_frame())),
+                Output::Head(h) => {
+                    self.head_held = 0;
+                    break Some(Output::Head(h));
+                }
+                Output::Credit { piece, .. } => {
+                    if let Some(bytes) = self.take_credit(piece) {
+                        break Some(Output::Credit { piece, bytes });
+                    }
+                }
+                Output::Piece(r) => {
+                    if let Some(p) = self.pieces.get_mut(&r.id) {
+                        p.asked = true;
+                    }
+                    break Some(Output::Piece(r));
+                }
+                Output::Remember { address, wire } => {
+                    self.remembering -= 1;
+                    break Some(Output::Remember { address, wire });
+                }
+                other => break Some(other),
             }
-            other => other,
         };
         if self.outputs.is_empty() && self.outputs.capacity() > 4 * OUTPUTS_KEPT {
             self.outputs.shrink_to(OUTPUTS_KEPT);
         }
-        Some(out)
+        out
+    }
+
+    /// What a stream is owed as main takes its credit, if anything.
+    fn take_credit(&mut self, piece: PieceId) -> Option<usize> {
+        let Some(Piece {
+            kind: Kind::Stream(s),
+            ..
+        }) = self.pieces.get_mut(&piece)
+        else {
+            return None;
+        };
+        s.credit_waits = false;
+        Some(std::mem::take(&mut s.owed)).filter(|&n| n > 0)
     }
 
     fn take_frame(&mut self) -> Vec<u8> {
@@ -1104,18 +1163,19 @@ impl<T: Copy> Core<T> {
         }
     }
 
+    /// A stream owed credit gets one [`Output::Credit`], unless one waits
+    /// for it already: what it carries is counted as main takes it
+    /// ([`Core::take_output`]). So however seldom main polls, the outputs
+    /// hold one credit at most for each stream, not one for each input.
     fn flush_credit(&mut self) {
-        let mut credit = Vec::new();
-        for (id, p) in &mut self.pieces {
+        for (&piece, p) in &mut self.pieces {
             if let Kind::Stream(s) = &mut p.kind
                 && s.owed > 0
+                && !s.credit_waits
             {
-                credit.push((*id, s.owed));
-                s.owed = 0;
+                s.credit_waits = true;
+                self.outputs.push_back(Output::Credit { piece, bytes: 0 });
             }
-        }
-        for (piece, bytes) in credit {
-            self.outputs.push_back(Output::Credit { piece, bytes });
         }
     }
 }
@@ -1253,6 +1313,11 @@ impl<T: Copy, W: Events<T>> Machine<T, W> {
         let Some(piece) = self.core.pieces.get_mut(&id) else {
             return Err(Misuse::EndedPiece);
         };
+        // Main answers only what it was asked: a request it hasn't taken
+        // has nothing of main's yet.
+        if !piece.asked {
+            return Err(Misuse::UnknownPiece);
+        }
         // Main reads a whole piece up to its bound; past it is `too_large`.
         let event = match (&piece.kind, event) {
             (Kind::Whole { max }, PieceEvent::Whole { body, .. }) if body.len() > *max => {
@@ -1419,7 +1484,7 @@ impl<T: Copy, W: Events<T>> Machine<T, W> {
     }
 
     /// After each input: a walk that has ended is dropped with what it
-    /// held, and credit owed goes out.
+    /// held, and a stream owed credit has a credit waiting for main.
     fn settle(&mut self) {
         if let Some(walk) = self.walk.as_ref() {
             walk.audit(&mut self.core);
