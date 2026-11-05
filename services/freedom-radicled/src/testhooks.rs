@@ -18,8 +18,8 @@
 //!   descriptor above stderr is (its `/proc/self/fd` link: a test may log a
 //!   path). Linux only.
 //! - `FREEDOM_RADICLED_TEST_START_DEADLINE_MS` replaces `rad.start`'s 30 s.
-//! - `FREEDOM_RADICLED_TEST_SHUTDOWN_WITHIN_MS` replaces how long the
-//!   shutdown waits for the node to stop ([`crate::service`]'s 3 s).
+//! - `FREEDOM_RADICLED_TEST_SHUTDOWN_WITHIN_MS` replaces how long the stop
+//!   takes, the pools' drain and then the node's ([`crate::node`]'s 3 s).
 //! - `FREEDOM_RADICLED_TEST_STOP_NODE=1` asks the node to stop right after
 //!   `rad.start` has answered, behind the stop's back: the node thread ends
 //!   as one that failed would, and the node's watch, or the stop, finds it.
@@ -27,6 +27,13 @@
 //!   published `Down`, before it claims exit 70: it logs `test hook: the
 //!   watch holds the node down` and never goes on, so only a stop that takes
 //!   the `Down` node can end the process with 70.
+//! - `FREEDOM_RADICLED_TEST_WORK_DEADLINE_MS` replaces the read pool's and
+//!   the write queue's 60 s deadlines.
+//! - `FREEDOM_RADICLED_TEST_HOLD_WORK` holds a pooled method's work, which
+//!   this build doesn't serve yet, in its slot before it answers: with `1`
+//!   until its token is cancelled (main's cancel, its deadline or the stop),
+//!   or for 30 s, and with `deaf` for 30 s whatever its token, as a call
+//!   that doesn't check it. Each logs `test hook: work holds its slot`.
 //!
 //! **Hermetic by construction:** a build with the feature never reaches
 //! off this host, whatever a test asks of it.
@@ -136,6 +143,31 @@ pub fn shutdown_within(default: Duration) -> Duration {
         return Duration::from_millis(ms);
     }
     default
+}
+
+/// The read pool's and the write queue's deadline.
+pub fn work_deadline(default: Duration) -> Duration {
+    #[cfg(feature = "testhooks")]
+    if let Some(ms) = millis("FREEDOM_RADICLED_TEST_WORK_DEADLINE_MS") {
+        return Duration::from_millis(ms);
+    }
+    default
+}
+
+/// Holds a pooled method's work in its slot, if asked: until `cancel` is
+/// cancelled, or whatever it is.
+pub fn hold_work(cancel: &libradicle::CancelToken) {
+    #[cfg(feature = "testhooks")]
+    if let Some(hold) = std::env::var_os("FREEDOM_RADICLED_TEST_HOLD_WORK") {
+        let deaf = hold == "deaf";
+        fc_service::log::info("test hook: work holds its slot", serde_json::json!({}));
+        let until = std::time::Instant::now() + Duration::from_secs(30);
+        while std::time::Instant::now() < until && (deaf || !cancel.is_cancelled()) {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+    #[cfg(not(feature = "testhooks"))]
+    let _ = cancel;
 }
 
 /// Whether the node is to be asked to stop right after `rad.start` has

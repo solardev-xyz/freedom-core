@@ -3,11 +3,21 @@
 //! **This build:** the start, in order: `rad.hello`, `rad.identity` (0008,
 //! "Keys"), `rad.reconcile` ([`crate::reconcile`]) and `rad.start`
 //! ([`crate::node`]), and the node's life until the connection ends. Every
-//! other method 0008 lists comes with later steps, and answers `stopped`, as
-//! before `RUNNING`:
+//! other method 0008 lists comes with later steps:
 //! - `rad.reconcile` and `rad.start` before `rad.identity` has succeeded:
 //!   `no_identity`, and the process ends;
-//! - otherwise `stopped`.
+//! - **the pooled methods** go through their pool's admission, as 0008's
+//!   table places them ([`crate::pools`]): `rad.quarantine_list`,
+//!   `rad.read` and `rad.blob` on the read pool, `rad.remove_repo`,
+//!   `rad.unseed` and `rad.write` on the write queue, each with its 60 s
+//!   deadline from admission. Before `RUNNING` and from the stop on they
+//!   are `stopped`, and past the pool's bounds `busy`. Their operations come
+//!   with later steps: until then each one's work answers `stopped`, as
+//!   this build answered it before;
+//! - `rad.connect_seeds` and `rad.clone`, for the network pool, whose
+//!   deadline is the request's own `timeout_ms` plus 30 s, come with the
+//!   network operations' step; they, `rad.stats` (inline) and
+//!   `rad.import_repo` (the import process's) answer `stopped`.
 //!
 //! **`rad.reconcile`** runs on a thread of its own, never the reader's. It
 //! is admitted once, after `rad.identity`; a second is `invalid_argument`,
@@ -44,8 +54,9 @@ use crate::build_info;
 use crate::confine::Grant;
 use crate::identity::{self, Identity};
 use crate::node::{self, Node};
+use crate::pools::{self, Pool, Pools, Ticket, Work};
 use crate::reconcile;
-use crate::units;
+use crate::{testhooks, units};
 
 /// How the process ends after a start step it answered with an error
 /// (0008: "the service answers with the error and then exits"). Main read
@@ -53,19 +64,19 @@ use crate::units;
 const FAILED_START: Exit = Exit::Ok;
 
 /// The methods 0008 lists beside `rad.hello`, `rad.identity` and
-/// `rad.shutdown`, which later steps implement.
+/// `rad.shutdown` that later steps implement, and that take no pool here.
 const LATER: &[&str] = &[
-    "rad.quarantine_list",
-    "rad.remove_repo",
     "rad.stats",
-    "rad.read",
-    "rad.blob",
     "rad.connect_seeds",
     "rad.clone",
-    "rad.unseed",
-    "rad.write",
     "rad.import_repo",
 ];
+
+/// The methods on the read pool.
+const READS: &[&str] = &["rad.quarantine_list", "rad.read", "rad.blob"];
+
+/// The methods on the write queue.
+const WRITES: &[&str] = &["rad.remove_repo", "rad.unseed", "rad.write"];
 
 /// The methods that need the node's identity first.
 const NEED_IDENTITY: &[&str] = &["rad.reconcile", "rad.start"];
@@ -114,16 +125,21 @@ pub struct RadicleService {
     git_config: libradicle::GitConfigIsolated,
     /// The node, from `rad.start` until the connection ends.
     node: Arc<Node>,
+    /// The read pool, the network pool and the write queue, which the node
+    /// opens and drains.
+    pools: Arc<Pools>,
 }
 
 impl RadicleService {
-    /// The service for `grant`'s home, with the key for this start, and
-    /// `units` the repair units' watch; `None` if the OS's randomness fails.
+    /// The service for `grant`'s home, with the key for this start, `units`
+    /// the repair units' watch and `pools` its pools, their threads started;
+    /// `None` if the OS's randomness fails.
     pub fn new(
         grant: Grant,
         network: &fc_service::network::NetworkPolicy,
         confinement: Value,
         units: Arc<units::UnitWatch>,
+        pools: Arc<Pools>,
         git_config: libradicle::GitConfigIsolated,
     ) -> Option<Self> {
         let identity = Identity::new(&grant.home)?;
@@ -138,7 +154,8 @@ impl RadicleService {
             deadline: Mutex::new(None),
             units,
             git_config,
-            node: Arc::new(Node::new()),
+            node: Arc::new(Node::new(pools.clone())),
+            pools,
         })
     }
 
@@ -150,6 +167,17 @@ impl RadicleService {
             .take()
         {
             deadline.disarm();
+        }
+    }
+
+    /// The pool `method` runs on, with its deadline from admission.
+    fn pool(&self, method: &str) -> Option<(&Pool<Connection>, std::time::Duration)> {
+        if READS.contains(&method) {
+            Some((self.pools.read(), pools::READ_DEADLINE))
+        } else if WRITES.contains(&method) {
+            Some((self.pools.write(), pools::WRITE_DEADLINE))
+        } else {
+            None
         }
     }
 
@@ -312,6 +340,20 @@ impl RadicleService {
     }
 }
 
+/// The work of a pooled method whose operation comes with a later step: it
+/// holds its slot as any work does, then answers `stopped`, as this build
+/// answered it before.
+fn later_step(conn: &Connection) -> Work {
+    let conn = conn.clone();
+    Box::new(move |ticket: &Ticket| {
+        testhooks::hold_work(&ticket.cancel);
+        let _ = conn.reply_error(
+            ticket.id,
+            &ErrorBody::new(ErrorCode::Stopped, "not served in this build"),
+        );
+    })
+}
+
 /// Answers `error`, then ends the process (0008: a failed start step).
 pub(crate) fn fail_start(conn: &Connection, id: u64, error: &ErrorBody) {
     log::error(
@@ -369,6 +411,9 @@ impl Service for RadicleService {
                 request.id,
                 &ErrorBody::new(ErrorCode::NoIdentity, "rad.identity has not succeeded"),
             );
+        } else if let Some((pool, within)) = self.pool(method) {
+            let deadline = Instant::now() + testhooks::work_deadline(within);
+            pool.submit(request.id, deadline, conn.clone(), later_step(conn));
         } else if LATER.contains(&method) {
             let _ = conn.reply_error(
                 request.id,
@@ -382,15 +427,18 @@ impl Service for RadicleService {
         }
     }
 
-    fn cancel(&self, _conn: &Connection, _id: u64) {
-        // Every request is answered at once: nothing runs to cancel.
+    fn cancel(&self, _conn: &Connection, id: u64) {
+        // A pool's request; the others are answered at once, or not
+        // cancellable (`rad.reconcile`, `rad.start`).
+        self.pools.cancel(id);
     }
 
     fn end(&self, conn: &Connection, end: End) {
         self.disarm_deadline();
         // Reconciliation stops after the unit in progress.
         self.stopping.store(true, Ordering::Release);
-        // The node stops, within the connection's 5 s exit.
+        // The pools drain, then the node stops, within the connection's 5 s
+        // exit.
         self.node.stop(conn, &self.home, end);
         log::info("connection ended", json!({ "end": end.name() }));
     }
