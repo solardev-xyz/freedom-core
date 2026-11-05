@@ -32,7 +32,7 @@ use fc_ipfs::unixfs::{self, Kind};
 
 use super::gateway::{self, Cache, RangeError};
 use super::jobs::{Verdict, Work};
-use super::{Ask, Failure, Holding, PieceFailure, PieceId};
+use super::{Ask, Failure, Holding, PieceFailure, PieceId, STREAM_WINDOW, Stash};
 use crate::plan::{ContentTrust, Root};
 use crate::validate::Refusal as PlanRefusal;
 
@@ -116,12 +116,19 @@ enum Turn {
 /// entry, which its length must equal; any other block at the limit (0009,
 /// Raw blocks).
 fn block_room(need: &Need) -> usize {
+    block_len(need).unwrap_or(fc_ipfs::block::MAX_BLOCK)
+}
+
+/// A raw leaf's length, as its entry gives it.
+fn block_len(need: &Need) -> Option<usize> {
     let leaf = ipfs_cid::parse(&need.cid).is_some_and(|c| c.codec == ipfs_cid::RAW);
     match need.what {
-        What::File { len, .. } if leaf => usize::try_from(len)
-            .unwrap_or(fc_ipfs::block::MAX_BLOCK)
-            .min(fc_ipfs::block::MAX_BLOCK),
-        _ => fc_ipfs::block::MAX_BLOCK,
+        What::File { len, .. } if leaf => Some(
+            usize::try_from(len)
+                .unwrap_or(fc_ipfs::block::MAX_BLOCK)
+                .min(fc_ipfs::block::MAX_BLOCK),
+        ),
+        _ => None,
     }
 }
 
@@ -284,9 +291,15 @@ struct Need {
 #[derive(Debug)]
 struct RawPiece {
     id: PieceId,
+    /// The block's buffer ([`RawPiece::next_size`]): made at its first
+    /// byte, within the room held for it and the piece's window.
     buf: Vec<u8>,
-    /// Room held for bytes yet to come.
-    reserved: usize,
+    /// Its length is known: a leaf whose entry gives it.
+    exact: bool,
+    /// Room held for the buffer: the block's bound, or the buffer's
+    /// capacity once that is more. Once the block is the job's, what the
+    /// buffer has past the block's bytes, if it couldn't be given back.
+    room: usize,
     /// The CID's length, held for the hash job.
     cid_len: usize,
     hashing: bool,
@@ -295,7 +308,27 @@ struct RawPiece {
 impl RawPiece {
     /// What it holds of the request's memory.
     fn held(&self) -> usize {
-        self.buf.len() + self.reserved + self.cid_len
+        self.room + self.cid_len
+    }
+
+    /// The buffer's next size, for `len` bytes. A leaf's is its length,
+    /// made once. A block of unknown length (a node, read into a block's
+    /// bound) starts at a frame's, then takes half its room and its window,
+    /// and only past that all its room: each move, the old buffer beside
+    /// the new and main's frame, fits the room and the window but the
+    /// last, whose rest is held for it ([`Walk::raw_data`]); and a buffer
+    /// cut to its block's length at its end fits them too, up to the half.
+    fn next_size(&self, len: usize) -> usize {
+        let cap = self.buf.capacity();
+        let half = (self.room + STREAM_WINDOW) / 2;
+        let next = if self.exact || cap >= half.min(self.room) {
+            self.room
+        } else if cap == 0 {
+            super::MAX_FRAME.min(self.room)
+        } else {
+            half.min(self.room)
+        };
+        next.max(len)
     }
 }
 
@@ -309,8 +342,9 @@ struct CarStream {
     reader: car::Reader,
     headed: bool,
     open: bool,
-    /// Bytes not yet given to the reader, while the body waits for credit.
-    stash: VecDeque<Vec<u8>>,
+    /// Bytes not yet given to the reader, while the body waits for credit:
+    /// in one buffer of the stream's window.
+    stash: Stash,
     /// Sections given to the hashing pool, in order, and those whose
     /// verdict came, waiting for the ones before them.
     sent: u64,
@@ -398,6 +432,9 @@ pub(crate) struct Walk {
     path_held: usize,
     /// Blocks checked, waiting for their turn: by need.
     arrived: BTreeMap<u64, Vec<u8>>,
+    /// What a raw block's buffer, arrived or hashing, holds past its bytes
+    /// when it couldn't give that back at its end: held with it, by need.
+    spares: BTreeMap<u64, usize>,
     raw: BTreeMap<u64, RawPiece>,
     /// Raw blocks only, from here on.
     raw_only: bool,
@@ -435,6 +472,7 @@ impl Walk {
             next_seq: 0,
             path_held: 0,
             arrived: BTreeMap::new(),
+            spares: BTreeMap::new(),
             raw: BTreeMap::new(),
             raw_only,
             car: None,
@@ -508,8 +546,12 @@ impl Walk {
         self.needs = VecDeque::new();
         self.needs_slots = 0;
         for (_, b) in std::mem::take(&mut self.arrived) {
-            core.unhold(b.len());
+            let n = b.len();
+            drop(b);
+            core.unhold(n);
         }
+        let spares: usize = std::mem::take(&mut self.spares).into_values().sum();
+        core.unhold(spares);
         for (_, r) in std::mem::take(&mut self.raw) {
             core.unhold(r.held());
             if !r.hashing {
@@ -647,23 +689,18 @@ impl Walk {
     }
 
     fn release_car(car: Option<CarStream>, core: &mut Core) {
-        if let Some(c) = car {
+        if let Some(mut c) = car {
             if c.open {
                 core.cancel_piece(c.id);
             }
+            c.stash.free(core);
             core.unhold(CAR_ROOM);
-            core.unhold(c.stash.iter().map(Vec::len).sum());
-            // Sections still hashing: their jobs' bytes come back with
-            // their results, and are dropped then; their costs go now.
-            let judged = c.verdicts.len() as u64;
-            let hashing = c.sent.saturating_sub(c.done).saturating_sub(judged);
-            core.unhold(
-                usize::try_from(hashing)
-                    .unwrap_or(usize::MAX)
-                    .saturating_mul(SECTION_COST),
-            );
+            // Sections still hashing: their jobs' bytes and structures come
+            // back with their results, and go then, with their costs.
             for (_, (cid, block, _)) in c.verdicts {
-                core.unhold(cid.len() + block.len() + SECTION_COST);
+                let n = cid.len() + block.len() + SECTION_COST;
+                drop((cid, block));
+                core.unhold(n);
             }
         }
     }
@@ -886,7 +923,7 @@ impl Walk {
                     Err(Halt::Fail(f)) => self.end(core, f),
                     Ok(()) => {}
                 }
-                let n = need.cid.len() + block.len();
+                let n = need.cid.len() + block.len() + self.spares.remove(&seq).unwrap_or(0);
                 drop((need, block));
                 core.unhold(n);
                 continue;
@@ -1018,7 +1055,8 @@ impl Walk {
                 RawPiece {
                     id,
                     buf: Vec::new(),
-                    reserved: room,
+                    exact: block_len(&need).is_some(),
+                    room,
                     cid_len: need.cid.len(),
                     hashing: false,
                 },
@@ -1045,7 +1083,7 @@ impl Walk {
                 return self.feed(core);
             }
         };
-        if !core.fits(CAR_ROOM + super::STREAM_WINDOW) {
+        if !core.fits(CAR_ROOM + STREAM_WINDOW + super::MAX_FRAME) {
             self.raw_only = true;
             return self.feed(core);
         }
@@ -1055,7 +1093,7 @@ impl Walk {
             path.push_str(&bytes);
         }
         let headers = vec![("accept".to_owned(), CAR_ACCEPT.to_owned())];
-        let Some(id) = core.fetch(Tag::Car, path, headers, Ask::Stream(None)) else {
+        let Some(id) = core.fetch(Tag::Car, path, headers, Ask::Stashed) else {
             self.raw_only = true;
             return self.feed(core);
         };
@@ -1066,7 +1104,7 @@ impl Walk {
             reader: car::Reader::new(),
             headed: false,
             open: true,
-            stash: VecDeque::new(),
+            stash: Stash::default(),
             sent: 0,
             done: 0,
             verdicts: BTreeMap::new(),
@@ -1900,10 +1938,11 @@ impl Walk {
 
     fn car_data(&mut self, core: &mut Core, bytes: Vec<u8>) {
         let Some(c) = self.car.as_mut() else {
-            core.unhold(bytes.len());
             return;
         };
-        c.stash.push_back(bytes);
+        // Copied into the stream's buffer, and the frame goes.
+        c.stash.push(&bytes);
+        drop(bytes);
         self.read_car(core);
         self.pump(core);
     }
@@ -1949,8 +1988,7 @@ impl Walk {
             c.open = false;
             core.cancel_piece(c.id);
         }
-        core.unhold(c.stash.iter().map(Vec::len).sum());
-        c.stash.clear();
+        c.stash.free(core);
         c.ended = true;
         c.broken.get_or_insert(failure);
     }
@@ -1969,9 +2007,10 @@ impl Walk {
                 // The sections waiting free room as their verdicts are used.
                 return Ok(Read::On);
             }
-            let Some(frame) = c.stash.front_mut() else {
+            let frame = c.stash.front();
+            if frame.is_empty() {
                 return Ok(Read::On);
-            };
+            }
             // The item being read completes with the bytes it wants; each
             // further section takes at least MIN_SECTION.
             let wanting = c.reader.wanting();
@@ -1989,12 +2028,9 @@ impl Walk {
                 return Ok(Read::On);
             }
             let pushed = c.reader.push(&frame[..take]);
-            frame.drain(..take);
-            if frame.is_empty() {
-                c.stash.pop_front();
-            }
-            // The bytes are the reader's now, within its room.
-            core.unhold(take);
+            // The bytes are the reader's now, within its room; their place
+            // in the window is main's again.
+            c.stash.consume(core, take);
             if c.open {
                 core.consumed(c.id, take);
             }
@@ -2026,11 +2062,12 @@ impl Walk {
 
     fn car_end(&mut self, core: &mut Core) {
         let Some(c) = self.car.as_mut() else {
-            return;
+            return core.window_done();
         };
         c.open = false;
-        // What it stashed is read first.
+        // What it stashed is read first, in the window kept for it.
         c.finished = true;
+        c.stash.keep(core);
         self.read_car(core);
     }
 
@@ -2059,40 +2096,68 @@ impl Walk {
 
     fn raw_data(&mut self, core: &mut Core, seq: u64, bytes: Vec<u8>) {
         let Some(r) = self.raw.get_mut(&seq) else {
-            core.unhold(bytes.len());
             return;
         };
         let n = bytes.len();
-        // The block's room was held; its bytes take it as they come. Bytes
-        // past it (a node longer than a leaf's entry) need room of their
-        // own.
-        let take = n.min(r.reserved);
-        if n > take && !core.fits(n - take) {
-            core.unhold(n);
-            return self.end(core, Failure::Memory);
+        let len = r.buf.len() + n;
+        if len > r.buf.capacity() {
+            // The buffer moves to its next size within the room held for it
+            // and the piece's window, which holds nothing past main's frame
+            // (its bytes are credited as they are copied). What the move
+            // needs past them is held while it is made, and bytes past the
+            // room (a node longer than a leaf's entry) keep their room.
+            let next = r.next_size(len);
+            let grow = next.saturating_sub(r.room);
+            let over = (r.buf.capacity() + next + n).saturating_sub(r.room + grow + STREAM_WINDOW);
+            if !core.fits(grow + over) {
+                return self.end(core, Failure::Memory);
+            }
+            core.hold(grow + over);
+            r.buf.reserve_exact(next - r.buf.len());
+            core.unhold(over);
+            r.room += grow;
         }
         r.buf.extend_from_slice(&bytes);
-        r.reserved -= take;
-        core.unhold(take);
+        drop(bytes);
         core.consumed(r.id, n);
     }
 
     fn raw_end(&mut self, core: &mut Core, seq: u64) {
         let Some(need) = self.needs.iter().find(|n| n.seq == seq).cloned() else {
             if let Some(r) = self.raw.remove(&seq) {
-                core.unhold(r.held());
+                let n = r.held();
+                drop(r);
+                core.unhold(n);
             }
-            return;
+            return core.window_done();
         };
         let Some(r) = self.raw.get_mut(&seq) else {
-            return;
+            return core.window_done();
         };
         r.hashing = true;
-        core.unhold(r.reserved);
-        r.reserved = 0;
-        // The block and its CID are the job's now.
+        let mut block = std::mem::take(&mut r.buf);
+        let len = block.len();
+        // A buffer longer than its block (a node of unknown length) is cut
+        // to it: a copy, at most, beside the buffer, made within its room
+        // and the window the block came through, which the walk holds
+        // until this end is done, and room held past them. Without that
+        // room the buffer is kept whole, and its room with it, until it
+        // goes. Room never made into the buffer goes.
+        if block.capacity() > len {
+            let over = (block.capacity() + len).saturating_sub(r.room + STREAM_WINDOW);
+            if core.fits(over) {
+                core.hold(over);
+                block.shrink_to_fit();
+                core.unhold(over);
+            }
+        }
+        core.unhold(r.room - block.capacity());
+        r.room = block.capacity();
+        core.window_done();
+        // The block and its CID are the job's now; the buffer's room past
+        // its bytes, if any, stays with the piece.
+        r.room -= len;
         r.cid_len = 0;
-        let block = std::mem::take(&mut r.buf);
         core.hash(
             Tag::Raw(seq),
             Work::Block {
@@ -2191,7 +2256,7 @@ impl super::Events<Tag> for Walk {
         match tag {
             Tag::Car => self.car_data(core, bytes),
             Tag::Raw(seq) => self.raw_data(core, seq, bytes),
-            _ => core.unhold(bytes.len()),
+            _ => drop(bytes),
         }
     }
 
@@ -2228,18 +2293,25 @@ impl super::Events<Tag> for Walk {
     }
 
     fn failed(&mut self, core: &mut Core, tag: Tag, failure: PieceFailure) {
-        if let Tag::Raw(seq) = tag
-            && let Some(r) = self.raw.remove(&seq)
-        {
-            core.unhold(r.held());
+        if let Tag::Raw(seq) = tag {
+            if let Some(r) = self.raw.remove(&seq) {
+                let n = r.held();
+                drop(r);
+                core.unhold(n);
+            }
+            core.window_done();
         }
-        if tag == Tag::Car
-            && let Some(c) = self.car.as_mut()
-        {
-            // The sections it sent before failing are still used.
+        if tag == Tag::Car {
+            let Some(c) = self.car.as_mut() else {
+                core.window_done();
+                return self.end(core, Failure::Piece(failure));
+            };
+            // The sections it sent before failing are still used, and what
+            // it stashed is still read, in the window kept for it.
             c.open = false;
             c.ended = true;
             c.broken = Some(Failure::Piece(failure));
+            c.stash.keep(core);
             return self.car_settled(core);
         }
         self.end(core, Failure::Piece(failure));
@@ -2271,8 +2343,11 @@ impl super::Events<Tag> for Walk {
             }
             (Tag::Section(n), Verdict::Block(result), Work::Block { cid, block }) => {
                 let Some(c) = self.car.as_mut() else {
-                    // The CAR gave way: its room goes to the raw blocks.
-                    core.unhold(cid.len() + block.len());
+                    // The CAR gave way: the section's room, and its job's
+                    // structures' cost, go to the raw blocks.
+                    let n = cid.len() + block.len() + SECTION_COST;
+                    drop((cid, block));
+                    core.unhold(n);
                     return self.pump(core);
                 };
                 c.verdicts.insert(n, (cid, block, result));
@@ -2283,15 +2358,21 @@ impl super::Events<Tag> for Walk {
             }
             (Tag::Raw(seq), Verdict::Block(result), Work::Block { cid, block }) => {
                 core.unhold(cid.len());
-                self.raw.remove(&seq);
+                let spare = self.raw.remove(&seq).map_or(0, |r| r.room);
+                let n = block.len() + spare;
                 if let Err(r) = result {
-                    core.unhold(block.len());
+                    drop(block);
+                    core.unhold(n);
                     return self.end(core, refusal(r));
                 }
                 if self.needs.iter().any(|n| n.seq == seq) {
                     self.arrived.insert(seq, block);
+                    if spare > 0 {
+                        self.spares.insert(seq, spare);
+                    }
                 } else {
-                    core.unhold(block.len());
+                    drop(block);
+                    core.unhold(n);
                 }
                 self.pump(core);
             }
