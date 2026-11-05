@@ -40,9 +40,15 @@
 //! main restarts. heartwood's own panics are caught by nothing, so this is
 //! how the service learns of them.
 //!
-//! **The stop** ([`Node::stop`], at the connection's end): the node is asked
-//! to stop and waited for, for at most 3 s ([`SHUTDOWN_WITHIN`]), inside the
-//! connection's 5 s exit.
+//! **The pools open with the node** ([`crate::pools`]): just before
+//! `rad.start`'s reply, so main's first request after it is admitted.
+//!
+//! **The stop** ([`Node::stop`], at the connection's end), within 3 s
+//! ([`SHUTDOWN_WITHIN`]), inside the connection's 5 s exit:
+//! 1. the pools are fenced and drained (0008: "the service fences new work,
+//!    answers waiting requests `stopped`"): queued requests are answered
+//!    `stopped`, running ones cancelled, and their threads waited for;
+//! 2. the node is asked to stop, and waited for in the time left.
 //!
 //! **How the node ended is one decision,** whichever of the watch and the
 //! stop comes first:
@@ -77,9 +83,10 @@
 //! ("Reconciliation"): `rad.shutdown` ended the connection, and this stop
 //! asked a node nothing had asked before. `Embedded::shutdown_within`
 //! returned `Ok` in time, so the node stopped because this stop asked it,
-//! and heartwood's workers have finished their fetches. This build has no
-//! writes, so no write is queued, running or uncertain. Anything else
-//! leaves the marker, and the next start runs the full repair.
+//! and heartwood's workers have finished their fetches. The pools' drain was
+//! complete before it: every pool thread ended, so no write is queued or
+//! running, and this build has no write that could be uncertain. Anything
+//! else leaves the marker, and the next start runs the full repair.
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
@@ -95,13 +102,15 @@ use radicle::node::gate::{self, RepoGate, RepoState};
 use radicle::storage::git::reconcile::quarantine::{self, Quarantine};
 use serde_json::json;
 
+use crate::pools::Pools;
 use crate::{dial, identity, marker, nat64, testhooks};
 
 /// `rad.start`'s bound (0008, "Bounds").
 pub const START_DEADLINE: Duration = Duration::from_secs(30);
 
-/// How long the stop waits for the node: inside the connection's 5 s exit,
-/// with room for the marker's removal and the final replies.
+/// How long the stop takes, the pools' drain and then the node's: inside
+/// the connection's 5 s exit, with room for the marker's removal and the
+/// final replies.
 pub const SHUTDOWN_WITHIN: Duration = Duration::from_secs(3);
 
 /// How often the node's watch asks whether the node thread runs.
@@ -164,13 +173,16 @@ pub struct Node {
     /// Notified when the phase changes: the start's deadline and the node's
     /// watch wait on it.
     changed: Condvar,
+    /// The pools, opened as the node runs and drained before it stops.
+    pools: Arc<Pools>,
 }
 
 impl Node {
-    pub fn new() -> Self {
+    pub fn new(pools: Arc<Pools>) -> Self {
         Self {
             phase: Mutex::new(Phase::Waiting),
             changed: Condvar::new(),
+            pools,
         }
     }
 
@@ -289,6 +301,8 @@ impl Node {
         }
         let identity = running.embedded.identity();
         log::info("the node runs", json!({ "nid": identity.nid }));
+        // `RUNNING`: before the reply, so that main's next request is admitted.
+        self.pools.open();
         let _ = conn.reply(
             id,
             &json!({ "did": identity.did, "nid": identity.nid, "alias": identity.alias }),
@@ -331,11 +345,16 @@ impl Node {
         }
     }
 
-    /// The connection ended with `end`: stops the node, if one runs, and
-    /// clears the dirty marker in `home` after a proven clean stop. A node
-    /// that ended, or began to stop, behind it is `node_down` (see the
-    /// module's doc). Nothing starts after this.
+    /// The connection ended with `end`: drains the pools, stops the node,
+    /// if one runs, and clears the dirty marker in `home` after a proven
+    /// clean stop. A node that ended, or began to stop, behind it is
+    /// `node_down` (see the module's doc). Nothing starts after this.
     pub fn stop(&self, conn: &Connection, home: &Path, end: End) {
+        let deadline = Instant::now() + testhooks::shutdown_within(SHUTDOWN_WITHIN);
+        let drained = self.pools.stop(deadline);
+        if !drained {
+            log::error("work was still running past the pools' drain", json!({}));
+        }
         // The node is taken under the phase's lock, where the watch marks it
         // down: whichever comes first decides.
         let previous = std::mem::replace(&mut *self.lock(), Phase::Over);
@@ -349,7 +368,8 @@ impl Node {
         };
         // Read before this stop asks: nothing else can reach the node now.
         let asked = running.asked;
-        let stopped = running.ask_stop(testhooks::shutdown_within(SHUTDOWN_WITHIN));
+        // In the time the drain left, if any: asked all the same.
+        let stopped = running.ask_stop(deadline.saturating_duration_since(Instant::now()));
         let Running {
             embedded,
             repositories,
@@ -358,7 +378,7 @@ impl Node {
         } = running;
         drop(nat64);
         drop(repositories);
-        match ending(watched || asked, &stopped, end) {
+        match ending(watched || asked, drained, &stopped, end) {
             Ending::Clean => match marker::remove(home) {
                 Ok(()) => log::info(
                     "the node stopped cleanly; the dirty marker is cleared",
@@ -421,11 +441,18 @@ enum Ending {
 /// request's outcome. `behind`: the node was found down, or asked to stop
 /// before. heartwood's run ends `Ok` only once it was asked, so a node
 /// thread that ended by itself is `NodeThread`, before this request or
-/// after it, as is one that panicked.
-fn ending(behind: bool, stopped: &Result<(), libradicle::Error>, end: End) -> Ending {
+/// after it, as is one that panicked. `drained`: the pools' drain was
+/// complete; work still running leaves nothing proven.
+fn ending(
+    behind: bool,
+    drained: bool,
+    stopped: &Result<(), libradicle::Error>,
+    end: End,
+) -> Ending {
     match stopped {
         _ if behind => Ending::Down,
         Err(libradicle::Error::NodeThread(_)) => Ending::Down,
+        _ if !drained => Ending::Unproven("work was still running"),
         // Without the details: a node thread's error can name a path.
         Err(libradicle::Error::ShutdownTimeout(_)) => Ending::Unproven("it didn't stop in time"),
         Err(_) => Ending::Unproven("its home wasn't let go of"),
@@ -583,32 +610,51 @@ mod tests {
     }
 
     /// A stop clears the marker only for a node it alone asked, stopped in
-    /// time, at `rad.shutdown`; a node found down, asked before, or whose
-    /// thread ended with an error is `node_down`, whatever the stop's end.
+    /// time, at `rad.shutdown`, after a complete drain; a node found down,
+    /// asked before, or whose thread ended with an error is `node_down`,
+    /// whatever the stop's end and the drain.
     #[test]
-    fn only_the_stop_that_alone_asked_a_live_node_is_clean() {
+    fn only_the_stop_that_alone_asked_a_live_node_after_a_drain_is_clean() {
         use libradicle::Error::{NodeThread, ShutdownTimeout};
         let thread = || Err(NodeThread("ended".into()));
         let late = || Err(ShutdownTimeout(Duration::ZERO));
-        assert_eq!(ending(false, &Ok(()), End::Shutdown), Ending::Clean);
-        assert_eq!(ending(false, &Ok(()), End::Eof), Ending::Stopped);
-        assert_eq!(ending(false, &thread(), End::Shutdown), Ending::Down);
-        assert_eq!(ending(false, &thread(), End::Eof), Ending::Down);
+        assert_eq!(ending(false, true, &Ok(()), End::Shutdown), Ending::Clean);
+        assert_eq!(ending(false, true, &Ok(()), End::Eof), Ending::Stopped);
+        assert_eq!(ending(false, true, &thread(), End::Shutdown), Ending::Down);
+        assert_eq!(ending(false, true, &thread(), End::Eof), Ending::Down);
         assert_eq!(
-            ending(false, &late(), End::Shutdown),
+            ending(false, true, &late(), End::Shutdown),
             Ending::Unproven("it didn't stop in time")
         );
         assert_eq!(
             ending(
                 false,
+                true,
                 &Err(std::io::Error::other("lock").into()),
                 End::Shutdown
             ),
             Ending::Unproven("its home wasn't let go of")
         );
+        // Work still running past the drain: nothing is proven.
+        for stopped in [Ok(()), late()] {
+            for end in [End::Shutdown, End::Eof] {
+                assert_eq!(
+                    ending(false, false, &stopped, end),
+                    Ending::Unproven("work was still running"),
+                    "{stopped:?}"
+                );
+            }
+        }
+        assert_eq!(ending(false, false, &thread(), End::Shutdown), Ending::Down);
         for stopped in [Ok(()), thread(), late()] {
             for end in [End::Shutdown, End::Eof] {
-                assert_eq!(ending(true, &stopped, end), Ending::Down, "{stopped:?}");
+                for drained in [true, false] {
+                    assert_eq!(
+                        ending(true, drained, &stopped, end),
+                        Ending::Down,
+                        "{stopped:?}"
+                    );
+                }
             }
         }
     }

@@ -6,7 +6,7 @@
 //!   (`fc_service::confine::clean_entry`), hardening, the arguments, the
 //!   environment ([`crate::env`]), the gate, and [`Grant::open`].
 //! - **After it:** logging's writer, the connection's threads, the
-//!   watchdogs, then the handshake.
+//!   watchdogs and the pools, then the handshake.
 //!
 //! The grant (0010, "What each service needs"): the Radicle home and the
 //! service's own `HOME` directory (0008, "Spawn and lock"), read and write,
