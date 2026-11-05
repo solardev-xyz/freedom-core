@@ -5,10 +5,13 @@
 //! (step 5c) gives it main's messages and the hashing pool's results, and
 //! it acts through an [`Io`], which the tests fake.
 //!
-//! - **Grants.** A request runs only once its whole budget, by its scheme
-//!   (2 MiB for Swarm, 8 MiB for IPFS: `fc_dweb::verifier::budget`), fits
+//! - **Grants.** A request runs only once its whole grant, by its scheme
+//!   (2 MiB for Swarm, 8 MiB for IPFS: `fc_dweb::verifier::grant`), fits
 //!   what is left of the thread's grants: the 128 MiB less the structure
-//!   cache's 24 MiB and the IPNS floors' 3 MiB ([`GRANTS`]). At most
+//!   cache's 24 MiB and the IPNS floors' 3 MiB ([`GRANTS`]), so 12 IPFS
+//!   or 50 Swarm requests at once. Its verifier's budget is the grant less
+//!   the scheme's allowance, what a request allocates beside what its
+//!   budget counts (`fc_dweb::verifier::budget`). At most
 //!   [`RUNNING`] run at once. The rest wait in order, at most [`WAITING`],
 //!   and one that waits [`GRANT_WAIT_MS`] for its grant ends `busy`. One
 //!   that arrives with that many waiting is `busy` at once. A grant is held
@@ -510,7 +513,7 @@ impl Engine {
     /// Starts what waits, in order, while the front's grant fits.
     fn admit(&mut self, io: &mut dyn Io, now: Ms) {
         while let Some(front) = self.waiting.front() {
-            let grant = verifier::budget(&front.request.plan.root);
+            let grant = verifier::grant(&front.request.plan.root);
             if self.running.len() >= self.bounds.running
                 || self.granted.saturating_add(grant) > self.bounds.grants
             {
@@ -533,7 +536,7 @@ impl Engine {
             req.partition.as_deref(),
             req.private,
             Options {
-                budget: grant,
+                budget: verifier::budget(&req.plan.root),
                 now: io.wall(),
                 car: req.car,
             },
@@ -1422,7 +1425,7 @@ mod tests {
         settle(&mut e, &mut f, &w, 0);
         // 101 MiB holds twelve 8 MiB grants.
         assert_eq!(e.counts(), (12, 2));
-        assert_eq!(e.granted(), 12 * verifier::IPFS_BUDGET);
+        assert_eq!(e.granted(), 12 * verifier::IPFS_GRANT);
         // A Swarm request behind them waits too, in order, though its
         // 2 MiB would fit.
         e.verify(&mut f, 0, 15, swarm(SITE_A, "/index.html"));
@@ -1443,6 +1446,22 @@ mod tests {
         e.tick(&mut f, GRANT_WAIT_MS);
         assert_eq!((f.ending(14), f.ending(15)), (Some("busy"), Some("busy")));
         assert_eq!(e.counts(), (12, 0));
+    }
+
+    #[test]
+    fn admission_takes_the_grant_not_the_budget() {
+        // A Swarm node that never answers: each request holds its 2 MiB.
+        let mut w = World::new();
+        w.hold = Some("/".into());
+        let mut e = Engine::new(Bounds::default());
+        let mut f = Fake::new(256);
+        for id in 1..=52 {
+            e.verify(&mut f, 0, id, swarm(SITE_A, "/index.html"));
+        }
+        settle(&mut e, &mut f, &w, 0);
+        // 101 MiB holds fifty 2 MiB grants; by the budgets, 52 would run.
+        assert_eq!(e.counts(), (50, 2));
+        assert_eq!(e.granted(), 50 * verifier::SWARM_GRANT);
     }
 
     #[test]
