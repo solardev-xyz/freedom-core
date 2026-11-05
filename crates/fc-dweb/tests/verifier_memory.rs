@@ -406,6 +406,10 @@ fn drive_paged(
             moved = true;
             break;
         }
+        // An ended stream is main's no longer: the driver keeps only those
+        // open, as main does, so its own memory doesn't grow with a walk's
+        // many blocks.
+        streams.retain(|s| !s.done);
         if !moved {
             if let Some(job) = next_job(&mut jobs) {
                 let result = job.run();
@@ -856,6 +860,12 @@ fn wide_file(n: usize) -> (Vec<u8>, World) {
 /// found, so the sections waiting are bounded with their jobs' own
 /// structures counted, not only their bytes. The leaves then come raw.
 fn flood() -> (Vec<u8>, World) {
+    flood_then(400_000, 0)
+}
+
+/// [`flood`] of `n` empty sections, then, past `0`, a raw block of
+/// `tail` bytes, which the file doesn't need either.
+fn flood_then(n: usize, tail: usize) -> (Vec<u8>, World) {
     let a = vec![b'a'; 100];
     let b = vec![b'b'; 100];
     let (la, lb) = (sha256_cid(0x55, &a), sha256_cid(0x55, &b));
@@ -880,8 +890,12 @@ fn flood() -> (Vec<u8>, World) {
         Arc::new(block.clone()),
     );
     let mut sections = vec![(root.clone(), block)];
-    for _ in 0..400_000 {
+    for _ in 0..n {
         sections.push((identity(b""), Vec::new()));
+    }
+    if tail > 0 {
+        let big: Vec<u8> = (0..tail).map(|i| (i % 251) as u8).collect();
+        sections.push((sha256_cid(0x55, &big), big));
     }
     world.insert(car_path(&root), Arc::new(car(&sections)));
     world.insert(format!("/ipfs/{}?format=raw", text(&la)), Arc::new(a));
@@ -1499,6 +1513,37 @@ fn allocations_stay_within_the_grant() {
         "{got:?}"
     );
     within_allowance(case, m, IPFS_ALLOWANCE);
+    // A file node of 4,000 raw leaves: their CIDs are queued at once, each
+    // within the room held for them.
+    let (root, world) = raw_file(&[1; 4_000]);
+    let case = "a file node of 4,000 one-byte raw leaves";
+    let (got, m) = capped_with(case, &plan(&root), raw(REQUEST_BUDGET), |v| {
+        drive(v, &world, false)
+    });
+    assert_eq!(
+        (got.0, got.1, got.2.as_str()),
+        (Some(200), 4_000, "end"),
+        "{got:?}"
+    );
+    within_allowance(case, m, IPFS_ALLOWANCE);
+    // The flood's empty sections, then a section of a whole 2 MiB block,
+    // whose buffer the reader makes as soon as it reads its length, in the
+    // push that completes the empty ones, so the reader's room is full: the
+    // vector the empty ones come in has room of its own beside it, and the
+    // reader goes before its room when the CAR gives way.
+    let (root, world) = flood_then(4_000, 2 << 20);
+    for poll in [Poll::Each, Poll::WhenStuck] {
+        let case = format!("CAR of 4,000 empty sections and one of 2 MiB, {poll:?}");
+        let (got, m) = capped(&case, &plan(&root), REQUEST_BUDGET, |v| {
+            drive_paged(v, &world, true, MAX_FRAME, true, poll)
+        });
+        assert_eq!(
+            (got.0, got.1, got.2.as_str()),
+            (Some(200), 200, "end"),
+            "{got:?}"
+        );
+        within_allowance(&case, m, IPFS_ALLOWANCE);
+    }
 }
 
 /// A stream's whole first window in one-byte frames, main not polling
