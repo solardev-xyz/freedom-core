@@ -24,7 +24,7 @@ fn hello_names_this_starts_recipient_and_the_libradicle_it_links() {
     assert_eq!(result["service_version"], env!("CARGO_PKG_VERSION"));
     assert_eq!(
         result["libradicle"],
-        json!({ "version": "0.8.0", "git_commit": "b7d62b951b313061fb9e4d5145193341e5ad7b15" })
+        json!({ "version": "0.8.0", "git_commit": "2ac9f7fa1687f36d37f8a70f36333f70c65bed4d" })
     );
     let recipient = STANDARD
         .decode(result["recipient"].as_str().unwrap())
@@ -148,8 +148,9 @@ fn a_key_file_refuses_the_start() {
 }
 
 /// Before `rad.identity`, the steps that need the identity end the process;
-/// every other method 0008 lists is `stopped` (no node runs in this build),
-/// and a method 0008 doesn't list is `unknown_method`.
+/// every other method 0008 lists is `stopped` (no read or write is served
+/// in this build), and a method 0008 doesn't list is `unknown_method`.
+/// `rad.start` itself is tests/start.rs's.
 #[test]
 fn methods_before_running() {
     let dirs = Dirs::new();
@@ -182,14 +183,14 @@ fn methods_before_running() {
     assert_eq!(reply["error"]["code"], "no_identity", "{reply}");
     assert_eq!(radicled.exit_code(EXIT_TIMEOUT), Some(0));
 
-    // With the identity, the home reconciles, and the start waits for a
-    // step this build doesn't have.
+    // With the identity, the home reconciles, and the methods are still
+    // `stopped`.
     let mut radicled = Radicled::serve(&dirs, &[]);
     radicled.hello();
     radicled.call("rad.identity", json!({ "ephemeral": true }));
     let reply = radicled.call("rad.reconcile", json!({}));
     assert_eq!(reply["result"]["was_dirty"], false, "{reply}");
-    let reply = radicled.call("rad.start", json!({ "alias": "x" }));
+    let reply = radicled.call("rad.read", json!({}));
     assert_eq!(reply["error"]["code"], "stopped", "{reply}");
 }
 

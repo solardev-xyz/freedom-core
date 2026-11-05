@@ -207,6 +207,16 @@ fn failure(e: &driver::Error) -> Failure {
             "its removal was in progress when two processes ended",
         ),
         driver::Error::NotBegun => failed("a repair", "a step ran before it began"),
+        // Every repository would fail alike, so none is quarantined
+        // (heartwood#27). libgit2's message can name a path: its class
+        // alone.
+        driver::Error::Host(e) => failed(
+            "the host's environment",
+            format_args!(
+                "libgit2 refused it ({:?}): its configuration outside any repository, or a repository's ownership",
+                e.class()
+            ),
+        ),
     }
 }
 
@@ -233,7 +243,7 @@ fn state_error(e: &radicle::storage::git::reconcile::state::Error) -> String {
 }
 
 /// What went wrong with the quarantine record, without its details.
-fn record_error(e: &quarantine::Error) -> String {
+pub(crate) fn record_error(e: &quarantine::Error) -> String {
     match e {
         quarantine::Error::Sql(_) => "its database doesn't open or answer".to_owned(),
         quarantine::Error::Invalid(_) => "it holds what it can't have written".to_owned(),

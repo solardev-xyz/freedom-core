@@ -49,11 +49,41 @@ pub fn with_node<R>(
             }),
             seeding_policy: None,
             isolated: true,
+            repositories: None,
         },
         key,
     )
     .unwrap();
     let result = f(&mut node);
+    node.shutdown().unwrap();
+    result
+}
+
+/// Runs a node on `home` as `seed`'s identity while `f` runs, which dials
+/// what its home's `config.json` and address book name, through the
+/// hermetic gate: loopback only, or the test process ends. Not isolated.
+pub fn with_node_dialing<R>(home: &Path, seed: &[u8; 32], f: impl FnOnce() -> R) -> R {
+    let mut bytes = *seed;
+    let key = libradicle::HostKey::from_bytes(&mut bytes).unwrap();
+    let node = libradicle::Embedded::start_with_key(
+        libradicle::Options {
+            home: home.to_path_buf(),
+            alias: "fixture".into(),
+            listen: vec![],
+            control_socket: false,
+            routing: Some(libradicle::Routing {
+                proxy: None,
+                onion: radicle::node::config::AddressConfig::Drop,
+                gate: super::hermetic::gate(),
+            }),
+            seeding_policy: None,
+            isolated: false,
+            repositories: None,
+        },
+        key,
+    )
+    .unwrap();
+    let result = f();
     node.shutdown().unwrap();
     result
 }

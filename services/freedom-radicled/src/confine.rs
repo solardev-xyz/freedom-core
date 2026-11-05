@@ -57,19 +57,51 @@ impl Grant {
     /// (the gate's lock). The Radicle node resolves names through the C
     /// library in `direct` mode (0008: std's `to_socket_addrs`, glibc's
     /// `getaddrinfo`), so the report says whether that reaches DNS.
+    ///
+    /// **NAT64 discovery** runs in `direct` mode alone, for the node's life
+    /// (`rad.start` holds its lease; design 0010, "NAT64 prefix
+    /// discovery"), as freedom-ipfsd's does: the files that list the
+    /// resolvers it asks, read-only, each where it really lives
+    /// ([`nat64_grants`]), and `SIOCGIFINDEX` (`interface_index`) for a
+    /// link-local resolver's named zone. In `socks5` mode it learns
+    /// nothing, so neither is granted.
     pub fn policy(&self, network: &NetworkPolicy, descriptors: Vec<i32>) -> Policy {
+        let direct = matches!(network, NetworkPolicy::Direct);
         Policy {
             read_write: vec![self.home.clone(), self.own_home.clone()],
-            read_only: Vec::new(),
+            read_only: if direct { nat64_grants() } else { Vec::new() },
             refer: true,
             min_abi: MIN_ABI,
             network: network.confinement(),
             resolver: confine::Resolver::System,
             descriptors,
-            // No NAT64 discovery here yet, so no interface lookups.
-            interface_index: false,
+            interface_index: direct,
         }
     }
+}
+
+/// The read-only grants for the files NAT64 discovery reads its resolvers
+/// from, as freedom-ipfsd's: on Linux, `/etc/resolv.conf` and
+/// systemd-resolved's export; on macOS, the file `/etc/resolv.conf` names.
+/// Each is granted where it really lives (a file in `/etc` alone, any other
+/// by its directory), so a replacement there stays readable.
+fn nat64_grants() -> Vec<PathBuf> {
+    let files: &[&str] = if cfg!(target_os = "linux") {
+        &fc_nat64::resolvers::LINUX_FILES
+    } else if cfg!(target_os = "macos") {
+        &fc_nat64::resolvers::MACOS_FILES
+    } else {
+        &[]
+    };
+    let mut grants = Vec::new();
+    for file in files {
+        if let Some(grant) = confine::resolver_grant(Path::new(file))
+            && !grants.contains(&grant)
+        {
+            grants.push(grant);
+        }
+    }
+    grants
 }
 
 /// Confines the process to `grant` under `network`. With the test hooks, it
@@ -82,4 +114,30 @@ pub fn confine(
 ) -> Result<Report, Invalid> {
     crate::testhooks::at_confinement_point();
     confine::confine(&grant.policy(network, descriptors))
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+
+    use super::*;
+
+    #[test]
+    fn nat64_discovery_is_granted_in_direct_mode_alone() {
+        let dir = tempfile::tempdir().unwrap();
+        let grant = Grant::open(dir.path(), dir.path()).unwrap();
+        let direct = grant.policy(&NetworkPolicy::Direct, vec![]);
+        assert!(direct.interface_index);
+        assert_eq!(direct.read_only, nat64_grants());
+        let socks5 = grant.policy(
+            &NetworkPolicy::Socks5 {
+                proxy: "127.0.0.1:9050".parse().unwrap(),
+            },
+            vec![],
+        );
+        assert!(!socks5.interface_index);
+        assert!(socks5.read_only.is_empty());
+        // Both read and write the home and the service's own HOME alone.
+        assert_eq!(direct.read_write, socks5.read_write);
+    }
 }

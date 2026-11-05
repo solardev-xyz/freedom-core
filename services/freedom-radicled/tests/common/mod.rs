@@ -224,6 +224,23 @@ impl Radicled {
         self.stdin.take();
     }
 
+    /// The start, as main runs it, as `SEED`'s identity: `rad.hello`,
+    /// `rad.identity` with the key sealed, `rad.reconcile`, then `rad.start`,
+    /// whose reply it returns.
+    pub fn start(&mut self) -> Value {
+        let hello = self.hello();
+        let identity = self.call("rad.identity", sealed_to(&hello, &SEED));
+        assert!(identity["result"].is_object(), "{identity}");
+        let reconciled = self.call("rad.reconcile", json!({}));
+        assert!(reconciled["result"].is_object(), "{reconciled}");
+        self.call("rad.start", json!({ "alias": "started" }))
+    }
+
+    /// `rad.shutdown`, as main sends it; the process then exits.
+    pub fn shutdown(&mut self) {
+        self.request("rad.shutdown", json!({}));
+    }
+
     /// The exit code, once it exits within `timeout`; `None` past it, or
     /// for an exit by signal.
     pub fn exit_code(&mut self, timeout: Duration) -> Option<i32> {
@@ -310,6 +327,23 @@ fn wait(child: &mut Child, timeout: Duration) -> Option<i32> {
         }
         std::thread::sleep(Duration::from_millis(10));
     }
+}
+
+/// Writes `home`'s `config.json` for a node that reaches no one by itself:
+/// the test network, no preferred seeds (one would bring the shipped seed
+/// book after it), a static peer set and no `connect` peers. `node`'s
+/// members add to its node configuration, or replace these.
+pub fn configure(home: &std::path::Path, node: Value) {
+    std::fs::create_dir_all(home).unwrap();
+    let mut fields = json!({ "alias": "quiet", "network": "test", "peers": { "type": "static" } });
+    for (key, value) in node.as_object().unwrap() {
+        fields[key] = value.clone();
+    }
+    std::fs::write(
+        home.join("config.json"),
+        json!({ "preferredSeeds": [], "node": fields }).to_string(),
+    )
+    .unwrap();
 }
 
 /// RFC 8032's first Ed25519 test key, and the node ID of its public key.
