@@ -7,15 +7,16 @@
 //!
 //! `FREEDOM_RADICLED_TEST_HOLD_WORK` holds a write before its boundary,
 //! `FREEDOM_RADICLED_TEST_HOLD_WRITE` just past it (src/testhooks.rs): for
-//! some milliseconds, or until the test releases it ([`held_until`]), and
-//! it logs the write's end, which a test waits for ([`release`]).
+//! some milliseconds, or until the test releases it ([`Dirs::held`]),
+//! before libradicle's call (`until`) or once it has returned (`after`),
+//! and it logs the write's end, which a test waits for ([`release`]).
 //! Every node here reaches no one, as in tests/start.rs.
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
 mod common;
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::time::{Duration, Instant};
 
 use common::fixture;
@@ -29,6 +30,8 @@ const CREATOR: [u8; 32] = [9; 32];
 
 const STARTED: &str = "test hook: the write has started";
 const RETURNED: &str = "test hook: the write has returned";
+const CALLED: &str = "test hook: libradicle's call has returned";
+const FENCED: &str = "test hook: the stop has fenced the pools";
 const HELD: &str = "test hook: work holds its slot";
 
 fn code(reply: &Value) -> &str {
@@ -71,18 +74,10 @@ fn served(dirs: &Dirs, extra: &[(&str, &str)]) -> Radicled {
     radicled
 }
 
-/// `FREEDOM_RADICLED_TEST_HOLD_WRITE`'s value that holds each write past
-/// its start until the test releases it, and the file that does: `name`,
-/// in the service's own `HOME`, which its confinement grants.
-fn held_until(dirs: &Dirs, name: &str) -> (String, PathBuf) {
-    let release = dirs.own_home.join(name);
-    (format!("until:{}", release.display()), release)
-}
-
-/// Releases the write held until `gate` exists, and waits for it to
-/// return: its outcome is marked by then, and no work is left for the
-/// stop's drain. A hang guard, never a timing assertion: on a loaded
-/// runner a COB write can take seconds.
+/// Releases the write held until `gate` exists ([`Dirs::held`]), and
+/// waits for it to return: its outcome is marked by then, and no work is
+/// left for the stop's drain. A hang guard, never a timing assertion: on
+/// a loaded runner a COB write can take seconds.
 fn release(radicled: &Radicled, gate: &Path) {
     std::fs::write(gate, b"").unwrap();
     assert!(radicled.logs(RETURNED, READ_TIMEOUT));
@@ -280,7 +275,7 @@ fn past_its_start_a_cancel_or_the_deadline_is_outcome_unknown_and_the_write_comp
     let dirs = Dirs::new();
     configure(&dirs.home, json!({}));
     let rid = fixture::repository(&dirs.home, &CREATOR, "late");
-    let (hold, gate) = held_until(&dirs, "release-cancelled");
+    let (hold, gate) = dirs.held("until", "release-cancelled");
     let mut radicled = served(&dirs, &[("FREEDOM_RADICLED_TEST_HOLD_WRITE", &hold)]);
     let cancelled = radicled.request("rad.write", create(rid, "Cancelled late"));
     assert!(radicled.logs_times(STARTED, 1, Duration::from_secs(10)));
@@ -294,7 +289,7 @@ fn past_its_start_a_cancel_or_the_deadline_is_outcome_unknown_and_the_write_comp
     assert!(cleared);
     assert!(titled(&dirs.home, rid, "Cancelled late").is_some());
 
-    let (hold, gate) = held_until(&dirs, "release-late");
+    let (hold, gate) = dirs.held("until", "release-late");
     let mut radicled = served(
         &dirs,
         &[
@@ -375,41 +370,57 @@ fn past_its_start_an_error_or_a_panic_is_outcome_unknown_and_its_repository_is_r
 /// The stop waits for a started write inside its drain, and the write's
 /// own reply stands. One that outlasts the drain is `outcome_unknown`,
 /// within the connection's 5 s exit, and the marker stays.
+///
+/// Neither half races the drain. The first write runs libradicle's call
+/// to its end, however long it takes, and is held there, unanswered; the
+/// test stops the service and releases the write only once the stop has
+/// fenced the pools, so the drain meets it and waits for no libradicle
+/// work. The second is held before its call until the test releases it,
+/// which it never does, so it outlasts the drain on any runner.
 #[test]
 fn a_stop_during_a_write_keeps_its_reply_or_leaves_the_marker() {
     let dirs = Dirs::new();
     configure(&dirs.home, json!({}));
     let rid = fixture::repository(&dirs.home, &CREATOR, "stopping");
-    let mut radicled = served(&dirs, &[("FREEDOM_RADICLED_TEST_HOLD_WRITE", "1000")]);
+    let (hold, gate) = dirs.held("after", "release-inside");
+    let mut radicled = served(&dirs, &[("FREEDOM_RADICLED_TEST_HOLD_WRITE", &hold)]);
     let write = radicled.request("rad.write", create(rid, "Inside the drain"));
-    assert!(radicled.logs_times(STARTED, 1, Duration::from_secs(10)));
+    assert!(radicled.logs(CALLED, READ_TIMEOUT));
     radicled.shutdown();
+    assert!(radicled.logs(FENCED, READ_TIMEOUT));
+    // The stop met the write before its outcome was marked and answered.
+    assert!(!radicled.logs(RETURNED, Duration::ZERO));
+    // Its reply then, which the drain waits for.
+    std::fs::write(&gate, b"").unwrap();
     let reply = radicled.reply(write);
     assert!(reply["result"]["id"].is_string(), "{reply}");
     let (_, cleared) = stopped_cleanly_after_shutdown(&mut radicled, &dirs.home);
     assert!(cleared);
     assert!(titled(&dirs.home, rid, "Inside the drain").is_some());
 
+    let (hold, _never) = dirs.held("until", "release-past");
     let mut radicled = served(
         &dirs,
         &[
-            ("FREEDOM_RADICLED_TEST_HOLD_WRITE", "6000"),
+            ("FREEDOM_RADICLED_TEST_HOLD_WRITE", &hold),
             ("FREEDOM_RADICLED_TEST_SHUTDOWN_WITHIN_MS", "1000"),
         ],
     );
     let write = radicled.request("rad.write", create(rid, "Past the drain"));
     assert!(radicled.logs_times(STARTED, 1, Duration::from_secs(10)));
-    let asked = Instant::now();
     radicled.shutdown();
     let reply = radicled.reply(write);
     assert_eq!(code(&reply), "outcome_unknown", "{reply}");
-    assert_eq!(radicled.exit_code(Duration::from_secs(8)), Some(0));
-    assert!(asked.elapsed() < Duration::from_secs(8));
+    // 0, not the exit watchdog's 70 (`teardown_unproven`): the stop ended
+    // within the connection's 5 s exit, without waiting for the write.
+    assert_eq!(radicled.exit_code(EXIT_TIMEOUT), Some(0));
     let log = radicled.stderr();
     assert!(
         log.contains("work was still running past the pools' drain"),
         "{log}"
     );
+    // Still held as the process ended.
+    assert!(!log.contains(RETURNED), "{log}");
     assert_eq!(fixture::marked(&dirs.home), Some(vec![NID.to_owned()]));
 }
 
