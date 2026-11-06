@@ -331,7 +331,7 @@ A unit that can't finish is not retried forever.
     - **Each record has its own `qid`,** a random 128-bit ID created with the record: 16 bytes from the operating system's cryptographic generator, never from a generator the process seeds. A new `qid` that another record holds is refused, and nothing is recorded. Every quarantine entry carries it, and main passes back the `qid` of the entry the user saw in the warning.
     - **The precondition:** when the writer starts the removal, it checks under the repository gate that the record for `rid` exists and has that `qid`. If the record is missing or has another `qid`, nothing is deleted, and the answer is `not_quarantined`. A delayed or duplicate removal can therefore never act on a repository that was cloned again after an earlier removal.
     - It then does these in order, durably, with the gate shut throughout:
-      1. unseeds the repository;
+      1. stops seeding it, whatever the default (heartwood's `Config::stop_seeding`): under the `block` default its policy goes, and under a permissive one it is blocked, so that the default doesn't seed it again once its record is cleared;
       2. deletes `storage/<rid>`, following no symlinks (a link or a Windows junction in its place is removed itself), then flushes the storage directory, so that the deletion is on disk before the record goes. A flush that fails keeps the record;
       3. deletes the repository's cache rows;
       4. clears the record.
@@ -491,6 +491,7 @@ The rules this design relies on, as 0007 specifies them:
 | `outcome_unknown` | any write that has started and isn't proven ([Writes](#writes)) | provider error -32603 with new text |
 | `stopped` | not yet `RUNNING`, shutting down, or a repository under online repair (COB ops) | 503 |
 | `quarantined` | on a quarantined repository: COB ops; for `namespace`, every read; a write, seed, clone or sync; `data.kind`, `data.step` | 503 with `{"error": message}`; the provider's existing errors for writes |
+| `not_quarantined` | `rad.remove_repo`: no record of `rid` has that `qid`, so nothing was removed ([the escape](#the-escape)) | the entry main showed is gone or was replaced: main lists the quarantine again |
 | `internal` | a panic on a read's thread | 500 |
 | `recovery_failed`; `deadline` | `rad.reconcile`: a failure outside any one repository, or the deadline; `message` names the step | the manager's error state; for `deadline`, "Radicle is still repairing its data" with Retry |
 | `key_file_present` | `rad.identity` or `rad.start`: something exists at `keys/radicle` ([The switch](#the-switch)) | main runs the switch and starts again, once; then the manager's error state |

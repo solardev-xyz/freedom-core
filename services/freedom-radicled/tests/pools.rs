@@ -2,9 +2,9 @@
 //! "Pools and budgets", "Deadlines" and "Start, stop and reconciliation"):
 //! they open as `rad.start` answers, refuse past their bounds, enforce
 //! their deadlines and main's cancel, and drain at the stop before the node
-//! is asked to stop. This build serves no pooled operation yet: each one's
-//! work answers `stopped`, and `FREEDOM_RADICLED_TEST_HOLD_WORK` holds it in
-//! its slot first.
+//! is asked to stop. This build serves only quarantine's pooled methods
+//! (tests/quarantine.rs): every other one's work answers `stopped`, and
+//! `FREEDOM_RADICLED_TEST_HOLD_WORK` holds it in its slot first.
 //!
 //! Every node here reaches no one, as in tests/start.rs.
 
@@ -29,6 +29,9 @@ const POOLED: [&str; 6] = [
     "rad.unseed",
     "rad.write",
 ];
+
+/// The pooled methods this build serves: quarantine's (tests/quarantine.rs).
+const SERVED: [&str; 2] = ["rad.quarantine_list", "rad.remove_repo"];
 
 fn code(reply: &Value) -> &str {
     reply["error"]["code"].as_str().unwrap_or_default()
@@ -55,9 +58,14 @@ fn pooled_methods_are_admitted_once_the_node_runs_and_the_stop_is_clean() {
     }
     let started = radicled.call("rad.start", json!({ "alias": "pools" }));
     assert!(started["result"].is_object(), "{started}");
-    // Admitted, and run: each one's work answers.
+    // Admitted, and run: each one's work answers. Quarantine's methods
+    // check their params.
     for method in POOLED {
         let reply = radicled.call(method, json!({}));
+        if SERVED.contains(&method) {
+            assert_eq!(code(&reply), "invalid_argument", "{method}: {reply}");
+            continue;
+        }
         assert_eq!(code(&reply), "stopped", "{method}: {reply}");
         assert_eq!(
             reply["error"]["message"], "not served in this build",
