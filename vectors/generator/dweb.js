@@ -1914,8 +1914,9 @@ async function buildVerifyRequests(ref, table) {
       ['off-strict', { strict: true }],
     ];
     if (c.scheme !== 'bzz') variants.push(['unsupported-strict', { unsupported: true, strict: true }]);
-    // Strict mode, on or off, changes nothing at the bound: one form.
-    if (c.bound) variants.splice(1);
+    // Strict mode, on or off, changes nothing at the bound: one form, and
+    // past it the strict form too, whose plan stays the 414 or 431.
+    if (c.bound) variants.splice(derived?.plan?.error ? 2 : 1);
     for (const [suffix, flags] of variants) {
       const request = structuredClone(run.request);
       Object.assign(request.backend, flags);

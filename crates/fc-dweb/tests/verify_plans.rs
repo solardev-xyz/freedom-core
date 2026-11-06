@@ -231,19 +231,59 @@ fn every_verify_plan_dweb_open_makes_is_one_dweb_verify_takes() {
     );
 }
 
+/// Strict mode changes nothing at the verifier's bound: each request past
+/// it in strict mode (`*-bound-*-strict`) gets the 414 or 431, with its
+/// message, that the same request gets without strict mode, never strict
+/// mode's 403 (0009, Verify plans).
+#[test]
+fn strict_mode_changes_no_plan_past_the_bound() {
+    let vectors = vectors();
+    let requests: HashMap<&str, &Json> = vectors["requests"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| (id(e), e))
+        .collect();
+    let mut statuses = BTreeSet::new();
+    for (&id, &entry) in &requests {
+        let Some(plain) = id
+            .strip_suffix("-strict")
+            .filter(|_| id.contains("-bound-"))
+        else {
+            continue;
+        };
+        let plain = requests[plain];
+        let mut request = plain["request"].clone();
+        request["backend"]["strict"] = true.into();
+        assert_eq!(entry["request"], request, "{id}");
+        assert_eq!(entry["plan"], plain["plan"], "{id}");
+        let plan = plan_for(entry);
+        assert_eq!(plan_json(&plan), plan_json(&plan_for(plain)), "{id}");
+        match plan {
+            Plan::Error(e) => statuses.insert(e.status),
+            plan => panic!("{id}: {plan:?}"),
+        };
+    }
+    assert_eq!(
+        statuses.into_iter().collect::<Vec<_>>(),
+        [fc_dweb::VERIFY_URL_STATUS, fc_dweb::VERIFY_HEADER_STATUS]
+    );
+}
+
 /// The plan `dweb.open` makes for `url`, with `headers`, on an external
-/// backend whose verification is on.
-fn opened(url: &str, headers: &[(String, String)]) -> Plan {
+/// backend whose verification is on, in strict mode or not.
+fn opened(url: &str, headers: &[(String, String)], strict: bool) -> Plan {
     let node = if url.starts_with("bzz:") {
         "ant"
     } else {
         "ipfs"
     };
     let mode = if node == "ant" { "external" } else { "gateway" };
-    let backend = Backend::from_value(&js_value(
-        &serde_json::json!({ node: mode, "up": true, "verify": true }),
-    ))
-    .unwrap();
+    let mut backend = serde_json::json!({ node: mode, "up": true, "verify": true });
+    if strict {
+        backend["strict"] = true.into();
+    }
+    let backend = Backend::from_value(&js_value(&backend)).unwrap();
     match open(&Request {
         url,
         method: "GET",
@@ -262,7 +302,8 @@ fn opened(url: &str, headers: &[(String, String)]) -> Plan {
 /// the 414 or 431 in its place, never a plan `dweb.verify` refuses: the
 /// path below the root; a Swarm plan's path and query together; an IPFS or
 /// IPNS query, which isn't counted, at any length up to 0006's 64 KiB URL;
-/// and each kept header's value.
+/// and each kept header's value. Strict mode or not, the plan is the same,
+/// to the 414's or 431's message.
 #[test]
 fn dweb_open_plans_only_what_dweb_verify_takes_at_the_bound() {
     let swarm = "c0ffee".repeat(10) + "beef";
@@ -321,12 +362,27 @@ fn dweb_open_plans_only_what_dweb_verify_takes_at_the_bound() {
             }
         }
     }
+    let message = |status| match status {
+        fc_dweb::VERIFY_URL_STATUS => fc_dweb::VERIFY_URL_TOO_LONG,
+        _ => fc_dweb::VERIFY_HEADER_TOO_LARGE,
+    };
     for (what, url, headers, past) in cases {
         assert!(url.len() <= 64 << 10, "{what}");
-        match (opened(&url, &headers), past) {
-            (Plan::Verify(plan), None) => assert_eq!(verified(&plan, "GET"), Ok(()), "{what}"),
-            (Plan::Error(e), Some(status)) => assert_eq!(e.status, status, "{what}"),
-            (plan, past) => panic!("{what}: {plan:?}, expected {past:?}"),
+        // Strict mode or not, the same plan, to its message.
+        let plans = [false, true].map(|strict| opened(&url, &headers, strict));
+        assert_eq!(plan_json(&plans[1]), plan_json(&plans[0]), "{what}");
+        for (strict, plan) in [false, true].into_iter().zip(plans) {
+            match (plan, past) {
+                (Plan::Verify(plan), None) => {
+                    assert_eq!(verified(&plan, "GET"), Ok(()), "{what}, strict {strict}");
+                }
+                (Plan::Error(e), Some(status)) => assert_eq!(
+                    (e.status, e.message.as_str()),
+                    (status, message(status)),
+                    "{what}, strict {strict}"
+                ),
+                (plan, past) => panic!("{what}, strict {strict}: {plan:?}, expected {past:?}"),
+            }
         }
     }
 }
