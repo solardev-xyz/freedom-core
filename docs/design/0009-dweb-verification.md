@@ -1,6 +1,6 @@
 # 0009: Verifying dweb content
 
-**Status:** decided (the user, 2026-10-23): open questions 1–11, which [Decisions](#decisions) records. Roadmap Phase 4 (item 4.5). Builds on [0001](0001-freedom-cored.md) (framing; streams as protocol version 2), [0005](0005-chain-data.md) (requests the core makes, memory reserved before it is allocated), [0006](0006-dweb-transports.md) (plans, main's executor, trust labels, and the prerequisites in *Later designs*) and [0007](0007-ipfs-service.md) (stream frames, credit and rings).
+**Status:** decided (the user, 2026-10-23): open questions 1–11, which [Decisions](#decisions) records. A [proposed amendment](#proposed-amendment-an-ipfs-grant-that-grows), an IPFS grant that grows, awaits the user. Roadmap Phase 4 (item 4.5). Builds on [0001](0001-freedom-cored.md) (framing; streams as protocol version 2), [0005](0005-chain-data.md) (requests the core makes, memory reserved before it is allocated), [0006](0006-dweb-transports.md) (plans, main's executor, trust labels, and the prerequisites in *Later designs*) and [0007](0007-ipfs-service.md) (stream frames, credit and rings).
 
 **The references:**
 - **freedom-browser** at `aebf5ec9` (`integration/rust-core`):
@@ -261,7 +261,7 @@ What the core asks main for while a `dweb.verify` runs.
 - **Memory, granted whole when a request starts** ([Bounds](#bounds)):
   - **The grant is the most the request allocates:** 2 MiB for a Swarm request, 8 MiB for an IPFS one. It is the request's budget, which counts everything the request holds, reserved before it is allocated, and a fixed allowance out of it, 64 KiB for either scheme, for the bounded allocations the count doesn't follow ([What a grant covers](#what-a-grant-covers)). It comes out of the dweb thread's 101 MiB of grants, the 128 MiB less the structure cache's 24 MiB and the IPNS floors' 3 MiB reserve.
   - **A request runs only once its grant fits.** Otherwise it waits, in order, among the 256 waiting, so the grants never pass their total and no walk waits for memory once it runs.
-  - **The price is concurrency:** at most 12 IPFS or 50 Swarm requests run at once, or a mix in between, fewer than the 64 the running bound allows.
+  - **The price is concurrency:** at most 12 IPFS or 50 Swarm requests run at once, or a mix in between, fewer than the 64 the running bound allows. A [proposed amendment](#proposed-amendment-an-ipfs-grant-that-grows) would start IPFS requests at 3 MiB and grow them on need, so 32 run at once.
   - **A grant is held for the request's whole life,** so a long stream holds its grant until its body ends.
   - **A request that has waited 10 s for its grant ends `busy`,** which main answers 503. Its deadline runs while it waits.
 - **Pieces in flight:** per request, at most 8: a `/bytes` stream and 4 intermediate chunks ahead of it ([Leaves](#leaves)); one CAR; or 8 raw blocks ([Raw blocks](#raw-blocks)). Across requests, at most 256 `shell.dweb_get` are outstanding, as 0004 bounds naming's requests to main; more wait in the dweb thread, first in, first out, and their memory counts against their request. So main never dials the node more than 256 times at once for verified requests.
@@ -1070,7 +1070,113 @@ As 0006's 4.7 did, the tests land before the code. Every case pins its failure s
    - then the core's follow-up PR that removes protocol 1 (the handshake's transitional note).
 7. **The default:** on for every external backend (decided, 1). Verification ships on once the gates pass; a gate that fails brings the default back to the user with its numbers.
 8. **freedom-ipfs:** pull requests of its own, into its integration branch, that adopt `fc-ipfs`'s bounded reader once the reader has merged here (decided, 11; [Upstream](#upstream)).
-9. **Later, if real content needs it:** a Swarm request refused for its memory (`request-memory`) is tried once more at an IPFS request's 8 MiB grant, admitted again under the same 128 MiB. Not built: real manifests stay far inside the limit.
+9. **Later, if real content needs it:** a Swarm request refused for its memory (`request-memory`) is tried once more at an IPFS request's 8 MiB grant, admitted again under the same 128 MiB. Not built: real manifests stay far inside the limit. The [proposed amendment](#proposed-amendment-an-ipfs-grant-that-grows) could do this by growth instead (its open question 6).
+
+## Proposed amendment: an IPFS grant that grows
+
+**Status:** proposed, not decided: the user's call ([its open questions](#open-questions-on-the-growing-grant)). Nothing here is built, and the sections above still describe what is. It changes [Admission](#admission-deadlines-and-cancel) and [Bounds](#bounds) for IPFS and IPNS requests. Swarm's 2 MiB grant stays as it is.
+
+### The problem: 12 IPFS requests at once
+
+- **Every IPFS request takes the whole 8 MiB grant when it starts,** whatever it fetches. So at most 12 run at once out of the 101 MiB of grants, against 50 Swarm requests, and IPFS never reaches the 64-running bound. The rest wait in order, and a request that has waited 10 s for its grant ends `busy` (503).
+- **Measured by 5d's gates** (`freedom-cored`'s `dweb_gates`, release builds, each piece answered after the round trip; #255):
+  - the realistic page (124 requests, 100 of them small IPFS objects, on raw blocks) had no `busy` at any round trip up to 200 ms. At 200 ms its small IPFS objects waited up to 5.2 s for their heads;
+  - twice that page (247 requests: 200 small IPFS objects, 6 long IPFS reads, 40 small Swarm objects and a Swarm video) still had no `busy`. But its small IPFS heads came at p50 5.2 s, p90 9.1 s, p99 9.90 s and at most 10.3 s, right at the 10 s cutoff. Small Swarm heads, queued behind them, came at up to 9.3 s.
+- **Most of that wait is for the grant.** At 200 ms a small read is 2 to 4 pieces in sequence (0.4–0.8 s). The wait grows with objects × pieces each × round trip ÷ the IPFS requests running at once. While the 6 long reads stream, they hold 48 of the 101 MiB.
+- **A small request needs far less than 8 MiB.** Measured for this note with `fc-dweb`'s test driver (`tests/verifier_ipfs.rs`), at the IPFS budget, for the site-v1 objects the gate's page asks for (`index.html`, `style.css`, `docs/page.html`, `docs/sub/x.txt`, the 300 kB `img/photo.jpg`, `page`, `data`) and the directory itself:
+  - on raw blocks, the gate's page's mode, each peaks at 2.13 MiB: one block of unknown length, reserved at the 2 MiB block limit until it arrives ([Raw blocks](#raw-blocks)), and its stream's window;
+  - through a CAR, each peaks at 2.25 to 2.54 MiB: the reader's room, 2 MiB and a header, held whole while the CAR is open ([The CAR request](#the-car-request)), the window, a frame and the object;
+  - each still answers at a budget of 2.13 MiB, in either mode: there, a CAR gives way to raw blocks;
+  - for comparison, the 10 MiB file, with the driver's default eager page, peaks at 3.0 MiB on raw blocks and 4.26 MiB through a CAR, and also answers at 2.13 MiB, with fewer blocks in flight. With a page that takes 16 KiB per step, it peaks at 3.50 MiB (3,674,172 B) on raw blocks and 3.76 MiB through a CAR. The small objects above peak the same under both pages. The HAMT directory's listing peaks at 4.25 MiB on raw blocks.
+
+  So two fixed rooms set what a small request holds, not its content.
+
+### What the walk knows, and when
+
+The grant is taken at admission, before any piece is fetched, so only the plan can size it.
+- **From the plan:** the scheme; the root's CID, and so its codec and hash function (an identity CID carries its content; a raw CID is one block of at most 2 MiB, of unknown length; a dag-pb CID can be anything); for IPNS, a record of at most 10 KiB first; the path's segments, the method (HEAD stops early), the range, and `car`.
+- **From the root's block, or each directory's on the path:** the node's type; a file's `filesize`, a claim its content must add up to, and its `blocksizes`, exact for raw leaves, whose length must equal their entry; a directory's links and their `Tsize`, a claim never checked and used only in listings.
+- **Only later:** a dag-pb child's size, until it arrives; each CAR section's length, just before its bytes; whether the gateway honours `entity-bytes` and the order; how fast the page reads.
+
+So the plan never shows that the root is small, except for an identity CID, and even a 10-byte file needs its first block's 2 MiB room. The first grant is set by what the walk's first steps can need. Past that, the walk learns what it needs as it goes, and that is when it can ask.
+
+### The proposal: a first grant, then the full one
+
+- **An IPFS or IPNS request's first grant is 3 MiB** (`S`), not 8: its budget is 2.94 MiB, after the same 64 KiB allowance. That covers the first block's room or a CAR's, with room to spare: every object the gate's page asks for peaks inside it, through a CAR or on raw blocks, so the realistic page never grows.
+- **The walk asks for the full grant** (`F`, today's 8 MiB) **wherever it ends `MEMORY` today,** and nowhere else. Below its full grant, a request asks to grow there instead, and halts as it does when it waits for room: its block and its need are kept, and nothing it did has gone out. At its full grant it ends `MEMORY` there, as today.
+- **Where the walk tries other ways first today, they still come first** (#246): where it reserves through `room_for`, a CAR whose room doesn't fit gives way to raw blocks, and a block waits while something out will give room back. Not every `MEMORY` site does that. Some end at once when a reservation fails, such as a raw block's buffer moving to its next size (`raw_data`), though something out might give room back. There a request below `F` grows at once, where a wait might have found the room. Fewer blocks in flight is never a reason to grow: growth comes only where today's walk would fail, not for speed. A walk that gave up its CAR stays on raw blocks after it grows.
+- **Not proposed, could come later:** an audit of every `MEMORY` site, so that each waits or falls back first wherever something can give room back, and growth comes only where nothing can. It would change today's walk at `F` too, and each such site would need cases that wait or fall back before they grow.
+- **One step,** from `S` straight to `F`. Smaller steps would leave less room idle in a request that needs only a little more, but each step would need its own deadlock check (below), and none of the measured content grows at all.
+- **Growth is admitted as a first grant is:** out of the same 101 MiB, only once it fits, and in order. Growth takes no running place.
+- **Proposed, but the user's call** ([question 5](#open-questions-on-the-growing-grant)): requests waiting to grow go before requests waiting to start, since they already hold memory and have done work. The user sees what that costs: while running requests keep asking to grow, an older small request waiting to start can wait its 10 s and end `busy`, though room for it came free, since each time a later grower took it first.
+- **If growth doesn't come within 10 s, the request ends `busy`,** as one whose first grant doesn't come: a 503, "Too many requests", before its head; after it, `abort { code: "busy" }`, one of the verified body's six codes. Not `MEMORY`: the core was too busy to grant the full budget, so the walk never tried it, and nothing is known about whether the content would fit. A request whose growth comes and whose reservation still doesn't fit at `F` ends `MEMORY`, as today. The head's deadline runs during the wait, and 10 s is well inside main's 60 s body idle timer.
+- **A grown request keeps `F` until it ends,** as every grant is held now. Giving growth back, once a listing is sent, say, could come later; it isn't proposed.
+- **Concurrency:** with the reserve below, the first grants share 96 MiB, so 32 IPFS requests run at once instead of 12, or 48 Swarm requests (50 today), or a mix.
+- **The ×2 page, estimated:** only the wait for a grant should shrink, to about 12/32 of today's. A small read's own 2 to 4 pieces still take 0.4–0.8 s. So the latest small IPFS head, at 10.26 s today, would come at about 4.1 to 4.35 s, and the p99, 9.90 s today, at about 3.96 to 4.21 s. That is an estimate, not a bound. Two effects, neither measured, could move it either way. The long reads would hold 18 MiB at `S`, not 48, which leaves more room for the small requests and could lower it. The 128 streams and 256 pieces come within reach (below), and contention there could slow pieces and raise it. The rerun's gate, small IPFS heads within 5 s at p99, decides it.
+
+### No deadlock when many small grants want to grow
+
+The danger: 32 requests at `S` all ask to grow at once with less than 5 MiB free. Each holds what the others need, and none ends.
+- **The reserve:** a first grant, of either scheme, is admitted only if `F − S` (5 MiB) stays free after it. Only growth takes that room.
+- **So growth is always free to take, or held by a request that waits for no one.** While 5 MiB are free, the first request waiting to grow gets them at once. When less is free, an earlier growth took it, and that request, now at `F`, never waits for another request's memory again. Like every request today, it waits only for main, the page and the hashing pool, and it ends at its end, its deadline, its idle timers or a cancel. Then 8 MiB come back, and the next grower goes.
+- **No cycle:** a request waiting to grow waits only for requests that don't wait for memory: grown ones, Swarm ones, and IPFS ones that haven't asked. So the queue always drains. The 10 s bound keeps each wait short: behind a grown request that streams for minutes, growers end `busy` after 10 s instead of waiting for it.
+- **Without the reserve,** 33 requests at `S` that all grew at once would each wait 10 s and all end `busy`. The timeout would rule out a deadlock, but none of them would answer. With the reserve, they are served one or more at a time.
+- **More than one at once** where free room allows: growth goes to each waiting grower in order while `F − S` is free.
+
+### The bounds that still hold
+
+- **128 MiB:** first grants and growth come out of the same 101 MiB, each checked before it is taken, so together they never pass it. The structure cache's 24 MiB and the floors' 3 MiB don't change. The allowance is inside the first grant, so growth adds budget only.
+- **Memory reserved before it is allocated** (0005): growth goes in the order thread, request, value. The dweb thread takes it out of its 101 MiB, then raises the request's budget. Only then does the walk make the reservation that didn't fit, and only after that does it allocate. A walk waiting to grow has allocated nothing for what it waits for.
+- **The other bounds stay as stated,** but two that today's grants keep out of reach become reachable. With 32 IPFS requests, each with several raw blocks in flight, main's 256 outstanding pieces and the 128 streams with credit can be reached (5d saw about 98 pieces stream at most). They were built for this, and their gates then run under the shipped grants (below).
+
+### What changes in the accounting
+
+- **The request's budget,** `Core`'s limit, is set from the first grant and raised once, by a new input (`Verifier::grow`, say), when the thread grants the growth. It never falls while the request runs. The verifier asks with a new output (`Output::Grow`), or ends `MEMORY` where it is already at `F`. `Options` gives both budgets, the first and the full.
+- **`Charged` and `Held` don't change.** Every value is charged as now, reserved against the budget of the moment, and released as now. Growth changes no charge: it only lets the next reservation fit. `reserved()` and the peak are counted as now.
+- **The engine:** a running request's `grant` is `S`, then `F`. `granted` grows by `F − S` when the growth is taken, and `settle` gives back all the request holds. Requests waiting to grow have a queue of their own, with their own 10 s timers in `next_due` and `tick`. Each queue is served in order, and `admit` serves the two in the order [question 5](#open-questions-on-the-growing-grant) chooses: growth first, as proposed, or a fair turn that keeps the reserve's deadlock condition.
+- **0009's text:** Admission's "granted whole when a request starts" and "no walk waits for memory once it runs" become "a first grant when it starts, and the full grant if its walk needs it". Bounds' memory rows and *What a grant covers* say the same. Failures' `busy` row adds a growth that hasn't come within 10 s, and the vault gate counts the most bodies the new grants admit.
+
+### Tests and gates for the growing grant
+
+- **`fc-dweb`, the verifier:**
+  - every IPFS request case and native exchange of the vectors, and the budget tests' plans, at `S` with growth granted: the same head, body and ending as at `F`. With growth refused: `busy` where they asked to grow, and the same answer elsewhere;
+  - the realistic page's objects, through CARs and on raw blocks, never ask to grow at `S` (the figures above, pinned);
+  - `more_memory_never_refuses` sweeps first grants, each grown to `F`: every one answers what `F` answers;
+  - growth is asked only where a run at that budget ends `MEMORY`, at each such site, those that end at once included, and never at `F`;
+  - `verifier_memory`'s counting allocator, for every case at `S`, grown or not: nothing allocated past the reservation by more than the allowance, and the reservation never past the request's budget at that moment;
+  - a request waiting to grow that is cancelled, or passes its deadline, gives back all it holds.
+- **`freedom-cored`'s engine:**
+  - growth and waiting starts served in the order chosen (question 5), each queue in order; `F − S` free after every admission; growth taken whole and given back whole; 10 s, then `busy`, before and after the head;
+  - a model test: any number of requests at `S` asking to grow at once, in any order, beside streams held open. The grants never pass 101 MiB, and each grower is granted or ends `busy` within 10 s;
+  - a sustained mixed queue, for well past 10 s: new requests keep arriving to start while running ones keep asking to grow. The test pins, for starters and growers apart, how many are served, how many end `busy`, and the longest wait, so each side's outcome under the chosen order is on record. Under a fair order, no grower waits behind a starter while only waiting growers hold the room that starter needs.
+- **Through the binary:** a wide directory's listing that grows and answers, and one whose growth can't come, which ends `busy`.
+- **5d's gates, rerun in release:**
+  - admission under the shipped grants: 32 IPFS, 48 Swarm;
+  - the realistic page at 0, 20, 50 and 200 ms, still without `busy`;
+  - **the ×2 page at 200 ms,** reported against 5d's figures (small IPFS heads p99 9.90 s, at most 10.3 s), then gated: no `busy`, and small IPFS heads within 5 s at p99, half the cutoff;
+  - a ×4 page, measured, not gated, for the new headroom;
+  - the 128 streams and the 256 pieces under the shipped grants;
+  - the vault gate, with the most bodies the new grants admit;
+  - resident memory within 128 MiB, with 32 requests at `S` all growing beside streaming bodies;
+  - IPFS throughput on loopback, still at least 80 % of unverified, at `S`.
+
+### Options weighed for the IPFS grant
+
+- **Grow in place** (proposed): a request keeps what it has fetched, and growth works after the head too. It costs a new wait inside a running request, the reserve, and the code paths above.
+- **Restart at the full grant,** step 9's pattern: a request at `S` that is refused for memory before its head is admitted again at `F`, once, from the start. It's simpler: nothing grows inside a running walk, and it can't deadlock, since the first attempt gives back its grant before the second waits. For the same reason it needs no reserve: ordinary admission keeps 33 IPFS requests at once, and Swarm's 50, against 32 and 48 in place. But it fetches again what the first attempt fetched, and waits for a grant twice. Nor can it help after the head: a request at `S` that needs more there is cut short `MEMORY`, where 8 MiB answers today.
+- **A smaller fixed grant** (3 MiB, no growth): one constant, and 33 IPFS requests at once. But content that needs 3 to 8 MiB and answers today (large directory listings, HAMT listings on raw blocks, wide nodes) would be refused `MEMORY`: a new deviation, of unmeasured reach.
+  - **With the CAR reader's room reduced** (a section reserved at its declared length, not at 2 MiB), a fixed grant could go lower through CARs. But a raw block of unknown length still needs 2 MiB, so going below about 2.2 MiB also needs raw blocks reserved as their bytes arrive. That would lower any option's grant. It's worth doing only if 32 at once proves too few.
+- **A queue per scheme:** Swarm requests would no longer wait behind IPFS ones (small Swarm heads waited up to 9.3 s in the ×2 page). But IPFS would still run 12 at once, and those are the requests at the cutoff. It could come later, beside growth.
+
+### Open questions on the growing grant
+
+1. **Grow in place, or restart at the full grant before the head?** Restart needs no reserve, so it runs 33 IPFS requests at once and keeps Swarm's 50, against 32 and 48 in place. In place keeps what a request has fetched, waits for a grant once, not twice, and can still grow after the head, where a restarted request at `S` is cut short `MEMORY`. Recommended: in place.
+2. **A first grant of 3 MiB** (32 IPFS requests at once), going lower only if the rerun shows the need?
+3. **The reserve costs Swarm two places** (50 → 48 at once) and changes the vault gate's count. Accept it, or exempt Swarm's admissions from the reserve? That keeps 50, but growth could then wait on Swarm requests too. Restart (question 1) needs no reserve at all, so it keeps 50 too, with 33 IPFS requests.
+4. **Growth that doesn't come within 10 s ends `busy`** (503 before the head, an abort after it), not `MEMORY`: the core was too busy to try the full budget, so the content might or might not fit it. Growth that comes, followed by a reservation that still doesn't fit, ends `MEMORY` as today. Agreed?
+5. **Growth before starts, or a fair turn?** Proposed: requests waiting to grow go first. They hold memory and have done work, and one that ends `busy` after its head is a body cut short, where a starter that ends `busy` is a 503 before anything is sent. The cost falls on starters: while running requests keep asking to grow, an older small request waiting to start can end `busy` after its 10 s, since room that comes free goes to growers first. The 10 s timer bounds that wait, but a wait that ends in failure isn't fair service. A fair order (the oldest waiter first, or a starter after each grower) keeps starters moving, but growers then wait longer, holding `S` idle, and more of them end `busy`, after their heads too. It also needs a deadlock check of its own: a grower held back for a starter must never wait while only waiting growers hold the room that starter needs, or all of them wait out their 10 s. Only content that grows meets either order: the realistic page never grows.
+6. **Swarm too?** The same growth could replace step 9's retry: a Swarm request refused for memory at 2 MiB would grow to 8 MiB in place. The reserve would then be 6 MiB, for 31 IPFS or 47 Swarm requests at once.
+7. **When?** After step 6, as planned, or before verification ships on by default, so that the default's gates measure it?
 
 ## Decisions
 
