@@ -513,26 +513,36 @@ fn the_writer_holds_64_windows() {
 }
 
 /// The writer's cap under pressure: 128 bodies (grants and running
-/// lifted) stream at full speed, main crediting each at once, then main
-/// stops reading. Their 16 MiB of windows press on the writer's 8 MiB:
-/// its queue fills to the cap, short of it by less than the 4 KiB a push
-/// waits for, and never past it. The rest waits in the bodies' own queues
+/// lifted), each read to its window uncredited, so every one waits on
+/// main with its next piece's bytes in hand. Main stops reading and
+/// credits each body another window: 16 MiB press on the writer's 8 MiB.
+/// Its queue fills to the cap, short of it by less than the 4 KiB a push
+/// waits for, and never past it; the rest waits in the bodies' own queues
 /// and comes once main reads again.
 #[cfg(feature = "testhooks")]
 #[test]
 fn the_writer_holds_at_most_8_mib() {
+    use common::{KIND_STREAM_CREDIT, stream_frame};
     let bodies = 2 * RUNNING;
     let (mut m, base, _dir, marker) =
         with_writer_marker(&[LIFTED, ("FREEDOM_CORED_TEST_DWEB_RUNNING", "128")]);
+    m.credits_bodies = false;
     m.keep_bodies = false;
     let ids: Vec<u64> = (0..bodies).map(|_| m.verify(swarm_64m())).collect();
-    wait_for(&mut m, Duration::from_secs(60), "every body", |m| {
-        ids.iter().all(|id| m.got[id].len > 0)
+    let got = |m: &Main| ids.iter().map(|id| m.got[id].len).sum::<usize>();
+    wait_for(&mut m, Duration::from_secs(60), "the windows", |m| {
+        got(m) == bodies * WINDOW
     });
+    // Main sends what the core's credit allows of their pieces meanwhile.
     run_for(&mut m, Duration::from_millis(500));
-    let streaming = writer_most(&marker).unwrap_or(0);
-    // Main stops reading until the writer's queue stops growing.
+    let windows = writer_most(&marker).unwrap_or(0);
     m.core.pause_reading();
+    let credit = u32::try_from(WINDOW).unwrap().to_be_bytes();
+    for &id in &ids {
+        m.core
+            .send_raw(&stream_frame(KIND_STREAM_CREDIT, id, &credit));
+    }
+    // Until the writer's queue stops growing.
     let (mut most, mut since) = (writer_most(&marker).unwrap_or(0), Instant::now());
     let until = Instant::now() + Duration::from_secs(30);
     while since.elapsed() < Duration::from_secs(1) && Instant::now() < until {
@@ -544,26 +554,24 @@ fn the_writer_holds_at_most_8_mib() {
     }
     let paused = resident(&m);
     m.core.resume_reading();
-    let before: usize = ids.iter().map(|id| m.got[id].len).sum();
-    run_for(&mut m, Duration::from_secs(1));
-    let after: usize = ids.iter().map(|id| m.got[id].len).sum();
+    wait_for(&mut m, Duration::from_secs(60), "the second windows", |m| {
+        got(m) == bodies * 2 * WINDOW
+    });
+    run_for(&mut m, Duration::from_millis(500));
     eprintln!(
-        "[writer cap] {bodies} bodies streaming: the writer's queue held at most {streaming} bytes; \
-         main paused: {most} bytes (cap {WRITER_DATA_CAP}); paused at {paused:?} KiB; \
-         {} MiB more in the second after",
-        (after - before) / MIB
+        "[writer cap] {bodies} bodies; the writer's queue held at most {windows} bytes for their \
+         windows, then {most} bytes (cap {WRITER_DATA_CAP}) for 16 MiB of credit with main's \
+         reads paused, at {paused:?} KiB"
     );
     assert!(
         most > WRITER_DATA_CAP - SMALL_FRAME && most <= WRITER_DATA_CAP,
         "the writer's queue held at most {most} bytes, not the cap {WRITER_DATA_CAP}"
     );
-    assert!(after > before, "the bodies go on once main reads");
+    assert_eq!(got(&m), bodies * 2 * WINDOW, "nothing past the credit");
     for &id in &ids {
         m.cancel(id);
     }
     m.settle(&ids);
-    let last = writer_most(&marker).unwrap();
-    assert!(last <= WRITER_DATA_CAP, "{last}");
     memory_within_bounds(&m, base, "writer cap");
 }
 
