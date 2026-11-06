@@ -13,14 +13,18 @@ use crate::plan::{
     BODY_IDLE_MS, BZZ_HEADERS_MS, BZZ_RETRY_DELAYS_MS, BZZ_RETRY_STATUSES, Backend, Ipfs,
     NATIVE_QUEUE_MS, Plan, ResponseOp, Root, Scheme, Verification, content_trust,
 };
-use crate::verify::{STRICT_MESSAGES, STRICT_STATUS, VERIFY_HEADERS_ANT, VERIFY_HEADERS_IPFS};
+use crate::verify::{
+    STRICT_MESSAGES, STRICT_STATUS, VERIFY_HEADER_STATUS, VERIFY_HEADER_TOO_LARGE,
+    VERIFY_HEADERS_ANT, VERIFY_HEADERS_IPFS, VERIFY_URL_STATUS, VERIFY_URL_TOO_LONG,
+};
 use crate::{js, url};
 
 /// The longest error message, in UTF-16 code units: twice the request's
 /// 64 KiB URL bound, so a message naming the host always fits.
 pub const MAX_MESSAGE_UNITS: usize = 131_072;
 
-/// The statuses an error plan may carry: today's.
+/// The statuses an error plan may carry: today's. 0009 adds its own, each
+/// with fixed messages: strict mode's 403 and the verifier's 414 and 431.
 pub const ERROR_STATUSES: [u16; 6] = [400, 404, 405, 415, 502, 503];
 
 /// The request a plan answers, as main admitted it.
@@ -675,25 +679,33 @@ fn redirect(
     Ok(())
 }
 
-/// One of today's statuses, the same code, and a bounded message; or,
-/// against a strict backend, strict mode's 403 with one of its fixed
-/// messages (0009, Strict mode).
+/// One of today's statuses, the same code, and a bounded message; or a
+/// refusal of 0009's with its fixed message: against a strict backend,
+/// strict mode's 403 with one of its messages (0009, Strict mode); against
+/// a backend whose verification is on, the verifier's 414 or 431 (0009,
+/// Bounds).
 fn error(body: &JsValue, request: &PlanRequest<'_>) -> Result<(), Refusal> {
     exact(body, &["status", "code", "message"])?;
     let status = body.get("status");
-    let strict = matches!(status, Some(JsValue::Number(n)) if *n == f64::from(STRICT_STATUS));
-    let status_ok = matches!(status, Some(JsValue::Number(n)) if ERROR_STATUSES.iter().any(|&s| f64::from(s) == *n));
+    let is = |s: u16| matches!(status, Some(JsValue::Number(n)) if *n == f64::from(s));
+    let verify = request.backend.verification() == Verification::On;
+    let fixed: Option<(bool, &[&str])> = if is(STRICT_STATUS) {
+        Some((request.backend.strict(), &STRICT_MESSAGES))
+    } else if is(VERIFY_URL_STATUS) {
+        Some((verify, &[VERIFY_URL_TOO_LONG]))
+    } else if is(VERIFY_HEADER_STATUS) {
+        Some((verify, &[VERIFY_HEADER_TOO_LARGE]))
+    } else {
+        None
+    };
     let code_ok = body.get("code") == status;
     let message = body.get("message").and_then(JsValue::as_str);
-    let message_ok = if strict {
-        message.is_some_and(|m| STRICT_MESSAGES.contains(&m))
-    } else {
-        message.is_some_and(|m| js::utf16_len(m) <= MAX_MESSAGE_UNITS)
-    };
-    let kind_ok = if strict {
-        request.backend.strict()
-    } else {
-        status_ok
+    let (kind_ok, message_ok) = match fixed {
+        Some((backend_ok, texts)) => (backend_ok, message.is_some_and(|m| texts.contains(&m))),
+        None => (
+            ERROR_STATUSES.iter().any(|&s| is(s)),
+            message.is_some_and(|m| js::utf16_len(m) <= MAX_MESSAGE_UNITS),
+        ),
     };
     if kind_ok && code_ok && message_ok {
         Ok(())

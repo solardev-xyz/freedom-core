@@ -55,6 +55,7 @@ use charged::Charged;
 
 use crate::plan::{Backend, ContentTrust, ErrorPlan, Node, ResponseOp, Root, Trust, Verify};
 use crate::validate::Refusal;
+use crate::verify::PastBound;
 
 /// A Swarm request's grant (0009, Bounds): what admission reserves for it,
 /// and the most it allocates. Its largest holding is a manifest lookup, the
@@ -116,12 +117,14 @@ pub const MAX_FRAME: usize = 64 << 10;
 pub const MAX_WHOLE: usize = 64 << 10;
 /// Chunk requests a Swarm walk has open at once (0009, Leaves).
 pub const MAX_CHUNK_PIECES: usize = 4;
-/// The most bytes a verify plan's path and query hold together, and each
-/// of its headers' values (0009, Bounds). A longer one is refused before
-/// anything is made of it: the plan's check copies the path a few times,
-/// uncounted, before the request's machine exists, and the machine keeps a
-/// Swarm request's path, query and range and an IPFS request's range and
-/// tag within the grant's allowance.
+/// The most bytes a verify plan's path holds, with a Swarm plan's query,
+/// and each of its headers' values (0009, Bounds). An IPFS or IPNS plan's
+/// query isn't counted: its walk never reads it. `dweb.open` plans a 414
+/// or a 431 past it, and a longer plan is refused before anything is made
+/// of it: the plan's check copies the path a few times, uncounted, before
+/// the request's machine exists, and the machine keeps a Swarm request's
+/// path, query and range and an IPFS request's range and tag within the
+/// grant's allowance.
 pub const MAX_PATH: usize = 8 << 10;
 
 /// The request's method, as main read it.
@@ -1802,17 +1805,15 @@ fn check_plan(plan: &Verify) -> Result<(), Refusal> {
     if !crate::verify::root_in_form(&plan.root) {
         return Err(Refusal::Root);
     }
-    // Lengths first, before any copy is made.
+    // Lengths first, before any copy is made: the bound `dweb.open` plans
+    // by, so only a plan it didn't make passes it.
+    match crate::verify::past_bound(plan) {
+        Some(PastBound::Path) => return Err(Refusal::Path),
+        Some(PastBound::Query) => return Err(Refusal::Query),
+        Some(PastBound::Header) => return Err(Refusal::Header),
+        None => {}
+    }
     let path = &plan.path;
-    if path.len() > MAX_PATH {
-        return Err(Refusal::Path);
-    }
-    if path.len() + plan.query.len() > MAX_PATH {
-        return Err(Refusal::Query);
-    }
-    if plan.headers.iter().any(|(_, v)| v.len() > MAX_PATH) {
-        return Err(Refusal::Header);
-    }
     if !(path.is_empty() || path.starts_with('/')) || path.contains(['?', '#']) {
         return Err(Refusal::Path);
     }

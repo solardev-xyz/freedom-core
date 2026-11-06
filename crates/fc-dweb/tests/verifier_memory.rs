@@ -1875,14 +1875,15 @@ fn an_uncharged_ipfs_value_shows_past_the_reservation() {
     }
 }
 
-/// A plan's path and query together, and each of its headers' values, are
-/// at most [`MAX_PATH`] bytes (0009, Bounds). Past it, the plan is refused
-/// before anything is made of it: a 1.4 MB path below a raw root
-/// allocated 8,400,476 bytes, past the 8 MiB grant, when it was accepted.
-/// At it, the plan's check copies the path a few times before the
+/// A plan's path (with a Swarm plan's query), and each of its headers'
+/// values, are at most [`MAX_PATH`] bytes (0009, Bounds). Past it, the plan
+/// is refused before anything is made of it: a 1.4 MB path below a raw
+/// root allocated 8,400,476 bytes, past the 8 MiB grant, when it was
+/// accepted. At it, the plan's check copies the path a few times before the
 /// request's machine exists, so with nothing reserved (a budget of 0: the
 /// walk ends at once, for its memory) what the request allocates is the
 /// check's copies and the machine's own structures, within the allowance.
+/// An IPFS plan's query, which the walk never reads, adds nothing.
 #[test]
 fn a_plan_past_its_path_bound_is_refused_before_it_is_copied() {
     let note = |line: &str| {
@@ -1994,6 +1995,27 @@ fn a_plan_past_its_path_bound_is_refused_before_it_is_copied() {
         note(&format!("{what}: {got:?}, {allocated} allocated"));
         assert_eq!(got, Ok(0), "{what}");
         assert!(allocated <= allowance, "{what}: {allocated} allocated");
+    }
+    // An IPFS plan's query isn't counted, and isn't copied: with a short
+    // path, or one at the bound, a query to 0006's 64 KiB URL bound
+    // allocates what no query does.
+    for path in [long(2), long(MAX_PATH)] {
+        let query = format!("?{}", "q".repeat((64 << 10) - 200 - path.len()));
+        let (got, without) = made(&with(&raw_root, path.clone(), "", vec![]));
+        assert_eq!(got, Ok(0));
+        let (got, allocated) = made(&with(&raw_root, path.clone(), &query, vec![]));
+        note(&format!(
+            "an IPFS path of {} bytes with a query of {}: {got:?}, {allocated} allocated, \
+             {without} without",
+            path.len(),
+            query.len()
+        ));
+        assert_eq!(got, Ok(0), "{} bytes", path.len());
+        assert!(
+            allocated < without + (1 << 10),
+            "{} bytes: {allocated} allocated, {without} without",
+            path.len()
+        );
     }
 }
 

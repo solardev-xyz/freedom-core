@@ -1652,6 +1652,29 @@ const STRICT_MESSAGES = {
   key: "This profile loads only verified content, and this IPNS name's key type can't be verified",
   encrypted: "This profile loads only verified content, and an encrypted Swarm reference can't be verified with an external node",
 };
+/**
+ * The verifier's bound (0009, Bounds; fc-dweb's MAX_PATH): the bytes it
+ * takes from a verify plan's path, with a Swarm plan's query (Ant's
+ * directory redirect keeps it; an IPFS or IPNS walk never reads it), and
+ * from each header's value. Past it, dweb.open plans a 414 or a 431 in
+ * place of the verify plan, strict mode or not.
+ */
+const MAX_VERIFY_PATH = 8192;
+const VERIFY_BOUND_ERRORS = {
+  url: { status: 414, code: 414, message: 'request URL too long to verify' },
+  header: { status: 431, code: 431, message: 'request header too large to verify' },
+};
+const utf8Length = (text) => Buffer.byteLength(text, 'utf8');
+
+/** What of a verify plan passes the verifier's bound: `url`, `header` or null. */
+function pastBound(verify) {
+  const path = utf8Length(verify.path);
+  if (path > MAX_VERIFY_PATH) return 'url';
+  if (verify.node === 'ant' && path + utf8Length(verify.query) > MAX_VERIFY_PATH) return 'url';
+  if (verify.headers.some(([, value]) => utf8Length(value) > MAX_VERIFY_PATH)) return 'header';
+  return null;
+}
+
 const B36 = '0123456789abcdefghijklmnopqrstuvwxyz';
 
 function baseDecode(text, alphabet) {
@@ -1810,21 +1833,60 @@ function verifyPlanOf(fetch, request, ref, jsRequest) {
   const keep = VERIFY_HEADERS[node];
   const response = [...VERIFY_RESPONSE_OPS[node]];
   if (node === 'ipfs' && request.method.toUpperCase() === 'GET' && ref.ipfs.__internals.isDocumentRequest(jsRequest)) response.push('small_text');
-  return {
-    plan: {
-      verify: {
-        node,
-        root,
-        path: below,
-        query,
-        headers: fetch.headers.filter(([name]) => keep.includes(name)),
-        retry: fetch.retry,
-        timers: fetch.timers,
-        response,
-        trust: { name: fetch.trust.name, content: 'verified' },
-      },
-    },
+  const verify = {
+    node,
+    root,
+    path: below,
+    query,
+    headers: fetch.headers.filter(([name]) => keep.includes(name)),
+    retry: fetch.retry,
+    timers: fetch.timers,
+    response,
+    trust: { name: fetch.trust.name, content: 'verified' },
   };
+  const past = pastBound(verify);
+  return { plan: past ? { error: VERIFY_BOUND_ERRORS[past] } : { verify } };
+}
+
+/**
+ * Requests at the verifier's bound, on each side of it (0009, Bounds):
+ * an IPFS, IPNS and Swarm path at it and a byte past; a Swarm path and
+ * query together; an IPFS or IPNS query of any length, which isn't
+ * counted; and a kept header's value, with one the verifier doesn't keep.
+ * Their plans are verify plans `dweb.verify` takes, or the 414 or 431
+ * `dweb.open` plans in their place.
+ */
+function boundCases() {
+  const h = SWARM_REF;
+  const v1 = b32cid(CID_BYTES.dagPb);
+  const key36 = 'k51qzi5uqu5dlvj2baxnqndepeb86cbk3ng7n3i46uzyxzyqj2xjonzllnv0v8';
+  const N = MAX_VERIFY_PATH;
+  // A path below the root of n bytes, and a query of n bytes with its `?`.
+  const path = (n) => '/' + 'p'.repeat(n - 1);
+  const query = (n) => '?' + 'q'.repeat(n - 1);
+  const headers = (...extra) => [['Accept', '*/*'], ['User-Agent', 'Freedom'], ...extra];
+  const range = (n) => ['Range', 'bytes=' + '0'.repeat(n - 7) + '-'];
+  const tag = (n) => ['If-None-Match', '"' + 't'.repeat(n - 2) + '"'];
+  const cases = [];
+  const add = (scheme, id, url, extra = {}) => cases.push({ scheme, id: `bound-${id}`, url, bound: true, ...extra });
+  add('ipfs', 'path-at', `ipfs://${v1}${path(N)}`);
+  add('ipfs', 'path-past', `ipfs://${v1}${path(N + 1)}`);
+  add('ipfs', 'short-path-long-query', `ipfs://${v1}/a${query(2 * N)}`);
+  add('ipfs', 'path-at-query-past', `ipfs://${v1}${path(N)}${query(N + 1)}`);
+  add('ipfs', 'range-at', `ipfs://${v1}/a`, { headers: headers(range(N)) });
+  add('ipfs', 'range-past', `ipfs://${v1}/a`, { headers: headers(range(N + 1)) });
+  add('ipfs', 'if-none-match-past', `ipfs://${v1}/a`, { headers: headers(tag(N + 1)) });
+  add('ipfs', 'other-header-past', `ipfs://${v1}/a`, { headers: headers(['X-Custom', 'x'.repeat(N + 1)]) });
+  add('ipns', 'path-at', `ipns://${key36}${path(N)}`);
+  add('ipns', 'path-past', `ipns://${key36}${path(N + 1)}`);
+  add('ipns', 'short-path-long-query', `ipns://${key36}/a${query(N + 1)}`);
+  add('bzz', 'path-at', `bzz://${h}${path(N)}`);
+  add('bzz', 'path-past', `bzz://${h}${path(N + 1)}`);
+  add('bzz', 'path-query-at', `bzz://${h}${path(N - 16)}${query(16)}`);
+  add('bzz', 'path-query-past', `bzz://${h}${path(N - 16)}${query(17)}`);
+  add('bzz', 'range-at', `bzz://${h}/a`, { headers: headers(range(N)) });
+  add('bzz', 'range-past', `bzz://${h}/a`, { headers: headers(range(N + 1)) });
+  return cases;
 }
 
 const strictError = (cause) => ({ error: { status: 403, code: 403, message: STRICT_MESSAGES[cause] } });
@@ -1833,7 +1895,7 @@ async function buildVerifyRequests(ref, table) {
   const out = [];
   // Each request's plan today, by id, for the downgrade cases.
   const todays = new Map();
-  for (const c of [...bzzCases(), ...ipfsCases()]) {
+  for (const c of [...bzzCases(), ...ipfsCases(), ...boundCases()]) {
     // Plans 0006 refuses (plan-paths, plan-headers) stay with dweb.json.
     if (c.validation) continue;
     const external = { ...c, backend: c.scheme === 'bzz' ? 'external' : 'gateway' };
@@ -1852,6 +1914,8 @@ async function buildVerifyRequests(ref, table) {
       ['off-strict', { strict: true }],
     ];
     if (c.scheme !== 'bzz') variants.push(['unsupported-strict', { unsupported: true, strict: true }]);
+    // Strict mode, on or off, changes nothing at the bound: one form.
+    if (c.bound) variants.splice(1);
     for (const [suffix, flags] of variants) {
       const request = structuredClone(run.request);
       Object.assign(request.backend, flags);
@@ -1860,7 +1924,10 @@ async function buildVerifyRequests(ref, table) {
       else if (!flags.verify) plan = flags.strict ? strictError(flags.unsupported ? 'unsupported' : 'off') : today;
       else if (derived.unverified) plan = flags.strict ? strictError(derived.unverified) : today;
       else plan = derived.plan;
-      const entry = { id: `${c.scheme}-${c.id}-${suffix}`, from: `${c.scheme}-${c.id}`, request };
+      const entry = { id: `${c.scheme}-${c.id}-${suffix}` };
+      // A bound case is no dweb.json request.
+      if (!c.bound) entry.from = `${c.scheme}-${c.id}`;
+      entry.request = request;
       if (c.resolution) entry.resolution = c.resolution;
       entry.plan = plan;
       // A root not in its form (a CID host that isn't a whole CID, say)
@@ -2016,6 +2083,20 @@ function verifyValidationCases(requests, todays) {
   downgrade('downgrade-fetch-ipfs-name-host', ipfsNameBase, 'path');
   downgrade('downgrade-fetch-ipns-name-host', find('ipns-name-ok-ipns-verify'), 'path');
   mutate('downgrade-fetch-bzz-name-encrypted', find('bzz-name-ok-encrypted-verify'), () => {}, 'valid');
+  // The verifier's bound: its 414 and 431, each with its fixed message,
+  // against a backend whose verification is on.
+  const url = find('bzz-bound-path-query-past-verify');
+  const header = find('ipfs-bound-range-past-verify');
+  assert.deepEqual([url.plan.error, header.plan.error], [VERIFY_BOUND_ERRORS.url, VERIFY_BOUND_ERRORS.header]);
+  mutate('bound-414-own', url, () => {}, 'valid');
+  mutate('bound-414-strict', url, () => {}, 'valid', withRequest(url, (r) => { r.backend.strict = true; }));
+  mutate('bound-414-not-verify', url, () => {}, 'error', withRequest(url, (r) => { delete r.backend.verify; }));
+  mutate('bound-414-other-message', url, (p) => { p.error.message = 'request URL too long'; }, 'error');
+  mutate('bound-414-431-message', url, (p) => { p.error.message = VERIFY_BOUND_ERRORS.header.message; }, 'error');
+  mutate('bound-414-code', url, (p) => { p.error.code = 431; }, 'error');
+  mutate('bound-431-own', header, () => {}, 'valid');
+  mutate('bound-431-unsupported', header, () => {}, 'error', withRequest(header, (r) => { delete r.backend.verify; r.backend.unsupported = true; }));
+  mutate('bound-431-414-message', header, (p) => { p.error.message = VERIFY_BOUND_ERRORS.url.message; }, 'error');
   return out;
 }
 
@@ -2028,14 +2109,15 @@ async function buildVerifyPlans(checkout, meta) {
     formats: {
       source: 'design: every plan is 0009\'s, composed from the reference\'s outcome on the external backend (as dweb.json\'s requests are, from the same cases), as 0009\'s Verify plans and Strict mode state; no reference has a verified mode',
       backend: '{ ant | ipfs: mode, up }, as in dweb.json, plus verify: true when verification is on and supported, strict: true when the profile\'s strict mode is on, and unsupported: true for a gateway whose verification is on but which the probe found without raw blocks',
-      requests: 'every dweb.json case whose plan 0006 accepts, on its external backend: id (the case\'s, suffixed verify, verify-strict, off-strict, or for IPFS unsupported-strict), from (dweb.json\'s request id), request, resolution, the expected plan, and validation',
-      plan: '{verify: {node, root ({swarm: 64 hex} | {ipfs: a CIDv1 in lowercase base32, canonical: a CIDv0 converted, base32 lowercased} | {ipns: a libp2p-key CID}), path (below the root, as the fetch plan sends it), query (the admitted URL\'s, with its ?, or empty), headers (only range for Ant; range and if-none-match for IPFS), retry and timers (the fetch plan\'s), response (the bundled node\'s operations), trust ({name, content: verified})}}; or the fetch plan that stays, unverified; or a redirect or error plan, unchanged; or strict mode\'s {error: {status: 403, code: 403, message}}',
+      requests: 'every dweb.json case whose plan 0006 accepts, on its external backend: id (the case\'s, suffixed verify, verify-strict, off-strict, or for IPFS unsupported-strict), from (dweb.json\'s request id), request, resolution, the expected plan, and validation; then the verifier\'s bound (*-bound-*, which have no from), suffixed verify only, since strict mode changes nothing there',
+      plan: '{verify: {node, root ({swarm: 64 hex} | {ipfs: a CIDv1 in lowercase base32, canonical: a CIDv0 converted, base32 lowercased} | {ipns: a libp2p-key CID}), path (below the root, as the fetch plan sends it), query (the admitted URL\'s, with its ?, or empty), headers (only range for Ant; range and if-none-match for IPFS), retry and timers (the fetch plan\'s), response (the bundled node\'s operations), trust ({name, content: verified})}}; or the fetch plan that stays, unverified; or a redirect or error plan, unchanged; or strict mode\'s {error: {status: 403, code: 403, message}}; or, for a verify plan whose path (with a Swarm plan\'s query) or a kept header\'s value passes verify_bound.max_path bytes, its {error} from verify_bound, strict mode or not',
       validation: 'validate_plan\'s verdict, valid or the stage that refuses (0009, Verify plans): request_id names a request above, or the case has its own request and plan',
     },
     constants: {
       verify_response_operations: VERIFY_RESPONSE_OPS,
       verify_headers: VERIFY_HEADERS,
       strict_messages: STRICT_MESSAGES,
+      verify_bound: { max_path: MAX_VERIFY_PATH, url: VERIFY_BOUND_ERRORS.url, header: VERIFY_BOUND_ERRORS.header },
     },
     requests,
     validation: verifyValidationCases(requests, todays),
