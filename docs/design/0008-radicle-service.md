@@ -478,7 +478,7 @@ The rules this design relies on, as 0007 specifies them:
 - **Reads (`rad.read`, `rad.blob`):**
   - **To the head:** the 60 s deadline runs from admission, and includes the queue and any wait for an output reservation. It ends when the head is written.
   - A read still queued at its deadline is removed before work starts, and answered `deadline`. A running read past it is cancelled, and answered `deadline` if its head hasn't been written.
-  - **After the head there is no service deadline.** A stalled or paused body is main's to judge: 0006's pull-driven idle timer cancels a body that leaves a pull unanswered for 60 s, and a paused reader is never timed out. The service ends a stream early only with `abort`: `cancelled`, `stopped`, `internal` or `too_large`.
+  - **After the head there is no service deadline.** A stalled or paused body is main's to judge: 0006's pull-driven idle timer cancels a body that leaves a pull unanswered for 60 s, and a paused reader is never timed out. The service ends a stream early only with `abort`: `cancelled`, `stopped` or `internal`. Its caps are checked before the head (a JSON read's JSON is complete before it, and a blob's size comes from its header), so `too_large` is always a reply, never an abort.
 - **Network operations:** `timeout_ms` + 30 s. A network operation past it gets `deadline`, but keeps its slot until libradicle returns.
 - **Writes:** 60 s, and 300 s for the import in its own process, with the outcome rules in [Writes](#writes).
 - **Main's watchdogs** are each deadline + 15 s, as 0001.
@@ -540,7 +540,7 @@ All bounds are process-wide. The service hosts one node.
   - **A blob** reserves twice its size while libgit2's buffer and the service's copy both exist, then once until its last byte is written.
   - **A JSON read** reserves both its materialized data and its serialized JSON ([JSON results](#json-results)).
   - **Per read:** a blob of at most 64 MiB (128 MiB reserved while loading); a JSON read of at most 64 MiB, of which at most 32 MiB is JSON.
-  - A read that can't reserve waits, inside its deadline to the head.
+  - A read that can't reserve waits, inside its deadline to the head, and is `cancelled` once its token is. Waiters take what fits as it is released, in no order. A reservation larger than the whole budget is `too_large` at once.
 - **What the service can't bound:** heartwood's own buffers:
   - fetch streams of up to 500 MiB each;
   - its reactor queues and per-peer write buffers.
@@ -553,10 +553,11 @@ All bounds are process-wide. The service hosts one node.
   - **Materialization:** the walks that build a result (`commits`, `commit` with its diff, `repo_stats`, `list_files`, `issues`, `patches`, `list_repos`) take a byte budget and a cancel token ([upstream](#upstream-changes)).
     - Each item reserves an estimate of its size as it is built: a commit's message and fixed fields, a diff hunk's text, a COB's events.
     - The walk stops with `too_large` when the next item doesn't fit.
+    - The walk charges a meter of its own, so the service reserves its whole byte budget, 32 MiB, from the output budget before the walk starts, and releases it once the JSON is complete. The walk loads at most as many bytes of objects (libradicle's `Bounds::loads`).
   - **Serialization:**
     - The shared serializers write into a size-limited writer. It reserves in 64 KiB steps from the output budget, and fails as soon as the output passes 32 MiB.
     - The limit counts output bytes after escaping. So lossy text and escape expansion (`\u0000` is 6 bytes for 1) can't pass it.
-    - The finished JSON is then streamed, under credit, with its length in the head, and its reservation is released as it is written.
+    - The finished JSON is then streamed, under credit, with its length in the head, in chunks of at most 64 KiB, one data frame each. Each chunk's reservation is released once it is written.
 - **In main, handlers get streams.**
   - `serveRepoApi`'s reads become `callStream`, which returns the head and a body stream. The handler builds `new Response(body, …)` from it.
   - Main holds 0007's 128 KiB ring per stream and nothing more.
