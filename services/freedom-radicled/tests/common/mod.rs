@@ -267,8 +267,14 @@ impl Radicled {
     /// Waits up to `within` for a stderr line containing `needle`, while
     /// the process runs.
     pub fn logs(&self, needle: &str, within: Duration) -> bool {
+        self.logs_times(needle, 1, within)
+    }
+
+    /// Waits up to `within` for `times` stderr lines containing `needle`,
+    /// while the process runs.
+    pub fn logs_times(&self, needle: &str, times: usize, within: Duration) -> bool {
         let until = Instant::now() + within;
-        while !self.log.lock().unwrap().contains(needle) {
+        while self.log.lock().unwrap().matches(needle).count() < times {
             if Instant::now() >= until {
                 return false;
             }

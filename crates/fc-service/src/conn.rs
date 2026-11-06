@@ -28,6 +28,10 @@
 //!   an unwritten terminal. The writer never holds the connection's lock
 //!   while it writes, and the body bytes it holds count toward its 16 MiB
 //!   cap.
+//! - **A request's work may claim its commit point** ([`Connection::commit`])
+//!   while nothing of it is queued: from then on main's cancel of it queues
+//!   no `cancelled`, and reaches the service alone, which answers it (0008,
+//!   "Writes": a write cancelled past its start is `outcome_unknown`).
 //! - **The lifecycle thread** enforces the handshake's deadline, polls the
 //!   parent every 2 s, and watches for the writer stall.
 //! - **Wakers run outside the lock,** so a producer's waker may call back
@@ -57,7 +61,7 @@
 //! reader decodes `{ type, id, method, params }` and ignores a `context`.
 
 use std::borrow::Cow;
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::future::Future;
 use std::io::{Read, Write};
 use std::pin::Pin;
@@ -235,6 +239,10 @@ pub trait Service: Send + Sync + 'static {
     /// terminal was written. Its `cancelled` reply or abort is already
     /// queued: stop its work. (A late cancel never reaches the service.)
     ///
+    /// The one exception: a request whose work claimed its commit point
+    /// ([`Connection::commit`]) and has queued nothing since. Nothing is
+    /// queued for it, and the service owes it its one reply.
+    ///
     /// The request isn't settled ([`Connection::settled`]) until this
     /// returns, even if its `cancelled` reply or abort is written
     /// meanwhile: a service that keeps a request's record until it is
@@ -308,6 +316,10 @@ struct State {
     /// The request whose accepted cancel the reader is handing to the
     /// service: it isn't settled until [`Service::cancel`] returns.
     cancelling: Option<u64>,
+    /// Requests whose work claimed its commit point
+    /// ([`Connection::commit`]): a cancel queues nothing for them while
+    /// they are unanswered. Pruned to the held ones at each claim.
+    committed: HashSet<u64>,
     /// Send futures waiting for room, and settled futures for a request's
     /// end.
     waiters: Vec<Waker>,
@@ -343,6 +355,7 @@ impl Link {
                 closed: false,
                 dispatching: false,
                 cancelling: None,
+                committed: HashSet::new(),
                 waiters: Vec::new(),
                 writing: false,
                 writing_terminal: None,
@@ -691,6 +704,32 @@ impl Connection {
             let room = result.is_ok();
             (result, room)
         })
+    }
+
+    /// Claims request `id`'s commit point for its work, as 0001's worker
+    /// claims its own: `true` if nothing of it is queued yet (no reply, no
+    /// head, and no `cancelled` from main's cancel), and from then on
+    /// main's cancel of it queues nothing while it stays so. That cancel
+    /// reaches [`Service::cancel`] alone, and the service owes the request
+    /// its one reply (0008, "Writes": a write cancelled past its start is
+    /// `outcome_unknown`, never `cancelled`). `false` otherwise: its answer
+    /// is queued, and its work must not commit.
+    ///
+    /// The check and the claim are one step under the connection's lock,
+    /// as main's cancel is: a cancel comes either before the claim, and is
+    /// `cancelled`, or after it.
+    pub fn commit(&self, id: u64) -> bool {
+        let mut state = self.link.lock();
+        if !state.sender.is_unanswered(id) {
+            return false;
+        }
+        let State {
+            sender, committed, ..
+        } = &mut *state;
+        // Only requests still held keep their claim.
+        committed.retain(|held| sender.is_live(*held));
+        committed.insert(id);
+        true
     }
 
     /// Resolves once nothing of request `id` is held any more: its reply,
@@ -1407,11 +1446,15 @@ impl<'a> Reader<'a> {
             if state.end.is_some() {
                 return Ok(());
             }
-            let outcome = state
-                .sender
-                .cancel(id)
-                .map_err(|e| End::Protocol(e.category()))?;
-            let cancelled = outcome == Cancel::Cancelled;
+            // Its work claimed its commit point: nothing is queued, and
+            // the service answers it ([`Connection::commit`]).
+            let committed = state.committed.contains(&id) && state.sender.is_unanswered(id);
+            let cancelled = committed
+                || state
+                    .sender
+                    .cancel(id)
+                    .map_err(|e| End::Protocol(e.category()))?
+                    == Cancel::Cancelled;
             state.dispatching = cancelled;
             if cancelled {
                 state.cancelling = Some(id);

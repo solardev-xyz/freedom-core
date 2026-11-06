@@ -78,6 +78,17 @@ pub enum ErrorCode {
     /// `rad.remove_repo`: no quarantine record of the repository has that
     /// `qid`, so nothing was removed (design 0008, "The escape").
     NotQuarantined,
+    /// A write past its mutation start that isn't proven: its error, a
+    /// panic, a cancel, its deadline, the stop or the node's end. It may
+    /// have been recorded; main never retries it (design 0008, "Writes").
+    OutcomeUnknown,
+    /// A COB write on a node running with a throwaway key: a profile
+    /// without a vault can't publish (design 0008, "Profiles without a
+    /// vault").
+    NeedsVault,
+    /// A write to a quarantined repository; `data` holds its `kind` and
+    /// `step` (design 0008, "The escape").
+    Quarantined,
 }
 
 /// The `error` member of a response: a closed shape, so a member it
@@ -173,11 +184,16 @@ mod tests {
 
     #[test]
     fn radicle_method_codes_on_the_wire() {
-        // Design 0008, Errors and "The escape": a libradicle error, and a
-        // removal whose `qid` no record has.
+        // Design 0008, Errors, "The escape" and "Writes": a libradicle
+        // error, a removal whose `qid` no record has, a write past its
+        // start that isn't proven, a COB write under a throwaway key, and a
+        // write to a quarantined repository.
         for (code, wire) in [
             (ErrorCode::Failed, "failed"),
             (ErrorCode::NotQuarantined, "not_quarantined"),
+            (ErrorCode::OutcomeUnknown, "outcome_unknown"),
+            (ErrorCode::NeedsVault, "needs_vault"),
+            (ErrorCode::Quarantined, "quarantined"),
         ] {
             assert_eq!(
                 serde_json::to_value(code).ok(),

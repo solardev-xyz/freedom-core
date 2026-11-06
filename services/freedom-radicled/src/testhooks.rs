@@ -35,9 +35,14 @@
 //!   until its token is cancelled (main's cancel, its deadline or the stop),
 //!   or for 30 s, and with `deaf` for 30 s whatever its token, as a call
 //!   that doesn't check it. Each logs `test hook: work holds its slot`.
-//!   `rad.remove_repo`'s work is held so too, with the node held shared,
-//!   before its removal starts ([`crate::quarantine`]); `rad.quarantine_list`'s
-//!   isn't.
+//!   `rad.remove_repo`'s, `rad.write`'s and `rad.unseed`'s work is held so
+//!   too, with the node held, before its mutation starts ([`crate::quarantine`],
+//!   [`crate::writes`]); `rad.quarantine_list`'s isn't.
+//! - `FREEDOM_RADICLED_TEST_HOLD_WRITE` acts on a write just past its
+//!   mutation start, before libradicle's call (`rad.write`, `rad.unseed`,
+//!   `rad.remove_repo`), logging `test hook: the write has started`: with a
+//!   number, it holds it that many milliseconds whatever its token, as a
+//!   libradicle call that doesn't check it; with `panic`, it panics there.
 //!
 //! **Hermetic by construction:** a build with the feature never reaches
 //! off this host, whatever a test asks of it.
@@ -172,6 +177,22 @@ pub fn hold_work(cancel: &libradicle::CancelToken) {
     }
     #[cfg(not(feature = "testhooks"))]
     let _ = cancel;
+}
+
+/// Just past a write's mutation start: holds it, or panics, if asked.
+// The panic is the fault this hook injects, and only with the feature.
+#[allow(clippy::panic)]
+pub fn at_write_start() {
+    #[cfg(feature = "testhooks")]
+    if let Ok(hold) = std::env::var("FREEDOM_RADICLED_TEST_HOLD_WRITE") {
+        fc_service::log::info("test hook: the write has started", serde_json::json!({}));
+        if hold == "panic" {
+            panic!("test hook: a panic past the write's start");
+        }
+        if let Ok(ms) = hold.parse() {
+            std::thread::sleep(Duration::from_millis(ms));
+        }
+    }
 }
 
 /// Whether the node is to be asked to stop right after `rad.start` has
