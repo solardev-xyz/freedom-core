@@ -112,8 +112,8 @@
 //!   for the writer as for any work.
 //!
 //! **Later steps add operations, not machinery:** a method's work is a
-//! closure given its [`Ticket`]. They add the output budget's waits inside
-//! the read deadline.
+//! closure given its [`Ticket`]. A read's waits for the output budget run
+//! inside its deadline and its token ([`crate::output::Until`]).
 
 use std::collections::VecDeque;
 use std::panic::{AssertUnwindSafe, catch_unwind};
