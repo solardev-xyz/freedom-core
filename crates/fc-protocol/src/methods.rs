@@ -82,7 +82,8 @@ pub struct Method {
     pub deadline: Deadline,
     /// The protocol version from which the core serves it: 1, or
     /// [`crate::PROTOCOL_VERSION_STREAMS`] for the methods whose bodies are
-    /// streams (design 0009). On an older connection it is unknown.
+    /// streams (design 0009). On an older connection it is unknown; the
+    /// core now speaks only protocol 2, so it serves every row.
     pub since: u32,
 }
 
@@ -267,8 +268,8 @@ mod tests {
         );
     }
 
-    /// Design 0009: the streamed methods exist from protocol 2 on; on a
-    /// protocol-1 connection they are unknown, as before.
+    /// Design 0009: the streamed methods exist from protocol 2 on; below it
+    /// the table calls them unknown (the core no longer speaks 1).
     #[test]
     fn the_streamed_methods_are_protocol_2() {
         for name in ["dweb.verify", "dweb.forget"] {

@@ -516,11 +516,11 @@ fn existing_node_files_are_tightened_at_adoption() {
         1,
         "core.hello",
         json!({
-            "protocol": 1, "shell_version": "test", "auto_lock_ms": 900_000,
+            "protocol": 2, "shell_version": "test", "auto_lock_ms": 900_000, "frames": ["stream"],
             "node_roots": { "bee": bee, "radicle": radicle },
         }),
     );
-    assert_eq!(hello["result"]["protocol"], 1, "{hello}");
+    assert_eq!(hello["result"]["protocol"], 2, "{hello}");
     // On its own thread: wait for it.
     let deadline = std::time::Instant::now() + Duration::from_secs(20);
     while written.iter().any(|file| mode(file) != 0o600) {
@@ -552,11 +552,11 @@ fn a_relative_node_root_is_ignored() {
         1,
         "core.hello",
         json!({
-            "protocol": 1, "shell_version": "test", "auto_lock_ms": 900_000,
+            "protocol": 2, "shell_version": "test", "auto_lock_ms": 900_000, "frames": ["stream"],
             "node_roots": { "bee": "relative/bee", "radicle": "/abs/../radicle" },
         }),
     );
-    assert_eq!(hello["result"]["protocol"], 1, "{hello}");
+    assert_eq!(hello["result"]["protocol"], 2, "{hello}");
 }
 
 /// Review of #114: recovery flushed the journal by opening it again by
