@@ -18,7 +18,7 @@ fn hello_status_shutdown() {
     let (_root, data, locks) = dirs();
     let mut core = spawn("serve", &data, &locks, &[]);
     let hello = core.hello();
-    assert_eq!(hello["result"]["protocol"], 1);
+    assert_eq!(hello["result"]["protocol"], 2);
     assert!(
         hello["result"]["capabilities"]
             .as_array()
@@ -69,7 +69,7 @@ fn errors_are_typed() {
     let again = core.call_shell(
         4,
         "core.hello",
-        json!({ "protocol": 1, "shell_version": "t", "auto_lock_ms": 0 }),
+        json!({ "protocol": 2, "shell_version": "t", "auto_lock_ms": 0, "frames": ["stream"] }),
     );
     assert_eq!(again["error"]["code"], "invalid_argument");
     core.close_stdin();
@@ -155,12 +155,12 @@ fn handshake_rules() {
 fn the_method_table_decides_who_may_call() {
     let (_root, data, locks) = dirs();
     let mut core = spawn("serve", &data, &locks, &[]);
-    let hello = json!({ "protocol": 1, "shell_version": "t", "auto_lock_ms": 900_000 });
+    let hello = json!({ "protocol": 2, "shell_version": "t", "auto_lock_ms": 900_000, "frames": ["stream"] });
     let refused = core.call(1, "core.hello", hello.clone());
     assert_eq!(refused["error"]["code"], "forbidden", "{refused}");
     assert_eq!(
         core.call_shell(2, "core.hello", hello)["result"]["protocol"],
-        1
+        2
     );
 
     let shutdown = core.call(3, "core.shutdown", json!({}));
@@ -279,7 +279,7 @@ fn a_peer_that_stops_reading_gets_backpressure_then_an_exit() {
     assert!(core.stderr().contains("main is not reading replies"));
     drop(writer.join().unwrap());
     let mut next = spawn("serve", &data, &locks, &[]);
-    assert_eq!(next.hello()["result"]["protocol"], 1);
+    assert_eq!(next.hello()["result"]["protocol"], 2);
 }
 
 #[test]
@@ -311,7 +311,7 @@ fn one_core_per_identity_dir() {
     first.close_stdin();
     assert_eq!(first.exit_code(Duration::from_secs(5)), 0);
     let mut fourth = spawn("serve", &data, &locks, &[]);
-    assert_eq!(fourth.hello()["result"]["protocol"], 1);
+    assert_eq!(fourth.hello()["result"]["protocol"], 2);
 }
 
 #[cfg(unix)]
@@ -460,7 +460,7 @@ fn hold_lock_survives_deleting_the_identity_dir() {
     holder.close_stdin();
     assert_eq!(holder.exit_code(Duration::from_secs(5)), 0);
     let mut core = spawn("serve", &data, &locks, &[]);
-    assert_eq!(core.hello()["result"]["protocol"], 1);
+    assert_eq!(core.hello()["result"]["protocol"], 2);
 }
 
 #[test]
@@ -525,7 +525,7 @@ fn slow_storage_at_startup_is_bounded_by_the_hello_deadline() {
     core.send(&shell_request(
         1,
         "core.hello",
-        json!({ "protocol": 1, "shell_version": "test", "auto_lock_ms": 900000 }),
+        json!({ "protocol": 2, "shell_version": "test", "auto_lock_ms": 900000, "frames": ["stream"] }),
     ));
     assert_eq!(core.exit_code(Duration::from_secs(5)), 76);
     assert!(started.elapsed() < Duration::from_secs(4));
@@ -542,20 +542,54 @@ fn hello_waits_for_the_snapshot() {
         &[("FREEDOM_CORED_TEST_SNAPSHOT_DELAY_MS", "500")],
     );
     let hello = core.hello();
-    assert_eq!(hello["result"]["protocol"], 1);
+    assert_eq!(hello["result"]["protocol"], 2);
     assert_eq!(
         core.call(2, "vault.status", json!({}))["result"]["exists"],
         false
     );
 }
 
-/// Design 0009: protocol 1 is accepted, with exactly today's capabilities
-/// and methods, until the browser speaks 2; protocol 2 adds the streamed
-/// methods and `streams`. Any other version is a mismatch, and protocol 2
-/// without stream frames is refused.
+/// Design 0009, Streams in the core: the core speaks protocol 2 only. A
+/// protocol-1 hello, in each form main sent it (with fragments or without,
+/// or offering streams anyway), is answered `protocol_mismatch` naming the
+/// core's version, and the core exits, as for any version but 2: there is
+/// no fallback. Protocol 2 without stream frames is refused too. Protocol
+/// 2's capabilities are every method, then the features, `streams` last.
 #[test]
-fn protocol_1_keeps_its_surface_and_protocol_2_adds_streams() {
-    let today: Vec<&str> = vec![
+fn only_protocol_2_is_spoken() {
+    let refused = [
+        json!({ "protocol": 1, "shell_version": "test", "auto_lock_ms": 900_000 }),
+        json!({ "protocol": 1, "shell_version": "test", "auto_lock_ms": 900_000, "frames": ["fragment"] }),
+        json!({ "protocol": 1, "shell_version": "test", "auto_lock_ms": 900_000, "frames": ["fragment", "stream"] }),
+        json!({ "protocol": 0, "shell_version": "test", "auto_lock_ms": 900_000, "frames": ["fragment", "stream"] }),
+        json!({ "protocol": 3, "shell_version": "test", "auto_lock_ms": 900_000, "frames": ["fragment", "stream"] }),
+    ];
+    for params in refused {
+        let (_root, data, locks) = dirs();
+        let mut core = spawn("serve", &data, &locks, &[]);
+        let reply = core.call_shell(1, "core.hello", params.clone());
+        assert_eq!(
+            reply["error"],
+            json!({ "code": "protocol_mismatch", "message": "Protocol mismatch", "data": { "core": 2 } }),
+            "{params}: {reply}"
+        );
+        // Nothing after the refusal: no capabilities, no streams.
+        assert_eq!(core.rest(), Vec::<serde_json::Value>::new(), "{params}");
+        assert_eq!(core.exit_code(Duration::from_secs(5)), 76, "{params}");
+    }
+
+    // Protocol 2 without stream frames.
+    let (_root, data, locks) = dirs();
+    let mut core = spawn("serve", &data, &locks, &[]);
+    let reply = core.call_shell(
+        1,
+        "core.hello",
+        json!({ "protocol": 2, "shell_version": "test", "auto_lock_ms": 900_000, "frames": ["fragment"] }),
+    );
+    assert_eq!(reply["error"]["code"], "invalid_argument", "{reply}");
+    assert_eq!(core.exit_code(Duration::from_secs(5)), 76);
+
+    let capabilities: Vec<&str> = vec![
         "core.hello",
         "core.shutdown",
         "vault.status",
@@ -591,60 +625,38 @@ fn protocol_1_keeps_its_surface_and_protocol_2_adds_streams() {
         "naming.invalidate_content",
         "naming.invalidate_tezos",
         "dweb.open",
+        "dweb.verify",
+        "dweb.forget",
         "fragments",
         "myotis_refusal_codes",
         "exclude_sources",
         "colibri_faults",
+        "streams",
     ];
-    let names = |hello: &serde_json::Value| -> Vec<String> {
-        hello["result"]["capabilities"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .map(|c| c.as_str().unwrap().to_owned())
-            .collect()
-    };
-    let (_root, data, locks) = dirs();
-    let mut core = spawn("serve", &data, &locks, &[]);
-    let hello = core.hello();
-    assert_eq!(hello["result"]["protocol"], 1);
-    assert_eq!(names(&hello), today);
-    for (id, method) in [(2, "dweb.verify"), (3, "dweb.forget")] {
-        let reply = core.call_shell(id, method, json!({}));
+    // With fragments, as main offers them, and without.
+    for fragments in [true, false] {
+        let (_root, data, locks) = dirs();
+        let mut core = spawn("serve", &data, &locks, &[]);
+        let hello = if fragments {
+            core.hello_fragments()
+        } else {
+            core.hello()
+        };
+        assert_eq!(hello["result"]["protocol"], 2, "{hello}");
         assert_eq!(
-            reply["error"]["code"], "unknown_method",
-            "{method}: {reply}"
+            hello["result"]["capabilities"],
+            json!(capabilities),
+            "{hello}"
         );
+        // The streamed methods are served: their params are read.
+        for (id, method) in [(2, "dweb.verify"), (3, "dweb.forget")] {
+            let reply = core.call_shell(id, method, json!({ "unknown": true }));
+            assert_eq!(
+                reply["error"]["code"], "invalid_argument",
+                "{method}: {reply}"
+            );
+        }
+        core.call_shell(4, "core.shutdown", json!({}));
+        assert_eq!(core.exit_code(Duration::from_secs(5)), 0);
     }
-    core.call_shell(4, "core.shutdown", json!({}));
-    assert_eq!(core.exit_code(Duration::from_secs(5)), 0);
-
-    let mut core = spawn("serve", &data, &locks, &[]);
-    let hello = core.hello_streams();
-    assert_eq!(hello["result"]["protocol"], 2);
-    let mut v2: Vec<String> = today.iter().map(|s| (*s).to_owned()).collect();
-    let at = v2.iter().position(|c| c == "dweb.open").unwrap() + 1;
-    v2.splice(at..at, ["dweb.verify".to_owned(), "dweb.forget".to_owned()]);
-    v2.push("streams".to_owned());
-    assert_eq!(names(&hello), v2);
-    core.call_shell(2, "core.shutdown", json!({}));
-    assert_eq!(core.exit_code(Duration::from_secs(5)), 0);
-
-    // Protocol 3: a mismatch naming the core's highest.
-    let mut core = spawn("serve", &data, &locks, &[]);
-    let reply = core.call_shell(
-        1,
-        "core.hello",
-        json!({ "protocol": 3, "shell_version": "test", "auto_lock_ms": 900_000 }),
-    );
-    assert_eq!(reply["error"]["code"], "protocol_mismatch", "{reply}");
-    assert_eq!(reply["error"]["data"]["core"], 2, "{reply}");
-    // Protocol 2 without stream frames.
-    let mut core = spawn("serve", &data, &locks, &[]);
-    let reply = core.call_shell(
-        1,
-        "core.hello",
-        json!({ "protocol": 2, "shell_version": "test", "auto_lock_ms": 900_000, "frames": ["fragment"] }),
-    );
-    assert_eq!(reply["error"]["code"], "invalid_argument", "{reply}");
 }

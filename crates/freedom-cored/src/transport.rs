@@ -17,17 +17,18 @@
 //!     whole response for the request in reassembly is a duplicate: either
 //!     way each request gets one response, as 0001 requires.
 //!   - **Stream frames** (design 0009, Streams in the core) are decoded on
-//!     every connection (`Kinds::CORE_STREAMS`), and taken only once a
-//!     protocol-2 hello has set the link's streams flag ([`Link::streams`]);
-//!     before that, or at protocol 1, one is `unknown_frame_kind`, as it
-//!     always was. They go on in the order read, with the whole messages,
-//!     to the dweb thread, outside the frame credits: the reader never
-//!     waits on dweb data. Main's credit bounds the data in flight at
-//!     16 MiB, not the frames that carry it, so the reader coalesces them,
-//!     one entry per stream ([`StreamMark`]), under a hard memory cap that
-//!     holds the most a peer within credit can send, whatever its framing:
-//!     past [`MAX_QUEUED_STREAM_BYTES`] (or [`MAX_QUEUED_STREAM_ENTRIES`],
-//!     a defence) not yet handled, the connection ends (`stream_backlog`).
+//!     every connection (`Kinds::CORE_STREAMS`), and taken only once the
+//!     hello, which settles protocol 2, has set the link's streams flag
+//!     ([`Link::streams`]); before that, one is `unknown_frame_kind`. The
+//!     core speaks no other version: protocol 1, which took none, is gone.
+//!     They go on in the order read, with the whole messages, to the dweb
+//!     thread, outside the frame credits: the reader never waits on dweb
+//!     data. Main's credit bounds the data in flight at 16 MiB, not the
+//!     frames that carry it, so the reader coalesces them, one entry per
+//!     stream ([`StreamMark`]), under a hard memory cap that holds the most
+//!     a peer within credit can send, whatever its framing: past
+//!     [`MAX_QUEUED_STREAM_BYTES`] (or [`MAX_QUEUED_STREAM_ENTRIES`], a
+//!     defence) not yet handled, the connection ends (`stream_backlog`).
 //! - **Writer thread:** one serialized writer for stdout. Each producer has
 //!   its own [`Allowance`] of queued frames, so naming traffic can't take
 //!   the vault loop's room (0001's reserved control capacity).
@@ -437,7 +438,7 @@ pub struct Link {
     control: Arc<Allowance>,
     /// When the writer last wrote and flushed a frame, whole or a fragment.
     last_write: Mutex<Option<Instant>>,
-    /// A protocol-2 hello settled: the reader takes stream frames.
+    /// The hello settled protocol 2: the reader takes stream frames.
     streams: AtomicBool,
     /// Stream frames read and not yet handled, coalesced ([`StreamMark`]).
     stream_backlog: Mutex<Backlog>,
@@ -457,8 +458,8 @@ impl Link {
         })
     }
 
-    /// The hello settled protocol 2 (design 0009): from now on the reader
-    /// takes stream frames. Set before the hello's reply is queued, so no
+    /// The hello settled protocol 2 (design 0009), the only version the
+    /// core speaks: from now on the reader takes stream frames. Set before the hello's reply is queued, so no
     /// stream frame main sends after reading it can be refused.
     pub fn enable_streams(&self) {
         self.streams.store(true, Ordering::SeqCst);
@@ -970,8 +971,8 @@ pub fn spawn_reader(
                 credits,
                 link,
                 pending,
-                // Every kind a protocol-2 connection reads; stream frames
-                // are refused in `deliver` until the hello settles 2.
+                // Every kind the connection reads; stream frames are refused
+                // in `deliver` until the hello settles protocol 2.
                 decoder: Decoder::with_kinds(Kinds::CORE_STREAMS),
                 // The core always offers fragments: the handshake grants
                 // main its credit. No begin can name a pending request
@@ -1140,7 +1141,7 @@ impl Reader {
 }
 
 impl Reader {
-    /// A stream frame: refused until a protocol-2 hello, as an unknown kind;
+    /// A stream frame: refused until the hello, as an unknown kind;
     /// then on to the dweb thread, in order with the whole messages, under
     /// the stream cap rather than the frame credits.
     fn deliver_stream(&mut self, frame: fc_protocol::frame::Frame) -> bool {
@@ -1737,11 +1738,11 @@ mod tests {
         out
     }
 
-    /// Design 0009: a stream frame before a protocol-2 hello is an unknown
-    /// kind, as it always was; after it, it goes on, in order with the
-    /// whole messages and outside the frame credits.
+    /// Design 0009: a stream frame before the hello, which settles protocol
+    /// 2, is an unknown kind; after it, it goes on, in order with the whole
+    /// messages and outside the frame credits.
     #[test]
-    fn stream_frames_go_on_only_after_a_protocol_2_hello() {
+    fn stream_frames_go_on_only_after_the_hello() {
         use fc_protocol::frame::{KIND_DATA, KIND_STREAM_CREDIT};
         let (mut before, received) = reader(Link::new(), &[]);
         assert!(!before.feed(&mut stream(KIND_STREAM_CREDIT, 2, &[0, 0, 0, 1])));
@@ -1771,7 +1772,7 @@ mod tests {
         assert_eq!(link.stream_backlog(), (0, 0));
     }
 
-    /// A reader past a protocol-2 hello.
+    /// A reader past the hello.
     fn streaming() -> (Arc<Link>, Reader, Receiver<Event>) {
         let link = Link::new();
         link.enable_streams();

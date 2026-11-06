@@ -93,8 +93,9 @@ pub struct Kinds {
 }
 
 impl Kinds {
-    /// `freedom-cored`'s connections at protocol 1: whole messages and
-    /// fragmented responses, and no stream frames (design 0007).
+    /// A `freedom-cored` connection before its hello settles protocol 2:
+    /// whole messages and fragmented responses, and no stream frames
+    /// (design 0007). Protocol 1, which stayed so, is gone (design 0009).
     pub const CORE: Kinds = Kinds {
         fragments: true,
         streams: None,

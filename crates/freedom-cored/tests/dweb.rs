@@ -1155,13 +1155,13 @@ mod verify {
         assert_eq!(m.core.exit_code(Duration::from_secs(10)), 0);
     }
 
+    /// Before the hello, a stream frame is an unknown kind. (Protocol 1,
+    /// which took none after its hello either, is gone: `serve`'s
+    /// `only_protocol_2_is_spoken`.)
     #[test]
-    fn at_protocol_1_stream_frames_and_dweb_methods_are_unknown() {
+    fn before_the_hello_a_stream_frame_is_unknown() {
         let (_dir, data, locks) = dirs();
         let mut core = spawn("serve", &data, &locks, &[]);
-        core.hello();
-        let reply = core.call_shell(2, "dweb.verify", swarm("/index.html"));
-        assert_eq!(reply["error"]["code"], "unknown_method", "{reply}");
         core.send_raw(&stream_frame(KIND_STREAM_CREDIT, 2, &1u32.to_be_bytes()));
         assert_eq!(core.exit_code(Duration::from_secs(10)), 76);
         assert!(core.stderr().contains("unknown_frame_kind"));

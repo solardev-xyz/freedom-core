@@ -197,7 +197,7 @@ Chromium ◀─body── main ◀─verified body (stream)── freedom-cored
 
   `vectors/dweb-verify-cases.json`'s `answers` write both forms out for the same node and the same 404 status: `swarm/path-not-found`'s head, Ant's own JSON with `verified` trust, beside `swarm/piece-404`'s error plan, and the gateway's pair.
 - **Errors:** a protocol error reply is only `busy` (the thread is full, or the grant didn't come in time), `cancelled` (main's cancel, before the head) or `invalid_argument` (the params, above). Every other outcome is a head or an error plan.
-- **Method rows** (amendment 3): `dweb.verify`, with the `head` deadline kind of 360 s (the time to the head, [Bounds](#bounds)), and `dweb.forget`, with none. Both carry `"protocol": 2` in `protocol/schema.json`, the only rows that do: on a protocol-1 connection they are `unknown_method`, and absent from `core.hello`'s capabilities.
+- **Method rows** (amendment 3): `dweb.verify`, with the `head` deadline kind of 360 s (the time to the head, [Bounds](#bounds)), and `dweb.forget`, with none. Both carry `"protocol": 2` in `protocol/schema.json`, the only rows that do: the version they came with. The core now speaks only protocol 2 ([Streams in the core](#streams-in-the-core)), so it serves every row and its capabilities name both.
 - **Thread:** the **dweb thread**, a new thread beside naming's and chain's, runs one sans-I/O machine per request (`fc-dweb`'s verifier). A pool of two hashing threads computes BMT roots and SHA-256 digests, and checks RSA signatures, for it.
 
 ### `shell.dweb_get`
@@ -229,7 +229,7 @@ What the core asks main for while a `dweb.verify` runs.
 0001 reserved frame kinds `0x02`–`0x0F` for Phase 4's streams, to come with protocol version 2. 0007 defined four of them for service connections, and #72 implements them in `fc-protocol`. The core adopts the same four frames, unchanged, with one generalization: **a stream is the body of a response, sent by whichever side answers the request.**
 
 - **The handshake:** `core.hello` carries `protocol: 2`, main offers `frames: ["fragment", "stream"]`, and the core's capabilities gain `streams`. Main and the core ship together, so neither falls back to version 1.
-  - **Transitional: the core still accepts protocol 1.** Until step 6 is in freedom-browser's integration branch, the browser speaks protocol 1, and a core that refused it couldn't be pinned there to be tested. So the core answers a protocol-1 hello as before: exactly the capabilities and methods it had, no `streams`, no stream frames (one is `unknown_frame_kind`), and `dweb.verify` and `dweb.forget` are `unknown_method`. A protocol-2 hello that doesn't offer `stream` is refused. The fallback ends before any browser release that ships the step-6 core: a short follow-up PR removes protocol 1 once step 6 is in the integration branch, and RELEASING's step 5b holds every signed browser release until the pinned core refuses it.
+  - **Protocol 1 is gone.** The core speaks protocol 2 only. A `core.hello` at any other version, protocol 1 included, is answered with 0001's `protocol_mismatch`, `data: { "core": 2 }`, and the core exits: there is no fallback. A protocol-2 hello that doesn't offer `stream` is refused (`invalid_argument`). Before the hello settles, a stream frame is `unknown_frame_kind`. The core kept protocol 1 while step 6 was built, with exactly its old surface (no `streams`, no stream frames, `dweb.verify` and `dweb.forget` unknown), so that it could be pinned in freedom-browser's integration branch and tested there; a follow-up PR removed it once step 6 was in that branch (freedom-browser #1017, main at protocol 2). A core from before it (0.10.0 and earlier) still accepts protocol 1, so RELEASING's step 5b keeps checking that the core a signed browser release pins refuses it.
 - **Who sends what:**
   - the responder sends data, `end` and `abort`; the requester sends credit;
   - the stream ID is the request's envelope ID, in the requester's ID space;
@@ -1067,7 +1067,7 @@ As 0006's 4.7 did, the tests land before the code. Every case pins its failure s
    - `dweb.forget` when a private window's partition closes;
    - the labels and the nodes panel;
    - then the [gates](#gates);
-   - then the core's follow-up PR that removes protocol 1 (the handshake's transitional note).
+   - then the core's follow-up PR that removes protocol 1 ([Streams in the core](#streams-in-the-core), the handshake).
 7. **The default:** on for every external backend (decided, 1). Verification ships on once the gates pass; a gate that fails brings the default back to the user with its numbers.
 8. **freedom-ipfs:** pull requests of its own, into its integration branch, that adopt `fc-ipfs`'s bounded reader once the reader has merged here (decided, 11; [Upstream](#upstream)).
 9. **Later, if real content needs it:** a Swarm request refused for its memory (`request-memory`) is tried once more at an IPFS request's 8 MiB grant, admitted again under the same 128 MiB. Not built: real manifests stay far inside the limit. The [proposed amendment](#proposed-amendment-an-ipfs-grant-that-grows) could do this by growth instead (its open question 6).
