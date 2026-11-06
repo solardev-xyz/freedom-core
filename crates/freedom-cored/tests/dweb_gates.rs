@@ -71,8 +71,8 @@ const GRANT_WAIT: Duration = Duration::from_secs(10);
 const WRITER_DATA_CAP: usize = 8 * MIB;
 #[cfg(feature = "testhooks")]
 const SMALL_FRAME: usize = 4 << 10;
-/// The file the dweb thread writes its writer's high-water mark to.
-#[cfg(feature = "testhooks")]
+/// The file the dweb thread writes its writer's high-water mark to
+/// (`testhooks`; without it, no file).
 const WRITER_MARKER: &str = "FREEDOM_CORED_TEST_DWEB_WRITER_MARKER";
 
 /// How far past its bound a timing may run in CI (a debug build on a
@@ -441,14 +441,13 @@ fn outstanding_pieces_stay_within_256() {
     );
 }
 
-/// The core with `env` and, with `testhooks`, the dweb writer's marker
-/// file in a directory of its own (kept as long as the core runs).
+/// The core with `env` and the dweb writer's marker file, in a directory
+/// of its own (kept as long as the core runs; written with `testhooks`).
 fn with_writer_marker(
     env: &[(&str, &str)],
 ) -> (Main, Option<Base>, tempfile::TempDir, std::path::PathBuf) {
     let dir = tempfile::tempdir().unwrap();
     let marker = dir.path().join("writer-most");
-    #[cfg(feature = "testhooks")]
     let env: Vec<(&str, &str)> = env
         .iter()
         .copied()
