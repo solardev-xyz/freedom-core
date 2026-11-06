@@ -3,13 +3,14 @@
 **Status:** proposed. Roadmap items 2.3 (page provider calls go straight to main) and 2.8 step 1 (a trusted approval surface). Builds on [0001](0001-freedom-cored.md) (the threat model, and the caller context that reserves `page` for Phase 2) and [0002](0002-signing.md) (signing, its approval tokens, and the signed view of #88). Design 0012 follows: grants, tokens and the EIP-1193 dispatcher in the core (`fc-eip1193`). Nothing here is built yet. The user decides the [open questions](#open-questions).
 
 **The references:**
-- **freedom-browser** at `eb59ce7d` (`integration/rust-core`):
+- **freedom-browser** at `f19705ad` (`integration/rust-core`):
   - the page side: `src/main/webview-preload.js` (the providers' bridges, the sub-frame return, the private-window guard);
-  - the chrome side, in `src/renderer/lib/`: `dapp-provider.js`, `swarm-provider.js`, `radicle-provider.js`, `guest-main-frame.js`, `tabs.js` (`committedDisplayUrl`), `url-utils.js` (`applyDnsNameIdentity`), `wallet/dapp-connect.js`, `wallet/dapp-prompt-guard.js`, `wallet/chain-switcher.js`;
+  - the chrome side, in `src/renderer/lib/`: `dapp-provider.js`, `swarm-provider.js`, `radicle-provider.js`, `guest-main-frame.js`, `tabs.js` (`committedDisplayUrl`), `url-utils.js` (`applyDnsNameIdentity`), `wallet/dapp-connect.js`, `wallet/dapp-prompt-guard.js`, `wallet/dapp-tx.js`, `wallet/chain-switcher.js`;
   - main, in `src/main/`: `swarm/swarm-provider-ipc.js`, `radicle/radicle-provider-ipc.js`, `wallet/wallet-ipc.js` (`requesterBelongsTo`, `dnsNameServesIpnsGuest`, `authorizeSigning`, `wallet:confirm-signing`), `wallet/signing-confirmation.js`, `wallet/agent-tab-custody.js`, `ipc-sender-policy.js`, `webcontents-setup.js`, `private/private-windows.js`, `agent/ipc.js`, and the chrome's `preload.js`;
   - `src/shared/origin-utils.js` (`getPermissionKey`), main's copy of the key rules.
 - **The spike** `b58441b1` on `codex/package-webview-runtime` ("compose wallet as shell surface view"): `src/main/trusted-wallet-surface.js` and `src/main/windows/shell-window.js`.
 - **Electron's API** as `electron.d.ts` types it, checked in 44.7.0 (integration's `package.json` asks for `^45.2.1`): `IpcMainInvokeEvent.senderFrame`, a `WebFrameMain` or null ("May be `null` if accessed after the frame has either navigated or been destroyed"), and `WebFrameMain`'s `frameTreeNodeId`, `detached`, `parent` and `send`.
+- **Electron's IPC** on its `45-x-y` branch: `shell/browser/electron_api_ipc_handler_impl.cc`, where `Message` and `Invoke` turn a message's arguments into JS values (`gin::ConvertToV8`) before any handler runs, with no size check.
 - **`fc-protocol`:** `CallerKind::Page` and `PageContext { origin, top_origin, frame, navigation }` (`crates/fc-protocol/src/message.rs`), which no method accepts yet (`methods.rs`, `Callers::allow`).
 
 ## Summary
@@ -19,13 +20,16 @@
   - **The chrome mints the approval.** `wallet:confirm-signing` issues an O-7 token for whatever the chrome sends (`wallet-ipc.js:621–643`). The token binds the signature to a request, not to the user's click, so a compromised chrome can sign anything.
   - **One frame, two documents.** `guest-main-frame.js` keeps sub-frames out, but can't tell two documents of the main frame apart (its lines 29–40).
 - **The way in:** the preload invokes main directly (`page:request`). The chrome no longer sees page requests.
-- **The attested requester:** main derives who asked from the IPC event's `senderFrame`: the guest, its window, the committed URL and its key, private or not, in Agent custody or not. The key rules are today's (`getPermissionKey`), dweb names, ENS over IPNS and onchain `web3://` included.
+- **The attested requester:** main derives who asked from the IPC event's `senderFrame`: the guest, its window, the committed URL and its key, private or not. The key rules are today's (`getPermissionKey`), dweb names, ENS over IPNS and onchain `web3://` included.
 - **Documents:** main numbers each committed main-frame navigation, and the preload binds a random nonce to its document with its first message. A request from a document that has gone is refused. This closes `guest-main-frame.js`'s gap.
 - **Sub-frames:** the top frame only, as today, now enforced by main. [Open question 1](#open-questions) asks about the alternative.
 - **Handles:** a prompt is a handle main issued. The chrome presents the handle and returns a decision. It never names a site. Approval tokens bind the handle and the attested key.
-- **Events** (`accountsChanged`, `chainChanged`, Swarm messages, Radicle seed status) go from main to the guest's document, never through the chrome.
+- **Tokens for page requests** come only from main, for a live request. From PRQ-5 the chrome's `wallet:confirm-signing` refuses the kinds that serve pages, and APS-3 closes the wallet's own.
+- **Events** (`accountsChanged`, `chainChanged`, Swarm messages, Radicle seed status) go from main to the guest's document, never through the chrome. Each carries the document's nonce, and the preload drops one that isn't its own.
+- **Agent custody** is read live, when a standing rule would answer and again just before the effect.
 - **The dispatcher** moves from the chrome into main's JS first. `fc-eip1193` follows in 0012.
-- **The approvals document (2.8 step 1):** one per window, a `WebContentsView` above the chrome, with its own preload. Main mints approval tokens only for decisions made there: first for dApp prompts, then for the wallet's own.
+- **The approvals document (2.8 step 1):** one per window, a `WebContentsView` above the chrome, with its own preload. Main mints approval tokens only for decisions made there: first for dApp prompts, then for the wallet's own. Much of what it shows comes from the page, so it shows it as text only, from a closed schema, under a strict CSP.
+- **Bounds:** a size limit on each request, checked by the preload and again by main as the request arrives, and byte and count budgets across every document. Large uploads take turns.
 - **The threat model:** a compromised chrome renderer or a compromised sub-frame. Main stays trusted (0001).
 - **Migration:** nine browser PRs for the requests (PRQ-1 to PRQ-9), then three for the approvals document (APS-1 to APS-3), each with the tests that prove its refusals.
 
@@ -34,7 +38,7 @@
 **Goals**
 - **Main decides who asked,** from Chromium's own record of the sending frame, never from a string a renderer sends.
 - **No request outlives its document:** no prompt, token, reply or event reaches a document other than the one that asked.
-- **The chrome only renders prompts:** it never names a site and never writes a grant, and after APS it never mints an approval.
+- **The chrome only renders prompts:** it never names a site, never writes a grant and never mints an approval for a page's request. After APS it mints no approval at all.
 - **The same page-facing API:** `window.ethereum`, `window.swarm` and `window.radicle` keep their methods, errors and events. [Changes from today](#changes-from-today) lists the exceptions.
 - **One step at a time:** each PR moves one group of methods and can be reverted on its own.
 
@@ -49,7 +53,7 @@
 ## Today
 
 **The path:**
-1. The page's provider posts a message to its own window. The preload's bridge forwards it with `ipcRenderer.sendToHost` (`webview-preload.js:1751–1794` for Ethereum, `1914–1947` for Swarm, `2065–2098` for Radicle). The Ethereum bridge also sends `window.location.origin`, which the chrome ignores.
+1. The page's provider posts a message to its own window. The preload's bridge forwards it with `ipcRenderer.sendToHost` (`webview-preload.js:1760–1803` for Ethereum, `1923–1956` for Swarm, `2074–2107` for Radicle). The Ethereum bridge also sends `window.location.origin`, which the chrome ignores.
 2. The chrome's `ipc-message` listener drops anything not from the guest's current main frame (`dapp-provider.js:729–759`, `guest-main-frame.js`).
 3. The chrome keys the request on the tab's `committedDisplayUrl` (`tabs.js:427–430`) through `getPermissionKey`. A DNS-named ENS site, loaded as `ipns://<key>`, is mapped back to its name from the chrome's `knownEnsNames` (`applyDnsNameIdentity`, `url-utils.js:496`).
 4. The chrome runs the method:
@@ -62,7 +66,7 @@
 **What main checks:**
 - **Signing** needs an O-7 token, or main's own reading of the site's auto-approve rule. For the rule, `requesterBelongsTo` checks that the named guest belongs to the sending chrome window and that its URL keys to the named site (`wallet-ipc.js:239–264`). For an `ipns://` guest it resolves the DNS name itself (`dnsNameServesIpnsGuest`, `276–290`).
 - **Swarm and Radicle** trust the chrome's `origin` and `meta` (`swarm-provider-ipc.js:12–31` and `2194–2198`; `radicle-provider-ipc.js:412`). Swarm cross-checks the guest's URL only when it delivers a subscription message (`1911–1930`), and counts navigations per guest (`navEpoch`, `1866–1891`).
-- **Agent custody:** no auto-approval for a tab the agent holds (`agent-tab-custody.js`).
+- **Agent custody:** no auto-approval for a tab the agent holds (`agent-tab-custody.js`), read at the moment each check decides.
 
 **Sub-frames.** Main turns on `nodeIntegrationInSubFrames` for tab webviews, so that iframes get the ad-block scriptlets (`webcontents-setup.js:254`). The preload returns before the providers in a sub-frame (`webview-preload.js:590`), and the chrome drops a sub-frame's provider message. A compromised sub-frame holds `ipcRenderer`, but the sender policy lets a webview call only the channels its preload uses (`ipc-sender-policy.js`), and the provider channels aren't among them.
 
@@ -77,22 +81,24 @@
 
 ## Threat model
 
-The attackers are a compromised chrome renderer (`renderer/index.html`) and a compromised sub-frame of a tab. Main is trusted (0001). The chrome renderer holds the privileged preload and parses what pages control: titles, favicons, URLs and request data. One renderer bug in any of these makes it the attacker.
+The attackers are a compromised chrome renderer (`renderer/index.html`) and a compromised sub-frame of a tab. Main is trusted (0001). Pages are hostile as ever: a page chooses what its requests contain and how many it sends. The chrome renderer holds the privileged preload and parses what pages control: titles, favicons, URLs and request data. One renderer bug in any of these makes it the attacker. The approvals document is a new renderer that also shows what pages control (a message, typed data, file names), so it is held to the rules in [Rendering a page's data](#rendering-a-pages-data).
 
 | The attacker wants to | Today | After PRQ-9 | After APS-3 |
 |---|---|---|---|
 | Act as a site it doesn't host (chrome) | Yes: it names the site | No: main derives the site from the sending frame | No |
 | Approve a real page request without the user (chrome) | Yes | Yes: the chrome still decides | No: only the approvals document decides |
-| Sign a payload no page asked for (chrome) | Yes: `wallet:confirm-signing` | Yes, through the wallet's own kinds | No: tokens only on the approvals document's decisions |
+| Sign a payload no page asked for (chrome) | Yes: `wallet:confirm-signing` | Only through the wallet's own kinds (`wallet-send`, a `safe-send` with no site, the three intent kinds, `executor-send`): from PRQ-5 main alone mints the kinds that serve pages | No: tokens only on the approvals document's decisions |
 | Write or widen a grant (chrome) | Yes | No: main writes grants from decisions | No |
 | Make a hosted page ask, and get it approved (chrome) | Yes | Yes | Every prompt reaches the user; standing rules still answer ([What stays open](#what-stays-open)) |
 | Ask as the top page (sub-frame) | No: the chrome drops it | No: main refuses it | No |
 | Reach the document that replaced the one that asked (either) | Yes: a late message passes `guest-main-frame.js` | No: the document's nonce | No |
 | Forge an event into a page (chrome) | Yes | Yes (`webview.send`), with no authority gained | The same |
+| Run script in the approvals document through a request's data (page) | No such document | No such document | No: text only, from a closed schema, under a strict CSP |
+| Make main hold more requests and bytes than it can afford (page) | Yes: no bound on requests in flight | No: a size per request, and budgets across every document ([Bounds](#bounds)) | No |
 
 ### What stays open
 
-- **The chrome can still script the pages it hosts.** A `<webview>`'s embedder can run script in its guest, and main then sees a genuine request from that page. After APS, every prompt this causes reaches the user in the approvals document, but a standing rule answers without one: "always allow" signing, a contract rule, a Swarm or Radicle auto-approve. Closing it needs the tabs out of the chrome's hands: a guard on the guest's script entry points that relies on Electron's internals, tabs as views main owns, which the spike's branch plans (`research/shell-compositor-webcontentsview-architecture.md`), or Chromium. [Open question 4](#open-questions).
+- **The chrome can still script the pages it hosts.** A `<webview>`'s embedder can run script in its guest, and main then sees a genuine request from that page. After APS, every prompt this causes reaches the user in the approvals document, but a standing rule answers without one: "always allow" signing, a contract rule, a Swarm or Radicle auto-approve. Closing it needs the tabs out of the chrome's hands: a guard on the guest's script entry points (which depends on how this Electron version works inside, may miss an entry point, and has to be retested on every Electron upgrade), tabs as views main owns, which the spike's branch plans (`research/shell-compositor-webcontentsview-architecture.md`), or Chromium. [Open question 4](#open-questions).
 - **Denial of service.** The chrome can hide tabs, drop badges and refuse to switch to the tab that asks. The approvals panel itself is main's.
 - **Spoofing.** The chrome and pages can draw a lookalike prompt in their own areas. After APS a decision there counts for nothing, but a vault password typed into a fake is lost. The panel's fixed place and its input rules ([The approvals document](#the-approvals-document)) are the defence.
 
@@ -103,13 +109,14 @@ Three channels between a tab's preload and main replace the provider channels th
 | Channel | Direction | Payload | Notes |
 |---|---|---|---|
 | `page:hello` | preload → main (`send`) | `{ nonce }` | Once per document, before the providers are injected ([Documents](#documents)) |
-| `page:request` | preload → main (`invoke`) | `{ nonce, provider, method, params }` | `provider` is `ethereum`, `swarm` or `radicle`. Answers `{ result }` or `{ error }` |
-| `page:event` | main → preload (`WebFrameMain.send`) | `{ provider, event, data }` | Only to the document the event is for ([Events](#events)) |
+| `page:request` | preload → main (`invoke`) | `{ nonce, provider, method, params, ticket }` | `provider` is `ethereum`, `swarm` or `radicle`. `ticket` only for a large request. Answers `{ result }` or `{ error }` |
+| `page:reserve` | preload → main (`invoke`) | `{ nonce, method, bytes }` | Only before a request over 1 MiB. Answers `{ ticket }` when its turn comes, or `{ error }` ([Bounds](#bounds)) |
+| `page:event` | main → preload (`WebFrameMain.send`) | `{ nonce, provider, event, data }` | `nonce` is the target document's. The preload drops an event whose nonce isn't its own ([Events](#events)) |
 
 - **The preload** keeps the page-facing providers and their `postMessage` protocol, and maps each page request id to its `invoke`. It sends nothing from the page's own `location`. The page's scripts never see the nonce: it lives in the preload's isolated world.
-- **The sender policy** (`ipc-sender-policy.js`) gets a tier for `page:hello` and `page:request`: a `webview` sender whose `senderFrame` is its main frame and isn't an internal page. Unlike every other channel, these two refuse the chrome, which has no page to speak for.
+- **The sender policy** (`ipc-sender-policy.js`) gets a tier for `page:hello`, `page:reserve` and `page:request`: a `webview` sender whose `senderFrame` is its main frame and isn't an internal page. Unlike every other channel, these refuse the chrome, which has no page to speak for.
 - **In flight across a navigation:** main checks the document again before it replies, and sends no reply to a document that has gone. Work already started, such as an upload or a broadcast, finishes, as today.
-- **Bounds:** [Bounds](#bounds).
+- **Bounds:** the preload measures each request before it sends it, and main measures it again as it arrives, before it keeps or copies anything ([Bounds](#bounds)).
 
 ## The attested requester
 
@@ -120,7 +127,7 @@ For every `page:hello` and `page:request`, main builds the requester from the IP
 3. **Not a preview:** the committed URL isn't `freedom-preview:`.
 4. **The top frame:** `event.senderFrame` is not null, not `detached`, and is `event.sender.mainFrame` ([Sub-frames](#sub-frames)).
 5. **The current document:** the request's nonce is the one bound to the frame's current document ([Documents](#documents)).
-6. **The key,** from the URL main recorded at the document's commit, which must still equal `senderFrame.url`'s key, by `getPermissionKey`'s rules ([Keys](#keys)).
+6. **The transport key:** `senderFrame.url`'s key, by the rules in [Keys](#keys) and with no name binding, must equal the record's `transportKey`. The permission key the request then acts under is the record's `key`, which differs only for a DNS name over IPNS ([Names over IPNS](#names-over-ipns)).
 
 The record main keeps per document:
 
@@ -130,15 +137,17 @@ The record main keeps per document:
 | `window` | the hosting chrome window's id |
 | `frame` | `senderFrame.frameTreeNodeId`: global in the browser, fixed for the frame's life, never reused |
 | `navigation` | main's document number ([Documents](#documents)) |
+| `nonce` | the hello's nonce ([Documents](#documents)) |
 | `url` | the committed URL |
-| `key` | the permission key, or none |
+| `transportKey` | the committed URL's own key by the rules in [Keys](#keys), with no name binding: `ipns://<key>` for a DNS name over IPNS. Fixed for the document's life. Step 6 compares it with the live frame URL's |
+| `key` | the permission key: the transport key, the DNS name a binding verified, or none. Grants, rules and prompts use it |
 | `topKey` | the top frame's key: equal to `key` under the top-frame policy |
-| `agent` | `isAgentPage(event.sender)` (`agent-tab-custody.js`) |
+| `agent` | `isAgentPage(event.sender)` at the hello (`agent-tab-custody.js`). For logs and tests only: no decision reads it ([Agent custody](#agent-custody)) |
 | `chain` | an onchain app's own chain, or none |
 
 ### Keys
 
-Main applies today's rules (`origin-utils.js:75–139`) to the committed URL:
+Main applies today's rules (`origin-utils.js:75–139`) to the committed URL. The table gives `key`. `transportKey` is the same in every row but `ipns://<key>`, where it is always `ipns://<key>`.
 
 | Committed URL | Key | Notes |
 |---|---|---|
@@ -160,9 +169,18 @@ A DNS name with an ENS contenthash (`example.com`) loads as `ipns://<key>`, sinc
 
 **Proposed: a name binding.**
 - When the chrome loads `ipns://<key>` for a DNS name, it first tells main: `page:bind-name { guest, name, key }`.
-- Main holds it for that guest's next main-frame commit. If that commit's URL is `ipns://<key>` with exactly that key, main resolves the name itself, as `dnsNameServesIpnsGuest` does (the resolver's base58 form, or the base36 `libp2p-key` form, compared exactly). If the name answers the key, the document's key is the name. Otherwise it's `ipns://<key>`.
+- Main holds it for that guest's next main-frame commit. If that commit's URL is `ipns://<key>` with exactly that key, main resolves the name itself, as `dnsNameServesIpnsGuest` does (the resolver's base58 form, or the base36 `libp2p-key` form, compared exactly). If the name answers the key, the document's `key` is the name. Otherwise it's `ipns://<key>`.
+- **Two keys, never mixed.** The document's `transportKey` stays `ipns://<key>`, and step 6 of [the attested requester](#the-attested-requester) compares the live frame URL with it. Grants, standing rules and prompts use `key`, the name.
 - The binding lasts while the guest's commits stay on that IPNS key: reloads and links within the site keep it.
-- Before a site method writes a grant or signs, main resolves the name again, as it does today for auto-approve. A name that no longer answers the key ends the binding, and the request is refused.
+- **Checked at every use of the name.** A name can move to other content at any time. So before the name's authority serves a request (a grant or a standing rule of the name's answering it, or a new grant written for the name), main resolves the name again and compares the answer with `transportKey`, for every provider:
+  - Ethereum: a connect, `eth_accounts` (it reveals the granted account), a signature, a send;
+  - Swarm: a publish, a feed write, a message sent, a subscription, and each message delivered to one;
+  - Radicle: seeding and unseeding, and the signed writes.
+
+  The unsigned effects are included: a Swarm publish or a Radicle seed under the name's auto-approve rule uses the name's authority as much as a signature does.
+- **After every wait.** The resolution itself is awaited, so after it returns main checks again that the document is current and its frame URL still keys to `transportKey`, as `requesterBelongsTo` does today. When anything else is awaited before the effect (a prompt, a vault unlock, a fee check, the core's view of typed data), main resolves the name and checks the document once more, just before the effect: the grant written, the signature, the send, the publish, the message or the node action.
+- The resolution is the core's naming, as today's auto-approve check uses. It answers from the core's cache while it holds the name's record, so the check is cheap to repeat.
+- **A name that no longer answers the key** ends the binding. The request is refused with nothing done (`eth_accounts` answers empty), the document's later site methods are refused as a keyless document's are, and its subscriptions end. A new commit can bind again, through a fresh `page:bind-name`.
 - A compromised chrome can only bind a name whose ENS record serves that key: the same content, and the outcome today's check accepts.
 
 ### PageContext
@@ -188,6 +206,7 @@ Main fills `fc-protocol`'s `PageContext` from the record:
 - **The nonce.** The preload makes 16 random bytes when it runs, as it makes the EIP-6963 uuid today (`webview-preload.js:628`), and sends `page:hello { nonce }` before it injects the providers, so before any page script can run.
 - **Binding.** Main binds the first hello it gets for the current number, from the main frame, and ignores every later one.
 - **Every request** carries the nonce. Main serves it only when the nonce is the current document's. A late request from the previous document carries the previous nonce and is refused (`navigated`), as is any request before the hello.
+- **Every event** carries the target document's nonce too, and the preload drops one that isn't its own ([Events](#events)).
 - **A page restored from a back/forward cache** keeps its old preload, which then sends a fresh hello with a new nonce on `pageshow` with `persisted`. PRQ-1 checks whether Electron restores pages this way at all.
 - **The one assumption:** main sees the commit before the new document's hello. The probe of 2026-09-28 found that the embedder gets `did-frame-navigate` before any message from the new document, one sent at preload time included (`guest-main-frame.js:21–27`). PRQ-1 repeats it in main, in real Electron. If it ever fails, the hello lands on the old number and is ignored, and the new document's requests are refused: the page loses its wallet, and nothing is misattributed.
 - **What it doesn't stop:** a compromised renderer can reuse a nonce it holds, but only from its own process: for its own site, as today.
@@ -223,12 +242,18 @@ Main fills `fc-protocol`'s `PageContext` from the record:
 | `page:prompt-closed` | main → chrome | `{ handle, reason }`, the reason one of `decided`, `navigated`, `closed`, `cancelled` |
 
 - **`site`** is main's: `{ key, label }`, the key as the address bar shows it. The chrome shows it unchanged.
-- **`view`** is what to show, built by main: a transaction's fields and the fee check's verdict, typed data and messages as the core's view (#88), the account and the chain. The chrome renders it. Nothing in it comes from the page unchecked.
+- **`view`** is what to show, built by main: a transaction's fields and the fee check's verdict, typed data and messages as the core's view (#88), the account and the chain. The chrome renders it. Much of it is the page's choice, checked for form and size but still hostile: [What a prompt shows](#what-a-prompt-shows) classifies every field.
 - **`kind`:** one per today's prompt. `eth.connect`, `eth.send`, `eth.sign`, `eth.safe_message`; `swarm.connect`, `swarm.publish`, `swarm.feed`, `swarm.messaging`, `swarm.manifest`; `radicle.connect`, `radicle.node`, `radicle.sign`; and `vault.unlock`, when a request needs the vault unlocked.
 - **`choices`:** only what the kind lets the user pick. The account for a connect, "always allow" where today's prompt offers it, the fee acknowledgement for a send.
 - **`guest`** lets the chrome show which tab asked, and switch to it.
 
-**Approval tokens.** On an approval, main mints the token itself with `signing-confirmation.js`, and the dispatcher spends it. A page request's token never leaves main. Its binding gains two fields, both from main's record, never from a caller:
+**Approval tokens.** Today the chrome asks `wallet:confirm-signing` for a token of any of `signing-confirmation.js`'s ten kinds, with an account and a payload of its choosing (`wallet-ipc.js:621–643`). From PRQ-5 the kinds that serve page requests have one issuer, inside main:
+- **The page kinds:** `dapp-send`, `sign-message`, `sign-typed-data`, `safe-message`, and a `safe-send` that names a site (a dApp's transaction from a Safe account, `wallet/dapp-tx.js:819`).
+- **The internal issuer** is the dispatcher's. It mints a token of a page kind only on an approval of an open handle whose request record is live. It takes the handle and the attested key from that record, and the account and the payload from the request main holds, never from a caller. The token never leaves main: the dispatcher spends it.
+- **The chrome's `wallet:confirm-signing` refuses the page kinds** from PRQ-5 on. It goes on minting the wallet's own six (`wallet-send`, a `safe-send` with no site, `intent-resend`, `intent-replace`, `intent-close`, `executor-send`) until APS-3.
+- **The auto-approve route moves too.** The signing handlers refuse the chrome's `{ autoApprove, webContentsId }` authorization for the page kinds. The dispatcher reads the site's rule itself, for the request record's key, with [Agent custody](#agent-custody) read live.
+
+A page kind's binding gains two fields, both from the record:
 - **the handle,** so a token answers one prompt;
 - **the attested key,** so a token minted for one site's request can't sign another's. A `dapp-send` token binds a site today, but the chrome supplies it (`signing-confirmation.js`, "What a token binds"). Now it is the requester's.
 
@@ -242,9 +267,37 @@ The dispatcher checks the document again before it spends the token. If the docu
 
 **Vault unlock.** Today the chrome shows the unlock screen when an auto-approved request finds the vault locked (`dapp-provider.js:332`, `371`). It stays there until APS-2. Then a `vault.unlock` prompt in the approvals document takes the password, and main unlocks.
 
+### What a prompt shows
+
+Every field of a prompt, by where it comes from:
+
+| Field | From | Trust |
+|---|---|---|
+| `kind`, the handle | main | Main's own |
+| The account: its address, label and kind (vault, Ledger, phone, Safe) | main's wallet state | Main's own |
+| The chain: its id and name | main: the selected chain, or an onchain app's own | Main's own |
+| The fee check's verdict, and the most a send can cost | main and the core (design 0005) | Main's own |
+| A warning | the core's view (#88) or main: a code from a fixed list, with fixed text | Main's own. A value a warning quotes is the page's, as below |
+| `site`: the key and its label | main: the committed URL, or a name a binding verified | Attested, but the site's owner chose its characters (a lookalike name). Shown as the address bar shows it |
+| Which tab asked: its place in the tab strip | main | Main's own |
+| That tab's title | the page | The page's, unchecked. Shown only marked as the page's, or not at all |
+| A page's favicon or any other image | the page | Never shown |
+| A transaction: `to`, `value`, `data`, the gas fields | the page | The page's, checked: main's shape checks (an address, a quantity, hex), shown in main's form (a checksummed address, an amount in units) |
+| A message (`personal_sign`) | the page | The page's, checked: main's message view decides text or hex |
+| Typed data: the domain, the type and field names, the values | the page, through the core's view (#88) | The page's, bounded and put in canonical form by the core |
+| A Safe message, or a dApp's Safe transaction | the page | As typed data and transactions |
+| Swarm: file names and paths, sizes, content types, a feed's name or topic, a message's target | the page | The page's, checked against `LIMITS` |
+| Radicle: a repository id, an issue's title and text, a comment | the page | The page's: the id checked for its form, the text for its size |
+
+- **Only main's own fields are trusted.** Every other field is hostile text, however main checked it, and is rendered as [Rendering a page's data](#rendering-a-pages-data) says.
+- **A closed schema.** For each `kind`, the view is a fixed list of these fields, each with a type and a bound: a length for each string, a count for each list, a depth for nesting (the core's typed-data view keeps its own), and at most 256 KiB for the whole view (proposed). Main builds the view to the schema and refuses a request whose view won't fit, as the core refuses a typed-data view too large for one reply today. Whoever renders the view checks it against the same schema.
+- **Before APS** the chrome renders it, and a markup bug there is a compromised chrome, as today. The rules matter most for the approvals document, which holds the decision channel.
+
 ## Events
 
 Main sends `page:event` with `WebFrameMain.send` on the guest's main frame, and only while that frame's current document is the one the event is for: the same key, and the same number where a subscription is bound to one.
+
+**The nonce in every event.** Main's check isn't enough alone. `WebFrameMain.send` targets a frame, not a document. A frame keeps its `frameTreeNodeId` across navigations, and its `WebFrameMain` across a same-process one, while its document changes. Between main's check and the delivery, the renderer can commit a new document in that frame, and the event then reaches the new document's preload. So every `page:event` carries the target document's nonce, which only main and that document's preload know, and the preload drops an event whose nonce isn't its own, before the page sees anything. The old nonce tells the new document nothing it can use: main refuses it. It doesn't stop a compromised chrome from forging events of its own ([Threat model](#threat-model)): it can script the page, which needs no nonce.
 
 | Provider | Event | When |
 |---|---|---|
@@ -263,8 +316,16 @@ Main sends `page:event` with `WebFrameMain.send` on the guest's main frame, and 
 - **In main's JS first,** in `src/main/page/`: the requester and documents (`page-documents.js`), the channels and handles (`page-requests.js`), the prompts (`page-prompts.js`), and one dispatcher per provider. They move today's chrome logic (`dapp-provider.js`, `swarm-provider.js`, `radicle-provider.js`) into main, method by method. They call main's existing authorities directly: `wallet-ipc.js`'s handlers, `executeSwarmMethod` and `executeRadicleMethod`, with the attested key in place of the chrome's `origin`.
 - **The chrome's provider modules** shrink to rendering prompts.
 - **The Identity & Wallet switch** (`enableIdentityWallet`) is read in main. When it's off, every request gets `4900`, as today.
-- **Agent custody:** main asks the agent service itself (`handleWalletRequest`, reached through the chrome today, `agent/ipc.js:664–684`). No standing rule answers for a tab in custody.
+- **Agent custody:** main asks the agent service itself (`handleWalletRequest`, reached through the chrome today, `agent/ipc.js:664–684`). No standing rule answers for a tab in custody ([Agent custody](#agent-custody)).
 - **Why JS first:** one move at a time, and the JS becomes the reference. 0012's `fc-eip1193` ports the Ethereum dispatcher, with vectors recorded from it.
+
+### Agent custody
+
+Custody changes while a document lives. The automation takes a tab and the user takes it back, with no navigation (`setAgentPageCustody`, a `WeakSet` in `agent-tab-custody.js`), and today's checks read it at the moment they decide (`requesterBelongsTo`, and Swarm's and Radicle's `agentCustodyRefusal`). So the record's `agent` field, read at the hello, is for logs and tests only, and main reads custody live:
+- **When it chooses a standing rule.** Before a standing rule answers a request (an "always allow", a contract rule, a Swarm or Radicle auto-approve, Radicle's signing grant), main reads `isAgentPage(event.sender)`. In custody no rule answers: the request takes the path of a request no rule covers, its prompt or the agent service's own handling, as today.
+- **Again just before the effect,** after the last await (a name's resolution, a vault unlock, the fee check, the core's view). A guest that entered custody meanwhile has its auto-approved request refused (`agent_custody`, as Swarm and Radicle answer today), with nothing signed, sent, published or seeded.
+- **A user's own decision isn't a standing rule.** A prompt the user answers counts in custody or out, as today's `meta.approval: 'user'` does.
+- **Leaving custody** lets the rules answer the tab's later requests. A request that went to its prompt because its tab was in custody keeps its prompt: it doesn't turn automatic when custody ends.
 
 ## The approvals document
 
@@ -273,11 +334,22 @@ Roadmap 2.8 step 1: a surface for approvals that neither the chrome renderer nor
 - **One per chrome window,** created with the window: a `WebContentsView` added to the window's `contentView` above the chrome's own view, hidden until it has something to show.
 - **Its own document and preload:** `renderer/approvals/approvals.html` and `approvals-preload.js`, both packaged. `sandbox: true`, `contextIsolation`, no Node, no `webviewTag`, no `nodeIntegrationInSubFrames`. Its own in-memory partition, which refuses every request but for its own files. Navigation and popups are refused, as `lockChromeWindow` refuses them for the chrome.
 - **Sender checks:** main's `approvals:*` handlers accept only that window's view. `event.sender` is the exact webContents main created, `senderFrame` is its main frame, and the URL is the packaged file. The spike checks the sender the same way (`senderMatchesSurface`).
-- **Main mints approval tokens only for it.** From APS-2, a decision on a page's handle counts only when it comes from the window's approvals document. From APS-3, the chrome's `wallet:confirm-signing` no longer mints a token on its own: it opens the request in the approvals document, and the token is returned only when the user approves there.
-- **What it shows:** the `view` of [the prompt protocol](#the-prompt-protocol), the site's key, and which tab asked. Nothing the page supplies, such as a title or a favicon, unless marked as the page's.
+- **Main mints approval tokens only for it.** From APS-2, a decision on a page's handle counts only when it comes from the window's approvals document. The chrome's `wallet:confirm-signing` has refused the page kinds since PRQ-5 ([Approval tokens](#the-prompt-protocol)). From APS-3 it mints none of the wallet's own kinds on its own either: it opens the request in the approvals document, and the token is returned only when the user approves there.
+- **What it shows:** the `view` of [the prompt protocol](#the-prompt-protocol), the site's key, and which tab asked, with every field classified in [What a prompt shows](#what-a-prompt-shows).
 - **Where:** a panel at the side of the content area, below the toolbar, where the wallet sidebar shows its prompts now. Its exact look is the user's call ([open question 2](#open-questions)). The chrome can't paint over a view stacked above it, and a page paints only inside its own guest.
-- **Input:** the panel takes focus when it shows. Its buttons ignore clicks and keys for 500 ms after it appears (proposed), so a page can't time a click onto it, and it has no default button, so Enter never approves.
+- **Input:** [Rendering a page's data](#rendering-a-pages-data).
 - **Background tabs:** [open question 3](#open-questions).
+
+### Rendering a page's data
+
+The document holds the decision channel, and it shows what a hostile page chose: a message, typed data's names and values, file names, an issue's text. Script that runs in it, through a markup bug, could approve by itself, and a sandbox, a private partition and exact sender checks don't prevent that. So:
+- **A closed, bounded schema.** The document accepts only the views of [What a prompt shows](#what-a-prompt-shows), and checks each against its kind's schema before it shows anything. An unknown kind or field, a wrong type, or a value over its bound shows a fixed error, and the prompt can then only be rejected.
+- **Text only.** The document is built from fixed templates in its own packaged script. Every value goes in as text (`textContent`), never as markup, a style, a URL, or an attribute a value chooses. Nothing from a page is ever HTML or code: no `innerHTML`, no `eval`, no `new Function`.
+- **Encoded for where it shows.** Control characters, and characters that are invisible or change the direction of text (the bidi controls, zero-width characters), show as visible escapes, so a message can't hide text or reorder what's around it. A long value is cut with a visible mark and shown in full in a scrolling text box.
+- **A restrictive CSP,** sent by main's handler for the document's partition with the document itself: `default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self'; font-src 'self'; connect-src 'none'; form-action 'none'; base-uri 'none'; frame-src 'none'; object-src 'none'; frame-ancestors 'none'; require-trusted-types-for 'script'; trusted-types 'none'` (proposed). The last two make every markup sink (`innerHTML`, `insertAdjacentHTML`, `document.write`) throw, so a slip in a template fails closed.
+- **No links.** No `<a href>`, `<form>`, `<area>`, `<iframe>`, `<object>` or `<img>` is ever built from a value. A URL, such as a site's or a contract's, is shown as text. Nothing in the document navigates or opens a window, and main refuses both anyway.
+- **Input.** The panel takes focus when it shows. Clicks and keys do nothing for 500 ms (proposed) after a prompt appears, after its content changes, and after the panel is shown again or moves, so a page can't time a click onto it. Main also refuses an approval that reaches it sooner than 500 ms after the document reported the prompt shown.
+- **Enter never approves.** No button is the default, focus starts on Reject, and Enter does nothing on Approve. Approving by keyboard is Space on a focused Approve, after the delay (proposed).
 
 **The spike `b58441b1`** built a trusted wallet surface: a right-hand `WebContentsView` drawer in the package chrome's `ShellWindow`, with a detached `BrowserWindow` as the fallback, its own preload, random channel names per surface, and a strict sender check. 0011 keeps the view, the preload and the sender check, and differs in three ways:
 - it hosts approvals, not wallet management;
@@ -286,9 +358,26 @@ Roadmap 2.8 step 1: a surface for approvals that neither the chrome renderer nor
 
 ## Bounds
 
+A count of requests is no bound on memory here. One `swarm_publishFiles` may carry 50 MiB (`LIMITS.maxFilesBytes`, `swarm-provider-ipc.js:64`), so 64 of them from one document would be over 3 GiB. Main bounds bytes as well as counts, across every document.
+
+**What main can't bound.** Electron turns an IPC message's arguments into JS values in main before any handler runs, the sender policy's included (`ElectronApiIPCHandlerImpl::Invoke` and `Message`), and gives main no way to see a message's size first. The only limit before that is Chromium's own cap on one IPC message, and it is above every bound here: a 50 MiB upload passes it today, through `sendToHost`. So a request's bytes reach main's memory once, whatever main then decides. A compromised renderer can make main take that much for each message it sends, on any channel, as it can today: the sender policy runs after the conversion too. What 0011 bounds is what an honest preload sends, which a page's script can't change, and everything main keeps once a request has arrived.
+
+**The rules:**
+1. **A size per request.** The two methods that carry data or files may be as large as their own payload limit plus 64 KiB for the rest of the request (`swarm_publishData` 10 MiB, `swarm_publishFiles` 50 MiB, from `LIMITS`). Every other method may be 1 MiB (proposed). A request's size is the bytes of its strings and binary data, counted by one walk that refuses past 10 000 values or 32 levels (proposed). The preload and main count it the same way.
+2. **Checked before sending.** The preload measures a request before it sends it, and refuses one over its size with the error the method gives an oversized payload today, or `-32005` where it has none. A page's script can't go around the preload.
+3. **Checked on arrival.** Main measures again, first thing, before it records, copies, queues or validates the request, and refuses one over its size. Main keeps no reference to a refused request, so its bytes are garbage at once.
+4. **Budgets across documents.** Main charges each admitted request's bytes and count to its document, its window and the whole browser, and refuses a request when any of the three is full (`-32005`, and nothing runs). A copy main makes for the work, such as a `Buffer` for an upload, is charged too. A charge ends when the request is answered and main has let go of its payload.
+5. **Large requests take turns.** A request over 1 MiB (only the two Swarm uploads allow one) needs a ticket. The preload first sends `page:reserve { nonce, method, bytes }`. Main queues it and grants tickets in order, two at a time across the browser (proposed), each charged its reserved bytes from the grant. The preload sends the request only with its ticket. Main refuses a large request with no ticket, with another document's, or with more bytes than its ticket reserved. A waiting reservation costs main a few bytes, not the payload. A ticket unused for 30 s, and every ticket of a document that has gone, is released.
+
 | Bound | Value |
 |---|---|
-| Requests in flight per document | 64 (proposed). The next gets `-32005` ("limit exceeded", EIP-1474) and doesn't run |
+| A request's size | `swarm_publishData` and `swarm_publishFiles`: their payload limit plus 64 KiB. Every other method: 1 MiB (proposed) |
+| The size walk | 10 000 values, 32 levels (proposed) |
+| In flight per document | 64 requests and 64 MiB (proposed). The next gets `-32005` ("limit exceeded", EIP-1474) and doesn't run |
+| In flight per window | 256 requests and 128 MiB (proposed) |
+| In flight in the browser | 1,024 requests and 256 MiB (proposed) |
+| Large requests (over 1 MiB) | 2 at a time in the browser, 16 reservations waiting (then `-32005`), a ticket unused for 30 s released (proposed) |
+| A prompt's view | 256 KiB, and each field's own bound ([What a prompt shows](#what-a-prompt-shows)) (proposed) |
 | Open wallet prompts per window | 1, as today. The next request gets `-32002` |
 | Hellos per document | 1; later ones are ignored |
 | The nonce | 16 random bytes, made by the preload |
@@ -296,7 +385,7 @@ Roadmap 2.8 step 1: a surface for approvals that neither the chrome renderer nor
 | Tokens | today's: two minutes, at most 32 outstanding (`signing-confirmation.js:68`, `72`) |
 | The panel's input delay | 500 ms (proposed) |
 
-Per-method bounds stay where they are (`swarm-provider-ipc.js`'s `LIMITS`, and the Radicle provider's).
+Per-method bounds stay where they are (`swarm-provider-ipc.js`'s `LIMITS`, and the Radicle provider's), checked after these.
 
 ## Migration
 
@@ -304,21 +393,21 @@ One browser PR per step, against `integration/rust-core`, in this order. A step 
 
 | Step | What | The tests that prove it |
 |---|---|---|
-| PRQ-1 | The attested requester and documents (`page-documents.js`), not yet used | Unit tests for each refusal: not a tab, private, preview, sub-frame, detached, no hello, wrong nonce, navigated. The key of every row in [Keys](#keys), and the name binding. In real Electron: main sees the commit before the new document's hello, across same-process, cross-process, reload and back/forward navigations |
-| PRQ-2 | `page:hello`, `page:request` and `page:event`, the sender-policy tier, handles and delivery, run through a test hook; no method moved | **A sub-frame's request refused.** **A page that navigated away refused:** a request sent, the page navigated, the request finished: no reply and no effect. Private windows and previews refused, the chrome refused on `page:request`, the in-flight bound |
-| PRQ-3 | Ethereum reads: `eth_chainId`, `net_version`, `eth_accounts` and the read-only list (`dapp-provider.js:74–100`). The selected chain in main | The same answers as the chrome's, for each method and URL form. An onchain app's chain pinned. A keyless document's reads |
-| PRQ-4 | Connecting: `eth_requestAccounts` and `wallet_switchEthereumChain`, with `page:prompt` and `page:decide`. Main writes the grant | **A forged chrome origin refused:** the chrome's `dapp:grant-permission` refused for every site; a `page:decide` names no site and can't move a grant to another; a decision from another window's chrome refused. One open prompt per window (`-32002`) |
-| PRQ-5 | Signing: `eth_sendTransaction`, `personal_sign`, `eth_signTypedData_v4`, Safe messages. Tokens bound to the handle and the attested key; auto-approve read by main | A token minted for handle A refused for handle B, for another key, after its document navigated, and when spent twice. No auto-approval for a tab in Agent custody. The signing handlers refuse a dApp request's `autoApprove` authorization from the chrome |
-| PRQ-6 | The Ethereum events the chrome still sends: the chain switcher's `chainChanged`, and `accountsChanged` when a grant is revoked or its account changes. A moved method's own events go out from main in its own step | None delivered to a navigated document, another key, a sub-frame or a private window. No `chainChanged` to an onchain app |
-| PRQ-7 | `window.swarm` through main: `executeSwarmMethod` takes the attested key, subscriptions are bound to the document, the manifest flow moves | **A forged chrome origin refused:** `swarm:provider-execute` is gone. A message for a navigated document dropped |
-| PRQ-8 | `window.radicle` through main, in the Radicle slot or after its switch to the service (0008) | As PRQ-7, for `radicle:provider-execute` |
-| PRQ-9 | Cleanup: the `sendToHost` provider channels, the chrome's request code, `guest-main-frame.js`, `navEpoch`, the `origin` parameters | The sender-policy test: no provider channel left, and the chrome refused on `page:hello` and `page:request` |
-| APS-1 | The approvals document behind a flag. Needs PRQ-5, and open question 2 answered | Its sender check: another webContents, a sub-frame and a navigated view refused. Navigation and popups refused. With the flag on, the chrome's `page:decide` refused |
-| APS-2 | dApp prompts in the approvals document; the chrome shows a badge only | A decision from window A's document refused for window B's handle. `vault.unlock` in the document |
-| APS-3 | The wallet's own prompts (sends, Safe, intents, executor fees) in the document; `wallet:confirm-signing` mints only on its decision | The chrome's `wallet:confirm-signing` gets no token without the user's decision in the document, for each of the ten kinds |
+| PRQ-1 | The attested requester and documents (`page-documents.js`), not yet used | Unit tests for each refusal: not a tab, private, preview, sub-frame, detached, no hello, wrong nonce, navigated. The key of every row in [Keys](#keys), and the name binding: `transportKey` and `key` kept apart, step 6 comparing a name-keyed document's frame URL with `transportKey`, and no decision reading the record's `agent`. In real Electron: main sees the commit before the new document's hello, across same-process, cross-process, reload and back/forward navigations |
+| PRQ-2 | `page:hello`, `page:reserve`, `page:request` and `page:event`, the sender-policy tier, handles and delivery, the bounds, run through a test hook; no method moved | **A sub-frame's request refused.** **A page that navigated away refused:** a request sent, the page navigated, the request finished: no reply and no effect. **An event for a replaced document dropped:** main checks the record, a test hook holds the `send`, the frame commits a same-process document of the same key (a reload, a link within the site), and the hook lets the send go: the new document's preload drops it, and its page sees nothing. **The size per request:** a request of exactly its method's size passes, and one byte more is refused by the preload, and by main for a request a test hook sends past the preload, before main records it. **The budgets:** documents in two windows, each within its own bound, fill the window's and then the browser's budget; the next request is refused and nothing runs; admission resumes as they finish. Private windows and previews refused, the chrome refused on `page:request`, the per-document bound |
+| PRQ-3 | Ethereum reads: `eth_chainId`, `net_version`, `eth_accounts` and the read-only list (`dapp-provider.js:74–100`). The selected chain in main | The same answers as the chrome's, for each method and URL form. An onchain app's chain pinned. A keyless document's reads. A name-keyed document's `eth_accounts` answers empty once the name moves off its IPNS key |
+| PRQ-4 | Connecting: `eth_requestAccounts` and `wallet_switchEthereumChain`, with `page:prompt` and `page:decide`. Main writes the grant | **A forged chrome origin refused:** the chrome's `dapp:grant-permission` refused for every site; a `page:decide` names no site and can't move a grant to another; a decision from another window's chrome refused. One open prompt per window (`-32002`). A name that moves off its IPNS key while its connect prompt is open gets no grant |
+| PRQ-5 | Signing: `eth_sendTransaction` (from a Safe account too), `personal_sign`, `eth_signTypedData_v4`, Safe messages. The page kinds reserved to main's issuer; tokens bound to the handle and the attested key; auto-approve read by main | **The chrome mints no page token:** for each of `dapp-send`, `sign-message`, `sign-typed-data`, `safe-message` and a site's `safe-send`, the chrome's `wallet:confirm-signing` is refused, and the handler refuses the chrome's `{ autoApprove, webContentsId }` authorization (a `safe-send` has no rule, and stays refused on that route). Through main's issuer: no token without a live request record; a token minted for handle A refused for handle B, for another key, after its document navigated, and when spent twice. Through main's own reading of the rules: a rule answers only a live request record of its own key. **Custody read live:** a tab that enters custody after its hello gets no standing rule; one that enters custody while an auto-approved request waits (on the name, the vault, the core's view) has that request refused, with nothing signed; one that leaves custody gets the rules for its next request, and a request already at its prompt keeps it. **A name moving off its IPNS key** before the rule is read, during the resolution and while the prompt is open: refused, nothing signed, on both routes |
+| PRQ-6 | The Ethereum events the chrome still sends: the chain switcher's `chainChanged`, and `accountsChanged` when a grant is revoked or its account changes. A moved method's own events go out from main in its own step | None delivered to a navigated document, another key, a sub-frame or a private window. No `chainChanged` to an onchain app. PRQ-2's replaced-document race, for each event |
+| PRQ-7 | `window.swarm` through main: `executeSwarmMethod` takes the attested key, subscriptions are bound to the document, the manifest flow moves | **A forged chrome origin refused:** `swarm:provider-execute` is gone. A message for a navigated document dropped, and PRQ-2's replaced-document race for `message`. **Uploads:** a `swarm_publishFiles` request of exactly its size passes and one byte more is refused; three large uploads from three documents run two at a time, the third waiting for its ticket; a ticket refused for another document and released when its document goes; the seventeenth waiting reservation refused. **Custody read live,** as in PRQ-5, for each auto-approvable method. **A name moving off its IPNS key** during a publish and a message sent under the auto-approve rule, and before a subscription's next message: refused or dropped, nothing published or sent |
+| PRQ-8 | `window.radicle` through main, in the Radicle slot or after its switch to the service (0008) | As PRQ-7, for `radicle:provider-execute`: custody and a name moving off its IPNS key for seeding, unseeding and the signed writes, and the replaced-document race for `seedStatus` |
+| PRQ-9 | Cleanup: the `sendToHost` provider channels, the chrome's request code, `guest-main-frame.js`, `navEpoch`, the `origin` parameters | The sender-policy test: no provider channel left, and the chrome refused on `page:hello`, `page:reserve` and `page:request` |
+| APS-1 | The approvals document behind a flag. Needs PRQ-5, and open question 2 answered | Its sender check: another webContents, a sub-frame and a navigated view refused. Navigation and popups refused. With the flag on, the chrome's `page:decide` refused. **Its rendering rules:** the CSP on the document's response, and a markup sink throwing under Trusted Types. **Input,** on a test prompt: a click or a key at 0 ms and at 499 ms does nothing, and at 500 ms counts; the delay starts again for a new prompt, a changed one, and the panel shown again; main refuses an approval sooner than 500 ms; Enter on every control never approves |
+| APS-2 | dApp prompts in the approvals document; the chrome shows a badge only | A decision from window A's document refused for window B's handle. `vault.unlock` in the document. **Hostile data,** in every field a page chooses, for every dApp kind: markup (`<script>`, `<img src=x onerror=…>`, `<svg onload=…>`), `javascript:` and `data:` URLs, `</style>` and CSS, bidi controls and over-long text show as literal text, add no element to the template, run nothing and make no request (the partition logs none). A view off its schema shows the error and can only be rejected |
+| APS-3 | The wallet's own prompts (sends, Safe, intents, executor fees) in the document; `wallet:confirm-signing` mints only on its decision | The chrome's `wallet:confirm-signing` gets no token without the user's decision in the document, for each of the six wallet kinds (PRQ-5 closed the page kinds). Hostile data as in APS-2, for their views |
 
 - **The flag** goes on by default only once the user has answered open question 2.
-- **Rollback:** each step reverts on its own. Until PRQ-9 removes it, the old path still works for every method.
+- **Rollback:** each step reverts on its own, and reverting it puts its methods back on today's path, with the refusals it added. Until PRQ-9 removes it, the old path is still there for every method.
 
 ## Changes from today
 
@@ -326,7 +415,8 @@ One browser PR per step, against `integration/rust-core`, in this order. A step 
 - `accountsChanged` and `chainChanged` reach every live document of a key. Today the chain switcher tells only the visible tab (`chain-switcher.js:180`, `dapp-provider.js:822–829`).
 - A request sent before the document's hello is refused. The preload sends the hello first, so a page never sees this.
 - The preload no longer sends `window.location.origin`.
-- A DNS-named ENS site keeps its grants through a binding main checked, not through the chrome's `knownEnsNames`.
+- A DNS-named ENS site keeps its grants through a binding main checked, not through the chrome's `knownEnsNames`, and main checks the name again at every use, not only for auto-approve.
+- A request over its size, or past main's budgets, is refused with `-32005` or the method's own error. A large Swarm upload waits for its turn.
 
 ## Options weighed
 
@@ -336,10 +426,12 @@ One browser PR per step, against `integration/rust-core`, in this order. A step 
 - **A name binding through a URL that carries the name,** instead of `page:bind-name`. The site would get a new origin, so its storage would move, and the handlers a new URL form.
 - **Approvals in the chrome, with stronger tokens.** Someone still asks for the token, and that would still be the chrome.
 - **A separate approvals window** (the spike's fallback). No layering to get right, but the user can't tell it from a page's popup, and it can open behind the browser.
+- **Ending every request when custody changes,** instead of reading custody live. Simple to state, but a user taking a tab back would lose its open prompts too.
+- **Refusing a large request while another runs,** instead of tickets. Simpler, but a page fails where it could wait, and an honest preload still sends main the payload it then refuses.
 
 ## Open questions
 
 1. **Iframes:** should a frame embedded in a dApp have no wallet (the top page only, as today), or `window.ethereum` under its own address?
 2. **The trusted panel:** should wallet and approval prompts move into a separate panel that pages and the tab strip can't draw into, which changes how and where they look?
 3. **Background tabs:** should a background tab's prompt open at once, as today, or wait until you switch to that tab?
-4. **Scripted pages:** a compromised browser UI can still run script inside a page it shows, so should we add a guard that relies on Electron's internals, or accept this until tabs leave the browser UI's process?
+4. **Scripted pages:** a compromised browser UI can still run script inside a page it shows, and that page's existing "always allow" rules then answer without asking you. Should we add a fragile guard now, one that depends on how this Electron version works inside, may miss a way in, and has to be retested on every Electron upgrade? Or accept that existing always-allow rules stay usable by a compromised browser UI until main owns the tabs?
