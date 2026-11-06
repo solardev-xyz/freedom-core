@@ -37,8 +37,8 @@
 //!
 //! **Resident memory** is read from `/proc` (`VmRSS`, `VmHWM`), as
 //! `vault`'s tests read it: Linux only. Elsewhere it is not measured. The
-//! peak is charged against an otherwise identical core after a protocol-1
-//! hello, which starts no dweb thread, so the thread's start counts too.
+//! peak is charged against an otherwise identical core before its hello,
+//! which starts the dweb thread, so the thread's start counts too.
 
 // The gates print what they measure.
 #![allow(
@@ -147,25 +147,51 @@ fn resident(_: &Main) -> Option<(u64, u64)> {
 /// What the gates charge the dweb thread against, in KiB.
 #[derive(Debug, Clone, Copy)]
 struct Base {
-    /// An otherwise identical core's resident memory after a protocol-1
-    /// hello: the event loop starts the dweb thread and its hashing pool
-    /// only at protocol 2, so this is the core without them.
+    /// An otherwise identical core's resident memory before its hello: the
+    /// event loop starts the dweb thread and its hashing pool only at the
+    /// hello, so this is the core without them.
     no_dweb: u64,
-    /// This core's after its protocol-2 hello, the dweb thread started.
+    /// This core's after its hello, the dweb thread started.
     hello: u64,
 }
 
+/// The names of `core`'s threads (Linux).
+#[cfg(target_os = "linux")]
+fn threads(core: &common::Core) -> Vec<String> {
+    std::fs::read_dir(format!("/proc/{}/task", core.child.id()))
+        .unwrap()
+        .filter_map(|task| std::fs::read_to_string(task.ok()?.path().join("comm")).ok())
+        .map(|name| name.trim().to_owned())
+        .collect()
+}
+
 /// The resident memory before the dweb thread: a second core, started
-/// with `m`'s `env`, after a protocol-1 hello with fragments. Everything
-/// `m` holds above it is the dweb thread's, its start included.
+/// with `m`'s `env`, before its hello (protocol 1's hello, which started
+/// no dweb thread, is gone), read once it has started up: its reader runs,
+/// and its snapshot, started after the reader, has been read. Everything
+/// `m` holds above it is the dweb thread's, its start included. A baseline
+/// read early could only be lower, which makes the check stricter.
 #[cfg(target_os = "linux")]
 fn baseline(m: &Main, env: &[(&str, &str)]) -> Option<Base> {
     let hello = m.core.memory_kib().0;
     let (_dir, data, locks) = common::dirs();
-    let mut v1 = common::spawn_env("serve", &data, &locks, &[], env);
-    let reply = v1.hello_fragments();
-    assert_eq!(reply["result"]["protocol"], 1, "{reply}");
-    let (no_dweb, _) = v1.memory_kib();
+    let before = common::spawn_env("serve", &data, &locks, &[], env);
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let names = threads(&before);
+        assert!(!names.iter().any(|t| t == "dweb"), "{names:?}");
+        if names.iter().any(|t| t == "stdin") && !names.iter().any(|t| t == "snapshot") {
+            break;
+        }
+        assert!(Instant::now() < deadline, "not started: {names:?}");
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    let (no_dweb, _) = before.memory_kib();
+    // And `m` runs its dweb thread (named once it has started).
+    while !threads(&m.core).iter().any(|t| t == "dweb") {
+        assert!(Instant::now() < deadline, "{:?}", threads(&m.core));
+        std::thread::sleep(Duration::from_millis(5));
+    }
     Some(Base { no_dweb, hello })
 }
 
@@ -183,7 +209,7 @@ fn memory_within_bounds(m: &Main, base: Option<Base>, what: &str) {
         return;
     };
     eprintln!(
-        "[{what}] resident memory: {no_dweb} KiB without the dweb thread (protocol 1), \
+        "[{what}] resident memory: {no_dweb} KiB without the dweb thread (before the hello), \
          {hello} KiB after this core's hello, {now} KiB now, peak {peak} KiB (+{} KiB)",
         peak.saturating_sub(no_dweb)
     );

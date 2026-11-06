@@ -570,18 +570,9 @@ impl Core {
         self.hello_with(900_000)
     }
 
-    /// The handshake, offering fragments (design 0005, Frames).
+    /// The handshake, offering fragments (design 0005, Frames) and streams
+    /// (design 0009, Streams in the core), as main does.
     pub fn hello_fragments(&mut self) -> Value {
-        self.call_shell(
-            1,
-            "core.hello",
-            json!({ "protocol": 1, "shell_version": "test", "auto_lock_ms": 900_000, "frames": ["fragment"] }),
-        )
-    }
-
-    /// The handshake at protocol 2, offering fragments and streams
-    /// (design 0009, Streams in the core).
-    pub fn hello_streams(&mut self) -> Value {
         self.call_shell(
             1,
             "core.hello",
@@ -589,11 +580,13 @@ impl Core {
         )
     }
 
+    /// The handshake at protocol 2, the only version the core speaks: it
+    /// offers streams, which protocol 2 requires, and no fragments.
     pub fn hello_with(&mut self, auto_lock_ms: u64) -> Value {
         self.call_shell(
             1,
             "core.hello",
-            json!({ "protocol": 1, "shell_version": "test", "auto_lock_ms": auto_lock_ms }),
+            json!({ "protocol": 2, "shell_version": "test", "auto_lock_ms": auto_lock_ms, "frames": ["stream"] }),
         )
     }
 
