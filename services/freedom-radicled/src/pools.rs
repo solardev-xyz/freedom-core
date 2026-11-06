@@ -42,6 +42,30 @@
 //! A running one has its token cancelled, and keeps its slot until its work
 //! returns.
 //!
+//! **The mutation-start boundary** (0008, "Writes"; [`Ticket::begin`]): a
+//! write *starts* when its work calls into libradicle's mutation, which it
+//! does only once `begin` has claimed the boundary for it. The claim is one
+//! decision with each way a request can be answered first, so exactly one
+//! of them wins:
+//! - **the stop**, which fences the pool under its lock;
+//! - **the deadline**, which the timer, or `begin` itself, marks under that
+//!   lock before it answers;
+//! - **main's cancel**, which the connection answers under its own lock:
+//!   `begin` claims the request's commit point there
+//!   ([`Connection::commit`]), and fails if anything of it is queued.
+//!
+//! **Before it, failure is definitive:** a write cancelled, past its
+//! deadline or met by the stop never starts, and its answer (`cancelled`,
+//! `deadline`, `stopped`) says so. **After it, only a success is proven.**
+//! The pool answers a started request `outcome_unknown`, never `deadline`,
+//! `cancelled` or `stopped`: at its deadline, at main's cancel (for which
+//! the connection queued nothing), past the stop's drain, after a panic,
+//! and when its work answers nothing. Its work runs on to its end and keeps
+//! its slot. A reply it queues after that is lost: the request has its
+//! answer. A started request whose work doesn't mark its outcome proven
+//! ([`Ticket::proven`]) leaves the run uncertain ([`Pools::uncertain`]), and
+//! the dirty marker stays ([`crate::node`]).
+//!
 //! **The work** runs on a pool thread, marked as request work for the panic
 //! hook. A panic is that request's `internal` error, or its stream's
 //! `internal` abort, and the thread goes on. Its token ([`Ticket::cancel`])
@@ -65,9 +89,8 @@
 //! cleared only after a complete drain ([`crate::node`]).
 //!
 //! **Later steps add operations, not machinery:** a method's work is a
-//! closure given its [`Ticket`]. They add the writes' own outcomes past
-//! their mutation start (`outcome_unknown`), the online repair's turns on
-//! the writer, and the output budget's waits inside the read deadline.
+//! closure given its [`Ticket`]. They add the online repair's turns on the
+//! writer, and the output budget's waits inside the read deadline.
 
 use std::collections::VecDeque;
 use std::panic::{AssertUnwindSafe, catch_unwind};
@@ -76,10 +99,12 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use fc_protocol::error::{ErrorBody, ErrorCode};
-use fc_protocol::stream::{Abort, AbortCode};
+use fc_protocol::stream::{Abort, AbortCode, Settled};
 use fc_service::conn::Connection;
+use fc_service::log;
 use fc_service::panic::{TaskKind, with_kind};
 use libradicle::CancelToken;
+use serde_json::json;
 
 /// A pool's threads, and how many requests may wait for one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -128,6 +153,34 @@ pub struct Ticket {
     /// Cancelled by main's cancel, by the deadline before the head, and by
     /// the stop.
     pub cancel: CancelToken,
+    /// Its pool, where its boundary is claimed.
+    boundary: Arc<dyn Boundary>,
+}
+
+impl Ticket {
+    /// The mutation-start boundary (see the module's doc): `true` if this
+    /// request's work may call into its mutation now, and the pool answers
+    /// it `outcome_unknown` from now on unless its work answers first.
+    /// `false` if it is answered or being answered: main cancelled it, its
+    /// deadline passed (then this answers it `deadline`, if the timer
+    /// hasn't yet), or the stop has begun. Its work must then return
+    /// without starting anything, and its answer stands.
+    pub fn begin(&self) -> bool {
+        self.boundary.begin(self.id)
+    }
+
+    /// The work's outcome past the boundary is proven: its mutation
+    /// returned success, or failed leaving nothing that needs a repair.
+    /// Without it, a started request leaves the run uncertain.
+    pub fn proven(&self) {
+        self.boundary.proven(self.id);
+    }
+}
+
+/// A pool's side of [`Ticket::begin`] and [`Ticket::proven`].
+trait Boundary: Send + Sync {
+    fn begin(&self, id: u64) -> bool;
+    fn proven(&self, id: u64);
 }
 
 /// A request's work, run once on a pool thread. It answers its request
@@ -142,8 +195,12 @@ pub trait Answers: Clone + Send + 'static {
 
     /// Settles request `id`: `error` as its one reply if nothing of it was
     /// written, `abort` if its stream is open, and nothing if it is settled
-    /// already ([`Connection::settle`]).
-    fn settle(&self, id: u64, error: &ErrorBody, abort: &Abort);
+    /// already ([`Connection::settle`]): whether it did either.
+    fn settle(&self, id: u64, error: &ErrorBody, abort: &Abort) -> bool;
+
+    /// Claims request `id`'s commit point, if nothing of it is queued:
+    /// main's cancel then queues nothing for it ([`Connection::commit`]).
+    fn commit(&self, id: u64) -> bool;
 }
 
 impl Answers for Connection {
@@ -151,8 +208,15 @@ impl Answers for Connection {
         self.reply_error(id, error).is_ok()
     }
 
-    fn settle(&self, id: u64, error: &ErrorBody, abort: &Abort) {
-        let _ = Connection::settle(self, id, error, abort);
+    fn settle(&self, id: u64, error: &ErrorBody, abort: &Abort) -> bool {
+        matches!(
+            Connection::settle(self, id, error, abort),
+            Ok(Settled::Replied | Settled::Aborted)
+        )
+    }
+
+    fn commit(&self, id: u64) -> bool {
+        Connection::commit(self, id)
     }
 }
 
@@ -186,10 +250,15 @@ struct Queued<A> {
 struct Running<A> {
     id: u64,
     deadline: Instant,
-    /// Whether the timer has handled its deadline.
+    /// Whether its deadline has been handled: by the timer, or by
+    /// [`Ticket::begin`].
     expired: bool,
     cancel: CancelToken,
     answers: A,
+    /// Whether its work has passed its mutation start ([`Ticket::begin`]).
+    started: bool,
+    /// Whether its work marked its outcome proven ([`Ticket::proven`]).
+    proven: bool,
 }
 
 struct State<A> {
@@ -199,6 +268,9 @@ struct State<A> {
     running: Vec<Running<A>>,
     /// The pool's threads that haven't ended: its workers and its timer.
     alive: usize,
+    /// A started request ended without a proven outcome, or was still
+    /// running past the stop's drain: for good.
+    uncertain: bool,
 }
 
 struct Inner<A> {
@@ -254,6 +326,38 @@ fn internal() -> ErrorBody {
     ErrorBody::new(ErrorCode::Internal, "Internal error")
 }
 
+/// A write past its mutation start whose outcome isn't proven, and `why`
+/// (0008, "Writes").
+pub fn outcome_unknown(why: &str) -> ErrorBody {
+    ErrorBody::new(
+        ErrorCode::OutcomeUnknown,
+        format!("the write started, and its outcome is unknown: {why}"),
+    )
+}
+
+/// Logs that request `id` was answered `outcome_unknown`, and why: with its
+/// code, never with the write's content (0008, "Writes").
+pub fn unknown_logged(id: u64, why: &str) {
+    log::error(
+        "a write's outcome is unknown",
+        json!({ "id": id, "code": "outcome_unknown", "why": why }),
+    );
+}
+
+/// Answers request `id` `outcome_unknown` for `why` through `answers`, as
+/// its one reply, or settles it so (`settle`): logged if it was answered.
+fn answer_unknown<A: Answers>(answers: &A, id: u64, why: &str, settle: bool) {
+    let error = outcome_unknown(why);
+    let answered = if settle {
+        answers.settle(id, &error, &stopping_abort())
+    } else {
+        answers.refuse(id, &error)
+    };
+    if answered {
+        unknown_logged(id, why);
+    }
+}
+
 /// One pool: its threads, its queue and its timer.
 pub struct Pool<A: Answers> {
     inner: Arc<Inner<A>>,
@@ -274,6 +378,7 @@ impl<A: Answers> Pool<A> {
                     queue: VecDeque::new(),
                     running: Vec::new(),
                     alive: 0,
+                    uncertain: false,
                 }),
                 work: Condvar::new(),
                 timer: Condvar::new(),
@@ -349,6 +454,7 @@ impl<A: Answers> Pool<A> {
                 id,
                 deadline,
                 cancel: CancelToken::new(),
+                boundary: self.inner.clone(),
             },
             answers,
             work,
@@ -360,8 +466,9 @@ impl<A: Answers> Pool<A> {
     }
 
     /// Main cancelled request `id`, and the connection has answered it: a
-    /// queued request is removed, a running one's token cancelled. Whether
-    /// the pool held it.
+    /// queued request is removed, a running one's token cancelled. One
+    /// past its mutation start, for which the connection queued nothing,
+    /// is answered `outcome_unknown` here. Whether the pool held it.
     pub fn cancel(&self, id: u64) -> bool {
         let mut state = self.inner.lock();
         if let Some(at) = state.queue.iter().position(|q| q.ticket.id == id) {
@@ -373,6 +480,12 @@ impl<A: Answers> Pool<A> {
         }
         if let Some(running) = state.running.iter().find(|r| r.id == id) {
             running.cancel.cancel();
+            if running.started {
+                let answers = running.answers.clone();
+                drop(state);
+                // Its work runs on to its end: its reply would be lost.
+                answer_unknown(&answers, id, "main cancelled it", false);
+            }
             return true;
         }
         false
@@ -413,14 +526,21 @@ impl<A: Answers> Pool<A> {
             }
         }
         if state.alive > 0 {
-            let running: Vec<(u64, A)> = state
+            if state.running.iter().any(|r| r.started && !r.proven) {
+                state.uncertain = true;
+            }
+            let running: Vec<(u64, A, bool)> = state
                 .running
                 .iter()
-                .map(|r| (r.id, r.answers.clone()))
+                .map(|r| (r.id, r.answers.clone(), r.started))
                 .collect();
             drop(state);
-            for (id, answers) in running {
-                answers.settle(id, &stopping(), &stopping_abort());
+            for (id, answers, started) in running {
+                if started {
+                    answer_unknown(&answers, id, "the service stopped before it returned", true);
+                } else {
+                    answers.settle(id, &stopping(), &stopping_abort());
+                }
             }
             return false;
         }
@@ -438,6 +558,44 @@ impl<A: Answers> Pool<A> {
     fn stop(&self, deadline: Instant) -> bool {
         self.fence();
         self.drain(deadline)
+    }
+}
+
+impl<A: Answers> Boundary for Inner<A> {
+    fn begin(&self, id: u64) -> bool {
+        let mut state = self.lock();
+        if state.phase == Phase::Stopped {
+            return false;
+        }
+        let Some(running) = state.running.iter_mut().find(|r| r.id == id) else {
+            return false;
+        };
+        if running.expired {
+            return false;
+        }
+        if Instant::now() >= running.deadline {
+            // Before the timer came to it: answered as the timer answers.
+            running.expired = true;
+            let (answers, cancel) = (running.answers.clone(), running.cancel.clone());
+            drop(state);
+            if answers.refuse(id, &past_deadline()) {
+                cancel.cancel();
+            }
+            return false;
+        }
+        // Main's cancel is decided under the connection's lock: the claim
+        // is made there too, nested in this one.
+        if !running.answers.commit(id) {
+            return false;
+        }
+        running.started = true;
+        true
+    }
+
+    fn proven(&self, id: u64) {
+        if let Some(running) = self.lock().running.iter_mut().find(|r| r.id == id) {
+            running.proven = true;
+        }
     }
 }
 
@@ -481,6 +639,8 @@ fn next<A: Answers>(inner: &Inner<A>) -> Option<Queued<A>> {
                 expired: false,
                 cancel: queued.ticket.cancel.clone(),
                 answers: queued.answers.clone(),
+                started: false,
+                proven: false,
             });
             return Some(queued);
         }
@@ -501,22 +661,43 @@ fn worker<A: Answers>(inner: &Inner<A>) {
         let outcome = with_kind(TaskKind::REQUEST, || {
             catch_unwind(AssertUnwindSafe(|| work(&ticket)))
         });
-        let stopping_now = inner.lock().phase == Phase::Stopped;
-        if outcome.is_err() {
-            answers.settle(
-                ticket.id,
-                &internal(),
-                &Abort::new(AbortCode::Internal, "Internal error"),
-            );
-        } else if stopping_now {
-            answers.settle(ticket.id, &stopping(), &stopping_abort());
-        } else {
+        let (stopping_now, expired, started, proven) = {
+            let state = inner.lock();
+            let (expired, started, proven) = state
+                .running
+                .iter()
+                .find(|r| r.id == ticket.id)
+                .map_or((false, false, false), |r| (r.expired, r.started, r.proven));
+            (state.phase == Phase::Stopped, expired, started, proven)
+        };
+        let id = ticket.id;
+        let internal_abort = Abort::new(AbortCode::Internal, "Internal error");
+        // A write has no stream: past its start, an abort never applies.
+        match (outcome.is_err(), stopping_now, started) {
+            (true, _, true) => answer_unknown(&answers, id, "an internal error", true),
+            (true, _, false) => {
+                answers.settle(id, &internal(), &internal_abort);
+            }
+            (false, true, true) => answer_unknown(&answers, id, "the service is stopping", true),
+            (false, true, false) => {
+                answers.settle(id, &stopping(), &stopping_abort());
+            }
             // Work that answered nothing: never a request left waiting.
-            answers.refuse(ticket.id, &internal());
+            (false, false, true) => answer_unknown(&answers, id, "it answered nothing", false),
+            // Past its deadline: whoever marked it so answers `deadline`,
+            // perhaps not yet (a write that didn't start for it).
+            (false, false, false) if expired => {}
+            (false, false, false) => {
+                answers.refuse(id, &internal());
+            }
         }
         // Its slot is let go of only now, after its answer: its work has
         // returned.
-        inner.lock().running.retain(|r| r.id != ticket.id);
+        let mut state = inner.lock();
+        if started && !proven {
+            state.uncertain = true;
+        }
+        state.running.retain(|r| r.id != id);
     }
 }
 
@@ -538,13 +719,13 @@ fn timer<A: Answers>(inner: &Inner<A>) {
         } else {
             VecDeque::new()
         };
-        let overdue: Vec<(u64, A, CancelToken)> = state
+        let overdue: Vec<(u64, A, CancelToken, bool)> = state
             .running
             .iter_mut()
             .filter(|r| !r.expired && r.deadline <= now)
             .map(|r| {
                 r.expired = true;
-                (r.id, r.answers.clone(), r.cancel.clone())
+                (r.id, r.answers.clone(), r.cancel.clone(), r.started)
             })
             .collect();
         if expired.is_empty() && overdue.is_empty() {
@@ -570,10 +751,14 @@ fn timer<A: Answers>(inner: &Inner<A>) {
         for queued in expired {
             queued.answers.refuse(queued.ticket.id, &past_deadline());
         }
-        for (id, answers, cancel) in overdue {
-            // Nothing of it answered yet: its head never goes out, and its
-            // work stops at its next check.
-            if answers.refuse(id, &past_deadline()) {
+        for (id, answers, cancel, started) in overdue {
+            if started {
+                // Past its mutation start: its work runs on to its end.
+                answer_unknown(&answers, id, "its deadline passed", false);
+                cancel.cancel();
+            } else if answers.refuse(id, &past_deadline()) {
+                // Nothing of it answered yet: its head never goes out, and
+                // its work stops at its next check.
                 cancel.cancel();
             }
         }
@@ -618,6 +803,13 @@ impl Pools {
     /// Main cancelled request `id` (see [`Pool::cancel`]).
     pub fn cancel(&self, id: u64) {
         let _ = self.all().iter().any(|pool| pool.cancel(id));
+    }
+
+    /// Whether a write in this run passed its mutation start without a
+    /// proven outcome (see the module's doc): its repository may hold a
+    /// partial mutation until it is repaired.
+    pub fn uncertain(&self) -> bool {
+        self.all().iter().any(|pool| pool.inner.lock().uncertain)
     }
 
     /// The stop (see the module's doc): every pool fenced, then drained

@@ -38,18 +38,20 @@
 //! `Embedded::node_alive` once a second. A node thread that ends while the
 //! node should run ends the process: `node_down`, exit 70, a crash, which
 //! main restarts. heartwood's own panics are caught by nothing, so this is
-//! how the service learns of them.
+//! how the service learns of them. It only tries the node's lock, never
+//! waiting for it under the phase's lock: while work holds the node
+//! exclusively, it asks again at the next interval.
 //!
 //! **The pools open with the node** ([`crate::pools`]): just before
 //! `rad.start`'s reply, so main's first request after it is admitted.
 //!
 //! **Pooled work reaches the node through its lock** ([`Node::handle`]):
 //! 0008's shared lock on the node ("Pools and budgets"). Work takes it
-//! shared, as reads and `rad.remove_repo` do: libradicle's calls for them
-//! take `&self`. Only the stop takes it exclusively, to ask the node to
-//! stop. The methods 0008 says need the node exclusively (`seeders`,
-//! `unseed_repo`) come with later steps. Work gets the node only while it
-//! runs, and lets go of it as its work returns.
+//! shared, as reads, the COB writes and `rad.remove_repo` do: libradicle's
+//! calls for them take `&self`. `rad.unseed` takes it exclusively, as
+//! libradicle's `unseed_repo` takes `&mut self`, and so does the stop, to
+//! ask the node to stop; `seeders` comes with a later step. Work gets the
+//! node only while it runs, and lets go of it as its work returns.
 //!
 //! **The stop** ([`Node::stop`], at the connection's end), within 3 s
 //! ([`SHUTDOWN_WITHIN`]), inside the connection's 5 s exit:
@@ -103,19 +105,21 @@
 //! **The dirty marker is cleared only after a proven clean stop**
 //! ("Reconciliation"): `rad.shutdown` ended the connection; the pools'
 //! drain was complete before the node's stop, so every pool thread ended,
-//! no write is queued or running, and this build has no write that could
-//! be uncertain (a removal from quarantine keeps its record until its last
-//! step, [`crate::quarantine`]); and the stop's `Shutdown` is `Asked::ThisCall`,
-//! `ThreadEnd::Stopped` and `HomeLock::Released`, within the time the drain
-//! left. So the node stopped because this stop asked it, it let go of its
-//! home, and heartwood's workers have finished their fetches. A node down
-//! behind the stop is `node_down` whatever the drain; otherwise an
-//! incomplete drain leaves the stop unproven. Anything else leaves the
-//! marker, and the next start runs the full repair.
+//! and no write is queued or running; no write of this run passed its
+//! mutation start without a proven outcome ([`Pools::uncertain`]: this
+//! build has no online repair yet, so such a write's repository is
+//! repaired only at the next start); and the stop's `Shutdown` is
+//! `Asked::ThisCall`, `ThreadEnd::Stopped` and `HomeLock::Released`, within
+//! the time the drain left. So the node stopped because this stop asked
+//! it, it let go of its home, and heartwood's workers have finished their
+//! fetches. A node down behind the stop is `node_down` whatever the drain;
+//! otherwise an incomplete drain leaves the stop unproven. Anything else
+//! leaves the marker, and the next start runs the full repair.
 
 use std::path::{Path, PathBuf};
 use std::sync::{
-    Arc, Condvar, Mutex, MutexGuard, PoisonError, RwLock, RwLockReadGuard, TryLockError,
+    Arc, Condvar, Mutex, MutexGuard, PoisonError, RwLock, RwLockReadGuard, RwLockWriteGuard,
+    TryLockError,
 };
 use std::time::{Duration, Instant};
 
@@ -162,8 +166,9 @@ struct Running {
 }
 
 impl Running {
-    /// The node, shared. Only the stop takes it exclusively, and never
-    /// panics holding it, so a poisoned lock still holds a whole node.
+    /// The node, shared. A poisoned lock still holds a whole node: the
+    /// stop never panics holding it, and `rad.unseed`'s call that unwinds
+    /// leaves the node as any call does.
     fn node(&self) -> RwLockReadGuard<'_, libradicle::Embedded> {
         self.embedded.read().unwrap_or_else(PoisonError::into_inner)
     }
@@ -184,7 +189,7 @@ impl Running {
     }
 
     /// Whether the node's thread still runs, if no one holds the node
-    /// exclusively: `None` otherwise.
+    /// exclusively: `None` otherwise. Never waits.
     fn alive(&self) -> Option<bool> {
         match self.embedded.try_read() {
             Ok(node) => Some(node.node_alive()),
@@ -206,6 +211,15 @@ impl Handle {
     /// The node, shared (see the module's doc).
     pub fn node(&self) -> RwLockReadGuard<'_, libradicle::Embedded> {
         self.embedded.read().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// The node, exclusively: once every other holder has let go of it.
+    /// A panic holding it poisons the lock; the node stays whole, as any
+    /// call that unwinds leaves it.
+    pub fn node_mut(&self) -> RwLockWriteGuard<'_, libradicle::Embedded> {
+        self.embedded
+            .write()
+            .unwrap_or_else(PoisonError::into_inner)
     }
 }
 
@@ -400,7 +414,10 @@ impl Node {
         let mut phase = self.lock();
         loop {
             match &*phase {
-                Phase::Running(running) if running.node().node_alive() => {}
+                // Never waited for under the phase's lock: work holding the
+                // node exclusively (`rad.unseed`) is waited out, and asked
+                // again at the next interval.
+                Phase::Running(running) if running.alive() != Some(false) => {}
                 Phase::Running(_) => {
                     if let Phase::Running(running) = std::mem::replace(&mut *phase, Phase::Over) {
                         *phase = Phase::Down(running);
@@ -462,6 +479,10 @@ impl Node {
         drop(nat64);
         drop(repositories);
         match decided {
+            Ending::Clean if self.pools.uncertain() => log::info(
+                "the node stopped cleanly, but a write's outcome is unknown; the dirty marker stays",
+                json!({}),
+            ),
             Ending::Clean => match marker::remove(home) {
                 Ok(()) => log::info(
                     "the node stopped cleanly; the dirty marker is cleared",
@@ -500,7 +521,8 @@ impl Node {
 
 /// The node thread ended while the node should run, or the node began to
 /// stop behind the service: the process ends with 70, a crash, and the
-/// marker stays. Nothing else is in flight in this build to answer.
+/// marker stays. The connection's end then stops the pools, which answer
+/// what is in flight: `stopped`, or `outcome_unknown` past a write's start.
 fn node_down(conn: &Connection) {
     log::error("the node thread ended", json!({ "reason": "node_down" }));
     conn.fail(Exit::Internal);

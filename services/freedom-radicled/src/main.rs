@@ -67,6 +67,7 @@ mod reconcile;
 mod service;
 mod testhooks;
 mod units;
+mod writes;
 
 use std::process::ExitCode;
 use std::sync::Arc;

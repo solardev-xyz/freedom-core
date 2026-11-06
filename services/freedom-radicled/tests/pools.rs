@@ -2,9 +2,10 @@
 //! "Pools and budgets", "Deadlines" and "Start, stop and reconciliation"):
 //! they open as `rad.start` answers, refuse past their bounds, enforce
 //! their deadlines and main's cancel, and drain at the stop before the node
-//! is asked to stop. This build serves only quarantine's pooled methods
-//! (tests/quarantine.rs): every other one's work answers `stopped`, and
-//! `FREEDOM_RADICLED_TEST_HOLD_WORK` holds it in its slot first.
+//! is asked to stop. This build serves quarantine's pooled methods
+//! (tests/quarantine.rs) and the writes (tests/writes.rs): the reads' work
+//! answers `stopped`. `FREEDOM_RADICLED_TEST_HOLD_WORK` holds each in its
+//! slot first, the writes before their mutation starts.
 //!
 //! Every node here reaches no one, as in tests/start.rs.
 
@@ -20,6 +21,10 @@ use serde_json::{Value, json};
 
 const HOLD: (&str, &str) = ("FREEDOM_RADICLED_TEST_HOLD_WORK", "1");
 
+/// A repository ID the home doesn't hold: an unseed of it is held in its
+/// slot as any write is, before its start.
+const RID: &str = "rad:z3gqcJUoA1n9HaHKufZs5FCSGazv5";
+
 /// The pooled methods, as 0008's table places them.
 const POOLED: [&str; 6] = [
     "rad.quarantine_list",
@@ -30,8 +35,14 @@ const POOLED: [&str; 6] = [
     "rad.write",
 ];
 
-/// The pooled methods this build serves: quarantine's (tests/quarantine.rs).
-const SERVED: [&str; 2] = ["rad.quarantine_list", "rad.remove_repo"];
+/// The pooled methods this build serves: quarantine's (tests/quarantine.rs)
+/// and the writes (tests/writes.rs).
+const SERVED: [&str; 4] = [
+    "rad.quarantine_list",
+    "rad.remove_repo",
+    "rad.unseed",
+    "rad.write",
+];
 
 fn code(reply: &Value) -> &str {
     reply["error"]["code"].as_str().unwrap_or_default()
@@ -58,8 +69,8 @@ fn pooled_methods_are_admitted_once_the_node_runs_and_the_stop_is_clean() {
     }
     let started = radicled.call("rad.start", json!({ "alias": "pools" }));
     assert!(started["result"].is_object(), "{started}");
-    // Admitted, and run: each one's work answers. Quarantine's methods
-    // check their params.
+    // Admitted, and run: each one's work answers. The served methods check
+    // their params.
     for method in POOLED {
         let reply = radicled.call(method, json!({}));
         if SERVED.contains(&method) {
@@ -101,7 +112,7 @@ fn the_pools_refuse_past_their_bounds_and_drain_at_a_clean_stop() {
         reply["error"]["message"], "the read queue is full",
         "{reply}"
     );
-    held.extend((0..1 + 16).map(|_| radicled.request("rad.write", json!({}))));
+    held.extend((0..1 + 16).map(|_| radicled.request("rad.unseed", json!({ "rid": RID }))));
     let reply = radicled.call("rad.unseed", json!({}));
     assert_eq!(code(&reply), "busy", "{reply}");
     assert_eq!(
@@ -147,7 +158,7 @@ fn queued_and_running_work_past_its_deadline_is_deadline() {
     let mut ids: Vec<u64> = (0..5)
         .map(|_| radicled.request("rad.read", json!({})))
         .collect();
-    ids.extend((0..2).map(|_| radicled.request("rad.write", json!({}))));
+    ids.extend((0..2).map(|_| radicled.request("rad.unseed", json!({ "rid": RID }))));
     for id in ids {
         let reply = radicled.reply(id);
         assert_eq!(code(&reply), "deadline", "{reply}");
@@ -177,7 +188,7 @@ fn work_still_running_past_the_drain_keeps_the_marker() {
         ],
     );
     assert!(radicled.start()["result"].is_object());
-    let write = radicled.request("rad.write", json!({}));
+    let write = radicled.request("rad.unseed", json!({ "rid": RID }));
     assert!(radicled.logs("test hook: work holds its slot", Duration::from_secs(10)));
     let asked = Instant::now();
     radicled.shutdown();

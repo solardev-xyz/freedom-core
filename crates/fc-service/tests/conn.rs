@@ -72,6 +72,9 @@ struct Toy {
     /// Heads' charges not yet released.
     charged: Arc<Mutex<usize>>,
     cancels: Mutex<Vec<u64>>,
+    /// Requests whose commit point `t.commit` claimed: a cancel of one is
+    /// answered `outcome_unknown` here.
+    committed: Mutex<Vec<u64>>,
     /// Holds the next cancel callback until it receives.
     cancel_gate: Mutex<Option<mpsc::Receiver<()>>>,
     /// Reentrant charges, as each is dropped.
@@ -212,6 +215,19 @@ impl Service for Toy {
                 conn.push(request.id, b"first bytes").unwrap();
             }
             "t.fail" => conn.fail(Exit::Internal),
+            // Answered by nothing until a cancel: work before its commit
+            // point.
+            "t.wait" => {}
+            // Claims another request's commit point: whether it could.
+            "t.commit" => {
+                let target = params["id"].as_u64().unwrap();
+                let committed = conn.commit(target);
+                if committed {
+                    self.committed.lock().unwrap().push(target);
+                }
+                conn.reply(request.id, &json!({ "committed": committed }))
+                    .unwrap();
+            }
             // Settles another request as a panic would.
             "t.settle" => {
                 let target = params["id"].as_u64().unwrap();
@@ -273,12 +289,19 @@ impl Service for Toy {
         }
     }
 
-    fn cancel(&self, _conn: &Connection, id: u64) {
+    fn cancel(&self, conn: &Connection, id: u64) {
         let gate = self.cancel_gate.lock().unwrap().take();
         if let Some(gate) = gate {
             gate.recv_timeout(Duration::from_secs(10)).unwrap();
         }
         self.cancels.lock().unwrap().push(id);
+        if self.committed.lock().unwrap().contains(&id) {
+            conn.reply_error(
+                id,
+                &ErrorBody::new(ErrorCode::OutcomeUnknown, "past its commit point"),
+            )
+            .unwrap();
+        }
     }
 
     fn end(&self, _conn: &Connection, end: End) {
@@ -1030,6 +1053,48 @@ fn a_failed_send_says_how_much_it_queued() {
     }
     assert_eq!(sent.unwrap(), json!({ "sent": received, "ok": false }));
     assert_eq!(received, (128 << 10) + 1);
+    main.close();
+    assert_eq!(main.exit(), Exit::Ok);
+}
+
+/// 0008, "Writes": main's cancel of a request whose work claimed its
+/// commit point queues no `cancelled`. It reaches the service alone, whose
+/// answer is the request's one reply. A claim is refused once anything of
+/// the request is queued: main's `cancelled`, its reply, or its head.
+#[test]
+fn a_cancel_after_a_commit_queues_nothing_and_the_service_answers() {
+    let mut main = start(options());
+    main.hello();
+    main.request(2, "t.wait", Value::Null);
+    main.request(3, "t.commit", json!({ "id": 2 }));
+    let reply = main.message();
+    assert_eq!(reply["id"], 3, "{reply}");
+    assert_eq!(reply["result"]["committed"], true, "{reply}");
+    main.json(json!({ "type": "cancel", "id": 2 }));
+    let reply = main.message();
+    assert_eq!(reply["id"], 2, "{reply}");
+    assert_eq!(reply["error"]["code"], "outcome_unknown", "{reply}");
+    // Answered: a second cancel is late.
+    main.json(json!({ "type": "cancel", "id": 2 }));
+
+    // Main's cancel first: `cancelled`, and no claim after it.
+    main.request(4, "t.wait", Value::Null);
+    main.json(json!({ "type": "cancel", "id": 4 }));
+    let reply = main.message();
+    assert_eq!(
+        (reply["id"].clone(), reply["error"]["code"].clone()),
+        (json!(4), json!("cancelled"))
+    );
+    // Answered, or headed, first; and an ID never seen.
+    main.request(5, "t.echo", json!(5));
+    assert_eq!(main.message()["result"]["echo"], 5);
+    main.request(6, "t.nobody", Value::Null);
+    assert_eq!(main.message()["result"]["body"], false);
+    for (id, target) in [(7, 4), (8, 5), (9, 6), (10, 99)] {
+        main.request(id, "t.commit", json!({ "id": target }));
+        assert_eq!(main.message()["result"]["committed"], false, "{target}");
+    }
+    assert_eq!(*main.toy.cancels.lock().unwrap(), [2, 4]);
     main.close();
     assert_eq!(main.exit(), Exit::Ok);
 }

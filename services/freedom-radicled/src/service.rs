@@ -13,9 +13,10 @@
 //!   deadline from admission. Before `RUNNING` and from the stop on they
 //!   are `stopped`, and past the pool's bounds `busy`. Quarantine's two,
 //!   `rad.quarantine_list` and `rad.remove_repo`, are served
-//!   ([`crate::quarantine`]). The others' operations come with later steps:
-//!   until then each one's work answers `stopped`, as this build answered
-//!   it before;
+//!   ([`crate::quarantine`]), and so are the writes, `rad.write` and
+//!   `rad.unseed`, with the mutation-start boundary ([`crate::writes`]).
+//!   The reads' operations come with later steps: until then each one's
+//!   work answers `stopped`, as this build answered it before;
 //! - `rad.connect_seeds` and `rad.clone`, for the network pool, whose
 //!   deadline is the request's own `timeout_ms` plus 30 s, come with the
 //!   network operations' step; they, `rad.stats` (inline) and
@@ -57,7 +58,7 @@ use crate::confine::Grant;
 use crate::identity::{self, Identity};
 use crate::node::{self, Node};
 use crate::pools::{self, Pool, Pools, Ticket, Work};
-use crate::{quarantine, reconcile};
+use crate::{quarantine, reconcile, writes};
 use crate::{testhooks, units};
 
 /// How the process ends after a start step it answered with an error
@@ -188,6 +189,12 @@ impl RadicleService {
         match request.method {
             "rad.quarantine_list" => quarantine::list(conn, &self.home, request.params),
             "rad.remove_repo" => quarantine::remove(conn, &self.node, &self.home, request.params),
+            "rad.write" => {
+                // Known by now: the pool admits nothing before `RUNNING`.
+                let ephemeral = self.identity.with(|i| i.ephemeral).unwrap_or(true);
+                writes::write(conn, &self.node, &self.home, request.params, ephemeral)
+            }
+            "rad.unseed" => writes::unseed(conn, &self.node, request.params),
             _ => later_step(conn),
         }
     }

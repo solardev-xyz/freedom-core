@@ -760,6 +760,12 @@ impl Sender {
         self.requests.contains_key(&id)
     }
 
+    /// Whether request `id` is held with nothing of it queued yet: no
+    /// reply, no head, and no `cancelled` in their place.
+    pub fn is_unanswered(&self, id: u64) -> bool {
+        matches!(self.requests.get(&id), Some(State::Working))
+    }
+
     /// The live requests.
     pub fn live(&self) -> usize {
         self.requests.len()
@@ -1028,6 +1034,26 @@ mod tests {
     #[test]
     fn a_cancels_abort_is_the_cancelled_abort() {
         assert_eq!(Abort::cancelled().to_json().unwrap(), CANCELLED_ABORT);
+    }
+
+    #[test]
+    fn only_a_request_with_nothing_queued_is_unanswered() {
+        let mut s = Sender::new();
+        assert!(!s.is_unanswered(1), "not held");
+        for id in 1..=5 {
+            s.request(id).unwrap();
+            assert!(s.is_unanswered(id));
+        }
+        s.reply(1, b"{}".to_vec()).unwrap();
+        s.head(2, b"{}".to_vec(), true).unwrap();
+        assert_eq!(s.cancel(3), Ok(Cancel::Cancelled));
+        s.head(4, b"{}".to_vec(), true).unwrap();
+        let mut out = Vec::new();
+        while s.next_frame(&mut out).is_some() {}
+        for id in 1..=4 {
+            assert!(!s.is_unanswered(id), "{id}");
+        }
+        assert!(s.is_unanswered(5));
     }
 
     #[test]

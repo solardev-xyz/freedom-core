@@ -440,6 +440,13 @@ The rules this design relies on, as 0007 specifies them:
 | `rad.write` | `op` (`create_issue`, `comment_issue`, `edit_issue_state`, `comment_patch`), `args` | today's JSON | write queue; 60 s |
 | `rad.import_repo` | `path`, `name`, `description`, `default_branch` | `{ rid }` | the import process only, once `rad.reconcile` has succeeded ([Writes](#writes)); 300 s |
 
+- **`rad.write`'s `args`** are today's arguments, by name, and each result is today's:
+  - `create_issue`: `{ rid, title, description, labels }`, giving `{ id }`;
+  - `comment_issue`: `{ rid, issue_id, body, reply_to }`, with `reply_to` optional or null, giving `{ id }`;
+  - `edit_issue_state`: `{ rid, issue_id, state }`, with `state` one of `open`, `closed` and `solved`, giving `{ id, state }`;
+  - `comment_patch`: `{ rid, revision_id, body }`, giving `{ id }`.
+
+  The service checks what libradicle would refuse of them (the RID, a COB ID, a title, a label, the state) before the write starts, so each of those is `invalid_argument`, never `outcome_unknown` ([Writes](#writes)).
 - **`rad.read`'s `op`** is one of the ops below, in three classes. Each body is JSON, and its class says whose bytes it reproduces ([Parity](#parity)).
   - **Pass-through:** the exact JSON text the v0.8.0 add-on returns for that export, with today's arguments:
     - `repo_info`, `tree`, `tree_at`, `blob`, `blob_at`;
@@ -591,8 +598,10 @@ All bounds are process-wide. The service hosts one node.
   - **Before it, failure is definitive:**
     - validation errors (`invalid_argument`), a full queue (`busy`), and a write on a node with a throwaway key (`needs_vault`);
     - a queued write that is cancelled, passes its deadline, or meets a shutdown. It is removed from the queue before it can run, and answered `cancelled`, `deadline` or `stopped`.
+    - a write on the writer that one of them meets before it starts: answered so, and it doesn't start.
 
     None of them ran.
+  - **The writer claims the start in one step with each of them,** so exactly one wins: the stop's fence and the deadline are decided under the queue's lock, and main's cancel under the connection's. Once the writer has claimed it, main's cancel queues no `cancelled` (the connection's commit point, as 0001's worker claims its own), and the service answers it `outcome_unknown`.
   - **After it, only a success is proven.** Every other result is **`outcome_unknown`**:
     - a libradicle error;
     - a panic;

@@ -1,6 +1,6 @@
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 
@@ -20,18 +20,25 @@ enum Answer {
 }
 
 /// The answers, as the connection's sender keeps them: one reply or head
-/// per request, and an abort only for an open stream.
+/// per request, and an abort only for an open stream; and the requests
+/// whose commit point their work claimed.
 #[derive(Clone, Default)]
-struct Record(Arc<Mutex<HashMap<u64, Answer>>>);
+struct Record {
+    answers: Arc<Mutex<HashMap<u64, Answer>>>,
+    committed: Arc<Mutex<HashSet<u64>>>,
+    /// While set for an ID, a refusal of it waits until this is cleared:
+    /// the timer held between deciding a deadline and answering it.
+    stall: Arc<Mutex<Option<u64>>>,
+}
 
 impl Record {
     fn get(&self, id: u64) -> Option<Answer> {
-        self.0.lock().unwrap().get(&id).cloned()
+        self.answers.lock().unwrap().get(&id).cloned()
     }
 
     /// Queues `answer` as `id`'s reply or head, unless it has one.
     fn answer(&self, id: u64, answer: Answer) -> bool {
-        let mut answers = self.0.lock().unwrap();
+        let mut answers = self.answers.lock().unwrap();
         if answers.contains_key(&id) {
             return false;
         }
@@ -40,14 +47,27 @@ impl Record {
     }
 
     /// Main's cancel, as the connection handles it: `cancelled`, unless
-    /// answered.
+    /// answered or committed; then the pool is told.
     fn cancel(&self, pool: &Pool<Record>, id: u64) -> bool {
-        self.answer(id, Answer::Error(ErrorCode::Cancelled));
+        if !self.committed.lock().unwrap().contains(&id) {
+            self.answer(id, Answer::Error(ErrorCode::Cancelled));
+        }
         pool.cancel(id)
     }
 
+    /// Main's cancel as the connection queues it, before it tells the
+    /// pool.
+    fn cancelled_unseen(&self, id: u64) {
+        assert!(!self.committed.lock().unwrap().contains(&id));
+        self.answer(id, Answer::Error(ErrorCode::Cancelled));
+    }
+
+    fn stall(&self, id: Option<u64>) {
+        *self.stall.lock().unwrap() = id;
+    }
+
     fn count(&self, answer: &Answer) -> usize {
-        self.0
+        self.answers
             .lock()
             .unwrap()
             .values()
@@ -58,20 +78,34 @@ impl Record {
 
 impl Answers for Record {
     fn refuse(&self, id: u64, error: &ErrorBody) -> bool {
+        while *self.stall.lock().unwrap() == Some(id) {
+            std::thread::sleep(Duration::from_millis(2));
+        }
         self.answer(id, Answer::Error(error.code))
     }
 
-    fn settle(&self, id: u64, error: &ErrorBody, abort: &Abort) {
-        let mut answers = self.0.lock().unwrap();
+    fn settle(&self, id: u64, error: &ErrorBody, abort: &Abort) -> bool {
+        let mut answers = self.answers.lock().unwrap();
         match answers.get(&id) {
             None => {
                 answers.insert(id, Answer::Error(error.code));
+                true
             }
             Some(Answer::Head) => {
                 answers.insert(id, Answer::Abort(abort.code));
+                true
             }
-            Some(_) => {}
+            Some(_) => false,
         }
+    }
+
+    fn commit(&self, id: u64) -> bool {
+        let answers = self.answers.lock().unwrap();
+        if answers.contains_key(&id) {
+            return false;
+        }
+        self.committed.lock().unwrap().insert(id);
+        true
     }
 }
 
@@ -133,7 +167,11 @@ impl Probe {
             loop {
                 if hold.released() {
                     if kind == Kind::Headed {
-                        record.0.lock().unwrap().insert(ticket.id, Answer::Done);
+                        record
+                            .answers
+                            .lock()
+                            .unwrap()
+                            .insert(ticket.id, Answer::Done);
                     } else {
                         record.answer(ticket.id, Answer::Done);
                     }
@@ -569,4 +607,337 @@ fn dropping_a_pool_ends_its_threads() {
     assert_eq!(inner.lock().alive, 4);
     drop(pool);
     assert!(until(|| inner.lock().alive == 0));
+}
+
+/// What a test write does past its boundary, once told to finish.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Past {
+    /// Answers its success, and marks it proven.
+    Proven,
+    /// Answers `outcome_unknown` itself, as a libradicle error is.
+    Fails,
+    /// Answers nothing.
+    Silent,
+    /// Panics.
+    Panics,
+}
+
+/// A write's work as the writes run it: once `go` is released it claims
+/// its boundary, and says whether it could on `began`; past it, it waits
+/// for `finish` whatever its token, as libradicle's mutation does, then
+/// does as `past` says.
+fn write(
+    record: &Record,
+    go: &Hold,
+    finish: &Hold,
+    began: &mpsc::Sender<bool>,
+    past: Past,
+) -> Work {
+    let (record, go, finish, began) = (record.clone(), go.clone(), finish.clone(), began.clone());
+    Box::new(move |ticket: &Ticket| {
+        while !go.released() {
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        let begun = ticket.begin();
+        let _ = began.send(begun);
+        if !begun {
+            return;
+        }
+        while !finish.released() {
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        match past {
+            Past::Proven => {
+                record.answer(ticket.id, Answer::Done);
+                ticket.proven();
+            }
+            Past::Fails => {
+                record.answer(ticket.id, Answer::Error(ErrorCode::OutcomeUnknown));
+            }
+            Past::Silent => {}
+            Past::Panics => panic!("a test panic past the boundary"),
+        }
+    })
+}
+
+fn began(rx: &mpsc::Receiver<bool>) -> bool {
+    rx.recv_timeout(Duration::from_secs(5)).unwrap()
+}
+
+fn running(pool: &Pool<Record>) -> usize {
+    pool.inner.lock().running.len()
+}
+
+fn uncertain(pool: &Pool<Record>) -> bool {
+    pool.inner.lock().uncertain
+}
+
+/// 0008, "Writes": main's cancel, queued by the connection before the pool
+/// hears of it, keeps a write from starting: the claim is made where the
+/// connection decides. And one the pool has heard of.
+#[test]
+fn a_write_cancelled_before_its_boundary_never_starts() {
+    let (record, finish) = (Record::default(), Hold::default());
+    let (go, go2) = (Hold::default(), Hold::default());
+    let (tx, rx) = mpsc::channel();
+    finish.release();
+    let pool = open(shape(1, 1));
+    pool.submit(
+        1,
+        far(),
+        record.clone(),
+        write(&record, &go, &finish, &tx, Past::Proven),
+    );
+    pool.submit(
+        2,
+        far(),
+        record.clone(),
+        write(&record, &go2, &finish, &tx, Past::Proven),
+    );
+    assert!(until(|| running(&pool) == 1));
+    // The connection has queued `cancelled`; the reader hasn't told the
+    // pool yet.
+    record.cancelled_unseen(1);
+    go.release();
+    assert!(!began(&rx));
+    // The reader's callback, late: the work may have returned already.
+    let _ = pool.cancel(1);
+    // The next, cancelled while it runs, before its boundary.
+    assert!(until(|| pool
+        .inner
+        .lock()
+        .running
+        .iter()
+        .any(|r| r.id == 2)));
+    assert!(record.cancel(&pool, 2));
+    go2.release();
+    assert!(!began(&rx));
+    assert!(until(|| running(&pool) == 0));
+    for id in [1, 2] {
+        assert_eq!(
+            record.get(id),
+            Some(Answer::Error(ErrorCode::Cancelled)),
+            "{id}"
+        );
+    }
+    assert!(!uncertain(&pool));
+    assert!(pool.stop(soon(2000)));
+}
+
+/// A deadline the timer has decided, but not yet answered, keeps a write
+/// from starting; and so does a deadline the timer hasn't come to:
+/// `begin` answers it itself.
+#[test]
+fn a_write_past_its_deadline_before_its_boundary_never_starts() {
+    let (record, go, finish) = (Record::default(), Hold::default(), Hold::default());
+    let (tx, rx) = mpsc::channel();
+    finish.release();
+    let pool = open(shape(2, 0));
+    // Decided, its answer held up.
+    record.stall(Some(1));
+    pool.submit(
+        1,
+        soon(50),
+        record.clone(),
+        write(&record, &go, &finish, &tx, Past::Proven),
+    );
+    assert!(until(|| pool
+        .inner
+        .lock()
+        .running
+        .iter()
+        .any(|r| r.id == 1 && r.expired)));
+    // Behind it, the timer can't reach the second's deadline.
+    pool.submit(
+        2,
+        soon(100),
+        record.clone(),
+        write(&record, &go, &finish, &tx, Past::Proven),
+    );
+    assert!(until(|| running(&pool) == 2));
+    std::thread::sleep(Duration::from_millis(150));
+    go.release();
+    assert!(!began(&rx));
+    assert!(!began(&rx));
+    assert_eq!(record.get(2), Some(Answer::Error(ErrorCode::Deadline)));
+    record.stall(None);
+    assert!(until(|| record.get(1).is_some()));
+    assert_eq!(record.get(1), Some(Answer::Error(ErrorCode::Deadline)));
+    assert!(!uncertain(&pool));
+    assert!(pool.stop(soon(2000)));
+}
+
+/// A write the stop meets before its boundary never starts: `stopped`.
+#[test]
+fn a_write_met_by_the_stop_before_its_boundary_never_starts() {
+    let (record, go, finish) = (Record::default(), Hold::default(), Hold::default());
+    let (tx, rx) = mpsc::channel();
+    finish.release();
+    let pool = open(shape(1, 0));
+    pool.submit(
+        1,
+        far(),
+        record.clone(),
+        write(&record, &go, &finish, &tx, Past::Proven),
+    );
+    assert!(until(|| running(&pool) == 1));
+    pool.fence();
+    go.release();
+    assert!(!began(&rx));
+    assert!(pool.drain(soon(2000)));
+    assert_eq!(record.get(1), Some(Answer::Error(ErrorCode::Stopped)));
+    assert!(!uncertain(&pool));
+}
+
+/// Past its boundary, a write's deadline is `outcome_unknown`, and its work
+/// runs on to its end, holding its slot: its success, later, is lost, and
+/// proven.
+#[test]
+fn past_its_boundary_a_deadline_is_outcome_unknown_and_the_write_runs_on() {
+    let (record, go, finish) = (Record::default(), Hold::default(), Hold::default());
+    let (tx, rx) = mpsc::channel();
+    go.release();
+    let pool = open(shape(1, 0));
+    pool.submit(
+        1,
+        soon(150),
+        record.clone(),
+        write(&record, &go, &finish, &tx, Past::Proven),
+    );
+    assert!(began(&rx));
+    assert!(until(|| record.get(1).is_some()));
+    assert_eq!(
+        record.get(1),
+        Some(Answer::Error(ErrorCode::OutcomeUnknown))
+    );
+    assert_eq!(running(&pool), 1);
+    let work = write(&record, &go, &finish, &tx, Past::Proven);
+    assert_eq!(pool.submit(2, far(), record.clone(), work), Admission::Busy);
+    finish.release();
+    assert!(until(|| running(&pool) == 0));
+    assert_eq!(
+        record.get(1),
+        Some(Answer::Error(ErrorCode::OutcomeUnknown))
+    );
+    assert!(!uncertain(&pool));
+    assert!(pool.stop(soon(2000)));
+}
+
+/// Past its boundary, main's cancel queues nothing at the connection, and
+/// the pool answers it `outcome_unknown`.
+#[test]
+fn past_its_boundary_a_cancel_is_outcome_unknown() {
+    let (record, go, finish) = (Record::default(), Hold::default(), Hold::default());
+    let (tx, rx) = mpsc::channel();
+    go.release();
+    let pool = open(shape(1, 0));
+    pool.submit(
+        1,
+        far(),
+        record.clone(),
+        write(&record, &go, &finish, &tx, Past::Fails),
+    );
+    assert!(began(&rx));
+    assert!(record.cancel(&pool, 1));
+    assert_eq!(
+        record.get(1),
+        Some(Answer::Error(ErrorCode::OutcomeUnknown))
+    );
+    finish.release();
+    assert!(until(|| running(&pool) == 0));
+    assert!(uncertain(&pool));
+    assert!(pool.stop(soon(2000)));
+}
+
+/// The stop waits for a started write within its drain, and a reply it
+/// queues in time stands; one still running past the drain is
+/// `outcome_unknown`, and leaves the run uncertain.
+#[test]
+fn the_stop_keeps_a_started_writes_reply_and_settles_one_past_the_drain_unknown() {
+    let (record, go, finish) = (Record::default(), Hold::default(), Hold::default());
+    let (tx, rx) = mpsc::channel();
+    go.release();
+    let pool = open(shape(1, 0));
+    pool.submit(
+        1,
+        far(),
+        record.clone(),
+        write(&record, &go, &finish, &tx, Past::Proven),
+    );
+    assert!(began(&rx));
+    let finishing = finish.clone();
+    let later = std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(100));
+        finishing.release();
+    });
+    assert!(pool.stop(soon(2000)));
+    later.join().unwrap();
+    assert_eq!(record.get(1), Some(Answer::Done));
+    assert!(!uncertain(&pool));
+
+    let (record, finish) = (Record::default(), Hold::default());
+    let pool = open(shape(1, 0));
+    pool.submit(
+        1,
+        far(),
+        record.clone(),
+        write(&record, &go, &finish, &tx, Past::Proven),
+    );
+    assert!(began(&rx));
+    assert!(!pool.stop(soon(200)));
+    assert_eq!(
+        record.get(1),
+        Some(Answer::Error(ErrorCode::OutcomeUnknown))
+    );
+    assert!(uncertain(&pool));
+    finish.release();
+    assert!(until(|| alive(&pool) == 0));
+    assert_eq!(
+        record.get(1),
+        Some(Answer::Error(ErrorCode::OutcomeUnknown))
+    );
+}
+
+/// Past its boundary, a panic and work that answers nothing are
+/// `outcome_unknown`; they, and a write that answers `outcome_unknown`
+/// itself, leave the run uncertain. A proven one doesn't.
+#[test]
+fn past_its_boundary_only_a_proven_outcome_leaves_the_run_certain() {
+    for (past, answer, left_uncertain) in [
+        (Past::Proven, Answer::Done, false),
+        (Past::Fails, Answer::Error(ErrorCode::OutcomeUnknown), true),
+        (Past::Silent, Answer::Error(ErrorCode::OutcomeUnknown), true),
+        (Past::Panics, Answer::Error(ErrorCode::OutcomeUnknown), true),
+    ] {
+        let (record, go, finish) = (Record::default(), Hold::default(), Hold::default());
+        let (tx, rx) = mpsc::channel();
+        go.release();
+        finish.release();
+        let pool = open(shape(1, 0));
+        pool.submit(
+            1,
+            far(),
+            record.clone(),
+            write(&record, &go, &finish, &tx, past),
+        );
+        assert!(began(&rx));
+        assert!(until(|| running(&pool) == 0));
+        assert_eq!(record.get(1), Some(answer.clone()));
+        assert_eq!(uncertain(&pool), left_uncertain);
+        // Before its boundary, the same work is `internal`, and certain.
+        if past == Past::Panics {
+            let pool = open(shape(1, 0));
+            pool.submit(
+                2,
+                far(),
+                record.clone(),
+                Box::new(|_: &Ticket| panic!("before")),
+            );
+            assert!(until(|| record.get(2).is_some()));
+            assert_eq!(record.get(2), Some(Answer::Error(ErrorCode::Internal)));
+            assert!(!uncertain(&pool));
+            assert!(pool.stop(soon(2000)));
+        }
+        assert!(pool.stop(soon(2000)));
+    }
 }

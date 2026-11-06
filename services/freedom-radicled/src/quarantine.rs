@@ -31,10 +31,19 @@
 //! the step. The record, its `qid` and the gate's close all stay, and a retry
 //! with the same `qid` runs the steps again, each of them idempotent.
 //!
-//! **A removal starts only while its token holds.** One cancelled first, by
-//! main's cancel, its deadline or the stop, removes nothing, and its request
-//! has its answer already. Once started, libradicle's call runs to its end,
-//! and the record is what a retry relies on.
+//! **A removal starts at the mutation-start boundary**
+//! ([`crate::pools::Ticket::begin`]), after its precondition. One that
+//! main's cancel, its deadline or the stop meets first removes nothing,
+//! and is answered `cancelled`, `deadline` or `stopped`. Once started,
+//! libradicle's call runs to its end, and its own outcome is proven
+//! whatever it is: a failure keeps the record, so the repository stays
+//! quarantined, and a retry relies on it. A cancel, the deadline or the
+//! stop that comes past the boundary is `outcome_unknown`: main lists the
+//! quarantine again, and a retry that finds the record gone is
+//! `not_quarantined`.
+//!
+//! **A write to a quarantined repository** is refused with `quarantined`,
+//! and the record's `kind` and `step` ([`refusal`], [`crate::writes`]).
 //!
 //! **Params** are read as each request is admitted. A bad one is answered
 //! `invalid_argument` by its work, after the pool's own refusals (`stopped`,
@@ -49,7 +58,7 @@ use std::sync::Arc;
 use fc_protocol::error::{ErrorBody, ErrorCode};
 use fc_service::conn::Connection;
 use fc_service::log;
-use radicle::node::gate::RepoGate;
+use radicle::node::gate::{self, RepoGate};
 use radicle::prelude::RepoId;
 use radicle::storage::git::reconcile::quarantine::{self, Qid, Quarantine, Removal, RemoveError};
 use serde::Deserialize;
@@ -183,34 +192,44 @@ pub fn remove(conn: &Connection, node: &Arc<Node>, home: &Path, params: Option<&
         };
         let embedded = handle.node();
         testhooks::hold_work(&ticket.cancel);
-        if ticket.cancel.is_cancelled() {
-            // Before the removal started: nothing is removed, and the
-            // request has its answer, or the stop gives it one.
+        let mut record = match precondition(&home, removing) {
+            Ok(record) => record,
+            Err(error) => return answer(&conn, ticket.id, Err(error)),
+        };
+        if !ticket.begin() {
+            // Answered, or being answered: nothing is removed.
             return;
         }
-        answer(
-            &conn,
-            ticket.id,
-            removal(&embedded, &handle.repositories, &home, removing),
-        );
+        testhooks::at_write_start();
+        let removed = removal(&embedded, &handle.repositories, removing, &mut record);
+        // Removed, nothing to remove, or a failure that keeps the record.
+        ticket.proven();
+        answer(&conn, ticket.id, removed);
     })
 }
 
-/// The removal, steps 1 to 3 of the module's doc, on `node`, whose gate's
-/// host half is `gate`.
-fn removal(
-    node: &libradicle::Embedded,
-    gate: &RepoGate,
-    home: &Path,
-    removing: Removing,
-) -> Result<Value, ErrorBody> {
+/// Step 1 of the module's doc: `home`'s record, which must hold
+/// `removing`'s repository with its `qid`.
+fn precondition(home: &Path, removing: Removing) -> Result<Quarantine, ErrorBody> {
     let Removing { rid, qid } = removing;
-    let mut record = Quarantine::open(record_path(home)).map_err(|e| record_failed(&e))?;
+    let record = Quarantine::open(record_path(home)).map_err(|e| record_failed(&e))?;
     let held = record.get(&rid).map_err(|e| record_failed(&e))?;
     if held.is_none_or(|held| held.qid != qid) {
         return Err(not_quarantined(rid));
     }
-    match node.remove_quarantined(rid, qid, &mut record) {
+    Ok(record)
+}
+
+/// The removal, steps 2 and 3 of the module's doc, on `node`, whose gate's
+/// host half is `gate`, through `record`.
+fn removal(
+    node: &libradicle::Embedded,
+    gate: &RepoGate,
+    removing: Removing,
+    record: &mut Quarantine,
+) -> Result<Value, ErrorBody> {
+    let Removing { rid, qid } = removing;
+    match node.remove_quarantined(rid, qid, record) {
         Ok(Removal::Removed) => {
             gate.open(rid);
             log::info(
@@ -229,6 +248,31 @@ fn removal(
             Err(error)
         }
     }
+}
+
+/// The refusal of a write to `rid`, which the gate holds quarantined for
+/// `kind`: `quarantined`, with the record's `kind` and `step` (0008,
+/// "Errors"). The gate's kind, and a null step, if the record doesn't read.
+pub fn refusal(home: &Path, rid: RepoId, kind: gate::Quarantine) -> ErrorBody {
+    let held = Quarantine::open(record_path(home))
+        .and_then(|record| record.get(&rid))
+        .ok()
+        .flatten();
+    let data = match held {
+        Some(record) => json!({ "kind": record.kind.as_str(), "step": record.step }),
+        None => json!({
+            "kind": match kind {
+                gate::Quarantine::Cache => "cache",
+                gate::Quarantine::Namespace => "namespace",
+            },
+            "step": null,
+        }),
+    };
+    ErrorBody::new(
+        ErrorCode::Quarantined,
+        format!("{rid} is quarantined: Radicle couldn't repair it"),
+    )
+    .with_data(data)
 }
 
 fn not_quarantined(rid: RepoId) -> ErrorBody {
