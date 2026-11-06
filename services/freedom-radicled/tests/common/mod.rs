@@ -68,6 +68,14 @@ impl Dirs {
             own_home,
         }
     }
+
+    /// A test hook's value, `<mode>:<path>`, that holds work until the
+    /// test releases it (src/testhooks.rs), and the file that does: `name`,
+    /// in the service's own `HOME`, which its confinement grants.
+    pub fn held(&self, mode: &str, name: &str) -> (String, PathBuf) {
+        let release = self.own_home.join(name);
+        (format!("{mode}:{}", release.display()), release)
+    }
 }
 
 /// The environment main gives the service, plus `extra`.

@@ -11,16 +11,16 @@
 //! A write's outcome is made unknown here as a page can make it: a comment
 //! on an issue the repository doesn't have fails past the write's start,
 //! in libradicle. `FREEDOM_RADICLED_TEST_HOLD_REPAIR` slows each repair
-//! turn, and `FREEDOM_RADICLED_TEST_HANG_UNIT` hangs a unit
-//! (src/testhooks.rs). Every node here reaches no one, as in
-//! tests/start.rs.
+//! turn, or holds it until the test releases it ([`Dirs::held`]), and
+//! `FREEDOM_RADICLED_TEST_HANG_UNIT` hangs a unit (src/testhooks.rs).
+//! Every node here reaches no one, as in tests/start.rs.
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
 mod common;
 
 use std::path::Path;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use common::fixture;
 use common::*;
@@ -33,6 +33,7 @@ const STOPPED: &str = "an online repair stopped between units";
 const QUARANTINED: &str = "an online repair quarantined its repository";
 const FAILED: &str = "an online repair failed outside its repository";
 const HOLDS: &str = "test hook: a repair turn holds the node";
+const FENCED: &str = "test hook: the stop has fenced the pools";
 const UNREPAIRED: &str =
     "a write's outcome is unknown, and its repository isn't repaired; the dirty marker stays";
 
@@ -83,6 +84,11 @@ fn owned(home: &Path, name: &str) -> RepoId {
 /// cleared, as the log and the home agree.
 fn shut_down(radicled: &mut Radicled, home: &Path) -> (String, bool) {
     radicled.shutdown();
+    exited(radicled, home)
+}
+
+/// As [`shut_down`], once `rad.shutdown` was sent.
+fn exited(radicled: &mut Radicled, home: &Path) -> (String, bool) {
     assert_eq!(radicled.exit_code(EXIT_TIMEOUT), Some(0));
     let log = radicled.stderr();
     let cleared = log.contains("the dirty marker is cleared");
@@ -147,6 +153,11 @@ fn an_uncertain_writes_repository_is_repaired_online_and_a_clean_stop_clears_the
 /// repair's progress; the next start's reconciliation repairs. A turn that
 /// outlasts the drain holds the node, and the stop still ends within the
 /// connection's 5 s exit, with the marker kept.
+///
+/// Neither half races the drain: each turn is held before its unit until
+/// the test releases it. The first is released only once the stop has
+/// fenced the writer, so its unit doesn't start and the drain waits for no
+/// unit; the second never is, so it outlasts the drain on any runner.
 #[test]
 fn a_stop_during_an_online_repair_keeps_the_marker_within_the_exit() {
     let dirs = Dirs::new();
@@ -155,13 +166,16 @@ fn a_stop_during_an_online_repair_keeps_the_marker_within_the_exit() {
     fixture::unsigned_ref(&dirs.home, rid, NID);
     let signed = fixture::sigrefs(&dirs.home, rid, NID);
 
-    let mut radicled = served(&dirs, &[("FREEDOM_RADICLED_TEST_HOLD_REPAIR", "500")]);
+    let (hold, gate) = dirs.held("until", "release-turn");
+    let mut radicled = served(&dirs, &[("FREEDOM_RADICLED_TEST_HOLD_REPAIR", &hold)]);
     let reply = radicled.call("rad.write", uncertain(rid));
     assert_eq!(code(&reply), "outcome_unknown", "{reply}");
-    assert!(radicled.logs(HOLDS, Duration::from_secs(10)));
-    let asked = Instant::now();
-    let (log, cleared) = shut_down(&mut radicled, &dirs.home);
-    assert!(asked.elapsed() < Duration::from_secs(5), "{log}");
+    assert!(radicled.logs(HOLDS, READ_TIMEOUT));
+    radicled.shutdown();
+    assert!(radicled.logs(FENCED, READ_TIMEOUT));
+    std::fs::write(&gate, b"").unwrap();
+    // 0, not the exit watchdog's 70: within the connection's 5 s exit.
+    let (log, cleared) = exited(&mut radicled, &dirs.home);
     assert!(!cleared, "{log}");
     assert!(log.contains(STOPPED), "{log}");
     assert!(!log.contains(DONE), "{log}");
@@ -174,10 +188,11 @@ fn a_stop_during_an_online_repair_keeps_the_marker_within_the_exit() {
 
     // The next start repairs it. Then a turn held past the drain, with
     // the node.
+    let (hold, _never) = dirs.held("until", "release-past");
     let mut radicled = Radicled::serve(
         &dirs,
         &[
-            ("FREEDOM_RADICLED_TEST_HOLD_REPAIR", "8000"),
+            ("FREEDOM_RADICLED_TEST_HOLD_REPAIR", &hold),
             ("FREEDOM_RADICLED_TEST_SHUTDOWN_WITHIN_MS", "1000"),
         ],
     );
@@ -193,11 +208,11 @@ fn a_stop_during_an_online_repair_keeps_the_marker_within_the_exit() {
     assert!(radicled.call("rad.start", json!({ "alias": "restarted" }))["result"].is_object());
     let reply = radicled.call("rad.write", uncertain(rid));
     assert_eq!(code(&reply), "outcome_unknown", "{reply}");
-    assert!(radicled.logs(HOLDS, Duration::from_secs(10)));
-    let asked = Instant::now();
+    assert!(radicled.logs(HOLDS, READ_TIMEOUT));
     radicled.shutdown();
-    assert_eq!(radicled.exit_code(Duration::from_secs(8)), Some(0));
-    assert!(asked.elapsed() < Duration::from_secs(8));
+    // 0, not the exit watchdog's 70 (`teardown_unproven`): the stop ended
+    // within the connection's 5 s exit, without waiting for the turn.
+    assert_eq!(radicled.exit_code(EXIT_TIMEOUT), Some(0));
     let log = radicled.stderr();
     assert!(log.contains("past the pools' drain"), "{log}");
     assert!(log.contains("the dirty marker stays"), "{log}");

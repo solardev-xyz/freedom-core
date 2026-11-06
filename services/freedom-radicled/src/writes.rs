@@ -391,13 +391,16 @@ pub fn write(
         }
         testhooks::at_write_start();
         let name = op.name();
-        match call(&embedded, rid, op) {
+        let called = call(&embedded, rid, op);
+        testhooks::at_write_call_end();
+        match called {
             Ok(result) => {
                 ticket.proven();
                 let _ = conn.reply(ticket.id, &result);
             }
             Err(e) => failed_past_start(&conn, ticket.id, name, rid, &e),
         }
+        testhooks::at_write_end();
     });
     (work, mutates)
 }
@@ -432,13 +435,16 @@ pub fn unseed(
             return;
         }
         testhooks::at_write_start();
-        match embedded.unseed_repo(rid) {
+        let called = embedded.unseed_repo(rid);
+        testhooks::at_write_call_end();
+        match called {
             Ok(unseeded) => {
                 ticket.proven();
                 let _ = conn.reply(ticket.id, &json!({ "unseeded": unseeded }));
             }
             Err(e) => failed_past_start(&conn, ticket.id, "unseed", rid, &e),
         }
+        testhooks::at_write_end();
     });
     (work, mutates)
 }

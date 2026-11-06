@@ -131,6 +131,8 @@ use libradicle::CancelToken;
 use radicle::prelude::RepoId;
 use serde_json::json;
 
+use crate::testhooks;
+
 /// A pool's threads, and how many requests may wait for one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Shape {
@@ -1035,6 +1037,7 @@ impl Pools {
         for pool in all {
             pool.fence();
         }
+        testhooks::at_fence();
         // Each pool is drained, even past one that isn't.
         let drained: Vec<bool> = all.iter().map(|pool| pool.drain(deadline)).collect();
         drained.into_iter().all(|complete| complete)
