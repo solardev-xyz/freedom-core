@@ -171,16 +171,13 @@ fn the_method_table_decides_who_may_call() {
     for (id, method) in [
         (5, "vault.reconcile"),
         (6, "nodes.op_status"),
-        (7, "compat.private_key"),
-        (8, "compat.bee_wallet_key"),
-        (9, "compat.publisher_key"),
         (10, "dweb.open"),
     ] {
         let reply = core.call(id, method, json!({}));
         assert_eq!(reply["error"]["code"], "forbidden", "{method}: {reply}");
     }
     // A name the table doesn't list is unknown, whoever asks.
-    for (id, method) in [(11, "compat.root_key"), (12, "core.restart")] {
+    for (id, method) in [(11, "keys.root_key"), (12, "core.restart")] {
         let reply = core.call_shell(id, method, json!({}));
         assert_eq!(
             reply["error"]["code"], "unknown_method",
@@ -580,9 +577,6 @@ fn protocol_1_keeps_its_surface_and_protocol_2_adds_streams() {
         "keys.validate_mnemonic",
         "keys.addresses",
         "keys.radicle_did",
-        "compat.private_key",
-        "compat.bee_wallet_key",
-        "compat.publisher_key",
         "sign.transaction",
         "sign.message",
         "sign.typed_data",

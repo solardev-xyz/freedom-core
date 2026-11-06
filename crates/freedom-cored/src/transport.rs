@@ -75,7 +75,7 @@
 //! the descriptors (handles), never through std's buffered `Stdin` and
 //! `Stdout`: std copies a write smaller than its 1 KiB `LineWriter` buffer
 //! into that buffer, and a flush resets its length, never its bytes, so a
-//! `compat.private_key` or `vault.export_mnemonic` reply stayed there until
+//! `vault.export_private_key` or `vault.export_mnemonic` reply stayed there until
 //! later frames happened to overwrite it. The reader wipes each part of the
 //! chunk it read as soon as the decoder has copied it into the frames' own
 //! wiped buffers, before it hands on any frame: a delivery can wait for

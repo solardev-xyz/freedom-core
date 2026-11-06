@@ -128,8 +128,8 @@ impl Secp256k1Key {
         &self.key
     }
 
-    /// The raw 32-byte private key. Only for the temporary `compat.*`
-    /// exports, the user-requested export, and keystore encoding.
+    /// The raw 32-byte private key. Only for the user-requested export and
+    /// keystore encoding.
     pub fn to_secret_bytes(&self) -> Zeroizing<[u8; 32]> {
         let bytes = Zeroizing::new(self.key.to_bytes());
         let mut out = Zeroizing::new([0u8; 32]);

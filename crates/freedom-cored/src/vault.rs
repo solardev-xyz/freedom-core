@@ -3,7 +3,7 @@
 //! and commit").
 //!
 //! - **Inline methods** run on the event loop and never wait: `vault.lock`,
-//!   `vault.touch`, `vault.status`, `keys.*`, `compat.*`.
+//!   `vault.touch`, `vault.status`, `keys.*`.
 //! - **KDF methods** go through one serialized queue to the worker thread:
 //!   unlock, verify, change_password, delete, create, import and both
 //!   exports. That covers the 900k-round PBKDF2 and the durable write.
@@ -668,16 +668,6 @@ struct AddressesParams {
 }
 
 #[derive(Deserialize)]
-struct AccountParams {
-    account: u32,
-}
-
-#[derive(Deserialize)]
-struct OriginParams {
-    origin_index: u32,
-}
-
-#[derive(Deserialize)]
 struct PublicKeyParams {
     public_key: String,
 }
@@ -780,15 +770,12 @@ impl Vault {
                 | "keys.validate_mnemonic"
                 | "keys.addresses"
                 | "keys.radicle_did"
-                | "compat.private_key"
-                | "compat.bee_wallet_key"
-                | "compat.publisher_key"
         ) || crate::signing::METHODS.contains(&method)
     }
 
     /// Handles a request. Inline methods reply at once; KDF methods are
     /// queued and reply when their job finishes. The caller was checked
-    /// against fc-protocol's method table before this (#101): `compat.*`,
+    /// against fc-protocol's method table before this (#101):
     /// `vault.reconcile` and `nodes.op_status` are main's own.
     pub fn request(&mut self, id: u64, method: &str, raw: Option<&str>) -> Vec<Out> {
         let mut out = Vec::new();
@@ -820,27 +807,6 @@ impl Vault {
             "keys.radicle_did" => {
                 params::<PublicKeyParams>(raw).and_then(|p| radicle_did(id, &p.public_key))
             }
-            "compat.private_key" => params::<AccountParams>(raw).and_then(|p| {
-                let key = self
-                    .state
-                    .user_wallet(p.account)
-                    .map_err(locked_or_internal)?;
-                private_key_result(id, key.to_secret_bytes().as_slice())
-            }),
-            "compat.bee_wallet_key" => self
-                .state
-                .freedom_keys()
-                .map_err(locked_or_internal)
-                .and_then(|keys| {
-                    private_key_result(id, keys.bee_wallet.to_secret_bytes().as_slice())
-                }),
-            "compat.publisher_key" => params::<OriginParams>(raw).and_then(|p| {
-                let key = self
-                    .state
-                    .publisher(p.origin_index)
-                    .map_err(locked_or_internal)?;
-                private_key_result(id, key.to_secret_bytes().as_slice())
-            }),
             _ if crate::signing::METHODS.contains(&method) => {
                 crate::signing::handle(&self.state, method, raw)
                     .map(|result| json_result(id, &result))
