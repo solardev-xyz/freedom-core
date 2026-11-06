@@ -236,6 +236,11 @@ publish job that runs no repository code.
      - the contract suite confined: DNS, TLS, the store's file
        operations, NAT64 discovery, and `socks5` through Arti on loopback
        and through a LAN proxy;
+     - **direct libp2p QUIC, end to end,** in `direct` mode: a load from a
+       controlled peer announced by a local delegated router with its
+       `quic-v1` address alone, as in 5a, checked from the peer's side,
+       and the same over TCP. CI shows only QUIC's sockets under the
+       profile: an unconnected UDP socket's reply, with no peer;
      - `fc-service`'s confinement test (`cargo test -p fc-service --test
        confine`, with stdio alone), which also prints the Mach rights held
        at the confinement point;
