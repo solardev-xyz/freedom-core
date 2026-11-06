@@ -14,7 +14,9 @@
 //!   are `stopped`, and past the pool's bounds `busy`. Quarantine's two,
 //!   `rad.quarantine_list` and `rad.remove_repo`, are served
 //!   ([`crate::quarantine`]), and so are the writes, `rad.write` and
-//!   `rad.unseed`, with the mutation-start boundary ([`crate::writes`]).
+//!   `rad.unseed`, with the mutation-start boundary ([`crate::writes`]),
+//!   and a COB write's online repair on the writer when its outcome is
+//!   unknown ([`crate::repair`]).
 //!   The reads' operations come with later steps: until then each one's
 //!   work answers `stopped`, as this build answered it before;
 //! - `rad.connect_seeds` and `rad.clone`, for the network pool, whose
@@ -57,8 +59,8 @@ use crate::build_info;
 use crate::confine::Grant;
 use crate::identity::{self, Identity};
 use crate::node::{self, Node};
-use crate::pools::{self, Pool, Pools, Ticket, Work};
-use crate::{quarantine, reconcile, writes};
+use crate::pools::{self, Mutates, Pool, Pools, Ticket, Work};
+use crate::{quarantine, reconcile, repair, writes};
 use crate::{testhooks, units};
 
 /// How the process ends after a start step it answered with an error
@@ -121,7 +123,8 @@ pub struct RadicleService {
     /// `rad.identity`'s deadline, armed by `rad.hello`'s reply.
     deadline: Mutex<Option<Watchdog>>,
     /// The repair units' watchdog, its thread started with the service:
-    /// reconciliation's at a start, and the online repair's (a later step).
+    /// reconciliation's at a start, and the online repair's while the node
+    /// runs.
     units: Arc<units::UnitWatch>,
     /// main's proof that libgit2 reads no git configuration outside a
     /// repository, for reconciliation.
@@ -146,6 +149,13 @@ impl RadicleService {
         git_config: libradicle::GitConfigIsolated,
     ) -> Option<Self> {
         let identity = Identity::new(&grant.home)?;
+        let node = Arc::new(Node::new(pools.clone()));
+        // The writer's online repair reaches the node only while it runs.
+        pools.repair_with(Arc::new(repair::Online::new(
+            Arc::downgrade(&node),
+            grant.home.clone(),
+            units.clone(),
+        )));
         Some(Self {
             home: grant.home,
             identity,
@@ -157,7 +167,7 @@ impl RadicleService {
             deadline: Mutex::new(None),
             units,
             git_config,
-            node: Arc::new(Node::new(pools.clone())),
+            node,
             pools,
         })
     }
@@ -184,10 +194,11 @@ impl RadicleService {
         }
     }
 
-    /// The work of pooled `request`.
-    fn work(&self, conn: &Connection, request: &Request<'_>) -> Work {
+    /// The work of pooled `request`, and the repository it mutates, if it
+    /// names one.
+    fn work(&self, conn: &Connection, request: &Request<'_>) -> (Work, Option<Mutates>) {
         match request.method {
-            "rad.quarantine_list" => quarantine::list(conn, &self.home, request.params),
+            "rad.quarantine_list" => (quarantine::list(conn, &self.home, request.params), None),
             "rad.remove_repo" => quarantine::remove(conn, &self.node, &self.home, request.params),
             "rad.write" => {
                 // Known by now: the pool admits nothing before `RUNNING`.
@@ -195,7 +206,7 @@ impl RadicleService {
                 writes::write(conn, &self.node, &self.home, request.params, ephemeral)
             }
             "rad.unseed" => writes::unseed(conn, &self.node, request.params),
-            _ => later_step(conn),
+            _ => (later_step(conn), None),
         }
     }
 
@@ -431,12 +442,8 @@ impl Service for RadicleService {
             );
         } else if let Some((pool, within)) = self.pool(method) {
             let deadline = Instant::now() + testhooks::work_deadline(within);
-            pool.submit(
-                request.id,
-                deadline,
-                conn.clone(),
-                self.work(conn, &request),
-            );
+            let (work, mutates) = self.work(conn, &request);
+            pool.submit_mutating(request.id, deadline, conn.clone(), work, mutates);
         } else if LATER.contains(&method) {
             let _ = conn.reply_error(
                 request.id,

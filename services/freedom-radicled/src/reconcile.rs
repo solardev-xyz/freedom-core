@@ -193,7 +193,7 @@ pub fn run(
 }
 
 /// A failure's message: its step, never a path.
-fn failure(e: &driver::Error) -> Failure {
+pub(crate) fn failure(e: &driver::Error) -> Failure {
     match e {
         driver::Error::Io(e) => failed("the storage", e.kind()),
         driver::Error::State(e) => failed("the reconcile state", state_error(e)),
@@ -231,7 +231,7 @@ fn kind_of(e: &radicle::storage::Error) -> String {
 /// What went wrong with the progress state, without its details: libgit2's
 /// and SQLite's messages can name a path, and a ref name is inside a
 /// repository.
-fn state_error(e: &radicle::storage::git::reconcile::state::Error) -> String {
+pub(crate) fn state_error(e: &radicle::storage::git::reconcile::state::Error) -> String {
     use radicle::storage::git::reconcile::state::Error;
     match e {
         Error::Sql(_) => "its database doesn't open or answer".to_owned(),

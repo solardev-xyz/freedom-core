@@ -88,13 +88,37 @@
 //! no work is running, so none can still write. The dirty marker is
 //! cleared only after a complete drain ([`crate::node`]).
 //!
+//! **The online repair's turns on the writer** (0008, "Writes": "Online
+//! repair after an uncertain write"; [`Repairer`], [`crate::repair`]). A
+//! write names the repository it mutates ([`Mutates`]), as it is admitted:
+//! - **queued as the call returns:** a write past its start whose work
+//!   returns without a proven outcome has its repository's repair queued,
+//!   before the writer takes its next task. Until it is over the run is
+//!   uncertain ([`Pools::uncertain`]);
+//! - **one unit a turn:** the writer takes the repair's turns and the
+//!   writes that may run in alternation, so a write to another repository
+//!   waits at most one unit, and a repair alone runs unit after unit.
+//!   Repairs run in the order they were queued;
+//! - **writes to it wait behind it:** a queued write to a repository whose
+//!   repair is queued isn't taken until the repair is over. It keeps its
+//!   place and its deadline, so the timer, main's cancel and the stop
+//!   answer it as any queued request;
+//! - **over:** repaired, or quarantined, the repository is certain again,
+//!   and its writes run, in their order. A repair that can't go on in this
+//!   run, stopped or failed outside its repository, no longer holds its
+//!   writes, and leaves the run uncertain for good;
+//! - **the stop** fences the repair with the pool: the turn running
+//!   finishes its unit, no unit starts after the fence, and the drain waits
+//!   for the writer as for any work.
+//!
 //! **Later steps add operations, not machinery:** a method's work is a
-//! closure given its [`Ticket`]. They add the online repair's turns on the
-//! writer, and the output budget's waits inside the read deadline.
+//! closure given its [`Ticket`]. They add the output budget's waits inside
+//! the read deadline.
 
 use std::collections::VecDeque;
 use std::panic::{AssertUnwindSafe, catch_unwind};
-use std::sync::{Arc, Condvar, Mutex, MutexGuard};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard, OnceLock};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
@@ -104,6 +128,7 @@ use fc_service::conn::Connection;
 use fc_service::log;
 use fc_service::panic::{TaskKind, with_kind};
 use libradicle::CancelToken;
+use radicle::prelude::RepoId;
 use serde_json::json;
 
 /// A pool's threads, and how many requests may wait for one.
@@ -187,6 +212,40 @@ trait Boundary: Send + Sync {
 /// through the connection it holds.
 pub type Work = Box<dyn FnOnce(&Ticket) + Send + 'static>;
 
+/// The repository a write mutates, named as it is admitted (see the
+/// module's doc): it waits behind that repository's online repair.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Mutates {
+    pub rid: RepoId,
+    /// Whether an outcome it leaves unknown is repaired online: a COB
+    /// write's is. Otherwise the run stays uncertain for good.
+    pub repaired: bool,
+}
+
+/// What a turn of an online repair did ([`Repairer::turn`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Turn {
+    /// It ran a unit, or waited for its repository to close, and more
+    /// remain.
+    More,
+    /// Its repository is repaired, or quarantined: certain again.
+    Over,
+    /// It can't go on in this run: stopped, or failed outside its
+    /// repository. The run stays uncertain.
+    Abandoned,
+}
+
+/// The online repair, as the writer runs it ([`crate::repair`]).
+pub trait Repairer: Send + Sync {
+    /// `rid`'s repair is queued: a write to it whose outcome is unknown has
+    /// returned. On the writer, before it takes its next task; never waits.
+    fn queued(&self, rid: RepoId);
+
+    /// `rid`'s next turn, on the writer: at most one unit, and none once
+    /// `stop` is set (the stop's fence).
+    fn turn(&self, rid: RepoId, stop: &Arc<AtomicBool>) -> Turn;
+}
+
 /// How a pool answers for its requests: the connection, or a test's record.
 pub trait Answers: Clone + Send + 'static {
     /// Queues `error` as request `id`'s one reply, unless something
@@ -244,6 +303,7 @@ struct Queued<A> {
     ticket: Ticket,
     answers: A,
     work: Work,
+    mutates: Option<Mutates>,
 }
 
 /// A request whose work runs: it holds its thread until the work returns.
@@ -268,15 +328,42 @@ struct State<A> {
     running: Vec<Running<A>>,
     /// The pool's threads that haven't ended: its workers and its timer.
     alive: usize,
-    /// A started request ended without a proven outcome, or was still
-    /// running past the stop's drain: for good.
+    /// A started request ended without a proven outcome that no repair
+    /// covers, or was still running past the stop's drain, or a repair was
+    /// abandoned: for good.
     uncertain: bool,
+    /// The repositories whose online repair is queued, oldest first: the
+    /// write queue's alone.
+    repairs: VecDeque<RepoId>,
+    /// Whether the writer's last turn was a repair's: the next goes to a
+    /// write, if one may run.
+    repaired_last: bool,
+}
+
+impl<A> State<A> {
+    /// Whether a write of this run may have left a partial mutation that
+    /// isn't repaired or quarantined since.
+    fn uncertain(&self) -> bool {
+        self.uncertain || !self.repairs.is_empty()
+    }
+
+    /// Whether `queued` must wait: a write to a repository whose repair is
+    /// queued.
+    fn held(&self, queued: &Queued<A>) -> bool {
+        queued
+            .mutates
+            .is_some_and(|mutates| self.repairs.contains(&mutates.rid))
+    }
 }
 
 struct Inner<A> {
     name: &'static str,
     shape: Shape,
     state: Mutex<State<A>>,
+    /// The online repair, once the service gives the write queue one.
+    repairer: OnceLock<Arc<dyn Repairer>>,
+    /// Set by the stop's fence: no repair unit starts after it.
+    stopping: Arc<AtomicBool>,
     /// The workers wait on it for queued work, or the stop.
     work: Condvar,
     /// The timer waits on it for its next deadline, a new one, or the stop.
@@ -379,7 +466,11 @@ impl<A: Answers> Pool<A> {
                     running: Vec::new(),
                     alive: 0,
                     uncertain: false,
+                    repairs: VecDeque::new(),
+                    repaired_last: false,
                 }),
+                repairer: OnceLock::new(),
+                stopping: Arc::new(AtomicBool::new(false)),
                 work: Condvar::new(),
                 timer: Condvar::new(),
                 ended: Condvar::new(),
@@ -425,7 +516,22 @@ impl<A: Answers> Pool<A> {
 
     /// Admits request `id`, whose `work` runs before `deadline`, or answers
     /// it `busy` or `stopped` through `answers`. Never waits.
+    #[cfg(test)]
     pub fn submit(&self, id: u64, deadline: Instant, answers: A, work: Work) -> Admission {
+        self.submit_mutating(id, deadline, answers, work, None)
+    }
+
+    /// As [`Pool::submit`], for work that `mutates` a repository, if it
+    /// names one: it waits behind that repository's online repair (see the
+    /// module's doc).
+    pub fn submit_mutating(
+        &self,
+        id: u64,
+        deadline: Instant,
+        answers: A,
+        work: Work,
+        mutates: Option<Mutates>,
+    ) -> Admission {
         let mut state = self.inner.lock();
         let refusal = match state.phase {
             Phase::Closed => Some((Admission::Stopped, not_running())),
@@ -458,6 +564,7 @@ impl<A: Answers> Pool<A> {
             },
             answers,
             work,
+            mutates,
         });
         drop(state);
         self.inner.work.notify_one();
@@ -492,11 +599,15 @@ impl<A: Answers> Pool<A> {
     }
 
     /// The stop's first half: fences the pool, answers every queued request
-    /// `stopped`, and cancels the running ones' tokens.
+    /// `stopped`, and cancels the running ones' tokens and the online
+    /// repair's.
     fn fence(&self) {
         let (queued, running) = {
             let mut state = self.inner.lock();
             state.phase = Phase::Stopped;
+            // Under the lock that decides the writer's next turn: no unit
+            // starts after it.
+            self.inner.stopping.store(true, Ordering::Release);
             let queued = std::mem::take(&mut state.queue);
             let running: Vec<CancelToken> =
                 state.running.iter().map(|r| r.cancel.clone()).collect();
@@ -616,88 +727,158 @@ impl<A> Drop for Leaving<'_, A> {
     }
 }
 
-/// The next request for a worker, the oldest queued, now running; `None`
-/// once the pool has stopped. One taken at or past its deadline is
-/// answered `deadline`, and its work dropped.
-fn next<A: Answers>(inner: &Inner<A>) -> Option<Queued<A>> {
+/// What a worker runs next.
+enum Next<A> {
+    /// A request, now running.
+    Request(Queued<A>),
+    /// A turn of this repository's online repair.
+    Repair(RepoId),
+}
+
+/// The next task for a worker, once there is one; `None` once the pool has
+/// stopped. It is the oldest queued request that isn't held behind an
+/// online repair, now running, or the oldest repair's turn: the two take
+/// turns while both are there (see the module's doc). A request taken at
+/// or past its deadline is answered `deadline`, and its work dropped.
+fn next<A: Answers>(inner: &Inner<A>) -> Option<Next<A>> {
     let mut state = inner.lock();
     loop {
         if state.phase == Phase::Stopped {
             return None;
         }
-        if let Some(queued) = state.queue.pop_front() {
-            if Instant::now() >= queued.ticket.deadline {
-                drop(state);
-                queued.answers.refuse(queued.ticket.id, &past_deadline());
-                drop(queued);
-                state = inner.lock();
+        let request = state.queue.iter().position(|queued| !state.held(queued));
+        match (request, state.repairs.front().copied()) {
+            (Some(_), Some(_)) if state.repaired_last => {}
+            (_, Some(rid)) => {
+                state.repaired_last = true;
+                return Some(Next::Repair(rid));
+            }
+            (Some(_), None) => {}
+            (None, None) => {
+                state = wait(&inner.work, state);
                 continue;
             }
-            state.running.push(Running {
-                id: queued.ticket.id,
-                deadline: queued.ticket.deadline,
-                expired: false,
-                cancel: queued.ticket.cancel.clone(),
-                answers: queued.answers.clone(),
-                started: false,
-                proven: false,
-            });
-            return Some(queued);
         }
-        state = wait(&inner.work, state);
+        let Some(queued) = request.and_then(|at| state.queue.remove(at)) else {
+            continue;
+        };
+        if Instant::now() >= queued.ticket.deadline {
+            drop(state);
+            queued.answers.refuse(queued.ticket.id, &past_deadline());
+            drop(queued);
+            state = inner.lock();
+            continue;
+        }
+        state.repaired_last = false;
+        state.running.push(Running {
+            id: queued.ticket.id,
+            deadline: queued.ticket.deadline,
+            expired: false,
+            cancel: queued.ticket.cancel.clone(),
+            answers: queued.answers.clone(),
+            started: false,
+            proven: false,
+        });
+        return Some(Next::Request(queued));
     }
 }
 
-/// A worker: runs the queued requests' work, oldest first, until the pool
-/// stops.
+/// A worker: runs the queued requests' work, oldest first, and on the
+/// writer the online repair's turns between them, until the pool stops.
 fn worker<A: Answers>(inner: &Inner<A>) {
     let _leaving = Leaving(inner);
-    while let Some(Queued {
+    while let Some(next) = next(inner) {
+        match next {
+            Next::Request(queued) => run(inner, queued),
+            Next::Repair(rid) => repair_turn(inner, rid),
+        }
+    }
+}
+
+/// One turn of `rid`'s online repair. A panic in it ends the process (70),
+/// as one in reconciliation does: a crash, whose next start repairs.
+fn repair_turn<A>(inner: &Inner<A>, rid: RepoId) {
+    let turn = match inner.repairer.get() {
+        Some(repairer) => with_kind(TaskKind::named("repair"), || {
+            repairer.turn(rid, &inner.stopping)
+        }),
+        // Never queued without one.
+        None => Turn::Abandoned,
+    };
+    let mut state = inner.lock();
+    match turn {
+        Turn::More => {}
+        Turn::Over => state.repairs.retain(|queued| *queued != rid),
+        Turn::Abandoned => {
+            state.repairs.retain(|queued| *queued != rid);
+            state.uncertain = true;
+        }
+    }
+}
+
+/// Runs a request's work, answers what it left unanswered, and lets go of
+/// its slot.
+fn run<A: Answers>(inner: &Inner<A>, queued: Queued<A>) {
+    let Queued {
         ticket,
         answers,
         work,
-    }) = next(inner)
-    {
-        let outcome = with_kind(TaskKind::REQUEST, || {
-            catch_unwind(AssertUnwindSafe(|| work(&ticket)))
-        });
-        let (stopping_now, expired, started, proven) = {
-            let state = inner.lock();
-            let (expired, started, proven) = state
-                .running
-                .iter()
-                .find(|r| r.id == ticket.id)
-                .map_or((false, false, false), |r| (r.expired, r.started, r.proven));
-            (state.phase == Phase::Stopped, expired, started, proven)
-        };
-        let id = ticket.id;
-        let internal_abort = Abort::new(AbortCode::Internal, "Internal error");
-        // A write has no stream: past its start, an abort never applies.
-        match (outcome.is_err(), stopping_now, started) {
-            (true, _, true) => answer_unknown(&answers, id, "an internal error", true),
-            (true, _, false) => {
-                answers.settle(id, &internal(), &internal_abort);
-            }
-            (false, true, true) => answer_unknown(&answers, id, "the service is stopping", true),
-            (false, true, false) => {
-                answers.settle(id, &stopping(), &stopping_abort());
-            }
-            // Work that answered nothing: never a request left waiting.
-            (false, false, true) => answer_unknown(&answers, id, "it answered nothing", false),
-            // Past its deadline: whoever marked it so answers `deadline`,
-            // perhaps not yet (a write that didn't start for it).
-            (false, false, false) if expired => {}
-            (false, false, false) => {
-                answers.refuse(id, &internal());
-            }
+        mutates,
+    } = queued;
+    let outcome = with_kind(TaskKind::REQUEST, || {
+        catch_unwind(AssertUnwindSafe(|| work(&ticket)))
+    });
+    let (stopping_now, expired, started, proven) = {
+        let state = inner.lock();
+        let (expired, started, proven) = state
+            .running
+            .iter()
+            .find(|r| r.id == ticket.id)
+            .map_or((false, false, false), |r| (r.expired, r.started, r.proven));
+        (state.phase == Phase::Stopped, expired, started, proven)
+    };
+    let id = ticket.id;
+    let internal_abort = Abort::new(AbortCode::Internal, "Internal error");
+    // A write has no stream: past its start, an abort never applies.
+    match (outcome.is_err(), stopping_now, started) {
+        (true, _, true) => answer_unknown(&answers, id, "an internal error", true),
+        (true, _, false) => {
+            answers.settle(id, &internal(), &internal_abort);
         }
-        // Its slot is let go of only now, after its answer: its work has
-        // returned.
-        let mut state = inner.lock();
-        if started && !proven {
-            state.uncertain = true;
+        (false, true, true) => answer_unknown(&answers, id, "the service is stopping", true),
+        (false, true, false) => {
+            answers.settle(id, &stopping(), &stopping_abort());
         }
-        state.running.retain(|r| r.id != id);
+        // Work that answered nothing: never a request left waiting.
+        (false, false, true) => answer_unknown(&answers, id, "it answered nothing", false),
+        // Past its deadline: whoever marked it so answers `deadline`,
+        // perhaps not yet (a write that didn't start for it).
+        (false, false, false) if expired => {}
+        (false, false, false) => {
+            answers.refuse(id, &internal());
+        }
+    }
+    // Its slot is let go of only now, after its answer: its work has
+    // returned. Past its start, an outcome left unknown has its
+    // repository's repair queued, before the writer's next task.
+    let repairer = inner.repairer.get();
+    let mut state = inner.lock();
+    let mut queued = None;
+    if started && !proven {
+        match mutates.filter(|mutates| mutates.repaired).zip(repairer) {
+            Some((Mutates { rid, .. }, repairer)) => {
+                if !state.repairs.contains(&rid) {
+                    state.repairs.push_back(rid);
+                }
+                queued = Some((rid, repairer));
+            }
+            None => state.uncertain = true,
+        }
+    }
+    state.running.retain(|r| r.id != id);
+    drop(state);
+    if let Some((rid, repairer)) = queued {
+        repairer.queued(rid);
     }
 }
 
@@ -805,11 +986,18 @@ impl Pools {
         let _ = self.all().iter().any(|pool| pool.cancel(id));
     }
 
+    /// The write queue's online repair, given once (see the module's doc):
+    /// until then, a write's unknown outcome leaves the run uncertain for
+    /// good.
+    pub fn repair_with(&self, repairer: Arc<dyn Repairer>) {
+        let _ = self.write.inner.repairer.set(repairer);
+    }
+
     /// Whether a write in this run passed its mutation start without a
-    /// proven outcome (see the module's doc): its repository may hold a
-    /// partial mutation until it is repaired.
+    /// proven outcome, and its repository isn't repaired or quarantined
+    /// since (see the module's doc): it may hold a partial mutation.
     pub fn uncertain(&self) -> bool {
-        self.all().iter().any(|pool| pool.inner.lock().uncertain)
+        self.all().iter().any(|pool| pool.inner.lock().uncertain())
     }
 
     /// The stop (see the module's doc): every pool fenced, then drained

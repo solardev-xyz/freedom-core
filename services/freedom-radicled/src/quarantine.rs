@@ -67,7 +67,7 @@ use serde_json::value::RawValue;
 use serde_json::{Value, json};
 
 use crate::node::Node;
-use crate::pools::{Ticket, Work};
+use crate::pools::{Mutates, Ticket, Work};
 use crate::reconcile::{entry, record_error};
 use crate::testhooks;
 
@@ -162,8 +162,14 @@ fn list_page(home: &Path, page: u64) -> Result<Value, ErrorBody> {
 }
 
 /// `rad.remove_repo`'s work, for its request's `params`, on `node`, whose
-/// home is `home`.
-pub fn remove(conn: &Connection, node: &Arc<Node>, home: &Path, params: Option<&RawValue>) -> Work {
+/// home is `home`. And the repository it removes, if its params name one:
+/// its outcome is always proven, so nothing is repaired after it.
+pub fn remove(
+    conn: &Connection,
+    node: &Arc<Node>,
+    home: &Path,
+    params: Option<&RawValue>,
+) -> (Work, Option<Mutates>) {
     let removing = parse::<RemoveParams>(params)
         .ok_or_else(|| invalid("rad.remove_repo takes { rid, qid }"))
         .and_then(|params| {
@@ -174,8 +180,12 @@ pub fn remove(conn: &Connection, node: &Arc<Node>, home: &Path, params: Option<&
                     .map_err(|_| invalid("qid isn't a quarantine record's ID"))?,
             })
         });
+    let mutates = removing.as_ref().ok().map(|removing| Mutates {
+        rid: removing.rid,
+        repaired: false,
+    });
     let (conn, node, home) = (conn.clone(), node.clone(), home.to_path_buf());
-    Box::new(move |ticket: &Ticket| {
+    let work: Work = Box::new(move |ticket: &Ticket| {
         let removing = match removing {
             Ok(removing) => removing,
             Err(error) => return answer(&conn, ticket.id, Err(error)),
@@ -205,7 +215,8 @@ pub fn remove(conn: &Connection, node: &Arc<Node>, home: &Path, params: Option<&
         // Removed, nothing to remove, or a failure that keeps the record.
         ticket.proven();
         answer(&conn, ticket.id, removed);
-    })
+    });
+    (work, mutates)
 }
 
 /// Step 1 of the module's doc: `home`'s record, which must hold

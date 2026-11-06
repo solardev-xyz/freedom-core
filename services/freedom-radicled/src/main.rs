@@ -64,6 +64,7 @@ mod node;
 mod pools;
 mod quarantine;
 mod reconcile;
+mod repair;
 mod service;
 mod testhooks;
 mod units;

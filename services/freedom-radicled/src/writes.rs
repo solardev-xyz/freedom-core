@@ -33,9 +33,11 @@
 //!    refuses it first, by the generation's identity);
 //! 4. `rad.write` to a repository its gate doesn't hold open: `quarantined`,
 //!    with `data.kind` and `data.step` from the record
-//!    ([`crate::quarantine::refusal`]), or `stopped` while it is being
-//!    repaired (the online repair is a later step, which makes writes wait
-//!    behind it). Otherwise the write holds a pass of the gate's
+//!    ([`crate::quarantine::refusal`]), or `stopped` for one whose online
+//!    repair couldn't go on, which stays closed until the next start.
+//!    Writes to a repository being repaired wait behind its repair in the
+//!    write queue ([`crate::pools`]), so they reach this check once it is
+//!    over. Otherwise the write holds a pass of the gate's
 //!    (`Purpose::Mutate`) until its call returns, so a close of the
 //!    repository waits for it;
 //! 5. main's cancel, the deadline or the stop: `cancelled`, `deadline` or
@@ -47,8 +49,16 @@
 //! deadline, the stop and the node's end so. A COB write commits a git
 //! object, moves a ref, re-signs `rad/sigrefs`, updates the COB cache and
 //! announces: an error at a later step doesn't prove that an earlier one
-//! didn't commit. Such a write keeps the dirty marker for the next start,
-//! whose reconciliation repairs its repository ([`crate::node`]).
+//! didn't commit. Such a COB write has its repository repaired online as
+//! its call returns ([`crate::repair`]); the dirty marker stays until that
+//! repair is over, and after a stop before it, for the next start's
+//! reconciliation ([`crate::node`]). `rad.unseed` changes the seeding
+//! policy, which no repair checks: one whose outcome is unknown keeps the
+//! marker for the run.
+//!
+//! **Each write names its repository** as it is admitted
+//! ([`crate::pools::Mutates`]), so that it waits behind that repository's
+//! online repair.
 
 use std::path::Path;
 use std::str::FromStr as _;
@@ -65,7 +75,7 @@ use serde_json::value::RawValue;
 use serde_json::{Value, json};
 
 use crate::node::Node;
-use crate::pools::{self, Ticket, Work};
+use crate::pools::{self, Mutates, Ticket, Work};
 use crate::{quarantine, testhooks};
 
 /// `rad.write`'s params.
@@ -286,8 +296,9 @@ fn needs_vault() -> ErrorBody {
 fn closed(home: &Path, rid: RepoId, state: RepoState) -> ErrorBody {
     match state {
         RepoState::Quarantined(kind) => quarantine::refusal(home, rid, kind),
-        // Only the online repair, a later step, sets it, and then writes
-        // wait behind it; and open, if it opened since.
+        // Writes wait behind a repair in progress: one still being
+        // repaired here is one whose repair couldn't go on. And open, if it
+        // opened since.
         RepoState::Repairing | RepoState::Open => {
             ErrorBody::new(ErrorCode::Stopped, "the repository is being repaired")
         }
@@ -340,17 +351,23 @@ fn call(node: &libradicle::Embedded, rid: RepoId, op: Op) -> Result<Value, libra
 }
 
 /// `rad.write`'s work, for its request's `params`, on `node`, whose home is
-/// `home`; `ephemeral`: the node runs with a throwaway key.
+/// `home`; `ephemeral`: the node runs with a throwaway key. And the
+/// repository it writes to, if its params name one: an outcome it leaves
+/// unknown is repaired online.
 pub fn write(
     conn: &Connection,
     node: &Arc<Node>,
     home: &Path,
     params: Option<&RawValue>,
     ephemeral: bool,
-) -> Work {
+) -> (Work, Option<Mutates>) {
     let write = write_params(params);
+    let mutates = write.as_ref().ok().map(|write| Mutates {
+        rid: write.rid,
+        repaired: true,
+    });
     let (conn, node, home) = (conn.clone(), node.clone(), home.to_path_buf());
-    Box::new(move |ticket: &Ticket| {
+    let work: Work = Box::new(move |ticket: &Ticket| {
         let Write { rid, op } = match write {
             Ok(write) => write,
             Err(error) => return refuse(&conn, ticket.id, &error),
@@ -381,16 +398,27 @@ pub fn write(
             }
             Err(e) => failed_past_start(&conn, ticket.id, name, rid, &e),
         }
-    })
+    });
+    (work, mutates)
 }
 
-/// `rad.unseed`'s work, for its request's `params`, on `node`.
-pub fn unseed(conn: &Connection, node: &Arc<Node>, params: Option<&RawValue>) -> Work {
+/// `rad.unseed`'s work, for its request's `params`, on `node`. And the
+/// repository it unseeds, if its params name one: no repair checks a
+/// policy, so an outcome it leaves unknown isn't repaired online.
+pub fn unseed(
+    conn: &Connection,
+    node: &Arc<Node>,
+    params: Option<&RawValue>,
+) -> (Work, Option<Mutates>) {
     let unseeding = parse::<UnseedParams>(params)
         .ok_or_else(|| invalid("rad.unseed takes { rid }"))
         .and_then(|params| rid(&params.rid));
+    let mutates = unseeding.as_ref().ok().map(|rid| Mutates {
+        rid: *rid,
+        repaired: false,
+    });
     let (conn, node) = (conn.clone(), node.clone());
-    Box::new(move |ticket: &Ticket| {
+    let work: Work = Box::new(move |ticket: &Ticket| {
         let rid = match unseeding {
             Ok(rid) => rid,
             Err(error) => return refuse(&conn, ticket.id, &error),
@@ -411,7 +439,8 @@ pub fn unseed(conn: &Connection, node: &Arc<Node>, params: Option<&RawValue>) ->
             }
             Err(e) => failed_past_start(&conn, ticket.id, "unseed", rid, &e),
         }
-    })
+    });
+    (work, mutates)
 }
 
 #[cfg(test)]

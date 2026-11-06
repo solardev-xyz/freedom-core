@@ -123,6 +123,49 @@ pub fn unsigned_ref(home: &Path, rid: RepoId, namespace: &str) {
     .unwrap();
 }
 
+/// A ref of `namespace` in `rid` to an object the repository doesn't
+/// have, written by hand, as libgit2 won't write one: what no repair can
+/// sign (0008, "The escape": a `namespace` quarantine).
+pub fn missing_object_ref(home: &Path, rid: RepoId, namespace: &str) {
+    let tags = storage_of(home, rid)
+        .join("refs")
+        .join("namespaces")
+        .join(namespace)
+        .join("refs")
+        .join("tags");
+    std::fs::create_dir_all(&tags).unwrap();
+    std::fs::write(
+        tags.join("missing"),
+        "0123456789abcdef0123456789abcdef01234567\n",
+    )
+    .unwrap();
+}
+
+/// The issues of `rid` in `home`'s COB cache: each one's JSON.
+pub fn issues(home: &Path, rid: RepoId) -> Vec<String> {
+    let db = sqlite::open(home.join("cobs").join("cache.db")).unwrap();
+    let mut stmt = db
+        .prepare("SELECT issue FROM issues WHERE repo = ?1 ORDER BY id")
+        .unwrap();
+    stmt.bind((1, rid.to_string().as_str())).unwrap();
+    let mut issues = Vec::new();
+    while let Ok(sqlite::State::Row) = stmt.next() {
+        issues.push(stmt.read::<String, _>(0).unwrap());
+    }
+    issues
+}
+
+/// Whether `home`'s reconcile state holds progress of `rid`'s repair.
+pub fn progress(home: &Path, rid: RepoId) -> bool {
+    let db = sqlite::open(home.join("cobs").join("cache.db")).unwrap();
+    let mut stmt = db
+        .prepare("SELECT COUNT(*) FROM reconcile_repository WHERE rid = ?1")
+        .unwrap();
+    stmt.bind((1, rid.to_string().as_str())).unwrap();
+    assert_eq!(stmt.next().unwrap(), sqlite::State::Row);
+    stmt.read::<i64, _>(0).unwrap() > 0
+}
+
 /// Whether `rid`'s `namespace` has the ref [`unsigned_ref`] sets.
 pub fn has_unsigned_ref(home: &Path, rid: RepoId, namespace: &str) -> bool {
     git2::Repository::open_bare(storage_of(home, rid))

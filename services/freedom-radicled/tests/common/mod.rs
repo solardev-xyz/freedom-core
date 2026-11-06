@@ -216,6 +216,31 @@ impl Radicled {
         }
     }
 
+    /// The replies to `ids`, by their IDs, in the order they arrived. They,
+    /// and other messages, stay for [`Radicled::reply`].
+    pub fn arrivals(&mut self, ids: &[u64]) -> Vec<u64> {
+        let wanted = |message: &Value| message["id"].as_u64().filter(|id| ids.contains(id));
+        let mut seen: Vec<u64> = Vec::new();
+        for id in self.pending.iter().filter_map(wanted) {
+            if !seen.contains(&id) {
+                seen.push(id);
+            }
+        }
+        while seen.len() < ids.len() {
+            let message = match self.frames.recv_timeout(READ_TIMEOUT) {
+                Ok(message) => message,
+                Err(e) => panic!("no replies to {ids:?} from freedom-radicled: {e}"),
+            };
+            if let Some(id) = wanted(&message)
+                && !seen.contains(&id)
+            {
+                seen.push(id);
+            }
+            self.pending.push_back(message);
+        }
+        seen
+    }
+
     /// Sends a request and returns its reply.
     pub fn call(&mut self, method: &str, params: Value) -> Value {
         let id = self.request(method, params);
