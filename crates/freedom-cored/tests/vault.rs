@@ -823,7 +823,7 @@ fn shutdown_is_honored_while_main_is_not_reading() {
     drop(writer.join().unwrap());
     // The gate is free for the next core.
     let mut next = spawn("serve", &data, &root.path().join("locks"), &[]);
-    assert_eq!(next.hello()["result"]["protocol"], 1);
+    assert_eq!(next.hello()["result"]["protocol"], 2);
 }
 
 #[test]

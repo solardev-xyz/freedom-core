@@ -18,8 +18,13 @@
 //!   ([`seatbelt`]), self-applied through Seatbelt's private calls, each
 //!   status derived from the sandbox's own checks once it is applied
 //!   ([`macos`]).
-//! - **Elsewhere,** for now: nothing is applied, and every property is
-//!   `unavailable` (Windows follows).
+//! - **Windows,** step 1 (D4): a job object that allows one active
+//!   process, nested in any job the process is in already (libuv's, under
+//!   main), and the process mitigation policies, each set, then read back
+//!   ([`windows`], its report from [`job`]). Files and local IPC need a
+//!   restricted token, a later step, so both are `unavailable`.
+//! - **Elsewhere:** nothing is applied, and every property is
+//!   `unavailable`.
 //!
 //! **The order** (0010, "The recommendation", step 1):
 //! 1. at entry, the panic hook, then [`clean_entry`]: if anything is open
@@ -42,6 +47,9 @@ use std::path::{Path, PathBuf};
 
 use serde::Serialize;
 
+// Derived and tested on every OS; applied on Windows.
+#[cfg_attr(not(windows), allow(dead_code))]
+mod job;
 #[cfg(target_os = "linux")]
 mod linux;
 #[cfg(target_os = "macos")]
@@ -52,6 +60,8 @@ mod resolver;
 pub mod seatbelt;
 #[cfg(target_os = "linux")]
 pub mod seccomp;
+#[cfg(windows)]
+mod windows;
 
 /// What a service may use once confined.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -155,10 +165,22 @@ pub enum Resolution {
     Fallback,
 }
 
+/// A process mitigation policy, as read back (Windows).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Mitigation {
+    /// Read back with every flag the service asked for.
+    Set,
+    /// Not set, or not read back: [`Report::reasons`] says why, under the
+    /// mitigation's name.
+    Missing,
+}
+
 /// What confinement the process got: `hello`'s `confinement`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Report {
-    /// `landlock-<abi>+seccomp`, `landlock-<abi>`, `seccomp` or `none`.
+    /// `landlock-<abi>+seccomp`, `landlock-<abi>`, `seccomp`, `seatbelt`,
+    /// `job` or `none`.
     pub mechanism: String,
     /// Outside the grant, no file is read or written; outside the
     /// read-write grant, none is truncated; and no file's mode, owner,
@@ -175,9 +197,15 @@ pub struct Report {
     pub network: Status,
     /// What a `partial` property leaves open.
     pub gaps: Vec<&'static str>,
-    /// Why a property is `unavailable` or `blocked`, and why resolution is
-    /// `files_only` or `fallback`.
+    /// Why a property is `unavailable` or `blocked`, why resolution is
+    /// `files_only` or `fallback`, and on Windows why a mitigation is
+    /// missing.
     pub reasons: BTreeMap<&'static str, String>,
+    /// On Windows, each process mitigation policy by name (`dynamic_code`,
+    /// `image_load`, `extension_points`), as read back. Empty elsewhere, and
+    /// then left out of the JSON.
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub mitigations: BTreeMap<&'static str, Mitigation>,
     /// In `direct` mode: on Linux for a service that resolves through the C
     /// library, set here; for a service with its own resolver, set by the
     /// service once it has read its configuration.
@@ -248,6 +276,12 @@ pub struct Options {
     /// Append these rules to the profile: the confinement test's inverse
     /// controls (an exec the probe must then perform).
     pub seatbelt_extra: Option<String>,
+    /// Make no job, as if creating or nesting it had failed with this Win32
+    /// error: something outside refused it.
+    pub job_error: Option<i32>,
+    /// Set no mitigation, as if each had failed with this Win32 error; each
+    /// is still read back.
+    pub mitigation_error: Option<i32>,
 }
 
 /// The environment variable the entry's re-exec sets ([`clean_entry`]), to
@@ -319,7 +353,11 @@ impl Entry {
 /// own file's: another file is [`Entry::Replaced`], which [`confine`]
 /// refuses (exit 77).
 ///
-/// Elsewhere, for now, it does nothing (Windows follows).
+/// Elsewhere it does nothing. **On Windows** a handle is inherited only if
+/// it was made inheritable and the parent asked; with `files` and `ipc`
+/// `unavailable` there, the report claims nothing an inherited handle could
+/// undo, and the restricted token's relaunch (a later step) passes only
+/// stdio and the lock (design 0010, "Windows").
 pub fn clean_entry() -> Entry {
     #[cfg(target_os = "linux")]
     {
@@ -371,15 +409,22 @@ pub fn confine_with(policy: &Policy, options: &Options) -> Result<Report, Invali
     {
         macos::confine(policy, options)
     }
-    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    #[cfg(windows)]
+    {
+        windows::confine(policy, options)
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
     {
         let _ = (policy, options);
-        Ok(unconfined("not yet confined on this OS"))
+        Ok(unconfined("not confined on this OS"))
     }
 }
 
 /// A report with every property `unavailable` for `why`.
-#[cfg_attr(any(target_os = "linux", target_os = "macos"), allow(dead_code))]
+#[cfg_attr(
+    any(target_os = "linux", target_os = "macos", windows),
+    allow(dead_code)
+)]
 fn unconfined(why: &str) -> Report {
     let mut reasons = BTreeMap::new();
     for property in ["files", "exec", "ipc", "network"] {
@@ -394,6 +439,7 @@ fn unconfined(why: &str) -> Report {
         gaps: Vec::new(),
         reasons,
         resolution: None,
+        mitigations: BTreeMap::new(),
     }
 }
 

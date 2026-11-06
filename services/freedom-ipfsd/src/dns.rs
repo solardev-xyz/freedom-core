@@ -50,7 +50,7 @@ pub fn read(network: &NetworkPolicy) -> Option<Dns> {
 /// Adds what resolves names to `report`, on Unix, where the configuration
 /// is `/etc/resolv.conf`: `resolv_conf` once it parsed, or `fallback` with
 /// the reason. Nothing in `socks5` mode, nor on Windows, which has no
-/// resolv.conf and no confinement yet.
+/// resolv.conf.
 pub fn report(report: &mut Report, dns: Option<&Dns>) {
     if !cfg!(unix) {
         return;
@@ -97,6 +97,7 @@ mod tests {
             gaps: Vec::new(),
             reasons: Default::default(),
             resolution: None,
+            mitigations: Default::default(),
         }
     }
 

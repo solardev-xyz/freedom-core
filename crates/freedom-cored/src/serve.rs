@@ -131,8 +131,8 @@ pub enum Event {
     /// here can go, then the requests that waited for them.
     Room,
     /// A stream's entry of frames (design 0009, Streams in the core), read
-    /// after a protocol-2 hello, for the dweb thread: outside the frame
-    /// credits, under the reader's stream cap.
+    /// after the hello, for the dweb thread: outside the frame credits,
+    /// under the reader's stream cap.
     Stream(transport::StreamMark),
 }
 
@@ -182,27 +182,10 @@ const CAPABILITIES: &[&str] = &[
     "naming.invalidate_content",
     "naming.invalidate_tezos",
     "dweb.open",
+    // Design 0009: verified fetches, whose bodies stream.
+    "dweb.verify",
+    "dweb.forget",
 ];
-
-/// The methods `core.hello`'s capabilities add at protocol 2, after
-/// [`CAPABILITIES`] (design 0009): verified fetches, whose bodies stream.
-/// On a protocol-1 connection they are unknown methods, as before.
-const CAPABILITIES_STREAMS: &[&str] = &["dweb.verify", "dweb.forget"];
-
-/// `core.hello`'s capabilities at `protocol`: the methods, then the
-/// features; at protocol 2, the streamed methods and `streams` too.
-fn capabilities(protocol: u32) -> Vec<&'static str> {
-    let streams = protocol >= fc_protocol::PROTOCOL_VERSION_STREAMS;
-    let mut out: Vec<&'static str> = CAPABILITIES.to_vec();
-    if streams {
-        out.extend_from_slice(CAPABILITIES_STREAMS);
-    }
-    out.extend_from_slice(FEATURES);
-    if streams {
-        out.push("streams");
-    }
-    out
-}
 
 /// The features in `core.hello`'s capabilities, after the methods (design
 /// 0005):
@@ -217,11 +200,14 @@ fn capabilities(protocol: u32) -> Vec<&'static str> {
 /// - `colibri_faults`: the core reads Colibri's `fault: true` beside a
 ///   failure or a revert, for its verifier-fault backoff (Colibri). Main
 ///   sends it only to a core that offers it.
+/// - `streams`: stream frames in both directions (design 0009, Streams in
+///   the core), on every connection: the core speaks only protocol 2.
 const FEATURES: &[&str] = &[
     "fragments",
     "myotis_refusal_codes",
     "exclude_sources",
     "colibri_faults",
+    "streams",
 ];
 
 pub fn run(options: &Options) -> Exit {
@@ -318,9 +304,9 @@ pub fn run(options: &Options) -> Exit {
         return Exit::Internal;
     }
 
-    // The dweb thread's share of the writer, for a protocol-2 hello. The
-    // writer's own handle goes to the outbox: once the producers' handles
-    // are gone, the writer ends.
+    // The dweb thread's share of the writer, for the hello. The writer's
+    // own handle goes to the outbox: once the producers' handles are gone,
+    // the writer ends.
     let dweb_out = writer.queue.clone();
     let mut core = Core {
         snapshot_ready: false,
@@ -337,7 +323,6 @@ pub fn run(options: &Options) -> Exit {
         link: Arc::clone(&link),
         credit: None,
         hello_done: false,
-        protocol: fc_protocol::PROTOCOL_VERSION,
         last_request_id: 0,
         vault: Vault::new(
             gate.identity_dir.clone(),
@@ -474,8 +459,8 @@ pub fn run(options: &Options) -> Exit {
             // data follows its head there.
             Ok(Event::Stream(mark)) => {
                 let Some(thread) = core.dweb.as_ref() else {
-                    // The reader takes stream frames only after a protocol-2
-                    // hello, which starts the thread.
+                    // The reader takes stream frames only after the hello,
+                    // which starts the thread.
                     break Exit::Internal;
                 };
                 if !thread.send(dweb::In::Stream(mark), None) {
@@ -597,8 +582,6 @@ struct Core {
     /// The credit of the frame being handled.
     credit: Option<transport::Credit>,
     hello_done: bool,
-    /// The protocol the hello settled: 1 until then.
-    protocol: u32,
     last_request_id: u64,
     vault: Vault,
     worker: Worker,
@@ -606,7 +589,7 @@ struct Core {
     requests: Arc<Requests>,
     naming: naming::Handle,
     chain: chain::Handle,
-    /// The dweb thread, once a hello has settled protocol 2 (design 0009).
+    /// The dweb thread, once the hello has settled (design 0009).
     dweb: Option<dweb::Handle>,
     /// What starts it; taken when it starts.
     dweb_start: Option<DwebStart>,
@@ -734,14 +717,10 @@ fn loggable(method: &str) -> &'static str {
 /// checked once for every request before anything is dispatched, and with
 /// the `testhooks` feature the test methods, when their hook enables them. `Err` is
 /// the refusal: a method the table doesn't list is unknown; one it lists,
-/// but not for this caller, is forbidden.
-fn admitted(
-    method: &str,
-    caller: CallerKind,
-    test_methods: bool,
-    protocol: u32,
-) -> Result<(), ErrorBody> {
-    match methods::admit(method, caller, protocol) {
+/// but not for this caller, is forbidden. The core speaks only protocol 2,
+/// at which the table serves every row.
+fn admitted(method: &str, caller: CallerKind, test_methods: bool) -> Result<(), ErrorBody> {
+    match methods::admit(method, caller, fc_protocol::PROTOCOL_VERSION_STREAMS) {
         Admission::Allowed(_) => Ok(()),
         Admission::Forbidden => Err(ErrorBody::new(
             ErrorCode::Forbidden,
@@ -1152,7 +1131,7 @@ impl Core {
         let test_methods = self.test.is_some();
         #[cfg(not(feature = "testhooks"))]
         let test_methods = false;
-        if let Err(refusal) = admitted(method, context.caller, test_methods, self.protocol) {
+        if let Err(refusal) = admitted(method, context.caller, test_methods) {
             return self.error(id, refusal);
         }
         let flow = match method {
@@ -1207,7 +1186,7 @@ impl Core {
                     Flow::Exit(Exit::Internal)
                 }
             }
-            // Admitted only at protocol 2, whose hello started the thread.
+            // Admitted only after the hello, which started the thread.
             method if dweb::handles(method) => {
                 let params = match params.map(|p| RawValue::from_string(p.to_owned())) {
                     Some(Ok(params)) => Some(params),
@@ -1267,23 +1246,19 @@ impl Core {
             );
             return Flow::Exit(Exit::Protocol);
         };
-        // Protocol 2 adds streams (design 0009). Protocol 1 stays, without
-        // them, until the browser speaks 2: see 0009, Streams in the core.
-        let streams = match params.protocol {
-            fc_protocol::PROTOCOL_VERSION => false,
-            fc_protocol::PROTOCOL_VERSION_STREAMS => true,
-            _ => {
-                let _ = self.error(
-                    id,
-                    ErrorBody::new(ErrorCode::ProtocolMismatch, "Protocol mismatch").with_data(
-                        serde_json::json!({ "core": fc_protocol::PROTOCOL_VERSION_STREAMS }),
-                    ),
-                );
-                return Flow::Exit(Exit::Protocol);
-            }
-        };
-        // At protocol 2, main takes stream frames: its hello says so.
-        if streams && !params.frames.iter().any(|kind| kind == "stream") {
+        // Protocol 2 only, the streams' version (design 0009, Streams in the
+        // core). Protocol 1 is gone: its hello is a mismatch like any other.
+        if params.protocol != fc_protocol::PROTOCOL_VERSION_STREAMS {
+            let _ = self.error(
+                id,
+                ErrorBody::new(ErrorCode::ProtocolMismatch, "Protocol mismatch").with_data(
+                    serde_json::json!({ "core": fc_protocol::PROTOCOL_VERSION_STREAMS }),
+                ),
+            );
+            return Flow::Exit(Exit::Protocol);
+        }
+        // Main takes stream frames: its hello says so.
+        if !params.frames.iter().any(|kind| kind == "stream") {
             let _ = self.error(
                 id,
                 ErrorBody::new(
@@ -1299,22 +1274,19 @@ impl Core {
                 ErrorBody::new(ErrorCode::InvalidArgument, "core.hello was already sent"),
             );
         }
-        self.protocol = params.protocol;
         // The dweb thread, and stream frames from now on: before the reply,
         // so nothing main sends after reading it is refused.
-        if streams {
-            let Some(start) = self.dweb_start.take() else {
+        let Some(start) = self.dweb_start.take() else {
+            return Flow::Exit(Exit::Internal);
+        };
+        match dweb::spawn(start.out, start.events, Arc::clone(&self.requests)) {
+            Ok(handle) => self.dweb = Some(handle),
+            Err(_) => {
+                log::error("cannot start a thread", serde_json::json!({}));
                 return Flow::Exit(Exit::Internal);
-            };
-            match dweb::spawn(start.out, start.events, Arc::clone(&self.requests)) {
-                Ok(handle) => self.dweb = Some(handle),
-                Err(_) => {
-                    log::error("cannot start a thread", serde_json::json!({}));
-                    return Flow::Exit(Exit::Internal);
-                }
             }
-            self.link.enable_streams();
         }
+        self.link.enable_streams();
         self.vault.set_auto_lock_ms(params.auto_lock_ms);
         spawn_adoption(params.node_roots.map(NodeRoots::valid).unwrap_or_default());
         // Granted with the handshake: main holds the core's credit from now
@@ -1336,9 +1308,9 @@ impl Core {
             &mut *payload,
             id,
             &HelloResult {
-                protocol: self.protocol,
+                protocol: fc_protocol::PROTOCOL_VERSION_STREAMS,
                 core_version: env!("CARGO_PKG_VERSION"),
-                capabilities: capabilities(self.protocol),
+                capabilities: CAPABILITIES.iter().chain(FEATURES).copied().collect(),
                 node_recovery: &self.node_recovery,
             },
         );
@@ -1813,12 +1785,7 @@ mod tests {
     #[test]
     fn every_method_has_a_row_and_every_row_a_handler() {
         let rows: Vec<&str> = methods::METHODS.iter().map(|m| m.name).collect();
-        let served: Vec<&str> = CAPABILITIES
-            .iter()
-            .chain(CAPABILITIES_STREAMS)
-            .chain(chain::METHODS)
-            .copied()
-            .collect();
+        let served: Vec<&str> = CAPABILITIES.iter().chain(chain::METHODS).copied().collect();
         assert_eq!(rows, served);
         for name in rows {
             assert!(
@@ -1826,7 +1793,7 @@ mod tests {
                     || Vault::handles(name)
                     || naming::handles(name)
                     || chain::handles(name)
-                    || CAPABILITIES_STREAMS.contains(&name),
+                    || dweb::handles(name),
                 "{name}"
             );
             assert_eq!(loggable(name), name);

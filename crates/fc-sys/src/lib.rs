@@ -12,6 +12,10 @@
 //! - [`windows::drive_type`]: storage qualification in `freedom-cored` and
 //!   `fc-service` (design 0001, "Lifetime lock");
 //! - [`windows::quiet_error_reporting`]: `fc-service`'s process hardening;
+//! - [`windows::Job`], [`windows::own_job_limits`] and
+//!   [`windows::Mitigation`]: its confinement on Windows (design 0010), a job
+//!   object of one process and the process mitigation policies, each read
+//!   back;
 //! - [`linux::landlock_abi`], [`linux::cloexec_from`] and
 //!   [`unix::set_cloexec`]: `fc-service`'s confinement on Linux (design
 //!   0010);

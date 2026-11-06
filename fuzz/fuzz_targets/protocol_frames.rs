@@ -3,7 +3,7 @@
 //! 0007 and 0009), with every JSON message decoded as the core decodes it.
 //!
 //! The first byte picks the connection and how the rest is cut:
-//! - `% 4`: a `freedom-cored` connection at protocol 1; a service
+//! - `% 4`: a `freedom-cored` connection before its hello; a service
 //!   connection as main reads it (data, end, abort) or as the service reads
 //!   it (credit); or the core's connection at protocol 2, which reads all
 //!   four into a duplex;
@@ -155,7 +155,7 @@ impl Connection {
             (Some(Side::Both), frame::KIND_DATA..=frame::KIND_STREAM_CREDIT) => {
                 self.take_duplex(&frame)
             }
-            // The core at protocol 2 takes fragments as at protocol 1.
+            // The core at protocol 2 takes fragments as before its hello.
             (Some(Side::Both), _) => self.take_core(frame),
             (Some(_), frame::KIND_JSON) => {
                 decode_message(&frame.payload);
