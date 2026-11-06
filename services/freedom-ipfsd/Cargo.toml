@@ -9,7 +9,7 @@
 [package]
 name = "freedom-ipfsd"
 description = "The freedom-ipfs service process: IPFS nodes as owned instances, over stdin and stdout frames (design 0007)"
-version = "0.3.0"
+version = "0.4.0"
 edition = "2024"
 rust-version = "1.99"
 publish = false
@@ -54,13 +54,15 @@ fc-service = { path = "../../crates/fc-service" }
 # dag-pb's link cap and strict dag-pb, the CAR varint error, IPNS's best
 # record and legacy fields, HAMT lookups by hash, cargo-deny, and one DNS
 # configuration for `direct`'s HTTP gate and libp2p transports (#82), read
-# once per process here, which `confinement.resolution` reports.
+# once per process here, which `confinement.resolution` reports. Then the
+# store's eviction (#87): its order read off an index, its total off a row
+# kept by triggers, in bounded batches, with old stores migrated at open.
 # src/build_info.rs reports the same commit.
 # freedom-ipfs-core: the memory budget's `Reservation`, which the gateway
 # crate doesn't re-export.
-freedom-ipfs-core = { git = "https://github.com/solardev-xyz/freedom-ipfs", rev = "af98afa939c4f2d479c562f1c4e280107e6552b0" }
-freedom-ipfs-gateway = { git = "https://github.com/solardev-xyz/freedom-ipfs", rev = "af98afa939c4f2d479c562f1c4e280107e6552b0", features = ["socks"] }
-freedom-ipfs-store = { git = "https://github.com/solardev-xyz/freedom-ipfs", rev = "af98afa939c4f2d479c562f1c4e280107e6552b0" }
+freedom-ipfs-core = { git = "https://github.com/solardev-xyz/freedom-ipfs", rev = "8a2311c2316b830b8bb3fe02e201765b2f5c35e0" }
+freedom-ipfs-gateway = { git = "https://github.com/solardev-xyz/freedom-ipfs", rev = "8a2311c2316b830b8bb3fe02e201765b2f5c35e0", features = ["socks"] }
+freedom-ipfs-store = { git = "https://github.com/solardev-xyz/freedom-ipfs", rev = "8a2311c2316b830b8bb3fe02e201765b2f5c35e0" }
 # The `Stream` trait, to read a response's body as it comes; already in
 # freedom-ipfs's graph.
 futures-core = "0.3"
@@ -85,7 +87,7 @@ tokio = { version = "1", default-features = false, features = ["rt-multi-thread"
 hickory-proto = { version = "0.25", default-features = false, features = ["std"] }
 # Upstream's SOCKS5 test proxy and test servers (its `test-util` feature),
 # for the `socks5` tests through the binary; the same pin as the gateway's.
-freedom-ipfs-net = { git = "https://github.com/solardev-xyz/freedom-ipfs", rev = "af98afa939c4f2d479c562f1c4e280107e6552b0", features = ["test-util"] }
+freedom-ipfs-net = { git = "https://github.com/solardev-xyz/freedom-ipfs", rev = "8a2311c2316b830b8bb3fe02e201765b2f5c35e0", features = ["test-util"] }
 tempfile = "3"
 
 # tests/confinement.rs: the kernel's Landlock ABI, which the report must name
