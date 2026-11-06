@@ -11,9 +11,11 @@
 //!   `rad.read` and `rad.blob` on the read pool, `rad.remove_repo`,
 //!   `rad.unseed` and `rad.write` on the write queue, each with its 60 s
 //!   deadline from admission. Before `RUNNING` and from the stop on they
-//!   are `stopped`, and past the pool's bounds `busy`. Their operations come
-//!   with later steps: until then each one's work answers `stopped`, as
-//!   this build answered it before;
+//!   are `stopped`, and past the pool's bounds `busy`. Quarantine's two,
+//!   `rad.quarantine_list` and `rad.remove_repo`, are served
+//!   ([`crate::quarantine`]). The others' operations come with later steps:
+//!   until then each one's work answers `stopped`, as this build answered
+//!   it before;
 //! - `rad.connect_seeds` and `rad.clone`, for the network pool, whose
 //!   deadline is the request's own `timeout_ms` plus 30 s, come with the
 //!   network operations' step; they, `rad.stats` (inline) and
@@ -55,7 +57,7 @@ use crate::confine::Grant;
 use crate::identity::{self, Identity};
 use crate::node::{self, Node};
 use crate::pools::{self, Pool, Pools, Ticket, Work};
-use crate::reconcile;
+use crate::{quarantine, reconcile};
 use crate::{testhooks, units};
 
 /// How the process ends after a start step it answered with an error
@@ -178,6 +180,15 @@ impl RadicleService {
             Some((self.pools.write(), pools::WRITE_DEADLINE))
         } else {
             None
+        }
+    }
+
+    /// The work of pooled `request`.
+    fn work(&self, conn: &Connection, request: &Request<'_>) -> Work {
+        match request.method {
+            "rad.quarantine_list" => quarantine::list(conn, &self.home, request.params),
+            "rad.remove_repo" => quarantine::remove(conn, &self.node, &self.home, request.params),
+            _ => later_step(conn),
         }
     }
 
@@ -413,7 +424,12 @@ impl Service for RadicleService {
             );
         } else if let Some((pool, within)) = self.pool(method) {
             let deadline = Instant::now() + testhooks::work_deadline(within);
-            pool.submit(request.id, deadline, conn.clone(), later_step(conn));
+            pool.submit(
+                request.id,
+                deadline,
+                conn.clone(),
+                self.work(conn, &request),
+            );
         } else if LATER.contains(&method) {
             let _ = conn.reply_error(
                 request.id,

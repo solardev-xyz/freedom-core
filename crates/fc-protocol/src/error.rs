@@ -71,6 +71,13 @@ pub enum ErrorCode {
     /// `rad.start` failed: libradicle's start, whose message is its own, or
     /// a step of the service's before it.
     StartFailed,
+    // The Radicle service's methods (design 0008, Errors).
+    /// A libradicle error before a write has started, its `message` naming
+    /// what failed.
+    Failed,
+    /// `rad.remove_repo`: no quarantine record of the repository has that
+    /// `qid`, so nothing was removed (design 0008, "The escape").
+    NotQuarantined,
 }
 
 /// The `error` member of a response: a closed shape, so a member it
@@ -152,6 +159,25 @@ mod tests {
             (ErrorCode::NoIdentity, "no_identity"),
             (ErrorCode::RecoveryFailed, "recovery_failed"),
             (ErrorCode::StartFailed, "start_failed"),
+        ] {
+            assert_eq!(
+                serde_json::to_value(code).ok(),
+                Some(serde_json::Value::from(wire))
+            );
+            assert_eq!(
+                serde_json::from_value::<ErrorCode>(wire.into()).ok(),
+                Some(code)
+            );
+        }
+    }
+
+    #[test]
+    fn radicle_method_codes_on_the_wire() {
+        // Design 0008, Errors and "The escape": a libradicle error, and a
+        // removal whose `qid` no record has.
+        for (code, wire) in [
+            (ErrorCode::Failed, "failed"),
+            (ErrorCode::NotQuarantined, "not_quarantined"),
         ] {
             assert_eq!(
                 serde_json::to_value(code).ok(),
