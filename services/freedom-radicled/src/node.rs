@@ -43,12 +43,24 @@
 //! **The pools open with the node** ([`crate::pools`]): just before
 //! `rad.start`'s reply, so main's first request after it is admitted.
 //!
+//! **Pooled work reaches the node through its lock** ([`Node::handle`]):
+//! 0008's shared lock on the node ("Pools and budgets"). Work takes it
+//! shared, as reads and `rad.remove_repo` do: libradicle's calls for them
+//! take `&self`. Only the stop takes it exclusively, to ask the node to
+//! stop. The methods 0008 says need the node exclusively (`seeders`,
+//! `unseed_repo`) come with later steps. Work gets the node only while it
+//! runs, and lets go of it as its work returns.
+//!
 //! **The stop** ([`Node::stop`], at the connection's end), within 3 s
 //! ([`SHUTDOWN_WITHIN`]), inside the connection's 5 s exit:
 //! 1. the pools are fenced and drained (0008: "the service fences new work,
 //!    answers waiting requests `stopped`"): queued requests are answered
 //!    `stopped`, running ones cancelled, and their threads waited for;
-//! 2. the node is asked to stop, and waited for in the time left.
+//! 2. the node is asked to stop, and waited for in the time left. A
+//!    complete drain leaves no work holding the node, so the stop takes its
+//!    lock at once. Work still running past the drain may hold it: the stop
+//!    never waits for it, and asks nothing ([`unasked`]). The node then
+//!    stops as that work lets go of it, or with the process.
 //!
 //! **How the node ended is one decision,** whichever of the watch and the
 //! stop comes first:
@@ -60,10 +72,13 @@
 //!   `Asked::ThisCall` if it was the first to ask, while the node's thread
 //!   ran; `Asked::Earlier` if a stop call had asked before; `Asked::Never`
 //!   if the thread had ended before any asked. The service makes its stop
-//!   calls only through [`Running::ask_stop`], and only where no other
-//!   thread can reach the node: under the phase's lock, or once the stop
-//!   has taken the node out of the phase. Dropping a node asks too, but
-//!   only one the phase never held, or after the stop. So a stop that finds
+//!   calls only through [`Running::ask_stop`], holding the node
+//!   exclusively, and only where no other thread can ask it: under the
+//!   phase's lock, or once the stop has taken the node out of the phase.
+//!   Work holds the node only shared, and never asks it. Dropping a node
+//!   asks too, but only one the phase never held, or after the stop: its
+//!   last holder drops it, the stop or, past an incomplete drain, the work
+//!   that still held it. So a stop that finds
 //!   `Asked::ThisCall` is the first to ask the node, and the only one.
 //! - **heartwood's run ends `Ok` only once it was asked to stop** (its
 //!   `Runtime::run` at the pinned commit). Its reactor ends on its
@@ -89,7 +104,8 @@
 //! ("Reconciliation"): `rad.shutdown` ended the connection; the pools'
 //! drain was complete before the node's stop, so every pool thread ended,
 //! no write is queued or running, and this build has no write that could
-//! be uncertain; and the stop's `Shutdown` is `Asked::ThisCall`,
+//! be uncertain (a removal from quarantine keeps its record until its last
+//! step, [`crate::quarantine`]); and the stop's `Shutdown` is `Asked::ThisCall`,
 //! `ThreadEnd::Stopped` and `HomeLock::Released`, within the time the drain
 //! left. So the node stopped because this stop asked it, it let go of its
 //! home, and heartwood's workers have finished their fetches. A node down
@@ -98,7 +114,9 @@
 //! marker, and the next start runs the full repair.
 
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Condvar, Mutex, MutexGuard};
+use std::sync::{
+    Arc, Condvar, Mutex, MutexGuard, PoisonError, RwLock, RwLockReadGuard, TryLockError,
+};
 use std::time::{Duration, Instant};
 
 use fc_protocol::error::{ErrorBody, ErrorCode};
@@ -128,12 +146,15 @@ pub const WATCH_INTERVAL: Duration = Duration::from_secs(1);
 /// The quarantine record's page, as the start reads it.
 const PAGE: usize = 64;
 
+/// The node under its lock (see the module's doc).
+type Shared = Arc<RwLock<libradicle::Embedded>>;
+
 /// A running node, and what runs with it.
 struct Running {
-    embedded: libradicle::Embedded,
-    /// The host's half of the node's repository gate: the online repair and
-    /// quarantine's removal (later steps) open and close repositories
-    /// through it.
+    embedded: Shared,
+    /// The host's half of the node's repository gate: quarantine's removal
+    /// opens a repository it removed through it, and the online repair (a
+    /// later step) opens and closes them.
     repositories: RepoGate,
     /// NAT64 discovery, running while its lease is held: `direct` mode's,
     /// for the node's life (`rad.stats` reads it, a later step).
@@ -141,12 +162,50 @@ struct Running {
 }
 
 impl Running {
+    /// The node, shared. Only the stop takes it exclusively, and never
+    /// panics holding it, so a poisoned lock still holds a whole node.
+    fn node(&self) -> RwLockReadGuard<'_, libradicle::Embedded> {
+        self.embedded.read().unwrap_or_else(PoisonError::into_inner)
+    }
+
     /// Asks the node to stop, and waits up to `within` for it
     /// (`Embedded::shutdown_within`): the one place the service asks.
     /// libradicle records the request, and the outcome says who asked
-    /// first (see the module's doc).
-    fn ask_stop(&mut self, within: Duration) -> libradicle::Shutdown {
-        self.embedded.shutdown_within(within)
+    /// first (see the module's doc). `None`, with nothing asked, while work
+    /// holds the node: the lock is only tried, never waited for.
+    fn ask_stop(&mut self, within: Duration) -> Option<libradicle::Shutdown> {
+        match self.embedded.try_write() {
+            Ok(mut node) => Some(node.shutdown_within(within)),
+            Err(TryLockError::Poisoned(poisoned)) => {
+                Some(poisoned.into_inner().shutdown_within(within))
+            }
+            Err(TryLockError::WouldBlock) => None,
+        }
+    }
+
+    /// Whether the node's thread still runs, if no one holds the node
+    /// exclusively: `None` otherwise.
+    fn alive(&self) -> Option<bool> {
+        match self.embedded.try_read() {
+            Ok(node) => Some(node.node_alive()),
+            Err(TryLockError::Poisoned(poisoned)) => Some(poisoned.into_inner().node_alive()),
+            Err(TryLockError::WouldBlock) => None,
+        }
+    }
+}
+
+/// The running node, as pooled work reaches it ([`Node::handle`]).
+#[derive(Clone)]
+pub struct Handle {
+    embedded: Shared,
+    /// The host's half of the node's repository gate.
+    pub repositories: RepoGate,
+}
+
+impl Handle {
+    /// The node, shared (see the module's doc).
+    pub fn node(&self) -> RwLockReadGuard<'_, libradicle::Embedded> {
+        self.embedded.read().unwrap_or_else(PoisonError::into_inner)
     }
 }
 
@@ -195,6 +254,18 @@ impl Node {
 
     fn lock(&self) -> MutexGuard<'_, Phase> {
         self.phase.lock().unwrap_or_else(|p| p.into_inner())
+    }
+
+    /// The running node, for pooled work: `None` unless it runs. The work
+    /// holds it until it returns, never longer (see the module's doc).
+    pub fn handle(&self) -> Option<Handle> {
+        match &*self.lock() {
+            Phase::Running(running) => Some(Handle {
+                embedded: running.embedded.clone(),
+                repositories: running.repositories.clone(),
+            }),
+            Phase::Waiting | Phase::Starting | Phase::Down(_) | Phase::Over => None,
+        }
     }
 
     /// Admits `rad.start`, once: `false` for a second.
@@ -306,7 +377,7 @@ impl Node {
                 &ErrorBody::new(ErrorCode::Internal, "Internal error"),
             );
         }
-        let identity = running.embedded.identity();
+        let identity = running.node().identity();
         log::info("the node runs", json!({ "nid": identity.nid }));
         // `RUNNING`: before the reply, so that main's next request is admitted.
         self.pools.open();
@@ -329,7 +400,7 @@ impl Node {
         let mut phase = self.lock();
         loop {
             match &*phase {
-                Phase::Running(running) if running.embedded.node_alive() => {}
+                Phase::Running(running) if running.node().node_alive() => {}
                 Phase::Running(_) => {
                     if let Phase::Running(running) = std::mem::replace(&mut *phase, Phase::Over) {
                         *phase = Phase::Down(running);
@@ -373,10 +444,15 @@ impl Node {
             Phase::Down(running) => (running, true),
             Phase::Waiting | Phase::Starting | Phase::Over => return,
         };
-        // Nothing else can reach the node now: the outcome says whether
-        // this stop was the first to ask it. In the time the drain left, if
-        // any: asked all the same.
+        // Nothing else can reach the node now, but work still running past
+        // the drain may hold it: the outcome says whether this stop was the
+        // first to ask it. In the time the drain left, if any: asked all the
+        // same.
         let stopped = running.ask_stop(deadline.saturating_duration_since(Instant::now()));
+        let decided = match &stopped {
+            Some(stopped) => ending(watched, drained, stopped, end),
+            None => unasked(watched, running.alive()),
+        };
         let Running {
             embedded,
             repositories,
@@ -385,7 +461,7 @@ impl Node {
         } = running;
         drop(nat64);
         drop(repositories);
-        match ending(watched, drained, &stopped, end) {
+        match decided {
             Ending::Clean => match marker::remove(home) {
                 Ok(()) => log::info(
                     "the node stopped cleanly; the dirty marker is cleared",
@@ -416,7 +492,8 @@ impl Node {
             ),
         }
         // A node that didn't stop in time is waited for once more as it
-        // drops, within the connection's 5 s exit.
+        // drops, within the connection's 5 s exit: here, or as the work that
+        // still held it lets go of it.
         drop(embedded);
     }
 }
@@ -478,6 +555,20 @@ fn ending(watched: bool, drained: bool, stopped: &libradicle::Shutdown, end: End
     }
 }
 
+/// How a stop that couldn't ask the node left it: work still running past
+/// the drain held the node, so the drain was incomplete. `watched`: the
+/// watch found the node down first; `alive`: whether its thread still ran,
+/// if the stop could tell. Nothing asked the node, and heartwood's run ends
+/// only once asked, so a thread that ended is `Down`; otherwise nothing is
+/// proven.
+fn unasked(watched: bool, alive: Option<bool>) -> Ending {
+    if watched || alive == Some(false) {
+        Ending::Down
+    } else {
+        Ending::Unproven("work was still running")
+    }
+}
+
 fn start_failed(message: impl Into<String>) -> ErrorBody {
     ErrorBody::new(ErrorCode::StartFailed, message)
 }
@@ -527,7 +618,7 @@ fn run(start: Start) -> Result<Running, ErrorBody> {
     )
     .map_err(|e| start_failed(e.to_string()))?;
     Ok(Running {
-        embedded,
+        embedded: Arc::new(RwLock::new(embedded)),
         repositories,
         nat64,
     })
@@ -731,6 +822,20 @@ mod tests {
             }
         }
         assert_eq!(rows, 3 * 3 * 3 * 2 * 2);
+    }
+
+    /// A stop that couldn't ask the node, because work still held it past
+    /// the drain: a node the watch found down, or whose thread ended though
+    /// nothing asked, is `node_down`; otherwise nothing is proven.
+    #[test]
+    fn a_stop_that_couldnt_ask_the_node_proves_nothing_and_hides_no_crash() {
+        let running = "work was still running";
+        assert_eq!(unasked(false, Some(true)), Ending::Unproven(running));
+        assert_eq!(unasked(false, None), Ending::Unproven(running));
+        assert_eq!(unasked(false, Some(false)), Ending::Down);
+        for alive in [Some(true), Some(false), None] {
+            assert_eq!(unasked(true, alive), Ending::Down, "{alive:?}");
+        }
     }
 
     #[test]

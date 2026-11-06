@@ -62,6 +62,7 @@ mod marker;
 mod nat64;
 mod node;
 mod pools;
+mod quarantine;
 mod reconcile;
 mod service;
 mod testhooks;

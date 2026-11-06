@@ -35,6 +35,9 @@
 //!   until its token is cancelled (main's cancel, its deadline or the stop),
 //!   or for 30 s, and with `deaf` for 30 s whatever its token, as a call
 //!   that doesn't check it. Each logs `test hook: work holds its slot`.
+//!   `rad.remove_repo`'s work is held so too, with the node held shared,
+//!   before its removal starts ([`crate::quarantine`]); `rad.quarantine_list`'s
+//!   isn't.
 //!
 //! **Hermetic by construction:** a build with the feature never reaches
 //! off this host, whatever a test asks of it.
