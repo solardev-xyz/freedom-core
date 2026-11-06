@@ -16,11 +16,9 @@
 //!   ([`crate::quarantine`]), and so are the writes, `rad.write` and
 //!   `rad.unseed`, with the mutation-start boundary ([`crate::writes`]),
 //!   and a COB write's online repair on the writer when its outcome is
-//!   unknown ([`crate::repair`]). `rad.read`'s pass-through ops are served
-//!   within the process's output budget ([`crate::reads`],
-//!   [`crate::output`]). `rad.blob` and `rad.read`'s other ops come with
-//!   later steps: until then each one's work answers `stopped`, as this
-//!   build answered it before;
+//!   unknown ([`crate::repair`]). `rad.read`, every op of it, and
+//!   `rad.blob` are served within the process's output budget
+//!   ([`crate::reads`], [`crate::output`]);
 //! - `rad.connect_seeds` and `rad.clone`, for the network pool, whose
 //!   deadline is the request's own `timeout_ms` plus 30 s, come with the
 //!   network operations' step; they, `rad.stats` (inline) and
@@ -224,6 +222,10 @@ impl RadicleService {
                 ),
                 None,
             ),
+            "rad.blob" => (
+                reads::blob(conn, &self.node, &self.budget, &self.home, request.params),
+                None,
+            ),
             _ => (later_step(conn), None),
         }
     }
@@ -387,9 +389,9 @@ impl RadicleService {
     }
 }
 
-/// The work of a pooled method whose operation comes with a later step: it
-/// holds its slot as any work does, then answers `stopped`, as this build
-/// answered it before.
+/// The work of a pooled method this build has no operation for (every one
+/// 0008 lists has one now): it holds its slot as any work does, then
+/// answers `stopped`.
 fn later_step(conn: &Connection) -> Work {
     let conn = conn.clone();
     Box::new(move |ticket: &Ticket| {

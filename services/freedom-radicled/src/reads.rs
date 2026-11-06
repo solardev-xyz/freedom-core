@@ -110,8 +110,11 @@ use crate::pools::{Pools, Ticket, Work};
 use crate::{quarantine, testhooks};
 use composed::Cobs;
 
+mod blob;
 mod composed;
 mod js;
+
+pub use blob::blob;
 
 /// How often a body waiting for credit looks at its token.
 const POLL: Duration = Duration::from_millis(10);
@@ -515,16 +518,27 @@ fn fence(
     writing: impl Fn(&RepoId) -> bool,
     op: &Op,
 ) -> Option<ErrorBody> {
-    let rid = op.rid()?;
+    fenced(home, gate, writing, op.rid()?, op.cob())
+}
+
+/// Why a read of `rid` can't read it now, if it can't: [`fence`]'s, for a
+/// COB op when `cob` says so (`rad.blob` isn't one).
+fn fenced(
+    home: &Path,
+    gate: &RepoGate,
+    writing: impl Fn(&RepoId) -> bool,
+    rid: RepoId,
+    cob: bool,
+) -> Option<ErrorBody> {
     match gate.state(&rid) {
-        RepoState::Quarantined(kind) if op.cob() || kind == gate::Quarantine::Namespace => {
+        RepoState::Quarantined(kind) if cob || kind == gate::Quarantine::Namespace => {
             Some(quarantine::refusal(home, rid, kind))
         }
-        RepoState::Repairing if op.cob() => Some(ErrorBody::new(
+        RepoState::Repairing if cob => Some(ErrorBody::new(
             ErrorCode::Stopped,
             "the repository is being repaired",
         )),
-        _ if op.cob() && writing(&rid) => Some(ErrorBody::new(
+        _ if cob && writing(&rid) => Some(ErrorBody::new(
             ErrorCode::Stopped,
             "a write to the repository is under way, and its outcome isn't proven yet",
         )),
@@ -799,7 +813,10 @@ pub fn read(
         let built = body(&handle, &budget, &until, op);
         drop(handle);
         match built {
-            Ok(body) => stream(&conn, ticket, &budget, &until, body),
+            Ok(body) => {
+                let head = json!({ "content_type": "application/json", "bytes": body.bytes() });
+                stream(&conn, ticket, &budget, &until, &head, Some(body));
+            }
             // Whoever cancelled its token answers it: main's cancel, the
             // deadline's timer, or the stop.
             Err(Failure::Refused(Refused::Cancelled)) => {}
@@ -808,11 +825,18 @@ pub fn read(
     })
 }
 
-/// The head, then `body`, then its end (see the module's doc).
-fn stream(conn: &Connection, ticket: &Ticket, budget: &Arc<Budget>, until: &Until, body: Body) {
-    let head = json!({ "content_type": "application/json", "bytes": body.bytes() });
+/// `head`, then `body` and its end, if it has one (see the module's doc):
+/// without one, the head opens no stream.
+fn stream(
+    conn: &Connection,
+    ticket: &Ticket,
+    budget: &Arc<Budget>,
+    until: &Until,
+    head: &Value,
+    body: Option<Body>,
+) {
     // What the pending head holds, reserved until the writer has written it.
-    let charge = match fc_service::conn::head_len(ticket.id, &head) {
+    let charge = match fc_service::conn::head_len(ticket.id, head) {
         Ok(size) => budget.reserve(size as u64, until),
         Err(_) => {
             return refuse(
@@ -829,8 +853,8 @@ fn stream(conn: &Connection, ticket: &Ticket, budget: &Arc<Budget>, until: &Unti
     };
     match conn.head_by(
         ticket.id,
-        &head,
-        true,
+        head,
+        body.is_some(),
         ticket.deadline,
         &late(),
         Some(Box::new(charge)),
@@ -839,6 +863,9 @@ fn stream(conn: &Connection, ticket: &Ticket, budget: &Arc<Budget>, until: &Unti
         // `deadline` is its reply; or it is settled already, or closing.
         Ok(Headed::Late) | Err(_) => return,
     }
+    let Some(body) = body else {
+        return;
+    };
     for chunk in body {
         if !send(conn, ticket, chunk.as_slice()) {
             // Cancelled, aborted or closing: the rest is dropped, and its

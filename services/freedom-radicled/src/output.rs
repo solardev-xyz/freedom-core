@@ -5,9 +5,10 @@
 //! ([`BUDGET`]), enforced by reservation. Every byte a read holds is
 //! reserved before it is allocated, and released when it is freed:
 //! - a [`Reservation`] holds its bytes until it drops, or gives part of
-//!   them back first ([`Reservation::release`]): a blob's is twice its size
-//!   while it loads, then once until its last byte is written
-//!   ([`BLOB_LOADING`]);
+//!   them back first ([`Reservation::release`]), or splits them
+//!   ([`Reservation::split`]): a blob's is twice its size while it loads
+//!   ([`BLOB_LOADING`]), then its range's, a chunk's share released as
+//!   each is written ([`Body::copied`]);
 //! - **a reservation that doesn't fit waits,** inside its read's deadline
 //!   to the head ([`Until`]). It is granted once enough is released, and is
 //!   `deadline` at the deadline, or `cancelled` once its token is: main's
@@ -80,18 +81,10 @@ pub const BUILT: u64 = 32 << 20;
 pub const JSON_READ: u64 = BUILT + JSON;
 
 /// The largest blob a read serves (`rad.blob`).
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "rad.blob uses it, a later step")
-)]
 pub const BLOB: u64 = 64 << 20;
 
 /// What a blob of [`BLOB`] reserves while it loads: libgit2's buffer and
 /// the service's copy.
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "rad.blob uses it, a later step")
-)]
 pub const BLOB_LOADING: u64 = 2 * BLOB;
 
 /// How often a reservation that waits looks at its token, which nothing
@@ -288,6 +281,18 @@ impl Reservation {
         self.bytes -= bytes;
         self.budget.give_back(bytes);
     }
+
+    /// Takes `bytes` of it, or all it holds if that is less, into a
+    /// reservation of their own, with nothing given back: for a part of
+    /// what it covers that is freed on its own.
+    pub fn split(&mut self, bytes: u64) -> Reservation {
+        let bytes = bytes.min(self.bytes);
+        self.bytes -= bytes;
+        Reservation {
+            budget: self.budget.clone(),
+            bytes,
+        }
+    }
 }
 
 impl Drop for Reservation {
@@ -462,6 +467,33 @@ impl Body {
     /// Its length: the head's `bytes`.
     pub fn bytes(&self) -> u64 {
         self.bytes
+    }
+
+    /// `bytes` copied into chunks of at most [`STEP`], each holding its
+    /// capacity's share of `reservation`, split from it before the chunk is
+    /// allocated (`rad.blob`'s range, out of the loaded blob): it must hold
+    /// at least as many bytes beside those `bytes` itself holds. What is
+    /// left of it stays there.
+    pub fn copied(bytes: &[u8], reservation: &mut Reservation) -> Result<Body, Failure> {
+        if reservation.bytes() < bytes.len() as u64 {
+            return Err(Failure::Internal("a copy past its reservation"));
+        }
+        let chunks = bytes
+            .chunks(STEP)
+            .map(|part| {
+                let reservation = reservation.split(part.len() as u64);
+                let mut chunk = Vec::with_capacity(part.len());
+                chunk.extend_from_slice(part);
+                Chunk {
+                    bytes: chunk,
+                    reservation,
+                }
+            })
+            .collect();
+        Ok(Body {
+            chunks,
+            bytes: bytes.len() as u64,
+        })
     }
 }
 

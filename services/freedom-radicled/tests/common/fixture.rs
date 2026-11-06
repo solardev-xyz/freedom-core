@@ -168,6 +168,118 @@ pub fn repository_with(
     (rid, ids)
 }
 
+/// One entry of a tree built object by object: its path, its git mode, and
+/// its content; for a gitlink (`0o160000`), the commit it names, in hex.
+pub type Entry<'a> = (&'a str, i32, &'a [u8]);
+
+/// The tree of `entries`, nested at each `/`, written into `repo`.
+fn tree_of(repo: &git2::Repository, entries: &[Entry<'_>]) -> git2::Oid {
+    let mut builder = repo.treebuilder(None).unwrap();
+    let mut dirs: std::collections::BTreeMap<&str, Vec<Entry<'_>>> = Default::default();
+    for &(path, mode, content) in entries {
+        match path.split_once('/') {
+            Some((dir, rest)) => dirs.entry(dir).or_default().push((rest, mode, content)),
+            None => {
+                let oid = if mode == 0o160000 {
+                    git2::Oid::from_str(std::str::from_utf8(content).unwrap()).unwrap()
+                } else {
+                    repo.blob(content).unwrap()
+                };
+                builder.insert(path, oid, mode).unwrap();
+            }
+        }
+    }
+    for (dir, inner) in dirs {
+        let oid = tree_of(repo, &inner);
+        builder.insert(dir, oid, 0o040000).unwrap();
+    }
+    builder.write().unwrap()
+}
+
+/// Imports a repository into `home` as `seed`'s identity whose `master` is
+/// one commit of exactly `entries`, written object by object (any mode, on
+/// any OS: a symlink, a submodule), with one issue; and the commit's ID.
+pub fn repository_of(
+    home: &Path,
+    seed: &[u8; 32],
+    name: &str,
+    entries: &[Entry<'_>],
+) -> (RepoId, String) {
+    let work = tempfile::tempdir().unwrap();
+    let repo = git2::Repository::init(work.path()).unwrap();
+    let tree = repo.find_tree(tree_of(&repo, entries)).unwrap();
+    let signature = git2::Signature::new(
+        "Fixture",
+        "fixture@example.invalid",
+        &git2::Time::new(1_700_000_000, 0),
+    )
+    .unwrap();
+    let commit = repo
+        .commit(
+            Some("refs/heads/master"),
+            &signature,
+            &signature,
+            "Files",
+            &tree,
+            &[],
+        )
+        .unwrap();
+    let rid = with_node(home, seed, |node| {
+        let rid = node
+            .import_repo(work.path(), name, "A fixture.", "master")
+            .unwrap();
+        node.create_issue(rid, "First", "Its description.", vec![])
+            .unwrap();
+        rid
+    });
+    (rid, commit.to_string())
+}
+
+/// Imports a repository into `home` as `seed`'s identity with a `README.md`
+/// and a tree `wide` of `entries` files, `f0000000` on, each the same small
+/// blob: a tree object of 36 bytes an entry. Its commit's ID.
+pub fn repository_with_wide_tree(
+    home: &Path,
+    seed: &[u8; 32],
+    name: &str,
+    entries: usize,
+) -> (RepoId, String) {
+    let work = tempfile::tempdir().unwrap();
+    let repo = git2::Repository::init(work.path()).unwrap();
+    let small = repo.blob(b"x\n").unwrap();
+    let mut wide = repo.treebuilder(None).unwrap();
+    for n in 0..entries {
+        wide.insert(format!("f{n:07}"), small, 0o100644).unwrap();
+    }
+    let wide = wide.write().unwrap();
+    let mut root = repo.treebuilder(None).unwrap();
+    root.insert("README.md", repo.blob(b"# Wide\n").unwrap(), 0o100644)
+        .unwrap();
+    root.insert("wide", wide, 0o040000).unwrap();
+    let tree = repo.find_tree(root.write().unwrap()).unwrap();
+    let signature = git2::Signature::new(
+        "Fixture",
+        "fixture@example.invalid",
+        &git2::Time::new(1_700_000_000, 0),
+    )
+    .unwrap();
+    let commit = repo
+        .commit(
+            Some("refs/heads/master"),
+            &signature,
+            &signature,
+            "Wide",
+            &tree,
+            &[],
+        )
+        .unwrap();
+    let rid = with_node(home, seed, |node| {
+        node.import_repo(work.path(), name, "A fixture.", "master")
+            .unwrap()
+    });
+    (rid, commit.to_string())
+}
+
 /// `rid`'s repository in `home`'s storage.
 pub fn storage_of(home: &Path, rid: RepoId) -> PathBuf {
     home.join("storage").join(rid.canonical())

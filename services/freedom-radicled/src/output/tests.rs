@@ -719,3 +719,67 @@ fn four_reads_at_their_most_fill_the_budget_and_a_fifth_waits() {
     drop(bodies);
     assert_eq!(budget.used(), 0);
 }
+
+/// A reservation split gives nothing back: the part is released as it
+/// drops, the rest as the rest does.
+#[test]
+fn a_split_reservation_releases_each_part_as_it_drops() {
+    let budget = Budget::new(1000);
+    let mut whole = budget.reserve(600, &within(1000)).unwrap();
+    let part = whole.split(200);
+    assert_eq!(
+        (whole.bytes(), part.bytes(), budget.used()),
+        (400, 200, 600)
+    );
+    drop(part);
+    assert_eq!(budget.used(), 400);
+    // Past what it holds: all of it.
+    let rest = whole.split(10_000);
+    assert_eq!((whole.bytes(), rest.bytes(), budget.used()), (0, 400, 400));
+    drop(whole);
+    assert_eq!(budget.used(), 400);
+    drop(rest);
+    assert_eq!(budget.used(), 0);
+}
+
+/// `rad.blob`'s range copied into a body: chunks of at most 64 KiB, each
+/// holding its own share of the reservation, released as it drops; the
+/// rest stays with the reservation. One the reservation doesn't cover is
+/// refused, and takes nothing.
+#[test]
+fn bytes_copied_into_a_body_hold_their_share_of_the_reservation() {
+    let budget = Budget::new(BUDGET);
+    let bytes: Vec<u8> = (0..3 * STEP + 7).map(|i| (i % 251) as u8).collect();
+    let mut held = budget
+        .reserve(2 * bytes.len() as u64, &within(1000))
+        .unwrap();
+    let mut body = Body::copied(&bytes, &mut held).unwrap();
+    assert_eq!(body.bytes(), bytes.len() as u64);
+    assert_eq!(held.bytes(), bytes.len() as u64);
+    assert_eq!(budget.used(), 2 * bytes.len() as u64);
+    drop(held);
+    assert_eq!(budget.used(), bytes.len() as u64);
+    let first = body.next().unwrap();
+    assert_eq!(first.as_slice(), &bytes[..STEP]);
+    assert_eq!(first.reservation.bytes(), STEP as u64);
+    assert_eq!(first.bytes.capacity(), STEP);
+    drop(first);
+    assert_eq!(budget.used(), (bytes.len() - STEP) as u64);
+    let mut out = bytes[..STEP].to_vec();
+    for chunk in body {
+        assert!(!chunk.as_slice().is_empty() && chunk.as_slice().len() <= STEP);
+        out.extend_from_slice(chunk.as_slice());
+    }
+    assert_eq!(out, bytes);
+    assert_eq!(budget.used(), 0);
+
+    let mut short = budget.reserve(10, &within(1000)).unwrap();
+    assert!(matches!(
+        Body::copied(&[0; 11], &mut short),
+        Err(Failure::Internal(_))
+    ));
+    assert_eq!(short.bytes(), 10);
+    // Empty: no chunk.
+    let empty = Body::copied(&[], &mut short).unwrap();
+    assert_eq!((empty.bytes(), empty.count(), short.bytes()), (0, 0, 10));
+}

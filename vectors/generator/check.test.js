@@ -17,6 +17,7 @@ const FILES = ['keys.json', 'mnemonic-validation.json', 'identity-formats.json',
 FILES.push('dweb.json', 'dweb-verify-plans.json', 'generator/dweb.js');
 FILES.push('streams.json', 'generator/streams.js');
 FILES.push('radicle-reads.json', 'generator/radicle-reads.js');
+FILES.push('radicle-blob.json', 'generator/radicle-blob.js');
 
 function corruptedCheck(filename, corrupt) {
   const copy = fs.mkdtempSync(path.join(os.tmpdir(), 'freedom-core-vectors-'));
@@ -645,4 +646,12 @@ test('check rejects a changed composed read', () => {
     entry.main.body = entry.main.body.replace('"0":', '"00":');
   });
   assert.match(stderr, /Byte mismatch: radicle-reads.json/);
+});
+
+test('check rejects a changed blob range', () => {
+  const stderr = corruptedCheck('radicle-blob.json', (contents) => {
+    const entry = contents.cases.find((item) => item.id === 'README.md GET bytes=-10');
+    entry.expect.head.range.start -= 1;
+  });
+  assert.match(stderr, /Byte mismatch: radicle-blob.json/);
 });

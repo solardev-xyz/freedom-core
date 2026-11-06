@@ -543,11 +543,11 @@ All bounds are process-wide. The service hosts one node.
 - **The network pool:** 8 threads for `connect_seeds` and `clone`, with 16 queued.
 - **The write queue:** one writer, with 16 queued.
 - **The output budget: 256 MiB,** enforced by reservation, as 0007's budget is. Every byte a read holds is reserved before it is allocated, and released when it is freed.
-  - **A blob** reserves twice its size while libgit2's buffer and the service's copy both exist, then once until its last byte is written.
+  - **A blob** reserves 32 MiB for its walk to the blob, two objects of at most 16 MiB, and releases it once it has the blob's size. It then reserves twice its size, never less than the walk's 32 MiB, which its load makes again, while libgit2's buffer and the service's copy both exist. Its range is copied out in 64 KiB chunks, each with its share of that reservation; the rest is released with the loaded copy, and each chunk once it is written. A `HEAD` reserves only the walk's.
   - **A JSON read** reserves both its materialized data and its serialized JSON ([JSON results](#json-results)).
   - **A blob read as JSON** (`blob`, `blob_at`) is loaded only up to 16 MiB, half its built data: libgit2's buffer and libradicle's copy both exist while it loads, and the size comes from the object's header first. Its built data is then what libradicle's serializer holds beside the JSON: the content, for text a copy of it in a JSON value, and, for text that isn't UTF-8, the lossy copy before that, 3 bytes for each invalid sequence. Past 32 MiB it is `too_large`, even when its JSON would fit.
   - **A composed read** (the composed ops, and those of main's serialization) holds the same 64 MiB: its JSON, at most 32 MiB, and, within one reservation of its 32 MiB of built data taken before it reads anything, its walks, the texts it composes from and its working set. Each walk gets the add-on's bounds, 16 MiB of JSON and as many of loaded objects, so it is `too_large` where the add-on is refused today; the text it composes from is counted, then held in a buffer of exactly its size, beside the walk's data; then the composition's working set, an object's members as they are reordered, gets the other half. `repo_info`, which libradicle copies as it writes it, gets a quarter of each. `readme_at`'s blob is read as `blob_at`'s is.
-  - **Per read:** a blob of at most 64 MiB (128 MiB reserved while loading); a JSON read of at most 64 MiB, of which at most 32 MiB is JSON.
+  - **Per read:** a blob of at most 64 MiB (128 MiB reserved while loading, then at most its 64 MiB); a JSON read of at most 64 MiB, of which at most 32 MiB is JSON.
   - A read that can't reserve waits, inside its deadline to the head, and is `cancelled` once its token is. Once it has waited, it gets `deadline` at its deadline, even if bytes are released then: a wait is never granted at or after it. Waiters take what fits as it is released, in no order. A reservation larger than the whole budget is `too_large` at once.
 - **What the service can't bound:** heartwood's own buffers:
   - fetch streams of up to 500 MiB each;
@@ -643,12 +643,13 @@ All bounds are process-wide. The service hosts one node.
 0006 requires raw, chunked and ranged bytes. libgit2 can't stream objects from packs (`Odb::reader` works only for loose objects), and fetched data lands in packs, often deltified. So **"chunked" means chunked over the pipe, from one bounded copy in memory**, not streamed from disk.
 
 - **`rad.blob { rid, revision, path, range?, head_only? }`:**
-  1. Resolve `path` at the commit, as `read_blob_at` does (`lr:1263`), refusing anything that isn't a blob with today's `NotABlob` message.
-  2. `Odb::read_header` gives the size and type without loading the content. Refuse a blob over 64 MiB with `too_large`.
+  1. Resolve `path` at the commit, as `read_blob_at` does (`lr:1263`), refusing anything that isn't a blob (a directory, a submodule) with today's `NotABlob` message. Each object on the way, the commit and the trees, is at most the add-on's 16 MiB, sized from its header first, within 32 MiB reserved for the walk: the service resolves the path with `read_blob_at_capped` at a cap of 0, which refuses any blob that isn't empty from its header, before `blob_header`, which bounds none of them, walks the same objects again.
+  2. `Odb::read_header` gives the size and type without loading the content. Refuse a blob over 64 MiB with `too_large`, `head_only` too.
   3. Normalize and validate `range` against that size, before anything is loaded ([Ranges](#ranges)).
   4. With `head_only`, the head is written now, without `binary`, and nothing is loaded. This serves `HEAD`.
-  5. Otherwise, reserve the output budget, load the blob, and compute `binary` with libgit2's rule (`git_blob_is_binary`, the first 8000 bytes).
-  6. Write the head `{ oid, size, binary, range }`, then stream the range in 64 KiB frames under credit. A zero-length body opens no stream.
+  5. Otherwise, reserve the output budget, load the blob, and compute `binary` with libgit2's rule (`git_blob_is_binary`, the first 8000 bytes). Copy the range out of it in 64 KiB chunks, then free it.
+  6. Write the head `{ oid, size, binary, range }`, where `range` is the range served, `{ start, end }` inclusive, or null for the whole blob; then stream the range in 64 KiB frames under credit. A zero-length body opens no stream: a head opens one exactly when its body has bytes. The head has no content type: main's comes from the extension ([The raw endpoint](#the-raw-endpoint)).
+  - `vectors/radicle-blob.json` pins the heads, bytes and errors over a fixture: the ranges are the design's, since main has no raw route yet, checked against the browser's pending `blob-api` contract tests; each file's `/blob/` answer and libradicle's error texts are main's at the reference.
 - **The JSON endpoint stays:**
   - `/blob/<rev>/<path>` on `rad:` and `radapi:` keeps returning `{ binary, name, content? }`, built by `rad.read`'s `blob_at` with v0.8.0's serializer, byte for byte;
   - that includes `from_utf8_lossy` for text and no content for binary.
@@ -662,7 +663,7 @@ All bounds are process-wide. The service hosts one node.
   - `{ start }`, which runs to the end;
   - `{ suffix }`, meaning the last `suffix` bytes.
 
-  Main parses a single `bytes=` range into it. A header that doesn't parse is ignored, as HTTP allows.
+  Each is of non-negative integers, a closed one's `start` at most its `end`; anything else, several ranges among them, is `invalid_argument`. Main parses a single `bytes=` range into it. A header that doesn't parse (`bytes=5-2` among them) is ignored, as HTTP allows, and so is one of several ranges: main sends no `range`.
 - **Normalization against `size`:**
   - an `end` at or past `size` is clamped to `size − 1`;
   - a suffix becomes `start = max(0, size − suffix)` and `end = size − 1`;

@@ -632,4 +632,4 @@ async function buildRadicleReads(checkout, meta) {
   }
 }
 
-module.exports = { buildRadicleReads };
+module.exports = { buildRadicleReads, loadMain };
