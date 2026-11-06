@@ -168,9 +168,6 @@ const CAPABILITIES: &[&str] = &[
     "keys.validate_mnemonic",
     "keys.addresses",
     "keys.radicle_did",
-    "compat.private_key",
-    "compat.bee_wallet_key",
-    "compat.publisher_key",
     "sign.transaction",
     "sign.message",
     "sign.typed_data",
@@ -1834,7 +1831,7 @@ mod tests {
             );
             assert_eq!(loggable(name), name);
         }
-        assert_eq!(loggable("compat.root_key"), "<unknown>");
+        assert_eq!(loggable("keys.root_key"), "<unknown>");
     }
 
     #[test]

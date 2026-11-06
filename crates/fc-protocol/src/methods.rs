@@ -17,8 +17,8 @@ use crate::message::CallerKind;
 /// Which callers a method accepts (design 0001, "Caller context").
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Callers {
-    /// Main itself only (`shell`): the handshake, shutdown, reconciliation
-    /// and the temporary `compat.*` exports, never a renderer channel.
+    /// Main itself only (`shell`): the handshake, shutdown and
+    /// reconciliation, never a renderer channel.
     Shell,
     /// The browser UI (`chrome`) and main itself (`shell`).
     ChromeOrShell,
@@ -133,9 +133,6 @@ pub const METHODS: &[Method] = &[
     row("keys.validate_mnemonic", CS, false, NOW),
     row("keys.addresses", CS, false, NOW),
     row("keys.radicle_did", CS, false, NOW),
-    row("compat.private_key", SHELL, false, NOW),
-    row("compat.bee_wallet_key", SHELL, false, NOW),
-    row("compat.publisher_key", SHELL, false, NOW),
     row("sign.transaction", CS, false, NOW),
     row("sign.message", CS, false, NOW),
     row("sign.typed_data", CS, false, NOW),
@@ -259,16 +256,13 @@ mod tests {
         }
         for m in METHODS {
             assert_eq!(admit(m.name, CallerKind::Page, V2), Admission::Forbidden);
-            if m.name.starts_with("compat.") {
-                assert_eq!(m.callers, Callers::Shell, "{}", m.name);
-            }
         }
         assert_eq!(
             admit("vault.unlock", CallerKind::Chrome, V2),
             Admission::Allowed(&METHODS[5])
         );
         assert_eq!(
-            admit("compat.secret", CallerKind::Shell, V2),
+            admit("vault.secret", CallerKind::Shell, V2),
             Admission::Unknown
         );
     }
