@@ -102,6 +102,72 @@ pub fn repository(home: &Path, seed: &[u8; 32], name: &str) -> RepoId {
     })
 }
 
+/// A working copy whose `master` has a commit for each of `commits`, oldest
+/// first, each writing its files (a path, its bytes) over the last; the
+/// commits' IDs, oldest first.
+fn working_copy_with(dir: &Path, commits: &[&[(&str, &[u8])]]) -> Vec<String> {
+    let repo = git2::Repository::init(dir).unwrap();
+    let signature = git2::Signature::new(
+        "Fixture",
+        "fixture@example.invalid",
+        &git2::Time::new(1_700_000_000, 0),
+    )
+    .unwrap();
+    let mut ids = Vec::new();
+    let mut parent: Option<git2::Oid> = None;
+    for (n, files) in commits.iter().enumerate() {
+        let mut index = repo.index().unwrap();
+        for (path, bytes) in *files {
+            let at = dir.join(path);
+            std::fs::create_dir_all(at.parent().unwrap()).unwrap();
+            std::fs::write(&at, bytes).unwrap();
+            index.add_path(Path::new(path)).unwrap();
+        }
+        index.write().unwrap();
+        let tree = repo.find_tree(index.write_tree().unwrap()).unwrap();
+        let parents: Vec<git2::Commit<'_>> = parent
+            .iter()
+            .map(|oid| repo.find_commit(*oid).unwrap())
+            .collect();
+        let parents: Vec<&git2::Commit<'_>> = parents.iter().collect();
+        let oid = repo
+            .commit(
+                Some("refs/heads/master"),
+                &signature,
+                &signature,
+                &format!("Commit {}", n + 1),
+                &tree,
+                &parents,
+            )
+            .unwrap();
+        ids.push(oid.to_string());
+        parent = Some(oid);
+    }
+    ids
+}
+
+/// Imports a repository into `home` as `seed`'s identity, with `commits`'
+/// history ([`working_copy_with`]) and one issue; and its commits' IDs,
+/// oldest first.
+pub fn repository_with(
+    home: &Path,
+    seed: &[u8; 32],
+    name: &str,
+    commits: &[&[(&str, &[u8])]],
+) -> (RepoId, Vec<String>) {
+    let work = tempfile::tempdir().unwrap();
+    let ids = working_copy_with(work.path(), commits);
+    let rid = with_node(home, seed, |node| {
+        let rid = node
+            .import_repo(work.path(), name, "A fixture.", "master")
+            .unwrap();
+        node.create_issue(rid, "First", "Its description.", vec![])
+            .unwrap();
+        rid
+    });
+    (rid, ids)
+}
+
 /// `rid`'s repository in `home`'s storage.
 pub fn storage_of(home: &Path, rid: RepoId) -> PathBuf {
     home.join("storage").join(rid.canonical())

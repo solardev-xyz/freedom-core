@@ -21,8 +21,9 @@
 //!   deadline, `<service>.shutdown`, parent death, the writer-stall exit,
 //!   a closing phase for the teardown, and the exit watchdog.
 //! - [`confine`]: OS confinement (design 0010), applied once on the main
-//!   thread while it is the only one: Landlock and seccomp on Linux, with
-//!   one status per property for `hello`.
+//!   thread while it is the only one: Landlock and seccomp on Linux,
+//!   Seatbelt on macOS, a job object and mitigation policies on Windows,
+//!   with one status per property for `hello`.
 //! - [`network`]: the `--network` spawn argument both services take, which
 //!   confinement applies and `hello` reports.
 //! - [`watchdog`]: plain threads that end the process unless disarmed in

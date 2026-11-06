@@ -24,7 +24,7 @@ fn hello_names_this_starts_recipient_and_the_libradicle_it_links() {
     assert_eq!(result["service_version"], env!("CARGO_PKG_VERSION"));
     assert_eq!(
         result["libradicle"],
-        json!({ "version": "0.8.0", "git_commit": "cd8e11919d929f8012b78478005d3674de6cf902" })
+        json!({ "version": "0.8.0", "git_commit": "5969d84c8f3c78ba8b3e064ebe289d9502f963dd" })
     );
     let recipient = STANDARD
         .decode(result["recipient"].as_str().unwrap())
@@ -46,6 +46,17 @@ fn hello_names_this_starts_recipient_and_the_libradicle_it_links() {
         let files = if abi >= 2 { "enforced" } else { "unavailable" };
         assert_eq!(confinement["files"], files, "{confinement}");
         assert_eq!(confinement["exec"], "enforced", "{confinement}");
+    }
+    // Windows, step 1: the job and each mitigation, read back.
+    if cfg!(windows) {
+        assert_eq!(confinement["mechanism"], "job", "{confinement}");
+        assert_eq!(confinement["exec"], "partial", "{confinement}");
+        assert_eq!(confinement["files"], "unavailable", "{confinement}");
+        assert_eq!(
+            confinement["mitigations"],
+            json!({ "dynamic_code": "set", "image_load": "set", "extension_points": "set" }),
+            "{confinement}"
+        );
     }
     assert!(confinement.is_object(), "{confinement}");
     a.close_stdin();

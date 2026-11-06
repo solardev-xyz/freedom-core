@@ -335,6 +335,7 @@ fn blocked(why: &str) -> Report {
         gaps: Vec::new(),
         reasons,
         resolution: None,
+        mitigations: BTreeMap::new(),
     }
 }
 
@@ -433,6 +434,7 @@ fn derive(policy: &Policy, grants: &Grants) -> Report {
         gaps,
         reasons,
         resolution: None,
+        mitigations: BTreeMap::new(),
     }
 }
 

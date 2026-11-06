@@ -946,7 +946,7 @@ dependencies = [
 
 [[package]]
 name = "fc-protocol"
-version = "0.10.0"
+version = "0.11.0"
 dependencies = [
  "base64 0.22.1",
  "serde",
@@ -957,7 +957,7 @@ dependencies = [
 
 [[package]]
 name = "fc-seal"
-version = "0.10.0"
+version = "0.11.0"
 dependencies = [
  "aes-gcm 0.11.1",
  "hpke",
@@ -968,7 +968,7 @@ dependencies = [
 
 [[package]]
 name = "fc-service"
-version = "0.10.0"
+version = "0.11.0"
 dependencies = [
  "fc-protocol",
  "fc-sys",
@@ -983,7 +983,7 @@ dependencies = [
 
 [[package]]
 name = "fc-sys"
-version = "0.10.0"
+version = "0.11.0"
 dependencies = [
  "libc",
  "windows-sys 0.61.2",
@@ -2163,7 +2163,7 @@ checksum = "b6d2cec3eae94f9f509c767b45932f1ada8350c4bdb85af2fcab4a3c14807981"
 [[package]]
 name = "libradicle"
 version = "0.8.0"
-source = "git+https://github.com/solardev-xyz/libradicle?rev=cd8e11919d929f8012b78478005d3674de6cf902#cd8e11919d929f8012b78478005d3674de6cf902"
+source = "git+https://github.com/solardev-xyz/libradicle?rev=5969d84c8f3c78ba8b3e064ebe289d9502f963dd#5969d84c8f3c78ba8b3e064ebe289d9502f963dd"
 dependencies = [
  "ed25519-dalek",
  "getrandom 0.4.3",

@@ -34,8 +34,10 @@
 //! **This build** answers `rad.hello`, `rad.identity` (0008, "The sealed
 //! release" and "Profiles without a vault"), `rad.reconcile` (0008,
 //! "Reconciliation") and `rad.start`, which runs the node until the
-//! connection ends ([`node`]). Every read and write comes with later steps;
-//! until then every other method 0008 lists answers `stopped`.
+//! connection ends ([`node`]); then quarantine's methods ([`quarantine`]),
+//! the writes ([`writes`]) and `rad.read`'s pass-through ops ([`reads`]).
+//! The other methods and ops 0008 lists come with later steps; until then
+//! each answers `stopped`.
 //!
 //! **No child processes:** libradicle is built with `no-spawn`, and the
 //! service starts none.
@@ -61,15 +63,10 @@ mod identity;
 mod marker;
 mod nat64;
 mod node;
-// The output budget and bounded JSON: `rad.read` and `rad.blob` use them,
-// with the next steps.
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "rad.read and rad.blob use it, later steps")
-)]
 mod output;
 mod pools;
 mod quarantine;
+mod reads;
 mod reconcile;
 mod repair;
 mod service;

@@ -465,6 +465,8 @@ The rules this design relies on, as 0007 specifies them:
 | `node_info` | none | `{ connected_peers, repos_total, repos_error }`, where `repos_total` is null and `repos_error` holds the message when enumeration fails | a `status` failure fails the call; collected, at most 64 KiB |
 
 - **The repair fence:** the COB ops (`issues`, `issue`, `patches`, `patch`, `issues_page`, `patches_page`) answer `stopped` (503) for a repository under repair, and `quarantined` (503) for a quarantined one ([Reconciliation](#reconciliation)).
+  - They answer `stopped` too while a COB write to the repository is past its mutation start and not yet proven, whether or not it has been answered, and from its return until its online repair is over ([Writes](#writes)): until then what it left may be partial. This includes a write that then succeeds, so a COB read that races a write may get a 503.
+  - The fence is looked at once, before the read's build. A read already building when a write starts, or a repair closes its repository, finishes on what it read, as a read just before them would have: the gate has no read pass, and a repair publishes the cache at its end.
 - **Why reads stream:** the 1 MiB JSON frame (0001) is smaller than many results, such as a commit's diff or a large text blob. Streaming also lets main pass a result to a handler without holding it ([JSON results](#json-results)).
 - **`rad.progress`** events carry `{ id, event }`, where `event` is today's progress JSON string ([Progress](#progress)).
 - **Cancel:**
@@ -539,6 +541,7 @@ All bounds are process-wide. The service hosts one node.
 - **The output budget: 256 MiB,** enforced by reservation, as 0007's budget is. Every byte a read holds is reserved before it is allocated, and released when it is freed.
   - **A blob** reserves twice its size while libgit2's buffer and the service's copy both exist, then once until its last byte is written.
   - **A JSON read** reserves both its materialized data and its serialized JSON ([JSON results](#json-results)).
+  - **A blob read as JSON** (`blob`, `blob_at`) is loaded only up to 16 MiB, half its built data: libgit2's buffer and libradicle's copy both exist while it loads, and the size comes from the object's header first. Its built data is then what libradicle's serializer holds beside the JSON: the content, for text a copy of it in a JSON value, and, for text that isn't UTF-8, the lossy copy before that, 3 bytes for each invalid sequence. Past 32 MiB it is `too_large`, even when its JSON would fit.
   - **Per read:** a blob of at most 64 MiB (128 MiB reserved while loading); a JSON read of at most 64 MiB, of which at most 32 MiB is JSON.
   - A read that can't reserve waits, inside its deadline to the head, and is `cancelled` once its token is. Once it has waited, it gets `deadline` at its deadline, even if bytes are released then: a wait is never granted at or after it. Waiters take what fits as it is released, in no order. A reservation larger than the whole budget is `too_large` at once.
 - **What the service can't bound:** heartwood's own buffers:
@@ -1339,7 +1342,7 @@ Measured against the add-on on linux-x64, macOS arm64 and win-x64:
 | `control-socket` | `node/control.sock` is bound | none | the `rad` CLI can't attach to Freedom's node |
 | `import-in-process` | `git push` from the working copy, which gains a `rad` remote | a libgit2 fetch; the working copy is untouched | no child process, and no git configuration from outside the service |
 | `blob-api` | text as lossy JSON; binary dropped | `/raw/` with raw bytes, Range, length, ETag and inert types; `/blob/` unchanged | images and downloads work; the JSON endpoint is the same |
-| `size-caps` | no limit | blobs ≤ 64 MiB, JSON ≤ 32 MiB, built data ≤ 64 MiB per read | 413 beyond |
+| `size-caps` | no limit | blobs ≤ 64 MiB (`rad.blob`), ≤ 16 MiB as JSON (`blob`, `blob_at`), JSON ≤ 32 MiB, built data ≤ 64 MiB per read | 413 beyond |
 | `rad-admission` | no admission or abort for `rad:` and `radapi:` | dweb admission; aborts cancel | 503 under extreme load; aborted reads stop |
 | `read-deadline` | none | 60 s to the head | a read stuck before its head gets 504 |
 | `read-concurrency` | reads serialized by one mutex | 4 concurrent | reads don't queue behind each other |

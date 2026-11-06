@@ -515,6 +515,7 @@ fn derive(policy: &Policy, landlock: &Landlock, seccomp: &Installed) -> Report {
         gaps,
         reasons,
         resolution: None,
+        mitigations: BTreeMap::new(),
     }
 }
 
