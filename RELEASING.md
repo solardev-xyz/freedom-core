@@ -261,11 +261,13 @@ publish job that runs no repository code.
      - ABI 1 (5.13), 2 (5.19) and 3 (6.2): `partial`, with the gaps named;
      - ABI 6 (6.12) and later: `ipc` `enforced`.
    - **The core refuses protocol 1** (design 0009, Streams in the core: the
-     handshake's transitional note). The `freedom-cored` tag the browser
-     pins must answer a `core.hello` at protocol 1 with
-     `protocol_mismatch`: the follow-up PR that removes protocol 1 has
-     merged, and the browser speaks protocol 2 with streams. A core that
-     still accepts protocol 1 blocks the browser release.
+     handshake). The packaged `freedom-cored` answers a `core.hello` at
+     protocol 1 with `protocol_mismatch` (`data: { "core": 2 }`) and exits,
+     and the browser speaks protocol 2 with streams. Every tag built since
+     protocol 1's removal does so by construction (`freedom-cored`'s
+     `only_protocol_2_is_spoken` test pins it); check the pinned binary all
+     the same. A tag from before it, 0.10.0 or earlier, still accepts
+     protocol 1 and blocks the browser release.
 
    `freedom-radicled`'s first release (`radicled-v*`) runs both lists, with
    libgit2's writes in place of SQLite's (a repository created, loose

@@ -378,7 +378,7 @@ impl Main {
     pub fn with_env(world: World, env: &[(&str, &str)]) -> Self {
         let (dir, data, locks) = dirs();
         let mut core = spawn_env("serve", &data, &locks, &[], env);
-        let hello = core.hello_streams();
+        let hello = core.hello_fragments();
         assert_eq!(hello["result"]["protocol"], 2, "{hello}");
         let caps = hello["result"]["capabilities"].as_array().unwrap();
         assert!(caps.contains(&json!("dweb.verify")), "{hello}");

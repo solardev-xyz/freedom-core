@@ -15,12 +15,16 @@ pub mod methods;
 pub mod secret;
 pub mod stream;
 
-/// The protocol version negotiated in `core.hello`.
+/// `core.hello`'s first protocol version: the method table's base, which
+/// `protocol/schema.json` names, its later rows marked with their own
+/// ([`methods::Method::since`]). `freedom-cored` no longer speaks it: a
+/// protocol-1 hello is a `protocol_mismatch` (design 0009, Streams in the
+/// core).
 pub const PROTOCOL_VERSION: u32 = 1;
 
 /// The version at which `freedom-cored`'s connection takes streams in both
 /// directions (design 0009, Streams in the core): main offers
 /// `frames: ["fragment", "stream"]`, the core's capabilities gain
 /// `streams`, and the connection reads [`frame::Kinds::CORE_STREAMS`] with
-/// a [`stream::Duplex`]. The core moves to it with its dweb thread.
+/// a [`stream::Duplex`]. The only version the core's `core.hello` accepts.
 pub const PROTOCOL_VERSION_STREAMS: u32 = 2;

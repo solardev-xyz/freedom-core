@@ -112,6 +112,29 @@ struct Bound {
     deadline: Option<Instant>,
     /// The `Standing` is gone: no bound can be armed again.
     dropped: bool,
+    /// A test's clock, read in place of the system's once set.
+    #[cfg(test)]
+    clock: Option<Clock>,
+}
+
+impl Bound {
+    /// The time now: the system's, or a test's clock.
+    fn now(&self) -> Instant {
+        #[cfg(test)]
+        if let Some(clock) = &self.clock {
+            return clock.now;
+        }
+        Instant::now()
+    }
+}
+
+/// A test's clock. It stands still until the test moves it on, so no stall
+/// of the test's thread can run a bound out.
+#[cfg(test)]
+struct Clock {
+    now: Instant,
+    /// The thread has checked the bound armed at `now`, and it held.
+    checked: bool,
 }
 
 impl Standing {
@@ -124,6 +147,8 @@ impl Standing {
                 generation: 0,
                 deadline: None,
                 dropped: false,
+                #[cfg(test)]
+                clock: None,
             }),
             wake: Condvar::new(),
         });
@@ -143,10 +168,9 @@ impl Standing {
     /// Arms it to end the process `after` from now, replacing the bound
     /// armed before, if any.
     pub fn arm(&self, after: Duration) -> Armed {
-        let deadline = Instant::now() + after;
         let mut bound = self.shared.lock();
         bound.generation += 1;
-        bound.deadline = Some(deadline);
+        bound.deadline = Some(bound.now() + after);
         let armed = Armed(bound.generation);
         drop(bound);
         self.shared.wake.notify_all();
@@ -202,9 +226,13 @@ impl Shared {
         loop {
             bound = match bound.deadline {
                 Some(deadline) => {
-                    let Some(left) = deadline.checked_duration_since(Instant::now()) else {
+                    let Some(left) = deadline.checked_duration_since(bound.now()) else {
                         fire(reason, exit);
                     };
+                    #[cfg(test)]
+                    if let Some(clock) = &mut bound.clock {
+                        clock.checked = true;
+                    }
                     match self.wake.wait_timeout(bound, left) {
                         Ok((bound, _)) => bound,
                         Err(poisoned) => poisoned.into_inner().0,
@@ -231,7 +259,9 @@ mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
     use super::*;
+    use std::mem::ManuallyDrop;
     use std::process::Command;
+    use std::sync::atomic::Ordering;
 
     const CHILD: &str = "FC_SERVICE_WATCHDOG_CHILD";
 
@@ -250,13 +280,15 @@ mod tests {
                 std::thread::sleep(Duration::from_secs(10));
             }
             "disarm" => {
-                Watchdog::arm(
-                    "teardown_unproven",
-                    Duration::from_millis(200),
-                    Exit::Internal,
-                )
-                .disarm();
-                std::thread::sleep(Duration::from_millis(400));
+                // Disarmed, its thread ends, so nothing is left to fire. The
+                // bound outlasts the run: no stall here can run it out first.
+                let watchdog =
+                    Watchdog::arm("teardown_unproven", Duration::from_secs(60), Exit::Internal);
+                let thread = Arc::downgrade(&watchdog.disarmed);
+                watchdog.disarm();
+                wait_until("the disarmed watchdog's thread ended", || {
+                    thread.strong_count() == 0
+                });
             }
             "standing-fire" => {
                 let standing = Standing::start("unit_overrun", Exit::Internal).unwrap();
@@ -265,8 +297,13 @@ mod tests {
             }
             "standing-disarm" => {
                 // Each bound is short enough to fire within the run unless
-                // it is stood down.
-                let standing = Standing::start("unit_overrun", Exit::Internal).unwrap();
+                // it is stood down. The run is on a test's clock, so only
+                // the test moves time on, never a stall of this thread. A
+                // failed assertion's unwinding skips the drop, which would
+                // wait for a bound that clock never runs out.
+                let standing =
+                    ManuallyDrop::new(Standing::start("unit_overrun", Exit::Internal).unwrap());
+                standing.on_test_clock();
                 let started = threads();
                 assert_eq!(started.is_some(), cfg!(target_os = "linux"));
                 for _ in 0..50 {
@@ -275,14 +312,16 @@ mod tests {
                     standing.disarm(armed);
                 }
                 // Arming again replaces the bound before: the first would
-                // have run out by the end of the second sleep.
+                // have run out by the end of the second advance.
                 standing.arm(Duration::from_millis(300));
-                std::thread::sleep(Duration::from_millis(200));
+                standing.advance(Duration::from_millis(200));
                 let second = standing.arm(Duration::from_millis(300));
-                std::thread::sleep(Duration::from_millis(200));
+                standing.advance(Duration::from_millis(200));
                 standing.disarm(second);
-                std::thread::sleep(Duration::from_millis(400));
+                standing.advance(Duration::from_millis(400));
                 assert_eq!(threads(), started, "one thread for every bound");
+                // No bound is armed, so the drop returns at once.
+                drop(ManuallyDrop::into_inner(standing));
             }
             "standing-replaced" => {
                 // Standing down a bound that was replaced leaves the one
@@ -306,10 +345,12 @@ mod tests {
                 // This thread ends the process, so no drop waits on a bound.
                 crate::exit::claim();
                 // One that has fired, and parks for this thread's exit
-                // holding the watchdog's lock.
+                // holding the watchdog's lock: its claim is the second.
                 let fired = Standing::start("unit_overrun", Exit::Internal).unwrap();
                 fired.arm(Duration::from_millis(50));
-                std::thread::sleep(Duration::from_millis(300));
+                wait_until("the bound fired", || {
+                    crate::exit::ATTEMPTS.load(Ordering::SeqCst) >= 2
+                });
                 drop(fired);
                 mark("dropped fired");
                 // One still armed, and one idle.
@@ -321,6 +362,41 @@ mod tests {
                 mark("dropped idle");
             }
             other => panic!("unknown mode {other}"),
+        }
+    }
+
+    impl Standing {
+        /// Puts it on a test's clock, at the system's time now.
+        fn on_test_clock(&self) {
+            self.shared.lock().clock = Some(Clock {
+                now: Instant::now(),
+                checked: false,
+            });
+        }
+
+        /// Moves its clock on by `by`, and returns once the thread has
+        /// checked the bound armed, if any, at the new time. A bound run
+        /// out by then ends the process first.
+        fn advance(&self, by: Duration) {
+            let mut bound = self.shared.lock();
+            let clock = bound.clock.as_mut().expect("on a test's clock");
+            clock.now += by;
+            clock.checked = false;
+            drop(bound);
+            self.shared.wake.notify_all();
+            wait_until("the thread checked its bound", || {
+                let bound = self.shared.lock();
+                bound.deadline.is_none() || bound.clock.as_ref().is_some_and(|clock| clock.checked)
+            });
+        }
+    }
+
+    /// Waits until `done`, or panics past 5 s, naming `what`.
+    fn wait_until(what: &str, mut done: impl FnMut() -> bool) {
+        let until = Instant::now() + Duration::from_secs(5);
+        while !done() {
+            assert!(Instant::now() < until, "waited 5 s for: {what}");
+            std::thread::sleep(Duration::from_millis(5));
         }
     }
 
