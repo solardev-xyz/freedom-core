@@ -1,6 +1,6 @@
 # 0012: Approvals and grants in the core
 
-**Status:** proposed. Roadmap items 2.2 (approval tokens, grants, auto-approve and transaction building in the core), 2.4 (x402) and 2.7 (phone signing). Builds on [0001](0001-freedom-cored.md) (the process, the caller context, the threat model), [0002](0002-signing.md) (signing, and the signed view of #88), [0005](0005-chain-data.md) (the fee reference and the one-nonce rule) and [0011](0011-page-requests.md) (the attested requester, `PageContext`, request handles, the page token kinds and the approvals document). It amends 0002's non-goal on approval and policy ([Amendments](#amendments)). Nothing here is built yet. The user decides the [open questions](#open-questions).
+**Status:** proposed. Roadmap items 2.2 (approval tokens, grants and auto-approve in the core; of transaction building, the preparation of a page's send, while the nonce, the journal and the broadcast wait for 0013), 2.4 (x402) and 2.7 (phone signing). Builds on [0001](0001-freedom-cored.md) (the process, the caller context, the threat model), [0002](0002-signing.md) (signing, and the signed view of #88), [0005](0005-chain-data.md) (the fee reference and the one-nonce rule) and [0011](0011-page-requests.md) (the attested requester, `PageContext`, request handles, the page token kinds and the approvals document). It amends 0002's non-goal on approval and policy ([Amendments](#amendments)). Nothing here is built yet. The user decides the [open questions](#open-questions).
 
 **The references:**
 - **freedom-browser** at `f19705ad` (`integration/rust-core`), in `src/main/`:
@@ -9,7 +9,7 @@
   - `wallet/transaction-service.js`, `wallet/nonce-reservations.js`, `wallet/intent-store.js`;
   - `x402/intercept.js`, `x402/sign-flow.js`, `x402/payment-utils.js`, `x402/ipc.js`, `x402/client.js`;
   - `wallet/remote/bridge.js` and `wallet/remote/signer.js` (phone signing).
-- **Browser PR #1016** (SEC-1, in review, head `c4f22e10`): the eleventh token kind, `x402-payment`.
+- **Browser PR #1016** (SEC-1, head `c4f22e10`, merged into `integration/rust-core` as `3c45ebc3`): the eleventh token kind, `x402-payment`. Line numbers are `f19705ad`'s.
 - **Browser PR #941** (R-6, approved against main, head `afae7650`, not on integration until SEC-3f merges it): `src/main/radicle/auto-write-limiter.js`.
 - **`@x402/evm` 2.28.0**, the reference checkout's: `dist/cjs/exact/client/index.js`.
 - **freedom-core:** `CallerKind::Page` and `PageContext` (`crates/fc-protocol/src/message.rs`), `Callers::allow` (`methods.rs`), and the vault's clock (`crates/freedom-cored/src/clock.rs`, #80).
@@ -19,21 +19,21 @@
 - **Today** main holds every approval rule in JS: ten token kinds with a two-minute life, the sites' standing rules, the D12 pause, x402's caps, and four grant files it writes itself. The core signs whatever main asks, as 0002 planned ("Policy moves with the Chromium work").
 - **The proposal ([Q3](#open-questions)):** move the policy into the core now, in Stage 1, in steps. Main keeps the prompts (0011's approvals document), the nonces and the intent journal, and stays trusted.
 - **Two new logic crates,** built for desktop and mobile alike: `fc-approval` (tokens, grants, standing rules, limits, x402 caps, phone jobs) and `fc-eip1193` (the Ethereum dispatcher, ported from 0011's main JS). Time comes in as a parameter, randomness as an injected RNG.
-- **Tokens:** the eleven kinds, each bound to the request in the form the core will sign it. A page kind also binds the attested page (`PageContext`) and 0011's handle.
-- **Grants and rules:** today's, ported with vectors: the account check, the 32-byte and warned-typed-data exceptions, the transaction rules, D12's pause, the fee check, Radicle's R-6 limit and x402's caps.
-- **Enforced, not advised ([Q8](#open-questions)):** from APR-4 the core refuses a page's signature unless it checked a token or a standing rule for that page itself. Where the core doesn't make the signature (Ledger, Safe, Radicle, Swarm uploads), it advises. [What the core enforces](#what-the-core-enforces) lists each.
+- **Tokens:** the eleven kinds, each bound to the request in the form the core will sign it. A page kind, a site's `safe-send` among them, also binds the attested page (`PageContext`) and 0011's handle. A typed-data token binds a digest of the whole parsed request as well as its EIP-712 hash, as today's binds the whole payload.
+- **Grants and rules:** today's, ported with vectors: the account check, the 32-byte and warned-typed-data exceptions, the transaction rules, D12's pause, the fee check, Radicle's R-6 limit and x402's caps. [Q9](#open-questions) asks whether to limit "Always allow".
+- **Enforced, not advised ([Q8](#open-questions)):** from APR-4 the core refuses a page's signature unless it checked a token or a standing rule for that page itself. That stops a main path that skips the check after a token or grant exists. It doesn't stop one that skips the prompt: until the core runs the dispatcher, a token or a grant stands on main's word that the user approved. From APR-7, an Ethereum page's tokens and grants come only from the core's own prompts. Where the core doesn't make the signature (Ledger, Safe, Radicle, Swarm uploads), it advises. [What the core enforces](#what-the-core-enforces) lists each.
 - **The files:** the core takes over the four permission files where they are, in today's format, with atomic writes. Older builds still read them ([Q10](#open-questions)), and a new limit is stored so that an older build reads it as no rule. 0013 decides any later move.
-- **Transaction building stays in main** in Stage 1. The nonce and the intent journal move with 0013's stores.
-- **`fc-eip1193`** runs a page's Ethereum request in the core, and asks main for each prompt with a core-to-main request, `approval.request`.
-- **x402:** the core checks the cap or the `x402-payment` token, builds the authorization itself and signs it. [Q11](#open-questions) asks whether today's caps stay.
-- **Phone jobs:** the core makes each job from a checked authorization, binds what it signs, and checks the answer, a payment's recipient and amount included.
-- **Migration:** APR-1 to APR-6, X402-1 and PHN-1 in the core; APB-1 to APB-4, X402-2 and PHN-2 in the browser.
+- **Transaction building is split:** until APR-5 main builds every transaction, as today. From APR-5 the core prepares a page's send (the gas estimate with its 20% buffer, the fees from its own quote), and main chooses the nonce, has the core sign the transaction with no other field changed, journals it and broadcasts it. The nonce and the journal move with 0013's stores.
+- **`fc-eip1193`** runs a page's Ethereum request in the core, and asks main for each prompt with a core-to-main request, `approval.request`, under a prompt id the core makes. Main ties that id to 0011's handle.
+- **x402:** the core checks the cap or the `x402-payment` token, builds the authorization itself and signs it. [Q11](#open-questions) asks whether a cap stays keyed on the seller alone.
+- **Phone jobs:** the core makes each job from a checked authorization, for the chrome it is sent to, binds what it signs, and checks the answer. A payment's recipient, amount, data and chain are compared when the transaction is visible, at the answer or later, and the payment is reported unverified until then.
+- **Migration:** APR-1 to APR-5, APR-7, X402-1 and PHN-1 in the core (APR-6 deferred); APB-1 to APB-4, X402-2 and PHN-2 in the browser.
 
 ## Goals and non-goals
 
 **Goals**
 - **One copy of the policy,** in logic crates that desktop, mobile and a later Chromium build share.
-- **No signature for a page without a check the core made:** a token or a standing rule, for that page and that request.
+- **No signature for a page without a check the core made:** a token or a standing rule, for that page and that request. In Stage 1 the user's decision behind a token or a grant is main's word. From APR-7, for Ethereum, it is the answer to the core's own prompt.
 - **Parity:** the same decisions as today's JS, pinned by vectors from it. Every difference is listed in [Deviations](#deviations).
 - **The same files,** readable by older builds.
 - **One step at a time,** each revertible on its own until the enforcing release.
@@ -87,7 +87,8 @@ All four live in the profile's `userData`, each one JSON object keyed by permiss
 | `radicle-permissions.json` | `{ origin, connectedAt, lastUsed, signing, autoApprove: { node, signing } }` | `writeFileSync` in place (`radicle-permissions.js:50`); `lastUsed` at most once a minute (117–121) |
 | `x402-permissions.json` | `{ "<chainId>:<asset>": { capAmount, spentAmount, createdAt, expiresAt } }` | `writeFileSync` in place (`x402/permissions.js:77`); expired caps dropped on load (47–58) |
 
-- **A file that doesn't parse** loads as `{}` in the dApp, Radicle and x402 stores (`dapp-permissions.js:48–51`), and the next write replaces it: every grant is lost. A torn in-place write does that.
+- **A file that doesn't parse** loads as `{}` in all four stores (`dapp-permissions.js:48–51`; `swarm-permissions.js:38–49`), and the next write replaces it: every grant is lost. A torn in-place write does that. Swarm's temp file and rename make a torn file less likely, not impossible, since nothing is flushed.
+- **A write that fails** is logged, and the change stays in memory only, until the next start: dApp (`dapp-permissions.js:59–66`), Radicle (`radicle-permissions.js:48–54`), x402 (`x402/permissions.js:75–81`). Swarm drops its cache and throws (`swarm-permissions.js:54–64`), so its change is undone.
 - **Times** are `Date.now()` milliseconds, x402's seconds. **Key order** is the order in which JS inserted the keys.
 
 ### Transaction building
@@ -97,22 +98,24 @@ All four live in the profile's `userData`, each one JSON object keyed by permiss
 ### Phone signing
 - **The job** goes to the focused window's chrome (`bridge.js:93`), whose openlv session tunnels it to the phone. Main accepts the answer only from that webContents (68), marks a payment possibly sent before it leaves (`remote-signer:request-sent`, 196), and gives up after 5 minutes (50).
 - **The answer:** a signature must recover to the account (`verifiedSignature` in `signer.js`). Typed data is checked with ethers' `verifyTypedData` over the dApp's own payload, not over the hash the core showed.
-- **A payment** is signed and broadcast by the phone, which picks its own nonce and fees. Main checks only that the reported transaction's `from` is the account, once the transaction is visible (`verifyDeviceBroadcastFrom`, `transaction-service.js:185–201`). So a chrome that relays the job can have the phone send another transaction from the same account, to another recipient or for another amount, and report its hash as the confirmed one. Only the phone's own screen shows the difference.
+- **A payment** is signed and broadcast by the phone, which picks its own nonce and fees. Main checks only that the reported transaction's `from` is the account, and only if the transaction is visible at the answer (`verifyDeviceBroadcastFrom`, `transaction-service.js:185–201`). Nothing reads it again later: a phone payment has no intent record (331–340). So a chrome that relays the job can have the phone send another transaction from the same account, to another recipient or for another amount, and report its hash as the confirmed one. Only the phone's own screen shows the difference.
 - **A lost answer** to a payment that may have gone is `REMOTE_OUTCOME_UNKNOWN`, never a failure. Only 4001, 4100 and 4200 mean "not run" (65).
 
 ## Threat model
 
 Stage 1 trusts main (0001). To 0011's attackers (a compromised chrome renderer or sub-frame) 0012 adds bugs in main, and whoever reaches a signature through one:
 
-| The attacker wants to | Today | After 0011 (PRQ-9, APS-3) | After APR-4, X402-2, PHN-2 |
+| The attacker wants to | Today | After 0011 (PRQ-9, APS-3) | After APR-4, APR-7, X402-2, PHN-2 |
 |---|---|---|---|
-| Sign for a page through a main path that skips the check (the O-7 class; SEC-1's `x402:approve`) | Yes: the core signs what main asks | Yes | No: the core refuses a page's signature without a token or rule it checked |
+| Sign for a page through a main path that skips the check after the approval (the O-7 class; SEC-1's `x402:approve`) | Yes: the core signs what main asks | Yes | No: the core refuses a page's signature without a token or rule it checked |
+| Sign or grant for a page through a main path that skips the prompt | Yes | Yes: main's issuer is the only check | Yes until APR-7: the core can't see the prompt, and takes main's word. From APR-7, not for Ethereum: the core mints and grants only on the answer to its own prompt. Swarm and Radicle grants stay on main's word |
 | Spend one site's or one document's token on another's request | Not another site's (a `dapp-send` binds it); another document's, yes | No: the handle and the attested key | No: checked in the core too, with the frame and the navigation |
 | Use a site's rule for another account | No (`permissionFor`) | No | No, in the core |
 | Widen an x402 cap without the user (chrome) | Yes: `x402:update-permission` | Yes | No: widening needs a decision |
 | Hold a signed x402 authorization beyond the cap | Yes: signed, then withheld at injection | Yes | No: the cap is charged when the core signs |
-| Have the phone send another transaction of the account, reported as the confirmed one (chrome) | Yes, unless the user reads the phone | Yes | No, once the transaction is visible: the core checks its fields |
-| Lose every grant through a torn write | Yes (three files) | Yes | No: atomic writes |
+| Have the phone send another transaction of the account, reported as the confirmed one (chrome) | Yes, unless the user reads the phone | Yes | No: the core compares its fields at the answer, or once it is visible later, even after a restart, and reports it unverified until then. The phone still sends what it signed |
+| Lose every grant through a torn write | Yes: three files written in place, and Swarm's unflushed | Yes | No: atomic writes |
+| Keep a grant active that its file never got (a failed write) | Yes (three stores) | Yes | No: a widening that isn't written isn't applied |
 | Act as main | Everything | Everything | Everything: main fills the caller context |
 
 ### What moving the policy protects against
@@ -122,6 +125,8 @@ Stage 1 trusts main (0001). To 0011's attackers (a compromised chrome renderer o
 
 ### What stays open
 - **A compromised main** can mint any token, name any page, and call as `shell`.
+- **The user's decision is main's word** until APR-7, and for Swarm and Radicle after it. The core checks that a token or a grant exists for the request, not that a prompt was shown. From APR-7 main still relays the answer to the core's own prompt, so a compromised main can still answer it.
+- **A swapped phone payment still goes.** The phone signs and sends it before the core can compare it. The core stops it from being reported as the confirmed one. Only the user reading the phone stops the payment.
 - **Enforcement is per caller.** The core can't see where a request came from, so it holds main to what main declares: a request declared as `page` needs a checked authorization, and one declared as `shell` doesn't. Main's dispatcher is the one sender of page requests, and a browser test pins that it never declares one as `shell` (APB-1).
 - **Main's inputs.** Custody, the D12 pause, whether a document is live, and which window hosts a tab are main's state. The core takes each as main sends it, and reads a missing one as "no standing rule".
 - **The chrome's wallet kinds** until APS-3 (0011): the chrome still asks for them.
@@ -147,6 +152,10 @@ Stage 1 trusts main (0001). To 0011's attackers (a compromised chrome renderer o
 
 Anything else is refused with `not_authorized` before a key is touched. A `chrome` caller needs a token of a wallet kind for every signature. Main's own signatures, under `shell`, carry none: no user decision stands behind them (a Safe's executor within the fee check, an x402 auto-pay until X402-2), and main is trusted.
 
+**What that checks, and what it can't.** The core checks that a token or a rule exists, that it binds this page and this request, and that it hasn't expired or been spent. It can't see the prompt. Until APR-7, `approval.issue` mints a page kind, and `approval.grant` writes a grant, because main says the user approved. A main path that skips the prompt and calls them gets a valid token or a standing rule, and every signature it covers then passes. So enforcement protects against a check omitted after issuance, not a prompt omitted before it. Stage 1 accepts that, as it trusts main (0001). One grant is bound to a decision once the core holds the dApp store (APB-2): a transaction rule, which only a spent `dapp-send` token with its flag set writes ([The model](#the-model)).
+
+**The end state, APR-7.** Once `fc-eip1193` runs the Ethereum dispatcher (APR-5) and the browser uses it (APB-4), the core stops admitting `page` on `approval.issue` and on `approval.grant` for the dApp store. A page-kind token is then minted only inside the core, on an approve answer to its own `approval.request`, for that prompt and 0011's handle. A connect, a signing flag or an "Always allow" is written only from the choices in that answer. Main still relays the answer, so a compromised main can still answer for the user, but a main bug that skips a prompt can no longer mint or grant. Swarm and Radicle grants stay on main's word until their dispatchers move into the core.
+
 **Advised instead** would mean the core answers "covered" or "not", and main acts on the answer. It's cheaper, but a main path that doesn't ask still signs.
 
 ### What the core enforces
@@ -154,7 +163,7 @@ Anything else is refused with `not_authorized` before a key is touched. A `chrom
 | Effect | Who signs | The core's check |
 |---|---|---|
 | A vault account's transaction, message or typed data | the core | enforced from APR-4 |
-| A phone account's job | the phone | enforced from PHN-2: the core makes a job only from a checked authorization, and checks the answer |
+| A phone account's job | the phone | enforced from PHN-2: the core makes a job only from a checked authorization, and checks the answer. A payment is compared once visible, and is unverified until then |
 | An x402 authorization | the core | enforced from X402-2, when main's x402 path signs only through `x402.authorize` |
 | A Ledger account's signature | the device, through main | advised (`approval.spend`) until 0016 |
 | A Safe transaction or message | the owners, through the core; the executor | advised until 0016. One confirmation collects every local owner's signature (`wallet-ipc.js:827–830`) |
@@ -169,18 +178,18 @@ Anything else is refused with `not_authorized` before a key is touched. A `chrom
 - **`fc-eip1193`** (logic, no I/O): the Ethereum dispatcher, a sans-I/O machine like `fc-chain`'s ([fc-eip1193](#fc-eip1193-and-approvalrequest)).
 - **`freedom-cored`:** the methods, the RNG, the clocks, and the files.
 - **Both crates compile for iOS and Android,** as CI requires of every logic crate (`.github/workflows/ci.yml`), and `freedom-mobile-ffi` links them later. Mobile brings its own store and prompts behind the same traits.
-- **No new dependency:** `sha2`, `sha3`, `k256`, `serde_json` and `rand_core` are in the workspace. JS's key order is kept with `serde_json`'s `preserve_order`, which `freedom-cored` already enables.
+- **No new dependency:** `sha2`, `sha3`, `k256`, `serde_json` and `rand_core` are in the workspace. JS's key order is kept with `serde_json`'s `preserve_order`. `fc-approval` enables it itself, as `freedom-cored` does, so that its own tests and mobile builds don't rely on another crate's features.
 
 **Time and randomness come in** (AGENTS rule 2):
 - **`now` is a parameter** of every call that judges time, as in `fc-chain`. There are two clocks:
   - **The vault's clock** (`clock.rs`, #80): milliseconds that count sleep and never run back. A wall clock set forward moves it ahead. Token lives, rate limits, job timeouts and evidence ages use it. A token minted before three days asleep is expired after them. Today a wall clock set back extends a token ([Deviations](#deviations)).
-  - **The wall clock,** in seconds, for what is written down or signed: x402's `createdAt` and `expiresAt`, and an authorization's `validBefore`. A wall clock earlier than a cap's `createdAt` expires the cap ([Deviations](#deviations)).
+  - **The wall clock,** for what is written down or signed: in seconds, x402's `createdAt` and `expiresAt` and an authorization's `validBefore`; in milliseconds, Q9's `grantedAt` and an unverified phone payment's time. A wall clock earlier than a cap's `createdAt`, or a rule's `grantedAt`, expires it ([Deviations](#deviations)).
 - **Randomness** comes in as `rand_core::TryCryptoRng`, as in `fc-vault`: token bytes, x402 nonces, phone job ids. The daemon passes the OS's (`getrandom`). Tests pass a fixed one, so that a vector can pin a whole x402 payload.
 
 ## Tokens
 
 **Who mints them** (`approval.issue`):
-- **Page kinds** (`dapp-send`, `sign-message`, `sign-typed-data`, `safe-message`, and a `safe-send` with a site): only the `page` caller, with the request's `PageContext` and 0011's handle. Main's dispatcher asks on the user's approval of an open handle: it is 0011's internal issuer. The core refuses `chrome` for every page kind, as 0011 refuses it from PRQ-5.
+- **Page kinds** (`dapp-send`, `sign-message`, `sign-typed-data`, `safe-message`, and a `safe-send` with a site): only the `page` caller, with the request's `PageContext` and 0011's handle. Main's dispatcher asks on the user's approval of an open handle: it is 0011's internal issuer. The core refuses `chrome` for every page kind, as 0011 refuses it from PRQ-5. From APR-7 no caller mints them: the core mints them itself, on its own prompts ([Enforced or advised](#enforced-or-advised-q8)).
 - **Wallet kinds** (`wallet-send`, a `safe-send` with no site, `intent-resend`, `intent-replace`, `intent-close`, `executor-send`, `x402-payment`): `chrome` until APS-3, then `shell` only. From APS-3 main asks as `shell` on a decision made in the approvals document.
 
 **What each binds.** The core binds the request in the form it will sign: its own parse of the `sign.*` parameters (0002's wire format), never main's display form. What is confirmed is then what is signed.
@@ -190,8 +199,9 @@ Anything else is refused with `not_authorized` before a key is touched. A `chrom
 | `wallet-send` | the account (the one main names as active, as today); the transaction but its nonce: chain, `to`, `value`, `data`, the gas limit and every fee field | `sign.transaction` |
 | `dapp-send` | as `wallet-send`, for the request's account; the page; the handle; whether "Always allow" was ticked | `sign.transaction` (page) |
 | `sign-message` | the account; the bytes to sign; the page; the handle | `sign.message` (page) |
-| `sign-typed-data` | the account; the EIP-712 hash, which the core computes at minting and returns with the view; the page; the handle | `sign.typed_data` (page), whose `expected_hash` must equal it |
-| `safe-send` | the Safe and its address; the SafeTx's chain, `to`, `value` and `data`; the site, or none | `approval.spend` (advised, until 0016) |
+| `sign-typed-data` | the account; the EIP-712 hash, which the core computes at minting and returns with the view; a SHA-256 of the whole request as the core parsed it ([below](#typed-data)); the page; the handle | `sign.typed_data` (page), whose `expected_hash` must equal the bound hash |
+| `safe-send`, with a site | the Safe and its address; the SafeTx's chain, `to`, `value` and `data`; the site, as `PageContext.origin`; the page; the handle | `approval.spend` (page; advised, until 0016) |
+| `safe-send`, with no site | the Safe and its address; the SafeTx's chain, `to`, `value` and `data` | `approval.spend` (chrome or shell; advised, until 0016) |
 | `safe-message` | the Safe; the method and a digest of its params; the page; the handle | `approval.spend` (advised, until 0016) |
 | `intent-resend` | the intent's id, chain, sender and nonce, and the hash sent again, from main's record | `approval.spend` (advised) |
 | `intent-replace` | the intent's id, sender and nonce, the payment it keeps, and the new fees | `sign.transaction`, at that nonce |
@@ -200,18 +210,27 @@ Anything else is refused with `not_authorized` before a key is touched. A `chrom
 | `x402-payment` | the account; the tab, the detection id and the URL; the chosen entry (index, scheme, network, asset, amount, `payTo`, a digest of the whole entry); the grant, or none (#1016) | `x402.authorize` |
 
 - **The page** is `PageContext`'s `origin`, `frame` and `navigation` ([PageContext](#pagecontext)). A token presented with another page is refused, so a token can't outlive its document's number, even if main's own check misses.
+- **A `safe-send` with a site and one with none are two kinds to the core.** A site's is a page kind: it binds the page and the handle like the others, so it is refused for another origin, frame, navigation or handle, and under `chrome` or `shell`. A wallet's names no page, and is refused under `page`. Neither is spent as the other.
 - **The nonce isn't bound,** except by `intent-replace`. Main chooses it after the confirmation, under the account's lock, until 0013 moves the journal.
 - **Life and count:** two minutes of the vault's clock, at most 32 outstanding, the oldest dropped. A token is **burnt** at its first presentation, whatever the outcome, as today. `approval.discard` burns one without spending it (#1016's `discardConfirmation`).
 - **A token is a bearer secret.** It is never logged, never in `Debug` output, and compared in constant time.
 - **The fee check** runs at minting for `wallet-send`, `dapp-send`, `intent-replace` and `executor-send`, except for a phone account, as `wallet:confirm-signing` does today ([The fee check](#the-fee-check)).
 
-**Parity.** The digest never leaves the core, so its bytes aren't the contract; the decisions are. For each kind, the JS reference's `bindingFor` gives the facts a payload binds, or its error. The core binds every one of those facts, so two payloads JS tells apart never share a token. It may refuse more ([Deviations](#deviations)): JS binds `chainId: true` as chain 1 (`Number(true)`).
+**Parity.** The digest never leaves the core, so its bytes aren't the contract; the decisions are. For each kind, the JS reference's `bindingFor` gives the facts a payload binds, or its error. The core binds every one of those facts, as it parses them, so two payloads JS tells apart never share a token, but for one case: typed data sent as a JSON string, which JS hashes as text and the core sees only parsed (`token-typed-parse`). It may refuse more ([Deviations](#deviations)): JS binds `chainId: true` as chain 1 (`Number(true)`).
+
+### Typed data
+- **Today's token binds the whole payload:** `bindingFor` hashes the typed data with `stableStringify` (`signing-confirmation.js:240–248`), and the token keeps the core's EIP-712 hash beside it for `expected_hash` (343).
+- **The hash alone isn't enough.** EIP-712 ignores a message field the types don't declare, and 0002's view lists a top-level one as sent but not signed. Two requests can share a hash and differ in what the user was shown.
+- **So the token binds both:** the EIP-712 hash, and a SHA-256 over the request's canonical JSON as `sign.typed_data` receives it. That is `typed_data` with its keys sorted and every member kept, undeclared ones at any depth included, then `primary_type` and `chain_id`. The view is built from exactly these, so it is bound too.
 
 ## Grants and standing rules
 
 ### The model
 - **A grant** is a site's entry in one of the four stores, under its permission key: 0011's `key`, which is `PageContext.origin`. x402's key is the paid URL's origin, as today ([x402](#x402)).
-- **The core writes a grant only from a decision:** a connect's account and chain, an "Always allow" from a confirmed send (the `dapp-send` token's flag, for the token's page), a Swarm or Radicle tier the user approved. These writes come from the `page` caller, for its own key. An x402 cap comes with its payment, through `x402.authorize`. The chrome may read and narrow (revoke, turn a rule off), as 0011 allows. It can't widen.
+- **The core writes a grant only on a decision, and in Stage 1 the decision is main's word:** a connect's account and chain, a signing flag, a Swarm or Radicle tier the user approved. They come through `approval.grant` from the `page` caller, for its own key. The core can't tell that a prompt was shown ([Enforced or advised](#enforced-or-advised-q8)). From APR-7 the dApp store's grants come only from the core's own prompts.
+- **A transaction rule comes only with a confirmed send.** When `sign.transaction` spends a `dapp-send` token whose "Always allow" flag is set, the core writes the rule for the token's page, after the signature, if that page's grant exposes the account, and the reply says whether it did, as `autoApproveAdded` does today. `approval.grant` refuses a transaction rule. Today the rule is written once main has recorded the send (`wallet-ipc.js:409–421`); the core writes it as it signs (`token-remember`).
+- **An x402 cap** comes with its payment, through `x402.authorize`.
+- **The chrome** may read and narrow (revoke, turn a rule off), as 0011 allows. It can't widen.
 - **Main's own writes** come as `shell`: a Swarm manifest's projection (`permission-manifests.js`) until 0015, and an account's deletion (`revokePermissionsForWalletIndex`).
 - **Events:** each change sends `approval.changed { store, key }`, so that main can send `accountsChanged` and Swarm's `connect` and `disconnect` to that key's documents (0011's events).
 
@@ -231,7 +250,17 @@ Each is today's, evaluated in the core for `PageContext.origin` and pinned by ve
 - **No rule answers in custody.** `PageContext` carries `agent` from APR-3 ([PageContext](#pagecontext)). Main reads it live as it sends each request, as 0011's custody rules require, and a request without it gets no standing rule.
 - **The D12 pause stays main's.** Its turns end when the intent journal commits, and the journal is main's. A standing authorization carries `paused`, which main reads in the send's own turn. A missing one reads as paused.
 - **R-6 moves as it is:** per key, a burst of 5, one per 30 s, 50 in 24 hours, on the vault's clock, in memory, forgotten on disconnect.
-- **"Always allow" has no limits today** but R-6's ([Q9](#open-questions)). If the user wants them, the proposal is: a rule lasts 30 days from when it was given; signing and transaction rules get R-6's rate limit; a transaction rule covers no more `value` than the send it came from. Each is stored so that an older build sees no rule ([The files](#the-files-q10)).
+
+### Limits on "Always allow" (Q9)
+"Always allow" has no limits today but R-6's. [Q9](#open-questions) asks whether to add three. They cover the dApp store's two rules, the signing flag and the transaction rules. Swarm's flags and Radicle's keep today's rules, R-6 included. If the user says yes, the proposal is:
+- **Expiry: 30 days.** A rule stores `grantedAt`, in wall-clock milliseconds like the file's other times, and answers while `grantedAt ≤ now < grantedAt + 2,592,000,000`. At exactly 30 days it is expired, and a wall clock earlier than `grantedAt` expires it, as for x402. Use doesn't renew it. A new "Always allow" for the same rule (the signing flag again, or a send to the same `to`, selector and chain) replaces it, with a new `grantedAt`. A restart changes nothing, since the time is in the file.
+- **Rate: R-6's limiter, as it is.** A burst of 5, refilled continuously at one per 30 s, and at most 50 in any 24 hours: a use counted at `t` stops counting at exactly `t` + 24 h. On the vault's clock.
+  - **One bucket per key and request class:** one for the key's message and typed-data signatures, one for its transactions, which all its transaction rules share. A site with many rules gets no more than a site with one.
+  - **In memory, as R-6:** a restart starts every bucket full and empty, and a revoked grant (a disconnect) forgets its buckets. A new grant needs the user's prompts again.
+  - **Over the limit, the prompt:** the request isn't refused, it is asked, as in R-6, and one the user approves there isn't counted.
+- **Value: no more than the send the rule came from.** A transaction rule stores `maxValue`, the confirmed send's `value` in wei as a decimal string, and covers a call whose `value` is at most that. Per call, not summed. A rule from a send of 0 covers only calls of 0. **It caps native ETH only.** A token's transfer or approval carries its amount in `data`, with `value` 0, and the rule's selector covers it for any amount, as today.
+- **Stored where an older build doesn't look:** under `autoApprove.limited`, as `{ signing: { grantedAt } | null, transactions: [{ to, selector, chainId, maxValue, grantedAt }] }`. An older build sees no rule and prompts ([The files](#the-files-q10)).
+- **Today's rules** (`autoApprove.signing`, `autoApprove.transactions`) carry no time and no value, so the new build answers none of them. Each such site prompts once after the update, and ticking "Always allow" then writes a limited rule. The old rules stay in the file for an older build, and a revoke clears both.
 
 ### The fee check
 0005's check A moves with the tokens and the rules: `fee-check.js`'s `referenceFee` and `judgeFees`, ported with vectors.
@@ -245,20 +274,37 @@ Each is today's, evaluated in the core for `PageContext.origin` and pinned by ve
 - **Where:** `core.hello` gains `grant_root`, the profile's `userData` as an absolute path, beside `node_roots`. The core opens the four files there under 0001's reading rules: a regular file the user owns, no symlink, a size bound.
 - **The format** is today's, byte for byte: the same keys, `JSON.stringify(…, null, 2)`'s text, and JS's key order (insertion order, as each store's operations leave it). Vectors pin the text after each operation.
 - **Writes** are 0001's single-file writes: a temp file, fsync, a rename, the directory flushed, mode `0600`. Each store has one writer: from its APB step on, main reads and writes it only through the core.
-- **Bounds** (proposed): 4 MiB per file, 4,096 keys per store, 256 transaction rules per key. A write past them is refused. A file past them is read as unreadable.
+- **Bounds** (proposed): 4 MiB (4,194,304 bytes) per file, 4,096 keys per store, 256 transaction rules per key. A file exactly at each bound is read and written. A write that would pass one is refused (`invalid_argument`), and the store is unchanged. A file past one is read as unreadable.
+- **A failed write** of the temp file, its fsync or the rename leaves the file as it was, and the change is reported as failed:
+  - **A widening** (a new grant, rule or tier, a higher cap, a cap's charge given back) isn't applied in memory either, so nothing is active that the file lacks.
+  - **A narrowing** (a revoke, a rule turned off, a cap lowered) is applied in memory, since keeping what the user removed is the worse failure, and is reported as not saved: the store's next write carries it, but a restart before then reads the old file.
+  - **An x402 charge** is written before the core signs, and a failed write refuses the payment with nothing signed.
+  - **A failed directory flush** after the rename is 0001's `durable: false`: the change is in place, and reported as applied but not durable.
 - **An unreadable file** is renamed aside once (`<name>.unreadable`), and the store starts empty, so every site asks again. Today the next write overwrites it.
 - **Older builds read the files as they are.** A grant revoked in the new build stays revoked after a rollback.
-- **New fields fail safe.** Anything that limits a rule (Q9's expiry, rate or value cap) is written where an older build doesn't look, such as `autoApprove.limited`, so an older build sees no rule and prompts. A grant never gains authority in an older build.
+- **New fields fail safe.** Anything that limits a rule (Q9's expiry or value cap; its rate is kept in memory) is written where an older build doesn't look, such as `autoApprove.limited`, so an older build sees no rule and prompts. A grant never gains authority in an older build.
 
 **The overlap with 0013.** 0013 decides which stores the core owns in the end (Q14), where they live (`<profile>/freedom/`), and whether that move is one-way (Q12). 0012 moves who writes the files, not where they are. `fc-approval`'s store trait is what 0013 relocates. The intent journal and the nonces are 0013's.
 
 ## Transaction building
 
-**Proposed: it stays in main in Stage 1,** as 0002 and 0005 set: the nonce under the account's lock, the intent journal, gas estimation and fee filling.
-- **Why not now:** the nonce is chosen from the journal's held nonces, and the journal's rules (a commit before any byte leaves, voiding, retiring) rest on its crash safety. Moving the nonce without the journal moves nothing: the core would take the larger of two numbers main supplies. The journal is a store, so 0013 moves it (Q14).
-- **What moves is the binding.** The core signs only the fields a token or rule authorized, so a main bug between the confirmation and the signature can change only the nonce.
-- **`fc-eip1193`** prepares a dApp's send itself (the estimate with its 20% buffer, the fees from the core's quote), since both are reads the core already serves. It hands the approved send back to main to sign, record and broadcast.
-- **APR-6 is therefore deferred.** It moves with 0013's intent store, if the user agrees there.
+**Proposed: from APR-5 the core prepares a page's send. Main keeps the nonce, the journal and the broadcast in Stage 1,** as 0002 and 0005 set.
+
+| Step | Until APR-5 | From APR-5: a page's `eth_sendTransaction` | The wallet's own sends |
+|---|---|---|---|
+| The gas limit: `eth_estimateGas` plus 20% | main | the core, through its own chain machine | main |
+| The fees, from the core's quote, and the type they imply | main | the core | main |
+| What the prompt shows and the token binds | main's prepared send | the core's | main's |
+| The nonce, under the account's lock | main | main | main |
+| The final transaction | main | main: the prepared fields unchanged, and the nonce | main |
+| The signature (`sign.transaction`, with the token) | the core | the core | the core |
+| The journal (`wallet-intents.jsonl`), then the broadcast | main | main | main |
+
+- **Why not the nonce now:** the nonce is chosen from the journal's held nonces, and the journal's rules (a commit before any byte leaves, voiding, retiring) rest on its crash safety. Moving the nonce without the journal moves nothing: the core would take the larger of two numbers main supplies. The journal is a store, so 0013 moves it (Q14).
+- **What moves first is the binding.** From APR-4 the core signs only the fields a token or a rule authorized: every `sign.transaction` field but the nonce, so the type, the chain, `to`, `value`, `data`, the gas limit and the fee fields. A main bug between the confirmation and the signature can change only the nonce.
+- **`fc-eip1193`** prepares a page's send itself, since the estimate and the quote are reads the core already serves. Its result `{ send }` carries the prepared transaction without a nonce, and its token. Main adds the nonce and passes the rest to `sign.transaction` unchanged. Any other change is a mismatch, and nothing is signed.
+- **A phone account** prepares nothing: the phone picks its own gas, fees and nonce, as today ([Phone jobs](#phone-jobs)).
+- **APR-6 is therefore deferred.** The nonce, the journal and the broadcast move with 0013's intent store, if the user agrees there.
 
 ## PageContext
 
@@ -274,7 +320,7 @@ Each is today's, evaluated in the core for `PageContext.origin` and pinned by ve
 | `transport_key` | 0011's `transportKey` | APR-5, for the core's own name check |
 
 - **Required once defined:** a page request without `agent` gets no standing rule. The wire form stays `"context": { "caller": "page", "page": { … } }` (`message.rs`).
-- **The core admits `page`** on `approval.issue`, `approval.discard`, `approval.spend`, `approval.check`, `approval.grant`, `approval.revoke`, `approval.touch`, `sign.transaction`, `sign.message`, `sign.typed_data` and `phone.job`, and later on `eip1193.request`. These are the rows 0011 left for 0012 (`Callers::allow`).
+- **The core admits `page`** on `approval.issue`, `approval.discard`, `approval.spend`, `approval.check`, `approval.grant`, `approval.revoke`, `approval.touch`, `sign.transaction`, `sign.message`, `sign.typed_data` and `phone.job`, and later on `eip1193.request`. These are the rows 0011 left for 0012 (`Callers::allow`). APR-7 takes `page` off `approval.issue`, and off `approval.grant` for the dApp store.
 
 ## API
 
@@ -282,11 +328,11 @@ Every method is in `fc-protocol`'s table with its callers. A refusal is `not_aut
 
 | Method | Callers | Params → result |
 |---|---|---|
-| `approval.issue` | page (page kinds); chrome (wallet kinds, until APS-3); shell (wallet kinds) | `{ kind, account, payload, handle?, fee_ack? }` → `{ token, expires_in_ms, hash?, view?, fee_check? }` |
+| `approval.issue` | page (page kinds, until APR-7); chrome (wallet kinds, until APS-3); shell (wallet kinds) | `{ kind, account, payload, handle?, fee_ack? }` → `{ token, expires_in_ms, hash?, view?, fee_check? }` |
 | `approval.discard` | page, chrome, shell | `{ token }` → `{}` |
 | `approval.spend` | the caller kind that minted the token | `{ token, kind, account, payload, handle? }` → `{ bound }`, for the advised kinds |
 | `approval.check` | page | `{ request, chain_id, paused }` → `{ covered, reason? }`: whether a standing rule would answer, for the choice between a prompt and none. Advice: `sign.*` decides again |
-| `approval.grant` | page; shell (a manifest's projection) | `{ store, change }` → `{ grant }` |
+| `approval.grant` | page (the dApp store until APR-7; never a transaction rule); shell (a manifest's projection) | `{ store, change }` → `{ grant }` |
 | `approval.revoke` | page, chrome, shell | `{ store, key, what }` → `{ revoked }` |
 | `approval.touch` | page | `{ store, chain_id? }` → `{}`: `lastUsed`, and a dApp's chain |
 | `approval.grants` | chrome, shell | `{ store, key? }` → the store's records, in today's shapes |
@@ -297,15 +343,21 @@ Every method is in `fc-protocol`'s table with its callers. A refusal is `not_aut
 | `eip1193.request` | page | [fc-eip1193](#fc-eip1193-and-approvalrequest) |
 
 - **APR-3 checks an authorization when one is present,** and still signs without one, as today. **APR-4 requires it.** So the browser can pass authorizations one release before the core insists.
-- **Events:** `approval.changed { store, key }`, from the core to main, for each grant written or revoked.
+- **Events:** `approval.changed { store, key }`, from the core to main, for each grant written or revoked; `phone.checked { job, outcome }` for a phone payment compared after its answer ([Phone jobs](#phone-jobs)).
 - **The order of work** is 0002's: all public work first, the authorization check included, then the key. A token presented while the vault is locked is still burnt, as today.
 
 ## fc-eip1193 and approval.request
 
 APR-5 moves 0011's Ethereum dispatcher (`src/main/page/`, in JS) into the core.
-- **`eip1193.request { method, params }`** (page caller): the core runs the request. Reads go to its own chain machine (0005). `eth_accounts` and the connect methods read its grants. Signatures go through its own tokens and rules. Its result is `{ result }`; or `{ error }`, with the EIP-1193 code main returns today; or `{ send }`, an approved transaction with its token, for main to sign, record and broadcast ([Transaction building](#transaction-building)).
-- **`approval.request`** is a core-to-main request, like 0004's `shell.*`: `{ page, kind, view, choices }` → `{ approve, choices }`. Main answers `closed` when 0011's handle closes, and `busy` when the window already has a wallet prompt open (the page gets `-32002`). The core builds `view` to 0011's closed schema. Main adds its own fields (the tab, the site's label) and shows it in the approvals document.
-- **`approval.recheck`** is another: `{ page }` → `{ live, agent }`, sent just before an effect a standing rule answered, as 0011 reads custody and the document again.
+- **`eip1193.request { method, params }`** (page caller): the core runs the request. Reads go to its own chain machine (0005). `eth_accounts` and the connect methods read its grants. Signatures go through its own tokens and rules. Its result is `{ result }`; or `{ error }`, with the EIP-1193 code main returns today; or `{ send }`, the prepared transaction without its nonce, and its token, for main to add the nonce, have it signed, record it and broadcast it ([Transaction building](#transaction-building)).
+- **`approval.request`** is a core-to-main request, like 0004's `shell.*`: `{ request, prompt, page, kind, view, choices }` → `{ prompt, handle, approve, choices }`, or `{ prompt, closed }`, or `{ prompt, busy }`.
+  - **`request`** is the 0001 id of the `eip1193.request` it serves, so that main opens the prompt on that request's record. `page` alone can't tell two requests of one document apart.
+  - **`prompt`** is 16 random bytes the core makes for each prompt, and never reuses. It is the core's identity for the prompt.
+  - **Main opens a 0011 handle for it,** on that request's record, and answers only with the decision made on that handle, echoing `prompt` and the handle. It answers `closed` when that handle closes (cancelled, its document gone, its window closed), and `busy` when the window already has a wallet prompt open (the page gets `-32002`).
+  - **The core checks the answer:** its `prompt` must be the one sent on that core-to-main request, and its handle one the core hasn't seen for another prompt. Otherwise the request fails, with nothing signed and nothing granted.
+  - **An approve** mints the page-kind token inside the core, bound to the page, the handle and the prompt, and the core spends it for that request only. It leaves the core only in a `{ device }` result (below). A grant the prompt offers (a connect's account and chain, an "Always allow") is written from the answer's `choices`, for that page.
+  - **The view:** the core builds `view` to 0011's closed schema. Main adds its own fields (the tab, the site's label) and shows it in the approvals document.
+- **`approval.recheck`** is another: `{ request, page }` → `{ live, agent }`, sent just before an effect a standing rule answered, as 0011 reads custody and the document again.
 - **Names over IPNS:** with `transport_key`, the core resolves the name itself before each use of its grant, by 0011's table of methods, with its own naming.
 - **Deadlines:** a prompt has none (0011). `eip1193.request` gets a new deadline class: no overall deadline while one of its own `approval.request`s is open, and each I/O step keeps its own. Main's hang watchdog skips a request while main is answering one of its prompts.
 - **Ledger and Safe accounts** (until 0016): their signing methods come back to main as `{ device }`, with the approved request and its token.
@@ -322,24 +374,37 @@ X402-1 moves the caps, the `x402-payment` token and the authorization into the c
   - The reply is the payment payload and a reservation id.
 - **`x402.settle { reservation, outcome }`:** `withheld` gives the amount back, since main dropped the header; `sent` keeps it.
 - **Widening a cap** (a higher amount, a longer window) needs a decision, as a new grant does. The activity pane can only narrow one (X402-2).
-- **The key stays the paid URL's origin,** main's word from `webRequest`. Keying a cap on the page as well is [Q11](#open-questions)'s alternative.
+- **The key stays the paid URL's origin,** main's word from `webRequest`. So unrelated pages that embed one seller share its cap. Keying a cap on the page as well as the seller is [Q11](#open-questions)'s alternative.
 
 ## Phone jobs
 
 PHN-1 makes the core the job's authority. The openlv session stays in the chrome, and main relays.
-- **`phone.job { account, method, payload, authorization }`:** the core checks the authorization as `sign.*` would, then records a job:
+- **`phone.job { account, method, payload, authorization, target }`:** the core checks the authorization as `sign.*` would, then records a job:
   - its id (16 random bytes), the account's index and address;
   - the method and what it binds: the message bytes; the typed data's confirmed hash and its view; a payment's chain, `to`, `value` and `data`;
   - the authorization it came from (its kind, site and handle);
+  - `target`, the id of the chrome's webContents that main chose to send it to (the focused window's, `bridge.js:93`), fixed before the job goes anywhere;
   - five minutes of the vault's clock.
 
   The reply is the JSON-RPC request to relay. For typed data it carries the core's view, so the phone signs what the user saw ([Deviations](#deviations)).
-- **`phone.sent { job }`** marks the job possibly sent, in one turn, as `remote-signer:request-sent` does. It is refused for a settled job.
-- **`phone.result { job, result | error }`** is accepted once:
+- **The sender.** `fc-protocol`'s `Context` names no chrome, so `phone.sent` and `phone.result` carry `sender`: the id of the webContents whose IPC message brought them, which main fills from `event.sender.id` and never takes from the message. The core refuses one whose `sender` isn't the job's `target` (`wrong_sender`), and the job stays open for its own chrome, as `jobOf` ignores such a message today (`bridge.js:68`). Main keeps its own check as well.
+- **`phone.sent { job, sender }`** marks the job possibly sent, in one turn, as `remote-signer:request-sent` does. It is refused for a settled job.
+- **`phone.result { job, sender, result | error }`** is accepted once:
   - **A signature** must be 65 bytes and recover to the account over the bound digest (EIP-191 over the bytes, or the confirmed EIP-712 hash). Otherwise it is refused (`wrong_account`, `bad_response`).
-  - **A payment's hash:** the core reads the transaction (`eth_getTransactionByHash`, 0005). If it is visible and its `from`, `to`, `value`, `data` or chain differs from the job's, it is refused (`wrong_transaction`). One not visible yet is accepted, as today, and tracked as any send is.
+  - **A payment's hash:** the core reads the transaction on the job's chain (`eth_getTransactionByHash`, 0005) and compares its `from`, `to`, `value`, `data` and chain id with the job's. A transaction with no chain id (pre-EIP-155) differs.
+    - **Visible and the same:** `{ outcome: "verified", hash }`.
+    - **Visible and different:** refused (`wrong_transaction`), with the transaction's fields, so that main shows what the phone sent.
+    - **Not visible, or the read failed:** `{ outcome: "unverified", hash }`, and the core keeps a record ([Unverified payments](#unverified-payments)).
   - **An error** is mapped as today. After `phone.sent`, a payment's lost or unrecognised answer is unknown. Only 4001, 4100 and 4200 mean "not run".
-- **Main still** chooses the window, relays the job, and tells the core which webContents answered. A chrome can drop or delay a job. It can no longer swap one.
+- **Main still** chooses the window, relays the job, and tells the core which webContents answered. A chrome can drop or delay a job. It can't have a swapped payment reported as the confirmed one, but the phone still sends what it signed.
+
+### Unverified payments
+- **The record:** the job's id, the hash, the account, the chain, `to`, `value` and `data`, the authorization's kind and site, and the wall-clock time of the answer. It goes into `phone-payments.json`, a new file beside the four (older builds don't read it; 0013 may move it), by 0001's atomic write, before `phone.result` replies.
+- **Rechecked** with `eth_getTransactionByHash` after 5 s, then at doubling intervals up to every 10 minutes, and at each start of the core, so that a restart loses none.
+- **Once it is visible,** the core compares the same fields as at the answer and sends `phone.checked { job, outcome }`: `verified`, or `mismatch` with the transaction's fields. Main shows a mismatch as another transaction sent from the phone, never as the confirmed one. The record is then dropped.
+- **Until then the outcome is unverified.** The page gets the hash, as today: the phone sent that transaction, and the hash is how the page follows it. The wallet shows the payment as sent from the phone and not yet checked, never as confirmed.
+- **After 24 hours of the wall clock** without the transaction visible, the outcome is `unknown` for good, reported once, and the record is dropped. A wall clock set forward ends it early, as unknown, never as verified.
+- **At most 256 records.** While 256 wait, a new phone payment's job is refused.
 
 ## Deviations
 
@@ -347,28 +412,39 @@ PHN-1 makes the core the job's authority. The openlv session stays in the chrome
 |---|---|---|
 | `token-clock` | a token lives two minutes of `Date.now()` | two minutes of the vault's clock: sleep counts, and a wall clock set back doesn't extend it |
 | `token-strict` | `bindingFor` takes what `BigInt` and `Number` take: `chainId: true`, `" 1"` | the parse `sign.*` uses; such a request gets no token |
-| `token-page` | a page kind binds the site the chrome names | it binds `PageContext` and the handle (0011) |
-| `token-remember` | `rememberAutoApprove` rides beside a confirmed token and names its own key | the flag is bound in the `dapp-send` token, and the rule is written for the token's page (0011 records it for the requester's key) |
+| `token-page` | a page kind binds the site the chrome names, a site's `safe-send` included | it binds `PageContext` and the handle (0011), a site's `safe-send` included |
+| `token-typed-parse` | typed data sent as a JSON string is bound as its text: two strings that differ only in spacing or key order get different tokens | bound as `sign.typed_data` receives it, parsed: they share a token, as they share the hash, the view and the signature |
+| `token-remember` | `rememberAutoApprove` rides beside a confirmed token and names its own key; the rule is written once main has recorded the send | the flag is bound in the `dapp-send` token, and the core writes the rule for the token's page as it signs (0011 records it for the requester's key) |
 | `rule-inputs` | custody and the pause are read inside main | sent with each request; a missing one reads as no rule |
-| `file-unreadable` | loads as `{}`, and the next write overwrites it | renamed aside as `.unreadable` |
+| `file-unreadable` | loads as `{}` in all four stores, Swarm's included, and the next write overwrites it | renamed aside as `.unreadable` |
 | `file-atomic` | written in place (three files), with no fsync (Swarm) | 0001's atomic write, mode `0600` |
+| `file-write-failed` | logged, and the change kept in memory only (dApp, Radicle, x402); the cache dropped and the error thrown (Swarm) | reported; a widening not applied, a narrowing applied and reported as not saved; after the rename, `durable: false` |
 | `file-bounds` | none | 4 MiB, 4,096 keys, 256 transaction rules per key |
 | `x402-at-sign` | a cap is charged at injection | at signing, and given back on `withheld` |
 | `x402-clock-back` | a cap stays valid when the wall clock is set before its `createdAt` | it is expired |
 | `x402-asset-case` | revoke and update take the asset as the caller writes it | lowercase everywhere |
 | `x402-widen` | `x402:update-permission` raises a cap on a bare call | widening needs a decision |
 | `phone-typed-view` | the dApp's own payload goes to the phone, checked with ethers' `verifyTypedData` | the core's view goes, checked against the confirmed hash |
-| `phone-tx-fields` | a reported payment is checked for `from` | `from`, `to`, `value`, `data` and the chain, once visible |
+| `phone-tx-fields` | a reported payment is checked for `from`, and only if it is visible at the answer | `from`, `to`, `value`, `data` and the chain, at the answer or once visible later, from a record that survives a restart; unverified until then, unknown after 24 hours |
 
-Each case has a vector or a test. A vector records what JS does; the core's expected answer comes from this table.
+If the user says yes to Q9, four more:
+
+| Case | JS today | The core |
+|---|---|---|
+| `rule-expiry` | a rule never expires | 30 days of the wall clock from `grantedAt`; expired at exactly 30 days, and by a clock set before `grantedAt` |
+| `rule-rate` | no rate on a dApp's rules | R-6's limiter, per key, one bucket for signatures and one for transactions; over it, the prompt |
+| `rule-value` | a transaction rule covers any `value` | at most the confirmed send's `value`, per call; token amounts in `data` aren't capped |
+| `rule-legacy` | today's rules answer | they answer nothing in the new build; the prompt writes a limited rule, and an older build still reads the old one |
+
+Each case has a vector or a test. A vector records what JS does; the core's expected answer comes from these tables.
 
 ## Vectors
 
-They come from the pinned reference checkout, through a generator `vectors/generator/approvals.js` that stubs Electron as the chain generator does, with a CI `check` mode (AGENTS rule 5):
+They come from the pinned reference checkout, at an `integration/rust-core` commit that has #1016 (`3c45ebc3` or later), through a generator `vectors/generator/approvals.js` that stubs Electron as the chain generator does, with a CI `check` mode (AGENTS rule 5):
 - **`vectors/approvals.json`:**
   - `tokens`: `bindingFor` for each kind, its facts or its error; payloads that bind alike, and apart; issue and consume runs under `_setNow`, including the boundary (at exactly two minutes a token is expired: `expiresAt <= now`); the cap of 32.
-  - `stores`: each store's operations in order, with `Date.now` fixed, and the file's text after each; malformed files, and what each store loads from them.
-  - `rules`: each rule's decisions, from `wallet-ipc.js`, `dapp-permissions.js` and the Swarm and Radicle stores; R-6's limiter under its own injected `now`; D12's decisions; `fee-check.js`'s references and verdicts.
+  - `stores`: each store's operations in order, with `Date.now` fixed, and the file's text after each; malformed files (truncated, not JSON, not an object), and what each of the four stores loads from them.
+  - `rules`: each rule's decisions, from `wallet-ipc.js`, `dapp-permissions.js` and the Swarm and Radicle stores; R-6's limiter under its own injected `now`, which Q9's rate reuses; D12's decisions; `fee-check.js`'s references and verdicts.
   - `x402`: `tupleFromAccept`, `findCoveringPermission`, the cap store under a fixed clock, and `@x402/evm`'s payloads with `getRandomValues` and `Date.now` fixed.
   - `phone`: the bridge's error mapping, and signatures over the reference's payloads.
 - **`vectors/eip1193.json`** (APR-5): the dispatcher's recorded exchanges.
@@ -379,22 +455,23 @@ One PR per step: the core's against `main`, the browser's against `integration/r
 
 | Step | What | Needs | The tests that prove it |
 |---|---|---|---|
-| APR-1 | `fc-approval`: tokens and bindings, the injected clock and RNG; `vectors/approvals.json`'s tokens | SEC-1 (#1016) merged, for the eleventh kind | Every kind binds the reference's facts; payloads JS tells apart get different tokens; the `token-*` deviations are refused. With a fixed clock, a token is valid at 119,999 ms and expired at 120,000. A 33rd token drops the oldest. A token is burnt on a mismatch, an expiry and a wrong kind. A fixed RNG gives a fixed token. The iOS and Android builds pass |
-| APR-2 | Grants, the files' codecs, the rules, R-6, the fee check | APR-1 | Each store's file text after every vector's operations, byte for byte; each malformed file; each rule's decision table; R-6's runs (a sixth write at once refused, one more after 30 s, the 51st in a day refused, disconnect forgets); D12's `paused`, and a missing one; the fee verdicts at 3·R, with no reference and with `answered: 1` |
-| APR-3 | `approval.*` in `freedom-cored`; `grant_root`; `PageContext.agent`; authorizations checked when present | APR-2 | Over the wire: page kinds refused for `chrome`; grant writes refused for `chrome`, revokes allowed; a token for one page refused for another `frame`, `navigation` or `origin`; files written atomically with mode `0600`, and temp files cleaned at start; an unreadable file renamed aside; a restart reloads; two writes to one store serialize; one `approval.changed` per change |
+| APR-1 | `fc-approval`: tokens and bindings, the injected clock and RNG; `vectors/approvals.json`'s tokens | SEC-1 (#1016, merged into integration as `3c45ebc3`), for the eleventh kind | Every kind binds the reference's facts; payloads JS tells apart get different tokens; the `token-*` deviations are refused. **A page kind,** a site's `safe-send` included, refused for another origin, frame, navigation and handle; a site's `safe-send` refused as a wallet one, and a wallet's as a site's. **Typed data:** two requests with the same EIP-712 hash that differ in an ignored field get different tokens, and each is refused for the other, for a top-level field (their views differ) and for a nested one (they don't). With a fixed clock, a token is valid at 119,999 ms and expired at 120,000. A 33rd token drops the oldest. A token is burnt on a mismatch, an expiry and a wrong kind. A fixed RNG gives a fixed token. The iOS and Android builds pass |
+| APR-2 | Grants, the files' codecs, the rules, R-6, the fee check | APR-1 | Each store's file text after every vector's operations, byte for byte; each malformed file, for all four stores, Swarm's included, loaded as the reference loads it; each rule's decision table; R-6's runs (a sixth write at once refused, one more at 30 s and none at 29,999 ms, the 51st in 24 hours refused and admitted at exactly 24 hours after the first, disconnect forgets); D12's `paused`, and a missing one; the fee verdicts at 3·R, with no reference and with `answered: 1`. **If Q9 is yes:** a rule covered at 30 days less 1 ms and expired at 30 days, and expired under a clock set before `grantedAt`, the same after a restart, from the file; each bucket's runs as R-6's, signatures and transactions apart, two transaction rules of one key sharing one bucket; a restart starts the buckets full, and a revoked grant forgets them; a request over the limit prompts, and isn't counted when approved there; a call of the confirmed send's `value` covered, and one of a wei more prompts; an ERC-20 `transfer` of any amount covered, as its selector allows; today's rules answer nothing, and stay in the file |
+| APR-3 | `approval.*` in `freedom-cored`; `grant_root`; `PageContext.agent`; authorizations checked when present | APR-2 | Over the wire: page kinds refused for `chrome`; grant writes refused for `chrome`, revokes allowed; a token for one page refused for another `frame`, `navigation` or `origin`, a site's `safe-send` through `approval.spend` included; files written atomically with mode `0600`, and temp files cleaned at start; an unreadable file renamed aside; a restart reloads; two writes to one store serialize; one `approval.changed` per change. **No rule without a decision:** `approval.grant` refuses a transaction rule; a `dapp-send` spent without its flag writes none; a flagged one that is refused (expired, for another page, a mismatch), or spent for an account the page's grant doesn't expose, writes none. **Bounds:** a file of exactly 4,194,304 bytes, 4,096 keys or 256 rules on one key is read, and a write that brings a file to each passes; a write to 4,194,305 bytes, a 4,097th key or a 257th rule is refused with the store unchanged, and a file holding one is renamed aside. **Failed writes,** by a hook at each step (the temp file's write, its fsync, the rename, the directory flush), for a widening and a narrowing of each store: before the rename, the error is reported and the file is unchanged; the widening isn't active (the next check refuses it, and so does a restart), and the narrowing is active and reported as not saved; an x402 charge whose write fails signs nothing; a failed directory flush reports `durable: false`, with the change in place |
 | APR-4 | `sign.*` require an authorization | APB-1 and APB-2 shipped; PRQ-5 | Each signing method refused without one, with another document's token, another site's, another account's, an expired one, and one spent twice. A standing rule refused in custody, while paused, over the fee threshold, for a warned view, for 32 bytes, for a plain transfer. Refused before any key is derived, and the token burnt while locked. `chrome` refused without a wallet-kind token; `shell` signs as before |
-| APR-5 | `fc-eip1193`, `eip1193.request`, `approval.request`, `approval.recheck`, `PageContext.transport_key` | APR-4; PRQ-9 | `vectors/eip1193.json` replayed. A prompt closed by a navigation does nothing. `busy` gives `-32002`. A request a rule answered is rechecked: a tab gone into custody, or a document gone, refuses it with nothing signed. A name moved off its IPNS key refuses every name-revalidated method |
-| APR-6 | Transaction building | 0013 decided | Deferred ([Transaction building](#transaction-building)) |
-| X402-1 | `x402.authorize`, `x402.settle`, the caps in the core | APR-3 | Payloads byte for byte as `@x402/evm` makes them under a fixed nonce and clock (EIP-3009 V1 and V2, Permit2). Tab A's token refused for tab B, entry 0's for entry 1, and after an account switch. A cap covering one payment signs one of two concurrent charges; `withheld` gives it back. No cap in custody or for an unattributed request. A cap expired, and one behind a clock set back. A grant written only as bound |
-| PHN-1 | `phone.job`, `phone.sent`, `phone.result` | APR-4 | A job only from a checked authorization. A result for another job, a second result, and one after expiry refused. A signature recovering to another account refused. Typed data checked against the confirmed hash. A visible transaction with another recipient, amount, data or chain refused; one not yet visible accepted. A payment's timeout after `phone.sent` unknown. 4001, 4100 and 4200 mapped as today |
+| APR-5 | `fc-eip1193`, `eip1193.request`, `approval.request` with the core's prompt ids, `approval.recheck`, `PageContext.transport_key` | APR-4; PRQ-9 | `vectors/eip1193.json` replayed. A prompt closed by a navigation does nothing. `busy` gives `-32002`. **Two prompts from one document:** two requests at once, the second answered `busy`, and a decision on the first answering only the first; two in turn, the second opened before the first's answer reaches the core, each answer reaching only its own request. **A decision crossed:** a test hook makes main answer one request's `approval.request` with the other's prompt id, handle or decision: refused, the request fails with nothing signed and no grant written, and the other's token never spends for it. **One handle closing alone:** with prompts open in two windows, one document navigating, its guest destroyed or its window closed ends only its own request (`closed`, nothing signed), and the other's approval still signs; in one document, a prompt cancelled while another request waits on its recheck ends only the cancelled one. **No grant without a decision:** a connect or an "Always allow" answered `closed`, `busy` or rejected, or approved without the choice, writes nothing. **The prepared send:** `{ send }` carries the estimate plus 20% and the core's quote; a test hook changes each of its fields in turn (the type, the chain, `to`, `value`, `data`, the gas limit, each fee field) before `sign.transaction`, which refuses it with nothing signed, and with only the nonce added it signs. A request a rule answered is rechecked: a tab gone into custody, or a document gone, refuses it with nothing signed. A name moved off its IPNS key refuses every name-revalidated method |
+| APR-6 | Transaction building: the nonce, the journal and the broadcast | 0013 decided | Deferred ([Transaction building](#transaction-building)) |
+| APR-7 | Page tokens and the dApp store's grants only from the core's own prompts: `page` taken off `approval.issue`, and off `approval.grant` for the dApp store | APB-4 shipped | Under `page`, `approval.issue` refused for each page kind, and `approval.grant` for each dApp change. Through `eip1193.request`, a page token, a connect, a signing flag and an "Always allow" only from an approve answer to the core's own prompt, for its prompt id, handle and page, and only with the choice the answer carries. Swarm and Radicle grants still pass `approval.grant` |
+| X402-1 | `x402.authorize`, `x402.settle`, the caps in the core | APR-3 | Payloads byte for byte as `@x402/evm` makes them under a fixed nonce and clock (EIP-3009 V1 and V2, Permit2). Tab A's token refused for tab B, entry 0's for entry 1, and after an account switch. A cap covering one payment signs one of two concurrent charges; `withheld` gives it back. No cap in custody or for an unattributed request. A cap expired, and one behind a clock set back. A grant written only as bound. **The asset's case:** a cap granted, looked up, charged, updated and revoked, with the asset in mixed case and in lowercase, is one cap throughout, and the file's key text is lowercase |
+| PHN-1 | `phone.job`, `phone.sent`, `phone.result`, `phone.checked`, `phone-payments.json` | APR-4 | A job only from a checked authorization, for the `target` it names. `phone.sent` and `phone.result` with another `sender` refused, and the job still open for its own. A result for another job, a second result, and one after expiry refused. A signature recovering to another account refused. Typed data checked against the confirmed hash. A transaction visible at the answer with another sender, recipient, amount, data or chain, a missing chain id included, refused. **Not visible at the answer:** `unverified`, and recorded; later visible with another recipient, amount, data or chain, `mismatch`, and never `verified`; later visible and the same, `verified`. The same with a restart between the answer and the transaction appearing. Not visible within 24 hours, `unknown`; a wall clock set forward gives `unknown`, never `verified`. A 257th unverified payment's job refused. A payment's timeout after `phone.sent` unknown. 4001, 4100 and 4200 mapped as today |
 | APB-1 | Tokens through the core: `wallet:confirm-signing` and main's issuer call `approval.issue`, and every `sign.*` passes its authorization | APR-3's release pinned; PRQ-5 | `signing-confirmation.test.js`'s cases against the core; no token kept in main; page kinds sent under `page`; main's dispatcher sends no page request as `shell` |
 | APB-2 | dApp grants and rules through the core; `dapp-permissions.json` becomes the core's | APB-1; PRQ-4 | Main writes the file nowhere (a spy on `fs`); `wallet-ipc.test.js`'s auto-approve cases and the D12 suites pass. Rollback: the reference's `dapp-permissions.js` reads a file the core wrote and sees the same grants |
 | APB-3 | Swarm and Radicle grants through the core, R-6 included | APR-3; SEC-3f (#941 on integration) | As APB-2, for both files; R-6's tests; the manifest projection written as `shell` |
 | APB-4 | The Ethereum dispatcher replaced by `eip1193.request` | APR-5; PRQ-9 | PRQ-3 to PRQ-6's tests pass unchanged against the core's dispatcher |
-| X402-2 | x402 through the core; `x402-permissions.json` becomes the core's; widening needs a decision | X402-1 | #1016's suites against the core; the activity pane can lower a cap and can't raise it |
-| PHN-2 | The bridge relays the core's jobs | PHN-1 | `bridge.test.js`'s and `signer.test.js`'s cases against the core; an answer from a webContents the job wasn't sent to refused |
+| X402-2 | x402 through the core; `x402-permissions.json` becomes the core's; widening needs a decision | X402-1 | #1016's suites against the core; the activity pane can lower a cap and can't raise it. Rollback: the reference's `x402/permissions.js` reads the core's file and finds each cap under the lowercase key `tupleFromAccept` makes |
+| PHN-2 | The bridge relays the core's jobs | PHN-1 | `bridge.test.js`'s and `signer.test.js`'s cases against the core; an answer from a webContents the job wasn't sent to refused by the core as well as by the bridge; an unverified payment shown as not yet checked, and a mismatch as another transaction, never as the confirmed one |
 
-- **Rollback:** until the browser pins APR-4's release, each browser step reverts on its own, and the core still signs without an authorization. After that pin, reverting APB-1 or APB-2 means reverting the pin too. The files' format never changes, so an older build reads them at every step.
+- **Rollback:** until the browser pins APR-4's release, each browser step reverts on its own, and the core still signs without an authorization. After that pin, reverting APB-1 or APB-2 means reverting the pin too. After APR-7's pin, reverting APB-4 means reverting that pin too. The files' format never changes, so an older build reads them at every step.
 - **One writer per store:** a store's APB step stops main's writes in the same PR that starts the core's.
 
 ## Amendments
@@ -402,7 +479,7 @@ One PR per step: the core's against `main`, the browser's against `integration/r
 Once decided:
 - **0002, Non-goals:** "Approval and policy" reads: "Stage 1 trusts main, which shows the prompts. From 0012 the core keeps the tokens, grants and standing rules, and refuses a page's signature without a check it made itself." "Policy moves with the Chromium work" goes. The *Callers* bullet admits `page` on the three EVM signing methods.
 - **0001, Messages:** `page` is admitted on the methods in [PageContext](#pagecontext); `not_authorized` joins the request errors; `core.hello` takes `grant_root`.
-- **0011:** `PageContext` gains `agent` and `transport_key`, and its internal issuer becomes a caller of `approval.issue`. A token still never reaches a renderer.
+- **0011:** `PageContext` gains `agent` and `transport_key`, and its internal issuer becomes a caller of `approval.issue`, until APR-7, when the core mints the page kinds itself. From APR-5 a prompt's handle record also keeps the core's `prompt` id: main answers each `approval.request` only with a decision on the handle it opened for it, echoes the prompt id and the handle, and answers `closed` when that handle closes. A token still never reaches a renderer.
 
 ## Options weighed
 
@@ -410,6 +487,8 @@ Once decided:
 - **New files in the core's own directory,** instead of today's: older builds would read stale grants, and a grant revoked since would come back on a rollback. Only writing both, or a one-way move, avoids that, and 0013 weighs the one-way move.
 - **Binding JS's digest byte for byte** (`stableStringify`): it never leaves the process, so only the decision matters, and binding the core's own parse binds what it signs.
 - **Moving the nonce now:** without the journal it moves nothing ([Transaction building](#transaction-building)).
+- **0011's handle passed into `eip1193.request`,** instead of a prompt id the core makes. Main would have to open a handle before it knows a prompt is needed, and a request that needs two prompts (an unlock, then the send) would need two, so 0011's rule that a prompt is a handle would change. The core's own id answers the same question, which prompt a decision is for, and the core checks it against what it sent. The handle is still bound into the token.
+- **Grants on main's word for good,** with no APR-7: simpler, but a main path that skips a prompt could still mint a token or write a grant after the dispatcher has moved into the core.
 - **Custody state kept in the core,** told by events: an event can arrive after the request it should have stopped. Read with each request, it can't.
 - **The core fetching its own fee reference** for each check: a second way into the chain machine, for evidence main already fetches before every prompt.
 - **WebRTC in the core for the phone:** a large new surface. Checking the answer gives the same assurance about what was signed.
@@ -417,7 +496,7 @@ Once decided:
 ## Open questions
 
 1. **Q3, policy in the core:** Move site approvals and grants into the core now (Electron), instead of waiting for Chromium as 0002 planned? *Proposed: yes.*
-2. **Q8, enforced:** Core refuses any dApp signature without an approval/grant it checked itself, though main stays trusted in Stage 1? *Proposed: yes, for every signature the core makes.*
-3. **Q9, "Always allow":** "Always allow" in the core: today's rules, or add limits (expiry, spending cap)? *Proposed: add 30 days, R-6's rate, and no more `value` than the send the rule came from.*
+2. **Q8, enforced:** Should the core refuse any dApp signature without an approval or an "Always allow" it checked itself? Until the core runs the Ethereum dispatcher, it takes main's word that you approved, so this catches a check main forgets after your approval, not a prompt main forgets to show. *Proposed: yes, for every signature the core makes; and once the core runs the Ethereum dispatcher, it asks for those prompts itself (APR-7).*
+3. **Q9, "Always allow":** Keep a site's "Always allow" as it is today, with no end, no rate and any amount, or add three limits? (a) A rule ends 30 days after you gave it. (b) A site's automatic signatures, and separately its automatic sends, go at most 5 at once, then one per 30 seconds and 50 a day, and past that you're asked. (c) A contract rule covers no more ETH than the send you allowed it from. This doesn't limit token amounts, which travel inside the call. With any of them, sites you have already allowed ask you once more. *Proposed: all three.*
 4. **Q10, rollback:** Must older builds still read the grant files after the move (rollback)? *Proposed: yes, in Stage 1.*
-5. **Q11, x402:** x402 automatic payments: keep today's per-site caps unchanged? *Proposed: yes, keyed as today, with the fixes in [Deviations](#deviations).*
+5. **Q11, x402:** An x402 spending cap belongs to the seller's site (the paid link's origin), not to the page you're on, so every page that embeds the same seller spends from one cap. Keep that, or give each cap to the pair of the page you're on and the seller, so that each embedding page needs its own? *Proposed: keep the seller-only cap, with the fixes in [Deviations](#deviations).*
