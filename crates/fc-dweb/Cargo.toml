@@ -13,8 +13,8 @@ workspace = true
 [features]
 # Test-only: at every release of a walk's memory, its live charged values
 # are still covered, and a test may read the allocator there
-# (`verifier::probe`); each input ends with the Swarm walk's holding equal
-# to what its values are charged.
+# (`verifier::probe`); each input ends with the walk's holding equal to
+# what its values are charged.
 memory-probe = []
 
 [dependencies]

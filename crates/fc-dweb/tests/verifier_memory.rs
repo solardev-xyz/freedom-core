@@ -18,12 +18,13 @@
 //! a small manifest. Every release must match a hold
 //! ([`Verifier::over_released`]).
 //!
-//! With the `memory-probe` feature, the Swarm walk's requests read the
-//! allocator at every release of the walk's memory, inside each input: what
-//! is live then must be within the machine's reservation and the same
-//! allowance, so a buffer whose charge goes before it does is caught where
-//! it happens, not only between inputs. (The IPFS walk doesn't hold to
-//! that yet: its requests keep the cap alone.)
+//! With the `memory-probe` feature, every request reads the allocator at
+//! every release of its walk's memory, inside each input: what is live
+//! then must be within the machine's reservation and the same allowance,
+//! so a buffer whose charge goes before it does is caught where it
+//! happens, not only between inputs. Each input also ends with the walk's
+//! holding equal to what its live values are charged
+//! ([`Verifier::over_released`]).
 //!
 //! `allocations_stay_within_the_grant` holds requests to their grant
 //! (0009, What a grant covers): between inputs, within each input (the
@@ -42,10 +43,12 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use cap::Cap;
 use fc_dweb::verifier::{
-    IPFS_ALLOWANCE, IPFS_BUDGET, IPFS_GRANT, Job, MAX_FRAME, Method, Options, Output, PieceId,
-    REQUEST_BUDGET, STREAM_WINDOW, SWARM_ALLOWANCE, SWARM_BUDGET, SWARM_GRANT, Verifier,
+    IPFS_ALLOWANCE, IPFS_BUDGET, IPFS_GRANT, Job, MAX_FRAME, MAX_PATH, Method, Options, Output,
+    PieceId, REQUEST_BUDGET, STREAM_WINDOW, SWARM_ALLOWANCE, SWARM_BUDGET, SWARM_GRANT, Verifier,
 };
-use fc_dweb::{Backend, ContentTrust, Ipfs, Node, ResponseOp, Root, Trust, Verify, retry, timers};
+use fc_dweb::{
+    Backend, ContentTrust, Ipfs, Node, Refusal, ResponseOp, Root, Trust, Verify, retry, timers,
+};
 use peak_alloc::PeakAlloc;
 use sha2::Digest;
 
@@ -148,10 +151,10 @@ fn at_release(reserved: usize) {
 /// What the driver and the machine's fixed structures may take beside the
 /// request's budget.
 const SLACK: usize = 256 << 10;
-/// What the Swarm walk's machine and its driver allocate beside what the
-/// machine reserves: its own structures, the outputs it queues and the
-/// driver's queues. Measured on a manifest of small nodes, and held to for
-/// the large ones.
+/// What a walk's machine and its driver allocate beside what the machine
+/// reserves: its own structures, the outputs it queues and the driver's
+/// queues. Measured on a manifest of small nodes, and held to for the large
+/// ones and for every IPFS request.
 const MACHINE: usize = 48 << 10;
 const CAR_TYPE: &str = "application/vnd.ipld.car; version=1; order=dfs; dups=y";
 const RAW_TYPE: &str = "application/vnd.ipld.raw";
@@ -304,7 +307,23 @@ fn drive_paged(
         let mut credits = 0;
         while taken && let Some(o) = v.poll() {
             match o {
-                Output::Piece(r) => asked.push_back(r),
+                // Main sends the request on and keeps only the piece's
+                // number: the driver finds its answer now, and keeps no
+                // copy of its path.
+                Output::Piece(r) => {
+                    let answer = world
+                        .get(&r.path)
+                        .unwrap_or_else(|| panic!("{}", r.path))
+                        .clone();
+                    let kind = if r.path.ends_with("format=ipns-record") {
+                        None
+                    } else if r.path.ends_with("format=raw") {
+                        Some(RAW_TYPE)
+                    } else {
+                        Some(CAR_TYPE)
+                    };
+                    asked.push_back((r.id, kind, answer));
+                }
                 Output::CancelPiece(id) => {
                     if let Some(s) = streams.iter_mut().find(|s| s.id == id) {
                         s.cancelled = true;
@@ -323,6 +342,8 @@ fn drive_paged(
                     credits = 0;
                     input(v, |v| v.floor(fc_dweb::store::FloorCheck::Accepted)).unwrap()
                 }
+                // A head with no body after it (a HEAD's) ends the request.
+                Output::Head(h) if !h.body => return (Some(h.status), body, "head".to_owned()),
                 Output::Head(h) => head = Some(h.status),
                 Output::Body(b) => {
                     body += b.len();
@@ -344,30 +365,25 @@ fn drive_paged(
             }
         }
         between(v);
+        // A job runs as the pool runs it, then its result is the machine's
+        // input: the pool's own work (an IPNS record's signed data, copied
+        // for its check) is the pool's, not the request's.
         if !slow_pool && let Some(job) = next_job(&mut jobs) {
-            input(v, |v| v.hashed(job.run())).unwrap();
+            let result = job.run();
+            input(v, |v| v.hashed(result)).unwrap();
             continue;
         }
-        if let Some(r) = asked.pop_front() {
-            let answer = world
-                .get(&r.path)
-                .unwrap_or_else(|| panic!("{}", r.path))
-                .clone();
-            let kind = if r.path.ends_with("format=raw") {
-                RAW_TYPE
-            } else {
-                CAR_TYPE
+        if let Some((id, kind, answer)) = asked.pop_front() {
+            let Some(kind) = kind else {
+                input(v, |v| v.piece_whole(id, 200, vec![], answer.to_vec())).unwrap();
+                continue;
             };
             input(v, |v| {
-                v.piece_head(
-                    r.id,
-                    200,
-                    vec![("content-type".to_owned(), kind.to_owned())],
-                )
+                v.piece_head(id, 200, vec![("content-type".to_owned(), kind.to_owned())])
             })
             .unwrap();
             streams.push(Stream {
-                id: r.id,
+                id,
                 body: answer,
                 sent: 0,
                 credited: 0,
@@ -397,9 +413,14 @@ fn drive_paged(
             moved = true;
             break;
         }
+        // An ended stream is main's no longer: the driver keeps only those
+        // open, as main does, so its own memory doesn't grow with a walk's
+        // many blocks.
+        streams.retain(|s| !s.done);
         if !moved {
             if let Some(job) = next_job(&mut jobs) {
-                input(v, |v| v.hashed(job.run())).unwrap();
+                let result = job.run();
+                input(v, |v| v.hashed(result)).unwrap();
                 continue;
             }
             if !taken {
@@ -458,6 +479,17 @@ fn capped_with<R>(
     options: Options,
     drive: impl FnOnce(&mut Verifier) -> R,
 ) -> (R, Measured) {
+    capped_as(case, p, Method::Get, options, drive)
+}
+
+/// [`capped_with`] for a request of `method`.
+fn capped_as<R>(
+    case: &str,
+    p: &Verify,
+    method: Method,
+    options: Options,
+    drive: impl FnOnce(&mut Verifier) -> R,
+) -> (R, Measured) {
     use std::io::Write;
     let budget = options.budget;
     let _ = writeln!(std::io::stderr(), "dense case: {case}, budget {budget}");
@@ -475,11 +507,9 @@ fn capped_with<R>(
     AT_RELEASE.store(0, Ordering::Relaxed);
     AT_RELEASE_RESERVED.store(0, Ordering::Relaxed);
     #[cfg(feature = "memory-probe")]
-    if p.node == Node::Ant {
-        fc_dweb::verifier::probe::at_release(Some(at_release));
-    }
+    fc_dweb::verifier::probe::at_release(Some(at_release));
     let (got, reserved) = {
-        let mut v = Verifier::new(1, p, Method::Get, None, false, options).unwrap();
+        let mut v = Verifier::new(1, p, method, None, false, options).unwrap();
         let got = drive(&mut v);
         assert_eq!(v.over_released(), 0, "{case}: released without a hold");
         (got, v.peak().max(LEDGER_BEFORE.load(Ordering::Relaxed)))
@@ -494,6 +524,11 @@ fn capped_with<R>(
     // Within each input too, at every release: nothing the walk released
     // was still live past the allowance.
     let past = AT_RELEASE.load(Ordering::Relaxed);
+    let _ = writeln!(
+        std::io::stderr(),
+        "  {case}: at a release, {past} allocated past the reservation {}",
+        AT_RELEASE_RESERVED.load(Ordering::Relaxed)
+    );
     assert!(
         past <= MACHINE,
         "{case}: at a release, {past} allocated past the reservation {}",
@@ -843,6 +878,12 @@ fn wide_file(n: usize) -> (Vec<u8>, World) {
 /// found, so the sections waiting are bounded with their jobs' own
 /// structures counted, not only their bytes. The leaves then come raw.
 fn flood() -> (Vec<u8>, World) {
+    flood_then(400_000, 0)
+}
+
+/// [`flood`] of `n` empty sections, then, past `0`, a raw block of
+/// `tail` bytes, which the file doesn't need either.
+fn flood_then(n: usize, tail: usize) -> (Vec<u8>, World) {
     let a = vec![b'a'; 100];
     let b = vec![b'b'; 100];
     let (la, lb) = (sha256_cid(0x55, &a), sha256_cid(0x55, &b));
@@ -859,11 +900,21 @@ fn flood() -> (Vec<u8>, World) {
         &data,
     );
     let root = sha256_cid(0x70, &block);
+    let mut world = HashMap::new();
+    // The root raw too, for a CAR that gives way before its first section
+    // is used.
+    world.insert(
+        format!("/ipfs/{}?format=raw", text(&root)),
+        Arc::new(block.clone()),
+    );
     let mut sections = vec![(root.clone(), block)];
-    for _ in 0..400_000 {
+    for _ in 0..n {
         sections.push((identity(b""), Vec::new()));
     }
-    let mut world = HashMap::new();
+    if tail > 0 {
+        let big: Vec<u8> = (0..tail).map(|i| (i % 251) as u8).collect();
+        sections.push((sha256_cid(0x55, &big), big));
+    }
     world.insert(car_path(&root), Arc::new(car(&sections)));
     world.insert(format!("/ipfs/{}?format=raw", text(&la)), Arc::new(a));
     world.insert(format!("/ipfs/{}?format=raw", text(&lb)), Arc::new(b));
@@ -879,7 +930,27 @@ fn flood() -> (Vec<u8>, World) {
 /// most of the orders measured (uniform keys, in no order, hold about
 /// 2.02 MB). What the allocator holds for them past the store and its
 /// partitions, and with them.
+///
+/// The structure is the same every time: in a quiet process every reading
+/// is the same (2,184,048 bytes on 64-bit Linux). But the count is the
+/// process's, and the harness's other threads may allocate or free beside
+/// a reading (a test that just ended, the next one spawned), once by
+/// 9,713 bytes. So the floors are measured until two readings in a row
+/// agree, which a disturbed reading doesn't.
 fn floors_fully_occupied() -> (usize, usize) {
+    let mut readings = vec![floors_reading()];
+    while readings.len() < 8 {
+        let next = floors_reading();
+        if readings.last() == Some(&next) {
+            return next;
+        }
+        readings.push(next);
+    }
+    panic!("no two readings in a row agree: {readings:?}");
+}
+
+/// One reading of [`floors_fully_occupied`].
+fn floors_reading() -> (usize, usize) {
     use fc_dweb::store::{FLOOR_NAMES, FloorCheck, PRIVATE_PARTITIONS, Store};
     let start = PeakAlloc.current_usage();
     let mut store = Store::new();
@@ -906,7 +977,7 @@ fn floors_fully_occupied() -> (usize, usize) {
     }
     let now = PeakAlloc.current_usage();
     drop((store, tickets, partitions));
-    (now - base, now - start)
+    (now.saturating_sub(base), now.saturating_sub(start))
 }
 
 #[test]
@@ -1271,10 +1342,11 @@ fn within_allowance(case: &str, m: Measured, allowance: usize) {
         let _ = writeln!(
             std::io::stderr(),
             "{case}: allocated {} at peak, reserved {}, past it between inputs {between}, \
-             within one {}, credits waiting at once {}",
+             within one {}, at a release {}, credits waiting at once {}",
             m.allocated,
             m.reserved,
             IN_INPUT.load(Ordering::Relaxed),
+            AT_RELEASE.load(Ordering::Relaxed),
             CREDITS_WAITING.load(Ordering::Relaxed)
         );
     }
@@ -1479,6 +1551,37 @@ fn allocations_stay_within_the_grant() {
         "{got:?}"
     );
     within_allowance(case, m, IPFS_ALLOWANCE);
+    // A file node of 4,000 raw leaves: their CIDs are queued at once, each
+    // within the room held for them.
+    let (root, world) = raw_file(&[1; 4_000]);
+    let case = "a file node of 4,000 one-byte raw leaves";
+    let (got, m) = capped_with(case, &plan(&root), raw(REQUEST_BUDGET), |v| {
+        drive(v, &world, false)
+    });
+    assert_eq!(
+        (got.0, got.1, got.2.as_str()),
+        (Some(200), 4_000, "end"),
+        "{got:?}"
+    );
+    within_allowance(case, m, IPFS_ALLOWANCE);
+    // The flood's empty sections, then a section of a whole 2 MiB block,
+    // whose buffer the reader makes as soon as it reads its length, in the
+    // push that completes the empty ones, so the reader's room is full: the
+    // vector the empty ones come in has room of its own beside it, and the
+    // reader goes before its room when the CAR gives way.
+    let (root, world) = flood_then(4_000, 2 << 20);
+    for poll in [Poll::Each, Poll::WhenStuck] {
+        let case = format!("CAR of 4,000 empty sections and one of 2 MiB, {poll:?}");
+        let (got, m) = capped(&case, &plan(&root), REQUEST_BUDGET, |v| {
+            drive_paged(v, &world, true, MAX_FRAME, true, poll)
+        });
+        assert_eq!(
+            (got.0, got.1, got.2.as_str()),
+            (Some(200), 200, "end"),
+            "{got:?}"
+        );
+        within_allowance(&case, m, IPFS_ALLOWANCE);
+    }
 }
 
 /// A stream's whole first window in one-byte frames, main not polling
@@ -1531,4 +1634,440 @@ fn a_window_of_one_byte_frames_unpolled_stays_within_the_grant() {
     assert_eq!(CREDITS_WAITING.load(Ordering::Relaxed), 1, "{case}");
     within_allowance(case, m, SWARM_ALLOWANCE);
     assert!(m.allocated <= SWARM_GRANT, "{case}: {m:?}");
+}
+
+// ---------------------------------------------------------------------------
+// The IPFS walk's values, each charged.
+
+/// An Ed25519 IPNS name from a seed, and its signer.
+fn ipns_key(seed: u8) -> (ed25519_dalek::SigningKey, String) {
+    let key = ed25519_dalek::SigningKey::from_bytes(&[seed; 32]);
+    let mut name = vec![0x01, 0x72, 0x00, 0x24, 0x08, 0x01, 0x12, 0x20];
+    name.extend_from_slice(key.verifying_key().as_bytes());
+    (key, text(&name))
+}
+
+fn cbor_head(major: u8, n: u64, out: &mut Vec<u8>) {
+    let m = major << 5;
+    if n < 24 {
+        out.push(m | n as u8);
+    } else if n <= 0xff {
+        out.extend_from_slice(&[m | 24, n as u8]);
+    } else if n <= 0xffff {
+        out.push(m | 25);
+        out.extend_from_slice(&(n as u16).to_be_bytes());
+    } else if n <= 0xffff_ffff {
+        out.push(m | 26);
+        out.extend_from_slice(&(n as u32).to_be_bytes());
+    } else {
+        out.push(m | 27);
+        out.extend_from_slice(&n.to_be_bytes());
+    }
+}
+
+/// A V2-only record naming `value`, valid until 2099, its signed data in
+/// DAG-CBOR's canonical key order.
+fn ipns_record(key: &ed25519_dalek::SigningKey, value: &str) -> Vec<u8> {
+    use ed25519_dalek::Signer;
+    let mut data = Vec::new();
+    cbor_head(5, 5, &mut data);
+    let field = |k: &str, data: &mut Vec<u8>| {
+        cbor_head(3, k.len() as u64, data);
+        data.extend_from_slice(k.as_bytes());
+    };
+    field("TTL", &mut data);
+    cbor_head(0, 60_000_000_000, &mut data);
+    field("Value", &mut data);
+    cbor_head(2, value.len() as u64, &mut data);
+    data.extend_from_slice(value.as_bytes());
+    field("Sequence", &mut data);
+    cbor_head(0, 1, &mut data);
+    field("Validity", &mut data);
+    let eol = b"2099-01-01T00:00:00Z";
+    cbor_head(2, eol.len() as u64, &mut data);
+    data.extend_from_slice(eol);
+    field("ValidityType", &mut data);
+    cbor_head(0, 0, &mut data);
+    let mut message = b"ipns-signature:".to_vec();
+    message.extend_from_slice(&data);
+    let mut out = vec![0x42, 64];
+    out.extend_from_slice(&key.sign(&message).to_bytes());
+    out.push(0x4a);
+    varint(data.len() as u64, &mut out);
+    out.extend_from_slice(&data);
+    out
+}
+
+/// A name whose record names a raw leaf with `pad` bytes of path below
+/// it: the record's value waits for the floor, then the path meets a file
+/// (`GatewayCore`'s 502).
+fn ipns_value_of(pad: usize) -> (Verify, World) {
+    let leaf = b"a raw leaf".to_vec();
+    let root = sha256_cid(0x55, &leaf);
+    let (key, name) = ipns_key(7);
+    let value = format!("/ipfs/{}/{}", text(&root), "s".repeat(pad));
+    let mut world = HashMap::new();
+    world.insert(format!("/ipfs/{}?format=raw", text(&root)), Arc::new(leaf));
+    world.insert(
+        format!("/ipns/{name}?format=ipns-record"),
+        Arc::new(ipns_record(&key, &value)),
+    );
+    let mut p = plan(&root);
+    p.root = Root::Ipns(name);
+    (p, world)
+}
+
+/// A directory with one entry named `pad` bytes long: a 2,000-byte raw
+/// leaf, asked for by its name, whose type is sniffed. Its tag and head
+/// carry the path.
+fn file_named(pad: usize) -> (Verify, World) {
+    file_named_in(pad, false)
+}
+
+/// [`file_named`], the gateway answering the path's CAR too.
+fn file_named_car(pad: usize) -> (Verify, World) {
+    file_named_in(pad, true)
+}
+
+fn file_named_in(pad: usize, with_car: bool) -> (Verify, World) {
+    let leaf: Vec<u8> = (0..2_000).map(|i| (i % 251) as u8).collect();
+    let leaf_cid = sha256_cid(0x55, &leaf);
+    let name = format!("f{}", "a".repeat(pad));
+    let mut data = Vec::new();
+    field_varint(1, 1, &mut data);
+    let dir = pb_node(&[(leaf_cid.clone(), name.clone(), 2_000)], &data);
+    let root = sha256_cid(0x70, &dir);
+    let mut world = HashMap::new();
+    world.insert(
+        format!("/ipfs/{}?format=raw", text(&root)),
+        Arc::new(dir.clone()),
+    );
+    world.insert(
+        format!("/ipfs/{}?format=raw", text(&leaf_cid)),
+        Arc::new(leaf.clone()),
+    );
+    if with_car {
+        world.insert(
+            format!("/ipfs/{}/{name}?format=car&dag-scope=entity", text(&root)),
+            Arc::new(car(&[(root.clone(), dir), (leaf_cid, leaf)])),
+        );
+    }
+    let mut p = plan(&root);
+    p.path = format!("/{name}");
+    (p, world)
+}
+
+/// A directory with one entry named `pad` bytes long, a directory of two
+/// entries, listed: its title and its links' base carry the path.
+fn listing_named(pad: usize) -> (Verify, World) {
+    let (sub, block) = names_block(2);
+    let name = format!("d{}", "a".repeat(pad));
+    let mut data = Vec::new();
+    field_varint(1, 1, &mut data);
+    let dir = pb_node(&[(sub.clone(), name.clone(), 0)], &data);
+    let root = sha256_cid(0x70, &dir);
+    let mut world = HashMap::new();
+    world.insert(format!("/ipfs/{}?format=raw", text(&root)), Arc::new(dir));
+    world.insert(format!("/ipfs/{}?format=raw", text(&sub)), Arc::new(block));
+    let mut p = plan(&root);
+    p.path = format!("/{name}/");
+    (p, world)
+}
+
+/// The most a request allocated past its reservation: between inputs,
+/// within one, and at any release of its walk's memory.
+fn past_the_reservation() -> [usize; 3] {
+    [&BETWEEN, &IN_INPUT, &AT_RELEASE].map(|n| n.load(Ordering::Relaxed))
+}
+
+/// A probe for a value the IPFS walk keeps without its charge: each request
+/// runs with a value of a few bytes and again with one as long as a plan's
+/// path may be ([`MAX_PATH`]), and a value the walk kept uncharged would
+/// show as that much more memory past the reservation, at a release of the
+/// walk's memory (the record's value is live at every release while it
+/// waits for the floor and is followed) or between inputs. Charged, the
+/// long run passes it by no more than the short one, within 2 KiB on each
+/// measure: the record's value; a file's path, tag, type and head, for a
+/// HEAD the head's headers while the head waits for the input's end; the
+/// path a CAR is asked for, while main hasn't taken the request; a
+/// listing's path, title and base. Before the walk was charged as the
+/// Swarm walk is, these were the IPFS part of the grant's allowance.
+#[test]
+fn an_uncharged_ipfs_value_shows_past_the_reservation() {
+    let _one = ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
+    let options = |car| Options {
+        budget: IPFS_BUDGET,
+        car,
+        ..Options::default()
+    };
+    type Case = (
+        &'static str,
+        fn(usize) -> (Verify, World),
+        u16,
+        Method,
+        bool,
+    );
+    let cases: [Case; 5] = [
+        (
+            "an IPNS record's value",
+            ipns_value_of,
+            502,
+            Method::Get,
+            false,
+        ),
+        ("a file at a long path", file_named, 200, Method::Get, false),
+        (
+            "a file's head at a long path",
+            file_named,
+            200,
+            Method::Head,
+            false,
+        ),
+        (
+            "a file at a long path, by its CAR",
+            file_named_car,
+            200,
+            Method::Get,
+            true,
+        ),
+        (
+            "a listing at a long path",
+            listing_named,
+            200,
+            Method::Get,
+            false,
+        ),
+    ];
+    for (what, case, status, method, car) in cases {
+        let ending = if method == Method::Head {
+            "head"
+        } else {
+            "end"
+        };
+        let mut past = [[0; 3]; 2];
+        // The longest a listing's path may be: `/d`, the name, `/`.
+        for (i, pad) in [8, MAX_PATH - 3].into_iter().enumerate() {
+            let label = format!("{what}, {pad} bytes");
+            let (p, world) = case(pad);
+            assert!(p.path.len() <= MAX_PATH, "{label}");
+            let (got, m) = capped_as(&label, &p, method, options(car), |v| {
+                drive(v, &world, false)
+            });
+            assert_eq!(
+                (got.0, got.2.as_str()),
+                (Some(status), ending),
+                "{label}: {got:?}"
+            );
+            past[i] = past_the_reservation();
+            within_allowance(&label, m, IPFS_ALLOWANCE);
+            assert!(m.allocated <= IPFS_GRANT, "{label}: {m:?}");
+        }
+        for (long, short) in past[1].into_iter().zip(past[0]) {
+            assert!(
+                long <= short + (2 << 10),
+                "{what}: past the reservation (between inputs, within one, at a \
+                 release) {:?} with {} bytes more, {:?} without",
+                past[1],
+                MAX_PATH - 11,
+                past[0]
+            );
+        }
+    }
+}
+
+/// A plan's path (with a Swarm plan's query), and each of its headers'
+/// values, are at most [`MAX_PATH`] bytes (0009, Bounds). Past it, the plan
+/// is refused before anything is made of it: a 1.4 MB path below a raw
+/// root allocated 8,400,476 bytes, past the 8 MiB grant, when it was
+/// accepted. At it, the plan's check copies the path a few times before the
+/// request's machine exists, so with nothing reserved (a budget of 0: the
+/// walk ends at once, for its memory) what the request allocates is the
+/// check's copies and the machine's own structures, within the allowance.
+/// An IPFS plan's query, which the walk never reads, adds nothing.
+#[test]
+fn a_plan_past_its_path_bound_is_refused_before_it_is_copied() {
+    let note = |line: &str| {
+        use std::io::Write;
+        let _ = writeln!(std::io::stderr(), "{line}");
+    };
+    let _one = ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
+    let leaf = b"a raw leaf".to_vec();
+    let raw_root = plan(&sha256_cid(0x55, &leaf));
+    let swarm = swarm_plan(&"ab".repeat(32), "");
+    // What the allocator reached making the request, and what the machine
+    // reserved at its peak.
+    let made = |p: &Verify| {
+        PeakAlloc.reset_peak_usage();
+        let base = PeakAlloc.current_usage();
+        let options = Options {
+            budget: 0,
+            ..Options::default()
+        };
+        let made = Verifier::new(1, p, Method::Get, None, false, options).map(|v| v.peak());
+        (made, PeakAlloc.peak_usage() - base)
+    };
+    let with = |p: &Verify, path: String, query: &str, headers: Vec<(String, String)>| {
+        let mut p = p.clone();
+        p.path = path;
+        p.query = query.to_owned();
+        p.headers = headers;
+        p
+    };
+    let long = |n: usize| format!("/{}", "a".repeat(n - 1));
+    let header = |name: &str, n: usize| vec![(name.to_owned(), "a".repeat(n))];
+    let refused: [(&str, Verify, Refusal); 6] = [
+        (
+            "a 1.4 MB path below a raw root",
+            with(&raw_root, format!("/{}", "a".repeat(1_400_000)), "", vec![]),
+            Refusal::Path,
+        ),
+        (
+            "an IPFS path a byte past the bound",
+            with(&raw_root, long(MAX_PATH + 1), "", vec![]),
+            Refusal::Path,
+        ),
+        (
+            "a Swarm path a byte past the bound",
+            with(&swarm, long(MAX_PATH + 1), "", vec![]),
+            Refusal::Path,
+        ),
+        (
+            "a Swarm path and query a byte past the bound",
+            with(&swarm, long(MAX_PATH - 8), "?query=ab", vec![]),
+            Refusal::Query,
+        ),
+        (
+            "an If-None-Match a byte past the bound",
+            with(
+                &raw_root,
+                String::new(),
+                "",
+                header("if-none-match", MAX_PATH + 1),
+            ),
+            Refusal::Header,
+        ),
+        (
+            "a Swarm range a byte past the bound",
+            with(&swarm, String::new(), "", header("range", MAX_PATH + 1)),
+            Refusal::Header,
+        ),
+    ];
+    for (what, p, refusal) in refused {
+        let (got, allocated) = made(&p);
+        note(&format!("{what}: {got:?}, {allocated} allocated"));
+        assert_eq!(got.err(), Some(refusal), "{what}");
+        assert!(allocated < 1 << 10, "{what}: {allocated} allocated");
+    }
+    let accepted: [(&str, Verify, usize); 5] = [
+        (
+            "an IPFS path at the bound",
+            with(&raw_root, long(MAX_PATH), "", vec![]),
+            IPFS_ALLOWANCE,
+        ),
+        (
+            "a Swarm path at the bound",
+            with(&swarm, long(MAX_PATH), "", vec![]),
+            SWARM_ALLOWANCE,
+        ),
+        (
+            "a Swarm path and query at the bound",
+            with(&swarm, long(MAX_PATH - 8), "?query=a", vec![]),
+            SWARM_ALLOWANCE,
+        ),
+        (
+            "an If-None-Match and a range at the bound",
+            with(
+                &raw_root,
+                long(MAX_PATH),
+                "",
+                [header("if-none-match", MAX_PATH), header("range", MAX_PATH)].concat(),
+            ),
+            IPFS_ALLOWANCE,
+        ),
+        (
+            "a Swarm range at the bound",
+            with(&swarm, long(MAX_PATH), "", header("range", MAX_PATH)),
+            SWARM_ALLOWANCE,
+        ),
+    ];
+    for (what, p, allowance) in accepted {
+        let (got, allocated) = made(&p);
+        note(&format!("{what}: {got:?}, {allocated} allocated"));
+        assert_eq!(got, Ok(0), "{what}");
+        assert!(allocated <= allowance, "{what}: {allocated} allocated");
+    }
+    // An IPFS plan's query isn't counted, and isn't copied: with a short
+    // path, or one at the bound, a query to 0006's 64 KiB URL bound
+    // allocates what no query does.
+    for path in [long(2), long(MAX_PATH)] {
+        let query = format!("?{}", "q".repeat((64 << 10) - 200 - path.len()));
+        let (got, without) = made(&with(&raw_root, path.clone(), "", vec![]));
+        assert_eq!(got, Ok(0));
+        let (got, allocated) = made(&with(&raw_root, path.clone(), &query, vec![]));
+        note(&format!(
+            "an IPFS path of {} bytes with a query of {}: {got:?}, {allocated} allocated, \
+             {without} without",
+            path.len(),
+            query.len()
+        ));
+        assert_eq!(got, Ok(0), "{} bytes", path.len());
+        assert!(
+            allocated < without + (1 << 10),
+            "{} bytes: {allocated} allocated, {without} without",
+            path.len()
+        );
+    }
+}
+
+/// A CAR's request carries the request's path: the machine counts it,
+/// with its headers, from when it makes it until main takes it, by what
+/// they hold.
+#[test]
+fn a_cars_request_is_counted_until_main_takes_it() {
+    let _one = ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
+    let (p, _) = file_named_car(MAX_PATH - 2);
+    let mut v = Verifier::new(1, &p, Method::Get, None, false, Options::default()).unwrap();
+    let before = v.reserved();
+    let Some(Output::Piece(r)) = v.poll() else {
+        panic!("no request")
+    };
+    assert!(
+        r.path.ends_with("?format=car&dag-scope=entity"),
+        "{}",
+        r.path
+    );
+    let held = r.path.capacity()
+        + r.headers.capacity() * std::mem::size_of::<(String, String)>()
+        + r.headers
+            .iter()
+            .map(|(n, v)| n.capacity() + v.capacity())
+            .sum::<usize>();
+    assert!(held > MAX_PATH, "{held}");
+    assert_eq!(before - v.reserved(), held);
+}
+
+/// The flood's CAR at budgets that run out while its sections pile up,
+/// their jobs held back: one push into the reader completes up to 64 of
+/// them, and room for one of a push's sections, with its job's structures,
+/// can run out after the push's own check passed. The 64 budgets, 517
+/// bytes apart, put that point at each place in a push. There the section
+/// can't wait out of the reader, so the CAR gives way, and raw blocks
+/// answer within the budget.
+#[test]
+fn a_section_without_room_gives_the_car_way() {
+    let _one = ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
+    let (root, world) = flood();
+    for i in 0..64 {
+        let budget = (3 << 20) + i * 517;
+        let case = format!("CAR of 400,000 empty sections at {budget}");
+        let (got, m) = capped(&case, &plan(&root), budget, |v| {
+            drive_paged(v, &world, true, MAX_FRAME, true, Poll::Each)
+        });
+        assert_eq!(
+            (got.0, got.1, got.2.as_str()),
+            (Some(200), 200, "end"),
+            "{case}: {got:?}"
+        );
+        assert!(m.reserved <= budget, "{case}: {m:?}");
+    }
 }

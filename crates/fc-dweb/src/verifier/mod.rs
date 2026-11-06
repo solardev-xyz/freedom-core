@@ -23,7 +23,9 @@
 //!   2 MiB for Swarm, 8 MiB for IPFS. Everything it holds counts against
 //!   its budget ([`budget`]), the grant less a fixed allowance for the few
 //!   bounded allocations the count doesn't follow ([`SWARM_ALLOWANCE`],
-//!   [`IPFS_ALLOWANCE`]), and is reserved before it is allocated. A walk
+//!   [`IPFS_ALLOWANCE`], the same), and is reserved before it is allocated:
+//!   each walk holds its memory only as values under their charges
+//!   ([`charged`]). A walk
 //!   that can't fit and has no other way on ends with the budget's own text
 //!   ([`MEMORY`]). A streamed piece's 128 KiB window is reserved when the
 //!   piece is asked for, held whole while the piece is open, and is the
@@ -53,6 +55,7 @@ use charged::Charged;
 
 use crate::plan::{Backend, ContentTrust, ErrorPlan, Node, ResponseOp, Root, Trust, Verify};
 use crate::validate::Refusal;
+use crate::verify::PastBound;
 
 /// A Swarm request's grant (0009, Bounds): what admission reserves for it,
 /// and the most it allocates. Its largest holding is a manifest lookup, the
@@ -72,12 +75,12 @@ pub const IPFS_GRANT: usize = 8 << 20;
 /// manifest inside the limit needs 2,002,470 bytes, so it can be at most
 /// about 94 KiB.
 pub const SWARM_ALLOWANCE: usize = 64 << 10;
-/// What an IPFS request allocates beside what its budget counts: Swarm's
-/// allowance, and the values the IPFS walk doesn't charge yet (its error
-/// page, the head's headers, the ETag and type strings, and an IPNS
-/// record's value while it waits for the floor, at most
-/// `fc_ipfs::ipns::MAX_RECORD`), until its walk is charged as Swarm's is.
-pub const IPFS_ALLOWANCE: usize = 128 << 10;
+/// What an IPFS request allocates beside what its budget counts: the same
+/// as a Swarm request, as its walk charges every value it keeps as the
+/// Swarm walk does (its pages, heads, tags and types, and an IPNS record's
+/// value while it waits for the floor among them). Measured in the same
+/// tests, which fail past it.
+pub const IPFS_ALLOWANCE: usize = SWARM_ALLOWANCE;
 /// A Swarm request's budget: its grant less its allowance.
 pub const SWARM_BUDGET: usize = SWARM_GRANT - SWARM_ALLOWANCE;
 /// An IPFS request's budget: its grant less its allowance.
@@ -114,6 +117,15 @@ pub const MAX_FRAME: usize = 64 << 10;
 pub const MAX_WHOLE: usize = 64 << 10;
 /// Chunk requests a Swarm walk has open at once (0009, Leaves).
 pub const MAX_CHUNK_PIECES: usize = 4;
+/// The most bytes a verify plan's path holds, with a Swarm plan's query,
+/// and each of its headers' values (0009, Bounds). An IPFS or IPNS plan's
+/// query isn't counted: its walk never reads it. `dweb.open` plans a 414
+/// or a 431 past it, and a longer plan is refused before anything is made
+/// of it: the plan's check copies the path a few times, uncounted, before
+/// the request's machine exists, and the machine keeps a Swarm request's
+/// path, query and range and an IPFS request's range and tag within the
+/// grant's allowance.
+pub const MAX_PATH: usize = 8 << 10;
 
 /// The request's method, as main read it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -450,6 +462,9 @@ struct Piece<T> {
     /// Main has taken its request ([`Output::Piece`]): only then may main
     /// answer it.
     asked: bool,
+    /// What its request holds while it waits for main, when it is counted
+    /// ([`Core::fetch_charged`]).
+    request: usize,
 }
 
 /// A segment of verified body: sent as main's credit allows, and kept,
@@ -572,6 +587,9 @@ pub(crate) struct Core<T> {
     /// The head's headers, once the walk made them within its room, until
     /// main takes the head ([`Core::head_charged`]).
     head_held: usize,
+    /// The pieces' requests counted while they wait for main
+    /// ([`Core::fetch_charged`]).
+    asking: usize,
     queue: VecDeque<Queued>,
     /// Body not yet sent.
     queued: usize,
@@ -619,6 +637,7 @@ impl<T: Copy> Core<T> {
             walk_held: charged::Held::default(),
             peak: 0,
             head_held: 0,
+            asking: 0,
             queue: VecDeque::new(),
             queued: 0,
             queue_len: 0,
@@ -653,6 +672,7 @@ impl<T: Copy> Core<T> {
             + self.walk_held.get()
             + self.queue_len
             + self.head_held
+            + self.asking
     }
 
     /// A streamed piece that ended has had its last bytes used or dropped:
@@ -718,8 +738,8 @@ impl<T: Copy> Core<T> {
         self.released();
     }
 
-    /// After an input, for a walk whose memory is all [`Charged`] (the
-    /// Swarm walk's): what it holds is what its live values are charged
+    /// After an input (each walk's memory is all [`Charged`]): what the
+    /// walk holds is what its live values are charged
     /// ([`charged::Held::audit`]).
     pub(crate) fn audit_charged(&mut self) {
         self.walk_held.audit();
@@ -734,14 +754,53 @@ impl<T: Copy> Core<T> {
         headers: Vec<(String, String)>,
         ask: Ask,
     ) -> Option<PieceId> {
-        let room = match ask {
-            Ask::Whole(max) => max,
-            Ask::Stream(_) => STREAM_WINDOW,
-            Ask::Stashed => STREAM_WINDOW + MAX_FRAME,
-        };
-        if !self.fits(room) || self.ended() {
+        if !self.fits(piece_room(ask)) || self.ended() {
             return None;
         }
+        let id = self.ask(tag, path, headers, ask, 0);
+        self.grew();
+        Some(id)
+    }
+
+    /// [`Core::fetch`] for a request whose path the walk made within its
+    /// charge: the request counts what its path and headers hold until main
+    /// takes it ([`Verifier::poll`]), and the walk's charge goes after the
+    /// request has the path. `None`, the path gone and then its charge, when
+    /// the piece's room and the headers don't fit.
+    pub(crate) fn fetch_charged(
+        &mut self,
+        tag: T,
+        path: Charged<String>,
+        headers: Vec<(String, String)>,
+        ask: Ask,
+    ) -> Option<PieceId> {
+        let held = headers_cost(&headers);
+        if !self.fits(piece_room(ask).saturating_add(held)) || self.ended() {
+            drop(headers);
+            path.release(self);
+            return None;
+        }
+        let mut id = None;
+        path.hand_over(self, |core, path| {
+            let cost = held + path.capacity();
+            core.asking += cost;
+            id = Some(core.ask(tag, path, headers, ask, cost));
+        });
+        self.grew();
+        id
+    }
+
+    /// The piece and its request for main, its room within the request's
+    /// memory; `request` is what the request holds, counted until main
+    /// takes it.
+    fn ask(
+        &mut self,
+        tag: T,
+        path: String,
+        headers: Vec<(String, String)>,
+        ask: Ask,
+        request: usize,
+    ) -> PieceId {
         let id = PieceId(self.next_piece);
         self.next_piece += 1;
         let (kind, stream, max_bytes) = match ask {
@@ -769,6 +828,7 @@ impl<T: Copy> Core<T> {
                 kind,
                 cancelled: false,
                 asked: false,
+                request,
             },
         );
         self.outputs.push_back(Output::Piece(PieceRequest {
@@ -778,8 +838,7 @@ impl<T: Copy> Core<T> {
             stream,
             max_bytes,
         }));
-        self.grew();
-        Some(id)
+        id
     }
 
     /// The walk no longer needs the piece.
@@ -831,13 +890,7 @@ impl<T: Copy> Core<T> {
         });
     }
 
-    pub(crate) fn hash(&mut self, tag: T, work: jobs::Work) {
-        let size = work.size();
-        self.queue_job(tag, work);
-        self.unhold(size);
-    }
-
-    /// [`Core::hash`] for charged work: the job has it, counted as its
+    /// Work for the hashing pool, charged: the job has it, counted as its
     /// size, before the walk's charge goes.
     pub(crate) fn hash_charged(&mut self, tag: T, work: Charged<jobs::Work>) {
         work.hand_over(self, |core, work| core.queue_job(tag, work));
@@ -865,12 +918,7 @@ impl<T: Copy> Core<T> {
     }
 
     /// Sends the head. For a HEAD, or a GET with no body, nothing follows.
-    pub(crate) fn head(
-        &mut self,
-        status: u16,
-        headers: Vec<(String, String)>,
-        content: ContentTrust,
-    ) {
+    fn head(&mut self, status: u16, headers: Vec<(String, String)>, content: ContentTrust) {
         if self.phase != Phase::Walking {
             return;
         }
@@ -888,17 +936,9 @@ impl<T: Copy> Core<T> {
         }
     }
 
-    /// Verified bytes for the body, from the walk's holding; `from` is the
-    /// streamed piece they came from.
-    pub(crate) fn body(&mut self, bytes: Vec<u8>, from: Option<PieceId>) {
-        let n = bytes.len();
-        self.enqueue(bytes, from);
-        self.unhold(n);
-        self.pump();
-    }
-
-    /// [`Core::body`] for charged bytes: the queue has them, shrunk to
-    /// their length, which it counts, before the walk's charge goes.
+    /// Verified bytes for the body, charged; `from` is the streamed piece
+    /// they came from. The queue has them, shrunk to their length, which
+    /// it counts, before the walk's charge goes.
     pub(crate) fn body_charged(&mut self, bytes: Charged<Vec<u8>>, from: Option<PieceId>) {
         bytes.hand_over(self, |core, mut bytes| {
             bytes.shrink_to_fit();
@@ -1065,6 +1105,7 @@ impl<T: Copy> Core<T> {
                 Output::Piece(r) => {
                     if let Some(p) = self.pieces.get_mut(&r.id) {
                         p.asked = true;
+                        self.asking -= std::mem::take(&mut p.request);
                     }
                     break Some(Output::Piece(r));
                 }
@@ -1180,9 +1221,9 @@ impl<T: Copy> Core<T> {
     }
 }
 
-/// The walk's raw hold and release, by count. The machine and the IPFS
-/// walk use them; the Swarm walk doesn't import them, and holds its memory
-/// only as [`Charged`] values. With the probe, a release that leaves a live
+/// The walk's raw hold and release, by count. The machine uses them, for
+/// what it takes in for the walk; neither walk imports them, and each holds
+/// its memory only as [`Charged`] values. With the probe, a release that leaves a live
 /// `Charged` value uncovered is a fault at that release
 /// ([`charged::Held::take`]).
 pub(crate) trait Holding {
@@ -1207,6 +1248,16 @@ impl<T: Copy> Holding for Core<T> {
         let running = !self.ended();
         self.walk_held.take(n, running);
         self.released();
+    }
+}
+
+/// A piece's room in the request's memory: a whole piece's bound, or a
+/// stream's window, and for a stashed stream a frame beside it.
+fn piece_room(ask: Ask) -> usize {
+    match ask {
+        Ask::Whole(max) => max,
+        Ask::Stream(_) => STREAM_WINDOW,
+        Ask::Stashed => STREAM_WINDOW + MAX_FRAME,
     }
 }
 
@@ -1655,7 +1706,7 @@ impl Verifier {
     /// the `memory-probe` feature, memory it still had once its charge had
     /// gone counts too, at every release and as its holding goes at the
     /// end, and so does any difference, after each input, between what the
-    /// Swarm walk holds and what its live values are charged.
+    /// walk holds and what its live values are charged.
     pub fn over_released(&self) -> usize {
         match &self.inner {
             Inner::Swarm(m) => m.core.walk_held.faults(),
@@ -1754,6 +1805,14 @@ fn check_plan(plan: &Verify) -> Result<(), Refusal> {
     if !crate::verify::root_in_form(&plan.root) {
         return Err(Refusal::Root);
     }
+    // Lengths first, before any copy is made: the bound `dweb.open` plans
+    // by, so only a plan it didn't make passes it.
+    match crate::verify::past_bound(plan) {
+        Some(PastBound::Path) => return Err(Refusal::Path),
+        Some(PastBound::Query) => return Err(Refusal::Query),
+        Some(PastBound::Header) => return Err(Refusal::Header),
+        None => {}
+    }
     let path = &plan.path;
     if !(path.is_empty() || path.starts_with('/')) || path.contains(['?', '#']) {
         return Err(Refusal::Path);
@@ -1826,6 +1885,35 @@ mod tests {
         core.flush_credit();
         core.cancel_piece(id);
         assert!(matches!(core.take_output(), Some(Output::CancelPiece(p)) if p == id));
+        assert!(core.take_output().is_none());
+    }
+
+    /// A request whose path the walk made within its charge counts the
+    /// path and its headers until main takes it, the walk's charge gone
+    /// once the request has the path; one that doesn't fit releases the
+    /// path's charge after the path.
+    #[test]
+    fn a_requests_path_is_counted_until_main_takes_it() {
+        let mut core: Core<()> = Core::new(1, Node::Ipfs, false, None, IPFS_BUDGET);
+        let path = Charged::make(&mut core, MAX_PATH, || "a".repeat(MAX_PATH)).unwrap();
+        let headers = vec![("accept".to_owned(), "x".repeat(60))];
+        let held = headers_cost(&headers);
+        let id = core.fetch_charged((), path, headers, Ask::Stashed).unwrap();
+        assert_eq!(core.walk_held.get(), 0);
+        let room = STREAM_WINDOW + MAX_FRAME;
+        assert_eq!(core.reserved(), room + MAX_PATH + held);
+        assert_eq!(core.peak, room + MAX_PATH + held);
+        assert!(matches!(core.take_output(), Some(Output::Piece(r)) if r.id == id));
+        assert_eq!(core.reserved(), room);
+        // Room for the path, but not for the piece beside it.
+        let mut core: Core<()> = Core::new(1, Node::Ipfs, false, None, room + MAX_PATH);
+        let path = Charged::make(&mut core, MAX_PATH, || "a".repeat(MAX_PATH)).unwrap();
+        let headers = vec![("accept".to_owned(), "x".to_owned())];
+        assert!(
+            core.fetch_charged((), path, headers, Ask::Stashed)
+                .is_none()
+        );
+        assert_eq!((core.reserved(), core.walk_held.faults()), (0, 0));
         assert!(core.take_output().is_none());
     }
 

@@ -22,8 +22,10 @@
 //! - **Verify plans** (design 0009): with verification on, a fetch for an
 //!   external backend becomes a [`Verify`] plan, unless its content can't
 //!   be verified (an encrypted Swarm reference, a DNSLink name, another
-//!   inlined key type), when it stays a fetch, or, in strict mode, a 403.
-//!   `vectors/dweb-verify-plans.json` is the contract.
+//!   inlined key type), when it stays a fetch, or, in strict mode, a 403;
+//!   or a 414 or 431 when it is longer than the verifier takes
+//!   ([`verifier::MAX_PATH`]). `vectors/dweb-verify-plans.json` is the
+//!   contract.
 //! - **Validation** ([`validate_plan`]): what main checks before it dials.
 //!   It has no reference; its vectors are the design's.
 //!
@@ -92,6 +94,7 @@ pub use response::{
 pub use validate::{ERROR_STATUSES, MAX_MESSAGE_UNITS, PlanRequest, Refusal, validate_plan};
 pub use verify::{
     NameKind, STRICT_DNSLINK, STRICT_ENCRYPTED, STRICT_KEY, STRICT_MESSAGES, STRICT_OFF,
-    STRICT_STATUS, STRICT_UNSUPPORTED, VERIFY_HEADERS_ANT, VERIFY_HEADERS_IPFS, canonical_cid,
+    STRICT_STATUS, STRICT_UNSUPPORTED, VERIFY_HEADER_STATUS, VERIFY_HEADER_TOO_LARGE,
+    VERIFY_HEADERS_ANT, VERIFY_HEADERS_IPFS, VERIFY_URL_STATUS, VERIFY_URL_TOO_LONG, canonical_cid,
     ipns_name_kind,
 };

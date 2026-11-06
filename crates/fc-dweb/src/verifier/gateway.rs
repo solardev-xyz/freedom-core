@@ -49,10 +49,26 @@ pub(crate) fn encode_path<S: AsRef<str>>(segments: &[S]) -> String {
 }
 
 fn encode_segment(s: &str) -> String {
-    const DIGITS: &[u8; 16] = b"0123456789ABCDEF";
     let mut out = String::with_capacity(s.len());
+    push_encoded(&mut out, s);
+    out
+}
+
+/// A byte [`encode_path`] writes as itself.
+fn unreserved(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || matches!(b, b'-' | b'.' | b'_' | b'~')
+}
+
+/// The length of a segment as [`encode_path`] writes it.
+pub(crate) fn encoded_len(s: &str) -> usize {
+    s.bytes().map(|b| if unreserved(b) { 1 } else { 3 }).sum()
+}
+
+/// A segment as [`encode_path`] writes it, appended to `out` in place.
+pub(crate) fn push_encoded(out: &mut String, s: &str) {
+    const DIGITS: &[u8; 16] = b"0123456789ABCDEF";
     for &b in s.as_bytes() {
-        if b.is_ascii_alphanumeric() || matches!(b, b'-' | b'.' | b'_' | b'~') {
+        if unreserved(b) {
             out.push(char::from(b));
         } else {
             out.push('%');
@@ -60,7 +76,6 @@ fn encode_segment(s: &str) -> String {
             out.push(char::from(DIGITS[usize::from(b & 15)]));
         }
     }
-    out
 }
 
 /// `file_etag`: `"fi1:<root>:<path, or .>:<length>"`.

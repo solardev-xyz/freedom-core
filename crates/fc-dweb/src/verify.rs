@@ -10,6 +10,7 @@ use crate::plan::{
     Backend, ContentTrust, ErrorPlan, Fetch, Node, Plan, ResponseOp, Root, Trust, Verification,
     Verify,
 };
+use crate::verifier::MAX_PATH;
 
 /// Strict mode's message when the backend's verification is off.
 pub const STRICT_OFF: &str =
@@ -41,6 +42,60 @@ pub const STRICT_STATUS: u16 = 403;
 /// The request headers the verifier honours: the bundled node's.
 pub const VERIFY_HEADERS_ANT: [&str; 1] = ["range"];
 pub const VERIFY_HEADERS_IPFS: [&str; 2] = ["range", "if-none-match"];
+
+/// The status for a request whose path, or a Swarm request's path and
+/// query, passes the verifier's bound ([`MAX_PATH`]).
+pub const VERIFY_URL_STATUS: u16 = 414;
+/// Its message.
+pub const VERIFY_URL_TOO_LONG: &str = "request URL too long to verify";
+/// The status for a request header the verifier keeps whose value passes
+/// the verifier's bound ([`MAX_PATH`]).
+pub const VERIFY_HEADER_STATUS: u16 = 431;
+/// Its message.
+pub const VERIFY_HEADER_TOO_LARGE: &str = "request header too large to verify";
+
+/// What of a verify plan passes the verifier's bound.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PastBound {
+    /// The path below the root.
+    Path,
+    /// A Swarm plan's path and query together.
+    Query,
+    /// A header's value.
+    Header,
+}
+
+impl PastBound {
+    /// The error plan `dweb.open` answers with in place of the verify plan.
+    fn error(self) -> ErrorPlan {
+        match self {
+            Self::Path | Self::Query => ErrorPlan::new(VERIFY_URL_STATUS, VERIFY_URL_TOO_LONG),
+            Self::Header => ErrorPlan::new(VERIFY_HEADER_STATUS, VERIFY_HEADER_TOO_LARGE),
+        }
+    }
+}
+
+/// The verifier's bound on what it takes from a plan (0009, Bounds), the
+/// one `dweb.open` plans by and `dweb.verify` checks again, so a plan
+/// `dweb.open` makes is never one `dweb.verify` refuses for its length:
+/// the path below the root, at most [`MAX_PATH`] bytes; a Swarm plan's
+/// path and query together, since the walk keeps the query for Ant's
+/// directory redirect; and each header's value. An IPFS or IPNS walk
+/// never reads the query, so it isn't counted: it is the URL's, there for
+/// main to tie the plan to its request, and 0006's request bound bounds
+/// it. Lengths only, so nothing is copied to judge them.
+pub(crate) fn past_bound(plan: &Verify) -> Option<PastBound> {
+    if plan.path.len() > MAX_PATH {
+        return Some(PastBound::Path);
+    }
+    if matches!(plan.root, Root::Swarm(_)) && plan.path.len() + plan.query.len() > MAX_PATH {
+        return Some(PastBound::Query);
+    }
+    if plan.headers.iter().any(|(_, v)| v.len() > MAX_PATH) {
+        return Some(PastBound::Header);
+    }
+    None
+}
 
 /// Why a request's content stays unverified.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -312,12 +367,19 @@ fn strict_error(cause: Unverified) -> Plan {
 /// What today's fetch plan for `backend` becomes (0009): a verify plan when
 /// its verification is on and the content can be verified, else the fetch
 /// as it is; or, in strict mode, a 403 where the content would be
-/// unverified. `small_text` is the request's: a GET navigation.
+/// unverified. A verify plan past the verifier's bound ([`past_bound`]) is
+/// a 414 or a 431 instead, strict mode or not, since it can't be verified
+/// at that length. `small_text` is the request's: a GET navigation.
 pub(crate) fn compose(fetch: Fetch, backend: Backend, small_text: bool) -> Plan {
     let strict = backend.strict();
     let refused = match backend.verification() {
         Verification::On => match derive(&fetch, small_text) {
-            Ok(verify) => return Plan::Verify(verify),
+            Ok(verify) => {
+                return match past_bound(&verify) {
+                    None => Plan::Verify(verify),
+                    Some(past) => Plan::Error(past.error()),
+                };
+            }
             Err(cause) => cause,
         },
         Verification::Unsupported => Unverified::Unsupported,
