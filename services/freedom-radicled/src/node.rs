@@ -47,8 +47,9 @@
 //!
 //! **Pooled work reaches the node through its lock** ([`Node::handle`]):
 //! 0008's shared lock on the node ("Pools and budgets"). Work takes it
-//! shared, as reads, the COB writes and `rad.remove_repo` do: libradicle's
-//! calls for them take `&self`. `rad.unseed` takes it exclusively, as
+//! shared, as reads, the COB writes, `rad.remove_repo` and the online
+//! repair's units ([`crate::repair`]) do: libradicle's calls for them take
+//! `&self`. `rad.unseed` takes it exclusively, as
 //! libradicle's `unseed_repo` takes `&mut self`, and so does the stop, to
 //! ask the node to stop; `seeders` comes with a later step. Work gets the
 //! node only while it runs, and lets go of it as its work returns.
@@ -105,10 +106,10 @@
 //! **The dirty marker is cleared only after a proven clean stop**
 //! ("Reconciliation"): `rad.shutdown` ended the connection; the pools'
 //! drain was complete before the node's stop, so every pool thread ended,
-//! and no write is queued or running; no write of this run passed its
-//! mutation start without a proven outcome ([`Pools::uncertain`]: this
-//! build has no online repair yet, so such a write's repository is
-//! repaired only at the next start); and the stop's `Shutdown` is
+//! and no write is queued or running; every write of this run that passed
+//! its mutation start without a proven outcome has had its repository
+//! repaired or quarantined online since ([`Pools::uncertain`],
+//! [`crate::repair`]); and the stop's `Shutdown` is
 //! `Asked::ThisCall`, `ThreadEnd::Stopped` and `HomeLock::Released`, within
 //! the time the drain left. So the node stopped because this stop asked
 //! it, it let go of its home, and heartwood's workers have finished their
@@ -157,8 +158,8 @@ type Shared = Arc<RwLock<libradicle::Embedded>>;
 struct Running {
     embedded: Shared,
     /// The host's half of the node's repository gate: quarantine's removal
-    /// opens a repository it removed through it, and the online repair (a
-    /// later step) opens and closes them.
+    /// opens a repository it removed through it, and the online repair
+    /// closes and opens them, through [`Handle`].
     repositories: RepoGate,
     /// NAT64 discovery, running while its lease is held: `direct` mode's,
     /// for the node's life (`rad.stats` reads it, a later step).
@@ -480,7 +481,7 @@ impl Node {
         drop(repositories);
         match decided {
             Ending::Clean if self.pools.uncertain() => log::info(
-                "the node stopped cleanly, but a write's outcome is unknown; the dirty marker stays",
+                "the node stopped cleanly, but a write's outcome is unknown, and its repository isn't repaired; the dirty marker stays",
                 json!({}),
             ),
             Ending::Clean => match marker::remove(home) {

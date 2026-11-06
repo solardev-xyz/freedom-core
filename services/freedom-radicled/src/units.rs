@@ -18,7 +18,7 @@
 //!   kind, and how long it has run.
 //!
 //! The same watch is reconciliation's at a start, and the online repair's
-//! while the node runs (a later step): the service holds it.
+//! while the node runs ([`crate::repair`]): the service holds it.
 
 use std::sync::Mutex;
 use std::time::{Duration, Instant};

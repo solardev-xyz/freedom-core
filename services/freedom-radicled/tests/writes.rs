@@ -290,10 +290,14 @@ fn past_its_start_a_cancel_or_the_deadline_is_outcome_unknown_and_the_write_comp
 
 /// Past the boundary, a libradicle error and a panic are each
 /// `outcome_unknown`, its text logged with the code. The write may be
-/// partial, so the marker stays after an otherwise clean stop, for the
-/// next start's repair.
+/// partial, so its repository is repaired online, one repair a write: the
+/// second write waits behind the first's repair. Once both are done, a
+/// clean stop clears the marker (src/repair.rs, tests/repair.rs). An
+/// unseed's unknown outcome is a policy's, which no repair checks: the
+/// marker stays after it, for the next start.
 #[test]
-fn past_its_start_an_error_or_a_panic_is_outcome_unknown_and_keeps_the_marker() {
+fn past_its_start_an_error_or_a_panic_is_outcome_unknown_and_its_repository_is_repaired() {
+    const DONE: &str = "an online repair is done";
     let dirs = Dirs::new();
     configure(&dirs.home, json!({}));
     let rid = fixture::repository(&dirs.home, &CREATOR, "failing");
@@ -311,25 +315,29 @@ fn past_its_start_an_error_or_a_panic_is_outcome_unknown_and_keeps_the_marker() 
         let reply = radicled.call("rad.write", json!({ "op": op, "args": args }));
         assert_eq!(code(&reply), "outcome_unknown", "{op}: {reply}");
     }
-    radicled.shutdown();
-    assert_eq!(radicled.exit_code(EXIT_TIMEOUT), Some(0));
-    let log = radicled.stderr();
+    assert!(radicled.logs_times(DONE, 2, Duration::from_secs(30)));
+    let (log, cleared) = stopped_cleanly(&mut radicled, &dirs.home);
+    assert!(cleared, "{log}");
     assert!(log.contains("a write failed past its start"), "{log}");
     assert!(!log.contains("Nowhere."), "{log}");
-    assert!(
-        log.contains("a write's outcome is unknown; the dirty marker stays"),
-        "{log}"
-    );
-    assert_eq!(fixture::marked(&dirs.home), Some(vec![NID.to_owned()]));
 
     let mut radicled = served(&dirs, &[("FREEDOM_RADICLED_TEST_HOLD_WRITE", "panic")]);
     let reply = radicled.call("rad.write", create(rid, "Panicked"));
     assert_eq!(code(&reply), "outcome_unknown", "{reply}");
-    radicled.shutdown();
-    assert_eq!(radicled.exit_code(EXIT_TIMEOUT), Some(0));
-    let log = radicled.stderr();
+    assert!(radicled.logs(DONE, Duration::from_secs(30)));
+    let (log, cleared) = stopped_cleanly(&mut radicled, &dirs.home);
+    assert!(cleared, "{log}");
+
+    let mut radicled = served(&dirs, &[("FREEDOM_RADICLED_TEST_HOLD_WRITE", "panic")]);
+    let reply = radicled.call("rad.unseed", json!({ "rid": rid.to_string() }));
+    assert_eq!(code(&reply), "outcome_unknown", "{reply}");
+    let (log, cleared) = stopped_cleanly(&mut radicled, &dirs.home);
+    assert!(!cleared, "{log}");
+    assert!(!log.contains("an online repair is queued"), "{log}");
     assert!(
-        log.contains("a write's outcome is unknown; the dirty marker stays"),
+        log.contains(
+            "a write's outcome is unknown, and its repository isn't repaired; the dirty marker stays"
+        ),
         "{log}"
     );
     assert_eq!(fixture::marked(&dirs.home), Some(vec![NID.to_owned()]));

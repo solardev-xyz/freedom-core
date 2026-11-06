@@ -43,6 +43,11 @@
 //!   `rad.remove_repo`), logging `test hook: the write has started`: with a
 //!   number, it holds it that many milliseconds whatever its token, as a
 //!   libradicle call that doesn't check it; with `panic`, it panics there.
+//! - `FREEDOM_RADICLED_TEST_HOLD_REPAIR=<ms>` holds each turn of an online
+//!   repair that many milliseconds, with the node held shared, just before
+//!   its unit, whatever the stop, as a slow unit holds the writer
+//!   ([`crate::repair`]). Each logs `test hook: a repair turn holds the
+//!   node`.
 //!
 //! **Hermetic by construction:** a build with the feature never reaches
 //! off this host, whatever a test asks of it.
@@ -192,6 +197,18 @@ pub fn at_write_start() {
         if let Ok(ms) = hold.parse() {
             std::thread::sleep(Duration::from_millis(ms));
         }
+    }
+}
+
+/// Before an online repair's unit, with the node held: holds it, if asked.
+pub fn hold_repair_turn() {
+    #[cfg(feature = "testhooks")]
+    if let Some(ms) = millis("FREEDOM_RADICLED_TEST_HOLD_REPAIR") {
+        fc_service::log::info(
+            "test hook: a repair turn holds the node",
+            serde_json::json!({}),
+        );
+        std::thread::sleep(Duration::from_millis(ms));
     }
 }
 
