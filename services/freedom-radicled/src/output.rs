@@ -11,8 +11,12 @@
 //! - **a reservation that doesn't fit waits,** inside its read's deadline
 //!   to the head ([`Until`]). It is granted once enough is released, and is
 //!   `deadline` at the deadline, or `cancelled` once its token is: main's
-//!   cancel, the deadline's (the pool's timer cancels it), the stop's. One
-//!   larger than the whole budget never fits, and is `too_large` at once.
+//!   cancel, the deadline's (the pool's timer cancels it), the stop's. The
+//!   deadline is looked at before each grant once it has waited, so bytes
+//!   released at or after it grant nothing; a reservation that fits at its
+//!   first look waits for nothing, and is granted even at its deadline (its
+//!   token, looked at first, ends the read's work past it). One larger
+//!   than the whole budget never fits, and is `too_large` at once.
 //!   Waiters take what fits as it is released, in no order: none keeps a
 //!   place for a larger one, which can wait to its deadline.
 //!
@@ -153,6 +157,10 @@ pub struct Budget {
     used: Mutex<u64>,
     /// Notified as bytes are released.
     released: Condvar,
+    /// The waits begun, each counted with the lock held: once a test sees
+    /// one and takes the lock, its reservation is waiting.
+    #[cfg(test)]
+    waits: std::sync::atomic::AtomicU64,
 }
 
 impl Budget {
@@ -162,6 +170,8 @@ impl Budget {
             total,
             used: Mutex::new(0),
             released: Condvar::new(),
+            #[cfg(test)]
+            waits: std::sync::atomic::AtomicU64::new(0),
         })
     }
 
@@ -181,7 +191,9 @@ impl Budget {
 
     /// Reserves `bytes`, waiting for them within `until` (see the module's
     /// doc): `too_large` at once if they are more than the whole budget,
-    /// `cancelled` once the token is, `deadline` at the deadline.
+    /// `cancelled` once the token is, `deadline` at the deadline. Once it
+    /// has waited, it is never granted at or after its deadline; only bytes
+    /// that fit at its first look are granted then.
     pub fn reserve(self: &Arc<Self>, bytes: u64, until: &Until) -> Result<Reservation, Refused> {
         if bytes > self.total {
             return Err(Refused::TooLarge {
@@ -190,21 +202,31 @@ impl Budget {
             });
         }
         let mut used = self.lock();
+        let mut waited = false;
         loop {
             if until.cancel.is_cancelled() {
                 return Err(Refused::Cancelled);
             }
-            if bytes <= self.total - *used {
+            let fits = bytes <= self.total - *used;
+            // Once it has waited, the deadline comes before a grant: what is
+            // released at or after it grants nothing. Only a reservation
+            // that fits at its first look is granted at its deadline: it
+            // waits for nothing.
+            let now = Instant::now();
+            if now >= until.deadline && (waited || !fits) {
+                return Err(Refused::Deadline);
+            }
+            if fits {
                 *used += bytes;
                 return Ok(Reservation {
                     budget: self.clone(),
                     bytes,
                 });
             }
-            let now = Instant::now();
-            if now >= until.deadline {
-                return Err(Refused::Deadline);
-            }
+            waited = true;
+            #[cfg(test)]
+            self.waits
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             let within = (until.deadline - now).min(POLL);
             used = match self.released.wait_timeout(used, within) {
                 Ok((used, _)) => used,

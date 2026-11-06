@@ -167,6 +167,61 @@ fn a_reservation_waits_until_enough_is_released() {
 }
 
 #[test]
+fn bytes_released_after_its_deadline_grant_a_waiting_reservation_nothing() {
+    let budget = Budget::new(10);
+    let mut held = budget.reserve(10, &within(0)).unwrap();
+    let until = within(1_000);
+    let deadline = until.deadline;
+    let waiter = {
+        let budget = budget.clone();
+        std::thread::spawn(move || budget.reserve(1, &until))
+    };
+    // A wait is counted with the lock held: once one is, and the lock is
+    // taken, the reservation is waiting.
+    let started = Instant::now();
+    while budget.waits.load(std::sync::atomic::Ordering::Relaxed) == 0 {
+        assert!(
+            started.elapsed() < Duration::from_secs(10),
+            "it never waited"
+        );
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    {
+        let mut used = budget.lock();
+        assert!(
+            Instant::now() < deadline,
+            "the lock came after the deadline"
+        );
+        // The budget held through the deadline, then all of it released,
+        // the lock held throughout: the waiter looks next after both.
+        std::thread::sleep(
+            (deadline + Duration::from_millis(50)).saturating_duration_since(Instant::now()),
+        );
+        *used -= held.bytes;
+        held.bytes = 0;
+    }
+    budget.released.notify_all();
+    assert_eq!(waiter.join().unwrap().unwrap_err(), Refused::Deadline);
+    assert_eq!(budget.used(), 0);
+}
+
+#[test]
+fn a_reservation_that_fits_at_its_first_look_is_granted_past_its_deadline() {
+    let budget = Budget::new(10);
+    let until = within(0);
+    std::thread::sleep(Duration::from_millis(5));
+    assert!(Instant::now() > until.deadline);
+    // It waits for nothing: granted.
+    let reservation = budget.reserve(10, &until).unwrap();
+    assert_eq!(budget.used(), 10);
+    // One that doesn't fit is `deadline` at once, without a wait.
+    assert_eq!(budget.reserve(1, &until).unwrap_err(), Refused::Deadline);
+    assert_eq!(budget.waits.load(std::sync::atomic::Ordering::Relaxed), 0);
+    drop(reservation);
+    assert_eq!(budget.used(), 0);
+}
+
+#[test]
 fn a_waiting_reservation_ends_at_its_tokens_cancel() {
     let budget = Budget::new(10);
     let _held = budget.reserve(10, &within(0)).unwrap();

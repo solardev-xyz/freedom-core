@@ -540,7 +540,7 @@ All bounds are process-wide. The service hosts one node.
   - **A blob** reserves twice its size while libgit2's buffer and the service's copy both exist, then once until its last byte is written.
   - **A JSON read** reserves both its materialized data and its serialized JSON ([JSON results](#json-results)).
   - **Per read:** a blob of at most 64 MiB (128 MiB reserved while loading); a JSON read of at most 64 MiB, of which at most 32 MiB is JSON.
-  - A read that can't reserve waits, inside its deadline to the head, and is `cancelled` once its token is. Waiters take what fits as it is released, in no order. A reservation larger than the whole budget is `too_large` at once.
+  - A read that can't reserve waits, inside its deadline to the head, and is `cancelled` once its token is. Once it has waited, it gets `deadline` at its deadline, even if bytes are released then: a wait is never granted at or after it. Waiters take what fits as it is released, in no order. A reservation larger than the whole budget is `too_large` at once.
 - **What the service can't bound:** heartwood's own buffers:
   - fetch streams of up to 500 MiB each;
   - its reactor queues and per-peer write buffers.
