@@ -32,12 +32,13 @@ fn numbers_are_written_as_javascript_writes_them() {
         (f64::INFINITY, "null"),
         (f64::NAN, "null"),
         // Halfway between two decimals of the fewest digits: the even one,
-        // where Rust's shortest form takes the one above.
-        (1658206780088562.25, "1658206780088562.2"),
-        (-1658206780088562.25, "-1658206780088562.2"),
-        (1658206780088562.75, "1658206780088562.8"),
-        (140737488355328.125, "140737488355328.12"),
-        (1.00000762939453125, "1.0000076293945312"),
+        // where Rust's shortest form takes the one above. (Each is built:
+        // its exact literal has more digits than a double holds.)
+        (1658206780088562.0 + 0.25, "1658206780088562.2"),
+        (-1658206780088562.0 - 0.25, "-1658206780088562.2"),
+        (1658206780088562.0 + 0.75, "1658206780088562.8"),
+        (2f64.powi(47) + 0.125, "140737488355328.12"),
+        (1.0 + 2f64.powi(-17), "1.0000076293945312"),
         // At a power of two the closest of those digits reads as the
         // double below: the next one up.
         (2f64.powi(-24), "5.960464477539063e-8"),
