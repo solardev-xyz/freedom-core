@@ -100,7 +100,11 @@ pub const KIND_CREDIT: u8 = 0x13;
 pub struct Core {
     pub child: Child,
     stdin: Option<ChildStdin>,
-    output: Receiver<Output>,
+    /// What the reader read, and when it finished reading it.
+    output: Receiver<(Output, Instant)>,
+    /// When the last frame returned came off the pipe, so a latency a
+    /// test measures leaves out the test's own backlog.
+    arrived: Instant,
     stderr: Option<std::thread::JoinHandle<String>>,
     /// Events seen while waiting for responses.
     pub events: Vec<Value>,
@@ -157,7 +161,7 @@ pub fn spawn_env(
         if lines {
             for line in BufReader::new(stdout).lines() {
                 let Ok(line) = line else { return };
-                if tx.send(Output::Line(line)).is_err() {
+                if tx.send((Output::Line(line), Instant::now())).is_err() {
                     return;
                 }
             }
@@ -179,7 +183,10 @@ pub fn spawn_env(
                 as usize)
                 .checked_sub(1)
             else {
-                let _ = tx.send(Output::Malformed(format!("frame header {header:?}")));
+                let _ = tx.send((
+                    Output::Malformed(format!("frame header {header:?}")),
+                    Instant::now(),
+                ));
                 return;
             };
             let mut payload = vec![0u8; len];
@@ -223,7 +230,7 @@ pub fn spawn_env(
             {
                 *gate.0.lock().unwrap() = true;
             }
-            if tx.send(output).is_err() {
+            if tx.send((output, Instant::now())).is_err() {
                 return;
             }
         }
@@ -239,6 +246,7 @@ pub fn spawn_env(
         output,
         stderr: Some(stderr),
         events: Vec::new(),
+        arrived: Instant::now(),
         paused,
         pause_on_begin,
     }
@@ -391,7 +399,7 @@ impl Core {
 
     /// The next frame, whatever its kind.
     pub fn recv_wire(&mut self) -> Wire {
-        match self.output.recv_timeout(READ_TIMEOUT) {
+        match self.next(READ_TIMEOUT) {
             Ok(Output::Frame(value)) => Wire::Message(value),
             Ok(Output::Wire(wire)) => wire,
             Ok(Output::Line(line)) => panic!("expected a frame, got line {line:?}"),
@@ -403,7 +411,7 @@ impl Core {
 
     /// The next frame, if one comes within `within`.
     pub fn recv_wire_within(&mut self, within: Duration) -> Option<Wire> {
-        match self.output.recv_timeout(within) {
+        match self.next(within) {
             Ok(Output::Frame(value)) => Some(Wire::Message(value)),
             Ok(Output::Wire(wire)) => Some(wire),
             Ok(Output::Line(line)) => panic!("expected a frame, got line {line:?}"),
@@ -411,6 +419,18 @@ impl Core {
             Err(mpsc::RecvTimeoutError::Timeout) => None,
             Err(mpsc::RecvTimeoutError::Disconnected) => self.closed("a frame"),
         }
+    }
+
+    /// The next output, noting when it was read.
+    fn next(&mut self, within: Duration) -> Result<Output, mpsc::RecvTimeoutError> {
+        let (output, arrived) = self.output.recv_timeout(within)?;
+        self.arrived = arrived;
+        Ok(output)
+    }
+
+    /// When the last frame returned was read off the core's stdout.
+    pub fn arrived(&self) -> Instant {
+        self.arrived
     }
 
     pub fn send(&mut self, message: &Value) {
@@ -424,7 +444,7 @@ impl Core {
     }
 
     pub fn recv(&mut self) -> Value {
-        match self.output.recv_timeout(READ_TIMEOUT) {
+        match self.next(READ_TIMEOUT) {
             Ok(Output::Frame(value)) => value,
             Ok(Output::Wire(wire)) => panic!("expected a whole message, got {wire:?}"),
             Ok(Output::Line(line)) => panic!("expected a frame, got line {line:?}"),
@@ -461,7 +481,7 @@ impl Core {
     pub fn rest(&mut self) -> Vec<Value> {
         let mut frames = Vec::new();
         loop {
-            match self.output.recv_timeout(READ_TIMEOUT) {
+            match self.next(READ_TIMEOUT) {
                 Ok(Output::Frame(value)) => frames.push(value),
                 Ok(Output::Wire(Wire::Credit)) => {}
                 Ok(Output::Wire(wire)) => panic!("expected a whole message, got {wire:?}"),
@@ -474,7 +494,7 @@ impl Core {
     }
 
     pub fn line(&mut self) -> String {
-        match self.output.recv_timeout(READ_TIMEOUT) {
+        match self.next(READ_TIMEOUT) {
             Ok(Output::Line(line)) => line,
             Ok(Output::Frame(_) | Output::Wire(_)) => panic!("expected a line"),
             Ok(Output::Malformed(what)) => panic!("malformed frame: {what}"),
