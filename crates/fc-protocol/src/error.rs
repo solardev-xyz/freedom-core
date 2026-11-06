@@ -72,6 +72,10 @@ pub enum ErrorCode {
     /// a step of the service's before it.
     StartFailed,
     // The Radicle service's methods (design 0008, Errors).
+    /// A read's libradicle error that today's message test takes for a
+    /// missing thing (`not found`, `does not exist`, `NotFound`, in any
+    /// case): its `message` is libradicle's (design 0008, Errors).
+    NotFound,
     /// A libradicle error before a write has started, its `message` naming
     /// what failed.
     Failed,
@@ -86,8 +90,9 @@ pub enum ErrorCode {
     /// without a vault can't publish (design 0008, "Profiles without a
     /// vault").
     NeedsVault,
-    /// A write to a quarantined repository; `data` holds its `kind` and
-    /// `step` (design 0008, "The escape").
+    /// A write to a quarantined repository, or a read of one: a COB read,
+    /// or any read for a `namespace` quarantine; `data` holds its `kind`
+    /// and `step` (design 0008, "The escape").
     Quarantined,
 }
 
@@ -184,11 +189,13 @@ mod tests {
 
     #[test]
     fn radicle_method_codes_on_the_wire() {
-        // Design 0008, Errors, "The escape" and "Writes": a libradicle
-        // error, a removal whose `qid` no record has, a write past its
-        // start that isn't proven, a COB write under a throwaway key, and a
-        // write to a quarantined repository.
+        // Design 0008, Errors, "The escape" and "Writes": a read's
+        // libradicle error for a missing thing, any other libradicle error,
+        // a removal whose `qid` no record has, a write past its start that
+        // isn't proven, a COB write under a throwaway key, and a write to a
+        // quarantined repository.
         for (code, wire) in [
+            (ErrorCode::NotFound, "not_found"),
             (ErrorCode::Failed, "failed"),
             (ErrorCode::NotQuarantined, "not_quarantined"),
             (ErrorCode::OutcomeUnknown, "outcome_unknown"),

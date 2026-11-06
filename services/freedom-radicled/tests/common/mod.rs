@@ -15,7 +15,7 @@
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic, dead_code)]
 
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::PathBuf;
 use std::process::{Child, ChildStdin, Command, Stdio};
@@ -92,8 +92,13 @@ pub struct Radicled {
     stderr: Option<std::thread::JoinHandle<String>>,
     /// stderr so far, as its reader has it.
     log: std::sync::Arc<std::sync::Mutex<String>>,
+    /// Each stream's data so far, in order: its frames come as messages
+    /// with their lengths alone ([`stream_frame`]).
+    bodies: Bodies,
     next_id: u64,
 }
+
+type Bodies = std::sync::Arc<std::sync::Mutex<HashMap<u64, Vec<u8>>>>;
 
 impl Drop for Radicled {
     fn drop(&mut self) {
@@ -135,6 +140,8 @@ impl Radicled {
         let mut stdout = child.stdout.take().unwrap();
         let stderr = child.stderr.take().unwrap();
         let (tx, frames) = mpsc::channel();
+        let bodies: Bodies = Default::default();
+        let data = bodies.clone();
         std::thread::spawn(move || {
             loop {
                 let mut header = [0u8; 5];
@@ -146,12 +153,12 @@ impl Radicled {
                 if stdout.read_exact(&mut payload).is_err() {
                     return;
                 }
-                let message = if header[4] == 1 {
-                    serde_json::from_slice(&payload).unwrap_or_else(
+                let message = match header[4] {
+                    1 => serde_json::from_slice(&payload).unwrap_or_else(
                         |_| json!({ "malformed": String::from_utf8_lossy(&payload) }),
-                    )
-                } else {
-                    json!({ "frame_kind": header[4] })
+                    ),
+                    2..=4 => stream_frame(header[4], &payload, &data),
+                    kind => json!({ "frame_kind": kind }),
                 };
                 if tx.send(message).is_err() {
                     return;
@@ -179,6 +186,7 @@ impl Radicled {
             pending: VecDeque::new(),
             stderr: Some(stderr),
             log,
+            bodies,
             next_id: 1,
         }
     }
@@ -239,6 +247,120 @@ impl Radicled {
             self.pending.push_back(message);
         }
         seen
+    }
+
+    /// Main's cancel of request `id`.
+    pub fn cancel(&mut self, id: u64) {
+        self.send(&json!({ "type": "cancel", "id": id }));
+    }
+
+    /// Returns `bytes` of stream `id`'s window.
+    pub fn credit(&mut self, id: u64, bytes: u32) {
+        let frame = fc_protocol::stream::credit_frame(id, bytes).unwrap();
+        let stdin = self.stdin.as_mut().expect("stdin is closed");
+        stdin.write_all(&frame).unwrap();
+        stdin.flush().unwrap();
+    }
+
+    /// The next frame of stream `id`; other messages wait.
+    pub fn stream(&mut self, id: u64) -> Value {
+        if let Some(at) = self.pending.iter().position(|m| m["stream_id"] == id) {
+            return self.pending.remove(at).unwrap();
+        }
+        loop {
+            let message = match self.frames.recv_timeout(READ_TIMEOUT) {
+                Ok(message) => message,
+                Err(e) => panic!("no frame of stream {id} from freedom-radicled: {e}"),
+            };
+            if message["stream_id"] == id {
+                return message;
+            }
+            self.pending.push_back(message);
+        }
+    }
+
+    /// Whether a frame of stream `id`, or a reply to `id`, arrives within
+    /// `within`. Either stays for [`Radicled::reply`] or
+    /// [`Radicled::stream`].
+    pub fn any_within(&mut self, id: u64, within: Duration) -> bool {
+        let ours = |m: &Value| m["stream_id"] == id || m["id"] == id;
+        if self.pending.iter().any(ours) {
+            return true;
+        }
+        let deadline = Instant::now() + within;
+        loop {
+            let left = deadline.saturating_duration_since(Instant::now());
+            match self.frames.recv_timeout(left) {
+                Ok(message) => {
+                    let found = ours(&message);
+                    self.pending.push_back(message);
+                    if found {
+                        return true;
+                    }
+                }
+                Err(_) => return false,
+            }
+        }
+    }
+
+    /// Stream `id`'s body to its terminal frame, returning each data
+    /// frame's bytes as credit as main's consumer does: its bytes, and the
+    /// terminal frame.
+    pub fn body(&mut self, id: u64) -> (Vec<u8>, Value) {
+        loop {
+            let frame = self.stream(id);
+            match frame["stream"].as_str() {
+                Some("data") => {
+                    let len = frame["len"].as_u64().unwrap();
+                    self.credit(id, u32::try_from(len).unwrap());
+                }
+                _ => {
+                    let bytes = self.bodies.lock().unwrap().remove(&id).unwrap_or_default();
+                    return (bytes, frame);
+                }
+            }
+        }
+    }
+
+    /// The data of stream `id` received so far, taken.
+    pub fn taken(&mut self, id: u64) -> Vec<u8> {
+        self.bodies.lock().unwrap().remove(&id).unwrap_or_default()
+    }
+
+    /// Reads stream `id`'s data frames, without credit, until `bytes` of it
+    /// have come: a window's worth, say.
+    pub fn uncredited(&mut self, id: u64, bytes: u64) {
+        let mut came = 0;
+        while came < bytes {
+            let frame = self.stream(id);
+            assert_eq!(frame["stream"], "data", "{frame}");
+            came += frame["len"].as_u64().unwrap();
+        }
+        assert_eq!(came, bytes);
+    }
+
+    /// `rad.read { op, args }`: its body, if its head came, after checking
+    /// the head and that the stream ended; or its error reply.
+    pub fn read(&mut self, op: &str, args: Value) -> Result<Vec<u8>, Value> {
+        let id = self.request("rad.read", json!({ "op": op, "args": args }));
+        self.read_reply(id)
+    }
+
+    /// [`Radicled::read`]'s answer for request `id`.
+    pub fn read_reply(&mut self, id: u64) -> Result<Vec<u8>, Value> {
+        let head = self.reply(id);
+        if head.get("error").is_some() {
+            return Err(head);
+        }
+        assert_eq!(head["result"]["content_type"], "application/json", "{head}");
+        let (bytes, end) = self.body(id);
+        assert_eq!(end["stream"], "end", "{end}");
+        assert_eq!(
+            head["result"]["bytes"].as_u64(),
+            Some(bytes.len() as u64),
+            "{head}"
+        );
+        Ok(bytes)
     }
 
     /// Sends a request and returns its reply.
@@ -369,6 +491,28 @@ impl HoldLock {
 
     pub fn exit_code(&mut self, timeout: Duration) -> Option<i32> {
         wait(&mut self.child, timeout)
+    }
+}
+
+/// A stream frame as a message: `{ stream, stream_id, … }`, a data frame's
+/// length (its bytes go to `bodies`), and an abort's code and message.
+fn stream_frame(kind: u8, payload: &[u8], bodies: &Bodies) -> Value {
+    use fc_protocol::stream::StreamFrame;
+    match StreamFrame::decode(kind, payload) {
+        Ok(StreamFrame::Data { id, bytes }) => {
+            bodies
+                .lock()
+                .unwrap()
+                .entry(id)
+                .or_default()
+                .extend_from_slice(bytes);
+            json!({ "stream": "data", "stream_id": id, "len": bytes.len() })
+        }
+        Ok(StreamFrame::End { id }) => json!({ "stream": "end", "stream_id": id }),
+        Ok(StreamFrame::Abort { id, abort }) => json!({ "stream": "abort", "stream_id": id,
+            "code": abort.code.as_str(), "message": abort.message }),
+        Ok(other) => json!({ "unexpected_frame": format!("{other:?}") }),
+        Err(e) => json!({ "unexpected_kind": kind, "error": e.category() }),
     }
 }
 
