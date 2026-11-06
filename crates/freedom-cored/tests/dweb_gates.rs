@@ -60,6 +60,14 @@ const WAITING: usize = 256;
 const SWARM_AT_ONCE: usize = 50;
 const IPFS_AT_ONCE: usize = 12;
 const GRANT_WAIT: Duration = Duration::from_secs(10);
+/// The dweb writer's cap on queued body bytes (`dweb::thread`), and the
+/// least a push takes when the cap would cut it (`fc_protocol::stream`).
+const WRITER_DATA_CAP: usize = 8 * MIB;
+#[cfg(feature = "testhooks")]
+const SMALL_FRAME: usize = 4 << 10;
+/// The file the dweb thread writes its writer's high-water mark to.
+#[cfg(feature = "testhooks")]
+const WRITER_MARKER: &str = "FREEDOM_CORED_TEST_DWEB_WRITER_MARKER";
 
 /// How far past its bound a timing may run in CI (a debug build on a
 /// shared runner). The figures are printed either way.
@@ -130,22 +138,59 @@ fn resident(_: &Main) -> Option<(u64, u64)> {
     None
 }
 
-/// Prints the core's peak resident memory against `base`, the resident
-/// memory after its hello, and checks the dweb load added at most the
-/// dweb thread's 128 MiB (0009, Bounds).
-fn memory_within_bounds(m: &Main, base: Option<(u64, u64)>, what: &str) {
-    let (Some((base, _)), Some((now, peak))) = (base, resident(m)) else {
+/// What the gates charge the dweb thread against, in KiB.
+#[derive(Debug, Clone, Copy)]
+struct Base {
+    /// An otherwise identical core's resident memory after a protocol-1
+    /// hello: the event loop starts the dweb thread and its hashing pool
+    /// only at protocol 2, so this is the core without them.
+    no_dweb: u64,
+    /// This core's after its protocol-2 hello, the dweb thread started.
+    hello: u64,
+}
+
+/// The resident memory before the dweb thread: a second core, started
+/// with `m`'s `env`, after a protocol-1 hello with fragments. Everything
+/// `m` holds above it is the dweb thread's, its start included.
+#[cfg(target_os = "linux")]
+fn baseline(m: &Main, env: &[(&str, &str)]) -> Option<Base> {
+    let hello = m.core.memory_kib().0;
+    let (_dir, data, locks) = common::dirs();
+    let mut v1 = common::spawn_env("serve", &data, &locks, &[], env);
+    let reply = v1.hello_fragments();
+    assert_eq!(reply["result"]["protocol"], 1, "{reply}");
+    let (no_dweb, _) = v1.memory_kib();
+    Some(Base { no_dweb, hello })
+}
+
+#[cfg(not(target_os = "linux"))]
+fn baseline(_: &Main, _: &[(&str, &str)]) -> Option<Base> {
+    None
+}
+
+/// Prints the core's peak resident memory against the core's without the
+/// dweb thread, and checks the dweb thread, from its start through the
+/// load, added at most its 128 MiB (0009, Bounds).
+fn memory_within_bounds(m: &Main, base: Option<Base>, what: &str) {
+    let (Some(Base { no_dweb, hello }), Some((now, peak))) = (base, resident(m)) else {
         eprintln!("[{what}] resident memory: not measured on this platform");
         return;
     };
     eprintln!(
-        "[{what}] resident memory: {base} KiB after the hello, {now} KiB now, peak {peak} KiB (+{} KiB)",
-        peak.saturating_sub(base)
+        "[{what}] resident memory: {no_dweb} KiB without the dweb thread (protocol 1), \
+         {hello} KiB after this core's hello, {now} KiB now, peak {peak} KiB (+{} KiB)",
+        peak.saturating_sub(no_dweb)
     );
     assert!(
-        peak <= base + 128 * 1024,
-        "[{what}] peak {peak} KiB over the hello's {base} KiB + 128 MiB"
+        peak <= no_dweb + 128 * 1024,
+        "[{what}] peak {peak} KiB over {no_dweb} KiB without the dweb thread + 128 MiB"
     );
+}
+
+/// The dweb writer's high-water mark of queued body bytes, from its
+/// marker file; `None` before it held any, or without `testhooks`.
+fn writer_most(marker: &std::path::Path) -> Option<usize> {
+    std::fs::read_to_string(marker).ok()?.trim().parse().ok()
 }
 
 /// Runs main for `d`.
@@ -252,7 +297,7 @@ fn admission(m: &mut Main, running: usize, offer: impl Fn() -> Value, what: &str
 fn admission_under_the_shipped_grants() {
     // Swarm: 50 grants of 2 MiB; then IPFS, 12 of 8 MiB.
     let mut m = Main::new(World::new().change("/chunks/", Answer::Hold));
-    let base = resident(&m);
+    let base = baseline(&m, &[]);
     admission(&mut m, SWARM_AT_ONCE, || swarm("/index.html"), "swarm");
     m.world = World::new().change("/ipfs/", Answer::Hold);
     m.asked.clear();
@@ -390,12 +435,30 @@ fn outstanding_pieces_stay_within_256() {
     );
 }
 
+/// The core with `env` and, with `testhooks`, the dweb writer's marker
+/// file in a directory of its own (kept as long as the core runs).
+fn with_writer_marker(
+    env: &[(&str, &str)],
+) -> (Main, Option<Base>, tempfile::TempDir, std::path::PathBuf) {
+    let dir = tempfile::tempdir().unwrap();
+    let marker = dir.path().join("writer-most");
+    #[cfg(feature = "testhooks")]
+    let env: Vec<(&str, &str)> = env
+        .iter()
+        .copied()
+        .chain([(WRITER_MARKER, marker.to_str().unwrap())])
+        .collect();
+    let m = Main::with_env(World::new(), &env);
+    let base = baseline(&m, &env);
+    (m, base, dir, marker)
+}
+
 /// The verified bodies main doesn't read: each gets its window and no
 /// more, the writer holds them while main's reads pause, and all of them
-/// come once it reads again.
+/// come once it reads again. The writer's queue never holds more than
+/// those windows, nor its cap.
 fn windows(env: &[(&str, &str)], bodies: usize, what: &str) {
-    let mut m = Main::with_env(World::new(), env);
-    let base = resident(&m);
+    let (mut m, base, _dir, marker) = with_writer_marker(env);
     m.credits_bodies = false;
     m.keep_bodies = false;
     let ids: Vec<u64> = (0..RUNNING).map(|_| m.verify(swarm_64m())).collect();
@@ -421,10 +484,19 @@ fn windows(env: &[(&str, &str)], bodies: usize, what: &str) {
         let want = if headed(&m.got[id]) { WINDOW } else { 0 };
         assert_eq!(m.got[id].len, want);
     }
+    let most = writer_most(&marker);
     eprintln!(
-        "[{what}] {bodies} bodies, uncredited: {total} bytes, {} KiB each; paused reader at {paused:?} KiB",
+        "[{what}] {bodies} bodies, uncredited: {total} bytes, {} KiB each; paused reader at {paused:?} KiB; \
+         the writer's queue held at most {most:?} bytes",
         WINDOW >> 10
     );
+    if cfg!(feature = "testhooks") {
+        let most = most.expect("the writer's high-water mark");
+        assert!(
+            most > 0 && most <= WRITER_DATA_CAP.min(bodies * WINDOW),
+            "{most}"
+        );
+    }
     memory_within_bounds(&m, base, what);
 }
 
@@ -440,11 +512,66 @@ fn the_writer_holds_64_windows() {
     windows(&[LIFTED], RUNNING, "windows, 64 bodies");
 }
 
+/// The writer's cap under pressure: 128 bodies (grants and running
+/// lifted) stream at full speed, main crediting each at once, then main
+/// stops reading. Their 16 MiB of windows press on the writer's 8 MiB:
+/// its queue fills to the cap, short of it by less than the 4 KiB a push
+/// waits for, and never past it. The rest waits in the bodies' own queues
+/// and comes once main reads again.
+#[cfg(feature = "testhooks")]
+#[test]
+fn the_writer_holds_at_most_8_mib() {
+    let bodies = 2 * RUNNING;
+    let (mut m, base, _dir, marker) =
+        with_writer_marker(&[LIFTED, ("FREEDOM_CORED_TEST_DWEB_RUNNING", "128")]);
+    m.keep_bodies = false;
+    let ids: Vec<u64> = (0..bodies).map(|_| m.verify(swarm_64m())).collect();
+    wait_for(&mut m, Duration::from_secs(60), "every body", |m| {
+        ids.iter().all(|id| m.got[id].len > 0)
+    });
+    run_for(&mut m, Duration::from_millis(500));
+    let streaming = writer_most(&marker).unwrap_or(0);
+    // Main stops reading until the writer's queue stops growing.
+    m.core.pause_reading();
+    let (mut most, mut since) = (writer_most(&marker).unwrap_or(0), Instant::now());
+    let until = Instant::now() + Duration::from_secs(30);
+    while since.elapsed() < Duration::from_secs(1) && Instant::now() < until {
+        std::thread::sleep(Duration::from_millis(20));
+        let now = writer_most(&marker).unwrap_or(0);
+        if now != most {
+            (most, since) = (now, Instant::now());
+        }
+    }
+    let paused = resident(&m);
+    m.core.resume_reading();
+    let before: usize = ids.iter().map(|id| m.got[id].len).sum();
+    run_for(&mut m, Duration::from_secs(1));
+    let after: usize = ids.iter().map(|id| m.got[id].len).sum();
+    eprintln!(
+        "[writer cap] {bodies} bodies streaming: the writer's queue held at most {streaming} bytes; \
+         main paused: {most} bytes (cap {WRITER_DATA_CAP}); paused at {paused:?} KiB; \
+         {} MiB more in the second after",
+        (after - before) / MIB
+    );
+    assert!(
+        most > WRITER_DATA_CAP - SMALL_FRAME && most <= WRITER_DATA_CAP,
+        "the writer's queue held at most {most} bytes, not the cap {WRITER_DATA_CAP}"
+    );
+    assert!(after > before, "the bodies go on once main reads");
+    for &id in &ids {
+        m.cancel(id);
+    }
+    m.settle(&ids);
+    let last = writer_most(&marker).unwrap();
+    assert!(last <= WRITER_DATA_CAP, "{last}");
+    memory_within_bounds(&m, base, "writer cap");
+}
+
 /// `vault.lock` every 20 ms for `d`, while 64 Swarm reads of 64 MiB
 /// stream at full speed: main reads and credits each body at once.
 fn vault_under_load(env: &[(&str, &str)], d: Duration) -> (Spread, usize) {
     let mut m = Main::with_env(World::new(), env);
-    let base = resident(&m);
+    let base = baseline(&m, env);
     m.keep_bodies = false;
     let ids: Vec<u64> = (0..RUNNING).map(|_| m.verify(swarm_64m())).collect();
     let streaming = |m: &Main| ids.iter().filter(|id| m.got[id].len > 0).count();
@@ -576,7 +703,7 @@ fn page_of(rtt: Duration, small: usize, strict: bool) -> usize {
         ("/style.css", content("site-style", 5000)),
     ];
     let mut m = Main::new(World::new());
-    let base = resident(&m);
+    let base = baseline(&m, &[]);
     m.delay = rtt;
     // id → (class, the body it must get, or its length)
     let mut want: Vec<(u64, &str, Option<Vec<u8>>, usize)> = Vec::new();
@@ -694,7 +821,7 @@ fn a_page_twice_as_big_at_200_ms() {
 #[ignore]
 fn resident_memory_stays_within_128_mib() {
     let mut m = Main::new(World::new());
-    let base = resident(&m);
+    let base = baseline(&m, &[]);
     m.keep_bodies = false;
     let swarm: Vec<u64> = (0..SWARM_AT_ONCE).map(|_| m.verify(swarm_64m())).collect();
     run_for(&mut m, Duration::from_secs(5));

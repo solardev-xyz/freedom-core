@@ -24,11 +24,17 @@
 //! - `FREEDOM_CORED_TEST_CHAIN_TOTAL_BYTES` replaces the chain total's
 //!   256 MiB (design 0005, Bounds), so a test can bring it near full.
 //! - `FREEDOM_CORED_TEST_DWEB_GRANTS_BYTES` replaces the dweb thread's
-//!   101 MiB of grants, and `FREEDOM_CORED_TEST_DWEB_STREAMS` its 128
-//!   streamed pieces (design 0009, Bounds). The grants alone keep the
-//!   running requests below the 64 admission allows, their streams below
-//!   128 and their pieces below main's 256, so a test that pins one of
-//!   those bounds lifts the ones in front of it.
+//!   101 MiB of grants, `FREEDOM_CORED_TEST_DWEB_STREAMS` its 128
+//!   streamed pieces, and `FREEDOM_CORED_TEST_DWEB_RUNNING` its 64 running
+//!   requests (design 0009, Bounds). The grants alone keep the running
+//!   requests below the 64 admission allows, their streams below 128 and
+//!   their pieces below main's 256, so a test that pins one of those
+//!   bounds lifts the ones in front of it. 64 bodies' windows are the
+//!   writer's 8 MiB, so a test that presses on that cap runs more.
+//! - `FREEDOM_CORED_TEST_DWEB_WRITER_MARKER` names a file the dweb thread
+//!   rewrites with the most verified-body bytes its writer has held queued
+//!   at once (the duplex sender's `held`, capped at 0009's 8 MiB), each
+//!   time that grows, so a test can read the high-water mark.
 //! - `FREEDOM_CORED_TEST_NAMING_MARKER` names a file the naming thread
 //!   appends a line to for each reply it makes (`reply`), and at its end
 //!   for the waiting frames it hands to the writer (`drain <count>`), so
@@ -135,7 +141,36 @@ pub fn dweb_bounds(mut bounds: crate::dweb::engine::Bounds) -> crate::dweb::engi
     if let Some(streams) = millis("FREEDOM_CORED_TEST_DWEB_STREAMS") {
         bounds.streams = usize::try_from(streams).unwrap_or(usize::MAX);
     }
+    if let Some(running) = millis("FREEDOM_CORED_TEST_DWEB_RUNNING") {
+        bounds.running = usize::try_from(running).unwrap_or(usize::MAX);
+    }
     bounds
+}
+
+/// The most verified-body bytes the dweb writer has held at once.
+#[cfg(feature = "testhooks")]
+static DWEB_WRITER_MOST: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// The dweb writer holds `held` queued body bytes: a new high-water mark
+/// goes to the marker file.
+#[cfg(feature = "testhooks")]
+pub fn dweb_writer_held(held: usize) {
+    static MARKER: std::sync::OnceLock<Option<std::ffi::OsString>> = std::sync::OnceLock::new();
+    let Some(marker) =
+        MARKER.get_or_init(|| std::env::var_os("FREEDOM_CORED_TEST_DWEB_WRITER_MARKER"))
+    else {
+        return;
+    };
+    let most = DWEB_WRITER_MOST.fetch_max(held, std::sync::atomic::Ordering::SeqCst);
+    if held > most {
+        // Written whole, then renamed over the marker: a test reading it
+        // meanwhile sees the old mark or the new one.
+        let mut next = marker.clone();
+        next.push(".next");
+        if std::fs::write(&next, held.to_string()).is_ok() {
+            let _ = std::fs::rename(&next, marker);
+        }
+    }
 }
 
 #[cfg(feature = "testhooks")]
@@ -234,3 +269,6 @@ pub fn chain_bounds(bounds: fc_chain::machine::Bounds) -> fc_chain::machine::Bou
 pub fn dweb_bounds(bounds: crate::dweb::engine::Bounds) -> crate::dweb::engine::Bounds {
     bounds
 }
+
+#[cfg(not(feature = "testhooks"))]
+pub fn dweb_writer_held(_held: usize) {}
