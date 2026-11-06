@@ -363,6 +363,22 @@ const SCENARIO_IDS: &[&str] = &[
     "fee-headroom-later-type-2-wins",
     "fee-headroom-last-resort",
     "fee-headroom-direct-last-resort",
+    // Main's #1046 (freedom-browser #1048), 13 of them with the
+    // `colibri-unproven` reference patch (design 0005, Main's #1046).
+    "colibri-unproven-balance",
+    "colibri-unproven-code",
+    "colibri-unproven-nonce",
+    "colibri-unproven-call",
+    "colibri-unproven-estimate",
+    "colibri-unproven-storage",
+    "colibri-unproven-block",
+    "colibri-unproven-quorum-labels",
+    "colibri-unproven-colibri-only",
+    "colibri-unproven-off-position",
+    "colibri-unproven-fee-methods",
+    "colibri-unproven-fee-quote-quorum",
+    "colibri-unproven-fee-quote-direct",
+    "colibri-unproven-trust",
 ];
 
 const CALLS: &[&str] = &["request", "getFeeQuote", "broadcastRawTransaction"];
@@ -378,8 +394,9 @@ const KINDS: &[&str] = &[
 ];
 const OUTCOMES: &[&str] = &["answered", "failed", "aborted", "refused", "open", "fired"];
 const DEVIATIONS: &[&str] = &["json-depth", "endpoint-dedup", "singleton-quorum"];
-/// The reference patches a scenario may name (design 0005, Main's #752).
-const PATCHES: &[&str] = &["tx-lookups", "fee-headroom"];
+/// The reference patches a scenario may name (design 0005, Main's #752,
+/// Main's #749 and Main's #1046).
+const PATCHES: &[&str] = &["tx-lookups", "fee-headroom", "colibri-unproven"];
 
 fn vectors() -> Json {
     let path = concat!(

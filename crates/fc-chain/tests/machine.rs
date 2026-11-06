@@ -2343,8 +2343,9 @@ fn boundary_fee_combine_header_dropped_when_not_mixed() {
 
 #[test]
 fn boundary_fee_combine_header_with_colibri_first_in_the_order() {
-    // Today's default order, Myotis not ready: Colibri's own quote fails,
-    // then Direct's collection reads the header.
+    // Today's default order, Myotis not ready: Colibri has no quote of its
+    // own (it doesn't serve eth_gasPrice, main's #1046), so Direct's
+    // collection reads the header at once.
     let mut world = World::new(
         Bounds::default(),
         &[fee_chain(
@@ -2354,23 +2355,10 @@ fn boundary_fee_combine_header_with_colibri_first_in_the_order() {
         )],
     );
     let id = world.submit(FEE, None);
-    let gas = world
-        .requests
-        .iter()
-        .find_map(|(io, _, request, _)| match request {
-            Request::Verified(VerifiedOp::Colibri { method, .. }) if method == "eth_gasPrice" => {
-                Some(*io)
-            }
-            _ => None,
-        })
-        .unwrap();
-    world.answer(
-        gas,
-        Answer::Colibri(ColibriReply::Failure {
-            class: fc_chain::machine::ColibriClass::Error,
-            fault: false,
-        }),
-    );
+    assert!(!world.requests.iter().any(|(_, _, request, _)| matches!(
+        request,
+        Request::Verified(VerifiedOp::Colibri { method, .. }) if method != "eth_getBlockByNumber"
+    )));
     assert_eq!(world.header_reads().len(), 1);
     world.quote_from("a", &g(100), Some(&g(1)));
     world.quote_from("b", &g(1000), None);
@@ -2490,32 +2478,18 @@ fn boundary_fee_combine_all_failing_with_the_last_error() {
     }
 
     // With no endpoint, today's text, and no header read: the next source,
-    // Colibri, is asked for its own quote.
+    // Colibri, has no quote of its own (main's #1046), and nothing is asked.
     let mut world = World::new(
         Bounds::default(),
         &[fee_chain(&["direct", "colibri"], &[], true)],
     );
     let id = world.submit(FEE, None);
-    assert!(world.header_reads().is_empty());
-    let (gas, request) = match &world.requests[..] {
-        [(io, _, request, _)] => (*io, request.clone()),
-        other => panic!("{other:?}"),
-    };
-    assert!(
-        matches!(&request, Request::Verified(VerifiedOp::Colibri { method, .. }) if method == "eth_gasPrice")
-    );
-    world.answer(
-        gas,
-        Answer::Colibri(ColibriReply::Failure {
-            class: fc_chain::machine::ColibriClass::Error,
-            fault: false,
-        }),
-    );
-    assert!(world.header_reads().is_empty());
+    assert!(world.requests.is_empty(), "{:?}", world.requests);
     match &world.reply(id).result {
         Err(ChainError::Thrown(error)) => assert_eq!(
             error.message.to_string_lossy(),
-            fc_chain::machine::COLIBRI_FAILED
+            "All chain sources failed for fee quote (direct: No RPC endpoint configured; \
+             colibri: Colibri does not support eth_gasPrice)"
         ),
         other => panic!("{other:?}"),
     }
@@ -3283,13 +3257,6 @@ fn colibri_result(json: &str) -> Answer {
     Answer::Colibri(ColibriReply::Result(json.into()))
 }
 
-fn colibri_failure() -> Answer {
-    Answer::Colibri(ColibriReply::Failure {
-        class: fc_chain::machine::ColibriClass::Error,
-        fault: false,
-    })
-}
-
 /// A block with this base fee.
 fn base_fee_block(base_fee: &str) -> String {
     format!(r#"{{"number":"0x10","baseFeePerGas":"{base_fee}"}}"#)
@@ -3389,65 +3356,62 @@ fn boundary_fee_combine_blocks() {
 
 #[test]
 fn fee_quote_last_resorts_through_the_walk() {
+    // The walk's other source is the quorum: Colibri has no quote of its
+    // own (main's #1046). Both endpoints answer each of its rounds alike.
+    let quorum = |world: &mut World, method: &str, answer: &dyn Fn() -> Answer| {
+        for endpoint in ["a", "b"] {
+            let io = world.rpc_to(endpoint, method);
+            world.answer(io, answer());
+        }
+    };
+    let quoted = |gas: u64| move || ok(&format!("\"{}\"", g(gas)));
+
     // A later source's quote wins over Direct's last resort.
     let mut world = World::new(
         Bounds::default(),
-        &[fee_chain(&["direct", "colibri"], &["a"], true)],
+        &[fee_chain(&["direct", "quorum"], &["a", "b"], false)],
     );
     let id = world.submit(FEE, None);
     world.quote_with_block("a", &g(40), None);
-    world.answer(
-        world.colibri_op("eth_gasPrice"),
-        colibri_result(&format!("\"{}\"", g(3))),
-    );
-    world.answer(
-        world.colibri_op("eth_maxPriorityFeePerGas"),
-        colibri_result(&format!("\"{}\"", g(1))),
-    );
+    world.quote_with_block("b", &g(40), None);
+    assert!(!world.replied(id));
+    quorum(&mut world, "eth_gasPrice", &quoted(3));
+    quorum(&mut world, "eth_maxPriorityFeePerGas", &quoted(1));
     assert_eq!(
         quote_json(world.reply(id)),
-        r#"{"type":"eip1559","baseFee":"2000000000","maxPriorityFeePerGas":"1000000000","maxFeePerGas":"5000000000","effectiveGasPrice":"3000000000","source":"colibri","verified":true}"#
+        r#"{"type":"eip1559","baseFee":"2000000000","maxPriorityFeePerGas":"1000000000","maxFeePerGas":"5000000000","effectiveGasPrice":"3000000000","source":"quorum","verified":true}"#
     );
 
-    // An earlier source's last resort is kept first: Colibri's block read
-    // fails, then Direct's endpoint fails at its own.
+    // An earlier source's last resort is kept first: the quorum's block
+    // read fails, then Direct's endpoints fail at their own.
     let mut world = World::new(
         Bounds::default(),
-        &[fee_chain(&["colibri", "direct"], &["a"], true)],
+        &[fee_chain(&["quorum", "direct"], &["a", "b"], false)],
     );
     let id = world.submit(FEE, None);
-    world.answer(
-        world.colibri_op("eth_gasPrice"),
-        colibri_result(&format!("\"{}\"", g(4))),
-    );
-    world.answer(
-        world.colibri_op("eth_maxPriorityFeePerGas"),
-        colibri_failure(),
-    );
-    world.answer(world.colibri_op("eth_getBlockByNumber"), colibri_failure());
+    quorum(&mut world, "eth_gasPrice", &quoted(4));
+    quorum(&mut world, "eth_maxPriorityFeePerGas", &no_hint);
+    quorum(&mut world, "eth_getBlockByNumber", &|| {
+        node_error(-32000, "block unavailable")
+    });
     assert!(!world.replied(id));
     world.quote_with_block("a", &g(40), None);
+    world.quote_with_block("b", &g(40), None);
     assert_eq!(
         quote_json(world.reply(id)),
-        r#"{"type":"legacy","gasPrice":"5050000000","effectiveGasPrice":"5050000000","source":"colibri","verified":true}"#
+        r#"{"type":"legacy","gasPrice":"5050000000","effectiveGasPrice":"5050000000","source":"quorum","verified":true}"#
     );
 
     // The last resort wins over a later source's node error.
     let mut world = World::new(
         Bounds::default(),
-        &[fee_chain(&["direct", "colibri"], &["a"], true)],
+        &[fee_chain(&["direct", "quorum"], &["a", "b"], false)],
     );
     let id = world.submit(FEE, None);
     world.quote_with_block("a", &g(4), None);
-    world.answer(
-        world.colibri_op("eth_gasPrice"),
-        Answer::Colibri(ColibriReply::Revert {
-            data: "0x".into(),
-            capacity: false,
-            fault: false,
-        }),
-    );
-    assert_eq!(quote_json(world.reply(id)), legacy("5050000000", 1));
+    world.quote_with_block("b", &g(4), None);
+    quorum(&mut world, "eth_gasPrice", &|| node_error(-32000, "down"));
+    assert_eq!(quote_json(world.reply(id)), legacy("5050000000", 2));
 }
 
 #[test]
