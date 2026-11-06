@@ -10,11 +10,13 @@
 //! **What `JSON.parse`, then `JSON.stringify`, change:**
 //! - whitespace between tokens is dropped;
 //! - a number is read as the nearest double, and written as JavaScript's
-//!   `Number.prototype.toString` writes it: the shortest digits that read
-//!   back, plainly below 1e21 (so an integer past 2^53 loses its low
-//!   digits: 18446744073709551615 is 18446744073709552000), in exponent
-//!   form from 1e21 and below 1e-6 (`1e+21`, `1e-7`); `-0` is `0`, and a
-//!   number past the doubles' range (`1e400`) is `null`;
+//!   `Number.prototype.toString` writes it: the fewest digits that read
+//!   back, and of two such decimals as close to the double, the even one
+//!   (1658206780088562.25 is 1658206780088562.2), plainly below 1e21 (so
+//!   an integer past 2^53 loses its low digits: 18446744073709551615 is
+//!   18446744073709552000), in exponent form from 1e21 and below 1e-6
+//!   (`1e+21`, `1e-7`); `-0` is `0`, and a number past the doubles' range
+//!   (`1e400`) is `null`;
 //! - a string's escapes are decoded, and written again as JavaScript
 //!   writes a string: `\b \t \n \f \r \" \\`, `\u00xx` (lowercase) for the
 //!   other control characters and for a lone surrogate, and everything
@@ -567,12 +569,9 @@ pub fn js_number(n: f64) -> Option<String> {
     if n == 0.0 {
         return Some("0".into());
     }
-    // The shortest digits that read back, and their exponent.
-    let shortest = format!("{:e}", n.abs());
-    let (mantissa, exponent) = shortest.split_once('e')?;
-    let digits: String = mantissa.chars().filter(|c| *c != '.').collect();
+    let (digits, exponent) = decimal(n.abs())?;
     let k = i32::try_from(digits.len()).ok()?;
-    let point = exponent.parse::<i32>().ok()? + 1;
+    let point = exponent + 1;
     let mut s = String::new();
     if n < 0.0 {
         s.push('-');
@@ -603,6 +602,56 @@ pub fn js_number(n: f64) -> Option<String> {
         s.push_str(&exponent.unsigned_abs().to_string());
     }
     Some(s)
+}
+
+/// The decimal JavaScript writes for `a`, a finite double above 0, as its
+/// significant digits and the exponent of the first: ECMA-262's
+/// Number::toString as its note recommends and V8 does. Of the decimals
+/// that read back as `a`, those with the fewest digits; of these, the
+/// closest to `a`; of two as close, the one whose last digit is even.
+///
+/// Rust's shortest form (`{:e}`) has the fewest digits, `k`, but of two as
+/// close it takes the one above: 1658206780088562.25 lies halfway between
+/// 1658206780088562.2 and 1658206780088562.3, which both read back, and
+/// Rust writes the second, JavaScript the first. So it gives only `k`. The
+/// closest decimal of `k` digits is `a` rounded to them (`{:.prec$e}`,
+/// which takes the even one of two as close), and it reads back, unless
+/// `a` is a power of two: there the doubles below are twice as close, so
+/// the closest can lie below, past halfway to the double below
+/// (2^-24, 5.9604644775390625e-8, rounds to 5.960464477539062e-8, which
+/// reads as the double below). The decimals of `k` digits that read back
+/// all lie above `a` then, and the closest is the next one up.
+fn decimal(a: f64) -> Option<(String, i32)> {
+    let k = scientific(&format!("{a:e}"))?.0.len();
+    let prec = k.checked_sub(1)?;
+    let rounded = format!("{a:.prec$e}");
+    let (mut digits, mut exponent) = scientific(&rounded)?;
+    match rounded.parse::<f64>().ok()?.partial_cmp(&a)? {
+        Ordering::Equal => {}
+        Ordering::Less => {
+            // Up by one in the last digit (17 digits at most).
+            let up = digits.parse::<u64>().ok()?.checked_add(1)?.to_string();
+            if up.len() > digits.len() {
+                exponent += 1;
+            }
+            digits = up;
+        }
+        // Above `a`, the closest reads back: the double above is never
+        // nearer than the one below, and some decimal of `k` digits reads
+        // back (Rust's form is one).
+        Ordering::Greater => return None,
+    }
+    let kept = digits.trim_end_matches('0').len().max(1);
+    digits.truncate(kept);
+    Some((digits, exponent))
+}
+
+/// The significant digits and the exponent of Rust's `{:e}` form of a
+/// positive double (`1.25e-7`, `5e-324`).
+fn scientific(text: &str) -> Option<(String, i32)> {
+    let (mantissa, exponent) = text.split_once('e')?;
+    let digits = mantissa.chars().filter(|c| *c != '.').collect();
+    Some((digits, exponent.parse().ok()?))
 }
 
 /// A number's text, as JavaScript writes it again.

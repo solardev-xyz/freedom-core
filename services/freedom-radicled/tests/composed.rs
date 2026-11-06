@@ -212,7 +212,7 @@ fn the_model_is_mains() {
     }
     // Only the escapes of lone surrogates are past serde_json.
     assert_eq!(unread, ["remotes-escapes", "remotes-escaped-keys"]);
-    assert_eq!(checked, 142);
+    assert_eq!(checked, 148);
 }
 
 /// The repositories of the parity test: `composed`, its README.md and

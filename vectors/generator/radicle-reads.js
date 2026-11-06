@@ -159,6 +159,140 @@ const RESTRINGIFY = [
   { id: 'string-root', text: `"${U('00e9')}"`, synthetic: true },
 ];
 
+// Numbers as main writes them (Number.prototype.toString), past what
+// libradicle writes: each case below is an array of numbers, served
+// through `remotes` as RESTRINGIFY's are. Main writes the fewest digits
+// that read back as the double, and of two such decimals as close to it
+// as each other, the even one: 1658206780088562.25 lies halfway between
+// 1658206780088562.2 and 1658206780088562.3, and main writes the first.
+const F64 = new DataView(new ArrayBuffer(8));
+const bitsOf = (x) => { F64.setFloat64(0, x); return F64.getBigUint64(0); };
+const ofBits = (bits) => { F64.setBigUint64(0, bits); return F64.getFloat64(0); };
+/** A seeded 64-bit generator, so the cases are the same on every run. */
+const seeded = (seed) => () => {
+  seed = (seed * 6364136223846793005n + 1442695040888963407n) & ((1n << 64n) - 1n);
+  return seed;
+};
+/** A positive double's exact value, which is a finite decimal: its
+ * significant digits, and the power of ten of its last one. */
+function exact(x) {
+  const bits = bitsOf(x);
+  const e = Number(bits >> 52n);
+  const m = (bits & ((1n << 52n) - 1n)) | (e ? 1n << 52n : 0n);
+  const p = Math.max(e, 1) - 1075;
+  let digits = p >= 0 ? m << BigInt(p) : m * 5n ** BigInt(-p);
+  let scale = Math.min(p, 0);
+  while (digits % 10n === 0n) { digits /= 10n; scale += 1; }
+  return { digits: digits.toString(), scale };
+}
+/** A positive double's exact value as a JSON number's text. */
+function exactText(x) {
+  const { digits, scale } = exact(x);
+  if (scale >= 0) return digits + '0'.repeat(scale);
+  const padded = digits.padStart(1 - scale, '0');
+  return `${padded.slice(0, scale)}.${padded.slice(scale)}`;
+}
+/** The significant digits main writes `x` with. */
+const mantissa = (x) => JSON.stringify(x).replace(/e.*$/, '').replace(/[-.]/g, '').replace(/^0+/, '').replace(/0+$/, '');
+/** How `x` (positive) lies against the decimals of the digits main writes
+ * it with: 'tie' when halfway between two that both read back (main
+ * writes the even one), 'power' when the closer one, or one of two as
+ * close, doesn't read back (only at a power of two, where the doubles below
+ * are twice as close: main writes the next one up), else 'plain'. */
+function placement(x) {
+  const { digits, scale } = exact(x);
+  const k = mantissa(x).length;
+  if (digits.length <= k) return 'plain';
+  const cut = digits.length - k;
+  const below = BigInt(digits.slice(0, k));
+  const rest = BigInt(digits.slice(k));
+  const half = 5n * 10n ** BigInt(cut - 1);
+  const reads = (n) => Number(`${n}e${scale + cut}`) === x;
+  const closest = rest < half || (rest === half && below % 2n === 0n) ? below : below + 1n;
+  if (!reads(closest)) {
+    assert.equal(bitsOf(x) & ((1n << 52n) - 1n), 0n, `${x}: the closest decimal doesn't read back, off a power of two`);
+    return 'power';
+  }
+  return rest === half && reads(below) && reads(below + 1n) ? 'tie' : 'plain';
+}
+/** As exact text where it is short, else as 21 digits, which read back. */
+const spelled = (x) => {
+  const t = exactText(Math.abs(x));
+  return (x < 0 ? '-' : '') + (t.length <= 40 ? t : Math.abs(x).toExponential(20));
+};
+const array = (xs) => `[${xs.join(',')}]`;
+function numberCases() {
+  // Halfway: the example, and the quarters about it in the binade
+  // [2^50, 2^51), whose doubles are a quarter apart (.25 and .75 are
+  // halfway, and main writes .2 and .8); then halfway doubles drawn from
+  // every binade that has them (52 of the 74 from 2^-23 to 2^51, none
+  // outside), at every place their lowest set bit can be, each binade's
+  // first two written down and its first written up.
+  const quarters = [];
+  for (let q = -6; q <= 6; q++) quarters.push(1658206780088562 + q / 4);
+  const next = seeded(0x5eed0001n);
+  const drawn = [];
+  for (let p = -30; p <= 52; p++) {
+    let down = 0;
+    let up = 0;
+    for (let lowest = 0; lowest < 52 && (down < 2 || up < 1); lowest++) {
+      for (let draw = 0; draw < 8 && (down < 2 || up < 1); draw++) {
+        const significand = ((next() >> 12n) | 1n) << BigInt(lowest) & ((1n << 52n) - 1n);
+        const x = ofBits((BigInt(p + 1023) << 52n) | significand);
+        if (placement(x) !== 'tie') continue;
+        if (mantissa(x) === exact(x).digits.slice(0, -1)) {
+          if (down < 2) { drawn.push(x); down += 1; }
+        } else if (up < 1) { drawn.push(x); up += 1; }
+      }
+    }
+  }
+  assert.ok(drawn.length > 150, 'halfway doubles from every binade');
+  const halfway = [...quarters, -1658206780088562.25, 140737488355328.125, 140737488355328.375, 1 + 2 ** -17, ...drawn];
+  // Powers of two: every one at which the closest decimal of main's digits
+  // doesn't read back, and the binary range's ends.
+  const powers = [];
+  for (let p = -1074; p <= 1023; p++) {
+    const x = 2 ** p;
+    if (placement(x) === 'power' || [-1074, -1073, -1022, -1, 0, 53, 1023].includes(p)) powers.push(x);
+  }
+  // The range's ends and the thresholds of the exponent form, as texts.
+  const ends = [
+    '5e-324', '4.9406564584124654e-324', '2.4703282292062328e-324', '1e-323', '1.5e-323',
+    '2.2250738585072009e-308', '2.225073858507201e-308', '2.2250738585072011e-308', '2.2250738585072014e-308',
+    '4.4501477170144023e-308', '1e-300', '9.8765e-310', '-3.7e-315',
+    '1.7976931348623157e308', '1.7976931348623158e308', '1.7976931348623155e308', '1.7976931348623159e308',
+    '8.98846567431158e307', '1e308', '-1e308', '1.2e300',
+    '1e23', '9.999999999999999e22', '1e22', '999999999999999900000', '999999999999999999999', '1.0000000000000001e21',
+    '0.000001', '9.999999999999999e-7', '0.0000009999999999999999', '1e-7', '9.99999999999999e-8', '1.0000000000000001e-7',
+    '123456789e-15', '-0.00000123',
+  ];
+  // Doubles from every magnitude, drawn from their bits.
+  const any = seeded(0x5eed0002n);
+  const random = [];
+  while (random.length < 200) {
+    const x = ofBits(any());
+    if (Number.isFinite(x) && x !== 0) random.push(x);
+  }
+  return [
+    { id: 'numbers-halfway', text: array(halfway.map(spelled)), synthetic: true },
+    { id: 'numbers-powers-of-two', text: array(powers.map(spelled)), synthetic: true },
+    { id: 'numbers-ends', text: array(ends), synthetic: true },
+    { id: 'numbers-random', text: array(random.map((x) => x.toExponential(20))), synthetic: true },
+    {
+      id: 'numbers-safe-integers',
+      text: array([
+        '9007199254740991', '9007199254740992', '9007199254740993', '-9007199254740991', '-9007199254740993',
+        '9007199254740993.0', '9.007199254740993e15', '9007199254740991.5', '9007199254740992.5', '9007199254740994',
+        '9007199254740995', '9007199254740997', '4503599627370495.5', '4503599627370496.5', '18014398509481985',
+        '18014398509481986', '18014398509481987', '900719925474099', '-900719925474099',
+      ]),
+      synthetic: true,
+    },
+    { id: 'numbers-negative-zero', text: `[-0e400,-1e-400,-2.4703282292062327e-324,-0.0e-0,-0E+5,-0.000,{"a":-0,"b":[-0.0]}]`, synthetic: true },
+  ];
+}
+RESTRINGIFY.push(...numberCases());
+
 // Query strings for the COB pages, through URLSearchParams as main reads
 // them: JavaScript's parseInt, its whitespace, and the clamps.
 const PAGE_QUERIES = [

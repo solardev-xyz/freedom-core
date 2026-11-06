@@ -189,7 +189,7 @@ fn each_composition_writes_mains_bytes() {
         }
         checked += 1;
     }
-    assert_eq!(checked, 144);
+    assert_eq!(checked, 150);
 }
 
 /// 0008, "Methods": `node_info`'s body is the design's, and main's two

@@ -176,7 +176,11 @@ pub fn parse(text: &str) -> Option<Js> {
     (reader.at == text.len()).then_some(value)
 }
 
-/// `String(n)`, as `JSON.stringify` writes a number.
+/// `String(n)`, as `JSON.stringify` writes a number. Its digits are
+/// serde_json's (Żmij's): the fewest that read back, and of two as close
+/// the even one, as V8's. Not Rust's shortest form, which takes the one
+/// above (1658206780088562.25 would be 1658206780088562.3), nor the
+/// service's way to the same digits (src/reads/js.rs).
 fn number(n: f64) -> String {
     if !n.is_finite() {
         return "null".into();
@@ -184,17 +188,32 @@ fn number(n: f64) -> String {
     if n == 0.0 {
         return "0".into();
     }
-    let a = n.abs();
-    if (1e-6..1e21).contains(&a) {
-        // Rust's Display: the shortest digits that read back, no exponent.
-        return format!("{n}");
-    }
-    let e = format!("{n:e}");
-    let (mantissa, exponent) = e.split_once('e').unwrap();
-    if exponent.starts_with('-') {
-        format!("{mantissa}e{exponent}")
+    // serde_json writes `1234.5`, `1.5e-7` or `1e16`: its digits, and the
+    // power of ten of the point before them.
+    let text = serde_json::to_string(&n.abs()).unwrap();
+    let (mantissa, exponent) = text.split_once('e').unwrap_or((&text, "0"));
+    let (whole, fraction) = mantissa.split_once('.').unwrap_or((mantissa, ""));
+    let all = format!("{whole}{fraction}");
+    let digits = all.trim_start_matches('0');
+    let point =
+        whole.len() as i32 - (all.len() - digits.len()) as i32 + exponent.parse::<i32>().unwrap();
+    let digits = digits.trim_end_matches('0');
+    let k = digits.len() as i32;
+    let sign = if n < 0.0 { "-" } else { "" };
+    // ECMA-262's Number::toString, steps 6 to 10.
+    if k <= point && point <= 21 {
+        format!("{sign}{digits}{}", "0".repeat((point - k) as usize))
+    } else if 0 < point && point <= 21 {
+        let (whole, fraction) = digits.split_at(point as usize);
+        format!("{sign}{whole}.{fraction}")
+    } else if -6 < point && point <= 0 {
+        format!("{sign}0.{}{digits}", "0".repeat(-point as usize))
     } else {
-        format!("{mantissa}e+{exponent}")
+        let (first, rest) = digits.split_at(1);
+        let dot = if rest.is_empty() { "" } else { "." };
+        let e = point - 1;
+        let e_sign = if e < 0 { '-' } else { '+' };
+        format!("{sign}{first}{dot}{rest}e{e_sign}{}", e.abs())
     }
 }
 

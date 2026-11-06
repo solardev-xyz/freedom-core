@@ -31,6 +31,18 @@ fn numbers_are_written_as_javascript_writes_them() {
         (123456789012345678901.0, "123456789012345680000"),
         (f64::INFINITY, "null"),
         (f64::NAN, "null"),
+        // Halfway between two decimals of the fewest digits: the even one,
+        // where Rust's shortest form takes the one above.
+        (1658206780088562.25, "1658206780088562.2"),
+        (-1658206780088562.25, "-1658206780088562.2"),
+        (1658206780088562.75, "1658206780088562.8"),
+        (140737488355328.125, "140737488355328.12"),
+        (1.00000762939453125, "1.0000076293945312"),
+        // At a power of two the closest of those digits reads as the
+        // double below: the next one up.
+        (2f64.powi(-24), "5.960464477539063e-8"),
+        (1e23, "1e+23"),
+        (9007199254740993.0, "9007199254740992"),
     ] {
         assert_eq!(js_number(n).as_deref(), Some(js), "{n}");
     }
@@ -38,6 +50,50 @@ fn numbers_are_written_as_javascript_writes_them() {
         again("[1e400,-0,9007199254740993,123]").unwrap(),
         "[null,0,9007199254740992,123]"
     );
+}
+
+/// Every number of the vectors' number cases, as main wrote it: the
+/// halfway cases, the powers of two, the range's ends and thresholds, doubles
+/// drawn from every magnitude, 2^53 and its neighbours, `-0`, and the
+/// floats and integers. Each through [`js_number`] and through the text's
+/// own path ([`write_number`], whose integers of up to 15 digits skip it).
+#[test]
+fn numbers_are_mains_in_the_vectors() {
+    let vectors: serde_json::Value =
+        serde_json::from_str(include_str!("../../../../../vectors/radicle-reads.json")).unwrap();
+    // The elements of a flat array's text; an object's members split too,
+    // the same in both texts, and are skipped.
+    let elements = |text: &str| -> Vec<String> {
+        let inner = text.strip_prefix('[').unwrap().strip_suffix(']').unwrap();
+        inner.split(',').map(str::to_string).collect()
+    };
+    let (mut checked, mut example) = (0, false);
+    for case in vectors["cases"].as_array().unwrap() {
+        let id = case["id"].as_str().unwrap();
+        if !(id.starts_with("remotes-numbers-")
+            || id == "remotes-floats"
+            || id == "remotes-integers")
+        {
+            continue;
+        }
+        let texts = elements(case["addon"][0]["text"].as_str().unwrap());
+        let written = elements(case["main"]["body"].as_str().unwrap());
+        assert_eq!(texts.len(), written.len(), "{id}");
+        for (text, js) in texts.iter().zip(&written) {
+            if !text.starts_with(|c: char| c == '-' || c.is_ascii_digit()) {
+                continue;
+            }
+            let n: f64 = text.parse().unwrap();
+            assert_eq!(js_number(n).as_deref(), Some(js.as_str()), "{id}: {text}");
+            let mut out = Vec::new();
+            write_number(text.as_bytes(), &mut out).unwrap();
+            assert_eq!(String::from_utf8(out).unwrap(), *js, "{id}: {text}");
+            example |= text == "1658206780088562.25" && js == "1658206780088562.2";
+            checked += 1;
+        }
+    }
+    assert!(example);
+    assert_eq!(checked, 512);
 }
 
 #[test]
