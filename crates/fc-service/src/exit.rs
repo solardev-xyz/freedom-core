@@ -90,7 +90,7 @@ static TIMER_EXITING: std::sync::OnceLock<fn()> = std::sync::OnceLock::new();
 
 /// Claims begun, and claims won: tests wait on them to order two exits.
 #[cfg(test)]
-static ATTEMPTS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+pub(crate) static ATTEMPTS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 #[cfg(test)]
 static ACQUIRED: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
