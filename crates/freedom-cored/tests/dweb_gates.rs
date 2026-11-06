@@ -6,8 +6,9 @@
 //! - **Fast, always run** (CI runs them with `--all-features`; the ones
 //!   marked `testhooks` need it): admission under the shipped grants, and
 //!   at 64 running / 256 waiting; 128 streams; main's 256 outstanding
-//!   pieces; the writer's windows; `vault.lock` under 64 streaming bodies
-//!   for 2 s; a realistic page with no round trip.
+//!   pieces; the writer's windows, and its 8 MiB cap under 16 MiB of
+//!   credit; `vault.lock` under 64 streaming bodies for 2 s; a realistic
+//!   page with no round trip.
 //! - **Heavy, `#[ignore]`d:** `vault.lock` for 10 s, the resident memory
 //!   under the heaviest mixes, and the realistic page at 50 and 200 ms
 //!   round trips:
@@ -29,10 +30,15 @@
 //! the 64 bodies' windows lift the bounds in front of them with
 //! `FREEDOM_CORED_TEST_DWEB_GRANTS_BYTES` and `FREEDOM_CORED_TEST_DWEB_STREAMS`.
 //! 0009's vault gate counts the 50 bodies the grants admit (the release
-//! run); the 64-body runs are stress checks.
+//! run); the 64-body runs are stress checks. 64 windows are exactly the
+//! writer's 8 MiB, so the test that presses on that cap runs 128 bodies
+//! (`FREEDOM_CORED_TEST_DWEB_RUNNING`) and reads the writer's high-water
+//! mark from `FREEDOM_CORED_TEST_DWEB_WRITER_MARKER`'s file.
 //!
 //! **Resident memory** is read from `/proc` (`VmRSS`, `VmHWM`), as
-//! `vault`'s tests read it: Linux only. Elsewhere it is not measured.
+//! `vault`'s tests read it: Linux only. Elsewhere it is not measured. The
+//! peak is charged against an otherwise identical core after a protocol-1
+//! hello, which starts no dweb thread, so the thread's start counts too.
 
 // The gates print what they measure.
 #![allow(
