@@ -16,9 +16,11 @@
 //!   ([`crate::quarantine`]), and so are the writes, `rad.write` and
 //!   `rad.unseed`, with the mutation-start boundary ([`crate::writes`]),
 //!   and a COB write's online repair on the writer when its outcome is
-//!   unknown ([`crate::repair`]).
-//!   The reads' operations come with later steps: until then each one's
-//!   work answers `stopped`, as this build answered it before;
+//!   unknown ([`crate::repair`]). `rad.read`'s pass-through ops are served
+//!   within the process's output budget ([`crate::reads`],
+//!   [`crate::output`]). `rad.blob` and `rad.read`'s other ops come with
+//!   later steps: until then each one's work answers `stopped`, as this
+//!   build answered it before;
 //! - `rad.connect_seeds` and `rad.clone`, for the network pool, whose
 //!   deadline is the request's own `timeout_ms` plus 30 s, come with the
 //!   network operations' step; they, `rad.stats` (inline) and
@@ -59,8 +61,9 @@ use crate::build_info;
 use crate::confine::Grant;
 use crate::identity::{self, Identity};
 use crate::node::{self, Node};
+use crate::output::{self, Budget};
 use crate::pools::{self, Mutates, Pool, Pools, Ticket, Work};
-use crate::{quarantine, reconcile, repair, writes};
+use crate::{quarantine, reads, reconcile, repair, writes};
 use crate::{testhooks, units};
 
 /// How the process ends after a start step it answered with an error
@@ -134,6 +137,9 @@ pub struct RadicleService {
     /// The read pool, the network pool and the write queue, which the node
     /// opens and drains.
     pools: Arc<Pools>,
+    /// The output budget, the process's: every read's bytes (0008, "Pools
+    /// and budgets").
+    budget: Arc<Budget>,
 }
 
 impl RadicleService {
@@ -169,6 +175,7 @@ impl RadicleService {
             git_config,
             node,
             pools,
+            budget: Budget::new(testhooks::budget(output::BUDGET)),
         })
     }
 
@@ -206,6 +213,17 @@ impl RadicleService {
                 writes::write(conn, &self.node, &self.home, request.params, ephemeral)
             }
             "rad.unseed" => writes::unseed(conn, &self.node, request.params),
+            "rad.read" => (
+                reads::read(
+                    conn,
+                    &self.node,
+                    &self.pools,
+                    &self.budget,
+                    &self.home,
+                    request.params,
+                ),
+                None,
+            ),
             _ => (later_step(conn), None),
         }
     }

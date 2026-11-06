@@ -319,6 +319,8 @@ struct Running<A> {
     started: bool,
     /// Whether its work marked its outcome proven ([`Ticket::proven`]).
     proven: bool,
+    /// The repository it mutates, if it names one.
+    mutates: Option<Mutates>,
 }
 
 struct State<A> {
@@ -598,6 +600,25 @@ impl<A: Answers> Pool<A> {
         false
     }
 
+    /// Whether a write to `rid` that an online repair covers
+    /// ([`Mutates::repaired`]) has passed its mutation start without a
+    /// proven outcome yet, or `rid`'s repair is queued: until then the
+    /// repository may hold a partial mutation (see the module's doc), and
+    /// its COB reads are fenced ([`crate::reads`]). Its call still running
+    /// counts, whether or not it has been answered `outcome_unknown`, until
+    /// its repair is queued, under the same lock, as its work returns.
+    pub fn writing(&self, rid: &RepoId) -> bool {
+        let state = self.inner.lock();
+        state.repairs.contains(rid)
+            || state.running.iter().any(|running| {
+                running.started
+                    && !running.proven
+                    && running
+                        .mutates
+                        .is_some_and(|mutates| mutates.repaired && mutates.rid == *rid)
+            })
+    }
+
     /// The stop's first half: fences the pool, answers every queued request
     /// `stopped`, and cancels the running ones' tokens and the online
     /// repair's.
@@ -778,6 +799,7 @@ fn next<A: Answers>(inner: &Inner<A>) -> Option<Next<A>> {
             answers: queued.answers.clone(),
             started: false,
             proven: false,
+            mutates: queued.mutates,
         });
         return Some(Next::Request(queued));
     }
@@ -984,6 +1006,12 @@ impl Pools {
     /// Main cancelled request `id` (see [`Pool::cancel`]).
     pub fn cancel(&self, id: u64) {
         let _ = self.all().iter().any(|pool| pool.cancel(id));
+    }
+
+    /// Whether a COB write to `rid` is past its start and unproven, or its
+    /// repository's online repair is queued ([`Pool::writing`]).
+    pub fn writing(&self, rid: &RepoId) -> bool {
+        self.write.writing(rid)
     }
 
     /// The write queue's online repair, given once (see the module's doc):

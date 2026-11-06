@@ -1262,3 +1262,98 @@ fn the_stop_reaches_the_turn_in_progress_and_no_turn_follows() {
     );
     assert!(uncertain(&pool));
 }
+
+/// A COB write's work held at both ends, as [`write`]'s is, its outcome
+/// proven or left unknown.
+fn held_write(
+    record: &Record,
+    go: &Hold,
+    finish: &Hold,
+    proven: bool,
+) -> (Work, mpsc::Receiver<bool>) {
+    let (began, rx) = mpsc::channel();
+    let past = if proven { Past::Proven } else { Past::Fails };
+    (write(record, go, finish, &began, past), rx)
+}
+
+/// 0008, "Methods" ("The repair fence"), and #259's note for the reads:
+/// a COB write to a repository fences it from its mutation start until its
+/// outcome is proven, or, unknown, until its repair is over; queued, or
+/// once proven, it fences nothing. Neither another repository nor a write
+/// no repair covers is fenced.
+#[test]
+fn a_cob_write_fences_its_repository_from_its_start_until_proven_or_repaired() {
+    let (record, timeline) = (Record::default(), Timeline::default());
+    let (fenced, other) = (repo(1), repo(2));
+    let fake = Fake::new(&timeline, &[(fenced, Script::Over(2))]);
+    fake.hold.0.store(false, Ordering::SeqCst);
+    let pool = writer(&fake);
+
+    // Proven: fenced only while its call runs, not once proven, though its
+    // work still runs.
+    let (go, finish, after) = (Hold::default(), Hold::default(), Hold::default());
+    let (began, rx) = mpsc::channel();
+    let work: Work = {
+        let (record, go, finish, after) =
+            (record.clone(), go.clone(), finish.clone(), after.clone());
+        Box::new(move |ticket: &Ticket| {
+            while !go.released() {
+                std::thread::sleep(Duration::from_millis(2));
+            }
+            let _ = began.send(ticket.begin());
+            while !finish.released() {
+                std::thread::sleep(Duration::from_millis(2));
+            }
+            record.answer(ticket.id, Answer::Done);
+            ticket.proven();
+            while !after.released() {
+                std::thread::sleep(Duration::from_millis(2));
+            }
+        })
+    };
+    submit(&pool, 1, far(), &record, work, writing(fenced));
+    assert!(until(|| running(&pool) == 1));
+    assert!(!pool.writing(&fenced));
+    go.release();
+    assert!(self::began(&rx));
+    assert!(pool.writing(&fenced));
+    assert!(!pool.writing(&other));
+    finish.release();
+    assert!(until(|| record.get(1) == Some(Answer::Done)));
+    assert!(until(|| !pool.writing(&fenced)));
+    assert_eq!(running(&pool), 1);
+    after.release();
+    assert!(until(|| running(&pool) == 0));
+    assert!(!pool.writing(&fenced));
+
+    // Unknown: fenced while its call runs, then until its repair is over.
+    let (go, finish) = (Hold::default(), Hold::default());
+    let (work, began) = held_write(&record, &go, &finish, false);
+    submit(&pool, 2, far(), &record, work, writing(fenced));
+    go.release();
+    assert!(self::began(&began));
+    assert!(pool.writing(&fenced));
+    finish.release();
+    assert!(until(|| events(&timeline).contains(&Event::Turn(fenced))));
+    assert!(pool.writing(&fenced));
+    assert!(!pool.writing(&other));
+    fake.hold.release();
+    assert!(until(|| !pool.writing(&fenced)));
+    assert!(pool.inner.lock().repairs.is_empty());
+
+    // A write no repair covers fences nothing, even unknown.
+    let (go, finish) = (Hold::default(), Hold::default());
+    let (work, began) = held_write(&record, &go, &finish, false);
+    let unseeding = Some(Mutates {
+        rid: fenced,
+        repaired: false,
+    });
+    submit(&pool, 3, far(), &record, work, unseeding);
+    go.release();
+    assert!(self::began(&began));
+    assert!(!pool.writing(&fenced));
+    finish.release();
+    assert!(until(|| running(&pool) == 0));
+    assert!(!pool.writing(&fenced));
+    assert!(pool.stop(soon(2000)));
+}
