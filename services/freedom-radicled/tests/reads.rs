@@ -102,7 +102,7 @@ const SECOND: &[(&str, &[u8])] = &[
 /// today's arguments. A commit whose diff isn't UTF-8 is served, its text
 /// decoded lossily (R-19). libradicle's errors are `not_found` by today's
 /// message test, otherwise `failed`, with its message; what doesn't parse
-/// is `invalid_argument`, and the ops of later steps are `stopped`.
+/// is `invalid_argument`.
 #[test]
 fn each_pass_through_op_answers_the_add_ons_bytes() {
     let dirs = Dirs::new();
@@ -321,7 +321,7 @@ fn each_pass_through_op_answers_the_add_ons_bytes() {
         assert_eq!(code(&reply), todays(message), "{op} {args}: {reply}");
         assert_eq!(reply["error"]["message"], message.as_str(), "{reply}");
     }
-    // What doesn't parse, and what a later step serves.
+    // What doesn't parse.
     let reply = radicled
         .read(
             "tree_at",
@@ -335,11 +335,6 @@ fn each_pass_through_op_answers_the_add_ons_bytes() {
     assert_eq!(code(&reply), "invalid_argument", "{reply}");
     let reply = radicled.call("rad.read", json!({ "args": {} }));
     assert_eq!(code(&reply), "invalid_argument", "{reply}");
-    for op in ["issue", "remotes", "repo_stats", "readme_at", "node_info"] {
-        let reply = radicled.read(op, json!({ "rid": r })).unwrap_err();
-        assert_eq!(code(&reply), "stopped", "{op}: {reply}");
-        assert_eq!(reply["error"]["message"], "not served in this build");
-    }
     let log = shut_down(&mut radicled, &dirs.home);
     // Neither content nor libradicle's messages are logged.
     assert!(!log.contains("caf"), "{log}");
