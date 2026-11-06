@@ -53,7 +53,8 @@
 //! - `FREEDOM_IPFSD_TEST_CANARY=<path>` reads the file once confined, from
 //!   the main thread, a runtime worker and a blocking-pool thread, and logs
 //!   whether each read it.
-//! - `FREEDOM_IPFSD_TEST_EXEC=1` tries to run `/bin/sh` once confined.
+//! - `FREEDOM_IPFSD_TEST_EXEC=1` tries to run `/bin/sh` (`cmd.exe` on
+//!   Windows) once confined, and logs whether it ran, or the spawn's error.
 //! - `FREEDOM_IPFSD_TEST_CONNECT=<port>` tries TCP to `127.0.0.1:<port>`
 //!   once confined.
 //! - `FREEDOM_IPFSD_TEST_RESOLV_CONF=<path>` reads the process's DNS
@@ -138,12 +139,19 @@ pub fn after_confinement(runtime: &tokio::runtime::Handle) {
             }
         }
         if std::env::var_os("FREEDOM_IPFSD_TEST_EXEC").is_some() {
-            let ran = std::process::Command::new("/bin/sh")
-                .arg("-c")
-                .arg("exit 0")
-                .status()
-                .is_ok();
-            fc_service::log::info("exec probe", json!({ "ran": ran }));
+            let (program, args) = if cfg!(windows) {
+                ("cmd.exe", ["/d", "/c", "exit 0"].as_slice())
+            } else {
+                ("/bin/sh", ["-c", "exit 0"].as_slice())
+            };
+            let status = std::process::Command::new(program).args(args).status();
+            fc_service::log::info(
+                "exec probe",
+                json!({
+                    "ran": status.is_ok(),
+                    "error": status.as_ref().err().and_then(std::io::Error::raw_os_error),
+                }),
+            );
         }
         if let Some(port) = std::env::var("FREEDOM_IPFSD_TEST_CONNECT")
             .ok()

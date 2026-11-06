@@ -8,12 +8,12 @@
 //! the lines, and checks from outside what the child must not have
 //! changed.
 //!
-//! Linux and macOS; on Windows it does nothing yet.
+//! Linux, macOS and Windows.
 
-#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+#[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
 #[allow(clippy::print_stderr)]
 fn main() {
-    eprintln!("confine: nothing to test on this platform yet");
+    eprintln!("confine: nothing to test on this platform");
 }
 
 #[cfg(target_os = "linux")]
@@ -26,9 +26,18 @@ fn main() {
     macos::main();
 }
 
+#[cfg(windows)]
+fn main() {
+    windows::main();
+}
+
 #[cfg(target_os = "macos")]
 #[path = "confine/macos.rs"]
 mod macos;
+
+#[cfg(windows)]
+#[path = "confine/windows.rs"]
+mod windows;
 
 #[cfg(target_os = "linux")]
 #[allow(
@@ -757,6 +766,7 @@ mod linux {
                 .collect(),
             reasons: Default::default(),
             resolution: None,
+            mitigations: Default::default(),
         }
     }
 

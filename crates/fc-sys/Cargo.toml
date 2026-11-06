@@ -37,6 +37,10 @@ test-abis = []
 # Test-only Mach calls on macOS (design 0010, Tests): a service lookup, and
 # the task's port names.
 test-macos = []
+# Test-only job calls on Windows (design 0010, Tests): assigning another
+# process to a job, as libuv assigns each child, and asking whether it is in
+# one.
+test-windows = []
 
 [target.'cfg(unix)'.dependencies]
 # The raw calls std and rustix lack: Landlock's version query, the
@@ -44,9 +48,19 @@ test-macos = []
 # and Seatbelt's (design 0010).
 libc = "0.2"
 
+# GetDriveTypeW, SetErrorMode and WerSetFlags; and confinement's job object
+# and process mitigation policies (design 0010, "Windows"): JobObjects and
+# Threading for the calls, Security for CreateJobObjectW's attributes,
+# Foundation for HANDLE, and SystemServices for the policies' structures,
+# whose size the calls are checked against.
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Security",
     "Win32_Storage_FileSystem",
     "Win32_System_Diagnostics_Debug",
     "Win32_System_ErrorReporting",
+    "Win32_System_JobObjects",
+    "Win32_System_SystemServices",
+    "Win32_System_Threading",
 ] }
