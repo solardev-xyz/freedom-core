@@ -398,6 +398,7 @@ pub fn write(
             }
             Err(e) => failed_past_start(&conn, ticket.id, name, rid, &e),
         }
+        testhooks::at_write_end();
     });
     (work, mutates)
 }
@@ -439,6 +440,7 @@ pub fn unseed(
             }
             Err(e) => failed_past_start(&conn, ticket.id, "unseed", rid, &e),
         }
+        testhooks::at_write_end();
     });
     (work, mutates)
 }
