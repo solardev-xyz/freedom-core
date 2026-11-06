@@ -1,6 +1,7 @@
-//! `rad.read`'s pass-through ops (design 0008, "Methods", "Deadlines",
-//! "Errors", "Pools and budgets" and "JSON results"), on the read pool with
-//! its 60 s deadline to the head ([`crate::pools`]).
+//! `rad.read` (design 0008, "Methods", "Deadlines", "Errors", "Pools and
+//! budgets" and "JSON results"), on the read pool with its 60 s deadline to
+//! the head ([`crate::pools`]): the pass-through ops here, and the composed
+//! ops and those of main's serialization in [`composed`].
 //!
 //! **`rad.read { op, args }`** answers a head, `{ content_type:
 //! "application/json", bytes }`, then the JSON as a body stream: the exact
@@ -19,12 +20,16 @@
 //! - `seeders { rid }`, with the node held exclusively, as libradicle's
 //!   `seeders` takes `&mut self`; `identity` and `status`.
 //!
+//! The other ops 0008 lists ([`composed`]): of main's serialization,
+//! `issue { rid, issue_id }`, `patch { rid, patch_id }`, `remotes { rid }`
+//! and `repo_stats { rid, revision }`; composed, `readme_at { rid,
+//! revision }`, `repo_meta { rid }`, `repos_meta`, `issues_page` and
+//! `patches_page { rid, status, page, per_page }`, and `node_info`.
+//!
 //! The ops without args take none, null or `{}`. A revision is 40
-//! lowercase hex digits, as main checks it. The other ops 0008 lists, of
-//! main's serialization (`issue`, `patch`, `remotes`, `repo_stats`) and
-//! composed (`readme_at`, `repo_meta`, `repos_meta`, `issues_page`,
-//! `patches_page`, `node_info`), come with a later step: until then each
-//! answers `stopped`, "not served in this build".
+//! lowercase hex digits, as main checks it; a COB ID 6 to 40, as
+//! libradicle checks it, refused with its text. A page's `status`, `page`
+//! and `per_page` are strings or null.
 //!
 //! **Before the build, in this order:**
 //! 1. the pool's own refusals: `stopped` before `RUNNING` and from the stop
@@ -35,7 +40,10 @@
 //! 3. **the fence** ([`fence`]), for an op that names a repository:
 //!    - quarantined at the gate: `quarantined`, with `data.kind` and
 //!      `data.step` from the record ([`crate::quarantine::refusal`]), for
-//!      the COB ops, and for every op of a `namespace` quarantine;
+//!      the COB ops (`issues`, `issue`, `patches`, `patch`, `issues_page`,
+//!      `patches_page`), and for every op of a `namespace` quarantine that
+//!      names the repository (the listings, `repos_meta` among them, list
+//!      it as they do any);
 //!    - the COB ops answer `stopped` while the repository is being
 //!      repaired, and while a COB write to it is past its mutation start
 //!      and not proven, or its online repair is queued
@@ -100,23 +108,13 @@ use crate::node::{Handle, Node};
 use crate::output::{Body, Budget, Failure, Refused, Until, json_read};
 use crate::pools::{Pools, Ticket, Work};
 use crate::{quarantine, testhooks};
+use composed::Cobs;
+
+mod composed;
+mod js;
 
 /// How often a body waiting for credit looks at its token.
 const POLL: Duration = Duration::from_millis(10);
-
-/// The ops 0008 lists that a later step serves.
-const LATER: &[&str] = &[
-    "issue",
-    "patch",
-    "remotes",
-    "repo_stats",
-    "readme_at",
-    "repo_meta",
-    "repos_meta",
-    "issues_page",
-    "patches_page",
-    "node_info",
-];
 
 /// `rad.read`'s params.
 #[derive(Deserialize)]
@@ -169,7 +167,34 @@ struct CommitsArgs {
     per_page: u32,
 }
 
-/// A pass-through op, its args checked.
+/// `{ rid, issue_id }`.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct IssueArgs {
+    rid: String,
+    issue_id: String,
+}
+
+/// `{ rid, patch_id }`.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PatchArgs {
+    rid: String,
+    patch_id: String,
+}
+
+/// A page's args: its query's raw `status`, `page` and `perPage`, each a
+/// string or null.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PageArgs {
+    rid: String,
+    status: Option<String>,
+    page: Option<String>,
+    per_page: Option<String>,
+}
+
+/// An op, its args checked.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Op {
     RepoInfo {
@@ -216,6 +241,37 @@ enum Op {
     },
     Identity,
     Status,
+    Issue {
+        rid: RepoId,
+        id: String,
+    },
+    Patch {
+        rid: RepoId,
+        id: String,
+    },
+    Remotes {
+        rid: RepoId,
+    },
+    RepoStats {
+        rid: RepoId,
+        revision: String,
+    },
+    ReadmeAt {
+        rid: RepoId,
+        revision: String,
+    },
+    RepoMeta {
+        rid: RepoId,
+    },
+    ReposMeta,
+    Page {
+        rid: RepoId,
+        cobs: Cobs,
+        status: Option<String>,
+        page: Option<String>,
+        per_page: Option<String>,
+    },
+    NodeInfo,
 }
 
 impl Op {
@@ -231,14 +287,33 @@ impl Op {
             | Op::Commit { rid, .. }
             | Op::Issues { rid }
             | Op::Patches { rid }
-            | Op::Seeders { rid } => Some(*rid),
-            Op::ListRepos | Op::ListSeededRepos | Op::Identity | Op::Status => None,
+            | Op::Seeders { rid }
+            | Op::Issue { rid, .. }
+            | Op::Patch { rid, .. }
+            | Op::Remotes { rid }
+            | Op::RepoStats { rid, .. }
+            | Op::ReadmeAt { rid, .. }
+            | Op::RepoMeta { rid }
+            | Op::Page { rid, .. } => Some(*rid),
+            Op::ListRepos
+            | Op::ListSeededRepos
+            | Op::Identity
+            | Op::Status
+            | Op::ReposMeta
+            | Op::NodeInfo => None,
         }
     }
 
     /// Whether it is a COB op, which the repair fences.
     fn cob(&self) -> bool {
-        matches!(self, Op::Issues { .. } | Op::Patches { .. })
+        matches!(
+            self,
+            Op::Issues { .. }
+                | Op::Patches { .. }
+                | Op::Issue { .. }
+                | Op::Patch { .. }
+                | Op::Page { .. }
+        )
     }
 }
 
@@ -279,6 +354,34 @@ fn revision(revision: String, what: &str) -> Result<String, ErrorBody> {
             "{what} isn't a commit ID (40 lowercase hex digits)"
         )))
     }
+}
+
+/// A COB ID, as libradicle checks it: 6 to 40 lowercase hex digits,
+/// refused with its text.
+fn cob_id(id: String) -> Result<String, ErrorBody> {
+    let hex = id
+        .bytes()
+        .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b));
+    if (6..=40).contains(&id.len()) && hex {
+        Ok(id)
+    } else {
+        Err(invalid(&libradicle::Error::InvalidCobId(id).to_string()))
+    }
+}
+
+/// A page's args.
+fn page(given: Value, op: &str, cobs: Cobs) -> Result<Op, ErrorBody> {
+    let a: PageArgs = args(
+        given,
+        &format!("{op} takes {{ rid, status, page, per_page }}"),
+    )?;
+    Ok(Op::Page {
+        rid: rid(&a.rid)?,
+        cobs,
+        status: a.status,
+        page: a.page,
+        per_page: a.per_page,
+    })
 }
 
 /// `rad.read`'s params, checked (see the module's doc).
@@ -354,13 +457,51 @@ fn op(params: Option<&RawValue>) -> Result<Op, ErrorBody> {
         }
         "identity" => none(&given, "identity takes no args").map(|()| Op::Identity),
         "status" => none(&given, "status takes no args").map(|()| Op::Status),
-        later if LATER.contains(&later) => Err(ErrorBody::new(
-            ErrorCode::Stopped,
-            "not served in this build",
-        )),
+        "issue" => {
+            let a: IssueArgs = args(given, "issue takes { rid, issue_id }")?;
+            Ok(Op::Issue {
+                rid: rid(&a.rid)?,
+                id: cob_id(a.issue_id)?,
+            })
+        }
+        "patch" => {
+            let a: PatchArgs = args(given, "patch takes { rid, patch_id }")?;
+            Ok(Op::Patch {
+                rid: rid(&a.rid)?,
+                id: cob_id(a.patch_id)?,
+            })
+        }
+        "remotes" => {
+            let a: RidArgs = args(given, "remotes takes { rid }")?;
+            Ok(Op::Remotes { rid: rid(&a.rid)? })
+        }
+        "repo_stats" => {
+            let a: RevisionArgs = args(given, "repo_stats takes { rid, revision }")?;
+            Ok(Op::RepoStats {
+                rid: rid(&a.rid)?,
+                revision: revision(a.revision, "revision")?,
+            })
+        }
+        "readme_at" => {
+            let a: RevisionArgs = args(given, "readme_at takes { rid, revision }")?;
+            Ok(Op::ReadmeAt {
+                rid: rid(&a.rid)?,
+                revision: revision(a.revision, "revision")?,
+            })
+        }
+        "repo_meta" => {
+            let a: RidArgs = args(given, "repo_meta takes { rid }")?;
+            Ok(Op::RepoMeta { rid: rid(&a.rid)? })
+        }
+        "repos_meta" => none(&given, "repos_meta takes no args").map(|()| Op::ReposMeta),
+        "issues_page" => page(given, "issues_page", Cobs::Issues),
+        "patches_page" => page(given, "patches_page", Cobs::Patches),
+        "node_info" => none(&given, "node_info takes no args").map(|()| Op::NodeInfo),
         _ => Err(invalid(
             "op is one of repo_info, tree, tree_at, blob, blob_at, commits, commit, issues, \
-             patches, list_repos, list_seeded_repos, seeders, identity and status",
+             patches, list_repos, list_seeded_repos, seeders, identity, status, issue, patch, \
+             remotes, repo_stats, readme_at, repo_meta, repos_meta, issues_page, patches_page \
+             and node_info",
         )),
     }
 }
@@ -580,6 +721,32 @@ fn body(handle: &Handle, budget: &Arc<Budget>, until: &Until, op: Op) -> Result<
             |_| handle.node().connected_peers(),
             |w, peers| json::connected_peers(w, *peers),
         ),
+        Op::Issue { rid, id } => composed::issue(handle, budget, until, rid, &id),
+        Op::Patch { rid, id } => composed::patch(handle, budget, until, rid, &id),
+        Op::Remotes { rid } => composed::remotes(handle, budget, until, rid),
+        Op::RepoStats { rid, revision } => {
+            composed::repo_stats(handle, budget, until, rid, &revision)
+        }
+        Op::ReadmeAt { rid, revision } => {
+            composed::readme_at(handle, budget, until, rid, &revision)
+        }
+        Op::RepoMeta { rid } => composed::repo_meta(handle, budget, until, rid),
+        Op::ReposMeta => composed::repos_meta(handle, budget, until),
+        Op::Page {
+            rid,
+            cobs,
+            status,
+            page,
+            per_page,
+        } => composed::page(
+            handle,
+            budget,
+            until,
+            rid,
+            cobs,
+            (status.as_deref(), page.as_deref(), per_page.as_deref()),
+        ),
+        Op::NodeInfo => composed::node_info(handle, budget, until),
     }
 }
 
