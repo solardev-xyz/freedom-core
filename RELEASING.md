@@ -213,8 +213,11 @@ publish job that runs no repository code.
      - macOS's hello report;
      - fc-service's confinement test, which prints the `KERN_PROCARGS2`
        result and the Mach rights held at the confinement point;
-     - Windows's report, which says `unavailable` until its job object
-       lands.
+     - Windows's report: `job`, `exec` `partial` with the gap
+       `parent_process` (0010, "Windows"), `files` and `ipc` `unavailable`,
+       and each of `mitigations` `set`;
+     - fc-service's confinement test on Windows: `cmd.exe` refused, inside a
+       job made as libuv makes one and with none.
 
      The dry run's native macOS and Windows builds pass the workflow's smoke
      test.

@@ -47,6 +47,17 @@ fn hello_names_this_starts_recipient_and_the_libradicle_it_links() {
         assert_eq!(confinement["files"], files, "{confinement}");
         assert_eq!(confinement["exec"], "enforced", "{confinement}");
     }
+    // Windows, step 1: the job and each mitigation, read back.
+    if cfg!(windows) {
+        assert_eq!(confinement["mechanism"], "job", "{confinement}");
+        assert_eq!(confinement["exec"], "partial", "{confinement}");
+        assert_eq!(confinement["files"], "unavailable", "{confinement}");
+        assert_eq!(
+            confinement["mitigations"],
+            json!({ "dynamic_code": "set", "image_load": "set", "extension_points": "set" }),
+            "{confinement}"
+        );
+    }
     assert!(confinement.is_object(), "{confinement}");
     a.close_stdin();
     assert_eq!(a.exit_code(EXIT_TIMEOUT), Some(0));

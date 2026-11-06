@@ -1,6 +1,7 @@
 //! Confinement through the binary (design 0010, Tests): what `ipfs.hello`
 //! reports, what the process holds at the confinement point, and what it
-//! can't do once confined, from each kind of thread it has.
+//! can't do once confined, from each kind of thread it has (on Windows,
+//! what `hello` reports and that `cmd.exe` doesn't run).
 //!
 //! The thread kinds a test hook reaches are the main thread, a runtime
 //! worker and a blocking-pool thread. fc-service's own (logging's writer,
@@ -87,6 +88,33 @@ fn hello_reports_the_policy_and_the_confinement_the_kernel_offers() {
                 "{confinement}"
             );
         }
+        _ if cfg!(windows) => {
+            // Step 1 (D4): the job, nested in the test's own job if it has
+            // one, and each mitigation read back. A process made with
+            // another as its parent takes that one's job: `exec` is
+            // `partial`, naming it. Files and local IPC wait for a
+            // restricted token.
+            assert_eq!(confinement["mechanism"], "job", "{confinement}");
+            assert_eq!(confinement["exec"], "partial", "{confinement}");
+            assert_eq!(
+                confinement["gaps"],
+                json!(["parent_process"]),
+                "{confinement}"
+            );
+            for property in ["files", "ipc"] {
+                assert_eq!(confinement[property], "unavailable", "{confinement}");
+                assert!(
+                    confinement["reasons"][property].is_string(),
+                    "{confinement}"
+                );
+            }
+            assert_eq!(confinement["network"], "none", "{confinement}");
+            assert_eq!(
+                confinement["mitigations"],
+                json!({ "dynamic_code": "set", "image_load": "set", "extension_points": "set" }),
+                "{confinement}"
+            );
+        }
         _ => assert!(confinement.is_object(), "{confinement}"),
     }
     ipfsd.shutdown();
@@ -108,6 +136,11 @@ fn hello_reports_the_policy_and_the_confinement_the_kernel_offers() {
     }
     if cfg!(target_os = "macos") {
         assert_eq!(result["confinement"]["network"], "enforced", "{hello}");
+    }
+    if cfg!(windows) {
+        // No port rule here: the service's gate enforces it.
+        assert_eq!(result["confinement"]["network"], "unavailable", "{hello}");
+        assert_eq!(result["confinement"]["mechanism"], "job", "{hello}");
     }
     // Its names go to the proxy: no DNS configuration is read.
     assert!(result["confinement"].get("resolution").is_none(), "{hello}");
@@ -208,6 +241,29 @@ fn once_confined_no_thread_reads_outside_and_nothing_runs() {
         true,
         "{stderr}"
     );
+}
+
+/// On Windows, once confined, the service can't run `cmd.exe`, which this
+/// test, unconfined, can: the job's limit refuses it.
+#[cfg(all(feature = "testhooks", windows))]
+#[test]
+fn once_confined_cmd_exe_is_refused() {
+    let control = std::process::Command::new("cmd.exe")
+        .args(["/d", "/c", "exit 0"])
+        .status()
+        .unwrap();
+    assert!(control.success());
+    let dirs = Dirs::new();
+    let mut ipfsd = Ipfsd::persistent(&dirs, &[("FREEDOM_IPFSD_TEST_EXEC", "1")]);
+    ipfsd.hello();
+    ipfsd.shutdown();
+    assert_eq!(ipfsd.exit_code(EXIT_TIMEOUT), Some(0));
+    let stderr = ipfsd.stderr();
+    let probes = logged(&stderr, "exec probe");
+    assert_eq!(probes.len(), 1, "{stderr}");
+    assert_eq!(probes[0]["ran"], false, "{stderr}");
+    // ERROR_NOT_ENOUGH_QUOTA: the job's one process is the service.
+    assert_eq!(probes[0]["error"], 1816, "{stderr}");
 }
 
 /// A descriptor inherited at spawn: one re-exec drops it, and the service

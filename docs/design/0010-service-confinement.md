@@ -68,7 +68,7 @@
 | the network | — | anything | unchanged, except where [noted](#options-per-os) |
 | main | the pipe | frames only, which main checks (0001, 0007) | the same |
 
-On Windows, the first step (a job object and mitigation policies) refuses child processes only. The files, local IPC and other same-user processes stay reachable until a restricted token or AppContainer (D4).
+On Windows, the first step (a job object and mitigation policies) refuses the service's own child processes only: one it creates with another of the user's processes as its parent takes that process's job ([Windows](#windows)). The files, local IPC and other same-user processes stay reachable until a restricted token or AppContainer (D4).
 
 ## What each service needs
 
@@ -304,6 +304,10 @@ The rest of this section is about glibc's resolver, `confine::Resolver::System`.
   - an active-process limit of 1 refuses every child process;
   - a memory limit would answer 0007's and 0008's open question on an OS memory limit.
   - **No UI restrictions:** libuv already places the service in main's job (0007), and Windows (8 and later) nests a second job only if neither job sets UI limits. A job with them would fail to be assigned.
+  - **No breakaway:** libuv's job lets its children break away, silently too, but a child breaks away only from jobs that allow it, starting with the innermost. The service's job allows none, so its limit holds.
+  - **Its handle closed** once it reads back: the process then holds no handle to its job, so it can't raise the limit. The job, unnamed, lives while the process is in it.
+  - **Its gap:** a process created with another process as its parent (`PROC_THREAD_ATTRIBUTE_PARENT_PROCESS`) takes that parent's job, not the creator's. The service runs with the user's token, so it can open any of the user's processes to name one, main included. `exec` is therefore `partial`, with the gap `parent_process`. The restricted token's spike checks whether it closes this.
+  - **Refused from outside** (an outer job with UI restrictions): `exec` is `blocked`, with the reason. The job's own limit refused, or a job assigned that doesn't read back, is an invalid policy (exit 77).
 
   Cheap (an estimate), but it doesn't restrict files.
 - **Process mitigation policies** (`SetProcessMitigationPolicy`, also self-applied):
@@ -312,9 +316,11 @@ The rest of this section is about glibc's resolver, `confine::Resolver::System`.
   - no legacy extension points (`ProcessExtensionPointDisablePolicy`);
   - optionally, only Microsoft-signed images from then on (`ProcessSignaturePolicy`). The service loads only system DLLs after it starts, which needs testing.
   - **Each is detected on its own:** set, then read back with `GetProcessMitigationPolicy`. One the OS doesn't know fails alone, and is reported missing.
+  - **Reported by name** in `hello`'s `mitigations` (`dynamic_code`, `image_load`, `extension_points`): `set` when it read back with every flag asked for, `missing` otherwise, with its reason in `reasons`. The signature policy isn't set in the first step: it needs the testing above.
   - **Not self-applied:** refusing child processes as a mitigation (`PROC_THREAD_ATTRIBUTE_CHILD_PROCESS_POLICY`) is set only when a process is created. The job's limit does that job here.
 
   Cheap (an estimate), but they don't restrict files either.
+- **Process-wide, both:** so `confine` counts no threads on Windows, where the loader starts worker threads of its own at process start. Handles inherited at spawn aren't checked in the first step: with `files` and `ipc` `unavailable`, the report claims nothing an inherited handle undoes, and the restricted token's relaunch passes only stdio and the lock.
 - **A restricted token with restricting SIDs** (Chromium's model on Windows):
   - **How it works:** every access check runs twice, once with the token's enabled SIDs and once with its restricting SIDs, and access needs both. So it limits reads as well as writes. (`WRITE_RESTRICTED` would limit only writes.)
   - **No privilege needed:** a process may start another with a restricted version of its own token.
@@ -338,7 +344,7 @@ The rest of this section is about glibc's resolver, `confine::Resolver::System`.
 | Linux: Landlock | confined | confined, except metadata | no exec of any file | abstract (ABI 6) and pathname (ABI 9) sockets | — | TCP ports (ABI 4), UDP ports (ABI 10) | no | small | none |
 | Linux: seccomp denylist | — | metadata changes and `truncate` refused | refused | no local sockets | reduced | — | no | small | none |
 | macOS: Seatbelt | confined | confined | refused | confined | reduced | by port, on loopback or any host | no | FFI, or `sandbox-exec` | D3 |
-| Windows: job and mitigations | — | — | refused | — | — | — | no | small FFI | none |
+| Windows: job and mitigations | — | — | refused, except with another process as parent | — | — | — | no | small FFI | none |
 | Windows: restricted token | confined, by ACLs | confined, by ACLs | with the job | by ACLs | — | — | no | relaunch, ACLs, a desktop | none, or a launcher |
 | Windows: AppContainer | confined | confined | with the job | confined | — | loopback needs an exemption | for loopback | launcher and ACLs | yes |
 
@@ -380,6 +386,7 @@ The rest of this section is about glibc's resolver, `confine::Resolver::System`.
    - **Why:** before ABI 8, Landlock restricts only the calling thread and the threads it starts later. A thread started earlier stays unconfined, and a compromise could use it. seccomp is installed with `TSYNC`, and Landlock with its `TSYNC` from ABI 8, as backstops. The order doesn't rely on them.
    - **Checked:** `confine` counts the process's threads first (`/proc/self/task` on Linux, `proc_pidinfo` on macOS). More than one is a bug, so the service exits 77 rather than report confinement.
      - **On macOS** Seatbelt confines the whole process, not a thread at a time, so the check is there for uniformity. A system thread started before `confine` would exit 77, and CI would show it.
+     - **On Windows** there is no count: the job and the mitigations are process-wide, and the loader starts threads of its own ([Windows](#windows)).
    - **Checked too: only the registered descriptors cross.** Landlock and seccomp check new opens and calls only. Nothing they do closes or revokes a descriptor opened before them: a connected socket, a pipe or FIFO, or a file opened outside the grants stays usable.
      - **The check:** `confine` compares every descriptor in the process's table (`/proc/self/fd` on Linux, `/dev/fd` on macOS) with stdio and the descriptors the service registered, whatever its type. The table's own descriptor, which `confine` opens to read it, is known by its number and skipped, and nothing else is opened while it reads.
      - **Anything else** above stderr, opened by the setup or left after the entry's re-exec, is a bug, and the service exits 77:
@@ -403,7 +410,7 @@ The rest of this section is about glibc's resolver, `confine::Resolver::System`.
      - **Minimum ABIs:** `freedom-ipfsd` uses ABI 1 and up. `freedom-radicled` needs ABI 2: below it, it applies no Landlock rules and reports `files` as `unavailable`, with the reason.
    - The seccomp denylist above, answering `EPERM` (`ENOSYS` for `clone3`), behind the ABI guard.
 3. **macOS:** a Seatbelt profile with the same paths and rules, self-applied through FFI (D3), so all three OSes work the same way. It passes the qualification gate before each release.
-4. **Windows:** the job object and the mitigation policies, self-applied, each detected on its own. File confinement follows with a restricted token, once its spike qualifies (D4).
+4. **Windows:** the job object and the mitigation policies, self-applied, each detected on its own ([Windows](#windows)). `files` and `ipc` are `unavailable`, and so is `network` in `socks5` mode: nothing in this step names a port. File confinement follows with a restricted token, once its spike qualifies (D4).
 5. **Reporting:** `ipfs.hello` and `rad.hello` gain `confinement`, one status per property:
 
    ```jsonc
@@ -412,7 +419,8 @@ The rest of this section is about glibc's resolver, `confine::Resolver::System`.
      "files": "enforced", "exec": "enforced", "ipc": "partial", "network": "enforced",
      "gaps": ["signals"],                 // what "partial" leaves open
      "reasons": {},                       // per property: why it is "unavailable" or "blocked"
-     "resolution": "system"               // `direct` mode. Through glibc (Linux): "system", or "files_only" with its reason. A service's own resolver (Linux, macOS): "resolv_conf", or "fallback" with its reason
+     "resolution": "system",              // `direct` mode. Through glibc (Linux): "system", or "files_only" with its reason. A service's own resolver (Linux, macOS): "resolv_conf", or "fallback" with its reason
+     "mitigations": { "dynamic_code": "set" }  // Windows alone: each mitigation, "set" or "missing" (its reason in `reasons`)
    }
    ```
 
@@ -608,7 +616,11 @@ Through the binary, in CI's job for each OS:
   - the helper opens no socket, and a canary listener sees nothing;
   - a kill and a timeout during the import, then a restart: the marker stays, the service reconciles, and the reply is `outcome_unknown`;
   - **an unclean stop before admission:** a write and a fetch unfinished at the stop's 5 s exit, leaving the marker and a ref lock file. The import process repairs them before it admits the import. A `rad.import_repo` sent before `rad.reconcile` has replied gets `stopped` and changes nothing. A reconciliation that reaches its deadline imports nothing.
-- **Windows:** the job is assigned inside libuv's job, and each mitigation reads back as set.
+- **Windows:**
+  - the job is assigned inside a job made as libuv makes one (breakaway allowed, silently too), and with no outer job;
+  - `cmd.exe` is refused once confined, also with `CREATE_BREAKAWAY_FROM_JOB` and from a thread started before `confine`, and the control, unconfined in libuv's job, runs it;
+  - each mitigation reads back as set;
+  - a forced refusal of the job gives `blocked`, and of each mitigation `missing`, each with its reason, and the service runs.
 - **Before shipping, on the release runtime** (each release's checklist): the release binaries, confined, on glibc 2.17 (the oldest the release builds run on, below `getrandom`'s 2.25: a load completes), 2.25 (the oldest the browser runs on), another from before 2.34 and a current one, each with a first lookup after confinement and none before it; with and without `resolve` and `mdns4_minimal` in `nsswitch.conf`; `socks5` mode through a LAN proxy, on Linux and macOS; and the packaged app started each way users start it (the desktop entry, a terminal, each Linux package format, macOS's Finder and Dock), checking from the services' logs that their entry re-exec seldom happens. A descriptor the app itself inherited without close-on-exec passes through to the services on Linux, and each start then re-executes once.
 - **Before shipping, measured:**
   - cold start to `hello`;
