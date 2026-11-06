@@ -762,14 +762,19 @@ fn a_composed_read_waiting_for_the_budget_ends_at_its_cancel_and_its_deadline() 
         br#"{"connectedPeers":0}"#
     );
 
-    // So does its deadline.
+    // So does its deadline, 8 s from its admission, which follows the send,
+    // timed before it: the reply is no sooner than 8 s from the send.
+    let sent = Instant::now();
     let waiting = radicled.request("rad.read", readme_at.clone());
-    let admitted = Instant::now();
     std::thread::sleep(Duration::from_millis(2000));
     let behind = status(&mut radicled);
     assert!(!radicled.any_within(behind, Duration::from_millis(2000)));
     assert_eq!(code(&radicled.reply(waiting)), "deadline");
-    assert!(admitted.elapsed() >= Duration::from_secs(8));
+    assert!(
+        sent.elapsed() >= Duration::from_secs(8),
+        "{:?}",
+        sent.elapsed()
+    );
     assert_eq!(
         radicled.read_reply(behind).unwrap(),
         br#"{"connectedPeers":0}"#
