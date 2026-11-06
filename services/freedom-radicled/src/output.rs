@@ -386,10 +386,16 @@ impl Json {
     /// Its JSON, once `written` says how its serialization ended: the
     /// writer's own refusal first, whatever the serializer made of it.
     pub fn finish(self, written: serde_json::Result<()>) -> Result<Body, Failure> {
+        self.end(written.map_err(Failure::Json))
+    }
+
+    /// Its JSON, once `composed` says how its writing ended: the writer's
+    /// own refusal first, whatever the writing made of it.
+    pub fn end(self, composed: Result<(), Failure>) -> Result<Body, Failure> {
         if let Some(refused) = self.refused {
             return Err(Failure::Refused(refused));
         }
-        written.map_err(Failure::Json)?;
+        composed?;
         Ok(Body {
             chunks: self.chunks,
             bytes: self.len,
@@ -478,6 +484,11 @@ pub enum Failure {
     Radicle(libradicle::Error),
     /// The serializer's own error, not the writer's.
     Json(serde_json::Error),
+    /// The op's own answer: a composed op's (`readme_at`'s "no readme").
+    Answered(ErrorBody),
+    /// A text that isn't what libradicle's serializer writes, as a
+    /// composition reads it: never expected. By what it was.
+    Internal(&'static str),
 }
 
 impl Failure {
@@ -492,6 +503,14 @@ impl Failure {
                 log::error(
                     "a read's JSON could not be serialized",
                     json!({ "category": format!("{:?}", error.classify()) }),
+                );
+                ErrorBody::new(ErrorCode::Internal, "Internal error")
+            }
+            Failure::Answered(error) => error,
+            Failure::Internal(what) => {
+                log::error(
+                    "a read's JSON could not be composed",
+                    json!({ "category": what }),
                 );
                 ErrorBody::new(ErrorCode::Internal, "Internal error")
             }
@@ -544,6 +563,24 @@ fn json_read_within<T>(
     drop(value);
     drop(built);
     json.finish(written)
+}
+
+/// A composed read within 0008's limits (`crate::reads`' composed ops):
+/// everything it builds (its walks' data, the texts it composes from, and
+/// its working set) within one reservation of the built budget,
+/// [`BUILT`], taken before anything is built; its JSON in a [`Json`]
+/// writer of at most [`JSON`]. `compose` writes it; what it built is freed
+/// once it returns, and the reservation then released.
+pub fn composed_read(
+    budget: &Arc<Budget>,
+    until: &Until,
+    compose: impl FnOnce(&mut Json) -> Result<(), Failure>,
+) -> Result<Body, Failure> {
+    let built = budget.reserve(BUILT, until)?;
+    let mut json = Json::new(budget.clone(), until.clone(), JSON);
+    let composed = compose(&mut json);
+    drop(built);
+    json.end(composed)
 }
 
 #[cfg(test)]

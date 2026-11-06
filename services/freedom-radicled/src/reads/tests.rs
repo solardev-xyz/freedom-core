@@ -117,7 +117,14 @@ fn each_op_takes_todays_args() {
 /// The ops without args take none, null or `{}`, and nothing else.
 #[test]
 fn ops_without_args_take_none() {
-    for name in ["list_repos", "list_seeded_repos", "identity", "status"] {
+    for name in [
+        "list_repos",
+        "list_seeded_repos",
+        "identity",
+        "status",
+        "repos_meta",
+        "node_info",
+    ] {
         assert!(checked(json!({ "op": name })).is_ok(), "{name}");
         assert!(read(name, Value::Null).is_ok(), "{name}");
         assert!(read(name, json!({})).is_ok(), "{name}");
@@ -224,14 +231,130 @@ fn what_doesnt_parse_is_invalid_argument() {
     }
 }
 
-/// The ops 0008 lists that a later step serves are `stopped`, not served
-/// in this build.
+/// The composed ops, and those of main's serialization, take their args
+/// by name: a COB ID as libradicle checks it, refused with its text; a
+/// page's `status`, `page` and `per_page` as strings or null.
 #[test]
-fn later_ops_are_not_served_in_this_build() {
-    for name in LATER {
-        let error = read(name, json!({ "rid": RID })).unwrap_err();
-        assert_eq!(error.code, ErrorCode::Stopped, "{name}");
-        assert_eq!(error.message, "not served in this build");
+fn each_composed_op_takes_its_args() {
+    let rid = rid_of();
+    let id = "abcdef0";
+    let cases = [
+        (
+            read("issue", json!({ "rid": RID, "issue_id": id })),
+            Op::Issue { rid, id: id.into() },
+        ),
+        (
+            read("patch", json!({ "rid": RID, "patch_id": REV })),
+            Op::Patch {
+                rid,
+                id: REV.into(),
+            },
+        ),
+        (read("remotes", json!({ "rid": RID })), Op::Remotes { rid }),
+        (
+            read("repo_stats", json!({ "rid": RID, "revision": REV })),
+            Op::RepoStats {
+                rid,
+                revision: REV.into(),
+            },
+        ),
+        (
+            read("readme_at", json!({ "rid": RID, "revision": REV })),
+            Op::ReadmeAt {
+                rid,
+                revision: REV.into(),
+            },
+        ),
+        (
+            read("repo_meta", json!({ "rid": RID })),
+            Op::RepoMeta { rid },
+        ),
+        (read("repos_meta", Value::Null), Op::ReposMeta),
+        (
+            read(
+                "issues_page",
+                json!({ "rid": RID, "status": "open", "page": " 2", "per_page": null }),
+            ),
+            Op::Page {
+                rid,
+                cobs: Cobs::Issues,
+                status: Some("open".into()),
+                page: Some(" 2".into()),
+                per_page: None,
+            },
+        ),
+        (
+            read(
+                "patches_page",
+                json!({ "rid": RID, "status": null, "page": null, "per_page": "x" }),
+            ),
+            Op::Page {
+                rid,
+                cobs: Cobs::Patches,
+                status: None,
+                page: None,
+                per_page: Some("x".into()),
+            },
+        ),
+        (read("node_info", json!({})), Op::NodeInfo),
+    ];
+    for (checked, expected) in cases {
+        let op = checked.unwrap();
+        assert_eq!(op, expected);
+        let named = !matches!(op, Op::ReposMeta | Op::NodeInfo);
+        assert_eq!(op.rid(), named.then_some(rid), "{op:?}");
+        assert_eq!(
+            op.cob(),
+            matches!(op, Op::Issue { .. } | Op::Patch { .. } | Op::Page { .. }),
+            "{op:?}"
+        );
+    }
+    // A COB ID: 6 to 40 lowercase hex digits, libradicle's text.
+    for bad in ["abcde", &"a".repeat(41), "ABCDEF", "abcdeg", "HEAD"] {
+        let error = read("issue", json!({ "rid": RID, "issue_id": bad })).unwrap_err();
+        assert_eq!(error.code, ErrorCode::InvalidArgument, "{bad}");
+        assert_eq!(
+            error.message,
+            libradicle::Error::InvalidCobId(bad.to_string()).to_string()
+        );
+        let error = read("patch", json!({ "rid": RID, "patch_id": bad })).unwrap_err();
+        assert_eq!(error.code, ErrorCode::InvalidArgument, "{bad}");
+    }
+    for (name, args) in [
+        ("issue", json!({ "rid": RID, "id": id })),
+        ("patch", json!({ "rid": RID, "issue_id": id })),
+        ("remotes", json!({ "rid": "rad:x" })),
+        ("repo_stats", json!({ "rid": RID, "revision": "HEAD" })),
+        (
+            "readme_at",
+            json!({ "rid": RID, "revision": REV.to_uppercase() }),
+        ),
+        ("readme_at", json!({ "rid": RID })),
+        ("repo_meta", json!({ "rid": RID, "page": 1 })),
+        ("repos_meta", json!({ "rid": RID })),
+        ("node_info", json!([])),
+        (
+            "issues_page",
+            json!({ "rid": RID, "status": 1, "page": null, "per_page": null }),
+        ),
+        (
+            "issues_page",
+            json!({ "rid": RID, "status": null, "page": 0, "per_page": null }),
+        ),
+        (
+            "issues_page",
+            json!({ "rid": RID, "status": null, "page": null, "perPage": "1" }),
+        ),
+        (
+            "patches_page",
+            json!({ "status": null, "page": null, "per_page": null }),
+        ),
+    ] {
+        assert_eq!(
+            code(read(name, args.clone())),
+            Some(ErrorCode::InvalidArgument),
+            "{name} {args}"
+        );
     }
 }
 
@@ -290,6 +413,40 @@ fn every_op() -> Vec<Op> {
         Op::Seeders { rid },
         Op::Identity,
         Op::Status,
+        Op::Issue {
+            rid,
+            id: "abcdef".into(),
+        },
+        Op::Patch {
+            rid,
+            id: "abcdef".into(),
+        },
+        Op::Remotes { rid },
+        Op::RepoStats {
+            rid,
+            revision: REV.into(),
+        },
+        Op::ReadmeAt {
+            rid,
+            revision: REV.into(),
+        },
+        Op::RepoMeta { rid },
+        Op::ReposMeta,
+        Op::Page {
+            rid,
+            cobs: Cobs::Issues,
+            status: None,
+            page: None,
+            per_page: None,
+        },
+        Op::Page {
+            rid,
+            cobs: Cobs::Patches,
+            status: None,
+            page: None,
+            per_page: None,
+        },
+        Op::NodeInfo,
     ]
 }
 
