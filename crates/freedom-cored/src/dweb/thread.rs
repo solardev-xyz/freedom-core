@@ -169,7 +169,7 @@ pub fn spawn(
                 stop: None,
             };
             let thread = Thread {
-                engine: Engine::new(Bounds::default()),
+                engine: Engine::new(crate::testhooks::dweb_bounds(Bounds::default())),
                 wire,
                 started: Instant::now(),
             };
@@ -553,6 +553,7 @@ impl Wire {
             }
             false
         });
+        crate::testhooks::dweb_writer_held(sender.held());
     }
 
     /// Hands the writer what was made, past the allowance, and stops the
@@ -693,6 +694,7 @@ impl Io for Wire {
             Ok(n) => n,
             Err(error) => return settled(request, Err(error)),
         };
+        crate::testhooks::dweb_writer_held(self.duplex.sender().held());
         if pushed < bytes.len() {
             let mut u = Unpushed::default();
             u.bytes.extend(&bytes[pushed..]);

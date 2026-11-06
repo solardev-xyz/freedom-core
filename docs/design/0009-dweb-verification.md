@@ -787,7 +787,7 @@ RSA signature checks for IPNS records, in release builds on the same server at a
 Measured before verification ships on by default (decision 1), on linux-x64, macOS arm64 and win-x64, verified against unverified on the same node:
 - **Swarm, loopback Ant, cached content:** a 1 KB file, a 10 MiB file and a seek into it, at 1, 50 and 200 concurrent requests, for a plain tree and erasure coding at levels 1 and 4. For plain and level-1 trees, verified time to first byte within 10 ms of unverified at p50 one at a time, and throughput of at least 40 MiB/s for the 10 MiB file. Level 4 is measured and reported against those figures.
 - **IPFS, loopback Kubo:** the same shapes. Verified throughput at least 80 % of unverified.
-- **The vault under load:** with 64 verified bodies streaming at full speed, a `vault.lock` is acknowledged within 50 ms at p99.
+- **The vault under load:** with 50 streaming bodies (the most the grants admit) at full speed, a `vault.lock` is acknowledged within 50 ms at p99. Stress tests lift the grants to stream 64 bodies and to reach the 64 running, the 128 streams and the 256 pieces.
 - **A real page load** of a Swarm site and an IPFS site, verified against unverified, in Chromium.
 
 If a gate fails, the default ([Decisions](#decisions), 1) and the [service alternative](#where-verification-runs) go back to the user with the numbers.
