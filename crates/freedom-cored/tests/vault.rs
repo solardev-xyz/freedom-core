@@ -105,19 +105,20 @@ fn create_lock_unlock_export_change_delete() {
     assert_eq!(unlocked["result"]["addresses"]["user_wallet"], user_wallet);
     assert_eq!(core.event()["event"], "vault.unlocked");
 
-    // Exports and compat.
+    // The backup export, and the keys back for signing.
     let exported = core.call(
         9,
         "vault.export_mnemonic",
         json!({ "password_b64": b64("testpass1") }),
     );
     assert_eq!(decoded(&exported["result"]["mnemonic_b64"]), phrase);
-    let forbidden = core.call(10, "compat.private_key", json!({ "account": 0 }));
-    assert_eq!(forbidden["error"]["code"], "forbidden");
-    let key = core.call_shell(11, "compat.private_key", json!({ "account": 0 }));
-    let hex = key["result"]["private_key_hex"].as_str().unwrap();
-    assert_eq!(hex.len(), 66);
-    assert!(hex.starts_with("0x") && hex[2..].bytes().all(|b| b"0123456789abcdef".contains(&b)));
+    let signed = core.call(
+        10,
+        "sign.message",
+        json!({ "key": { "kind": "account", "index": 0 }, "message": "0x01" }),
+    );
+    let signature = signed["result"]["signature"].as_str().unwrap();
+    assert_eq!(signature.len(), 132, "{signed}");
 
     // Change password: the lock state is unchanged (stays unlocked).
     let changed = core.call(
@@ -174,6 +175,73 @@ fn create_lock_unlock_export_change_delete() {
             json!({ "password_b64": b64("testpass2") })
         )["error"]["message"],
         "No vault found"
+    );
+}
+
+/// Phase 2 removed the temporary raw-key exports (designs 0001 and 0002):
+/// keys sign inside the core. The three are unknown to every caller, with
+/// the vault unlocked, and `core.hello` no longer offers them.
+#[test]
+fn compat_exports_are_gone() {
+    let (_root, data, locks) = dirs();
+    let mut core = spawn("serve", &data, &locks, &[]);
+    let hello = core.hello();
+    let capabilities = hello["result"]["capabilities"].as_array().unwrap();
+    assert!(
+        capabilities
+            .iter()
+            .all(|c| !c.as_str().unwrap().starts_with("compat.")),
+        "{hello}"
+    );
+    core.call(
+        2,
+        "vault.import",
+        json!({ "password_b64": b64("testpass1"), "mnemonic_b64": b64(ABANDON) }),
+    );
+    assert_eq!(core.event()["event"], "vault.unlocked");
+    let mut id = 2;
+    for method in [
+        "compat.private_key",
+        "compat.bee_wallet_key",
+        "compat.publisher_key",
+    ] {
+        for params in [
+            json!({}),
+            json!({ "account": 0 }),
+            json!({ "origin_index": 0 }),
+        ] {
+            id += 1;
+            let shell = core.call_shell(id, method, params.clone());
+            assert_eq!(
+                shell["error"]["code"], "unknown_method",
+                "{method}: {shell}"
+            );
+            assert!(shell["result"].is_null(), "{method}: {shell}");
+            id += 1;
+            let chrome = core.call(id, method, params.clone());
+            assert_eq!(
+                chrome["error"]["code"], "unknown_method",
+                "{method}: {chrome}"
+            );
+            id += 1;
+            let mut page = request(id, method, params);
+            page["context"] = json!({ "caller": "page", "page": { "origin": "https://a", "top_origin": "https://a", "frame": 1, "navigation": 1 } });
+            core.send(&page);
+            let page = core.response(id);
+            assert_eq!(page["error"]["code"], "unknown_method", "{method}: {page}");
+        }
+    }
+    // Still unlocked: the keys are there, and only sign inside the core.
+    id += 1;
+    let signed = core.call(
+        id,
+        "sign.message",
+        json!({ "key": { "kind": "account", "index": 0 }, "message": "0x01" }),
+    );
+    assert_eq!(
+        signed["result"]["signature"].as_str().map(str::len),
+        Some(132),
+        "{signed}"
     );
 }
 
@@ -253,8 +321,6 @@ fn import_and_parity_errors() {
     );
     // The well-known key of that address, in ethers' format.
     const KEY: &str = "0x1ab42cc412b618bdea3a599e3c9bae199ebf030895b039e9db1e30dafb12b727";
-    let compat = core.call_shell(11, "compat.private_key", json!({ "account": 0 }));
-    assert_eq!(compat["result"]["private_key_hex"], KEY);
     let exported = core.call(
         12,
         "vault.export_private_key",
@@ -587,7 +653,7 @@ fn deadlines_answer_stalled_work_once_and_stop_its_commit() {
 fn auto_lock_is_not_postponed_by_a_busy_queue() {
     // 1,500 requests deriving 64 addresses each take far longer than the
     // 150 ms auto-lock, so the lock must land while the queue is busy, and
-    // the secret lookup queued at the end must find the vault locked.
+    // the signature queued at the end must find the vault locked.
     let (_root, data, locks) = dirs();
     let mut core = spawn_env("serve", &data, &locks, &[], &[]);
     core.hello_with(150);
@@ -607,12 +673,12 @@ fn auto_lock_is_not_postponed_by_a_busy_queue() {
     }
     burst.extend(frame(&shell_request(
         1503,
-        "compat.private_key",
-        json!({ "account": 0 }),
+        "sign.message",
+        json!({ "key": { "kind": "account", "index": 0 }, "message": "0x01" }),
     )));
     core.send_raw(&burst);
-    let compat = core.until_response(1503);
-    assert_eq!(compat["error"]["code"], "vault_locked", "{compat}");
+    let signed = core.until_response(1503);
+    assert_eq!(signed["error"]["code"], "vault_locked", "{signed}");
     let events = core.events();
     assert!(
         events.iter().any(|e| e["data"]["reason"] == "auto"),
@@ -896,10 +962,12 @@ fn auto_lock_due_while_draining(late_touch: bool) {
         frames.push(frame(&request(touch, "vault.touch", json!({ "pad": pad }))));
     }
     let key = if late_touch { touch + 1 } else { touch };
+    // As large as the others: the message is the padding.
+    let message = format!("0x{}", "00".repeat(32 * 1024));
     frames.push(frame(&shell_request(
         key,
-        "compat.private_key",
-        json!({ "account": 0, "pad": pad }),
+        "sign.message",
+        json!({ "key": { "kind": "account", "index": 0 }, "message": message }),
     )));
     // Past the reader's credits: feeding stalls once the core waits.
     frames.extend(padded(key + 1..key + 101));
@@ -953,10 +1021,7 @@ fn auto_lock_due_while_draining(late_touch: bool) {
         "{}",
         seen[at(key)]
     );
-    assert!(
-        seen.iter()
-            .all(|m| m["result"]["private_key_hex"].is_null())
-    );
+    assert!(seen.iter().all(|m| m["result"]["signature"].is_null()));
     // Nothing after the lock found keys.
     for reply in &seen[lock + 1..] {
         if reply["id"] == touch && late_touch {

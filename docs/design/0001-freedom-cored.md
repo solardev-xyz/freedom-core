@@ -411,9 +411,8 @@ Main's proxy has to reproduce each JS handler: argument checks and defaults, the
 | `nodes.op_status` | `{ op_id }` → `{ status: "installed" \| "pending_recovery" \| "not_committed" \| "corrupt" }` | reconciliation after a lost reply |
 | `nodes.seal_radicle_key` | `{ recipient }` → `{ enc, ciphertext }`, base64 | main only; [0008](0008-radicle-service.md#the-sealed-release): the Radicle node key, sealed (HPKE) to the key the Radicle service made for one start. `no_vault` only when no vault file exists, `vault_locked`, `invalid_argument`. Implemented in `fc-seal` with the `hpke` crate |
 | `vault.reconcile` | see [Reconciliation](#reconciliation) | after a lost mutation reply |
-| `compat.private_key` | `{ account }` → `{ private_key }` | temporary; see Migration |
-| `compat.bee_wallet_key` | → `{ private_key }` | temporary |
-| `compat.publisher_key` | `{ origin_index }` → `{ private_key }` | temporary |
+
+Phase 2 removed the temporary `compat.private_key`, `compat.bee_wallet_key` and `compat.publisher_key` exports ([0002](0002-signing.md)); every caller now gets `unknown_method`.
 
 **Events from the core:** `vault.locked { reason: "manual" | "auto" | "delete" | "shutdown", epoch }` and `vault.unlocked { epoch }`.
 
