@@ -11,7 +11,6 @@ The code holds users' keys and money. Every rule below exists for that reason.
 3. **No raw private key or seed leaves the core.**
    - **Exceptions:**
      - user-requested backup exports (`vault.export_*`) and the onboarding display of the mnemonic, which are permanent;
-     - the temporary `compat.*` exports listed in `docs/design/0001-freedom-cored.md`, which Phase 2 deletes;
      - Bee's node keystore, which `nodes.write_identity` writes for the Bee node main runs (0001, "Multi-file writes"), until Phase 5. It is in the format the JS reference writes, mode `0600` on Unix (on Windows it inherits its containing directory's ACL; 0001 describes the default profile's guarantee and the limit for alternate roots). Its password is in the node's `config.yaml` until Phase 5 moves it (0001, K-3);
      - the sealed release of the Radicle node key to the Radicle service, through `nodes.seal_radicle_key`: sealed (HPKE) to a key the service makes at each start, and only while the vault is unlocked (design 0008, "Keys"). Main relays only ciphertext.
 
