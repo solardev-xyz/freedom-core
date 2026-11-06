@@ -61,6 +61,13 @@ mod identity;
 mod marker;
 mod nat64;
 mod node;
+// The output budget and bounded JSON: `rad.read` and `rad.blob` use them,
+// with the next steps.
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "rad.read and rad.blob use it, later steps")
+)]
+mod output;
 mod pools;
 mod quarantine;
 mod reconcile;
