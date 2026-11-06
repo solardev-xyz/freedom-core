@@ -73,13 +73,25 @@ pub const JSON: u64 = 32 << 20;
 pub const BUILT: u64 = 32 << 20;
 
 /// The most one JSON read holds: its built data and its JSON.
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "0008's figure, which the tests hold the caps to")
+)]
 pub const JSON_READ: u64 = BUILT + JSON;
 
 /// The largest blob a read serves (`rad.blob`).
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "rad.blob uses it, a later step")
+)]
 pub const BLOB: u64 = 64 << 20;
 
 /// What a blob of [`BLOB`] reserves while it loads: libgit2's buffer and
 /// the service's copy.
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "rad.blob uses it, a later step")
+)]
 pub const BLOB_LOADING: u64 = 2 * BLOB;
 
 /// How often a reservation that waits looks at its token, which nothing
@@ -180,11 +192,19 @@ impl Budget {
     }
 
     /// Its total.
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "rad.stats reports it, a later step")
+    )]
     pub fn total(&self) -> u64 {
         self.total
     }
 
     /// The bytes reserved now: `rad.stats`'s budget use.
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "rad.stats reports it, a later step")
+    )]
     pub fn used(&self) -> u64 {
         *self.lock()
     }
@@ -334,11 +354,19 @@ impl Json {
     }
 
     /// The bytes written.
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "the tests look at a writer's state")
+    )]
     pub fn len(&self) -> u64 {
         self.len
     }
 
     /// Why it refused a write, if it did.
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "the tests look at a writer's state")
+    )]
     pub fn refused(&self) -> Option<&Refused> {
         self.refused.as_ref()
     }

@@ -3,9 +3,10 @@
 //! they open as `rad.start` answers, refuse past their bounds, enforce
 //! their deadlines and main's cancel, and drain at the stop before the node
 //! is asked to stop. This build serves quarantine's pooled methods
-//! (tests/quarantine.rs) and the writes (tests/writes.rs): the reads' work
-//! answers `stopped`. `FREEDOM_RADICLED_TEST_HOLD_WORK` holds each in its
-//! slot first, the writes before their mutation starts.
+//! (tests/quarantine.rs), the writes (tests/writes.rs) and `rad.read`'s
+//! pass-through ops (tests/reads.rs): `rad.blob`'s work answers `stopped`.
+//! `FREEDOM_RADICLED_TEST_HOLD_WORK` holds each in its slot first, the
+//! writes before their mutation starts, and the reads before their build.
 //!
 //! Every node here reaches no one, as in tests/start.rs.
 
@@ -35,14 +36,20 @@ const POOLED: [&str; 6] = [
     "rad.write",
 ];
 
-/// The pooled methods this build serves: quarantine's (tests/quarantine.rs)
-/// and the writes (tests/writes.rs).
-const SERVED: [&str; 4] = [
+/// The pooled methods this build serves: quarantine's (tests/quarantine.rs),
+/// the writes (tests/writes.rs) and `rad.read` (tests/reads.rs).
+const SERVED: [&str; 5] = [
     "rad.quarantine_list",
+    "rad.read",
     "rad.remove_repo",
     "rad.unseed",
     "rad.write",
 ];
+
+/// A read held in its slot: `status`, which reads no repository.
+fn status() -> Value {
+    json!({ "op": "status" })
+}
 
 fn code(reply: &Value) -> &str {
     reply["error"]["code"].as_str().unwrap_or_default()
@@ -104,7 +111,7 @@ fn the_pools_refuse_past_their_bounds_and_drain_at_a_clean_stop() {
     assert!(radicled.start()["result"].is_object());
 
     let mut held: Vec<u64> = (0..4 + 320)
-        .map(|_| radicled.request("rad.read", json!({})))
+        .map(|_| radicled.request("rad.read", status()))
         .collect();
     let reply = radicled.call("rad.read", json!({}));
     assert_eq!(code(&reply), "busy", "{reply}");
@@ -126,7 +133,7 @@ fn the_pools_refuse_past_their_bounds_and_drain_at_a_clean_stop() {
     let cancelled = held.remove(4 + 320 - 1);
     radicled.send(&json!({ "type": "cancel", "id": cancelled }));
     assert_eq!(code(&radicled.reply(cancelled)), "cancelled");
-    held.push(radicled.request("rad.read", json!({})));
+    held.push(radicled.request("rad.read", status()));
     let reply = radicled.call("rad.blob", json!({}));
     assert_eq!(code(&reply), "busy", "{reply}");
 
@@ -156,7 +163,7 @@ fn queued_and_running_work_past_its_deadline_is_deadline() {
     let admitted = Instant::now();
     // Four running and one queued; one writing and one queued.
     let mut ids: Vec<u64> = (0..5)
-        .map(|_| radicled.request("rad.read", json!({})))
+        .map(|_| radicled.request("rad.read", status()))
         .collect();
     ids.extend((0..2).map(|_| radicled.request("rad.unseed", json!({ "rid": RID }))));
     for id in ids {

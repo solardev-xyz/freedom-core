@@ -30,6 +30,8 @@
 //!   the `Down` node can end the process with 70.
 //! - `FREEDOM_RADICLED_TEST_WORK_DEADLINE_MS` replaces the read pool's and
 //!   the write queue's 60 s deadlines.
+//! - `FREEDOM_RADICLED_TEST_BUDGET=<bytes>` replaces the output budget's
+//!   256 MiB.
 //! - `FREEDOM_RADICLED_TEST_HOLD_WORK` holds a pooled method's work, which
 //!   this build doesn't serve yet, in its slot before it answers: with `1`
 //!   until its token is cancelled (main's cancel, its deadline or the stop),
@@ -37,7 +39,8 @@
 //!   that doesn't check it. Each logs `test hook: work holds its slot`.
 //!   `rad.remove_repo`'s, `rad.write`'s and `rad.unseed`'s work is held so
 //!   too, with the node held, before its mutation starts ([`crate::quarantine`],
-//!   [`crate::writes`]); `rad.quarantine_list`'s isn't.
+//!   [`crate::writes`]), and `rad.read`'s past its fence, before its build
+//!   reserves anything ([`crate::reads`]); `rad.quarantine_list`'s isn't.
 //! - `FREEDOM_RADICLED_TEST_HOLD_WRITE` acts on a write just past its
 //!   mutation start, before libradicle's call (`rad.write`, `rad.unseed`,
 //!   `rad.remove_repo`), logging `test hook: the write has started`: with a
@@ -164,6 +167,15 @@ pub fn work_deadline(default: Duration) -> Duration {
     #[cfg(feature = "testhooks")]
     if let Some(ms) = millis("FREEDOM_RADICLED_TEST_WORK_DEADLINE_MS") {
         return Duration::from_millis(ms);
+    }
+    default
+}
+
+/// The output budget's size.
+pub fn budget(default: u64) -> u64 {
+    #[cfg(feature = "testhooks")]
+    if let Some(bytes) = millis("FREEDOM_RADICLED_TEST_BUDGET") {
+        return bytes;
     }
     default
 }
