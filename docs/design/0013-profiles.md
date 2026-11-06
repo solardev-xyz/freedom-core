@@ -1,31 +1,34 @@
 # 0013: Profiles and Freedom state
 
-**Status:** proposed. Roadmap items 5.1 (profiles in the core), 5.2 (stores), 5.3 (a core for several profiles) and 5.4 (the Stage-2 prerequisites: (a) the key store and the quick-unlock re-wrap, (b) one directory of Freedom data per profile, (c) node keys at rest). Builds on [0001](0001-freedom-cored.md) (the process, the gate, durable writes, quick unlock until Phase 5, Bee's keystore password until Phase 5) and [0010](0010-service-confinement.md) (the protected roots, and D7, confining `freedom-cored`, which waits for this design). It must agree with 0012 (#264, not merged yet), which owns the four permission files and proposes `phone-payments.json`. It answers 0001's open question 1, on `vault-meta.json`, and proposes an amendment to AGENTS.md rules 3 and 4. Nothing here is built yet. The user decides the [open questions](#open-questions).
+**Status:** proposed. Roadmap items 5.1 (profiles in the core), 5.2 (stores), 5.3 (a core for several profiles) and 5.4 (the Stage-2 prerequisites: (a) the key store and the quick-unlock re-wrap, (b) one directory of Freedom data per profile, (c) node keys at rest). Builds on [0001](0001-freedom-cored.md) (the process, the gate, durable writes, quick unlock until Phase 5, Bee's keystore password until Phase 5) and [0010](0010-service-confinement.md) (the protected roots, and D7, confining `freedom-cored`, which waits for this design). It must agree with [0012](0012-approvals.md) (proposed, merged as #264), which owns the four permission files and proposes `phone-payments.json`. It answers 0001's open question 1, on `vault-meta.json`, and proposes an amendment to AGENTS.md rules 3 and 4. Nothing here is built yet. The user decides the [open questions](#open-questions).
 
 **The references:**
-- **freedom-browser** at `8e15b10a` (`integration/rust-core`), in `src/main/`:
+- **freedom-browser** at `5484f8dd` (`integration/rust-core`), in `src/main/`:
   - profiles: `profile-resolver.js`, `profile-catalog.js`, `profile-paths.js`, `profile-lock.js`, `profile-launcher.js`, `profile-focus-handoff.js`, `profile-instance-handoff.js`, `profile-switch-scheme.js`, `profile-registry-watcher.js`, `profile-external-candidates.js` (about 4.5k lines together), `index.js` (startup), `migrate-user-data.js`, `service-locks.js`, `service-grant.js`, `ipc-handlers.js` (`ensureProfileClosedForDelete`), `ipfs/ipfsd-gate.js`, `core/core-process.js`;
   - quick unlock: `quick-unlock.js`, and the renderer's `src/renderer/lib/onboarding.js` (`performQuickSetup`);
-  - the stores listed under [The stores](#the-stores), `identity-manager.js` (`vault-meta.json`), `lib/durable-journal.js`, `ant-manager.js` (`ensureConfig`).
+  - the stores listed under [The stores](#the-stores), `identity-manager.js` (`vault-meta.json`), `lib/durable-journal.js`, `ant-manager.js` (`ensureConfig`);
+  - RPC API keys: `wallet/rpc-manager.js`, `networks/network-registry.js`, `networks/network-ipc.js`, the chrome's `preload.js`, and the settings page, `src/renderer/pages/scripts/settings.js`.
 - **proper-lockfile 4.1.2**, the reference checkout's: `lib/lockfile.js`.
+- **`secret-service` 5.2**'s blocking API, which opens a session-bus connection at each `SecretService::connect`.
 - **Browser PRs against main:** #943 (K-3 part 1, head `c1cbe568`; `private-files.js`), #945 (K-5, head `eeb6023f`), #946 (K-3 part 2, head `2a260195`; `swarm/ant-keystore-password.js`, `swarm/ant-config-password.js`). SEC-3d (#1029) merges #943 and #945 into integration; SEC-3f adapts #946 after it (the coordinator's decision, Option A of the SEC-2 audit). **Issue #963:** Windows key-file I/O binds to directories by path.
-- **freedom-core** at `506e8474` (`main`): `freedom-cored/src/fsx.rs` (durable writes), `anchor.rs` (handle-relative node files), `nodes.rs` (Bee's `config.yaml`), `exit.rs`, `fc-service/src/gate.rs`, `fc-sys`, `fc-protocol/src/message.rs` (`Context`).
-- **Design 0012** at #264's head `8cb3c771`, branch `docs/0012-approvals`.
+- **freedom-core** at `bcc385e9` (`main`): `freedom-cored/src/fsx.rs` (durable writes), `anchor.rs` (handle-relative node files), `nodes.rs` (Bee's `config.yaml`), `exit.rs`, `main.rs` (`hold-lock`), `serve.rs` (`core.hello`), `fc-service/src/gate.rs`, `fc-service/src/confine/`, `fc-seal` (HPKE), `fc-sys`, `fc-protocol/src/lib.rs` (protocol versions) and `message.rs` (`Context`).
+- **Design 0012**, proposed, merged into `main` as #264 (`bcc385e9`), and 0010's one-shot Radicle import (D5), the pattern for this design's one-shot processes.
 - **Apple's TN3137**, *On Mac keychain APIs and implementations*: the data protection keychain, which biometric access control needs, needs a keychain-access entitlement backed by a provisioning profile.
 
 ## Summary
 
 - **Today** each profile is one Electron process. Main picks the profile from argv, the environment and the shared catalog, points `userData` at it (`app.setPath`) before anything else touches storage, and holds a lock directory in it whose mtime it refreshes. Every Freedom store is a JSON, JSONL or SQLite file that main writes itself, most in place.
-- **5.1, resolving the profile:** a synchronous subcommand, `freedom-cored profile open`, which main runs with `spawnSync` before `app.setPath`. It applies today's rules and writes the catalog durably. Main keeps the argv parsing, the launch and hand-off glue, and the profile lock in today's format, so older builds see an open profile as open. A profile counts as open when its lock is fresh **or** its core's gate is held, and a delete holds every gate of the profile it removes. That fixes the stale-lease delete. If the subcommand misses its latency budget on any OS, `open` stays in JS, and only the catalog's other operations move.
-- **5.2, the stores ([Q14](#open-questions)):** the core owns the stores that decide or record authority and money: wallet (`vault-meta.json`, the intent journal, pending Safe transactions), permissions (0012's four files and `phone-payments.json`), feeds (0015's), payments, profiles, and the secrets. Each stays in today's format, byte for byte, with 0001's atomic writes. SQLite schemas are kept. The other Freedom stores stay in main and get durable writes. History, bookmarks and downloads aren't ported.
-- **5.3, several profiles ([Q15](#open-questions)):** one core per profile while Electron runs one process per profile. The core gains a profile dimension now: per-profile vault, lock state, throttle, gates, stores and secrets, carried in the caller context and tested with two profiles over one pipe. A core for every profile comes with Chromium, which has one parent process. The transport stays a pipe in both stages, never a socket.
-- **5.4a, the key store ([Q13](#open-questions)):** a `KeyStore` trait in a new logic crate, `fc-keystore`, that seals 32-byte wrapping keys under one of two policies, `Unattended` or `UserPresence`. Every secret is AES-256-GCM under such a key in one file per profile. Backends: the macOS Keychain (`security-framework`), Windows DPAPI (through `fc-sys`), the Secret Service on Linux (`secret-service`), and Android Keystore and the iOS Keychain through `freedom-mobile-ffi`.
+- **5.1, resolving the profile:** a synchronous subcommand, `freedom-cored profile open`, which main runs with `spawnSync` before `app.setPath`. It applies today's rules and writes the catalog durably. The catalog's other operations are one-shot subcommands too, so the running core never touches the catalog or another profile. Main keeps the argv parsing, the launch and hand-off glue, and the profile lock in today's format, so older builds see an open profile as open. If the subcommand misses its latency budget on any OS, `open` stays in JS, and only the catalog's other operations move.
+- **The profile gate:** an OS lock keyed by the profile's `userData`, which a small `hold-profile` process holds for main from before it takes the profile lock until after it lets go. A profile counts as open when its lock is fresh **or** that gate is held, and a delete holds every gate of the profile it removes. That fixes the stale-lease delete, for overridden layouts and for a main that stalls before its core is up too.
+- **5.2, the stores ([Q14](#open-questions)):** the core owns the stores that decide or record authority and money: wallet (`vault-meta.json`, the intent journal, pending Safe transactions), permissions (0012's four files and `phone-payments.json`), feeds (0015's), payments, profiles, and the secrets. Each stays in today's format, byte for byte, with 0001's atomic writes. SQLite schemas are kept. Stored RPC API keys reach only the shell, never a renderer. The other Freedom stores stay in main and get durable writes. History, bookmarks and downloads aren't ported.
+- **5.3, several profiles ([Q15](#open-questions)):** one core per profile while Electron runs one process per profile. The core gains a profile dimension now: per-profile vault, lock state, throttle, gates, stores and secrets, carried in the caller context at a new protocol version, 3, and tested with two profiles over one pipe. The core keeps protocol 2 during the rollout, and `core.hello` settles which one a pair speaks, so the current browser works with the new core and the reverse. One shared core for all profiles comes with Chromium, which has one parent process. The transport stays a pipe in both stages, never a socket.
+- **5.4a, the key store ([Q13a, Q13b](#open-questions)):** a `KeyStore` trait in a new logic crate, `fc-keystore`, that makes and keeps 32-byte wrapping keys under one of two policies, `Unattended` or `UserPresence`. Every secret is AES-256-GCM under such a key in one file per profile. Backends: the macOS Keychain (`security-framework`), Windows DPAPI (through `fc-sys`), the Secret Service on Linux (`secret-service`), and Android Keystore and the iOS Keychain through `freedom-mobile-ffi`. On desktop every key-store call runs in a one-shot helper, `freedom-cored keystore`, that main starts for it, so `serve` never connects to a key-store service, before or after it confines itself.
 - **The quick-unlock re-wrap comes early (PRF-1, PRF-2).** At the next Touch ID use, main hands the password it unsealed to the core once. From then on the core holds it, and Quick Setup writes it together with the vault. Today's `quick-unlock.dat` stays in place for older builds. Biometric binding in the OS waits for a signing spike, and Touch ID stays main's prompt until then.
-- **5.4b, the Freedom directory ([Q12](#open-questions)):** every Freedom-owned entry of a profile moves into `<profile>/freedom/`, and the shell's data stays at the root. A reader release, which reads both layouts and finishes a move it finds, ships first. The move ships late, as the last Stage-1 step. It is one rename per entry (a copy only across devices), journaled, rolled back before its marker and forward after. Builds older than the reader can't open the moved identity, by design.
+- **5.4b, the Freedom directory ([Q12](#open-questions)):** every Freedom-owned entry of a profile moves into `<profile>/freedom/`, and the shell's data stays at the root. A reader release, which reads both layouts and finishes a move it finds, ships first. The move ships late, as the last Stage-1 step. It is one rename per entry (a copy only across devices), journaled, rolled back before its marker and forward after. It runs before main takes its own lock, and holds the profile lock itself in today's format, refreshed from its own thread, so older builds see the profile open however long it takes. Builds older than the reader can't open the moved identity, by design.
 - **5.4c, Bee's keystore password ([Q16](#open-questions)):** the core keeps it in the profile's secrets file and writes antd's one-use `--password-file` itself. It reads #946's seals as migration input: main opens the ciphertext, and the core checks it against the keystore. `config.yaml` keeps the password only where the OS has no key store. AGENTS.md rules 3 and 4 change to match. `fc-sys` gains Windows handle-relative file calls, which closes #963 for every file the core writes.
 - **`vault-meta.json`** becomes the core's: in place, in today's format, written with the vault as one journaled operation where both change. Device, phone and Safe records stay in it and keep working while the vault is locked (0001's open question 1).
-- **0010 and D7:** the protected roots gain `freedom/`'s entries. D7 can confine the core to the profile's directory as soon as it is designed, and narrow it to `freedom/` after the move. The core makes no network connection, needs the Keychain's Mach services on macOS, and reads the Secret Service before it confines itself on Linux.
-- **Facts found:** a stale-looking lock is trusted for deletion; deletion holds only the IPFS gate; and on macOS and Windows, deleting the packaged default profile removes the shared lock directory.
+- **0010 and D7:** the protected roots gain `freedom/`'s entries. D7 can confine `serve` to the profile's directory as soon as it is designed, and narrow it to `freedom/` after the move. Before the move that separates a named profile from the others, but not the packaged default profile, whose directory is the app root; after it, both. The catalog and other profiles are the subcommands' work, never `serve`'s. `serve` makes no network connection, and its only local IPC is main's pipe.
+- **Facts found:** a stale-looking lock is trusted for deletion; deletion holds only the IPFS gate; on macOS and Windows, deleting the packaged default profile removes the shared lock directory; and the chrome renderer's preload can fetch the RPC pool with the API keys in its URLs.
 
 ## Goals and non-goals
 
@@ -43,7 +46,7 @@
 - **The agent's stores** (`agent-*.sqlite`, `agent/`), which move with the agent's own design (6.2).
 - **The semantics of the grant stores** (0012) and of the Swarm stores (0015). 0013 decides who writes them, where they live, and how.
 - **A compromised main.** Stage 1 trusts it (0001).
-- **Windows Hello and Linux quick unlock,** unless Q13 asks for them.
+- **Windows Hello and Linux quick unlock,** unless Q13b asks for them.
 
 ## Today
 
@@ -65,9 +68,11 @@
 - **The profile lock** (`profile-lock.js`):
   - **Format:** proper-lockfile on the target `profile-open`, with the lock directory `profile-open.lock` in the profile's `userData`. It is held by `mkdir`, and kept by refreshing the directory's mtime every 10 s. It is stale after 30 s; dev builds use 1 s and 5 s (5–10, 53–84).
   - **Takeover:** a launch that finds a stale lock removes the directory and takes it (`lib/lockfile.js:24–92`).
-  - **Compromise:** the holder marks its own lock compromised when the mtime isn't the one it set, or a refresh runs past the stale time (99–160), and main's handler then throws (`profile-lock.js:77–80`).
-  - **When:** main takes it after `app.setPath` (`index.js:143–178`).
-- **The core's gate is separate:** `freedom-cored serve` holds `<lock-dir>/<sha256(canonical identity dir)>.lock` for its whole life (0001), freedom-ipfsd holds `ipfs-…` and freedom-radicled `radicle-…` (`fc-service/src/gate.rs`). The core starts after `app.whenReady`.
+  - **The refresh** is an event-loop timer (`setTimeout`, 108). Anything that blocks main's loop stops it, `spawnSync` included, and 30 s later another build can take the lock over.
+  - **Compromise:** at a refresh, the holder marks its own lock compromised when the mtime isn't the one it set, or the directory is gone, or the refresh fails past the stale time (99–160), and main's handler then throws (`profile-lock.js:77–80`). A loop that was only blocked, with nobody taking over meanwhile, refreshes again as if nothing happened.
+  - **When:** main takes it with `lockSync` at its top level, after `app.setPath` and before `app.whenReady` (`index.js:143–178`). The top level already reads a store before the first window: `loadSettings()`, for Blink's features (546).
+- **The core's gate is separate:** `freedom-cored serve` holds `<lock-dir>/<sha256(canonical identity dir)>.lock` for its whole life (0001), freedom-ipfsd holds `ipfs-…` and freedom-radicled `radicle-…` (`fc-service/src/gate.rs`). The core starts after `app.whenReady`. `freedom-cored hold-lock` takes the core's gate, prints `locked`, and holds it until its stdin closes (`main.rs:110–135`).
+- **Overrides:** `FREEDOM_IDENTITY_DATA`, `FREEDOM_ANT_DATA`, `FREEDOM_BEE_DATA`, `FREEDOM_IPFS_DATA`, `FREEDOM_TOR_DATA`, `FREEDOM_RADICLE_DATA` and `MYOTIS_DATA_DIR` move a component's directory out of `userData` (`profile-paths.js:17–35`, 284–292). They come from the launching process's environment, and nothing records them, so another process can't know where a running profile keeps its identity.
 - **The glue** launches another profile (`profile-launcher.js`), hands focus and URLs to a running one (`profile-focus-handoff.js`, `profile-instance-handoff.js`, `profile-switch-scheme.js`), and watches the catalog (`profile-registry-watcher.js`). The roadmap counts this glue as shell work that stays in Electron.
 
 ### The stores
@@ -130,6 +135,7 @@ All in the profile's `userData` unless noted. "In place" means `writeFileSync` o
    - Removed, every gate held at that moment by another profile's core or services goes with it, and the next process locks a new file under the same name.
    - Linux is safe: `~/.config/freedom` and `~/.config/Freedom/locks` are different directories.
 4. **Fifteen of the Freedom stores' modules write in place, and five by an unflushed rename** (the table above, and the catalog's `profile-catalog.js:269–274`).
+5. **The chrome renderer can fetch the RPC API keys.** The chrome's preload exposes `rpcManager.getEffectiveUrls` (`preload.js:995–1000`). Its handler returns the chain's RPC pool with each key substituted into its URL (`rpc-manager.js:178–182`, `network-registry.js:475–490`). No renderer code on integration calls it: the settings page gets only `hasKey` for each keyed provider (`network-ipc.js:108`, `settings.js:3066`), and sets, tests or removes a key without reading one back.
 
 ## Threat model
 
@@ -141,13 +147,16 @@ Stage 1 trusts main (0001). What this design adds protection against:
 | Bee's keystore password beside the keystore (K-3) | `config.yaml`; #946 seals it with `safeStorage` | the core's secrets file under the OS key store; `config.yaml` only where there is none |
 | RPC API keys in plain JSON (K-5) | `rpc-api-keys.json` (#945: owner-only) | the secrets file |
 | Quick Setup users locked out by a shell change | the only copy is Electron's `safeStorage`, bound to the `userData` path | the core's key store, from PRF-2 |
-| A live profile deleted under itself | a stale lock is trusted | a held gate means open; deletion holds every gate |
+| A live profile deleted under itself | a stale lock is trusted | a held profile gate means open, from before the lock to after it; deletion holds every gate |
+| An older build entering a profile mid-move | — | the move holds the profile lock in today's format, refreshed from its own thread |
 | The shared lock directory removed with the default profile | `locks` isn't a shared entry | kept |
 | Two writers on one store | the profile lock only | one writer per store, and the core's gate |
 | A same-user process swapping a directory on Windows (#963) | checked by path | handle-relative calls for every file the core writes |
 | A compromised service reading Freedom data (0010) | protected roots by component | the same, with `freedom/`'s entries |
+| A compromised core reaching other profiles, the catalog or the session bus (D7) | not confined | `serve` confined to its profile's data (the default profile only after the move); catalog work in one-shot subcommands; key-store calls in a one-shot helper |
+| A compromised chrome renderer reading RPC API keys (0011's adversary) | `rpcManager.getEffectiveUrls` returns them inside URLs | plaintext only to the shell; the chrome sees which providers have a key, and can set or remove one |
 
-**Not covered:** a compromised main; a same-user process, which can read the profile's files directly (outside the boundary, as in 0001 and 0010); root, admin and physical attacks. **On Windows and Linux** the `Unattended` key is readable by any process of the user while the session is unlocked (DPAPI, the Secret Service), so it protects against other users and an offline copy of the disk, not against a same-user process. On macOS the Keychain item's access list adds the code signature. The design calls nothing defense in depth that isn't.
+**Not covered:** a compromised main; a same-user process, which can read the profile's files directly (outside the boundary, as in 0001 and 0010); root, admin and physical attacks. **On Windows and Linux** the `Unattended` key is readable by any process of the user while the session is unlocked (DPAPI, the Secret Service), so it protects against other users and an offline copy of the disk, not against a same-user process. On macOS the Keychain item's access list adds the code signature. **Through the helper,** a compromised `serve` can still have main run key-store calls on its own profile's items: forget them, which sends each secret to its fallback path, or open them, which gives it what it already holds. It can't reach the session bus or the Keychain's other items, nor another profile's items wherever D7 keeps that profile's files out of its grant (for the packaged default profile, from D7b on), since their ids are in those files. The design calls nothing defense in depth that isn't.
 
 ## 5.1 Resolving the profile
 
@@ -159,7 +168,7 @@ freedom-cored profile open --app-root <dir> --lock-dir <dir>
     [--profile <id>] [--switch <id>] [--env-profile <id>] [--runtime]
 ```
 
-- **What it does:** it applies `resolveProfile`'s rules as `fc-profile` ports them (the order above, sanitizing, first-run registration, the fallback, `lastOpenedAt`), creates or updates the catalog record and `profile.json`, and prints one JSON object: `{ outcome: "opened" | "switch_refused", id, display_name, user_data_dir, slot, nodes, switch_only? }`.
+- **What it does:** it applies `resolveProfile`'s rules as `fc-profile` ports them (the order above, sanitizing, first-run registration, the fallback, `lastOpenedAt`), creates or updates the catalog record and `profile.json`, and prints one JSON object: `{ outcome: "opened" | "switch_refused", id, display_name, user_data_dir, slot, nodes, switch_only?, lock_fresh, gate_held, layout }`. `layout` is `"root"`, `"freedom"` (the marker exists) or `"pending"` (a move's journal exists), which tells main whether to run `profile migrate` ([The move](#the-move)).
   - **Exits:** 0 with that object; 74 (`storage`, with the kind on stderr: unreadable or unsupported catalog, a network filesystem, a path that isn't the user's); 75 when the catalog's write lock stays held; 64 for bad arguments.
   - **A switch** to a profile that isn't open answers `switch_refused`, as `PROFILE_SWITCH_REJECTED` does today.
 - **What stays in main:**
@@ -168,22 +177,33 @@ freedom-cored profile open --app-root <dir> --lock-dir <dir>
   - finding a dev checkout's root;
   - `app.setPath` itself;
   - the error dialogs, the launcher and the hand-off glue.
-- **How main calls it:** `spawnSync` with a 5 s timeout and the core's cleared environment (0001's *Spawn*), from the app's resources. A failure shows today's "Freedom profile could not open" dialog. There is no JS fallback: the catalog keeps one writer per build, and older builds already coexist through the format and the lock.
-- **The catalog's write lock** is proper-lockfile's format exactly: `mkdir`, an mtime that a holder over 10 s refreshes, stale after 30 s, a stale lock taken over by removing it. So the subcommand and an older build exclude each other. It holds the lock for milliseconds.
+- **How main calls it:** `spawnSync` with a 5 s timeout and the core's cleared environment (0001's *Spawn*), from the app's resources. It runs before main takes the profile lock, so main holds no lease while it blocks. A failure shows today's "Freedom profile could not open" dialog. There is no JS fallback: the catalog keeps one writer per build, and older builds already coexist through the format and the lock.
+- **The catalog's write lock** is proper-lockfile's format exactly: `mkdir`, an mtime that a holder over 10 s refreshes, stale after 30 s, a stale lock taken over by removing it. So the subcommands and an older build exclude each other. `profile open` holds the lock for milliseconds. A subcommand that may hold it longer, as `profile delete` does for the whole delete (`profile-catalog.js:1138–1141`), refreshes it from a thread that does nothing else, and checks at each refresh that the mtime is still the one it set, as proper-lockfile does.
 - **Writes:** 0001's durable atomic writes, today's text (`JSON.stringify(…, null, 2)`, JS key order). The temp names keep the `profile-registry.json.` prefix, which `isAppRootSharedEntry` spares (`profile-catalog.js:832–835`).
 - **The latency gate (PRF-3):** the subcommand's wall time, measured by main around `spawnSync`, must stay under 100 ms at the 95th percentile on each OS's CI runner, cold start included. Windows builds are unsigned today, so a first scan there counts.
   - **If an OS misses it,** `open` stays in JS on that OS: it is the one call made before any window. `fc-profile` still backs every other catalog operation, and Stage 2.
   - **The cost of staying in JS everywhere:** two implementations of the catalog until Stage 2, and the port done later, when the reference may be gone.
-- **The catalog's other operations** move to `profile.*` methods on the running core: create, rename, delete, import, the node settings and the reserved ports ([API](#api)). The profile manager calls them from whichever profile process shows it.
+- **The catalog's other operations are subcommands too,** not methods of the running core: `profile list`, `create`, `rename`, `import`, `delete`, `update-nodes`, `reserved-ports` and `status` ([API](#api)).
+  - **How main calls them:** with an asynchronous `spawn`, so its own lock keeps refreshing, when the profile manager or the node settings ask through today's IPC, from whichever profile process shows them.
+  - **Each is one short run on main's arguments.** It reads nothing a page or the network sent. Each confines itself with 0010's mechanisms before it reads anything (`profile open` included): read-write on the app root, the lock directory and, in dev builds, the `R/` root of the Radicle homes beside the app root; no network; no child process.
+  - **Why not methods of `serve`:** catalog work needs the app root, and an import or a delete another profile's directory. D7 keeps both from `serve` ([D7](#effects-on-0010-and-d7)), the long-lived process that parses what pages and the network send.
+  - **The grant's limit:** Landlock can't grant a directory without everything below it, and the app root holds every profile, so on Linux each of these runs reaches every profile. That is acceptable for a run that takes only main's arguments and exits.
 
 ### The lock
 
 - **The format stays exactly today's,** taken by main in JS as today. Older builds read and honor it, and the new build honors theirs. Moving its refresh into the core was weighed and dropped: proper-lockfile marks a lock whose mtime it didn't set as compromised, so a lock can't pass between processes, and two refreshers break it ([Options weighed](#options-weighed)).
-- **What "open" means, in new builds:** the lock is fresh, **or** the profile's core gate is held. The gate is held for the core's whole life, and the core exits when main dies (0001). So a live profile whose main loop has stalled still reads as open, though its lock looks stale.
-  - **Asking the gate:** `profile open` reports whether the chosen profile's gate is held (`gate_held` in its answer), and the running core answers `profile.is_open { user_data_dir }` for any other profile. Each tries the gate's lock without waiting and lets go at once. A core starting at that moment retries contention for 5 s (0001), so the probe can't make it fail.
-  - **Who asks:** the subcommand's switch check, `isProfileLocked`, and a launch about to take a stale lock over.
+- **The profile gate:** `<lock-dir>/profile-<sha256(canonical userData)>.lock`, in the namespaced form of `fc-service`'s gates (`gate.rs`, `lock_file_name`), with 0001's rules: an OS lock, a file never unlinked.
+  - **Why `userData`:** it is the one path every process can name for every profile. The catalog records each profile's directory, and `--profile-dir` and test launches name it. The core's identity gate can't serve: a component override (`FREEDOM_IDENTITY_DATA`, …) moves the identity, and nothing records the environment another profile started with ([Profiles](#profiles)).
+  - **Who holds it:** `freedom-cored hold-profile --user-data-dir <dir> --lock-dir <dir> [--app-root <dir> --id <id>]`. It takes the gate, prints `locked`, and holds it until its stdin closes, as `hold-lock` does. For a catalog profile it then checks that the catalog still lists that id at that directory, so a launch that raced a delete fails instead of opening an empty profile. After that it confines itself to its stdin and stdout: no file, no network, no child. It does nothing else, so a stalled or busy main doesn't stall it.
+  - **From before the lock to after it:** main starts it after `app.setPath` (and after `profile migrate`, when one runs) and before it takes the profile lock. It waits for `locked` (10 s at most) before it starts the core, any node, any store write or its first window. At quit it closes the holder's stdin only after releasing the lock. So whenever a new build holds the profile lock, the gate is held too: before `serve` starts, while the core restarts after a crash, and while main's loop is stalled. The moment between taking the lock and the holder's `locked` lies inside the lock's first 30 s, while the lock is fresh.
+  - **If it can't take the gate** within its 5 s contention retry, another new build has the profile: main lets go of its lock and hands over, or reports the profile busy, as for a fresh lock. If the holder dies while main runs, main starts another at once; the lock, still fresh, covers the moment, and a main that can't take the gate again within 5 s quits, as on a compromised lock.
+- **What "open" means, in new builds:** the lock is fresh, **or** the profile gate is held. So a live profile whose main loop has stalled still reads as open, though its lock looks stale, from the moment its main took the lock, its core up or not.
+  - **Asking the gate:** `profile open` reports `gate_held` for the chosen profile, and `profile status --user-data-dir <dir>` for any other. Main runs `status` asynchronously, like the other subcommands, and only for a lock that reads stale, since a fresh lock already means open. Each tries the gate's lock without waiting and lets go at once. A holder starting at that moment retries contention for 5 s, so a probe can't make it fail.
+  - **Who asks:** `profile open`'s switch check, `isProfileLocked` when the lock reads stale, and a launch about to take a stale lock over (in `profile open`).
   - A stale lock with the gate held is treated as held: the launch hands over or reports the profile busy, as for a fresh one.
-- **Deletion** holds the target's gates for the whole operation: the core's identity gate, freedom-ipfsd's and, for a catalog profile, freedom-radicled's on its home. Any one held refuses the delete before anything changes. This is 0001's rule, built at last, and it fixes the stale-lease delete. The quit request to a running profile stays as it is, before the delete.
+- **Older builds** know only the lock. Against them the lock excludes as it does today, and a stalled older build can still be taken over after 30 s, as today ([Failure modes](#failure-modes)).
+- **Deletion** (`profile delete`) holds the target's gates for the whole operation: its profile gate, the core's identity gate, freedom-ipfsd's and, for a catalog profile, freedom-radicled's on its home. The last three are taken on the paths the delete removes: inside the profile, and a catalog profile's `R/<slot>` home. An overridden component lives elsewhere and isn't deleted, and a process using one holds the profile gate anyway. Any one held refuses the delete before anything changes. This is 0001's rule, built at last, and it fixes the stale-lease delete. The quit request to a running profile stays as it is, before the delete.
+- **The core's identity gate stays,** for what 0001 gives it: one core per identity directory, wherever an override puts it.
 - **The lock directory is kept:** `locks` joins the app root's shared entries. That is a one-line fix in `profile-catalog.js`, and it should ship now, outside the PRF steps.
 
 ## 5.2 Stores (Q14)
@@ -194,7 +214,7 @@ freedom-cored profile open --app-root <dir> --lock-dir <dir>
 
 | Set | Stores | Why |
 |---|---|---|
-| **A, the core** | **wallet:** `vault-meta.json`, `wallet-intents.jsonl` (and the nonce reservations, in memory), `safe-pending.json`; **permissions:** 0012's four files and `phone-payments.json`; **feeds:** `swarm-feeds.json`, `swarm-manifest-grants.json`, `publish-history.sqlite` (0015 designs their methods); **payments:** `payment-history.sqlite`; **profiles:** `profile-registry.json`, `profile.json`; **secrets:** the quick-unlock credential, Bee's keystore password, the RPC API keys | each decides what may be signed or spent, records money that left, or protects a key. A main bug or a torn file there costs funds or authority |
+| **A, the core** | **wallet:** `vault-meta.json`, `wallet-intents.jsonl` (and the nonce reservations, in memory), `safe-pending.json`; **permissions:** 0012's four files and `phone-payments.json`; **feeds:** `swarm-feeds.json`, `swarm-manifest-grants.json`, `publish-history.sqlite` (0015 designs their methods); **payments:** `payment-history.sqlite`; **profiles:** `profile-registry.json`, `profile.json` (through the subcommands, never `serve`); **secrets:** the quick-unlock credential, Bee's keystore password, the RPC API keys | each decides what may be signed or spent, records money that left, or protects a key. A main bug or a torn file there costs funds or authority |
 | **B, main, durable** | `settings.json`, `network-config.json`, `custom-chains.json`, `custom-tokens.json`, `permissions.json`, `adblock-allowlist.json`, `external-node-decisions.json`, and the caches `balance-cache.json`, `chain-catalog.json`, `swarm-browsing-credit.json` | settings and caches: losing one costs a preference or a refetch. Several have a native home in Stage 2 (Chromium's preferences and content settings, the native ad blocker) |
 | **C, the shell's** | `history.sqlite`, `downloads.sqlite`, `user-bookmarks.json`, and Electron's own files | Chromium-native in Stage 2 (the roadmap's non-goal) |
 
@@ -236,7 +256,7 @@ freedom-cored profile open --app-root <dir> --lock-dir <dir>
 
 ## 5.3 One core, several profiles (Q15)
 
-**Proposed: one core per profile while Electron runs one main per profile. One core for every profile only once Chromium runs them all in one process. The core gains the profile dimension now.**
+**Proposed: one core per profile while Electron runs one main per profile. One shared core for all open profiles only once Chromium runs them all in one process. The core gains the profile dimension now.**
 
 - **Why not one core for all now:** Electron's profiles are separate processes, so a shared core would need a rendezvous: a socket or a named pipe that the second main can find. Any process of the same user could find it too. A token for it would sit in a file the same user can read. 0001's property, "only the parent holds the pipe", would be gone, and with it the reason a same-user process can't ask the core to sign. Under Chromium there is one parent again, and the pipe works for every profile.
 - **The transport stays a pipe** (0001's stdin and stdout frames) in both stages. No socket, port or token, ever.
@@ -254,10 +274,16 @@ freedom-cored profile open --app-root <dir> --lock-dir <dir>
   - `profile.open { user_data_dir, identity_dir, node_roots, grant_root, … } → { profile }` takes the profile's gates and returns a small handle;
   - `profile.close { profile }` locks the profile's vault, drops its caches and releases its gates;
   - `Context` (`fc-protocol/src/message.rs`) gains `profile`. Every profile-scoped method requires it, events carry it, and a request for a profile not open is refused (`no_profile`).
+  - All of this is **protocol 3**. `profile.open` and `profile.close` are rows marked `"protocol": 3` in `protocol/schema.json`, as 0009 marked its protocol-2 rows.
 - **In Stage 1** `serve`'s `--data-dir` still names the one profile, opened at start as today, and `core.hello`'s answer carries its handle. The core refuses `profile.open`, except under the test build's flag. PRF-8's tests run two profiles over one pipe: a lock, an unlock, a throttle and a failed write in one leave the other as it was.
+- **The rollout, in both directions:** the core keeps protocol 2 beside 3, as it kept 1 beside 2 while 0009's step 6 was built.
+  - **At protocol 2,** nothing changes for today's browser: a request names no profile and means the one `serve` opened, a request that carries `profile` is refused (`invalid_argument`), `profile.open` and `profile.close` are unknown, and events carry no `profile`.
+  - **The handshake:** main offers `core.hello { protocol: 2, max_protocol: 3, … }`. A core from PRF-8 on answers at 3, with the handle. An older core reads `protocol: 2` and ignores `max_protocol`, as it ignores every hello field it doesn't know (`HelloParams`, `serve.rs:608–625`), and answers at 2. Main speaks the version the answer names.
+  - So the current browser runs on the new core at protocol 2, and the new browser on the previous core at 2. Only a pair that both speak 3 sends handles.
+  - **Protocol 2 goes** in a follow-up core PR once a browser release on `main` speaks 3, as 0009's follow-up removed protocol 1.
 - **Stage 2's open question,** left to it: a crash takes every profile's unlock state with it, and a confined core can't widen its grants for a profile opened later ([D7](#effects-on-0010-and-d7)).
 
-## 5.4a The key store and the quick-unlock re-wrap (Q13)
+## 5.4a The key store and the quick-unlock re-wrap (Q13a, Q13b)
 
 ### The trait
 
@@ -269,9 +295,10 @@ pub enum Policy { Unattended, UserPresence }
 pub trait KeyStore {
     /// What this device offers, asked once per profile open.
     fn capabilities(&self) -> Capabilities;
-    /// Seals a fresh 32-byte wrapping key. The result is what the secrets
-    /// file stores: an item reference, or an OS blob.
-    fn seal(&self, key: &WrapKey, policy: Policy, label: &Label) -> Result<Sealed, KeyStoreError>;
+    /// Makes a fresh 32-byte wrapping key where it is kept, under `policy`,
+    /// and returns it with what the secrets file stores: an item
+    /// reference, or an OS blob.
+    fn create(&self, policy: Policy, label: &Label) -> Result<(WrapKey, Sealed), KeyStoreError>;
     /// Opens it. `UserPresence` asks the user, with `reason`.
     fn open(&self, sealed: &Sealed, reason: &Reason) -> Result<WrapKey, KeyStoreError>;
     /// Removes the item. A missing item is success.
@@ -281,13 +308,15 @@ pub trait KeyStore {
 pub enum KeyStoreError { NotFound, Cancelled, Unavailable, Invalidated, Denied, Backend(BackendError) }
 ```
 
-- **Sealing, not storing:** the macOS Keychain and the Secret Service store an item, DPAPI returns a blob, and Android Keystore keeps a key and encrypts with it. `seal` and `open` cover all of these.
-- **Only wrapping keys** go to the OS: two per profile at most, one per policy. `WrapKey` zeroizes on drop and has no `Debug`, `Display`, `Serialize` or `Clone` (rule 3).
+- **Creating, not storing a given key:** the macOS Keychain and the Secret Service store an item, DPAPI returns a blob, and Android Keystore keeps a key and encrypts with it. `create` and `open` cover all of these. The key is made where it is kept, in the helper on desktop ([The helper](#the-helper-freedom-cored-keystore)), so it reaches the core only sealed to it.
+- **Replacing a key** is three calls: `create` a new one, rewrite every entry under it in one atomic write of the secrets file, then `forget` the old one.
+- **Only wrapping keys** go to the OS: two per profile at most, one per policy, and a third for the moment one is replaced. `WrapKey` zeroizes on drop and has no `Debug`, `Display`, `Serialize` or `Clone` (rule 3).
 - **The secrets file** (`identity/secrets.json`, 0600, 0001's atomic write):
 
   ```json
   { "version": 1,
-    "keys": { "unattended": { "backend": "macos-keychain", "sealed": "<base64>" } },
+    "keys": { "unattended": { "backend": "macos-keychain", "item": "<32 hex>", "sealed": "<base64>",
+                              "pending": null } },
     "entries": { "<name>": { "key": "unattended", "nonce": "<base64, 12 bytes>",
                              "ciphertext": "<base64>", "binding": { … } } } }
   ```
@@ -299,27 +328,54 @@ pub enum KeyStoreError { NotFound, Cancelled, Unavailable, Invalidated, Denied, 
 
 | OS | `Unattended` | `UserPresence` | Code |
 |---|---|---|---|
-| macOS | a generic-password item in the login keychain, its access list the core's signature | the data protection keychain with `SecAccessControl` (`userPresence`), once the core can carry the entitlement | **`security-framework` 3.7** (MIT OR Apache-2.0), pinned exactly: its `passwords` and `access_control` modules. Its unsafe stays inside it, as D6 accepted for `landlock`. Hand-written FFI would rebuild Core Foundation dictionaries call by call |
-| Windows | DPAPI, `CryptProtectData` with the profile's id as entropy and no UI | Windows Hello (`KeyCredentialManager`), only if Q13 says so | **`fc-sys`** (rule 6): `CryptProtectData`, `CryptUnprotectData` and `LocalFree`, each a safe function with its `SAFETY` comment, through `windows-sys`, which `fc-sys` already uses. Hello is WinRT, which needs the `windows` crate (0.62, MIT OR Apache-2.0); not added unless Q13 says Windows too |
+| macOS | a generic-password item in the login keychain, its access list the signature of `freedom-cored`, the binary the helper runs | the data protection keychain with `SecAccessControl` (`userPresence`), once the core can carry the entitlement | **`security-framework` 3.7** (MIT OR Apache-2.0), pinned exactly: its `passwords` and `access_control` modules. Its unsafe stays inside it, as D6 accepted for `landlock`. Hand-written FFI would rebuild Core Foundation dictionaries call by call |
+| Windows | DPAPI, `CryptProtectData` with the profile's id as entropy and no UI | Windows Hello (`KeyCredentialManager`), only if Q13b says so | **`fc-sys`** (rule 6): `CryptProtectData`, `CryptUnprotectData` and `LocalFree`, each a safe function with its `SAFETY` comment, through `windows-sys`, which `fc-sys` already uses. Hello is WinRT, which needs the `windows` crate (0.62, MIT OR Apache-2.0); not added unless Q13b says Windows too |
 | Linux | an item in the Secret Service's default collection | none: no OS biometric binding exists | **`secret-service` 5.2** (MIT OR Apache-2.0), pinned exactly, with `rt-async-io-crypto-rust`, through its blocking API. It brings `zbus` (MIT) and an async-io executor, but no tokio. The step measures the binary's growth, and `cargo deny` must pass. The alternative is `dbus-secret-service`, which links the system's libdbus |
 | iOS, Android | Keychain, Android Keystore | Keychain access control, `setUserAuthenticationRequired` | the mobile apps, behind the trait |
 
 - **Not `keyring`** (4.2): it is a facade over the same three. It has no access-control policy and no DPAPI blob of our own, and it would be wrapped again.
 - **No backend is ever faked.** A Secret Service that doesn't answer, or no keyring, is `Unavailable`: each secret stays where it is today, with today's owner-only file. That is #946's `v10` rule, kept: the core has no fixed-key fallback.
 - **When the OS is asked:**
-  - **Unattended keys** are opened when the profile opens, but only if the secrets file holds an entry. On Linux that is the only D-Bus use, and it comes before D7 confines the core. On desktops that log in without a password, gnome-keyring asks to be unlocked then. #946 notes the same prompt at Ant's start.
+  - **Unattended keys** are opened when the profile opens, but only if the secrets file holds an entry. On desktops that log in without a password, gnome-keyring asks to be unlocked then. #946 notes the same prompt at Ant's start.
+  - **A key is created** when the first secret under it is written: `quick_unlock.enroll`, a `vault.create` or `vault.import` with `quick_unlock: true`, an RPC API key added, a Bee identity written or adopted ([5.4c](#54c-bees-keystore-password-q16)). **It is forgotten** when quick unlock is disabled, the vault or the profile is deleted, or the key is replaced. These come at any time while the profile is open, long after D7 has confined `serve`.
   - **`UserPresence`** asks at each quick unlock.
 - **The entitlement:** biometric access control needs the data protection keychain, which needs the process to carry a keychain-access entitlement authorized by a provisioning profile (TN3137). `freedom-cored` is a bare executable in the app's resources. PRF-1 spikes signing it as a helper bundle with that entitlement. Until that passes, `UserPresence` is `Unavailable` on macOS, and Touch ID stays main's prompt in front of the core, as today.
+
+### The helper, `freedom-cored keystore`
+
+**Proposed: on every desktop OS, each key-store call runs in a one-shot process that main starts for it. `serve` never calls a key store itself.**
+
+- **Why:** `create` and `forget` are runtime calls (above), and D7 confines `serve` for its whole life.
+  - **Linux:** `secret-service` 5.2's blocking API opens a session-bus connection at each connect. 0010 keeps the session bus from every confined process, since it can start programs (0010's threat list; seccomp's socket rule). A connection kept open across `confine` would give a compromised core the bus for the rest of its life.
+  - **macOS:** the Keychain needs the Security server's Mach services. They reach every item of the user's keychains that the core's signature may use, not only Freedom's.
+  - **Windows:** DPAPI calls the local security authority, which 0010's restricted token (D4) may not reach.
+  - One path on every OS keeps `serve`'s confinement free of key storage.
+- **The call:** the core's desktop `KeyStore` sends main `shell.keystore { op, policy, item, reply_key, reason? }`, as its HTTP goes through main's `shell.*` executors (0004). `op` is `create`, `open` or `forget`. `item` is the key's random id (32 hex digits), and `reason` one of a fixed list (`quick_unlock`, `export`) for which main supplies the text the OS shows. Main checks the form, then runs `freedom-cored keystore --op <op> --policy <policy> --item <id> --reply-key <base64> [--reason <kind>]` with no stdin, one at a time per profile, and relays its answer.
+- **The secret transfer:**
+  - The core makes an X25519 key pair for each request and keeps its private half. `reply_key` is the public half.
+  - For `create`, the helper makes the wrapping key from the OS's RNG and stores or seals it in the OS. For `create` and `open`, it returns the key HPKE-sealed to `reply_key`, in `fc-seal`'s suite, as `nodes.seal_radicle_key` seals for the Radicle service. The associated data is `freedom-keystore/1`, the op and the item id. `forget` returns nothing secret.
+  - So main relays only ciphertext, and no wrapping key crosses argv, stdin or main's heap. The helper zeroizes its copy before it exits.
+- **The answer:** one JSON line on stdout, at most 4 KiB. It is `{ ok: true, sealed?, key? }`, or `{ ok: false, error, reason? }` where `error` is `not_found`, `cancelled`, `unavailable`, `invalidated`, `denied` or `backend`, mapped onto `KeyStoreError`. Anything else is `Backend`: no line, a longer one, an exit without an answer, or a `key` that doesn't open under the request's key, op and item.
+- **Deadlines:** main kills a helper after 60 s for `create` and `open`, which may wait on gnome-keyring's unlock prompt or on Touch ID, and after 10 s for `forget`. The core then gets `Unavailable`, with `reason: "timeout"`.
+- **The failure contract:**
+  - Before a `create`, the core writes the new item's id into the secrets file as `pending` under its policy. It makes the key the file's own only after the helper has answered and the entries under it are written, in one atomic write.
+  - A failure, a kill or a crash at any point therefore leaves the file's committed keys and entries as they were. The next profile open forgets a `pending` item that never committed, which also covers a helper killed after the OS stored the item and before it answered.
+  - `forget` runs only once the file no longer names the item. A failed `forget` leaves an item the file doesn't name, and it is tried again at the next open.
+  - Nothing is deleted on a failed `open` ([Failure modes](#failure-modes)).
+- **The helper's own limits:** it runs no program and writes no file. It makes one call to the OS's key store and exits. Its environment is the core's cleared one plus what the backend needs: `DBUS_SESSION_BUS_ADDRESS` and `XDG_RUNTIME_DIR` on Linux. How far it confines itself beyond refusing child processes is the qualification gate's to show, per OS, since it must keep its one channel to the key store.
+- **Mobile** implements the trait in the app's own process. There is no helper there.
 
 ### The re-wrap
 
 - **PRF-1 (core):**
+  - the helper with its macOS backend, and the core's desktop `KeyStore` over `shell.keystore`;
   - `quick_unlock.enroll { password }` checks the password against the vault, sharing 0001's throttle. It then writes the `quick-unlock` entry, bound to the vault file's SHA-256 (today's binding, without the path), under `UserPresence` where available and `Unattended` otherwise.
   - `quick_unlock.unlock {}` unlocks with it, so the password stays in the core. `quick_unlock.export_mnemonic` and `export_private_key` are the Touch ID exports.
   - `quick_unlock.status` and `quick_unlock.disable` complete the set.
   - `vault.create` and `vault.import` gain `quick_unlock: true`. That writes the entry before the vault commits, bound to the new vault's digest, so a Quick Setup vault never exists without its credential. A crash between the two leaves an entry that names no vault, which the core removes at start.
   - `vault.change_password` writes the new vault and the re-wrapped entry as one operation.
 - **PRF-2 (browser):**
+  - Main's `shell.keystore` executor, which checks the request and runs the helper.
   - At the next Touch ID unlock or export, a profile with only `quick-unlock.dat` goes through it once, as today. Main then sends the password it unsealed to `quick_unlock.enroll`. Later unlocks call `quick_unlock.unlock` behind main's Touch ID prompt.
   - Quick Setup prompts for Touch ID first, then creates with `quick_unlock: true`, and still writes `quick-unlock.dat` for older builds.
   - `quick-unlock.dat` is left byte for byte. Disabling removes both credentials.
@@ -347,8 +403,14 @@ pub enum KeyStoreError { NotFound, Cancelled, Unavailable, Invalidated, Denied, 
 
 ### The move
 
-`freedom-cored profile migrate --profile-dir <dir> --lock-dir <dir>`, run by main with `spawnSync` right after it takes the profile lock, and before it starts the core's `serve`, any node or any store.
-1. **Gates:** it holds the core's gate and freedom-ipfsd's, on both the old and the new paths. A gate's name is the digest of a canonical path, so both names are held.
+`freedom-cored profile migrate --profile-dir <dir> --lock-dir <dir> [--dev]`, run by main with `spawnSync` after `app.setPath` and **before main starts `hold-profile` or takes its own profile lock**. Main runs it only when `profile open` reported `layout: "pending"`, or, from PRF-9, `"root"`. So it also comes before the core's `serve`, any node and any store.
+1. **Its own exclusion, for the whole run:**
+   - **The profile gate first,** so a new build sees the profile open.
+   - **Then the profile lock, in today's format.** It takes `profile-open.lock` as proper-lockfile does, with `mkdir`. A stale lock is taken over, since holding the gate shows that no live new build has the profile. It refreshes the mtime every 10 s (1 s in dev) from a thread that does nothing else, and checks at each refresh that the mtime is still the one it set. So an older build sees the profile open for the whole run, however long a copy or a held Windows rename takes, and whatever main is doing.
+   - **The core's gate and freedom-ipfsd's,** on both the old and the new paths. A gate's name is the digest of a canonical path, so both names are held.
+   - **A lock or gate held by another process** ends the run at once with `busy` (exit 75), with nothing changed, and main hands over or reports the profile busy, as for a fresh lock.
+   - **It lets go** only after the marker and cleanup, or after a rollback. Main then starts `hold-profile` and takes its own lock, as at any start. A launch that takes the profile in the moment between finds it settled, in one layout or the other.
+   - **If its lock is compromised** (the process was frozen past 30 s and another build took the lock over), it changes nothing more and exits 74 with `lock_lost`. The journal stays for the next start. No lease can cover a frozen holder, proper-lockfile's included.
 2. **The journal:** `freedom/.move.json` lists the entries present, in order. It is written and synced before the first change.
 3. **Each entry is one rename** into `freedom/`. On Windows, a rename refused while an indexer holds the entry (`EPERM`, `EACCES`, `EBUSY`) is retried, as `profile-catalog.js:1053–1086` retries its fence: 10 times, 100 ms apart.
    - **An entry on another device** is copied to `freedom/<name>.moving`, synced, then renamed to its name. That is the roadmap's copy-then-rename. Its source is removed only after step 5.
@@ -362,12 +424,16 @@ pub enum KeyStoreError { NotFound, Cancelled, Unavailable, Invalidated, Denied, 
 - **After the marker, it rolls forward:** a start that finds the journal and the marker finishes the cleanup.
 - **A journal that doesn't parse** stops the profile from opening (exit 74, with a clear message). The core doesn't guess which entries moved.
 - **New profiles** created by a build from PRF-9 on start in the new layout.
+- **Why the move holds its own lock** rather than running under main's:
+  - **`spawnSync` under main's lock** stops main's refresh timer ([Profiles](#profiles)). A run past 30 s lets an older build take the lock over, and the gates the move holds mean nothing to that build.
+  - **An asynchronous child under main's lock** keeps the refresh going, but main's top level reads stores before the first window (`loadSettings()`, `index.js:546`) and would race the move. A main that dies or stalls mid-move would also let the lock lapse while the child goes on.
+  - **Its own refresher** depends on neither. And `spawnSync` is safe here, since main holds no lease while it waits. A long move shows nothing on screen, as today's `migrateUserData` doesn't (`index.js:79–81`).
 
 ### Readers, and the downgrade
 
 - **The reader release (PRF-4):**
   - Every path getter in main and in the core resolves the profile's Freedom root once: `freedom/` if `freedom/layout.json` exists, the root otherwise.
-  - It runs `profile migrate --finish-only`, which completes or rolls back a move it finds, and starts none.
+  - When `profile open` reports a journal (`layout: "pending"`), main runs `profile migrate --finish-only` in the same place and under the same exclusion. It completes or rolls back the move it finds, and starts none.
   - It ships long before the move, and the move ships as the last Stage-1 step, just before Stage 2 needs it.
 - **Downgrade, [Q12](#open-questions):**
   - **To a build from the reader release on,** everything works, both ways.
@@ -434,21 +500,25 @@ Rule 4 gains: "OS key-store items hold wrapping keys only, one per profile and p
   - `COMPONENT_DATA_DIRS` (`profile-paths.js:284–292`), which feeds `service-grant.js`, gains the `freedom/` prefix for every component that moves, and the stores' names join it. After the move, `freedom/` holds the IPFS grant, so by 0010's rule it isn't a root itself. Its other entries are roots, names not yet created included.
   - The lock directory stays a root. `R/<slot>` homes don't move.
   - A service's grant inside a profile changes path once, at the move. Each spawn's check runs as before.
-- **D7, `freedom-cored`'s own confinement,** gets what it needs from this design:
-  - **Files, before the move (D7a):** read-write on the profile's `userData`, the lock directory and the profile's Radicle home. That already keeps a compromised core away from other profiles, the user's files and the places that start programs. The core writes set-A files at the root of `userData` with atomic renames, so the grant can't be narrower than that directory.
-  - **Files, after the move (D7b):** read-write on `<profile>/freedom/`, the lock directory and the Radicle home. Electron's own data in the same profile, its cookies included, leaves the grant.
+- **D7, `freedom-cored`'s own confinement,** is `serve`'s. What `serve` needs, as this design leaves it:
+  - **Files, before the move (D7a):** read-write on the profile's `userData`, the lock directory, the profile's Radicle home, and each directory the core writes that an override puts outside `userData` (the identity directory, and the node roots of `core.hello`: Ant's or Bee's data). The core writes set-A files at the root of `userData` with atomic renames, so the grant can't be narrower than that directory.
+    - **For a named profile,** that keeps a compromised core away from other profiles, the catalog, the user's other files and the places that start programs.
+    - **For the packaged default profile it doesn't.** Its `userData` is the app root, which holds `profile-registry.json`, `Profiles/` and `R/`. Landlock's grant on a directory covers everything below it, so on Linux the default profile's core reaches every profile under D7a. Seatbelt can deny paths inside an allowed subtree, so on macOS D7a can take `Profiles/`, the other profiles' `R/` homes and the catalog back out; the qualification gate shows whether it does. Windows confines files only once 0010's restricted token qualifies (D4).
+  - **Files, after the move (D7b):** read-write on `<profile>/freedom/`, the lock directory, the Radicle home, and the overridden directories. The default profile's `freedom/` holds no other profile, so D7b separates it as D7a separates a named one. Electron's own data in the same profile, its cookies included, leaves the grant, and so does `profile.json` at the profile's root, which only the subcommands write.
+  - **The catalog and other profiles** are never `serve`'s: `profile open` and the catalog subcommands do that work ([5.1](#51-resolving-the-profile)), each a short run on main's arguments, confined on its own. `serve` has no catalog method.
   - **Network:** none. Every HTTP request the core makes goes through main's `shell.*` executors (0005, 0006, 0009), so the core needs no socket at all.
-  - **Local IPC:**
-    - main's pipe;
-    - on macOS, the Security server's Mach services, by name, for the Keychain. The qualification gate names them, as 0010 named mDNSResponder's;
-    - on Linux, the Secret Service, read before `confine`, after which no D-Bus socket stays open. The session bus can start programs (0010's threat list), so it is never kept.
-  - **Processes:** none. `hold-lock`, `recover`, `profile open` and `profile migrate` are separate runs of the binary by main, not children of `serve`.
+  - **Local IPC:** main's pipe, and nothing else, on every OS. Every key-store call goes through the helper ([The helper](#the-helper-freedom-cored-keystore)), so `serve` needs neither the session bus on Linux nor the Security server's Mach services on macOS, and no key-store connection is open across `confine`.
+  - **Processes:** none. `hold-lock`, `hold-profile`, `recover`, `profile open`, `profile migrate`, the catalog subcommands and `keystore` are separate runs of the binary by main, not children of `serve`.
+  - **D7's own tests,** besides 0010's, run against a `serve` that has confined itself:
+    - a named profile's `serve` can't read `profile-registry.json` or another profile's directory, and every catalog operation works from that profile's manager meanwhile;
+    - connecting to the session bus fails;
+    - through the helper, the `Unattended` key is created, opened, replaced and forgotten after `confine`, on every OS that offers it: macOS (a temporary keychain), Windows (DPAPI) and Linux (a Secret Service on CI's private session bus). `UserPresence` is tested the same way on macOS once its spike passes.
   - **Stage 2's multi-profile core:** Landlock and Seatbelt can't widen a sandbox, so a profile opened after `confine` needs a new core process or a grant over `Profiles/`. That is left to the Stage-2 design.
 
 ## Relation to 0012 and 0015
 
 - **0012's files** keep its rules (format, bounds, failed and narrowing writes, unreadable files set aside), and are set A here.
-  - `grant_root` keeps its meaning, "where the grant files are". From PRF-8 it travels in `profile.open`, and after PRF-9 it names `<profile>/freedom/`.
+  - `grant_root` keeps its meaning, "where the grant files are". From PRF-8 it travels in `profile.open`, at protocol 3, and after PRF-9 it names `<profile>/freedom/`.
   - `fc-approval`'s store trait is what `fc-store` implements.
   - `phone-payments.json`, which older builds don't read, moves with the rest at PRF-9.
 - **The intent journal and the nonces** are set A, so 0012's APR-6 (the nonce, the journal and the broadcast) follows PRF-6's intent step.
@@ -460,15 +530,17 @@ Rule 4 gains: "OS key-store items hold wrapping keys only, one per profile and p
 - **A crash in the middle of the move:** the journal is on disk before the first rename. Before the marker the next start rolls back; after it, it finishes. A crash in a cross-device copy leaves only `<name>.moving`, which the rollback removes.
 - **A partial move:** a profile is never opened half-moved. Readers decide by the marker, `--finish-only` settles any journal first, and an unreadable journal stops the profile with a message instead of a guess.
 - **Two builds at once:**
-  - **On one profile:** the profile lock excludes them in any mix of builds, and the core's gate also excludes two cores.
-  - **A stale takeover:** a pre-core build from main can take a stale lock over without a gate. That is 0001's unsupported pairing of two identity writers, and the release notes keep saying so.
-  - **On the catalog:** the subcommand and older builds share proper-lockfile's write lock.
-  - **During a move:** the move takes the profile lock first, so an older build on the same profile waits or hands over. Other profiles are untouched.
+  - **On one profile:** the profile lock excludes them in any mix of builds, the profile gate excludes two new builds, and the core's gate also excludes two cores.
+  - **A stale takeover:** an older build knows no gate, so it can still take over the stale lock of a new build whose main has stalled past 30 s, as it can today. For a pre-core build that is 0001's unsupported pairing of two identity writers, and the release notes keep saying so.
+  - **On the catalog:** the subcommands and older builds share proper-lockfile's write lock.
+  - **During a move:** the move holds the profile lock itself, in today's format, and refreshes it from its own thread, so an older build on the same profile hands over or reports it busy for the whole move, however long it takes. The profile gate does the same for new builds. Other profiles are untouched.
 - **A stale profile lock:**
   - **with the gate held:** the profile is open, so a launch hands over, and a delete or a takeover is refused;
-  - **with the gate free:** taken over as today. That is a crashed process, or one whose core isn't up yet;
+  - **with the gate free:** taken over as today. That is a crashed process, or an older build, which holds no gate. A new build's main holds the gate from before its lock, so its core not being up yet no longer makes it look closed;
   - **a fresh lock that a crashed process left:** a relaunch within 30 s reports the profile busy, as today. A fresh lock with no gate can't be told apart from a profile still starting, so it isn't taken.
-- **A main loop stalled past 30 s** still finds its own lock compromised, and throws (`profile-lock.js:77–80`), as today. With the gate rule, another new build no longer takes the profile over meanwhile.
+- **A main loop stalled past 30 s** keeps its lock if nobody took it over meanwhile. If an older build did, main finds the lock compromised at its next refresh and throws (`profile-lock.js:77–80`), as today. A new build no longer takes it over, since the gate is held.
+- **The gate's holder dies while main runs:** main starts another at once. The lock, still fresh, covers the moment, and a main that can't take the gate again within 5 s quits, as on a compromised lock.
+- **A key-store helper that fails, hangs or is killed:** the secrets file's committed keys and entries stay as they were, a `pending` item is forgotten at the next open, and the request fails with `key_store_unavailable` or `key_store_cancelled` ([The helper](#the-helper-freedom-cored-keystore)).
 - **The key store unavailable or reset:** each secret falls back to its documented path (re-inject, quick unlock off, RPC keys re-entered). Nothing is deleted on a failed open, and a Quick Setup credential is never removed except by an explicit disable or a vault delete (0001: nothing destructive is inferred from a missing credential).
 - **A full disk:** a write fails before its rename, and the store is unchanged. A move fails before its marker, and rolls back.
 
@@ -477,19 +549,26 @@ Rule 4 gains: "OS key-store items hold wrapping keys only, one per profile and p
 | Method | Caller | Shape |
 |---|---|---|
 | `profile open` (subcommand) | main, before `app.setPath` | above |
-| `profile migrate` (subcommand) | main, after the profile lock | `--profile-dir`, `--lock-dir`, `--finish-only` → `migrated`, `nothing`, `rolled_back` or `corrupt` on stdout |
-| `profile.open` / `profile.close` | shell | [5.3](#53-one-core-several-profiles-q15) |
-| `profile.list`, `profile.create`, `profile.rename`, `profile.import`, `profile.delete` | chrome | today's results; `delete { id, confirm_display_name }` holds the target's gates, answers `lock_held` if one is held |
-| `profile.is_open` | shell | `{ user_data_dir }` → `{ open, lock_fresh, gate_held }` |
-| `profile.update_nodes`, `profile.reserved_ports` | shell | `updateProfileNodeConfig`'s and `getReservedManagedPorts`' |
+| `profile migrate` (subcommand) | main, after `app.setPath`, before `hold-profile` and its own lock | `--profile-dir`, `--lock-dir`, `--dev`, `--finish-only` → `migrated`, `nothing`, `rolled_back`, `busy`, `lock_lost` or `corrupt` on stdout |
+| `hold-profile` (subcommand) | main, from `app.setPath` until after it releases its lock | `--user-data-dir`, `--lock-dir`, `--app-root` and `--id` for a catalog profile → `locked`, then holds the profile gate until stdin closes |
+| `profile list`, `create`, `rename`, `import`, `delete` (subcommands) | main, for the profile manager | today's results, as JSON on stdout; `delete --id --confirm-display-name` holds the target's gates, and answers `lock_held` if one is held |
+| `profile update-nodes`, `reserved-ports` (subcommands) | main, for the node settings | `updateProfileNodeConfig`'s and `getReservedManagedPorts`' |
+| `profile status` (subcommand) | main, for a lock that reads stale | `--user-data-dir <dir>`, repeatable → `{ open, lock_fresh, gate_held }` for each |
+| `keystore` (subcommand) | main, for `shell.keystore` | [The helper](#the-helper-freedom-cored-keystore) |
+| `shell.keystore` | the core, to main | `{ op, policy, item, reply_key, reason? }` → the helper's answer |
+| `core.hello` | shell | gains `max_protocol`; at 3, its answer carries `profile` ([5.3](#53-one-core-several-profiles-q15)) |
+| `profile.open` / `profile.close` | shell, protocol 3 | [5.3](#53-one-core-several-profiles-q15) |
 | `accounts.*` | chrome, shell | one per `vault-meta.json` change |
 | `intents.*` | shell | `intent-store.js`'s record kinds: commit, handoff, outcome, settle, void, retire, track, and the reads |
 | `payments.*`, `safe_pending.*` | shell, chrome | the modules' operations |
 | `quick_unlock.enroll`, `.unlock`, `.export_mnemonic`, `.export_private_key`, `.status`, `.disable` | chrome (after main's Touch ID prompt), shell (enroll) | [The re-wrap](#the-re-wrap) |
-| `secrets.rpc_api_keys`, `secrets.set_rpc_api_key` | shell, chrome | the keys main needs for the requests it runs |
+| `secrets.rpc_api_keys` | shell only | the keys main needs for the requests it runs |
+| `secrets.rpc_api_key_status`, `secrets.set_rpc_api_key`, `secrets.remove_rpc_api_key` | chrome, shell | `{ providers: [{ id, present }] }`, never a key; a set replaces any key the provider had |
 | `nodes.bee_handoff`, `nodes.bee_handoff_done`, `nodes.adopt_bee_password` | shell | [5.4c](#54c-bees-keystore-password-q16) |
 
 New request errors: `no_profile`, `key_store_unavailable` (with `data.reason`), `key_store_cancelled`.
+
+**RPC API keys stay out of the renderers.** `secrets.rpc_api_keys` answers only `shell`, and a `chrome` caller gets `forbidden`. The settings page sees which providers have a key, as it does today (`hasKey`), and can set, replace or remove one and test a key the user types, but can't read a stored one back. No product need asks for more: today's page shows nothing but presence ([Facts found](#facts-found-while-checking-the-code), 5). PRF-6(e) also removes the chrome preload's `rpcManager.getEffectiveUrls`, which no renderer calls. Main substitutes a key only into a request it runs itself.
 
 ## Vectors
 
@@ -508,7 +587,7 @@ From the JS reference (rule 5), each with its own `meta` naming the pinned commi
 - **`journal.json`:** `durable-journal.js`'s lines and checksums, a whole last record without its newline, torn tails, a damaged line, compaction, and the 64 MiB bound.
 - **`bee-seal.json`:** #946's seal records, valid and not, with `readSeal`'s verdicts; the serde_yaml fixture of `password:` lines with their decoded passwords; and keystore digests.
 - **`sqlite.json`:** `sqlite_master`'s rows and `user_version` for both databases as the reference creates them, and the rows after the reference's operations.
-- **The design's own,** with no reference (`source: design`): the secrets file under a fixed key and nonce, with the associated-data refusals; the layout list for each kind of profile (packaged default, named, dev, `--profile-dir`, test); and the move journal's states.
+- **The design's own,** with no reference (`source: design`): the secrets file under a fixed key and nonce, with the associated-data refusals and a `pending` item; the helper's answers under a fixed request key, with the refusals; the profile gate's file name for each kind of profile; the layout list for each kind of profile (packaged default, named, dev, `--profile-dir`, test); and the move journal's states.
 
 ## Migration
 
@@ -516,21 +595,22 @@ One PR per step: the core's against `main`, the browser's against `integration/r
 
 | Step | Repo | What | Needs | The tests that prove it |
 |---|---|---|---|---|
-| PRF-1 | core | `fc-keystore` (trait, policies, the secrets file); the macOS `Unattended` backend; `quick_unlock.*`; `quick_unlock: true` on create and import; the re-wrap on change of password; the entitlement spike for `UserPresence` | — | Secrets vectors byte for byte; an entry under another name, binding or key refused. On macOS CI, a temporary keychain: seal, open, forget, and `NotFound` after forget. Enroll refused for a wrong password and throttled with `vault.unlock`. Unlock works locked and unlocked. A failure hook at each step of create-with-credential and of change-password leaves the old pair or the new, never a vault without its credential. An entry naming no vault removed at start. iOS and Android builds pass |
-| PRF-2 | browser | The re-wrap: enroll at the next Touch ID use; unlock through the core; Quick Setup creates with the credential and still writes `quick-unlock.dat`; disable removes both; the one-time prompt before a shell switch | PRF-1's release pinned | The migration suite: a profile with a v2 and one with a legacy `quick-unlock.dat` unlocks once through it and then through the core, with the file's bytes unchanged. **Downgrade:** the reference `quick-unlock.js` still unlocks from it. A password change keeps quick unlock in the core. The Quick Setup e2e on macOS with a stubbed Touch ID; Quick Setup's failure path deletes nothing the core committed |
-| PRF-3 | core | `fc-profile`; `profile open`; `profile.*` and `profile.is_open`; the catalog's write lock; deletion under every gate; `locks` kept; `profile migrate --finish-only`, the move's recovery, which starts no move | — | `profiles.json` replayed. The latency gate on every OS. A Jest harness runs the reference's `createProfile` and `renameProfile` against the subcommand in a loop: the catalog stays valid, and no record is lost. A stale write lock taken at 30 s, not at 29,999 ms. **The stale-lease case:** a lock backdated 31 s with the target's core, IPFS or Radicle gate held refuses the delete, with nothing changed. The default profile's delete keeps `locks/` and every other shared entry |
-| PRF-4 | browser | `profile open` before `app.setPath`; the profile manager through `profile.*`; "open" means a fresh lock or a held gate; **the reader release**: one Freedom-root resolver, and `profile migrate --finish-only` at start | PRF-3's release pinned | `npm run test:migration` and the profile e2e specs, unchanged. The stale-lease probe refused. **Downgrade:** the reference resolver opens a catalog the subcommand wrote. A profile in the moved layout, built from the layout vectors, opens, and so does one with a journal pending before and after its marker |
-| PRF-5 | core | `fc-store` (JSON, the journal, SQLite); `fc-wallet-state`; `accounts.*`, `intents.*`, `payments.*`, `safe_pending.*`, `secrets.rpc_api_keys`; vault and metadata as one write; the Windows handle-relative calls in `fc-sys` | PRF-1 | Each store's text after every vector's operation, byte for byte. The journal vectors in both directions. The SQLite schema rows equal the reference's, and a database each side wrote is read by the other. A failure hook at each write step (temp write, fsync, rename, directory flush) leaves the file as it was, or reports `durable: false`. On Windows: a directory swapped for a junction between the open and the write is refused, and the file lands nowhere else; a reparse point at a child's name refused; renames and deletes by handle |
-| PRF-6 | browser | Set A through the core, one store per PR: (a) `vault-meta.json`, (b) the intent journal, then 0012's APR-6, (c) payments, (d) pending Safe transactions, (e) RPC API keys into the secrets file. Set B onto `lib/atomic-file.js` | PRF-5's release pinned | Each module's Jest suite against the core. An `fs` spy shows main writes none of the store's files. **Rollback:** the reference module reads the file the core wrote and sees the same state. RPC API keys: the old file is removed only after the entry is written; with no key store it stays, owner-only |
-| PRF-7 | core, then browser | Bee's keystore password: the Linux and Windows `Unattended` backends; `nodes.write_identity` without the line; `bee_handoff`, `bee_handoff_done`, `adopt_bee_password`; the browser's Ant start through them; the AGENTS.md amendment | PRF-5; SEC-3f | `bee-seal.json` replayed. Adoption from a seal, and from a `password:` line in every form the fixture holds. Refused for a seal of another keystore, for a password that doesn't open it, and for a keystore changed between the check and the write. The hand-off file is 0600 in a 0700 directory, gone after `done`, and an orphan swept. With no key store, `config.yaml` keeps the line. **Downgrade:** a SEC-3f build starts Ant from the seal the core left |
-| PRF-8 | core | The profile dimension: `profile.open` and `profile.close`; `Context.profile`; per-profile state | PRF-5 | Two profiles over one pipe under the test flag: a lock, an unlock, the throttle, auto-lock and a failed write in one leave the other as it was. A request without `profile`, or for one not open, refused. A second `profile.open` refused without the flag |
-| PRF-9 | core, then browser | The move: `profile migrate` starting moves; the marker; the placeholder; downgrade residue set aside; new profiles in the new layout; 0010's component list with `freedom/` | PRF-4 shipped long enough; Q12 | **A crash hook at every step:** before the marker it rolls back to the old layout, which opens; after it, it finishes. A cross-device entry copied and its source kept until the marker. A database with a non-empty `-wal` stops the move. A Windows rename held by another handle retried, then rolled back. **Downgrade:** a reader build opens the moved profile. An older build can't create a vault under the placeholder. On re-upgrade, its root entries are set aside, unmerged. Every protected root in `freedom/` is refused as a grant |
+| PRF-1 | core | `fc-keystore` (trait, policies, the secrets file); the helper, `freedom-cored keystore`, with the macOS `Unattended` backend; the core's desktop `KeyStore` over `shell.keystore`; `quick_unlock.*`; `quick_unlock: true` on create and import; the re-wrap on change of password; the entitlement spike for `UserPresence` | — | Secrets vectors byte for byte; an entry under another name, binding or key refused. On macOS CI, a temporary keychain: create, open, replace and forget through the helper, and `NotFound` after forget. **The helper's contract:** an answer not sealed to the request's key, or sealed for another op or item, is refused; a reply over 4 KiB, no reply, and a helper past its deadline are `Unavailable` or `Backend`; a helper killed after the OS stored the item and before it answered leaves the file's committed state as it was, and the `pending` item is forgotten at the next open; no wrapping key appears in argv, stdin or the bytes main relays. Enroll refused for a wrong password and throttled with `vault.unlock`. Unlock works locked and unlocked. A failure hook at each step of create-with-credential and of change-password leaves the old pair or the new, never a vault without its credential. An entry naming no vault removed at start. iOS and Android builds pass |
+| PRF-2 | browser | Main's `shell.keystore` executor, which runs the helper. The re-wrap: enroll at the next Touch ID use; unlock through the core; Quick Setup creates with the credential and still writes `quick-unlock.dat`; disable removes both; the one-time prompt before a shell switch | PRF-1's release pinned | The migration suite: a profile with a v2 and one with a legacy `quick-unlock.dat` unlocks once through it and then through the core, with the file's bytes unchanged. **Downgrade:** the reference `quick-unlock.js` still unlocks from it. A password change keeps quick unlock in the core. The Quick Setup e2e on macOS with a stubbed Touch ID; Quick Setup's failure path deletes nothing the core committed |
+| PRF-3 | core | `fc-profile`; `profile open`; the catalog subcommands and `profile status`; `hold-profile` and the profile gate; the catalog's write lock, refreshed by a long holder; deletion under every gate; `locks` kept; `profile migrate --finish-only`, the move's recovery, which starts no move, under the move's own exclusion | — | `profiles.json` replayed. The latency gate on every OS. A Jest harness runs the reference's `createProfile` and `renameProfile` against the subcommands in a loop: the catalog stays valid, and no record is lost. **The write lock both ways:** the reference holds it past 10 s while a subcommand waits, and a subcommand holds it past 10 s while the reference waits; neither takes over a live lock, and each takes over a dead holder's at 30 s, not at 29,999 ms. **The stale-lease case:** a lock backdated 31 s with the target's profile, core, IPFS or Radicle gate held refuses the delete, with nothing changed. `hold-profile` refuses a catalog profile no longer listed at its directory. Each subcommand, confined, can't read outside its grant. The default profile's delete keeps `locks/` and every other shared entry |
+| PRF-4 | browser | `profile open` before `app.setPath`; `hold-profile` from `app.setPath` until after the lock's release; the profile manager and node settings through the subcommands; "open" means a fresh lock or a held profile gate; **the reader release**: one Freedom-root resolver, and `profile migrate --finish-only` before the lock when `profile open` reports a journal | PRF-3's release pinned | `npm run test:migration` and the profile e2e specs, unchanged. The stale-lease probe refused. **Overrides:** catalog profiles launched with each of `FREEDOM_IDENTITY_DATA`, `FREEDOM_ANT_DATA`, `FREEDOM_BEE_DATA`, `FREEDOM_IPFS_DATA`, `FREEDOM_TOR_DATA`, `FREEDOM_RADICLE_DATA` and `MYOTIS_DATA_DIR`, their locks backdated 31 s: another profile's manager reads each open, and its delete is refused with nothing changed. **A launch held before `serve`:** a test hook stops main after it takes the lock and before the core starts, for 45 s; a second launch hands over or reports the profile busy, and a delete from another profile is refused. The holder killed while main runs: main takes the gate again, or quits. **Downgrade:** the reference resolver opens a catalog the subcommands wrote. A profile in the moved layout, built from the layout vectors, opens, and so does one with a journal pending before and after its marker |
+| PRF-5 | core | `fc-store` (JSON, the journal, SQLite); `fc-wallet-state`; `accounts.*`, `intents.*`, `payments.*`, `safe_pending.*`, `secrets.*` (`rpc_api_keys` for `shell` only); vault and metadata as one write; the Windows handle-relative calls in `fc-sys` | PRF-1 | Each store's text after every vector's operation, byte for byte. `secrets.rpc_api_keys` from `chrome` is `forbidden`, and `rpc_api_key_status` answers presence and no key bytes. The journal vectors in both directions. The SQLite schema rows equal the reference's, and a database each side wrote is read by the other. A failure hook at each write step (temp write, fsync, rename, directory flush) leaves the file as it was, or reports `durable: false`. On Windows: a directory swapped for a junction between the open and the write is refused, and the file lands nowhere else; a reparse point at a child's name refused; renames and deletes by handle |
+| PRF-6 | browser | Set A through the core, one store per PR: (a) `vault-meta.json`, (b) the intent journal, then 0012's APR-6, (c) payments, (d) pending Safe transactions, (e) RPC API keys into the secrets file, the settings page on `rpc_api_key_status`, and `rpcManager.getEffectiveUrls` removed from the chrome preload. Set B onto `lib/atomic-file.js` | PRF-5's release pinned | Each module's Jest suite against the core. An `fs` spy shows main writes none of the store's files. **Rollback:** the reference module reads the file the core wrote and sees the same state. RPC API keys: the old file is removed only after the entry is written; with no key store it stays, owner-only; no renderer channel returns a key, or a URL with one in it |
+| PRF-7 | core, then browser | Bee's keystore password: the helper's Linux and Windows `Unattended` backends; `nodes.write_identity` without the line; `bee_handoff`, `bee_handoff_done`, `adopt_bee_password`; the browser's Ant start through them; the AGENTS.md amendment | PRF-5; SEC-3f | `bee-seal.json` replayed. Through the helper, on Linux CI's private session bus with a Secret Service and on Windows: create, open, replace and forget; a locked collection whose prompt is dismissed is `Cancelled`; no Secret Service is `Unavailable`, and each secret stays where it is. Adoption from a seal, and from a `password:` line in every form the fixture holds. Refused for a seal of another keystore, for a password that doesn't open it, and for a keystore changed between the check and the write. The hand-off file is 0600 in a 0700 directory, gone after `done`, and an orphan swept. With no key store, `config.yaml` keeps the line. **Downgrade:** a SEC-3f build starts Ant from the seal the core left |
+| PRF-8 | core | The profile dimension at protocol 3: `profile.open` and `profile.close`; `Context.profile`; per-profile state; `core.hello`'s `max_protocol`; protocol 2 kept beside it | PRF-5 | Two profiles over one pipe at protocol 3 under the test flag: a lock, an unlock, the throttle, auto-lock and a failed write in one leave the other as it was. At 3, a request without `profile`, or for one not open, refused. A second `profile.open` refused without the flag. At protocol 2, every method served for the start profile, a request carrying `profile` refused, `profile.open` unknown, events without `profile`. A hello with `max_protocol: 3` answered at 3, and one without it at 2 |
+| PRF-8b | browser | `core.hello` with `max_protocol: 3`; at 3, every profile-scoped request carries the hello's handle, and events are read by theirs; at 2, today's requests | PRF-8's release pinned | **Both rollout directions:** the integration browser from before this step, its suites run against PRF-8's core, speaking 2; this step's browser against the previous core release, negotiating 2; and against PRF-8's core, speaking 3, with the same results. The two-profile test above, driven from main's client |
+| PRF-9 | core, then browser | The move: `profile migrate` starting moves, under its own lock and gates; the marker; the placeholder; downgrade residue set aside; new profiles in the new layout; 0010's component list with `freedom/` | PRF-4 shipped long enough; Q12 | **A crash hook at every step:** before the marker it rolls back to the old layout, which opens; after it, it finishes. A cross-device entry copied and its source kept until the marker. A symlink to a directory on another device moved as the link, its target untouched. A database with a non-empty `-wal` stops the move. A Windows rename held by another handle retried, then rolled back. **Two real builds, each phase held past 30 s:** a test hook holds the move at each step (the journal written, the renames, a cross-device copy, the placeholder, the marker, the cleanup), and `--finish-only` at each recovery phase (a rollback, a roll-forward), for 45 s. Meanwhile an older build, both the last release before the reader and a reader build, tries to open the profile and, from another profile, to delete it: each finds it open and changes nothing, and the lock's mtime keeps advancing. After the run, main's own lock is taken and stays uncompromised. A move frozen past 30 s while another build takes the lock over exits `lock_lost` when it resumes, and changes nothing more. **Downgrade:** a reader build opens the moved profile. An older build can't create a vault under the placeholder. On re-upgrade, its root entries are set aside, unmerged. Every protected root in `freedom/` is refused as a grant |
 
-**D7** comes after this design is decided (D7a), and narrows after PRF-9 (D7b).
+**D7** comes after this design is decided (D7a), and narrows after PRF-9 (D7b). It ships only once [its tests](#effects-on-0010-and-d7) pass: the catalog and other profiles out of `serve`'s reach, and the key store through the helper after `confine`.
 
 ## Rollback and downgrade
 
-- **Each core step is additive** until the browser step that uses it. Each browser step reverts on its own until the next one builds on it.
+- **Each core step is additive** until the browser step that uses it. PRF-8 is too: it keeps protocol 2, so the browser before PRF-8b runs on it unchanged, and PRF-8b's browser runs on an older core at 2. Each browser step reverts on its own until the next one builds on it.
 - **No format changes before PRF-9,** except the new files (`secrets.json`, the core's credential, `layout.json`), which older builds don't read. So an older build reads every store at every step up to the move.
 - **Each step's tests read the core's output with the reference's code.** That is the rollback guarantee, as in 0001 and 0012.
 - **Secrets that move out of a file** (RPC API keys, Bee's password) leave behind what older builds need, or nothing they would misread:
@@ -547,13 +627,15 @@ One PR per step: the core's against `main`, the browser's against `integration/r
 | `quick-unlock-password-change` | a password change turns quick unlock off silently | the credential is re-wrapped with the new vault |
 | `quick-setup-one-write` | the vault first, then the credential; a failure deletes the vault | written together; nothing to delete |
 | `quick-unlock-in-core` | the password crosses into main at each unlock | it stays in the core after the one enrollment |
-| `profile-open-gate` | a stale lock is free | free only if the core's gate is free too |
+| `profile-open-gate` | a stale lock is free | free only if the profile gate is free too, which a new build holds from before its lock to after it |
 | `profile-delete-gates` | only the IPFS gate is held; a stale lock is trusted | every gate held; any one held refuses |
 | `locks-kept` | the default profile's delete removes `locks/` (macOS, Windows) | kept |
 | `catalog-durable` | renamed without fsync | 0001's durable write |
 | `store-durable` | set B in place or unflushed | `lib/atomic-file.js` |
 | `vault-meta-unreadable` | reads as missing | renamed aside and reported, as 0012's files |
 | `secrets-sealed` | Bee's password and the RPC API keys in files | in the secrets file, where a key store exists |
+| `rpc-keys-shell-only` | the chrome's preload can fetch the RPC pool with the keys in its URLs | the chrome sees presence only; `getEffectiveUrls` is gone |
+| `catalog-out-of-process` | main writes the catalog in-process | one-shot subcommands, never the running core |
 
 ## Amendments
 
@@ -561,11 +643,12 @@ Once decided:
 - **0001:**
   - *Quick unlock*: "Phase 5 re-wraps it" points to 0013's re-wrap.
   - *Open questions* 1 is answered as above.
-  - *Lifetime lock*: `profile migrate` joins `hold-lock` and `recover` as a gated subcommand, and the lock directory is listed among the app root's shared entries.
-  - *Messages*: `Context` gains `profile`; `profile.open` carries `node_roots` and `grant_root`.
+  - *Lifetime lock*: `profile migrate` and `hold-profile` join `hold-lock` and `recover` as gated subcommands; the profile gate, `profile-…`, joins the lock directory's gates; and the lock directory is listed among the app root's shared entries.
+  - *Messages*: protocol 3; `core.hello` gains `max_protocol`; `Context` gains `profile`; `profile.open` carries `node_roots` and `grant_root`.
 - **0010:**
   - step 7's component directories gain `freedom/` (PRF-9);
-  - D7 points here for its grants.
+  - D7 points here for its grants, its default-profile limit before the move, and its tests;
+  - the key-store helper and the catalog subcommands are one-shot processes of the kind D5 chose for the Radicle import.
 - **0012:** `grant_root` travels in `profile.open` from PRF-8.
 - **AGENTS.md:** rules 3 and 4 as in [5.4c](#agentsmd-rules-3-and-4).
 
@@ -576,8 +659,16 @@ Once decided:
   - **One holder, the core:** nothing holds the lock before the core is up, and nothing while it restarts after a crash. A main alive through 30 s of core restarts would lose its profile to an older build.
   - **Both refreshing:** proper-lockfile marks its own lock compromised when another process sets the mtime (`lib/lockfile.js:129–138`), so main and the core can't both refresh it.
 
-  The gate gives the same answer without touching the format.
-- **One core for every profile in Electron, over a socket:** any process of the user can reach it. Peer credentials say only "same user".
+  The profile gate gives the same answer without touching the format. The move holds the lock itself only while main holds none, so there is still one refresher at a time.
+- **The core's identity gate as the sign of "open":** the first draft's choice. An override moves the identity directory and nothing records it, so another process can't name that gate; and nothing holds it before `serve` starts.
+- **Passing every resolved root to the catalog instead,** so others can name the identity gate: it closes the first gap, not the second, and records each launch's environment in a shared file.
+- **The migration under main's lock:** see [The move](#the-move).
+- **Catalog methods on `serve`, with a grant over the app root:** one spawn fewer per action in the profile manager, but a compromised core would reach every profile.
+- **A session-bus connection kept across `confine`:** every runtime `create` and `forget` would work in `serve`, but a compromised core would hold the bus, which can start programs, for its whole life.
+- **Every key created before `confine`,** so `serve` only opens at runtime: it would ask the Secret Service at each start, for a profile with no secret too, and a key forgotten or replaced at runtime would still need the bus.
+- **The helper on Linux only,** the Keychain and DPAPI in `serve`: one spawn fewer per call on macOS and Windows, but `serve` would keep the Security server's Mach services on macOS, and a restricted token on Windows would have to keep DPAPI working.
+- **`Context.profile` optional, its absence meaning the start profile:** one dialect instead of two, but a client that forgets the field works until a second profile opens. At protocol 3 its absence is an error from the first request.
+- **One shared core for all profiles in Electron, over a socket:** any process of the user can reach it. Peer credentials say only "same user".
 - **Main's `safeStorage` as the key store:** the core's secrets would stay tied to Electron, which is the Quick Setup problem itself.
 - **Reading `safeStorage` ciphertexts in the core:** it would reimplement Chromium's formats per OS, and need the Electron app's keychain access.
 - **`biometryCurrentSet`:** stronger against a new fingerprint, and fatal for a Quick Setup user who adds one.
@@ -590,8 +681,9 @@ Once decided:
 ## Open questions
 
 1. **Q12, one-way:** May moving data into `<profile>/freedom/` be one-way? *Proposed: yes. Every build from the reader release on reads both layouts. An older build finds a fresh profile and can't create a second identity, and anything it writes is kept aside, unmerged.*
-2. **Q13, quick unlock:** Touch ID quick unlock into the OS keychain with biometrics; Windows Hello and Linux too? *Proposed: macOS now: the re-wrap in PRF-1 and PRF-2, and biometric binding once the core can be signed for it. Windows Hello later, as its own step, if you want it. Not on Linux, which has no OS biometric binding.*
-3. **Q14, stores:** Core owns only wallet/permission/feed/intent stores, or every Freedom store? *Proposed: those, plus payments, profiles and secrets (set A), in Stage 1. Settings and caches (set B) stay in main with crash-safe writes.*
-4. **Q15, one core:** One core process for every open profile in Electron, or only once Chromium runs all profiles in one process? *Proposed: only once Chromium runs all profiles in one process. The core is built for several profiles now, but each Electron profile keeps its own.*
-5. **Q16, Swarm keystore password:** Swarm keystore password out of `config.yaml` into the OS keychain via the core? *Proposed: yes. Where the OS has no keychain it stays in the owner-only `config.yaml`, and a profile copied to another computer needs one re-injection.*
-6. **The Mac's password as a fallback:** once the core holds a Quick Setup password, may your Mac's login password unlock it when Touch ID can't (the lid closed, the sensor failing)? *Proposed: yes. Today such a user has only the recovery phrase.*
+2. **Q13a, quick unlock now:** Move the Quick Setup password now out of Electron's storage into the core, under an OS key that opens without a prompt, on macOS, with Touch ID still asked by the browser as today? *Proposed: yes, in PRF-1 and PRF-2, so Quick Setup users keep access across the shell change.*
+3. **Q13b, Touch ID in the OS, later:** Later, make macOS itself require Touch ID (user presence) to open that key, once a signing spike shows the core can carry the entitlement it needs? And Windows Hello, as its own later step? *Proposed: on macOS yes, if the spike passes; until then Q13a's key stays. Windows Hello only if you want it. Not on Linux, which has no OS biometric binding.*
+4. **Q14, stores:** Core owns only wallet/permission/feed/intent stores, or every Freedom store? *Proposed: those, plus payments, profiles and secrets (set A), in Stage 1. Settings and caches (set B) stay in main with crash-safe writes.*
+5. **Q15, one core:** One **shared** core process for all open profiles in Electron, or only once Chromium runs all profiles in one process? *Proposed: only once Chromium runs all profiles in one process. The core is built for several profiles now, but each Electron profile keeps its own.*
+6. **Q16, Swarm keystore password:** Swarm keystore password out of `config.yaml` into the OS key store via the core? *Proposed: yes. Where the OS has no key store it stays in the owner-only `config.yaml`, and a profile copied to another computer needs one re-injection.*
+7. **The Mac's password as a fallback:** once macOS itself guards the Quick Setup password (Q13b), may your Mac's login password open it when Touch ID can't (the lid closed, the sensor failing)? *Proposed: yes. Today such a user has only the recovery phrase.*
