@@ -346,7 +346,11 @@ fn each_case_answers_the_vectors() {
             assert_eq!(main["content"], text, "{path}");
         }
     }
-    // No stream for a head without a body, however long after.
+    // No stream for a head without a body, however long after: nothing of
+    // it is left open, so main's cancel of it queues nothing.
+    for &id in &bodiless {
+        radicled.cancel(id);
+    }
     assert!(!radicled.any_within(u64::MAX, Duration::from_millis(500)));
     for &id in &bodiless {
         assert!(!radicled.any_within(id, Duration::ZERO), "{id}");
