@@ -215,6 +215,7 @@ pub fn remove(
         // Removed, nothing to remove, or a failure that keeps the record.
         ticket.proven();
         answer(&conn, ticket.id, removed);
+        testhooks::at_write_end();
     });
     (work, mutates)
 }

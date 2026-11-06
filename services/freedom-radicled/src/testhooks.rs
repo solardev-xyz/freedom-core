@@ -45,7 +45,13 @@
 //!   mutation start, before libradicle's call (`rad.write`, `rad.unseed`,
 //!   `rad.remove_repo`), logging `test hook: the write has started`: with a
 //!   number, it holds it that many milliseconds whatever its token, as a
-//!   libradicle call that doesn't check it; with `panic`, it panics there.
+//!   libradicle call that doesn't check it; with `until:<path>`, it holds
+//!   it, whatever its token, until a file exists at `<path>` or for 30 s,
+//!   so that the test releases it (a path the confinement grants: in the
+//!   service's own `HOME`); with `panic`, it panics there. Once the call
+//!   has returned and the write's outcome is marked and answered, it logs
+//!   `test hook: the write has returned`, so that a test waits for the
+//!   write's end instead of guessing how long a write takes.
 //! - `FREEDOM_RADICLED_TEST_HOLD_REPAIR=<ms>` holds each turn of an online
 //!   repair that many milliseconds, with the node held shared, just before
 //!   its unit, whatever the stop, as a slow unit holds the writer
@@ -206,9 +212,23 @@ pub fn at_write_start() {
         if hold == "panic" {
             panic!("test hook: a panic past the write's start");
         }
-        if let Ok(ms) = hold.parse() {
+        if let Some(release) = hold.strip_prefix("until:") {
+            let until = std::time::Instant::now() + Duration::from_secs(30);
+            while std::time::Instant::now() < until && !std::path::Path::new(release).exists() {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+        } else if let Ok(ms) = hold.parse() {
             std::thread::sleep(Duration::from_millis(ms));
         }
+    }
+}
+
+/// A write's end, past its start, once its outcome is marked and answered:
+/// logs it, if `FREEDOM_RADICLED_TEST_HOLD_WRITE` is set.
+pub fn at_write_end() {
+    #[cfg(feature = "testhooks")]
+    if std::env::var_os("FREEDOM_RADICLED_TEST_HOLD_WRITE").is_some() {
+        fc_service::log::info("test hook: the write has returned", serde_json::json!({}));
     }
 }
 

@@ -6,14 +6,16 @@
 //! `outcome_unknown`, and a write that ends so keeps the dirty marker.
 //!
 //! `FREEDOM_RADICLED_TEST_HOLD_WORK` holds a write before its boundary,
-//! `FREEDOM_RADICLED_TEST_HOLD_WRITE` just past it (src/testhooks.rs).
+//! `FREEDOM_RADICLED_TEST_HOLD_WRITE` just past it (src/testhooks.rs): for
+//! some milliseconds, or until the test releases it ([`held_until`]), and
+//! it logs the write's end, which a test waits for ([`release`]).
 //! Every node here reaches no one, as in tests/start.rs.
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
 mod common;
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use common::fixture;
@@ -26,6 +28,7 @@ use serde_json::{Value, json};
 const CREATOR: [u8; 32] = [9; 32];
 
 const STARTED: &str = "test hook: the write has started";
+const RETURNED: &str = "test hook: the write has returned";
 const HELD: &str = "test hook: work holds its slot";
 
 fn code(reply: &Value) -> &str {
@@ -66,6 +69,23 @@ fn served(dirs: &Dirs, extra: &[(&str, &str)]) -> Radicled {
     let started = radicled.start();
     assert!(started["result"].is_object(), "{started}");
     radicled
+}
+
+/// `FREEDOM_RADICLED_TEST_HOLD_WRITE`'s value that holds each write past
+/// its start until the test releases it, and the file that does: `name`,
+/// in the service's own `HOME`, which its confinement grants.
+fn held_until(dirs: &Dirs, name: &str) -> (String, PathBuf) {
+    let release = dirs.own_home.join(name);
+    (format!("until:{}", release.display()), release)
+}
+
+/// Releases the write held until `gate` exists, and waits for it to
+/// return: its outcome is marked by then, and no work is left for the
+/// stop's drain. A hang guard, never a timing assertion: on a loaded
+/// runner a COB write can take seconds.
+fn release(radicled: &Radicled, gate: &Path) {
+    std::fs::write(gate, b"").unwrap();
+    assert!(radicled.logs(RETURNED, READ_TIMEOUT));
 }
 
 /// `rad.shutdown`, then a stop with a complete drain: exit 0, its log, and
@@ -246,32 +266,39 @@ fn a_write_cancelled_expired_or_stopped_before_its_start_writes_nothing() {
     assert_eq!(issues(&dirs.home, rid).len(), 1);
 }
 
-/// Past the boundary, main's cancel and the deadline are `outcome_unknown`,
-/// at once, and the write runs on to its end, its reply lost: the issue is
-/// recorded. It keeps the writer, so a write queued behind it passes its
-/// own deadline unstarted. The stop's drain waits for it; having
-/// completed, it is proven, so the run stays clean.
+/// Past the boundary, main's cancel and the deadline are `outcome_unknown`
+/// at once, while the write is still held, and the write then runs on to
+/// its end, its reply lost: the issue is recorded. It keeps the writer, so
+/// a write queued behind it passes its own deadline unstarted. Once it has
+/// returned it is proven, so the stop's drain is complete and the run
+/// stays clean. Each write is held until the test releases it, and the
+/// stop waits for its end ([`release`]), so nothing here races the 3 s
+/// drain; the drain's own wait for a write is
+/// [`a_stop_during_a_write_keeps_its_reply_or_leaves_the_marker`]'s.
 #[test]
 fn past_its_start_a_cancel_or_the_deadline_is_outcome_unknown_and_the_write_completes() {
     let dirs = Dirs::new();
     configure(&dirs.home, json!({}));
     let rid = fixture::repository(&dirs.home, &CREATOR, "late");
-    let mut radicled = served(&dirs, &[("FREEDOM_RADICLED_TEST_HOLD_WRITE", "1500")]);
+    let (hold, gate) = held_until(&dirs, "release-cancelled");
+    let mut radicled = served(&dirs, &[("FREEDOM_RADICLED_TEST_HOLD_WRITE", &hold)]);
     let cancelled = radicled.request("rad.write", create(rid, "Cancelled late"));
     assert!(radicled.logs_times(STARTED, 1, Duration::from_secs(10)));
-    let asked = Instant::now();
     radicled.send(&json!({ "type": "cancel", "id": cancelled }));
     let reply = radicled.reply(cancelled);
     assert_eq!(code(&reply), "outcome_unknown", "{reply}");
-    assert!(asked.elapsed() < Duration::from_millis(1000));
+    // At once: the write is still held, and only the test releases it.
+    assert!(!radicled.logs(RETURNED, Duration::ZERO));
+    release(&radicled, &gate);
     let (_, cleared) = stopped_cleanly(&mut radicled, &dirs.home);
     assert!(cleared);
     assert!(titled(&dirs.home, rid, "Cancelled late").is_some());
 
+    let (hold, gate) = held_until(&dirs, "release-late");
     let mut radicled = served(
         &dirs,
         &[
-            ("FREEDOM_RADICLED_TEST_HOLD_WRITE", "2000"),
+            ("FREEDOM_RADICLED_TEST_HOLD_WRITE", &hold),
             ("FREEDOM_RADICLED_TEST_WORK_DEADLINE_MS", "800"),
         ],
     );
@@ -282,6 +309,8 @@ fn past_its_start_a_cancel_or_the_deadline_is_outcome_unknown_and_the_write_comp
     assert_eq!(code(&reply), "outcome_unknown", "{reply}");
     let reply = radicled.reply(behind);
     assert_eq!(code(&reply), "deadline", "{reply}");
+    assert!(!radicled.logs(RETURNED, Duration::ZERO));
+    release(&radicled, &gate);
     let (log, cleared) = stopped_cleanly(&mut radicled, &dirs.home);
     assert!(cleared, "{log}");
     assert!(titled(&dirs.home, rid, "Past its deadline").is_some());
