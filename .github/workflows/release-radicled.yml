@@ -112,8 +112,8 @@ jobs:
       matrix:
         include:
           - { runner: macos-latest, target: aarch64-apple-darwin, asset: darwin-arm64, native: true }
-          # Cross-compiled on Apple silicon; checked under Rosetta 2 where
-          # the runner has it.
+          # Cross-compiled on Apple silicon, as freedom-ipfsd's is; its
+          # archive is checked on an Intel runner (`check-darwin-amd64`).
           - { runner: macos-latest, target: x86_64-apple-darwin, asset: darwin-amd64, native: false }
           # Linked dynamically against glibc 2.17, as freedom-ipfsd is
           # (0007, open question 6), so they run wherever Electron does (it
@@ -307,18 +307,11 @@ jobs:
           echo "exit code $code"
           [ "$code" = 64 ]
       - name: rad.hello
+        if: matrix.native
         run: |
           # The runner's own Python: python3, or `python` on Windows.
           python=python3
           [ "$RUNNER_OS" = Windows ] && python=python
-          if [ "${{ matrix.native }}" != true ]; then
-            # An x86-64 macOS binary on Apple silicon runs under Rosetta 2,
-            # where the runner has it.
-            if ! arch -x86_64 /usr/bin/true 2>/dev/null; then
-              echo "::warning title=rad.hello not run::$TARGET can't run here: the runner has no Rosetta 2"
-              exit 0
-            fi
-          fi
           "$python" ../../scripts/radicled-hello.py "$BIN"
       # build.rs refuses `testhooks` in a release-profile build, debug
       # assertions or not (services.yml checks it with `cargo check`): the
@@ -346,9 +339,50 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
+  # The darwin-amd64 archive, run natively. On the Apple silicon runner
+  # that builds it, it would run under Rosetta 2, whose translator has a
+  # thread of its own, so confinement's one-thread check refuses it there
+  # (exit 77, "2 threads before confinement") before the handshake.
+  check-darwin-amd64:
+    name: check (darwin-amd64, on Intel)
+    needs: build
+    runs-on: macos-15-intel
+    defaults:
+      run:
+        shell: bash
+    steps:
+      # For scripts/radicled-hello.py and the lockfile it checks against.
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: freedom-radicled-darwin-amd64
+          path: dist
+      - name: Unpack the archive
+        run: |
+          (cd dist && shasum -a 256 -c ./*.sha256)
+          unpacked="$RUNNER_TEMP/unpacked"
+          mkdir -p "$unpacked"
+          tar -xzf dist/*.tar.gz -C "$unpacked"
+          ls -l "$unpacked"
+          uname -m
+          file "$unpacked/freedom-radicled"
+          echo "BIN=$unpacked/freedom-radicled" >> "$GITHUB_ENV"
+      - name: Smoke test (usage exits 64)
+        run: |
+          set +e
+          "$BIN" 2>/dev/null
+          code=$?
+          set -e
+          echo "exit code $code"
+          [ "$code" = 64 ]
+      - name: rad.hello
+        run: python3 scripts/radicled-hello.py "$BIN"
+
   publish:
     name: SHA256SUMS, provenance and publish
-    needs: [check, build]
+    needs: [check, build, check-darwin-amd64]
     if: needs.check.outputs.publish == 'true'
     runs-on: ubuntu-latest
     permissions:

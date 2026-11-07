@@ -93,7 +93,7 @@ LICENSE_PREFIXES = ("license", "licence", "copying", "notice", "unlicense", "cop
 # rust-toolchain.toml moves, re-check them: the musl version Rust bundles,
 # the LLVM commit, and the standard library's crates. When release-ipfsd.yml
 # or release-radicled.yml moves to another Zig, re-check what it links
-# (ZIG_GLIBC_RUNTIME).
+# (zig_glibc_runtime and each binary's startup notice).
 TOOLCHAIN = "1.99"
 # Out-of-tree crates the standard library links on the release targets
 # (rust-src library/vendor).
@@ -115,25 +115,31 @@ STD_NOT_LINKED = {"getopts", "rustc-literal-escaper"}
 Native = collections.namedtuple(
     "Native", "label expression text bundled_by source", defaults=(None, None)
 )
-# What Zig 0.15.2 links statically into a glibc 2.17 build, found in the
-# binaries' symbols: glibc's startup object and the libc_nonshared
-# members the binary needs, and LLVM's libunwind in place of libgcc_s.
-# Zig also passes its compiler_rt and UBSan runtime to the linker, but
-# nothing of either is linked. Zig's libunwind license is LLVM's, the
-# same text as rust-src's.
-ZIG_GLIBC_RUNTIME = [
-    (
-        "GNU C Library startup and libc_nonshared objects, built by Zig "
-        "0.15.2 for glibc 2.17 (Linux)",
-        "LGPL-2.1-or-later, with the GNU C Library's exception for linking",
-        "notices/glibc-2.17-startup-NOTICE",
-    ),
-    (
-        "LLVM libunwind, Zig 0.15.2's copy (unwinder; Linux)",
-        "Apache-2.0 WITH LLVM-exception",
-        "rust-src:src/llvm-project/libunwind/LICENSE.TXT",
-    ),
-]
+
+
+def zig_glibc_runtime(startup_notice):
+    """What Zig 0.15.2 links statically into a glibc 2.17 build, found in
+    the binaries' symbols: glibc's startup object and the libc_nonshared
+    members the binary needs, which `startup_notice` lists (they differ by
+    binary), and LLVM's libunwind in place of libgcc_s. Zig also passes its
+    compiler_rt and UBSan runtime to the linker, but nothing of either is
+    linked. Zig's libunwind license is LLVM's, the same text as
+    rust-src's."""
+    return [
+        (
+            "GNU C Library startup and libc_nonshared objects, built by Zig "
+            "0.15.2 for glibc 2.17 (Linux)",
+            "LGPL-2.1-or-later, with the GNU C Library's exception for linking",
+            startup_notice,
+        ),
+        (
+            "LLVM libunwind, Zig 0.15.2's copy (unwinder; Linux)",
+            "Apache-2.0 WITH LLVM-exception",
+            "rust-src:src/llvm-project/libunwind/LICENSE.TXT",
+        ),
+    ]
+
+
 NATIVE = {
     BINARY: [
         (
@@ -152,9 +158,9 @@ NATIVE = {
             "notices/llvm-compiler-rt-LICENSE.TXT",
         ),
     ],
-    "freedom-ipfsd": ZIG_GLIBC_RUNTIME,
+    "freedom-ipfsd": zig_glibc_runtime("notices/glibc-2.17-startup-NOTICE"),
     "freedom-radicled": [
-        *ZIG_GLIBC_RUNTIME,
+        *zig_glibc_runtime("notices/glibc-2.17-startup-freedom-radicled-NOTICE"),
         # libgit2-sys's `vendored` build, which heartwood's git2 asks for:
         # libgit2's own sources and, of the code it bundles, llhttp, xdiff,
         # PCRE2, SHA-1 collision detection and RFC 6234's SHA-256, on every

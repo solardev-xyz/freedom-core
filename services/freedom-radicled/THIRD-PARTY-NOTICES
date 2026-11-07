@@ -384,21 +384,21 @@ Rust 1.99 toolchain runtime:
 - LLVM libunwind, Zig 0.15.2's copy (unwinder; Linux): Apache-2.0 WITH LLVM-exception
 
 ========================================================================
-Used by: GNU C Library startup and libc_nonshared objects, built by Zig 0.15.2 for glibc 2.17 (Linux) (glibc-2.17-startup-NOTICE)
+Used by: GNU C Library startup and libc_nonshared objects, built by Zig 0.15.2 for glibc 2.17 (Linux) (glibc-2.17-startup-freedom-radicled-NOTICE)
 ------------------------------------------------------------------------
 The GNU C Library's startup code and libc_nonshared objects, as Zig 0.15.2
 builds them from the glibc sources it bundles for a glibc 2.17 target, and
-links them statically into freedom-ipfsd's Linux binaries (x86_64 and
+links them statically into freedom-radicled's Linux binaries (x86_64 and
 aarch64):
 
 - Scrt1.o, from sysdeps/x86_64/start.S (Copyright (C) 2001-2025) and
   sysdeps/aarch64/start.S (Copyright (C) 1995-2025);
 - __libc_csu_init and __libc_csu_fini, from csu/elf-init-2.33.c
   (Copyright (C) 2002-2020);
-- stat64, fstat64 and lstat64, from io/stat64-2.32.c, io/fstat64-2.32.c and
-  io/lstat64-2.32.c (Copyright (C) 1996-2020);
-- __pthread_atfork (aarch64), from sysdeps/pthread/pthread_atfork.c
-  (Copyright (C) 2002-2021).
+- stat, fstat, lstat, stat64, fstat64 and lstat64, from io/stat-2.32.c,
+  io/fstat-2.32.c, io/lstat-2.32.c, io/stat64-2.32.c, io/fstat64-2.32.c
+  and io/lstat64-2.32.c (Copyright (C) 1996-2020);
+- fstatat64, from io/fstatat64-2.32.c (Copyright (C) 2005-2020).
 
 Each copyright is held by the Free Software Foundation, Inc., and each file
 carries this notice:

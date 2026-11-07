@@ -342,18 +342,21 @@ repository code.
    - checks that the binary names no `FREEDOM_RADICLED_TEST_*` variable,
      which only the `testhooks` feature compiles in;
    - packages the binary with both notice files, then unpacks the archive
-     and runs its binary: usage exits 64 on the four native builds, and one
-     `rad.hello` (`scripts/radicled-hello.py`) on each target the runner
-     can execute, `x86_64-apple-darwin` under Rosetta 2 where the runner has
-     it. The handshake spawns `serve` as main does, with a cleared
-     environment, and checks the reply against `Cargo.lock`: the version,
-     libradicle's version and commit, a 32-byte recipient, the network, and
-     a confinement report, which the log shows; then stdin's end must exit
-     0;
+     and runs its binary on the four native builds: usage exits 64, and one
+     `rad.hello` (`scripts/radicled-hello.py`). The handshake spawns `serve`
+     as main does, with a cleared environment, and checks the reply against
+     `Cargo.lock`: the version, libradicle's version and commit, a 32-byte
+     recipient, the network, and a confinement report, which the log
+     shows; then stdin's end must exit 0;
    - runs the release build's own command with `--features testhooks`,
      with and without release debug assertions, which `build.rs` must
      refuse.
 
+   `x86_64-apple-darwin` is cross-compiled on Apple silicon, where it would
+   run under Rosetta 2. The translator has a thread of its own, so
+   confinement's one-thread check refuses it there (exit 77, "2 threads
+   before confinement"). So a job on an Intel runner (`macos-15-intel`)
+   runs its archive's binary natively: the checksum, usage and `rad.hello`.
    Then the publish job assembles `SHA256SUMS`, attests every archive and
    `SHA256SUMS`, and publishes.
 
