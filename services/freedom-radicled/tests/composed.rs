@@ -750,7 +750,10 @@ fn a_composed_read_waiting_for_the_budget_ends_at_its_cancel_and_its_deadline() 
     );
     let head = radicled.reply(held);
     assert!(
-        head["result"]["bytes"].as_u64().unwrap() > (JSON_CAP as u64) - 64,
+        head["result"]["bytes"]
+            .as_u64()
+            .unwrap_or_else(|| panic!("{head}"))
+            > (JSON_CAP as u64) - 64,
         "{head}"
     );
     radicled.uncredited(held, 128 << 10);
@@ -785,6 +788,9 @@ fn a_composed_read_waiting_for_the_budget_ends_at_its_cancel_and_its_deadline() 
     assert!(!radicled.any_within(behind, Duration::from_millis(2000)));
     assert_eq!(code(&radicled.reply(waiting)), "deadline");
     assert!(admitted.elapsed() >= Duration::from_secs(8));
+    // The test's 8 s, not the default 60 s: it was admitted once `from`
+    // existed.
+    assert!(admitted.elapsed() < Duration::from_secs(60));
     assert_eq!(
         radicled.read_reply(behind).unwrap(),
         br#"{"connectedPeers":0}"#
