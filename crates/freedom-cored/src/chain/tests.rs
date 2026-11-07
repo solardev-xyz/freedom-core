@@ -826,15 +826,12 @@ fn myotis_and_colibri_operations_take_the_designs_forms() {
     assert_eq!(reply["result"]["source"], "myotis");
     assert_eq!(reply["result"]["verified"], true);
     assert!(reply["result"]["trust"].is_object());
-    // Colibri, once Myotis has failed with a class.
-    let (id, params) = read(
-        4,
-        "eth_call",
-        json!([{ "to": address, "data": "0x" }, "latest"]),
-    );
+    // Colibri, once Myotis has failed with a class: an account read, as
+    // Colibri serves no call (main's #1046).
+    let (id, params) = read(4, "eth_getCode", json!([address, "latest"]));
     t.call(id, "chain.request", &params);
     let op = requests(&t.written())[0].clone();
-    assert_eq!(op["params"]["myotis"], "call_tx");
+    assert_eq!(op["params"]["myotis"], "code");
     assert!(
         t.answer(
             op["id"].as_u64().unwrap(),
@@ -845,7 +842,7 @@ fn myotis_and_colibri_operations_take_the_designs_forms() {
     t.at(2);
     let op = requests(&t.written())[0].clone();
     assert_eq!(op["params"]["colibri"], "request");
-    assert_eq!(op["params"]["method"], "eth_call");
+    assert_eq!(op["params"]["method"], "eth_getCode");
     assert_eq!(op["params"]["generation"], 1);
     assert!(op["params"]["deadline_ms"].as_u64().unwrap() > 0);
     assert!(
@@ -1227,14 +1224,15 @@ fn a_colibri_result_of_undefined_replies_without_result() {
 
 #[test]
 fn a_colibri_revert_with_capacity_blocks_the_apps_route() {
-    // The read rejects with the revert, and the same call from the same app
-    // never asks Colibri again: it is bypassed.
+    // The read rejects with the revert, and the same read from the same app
+    // never asks Colibri again: it is bypassed. An account read drives
+    // Colibri, which serves no call (main's #1046).
     let mut t = test();
     let mut config = chain_snapshot(&["colibri"], &[]);
     config["prover"] = json!({ "endpoint": "p", "zk": false });
     t.configure(json!([config]));
     let call = |id| {
-        let (id, mut params) = read(id, "eth_call", json!([{ "to": "0xabc" }, "latest"]));
+        let (id, mut params) = read(id, "eth_getBalance", json!(["0xabc", "latest"]));
         params["origin"] = json!("https://swap.example");
         (id, params)
     };
@@ -1298,8 +1296,9 @@ fn a_late_colibri_answer_at_the_depth_bound_still_clears_its_fault_record() {
             );
         }
     };
+    // An account read drives Colibri, which serves no call (main's #1046).
     let call = |id: u64, to: &str, origin: Option<&str>| {
-        let (id, mut params) = read(id, "eth_call", json!([{ "to": to }, "latest"]));
+        let (id, mut params) = read(id, "eth_getBalance", json!([to, "latest"]));
         if let Some(origin) = origin {
             params["origin"] = json!(origin);
         }
