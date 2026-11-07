@@ -173,7 +173,7 @@ NATIVE = {
         Native(
             "libgit2 1.9.6 (C library), with the code it bundles, built from "
             "libgit2-sys 0.18.7+1.9.6's copy",
-            "GPL-2.0-only WITH GCC-exception-2.0 (libgit2's linking exception); "
+            "GPL-2.0-only WITH LicenseRef-libgit2-linking-exception (libgit2's own linking exception, in its COPYING); "
             "the code it bundles under the licenses in its COPYING, LibXDiff's "
             "LGPL-2.1-or-later among them",
             "crate:libgit2/COPYING",

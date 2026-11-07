@@ -356,7 +356,7 @@ of an executable be told where the source is. Each one's exact source:
 - colored 2.2.0: https://static.crates.io/crates/colored/colored-2.2.0.crate (repository: https://github.com/mackwic/colored)
 
 C libraries that crates above bundle, built into the binary:
-- libgit2 1.9.6 (C library), with the code it bundles, built from libgit2-sys 0.18.7+1.9.6's copy: GPL-2.0-only WITH GCC-exception-2.0 (libgit2's linking exception); the code it bundles under the licenses in its COPYING, LibXDiff's LGPL-2.1-or-later among them
+- libgit2 1.9.6 (C library), with the code it bundles, built from libgit2-sys 0.18.7+1.9.6's copy: GPL-2.0-only WITH LicenseRef-libgit2-linking-exception (libgit2's own linking exception, in its COPYING); the code it bundles under the licenses in its COPYING, LibXDiff's LGPL-2.1-or-later among them
   Source code: libgit2 1.9.6 and the code it bundles, LibXDiff
   (deps/xdiff, LGPL-2.1-or-later) among them, are in the binary
   unmodified. Their source is in libgit2-sys 0.18.7+1.9.6's crate,
