@@ -275,6 +275,8 @@ fn eof_with_a_teardown_held_past_5_s_exits_70() {
     // At the bound, never by the held job's end: not before its 30 s, past
     // EXIT_TIMEOUT.
     assert_eq!(ipfsd.exit_code(EXIT_TIMEOUT), Some(70));
+    // Not before the bound; its length is pinned by instances.rs's unit
+    // test (#284).
     let took = closed.elapsed();
     assert!(took >= Duration::from_secs(5), "{took:?}");
     let stderr = ipfsd.stderr();

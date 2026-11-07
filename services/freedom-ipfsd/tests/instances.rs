@@ -254,6 +254,8 @@ fn a_teardown_held_past_5_s_exits_70() {
     // At the bound: the held job never lets the join return, before its
     // 30 s, past EXIT_TIMEOUT.
     assert_eq!(ipfsd.exit_code(EXIT_TIMEOUT), Some(70));
+    // Not before the bound; its length, 5 s, is pinned by instances.rs's
+    // unit test, not by this process's wall clock (#284).
     let took = sent.elapsed();
     assert!(took >= Duration::from_secs(5), "{took:?}");
     // The stop was never answered.
@@ -418,6 +420,8 @@ fn a_fenced_build_held_past_5_s_exits_70(
     let start = ipfsd.request("ipfs.start", memory("e-1"));
     fence(&mut ipfsd, start);
     assert_eq!(ipfsd.exit_code(EXIT_TIMEOUT), Some(70));
+    // Not before the bound; its length is pinned by instances.rs's unit
+    // test (#284).
     let took = sent.elapsed();
     assert!(took >= after + Duration::from_secs(5), "{took:?}");
     assert!(ipfsd.stdout_closes_within(EXIT_TIMEOUT));

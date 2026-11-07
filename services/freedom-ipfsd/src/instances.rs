@@ -981,3 +981,19 @@ fn store_error_kind(error: &StoreError) -> &'static str {
         StoreError::PageCap { .. } => "page_cap",
     }
 }
+
+#[cfg(test)]
+mod bound {
+    use std::time::Duration;
+
+    use super::TEARDOWN_BOUND;
+
+    /// 0007's teardown bound, pinned here. The exit-70 tests check only that
+    /// exit 70 comes no earlier than it: an upper limit on their wall clock
+    /// raced runner stalls (#284), so a longer bound is caught here instead
+    /// (#288, review round 1).
+    #[test]
+    fn the_teardown_bound_is_0007s_five_seconds() {
+        assert_eq!(TEARDOWN_BOUND, Duration::from_secs(5));
+    }
+}
