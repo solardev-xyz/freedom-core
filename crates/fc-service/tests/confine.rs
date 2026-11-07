@@ -232,6 +232,38 @@ mod linux {
             );
             return;
         }
+        if case == "held-dir" {
+            // A directory opened before `confine`, as the import's roots
+            // are, then renamed, and another made at its name: its rule
+            // follows the directory held, never the name.
+            let named = p.outside.join("held");
+            std::fs::create_dir(&named).unwrap();
+            std::fs::write(named.join("file"), b"held").unwrap();
+            let held = confine::OpenDir::open(&named).unwrap();
+            let moved = p.outside.join("held-moved");
+            std::fs::rename(&named, &moved).unwrap();
+            std::fs::create_dir(&named).unwrap();
+            std::fs::write(named.join("file"), b"another").unwrap();
+            let (mut registered, _files) = registered(&p);
+            registered.push(held.descriptor());
+            let mut policy = policy(&p, network, min_abi, registered);
+            policy.read_only_dirs.push(held.clone());
+            let report = confine::confine(&policy).unwrap();
+            println!("REPORT {}", report.to_json());
+            check(
+                "the directory held reads, renamed",
+                std::fs::read(moved.join("file")).is_ok_and(|bytes| bytes == b"held"),
+            );
+            check(
+                "another directory at its name doesn't",
+                std::fs::read(named.join("file")).is_err(),
+            );
+            check(
+                "the directory held isn't written",
+                std::fs::write(moved.join("written"), b"x").is_err(),
+            );
+            return;
+        }
         // The lock and a directory, opened before `confine` and registered,
         // as a service's are: they cross.
         let (registered, _held) = registered(&p);
@@ -394,6 +426,7 @@ mod linux {
         Policy {
             read_write: vec![p.data.clone()],
             read_only: vec![p.read_only.clone()],
+            read_only_dirs: Vec::new(),
             refer: false,
             min_abi,
             network,
@@ -868,6 +901,7 @@ mod linux {
             format!("files run: {r:?}"),
         );
         failures.extend(passed("files", &files));
+        failures.extend(passed("held-dir", &run(&world, "held-dir")));
 
         // Nothing outside changed: mode, owner, times, xattrs.
         let after = std::fs::metadata(&canary).unwrap();

@@ -1,0 +1,2140 @@
+{
+  "meta": {
+    "freedomBrowserCommit": "fb540328162839e68150fe2c5e517edb86734d1c",
+    "packages": {
+      "ethers": "6.17.0",
+      "@scure/bip39": "2.4.0",
+      "@scure/base": "1.2.6",
+      "micro-key-producer": "0.10.2",
+      "@metamask/browser-passworder": "6.0.0"
+    },
+    "nodeVersion": "v24.15.0",
+    "generator": "vectors/generator/generate.js"
+  },
+  "formats": {
+    "imports": "`importGitHubRepo(url)` at the reference, whole: `default_branch` is what the scripted `git symbolic-ref --short HEAD` prints (null: it fails), `description_body` the scripted GitHub API body; `addon` the one `importRepo` call main makes (its arguments: the clone's path, the repository's name, the description and the default branch, which `rad.import_repo` takes as `path`, `name`, `description` and `default_branch`) and the add-on's answer text; `main` what main then did: its result, the add-on calls, the git commands, the HTTPS requests, the temporary directory's prefix, the progress it sent, the bridge map it wrote, the directories it removed and its console lines. `expect` (`source: design`) is the service's answer: `result_text`, libradicle's `json::rid` text, or `error` with its code and message, whose message is the text main reads."
+  },
+  "constants": {
+    "rid": "rad:z3gqcJUoA1n9HaHKufZs5FCSGazv5",
+    "temp": "/profile/tmp/github-bridge-AbC123",
+    "radicle_home": "/profile/radicle-data"
+  },
+  "imports": [
+    {
+      "id": "imported",
+      "url": "https://github.com/solardev-xyz/freedom-browser",
+      "default_branch": "main",
+      "description_body": "{\"description\":\"A browser.\"}",
+      "addon": {
+        "args": [
+          "/profile/tmp/github-bridge-AbC123/freedom-browser",
+          "freedom-browser",
+          "A browser.",
+          "main"
+        ],
+        "text": "{\"rid\":\"rad:z3gqcJUoA1n9HaHKufZs5FCSGazv5\"}"
+      },
+      "expect": {
+        "source": "design",
+        "result_text": "{\"rid\":\"rad:z3gqcJUoA1n9HaHKufZs5FCSGazv5\"}"
+      },
+      "main": {
+        "result": {
+          "success": true,
+          "rid": "z3gqcJUoA1n9HaHKufZs5FCSGazv5",
+          "name": "freedom-browser",
+          "owner": "solardev-xyz",
+          "description": "A browser."
+        },
+        "calls": [
+          {
+            "export": "importRepo",
+            "args": [
+              "/profile/tmp/github-bridge-AbC123/freedom-browser",
+              "freedom-browser",
+              "A browser.",
+              "main"
+            ]
+          }
+        ],
+        "git": [
+          {
+            "file": "git",
+            "args": [
+              "--version"
+            ],
+            "cwd": null,
+            "timeout": 5000
+          },
+          {
+            "file": "git",
+            "args": [
+              "clone",
+              "https://github.com/solardev-xyz/freedom-browser.git",
+              "/profile/tmp/github-bridge-AbC123/freedom-browser"
+            ],
+            "cwd": null,
+            "timeout": 300000
+          },
+          {
+            "file": "git",
+            "args": [
+              "symbolic-ref",
+              "--short",
+              "HEAD"
+            ],
+            "cwd": "/profile/tmp/github-bridge-AbC123/freedom-browser",
+            "timeout": 5000
+          }
+        ],
+        "https": [
+          {
+            "method": "HEAD",
+            "url": "https://github.com/"
+          },
+          {
+            "method": "GET",
+            "url": "https://api.github.com/repos/solardev-xyz/freedom-browser"
+          }
+        ],
+        "temp": [
+          "github-bridge"
+        ],
+        "progress": [
+          {
+            "channel": "github-bridge:progress",
+            "data": {
+              "step": "validating",
+              "message": "Validating GitHub URL..."
+            }
+          },
+          {
+            "channel": "github-bridge:progress",
+            "data": {
+              "step": "checking-prereqs",
+              "message": "Checking prerequisites..."
+            }
+          },
+          {
+            "channel": "github-bridge:progress",
+            "data": {
+              "step": "cloning",
+              "message": "Cloning solardev-xyz/freedom-browser..."
+            }
+          },
+          {
+            "channel": "github-bridge:progress",
+            "data": {
+              "step": "initializing",
+              "message": "Initializing Radicle project..."
+            }
+          },
+          {
+            "channel": "github-bridge:progress",
+            "data": {
+              "step": "success",
+              "message": "Repository seeded successfully!"
+            }
+          }
+        ],
+        "writes": [
+          {
+            "path": "/profile/radicle-data/github-bridge-map.json",
+            "data": "{\n  \"solardev-xyz/freedom-browser\": \"z3gqcJUoA1n9HaHKufZs5FCSGazv5\"\n}"
+          }
+        ],
+        "removed": [
+          "/profile/tmp/github-bridge-AbC123"
+        ],
+        "console": [
+          {
+            "level": "log",
+            "line": "[GitHubBridge] Success: solardev-xyz/freedom-browser -> rad:z3gqcJUoA1n9HaHKufZs5FCSGazv5"
+          }
+        ]
+      }
+    },
+    {
+      "id": "imported-no-description",
+      "url": "https://github.com/solardev-xyz/freedom-browser.git",
+      "default_branch": "main",
+      "description_body": "{}",
+      "addon": {
+        "args": [
+          "/profile/tmp/github-bridge-AbC123/freedom-browser",
+          "freedom-browser",
+          "Imported from github.com/solardev-xyz/freedom-browser",
+          "main"
+        ],
+        "text": "{\"rid\":\"rad:z3gqcJUoA1n9HaHKufZs5FCSGazv5\"}"
+      },
+      "expect": {
+        "source": "design",
+        "result_text": "{\"rid\":\"rad:z3gqcJUoA1n9HaHKufZs5FCSGazv5\"}"
+      },
+      "main": {
+        "result": {
+          "success": true,
+          "rid": "z3gqcJUoA1n9HaHKufZs5FCSGazv5",
+          "name": "freedom-browser",
+          "owner": "solardev-xyz",
+          "description": ""
+        },
+        "calls": [
+          {
+            "export": "importRepo",
+            "args": [
+              "/profile/tmp/github-bridge-AbC123/freedom-browser",
+              "freedom-browser",
+              "Imported from github.com/solardev-xyz/freedom-browser",
+              "main"
+            ]
+          }
+        ],
+        "git": [
+          {
+            "file": "git",
+            "args": [
+              "--version"
+            ],
+            "cwd": null,
+            "timeout": 5000
+          },
+          {
+            "file": "git",
+            "args": [
+              "clone",
+              "https://github.com/solardev-xyz/freedom-browser.git",
+              "/profile/tmp/github-bridge-AbC123/freedom-browser"
+            ],
+            "cwd": null,
+            "timeout": 300000
+          },
+          {
+            "file": "git",
+            "args": [
+              "symbolic-ref",
+              "--short",
+              "HEAD"
+            ],
+            "cwd": "/profile/tmp/github-bridge-AbC123/freedom-browser",
+            "timeout": 5000
+          }
+        ],
+        "https": [
+          {
+            "method": "HEAD",
+            "url": "https://github.com/"
+          },
+          {
+            "method": "GET",
+            "url": "https://api.github.com/repos/solardev-xyz/freedom-browser"
+          }
+        ],
+        "temp": [
+          "github-bridge"
+        ],
+        "progress": [
+          {
+            "channel": "github-bridge:progress",
+            "data": {
+              "step": "validating",
+              "message": "Validating GitHub URL..."
+            }
+          },
+          {
+            "channel": "github-bridge:progress",
+            "data": {
+              "step": "checking-prereqs",
+              "message": "Checking prerequisites..."
+            }
+          },
+          {
+            "channel": "github-bridge:progress",
+            "data": {
+              "step": "cloning",
+              "message": "Cloning solardev-xyz/freedom-browser..."
+            }
+          },
+          {
+            "channel": "github-bridge:progress",
+            "data": {
+              "step": "initializing",
+              "message": "Initializing Radicle project..."
+            }
+          },
+          {
+            "channel": "github-bridge:progress",
+            "data": {
+              "step": "success",
+              "message": "Repository seeded successfully!"
+            }
+          }
+        ],
+        "writes": [
+          {
+            "path": "/profile/radicle-data/github-bridge-map.json",
+            "data": "{\n  \"solardev-xyz/freedom-browser\": \"z3gqcJUoA1n9HaHKufZs5FCSGazv5\"\n}"
+          }
+        ],
+        "removed": [
+          "/profile/tmp/github-bridge-AbC123"
+        ],
+        "console": [
+          {
+            "level": "log",
+            "line": "[GitHubBridge] Success: solardev-xyz/freedom-browser -> rad:z3gqcJUoA1n9HaHKufZs5FCSGazv5"
+          }
+        ]
+      }
+    },
+    {
+      "id": "imported-trunk",
+      "url": "octo/hello",
+      "default_branch": "trunk",
+      "description_body": "{\"description\":\"A browser.\"}",
+      "addon": {
+        "args": [
+          "/profile/tmp/github-bridge-AbC123/hello",
+          "hello",
+          "A browser.",
+          "trunk"
+        ],
+        "text": "{\"rid\":\"rad:z3gqcJUoA1n9HaHKufZs5FCSGazv5\"}"
+      },
+      "expect": {
+        "source": "design",
+        "result_text": "{\"rid\":\"rad:z3gqcJUoA1n9HaHKufZs5FCSGazv5\"}"
+      },
+      "main": {
+        "result": {
+          "success": true,
+          "rid": "z3gqcJUoA1n9HaHKufZs5FCSGazv5",
+          "name": "hello",
+          "owner": "octo",
+          "description": "A browser."
+        },
+        "calls": [
+          {
+            "export": "importRepo",
+            "args": [
+              "/profile/tmp/github-bridge-AbC123/hello",
+              "hello",
+              "A browser.",
+              "trunk"
+            ]
+          }
+        ],
+        "git": [
+          {
+            "file": "git",
+            "args": [
+              "--version"
+            ],
+            "cwd": null,
+            "timeout": 5000
+          },
+          {
+            "file": "git",
+            "args": [
+              "clone",
+              "https://github.com/octo/hello.git",
+              "/profile/tmp/github-bridge-AbC123/hello"
+            ],
+            "cwd": null,
+            "timeout": 300000
+          },
+          {
+            "file": "git",
+            "args": [
+              "symbolic-ref",
+              "--short",
+              "HEAD"
+            ],
+            "cwd": "/profile/tmp/github-bridge-AbC123/hello",
+            "timeout": 5000
+          }
+        ],
+        "https": [
+          {
+            "method": "HEAD",
+            "url": "https://github.com/"
+          },
+          {
+            "method": "GET",
+            "url": "https://api.github.com/repos/octo/hello"
+          }
+        ],
+        "temp": [
+          "github-bridge"
+        ],
+        "progress": [
+          {
+            "channel": "github-bridge:progress",
+            "data": {
+              "step": "validating",
+              "message": "Validating GitHub URL..."
+            }
+          },
+          {
+            "channel": "github-bridge:progress",
+            "data": {
+              "step": "checking-prereqs",
+              "message": "Checking prerequisites..."
+            }
+          },
+          {
+            "channel": "github-bridge:progress",
+            "data": {
+              "step": "cloning",
+              "message": "Cloning octo/hello..."
+            }
+          },
+          {
+            "channel": "github-bridge:progress",
+            "data": {
+              "step": "initializing",
+              "message": "Initializing Radicle project..."
+            }
+          },
+          {
+            "channel": "github-bridge:progress",
+            "data": {
+              "step": "success",
+              "message": "Repository seeded successfully!"
+            }
+          }
+        ],
+        "writes": [
+          {
+            "path": "/profile/radicle-data/github-bridge-map.json",
+            "data": "{\n  \"octo/hello\": \"z3gqcJUoA1n9HaHKufZs5FCSGazv5\"\n}"
+          }
+        ],
+        "removed": [
+          "/profile/tmp/github-bridge-AbC123"
+        ],
+        "console": [
+          {
+            "level": "log",
+            "line": "[GitHubBridge] Success: octo/hello -> rad:z3gqcJUoA1n9HaHKufZs5FCSGazv5"
+          }
+        ]
+      }
+    },
+    {
+      "id": "imported-default-branch-unknown",
+      "url": "github.com/octo/hello",
+      "default_branch": null,
+      "description_body": "{\"description\":\"A browser.\"}",
+      "addon": {
+        "args": [
+          "/profile/tmp/github-bridge-AbC123/hello",
+          "hello",
+          "A browser.",
+          "main"
+        ],
+        "text": "{\"rid\":\"rad:z3gqcJUoA1n9HaHKufZs5FCSGazv5\"}"
+      },
+      "expect": {
+        "source": "design",
+        "result_text": "{\"rid\":\"rad:z3gqcJUoA1n9HaHKufZs5FCSGazv5\"}"
+      },
+      "main": {
+        "result": {
+          "success": true,
+          "rid": "z3gqcJUoA1n9HaHKufZs5FCSGazv5",
+          "name": "hello",
+          "owner": "octo",
+          "description": "A browser."
+        },
+        "calls": [
+          {
+            "export": "importRepo",
+            "args": [
+              "/profile/tmp/github-bridge-AbC123/hello",
+              "hello",
+              "A browser.",
+              "main"
+            ]
+          }
+        ],
+        "git": [
+          {
+            "file": "git",
+            "args": [
+              "--version"
+            ],
+            "cwd": null,
+            "timeout": 5000
+          },
+          {
+            "file": "git",
+            "args": [
+              "clone",
+              "https://github.com/octo/hello.git",
+              "/profile/tmp/github-bridge-AbC123/hello"
+            ],
+            "cwd": null,
+            "timeout": 300000
+          },
+          {
+            "file": "git",
+            "args": [
+              "symbolic-ref",
+              "--short",
+              "HEAD"
+            ],
+            "cwd": "/profile/tmp/github-bridge-AbC123/hello",
+            "timeout": 5000
+          }
+        ],
+        "https": [
+          {
+            "method": "HEAD",
+            "url": "https://github.com/"
+          },
+          {
+            "method": "GET",
+            "url": "https://api.github.com/repos/octo/hello"
+          }
+        ],
+        "temp": [
+          "github-bridge"
+        ],
+        "progress": [
+          {
+            "channel": "github-bridge:progress",
+            "data": {
+              "step": "validating",
+              "message": "Validating GitHub URL..."
+            }
+          },
+          {
+            "channel": "github-bridge:progress",
+            "data": {
+              "step": "checking-prereqs",
+              "message": "Checking prerequisites..."
+            }
+          },
+          {
+            "channel": "github-bridge:progress",
+            "data": {
+              "step": "cloning",
+              "message": "Cloning octo/hello..."
+            }
+          },
+          {
+            "channel": "github-bridge:progress",
+            "data": {
+              "step": "initializing",
+              "message": "Initializing Radicle project..."
+            }
+          },
+          {
+            "channel": "github-bridge:progress",
+            "data": {
+              "step": "success",
+              "message": "Repository seeded successfully!"
+            }
+          }
+        ],
+        "writes": [
+          {
+            "path": "/profile/radicle-data/github-bridge-map.json",
+            "data": "{\n  \"octo/hello\": \"z3gqcJUoA1n9HaHKufZs5FCSGazv5\"\n}"
+          }
+        ],
+        "removed": [
+          "/profile/tmp/github-bridge-AbC123"
+        ],
+        "console": [
+          {
+            "level": "log",
+            "line": "[GitHubBridge] Success: octo/hello -> rad:z3gqcJUoA1n9HaHKufZs5FCSGazv5"
+          }
+        ]
+      }
+    },
+    {
+      "id": "invalid-rid",
+      "url": "https://github.com/solardev-xyz/freedom-browser",
+      "default_branch": "main",
+      "description_body": "{\"description\":\"A browser.\"}",
+      "addon": {
+        "args": [
+          "/profile/tmp/github-bridge-AbC123/freedom-browser",
+          "freedom-browser",
+          "A browser.",
+          "main"
+        ],
+        "text": "{\"rid\":\"not-a-radicle-id\"}"
+      },
+      "main": {
+        "result": {
+          "success": false,
+          "error": {
+            "code": "IMPORT_FAILED",
+            "message": "Native Radicle import returned an invalid repository ID"
+          }
+        },
+        "calls": [
+          {
+            "export": "importRepo",
+            "args": [
+              "/profile/tmp/github-bridge-AbC123/freedom-browser",
+              "freedom-browser",
+              "A browser.",
+              "main"
+            ]
+          }
+        ],
+        "git": [
+          {
+            "file": "git",
+            "args": [
+              "--version"
+            ],
+            "cwd": null,
+            "timeout": 5000
+          },
+          {
+            "file": "git",
+            "args": [
+              "clone",
+              "https://github.com/solardev-xyz/freedom-browser.git",
+              "/profile/tmp/github-bridge-AbC123/freedom-browser"
+            ],
+            "cwd": null,
+            "timeout": 300000
+          },
+          {
+            "file": "git",
+            "args": [
+              "symbolic-ref",
+              "--short",
+              "HEAD"
+            ],
+            "cwd": "/profile/tmp/github-bridge-AbC123/freedom-browser",
+            "timeout": 5000
+          }
+        ],
+        "https": [
+          {
+            "method": "HEAD",
+            "url": "https://github.com/"
+          },
+          {
+            "method": "GET",
+            "url": "https://api.github.com/repos/solardev-xyz/freedom-browser"
+          }
+        ],
+        "temp": [
+          "github-bridge"
+        ],
+        "progress": [
+          {
+            "channel": "github-bridge:progress",
+            "data": {
+              "step": "validating",
+              "message": "Validating GitHub URL..."
+            }
+          },
+          {
+            "channel": "github-bridge:progress",
+            "data": {
+              "step": "checking-prereqs",
+              "message": "Checking prerequisites..."
+            }
+          },
+          {
+            "channel": "github-bridge:progress",
+            "data": {
+              "step": "cloning",
+              "message": "Cloning solardev-xyz/freedom-browser..."
+            }
+          },
+          {
+            "channel": "github-bridge:progress",
+            "data": {
+              "step": "initializing",
+              "message": "Initializing Radicle project..."
+            }
+          },
+          {
+            "channel": "github-bridge:progress",
+            "data": {
+              "step": "error",
+              "message": "Native Radicle import returned an invalid repository ID"
+            }
+          }
+        ],
+        "writes": [],
+        "removed": [
+          "/profile/tmp/github-bridge-AbC123"
+        ],
+        "console": [
+          {
+            "level": "error",
+            "line": "[GitHubBridge] Import failed: Native Radicle import returned an invalid repository ID"
+          }
+        ]
+      }
+    },
+    {
+      "id": "error-exists",
+      "url": "https://github.com/solardev-xyz/freedom-browser",
+      "default_branch": "main",
+      "description_body": "{\"description\":\"A browser.\"}",
+      "addon": {
+        "args": [
+          "/profile/tmp/github-bridge-AbC123/freedom-browser",
+          "freedom-browser",
+          "A browser.",
+          "main"
+        ],
+        "text": "{\"error\":\"rad:z3gqcJUoA1n9HaHKufZs5FCSGazv5 already exists in storage\"}"
+      },
+      "expect": {
+        "source": "design",
+        "error": {
+          "code": "failed",
+          "message": "rad:z3gqcJUoA1n9HaHKufZs5FCSGazv5 already exists in storage"
+        }
+      },
+      "main": {
+        "result": {
+          "success": false,
+          "error": {
+            "code": "ALREADY_BRIDGED",
+            "message": "This GitHub repository is already bridged to Radicle.",
+            "details": {
+              "rid": "z3gqcJUoA1n9HaHKufZs5FCSGazv5"
+            }
+          },
+          "step": "initializing",
+          "rid": "z3gqcJUoA1n9HaHKufZs5FCSGazv5"
+        },
+        "calls": [
+          {
+            "export": "importRepo",
+            "args": [
+              "/profile/tmp/github-bridge-AbC123/freedom-browser",
+              "freedom-browser",
+              "A browser.",
+              "main"
+            ]
+          }
+        ],
+        "git": [
+          {
+            "file": "git",
+            "args": [
+              "--version"
+            ],
+            "cwd": null,
+            "timeout": 5000
+          },
+          {
+            "file": "git",
+            "args": [
+              "clone",
+              "https://github.com/solardev-xyz/freedom-browser.git",
+              "/profile/tmp/github-bridge-AbC123/freedom-browser"
+            ],
+            "cwd": null,
+            "timeout": 300000
+          },
+          {
+            "file": "git",
+            "args": [
+              "symbolic-ref",
+              "--short",
+              "HEAD"
+            ],
+            "cwd": "/profile/tmp/github-bridge-AbC123/freedom-browser",
+            "timeout": 5000
+          }
+        ],
+        "https": [
+          {
+            "method": "HEAD",
+            "url": "https://github.com/"
+          },
+          {
+            "method": "GET",
+            "url": "https://api.github.com/repos/solardev-xyz/freedom-browser"
+          }
+        ],
+        "temp": [
+          "github-bridge"
+        ],
+        "progress": [
+          {
+            "channel": "github-bridge:progress",
+            "data": {
+              "step": "validating",
+              "message": "Validating GitHub URL..."
+            }
+          },
+          {
+            "channel": "github-bridge:progress",
+            "data": {
+              "step": "checking-prereqs",
+              "message": "Checking prerequisites..."
+            }
+          },
+          {
+            "channel": "github-bridge:progress",
+            "data": {
+              "step": "cloning",
+              "message": "Cloning solardev-xyz/freedom-browser..."
+            }
+          },
+          {
+            "channel": "github-bridge:progress",
+            "data": {
+              "step": "initializing",
+              "message": "Initializing Radicle project..."
+            }
+          }
+        ],
+        "writes": [
+          {
+            "path": "/profile/radicle-data/github-bridge-map.json",
+            "data": "{\n  \"solardev-xyz/freedom-browser\": \"z3gqcJUoA1n9HaHKufZs5FCSGazv5\"\n}"
+          }
+        ],
+        "removed": [
+          "/profile/tmp/github-bridge-AbC123"
+        ],
+        "console": [
+          {
+            "level": "error",
+            "line": "[GitHubBridge] Import failed: rad:z3gqcJUoA1n9HaHKufZs5FCSGazv5 already exists in storage"
+          }
+        ]
+      }
+    },
+    {
+      "id": "error-outcome-unknown",
+      "url": "https://github.com/solardev-xyz/freedom-browser",
+      "default_branch": "main",
+      "description_body": "{\"description\":\"A browser.\"}",
+      "addon": {
+        "args": [
+          "/profile/tmp/github-bridge-AbC123/freedom-browser",
+          "freedom-browser",
+          "A browser.",
+          "main"
+        ],
+        "text": "{\"error\":\"the import was cut off past its start: it may have been recorded\"}"
+      },
+      "expect": {
+        "source": "design",
+        "error": {
+          "code": "outcome_unknown",
+          "message": "the import was cut off past its start: it may have been recorded"
+        }
+      },
+      "main": {
+        "result": {
+          "success": false,
+          "error": {
+            "code": "IMPORT_FAILED",
+            "message": "the import was cut off past its start: it may have been recorded"
+          }
+        },
+        "calls": [
+          {
+            "export": "importRepo",
+            "args": [
+              "/profile/tmp/github-bridge-AbC123/freedom-browser",
+              "freedom-browser",
+              "A browser.",
+              "main"
+            ]
+          }
+        ],
+        "git": [
+          {
+            "file": "git",
+            "args": [
+              "--version"
+            ],
+            "cwd": null,
+            "timeout": 5000
+          },
+          {
+            "file": "git",
+            "args": [
+              "clone",
+              "https://github.com/solardev-xyz/freedom-browser.git",
+              "/profile/tmp/github-bridge-AbC123/freedom-browser"
+            ],
+            "cwd": null,
+            "timeout": 300000
+          },
+          {
+            "file": "git",
+            "args": [
+              "symbolic-ref",
+              "--short",
+              "HEAD"
+            ],
+            "cwd": "/profile/tmp/github-bridge-AbC123/freedom-browser",
+            "timeout": 5000
+          }
+        ],
+        "https": [
+          {
+            "method": "HEAD",
+            "url": "https://github.com/"
+          },
+          {
+            "method": "GET",
+            "url": "https://api.github.com/repos/solardev-xyz/freedom-browser"
+          }
+        ],
+        "temp": [
+          "github-bridge"
+        ],
+        "progress": [
+          {
+            "channel": "github-bridge:progress",
+            "data": {
+              "step": "validating",
+              "message": "Validating GitHub URL..."
+            }
+          },
+          {
+            "channel": "github-bridge:progress",
+            "data": {
+              "step": "checking-prereqs",
+              "message": "Checking prerequisites..."
+            }
+          },
+          {
+            "channel": "github-bridge:progress",
+            "data": {
+              "step": "cloning",
+              "message": "Cloning solardev-xyz/freedom-browser..."
+            }
+          },
+          {
+            "channel": "github-bridge:progress",
+            "data": {
+              "step": "initializing",
+              "message": "Initializing Radicle project..."
+            }
+          },
+          {
+            "channel": "github-bridge:progress",
+            "data": {
+              "step": "error",
+              "message": "the import was cut off past its start: it may have been recorded"
+            }
+          }
+        ],
+        "writes": [],
+        "removed": [
+          "/profile/tmp/github-bridge-AbC123"
+        ],
+        "console": [
+          {
+            "level": "error",
+            "line": "[GitHubBridge] Import failed: the import was cut off past its start: it may have been recorded"
+          }
+        ]
+      }
+    },
+    {
+      "id": "error-needs-vault",
+      "url": "https://github.com/solardev-xyz/freedom-browser",
+      "default_branch": "main",
+      "description_body": "{\"description\":\"A browser.\"}",
+      "addon": {
+        "args": [
+          "/profile/tmp/github-bridge-AbC123/freedom-browser",
+          "freedom-browser",
+          "A browser.",
+          "main"
+        ],
+        "text": "{\"error\":\"the node runs with a throwaway key: publishing needs a vault\"}"
+      },
+      "expect": {
+        "source": "design",
+        "error": {
+          "code": "needs_vault",
+          "message": "the node runs with a throwaway key: publishing needs a vault"
+        }
+      },
+      "main": {
+        "result": {
+          "success": false,
+          "error": {
+            "code": "IMPORT_FAILED",
+            "message": "the node runs with a throwaway key: publishing needs a vault"
+          }
+        },
+        "calls": [
+          {
+            "export": "importRepo",
+            "args": [
+              "/profile/tmp/github-bridge-AbC123/freedom-browser",
+              "freedom-browser",
+              "A browser.",
+              "main"
+            ]
+          }
+        ],
+        "git": [
+          {
+            "file": "git",
+            "args": [
+              "--version"
+            ],
+            "cwd": null,
+            "timeout": 5000
+          },
+          {
+            "file": "git",
+            "args": [
+              "clone",
+              "https://github.com/solardev-xyz/freedom-browser.git",
+              "/profile/tmp/github-bridge-AbC123/freedom-browser"
+            ],
+            "cwd": null,
+            "timeout": 300000
+          },
+          {
+            "file": "git",
+            "args": [
+              "symbolic-ref",
+              "--short",
+              "HEAD"
+            ],
+            "cwd": "/profile/tmp/github-bridge-AbC123/freedom-browser",
+            "timeout": 5000
+          }
+        ],
+        "https": [
+          {
+            "method": "HEAD",
+            "url": "https://github.com/"
+          },
+          {
+            "method": "GET",
+            "url": "https://api.github.com/repos/solardev-xyz/freedom-browser"
+          }
+        ],
+        "temp": [
+          "github-bridge"
+        ],
+        "progress": [
+          {
+            "channel": "github-bridge:progress",
+            "data": {
+              "step": "validating",
+              "message": "Validating GitHub URL..."
+            }
+          },
+          {
+            "channel": "github-bridge:progress",
+            "data": {
+              "step": "checking-prereqs",
+              "message": "Checking prerequisites..."
+            }
+          },
+          {
+            "channel": "github-bridge:progress",
+            "data": {
+              "step": "cloning",
+              "message": "Cloning solardev-xyz/freedom-browser..."
+            }
+          },
+          {
+            "channel": "github-bridge:progress",
+            "data": {
+              "step": "initializing",
+              "message": "Initializing Radicle project..."
+            }
+          },
+          {
+            "channel": "github-bridge:progress",
+            "data": {
+              "step": "error",
+              "message": "the node runs with a throwaway key: publishing needs a vault"
+            }
+          }
+        ],
+        "writes": [],
+        "removed": [
+          "/profile/tmp/github-bridge-AbC123"
+        ],
+        "console": [
+          {
+            "level": "error",
+            "line": "[GitHubBridge] Import failed: the node runs with a throwaway key: publishing needs a vault"
+          }
+        ]
+      }
+    },
+    {
+      "id": "error-unsupported-layout",
+      "url": "https://github.com/solardev-xyz/freedom-browser",
+      "default_branch": "main",
+      "description_body": "{\"description\":\"A browser.\"}",
+      "addon": {
+        "args": [
+          "/profile/tmp/github-bridge-AbC123/freedom-browser",
+          "freedom-browser",
+          "A browser.",
+          "main"
+        ],
+        "text": "{\"error\":\"the repository is, contains, or lies inside a directory of Freedom's own\"}"
+      },
+      "expect": {
+        "source": "design",
+        "error": {
+          "code": "unsupported_layout",
+          "message": "the repository is, contains, or lies inside a directory of Freedom's own"
+        }
+      },
+      "main": {
+        "result": {
+          "success": false,
+          "error": {
+            "code": "IMPORT_FAILED",
+            "message": "the repository is, contains, or lies inside a directory of Freedom's own"
+          }
+        },
+        "calls": [
+          {
+            "export": "importRepo",
+            "args": [
+              "/profile/tmp/github-bridge-AbC123/freedom-browser",
+              "freedom-browser",
+              "A browser.",
+              "main"
+            ]
+          }
+        ],
+        "git": [
+          {
+            "file": "git",
+            "args": [
+              "--version"
+            ],
+            "cwd": null,
+            "timeout": 5000
+          },
+          {
+            "file": "git",
+            "args": [
+              "clone",
+              "https://github.com/solardev-xyz/freedom-browser.git",
+              "/profile/tmp/github-bridge-AbC123/freedom-browser"
+            ],
+            "cwd": null,
+            "timeout": 300000
+          },
+          {
+            "file": "git",
+            "args": [
+              "symbolic-ref",
+              "--short",
+              "HEAD"
+            ],
+            "cwd": "/profile/tmp/github-bridge-AbC123/freedom-browser",
+            "timeout": 5000
+          }
+        ],
+        "https": [
+          {
+            "method": "HEAD",
+            "url": "https://github.com/"
+          },
+          {
+            "method": "GET",
+            "url": "https://api.github.com/repos/solardev-xyz/freedom-browser"
+          }
+        ],
+        "temp": [
+          "github-bridge"
+        ],
+        "progress": [
+          {
+            "channel": "github-bridge:progress",
+            "data": {
+              "step": "validating",
+              "message": "Validating GitHub URL..."
+            }
+          },
+          {
+            "channel": "github-bridge:progress",
+            "data": {
+              "step": "checking-prereqs",
+              "message": "Checking prerequisites..."
+            }
+          },
+          {
+            "channel": "github-bridge:progress",
+            "data": {
+              "step": "cloning",
+              "message": "Cloning solardev-xyz/freedom-browser..."
+            }
+          },
+          {
+            "channel": "github-bridge:progress",
+            "data": {
+              "step": "initializing",
+              "message": "Initializing Radicle project..."
+            }
+          },
+          {
+            "channel": "github-bridge:progress",
+            "data": {
+              "step": "error",
+              "message": "the repository is, contains, or lies inside a directory of Freedom's own"
+            }
+          }
+        ],
+        "writes": [],
+        "removed": [
+          "/profile/tmp/github-bridge-AbC123"
+        ],
+        "console": [
+          {
+            "level": "error",
+            "line": "[GitHubBridge] Import failed: the repository is, contains, or lies inside a directory of Freedom's own"
+          }
+        ]
+      }
+    },
+    {
+      "id": "error-no-branch",
+      "url": "https://github.com/solardev-xyz/freedom-browser",
+      "default_branch": "main",
+      "description_body": "{\"description\":\"A browser.\"}",
+      "addon": {
+        "args": [
+          "/profile/tmp/github-bridge-AbC123/freedom-browser",
+          "freedom-browser",
+          "A browser.",
+          "main"
+        ],
+        "text": "{\"error\":\"the working copy has no branch main\"}"
+      },
+      "expect": {
+        "source": "design",
+        "error": {
+          "code": "invalid_argument",
+          "message": "the working copy has no branch main"
+        }
+      },
+      "main": {
+        "result": {
+          "success": false,
+          "error": {
+            "code": "IMPORT_FAILED",
+            "message": "the working copy has no branch main"
+          }
+        },
+        "calls": [
+          {
+            "export": "importRepo",
+            "args": [
+              "/profile/tmp/github-bridge-AbC123/freedom-browser",
+              "freedom-browser",
+              "A browser.",
+              "main"
+            ]
+          }
+        ],
+        "git": [
+          {
+            "file": "git",
+            "args": [
+              "--version"
+            ],
+            "cwd": null,
+            "timeout": 5000
+          },
+          {
+            "file": "git",
+            "args": [
+              "clone",
+              "https://github.com/solardev-xyz/freedom-browser.git",
+              "/profile/tmp/github-bridge-AbC123/freedom-browser"
+            ],
+            "cwd": null,
+            "timeout": 300000
+          },
+          {
+            "file": "git",
+            "args": [
+              "symbolic-ref",
+              "--short",
+              "HEAD"
+            ],
+            "cwd": "/profile/tmp/github-bridge-AbC123/freedom-browser",
+            "timeout": 5000
+          }
+        ],
+        "https": [
+          {
+            "method": "HEAD",
+            "url": "https://github.com/"
+          },
+          {
+            "method": "GET",
+            "url": "https://api.github.com/repos/solardev-xyz/freedom-browser"
+          }
+        ],
+        "temp": [
+          "github-bridge"
+        ],
+        "progress": [
+          {
+            "channel": "github-bridge:progress",
+            "data": {
+              "step": "validating",
+              "message": "Validating GitHub URL..."
+            }
+          },
+          {
+            "channel": "github-bridge:progress",
+            "data": {
+              "step": "checking-prereqs",
+              "message": "Checking prerequisites..."
+            }
+          },
+          {
+            "channel": "github-bridge:progress",
+            "data": {
+              "step": "cloning",
+              "message": "Cloning solardev-xyz/freedom-browser..."
+            }
+          },
+          {
+            "channel": "github-bridge:progress",
+            "data": {
+              "step": "initializing",
+              "message": "Initializing Radicle project..."
+            }
+          },
+          {
+            "channel": "github-bridge:progress",
+            "data": {
+              "step": "error",
+              "message": "the working copy has no branch main"
+            }
+          }
+        ],
+        "writes": [],
+        "removed": [
+          "/profile/tmp/github-bridge-AbC123"
+        ],
+        "console": [
+          {
+            "level": "error",
+            "line": "[GitHubBridge] Import failed: the working copy has no branch main"
+          }
+        ]
+      }
+    },
+    {
+      "id": "error-params",
+      "url": "https://github.com/solardev-xyz/freedom-browser",
+      "default_branch": "main",
+      "description_body": "{\"description\":\"A browser.\"}",
+      "addon": {
+        "args": [
+          "/profile/tmp/github-bridge-AbC123/freedom-browser",
+          "freedom-browser",
+          "A browser.",
+          "main"
+        ],
+        "text": "{\"error\":\"rad.import_repo takes { path, name, description, default_branch }\"}"
+      },
+      "expect": {
+        "source": "design",
+        "error": {
+          "code": "invalid_argument",
+          "message": "rad.import_repo takes { path, name, description, default_branch }"
+        }
+      },
+      "main": {
+        "result": {
+          "success": false,
+          "error": {
+            "code": "IMPORT_FAILED",
+            "message": "rad.import_repo takes { path, name, description, default_branch }"
+          }
+        },
+        "calls": [
+          {
+            "export": "importRepo",
+            "args": [
+              "/profile/tmp/github-bridge-AbC123/freedom-browser",
+              "freedom-browser",
+              "A browser.",
+              "main"
+            ]
+          }
+        ],
+        "git": [
+          {
+            "file": "git",
+            "args": [
+              "--version"
+            ],
+            "cwd": null,
+            "timeout": 5000
+          },
+          {
+            "file": "git",
+            "args": [
+              "clone",
+              "https://github.com/solardev-xyz/freedom-browser.git",
+              "/profile/tmp/github-bridge-AbC123/freedom-browser"
+            ],
+            "cwd": null,
+            "timeout": 300000
+          },
+          {
+            "file": "git",
+            "args": [
+              "symbolic-ref",
+              "--short",
+              "HEAD"
+            ],
+            "cwd": "/profile/tmp/github-bridge-AbC123/freedom-browser",
+            "timeout": 5000
+          }
+        ],
+        "https": [
+          {
+            "method": "HEAD",
+            "url": "https://github.com/"
+          },
+          {
+            "method": "GET",
+            "url": "https://api.github.com/repos/solardev-xyz/freedom-browser"
+          }
+        ],
+        "temp": [
+          "github-bridge"
+        ],
+        "progress": [
+          {
+            "channel": "github-bridge:progress",
+            "data": {
+              "step": "validating",
+              "message": "Validating GitHub URL..."
+            }
+          },
+          {
+            "channel": "github-bridge:progress",
+            "data": {
+              "step": "checking-prereqs",
+              "message": "Checking prerequisites..."
+            }
+          },
+          {
+            "channel": "github-bridge:progress",
+            "data": {
+              "step": "cloning",
+              "message": "Cloning solardev-xyz/freedom-browser..."
+            }
+          },
+          {
+            "channel": "github-bridge:progress",
+            "data": {
+              "step": "initializing",
+              "message": "Initializing Radicle project..."
+            }
+          },
+          {
+            "channel": "github-bridge:progress",
+            "data": {
+              "step": "error",
+              "message": "rad.import_repo takes { path, name, description, default_branch }"
+            }
+          }
+        ],
+        "writes": [],
+        "removed": [
+          "/profile/tmp/github-bridge-AbC123"
+        ],
+        "console": [
+          {
+            "level": "error",
+            "line": "[GitHubBridge] Import failed: rad.import_repo takes { path, name, description, default_branch }"
+          }
+        ]
+      }
+    },
+    {
+      "id": "error-path",
+      "url": "https://github.com/solardev-xyz/freedom-browser",
+      "default_branch": "main",
+      "description_body": "{\"description\":\"A browser.\"}",
+      "addon": {
+        "args": [
+          "/profile/tmp/github-bridge-AbC123/freedom-browser",
+          "freedom-browser",
+          "A browser.",
+          "main"
+        ],
+        "text": "{\"error\":\"path isn't the --source this import process was started with\"}"
+      },
+      "expect": {
+        "source": "design",
+        "error": {
+          "code": "invalid_argument",
+          "message": "path isn't the --source this import process was started with"
+        }
+      },
+      "main": {
+        "result": {
+          "success": false,
+          "error": {
+            "code": "IMPORT_FAILED",
+            "message": "path isn't the --source this import process was started with"
+          }
+        },
+        "calls": [
+          {
+            "export": "importRepo",
+            "args": [
+              "/profile/tmp/github-bridge-AbC123/freedom-browser",
+              "freedom-browser",
+              "A browser.",
+              "main"
+            ]
+          }
+        ],
+        "git": [
+          {
+            "file": "git",
+            "args": [
+              "--version"
+            ],
+            "cwd": null,
+            "timeout": 5000
+          },
+          {
+            "file": "git",
+            "args": [
+              "clone",
+              "https://github.com/solardev-xyz/freedom-browser.git",
+              "/profile/tmp/github-bridge-AbC123/freedom-browser"
+            ],
+            "cwd": null,
+            "timeout": 300000
+          },
+          {
+            "file": "git",
+            "args": [
+              "symbolic-ref",
+              "--short",
+              "HEAD"
+            ],
+            "cwd": "/profile/tmp/github-bridge-AbC123/freedom-browser",
+            "timeout": 5000
+          }
+        ],
+        "https": [
+          {
+            "method": "HEAD",
+            "url": "https://github.com/"
+          },
+          {
+            "method": "GET",
+            "url": "https://api.github.com/repos/solardev-xyz/freedom-browser"
+          }
+        ],
+        "temp": [
+          "github-bridge"
+        ],
+        "progress": [
+          {
+            "channel": "github-bridge:progress",
+            "data": {
+              "step": "validating",
+              "message": "Validating GitHub URL..."
+            }
+          },
+          {
+            "channel": "github-bridge:progress",
+            "data": {
+              "step": "checking-prereqs",
+              "message": "Checking prerequisites..."
+            }
+          },
+          {
+            "channel": "github-bridge:progress",
+            "data": {
+              "step": "cloning",
+              "message": "Cloning solardev-xyz/freedom-browser..."
+            }
+          },
+          {
+            "channel": "github-bridge:progress",
+            "data": {
+              "step": "initializing",
+              "message": "Initializing Radicle project..."
+            }
+          },
+          {
+            "channel": "github-bridge:progress",
+            "data": {
+              "step": "error",
+              "message": "path isn't the --source this import process was started with"
+            }
+          }
+        ],
+        "writes": [],
+        "removed": [
+          "/profile/tmp/github-bridge-AbC123"
+        ],
+        "console": [
+          {
+            "level": "error",
+            "line": "[GitHubBridge] Import failed: path isn't the --source this import process was started with"
+          }
+        ]
+      }
+    },
+    {
+      "id": "error-already-called",
+      "url": "https://github.com/solardev-xyz/freedom-browser",
+      "default_branch": "main",
+      "description_body": "{\"description\":\"A browser.\"}",
+      "addon": {
+        "args": [
+          "/profile/tmp/github-bridge-AbC123/freedom-browser",
+          "freedom-browser",
+          "A browser.",
+          "main"
+        ],
+        "text": "{\"error\":\"rad.import_repo was already called\"}"
+      },
+      "expect": {
+        "source": "design",
+        "error": {
+          "code": "invalid_argument",
+          "message": "rad.import_repo was already called"
+        }
+      },
+      "main": {
+        "result": {
+          "success": false,
+          "error": {
+            "code": "IMPORT_FAILED",
+            "message": "rad.import_repo was already called"
+          }
+        },
+        "calls": [
+          {
+            "export": "importRepo",
+            "args": [
+              "/profile/tmp/github-bridge-AbC123/freedom-browser",
+              "freedom-browser",
+              "A browser.",
+              "main"
+            ]
+          }
+        ],
+        "git": [
+          {
+            "file": "git",
+            "args": [
+              "--version"
+            ],
+            "cwd": null,
+            "timeout": 5000
+          },
+          {
+            "file": "git",
+            "args": [
+              "clone",
+              "https://github.com/solardev-xyz/freedom-browser.git",
+              "/profile/tmp/github-bridge-AbC123/freedom-browser"
+            ],
+            "cwd": null,
+            "timeout": 300000
+          },
+          {
+            "file": "git",
+            "args": [
+              "symbolic-ref",
+              "--short",
+              "HEAD"
+            ],
+            "cwd": "/profile/tmp/github-bridge-AbC123/freedom-browser",
+            "timeout": 5000
+          }
+        ],
+        "https": [
+          {
+            "method": "HEAD",
+            "url": "https://github.com/"
+          },
+          {
+            "method": "GET",
+            "url": "https://api.github.com/repos/solardev-xyz/freedom-browser"
+          }
+        ],
+        "temp": [
+          "github-bridge"
+        ],
+        "progress": [
+          {
+            "channel": "github-bridge:progress",
+            "data": {
+              "step": "validating",
+              "message": "Validating GitHub URL..."
+            }
+          },
+          {
+            "channel": "github-bridge:progress",
+            "data": {
+              "step": "checking-prereqs",
+              "message": "Checking prerequisites..."
+            }
+          },
+          {
+            "channel": "github-bridge:progress",
+            "data": {
+              "step": "cloning",
+              "message": "Cloning solardev-xyz/freedom-browser..."
+            }
+          },
+          {
+            "channel": "github-bridge:progress",
+            "data": {
+              "step": "initializing",
+              "message": "Initializing Radicle project..."
+            }
+          },
+          {
+            "channel": "github-bridge:progress",
+            "data": {
+              "step": "error",
+              "message": "rad.import_repo was already called"
+            }
+          }
+        ],
+        "writes": [],
+        "removed": [
+          "/profile/tmp/github-bridge-AbC123"
+        ],
+        "console": [
+          {
+            "level": "error",
+            "line": "[GitHubBridge] Import failed: rad.import_repo was already called"
+          }
+        ]
+      }
+    },
+    {
+      "id": "error-before-reconcile",
+      "url": "https://github.com/solardev-xyz/freedom-browser",
+      "default_branch": "main",
+      "description_body": "{\"description\":\"A browser.\"}",
+      "addon": {
+        "args": [
+          "/profile/tmp/github-bridge-AbC123/freedom-browser",
+          "freedom-browser",
+          "A browser.",
+          "main"
+        ],
+        "text": "{\"error\":\"rad.import_repo is admitted only after rad.reconcile has succeeded\"}"
+      },
+      "expect": {
+        "source": "design",
+        "error": {
+          "code": "stopped",
+          "message": "rad.import_repo is admitted only after rad.reconcile has succeeded"
+        }
+      },
+      "main": {
+        "result": {
+          "success": false,
+          "error": {
+            "code": "IMPORT_FAILED",
+            "message": "rad.import_repo is admitted only after rad.reconcile has succeeded"
+          }
+        },
+        "calls": [
+          {
+            "export": "importRepo",
+            "args": [
+              "/profile/tmp/github-bridge-AbC123/freedom-browser",
+              "freedom-browser",
+              "A browser.",
+              "main"
+            ]
+          }
+        ],
+        "git": [
+          {
+            "file": "git",
+            "args": [
+              "--version"
+            ],
+            "cwd": null,
+            "timeout": 5000
+          },
+          {
+            "file": "git",
+            "args": [
+              "clone",
+              "https://github.com/solardev-xyz/freedom-browser.git",
+              "/profile/tmp/github-bridge-AbC123/freedom-browser"
+            ],
+            "cwd": null,
+            "timeout": 300000
+          },
+          {
+            "file": "git",
+            "args": [
+              "symbolic-ref",
+              "--short",
+              "HEAD"
+            ],
+            "cwd": "/profile/tmp/github-bridge-AbC123/freedom-browser",
+            "timeout": 5000
+          }
+        ],
+        "https": [
+          {
+            "method": "HEAD",
+            "url": "https://github.com/"
+          },
+          {
+            "method": "GET",
+            "url": "https://api.github.com/repos/solardev-xyz/freedom-browser"
+          }
+        ],
+        "temp": [
+          "github-bridge"
+        ],
+        "progress": [
+          {
+            "channel": "github-bridge:progress",
+            "data": {
+              "step": "validating",
+              "message": "Validating GitHub URL..."
+            }
+          },
+          {
+            "channel": "github-bridge:progress",
+            "data": {
+              "step": "checking-prereqs",
+              "message": "Checking prerequisites..."
+            }
+          },
+          {
+            "channel": "github-bridge:progress",
+            "data": {
+              "step": "cloning",
+              "message": "Cloning solardev-xyz/freedom-browser..."
+            }
+          },
+          {
+            "channel": "github-bridge:progress",
+            "data": {
+              "step": "initializing",
+              "message": "Initializing Radicle project..."
+            }
+          },
+          {
+            "channel": "github-bridge:progress",
+            "data": {
+              "step": "error",
+              "message": "rad.import_repo is admitted only after rad.reconcile has succeeded"
+            }
+          }
+        ],
+        "writes": [],
+        "removed": [
+          "/profile/tmp/github-bridge-AbC123"
+        ],
+        "console": [
+          {
+            "level": "error",
+            "line": "[GitHubBridge] Import failed: rad.import_repo is admitted only after rad.reconcile has succeeded"
+          }
+        ]
+      }
+    },
+    {
+      "id": "error-ending",
+      "url": "https://github.com/solardev-xyz/freedom-browser",
+      "default_branch": "main",
+      "description_body": "{\"description\":\"A browser.\"}",
+      "addon": {
+        "args": [
+          "/profile/tmp/github-bridge-AbC123/freedom-browser",
+          "freedom-browser",
+          "A browser.",
+          "main"
+        ],
+        "text": "{\"error\":\"the import process is ending\"}"
+      },
+      "expect": {
+        "source": "design",
+        "error": {
+          "code": "stopped",
+          "message": "the import process is ending"
+        }
+      },
+      "main": {
+        "result": {
+          "success": false,
+          "error": {
+            "code": "IMPORT_FAILED",
+            "message": "the import process is ending"
+          }
+        },
+        "calls": [
+          {
+            "export": "importRepo",
+            "args": [
+              "/profile/tmp/github-bridge-AbC123/freedom-browser",
+              "freedom-browser",
+              "A browser.",
+              "main"
+            ]
+          }
+        ],
+        "git": [
+          {
+            "file": "git",
+            "args": [
+              "--version"
+            ],
+            "cwd": null,
+            "timeout": 5000
+          },
+          {
+            "file": "git",
+            "args": [
+              "clone",
+              "https://github.com/solardev-xyz/freedom-browser.git",
+              "/profile/tmp/github-bridge-AbC123/freedom-browser"
+            ],
+            "cwd": null,
+            "timeout": 300000
+          },
+          {
+            "file": "git",
+            "args": [
+              "symbolic-ref",
+              "--short",
+              "HEAD"
+            ],
+            "cwd": "/profile/tmp/github-bridge-AbC123/freedom-browser",
+            "timeout": 5000
+          }
+        ],
+        "https": [
+          {
+            "method": "HEAD",
+            "url": "https://github.com/"
+          },
+          {
+            "method": "GET",
+            "url": "https://api.github.com/repos/solardev-xyz/freedom-browser"
+          }
+        ],
+        "temp": [
+          "github-bridge"
+        ],
+        "progress": [
+          {
+            "channel": "github-bridge:progress",
+            "data": {
+              "step": "validating",
+              "message": "Validating GitHub URL..."
+            }
+          },
+          {
+            "channel": "github-bridge:progress",
+            "data": {
+              "step": "checking-prereqs",
+              "message": "Checking prerequisites..."
+            }
+          },
+          {
+            "channel": "github-bridge:progress",
+            "data": {
+              "step": "cloning",
+              "message": "Cloning solardev-xyz/freedom-browser..."
+            }
+          },
+          {
+            "channel": "github-bridge:progress",
+            "data": {
+              "step": "initializing",
+              "message": "Initializing Radicle project..."
+            }
+          },
+          {
+            "channel": "github-bridge:progress",
+            "data": {
+              "step": "error",
+              "message": "the import process is ending"
+            }
+          }
+        ],
+        "writes": [],
+        "removed": [
+          "/profile/tmp/github-bridge-AbC123"
+        ],
+        "console": [
+          {
+            "level": "error",
+            "line": "[GitHubBridge] Import failed: the import process is ending"
+          }
+        ]
+      }
+    },
+    {
+      "id": "error-not-a-repository",
+      "url": "https://github.com/solardev-xyz/freedom-browser",
+      "default_branch": "main",
+      "description_body": "{\"description\":\"A browser.\"}",
+      "addon": {
+        "args": [
+          "/profile/tmp/github-bridge-AbC123/freedom-browser",
+          "freedom-browser",
+          "A browser.",
+          "main"
+        ],
+        "text": "{\"error\":\"could not find repository at '/profile/tmp/github-bridge-AbC123/freedom-browser'; class=Repository (6); code=NotFound (-3)\"}"
+      },
+      "expect": {
+        "source": "design",
+        "error": {
+          "code": "not_found",
+          "message": "could not find repository at '/profile/tmp/github-bridge-AbC123/freedom-browser'; class=Repository (6); code=NotFound (-3)"
+        }
+      },
+      "main": {
+        "result": {
+          "success": false,
+          "error": {
+            "code": "IMPORT_FAILED",
+            "message": "could not find repository at '/profile/tmp/github-bridge-AbC123/freedom-browser'; class=Repository (6); code=NotFound (-3)"
+          }
+        },
+        "calls": [
+          {
+            "export": "importRepo",
+            "args": [
+              "/profile/tmp/github-bridge-AbC123/freedom-browser",
+              "freedom-browser",
+              "A browser.",
+              "main"
+            ]
+          }
+        ],
+        "git": [
+          {
+            "file": "git",
+            "args": [
+              "--version"
+            ],
+            "cwd": null,
+            "timeout": 5000
+          },
+          {
+            "file": "git",
+            "args": [
+              "clone",
+              "https://github.com/solardev-xyz/freedom-browser.git",
+              "/profile/tmp/github-bridge-AbC123/freedom-browser"
+            ],
+            "cwd": null,
+            "timeout": 300000
+          },
+          {
+            "file": "git",
+            "args": [
+              "symbolic-ref",
+              "--short",
+              "HEAD"
+            ],
+            "cwd": "/profile/tmp/github-bridge-AbC123/freedom-browser",
+            "timeout": 5000
+          }
+        ],
+        "https": [
+          {
+            "method": "HEAD",
+            "url": "https://github.com/"
+          },
+          {
+            "method": "GET",
+            "url": "https://api.github.com/repos/solardev-xyz/freedom-browser"
+          }
+        ],
+        "temp": [
+          "github-bridge"
+        ],
+        "progress": [
+          {
+            "channel": "github-bridge:progress",
+            "data": {
+              "step": "validating",
+              "message": "Validating GitHub URL..."
+            }
+          },
+          {
+            "channel": "github-bridge:progress",
+            "data": {
+              "step": "checking-prereqs",
+              "message": "Checking prerequisites..."
+            }
+          },
+          {
+            "channel": "github-bridge:progress",
+            "data": {
+              "step": "cloning",
+              "message": "Cloning solardev-xyz/freedom-browser..."
+            }
+          },
+          {
+            "channel": "github-bridge:progress",
+            "data": {
+              "step": "initializing",
+              "message": "Initializing Radicle project..."
+            }
+          },
+          {
+            "channel": "github-bridge:progress",
+            "data": {
+              "step": "error",
+              "message": "could not find repository at '/profile/tmp/github-bridge-AbC123/freedom-browser'; class=Repository (6); code=NotFound (-3)"
+            }
+          }
+        ],
+        "writes": [],
+        "removed": [
+          "/profile/tmp/github-bridge-AbC123"
+        ],
+        "console": [
+          {
+            "level": "error",
+            "line": "[GitHubBridge] Import failed: could not find repository at '/profile/tmp/github-bridge-AbC123/freedom-browser'; class=Repository (6); code=NotFound (-3)"
+          }
+        ]
+      }
+    }
+  ]
+}

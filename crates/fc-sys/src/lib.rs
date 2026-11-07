@@ -12,6 +12,9 @@
 //! - [`windows::drive_type`]: storage qualification in `freedom-cored` and
 //!   `fc-service` (design 0001, "Lifetime lock");
 //! - [`windows::quiet_error_reporting`]: `fc-service`'s process hardening;
+//! - [`windows::file_id`] and [`windows::file_index`]: a directory's
+//!   identity, for `fc-service`'s `OpenDir` (design 0010, D5: the import's
+//!   roots, checked again once confined);
 //! - [`windows::Job`], [`windows::own_job_limits`] and
 //!   [`windows::Mitigation`]: its confinement on Windows (design 0010), a job
 //!   object of one process and the process mitigation policies, each read

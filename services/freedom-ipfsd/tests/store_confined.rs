@@ -42,6 +42,7 @@ fn child(case: &str) {
     let report = confine::confine(&Policy {
         read_write: vec![dir.clone()],
         read_only: Vec::new(),
+        read_only_dirs: Vec::new(),
         refer: false,
         min_abi: 1,
         network: Network::Offline,

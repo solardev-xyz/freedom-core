@@ -48,11 +48,13 @@ test-windows = []
 # and Seatbelt's (design 0010).
 libc = "0.2"
 
-# GetDriveTypeW, SetErrorMode and WerSetFlags; and confinement's job object
-# and process mitigation policies (design 0010, "Windows"): JobObjects and
-# Threading for the calls, Security for CreateJobObjectW's attributes,
-# Foundation for HANDLE, and SystemServices for the policies' structures,
-# whose size the calls are checked against.
+# GetDriveTypeW, SetErrorMode and WerSetFlags; a file's identity
+# (GetFileInformationByHandleEx and GetFileInformationByHandle, in
+# Storage_FileSystem); and confinement's job object and process mitigation
+# policies (design 0010, "Windows"): JobObjects and Threading for the calls,
+# Security for CreateJobObjectW's attributes, Foundation for HANDLE, and
+# SystemServices for the policies' structures, whose size the calls are
+# checked against.
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = [
     "Win32_Foundation",

@@ -18,6 +18,7 @@ const { buildStreams } = require('./streams');
 const { buildRadicleReads } = require('./radicle-reads');
 const { buildRadicleNetwork } = require('./radicle-network');
 const { buildRadicleStats } = require('./radicle-stats');
+const { buildRadicleImport } = require('./radicle-import');
 
 const REFERENCE_COMMIT = 'fb540328162839e68150fe2c5e517edb86734d1c';
 const OUTPUT = path.resolve(__dirname, '..');
@@ -548,6 +549,9 @@ async function main() {
     // Design 0008's `rad.stats`: the design's result, with main's peer
     // count today.
     'radicle-stats.json': await buildRadicleStats(reference.checkout, reference.meta),
+    // Design 0008's import, from main's GitHub bridge over a scripted
+    // add-on, and the service's answers.
+    'radicle-import.json': await buildRadicleImport(reference.checkout, reference.meta),
   };
   // Check every deterministic file before doing the more expensive fixture checks.
   for (const [filename, contents] of Object.entries(deterministic)) {
