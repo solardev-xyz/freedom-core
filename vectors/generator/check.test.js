@@ -538,7 +538,7 @@ test('chain replay fails loudly on unscripted I/O', async () => {
   await assert.rejects(chainReplay.runScenario(REFERENCE, FakeTimers, myotis), /unscripted Myotis account on chain 100/);
   const colibri = structuredClone(chainDefinition('router-colibri-deadline'));
   delete colibri.world.colibri;
-  await assert.rejects(chainReplay.runScenario(REFERENCE, FakeTimers, colibri), /unscripted Colibri eth_call/);
+  await assert.rejects(chainReplay.runScenario(REFERENCE, FakeTimers, colibri), /unscripted Colibri eth_getBalance/);
   const dns = structuredClone(chainDefinition('blockscout-redirect-dns-fails'));
   delete dns.world.dns;
   await assert.rejects(chainReplay.runScenario(REFERENCE, FakeTimers, dns), /undeclared DNS name nowhere\.example/);

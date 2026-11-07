@@ -382,7 +382,8 @@ fn colibri_faults_back_its_method_off_read_or_not() {
     chain["prover"] = json!({ "endpoint": "p1", "zk": true });
     configure(&mut core, 2, &[chain]);
     let fault = json!({ "result": { "failure": "error", "fault": true } });
-    let call_read = read("eth_call", json!([{ "to": ADDRESS }, "latest"]));
+    // An account read: Colibri serves no call (main's #1046).
+    let call_read = read("eth_getCode", json!([ADDRESS, "latest"]));
     core.send(&request(3, "chain.request", call_read.clone()));
     let (got, seen) = serve(&mut core, 3, |request| match request["method"].as_str() {
         Some("shell.verified") => Some(fault.clone()),
@@ -1477,6 +1478,8 @@ fn arrays_are_never_proofs_that_nothing_was_sent() {
         chain
     };
     let call_read = read("eth_call", json!([{ "to": ADDRESS }, "latest"]));
+    // Colibri serves no call (main's #1046): an account read reaches it.
+    let colibri_read = read("eth_getBalance", json!([ADDRESS, "latest"]));
     for (chain, call, result) in [
         // A Direct attempt: `[true]` for `{ not_sent: true }`.
         (direct.clone(), broadcast(4), json!([true])),
@@ -1506,12 +1509,12 @@ fn arrays_are_never_proofs_that_nothing_was_sent() {
         ),
         (
             colibri.clone(),
-            request(4, "chain.request", call_read.clone()),
+            request(4, "chain.request", colibri_read.clone()),
             json!({ "revert": ["0x12"] }),
         ),
         (
             colibri,
-            request(4, "chain.request", call_read.clone()),
+            request(4, "chain.request", colibri_read),
             json!([true]),
         ),
     ] {
@@ -1982,6 +1985,12 @@ fn a_null_member_of_another_shape_is_malformed() {
         "chain.request",
         read("eth_call", json!([{ "to": ADDRESS }, "latest"])),
     );
+    // Colibri serves no call (main's #1046): an account read reaches it.
+    let colibri_read = request(
+        4,
+        "chain.request",
+        read("eth_getBalance", json!([ADDRESS, "latest"])),
+    );
     let mut cases = Vec::new();
     for extra in [
         "uncertain",
@@ -2017,7 +2026,7 @@ fn a_null_member_of_another_shape_is_malformed() {
         json!({ "result": "0x01", "revert": null }),
         json!({ "revert": null }),
     ] {
-        cases.push((colibri.clone(), call_read.clone(), shape));
+        cases.push((colibri.clone(), colibri_read.clone(), shape));
     }
     for (chain, call, shape) in cases {
         let (_root, mut core) = configured(chain);

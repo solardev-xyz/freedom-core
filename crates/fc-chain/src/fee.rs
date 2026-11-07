@@ -15,7 +15,8 @@
 //! - **The headroom:** every tip floored at [`MIN_PRIORITY_FEE_WEI`];
 //!   `maxFeePerGas = 2·base + tip`, `effectiveGasPrice = base + tip`; a
 //!   legacy gas price ⌊G·125/100⌋ + the floor.
-//! - Decimal strings; `verified` for myotis, colibri and quorum. The
+//! - Decimal strings; `verified` for myotis and quorum (not colibri, which
+//!   can't prove eth_gasPrice: main's #1046). The
 //!   machine unverifies a quorum's quote when its m is 1 (deviation
 //!   `singleton-quorum`), and marks a Myotis quote priced from a block the
 //!   read path read ([`FeeQuote::priced_from`]).
@@ -323,7 +324,9 @@ impl QuoteValues {
     /// with `maxFeePerGas = 2·base + tip` and `effectiveGasPrice = base +
     /// tip`, or legacy at ⌊G·125/100⌋ + the floor.
     pub fn quote(&self, source: &str) -> FeeQuote {
-        let verified = matches!(source, "myotis" | "colibri" | "quorum");
+        // Not Colibri: it can't prove eth_gasPrice, which it doesn't serve
+        // (main's #1046), so a quote of its would rest on one public RPC.
+        let verified = matches!(source, "myotis" | "quorum");
         let source = source.to_owned();
         match &self.priced {
             Priced::Eip1559 { base, tip } => FeeQuote::Eip1559 {

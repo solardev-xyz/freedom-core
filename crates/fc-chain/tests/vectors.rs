@@ -7,22 +7,22 @@
 
 use fc_chain::{
     ANT_EXCLUDE_SOURCES, ANT_INCLUDE_SOURCES, ANT_LOG_SCAN_SHRINK_NEEDLES, AnswerError,
-    AttemptClass, BLOCKSCOUT, BLOCKSCOUT_MAX_PAGES, BlockscoutError, ERC20_TRANSFER_TOPIC,
-    ErrorRank, FeeBlock, FeeOutcome, JSON_PARSE_FAILURE, JsString, LOG_INDEX_ABORT_COOLDOWN_MS,
-    LOG_INDEX_CHAIN_ID, LOG_INDEX_DISAGREEMENT_COOLDOWN_MS, LOG_INDEX_PAIR_MALFORMED_COOLDOWN_MS,
-    LOG_INDEX_TAIL_BLOCKS, LOG_INDEX_TOKEN, LOG_RANGE_CAP_TTL_MS, LOG_RANGE_REFUSAL_CODE,
-    LOG_SCAN_COOLDOWN_MS, LOG_SCAN_QUORUM_ROUNDS, LOG_SCAN_QUORUM_TIMEOUT_MS,
-    LOG_TRUNCATION_MIN_SPAN, LOG_TRUNCATION_TAIL_BLOCKS, LogIndexFilter, MAX_COOLDOWN_MS,
-    MAX_DECIMAL_BITS, MAX_MYOTIS_REFUSAL_MESSAGE, MAX_PAGE_SIZE, MIN_COOLDOWN_MS,
-    MYOTIS_BLOB_FIELDS, MYOTIS_NOT_READY, MyotisFailure, MyotisOperation, Outcome, PageReply,
-    Party, RATE_LIMIT_COOLDOWN_MS, READ_METHODS, ReceivedError, RefusalReason, SINGLE_NODE_METHODS,
-    ScanStep, SourceFailure, StableDigest, TransferScan, TxHash, agreed_rpc_logs,
-    ant_shrinks_log_scan_on, blockscout_transfer, broadcast_failure_text, canonical_log,
-    classify_broadcast_answer, combine_fee_quotes, combine_last_resorts, cooldown_from,
-    decode_answer, fee_quote, fee_quote_failure_text, fee_quote_values, is_js_whitespace,
-    is_read_method, log_index_filter, log_query_span, log_range_refusal_text, log_scan_range_cap,
-    logs_agree, myotis_answer, myotis_operation, myotis_trust, no_source_left_text,
-    normalize_params, rank_log_scan_error, request_failure_text, rpc_transfer,
+    AttemptClass, BLOCKSCOUT, BLOCKSCOUT_MAX_PAGES, BlockscoutError, COLIBRI_UNPROVEN_METHODS,
+    ERC20_TRANSFER_TOPIC, ErrorRank, FeeBlock, FeeOutcome, JSON_PARSE_FAILURE, JsString,
+    LOG_INDEX_ABORT_COOLDOWN_MS, LOG_INDEX_CHAIN_ID, LOG_INDEX_DISAGREEMENT_COOLDOWN_MS,
+    LOG_INDEX_PAIR_MALFORMED_COOLDOWN_MS, LOG_INDEX_TAIL_BLOCKS, LOG_INDEX_TOKEN,
+    LOG_RANGE_CAP_TTL_MS, LOG_RANGE_REFUSAL_CODE, LOG_SCAN_COOLDOWN_MS, LOG_SCAN_QUORUM_ROUNDS,
+    LOG_SCAN_QUORUM_TIMEOUT_MS, LOG_TRUNCATION_MIN_SPAN, LOG_TRUNCATION_TAIL_BLOCKS,
+    LogIndexFilter, MAX_COOLDOWN_MS, MAX_DECIMAL_BITS, MAX_MYOTIS_REFUSAL_MESSAGE, MAX_PAGE_SIZE,
+    MIN_COOLDOWN_MS, MYOTIS_BLOB_FIELDS, MYOTIS_NOT_READY, MyotisFailure, MyotisOperation, Outcome,
+    PageReply, Party, RATE_LIMIT_COOLDOWN_MS, READ_METHODS, ReceivedError, RefusalReason,
+    SINGLE_NODE_METHODS, ScanStep, SourceFailure, StableDigest, TransferScan, TxHash,
+    agreed_rpc_logs, ant_shrinks_log_scan_on, blockscout_transfer, broadcast_failure_text,
+    canonical_log, classify_broadcast_answer, combine_fee_quotes, combine_last_resorts,
+    cooldown_from, decode_answer, fee_quote, fee_quote_failure_text, fee_quote_values,
+    is_js_whitespace, is_read_method, log_index_filter, log_query_span, log_range_refusal_text,
+    log_scan_range_cap, logs_agree, myotis_answer, myotis_operation, myotis_trust,
+    no_source_left_text, normalize_params, rank_log_scan_error, request_failure_text, rpc_transfer,
     rpc_transfer_log_well_formed, safe_error_message, source_order, source_serves_method,
     stable_digest, stable_value, transaction_hash, transfers_json, unsupported_read_method_text,
 };
@@ -352,12 +352,15 @@ fn fee_quotes() {
             Some(other) => panic!("unknown deviation {other}"),
         }
         // A case main's #749 changes records the pinned router's outcome.
+        // Main's #1046 (`colibri-unproven`) also changes Colibri's: it is
+        // no longer verified.
         if case.get("patches").is_some() {
-            assert_eq!(
-                case["patches"],
-                serde_json::json!(["fee-headroom"]),
-                "{name}"
-            );
+            let patches = if source == "colibri" {
+                serde_json::json!(["fee-headroom", "colibri-unproven"])
+            } else {
+                serde_json::json!(["fee-headroom"])
+            };
+            assert_eq!(case["patches"], patches, "{name}");
             assert!(case.get("unpatched").is_some(), "{name}");
         }
     }
@@ -547,6 +550,20 @@ fn read_methods() {
         let source = str_of(capability, "source");
         let unsupported = strings(&capability["unsupported"]);
         assert_eq!(capability["opt_in"] == true, source == BLOCKSCOUT);
+        // Main's #1046 (`colibri-unproven`) changes Colibri's alone: it
+        // serves none of eth_gasPrice, eth_feeHistory, eth_call and
+        // eth_estimateGas.
+        if source == "colibri" {
+            assert_eq!(
+                capability["patches"],
+                serde_json::json!(["colibri-unproven"])
+            );
+            let mut pinned = strings(&capability["unpatched"]);
+            pinned.extend(COLIBRI_UNPROVEN_METHODS);
+            assert_eq!(pinned, unsupported);
+        } else {
+            assert!(capability.get("patches").is_none(), "{source}");
+        }
         for probe in probes {
             let method = str_of(probe, "method");
             assert_eq!(
