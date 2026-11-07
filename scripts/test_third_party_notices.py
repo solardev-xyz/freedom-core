@@ -114,7 +114,7 @@ class Binaries(unittest.TestCase):
     def test_every_binary_names_its_targets_and_native_code(self):
         self.assertEqual(set(notices.TARGETS), set(notices.WORKSPACES))
         self.assertEqual(set(notices.NATIVE), set(notices.WORKSPACES))
-        self.assertLessEqual(set(notices.LINKS_CHECKED), set(notices.WORKSPACES))
+        self.assertEqual(set(notices.LINKS_CHECKED), set(notices.WORKSPACES))
 
     def test_the_services_link_glibc_on_linux_and_the_core_musl(self):
         linux = lambda binary: [t for t in notices.TARGETS[binary] if "linux" in t]
@@ -143,6 +143,11 @@ class Binaries(unittest.TestCase):
         libgit2 = next(e for b, e in bundled.items() if b.startswith("libgit2-sys "))
         self.assertIn("LGPL-2.1-or-later", libgit2.expression)
         self.assertIn("freedom-core", libgit2.source)
+
+    def test_ipfsd_lists_sqlite(self):
+        bundled = [notices.Native(*e) for e in notices.NATIVE["freedom-ipfsd"] if len(e) > 3]
+        self.assertEqual([e.bundled_by.split(" ")[0] for e in bundled], ["libsqlite3-sys"])
+        self.assertIn("public domain", bundled[0].expression)
 
 
 class Bundled(unittest.TestCase):
