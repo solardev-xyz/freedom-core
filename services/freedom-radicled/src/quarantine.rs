@@ -212,6 +212,7 @@ pub fn remove(
         }
         testhooks::at_write_start();
         let removed = removal(&embedded, &handle.repositories, removing, &mut record);
+        testhooks::at_write_call_end();
         // Removed, nothing to remove, or a failure that keeps the record.
         ticket.proven();
         answer(&conn, ticket.id, removed);

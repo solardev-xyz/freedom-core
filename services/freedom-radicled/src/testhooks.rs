@@ -48,15 +48,25 @@
 //!   libradicle call that doesn't check it; with `until:<path>`, it holds
 //!   it, whatever its token, until a file exists at `<path>` or for 30 s,
 //!   so that the test releases it (a path the confinement grants: in the
-//!   service's own `HOME`); with `panic`, it panics there. Once the call
-//!   has returned and the write's outcome is marked and answered, it logs
+//!   service's own `HOME`); with `panic`, it panics there. With
+//!   `after:<path>` it lets the call run, however long it takes, and holds
+//!   the write once the call has returned, before its outcome is marked
+//!   and answered, logging `test hook: libradicle's call has returned`,
+//!   until a file exists at `<path>` or for 30 s. Once the call has
+//!   returned and the write's outcome is marked and answered, it logs
 //!   `test hook: the write has returned`, so that a test waits for the
 //!   write's end instead of guessing how long a write takes.
-//! - `FREEDOM_RADICLED_TEST_HOLD_REPAIR=<ms>` holds each turn of an online
-//!   repair that many milliseconds, with the node held shared, just before
-//!   its unit, whatever the stop, as a slow unit holds the writer
-//!   ([`crate::repair`]). Each logs `test hook: a repair turn holds the
-//!   node`.
+//! - `FREEDOM_RADICLED_TEST_HOLD_REPAIR` holds each turn of an online
+//!   repair, with the node held shared, just before its unit, whatever the
+//!   stop, as a slow unit holds the writer ([`crate::repair`]): with a
+//!   number, that many milliseconds; with `until:<path>`, until a file
+//!   exists at `<path>` or for 30 s. Each logs `test hook: a repair turn
+//!   holds the node`.
+//! - With `FREEDOM_RADICLED_TEST_HOLD_WRITE` or
+//!   `FREEDOM_RADICLED_TEST_HOLD_REPAIR` set, the stop logs `test hook: the
+//!   stop has fenced the pools` once every pool is fenced, before their
+//!   drain ([`crate::pools`]): a test that releases held work only then
+//!   knows the stop met it.
 //!
 //! **Hermetic by construction:** a build with the feature never reaches
 //! off this host, whatever a test asks of it.
@@ -202,6 +212,15 @@ pub fn hold_work(cancel: &libradicle::CancelToken) {
     let _ = cancel;
 }
 
+/// Holds the calling thread until a file exists at `release`, or for 30 s.
+#[cfg(feature = "testhooks")]
+fn until_released(release: &str) {
+    let until = std::time::Instant::now() + Duration::from_secs(30);
+    while std::time::Instant::now() < until && !std::path::Path::new(release).exists() {
+        std::thread::sleep(Duration::from_millis(5));
+    }
+}
+
 /// Just past a write's mutation start: holds it, or panics, if asked.
 // The panic is the fault this hook injects, and only with the feature.
 #[allow(clippy::panic)]
@@ -213,13 +232,25 @@ pub fn at_write_start() {
             panic!("test hook: a panic past the write's start");
         }
         if let Some(release) = hold.strip_prefix("until:") {
-            let until = std::time::Instant::now() + Duration::from_secs(30);
-            while std::time::Instant::now() < until && !std::path::Path::new(release).exists() {
-                std::thread::sleep(Duration::from_millis(5));
-            }
+            until_released(release);
         } else if let Ok(ms) = hold.parse() {
             std::thread::sleep(Duration::from_millis(ms));
         }
+    }
+}
+
+/// Once a write's libradicle call has returned, before its outcome is
+/// marked and answered: holds it, if asked (`after:<path>`).
+pub fn at_write_call_end() {
+    #[cfg(feature = "testhooks")]
+    if let Ok(hold) = std::env::var("FREEDOM_RADICLED_TEST_HOLD_WRITE")
+        && let Some(release) = hold.strip_prefix("after:")
+    {
+        fc_service::log::info(
+            "test hook: libradicle's call has returned",
+            serde_json::json!({}),
+        );
+        until_released(release);
     }
 }
 
@@ -235,12 +266,31 @@ pub fn at_write_end() {
 /// Before an online repair's unit, with the node held: holds it, if asked.
 pub fn hold_repair_turn() {
     #[cfg(feature = "testhooks")]
-    if let Some(ms) = millis("FREEDOM_RADICLED_TEST_HOLD_REPAIR") {
+    if let Ok(hold) = std::env::var("FREEDOM_RADICLED_TEST_HOLD_REPAIR") {
         fc_service::log::info(
             "test hook: a repair turn holds the node",
             serde_json::json!({}),
         );
-        std::thread::sleep(Duration::from_millis(ms));
+        if let Some(release) = hold.strip_prefix("until:") {
+            until_released(release);
+        } else if let Ok(ms) = hold.parse() {
+            std::thread::sleep(Duration::from_millis(ms));
+        }
+    }
+}
+
+/// The stop, once every pool is fenced and before their drain: logs it,
+/// if `FREEDOM_RADICLED_TEST_HOLD_WRITE` or
+/// `FREEDOM_RADICLED_TEST_HOLD_REPAIR` is set.
+pub fn at_fence() {
+    #[cfg(feature = "testhooks")]
+    if std::env::var_os("FREEDOM_RADICLED_TEST_HOLD_WRITE").is_some()
+        || std::env::var_os("FREEDOM_RADICLED_TEST_HOLD_REPAIR").is_some()
+    {
+        fc_service::log::info(
+            "test hook: the stop has fenced the pools",
+            serde_json::json!({}),
+        );
     }
 }
 
