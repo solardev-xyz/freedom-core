@@ -23,7 +23,7 @@
 - **HTTP through main:** the C core is already sans-I/O: each step returns the data it needs. The service asks main for each piece with `shell.colibri_fetch`, naming a server *type*, a verb, a path and a payload, never a URL.
   - Main admits only the request shapes the open operation allows ([The fetch contract](#the-fetch-contract)) and refuses the rest.
   - Main picks the servers and fetches through the session's network stack. It reserves the body's maximum from a browser-wide pool before reading, reads the body whole, and streams it to the service over the pipe ([Bodies](#bodies)).
-- **The build ([Q20](#open-questions)):** upstream's Rust crate pulls in tokio and reqwest, and its build script downloads prebuilt archives when it can't run CMake. The choice is between working through public upstream PRs (proposed: small PRs that gate the HTTP client behind a feature and make the build offline and pinned, with a pinned fork commit until they are released) and keeping a vendored copy of the C sources in this repository.
+- **The build ([Q20](#open-questions)):** upstream's Rust crate pulls in tokio and reqwest, and its build script downloads prebuilt archives when it can't run CMake. Its C API also can't be built without the prover, which includes a PolyForm-labelled header and proves locally when the remote prover fails. So the build must be verifier-only ([The verifier-only build](#the-verifier-only-build)). The choice is between working through public upstream PRs (proposed: small PRs that gate the HTTP client behind a feature, make the build offline and pinned, and allow a verifier-only build, with a pinned fork commit until they are released) and keeping a vendored copy of the C sources, with that change, in this repository.
 - **The protocol:** the core's side doesn't change. 0005's `{ colibri: "request" }` and 0004's `{ colibri: "resolve" }` and `{ colibri: "reverse" }` keep their wire shape and outcomes, and the core's fault, capacity and #752 rules stay as they are. What changes is what main runs for them: a client of the service instead of the WASM worker host. A step marker tells main which request was inside the C core when a process died. That attribution is step-local and best-effort: it is the process's own evidence, which a taken-over process could forge, and a crash that surfaces after its step has ended names nobody ([The step marker](#the-step-marker)).
 - **The proof:** `vectors/colibri.json`, recorded from the JS reference through a recording runtime around the real `c4w.wasm`. The native build must reproduce every step's status text byte for byte, every data request and every storage write.
 - **Running it:** budgets per process (memory, open requests, bodies, storage) and browser-wide (processes, resident memory, directories, main's fetch pool), a kill one second past a request's deadline while it is inside the C core, lazy restarts with 0007's back-off, and a recycle above the memory budget.
@@ -88,7 +88,15 @@
 8. **F-8: upstream's license labels disagree.**
    - The README makes everything except `src/server/` MIT (`README.md:259–269`), so `src/chains/eth/server/` is MIT by that text.
    - At `v3.0.3`, 12 of that directory's 32 files carry `SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0`. Of the rest, 5 say MIT and 15 carry no identifier. Two OP files had the same mismatch before #401.
-   - No build of ours compiles any of them, and COL-2's gate checks that ([Licenses](#licenses)).
+   - The prover includes one of them, `period_store_files.h`, so the build must leave the prover out ([The verifier-only build](#the-verifier-only-build)). Then no build of ours compiles or includes any of them, and COL-2's gate checks that ([Licenses](#licenses)).
+9. **F-9: a failed remote proof is proven locally.**
+   - When the prover request of a proofable read fails (an HTTP error, every server failing), the RPC context creates a local prover and proves the read itself (`colibri_common.c:504–511`). `c4w.wasm` links the prover (`bindings/emscripten/CMakeLists.txt:76`).
+   - The local prover then fetches what a prover server would, from the `eth_rpc` and `beacon_api` hosts: the caller's own request, with PAP undone. It runs that work in main's WASM worker.
+   - The proof is still verified, so the label stays right; the cost is privacy and memory.
+   - Found by reading the code; COL-1's every-server-fails cases show it running. The service drops it (deviation `no-local-proving`).
+10. **F-10: the store keeps what requests touched.**
+    - Besides sync state (`states_<chain>`, `sync_<chain>_<period>`), the C core stores verified headers (`headers_<chain>`, `header_cache.c:239`), the prover's transaction index (`tx_cache_<chain>`, `pap_tx_cache.c:56`), contract code by its hash (`code_<hash>`, `eth_account.c:170`), and, for each contract an `eth_call` ran, its proven storage (`call_<chain>_<address>`, `eth_call_account.c:205–207`, `verify_call.c:742`).
+    - So the store shows which contracts were called. Today private windows share it, and so does the service ([The store](#the-store-and-the-lifetime-lock)).
 
 ## Threat model
 
@@ -114,13 +122,24 @@ Stage 1 trusts main (0001). The attacker here controls the verifier's input: a m
 
 ### What a taken-over verifier keeps
 
-The fetch contract is the whole of its reach. Within it, a process running injected code can still:
-- **pick the entries:** ask for any entry its open operations admit, as often as the fetch budgets allow (64 open per process, 1,024 per request);
-- **fill the free fields:** sync periods, slots, block roots, the prover GET's block, the prover POST's `c4` and `last_block_hash`, and the state reads' addresses and slots, each of the entry's form and length. Main can't tell an honest value from one chosen to carry data, so a few bytes per fetch can reach that type's hosts;
-- **choose among the servers:** `exclude_mask` skips servers in the type's list, so it can aim a fetch at one of them, a configured loopback prover included (`network-registry.js:253–256` accepts https or loopback provers);
+The fetch contract is the whole of its reach, and every field in it is either derived by main or one of the free fields below. Within it, a process running injected code can still:
+- **choose when and how often:** ask for any variant its open operations allow, as often as the fetch budgets allow (64 open per process, 1,024 per request), at times it picks;
+- **fill the free fields.** Main can't tell an honest value from one chosen to carry data, so each fetch can carry a few bytes, to the hosts of its type:
+
+| Free field | Where | Its channel |
+|---|---|---|
+| `c4`, the client state (at most 41 bytes), in a prover POST or a cached GET's path | every prover variant | the prover |
+| `last_block_hash` (32 bytes) | every prover POST | the prover |
+| `std` or `zk`, and `zk_proof` | prover variants of a ZK client (the F-4 fallback drops ZK) | the prover |
+| `colibri_proofCall`'s access list: addresses and storage keys, up to the payload cap | `eth_call`, `eth_estimateGas` | the prover |
+| the storage reads' and code reads' addresses and keys | `eth_call`, `eth_estimateGas` | the `eth_rpc` hosts |
+| `from_block`, and the block numbers of the receipts and block proofs | transaction lookups | the prover |
+| the sync period and count, the bootstrap root, the slot | every operation | the beacon and checkpoint hosts, and the prover as the last server of both |
+
+- **choose among the servers:** `exclude_mask` skips servers in the type's list, so it can aim a fetch at one of them. That includes a configured loopback prover (`network-registry.js:253–256` accepts https or loopback provers), which gets only the prover variants;
 - **hold its operations open** until their deadlines, and its body reservations with them.
 
-It can't send another verb, path shape, header or host, or anything while it has no open operation, or reuse one operation's binding for another.
+It can't send another verb, path shape, header, cache age or host. It can't send anything while it has no open operation, and it can't use one operation's variants for another.
 
 ## The process
 
@@ -144,7 +163,7 @@ The registry takes user chains and prover coverage with no bound on their number
   - **If none is idle,** the request fails at once with `Colibri service busy`, built as `Colibri service unavailable` is. It is neither a fault nor a capacity failure, nothing counts it toward restarts or the backoff, and the read falls to its next source. The request holds its slot until that answer, as physical completion requires.
   - **A recycle** ([Crashes](#crashes-overruns-and-restarts)) counts toward the limit until the old process exits. Main spawns the successor at once if the limit has room, by retiring an idle process if it must; otherwise when the old one exits. Until then, that chain's new requests get `Colibri service busy`.
 - **Checkpoint processes:** at most 2 at once (one per Myotis chain today). A third check fails at once with `CHECKPOINT_UNAVAILABLE`, main's class for a check that couldn't run.
-- **Resident memory:** at most 3 × 256 + 2 × 128 = 1,024 MiB of budget browser-wide. Each process holds to its own budget as [Budgets](#budgets) says: it reads its memory after each step, and an OS-enforced hard limit is Q17.
+- **Resident memory:** at most 3 × 256 + 2 × 128 = 1,024 MiB of budget browser-wide. Each process holds to its own budget as [Budgets](#budgets) says: it reads its memory after each step. An OS-enforced hard limit is [0007's open question 9](0007-ipfs-service.md#open-questions) ("An OS memory limit"), which this service shares.
 - **Directories:** at most 6 chain directories under `<userData>/colibri/`, so 384 MiB of store at most.
   - Main sets each directory's modification time when it spawns that chain's process.
   - Before a spawn would make a seventh directory, main deletes the oldest directory whose process isn't live. It is a cache, and that chain bootstraps again.
@@ -172,7 +191,7 @@ Every part exists in `fc-service` today. fc-service's own confinement tests and 
 
 - **Plain threads, no async runtime:** fc-service's connection threads, and one *verifier thread* that makes every call into the C core. The C core keeps process-wide caches, some without a lock (`src/util/json_validate.c:272`), so one thread per process makes those calls. That is today's concurrency too: one single-threaded WASM instance per chain.
 - **A request** is a context in the C core. It runs one step at a time on the verifier thread, then waits for main's answers to its data requests while other requests step.
-- **No clock in the C core:** the freshness bound (`now − 60 s`) comes from main in each request, as the JS binding computes it (`cjs/index.js:135`).
+- **The clock:** the freshness bound (`now − 60 s`) comes from main in each request, as the JS binding computes it (`cjs/index.js:135`). The C core reads the clock itself only for the transaction index's age (`pap_tx_cache.c`, `verify_pap_tx.c:197`), which confinement doesn't affect.
 - **Fixed flags:** PAP (`privacy_mode: 'basic'`), verified-only, remote prover mode, the 60 s freshness window, as `colibri-worker.js` pins them. ZK is per client.
 - **Panics:** the service's own Rust code forbids them (AGENTS rule 6). An abort in the C core ends the process like a crash.
 
@@ -182,7 +201,7 @@ Every part exists in `fc-service` today. fc-service's own confinement tests and 
 - **Writes** are a temporary file, fsync and rename, with stale temporary files swept at start. Today's `createDiskStorage` writes a temporary file and renames it, and sweeps at start, but doesn't fsync (`colibri-worker.js:84–109`). The fsync is new.
 - **Bounds:** a key is `[A-Za-z0-9_]{1,100}`; a value at most 1 MiB (a sync committee is 49,152 bytes); a directory at most 64 MiB. A write past a bound fails, and the C core sees a failed write.
 - **The lock:** fc-service's gate, keyed by the chain's directory, so a replacement never writes while its predecessor still can. Today a draining worker and its replacement share the store.
-- **What it holds:** public chain data alone, under two kinds of key, `states_<chain>` and `sync_<chain>_<period>` (`sync_committee_state.c`), and nothing a request names. So private windows share it, as they do today.
+- **What it holds:** sync state (`states_<chain>`, `sync_<chain>_<period>`), verified headers, the transaction index, contract code by hash, and the proven storage of each contract an `eth_call` ran (F-10). Some of that shows which contracts were called. Private windows share it, as they do today; a store per private window, or none for them, would be a change of its own.
 - **No other store:** the C core is built with its own file store off (`FILE_STORAGE`, which writes to the working directory), and the service gives it its store before `hello`.
 - **0013's move:** `colibri/` isn't in 0013's list of entries that move into `<profile>/freedom/`. As a cache it can join the list, or be left and rebuilt ([Amendments](#amendments)).
 
@@ -198,16 +217,42 @@ Every part exists in `fc-service` today. fc-service's own confinement tests and 
 - **A C API usable without WASM** (`src/api/colibri.h`): `c4_create_rpc_ctx`, `c4_rpc_execute_json_status`, `c4_req_set_response`, `c4_req_set_error`, `c4_free_rpc_ctx`, the verify and decode calls, `c4_get_method_support`, `c4_set_storage_config` and `c4_get_current_version_number`. It is sans-I/O: a step returns the data it needs as JSON.
 - **A Rust crate,** `bindings/rust` (0.1.0), with two layers:
   - safe context types (`RpcCtx`, `Verifier`) over the C API, and `unsafe fn` answers (`req_set_response`, `req_set_error`), unsafe because they take the C core's request pointer as an integer;
-  - a high-level `Colibri` client that fetches with reqwest on tokio. tokio, reqwest, futures and async-trait are unconditional dependencies (`Cargo.toml:41–45`); only the OP module is a feature (`op`, default on).
-- **Its build script** (`build.rs`) links archives from `COLIBRI_LIB_DIR`; or, inside an upstream checkout, runs CMake with `CURL`, `CLI` and `HTTP_SERVER` off (`:212–216`), writing the CMake tree into the checkout (`build-rust/<target>`, `:187`); or else downloads a prebuilt archive from GitHub releases with `curl`, unverified (`:333–393`).
+  - a high-level `Colibri` client that fetches with reqwest on tokio. tokio, reqwest, futures and async-trait are unconditional dependencies (`Cargo.toml:41–45`); only the OP module is a feature (`op`, default on);
+  - a `Prover` over the prover's C API (`src/core/prover.rs`), always built.
+- **Its build script** (`build.rs`) links archives from `COLIBRI_LIB_DIR`; or, inside an upstream checkout, runs CMake with `CURL`, `CLI` and `HTTP_SERVER` off (`:212–216`) and builds the `prover`, `eth_prover` and `api_ffi` targets too (`:229`), writing the CMake tree into the checkout (`build-rust/<target>`, `:187`); or else downloads a prebuilt archive from GitHub releases with `curl`, unverified (`:333–393`).
 - **The version number** provers route proofs by comes from `git describe` at configure time (`CMakeLists.txt:27`), or from `C4_VERSION`. A Cargo git checkout need not carry the tags, and a vendored copy has no `.git` at all, so a build that doesn't set `C4_VERSION` can report the wrong version, and a prover then sends a proof format the verifier can't read.
+
+### The verifier-only build
+
+Both options need it, and COL-2 can't start without it. At `v3.0.3` the C API can't be built without the prover, and the prover breaks the license gate and adds a behavior this design doesn't want.
+
+**Why it's needed:**
+- **The C API needs the prover.** `src/api` is added only when both `VERIFIER` and `PROVER` are on (`src/CMakeLists.txt:31–33`). The RPC context calls `c4_prover_create` to prove locally (`colibri_common.c:504–511`, `:620`, `:755`). The crate's build script builds `prover`, `eth_prover` and `api_ffi` (`build.rs:229`), and the crate wraps a `Prover` (`src/core/prover.rs`).
+- **The prover includes a PolyForm header.** `eth_prover` always compiles `prover/historic_proof.c` and `prover/historic_proof_zk.c` (`src/chains/eth/CMakeLists.txt:187–215`). Both include `../server/period_store_files.h` (`historic_proof.c:26`, `historic_proof_zk.c:24`), whose header is `PolyForm-Noncommercial-1.0.0`, and `historic_proof.c` also includes `../server/eth_clients.h`, which has no identifier. So even with `HTTP_SERVER` off, the dependency manifest lists a PolyForm header, and COL-2's gate fails.
+- **The prover is also a behavior:** when the remote proof request fails, the RPC context proves locally from the `eth_rpc` and `beacon_api` hosts (F-9).
+
+No verifier, util, API or chain-verifier source includes a server header at `v3.0.3`; only those two prover files do.
+
+**The change:**
+1. `src/api` and `api_ffi` build with `VERIFIER=ON` and `PROVER=OFF`.
+2. In `colibri_common.c`, the local-proving paths go under `#ifdef PROVER`. Without the prover:
+   - a remote proof's error ends the request with that error's text (deviation `no-local-proving`);
+   - a context in local or hybrid mode is refused when it is created.
+3. In the Rust crate, a `prover` feature (default on) covers `Prover`, the prover FFI and the `prover` and `eth_prover` targets. With `default-features = false`, `build.rs` builds `verifier`, `eth_verifier` and `api_ffi` with `PROVER=OFF`.
+
+Moving `period_store_files.h`'s constants (file-name strings) under MIT would fix the license gate alone. But it would leave the prover compiled, and F-9's fallback with it, so this design doesn't take that route.
+
+**Who makes it:** under Option A, a fourth upstream PR, carried in the pinned fork commit until it is released. Under Option B, a patch to the vendored copy, and our bindings declare no prover function.
+
+**COL-2 depends on it:** COL-2 starts once the change is in the pinned commit or the vendored copy, and its CI builds with `PROVER=OFF`.
 
 ### Option A: public upstream PRs
 
-Three small PRs upstream, each useful to other users of the crate:
+Four small PRs upstream, each useful to other users of the crate:
 1. **An `http` feature, on by default,** around the high-level client and its error variant, so `default-features = false` drops tokio, reqwest, futures and async-trait;
 2. **An offline, reproducible build:** no download unless asked for, the CMake tree under `OUT_DIR` (or a set directory), `C4_VERSION` from the crate's own version, and `FetchContent` pinned by commit with a hash, or overridable from local sources;
-3. **A safe answer API:** pending requests as values tied to their context's lifetime, so a caller can answer one without `unsafe`.
+3. **A safe answer API:** pending requests as values tied to their context's lifetime, so a caller can answer one without `unsafe`;
+4. **A verifier-only build** ([above](#the-verifier-only-build)): the C API with `PROVER=OFF`, and a `prover` feature in the crate.
 
 Filing two public issues, F-1 (`VerifiedOnly` answering unproofable methods without a proof) and F-6 (the unknown-hash trap), is a separate question, and either option can file them ([Open questions](#open-questions)).
 
@@ -218,18 +263,19 @@ Until they are released, `freedom-colibrid` depends on a fork under `solardev-xy
 
 ### Option B: a vendored copy
 
-The C core at `v3.0.3` and its third-party sources copied into `services/freedom-colibrid/vendor/`, with their licenses, built by our `build.rs` through the `cmake` crate, with our own bindings to the dozen C functions the service calls.
+The C core at `v3.0.3` and its third-party sources copied into `services/freedom-colibrid/vendor/`, with their licenses, and the [verifier-only](#the-verifier-only-build) patch applied, built by our `build.rs` through the `cmake` crate with `PROVER=OFF`, with our own bindings to the dozen C functions the service calls.
 - **Cost:**
   - our own FFI module with `unsafe` (an AGENTS rule 6 exception, each call with a `SAFETY` comment, as `fc-sys`);
-  - every upstream release copied and re-checked by hand, CMake's generated chain headers included (`src/chains/chains.cmake:50`, `:116`);
+  - every upstream release copied and re-checked by hand, CMake's generated chain headers included (`src/chains/chains.cmake:50`, `:116`), and the verifier-only patch carried forward;
   - about 47k lines of C and headers in `src/` outside the server, the CLI and the ZK prover (93 source files) plus `libs/crypto`, blst, evmone and intx in our tree.
 - **Gain:** nothing upstream needs to agree to; full control of flags and pins.
 
 ### Licenses
 
-Both options build with `HTTP_SERVER` off, so nothing under `src/server/` is compiled. COL-2's license gate checks that against the build's **compiled-source manifest**: every source CMake compiles, from its compile commands, and every header the compiler's dependency files list. The build fails if:
+Both options build with `HTTP_SERVER` off and, through the [verifier-only build](#the-verifier-only-build), with `PROVER` off. Then nothing under `src/server/` or `src/chains/eth/server/` is compiled or included. With the prover on, `period_store_files.h` would be included and the gate would fail. COL-2's license gate checks this against the build's **compiled-source manifest**: every source CMake compiles, from its compile commands, and every header the compiler's dependency files list. The build fails if:
 - **anything under `src/server/` is compiled,** whatever its header says;
-- **anything under `src/chains/eth/server/` is compiled.** It is MIT by the README, but its headers are mixed (F-8), and the verifier needs none of it;
+- **anything under `src/chains/eth/server/` is compiled or included.** It is MIT by the README, but its headers are mixed (F-8), and the verifier needs none of it;
+- **any prover target or source is built** (`src/prover/`, `src/chains/eth/prover/`): the build is verifier-only;
 - **the notice audit fails:** a compiled source or listed header carries an SPDX identifier or license text that isn't one the notices file lists (MIT, Apache-2.0, and the third parties' own). A header naming PolyForm anywhere fails it.
 
 `src/util/version.c`, which is MIT, prints `License: PolyForm Noncommercial 1.0.0` from `c4_print_version`, which only the server and the CLIs call. The service never calls it.
@@ -271,7 +317,7 @@ On fc-service's connection, at the version services speak, with fc-protocol's tw
 
 - **`request`** names main's open `colibri.request` or `colibri.checkpoint` on this process. Main refuses a fetch for anything else, and a fetch whose shape that operation doesn't allow.
 - **`type`:** `prover`, `beacon_api`, `checkpointz` or `eth_rpc`; on a checkpoint process, `checkpointz`, `beacon_api` or `checkpoint_proof`.
-- **`method`** is the C core's verb, `get` or `post`. Main sends the verb the contract's entry has; anything else is refused.
+- **`method`** is the C core's verb, `get` or `post`. Main sends the verb the matching variant has; anything else is refused.
 - **`delay`** stays in the service: it waits before sending the fetch, as `handle_request` waits.
 - **The head's `bytes`** is the body's exact length: main has read it whole before the head goes ([Bodies](#bodies)).
 - **The body** comes as 0009's stream, from main to the service, with a 128 KiB window. The service reserves exactly `bytes` from its own bodies budget before granting credit. A head it can't reserve is answered with `busy`, which the C core sees as a failed fetch (`Colibri fetch busy`).
@@ -367,57 +413,95 @@ For `shell.colibri_fetch`, main does what `fetch_from_servers` does, through the
 
 ### The fetch contract
 
-Today the worker fetches whatever request the WASM instance returns. `fetch_from_servers` upper-cases the verb (`cjs/http.js:29`), joins any path to the type's servers (`:5–14`), sends any payload and follows redirects anywhere. Main replaces that with a closed table of **entries**. It checks each fetch against the entries the fetch's operation allows, and refuses anything else.
+Today the worker fetches whatever request the WASM instance returns. `fetch_from_servers` upper-cases the verb (`cjs/http.js:29`), joins any path to the type's servers (`:5–14`), sends any payload and follows redirects anywhere. Main replaces that with a closed grammar. It checks each fetch against the variants the fetch's operation allows, and refuses anything else.
 
-**The entries,** from what the 3.0.3 verifier asks for:
+**The grammar is the source-level table below, not a recording.**
+- It is derived from every place 3.0.3's verifier-only build makes a data request. With the prover out of the build ([The verifier-only build](#the-verifier-only-build)), this list is complete:
+  - the RPC context's remote proof (`colibri_common.c:477–501`) and its unproven pass-through (`:522–579`);
+  - `pap_request_proof`, `pap_request_get` and `pap_request_eth_rpc` (`pap_req.c:35–176`);
+  - `colibri_proofCall` (`verify_call.c:643–694`);
+  - the code read (`eth_account.c:134–186`) and the storage read (`call_ctx.c:129–240`);
+  - the four sync requests (`sync_committee_state.c:199–221`, `:235–282`, `:299–321`, `:709–750`).
+- A finite COL-1 recording can't prove that table complete. COL-1 checks it from both sides: every request the reference makes in every case must match a variant its operation allows, and every variant must be reached by some case.
+- A version bump re-derives the table from the new sources, as part of the bump.
 
-| Entry | Type | Verb | Path | Payload | `accept`, `max_age` | Body at most |
-|---|---|---|---|---|---|---|
-| `proof` | `prover` | POST | empty | an object with `method`, `params`, `version` (the pin's 196611), and optionally `c4` (the client state, hex), `zk_proof` (`true`, a ZK client only), `include_code`, `logs_completeness` (`true`) and `last_block_hash` (32-byte hex), and nothing else (`pap_req.c:35–38`, `state.c:72–96`) | `ssz`, none | 16 MiB |
-| `proof_get` | `prover` | GET | `proof/<m>/<block>/196611/<std\|zk>/0x<hex>`: `<m>` `eth_getBlockHeader`, `eth_getBlockByNumber` or `eth_getBlockReceipts`; `<block>` a block tag or `0x` hex; the hex the client state; no query (`prover_cache_url.c:35`, `:98–101`) | none | `ssz`, 1 to 86,400 | 16 MiB |
-| `tx_cache` | `prover` | GET | `tx_cache?max_blocks=<n>` or `tx_cache?from_block=<n>&max_blocks=<n>` (`verify_pap_tx.c:63–70`) | none | `ssz`, 1 to 86,400 | 16 MiB |
-| `lc_updates` | `beacon_api` | GET | `eth/v1/beacon/light_client/updates?start_period=<n>&count=<n>` (`sync_committee_state.c:201`) | none | `ssz`, none | 16 MiB |
-| `lc_bootstrap` | `beacon_api` | GET | `eth/v1/beacon/light_client/bootstrap/0x<64 hex>` (`:301`) | none | `ssz`, none | 1 MiB |
-| `finality` | `checkpointz` | GET | `eth/v1/beacon/states/head/finality_checkpoints` (`:235`) | none | `json`, none | 64 KiB |
-| `block_root` | `checkpointz` | GET | `eth/v1/beacon/blocks/<n>/root` (`:709`) | none | `json`, none | 64 KiB |
-| `state_read` | `eth_rpc` | POST | empty | JSON-RPC 2.0, `id` 1: `eth_getCode` `[address, "latest"]` (`eth_account.c:141`), `eth_getProof` `[address, [slot], "latest"]` or `eth_getStorageAt` `[address, slot, "latest"]` (`call_ctx.c:142–144`) | `json`, none | 1 MiB |
-| `checkpoint_proof` | `checkpoint_proof` | main's own | none from the service: main fetches the checkpoint proof from the prover, as `checkpoint-verifier-worker.js` does today | none | main's | 4 MiB |
-| `checkpoint_root` | `checkpointz` (checkpoint process) | GET | the one path today's interception admits, answered from main's quorum (origin, `GET`, the path, at most 8) | none | `json`, none | 64 KiB |
+**The fixed configuration** that the table assumes, as `colibri-worker.js` and the package set it (`cjs/index.js:99–116`, `:239–245`):
+- PAP on (`privacy_mode: 'basic'`) and the remote prover mode;
+- none of `include_code`, `logs_completeness`, oblivious nodes, witness keys, proxy URLs or light-client mode;
+- ZK per client.
 
-- **`<n>`** is a decimal integer within 32 bits (64 for blocks and slots), with no sign and no leading zero.
-- **Hex** has its fixed length where it has one. `c4`, and the client state in `proof_get`, are the client state: at most 41 bytes (`sync_committee.h:39`).
-- **The table is pinned by COL-1:** the generator checks that every request the reference makes, in every case, matches an entry the case's operation allows, and fails otherwise. It also records each entry's largest body. The body numbers above are provisional, and COL-2's rule for budgets applies to them.
-- **Not admitted:**
-  - `rpc_handle_unproofable`'s pass-through of the caller's own call (`colibri_common.c:522–579`): the service refuses those reads first (F-1);
-  - the PAP send path (`verify_pap_tx.c:325`): the router sends no write to Colibri;
-  - the oblivious-node and proxy fields: not exposed.
+Anything those settings would add is refused: the `include_code`, `logs_completeness`, `signers`, `rpc` and `beacon` payload keys, a `?signers=` query, and the oblivious `eth_getProof` storage read (`call_ctx.c:142`).
 
-**What each operation allows** (main derives it from the open operation, never from the service):
-- **`colibri.request { method, params }`:**
-  - the entries COL-1 records for that method, and no others;
-  - in `proof`, a `method` and `params` equal to the operation's own (compared as parsed JSON), or one of the sub-proofs COL-1 records for that method (`eth_getBlockHeader`, `eth_getBlockReceipts`, the transaction lookup's block proof: `call_ctx.c:589`, `verify_pap_tx.c:210–313`), with params of that sub-proof's form;
-  - in `proof_get`, `zk` only on a ZK client;
-  - the `beacon_api` and `checkpointz` entries for any method, since they concern the chain's sync state, not the request.
-- **`colibri.checkpoint`:** `checkpoint_proof` once, then `checkpoint_root`.
-- **The binding is per request:**
-  - a fetch names one open request of its own process;
-  - a request that has ended (replied, cancelled, past its deadline) admits nothing;
-  - one request's binding never admits another's method or params.
+**Shared forms:**
+- **Props:** every prover POST ends with the props enrichment adds (`colibri_common.c:155–175`, `state.c:72–96`), and with nothing else:
+  - `version`: exactly 196611;
+  - optional `c4`: `0x` and the client state, at most 41 bytes (`sync_committee.h:39`);
+  - optional `zk_proof: true`, only on a client main configured with ZK;
+  - optional `last_block_hash`: `0x` and 32 bytes.
+- **The cached GET:** a prover request for `eth_getBlockHeader`, `eth_getBlockByNumber` or `eth_getBlockReceipts`, whose block `B` is a safe token, is rewritten as a GET (`colibri_common.c:113–151`, `prover_cache_url.c:90–118`). A safe token is `latest`, `safe`, `justified`, `finalized`, or `0x` hex of 1 to 64 digits (`prover_cache_url.c:69–88`). The GET is `proof/<m>/<B>/196611/<std|zk>/0x<client state>`:
+  - `zk` only on a ZK client;
+  - no query;
+  - the request's other params dropped;
+  - `max_age` exactly `c4_eth_block_ttl_s(chain, B)` (`prover_cache_url.c:47–62`): for `latest`, half the block time; for `safe` and `justified`, half an epoch; for `finalized`, an epoch; for a number or hash, none;
+  - main computes both the form and the TTL from `B`. A request whose `B` isn't a safe token stays a POST, and only one of the two forms is admitted for a given `B`.
+- **Sync:** any operation may need the chain's sync state, so these are admitted for every operation:
+
+| Variant | Type | Request | Free fields |
+|---|---|---|---|
+| `lc_updates` | `beacon_api` | GET `eth/v1/beacon/light_client/updates?start_period=<n>&count=<n>`, `ssz` | the period and the count, 32-bit decimals |
+| `lc_bootstrap` | `beacon_api` | GET `eth/v1/beacon/light_client/bootstrap/0x<64 hex>`, `ssz` | the block root |
+| `finality` | `checkpointz` | GET `eth/v1/beacon/states/head/finality_checkpoints`, `json` | none |
+| `block_root` | `checkpointz` | GET `eth/v1/beacon/blocks/<n>/root`, `json` | the slot, a 64-bit decimal |
+
+**The variants for each operation.** `M` and `P` are the operation's method and params, and `B` is its block parameter, or `latest` where it has none or it isn't a string (`call_ctx.c:580–583`, `verify_call.c:649–651`). Every method, path, payload field and cache age below is fixed or derived by main from `M`, `P`, the chain and the client. A field marked *free* is one the process chooses.
+
+| Operation | Allowed fetches, beside the sync variants |
+|---|---|
+| `eth_getBalance` and `eth_getTransactionCount`, `P` = `[a, B]` | the PAP rewrite only (`eth_verify.c:271–274`): prover POST `{"method": "eth_getProof", "params": [a, [], B]}` and the props |
+| `eth_getStorageAt`, `P` = `[a, s, B]` | the PAP rewrite only (`:276–279`): prover POST `{"method": "eth_getProof", "params": [a, [s], B]}` and the props |
+| `eth_getCode`, `P` = `[a, B]` | prover POST `{"method": M, "params": P}` and the props; and the code read: `eth_rpc` POST `{"jsonrpc":"2.0","id":1,"method":"eth_getCode","params":[a, "latest"]}` with this `a` (`eth_account.c:141`) |
+| `eth_blockNumber`, `eth_maxPriorityFeePerGas`, `eth_getBlockByNumber`, `eth_getBlockByHash` | prover POST `{"method": M, "params": P}` and the props |
+| `eth_call` and `eth_estimateGas` (PAP runs them in the verifier: `eth_verify.c:231`) | `colibri_proofCall`: prover POST `{"jsonrpc":"2.0","id":1,"method":"colibri_proofCall","params":[{"accessList":[{"address", "storageKeys"}, …]}, B]}` and the props (`verify_call.c:643–694`); *free:* the access list's addresses and keys |
+| (the same) | the header sub-proof: `eth_getBlockHeader [B]` (`call_ctx.c:576–590`), as the cached GET or a POST with the props, by `B` |
+| (the same) | storage reads: `eth_rpc` POST `{"jsonrpc":"2.0","id":1,"method":"eth_getStorageAt","params":[addr, key, "latest"]}` (`call_ctx.c:144`); *free:* `addr`, `key` |
+| (the same) | code reads: `eth_rpc` POST `eth_getCode [addr, "latest"]`, as above; *free:* `addr` |
+| `eth_getTransactionByHash` and `eth_getTransactionReceipt`, `P` = `[h]` (PAP runs them in the verifier: `eth_verify.c:233`) | the tx cache: prover GET `tx_cache?max_blocks=256` or `tx_cache?from_block=<n>&max_blocks=256` (`verify_pap_tx.c:53–73`, `pap_tx_cache.h:66`), `max_age` 2 on Gnosis chains and 6 elsewhere (`verify_pap_tx.c:49–51`); *free:* `from_block` |
+| (the same) | the fallback: prover POST `{"method": M, "params": [h]}` and the props (`verify_pap_tx.c:210`) |
+| (`eth_getTransactionReceipt`) | the block's receipts: `eth_getBlockReceipts ["0x<n>"]` (`verify_pap_tx.c:241`), as the cached GET; *free:* the block number `n` |
+| (`eth_getTransactionByHash`) | the block: `eth_getBlockByNumber ["0x<n>", true]` (`verify_pap_tx.c:294`; that method in remote mode, `:119–121`), as the cached GET; *free:* `n` |
+| `colibri.checkpoint` | `checkpoint_proof` once: main's own fetch from the prover, as `checkpoint-verifier-worker.js` makes it today, 4 MiB at most, with nothing taken from the service; then `checkpoint_root`: the one path today's interception admits, answered from main's quorum (origin, `GET`, the path, at most 8) |
+
+- **Comparisons:** `a`, `s`, `B` and `h` are compared as parsed JSON, with addresses and hex compared without regard to case. Main computes each rewrite from `P` the way the C core does, and admits that and nothing else. A `P` of another length than the table shows gets no rewrite, so it is sent as `{"method": M, "params": P}`, as the C core sends it. So an operation never admits another method, other params, or a variant of another operation.
+- **Not admitted, for any operation:**
+  - the unproven pass-through (`colibri_common.c:522–579`), since the service refuses those reads first (F-1);
+  - `pap_request_eth_rpc`, the PAP send path (`verify_pap_tx.c:325`), since the router sends no write to Colibri;
+  - `eth_getTransactionByBlockNumberAndIndex` and `colibri_simulateTransaction`, which the router never asks for;
+  - every request of the local prover, which the build doesn't contain.
+- **Bounds on free fields:** decimals are within 32 bits (64 for blocks and slots), with no sign and no leading zero. Addresses are 20 bytes, keys and roots 32. A `colibri_proofCall` payload is at most 64 KiB, like any payload.
+- **Body maximums,** provisional; COL-1 records the largest body each variant gets, and COL-2's budget rule applies:
+  - the prover's proofs and the tx cache: 16 MiB (the C core caps the tx cache at 10 MiB itself);
+  - light-client updates: 16 MiB, and a bootstrap 1 MiB;
+  - the checkpointz answers: 64 KiB;
+  - the `eth_rpc` reads: 1 MiB.
+
+**Per request:**
+- a fetch names one open request of its own process;
+- a request that has ended (replied, cancelled, past its deadline) admits nothing.
 
 **What main builds** (the service sends none of it):
-- **The URL:** `joinPath(server, path)`, with a path that matched an entry: relative, with no scheme, no leading `/`, no `//`, no `.` or `..` segment, no `%`, no `\`, no control character and no query beyond the entry's own, in its order.
-- **The verb:** the entry's.
-- **The headers:** `Accept` from the entry, `Content-Type: application/json` with a payload, and `Cache-Control: max-age=<max_age>` only on an entry that takes one. The session adds its own, as for `shell.rpc`.
+- **The URL:** `joinPath(server, path)`, with a path that matched a variant. It is relative, with no scheme, no leading `/`, no `//`, no `.` or `..` segment, no `%`, no `\`, no control character and no query beyond the variant's own, in its order.
+- **The verb:** the variant's.
+- **The headers:** `Accept` from the variant, `Content-Type: application/json` with a payload, and `Cache-Control: max-age=<n>` only with the variant's derived `max_age`. The session adds its own, as for `shell.rpc`.
 - **The payload:** `JSON.stringify` of its parse, at most 64 KiB.
 
 **The servers** come from main's table by type, never from the service:
 - **`prover`:** the registry's first prover for the chain, https or loopback (`network-registry.js:253–256`);
-- **`beacon_api`, `checkpointz`, `eth_rpc`:** as the [default-host question](#open-questions), decided before COL-1, says. Under its proposed answer that is the package's lists for the chain, which main holds as a table that a vector pins (F-2), in `handle_request`'s order (`cjs/http.js:151–168`).
-- **For a checkpoint process,** `beacon_api` has no server, as today.
+- **`beacon_api`, `checkpointz`, `eth_rpc`:** as the [default-host question](#open-questions), decided before COL-1, says. Under its proposed answer that is the package's lists for the chain, which main holds as a table that a vector pins (F-2), in `handle_request`'s order (`cjs/http.js:151–168`);
+- **for a checkpoint process,** `beacon_api` has no server, as today;
 - **`exclude_mask`** only skips servers. Its bits must be within the list's length.
 
 **Redirects:**
-- **A GET** follows at most 3 redirects (301, 302, 303, 307, 308). Each `Location` must resolve to the same server's origin and to a path the same entry admits, and each hop passes the endpoint policy and the onion gate.
+- **A GET** follows at most 3 redirects (301, 302, 303, 307, 308). Each `Location` must resolve to the same server's origin and to the same variant with the same bound fields, and each hop passes the endpoint policy and the onion gate.
 - **A POST follows none.**
 - **Any other 3xx** is that server's failure, `HTTP error! Status: <n>, Details: redirect refused`, and the next server is tried. Today Node follows up to 20 redirects to any host (deviation `fetch-contract`).
 
@@ -427,22 +511,28 @@ Today the worker fetches whatever request the WASM instance returns. `fetch_from
   - absolute paths (`https://…`, `http://…`) and scheme-relative ones (`//host/…`);
   - a leading `/`, dot segments, `%2f`, `%2e`, a backslash, a control character, and an unknown query key or order;
   - cross-type requests, such as a beacon path as `prover` or a `proof` payload as `eth_rpc`;
-  - verbs other than the entry's: `put`, `delete`, `GET`, `get ` and an empty one;
-  - a payload with an extra key, a wrong `version`, `zk_proof` on a non-ZK client, or an over-long `c4`;
-  - out-of-contract redirects: to another origin, to another entry's path, a fourth hop, any redirect of a POST, and an https-to-http downgrade;
-  - cross-operation reuse: request A's id with request B's method or params, an ended request's id, another process's request id, and a fetch when no operation is open;
+  - verbs other than the variant's: `put`, `delete`, `GET`, `get ` and an empty one;
+  - for each operation:
+    - a payload whose method or params differ from the variant's derivation, such as `eth_getBalance` sent as itself instead of as `eth_getProof`, another address, another block, or another hash;
+    - a cached GET with another method, block, version or TTL;
+    - `tx_cache` with another `max_blocks` or `max_age`;
+    - a state read at another block;
+  - the configuration's absent options: `include_code`, `logs_completeness`, `signers`, `rpc` or `beacon` keys, a `?signers=` query, an oblivious `eth_getProof` storage read, `zk_proof` or `zk` on a non-ZK client, and an over-long `c4`;
+  - out-of-contract redirects: to another origin, to another variant or bound field, a fourth hop, any redirect of a POST, and an https-to-http downgrade;
+  - cross-operation reuse: request A's id with request B's variant, an ended request's id, another process's request id, and a fetch when no operation is open;
   - an `exclude_mask` bit past the list.
+- **The acceptance tests** (COL-5): each variant above, for chains 1 and 100, ZK on and off, is admitted with its derived fields.
 
 ### Bodies
 
-**Main reserves before reading.** Before main sends a request to a server, it reserves the entry's maximum from **main's Colibri fetch pool**.
+**Main reserves before reading.** Before main sends a request to a server, it reserves the variant's body maximum from **main's Colibri fetch pool**.
 - The pool is 128 MiB, browser-wide, and held by `colibri-service.js` for every `freedom-colibrid` process, persistent or checkpoint. 128 MiB is 8 bodies of 16 MiB, one per Colibri operation main runs at once (0004). COL-1's recordings show how many bodies a round holds at once, and COL-2's budget rule then applies to the pool too.
 - It is separate from 0005's chain I/O pool (192 MiB, `service-client.js:90`), which bounds what main holds for the core's connection. Colibri's fetches can't starve the core's replies, or the reverse.
 - **No room:** the fetch isn't sent. The service gets `{ error: "Colibri fetch pool full" }`, which the C core sees as a failed fetch. The request ends in an error, neither a fault nor capacity, and the read falls to its next source.
 - **Control frames don't use the pool:** credit, cancels, small replies and `colibri.step` go on while it is full, as 0005's pool rules have it.
 
 **Main reads the body whole before the head goes,** as `fetch_from_servers` does (`blob()`, `cjs/http.js:57`), and as failing over to the next server needs. It counts the decoded bytes:
-- **`Content-Length` is a hint only.** A declared length over the entry's maximum fails that server before the body is read. A missing one changes nothing.
+- **`Content-Length` is a hint only.** A declared length over the variant's maximum fails that server before the body is read. A missing one changes nothing.
 - **Compressed bodies:** Chromium's network stack decodes them. The count and the maximum are of decoded bytes, so a small body that inflates past the maximum stops there.
 - **Chunked bodies** are counted like a body with no length.
 - **Past the maximum,** the read is aborted and that server fails with `Request to <url> failed: response over <n> bytes`. The next server is tried under the same reservation.
@@ -474,7 +564,7 @@ The numbers below hold until COL-2 measures the native build. It replaces each w
 |---|---|---|
 | open requests | 16 (main sends at most 8: 0004's bound per verifier) | 1 |
 | fetches open | 64 per process; 1,024 per request in all | the same |
-| a fetched body | the entry's maximum ([The fetch contract](#the-fetch-contract)), 16 MiB at most | 4 MiB (the proof), 64 KiB otherwise |
+| a fetched body | the variant's maximum ([The fetch contract](#the-fetch-contract)), 16 MiB at most | 4 MiB (the proof), 64 KiB otherwise |
 | bodies in flight | 32 MiB: the head's exact `bytes` reserved before credit | 8 MiB, the same way |
 | store | 1 MiB a value, 64 MiB a directory | memory, counted in resident memory |
 | resident memory | 256 MiB, then a [recycle](#crashes-overruns-and-restarts) | 128 MiB, then the check fails |
@@ -488,9 +578,9 @@ The numbers below hold until COL-2 measures the native build. It replaces each w
 | checkpoint processes | 2 at once | `CHECKPOINT_UNAVAILABLE` |
 | resident memory | 3 × 256 + 2 × 128 = 1,024 MiB of budgets | each process's own rule |
 | chain directories | 6, so 384 MiB of store | the oldest one without a live process is deleted |
-| main's Colibri fetch pool | 128 MiB, each fetch reserving its entry's maximum before it is sent | `Colibri fetch pool full`, a failed fetch |
+| main's Colibri fetch pool | 128 MiB, each fetch reserving its variant's maximum before it is sent | `Colibri fetch pool full`, a failed fetch |
 
-- **Resident memory** is read by the service after each step (`/proc/self/statm`, `task_info` on macOS). It can't bound the C core's allocations as they happen. A hard limit by the OS is user question Q17, shared with 0007.
+- **Resident memory** is read by the service after each step (`/proc/self/statm`, `task_info` on macOS). It can't bound the C core's allocations as they happen. A hard limit by the OS (`RLIMIT_AS`, or a Windows job memory limit) is [0007's open question 9](0007-ipfs-service.md#open-questions), "An OS memory limit", and its answer applies to this service too.
 - **A reply over 0001's message cap** is `too_large`, as 0005 says.
 
 ## Crashes, overruns and restarts
@@ -516,7 +606,9 @@ The numbers below hold until COL-2 measures the native build. It replaces each w
   - the checkpoint: both captures in `docs/audits/evidence/colibri-v3-2026-09/captures`, a flipped proof, a v2 proof;
   - F-1: `eth_gasPrice`, `eth_feeHistory`, reads at `pending` and at `earliest`, and a read with an EIP-1898 block object (which 3.0.3 reads as `latest`: #279), each marked `deviation: colibri-unproofable`. These pin the adapter itself: the router stops sending them with #1048 and #279, whose own vectors cover the routing;
   - #750: an unknown-hash receipt, which traps in WASM. The service must end it in an error or a crash, never a result.
-- **The fetch contract:** the generator checks every recorded request against main's table ([The fetch contract](#the-fetch-contract)) for its case's operation, and fails on one that matches no allowed entry. It records each entry's largest body.
+- **The fetch contract:** the table in [The fetch contract](#the-fetch-contract) is the grammar, and the recording checks it rather than defines it. The generator fails on a recorded request that matches no variant its case's operation allows, and on a variant no case reaches. It records each variant's largest body.
+- **Cases for every variant:** account reads (the PAP rewrites), code (with its code read), blocks, `eth_call` and `eth_estimateGas` (`colibri_proofCall`, the header sub-proof in both its GET and POST forms, storage and code reads), transaction lookups (tx cache cold and incremental, found and the fallback, receipts and block proofs), and each sync request.
+- **F-9:** each proofable method with every prover failing, which the reference proves locally (deviation `no-local-proving`).
 - **What the native build must match:** each step's status text byte for byte (the request pointer replaced by its index), the data requests in their rounds, the store's writes, and the version number. Through main's client: each adapter outcome (result, or error with name, code, message and data).
 - **Where the deviations show:** cases marked with their deviation id record the reference's outcome and the design's.
 
@@ -527,8 +619,9 @@ The numbers below hold until COL-2 measures the native build. It replaces each w
 | `colibri-unproofable` | the adapter answers unproofable methods and `pending`/`earliest` reads from a public RPC without proof, and a non-string block as `latest`; the router labels them verified (F-1; the router stops asking with #1048 and #279) | refused before any context: `Method <m> is not supported` |
 | `colibri-deadline` | a request waiting on the network keeps its slot up to 60 s past its deadline, then fails as a fault and takes its worker's other requests with it | cancelled at its deadline; not a fault; nothing else ends |
 | `colibri-culprit` | a trap names its call's request; a stuck worker's culprit is guessed from methods, and several suspects of mixed methods name nobody | the step marker names the request whose call was running, best-effort; a death outside any step names nobody |
-| `colibri-session-fetch` | Node's fetch: no proxy, Tor, endpoint policy, timeout or body cap | main's session fetch with them; each body within its entry's maximum, reserved from main's Colibri fetch pool before it is sent, and `Colibri fetch pool full` when the pool can't |
-| `fetch-contract` | any request the instance returns is fetched: any verb, path and payload on the type's hosts, redirects followed anywhere | only the entries the open operation allows; GET redirects within the server's origin and the entry, at most 3; POST none; anything else `Colibri fetch refused` |
+| `colibri-session-fetch` | Node's fetch: no proxy, Tor, endpoint policy, timeout or body cap | main's session fetch with them; each body within its variant's maximum, reserved from main's Colibri fetch pool before it is sent, and `Colibri fetch pool full` when the pool can't |
+| `fetch-contract` | any request the instance returns is fetched: any verb, path and payload on the type's hosts, redirects followed anywhere | only the variants the open operation allows, with every derivable field bound; GET redirects within the server's origin and the variant, at most 3; POST none; anything else `Colibri fetch refused` |
+| `no-local-proving` | a failed remote proof is proven locally in main's worker, from the `eth_rpc` and `beacon_api` hosts (F-9) | the request ends with the remote proof's error; the read falls to its next source |
 | `colibri-processes` | a worker per chain, with no bound on their number | at most 3 persistent and 2 checkpoint processes, idle ones retired, `Colibri service busy` at the limit |
 | `fetch-error-text` | a fetch error names the URL and payload, and carries the whole error body | URLs as `<url>`, at most 2,000 units |
 | `no-initial-chain-id` | a local `eth_chainId` context on each client's first request | none |
@@ -542,11 +635,11 @@ The numbers below hold until COL-2 measures the native build. It replaces each w
 
 | Step | Where | What | Done when |
 |---|---|---|---|
-| COL-1 | core `main` | `vectors/colibri.json`, its generator and fixtures | the default-host question is decided first; `generate.js check` passes; damaged copies fail it (`check.test.js`); every case above is present; every recorded request matches an entry its operation allows |
-| COL-2 | core `main` | the native build in `services/freedom-colibrid` (a library and a test harness, no service yet), by the Q20 answer; the measured budgets as an amendment here | CI on Linux, macOS and Windows runs every COL-1 trace through the native C core and matches it; the version number is 196611; the license gate passes on the compiled-source manifest (nothing under `src/server/` or `src/chains/eth/server/`, and the notice audit: [Licenses](#licenses)); an ASan and UBSan job runs every trace, #750's included, clean; any difference or sanitizer finding stops the step and is reported |
+| COL-1 | core `main` | `vectors/colibri.json`, its generator and fixtures | the default-host question is decided first; `generate.js check` passes; every variant of the fetch contract is reached; damaged copies fail it (`check.test.js`); every case above is present; every recorded request matches a variant its operation allows |
+| COL-2 | core `main` | the native build in `services/freedom-colibrid` (a library and a test harness, no service yet), by the Q20 answer, verifier-only: it starts once the [verifier-only change](#the-verifier-only-build) is in the pinned commit or the vendored copy; the measured budgets as an amendment here | CI on Linux, macOS and Windows runs every COL-1 trace through the native C core and matches it; the version number is 196611; the build has `PROVER=OFF`; the license gate passes on the compiled-source manifest (nothing under `src/server/`, `src/chains/eth/server/` or the prover, and the notice audit: [Licenses](#licenses)); an ASan and UBSan job runs every trace, #750's included, clean; any difference or sanitizer finding stops the step and is reported |
 | COL-3 | core `main` | `fc-service`: requests from a service to main, two-way streams for a service that turns them on, and an event the sender waits to see written, with an error to the sender when the write doesn't finish within its wait | fc-service's tests; `vectors/streams.json` gains a service's two-way cases; freedom-ipfsd and freedom-radicled unchanged, and their connections still refuse incoming stream frames |
 | COL-4 | core `main` | `freedom-colibrid`: the methods, confinement, the store, budgets and its release | the vectors through the binary with a scripted main, on three OSes; confined, `socket` and a file outside the grant are refused (Linux, macOS); test hooks: a crash in a step names that request, a spin is killed and named, a recycle is no fault; the step marker: a held writer times the marker out and the C core isn't entered (`busy`), a death before `colibri.stepped` names the request, a death after it names nobody; a stream longer or shorter than its head (`Colibri body length mismatch`) while other streams and control frames go on; every budget's refusal; a fuzz target for the decoder and verifier in `fuzz/` |
-| COL-5 | browser `integration/rust-core` | `colibri-service.js` with `colibri-worker-host.js`'s interface, main's fetches with the fetch contract and the Colibri fetch pool, the browser-wide bounds, the checkpoint path, the binary's pin and fetch, the license audit; behind a development switch, WASM still the default; the default-host question decided first | the Colibri suites (`colibri-worker-host`, `colibri-resolver`, `chain-verified`, `naming-verified`, `checkpoint-verifier-worker`) pass against both backends as one contract suite, deviations marked; the ENS e2e suite (`ENS_COLIBRI_E2E=1`) passes on the service; the checkpoint captures verify through the one-shot process; with a session proxy set, every Colibri fetch goes through it; the fetch contract's refusal tests and the body tests ([Main's fetches](#mains-fetches)); the 7-chain walk ([How many](#how-many)); with a scripted service, forged markers (an unknown or ended request, a second `colibri.step` while one is open, a `colibri.stepped` for another request) kill the process and name nobody, and a death after a clearing event names nobody; `createError`'s three rules byte for byte |
+| COL-5 | browser `integration/rust-core` | `colibri-service.js` with `colibri-worker-host.js`'s interface, main's fetches with the fetch contract and the Colibri fetch pool, the browser-wide bounds, the checkpoint path, the binary's pin and fetch, the license audit; behind a development switch, WASM still the default; the default-host question decided first | the Colibri suites (`colibri-worker-host`, `colibri-resolver`, `chain-verified`, `naming-verified`, `checkpoint-verifier-worker`) pass against both backends as one contract suite, deviations marked; the ENS e2e suite (`ENS_COLIBRI_E2E=1`) passes on the service; the checkpoint captures verify through the one-shot process; with a session proxy set, every Colibri fetch goes through it; the fetch contract's refusal and acceptance tests and the body tests ([Main's fetches](#mains-fetches)); the 7-chain walk ([How many](#how-many)); with a scripted service, forged markers (an unknown or ended request, a second `colibri.step` while one is open, a `colibri.stepped` for another request) kill the process and name nobody, and a death after a clearing event names nobody; `createError`'s three rules byte for byte |
 | COL-6 | browser `integration/rust-core` | the service by default; then the WASM path removed: `colibri-runtime.js`, `colibri-worker.js`, `colibri-worker-host.js` and their tests, the package and its pin, `C4_DISABLE_NATIVE`, the V8 flag if nothing else needs it, the license entries | `git grep colibri-stateless` finds only the changelog and docs; the unit and e2e suites pass on three OSes; the app loses the package (`c4w.wasm`, 1.37 MB, and F-3's 7.2 MiB of add-ons) |
 
 - **Q19, native only:** COL-6 switches and removes in one release.
@@ -569,7 +662,7 @@ Once decided:
 - **One process per request:** the strongest isolation, and attribution without a marker, at a process start and a store load per request, and no shared cache.
 - **The WASM build in a process:** keeps WASM's bounds and adds the process. `c4w.wasm` is an Emscripten build whose imports are JavaScript, so it needs Node (Electron as Node), which 0010 can't confine, or a WASI build upstream doesn't ship, run under wasmtime. The fallback if COL-2 finds the native build less safe than WASM in a way the hardening can't answer.
 - **Keeping the flat store:** no bootstrap after the switch, but every chain's process could write every chain's keys, and the native build would read the WASM build's BLS key files, whose format is the build's.
-- **Main streaming each body to the service as it arrives,** instead of reading it whole first: less held in main, but the head couldn't carry an exact length, the service would have to reserve the entry's maximum itself, and failing over to the next server after part of a body had gone would need a way to take it back. `fetch_from_servers` reads each body whole too, and the pool bounds what main holds.
+- **Main streaming each body to the service as it arrives,** instead of reading it whole first: less held in main, but the head couldn't carry an exact length, the service would have to reserve the variant's maximum itself, and failing over to the next server after part of a body had gone would need a way to take it back. `fetch_from_servers` reads each body whole too, and the pool bounds what main holds.
 - **Upstream's high-level client with our own `RequestHandler`:** it still compiles tokio and reqwest, and its loop isn't the JS reference's.
 
 ## Open questions
@@ -583,8 +676,9 @@ Once decided:
    - **Keep WASM for one release:** COL-6 switches, with a setting that brings the WASM workers back, and the removal follows in the next release. That costs two backends tested in every PR of that release, and the package kept.
    - *Proposed: native only, once COL-5's contract suite and the ENS e2e suite pass on the service on three OSes. The WASM path's main risk, a crash of main, is the one this design removes.*
 3. **Q20: work through public upstream PRs, or keep a vendored copy?**
-   - **Public upstream PRs:** three small PRs on Colibri upstream (an `http` feature, an offline pinned build, a safe answer API), with a pinned fork commit until they are released ([Option A](#option-a-public-upstream-prs)).
-   - **A vendored copy:** the C sources copied into this repository, with our own `unsafe` bindings and every upstream release re-checked by hand ([Option B](#option-b-a-vendored-copy)).
+   - **Public upstream PRs:** four small PRs on Colibri upstream (an `http` feature, an offline pinned build, a safe answer API, and a [verifier-only build](#the-verifier-only-build)), with a pinned fork commit until they are released ([Option A](#option-a-public-upstream-prs)).
+   - **A vendored copy:** the C sources copied into this repository with the verifier-only change as our own patch, our own `unsafe` bindings, and every upstream release re-checked by hand ([Option B](#option-b-a-vendored-copy)).
+   - Either way, COL-2 waits for the verifier-only change, since without it the license gate can't pass.
    - *Proposed: public upstream PRs.*
 4. **May we file two public issues upstream, for F-1 and F-6?** This is separate from Q20: either build path can file them, or neither.
    - **F-1:** `VerifiedOnly` answers unproofable methods and `pending`/`earliest` reads without a proof.
