@@ -24,7 +24,7 @@ use serde_json::{Map, Value, json};
 
 use crate::build_info;
 use crate::identity::{self, Identity};
-use crate::{reconcile, testhooks, units};
+use crate::{reconcile, stats, testhooks, units};
 
 /// How the process ends after a start step it answered with an error
 /// (0008: "the service answers with the error and then exits"). Main read
@@ -60,7 +60,10 @@ pub struct Steps {
     /// `rad.identity`'s deadline, armed by `rad.hello`'s reply.
     deadline: Mutex<Option<Watchdog>>,
     /// The repair units' watchdog, its thread started with the process.
-    units: Arc<units::UnitWatch>,
+    pub units: Arc<units::UnitWatch>,
+    /// The quarantine record's count once reconciliation is done, for
+    /// `rad.stats`.
+    quarantined: Arc<stats::Quarantined>,
     /// main's proof that libgit2 reads no git configuration outside a
     /// repository, for reconciliation.
     git_config: libradicle::GitConfigIsolated,
@@ -74,6 +77,7 @@ impl Steps {
         network: Value,
         confinement: Value,
         units: Arc<units::UnitWatch>,
+        quarantined: Arc<stats::Quarantined>,
         git_config: libradicle::GitConfigIsolated,
     ) -> Option<Self> {
         let identity = Identity::new(&home)?;
@@ -86,6 +90,7 @@ impl Steps {
             confinement,
             deadline: Mutex::new(None),
             units,
+            quarantined,
             git_config,
         })
     }
@@ -196,6 +201,7 @@ impl Steps {
         let home = self.home.clone();
         let cancel = self.stopping.clone();
         let reconciliation = self.reconciliation.clone();
+        let quarantined = self.quarantined.clone();
         let owed = conn.clone();
         let id = request.id;
         // Each unit's time limit, from outside the worker.
@@ -220,7 +226,11 @@ impl Steps {
                 );
                 drop(signer);
                 match outcome {
-                    Ok(reconcile::Outcome::Done { reply, resigned }) => {
+                    Ok(reconcile::Outcome::Done {
+                        reply,
+                        resigned,
+                        quarantined: count,
+                    }) => {
                         log::info(
                             "reconciled",
                             json!({
@@ -229,6 +239,7 @@ impl Steps {
                                 "quarantined": reply["quarantined"]["count"],
                             }),
                         );
+                        quarantined.set(Some(count));
                         *reconciliation.lock().unwrap_or_else(|p| p.into_inner()) =
                             Reconciliation::Done { resigned };
                         let _ = owed.reply(id, &reply);

@@ -465,9 +465,10 @@ impl Instances {
         fixed: Fixed,
         caches: Option<Reservation>,
     ) {
-        testhooks::start_delay();
+        testhooks::before_build();
         testhooks::panic_at("start");
         let built = self.open(&start, seq, fixed, caches);
+        testhooks::at_build_end();
         let instance_id = start.instance;
         let mut table = self.lock();
         let (fenced, bound, stops) = match table.active.get_mut(&instance_id) {
@@ -978,5 +979,21 @@ fn store_error_kind(error: &StoreError) -> &'static str {
         StoreError::Core(_) => "core",
         StoreError::Json(_) => "json",
         StoreError::PageCap { .. } => "page_cap",
+    }
+}
+
+#[cfg(test)]
+mod bound {
+    use std::time::Duration;
+
+    use super::TEARDOWN_BOUND;
+
+    /// 0007's teardown bound, pinned here. The exit-70 tests check only that
+    /// exit 70 comes no earlier than it: an upper limit on their wall clock
+    /// raced runner stalls (#284), so a longer bound is caught here instead
+    /// (#288, review round 1).
+    #[test]
+    fn the_teardown_bound_is_0007s_five_seconds() {
+        assert_eq!(TEARDOWN_BOUND, Duration::from_secs(5));
     }
 }

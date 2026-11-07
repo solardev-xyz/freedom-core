@@ -159,16 +159,17 @@ fn a_key_file_refuses_the_start() {
 }
 
 /// Before `rad.identity`, the steps that need the identity end the process;
-/// every other method 0008 lists is `stopped` (no read or write is served
-/// in this build), and a method 0008 doesn't list is `unknown_method`.
-/// `rad.start` itself is tests/start.rs's.
+/// `rad.stats` is answered (tests/stats.rs); every other method 0008 lists
+/// is `stopped` (no node runs), and a method 0008 doesn't list is
+/// `unknown_method`. `rad.start` itself is tests/start.rs's.
 #[test]
 fn methods_before_running() {
     let dirs = Dirs::new();
     let mut radicled = Radicled::serve(&dirs, &[]);
     radicled.hello();
+    let reply = radicled.call("rad.stats", json!({}));
+    assert_eq!(reply["result"]["node"], "waiting", "{reply}");
     for method in [
-        "rad.stats",
         "rad.read",
         "rad.blob",
         "rad.quarantine_list",

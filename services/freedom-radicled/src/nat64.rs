@@ -57,13 +57,12 @@ impl Discovery {
         self.inner.lease()
     }
 
-    /// What `rad.stats` will report of it.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "rad.stats reports it, a later step")
-    )]
-    pub fn stats(&self) -> serde_json::Value {
-        self.inner.stats()
+    /// What `rad.stats` reports of it ([`crate::stats`]): its state, at
+    /// most `prefixes` of its prefixes, and the first `failures` of why the
+    /// last round's resolvers failed, each list cut as fc-nat64 reads it,
+    /// so the work is bounded however many resolvers the OS lists.
+    pub fn stats(&self, prefixes: usize, failures: usize) -> serde_json::Value {
+        self.inner.stats_bounded(prefixes, failures)
     }
 }
 
@@ -101,7 +100,7 @@ mod tests {
         }
         assert_eq!(discovery.inner.state(), Nat64State::NONE);
         assert!(routing.gate.allows(&target, &ipv6), "known, it passes");
-        assert_eq!(discovery.stats()["state"], "known");
+        assert_eq!(discovery.stats(16, 16)["state"], "known");
     }
 
     #[test]

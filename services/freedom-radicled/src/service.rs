@@ -26,9 +26,11 @@
 //!   ([`crate::network`]): a clone's progress goes to main as
 //!   `rad.progress` events, bounded per clone, through the progress hub's
 //!   thread ([`crate::network::progress`]);
-//! - `rad.stats` (inline) comes with a later step, and answers `stopped`;
-//!   so does `rad.import_repo`, which only the import process serves
-//!   ([`crate::import`]).
+//! - **`rad.stats`** is answered inline, on the reader thread, at once, in
+//!   every phase from the handshake on: what the service holds in memory,
+//!   never waiting ([`crate::stats`]);
+//! - `rad.import_repo` answers `stopped`: only the import process serves
+//!   it ([`crate::import`]).
 //!
 //! **`rad.hello`'s members, `rad.identity` and `rad.reconcile`** are the
 //! steps both processes answer ([`crate::steps`]).
@@ -60,14 +62,14 @@ use crate::node::{self, Node};
 use crate::output::{self, Budget};
 use crate::pools::{self, Mutates, Pool, Pools, Ticket, Work};
 use crate::steps::Steps;
-use crate::{quarantine, reads, repair, writes};
+use crate::{quarantine, reads, repair, stats, writes};
 use crate::{testhooks, units};
 
 pub(crate) use crate::steps::fail_start;
 
 /// The methods 0008 lists beside `rad.hello`, `rad.identity` and
 /// `rad.shutdown` that later steps implement, and that take no pool here.
-const LATER: &[&str] = &["rad.stats", "rad.import_repo"];
+const LATER: &[&str] = &["rad.import_repo"];
 
 /// The methods on the network pool.
 const NETWORK: &[&str] = &["rad.connect_seeds", "rad.clone"];
@@ -105,6 +107,8 @@ pub struct RadicleService {
     budget: Arc<Budget>,
     /// The clones' progress, written to main by its thread.
     progress: Arc<progress::Hub>,
+    /// The quarantine record's count, for `rad.stats`.
+    quarantined: Arc<stats::Quarantined>,
 }
 
 impl RadicleService {
@@ -122,11 +126,13 @@ impl RadicleService {
         git_config: libradicle::GitConfigIsolated,
     ) -> Option<Self> {
         let node = Arc::new(Node::new(pools.clone()));
+        let quarantined = Arc::new(stats::Quarantined::default());
         // The writer's online repair reaches the node only while it runs.
         pools.repair_with(Arc::new(repair::Online::new(
             Arc::downgrade(&node),
             grant.home.clone(),
             units.clone(),
+            quarantined.clone(),
         )));
         Some(Self {
             steps: Steps::new(
@@ -134,6 +140,7 @@ impl RadicleService {
                 network.to_json(),
                 confinement,
                 units,
+                quarantined.clone(),
                 git_config,
             )?,
             policy: *network,
@@ -141,6 +148,7 @@ impl RadicleService {
             pools,
             budget: Budget::new(testhooks::budget(output::BUDGET)),
             progress,
+            quarantined,
         })
     }
 
@@ -163,9 +171,13 @@ impl RadicleService {
                 quarantine::list(conn, &self.steps.home, request.params),
                 None,
             ),
-            "rad.remove_repo" => {
-                quarantine::remove(conn, &self.node, &self.steps.home, request.params)
-            }
+            "rad.remove_repo" => quarantine::remove(
+                conn,
+                &self.node,
+                &self.steps.home,
+                request.params,
+                &self.quarantined,
+            ),
             "rad.write" => {
                 // Known by now: the pool admits nothing before `RUNNING`.
                 let ephemeral = self.steps.identity.with(|i| i.ephemeral).unwrap_or(true);
@@ -190,6 +202,30 @@ impl RadicleService {
                 None,
             ),
             _ => (later_step(conn), None),
+        }
+    }
+
+    /// `rad.stats`'s snapshot: what the service holds now, each part read
+    /// under a lock held only briefly ([`crate::stats`]).
+    fn snapshot(&self) -> stats::Snapshot {
+        stats::Snapshot {
+            node: self.node.view(),
+            unit: self
+                .steps
+                .units
+                .current()
+                .map(|(kind, elapsed)| stats::Unit {
+                    kind,
+                    elapsed,
+                    limit: self.steps.units.limit(),
+                }),
+            quarantined: self.quarantined.get(),
+            pools: self.pools.usage(),
+            output: (self.budget.used(), self.budget.total()),
+            mode: match self.policy {
+                NetworkPolicy::Direct => "direct",
+                NetworkPolicy::Socks5 { .. } => "socks5",
+            },
         }
     }
 
@@ -265,6 +301,8 @@ impl Service for RadicleService {
             self.steps.reconcile(conn, &request);
         } else if method == "rad.start" && self.steps.identity.known() {
             self.start(conn, &request);
+        } else if method == "rad.stats" {
+            stats::answer(conn, &request, || self.snapshot());
         } else if method == "rad.identity" {
             self.steps.identity(conn, &request);
         } else if NEED_IDENTITY.contains(&method) && !self.steps.identity.known() {

@@ -41,10 +41,10 @@
 //! release" and "Profiles without a vault"), `rad.reconcile` (0008,
 //! "Reconciliation") and `rad.start`, which runs the node until the
 //! connection ends ([`node`]); then quarantine's methods ([`quarantine`]),
-//! the writes ([`writes`]), `rad.read`'s ops ([`reads`]) and the network
-//! operations, `rad.connect_seeds` and `rad.clone` ([`network`]). The
-//! import process answers `rad.hello`, `rad.identity`, `rad.reconcile` and
-//! `rad.import_repo` ([`import`]).
+//! the writes ([`writes`]), `rad.read`'s ops ([`reads`]), the network
+//! operations, `rad.connect_seeds` and `rad.clone` ([`network`]), and
+//! `rad.stats` ([`stats`]). The import process answers `rad.hello`,
+//! `rad.identity`, `rad.reconcile` and `rad.import_repo` ([`import`]).
 //! The other methods and ops 0008 lists come with later steps; until then
 //! each answers `stopped`.
 //!
@@ -82,6 +82,7 @@ mod reads;
 mod reconcile;
 mod repair;
 mod service;
+mod stats;
 mod steps;
 mod testhooks;
 mod units;
@@ -407,11 +408,15 @@ fn serve_import(
             return Exit::Internal;
         }
     };
+    // The quarantine record's count, which no method of this process
+    // reports.
+    let quarantined = Arc::new(stats::Quarantined::default());
     let Some(steps) = steps::Steps::new(
         grant.home,
         json!({ "mode": "offline" }),
         confinement,
         units,
+        quarantined,
         git_config,
     ) else {
         log::error("the OS random number generator failed", json!({}));

@@ -20,7 +20,7 @@
 use std::collections::VecDeque;
 use std::ffi::OsStr;
 use std::io::{BufRead, BufReader, Read, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, ExitStatus, Stdio};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
 use std::sync::{Arc, Condvar, Mutex};
@@ -412,6 +412,51 @@ impl Ipfsd {
         }
     }
 
+    /// Waits until the service logs a line whose message is `msg` (a test
+    /// hook's, say): a hang guard of [`READ_TIMEOUT`], never a timing
+    /// bound. Fails at once if stderr closes without it.
+    #[track_caller]
+    pub fn logged(&mut self, msg: &str) {
+        let line = format!("\"msg\":\"{msg}\"");
+        let deadline = Instant::now() + READ_TIMEOUT;
+        loop {
+            // Taken before the read: once stderr has closed, nothing more
+            // comes.
+            let closed = self
+                .stderr
+                .as_ref()
+                .is_none_or(std::thread::JoinHandle::is_finished);
+            if self.stderr_read.lock().unwrap().contains(&line) {
+                return;
+            }
+            if closed || Instant::now() >= deadline {
+                self.lifecycle_failure(&format!("never logged {msg:?}"));
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    /// Whether no message comes within `within`, and none is waiting: that
+    /// something hasn't happened yet, never that it will.
+    pub fn quiet_for(&mut self, within: Duration) -> bool {
+        if !self.pending.is_empty() {
+            return false;
+        }
+        match self.frames.recv_timeout(within) {
+            Ok(message) => {
+                self.pending.push_back(message);
+                false
+            }
+            Err(RecvTimeoutError::Timeout) => true,
+            Err(RecvTimeoutError::Disconnected) => false,
+        }
+    }
+
+    /// Whether the process exits within `within`.
+    pub fn exits_within(&mut self, within: Duration) -> bool {
+        wait(&mut self.child, within).is_some()
+    }
+
     /// stderr, once the process has exited.
     pub fn stderr(&mut self) -> String {
         if let Some(reader) = self.stderr.take() {
@@ -778,4 +823,23 @@ pub fn stopping(stderr: &str) -> Vec<(String, bool)> {
             )
         })
         .collect()
+}
+
+/// The test hooks' log lines (src/testhooks.rs).
+pub const BUILD_RETURNED: &str = "test hook: a start's build has returned";
+pub const TEARDOWN_HELD: &str = "test hook: a teardown is held";
+
+/// A hold variable's value (`FREEDOM_IPFSD_TEST_HOLD_START`,
+/// `FREEDOM_IPFSD_TEST_HOLD_TEARDOWN`): held at `at` (`until` or `after`)
+/// until a file exists at `release`, or for at most 30 s. A confined
+/// process sees the file only in its data directory: the persistent
+/// process's, as [`Dirs`] gives it. A hold the test never releases may name
+/// any path.
+pub fn hold(at: &str, release: &Path) -> String {
+    format!("{at}:{}", release.display())
+}
+
+/// Releases a hold: creates its file.
+pub fn release(path: &Path) {
+    std::fs::write(path, b"").unwrap();
 }

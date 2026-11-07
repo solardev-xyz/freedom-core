@@ -1,0 +1,1202 @@
+{
+  "meta": {
+    "freedomBrowserCommit": "fb540328162839e68150fe2c5e517edb86734d1c",
+    "packages": {
+      "ethers": "6.17.0",
+      "@scure/bip39": "2.4.0",
+      "@scure/base": "1.2.6",
+      "micro-key-producer": "0.10.2",
+      "@metamask/browser-passworder": "6.0.0"
+    },
+    "nodeVersion": "v24.15.0",
+    "generator": "vectors/generator/generate.js"
+  },
+  "formats": {
+    "cases": "The design's result (`source: design`) for a state of the service: `phase` (`waiting`, `starting`, `running`, `down`, `stopped`); `alive`, whether the node's thread still runs where the lock could be tried, else null; `peers`, the node's watch's last count, or null; `nat64`, discovery's stats while its lease is held (`state`, `prefixes`, `failures`), or null; `unit`, the repair unit in progress (`kind`, `elapsed_us` in microseconds, `limit_ms`), or null; `quarantined`, the record's last count, or null; `pools`, each pool's requests `running` and `queued` and the online `repairs` queued; `output`, the budget's `used` and `limit`; `mode`. `result_text` is the result the service writes, byte for byte.",
+    "connections": "Main's peer count today: the add-on's `status` text, what the reference's `getConnections` returned for it (`main`, with the add-on calls it made), and `rad.stats`'s result for a running node with that count.",
+    "constants": "The service's bounds the result reports or holds to: the output budget, each pool's threads and queued places, a repair unit's limit, the NAT64 lists' cuts, and the result's most bytes."
+  },
+  "constants": {
+    "output_limit": 268435456,
+    "pools": {
+      "read": {
+        "threads": 4,
+        "queue": 320
+      },
+      "network": {
+        "threads": 8,
+        "queue": 16
+      },
+      "write": {
+        "threads": 1,
+        "queue": 16
+      }
+    },
+    "unit_limit_ms": 30000,
+    "nat64_prefixes": 16,
+    "nat64_failures": 16,
+    "max_result": 4096
+  },
+  "cases": [
+    {
+      "id": "at-the-handshake",
+      "about": "before rad.identity: no node, nothing counted",
+      "state": {
+        "phase": "waiting",
+        "alive": null,
+        "peers": null,
+        "nat64": null,
+        "unit": null,
+        "quarantined": null,
+        "pools": {
+          "read": {
+            "running": 0,
+            "queued": 0,
+            "repairs": 0
+          },
+          "network": {
+            "running": 0,
+            "queued": 0,
+            "repairs": 0
+          },
+          "write": {
+            "running": 0,
+            "queued": 0,
+            "repairs": 0
+          }
+        },
+        "output": {
+          "used": 0,
+          "limit": 268435456
+        },
+        "mode": "direct"
+      },
+      "source": "design",
+      "result_text": "{\"node\":\"waiting\",\"node_alive\":false,\"connected_peers\":null,\"unit\":null,\"quarantined_count\":null,\"pools\":{\"read\":{\"running\":0,\"queued\":0,\"threads\":4,\"queue\":320},\"network\":{\"running\":0,\"queued\":0,\"threads\":8,\"queue\":16},\"write\":{\"running\":0,\"queued\":0,\"threads\":1,\"queue\":16,\"repairs\":0}},\"budget\":{\"output\":{\"used\":0,\"limit\":268435456}},\"network\":{\"mode\":\"direct\",\"nat64\":null}}"
+    },
+    {
+      "id": "reconciling",
+      "about": "a unit of reconciliation in progress, before the node: its elapsed time in whole milliseconds",
+      "state": {
+        "phase": "waiting",
+        "alive": null,
+        "peers": null,
+        "nat64": null,
+        "unit": {
+          "kind": "cache",
+          "elapsed_us": 1999,
+          "limit_ms": 30000
+        },
+        "quarantined": null,
+        "pools": {
+          "read": {
+            "running": 0,
+            "queued": 0,
+            "repairs": 0
+          },
+          "network": {
+            "running": 0,
+            "queued": 0,
+            "repairs": 0
+          },
+          "write": {
+            "running": 0,
+            "queued": 0,
+            "repairs": 0
+          }
+        },
+        "output": {
+          "used": 0,
+          "limit": 268435456
+        },
+        "mode": "direct"
+      },
+      "source": "design",
+      "result_text": "{\"node\":\"waiting\",\"node_alive\":false,\"connected_peers\":null,\"unit\":{\"kind\":\"cache\",\"elapsed_ms\":1,\"limit_ms\":30000},\"quarantined_count\":null,\"pools\":{\"read\":{\"running\":0,\"queued\":0,\"threads\":4,\"queue\":320},\"network\":{\"running\":0,\"queued\":0,\"threads\":8,\"queue\":16},\"write\":{\"running\":0,\"queued\":0,\"threads\":1,\"queue\":16,\"repairs\":0}},\"budget\":{\"output\":{\"used\":0,\"limit\":268435456}},\"network\":{\"mode\":\"direct\",\"nat64\":null}}"
+    },
+    {
+      "id": "reconciled",
+      "about": "rad.reconcile has counted the record",
+      "state": {
+        "phase": "waiting",
+        "alive": null,
+        "peers": null,
+        "nat64": null,
+        "unit": null,
+        "quarantined": 2,
+        "pools": {
+          "read": {
+            "running": 0,
+            "queued": 0,
+            "repairs": 0
+          },
+          "network": {
+            "running": 0,
+            "queued": 0,
+            "repairs": 0
+          },
+          "write": {
+            "running": 0,
+            "queued": 0,
+            "repairs": 0
+          }
+        },
+        "output": {
+          "used": 0,
+          "limit": 268435456
+        },
+        "mode": "direct"
+      },
+      "source": "design",
+      "result_text": "{\"node\":\"waiting\",\"node_alive\":false,\"connected_peers\":null,\"unit\":null,\"quarantined_count\":2,\"pools\":{\"read\":{\"running\":0,\"queued\":0,\"threads\":4,\"queue\":320},\"network\":{\"running\":0,\"queued\":0,\"threads\":8,\"queue\":16},\"write\":{\"running\":0,\"queued\":0,\"threads\":1,\"queue\":16,\"repairs\":0}},\"budget\":{\"output\":{\"used\":0,\"limit\":268435456}},\"network\":{\"mode\":\"direct\",\"nat64\":null}}"
+    },
+    {
+      "id": "starting",
+      "about": "rad.start running: a count from before is never reported, nor NAT64",
+      "state": {
+        "phase": "starting",
+        "alive": true,
+        "peers": 5,
+        "nat64": {
+          "state": "known",
+          "prefixes": [
+            "64:ff9b::/96"
+          ],
+          "failures": []
+        },
+        "unit": null,
+        "quarantined": 2,
+        "pools": {
+          "read": {
+            "running": 0,
+            "queued": 0,
+            "repairs": 0
+          },
+          "network": {
+            "running": 0,
+            "queued": 0,
+            "repairs": 0
+          },
+          "write": {
+            "running": 0,
+            "queued": 0,
+            "repairs": 0
+          }
+        },
+        "output": {
+          "used": 0,
+          "limit": 268435456
+        },
+        "mode": "direct"
+      },
+      "source": "design",
+      "result_text": "{\"node\":\"starting\",\"node_alive\":false,\"connected_peers\":null,\"unit\":null,\"quarantined_count\":2,\"pools\":{\"read\":{\"running\":0,\"queued\":0,\"threads\":4,\"queue\":320},\"network\":{\"running\":0,\"queued\":0,\"threads\":8,\"queue\":16},\"write\":{\"running\":0,\"queued\":0,\"threads\":1,\"queue\":16,\"repairs\":0}},\"budget\":{\"output\":{\"used\":0,\"limit\":268435456}},\"network\":{\"mode\":\"direct\",\"nat64\":null}}"
+    },
+    {
+      "id": "running-before-the-first-count",
+      "about": "the watch hasn't counted the peers yet; discovery pending",
+      "state": {
+        "phase": "running",
+        "alive": true,
+        "peers": null,
+        "nat64": {
+          "state": "pending",
+          "prefixes": [],
+          "failures": []
+        },
+        "unit": null,
+        "quarantined": 0,
+        "pools": {
+          "read": {
+            "running": 0,
+            "queued": 0,
+            "repairs": 0
+          },
+          "network": {
+            "running": 0,
+            "queued": 0,
+            "repairs": 0
+          },
+          "write": {
+            "running": 0,
+            "queued": 0,
+            "repairs": 0
+          }
+        },
+        "output": {
+          "used": 0,
+          "limit": 268435456
+        },
+        "mode": "direct"
+      },
+      "source": "design",
+      "result_text": "{\"node\":\"running\",\"node_alive\":true,\"connected_peers\":null,\"unit\":null,\"quarantined_count\":0,\"pools\":{\"read\":{\"running\":0,\"queued\":0,\"threads\":4,\"queue\":320},\"network\":{\"running\":0,\"queued\":0,\"threads\":8,\"queue\":16},\"write\":{\"running\":0,\"queued\":0,\"threads\":1,\"queue\":16,\"repairs\":0}},\"budget\":{\"output\":{\"used\":0,\"limit\":268435456}},\"network\":{\"mode\":\"direct\",\"nat64\":{\"state\":\"pending\",\"prefixes\":[],\"failures\":[]}}}"
+    },
+    {
+      "id": "running",
+      "about": "a running node, its peers counted, some work in the pools, some of the budget reserved",
+      "state": {
+        "phase": "running",
+        "alive": true,
+        "peers": 3,
+        "nat64": {
+          "state": "known",
+          "prefixes": [
+            "64:ff9b::/96"
+          ],
+          "failures": []
+        },
+        "unit": null,
+        "quarantined": 1,
+        "pools": {
+          "read": {
+            "running": 2,
+            "queued": 0,
+            "repairs": 0
+          },
+          "network": {
+            "running": 1,
+            "queued": 0,
+            "repairs": 0
+          },
+          "write": {
+            "running": 1,
+            "queued": 2,
+            "repairs": 1
+          }
+        },
+        "output": {
+          "used": 3145745,
+          "limit": 268435456
+        },
+        "mode": "direct"
+      },
+      "source": "design",
+      "result_text": "{\"node\":\"running\",\"node_alive\":true,\"connected_peers\":3,\"unit\":null,\"quarantined_count\":1,\"pools\":{\"read\":{\"running\":2,\"queued\":0,\"threads\":4,\"queue\":320},\"network\":{\"running\":1,\"queued\":0,\"threads\":8,\"queue\":16},\"write\":{\"running\":1,\"queued\":2,\"threads\":1,\"queue\":16,\"repairs\":1}},\"budget\":{\"output\":{\"used\":3145745,\"limit\":268435456}},\"network\":{\"mode\":\"direct\",\"nat64\":{\"state\":\"known\",\"prefixes\":[\"64:ff9b::/96\"],\"failures\":[]}}}"
+    },
+    {
+      "id": "running-held-exclusively",
+      "about": "work holds the node exclusively, so its liveness isn't asked: the watch hasn't found it down",
+      "state": {
+        "phase": "running",
+        "alive": null,
+        "peers": 3,
+        "nat64": {
+          "state": "known",
+          "prefixes": [
+            "64:ff9b::/96"
+          ],
+          "failures": []
+        },
+        "unit": null,
+        "quarantined": 0,
+        "pools": {
+          "read": {
+            "running": 0,
+            "queued": 0,
+            "repairs": 0
+          },
+          "network": {
+            "running": 0,
+            "queued": 0,
+            "repairs": 0
+          },
+          "write": {
+            "running": 0,
+            "queued": 0,
+            "repairs": 0
+          }
+        },
+        "output": {
+          "used": 0,
+          "limit": 268435456
+        },
+        "mode": "direct"
+      },
+      "source": "design",
+      "result_text": "{\"node\":\"running\",\"node_alive\":true,\"connected_peers\":3,\"unit\":null,\"quarantined_count\":0,\"pools\":{\"read\":{\"running\":0,\"queued\":0,\"threads\":4,\"queue\":320},\"network\":{\"running\":0,\"queued\":0,\"threads\":8,\"queue\":16},\"write\":{\"running\":0,\"queued\":0,\"threads\":1,\"queue\":16,\"repairs\":0}},\"budget\":{\"output\":{\"used\":0,\"limit\":268435456}},\"network\":{\"mode\":\"direct\",\"nat64\":{\"state\":\"known\",\"prefixes\":[\"64:ff9b::/96\"],\"failures\":[]}}}"
+    },
+    {
+      "id": "running-thread-ended",
+      "about": "the node's thread ended, and the watch hasn't marked it down yet",
+      "state": {
+        "phase": "running",
+        "alive": false,
+        "peers": 3,
+        "nat64": {
+          "state": "known",
+          "prefixes": [
+            "64:ff9b::/96"
+          ],
+          "failures": []
+        },
+        "unit": null,
+        "quarantined": 0,
+        "pools": {
+          "read": {
+            "running": 0,
+            "queued": 0,
+            "repairs": 0
+          },
+          "network": {
+            "running": 0,
+            "queued": 0,
+            "repairs": 0
+          },
+          "write": {
+            "running": 0,
+            "queued": 0,
+            "repairs": 0
+          }
+        },
+        "output": {
+          "used": 0,
+          "limit": 268435456
+        },
+        "mode": "direct"
+      },
+      "source": "design",
+      "result_text": "{\"node\":\"running\",\"node_alive\":false,\"connected_peers\":3,\"unit\":null,\"quarantined_count\":0,\"pools\":{\"read\":{\"running\":0,\"queued\":0,\"threads\":4,\"queue\":320},\"network\":{\"running\":0,\"queued\":0,\"threads\":8,\"queue\":16},\"write\":{\"running\":0,\"queued\":0,\"threads\":1,\"queue\":16,\"repairs\":0}},\"budget\":{\"output\":{\"used\":0,\"limit\":268435456}},\"network\":{\"mode\":\"direct\",\"nat64\":{\"state\":\"known\",\"prefixes\":[\"64:ff9b::/96\"],\"failures\":[]}}}"
+    },
+    {
+      "id": "down",
+      "about": "the node's thread ended while it should run: the process is ending",
+      "state": {
+        "phase": "down",
+        "alive": false,
+        "peers": 3,
+        "nat64": {
+          "state": "known",
+          "prefixes": [
+            "64:ff9b::/96"
+          ],
+          "failures": []
+        },
+        "unit": null,
+        "quarantined": 1,
+        "pools": {
+          "read": {
+            "running": 0,
+            "queued": 0,
+            "repairs": 0
+          },
+          "network": {
+            "running": 0,
+            "queued": 0,
+            "repairs": 0
+          },
+          "write": {
+            "running": 0,
+            "queued": 0,
+            "repairs": 0
+          }
+        },
+        "output": {
+          "used": 0,
+          "limit": 268435456
+        },
+        "mode": "direct"
+      },
+      "source": "design",
+      "result_text": "{\"node\":\"down\",\"node_alive\":false,\"connected_peers\":null,\"unit\":null,\"quarantined_count\":1,\"pools\":{\"read\":{\"running\":0,\"queued\":0,\"threads\":4,\"queue\":320},\"network\":{\"running\":0,\"queued\":0,\"threads\":8,\"queue\":16},\"write\":{\"running\":0,\"queued\":0,\"threads\":1,\"queue\":16,\"repairs\":0}},\"budget\":{\"output\":{\"used\":0,\"limit\":268435456}},\"network\":{\"mode\":\"direct\",\"nat64\":null}}"
+    },
+    {
+      "id": "stopped",
+      "about": "the start failed, or the connection ended",
+      "state": {
+        "phase": "stopped",
+        "alive": null,
+        "peers": null,
+        "nat64": null,
+        "unit": null,
+        "quarantined": 1,
+        "pools": {
+          "read": {
+            "running": 0,
+            "queued": 0,
+            "repairs": 0
+          },
+          "network": {
+            "running": 0,
+            "queued": 0,
+            "repairs": 0
+          },
+          "write": {
+            "running": 0,
+            "queued": 0,
+            "repairs": 0
+          }
+        },
+        "output": {
+          "used": 0,
+          "limit": 268435456
+        },
+        "mode": "direct"
+      },
+      "source": "design",
+      "result_text": "{\"node\":\"stopped\",\"node_alive\":false,\"connected_peers\":null,\"unit\":null,\"quarantined_count\":1,\"pools\":{\"read\":{\"running\":0,\"queued\":0,\"threads\":4,\"queue\":320},\"network\":{\"running\":0,\"queued\":0,\"threads\":8,\"queue\":16},\"write\":{\"running\":0,\"queued\":0,\"threads\":1,\"queue\":16,\"repairs\":0}},\"budget\":{\"output\":{\"used\":0,\"limit\":268435456}},\"network\":{\"mode\":\"direct\",\"nat64\":null}}"
+    },
+    {
+      "id": "socks5",
+      "about": "socks5 mode: no NAT64 discovery",
+      "state": {
+        "phase": "running",
+        "alive": true,
+        "peers": 2,
+        "nat64": null,
+        "unit": null,
+        "quarantined": 0,
+        "pools": {
+          "read": {
+            "running": 0,
+            "queued": 0,
+            "repairs": 0
+          },
+          "network": {
+            "running": 0,
+            "queued": 0,
+            "repairs": 0
+          },
+          "write": {
+            "running": 0,
+            "queued": 0,
+            "repairs": 0
+          }
+        },
+        "output": {
+          "used": 0,
+          "limit": 268435456
+        },
+        "mode": "socks5"
+      },
+      "source": "design",
+      "result_text": "{\"node\":\"running\",\"node_alive\":true,\"connected_peers\":2,\"unit\":null,\"quarantined_count\":0,\"pools\":{\"read\":{\"running\":0,\"queued\":0,\"threads\":4,\"queue\":320},\"network\":{\"running\":0,\"queued\":0,\"threads\":8,\"queue\":16},\"write\":{\"running\":0,\"queued\":0,\"threads\":1,\"queue\":16,\"repairs\":0}},\"budget\":{\"output\":{\"used\":0,\"limit\":268435456}},\"network\":{\"mode\":\"socks5\",\"nat64\":null}}"
+    },
+    {
+      "id": "quarantined-unknown",
+      "about": "a count of the record that failed: unknown until the next",
+      "state": {
+        "phase": "running",
+        "alive": true,
+        "peers": 0,
+        "nat64": {
+          "state": "known",
+          "prefixes": [
+            "64:ff9b::/96"
+          ],
+          "failures": []
+        },
+        "unit": null,
+        "quarantined": null,
+        "pools": {
+          "read": {
+            "running": 0,
+            "queued": 0,
+            "repairs": 0
+          },
+          "network": {
+            "running": 0,
+            "queued": 0,
+            "repairs": 0
+          },
+          "write": {
+            "running": 0,
+            "queued": 0,
+            "repairs": 0
+          }
+        },
+        "output": {
+          "used": 0,
+          "limit": 268435456
+        },
+        "mode": "direct"
+      },
+      "source": "design",
+      "result_text": "{\"node\":\"running\",\"node_alive\":true,\"connected_peers\":0,\"unit\":null,\"quarantined_count\":null,\"pools\":{\"read\":{\"running\":0,\"queued\":0,\"threads\":4,\"queue\":320},\"network\":{\"running\":0,\"queued\":0,\"threads\":8,\"queue\":16},\"write\":{\"running\":0,\"queued\":0,\"threads\":1,\"queue\":16,\"repairs\":0}},\"budget\":{\"output\":{\"used\":0,\"limit\":268435456}},\"network\":{\"mode\":\"direct\",\"nat64\":{\"state\":\"known\",\"prefixes\":[\"64:ff9b::/96\"],\"failures\":[]}}}"
+    },
+    {
+      "id": "an-online-repair-unit",
+      "about": "an online repair's unit, past its limit as the watchdog fires; a test-hooked limit",
+      "state": {
+        "phase": "running",
+        "alive": true,
+        "peers": 0,
+        "nat64": {
+          "state": "known",
+          "prefixes": [
+            "64:ff9b::/96"
+          ],
+          "failures": []
+        },
+        "unit": {
+          "kind": "namespace-begin",
+          "elapsed_us": 30001999,
+          "limit_ms": 30000
+        },
+        "quarantined": 0,
+        "pools": {
+          "read": {
+            "running": 0,
+            "queued": 0,
+            "repairs": 0
+          },
+          "network": {
+            "running": 0,
+            "queued": 0,
+            "repairs": 0
+          },
+          "write": {
+            "running": 1,
+            "queued": 0,
+            "repairs": 1
+          }
+        },
+        "output": {
+          "used": 0,
+          "limit": 268435456
+        },
+        "mode": "direct"
+      },
+      "source": "design",
+      "result_text": "{\"node\":\"running\",\"node_alive\":true,\"connected_peers\":0,\"unit\":{\"kind\":\"namespace-begin\",\"elapsed_ms\":30001,\"limit_ms\":30000},\"quarantined_count\":0,\"pools\":{\"read\":{\"running\":0,\"queued\":0,\"threads\":4,\"queue\":320},\"network\":{\"running\":0,\"queued\":0,\"threads\":8,\"queue\":16},\"write\":{\"running\":1,\"queued\":0,\"threads\":1,\"queue\":16,\"repairs\":1}},\"budget\":{\"output\":{\"used\":0,\"limit\":268435456}},\"network\":{\"mode\":\"direct\",\"nat64\":{\"state\":\"known\",\"prefixes\":[\"64:ff9b::/96\"],\"failures\":[]}}}"
+    },
+    {
+      "id": "a-shorter-limit",
+      "about": "the unit watch's own limit, as a test hook sets it",
+      "state": {
+        "phase": "running",
+        "alive": true,
+        "peers": 0,
+        "nat64": {
+          "state": "known",
+          "prefixes": [
+            "64:ff9b::/96"
+          ],
+          "failures": []
+        },
+        "unit": {
+          "kind": "publish",
+          "elapsed_us": 0,
+          "limit_ms": 1000
+        },
+        "quarantined": 0,
+        "pools": {
+          "read": {
+            "running": 0,
+            "queued": 0,
+            "repairs": 0
+          },
+          "network": {
+            "running": 0,
+            "queued": 0,
+            "repairs": 0
+          },
+          "write": {
+            "running": 0,
+            "queued": 0,
+            "repairs": 0
+          }
+        },
+        "output": {
+          "used": 0,
+          "limit": 268435456
+        },
+        "mode": "direct"
+      },
+      "source": "design",
+      "result_text": "{\"node\":\"running\",\"node_alive\":true,\"connected_peers\":0,\"unit\":{\"kind\":\"publish\",\"elapsed_ms\":0,\"limit_ms\":1000},\"quarantined_count\":0,\"pools\":{\"read\":{\"running\":0,\"queued\":0,\"threads\":4,\"queue\":320},\"network\":{\"running\":0,\"queued\":0,\"threads\":8,\"queue\":16},\"write\":{\"running\":0,\"queued\":0,\"threads\":1,\"queue\":16,\"repairs\":0}},\"budget\":{\"output\":{\"used\":0,\"limit\":268435456}},\"network\":{\"mode\":\"direct\",\"nat64\":{\"state\":\"known\",\"prefixes\":[\"64:ff9b::/96\"],\"failures\":[]}}}"
+    },
+    {
+      "id": "pools-full",
+      "about": "every pool at its bound",
+      "state": {
+        "phase": "running",
+        "alive": true,
+        "peers": 0,
+        "nat64": {
+          "state": "known",
+          "prefixes": [
+            "64:ff9b::/96"
+          ],
+          "failures": []
+        },
+        "unit": null,
+        "quarantined": 0,
+        "pools": {
+          "read": {
+            "running": 4,
+            "queued": 320,
+            "repairs": 0
+          },
+          "network": {
+            "running": 8,
+            "queued": 16,
+            "repairs": 0
+          },
+          "write": {
+            "running": 1,
+            "queued": 16,
+            "repairs": 16
+          }
+        },
+        "output": {
+          "used": 0,
+          "limit": 268435456
+        },
+        "mode": "direct"
+      },
+      "source": "design",
+      "result_text": "{\"node\":\"running\",\"node_alive\":true,\"connected_peers\":0,\"unit\":null,\"quarantined_count\":0,\"pools\":{\"read\":{\"running\":4,\"queued\":320,\"threads\":4,\"queue\":320},\"network\":{\"running\":8,\"queued\":16,\"threads\":8,\"queue\":16},\"write\":{\"running\":1,\"queued\":16,\"threads\":1,\"queue\":16,\"repairs\":16}},\"budget\":{\"output\":{\"used\":0,\"limit\":268435456}},\"network\":{\"mode\":\"direct\",\"nat64\":{\"state\":\"known\",\"prefixes\":[\"64:ff9b::/96\"],\"failures\":[]}}}"
+    },
+    {
+      "id": "budget-full",
+      "about": "the whole output budget reserved",
+      "state": {
+        "phase": "running",
+        "alive": true,
+        "peers": 0,
+        "nat64": {
+          "state": "known",
+          "prefixes": [
+            "64:ff9b::/96"
+          ],
+          "failures": []
+        },
+        "unit": null,
+        "quarantined": 0,
+        "pools": {
+          "read": {
+            "running": 0,
+            "queued": 0,
+            "repairs": 0
+          },
+          "network": {
+            "running": 0,
+            "queued": 0,
+            "repairs": 0
+          },
+          "write": {
+            "running": 0,
+            "queued": 0,
+            "repairs": 0
+          }
+        },
+        "output": {
+          "used": 268435456,
+          "limit": 268435456
+        },
+        "mode": "direct"
+      },
+      "source": "design",
+      "result_text": "{\"node\":\"running\",\"node_alive\":true,\"connected_peers\":0,\"unit\":null,\"quarantined_count\":0,\"pools\":{\"read\":{\"running\":0,\"queued\":0,\"threads\":4,\"queue\":320},\"network\":{\"running\":0,\"queued\":0,\"threads\":8,\"queue\":16},\"write\":{\"running\":0,\"queued\":0,\"threads\":1,\"queue\":16,\"repairs\":0}},\"budget\":{\"output\":{\"used\":268435456,\"limit\":268435456}},\"network\":{\"mode\":\"direct\",\"nat64\":{\"state\":\"known\",\"prefixes\":[\"64:ff9b::/96\"],\"failures\":[]}}}"
+    },
+    {
+      "id": "budget-shrunk",
+      "about": "a test hook's budget",
+      "state": {
+        "phase": "running",
+        "alive": true,
+        "peers": 0,
+        "nat64": {
+          "state": "known",
+          "prefixes": [
+            "64:ff9b::/96"
+          ],
+          "failures": []
+        },
+        "unit": null,
+        "quarantined": 0,
+        "pools": {
+          "read": {
+            "running": 0,
+            "queued": 0,
+            "repairs": 0
+          },
+          "network": {
+            "running": 0,
+            "queued": 0,
+            "repairs": 0
+          },
+          "write": {
+            "running": 0,
+            "queued": 0,
+            "repairs": 0
+          }
+        },
+        "output": {
+          "used": 4096,
+          "limit": 67108864
+        },
+        "mode": "direct"
+      },
+      "source": "design",
+      "result_text": "{\"node\":\"running\",\"node_alive\":true,\"connected_peers\":0,\"unit\":null,\"quarantined_count\":0,\"pools\":{\"read\":{\"running\":0,\"queued\":0,\"threads\":4,\"queue\":320},\"network\":{\"running\":0,\"queued\":0,\"threads\":8,\"queue\":16},\"write\":{\"running\":0,\"queued\":0,\"threads\":1,\"queue\":16,\"repairs\":0}},\"budget\":{\"output\":{\"used\":4096,\"limit\":67108864}},\"network\":{\"mode\":\"direct\",\"nat64\":{\"state\":\"known\",\"prefixes\":[\"64:ff9b::/96\"],\"failures\":[]}}}"
+    },
+    {
+      "id": "nat64-unknown",
+      "about": "a resolver failed: why, in order",
+      "state": {
+        "phase": "running",
+        "alive": true,
+        "peers": 0,
+        "nat64": {
+          "state": "unknown",
+          "prefixes": [
+            "64:ff9b::/96"
+          ],
+          "failures": [
+            "timeout",
+            "rcode"
+          ]
+        },
+        "unit": null,
+        "quarantined": 0,
+        "pools": {
+          "read": {
+            "running": 0,
+            "queued": 0,
+            "repairs": 0
+          },
+          "network": {
+            "running": 0,
+            "queued": 0,
+            "repairs": 0
+          },
+          "write": {
+            "running": 0,
+            "queued": 0,
+            "repairs": 0
+          }
+        },
+        "output": {
+          "used": 0,
+          "limit": 268435456
+        },
+        "mode": "direct"
+      },
+      "source": "design",
+      "result_text": "{\"node\":\"running\",\"node_alive\":true,\"connected_peers\":0,\"unit\":null,\"quarantined_count\":0,\"pools\":{\"read\":{\"running\":0,\"queued\":0,\"threads\":4,\"queue\":320},\"network\":{\"running\":0,\"queued\":0,\"threads\":8,\"queue\":16},\"write\":{\"running\":0,\"queued\":0,\"threads\":1,\"queue\":16,\"repairs\":0}},\"budget\":{\"output\":{\"used\":0,\"limit\":268435456}},\"network\":{\"mode\":\"direct\",\"nat64\":{\"state\":\"unknown\",\"prefixes\":[\"64:ff9b::/96\"],\"failures\":[\"timeout\",\"rcode\"]}}}"
+    },
+    {
+      "id": "nat64-at-its-bounds",
+      "about": "16 prefixes and 16 failures: nothing cut",
+      "state": {
+        "phase": "running",
+        "alive": true,
+        "peers": 0,
+        "nat64": {
+          "state": "incomplete",
+          "prefixes": [
+            "2001:db8:1::/96",
+            "2001:db8:2::/96",
+            "2001:db8:3::/96",
+            "2001:db8:4::/96",
+            "2001:db8:5::/96",
+            "2001:db8:6::/96",
+            "2001:db8:7::/96",
+            "2001:db8:8::/96",
+            "2001:db8:9::/96",
+            "2001:db8:a::/96",
+            "2001:db8:b::/96",
+            "2001:db8:c::/96",
+            "2001:db8:d::/96",
+            "2001:db8:e::/96",
+            "2001:db8:f::/96",
+            "2001:db8:10::/96"
+          ],
+          "failures": [
+            "timeout",
+            "timeout",
+            "timeout",
+            "timeout",
+            "timeout",
+            "timeout",
+            "timeout",
+            "timeout",
+            "timeout",
+            "timeout",
+            "timeout",
+            "timeout",
+            "timeout",
+            "timeout",
+            "timeout",
+            "timeout"
+          ]
+        },
+        "unit": null,
+        "quarantined": 0,
+        "pools": {
+          "read": {
+            "running": 0,
+            "queued": 0,
+            "repairs": 0
+          },
+          "network": {
+            "running": 0,
+            "queued": 0,
+            "repairs": 0
+          },
+          "write": {
+            "running": 0,
+            "queued": 0,
+            "repairs": 0
+          }
+        },
+        "output": {
+          "used": 0,
+          "limit": 268435456
+        },
+        "mode": "direct"
+      },
+      "source": "design",
+      "result_text": "{\"node\":\"running\",\"node_alive\":true,\"connected_peers\":0,\"unit\":null,\"quarantined_count\":0,\"pools\":{\"read\":{\"running\":0,\"queued\":0,\"threads\":4,\"queue\":320},\"network\":{\"running\":0,\"queued\":0,\"threads\":8,\"queue\":16},\"write\":{\"running\":0,\"queued\":0,\"threads\":1,\"queue\":16,\"repairs\":0}},\"budget\":{\"output\":{\"used\":0,\"limit\":268435456}},\"network\":{\"mode\":\"direct\",\"nat64\":{\"state\":\"incomplete\",\"prefixes\":[\"2001:db8:1::/96\",\"2001:db8:2::/96\",\"2001:db8:3::/96\",\"2001:db8:4::/96\",\"2001:db8:5::/96\",\"2001:db8:6::/96\",\"2001:db8:7::/96\",\"2001:db8:8::/96\",\"2001:db8:9::/96\",\"2001:db8:a::/96\",\"2001:db8:b::/96\",\"2001:db8:c::/96\",\"2001:db8:d::/96\",\"2001:db8:e::/96\",\"2001:db8:f::/96\",\"2001:db8:10::/96\"],\"failures\":[\"timeout\",\"timeout\",\"timeout\",\"timeout\",\"timeout\",\"timeout\",\"timeout\",\"timeout\",\"timeout\",\"timeout\",\"timeout\",\"timeout\",\"timeout\",\"timeout\",\"timeout\",\"timeout\"]}}}"
+    },
+    {
+      "id": "nat64-past-its-bounds",
+      "about": "more than a state holds (synthetic) and 20 resolvers listed that can't be asked: the first 16 of each",
+      "state": {
+        "phase": "running",
+        "alive": true,
+        "peers": 0,
+        "nat64": {
+          "state": "incomplete",
+          "prefixes": [
+            "2001:db8:1::/96",
+            "2001:db8:2::/96",
+            "2001:db8:3::/96",
+            "2001:db8:4::/96",
+            "2001:db8:5::/96",
+            "2001:db8:6::/96",
+            "2001:db8:7::/96",
+            "2001:db8:8::/96",
+            "2001:db8:9::/96",
+            "2001:db8:a::/96",
+            "2001:db8:b::/96",
+            "2001:db8:c::/96",
+            "2001:db8:d::/96",
+            "2001:db8:e::/96",
+            "2001:db8:f::/96",
+            "2001:db8:10::/96",
+            "2001:db8:11::/96",
+            "2001:db8:12::/96",
+            "2001:db8:13::/96",
+            "2001:db8:14::/96"
+          ],
+          "failures": [
+            "unaskable",
+            "unaskable",
+            "unaskable",
+            "unaskable",
+            "unaskable",
+            "unaskable",
+            "unaskable",
+            "unaskable",
+            "over_limit",
+            "over_limit",
+            "over_limit",
+            "over_limit",
+            "over_limit",
+            "over_limit",
+            "over_limit",
+            "over_limit",
+            "over_limit",
+            "over_limit",
+            "over_limit",
+            "over_limit"
+          ]
+        },
+        "unit": null,
+        "quarantined": 0,
+        "pools": {
+          "read": {
+            "running": 0,
+            "queued": 0,
+            "repairs": 0
+          },
+          "network": {
+            "running": 0,
+            "queued": 0,
+            "repairs": 0
+          },
+          "write": {
+            "running": 0,
+            "queued": 0,
+            "repairs": 0
+          }
+        },
+        "output": {
+          "used": 0,
+          "limit": 268435456
+        },
+        "mode": "direct"
+      },
+      "source": "design",
+      "result_text": "{\"node\":\"running\",\"node_alive\":true,\"connected_peers\":0,\"unit\":null,\"quarantined_count\":0,\"pools\":{\"read\":{\"running\":0,\"queued\":0,\"threads\":4,\"queue\":320},\"network\":{\"running\":0,\"queued\":0,\"threads\":8,\"queue\":16},\"write\":{\"running\":0,\"queued\":0,\"threads\":1,\"queue\":16,\"repairs\":0}},\"budget\":{\"output\":{\"used\":0,\"limit\":268435456}},\"network\":{\"mode\":\"direct\",\"nat64\":{\"state\":\"incomplete\",\"prefixes\":[\"2001:db8:1::/96\",\"2001:db8:2::/96\",\"2001:db8:3::/96\",\"2001:db8:4::/96\",\"2001:db8:5::/96\",\"2001:db8:6::/96\",\"2001:db8:7::/96\",\"2001:db8:8::/96\",\"2001:db8:9::/96\",\"2001:db8:a::/96\",\"2001:db8:b::/96\",\"2001:db8:c::/96\",\"2001:db8:d::/96\",\"2001:db8:e::/96\",\"2001:db8:f::/96\",\"2001:db8:10::/96\"],\"failures\":[\"unaskable\",\"unaskable\",\"unaskable\",\"unaskable\",\"unaskable\",\"unaskable\",\"unaskable\",\"unaskable\",\"over_limit\",\"over_limit\",\"over_limit\",\"over_limit\",\"over_limit\",\"over_limit\",\"over_limit\",\"over_limit\"]}}}"
+    },
+    {
+      "id": "largest",
+      "about": "every list at its bound, the longest names and the largest numbers",
+      "state": {
+        "phase": "running",
+        "alive": true,
+        "peers": 9007199254740991,
+        "nat64": {
+          "state": "incomplete",
+          "prefixes": [
+            "ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff/128",
+            "ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff/128",
+            "ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff/128",
+            "ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff/128",
+            "ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff/128",
+            "ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff/128",
+            "ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff/128",
+            "ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff/128",
+            "ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff/128",
+            "ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff/128",
+            "ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff/128",
+            "ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff/128",
+            "ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff/128",
+            "ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff/128",
+            "ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff/128",
+            "ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff/128"
+          ],
+          "failures": [
+            "over_limit",
+            "over_limit",
+            "over_limit",
+            "over_limit",
+            "over_limit",
+            "over_limit",
+            "over_limit",
+            "over_limit",
+            "over_limit",
+            "over_limit",
+            "over_limit",
+            "over_limit",
+            "over_limit",
+            "over_limit",
+            "over_limit",
+            "over_limit"
+          ]
+        },
+        "unit": {
+          "kind": "namespace-begin",
+          "elapsed_us": 9007199254740991,
+          "limit_ms": 9007199254740991
+        },
+        "quarantined": 9007199254740991,
+        "pools": {
+          "read": {
+            "running": 9007199254740991,
+            "queued": 9007199254740991,
+            "repairs": 0
+          },
+          "network": {
+            "running": 9007199254740991,
+            "queued": 9007199254740991,
+            "repairs": 0
+          },
+          "write": {
+            "running": 9007199254740991,
+            "queued": 9007199254740991,
+            "repairs": 9007199254740991
+          }
+        },
+        "output": {
+          "used": 9007199254740991,
+          "limit": 9007199254740991
+        },
+        "mode": "direct"
+      },
+      "source": "design",
+      "result_text": "{\"node\":\"running\",\"node_alive\":true,\"connected_peers\":9007199254740991,\"unit\":{\"kind\":\"namespace-begin\",\"elapsed_ms\":9007199254740,\"limit_ms\":9007199254740991},\"quarantined_count\":9007199254740991,\"pools\":{\"read\":{\"running\":9007199254740991,\"queued\":9007199254740991,\"threads\":4,\"queue\":320},\"network\":{\"running\":9007199254740991,\"queued\":9007199254740991,\"threads\":8,\"queue\":16},\"write\":{\"running\":9007199254740991,\"queued\":9007199254740991,\"threads\":1,\"queue\":16,\"repairs\":9007199254740991}},\"budget\":{\"output\":{\"used\":9007199254740991,\"limit\":9007199254740991}},\"network\":{\"mode\":\"direct\",\"nat64\":{\"state\":\"incomplete\",\"prefixes\":[\"ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff/128\",\"ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff/128\",\"ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff/128\",\"ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff/128\",\"ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff/128\",\"ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff/128\",\"ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff/128\",\"ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff/128\",\"ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff/128\",\"ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff/128\",\"ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff/128\",\"ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff/128\",\"ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff/128\",\"ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff/128\",\"ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff/128\",\"ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff/128\"],\"failures\":[\"over_limit\",\"over_limit\",\"over_limit\",\"over_limit\",\"over_limit\",\"over_limit\",\"over_limit\",\"over_limit\",\"over_limit\",\"over_limit\",\"over_limit\",\"over_limit\",\"over_limit\",\"over_limit\",\"over_limit\",\"over_limit\"]}}}"
+    }
+  ],
+  "connections": [
+    {
+      "id": "peers-0",
+      "status_text": "{\"connectedPeers\":0}",
+      "main": {
+        "connections": {
+          "success": true,
+          "count": 0,
+          "reposCount": 0,
+          "version": "0.8.0"
+        },
+        "calls": [
+          {
+            "export": "status",
+            "args": []
+          },
+          {
+            "export": "listRepos",
+            "args": []
+          }
+        ],
+        "infos": [
+          "[RadicleEmbedded] Loaded addon from /freedom-core-vectors/libradicle.node"
+        ],
+        "warnings": []
+      },
+      "state": {
+        "phase": "running",
+        "alive": true,
+        "peers": 0,
+        "nat64": {
+          "state": "known",
+          "prefixes": [
+            "64:ff9b::/96"
+          ],
+          "failures": []
+        },
+        "unit": null,
+        "quarantined": 0,
+        "pools": {
+          "read": {
+            "running": 0,
+            "queued": 0,
+            "repairs": 0
+          },
+          "network": {
+            "running": 0,
+            "queued": 0,
+            "repairs": 0
+          },
+          "write": {
+            "running": 0,
+            "queued": 0,
+            "repairs": 0
+          }
+        },
+        "output": {
+          "used": 0,
+          "limit": 268435456
+        },
+        "mode": "direct"
+      },
+      "result_text": "{\"node\":\"running\",\"node_alive\":true,\"connected_peers\":0,\"unit\":null,\"quarantined_count\":0,\"pools\":{\"read\":{\"running\":0,\"queued\":0,\"threads\":4,\"queue\":320},\"network\":{\"running\":0,\"queued\":0,\"threads\":8,\"queue\":16},\"write\":{\"running\":0,\"queued\":0,\"threads\":1,\"queue\":16,\"repairs\":0}},\"budget\":{\"output\":{\"used\":0,\"limit\":268435456}},\"network\":{\"mode\":\"direct\",\"nat64\":{\"state\":\"known\",\"prefixes\":[\"64:ff9b::/96\"],\"failures\":[]}}}"
+    },
+    {
+      "id": "peers-3",
+      "status_text": "{\"connectedPeers\":3}",
+      "main": {
+        "connections": {
+          "success": true,
+          "count": 3,
+          "reposCount": 0,
+          "version": "0.8.0"
+        },
+        "calls": [
+          {
+            "export": "status",
+            "args": []
+          },
+          {
+            "export": "listRepos",
+            "args": []
+          }
+        ],
+        "infos": [],
+        "warnings": []
+      },
+      "state": {
+        "phase": "running",
+        "alive": true,
+        "peers": 3,
+        "nat64": {
+          "state": "known",
+          "prefixes": [
+            "64:ff9b::/96"
+          ],
+          "failures": []
+        },
+        "unit": null,
+        "quarantined": 0,
+        "pools": {
+          "read": {
+            "running": 0,
+            "queued": 0,
+            "repairs": 0
+          },
+          "network": {
+            "running": 0,
+            "queued": 0,
+            "repairs": 0
+          },
+          "write": {
+            "running": 0,
+            "queued": 0,
+            "repairs": 0
+          }
+        },
+        "output": {
+          "used": 0,
+          "limit": 268435456
+        },
+        "mode": "direct"
+      },
+      "result_text": "{\"node\":\"running\",\"node_alive\":true,\"connected_peers\":3,\"unit\":null,\"quarantined_count\":0,\"pools\":{\"read\":{\"running\":0,\"queued\":0,\"threads\":4,\"queue\":320},\"network\":{\"running\":0,\"queued\":0,\"threads\":8,\"queue\":16},\"write\":{\"running\":0,\"queued\":0,\"threads\":1,\"queue\":16,\"repairs\":0}},\"budget\":{\"output\":{\"used\":0,\"limit\":268435456}},\"network\":{\"mode\":\"direct\",\"nat64\":{\"state\":\"known\",\"prefixes\":[\"64:ff9b::/96\"],\"failures\":[]}}}"
+    },
+    {
+      "id": "peers-1000",
+      "status_text": "{\"connectedPeers\":1000}",
+      "main": {
+        "connections": {
+          "success": true,
+          "count": 1000,
+          "reposCount": 0,
+          "version": "0.8.0"
+        },
+        "calls": [
+          {
+            "export": "status",
+            "args": []
+          },
+          {
+            "export": "listRepos",
+            "args": []
+          }
+        ],
+        "infos": [],
+        "warnings": []
+      },
+      "state": {
+        "phase": "running",
+        "alive": true,
+        "peers": 1000,
+        "nat64": {
+          "state": "known",
+          "prefixes": [
+            "64:ff9b::/96"
+          ],
+          "failures": []
+        },
+        "unit": null,
+        "quarantined": 0,
+        "pools": {
+          "read": {
+            "running": 0,
+            "queued": 0,
+            "repairs": 0
+          },
+          "network": {
+            "running": 0,
+            "queued": 0,
+            "repairs": 0
+          },
+          "write": {
+            "running": 0,
+            "queued": 0,
+            "repairs": 0
+          }
+        },
+        "output": {
+          "used": 0,
+          "limit": 268435456
+        },
+        "mode": "direct"
+      },
+      "result_text": "{\"node\":\"running\",\"node_alive\":true,\"connected_peers\":1000,\"unit\":null,\"quarantined_count\":0,\"pools\":{\"read\":{\"running\":0,\"queued\":0,\"threads\":4,\"queue\":320},\"network\":{\"running\":0,\"queued\":0,\"threads\":8,\"queue\":16},\"write\":{\"running\":0,\"queued\":0,\"threads\":1,\"queue\":16,\"repairs\":0}},\"budget\":{\"output\":{\"used\":0,\"limit\":268435456}},\"network\":{\"mode\":\"direct\",\"nat64\":{\"state\":\"known\",\"prefixes\":[\"64:ff9b::/96\"],\"failures\":[]}}}"
+    }
+  ]
+}

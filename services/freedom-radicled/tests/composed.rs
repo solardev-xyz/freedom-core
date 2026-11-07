@@ -709,6 +709,8 @@ fn a_composed_read_is_bounded_where_the_add_on_is() {
     shut_down(&mut radicled, &dirs.home);
 }
 
+const WAITS: &str = "test hook: a reservation waits for the budget";
+
 /// 0008, "Pools and budgets" and "Deadlines": a composed read that can't
 /// reserve waits, holding what it has, and ends at main's cancel, freeing
 /// it for a read behind it, and at its deadline, 8 s from its admission.
@@ -729,11 +731,17 @@ fn a_composed_read_waiting_for_the_budget_ends_at_its_cancel_and_its_deadline() 
         &[&[("big.txt", &big), ("README.md", &readme)]],
     );
     let r = rid.to_string();
+    // The 8 s deadline is the reads' under test, not the held body's: it
+    // applies once `from` exists, which the test makes after the body's
+    // head, however long that body took to build.
+    let from = dirs.own_home.join("deadline-from");
+    let from_arg = from.display().to_string();
     let mut radicled = served(
         &dirs,
         &[
             ("FREEDOM_RADICLED_TEST_BUDGET", "68157440"),
             ("FREEDOM_RADICLED_TEST_WORK_DEADLINE_MS", "8000"),
+            ("FREEDOM_RADICLED_TEST_WORK_DEADLINE_FROM", &from_arg),
         ],
     );
     let held = radicled.request(
@@ -742,17 +750,23 @@ fn a_composed_read_waiting_for_the_budget_ends_at_its_cancel_and_its_deadline() 
     );
     let head = radicled.reply(held);
     assert!(
-        head["result"]["bytes"].as_u64().unwrap() > (JSON_CAP as u64) - 64,
+        head["result"]["bytes"]
+            .as_u64()
+            .unwrap_or_else(|| panic!("{head}"))
+            > (JSON_CAP as u64) - 64,
         "{head}"
     );
     radicled.uncredited(held, 128 << 10);
+    std::fs::write(&from, b"").unwrap();
     let readme_at = json!({ "op": "readme_at", "args": { "rid": r, "revision": commits[0] } });
     let status = |radicled: &mut Radicled| radicled.request("rad.read", json!({ "op": "status" }));
 
-    // Main's cancel ends a wait, and frees what it held.
+    // Main's cancel ends a wait, and frees what it held. The `status` is
+    // sent once the README waits, so it waits behind it.
     let waiting = radicled.request("rad.read", readme_at.clone());
-    std::thread::sleep(Duration::from_millis(1000));
+    assert!(radicled.logs_times(WAITS, 1, READ_TIMEOUT));
     let behind = status(&mut radicled);
+    assert!(radicled.logs_times(WAITS, 2, READ_TIMEOUT));
     assert!(!radicled.any_within(waiting, Duration::from_millis(1500)));
     assert!(!radicled.any_within(behind, Duration::ZERO));
     radicled.cancel(waiting);
@@ -762,14 +776,21 @@ fn a_composed_read_waiting_for_the_budget_ends_at_its_cancel_and_its_deadline() 
         br#"{"connectedPeers":0}"#
     );
 
-    // So does its deadline.
-    let waiting = radicled.request("rad.read", readme_at.clone());
+    // So does its deadline. Its clock starts before it is sent, so never
+    // after its admission. The `status` comes 2 s after it waits, so that
+    // its own deadline is 2 s past the README's.
     let admitted = Instant::now();
+    let waiting = radicled.request("rad.read", readme_at.clone());
+    assert!(radicled.logs_times(WAITS, 3, READ_TIMEOUT));
     std::thread::sleep(Duration::from_millis(2000));
     let behind = status(&mut radicled);
+    assert!(radicled.logs_times(WAITS, 4, READ_TIMEOUT));
     assert!(!radicled.any_within(behind, Duration::from_millis(2000)));
     assert_eq!(code(&radicled.reply(waiting)), "deadline");
     assert!(admitted.elapsed() >= Duration::from_secs(8));
+    // The test's 8 s, not the default 60 s: it was admitted once `from`
+    // existed.
+    assert!(admitted.elapsed() < Duration::from_secs(60));
     assert_eq!(
         radicled.read_reply(behind).unwrap(),
         br#"{"connectedPeers":0}"#
@@ -851,14 +872,23 @@ fn a_quarantined_repository_is_refused_as_0008_says() {
 }
 
 const STARTED: &str = "test hook: the write has started";
+const RETURNED: &str = "test hook: the write has returned";
 const QUEUED: &str = "an online repair is queued";
+const HOLDS: &str = "test hook: a repair turn holds the node";
 const DONE: &str = "an online repair is done";
+const RECORDED: &str = "test hook: the repair's end is recorded";
 
 /// 0008, "Methods" ("The repair fence") and "Writes": a repository's
 /// composed COB ops answer `stopped` while a COB write to it is past its
 /// start and not yet proven, and while its online repair runs; its other
 /// composed reads go on. Once the write is proven, or the repair is over,
 /// they read what it left.
+///
+/// Nothing here races a hold: each write is held past its start, and the
+/// repair's turns before their unit, until the test releases them
+/// ([`Dirs::held`]), so the fenced reads come while the write or the
+/// repair is under way on any runner. The reads after the repair wait for
+/// the writer to record its end, which comes a moment after its `done`.
 #[test]
 fn a_repository_being_written_or_repaired_fences_its_composed_cob_reads() {
     let dirs = Dirs::new();
@@ -872,17 +902,24 @@ fn a_repository_being_written_or_repaired_fences_its_composed_cob_reads() {
     let first = fixture::with_node(&dirs.home, &SEED, |node| {
         node.issues(rid).unwrap()[0].0.to_string()
     });
+    let (write_hold, write_gate) = dirs.held("until", "release-write");
+    let (repair_hold, repair_gate) = dirs.held("until", "release-repair");
     let mut radicled = served(
         &dirs,
         &[
-            ("FREEDOM_RADICLED_TEST_HOLD_WRITE", "2000"),
-            ("FREEDOM_RADICLED_TEST_HOLD_REPAIR", "1000"),
+            ("FREEDOM_RADICLED_TEST_HOLD_WRITE", &write_hold),
+            ("FREEDOM_RADICLED_TEST_HOLD_REPAIR", &repair_hold),
         ],
     );
     let r = rid.to_string();
     let page = json!({ "rid": r, "status": null, "page": null, "per_page": null });
     let issue = json!({ "rid": r, "issue_id": first });
-    let fenced = |radicled: &mut Radicled| {
+    // Its COB ops are `stopped`; `readme_at` and `remotes` go on.
+    // `repo_meta` isn't fenced either, but it takes the node exclusively
+    // (libradicle's `seeders`), so it waits for the write or the repair's
+    // turn, which hold the node shared: it is sent last, and its answer
+    // read once the test has released them.
+    let fenced = |radicled: &mut Radicled| -> u64 {
         for (op, args) in [
             ("issue", issue.clone()),
             ("issues_page", page.clone()),
@@ -894,14 +931,18 @@ fn a_repository_being_written_or_repaired_fences_its_composed_cob_reads() {
         }
         for (op, args) in [
             ("readme_at", json!({ "rid": r, "revision": commits[0] })),
-            ("repo_meta", json!({ "rid": r })),
             ("remotes", json!({ "rid": r })),
         ] {
             assert!(radicled.read(op, args.clone()).is_ok(), "{op}");
         }
+        radicled.request(
+            "rad.read",
+            json!({ "op": "repo_meta", "args": { "rid": r } }),
+        )
     };
 
-    // A write held past its start, then proven.
+    // A write held past its start, then proven: proven before its reply,
+    // so read at once.
     let write = radicled.request(
         "rad.write",
         json!({
@@ -909,11 +950,17 @@ fn a_repository_being_written_or_repaired_fences_its_composed_cob_reads() {
             "args": { "rid": r, "title": "Written", "description": "Its body.", "labels": [] },
         }),
     );
-    assert!(radicled.logs(STARTED, Duration::from_secs(10)));
-    fenced(&mut radicled);
+    assert!(radicled.logs(STARTED, READ_TIMEOUT));
+    let meta = fenced(&mut radicled);
+    assert!(!radicled.logs(RETURNED, Duration::ZERO));
+    std::fs::write(&write_gate, b"").unwrap();
     assert!(radicled.reply(write)["result"]["id"].is_string());
+    assert!(radicled.read_reply(meta).is_ok());
     let listed = read_text(&mut radicled, "issues_page", &page);
     assert!(listed.contains("Written"), "{listed}");
+    // Its hold is over: the next write's holds until the gate is back.
+    assert!(radicled.logs(RETURNED, READ_TIMEOUT));
+    std::fs::remove_file(&write_gate).unwrap();
 
     // A write whose outcome is unknown: fenced while it runs, then while
     // its repository is repaired.
@@ -924,15 +971,22 @@ fn a_repository_being_written_or_repaired_fences_its_composed_cob_reads() {
             "args": { "rid": r, "issue_id": "abcdef0123", "body": "Nowhere." },
         }),
     );
-    assert!(radicled.logs_times(STARTED, 2, Duration::from_secs(10)));
+    assert!(radicled.logs_times(STARTED, 2, READ_TIMEOUT));
     assert_eq!(
         code(&radicled.read("issue", issue.clone()).unwrap_err()),
         "stopped"
     );
+    std::fs::write(&write_gate, b"").unwrap();
     assert_eq!(code(&radicled.reply(write)), "outcome_unknown");
-    assert!(radicled.logs(QUEUED, Duration::from_secs(10)));
-    fenced(&mut radicled);
-    assert!(radicled.logs(DONE, Duration::from_secs(60)));
+    assert!(radicled.logs(QUEUED, READ_TIMEOUT));
+    // Its first turn has begun the repair, and holds before its unit.
+    assert!(radicled.logs(HOLDS, READ_TIMEOUT));
+    let meta = fenced(&mut radicled);
+    assert!(!radicled.logs(DONE, Duration::ZERO));
+    std::fs::write(&repair_gate, b"").unwrap();
+    assert!(radicled.read_reply(meta).is_ok());
+    assert!(radicled.logs(DONE, READ_TIMEOUT));
+    assert!(radicled.logs(RECORDED, READ_TIMEOUT));
     assert!(radicled.read("issue", issue).is_ok());
     let listed = read_text(&mut radicled, "issues_page", &page);
     assert!(listed.contains("Written"), "{listed}");
