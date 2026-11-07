@@ -615,7 +615,14 @@ impl Naming {
                 settled = true;
                 continue;
             }
-            let (method, kind, params) = shell_request(request, *generations, left);
+            // Whom an operation serves is read as its frame is made: a
+            // caller that has left since it was queued is answered by now
+            // (freedom-core #285).
+            let serves = match request {
+                Request::Verified(_) => self.serves(io),
+                _ => Vec::new(),
+            };
+            let (method, kind, params) = shell_request(request, *generations, left, &serves);
             let params =
                 serde_json::to_vec(&params).map_err(|_| Stop::Protocol("unwritable_request"))?;
             // Its frame is made outside the gate's lock. Naming's requests
@@ -648,6 +655,22 @@ impl Naming {
             }
         }
         Ok(settled)
+    }
+
+    /// The IDs main gave the requests that the machine's outstanding
+    /// request `io` serves now, in increasing order (freedom-core #285):
+    /// the lookups, and `dweb.open` requests, waiting on the session that
+    /// made it. None has been answered yet, so each is still pending at
+    /// main when the request arrives: a caller's reply is made as it
+    /// leaves its session, and goes to the writer before any request made
+    /// after it (requests wait while replies do).
+    fn serves(&self, io: u64) -> Vec<u64> {
+        let callers = self.machine.callers_of(io);
+        self.callers
+            .iter()
+            .filter(|(_, caller)| callers.contains(caller))
+            .map(|(id, _)| *id)
+            .collect()
     }
 
     /// A resolution reply (design 0004, Replies).
@@ -857,12 +880,14 @@ fn with_placeholders(value: &JsValue) -> (JsValue, Vec<String>) {
 
 /// A machine request as a `shell.*` request: its method, how to read the
 /// answer, and its params with the generations of its scopes.
-/// A `shell.*` request: its method, kind and params. `deadline_ms` is what
-/// is left of its session's deadline.
+/// `deadline_ms` is what is left of its session's deadline; `serves`, for
+/// a verified operation, the IDs of main's requests it serves
+/// ([`Naming::serves`]).
 fn shell_request(
     request: &Request,
     generations: Generations,
     deadline_ms: Ms,
+    serves: &[u64],
 ) -> (&'static str, Kind, serde_json::Value) {
     let ens = serde_json::json!({ "ens": generations.ens });
     match request {
@@ -907,6 +932,7 @@ fn shell_request(
                     serde_json::json!({ "lifecycle": generations.lifecycle }),
                 );
                 map.insert("deadline_ms".into(), deadline_ms.into());
+                map.insert("serves".into(), serves.into());
             }
             ("shell.verified", Kind::Verified, params)
         }
@@ -1422,6 +1448,120 @@ mod tests {
             assert_eq!(shell(&written(&rx)).len(), 1);
         }
         assert!(naming.outbox.is_empty() && naming.queued.is_empty());
+    }
+
+    /// Naming configured with Myotis alone, and Myotis ready.
+    fn myotis_only(naming: &mut Naming) {
+        let myotis = SNAPSHOT
+            .replace(r#""order":["quorum"]"#, r#""order":["myotis"]"#)
+            .replace(r#""myotis_enabled":false"#, r#""myotis_enabled":true"#);
+        assert!(naming.request(1, "naming.configure", Some(&myotis)).is_ok());
+        let ready = r#"{"ready":true,"enabled":true}"#;
+        assert!(
+            naming
+                .request(2, "naming.availability", Some(ready))
+                .is_ok()
+        );
+    }
+
+    fn resolve(naming: &mut Naming, id: u64, name: &str, private: bool) {
+        let params = serde_json::json!({ "name": name, "private": private }).to_string();
+        assert!(
+            naming
+                .request(id, "naming.resolve_content", Some(&params))
+                .is_ok()
+        );
+        assert!(naming.advance(0).is_ok());
+    }
+
+    fn verified(frames: &[serde_json::Value]) -> Vec<&serde_json::Value> {
+        frames
+            .iter()
+            .filter(|f| f["method"] == "shell.verified")
+            .collect()
+    }
+
+    /// Each verified operation names the requests it serves, by main's IDs
+    /// (freedom-core #285): the lookups waiting on its session as its frame
+    /// is made. Lookups of other names, from other windows, never share
+    /// one; a lookup that joins a session while its operation waits for a
+    /// slot at main is named; one that left before the operation went (a
+    /// cancel) is not; and one no lookup waits for any more names none.
+    #[test]
+    fn verified_operations_serve_the_lookups_waiting_on_them() {
+        // Main takes one of the core's requests at a time.
+        let (mut naming, rx) = naming(1, usize::MAX);
+        myotis_only(&mut naming);
+        assert!(naming.advance(0).is_ok());
+        written(&rx);
+        // a.eth's operation goes at once.
+        resolve(&mut naming, 10, "a.eth", true);
+        let frames = written(&rx);
+        let ops = verified(&frames);
+        assert_eq!(ops.len(), 1, "{frames:?}");
+        assert_eq!(ops[0]["params"]["name"], "a.eth");
+        assert_eq!(ops[0]["params"]["serves"], serde_json::json!([10]));
+        let a = ops[0]["id"].as_u64().unwrap();
+        // b.eth's and c.eth's wait for the slot. Lookups 13 and 14 join
+        // b.eth's session meanwhile, 12 leaves it, and c.eth's only one
+        // leaves too.
+        resolve(&mut naming, 12, "b.eth", false);
+        resolve(&mut naming, 13, "b.eth", true);
+        resolve(&mut naming, 15, "c.eth", true);
+        resolve(&mut naming, 14, "b.eth", false);
+        assert_eq!(naming.queued.len(), 2);
+        for id in [12, 15] {
+            assert!(naming.handle(In::Cancel { id }).is_ok());
+            assert!(naming.flush().is_ok());
+        }
+        let frames = written(&rx);
+        assert!(verified(&frames).is_empty(), "{frames:?}");
+        for id in [12, 15] {
+            let reply = frames.iter().find(|f| f["id"] == id).unwrap();
+            assert_eq!(reply["error"]["code"], "cancelled");
+        }
+        // Each answer frees the slot for the next operation.
+        let failed = || RawValue::from_string(r#"{"failure":"error"}"#.into()).unwrap();
+        assert!(respond(&mut naming, a, Ok(failed())).is_ok());
+        assert!(naming.advance(0).is_ok());
+        let frames = written(&rx);
+        let ops = verified(&frames);
+        assert_eq!(ops.len(), 1, "{frames:?}");
+        assert_eq!(ops[0]["params"]["name"], "b.eth");
+        assert_eq!(ops[0]["params"]["serves"], serde_json::json!([13, 14]));
+        let b = ops[0]["id"].as_u64().unwrap();
+        assert!(respond(&mut naming, b, Ok(failed())).is_ok());
+        assert!(naming.advance(0).is_ok());
+        let frames = written(&rx);
+        let ops = verified(&frames);
+        assert_eq!(ops.len(), 1, "{frames:?}");
+        assert_eq!(ops[0]["params"]["name"], "c.eth");
+        assert_eq!(ops[0]["params"]["serves"], serde_json::json!([]));
+        // Every lookup that waited on b.eth's session has its reply.
+        for id in [13, 14] {
+            assert!(frames.iter().any(|f| f["id"] == id), "{frames:?}");
+        }
+    }
+
+    /// Only a verified operation names the requests it serves.
+    #[test]
+    fn only_verified_operations_name_what_they_serve() {
+        let generations = Generations::default();
+        let prefetch = Request::Prefetch {
+            uri: "ipfs://x".into(),
+        };
+        let (_, _, params) = shell_request(&prefetch, generations, 5, &[3]);
+        assert!(params.get("serves").is_none(), "{params}");
+        let op = Request::Verified(VerifiedOp::MyotisCall {
+            to: [0x11; 20],
+            data: vec![0x01],
+        });
+        let (method, kind, params) = shell_request(&op, generations, 5, &[3, 4]);
+        assert_eq!(method, "shell.verified");
+        assert!(kind == Kind::Verified);
+        assert_eq!(params["serves"], serde_json::json!([3, 4]));
+        assert_eq!(params["myotis"], "call");
+        assert_eq!(params["deadline_ms"], 5);
     }
 
     /// A name of a whole frame is refused before any request (#74): it
