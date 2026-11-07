@@ -528,8 +528,9 @@ The origin is browsing data: it stays in core memory, is never logged and dies w
 
 ### Results and trust
 
-- **Results:** `{ result, source, verified, trust? }`, where `verified` is true for myotis, colibri and blockscout, and for a quorum whose m is more than 1. `trust` comes only on request.
+- **Results:** `{ result, source, verified, trust? }`, where `verified` is true for myotis and colibri, and for a quorum or blockscout on a chain whose m is more than 1. `trust` comes only on request.
 - **A quorum with m = 1** (deviation `singleton-quorum`) is one endpoint's answer, whatever the configuration says. Its reply is not `verified`, and its trust's `level` is Direct's for the endpoint that answered: `user-configured` or `unverified`. Its `method` stays `quorum`, and its `quorum` member still reads `{ k, m: 1, achieved: true }`. A fee quote from such a quorum is not `verified` either. Today all of them are labelled `verified` (`boundary-quorum-singleton-not-verified`), and `onchain-app-protocol.js` and the `web3:` gate read that flag alone.
+  - **Blockscout's answer** takes its newest blocks from that quorum, so on such a chain it is one endpoint's word too (#297). Its reply is not `verified`, and its trust's `level` is `unverified`. The rest of its trust is unchanged: `method: "blockscout"`, the index and the paired endpoint in `agreed` and `queried`, and `quorum` `{ k: 2, m: 2, achieved: true }`. Today every Blockscout answer is labelled `verified`. Main's freedom-browser #1097 makes the same change. No vector reads Blockscout with m = 1, so `tests/machine.rs` pins the change. The pair's endpoint may still be the index's own operator; #297 tracks that.
 - **Final failure**, in today's order:
   - a truncation, at once ([Logs](#logs));
   - the Ant profile's best-ranked error;
@@ -1004,7 +1005,7 @@ Naming's rule is that server text never reaches a reply (0004 *Secrets*). Chain 
 | `quorum-clamps` | `k ≥ 1`, `timeout ≥ 500`, unbounded above | also `k ≤ 9`, `timeout ≤ 60 s`, ≤ 64 endpoints | clamped |
 | `order-validation` | duplicates run twice; unknown names fail late | dropped at configuration | |
 | `endpoint-dedup` | an endpoint listed twice is two quorum members, so it can agree with itself | each endpoint reference once, in its first place; user-configured if any entry is | one endpoint never reaches a quorum alone |
-| `singleton-quorum` | a quorum with m = 1 is labelled `verified`, reads and fee quotes alike | `verified: false`, and the trust level Direct gives that endpoint | one endpoint's answer is never verified evidence |
+| `singleton-quorum` | a quorum with m = 1 is labelled `verified`, reads and fee quotes alike, and so is every Blockscout answer | `verified: false`, and the trust level Direct gives that endpoint; a Blockscout answer on such a chain is `verified: false`, trust level `unverified` | one endpoint's answer is never verified evidence |
 | `config-change` | the registry re-read mid-request; a change applies piecemeal | a change ends the chain's requests; main sends reads and fee quotes again once | callers see the new configuration whole |
 | `abandoned-exchanges` | the caller's signal doesn't reach the quorum | a cancel cancels members | |
 | `cancel-promptly` | the `AbortError` is thrown at the router's next check, so a read waiting on a verifier settles when that operation does | `cancelled` at once; the verifier's slot is held until main's reply | `cancel-read-no-fallthrough` replies at 10 ms, not 20 |
