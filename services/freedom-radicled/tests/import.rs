@@ -490,6 +490,20 @@ fn layouts_that_cant_be_granted_are_unsupported() {
     // A source inside a protected root.
     let (_, reply, _) = import_layout(&work.source, &[&work.root]);
     assert_eq!(reply["error"]["code"], "unsupported_layout", "{reply}");
+    // Refused at its admission, before the import's thread: none of its
+    // stages is reached.
+    let dirs = ready();
+    let mut radicled = Radicled::import(
+        &dirs,
+        &work.source,
+        &[&work.root],
+        &[("FREEDOM_RADICLED_TEST_HOLD_IMPORT", "admitted@0")],
+    );
+    radicled.reconciled();
+    let reply = radicled.call("rad.import_repo", params(&work.source));
+    refused(&mut radicled, &dirs, &reply, "unsupported_layout", None);
+    let log = radicled.stderr();
+    assert!(!log.contains("the import reached a stage"), "{log}");
     // A source that holds the home, which holds Freedom's data.
     let dirs = ready();
     let holder = dirs.home.parent().unwrap().to_path_buf();
