@@ -522,6 +522,47 @@ module.exports.__configure = () => __retire(getEffectiveRpcEndpoints(), ${b.reti
   }),
 };
 
+// Reference patches (design 0004, Reference patches): a rule
+// freedom-browser's main took after the pinned commit, applied to the pinned
+// resolver in memory, so a scenario that names it records main's behaviour
+// without moving the pin. Unlike a deviation's, the core agrees with main:
+// a scenario names one in `patches` and no `deviation`. It records its
+// patches and the unpatched reference's results (`unpatched`), and
+// generation fails unless the reference patch changes its results or its
+// I/O on its own.
+//
+// `no-colibri-names` is main's #1076 (NO_COLIBRI_NAMES_REF below): Colibri
+// is no name-resolution method. Colibri 3.0.3 runs a lookup's eth_call on
+// contract code from one of its public eth_rpc servers, unchecked against
+// the proven code hash, and a call that reads no storage gets no proof. Its
+// edits are main's resolver lines without their comments: `colibri` leaves
+// the known methods, so an order skips it; a legacy Colibri primary, and an
+// order that names no other method, take Myotis and then the quorum; and
+// `resolveWithMethod` and `resolveEnsReverseWithMethod` lose their Colibri
+// branches. Main deletes the Colibri paths they called (tryColibriPath,
+// tryColibriReverse, buildColibriTrust); here they stay, unreachable.
+const NO_COLIBRI_NAMES_REF = 'freedom-browser #1082 at 0da2215b';
+const REFERENCE_PATCHES = {
+  'no-colibri-names': () => ({
+    reference: true,
+    text: `Colibri answers no ENS, reverse or NameNFT lookup (main's #1076, ${NO_COLIBRI_NAMES_REF}): an order that names it skips it, and the next method answers with its own label; a legacy Colibri primary, or an order with no other method, takes Myotis and then the quorum.`,
+    source: {
+      'ens-resolver.js': {
+        edits: [
+          ["const RESOLUTION_METHOD_IDS = new Set(['myotis', 'colibri', 'quorum', 'direct']);",
+            "const RESOLUTION_METHOD_IDS = new Set(['myotis', 'quorum', 'direct']);"],
+          ["  const primary = ['colibri', 'quorum', 'direct'].includes(verification.primary)\n    ? verification.primary\n    : 'colibri';\n  return {\n    order: [...new Set(['myotis', primary, ...(primary === 'quorum' ? [] : ['quorum'])])],",
+            "  const primary = verification.primary === 'direct' ? 'direct' : 'quorum';\n  return {\n    order: [...new Set(['myotis', primary, 'quorum'])],"],
+          ["  if (method === 'colibri') {\n    return tryColibriPath(normalizedName, callData, callResolver, nameSystem);\n  }\n", ''],
+          ["  if (method === 'colibri') return tryColibriReverse(normalizedAddress, coinType);\n\n", ''],
+        ],
+        append: [],
+      },
+    },
+  }),
+};
+Object.assign(PATCHES, REFERENCE_PATCHES);
+
 /** A scenario's patches, resolved against its bounds. */
 function patchesOf(scenario) {
   const bounds = { ...BOUNDS, ...(scenario.world?.bounds ?? {}) };
@@ -1344,8 +1385,13 @@ async function runScenario(checkout, ethers, FakeTimers, scenario) {
     const limit = Date.now() + MAX_STEP_MS;
     while (clock.countTimers() > 0 && Date.now() < limit) await clock.nextAsync();
     if (violations.length > 0) throw new Error(`scenario ${scenario.id}: unscripted I/O: ${[...new Set(violations)].join('; ')}`);
-    const deviation = scenario.deviation ? { deviation: scenario.deviation, patches: describe(patches) } : {};
-    return { id: scenario.id, system, seed: scenario.seed ?? 7, ...deviation, world: describe(scenario.world), steps, io: describe(io) };
+    // A deviation's patches, and the reference patches (main's later rules,
+    // which the core shares), are recorded alike.
+    const patched = {
+      ...(scenario.deviation ? { deviation: scenario.deviation } : {}),
+      ...(patches.length > 0 ? { patches: describe(patches) } : {}),
+    };
+    return { id: scenario.id, system, seed: scenario.seed ?? 7, ...patched, world: describe(scenario.world), steps, io: describe(io) };
   } finally {
     for (const fn of undo.reverse()) fn();
   }
@@ -1507,6 +1553,7 @@ function scenarioDefinitions(ethers) {
     one('direct-builtin', base({ network: order(['direct']), sources: [{ id: 'pub', coverage: { 1: ENDPOINTS[0] } }], sourceList: [{ id: 'pub', builtin: true }] })),
     ...addressAndReverse(ethers, base, one),
     ...verifiedPaths(ethers, base, one, order, GOOD, lookup),
+    ...noColibriNamesScenarios(ethers, base, one, order, GOOD, EVIL),
     ...deviationScenarios(ethers, base, GOOD, lookupVia, contentAnswer),
     ...tezosScenarios(),
   ];
@@ -1756,36 +1803,18 @@ function deviationScenarios(ethers, base, GOOD, lookupVia, contentAnswer) {
     },
     // One endpoint answers blocks with a null hash: the core counts it as a
     // failed fetch (and quarantines it), so the second lookup's legs avoid it.
-    // Colibri's worker doesn't start: its operation fails as `error`, before
-    // any resolver runs. With Colibri last, the lookup ends on the core's
-    // class text, whether or not the name's label is too long.
+    // Myotis' record operation fails as `invalid_argument`: ethers refuses
+    // the odd-length revert it proves. With Myotis last, the lookup ends on
+    // the core's class text; for a name whose label is too long, the class
+    // is dnsEncode's refusal, whose message the core rebuilds. (Colibri's
+    // operations drove this until main's #1076: no order reaches them.)
     deviation('verified-failure-text', base({
-      network: { ...QUORUM_NETWORK, verification: { order: ['colibri'], preferVerified: false } },
-      colibri: { prover: 'https://prover.example', workerFails: true, calls: { resolve: GOOD } },
+      network: { ...QUORUM_NETWORK, verification: { order: ['myotis'], preferVerified: false } },
+      myotis: { enabled: true, ready: true, calls: { resolve: { revert: '0x123' } } },
     }), [
       { call: content() },
       { after: 1000, call: content(`${'é'.repeat(150)}.eth`) },
     ]),
-    {
-      // A .wei name through Colibri's NameNFT resolver, which doesn't
-      // dnsEncode: an odd-length revert is ethers' invalid_argument too, but
-      // not a label refusal, so the class text stands.
-      ...deviation('verified-failure-text', base({
-        network: { ...QUORUM_NETWORK, verification: { order: ['colibri'], preferVerified: false } },
-        colibri: { prover: 'https://prover.example', calls: { 'wns:contenthash': { revert: '0x123' } } },
-      }), [{ call: content(`${'é'.repeat(150)}.wei`) }]),
-      id: 'deviation-verified-failure-text-namenft',
-    },
-    {
-      // Myotis refuses the label (invalid_argument, the message rebuilt),
-      // then Colibri fails to start, which ends the order.
-      ...deviation('verified-failure-text', base({
-        network: { ...QUORUM_NETWORK, verification: { order: ['myotis', 'colibri'], preferVerified: true } },
-        myotis: { enabled: true, ready: true, calls: { resolve: GOOD } },
-        colibri: { prover: 'https://prover.example', workerFails: true, calls: { resolve: GOOD } },
-      }), [{ call: content(`${'é'.repeat(150)}.eth`) }]),
-      id: 'deviation-verified-failure-text-order',
-    },
     deviation('null-block-hash', base({ hosts: { 'c.rpc.example': { nullHash: true } } }), [
       { call: content() },
       { after: 31_000, call: content('alice.eth') },
@@ -1863,10 +1892,13 @@ function deviationScenarios(ethers, base, GOOD, lookupVia, contentAnswer) {
     // own normalization: shown as UNVERIFIED with its claim, on each path.
     deviation('reverse-normalized', base({ calls: { reverse: lookalike } }), [{ call: reverse }]),
     {
-      ...deviation('reverse-normalized', base({
+      // Colibri alone: with main's #1076 the quorum answers in its place,
+      // and the rule holds there.
+      ...noColibriNames(deviation('reverse-normalized', base({
         network: via(['colibri']),
+        calls: { reverse: lookalike },
         colibri: { prover: 'https://prover.example', calls: { reverse: lookalike } },
-      }), [{ call: reverse }]),
+      }), [{ call: reverse }])),
       id: 'deviation-reverse-normalized-colibri',
     },
     {
@@ -1879,6 +1911,76 @@ function deviationScenarios(ethers, base, GOOD, lookupVia, contentAnswer) {
   ];
 }
 
+/** A scenario recorded with main's #1076 (reference patch `no-colibri-names`). */
+function noColibriNames(scenario) {
+  return { ...scenario, patches: [...(scenario.patches ?? []), 'no-colibri-names'] };
+}
+
+/**
+ * Main's #1076 (reference patch `no-colibri-names`): the ports of
+ * ens-resolver.test.js's "Colibri answers no name lookup (#1076)" tests at
+ * NO_COLIBRI_NAMES_REF. Colibri is scripted with forgeries, as there, so the
+ * unpatched reference's results show what a public RPC could have made it
+ * answer; the next method answers instead, with its own label.
+ */
+function noColibriNamesScenarios(ethers, base, one, order, GOOD, EVIL) {
+  const coder = ethers.AbiCoder.defaultAbiCoder();
+  const ACCOUNT = '0x' + 'ab'.repeat(20);
+  const FORGED = '0x' + 'ee'.repeat(20);
+  const urAddress = (address) => ({ data: coder.encode(['bytes', 'address'], [coder.encode(['address'], [address]), '0x' + '22'.repeat(20)]) });
+  const urReverse = (name) => ({ data: coder.encode(['string', 'address', 'address'], [name, '0x' + '22'.repeat(20), '0x' + '33'.repeat(20)]) });
+  const nftString = (text) => ({ data: coder.encode(['string'], [text]) });
+  const nftAddress = (address) => ({ data: coder.encode(['address'], [address]) });
+  const COLIBRI = (calls) => ({ prover: 'https://prover.example', calls });
+  const address = (name) => ({ fn: 'resolveEnsAddress', args: [name] });
+  const reverse = { fn: 'resolveEnsReverse', args: [ACCOUNT] };
+  // A legacy configuration: `primary` alone, as the old settings wrote it.
+  const legacy = (primary) => ({ verification: { primary }, quorum: order(['quorum']).quorum });
+  return [
+    // The old default, a Colibri primary and no order: Myotis, then the quorum.
+    noColibriNames(one('no-colibri-names-legacy-default', base({ network: legacy('colibri'), colibri: COLIBRI({ resolve: EVIL }) }))),
+    // Send-to-name: Colibri first, the quorum's address.
+    noColibriNames(one('no-colibri-names-address', base({
+      network: order(['colibri', 'quorum']),
+      calls: { resolve: GOOD, 'resolve:addr': urAddress(ACCOUNT) },
+      colibri: COLIBRI({ 'resolve:addr': urAddress(FORGED) }),
+    }), address('pay.eth'))),
+    // Colibri alone: a primary name from the quorum.
+    noColibriNames(one('no-colibri-names-alone-reverse', base({
+      network: order(['colibri']),
+      calls: { reverse: urReverse('vitalik.eth') },
+      colibri: COLIBRI({ reverse: urReverse('forged.eth') }),
+    }), reverse)),
+    // The shipped order, Myotis off: a .wei address through the WNS
+    // contract, from the quorum.
+    noColibriNames(one('no-colibri-names-default-order-wei', base({
+      network: order(['myotis', 'colibri', 'quorum'], true),
+      calls: { 'wns:addr': nftAddress(ACCOUNT) },
+      colibri: COLIBRI({ 'wns:addr': nftAddress(FORGED) }),
+    }), address('alice.wei'))),
+    // A WNS primary name and its forward check, from the quorum.
+    noColibriNames(one('no-colibri-names-wns-reverse', base({
+      network: order(['colibri', 'quorum']),
+      calls: { reverse: urReverse(''), 'wns:reverse': nftString('alice.wei'), 'wns:addr': nftAddress(ACCOUNT), 'gns:reverse': nftString('') },
+      colibri: COLIBRI({ reverse: urReverse(''), 'wns:reverse': nftString('forged.wei'), 'wns:addr': nftAddress(ACCOUNT), 'gns:reverse': nftString('') }),
+    }), reverse)),
+    // Direct after Colibri: Direct answers, unverified.
+    noColibriNames(one('no-colibri-names-direct', base({
+      network: order(['colibri', 'direct']),
+      sources: [{ id: 'pub', coverage: { 1: ENDPOINTS[0] } }],
+      sourceList: [{ id: 'pub', builtin: true }],
+      calls: { resolve: GOOD, 'resolve:addr': urAddress(ACCOUNT) },
+      colibri: COLIBRI({ 'resolve:addr': urAddress(FORGED) }),
+    }), address('direct.eth'))),
+    // Colibri alone, Myotis ready: Myotis answers first.
+    noColibriNames(one('no-colibri-names-alone-myotis', base({
+      network: order(['colibri']),
+      myotis: { enabled: true, ready: true, block: 23_456_789, calls: { resolve: GOOD } },
+      colibri: COLIBRI({ resolve: EVIL }),
+    }))),
+  ];
+}
+
 /** Myotis and Colibri, alone, in the method order, and across transitions. */
 function verifiedPaths(ethers, base, one, order, GOOD, lookup) {
   const coder = ethers.AbiCoder.defaultAbiCoder();
@@ -1887,8 +1989,10 @@ function verifiedPaths(ethers, base, one, order, GOOD, lookup) {
   return [
     one('myotis-verified', base({ network: order(['myotis', 'colibri', 'quorum']), myotis: { enabled: true, ready: true, calls: { resolve: GOOD } } })),
     one('myotis-not-ready-falls-to-quorum', base({ network: order(['myotis', 'quorum']), myotis: { enabled: true, ready: false } })),
-    one('colibri-verified', base({ network: order(['colibri', 'quorum']), colibri: COLIBRI({ resolve: GOOD }) })),
-    one('colibri-resolver-not-found', base({ network: order(['colibri', 'quorum']), colibri: COLIBRI({ resolve: { revert: notFound } }) })),
+    // Main's #1076: Colibri answers no name, so each of its scenarios below
+    // is recorded with the reference patch, its answer the next method's.
+    noColibriNames(one('colibri-verified', base({ network: order(['colibri', 'quorum']), colibri: COLIBRI({ resolve: GOOD }) }))),
+    noColibriNames(one('colibri-resolver-not-found', base({ network: order(['colibri', 'quorum']), colibri: COLIBRI({ resolve: { revert: notFound } }) }))),
     // A label of 150 é (300 bytes) through each verified method alone:
     // its adapter's universalResolverCall refuses it in dnsEncode, and
     // that error is what the lookup ends with.
@@ -1900,27 +2004,27 @@ function verifiedPaths(ethers, base, one, order, GOOD, lookup) {
         { after: 1000, call: { fn: 'resolveEnsAddress', args: [`${'é'.repeat(150)}.eth`] } },
       ],
     },
-    {
+    noColibriNames({
       id: 'colibri-label-over-255-bytes',
       world: base({ network: order(['colibri']), colibri: COLIBRI({ resolve: GOOD }) }),
       steps: [
         { call: content(`${'é'.repeat(150)}.eth`) },
         { after: 1000, call: { fn: 'resolveEnsAddress', args: [`${'é'.repeat(150)}.eth`] } },
       ],
-    },
-    one('colibri-unavailable-falls-to-quorum', base({ network: order(['colibri', 'quorum']), colibri: COLIBRI({ resolve: { unavailable: true } }) })),
+    }),
+    noColibriNames(one('colibri-unavailable-falls-to-quorum', base({ network: order(['colibri', 'quorum']), colibri: COLIBRI({ resolve: { unavailable: true } }) }))),
     // Colibri with ethers' built-in CCIP-Read, and two operations at once:
     // every raw call belongs to its own operation.
-    one('colibri-ccip', base({
+    noColibriNames(one('colibri-ccip', base({
       network: order(['colibri']),
       colibri: COLIBRI({ resolve: { revert: lookup }, callback: GOOD }),
       gateways: { 'gw.example': { delay: 50, body: JSON.stringify({ data: '0xcafe' }) } },
-    })),
-    {
+    }))),
+    noColibriNames({
       id: 'colibri-concurrent',
       world: base({ network: order(['colibri']), colibri: COLIBRI({ resolve: GOOD }) }),
       steps: [{ calls: [content(), content('nick.eth')] }],
-    },
+    }),
     one('myotis-ccip', base({
       network: order(['myotis', 'quorum']),
       myotis: { enabled: true, ready: true, calls: { resolve: { revert: lookup }, callback: GOOD } },
@@ -2170,17 +2274,39 @@ function loadFakeTimers(checkout) {
   return Module.createRequire(path.join(checkout, 'package.json'))('@sinonjs/fake-timers');
 }
 
+// The scenarios main's #1076 changes (reference patch `no-colibri-names`):
+// every one a discovery run found among the rest, and the ports of main's
+// tests. Generation fails if one is missing or doesn't name the patch.
+const NO_COLIBRI_NAMES_SCENARIOS = [
+  'colibri-verified', 'colibri-resolver-not-found', 'colibri-label-over-255-bytes',
+  'colibri-unavailable-falls-to-quorum', 'colibri-ccip', 'colibri-concurrent',
+  'deviation-reverse-normalized-colibri',
+  'no-colibri-names-legacy-default', 'no-colibri-names-address', 'no-colibri-names-alone-reverse',
+  'no-colibri-names-default-order-wei', 'no-colibri-names-wns-reverse', 'no-colibri-names-direct',
+  'no-colibri-names-alone-myotis',
+];
+
 async function buildNamingReplay(checkout, ethers, meta) {
   const FakeTimers = loadFakeTimers(checkout);
+  const definitions = scenarioDefinitions(ethers);
+  const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
+  for (const id of NO_COLIBRI_NAMES_SCENARIOS) {
+    const scenario = definitions.find((d) => d.id === id);
+    if (!scenario?.patches?.includes('no-colibri-names')) throw new Error(`scenario ${id}: missing, or without no-colibri-names`);
+  }
   const out = [];
-  for (const scenario of scenarioDefinitions(ethers)) {
+  for (const scenario of definitions) {
     const run = await runScenario(checkout, ethers, FakeTimers, scenario);
-    if (scenario.deviation) {
-      // The deviation must show: the unpatched reference differs in its
+    if (scenario.patches?.length) {
+      // The patches must show: the unpatched reference differs in its
       // results or its I/O.
       const plain = await runScenario(checkout, ethers, FakeTimers, { ...scenario, deviation: undefined, patches: [] });
-      const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
-      if (same(plain.steps, run.steps) && same(plain.io, run.io)) throw new Error(`deviation vector ${scenario.id}: the patches change nothing`);
+      if (same(plain.steps, run.steps) && same(plain.io, run.io)) throw new Error(`patched scenario ${scenario.id}: the patches change nothing`);
+      // So must each reference patch on its own.
+      for (const id of scenario.patches.filter((patch) => PATCHES[patch]?.(BOUNDS).reference)) {
+        const without = await runScenario(checkout, ethers, FakeTimers, { ...scenario, patches: scenario.patches.filter((patch) => patch !== id) });
+        if (same(without.steps, run.steps) && same(without.io, run.io)) throw new Error(`patched scenario ${scenario.id}: ${id} changes nothing on its own`);
+      }
       run.unpatched = plain.steps.map((step) => step.results);
     }
     out.push(run);
@@ -2188,4 +2314,4 @@ async function buildNamingReplay(checkout, ethers, meta) {
   return { meta, scenarios: out };
 }
 
-module.exports = { buildNamingReplay, runScenario, scenarioDefinitions, loadFakeTimers, PATCHES, __toCore, revertData };
+module.exports = { buildNamingReplay, runScenario, scenarioDefinitions, loadFakeTimers, PATCHES, NO_COLIBRI_NAMES_SCENARIOS, __toCore, revertData };

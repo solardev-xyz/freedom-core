@@ -940,21 +940,6 @@ fn verified_params(op: &VerifiedOp) -> serde_json::Value {
         VerifiedOp::MyotisCall { to, data } => {
             serde_json::json!({ "myotis": "call", "to": hex(to), "data": hex(data) })
         }
-        VerifiedOp::ColibriResolve {
-            name,
-            call_data,
-            resolver,
-        } => serde_json::json!({
-            "colibri": "resolve",
-            "name": name,
-            "call_data": hex(call_data),
-            "resolver": resolver,
-        }),
-        VerifiedOp::ColibriReverse { address, coin_type } => serde_json::json!({
-            "colibri": "reverse",
-            "address": address,
-            "coin_type": coin_type,
-        }),
     }
 }
 

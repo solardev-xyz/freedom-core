@@ -43,6 +43,40 @@ fn str_of(value: Option<&JsValue>) -> &str {
     value.and_then(JsValue::as_str).unwrap_or("")
 }
 
+/// `resolutionPolicy(network)`, as main computes the order it sends (design
+/// 0004, Configuration): the known methods once each, in order, or with none,
+/// the legacy one from `primary`. Colibri is no name-resolution method (main's
+/// #1076): an order skips it, and a Colibri primary takes Myotis, then the
+/// quorum.
+fn resolution_policy(verification: &JsValue) -> (Vec<String>, bool) {
+    const METHODS: [&str; 3] = ["myotis", "quorum", "direct"];
+    let mut order: Vec<String> = Vec::new();
+    for method in verification
+        .get("order")
+        .and_then(JsValue::as_array)
+        .unwrap_or(&[])
+        .iter()
+        .filter_map(JsValue::as_str)
+    {
+        if METHODS.contains(&method) && !order.iter().any(|m| m == method) {
+            order.push(method.to_owned());
+        }
+    }
+    if !order.is_empty() {
+        let prefer = verification.get("preferVerified") == Some(&JsValue::Bool(true));
+        return (order, prefer);
+    }
+    let primary = match verification.get("primary").and_then(JsValue::as_str) {
+        Some("direct") => "direct",
+        _ => "quorum",
+    };
+    let mut legacy = vec!["myotis".to_owned(), primary.to_owned()];
+    if primary != "quorum" {
+        legacy.push("quorum".to_owned());
+    }
+    (legacy, false)
+}
+
 /// The configuration main would send for a scenario's world.
 fn config(world: &JsValue, system: &str) -> Config {
     let endpoints: Vec<String> = world
@@ -57,13 +91,7 @@ fn config(world: &JsValue, system: &str) -> Config {
         .get("verification")
         .cloned()
         .unwrap_or(JsValue::Null);
-    let order: Vec<String> = verification
-        .get("order")
-        .and_then(JsValue::as_array)
-        .unwrap_or(&[])
-        .iter()
-        .filter_map(|m| m.as_str().map(str::to_owned))
-        .collect();
+    let (order, prefer_verified) = resolution_policy(&verification);
     // `getDirectRpcCandidate(1)`.
     let direct = endpoints.first().map(|url| {
         let sources = world
@@ -114,7 +142,7 @@ fn config(world: &JsValue, system: &str) -> Config {
         tezos,
         direct,
         order,
-        prefer_verified: verification.get("preferVerified") == Some(&JsValue::Bool(true)),
+        prefer_verified,
         quorum: network.get("quorum").cloned().unwrap_or(JsValue::Null),
         myotis_enabled: world.get("myotis").and_then(|m| m.get("enabled"))
             == Some(&JsValue::Bool(true)),
@@ -537,23 +565,6 @@ fn verified_matches(op: &VerifiedOp, e: &JsValue) -> bool {
                 && op_name == "call"
                 && text("to") == Some(fc_naming::session::rpc::hex(to))
                 && text("data") == Some(fc_naming::session::rpc::hex(data))
-        }
-        VerifiedOp::ColibriResolve {
-            name,
-            call_data,
-            resolver,
-        } => {
-            host == "colibri"
-                && op_name == "resolve"
-                && text("name") == Some(name.to_ascii_lowercase())
-                && text("callData") == Some(fc_naming::session::rpc::hex(call_data))
-                && p.get("nameNft") == Some(&JsValue::Bool(*resolver == "name_nft"))
-        }
-        VerifiedOp::ColibriReverse { address, coin_type } => {
-            host == "colibri"
-                && op_name == "reverse"
-                && text("address") == Some(address.to_ascii_lowercase())
-                && text("coinType") == Some(coin_type.to_string())
         }
     }
 }

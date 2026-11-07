@@ -698,6 +698,53 @@ fn a_repeated_endpoint_counts_once() {
     assert_eq!(run(&[a, b, a, c, b, d]), run(&[a, b, c, d]));
 }
 
+/// Colibri is no name-resolution method (main's #1076): Colibri 3.0.3 runs
+/// a lookup's `eth_call` on contract code from a public RPC, unchecked
+/// against the proven code hash. Main leaves it out of the order; one that
+/// still names it, with a prover configured, asks Colibri nothing, and the
+/// next method answers with its own label.
+#[test]
+fn an_order_naming_colibri_asks_it_nothing() {
+    let colibri_first = || {
+        let mut config = config();
+        config.order = vec!["colibri".into(), "quorum".into()];
+        config.prover = Some(("https://prover.example".into(), true));
+        config
+    };
+    let mut world = World::new(colibri_first());
+    let a = world.machine.resolve_content("vitalik.eth");
+    world.run(10_000);
+    let result = world.reply(a).outcome.as_ref().unwrap();
+    let trust = result.get("trust").unwrap();
+    assert_eq!(
+        trust.get("level").and_then(JsValue::as_str),
+        Some("verified")
+    );
+    assert_eq!(trust.get("method"), None, "the quorum's label");
+    assert!(!world.sent.iter().any(|s| s.verified));
+    assert!(world.sent.iter().any(|s| s.endpoint.is_some()));
+
+    // Colibri alone: nothing is asked, for any lookup.
+    let mut config = colibri_first();
+    config.order = vec!["colibri".into()];
+    let mut world = World::new(config);
+    let callers = [
+        world.machine.resolve_content("vitalik.eth"),
+        world.machine.resolve_address("vitalik.eth", 1.0),
+        world.machine.resolve_content("alice.wei"),
+        world
+            .machine
+            .resolve_reverse(&format!("0x{}", "ab".repeat(20)), 1.0),
+    ];
+    world.run(10_000);
+    assert!(world.sent.is_empty(), "no request at all");
+    for caller in callers {
+        let reply = format!("{:?}", world.reply(caller).outcome);
+        assert!(!reply.contains("colibri"), "{reply}");
+        assert!(!reply.contains("\"verified\""), "{reply}");
+    }
+}
+
 #[test]
 fn enabling_myotis_is_live_state_not_a_configuration_change() {
     let mut config = config();
