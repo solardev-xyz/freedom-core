@@ -185,6 +185,17 @@ pub const WRITE: Shape = Shape {
     queued: 16,
 };
 
+/// A pool's use now (`rad.stats`, [`crate::stats`]): its requests running,
+/// each holding its thread until its work returns, and queued; the online
+/// repairs queued, which only the write queue has; and its shape.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Usage {
+    pub running: usize,
+    pub queued: usize,
+    pub repairs: usize,
+    pub shape: Shape,
+}
+
 /// A read's deadline, from admission to its head (0008, "Deadlines").
 pub const READ_DEADLINE: Duration = Duration::from_secs(60);
 
@@ -626,6 +637,17 @@ impl<A: Answers> Pool<A> {
         self.inner.work.notify_one();
         self.inner.timer.notify_one();
         Admission::Queued
+    }
+
+    /// Its use now: one look under its lock, which is never held long.
+    pub fn usage(&self) -> Usage {
+        let state = self.inner.lock();
+        Usage {
+            running: state.running.len(),
+            queued: state.queue.len(),
+            repairs: state.repairs.len(),
+            shape: self.inner.shape,
+        }
     }
 
     /// Main cancelled request `id`, and the connection has answered it: a
@@ -1106,6 +1128,16 @@ impl Pools {
     /// repository's online repair is queued ([`Pool::writing`]).
     pub fn writing(&self, rid: &RepoId) -> bool {
         self.write.writing(rid)
+    }
+
+    /// Each pool's use, by its name: the read pool, the network pool and the
+    /// write queue.
+    pub fn usage(&self) -> [(&'static str, Usage); 3] {
+        [
+            ("read", self.read.usage()),
+            ("network", self.network.usage()),
+            ("write", self.write.usage()),
+        ]
     }
 
     /// The write queue's online repair, given once (see the module's doc):

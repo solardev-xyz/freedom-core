@@ -69,6 +69,7 @@ use serde_json::{Value, json};
 use crate::node::Node;
 use crate::pools::{Mutates, Ticket, Work};
 use crate::reconcile::{entry, record_error};
+use crate::stats::Quarantined;
 use crate::testhooks;
 
 /// The most entries a page of `rad.quarantine_list` holds (0008, "Bounds").
@@ -162,13 +163,15 @@ fn list_page(home: &Path, page: u64) -> Result<Value, ErrorBody> {
 }
 
 /// `rad.remove_repo`'s work, for its request's `params`, on `node`, whose
-/// home is `home`. And the repository it removes, if its params name one:
+/// home is `home`, the record counted again into `quarantined` once its
+/// removal has run. And the repository it removes, if its params name one:
 /// its outcome is always proven, so nothing is repaired after it.
 pub fn remove(
     conn: &Connection,
     node: &Arc<Node>,
     home: &Path,
     params: Option<&RawValue>,
+    quarantined: &Arc<Quarantined>,
 ) -> (Work, Option<Mutates>) {
     let removing = parse::<RemoveParams>(params)
         .ok_or_else(|| invalid("rad.remove_repo takes { rid, qid }"))
@@ -185,6 +188,7 @@ pub fn remove(
         repaired: false,
     });
     let (conn, node, home) = (conn.clone(), node.clone(), home.to_path_buf());
+    let quarantined = quarantined.clone();
     let work: Work = Box::new(move |ticket: &Ticket| {
         let removing = match removing {
             Ok(removing) => removing,
@@ -212,6 +216,7 @@ pub fn remove(
         }
         testhooks::at_write_start();
         let removed = removal(&embedded, &handle.repositories, removing, &mut record);
+        quarantined.recount(&record);
         testhooks::at_write_call_end();
         // Removed, nothing to remove, or a failure that keeps the record.
         ticket.proven();
