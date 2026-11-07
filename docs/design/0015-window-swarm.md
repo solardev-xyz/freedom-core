@@ -31,7 +31,7 @@
 - **SW-1 in the core:** the core checks a raw SOC's identity against its own store in today's place, checks again in the step that sends the signature, and holds every identity change that could make it shared until the vault answers. It computes every feed identifier itself. So no main bug can sign a page's SOC under another site's identity, and 0012's "a page's Swarm SOC: advised until 0015" becomes enforced. A [deterministic interleaving gate](#sw-1-in-the-core) tests it.
 - **The proof:** `vectors/swarm.json` from the JS reference at bee-js 13.2.0 exactly: the browser's real modules over a recording fake node. Every method's outcome, every request bee-js sends (tar bytes included), the stores' bytes, the batch choices, GSOC signers and chunk-tree roots.
 - **Steps SWM-1 to SWM-9:** vectors; `fc-swarm`'s write side; the provider crate; the core's thread and methods; main's executor; the stores through the core; the methods through the core behind a switch; main's own Swarm calls without bee-js; the switch and the removals.
-- **Found while checking the code** ([Facts](#facts-found-while-checking-the-code)): any page could make main download a whole feed entry of any size before its read budget was charged (F-1); on Windows, `publishFiles` sent nested paths with backslashes (F-2); an explicit-index feed write read a 500 as a free index (F-5). #1056 and #1057 fix all three. Feed entries have no size limit (F-4): its fix, #1053, waits on [question 3](#open-questions). bee-js's tar writer cuts long non-ASCII file names (F-3), and the publisher index counter is trusted as stored (F-8).
+- **Found while checking the code** ([Facts](#facts-found-while-checking-the-code)): any page could make main download a whole feed entry of any size before its read budget was charged (F-1); on Windows, `publishFiles` sent nested paths with backslashes (F-2); an explicit-index feed write read a 500 as a free index (F-5). #1056 and #1057 fix all three. Feed entries have no size limit (F-4): its fix, #1053, waits on [question 3](#open-questions). bee-js's tar writer cuts long non-ASCII file names (F-3), the publisher index counter is trusted as stored (F-8), and bee-js sends a PSS recipient in a form the bundled node refuses (F-9).
 
 ## Goals and non-goals
 
@@ -107,6 +107,7 @@ In `handleWriteSingleOwnerChunk` (`spi:1013–1095`), after the params and the f
 6. **F-6 (known, #360):** bee-js, the SOC upload, the reachability probe and the subscriptions' WebSockets use Node's own network stack, so a remote node gets no proxy and no Tor (`swarm-service.js:21–23`, `spi:2168–2172`).
 7. **F-7 (known, 0006):** no `window.swarm` call to the node has a deadline or a cancel, apart from the 5 s probe and the 10 s tag read. #1057's metered reads have none either.
 8. **F-8: the publisher index counter is trusted as stored.** `createAppScopedIdentity` takes `nextPublisherKeyIndex` as the new index (`feed-store.js:650–675`), and loading a v2 store checks only that the counter is a non-negative integer (`:267–290`), not that it is past every stored index. A store whose counter is at or below a held index hands that index to the next site, which makes both shared. Freedom never writes such a store; an edited or merged file can. Not reachable from a page or the chrome. Found by reading the code. The core allocates past every stored index ([SW-1 in the core](#sw-1-in-the-core)).
+9. **F-9: bee-js sends a PSS recipient the bundled node refuses.** `sendPss` requires a compressed key (`^0[23]` and 64 hex, `spi:1755–1760`). bee-js's `pssSend` turns it into a `PublicKey`, which holds the 64 bytes x ‖ y, and puts `String(key)` in the query (`modules/messaging.js:74–79`, `api/pss.js:10–18`): 128 hex, with no SEC1 prefix. Ant v0.5.77, the release the browser pins, reads `recipient` with `PublicKey::from_sec1_bytes`, which takes 33 or 65 bytes, and answers anything else 400 `invalid recipient public key` (`ant-gateway/src/retrieval.rs:999–1010`). So `window.swarm.sendPss` fails against the bundled node. Found by reading bee-js 13.2.0 and Ant's source at its tag, and by running core-sdk's `PublicKey` from the reference's install (a 66-hex key gives a 128-hex query value); not run against a node. The provider's tests mock `pssSend`. The core sends the page's compressed key (deviation `pss-recipient`). **Fix now:** a browser issue, since bee-js gives no way to send another form.
 
 ## Threat model
 
@@ -157,8 +158,8 @@ Stage 1 trusts main (0001). The attackers here are a page (any page reaches the 
 | Method | Callers | Params → result |
 |---|---|---|
 | `swarm.request` | page | `{ method, params, approval, deadline_ms }` → `{ result }` or `{ error: { code, message, data? } }`, today's shapes. For `swarm_subscribe`, `{ subscribe: { kind, key } }`, which main opens. `swarm_unsubscribe` never reaches the core |
-| `swarm.publish` | shell | main's own uploads: `{ kind: "data" \| "file" \| "collection", parts, name?, content_type?, index_document?, encrypt?, pin, deferred, history? }` → `{ reference, tag_uid, batch, bytes }` |
-| `swarm.feed` | shell | main's own feeds (the agent's): `{ op: "create" \| "update", key: { kind: "bee_wallet" }, topic, reference?, min_index? }` → `feed-service.js`'s results |
+| `swarm.publish` | shell | main's own uploads: `{ kind: "data" \| "file" \| "collection", parts, name?, content_type?, index_document?, encrypt?, batch?, pin, deferred, history? }` → `{ reference, tag_uid, batch, bytes }` |
+| `swarm.feed` | shell | main's own feeds (the agent's): `{ op: "create" \| "update", key: { kind: "bee_wallet" }, topic, reference?, min_index?, batch? }` → `feed-service.js`'s results |
 | `swarm.stamps` | chrome, shell | `{ id? }` → the node's batches, or one of them, as main reads them today (bee-js's `mapPostageBatch` fields Freedom uses, with `exists` and `propagating`) |
 | `swarm.upload_status` | chrome, shell | `{ tag_uid }` → `normalizeTag`'s object (`publish-service.js:74–98`) |
 | `swarm.identities` | chrome, shell | `{ op, … }`, one op per IPC handler of `feed-store.js:966–1050` → today's shapes |
@@ -212,13 +213,13 @@ Requests stay within one frame (0005), so bulk bytes can't ride in `params`. And
 
 ### `shell.swarm_api`
 
-Each call names one **form**. Main checks the call against its row before any dial, and [the grammar](#the-operation-grammar) says which forms a parent may use, when, how often and with which values. Hex is lowercase. `<a>`, `<t>`, `<id>` and `<b>` are 64 hex; `<o>` is 40 hex; `<uid>` is a decimal integer from 1 to 2^32 − 1 with no leading zero; `<x>` is 4 or 6 hex.
+Each call names one **form**. Main checks the call against its row before any dial, and [the grammar](#the-operation-grammar) says which forms a parent may use, when, how often and with which values. Hex is lowercase, as bee-js's `Reference`, `Topic` and `EthAddress` write it, and a value bound from the page's params is lowercased first; `<x>` is the one exception, sent as the page gave it, as bee-js does. `<a>`, `<t>`, `<id>` and `<b>` are 64 hex; `<o>` is 40 hex; `<uid>` is a decimal integer from 1 to 2^53 − 1 with no leading zero; `<x>` is 4 or 6 hex.
 
 | Form | Method and path | Query | Request headers | Body | Reply |
 |---|---|---|---|---|---|
 | `chunk` | `GET /chunks/<a>` | — | — | — | whole, at most 4,201 bytes (a SOC: 32 + 65 + 8 + 4,096) |
-| `bytes` | `GET /bytes/<a>` | — | `range: bytes=<s>-<e>` (decimal, `s` ≤ `e`), or none | — | a stream, at most `max_bytes` |
-| `feed_head` | `GET /feeds/<o>/<t>` | — | `swarm-only-root-chunk: true` | — | whole, at most 4,201 bytes; the core reads only its headers |
+| `bytes` | `GET /bytes/<a>` | — | `range: bytes=<s>-<e>` (decimal, `s` ≤ `e`), or none, as the row says | — | a stream, at most `max_bytes` |
+| `feed_head` | `GET /feeds/<o>/<t>` | — (in particular, no `Swarm-Only-Root-Chunk` query) | `swarm-only-root-chunk: true` | — | whole, at most 4,201 bytes; the core reads only its headers |
 | `feed_latest` | `GET /feeds/<o>/<t>` | — | — | — | a stream, at most `max_bytes` |
 | `tag` | `GET /tags/<uid>` | — | — | — | whole JSON, at most 64 KiB |
 | `addresses` | `GET /addresses` | — | — | — | whole JSON, at most 64 KiB |
@@ -230,9 +231,11 @@ Each call names one **form**. Main checks the call against its row before any di
 | `chunk_up` | `POST /chunks` | — | `content-type: application/octet-stream`, `swarm-postage-batch-id`, `swarm-pin: true`, `swarm-deferred-upload: false` | span ‖ payload, 9 to 4,104 bytes: `{ base64 }` | the same |
 | `soc_up` | `POST /soc/<o>/<id>` | `sig=<130 hex>` | `content-type: application/octet-stream`, `swarm-postage-batch-id`; `swarm-pin: true` and `swarm-deferred-upload: false` for `writeSingleOwnerChunk` only | span ‖ payload, 9 to 4,104 bytes: `{ base64 }` | the same |
 | `feed_manifest` | `POST /feeds/<o>/<t>` | — | `swarm-postage-batch-id` | — | the same |
-| `pss_send` | `POST /pss/send/<t>/<x>` | `recipient=<66 hex>` | `content-type: application/octet-stream`, `swarm-postage-batch-id` | the message, at most 4,000 bytes: `{ base64 }` | the same |
+| `pss_send` | `POST /pss/send/<t>/<x>` | `recipient=<66 hex>`, a compressed key (F-9) | `content-type: application/octet-stream`, `swarm-postage-batch-id` | the message, at most 4,000 bytes: `{ base64 }` | the same |
 
 - **Values:** `<n>` is the operation's file name, form-encoded as `URLSearchParams` encodes it; `<p>` the index document's path; `content-type` on `bzz_file` the operation's. A query takes only its row's names, once each, in that order.
+- **Why `feed_head` uses the header:** Ant reads `swarm-only-root-chunk` as a request header and ignores an unknown query key (`download_feed`, `ant-gateway/src/retrieval.rs:4387` at v0.5.77; recorded at v0.5.71 in `vectors/dweb-verify.json`, where the header form returns the root chunk, 1,064 bytes, and the plain form the content). bee-js 13.2.0's own `probeFeed` sends it as a query (`api/feed.js:46–55`), which Ant ignores, so it would download the whole entry; Freedom never calls `probeFeed`. The core sends the header, as 0009's verifier does, and the query form is refused.
+- **No retrieval headers:** `chunk` and `bytes` carry none of 0009's three (`swarm-chunk-retrieval-timeout`, `swarm-redundancy-strategy`, `swarm-redundancy-fallback-mode`): bee-js sends none for these calls today, so `readData`'s walk doesn't either.
 - **Request headers:** only the row's, each at most once, at the row's values. Main adds bee-js's `accept: application/json, text/plain, */*`, `accept-encoding: identity` (as #1057 does, so a declared length is the decoded one), and the transport's own (`content-length`, `transfer-encoding`). A call with any other header is refused.
 - **Reply headers** the core reads: `content-type`, `content-length`, `swarm-tag`, `swarm-feed-index` and `swarm-feed-index-next`; at most 8, each name at most 64 bytes and each value at most 1 KiB. The reason phrase is at most 1 KiB. Past either, the call fails `error`.
 - **Error statuses:** for any form, a status outside 200–299 is answered whole, its body read up to 8 KiB, never as a stream. Nodes answer errors with short JSON; 8 KiB keeps #1057's 4,096 bytes and bounds what an error can make main hold.
@@ -251,9 +254,9 @@ Each call names one **form**. Main checks the call against its row before any di
 | Parent | Ready | Calls, in order | Main binds |
 |---|---|---|---|
 | `readChunk` | `reachable` | `chunk` ×1 | `<a>` = `params.reference` |
-| `readSingleOwnerChunk` | `reachable` | `chunk` ×1 | `<a>` = keccak256(`params.identifier` ‖ `params.owner`) |
-| `readData` | `reachable` | `chunk` ×1 (the root); then, at most 8 open at once (0009's walk), `chunk` at most 2 + 2⌈B / 4,096⌉ in all and `bytes` at most once | the root's and `bytes`' `<a>` = `params.reference`; `bytes` with a `range`; `max_bytes` at most B |
-| `readFeedEntry` with `index` | `reachable` | `chunk` ×1 (the SOC); then `bytes` at most once | with `params.owner` given, the SOC's `<a>` = keccak256(keccak256(`<t>` ‖ index as 8 bytes, big-endian) ‖ `<o>`), `<t>` as for the latest entry; `bytes` without a `range`; `max_bytes` at most B |
+| `readSingleOwnerChunk` | `reachable` | `chunk` ×1 | `<a>` = `params.address`, or, without it, keccak256(`params.identifier` ‖ `params.owner`) |
+| `readData` | `reachable` | `chunk` ×1 (the root); then, only when the root's size `n` is over 4,096 bytes, 0009's walk, at most 8 open at once: `chunk` at most 2 + 2⌈B / 4,096⌉ in all (intermediate chunks, and a leaf fetched again when it fails its check), and `bytes` at most once, the leaves' stream | the root's and `bytes`' `<a>` = `params.reference`; `n` from the span of the root chunk main returned, as `dataSizeFromSpan` reads it, at most B; `bytes` only with `range: bytes=0-<n − 1>` and `max_bytes` = `n` |
+| `readFeedEntry` with `index` | `reachable` | `chunk` ×1 (the SOC); then, only when the size in its wrapped span is over 4,096 bytes, `bytes` ×1 | with `params.owner` given, the SOC's `<a>` = keccak256(keccak256(`<t>` ‖ index as 8 bytes, big-endian) ‖ `<o>`), `<t>` as for the latest entry; `bytes` without a `range`, its `max_bytes` = the size in the wrapped span of the SOC main returned (its bytes 97–104, as `dataSizeFromSpan` reads them), at most B |
 | `readFeedEntry`, latest | `reachable` | `feed_latest` ×1 | `<t>` = `params.topic`, or keccak256(utf8(key + "/" + `params.name`)); `<o>` = `params.owner` when given; `max_bytes` at most B |
 | `getUploadStatus` | — | `tag` ×1 | `<uid>` = `params.tagUid` |
 | `getMessagingIdentity` | `reachable` | `addresses` ×1 | — |
@@ -262,21 +265,23 @@ Each call names one **form**. Main checks the call against its row before any di
 | `publishChunk` | `publish` | `stamps` ×1, then `chunk_up` ×1 | the body = span ‖ the data |
 | `writeSingleOwnerChunk` | `publish` | `stamps` ×1, then `soc_up` ×1 | `<id>` = `params.identifier`; the body = span ‖ the data |
 | `createFeed` | `publish` | `stamps` ×1, then `feed_manifest` ×1 | `<t>` = keccak256(utf8(key + "/" + `params.name`)) |
-| `updateFeed` | `publish` | `stamps` ×1; `feed_head` ×1; after its 404, `chunk` at most 82 (today's head probe); then `soc_up` ×1 | `<t>` as for `createFeed`; one `<o>` throughout; the body = span ‖ an 8-byte timestamp ‖ `params.reference`: 48 bytes, or 80 for an encrypted reference |
-| `writeFeedEntry` | `publish` | `stamps` ×1; with `index`, `chunk` ×1, else `feed_head` ×1 and, after its 404, `chunk` at most 82; for data over 4,096 bytes `bytes_up` ×1; then `soc_up` ×1 | `<t>` as for `createFeed`; one `<o>` throughout; `bytes_up`'s body exactly the data's length; for data of 4,096 bytes or less, `soc_up`'s body = span ‖ the data |
-| `sendPss` | `publish` | `stamps` ×1, then `pss_send` ×1 | `<t>` = keccak256(utf8(`params.topic`)); `<x>` = `params.targets`; `recipient` = `params.recipient`; the body = the message |
+| `updateFeed` | `publish` | `stamps` ×1; `feed_head` ×1; after its 404 or 500 (`isNotFoundError`), `chunk` at most 82 (today's head probe); then `soc_up` ×1 | `<t>` as for `createFeed`; one `<o>` throughout; the body = span ‖ an 8-byte timestamp ‖ `params.reference`: 48 bytes, or 80 for an encrypted reference |
+| `writeFeedEntry` | `publish` | `stamps` ×1; with `index`, `chunk` ×1, else `feed_head` ×1 and, after its 404 or 500, `chunk` at most 82; for data over 4,096 bytes `bytes_up` ×1; then `soc_up` ×1 | `<t>` as for `createFeed`; one `<o>` throughout; `bytes_up`'s body exactly the data's length; for data of 4,096 bytes or less, `soc_up`'s body = span ‖ the data |
+| `sendPss` | `publish` | `stamps` ×1, then `pss_send` ×1 | `<t>` = keccak256(utf8(`params.topic`)); `<x>` = `params.targets`, as given; `recipient` = `params.recipient`, lowercased (the compressed key, F-9); the body = the message |
 | `sendGsoc` | `publish` | `stamps` ×1, then `soc_up` ×1 | `<id>` = keccak256(utf8(`params.topic`)); the body = span ‖ the message |
 | `subscribe` | `subscribe` | none | — |
 | `getCapabilities` | `publish` | none | — |
 | `requestAccess`, `getSigningIdentity`, `listFeeds` | — | none | — |
-| `swarm.publish` `data`, `file` | — | `stamps` ×1, then `bzz_file` ×1 | `<n>` = `name`; `content-type` = `content_type`; `swarm-deferred-upload` false for `data`, true for `file`; `swarm-encrypt` only when `encrypt`; the body exactly the part's length |
-| `swarm.publish` `collection` | — | `stamps` ×1, then `bzz_tar` ×1 | `swarm-index-document` = `index_document`; `swarm-encrypt` only when `encrypt`; the body at most T(parts) |
+| `swarm.publish` `data`, `file` | — | `stamps` ×1, then `bzz_file` ×1 | `<n>` = `name`, else `data` for `data`; `content-type` = `content_type`, else `text/plain` for `data` and `application/octet-stream` for `file`, as `publish-service.js` and bee-js's `uploadFile` default them; `swarm-deferred-upload` = `deferred` (today false for `data`, true for `file`); `swarm-encrypt` only when `encrypt`; the body exactly the part's length |
+| `swarm.publish` `collection` | — | `stamps` ×1, then `bzz_tar` ×1 | `swarm-index-document` = `index_document`, else `index.html` when a top-level part has that name; `swarm-encrypt` only when `encrypt`; the body at most T(parts) |
 | `swarm.feed` `create` | — | `stamps` ×1, then `feed_manifest` ×1 | `<t>` = `topic` |
 | `swarm.feed` `update` | — | as `updateFeed` | `<t>` = `topic`; the body as for `updateFeed`, ending in `reference` |
 | `swarm.stamps` | — | `stamps` ×1, or `stamp` ×1 with `id` | `<b>` = `id` |
 | `swarm.upload_status` | — | `tag` ×1 | `<uid>` = `tag_uid` |
 
 T(files) = 1,024 + Σ (1,024 + ⌈name's bytes / 512⌉ × 512 + ⌈size / 512⌉ × 512): a header, room for a long-name entry, and the body, each padded to 512 bytes, then the two zero blocks. It is an upper bound, which the core's exact tar never passes.
+
+**A given batch:** `swarm.publish` and `swarm.feed` may name their `batch`, as the agent passes `batchId` today (`swarm-publication-controller.js:128`, `:594`, `:787`; `publish-service.js:114`, `feed-service.js:289`). Then the row's `stamps` is left out, and the upload's `swarm-postage-batch-id` must be that batch. Without one, it is the batch the core chose; main doesn't check which listed batch that is, which would mean parsing `/stamps` in main.
 
 **The rules:**
 - **Order and phase:** main records each call it admits for a parent. A call is admitted only as the next its row allows, and only after the row's ready check answered `ok`. One call at a time per parent, except `readData`'s eight.
@@ -287,7 +292,9 @@ T(files) = 1,024 + Σ (1,024 + ⌈name's bytes / 512⌉ × 512 + ⌈size / 512�
 - **`swarm.body`** comes once per streaming call, for that call only.
 - **After the parent ends** (replied, cancelled, past its deadline), nothing is admitted for it.
 - **A refused call** is answered `invalid_argument` with `data: { rule }` (`form`, `order`, `count`, `value`, `header`, `query`, `body` or `ended`), before any dial. Main logs it at `warn` with the parent's method, its step and the rule, never a path, value or body, and refuses every later call of that parent. The core's machine ends that request with -32603 `Internal error`. Main doesn't kill the core: as with 0014's refused fetch, the grammar already bounds what it can reach.
-- **One source:** the grammar is data, `vectors/swarm-grammar.json`. SWM-1's generator checks every request the reference records against it, SWM-3 checks the core's machines, and main's executor suite reads the same file, as `stream-vectors.test.js` reads `streams.json`.
+- **One source:** the grammar is data, `vectors/swarm-grammar.json`: the forms, the rows, and for each row its **honest** calls, which must be admitted, and its **forbidden alternatives**, which must be refused. SWM-1's generator checks every request the reference records against it, SWM-3 checks the core's machines and runs both lists, and main's executor suite reads the same file and runs both lists, as `stream-vectors.test.js` reads `streams.json`.
+- **The honest calls** include, for each row, every request the reference makes that the core keeps, at the edges: an SOC read by `params.address` and by owner and identifier; `params.reference`, `params.targets` and an address in upper case; a feed entry of exactly 4,096 bytes (no `bytes_up`) and one of 4,097; a `readData` root of 4,096 bytes (no walk) and one of 4,097; a head probe after a 404 and after a 500, up to its 82nd read; an upload with the parent's own `batch` and no `stamps`; `bzz_file` with each default content type; `index.html` as the default index document.
+- **The forbidden alternatives** are each row's nearest wrong call: the reference's requests the core drops (an unranged `bytes` under `readData`; `GET /chunks` after a `/bytes` upload; a second `/stamps`; a whole `feed_latest` for an index lookup; the 128-hex PSS recipient); the query form `?Swarm-Only-Root-Chunk=true` for `feed_head`; a `range` other than `bytes=0-<n − 1>`, or a `max_bytes` other than `n`; a `bytes` for an entry of 4,096 bytes or less; a retrieval header on `chunk` or `bytes`; another address than `params.address`; a `swarm-postage-batch-id` other than the parent's `batch` when it named one.
 
 **The refusal tests** (SWM-5, against a scripted core), each refused before any dial and logged with its rule:
 - **Cross-operation:**
@@ -308,6 +315,7 @@ T(files) = 1,024 + Σ (1,024 + ⌈name's bytes / 512⌉ × 512 + ⌈size / 512�
 - **Values:** another reference, identifier, topic, recipient or target than the row binds; a second `<o>` or `<t>` within one request; `swarm-encrypt` under `swarm.request`, or under `swarm.publish` without `encrypt`; `swarm-deferred-upload: true` for `publishData`; another `content-type` than the page's.
 - **Bodies:** a length other than the row's; base64 bytes that differ from the page's; `{ stream }` where the row has `{ base64 }`, and the reverse; a `max_bytes` past the form's cap.
 - **Parts and bodies:** another request's part, one part twice, a `swarm.body` for a call that doesn't stream, or a second one.
+- **Every honest call and forbidden alternative** of `swarm-grammar.json`, admitted and refused as listed.
 
 ### Main's Swarm I/O pool
 
@@ -399,10 +407,10 @@ node ◀──POST (transport)─────┤◀───────swarm.bo
 ## Feeds, SOCs and SW-1
 
 - **Feed writes** (`updateFeed`, `writeFeedEntry`): the core computes the topic from the page's key and the feed's name, the index from the node's answers (or the page's explicit index), and the identifier `keccak256(topic ‖ index as 8 bytes, big-endian)`. A page never names the identifier of a feed write. The key is the feed's identity recorded at creation, else the active one (`getFeedIdentity`, `spi:1204–1216`).
-- **Index lookups** ask `GET /feeds` with `swarm-only-root-chunk: true`, as 0009's feed pieces do, and take the next index as `swarm-feed-index` + 1, today's own fallback (`feed-service.js:223–235`). Today the lookup downloads the latest payload whole just to learn its index. A 404 falls back to today's head probe over `GET /chunks` (`probeFeedHead`, at most 82 reads). An explicit index is checked as #1057's `feedEntryExists` checks it: its SOC only, and only a 404 frees it. Writes to one topic go one at a time in the swarm thread.
+- **Index lookups** ask `GET /feeds` with `swarm-only-root-chunk: true`, as 0009's feed pieces do, and take the next index as `swarm-feed-index` + 1, today's own fallback (`feed-service.js:223–235`). Today the lookup downloads the latest payload whole just to learn its index. A 404 or a 500 falls back to today's head probe over `GET /chunks` (`probeFeedHead`, at most 82 reads), as `isNotFoundError` reads the lookup today. An explicit index is checked as #1057's `feedEntryExists` checks it: its SOC only, and only a 404 frees it. Writes to one topic go one at a time in the swarm thread.
 - **Keys:** a publisher key signs only inside `swarm.request`, for the page key whose identity holds its index. `swarm.feed` takes only the Bee wallet key (main's own feeds). A mined GSOC key signs only GSOC messages.
 - **`swarm.sign_soc`** loses `chrome` at SWM-4: nothing in the chrome calls it, and main calls it as `shell` (`vault-backend.js:55–63`). It goes at SWM-9, once nothing calls it.
-- **Reads:** `readChunk` and `readSingleOwnerChunk` check the chunk with `fc-swarm::verify` (an address, or a SOC's signature and address), as bee-js's `unmarshal*` does in main today. `readData` joins through 0009's verified file walk, its pieces as `shell.swarm_api` GETs, where today the node's `/bytes` join is taken on its length. A feed entry is read as #1057 reads it: at an explicit index, its SOC, charged once read, then the size from its span reserved before `GET /bytes`, which streams and is held to exactly that size; the latest entry streamed, reserved from its declared length or as it comes, its `max_bytes` the site's `maxBytes`.
+- **Reads:** `readChunk` and `readSingleOwnerChunk` check the chunk with `fc-swarm::verify` (an address, or a SOC's signature and address), as bee-js's `unmarshal*` does in main today. `readData` reads through 0009's verified file walk, its pieces as `shell.swarm_api` GETs, where today the node's whole `/bytes` join is taken on its length. That walk reads the leaves as one ranged `GET /bytes` stream and checks each 4 KiB leaf against the address its verified parent names before using it (0009, *Leaves*). A leaf that fails is fetched once as `/chunks/<address>`. So the ranged `bytes` in the `readData` row is the verified leaf stream; the reference's unranged join is the deviation `read-data-verified`, refused to the core. A feed entry is read as #1057 reads it: at an explicit index, its SOC, charged once read, then the size from its span reserved before `GET /bytes`, which streams and is held to exactly that size; the latest entry streamed, reserved from its declared length or as it comes, its `max_bytes` the site's `maxBytes`.
 
 ### SW-1 in the core
 
@@ -444,7 +452,7 @@ node ◀──POST (transport)─────┤◀───────swarm.bo
 **Mining, in the core:**
 - **Where:** one **mining lane**, a thread in `freedom-cored`. It is arithmetic on public inputs, with no parser of untrusted structure, so it needs no process of its own ([Options weighed](#options-weighed)).
 - **The search is bee-js's** (`modules/messaging.js:154–168`, the same in 13.1.0 and 13.2.0): private keys `0xb33 + i` for `i` below 65,535; the first whose SOC address shares at least 12 leading bits with the target wins; none is `gsoc_mining_failed`, as today. Same inputs, same signer, so every existing room keeps its address.
-- **In batches:** `fc-swarm::gsoc::Miner` holds the search's state (the next candidate and its point), and `step(n)` tries at most `n` candidates and returns `found(i)`, `more` or `exhausted`. The lane runs a job 256 candidates at a time. Between batches it checks the job's cancel and its deadline on the core's clock. A batch loops only over its count and does the same work for every candidate, so its time doesn't depend on the input: estimated under 10 ms. A job therefore ends within one batch of its deadline or its cancel, and the lane takes the next job then. `gsoc::mine`, the whole search in one call, is the same search, for the vectors.
+- **In batches:** `fc-swarm::gsoc::Miner` holds the search's state (the next candidate and its point), and `step(n)` tries at most `n` candidates and returns `found(i)`, `more` or `exhausted`. The lane runs a job 256 candidates at a time. Between batches it checks the job's cancel and its deadline on the core's clock. Each candidate costs the same fixed work, and a batch tries at most 256 of them: it returns early at a match, and otherwise runs to its 256th. So a batch's worst case is bounded and doesn't depend on the input, estimated under 10 ms. A job therefore ends within one batch of its deadline or its cancel, and the lane takes the next job then. `gsoc::mine`, the whole search in one call, is the same search, for the vectors.
 - **Time:** bee-js needs about 5 s for all 65,535 candidates on Electron's Node (`gsoc-miner.js:24–26`). In Rust, a candidate is one point step (the generator added to the last key's point gives the next key's) and two Keccak hashes. About 4,096 candidates are expected: estimated under 0.1 s, and under 2 s at the cap. SWM-2 measures a batch and both cases on three OSes.
 - **Today's budgets, kept** (`messaging-service.js:83–144`, `gsoc-miner.js:1–28`):
   - 16 new topics a minute per site; a job that fails counts, while cache hits and joins are free;
@@ -458,7 +466,7 @@ node ◀──POST (transport)─────┤◀───────swarm.bo
 - **New limits:**
   - at most 16 jobs waiting per site and 256 in all; past either, `busy` (4900, `data.reason: "busy"`), and nothing is mined for it;
   - a waiter's cancel or deadline ends only its own wait. The job stops at the next batch when its last waiter has gone;
-  - **a batch that doesn't return:** a watchdog on the swarm thread marks the lane stuck after 1 s on one batch, a hundred times its estimate. The job ends `gsoc_mining_failed` (`GSOC mining failed: mining lane stuck`), and a new lane thread takes the queue. The stuck thread can't be stopped safely, so it is left, and its answer, if any, is dropped. A second stuck lane in one start turns mining off until the core restarts: jobs end `gsoc_mining_failed`. Only a bug reaches this, since a batch's work is fixed.
+  - **a batch that doesn't return:** a watchdog on the swarm thread marks the lane stuck after 1 s on one batch, a hundred times its estimate. The job ends `gsoc_mining_failed` (`GSOC mining failed: mining lane stuck`), and a new lane thread takes the queue. The stuck thread can't be stopped safely, so it is left, and its answer, if any, is dropped. A second stuck lane in one start turns mining off until the core restarts: jobs end `gsoc_mining_failed`. Only a bug reaches this, since a batch's work is bounded.
 - **The tests:**
   - **SWM-2:** `step` over any split into batches finds the same signer as one `mine` call and as bee-js (the `gsoc` vectors), and no `step(n)` tries more than `n` candidates;
   - **SWM-4,** on the lane with the core's test hooks (its clock and a delay per batch):
@@ -506,10 +514,10 @@ node ◀──POST (transport)─────┤◀───────swarm.bo
 The swarm thread's 64 MiB is reserved before use: when a request is admitted, and before each call that brings bytes in. `b64(m)` is 4⌈m / 3⌉.
 - **A request:** 64 KiB when it is admitted (its params, state and texts); for an upload, 300 KiB more when it starts ([Bounds](#bounds)); for a mining job, 4 KiB.
 - **A whole call,** reserved before its `shell.swarm_api` goes:
-  - a binary body (`chunk`, `feed_head`): `m + 2 × b64(m) + 16 KiB`, `m` the form's cap, at least 8 KiB for an error body;
-  - a JSON body (`stamps`, `stamp`, `tag`, `addresses`, an upload's result): `5m + 2 × b64(m) + 16 KiB`;
-  - the parts: the reply as it is reassembled (`b64(m) + 16 KiB`), its parsed base64 text (`b64(m)`), the decoded bytes (`m`) and, for JSON, the parsed value, at four times its length. Each copy is dropped as the next is made. The charge counts them all at once.
-- **A streamed read for a page:** `n + 2 × b64(n) + 16 KiB`, where `n` is what the read may hold: the size reserved from the site's budget for an explicit index, or the room left in its window for the latest entry. That covers the bytes as they come, the result's base64 and the serialized reply.
+  - a binary body (`chunk`, `feed_head`): `m + 2 × b64(m) + 16 KiB`, `m` the form's cap, at least 32 KiB for an error body and [its transcoding](#json-replies);
+  - a JSON body (`stamps`, `stamp`, `tag`, `addresses`, an upload's result): `3m + 2 × b64(m) + 16 KiB + E × 256 B`, `E` the reply type's element cap below;
+  - the parts: the reply as it is reassembled (`b64(m) + 16 KiB`), its parsed base64 text (`b64(m)`), the decoded bytes (`m`) and, for JSON, what the [typed reader](#json-replies) keeps (`2m + E × 256 B`). Each copy is dropped as the next is made. The charge counts them all at once.
+- **A streamed read for a page:** `n + 2 × b64(n) + 16 KiB`, where `n` is what the read may hold, and at least 32 KiB for an error: the size reserved from the site's budget for an explicit index, or the room left in its window for the latest entry. That covers the bytes as they come, the result's base64 and the serialized reply.
 - **The reader** takes the reply's bound from the request's entry, `b64(m) + 16 KiB`, so a fragmented reply never grows past its reservation. A longer one is a protocol error; main sends none.
 - **Released:**
   - a call's charge when the step that consumes its reply ends;
@@ -522,7 +530,27 @@ The swarm thread's 64 MiB is reserved before use: when a request is admitted, an
 **The tests** (SWM-4, the binary against a scripted main):
 - **Concurrent maximum reads:** eight connected sites each read a 5 MiB feed entry at once, four the latest entry and four at an explicit index. The charges never pass 64 MiB, the reads that don't fit wait and then complete in order, and resident memory stays within the charges plus the process's base.
 - **Reassembly:** a fragmented 1 MiB `/stamps` reply is reassembled within its reservation; one longer than its bound is a protocol error.
+- **Dense JSON:** eight 1 MiB `/stamps` replies at once, each one of the adversarial shapes in [JSON replies](#json-replies), parsed while the memory is sampled. Resident memory stays within their charges plus the process's base.
 - **Cancel** at each stage: before the reply, mid-stream, and with the reply in flight. Each charge is released only once main's answer is consumed.
+
+#### JSON replies
+
+The core never parses a node's reply into a generic JSON value: a dense array of `m / 2` scalars would cost one value-sized element each, many times `m`. Each JSON reply type has a **typed reader** instead. It reads the bytes once, keeps only the fields the core uses, skips every other value without keeping it, and stops at fixed caps:
+- **What it can hold:** the strings it keeps, each a copy of bytes from the reply, so at most `m` together; the parser's scratch for one escaped string, at most `m`; and at most `E` elements of at most 256 bytes each, numbers and flags read as JavaScript reads them (IEEE doubles, `fc-json`'s rules). That is the `2m + E × 256 B` above.
+- **Its caps,** past which the call fails `too_large` (deviation `reply-bounds`):
+
+  | Reply | Kept | `E` | Its charge at the form's cap |
+  |---|---|---|---|
+  | `/stamps` (1 MiB) | per batch, the fields `mapPostageBatch` reads, its label as it came | 4,096 batches | 6.7 MiB |
+  | `/stamps/<b>` (64 KiB) | one batch, the same fields | 1 | 0.4 MiB |
+  | `/tags/<uid>` (64 KiB) | `normalizeTag`'s fields | 1 | 0.4 MiB |
+  | `/addresses` (64 KiB) | `overlay` and `pssPublicKey`; the underlays skipped | 1 | 0.4 MiB |
+  | an upload's result (64 KiB) | `reference` | 1 | 0.4 MiB |
+
+- **Skipped values** cost nothing kept: the reader counts their nesting, at most 64 deep, past which the call fails `error`, and keeps no element of them.
+- **A repeated key** keeps the last value, as `JSON.parse` does, overwriting in place.
+- **Error bodies,** at most 8 KiB, are the one reply whose whole value matters: the page's text is `JSON.stringify` of its parse, and `isChunkNotFoundError` reads its `message`. A transcoder writes that text as it reads, holding only the text and each open object's keys and members until the object closes, so a repeated key keeps its first place and its last value, as `JSON.parse` gives them. It holds at most four times the body, which the 32 KiB floor above covers.
+- **The tests** (SWM-3 on the readers; SWM-4's memory gate): replies at each cap and one past it; a 1 MiB dense array of `0,` under an unknown key; 4,096 minimal batches; one batch whose label is the whole reply; nesting at 64 and 65; a key repeated through the whole reply; and error bodies that are dense arrays, deep objects, repeated keys and lone surrogates, against `JSON.stringify(JSON.parse(text))`. Each reader's kept bytes are measured against its charge, and SWM-4 runs eight such `/stamps` replies at once with resident memory within the charges.
 
 ### Budgets
 
@@ -545,7 +573,7 @@ Today's code has none of these. Its own budgets stay as they are: the read budge
 `vectors/swarm.json`, generated from the JS reference (AGENTS rule 5) by `vectors/generator/swarm.js`, with the harness `naming.json` uses: the browser's own modules at the pin, Electron stubbed, no reference code copied. Global `fetch` and `WebSocket` are a recording fake node with scripted answers, the clock is fixed, and signatures come from bee-js's own signer with the test keys of `keys.json`.
 - **The reference** is the browser at an `integration/rust-core` commit that has #1057, with bee-js 13.2.0 exactly, as its lockfile pins. CI's vectors job checks that commit out fresh and installs it with `npm ci --ignore-scripts` from its own lockfile, as for every vector file. The generator asserts `@ethersphere/bee-js` 13.2.0 and `@ethersphere/core-sdk` 0.2.2 from their installed `package.json` (`packageVersion`) and records both in `meta`. So a checkout with another install, like the reference checkout's 13.1.0, fails rather than generating. No bee-js code is taken or run from outside that install.
 - **`methods`:** each method, with params in the typed form, the stores before, the grants, the approval path and the scripted node. It records the result or error; every node request (method, path, query, headers, and the body's bytes, or its length and SHA-256); the stores' text after; the history rows. Tables of bad params, one failing check per case, pin the order of checks.
-- **The grammar** (`vectors/swarm-grammar.json`, written from [the table](#the-operation-grammar)): the generator checks every request each case records against its operation's row. It fails on any that matches no row and isn't one of a named deviation's requests: the reference's second `/stamps` read, its whole `/feeds` download for an index, its `GET /chunks` after a `/bytes` upload, and `readData`'s whole `/bytes`.
+- **The grammar** (`vectors/swarm-grammar.json`, written from [the table](#the-operation-grammar)): the generator checks every request each case records against its operation's row. It fails on any that matches no row and isn't one of a named deviation's requests: the reference's second `/stamps` read, its whole `/feeds` download for an index, its `GET /chunks` after a `/bytes` upload, `readData`'s whole `/bytes`, and `sendPss`'s 128-hex recipient. It also writes each row's honest calls and forbidden alternatives into the file ([the rules](#the-operation-grammar)).
 - **`bodies`:** the tars bee-js writes for `window.swarm`'s path forms; single-file uploads; the `/bytes` path of a large feed entry; SOC, chunk and PSS bodies.
 - **`trees`:** core-sdk's `ChunkSplitter` roots and root chunks over seeded data of 0, 1, 4,095, 4,096, 4,097, 524,288, 524,289 bytes and 10 MiB.
 - **`stamps`:** `mapPostageBatch` over recorded `/stamps` answers (usable, propagating, full immutable, full mutable, missing fields), and `selectBestBatch` with each option over them.
@@ -572,7 +600,8 @@ Against the reference pin, which has #1057. F-1's and F-5's first deviations (`f
 | `tar-paths` | a name of over 100 UTF-8 bytes cut by bee-js (F-3): `swarm.publish` collections only, since a page's paths are at most 100 bytes | names counted in bytes |
 | `feed-wrap-root` | the SOC wraps the root chunk the node sends back | the core's own root; a different node reference refused |
 | `reference-check` | `publishChunk` answers its own address and ignores the node's; a `/bytes` upload's reference is taken as the node gives it (a SOC's is already checked, `chunk-service.js:120–123`) | both checked; a mismatch is -32603 `The Swarm node returned another reference` |
-| `read-data-verified` | `/bytes` joined by the node, its length checked | 0009's verified walk; bad data is `chunk_type_mismatch` |
+| `read-data-verified` | `/bytes` joined by the node, unranged, its length checked | 0009's verified walk: chunks, and the leaves as one ranged `/bytes` stream, each leaf checked; bad data is `chunk_type_mismatch` |
+| `pss-recipient` | the recipient sent as 128 hex, which the bundled node refuses (F-9) | the page's compressed key, 66 hex |
 | `read-pieces` | a latest feed read without a declared length is reserved per network read, so after a refusal what stays charged depends on how the body arrived | reserved per data frame from main; what stays charged differs by less than one piece |
 | `index-probe` | the latest payload downloaded whole to learn its index | the root chunk only |
 | `index-allocation` | allocation trusts `nextPublisherKeyIndex` (F-8) | past every stored index |
@@ -596,6 +625,7 @@ What a page can see, against the reference pin with #1057. Everything else stays
 - `busy` when the core's Swarm queue, its memory, main's Swarm I/O pool or the mining queue is full.
 - A node reply past its form's cap fails the call.
 - A node that answers with the wrong reference for a chunk or a large feed entry gets the write refused.
+- `sendPss` sends the recipient as the compressed key the node reads, so it reaches the bundled node (F-9).
 - A transport failure's message is one fixed text for each kind of failure, and an error body's text comes from its first 8 KiB.
 - If question 4 is yes: while a proxy or Tor is on, `subscribe` to a node not on loopback is refused with 4900 `Node not available: proxy-or-tor` (`data.reason: "proxy-or-tor"`), and open subscriptions to it end when either comes on.
 
