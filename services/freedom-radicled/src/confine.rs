@@ -17,7 +17,7 @@
 use std::io;
 use std::path::{Path, PathBuf};
 
-use fc_service::confine::{self, Invalid, Policy, Report};
+use fc_service::confine::{self, Invalid, OpenDir, Policy, Report};
 use fc_service::network::NetworkPolicy;
 
 /// The lowest Landlock ABI the service's file rules work under: `refer`
@@ -70,6 +70,7 @@ impl Grant {
         Policy {
             read_write: vec![self.home.clone(), self.own_home.clone()],
             read_only: if direct { nat64_grants() } else { Vec::new() },
+            read_only_dirs: Vec::new(),
             refer: true,
             min_abi: MIN_ABI,
             network: network.confinement(),
@@ -104,6 +105,34 @@ fn nat64_grants() -> Vec<PathBuf> {
     grants
 }
 
+impl Grant {
+    /// The import process's policy (design 0010, D5): the same two
+    /// directories read and write, with `refer`; `roots`, the working
+    /// copy's checked roots, read only, each from the directory held open
+    /// (its descriptor kept with `descriptors`, the gate's lock); and no
+    /// network: no TCP rule (ABI 4), seccomp refusing every socket family,
+    /// and nothing granted for name resolution or NAT64 discovery.
+    pub fn import_policy(&self, roots: &[OpenDir], descriptors: Vec<i32>) -> Policy {
+        #[cfg(unix)]
+        let descriptors = {
+            let mut descriptors = descriptors;
+            descriptors.extend(roots.iter().map(OpenDir::descriptor));
+            descriptors
+        };
+        Policy {
+            read_write: vec![self.home.clone(), self.own_home.clone()],
+            read_only: Vec::new(),
+            read_only_dirs: roots.to_vec(),
+            refer: true,
+            min_abi: MIN_ABI,
+            network: confine::Network::Offline,
+            resolver: confine::Resolver::None,
+            descriptors,
+            interface_index: false,
+        }
+    }
+}
+
 /// Confines the process to `grant` under `network`. With the test hooks, it
 /// first reports the threads and descriptors the process has here, so a test
 /// proves the point is reached single-threaded, holding stdio and the lock.
@@ -112,8 +141,13 @@ pub fn confine(
     network: &NetworkPolicy,
     descriptors: Vec<i32>,
 ) -> Result<Report, Invalid> {
+    apply(&grant.policy(network, descriptors))
+}
+
+/// Confines the process under `policy`, as [`confine`] does.
+pub fn apply(policy: &Policy) -> Result<Report, Invalid> {
     crate::testhooks::at_confinement_point();
-    confine::confine(&grant.policy(network, descriptors))
+    confine::confine(policy)
 }
 
 #[cfg(test)]
@@ -139,5 +173,39 @@ mod tests {
         assert!(socks5.read_only.is_empty());
         // Both read and write the home and the service's own HOME alone.
         assert_eq!(direct.read_write, socks5.read_write);
+    }
+
+    #[test]
+    fn the_import_reads_its_roots_alone_and_has_no_network() {
+        let dir = tempfile::tempdir().unwrap();
+        let grant = Grant::open(dir.path(), dir.path()).unwrap();
+        let base = std::fs::canonicalize(dir.path()).unwrap();
+        for name in ["work", "elsewhere.git"] {
+            std::fs::create_dir(base.join(name)).unwrap();
+        }
+        let roots = vec![
+            OpenDir::open(&base.join("work")).unwrap(),
+            OpenDir::open(&base.join("elsewhere.git")).unwrap(),
+        ];
+        let policy = grant.import_policy(&roots, vec![3]);
+        // By the directories held open, nothing by path.
+        assert_eq!(policy.read_only_dirs, roots);
+        assert!(policy.read_only.is_empty());
+        assert_eq!(
+            policy.read_write,
+            grant.policy(&NetworkPolicy::Direct, vec![]).read_write
+        );
+        assert_eq!(policy.network, confine::Network::Offline);
+        assert_eq!(policy.resolver, confine::Resolver::None);
+        assert!(policy.refer && !policy.interface_index);
+        assert_eq!(policy.min_abi, MIN_ABI);
+        // The gate's lock, and each root's descriptor.
+        #[cfg(unix)]
+        assert_eq!(
+            policy.descriptors,
+            vec![3, roots[0].descriptor(), roots[1].descriptor()]
+        );
+        #[cfg(not(unix))]
+        assert_eq!(policy.descriptors, vec![3]);
     }
 }

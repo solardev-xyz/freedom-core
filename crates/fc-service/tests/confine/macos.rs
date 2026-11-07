@@ -281,6 +281,7 @@ fn policy(p: &Paths, network: Network, descriptors: Vec<i32>) -> Policy {
     Policy {
         read_write: vec![p.data.clone()],
         read_only: vec![p.read_only.clone()],
+        read_only_dirs: Vec::new(),
         refer: false,
         min_abi: 1,
         network,

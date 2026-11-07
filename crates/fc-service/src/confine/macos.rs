@@ -266,6 +266,15 @@ fn grants(policy: &Policy) -> Result<Grants, Invalid> {
             }
         }
     }
+    // A directory held open, by the canonical path it was opened at:
+    // Seatbelt's rules are by path, so the service checks it again once
+    // confined.
+    for dir in &policy.read_only_dirs {
+        let path = dir.path().to_path_buf();
+        if !grants.read_only_dirs.contains(&path) {
+            grants.read_only_dirs.push(path);
+        }
+    }
     Ok(grants)
 }
 
@@ -467,6 +476,7 @@ mod tests {
         let policy = Policy {
             read_write: vec![dir.path().to_path_buf()],
             read_only: vec![PathBuf::from("/etc/hosts"), PathBuf::from("/nonexistent")],
+            read_only_dirs: Vec::new(),
             refer: false,
             min_abi: 1,
             network: Network::Offline,
@@ -491,6 +501,7 @@ mod tests {
         let policy = Policy {
             read_write: Vec::new(),
             read_only: Vec::new(),
+            read_only_dirs: Vec::new(),
             refer: false,
             min_abi: 1,
             network: Network::Direct,

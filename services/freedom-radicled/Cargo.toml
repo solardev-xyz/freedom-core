@@ -34,8 +34,8 @@ fc-service = { path = "../../crates/fc-service" }
 # The sealed release of the node key (0008, "The sealed release"): the
 # service's X25519 key for one start, and opening what the core sealed to it.
 fc-seal = { path = "../../crates/fc-seal" }
-# libradicle at `integration/rust-core` (0bc2c72, #32's merge), built with
-# `no-spawn`,
+# libradicle at `integration/rust-core` (46cf9d9, #33's merge),
+# built with `no-spawn`,
 # explicitly (0008, "Spawn and lock"): serving runs in process and `git gc`
 # is skipped. It carries the upstream changes 0008 lists for the service's
 # first steps: the routing, `isolated` and `control_socket` options, the
@@ -51,13 +51,16 @@ fc-seal = { path = "../../crates/fc-seal" }
 # asked, how the node's thread ended and the home apart (`Shutdown`). And
 # R-19's fix (libradicle #31): a commit's diff that isn't UTF-8 is decoded
 # lossily, and serialized without a `Value` copy, instead of panicking, and
-# an alias Radicle refuses is `Error::Alias`. And #32: a bounded walk charges
-# each tree and commit what libgit2 holds of it once parsed, and the walk to
-# a file is bounded (`blob_header_bounded`, `read_blob_at_bounded`), for
-# `rad.blob` (freedom-core #277, round 2). Pinned by commit until those
-# changes are released (deny.toml allows solardev-xyz).
+# an alias Radicle refuses is `Error::Alias`. Then the bounded reads' charges
+# for what libgit2 holds of a tree or commit, and the walk to a file bounded
+# (libradicle #32: `blob_header_bounded`, `read_blob_at_bounded`, for
+# `rad.blob`), and the import with no node (#33: `import::Import`, a libgit2
+# fetch into a temporary clone moved into place last, the working copy never
+# written, its `Moved` stage told after the move), which the import process
+# runs. Pinned by commit until those changes are released (deny.toml allows
+# solardev-xyz).
 # src/build_info.rs reports the same commit.
-libradicle = { git = "https://github.com/solardev-xyz/libradicle", rev = "0bc2c72e44a6088c2fe76111c0d7e0314de604e5", features = ["no-spawn"] }
+libradicle = { git = "https://github.com/solardev-xyz/libradicle", rev = "46cf9d99ec868c938ffed13b6a38fbeda0a50857", features = ["no-spawn"] }
 # libgit2's process-wide options, which heartwood's `radicle::git::raw`
 # doesn't re-export: the object cache turned off (src/reads.rs, `uncache`),
 # and the probe of it. Already in libradicle's graph, at its version and with
@@ -91,6 +94,10 @@ ed25519-dalek = { version = "2", default-features = false, features = ["zeroize"
 getrandom = "0.4"
 rand_core = "0.10"
 base64 = "0.22"
+# The import's verified source, as libgit2 opens it on Windows: a canonical
+# path without its `\\?\` prefix where that names the same path. Already in
+# libradicle's graph (its own import uses it).
+dunce = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["raw_value"] }
 zeroize = "1"

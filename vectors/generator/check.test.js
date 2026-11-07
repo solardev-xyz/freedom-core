@@ -20,6 +20,7 @@ FILES.push('radicle-reads.json', 'generator/radicle-reads.js');
 FILES.push('radicle-blob.json', 'generator/radicle-blob.js');
 FILES.push('radicle-network.json', 'generator/radicle-network.js');
 FILES.push('radicle-stats.json', 'generator/radicle-stats.js');
+FILES.push('radicle-import.json', 'generator/radicle-import.js');
 
 function corruptedCheck(filename, corrupt) {
   const copy = fs.mkdtempSync(path.join(os.tmpdir(), 'freedom-core-vectors-'));
@@ -700,4 +701,12 @@ test('check rejects a changed stats result', () => {
     entry.result_text = entry.result_text.replace('"over_limit"]', '"over_limit","over_limit"]');
   });
   assert.match(stderr, /Byte mismatch: radicle-stats.json/);
+});
+
+test('check rejects a changed import answer', () => {
+  const stderr = corruptedCheck('radicle-import.json', (contents) => {
+    const entry = contents.imports.find((item) => item.id === 'error-outcome-unknown');
+    entry.expect.error.message = 'the import timed out';
+  });
+  assert.match(stderr, /Byte mismatch: radicle-import.json/);
 });

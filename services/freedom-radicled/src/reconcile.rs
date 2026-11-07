@@ -154,6 +154,13 @@ pub fn run(
     };
     let storage =
         Storage::open(&paths.storage, info).map_err(|e| failed("the storage", kind_of(&e)))?;
+    // The COB cache's own tables, migrated as a node start migrates them: a
+    // home whose node never started has none, and a repair rebuilds a
+    // repository's COBs into them (#306). A no-op on a migrated cache.
+    // It is the reconcile state's own database, so a failure is named so.
+    radicle::cob::cache::StoreWriter::open(&paths.progress)
+        .and_then(|db| db.with_migrations(radicle::cob::cache::migrate::ignore))
+        .map_err(|_| failed("the reconcile state", "its database doesn't open or answer"))?;
     let mut state =
         State::open(&paths.progress).map_err(|e| failed("the reconcile state", state_error(&e)))?;
     let mut quarantine = Quarantine::open(&paths.record)

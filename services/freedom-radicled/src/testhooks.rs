@@ -100,6 +100,37 @@
 //!   holds` as they begin. The terminal event follows as libradicle's
 //!   `clone_repo_with` emits it, and once the clone has answered it logs
 //!   `test hook: the clone has answered`.
+//! - `FREEDOM_RADICLED_TEST_IMPORT_LIMIT_MS` replaces the import process's
+//!   300 s for `rad.import_repo` from its admission ([`crate::import`]).
+//! - `FREEDOM_RADICLED_TEST_HOLD_IMPORT=<stage>@<hold>` holds the import at
+//!   `<stage>`: `admitted`, on its thread before the roots are found again
+//!   and libradicle's checks and the start; `verified`, once the roots are
+//!   found again and match, just before libradicle opens the working copy;
+//!   `start`, just past its start, before libradicle's call; or
+//!   `created`, `fetched`, `signed`, `seeded` or `moved` (the repository in
+//!   place, before the storage directory's flush), each once libradicle has
+//!   done that durable step. `<hold>` is a number of milliseconds,
+//!   `until:<path>` (until a file exists there, or 30 s), or `panic`. While
+//!   it is set, each stage reached logs `test hook: the import reached a
+//!   stage`, and the held one `test hook: the import holds at a stage`,
+//!   each with its `stage`.
+//! - `FREEDOM_RADICLED_TEST_HOLD_CONFINE=until:<path>` holds the process
+//!   at its confinement point, after the import's roots are found and
+//!   checked and before the rules, until a file exists at `<path>` or for
+//!   30 s, logging `test hook: the confinement point holds`: still the one
+//!   thread, opening nothing, so a test can change the source there.
+//! - `FREEDOM_RADICLED_TEST_HOLD_END=until:<path>` holds the import
+//!   process's end, once it has closed an import not yet started to any
+//!   start, until a file exists at `<path>` or for 4 s (within the
+//!   connection's 5 s exit), logging `test hook: the end holds`: the
+//!   process lives on while the import's thread meets the closed start.
+//! - `FREEDOM_RADICLED_TEST_PROBE_READ=<path>`,
+//!   `FREEDOM_RADICLED_TEST_PROBE_DIAL=<ip:port>` and, on Unix,
+//!   `FREEDOM_RADICLED_TEST_PROBE_UNIX=<path>`: once `rad.import_repo` is
+//!   admitted, confined, the import's thread reads the file, connects over
+//!   TCP, or connects to the Unix socket, and logs `test hook: probe` with
+//!   what it tried and whether it worked (`ok`, else the error's kind), so
+//!   that a test shows what confinement refuses.
 //! - With `FREEDOM_RADICLED_TEST_HOLD_WRITE` or
 //!   `FREEDOM_RADICLED_TEST_HOLD_REPAIR` set, the stop logs `test hook: the
 //!   stop has fenced the pools` once every pool is fenced, before their
@@ -168,8 +199,21 @@ pub fn at_unit_start(kind: &str) {
     let _ = kind;
 }
 
-/// At the confinement point: logs the process's thread count when asked.
+/// At the confinement point: holds the process there, single-threaded and
+/// opening nothing, if asked; then logs the process's thread count when
+/// asked.
 pub fn at_confinement_point() {
+    #[cfg(feature = "testhooks")]
+    if let Some(release) = std::env::var("FREEDOM_RADICLED_TEST_HOLD_CONFINE")
+        .ok()
+        .and_then(|hold| hold.strip_prefix("until:").map(str::to_owned))
+    {
+        fc_service::log::info(
+            "test hook: the confinement point holds",
+            serde_json::json!({}),
+        );
+        until_released(&release);
+    }
     #[cfg(all(feature = "testhooks", target_os = "linux"))]
     if std::env::var_os("FREEDOM_RADICLED_TEST_THREADS").is_some() {
         let threads = std::fs::read_dir("/proc/self/task").map_or(0, Iterator::count);
@@ -672,6 +716,101 @@ mod hermetic {
 
         fn isolates_streams(&self) -> bool {
             self.inner.isolates_streams()
+        }
+    }
+}
+
+/// `rad.import_repo`'s time from its admission.
+pub fn import_limit(default: Duration) -> Duration {
+    #[cfg(feature = "testhooks")]
+    if let Some(ms) = millis("FREEDOM_RADICLED_TEST_IMPORT_LIMIT_MS") {
+        return Duration::from_millis(ms);
+    }
+    default
+}
+
+/// Once `rad.import_repo` is admitted, on the import's thread: the probes,
+/// if asked.
+pub fn at_import_admission() {
+    #[cfg(feature = "testhooks")]
+    {
+        let outcome = |result: std::io::Result<()>| match result {
+            Ok(()) => "ok".to_owned(),
+            Err(e) => e.kind().to_string(),
+        };
+        if let Some(path) = std::env::var_os("FREEDOM_RADICLED_TEST_PROBE_READ") {
+            let read = std::fs::read(&path).map(drop);
+            fc_service::log::info(
+                "test hook: probe",
+                serde_json::json!({ "probe": "read", "outcome": outcome(read) }),
+            );
+        }
+        if let Some(addr) = std::env::var("FREEDOM_RADICLED_TEST_PROBE_DIAL")
+            .ok()
+            .and_then(|a| a.parse::<std::net::SocketAddr>().ok())
+        {
+            let dial =
+                std::net::TcpStream::connect_timeout(&addr, Duration::from_secs(2)).map(drop);
+            fc_service::log::info(
+                "test hook: probe",
+                serde_json::json!({ "probe": "dial", "outcome": outcome(dial) }),
+            );
+        }
+        #[cfg(unix)]
+        if let Some(path) = std::env::var_os("FREEDOM_RADICLED_TEST_PROBE_UNIX") {
+            let unix = std::os::unix::net::UnixStream::connect(path).map(drop);
+            fc_service::log::info(
+                "test hook: probe",
+                serde_json::json!({ "probe": "unix", "outcome": outcome(unix) }),
+            );
+        }
+    }
+}
+
+/// At an import's `stage`: logs it, and holds it or panics there, if asked.
+// The panic is the fault this hook injects, and only with the feature.
+#[allow(clippy::panic)]
+pub fn at_import_stage(stage: &str) {
+    #[cfg(feature = "testhooks")]
+    if let Ok(asked) = std::env::var("FREEDOM_RADICLED_TEST_HOLD_IMPORT") {
+        fc_service::log::info(
+            "test hook: the import reached a stage",
+            serde_json::json!({ "stage": stage }),
+        );
+        let Some((at, hold)) = asked.split_once('@') else {
+            return;
+        };
+        if at != stage {
+            return;
+        }
+        fc_service::log::info(
+            "test hook: the import holds at a stage",
+            serde_json::json!({ "stage": stage }),
+        );
+        if hold == "panic" {
+            panic!("test hook: a panic past the import's start");
+        }
+        if let Some(release) = hold.strip_prefix("until:") {
+            until_released(release);
+        } else if let Ok(ms) = hold.parse() {
+            std::thread::sleep(Duration::from_millis(ms));
+        }
+    }
+    #[cfg(not(feature = "testhooks"))]
+    let _ = stage;
+}
+
+/// The import process's end, once no import can start: holds it, if asked.
+pub fn hold_end() {
+    #[cfg(feature = "testhooks")]
+    if let Some(release) = std::env::var("FREEDOM_RADICLED_TEST_HOLD_END")
+        .ok()
+        .and_then(|hold| hold.strip_prefix("until:").map(str::to_owned))
+    {
+        fc_service::log::info("test hook: the end holds", serde_json::json!({}));
+        let until = std::time::Instant::now() + Duration::from_secs(4);
+        while std::time::Instant::now() < until && !std::path::Path::new(&release).exists() {
+            std::thread::sleep(Duration::from_millis(5));
         }
     }
 }

@@ -47,6 +47,7 @@ use std::path::{Path, PathBuf};
 
 use serde::Serialize;
 
+mod dir;
 // Derived and tested on every OS; applied on Windows.
 #[cfg_attr(not(windows), allow(dead_code))]
 mod job;
@@ -63,6 +64,8 @@ pub mod seccomp;
 #[cfg(windows)]
 mod windows;
 
+pub use dir::{Identity, OpenDir};
+
 /// What a service may use once confined.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Policy {
@@ -74,6 +77,13 @@ pub struct Policy {
     /// ([`system_read_only`], which `confine` adds): an import's checked
     /// roots, say.
     pub read_only: Vec<PathBuf>,
+    /// Directories it opened before `confine` and only reads, each held
+    /// open with its identity ([`OpenDir`]): an import's checked roots. On
+    /// Linux, Landlock's rule for each is made from its open handle, never
+    /// by opening its path again; Seatbelt's names its path. Each one's
+    /// descriptor must be in [`Policy::descriptors`], as any directory a
+    /// service holds open.
+    pub read_only_dirs: Vec<OpenDir>,
     /// Renames and links across the read-write directories (Landlock's
     /// `refer`, ABI 2): libgit2 links each loose object into place.
     pub refer: bool,

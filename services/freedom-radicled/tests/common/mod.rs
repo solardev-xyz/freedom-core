@@ -139,6 +139,30 @@ impl Radicled {
         Radicled::spawn(command)
     }
 
+    /// `import` for `dirs`, reading `source`, with `protected` as main's
+    /// protected roots, and `extra` in its environment (design 0010, D5).
+    pub fn import(
+        dirs: &Dirs,
+        source: &std::path::Path,
+        protected: &[&std::path::Path],
+        extra: &[(&str, &str)],
+    ) -> Radicled {
+        let mut command = Command::new(BIN);
+        command
+            .arg("import")
+            .arg("--home")
+            .arg(&dirs.home)
+            .arg("--lock-dir")
+            .arg(&dirs.locks)
+            .arg("--source")
+            .arg(source);
+        for root in protected {
+            command.arg("--protected").arg(root);
+        }
+        environment(&mut command, dirs, extra);
+        Radicled::spawn(command)
+    }
+
     pub fn spawn(mut command: Command) -> Radicled {
         command
             .stdin(Stdio::piped())
@@ -481,6 +505,18 @@ impl Radicled {
         let reconciled = self.call("rad.reconcile", json!({}));
         assert!(reconciled["result"].is_object(), "{reconciled}");
         self.call("rad.start", json!({ "alias": "started" }))
+    }
+
+    /// The import process's steps before `rad.import_repo`, as `SEED`'s
+    /// identity: `rad.hello`, `rad.identity` with the key sealed, then
+    /// `rad.reconcile`, whose reply it returns with `rad.hello`'s.
+    pub fn reconciled(&mut self) -> (Value, Value) {
+        let hello = self.hello();
+        let identity = self.call("rad.identity", sealed_to(&hello, &SEED));
+        assert!(identity["result"].is_object(), "{identity}");
+        let reconciled = self.call("rad.reconcile", json!({}));
+        assert!(reconciled["result"].is_object(), "{reconciled}");
+        (hello, reconciled)
     }
 
     /// `rad.shutdown`, as main sends it; the process then exits.

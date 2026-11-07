@@ -123,15 +123,14 @@ pub struct Discovery {
 }
 
 struct Shared {
-    /// The state as published.
-    state: Mutex<Nat64State>,
+    /// The state and its round's failures as published, under one lock, so
+    /// a read never pairs one publication's state with another's failures
+    /// (#303).
+    published: Mutex<Published>,
     /// The host's: where each new state goes.
     publish: Publish,
     /// The rounds' thread's name.
     thread: &'static str,
-    /// Why the last round's resolvers failed, each a fixed name: none since
-    /// a resume until a round publishes.
-    failures: Mutex<Vec<&'static str>>,
     /// Held across a publication and its log line, so both stay in order
     /// between publishers. Readers never take it, so they never wait for
     /// the line, which names every resolver's failure.
@@ -147,6 +146,15 @@ struct Shared {
     /// let go: tests.
     #[cfg(test)]
     before_log: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
+}
+
+/// What a publication installs, together.
+struct Published {
+    /// The state.
+    state: Nat64State,
+    /// Why the last round's resolvers failed, each a fixed name: none since
+    /// a resume until a round publishes.
+    failures: Vec<&'static str>,
 }
 
 #[derive(Default)]
@@ -171,10 +179,12 @@ impl Discovery {
     pub fn new(source: Source, timing: Timing, host: Host) -> Discovery {
         Discovery {
             shared: Arc::new(Shared {
-                state: Mutex::new(Nat64State::Pending),
+                published: Mutex::new(Published {
+                    state: Nat64State::Pending,
+                    failures: Vec::new(),
+                }),
                 publish: host.publish,
                 thread: host.thread,
-                failures: Mutex::new(Vec::new()),
                 publishing: Mutex::new(()),
                 source,
                 timing,
@@ -208,33 +218,28 @@ impl Discovery {
     }
 
     /// [`Discovery::stats`] with at most `prefixes` prefixes and the first
-    /// `failures` failures (freedom-radicled's `rad.stats`): each list is
-    /// cut as it is read, under its own lock, so the work and the copy are
-    /// bounded however many resolvers the OS lists.
+    /// `failures` failures (freedom-radicled's `rad.stats`): one
+    /// publication's state and failures, read together under one lock, each
+    /// list cut as it is read, so the work and the copy are bounded however
+    /// many resolvers the OS lists.
     pub fn stats_bounded(&self, prefixes: usize, failures: usize) -> serde_json::Value {
-        let (name, prefixes) = {
-            let state = self
+        let (name, prefixes, failures) = {
+            let published = self
                 .shared
-                .state
+                .published
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
-            let listed: Vec<String> = state
+            let listed: Vec<String> = published
+                .state
                 .prefixes()
                 .iter()
                 .take(prefixes)
                 .map(|prefix| prefix.cidr().to_string())
                 .collect();
-            (state_name(&state), listed)
+            let why: Vec<&'static str> =
+                published.failures.iter().take(failures).copied().collect();
+            (state_name(&published.state), listed, why)
         };
-        let failures: Vec<&'static str> = self
-            .shared
-            .failures
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .iter()
-            .take(failures)
-            .copied()
-            .collect();
         json!({ "state": name, "prefixes": prefixes, "failures": failures })
     }
 
@@ -320,19 +325,21 @@ impl Shared {
     }
 
     fn current(&self) -> Nat64State {
-        self.state
+        self.published
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .state
             .clone()
     }
 
     /// Publishes `state` and its round's failures, and logs a change.
     ///
-    /// The state and failure locks are held only to swap in what is already
-    /// built: the failure list, one name per OS resolver, is copied before,
-    /// and the log line, which carries all of it, is written after. A
-    /// bounded read (`stats_bounded`) never waits behind work the size of
-    /// the OS's list (#292 review, round 2).
+    /// The published lock is held only to swap in what is already built:
+    /// the failure list, one name per OS resolver, is copied before, and the
+    /// log line, which carries all of it, is written after. A bounded read
+    /// (`stats_bounded`) never waits behind work the size of the OS's list
+    /// (#292 review, round 2), and sees the state and failures of one
+    /// publication (#303).
     fn publish(&self, state: Nat64State, failures: &[Failed]) {
         let _order = self
             .publishing
@@ -342,28 +349,26 @@ impl Shared {
         // Copied before the lock, moved in under it: the guard holds only
         // the swap (#292 review, round 3).
         let installed = why.clone();
+        let (name, prefixes) = (state_name(&state), state.prefixes().len());
         let earlier = {
             let mut published = self
-                .failures
+                .published
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
-            std::mem::replace(&mut *published, installed)
-        };
-        drop(earlier);
-        let (name, prefixes) = (state_name(&state), state.prefixes().len());
-        {
-            let mut published = self
-                .state
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
-            if *published == state {
+            let earlier = std::mem::replace(&mut published.failures, installed);
+            if published.state == state {
+                // The failures change alone: no new state, and no line.
+                drop(published);
+                drop(earlier);
                 return;
             }
-            // Under the lock: `state()` and the host see each change
-            // together, and in order.
-            *published = state;
-            (self.publish)(&published);
-        }
+            // Under the lock: `state()`, the stats and the host see each
+            // change together, and in order.
+            published.state = state;
+            (self.publish)(&published.state);
+            earlier
+        };
+        drop(earlier);
         #[cfg(test)]
         self.before_log();
         log::info(
@@ -1550,6 +1555,43 @@ mod tests {
             log[1].at.saturating_duration_since(asked)
         );
         assert_eq!(log[1].stats["failures"], json!(["over_limit"]));
+    }
+
+    /// A read sees one publication's state and failures together (#303):
+    /// with publications alternating between two pairs, no read pairs one's
+    /// state with the other's failures.
+    #[test]
+    fn a_read_pairs_one_publications_state_and_failures() {
+        let discovery = Discovery::new(Arc::new(Vec::new), FAST, host());
+        let unknown = vec![(String::from("a"), "unaskable")];
+        let pending = vec![(String::from("b"), "rcode"), (String::from("c"), "rcode")];
+        let stop = std::sync::atomic::AtomicBool::new(false);
+        let reads = std::thread::scope(|scope| {
+            let reader = scope.spawn(|| {
+                let mut reads = 0u32;
+                while !stop.load(Ordering::SeqCst) {
+                    let stats = discovery.stats();
+                    let pair = (
+                        stats["state"].as_str().unwrap().to_owned(),
+                        stats["failures"].as_array().unwrap().len(),
+                    );
+                    match (pair.0.as_str(), pair.1) {
+                        // The start's, then the two publications'.
+                        ("pending", 0) | ("unknown", 1) | ("pending", 2) => {}
+                        _ => panic!("a torn read: {stats}"),
+                    }
+                    reads += 1;
+                }
+                reads
+            });
+            for _ in 0..2_000 {
+                discovery.shared.publish(Nat64State::unknown([]), &unknown);
+                discovery.shared.publish(Nat64State::Pending, &pending);
+            }
+            stop.store(true, Ordering::SeqCst);
+            reader.join().unwrap()
+        });
+        assert!(reads > 0);
     }
 
     #[test]

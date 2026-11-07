@@ -438,7 +438,7 @@ The rules this design relies on, as 0007 specifies them:
 | `rad.clone` | `rid`, `timeout_ms`, `progress` (a boolean; absent or null is `false`) | `{ ok }` or `{ cancelled }`; with `progress`, `rad.progress` events | network pool; `timeout_ms` + 30 s |
 | `rad.unseed` | `rid` | `{ unseeded }` | write queue; 60 s |
 | `rad.write` | `op` (`create_issue`, `comment_issue`, `edit_issue_state`, `comment_patch`), `args` | today's JSON | write queue; 60 s |
-| `rad.import_repo` | `path`, `name`, `description`, `default_branch` | `{ rid }` | the import process only, once `rad.reconcile` has succeeded ([Writes](#writes)); 300 s |
+| `rad.import_repo` | `path`, `name`, `description`, `default_branch` | `{ rid }`: the text libradicle's `json::rid` writes, as the add-on's `importRepo` returns it | the import process only, once `rad.reconcile` has succeeded ([Writes](#writes)); 300 s from admission |
 
 - **`rad.write`'s `args`** are today's arguments, by name, and each result is today's:
   - `create_issue`: `{ rid, title, description, labels }`, giving `{ id }`;
@@ -527,6 +527,7 @@ The rules this design relies on, as 0007 specifies them:
 | `no_identity` | `rad.reconcile` or `rad.start` before `rad.identity` succeeded | the manager's error state |
 | `start_failed` | `rad.start`; `message` is libradicle's | the manager's error state, with that message |
 | `needs_vault` | a COB write or `rad.import_repo` on a node with a throwaway key ([Profiles without a vault](#profiles-without-a-vault)) | refused in main before anything is sent; the provider's existing errors |
+| `unsupported_layout` | `rad.import_repo`: the working copy's roots can't be granted: one is, contains, or lies inside a protected root, or there are more roots or depth than the bound ([0010](0010-service-confinement.md), D5) | the import's error, with its message; nothing was imported |
 
 **No read's error names a filesystem path** (deviation `pathless-errors`). Main sends a read's `message` on to pages, and libradicle's text for a repository the node doesn't have names its storage path under the profile, `failed to resolve path '<home>/storage/<rid>' …`. So `rad.read` and `rad.blob`, and `node_info`'s `repos_error`, keep libradicle's text only where it can't name one:
 - libradicle's own errors whose texts hold only what the request named (a path in the tree, a revision, a COB ID, a RID) or a bound: `NotABlob`, `NotATree`, `InvalidCobId`, `InvalidRevision`, `TooLarge`, `TooDeep` and the like;
@@ -537,7 +538,7 @@ Every other text can name one: libgit2's `Os`, `Filesystem`, `Repository`, `Conf
 
 Exit codes:
 - 0001's: 64, 74, 75 and 76;
-- 70 for `node_down`, or a panic outside a request;
+- 70 for `node_down`, a panic outside a request, or, in the import process, `rad.import_repo` past its 300 s (`import_deadline`);
 - 0 after a start step the service answered with an error (`rad.identity`, `rad.reconcile`, `rad.start`): main has read the error, and doesn't restart;
 - 77 for `confinement` ([0010](0010-service-confinement.md)), before `rad.hello`. As in 0007, it is an error, not a crash: main doesn't restart it.
 
@@ -671,11 +672,18 @@ All bounds are process-wide. The service hosts one node.
   - A unit that fails with an error quarantines the repository at once. A unit that hangs ends the process, and the next start retries the unit or quarantines. The marker stays set, so the next start checks the repository again.
   - This mirrors 0005's uncertain broadcasts.
 - **Import, in a one-shot process** ([0010](0010-service-confinement.md)'s D5, decided by the user):
-  - **The process:** main stops the service and runs `freedom-radicled import --home … --lock-dir … --source <path>`. It takes the home's gate, confines itself to the repository's checked roots, and answers `rad.hello`, `rad.identity`, `rad.reconcile` and `rad.import_repo`, in that order. It exits after the import, and main starts the service again. [0010](0010-service-confinement.md) gives its roots, grant, admission rule and bounds.
+  - **The process:** main stops the service and runs `freedom-radicled import --home … --lock-dir … --source <path> [--protected <dir>]…`. It takes the home's gate, confines itself to the repository's checked roots, and answers `rad.hello`, `rad.identity`, `rad.reconcile` and `rad.import_repo`, in that order. It exits after the import's answer, and main starts the service again. [0010](0010-service-confinement.md) gives its roots, grant, admission rule and bounds; anything else is `unknown_method`.
+  - **Before its start, every refusal is definitive,** in this order: params that aren't an object of the four strings (`invalid_argument`); a throwaway key (`needs_vault`); a `path` that isn't `--source` (`invalid_argument`); a layout that can't be granted (`unsupported_layout`); roots that changed since they were checked, found again once confined (`unsupported_layout`); what libradicle's `Import::prepare` refuses: an argument Radicle refuses or a branch the working copy lacks (`invalid_argument`), a repository already in storage (`failed`, "`<rid>` already exists in storage", which main's bridge reads as already bridged), the working copy's open (`not_found` or `failed`, by today's message test); then main's cancel (`cancelled`) or the connection's end (`stopped`). A `rad.import_repo` before `rad.reconcile` has succeeded is `stopped`, and the process goes on; a second, once one is admitted, is `invalid_argument`.
+  - **The start** is claimed in one step with main's cancel (the connection's commit point) and the connection's end. Past it, main's cancel queues nothing, and only a success is proven.
   - `rad.import_repo` creates the repository in storage and fetches the working copy's default branch into the node's namespace with libgit2's local transport, then signs the refs ([upstream](#upstream-changes)). It runs on storage, without a running node; the node announces the repository with its inventory at its next start.
   - libgit2 runs no hooks, uses no helpers, and reads no configuration that could send it to the network: it has no global or system configuration ([Spawn](#spawn-and-lock)), and its source is a local path.
   - The working copy is read, never written: it gets no `rad` remote (deviation `import-in-process`).
-  - A kill or the deadline during an import ends the process, and with it the import. Reconciliation at the service's next start handles the partial repository, and the reply is `outcome_unknown`.
+  - **The roots are bound to the directories checked,** not to their names ([0010](0010-service-confinement.md)'s D5): each is held open from its check, Landlock's rules are made from those handles, and once confined, just before libradicle opens the working copy, the roots are found again and compared by canonical path and identity. libradicle opens the verified canonical source, never `path` as given. What remains is the limit `import-recheck` ([Limits](#limits)).
+  - A kill or the deadline during an import ends the process, and with it the import, and the reply is `outcome_unknown`. libradicle builds the repository in a temporary clone and moves it into place last, so what a cut-off import leaves depends on which side of the move it stopped:
+    - **before the move,** only the temporary clone (`<rid>.tmp`), which reconciliation at the service's next start removes;
+    - **after it,** the whole repository, signed and seeded, with no temporary clone, which reconciliation finds valid. A later import of the same working copy is refused as already in storage.
+
+    So storage holds a complete repository or none, and main sees `outcome_unknown` either way. A libradicle error or a panic past the start is answered `outcome_unknown` by the process itself, and the marker stays.
 
 ## The blob API
 
@@ -1092,6 +1100,7 @@ The source research for this design found four ways the node gives away more tha
 9. **An in-process import:**
    - `import_repo` (`lr:1012`) creates the repository in storage, fetches the working copy's branch into the node's namespace with libgit2's local transport, and signs the refs;
    - it replaces `rad::init`'s `git push` (`hw/radicle/src/rad.rs:107`–`120`);
+   - **as built (step 4, item 15):** heartwood's `rad::init` already fetches in process (heartwood's R-13), but it writes to the working copy (a `rad` remote, `refs/remotes/rad/<branch>` and its configuration), and `import_repo` seeds, inventories and announces through the running node. So the service uses a new `libradicle::import::Import` (solardev-xyz/libradicle#33), which runs with no node: `prepare` checks everything and changes nothing (the arguments as `rad init` checks them, the branch, a path libgit2's transport takes, and a repository already in storage: `Error::Exists`); `run` builds the repository in a temporary clone (the identity, the fetch, the canonical and signed refs, the seeding policy written under the home's node lock) and moves it into place last. `import_repo` stays as it is for the bindings;
    - libgit2's configuration search paths are emptied, so no global or system git configuration applies: libradicle's `isolate_git_config` (solardev-xyz/libradicle#27), which the service calls early in `main`, before any thread starts. That call is the service's one `unsafe` block (AGENTS.md rule 6): libgit2's search paths are process-wide options with no sound safe setter. libradicle's starts don't call it, so the add-on and UniFFI keep their host's paths.
 
 9a. **The host's repository gate, and repairs with the host's key.** Found when the service was built (step 4): heartwood's gate (item 14) and its online repair (item 13) need a way in from the host.
@@ -1364,7 +1373,8 @@ Measured against the add-on on linux-x64, macOS arm64 and win-x64:
 | read pool | 4 threads, 320 queued; 60 s to the head, queue and reservation waits included | `busy`; `deadline` |
 | network pool | 8 threads, 16 queued; `timeout_ms` (a `u32`) + 30 s | `busy`; `deadline`, with the slot held until libradicle returns |
 | write queue | 1 at a time, 16 queued; 60 s; the slot held until the call returns | `busy`; `outcome_unknown` once started |
-| the import process | one import; `rad.reconcile`'s 300 s, then 300 s from the import's admission ([0010](0010-service-confinement.md)) | the process exits; `outcome_unknown` once started |
+| the import process | one import; `rad.reconcile`'s 300 s, then 300 s from the import's admission ([0010](0010-service-confinement.md)) | the process exits (70); `outcome_unknown` once started |
+| the import's roots | at most 16; alternates to libgit2's depth (5); a `.git` file, `commondir` or alternates file of at most 64 KiB | `unsupported_layout` |
 | output budget | 256 MiB by reservation; a blob ≤ 64 MiB (128 MiB reserved while loading); a JSON read ≤ 64 MiB with ≤ 32 MiB of JSON | the read waits within its deadline; `too_large` per read |
 | progress events | per clone, ≤ 10 unwritten of ≤ 4 KiB encoded, plus the terminal; one more in the connection, shared; failures past 8 are summarized | the summary grows its count, not its size; reasons are cut |
 | streams | 0007's: a 128 KiB window, 64 KiB frames, one 128 KiB ring per stream in main | the service waits for credit |
@@ -1407,6 +1417,14 @@ Measured against the add-on on linux-x64, macOS arm64 and win-x64:
 | `path-depth` | any path is walked, a tree loaded for each component | a path of more than 4096 components (libradicle's `MAX_TREE_DEPTH`, git's default `core.maxTreeDepth`) is `invalid_argument` before the repository is opened ([Pools and budgets](#pools-and-budgets)) | a path no repository nests that deep in practice gets 400 |
 | `identity-cap` | heartwood parses a repository's identity document whatever its size | a read that parses one whose blob is over 1 MiB refuses it before the parse, from the blob's header: `too_large`, with a fixed text; a listing is refused while such a repository is seeded ([Pools and budgets](#pools-and-budgets)) | real documents, a few KB, are read as today; a repository whose document is over 1 MiB gets 413, and so does the listing |
 | `pathless-errors` | a read's error is the add-on's text, which for a repository the node doesn't have names its storage path under the profile, and can name other files for storage, git and node errors | libradicle's text only where it can't name a filesystem path; a missing repository is `repository not found`; any other `not found` or `the read failed`, by today's message test ([Errors](#errors)) | pages never see the profile's paths; the same 404 and 500 |
+
+## Limits
+
+What the service doesn't close, by name:
+
+| ID | What remains | Why it is accepted |
+|---|---|---|
+| `import-recheck` | The import process checks its roots again once confined, just before libgit2 opens the working copy, by canonical path and identity. Between that check and libgit2's own opens (`Import::prepare`'s, then the local transport's for the fetch, milliseconds later), the source's directories or its `.git` file, `commondir` or alternates could be swapped by name. libgit2 then reads what the names name: on Linux only what Landlock grants, which is the checked roots, the Radicle home and the process's own `HOME`; on macOS, whose Seatbelt rules are by path, whatever is at the checked paths; on Windows, which has no file confinement yet, anything. | Only a local process running with the user's own rights, racing the import on purpose, can use it, and such a process can already read the Radicle storage and the user's files directly. |
 
 ## Implementation steps
 

@@ -31,6 +31,7 @@ pub fn policy(
     confine::Policy {
         read_write,
         read_only: resolver_grants(),
+        read_only_dirs: Vec::new(),
         refer: false,
         min_abi: 1,
         network: network.confinement(),

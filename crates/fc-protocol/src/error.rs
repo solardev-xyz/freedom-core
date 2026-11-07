@@ -98,6 +98,10 @@ pub enum ErrorCode {
     /// `data.size` holds the blob's size, for main's 416 with
     /// `Content-Range: bytes */size` (design 0008, "Ranges").
     RangeNotSatisfiable,
+    /// `rad.import_repo`: the working copy's roots can't be granted (one
+    /// fails main's check, or there are more roots or depth than the bound),
+    /// so nothing is imported (design 0010, D5).
+    UnsupportedLayout,
 }
 
 /// The `error` member of a response: a closed shape, so a member it
@@ -206,6 +210,7 @@ mod tests {
             (ErrorCode::NeedsVault, "needs_vault"),
             (ErrorCode::Quarantined, "quarantined"),
             (ErrorCode::RangeNotSatisfiable, "range_not_satisfiable"),
+            (ErrorCode::UnsupportedLayout, "unsupported_layout"),
         ] {
             assert_eq!(
                 serde_json::to_value(code).ok(),
