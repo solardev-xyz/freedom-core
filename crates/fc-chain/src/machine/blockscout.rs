@@ -1,8 +1,11 @@
 //! The Blockscout source (design 0005, Logs: Blockscout pairing): the
 //! router's `requestLogIndex`. A range-capped xBZZ Transfer scan wider than
-//! the RPC quorum can verify is answered by two independent providers that
-//! agree: one RPC endpoint able to serve the span, then Blockscout's log
-//! index, paged back from the newest; the newest blocks go to the quorum.
+//! the RPC quorum can verify is answered by two sources that agree: one RPC
+//! endpoint able to serve the span, then Blockscout's log index, paged back
+//! from the newest; the newest blocks go to the quorum. Nothing yet proves
+//! the two are different operators (the endpoint may be the index's own),
+//! so the answer is verified only where the chain's quorum verifies
+//! (`m > 1`); operator independence is #297's open part.
 
 use std::cell::RefCell;
 use std::rc::Rc;
