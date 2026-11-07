@@ -538,7 +538,7 @@ The password crosses the pipe, which is no worse than today, where it is used in
     - `linux-amd64` and `linux-arm64`, static musl binaries;
     - `windows-amd64`, with the C runtime linked statically;
   - publishes the archives and `SHA256SUMS`, with build provenance (`actions/attest`, Sigstore) for each archive and for `SHA256SUMS`. It ties each file to this repository, `release.yml`, the tagged commit and the run. Releases up to 0.5.0 predate it.
-  - The service binaries have release workflows and tags of their own, with the same provenance: `ipfsd-vX.Y.Z` (`release-ipfsd.yml`, design 0007), and `radicled-vX.Y.Z` to come (design 0008).
+  - The service binaries have release workflows and tags of their own, with the same provenance: `ipfsd-vX.Y.Z` (`release-ipfsd.yml`, design 0007), and `radicled-vX.Y.Z` (`release-radicled.yml`, design 0008).
 - **freedom-browser:**
   - `scripts/fetch-freedom-cored.js` pins the release tag and the SHA-256 of that release's `SHA256SUMS`;
   - `npm run core:download` fetches the target's archive and verifies it against the pinned `SHA256SUMS`, and `extraResources` ships it. The SHA-256 pins are what a local build checks;

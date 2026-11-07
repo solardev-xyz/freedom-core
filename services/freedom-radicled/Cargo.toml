@@ -66,6 +66,13 @@ libradicle = { git = "https://github.com/solardev-xyz/libradicle", rev = "46cf9d
 # and the probe of it. Already in libradicle's graph, at its version and with
 # its features (none of the defaults).
 git2 = { version = "0.21", default-features = false }
+# zlib, which libgit2 links, built from libz-sys's bundled copy on every
+# target (`static`), as libgit2 and SQLite are built from theirs. Without
+# it libz-sys links the build host's zlib wherever pkg-config or the C
+# compiler finds one, so what a release binary links would depend on the
+# runner, not the tag (release-radicled.yml; THIRD-PARTY-NOTICES lists
+# the bundled copy). Already in libradicle's graph, through libgit2-sys.
+libz-sys = { version = "1", default-features = false, features = ["static"] }
 # heartwood's `radicle`, at the commit libradicle pins, so that both resolve
 # to one package (build_info's test holds them to one commit): the node
 # identity's public forms (`did:key`, the node ID), and, from the next step,
