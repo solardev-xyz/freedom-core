@@ -97,11 +97,21 @@ impl Peer {
     fn with_seeds(seeds: &[String]) -> Self {
         let home = tempfile::tempdir().unwrap();
         configure(home.path(), json!({ "alias": "peer" }));
-        let config = home.path().join("config.json");
-        let mut fields: serde_json::Value =
-            serde_json::from_slice(&std::fs::read(&config).unwrap()).unwrap();
-        fields["preferredSeeds"] = json!(seeds);
-        std::fs::write(&config, fields.to_string()).unwrap();
+        preferred(home.path(), seeds);
+        Self::start(home)
+    }
+
+    /// A peer that holds and seeds a repository of its own, `name`, made in
+    /// its home before it starts.
+    fn serving(name: &str) -> (Self, RepoId) {
+        let home = tempfile::tempdir().unwrap();
+        configure(home.path(), json!({ "alias": "peer" }));
+        let rid = fixture::repository(home.path(), &OTHER_SEED, name);
+        (Self::start(home), rid)
+    }
+
+    /// Starts the peer on its home, listening on loopback.
+    fn start(home: tempfile::TempDir) -> Self {
         let addr = SocketAddr::from((Ipv4Addr::LOCALHOST, free_port()));
         let mut seed = OTHER_SEED;
         let node = libradicle::Embedded::start_with_key(
@@ -159,6 +169,15 @@ impl Drop for Peer {
             let _ = node.shutdown();
         }
     }
+}
+
+/// Sets `home`'s `config.json` preferred seeds to `seeds`.
+fn preferred(home: &Path, seeds: &[String]) {
+    let config = home.join("config.json");
+    let mut fields: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&config).unwrap()).unwrap();
+    fields["preferredSeeds"] = json!(seeds);
+    std::fs::write(&config, fields.to_string()).unwrap();
 }
 
 /// `config.json`'s routes, conflicting with the service's: a global proxy
@@ -491,4 +510,118 @@ fn a_quarantined_repository_is_neither_announced_nor_served() {
     }
     radicled.shutdown();
     assert_eq!(radicled.exit_code(EXIT_TIMEOUT), Some(0));
+}
+
+/// 0008, "Methods": `rad.connect_seeds` dials the seed book through the
+/// node, whose dials go through the service's gate, and answers today's
+/// report: the text libradicle's `json::seed_report` writes for it, byte
+/// for byte, as main reads it from the add-on (vectors/radicle-network.json
+/// pins the shapes). On the test network the book is the two preferred
+/// seeds: a loopback peer, and a port nothing listens on, whose failure the
+/// report names.
+#[test]
+fn connect_seeds_answers_libradicles_report_of_its_dials() {
+    let peer = Peer::new();
+    let refused = SocketAddr::from((Ipv4Addr::LOCALHOST, free_port()));
+    let dirs = Dirs::new();
+    configure(&dirs.home, json!({}));
+    preferred(
+        &dirs.home,
+        &[
+            format!("{}@{}", peer.nid(), peer.addr),
+            format!("{}@{refused}", nid(5)),
+        ],
+    );
+    let mut radicled = Radicled::serve(&dirs, &[]);
+    assert!(radicled.start()["result"].is_object());
+    let sent = Instant::now();
+    let reply = radicled.call("rad.connect_seeds", json!({ "timeout_ms": 10_000 }));
+    let report = &reply["result"];
+    assert!(sent.elapsed() < Duration::from_secs(10 + 30), "{reply}");
+    let number = |key: &str| usize::try_from(report[key].as_u64().unwrap()).unwrap();
+    let rebuilt = libradicle::SeedConnectReport {
+        attempted: number("attempted"),
+        connected: number("connected"),
+        target: number("target"),
+        target_reached: report["targetReached"].as_bool().unwrap(),
+        elapsed: Duration::from_millis(report["elapsedMs"].as_u64().unwrap()),
+        failures: report["failures"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|f| libradicle::SeedConnectFailure {
+                nid: f["nid"].as_str().unwrap().into(),
+                addr: f["addr"].as_str().unwrap().into(),
+                reason: f["reason"].as_str().unwrap().into(),
+            })
+            .collect(),
+    };
+    let text = libradicle::json::to_string(|w| libradicle::json::seed_report(w, &rebuilt));
+    assert_eq!(serde_json::to_string(report).unwrap(), text);
+    // The peer is reached, the closed port isn't: 1 of the 2 the book's
+    // size makes the target. The node may have reached the peer itself.
+    assert_eq!((number("connected"), number("target")), (1, 2), "{reply}");
+    assert_eq!(report["targetReached"], false);
+    assert!((1..=2).contains(&number("attempted")), "{reply}");
+    let failures = report["failures"].as_array().unwrap();
+    assert_eq!(failures.len(), 1, "{reply}");
+    assert_eq!(failures[0]["nid"], nid(5));
+    assert_eq!(failures[0]["addr"], refused.to_string());
+    assert!(eventually(Duration::from_secs(10), || peer.connected() > 0));
+    radicled.shutdown();
+    assert_eq!(radicled.exit_code(EXIT_TIMEOUT), Some(0));
+}
+
+/// 0008, "Methods" and "Progress": `rad.clone` of a repository a loopback
+/// peer seeds: libradicle's own clone, its progress as `rad.progress`
+/// events, the terminal `done` last, then `{ ok }`; the
+/// repository is then read from storage. Proven, the clone leaves no
+/// marker after a clean stop.
+#[test]
+fn a_clone_from_a_loopback_peer_is_ok_and_its_repository_is_read() {
+    let (peer, rid) = Peer::serving("shared");
+    let at = format!("{}@{}", peer.nid(), peer.addr);
+    let dirs = Dirs::new();
+    configure(&dirs.home, json!({ "connect": [at.clone()] }));
+    preferred(&dirs.home, &[at]);
+    let mut radicled = Radicled::serve(&dirs, &[]);
+    assert!(radicled.start()["result"].is_object());
+    assert!(
+        eventually(Duration::from_secs(30), || peer.connected() > 0),
+        "the node never reached its peer"
+    );
+    let id = radicled.request(
+        "rad.clone",
+        json!({ "rid": rid.to_string(), "timeout_ms": 30_000, "progress": true }),
+    );
+    let (events, reply) = radicled.progress(id);
+    assert_eq!(reply["result"], json!({ "ok": true }), "{reply}");
+    let phases: Vec<String> = events
+        .iter()
+        .map(|m| {
+            let event: serde_json::Value =
+                serde_json::from_str(m["data"]["event"].as_str().unwrap()).unwrap();
+            event["phase"].as_str().unwrap().to_owned()
+        })
+        .collect();
+    // libradicle's `resolving` and `connecting` may fold into the latest
+    // before the writer takes them.
+    assert_eq!(
+        phases.last().map(String::as_str),
+        Some("done"),
+        "{phases:?}"
+    );
+    assert!(phases.iter().any(|p| p == "fetching"), "{phases:?}");
+    let info: serde_json::Value = serde_json::from_slice(
+        &radicled
+            .read("repo_info", json!({ "rid": rid.to_string() }))
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(info["rid"], rid.to_string());
+    assert_eq!(info["name"], "shared");
+    radicled.shutdown();
+    assert_eq!(radicled.exit_code(EXIT_TIMEOUT), Some(0));
+    let log = radicled.stderr();
+    assert!(log.contains("the dirty marker is cleared"), "{log}");
 }

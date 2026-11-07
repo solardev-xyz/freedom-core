@@ -360,7 +360,7 @@ fn past_its_start_an_error_or_a_panic_is_outcome_unknown_and_its_repository_is_r
     assert!(!log.contains("an online repair is queued"), "{log}");
     assert!(
         log.contains(
-            "a write's outcome is unknown, and its repository isn't repaired; the dirty marker stays"
+            "an outcome is unknown: a write's whose repository isn't repaired, or a clone's that was cut off; the dirty marker stays"
         ),
         "{log}"
     );

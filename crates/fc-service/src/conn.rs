@@ -32,6 +32,10 @@
 //!   while nothing of it is queued: from then on main's cancel of it queues
 //!   no `cancelled`, and reaches the service alone, which answers it (0008,
 //!   "Writes": a write cancelled past its start is `outcome_unknown`).
+//! - **An event may be about a request** ([`Connection::event_for`]): it
+//!   is queued only while nothing of that request is, so none follows the
+//!   request's answer, and every one queued before the answer is written
+//!   before it, events going first (0008, "Progress").
 //! - **The lifecycle thread** enforces the handshake's deadline, polls the
 //!   parent every 2 s, and watches for the writer stall.
 //! - **Wakers run outside the lock,** so a producer's waker may call back
@@ -273,6 +277,9 @@ pub enum EventError {
     Encode,
     /// The connection ended.
     Closed,
+    /// The request the event is about has its answer queued, or isn't held
+    /// ([`Connection::event_for`]).
+    Answered,
 }
 
 /// The service's handle on its connection. Clones share it.
@@ -752,6 +759,45 @@ impl Connection {
         let mut state = self.link.lock();
         if state.end.is_some() {
             return Err(EventError::Closed);
+        }
+        if state.events.len() >= state.max_events {
+            return Err(EventError::Full);
+        }
+        state.events.push_back(json);
+        drop(state);
+        self.link.writer.notify_one();
+        Ok(())
+    }
+
+    /// Queues an event about request `id` for main, as
+    /// [`Connection::event`] does, only while the request is held with
+    /// nothing of it queued: no reply, no head, and no `cancelled` from
+    /// main's cancel ([`EventError::Answered`] otherwise). The check and
+    /// the queueing are one step under the connection's lock, as a reply's
+    /// queueing is, so no event about a request is queued after its answer;
+    /// and since the writer writes every queued event before any reply,
+    /// each one queued before the answer is written before it (0008,
+    /// "Progress": progress stops at the final answer). A request whose
+    /// work claimed its commit point ([`Connection::commit`]) stays so
+    /// through main's cancel, until its work answers.
+    pub fn event_for<T: Serialize>(
+        &self,
+        id: u64,
+        event: &str,
+        data: &T,
+    ) -> Result<(), EventError> {
+        let mut json = Vec::new();
+        write_event(&mut json, event, data).map_err(|_| EventError::Encode)?;
+        if json.len() > frame::MAX_PAYLOAD {
+            return Err(EventError::Encode);
+        }
+        let mut state = self.link.lock();
+        // Nothing more is written once the writer is done.
+        if state.end.is_some() || state.closed || state.writer_done {
+            return Err(EventError::Closed);
+        }
+        if !state.sender.is_unanswered(id) {
+            return Err(EventError::Answered);
         }
         if state.events.len() >= state.max_events {
             return Err(EventError::Full);
@@ -1812,6 +1858,105 @@ mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
     use super::*;
+
+    /// The JSON messages `link`'s writer writes once the connection has
+    /// closed, in order.
+    fn written(link: &Link) -> Vec<serde_json::Value> {
+        link.close();
+        let mut out = Vec::new();
+        write_loop(link, &mut out);
+        let mut messages = Vec::new();
+        let mut rest = &out[..];
+        while rest.len() >= 5 {
+            let len = u32::from_be_bytes([rest[0], rest[1], rest[2], rest[3]]) as usize;
+            assert_eq!(rest[4], 1, "a JSON frame");
+            messages.push(serde_json::from_slice(&rest[5..4 + len]).unwrap());
+            rest = &rest[4 + len..];
+        }
+        assert!(rest.is_empty());
+        messages
+    }
+
+    /// 0008, "Progress": an event about a request is queued only while
+    /// nothing of the request is, through main's cancel once its work
+    /// claimed its commit point; each is written before the request's
+    /// answer, and none after it. The connection's bound applies as to any
+    /// event.
+    #[test]
+    fn an_event_about_a_request_is_queued_only_before_its_answer() {
+        let mut options = Options::new("t", 1, Instant::now());
+        options.exit_watchdog = None;
+        options.max_events = 3;
+        let link = Arc::new(Link::new(&options));
+        let conn = Connection { link: link.clone() };
+        // Not held: nothing of it may be said.
+        assert_eq!(
+            conn.event_for(1, "t.progress", &0),
+            Err(EventError::Answered)
+        );
+        for id in 1..=3 {
+            link.lock().sender.request(id).unwrap();
+        }
+        assert_eq!(conn.event_for(1, "t.progress", &1), Ok(()));
+        // Its commit point claimed, main's cancel queues nothing for it
+        // (the reader's `cancel`): it is still unanswered.
+        assert!(conn.commit(1));
+        assert_eq!(conn.event_for(1, "t.progress", &2), Ok(()));
+        // Another, cancelled before any claim: `cancelled` is queued.
+        assert_eq!(
+            link.lock().sender.cancel(2).unwrap(),
+            fc_protocol::stream::Cancel::Cancelled
+        );
+        assert_eq!(
+            conn.event_for(2, "t.progress", &3),
+            Err(EventError::Answered)
+        );
+        // A head is an answer too.
+        conn.head(3, &"head", false).unwrap();
+        assert_eq!(
+            conn.event_for(3, "t.progress", &4),
+            Err(EventError::Answered)
+        );
+        conn.reply(1, &"done").unwrap();
+        assert_eq!(
+            conn.event_for(1, "t.progress", &5),
+            Err(EventError::Answered)
+        );
+        // The bound: two of three wait, and one more fills it.
+        assert_eq!(conn.event("t.other", &6), Ok(()));
+        assert_eq!(conn.event("t.other", &7), Err(EventError::Full));
+        link.lock().sender.request(4).unwrap();
+        assert_eq!(conn.event_for(4, "t.progress", &8), Err(EventError::Full));
+
+        let messages = written(&link);
+        // The events first, in their order, then the answers: no event
+        // after its request's answer.
+        let events: Vec<&serde_json::Value> = messages[..3].iter().map(|m| &m["data"]).collect();
+        assert!(
+            messages[..3].iter().all(|m| m["type"] == "event"),
+            "{messages:?}"
+        );
+        assert_eq!(
+            events,
+            [
+                &serde_json::json!(1),
+                &serde_json::json!(2),
+                &serde_json::json!(6)
+            ]
+        );
+        assert!(
+            messages[3..].iter().all(|m| m["type"] != "event"),
+            "{messages:?}"
+        );
+        let mut answered: Vec<u64> = messages[3..]
+            .iter()
+            .map(|m| m["id"].as_u64().unwrap())
+            .collect();
+        answered.sort_unstable();
+        assert_eq!(answered, [1, 2, 3]);
+        // After the close, nothing more.
+        assert_eq!(conn.event_for(4, "t.progress", &9), Err(EventError::Closed));
+    }
 
     /// Review of #141, round 2: when the writer fails, every queued head's
     /// JSON is freed before what its head held: a charge dropped while its

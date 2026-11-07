@@ -17,6 +17,7 @@ const FILES = ['keys.json', 'mnemonic-validation.json', 'identity-formats.json',
 FILES.push('dweb.json', 'dweb-verify-plans.json', 'generator/dweb.js');
 FILES.push('streams.json', 'generator/streams.js');
 FILES.push('radicle-reads.json', 'generator/radicle-reads.js');
+FILES.push('radicle-network.json', 'generator/radicle-network.js');
 
 function corruptedCheck(filename, corrupt) {
   const copy = fs.mkdtempSync(path.join(os.tmpdir(), 'freedom-core-vectors-'));
@@ -645,4 +646,12 @@ test('check rejects a changed composed read', () => {
     entry.main.body = entry.main.body.replace('"0":', '"00":');
   });
   assert.match(stderr, /Byte mismatch: radicle-reads.json/);
+});
+
+test('check rejects a changed progress envelope', () => {
+  const stderr = corruptedCheck('radicle-network.json', (contents) => {
+    const entry = contents.queue.find((item) => item.id === 'eight-failures-then-a-summary');
+    entry.written[8] = entry.written[8].replace('"count\\":12', '"count\\":13');
+  });
+  assert.match(stderr, /Byte mismatch: radicle-network.json/);
 });
