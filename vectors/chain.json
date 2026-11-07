@@ -2963,13 +2963,14 @@
       "gas_price": "\"0x10\"",
       "priority": "\"0x1\"",
       "patches": [
-        "fee-headroom"
+        "fee-headroom",
+        "colibri-unproven"
       ],
       "unpatched": {
         "quote_json": "{\"type\":\"eip1559\",\"baseFee\":\"15\",\"maxPriorityFeePerGas\":\"1\",\"maxFeePerGas\":\"31\",\"effectiveGasPrice\":\"16\",\"source\":\"colibri\",\"verified\":true}"
       },
       "js": {
-        "quote_json": "{\"type\":\"eip1559\",\"baseFee\":\"15\",\"maxPriorityFeePerGas\":\"50000000\",\"maxFeePerGas\":\"50000030\",\"effectiveGasPrice\":\"50000015\",\"source\":\"colibri\",\"verified\":true}"
+        "quote_json": "{\"type\":\"eip1559\",\"baseFee\":\"15\",\"maxPriorityFeePerGas\":\"50000000\",\"maxFeePerGas\":\"50000030\",\"effectiveGasPrice\":\"50000015\",\"source\":\"colibri\",\"verified\":false}"
       }
     },
     {
@@ -3904,13 +3905,14 @@
         "json": "{\"baseFeePerGas\":\"80000000000\"}"
       },
       "patches": [
-        "fee-headroom"
+        "fee-headroom",
+        "colibri-unproven"
       ],
       "unpatched": {
         "quote_json": "{\"type\":\"legacy\",\"gasPrice\":\"100000000000\",\"effectiveGasPrice\":\"100000000000\",\"source\":\"colibri\",\"verified\":true}"
       },
       "js": {
-        "quote_json": "{\"type\":\"eip1559\",\"baseFee\":\"80000000000\",\"maxPriorityFeePerGas\":\"20000000000\",\"maxFeePerGas\":\"180000000000\",\"effectiveGasPrice\":\"100000000000\",\"source\":\"colibri\",\"verified\":true}"
+        "quote_json": "{\"type\":\"eip1559\",\"baseFee\":\"80000000000\",\"maxPriorityFeePerGas\":\"20000000000\",\"maxFeePerGas\":\"180000000000\",\"effectiveGasPrice\":\"100000000000\",\"source\":\"colibri\",\"verified\":false}"
       }
     },
     {
@@ -3976,13 +3978,14 @@
         "json": "{\"number\":\"0x10\"}"
       },
       "patches": [
-        "fee-headroom"
+        "fee-headroom",
+        "colibri-unproven"
       ],
       "unpatched": {
         "quote_json": "{\"type\":\"legacy\",\"gasPrice\":\"8000000000\",\"effectiveGasPrice\":\"8000000000\",\"source\":\"colibri\",\"verified\":true}"
       },
       "js": {
-        "quote_json": "{\"type\":\"legacy\",\"gasPrice\":\"10050000000\",\"effectiveGasPrice\":\"10050000000\",\"source\":\"colibri\",\"verified\":true}"
+        "quote_json": "{\"type\":\"legacy\",\"gasPrice\":\"10050000000\",\"effectiveGasPrice\":\"10050000000\",\"source\":\"colibri\",\"verified\":false}"
       }
     },
     {
@@ -4269,7 +4272,8 @@
         "fails": "proof failed"
       },
       "patches": [
-        "fee-headroom"
+        "fee-headroom",
+        "colibri-unproven"
       ],
       "unpatched": {
         "quote_json": "{\"type\":\"legacy\",\"gasPrice\":\"4000000000\",\"effectiveGasPrice\":\"4000000000\",\"source\":\"colibri\",\"verified\":true}"
@@ -4279,7 +4283,7 @@
           "name": "SourceUnavailableError",
           "message_json": "\"colibri has no usable priority fee and its latest block failed: proof failed\""
         },
-        "last_resort_json": "{\"type\":\"legacy\",\"gasPrice\":\"5050000000\",\"effectiveGasPrice\":\"5050000000\",\"source\":\"colibri\",\"verified\":true}"
+        "last_resort_json": "{\"type\":\"legacy\",\"gasPrice\":\"5050000000\",\"effectiveGasPrice\":\"5050000000\",\"source\":\"colibri\",\"verified\":false}"
       }
     },
     {
@@ -5671,9 +5675,27 @@
           "eth_uninstallFilter",
           "web3_clientVersion",
           "web3_sha3",
-          "eth_getLogs"
+          "eth_getLogs",
+          "eth_gasPrice",
+          "eth_feeHistory",
+          "eth_call",
+          "eth_estimateGas"
         ],
-        "opt_in": false
+        "opt_in": false,
+        "patches": [
+          "colibri-unproven"
+        ],
+        "unpatched": [
+          "eth_getFilterChanges",
+          "eth_getFilterLogs",
+          "eth_newFilter",
+          "eth_newBlockFilter",
+          "eth_newPendingTransactionFilter",
+          "eth_uninstallFilter",
+          "web3_clientVersion",
+          "web3_sha3",
+          "eth_getLogs"
+        ]
       },
       {
         "source": "quorum",
@@ -5956,8 +5978,8 @@
     {
       "id": "all-tried",
       "chain_id": 1,
-      "method": "eth_call",
-      "params": "[{\"to\":\"0x1111111111111111111111111111111111111111\"}]",
+      "method": "eth_getBalance",
+      "params": "[\"0x1111111111111111111111111111111111111111\",\"latest\"]",
       "read_order": [
         "myotis",
         "colibri",
@@ -5990,7 +6012,7 @@
             "message_json": "\"No RPC endpoint configured\""
           }
         ],
-        "text_json": "\"All chain sources failed for eth_call (myotis: Myotis is not ready; colibri: No Colibri prover configured; quorum: RPC quorum needs 2 endpoints; direct: No RPC endpoint configured)\""
+        "text_json": "\"All chain sources failed for eth_getBalance (myotis: Myotis is not ready; colibri: No Colibri prover configured; quorum: RPC quorum needs 2 endpoints; direct: No RPC endpoint configured)\""
       }
     },
     {

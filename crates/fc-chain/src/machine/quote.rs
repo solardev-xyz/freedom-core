@@ -659,9 +659,10 @@ pub(crate) async fn fee_reference(req: &Req) -> FeeReference {
     }
 }
 
-/// Colibri and the quorum make two requests, and a third for their own
-/// latest block when the hint can't price a quote; any other source fails
-/// as `requestSource` does.
+/// The quorum makes two requests, and a third for its own latest block
+/// when the hint can't price a quote; any other source fails as
+/// `requestSource` does. Colibri fails at its first: it doesn't serve
+/// `eth_gasPrice` (main's #1046).
 async fn other(req: &Req, source: &str) -> Result<FeeQuote, SourceFailure> {
     let keeper = RefCell::new(Keeper::new(None));
     let options = SourceOptions {
