@@ -94,6 +94,10 @@ pub enum ErrorCode {
     /// or any read for a `namespace` quarantine; `data` holds its `kind`
     /// and `step` (design 0008, "The escape").
     Quarantined,
+    /// `rad.import_repo`: the working copy's roots can't be granted (one
+    /// fails main's check, or there are more roots or depth than the bound),
+    /// so nothing is imported (design 0010, D5).
+    UnsupportedLayout,
 }
 
 /// The `error` member of a response: a closed shape, so a member it
@@ -201,6 +205,7 @@ mod tests {
             (ErrorCode::OutcomeUnknown, "outcome_unknown"),
             (ErrorCode::NeedsVault, "needs_vault"),
             (ErrorCode::Quarantined, "quarantined"),
+            (ErrorCode::UnsupportedLayout, "unsupported_layout"),
         ] {
             assert_eq!(
                 serde_json::to_value(code).ok(),

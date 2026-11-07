@@ -18,6 +18,7 @@ FILES.push('dweb.json', 'dweb-verify-plans.json', 'generator/dweb.js');
 FILES.push('streams.json', 'generator/streams.js');
 FILES.push('radicle-reads.json', 'generator/radicle-reads.js');
 FILES.push('radicle-network.json', 'generator/radicle-network.js');
+FILES.push('radicle-import.json', 'generator/radicle-import.js');
 
 function corruptedCheck(filename, corrupt) {
   const copy = fs.mkdtempSync(path.join(os.tmpdir(), 'freedom-core-vectors-'));
@@ -682,4 +683,12 @@ test('check rejects a changed progress envelope', () => {
     entry.written[8] = entry.written[8].replace('"count\\":12', '"count\\":13');
   });
   assert.match(stderr, /Byte mismatch: radicle-network.json/);
+});
+
+test('check rejects a changed import answer', () => {
+  const stderr = corruptedCheck('radicle-import.json', (contents) => {
+    const entry = contents.imports.find((item) => item.id === 'error-outcome-unknown');
+    entry.expect.error.message = 'the import timed out';
+  });
+  assert.match(stderr, /Byte mismatch: radicle-import.json/);
 });

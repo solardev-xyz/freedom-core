@@ -34,7 +34,8 @@ fc-service = { path = "../../crates/fc-service" }
 # The sealed release of the node key (0008, "The sealed release"): the
 # service's X25519 key for one start, and opening what the core sealed to it.
 fc-seal = { path = "../../crates/fc-seal" }
-# libradicle at `integration/rust-core` (5969d84), built with `no-spawn`,
+# libradicle at its #33 (a9a9d35, on `integration/rust-core` 0bc2c72),
+# built with `no-spawn`,
 # explicitly (0008, "Spawn and lock"): serving runs in process and `git gc`
 # is skipped. It carries the upstream changes 0008 lists for the service's
 # first steps: the routing, `isolated` and `control_socket` options, the
@@ -50,10 +51,14 @@ fc-seal = { path = "../../crates/fc-seal" }
 # asked, how the node's thread ended and the home apart (`Shutdown`). And
 # R-19's fix (libradicle #31): a commit's diff that isn't UTF-8 is decoded
 # lossily, and serialized without a `Value` copy, instead of panicking, and
-# an alias Radicle refuses is `Error::Alias`. Pinned by commit until those
-# changes are released (deny.toml allows solardev-xyz).
+# an alias Radicle refuses is `Error::Alias`. Then the bounded reads' charges
+# for what libgit2 holds of a tree or commit (libradicle #32), and the import
+# with no node (#33: `import::Import`, a libgit2 fetch into a temporary clone
+# moved into place last, the working copy never written), which the import
+# process runs. Pinned by commit until those changes are released (deny.toml
+# allows solardev-xyz).
 # src/build_info.rs reports the same commit.
-libradicle = { git = "https://github.com/solardev-xyz/libradicle", rev = "5969d84c8f3c78ba8b3e064ebe289d9502f963dd", features = ["no-spawn"] }
+libradicle = { git = "https://github.com/solardev-xyz/libradicle", rev = "a9a9d35ef72800637c0af67fdfc35fda4d653110", features = ["no-spawn"] }
 # heartwood's `radicle`, at the commit libradicle pins, so that both resolve
 # to one package (build_info's test holds them to one commit): the node
 # identity's public forms (`did:key`, the node ID), and, from the next step,

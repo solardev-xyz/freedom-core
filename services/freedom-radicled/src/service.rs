@@ -26,15 +26,12 @@
 //!   ([`crate::network`]): a clone's progress goes to main as
 //!   `rad.progress` events, bounded per clone, through the progress hub's
 //!   thread ([`crate::network::progress`]);
-//! - `rad.stats` (inline) and `rad.import_repo` (the import process's)
-//!   come with later steps, and answer `stopped`.
+//! - `rad.stats` (inline) comes with a later step, and answers `stopped`;
+//!   so does `rad.import_repo`, which only the import process serves
+//!   ([`crate::import`]).
 //!
-//! **`rad.reconcile`** runs on a thread of its own, never the reader's. It
-//! is admitted once, after `rad.identity`; a second is `invalid_argument`,
-//! and ends the process. Its failure (`recovery_failed`) and its cutoff
-//! (`deadline`) end the process after the reply, as a failed start step
-//! does. `rad.shutdown`, or the connection's end, stops it after the unit
-//! in progress.
+//! **`rad.hello`'s members, `rad.identity` and `rad.reconcile`** are the
+//! steps both processes answer ([`crate::steps`]).
 //!
 //! **`rad.start`** is admitted once, after `rad.reconcile` has succeeded,
 //! with `{ alias }`, an alias heartwood takes. Anything else is
@@ -46,34 +43,27 @@
 //! stops the node ([`crate::node::Node::stop`]). A method 0008 doesn't list
 //! is `unknown_method`.
 
-use std::path::PathBuf;
 use std::str::FromStr as _;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::Instant;
 
 use fc_protocol::error::{ErrorBody, ErrorCode};
 use fc_service::conn::{Connection, End, Hello, Request, Service};
+use fc_service::log;
 use fc_service::network::NetworkPolicy;
-use fc_service::watchdog::Watchdog;
-use fc_service::{Exit, log};
 use serde::Deserialize;
 use serde_json::{Map, Value, json};
 
-use crate::build_info;
 use crate::confine::Grant;
-use crate::identity::{self, Identity};
 use crate::network::{self, progress};
 use crate::node::{self, Node};
 use crate::output::{self, Budget};
 use crate::pools::{self, Mutates, Pool, Pools, Ticket, Work};
-use crate::{quarantine, reads, reconcile, repair, writes};
+use crate::steps::Steps;
+use crate::{quarantine, reads, repair, writes};
 use crate::{testhooks, units};
 
-/// How the process ends after a start step it answered with an error
-/// (0008: "the service answers with the error and then exits"). Main read
-/// the error; this isn't a crash.
-const FAILED_START: Exit = Exit::Ok;
+pub(crate) use crate::steps::fail_start;
 
 /// The methods 0008 lists beside `rad.hello`, `rad.identity` and
 /// `rad.shutdown` that later steps implement, and that take no pool here.
@@ -91,20 +81,6 @@ const WRITES: &[&str] = &["rad.remove_repo", "rad.unseed", "rad.write"];
 /// The methods that need the node's identity first.
 const NEED_IDENTITY: &[&str] = &["rad.reconcile", "rad.start"];
 
-/// Where `rad.reconcile` stands.
-enum Reconciliation {
-    /// Not asked for yet.
-    Waiting,
-    /// Running, or ended in a failure that ends the process.
-    Running,
-    /// Done: the home is consistent. The repositories whose own namespace
-    /// was re-signed are announced once the node runs: heartwood's start
-    /// queues a refs announcement for each ([`crate::node`]).
-    Done {
-        resigned: Vec<radicle::prelude::RepoId>,
-    },
-}
-
 /// `rad.start`'s params.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -113,27 +89,12 @@ struct StartParams {
 }
 
 pub struct RadicleService {
-    /// The Radicle home, under the gate.
-    home: PathBuf,
-    identity: Identity,
-    reconciliation: Arc<Mutex<Reconciliation>>,
-    /// Stops reconciliation between units: set by the connection's end.
-    stopping: Arc<AtomicBool>,
+    /// `rad.hello`, `rad.identity` and `rad.reconcile`, with the home and
+    /// the identity. The repair units' watchdog is reconciliation's at a
+    /// start, and the online repair's while the node runs.
+    steps: Steps,
     /// The process's policy (`--network`), which the node runs under.
     policy: NetworkPolicy,
-    /// `rad.hello`'s `network`: the policy, as it reports it.
-    network: Value,
-    /// `rad.hello`'s `confinement`: what `confine` reported (design 0010).
-    confinement: Value,
-    /// `rad.identity`'s deadline, armed by `rad.hello`'s reply.
-    deadline: Mutex<Option<Watchdog>>,
-    /// The repair units' watchdog, its thread started with the service:
-    /// reconciliation's at a start, and the online repair's while the node
-    /// runs.
-    units: Arc<units::UnitWatch>,
-    /// main's proof that libgit2 reads no git configuration outside a
-    /// repository, for reconciliation.
-    git_config: libradicle::GitConfigIsolated,
     /// The node, from `rad.start` until the connection ends.
     node: Arc<Node>,
     /// The read pool, the network pool and the write queue, which the node
@@ -160,7 +121,6 @@ impl RadicleService {
         progress: Arc<progress::Hub>,
         git_config: libradicle::GitConfigIsolated,
     ) -> Option<Self> {
-        let identity = Identity::new(&grant.home)?;
         let node = Arc::new(Node::new(pools.clone()));
         // The writer's online repair reaches the node only while it runs.
         pools.repair_with(Arc::new(repair::Online::new(
@@ -169,32 +129,19 @@ impl RadicleService {
             units.clone(),
         )));
         Some(Self {
-            home: grant.home,
-            identity,
-            reconciliation: Arc::new(Mutex::new(Reconciliation::Waiting)),
-            stopping: Arc::new(AtomicBool::new(false)),
+            steps: Steps::new(
+                grant.home,
+                network.to_json(),
+                confinement,
+                units,
+                git_config,
+            )?,
             policy: *network,
-            network: network.to_json(),
-            confinement,
-            deadline: Mutex::new(None),
-            units,
-            git_config,
             node,
             pools,
             budget: Budget::new(testhooks::budget(output::BUDGET)),
             progress,
         })
-    }
-
-    fn disarm_deadline(&self) {
-        if let Some(deadline) = self
-            .deadline
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .take()
-        {
-            deadline.disarm();
-        }
     }
 
     /// The pool `method` runs on, with its deadline from admission.
@@ -212,12 +159,23 @@ impl RadicleService {
     /// names one.
     fn work(&self, conn: &Connection, request: &Request<'_>) -> (Work, Option<Mutates>) {
         match request.method {
-            "rad.quarantine_list" => (quarantine::list(conn, &self.home, request.params), None),
-            "rad.remove_repo" => quarantine::remove(conn, &self.node, &self.home, request.params),
+            "rad.quarantine_list" => (
+                quarantine::list(conn, &self.steps.home, request.params),
+                None,
+            ),
+            "rad.remove_repo" => {
+                quarantine::remove(conn, &self.node, &self.steps.home, request.params)
+            }
             "rad.write" => {
                 // Known by now: the pool admits nothing before `RUNNING`.
-                let ephemeral = self.identity.with(|i| i.ephemeral).unwrap_or(true);
-                writes::write(conn, &self.node, &self.home, request.params, ephemeral)
+                let ephemeral = self.steps.identity.with(|i| i.ephemeral).unwrap_or(true);
+                writes::write(
+                    conn,
+                    &self.node,
+                    &self.steps.home,
+                    request.params,
+                    ephemeral,
+                )
             }
             "rad.unseed" => writes::unseed(conn, &self.node, request.params),
             "rad.read" => (
@@ -226,114 +184,12 @@ impl RadicleService {
                     &self.node,
                     &self.pools,
                     &self.budget,
-                    &self.home,
+                    &self.steps.home,
                     request.params,
                 ),
                 None,
             ),
             _ => (later_step(conn), None),
-        }
-    }
-
-    /// Answers `error`, then ends the process (0008: a failed start step).
-    fn fail_start(&self, conn: &Connection, id: u64, error: &ErrorBody) {
-        fail_start(conn, id, error);
-    }
-
-    /// `rad.reconcile`: admitted once, after `rad.identity`, and run on a
-    /// thread of its own.
-    fn reconcile(&self, conn: &Connection, request: &Request<'_>) {
-        let none = request.params.is_none_or(|raw| {
-            serde_json::from_str::<Value>(raw.get())
-                .is_ok_and(|value| value.is_null() || value.as_object().is_some_and(Map::is_empty))
-        });
-        if !none {
-            return self.fail_start(
-                conn,
-                request.id,
-                &ErrorBody::new(ErrorCode::InvalidArgument, "rad.reconcile takes no params"),
-            );
-        }
-        {
-            let mut phase = self
-                .reconciliation
-                .lock()
-                .unwrap_or_else(|p| p.into_inner());
-            if !matches!(*phase, Reconciliation::Waiting) {
-                drop(phase);
-                return self.fail_start(
-                    conn,
-                    request.id,
-                    &ErrorBody::new(
-                        ErrorCode::InvalidArgument,
-                        "rad.reconcile was already called",
-                    ),
-                );
-            }
-            *phase = Reconciliation::Running;
-        }
-        let admitted = Instant::now();
-        let Some((own, signer)) = self.identity.with(|i| (i.id, i.signer())) else {
-            // `request` checked that the identity is known.
-            return self.fail_start(
-                conn,
-                request.id,
-                &ErrorBody::new(ErrorCode::NoIdentity, "rad.identity has not succeeded"),
-            );
-        };
-        let home = self.home.clone();
-        let cancel = self.stopping.clone();
-        let reconciliation = self.reconciliation.clone();
-        let owed = conn.clone();
-        let id = request.id;
-        // Each unit's time limit, from outside the worker.
-        let watch = self.units.clone();
-        let git_config = self.git_config;
-        let spawned = std::thread::Builder::new()
-            .name("reconcile".into())
-            .spawn(move || {
-                let run = reconcile::Run {
-                    home: &home,
-                    own,
-                    signer: signer.as_ref(),
-                    admitted,
-                    cutoff: crate::testhooks::reconcile_cutoff(reconcile::CUTOFF),
-                    cancel,
-                };
-                // A panic here ends the process (70): a crash, which main
-                // restarts, and whose next start reconciles again.
-                let outcome = fc_service::panic::with_kind(
-                    fc_service::panic::TaskKind::named("reconcile"),
-                    || reconcile::run(&run, &*watch, git_config),
-                );
-                drop(signer);
-                match outcome {
-                    Ok(reconcile::Outcome::Done { reply, resigned }) => {
-                        log::info(
-                            "reconciled",
-                            json!({
-                                "was_dirty": reply["was_dirty"],
-                                "repaired": reply["repaired"],
-                                "quarantined": reply["quarantined"]["count"],
-                            }),
-                        );
-                        *reconciliation.lock().unwrap_or_else(|p| p.into_inner()) =
-                            Reconciliation::Done { resigned };
-                        let _ = owed.reply(id, &reply);
-                    }
-                    Ok(reconcile::Outcome::Deadline(error)) => fail_start(&owed, id, &error),
-                    Ok(reconcile::Outcome::Cancelled(error)) => {
-                        let _ = owed.reply_error(id, &error);
-                    }
-                    Err(reconcile::Failure(error)) => fail_start(&owed, id, &error),
-                }
-            });
-        if spawned.is_err() {
-            self.fail_start(
-                conn,
-                id,
-                &ErrorBody::new(ErrorCode::Internal, "Internal error"),
-            );
         }
     }
 
@@ -347,18 +203,8 @@ impl RadicleService {
                 &ErrorBody::new(ErrorCode::InvalidArgument, message),
             );
         };
-        let resigned = {
-            let phase = self
-                .reconciliation
-                .lock()
-                .unwrap_or_else(|p| p.into_inner());
-            match &*phase {
-                Reconciliation::Done { resigned } => resigned.len(),
-                Reconciliation::Waiting | Reconciliation::Running => {
-                    drop(phase);
-                    return invalid("rad.reconcile has not succeeded");
-                }
-            }
+        let Some(resigned) = self.steps.reconciled() else {
+            return invalid("rad.reconcile has not succeeded");
         };
         let Some(params) = request
             .params
@@ -373,7 +219,7 @@ impl RadicleService {
             return invalid("rad.start was already called");
         }
         // The start takes the key: the service keeps no copy of it.
-        let Some(key) = self.identity.take_key() else {
+        let Some(key) = self.steps.identity.take_key() else {
             return fail_start(
                 conn,
                 request.id,
@@ -385,7 +231,7 @@ impl RadicleService {
             conn,
             request.id,
             node::Start {
-                home: self.home.clone(),
+                home: self.steps.home.clone(),
                 alias: params.alias,
                 network: self.policy,
                 key,
@@ -408,59 +254,21 @@ fn later_step(conn: &Connection) -> Work {
     })
 }
 
-/// Answers `error`, then ends the process (0008: a failed start step).
-pub(crate) fn fail_start(conn: &Connection, id: u64, error: &ErrorBody) {
-    log::error(
-        "a start step failed",
-        json!({ "code": serde_json::to_value(error.code).unwrap_or(Value::Null) }),
-    );
-    let _ = conn.reply_error(id, error);
-    conn.fail(FAILED_START);
-}
-
 impl Service for RadicleService {
     fn hello(&self, _hello: &Hello) -> Result<Map<String, Value>, ErrorBody> {
-        let mut members = Map::new();
-        members.insert("service_version".into(), env!("CARGO_PKG_VERSION").into());
-        members.insert(
-            "libradicle".into(),
-            json!({
-                "version": build_info::LIBRADICLE_VERSION,
-                "git_commit": build_info::LIBRADICLE_COMMIT,
-            }),
-        );
-        members.insert("recipient".into(), self.identity.recipient().into());
-        members.insert("network".into(), self.network.clone());
-        members.insert("confinement".into(), self.confinement.clone());
-        // `rad.identity` within 30 s of this reply, or the process ends.
-        let deadline = Watchdog::arm(
-            "identity_deadline",
-            crate::testhooks::identity_deadline(identity::DEADLINE),
-            Exit::Protocol,
-        );
-        *self.deadline.lock().unwrap_or_else(|p| p.into_inner()) = Some(deadline);
-        Ok(members)
+        Ok(self.steps.hello())
     }
 
     fn request(&self, conn: &Connection, request: Request<'_>) {
         let method = request.method;
-        if method == "rad.reconcile" && self.identity.known() {
-            self.reconcile(conn, &request);
-        } else if method == "rad.start" && self.identity.known() {
+        if method == "rad.reconcile" && self.steps.identity.known() {
+            self.steps.reconcile(conn, &request);
+        } else if method == "rad.start" && self.steps.identity.known() {
             self.start(conn, &request);
         } else if method == "rad.identity" {
-            match self
-                .identity
-                .establish(request.params.map(serde_json::value::RawValue::get))
-            {
-                Ok(result) => {
-                    self.disarm_deadline();
-                    let _ = conn.reply(request.id, &result);
-                }
-                Err(identity::Failure(error)) => self.fail_start(conn, request.id, &error),
-            }
-        } else if NEED_IDENTITY.contains(&method) && !self.identity.known() {
-            self.fail_start(
+            self.steps.identity(conn, &request);
+        } else if NEED_IDENTITY.contains(&method) && !self.steps.identity.known() {
+            fail_start(
                 conn,
                 request.id,
                 &ErrorBody::new(ErrorCode::NoIdentity, "rad.identity has not succeeded"),
@@ -472,7 +280,13 @@ impl Service for RadicleService {
         } else if NETWORK.contains(&method) {
             let admitted = Instant::now();
             let (work, within) = if method == "rad.clone" {
-                network::clone(conn, &self.node, &self.progress, &self.home, request.params)
+                network::clone(
+                    conn,
+                    &self.node,
+                    &self.progress,
+                    &self.steps.home,
+                    request.params,
+                )
             } else {
                 network::connect_seeds(conn, &self.node, request.params)
             };
@@ -503,13 +317,13 @@ impl Service for RadicleService {
     }
 
     fn end(&self, conn: &Connection, end: End) {
-        self.disarm_deadline();
-        // Reconciliation stops after the unit in progress.
-        self.stopping.store(true, Ordering::Release);
+        // `rad.identity`'s deadline stands down, and reconciliation stops
+        // after the unit in progress.
+        self.steps.end();
         // The pools drain, then the node stops, within the connection's 5 s
         // exit. The clones' progress stops with the connection: nothing more
         // is written.
-        self.node.stop(conn, &self.home, end);
+        self.node.stop(conn, &self.steps.home, end);
         self.progress.stop();
         log::info("connection ended", json!({ "end": end.name() }));
     }

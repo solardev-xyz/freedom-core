@@ -505,17 +505,21 @@ The rest of this section is about glibc's resolver, `confine::Resolver::System`.
 **Decided (the user, 2026-10-23): the one-shot import process** (option 1). The others are kept below as the decision's rationale.
 
 1. **A one-shot import process** (decided):
-   - Main stops the service and runs `freedom-radicled import --home … --lock-dir … --source <path>`. The process takes the home gate, confines itself, and answers four of 0008's methods, in order: `rad.hello`, `rad.identity`, `rad.reconcile`, then `rad.import_repo`, whose `path` must be the `--source`. It exits after the import. Then main starts the service again.
+   - Main stops the service and runs `freedom-radicled import --home … --lock-dir … --source <path> [--protected <dir>]… [--parent-pid <pid>]`. The process takes the home gate, confines itself, and answers four of 0008's methods, in order: `rad.hello`, `rad.identity`, `rad.reconcile`, then `rad.import_repo`, whose `path` must be the `--source`, exactly. It exits after the import's answer, whatever it is. Then main starts the service again.
+     - **`--protected`** is one of main's protected roots ([step 7](#the-recommendation)), as main resolves them, once for each: the process checks the roots before confinement, and only main knows the catalog's profiles and overrides. The process adds its own three: the lock directory, the home and its own `HOME`. (Implementation, freedom-core item 15.)
+     - `rad.hello`'s `network` is `{ "mode": "offline" }`: the process takes no `--network`.
    - **The repository's roots** are found before confinement, from the source's own files, without libgit2:
      - the source;
      - its git directory: `.git`, or the directory a `gitdir:` file names;
      - for a linked worktree, the common directory its `commondir` names;
-     - each objects directory that `objects/info/alternates` lists, recursively, to libgit2's depth.
+     - each objects directory that `objects/info/alternates` lists, recursively, to libgit2's depth: from the common directory's `objects`, libgit2 1.9 reads the alternates of an objects directory at depth 5 or less (`GIT_ALTERNATES_MAX_DEPTH`), a line starting with `.` relative to the directory listing it. A listed directory that doesn't exist is skipped, as libgit2 skips it.
 
-     Each is canonical.
+     Each is canonical, and a root inside another is dropped.
    - **Every root passes main's check** ([step 7](#the-recommendation)): none is, contains, or lies inside a protected root. So a repository at the user's home is refused, since it contains Freedom's data.
    - **The grant:** read only on exactly those roots, read and write on the home, and no network: no TCP rule (ABI 4), and seccomp refuses every socket family.
    - **Unsupported layouts are refused** with `unsupported_layout`, before anything changes: a root that fails the check, or more roots or depth than the bound. Anything libgit2 then reads outside the roots, such as a configuration `include`, fails the source's open, which comes before the import starts.
+     - **The bounds:** at most 16 roots; a `.git` file, `commondir` or alternates file of at most 64 KiB; alternates listed by an objects directory past depth 5 (which libgit2 would silently ignore) are refused, as is an alternate relative without a leading `.`, which libgit2 reads from the process's working directory. A path that isn't valid Unicode is refused too: main names it in JSON, and libgit2's local transport takes a string.
+     - **The refusal is an answer:** a layout that can't be granted confines the process with no root, and `rad.import_repo` answers `unsupported_layout`, after its params, `needs_vault` and the path check.
    - **A clean home first:** a stopped node doesn't prove the home clean. 0008 lets a stop reach its 5 s exit with a write or a fetch unfinished, which leaves the dirty marker, ref lock files or an unsigned namespace. So the process runs 0008's reconciliation before it admits the import:
      - `rad.import_repo` is admitted only after `rad.reconcile` has succeeded in the same process. Before that it gets `stopped`, and nothing changes.
      - A reconciliation that ends in `deadline` or `recovery_failed` ends the process with nothing imported, as it ends a service's start. Main shows 0008's "Radicle is still repairing its data" with Retry, or the error.
@@ -524,9 +528,9 @@ The rest of this section is about glibc's resolver, `confine::Resolver::System`.
    - **The bounds:** `rad.reconcile` keeps 0008's 300 s, with main's watchdog at 315 s. `rad.import_repo` then has its own 300 s from admission, under the process's watchdog (exit 70), with main's at 315 s. So the node is down for at most about ten minutes. Without the marker, reconciliation only removes temporary clones and ref lock files.
    - **0008's contracts hold:**
      - **Key custody:** the import, and any re-signing during reconciliation, use the node key the core releases sealed, through `rad.identity`, as at a start (0008, *Keys*). So, on a profile with a vault, an import waits for an unlock as a start does. A profile without one has no import: main refuses it with `needs_vault`, and the process never makes a throwaway key.
-     - **The dirty marker:** as in a service's run. Reconciliation writes it before changing anything, and it stays while the process runs. It is removed at the exit only when no write is uncertain: after a proven import, or a refusal before the mutation. Any other end leaves it, and the service's next start reconciles again.
+     - **The dirty marker:** as in a service's run. Reconciliation writes it before changing anything, and it stays while the process runs. It is removed at the exit only when no write is uncertain: after a proven import, a refusal before the mutation (main's cancel before it included), or the connection's end with no import started, each once reconciliation is done. Any other end leaves it, and the service's next start reconciles again.
      - **Outcomes:** a failure before the mutation starts is definitive (`invalid_argument`, `unsupported_layout`). After it, only a success is proven. An error, a crash, a kill or the deadline is `outcome_unknown`.
-     - **Upstream:** libradicle's import runs on storage, without a running node. The node announces the repository with its inventory at its next start.
+     - **Upstream:** libradicle's import runs on storage, without a running node (`libradicle::import::Import`, solardev-xyz/libradicle#33). It builds the repository in a temporary clone, as a clone does, and moves it into place last, so a kill or the deadline leaves only a temporary clone, which reconciliation removes at the service's next start. The node announces the repository with its inventory at its next start.
    - **What 0008 gains** (made in this PR, to its *Writes*, methods and bounds):
      - the `import` subcommand, with its four methods and the admission rule above;
      - `rad.import_repo` leaves the service's write queue, and with it the need to hold the node exclusively;

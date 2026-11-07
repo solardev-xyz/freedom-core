@@ -104,6 +104,26 @@ fn nat64_grants() -> Vec<PathBuf> {
     grants
 }
 
+impl Grant {
+    /// The import process's policy (design 0010, D5): the same two
+    /// directories read and write, with `refer`; `roots`, the working
+    /// copy's checked roots, read only; and no network: no TCP rule (ABI
+    /// 4), seccomp refusing every socket family, and nothing granted for
+    /// name resolution or NAT64 discovery.
+    pub fn import_policy(&self, roots: &[PathBuf], descriptors: Vec<i32>) -> Policy {
+        Policy {
+            read_write: vec![self.home.clone(), self.own_home.clone()],
+            read_only: roots.to_vec(),
+            refer: true,
+            min_abi: MIN_ABI,
+            network: confine::Network::Offline,
+            resolver: confine::Resolver::None,
+            descriptors,
+            interface_index: false,
+        }
+    }
+}
+
 /// Confines the process to `grant` under `network`. With the test hooks, it
 /// first reports the threads and descriptors the process has here, so a test
 /// proves the point is reached single-threaded, holding stdio and the lock.
@@ -112,8 +132,13 @@ pub fn confine(
     network: &NetworkPolicy,
     descriptors: Vec<i32>,
 ) -> Result<Report, Invalid> {
+    apply(&grant.policy(network, descriptors))
+}
+
+/// Confines the process under `policy`, as [`confine`] does.
+pub fn apply(policy: &Policy) -> Result<Report, Invalid> {
     crate::testhooks::at_confinement_point();
-    confine::confine(&grant.policy(network, descriptors))
+    confine::confine(policy)
 }
 
 #[cfg(test)]
@@ -139,5 +164,23 @@ mod tests {
         assert!(socks5.read_only.is_empty());
         // Both read and write the home and the service's own HOME alone.
         assert_eq!(direct.read_write, socks5.read_write);
+    }
+
+    #[test]
+    fn the_import_reads_its_roots_alone_and_has_no_network() {
+        let dir = tempfile::tempdir().unwrap();
+        let grant = Grant::open(dir.path(), dir.path()).unwrap();
+        let roots = vec![PathBuf::from("/work"), PathBuf::from("/elsewhere.git")];
+        let policy = grant.import_policy(&roots, vec![3]);
+        assert_eq!(policy.read_only, roots);
+        assert_eq!(
+            policy.read_write,
+            grant.policy(&NetworkPolicy::Direct, vec![]).read_write
+        );
+        assert_eq!(policy.network, confine::Network::Offline);
+        assert_eq!(policy.resolver, confine::Resolver::None);
+        assert!(policy.refer && !policy.interface_index);
+        assert_eq!(policy.min_abi, MIN_ABI);
+        assert_eq!(policy.descriptors, vec![3]);
     }
 }
