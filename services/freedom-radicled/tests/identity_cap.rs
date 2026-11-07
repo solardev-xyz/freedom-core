@@ -7,9 +7,11 @@
 //! The documents are written straight into storage before the service
 //! starts, each a commit after the identity's head at `refs/rad/id`
 //! (`fixture::set_identity_document`): the repository's own document with
-//! a padding payload, as heartwood accepts any payload, to the byte; and
-//! one past the cap that isn't JSON at all, which only a check before the
-//! parse can refuse as too large. Every node here reaches no one, as in
+//! a padding payload, as heartwood accepts any payload, to the byte; one
+//! past the cap that isn't JSON at all, which only a check before the
+//! parse can refuse as too large; and one past it whose project payload
+//! isn't a project, which libradicle's listing would fail on, where it
+//! skips one that doesn't parse. Every node here reaches no one, as in
 //! tests/start.rs.
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
@@ -59,6 +61,20 @@ fn padded(base: &[u8], size: usize) -> Vec<u8> {
     bytes
 }
 
+/// A document of exactly `size` bytes that parses and verifies, from
+/// `base`, but whose project payload is a string of padding: libradicle's
+/// listing, which skips a repository whose document doesn't parse, fails
+/// on its project.
+fn not_a_project(base: &[u8], size: usize) -> Vec<u8> {
+    let mut doc: Value = serde_json::from_slice(base).unwrap();
+    doc["payload"]["xyz.radicle.project"] = json!("");
+    let empty = serde_json::to_vec(&doc).unwrap().len();
+    doc["payload"]["xyz.radicle.project"] = json!("z".repeat(size - empty));
+    let bytes = serde_json::to_vec(&doc).unwrap();
+    assert_eq!(bytes.len(), size);
+    bytes
+}
+
 /// A repository with one commit; its RID and that commit's ID.
 fn repository(home: &Path, name: &str) -> (RepoId, String) {
     let files: &[(&str, &[u8])] = &[("README.md", b"# Identity\n")];
@@ -74,9 +90,10 @@ fn is_over(reply: &Result<Vec<u8>, Value>) -> bool {
     }
 }
 
-/// 0008, "Errors" and deviation `identity-cap`: three repositories, whose
-/// documents are exactly 1 MiB (`at`), one byte more (`over`), and one
-/// byte more that isn't JSON (`unparsed`).
+/// 0008, "Errors" and deviation `identity-cap`: four repositories, whose
+/// documents are exactly 1 MiB (`at`), one byte more (`over`), one byte
+/// more that isn't JSON (`unparsed`), and one byte more whose project
+/// payload isn't a project (`unprojected`).
 /// - The reads of one repository that parse its document, `repo_info`,
 ///   `remotes`, `repo_stats` and `repo_meta`: `at` served, as the add-on
 ///   reads it; `over` and `unparsed` refused, `too_large` with the fixed
@@ -84,8 +101,10 @@ fn is_over(reply: &Result<Vec<u8>, Value>) -> bool {
 /// - `tree` and `blob` without a revision parse it only when `HEAD`
 ///   doesn't resolve: `at`'s and `unparsed`'s don't, `over`'s does. `at`
 ///   and `over` served; `unparsed` refused.
-/// - The listings parse every seeded repository's: refused while `over` or
-///   `unparsed` is seeded; once both are unseeded, served, `at` alone.
+/// - The listings parse every seeded repository's: refused while `over`,
+///   `unparsed` or `unprojected` is seeded, `unprojected` alone included,
+///   whose listing by libradicle would fail with its own error first;
+///   once all three are unseeded, served, `at` alone.
 #[test]
 fn an_identity_document_over_1_mib_is_refused_before_it_is_parsed() {
     let dirs = Dirs::new();
@@ -93,11 +112,14 @@ fn an_identity_document_over_1_mib_is_refused_before_it_is_parsed() {
     let (at, at_commit) = repository(&dirs.home, "at");
     let (over, over_commit) = repository(&dirs.home, "over");
     let (unparsed, unparsed_commit) = repository(&dirs.home, "unparsed");
+    let (unprojected, unprojected_commit) = repository(&dirs.home, "unprojected");
     let base = fixture::identity_document(&dirs.home, at);
     fixture::set_identity_document(&dirs.home, at, &padded(&base, DOCUMENT));
     let base = fixture::identity_document(&dirs.home, over);
     fixture::set_identity_document(&dirs.home, over, &padded(&base, DOCUMENT + 1));
     fixture::set_identity_document(&dirs.home, unparsed, &vec![b'z'; DOCUMENT + 1]);
+    let base = fixture::identity_document(&dirs.home, unprojected);
+    fixture::set_identity_document(&dirs.home, unprojected, &not_a_project(&base, DOCUMENT + 1));
     assert_eq!(fixture::identity_document(&dirs.home, at).len(), DOCUMENT);
     fixture::dangling_head(&dirs.home, at);
     fixture::dangling_head(&dirs.home, unparsed);
@@ -129,7 +151,11 @@ fn an_identity_document_over_1_mib_is_refused_before_it_is_parsed() {
     }
     let answer = radicled.read("repo_info", json!({ "rid": at.to_string() }));
     assert_eq!(String::from_utf8(answer.unwrap()).unwrap(), info);
-    for (rid, commit) in [(over, &over_commit), (unparsed, &unparsed_commit)] {
+    for (rid, commit) in [
+        (over, &over_commit),
+        (unparsed, &unparsed_commit),
+        (unprojected, &unprojected_commit),
+    ] {
         for (op, args) in one(rid, commit) {
             let reply = radicled.read(op, args.clone());
             assert!(is_over(&reply), "{op} {args}: {reply:?}");
@@ -168,8 +194,9 @@ fn an_identity_document_over_1_mib_is_refused_before_it_is_parsed() {
     assert_eq!(node_info["repos_total"], Value::Null, "{node_info}");
     assert_eq!(node_info["repos_error"], OVER, "{node_info}");
 
-    // `over` unseeded: `unparsed` still refuses them; then both.
-    for (rid, refused) in [(over, true), (unparsed, false)] {
+    // Unseeded one by one: refused while any of the three is seeded, the
+    // last `unprojected` alone.
+    for (rid, refused) in [(over, true), (unparsed, true), (unprojected, false)] {
         let reply = radicled.call("rad.unseed", json!({ "rid": rid.to_string() }));
         assert_eq!(reply["result"], json!({ "unseeded": true }), "{reply}");
         for op in listings {
