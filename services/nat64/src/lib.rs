@@ -339,13 +339,16 @@ impl Shared {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         let why: Vec<&'static str> = failures.iter().map(|(_, why)| *why).collect();
-        let earlier = std::mem::replace(
-            &mut *self
+        // Copied before the lock, moved in under it: the guard holds only
+        // the swap (#292 review, round 3).
+        let installed = why.clone();
+        let earlier = {
+            let mut published = self
                 .failures
                 .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner()),
-            why.clone(),
-        );
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            std::mem::replace(&mut *published, installed)
+        };
         drop(earlier);
         let (name, prefixes) = (state_name(&state), state.prefixes().len());
         {
@@ -1025,19 +1028,25 @@ mod tests {
             ..FAST
         };
         let discovery = Discovery::new(Arc::new(move || listed.clone()), once, host());
-        let held = Arc::new(std::sync::Barrier::new(2));
-        let release = Arc::new(std::sync::Barrier::new(2));
-        let (hook_held, hook_release) = (held.clone(), release.clone());
+        // Every wait is bounded, so any failure ends the test rather than
+        // hanging it (#292 review, round 3).
+        let (reached, held) = std::sync::mpsc::channel::<()>();
+        let (release, released) = std::sync::mpsc::channel::<()>();
+        let released = Mutex::new(released);
         // Only a change logs: the first is the round's end.
         let logs = Arc::new(AtomicUsize::new(0));
         *discovery.shared.before_log.lock().unwrap() = Some(Arc::new(move || {
             if logs.fetch_add(1, Ordering::SeqCst) == 0 {
-                hook_held.wait();
-                hook_release.wait();
+                let _ = reached.send(());
+                let _ = released
+                    .lock()
+                    .unwrap()
+                    .recv_timeout(Duration::from_secs(10));
             }
         }));
         let _lease = discovery.lease();
-        held.wait();
+        held.recv_timeout(Duration::from_secs(10))
+            .expect("the round's line never came");
         let read = std::thread::scope(|scope| {
             let (sent, read) = std::sync::mpsc::channel();
             let discovery = &discovery;
@@ -1046,7 +1055,7 @@ mod tests {
             });
             let answer = read.recv_timeout(Duration::from_secs(5));
             // Let the line go either way, so a reader stuck behind it ends.
-            release.wait();
+            let _ = release.send(());
             answer
         });
         let read = read.expect("stats_bounded waited for the log line");
