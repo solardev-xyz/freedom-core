@@ -783,9 +783,8 @@ fn a_blobs_held_bytes() {
 /// if its JSON's writing would hold more than it.
 #[test]
 fn a_blob_is_bounded_by_the_built_budget() {
-    let bounds = |budget| Bounds::new(libradicle::CancelToken::new(), budget);
     let mut asked = None;
-    let blob = bounded_blob(&bounds(100), |limit| {
+    let blob = bounded_blob(100, |limit| {
         asked = Some(limit);
         Ok(text(&[b'a'; 50]))
     })
@@ -793,7 +792,7 @@ fn a_blob_is_bounded_by_the_built_budget() {
     assert_eq!(asked, Some(50));
     assert_eq!(blob.content.len(), 50);
     // 26 bytes of Latin-1: 26 + 2 × 78 held.
-    let refused = bounded_blob(&bounds(100), |_| Ok(text(&[0xe9; 26]))).unwrap_err();
+    let refused = bounded_blob(100, |_| Ok(text(&[0xe9; 26]))).unwrap_err();
     assert!(
         matches!(
             refused,
@@ -806,10 +805,10 @@ fn a_blob_is_bounded_by_the_built_budget() {
     );
     // 20 bytes of Latin-1 hold 20 + 2 × 60: at the budget, taken; one byte
     // over, refused.
-    assert!(bounded_blob(&bounds(140), |_| Ok(text(&[0xe9; 20]))).is_ok());
-    assert!(bounded_blob(&bounds(139), |_| Ok(text(&[0xe9; 20]))).is_err());
+    assert!(bounded_blob(140, |_| Ok(text(&[0xe9; 20]))).is_ok());
+    assert!(bounded_blob(139, |_| Ok(text(&[0xe9; 20]))).is_err());
     // libradicle's own refusal stands.
-    let refused = bounded_blob(&bounds(100), |limit| {
+    let refused = bounded_blob(100, |limit| {
         Err(libradicle::Error::TooLarge { size: 51, limit })
     })
     .unwrap_err();
@@ -823,11 +822,17 @@ fn a_blob_is_bounded_by_the_built_budget() {
 }
 
 /// 0008's figures: a blob read as JSON is at most 16 MiB, the add-on's cap,
-/// so its loading's two copies fit the built budget.
+/// so its loading's two copies fit the built budget, with libgit2's NUL and
+/// structs beside them reserved apart.
 #[test]
 fn the_figures() {
     assert_eq!(output::BUILT / 2, 16 << 20);
     assert_eq!(output::BUILT / 2, libradicle::BINDING_READ_BUDGET);
+    assert_eq!(BESIDE, 257);
+    assert_eq!(
+        libradicle::raw_held(output::BUILT / 2) + output::BUILT / 2,
+        output::BUILT + BESIDE
+    );
     let bounds = Bounds::new(libradicle::CancelToken::new(), output::BUILT).with_loads(7);
     let half = halved(&bounds);
     assert_eq!(half.budget, output::BUILT / 2);

@@ -24,6 +24,7 @@ use std::time::{Duration, Instant};
 use common::fixture;
 use common::*;
 use libradicle::{BINDING_READ_BUDGET, Blob, Bounds, json};
+use radicle::git::raw as git2;
 use radicle::prelude::RepoId;
 use radicle::storage::git::reconcile::quarantine::Kind;
 use serde_json::{Value, json};
@@ -489,6 +490,139 @@ fn a_reply_at_32_mib_is_served_and_one_byte_more_is_too_large() {
             .read("blob_at", blob_at(rid, &revision, "at.txt"))
             .is_ok()
     );
+    shut_down(&mut radicled, &dirs.home);
+}
+
+/// The header sizes of `oids` in `rid`'s storage in `home`.
+fn sizes(home: &Path, rid: RepoId, oids: &[git2::Oid]) -> Vec<u64> {
+    let repo = git2::Repository::open_bare(fixture::storage_of(home, rid)).unwrap();
+    let odb = repo.odb().unwrap();
+    oids.iter()
+        .map(|&oid| odb.read_header(oid).unwrap().0 as u64)
+        .collect()
+}
+
+/// 0008, "Pools and budgets" and "JSON results" (review of #277, round 3):
+/// a walk can hold what it has loaded and what it has built at once
+/// (`tree_at` keeps its tree while it builds the entries), so a JSON read's
+/// one 32 MiB reservation for its build gives its walk half for each, the
+/// add-on's 16 MiB of items and 16 MiB of loads. Under a root tree of
+/// 118,000 files:
+/// - **both near their caps at once:** `tree_at` of a directory with a
+///   4,000-byte name and 3,600 files is charged more than 12 MiB of loads
+///   (what libgit2 holds of the commit, the root and the directory, from
+///   their headers) and builds more than 12 MiB of items (its JSON):
+///   together more than either half, and within the reservation. Served,
+///   the add-on's bytes;
+/// - **items past their half:** the same with 4,600 files builds more than
+///   16 MiB, under its loads' half, and within 32 MiB in all: `too_large`
+///   at the items' 16 MiB, as the add-on;
+/// - **loads past their half:** a directory of 35,000 files is charged more
+///   than 16 MiB of loads with the root, under 32 MiB: `too_large` with
+///   that charge over 16 MiB, as the add-on.
+#[test]
+fn a_walks_loads_and_items_share_its_build_reservation() {
+    const HALF: u64 = BINDING_READ_BUDGET;
+    const BUILT: u64 = 2 * HALF;
+    let dirs = Dirs::new();
+    configure(&dirs.home, json!({}));
+    let near = "a".repeat(4000);
+    let past = "b".repeat(4000);
+    let (rid, revision) = fixture::repository_with_trees(
+        &dirs.home,
+        &SEED,
+        "trees",
+        118_000,
+        &[(&near, 3_600), (&past, 4_600), ("c", 35_000)],
+    );
+    // The walk's loads to each directory, as libradicle charges them.
+    let loads = {
+        let repo = git2::Repository::open_bare(fixture::storage_of(&dirs.home, rid)).unwrap();
+        let commit = repo
+            .find_commit(git2::Oid::from_str(&revision).unwrap())
+            .unwrap();
+        let root = repo.find_tree(commit.tree_id()).unwrap();
+        let mut ids = vec![commit.id(), root.id()];
+        for dir in [near.as_str(), past.as_str(), "c"] {
+            ids.push(root.get_name(dir).unwrap().id());
+        }
+        let s = sizes(&dirs.home, rid, &ids);
+        let above = libradicle::commit_held(s[0]) + libradicle::tree_held(s[1]);
+        [2, 3, 4].map(|i| above + libradicle::tree_held(s[i]))
+    };
+    // The add-on's answers for the two that fit its bounds, and the JSON
+    // the second would build.
+    let (near_json, past_json) = fixture::with_node(&dirs.home, &SEED, |node| {
+        let json_of = |path: &str| {
+            let (entries, commit) = node.tree_at(rid, &revision, path).unwrap();
+            text(|w| json::tree_at(w, &entries, &commit))
+        };
+        let near_json = json_of(&near);
+        assert_eq!(
+            node.tree_at_bounded(rid, &revision, &near, &Bounds::for_binding())
+                .map(|(e, c)| text(|w| json::tree_at(w, &e, &c)))
+                .unwrap(),
+            near_json
+        );
+        (near_json, json_of(&past).len() as u64)
+    });
+    let near_items = near_json.len() as u64;
+    assert!(loads[0] > 12 << 20 && loads[0] <= HALF, "{}", loads[0]);
+    assert!(near_items > 12 << 20 && near_items <= HALF, "{near_items}");
+    assert!(loads[0] + near_items > HALF && loads[0] + near_items <= BUILT);
+    assert!(past_json > HALF && loads[1] <= HALF && loads[1] + past_json <= BUILT);
+    assert!(loads[2] > HALF && loads[2] <= BUILT, "{}", loads[2]);
+
+    let mut radicled = served(&dirs, &[]);
+    let at = |path: &str| json!({ "rid": rid.to_string(), "revision": revision, "path": path });
+    assert_eq!(read_text(&mut radicled, "tree_at", &at(&near)), near_json);
+    let reply = radicled.read("tree_at", at(&past)).unwrap_err();
+    assert_eq!(code(&reply), "too_large", "{reply}");
+    let message = reply["error"]["message"].as_str().unwrap();
+    assert!(
+        message.ends_with(&format!(" bytes is over the limit of {HALF}")),
+        "{message}"
+    );
+    let reply = radicled.read("tree_at", at("c")).unwrap_err();
+    assert_eq!(code(&reply), "too_large", "{reply}");
+    assert_eq!(
+        reply["error"]["message"],
+        format!("{} bytes is over the limit of {HALF}", loads[2])
+    );
+    shut_down(&mut radicled, &dirs.home);
+}
+
+/// 0008, "Pools and budgets" (review of #277, round 3): a blob read as JSON
+/// holds, while it loads, libgit2's buffer of up to 16 MiB with its NUL and
+/// structs and libradicle's copy: the build's 32 MiB and 257 bytes, one
+/// reservation. With an output budget a byte short of it, `blob`,
+/// `blob_at` and `readme_at` are `too_large` at once, naming it.
+#[test]
+fn a_blob_as_json_reserves_libgit2s_bytes_with_its_build() {
+    const BUILT: u64 = 32 << 20;
+    let dirs = Dirs::new();
+    configure(&dirs.home, json!({}));
+    let (rid, commits) = fixture::repository_with(&dirs.home, &SEED, "beside", &[FIRST]);
+    let reserved = BUILT + libradicle::raw_held(0);
+    let budget = (reserved - 1).to_string();
+    let mut radicled = served(&dirs, &[("FREEDOM_RADICLED_TEST_BUDGET", &budget)]);
+    let r = rid.to_string();
+    for (op, args) in [
+        ("blob", json!({ "rid": r, "path": "README.md" })),
+        (
+            "blob_at",
+            json!({ "rid": r, "revision": commits[0], "path": "README.md" }),
+        ),
+        ("readme_at", json!({ "rid": r, "revision": commits[0] })),
+    ] {
+        let reply = radicled.read(op, args).unwrap_err();
+        assert_eq!(code(&reply), "too_large", "{op}: {reply}");
+        assert_eq!(
+            reply["error"]["message"],
+            format!("{reserved} bytes is over the limit of {}", reserved - 1),
+            "{op}"
+        );
+    }
     shut_down(&mut radicled, &dirs.home);
 }
 

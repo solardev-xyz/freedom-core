@@ -52,9 +52,10 @@
 //!   each, for a listed repository whose JSON took 62 at least: under 5.2
 //!   MiB), beside one repository's `repo_meta` at a time;
 //! - **`readme_at`'s blob** is read as `blob_at`'s, once the tree is
-//!   dropped: loaded up to 16 MiB, and refused if what its JSON's writing
-//!   holds passes the built budget ([`super::bounded_blob`]); its JSON goes
-//!   through [`super::js::Spliced`] into the reply's.
+//!   dropped: loaded up to 16 MiB, with libgit2's 257 bytes beside it
+//!   reserved with the build ([`super::BESIDE`]), and refused if what its
+//!   JSON's writing holds passes the built budget ([`super::bounded_blob`]);
+//!   its JSON goes through [`super::js::Spliced`] into the reply's.
 //!
 //! `repos_meta` looks at the read's token before each repository; a walk
 //! looks at it as it goes.
@@ -69,10 +70,12 @@ use radicle::prelude::RepoId;
 use serde::Serialize;
 use serde_json::json;
 
-use super::bounded_blob;
 use super::js::{self, Seeding, Work};
+use super::{BESIDE, bounded_blob};
 use crate::node::Handle;
-use crate::output::{BUILT, Body, Budget, Failure, Json, Refused, Until, composed_read};
+use crate::output::{
+    BUILT, Body, Budget, Failure, Json, Refused, Until, composed_read, composed_read_beside,
+};
 
 /// The add-on's bounds of a walk: libradicle's `BINDING_READ_BUDGET`, half
 /// the built budget.
@@ -280,7 +283,8 @@ pub fn readme_at(
     rid: RepoId,
     revision: &str,
 ) -> Result<Body, Failure> {
-    composed_read(budget, until, |out| {
+    // libgit2's bytes beside the blob while it loads, with the build.
+    composed_read_beside(BESIDE, budget, until, |out| {
         let path = {
             let (entries, _) =
                 handle
@@ -299,7 +303,7 @@ pub fn readme_at(
                 "no readme",
             )));
         };
-        let blob = bounded_blob(&bounds(until, BUILT), |limit| {
+        let blob = bounded_blob(BUILT, |limit| {
             handle
                 .node()
                 .read_blob_at_capped(rid, revision, path, limit)

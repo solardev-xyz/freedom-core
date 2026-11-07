@@ -24,13 +24,18 @@
 //!
 //! **A JSON read** ([`json_read`]) holds at most 64 MiB ([`JSON_READ`]), of
 //! which at most 32 MiB is JSON:
-//! 1. **the built data:** libradicle's walk takes the read's token and a
-//!    byte budget of 32 MiB ([`BUILT`]), as [`libradicle::Bounds`]: it
-//!    charges each item as it is built, its estimate the item's JSON, and
-//!    stops `TooLarge` when the next one doesn't fit. It loads at most as
-//!    many bytes of objects (`Bounds::loads`). The walk charges a meter of
-//!    its own, with no way into this budget, so the whole of its byte budget
-//!    is reserved here before it starts: never less than its items take;
+//! 1. **the built data:** 32 MiB ([`BUILT`]) is reserved before the walk
+//!    starts, and the walk gets half of it for the items it builds and half
+//!    for the objects it loads, as [`libradicle::Bounds`] with the read's
+//!    token: the add-on's 16 MiB of each (`Bounds::for_binding`'s). A walk
+//!    can hold both at once (`tree_at` keeps its tree while it builds its
+//!    entries), so both are inside the one reservation (review of #277,
+//!    round 3). It charges each item as it is built, its estimate the
+//!    item's JSON, and each object before it loads it, what libgit2 holds
+//!    of it once parsed, and stops `TooLarge` when the next one doesn't
+//!    fit. The walk charges meters of its own, with no way into this
+//!    budget, so the whole of its two budgets is reserved here before it
+//!    starts: never less than its items and loads take;
 //! 2. **the JSON:** the result is serialized into a [`Json`] writer. It
 //!    reserves from the budget in 64 KiB steps ([`STEP`]), each before it is
 //!    allocated, and fails as soon as its output would pass 32 MiB
@@ -578,19 +583,36 @@ pub fn json_read<T>(
     build: impl FnOnce(&Bounds) -> Result<T, libradicle::Error>,
     write: impl FnOnce(&mut Json, &T) -> serde_json::Result<()>,
 ) -> Result<Body, Failure> {
-    json_read_within(READ, budget, until, build, write)
+    json_read_within(READ, 0, budget, until, build, write)
 }
 
-fn json_read_within<T>(
-    limits: Limits,
+/// [`json_read`], with `beside` more bytes in its build's reservation: what
+/// its build holds outside its walk's bounds (a blob's NUL and structs
+/// beside the libgit2 buffer and the copy that fill the build,
+/// `crate::reads`).
+pub fn json_read_beside<T>(
+    beside: u64,
     budget: &Arc<Budget>,
     until: &Until,
     build: impl FnOnce(&Bounds) -> Result<T, libradicle::Error>,
     write: impl FnOnce(&mut Json, &T) -> serde_json::Result<()>,
 ) -> Result<Body, Failure> {
-    // The walk's whole budget, before it starts.
-    let built = budget.reserve(limits.built, until)?;
-    let bounds = Bounds::new(until.cancel.clone(), limits.built).with_loads(limits.built);
+    json_read_within(READ, beside, budget, until, build, write)
+}
+
+fn json_read_within<T>(
+    limits: Limits,
+    beside: u64,
+    budget: &Arc<Budget>,
+    until: &Until,
+    build: impl FnOnce(&Bounds) -> Result<T, libradicle::Error>,
+    write: impl FnOnce(&mut Json, &T) -> serde_json::Result<()>,
+) -> Result<Body, Failure> {
+    // The walk's whole budget, before it starts: half of it for what it
+    // builds, half for what it loads, both of which it can hold at once.
+    let built = budget.reserve(limits.built + beside, until)?;
+    let half = limits.built / 2;
+    let bounds = Bounds::new(until.cancel.clone(), half).with_loads(half);
     let value = build(&bounds)?;
     let mut json = Json::new(budget.clone(), until.clone(), limits.json);
     let written = write(&mut json, &value);
@@ -610,7 +632,18 @@ pub fn composed_read(
     until: &Until,
     compose: impl FnOnce(&mut Json) -> Result<(), Failure>,
 ) -> Result<Body, Failure> {
-    let built = budget.reserve(BUILT, until)?;
+    composed_read_beside(0, budget, until, compose)
+}
+
+/// [`composed_read`], with `beside` more bytes in its build's reservation,
+/// as [`json_read_beside`]'s (`readme_at`'s blob).
+pub fn composed_read_beside(
+    beside: u64,
+    budget: &Arc<Budget>,
+    until: &Until,
+    compose: impl FnOnce(&mut Json) -> Result<(), Failure>,
+) -> Result<Body, Failure> {
+    let built = budget.reserve(BUILT + beside, until)?;
     let mut json = Json::new(budget.clone(), until.clone(), JSON);
     let composed = compose(&mut json);
     drop(built);

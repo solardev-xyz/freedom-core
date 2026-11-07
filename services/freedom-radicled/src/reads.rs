@@ -60,26 +60,32 @@
 //! **The build and its JSON** ([`crate::output::json_read`]) reserve from
 //! the process's output budget before they allocate, inside the read's
 //! deadline and its token: the walk's whole 32 MiB first, then the JSON in
-//! 64 KiB steps, at most 32 MiB of it. libradicle charges each commit and
-//! tree a walk loads what libgit2 holds of it once parsed, from its header
-//! (`libradicle::commit_held`, `libradicle::tree_held`), and libgit2's
-//! object cache, which would keep them past the walk, is off ([`uncache`]). A read past a cap is `too_large`; one
-//! whose deadline ends a wait is `deadline`. One whose token is cancelled,
+//! 64 KiB steps, at most 32 MiB of it. The walk gets half of those 32 MiB
+//! for the items it builds and half for the objects it loads, the add-on's
+//! 16 MiB of each, as a walk can hold both at once. libradicle charges
+//! each commit and tree a walk loads what libgit2 holds of it once parsed,
+//! from its header (`libradicle::commit_held`, `libradicle::tree_held`),
+//! and libgit2's object cache, which would keep them past the walk, is off
+//! ([`uncache`]). A read past a cap is `too_large`; one whose deadline
+//! ends a wait is `deadline`. One whose token is cancelled,
 //! in a wait or in its walk, is answered by whoever cancelled it: main's
 //! cancel `cancelled`, the timer `deadline`, the stop `stopped`. The
 //! node is held for the build alone, never while the body waits for credit.
 //! Two results are copied as libradicle writes them, with a `json!` value,
 //! so their build is bounded for the copy too:
-//! - **`repo_info`'s** walk takes half the built budget, so the value's
-//!   copy, about the result's size, fits in the other half;
+//! - **`repo_info`'s** walk takes half its items' 16 MiB, so the value's
+//!   copy, about the result's size, fits beside it;
 //! - **a blob** is loaded only up to half the built budget, 16 MiB (the
 //!   add-on's cap too, `libradicle::BINDING_READ_BUDGET`), its size read
 //!   from its header first ([`bounded_blob`]), as libgit2's buffer and
-//!   libradicle's copy of it are both held while it loads. Then what its
-//!   JSON's writing holds beside the JSON ([`blob_held`]): its content,
-//!   and for text the value's copy of it, and before that the lossy copy of
-//!   one that isn't UTF-8, three bytes for each invalid sequence. Past the
-//!   built budget it is `too_large`.
+//!   libradicle's copy of it are both held while it loads; libgit2's NUL
+//!   and structs beside them, 257 bytes, are reserved with the build
+//!   ([`BESIDE`]). Its walk is libradicle's, within the add-on's 16 MiB of
+//!   loads, and dropped before the blob loads. Then what its JSON's writing
+//!   holds beside the JSON ([`blob_held`]): its content, and for text the
+//!   value's copy of it, and before that the lossy copy of one that isn't
+//!   UTF-8, three bytes for each invalid sequence. Past the built budget it
+//!   is `too_large`.
 //!
 //! **libradicle's errors:** `not_found` when the message matches today's
 //! test (`not found`, `does not exist` or `NotFound`, in any case),
@@ -118,7 +124,7 @@ use serde_json::value::RawValue;
 use serde_json::{Value, json};
 
 use crate::node::{Handle, Node};
-use crate::output::{Body, Budget, Failure, Refused, Until, json_read};
+use crate::output::{BUILT, Body, Budget, Failure, Refused, Until, json_read, json_read_beside};
 use crate::pools::{Pools, Ticket, Work};
 use crate::{quarantine, testhooks};
 use composed::Cobs;
@@ -734,21 +740,47 @@ fn lossy_len(bytes: &[u8]) -> Option<u64> {
     )
 }
 
-/// A blob, loaded within `bounds` (see the module's doc), then refused
-/// `too_large` if its JSON's writing would hold more than the built budget.
+/// What libgit2 holds of a blob beside its bytes while it loads it: their
+/// NUL and its structs (`libradicle::raw_held` of none). A blob read as
+/// JSON is loaded up to half of its build's reservation, and libradicle
+/// copies it while libgit2's buffer lives: twice the blob is that
+/// reservation, and these bytes are past it, reserved with it
+/// ([`blob_read`], and `readme_at`'s).
+const BESIDE: u64 = libradicle::raw_held(0);
+
+/// A blob, loaded up to half of `built`, the reservation of what its read
+/// builds (see the module's doc), then refused `too_large` if its JSON's
+/// writing would hold more than `built`.
 fn bounded_blob(
-    bounds: &Bounds,
+    built: u64,
     load: impl FnOnce(u64) -> Result<Blob, libradicle::Error>,
 ) -> Result<Blob, libradicle::Error> {
-    let blob = load(bounds.budget / 2)?;
+    let blob = load(built / 2)?;
     let held = blob_held(&blob);
-    if held > bounds.budget {
+    if held > built {
         return Err(libradicle::Error::TooLarge {
             size: held,
-            limit: bounds.budget,
+            limit: built,
         });
     }
     Ok(blob)
+}
+
+/// `blob` or `blob_at`: the blob `load` loads, as JSON, within the build's
+/// reservation and libgit2's bytes beside it ([`BESIDE`]).
+fn blob_read(
+    budget: &Arc<Budget>,
+    until: &Until,
+    path: &str,
+    load: impl FnOnce(u64) -> Result<Blob, libradicle::Error>,
+) -> Result<Body, Failure> {
+    json_read_beside(
+        BESIDE,
+        budget,
+        until,
+        |_| bounded_blob(BUILT, load),
+        |w, blob| json::blob(w, path, blob),
+    )
 }
 
 /// `bounds` with half its JSON budget: for a result libradicle copies as it
@@ -785,32 +817,18 @@ fn body(handle: &Handle, budget: &Arc<Budget>, until: &Until, op: Op) -> Result<
             |bounds| handle.node().tree_at_bounded(rid, &revision, &path, bounds),
             |w, (entries, commit)| json::tree_at(w, entries, commit),
         ),
-        Op::Blob { rid, path } => json_read(
-            budget,
-            until,
-            |bounds| {
-                bounded_blob(bounds, |limit| {
-                    handle.node().read_blob_capped(rid, &path, limit)
-                })
-            },
-            |w, blob| json::blob(w, &path, blob),
-        ),
+        Op::Blob { rid, path } => blob_read(budget, until, &path, |limit| {
+            handle.node().read_blob_capped(rid, &path, limit)
+        }),
         Op::BlobAt {
             rid,
             revision,
             path,
-        } => json_read(
-            budget,
-            until,
-            |bounds| {
-                bounded_blob(bounds, |limit| {
-                    handle
-                        .node()
-                        .read_blob_at_capped(rid, &revision, &path, limit)
-                })
-            },
-            |w, blob| json::blob(w, &path, blob),
-        ),
+        } => blob_read(budget, until, &path, |limit| {
+            handle
+                .node()
+                .read_blob_at_capped(rid, &revision, &path, limit)
+        }),
         Op::Commits {
             rid,
             parent,

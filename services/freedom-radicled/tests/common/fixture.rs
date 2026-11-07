@@ -280,6 +280,57 @@ pub fn repository_with_wide_tree(
     (rid, commit.to_string())
 }
 
+/// Imports a repository into `home` as `seed`'s identity whose one commit's
+/// root tree has `filler` files, `f0000000` on, and a tree for each of
+/// `dirs`, its name and its count of such files: each file the same small
+/// blob, so each entry of those trees is 36 bytes. Its commit's ID.
+pub fn repository_with_trees(
+    home: &Path,
+    seed: &[u8; 32],
+    name: &str,
+    filler: usize,
+    dirs: &[(&str, usize)],
+) -> (RepoId, String) {
+    let work = tempfile::tempdir().unwrap();
+    let repo = git2::Repository::init(work.path()).unwrap();
+    let small = repo.blob(b"x\n").unwrap();
+    let files = |count: usize| {
+        let mut builder = repo.treebuilder(None).unwrap();
+        for n in 0..count {
+            builder.insert(format!("f{n:07}"), small, 0o100644).unwrap();
+        }
+        builder.write().unwrap()
+    };
+    let mut root = repo
+        .treebuilder(Some(&repo.find_tree(files(filler)).unwrap()))
+        .unwrap();
+    for &(dir, count) in dirs {
+        root.insert(dir, files(count), 0o040000).unwrap();
+    }
+    let tree = repo.find_tree(root.write().unwrap()).unwrap();
+    let signature = git2::Signature::new(
+        "Fixture",
+        "fixture@example.invalid",
+        &git2::Time::new(1_700_000_000, 0),
+    )
+    .unwrap();
+    let commit = repo
+        .commit(
+            Some("refs/heads/master"),
+            &signature,
+            &signature,
+            "Trees",
+            &tree,
+            &[],
+        )
+        .unwrap();
+    let rid = with_node(home, seed, |node| {
+        node.import_repo(work.path(), name, "A fixture.", "master")
+            .unwrap()
+    });
+    (rid, commit.to_string())
+}
+
 /// A commit written straight into `rid`'s repository in `home`'s storage,
 /// on no ref, whose tree nests a tree `d` `depth` times, each tree with a
 /// file `f` of `content`: `d/…/d/f` is there at every depth up to `depth`.

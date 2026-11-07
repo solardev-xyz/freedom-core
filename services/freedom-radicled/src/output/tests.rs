@@ -500,11 +500,14 @@ fn a_json_read_reserves_its_whole_build_before_it_walks_and_releases_it_once_wri
     let until = within(10_000);
     let body = json_read_within(
         limits,
+        0,
         &budget,
         &until,
         |bounds| {
             assert_eq!(budget.used(), 1000);
-            assert_eq!((bounds.budget, bounds.loads), (1000, 1000));
+            // Half for what it builds, half for what it loads, both held at
+            // once within the one reservation (review of #277, round 3).
+            assert_eq!((bounds.budget, bounds.loads), (500, 500));
             assert!(!bounds.cancel.is_cancelled());
             Ok("x".repeat(100))
         },
@@ -531,7 +534,9 @@ fn a_json_reads_walk_has_the_reads_token() {
         &budget,
         &until,
         |bounds| -> Result<(), _> {
-            assert_eq!((bounds.budget, bounds.loads), (BUILT, BUILT));
+            // The add-on's bounds: 16 MiB of items, 16 of loads.
+            assert_eq!((bounds.budget, bounds.loads), (BUILT / 2, BUILT / 2));
+            assert_eq!(BUILT / 2, libradicle::BINDING_READ_BUDGET);
             until.cancel.cancel();
             assert!(bounds.cancel.is_cancelled());
             Err(libradicle::Error::Cancelled)
@@ -589,6 +594,7 @@ fn a_json_read_that_cant_reserve_its_build_never_walks() {
     let started = Instant::now();
     let failure = json_read_within(
         limits,
+        0,
         &budget,
         &within(50),
         |_| -> Result<(), _> { panic!("walked without its reservation") },
@@ -609,6 +615,7 @@ fn a_json_read_past_its_json_is_too_large_and_holds_nothing() {
     };
     let failure = json_read_within(
         limits,
+        0,
         &budget,
         &within(10_000),
         |_| Ok("y".repeat(20)),
