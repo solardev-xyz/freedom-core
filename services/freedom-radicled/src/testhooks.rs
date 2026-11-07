@@ -33,7 +33,10 @@
 //!   shared, before it asks heartwood ([`crate::node`]), logging `test
 //!   hook: the watch's look holds the node`: a look the stop meets.
 //! - `FREEDOM_RADICLED_TEST_WORK_DEADLINE_MS` replaces the read pool's and
-//!   the write queue's 60 s deadlines.
+//!   the write queue's 60 s deadlines. With
+//!   `FREEDOM_RADICLED_TEST_WORK_DEADLINE_FROM=<path>` it replaces them
+//!   only for the requests admitted once a file exists at `<path>`, so that
+//!   a test's setup isn't timed by the deadline it tests.
 //! - `FREEDOM_RADICLED_TEST_BUDGET=<bytes>` replaces the output budget's
 //!   256 MiB. A reservation that has to wait for it logs `test hook: a
 //!   reservation waits for the budget` as it first waits, with the
@@ -210,10 +213,14 @@ pub fn shutdown_within(default: Duration) -> Duration {
     default
 }
 
-/// The read pool's and the write queue's deadline.
+/// The read pool's and the write queue's deadline, for a request admitted
+/// now.
 pub fn work_deadline(default: Duration) -> Duration {
     #[cfg(feature = "testhooks")]
-    if let Some(ms) = millis("FREEDOM_RADICLED_TEST_WORK_DEADLINE_MS") {
+    if let Some(ms) = millis("FREEDOM_RADICLED_TEST_WORK_DEADLINE_MS")
+        && std::env::var_os("FREEDOM_RADICLED_TEST_WORK_DEADLINE_FROM")
+            .is_none_or(|from| std::path::Path::new(&from).exists())
+    {
         return Duration::from_millis(ms);
     }
     default

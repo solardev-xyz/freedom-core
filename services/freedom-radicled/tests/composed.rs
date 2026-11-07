@@ -731,11 +731,17 @@ fn a_composed_read_waiting_for_the_budget_ends_at_its_cancel_and_its_deadline() 
         &[&[("big.txt", &big), ("README.md", &readme)]],
     );
     let r = rid.to_string();
+    // The 8 s deadline is the reads' under test, not the held body's: it
+    // applies once `from` exists, which the test makes after the body's
+    // head, however long that body took to build.
+    let from = dirs.own_home.join("deadline-from");
+    let from_arg = from.display().to_string();
     let mut radicled = served(
         &dirs,
         &[
             ("FREEDOM_RADICLED_TEST_BUDGET", "68157440"),
             ("FREEDOM_RADICLED_TEST_WORK_DEADLINE_MS", "8000"),
+            ("FREEDOM_RADICLED_TEST_WORK_DEADLINE_FROM", &from_arg),
         ],
     );
     let held = radicled.request(
@@ -744,10 +750,14 @@ fn a_composed_read_waiting_for_the_budget_ends_at_its_cancel_and_its_deadline() 
     );
     let head = radicled.reply(held);
     assert!(
-        head["result"]["bytes"].as_u64().unwrap() > (JSON_CAP as u64) - 64,
+        head["result"]["bytes"]
+            .as_u64()
+            .unwrap_or_else(|| panic!("{head}"))
+            > (JSON_CAP as u64) - 64,
         "{head}"
     );
     radicled.uncredited(held, 128 << 10);
+    std::fs::write(&from, b"").unwrap();
     let readme_at = json!({ "op": "readme_at", "args": { "rid": r, "revision": commits[0] } });
     let status = |radicled: &mut Radicled| radicled.request("rad.read", json!({ "op": "status" }));
 
@@ -778,6 +788,9 @@ fn a_composed_read_waiting_for_the_budget_ends_at_its_cancel_and_its_deadline() 
     assert!(!radicled.any_within(behind, Duration::from_millis(2000)));
     assert_eq!(code(&radicled.reply(waiting)), "deadline");
     assert!(admitted.elapsed() >= Duration::from_secs(8));
+    // The test's 8 s, not the default 60 s: it was admitted once `from`
+    // existed.
+    assert!(admitted.elapsed() < Duration::from_secs(60));
     assert_eq!(
         radicled.read_reply(behind).unwrap(),
         br#"{"connectedPeers":0}"#
