@@ -16,6 +16,7 @@ const FILES = ['keys.json', 'mnemonic-validation.json', 'identity-formats.json',
 
 FILES.push('dweb.json', 'dweb-verify-plans.json', 'generator/dweb.js');
 FILES.push('streams.json', 'generator/streams.js');
+FILES.push('radicle-reads.json', 'generator/radicle-reads.js');
 
 function corruptedCheck(filename, corrupt) {
   const copy = fs.mkdtempSync(path.join(os.tmpdir(), 'freedom-core-vectors-'));
@@ -636,4 +637,12 @@ test('check rejects a changed stream expectation', () => {
     entry.steps.find((step) => step.write)?.write.unshift(['data', 41, 1000, 50000]);
   });
   assert.match(stderr, /Byte mismatch: streams.json/);
+});
+
+test('check rejects a changed composed read', () => {
+  const stderr = corruptedCheck('radicle-reads.json', (contents) => {
+    const entry = contents.cases.find((item) => item.id === 'remotes-index-branches');
+    entry.main.body = entry.main.body.replace('"0":', '"00":');
+  });
+  assert.match(stderr, /Byte mismatch: radicle-reads.json/);
 });

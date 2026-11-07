@@ -15,6 +15,7 @@ const { buildChain } = require('./chain');
 const { buildChainReplay } = require('./chain-replay');
 const { buildDweb, buildVerifyPlans } = require('./dweb');
 const { buildStreams } = require('./streams');
+const { buildRadicleReads } = require('./radicle-reads');
 
 const REFERENCE_COMMIT = 'fb540328162839e68150fe2c5e517edb86734d1c';
 const OUTPUT = path.resolve(__dirname, '..');
@@ -536,6 +537,9 @@ async function main() {
     'dweb-verify-plans.json': await buildVerifyPlans(reference.checkout, reference.meta),
     // The design's, with no reference: its meta is the shared one.
     'streams.json': buildStreams(reference.meta),
+    // Design 0008's composed reads, from main's radapi handlers over a
+    // scripted add-on.
+    'radicle-reads.json': await buildRadicleReads(reference.checkout, reference.meta),
   };
   // Check every deterministic file before doing the more expensive fixture checks.
   for (const [filename, contents] of Object.entries(deterministic)) {

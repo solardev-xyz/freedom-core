@@ -27,6 +27,7 @@ use serde_json::{Value, json};
 
 pub mod fixture;
 pub mod hermetic;
+pub mod js;
 
 pub const BIN: &str = env!("CARGO_BIN_EXE_freedom-radicled");
 /// A hang guard, never a timing assertion.
@@ -66,6 +67,14 @@ impl Dirs {
             locks,
             own_home,
         }
+    }
+
+    /// A test hook's value, `<mode>:<path>`, that holds work until the
+    /// test releases it (src/testhooks.rs), and the file that does: `name`,
+    /// in the service's own `HOME`, which its confinement grants.
+    pub fn held(&self, mode: &str, name: &str) -> (String, PathBuf) {
+        let release = self.own_home.join(name);
+        (format!("{mode}:{}", release.display()), release)
     }
 }
 
