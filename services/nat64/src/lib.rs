@@ -132,6 +132,10 @@ struct Shared {
     /// Why the last round's resolvers failed, each a fixed name: none since
     /// a resume until a round publishes.
     failures: Mutex<Vec<&'static str>>,
+    /// Held across a publication and its log line, so both stay in order
+    /// between publishers. Readers never take it, so they never wait for
+    /// the line, which names every resolver's failure.
+    publishing: Mutex<()>,
     source: Source,
     timing: Timing,
     control: Mutex<Control>,
@@ -139,6 +143,10 @@ struct Shared {
     /// Run between a send's check and the send, under the lock: tests.
     #[cfg(test)]
     before_send: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
+    /// Run as a publication's log line is about to be written, its locks
+    /// let go: tests.
+    #[cfg(test)]
+    before_log: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
 }
 
 #[derive(Default)]
@@ -167,12 +175,15 @@ impl Discovery {
                 publish: host.publish,
                 thread: host.thread,
                 failures: Mutex::new(Vec::new()),
+                publishing: Mutex::new(()),
                 source,
                 timing,
                 control: Mutex::new(Control::default()),
                 wake: Condvar::new(),
                 #[cfg(test)]
                 before_send: Mutex::new(None),
+                #[cfg(test)]
+                before_log: Mutex::new(None),
             }),
         }
     }
@@ -279,6 +290,18 @@ pub struct Round {
 
 impl Shared {
     #[cfg(test)]
+    fn before_log(&self) {
+        let hook = self
+            .before_log
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone();
+        if let Some(hook) = hook {
+            hook();
+        }
+    }
+
+    #[cfg(test)]
     fn before_send(&self) {
         let hook = self
             .before_send
@@ -304,34 +327,46 @@ impl Shared {
     }
 
     /// Publishes `state` and its round's failures, and logs a change.
+    ///
+    /// The state and failure locks are held only to swap in what is already
+    /// built: the failure list, one name per OS resolver, is copied before,
+    /// and the log line, which carries all of it, is written after. A
+    /// bounded read (`stats_bounded`) never waits behind work the size of
+    /// the OS's list (#292 review, round 2).
     fn publish(&self, state: Nat64State, failures: &[Failed]) {
-        *self
-            .failures
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner()) =
-            failures.iter().map(|(_, why)| *why).collect();
-        let mut published = self
-            .state
+        let _order = self
+            .publishing
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        if *published == state {
-            return;
+        let why: Vec<&'static str> = failures.iter().map(|(_, why)| *why).collect();
+        let earlier = std::mem::replace(
+            &mut *self
+                .failures
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()),
+            why.clone(),
+        );
+        drop(earlier);
+        let (name, prefixes) = (state_name(&state), state.prefixes().len());
+        {
+            let mut published = self
+                .state
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if *published == state {
+                return;
+            }
+            // Under the lock: `state()` and the host see each change
+            // together, and in order.
+            *published = state;
+            (self.publish)(&published);
         }
+        #[cfg(test)]
+        self.before_log();
         log::info(
             "NAT64 discovery",
-            json!({
-                "state": state_name(&state),
-                "prefixes": state.prefixes().len(),
-                "failures": failures
-                    .iter()
-                    .map(|(_, why)| *why)
-                    .collect::<Vec<_>>(),
-            }),
+            json!({ "state": name, "prefixes": prefixes, "failures": why }),
         );
-        // Under the lock: `state()` and the host see each change together,
-        // and in order.
-        *published = state;
-        (self.publish)(&published);
     }
 
     /// The rounds, for the process's life: each while a lease is held,
@@ -973,6 +1008,50 @@ mod tests {
             json!({ "state": "unknown", "prefixes": [], "failures": first })
         );
         assert_eq!(discovery.stats_bounded(16, 0)["failures"], json!([]));
+    }
+
+    /// A bounded read doesn't wait for a publication's log line, which names
+    /// every resolver's failure (#292 review, round 2): with the round's
+    /// line held, `stats_bounded` answers the new state at once.
+    #[test]
+    fn a_bounded_read_doesnt_wait_for_the_log_line() {
+        let listed: Vec<Learned> = (0..10_000)
+            .map(|n| Learned::Unaskable(format!("fe80::{n:x}")))
+            .collect();
+        let once = Timing {
+            floor: Duration::from_secs(60),
+            ceiling: Duration::from_secs(60),
+            backoff: Duration::from_secs(60),
+            ..FAST
+        };
+        let discovery = Discovery::new(Arc::new(move || listed.clone()), once, host());
+        let held = Arc::new(std::sync::Barrier::new(2));
+        let release = Arc::new(std::sync::Barrier::new(2));
+        let (hook_held, hook_release) = (held.clone(), release.clone());
+        // Only a change logs: the first is the round's end.
+        let logs = Arc::new(AtomicUsize::new(0));
+        *discovery.shared.before_log.lock().unwrap() = Some(Arc::new(move || {
+            if logs.fetch_add(1, Ordering::SeqCst) == 0 {
+                hook_held.wait();
+                hook_release.wait();
+            }
+        }));
+        let _lease = discovery.lease();
+        held.wait();
+        let read = std::thread::scope(|scope| {
+            let (sent, read) = std::sync::mpsc::channel();
+            let discovery = &discovery;
+            scope.spawn(move || {
+                let _ = sent.send(discovery.stats_bounded(16, 16));
+            });
+            let answer = read.recv_timeout(Duration::from_secs(5));
+            // Let the line go either way, so a reader stuck behind it ends.
+            release.wait();
+            answer
+        });
+        let read = read.expect("stats_bounded waited for the log line");
+        assert_eq!(read["state"], "unknown");
+        assert_eq!(read["failures"].as_array().unwrap().len(), 16);
     }
 
     #[test]
