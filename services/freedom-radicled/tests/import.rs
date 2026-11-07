@@ -1206,8 +1206,12 @@ fn a_kill_after_the_move_leaves_the_whole_repository() {
 
 /// libradicle opens the verified canonical source, never `path` as main
 /// gave it: a symlink in that path, retargeted once the roots are found
-/// again, changes nothing.
-#[cfg(unix)]
+/// again, changes nothing. Linux alone: Landlock doesn't check a path's
+/// resolution, but Seatbelt grants metadata only on the grants' ancestors
+/// and its root links, so on macOS a source named through a symlink
+/// outside its roots doesn't resolve once confined, and is refused (as
+/// libgit2's own open of it failed before the roots were checked again).
+#[cfg(target_os = "linux")]
 #[test]
 fn libradicle_opens_the_checked_source_never_the_path_as_given() {
     let dirs = ready();
