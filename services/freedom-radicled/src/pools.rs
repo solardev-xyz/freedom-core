@@ -899,14 +899,19 @@ fn repair_turn<A>(inner: &Inner<A>, rid: RepoId) {
         // Never queued without one.
         None => Turn::Abandoned,
     };
-    let mut state = inner.lock();
-    match turn {
-        Turn::More => {}
-        Turn::Over => state.repairs.retain(|queued| *queued != rid),
-        Turn::Abandoned => {
-            state.repairs.retain(|queued| *queued != rid);
-            state.uncertain = true;
+    {
+        let mut state = inner.lock();
+        match turn {
+            Turn::More => {}
+            Turn::Over => state.repairs.retain(|queued| *queued != rid),
+            Turn::Abandoned => {
+                state.repairs.retain(|queued| *queued != rid);
+                state.uncertain = true;
+            }
         }
+    }
+    if turn != Turn::More {
+        testhooks::at_repair_end();
     }
 }
 
