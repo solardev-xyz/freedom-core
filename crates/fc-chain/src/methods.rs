@@ -122,7 +122,8 @@ pub enum ColibriParams {
     /// The params as sent.
     AsSent,
     /// The params with `"latest"` appended ([`colibri_latest_appended`]):
-    /// an account read or a call without its block parameter.
+    /// an account read without its block parameter. Calls never get here,
+    /// as Colibri serves none (main's #1046).
     LatestAppended,
     /// Refused before Colibri is asked: the text that completes `Colibri
     /// cannot prove <method> `.

@@ -868,6 +868,54 @@ fn myotis_and_colibri_operations_take_the_designs_forms() {
 }
 
 #[test]
+fn a_call_takes_myotiss_call_tx_form_and_skips_colibri() {
+    // The daemon's own mapping of a Myotis call (`chain.rs`): a call reaches
+    // Myotis as `{ myotis: "call_tx", tx }`. Once Myotis fails, Colibri isn't
+    // asked, as it serves no call (main's #1046); Direct answers, unverified.
+    let mut t = test();
+    let mut config = chain_snapshot(&["myotis", "colibri", "direct"], &["a"]);
+    config["myotis"] = json!(true);
+    config["prover"] = json!({ "endpoint": "p1", "zk": true });
+    t.configure(json!([config]));
+    t.call(
+        2,
+        "chain.availability",
+        &json!({ "chain_id": 1, "ready": true }),
+    );
+    let address = "0x1111111111111111111111111111111111111111";
+    let tx = json!({ "to": address, "data": "0x" });
+    let (id, params) = read(3, "eth_call", json!([tx, "latest"]));
+    t.call(id, "chain.request", &params);
+    let op = requests(&t.written())[0].clone();
+    assert_eq!(op["method"], "shell.verified");
+    assert_eq!(
+        op["params"],
+        json!({ "myotis": "call_tx", "chain_id": 1, "tx": tx, "generation": 1 })
+    );
+    assert!(
+        t.answer(
+            op["id"].as_u64().unwrap(),
+            Ok(json!({ "failure": "not_ready" }))
+        )
+        .is_ok()
+    );
+    t.at(1);
+    let next = requests(&t.written())[0].clone();
+    assert_ne!(next["params"]["colibri"], "request", "{next}");
+    assert!(
+        t.answer(
+            next["id"].as_u64().unwrap(),
+            rpc_answer(r#"{"jsonrpc":"2.0","id":1,"result":"0x02"}"#)
+        )
+        .is_ok()
+    );
+    t.at(2);
+    let reply = t.written().into_iter().find(|f| f["id"] == 3).unwrap();
+    assert_eq!(reply["result"]["result"], "0x02", "{reply}");
+    assert_eq!(reply["result"]["verified"], false, "{reply}");
+}
+
+#[test]
 fn a_fee_reference_replies_in_its_form() {
     // Myotis first and ready: the reference asks it nothing. Colibri gives
     // the header; B asks the endpoints.
