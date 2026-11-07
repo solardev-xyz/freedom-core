@@ -842,6 +842,15 @@ impl Chain {
             };
             let io = queued.io;
             let kind = kind_of(&queued.request);
+            // The chain request it serves, by main's ID: it never goes once
+            // that request has ended (`retire`), so main still waits for it
+            // (freedom-core #285).
+            let serves: Vec<u64> = queued
+                .owner
+                .and_then(|owner| self.callers.get(&owner))
+                .map(|caller| caller.id)
+                .into_iter()
+                .collect();
             let clock = &self.clock;
             #[cfg(test)]
             let on_frame = &mut self.on_frame;
@@ -851,7 +860,7 @@ impl Chain {
                 &self.out,
                 || {
                     let (method, (params, deadline)) =
-                        shell_params(&queued.request, queued.generation);
+                        shell_params(&queued.request, queued.generation, &serves);
                     let frame = requests::request_frame(method, &params, deadline);
                     #[cfg(test)]
                     if let Some(on_frame) = on_frame.as_mut() {
@@ -1025,8 +1034,14 @@ impl Chain {
 /// A `shell.*` request's method, and its params with the generation it
 /// runs under. Where the design has a `deadline_ms`, the params have a slot
 /// for it, written as the request takes its slot at main
-/// ([`requests::RequestFrame`]), and where it starts comes with them.
-fn shell_params(request: &Request, generation: u64) -> (&'static str, (Vec<u8>, Option<usize>)) {
+/// ([`requests::RequestFrame`]), and where it starts comes with them. A
+/// verified operation also names the IDs of main's requests it serves,
+/// `serves`: the chain request that made it (freedom-core #285).
+fn shell_params(
+    request: &Request,
+    generation: u64,
+    serves: &[u64],
+) -> (&'static str, (Vec<u8>, Option<usize>)) {
     match request {
         Request::Rpc {
             endpoint,
@@ -1089,7 +1104,9 @@ fn shell_params(request: &Request, generation: u64) -> (&'static str, (Vec<u8>, 
             };
             (
                 "shell.verified",
-                op.number("generation", generation).finish_params(),
+                op.number("generation", generation)
+                    .numbers("serves", serves)
+                    .finish_params(),
             )
         }
         Request::Verified(VerifiedOp::MyotisBroadcast { chain_id, raw }) => (
@@ -1099,6 +1116,7 @@ fn shell_params(request: &Request, generation: u64) -> (&'static str, (Vec<u8>, 
                 .number("chain_id", *chain_id)
                 .string("raw", raw)
                 .number("generation", generation)
+                .numbers("serves", serves)
                 .finish_params(),
         ),
         Request::Verified(VerifiedOp::Colibri {
@@ -1115,6 +1133,7 @@ fn shell_params(request: &Request, generation: u64) -> (&'static str, (Vec<u8>, 
                 .raw("params", params)
                 .deadline_slot()
                 .number("generation", generation)
+                .numbers("serves", serves)
                 .finish_params(),
         ),
     }
@@ -2296,6 +2315,19 @@ impl Object {
     fn number(mut self, key: &str, value: u64) -> Self {
         self.key(key);
         self.json.extend_from_slice(value.to_string().as_bytes());
+        self
+    }
+
+    fn numbers(mut self, key: &str, values: &[u64]) -> Self {
+        self.key(key);
+        self.json.push(b'[');
+        for (i, value) in values.iter().enumerate() {
+            if i > 0 {
+                self.json.push(b',');
+            }
+            self.json.extend_from_slice(value.to_string().as_bytes());
+        }
+        self.json.push(b']');
         self
     }
 

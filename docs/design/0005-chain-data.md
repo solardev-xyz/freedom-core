@@ -149,6 +149,8 @@ Myotis and Colibri keep running in main through today's adapters, one whole oper
 | `{ myotis: "broadcast", chain_id, raw }` | `sendRawTransaction` | `{ hash }`, `{ rejected: { reason } }`, `{ rejected: { reason, code: -32602 } }`, `{ uncertain }`, `{ not_sent }` or `{ failure: class }` |
 | `{ colibri: "request", chain_id, method, params, deadline_ms }` | `requestViaColibri` | `{ result }`, `{ undefined_keys: ["result"] }`, `{ revert: { data } }`, `{ revert: { data }, capacity: true }` or `{ failure: class }`; a revert or a failure with `fault: true` beside it when it was a verifier fault |
 
+Each operation's params also carry its chain's `generation` and **`serves`** (freedom-core #285): `[<ID>]`, the ID main gave the chain request that made it. The chain thread never sends an operation once its request has ended (its queued I/O retires, 57-M2), so that request is still pending at main when the operation arrives. Main reads it as 0004 says ([Verified operations](0004-naming-sessions.md#verified-operations)): to run a Colibri read in the private session of a private window's request, exactly. It needs no negotiation, since main's executors read only the members they know.
+
 #### Myotis read outcomes
 
 - **`{ payload, block_before, block_after }`:** the adapter's JSON with 0004's snake_case keys, and `optimistic_block_number` before and after. The core runs `assertMyotisAnswer`'s classification on it: revert, refusal, infeasible, capability refusal, unavailable.

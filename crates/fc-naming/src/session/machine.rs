@@ -1132,6 +1132,23 @@ impl Machine {
         self.ctx.budget.borrow_mut().set_backlog(bytes);
     }
 
+    /// The callers outstanding request `id` serves now: those waiting on
+    /// the session whose current attempt made it, in the order they came
+    /// (freedom-core #285). A caller leaves the list as its reply is made
+    /// (a cancel, its own deadline, its attempts spent), so none listed has
+    /// been answered. Empty when none waits (they all left, and the session
+    /// runs on for its cache), or when no running attempt made the request.
+    pub fn callers_of(&self, id: u64) -> Vec<u64> {
+        let Some(owner) = self.ctx.rt.owner_of(id) else {
+            return Vec::new();
+        };
+        self.sessions
+            .iter()
+            .find(|session| session.owner == owner)
+            .map(|session| session.callers.iter().map(|caller| caller.id).collect())
+            .unwrap_or_default()
+    }
+
     /// The effects since the last call, each with its attempt's
     /// generations.
     pub fn take_effects(&mut self) -> Vec<Emitted> {

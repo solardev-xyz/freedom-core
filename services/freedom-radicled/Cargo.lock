@@ -946,7 +946,7 @@ dependencies = [
 
 [[package]]
 name = "fc-protocol"
-version = "0.12.1"
+version = "0.12.2"
 dependencies = [
  "base64 0.22.1",
  "serde",
@@ -957,7 +957,7 @@ dependencies = [
 
 [[package]]
 name = "fc-seal"
-version = "0.12.1"
+version = "0.12.2"
 dependencies = [
  "aes-gcm 0.11.1",
  "hpke",
@@ -968,7 +968,7 @@ dependencies = [
 
 [[package]]
 name = "fc-service"
-version = "0.12.1"
+version = "0.12.2"
 dependencies = [
  "fc-protocol",
  "fc-sys",
@@ -983,7 +983,7 @@ dependencies = [
 
 [[package]]
 name = "fc-sys"
-version = "0.12.1"
+version = "0.12.2"
 dependencies = [
  "libc",
  "windows-sys 0.61.2",
