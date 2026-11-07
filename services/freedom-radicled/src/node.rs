@@ -312,24 +312,31 @@ impl Node {
     /// What `rad.stats` reports of the node ([`crate::stats`]): its phase;
     /// while one runs, whether its thread still runs, the lock only tried,
     /// never waited for; the watch's last count of its peers; and NAT64
-    /// discovery's stats, while its lease is held. Under the phase's lock,
-    /// which nothing holds while it waits.
+    /// discovery's stats, while its lease is held, each list read to its
+    /// bound. The phase's lock, which nothing holds while it waits, is held
+    /// only for the phase, the tried liveness and a handle on discovery;
+    /// discovery is read after it is let go of.
     pub fn view(&self) -> stats::NodeView {
-        let phase = self.lock();
-        let (name, running) = match &*phase {
-            Phase::Waiting => (stats::Phase::Waiting, None),
-            Phase::Starting => (stats::Phase::Starting, None),
-            Phase::Running(running) => (stats::Phase::Running, Some(running)),
-            Phase::Down(running) => (stats::Phase::Down, Some(running)),
-            Phase::Over => (stats::Phase::Stopped, None),
+        let (name, alive, discovery) = {
+            let phase = self.lock();
+            let (name, running) = match &*phase {
+                Phase::Waiting => (stats::Phase::Waiting, None),
+                Phase::Starting => (stats::Phase::Starting, None),
+                Phase::Running(running) => (stats::Phase::Running, Some(running)),
+                Phase::Down(running) => (stats::Phase::Down, Some(running)),
+                Phase::Over => (stats::Phase::Stopped, None),
+            };
+            let discovery = running
+                .and_then(|running| running.nat64.as_ref())
+                .map(|(discovery, _)| discovery.clone());
+            (name, running.and_then(Running::alive), discovery)
         };
         stats::NodeView {
             phase: name,
-            alive: running.and_then(Running::alive),
+            alive,
             peers: self.peers(),
-            nat64: running
-                .and_then(|running| running.nat64.as_ref())
-                .map(|(discovery, _)| discovery.stats()),
+            nat64: discovery
+                .map(|discovery| discovery.stats(stats::NAT64_PREFIXES, stats::NAT64_FAILURES)),
         }
     }
 
@@ -1030,6 +1037,81 @@ mod tests {
             counted(Some(3), Some(Err(libradicle::Error::Cancelled))),
             None
         );
+    }
+
+    /// `rad.stats`'s view of a running node, with no watch: the liveness it
+    /// gives is `Running::alive`'s, tried on the node itself (alive, then
+    /// not once the node is stopped to completion while its phase still
+    /// says it runs, the second the watch would take to see it); and NAT64
+    /// discovery's lists, read to their bounds however many resolvers fail
+    /// (10,000 that can't be asked). A node reaching no one: isolated, its
+    /// gate held to loopback by the test hooks, so only with them.
+    #[cfg(feature = "testhooks")]
+    #[test]
+    fn the_view_tries_the_running_nodes_thread_and_bounds_nat64() {
+        use fc_nat64::resolvers::Learned;
+        let home = tempfile::tempdir().unwrap();
+        let mut seed = [7u8; 32];
+        let key = libradicle::HostKey::from_bytes(&mut seed).unwrap();
+        let routing = testhooks::routing(
+            dial::routing(
+                &NetworkPolicy::Direct,
+                &[],
+                dial::Nat64::fixed(Nat64State::NONE),
+            )
+            .unwrap(),
+        );
+        let embedded = libradicle::Embedded::start_with_key(
+            libradicle::Options {
+                home: home.path().to_path_buf(),
+                alias: "view".into(),
+                listen: vec![],
+                control_socket: false,
+                routing: Some(routing),
+                seeding_policy: Some(DefaultSeedingPolicy::Block),
+                isolated: true,
+                repositories: None,
+            },
+            key,
+        )
+        .unwrap();
+        let listed: Vec<Learned> = (0..10_000)
+            .map(|n| Learned::Unaskable(format!("fe80::{n:x}")))
+            .collect();
+        let discovery =
+            nat64::Discovery::new(Arc::new(move || listed.clone()), nat64::Timing::DESIGN);
+        let lease = discovery.lease();
+        let until = Instant::now() + Duration::from_secs(10);
+        while discovery.stats(0, 0)["state"] != "unknown" {
+            assert!(Instant::now() < until, "discovery never settled");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let node = Node::new(Arc::new(Pools::start().unwrap()));
+        *node.lock() = Phase::Running(Running {
+            embedded: Arc::new(RwLock::new(embedded)),
+            repositories: RepoGate::new(),
+            nat64: Some((discovery, lease)),
+        });
+
+        let view = node.view();
+        assert_eq!(view.phase, stats::Phase::Running);
+        assert_eq!(view.alive, Some(true));
+        let mut first = vec!["unaskable"; 8];
+        first.extend(vec!["over_limit"; 8]);
+        assert_eq!(
+            view.nat64,
+            Some(serde_json::json!({ "state": "unknown", "prefixes": [], "failures": first }))
+        );
+
+        // Stopped to completion, its phase left as it was.
+        if let Phase::Running(running) = &mut *node.lock() {
+            let stopped = running.ask_stop(Duration::from_secs(30)).unwrap();
+            assert_eq!(stopped.thread, libradicle::ThreadEnd::Stopped);
+        }
+        let view = node.view();
+        assert_eq!(view.phase, stats::Phase::Running);
+        assert_eq!(view.alive, Some(false));
+        *node.lock() = Phase::Over;
     }
 
     /// `rad.stats`'s view of a node that doesn't run: its phase, and

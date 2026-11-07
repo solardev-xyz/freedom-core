@@ -121,7 +121,8 @@ fn the_vectors_constants_are_the_services() {
         constants["unit_limit_ms"],
         crate::units::UNIT_LIMIT.as_millis() as u64
     );
-    assert_eq!(constants["nat64_prefixes"], Nat64State::MAX_PREFIXES);
+    assert_eq!(constants["nat64_prefixes"], NAT64_PREFIXES);
+    assert_eq!(NAT64_PREFIXES, Nat64State::MAX_PREFIXES);
     assert_eq!(constants["nat64_failures"], NAT64_FAILURES);
     assert_eq!(constants["max_result"], MAX_RESULT);
 }

@@ -193,22 +193,38 @@ impl Discovery {
     /// learned (`addr/len`), and why the last round's resolvers failed,
     /// each a fixed name (never an address).
     pub fn stats(&self) -> serde_json::Value {
-        let state = self.state();
-        let failures = self
+        self.stats_bounded(usize::MAX, usize::MAX)
+    }
+
+    /// [`Discovery::stats`] with at most `prefixes` prefixes and the first
+    /// `failures` failures (freedom-radicled's `rad.stats`): each list is
+    /// cut as it is read, under its own lock, so the work and the copy are
+    /// bounded however many resolvers the OS lists.
+    pub fn stats_bounded(&self, prefixes: usize, failures: usize) -> serde_json::Value {
+        let (name, prefixes) = {
+            let state = self
+                .shared
+                .state
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let listed: Vec<String> = state
+                .prefixes()
+                .iter()
+                .take(prefixes)
+                .map(|prefix| prefix.cidr().to_string())
+                .collect();
+            (state_name(&state), listed)
+        };
+        let failures: Vec<&'static str> = self
             .shared
             .failures
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .clone();
-        json!({
-            "state": state_name(&state),
-            "prefixes": state
-                .prefixes()
-                .iter()
-                .map(|prefix| prefix.cidr().to_string())
-                .collect::<Vec<_>>(),
-            "failures": failures,
-        })
+            .iter()
+            .take(failures)
+            .copied()
+            .collect();
+        json!({ "state": name, "prefixes": prefixes, "failures": failures })
     }
 
     /// Holds discovery running until the lease is dropped. The first lease
@@ -922,6 +938,43 @@ mod tests {
         ));
     }
 
+    /// However many resolvers the OS lists, a bounded read copies only the
+    /// first failures: 10,000 listed that can't be asked fail 10,000 times
+    /// (8 asked, the rest past the round's 8), and `stats_bounded` gives the
+    /// first 16, in order.
+    #[test]
+    fn bounded_stats_copy_only_the_first_failures() {
+        let listed: Vec<Learned> = (0..10_000)
+            .map(|n| Learned::Unaskable(format!("fe80::{n:x}")))
+            .collect();
+        // One round, then none for a minute: no later round's pending
+        // state comes between the reads.
+        let once = Timing {
+            floor: Duration::from_secs(60),
+            ceiling: Duration::from_secs(60),
+            backoff: Duration::from_secs(60),
+            ..FAST
+        };
+        let discovery = Discovery::new(Arc::new(move || listed.clone()), once, host());
+        let _lease = discovery.lease();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while discovery.state() != Nat64State::unknown([]) && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(discovery.state(), Nat64State::unknown([]));
+        assert_eq!(
+            discovery.stats()["failures"].as_array().unwrap().len(),
+            10_000
+        );
+        let mut first = vec!["unaskable"; MAX_RESOLVERS];
+        first.extend(vec!["over_limit"; 16 - MAX_RESOLVERS]);
+        assert_eq!(
+            discovery.stats_bounded(16, 16),
+            json!({ "state": "unknown", "prefixes": [], "failures": first })
+        );
+        assert_eq!(discovery.stats_bounded(16, 0)["failures"], json!([]));
+    }
+
     #[test]
     fn stats_give_the_state_its_prefixes_and_why_resolvers_failed() {
         let answers = Arc::new(Mutex::new(Some(vec!["2001:db8:64::"])));
@@ -942,6 +995,12 @@ mod tests {
         assert_eq!(
             discovery.stats(),
             json!({ "state": "known", "prefixes": ["2001:db8:64::/96"], "failures": [] })
+        );
+        // Bounded: the prefixes cut as they are read.
+        assert_eq!(discovery.stats_bounded(1, 0), discovery.stats());
+        assert_eq!(
+            discovery.stats_bounded(0, 16),
+            json!({ "state": "known", "prefixes": [], "failures": [] })
         );
         // Unknown, then unknown for another reason: the reasons follow the
         // last round, though the state doesn't change.

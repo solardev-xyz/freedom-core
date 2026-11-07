@@ -33,8 +33,12 @@
 //!   resolvers failed (`nat64::Discovery::stats`), or null.
 //!
 //! **Bounded:** every list is cut, NAT64's prefixes to the 16 a state holds
-//! ([`Nat64State::MAX_PREFIXES`]) and its failures to the first 16
-//! ([`NAT64_FAILURES`]), whatever the OS lists; every other member is a
+//! ([`NAT64_PREFIXES`]) and its failures to the first 16
+//! ([`NAT64_FAILURES`]), whatever the OS lists: as fc-nat64 reads them,
+//! under its own locks and outside the node's phase lock
+//! ([`crate::node::Node::view`]), so neither the copy nor the work grows
+//! with the OS's list, and again as the result is written. Every other
+//! member is a
 //! number, a fixed name or a unit's kind. So the result is at most 4 KiB,
 //! one frame (the tests hold its largest to it). It reserves nothing from
 //! the output budget: it reports it, and must answer while the budget is
@@ -54,6 +58,9 @@ use radicle::storage::git::reconcile::quarantine::Quarantine;
 use serde_json::{Map, Value, json};
 
 use crate::pools::Usage;
+
+/// The most NAT64 prefixes reported: as many as a state holds.
+pub const NAT64_PREFIXES: usize = Nat64State::MAX_PREFIXES;
 
 /// The most NAT64 failures reported, the first of the last round's.
 pub const NAT64_FAILURES: usize = 16;
@@ -89,7 +96,8 @@ pub struct NodeView {
     pub alive: Option<bool>,
     /// The watch's last count of its peers.
     pub peers: Option<usize>,
-    /// NAT64 discovery's stats, while its lease is held (`direct` mode).
+    /// NAT64 discovery's stats, while its lease is held (`direct` mode),
+    /// each list read to its bound.
     pub nat64: Option<Value>,
 }
 
@@ -119,17 +127,27 @@ fn millis(duration: Duration) -> u64 {
     u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
 }
 
-/// `nat64`'s stats, every list cut to its bound.
-fn bounded_nat64(mut nat64: Value) -> Value {
-    for (list, bound) in [
-        ("prefixes", Nat64State::MAX_PREFIXES),
-        ("failures", NAT64_FAILURES),
-    ] {
-        if let Some(items) = nat64.get_mut(list).and_then(Value::as_array_mut) {
-            items.truncate(bound);
-        }
-    }
-    nat64
+/// `nat64`'s stats, every list cut to its bound, copying no more of it.
+fn bounded_nat64(nat64: &Value) -> Value {
+    let Some(members) = nat64.as_object() else {
+        return Value::Null;
+    };
+    let members: Map<String, Value> = members
+        .iter()
+        .map(|(member, value)| {
+            let bound = match member.as_str() {
+                "prefixes" => Some(NAT64_PREFIXES),
+                "failures" => Some(NAT64_FAILURES),
+                _ => None,
+            };
+            let value = match (bound, value.as_array()) {
+                (Some(bound), Some(items)) => items.iter().take(bound).cloned().collect(),
+                _ => value.clone(),
+            };
+            (member.clone(), value)
+        })
+        .collect();
+    Value::Object(members)
 }
 
 /// `rad.stats`'s result for `snapshot` (see the module's doc).
@@ -153,7 +171,7 @@ pub fn result(snapshot: &Snapshot) -> Value {
         })
         .collect();
     let nat64 = match (&node.nat64, running) {
-        (Some(nat64), true) => bounded_nat64(nat64.clone()),
+        (Some(nat64), true) => bounded_nat64(nat64),
         _ => Value::Null,
     };
     json!({
