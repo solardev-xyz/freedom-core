@@ -280,95 +280,35 @@ pub fn repository_with_wide_tree(
     (rid, commit.to_string())
 }
 
-/// A tree of `entries` (a name, its mode, its object), then of entries with
-/// long names, each naming `filler`, to `size` bytes, give or take 36: an
-/// entry is its mode in octal, a space, its name, a NUL and its 20-byte ID.
-/// The long names are `fill` repeated after an 8-digit count, so the tree
-/// has few entries and compresses well.
-fn tree_to(
-    repo: &git2::Repository,
-    entries: &[(&str, i32, git2::Oid)],
-    size: u64,
-    fill: char,
-    filler: git2::Oid,
-) -> git2::Oid {
-    let cost = |mode: i32, name: usize| (format!("{mode:o}").len() + name + 22) as u64;
-    let mut builder = repo.treebuilder(None).unwrap();
-    let mut bytes = 0;
-    for &(name, mode, oid) in entries {
-        builder.insert(name, oid, mode).unwrap();
-        bytes += cost(mode, name.len());
-    }
-    let mut n = 0;
-    while size.saturating_sub(bytes) >= cost(0o100644, 8) {
-        let name = usize::try_from(size - bytes - cost(0o100644, 0))
-            .unwrap()
-            .min(60_000);
-        let long = format!("{n:08}{}", fill.to_string().repeat(name - 8));
-        builder.insert(&long, filler, 0o100644).unwrap();
-        bytes += cost(0o100644, name);
-        n += 1;
-    }
-    builder.write().unwrap()
-}
-
-/// Imports a repository into `home` as `seed`'s identity whose one commit,
-/// its root tree and the tree `dir` under it are each `size` bytes, give or
-/// take 36, with `dir/file.txt` of `content`: the commit by its message,
-/// each tree by entries with long names ([`tree_to`]). Its commit's ID.
-pub fn repository_with_large_walk(
-    home: &Path,
-    seed: &[u8; 32],
-    name: &str,
-    size: u64,
-    content: &[u8],
-) -> (RepoId, String) {
-    let work = tempfile::tempdir().unwrap();
-    let repo = git2::Repository::init(work.path()).unwrap();
+/// A commit written straight into `rid`'s repository in `home`'s storage,
+/// on no ref, whose tree nests a tree `d` `depth` times, each tree with a
+/// file `f` of `content`: `d/…/d/f` is there at every depth up to `depth`.
+/// Its ID. Written in storage rather than imported: libgit2's own walks of
+/// a tree recurse, and the import's packing is one.
+pub fn deep_commit(home: &Path, rid: RepoId, depth: usize, content: &[u8]) -> String {
+    let repo = git2::Repository::open_bare(storage_of(home, rid)).unwrap();
     let file = repo.blob(content).unwrap();
-    let dir = tree_to(
-        &repo,
-        &[("file.txt", 0o100644, file)],
-        size,
-        'd',
-        repo.blob(b"d\n").unwrap(),
-    );
-    let root = tree_to(
-        &repo,
-        &[("dir", 0o040000, dir)],
-        size,
-        'r',
-        repo.blob(b"r\n").unwrap(),
-    );
-    let tree = repo.find_tree(root).unwrap();
+    let mut tree = {
+        let mut builder = repo.treebuilder(None).unwrap();
+        builder.insert("f", file, 0o100644).unwrap();
+        builder.write().unwrap()
+    };
+    for _ in 0..depth {
+        let mut builder = repo.treebuilder(None).unwrap();
+        builder.insert("d", tree, 0o040000).unwrap();
+        builder.insert("f", file, 0o100644).unwrap();
+        tree = builder.write().unwrap();
+    }
+    let tree = repo.find_tree(tree).unwrap();
     let signature = git2::Signature::new(
         "Fixture",
         "fixture@example.invalid",
         &git2::Time::new(1_700_000_000, 0),
     )
     .unwrap();
-    // A commit of a one-byte message gives the rest's size, then the
-    // message makes up the difference.
-    let probe = repo
-        .commit(None, &signature, &signature, "m", &tree, &[])
-        .unwrap();
-    let rest = repo.odb().unwrap().read_header(probe).unwrap().0 as u64 - 1;
-    let message = "m".repeat(usize::try_from(size - rest).unwrap());
-    let commit = repo
-        .commit(
-            Some("refs/heads/master"),
-            &signature,
-            &signature,
-            &message,
-            &tree,
-            &[],
-        )
-        .unwrap();
-    let rid = with_node(home, seed, |node| {
-        node.import_repo(work.path(), name, "A fixture.", "master")
-            .unwrap()
-    });
-    (rid, commit.to_string())
+    repo.commit(None, &signature, &signature, "Deep", &tree, &[])
+        .unwrap()
+        .to_string()
 }
 
 /// `rid`'s repository in `home`'s storage.

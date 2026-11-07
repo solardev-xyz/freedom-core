@@ -6,9 +6,10 @@
 //! reserved before it is allocated, and released when it is freed:
 //! - a [`Reservation`] holds its bytes until it drops, or gives part of
 //!   them back first ([`Reservation::release`]), or splits them
-//!   ([`Reservation::split`]): a blob's is twice its size while it loads
-//!   ([`BLOB_LOADING`]), then its range's, a chunk's share released as
-//!   each is written ([`Body::copied`]);
+//!   ([`Reservation::split`]): a blob's is twice its size and libgit2's
+//!   few bytes beside it while it loads ([`BLOB_LOADING`]), then its
+//!   range's, a chunk's share released as each is written
+//!   ([`Body::copied`]);
 //! - **a reservation that doesn't fit waits,** inside its read's deadline
 //!   to the head ([`Until`]). It is granted once enough is released, and is
 //!   `deadline` at the deadline, or `cancelled` once its token is: main's
@@ -83,9 +84,10 @@ pub const JSON_READ: u64 = BUILT + JSON;
 /// The largest blob a read serves (`rad.blob`).
 pub const BLOB: u64 = 64 << 20;
 
-/// What a blob of [`BLOB`] reserves while it loads: libgit2's buffer and
-/// the service's copy.
-pub const BLOB_LOADING: u64 = 2 * BLOB;
+/// What a blob of [`BLOB`] reserves while it loads: what libgit2 holds of
+/// it (`libradicle::raw_held`: its bytes in a buffer one byte longer, and
+/// its structs) and libradicle's copy.
+pub const BLOB_LOADING: u64 = libradicle::raw_held(BLOB) + BLOB;
 
 /// How often a reservation that waits looks at its token, which nothing
 /// signals: a cancel is seen within this.

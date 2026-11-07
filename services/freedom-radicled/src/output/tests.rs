@@ -88,7 +88,8 @@ fn the_designs_figures() {
     assert_eq!(BUILT, 32 << 20);
     assert_eq!(JSON_READ, 64 << 20);
     assert_eq!(BLOB, 64 << 20);
-    assert_eq!(BLOB_LOADING, 128 << 20);
+    // Twice the blob, and libgit2's NUL and 256 bytes of structs.
+    assert_eq!(BLOB_LOADING, (128 << 20) + 257);
     assert_eq!(Budget::new(BUDGET).total(), BUDGET);
     assert_eq!(
         READ,

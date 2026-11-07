@@ -81,6 +81,23 @@ fn rad_blob_takes_its_params() {
     }
 }
 
+/// Review of #277, round 2: a path of more than libradicle's
+/// `MAX_TREE_DEPTH` components is `invalid_argument`, as `rad.read`'s; one
+/// at the limit is taken.
+#[test]
+fn a_path_past_the_depth_limit_is_invalid_argument() {
+    let at = vec!["d"; libradicle::MAX_TREE_DEPTH].join("/");
+    let past = vec!["d"; libradicle::MAX_TREE_DEPTH + 1].join("/");
+    assert_eq!(
+        checked(with(json!({ "path": at.clone() }))).unwrap().path,
+        at
+    );
+    assert_eq!(
+        message(checked(with(json!({ "path": past })))),
+        "path has more than 4096 components"
+    );
+}
+
 /// 0008, "Errors": a range, or any param, that doesn't parse is
 /// `invalid_argument`. A range has exactly one shape's members, each a
 /// non-negative integer, and a closed one's `start` is at most its `end`.
@@ -205,17 +222,26 @@ fn a_range_is_normalized_against_the_size() {
     }
 }
 
-/// The walk's reservation, three objects of the add-on's 16 MiB (the
-/// commit, a tree and the next), and a blob's while it loads, never less
-/// than the walk's.
+/// The walk's reservation and loads, `rad.read`'s 32 MiB (review of #277,
+/// round 2), and a blob's while it loads: twice its size and libgit2's 257
+/// bytes beside it, never less than the walk's.
 #[test]
 fn the_figures() {
-    assert_eq!(WALK, 48 << 20);
+    assert_eq!(WALK, 32 << 20);
+    assert_eq!(
+        walk(&Until::new(
+            std::time::Instant::now(),
+            libradicle::CancelToken::new()
+        ))
+        .loads,
+        WALK
+    );
     assert_eq!(loading(BLOB), BLOB_LOADING);
     assert_eq!(loading(BLOB - 1), BLOB_LOADING - 2);
-    assert_eq!(loading(25 << 20), 50 << 20);
-    assert_eq!(loading(24 << 20), WALK);
-    assert_eq!(loading(16 << 20), WALK);
+    assert_eq!(loading(25 << 20), (50 << 20) + 257);
+    // 2 × (16 MiB − 129) + 257 is a byte under the walk's.
+    assert_eq!(loading((16 << 20) - 129), WALK);
+    assert_eq!(loading((16 << 20) - 128), WALK + 1);
     assert_eq!(loading(1), WALK);
     assert_eq!(loading(0), WALK);
 }

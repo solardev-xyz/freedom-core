@@ -34,7 +34,8 @@ fc-service = { path = "../../crates/fc-service" }
 # The sealed release of the node key (0008, "The sealed release"): the
 # service's X25519 key for one start, and opening what the core sealed to it.
 fc-seal = { path = "../../crates/fc-seal" }
-# libradicle at `integration/rust-core` (5969d84), built with `no-spawn`,
+# libradicle at `integration/rust-core` (5969d84) with #32 (9d1639a), until
+# #32 merges and the pin moves to its merge, built with `no-spawn`,
 # explicitly (0008, "Spawn and lock"): serving runs in process and `git gc`
 # is skipped. It carries the upstream changes 0008 lists for the service's
 # first steps: the routing, `isolated` and `control_socket` options, the
@@ -50,10 +51,18 @@ fc-seal = { path = "../../crates/fc-seal" }
 # asked, how the node's thread ended and the home apart (`Shutdown`). And
 # R-19's fix (libradicle #31): a commit's diff that isn't UTF-8 is decoded
 # lossily, and serialized without a `Value` copy, instead of panicking, and
-# an alias Radicle refuses is `Error::Alias`. Pinned by commit until those
+# an alias Radicle refuses is `Error::Alias`. And #32: a bounded walk charges
+# each tree and commit what libgit2 holds of it once parsed, and the walk to
+# a file is bounded (`blob_header_bounded`, `read_blob_at_bounded`), for
+# `rad.blob` (freedom-core #277, round 2). Pinned by commit until those
 # changes are released (deny.toml allows solardev-xyz).
 # src/build_info.rs reports the same commit.
-libradicle = { git = "https://github.com/solardev-xyz/libradicle", rev = "5969d84c8f3c78ba8b3e064ebe289d9502f963dd", features = ["no-spawn"] }
+libradicle = { git = "https://github.com/solardev-xyz/libradicle", rev = "9d1639a9eff9ef8dfc53628cc72c3496546e39e9", features = ["no-spawn"] }
+# libgit2's process-wide options, which heartwood's `radicle::git::raw`
+# doesn't re-export: the object cache turned off (src/reads.rs, `uncache`),
+# and the probe of it. Already in libradicle's graph, at its version and with
+# its features (none of the defaults).
+git2 = { version = "0.21", default-features = false }
 # heartwood's `radicle`, at the commit libradicle pins, so that both resolve
 # to one package (build_info's test holds them to one commit): the node
 # identity's public forms (`did:key`, the node ID), and, from the next step,

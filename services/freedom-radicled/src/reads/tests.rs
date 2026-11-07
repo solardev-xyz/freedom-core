@@ -231,6 +231,48 @@ fn what_doesnt_parse_is_invalid_argument() {
     }
 }
 
+/// Review of #277, round 2: a path of more than libradicle's
+/// `MAX_TREE_DEPTH` components is `invalid_argument` in each op that takes
+/// one, before anything opens the repository; one at the limit is taken,
+/// as is one whose empty components (as libradicle skips them) leave it at
+/// the limit.
+#[test]
+fn a_path_past_the_depth_limit_is_invalid_argument() {
+    let at = vec!["d"; MAX_TREE_DEPTH].join("/");
+    let past = vec!["d"; MAX_TREE_DEPTH + 1].join("/");
+    let padded = format!("/{}//", vec!["d"; MAX_TREE_DEPTH].join("//"));
+    let message = format!("path has more than {MAX_TREE_DEPTH} components");
+    for (name, rev) in [
+        ("tree", false),
+        ("tree_at", true),
+        ("blob", false),
+        ("blob_at", true),
+    ] {
+        let args = |path: &str| {
+            if rev {
+                json!({ "rid": RID, "revision": REV, "path": path })
+            } else {
+                json!({ "rid": RID, "path": path })
+            }
+        };
+        for path in [&at, &padded] {
+            assert!(read(name, args(path)).is_ok(), "{name}");
+        }
+        let error = read(name, args(&past)).unwrap_err();
+        assert_eq!(error.code, ErrorCode::InvalidArgument, "{name}");
+        assert_eq!(error.message, message, "{name}");
+    }
+    assert_eq!(MAX_TREE_DEPTH, 4096);
+}
+
+/// libgit2's object cache as the probe sees it: on in this process, which
+/// no `main` has run in (`main` turns it off, which `tests/process.rs`
+/// checks through the binary).
+#[test]
+fn the_probe_sees_the_object_cache() {
+    assert!(object_cache_on().unwrap());
+}
+
 /// The composed ops, and those of main's serialization, take their args
 /// by name: a COB ID as libradicle checks it, refused with its text; a
 /// page's `status`, `page` and `per_page` as strings or null.

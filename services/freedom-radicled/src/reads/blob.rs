@@ -14,7 +14,10 @@
 //! none.
 //!
 //! **Its params:** a RID, a revision of 40 lowercase hex digits, as main
-//! checks it, and a path, as `blob_at` takes it. `range` is absent or null,
+//! checks it, and a path, as `blob_at` takes it, of at most libradicle's
+//! `MAX_TREE_DEPTH` components, 4096, as `rad.read`'s paths
+//! ([`super::path`]): each component is a tree the walk loads, so a longer
+//! path is refused before the repository is opened. `range` is absent or null,
 //! or one of ([`Range`]):
 //! - `{ start, end }`, both inclusive, `start` at most `end`;
 //! - `{ start }`, to the blob's end;
@@ -30,9 +33,10 @@
 //! 2. the fence ([`super::fenced`]): `rad.blob` isn't a COB op, so only a
 //!    `namespace` quarantine refuses it, `quarantined`, as `blob_at`;
 //! 3. the blob's header ([`header`]): its path resolved at the commit as
-//!    `blob_at` resolves it, each object on the way (the commit and the
-//!    trees) at most the add-on's 16 MiB (`BINDING_READ_BUDGET`), within
-//!    [`WALK`] reserved from the output budget, three such objects; the
+//!    `blob_at` resolves it, within [`WALK`] reserved from the output
+//!    budget: libradicle charges the commit and each tree on the way what
+//!    libgit2 holds of it once parsed, from its header, before it loads it,
+//!    all of them within `WALK`, and stops the walk at the read's token; the
 //!    blob's ID and size from its object header. Anything that isn't a blob
 //!    (a directory, a submodule) is `blob_at`'s `NotABlob`; libradicle's
 //!    errors are `not_found` or `failed` by today's message test, with its
@@ -44,10 +48,11 @@
 //!    `range_not_satisfiable`, with `data.size`, when it is outside the
 //!    blob.
 //!
-//! **Then the bytes:** the blob is loaded with libradicle's capped read at
-//! its size, within twice its size reserved ([`BLOB_LOADING`] at most;
-//! never less than [`WALK`], for the walk the load makes again), as
-//! libgit2's buffer and libradicle's copy both exist while it loads. The
+//! **Then the bytes:** the blob is loaded with libradicle's bounded read at
+//! its size, within what libgit2 holds of it and libradicle's copy
+//! reserved, both held while it loads ([`loading`], [`BLOB_LOADING`] at
+//! most; never less than [`WALK`], for the walk the load makes again, within
+//! the same bounds, whose objects are dropped before the blob loads). The
 //! range is copied out of it in chunks of at most 64 KiB, each holding its
 //! own share of that reservation, and the rest is released with the
 //! loaded copy: from then on the read holds its range, each chunk released
@@ -65,24 +70,31 @@ use std::sync::Arc;
 
 use fc_protocol::error::{ErrorBody, ErrorCode};
 use fc_service::conn::Connection;
-use libradicle::{BINDING_READ_BUDGET, BlobHeader, Embedded};
+use libradicle::{BlobHeader, Bounds, Embedded};
 use radicle::prelude::RepoId;
 use serde::Deserialize;
 use serde_json::value::RawValue;
 use serde_json::{Value, json};
 
-use super::{fenced, invalid, parse, radicle_error, refuse, revision, rid, stream};
+use super::{fenced, invalid, parse, path, radicle_error, refuse, revision, rid, stream};
 use crate::node::{Handle, Node};
-use crate::output::{BLOB, BLOB_LOADING, Body, Budget, Failure, Refused, Until};
+use crate::output::{BLOB, BLOB_LOADING, BUILT, Body, Budget, Failure, Refused, Until};
 use crate::pools::{Ticket, Work};
 use crate::testhooks;
 
-/// What a blob's walk may hold: the objects on the way to it, each at most
-/// the add-on's 16 MiB by its header, three at once. libradicle's walk (its
-/// `blob_header_in`, at the pinned commit) keeps the commit loaded until it
-/// returns, and loads each tree on the path before it drops the one above
-/// it: the commit, a tree and the next one.
-pub const WALK: u64 = 3 * BINDING_READ_BUDGET;
+/// What a blob's walk may hold, and its loads' bounds: the loads of
+/// `rad.read`'s walks, [`BUILT`], so that the walk to a blob in a directory
+/// `tree_at` lists fits as that listing's does.
+///
+/// libradicle charges the commit and every tree on the way what libgit2
+/// holds of it once parsed (`libradicle::commit_held`, about three times a
+/// commit's size; `libradicle::tree_held`, up to about 4.4 times a tree's,
+/// for a tree of the shortest entries), from its header before it loads
+/// it, each object and all of them together within this (review of #277,
+/// round 2). The walk holds only objects it has charged, the commit and a
+/// tree or two at once, and frees each as it drops it, since libgit2's
+/// object cache is off ([`super::uncache`]): so it holds at most this.
+pub const WALK: u64 = BUILT;
 
 /// `rad.blob`'s params.
 #[derive(Deserialize)]
@@ -186,7 +198,7 @@ fn request(params: Option<&RawValue>) -> Result<Request, ErrorBody> {
     Ok(Request {
         rid: rid(&p.rid)?,
         revision: revision(p.revision, "revision")?,
-        path: p.path,
+        path: path(p.path)?,
         range,
         head_only: p.head_only.unwrap_or(false),
     })
@@ -221,30 +233,34 @@ pub fn span(range: Option<Range>, size: u64) -> Result<Option<Span>, ErrorBody> 
     Ok(Some(Span { start, end }))
 }
 
-/// What a blob of `size` bytes reserves while it loads: twice its size, as
-/// libgit2's buffer and libradicle's copy both exist; never less than
-/// [`WALK`], for the walk its load makes again; at most [`BLOB_LOADING`],
-/// since it is at most [`BLOB`].
+/// What a blob of `size` bytes reserves while it loads: what libgit2 holds
+/// of it (`libradicle::raw_held`: its bytes, a NUL and its structs) and
+/// libradicle's copy, both held while it copies; never less than [`WALK`],
+/// for the walk its load makes again; at most [`BLOB_LOADING`], since it is
+/// at most [`BLOB`].
 fn loading(size: u64) -> u64 {
-    size.saturating_mul(2).clamp(WALK, BLOB_LOADING)
+    libradicle::raw_held(size)
+        .saturating_add(size)
+        .clamp(WALK, BLOB_LOADING)
+}
+
+/// The bounds of a blob's walk: [`WALK`] of loads, and the read's token.
+/// The JSON budget isn't the walk's: it builds none.
+fn walk(until: &Until) -> Bounds {
+    Bounds::new(until.cancel.clone(), WALK).with_loads(WALK)
 }
 
 /// The blob at `path` in `revision`: its ID and size, from its object
-/// header, with none of it loaded (see the module's doc).
-///
-/// libradicle's `blob_header` bounds none of the objects on the way to the
-/// blob, so the path is resolved first by its capped read at a cap of 0:
-/// it walks to the blob as `blob_at` does, each object on the way at most
-/// `BINDING_READ_BUDGET`, with `blob_at`'s errors, and refuses any blob
-/// that isn't empty from its header (`TooLarge` with a limit of 0) before
-/// loading it. The revision is a commit ID, so `blob_header` then walks the
-/// same objects, every one known to fit.
-fn header(node: &Embedded, rid: RepoId, revision: &str, path: &str) -> Result<BlobHeader, Failure> {
-    match node.read_blob_at_capped(rid, revision, path, 0) {
-        Ok(_) | Err(libradicle::Error::TooLarge { limit: 0, .. }) => {}
-        Err(e) => return Err(e.into()),
-    }
-    Ok(node.blob_header(rid, revision, path)?)
+/// header, with none of it loaded, the walk to it within `bounds` (see the
+/// module's doc), with `blob_at`'s errors.
+fn header(
+    node: &Embedded,
+    rid: RepoId,
+    revision: &str,
+    path: &str,
+    bounds: &Bounds,
+) -> Result<BlobHeader, Failure> {
+    Ok(node.blob_header_bounded(rid, revision, path, bounds)?)
 }
 
 /// What a read answers before its body: the head, and the body, if it has
@@ -261,9 +277,10 @@ fn serve(
     until: &Until,
     r: &Request,
 ) -> Result<Served, Failure> {
-    let walk = budget.reserve(WALK, until)?;
-    let BlobHeader { oid, size } = header(&handle.node(), r.rid, &r.revision, &r.path)?;
-    drop(walk);
+    let bounds = walk(until);
+    let walking = budget.reserve(WALK, until)?;
+    let BlobHeader { oid, size } = header(&handle.node(), r.rid, &r.revision, &r.path, &bounds)?;
+    drop(walking);
     if size > BLOB {
         return Err(Refused::TooLarge { size, limit: BLOB }.into());
     }
@@ -278,7 +295,7 @@ fn serve(
     let mut held = budget.reserve(loading(size), until)?;
     let blob = handle
         .node()
-        .read_blob_at_capped(r.rid, &r.revision, &r.path, size)?;
+        .read_blob_at_bounded(r.rid, &r.revision, &r.path, size, &bounds)?;
     if blob.content.len() as u64 != size {
         return Err(Failure::Internal(
             "a blob's content isn't its header's size",

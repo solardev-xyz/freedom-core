@@ -19,7 +19,8 @@
 //!    (`libradicle::isolate_git_config`, libradicle item 9), while the
 //!    process has one thread: no git configuration outside a repository
 //!    applies, and confinement, which leaves `/etc/gitconfig` unreadable,
-//!    fails no repository's open;
+//!    fails no repository's open; then libgit2's object cache turned off
+//!    ([`reads::uncache`]), so that nothing a read loads outlives its walk;
 //! 4. the arguments, `--network` among them;
 //! 5. the environment main cleared, checked ([`env`]);
 //! 6. the gate, `<lock-dir>/radicle-<sha256(canonical home)>.lock`, before
@@ -121,7 +122,14 @@ fn main() -> ExitCode {
     // reconciliation's among them, starts from `serve`, after this returns.
     let isolated = unsafe { libradicle::isolate_git_config() };
     let exit = match isolated {
-        Ok(git_config) => run(started, &entry, git_config),
+        Ok(git_config) => {
+            // libgit2's object cache off, another process-wide option, set
+            // while the process still has one thread: so that what a read
+            // loads is freed with its walk (`reads::uncache`).
+            reads::uncache();
+            testhooks::object_cache();
+            run(started, &entry, git_config)
+        }
         Err(e) => {
             log::error(
                 "cannot isolate libgit2 from git configuration",

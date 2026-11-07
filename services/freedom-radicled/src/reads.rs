@@ -36,7 +36,10 @@
 //!    on, `busy` past its bounds;
 //! 2. params that don't parse, read at admission and answered by the work:
 //!    `invalid_argument`. That is an op 0008 doesn't list, args it doesn't
-//!    take, a RID, or a revision or `parent` that isn't 40 lowercase hex;
+//!    take, a RID, or a revision or `parent` that isn't 40 lowercase hex,
+//!    and a path (`tree`, `tree_at`, `blob`, `blob_at`) of more than
+//!    libradicle's `MAX_TREE_DEPTH` components, 4096 ([`path`]): each is a
+//!    tree its walk would load;
 //! 3. **the fence** ([`fence`]), for an op that names a repository:
 //!    - quarantined at the gate: `quarantined`, with `data.kind` and
 //!      `data.step` from the record ([`crate::quarantine::refusal`]), for
@@ -57,7 +60,10 @@
 //! **The build and its JSON** ([`crate::output::json_read`]) reserve from
 //! the process's output budget before they allocate, inside the read's
 //! deadline and its token: the walk's whole 32 MiB first, then the JSON in
-//! 64 KiB steps, at most 32 MiB of it. A read past a cap is `too_large`; one
+//! 64 KiB steps, at most 32 MiB of it. libradicle charges each commit and
+//! tree a walk loads what libgit2 holds of it once parsed, from its header
+//! (`libradicle::commit_held`, `libradicle::tree_held`), and libgit2's
+//! object cache, which would keep them past the walk, is off ([`uncache`]). A read past a cap is `too_large`; one
 //! whose deadline ends a wait is `deadline`. One whose token is cancelled,
 //! in a wait or in its walk, is answered by whoever cancelled it: main's
 //! cancel `cancelled`, the timer `deadline`, the stop `stopped`. The
@@ -101,7 +107,7 @@ use std::time::Duration;
 
 use fc_protocol::error::{ErrorBody, ErrorCode};
 use fc_service::conn::{Connection, Headed};
-use libradicle::{BINDING_MAX_PER_PAGE, Blob, Bounds, json};
+use libradicle::{BINDING_MAX_PER_PAGE, Blob, Bounds, MAX_TREE_DEPTH, json};
 use radicle::git::raw::{ErrorClass as GitClass, ErrorCode as GitCode};
 use radicle::node::gate::{self, RepoGate, RepoState};
 use radicle::prelude::RepoId;
@@ -125,6 +131,40 @@ pub use blob::blob;
 
 /// How often a body waiting for credit looks at its token.
 const POLL: Duration = Duration::from_millis(10);
+
+/// Turns libgit2's object cache off, for the whole process (0008, "Pools
+/// and budgets"). With it on, every commit and tree under 4 KiB that a
+/// repository handle loads stays parsed in its cache until the handle
+/// closes, against a limit of 256 MiB counted in the objects' bytes, not in
+/// what their parse holds: past any read's reservation. With it off, what a
+/// walk loads is freed once the walk drops it, so a walk holds at most what
+/// libradicle has charged it.
+///
+/// Nothing in the service needs the cache: heartwood's node, its fetches,
+/// the reconciliation, the repairs, the writes and the reads all read
+/// objects through libgit2 the same way with it off, each object read from
+/// the object database again where it would have been found in the cache.
+/// The packs' own delta-base caches aren't this option's, and stay.
+///
+/// libgit2 keeps the option in a global it reads unlocked, as it does its
+/// search paths: `main` sets it once, before any thread can use libgit2.
+pub fn uncache() {
+    git2::opts::enable_caching(false);
+}
+
+/// Whether libgit2's object cache keeps what a repository loads: whether a
+/// tree looked up twice, in a repository held in memory, is one object.
+#[cfg(any(test, feature = "testhooks"))]
+pub fn object_cache_on() -> Result<bool, git2::Error> {
+    use git2::{Binding as _, ObjectType, Odb, Repository};
+    let odb = Odb::new()?;
+    odb.add_new_mempack_backend(1)?;
+    let repo = Repository::from_odb(odb)?;
+    let tree = repo.odb()?.write(ObjectType::Tree, &[])?;
+    let first = repo.find_tree(tree)?;
+    let second = repo.find_tree(tree)?;
+    Ok(first.raw() == second.raw())
+}
 
 /// `rad.read`'s params.
 #[derive(Deserialize)]
@@ -352,6 +392,20 @@ fn rid(rid: &str) -> Result<RepoId, ErrorBody> {
     RepoId::from_str(rid).map_err(|_| invalid("rid isn't a repository ID"))
 }
 
+/// A path of at most libradicle's `MAX_TREE_DEPTH` components (4096, git's
+/// own default `core.maxTreeDepth`), as libradicle walks a path: `/` its
+/// separator, empty components skipped. Each component is a tree the walk
+/// loads, so a longer one is refused here, before the repository is opened
+/// (0008, "Pools and budgets"; deviation `path-depth`).
+fn path(path: String) -> Result<String, ErrorBody> {
+    if path.split('/').filter(|c| !c.is_empty()).count() > MAX_TREE_DEPTH {
+        return Err(invalid(&format!(
+            "path has more than {MAX_TREE_DEPTH} components"
+        )));
+    }
+    Ok(path)
+}
+
 /// A full commit ID, as main checks it: 40 lowercase hex digits.
 fn revision(revision: String, what: &str) -> Result<String, ErrorBody> {
     let hex = revision
@@ -407,7 +461,7 @@ fn op(params: Option<&RawValue>) -> Result<Op, ErrorBody> {
             let a: PathArgs = args(given, "tree takes { rid, path }")?;
             Ok(Op::Tree {
                 rid: rid(&a.rid)?,
-                path: a.path,
+                path: path(a.path)?,
             })
         }
         "tree_at" => {
@@ -415,14 +469,14 @@ fn op(params: Option<&RawValue>) -> Result<Op, ErrorBody> {
             Ok(Op::TreeAt {
                 rid: rid(&a.rid)?,
                 revision: revision(a.revision, "revision")?,
-                path: a.path,
+                path: path(a.path)?,
             })
         }
         "blob" => {
             let a: PathArgs = args(given, "blob takes { rid, path }")?;
             Ok(Op::Blob {
                 rid: rid(&a.rid)?,
-                path: a.path,
+                path: path(a.path)?,
             })
         }
         "blob_at" => {
@@ -430,7 +484,7 @@ fn op(params: Option<&RawValue>) -> Result<Op, ErrorBody> {
             Ok(Op::BlobAt {
                 rid: rid(&a.rid)?,
                 revision: revision(a.revision, "revision")?,
-                path: a.path,
+                path: path(a.path)?,
             })
         }
         "commits" => {
