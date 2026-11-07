@@ -224,7 +224,10 @@ fn a_source_that_isnt_unicode_grants_nothing() {
     let work = root.join("work");
     std::fs::create_dir_all(work.join(".git")).unwrap();
     let source = Source::find(work.as_os_str(), &[]);
-    assert_eq!(source.granted(), std::slice::from_ref(&work));
+    let granted: Vec<&Path> = source.granted().iter().map(|r| r.path()).collect();
+    assert_eq!(granted, [work.as_path()]);
+    // Found again, the same: the canonical source, for libradicle.
+    assert_eq!(source.verify().unwrap(), work);
     // A protected root inside it: nothing granted, and the reason kept.
     let source = Source::find(work.as_os_str(), &[work.join(".git")]);
     assert!(source.granted().is_empty());

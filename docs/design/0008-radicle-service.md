@@ -653,12 +653,17 @@ All bounds are process-wide. The service hosts one node.
   - This mirrors 0005's uncertain broadcasts.
 - **Import, in a one-shot process** ([0010](0010-service-confinement.md)'s D5, decided by the user):
   - **The process:** main stops the service and runs `freedom-radicled import --home … --lock-dir … --source <path> [--protected <dir>]…`. It takes the home's gate, confines itself to the repository's checked roots, and answers `rad.hello`, `rad.identity`, `rad.reconcile` and `rad.import_repo`, in that order. It exits after the import's answer, and main starts the service again. [0010](0010-service-confinement.md) gives its roots, grant, admission rule and bounds; anything else is `unknown_method`.
-  - **Before its start, every refusal is definitive,** in this order: params that aren't an object of the four strings (`invalid_argument`); a throwaway key (`needs_vault`); a `path` that isn't `--source` (`invalid_argument`); a layout that can't be granted (`unsupported_layout`); what libradicle's `Import::prepare` refuses: an argument Radicle refuses or a branch the working copy lacks (`invalid_argument`), a repository already in storage (`failed`, "`<rid>` already exists in storage", which main's bridge reads as already bridged), the working copy's open (`not_found` or `failed`, by today's message test); then main's cancel (`cancelled`) or the connection's end (`stopped`). A `rad.import_repo` before `rad.reconcile` has succeeded is `stopped`, and the process goes on; a second, once one is admitted, is `invalid_argument`.
+  - **Before its start, every refusal is definitive,** in this order: params that aren't an object of the four strings (`invalid_argument`); a throwaway key (`needs_vault`); a `path` that isn't `--source` (`invalid_argument`); a layout that can't be granted (`unsupported_layout`); roots that changed since they were checked, found again once confined (`unsupported_layout`); what libradicle's `Import::prepare` refuses: an argument Radicle refuses or a branch the working copy lacks (`invalid_argument`), a repository already in storage (`failed`, "`<rid>` already exists in storage", which main's bridge reads as already bridged), the working copy's open (`not_found` or `failed`, by today's message test); then main's cancel (`cancelled`) or the connection's end (`stopped`). A `rad.import_repo` before `rad.reconcile` has succeeded is `stopped`, and the process goes on; a second, once one is admitted, is `invalid_argument`.
   - **The start** is claimed in one step with main's cancel (the connection's commit point) and the connection's end. Past it, main's cancel queues nothing, and only a success is proven.
   - `rad.import_repo` creates the repository in storage and fetches the working copy's default branch into the node's namespace with libgit2's local transport, then signs the refs ([upstream](#upstream-changes)). It runs on storage, without a running node; the node announces the repository with its inventory at its next start.
   - libgit2 runs no hooks, uses no helpers, and reads no configuration that could send it to the network: it has no global or system configuration ([Spawn](#spawn-and-lock)), and its source is a local path.
   - The working copy is read, never written: it gets no `rad` remote (deviation `import-in-process`).
-  - A kill or the deadline during an import ends the process, and with it the import. Reconciliation at the service's next start handles the partial repository, and the reply is `outcome_unknown`. libradicle builds the repository in a temporary clone and moves it into place last, so the partial repository is a temporary clone, which reconciliation always removes. A libradicle error or a panic past the start is answered `outcome_unknown` by the process itself, and the marker stays.
+  - **The roots are bound to the directories checked,** not to their names ([0010](0010-service-confinement.md)'s D5): each is held open from its check, Landlock's rules are made from those handles, and once confined, just before libradicle opens the working copy, the roots are found again and compared by canonical path and identity. libradicle opens the verified canonical source, never `path` as given. What remains is the limit `import-recheck` ([Limits](#limits)).
+  - A kill or the deadline during an import ends the process, and with it the import, and the reply is `outcome_unknown`. libradicle builds the repository in a temporary clone and moves it into place last, so what a cut-off import leaves depends on which side of the move it stopped:
+    - **before the move,** only the temporary clone (`<rid>.tmp`), which reconciliation at the service's next start removes;
+    - **after it,** the whole repository, signed and seeded, with no temporary clone, which reconciliation finds valid. A later import of the same working copy is refused as already in storage.
+
+    So storage holds a complete repository or none, and main sees `outcome_unknown` either way. A libradicle error or a panic past the start is answered `outcome_unknown` by the process itself, and the marker stays.
 
 ## The blob API
 
@@ -1388,6 +1393,14 @@ Measured against the add-on on linux-x64, macOS arm64 and win-x64:
 | `address-policy` | none | untrusted targets refused unless globally reachable unicast, with IPv6 forms that embed IPv4 judged by their IPv4 address (0007) | configured local seeds still work |
 | `address-families` | as `config.json` and the default features allow | IPv4, IPv6, DNS and onion dialled; I2P decoded, never dialled; every routing field set in memory | a conflicting `config.json` can't change routing |
 | `health` | none | `rad.stats` every 5 s | a dead node is noticed and restarted |
+
+## Limits
+
+What the service doesn't close, by name:
+
+| ID | What remains | Why it is accepted |
+|---|---|---|
+| `import-recheck` | The import process checks its roots again once confined, just before libgit2 opens the working copy, by canonical path and identity. Between that check and libgit2's own opens (`Import::prepare`'s, then the local transport's for the fetch, milliseconds later), the source's directories or its `.git` file, `commondir` or alternates could be swapped by name. libgit2 then reads what the names name: on Linux only what Landlock grants, which is the checked roots, the Radicle home and the process's own `HOME`; on macOS, whose Seatbelt rules are by path, whatever is at the checked paths; on Windows, which has no file confinement yet, anything. | Only a local process running with the user's own rights, racing the import on purpose, can use it, and such a process can already read the Radicle storage and the user's files directly. |
 
 ## Implementation steps
 

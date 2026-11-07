@@ -1,16 +1,17 @@
-//! Windows calls: storage qualification, error reporting, and
-//! confinement's job object and process mitigation policies (design 0010,
-//! "Windows").
+//! Windows calls: storage qualification, error reporting, a file's
+//! identity, and confinement's job object and process mitigation policies
+//! (design 0010, "Windows").
 //!
 //! None of these calls closes a handle but [`Job`]'s own, which it owns.
 
 use std::io;
-#[cfg(feature = "test-windows")]
-use std::os::windows::io::BorrowedHandle;
-use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
+use std::os::windows::io::{AsRawHandle, BorrowedHandle, FromRawHandle, OwnedHandle};
 
 use windows_sys::Win32::Foundation::HANDLE;
-use windows_sys::Win32::Storage::FileSystem::GetDriveTypeW;
+use windows_sys::Win32::Storage::FileSystem::{
+    BY_HANDLE_FILE_INFORMATION, FILE_ID_INFO, FileIdInfo, GetDriveTypeW,
+    GetFileInformationByHandle, GetFileInformationByHandleEx,
+};
 use windows_sys::Win32::System::Diagnostics::Debug::{
     SEM_FAILCRITICALERRORS, SEM_NOGPFAULTERRORBOX, SEM_NOOPENFILEERRORBOX, SetErrorMode,
 };
@@ -50,6 +51,53 @@ pub fn drive_type(root: &[u16]) -> u32 {
     // for the whole call; GetDriveTypeW only reads it and keeps no
     // reference.
     unsafe { GetDriveTypeW(root.as_ptr()) }
+}
+
+/// The size of `FILE_ID_INFO`, as `GetFileInformationByHandleEx` takes it.
+const FILE_ID_INFO_SIZE: u32 = size_of::<FILE_ID_INFO>() as u32;
+const _: () = assert!(size_of::<FILE_ID_INFO>() <= u32::MAX as usize);
+
+/// The identity of the file `file` is open on, among every file of the
+/// machine's volumes: its volume's serial number and its 128-bit file ID
+/// (`GetFileInformationByHandleEx`, `FileIdInfo`), which ReFS needs whole. A
+/// file system that doesn't give it fails the call, and [`file_index`]
+/// serves there.
+#[allow(unsafe_code)]
+pub fn file_id(file: BorrowedHandle<'_>) -> io::Result<(u64, u128)> {
+    let mut info = FILE_ID_INFO::default();
+    // SAFETY: `info` is a whole FILE_ID_INFO of FILE_ID_INFO_SIZE bytes,
+    // borrowed mutably for the call, which writes at most that many; the
+    // handle is open for its borrow, and one that isn't a file's fails the
+    // call.
+    let ok = unsafe {
+        GetFileInformationByHandleEx(
+            file.as_raw_handle(),
+            FileIdInfo,
+            (&raw mut info).cast(),
+            FILE_ID_INFO_SIZE,
+        )
+    };
+    win32(ok)?;
+    Ok((
+        info.VolumeSerialNumber,
+        u128::from_le_bytes(info.FileId.Identifier),
+    ))
+}
+
+/// [`file_id`] as every file system gives it (`GetFileInformationByHandle`):
+/// the volume's 32-bit serial number and the 64-bit file index, widened.
+#[allow(unsafe_code)]
+pub fn file_index(file: BorrowedHandle<'_>) -> io::Result<(u64, u128)> {
+    let mut info = BY_HANDLE_FILE_INFORMATION::default();
+    // SAFETY: `info` is a whole BY_HANDLE_FILE_INFORMATION, borrowed mutably
+    // for the call, which writes only it; the handle is open for its
+    // borrow, and one that isn't a file's fails the call.
+    let ok = unsafe { GetFileInformationByHandle(file.as_raw_handle(), &raw mut info) };
+    win32(ok)?;
+    Ok((
+        u64::from(info.dwVolumeSerialNumber),
+        (u128::from(info.nFileIndexHigh) << 32) | u128::from(info.nFileIndexLow),
+    ))
 }
 
 /// No fault dialog, and no heap in Windows Error Reporting's reports, for
@@ -353,6 +401,29 @@ mod tests {
         ));
         let unterminated: Vec<u16> = "C:\\".encode_utf16().collect();
         assert_eq!(drive_type(&unterminated), DRIVE_UNKNOWN);
+    }
+
+    #[test]
+    fn a_file_s_identity_is_its_own_and_survives_a_rename() {
+        use std::os::windows::io::AsHandle;
+        let dir = std::env::temp_dir().join(format!("fc-sys-file-id-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let (one, two) = (dir.join("one"), dir.join("two"));
+        std::fs::write(&one, b"one").unwrap();
+        std::fs::write(&two, b"two").unwrap();
+        let ids = |path: &std::path::Path| {
+            let file = std::fs::File::open(path).unwrap();
+            (
+                file_id(file.as_handle()).unwrap(),
+                file_index(file.as_handle()).unwrap(),
+            )
+        };
+        let (id, index) = ids(&one);
+        assert_ne!(ids(&two), (id, index));
+        let renamed = dir.join("renamed");
+        std::fs::rename(&one, &renamed).unwrap();
+        assert_eq!(ids(&renamed), (id, index));
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

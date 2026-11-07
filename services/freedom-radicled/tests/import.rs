@@ -18,7 +18,15 @@
 //!   reconciliation past its cutoff, or still running, imports nothing;
 //! - a kill, the deadline (exit 70) or a panic during an import: the marker
 //!   stays, no process is left, and the service's next start removes the
-//!   temporary clone.
+//!   temporary clone; a kill after the move leaves the whole repository,
+//!   which the next start finds valid, and a second import refuses;
+//! - the roots are bound to the directories checked: the source swapped,
+//!   or redirected (itself, its `.git` file, `commondir`, alternates) into
+//!   a tree the process always may write (its own `HOME`, the Radicle
+//!   home), at the confinement point or once the import is admitted, is
+//!   `unsupported_layout` with nothing imported;
+//! - a FIFO, or a symlink to one, at any file discovery reads is
+//!   `unsupported_layout` at once, never waited on.
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
@@ -893,4 +901,339 @@ fn other_methods_are_unknown_to_the_import_process() {
     assert_eq!(radicled.exit_code(Duration::from_secs(15)), Some(0));
     // No import started: the home is as reconciliation left it.
     assert_eq!(fixture::marked(&dirs.home), None);
+}
+
+/// The import's own text for roots found again that aren't those checked.
+const CHANGED: &str = "the repository's directories changed after they were checked";
+
+/// Where a test changes the source: at the confinement point (after the
+/// roots are found and checked, before the rules), or once the import is
+/// admitted (on its thread, before libradicle opens the working copy).
+#[derive(Debug, Clone, Copy)]
+enum When {
+    Confinement,
+    Admitted,
+}
+
+/// A working copy at `dir`, with one commit on `master`: a decoy.
+fn decoy(dir: &Path) -> PathBuf {
+    let repo = git2::Repository::init(dir).unwrap();
+    commit(&repo, dir, "# Decoy\n");
+    dir.to_path_buf()
+}
+
+/// Imports `source` while `change` alters it at `when`, given the home;
+/// asserts the import is refused as changed, with nothing imported.
+fn refused_when_changed(source: &Path, when: When, change: impl FnOnce(&Dirs)) {
+    let dirs = ready();
+    let reply = match when {
+        When::Confinement => {
+            let (hold, release) = dirs.held("until", "confined");
+            let mut radicled = Radicled::import(
+                &dirs,
+                source,
+                &[],
+                &[("FREEDOM_RADICLED_TEST_HOLD_CONFINE", hold.as_str())],
+            );
+            assert!(radicled.logs("test hook: the confinement point holds", READ_TIMEOUT));
+            change(&dirs);
+            std::fs::write(&release, "").unwrap();
+            radicled.reconciled();
+            let reply = radicled.call("rad.import_repo", params(source));
+            refused(
+                &mut radicled,
+                &dirs,
+                &reply,
+                "unsupported_layout",
+                Some(CHANGED),
+            );
+            reply
+        }
+        When::Admitted => {
+            let (hold, release) = dirs.held("admitted@until", "admitted");
+            let mut radicled = Radicled::import(
+                &dirs,
+                source,
+                &[],
+                &[("FREEDOM_RADICLED_TEST_HOLD_IMPORT", hold.as_str())],
+            );
+            radicled.reconciled();
+            let id = radicled.request("rad.import_repo", params(source));
+            assert!(radicled.logs("test hook: the import holds at a stage", READ_TIMEOUT));
+            change(&dirs);
+            std::fs::write(&release, "").unwrap();
+            let reply = radicled.reply(id);
+            refused(
+                &mut radicled,
+                &dirs,
+                &reply,
+                "unsupported_layout",
+                Some(CHANGED),
+            );
+            assert!(!radicled.stderr().contains("the import has started"));
+            reply
+        }
+    };
+    assert_eq!(
+        reply["error"]["code"], "unsupported_layout",
+        "{when:?}: {reply}"
+    );
+}
+
+#[test]
+fn the_source_swapped_or_redirected_after_its_check_is_refused() {
+    for when in [When::Confinement, When::Admitted] {
+        // Another directory at the same path: the same names, another
+        // directory, which was never checked.
+        let work = working_copy();
+        let other = working_copy();
+        refused_when_changed(&work.source, when, |_| {
+            std::fs::rename(&work.source, work.root.join("checked")).unwrap();
+            std::fs::rename(&other.source, &work.source).unwrap();
+        });
+
+        // The source itself, a symlink into the process's own `HOME`.
+        #[cfg(unix)]
+        {
+            let work = working_copy();
+            refused_when_changed(&work.source, when, |dirs| {
+                let decoy = decoy(&dirs.own_home.join("decoy"));
+                std::fs::rename(&work.source, work.root.join("checked")).unwrap();
+                std::os::unix::fs::symlink(&decoy, &work.source).unwrap();
+            });
+        }
+
+        // Its `.git` file, naming a git directory in the process's own
+        // `HOME`.
+        let work = working_copy();
+        let gitdir = work.root.join("elsewhere.git");
+        std::fs::rename(work.source.join(".git"), &gitdir).unwrap();
+        std::fs::write(
+            work.source.join(".git"),
+            format!("gitdir: {}\n", gitdir.display()),
+        )
+        .unwrap();
+        refused_when_changed(&work.source, when, |dirs| {
+            let decoy = decoy(&dirs.own_home.join("decoy"));
+            std::fs::write(
+                work.source.join(".git"),
+                format!("gitdir: {}\n", decoy.join(".git").display()),
+            )
+            .unwrap();
+        });
+
+        // A linked worktree's `commondir`, naming a repository in the
+        // Radicle home.
+        let work = working_copy();
+        let linked = work.root.join("linked");
+        git2::Repository::open(&work.source)
+            .unwrap()
+            .worktree("linked", &linked, None)
+            .unwrap();
+        let commondir = work.source.join(".git/worktrees/linked/commondir");
+        assert!(commondir.is_file());
+        refused_when_changed(&linked, when, |dirs| {
+            let decoy = decoy(&dirs.home.join("decoy"));
+            std::fs::write(&commondir, format!("{}\n", decoy.join(".git").display())).unwrap();
+        });
+
+        // Alternates, naming a repository's objects in the Radicle home.
+        let work = working_copy();
+        refused_when_changed(&work.source, when, |dirs| {
+            let decoy = decoy(&dirs.home.join("decoy"));
+            let info = work.source.join(".git/objects/info");
+            std::fs::create_dir_all(&info).unwrap();
+            std::fs::write(
+                info.join("alternates"),
+                format!("{}\n", decoy.join(".git/objects").display()),
+            )
+            .unwrap();
+        });
+    }
+}
+
+/// A FIFO at `at`.
+#[cfg(unix)]
+fn fifo(at: &Path) {
+    let made = std::process::Command::new("mkfifo")
+        .arg(at)
+        .status()
+        .unwrap();
+    assert!(made.success());
+}
+
+#[cfg(unix)]
+#[test]
+fn a_fifo_at_any_file_discovery_reads_is_refused_at_once() {
+    // Each file the roots are found from, in a layout that reaches it: the
+    // `.git` file, a linked worktree's `commondir`, an alternates file.
+    let layouts: [(&str, fn(&Work) -> (PathBuf, PathBuf)); 3] = [
+        ("the `.git` file", |work| {
+            let gitdir = work.root.join("elsewhere.git");
+            std::fs::rename(work.source.join(".git"), &gitdir).unwrap();
+            (work.source.clone(), work.source.join(".git"))
+        }),
+        ("`commondir`", |work| {
+            let linked = work.root.join("linked");
+            git2::Repository::open(&work.source)
+                .unwrap()
+                .worktree("linked", &linked, None)
+                .unwrap();
+            let commondir = work.source.join(".git/worktrees/linked/commondir");
+            std::fs::remove_file(&commondir).unwrap();
+            (linked, commondir)
+        }),
+        ("an alternates file", |work| {
+            let info = work.source.join(".git/objects/info");
+            std::fs::create_dir_all(&info).unwrap();
+            (work.source.clone(), info.join("alternates"))
+        }),
+    ];
+    for (what, layout) in layouts {
+        for linked in [false, true] {
+            let work = working_copy();
+            let (source, file) = layout(&work);
+            if linked {
+                let elsewhere = work.root.join("fifo");
+                fifo(&elsewhere);
+                std::os::unix::fs::symlink(&elsewhere, &file).unwrap();
+            } else {
+                fifo(&file);
+            }
+            let dirs = ready();
+            let mut radicled = Radicled::import(&dirs, &source, &[], &[]);
+            // The guard: the roots are found before confinement, before any
+            // watchdog. A process that opened the FIFO to read it would wait
+            // for a writer, and never get here.
+            assert!(
+                radicled.logs(r#""msg":"importing""#, Duration::from_secs(30)),
+                "{what} (a symlink: {linked}): the process waited: {}",
+                radicled.stderr()
+            );
+            radicled.reconciled();
+            let reply = radicled.call("rad.import_repo", params(&source));
+            refused(&mut radicled, &dirs, &reply, "unsupported_layout", None);
+            let message = reply["error"]["message"].as_str().unwrap();
+            assert!(message.contains("isn't a regular file"), "{what}: {reply}");
+        }
+    }
+}
+
+#[test]
+fn a_kill_after_the_move_leaves_the_whole_repository() {
+    let dirs = ready();
+    // The home as main's import finds it: its service ran, and was stopped
+    // for the import. The node's start made the COB cache's tables, which
+    // the next start's reconciliation rebuilds the imported repository's
+    // cache into.
+    let mut service = Radicled::serve(&dirs, &[]);
+    let started = service.start();
+    assert!(started["result"].is_object(), "{started}");
+    service.shutdown();
+    assert_eq!(service.exit_code(EXIT_TIMEOUT), Some(0));
+    let work = working_copy();
+    let (hold, _release) = dirs.held("moved@until", "never");
+    let mut radicled = Radicled::import(
+        &dirs,
+        &work.source,
+        &[],
+        &[("FREEDOM_RADICLED_TEST_HOLD_IMPORT", hold.as_str())],
+    );
+    radicled.reconciled();
+    radicled.request("rad.import_repo", params(&work.source));
+    assert!(radicled.logs("test hook: the import holds at a stage", READ_TIMEOUT));
+    radicled.child.kill().unwrap();
+    radicled.child.wait().unwrap();
+    let log = radicled.stderr();
+    let started: Value = log
+        .lines()
+        .find(|line| line.contains("the import has started"))
+        .map(|line| serde_json::from_str(line).unwrap())
+        .unwrap_or_else(|| panic!("{log}"));
+    let rid: RepoId = started["rid"].as_str().unwrap().parse().unwrap();
+    // Past the move: the whole repository, under its ID, and no temporary
+    // clone. Main saw no answer: `outcome_unknown`, and the marker stays.
+    assert_eq!(storage(&dirs), [rid.canonical()]);
+    assert_eq!(fixture::marked(&dirs.home), Some(vec![NID.to_owned()]));
+    check_imported(&dirs, rid, work.tip);
+
+    // The service's start reconciles: nothing to remove or re-sign, and it
+    // serves the repository.
+    let mut service = Radicled::serve(&dirs, &[]);
+    let hello = service.hello();
+    service.call("rad.identity", sealed_to(&hello, &SEED));
+    let reconciled = service.call("rad.reconcile", json!({}));
+    assert_eq!(reconciled["result"]["was_dirty"], true, "{reconciled}");
+    assert_eq!(
+        reconciled["result"]["repaired"]["clones"], 0,
+        "{reconciled}"
+    );
+    assert_eq!(
+        reconciled["result"]["repaired"]["resigned"], 0,
+        "{reconciled}"
+    );
+    assert_eq!(
+        reconciled["result"]["quarantined"]["count"], 0,
+        "{reconciled}"
+    );
+    let started = service.call("rad.start", json!({ "alias": "restarted" }));
+    assert!(started["result"].is_object(), "{started}");
+    let info = service.read("repo_info", json!({ "rid": rid.to_string() }));
+    let info: Value = serde_json::from_slice(&info.unwrap()).unwrap();
+    assert_eq!(info["head"], work.tip.to_string(), "{info}");
+    service.shutdown();
+    assert_eq!(service.exit_code(EXIT_TIMEOUT), Some(0));
+    assert_eq!(fixture::marked(&dirs.home), None);
+    check_imported(&dirs, rid, work.tip);
+
+    // A second import of it is refused: it is in storage.
+    let mut radicled = Radicled::import(&dirs, &work.source, &[], &[]);
+    radicled.reconciled();
+    let reply = radicled.call("rad.import_repo", params(&work.source));
+    assert_eq!(reply["error"]["code"], "failed", "{reply}");
+    assert_eq!(
+        reply["error"]["message"],
+        format!("{rid} already exists in storage")
+    );
+    assert_eq!(radicled.exit_code(EXIT_TIMEOUT), Some(0));
+    assert_eq!(storage(&dirs), [rid.canonical()]);
+}
+
+/// libradicle opens the verified canonical source, never `path` as main
+/// gave it: a symlink in that path, retargeted once the roots are found
+/// again, changes nothing.
+#[cfg(unix)]
+#[test]
+fn libradicle_opens_the_checked_source_never_the_path_as_given() {
+    let dirs = ready();
+    let work = working_copy();
+    // Main names the source through a symlinked directory.
+    let via = work.root.join("via");
+    std::os::unix::fs::symlink(&work.root, &via).unwrap();
+    let source = via.join("work");
+    let (hold, release) = dirs.held("verified@until", "verified");
+    let mut radicled = Radicled::import(
+        &dirs,
+        &source,
+        &[],
+        &[("FREEDOM_RADICLED_TEST_HOLD_IMPORT", hold.as_str())],
+    );
+    radicled.reconciled();
+    let id = radicled.request("rad.import_repo", params(&source));
+    assert!(radicled.logs("test hook: the import holds at a stage", READ_TIMEOUT));
+    // The symlink now names another working copy, in the process's own
+    // `HOME`, which it may read.
+    let decoys = dirs.own_home.join("decoys");
+    let decoy = decoy(&decoys.join("work"));
+    let decoy_tip = git2::Repository::open(&decoy)
+        .unwrap()
+        .refname_to_id("refs/heads/master")
+        .unwrap();
+    std::fs::remove_file(&via).unwrap();
+    std::os::unix::fs::symlink(&decoys, &via).unwrap();
+    std::fs::write(&release, "").unwrap();
+    let rid = rid_of(&radicled.reply(id));
+    assert_eq!(radicled.exit_code(EXIT_TIMEOUT), Some(0));
+    assert_ne!(decoy_tip, work.tip);
+    check_imported(&dirs, rid, work.tip);
 }

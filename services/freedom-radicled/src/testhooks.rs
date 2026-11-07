@@ -100,8 +100,10 @@
 //! - `FREEDOM_RADICLED_TEST_IMPORT_LIMIT_MS` replaces the import process's
 //!   300 s for `rad.import_repo` from its admission ([`crate::import`]).
 //! - `FREEDOM_RADICLED_TEST_HOLD_IMPORT=<stage>@<hold>` holds the import at
-//!   `<stage>`: `admitted`, on its thread before libradicle's checks and
-//!   the start; `start`, just past its start, before libradicle's call; or
+//!   `<stage>`: `admitted`, on its thread before the roots are found again
+//!   and libradicle's checks and the start; `verified`, once the roots are
+//!   found again and match, just before libradicle opens the working copy;
+//!   `start`, just past its start, before libradicle's call; or
 //!   `created`, `fetched`, `signed`, `seeded` or `moved` (the repository in
 //!   place, before the storage directory's flush), each once libradicle has
 //!   done that durable step. `<hold>` is a number of milliseconds,
@@ -109,6 +111,11 @@
 //!   it is set, each stage reached logs `test hook: the import reached a
 //!   stage`, and the held one `test hook: the import holds at a stage`,
 //!   each with its `stage`.
+//! - `FREEDOM_RADICLED_TEST_HOLD_CONFINE=until:<path>` holds the process
+//!   at its confinement point, after the import's roots are found and
+//!   checked and before the rules, until a file exists at `<path>` or for
+//!   30 s, logging `test hook: the confinement point holds`: still the one
+//!   thread, opening nothing, so a test can change the source there.
 //! - `FREEDOM_RADICLED_TEST_HOLD_END=until:<path>` holds the import
 //!   process's end, once it has closed an import not yet started to any
 //!   start, until a file exists at `<path>` or for 4 s (within the
@@ -189,8 +196,21 @@ pub fn at_unit_start(kind: &str) {
     let _ = kind;
 }
 
-/// At the confinement point: logs the process's thread count when asked.
+/// At the confinement point: holds the process there, single-threaded and
+/// opening nothing, if asked; then logs the process's thread count when
+/// asked.
 pub fn at_confinement_point() {
+    #[cfg(feature = "testhooks")]
+    if let Some(release) = std::env::var("FREEDOM_RADICLED_TEST_HOLD_CONFINE")
+        .ok()
+        .and_then(|hold| hold.strip_prefix("until:").map(str::to_owned))
+    {
+        fc_service::log::info(
+            "test hook: the confinement point holds",
+            serde_json::json!({}),
+        );
+        until_released(&release);
+    }
     #[cfg(all(feature = "testhooks", target_os = "linux"))]
     if std::env::var_os("FREEDOM_RADICLED_TEST_THREADS").is_some() {
         let threads = std::fs::read_dir("/proc/self/task").map_or(0, Iterator::count);

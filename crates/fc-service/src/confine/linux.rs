@@ -345,6 +345,16 @@ fn restrict(policy: &Policy, abi: ABI) -> Result<(), Refused> {
             ))
             .map_err(rules)?;
     }
+    // From the directories held open, never their paths: the rule is the
+    // directory's that was checked, whatever its name now names.
+    for dir in &policy.read_only_dirs {
+        created = created
+            .add_rule(PathBeneath::new(
+                dir.file(),
+                (AccessFs::ReadFile | AccessFs::ReadDir) & AccessFs::from_all(abi),
+            ))
+            .map_err(rules)?;
+    }
     if let (Network::Socks5 { port, .. }, true) = (policy.network, abi >= ABI::V4) {
         created = created
             .add_rule(NetPort::new(port, AccessNet::ConnectTcp))
@@ -527,6 +537,7 @@ mod tests {
         Policy {
             read_write: Vec::new(),
             read_only: Vec::new(),
+            read_only_dirs: Vec::new(),
             refer: false,
             min_abi: 1,
             network,

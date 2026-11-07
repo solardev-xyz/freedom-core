@@ -107,6 +107,7 @@ fn child(case: &str) {
     let policy = Policy {
         read_write: Vec::new(),
         read_only: Vec::new(),
+        read_only_dirs: Vec::new(),
         refer: false,
         min_abi: 1,
         network: Network::Direct,

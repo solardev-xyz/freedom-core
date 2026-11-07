@@ -17,7 +17,7 @@
 use std::io;
 use std::path::{Path, PathBuf};
 
-use fc_service::confine::{self, Invalid, Policy, Report};
+use fc_service::confine::{self, Invalid, OpenDir, Policy, Report};
 use fc_service::network::NetworkPolicy;
 
 /// The lowest Landlock ABI the service's file rules work under: `refer`
@@ -70,6 +70,7 @@ impl Grant {
         Policy {
             read_write: vec![self.home.clone(), self.own_home.clone()],
             read_only: if direct { nat64_grants() } else { Vec::new() },
+            read_only_dirs: Vec::new(),
             refer: true,
             min_abi: MIN_ABI,
             network: network.confinement(),
@@ -107,13 +108,21 @@ fn nat64_grants() -> Vec<PathBuf> {
 impl Grant {
     /// The import process's policy (design 0010, D5): the same two
     /// directories read and write, with `refer`; `roots`, the working
-    /// copy's checked roots, read only; and no network: no TCP rule (ABI
-    /// 4), seccomp refusing every socket family, and nothing granted for
-    /// name resolution or NAT64 discovery.
-    pub fn import_policy(&self, roots: &[PathBuf], descriptors: Vec<i32>) -> Policy {
+    /// copy's checked roots, read only, each from the directory held open
+    /// (its descriptor kept with `descriptors`, the gate's lock); and no
+    /// network: no TCP rule (ABI 4), seccomp refusing every socket family,
+    /// and nothing granted for name resolution or NAT64 discovery.
+    pub fn import_policy(&self, roots: &[OpenDir], descriptors: Vec<i32>) -> Policy {
+        #[cfg(unix)]
+        let descriptors = {
+            let mut descriptors = descriptors;
+            descriptors.extend(roots.iter().map(OpenDir::descriptor));
+            descriptors
+        };
         Policy {
             read_write: vec![self.home.clone(), self.own_home.clone()],
-            read_only: roots.to_vec(),
+            read_only: Vec::new(),
+            read_only_dirs: roots.to_vec(),
             refer: true,
             min_abi: MIN_ABI,
             network: confine::Network::Offline,
@@ -170,9 +179,18 @@ mod tests {
     fn the_import_reads_its_roots_alone_and_has_no_network() {
         let dir = tempfile::tempdir().unwrap();
         let grant = Grant::open(dir.path(), dir.path()).unwrap();
-        let roots = vec![PathBuf::from("/work"), PathBuf::from("/elsewhere.git")];
+        let base = std::fs::canonicalize(dir.path()).unwrap();
+        for name in ["work", "elsewhere.git"] {
+            std::fs::create_dir(base.join(name)).unwrap();
+        }
+        let roots = vec![
+            OpenDir::open(&base.join("work")).unwrap(),
+            OpenDir::open(&base.join("elsewhere.git")).unwrap(),
+        ];
         let policy = grant.import_policy(&roots, vec![3]);
-        assert_eq!(policy.read_only, roots);
+        // By the directories held open, nothing by path.
+        assert_eq!(policy.read_only_dirs, roots);
+        assert!(policy.read_only.is_empty());
         assert_eq!(
             policy.read_write,
             grant.policy(&NetworkPolicy::Direct, vec![]).read_write
@@ -181,6 +199,13 @@ mod tests {
         assert_eq!(policy.resolver, confine::Resolver::None);
         assert!(policy.refer && !policy.interface_index);
         assert_eq!(policy.min_abi, MIN_ABI);
+        // The gate's lock, and each root's descriptor.
+        #[cfg(unix)]
+        assert_eq!(
+            policy.descriptors,
+            vec![3, roots[0].descriptor(), roots[1].descriptor()]
+        );
+        #[cfg(not(unix))]
         assert_eq!(policy.descriptors, vec![3]);
     }
 }

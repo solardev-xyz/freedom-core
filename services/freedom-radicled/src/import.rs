@@ -4,11 +4,24 @@
 //!
 //! **Before the connection** ([`crate::main`]), as `serve` does: the gate,
 //! then the working copy's roots, found from the source's own files without
-//! libgit2 and checked against main's protected roots ([`roots`]), then
-//! confinement to them: read only on exactly those roots, read and write on
-//! the home and the service's own `HOME`, and no network
+//! libgit2, each held open with its identity, and checked against main's
+//! protected roots ([`roots`]), then confinement to them: read only on
+//! exactly those roots (on Linux, Landlock's rules made from the
+//! directories held open, never their paths), read and write on the home
+//! and the service's own `HOME`, and no network
 //! ([`crate::confine::Grant::import_policy`]). A layout that can't be
 //! granted grants no root, and is refused at `rad.import_repo`.
+//!
+//! **The roots again,** once confined: just before libradicle opens the
+//! working copy, they are found again from `--source` and compared with
+//! those checked and granted, each by its canonical path and identity
+//! ([`Source::verify`]). Any difference is `unsupported_layout`, with
+//! nothing changed, and libradicle opens the verified canonical source,
+//! never `path` as given. What remains is the moment between that check
+//! and libgit2's own opens (0008's limit `import-recheck`): a local process
+//! with the user's rights that races on purpose, and could read the
+//! storage directly anyway. On macOS, whose Seatbelt rules are by path,
+//! this check is what binds the import to the directories checked.
 //!
 //! **The methods,** in order: `rad.hello`, `rad.identity` and
 //! `rad.reconcile`, as at a start ([`crate::steps`]), then
@@ -28,21 +41,26 @@
 //! (`needs_vault`: main refuses it first, by the generation's identity);
 //! `path` that isn't `--source`, exactly (`invalid_argument`); a layout
 //! that can't be granted (`unsupported_layout`); then, on the import's own
-//! thread, what libradicle's `Import::prepare` refuses: an argument
-//! Radicle refuses or a branch the working copy lacks (`invalid_argument`),
-//! a repository already in storage (`failed`, "… already exists in
-//! storage"), and the working copy's open (`not_found` or `failed`, by
-//! today's message test, with libgit2's text); then main's cancel
-//! (`cancelled`, the connection's) or the connection's end (`stopped`).
+//! thread, roots that changed since they were checked
+//! (`unsupported_layout`), and what libradicle's `Import::prepare`
+//! refuses: an argument Radicle refuses or a branch the working copy lacks
+//! (`invalid_argument`), a repository already in storage (`failed`, "…
+//! already exists in storage"), and the working copy's open (`not_found`
+//! or `failed`, by today's message test, with libgit2's text); then main's
+//! cancel (`cancelled`, the connection's) or the connection's end
+//! (`stopped`).
 //!
 //! **The start** is claimed in one step with main's cancel
 //! ([`Connection::commit`]) and the connection's end, under the import's
 //! lock. Past it, only a success is proven: libradicle's error, a panic,
 //! the deadline, a kill or a crash is `outcome_unknown`, the error's text
 //! logged with its code. libradicle builds the repository in a temporary
-//! clone and moves it into place last, so what a cut-off import leaves is
-//! a temporary clone, which reconciliation at the service's next start
-//! removes.
+//! clone and moves it into place last, so a cut-off import leaves one of
+//! two things: before the move, only its temporary clone (`<rid>.tmp`),
+//! which reconciliation at the service's next start removes; after it, the
+//! whole repository, signed and seeded, which reconciliation finds valid.
+//! Storage holds a complete repository or none, and main sees
+//! `outcome_unknown` either way.
 //!
 //! **The dirty marker** stays from `rad.reconcile` on, and is removed only
 //! when no import is uncertain: after a proven import, a refusal before the
@@ -100,37 +118,60 @@ pub struct Params {
 pub struct Source {
     /// `--source`, as given, if it is valid Unicode: `path` must be it.
     named: Option<String>,
-    /// The roots confinement grants, or why the layout can't be granted.
-    roots: Result<Vec<PathBuf>, roots::Unsupported>,
+    /// The roots confinement grants, held open, or why the layout can't be
+    /// granted.
+    found: Result<roots::Found, roots::Unsupported>,
 }
+
+/// `unsupported_layout`'s text for roots found again, once confined, that
+/// aren't the ones checked and granted.
+pub const CHANGED: &str = "the repository's directories changed after they were checked";
 
 impl Source {
     /// Finds `source`'s roots and checks them against `protected`.
     pub fn find(source: &OsStr, protected: &[PathBuf]) -> Self {
         let named = source.to_str().map(str::to_owned);
-        let roots = match &named {
+        let found = match &named {
             None => Err(roots::Unsupported(
                 "the source's path isn't valid Unicode".into(),
             )),
             Some(named) => roots::find(Path::new(named)).and_then(|found| {
-                roots::check(&found, protected)?;
+                roots::check(&found.paths(), protected)?;
                 Ok(found)
             }),
         };
-        Self { named, roots }
+        Self { named, found }
     }
 
     /// What confinement grants read only: the roots, or nothing.
-    pub fn granted(&self) -> &[PathBuf] {
-        self.roots.as_deref().unwrap_or(&[])
+    pub fn granted(&self) -> &[roots::OpenDir] {
+        self.found.as_ref().map_or(&[], |found| &found.roots)
     }
 
     /// For the log: how many roots, or why none.
     pub fn summary(&self) -> Value {
-        match &self.roots {
-            Ok(roots) => json!({ "roots": roots.len() }),
+        match &self.found {
+            Ok(found) => json!({ "roots": found.roots.len() }),
             Err(why) => json!({ "unsupported": why.0 }),
         }
+    }
+
+    /// Once confined, just before libradicle opens the working copy: finds
+    /// the roots again from `--source` and compares them with those checked
+    /// and granted, each by its canonical path and identity. Any difference
+    /// is `unsupported_layout` ([`CHANGED`], or what the second search
+    /// refused), with nothing changed. Returns the source's canonical
+    /// path, the one `Import::prepare` opens.
+    pub fn verify(&self) -> Result<PathBuf, roots::Unsupported> {
+        let found = self.found.as_ref().map_err(Clone::clone)?;
+        let again = match &self.named {
+            Some(named) => roots::find(Path::new(named))?,
+            None => return Err(roots::Unsupported(CHANGED.into())),
+        };
+        if !found.same(&again) {
+            return Err(roots::Unsupported(CHANGED.into()));
+        }
+        Ok(found.source.0.clone())
     }
 }
 
@@ -150,7 +191,7 @@ enum Phase {
 
 pub struct ImportService {
     steps: Steps,
-    source: Source,
+    source: Arc<Source>,
     phase: Arc<Mutex<Phase>>,
 }
 
@@ -158,7 +199,7 @@ impl ImportService {
     pub fn new(steps: Steps, source: Source) -> Self {
         Self {
             steps,
-            source,
+            source: Arc::new(source),
             phase: Arc::new(Mutex::new(Phase::Waiting)),
         }
     }
@@ -214,12 +255,13 @@ impl ImportService {
         if self.source.named.as_deref() != Some(params.path.as_str()) {
             return ending.refused(&ErrorBody::new(ErrorCode::InvalidArgument, NOT_THE_SOURCE));
         }
-        if let Err(why) = &self.source.roots {
+        if let Err(why) = &self.source.found {
             return ending.refused(&ErrorBody::new(ErrorCode::UnsupportedLayout, why.0.clone()));
         }
+        let source = self.source.clone();
         let spawned = std::thread::Builder::new()
             .name("import".into())
-            .spawn(move || run(ending, &params, &key));
+            .spawn(move || run(ending, &source, &params, &key));
         if spawned.is_err() {
             // The closure, and `ending` with it, went with the error: the
             // process ends with the connection, answering nothing more. The
@@ -267,14 +309,27 @@ impl Ending {
     }
 }
 
-/// The import's own thread: libradicle's checks, the start, the import.
-fn run(ending: Ending, params: &Params, key: &radicle::crypto::SigningKey) {
+/// The import's own thread: the roots checked again, libradicle's checks,
+/// the start, the import.
+fn run(ending: Ending, source: &Source, params: &Params, key: &radicle::crypto::SigningKey) {
     testhooks::at_import_admission();
     testhooks::at_import_stage("admitted");
+    // The roots again, confined, just before libgit2 opens the working
+    // copy: the same directories as those checked and granted, or nothing.
+    let verified = match source.verify() {
+        Ok(verified) => verified,
+        Err(why) => {
+            return ending.refused(&ErrorBody::new(ErrorCode::UnsupportedLayout, why.0));
+        }
+    };
+    testhooks::at_import_stage("verified");
+    // libradicle opens the verified canonical source, never `path` as
+    // given; on Windows without the `\\?\` prefix where that names the
+    // same path, as libgit2 takes it.
     let prepared = libradicle::import::Import::prepare(
         &ending.home,
         key,
-        Path::new(&params.path),
+        dunce::simplified(&verified),
         &params.name,
         &params.description,
         &params.default_branch,
