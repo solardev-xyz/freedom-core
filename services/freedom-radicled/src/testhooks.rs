@@ -93,6 +93,11 @@
 //!   it is set, each stage reached logs `test hook: the import reached a
 //!   stage`, and the held one `test hook: the import holds at a stage`,
 //!   each with its `stage`.
+//! - `FREEDOM_RADICLED_TEST_HOLD_END=until:<path>` holds the import
+//!   process's end, once it has closed an import not yet started to any
+//!   start, until a file exists at `<path>` or for 4 s (within the
+//!   connection's 5 s exit), logging `test hook: the end holds`: the
+//!   process lives on while the import's thread meets the closed start.
 //! - `FREEDOM_RADICLED_TEST_PROBE_READ=<path>`,
 //!   `FREEDOM_RADICLED_TEST_PROBE_DIAL=<ip:port>` and, on Unix,
 //!   `FREEDOM_RADICLED_TEST_PROBE_UNIX=<path>`: once `rad.import_repo` is
@@ -700,4 +705,19 @@ pub fn at_import_stage(stage: &str) {
     }
     #[cfg(not(feature = "testhooks"))]
     let _ = stage;
+}
+
+/// The import process's end, once no import can start: holds it, if asked.
+pub fn hold_end() {
+    #[cfg(feature = "testhooks")]
+    if let Some(release) = std::env::var("FREEDOM_RADICLED_TEST_HOLD_END")
+        .ok()
+        .and_then(|hold| hold.strip_prefix("until:").map(str::to_owned))
+    {
+        fc_service::log::info("test hook: the end holds", serde_json::json!({}));
+        let until = std::time::Instant::now() + Duration::from_secs(4);
+        while std::time::Instant::now() < until && !std::path::Path::new(&release).exists() {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
 }

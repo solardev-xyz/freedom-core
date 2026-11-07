@@ -337,6 +337,15 @@ mod tests {
         std::fs::write(linked.join("commondir"), "../..\n").unwrap();
         // The linked git directory lies inside the common one: one root.
         assert_eq!(find(&source).unwrap(), vec![source.clone(), main.clone()]);
+        // A git directory outside both the source and its common
+        // directory: three roots.
+        let apart = mkdir(&root.join("apart"));
+        std::fs::write(apart.join("commondir"), format!("{}\n", main.display())).unwrap();
+        std::fs::write(source.join(".git"), "gitdir: ../apart\n").unwrap();
+        assert_eq!(
+            find(&source).unwrap(),
+            vec![source.clone(), apart.clone(), main.clone()]
+        );
         // An absolute `gitdir:` naming the common directory itself.
         std::fs::write(source.join(".git"), format!("gitdir: {}\n", main.display())).unwrap();
         assert_eq!(find(&source).unwrap(), vec![source, main]);
@@ -424,9 +433,13 @@ mod tests {
         std::fs::remove_file(source.join(".git")).unwrap();
         let objects = mkdir(&source.join(".git/objects"));
         mkdir(&objects.join("info"));
-        let many: Vec<String> = (0..MAX_ROOTS)
+        // 16 roots pass: the source and 15 alternates; 17 don't.
+        assert_eq!(MAX_ROOTS, 16);
+        let many: Vec<String> = (0..16)
             .map(|n| mkdir(&root.join(format!("m{n}"))).display().to_string())
             .collect();
+        std::fs::write(objects.join("info/alternates"), many[..15].join("\n")).unwrap();
+        assert_eq!(find(&source).unwrap().len(), 16);
         std::fs::write(objects.join("info/alternates"), many.join("\n")).unwrap();
         assert!(find(&source).unwrap_err().0.contains("more than"));
     }

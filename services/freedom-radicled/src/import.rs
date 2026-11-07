@@ -351,16 +351,13 @@ fn parse_params(raw: &RawValue) -> Option<Params> {
 /// `importRepo` returns, from libradicle's `json::rid`.
 pub fn result(rid: &radicle::prelude::RepoId) -> Box<RawValue> {
     let mut text = Vec::new();
-    let written = libradicle::json::rid(&mut text, rid).is_ok();
+    // Into memory, libradicle's writer doesn't fail, and writes JSON: the
+    // `null` below is never answered.
+    let _ = libradicle::json::rid(&mut text, rid);
     String::from_utf8(text)
         .ok()
-        .filter(|_| written)
         .and_then(|text| RawValue::from_string(text).ok())
-        .unwrap_or_else(|| {
-            // libradicle's writer into memory doesn't fail; the same bytes.
-            serde_json::value::to_raw_value(&json!({ "rid": rid.to_string() }))
-                .unwrap_or_else(|_| Box::<RawValue>::default())
-        })
+        .unwrap_or_default()
 }
 
 /// libradicle's refusal before the start, as the service answers it.
@@ -454,6 +451,7 @@ impl Service for ImportService {
                 if self.steps.reconciled().is_some() {
                     clear_marker(&self.steps.home, "no import started");
                 }
+                testhooks::hold_end();
             }
             // An import past its start: the process ends within the
             // connection's exit, and with it the import, unless it is

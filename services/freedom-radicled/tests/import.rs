@@ -774,6 +774,41 @@ fn the_imports_deadline_ends_the_process_with_70() {
 }
 
 #[test]
+fn libradicles_error_past_the_start_is_outcome_unknown() {
+    let dirs = ready();
+    let work = working_copy();
+    let (hold, release) = dirs.held("created@until", "release");
+    let mut radicled = Radicled::import(
+        &dirs,
+        &work.source,
+        &[],
+        &[("FREEDOM_RADICLED_TEST_HOLD_IMPORT", hold.as_str())],
+    );
+    radicled.reconciled();
+    let id = radicled.request("rad.import_repo", params(&work.source));
+    assert!(radicled.logs("test hook: the import holds at a stage", READ_TIMEOUT));
+    // The branch goes from the working copy before the fetch: libradicle's
+    // run fails past the start, and removes its temporary clone.
+    git2::Repository::open(&work.source)
+        .unwrap()
+        .find_reference("refs/heads/master")
+        .unwrap()
+        .delete()
+        .unwrap();
+    std::fs::write(&release, "").unwrap();
+    let reply = radicled.reply(id);
+    assert_eq!(reply["error"]["code"], "outcome_unknown", "{reply}");
+    assert_eq!(radicled.exit_code(EXIT_TIMEOUT), Some(0));
+    assert!(storage(&dirs).is_empty(), "{:?}", storage(&dirs));
+    assert_eq!(fixture::marked(&dirs.home), Some(vec![NID.to_owned()]));
+    let mut service = Radicled::serve(&dirs, &[]);
+    let hello = service.hello();
+    service.call("rad.identity", sealed_to(&hello, &SEED));
+    let reconciled = service.call("rad.reconcile", json!({}));
+    assert_eq!(reconciled["result"]["was_dirty"], true, "{reconciled}");
+}
+
+#[test]
 fn a_panic_past_the_start_is_outcome_unknown() {
     let dirs = ready();
     let work = working_copy();
@@ -795,20 +830,30 @@ fn the_connections_end_before_the_start_imports_nothing() {
     let dirs = ready();
     let work = working_copy();
     let (hold, release) = dirs.held("admitted@until", "release");
+    let (hold_end, ended) = dirs.held("until", "ended");
     let mut radicled = Radicled::import(
         &dirs,
         &work.source,
         &[],
-        &[("FREEDOM_RADICLED_TEST_HOLD_IMPORT", hold.as_str())],
+        &[
+            ("FREEDOM_RADICLED_TEST_HOLD_IMPORT", hold.as_str()),
+            ("FREEDOM_RADICLED_TEST_HOLD_END", hold_end.as_str()),
+        ],
     );
     radicled.reconciled();
     radicled.request("rad.import_repo", params(&work.source));
     assert!(radicled.logs("test hook: the import holds at a stage", READ_TIMEOUT));
     radicled.shutdown();
-    assert!(radicled.logs("connection ended", READ_TIMEOUT));
+    // The end has closed the start; the process lives on while the import's
+    // thread meets it: `stopped`, and nothing starts.
+    assert!(radicled.logs("test hook: the end holds", READ_TIMEOUT));
     std::fs::write(&release, "").unwrap();
+    assert!(radicled.logs("the import is answered", READ_TIMEOUT));
+    std::fs::write(&ended, "").unwrap();
     assert_eq!(radicled.exit_code(EXIT_TIMEOUT), Some(0));
-    assert!(!radicled.stderr().contains("the import has started"));
+    let log = radicled.stderr();
+    assert!(!log.contains("the import has started"), "{log}");
+    assert!(log.contains(r#""code":"stopped""#), "{log}");
     assert!(storage(&dirs).is_empty(), "{:?}", storage(&dirs));
     assert_eq!(fixture::marked(&dirs.home), None);
 }
