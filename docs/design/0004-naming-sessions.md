@@ -3,7 +3,7 @@
 **Status:** proposed. Builds on [0001](0001-freedom-cored.md) (process, framing, deadlines) and [0003](0003-naming.md) (codecs and the resolution architecture). It specifies the protocol that 0003's [architecture](0003-naming.md#resolution-architecture) left open, and answers every item of [What design 0004 must satisfy](0003-naming.md#what-design-0004-must-satisfy) (see [Traceability](#traceability)).
 
 **Ground truth** is the replay harness: `vectors/naming-replay.json` runs the pinned resolvers through scripted worlds, and its scenario IDs are cited below in `code`.
-- **The oracle:** freedom-browser `fb540328` (the `meta` of the vectors), with its ethers 6.17.0 and `@sinonjs/fake-timers` 15.4.0.
+- **The oracle:** freedom-browser `fb540328` (the `meta` of the vectors), with its ethers 6.17.0 and `@sinonjs/fake-timers` 15.4.0. A rule main took later is applied to it as a [reference patch](#reference-patches): today, main's #1076, which takes Colibri out of name resolution.
 - **Conflicts:** where this document and a vector disagree, the vector wins and the document has a bug.
 
 ## Summary
@@ -12,7 +12,7 @@ A name lookup becomes a **session** in `freedom-cored`. The session is a sans-I/
 - **main → core:** a `naming.*` request starts or joins a session.
 - **core → main:** the session asks main for each I/O it needs, using 0001's support for requests in both directions:
   - `shell.rpc`, `shell.tezos`, `shell.gateway`: HTTP;
-  - `shell.verified`: a whole Myotis or Colibri operation through today's adapters;
+  - `shell.verified`: a whole Myotis operation through today's adapter (Colibri runs none: [main's #1076](#mains-1076-colibri-answers-no-name));
   - `shell.prefetch`.
 - **The core decides everything else:** which endpoints, which block, deadlines, quarantine, agreement, trust labels, the result, and its cache lifetime.
 
@@ -32,7 +32,7 @@ Main stays a transport and adapter host:
 
 **Non-goals**
 - **New trust semantics** (0003's open question 1), and new record types.
-- **Myotis' and Colibri's own networking** (roadmap 3.3): their adapters run in main as today.
+- **Myotis' own networking** (roadmap 3.3): its adapter runs in main as today. Colibri resolves no names ([main's #1076](#mains-1076-colibri-answers-no-name)).
 - **Mobile drivers.** The machine is platform-neutral; its drivers on iOS and Android come later.
 
 ## The protocol
@@ -112,14 +112,14 @@ Main implements these. Each carries its attempt's generations and a `deadline_ms
 
 ### Verified operations
 
-Myotis and Colibri keep running in main, through today's adapters, **one whole operation per request**. This is the unit today's code retains a client for, retries, and runs ethers' built-in CCIP-Read inside.
+Myotis keeps running in main, through today's adapter, **one whole operation per request**. This is the unit today's code retains a client for, retries, and runs ethers' built-in CCIP-Read inside.
 
 | Operation | Main runs | Reply |
 |---|---|---|
 | `{ myotis: "record", method, name?, address?, coin_type }` | `resolveMyotisEnsRecord` (`myotis-resolver.js`: the UR over `MyotisProvider`, with its CCIP) | `{ status: "ok" \| "noRecord", data_hex?, address_hex?, name?, verified, block_number }`, `{ revert }` (the operation's revert data), or `{ failure }` |
 | `{ myotis: "call", to, data }` | `myotisManager.ethCall` at `latest`, then `getStatus()` | `{ result_hex, optimistic_block_number }` or `{ failure }` |
-| `{ colibri: "resolve", name, call_data, resolver }` | `resolveCallViaColibri(name, callData, callResolver)`, where `resolver` (`ur`, `name_nft` or `name_nft_reverse`) picks the call resolver; with today's whole-operation client rebuild and retry (`withColibriClientRetry`) and ethers' built-in CCIP | `{ resolved_data, resolver_address }`, `{ revert }` or `{ failure }` |
-| `{ colibri: "reverse", address, coin_type }` | `resolveReverseViaColibri` | `{ name }`, `{ revert }` or `{ failure }` |
+
+**No Colibri operations** ([main's #1076](#mains-1076-colibri-answers-no-name)). The pinned reference also ran `{ colibri: "resolve", name, call_data, resolver }` (`resolveCallViaColibri`, the Universal Resolver or a NameNFT call through Colibri) and `{ colibri: "reverse", address, coin_type }` (`resolveReverseViaColibri`). Main no longer runs either: it refuses them, as it refuses a malformed operation, and the core never asks.
 
 - **Main runs no epoch check of its own.** The reply is the outcome the adapter gives, as the reference receives it. A success is forwarded as a success, and `tryMyotisPath`'s check after it is the core's ([Verified methods](#verified-methods)).
 - **The adapters guard themselves.** An operation that crosses a change of Myotis availability fails inside the adapter:
@@ -144,7 +144,6 @@ A resolution reply is one of:
 
 **Endpoint references in results.** Where today's results name endpoints, the core writes `{ "ref": "<endpoint>" }` and main substitutes, in exactly these places:
 - **ENS** `trust.agreed[]`, `trust.dissented[]`, `trust.queried[]`, `groups[].urls[]`: the host (`hostOf`, today's helper, which returns the input when it doesn't parse).
-- **Colibri** `trust.prover`, `trust.agreed[]`, `trust.queried[]`: the prover's host.
 - **Tezos** `trust.agreed[]`: the URL, since today's Tezos results carry full URLs. Tezos `groups[].urls[]`: the host.
 
 Literal labels such as Myotis' `myotis-p2p` are plain strings and never substituted. Main keeps a reference's mapping while any request or reply can still name it.
@@ -158,7 +157,7 @@ Literal labels such as Myotis' `myotis-p2p` are plain strings and never substitu
   "rpc": [ { "endpoint": "e3" }, … ],              // effective order, ≤ 64 entries
   "direct": { "endpoint": "e3", "user_configured": true },   // or null
   "prover": { "endpoint": "p1", "zk": true },                // or null
-  "policy": { "order": ["myotis", "colibri", "quorum"], "prefer_verified": false },
+  "policy": { "order": ["myotis", "quorum"], "prefer_verified": false },
   "quorum": { "k": 3, "m": 2, "timeout_ms": 5000, "anchor": "latest", "anchor_ttl_ms": 30000 },
   "myotis_enabled": true,
   "tezos": [ "t1", "t2", "t3" ] }
@@ -167,7 +166,8 @@ Literal labels such as Myotis' `myotis-p2p` are plain strings and never substitu
 - **Main computes the inputs as today:**
   - `rpc` is `getEffectiveRpcEndpoints()` (with `ETH_RPC` prepended, deduplicated case-insensitively), its first 64 in that order (deviation `rpc-endpoints`): the core refuses a longer list;
   - `direct` is `getDirectRpcCandidate(1)` (the first registry endpoint, ignoring `ETH_RPC`);
-  - `policy` is `resolutionPolicy()` (including the legacy `primary` mapping);
+  - `policy` is `resolutionPolicy()` (including the legacy `primary` mapping). Since main's #1076 it never names Colibri; an order that still does skips it in the core too, as any unknown method;
+  - `prover` is the Colibri prover as before. Naming no longer uses it; a change still advances the ENS generation;
   - `quorum` is the raw `network.quorum` values;
   - `tezos` is `getRpcEndpoints()` (with `TEZOS_RPC` prepended).
 - **Each endpoint once:** the core keeps an `rpc` or `tezos` reference listed again only in its first place. Main's lists are deduplicated already, so this never changes what main sends; it keeps one endpoint from counting twice in a quorum, as two legs or two anchor heads, if a list ever repeats one.
@@ -259,10 +259,7 @@ The rules below restate the reference, so a reviewer can check them against the 
   - **ENS records** use `{ myotis: "record" }`. A `noRecord` re-encodes to today's empty ABI forms.
   - **WNS/GNS calls** use `{ myotis: "call" }`. Their trust takes the reply's `optimistic_block_number`, as `tryMyotisContractPath` reads it today.
   - **Trust:** `verified`, `method: myotis`, finality `optimistic` unless the record says it is verified (finalized) (`myotis-verified`, `myotis-ccip`).
-- **Colibri:**
-  - **Calls:** through `{ colibri: … }`, whose single client rebuild and retry wraps the whole operation (`colibri-unavailable-falls-to-quorum`: two verified attempts, then quorum).
-  - **Results:** a proven `ResolverNotFound` is a verified `NO_RESOLVER` (`colibri-resolver-not-found`). Any other failure is a method error, and the order continues.
-  - **Trust:** `prover` is the prover's host, and `proof` is `ZK sync-committee proof` or `Sync-committee proof` (from `zk`).
+- **Colibri is no method** ([main's #1076](#mains-1076-colibri-answers-no-name)). The pinned reference ran its ENS, reverse and NameNFT lookups through `{ colibri: … }` and labelled them `verified` with `method: colibri`. An order that names Colibri skips it now, and the next method answers with its own label (`colibri-verified`, `colibri-resolver-not-found`, `colibri-unavailable-falls-to-quorum`, `no-colibri-names-*`).
 - **A Myotis method and its operations:** a method (`tryMyotisPath`, `tryMyotisReverse`) runs one or more operations. A forward lookup runs one. A reverse runs the ENS reverse record and then, for WNS and GNS in turn, a reverse call and a forward check.
   - **A failed operation** is handled where today's code handles that error. A failed WNS or GNS forward check is caught inside the reverse: the claim stays unverified, and the next system is tried. Any other failure leaves the method.
   - **The method-wide check:** when the method ends without an error escaping, the core compares Myotis' readiness and epoch, as the last `naming.availability` gave them, against their values when the method began (today's `MYOTIS_LIFECYCLE_CHANGED` in `tryMyotisPath` and `tryMyotisReverse`). On a change the method order is aborted at once, and the session restarts.
@@ -296,7 +293,7 @@ These follow `doResolveEnsContent`, `doResolveEnsAddress` and `doResolveEnsRever
   - The zero address and empty bytes are `NO_ADDRESS` (`address-*`).
 - **Reverse:**
   - **ENS:** through the UR's `reverse`, as an `(outcome, detail)` agreement value. A `ReverseAddressMismatch` is `UNVERIFIED` with the claimed name (`reverse-*`).
-  - **Only a normalized ENS name is the address's name** (deviation `reverse-normalized`, #75). The forward check hashes the claimed name as written, so an owner of an unnormalized name such as `vitaIik.eth` (a capital I) passes it, and the name renders like `vitalik.eth`. The core shows a name only when it is its own ENSIP-15 normalization; any other is `UNVERIFIED` with the claimed name and `Reverse record for <address> claims a name that isn't normalized`, with the trust the answer had, and a last member `unverifiedCause: "unnormalized"`. The cause lets the wallet say why: such a name usually does resolve back, so the warning for a name that doesn't would read as a false alarm. This holds for the quorum, Colibri and Myotis paths alike (`deviation-reverse-normalized`, `-colibri`, `-myotis`). WNS and GNS claims are normalized before their forward check already. The reference had the same gap. freedom-browser main took the same rule and the same `unverifiedCause` in #756 (94b0af4e), but the vectors stay pinned to fb540328, so the rule stays a deviation from it.
+  - **Only a normalized ENS name is the address's name** (deviation `reverse-normalized`, #75). The forward check hashes the claimed name as written, so an owner of an unnormalized name such as `vitaIik.eth` (a capital I) passes it, and the name renders like `vitalik.eth`. The core shows a name only when it is its own ENSIP-15 normalization; any other is `UNVERIFIED` with the claimed name and `Reverse record for <address> claims a name that isn't normalized`, with the trust the answer had, and a last member `unverifiedCause: "unnormalized"`. The cause lets the wallet say why: such a name usually does resolve back, so the warning for a name that doesn't would read as a false alarm. This holds for the quorum and Myotis paths alike (`deviation-reverse-normalized`, `-myotis`; `-colibri` is an order of Colibri alone, which the quorum now answers). WNS and GNS claims are normalized before their forward check already. The reference had the same gap. freedom-browser main took the same rule and the same `unverifiedCause` in #756 (94b0af4e), but the vectors stay pinned to fb540328, so the rule stays a deviation from it.
   - **WNS, then GNS:** on chain 1, an ENS `NO_REVERSE` falls back to WNS, then GNS, through **the same method** that produced the ENS answer. A claim is checked by a forward `addr` through that method too. A failed forward check leaves the claim unverified, and the next system is tried (`reverse-ens-empty-then-wns`, `reverse-ens-and-wns-empty-then-gns`, `reverse-wns-claim-fails-forward-then-gns-empty`; through Myotis, [Verified methods](#verified-methods)).
   - **Provisional:** a result that is `unverified` or `UNVERIFIED`.
   - **Error outcomes** agree by their [agreement identity](#errors-agreement-and-text), not by display text.
@@ -413,7 +410,7 @@ Rule 2 uses socket codes, not text.
         - A clearnet gateway goes `DIRECT`; the Tor PAC routes only `.onion`. A clearnet gateway that the session would send through a proxy is refused, because main can't check where the proxy connects.
         - An `.onion` gateway keeps its separately authorized route, through the PAC to Arti, and is never resolved locally. It is refused while that route isn't on the session, as today.
       - **Redirects stay refused** (`redirect: 'error'`), so no hop needs a check.
-      - **Every gateway fetch is covered.** The pinned legs' loop and the Myotis and Colibri adapters' automatic CCIP callbacks all use main's one gateway fetch (`ccip-fetch.js`), so the check covers the [verified paths](#verified-operations) too.
+      - **Every gateway fetch is covered.** The pinned legs' loop and the Myotis adapter's automatic CCIP callbacks all use main's one gateway fetch (`ccip-fetch.js`), so the check covers the [verified paths](#verified-operations) too.
       - **A refusal** is `refused`, so the next gateway is tried.
       - **Tests:** main's tests use the cases generated from 0007's table. These include site-local, 6to4, ISATAP, both NAT64 forms and the IPv4-mapped spellings.
     - An HTTP error, a redirect or an invalid answer moves on to the next URL (`ccip-gateway-errors-fall-through`).
@@ -614,7 +611,7 @@ Each deviation gets a boundary vector in the implementation PR, generated from t
 | `random-streams` | the 429 back-off and the shuffle draw from one `Math.random` | separate streams | later shuffles don't depend on earlier back-offs; vectors seed the back-off apart |
 | `core-restart` | — (no separate process) | pending naming requests fail when the core restarts | `RESOLUTION_ERROR`; nothing cached |
 | `prefetch-set` | unbounded | 32 surviving prefetches | the oldest is cancelled |
-| `verified-failure-text` | a failed verified operation throws the adapter's own error | the core sees the failure class alone, and the method throws `verified call failed: <class>`; for a name with a label over 255 bytes, an `invalid_argument` from the Myotis record operation or Colibri's `ur` resolver (which `dnsEncode` the name first) is that refusal, whose ethers message the core rebuilds | the same failure, with the class's text where the order ends on it |
+| `verified-failure-text` | a failed verified operation throws the adapter's own error | the core sees the failure class alone, and the method throws `verified call failed: <class>`; for a name with a label over 255 bytes, an `invalid_argument` from the Myotis record operation (which `dnsEncode`s the name first) is that refusal, whose ethers message the core rebuilds | the same failure, with the class's text where the order ends on it (`deviation-verified-failure-text`: an odd-length revert Myotis proves, then a label over 255 bytes) |
 
 ## Replay
 
@@ -626,7 +623,8 @@ The Rust machine runs each scenario of `naming-replay.json`:
 **The driver reproduces three reference artifacts:**
 - **The ethers stall:** it delays a JSON-RPC request's first send by 10 ms before matching it. Retries inside the exchange carry no stall.
 - **The exchange loop:** one `shell.rpc` consumes the reference's exchanges for that request, redirects and 429 retries included.
-- **Verified operations:** the driver plays the adapter. It answers a `shell.verified` operation with the outcome the reference's adapter returned. The harness records each adapter operation (`resolveRecord`, `ethCall`, `resolveCallViaColibri`, `resolveReverseViaColibri`) and its outcome next to the raw exchanges it made, which is an implementation-step change.
+- **Verified operations:** the driver plays the adapter. It answers a `shell.verified` operation with the outcome the reference's adapter returned. The harness records each adapter operation (`resolveRecord`, `ethCall`, and in the pinned reference's runs `resolveCallViaColibri` and `resolveReverseViaColibri`) and its outcome next to the raw exchanges it made, which is an implementation-step change. No recorded scenario has a Colibri operation since [main's #1076](#mains-1076-colibri-answers-no-name).
+- **Configuration:** the driver plays main's `resolutionPolicy`: the order it gives the core is the world's known methods once each, or the legacy order from `primary` when none is left, as main computes it.
 - **Order:** answers are delivered in the reference's timer order, using the executor's external events.
 
 **Compared exactly:**
@@ -637,7 +635,8 @@ The Rust machine runs each scenario of `naming-replay.json`:
 **Vectors the implementation adds:**
 - a redirect followed by a 429 (the retry goes to the redirect target), and concurrent 429s, shuffles and cancellations under deviation `random-streams`;
 - reverse error outcomes that differ only in callback data (they conflict), legacy envelopes that differ only in `info.error.data` (they agree), and invalid gateway URLs at different indexes;
-- one boundary vector per deviation.
+- one boundary vector per deviation;
+- the scenarios a [reference patch](#reference-patches) changes, and the ports of main's tests for it.
 
 Main's own behavior (pipe overtakes, crashes, per-caller allowances, `FetchRequest` over the session stack) is tested in the daemon and the browser, since the reference has no such seam.
 
@@ -645,6 +644,28 @@ Main's own behavior (pipe overtakes, crashes, per-caller allowances, `FetchReque
 - **Deviations:** the fields a deviation covers are compared under its rule.
 - **Abandoned exchanges:** the end times and rejection records of exchanges the core cancelled are excluded. So are the reference's requests that belong to an exchange the core had already cancelled, such as a 429 retry after a leg's deadline. A scenario where such an exchange would change later quarantine is an `abandoned-exchanges` vector with expected values of its own.
 - **Prefetch:** start and the machine's cancellation are compared. End times are main's (the 10 s timer) and are not compared.
+
+## Reference patches
+
+A rule freedom-browser's main took after the pinned commit is applied to the pinned resolver in memory, so that a scenario records main's behaviour without moving the pin (design 0005 does the same, Replay). Unlike a deviation's, the core agrees with main. A patched scenario names the patch in `patches` and no `deviation`; it records the patch (its edits) and the pinned reference's results (`unpatched`), and generation fails unless the patch changes its results or its I/O on its own. When main's change merges, the citation moves to main's commit; no vector needs to change unless the code does.
+
+### Main's #1076: Colibri answers no name
+
+**The bug** (freedom-browser #1076, found by the Codex review of freedom-browser #1048 and #1049, round 4). In privacy mode (`privacy_mode: "basic"`, which Freedom always sets), Colibri 3.0.3 runs a lookup's Universal Resolver or NameNFT `eth_call` locally, on contract code it fetches from one of its built-in public `eth_rpc` servers and never compares with the proven code hash (`call_ctx.c`'s `call_account_get_code`, `eth_account.c`). A call that reads no storage fetches no proof and is accepted (`verify_call.c`'s `verify_call_result_and_finish`). So one of those servers could return any address, name or revert, and the reference labelled it `verified` with `method: colibri` and a sync-committee proof. Send-to-name used the address as the recipient, with the verified checkmark. It is the naming side of freedom-browser #1060 ("calls without proofs"), which design 0005's router fixes for chain data (freedom-core #279).
+
+**The rule** (reference patch `no-colibri-names`; freedom-browser main's fix: #1082, head `0da2215b`):
+- **Colibri leaves the known methods:** `resolutionPolicy` keeps `myotis`, `quorum` and `direct`, so an order that names Colibri skips it, and the next method answers with its own label.
+- **A legacy Colibri primary,** and an order that names no other method, take Myotis and then the quorum.
+- **`resolveWithMethod` and `resolveEnsReverseWithMethod`** lose their Colibri branches. Main deletes the Colibri paths they called; the patch leaves them, unreachable.
+- **The core:** `VerifiedOp` has no Colibri operation, `with_method` and `ens_reverse_with` treat `colibri` as unavailable, and no result carries Colibri trust. Main refuses `{ colibri: … }` operations (integration's `naming-verified.js`, freedom-browser #1083), so an older core gets no answer to label either.
+
+**The vectors** (`generate.js generate`, nothing hand-edited; `NO_COLIBRI_NAMES_SCENARIOS` lists them, and generation fails if one is missing):
+- **Six scenarios change and are recorded patched,** each with the pinned reference's Colibri results as `unpatched`: `colibri-verified`, `-resolver-not-found`, `-label-over-255-bytes`, `-unavailable-falls-to-quorum`, `-ccip` and `-concurrent`. The quorum answers in Colibri's place, or, for an order of Colibri alone, Myotis (off in these worlds) and then the quorum. A discovery run over every other ENS scenario found no other change.
+- **`deviation-reverse-normalized-colibri`** takes both patches: the quorum answers its reverse, and the rule holds there.
+- **Seven `no-colibri-names-*` scenarios** port main's "Colibri answers no name lookup (#1076)" tests, with Colibri scripted to forge, as there: the legacy default (a Colibri primary, no order), send-to-name with Colibri first, a primary name with Colibri alone, a `.wei` address in the shipped order, a WNS primary name and its forward check, Direct after Colibri (unverified), and Colibri alone with Myotis ready (Myotis answers).
+- **`verified-failure-text`** was pinned through Colibri's operations. Its vector now drives Myotis' record operation: an odd-length revert is `invalid_argument` with the core's class text, and a label over 255 bytes is the rebuilt refusal. `deviation-verified-failure-text-namenft` and `-order` are gone: they needed a Colibri operation, and Myotis' NameNFT calls return a failure as a status, which the patch doesn't model.
+
+**What comes next:** Colibri can serve names again only once a release binds the code it runs, and the whole call, to authenticated state. Design 0014's Colibri service lists `eth_call` operations for the future service; it needs the matching amendment, so that it serves no naming call either.
 
 ## Traceability
 
