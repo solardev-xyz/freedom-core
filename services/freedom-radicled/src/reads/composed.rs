@@ -60,7 +60,7 @@
 //! `repos_meta` looks at the read's token before each repository; a walk
 //! looks at it as it goes.
 //!
-//! **An identity document over 1 MiB** ([`super::identity`]): `remotes`,
+//! **An identity document over 64 KiB** ([`super::identity`]): `remotes`,
 //! `repo_stats` and each `repo_meta` check the repository's before their
 //! walk, within its bounds, and the listings of `repos_meta` and
 //! `node_info` every seeded repository's; one over the cap is `too_large`

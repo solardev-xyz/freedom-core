@@ -90,7 +90,7 @@
 //!   UTF-8, three bytes for each invalid sequence. Past the built budget it
 //!   is `too_large`.
 //!
-//! **An identity document over 1 MiB** is refused before the walk parses
+//! **An identity document over 64 KiB** is refused before the walk parses
 //! it ([`identity`], 0008's deviation `identity-cap`): `repo_info`,
 //! `tree` and `blob` without a revision when `HEAD` doesn't resolve, the
 //! listings, and the composed reads of them check its blob's size first,
