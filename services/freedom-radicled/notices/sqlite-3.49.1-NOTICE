@@ -1,0 +1,12 @@
+SQLite 3.49.1, as the sqlite3-src 0.7.0 crate bundles it (the
+amalgamation source/sqlite3.c, from Fossil check-in
+873d4e274b4988d260ba8354a9718324a1c2), is in the public domain
+(https://sqlite.org/copyright.html). In place of a license, its source
+carries this dedication:
+
+The author disclaims copyright to this source code.  In place of
+a legal notice, here is a blessing:
+
+   May you do good and not evil.
+   May you find forgiveness for yourself and forgive others.
+   May you share freely, never taking more than you give.

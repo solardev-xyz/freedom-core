@@ -1,0 +1,440 @@
+name: Release freedom-radicled
+
+# Builds freedom-radicled, the libradicle service (design 0008), for the
+# same five platforms as freedom-ipfsd (on Linux against glibc 2.17, as
+# freedom-ipfsd is) and publishes the archives plus SHA256SUMS as a GitHub
+# release, with build provenance attested for each. freedom-browser pins a
+# release tag and the digest of its SHA256SUMS (see RELEASING.md).
+#
+# Only a tag push (radicled-vX.Y.Z, matching services/freedom-radicled's
+# version) publishes. A manual run (on any ref, tags included) or a PR that
+# changes this file builds and checks every target without publishing.
+#
+# Build jobs run repository code, and every dependency's build script and
+# proc macro, with a read-only token, each in its own checkout and with no
+# cache (0008, "Scope of the separation"). Only the publish job can write,
+# and it runs no repository code: it downloads the build artifacts,
+# assembles SHA256SUMS, attests them and creates the release.
+
+on:
+  push:
+    tags: ["radicled-v*"]
+  pull_request:
+    paths: [".github/workflows/release-radicled.yml"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-radicled-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  check:
+    name: check tag and notices
+    runs-on: ubuntu-latest
+    outputs:
+      publish: ${{ steps.tag.outputs.publish }}
+      tag: ${{ steps.tag.outputs.tag }}
+      version: ${{ steps.tag.outputs.version }}
+      heartwood: ${{ steps.inputs.outputs.heartwood }}
+      epoch: ${{ steps.inputs.outputs.epoch }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - id: tag
+        name: Publish only on a tag push matching the service's version
+        run: |
+          version=$(python3 -c 'import tomllib; print(tomllib.load(open("services/freedom-radicled/Cargo.toml", "rb"))["package"]["version"])')
+          [ -n "$version" ] || { echo "no [package] version" >&2; exit 1; }
+          # The release tag is radicled-vX.Y.Z; the archives are
+          # freedom-radicled-vX.Y.Z-<asset>.
+          if [ "$GITHUB_EVENT_NAME" = "push" ] && [ "$GITHUB_REF_TYPE" = "tag" ]; then
+            if [ "$GITHUB_REF_NAME" != "radicled-v$version" ]; then
+              echo "tag $GITHUB_REF_NAME does not match freedom-radicled's version $version (radicled-v$version)" >&2
+              exit 1
+            fi
+            echo "publish=true" >> "$GITHUB_OUTPUT"
+            echo "tag=$GITHUB_REF_NAME" >> "$GITHUB_OUTPUT"
+            echo "version=v$version" >> "$GITHUB_OUTPUT"
+          else
+            echo "dry run ($GITHUB_EVENT_NAME on $GITHUB_REF_TYPE $GITHUB_REF_NAME)"
+            echo "publish=false" >> "$GITHUB_OUTPUT"
+            echo "tag=radicled-v$version-dryrun" >> "$GITHUB_OUTPUT"
+            echo "version=v$version-dryrun" >> "$GITHUB_OUTPUT"
+          fi
+      - id: inputs
+        name: What heartwood's build scripts embed, from the tag
+        run: |
+          # heartwood's build scripts (radicle, radicle-node) embed
+          # RADICLE_VERSION, GIT_HEAD and SOURCE_DATE_EPOCH. Unset, each
+          # runs `git` in cargo's checkout of heartwood, whose answer
+          # depends on what cargo's git database holds (an abbreviation's
+          # length, tags), not on the tag. RADICLE_VERSION is the node's
+          # announced user agent (`/radicle:<version>/`). So every target
+          # gets them from the tag: heartwood's commit as Cargo.lock pins
+          # it, in 8 hex digits, as `git describe` gives it from a
+          # checkout with no tags, and the tagged commit's time.
+          heartwood=$(python3 - <<'EOF'
+          import tomllib
+          lock = tomllib.load(open("services/freedom-radicled/Cargo.lock", "rb"))
+          prefix = "git+https://github.com/solardev-xyz/heartwood?rev="
+          commits = {p["source"].rsplit("#", 1)[1] for p in lock["package"]
+                     if p.get("source", "").startswith(prefix)}
+          if len(commits) != 1:
+              raise SystemExit(f"Cargo.lock pins heartwood at {len(commits)} commits, not one")
+          print(commits.pop())
+          EOF
+          )
+          epoch=$(git log -1 --pretty=%ct HEAD)
+          echo "heartwood $heartwood, commit time $epoch"
+          echo "heartwood=${heartwood:0:8}" >> "$GITHUB_OUTPUT"
+          echo "epoch=$epoch" >> "$GITHUB_OUTPUT"
+      - name: Toolchain
+        run: rustup toolchain install
+      # The archives ship services/freedom-radicled/THIRD-PARTY-NOTICES:
+      # it must list what this tag links.
+      - name: services/freedom-radicled/THIRD-PARTY-NOTICES is current
+        run: |
+          (cd services/freedom-radicled && cargo fetch --locked)
+          python3 scripts/third-party-notices.py --binary freedom-radicled --check
+
+  build:
+    name: build (${{ matrix.asset }})
+    needs: check
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - { runner: macos-latest, target: aarch64-apple-darwin, asset: darwin-arm64, native: true }
+          # Cross-compiled on Apple silicon, as freedom-ipfsd's is; its
+          # archive is checked on an Intel runner (`check-darwin-amd64`).
+          - { runner: macos-latest, target: x86_64-apple-darwin, asset: darwin-amd64, native: false }
+          # Linked dynamically against glibc 2.17, as freedom-ipfsd is
+          # (0007, open question 6), so they run wherever Electron does (it
+          # needs 2.25). cargo-zigbuild links them, with Zig's copy of glibc
+          # 2.17's symbols and startup code.
+          - { runner: ubuntu-latest, target: x86_64-unknown-linux-gnu, glibc: "2.17", asset: linux-amd64, native: true }
+          - { runner: ubuntu-24.04-arm, target: aarch64-unknown-linux-gnu, glibc: "2.17", asset: linux-arm64, native: true }
+          - { runner: windows-latest, target: x86_64-pc-windows-msvc, asset: windows-amd64, native: true }
+    runs-on: ${{ matrix.runner }}
+    defaults:
+      run:
+        shell: bash
+        working-directory: services/freedom-radicled
+    env:
+      VERSION: ${{ needs.check.outputs.version }}
+      TARGET: ${{ matrix.target }}
+      GLIBC: ${{ matrix.glibc }}
+      # The release build's environment, for the build and for the test
+      # hooks' refusal below, which must reuse what the build compiled.
+      # Windows: link the C runtime statically (no VC++ redistributable).
+      RUSTFLAGS: ${{ contains(matrix.target, 'windows') && '-C target-feature=+crt-static' || '' }}
+      # heartwood's build scripts (check's `inputs` step).
+      RADICLE_VERSION: ${{ needs.check.outputs.heartwood }}
+      GIT_HEAD: ${{ needs.check.outputs.heartwood }}
+      SOURCE_DATE_EPOCH: ${{ needs.check.outputs.epoch }}
+      # libz-sys asks vcpkg for a zlib on Windows before it builds its own:
+      # never the runner's.
+      VCPKGRS_DISABLE: "1"
+      # The bundled C libraries, whatever the runner sets: libz-sys reads
+      # LIBZ_SYS_STATIC before its `static` feature, and libgit2-sys takes any
+      # LIBGIT2_NO_VENDOR but 0 as "use the system's libgit2" (#308 review,
+      # round 1). The notices name the bundled copies.
+      LIBZ_SYS_STATIC: "1"
+      LIBGIT2_NO_VENDOR: "0"
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - name: Toolchain
+        run: |
+          rustup toolchain install
+          rustup target add "$TARGET"
+      - name: Zig and cargo-zigbuild
+        if: matrix.glibc
+        run: |
+          # Their PyPI wheels, for the runner's architecture, pinned by
+          # version and sha256, as release-ipfsd.yml has them. A wheel is a
+          # zip: the binaries need no pip.
+          case "$(uname -m)" in
+            x86_64)
+              zig_url=https://files.pythonhosted.org/packages/db/81/f9f5c7fd68d80b8edff2a641a1c95ac4125356387d298374227040b8e1e8/ziglang-0.15.2-py3-none-manylinux_2_12_x86_64.manylinux2010_x86_64.musllinux_1_1_x86_64.whl
+              zig_sha256=806316453d1ede7174ed3fefb8e5348154629089c3bb5fe812dfd0e172fac130
+              zigbuild_url=https://files.pythonhosted.org/packages/95/2b/3fbef7958e7902b1c0119e1a028528df6a5d28bae11282ee550689cb8b59/cargo_zigbuild-0.23.4-py3-none-manylinux_2_5_x86_64.manylinux1_x86_64.whl
+              zigbuild_sha256=0a149a2a07b9513d422efa9cc23e1add9741f08abe86845fa418eaeb4cca7931
+              ;;
+            aarch64)
+              zig_url=https://files.pythonhosted.org/packages/53/7d/8c277208250ffa72f12a10f52dfc1d45850f08244093065b40c5f4628260/ziglang-0.15.2-py3-none-manylinux_2_17_aarch64.manylinux2014_aarch64.musllinux_1_1_aarch64.whl
+              zig_sha256=edc0aa60ec964a4cf462d40f68d7de242ddf37fd9a80f2afaee6397059463230
+              zigbuild_url=https://files.pythonhosted.org/packages/40/c8/ac728b3e0bfe97a1d9e94e61402c0e4524689e1d2d6665009f0682f32ca2/cargo_zigbuild-0.23.4-py3-none-manylinux_2_17_aarch64.manylinux2014_aarch64.whl
+              zigbuild_sha256=9f848addf9ca16e8df52b4a86eb41f7555bb4205aea117ad521f501a307129f5
+              ;;
+            *)
+              echo "no pinned Zig for $(uname -m)" >&2
+              exit 1
+              ;;
+          esac
+          tools="$RUNNER_TEMP/zigbuild"
+          mkdir -p "$tools"
+          cd "$tools"
+          curl -fsSL -o zig.whl "$zig_url"
+          curl -fsSL -o cargo-zigbuild.whl "$zigbuild_url"
+          printf '%s  zig.whl\n%s  cargo-zigbuild.whl\n' "$zig_sha256" "$zigbuild_sha256" | sha256sum --check
+          unzip -q zig.whl -d zig
+          unzip -q cargo-zigbuild.whl -d cargo-zigbuild
+          chmod +x zig/ziglang/zig cargo-zigbuild/cargo_zigbuild-0.23.4.data/scripts/cargo-zigbuild
+          echo "$tools/zig/ziglang" >> "$GITHUB_PATH"
+          echo "$tools/cargo-zigbuild/cargo_zigbuild-0.23.4.data/scripts" >> "$GITHUB_PATH"
+          "$tools/zig/ziglang/zig" version
+          "$tools/cargo-zigbuild/cargo_zigbuild-0.23.4.data/scripts/cargo-zigbuild" --version
+      - name: Build
+        run: |
+          # sqlite3-src defines each SQLITE_* variable of its build's
+          # environment as a C macro: none may come from the runner.
+          if env | grep -q '^SQLITE_'; then
+            echo "SQLITE_* variables are set; they would change the bundled SQLite: $(env | grep -o '^SQLITE_[A-Za-z0-9_]*' | tr '\n' ' ')" >&2
+            exit 1
+          fi
+          echo "RADICLE_VERSION=$RADICLE_VERSION GIT_HEAD=$GIT_HEAD SOURCE_DATE_EPOCH=$SOURCE_DATE_EPOCH"
+          if [ -n "$GLIBC" ]; then
+            # The glibc version as a suffix of the target; the binary still
+            # lands in target/<target>/release.
+            cargo zigbuild --locked --release --target "$TARGET.$GLIBC"
+          else
+            cargo build --locked --release --target "$TARGET"
+          fi
+      - name: glibc ${{ matrix.glibc }} on Linux
+        if: matrix.glibc
+        run: |
+          bin=target/$TARGET/release/freedom-radicled
+          file "$bin"
+          # The highest glibc symbol version it needs is at most $GLIBC.
+          highest="$(objdump -T "$bin" | grep -o 'GLIBC_[0-9][0-9.]*' | sed 's/^GLIBC_//' | sort -uV | tail -n 1 || true)"
+          echo "highest GLIBC_ symbol version: $highest"
+          if [ -z "$highest" ] || [ "$(printf '%s\n%s\n' "$highest" "$GLIBC" | sort -V | tail -n 1)" != "$GLIBC" ]; then
+            echo "$bin needs glibc ${highest:-(none found)}, not $GLIBC at most" >&2
+            exit 1
+          fi
+          # Exactly one program interpreter: the architecture's standard
+          # glibc loader, where every distribution has it.
+          case "$TARGET" in
+            x86_64-*) want=/lib64/ld-linux-x86-64.so.2 ;;
+            aarch64-*) want=/lib/ld-linux-aarch64.so.1 ;;
+            *) echo "no standard loader known for $TARGET" >&2; exit 1 ;;
+          esac
+          interp="$(readelf -l "$bin" | sed -n 's/.*\[Requesting program interpreter: \(.*\)\]$/\1/p')"
+          echo "interpreter: ${interp:-(none)}"
+          if [ "$(printf '%s' "$interp" | grep -c '')" != 1 ] || [ "$interp" != "$want" ]; then
+            echo "$bin's interpreter is ${interp:-(none)}, not $want" >&2
+            exit 1
+          fi
+          # The libraries it needs are glibc's and libgcc_s, and nothing
+          # else: libgit2, zlib and SQLite are linked in, never the host's.
+          needed="$(readelf -d "$bin" | sed -n 's/.*(NEEDED).*\[\(.*\)\]$/\1/p')"
+          echo "needed: $(echo $needed)"
+          echo "$needed" | grep -qx 'libc.so.6' || { echo "$bin doesn't need libc.so.6" >&2; exit 1; }
+          for lib in $needed; do
+            case "$lib" in
+              libc.so.6 | libm.so.6 | libpthread.so.0 | libdl.so.2 | librt.so.1 | libutil.so.1 \
+                | ld-linux-x86-64.so.2 | ld-linux-aarch64.so.1 | libgcc_s.so.1) ;;
+              *)
+                echo "$bin needs $lib, which is neither glibc's nor libgcc_s" >&2
+                exit 1
+                ;;
+            esac
+          done
+      - name: No test hooks in the binary
+        run: |
+          bin=target/$TARGET/release/freedom-radicled
+          [ -f "$bin.exe" ] && bin="$bin.exe"
+          # Every hook reads a FREEDOM_RADICLED_TEST_* variable only with
+          # the `testhooks` feature (src/testhooks.rs): without it no name
+          # is compiled in.
+          if LC_ALL=C grep -a -q 'FREEDOM_RADICLED_TEST_' "$bin"; then
+            echo "$bin names a FREEDOM_RADICLED_TEST_* variable: built with the test hooks" >&2
+            exit 1
+          fi
+          echo "no FREEDOM_RADICLED_TEST_* name in $bin"
+      - name: Package
+        run: |
+          name="freedom-radicled-${VERSION}-${{ matrix.asset }}"
+          dist="$GITHUB_WORKSPACE/dist"
+          mkdir -p "$dist"
+          # The binary, plus the notices of the code it statically links:
+          # its own THIRD-PARTY-NOTICES (crates, libgit2, zlib, SQLite and
+          # the runtime), and the Rust project's notice file for the
+          # standard library, from the toolchain that built it.
+          sysroot="$(rustc --print sysroot)"
+          if command -v cygpath >/dev/null; then sysroot="$(cygpath -u "$sysroot")"; fi
+          cp "$sysroot/share/doc/rust/COPYRIGHT-library.html" THIRD-PARTY-NOTICES-rust-std.html
+          notices="THIRD-PARTY-NOTICES THIRD-PARTY-NOTICES-rust-std.html"
+          if [[ "$TARGET" == *windows* ]]; then
+            archive="$name.zip"
+            (cd target/$TARGET/release && 7z a -tzip "$dist/$archive" freedom-radicled.exe >/dev/null)
+            7z a -tzip "$dist/$archive" $notices >/dev/null
+          else
+            archive="$name.tar.gz"
+            tar -czf "$dist/$archive" -C target/$TARGET/release freedom-radicled -C "$PWD" $notices
+          fi
+          (cd "$dist" && (sha256sum "$archive" 2>/dev/null || shasum -a 256 "$archive") > "$archive.sha256")
+          cat "$dist/$archive.sha256"
+          echo "ARCHIVE=$archive" >> "$GITHUB_ENV"
+      # The checks below run the archive's own binary, unpacked apart from
+      # the build.
+      - name: Unpack the archive
+        run: |
+          unpacked="$RUNNER_TEMP/unpacked"
+          mkdir -p "$unpacked"
+          if [[ "$ARCHIVE" == *.zip ]]; then
+            7z x -o"$unpacked" "$GITHUB_WORKSPACE/dist/$ARCHIVE" >/dev/null
+            bin="$unpacked/freedom-radicled.exe"
+          else
+            tar -xzf "$GITHUB_WORKSPACE/dist/$ARCHIVE" -C "$unpacked"
+            bin="$unpacked/freedom-radicled"
+          fi
+          ls -l "$unpacked"
+          for file in "$bin" "$unpacked/THIRD-PARTY-NOTICES" "$unpacked/THIRD-PARTY-NOTICES-rust-std.html"; do
+            [ -f "$file" ] || { echo "the archive has no $(basename "$file")" >&2; exit 1; }
+          done
+          echo "BIN=$bin" >> "$GITHUB_ENV"
+      - name: Smoke test (usage exits 64)
+        if: matrix.native
+        run: |
+          set +e
+          "$BIN" 2>/dev/null
+          code=$?
+          set -e
+          echo "exit code $code"
+          [ "$code" = 64 ]
+      - name: rad.hello
+        if: matrix.native
+        run: |
+          # The runner's own Python: python3, or `python` on Windows.
+          python=python3
+          [ "$RUNNER_OS" = Windows ] && python=python
+          "$python" ../../scripts/radicled-hello.py "$BIN"
+      # build.rs refuses `testhooks` in a release-profile build, debug
+      # assertions or not (services.yml checks it with `cargo check`): the
+      # release build's own command, with the feature, fails on its error.
+      # After packaging, so the archive is the build above, whatever this
+      # step compiles; and before the upload, so a failure publishes nothing.
+      - name: The release build refuses the test hooks
+        run: |
+          if [ -n "$GLIBC" ]; then
+            build=(cargo zigbuild --locked --release --target "$TARGET.$GLIBC")
+          else
+            build=(cargo build --locked --release --target "$TARGET")
+          fi
+          for config in "" "--config profile.release.debug-assertions=true"; do
+            if "${build[@]}" --features testhooks $config 2> testhooks-release.err; then
+              echo "a release build compiled with the testhooks feature ($config)" >&2
+              exit 1
+            fi
+            grep -F "the \`testhooks\` feature is for debug and test builds only" testhooks-release.err
+          done
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: freedom-radicled-${{ matrix.asset }}
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 7
+
+  # The darwin-amd64 archive, run natively. On the Apple silicon runner
+  # that builds it, it would run under Rosetta 2, whose translator has a
+  # thread of its own, so confinement's one-thread check refuses it there
+  # (exit 77, "2 threads before confinement") before the handshake.
+  check-darwin-amd64:
+    name: check (darwin-amd64, on Intel)
+    needs: build
+    runs-on: macos-15-intel
+    defaults:
+      run:
+        shell: bash
+    steps:
+      # For scripts/radicled-hello.py and the lockfile it checks against.
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: freedom-radicled-darwin-amd64
+          path: dist
+      - name: Unpack the archive
+        run: |
+          (cd dist && shasum -a 256 -c ./*.sha256)
+          unpacked="$RUNNER_TEMP/unpacked"
+          mkdir -p "$unpacked"
+          tar -xzf dist/*.tar.gz -C "$unpacked"
+          ls -l "$unpacked"
+          uname -m
+          file "$unpacked/freedom-radicled"
+          echo "BIN=$unpacked/freedom-radicled" >> "$GITHUB_ENV"
+      - name: Smoke test (usage exits 64)
+        run: |
+          set +e
+          "$BIN" 2>/dev/null
+          code=$?
+          set -e
+          echo "exit code $code"
+          [ "$code" = 64 ]
+      - name: rad.hello
+        run: python3 scripts/radicled-hello.py "$BIN"
+
+  publish:
+    name: SHA256SUMS, provenance and publish
+    needs: [check, build, check-darwin-amd64]
+    if: needs.check.outputs.publish == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      # Build provenance: a Sigstore certificate for this workflow run
+      # (id-token), stored with the repository's attestations.
+      id-token: write
+      attestations: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      TAG: ${{ needs.check.outputs.tag }}
+      VERSION: ${{ needs.check.outputs.version }}
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: freedom-radicled-*
+          path: dist
+          merge-multiple: true
+      - name: Assemble SHA256SUMS
+        working-directory: dist
+        run: |
+          count=$(ls *.sha256 | wc -l)
+          [ "$count" = 5 ] || { echo "expected 5 checksums, got $count" >&2; exit 1; }
+          cat *.sha256 | sort -k2 > SHA256SUMS
+          rm *.sha256
+          # Every listed archive must be present and match.
+          sha256sum --check SHA256SUMS
+          cat SHA256SUMS
+          echo "digest of SHA256SUMS (pin this in freedom-browser):"
+          sha256sum SHA256SUMS
+      # SLSA build provenance for every archive and SHA256SUMS, signed for
+      # this workflow at the tagged commit. Before the release exists, so a
+      # failure here publishes nothing.
+      - name: Attest build provenance
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-path: |
+            dist/*.tar.gz
+            dist/*.zip
+            dist/SHA256SUMS
+      - name: Draft, upload, publish
+        working-directory: dist
+        run: |
+          # --verify-tag: never let gh create a tag that isn't there.
+          gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --verify-tag --draft \
+            --title "freedom-radicled $VERSION" \
+            --notes "freedom-radicled, the libradicle service, for Freedom Browser (design 0008). Verify archives against SHA256SUMS, and their build provenance with: gh attestation verify <archive> --repo $GITHUB_REPOSITORY --signer-workflow $GITHUB_REPOSITORY/.github/workflows/release-radicled.yml --source-ref refs/tags/$TAG" \
+            ./*.tar.gz ./*.zip SHA256SUMS
+          gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --draft=false

@@ -1,0 +1,69 @@
+{
+  "amplify_num 0.5.4": {
+    "repository": "https://github.com/rust-amplify/amplify-num",
+    "commit": "872842c3d151296b18314dfa5bf86548c2ce4f29",
+    "files": [
+      "rust-amplify-amplify-num/LICENSE"
+    ]
+  },
+  "base256emoji 1.0.2": {
+    "repository": "https://github.com/Jorropo/base256emoji",
+    "commit": "f7cf4ae2c15123376d6634ca7aed005034b396ec",
+    "files": [
+      "spdx/MIT.txt"
+    ],
+    "note": "Neither the crate nor its repository (at this commit or on its default branch) carries a license text; it declares MIT. SPDX's MIT text (license-list-data v3.29.0, 31ba1a50e5397e00a304dbadc76531740e89ee48) stands in."
+  },
+  "base45 3.2.0": {
+    "repository": "https://github.com/opendevtools/base45",
+    "commit": "b9959a71143e0bd7b5f6ce547fe3c65f2031ad97",
+    "files": [
+      "spdx/MIT.txt"
+    ],
+    "note": "Neither the crate nor its repository (at this commit or on its default branch) carries a license text; it declares MIT. SPDX's MIT text (license-list-data v3.29.0, 31ba1a50e5397e00a304dbadc76531740e89ee48) stands in."
+  },
+  "const-str 0.4.3": {
+    "repository": "https://github.com/Nugine/const-str",
+    "commit": "a549b512ced97f5ec6569823dbce08916cd611f3",
+    "files": [
+      "Nugine-const-str/LICENSE"
+    ]
+  },
+  "cypheraddr 0.4.1": {
+    "repository": "https://github.com/Cyphernet-DAO/rust-cyphernet",
+    "commit": "8e68baedec9d30c9b4748e09592613a1abf97bf9",
+    "files": [
+      "Cyphernet-DAO-rust-cyphernet/LICENSE"
+    ]
+  },
+  "cyphergraphy 0.3.1": {
+    "repository": "https://github.com/Cyphernet-DAO/rust-cyphernet",
+    "commit": "23a1eb1b5d8522f2b03f017d40b080d13fba333a",
+    "files": [
+      "Cyphernet-DAO-rust-cyphernet/LICENSE"
+    ]
+  },
+  "libradicle 0.8.0": {
+    "repository": "https://github.com/solardev-xyz/libradicle",
+    "commit": "46cf9d99ec868c938ffed13b6a38fbeda0a50857",
+    "files": [
+      "spdx/Apache-2.0.txt",
+      "spdx/MIT.txt"
+    ],
+    "note": "Neither the crate nor its repository (at this commit or on main) carries a license text; its manifest and README declare MIT OR Apache-2.0. SPDX's Apache-2.0 and MIT texts (license-list-data v3.29.0, 31ba1a50e5397e00a304dbadc76531740e89ee48) stand in."
+  },
+  "noise-framework 0.4.1": {
+    "repository": "https://github.com/Cyphernet-DAO/rust-cyphernet",
+    "commit": "fe39e18392a775b42857e6fa3e92bd001ecfe1c3",
+    "files": [
+      "Cyphernet-DAO-rust-cyphernet/LICENSE"
+    ]
+  },
+  "socks5-client 0.4.3": {
+    "repository": "https://github.com/Cyphernet-DAO/rust-cyphernet",
+    "commit": "fe39e18392a775b42857e6fa3e92bd001ecfe1c3",
+    "files": [
+      "Cyphernet-DAO-rust-cyphernet/LICENSE"
+    ]
+  }
+}
