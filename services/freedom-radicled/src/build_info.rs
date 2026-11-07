@@ -4,13 +4,13 @@
 
 /// The libradicle version the pinned commit carries.
 pub const LIBRADICLE_VERSION: &str = "0.8.0";
-/// The pinned commit: libradicle#32's head (a bounded walk charges what
-/// libgit2 holds of each tree and commit, and the walk to a file is
-/// bounded), on `integration/rust-core` at libradicle#31's merge (R-19: a
+/// The pinned commit: `integration/rust-core` at libradicle#32's merge (a
+/// bounded walk charges what libgit2 holds of each tree and commit, and the
+/// walk to a file is bounded), after libradicle#31's (R-19: a
 /// commit's non-UTF-8 diff decoded lossily, never a panic), with #30 (the
 /// stop's `Shutdown` outcome), #22 (the host's repository gate), #23 (the
 /// hermetic test guard) and #28 (`Options::seeding_policy`).
-pub const LIBRADICLE_COMMIT: &str = "0353a51724fcdf197ab8c7ca066bea266ad8595c";
+pub const LIBRADICLE_COMMIT: &str = "0bc2c72e44a6088c2fe76111c0d7e0314de604e5";
 
 #[cfg(test)]
 mod tests {

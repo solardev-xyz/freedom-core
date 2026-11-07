@@ -73,8 +73,11 @@
 //! node is held for the build alone, never while the body waits for credit.
 //! Two results are copied as libradicle writes them, with a `json!` value,
 //! so their build is bounded for the copy too:
-//! - **`repo_info`'s** walk takes half its items' 16 MiB, so the value's
-//!   copy, about the result's size, fits beside it;
+//! - **`repo_info`'s** walk gets the add-on's 16 MiB of items and of loads,
+//!   as every walk does. Once it returns, its repository and the objects it
+//!   loaded are dropped (libgit2's cache is off), so the result, at most
+//!   16 MiB, and the value's copy, about its size, are held together within
+//!   the same 32 MiB while it is written;
 //! - **a blob** is loaded only up to half the built budget, 16 MiB (the
 //!   add-on's cap too, `libradicle::BINDING_READ_BUDGET`), its size read
 //!   from its header first ([`bounded_blob`]), as libgit2's buffer and
@@ -113,7 +116,7 @@ use std::time::Duration;
 
 use fc_protocol::error::{ErrorBody, ErrorCode};
 use fc_service::conn::{Connection, Headed};
-use libradicle::{BINDING_MAX_PER_PAGE, Blob, Bounds, MAX_TREE_DEPTH, json};
+use libradicle::{BINDING_MAX_PER_PAGE, Blob, MAX_TREE_DEPTH, json};
 use radicle::git::raw::{ErrorClass as GitClass, ErrorCode as GitCode};
 use radicle::node::gate::{self, RepoGate, RepoState};
 use radicle::prelude::RepoId;
@@ -783,22 +786,13 @@ fn blob_read(
     )
 }
 
-/// `bounds` with half its JSON budget: for a result libradicle copies as it
-/// writes it.
-fn halved(bounds: &Bounds) -> Bounds {
-    Bounds {
-        budget: bounds.budget / 2,
-        ..bounds.clone()
-    }
-}
-
 /// `op`'s JSON, built and written within the budget (see the module's doc).
 fn body(handle: &Handle, budget: &Arc<Budget>, until: &Until, op: Op) -> Result<Body, Failure> {
     match op {
         Op::RepoInfo { rid } => json_read(
             budget,
             until,
-            |bounds| handle.node().repo_info_bounded(rid, &halved(bounds)),
+            |bounds| handle.node().repo_info_bounded(rid, bounds),
             json::repo_info,
         ),
         Op::Tree { rid, path } => json_read(

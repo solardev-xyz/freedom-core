@@ -833,8 +833,4 @@ fn the_figures() {
         libradicle::raw_held(output::BUILT / 2) + output::BUILT / 2,
         output::BUILT + BESIDE
     );
-    let bounds = Bounds::new(libradicle::CancelToken::new(), output::BUILT).with_loads(7);
-    let half = halved(&bounds);
-    assert_eq!(half.budget, output::BUILT / 2);
-    assert_eq!(half.loads, 7);
 }
