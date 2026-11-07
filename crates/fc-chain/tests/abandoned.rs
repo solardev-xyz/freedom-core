@@ -54,8 +54,9 @@ fn answers_to_ended_callers_are_dropped_at_once() {
         let id = machine.submit(
             Call::Read {
                 chain_id: 1,
-                method: "eth_call".into(),
-                params: r#"[{"to":"0xabc"},"latest"]"#.into(),
+                // An account read: Colibri serves no call (main's #1046).
+                method: "eth_getBalance".into(),
+                params: r#"["0xabc","latest"]"#.into(),
                 options: ReadOptions {
                     origin: Some(format!("https://app{i}.example")),
                     ..ReadOptions::default()

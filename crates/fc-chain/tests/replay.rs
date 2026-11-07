@@ -2434,7 +2434,7 @@ const DEVIATIONS: &[Expected] = &[
             Want::Thrown {
                 class: "Error",
                 name: "Error",
-                message: "All chain sources failed for eth_call (colibri: No Colibri prover configured; direct: No RPC endpoint configured)",
+                message: "All chain sources failed for eth_getBalance (colibri: No Colibri prover configured; direct: No RPC endpoint configured)",
                 props: &[],
             },
         )],
@@ -2726,9 +2726,10 @@ const DEVIATIONS: &[Expected] = &[
         )],
         ..EXPECTED
     },
-    // Colibri's block fails, and Direct's quote wins over its last resort.
-    // B's header read starts with Direct's collection and fails as the
-    // world's Colibri fails every block; nothing waits for it.
+    // With main's #1046 (`colibri-unproven`) Colibri has no quote of its
+    // own, so Direct's is the walk's first. B's header read starts with
+    // Direct's collection and fails as the world's Colibri fails every
+    // block; nothing waits for it.
     Expected {
         id: "fee-headroom-later-type-2-wins",
         deviation: "fee-combination",
@@ -2741,9 +2742,53 @@ const DEVIATIONS: &[Expected] = &[
             ),
         )],
         requests: &[
-            r#"colibri request chain 1 at 0 {"method":"eth_gasPrice","params":[],"deadline_ms":1000}"#,
-            r#"colibri request chain 1 at 0 {"method":"eth_maxPriorityFeePerGas","params":[],"deadline_ms":1000}"#,
+            r#"rpc https://rpc.example at 0 {"jsonrpc":"2.0","id":0,"method":"eth_gasPrice","params":[]}"#,
             r#"colibri request chain 1 at 0 {"method":"eth_getBlockByNumber","params":["latest",false],"deadline_ms":1000}"#,
+            r#"rpc https://rpc.example at 0 {"jsonrpc":"2.0","id":0,"method":"eth_maxPriorityFeePerGas","params":[]}"#,
+        ],
+        ..EXPECTED
+    },
+    // Main's #1046 (`colibri-unproven`): Myotis's gas price of 0 fails it,
+    // Colibri has no quote of its own, and the walk reaches Direct, whose
+    // one endpoint answers as Colibri did. B marks it `answered: 1`, and
+    // its header read starts with the collection; the world's Colibri
+    // answers it `0x1`, a block that isn't an object, so the read fails and
+    // nothing waits for it.
+    Expected {
+        id: "boundary-fee-myotis-non-positive-gas-price",
+        deviation: "fee-combination",
+        replies: &[(
+            0,
+            0,
+            0,
+            Want::Quote(
+                r#"{"type":"eip1559","baseFee":"4","maxPriorityFeePerGas":"50000000","maxFeePerGas":"50000008","effectiveGasPrice":"50000004","source":"direct","verified":false,"answered":1}"#,
+            ),
+        )],
+        requests: &[
+            "myotis fee chain 1 at 0 {}",
+            r#"rpc https://rpc.example at 0 {"jsonrpc":"2.0","id":0,"method":"eth_gasPrice","params":[]}"#,
+            r#"colibri request chain 1 at 0 {"method":"eth_getBlockByNumber","params":["latest",false],"deadline_ms":5000}"#,
+            r#"rpc https://rpc.example at 0 {"jsonrpc":"2.0","id":0,"method":"eth_maxPriorityFeePerGas","params":[]}"#,
+        ],
+        ..EXPECTED
+    },
+    // Main's #1046 (`colibri-unproven`): the walk skips Colibri for
+    // Direct, whose one endpoint B marks `answered: 1`; its header read
+    // starts with the collection and is answered `0x1` by the world's
+    // Colibri, which fails it; nothing waits for it.
+    Expected {
+        id: "colibri-unproven-fee-quote-direct",
+        deviation: "fee-combination",
+        replies: &[(
+            0,
+            0,
+            0,
+            Want::Quote(
+                r#"{"type":"eip1559","baseFee":"900000000","maxPriorityFeePerGas":"100000000","maxFeePerGas":"1900000000","effectiveGasPrice":"1000000000","source":"direct","verified":false,"answered":1}"#,
+            ),
+        )],
+        requests: &[
             r#"rpc https://rpc.example at 0 {"jsonrpc":"2.0","id":0,"method":"eth_gasPrice","params":[]}"#,
             r#"colibri request chain 1 at 0 {"method":"eth_getBlockByNumber","params":["latest",false],"deadline_ms":1000}"#,
             r#"rpc https://rpc.example at 0 {"jsonrpc":"2.0","id":0,"method":"eth_maxPriorityFeePerGas","params":[]}"#,
@@ -2775,13 +2820,13 @@ const DEVIATIONS: &[Expected] = &[
 
 /// The score: scenarios replayed exactly (deviation scenarios with their
 /// asserted difference included), and those not replayed yet.
-const PASSING: usize = 343;
+const PASSING: usize = 362;
 const NOT_REPLAYED: usize = 0;
 /// The permitted races, counted: each is a cancel the machine made in the
 /// tick the reference's exchange settled, after what [`race`] names. Main
 /// withholds each quorum member's answer; a page's deadline failure is the
 /// machine's own timer.
-const RACES: &[(Race, usize)] = &[(Race::QuorumTail, 128), (Race::PageDeadline, 4)];
+const RACES: &[(Race, usize)] = &[(Race::QuorumTail, 147), (Race::PageDeadline, 4)];
 
 #[test]
 // The score is the test's report, printed with `--nocapture`.
