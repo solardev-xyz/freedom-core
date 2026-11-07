@@ -35,10 +35,10 @@
 //! release" and "Profiles without a vault"), `rad.reconcile` (0008,
 //! "Reconciliation") and `rad.start`, which runs the node until the
 //! connection ends ([`node`]); then quarantine's methods ([`quarantine`]),
-//! the writes ([`writes`]), `rad.read`'s ops ([`reads`]) and the network
-//! operations, `rad.connect_seeds` and `rad.clone` ([`network`]).
-//! The other methods and ops 0008 lists come with later steps; until then
-//! each answers `stopped`.
+//! the writes ([`writes`]), `rad.read`'s ops ([`reads`]), the network
+//! operations, `rad.connect_seeds` and `rad.clone` ([`network`]), and
+//! `rad.stats` ([`stats`]). The other methods and ops 0008 lists come with
+//! later steps; until then each answers `stopped`.
 //!
 //! **No child processes:** libradicle is built with `no-spawn`, and the
 //! service starts none.
@@ -72,6 +72,7 @@ mod reads;
 mod reconcile;
 mod repair;
 mod service;
+mod stats;
 mod testhooks;
 mod units;
 mod writes;

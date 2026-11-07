@@ -42,6 +42,19 @@
 //! waiting for it under the phase's lock: while work holds the node
 //! exclusively, it asks again at the next interval.
 //!
+//! **The watch also counts the node's peers** for `rad.stats`
+//! ([`crate::stats`]), which is answered on the reader thread and so can't
+//! ask heartwood itself: heartwood answers its sessions only through its
+//! reactor, and may take any time to. Each interval, once the node is found
+//! alive, the watch holds the node shared, trying its lock as above, and
+//! asks `Embedded::connected_peers`; the count is published for `rad.stats`
+//! ([`Node::view`]), kept when the look is skipped, and unknown after one
+//! that failed. The look is marked under the phase's lock, then made
+//! outside it, so the phase's lock is never held while heartwood answers,
+//! and the stop, which takes the node out of the phase under that lock,
+//! waits for a look already under way before it asks the node to stop
+//! ([`Node::stop`]).
+//!
 //! **The pools open with the node** ([`crate::pools`]): just before
 //! `rad.start`'s reply, so main's first request after it is admitted.
 //!
@@ -61,8 +74,10 @@
 //!    `stopped`, running ones cancelled, and their threads waited for;
 //! 2. the node is asked to stop, and waited for in the time left. A
 //!    complete drain leaves no work holding the node, so the stop takes its
-//!    lock at once. Work still running past the drain may hold it: the stop
-//!    never waits for it, and asks nothing ([`unasked`]). The node then
+//!    lock at once, once the watch's look at its peers, if one is under
+//!    way, has let go of it, which it waits for in that time. Work still
+//!    running past the drain may hold it, or a look past that time: the
+//!    stop never waits for it, and asks nothing ([`unasked`]). The node then
 //!    stops as that work lets go of it, or with the process.
 //!
 //! **How the node ended is one decision,** whichever of the watch and the
@@ -118,6 +133,7 @@
 //! leaves the marker, and the next start runs the full repair.
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{
     Arc, Condvar, Mutex, MutexGuard, PoisonError, RwLock, RwLockReadGuard, RwLockWriteGuard,
     TryLockError,
@@ -135,7 +151,7 @@ use radicle::storage::git::reconcile::quarantine::{self, Quarantine};
 use serde_json::json;
 
 use crate::pools::Pools;
-use crate::{dial, identity, marker, nat64, testhooks};
+use crate::{dial, identity, marker, nat64, stats, testhooks};
 
 /// `rad.start`'s bound (0008, "Bounds").
 pub const START_DEADLINE: Duration = Duration::from_secs(30);
@@ -162,7 +178,7 @@ struct Running {
     /// closes and opens them, through [`Handle`].
     repositories: RepoGate,
     /// NAT64 discovery, running while its lease is held: `direct` mode's,
-    /// for the node's life (`rad.stats` reads it, a later step).
+    /// for the node's life (`rad.stats` reports it).
     nat64: Option<(nat64::Discovery, nat64::Lease)>,
 }
 
@@ -256,7 +272,26 @@ pub struct Node {
     changed: Condvar,
     /// The pools, opened as the node runs and drained before it stops.
     pools: Arc<Pools>,
+    /// The node's connected peers, as the watch last counted them
+    /// ([`NO_COUNT`] until it has, and after a count that failed).
+    peers: AtomicU64,
+    /// Whether the watch is looking at the node's peers, holding it shared
+    /// (see the module's doc).
+    looking: Mutex<bool>,
+    /// Notified as a look ends.
+    looked: Condvar,
 }
+
+/// [`Node::peers`] with no count.
+const NO_COUNT: u64 = u64::MAX;
+
+/// What the stop logs when it couldn't ask the node: work still held it
+/// past the drain.
+const WORK_HELD: &str = "work was still running";
+
+/// The same, after a complete drain: the watch's look at the peers still
+/// held it.
+const LOOK_HELD: &str = "the node's watch was still counting its peers";
 
 impl Node {
     pub fn new(pools: Arc<Pools>) -> Self {
@@ -264,7 +299,85 @@ impl Node {
             phase: Mutex::new(Phase::Waiting),
             changed: Condvar::new(),
             pools,
+            peers: AtomicU64::new(NO_COUNT),
+            looking: Mutex::new(false),
+            looked: Condvar::new(),
         }
+    }
+
+    fn lock_looking(&self) -> MutexGuard<'_, bool> {
+        self.looking.lock().unwrap_or_else(|p| p.into_inner())
+    }
+
+    /// What `rad.stats` reports of the node ([`crate::stats`]): its phase;
+    /// while one runs, whether its thread still runs, the lock only tried,
+    /// never waited for; the watch's last count of its peers; and NAT64
+    /// discovery's stats, while its lease is held, each list read to its
+    /// bound. The phase's lock, which nothing holds while it waits, is held
+    /// only for the phase, the tried liveness and a handle on discovery;
+    /// discovery is read after it is let go of.
+    pub fn view(&self) -> stats::NodeView {
+        let (name, alive, discovery) = {
+            let phase = self.lock();
+            let (name, running) = match &*phase {
+                Phase::Waiting => (stats::Phase::Waiting, None),
+                Phase::Starting => (stats::Phase::Starting, None),
+                Phase::Running(running) => (stats::Phase::Running, Some(running)),
+                Phase::Down(running) => (stats::Phase::Down, Some(running)),
+                Phase::Over => (stats::Phase::Stopped, None),
+            };
+            let discovery = running
+                .and_then(|running| running.nat64.as_ref())
+                .map(|(discovery, _)| discovery.clone());
+            (name, running.and_then(Running::alive), discovery)
+        };
+        stats::NodeView {
+            phase: name,
+            alive,
+            peers: self.peers(),
+            nat64: discovery
+                .map(|discovery| discovery.stats(stats::NAT64_PREFIXES, stats::NAT64_FAILURES)),
+        }
+    }
+
+    /// The watch's last count of the node's peers.
+    fn peers(&self) -> Option<usize> {
+        let peers = self.peers.load(Ordering::Acquire);
+        (peers != NO_COUNT).then(|| usize::try_from(peers).unwrap_or(usize::MAX))
+    }
+
+    /// The watch's look at the node's peers (see the module's doc), which
+    /// the watch marked under the phase's lock, and makes without it: the
+    /// count published, then the look's end. The node is let go of before
+    /// that end, so a stop that waited for it is never left a holder of the
+    /// node but its own.
+    fn look(&self, embedded: Shared) {
+        let looked = count(&embedded);
+        drop(embedded);
+        let counted = counted(self.peers(), looked);
+        // A count can't reach `NO_COUNT`: no node holds 2^64 - 1 sessions.
+        let stored = counted.map_or(NO_COUNT, |peers| {
+            u64::try_from(peers).map_or(NO_COUNT - 1, |peers| peers.min(NO_COUNT - 1))
+        });
+        self.peers.store(stored, Ordering::Release);
+        *self.lock_looking() = false;
+        self.looked.notify_all();
+    }
+
+    /// Waits until no look at the peers holds the node, at most until
+    /// `deadline`: whether none does.
+    fn looks_ended(&self, deadline: Instant) -> bool {
+        let mut looking = self.lock_looking();
+        while *looking {
+            let Some(left) = deadline.checked_duration_since(Instant::now()) else {
+                return false;
+            };
+            looking = match self.looked.wait_timeout(looking, left) {
+                Ok((looking, _)) => looking,
+                Err(poisoned) => poisoned.into_inner().0,
+            };
+        }
+        true
     }
 
     fn lock(&self) -> MutexGuard<'_, Phase> {
@@ -417,8 +530,16 @@ impl Node {
             match &*phase {
                 // Never waited for under the phase's lock: work holding the
                 // node exclusively (`rad.unseed`) is waited out, and asked
-                // again at the next interval.
-                Phase::Running(running) if running.alive() != Some(false) => {}
+                // again at the next interval. Then the peers are counted,
+                // outside that lock, the look marked under it first (see
+                // the module's doc).
+                Phase::Running(running) if running.alive() != Some(false) => {
+                    let embedded = running.embedded.clone();
+                    *self.lock_looking() = true;
+                    drop(phase);
+                    self.look(embedded);
+                    phase = self.lock();
+                }
                 Phase::Running(_) => {
                     if let Phase::Running(running) = std::mem::replace(&mut *phase, Phase::Over) {
                         *phase = Phase::Down(running);
@@ -462,6 +583,10 @@ impl Node {
             Phase::Down(running) => (running, true),
             Phase::Waiting | Phase::Starting | Phase::Over => return,
         };
+        // The watch's look at the peers, if one is under way, holds the node
+        // shared: waited for in the time left, so that the node is asked
+        // with nothing holding it (see the module's doc).
+        let _ = self.looks_ended(deadline);
         // Nothing else can reach the node now, but work still running past
         // the drain may hold it: the outcome says whether this stop was the
         // first to ask it. In the time the drain left, if any: asked all the
@@ -469,7 +594,11 @@ impl Node {
         let stopped = running.ask_stop(deadline.saturating_duration_since(Instant::now()));
         let decided = match &stopped {
             Some(stopped) => ending(watched, drained, stopped, end),
-            None => unasked(watched, running.alive()),
+            None => unasked(
+                watched,
+                running.alive(),
+                if drained { LOOK_HELD } else { WORK_HELD },
+            ),
         };
         let Running {
             embedded,
@@ -579,16 +708,42 @@ fn ending(watched: bool, drained: bool, stopped: &libradicle::Shutdown, end: End
 }
 
 /// How a stop that couldn't ask the node left it: work still running past
-/// the drain held the node, so the drain was incomplete. `watched`: the
-/// watch found the node down first; `alive`: whether its thread still ran,
-/// if the stop could tell. Nothing asked the node, and heartwood's run ends
-/// only once asked, so a thread that ended is `Down`; otherwise nothing is
-/// proven.
-fn unasked(watched: bool, alive: Option<bool>) -> Ending {
+/// the drain held the node, so the drain was incomplete, or after a
+/// complete drain the watch's look at its peers did, past the stop's time;
+/// `why` says which. `watched`: the watch found the node down first;
+/// `alive`: whether its thread still ran, if the stop could tell. Nothing
+/// asked the node, and heartwood's run ends only once asked, so a thread
+/// that ended is `Down`; otherwise nothing is proven.
+fn unasked(watched: bool, alive: Option<bool>, why: &'static str) -> Ending {
     if watched || alive == Some(false) {
         Ending::Down
     } else {
-        Ending::Unproven("work was still running")
+        Ending::Unproven(why)
+    }
+}
+
+/// The node's connected peers, holding it shared: `None`, asking nothing,
+/// while work holds it exclusively, as the lock is only tried.
+fn count(embedded: &Shared) -> Option<Result<usize, libradicle::Error>> {
+    let node = match embedded.try_read() {
+        Ok(node) => node,
+        Err(TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
+        Err(TryLockError::WouldBlock) => return None,
+    };
+    testhooks::hold_look();
+    Some(node.connected_peers())
+}
+
+/// The peers' count after a look, from the one before it, `previous`: kept
+/// when the look was skipped, unknown after one that failed.
+fn counted(
+    previous: Option<usize>,
+    looked: Option<Result<usize, libradicle::Error>>,
+) -> Option<usize> {
+    match looked {
+        None => previous,
+        Some(Ok(peers)) => Some(peers),
+        Some(Err(_)) => None,
     }
 }
 
@@ -853,12 +1008,144 @@ mod tests {
     #[test]
     fn a_stop_that_couldnt_ask_the_node_proves_nothing_and_hides_no_crash() {
         let running = "work was still running";
-        assert_eq!(unasked(false, Some(true)), Ending::Unproven(running));
-        assert_eq!(unasked(false, None), Ending::Unproven(running));
-        assert_eq!(unasked(false, Some(false)), Ending::Down);
+        assert_eq!(
+            unasked(false, Some(true), WORK_HELD),
+            Ending::Unproven(running)
+        );
+        assert_eq!(unasked(false, None, WORK_HELD), Ending::Unproven(running));
+        assert_eq!(
+            unasked(false, Some(true), LOOK_HELD),
+            Ending::Unproven(LOOK_HELD)
+        );
+        assert_eq!(unasked(false, Some(false), WORK_HELD), Ending::Down);
         for alive in [Some(true), Some(false), None] {
-            assert_eq!(unasked(true, alive), Ending::Down, "{alive:?}");
+            for why in [WORK_HELD, LOOK_HELD] {
+                assert_eq!(unasked(true, alive, why), Ending::Down, "{alive:?}");
+            }
         }
+    }
+
+    /// The peers' count (`rad.stats`): a look's count replaces the last,
+    /// a skipped look keeps it, and a failed one leaves it unknown.
+    #[test]
+    fn a_look_counts_skips_or_forgets_the_peers() {
+        assert_eq!(counted(None, Some(Ok(3))), Some(3));
+        assert_eq!(counted(Some(3), Some(Ok(0))), Some(0));
+        assert_eq!(counted(Some(3), None), Some(3));
+        assert_eq!(counted(None, None), None);
+        assert_eq!(
+            counted(Some(3), Some(Err(libradicle::Error::Cancelled))),
+            None
+        );
+    }
+
+    /// `rad.stats`'s view of a running node, with no watch: the liveness it
+    /// gives is `Running::alive`'s, tried on the node itself (alive, then
+    /// not once the node is stopped to completion while its phase still
+    /// says it runs, the second the watch would take to see it); and NAT64
+    /// discovery's lists, read to their bounds however many resolvers fail
+    /// (10,000 that can't be asked). A node reaching no one: isolated, its
+    /// gate held to loopback by the test hooks, so only with them.
+    #[cfg(feature = "testhooks")]
+    #[test]
+    fn the_view_tries_the_running_nodes_thread_and_bounds_nat64() {
+        use fc_nat64::resolvers::Learned;
+        let home = tempfile::tempdir().unwrap();
+        let mut seed = [7u8; 32];
+        let key = libradicle::HostKey::from_bytes(&mut seed).unwrap();
+        let routing = testhooks::routing(
+            dial::routing(
+                &NetworkPolicy::Direct,
+                &[],
+                dial::Nat64::fixed(Nat64State::NONE),
+            )
+            .unwrap(),
+        );
+        let embedded = libradicle::Embedded::start_with_key(
+            libradicle::Options {
+                home: home.path().to_path_buf(),
+                alias: "view".into(),
+                listen: vec![],
+                control_socket: false,
+                routing: Some(routing),
+                seeding_policy: Some(DefaultSeedingPolicy::Block),
+                isolated: true,
+                repositories: None,
+            },
+            key,
+        )
+        .unwrap();
+        let listed: Vec<Learned> = (0..10_000)
+            .map(|n| Learned::Unaskable(format!("fe80::{n:x}")))
+            .collect();
+        let discovery =
+            nat64::Discovery::new(Arc::new(move || listed.clone()), nat64::Timing::DESIGN);
+        let lease = discovery.lease();
+        let until = Instant::now() + Duration::from_secs(10);
+        while discovery.stats(0, 0)["state"] != "unknown" {
+            assert!(Instant::now() < until, "discovery never settled");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let node = Node::new(Arc::new(Pools::start().unwrap()));
+        *node.lock() = Phase::Running(Running {
+            embedded: Arc::new(RwLock::new(embedded)),
+            repositories: RepoGate::new(),
+            nat64: Some((discovery, lease)),
+        });
+
+        let view = node.view();
+        assert_eq!(view.phase, stats::Phase::Running);
+        assert_eq!(view.alive, Some(true));
+        let mut first = vec!["unaskable"; 8];
+        first.extend(vec!["over_limit"; 8]);
+        assert_eq!(
+            view.nat64,
+            Some(serde_json::json!({ "state": "unknown", "prefixes": [], "failures": first }))
+        );
+
+        // Stopped to completion, its phase left as it was.
+        if let Phase::Running(running) = &mut *node.lock() {
+            let stopped = running.ask_stop(Duration::from_secs(30)).unwrap();
+            assert_eq!(stopped.thread, libradicle::ThreadEnd::Stopped);
+        }
+        let view = node.view();
+        assert_eq!(view.phase, stats::Phase::Running);
+        assert_eq!(view.alive, Some(false));
+        *node.lock() = Phase::Over;
+    }
+
+    /// `rad.stats`'s view of a node that doesn't run: its phase, and
+    /// nothing of a node; the stop waits for a look under way, within its
+    /// time.
+    #[test]
+    fn the_view_names_the_phase_and_the_stop_waits_for_a_look() {
+        let node = Arc::new(Node::new(Arc::new(Pools::start().unwrap())));
+        let view = node.view();
+        assert_eq!(view.phase, stats::Phase::Waiting);
+        assert_eq!((view.alive, view.peers, view.nat64), (None, None, None));
+        assert!(node.admit());
+        assert_eq!(node.view().phase, stats::Phase::Starting);
+        *node.lock() = Phase::Over;
+        assert_eq!(node.view().phase, stats::Phase::Stopped);
+
+        // No look under way: at once, whatever the deadline.
+        assert!(node.looks_ended(Instant::now()));
+        // One that outlives the deadline.
+        *node.lock_looking() = true;
+        let asked = Instant::now();
+        assert!(!node.looks_ended(asked + Duration::from_millis(100)));
+        assert!(asked.elapsed() >= Duration::from_millis(100));
+        // One that ends within it: waited for.
+        let ending = {
+            let node = node.clone();
+            std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_millis(200));
+                *node.lock_looking() = false;
+                node.looked.notify_all();
+            })
+        };
+        assert!(node.looks_ended(Instant::now() + Duration::from_secs(10)));
+        ending.join().unwrap();
     }
 
     #[test]

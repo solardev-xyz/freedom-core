@@ -4,10 +4,12 @@
 //! A name past the longest CID's text is refused before any conversion.
 //!
 //! A scaling check, not a time limit: the cost of refusing a name of 64 Ki
-//! characters against one of 8 Ki, in this thread's own CPU time. Refusing
-//! by length costs the same for both; converting first costs 64 times as
-//! much for 8 times the text. Its own process, so the thread's accounting
-//! is this test's alone.
+//! characters against one of 8 Ki. Refusing by length costs the same for
+//! both; converting first costs 64 times as much for 8 times the text. On
+//! Linux it is this thread's own CPU time, and its own process, so the
+//! thread's accounting is this test's alone; elsewhere it is wall time,
+//! which a runner's stall inflates (#294), so each cost is the least of
+//! three measurements.
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
@@ -17,34 +19,64 @@ use std::time::Instant;
 use fc_ipfs::cid::{self, MAX_CID, MAX_CID_TEXT};
 
 /// The CPU time this thread has used, in nanoseconds: Linux's scheduler
-/// accounting, which other processes' load doesn't inflate; elsewhere, the
-/// time since the first call.
+/// accounting, which other processes' load doesn't inflate, or wall time
+/// where it can't be read.
+#[cfg(target_os = "linux")]
 fn cpu_ns() -> u128 {
-    static START: OnceLock<Instant> = OnceLock::new();
     std::fs::read_to_string("/proc/thread-self/schedstat")
         .ok()
         .and_then(|stat| stat.split_whitespace().next()?.parse().ok())
-        .unwrap_or_else(|| START.get_or_init(Instant::now).elapsed().as_nanos())
+        .unwrap_or_else(wall_ns)
 }
 
-/// What one read of `text` costs in CPU time, in nanoseconds, repeated
-/// until 200 ms are used, since the scheduler brings a running thread's
-/// account up to date only at its ticks.
+/// Off Linux std has no thread CPU clock: wall time, with no failed
+/// `/proc` lookup in each read (#295 review, round 1).
+#[cfg(not(target_os = "linux"))]
+fn cpu_ns() -> u128 {
+    wall_ns()
+}
+
+/// The time since the first call, in nanoseconds.
+fn wall_ns() -> u128 {
+    static START: OnceLock<Instant> = OnceLock::new();
+    START.get_or_init(Instant::now).elapsed().as_nanos()
+}
+
+/// What one read of `text` costs, in nanoseconds: the least of three
+/// measurements. Off Linux the clock is the wall's, and a runner that
+/// deschedules this thread for a moment inflates one measurement (#294:
+/// 14.8 times on a macOS runner); the least of three drops that moment.
 fn cost(text: &str) -> f64 {
+    (0..3).map(|_| measured(text)).fold(f64::INFINITY, f64::min)
+}
+
+/// One measurement of what a read of `text` costs, in nanoseconds:
+/// repeated until 200 ms are used, since the scheduler brings a running
+/// thread's account up to date only at its ticks. The reads run in
+/// batches that double, so the clock is read a few dozen times however
+/// cheap a read is, and its own cost doesn't count as the read's (#295
+/// review, round 1).
+fn measured(text: &str) -> f64 {
     let start = cpu_ns();
     let mut runs = 0u32;
+    let mut batch = 1u32;
     loop {
-        let read = if text.starts_with('k') {
-            cid::from_key_text(text)
-        } else {
-            cid::from_base32(text)
-        };
-        assert!(read.is_none());
-        runs += 1;
+        for _ in 0..batch {
+            // Opaque to the optimizer, so a batch can't fold into one read.
+            let text = std::hint::black_box(text);
+            let read = if text.starts_with('k') {
+                cid::from_key_text(text)
+            } else {
+                cid::from_base32(text)
+            };
+            assert!(std::hint::black_box(read).is_none());
+        }
+        runs = runs.saturating_add(batch);
         let spent = cpu_ns() - start;
         if spent >= 200_000_000 {
             return spent as f64 / f64::from(runs);
         }
+        batch = batch.saturating_mul(2);
     }
 }
 

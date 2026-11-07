@@ -340,7 +340,7 @@ function loadMain(checkout) {
     [ADDON]: addon,
   });
   const seedStatus = loadWithInternals(checkout, 'src/main/radicle/seed-status.js', [], { '../logger': log });
-  const manager = loadWithInternals(checkout, 'src/main/radicle-manager.js', ['connectAndSeedDefault', 'seedRepository'], {
+  const manager = loadWithInternals(checkout, 'src/main/radicle-manager.js', ['connectAndSeedDefault', 'seedRepository', 'getConnections'], {
     electron: { ipcMain: { handle() {}, on() {}, removeHandler() {} }, BrowserWindow: { getAllWindows: () => [] } },
     './logger': log,
     './radicle-embedded': embedded,
@@ -575,4 +575,5 @@ async function buildRadicleNetwork(checkout, meta) {
   }
 }
 
-module.exports = { buildRadicleNetwork };
+// radicle-stats.js reads main's peer count through the same harness.
+module.exports = { buildRadicleNetwork, loadMain, runMain };

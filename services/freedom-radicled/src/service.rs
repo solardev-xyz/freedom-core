@@ -26,8 +26,11 @@
 //!   ([`crate::network`]): a clone's progress goes to main as
 //!   `rad.progress` events, bounded per clone, through the progress hub's
 //!   thread ([`crate::network::progress`]);
-//! - `rad.stats` (inline) and `rad.import_repo` (the import process's)
-//!   come with later steps, and answer `stopped`.
+//! - **`rad.stats`** is answered inline, on the reader thread, at once, in
+//!   every phase from the handshake on: what the service holds in memory,
+//!   never waiting ([`crate::stats`]);
+//! - `rad.import_repo` (the import process's) comes with a later step, and
+//!   answers `stopped`.
 //!
 //! **`rad.reconcile`** runs on a thread of its own, never the reader's. It
 //! is admitted once, after `rad.identity`; a second is `invalid_argument`,
@@ -67,7 +70,7 @@ use crate::network::{self, progress};
 use crate::node::{self, Node};
 use crate::output::{self, Budget};
 use crate::pools::{self, Mutates, Pool, Pools, Ticket, Work};
-use crate::{quarantine, reads, reconcile, repair, writes};
+use crate::{quarantine, reads, reconcile, repair, stats, writes};
 use crate::{testhooks, units};
 
 /// How the process ends after a start step it answered with an error
@@ -77,7 +80,7 @@ const FAILED_START: Exit = Exit::Ok;
 
 /// The methods 0008 lists beside `rad.hello`, `rad.identity` and
 /// `rad.shutdown` that later steps implement, and that take no pool here.
-const LATER: &[&str] = &["rad.stats", "rad.import_repo"];
+const LATER: &[&str] = &["rad.import_repo"];
 
 /// The methods on the network pool.
 const NETWORK: &[&str] = &["rad.connect_seeds", "rad.clone"];
@@ -144,6 +147,8 @@ pub struct RadicleService {
     budget: Arc<Budget>,
     /// The clones' progress, written to main by its thread.
     progress: Arc<progress::Hub>,
+    /// The quarantine record's count, for `rad.stats`.
+    quarantined: Arc<stats::Quarantined>,
 }
 
 impl RadicleService {
@@ -162,11 +167,13 @@ impl RadicleService {
     ) -> Option<Self> {
         let identity = Identity::new(&grant.home)?;
         let node = Arc::new(Node::new(pools.clone()));
+        let quarantined = Arc::new(stats::Quarantined::default());
         // The writer's online repair reaches the node only while it runs.
         pools.repair_with(Arc::new(repair::Online::new(
             Arc::downgrade(&node),
             grant.home.clone(),
             units.clone(),
+            quarantined.clone(),
         )));
         Some(Self {
             home: grant.home,
@@ -183,6 +190,7 @@ impl RadicleService {
             pools,
             budget: Budget::new(testhooks::budget(output::BUDGET)),
             progress,
+            quarantined,
         })
     }
 
@@ -213,7 +221,13 @@ impl RadicleService {
     fn work(&self, conn: &Connection, request: &Request<'_>) -> (Work, Option<Mutates>) {
         match request.method {
             "rad.quarantine_list" => (quarantine::list(conn, &self.home, request.params), None),
-            "rad.remove_repo" => quarantine::remove(conn, &self.node, &self.home, request.params),
+            "rad.remove_repo" => quarantine::remove(
+                conn,
+                &self.node,
+                &self.home,
+                request.params,
+                &self.quarantined,
+            ),
             "rad.write" => {
                 // Known by now: the pool admits nothing before `RUNNING`.
                 let ephemeral = self.identity.with(|i| i.ephemeral).unwrap_or(true);
@@ -284,6 +298,7 @@ impl RadicleService {
         let home = self.home.clone();
         let cancel = self.stopping.clone();
         let reconciliation = self.reconciliation.clone();
+        let quarantined = self.quarantined.clone();
         let owed = conn.clone();
         let id = request.id;
         // Each unit's time limit, from outside the worker.
@@ -308,7 +323,11 @@ impl RadicleService {
                 );
                 drop(signer);
                 match outcome {
-                    Ok(reconcile::Outcome::Done { reply, resigned }) => {
+                    Ok(reconcile::Outcome::Done {
+                        reply,
+                        resigned,
+                        quarantined: count,
+                    }) => {
                         log::info(
                             "reconciled",
                             json!({
@@ -317,6 +336,7 @@ impl RadicleService {
                                 "quarantined": reply["quarantined"]["count"],
                             }),
                         );
+                        quarantined.set(Some(count));
                         *reconciliation.lock().unwrap_or_else(|p| p.into_inner()) =
                             Reconciliation::Done { resigned };
                         let _ = owed.reply(id, &reply);
@@ -334,6 +354,26 @@ impl RadicleService {
                 id,
                 &ErrorBody::new(ErrorCode::Internal, "Internal error"),
             );
+        }
+    }
+
+    /// `rad.stats`'s snapshot: what the service holds now, each part read
+    /// under a lock held only briefly ([`crate::stats`]).
+    fn snapshot(&self) -> stats::Snapshot {
+        stats::Snapshot {
+            node: self.node.view(),
+            unit: self.units.current().map(|(kind, elapsed)| stats::Unit {
+                kind,
+                elapsed,
+                limit: self.units.limit(),
+            }),
+            quarantined: self.quarantined.get(),
+            pools: self.pools.usage(),
+            output: (self.budget.used(), self.budget.total()),
+            mode: match self.policy {
+                NetworkPolicy::Direct => "direct",
+                NetworkPolicy::Socks5 { .. } => "socks5",
+            },
         }
     }
 
@@ -448,6 +488,8 @@ impl Service for RadicleService {
             self.reconcile(conn, &request);
         } else if method == "rad.start" && self.identity.known() {
             self.start(conn, &request);
+        } else if method == "rad.stats" {
+            stats::answer(conn, &request, || self.snapshot());
         } else if method == "rad.identity" {
             match self
                 .identity

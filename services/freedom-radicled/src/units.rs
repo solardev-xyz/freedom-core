@@ -14,8 +14,8 @@
 //!   before it starts, and the dirty marker stays, so the next start sees
 //!   which unit overran, reruns it in its smallest form, and quarantines its
 //!   repository after a second process ends during it.
-//! - **What is running** is kept for `rad.stats` (a later step): the unit's
-//!   kind, and how long it has run.
+//! - **What is running** is kept for `rad.stats` ([`crate::stats`]): the
+//!   unit's kind, how long it has run, and its limit.
 //!
 //! The same watch is reconciliation's at a start, and the online repair's
 //! while the node runs ([`crate::repair`]): the service holds it.
@@ -60,14 +60,15 @@ impl UnitWatch {
     }
 
     /// The unit running, by its kind, and how long it has run.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "rad.stats reads it, a later step")
-    )]
     pub fn current(&self) -> Option<(String, Duration)> {
         self.lock()
             .as_ref()
             .map(|running| (running.kind.clone(), running.started.elapsed()))
+    }
+
+    /// Each unit's time limit.
+    pub fn limit(&self) -> Duration {
+        self.limit
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, Option<Running>> {
