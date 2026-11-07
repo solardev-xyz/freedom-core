@@ -244,31 +244,39 @@ fn a_panic_in_the_service_s_own_work_exits_70_with_one_fixed_line() {
 #[cfg(feature = "testhooks")]
 #[test]
 fn shutdown_waits_for_quiescence() {
-    let mut ipfsd = Ipfsd::ephemeral(&[("FREEDOM_IPFSD_TEST_HOLD_TEARDOWN_MS", "1500")]);
+    // The persistent process: the hold's file is in its data directory.
+    let dirs = Dirs::new();
+    let file = dirs.data.join("release");
+    let held = hold("until", &file);
+    let mut ipfsd = Ipfsd::persistent(&dirs, &[("FREEDOM_IPFSD_TEST_HOLD_TEARDOWN", &held)]);
     ipfsd.hello();
-    assert_eq!(ipfsd.start(memory("e-1"))["result"]["instance"], "e-1");
-    let sent = Instant::now();
+    assert_eq!(ipfsd.start(disk("p-1"))["result"]["instance"], "p-1");
     ipfsd.shutdown();
+    // The instance is cancelled, and its runtime's join waits for the held
+    // job: no exit.
+    ipfsd.logged(TEARDOWN_HELD);
+    assert!(!ipfsd.exits_within(Duration::from_millis(300)));
+    // The exit, once the test releases the job and the join returns.
+    release(&file);
     assert_eq!(ipfsd.exit_code(EXIT_TIMEOUT), Some(0));
-    // The exit waited for the instance's runtime to be joined.
-    assert!(sent.elapsed() >= Duration::from_millis(1500));
 }
 
 #[cfg(feature = "testhooks")]
 #[test]
 fn eof_with_a_teardown_held_past_5_s_exits_70() {
-    let mut ipfsd = Ipfsd::ephemeral(&[("FREEDOM_IPFSD_TEST_HOLD_TEARDOWN_MS", "8000")]);
+    // Held until a file the test never creates.
+    let never = tempfile::tempdir().unwrap();
+    let held = hold("until", &never.path().join("release"));
+    let mut ipfsd = Ipfsd::ephemeral(&[("FREEDOM_IPFSD_TEST_HOLD_TEARDOWN", &held)]);
     ipfsd.hello();
     assert_eq!(ipfsd.start(memory("e-1"))["result"]["instance"], "e-1");
     let closed = Instant::now();
     ipfsd.close_stdin();
+    // At the bound, never by the held job's end: not before its 30 s, past
+    // EXIT_TIMEOUT.
     assert_eq!(ipfsd.exit_code(EXIT_TIMEOUT), Some(70));
-    // Within the bound, never by the held job's end.
     let took = closed.elapsed();
-    assert!(
-        took >= Duration::from_secs(5) && took < Duration::from_secs(8),
-        "{took:?}"
-    );
+    assert!(took >= Duration::from_secs(5), "{took:?}");
     let stderr = ipfsd.stderr();
     assert!(stderr.contains("teardown_unproven"), "{stderr}");
     assert!(!stderr.contains("\"instance stopped\""), "{stderr}");

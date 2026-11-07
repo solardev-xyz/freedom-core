@@ -285,19 +285,27 @@ fn discovery_queries_only_while_a_direct_instance_lives() {
 }
 
 /// 169-M1: a fenced instance's discovery lease goes at its fence, not when
-/// its teardown is proven. A live instance's stop, its teardown held 2 s
-/// across the 5 s refresh: no query until the stop's acknowledgement.
+/// its teardown is proven. A live instance's stop, its teardown held across
+/// the 5 s refresh until the test releases it, 1.5 s after the stop: no
+/// query until the stop's acknowledgement. The persistent process: the
+/// hold's file is in its data directory.
 #[test]
 fn a_stopped_instance_holds_discovery_no_longer_than_its_fence() {
     let dns64 = Dns64::start(&["2001:db8:64::"], false);
     let resolvers = dns64.addr.to_string();
-    let mut ipfsd = Ipfsd::ephemeral(&[
-        ("FREEDOM_IPFSD_TEST_NAT64_RESOLVERS", &resolvers),
-        ("FREEDOM_IPFSD_TEST_HOLD_TEARDOWN_MS", "2000"),
-    ]);
+    let dirs = Dirs::new();
+    let file = dirs.data.join("release");
+    let held = hold("until", &file);
+    let mut ipfsd = Ipfsd::persistent(
+        &dirs,
+        &[
+            ("FREEDOM_IPFSD_TEST_NAT64_RESOLVERS", &resolvers),
+            ("FREEDOM_IPFSD_TEST_HOLD_TEARDOWN", &held),
+        ],
+    );
     ipfsd.hello();
-    assert_eq!(ipfsd.start(memory("e-1"))["result"]["instance"], "e-1");
-    let network = network_stats_until(&mut ipfsd, "e-1", |network| {
+    assert_eq!(ipfsd.start(disk("p-1"))["result"]["instance"], "p-1");
+    let network = network_stats_until(&mut ipfsd, "p-1", |network| {
         network["nat64"]["state"] == "known"
     });
     assert_eq!(network["nat64"]["state"], "known", "{network}");
@@ -306,8 +314,11 @@ fn a_stopped_instance_holds_discovery_no_longer_than_its_fence() {
     std::thread::sleep(Duration::from_millis(4000));
     let before = dns64.queries();
     let stopped = Instant::now();
-    assert_eq!(ipfsd.stop("e-1")["result"], json!({ "instance": "e-1" }));
-    assert!(stopped.elapsed() >= Duration::from_millis(1500));
+    let stop = ipfsd.request("ipfs.stop", json!({ "instance": "p-1" }));
+    ipfsd.logged(TEARDOWN_HELD);
+    std::thread::sleep(Duration::from_millis(1500).saturating_sub(stopped.elapsed()));
+    release(&file);
+    assert_eq!(ipfsd.reply(stop)["result"], json!({ "instance": "p-1" }));
     assert_eq!(
         dns64.queries(),
         before,
@@ -318,51 +329,77 @@ fn a_stopped_instance_holds_discovery_no_longer_than_its_fence() {
 }
 
 /// The same for a start fenced while it builds, by each of a start's
-/// fences: a stop, a cancel, its deadline, the connection's end. Fenced 1 s
-/// after its admission's query, its build held 5.5 s: past the 5 s
-/// refresh, and within the 5 s bound its fence armed. No query meanwhile.
+/// fences: a stop, a cancel, its deadline, the connection's end. Its build
+/// returns, then its job is held before it looks at its fence. Fenced 3 s
+/// after its admission's query, it is released at 5.5 s, past the 5 s
+/// refresh, so only its teardown is left inside the 5 s bound its fence
+/// armed. No query meanwhile. The persistent process: the hold's file is in
+/// its data directory.
 #[test]
 fn a_start_fenced_while_building_holds_discovery_no_longer() {
     for fence in ["stop", "cancel", "deadline", "end"] {
         let dns64 = Dns64::start(&["2001:db8:64::"], false);
         let resolvers = dns64.addr.to_string();
+        let dirs = Dirs::new();
+        let file = dirs.data.join("release");
+        let held = hold("after", &file);
         let mut env = vec![
             ("FREEDOM_IPFSD_TEST_NAT64_RESOLVERS", resolvers.as_str()),
-            ("FREEDOM_IPFSD_TEST_START_DELAY_MS", "5500"),
+            ("FREEDOM_IPFSD_TEST_HOLD_START", held.as_str()),
         ];
         if fence == "deadline" {
-            env.push(("FREEDOM_IPFSD_TEST_START_DEADLINE_MS", "1000"));
+            env.push(("FREEDOM_IPFSD_TEST_START_DEADLINE_MS", "3000"));
         }
-        let mut ipfsd = Ipfsd::ephemeral(&env);
+        let mut ipfsd = Ipfsd::persistent(&dirs, &env);
         ipfsd.hello();
-        let start = ipfsd.request("ipfs.start", memory("e-1"));
+        let start = ipfsd.request("ipfs.start", disk("p-1"));
         // Its admission took the lease: discovery has asked.
         let deadline = Instant::now() + Duration::from_secs(5);
         while dns64.queries() == 0 && Instant::now() < deadline {
             std::thread::sleep(Duration::from_millis(10));
         }
+        let asked = Instant::now();
         assert!(dns64.queries() > 0, "{fence}: no query at admission");
-        std::thread::sleep(Duration::from_millis(1000));
+        ipfsd.logged(BUILD_RETURNED);
+        std::thread::sleep(Duration::from_millis(3000).saturating_sub(asked.elapsed()));
         let before = dns64.queries();
-        match fence {
+        let stop = match fence {
             "stop" => {
-                let stop = ipfsd.request("ipfs.stop", json!({ "instance": "e-1" }));
-                assert_eq!(ipfsd.recv()["id"], start);
-                assert_eq!(ipfsd.recv()["id"], stop);
+                let stop = ipfsd.request("ipfs.stop", json!({ "instance": "p-1" }));
+                // The fence is in place once a second stop is answered.
+                assert_eq!(ipfsd.stop("p-1")["error"]["code"], "stopped");
+                Some(stop)
             }
             "cancel" => {
                 ipfsd.cancel(start);
-                // The instance is gone once built and torn down.
-                std::thread::sleep(Duration::from_millis(5500));
+                assert_eq!(ipfsd.reply(start)["error"]["code"], "cancelled");
+                // The reader handled the cancel before this stop: the fence
+                // is in place.
+                assert_eq!(ipfsd.stop("p-1")["error"]["code"], "stopped");
+                None
             }
             "deadline" => {
-                assert_eq!(ipfsd.recv()["error"]["code"], "deadline");
-                std::thread::sleep(Duration::from_millis(5500));
+                assert_eq!(ipfsd.reply(start)["error"]["code"], "deadline");
+                None
             }
             _ => {
                 ipfsd.close_stdin();
-                assert_eq!(ipfsd.exit_code(EXIT_TIMEOUT), Some(0), "{fence}");
+                ipfsd.logged("the connection ended");
+                None
             }
+        };
+        // Past the refresh's time, the build is released: the instance is
+        // torn down.
+        std::thread::sleep(Duration::from_millis(5500).saturating_sub(asked.elapsed()));
+        release(&file);
+        match fence {
+            "stop" => {
+                assert_eq!(ipfsd.reply(start)["error"]["code"], "stopped");
+                let stop = stop.unwrap();
+                assert_eq!(ipfsd.reply(stop)["result"], json!({ "instance": "p-1" }));
+            }
+            "cancel" | "deadline" => ipfsd.logged("instance stopped"),
+            _ => assert_eq!(ipfsd.exit_code(EXIT_TIMEOUT), Some(0), "{fence}"),
         }
         assert_eq!(
             dns64.queries(),

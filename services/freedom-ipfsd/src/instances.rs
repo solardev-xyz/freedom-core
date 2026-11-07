@@ -465,9 +465,10 @@ impl Instances {
         fixed: Fixed,
         caches: Option<Reservation>,
     ) {
-        testhooks::start_delay();
+        testhooks::before_build();
         testhooks::panic_at("start");
         let built = self.open(&start, seq, fixed, caches);
+        testhooks::at_build_end();
         let instance_id = start.instance;
         let mut table = self.lock();
         let (fenced, bound, stops) = match table.active.get_mut(&instance_id) {

@@ -196,7 +196,9 @@ fn a_store_that_wont_open_is_storage() {
 #[test]
 fn a_stop_is_answered_only_once_quiescence_is_proven() {
     let dirs = Dirs::new();
-    let mut ipfsd = Ipfsd::persistent(&dirs, &[("FREEDOM_IPFSD_TEST_HOLD_TEARDOWN_MS", "1500")]);
+    let file = dirs.data.join("release");
+    let held = hold("until", &file);
+    let mut ipfsd = Ipfsd::persistent(&dirs, &[("FREEDOM_IPFSD_TEST_HOLD_TEARDOWN", &held)]);
     ipfsd.hello();
     assert_eq!(ipfsd.start(disk("p-1"))["result"]["instance"], "p-1");
     // The instance's runtime threads, once they have named themselves.
@@ -209,7 +211,6 @@ fn a_stop_is_answered_only_once_quiescence_is_proven() {
         assert!(ipfsd.threads("ipfs-inst-1") > 0);
     }
 
-    let sent = Instant::now();
     let stop = ipfsd.request("ipfs.stop", json!({ "instance": "p-1" }));
     // The fence comes first: a second stop is `stopped`, and a replacement
     // waits for the room, both answered while the teardown runs.
@@ -221,11 +222,15 @@ fn a_stop_is_answered_only_once_quiescence_is_proven() {
     assert_eq!(first["error"]["code"], "stopped", "{first}");
     assert_eq!(second["id"], replacement, "{second}");
     assert_eq!(second["error"]["code"], "busy", "{second}");
-    // Then the stop, once the runtime's join has waited for the held job.
+    // The instance is cancelled, and its runtime's join waits for the held
+    // job: the stop isn't answered.
+    ipfsd.logged(TEARDOWN_HELD);
+    assert!(ipfsd.quiet_for(Duration::from_millis(300)));
+    // Then the stop, once the test releases the job and the join returns.
+    release(&file);
     let reply = ipfsd.recv();
     assert_eq!(reply["id"], stop, "{reply}");
     assert_eq!(reply["result"], json!({ "instance": "p-1" }));
-    assert!(sent.elapsed() >= Duration::from_millis(1500));
     // No thread of the instance's runtime is left.
     #[cfg(target_os = "linux")]
     assert_eq!(ipfsd.threads("ipfs-inst-1"), 0);
@@ -238,18 +243,19 @@ fn a_stop_is_answered_only_once_quiescence_is_proven() {
 #[cfg(feature = "testhooks")]
 #[test]
 fn a_teardown_held_past_5_s_exits_70() {
-    let mut ipfsd = Ipfsd::ephemeral(&[("FREEDOM_IPFSD_TEST_HOLD_TEARDOWN_MS", "8000")]);
+    // Held until a file the test never creates.
+    let never = tempfile::tempdir().unwrap();
+    let held = hold("until", &never.path().join("release"));
+    let mut ipfsd = Ipfsd::ephemeral(&[("FREEDOM_IPFSD_TEST_HOLD_TEARDOWN", &held)]);
     ipfsd.hello();
     assert_eq!(ipfsd.start(memory("e-1"))["result"]["instance"], "e-1");
     let sent = Instant::now();
     ipfsd.request("ipfs.stop", json!({ "instance": "e-1" }));
+    // At the bound: the held job never lets the join return, before its
+    // 30 s, past EXIT_TIMEOUT.
     assert_eq!(ipfsd.exit_code(EXIT_TIMEOUT), Some(70));
-    // At the bound, before the held job would have let the join return.
     let took = sent.elapsed();
-    assert!(
-        took >= Duration::from_secs(5) && took < Duration::from_secs(8),
-        "{took:?}"
-    );
+    assert!(took >= Duration::from_secs(5), "{took:?}");
     // The stop was never answered.
     assert!(ipfsd.stdout_closes_within(EXIT_TIMEOUT));
     assert_eq!(ipfsd.leftover(), Vec::<serde_json::Value>::new());
@@ -261,10 +267,18 @@ fn a_teardown_held_past_5_s_exits_70() {
 #[test]
 fn a_stop_while_starting_answers_both() {
     let dirs = Dirs::new();
-    let mut ipfsd = Ipfsd::persistent(&dirs, &[("FREEDOM_IPFSD_TEST_START_DELAY_MS", "500")]);
+    let file = dirs.data.join("release");
+    let held = hold("after", &file);
+    let mut ipfsd = Ipfsd::persistent(&dirs, &[("FREEDOM_IPFSD_TEST_HOLD_START", &held)]);
     ipfsd.hello();
     let start = ipfsd.request("ipfs.start", disk("p-1"));
+    // Built, and held before its job looks at its fence: the stop fences a
+    // start, and only the teardown is left inside the bound it arms.
+    ipfsd.logged(BUILD_RETURNED);
     let stop = ipfsd.request("ipfs.stop", json!({ "instance": "p-1" }));
+    // The fence is in place once a second stop is answered `stopped`.
+    assert_eq!(ipfsd.stop("p-1")["error"]["code"], "stopped");
+    release(&file);
     // The start is fenced: `stopped`. The stop is answered once the
     // instance, built after all, has been torn down.
     let first = ipfsd.recv();
@@ -286,8 +300,8 @@ fn a_stop_while_starting_answers_both() {
         2,
         "{stderr}"
     );
-    // Revoked first: p-1 as soon as it existed, fenced while it built; p-2
-    // at the connection's end.
+    // Revoked first: p-1 as soon as its job found it fenced; p-2 at the
+    // connection's end.
     assert_eq!(
         stopping(&stderr),
         [("p-1".to_string(), true), ("p-2".to_string(), true)],
@@ -322,14 +336,22 @@ fn every_fence_revokes_the_network_first() {
 #[test]
 fn a_cancelled_start_is_torn_down() {
     let dirs = Dirs::new();
-    let mut ipfsd = Ipfsd::persistent(&dirs, &[("FREEDOM_IPFSD_TEST_START_DELAY_MS", "500")]);
+    let file = dirs.data.join("release");
+    let held = hold("after", &file);
+    let mut ipfsd = Ipfsd::persistent(&dirs, &[("FREEDOM_IPFSD_TEST_HOLD_START", &held)]);
     ipfsd.hello();
     let start = ipfsd.request("ipfs.start", disk("p-1"));
+    // Built, and held before its job looks at its fence: the cancel fences
+    // a start, and only the teardown is left inside the bound it arms.
+    ipfsd.logged(BUILD_RETURNED);
     ipfsd.cancel(start);
     assert_eq!(ipfsd.reply(start)["error"]["code"], "cancelled");
-    // Its room stays taken until it is built and torn down.
+    // Its room stays taken until it is torn down. The reader handled the
+    // cancel before this start, so the fence is in place.
     assert_eq!(ipfsd.start(disk("p-2"))["error"]["code"], "busy");
-    let deadline = Instant::now() + Duration::from_secs(10);
+    release(&file);
+    // A hang guard, not a timing bound.
+    let deadline = Instant::now() + READ_TIMEOUT;
     let started = loop {
         let reply = ipfsd.start(disk("p-2"));
         if reply["error"]["code"] != "busy" || Instant::now() >= deadline {
@@ -341,7 +363,8 @@ fn a_cancelled_start_is_torn_down() {
     assert_eq!(ipfsd.stop("p-1")["error"]["code"], "stopped");
     ipfsd.shutdown();
     assert_eq!(ipfsd.exit_code(EXIT_TIMEOUT), Some(0));
-    // The cancelled start's instance was revoked as soon as it existed.
+    // The cancelled start's instance was revoked as soon as its job found
+    // it fenced.
     let stderr = ipfsd.stderr();
     assert_eq!(stopping(&stderr)[0], ("p-1".to_string(), true), "{stderr}");
 }
@@ -349,17 +372,28 @@ fn a_cancelled_start_is_torn_down() {
 #[cfg(feature = "testhooks")]
 #[test]
 fn a_start_past_its_deadline_is_answered_deadline_and_torn_down() {
-    let mut ipfsd = Ipfsd::ephemeral(&[
-        ("FREEDOM_IPFSD_TEST_START_DELAY_MS", "800"),
-        ("FREEDOM_IPFSD_TEST_START_DEADLINE_MS", "100"),
-    ]);
+    // Held once built, before its job looks at its fence, until the test
+    // releases it: its deadline passes meanwhile, or during its build.
+    let dirs = Dirs::new();
+    let file = dirs.data.join("release");
+    let held = hold("after", &file);
+    let mut ipfsd = Ipfsd::persistent(
+        &dirs,
+        &[
+            ("FREEDOM_IPFSD_TEST_HOLD_START", &held),
+            ("FREEDOM_IPFSD_TEST_START_DEADLINE_MS", "100"),
+        ],
+    );
     ipfsd.hello();
-    assert_eq!(ipfsd.start(memory("e-1"))["error"]["code"], "deadline");
+    assert_eq!(ipfsd.start(disk("p-1"))["error"]["code"], "deadline");
     // Fenced at the deadline.
-    assert_eq!(ipfsd.stop("e-1")["error"]["code"], "stopped");
+    assert_eq!(ipfsd.stop("p-1")["error"]["code"], "stopped");
     ipfsd.close_stdin();
+    // Released once the connection has ended: the exit comes once the
+    // instance is torn down.
+    ipfsd.logged("the connection ended");
+    release(&file);
     assert_eq!(ipfsd.exit_code(EXIT_TIMEOUT), Some(0));
-    // The end waited for the build, then tore the instance down.
     let stderr = ipfsd.stderr();
     assert!(stderr.contains("\"instance stopped\""), "{stderr}");
 }
@@ -367,25 +401,25 @@ fn a_start_past_its_deadline_is_answered_deadline_and_torn_down() {
 /// Review of #129, M1: a start fenced while its build is held past the 5 s
 /// bound. The bound runs from the fence, through the build: the process
 /// exits 70 at it, with nothing answered after the fence, rather than when
-/// the build (8 s) ends.
+/// the build ends. The build is held until a file the test never creates,
+/// so it can't end before the hold's 30 s, past EXIT_TIMEOUT.
 #[cfg(feature = "testhooks")]
 fn a_fenced_build_held_past_5_s_exits_70(
     env: &[(&str, &str)],
     fence: impl FnOnce(&mut Ipfsd, u64),
     after: Duration,
 ) {
+    let never = tempfile::tempdir().unwrap();
+    let held = hold("until", &never.path().join("release"));
     let mut ipfsd =
-        Ipfsd::ephemeral(&[&[("FREEDOM_IPFSD_TEST_START_DELAY_MS", "8000")], env].concat());
+        Ipfsd::ephemeral(&[&[("FREEDOM_IPFSD_TEST_HOLD_START", held.as_str())], env].concat());
     ipfsd.hello();
     let sent = Instant::now();
     let start = ipfsd.request("ipfs.start", memory("e-1"));
     fence(&mut ipfsd, start);
     assert_eq!(ipfsd.exit_code(EXIT_TIMEOUT), Some(70));
     let took = sent.elapsed();
-    assert!(
-        took >= after + Duration::from_secs(5) && took < Duration::from_secs(8),
-        "{took:?}"
-    );
+    assert!(took >= after + Duration::from_secs(5), "{took:?}");
     assert!(ipfsd.stdout_closes_within(EXIT_TIMEOUT));
     assert_eq!(ipfsd.leftover(), Vec::<serde_json::Value>::new());
     let stderr = ipfsd.stderr();
