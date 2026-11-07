@@ -1141,19 +1141,31 @@ fn a_fifo_at_any_file_discovery_reads_is_refused_at_once() {
 #[test]
 fn a_kill_after_the_move_leaves_the_whole_repository() {
     let dirs = ready();
-    // The home as main's import finds it: its service ran, and was stopped
-    // for the import. The node's start made the COB cache's tables, which
-    // the next start's reconciliation rebuilds the imported repository's
-    // cache into.
+    // The home as main's import finds it when its service ran, and was
+    // stopped for the import: the node's start made the COB cache's tables.
     let mut service = Radicled::serve(&dirs, &[]);
     let started = service.start();
     assert!(started["result"].is_object(), "{started}");
     service.shutdown();
     assert_eq!(service.exit_code(EXIT_TIMEOUT), Some(0));
+    killed_after_the_move_then_served(&dirs);
+}
+
+/// The same on a home whose node never started (#306, #299 review round
+/// 2): the COB cache has no tables of its own until reconciliation migrates
+/// it, as a node start does, before its repair rebuilds into them.
+#[test]
+fn a_kill_after_the_move_on_a_home_never_started_leaves_the_whole_repository() {
+    killed_after_the_move_then_served(&ready());
+}
+
+/// An import killed at `moved`, then the service's start: it reconciles,
+/// serves the whole repository, and a second import is refused.
+fn killed_after_the_move_then_served(dirs: &Dirs) {
     let work = working_copy();
     let (hold, _release) = dirs.held("moved@until", "never");
     let mut radicled = Radicled::import(
-        &dirs,
+        dirs,
         &work.source,
         &[],
         &[("FREEDOM_RADICLED_TEST_HOLD_IMPORT", hold.as_str())],
@@ -1172,13 +1184,13 @@ fn a_kill_after_the_move_leaves_the_whole_repository() {
     let rid: RepoId = started["rid"].as_str().unwrap().parse().unwrap();
     // Past the move: the whole repository, under its ID, and no temporary
     // clone. Main saw no answer: `outcome_unknown`, and the marker stays.
-    assert_eq!(storage(&dirs), [rid.canonical()]);
+    assert_eq!(storage(dirs), [rid.canonical()]);
     assert_eq!(fixture::marked(&dirs.home), Some(vec![NID.to_owned()]));
-    check_imported(&dirs, rid, work.tip);
+    check_imported(dirs, rid, work.tip);
 
     // The service's start reconciles: nothing to remove or re-sign, and it
     // serves the repository.
-    let mut service = Radicled::serve(&dirs, &[]);
+    let mut service = Radicled::serve(dirs, &[]);
     let hello = service.hello();
     service.call("rad.identity", sealed_to(&hello, &SEED));
     let reconciled = service.call("rad.reconcile", json!({}));
@@ -1203,10 +1215,10 @@ fn a_kill_after_the_move_leaves_the_whole_repository() {
     service.shutdown();
     assert_eq!(service.exit_code(EXIT_TIMEOUT), Some(0));
     assert_eq!(fixture::marked(&dirs.home), None);
-    check_imported(&dirs, rid, work.tip);
+    check_imported(dirs, rid, work.tip);
 
     // A second import of it is refused: it is in storage.
-    let mut radicled = Radicled::import(&dirs, &work.source, &[], &[]);
+    let mut radicled = Radicled::import(dirs, &work.source, &[], &[]);
     radicled.reconciled();
     let reply = radicled.call("rad.import_repo", params(&work.source));
     assert_eq!(reply["error"]["code"], "failed", "{reply}");
@@ -1215,7 +1227,7 @@ fn a_kill_after_the_move_leaves_the_whole_repository() {
         format!("{rid} already exists in storage")
     );
     assert_eq!(radicled.exit_code(EXIT_TIMEOUT), Some(0));
-    assert_eq!(storage(&dirs), [rid.canonical()]);
+    assert_eq!(storage(dirs), [rid.canonical()]);
 }
 
 /// libradicle opens the verified canonical source, never `path` as main
