@@ -8,8 +8,9 @@
 use fc_chain::FeeQuote;
 use fc_chain::machine::{
     Answer, Bounds, BroadcastOutcome, Call, ChainConfig, ChainError, ColibriReply, Effect, Emitted,
-    FeeReference, Header, Machine, MyotisClass, MyotisRejection, MyotisReply, Prop, Protocol,
-    Prover, QuorumConfig, ReadOptions, Reply, Request, RpcEndpoint, Success, Transport, VerifiedOp,
+    FeeReference, Fired, Header, Machine, MyotisClass, MyotisRejection, MyotisReply, Prop,
+    Protocol, Prover, QuorumConfig, ReadOptions, Reply, Request, RpcEndpoint, Success, Transport,
+    VerifiedOp,
 };
 
 /// A test world: the machine and everything it emitted.
@@ -3726,4 +3727,451 @@ fn each_verified_operation_names_the_request_that_made_it() {
         .collect();
     assert_eq!(owners, vec![(Some(waiter), "myotis")]);
     assert!(machine.take_replies().iter().any(|r| r.id == first));
+}
+
+// ---------------------------------------------------------------------------
+// endpoint-slots (#313): at most four of an endpoint's exchanges are at
+// main at once; the next waits in the core, and its exchange's own timer
+// starts only when it takes a slot. The transport below is main's on
+// integration: Electron's network stack opens at most six HTTP/1.1
+// connections to one host and port, a request waits for one in its own
+// queue, and main's deadline for an exchange counts that wait.
+
+/// A slow HTTP/1.1 endpoint behind a per-host connection cap, as main
+/// performs the machine's `shell.rpc` requests.
+struct Net {
+    /// Connections to one endpoint.
+    connections: usize,
+    /// How long the endpoint takes over one request, by method, once it
+    /// has a connection.
+    service: fn(&str) -> u64,
+    /// The world's requests and cancels already taken.
+    seen: (usize, usize),
+    /// Waiting for a connection: `(io, endpoint, method, main's deadline)`.
+    queued: Vec<(u64, String, String, u64)>,
+    /// On a connection: `(io, endpoint, answered at, main's deadline)`.
+    active: Vec<(u64, String, u64, u64)>,
+    /// When each request got its connection: `(io, at)`.
+    wire: Vec<(u64, u64)>,
+    /// The most requests ever waiting for a connection.
+    most_queued: usize,
+}
+
+impl Net {
+    fn new(service: fn(&str) -> u64) -> Self {
+        Self {
+            connections: 6,
+            service,
+            seen: (0, 0),
+            queued: Vec::new(),
+            active: Vec::new(),
+            wire: Vec::new(),
+            most_queued: 0,
+        }
+    }
+
+    /// Takes the world's new requests and cancels, then connects what fits.
+    fn take(&mut self, world: &World) {
+        let now = world.machine.now();
+        for (io, _, request, _) in &world.requests[self.seen.0..] {
+            if let Request::Rpc {
+                endpoint,
+                body,
+                deadline_ms,
+                ..
+            } = request
+            {
+                let method = body
+                    .split("\"method\":\"")
+                    .nth(1)
+                    .and_then(|rest| rest.split('"').next())
+                    .unwrap_or("")
+                    .to_owned();
+                let deadline = now + deadline_ms;
+                world.machine.schedule(deadline, *io);
+                self.queued.push((*io, endpoint.clone(), method, deadline));
+            }
+        }
+        self.seen.0 = world.requests.len();
+        for (io, _) in &world.cancels[self.seen.1..] {
+            // Aborted: out of the queue, or its connection freed.
+            self.queued.retain(|q| q.0 != *io);
+            self.active.retain(|a| a.0 != *io);
+        }
+        self.seen.1 = world.cancels.len();
+        let mut i = 0;
+        while i < self.queued.len() {
+            let endpoint = &self.queued[i].1;
+            let open = self.active.iter().filter(|a| &a.1 == endpoint).count();
+            if open < self.connections {
+                let (io, endpoint, method, deadline) = self.queued.remove(i);
+                let done = now + (self.service)(&method);
+                world.machine.schedule(done, io);
+                self.wire.push((io, now));
+                self.active.push((io, endpoint, done, deadline));
+            } else {
+                i += 1;
+            }
+        }
+        self.most_queued = self.most_queued.max(self.queued.len());
+    }
+
+    /// Main's reply to `io` at `now`, if one is due: the answer once the
+    /// endpoint has served it, `timeout` at main's deadline, whether it
+    /// was on a connection or still waiting for one.
+    fn due(&mut self, io: u64, now: u64) -> Option<Answer> {
+        if let Some(at) = self.active.iter().position(|a| a.0 == io) {
+            let (_, _, done, deadline) = self.active[at];
+            if now >= done.min(deadline) {
+                self.active.remove(at);
+                return Some(if done <= deadline {
+                    ok(r#""0x1""#)
+                } else {
+                    Answer::Failed(Transport::Timeout)
+                });
+            }
+            return None;
+        }
+        let at = self.queued.iter().position(|q| q.0 == io)?;
+        if now >= self.queued[at].3 {
+            self.queued.remove(at);
+            return Some(Answer::Failed(Transport::Timeout));
+        }
+        None
+    }
+
+    fn on_wire(&self, io: u64) -> Option<u64> {
+        self.wire.iter().find(|w| w.0 == io).map(|w| w.1)
+    }
+}
+
+/// Runs the world against `net` to `until`.
+fn drive(world: &mut World, net: &mut Net, until: u64) {
+    loop {
+        world.collect();
+        net.take(world);
+        match world.machine.fire_next(until) {
+            None => break,
+            Some(Fired::External(io)) => {
+                let now = world.machine.now();
+                if let Some(answer) = net.due(io, now) {
+                    world.answer(io, answer);
+                }
+            }
+            Some(Fired::Timer) => {}
+        }
+    }
+    world.collect();
+    net.take(world);
+}
+
+/// A user's own node: one endpoint, read Direct, 5 s per exchange.
+fn local_node() -> ChainConfig {
+    chain(1, &["direct"], &["local"], ("3", "2", "5000"))
+}
+
+fn balance(i: usize) -> Call {
+    read(1, "eth_getBalance", &format!(r#"["0x{i:x}","latest"]"#))
+}
+
+fn code() -> Call {
+    read(1, "eth_getCode", r#"["0xabc","latest"]"#)
+}
+
+/// The request a read's exchange made, by its params.
+fn request_for(world: &World, params: &str) -> Option<(u64, u64)> {
+    world
+        .requests
+        .iter()
+        .find_map(|(io, at, request, _)| match request {
+            Request::Rpc { body, .. } if body.contains(params) => Some((*io, *at)),
+            _ => None,
+        })
+}
+
+fn slots(world: &World) -> Vec<(String, usize, usize)> {
+    world.machine.state_tables().endpoint_slots
+}
+
+fn thrown_text(reply: &Reply) -> String {
+    match &reply.result {
+        Err(ChainError::Thrown(thrown)) => thrown.message.to_string_lossy(),
+        other => panic!("{other:?}"),
+    }
+}
+
+// The issue's case: a burst of slow reads, then one more. Each balance
+// takes the endpoint 4 s; the code read, asked 100 ms later, takes 0.5 s.
+// Main's transport would hold it, and the burst's last six, behind six
+// connections, while the core's 5 s timers ran: they and it would time out
+// at 5 s and 5.1 s, unsent or half served. The core sends four at a time
+// instead, and each exchange's timer starts when it is sent.
+#[test]
+fn a_read_queued_behind_slow_reads_gets_its_own_bound() {
+    let mut net = Net::new(|method| if method == "eth_getCode" { 500 } else { 4_000 });
+    let mut world = World::new(Bounds::default(), &[local_node()]);
+    let burst: Vec<u64> = (0..12).map(|i| world.submit(balance(i), None)).collect();
+    // Four at main; the other eight wait in the core, unsent.
+    assert_eq!(world.rpcs().len(), 4);
+    assert_eq!(slots(&world), [("local".to_owned(), 4, 8)]);
+    drive(&mut world, &mut net, 100);
+    let probe = world.submit(code(), None);
+    assert_eq!(slots(&world), [("local".to_owned(), 4, 9)]);
+    drive(&mut world, &mut net, 20_000);
+
+    // Main's transport never queued one: the core kept within its pool.
+    assert_eq!(net.most_queued, 0);
+    // Four at a time, first come first served: each wave as the one before
+    // answers, each request on the wire as it is made.
+    for (i, id) in burst.iter().enumerate() {
+        let wave = u64::try_from(i / 4).unwrap();
+        let (io, at) = request_for(&world, &format!(r#"["0x{i:x}","latest"]"#)).unwrap();
+        assert_eq!(at, wave * 4_000, "balance {i}");
+        assert_eq!(net.on_wire(io), Some(at), "balance {i}");
+        assert_eq!(result(world.reply(*id)), Some(r#""0x1""#), "balance {i}");
+        assert_eq!(world.reply(*id).settled, (wave + 1) * 4_000, "balance {i}");
+    }
+    // The code read waited 11.9 s, then had its own 5 s: answered at 12.5 s.
+    let (_, at) = request_for(&world, r#"["0xabc","latest"]"#).unwrap();
+    assert_eq!(at, 12_000);
+    assert_eq!(result(world.reply(probe)), Some(r#""0x1""#));
+    assert_eq!(world.reply(probe).settled, 12_500);
+    assert!(world.cancels.is_empty());
+    assert!(slots(&world).is_empty());
+}
+
+// The wait doesn't count, but the exchange's own bound still does: a read
+// that waits 3.9 s and then takes 7 s times out 5 s after it was sent.
+#[test]
+fn a_queued_read_still_times_out_on_its_own_exchange() {
+    let mut net = Net::new(|method| {
+        if method == "eth_getCode" {
+            7_000
+        } else {
+            4_000
+        }
+    });
+    let mut world = World::new(Bounds::default(), &[local_node()]);
+    for i in 0..4 {
+        world.submit(balance(i), None);
+    }
+    drive(&mut world, &mut net, 100);
+    let probe = world.submit(code(), None);
+    drive(&mut world, &mut net, 20_000);
+    let (io, at) = request_for(&world, r#"["0xabc","latest"]"#).unwrap();
+    assert_eq!(at, 4_000);
+    assert_eq!(world.reply(probe).settled, 9_000);
+    assert!(
+        thrown_text(world.reply(probe)).contains("RPC query timeout after 5000ms"),
+        "{}",
+        thrown_text(world.reply(probe))
+    );
+    assert_eq!(world.cancelled(io), Some(9_000));
+    assert!(slots(&world).is_empty());
+}
+
+// A read cancelled while it waits leaves the queue at once: it replies
+// `cancelled`, sends nothing, and the one behind it takes the first free
+// slot. No slot leaks: a later burst again sends four at once.
+#[test]
+fn a_cancelled_queued_read_leaves_the_queue() {
+    let mut net = Net::new(|_| 4_000);
+    let mut world = World::new(Bounds::default(), &[local_node()]);
+    for i in 0..4 {
+        world.submit(balance(i), None);
+    }
+    drive(&mut world, &mut net, 100);
+    let gone = world.submit(balance(100), None);
+    drive(&mut world, &mut net, 200);
+    let next = world.submit(balance(200), None);
+    assert_eq!(slots(&world), [("local".to_owned(), 4, 2)]);
+    drive(&mut world, &mut net, 1_000);
+    assert!(world.machine.cancel(gone));
+    world.collect();
+    assert_eq!(protocol(world.reply(gone)), Some(Protocol::Cancelled));
+    assert_eq!(world.reply(gone).settled, 1_000);
+    assert_eq!(slots(&world), [("local".to_owned(), 4, 1)]);
+    drive(&mut world, &mut net, 20_000);
+    assert_eq!(request_for(&world, r#"["0x64","latest"]"#), None);
+    let (_, at) = request_for(&world, r#"["0xc8","latest"]"#).unwrap();
+    assert_eq!(at, 4_000);
+    assert_eq!(world.reply(next).settled, 8_000);
+    assert!(slots(&world).is_empty());
+    let made = world.rpcs().len();
+    for i in 300..305 {
+        world.submit(balance(i), None);
+    }
+    assert_eq!(world.rpcs().len(), made + 4);
+    assert_eq!(slots(&world), [("local".to_owned(), 4, 1)]);
+}
+
+// An exchange that ends early passes its slot on at once: here its read is
+// cancelled at 1 s, its exchange cancelled at main, and the waiter's
+// request made in the same instant.
+#[test]
+fn a_cancelled_exchange_passes_its_slot_on_at_once() {
+    let mut net = Net::new(|_| 4_000);
+    let mut world = World::new(Bounds::default(), &[local_node()]);
+    let first = world.submit(balance(0), None);
+    for i in 1..4 {
+        world.submit(balance(i), None);
+    }
+    let waiter = world.submit(balance(4), None);
+    drive(&mut world, &mut net, 1_000);
+    let (io, _) = request_for(&world, r#"["0x0","latest"]"#).unwrap();
+    assert!(world.machine.cancel(first));
+    world.collect();
+    assert_eq!(world.cancelled(io), Some(1_000));
+    let (_, at) = request_for(&world, r#"["0x4","latest"]"#).unwrap();
+    assert_eq!(at, 1_000);
+    drive(&mut world, &mut net, 20_000);
+    assert_eq!(world.reply(waiter).settled, 5_000);
+    assert!(slots(&world).is_empty());
+}
+
+// A broadcast's attempt never waits for a slot, nor takes one: a payment
+// goes at once, as today, beside four slow reads.
+#[test]
+fn a_broadcast_attempt_never_waits_for_a_slot() {
+    let mut net = Net::new(|_| 4_000);
+    let config = ChainConfig {
+        broadcast_order: vec!["direct".into()],
+        ..chain(1, &["direct"], &["local"], ("3", "2", "5000"))
+    };
+    let mut world = World::new(Bounds::default(), &[config]);
+    for i in 0..4 {
+        world.submit(balance(i), None);
+    }
+    drive(&mut world, &mut net, 100);
+    world.submit(send(), None);
+    let sent = world
+        .rpcs()
+        .into_iter()
+        .find(|(_, _, _, method)| method == "eth_sendRawTransaction")
+        .unwrap();
+    assert_eq!(sent.1, 100);
+    assert_eq!(slots(&world), [("local".to_owned(), 4, 0)]);
+}
+
+// Blockscout's pair asks with what is left of its source's budget, so its
+// wait for a slot counts against that budget: with its endpoint busy, it
+// gives up unsent when the budget runs out (25 s: the Ant profile's 30 s
+// less the 5 s held back for the newest blocks). Blockscout then fails,
+// and so does the scan, wider than any endpoint serves.
+#[test]
+fn blockscouts_pair_waits_within_its_budget() {
+    let bounds = Bounds {
+        endpoint_exchanges: 1,
+        ..Bounds::default()
+    };
+    // Another read keeps endpoint a's one slot for 60 s.
+    let holder = chain(1, &["direct"], &["a"], ("1", "1", "60000"));
+    let mut world = World::new(bounds, &[ant_chain("2"), holder]);
+    // The first scan teaches the caps, as in the test above.
+    world.submit(ant_scan(), None);
+    serve(&mut world, 0, &|| {
+        node_error(-32701, "exceed maximum block range: 10000")
+    });
+    world.submit(read(1, "eth_blockNumber", "[]"), None);
+    let held = world.requests.len();
+    let start = world.machine.now();
+    let scan = world.submit(ant_scan(), None);
+    // The pair waits for a, unsent.
+    assert_eq!(slots(&world), [("a".to_owned(), 1, 1)]);
+    world.run(start + 24_999);
+    assert!(!world.replied(scan));
+    world.run(start + 25_000);
+    assert_eq!(world.reply(scan).settled, start + 25_000);
+    assert_eq!(
+        thrown_text(world.reply(scan)),
+        "query exceeds max block range 10000"
+    );
+    // Never sent, and out of the queue.
+    assert_eq!(world.requests.len(), held);
+    assert_eq!(slots(&world), [("a".to_owned(), 1, 0)]);
+}
+
+// Once its slot frees, the pair has what is left of the budget, not a
+// fresh one: freed at 10 s, it is sent with 15 s, and times out at 25 s.
+#[test]
+fn blockscouts_pair_keeps_what_is_left_of_its_budget() {
+    let bounds = Bounds {
+        endpoint_exchanges: 1,
+        ..Bounds::default()
+    };
+    let holder = chain(1, &["direct"], &["a"], ("1", "1", "60000"));
+    let mut world = World::new(bounds, &[ant_chain("2"), holder]);
+    world.submit(ant_scan(), None);
+    serve(&mut world, 0, &|| {
+        node_error(-32701, "exceed maximum block range: 10000")
+    });
+    world.submit(read(1, "eth_blockNumber", "[]"), None);
+    let (holder_io, _, _, _) = world.requests.last().cloned().unwrap();
+    let held = world.requests.len();
+    let start = world.machine.now();
+    let scan = world.submit(ant_scan(), None);
+    world.run(start + 10_000);
+    world.answer(holder_io, ok(r#""0x1""#));
+    let (io, at, request, _) = world.requests[held].clone();
+    assert_eq!(at, start + 10_000);
+    match request {
+        Request::Rpc {
+            endpoint,
+            deadline_ms,
+            ..
+        } => {
+            assert_eq!(endpoint, "a");
+            assert_eq!(deadline_ms, 15_000);
+        }
+        other => panic!("{other:?}"),
+    }
+    world.run(start + 24_999);
+    assert!(!world.replied(scan));
+    world.run(start + 25_000);
+    assert_eq!(world.cancelled(io), Some(start + 25_000));
+    assert_eq!(world.reply(scan).settled, start + 25_000);
+    assert!(slots(&world).is_empty());
+}
+
+// A slot freed by a request that runs on reaches a waiter the machine
+// polled before it, in the same instant. One slot per endpoint here: A
+// walks y then x, B walks x then z. A waits for x behind B; when B's x
+// fails and B moves on to z, A's request to x is made at once.
+#[test]
+fn a_freed_slot_reaches_an_earlier_waiter_in_the_same_instant() {
+    let bounds = Bounds {
+        endpoint_exchanges: 1,
+        ..Bounds::default()
+    };
+    let mut world = World::new(
+        bounds,
+        &[
+            chain(1, &["direct"], &["y", "x"], ("3", "2", "5000")),
+            chain(2, &["direct"], &["x", "z"], ("3", "2", "5000")),
+        ],
+    );
+    let a = world.submit(read(1, "eth_blockNumber", "[]"), None);
+    let b = world.submit(read(2, "eth_blockNumber", "[]"), None);
+    let sent = |world: &World| -> Vec<(u64, String)> {
+        world
+            .rpcs()
+            .into_iter()
+            .map(|(_, at, endpoint, _)| (at, endpoint))
+            .collect()
+    };
+    assert_eq!(sent(&world), [(0, "y".into()), (0, "x".into())]);
+    world.run(1_000);
+    let (a_y, b_x) = (world.rpcs()[0].0, world.rpcs()[1].0);
+    // A's y fails: A waits for x, held by B.
+    world.answer(a_y, Answer::Failed(Transport::Network));
+    assert_eq!(slots(&world), [("x".to_owned(), 1, 1)]);
+    // B's x fails: B moves on to z, and A takes x at once.
+    world.answer(b_x, Answer::Failed(Transport::Network));
+    assert_eq!(
+        sent(&world)[2..],
+        [(1_000, "z".to_owned()), (1_000, "x".to_owned())]
+    );
+    world.run(20_000);
+    assert!(world.replied(a) && world.replied(b));
+    assert!(slots(&world).is_empty());
 }

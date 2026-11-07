@@ -241,6 +241,7 @@ Each operation's params also carry its chain's `generation` and **`serves`** (fr
   - the quorum's budget is a *verification* budget: when Direct comes next, its members run on to `configured`;
   - Direct gives every endpoint `configured`, walking them one at a time ([Direct](#direct) on the reference's widening); a fee quote's Direct asks up to three at once ([B](#b-combining-directs-quotes));
   - the Ant profile widens the quorum budget to 30 s.
+- **An exchange's own bound** (`configured`, or Direct's widened one) counts from when the exchange takes one of its endpoint's slots and its `shell.rpc` is made ([Per endpoint](#per-endpoint-313)): a wait behind the endpoint's other exchanges never uses it up. Budgets count from when they began, that wait included: a quorum round's verification timer, the interactive cap, the truncation check's bound, Blockscout's pairing budget and the request's deadline.
 - **Overall:** 120 s per request, or the caller's `deadline_ms` if lower (deviation `overall-deadline`).
   - **Today** a request has no overall bound: an interactive read on chain 1 can take about 39 s, and more with user settings.
   - **Past the deadline,** a read or a fee quote ends with `deadline`, its I/O is cancelled, and nothing more is asked. A call that arrives with no time left (`deadline_ms` 0) replies `deadline` before any I/O, under its chain's current generation.
@@ -963,6 +964,30 @@ Naming's rule is that server text never reaches a reply (0004 *Secrets*). Chain 
   A boundary vector pins it. Larger `eth_getLogs` scans fail with `too_large` from that source; providers' own limits usually apply first. Main enforces the cap; an answer delivered over it anyway is the same `too_large` failure.
 - **Status:** a non-2xx answer is `HTTP <status>`, its body unread, as today.
 
+### Per endpoint (#313)
+
+Electron's network stack opens at most six HTTP/1.1 connections to one host and port, and queues further requests itself. Time a request spent there counted against the core's timer for its exchange and against main's `deadline_ms`. So a burst of slow reads to one HTTP/1.1 endpoint, such as a user's `http://localhost:8545` or a cold fork, made a later read time out before it was sent (freedom-browser #1106). Deviation `endpoint-slots` keeps the queue in the core instead:
+- **The cap:** at most **4** of the chain thread's exchanges per endpoint reference are at main at once. Four leaves room under the six for naming's exchanges, which share the stack and the providers, and for main's endpoint checks.
+- **The queue:** the next exchange waits in the core, first come first served across every chain request. A slot that frees passes straight to the first waiter, whose request is made in the same instant.
+- **Its own bound starts with its slot:** the exchange's timer and its `deadline_ms` start when its request is made, as before, but that is now when it has a slot. So waiting never uses up its bound, and once sent it still times out when its bound passes.
+- **What bounds the wait** is its caller's:
+  - its source's budget, where it has one: a quorum round's verification timer (when no Direct follows, or once a member has given a result), the truncation check's bound, Blockscout's pairing budget (below);
+  - always its chain request's deadline.
+
+  A quorum with Direct next waits for a queued member as for a running one. Admission bounds the queue: 64 running requests, each with at most k ≤ 9 exchanges outstanding.
+- **Leaving the queue:** an exchange whose future ends while it waits leaves at once and sends nothing. That covers a cancel, a quorum that settled, its source's budget, a configuration change, the deadline and the memory budget. One that ends while at main, by main's reply, its own timer or a cancel, gives its slot to the next waiter at once, as its `cancel` goes to main.
+- **Blockscout's pair** is asked with what is left of its source's budget, so its wait counts against that budget. One that gets no slot within it fails as a timeout, never sent; one that gets a slot is sent with what is left.
+- **Not capped:**
+  - a broadcast's attempts (`eth_sendRawTransaction`): they go at once, as today, take no slot and never wait behind reads;
+  - Blockscout's pages, which go to the index's own endpoint, one at a time per scan;
+  - verifier operations.
+- **Endpoints are references.** Main gives one per (chain, URL), and within a chain one per provider (freedom-browser #1099), so no two of a chain's references share a host and port. Two chains' references can: one host serving both chains may have eight exchanges at main. Naming's exchanges aren't counted either. Those can still wait in Electron's queue, as before.
+- **Latency:** a burst of more than four exchanges to one endpoint goes out in waves of four.
+  - **HTTP/1.1:** the stack would have queued them anyway, at six.
+  - **Multiplexed endpoints** (HTTPS over HTTP/2, most providers) need no cap, and each wave costs a round trip they wouldn't have needed. A dApp's burst of 20 reads through the quorum takes about five round trips instead of one ([Open questions](#open-questions) 12).
+  - **A saturated endpoint:** a read behind it waits for a slot instead of failing at `configured`, so Direct moves past it only once its exchange is sent and ends.
+- **Parity:** no replay scenario has more than four exchanges at main at once to one endpoint, so no record changes. The replay checks that no slot is held or waited for after any step.
+
 ## Bounds
 
 | Budget | Bound | Exhausted |
@@ -970,6 +995,7 @@ Naming's rule is that server text never reaches a reply (0004 *Secrets*). Chain 
 | running / waiting chain requests | 64 / 256 | `busy` |
 | one request | 120 s, or the caller's `deadline_ms` | `deadline` (broadcasts: [Outcome](#outcome)) |
 | one answer | 18 MiB | `too_large`: a source failure |
+| exchanges at main per endpoint | 4 | the next waits in the core; its own bound starts when it is sent ([Per endpoint](#per-endpoint-313)) |
 | one message | 32 MiB, serialized | the request fails with `too_large`; a received one is a protocol error |
 | fragmented responses in flight | one per direction (bulk credit); its bytes reserved at begin, outside the reader's 16 MiB | the sender waits for credit, sending whole messages meanwhile |
 | one request message | one frame (1 MiB) | `too_large` |
@@ -998,6 +1024,7 @@ Naming's rule is that server text never reaches a reply (0004 *Secrets*). Chain 
 | `rpc-redirects` | ≤ 20 hops unchecked, POST→GET on 301/302 | each hop checked, method and body kept | a refused hop is a source failure |
 | `rpc-id` | `id: Date.now()` | a per-request counter | none for nodes; vectors normalize ids |
 | `response-caps` | none | 18 MiB per answer | `too_large`, a source failure |
+| `endpoint-slots` | every exchange sent at once (undici has no per-host limit) | at most 4 of an endpoint's exchanges at main; the rest wait in the core, each exchange's bound starting when it is sent | a burst to one endpoint goes in waves of four; behind a slow HTTP/1.1 endpoint a read waits instead of timing out unsent in Electron's queue (#313) |
 | `request-size` | unbounded | one frame (1 MiB) per chain request | `too_large` |
 | `json-depth` | V8's parser, no fixed depth | 512 levels, in answers, Myotis payloads and Blockscout pages | a source failure; a deeper Blockscout page is `answer is not JSON` |
 | `bigint-width` | `BigInt` of any decimal width, in time quadratic in its length | decimal input, gas prices, a block's base fee and Myotis numbers (balances, nonces, fees, estimates) wider than 4096 bits are refused: such a call-object quantity is left as sent, such a gas price fails its source, such a base fee fails the block read, and such a Myotis number is a plain error; fees computed from an accepted value can print two bits wider (the headroom's 2·base + tip and 125% + floor) | no minutes-long conversions on the chain thread; hex, octal and binary stay exact |
@@ -1060,7 +1087,7 @@ The harness drives the pinned `chain-data-router.js`, with the real `blockscout-
   - **every request the core owns** (`shell.rpc`'s endpoint and body with its `id` normalized, a verifier operation and its params, a Blockscout page) with its start, matched to a record of the same call, and **in the reference's order**: no request answers a ledger entry earlier than one already matched. No allowance for unordered concurrency is needed; the order holds across every call of every step. Main's own I/O (Blockscout's hops and DNS lookups, Myotis status samples) feeds the replies main sends instead;
   - **every cancel:** an exchange the reference aborted at T is cancelled at T, and no other is cancelled, except in two permitted races, each counted: a quorum member cancelled when a sibling launched in the same tick answered the same call in the tick both settled (147; the reference's abort came after the member's answer), and a Blockscout page cancelled by the scan's deadline in the tick its own fetch failed with `no answer within` (4). Main never delivers an answer to an exchange the machine cancelled first: it aborted it;
   - **every result and error,** with its settle time: key order, constructor, `name`, message, own properties, `-0` and UTF-16 strings;
-  - **the state tables** after each step. Route keys whose target lists several addresses are compared with that list digested ([Adaptive bypass](#adaptive-bypass)). A patched scenario's tables add `colibri_faults`: `["<chain> <method>", { faults, strikes, coolUntil }]` per record, in the reference's insertion order.
+  - **the state tables** after each step, and the machine's own `endpoint_slots` empty (deviation `endpoint-slots`; the reference has none). Route keys whose target lists several addresses are compared with that list digested ([Adaptive bypass](#adaptive-bypass)). A patched scenario's tables add `colibri_faults`: `["<chain> <method>", { faults, strikes, coolUntil }]` per record, in the reference's insertion order.
   - **24 scenarios show a deviation's difference,** each listed in the test with the whole reply, the requests and the state it must show instead, and every field the deviation doesn't change still compared: `broadcast-outcome` (13: today's error, or a success with another hash, becomes `uncertain`, reporting keccak256 of the raw bytes, with each reconciliation lookup made listed with its endpoint and its whole body or params, the hash included), `config-change` (`boundary-registry-change-mid-request`: the three members asked again at 1,000 listed whole, and the one exchange the change moves, Direct's, given its new start), `order-validation` (`boundary-order-duplicates-and-unknown`), `endpoint-dedup` (`boundary-quorum-duplicate-endpoint`: a asked once, its second exchange never made, and the quorum's miss handed to Direct), `singleton-quorum` (`boundary-quorum-singleton-not-verified`: the same requests, two reads and a fee quote labelled as Direct would), `json-depth` (`boundary-json-depth-513`), `cancel-promptly` (`cancel-read-no-fallthrough`) and `adapter-error-text` (`boundary-colibri-revert-capacity`: the revert reads `execution reverted`, its route blocked as today; `tx-lookup-all-sources-fail`: Colibri's own error reads `Colibri request failed`, as main's has since #681).
   - **`fee-combination`** ([B](#b-combining-directs-quotes)) changes eleven more: three of the 306 (below); `boundary-fee-quorum-priority-disagrees`, which main's #749 makes reach Direct with three endpoints; five of #749's twelve new scenarios ([Main's #749](#mains-749)); and `boundary-fee-myotis-non-positive-gas-price` and `colibri-unproven-fee-quote-direct`, which #1046 makes reach Direct ([Main's #1046](#mains-1046)).
     - **What each lists:** its whole requests, with their starts and cancels, and its whole reply.
@@ -1262,3 +1289,4 @@ freedom-browser #1048 (head `a515f9a7`, fixes #1046 and #1060) stops main's rout
 9. **Fee plausibility** (#92): **decided** (the user, 2026-10-22): A, with a threshold relative to the current network fee, and B across several endpoints; tightened in #109's review: mixed quotes combine as EIP-1559 where a verified header shows it, and one endpoint's reference permits no auto-approval. See [Plausibility](#plausibility-decided-92).
 10. **An independent tip reference.** In A's verified case, R's priority part comes from B's quotes. The tips paid in Colibri's verified latest block, read with its transactions, would bound it independently. That read is heavier and close to C, which isn't adopted; this is open, not proposed.
 11. **'Taken' evidence** (#94): **decided** (the user, 2026-10-22): the search starts from a bracket, with Colibri's proven reads where Colibri covers them; no block scan, and no state-serving or archive endpoint beyond Colibri; out of reach, an intent stays held and is shown as *Couldn't confirm*; the 8192-block bound stays; closing by hand only when the verified nonce at F is past N, with text that says it proves nothing about the payment. See [State history](#state-history).
+12. **Endpoint slots on multiplexed endpoints** (#313). The cap of four ([Per endpoint](#per-endpoint-313)) is for HTTP/1.1 endpoints, to which Electron opens six connections. An HTTPS endpoint that speaks HTTP/2 needs none, and pays a round trip per wave of four in a burst. The core can't tell them apart: it has references, not URLs. Main could mark the endpoints that need the cap (every `http:` URL, say) in `chain.configure`, a protocol addition. Also open: whether interactive reads should go ahead of background ones in the queue, such as the Ant bridge's scans or the wallet's balance sweeps.

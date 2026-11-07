@@ -169,6 +169,10 @@ pub struct StateTables {
     pub adaptive: Vec<(String, RouteState)>,
     /// `(chain, in_flight, waiting)` for each chain with either.
     pub myotis_slots: Vec<(u64, usize, usize)>,
+    /// `(endpoint, at main, waiting)` for each endpoint with either
+    /// (`endpoint-slots`). The reference has no such table: the replay
+    /// expects it empty after every step.
+    pub endpoint_slots: Vec<(String, usize, usize)>,
     pub colibri_in_flight: usize,
     pub colibri_routes: Vec<(String, usize)>,
     pub log_range: Vec<(String, RangeEntry)>,
@@ -1045,6 +1049,11 @@ impl Machine {
                 .iter()
                 .filter(|(_, s)| s.in_flight > 0 || !s.waiters.is_empty())
                 .map(|(chain, s)| (*chain, s.in_flight, s.waiters.len()))
+                .collect(),
+            endpoint_slots: state
+                .endpoints
+                .iter()
+                .map(|(endpoint, s)| (endpoint.clone(), s.in_flight, s.waiters.len()))
                 .collect(),
             colibri_in_flight: state.colibri.in_flight,
             colibri_routes: state.colibri.routes.clone(),
