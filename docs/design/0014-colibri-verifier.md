@@ -89,14 +89,16 @@
    - The README makes everything except `src/server/` MIT (`README.md:259–269`), so `src/chains/eth/server/` is MIT by that text.
    - At `v3.0.3`, 12 of that directory's 32 files carry `SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0`. Of the rest, 5 say MIT and 15 carry no identifier. Two OP files had the same mismatch before #401.
    - The prover includes one of them, `period_store_files.h`, so the build must leave the prover out ([The verifier-only build](#the-verifier-only-build)). Then no build of ours compiles or includes any of them, and COL-2's gate checks that ([Licenses](#licenses)).
-9. **F-9: a failed remote proof is proven locally.**
-   - When the prover request of a proofable read fails (an HTTP error, every server failing), the RPC context creates a local prover and proves the read itself (`colibri_common.c:504–511`). `c4w.wasm` links the prover (`bindings/emscripten/CMakeLists.txt:76`).
-   - The local prover then fetches what a prover server would, from the `eth_rpc` and `beacon_api` hosts: the caller's own request, with PAP undone. It runs that work in main's WASM worker.
-   - The proof is still verified, so the label stays right; the cost is privacy and memory.
+9. **F-9: a failed remote proof is proven locally** (freedom-browser #1059).
+   - When the prover request of a proofable read fails (an HTTP error, every server failing), the RPC context creates a local prover and proves the read itself (`colibri_common.c:504–511`). `c4w.wasm` links the prover (`bindings/emscripten/CMakeLists.txt:75–76`).
+   - **Who receives what:** the local prover fetches the read's underlying proof inputs, account and block data, from the package's built-in public `eth_rpc` and `beacon_api` hosts. So a prover outage silently widens who receives them: from the configured prover alone to those hosts.
+   - **PAP still holds:** balance, nonce and storage are still proven through `eth_getProof`, the same intent-hiding shape as the remote PAP rewrite (`proof_account.c:107–133`). PAP makes `eth_call` and `eth_estimateGas` `METHOD_LOCAL` (`eth_verify.c:231`), so they never enter this fallback, and their calldata isn't exposed by it.
+   - **Resources:** the prover's work runs in main's WASM worker.
+   - **The answer stays sound:** the locally built proof is verified before it is returned, so the `verified` label stays right. This is a privacy and resource-isolation issue of medium severity, not an integrity one.
    - Found by reading the code; COL-1's every-server-fails cases show it running. The service drops it (deviation `no-local-proving`).
-10. **F-10: the store keeps what requests touched.**
+10. **F-10: the store keeps what requests touched** (freedom-browser #1058).
     - Besides sync state (`states_<chain>`, `sync_<chain>_<period>`), the C core stores verified headers (`headers_<chain>`, `header_cache.c:239`), the prover's transaction index (`tx_cache_<chain>`, `pap_tx_cache.c:56`), contract code by its hash (`code_<hash>`, `eth_account.c:170`), and, for each contract an `eth_call` ran, its proven storage (`call_<chain>_<address>`, `eth_call_account.c:205–207`, `verify_call.c:742`).
-    - So the store shows which contracts were called. Today private windows share it, and so does the service ([The store](#the-store-and-the-lifetime-lock)).
+    - So the store shows which contracts were called. The data is public chain state, but the access pattern it records is private. Today private windows share it, and so would the service ([The store](#the-store-and-the-lifetime-lock)). Medium privacy severity.
 
 ## Threat model
 
@@ -457,21 +459,21 @@ Anything those settings would add is refused: the `include_code`, `logs_complete
 
 | Operation | Allowed fetches, beside the sync variants |
 |---|---|
-| `eth_getBalance` and `eth_getTransactionCount`, `P` = `[a, B]` | the PAP rewrite only (`eth_verify.c:271–274`): prover POST `{"method": "eth_getProof", "params": [a, [], B]}` and the props |
-| `eth_getStorageAt`, `P` = `[a, s, B]` | the PAP rewrite only (`:276–279`): prover POST `{"method": "eth_getProof", "params": [a, [s], B]}` and the props |
-| `eth_getCode`, `P` = `[a, B]` | prover POST `{"method": M, "params": P}` and the props; and the code read: `eth_rpc` POST `{"jsonrpc":"2.0","id":1,"method":"eth_getCode","params":[a, "latest"]}` with this `a` (`eth_account.c:141`) |
-| `eth_blockNumber`, `eth_maxPriorityFeePerGas`, `eth_getBlockByNumber`, `eth_getBlockByHash` | prover POST `{"method": M, "params": P}` and the props |
+| `eth_getBalance` and `eth_getTransactionCount`, `P` a JSON array of exactly 2, `[a, B]` | the PAP rewrite only (`eth_verify.c:271–274`): prover POST `{"method": "eth_getProof", "params": [a, [], B]}` and the props |
+| `eth_getStorageAt`, `P` a JSON array of exactly 3, `[a, s, B]` | the PAP rewrite only (`:276–279`): prover POST `{"method": "eth_getProof", "params": [a, [s], B]}` and the props |
+| the same three methods, with any other `P`: an array of another length, or not an array | no rewrite (`eth_verify.c:253–256`, `:271`, `colibri_common.c:477–501`): prover POST `{"method": M, "params": P}` and the props, exactly as received. Neither `fc-chain` nor `chain-verified.js:245–263` checks the shape, so such reads reach Colibri |
+| `eth_getCode`, `eth_blockNumber`, `eth_maxPriorityFeePerGas`, `eth_getBlockByNumber`, `eth_getBlockByHash` | prover POST `{"method": M, "params": P}` and the props. For `eth_getCode`, the prover puts the code in the proof (`proof_account.c:70–100`, on the prover's side) and the verifier only checks it against the proven code hash (`verify_account_proof.c:81`, `eth_account.c:254–333`; without it, `no code included!`), so no code read is admitted |
 | `eth_call` and `eth_estimateGas` (PAP runs them in the verifier: `eth_verify.c:231`) | `colibri_proofCall`: prover POST `{"jsonrpc":"2.0","id":1,"method":"colibri_proofCall","params":[{"accessList":[{"address", "storageKeys"}, …]}, B]}` and the props (`verify_call.c:643–694`); *free:* the access list's addresses and keys |
 | (the same) | the header sub-proof: `eth_getBlockHeader [B]` (`call_ctx.c:576–590`), as the cached GET or a POST with the props, by `B` |
 | (the same) | storage reads: `eth_rpc` POST `{"jsonrpc":"2.0","id":1,"method":"eth_getStorageAt","params":[addr, key, "latest"]}` (`call_ctx.c:144`); *free:* `addr`, `key` |
-| (the same) | code reads: `eth_rpc` POST `eth_getCode [addr, "latest"]`, as above; *free:* `addr` |
+| (the same) | code reads: `eth_rpc` POST `{"jsonrpc":"2.0","id":1,"method": "eth_getCode", "params": [addr, "latest"]}` (`eth_account.c:134–189`, reached only from call execution: `call_ctx.c:245–299`, `verify_call.c:450`); *free:* `addr` |
 | `eth_getTransactionByHash` and `eth_getTransactionReceipt`, `P` = `[h]` (PAP runs them in the verifier: `eth_verify.c:233`) | the tx cache: prover GET `tx_cache?max_blocks=256` or `tx_cache?from_block=<n>&max_blocks=256` (`verify_pap_tx.c:53–73`, `pap_tx_cache.h:66`), `max_age` 2 on Gnosis chains and 6 elsewhere (`verify_pap_tx.c:49–51`); *free:* `from_block` |
 | (the same) | the fallback: prover POST `{"method": M, "params": [h]}` and the props (`verify_pap_tx.c:210`) |
 | (`eth_getTransactionReceipt`) | the block's receipts: `eth_getBlockReceipts ["0x<n>"]` (`verify_pap_tx.c:241`), as the cached GET; *free:* the block number `n` |
 | (`eth_getTransactionByHash`) | the block: `eth_getBlockByNumber ["0x<n>", true]` (`verify_pap_tx.c:294`; that method in remote mode, `:119–121`), as the cached GET; *free:* `n` |
 | `colibri.checkpoint` | `checkpoint_proof` once: main's own fetch from the prover, as `checkpoint-verifier-worker.js` makes it today, 4 MiB at most, with nothing taken from the service; then `checkpoint_root`: the one path today's interception admits, answered from main's quorum (origin, `GET`, the path, at most 8) |
 
-- **Comparisons:** `a`, `s`, `B` and `h` are compared as parsed JSON, with addresses and hex compared without regard to case. Main computes each rewrite from `P` the way the C core does, and admits that and nothing else. A `P` of another length than the table shows gets no rewrite, so it is sent as `{"method": M, "params": P}`, as the C core sends it. So an operation never admits another method, other params, or a variant of another operation.
+- **Comparisons:** `a`, `s`, `B` and `h` are compared as parsed JSON, with addresses and hex compared without regard to case. Main computes each rewrite from `P` the way the C core does, and admits that and nothing else: the rewrite for an exact-arity array, the original `{M, P}` for any other shape, never both. So an operation never admits another method, other params, or a variant of another operation.
 - **Not admitted, for any operation:**
   - the unproven pass-through (`colibri_common.c:522–579`), since the service refuses those reads first (F-1);
   - `pap_request_eth_rpc`, the PAP send path (`verify_pap_tx.c:325`), since the router sends no write to Colibri;
@@ -513,7 +515,8 @@ Anything those settings would add is refused: the `include_code`, `logs_complete
   - cross-type requests, such as a beacon path as `prover` or a `proof` payload as `eth_rpc`;
   - verbs other than the variant's: `put`, `delete`, `GET`, `get ` and an empty one;
   - for each operation:
-    - a payload whose method or params differ from the variant's derivation, such as `eth_getBalance` sent as itself instead of as `eth_getProof`, another address, another block, or another hash;
+    - a payload whose method or params differ from the variant's derivation, such as an exact-arity `eth_getBalance` sent as itself instead of as `eth_getProof`, a wrong-arity or non-array one sent as an `eth_getProof` rewrite, another address, another block, or another hash;
+    - an `eth_rpc` code read during a top-level `eth_getCode`;
     - a cached GET with another method, block, version or TTL;
     - `tx_cache` with another `max_blocks` or `max_age`;
     - a state read at another block;
@@ -521,7 +524,7 @@ Anything those settings would add is refused: the `include_code`, `logs_complete
   - out-of-contract redirects: to another origin, to another variant or bound field, a fourth hop, any redirect of a POST, and an https-to-http downgrade;
   - cross-operation reuse: request A's id with request B's variant, an ended request's id, another process's request id, and a fetch when no operation is open;
   - an `exclude_mask` bit past the list.
-- **The acceptance tests** (COL-5): each variant above, for chains 1 and 100, ZK on and off, is admitted with its derived fields.
+- **The acceptance tests** (COL-5): each variant above, for chains 1 and 100, ZK on and off, is admitted with its derived fields. That includes the original-payload variant, for `eth_getBalance` and `eth_getTransactionCount` with arrays of length 1 and 3, `eth_getStorageAt` with arrays of length 2 and 4, and each of the three with an object, a string and `null` as `P`.
 
 ### Bodies
 
@@ -607,7 +610,7 @@ The numbers below hold until COL-2 measures the native build. It replaces each w
   - F-1: `eth_gasPrice`, `eth_feeHistory`, reads at `pending` and at `earliest`, and a read with an EIP-1898 block object (which 3.0.3 reads as `latest`: #279), each marked `deviation: colibri-unproofable`. These pin the adapter itself: the router stops sending them with #1048 and #279, whose own vectors cover the routing;
   - #750: an unknown-hash receipt, which traps in WASM. The service must end it in an error or a crash, never a result.
 - **The fetch contract:** the table in [The fetch contract](#the-fetch-contract) is the grammar, and the recording checks it rather than defines it. The generator fails on a recorded request that matches no variant its case's operation allows, and on a variant no case reaches. It records each variant's largest body.
-- **Cases for every variant:** account reads (the PAP rewrites), code (with its code read), blocks, `eth_call` and `eth_estimateGas` (`colibri_proofCall`, the header sub-proof in both its GET and POST forms, storage and code reads), transaction lookups (tx cache cold and incremental, found and the fallback, receipts and block proofs), and each sync request.
+- **Cases for every variant:** account reads (the PAP rewrites, and wrong-arity and non-array params sent as they are), code, blocks, `eth_call` and `eth_estimateGas` (`colibri_proofCall`, the header sub-proof in both its GET and POST forms, storage and code reads), transaction lookups (tx cache cold and incremental, found and the fallback, receipts and block proofs), and each sync request.
 - **F-9:** each proofable method with every prover failing, which the reference proves locally (deviation `no-local-proving`).
 - **What the native build must match:** each step's status text byte for byte (the request pointer replaced by its index), the data requests in their rounds, the store's writes, and the version number. Through main's client: each adapter outcome (result, or error with name, code, message and data).
 - **Where the deviations show:** cases marked with their deviation id record the reference's outcome and the design's.
