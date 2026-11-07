@@ -31,7 +31,10 @@
 //! - `FREEDOM_RADICLED_TEST_WORK_DEADLINE_MS` replaces the read pool's and
 //!   the write queue's 60 s deadlines.
 //! - `FREEDOM_RADICLED_TEST_BUDGET=<bytes>` replaces the output budget's
-//!   256 MiB.
+//!   256 MiB. A reservation that has to wait for it logs `test hook: a
+//!   reservation waits for the budget` as it first waits, with the
+//!   budget's lock held ([`crate::output`]): a request sent once the line
+//!   is logged reserves after it.
 //! - `FREEDOM_RADICLED_TEST_HOLD_WORK` holds a pooled method's work, which
 //!   this build doesn't serve yet, in its slot before it answers: with `1`
 //!   until its token is cancelled (main's cancel, its deadline or the stop),
@@ -61,7 +64,12 @@
 //!   stop, as a slow unit holds the writer ([`crate::repair`]): with a
 //!   number, that many milliseconds; with `until:<path>`, until a file
 //!   exists at `<path>` or for 30 s. Each logs `test hook: a repair turn
-//!   holds the node`.
+//!   holds the node`. Once the writer has recorded the repair's end, done
+//!   or abandoned, so that the repository's COB reads no longer count it
+//!   ([`crate::pools`]), it logs `test hook: the repair's end is recorded`:
+//!   `an online repair is done` comes a moment before, from the repair's
+//!   last turn, so a COB read sent on that line alone can still be
+//!   `stopped`. `0` holds nothing, for this line alone.
 //! - `FREEDOM_RADICLED_TEST_NETWORK_SLACK_MS` replaces the 30 s a network
 //!   operation's deadline adds to its `timeout_ms` ([`crate::network`]).
 //! - `FREEDOM_RADICLED_TEST_CLONE=<JSON>` replaces libradicle's clone, past
@@ -296,6 +304,30 @@ pub fn hold_repair_turn() {
         } else if let Ok(ms) = hold.parse() {
             std::thread::sleep(Duration::from_millis(ms));
         }
+    }
+}
+
+/// Once the writer has recorded an online repair's end, done or
+/// abandoned: logs it, if `FREEDOM_RADICLED_TEST_HOLD_REPAIR` is set.
+pub fn at_repair_end() {
+    #[cfg(feature = "testhooks")]
+    if std::env::var_os("FREEDOM_RADICLED_TEST_HOLD_REPAIR").is_some() {
+        fc_service::log::info(
+            "test hook: the repair's end is recorded",
+            serde_json::json!({}),
+        );
+    }
+}
+
+/// As a reservation first waits for the output budget, with its lock
+/// held: logs it, if `FREEDOM_RADICLED_TEST_BUDGET` is set.
+pub fn at_budget_wait() {
+    #[cfg(feature = "testhooks")]
+    if std::env::var_os("FREEDOM_RADICLED_TEST_BUDGET").is_some() {
+        fc_service::log::info(
+            "test hook: a reservation waits for the budget",
+            serde_json::json!({}),
+        );
     }
 }
 
