@@ -5,7 +5,10 @@
 //! - **Bee** (`injectBeeIdentity`): `<data_dir>/keys/swarm.key`, the Bee
 //!   wallet in an ethers keystore v3 under a fresh random password (32 bytes
 //!   as hex), and `<data_dir>/config.yaml` from `createBeeConfig`'s template,
-//!   which holds that password (K-3, Phase 5) and main's ports.
+//!   which holds that password and main's ports. Until Phase 5 (K-3) the
+//!   password goes there. Main seals it at the next start of the bundled
+//!   node where sealing succeeds, and removes the line only after the seal
+//!   is verified and published (freedom-browser#942).
 //! - **Radicle** (`injectRadicleKey`): `<home>/keys/radicle` (OpenSSH, the
 //!   alias as comment), `<home>/keys/radicle.pub`, and `<home>/config.json`
 //!   with `node.alias` set and every other setting kept, serialized like

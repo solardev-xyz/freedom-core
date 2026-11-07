@@ -14,9 +14,11 @@
 //! The vectors' files are committed object by object, so a symlink and a
 //! submodule are the same on every OS; libradicle reads them on the same
 //! home before the service starts. `FREEDOM_RADICLED_TEST_BUDGET` shrinks
-//! the output budget and `FREEDOM_RADICLED_TEST_WORK_DEADLINE_MS` the read
-//! pool's deadline (src/testhooks.rs). Every node here reaches no one, as
-//! in tests/start.rs.
+//! the output budget, and logs each reservation that waits for it;
+//! `FREEDOM_RADICLED_TEST_WORK_DEADLINE_MS` the read pool's deadline, with
+//! `…_FROM` for the requests admitted once a file exists
+//! (src/testhooks.rs). Every node here reaches no one, as in
+//! tests/start.rs.
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
@@ -644,6 +646,8 @@ fn a_blob_reserves_twice_its_size_while_it_loads() {
     shut_down(&mut radicled, &dirs.home);
 }
 
+const WAITS: &str = "test hook: a reservation waits for the budget";
+
 /// 0008, "Pools and budgets" and "Deadlines": a blob that can't reserve
 /// its load waits, holding nothing, and ends at main's cancel and at its
 /// deadline; reads that fit go on meanwhile. A body main doesn't credit
@@ -658,11 +662,17 @@ fn a_blob_waiting_for_the_budget_ends_at_its_cancel_and_its_deadline() {
     let (rid, revision) = bounds_repository(&dirs.home);
     let deadline = Duration::from_secs(8);
     let budget = (BLOB_LOADING + (1 << 20)).to_string();
+    // The 8 s deadline is the waiting loads' under test, not the held
+    // body's: it applies once `from` exists, which the test makes after the
+    // body's head, however long that body took to load.
+    let from = dirs.own_home.join("deadline-from");
+    let from_arg = from.display().to_string();
     let mut radicled = served(
         &dirs,
         &[
             ("FREEDOM_RADICLED_TEST_BUDGET", &budget),
             ("FREEDOM_RADICLED_TEST_WORK_DEADLINE_MS", "8000"),
+            ("FREEDOM_RADICLED_TEST_WORK_DEADLINE_FROM", &from_arg),
         ],
     );
     let held = radicled.request("rad.blob", at(rid, &revision, "cap.bin", false));
@@ -670,6 +680,7 @@ fn a_blob_waiting_for_the_budget_ends_at_its_cancel_and_its_deadline() {
     assert_eq!(head["result"]["size"], BLOB, "{head}");
     // Its window's worth, and no credit.
     radicled.uncredited(held, 128 << 10);
+    std::fs::write(&from, b"").unwrap();
     let fits = |radicled: &mut Radicled| {
         let small = blob(radicled, at(rid, &revision, "small.txt", false)).1;
         assert_eq!(small.unwrap().1, b"small\n");
@@ -679,6 +690,7 @@ fn a_blob_waiting_for_the_budget_ends_at_its_cancel_and_its_deadline() {
 
     // Main's cancel ends a wait.
     let waiting = radicled.request("rad.blob", at(rid, &revision, "cap.bin", false));
+    assert!(radicled.logs_times(WAITS, 1, READ_TIMEOUT));
     assert!(!radicled.any_within(waiting, Duration::from_millis(1500)));
     fits(&mut radicled);
     assert!(!radicled.any_within(waiting, Duration::ZERO));
@@ -689,10 +701,14 @@ fn a_blob_waiting_for_the_budget_ends_at_its_cancel_and_its_deadline() {
     // request is sent: the reply is never sooner than 8 s from the send.
     let sent = Instant::now();
     let waiting = radicled.request("rad.blob", at(rid, &revision, "cap.bin", false));
+    assert!(radicled.logs_times(WAITS, 2, READ_TIMEOUT));
     assert!(!radicled.any_within(waiting, Duration::from_millis(1500)));
     fits(&mut radicled);
     assert_eq!(code(&radicled.reply(waiting)), "deadline");
     assert!(sent.elapsed() >= deadline);
+    // The test's 8 s, not the default 60 s: it was admitted once `from`
+    // existed.
+    assert!(sent.elapsed() < Duration::from_secs(60));
     // Nothing more of it.
     assert!(!radicled.any_within(waiting, Duration::from_millis(500)));
 

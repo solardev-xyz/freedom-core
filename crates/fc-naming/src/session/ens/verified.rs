@@ -1,5 +1,7 @@
-//! Verified methods: whole Myotis and Colibri operations through main's
-//! adapters (design 0004, Verified operations).
+//! Verified methods: whole Myotis operations through main's adapter (design
+//! 0004, Verified operations). Colibri runs none (main's #1076): Colibri
+//! 3.0.3 runs a lookup's `eth_call` on contract code from a public RPC,
+//! unchecked against the proven code hash, so its answer can't be verified.
 
 use super::*;
 
@@ -33,41 +35,6 @@ pub(crate) fn myotis_trust(finalized: bool, block: JsValue, system: &str) -> JsV
         ("agreed", p2p.clone()),
         ("dissented", JsValue::Array(Vec::new())),
         ("queried", p2p),
-        (
-            "quorum",
-            obj(vec![
-                ("k", JsValue::Number(1.0)),
-                ("m", JsValue::Number(1.0)),
-                ("achieved", JsValue::Bool(true)),
-            ]),
-        ),
-    ])
-}
-
-/// `buildColibriTrust`: the prover as an endpoint reference ("" without one).
-pub(crate) fn colibri_trust(ctx: &Ctx, system: &str) -> JsValue {
-    let prover = ctx.state.borrow().config.prover.clone();
-    let (host, zk) = match &prover {
-        Some((endpoint, zk)) => (obj(vec![("ref", s(endpoint))]), *zk),
-        None => (s(""), true),
-    };
-    obj(vec![
-        ("level", s("verified")),
-        ("system", s(system)),
-        ("method", s("colibri")),
-        ("prover", host.clone()),
-        (
-            "proof",
-            s(if zk {
-                "ZK sync-committee proof"
-            } else {
-                "Sync-committee proof"
-            }),
-        ),
-        ("block", JsValue::Null),
-        ("agreed", JsValue::Array(vec![host.clone()])),
-        ("dissented", JsValue::Array(Vec::new())),
-        ("queried", JsValue::Array(vec![host])),
         (
             "quorum",
             obj(vec![
@@ -248,52 +215,6 @@ pub(crate) async fn myotis_ens(
     }))
 }
 
-/// `tryColibriPath`.
-pub(crate) async fn colibri(ctx: &Ctx, lookup: &Lookup<'_>) -> Result<Consensus, Thrown> {
-    if ctx.state.borrow().config.prover.is_none() {
-        return Err(Thrown::new("No Colibri prover configured for chain 1"));
-    }
-    let resolver = match lookup.resolver {
-        Resolver::NameNft(_) => "name_nft",
-        Resolver::NameNftReverse(_) => "name_nft_reverse",
-        _ => "ur",
-    };
-    let op = VerifiedOp::ColibriResolve {
-        name: lookup.name.to_owned(),
-        call_data: lookup.call_data.to_vec(),
-        resolver,
-    };
-    let trust = colibri_trust(ctx, lookup.system);
-    match verified(ctx, op).await {
-        Verified::Result(result) => {
-            let data = result
-                .get("resolvedData")
-                .and_then(JsValue::as_str)
-                .and_then(rpc::hex_string)
-                .ok_or_else(|| Thrown::new("unexpected Colibri answer"))?;
-            Ok(Consensus::Data {
-                resolved: data,
-                trust,
-            })
-        }
-        Verified::Revert(data)
-            if revert_names(
-                &data,
-                &["0x77209fe8", "0x1e9535f2"],
-                &["resolvernotfound", "resolvernotcontract"],
-            ) =>
-        {
-            Ok(Consensus::NotFound {
-                reason: "NO_RESOLVER",
-                error: None,
-                trust,
-            })
-        }
-        other if resolver == "ur" => Err(ur_error(&other, lookup.name)),
-        other => Err(verifier_error(&other)),
-    }
-}
-
 /// A proven revert's selector, or an `Error(string)` reason naming it.
 pub(crate) fn revert_names(data: &[u8], selectors: &[&str], reasons: &[&str]) -> bool {
     let error = CallError::Rpc(RpcError::CallException {
@@ -304,62 +225,6 @@ pub(crate) fn revert_names(data: &[u8], selectors: &[&str], reasons: &[&str]) ->
         .selector()
         .is_some_and(|sel| selectors.contains(&sel.as_str()))
         || error.reason_names(reasons)
-}
-
-/// `tryColibriReverse`.
-pub(crate) async fn colibri_reverse(
-    ctx: &Ctx,
-    address: &str,
-    coin_type: u64,
-) -> Result<JsValue, Thrown> {
-    let trust = colibri_trust(ctx, "ens");
-    match verified(
-        ctx,
-        VerifiedOp::ColibriReverse {
-            address: address.to_owned(),
-            coin_type,
-        },
-    )
-    .await
-    {
-        Verified::Result(result) => match result
-            .get("name")
-            .and_then(JsValue::as_str)
-            .filter(|n| !n.is_empty())
-        {
-            Some(name) => Ok(ens_primary_name(address, name, trust)),
-            None => Ok(no_reverse(address, Some(trust))),
-        },
-        Verified::Revert(data)
-            if revert_names(
-                &data,
-                &["0x77209fe8", "0x1e9535f2"],
-                &["resolvernotfound", "resolvernotcontract"],
-            ) =>
-        {
-            Ok(no_reverse(address, Some(trust)))
-        }
-        Verified::Revert(data)
-            if revert_names(&data, &["0xef9c03ce"], &["reverseaddressmismatch"]) =>
-        {
-            let claimed = ur::reverse_mismatch_claimed_name(&data);
-            Ok(obj(vec![
-                ("success", JsValue::Bool(false)),
-                ("address", s(address)),
-                ("system", s("ens")),
-                ("reason", s("UNVERIFIED")),
-                ("claimedName", claimed.map_or(JsValue::Null, |c| s(&c))),
-                (
-                    "error",
-                    s(&format!(
-                        "Reverse record for {address} does not forward-verify"
-                    )),
-                ),
-                ("trust", trust),
-            ]))
-        }
-        other => Err(verifier_error(&other)),
-    }
 }
 
 /// `tryMyotisReverse` (`readMyotisReverse` inside the epoch guard).

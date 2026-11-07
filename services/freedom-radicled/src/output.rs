@@ -65,6 +65,8 @@ use fc_service::log;
 use libradicle::{Bounds, CancelToken};
 use serde_json::json;
 
+use crate::testhooks;
+
 /// The output budget: every read's bytes, process-wide (0008, "Pools and
 /// budgets").
 pub const BUDGET: u64 = 256 << 20;
@@ -191,20 +193,12 @@ impl Budget {
         self.used.lock().unwrap_or_else(|p| p.into_inner())
     }
 
-    /// Its total.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "rad.stats reports it, a later step")
-    )]
+    /// Its total: `rad.stats`'s budget limit.
     pub fn total(&self) -> u64 {
         self.total
     }
 
     /// The bytes reserved now: `rad.stats`'s budget use.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "rad.stats reports it, a later step")
-    )]
     pub fn used(&self) -> u64 {
         *self.lock()
     }
@@ -242,6 +236,9 @@ impl Budget {
                     budget: self.clone(),
                     bytes,
                 });
+            }
+            if !waited {
+                testhooks::at_budget_wait();
             }
             waited = true;
             #[cfg(test)]

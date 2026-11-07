@@ -82,7 +82,9 @@ pub use logs::{
     LOG_TRUNCATION_MIN_SPAN, LOG_TRUNCATION_TAIL_BLOCKS, log_query_span, log_range_refusal_text,
 };
 pub use methods::{
-    BLOCKSCOUT, READ_METHODS, SINGLE_NODE_METHODS, SourceOrder, is_read_method, source_order,
+    BLOCKSCOUT, COLIBRI_BLOCK_PARAM, COLIBRI_LATEST_ONLY, COLIBRI_NOT_A_STRING,
+    COLIBRI_UNPROVEN_METHODS, ColibriParams, LATEST_APPENDED, READ_METHODS, SINGLE_NODE_METHODS,
+    SourceOrder, colibri_latest_appended, colibri_request_params, is_read_method, source_order,
     source_serves_method,
 };
 pub use myotis::{

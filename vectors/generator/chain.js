@@ -691,20 +691,27 @@ function pinnedQuote(feeQuote, source, gasPrice, priority) {
   }
 }
 
-async function buildFeeQuotes(router, pinned) {
+// `unproven` is the router with main's #1046 (`colibri-unproven`) after
+// #749: it no longer counts a Colibri quote as verified. A case it changes
+// names both patches; every such case is one #749 changes too.
+async function buildFeeQuotes(router, pinned, unproven) {
   const { feeQuote } = router.__internals;
   const cases = [];
   for (const [id, source, gasPrice, priority, deviation, scripted = NO_BASE_FEE_BLOCK] of feeInputs()) {
-    const { asked, js } = await headroomQuote(feeQuote, id, source, gasPrice, priority, scripted);
+    const headroom = await headroomQuote(feeQuote, id, source, gasPrice, priority, scripted);
+    const { asked, js } = await headroomQuote(unproven.__internals.feeQuote, id, source, gasPrice, priority, scripted);
+    assert.equal(asked, headroom.asked, id);
     const unpatched = pinnedQuote(pinned.__internals.feeQuote, source, gasPrice, priority);
-    const changed = JSON.stringify(unpatched) !== JSON.stringify(js);
+    const changed = JSON.stringify(unpatched) !== JSON.stringify(headroom.js);
+    const unprovenChanged = JSON.stringify(headroom.js) !== JSON.stringify(js);
+    assert.ok(changed || !unprovenChanged, `${id}: colibri-unproven alone changes it`);
     cases.push({
       id, source, gas_price: gasPrice, priority,
       // The block the quote read, when it read one: its result's JSON text
       // (null: undefined), or the failure it threw.
       ...(asked ? { block: scripted.fails === undefined ? { json: scripted.json } : { fails: scripted.fails } } : {}),
       ...(deviation ? { deviation } : {}),
-      ...(changed ? { patches: ['fee-headroom'], unpatched } : {}),
+      ...(changed ? { patches: unprovenChanged ? ['fee-headroom', 'colibri-unproven'] : ['fee-headroom'], unpatched } : {}),
       js,
     });
   }
@@ -1082,11 +1089,22 @@ const METHOD_PROBES = [
   '__proto__', 'constructor', 'toString', 'hasOwnProperty', 'valueOf',
 ];
 
-async function buildMethods(router) {
+// The sources' capabilities are main's #1046 (`colibri-unproven`, from
+// `unproven`): Colibri doesn't serve eth_gasPrice or eth_feeHistory. A
+// source it changes names the patch, with the pinned router's list as
+// `unpatched`.
+async function buildMethods(router, unproven) {
   const { READ_METHODS, SINGLE_NODE_METHODS } = router.__internals;
-  const capabilities = Object.entries(router.SOURCE_CAPABILITIES).map(([source, capability]) => ({
-    source, unsupported: [...capability.unsupported], opt_in: capability.optIn === true,
-  }));
+  const capabilities = Object.entries(unproven.SOURCE_CAPABILITIES).map(([source, capability]) => {
+    const unsupported = [...capability.unsupported];
+    const pinned = [...router.SOURCE_CAPABILITIES[source].unsupported];
+    return {
+      source, unsupported, opt_in: capability.optIn === true,
+      ...(JSON.stringify(pinned) === JSON.stringify(unsupported) ? {} : { patches: ['colibri-unproven'], unpatched: pinned }),
+    };
+  });
+  assert.deepEqual(Object.keys(unproven.SOURCE_CAPABILITIES), Object.keys(router.SOURCE_CAPABILITIES));
+  assert.ok(capabilities.some((capability) => capability.patches), 'colibri-unproven changes no capability');
   const probes = [...READ_METHODS, ...SINGLE_NODE_METHODS, ...METHOD_PROBES];
   const unsupported = [];
   for (const method of ['eth_sendRawTransaction', 'eth_chainId', '', 'eth call', 'méthode 😀', 'x'.repeat(600)]) {
@@ -1119,9 +1137,13 @@ function sourceOrderScenarios(blockscout) {
   const transfer = blockscout.ERC20_TRANSFER_TOPIC;
   const scan = (fields) => jsonText([{ address: token, topics: [transfer, addressTopic(WALLET)], fromBlock: '0x1', toBlock: '0x186a0', ...fields }]);
   const call = jsonText([{ to: ADDRESS }]);
+  // A read every source serves: Colibri serves no call since main's #1046
+  // (`colibri-unproven`), which these cases, the pinned router's, don't
+  // patch in.
+  const balance = jsonText([ADDRESS, 'latest']);
   const all = ['myotis', 'colibri', 'quorum', 'direct'];
   return [
-    { id: 'all-tried', method: 'eth_call', params: call, readOrder: all },
+    { id: 'all-tried', method: 'eth_getBalance', params: balance, readOrder: all },
     { id: 'single-node-method', method: 'web3_clientVersion', params: '[]', readOrder: all },
     { id: 'single-node-method-no-direct', method: 'eth_newBlockFilter', params: '[]', readOrder: ['myotis', 'colibri', 'quorum'] },
     { id: 'all-excluded', method: 'eth_call', params: call, readOrder: ['quorum'], exclude: ['quorum'] },
@@ -2379,6 +2401,10 @@ async function buildChain(checkout, ethers, privateKey, meta) {
   // quotes. It is loaded first, on the same world: the loader's hook stays
   // with the router loaded last, which every other case uses.
   const headroom = loadRouter(checkout, world, ['fee-headroom']);
+  // Main's #1046 after #749 (`colibri-unproven`, freedom-browser #1048):
+  // the Colibri quotes' label and the sources' capabilities. Loaded before
+  // the router the other cases use, for the same reason.
+  const unproven = loadRouter(checkout, world, ['fee-headroom', 'colibri-unproven']);
   const router = loadRouter(checkout, world);
   assert.equal(router.__internals.stableValue({ b: 1, a: [2] }), '{"a":[2],"b":1}', 'STOP: stableValue sanity check failed');
   const normalization = buildNormalization(router);
@@ -2391,7 +2417,7 @@ async function buildChain(checkout, ethers, privateKey, meta) {
     stable: stable.cases,
     equivalence: stable.equivalence,
     answers: await buildAnswers(router),
-    fee_quotes: await buildFeeQuotes(headroom, router),
+    fee_quotes: await buildFeeQuotes(headroom, router, unproven),
     fee_combinations: await buildFeeCombinations(headroom),
     safe_error_message: safe.cases,
     safe_error_whitespace: safe.whitespace,
@@ -2405,7 +2431,7 @@ async function buildChain(checkout, ethers, privateKey, meta) {
   const bridge = loadBridge(checkout);
   const blockscout = loadBlockscout(checkout);
   Object.assign(chain, {
-    methods: await buildMethods(router),
+    methods: await buildMethods(router, unproven),
     source_orders: await buildSourceOrders(router, world, bridge, blockscout),
     myotis: await buildMyotis(router, world),
     ant_profile: buildAntProfile(bridge, router),

@@ -18,6 +18,8 @@ FILES.push('dweb.json', 'dweb-verify-plans.json', 'generator/dweb.js');
 FILES.push('streams.json', 'generator/streams.js');
 FILES.push('radicle-reads.json', 'generator/radicle-reads.js');
 FILES.push('radicle-blob.json', 'generator/radicle-blob.js');
+FILES.push('radicle-network.json', 'generator/radicle-network.js');
+FILES.push('radicle-stats.json', 'generator/radicle-stats.js');
 
 function corruptedCheck(filename, corrupt) {
   const copy = fs.mkdtempSync(path.join(os.tmpdir(), 'freedom-core-vectors-'));
@@ -450,9 +452,9 @@ test('replay transport keeps ethers\' cancel and timeout semantics', async () =>
   assert.equal(hang.io.outcome, 'open');
 });
 
-test('replay attributes every verifier raw call to its operation', () => {
+test('replay attributes every verifier raw call to its operation', async () => {
   const vectors = JSON.parse(fs.readFileSync(path.join(SOURCE, 'naming-replay.json'), 'utf8'));
-  for (const scenario of vectors.scenarios) {
+  const attributed = (scenario) => {
     const ops = new Map(scenario.io.filter((e) => e.kind === 'verified-op').map((e) => [e.id, e]));
     for (const entry of scenario.io) {
       if (entry.kind !== 'verified' && entry.within === undefined) continue;
@@ -461,10 +463,38 @@ test('replay attributes every verifier raw call to its operation', () => {
       assert.ok(entry.t >= op.t && (op.end === null || entry.t <= op.end), `${scenario.id}: exchange ${entry.id} outside operation ${op.id}`);
       if (entry.kind === 'verified') assert.equal(entry.host, op.host, `${scenario.id}: exchange ${entry.id} attributed to another verifier`);
     }
-  }
-  const concurrent = vectors.scenarios.find((s) => s.id === 'colibri-concurrent');
+  };
+  for (const scenario of vectors.scenarios) attributed(scenario);
+  // Two operations at once, each owning its raw call: Colibri's, as the
+  // pinned reference runs them. Main's #1076 keeps names off Colibri, so
+  // the recorded scenario asks it nothing.
+  const ethers = referenceEthers();
+  const plain = { ...definition(ethers, 'colibri-concurrent'), patches: [] };
+  const concurrent = await replay.runScenario(REFERENCE, ethers, replay.loadFakeTimers(REFERENCE), plain);
+  attributed(concurrent);
   const owners = concurrent.io.filter((e) => e.kind === 'verified').map((e) => e.within);
   assert.equal(new Set(owners).size, 2, 'each concurrent operation owns its raw call');
+});
+
+// Main's #1076: no recorded scenario asks Colibri for a name, and each the
+// reference patch changes records it, with the pinned reference's results.
+test('naming replay asks Colibri nothing, and records main\'s #1076 where it applies', () => {
+  const vectors = JSON.parse(fs.readFileSync(path.join(SOURCE, 'naming-replay.json'), 'utf8'));
+  for (const scenario of vectors.scenarios) {
+    assert.ok(!scenario.io.some((e) => e.host === 'colibri'), `${scenario.id} asks Colibri`);
+    for (const result of scenario.steps.flatMap((step) => step.results)) {
+      assert.notEqual(result.value?.trust?.method, 'colibri', `${scenario.id}: a Colibri label`);
+    }
+  }
+  const patched = vectors.scenarios.filter((s) => (s.patches ?? []).some((p) => p.id === 'no-colibri-names'));
+  assert.deepEqual(patched.map((s) => s.id).sort(), [...replay.NO_COLIBRI_NAMES_SCENARIOS].sort());
+  for (const scenario of patched) {
+    assert.ok(Array.isArray(scenario.unpatched), `${scenario.id}: no unpatched results`);
+  }
+  // The ports of main's tests: the pinned reference took Colibri's forgery.
+  for (const scenario of patched.filter((s) => s.id.startsWith('no-colibri-names-'))) {
+    assert.match(JSON.stringify(scenario.unpatched), /"method":"colibri"/, `${scenario.id}: the pinned reference didn't use Colibri`);
+  }
 });
 
 // The chain replay runs in this process too.
@@ -511,7 +541,7 @@ test('chain replay fails loudly on unscripted I/O', async () => {
   await assert.rejects(chainReplay.runScenario(REFERENCE, FakeTimers, myotis), /unscripted Myotis account on chain 100/);
   const colibri = structuredClone(chainDefinition('router-colibri-deadline'));
   delete colibri.world.colibri;
-  await assert.rejects(chainReplay.runScenario(REFERENCE, FakeTimers, colibri), /unscripted Colibri eth_call/);
+  await assert.rejects(chainReplay.runScenario(REFERENCE, FakeTimers, colibri), /unscripted Colibri eth_getBalance/);
   const dns = structuredClone(chainDefinition('blockscout-redirect-dns-fails'));
   delete dns.world.dns;
   await assert.rejects(chainReplay.runScenario(REFERENCE, FakeTimers, dns), /undeclared DNS name nowhere\.example/);
@@ -654,4 +684,20 @@ test('check rejects a changed blob range', () => {
     entry.expect.head.range.start -= 1;
   });
   assert.match(stderr, /Byte mismatch: radicle-blob.json/);
+});
+
+test('check rejects a changed progress envelope', () => {
+  const stderr = corruptedCheck('radicle-network.json', (contents) => {
+    const entry = contents.queue.find((item) => item.id === 'eight-failures-then-a-summary');
+    entry.written[8] = entry.written[8].replace('"count\\":12', '"count\\":13');
+  });
+  assert.match(stderr, /Byte mismatch: radicle-network.json/);
+});
+
+test('check rejects a changed stats result', () => {
+  const stderr = corruptedCheck('radicle-stats.json', (contents) => {
+    const entry = contents.cases.find((item) => item.id === 'nat64-past-its-bounds');
+    entry.result_text = entry.result_text.replace('"over_limit"]', '"over_limit","over_limit"]');
+  });
+  assert.match(stderr, /Byte mismatch: radicle-stats.json/);
 });

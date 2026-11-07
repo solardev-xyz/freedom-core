@@ -132,6 +132,10 @@ struct Shared {
     /// Why the last round's resolvers failed, each a fixed name: none since
     /// a resume until a round publishes.
     failures: Mutex<Vec<&'static str>>,
+    /// Held across a publication and its log line, so both stay in order
+    /// between publishers. Readers never take it, so they never wait for
+    /// the line, which names every resolver's failure.
+    publishing: Mutex<()>,
     source: Source,
     timing: Timing,
     control: Mutex<Control>,
@@ -139,6 +143,10 @@ struct Shared {
     /// Run between a send's check and the send, under the lock: tests.
     #[cfg(test)]
     before_send: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
+    /// Run as a publication's log line is about to be written, its locks
+    /// let go: tests.
+    #[cfg(test)]
+    before_log: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
 }
 
 #[derive(Default)]
@@ -167,12 +175,15 @@ impl Discovery {
                 publish: host.publish,
                 thread: host.thread,
                 failures: Mutex::new(Vec::new()),
+                publishing: Mutex::new(()),
                 source,
                 timing,
                 control: Mutex::new(Control::default()),
                 wake: Condvar::new(),
                 #[cfg(test)]
                 before_send: Mutex::new(None),
+                #[cfg(test)]
+                before_log: Mutex::new(None),
             }),
         }
     }
@@ -193,22 +204,38 @@ impl Discovery {
     /// learned (`addr/len`), and why the last round's resolvers failed,
     /// each a fixed name (never an address).
     pub fn stats(&self) -> serde_json::Value {
-        let state = self.state();
-        let failures = self
+        self.stats_bounded(usize::MAX, usize::MAX)
+    }
+
+    /// [`Discovery::stats`] with at most `prefixes` prefixes and the first
+    /// `failures` failures (freedom-radicled's `rad.stats`): each list is
+    /// cut as it is read, under its own lock, so the work and the copy are
+    /// bounded however many resolvers the OS lists.
+    pub fn stats_bounded(&self, prefixes: usize, failures: usize) -> serde_json::Value {
+        let (name, prefixes) = {
+            let state = self
+                .shared
+                .state
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let listed: Vec<String> = state
+                .prefixes()
+                .iter()
+                .take(prefixes)
+                .map(|prefix| prefix.cidr().to_string())
+                .collect();
+            (state_name(&state), listed)
+        };
+        let failures: Vec<&'static str> = self
             .shared
             .failures
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .clone();
-        json!({
-            "state": state_name(&state),
-            "prefixes": state
-                .prefixes()
-                .iter()
-                .map(|prefix| prefix.cidr().to_string())
-                .collect::<Vec<_>>(),
-            "failures": failures,
-        })
+            .iter()
+            .take(failures)
+            .copied()
+            .collect();
+        json!({ "state": name, "prefixes": prefixes, "failures": failures })
     }
 
     /// Holds discovery running until the lease is dropped. The first lease
@@ -263,6 +290,18 @@ pub struct Round {
 
 impl Shared {
     #[cfg(test)]
+    fn before_log(&self) {
+        let hook = self
+            .before_log
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone();
+        if let Some(hook) = hook {
+            hook();
+        }
+    }
+
+    #[cfg(test)]
     fn before_send(&self) {
         let hook = self
             .before_send
@@ -288,34 +327,49 @@ impl Shared {
     }
 
     /// Publishes `state` and its round's failures, and logs a change.
+    ///
+    /// The state and failure locks are held only to swap in what is already
+    /// built: the failure list, one name per OS resolver, is copied before,
+    /// and the log line, which carries all of it, is written after. A
+    /// bounded read (`stats_bounded`) never waits behind work the size of
+    /// the OS's list (#292 review, round 2).
     fn publish(&self, state: Nat64State, failures: &[Failed]) {
-        *self
-            .failures
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner()) =
-            failures.iter().map(|(_, why)| *why).collect();
-        let mut published = self
-            .state
+        let _order = self
+            .publishing
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        if *published == state {
-            return;
+        let why: Vec<&'static str> = failures.iter().map(|(_, why)| *why).collect();
+        // Copied before the lock, moved in under it: the guard holds only
+        // the swap (#292 review, round 3).
+        let installed = why.clone();
+        let earlier = {
+            let mut published = self
+                .failures
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            std::mem::replace(&mut *published, installed)
+        };
+        drop(earlier);
+        let (name, prefixes) = (state_name(&state), state.prefixes().len());
+        {
+            let mut published = self
+                .state
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if *published == state {
+                return;
+            }
+            // Under the lock: `state()` and the host see each change
+            // together, and in order.
+            *published = state;
+            (self.publish)(&published);
         }
+        #[cfg(test)]
+        self.before_log();
         log::info(
             "NAT64 discovery",
-            json!({
-                "state": state_name(&state),
-                "prefixes": state.prefixes().len(),
-                "failures": failures
-                    .iter()
-                    .map(|(_, why)| *why)
-                    .collect::<Vec<_>>(),
-            }),
+            json!({ "state": name, "prefixes": prefixes, "failures": why }),
         );
-        // Under the lock: `state()` and the host see each change together,
-        // and in order.
-        *published = state;
-        (self.publish)(&published);
     }
 
     /// The rounds, for the process's life: each while a lease is held,
@@ -922,6 +976,93 @@ mod tests {
         ));
     }
 
+    /// However many resolvers the OS lists, a bounded read copies only the
+    /// first failures: 10,000 listed that can't be asked fail 10,000 times
+    /// (8 asked, the rest past the round's 8), and `stats_bounded` gives the
+    /// first 16, in order.
+    #[test]
+    fn bounded_stats_copy_only_the_first_failures() {
+        let listed: Vec<Learned> = (0..10_000)
+            .map(|n| Learned::Unaskable(format!("fe80::{n:x}")))
+            .collect();
+        // One round, then none for a minute: no later round's pending
+        // state comes between the reads.
+        let once = Timing {
+            floor: Duration::from_secs(60),
+            ceiling: Duration::from_secs(60),
+            backoff: Duration::from_secs(60),
+            ..FAST
+        };
+        let discovery = Discovery::new(Arc::new(move || listed.clone()), once, host());
+        let _lease = discovery.lease();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while discovery.state() != Nat64State::unknown([]) && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(discovery.state(), Nat64State::unknown([]));
+        assert_eq!(
+            discovery.stats()["failures"].as_array().unwrap().len(),
+            10_000
+        );
+        let mut first = vec!["unaskable"; MAX_RESOLVERS];
+        first.extend(vec!["over_limit"; 16 - MAX_RESOLVERS]);
+        assert_eq!(
+            discovery.stats_bounded(16, 16),
+            json!({ "state": "unknown", "prefixes": [], "failures": first })
+        );
+        assert_eq!(discovery.stats_bounded(16, 0)["failures"], json!([]));
+    }
+
+    /// A bounded read doesn't wait for a publication's log line, which names
+    /// every resolver's failure (#292 review, round 2): with the round's
+    /// line held, `stats_bounded` answers the new state at once.
+    #[test]
+    fn a_bounded_read_doesnt_wait_for_the_log_line() {
+        let listed: Vec<Learned> = (0..10_000)
+            .map(|n| Learned::Unaskable(format!("fe80::{n:x}")))
+            .collect();
+        let once = Timing {
+            floor: Duration::from_secs(60),
+            ceiling: Duration::from_secs(60),
+            backoff: Duration::from_secs(60),
+            ..FAST
+        };
+        let discovery = Discovery::new(Arc::new(move || listed.clone()), once, host());
+        // Every wait is bounded, so any failure ends the test rather than
+        // hanging it (#292 review, round 3).
+        let (reached, held) = std::sync::mpsc::channel::<()>();
+        let (release, released) = std::sync::mpsc::channel::<()>();
+        let released = Mutex::new(released);
+        // Only a change logs: the first is the round's end.
+        let logs = Arc::new(AtomicUsize::new(0));
+        *discovery.shared.before_log.lock().unwrap() = Some(Arc::new(move || {
+            if logs.fetch_add(1, Ordering::SeqCst) == 0 {
+                let _ = reached.send(());
+                let _ = released
+                    .lock()
+                    .unwrap()
+                    .recv_timeout(Duration::from_secs(10));
+            }
+        }));
+        let _lease = discovery.lease();
+        held.recv_timeout(Duration::from_secs(10))
+            .expect("the round's line never came");
+        let read = std::thread::scope(|scope| {
+            let (sent, read) = std::sync::mpsc::channel();
+            let discovery = &discovery;
+            scope.spawn(move || {
+                let _ = sent.send(discovery.stats_bounded(16, 16));
+            });
+            let answer = read.recv_timeout(Duration::from_secs(5));
+            // Let the line go either way, so a reader stuck behind it ends.
+            let _ = release.send(());
+            answer
+        });
+        let read = read.expect("stats_bounded waited for the log line");
+        assert_eq!(read["state"], "unknown");
+        assert_eq!(read["failures"].as_array().unwrap().len(), 16);
+    }
+
     #[test]
     fn stats_give_the_state_its_prefixes_and_why_resolvers_failed() {
         let answers = Arc::new(Mutex::new(Some(vec!["2001:db8:64::"])));
@@ -942,6 +1083,12 @@ mod tests {
         assert_eq!(
             discovery.stats(),
             json!({ "state": "known", "prefixes": ["2001:db8:64::/96"], "failures": [] })
+        );
+        // Bounded: the prefixes cut as they are read.
+        assert_eq!(discovery.stats_bounded(1, 0), discovery.stats());
+        assert_eq!(
+            discovery.stats_bounded(0, 16),
+            json!({ "state": "known", "prefixes": [], "failures": [] })
         );
         // Unknown, then unknown for another reason: the reasons follow the
         // last round, though the state doesn't change.
@@ -1199,9 +1346,62 @@ mod tests {
         );
     }
 
+    /// A state discovery published, as its log line is about to be written:
+    /// the state, what `stats()` read then, and when.
+    #[derive(Debug, Clone)]
+    struct Published {
+        state: Nat64State,
+        stats: serde_json::Value,
+        at: Instant,
+    }
+
+    /// Every state `discovery` publishes from now on, in order. Each entry
+    /// is read under the publication's order lock, so its failures are the
+    /// ones published with it. A test reads a state from this log, however
+    /// briefly it lasted, rather than polling for it while it lasts (#298).
+    fn transitions(discovery: &Discovery) -> Arc<Mutex<Vec<Published>>> {
+        let log = Arc::new(Mutex::new(Vec::new()));
+        let written = log.clone();
+        let shared = Arc::downgrade(&discovery.shared);
+        *discovery.shared.before_log.lock().unwrap() = Some(Arc::new(move || {
+            if let Some(shared) = shared.upgrade() {
+                let discovery = Discovery { shared };
+                written.lock().unwrap().push(Published {
+                    state: discovery.state(),
+                    stats: discovery.stats(),
+                    at: Instant::now(),
+                });
+            }
+        }));
+        log
+    }
+
+    /// The log once `wanted` holds of it, or as it is after 5 s.
+    fn wait_log(
+        log: &Mutex<Vec<Published>>,
+        wanted: impl Fn(&[Published]) -> bool,
+    ) -> Vec<Published> {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let published = log.lock().unwrap().clone();
+            if wanted(&published) || Instant::now() > deadline {
+                return published;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+
+    fn states(log: &[Published]) -> Vec<Nat64State> {
+        log.iter()
+            .map(|published| published.state.clone())
+            .collect()
+    }
+
     /// Discovery that knows no prefix from one answering resolver, then
     /// refreshes against `then`, every 30 ms, or `backoff` after a failed
-    /// round's start.
+    /// round's start. The known state can last as little as 30 ms, which a
+    /// stalled runner's poll misses (#298): the tests read it from
+    /// [`transitions`]' log.
     fn known_then(then: Vec<Learned>, attempt: Duration, backoff: Duration) -> Discovery {
         let (good, _) = dns64(Arc::new(Mutex::new(Some(vec![]))));
         let calls = Arc::new(AtomicUsize::new(0));
@@ -1236,28 +1436,36 @@ mod tests {
             Duration::from_secs(2),
             Duration::from_secs(4),
         );
+        let published = transitions(&discovery);
         let _lease = discovery.lease();
-        assert_eq!(
-            wait_for(&discovery, |state| *state != Nat64State::Pending),
-            Nat64State::NONE
-        );
         // The refresh is under way: the quiet one has its query, and won't
-        // time out for 2 s. The failure is established already: pending,
-        // well before the quiet one's 2 s are up.
-        quiet_queries.recv_timeout(Duration::from_secs(2)).unwrap();
-        let state = wait_within(&discovery, Duration::from_millis(800), |state| {
-            *state == Nat64State::Pending
+        // time out for 2 s.
+        quiet_queries.recv_timeout(Duration::from_secs(5)).unwrap();
+        let asked = Instant::now();
+        let log = wait_log(&published, |log| {
+            log.iter()
+                .any(|published| matches!(published.state, Nat64State::Unknown(_)))
         });
-        assert_eq!(state, Nat64State::Pending);
+        let states = states(&log);
+        assert!(states.len() >= 3, "{states:?}");
+        // Known, from the first round.
+        assert_eq!(states[0], Nat64State::NONE);
+        // The failure is established already: pending, well before the
+        // quiet one's 2 s are up.
+        assert_eq!(states[1], Nat64State::Pending);
+        assert!(
+            log[1].at < asked + Duration::from_millis(800),
+            "pending {:?} after the quiet one's query",
+            log[1].at.saturating_duration_since(asked)
+        );
         let target: std::net::IpAddr = "2a00:1:2:3::7f00:1".parse().unwrap();
-        assert!(freedom_ipfs_addr::check_address(target, &state).is_err());
+        assert!(freedom_ipfs_addr::check_address(target, &states[1]).is_err());
         // Pending, with the failure it is pending for.
-        assert_eq!(discovery.stats()["state"], "pending");
-        assert_eq!(discovery.stats()["failures"], json!(["rcode"]));
+        assert_eq!(log[1].stats["state"], "pending");
+        assert_eq!(log[1].stats["failures"], json!(["rcode"]));
         // The round's end: unknown.
-        let state = wait_for(&discovery, |state| matches!(state, Nat64State::Unknown(_)));
-        assert!(matches!(state, Nat64State::Unknown(_)), "{state:?}");
-        assert!(freedom_ipfs_addr::check_address(target, &state).is_err());
+        assert!(matches!(states[2], Nat64State::Unknown(_)), "{states:?}");
+        assert!(freedom_ipfs_addr::check_address(target, &states[2]).is_err());
     }
 
     #[test]
@@ -1286,33 +1494,35 @@ mod tests {
             Duration::from_secs(2),
             Duration::from_secs(4),
         );
+        let published = transitions(&discovery);
         let _lease = discovery.lease();
-        assert_eq!(
-            wait_for(&discovery, |state| *state != Nat64State::Pending),
-            Nat64State::NONE
-        );
         learning_queries
-            .recv_timeout(Duration::from_secs(2))
+            .recv_timeout(Duration::from_secs(5))
             .unwrap();
         let target: std::net::IpAddr = "2002:808:808::7f00:1".parse().unwrap();
-        // While the learning answer is out: pending, which admits no IPv6
+        // While the learning answer is out, every state published so far:
+        // known, from the first round, then pending, which admits no IPv6
         // target but an IPv4-mapped one.
-        let early = wait_within(&discovery, Duration::from_secs(1), |state| {
-            *state == Nat64State::Pending
-        });
-        assert_eq!(early, Nat64State::Pending);
-        assert!(freedom_ipfs_addr::check_address(target, &early).is_err());
+        let early = states(&wait_log(&published, |log| log.len() >= 2));
+        assert_eq!(early, vec![Nat64State::NONE, Nat64State::Pending]);
+        assert!(freedom_ipfs_addr::check_address(target, &early[1]).is_err());
         let mapped: std::net::IpAddr = "::ffff:8.8.8.8".parse().unwrap();
-        assert!(freedom_ipfs_addr::check_address(mapped, &early).is_ok());
-        // Released: the round's end, unknown with the /96, refuses it.
+        assert!(freedom_ipfs_addr::check_address(mapped, &early[1]).is_ok());
+        // Released: the round's end, unknown with the /96, refuses it, and
+        // nothing came between.
         let (lock, wake) = &*release;
         *lock.lock().unwrap() = true;
         wake.notify_all();
-        let end = wait_for(
-            &discovery,
-            |state| matches!(state, Nat64State::Unknown(prefixes) if !prefixes.is_empty()),
+        let log = states(&wait_log(&published, |log| {
+            log.iter().any(|published| {
+                matches!(&published.state, Nat64State::Unknown(prefixes) if !prefixes.is_empty())
+            })
+        }));
+        let end = Nat64State::unknown([prefix("2002:808:808::", 96)]);
+        assert_eq!(
+            log,
+            vec![Nat64State::NONE, Nat64State::Pending, end.clone()]
         );
-        assert_eq!(end, Nat64State::unknown([prefix("2002:808:808::", 96)]));
         assert!(freedom_ipfs_addr::check_address(target, &end).is_err());
     }
 
@@ -1323,18 +1533,23 @@ mod tests {
         let mut then: Vec<Learned> = first.iter().map(|(addr, _)| ask(*addr)).collect();
         then.push(ask(silent().0));
         let discovery = known_then(then, Duration::from_secs(2), Duration::from_secs(4));
+        let published = transitions(&discovery);
         let _lease = discovery.lease();
-        assert_eq!(
-            wait_for(&discovery, |state| *state != Nat64State::Pending),
-            Nat64State::NONE
+        // The refresh is under way: its first resolver has its query.
+        first[0].1.recv_timeout(Duration::from_secs(5)).unwrap();
+        let asked = Instant::now();
+        let log = wait_log(&published, |log| log.len() >= 2);
+        let states = states(&log);
+        assert!(states.len() >= 2, "{states:?}");
+        // Known, from the first round; then, well before any of the round's
+        // 2 s timeouts, pending, with the failure it is pending for.
+        assert_eq!(states[..2], [Nat64State::NONE, Nat64State::Pending]);
+        assert!(
+            log[1].at < asked + Duration::from_millis(800),
+            "pending {:?} after the round's first query",
+            log[1].at.saturating_duration_since(asked)
         );
-        first[0].1.recv_timeout(Duration::from_secs(2)).unwrap();
-        // Well before any of the round's 2 s timeouts: pending.
-        let state = wait_within(&discovery, Duration::from_millis(800), |state| {
-            *state == Nat64State::Pending
-        });
-        assert_eq!(state, Nat64State::Pending);
-        assert_eq!(discovery.stats()["failures"], json!(["over_limit"]));
+        assert_eq!(log[1].stats["failures"], json!(["over_limit"]));
     }
 
     #[test]

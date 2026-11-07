@@ -75,10 +75,15 @@ pub struct Run<'a> {
 /// How a run ended, short of a failure.
 #[derive(Debug)]
 pub enum Outcome {
-    /// Every repair is done, or its repository quarantined: the reply, and
-    /// the repositories whose own namespace was re-signed, to be announced
-    /// once the node runs.
-    Done { reply: Value, resigned: Vec<RepoId> },
+    /// Every repair is done, or its repository quarantined: the reply, the
+    /// repositories whose own namespace was re-signed, to be announced once
+    /// the node runs, and how many repositories the record holds
+    /// (`rad.stats`).
+    Done {
+        reply: Value,
+        resigned: Vec<RepoId>,
+        quarantined: usize,
+    },
     /// The cutoff passed: `deadline`.
     Deadline(ErrorBody),
     /// `rad.shutdown` came: `stopped`.
@@ -179,6 +184,7 @@ pub fn run(
             Ok(Outcome::Done {
                 reply: reply(&report),
                 resigned: report.resigned.clone(),
+                quarantined: report.quarantined,
             })
         }
         Ending::Deadline => Ok(Outcome::Deadline(ErrorBody::new(

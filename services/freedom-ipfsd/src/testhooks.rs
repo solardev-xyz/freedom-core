@@ -3,14 +3,25 @@
 //! debug or test build:** without it every hook is a no-op and no variable
 //! is read, and a release build with it doesn't compile.
 //!
-//! - `FREEDOM_IPFSD_TEST_HOLD_TEARDOWN_MS` holds each instance's teardown:
-//!   the instance runs an untracked job on its runtime's blocking pool, as
-//!   a library's would be (reqwest's `getaddrinfo`), which waits for the
-//!   instance to be cancelled and then sleeps this long. Only the join of
-//!   the instance's runtime waits for it, so quiescence comes that much
-//!   later.
-//! - `FREEDOM_IPFSD_TEST_START_DELAY_MS` stalls each `ipfs.start` before it
-//!   opens its store.
+//! - **Holds** wait until a file exists at `<path>`, for at most 30 s, so
+//!   the test decides when held work goes on. A confined process sees the
+//!   file only where its confinement grants it: the persistent process's
+//!   data directory. The ephemeral process is granted none, so its holds
+//!   end only at the 30 s, which suits a hold the test never releases.
+//!   - `FREEDOM_IPFSD_TEST_HOLD_TEARDOWN=until:<path>` holds each instance's
+//!     teardown: the instance runs an untracked job on its runtime's
+//!     blocking pool, as a library's would be (reqwest's `getaddrinfo`),
+//!     which waits for the instance to be cancelled, logs `test hook: a
+//!     teardown is held`, then waits for the file. Only the join of the
+//!     instance's runtime waits for it, so quiescence comes once the file
+//!     exists.
+//!   - `FREEDOM_IPFSD_TEST_HOLD_START=until:<path>` holds each
+//!     `ipfs.start`'s job before its build, before it opens its store.
+//!   - `FREEDOM_IPFSD_TEST_HOLD_START=after:<path>` holds each
+//!     `ipfs.start`'s job once its build has returned, before it looks at
+//!     its fence, and logs `test hook: a start's build has returned` first.
+//!     A start the test fences meanwhile has only its teardown left inside
+//!     the 5 s bound the fence armed once the file exists.
 //! - `FREEDOM_IPFSD_TEST_START_DEADLINE_MS` replaces `ipfs.start`'s 10 s
 //!   deadline.
 //! - `FREEDOM_IPFSD_TEST_PANIC=start` panics in each `ipfs.start`'s job,
@@ -78,6 +89,27 @@ use freedom_ipfs_gateway::{GatewayCoreRequest, Instance};
 #[cfg(feature = "testhooks")]
 fn millis(name: &str) -> Option<u64> {
     std::env::var(name).ok().and_then(|v| v.parse().ok())
+}
+
+/// How long a hold waits for its file at most.
+#[cfg(feature = "testhooks")]
+const HOLD_GIVE_UP: Duration = Duration::from_secs(30);
+
+/// A hold variable's file, if its value is `<at>:<path>`.
+#[cfg(feature = "testhooks")]
+fn hold(name: &str, at: &str) -> Option<std::path::PathBuf> {
+    let value = std::env::var(name).ok()?;
+    let path = value.strip_prefix(at)?.strip_prefix(':')?;
+    Some(std::path::PathBuf::from(path))
+}
+
+/// Waits until a file exists at `path`, or [`HOLD_GIVE_UP`] has passed.
+#[cfg(feature = "testhooks")]
+fn until_released(path: &std::path::Path) {
+    let give_up = std::time::Instant::now() + HOLD_GIVE_UP;
+    while !path.exists() && std::time::Instant::now() < give_up {
+        std::thread::sleep(Duration::from_millis(10));
+    }
 }
 
 /// At the confinement point: logs the thread count and the descriptors
@@ -171,11 +203,11 @@ pub fn after_confinement(runtime: &tokio::runtime::Handle) {
     let _ = runtime;
 }
 
-/// Holds the instance's teardown, as `FREEDOM_IPFSD_TEST_HOLD_TEARDOWN_MS`
-/// says.
+/// Holds the instance's teardown, as
+/// `FREEDOM_IPFSD_TEST_HOLD_TEARDOWN=until:<path>` says.
 #[cfg(feature = "testhooks")]
 pub fn hold_teardown(instance: &Instance) {
-    let Some(ms) = millis("FREEDOM_IPFSD_TEST_HOLD_TEARDOWN_MS") else {
+    let Some(release) = hold("FREEDOM_IPFSD_TEST_HOLD_TEARDOWN", "until") else {
         return;
     };
     let cancelled = instance.context().cancellation_token().clone();
@@ -184,7 +216,8 @@ pub fn hold_teardown(instance: &Instance) {
         while !cancelled.is_cancelled() {
             std::thread::sleep(Duration::from_millis(10));
         }
-        std::thread::sleep(Duration::from_millis(ms));
+        fc_service::log::info("test hook: a teardown is held", serde_json::json!({}));
+        until_released(&release);
     }));
 }
 
@@ -345,11 +378,26 @@ pub fn gateway_config(
     config
 }
 
-/// Stalls an `ipfs.start`, as `FREEDOM_IPFSD_TEST_START_DELAY_MS` says.
-pub fn start_delay() {
+/// Holds an `ipfs.start`'s job before its build, as
+/// `FREEDOM_IPFSD_TEST_HOLD_START=until:<path>` says.
+pub fn before_build() {
     #[cfg(feature = "testhooks")]
-    if let Some(ms) = millis("FREEDOM_IPFSD_TEST_START_DELAY_MS") {
-        std::thread::sleep(Duration::from_millis(ms));
+    if let Some(release) = hold("FREEDOM_IPFSD_TEST_HOLD_START", "until") {
+        until_released(&release);
+    }
+}
+
+/// Holds an `ipfs.start`'s job once its build has returned, before it
+/// looks at its fence, as `FREEDOM_IPFSD_TEST_HOLD_START=after:<path>`
+/// says.
+pub fn at_build_end() {
+    #[cfg(feature = "testhooks")]
+    if let Some(release) = hold("FREEDOM_IPFSD_TEST_HOLD_START", "after") {
+        fc_service::log::info(
+            "test hook: a start's build has returned",
+            serde_json::json!({}),
+        );
+        until_released(&release);
     }
 }
 

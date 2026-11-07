@@ -292,8 +292,9 @@ fn needs_vault() -> ErrorBody {
     )
 }
 
-/// The refusal of a write to `rid`, whose state at the gate isn't open.
-fn closed(home: &Path, rid: RepoId, state: RepoState) -> ErrorBody {
+/// The refusal of a write, or a clone ([`crate::network`]), to `rid`,
+/// whose state at the gate isn't open.
+pub(crate) fn closed(home: &Path, rid: RepoId, state: RepoState) -> ErrorBody {
     match state {
         RepoState::Quarantined(kind) => quarantine::refusal(home, rid, kind),
         // Writes wait behind a repair in progress: one still being

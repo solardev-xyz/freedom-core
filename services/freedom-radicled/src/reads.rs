@@ -631,8 +631,9 @@ const FAILED: &str = "the read failed";
 /// can't name a filesystem path ([`pathless`]). A repository the node
 /// doesn't have is [`MISSING`]; any other error that could name a path is
 /// [`NOT_FOUND`] or [`FAILED`], by its code, so main's 404 and 500 stay
-/// what they are today.
-fn radicle_error(e: libradicle::Error) -> ErrorBody {
+/// what they are today. A network operation's error is answered the same
+/// way ([`crate::network`]).
+pub(crate) fn radicle_error(e: libradicle::Error) -> ErrorBody {
     if missing(&e) {
         return ErrorBody::new(ErrorCode::NotFound, MISSING);
     }
