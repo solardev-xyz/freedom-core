@@ -497,11 +497,17 @@ fn a_read_waiting_for_the_budget_ends_at_its_cancel_and_its_deadline() {
     configure(&dirs.home, json!({}));
     let (rid, revision) = bounds_repository(&dirs.home);
     let deadline = Duration::from_secs(8);
+    // The 8 s deadline is the reads' under test, not the held body's: it
+    // applies once `from` exists, which the test makes after the body's
+    // head, however long that body took to build.
+    let from = dirs.own_home.join("deadline-from");
+    let from_arg = from.display().to_string();
     let mut radicled = served(
         &dirs,
         &[
             ("FREEDOM_RADICLED_TEST_BUDGET", "68157440"),
             ("FREEDOM_RADICLED_TEST_WORK_DEADLINE_MS", "8000"),
+            ("FREEDOM_RADICLED_TEST_WORK_DEADLINE_FROM", &from_arg),
         ],
     );
     let held = radicled.request(
@@ -512,6 +518,7 @@ fn a_read_waiting_for_the_budget_ends_at_its_cancel_and_its_deadline() {
     assert_eq!(head["result"]["bytes"], JSON_CAP, "{head}");
     // Its window's worth, and no credit.
     radicled.uncredited(held, 128 << 10);
+    std::fs::write(&from, b"").unwrap();
     let status = |radicled: &mut Radicled| radicled.request("rad.read", json!({ "op": "status" }));
 
     // Main's cancel ends a wait. The small read is sent once the 8 MiB
@@ -548,6 +555,9 @@ fn a_read_waiting_for_the_budget_ends_at_its_cancel_and_its_deadline() {
     assert!(!radicled.any_within(behind, Duration::from_millis(2000)));
     assert_eq!(code(&radicled.reply(waiting)), "deadline");
     assert!(admitted.elapsed() >= deadline);
+    // The test's 8 s, not the default 60 s: it was admitted once `from`
+    // existed.
+    assert!(admitted.elapsed() < Duration::from_secs(60));
     assert_eq!(
         radicled.read_reply(behind).unwrap(),
         br#"{"connectedPeers":0}"#
