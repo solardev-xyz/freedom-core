@@ -34,8 +34,7 @@ const QUARANTINED: &str = "an online repair quarantined its repository";
 const FAILED: &str = "an online repair failed outside its repository";
 const HOLDS: &str = "test hook: a repair turn holds the node";
 const FENCED: &str = "test hook: the stop has fenced the pools";
-const UNREPAIRED: &str =
-    "a write's outcome is unknown, and its repository isn't repaired; the dirty marker stays";
+const UNREPAIRED: &str = "an outcome is unknown: a write's whose repository isn't repaired, or a clone's that was cut off; the dirty marker stays";
 
 /// How long a repair of a fixture's repository may take, unheld.
 const REPAIRED_WITHIN: Duration = Duration::from_secs(30);

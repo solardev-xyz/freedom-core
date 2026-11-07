@@ -222,7 +222,7 @@ Each ref is renamed into place atomically, but the steps together aren't. So bef
   - `rad.reconcile` adds the running identity's before it changes anything. A throwaway key's isn't added: it owns no namespace and signs nothing ([Profiles without a vault](#profiles-without-a-vault)), so a check of it would find nothing, and successive throwaway starts that each reach the deadline would only grow the marker;
   - an earlier identity stays named until its namespace has been checked, whatever key later processes run with. Its vault may have been deleted or replaced since. The [switch](#the-switch) names the identity whose key file it removes in the same way;
   - once every earlier identity's namespace is checked or its repository quarantined, `rad.reconcile` rewrites the marker durably to name only the running identity (none, for a throwaway key), before it replies.
-- **It is kept after anything that may be partial:** a write that ends `outcome_unknown`, or a clone or fetch that is cancelled or cut off.
+- **It is kept after anything that may be partial:** a write that ends `outcome_unknown`, or a clone or fetch that is cancelled or cut off. For `rad.clone`, that is one past its start that libradicle reports cancelled (main's cancel, its deadline or the stop flipped its token), one still running past the stop's drain, and one that panicked. A clone whose libradicle call returned `Ok`, or an error of libradicle's other than cancelled, is proven: its fetches ended.
 - **It is cleared only after a proven clean stop.** At `rad.shutdown`, it is removed (durably) only when all of these hold:
   - the write queue is empty, and the executing writer, if any, has returned;
   - every write that ended `outcome_unknown` this run has had its repository repaired or quarantined since ([Writes](#writes));
@@ -434,8 +434,8 @@ The rules this design relies on, as 0007 specifies them:
 | `rad.shutdown` | none | none: the process exits | main kills after 10 s |
 | `rad.read` | `op`, `args` | head `{ content_type: "application/json", bytes }`, then the JSON as a body stream | read pool; 60 s to the head |
 | `rad.blob` | `rid`, `revision`, `path`, `range?`, `head_only?` | head `{ oid, size, binary?, range }`, then the bytes | read pool; 60 s to the head |
-| `rad.connect_seeds` | `timeout_ms` | today's report | network pool; `timeout_ms` + 30 s |
-| `rad.clone` | `rid`, `timeout_ms`, `progress` | `{ ok }` or `{ cancelled }`; `rad.progress` events | network pool; `timeout_ms` + 30 s |
+| `rad.connect_seeds` | `timeout_ms` | today's report: the text libradicle's `json::seed_report` writes, byte for byte | network pool; `timeout_ms` + 30 s |
+| `rad.clone` | `rid`, `timeout_ms`, `progress` (a boolean; absent or null is `false`) | `{ ok }` or `{ cancelled }`; with `progress`, `rad.progress` events | network pool; `timeout_ms` + 30 s |
 | `rad.unseed` | `rid` | `{ unseeded }` | write queue; 60 s |
 | `rad.write` | `op` (`create_issue`, `comment_issue`, `edit_issue_state`, `comment_patch`), `args` | today's JSON | write queue; 60 s |
 | `rad.import_repo` | `path`, `name`, `description`, `default_branch` | `{ rid }` | the import process only, once `rad.reconcile` has succeeded ([Writes](#writes)); 300 s |
@@ -472,10 +472,14 @@ The rules this design relies on, as 0007 specifies them:
   - They answer `stopped` too while a COB write to the repository is past its mutation start and not yet proven, whether or not it has been answered, and from its return until its online repair is over ([Writes](#writes)): until then what it left may be partial. This includes a write that then succeeds, so a COB read that races a write may get a 503.
   - The fence is looked at once, before the read's build. A read already building when a write starts, or a repair closes its repository, finishes on what it read, as a read just before them would have: the gate has no read pass, and a repair publishes the cache at its end.
 - **Why reads stream:** the 1 MiB JSON frame (0001) is smaller than many results, such as a commit's diff or a large text blob. Streaming also lets main pass a result to a handler without holding it ([JSON results](#json-results)).
+- **`timeout_ms`** is the add-on's `u32`, as its `connectSeeds` and `cloneRepo` take it: an integer from 0 to 4,294,967,295, else `invalid_argument`. So a network deadline is at most about 49.7 days and 30 s from admission.
+- **`rad.clone`'s refusals before its start** are definitive, in this order: the pool's (`stopped`, `busy`); params that don't parse (`invalid_argument`; a RID with the add-on's text, `invalid RID "…": …`); the node not running (`stopped`); a repository its gate doesn't hold open (`quarantined` with `data.kind` and `data.step`, or `stopped` while it is repaired); main's cancel, the deadline or the stop. libradicle's `Gated`, from the same check inside its seed, is answered the same way; any other libradicle error is `not_found` or `failed` with libradicle's text, as for reads (`no seeds found for …`, `fetching … failed: …`, `fetching … timed out`).
 - **`rad.progress`** events carry `{ id, event }`, where `event` is today's progress JSON string ([Progress](#progress)).
 - **Cancel:**
   - The envelope's `cancel` on a `rad.clone` flips its `CancelToken`, which replaces `cancelClone(rid)`. Main maps the RID to the request.
   - libradicle checks the token between candidates, and an in-flight fetch finishes first (`lr:449`). So the reply comes when the clone actually stops.
+  - **The clone's start:** just before libradicle's call, the clone claims its request's commit point, as a write's start does, in one decision with the stop, the deadline and main's cancel. A cancel before it is the connection's `cancelled`, and nothing starts. From it on, main's cancel queues nothing at the connection: it flips the token alone, and the clone answers `{ cancelled }` once libradicle returns cancelled, its `cancelled` event first. The deadline answers `deadline` and the stop `stopped`, never `outcome_unknown`, and the clone keeps its slot until libradicle returns.
+  - **`rad.connect_seeds`** takes no token in libradicle: main's cancel is `cancelled` at once, and its work keeps its slot until libradicle returns, within its own `timeout_ms`.
   - Cancelling a queued read removes it before it starts. Cancelling a running read stops its stream at once, and its walk at the next check ([upstream](#upstream-changes)).
   - For writes, see [Writes](#writes).
 
@@ -485,7 +489,7 @@ The rules this design relies on, as 0007 specifies them:
   - **To the head:** the 60 s deadline runs from admission, and includes the queue and any wait for an output reservation. It ends when the head is written.
   - A read still queued at its deadline is removed before work starts, and answered `deadline`. A running read past it is cancelled, and answered `deadline` if its head hasn't been written.
   - **After the head there is no service deadline.** A stalled or paused body is main's to judge: 0006's pull-driven idle timer cancels a body that leaves a pull unanswered for 60 s, and a paused reader is never timed out. The service ends a stream early only with `abort`: `cancelled`, `stopped` or `internal`. Its caps are checked before the head (a JSON read's JSON is complete before it, and a blob's size comes from its header), so `too_large` is always a reply, never an abort.
-- **Network operations:** `timeout_ms` + 30 s. A network operation past it gets `deadline`, but keeps its slot until libradicle returns.
+- **Network operations:** `timeout_ms` + 30 s, from admission. A network operation past it gets `deadline`, but keeps its slot until libradicle returns, and its token is flipped. A clone's progress stops with that answer.
 - **Writes:** 60 s, and 300 s for the import in its own process, with the outcome rules in [Writes](#writes).
 - **Main's watchdogs** are each deadline + 15 s, as 0001.
 
@@ -500,9 +504,9 @@ The rules this design relies on, as 0007 specifies them:
 | `range_not_satisfiable` | `range` outside the blob; `data.size` | 416 with `Content-Range: bytes */size` |
 | `busy` | a pool's queue is full | 503 |
 | `deadline` | past the deadline, before a head or before a write starts | 504 for reads; the provider's existing errors otherwise |
-| `cancelled` | main's cancel, before a write starts | the request is already gone |
+| `cancelled` | main's cancel, before a write or a clone starts | the request is already gone |
 | `outcome_unknown` | any write that has started and isn't proven ([Writes](#writes)) | provider error -32603 with new text |
-| `stopped` | not yet `RUNNING`, shutting down, or a repository under online repair (COB ops) | 503 |
+| `stopped` | not yet `RUNNING`, shutting down, or a repository under online repair (COB ops, a clone) | 503 |
 | `quarantined` | on a quarantined repository: COB ops; for `namespace`, every read; a write, seed, clone or sync; `data.kind`, `data.step` | 503 with `{"error": message}`; the provider's existing errors for writes |
 | `not_quarantined` | `rad.remove_repo`: no record of `rid` has that `qid`, so nothing was removed ([the escape](#the-escape)) | the entry main showed is gone or was replaced: main lists the quarantine again |
 | `internal` | a panic on a read's thread | 500 |
@@ -522,15 +526,19 @@ Exit codes:
 ### Progress
 
 - **What libradicle emits:** clone progress, from its clone loop on a network-pool thread (`lr:454`). The reactor is never involved.
-- **The service's callback never blocks.** It writes into a bounded per-clone queue and returns.
+- **The service's callback never blocks.** It writes into a bounded per-clone queue and returns. One thread of the service writes every clone's queue to the connection, oldest event first, one at a time, each clone in turn; the connection holds at most one event waiting for its writer (`max_events` 1), so what a clone hasn't had written waits in its own queue, under its bounds.
 - **The queue,** per clone:
   - **`resolving`, `connecting` and `fetching`:** only the latest unwritten one is kept.
-  - **`peer-failed`:** up to 8 unwritten events are kept as they are. Beyond that, they fold into one summary event, `{"phase":"peer-failed","summary":{"count":N,"reasons":[…]}}`, holding the count and the 4 most recent reasons.
+  - **`peer-failed`:** up to 8 unwritten events are kept as they are. A failure past them, while 8 wait, starts one summary event, `{"phase":"peer-failed","summary":{"count":N,"reasons":[…]}}`, holding the count and the 4 most recent reasons. Every failure while the summary waits folds into it. Once it is written, a later failure is kept as it is again, while fewer than 8 wait.
   - **The terminal event** (`done`, `failed` or `cancelled`) has a reserved slot and is never dropped. It is written after everything queued before it.
-  - **Size:** every event is measured as encoded JSON, envelope fields and escaping included, and must be at most 4 KiB.
-    - An event that would be larger is cut down before it is queued. First the summary's oldest reasons are dropped. Then the remaining `reason` texts are shortened at UTF-8 character boundaries, each ending with `…`, until the whole encoded event fits.
-    - The phase and the count are never cut. Escaping counts: a NUL encodes to 6 bytes, a backslash to 2.
-- **So a clone holds at most 10 unwritten events of at most 4 KiB encoded:** one latest phase event, 8 failures, and the summary. Its terminal event is separate.
+  - **Order:** the others are written in the order they were last queued. A phase event that replaces the latest, and a summary a failure folds into, take their place as of then.
+  - **Size:** every event is measured as encoded JSON, envelope fields and escaping included, and must be at most 4 KiB: the whole envelope the connection writes for it, `{"type":"event","event":"rad.progress","data":{"id":…,"event":"…"}}`, without the frame's header.
+    - An event that would be larger is cut down before it is queued. First the summary's oldest reasons are dropped, while more than one is left. Then the one reason left, or a single event's reason, is cut to its longest prefix at a UTF-8 character boundary that, ending with `…`, lets the whole encoded event fit.
+    - The phase and the count are never cut. Escaping counts: a NUL encodes to 6 bytes in the event's JSON and 7 in the envelope's, a backslash and a quote to 2 and 4. The request's ID counts too.
+    - A reason longer than 4 KiB is truncated to it first, which changes no outcome. A phase event too large however it is cut (libradicle's addresses and node IDs are far shorter) is dropped.
+- **So a clone holds at most 10 unwritten events of at most 4 KiB encoded:** one latest phase event, 8 failures, and the summary. Its terminal event is separate. The connection holds one more, for every clone.
+- **Progress stops at the final answer.** An event is queued at the connection only while nothing of its request is (no reply, no head, no `cancelled`), in one step under the connection's lock; the writer writes every queued event before any reply. The clone waits until its queue is written before it answers, so its terminal event comes before its answer. Once it is answered otherwise (its deadline, the stop) or the connection ends, its queue is dropped, and what libradicle emits after that with it. A clone without `progress` sends none.
+- `vectors/radicle-network.json` pins the queue (the design's cases, `source: design`), libradicle's event texts and main's reading of them.
 - **This is a deviation** (`progress-summary`): today every event reaches the callback. `seed-status.js` accepts the summary event.
 
 ### Pools and budgets
@@ -1322,11 +1330,11 @@ Measured against the add-on on linux-x64, macOS arm64 and win-x64:
 | restarts | 0.5 s, 2 s, 10 s; three crashes in 60 s | stop, and "Restart Radicle" |
 | child processes | none | — |
 | read pool | 4 threads, 320 queued; 60 s to the head, queue and reservation waits included | `busy`; `deadline` |
-| network pool | 8 threads, 16 queued; `timeout_ms` + 30 s | `busy`; `deadline`, with the slot held until libradicle returns |
+| network pool | 8 threads, 16 queued; `timeout_ms` (a `u32`) + 30 s | `busy`; `deadline`, with the slot held until libradicle returns |
 | write queue | 1 at a time, 16 queued; 60 s; the slot held until the call returns | `busy`; `outcome_unknown` once started |
 | the import process | one import; `rad.reconcile`'s 300 s, then 300 s from the import's admission ([0010](0010-service-confinement.md)) | the process exits; `outcome_unknown` once started |
 | output budget | 256 MiB by reservation; a blob ≤ 64 MiB (128 MiB reserved while loading); a JSON read ≤ 64 MiB with ≤ 32 MiB of JSON | the read waits within its deadline; `too_large` per read |
-| progress events | per clone, ≤ 10 unwritten of ≤ 4 KiB encoded, plus the terminal; failures past 8 are summarized | the summary grows its count, not its size; reasons are cut |
+| progress events | per clone, ≤ 10 unwritten of ≤ 4 KiB encoded, plus the terminal; one more in the connection, shared; failures past 8 are summarized | the summary grows its count, not its size; reasons are cut |
 | streams | 0007's: a 128 KiB window, 64 KiB frames, one 128 KiB ring per stream in main | the service waits for credit |
 | collected results in main | per call: 64 KiB, or 4 MiB for the lists; 16 MiB in all, held until the scope's callback settles, even after an abort | `too_large`; `busy` after 5 s |
 | other callers in main | 64 outstanding, 64 waiting | `busy` |

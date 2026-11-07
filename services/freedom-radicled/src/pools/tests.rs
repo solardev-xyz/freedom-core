@@ -13,6 +13,8 @@ enum Answer {
     Error(ErrorCode),
     /// The work's own reply.
     Done,
+    /// A network operation's `{ cancelled }` result.
+    Cancelled,
     /// The work's head, its stream open.
     Head,
     /// Its stream aborted.
@@ -1355,5 +1357,275 @@ fn a_cob_write_fences_its_repository_from_its_start_until_proven_or_repaired() {
     finish.release();
     assert!(until(|| running(&pool) == 0));
     assert!(!pool.writing(&fenced));
+    assert!(pool.stop(soon(2000)));
+}
+
+/// How a network operation's libradicle call behaves past its start.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Call {
+    /// Returns cancelled once its token is, as a clone does between
+    /// candidates; or `Ok` once `finish` is released.
+    Heeds,
+    /// Returns `Ok` once `finish` is released, whatever its token: a fetch
+    /// in flight finishes first.
+    Deaf,
+    /// Panics once `finish` is released.
+    Panics,
+}
+
+/// A network operation's work as `rad.clone`'s runs it: once `go` is
+/// released it claims its start, and says whether it could on `began`;
+/// past it, it calls as `call` says, then answers as the clone does:
+/// `Done` for `Ok`, proven; for cancelled, the `{ cancelled }` result
+/// (`Answer::Cancelled`) only if main cancelled it, and unproven.
+fn network(
+    record: &Record,
+    go: &Hold,
+    finish: &Hold,
+    began: &mpsc::Sender<bool>,
+    call: Call,
+) -> Work {
+    let (record, go, finish, began) = (record.clone(), go.clone(), finish.clone(), began.clone());
+    Box::new(move |ticket: &Ticket| {
+        while !go.released() {
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        let claimed = ticket.claim();
+        let _ = began.send(claimed);
+        if !claimed {
+            return;
+        }
+        loop {
+            if finish.released() {
+                if call == Call::Panics {
+                    panic!("a test panic past the network start");
+                }
+                ticket.proven();
+                record.answer(ticket.id, Answer::Done);
+                return;
+            }
+            if call == Call::Heeds && ticket.cancel.is_cancelled() {
+                if ticket.cancelled_by_main() {
+                    record.answer(ticket.id, Answer::Cancelled);
+                }
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(2));
+        }
+    })
+}
+
+/// 0008, "Methods": past its start, main's cancel queues nothing at the
+/// connection, and the pool answers nothing either: it cancels the token,
+/// and the work answers `{ cancelled }` once libradicle returns, holding
+/// its slot until then. Cut off, the run is uncertain.
+#[test]
+fn past_its_start_main_cancels_a_network_operation_through_its_token() {
+    let (record, go, finish) = (Record::default(), Hold::default(), Hold::default());
+    let (tx, rx) = mpsc::channel();
+    go.release();
+    let pool = open(shape(1, 0));
+    pool.submit(
+        1,
+        far(),
+        record.clone(),
+        network(&record, &go, &finish, &tx, Call::Deaf),
+    );
+    assert!(began(&rx));
+    assert!(record.cancel(&pool, 1));
+    // Nothing answered yet, and its token is cancelled: the call runs on,
+    // in its slot.
+    assert_eq!(record.get(1), None);
+    let cancel = pool.inner.lock().running[0].cancel.clone();
+    assert!(cancel.is_cancelled());
+    let work = network(&record, &go, &finish, &tx, Call::Heeds);
+    assert_eq!(pool.submit(2, far(), record.clone(), work), Admission::Busy);
+    // A deaf call that then succeeds answers its success, proven.
+    finish.release();
+    assert!(until(|| running(&pool) == 0));
+    assert_eq!(record.get(1), Some(Answer::Done));
+    assert!(!uncertain(&pool));
+
+    // One that heeds its token answers `{ cancelled }`, and is cut off.
+    let finish = Hold::default();
+    pool.submit(
+        3,
+        far(),
+        record.clone(),
+        network(&record, &go, &finish, &tx, Call::Heeds),
+    );
+    assert!(began(&rx));
+    assert!(record.cancel(&pool, 3));
+    assert!(until(|| running(&pool) == 0));
+    assert_eq!(record.get(3), Some(Answer::Cancelled));
+    assert!(uncertain(&pool));
+    assert!(pool.stop(soon(2000)));
+}
+
+/// Before its start, main's cancel is the connection's `cancelled`, as
+/// for any request, and nothing starts: the run stays certain.
+#[test]
+fn a_network_operation_cancelled_before_its_start_never_starts() {
+    let (record, go, finish) = (Record::default(), Hold::default(), Hold::default());
+    let (tx, rx) = mpsc::channel();
+    let pool = open(shape(1, 1));
+    pool.submit(
+        1,
+        far(),
+        record.clone(),
+        network(&record, &go, &finish, &tx, Call::Heeds),
+    );
+    assert!(until(|| running(&pool) == 1));
+    assert!(record.cancel(&pool, 1));
+    // A queued one is removed, and never runs.
+    pool.submit(
+        2,
+        far(),
+        record.clone(),
+        network(&record, &go, &finish, &tx, Call::Heeds),
+    );
+    assert!(record.cancel(&pool, 2));
+    go.release();
+    assert!(!began(&rx));
+    assert!(until(|| running(&pool) == 0));
+    assert!(rx.recv_timeout(Duration::from_millis(150)).is_err());
+    for id in [1, 2] {
+        assert_eq!(record.get(id), Some(Answer::Error(ErrorCode::Cancelled)));
+    }
+    assert!(!uncertain(&pool));
+    assert!(pool.stop(soon(2000)));
+}
+
+/// 0008, "Deadlines": past its start, a network operation past its
+/// deadline is `deadline`, never `outcome_unknown`, its token cancelled;
+/// it keeps its slot until libradicle returns. One that then succeeds is
+/// proven; one cancelled by it leaves the run uncertain.
+#[test]
+fn past_its_start_a_network_deadline_is_deadline_and_keeps_its_slot() {
+    let (record, go, finish) = (Record::default(), Hold::default(), Hold::default());
+    let (tx, rx) = mpsc::channel();
+    go.release();
+    let pool = open(shape(1, 0));
+    pool.submit(
+        1,
+        soon(150),
+        record.clone(),
+        network(&record, &go, &finish, &tx, Call::Deaf),
+    );
+    assert!(began(&rx));
+    assert!(until(|| record.get(1).is_some()));
+    assert_eq!(record.get(1), Some(Answer::Error(ErrorCode::Deadline)));
+    assert!(pool.inner.lock().running[0].cancel.is_cancelled());
+    let work = network(&record, &go, &finish, &tx, Call::Heeds);
+    assert_eq!(pool.submit(2, far(), record.clone(), work), Admission::Busy);
+    finish.release();
+    assert!(until(|| running(&pool) == 0));
+    assert_eq!(record.get(1), Some(Answer::Error(ErrorCode::Deadline)));
+    assert!(!uncertain(&pool));
+
+    let finish = Hold::default();
+    pool.submit(
+        3,
+        soon(150),
+        record.clone(),
+        network(&record, &go, &finish, &tx, Call::Heeds),
+    );
+    assert!(began(&rx));
+    assert!(until(|| running(&pool) == 0));
+    assert_eq!(record.get(3), Some(Answer::Error(ErrorCode::Deadline)));
+    assert!(uncertain(&pool));
+    assert!(pool.stop(soon(2000)));
+}
+
+/// Before its start, the deadline and the stop keep it from starting, as
+/// a write's boundary does.
+#[test]
+fn a_network_operation_past_its_deadline_or_met_by_the_stop_never_starts() {
+    let (record, go, finish) = (Record::default(), Hold::default(), Hold::default());
+    let (tx, rx) = mpsc::channel();
+    let pool = open(shape(1, 0));
+    pool.submit(
+        1,
+        soon(50),
+        record.clone(),
+        network(&record, &go, &finish, &tx, Call::Heeds),
+    );
+    assert!(until(|| record.get(1).is_some()));
+    go.release();
+    assert!(!began(&rx));
+    assert_eq!(record.get(1), Some(Answer::Error(ErrorCode::Deadline)));
+    assert!(until(|| running(&pool) == 0));
+
+    let go = Hold::default();
+    pool.submit(
+        2,
+        far(),
+        record.clone(),
+        network(&record, &go, &finish, &tx, Call::Heeds),
+    );
+    assert!(until(|| running(&pool) == 1));
+    pool.fence();
+    go.release();
+    assert!(!began(&rx));
+    assert!(pool.drain(soon(2000)));
+    assert_eq!(record.get(2), Some(Answer::Error(ErrorCode::Stopped)));
+    assert!(!uncertain(&pool));
+}
+
+/// The stop, past a network start: its token cancelled, the operation
+/// returns cancelled and is answered `stopped`, never `{ cancelled }`, and
+/// cut off. One still running past the drain is settled `stopped` too,
+/// and the drain is incomplete. Either way the run is uncertain.
+#[test]
+fn the_stop_answers_a_started_network_operation_stopped_and_marks_it() {
+    let (record, go, finish) = (Record::default(), Hold::default(), Hold::default());
+    let (tx, rx) = mpsc::channel();
+    go.release();
+    let pool = open(shape(1, 0));
+    pool.submit(
+        1,
+        far(),
+        record.clone(),
+        network(&record, &go, &finish, &tx, Call::Heeds),
+    );
+    assert!(began(&rx));
+    assert!(pool.stop(soon(2000)));
+    assert_eq!(record.get(1), Some(Answer::Error(ErrorCode::Stopped)));
+    assert!(uncertain(&pool));
+
+    let (record, finish) = (Record::default(), Hold::default());
+    let pool = open(shape(1, 0));
+    pool.submit(
+        2,
+        far(),
+        record.clone(),
+        network(&record, &go, &finish, &tx, Call::Deaf),
+    );
+    assert!(began(&rx));
+    assert!(!pool.stop(soon(150)));
+    assert_eq!(record.get(2), Some(Answer::Error(ErrorCode::Stopped)));
+    assert!(uncertain(&pool));
+    finish.release();
+}
+
+/// A panic past a network start is `internal`, never `outcome_unknown`,
+/// and leaves the run uncertain.
+#[test]
+fn a_panic_past_a_network_start_is_internal_and_marks_the_run() {
+    let (record, go, finish) = (Record::default(), Hold::default(), Hold::default());
+    let (tx, rx) = mpsc::channel();
+    go.release();
+    finish.release();
+    let pool = open(shape(1, 0));
+    pool.submit(
+        1,
+        far(),
+        record.clone(),
+        network(&record, &go, &finish, &tx, Call::Panics),
+    );
+    assert!(began(&rx));
+    assert!(until(|| running(&pool) == 0));
+    assert_eq!(record.get(1), Some(Answer::Error(ErrorCode::Internal)));
+    assert!(uncertain(&pool));
     assert!(pool.stop(soon(2000)));
 }

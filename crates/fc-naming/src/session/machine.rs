@@ -200,10 +200,6 @@ fn request_bytes(request: &Request) -> usize {
                 name.as_ref().map_or(0, String::len) + address.as_ref().map_or(0, String::len)
             }
             super::ens::VerifiedOp::MyotisCall { data, .. } => data.len(),
-            super::ens::VerifiedOp::ColibriResolve {
-                name, call_data, ..
-            } => name.len() + call_data.len(),
-            super::ens::VerifiedOp::ColibriReverse { .. } => 0,
         },
     }
 }

@@ -3,8 +3,9 @@
 //! they open as `rad.start` answers, refuse past their bounds, enforce
 //! their deadlines and main's cancel, and drain at the stop before the node
 //! is asked to stop. This build serves quarantine's pooled methods
-//! (tests/quarantine.rs), the writes (tests/writes.rs) and `rad.read`'s
-//! pass-through ops (tests/reads.rs): `rad.blob`'s work answers `stopped`.
+//! (tests/quarantine.rs), the writes (tests/writes.rs), `rad.read`'s ops
+//! (tests/reads.rs, tests/composed.rs) and the network operations
+//! (tests/clone.rs, tests/network.rs): `rad.blob`'s work answers `stopped`.
 //! `FREEDOM_RADICLED_TEST_HOLD_WORK` holds each in its slot first, the
 //! writes before their mutation starts, and the reads before their build.
 //!
@@ -27,20 +28,25 @@ const HOLD: (&str, &str) = ("FREEDOM_RADICLED_TEST_HOLD_WORK", "1");
 const RID: &str = "rad:z3gqcJUoA1n9HaHKufZs5FCSGazv5";
 
 /// The pooled methods, as 0008's table places them.
-const POOLED: [&str; 6] = [
+const POOLED: [&str; 8] = [
     "rad.quarantine_list",
     "rad.read",
     "rad.blob",
+    "rad.connect_seeds",
+    "rad.clone",
     "rad.remove_repo",
     "rad.unseed",
     "rad.write",
 ];
 
 /// The pooled methods this build serves: quarantine's (tests/quarantine.rs),
-/// the writes (tests/writes.rs) and `rad.read` (tests/reads.rs).
-const SERVED: [&str; 5] = [
+/// the writes (tests/writes.rs), `rad.read` (tests/reads.rs) and the
+/// network operations (tests/clone.rs).
+const SERVED: [&str; 7] = [
     "rad.quarantine_list",
     "rad.read",
+    "rad.connect_seeds",
+    "rad.clone",
     "rad.remove_repo",
     "rad.unseed",
     "rad.write",

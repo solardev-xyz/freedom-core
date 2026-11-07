@@ -38,9 +38,10 @@
 //!   one produced past it is never sent.
 //!
 //! **Cancel** (main's, [`Pools::cancel`]): the connection has answered
-//! `cancelled` already. A queued request is removed before its work starts.
-//! A running one has its token cancelled, and keeps its slot until its work
-//! returns.
+//! `cancelled` already, unless the request's work claimed its commit point
+//! (a write's start, a network start: below). A queued request is removed
+//! before its work starts. A running one has its token cancelled, and keeps
+//! its slot until its work returns.
 //!
 //! **The mutation-start boundary** (0008, "Writes"; [`Ticket::begin`]): a
 //! write *starts* when its work calls into libradicle's mutation, which it
@@ -65,6 +66,25 @@
 //! answer. A started request whose work doesn't mark its outcome proven
 //! ([`Ticket::proven`]) leaves the run uncertain ([`Pools::uncertain`]), and
 //! the dirty marker stays ([`crate::node`]).
+//!
+//! **The network start** (0008, "Methods": cancel; [`Ticket::claim`]): a
+//! network operation's work claims its request's commit point just before
+//! it calls into libradicle, in the same one decision as a write's start,
+//! with the stop, the deadline and main's cancel. From then on:
+//! - **main's cancel** queues nothing: it cancels the request's token, and
+//!   its work answers once libradicle returns (`{ cancelled }` for a clone,
+//!   [`Ticket::cancelled_by_main`]), so the reply comes when the operation
+//!   actually stops;
+//! - **the deadline** answers it `deadline`, and **the stop** `stopped`, as
+//!   for any request: it never is `outcome_unknown`. Either way it keeps its
+//!   slot until libradicle returns (0008: "keeps its slot until libradicle
+//!   returns");
+//! - **its outcome is marked:** unless its work marks it proven
+//!   ([`Ticket::proven`]), as libradicle's call returning without being cut
+//!   off does, the run is uncertain ([`Pools::uncertain`]), and the dirty
+//!   marker stays (0008, "Reconciliation": "a clone or fetch that is
+//!   cancelled or cut off"). So does one still running past the stop's
+//!   drain, or one that panicked.
 //!
 //! **The work** runs on a pool thread, marked as request work for the panic
 //! hook. A panic is that request's `internal` error, or its stream's
@@ -193,7 +213,24 @@ impl Ticket {
     /// hasn't yet), or the stop has begun. Its work must then return
     /// without starting anything, and its answer stands.
     pub fn begin(&self) -> bool {
-        self.boundary.begin(self.id)
+        self.boundary.begin(self.id, Start::Mutation)
+    }
+
+    /// The network start (see the module's doc): `true` if this request's
+    /// work may call libradicle's network operation now. It holds the
+    /// request's commit point from now on: main's cancel queues nothing,
+    /// and reaches its token alone, and its work owes the request its
+    /// answer. The deadline and the stop answer it as before, never
+    /// `outcome_unknown`. `false` as for [`Ticket::begin`]: its work must
+    /// then return without starting anything, and its answer stands.
+    pub fn claim(&self) -> bool {
+        self.boundary.begin(self.id, Start::Network)
+    }
+
+    /// Whether main cancelled this request while it ran: a network
+    /// operation past its start answers `{ cancelled }` for it.
+    pub fn cancelled_by_main(&self) -> bool {
+        self.boundary.cancelled(self.id)
     }
 
     /// The work's outcome past the boundary is proven: its mutation
@@ -204,10 +241,21 @@ impl Ticket {
     }
 }
 
-/// A pool's side of [`Ticket::begin`] and [`Ticket::proven`].
+/// Which start a request's work claims.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Start {
+    /// A write's mutation start ([`Ticket::begin`]).
+    Mutation,
+    /// A network operation's ([`Ticket::claim`]).
+    Network,
+}
+
+/// A pool's side of [`Ticket::begin`], [`Ticket::claim`],
+/// [`Ticket::proven`] and [`Ticket::cancelled_by_main`].
 trait Boundary: Send + Sync {
-    fn begin(&self, id: u64) -> bool;
+    fn begin(&self, id: u64, start: Start) -> bool;
     fn proven(&self, id: u64);
+    fn cancelled(&self, id: u64) -> bool;
 }
 
 /// A request's work, run once on a pool thread. It answers its request
@@ -319,6 +367,10 @@ struct Running<A> {
     answers: A,
     /// Whether its work has passed its mutation start ([`Ticket::begin`]).
     started: bool,
+    /// Whether its work has passed its network start ([`Ticket::claim`]).
+    claimed: bool,
+    /// Whether main cancelled it while it ran.
+    cancelled: bool,
     /// Whether its work marked its outcome proven ([`Ticket::proven`]).
     proven: bool,
     /// The repository it mutates, if it names one.
@@ -332,9 +384,9 @@ struct State<A> {
     running: Vec<Running<A>>,
     /// The pool's threads that haven't ended: its workers and its timer.
     alive: usize,
-    /// A started request ended without a proven outcome that no repair
-    /// covers, or was still running past the stop's drain, or a repair was
-    /// abandoned: for good.
+    /// A started request, or a network operation past its start, ended
+    /// without a proven outcome that no repair covers, or was still running
+    /// past the stop's drain, or a repair was abandoned: for good.
     uncertain: bool,
     /// The repositories whose online repair is queued, oldest first: the
     /// write queue's alone.
@@ -579,7 +631,8 @@ impl<A: Answers> Pool<A> {
     /// Main cancelled request `id`, and the connection has answered it: a
     /// queued request is removed, a running one's token cancelled. One
     /// past its mutation start, for which the connection queued nothing,
-    /// is answered `outcome_unknown` here. Whether the pool held it.
+    /// is answered `outcome_unknown` here; one past its network start is
+    /// its work's to answer. Whether the pool held it.
     pub fn cancel(&self, id: u64) -> bool {
         let mut state = self.inner.lock();
         if let Some(at) = state.queue.iter().position(|q| q.ticket.id == id) {
@@ -589,7 +642,8 @@ impl<A: Answers> Pool<A> {
             drop(removed);
             return true;
         }
-        if let Some(running) = state.running.iter().find(|r| r.id == id) {
+        if let Some(running) = state.running.iter_mut().find(|r| r.id == id) {
+            running.cancelled = true;
             running.cancel.cancel();
             if running.started {
                 let answers = running.answers.clone();
@@ -660,7 +714,11 @@ impl<A: Answers> Pool<A> {
             }
         }
         if state.alive > 0 {
-            if state.running.iter().any(|r| r.started && !r.proven) {
+            if state
+                .running
+                .iter()
+                .any(|r| (r.started || r.claimed) && !r.proven)
+            {
                 state.uncertain = true;
             }
             let running: Vec<(u64, A, bool)> = state
@@ -696,7 +754,7 @@ impl<A: Answers> Pool<A> {
 }
 
 impl<A: Answers> Boundary for Inner<A> {
-    fn begin(&self, id: u64) -> bool {
+    fn begin(&self, id: u64, start: Start) -> bool {
         let mut state = self.lock();
         if state.phase == Phase::Stopped {
             return false;
@@ -722,7 +780,10 @@ impl<A: Answers> Boundary for Inner<A> {
         if !running.answers.commit(id) {
             return false;
         }
-        running.started = true;
+        match start {
+            Start::Mutation => running.started = true,
+            Start::Network => running.claimed = true,
+        }
         true
     }
 
@@ -730,6 +791,13 @@ impl<A: Answers> Boundary for Inner<A> {
         if let Some(running) = self.lock().running.iter_mut().find(|r| r.id == id) {
             running.proven = true;
         }
+    }
+
+    fn cancelled(&self, id: u64) -> bool {
+        self.lock()
+            .running
+            .iter()
+            .any(|running| running.id == id && running.cancelled)
     }
 }
 
@@ -800,6 +868,8 @@ fn next<A: Answers>(inner: &Inner<A>) -> Option<Next<A>> {
             cancel: queued.ticket.cancel.clone(),
             answers: queued.answers.clone(),
             started: false,
+            claimed: false,
+            cancelled: false,
             proven: false,
             mutates: queued.mutates,
         });
@@ -829,14 +899,19 @@ fn repair_turn<A>(inner: &Inner<A>, rid: RepoId) {
         // Never queued without one.
         None => Turn::Abandoned,
     };
-    let mut state = inner.lock();
-    match turn {
-        Turn::More => {}
-        Turn::Over => state.repairs.retain(|queued| *queued != rid),
-        Turn::Abandoned => {
-            state.repairs.retain(|queued| *queued != rid);
-            state.uncertain = true;
+    {
+        let mut state = inner.lock();
+        match turn {
+            Turn::More => {}
+            Turn::Over => state.repairs.retain(|queued| *queued != rid),
+            Turn::Abandoned => {
+                state.repairs.retain(|queued| *queued != rid);
+                state.uncertain = true;
+            }
         }
+    }
+    if turn != Turn::More {
+        testhooks::at_repair_end();
     }
 }
 
@@ -852,14 +927,22 @@ fn run<A: Answers>(inner: &Inner<A>, queued: Queued<A>) {
     let outcome = with_kind(TaskKind::REQUEST, || {
         catch_unwind(AssertUnwindSafe(|| work(&ticket)))
     });
-    let (stopping_now, expired, started, proven) = {
+    let (stopping_now, expired, started, claimed, proven) = {
         let state = inner.lock();
-        let (expired, started, proven) = state
+        let (expired, started, claimed, proven) = state
             .running
             .iter()
             .find(|r| r.id == ticket.id)
-            .map_or((false, false, false), |r| (r.expired, r.started, r.proven));
-        (state.phase == Phase::Stopped, expired, started, proven)
+            .map_or((false, false, false, false), |r| {
+                (r.expired, r.started, r.claimed, r.proven)
+            });
+        (
+            state.phase == Phase::Stopped,
+            expired,
+            started,
+            claimed,
+            proven,
+        )
     };
     let id = ticket.id;
     let internal_abort = Abort::new(AbortCode::Internal, "Internal error");
@@ -884,10 +967,14 @@ fn run<A: Answers>(inner: &Inner<A>, queued: Queued<A>) {
     }
     // Its slot is let go of only now, after its answer: its work has
     // returned. Past its start, an outcome left unknown has its
-    // repository's repair queued, before the writer's next task.
+    // repository's repair queued, before the writer's next task. Past a
+    // network start, it leaves the run uncertain.
     let repairer = inner.repairer.get();
     let mut state = inner.lock();
     let mut queued = None;
+    if claimed && !proven {
+        state.uncertain = true;
+    }
     if started && !proven {
         match mutates.filter(|mutates| mutates.repaired).zip(repairer) {
             Some((Mutates { rid, .. }, repairer)) => {
@@ -991,6 +1078,11 @@ impl Pools {
     /// The read pool.
     pub fn read(&self) -> &Pool<Connection> {
         &self.read
+    }
+
+    /// The network pool.
+    pub fn network(&self) -> &Pool<Connection> {
+        &self.network
     }
 
     /// The write queue.

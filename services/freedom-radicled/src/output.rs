@@ -58,6 +58,8 @@ use fc_service::log;
 use libradicle::{Bounds, CancelToken};
 use serde_json::json;
 
+use crate::testhooks;
+
 /// The output budget: every read's bytes, process-wide (0008, "Pools and
 /// budgets").
 pub const BUDGET: u64 = 256 << 20;
@@ -242,6 +244,9 @@ impl Budget {
                     budget: self.clone(),
                     bytes,
                 });
+            }
+            if !waited {
+                testhooks::at_budget_wait();
             }
             waited = true;
             #[cfg(test)]
