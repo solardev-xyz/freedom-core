@@ -86,15 +86,33 @@ pub const COLIBRI_BLOCK_PARAM: [(&str, usize); 7] = [
 
 /// The block tags Colibri can't prove a read at: a pending block has no
 /// beacon block, and the earliest predates the beacon chain. It answers
-/// such a read from a public RPC host, unproven (main's #1046).
-pub const COLIBRI_UNPROVABLE_TAGS: [&str; 2] = ["pending", "earliest"];
+/// such a read from a public RPC host, unproven (main's #1046). Each with
+/// the name Colibri's refusal gives it.
+pub const COLIBRI_UNPROVABLE_TAGS: [(&str, &str); 2] = [
+    ("pending", r#"block "pending""#),
+    ("earliest", r#"block "earliest""#),
+];
 
-/// `colibriUnprovableTag(method, params)`: the tag of [`COLIBRI_UNPROVABLE_TAGS`]
-/// that `params` (JSON text) holds where `method` takes its block
-/// parameter ([`COLIBRI_BLOCK_PARAM`]), compared exactly, as Colibri's
-/// `eth_json_is_unproofable_tag` does; `None` otherwise, and for params
-/// that aren't an array (`Array.isArray`) or don't parse.
-pub fn colibri_unprovable_tag(method: &str, params: &str) -> Option<&'static str> {
+/// How Colibri's refusal names a block that isn't a string
+/// ([`colibri_unprovable_block`]).
+pub const COLIBRI_NOT_A_STRING: &str = "a block that isn't a string";
+
+/// `colibriUnprovableBlock(method, params)`: the block that makes this read
+/// one Colibri can't prove, as its refusal names it, or `None`. That is the
+/// element of `params` (JSON text) where `method` takes its block parameter
+/// ([`COLIBRI_BLOCK_PARAM`]), when it is:
+/// - a string of [`COLIBRI_UNPROVABLE_TAGS`] (`block "pending"`), compared
+///   exactly as Colibri's `eth_json_is_unproofable_tag` does;
+/// - anything but a string ([`COLIBRI_NOT_A_STRING`]): an EIP-1898 object,
+///   `null`, a number, a boolean, an array. Colibri 3.0.3 binds no such
+///   block: in privacy mode its call path reads any non-string as `latest`,
+///   and its account verifier compares no requested block with the proven
+///   one.
+///
+/// `None` for params that aren't an array (`Array.isArray`) or don't
+/// parse, and for an array too short to hold the parameter: that asks for
+/// `latest`, which stays Colibri's.
+pub fn colibri_unprovable_block(method: &str, params: &str) -> Option<&'static str> {
     let (_, position) = COLIBRI_BLOCK_PARAM
         .iter()
         .find(|(name, _)| *name == method)?;
@@ -103,15 +121,15 @@ pub fn colibri_unprovable_tag(method: &str, params: &str) -> Option<&'static str
     if root.kind() != Kind::Array {
         return None;
     }
-    let tag = root.children().nth(*position)?;
-    if tag.kind() != Kind::String {
-        return None;
+    let block = root.children().nth(*position)?;
+    if block.kind() != Kind::String {
+        return Some(COLIBRI_NOT_A_STRING);
     }
-    let units: Vec<u16> = tag.units().collect();
+    let units: Vec<u16> = block.units().collect();
     COLIBRI_UNPROVABLE_TAGS
         .iter()
-        .copied()
-        .find(|name| name.encode_utf16().eq(units.iter().copied()))
+        .find(|(tag, _)| tag.encode_utf16().eq(units.iter().copied()))
+        .map(|(_, named)| *named)
 }
 
 /// The sources of one request.
@@ -209,22 +227,26 @@ mod tests {
         assert_eq!(order.order, ["direct"]);
         assert_eq!(order.dropped, ["colibri"]);
 
-        let tag = colibri_unprovable_tag;
+        let block = colibri_unprovable_block;
         let call = r#"{"to":"0xabc"}"#;
+        // A method's params with `value` at its block parameter.
+        let with = |method: &str, at: usize, value: &str| {
+            let mut params: Vec<String> = vec![r#""0xabc""#.into(); at + 1];
+            if matches!(method, "eth_call" | "eth_estimateGas") {
+                params[0] = call.into();
+            }
+            params[at] = value.into();
+            params
+        };
+        let text = |params: &[String]| format!("[{}]", params.join(","));
         for (method, at) in COLIBRI_BLOCK_PARAM {
-            for want in COLIBRI_UNPROVABLE_TAGS {
+            for (tag, named) in COLIBRI_UNPROVABLE_TAGS {
                 // The tag in the method's block parameter, and nowhere else.
-                let mut params: Vec<String> = vec![r#""0xabc""#.into(); at + 1];
-                if matches!(method, "eth_call" | "eth_estimateGas") {
-                    params[0] = call.into();
-                }
-                params[at] = format!("\"{want}\"");
-                let text = format!("[{}]", params.join(","));
-                assert_eq!(tag(method, &text), Some(want), "{method} {text}");
+                let mut params = with(method, at, &format!("\"{tag}\""));
+                assert_eq!(block(method, &text(&params)), Some(named), "{method}");
                 params[at] = r#""latest""#.into();
-                params.push(format!("\"{want}\""));
-                let text = format!("[{}]", params.join(","));
-                assert_eq!(tag(method, &text), None, "{method} {text}");
+                params.push(format!("\"{tag}\""));
+                assert_eq!(block(method, &text(&params)), None, "{method}");
             }
             for other in [
                 r#""latest""#,
@@ -232,21 +254,43 @@ mod tests {
                 r#""finalized""#,
                 r#""0x10d4f00""#,
             ] {
-                let mut params: Vec<String> = vec![r#""0xabc""#.into(); at + 1];
-                params[at] = other.into();
-                assert_eq!(tag(method, &format!("[{}]", params.join(","))), None);
+                let params = with(method, at, other);
+                assert_eq!(block(method, &text(&params)), None, "{method} {other}");
             }
+            // Anything there that isn't a string: EIP-1898's objects first.
+            for other in [
+                r#"{"blockHash":"0x1111111111111111111111111111111111111111111111111111111111111111","requireCanonical":true}"#,
+                r#"{"blockNumber":"0x10d4f00"}"#,
+                "null",
+                "16",
+                "true",
+                r#"["latest"]"#,
+            ] {
+                let params = with(method, at, other);
+                assert_eq!(
+                    block(method, &text(&params)),
+                    Some(COLIBRI_NOT_A_STRING),
+                    "{method} {other}"
+                );
+            }
+            // Too short to hold it: `latest`.
+            let mut params = with(method, at, r#""latest""#);
+            params.truncate(at);
+            assert_eq!(block(method, &text(&params)), None, "{method} {params:?}");
         }
         // Exact strings only, in an array.
-        assert_eq!(tag("eth_getBalance", r#"["0xabc","PENDING"]"#), None);
-        assert_eq!(tag("eth_getBalance", r#"["0xabc","pending "]"#), None);
-        assert_eq!(tag("eth_getBalance", r#"["0xabc",["pending"]]"#), None);
-        assert_eq!(tag("eth_getBalance", r#"{"1":"pending"}"#), None);
-        assert_eq!(tag("eth_getBalance", r#""xpending""#), None);
-        assert_eq!(tag("eth_getBalance", "not json"), None);
+        assert_eq!(block("eth_getBalance", r#"["0xabc","PENDING"]"#), None);
+        assert_eq!(block("eth_getBalance", r#"["0xabc","pending "]"#), None);
+        assert_eq!(block("eth_getBalance", r#"{"1":"pending"}"#), None);
         assert_eq!(
-            tag("eth_getBalance", r#"["0xabc","pend\u0069ng"]"#),
-            Some("pending")
+            block("eth_getBalance", r#"{"1":{"blockNumber":"0x1"}}"#),
+            None
+        );
+        assert_eq!(block("eth_getBalance", r#""xpending""#), None);
+        assert_eq!(block("eth_getBalance", "not json"), None);
+        assert_eq!(
+            block("eth_getBalance", r#"["0xabc","pend\u0069ng"]"#),
+            Some(r#"block "pending""#)
         );
         // Methods that take no block parameter Colibri reads.
         for method in [
@@ -256,7 +300,7 @@ mod tests {
             "eth_getLogs",
         ] {
             assert_eq!(
-                tag(method, r#"["pending","pending","pending"]"#),
+                block(method, r#"["pending","pending","pending"]"#),
                 None,
                 "{method}"
             );

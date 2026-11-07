@@ -363,7 +363,7 @@ const SCENARIO_IDS: &[&str] = &[
     "fee-headroom-later-type-2-wins",
     "fee-headroom-last-resort",
     "fee-headroom-direct-last-resort",
-    // Main's #1046 (freedom-browser #1048), 13 of them with the
+    // Main's #1046 (freedom-browser #1048), 14 of them with the
     // `colibri-unproven` reference patch (design 0005, Main's #1046).
     "colibri-unproven-balance",
     "colibri-unproven-code",
@@ -374,6 +374,7 @@ const SCENARIO_IDS: &[&str] = &[
     "colibri-unproven-block",
     "colibri-unproven-quorum-labels",
     "colibri-unproven-colibri-only",
+    "colibri-unproven-non-strings",
     "colibri-unproven-off-position",
     "colibri-unproven-fee-methods",
     "colibri-unproven-fee-quote-quorum",

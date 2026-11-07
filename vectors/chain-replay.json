@@ -103925,7 +103925,7 @@
     },
     {
       "id": "colibri-unproven-balance",
-      "from": "chain-data-router.test.js@13f65239:2519",
+      "from": "chain-data-router.test.js@63c77545:2529",
       "patches": [
         "colibri-unproven"
       ],
@@ -104071,7 +104071,103 @@
               "fn": "request",
               "chain": 1,
               "method": "eth_getBalance",
+              "params_json": "[\"0xabc\",{\"blockHash\":\"0x1111111111111111111111111111111111111111111111111111111111111111\",\"requireCanonical\":true}]",
+              "started": 0
+            }
+          ],
+          "results": [
+            {
+              "value": [
+                {
+                  "key": "result",
+                  "json": "\"rpc:eth_getBalance\""
+                },
+                {
+                  "key": "source",
+                  "json": "\"direct\""
+                },
+                {
+                  "key": "verified",
+                  "json": "false"
+                }
+              ],
+              "settled": 0
+            }
+          ],
+          "state": {}
+        },
+        {
+          "at": 0,
+          "calls": [
+            {
+              "fn": "request",
+              "chain": 1,
+              "method": "eth_getBalance",
+              "params_json": "[\"0xabc\",{\"blockNumber\":\"0x10d4f00\"}]",
+              "started": 0
+            }
+          ],
+          "results": [
+            {
+              "value": [
+                {
+                  "key": "result",
+                  "json": "\"rpc:eth_getBalance\""
+                },
+                {
+                  "key": "source",
+                  "json": "\"direct\""
+                },
+                {
+                  "key": "verified",
+                  "json": "false"
+                }
+              ],
+              "settled": 0
+            }
+          ],
+          "state": {}
+        },
+        {
+          "at": 0,
+          "calls": [
+            {
+              "fn": "request",
+              "chain": 1,
+              "method": "eth_getBalance",
               "params_json": "[\"0xabc\",\"latest\"]",
+              "started": 0
+            }
+          ],
+          "results": [
+            {
+              "value": [
+                {
+                  "key": "result",
+                  "json": "\"colibri:proven\""
+                },
+                {
+                  "key": "source",
+                  "json": "\"colibri\""
+                },
+                {
+                  "key": "verified",
+                  "json": "true"
+                }
+              ],
+              "settled": 0
+            }
+          ],
+          "state": {}
+        },
+        {
+          "at": 0,
+          "calls": [
+            {
+              "fn": "request",
+              "chain": 1,
+              "method": "eth_getBalance",
+              "params_json": "[\"0xabc\"]",
               "started": 0
             }
           ],
@@ -104135,11 +104231,59 @@
           "step": 2,
           "call": 0,
           "t": 0,
+          "kind": "rpc",
+          "url": "https://rpc.example",
+          "method": "eth_getBalance",
+          "body": "{\"jsonrpc\":\"2.0\",\"id\":0,\"method\":\"eth_getBalance\",\"params\":[\"0xabc\",{\"blockHash\":\"0x1111111111111111111111111111111111111111111111111111111111111111\",\"requireCanonical\":true}]}",
+          "end": 0,
+          "outcome": "answered",
+          "answer": {
+            "status": 200,
+            "body": "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":\"rpc:eth_getBalance\"}"
+          }
+        },
+        {
+          "id": 3,
+          "step": 3,
+          "call": 0,
+          "t": 0,
+          "kind": "rpc",
+          "url": "https://rpc.example",
+          "method": "eth_getBalance",
+          "body": "{\"jsonrpc\":\"2.0\",\"id\":0,\"method\":\"eth_getBalance\",\"params\":[\"0xabc\",{\"blockNumber\":\"0x10d4f00\"}]}",
+          "end": 0,
+          "outcome": "answered",
+          "answer": {
+            "status": 200,
+            "body": "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":\"rpc:eth_getBalance\"}"
+          }
+        },
+        {
+          "id": 4,
+          "step": 4,
+          "call": 0,
+          "t": 0,
           "kind": "verified-op",
           "host": "colibri",
           "op": "request",
           "chain": 1,
           "params_json": "{\"method\":\"eth_getBalance\",\"params\":[\"0xabc\",\"latest\"],\"deadline_ms\":1000}",
+          "end": 0,
+          "outcome": "answered",
+          "answer": {
+            "result_json": "\"colibri:proven\""
+          }
+        },
+        {
+          "id": 5,
+          "step": 5,
+          "call": 0,
+          "t": 0,
+          "kind": "verified-op",
+          "host": "colibri",
+          "op": "request",
+          "chain": 1,
+          "params_json": "{\"method\":\"eth_getBalance\",\"params\":[\"0xabc\"],\"deadline_ms\":1000}",
           "end": 0,
           "outcome": "answered",
           "answer": {
@@ -104204,12 +104348,69 @@
             ],
             "settled": 0
           }
+        ],
+        [
+          {
+            "value": [
+              {
+                "key": "result",
+                "json": "\"colibri:proven\""
+              },
+              {
+                "key": "source",
+                "json": "\"colibri\""
+              },
+              {
+                "key": "verified",
+                "json": "true"
+              }
+            ],
+            "settled": 0
+          }
+        ],
+        [
+          {
+            "value": [
+              {
+                "key": "result",
+                "json": "\"colibri:proven\""
+              },
+              {
+                "key": "source",
+                "json": "\"colibri\""
+              },
+              {
+                "key": "verified",
+                "json": "true"
+              }
+            ],
+            "settled": 0
+          }
+        ],
+        [
+          {
+            "value": [
+              {
+                "key": "result",
+                "json": "\"colibri:proven\""
+              },
+              {
+                "key": "source",
+                "json": "\"colibri\""
+              },
+              {
+                "key": "verified",
+                "json": "true"
+              }
+            ],
+            "settled": 0
+          }
         ]
       ]
     },
     {
       "id": "colibri-unproven-code",
-      "from": "chain-data-router.test.js@13f65239:2519",
+      "from": "chain-data-router.test.js@63c77545:2529",
       "patches": [
         "colibri-unproven"
       ],
@@ -104355,7 +104556,103 @@
               "fn": "request",
               "chain": 1,
               "method": "eth_getCode",
+              "params_json": "[\"0xabc\",{\"blockHash\":\"0x1111111111111111111111111111111111111111111111111111111111111111\",\"requireCanonical\":true}]",
+              "started": 0
+            }
+          ],
+          "results": [
+            {
+              "value": [
+                {
+                  "key": "result",
+                  "json": "\"rpc:eth_getCode\""
+                },
+                {
+                  "key": "source",
+                  "json": "\"direct\""
+                },
+                {
+                  "key": "verified",
+                  "json": "false"
+                }
+              ],
+              "settled": 0
+            }
+          ],
+          "state": {}
+        },
+        {
+          "at": 0,
+          "calls": [
+            {
+              "fn": "request",
+              "chain": 1,
+              "method": "eth_getCode",
+              "params_json": "[\"0xabc\",{\"blockNumber\":\"0x10d4f00\"}]",
+              "started": 0
+            }
+          ],
+          "results": [
+            {
+              "value": [
+                {
+                  "key": "result",
+                  "json": "\"rpc:eth_getCode\""
+                },
+                {
+                  "key": "source",
+                  "json": "\"direct\""
+                },
+                {
+                  "key": "verified",
+                  "json": "false"
+                }
+              ],
+              "settled": 0
+            }
+          ],
+          "state": {}
+        },
+        {
+          "at": 0,
+          "calls": [
+            {
+              "fn": "request",
+              "chain": 1,
+              "method": "eth_getCode",
               "params_json": "[\"0xabc\",\"latest\"]",
+              "started": 0
+            }
+          ],
+          "results": [
+            {
+              "value": [
+                {
+                  "key": "result",
+                  "json": "\"colibri:proven\""
+                },
+                {
+                  "key": "source",
+                  "json": "\"colibri\""
+                },
+                {
+                  "key": "verified",
+                  "json": "true"
+                }
+              ],
+              "settled": 0
+            }
+          ],
+          "state": {}
+        },
+        {
+          "at": 0,
+          "calls": [
+            {
+              "fn": "request",
+              "chain": 1,
+              "method": "eth_getCode",
+              "params_json": "[\"0xabc\"]",
               "started": 0
             }
           ],
@@ -104419,11 +104716,59 @@
           "step": 2,
           "call": 0,
           "t": 0,
+          "kind": "rpc",
+          "url": "https://rpc.example",
+          "method": "eth_getCode",
+          "body": "{\"jsonrpc\":\"2.0\",\"id\":0,\"method\":\"eth_getCode\",\"params\":[\"0xabc\",{\"blockHash\":\"0x1111111111111111111111111111111111111111111111111111111111111111\",\"requireCanonical\":true}]}",
+          "end": 0,
+          "outcome": "answered",
+          "answer": {
+            "status": 200,
+            "body": "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":\"rpc:eth_getCode\"}"
+          }
+        },
+        {
+          "id": 3,
+          "step": 3,
+          "call": 0,
+          "t": 0,
+          "kind": "rpc",
+          "url": "https://rpc.example",
+          "method": "eth_getCode",
+          "body": "{\"jsonrpc\":\"2.0\",\"id\":0,\"method\":\"eth_getCode\",\"params\":[\"0xabc\",{\"blockNumber\":\"0x10d4f00\"}]}",
+          "end": 0,
+          "outcome": "answered",
+          "answer": {
+            "status": 200,
+            "body": "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":\"rpc:eth_getCode\"}"
+          }
+        },
+        {
+          "id": 4,
+          "step": 4,
+          "call": 0,
+          "t": 0,
           "kind": "verified-op",
           "host": "colibri",
           "op": "request",
           "chain": 1,
           "params_json": "{\"method\":\"eth_getCode\",\"params\":[\"0xabc\",\"latest\"],\"deadline_ms\":1000}",
+          "end": 0,
+          "outcome": "answered",
+          "answer": {
+            "result_json": "\"colibri:proven\""
+          }
+        },
+        {
+          "id": 5,
+          "step": 5,
+          "call": 0,
+          "t": 0,
+          "kind": "verified-op",
+          "host": "colibri",
+          "op": "request",
+          "chain": 1,
+          "params_json": "{\"method\":\"eth_getCode\",\"params\":[\"0xabc\"],\"deadline_ms\":1000}",
           "end": 0,
           "outcome": "answered",
           "answer": {
@@ -104488,12 +104833,69 @@
             ],
             "settled": 0
           }
+        ],
+        [
+          {
+            "value": [
+              {
+                "key": "result",
+                "json": "\"colibri:proven\""
+              },
+              {
+                "key": "source",
+                "json": "\"colibri\""
+              },
+              {
+                "key": "verified",
+                "json": "true"
+              }
+            ],
+            "settled": 0
+          }
+        ],
+        [
+          {
+            "value": [
+              {
+                "key": "result",
+                "json": "\"colibri:proven\""
+              },
+              {
+                "key": "source",
+                "json": "\"colibri\""
+              },
+              {
+                "key": "verified",
+                "json": "true"
+              }
+            ],
+            "settled": 0
+          }
+        ],
+        [
+          {
+            "value": [
+              {
+                "key": "result",
+                "json": "\"colibri:proven\""
+              },
+              {
+                "key": "source",
+                "json": "\"colibri\""
+              },
+              {
+                "key": "verified",
+                "json": "true"
+              }
+            ],
+            "settled": 0
+          }
         ]
       ]
     },
     {
       "id": "colibri-unproven-nonce",
-      "from": "chain-data-router.test.js@13f65239:2519",
+      "from": "chain-data-router.test.js@63c77545:2529",
       "patches": [
         "colibri-unproven"
       ],
@@ -104639,7 +105041,103 @@
               "fn": "request",
               "chain": 1,
               "method": "eth_getTransactionCount",
+              "params_json": "[\"0xabc\",{\"blockHash\":\"0x1111111111111111111111111111111111111111111111111111111111111111\",\"requireCanonical\":true}]",
+              "started": 0
+            }
+          ],
+          "results": [
+            {
+              "value": [
+                {
+                  "key": "result",
+                  "json": "\"rpc:eth_getTransactionCount\""
+                },
+                {
+                  "key": "source",
+                  "json": "\"direct\""
+                },
+                {
+                  "key": "verified",
+                  "json": "false"
+                }
+              ],
+              "settled": 0
+            }
+          ],
+          "state": {}
+        },
+        {
+          "at": 0,
+          "calls": [
+            {
+              "fn": "request",
+              "chain": 1,
+              "method": "eth_getTransactionCount",
+              "params_json": "[\"0xabc\",{\"blockNumber\":\"0x10d4f00\"}]",
+              "started": 0
+            }
+          ],
+          "results": [
+            {
+              "value": [
+                {
+                  "key": "result",
+                  "json": "\"rpc:eth_getTransactionCount\""
+                },
+                {
+                  "key": "source",
+                  "json": "\"direct\""
+                },
+                {
+                  "key": "verified",
+                  "json": "false"
+                }
+              ],
+              "settled": 0
+            }
+          ],
+          "state": {}
+        },
+        {
+          "at": 0,
+          "calls": [
+            {
+              "fn": "request",
+              "chain": 1,
+              "method": "eth_getTransactionCount",
               "params_json": "[\"0xabc\",\"latest\"]",
+              "started": 0
+            }
+          ],
+          "results": [
+            {
+              "value": [
+                {
+                  "key": "result",
+                  "json": "\"colibri:proven\""
+                },
+                {
+                  "key": "source",
+                  "json": "\"colibri\""
+                },
+                {
+                  "key": "verified",
+                  "json": "true"
+                }
+              ],
+              "settled": 0
+            }
+          ],
+          "state": {}
+        },
+        {
+          "at": 0,
+          "calls": [
+            {
+              "fn": "request",
+              "chain": 1,
+              "method": "eth_getTransactionCount",
+              "params_json": "[\"0xabc\"]",
               "started": 0
             }
           ],
@@ -104703,11 +105201,59 @@
           "step": 2,
           "call": 0,
           "t": 0,
+          "kind": "rpc",
+          "url": "https://rpc.example",
+          "method": "eth_getTransactionCount",
+          "body": "{\"jsonrpc\":\"2.0\",\"id\":0,\"method\":\"eth_getTransactionCount\",\"params\":[\"0xabc\",{\"blockHash\":\"0x1111111111111111111111111111111111111111111111111111111111111111\",\"requireCanonical\":true}]}",
+          "end": 0,
+          "outcome": "answered",
+          "answer": {
+            "status": 200,
+            "body": "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":\"rpc:eth_getTransactionCount\"}"
+          }
+        },
+        {
+          "id": 3,
+          "step": 3,
+          "call": 0,
+          "t": 0,
+          "kind": "rpc",
+          "url": "https://rpc.example",
+          "method": "eth_getTransactionCount",
+          "body": "{\"jsonrpc\":\"2.0\",\"id\":0,\"method\":\"eth_getTransactionCount\",\"params\":[\"0xabc\",{\"blockNumber\":\"0x10d4f00\"}]}",
+          "end": 0,
+          "outcome": "answered",
+          "answer": {
+            "status": 200,
+            "body": "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":\"rpc:eth_getTransactionCount\"}"
+          }
+        },
+        {
+          "id": 4,
+          "step": 4,
+          "call": 0,
+          "t": 0,
           "kind": "verified-op",
           "host": "colibri",
           "op": "request",
           "chain": 1,
           "params_json": "{\"method\":\"eth_getTransactionCount\",\"params\":[\"0xabc\",\"latest\"],\"deadline_ms\":1000}",
+          "end": 0,
+          "outcome": "answered",
+          "answer": {
+            "result_json": "\"colibri:proven\""
+          }
+        },
+        {
+          "id": 5,
+          "step": 5,
+          "call": 0,
+          "t": 0,
+          "kind": "verified-op",
+          "host": "colibri",
+          "op": "request",
+          "chain": 1,
+          "params_json": "{\"method\":\"eth_getTransactionCount\",\"params\":[\"0xabc\"],\"deadline_ms\":1000}",
           "end": 0,
           "outcome": "answered",
           "answer": {
@@ -104772,12 +105318,69 @@
             ],
             "settled": 0
           }
+        ],
+        [
+          {
+            "value": [
+              {
+                "key": "result",
+                "json": "\"colibri:proven\""
+              },
+              {
+                "key": "source",
+                "json": "\"colibri\""
+              },
+              {
+                "key": "verified",
+                "json": "true"
+              }
+            ],
+            "settled": 0
+          }
+        ],
+        [
+          {
+            "value": [
+              {
+                "key": "result",
+                "json": "\"colibri:proven\""
+              },
+              {
+                "key": "source",
+                "json": "\"colibri\""
+              },
+              {
+                "key": "verified",
+                "json": "true"
+              }
+            ],
+            "settled": 0
+          }
+        ],
+        [
+          {
+            "value": [
+              {
+                "key": "result",
+                "json": "\"colibri:proven\""
+              },
+              {
+                "key": "source",
+                "json": "\"colibri\""
+              },
+              {
+                "key": "verified",
+                "json": "true"
+              }
+            ],
+            "settled": 0
+          }
         ]
       ]
     },
     {
       "id": "colibri-unproven-call",
-      "from": "chain-data-router.test.js@13f65239:2519",
+      "from": "chain-data-router.test.js@63c77545:2529",
       "patches": [
         "colibri-unproven"
       ],
@@ -104923,7 +105526,103 @@
               "fn": "request",
               "chain": 1,
               "method": "eth_call",
+              "params_json": "[{\"to\":\"0xabc\",\"data\":\"0x70a08231\"},{\"blockHash\":\"0x1111111111111111111111111111111111111111111111111111111111111111\",\"requireCanonical\":true}]",
+              "started": 0
+            }
+          ],
+          "results": [
+            {
+              "value": [
+                {
+                  "key": "result",
+                  "json": "\"rpc:eth_call\""
+                },
+                {
+                  "key": "source",
+                  "json": "\"direct\""
+                },
+                {
+                  "key": "verified",
+                  "json": "false"
+                }
+              ],
+              "settled": 0
+            }
+          ],
+          "state": {}
+        },
+        {
+          "at": 0,
+          "calls": [
+            {
+              "fn": "request",
+              "chain": 1,
+              "method": "eth_call",
+              "params_json": "[{\"to\":\"0xabc\",\"data\":\"0x70a08231\"},{\"blockNumber\":\"0x10d4f00\"}]",
+              "started": 0
+            }
+          ],
+          "results": [
+            {
+              "value": [
+                {
+                  "key": "result",
+                  "json": "\"rpc:eth_call\""
+                },
+                {
+                  "key": "source",
+                  "json": "\"direct\""
+                },
+                {
+                  "key": "verified",
+                  "json": "false"
+                }
+              ],
+              "settled": 0
+            }
+          ],
+          "state": {}
+        },
+        {
+          "at": 0,
+          "calls": [
+            {
+              "fn": "request",
+              "chain": 1,
+              "method": "eth_call",
               "params_json": "[{\"to\":\"0xabc\",\"data\":\"0x70a08231\"},\"latest\"]",
+              "started": 0
+            }
+          ],
+          "results": [
+            {
+              "value": [
+                {
+                  "key": "result",
+                  "json": "\"colibri:proven\""
+                },
+                {
+                  "key": "source",
+                  "json": "\"colibri\""
+                },
+                {
+                  "key": "verified",
+                  "json": "true"
+                }
+              ],
+              "settled": 0
+            }
+          ],
+          "state": {}
+        },
+        {
+          "at": 0,
+          "calls": [
+            {
+              "fn": "request",
+              "chain": 1,
+              "method": "eth_call",
+              "params_json": "[{\"to\":\"0xabc\",\"data\":\"0x70a08231\"}]",
               "started": 0
             }
           ],
@@ -104987,11 +105686,59 @@
           "step": 2,
           "call": 0,
           "t": 0,
+          "kind": "rpc",
+          "url": "https://rpc.example",
+          "method": "eth_call",
+          "body": "{\"jsonrpc\":\"2.0\",\"id\":0,\"method\":\"eth_call\",\"params\":[{\"to\":\"0xabc\",\"data\":\"0x70a08231\"},{\"blockHash\":\"0x1111111111111111111111111111111111111111111111111111111111111111\",\"requireCanonical\":true}]}",
+          "end": 0,
+          "outcome": "answered",
+          "answer": {
+            "status": 200,
+            "body": "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":\"rpc:eth_call\"}"
+          }
+        },
+        {
+          "id": 3,
+          "step": 3,
+          "call": 0,
+          "t": 0,
+          "kind": "rpc",
+          "url": "https://rpc.example",
+          "method": "eth_call",
+          "body": "{\"jsonrpc\":\"2.0\",\"id\":0,\"method\":\"eth_call\",\"params\":[{\"to\":\"0xabc\",\"data\":\"0x70a08231\"},{\"blockNumber\":\"0x10d4f00\"}]}",
+          "end": 0,
+          "outcome": "answered",
+          "answer": {
+            "status": 200,
+            "body": "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":\"rpc:eth_call\"}"
+          }
+        },
+        {
+          "id": 4,
+          "step": 4,
+          "call": 0,
+          "t": 0,
           "kind": "verified-op",
           "host": "colibri",
           "op": "request",
           "chain": 1,
           "params_json": "{\"method\":\"eth_call\",\"params\":[{\"to\":\"0xabc\",\"data\":\"0x70a08231\"},\"latest\"],\"deadline_ms\":1000}",
+          "end": 0,
+          "outcome": "answered",
+          "answer": {
+            "result_json": "\"colibri:proven\""
+          }
+        },
+        {
+          "id": 5,
+          "step": 5,
+          "call": 0,
+          "t": 0,
+          "kind": "verified-op",
+          "host": "colibri",
+          "op": "request",
+          "chain": 1,
+          "params_json": "{\"method\":\"eth_call\",\"params\":[{\"to\":\"0xabc\",\"data\":\"0x70a08231\"}],\"deadline_ms\":1000}",
           "end": 0,
           "outcome": "answered",
           "answer": {
@@ -105056,12 +105803,69 @@
             ],
             "settled": 0
           }
+        ],
+        [
+          {
+            "value": [
+              {
+                "key": "result",
+                "json": "\"colibri:proven\""
+              },
+              {
+                "key": "source",
+                "json": "\"colibri\""
+              },
+              {
+                "key": "verified",
+                "json": "true"
+              }
+            ],
+            "settled": 0
+          }
+        ],
+        [
+          {
+            "value": [
+              {
+                "key": "result",
+                "json": "\"colibri:proven\""
+              },
+              {
+                "key": "source",
+                "json": "\"colibri\""
+              },
+              {
+                "key": "verified",
+                "json": "true"
+              }
+            ],
+            "settled": 0
+          }
+        ],
+        [
+          {
+            "value": [
+              {
+                "key": "result",
+                "json": "\"colibri:proven\""
+              },
+              {
+                "key": "source",
+                "json": "\"colibri\""
+              },
+              {
+                "key": "verified",
+                "json": "true"
+              }
+            ],
+            "settled": 0
+          }
         ]
       ]
     },
     {
       "id": "colibri-unproven-estimate",
-      "from": "chain-data-router.test.js@13f65239:2519",
+      "from": "chain-data-router.test.js@63c77545:2529",
       "patches": [
         "colibri-unproven"
       ],
@@ -105207,7 +106011,103 @@
               "fn": "request",
               "chain": 1,
               "method": "eth_estimateGas",
+              "params_json": "[{\"to\":\"0xabc\",\"data\":\"0x70a08231\"},{\"blockHash\":\"0x1111111111111111111111111111111111111111111111111111111111111111\",\"requireCanonical\":true}]",
+              "started": 0
+            }
+          ],
+          "results": [
+            {
+              "value": [
+                {
+                  "key": "result",
+                  "json": "\"rpc:eth_estimateGas\""
+                },
+                {
+                  "key": "source",
+                  "json": "\"direct\""
+                },
+                {
+                  "key": "verified",
+                  "json": "false"
+                }
+              ],
+              "settled": 0
+            }
+          ],
+          "state": {}
+        },
+        {
+          "at": 0,
+          "calls": [
+            {
+              "fn": "request",
+              "chain": 1,
+              "method": "eth_estimateGas",
+              "params_json": "[{\"to\":\"0xabc\",\"data\":\"0x70a08231\"},{\"blockNumber\":\"0x10d4f00\"}]",
+              "started": 0
+            }
+          ],
+          "results": [
+            {
+              "value": [
+                {
+                  "key": "result",
+                  "json": "\"rpc:eth_estimateGas\""
+                },
+                {
+                  "key": "source",
+                  "json": "\"direct\""
+                },
+                {
+                  "key": "verified",
+                  "json": "false"
+                }
+              ],
+              "settled": 0
+            }
+          ],
+          "state": {}
+        },
+        {
+          "at": 0,
+          "calls": [
+            {
+              "fn": "request",
+              "chain": 1,
+              "method": "eth_estimateGas",
               "params_json": "[{\"to\":\"0xabc\",\"data\":\"0x70a08231\"},\"latest\"]",
+              "started": 0
+            }
+          ],
+          "results": [
+            {
+              "value": [
+                {
+                  "key": "result",
+                  "json": "\"colibri:proven\""
+                },
+                {
+                  "key": "source",
+                  "json": "\"colibri\""
+                },
+                {
+                  "key": "verified",
+                  "json": "true"
+                }
+              ],
+              "settled": 0
+            }
+          ],
+          "state": {}
+        },
+        {
+          "at": 0,
+          "calls": [
+            {
+              "fn": "request",
+              "chain": 1,
+              "method": "eth_estimateGas",
+              "params_json": "[{\"to\":\"0xabc\",\"data\":\"0x70a08231\"}]",
               "started": 0
             }
           ],
@@ -105271,11 +106171,59 @@
           "step": 2,
           "call": 0,
           "t": 0,
+          "kind": "rpc",
+          "url": "https://rpc.example",
+          "method": "eth_estimateGas",
+          "body": "{\"jsonrpc\":\"2.0\",\"id\":0,\"method\":\"eth_estimateGas\",\"params\":[{\"to\":\"0xabc\",\"data\":\"0x70a08231\"},{\"blockHash\":\"0x1111111111111111111111111111111111111111111111111111111111111111\",\"requireCanonical\":true}]}",
+          "end": 0,
+          "outcome": "answered",
+          "answer": {
+            "status": 200,
+            "body": "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":\"rpc:eth_estimateGas\"}"
+          }
+        },
+        {
+          "id": 3,
+          "step": 3,
+          "call": 0,
+          "t": 0,
+          "kind": "rpc",
+          "url": "https://rpc.example",
+          "method": "eth_estimateGas",
+          "body": "{\"jsonrpc\":\"2.0\",\"id\":0,\"method\":\"eth_estimateGas\",\"params\":[{\"to\":\"0xabc\",\"data\":\"0x70a08231\"},{\"blockNumber\":\"0x10d4f00\"}]}",
+          "end": 0,
+          "outcome": "answered",
+          "answer": {
+            "status": 200,
+            "body": "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":\"rpc:eth_estimateGas\"}"
+          }
+        },
+        {
+          "id": 4,
+          "step": 4,
+          "call": 0,
+          "t": 0,
           "kind": "verified-op",
           "host": "colibri",
           "op": "request",
           "chain": 1,
           "params_json": "{\"method\":\"eth_estimateGas\",\"params\":[{\"to\":\"0xabc\",\"data\":\"0x70a08231\"},\"latest\"],\"deadline_ms\":1000}",
+          "end": 0,
+          "outcome": "answered",
+          "answer": {
+            "result_json": "\"colibri:proven\""
+          }
+        },
+        {
+          "id": 5,
+          "step": 5,
+          "call": 0,
+          "t": 0,
+          "kind": "verified-op",
+          "host": "colibri",
+          "op": "request",
+          "chain": 1,
+          "params_json": "{\"method\":\"eth_estimateGas\",\"params\":[{\"to\":\"0xabc\",\"data\":\"0x70a08231\"}],\"deadline_ms\":1000}",
           "end": 0,
           "outcome": "answered",
           "answer": {
@@ -105340,12 +106288,69 @@
             ],
             "settled": 0
           }
+        ],
+        [
+          {
+            "value": [
+              {
+                "key": "result",
+                "json": "\"colibri:proven\""
+              },
+              {
+                "key": "source",
+                "json": "\"colibri\""
+              },
+              {
+                "key": "verified",
+                "json": "true"
+              }
+            ],
+            "settled": 0
+          }
+        ],
+        [
+          {
+            "value": [
+              {
+                "key": "result",
+                "json": "\"colibri:proven\""
+              },
+              {
+                "key": "source",
+                "json": "\"colibri\""
+              },
+              {
+                "key": "verified",
+                "json": "true"
+              }
+            ],
+            "settled": 0
+          }
+        ],
+        [
+          {
+            "value": [
+              {
+                "key": "result",
+                "json": "\"colibri:proven\""
+              },
+              {
+                "key": "source",
+                "json": "\"colibri\""
+              },
+              {
+                "key": "verified",
+                "json": "true"
+              }
+            ],
+            "settled": 0
+          }
         ]
       ]
     },
     {
       "id": "colibri-unproven-storage",
-      "from": "chain-data-router.test.js@13f65239:2519",
+      "from": "chain-data-router.test.js@63c77545:2529",
       "patches": [
         "colibri-unproven"
       ],
@@ -105491,7 +106496,103 @@
               "fn": "request",
               "chain": 1,
               "method": "eth_getStorageAt",
+              "params_json": "[\"0xabc\",\"0x0\",{\"blockHash\":\"0x1111111111111111111111111111111111111111111111111111111111111111\",\"requireCanonical\":true}]",
+              "started": 0
+            }
+          ],
+          "results": [
+            {
+              "value": [
+                {
+                  "key": "result",
+                  "json": "\"rpc:eth_getStorageAt\""
+                },
+                {
+                  "key": "source",
+                  "json": "\"direct\""
+                },
+                {
+                  "key": "verified",
+                  "json": "false"
+                }
+              ],
+              "settled": 0
+            }
+          ],
+          "state": {}
+        },
+        {
+          "at": 0,
+          "calls": [
+            {
+              "fn": "request",
+              "chain": 1,
+              "method": "eth_getStorageAt",
+              "params_json": "[\"0xabc\",\"0x0\",{\"blockNumber\":\"0x10d4f00\"}]",
+              "started": 0
+            }
+          ],
+          "results": [
+            {
+              "value": [
+                {
+                  "key": "result",
+                  "json": "\"rpc:eth_getStorageAt\""
+                },
+                {
+                  "key": "source",
+                  "json": "\"direct\""
+                },
+                {
+                  "key": "verified",
+                  "json": "false"
+                }
+              ],
+              "settled": 0
+            }
+          ],
+          "state": {}
+        },
+        {
+          "at": 0,
+          "calls": [
+            {
+              "fn": "request",
+              "chain": 1,
+              "method": "eth_getStorageAt",
               "params_json": "[\"0xabc\",\"0x0\",\"latest\"]",
+              "started": 0
+            }
+          ],
+          "results": [
+            {
+              "value": [
+                {
+                  "key": "result",
+                  "json": "\"colibri:proven\""
+                },
+                {
+                  "key": "source",
+                  "json": "\"colibri\""
+                },
+                {
+                  "key": "verified",
+                  "json": "true"
+                }
+              ],
+              "settled": 0
+            }
+          ],
+          "state": {}
+        },
+        {
+          "at": 0,
+          "calls": [
+            {
+              "fn": "request",
+              "chain": 1,
+              "method": "eth_getStorageAt",
+              "params_json": "[\"0xabc\",\"0x0\"]",
               "started": 0
             }
           ],
@@ -105555,11 +106656,59 @@
           "step": 2,
           "call": 0,
           "t": 0,
+          "kind": "rpc",
+          "url": "https://rpc.example",
+          "method": "eth_getStorageAt",
+          "body": "{\"jsonrpc\":\"2.0\",\"id\":0,\"method\":\"eth_getStorageAt\",\"params\":[\"0xabc\",\"0x0\",{\"blockHash\":\"0x1111111111111111111111111111111111111111111111111111111111111111\",\"requireCanonical\":true}]}",
+          "end": 0,
+          "outcome": "answered",
+          "answer": {
+            "status": 200,
+            "body": "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":\"rpc:eth_getStorageAt\"}"
+          }
+        },
+        {
+          "id": 3,
+          "step": 3,
+          "call": 0,
+          "t": 0,
+          "kind": "rpc",
+          "url": "https://rpc.example",
+          "method": "eth_getStorageAt",
+          "body": "{\"jsonrpc\":\"2.0\",\"id\":0,\"method\":\"eth_getStorageAt\",\"params\":[\"0xabc\",\"0x0\",{\"blockNumber\":\"0x10d4f00\"}]}",
+          "end": 0,
+          "outcome": "answered",
+          "answer": {
+            "status": 200,
+            "body": "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":\"rpc:eth_getStorageAt\"}"
+          }
+        },
+        {
+          "id": 4,
+          "step": 4,
+          "call": 0,
+          "t": 0,
           "kind": "verified-op",
           "host": "colibri",
           "op": "request",
           "chain": 1,
           "params_json": "{\"method\":\"eth_getStorageAt\",\"params\":[\"0xabc\",\"0x0\",\"latest\"],\"deadline_ms\":1000}",
+          "end": 0,
+          "outcome": "answered",
+          "answer": {
+            "result_json": "\"colibri:proven\""
+          }
+        },
+        {
+          "id": 5,
+          "step": 5,
+          "call": 0,
+          "t": 0,
+          "kind": "verified-op",
+          "host": "colibri",
+          "op": "request",
+          "chain": 1,
+          "params_json": "{\"method\":\"eth_getStorageAt\",\"params\":[\"0xabc\",\"0x0\"],\"deadline_ms\":1000}",
           "end": 0,
           "outcome": "answered",
           "answer": {
@@ -105624,12 +106773,69 @@
             ],
             "settled": 0
           }
+        ],
+        [
+          {
+            "value": [
+              {
+                "key": "result",
+                "json": "\"colibri:proven\""
+              },
+              {
+                "key": "source",
+                "json": "\"colibri\""
+              },
+              {
+                "key": "verified",
+                "json": "true"
+              }
+            ],
+            "settled": 0
+          }
+        ],
+        [
+          {
+            "value": [
+              {
+                "key": "result",
+                "json": "\"colibri:proven\""
+              },
+              {
+                "key": "source",
+                "json": "\"colibri\""
+              },
+              {
+                "key": "verified",
+                "json": "true"
+              }
+            ],
+            "settled": 0
+          }
+        ],
+        [
+          {
+            "value": [
+              {
+                "key": "result",
+                "json": "\"colibri:proven\""
+              },
+              {
+                "key": "source",
+                "json": "\"colibri\""
+              },
+              {
+                "key": "verified",
+                "json": "true"
+              }
+            ],
+            "settled": 0
+          }
         ]
       ]
     },
     {
       "id": "colibri-unproven-block",
-      "from": "chain-data-router.test.js@13f65239:2519",
+      "from": "chain-data-router.test.js@63c77545:2529",
       "patches": [
         "colibri-unproven"
       ],
@@ -105775,7 +106981,103 @@
               "fn": "request",
               "chain": 1,
               "method": "eth_getBlockByNumber",
+              "params_json": "[{\"blockHash\":\"0x1111111111111111111111111111111111111111111111111111111111111111\",\"requireCanonical\":true},false]",
+              "started": 0
+            }
+          ],
+          "results": [
+            {
+              "value": [
+                {
+                  "key": "result",
+                  "json": "\"rpc:eth_getBlockByNumber\""
+                },
+                {
+                  "key": "source",
+                  "json": "\"direct\""
+                },
+                {
+                  "key": "verified",
+                  "json": "false"
+                }
+              ],
+              "settled": 0
+            }
+          ],
+          "state": {}
+        },
+        {
+          "at": 0,
+          "calls": [
+            {
+              "fn": "request",
+              "chain": 1,
+              "method": "eth_getBlockByNumber",
+              "params_json": "[{\"blockNumber\":\"0x10d4f00\"},false]",
+              "started": 0
+            }
+          ],
+          "results": [
+            {
+              "value": [
+                {
+                  "key": "result",
+                  "json": "\"rpc:eth_getBlockByNumber\""
+                },
+                {
+                  "key": "source",
+                  "json": "\"direct\""
+                },
+                {
+                  "key": "verified",
+                  "json": "false"
+                }
+              ],
+              "settled": 0
+            }
+          ],
+          "state": {}
+        },
+        {
+          "at": 0,
+          "calls": [
+            {
+              "fn": "request",
+              "chain": 1,
+              "method": "eth_getBlockByNumber",
               "params_json": "[\"latest\",false]",
+              "started": 0
+            }
+          ],
+          "results": [
+            {
+              "value": [
+                {
+                  "key": "result",
+                  "json": "\"colibri:proven\""
+                },
+                {
+                  "key": "source",
+                  "json": "\"colibri\""
+                },
+                {
+                  "key": "verified",
+                  "json": "true"
+                }
+              ],
+              "settled": 0
+            }
+          ],
+          "state": {}
+        },
+        {
+          "at": 0,
+          "calls": [
+            {
+              "fn": "request",
+              "chain": 1,
+              "method": "eth_getBlockByNumber",
+              "params_json": "[]",
               "started": 0
             }
           ],
@@ -105839,11 +107141,59 @@
           "step": 2,
           "call": 0,
           "t": 0,
+          "kind": "rpc",
+          "url": "https://rpc.example",
+          "method": "eth_getBlockByNumber",
+          "body": "{\"jsonrpc\":\"2.0\",\"id\":0,\"method\":\"eth_getBlockByNumber\",\"params\":[{\"blockHash\":\"0x1111111111111111111111111111111111111111111111111111111111111111\",\"requireCanonical\":true},false]}",
+          "end": 0,
+          "outcome": "answered",
+          "answer": {
+            "status": 200,
+            "body": "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":\"rpc:eth_getBlockByNumber\"}"
+          }
+        },
+        {
+          "id": 3,
+          "step": 3,
+          "call": 0,
+          "t": 0,
+          "kind": "rpc",
+          "url": "https://rpc.example",
+          "method": "eth_getBlockByNumber",
+          "body": "{\"jsonrpc\":\"2.0\",\"id\":0,\"method\":\"eth_getBlockByNumber\",\"params\":[{\"blockNumber\":\"0x10d4f00\"},false]}",
+          "end": 0,
+          "outcome": "answered",
+          "answer": {
+            "status": 200,
+            "body": "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":\"rpc:eth_getBlockByNumber\"}"
+          }
+        },
+        {
+          "id": 4,
+          "step": 4,
+          "call": 0,
+          "t": 0,
           "kind": "verified-op",
           "host": "colibri",
           "op": "request",
           "chain": 1,
           "params_json": "{\"method\":\"eth_getBlockByNumber\",\"params\":[\"latest\",false],\"deadline_ms\":1000}",
+          "end": 0,
+          "outcome": "answered",
+          "answer": {
+            "result_json": "\"colibri:proven\""
+          }
+        },
+        {
+          "id": 5,
+          "step": 5,
+          "call": 0,
+          "t": 0,
+          "kind": "verified-op",
+          "host": "colibri",
+          "op": "request",
+          "chain": 1,
+          "params_json": "{\"method\":\"eth_getBlockByNumber\",\"params\":[],\"deadline_ms\":1000}",
           "end": 0,
           "outcome": "answered",
           "answer": {
@@ -105908,12 +107258,69 @@
             ],
             "settled": 0
           }
+        ],
+        [
+          {
+            "value": [
+              {
+                "key": "result",
+                "json": "\"colibri:proven\""
+              },
+              {
+                "key": "source",
+                "json": "\"colibri\""
+              },
+              {
+                "key": "verified",
+                "json": "true"
+              }
+            ],
+            "settled": 0
+          }
+        ],
+        [
+          {
+            "value": [
+              {
+                "key": "result",
+                "json": "\"colibri:proven\""
+              },
+              {
+                "key": "source",
+                "json": "\"colibri\""
+              },
+              {
+                "key": "verified",
+                "json": "true"
+              }
+            ],
+            "settled": 0
+          }
+        ],
+        [
+          {
+            "value": [
+              {
+                "key": "result",
+                "json": "\"colibri:proven\""
+              },
+              {
+                "key": "source",
+                "json": "\"colibri\""
+              },
+              {
+                "key": "verified",
+                "json": "true"
+              }
+            ],
+            "settled": 0
+          }
         ]
       ]
     },
     {
       "id": "colibri-unproven-quorum-labels",
-      "from": "chain-data-router.test.js@13f65239:2533",
+      "from": "chain-data-router.test.js@63c77545:2543",
       "patches": [
         "colibri-unproven"
       ],
@@ -106010,6 +107417,70 @@
               "chain": 1,
               "method": "eth_getStorageAt",
               "params_json": "[\"0xabc\",\"0x0\",\"earliest\"]",
+              "started": 0
+            }
+          ],
+          "results": [
+            {
+              "value": [
+                {
+                  "key": "result",
+                  "json": "\"0x6\""
+                },
+                {
+                  "key": "source",
+                  "json": "\"quorum\""
+                },
+                {
+                  "key": "verified",
+                  "json": "true"
+                }
+              ],
+              "settled": 0
+            }
+          ],
+          "state": {}
+        },
+        {
+          "at": 0,
+          "calls": [
+            {
+              "fn": "request",
+              "chain": 1,
+              "method": "eth_call",
+              "params_json": "[{\"to\":\"0xabc\",\"data\":\"0x70a08231\"},{\"blockHash\":\"0x1111111111111111111111111111111111111111111111111111111111111111\",\"requireCanonical\":true}]",
+              "started": 0
+            }
+          ],
+          "results": [
+            {
+              "value": [
+                {
+                  "key": "result",
+                  "json": "\"0x6\""
+                },
+                {
+                  "key": "source",
+                  "json": "\"quorum\""
+                },
+                {
+                  "key": "verified",
+                  "json": "true"
+                }
+              ],
+              "settled": 0
+            }
+          ],
+          "state": {}
+        },
+        {
+          "at": 0,
+          "calls": [
+            {
+              "fn": "request",
+              "chain": 1,
+              "method": "eth_estimateGas",
+              "params_json": "[{\"to\":\"0xabc\",\"data\":\"0x70a08231\"},{\"blockNumber\":\"0x10d4f00\"}]",
               "started": 0
             }
           ],
@@ -106131,9 +107602,143 @@
             "status": 200,
             "body": "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":\"0x6\"}"
           }
+        },
+        {
+          "id": 6,
+          "step": 2,
+          "call": 0,
+          "t": 0,
+          "kind": "rpc",
+          "url": "https://a.example",
+          "method": "eth_call",
+          "body": "{\"jsonrpc\":\"2.0\",\"id\":0,\"method\":\"eth_call\",\"params\":[{\"to\":\"0xabc\",\"data\":\"0x70a08231\"},{\"blockHash\":\"0x1111111111111111111111111111111111111111111111111111111111111111\",\"requireCanonical\":true}]}",
+          "end": 0,
+          "outcome": "answered",
+          "answer": {
+            "status": 200,
+            "body": "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":\"0x6\"}"
+          }
+        },
+        {
+          "id": 7,
+          "step": 2,
+          "call": 0,
+          "t": 0,
+          "kind": "rpc",
+          "url": "https://b.example",
+          "method": "eth_call",
+          "body": "{\"jsonrpc\":\"2.0\",\"id\":0,\"method\":\"eth_call\",\"params\":[{\"to\":\"0xabc\",\"data\":\"0x70a08231\"},{\"blockHash\":\"0x1111111111111111111111111111111111111111111111111111111111111111\",\"requireCanonical\":true}]}",
+          "end": 0,
+          "outcome": "answered",
+          "answer": {
+            "status": 200,
+            "body": "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":\"0x6\"}"
+          }
+        },
+        {
+          "id": 8,
+          "step": 2,
+          "call": 0,
+          "t": 0,
+          "kind": "rpc",
+          "url": "https://c.example",
+          "method": "eth_call",
+          "body": "{\"jsonrpc\":\"2.0\",\"id\":0,\"method\":\"eth_call\",\"params\":[{\"to\":\"0xabc\",\"data\":\"0x70a08231\"},{\"blockHash\":\"0x1111111111111111111111111111111111111111111111111111111111111111\",\"requireCanonical\":true}]}",
+          "end": 0,
+          "outcome": "answered",
+          "answer": {
+            "status": 200,
+            "body": "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":\"0x6\"}"
+          }
+        },
+        {
+          "id": 9,
+          "step": 3,
+          "call": 0,
+          "t": 0,
+          "kind": "rpc",
+          "url": "https://a.example",
+          "method": "eth_estimateGas",
+          "body": "{\"jsonrpc\":\"2.0\",\"id\":0,\"method\":\"eth_estimateGas\",\"params\":[{\"to\":\"0xabc\",\"data\":\"0x70a08231\"},{\"blockNumber\":\"0x10d4f00\"}]}",
+          "end": 0,
+          "outcome": "answered",
+          "answer": {
+            "status": 200,
+            "body": "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":\"0x6\"}"
+          }
+        },
+        {
+          "id": 10,
+          "step": 3,
+          "call": 0,
+          "t": 0,
+          "kind": "rpc",
+          "url": "https://b.example",
+          "method": "eth_estimateGas",
+          "body": "{\"jsonrpc\":\"2.0\",\"id\":0,\"method\":\"eth_estimateGas\",\"params\":[{\"to\":\"0xabc\",\"data\":\"0x70a08231\"},{\"blockNumber\":\"0x10d4f00\"}]}",
+          "end": 0,
+          "outcome": "answered",
+          "answer": {
+            "status": 200,
+            "body": "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":\"0x6\"}"
+          }
+        },
+        {
+          "id": 11,
+          "step": 3,
+          "call": 0,
+          "t": 0,
+          "kind": "rpc",
+          "url": "https://c.example",
+          "method": "eth_estimateGas",
+          "body": "{\"jsonrpc\":\"2.0\",\"id\":0,\"method\":\"eth_estimateGas\",\"params\":[{\"to\":\"0xabc\",\"data\":\"0x70a08231\"},{\"blockNumber\":\"0x10d4f00\"}]}",
+          "end": 0,
+          "outcome": "answered",
+          "answer": {
+            "status": 200,
+            "body": "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":\"0x6\"}"
+          }
         }
       ],
       "unpatched": [
+        [
+          {
+            "value": [
+              {
+                "key": "result",
+                "json": "\"colibri:unproven\""
+              },
+              {
+                "key": "source",
+                "json": "\"colibri\""
+              },
+              {
+                "key": "verified",
+                "json": "true"
+              }
+            ],
+            "settled": 0
+          }
+        ],
+        [
+          {
+            "value": [
+              {
+                "key": "result",
+                "json": "\"colibri:unproven\""
+              },
+              {
+                "key": "source",
+                "json": "\"colibri\""
+              },
+              {
+                "key": "verified",
+                "json": "true"
+              }
+            ],
+            "settled": 0
+          }
+        ],
         [
           {
             "value": [
@@ -106176,7 +107781,7 @@
     },
     {
       "id": "colibri-unproven-colibri-only",
-      "from": "chain-data-router.test.js@13f65239:2546",
+      "from": "chain-data-router.test.js@63c77545:2556",
       "patches": [
         "colibri-unproven"
       ],
@@ -106285,6 +107890,54 @@
                 "class": "Error",
                 "name": "Error",
                 "message_json": "\"All chain sources failed for eth_call (colibri: Colibri cannot prove eth_call at block \\\"earliest\\\")\"",
+                "props": []
+              },
+              "settled": 0
+            }
+          ],
+          "state": {}
+        },
+        {
+          "at": 0,
+          "calls": [
+            {
+              "fn": "request",
+              "chain": 1,
+              "method": "eth_call",
+              "params_json": "[{\"to\":\"0xabc\",\"data\":\"0x70a08231\"},{\"blockHash\":\"0x1111111111111111111111111111111111111111111111111111111111111111\",\"requireCanonical\":true}]",
+              "started": 0
+            }
+          ],
+          "results": [
+            {
+              "thrown": {
+                "class": "Error",
+                "name": "Error",
+                "message_json": "\"All chain sources failed for eth_call (colibri: Colibri cannot prove eth_call at a block that isn't a string)\"",
+                "props": []
+              },
+              "settled": 0
+            }
+          ],
+          "state": {}
+        },
+        {
+          "at": 0,
+          "calls": [
+            {
+              "fn": "request",
+              "chain": 1,
+              "method": "eth_getBalance",
+              "params_json": "[\"0xabc\",{\"blockNumber\":\"0x10d4f00\"}]",
+              "started": 0
+            }
+          ],
+          "results": [
+            {
+              "thrown": {
+                "class": "Error",
+                "name": "Error",
+                "message_json": "\"All chain sources failed for eth_getBalance (colibri: Colibri cannot prove eth_getBalance at a block that isn't a string)\"",
                 "props": []
               },
               "settled": 0
@@ -106418,12 +108071,401 @@
             ],
             "settled": 0
           }
+        ],
+        [
+          {
+            "value": [
+              {
+                "key": "result",
+                "json": "\"colibri:unproven\""
+              },
+              {
+                "key": "source",
+                "json": "\"colibri\""
+              },
+              {
+                "key": "verified",
+                "json": "true"
+              }
+            ],
+            "settled": 0
+          }
+        ],
+        [
+          {
+            "value": [
+              {
+                "key": "result",
+                "json": "\"colibri:unproven\""
+              },
+              {
+                "key": "source",
+                "json": "\"colibri\""
+              },
+              {
+                "key": "verified",
+                "json": "true"
+              }
+            ],
+            "settled": 0
+          }
+        ]
+      ]
+    },
+    {
+      "id": "colibri-unproven-non-strings",
+      "from": "chain-data-router.test.js@63c77545:2573",
+      "patches": [
+        "colibri-unproven"
+      ],
+      "world": {
+        "chains": {
+          "1": {
+            "network": {
+              "access": {
+                "readOrder": [
+                  "colibri",
+                  "direct"
+                ]
+              },
+              "quorum": {
+                "k": 3,
+                "m": 2,
+                "timeoutMs": 1000
+              }
+            },
+            "rpc": [
+              "https://rpc.example"
+            ],
+            "prover": [
+              "https://prover.example"
+            ]
+          },
+          "100": {
+            "network": {
+              "access": {
+                "readOrder": [
+                  "colibri",
+                  "direct"
+                ]
+              },
+              "quorum": {
+                "k": 3,
+                "m": 2,
+                "timeoutMs": 1000
+              }
+            },
+            "rpc": [
+              "https://rpc.example"
+            ],
+            "prover": [
+              "https://prover.example"
+            ]
+          }
+        },
+        "myotis": {
+          "1": {
+            "ready": true,
+            "status": {
+              "optimisticBlockNumber": 25684159
+            },
+            "ops": {}
+          },
+          "100": {
+            "ready": true,
+            "status": {
+              "optimisticBlockNumber": 25684159
+            },
+            "ops": {}
+          }
+        },
+        "rpc": {
+          "https://rpc.example": {
+            "result": "rpc:answer"
+          }
+        },
+        "colibri": {
+          "result": "colibri:unproven"
+        }
+      },
+      "steps": [
+        {
+          "at": 0,
+          "calls": [
+            {
+              "fn": "request",
+              "chain": 1,
+              "method": "eth_call",
+              "params_json": "[{\"to\":\"0xabc\",\"data\":\"0x70a08231\"},null]",
+              "started": 0
+            }
+          ],
+          "results": [
+            {
+              "value": [
+                {
+                  "key": "result",
+                  "json": "\"rpc:answer\""
+                },
+                {
+                  "key": "source",
+                  "json": "\"direct\""
+                },
+                {
+                  "key": "verified",
+                  "json": "false"
+                }
+              ],
+              "settled": 0
+            }
+          ],
+          "state": {}
+        },
+        {
+          "at": 0,
+          "calls": [
+            {
+              "fn": "request",
+              "chain": 1,
+              "method": "eth_getBalance",
+              "params_json": "[\"0xabc\",16]",
+              "started": 0
+            }
+          ],
+          "results": [
+            {
+              "value": [
+                {
+                  "key": "result",
+                  "json": "\"rpc:answer\""
+                },
+                {
+                  "key": "source",
+                  "json": "\"direct\""
+                },
+                {
+                  "key": "verified",
+                  "json": "false"
+                }
+              ],
+              "settled": 0
+            }
+          ],
+          "state": {}
+        },
+        {
+          "at": 0,
+          "calls": [
+            {
+              "fn": "request",
+              "chain": 1,
+              "method": "eth_getStorageAt",
+              "params_json": "[\"0xabc\",\"0x0\",true]",
+              "started": 0
+            }
+          ],
+          "results": [
+            {
+              "value": [
+                {
+                  "key": "result",
+                  "json": "\"rpc:answer\""
+                },
+                {
+                  "key": "source",
+                  "json": "\"direct\""
+                },
+                {
+                  "key": "verified",
+                  "json": "false"
+                }
+              ],
+              "settled": 0
+            }
+          ],
+          "state": {}
+        },
+        {
+          "at": 0,
+          "calls": [
+            {
+              "fn": "request",
+              "chain": 1,
+              "method": "eth_getBlockByNumber",
+              "params_json": "[[\"latest\"],false]",
+              "started": 0
+            }
+          ],
+          "results": [
+            {
+              "value": [
+                {
+                  "key": "result",
+                  "json": "\"rpc:answer\""
+                },
+                {
+                  "key": "source",
+                  "json": "\"direct\""
+                },
+                {
+                  "key": "verified",
+                  "json": "false"
+                }
+              ],
+              "settled": 0
+            }
+          ],
+          "state": {}
+        }
+      ],
+      "io": [
+        {
+          "id": 0,
+          "step": 0,
+          "call": 0,
+          "t": 0,
+          "kind": "rpc",
+          "url": "https://rpc.example",
+          "method": "eth_call",
+          "body": "{\"jsonrpc\":\"2.0\",\"id\":0,\"method\":\"eth_call\",\"params\":[{\"to\":\"0xabc\",\"data\":\"0x70a08231\"},null]}",
+          "end": 0,
+          "outcome": "answered",
+          "answer": {
+            "status": 200,
+            "body": "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":\"rpc:answer\"}"
+          }
+        },
+        {
+          "id": 1,
+          "step": 1,
+          "call": 0,
+          "t": 0,
+          "kind": "rpc",
+          "url": "https://rpc.example",
+          "method": "eth_getBalance",
+          "body": "{\"jsonrpc\":\"2.0\",\"id\":0,\"method\":\"eth_getBalance\",\"params\":[\"0xabc\",16]}",
+          "end": 0,
+          "outcome": "answered",
+          "answer": {
+            "status": 200,
+            "body": "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":\"rpc:answer\"}"
+          }
+        },
+        {
+          "id": 2,
+          "step": 2,
+          "call": 0,
+          "t": 0,
+          "kind": "rpc",
+          "url": "https://rpc.example",
+          "method": "eth_getStorageAt",
+          "body": "{\"jsonrpc\":\"2.0\",\"id\":0,\"method\":\"eth_getStorageAt\",\"params\":[\"0xabc\",\"0x0\",true]}",
+          "end": 0,
+          "outcome": "answered",
+          "answer": {
+            "status": 200,
+            "body": "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":\"rpc:answer\"}"
+          }
+        },
+        {
+          "id": 3,
+          "step": 3,
+          "call": 0,
+          "t": 0,
+          "kind": "rpc",
+          "url": "https://rpc.example",
+          "method": "eth_getBlockByNumber",
+          "body": "{\"jsonrpc\":\"2.0\",\"id\":0,\"method\":\"eth_getBlockByNumber\",\"params\":[[\"latest\"],false]}",
+          "end": 0,
+          "outcome": "answered",
+          "answer": {
+            "status": 200,
+            "body": "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":\"rpc:answer\"}"
+          }
+        }
+      ],
+      "unpatched": [
+        [
+          {
+            "value": [
+              {
+                "key": "result",
+                "json": "\"colibri:unproven\""
+              },
+              {
+                "key": "source",
+                "json": "\"colibri\""
+              },
+              {
+                "key": "verified",
+                "json": "true"
+              }
+            ],
+            "settled": 0
+          }
+        ],
+        [
+          {
+            "value": [
+              {
+                "key": "result",
+                "json": "\"colibri:unproven\""
+              },
+              {
+                "key": "source",
+                "json": "\"colibri\""
+              },
+              {
+                "key": "verified",
+                "json": "true"
+              }
+            ],
+            "settled": 0
+          }
+        ],
+        [
+          {
+            "value": [
+              {
+                "key": "result",
+                "json": "\"colibri:unproven\""
+              },
+              {
+                "key": "source",
+                "json": "\"colibri\""
+              },
+              {
+                "key": "verified",
+                "json": "true"
+              }
+            ],
+            "settled": 0
+          }
+        ],
+        [
+          {
+            "value": [
+              {
+                "key": "result",
+                "json": "\"colibri:unproven\""
+              },
+              {
+                "key": "source",
+                "json": "\"colibri\""
+              },
+              {
+                "key": "verified",
+                "json": "true"
+              }
+            ],
+            "settled": 0
+          }
         ]
       ]
     },
     {
       "id": "colibri-unproven-off-position",
-      "from": "chain-data-router.test.js@13f65239:2583",
+      "from": "chain-data-router.test.js@63c77545:2636",
       "world": {
         "chains": {
           "1": {
@@ -106782,7 +108824,7 @@
     },
     {
       "id": "colibri-unproven-fee-methods",
-      "from": "chain-data-router.test.js@13f65239:2590",
+      "from": "chain-data-router.test.js@63c77545:2643",
       "patches": [
         "colibri-unproven"
       ],
@@ -107016,7 +109058,7 @@
     },
     {
       "id": "colibri-unproven-fee-quote-quorum",
-      "from": "chain-data-router.test.js@13f65239:2609",
+      "from": "chain-data-router.test.js@63c77545:2662",
       "patches": [
         "fee-headroom",
         "colibri-unproven"
@@ -107300,7 +109342,7 @@
     },
     {
       "id": "colibri-unproven-fee-quote-direct",
-      "from": "chain-data-router.test.js@13f65239:2631",
+      "from": "chain-data-router.test.js@63c77545:2684",
       "patches": [
         "fee-headroom",
         "colibri-unproven"
@@ -107514,7 +109556,7 @@
     },
     {
       "id": "colibri-unproven-trust",
-      "from": "chain-data-router.test.js@13f65239:2663",
+      "from": "chain-data-router.test.js@63c77545:2716",
       "patches": [
         "colibri-unproven"
       ],

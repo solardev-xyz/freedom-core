@@ -27,7 +27,9 @@ use crate::js::{Element, element};
 use crate::logs::{
     LOG_TRUNCATION_MIN_SPAN, LOG_TRUNCATION_TAIL_BLOCKS, block_number_value, log_query_span,
 };
-use crate::methods::{colibri_unprovable_tag, is_read_method, source_order, source_serves_method};
+use crate::methods::{
+    colibri_unprovable_block, is_read_method, source_order, source_serves_method,
+};
 use crate::myotis::{
     MYOTIS_NOT_READY, MyotisFailure, myotis_answer, myotis_call_span, myotis_operation,
     myotis_trust,
@@ -682,11 +684,12 @@ pub(crate) async fn colibri(
             format!("Colibri does not support {method}").as_str(),
         ));
     }
-    // A block Colibri can't prove at: it would answer from a public RPC
-    // host, unproven (main's #1046). Refused before Colibri is asked.
-    if let Some(tag) = colibri_unprovable_tag(method, params) {
+    // A block Colibri can't prove at: a tag it would answer from a public
+    // RPC host, unproven, or a block that isn't a string, which it binds to
+    // no block (main's #1046). Refused before Colibri is asked.
+    if let Some(block) = colibri_unprovable_block(method, params) {
         return Err(Thrown::unavailable(
-            format!("Colibri cannot prove {method} at block \"{tag}\"").as_str(),
+            format!("Colibri cannot prove {method} at {block}").as_str(),
         ));
     }
     let chain_id = req.chain.chain_id;

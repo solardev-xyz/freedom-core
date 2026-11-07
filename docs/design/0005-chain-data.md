@@ -5,7 +5,7 @@
 **The reference** is `src/main/networks/chain-data-router.js` at freedom-browser `fb540328`, with `blockscout-logs.js` and the Ant bridge's router options (`swarm/ant-chain-bridge.js`).
 - **Three later rules** are ported without moving the pin:
   - from main `94b0af4e`: #752's Colibri ordering for transaction lookups and its verifier-fault backoff ([Colibri](#colibri)), and #749's fee headroom ([Fee quotes](#fee-quotes));
-  - from freedom-browser #1048 at `13f65239`, a fix to main that isn't merged yet: Colibri serves no answer it can't prove (#1046; [Colibri](#colibri)).
+  - from freedom-browser #1048 at `63c77545`, a fix to main that isn't merged yet: Colibri serves no answer it can't prove (#1046; [Colibri](#colibri)).
 
   Their vectors run the pinned router with those rules patched in, as the reference patches `tx-lookups`, `fee-headroom` and `colibri-unproven` ([Replay](#replay)).
 - **Ground truth** will be a replay harness, `vectors/chain-replay.json`, built like 0004's: it runs the pinned router through scripted worlds and records every exchange, verifier operation, timing, result and error. Its scenario IDs are cited below where a rule depends on them.
@@ -341,7 +341,7 @@ The rules below restate the reference so a reviewer can check them against the c
 | Source | Doesn't serve | Notes |
 |---|---|---|
 | myotis | the single-node methods; anything but its seven operations, refused after taking a slot (parity) | `latest` or no tag only |
-| colibri | single-node methods, `eth_getLogs`, `eth_gasPrice`, `eth_feeHistory` | any success is `verified`; no `pending` or `earliest` block ([Colibri](#colibri)) |
+| colibri | single-node methods, `eth_getLogs`, `eth_gasPrice`, `eth_feeHistory` | any success is `verified`; no `pending`, `earliest` or non-string block ([Colibri](#colibri)) |
 | quorum | single-node methods | |
 | direct | — | |
 | blockscout | everything but `eth_getLogs` | opt-in: the Ant profile only |
@@ -425,12 +425,15 @@ The router keeps parsed values; the core keeps **text**.
 - **Trust:** the prover's host, and `ZK sync-committee proof` or `Sync-committee proof`.
 - **Unproven answers** (freedom-browser #1046, fixed on main by #1048). Colibri 3.0.3 doesn't prove every answer it gives. For a request it classes as unproofable (`src/chains/eth/verifier/eth_verify.c`), it sends the call to one of its `eth_rpc` servers and returns that server's `result` as a success, even under `Strategy.VerifiedOnly` (`rpc_handle_unproofable`, `src/api/colibri_common.c`). Those servers are the package's default public RPC hosts, which the user never configured. Such an answer, labelled `verified`, would be one public RPC's word. So Colibri serves neither kind:
   - **`eth_gasPrice` and `eth_feeHistory`,** which it never proves (`not_verifieable_yet_methods`): they are among the methods it doesn't serve ([Methods and sources](#methods-and-sources), `source_serves_method`). A read of either leaves Colibri out, and a fee quote's Colibri step fails at once with `Colibri does not support eth_gasPrice`.
-  - **A read at a `pending` or `earliest` block** (`eth_has_unproofable_block_tag`: a pending block has no beacon block, and the earliest predates the beacon chain). Before Colibri is asked, its step fails as unavailable with `Colibri cannot prove <method> at block "<tag>"`, as Myotis refuses tags other than `latest` (`colibri_unprovable_tag`). The next source answers, labelled as itself. The block parameter is where upstream's `eth_block_tag_index` reads it:
+  - **A read at a `pending` or `earliest` block** (`eth_has_unproofable_block_tag`: a pending block has no beacon block, and the earliest predates the beacon chain). Before Colibri is asked, its step fails as unavailable with `Colibri cannot prove <method> at block "<tag>"`, as Myotis refuses tags other than `latest` (`colibri_unprovable_block`). The next source answers, labelled as itself.
+  - **A read at a block that isn't a string:** an EIP-1898 object (`{ "blockHash", "requireCanonical" }` or `{ "blockNumber" }`), `null`, a number, a boolean or an array. Colibri 3.0.3 binds no such block: in privacy mode its call path reads any non-string block as `latest` (`call_ctx.c`, `verify_call.c`), and its account verifier compares no requested block with the proven one (`verify_account_proof.c`). So its answer could be labelled `verified` for a block nobody checked. Its step fails the same way, with `Colibri cannot prove <method> at a block that isn't a string`.
+
+  The block parameter is where upstream's `eth_block_tag_index` reads it:
     - `params[1]` for `eth_getBalance`, `eth_getCode`, `eth_getTransactionCount`, `eth_call` and `eth_estimateGas`;
     - `params[2]` for `eth_getStorageAt`;
     - `params[0]` for `eth_getBlockByNumber`.
 
-    The params must be an array, and the element must be the string, compared exactly as upstream compares it. A tag elsewhere doesn't count (`colibri-unproven-off-position`). Upstream's other tagged methods aren't read methods, and `eth_getLogs` isn't Colibri's at all.
+    The params must be an array. A string is compared exactly, as upstream compares it, and any other value there is refused. Params too short to hold the parameter ask for `latest` and stay Colibri's. A tag elsewhere doesn't count (`colibri-unproven-off-position`). Upstream's other tagged methods aren't read methods, and `eth_getLogs` isn't Colibri's at all.
   - **The labels** follow the source that answered: Colibri answers only what it proves, and a fee quote is never Colibri's. `feeQuote` no longer counts Colibri as verified ([Fee quotes](#fee-quotes)).
 
   Scenarios: `colibri-unproven-*` ([Main's #1046](#mains-1046)).
@@ -765,7 +768,7 @@ The options weighed are kept below. [B](#b-combining-directs-quotes) and [A](#a-
 - **Today** the only checks are a gas price above 0, a priority fee at most the gas price, and the 4096-bit width. Nodes rarely agree exactly on `eth_gasPrice`, so the quorum usually misses and Direct quotes, from one endpoint (`router-fee-quote-direct-same-endpoint`).
 - **What one endpoint can do:** answer both values with 1e18 wei. The quote becomes EIP-1559 with base fee 0 and a priority fee of 1e18 wei per gas, about 21,000 ETH for a plain transfer, all of it a tip. A node refuses a transaction the sender can't cover, so the real risk is a smaller inflation: ten or fifty times the going rate, which the user pays in full and may not notice.
 - **What the wallet shows:** the send screen and a dApp's transaction show an estimated fee, the gas limit times the quote's effective gas price. Nothing says the quote came from one endpoint, or that it is far above the chain's recent fees.
-- **Provenance isn't plausibility.** A quote's `verified` names its source (Myotis, Colibri or a quorum), not a check of its value. An honest source can be far off during a spike, and fees can reach a transaction without any quote: a dApp supplies them, or a replacement raises them.
+- **Provenance isn't plausibility.** A quote's `verified` names its source (Myotis or a quorum; never Colibri, which doesn't quote since main's #1046), not a check of its value. An honest source can be far off during a spike, and fees can reach a transaction without any quote: a dApp supplies them, or a replacement raises them.
 - **Options:**
 
 | Option | Bounds it | Cost |
@@ -780,7 +783,7 @@ The options weighed are kept below. [B](#b-combining-directs-quotes) and [A](#a-
 
 #### B: combining Direct's quotes
 
-Deviation `fee-combination`. A fee quote's Direct step (today's `requestDirectFeeQuote`) asks several endpoints and combines their quotes. Myotis, Colibri and the quorum quote as [Fee quotes](#fee-quotes) says, headroom included.
+Deviation `fee-combination`. A fee quote's Direct step (today's `requestDirectFeeQuote`) asks several endpoints and combines their quotes. Myotis and the quorum quote as [Fee quotes](#fee-quotes) says, headroom included. Colibri doesn't quote: it doesn't serve `eth_gasPrice` (main's #1046).
 
 **Amended for main's #749** (the user, 2026-10-23): each endpoint's quote carries main's headroom before it is combined, its own block prices an unusable hint, an endpoint whose block read fails counts as failed, and the mixed rule without a verified header takes the lowest raw gas price, then the headroom once.
 - **Collection:**
@@ -902,7 +905,7 @@ A runs in main, at the confirmation before every transaction signature: a send t
     - the headroom: `lowest_priority` floored, a block-priced EIP-1559 quote's tip included, and Direct's last resort as the reference's quote;
     - the deadline, a `cancel` and a configuration change.
   - **Main's tests for A** (freedom-browser, step 5):
-    - fees from a Myotis, Colibri, quorum and Direct quote, a dApp's EIP-1559 and legacy fields, and a replacement, each judged against the same R;
+    - fees from a Myotis, quorum and Direct quote, a dApp's EIP-1559 and legacy fields, and a replacement, each judged against the same R (there is no Colibri quote since main's #1046);
     - the threshold, at and just above 3·R;
     - all-legacy quotes on an EIP-1559 chain (R = 2·B, and 2·B + the floor from the pin bump that brings floored quotes), and a legacy chain (the combined quote);
     - from that pin bump, a low-base-fee chain: floored quotes judged against an R that carries the floor, and not flagged;
@@ -1036,13 +1039,13 @@ The harness drives the pinned `chain-data-router.js`, with the real `blockscout-
   - nesting at 512 and 513 levels (`boundary-json-depth-512`, and `boundary-json-depth-513` for deviation `json-depth`);
   - canonical-equivalence pairs through the quorum: duplicate keys, number spellings, `__proto__`, lone surrogates (`boundary-agreement-*`);
   - `isCapacityFailure` on Colibri's errors: collapsed whitespace, a phrase past 500 units, elided hex and an error's own `failureKind` (`boundary-adaptive-capacity-*`).
-- **The harness** (`vectors/generator/chain-replay.js`) has 357 scenarios, each with a stable ID and a `from` field citing its source test or this document: 306 from the pinned router, 25 for main's #752 ([Main's #752](#mains-752)), 12 for main's #749 ([Main's #749](#mains-749)) and 14 for #1046 ([Main's #1046](#mains-1046)).
+- **The harness** (`vectors/generator/chain-replay.js`) has 358 scenarios, each with a stable ID and a `from` field citing its source test or this document: 306 from the pinned router, 25 for main's #752 ([Main's #752](#mains-752)), 12 for main's #749 ([Main's #749](#mains-749)) and 15 for #1046 ([Main's #1046](#mains-1046)).
   - **Values as text:** every value the reference produced or was given is recorded as JSON text, and `undefined` as a field of its own. No value can pass for an encoding, and every value `JSON.parse` makes survives: lone surrogates, any depth, `-0` and infinities.
   - **Large texts:** a text over 64 KiB is stored in its field's repeat form, a repeat unit plus a SHA-256, which keeps the 8 MiB `html()` answers small.
   - **Settle times:** ported scenarios carry the settle times their tests assert, and generation fails if a fixture drifts from them.
-- **The machine replays all 357** (`crates/fc-chain/tests/replay.rs`). A driver plays main from the records: it starts each call when the reference did, and answers each request with the answer its record got, at the time it got it, delivering answers due in one tick in the reference's microtask order (a failed fetch or a non-2xx status settles before a body is read; equal delays settle in registration order). It compares exactly:
+- **The machine replays all 358** (`crates/fc-chain/tests/replay.rs`). A driver plays main from the records: it starts each call when the reference did, and answers each request with the answer its record got, at the time it got it, delivering answers due in one tick in the reference's microtask order (a failed fetch or a non-2xx status settles before a body is read; equal delays settle in registration order). It compares exactly:
   - **every request the core owns** (`shell.rpc`'s endpoint and body with its `id` normalized, a verifier operation and its params, a Blockscout page) with its start, matched to a record of the same call, and **in the reference's order**: no request answers a ledger entry earlier than one already matched. No allowance for unordered concurrency is needed; the order holds across every call of every step. Main's own I/O (Blockscout's hops and DNS lookups, Myotis status samples) feeds the replies main sends instead;
-  - **every cancel:** an exchange the reference aborted at T is cancelled at T, and no other is cancelled, except in two permitted races, each counted: a quorum member cancelled when a sibling launched in the same tick answered the same call in the tick both settled (132; the reference's abort came after the member's answer), and a Blockscout page cancelled by the scan's deadline in the tick its own fetch failed with `no answer within` (4). Main never delivers an answer to an exchange the machine cancelled first: it aborted it;
+  - **every cancel:** an exchange the reference aborted at T is cancelled at T, and no other is cancelled, except in two permitted races, each counted: a quorum member cancelled when a sibling launched in the same tick answered the same call in the tick both settled (134; the reference's abort came after the member's answer), and a Blockscout page cancelled by the scan's deadline in the tick its own fetch failed with `no answer within` (4). Main never delivers an answer to an exchange the machine cancelled first: it aborted it;
   - **every result and error,** with its settle time: key order, constructor, `name`, message, own properties, `-0` and UTF-16 strings;
   - **the state tables** after each step. Route keys whose target lists several addresses are compared with that list digested ([Adaptive bypass](#adaptive-bypass)). A patched scenario's tables add `colibri_faults`: `["<chain> <method>", { faults, strikes, coolUntil }]` per record, in the reference's insertion order.
   - **24 scenarios show a deviation's difference,** each listed in the test with the whole reply, the requests and the state it must show instead, and every field the deviation doesn't change still compared: `broadcast-outcome` (13: today's error, or a success with another hash, becomes `uncertain`, reporting keccak256 of the raw bytes, with each reconciliation lookup made listed with its endpoint and its whole body or params, the hash included), `config-change` (`boundary-registry-change-mid-request`: the three members asked again at 1,000 listed whole, and the one exchange the change moves, Direct's, given its new start), `order-validation` (`boundary-order-duplicates-and-unknown`), `endpoint-dedup` (`boundary-quorum-duplicate-endpoint`: a asked once, its second exchange never made, and the quorum's miss handed to Direct), `singleton-quorum` (`boundary-quorum-singleton-not-verified`: the same requests, two reads and a fee quote labelled as Direct would), `json-depth` (`boundary-json-depth-513`), `cancel-promptly` (`cancel-read-no-fallthrough`) and `adapter-error-text` (`boundary-colibri-revert-capacity`: the revert reads `execution reverted`, its route blocked as today; `tx-lookup-all-sources-fail`: Colibri's own error reads `Colibri request failed`, as main's has since #681).
@@ -1152,10 +1155,10 @@ Main's #749 (`3d9e7b33`, merged in #751) prices fee quotes with headroom ([Fee q
 
 #### Main's #1046
 
-freedom-browser #1048 (head `13f65239`, fixes #1046) stops main's router from labelling Colibri's unproven answers verified ([Colibri](#colibri), Unproven answers). It is a pull request against main, not merged yet. The core follows it, and its rule is a **reference patch**, `colibri-unproven` in the generator's `PATCHES`, as #752's and #749's are.
+freedom-browser #1048 (head `63c77545`, fixes #1046) stops main's router from labelling Colibri's unproven answers verified ([Colibri](#colibri), Unproven answers). It is a pull request against main, not merged yet. The core follows it, and its rule is a **reference patch**, `colibri-unproven` in the generator's `PATCHES`, as #752's and #749's are.
 - **What it is:** #1048's router lines, applied in memory to the pinned router:
   - Colibri's `unsupported` gains `eth_gasPrice` and `eth_feeHistory`;
-  - `requestColibri` refuses a read at `pending` or `earliest`, after its method check, through `colibriUnprovableTag` and its table of block parameters;
+  - `requestColibri` refuses a read at `pending` or `earliest`, or at a block that isn't a string, after its method check, through `colibriUnprovableBlock` and its table of block parameters;
   - `feeQuote` no longer counts `colibri` as verified.
 
   Two edits touch functions `tx-lookups` and `fee-headroom` also edit, so a scenario names `colibri-unproven` after them, and its edits are written to apply after theirs. Each edit's text must still occur exactly once.
@@ -1172,18 +1175,19 @@ freedom-browser #1048 (head `13f65239`, fixes #1046) stops main's router from la
     - `boundary-fee-all-sources-unavailable`'s aggregate reads `colibri: Colibri does not support eth_gasPrice`;
     - `fee-headroom-colibri-inconsistent`, `fee-headroom-no-hint-method` and `fee-headroom-last-resort` have only Colibri, so they fail with `All chain sources failed for fee quote (colibri: Colibri does not support eth_gasPrice)`;
     - `fee-headroom-later-type-2-wins` gets the same quote from Direct, with Colibri's three requests gone (`fee-combination`'s requests change with them).
-- **New scenarios** port #1048's tests in `chain-data-router.test.js` at `13f65239`. Thirteen are patched. One comes out the same without the patch, so it is recorded unpatched: `colibri-unproven-off-position`.
+- **New scenarios** port #1048's tests in `chain-data-router.test.js` at `63c77545`. Fourteen are patched. One comes out the same without the patch, so it is recorded unpatched: `colibri-unproven-off-position`.
 
 | Scenario | From | Shows |
 |---|---|---|
-| `colibri-unproven-balance`, `-code`, `-nonce`, `-call`, `-estimate`, `-storage`, `-block` | 2519 | each method at `pending` and `earliest` answered by Direct, `verified: false`; at `latest` (as at 2561), by Colibri, `verified: true` |
-| `colibri-unproven-quorum-labels` | 2533 | the read order `[myotis, colibri, quorum, direct]`: the quorum answers a pending nonce and an earliest storage read, `verified: true` |
-| `colibri-unproven-colibri-only` | 2546 | a Colibri-only order: the tags fail with Colibri's refusal; `eth_gasPrice` and `eth_feeHistory` (as at 2590) with `No chain source left …` |
-| `colibri-unproven-off-position` (unpatched) | 2583 | a tag outside the block parameter, and methods without one: still Colibri's |
-| `colibri-unproven-fee-methods` | 2590 | `eth_gasPrice` and `eth_feeHistory` from Direct |
-| `colibri-unproven-fee-quote-quorum` | 2609 | a fee quote from the quorum, `verified: true` (with `fee-headroom`) |
-| `colibri-unproven-fee-quote-direct` | 2631 | a fee quote from Direct, `verified: false` (with `fee-headroom`; `fee-combination`: `answered: 1`, and B's header read, which fails) |
-| `colibri-unproven-trust` | 2663 | a pending `eth_call`'s trust is Direct's; at `latest`, Colibri's proof |
+| `colibri-unproven-balance`, `-code`, `-nonce`, `-call`, `-estimate`, `-storage`, `-block` | 2529 | each method at `pending`, `earliest` and both EIP-1898 objects answered by Direct, `verified: false`; at `latest` (as at 2614) and without its block parameter (as at 2587), by Colibri, `verified: true` |
+| `colibri-unproven-quorum-labels` | 2543 | the read order `[myotis, colibri, quorum, direct]`: the quorum answers a pending nonce, an earliest storage read, and a call and an estimate at the two objects, `verified: true` |
+| `colibri-unproven-colibri-only` | 2556 | a Colibri-only order: the tags and the objects fail with Colibri's refusal; `eth_gasPrice` and `eth_feeHistory` (as at 2643) with `No chain source left …` |
+| `colibri-unproven-non-strings` | 2573 | `null`, a number, a boolean and an array at the block parameter: Direct answers, `verified: false` |
+| `colibri-unproven-off-position` (unpatched) | 2636 | a tag outside the block parameter, and methods without one: still Colibri's |
+| `colibri-unproven-fee-methods` | 2643 | `eth_gasPrice` and `eth_feeHistory` from Direct |
+| `colibri-unproven-fee-quote-quorum` | 2662 | a fee quote from the quorum, `verified: true` (with `fee-headroom`) |
+| `colibri-unproven-fee-quote-direct` | 2684 | a fee quote from Direct, `verified: false` (with `fee-headroom`; `fee-combination`: `answered: 1`, and B's header read, which fails) |
+| `colibri-unproven-trust` | 2716 | a pending `eth_call`'s trust is Direct's; at `latest`, Colibri's proof |
 
 - **The codec vectors** in `vectors/chain.json`:
   - **`methods.source_capabilities`** come from the patched router. Colibri's entry names the patch, and keeps the pinned list as `unpatched`.
@@ -1221,7 +1225,9 @@ freedom-browser #1048 (head `13f65239`, fixes #1046) stops main's router from la
 ## Open questions
 
 1. **Revert agreement.** Today reverts never agree in a quorum, so a dApp loses the revert data unless Myotis or Colibri gave it. Should identical error objects (code and data) count as agreement?
-2. **Colibri's coverage.** Which methods does Colibri's `VerifiedOnly` client actually prove (`eth_gasPrice`, `eth_feeHistory`, `eth_blockNumber`, `pending` reads)? Today any Colibri success is labelled verified. [State history](#state-history) depends on it too: whether Colibri proves the sender's nonce at a block hash (EIP-1898) and a block with its transactions, and how far back.
+2. **Colibri's coverage.** Main's #1046 settles part of it ([Colibri](#colibri), Unproven answers). Colibri 3.0.3 proves neither `eth_gasPrice` nor `eth_feeHistory`, nor a read at `pending` or `earliest`, and it binds no non-string block. The router asks it for none of these, and any other Colibri success is still labelled verified. Still unknown:
+   - whether it binds the block of a read at a block number or hash string. v3.0.3's source suggests not everywhere: its account verifier compares no requested block, and its call path checks a requested number but not a hash;
+   - for [State history](#state-history): whether it proves the sender's nonce at a block hash and a block with its transactions, and how far back.
 3. **Gnosis' Direct after a failed quorum** has nothing to ask without API keys. Intended?
 4. **Myotis' head-of-line wait.** Methods Myotis doesn't serve take a slot before being refused. Checking the method first is a pure improvement, but observable in timing.
 5. **The wallet's texts and UI** (step 5): how to show "sent, unconfirmed", unresolved and "taken" intents, and how to offer the same bytes again or a replacement at the same nonce. [State history](#state-history) decides one part (#94): *Couldn't confirm*, and closing such an intent by hand, with its text.
