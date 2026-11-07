@@ -1073,6 +1073,7 @@ dependencies = [
  "git2",
  "libc",
  "libradicle",
+ "libz-sys",
  "radicle",
  "rand_core 0.10.1",
  "serde",

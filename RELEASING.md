@@ -289,3 +289,117 @@ gh attestation verify freedom-ipfsd-vX.Y.Z-linux-amd64.tar.gz \
   --source-ref refs/tags/ipfsd-vX.Y.Z \
   --deny-self-hosted-runners
 ```
+
+# Releasing freedom-radicled
+
+`services/freedom-radicled` (design 0008) is released on its own tags,
+`radicled-vX.Y.Z`, by `.github/workflows/release-radicled.yml`. It has
+freedom-ipfsd's shape and targets: build jobs with a read-only token, each
+in its own checkout with no cache, and one publish job that runs no
+repository code.
+
+0. **Notices.** `services/freedom-radicled/THIRD-PARTY-NOTICES` is generated
+   and committed:
+   `(cd services/freedom-radicled && cargo fetch --locked) && python3 scripts/third-party-notices.py --binary freedom-radicled`.
+   CI (`services.yml`) and the release workflow's first job fail when it is
+   stale. Besides the crates and the runtime, it lists the C libraries
+   crates bundle and build in, each tied to the exact crate version, so a
+   new version fails until its entry (`NATIVE` in the script) is re-checked:
+   - **libgit2 1.9.6** (`libgit2-sys`'s `vendored` build), GPL-2.0 with its
+     linking exception, with its `COPYING`, which carries the notices of the
+     code it bundles. One of them, LibXDiff, is LGPL-2.1-or-later and linked
+     statically, so the entry also says where its source is, and where
+     freedom-radicled's is, to rebuild it against a modified copy;
+   - **zlib 1.3.2** (`libz-sys`, built from its own copy on every target:
+     `Cargo.toml` asks for `static`);
+   - **SQLite 3.49.1** (`sqlite3-src`'s amalgamation), public domain, with
+     the dedication its source carries.
+
+   Every shipped crate that declares `links` must be one of these, or be
+   listed in the script's `LINKS_CHECKED` with why its own files cover it.
+   Texts for crates that ship none are vendored in
+   `services/freedom-radicled/notices/` (its README lists them). The
+   archives also ship `THIRD-PARTY-NOTICES-rust-std.html`.
+1. **Bump the version** in a PR: `version` in
+   `services/freedom-radicled/Cargo.toml`, and its own `Cargo.lock`
+   (`cargo metadata --offline --format-version 1` in
+   `services/freedom-radicled`). `rad.hello` reports it as
+   `service_version`, independent of the core's version.
+2. **Tag the merged commit on `main`** once its CI is green and the bump PR
+   records a result for every item in step 5a of freedom-ipfsd's list
+   (above), as its last paragraph adapts it for this service:
+   `git tag radicled-vX.Y.Z <commit> && git push origin radicled-vX.Y.Z`.
+   Only a tag equal to `radicled-v` + that version publishes.
+3. **The workflow.** The first job checks the tag and the notices, and
+   takes from the tag what heartwood's build scripts embed (below). Then
+   each target's job:
+   - builds with `--locked --release`, Linux with `cargo-zigbuild` against
+     glibc 2.17 as freedom-ipfsd's does (Zig 0.15.2 and cargo-zigbuild
+     0.23.4, pinned by sha256);
+   - on Linux, checks that the binary needs glibc 2.17 at most, the
+     standard loader, and no library but glibc's and `libgcc_s`: libgit2,
+     zlib and SQLite are linked in;
+   - checks that the binary names no `FREEDOM_RADICLED_TEST_*` variable,
+     which only the `testhooks` feature compiles in;
+   - packages the binary with both notice files, then unpacks the archive
+     and runs its binary on the four native builds: usage exits 64, and one
+     `rad.hello` (`scripts/radicled-hello.py`). The handshake spawns `serve`
+     as main does, with a cleared environment, and checks the reply against
+     `Cargo.lock`: the version, libradicle's version and commit, a 32-byte
+     recipient, the network, and a confinement report, which the log
+     shows; then stdin's end must exit 0;
+   - runs the release build's own command with `--features testhooks`,
+     with and without release debug assertions, which `build.rs` must
+     refuse.
+
+   `x86_64-apple-darwin` is cross-compiled on Apple silicon, where it would
+   run under Rosetta 2. The translator has a thread of its own, so
+   confinement's one-thread check refuses it there (exit 77, "2 threads
+   before confinement"). So a job on an Intel runner (`macos-15-intel`)
+   runs its archive's binary natively: the checksum, usage and `rad.hello`.
+   Then the publish job assembles `SHA256SUMS`, attests every archive and
+   `SHA256SUMS`, and publishes.
+
+   | Asset | Target |
+   |---|---|
+   | `freedom-radicled-vX.Y.Z-darwin-arm64.tar.gz` | `aarch64-apple-darwin` |
+   | `freedom-radicled-vX.Y.Z-darwin-amd64.tar.gz` | `x86_64-apple-darwin` |
+   | `freedom-radicled-vX.Y.Z-linux-amd64.tar.gz` | `x86_64-unknown-linux-gnu` (glibc ≥ 2.17) |
+   | `freedom-radicled-vX.Y.Z-linux-arm64.tar.gz` | `aarch64-unknown-linux-gnu` (glibc ≥ 2.17) |
+   | `freedom-radicled-vX.Y.Z-windows-amd64.zip` | `x86_64-pc-windows-msvc` (static CRT) |
+
+   **What the tag fixes.** The dependencies are the lockfile's
+   (`--locked`; libradicle and heartwood by commit), the toolchain is
+   `rust-toolchain.toml`'s, and Zig is pinned. The C libraries are the
+   crates' bundled copies, never the runner's: `libz-sys` builds its own
+   (`static`), vcpkg is off (`VCPKGRS_DISABLE`), and the build refuses
+   `SQLITE_*` variables, which `sqlite3-src` would compile in. heartwood's
+   build scripts embed `RADICLE_VERSION`, which is the node's announced
+   user agent (`/radicle:<version>/`), `GIT_HEAD` and `SOURCE_DATE_EPOCH`.
+   Unset, they come from `git` in cargo's checkout of heartwood, so the
+   workflow sets them: heartwood's commit in 8 hex digits for the first
+   two, and the tagged commit's time. To rebuild a Linux binary from a tag:
+
+   ```sh
+   cd services/freedom-radicled
+   heartwood=<heartwood's commit in Cargo.lock, 8 hex digits>
+   RADICLE_VERSION=$heartwood GIT_HEAD=$heartwood \
+     SOURCE_DATE_EPOCH=$(git log -1 --pretty=%ct radicled-vX.Y.Z) \
+     cargo zigbuild --locked --release --target x86_64-unknown-linux-gnu.2.17
+   ```
+
+4. **Pin it in freedom-browser**, as for the core: the tag, plus the SHA-256
+   of the release's `SHA256SUMS`, which the publish job prints.
+5. **Confinement, before shipping:** freedom-ipfsd's step 5 (above), both
+   lists, with its last paragraph's substitutions for this service.
+
+Failed runs, immutable releases and the tag ruleset work as for the core
+(above). Verify a download's provenance with:
+
+```sh
+gh attestation verify freedom-radicled-vX.Y.Z-linux-amd64.tar.gz \
+  --repo solardev-xyz/freedom-core \
+  --signer-workflow solardev-xyz/freedom-core/.github/workflows/release-radicled.yml \
+  --source-ref refs/tags/radicled-vX.Y.Z \
+  --deny-self-hosted-runners
+```

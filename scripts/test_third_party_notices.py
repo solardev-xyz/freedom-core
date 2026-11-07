@@ -114,13 +114,100 @@ class Binaries(unittest.TestCase):
     def test_every_binary_names_its_targets_and_native_code(self):
         self.assertEqual(set(notices.TARGETS), set(notices.WORKSPACES))
         self.assertEqual(set(notices.NATIVE), set(notices.WORKSPACES))
+        self.assertLessEqual(set(notices.LINKS_CHECKED), set(notices.WORKSPACES))
 
-    def test_the_service_links_glibc_on_linux_and_the_core_musl(self):
+    def test_the_services_link_glibc_on_linux_and_the_core_musl(self):
         linux = lambda binary: [t for t in notices.TARGETS[binary] if "linux" in t]
-        self.assertEqual(linux("freedom-ipfsd"),
-                         ["x86_64-unknown-linux-gnu", "aarch64-unknown-linux-gnu"])
+        for service in ("freedom-ipfsd", "freedom-radicled"):
+            self.assertEqual(linux(service),
+                             ["x86_64-unknown-linux-gnu", "aarch64-unknown-linux-gnu"])
         self.assertEqual(linux(notices.BINARY),
                          ["x86_64-unknown-linux-musl", "aarch64-unknown-linux-musl"])
+
+    def test_every_native_entry_is_well_formed(self):
+        for binary, entries in notices.NATIVE.items():
+            for entry in map(lambda e: notices.Native(*e), entries):
+                with self.subTest(binary=binary, label=entry.label):
+                    self.assertTrue(entry.label and entry.expression and entry.text)
+                    if entry.text.startswith("crate:"):
+                        self.assertTrue(entry.bundled_by)
+                    if entry.bundled_by:
+                        name, _, version = entry.bundled_by.partition(" ")
+                        self.assertTrue(name and version and " " not in version)
+
+    def test_radicled_lists_libgit2_zlib_and_sqlite_with_libgit2s_source(self):
+        bundled = {notices.Native(*e).bundled_by: notices.Native(*e)
+                   for e in notices.NATIVE["freedom-radicled"] if len(e) > 3}
+        self.assertEqual({b.split(" ")[0] for b in bundled},
+                         {"libgit2-sys", "libz-sys", "sqlite3-src"})
+        libgit2 = next(e for b, e in bundled.items() if b.startswith("libgit2-sys "))
+        self.assertIn("LGPL-2.1-or-later", libgit2.expression)
+        self.assertIn("freedom-core", libgit2.source)
+
+
+class Bundled(unittest.TestCase):
+    """C libraries that crates bundle: tied to the crate's exact version,
+    their texts read from its source, and every `links` crate accounted
+    for."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.dir = pathlib.Path(self.tmp.name)
+        crate = self.dir / "libz-sys-1.1.31"
+        (crate / "src" / "zlib").mkdir(parents=True)
+        (crate / "src" / "zlib" / "LICENSE").write_text("zlib")
+        self.crates = {
+            ("libz-sys", "1.1.31"): {"manifest_path": str(crate / "Cargo.toml"), "links": "z"},
+            ("ring", "0.17.14"): {"manifest_path": "unused", "links": "ring_core"},
+            ("serde", "1.0.0"): {"manifest_path": "unused"},
+        }
+        self.zlib = notices.Native("zlib", "Zlib", "crate:src/zlib/LICENSE", "libz-sys 1.1.31")
+        self.saved = dict(notices.LINKS_CHECKED)
+
+    def tearDown(self):
+        notices.LINKS_CHECKED.clear()
+        notices.LINKS_CHECKED.update(self.saved)
+        self.tmp.cleanup()
+
+    def test_a_crate_text_is_read_from_the_bundling_crate(self):
+        self.assertEqual(notices.native_text(self.zlib, self.crates, self.dir),
+                         self.dir / "libz-sys-1.1.31" / "src" / "zlib" / "LICENSE")
+
+    def test_another_version_of_the_bundling_crate_fails(self):
+        moved = self.zlib._replace(bundled_by="libz-sys 1.1.32")
+        with self.assertRaisesRegex(notices.NoticeError, "ships libz-sys 1.1.31, not 1.1.32"):
+            notices.native_text(moved, self.crates, self.dir)
+        gone = self.zlib._replace(bundled_by="libgit2-sys 0.18.7")
+        with self.assertRaisesRegex(notices.NoticeError, "doesn't ship libgit2-sys, not 0.18.7"):
+            notices.native_text(gone, self.crates, self.dir)
+
+    def test_a_missing_text_or_bundler_fails(self):
+        with self.assertRaisesRegex(notices.NoticeError, "is missing"):
+            notices.native_text(self.zlib._replace(text="crate:COPYING"), self.crates, self.dir)
+        with self.assertRaisesRegex(notices.NoticeError, "needs the crate that bundles it"):
+            notices.native_text(self.zlib._replace(bundled_by=None), self.crates, self.dir)
+
+    def test_every_links_crate_is_accounted_for(self):
+        notices.LINKS_CHECKED["svc"] = {"ring": "its own files"}
+        notices.check_links("svc", self.crates, [self.zlib])
+        with self.assertRaisesRegex(notices.NoticeError, "libz-sys 1.1.31 declares links"):
+            notices.check_links("svc", self.crates, [])
+        notices.LINKS_CHECKED["svc"] = {}
+        with self.assertRaisesRegex(notices.NoticeError, "ring 0.17.14 declares links"):
+            notices.check_links("svc", self.crates, [self.zlib])
+
+    def test_a_stale_links_entry_fails(self):
+        notices.LINKS_CHECKED["svc"] = {"ring": "its own files", "openssl-sys": "gone"}
+        with self.assertRaisesRegex(notices.NoticeError, "lists openssl-sys"):
+            notices.check_links("svc", self.crates, [self.zlib])
+
+    def test_an_unchecked_binary_is_not_checked(self):
+        notices.LINKS_CHECKED.pop("svc", None)
+        notices.check_links("svc", self.crates, [])
+
+    def test_the_header_names_bundled_c_only_when_there_is_some(self):
+        self.assertNotIn("C libraries", " ".join(notices.header("x")))
+        self.assertIn("the C libraries some of them bundle", " ".join(notices.header("x", True)))
 
 
 class Arguments(unittest.TestCase):
@@ -129,10 +216,11 @@ class Arguments(unittest.TestCase):
         self.assertEqual(notices.parse_args(["--check"]), ("freedom-cored", True))
 
     def test_a_service(self):
-        self.assertEqual(notices.parse_args(["--binary", "freedom-ipfsd", "--check"]),
-                         ("freedom-ipfsd", True))
-        self.assertEqual(notices.output_for("freedom-ipfsd"),
-                         notices.ROOT / "services" / "freedom-ipfsd" / "THIRD-PARTY-NOTICES")
+        for service in ("freedom-ipfsd", "freedom-radicled"):
+            self.assertEqual(notices.parse_args(["--binary", service, "--check"]),
+                             (service, True))
+            self.assertEqual(notices.output_for(service),
+                             notices.ROOT / "services" / service / "THIRD-PARTY-NOTICES")
 
     def test_refusals(self):
         for argv in (["--binary"], ["--binary", "nope"], ["--frobnicate"]):

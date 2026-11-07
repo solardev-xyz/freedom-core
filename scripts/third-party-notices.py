@@ -17,11 +17,19 @@ Apache-2.0, BSD-3-Clause, ...) require their notices to ship with it:
    toolchain's rust-src), compiler-builtins, and the native code linked
    statically on Linux (texts in notices/, reviewed for TOOLCHAIN). For
    freedom-cored, static musl: musl libc and LLVM's libunwind and crt
-   objects. For freedom-ipfsd, glibc 2.17 linked dynamically through Zig:
-   glibc's startup and libc_nonshared objects and LLVM's libunwind, which
-   Zig builds from the sources it bundles. The Rust project's own notice
-   file for the standard library ships next to it, copied from the
-   toolchain by the release workflow as THIRD-PARTY-NOTICES-rust-std.html.
+   objects. For freedom-ipfsd and freedom-radicled, glibc 2.17 linked
+   dynamically through Zig: glibc's startup and libc_nonshared objects and
+   LLVM's libunwind, which Zig builds from the sources it bundles. The Rust
+   project's own notice file for the standard library ships next to it,
+   copied from the toolchain by the release workflow as
+   THIRD-PARTY-NOTICES-rust-std.html.
+3. C libraries a crate bundles and builds into the binary, whose notices
+   aren't the crate's own: for freedom-radicled, libgit2 (with the code it
+   bundles), zlib and SQLite. Each is tied to the exact crate version that
+   bundles it, and its texts are read from that crate's source, so a new
+   version fails until its entry is re-checked. For a binary listed in
+   LINKS_CHECKED, every crate it ships that declares `links` must be one of
+   these, or say why its own files cover what it links.
 
 A new proc-macro or build script can still emit code into the binary; when
 one is added, check where its generated code comes from.
@@ -34,10 +42,12 @@ Needs the crates' sources (`cargo fetch --locked`) and the toolchain's
 rust-src component (rust-toolchain.toml installs it).
 """
 
+import collections
 import json
 import pathlib
 import subprocess
 import sys
+import textwrap
 import tomllib
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
@@ -49,10 +59,11 @@ BINARY = "freedom-cored"
 WORKSPACES = {
     BINARY: ROOT,
     "freedom-ipfsd": ROOT / "services" / "freedom-ipfsd",
+    "freedom-radicled": ROOT / "services" / "freedom-radicled",
 }
 # Every target each binary's release workflow builds: release.yml for the
-# core, release-ipfsd.yml for the service, whose Linux builds link glibc 2.17
-# dynamically (design 0007, open question 6).
+# core, release-ipfsd.yml and release-radicled.yml for the services, whose
+# Linux builds link glibc 2.17 dynamically (design 0007, open question 6).
 TARGETS = {
     BINARY: [
         "aarch64-apple-darwin",
@@ -68,13 +79,21 @@ TARGETS = {
         "aarch64-unknown-linux-gnu",
         "x86_64-pc-windows-msvc",
     ],
+    "freedom-radicled": [
+        "aarch64-apple-darwin",
+        "x86_64-apple-darwin",
+        "x86_64-unknown-linux-gnu",
+        "aarch64-unknown-linux-gnu",
+        "x86_64-pc-windows-msvc",
+    ],
 }
 LICENSE_PREFIXES = ("license", "licence", "copying", "notice", "unlicense", "copyright")
 
 # The toolchain the runtime notices below were reviewed for. When
 # rust-toolchain.toml moves, re-check them: the musl version Rust bundles,
 # the LLVM commit, and the standard library's crates. When release-ipfsd.yml
-# moves to another Zig, re-check what it links (NATIVE's freedom-ipfsd entry).
+# or release-radicled.yml moves to another Zig, re-check what it links
+# (zig_glibc_runtime and each binary's startup notice).
 TOOLCHAIN = "1.99"
 # Out-of-tree crates the standard library links on the release targets
 # (rust-src library/vendor).
@@ -85,9 +104,42 @@ STD_CRATES = [
 # Vendored crates whose std libraries never end up in a binary.
 STD_NOT_LINKED = {"getopts", "rustc-literal-escaper"}
 # Native code each binary statically links on some targets: (label,
-# license, text). Windows links Microsoft's C runtime statically under
-# Microsoft's redistribution terms; macOS links its system libraries
-# dynamically, as freedom-ipfsd's Linux builds link glibc's.
+# license, text), or (label, license, text, bundled_by, source) for a C
+# library a crate bundles. `bundled_by` is that crate, "<name> <version>",
+# which the binary must ship at exactly that version, and a `crate:` text is
+# read from its source. `source`, if set, tells recipients where the
+# library's source is, for a license that asks for it. Windows links
+# Microsoft's C runtime statically under Microsoft's redistribution terms;
+# macOS links its system libraries dynamically, as the services' Linux
+# builds link glibc's.
+Native = collections.namedtuple(
+    "Native", "label expression text bundled_by source", defaults=(None, None)
+)
+
+
+def zig_glibc_runtime(startup_notice):
+    """What Zig 0.15.2 links statically into a glibc 2.17 build, found in
+    the binaries' symbols: glibc's startup object and the libc_nonshared
+    members the binary needs, which `startup_notice` lists (they differ by
+    binary), and LLVM's libunwind in place of libgcc_s. Zig also passes its
+    compiler_rt and UBSan runtime to the linker, but nothing of either is
+    linked. Zig's libunwind license is LLVM's, the same text as
+    rust-src's."""
+    return [
+        (
+            "GNU C Library startup and libc_nonshared objects, built by Zig "
+            "0.15.2 for glibc 2.17 (Linux)",
+            "LGPL-2.1-or-later, with the GNU C Library's exception for linking",
+            startup_notice,
+        ),
+        (
+            "LLVM libunwind, Zig 0.15.2's copy (unwinder; Linux)",
+            "Apache-2.0 WITH LLVM-exception",
+            "rust-src:src/llvm-project/libunwind/LICENSE.TXT",
+        ),
+    ]
+
+
 NATIVE = {
     BINARY: [
         (
@@ -106,25 +158,67 @@ NATIVE = {
             "notices/llvm-compiler-rt-LICENSE.TXT",
         ),
     ],
-    # What Zig 0.15.2 links statically into a glibc 2.17 build, found in the
-    # binaries' symbols: glibc's startup object and the libc_nonshared
-    # members the binary needs, and LLVM's libunwind in place of libgcc_s.
-    # Zig also passes its compiler_rt and UBSan runtime to the linker, but
-    # nothing of either is linked. Zig's libunwind license is LLVM's, the
-    # same text as rust-src's.
-    "freedom-ipfsd": [
-        (
-            "GNU C Library startup and libc_nonshared objects, built by Zig "
-            "0.15.2 for glibc 2.17 (Linux)",
-            "LGPL-2.1-or-later, with the GNU C Library's exception for linking",
-            "notices/glibc-2.17-startup-NOTICE",
+    "freedom-ipfsd": zig_glibc_runtime("notices/glibc-2.17-startup-NOTICE"),
+    "freedom-radicled": [
+        *zig_glibc_runtime("notices/glibc-2.17-startup-freedom-radicled-NOTICE"),
+        # libgit2-sys's `vendored` build, which heartwood's git2 asks for:
+        # libgit2's own sources and, of the code it bundles, llhttp, xdiff,
+        # PCRE2, SHA-1 collision detection and RFC 6234's SHA-256, on every
+        # target (its build.rs). COPYING holds libgit2's license, the GPL 2
+        # with its linking exception, and the notices of everything it
+        # bundles. xdiff (deps/xdiff, LibXDiff) is LGPL-2.1-or-later, which
+        # the linking exception doesn't cover: LGPL 2.1 section 6 asks that
+        # recipients of a binary that links it statically can get its source
+        # and relink it.
+        Native(
+            "libgit2 1.9.6 (C library), with the code it bundles, built from "
+            "libgit2-sys 0.18.7+1.9.6's copy",
+            "GPL-2.0-only WITH LicenseRef-libgit2-linking-exception (libgit2's own linking exception, in its COPYING); "
+            "the code it bundles under the licenses in its COPYING, LibXDiff's "
+            "LGPL-2.1-or-later among them",
+            "crate:libgit2/COPYING",
+            "libgit2-sys 0.18.7+1.9.6",
+            "libgit2 1.9.6 and the code it bundles, LibXDiff (deps/xdiff, "
+            "LGPL-2.1-or-later) among them, are in the binary unmodified. "
+            "Their source is in libgit2-sys 0.18.7+1.9.6's crate, "
+            "https://static.crates.io/crates/libgit2-sys/"
+            "libgit2-sys-0.18.7+1.9.6.crate (libgit2/). freedom-radicled's "
+            "complete source, to rebuild it against a modified copy, is "
+            "https://github.com/solardev-xyz/freedom-core at the release's "
+            "radicled-v* tag (services/freedom-radicled, with its Cargo.lock; "
+            "RELEASING.md describes the build).",
         ),
-        (
-            "LLVM libunwind, Zig 0.15.2's copy (unwinder; Linux)",
-            "Apache-2.0 WITH LLVM-exception",
-            "rust-src:src/llvm-project/libunwind/LICENSE.TXT",
+        # libz-sys's own copy, on every target: freedom-radicled's
+        # Cargo.toml asks for `static`.
+        Native(
+            "zlib 1.3.2 (C library), built from libz-sys 1.1.31's copy",
+            "Zlib",
+            "crate:src/zlib/LICENSE",
+            "libz-sys 1.1.31",
+        ),
+        # sqlite3-src's amalgamation (source/sqlite3.c), with `bundled`.
+        # SQLite is in the public domain: its notice is the dedication its
+        # source carries.
+        Native(
+            "SQLite 3.49.1 (C library), built from sqlite3-src 0.7.0's "
+            "amalgamation",
+            "blessing (public domain)",
+            "services/freedom-radicled/notices/sqlite-3.49.1-NOTICE",
+            "sqlite3-src 0.7.0",
         ),
     ],
+}
+# Binaries whose shipped crates that declare `links` are all accounted for:
+# each must bundle a NATIVE entry's library (its `bundled_by`), or be listed
+# here with why its own license files cover what it links. freedom-ipfsd
+# isn't checked yet: its bundled SQLite (libsqlite3-sys) has no entry.
+LINKS_CHECKED = {
+    BINARY: {},
+    "freedom-radicled": {
+        "ring": "its C and assembly, its own and BoringSSL's, are covered by "
+        "its LICENSE, LICENSE-BoringSSL and LICENSE-other-bits",
+        "defmt": "no native code: `links` only keeps one copy in a graph",
+    },
 }
 
 
@@ -384,18 +478,86 @@ def vendored_notices(binary):
     return vendored
 
 
-def header(binary):
-    """The file's opening: the core's text, naming `binary`."""
+def bundling_crate(entry, crates):
+    """The shipped crate a NATIVE entry's library comes from: exactly the
+    `bundled_by` version, so that a new version fails until it is
+    re-checked."""
+    name, _, version = entry.bundled_by.partition(" ")
+    package = crates.get((name, version))
+    if package is None:
+        shipped = ", ".join(sorted(v for (n, v) in crates if n == name))
+        found = f"ships {name} {shipped}" if shipped else f"doesn't ship {name}"
+        raise NoticeError(
+            f"{entry.label}: the binary {found}, not {version}: re-check what "
+            "it bundles, then update its NATIVE entry"
+        )
+    return package
+
+
+def native_text(entry, crates, rust_src):
+    """Where a NATIVE entry's text is: `crate:` in the source of the crate
+    that bundles it, `rust-src:` in the toolchain's, else the repository."""
+    text = entry.text
+    if text.startswith("crate:"):
+        if not entry.bundled_by:
+            raise NoticeError(f"{entry.label}: a crate: text needs the crate that bundles it")
+        directory = pathlib.Path(bundling_crate(entry, crates)["manifest_path"]).parent
+        path = directory / text[len("crate:"):]
+    elif text.startswith("rust-src:"):
+        path = rust_src / text[len("rust-src:"):]
+    else:
+        path = ROOT / text
+    if not path.is_file():
+        raise NoticeError(f"{entry.label}: {text} is missing")
+    return path
+
+
+def check_links(binary, crates, natives):
+    """For a binary in LINKS_CHECKED: every shipped crate that declares
+    `links` bundles a NATIVE entry's library, or is listed there; and every
+    crate listed there is still shipped."""
+    if binary not in LINKS_CHECKED:
+        return
+    covered = LINKS_CHECKED[binary]
+    bundlers = {entry.bundled_by for entry in natives if entry.bundled_by}
+    for (name, version) in sorted(crates):
+        links = crates[(name, version)].get("links")
+        if links and f"{name} {version}" not in bundlers and name not in covered:
+            raise NoticeError(
+                f"{name} {version} declares links = {links!r}: add the native code it "
+                "builds to NATIVE, or say in LINKS_CHECKED why its own files cover it"
+            )
+    for name in sorted(covered):
+        if not any(shipped == name for (shipped, _) in crates):
+            raise NoticeError(f"LINKS_CHECKED lists {name}, which the binary doesn't ship")
+
+
+def header(binary, bundles_c=False):
+    """The file's opening: the core's text, naming `binary`, and the C
+    libraries its crates bundle if it has any."""
+    if bundles_c:
+        what = [
+            "crates it depends on, the C libraries some of them bundle, and the",
+            "runtime of the Rust toolchain it is built with. Each is listed with",
+            "its license expression, followed by the license and notice texts its",
+            "source distributes. The Rust standard library's own notices are in",
+            "THIRD-PARTY-NOTICES-rust-std.html, which ships next to this file.",
+            "Generated by scripts/third-party-notices.py; do not edit.",
+        ]
+    else:
+        what = [
+            "crates it depends on, and the runtime of the Rust toolchain it is built",
+            "with. Each is listed with its license expression, followed by the",
+            "license and notice texts its source distributes. The Rust standard",
+            "library's own notices are in THIRD-PARTY-NOTICES-rust-std.html, which",
+            "ships next to this file. Generated by scripts/third-party-notices.py;",
+            "do not edit.",
+        ]
     return [
         f"THIRD-PARTY NOTICES for {binary}",
         "",
         f"{binary} statically links the third-party code listed below: the",
-        "crates it depends on, and the runtime of the Rust toolchain it is built",
-        "with. Each is listed with its license expression, followed by the",
-        "license and notice texts its source distributes. The Rust standard",
-        "library's own notices are in THIRD-PARTY-NOTICES-rust-std.html, which",
-        "ships next to this file. Generated by scripts/third-party-notices.py;",
-        "do not edit.",
+        *what,
     ]
 
 
@@ -406,7 +568,8 @@ def generate(binary=BINARY):
             crates[(package["name"], package["version"])] = package
     sysroot, source = toolchain_sources()
     vendored = vendored_notices(binary)
-    lines = [*header(binary), "", "Crates:"]
+    natives = [Native(*entry) for entry in NATIVE[binary]]
+    lines = [*header(binary, any(entry.bundled_by for entry in natives)), "", "Crates:"]
     texts = {}  # text -> [labels]
 
     def add(label, files):
@@ -429,6 +592,7 @@ def generate(binary=BINARY):
             "notices/crates.json vendors texts for crates the binary doesn't ship: "
             + ", ".join(sorted(vendored))
         )
+    check_links(binary, crates, natives)
     offered = [
         crates[key] for key in sorted(crates) if needs_source_offer(crates[key].get("license"))
     ]
@@ -441,17 +605,28 @@ def generate(binary=BINARY):
         ]
         for package in offered:
             lines.append(f"- {package['name']} {package['version']}: {source_location(package)}")
+    bundled = [entry for entry in natives if entry.bundled_by]
+    if bundled:
+        lines += ["", "C libraries that crates above bundle, built into the binary:"]
+        for entry in bundled:
+            lines.append(f"- {entry.label}: {entry.expression}")
+            if entry.source:
+                lines += textwrap.wrap(
+                    "Source code: " + entry.source, width=72,
+                    initial_indent="  ", subsequent_indent="  ",
+                    break_long_words=False, break_on_hyphens=False,
+                )
+            add(entry.label, [native_text(entry, crates, source)])
     lines += ["", f"Rust {TOOLCHAIN} toolchain runtime:"]
     for (name, version, expression, directory, declared) in std_crates(sysroot, source):
         label = f"{name} {version}"
         lines.append(f"- {label} (Rust standard library): {expression}")
         add(label, license_files(label, directory, declared))
-    for (label, expression, text) in NATIVE[binary]:
-        lines.append(f"- {label}: {expression}")
-        path = source / text[len("rust-src:"):] if text.startswith("rust-src:") else ROOT / text
-        if not path.is_file():
-            raise NoticeError(f"{label}: {text} is missing")
-        add(label, [path])
+    for entry in natives:
+        if entry.bundled_by:
+            continue
+        lines.append(f"- {entry.label}: {entry.expression}")
+        add(entry.label, [native_text(entry, crates, source)])
     lines.append("")
     for text, owners in sorted(texts.items(), key=lambda item: item[1][0]):
         lines.append("=" * 72)

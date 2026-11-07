@@ -1444,7 +1444,7 @@ What the service doesn't close, by name:
    - `rad.stats`;
    - the X25519 recipient, `rad.identity` with HPKE, the key-file check and the throwaway key, and `needs_vault` for writes under a throwaway key;
    - the test hooks and the Rust tests.
-5. **Release:** five targets, `SHA256SUMS`, attestations and notices (libgit2's included), on `radicled-v*` tags, in separate build jobs.
+5. **Release:** five targets, `SHA256SUMS`, attestations and notices (libgit2's included), on `radicled-v*` tags, in separate build jobs: `release-radicled.yml` (RELEASING.md, "Releasing freedom-radicled").
 6. **freedom-core:**
    - `nodes.write_identity` for Radicle takes the home gate and gains `wipe`. It writes no key file, removes `keys/radicle` and `keys/radicle.pub` (the switch) after naming the old identity in `node/dirty`, and needs no vault;
    - the core's recovery paths take the gate;
