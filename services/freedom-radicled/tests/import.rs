@@ -1062,12 +1062,17 @@ fn fifo(at: &Path) {
     assert!(made.success());
 }
 
+/// A layout made from a working copy: the source to import, and the file
+/// discovery reads in it.
+#[cfg(unix)]
+type Layout = fn(&Work) -> (PathBuf, PathBuf);
+
 #[cfg(unix)]
 #[test]
 fn a_fifo_at_any_file_discovery_reads_is_refused_at_once() {
     // Each file the roots are found from, in a layout that reaches it: the
     // `.git` file, a linked worktree's `commondir`, an alternates file.
-    let layouts: [(&str, fn(&Work) -> (PathBuf, PathBuf)); 3] = [
+    let layouts: [(&str, Layout); 3] = [
         ("the `.git` file", |work| {
             let gitdir = work.root.join("elsewhere.git");
             std::fs::rename(work.source.join(".git"), &gitdir).unwrap();
