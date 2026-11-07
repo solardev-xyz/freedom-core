@@ -102,7 +102,7 @@ Main implements these. Each carries its attempt's generations and a `deadline_ms
 | `shell.rpc` | `{ endpoint, body }` | one exchange with ethers' `FetchRequest` policy: redirects, 429 back-off, expiry (see [Transport](#transport)) | `{ status, body }` or a [transport error](#transport-errors) |
 | `shell.tezos` | `{ endpoint, method, path, body? }` | GET or POST `endpoint URL + path` | `{ status, body }` or a transport error |
 | `shell.gateway` | `{ url, method, body? }` | `netGatewayFetch` with today's flags | `{ status, body }` or a transport error |
-| `shell.verified` | a [verified operation](#verified-operations) | today's adapter, whole | the operation's outcome |
+| `shell.verified` | a [verified operation](#verified-operations), with `generations`, `deadline_ms` and `serves` | today's adapter, whole | the operation's outcome |
 | `shell.prefetch` | `{ uri }` | `prefetchGatewayUrl(uri)` | `{}` when it ends (finished, failed, its 10 s timer, or cancelled) |
 
 - **Request bodies** travel as text: JSON-RPC and gateway bodies are ASCII JSON.
@@ -130,6 +130,11 @@ Myotis keeps running in main, through today's adapter, **one whole operation per
 - **Revert data** goes as bytes the core reads: `0x` and whole bytes, checked in constant stack. An error carrying anything else (an odd digit, a `0X`) is a failure, classed by the rules above (`error` unless it is `lifecycle`, `timeout` or `invalid_argument`); sent as a revert, the core would refuse it as a malformed reply.
 - **Provenance:** a `revert` is the verifier's proven revert data. The core records which verifier produced it.
 - **The adapters' own bounds** are unchanged. Main bounds physical work: at most 8 operations per verifier are running, counted until the adapter's promise actually settles, not when the core cancels. Beyond that, main answers `{ failure: "unavailable" }` at once.
+- **`serves`** (freedom-core #285): each operation's params also name the requests of main's it serves, by the IDs main gave them. They are the lookups waiting on the session that made it (`naming.resolve_*`, and a `dweb.open` waiting for its name), in increasing order, as they are when the operation's frame is made.
+  - **Each is still pending at main** when the operation arrives. A lookup leaves its session as its reply is made (a cancel, its own deadline, its attempts spent), and the core writes that reply before any request it makes afterwards. A lookup that joins the session after the frame is made isn't named: the operation was asked before it came, so it carries nothing of it.
+  - **Empty** when no lookup waits any more: they have all left, and the session runs on for its cache.
+  - **Main attributes the operation from it** (freedom-browser #1058, a private window's Colibri store). The operation is private when any request it names was sent from a private window, when it names none, or when it names one main doesn't know. It then runs in the private session those requests share, or is refused when they share none. An operation without `serves`, from an older core, counts as private. Naming runs no Colibri operation, so only chain data's ([0005](0005-chain-data.md#verified-operations)) depend on it today; both carry it alike.
+  - **No negotiation and no version change:** main's executors read only the members they know, so an older main ignores it, and the protocol stays at version 2.
 
 ### Replies
 

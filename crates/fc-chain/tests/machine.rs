@@ -3653,3 +3653,77 @@ fn blockscouts_label_follows_its_quorums() {
         );
     }
 }
+
+/// The verified operations emitted since the last call: `(io id, the chain
+/// request that made it, its verifier)`.
+fn verified_ops(machine: &mut Machine) -> Vec<(u64, Option<u64>, &'static str)> {
+    machine.poll();
+    machine
+        .take_effects()
+        .into_iter()
+        .filter_map(|emitted| match emitted.effect {
+            Effect::Request {
+                id,
+                request: Request::Verified(op),
+                ..
+            } => {
+                let verifier = match op {
+                    VerifiedOp::Colibri { .. } => "colibri",
+                    _ => "myotis",
+                };
+                Some((id, emitted.request, verifier))
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+/// Every verified operation names the chain request that made it
+/// (`Emitted::request`), which the driver turns into main's ID for
+/// `shell.verified`'s `serves` (freedom-core #285): reads in flight
+/// together each name their own, and a Myotis slot passed on names the
+/// waiter that takes it, not the read whose answer freed it.
+#[test]
+fn each_verified_operation_names_the_request_that_made_it() {
+    let colibri = ChainConfig {
+        prover: Some(Prover {
+            endpoint: "p".into(),
+            zk: true,
+        }),
+        ..chain(100, &["colibri"], &["a"], ("3", "2", "5000"))
+    };
+    let mut machine = Machine::new(0, Bounds::default());
+    machine.configure(&[chain(1, &["myotis"], &["a"], ("3", "2", "5000")), colibri]);
+    machine.availability(1, true);
+    let balance = |address: char| format!(r#"["0x{}","latest"]"#, address.to_string().repeat(40));
+    let first = machine.submit(read(1, "eth_getBalance", &balance('1')), None);
+    let waiter = machine.submit(read(1, "eth_getBalance", &balance('2')), None);
+    let third = machine.submit(read(100, "eth_getBalance", &balance('3')), None);
+    let fourth = machine.submit(read(100, "eth_getBalance", &balance('4')), None);
+    let ops = verified_ops(&mut machine);
+    let owners: Vec<_> = ops
+        .iter()
+        .map(|(_, owner, verifier)| (*owner, *verifier))
+        .collect();
+    assert_eq!(
+        owners,
+        vec![
+            (Some(first), "myotis"),
+            (Some(third), "colibri"),
+            (Some(fourth), "colibri"),
+        ]
+    );
+    // The first read's answer passes chain 1's Myotis slot on to the
+    // waiter, whose operation is its own.
+    assert!(machine.complete(
+        ops[0].0,
+        Answer::Myotis(MyotisReply::Failure(MyotisClass::Error))
+    ));
+    let ops = verified_ops(&mut machine);
+    let owners: Vec<_> = ops
+        .iter()
+        .map(|(_, owner, verifier)| (*owner, *verifier))
+        .collect();
+    assert_eq!(owners, vec![(Some(waiter), "myotis")]);
+    assert!(machine.take_replies().iter().any(|r| r.id == first));
+}
