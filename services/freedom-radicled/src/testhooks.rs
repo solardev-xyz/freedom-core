@@ -62,6 +62,26 @@
 //!   number, that many milliseconds; with `until:<path>`, until a file
 //!   exists at `<path>` or for 30 s. Each logs `test hook: a repair turn
 //!   holds the node`.
+//! - `FREEDOM_RADICLED_TEST_NETWORK_SLACK_MS` replaces the 30 s a network
+//!   operation's deadline adds to its `timeout_ms` ([`crate::network`]).
+//! - `FREEDOM_RADICLED_TEST_CLONE=<JSON>` replaces libradicle's clone, past
+//!   the clone's start, by a scripted one that reaches no one
+//!   ([`scripted_clone`]): `{ "failures": N, "reason": "…", "repeat": R,
+//!   "then": "ok" | "fail" | "hold" | "deaf" | "until", "hold_ms": M,
+//!   "release": "<path>" }`. It emits `resolving` for N + 1 candidates, and
+//!   for each of the N `connecting`, `fetching` and `peer-failed` with the
+//!   reason repeated R times (1 by default), as fast as it can, looking at
+//!   its token before each candidate as libradicle does; it logs `test
+//!   hook: the clone has emitted its failures`. Then `ok` emits the last
+//!   candidate's `connecting` and `fetching` and succeeds, and `fail` fails
+//!   as libradicle's `FetchFailed` with the reason. `hold` waits for its
+//!   token, at most 30 s. `deaf` waits M milliseconds, and `until` until a
+//!   file exists at the path or 30 s, whatever the token: each then emits
+//!   the last candidate's `connecting` and `fetching`, and is cancelled if
+//!   its token is, else succeeds. The three log `test hook: the clone
+//!   holds` as they begin. The terminal event follows as libradicle's
+//!   `clone_repo_with` emits it, and once the clone has answered it logs
+//!   `test hook: the clone has answered`.
 //! - With `FREEDOM_RADICLED_TEST_HOLD_WRITE` or
 //!   `FREEDOM_RADICLED_TEST_HOLD_REPAIR` set, the stop logs `test hook: the
 //!   stop has fenced the pools` once every pool is fenced, before their
@@ -291,6 +311,155 @@ pub fn at_fence() {
             "test hook: the stop has fenced the pools",
             serde_json::json!({}),
         );
+    }
+}
+
+/// What a network operation's deadline adds to its `timeout_ms`.
+pub fn network_slack(default: Duration) -> Duration {
+    #[cfg(feature = "testhooks")]
+    if let Some(ms) = millis("FREEDOM_RADICLED_TEST_NETWORK_SLACK_MS") {
+        return Duration::from_millis(ms);
+    }
+    default
+}
+
+/// A scripted clone of `rid`, in place of libradicle's, if one is asked
+/// for (see the module's doc): its result, its events emitted as
+/// libradicle's `clone_repo_with` emits them. `None` otherwise.
+pub fn scripted_clone(
+    rid: radicle::prelude::RepoId,
+    cancel: &libradicle::CancelToken,
+    emit: &mut dyn FnMut(libradicle::Progress),
+) -> Option<Result<(), libradicle::Error>> {
+    #[cfg(feature = "testhooks")]
+    if let Ok(spec) = std::env::var("FREEDOM_RADICLED_TEST_CLONE") {
+        let result = scripted::run(&spec, rid, cancel, emit);
+        emit(match &result {
+            Ok(()) => libradicle::Progress::Done,
+            Err(libradicle::Error::Cancelled) => libradicle::Progress::Cancelled,
+            Err(e) => libradicle::Progress::Failed {
+                reason: e.to_string(),
+            },
+        });
+        return Some(result);
+    }
+    #[cfg(not(feature = "testhooks"))]
+    let _ = (rid, cancel, emit);
+    None
+}
+
+/// A clone's end, once it has answered: logs it, if a scripted clone is
+/// asked for.
+pub fn at_clone_end() {
+    #[cfg(feature = "testhooks")]
+    if std::env::var_os("FREEDOM_RADICLED_TEST_CLONE").is_some() {
+        fc_service::log::info("test hook: the clone has answered", serde_json::json!({}));
+    }
+}
+
+#[cfg(feature = "testhooks")]
+mod scripted {
+    use std::time::{Duration, Instant};
+
+    use libradicle::{CancelToken, Progress};
+    use radicle::prelude::RepoId;
+    use serde::Deserialize;
+
+    /// The script (see the module's doc).
+    #[derive(Deserialize)]
+    struct Script {
+        failures: usize,
+        #[serde(default)]
+        reason: String,
+        #[serde(default)]
+        repeat: Option<usize>,
+        then: String,
+        #[serde(default)]
+        hold_ms: u64,
+        #[serde(default)]
+        release: Option<String>,
+    }
+
+    const NID: &str = "z6MkScriptedSeedScriptedSeedScriptedSeedScripted";
+
+    fn candidate(index: usize, total: usize, emit: &mut dyn FnMut(Progress)) {
+        emit(Progress::Connecting {
+            nid: NID.to_owned(),
+            addr: format!("127.0.0.1:{}", 40000 + index),
+            index,
+            total,
+        });
+        emit(Progress::Fetching {
+            nid: NID.to_owned(),
+            index,
+            total,
+        });
+    }
+
+    pub fn run(
+        spec: &str,
+        rid: RepoId,
+        cancel: &CancelToken,
+        emit: &mut dyn FnMut(Progress),
+    ) -> Result<(), libradicle::Error> {
+        let script: Script = serde_json::from_str(spec)
+            .map_err(|e| libradicle::Error::FetchFailed(rid, format!("a bad script: {e}")))?;
+        let reason = script.reason.repeat(script.repeat.unwrap_or(1));
+        let total = script.failures + 1;
+        emit(Progress::Resolving { candidates: total });
+        for index in 1..=script.failures {
+            if cancel.is_cancelled() {
+                return Err(libradicle::Error::Cancelled);
+            }
+            candidate(index, total, emit);
+            emit(Progress::PeerFailed {
+                nid: NID.to_owned(),
+                index,
+                total,
+                reason: reason.clone(),
+            });
+        }
+        fc_service::log::info(
+            "test hook: the clone has emitted its failures",
+            serde_json::json!({}),
+        );
+        let until = Instant::now() + Duration::from_secs(30);
+        let wait = |done: &dyn Fn() -> bool| {
+            fc_service::log::info("test hook: the clone holds", serde_json::json!({}));
+            while Instant::now() < until && !done() {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+        };
+        match script.then.as_str() {
+            "ok" => {
+                candidate(total, total, emit);
+                Ok(())
+            }
+            "fail" => Err(libradicle::Error::FetchFailed(rid, reason)),
+            "hold" => {
+                wait(&|| cancel.is_cancelled());
+                if cancel.is_cancelled() {
+                    Err(libradicle::Error::Cancelled)
+                } else {
+                    Ok(())
+                }
+            }
+            then => {
+                if then == "until" {
+                    let release = script.release.unwrap_or_default();
+                    wait(&|| std::path::Path::new(&release).exists());
+                } else {
+                    let held = Instant::now() + Duration::from_millis(script.hold_ms.min(30_000));
+                    wait(&|| Instant::now() >= held);
+                }
+                candidate(total, total, emit);
+                if cancel.is_cancelled() {
+                    Err(libradicle::Error::Cancelled)
+                } else {
+                    Ok(())
+                }
+            }
+        }
     }
 }
 

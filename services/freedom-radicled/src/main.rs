@@ -35,7 +35,8 @@
 //! release" and "Profiles without a vault"), `rad.reconcile` (0008,
 //! "Reconciliation") and `rad.start`, which runs the node until the
 //! connection ends ([`node`]); then quarantine's methods ([`quarantine`]),
-//! the writes ([`writes`]) and `rad.read`'s pass-through ops ([`reads`]).
+//! the writes ([`writes`]), `rad.read`'s ops ([`reads`]) and the network
+//! operations, `rad.connect_seeds` and `rad.clone` ([`network`]).
 //! The other methods and ops 0008 lists come with later steps; until then
 //! each answers `stopped`.
 //!
@@ -62,6 +63,7 @@ mod env;
 mod identity;
 mod marker;
 mod nat64;
+mod network;
 mod node;
 mod output;
 mod pools;
@@ -268,8 +270,26 @@ fn serve(
             return Exit::Internal;
         }
     };
-    let service = match RadicleService::new(grant, &network, confinement, units, pools, git_config)
-    {
+    // The clones' progress: one thread, which writes their events to main.
+    let progress = match network::progress::Hub::start() {
+        Ok(hub) => Arc::new(hub),
+        Err(e) => {
+            log::error(
+                "cannot start the progress hub",
+                json!({ "error": e.kind().to_string() }),
+            );
+            return Exit::Internal;
+        }
+    };
+    let service = match RadicleService::new(
+        grant,
+        &network,
+        confinement,
+        units,
+        pools,
+        progress,
+        git_config,
+    ) {
         Some(service) => Arc::new(service),
         None => {
             log::error("the OS random number generator failed", json!({}));
@@ -278,5 +298,8 @@ fn serve(
     };
     let mut options = Options::new(SERVICE, PROTOCOL, started);
     options.parent_pid = parent_pid;
+    // One event waits for the writer at most: what a clone hasn't had
+    // written waits in its own bounded queue (0008, "Progress").
+    options.max_events = network::progress::CONNECTION_EVENTS;
     conn::run(service, options, std::io::stdin(), std::io::stdout())
 }

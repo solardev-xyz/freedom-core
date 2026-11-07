@@ -105,6 +105,9 @@ pub struct Radicled {
     /// with their lengths alone ([`stream_frame`]).
     bodies: Bodies,
     next_id: u64,
+    /// While set, stdout isn't read: the service's writer fills the pipe,
+    /// then waits, as when main doesn't read ([`Radicled::pause`]).
+    paused: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
 type Bodies = std::sync::Arc<std::sync::Mutex<HashMap<u64, Vec<u8>>>>;
@@ -151,8 +154,13 @@ impl Radicled {
         let (tx, frames) = mpsc::channel();
         let bodies: Bodies = Default::default();
         let data = bodies.clone();
+        let paused = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let pausing = paused.clone();
         std::thread::spawn(move || {
             loop {
+                while pausing.load(std::sync::atomic::Ordering::SeqCst) {
+                    std::thread::sleep(Duration::from_millis(5));
+                }
                 let mut header = [0u8; 5];
                 if stdout.read_exact(&mut header).is_err() {
                     return;
@@ -163,9 +171,16 @@ impl Radicled {
                     return;
                 }
                 let message = match header[4] {
-                    1 => serde_json::from_slice(&payload).unwrap_or_else(
-                        |_| json!({ "malformed": String::from_utf8_lossy(&payload) }),
-                    ),
+                    1 => {
+                        let mut message: Value = serde_json::from_slice(&payload).unwrap_or_else(
+                            |_| json!({ "malformed": String::from_utf8_lossy(&payload) }),
+                        );
+                        // An event as written: its envelope's exact bytes.
+                        if message["type"] == "event" {
+                            message["wire"] = String::from_utf8_lossy(&payload).into();
+                        }
+                        message
+                    }
                     2..=4 => stream_frame(header[4], &payload, &data),
                     kind => json!({ "frame_kind": kind }),
                 };
@@ -197,6 +212,70 @@ impl Radicled {
             log,
             bodies,
             next_id: 1,
+            paused,
+        }
+    }
+
+    /// Stops reading stdout after the frame being read: what the service
+    /// writes next waits in the pipe, then in the service, as when main
+    /// doesn't read.
+    pub fn pause(&self) {
+        self.paused.store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// Reads stdout again.
+    pub fn resume(&self) {
+        self.paused
+            .store(false, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// Request `id`'s `rad.progress` events, in the order they came, up to
+    /// its reply, which it returns last; other messages wait.
+    pub fn progress(&mut self, id: u64) -> (Vec<Value>, Value) {
+        let ours = |m: &Value| m["event"] == "rad.progress" && m["data"]["id"] == id;
+        let mut events = Vec::new();
+        let mut kept = VecDeque::new();
+        let mut reply = None;
+        for message in std::mem::take(&mut self.pending) {
+            if reply.is_none() && ours(&message) {
+                events.push(message);
+            } else if reply.is_none() && message["id"] == id {
+                reply = Some(message);
+            } else {
+                kept.push_back(message);
+            }
+        }
+        self.pending = kept;
+        while reply.is_none() {
+            let message = match self.frames.recv_timeout(READ_TIMEOUT) {
+                Ok(message) => message,
+                Err(e) => panic!("no reply to {id} from freedom-radicled: {e}"),
+            };
+            if ours(&message) {
+                events.push(message);
+            } else if message["id"] == id {
+                reply = Some(message);
+            } else {
+                self.pending.push_back(message);
+            }
+        }
+        (events, reply.unwrap())
+    }
+
+    /// Whether any `rad.progress` of request `id` has come since its reply,
+    /// or comes within `within`.
+    pub fn progress_after(&mut self, id: u64, within: Duration) -> bool {
+        let ours = |m: &Value| m["event"] == "rad.progress" && m["data"]["id"] == id;
+        let deadline = Instant::now() + within;
+        loop {
+            if self.pending.iter().any(ours) {
+                return true;
+            }
+            let left = deadline.saturating_duration_since(Instant::now());
+            match self.frames.recv_timeout(left) {
+                Ok(message) => self.pending.push_back(message),
+                Err(_) => return false,
+            }
         }
     }
 

@@ -481,7 +481,7 @@ impl Node {
         drop(repositories);
         match decided {
             Ending::Clean if self.pools.uncertain() => log::info(
-                "the node stopped cleanly, but a write's outcome is unknown, and its repository isn't repaired; the dirty marker stays",
+                "the node stopped cleanly, but an outcome is unknown: a write's whose repository isn't repaired, or a clone's that was cut off; the dirty marker stays",
                 json!({}),
             ),
             Ending::Clean => match marker::remove(home) {

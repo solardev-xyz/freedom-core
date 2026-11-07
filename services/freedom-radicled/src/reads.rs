@@ -532,8 +532,9 @@ fn fence(
     }
 }
 
-/// libradicle's error, answered (see the module's doc).
-fn radicle_error(e: libradicle::Error) -> ErrorBody {
+/// libradicle's error, answered (see the module's doc); a network
+/// operation's too ([`crate::network`]).
+pub(crate) fn radicle_error(e: libradicle::Error) -> ErrorBody {
     let message = e.to_string();
     let code = if not_found(&message) {
         ErrorCode::NotFound
