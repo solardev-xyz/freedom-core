@@ -410,14 +410,16 @@ fn an_online_repair_unit_that_hangs_ends_the_process_and_the_next_start_repairs(
         &dirs,
         &[
             ("FREEDOM_RADICLED_TEST_HANG_UNIT", "cache"),
-            ("FREEDOM_RADICLED_TEST_UNIT_LIMIT_MS", "1000"),
+            // The hung unit's alone: the online repair's units before it
+            // keep their 30 s (src/testhooks.rs).
+            ("FREEDOM_RADICLED_TEST_HANG_LIMIT_MS", "1000"),
         ],
     );
     let reply = radicled.call("rad.write", uncertain(rid));
     assert_eq!(code(&reply), "outcome_unknown", "{reply}");
-    assert_eq!(radicled.exit_code(EXIT_TIMEOUT), Some(70));
+    assert_eq!(radicled.exit_code(OVERRUN_EXIT_TIMEOUT), Some(70));
     let log = radicled.stderr();
-    assert!(log.contains(r#""reason":"unit_overrun""#), "{log}");
+    assert_eq!(overrun(&log)["bound_ms"], 1000, "{log}");
     assert!(!log.contains(DONE), "{log}");
     assert_eq!(fixture::marked(&dirs.home), Some(vec![NID.to_owned()]));
 

@@ -15,7 +15,10 @@
 //!   service's start, not a bound.
 //!
 //! A firing watchdog never waits on stderr: its line has at most 150 ms,
-//! under a bound armed before it is written.
+//! under a bound armed before it is written. The line names the bound that
+//! ran out (`bound_ms`) and how long before it was armed (`elapsed_ms`, the
+//! bound or more, if its thread ran late), so the bound that ended a
+//! process is known from its line alone.
 
 use std::cell::Cell;
 use std::sync::{Arc, Condvar, Mutex};
@@ -47,7 +50,8 @@ impl Watchdog {
     ) -> Watchdog {
         let disarmed = Arc::new((Mutex::new(false), Condvar::new()));
         let state = disarmed.clone();
-        let deadline = Instant::now() + after;
+        let armed = Instant::now();
+        let deadline = armed + after;
         let spawned = std::thread::Builder::new()
             .name("watchdog".into())
             .spawn(move || {
@@ -56,7 +60,7 @@ impl Watchdog {
                 while !*flag {
                     let Some(left) = deadline.checked_duration_since(Instant::now()) else {
                         let (reason, exit) = decide();
-                        fire(reason, exit);
+                        fire(reason, exit, Some((after, armed.elapsed())));
                     };
                     flag = match wake.wait_timeout(flag, left) {
                         Ok((flag, _)) => flag,
@@ -67,7 +71,7 @@ impl Watchdog {
         if let Err(error) = spawned {
             // The closure, and so `decide`, went with the error.
             drop(error);
-            fire("watchdog_unavailable", Exit::Internal);
+            fire("watchdog_unavailable", Exit::Internal, None);
         }
         Watchdog { disarmed }
     }
@@ -110,6 +114,9 @@ struct Bound {
     generation: u64,
     /// When the bound armed ends, if one is.
     deadline: Option<Instant>,
+    /// The bound last armed, as [`Standing::arm`] was given it: what a
+    /// firing watchdog logs.
+    after: Duration,
     /// The `Standing` is gone: no bound can be armed again.
     dropped: bool,
     /// A test's clock, read in place of the system's once set.
@@ -146,6 +153,7 @@ impl Standing {
             bound: Mutex::new(Bound {
                 generation: 0,
                 deadline: None,
+                after: Duration::ZERO,
                 dropped: false,
                 #[cfg(test)]
                 clock: None,
@@ -171,6 +179,7 @@ impl Standing {
         let mut bound = self.shared.lock();
         bound.generation += 1;
         bound.deadline = Some(bound.now() + after);
+        bound.after = after;
         let armed = Armed(bound.generation);
         drop(bound);
         self.shared.wake.notify_all();
@@ -226,8 +235,12 @@ impl Shared {
         loop {
             bound = match bound.deadline {
                 Some(deadline) => {
-                    let Some(left) = deadline.checked_duration_since(bound.now()) else {
-                        fire(reason, exit);
+                    let now = bound.now();
+                    let Some(left) = deadline.checked_duration_since(now) else {
+                        // Armed `after` before the deadline, which `now` is
+                        // at or past.
+                        let elapsed = bound.after + now.saturating_duration_since(deadline);
+                        fire(reason, exit, Some((bound.after, elapsed)));
                     };
                     #[cfg(test)]
                     if let Some(clock) = &mut bound.clock {
@@ -245,13 +258,22 @@ impl Shared {
     }
 }
 
-fn fire(reason: &'static str, exit: Exit) -> ! {
+/// Ends the process with `exit`, logging `reason` and, for a bound that ran
+/// out, the bound and how long before it was armed.
+fn fire(reason: &'static str, exit: Exit, ran_out: Option<(Duration, Duration)>) -> ! {
     crate::exit::exit_reporting(exit, crate::exit::REPORT_BOUND, || {
-        crate::log::error(
-            "a watchdog ends the process",
-            serde_json::json!({ "reason": reason, "exit": exit.code() }),
-        );
+        let mut fields = serde_json::json!({ "reason": reason, "exit": exit.code() });
+        if let (Some((bound, elapsed)), Some(map)) = (ran_out, fields.as_object_mut()) {
+            map.insert("bound_ms".into(), millis(bound).into());
+            map.insert("elapsed_ms".into(), millis(elapsed).into());
+        }
+        crate::log::error("a watchdog ends the process", fields);
     })
+}
+
+/// `duration` in whole milliseconds.
+fn millis(duration: Duration) -> u64 {
+    u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
 }
 
 #[cfg(test)]
@@ -453,15 +475,32 @@ mod tests {
         (status.code(), stderr)
     }
 
+    /// The line a firing watchdog logged, parsed.
+    fn fired(stderr: &str) -> serde_json::Value {
+        stderr
+            .lines()
+            .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+            .find(|line| line["msg"] == "a watchdog ends the process")
+            .unwrap_or_else(|| panic!("no watchdog line: {stderr}"))
+    }
+
+    /// The line names the bound that ran out, and how long before it was
+    /// armed: at least the bound.
+    fn assert_ran_out(stderr: &str, reason: &str, bound_ms: u64) {
+        let line = fired(stderr);
+        assert_eq!(line["reason"], reason, "{stderr}");
+        assert_eq!(line["exit"], 70, "{stderr}");
+        assert_eq!(line["bound_ms"], bound_ms, "{stderr}");
+        let elapsed = line["elapsed_ms"].as_u64().unwrap();
+        assert!(elapsed >= bound_ms, "{stderr}");
+    }
+
     #[test]
     fn an_armed_watchdog_ends_the_process_with_its_code() {
         let started = Instant::now();
         let (code, stderr) = run_child("fire");
         assert_eq!(code, Some(70), "{stderr}");
-        assert!(
-            stderr.contains(r#""reason":"teardown_unproven""#),
-            "{stderr}"
-        );
+        assert_ran_out(&stderr, "teardown_unproven", 100);
         assert!(started.elapsed() < Duration::from_secs(5));
     }
 
@@ -478,10 +517,8 @@ mod tests {
             let started = Instant::now();
             let (code, stderr) = run_child(mode);
             assert_eq!(code, Some(70), "{mode}: {stderr}");
-            assert!(
-                stderr.contains(r#""reason":"unit_overrun""#),
-                "{mode}: {stderr}"
-            );
+            // The bound that replaced the 10 s one is the one named.
+            assert_ran_out(&stderr, "unit_overrun", 100);
             assert!(started.elapsed() < Duration::from_secs(5), "{mode}");
         }
     }
@@ -491,7 +528,7 @@ mod tests {
         let started = Instant::now();
         let (code, stderr) = run_child("standing-dropped");
         assert_eq!(code, Some(70), "{stderr}");
-        assert!(stderr.contains(r#""reason":"unit_overrun""#), "{stderr}");
+        assert_ran_out(&stderr, "unit_overrun", 100);
         assert!(!stderr.contains(DROP_RETURNED), "{stderr}");
         assert!(started.elapsed() < Duration::from_secs(5));
     }

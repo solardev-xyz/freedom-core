@@ -9,7 +9,7 @@
 mod common;
 
 use std::path::Path;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use common::fixture;
 use common::*;
@@ -17,10 +17,13 @@ use radicle::prelude::RepoId;
 use radicle::storage::git::reconcile::state::State;
 use serde_json::{Value, json};
 
-/// A unit's limit in these tests: short enough that a hung unit ends its
-/// process quickly, long enough that every other unit returns within it on a
-/// slow runner (a re-signing unit took more than 300 ms on Windows CI).
-const LIMIT_MS: &str = "3000";
+/// The hung unit's limit in these tests (`FREEDOM_RADICLED_TEST_HANG_LIMIT_MS`),
+/// short, so that it ends its process quickly. Only the hung unit's kind
+/// gets it: every unit before it keeps its 30 s, so one that a slow
+/// runner's disk holds up never fires in its place (on Windows CI, with
+/// four processes' fsyncs at once, `ref-locks` has taken 2.6 s and `begin`
+/// 3.3 s).
+const LIMIT_MS: u64 = 3000;
 
 /// Every kind of unit heartwood's driver runs, as its records name them.
 const KINDS: [&str; 11] = [
@@ -62,26 +65,29 @@ fn identified(dirs: &Dirs, extra: &[(&str, &str)]) -> Radicled {
 }
 
 /// A start whose first unit of `kind` hangs: the process ends with 70 and
-/// logs `unit_overrun`, without answering `rad.reconcile`.
+/// logs `unit_overrun`, without answering `rad.reconcile`, and the bound
+/// that ran out is the hung unit's own limit. However long the units before
+/// it took, theirs are 30 s: only the hung kind's is [`LIMIT_MS`]. With the
+/// unit the record shows in progress (the callers' checks), that is the
+/// hung unit ended by its limit, and by nothing later, without timing the
+/// run on the test's clock.
 fn hang(dirs: &Dirs, kind: &str) {
+    let limit = LIMIT_MS.to_string();
     let mut radicled = identified(
         dirs,
         &[
-            ("FREEDOM_RADICLED_TEST_UNIT_LIMIT_MS", LIMIT_MS),
             ("FREEDOM_RADICLED_TEST_HANG_UNIT", kind),
+            ("FREEDOM_RADICLED_TEST_HANG_LIMIT_MS", &limit),
         ],
     );
-    let started = Instant::now();
     radicled.request("rad.reconcile", json!({}));
     assert_eq!(
-        radicled.exit_code(EXIT_TIMEOUT),
+        radicled.exit_code(OVERRUN_EXIT_TIMEOUT),
         Some(70),
         "a {kind} unit that hangs ends the process"
     );
-    // Its limit, and the time to run the units before it.
-    assert!(started.elapsed() < Duration::from_secs(12), "{kind}");
     let log = radicled.stderr();
-    assert!(log.contains(r#""reason":"unit_overrun""#), "{kind}: {log}");
+    assert_eq!(overrun(&log)["bound_ms"], LIMIT_MS, "{kind}: {log}");
 }
 
 fn reconcile(dirs: &Dirs) -> Value {

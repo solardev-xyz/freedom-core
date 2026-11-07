@@ -34,6 +34,28 @@ pub const BIN: &str = env!("CARGO_BIN_EXE_freedom-radicled");
 pub const READ_TIMEOUT: Duration = Duration::from_secs(60);
 /// How long a process gets to exit when it should.
 pub const EXIT_TIMEOUT: Duration = Duration::from_secs(15);
+/// How long a process whose repair unit hangs gets to end: the steps and
+/// units before that unit, then its limit. Generous, because a slow
+/// runner's disk can stretch what comes before: on Windows CI, with each
+/// test binary's processes writing at once, a reconcile state commit has
+/// taken 5 s and a unit 3 s. A hang guard, never a timing assertion: which
+/// bound ended the process is the watchdog's line's to say ([`overrun`]).
+pub const OVERRUN_EXIT_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// The unit watchdog's line in `log`, once it has ended the process: its
+/// reason `unit_overrun`, the bound that ran out (`bound_ms`), and how long
+/// before that bound was armed (`elapsed_ms`), never less than the bound.
+pub fn overrun(log: &str) -> Value {
+    let line = log
+        .lines()
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .find(|line| line["msg"] == "a watchdog ends the process")
+        .unwrap_or_else(|| panic!("no watchdog line: {log}"));
+    assert_eq!(line["reason"], "unit_overrun", "{log}");
+    let (bound, elapsed) = (line["bound_ms"].as_u64(), line["elapsed_ms"].as_u64());
+    assert!(bound.zip(elapsed).is_some_and(|(b, e)| e >= b), "{log}");
+    line
+}
 
 /// Held across every spawn of this test process (see the module's doc).
 static SPAWN: std::sync::Mutex<()> = std::sync::Mutex::new(());

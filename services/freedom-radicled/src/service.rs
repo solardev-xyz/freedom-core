@@ -223,10 +223,10 @@ impl RadicleService {
                 .steps
                 .units
                 .current()
-                .map(|(kind, elapsed)| stats::Unit {
+                .map(|(kind, elapsed, limit)| stats::Unit {
                     kind,
                     elapsed,
-                    limit: self.steps.units.limit(),
+                    limit,
                 }),
             quarantined: self.quarantined.get(),
             pools: self.pools.usage(),
