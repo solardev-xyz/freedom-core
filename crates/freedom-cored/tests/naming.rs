@@ -570,3 +570,82 @@ fn cached_fanout_under_vault_work() {
         );
     }
 }
+
+/// The core's next `shell.verified` request, by the name it looks up.
+fn next_verified(core: &mut common::Core) -> (String, Value) {
+    let message = core.recv();
+    assert_eq!(message["type"], "request", "{message}");
+    assert_eq!(message["method"], "shell.verified", "{message}");
+    let name = message["params"]["name"].as_str().unwrap().to_owned();
+    (name, message)
+}
+
+/// Main's reply to one of the core's requests.
+fn answer(core: &mut common::Core, request: &Value, result: Value) {
+    core.send(&json!({ "type": "response", "id": request["id"], "result": result }));
+}
+
+/// Each `shell.verified` names main's requests it serves (freedom-core
+/// #285), so main can tell a private window's operation from a normal
+/// one's. Lookups of two names at once, one from a private window and one
+/// from a normal one, each name only their own. A lookup that joins a
+/// session is named by the session's next operation: here its restart
+/// across a Myotis transition, which serves both windows.
+#[test]
+fn verified_operations_name_the_lookups_they_serve() {
+    let (_root, data, locks) = dirs();
+    let mut core = spawn("serve", &data, &locks, &[]);
+    core.hello();
+    let mut myotis = snapshot();
+    myotis["policy"]["order"] = json!(["myotis"]);
+    myotis["myotis_enabled"] = json!(true);
+    let configured = core.call(2, "naming.configure", myotis);
+    assert!(configured["result"].is_object(), "{configured}");
+    let ready = json!({ "ready": true, "enabled": true });
+    let lifecycle = core.call(3, "naming.availability", ready.clone());
+    assert_eq!(lifecycle["result"], json!({ "lifecycle": 1 }));
+    let resolve = |id: u64, name: &str, private: bool| {
+        request(
+            id,
+            "naming.resolve_content",
+            json!({ "name": name, "private": private }),
+        )
+    };
+    core.send(&resolve(10, "a.eth", true));
+    core.send(&resolve(11, "b.eth", false));
+    let mut ops = BTreeMap::new();
+    while ops.len() < 2 {
+        let (name, op) = next_verified(&mut core);
+        ops.insert(name, op);
+    }
+    assert_eq!(ops["a.eth"]["params"]["serves"], json!([10]));
+    assert_eq!(ops["b.eth"]["params"]["serves"], json!([11]));
+    assert_eq!(
+        ops["a.eth"]["params"]["generations"],
+        json!({ "lifecycle": 1 })
+    );
+    // b.eth's operation fails, and with it the lookup: Myotis is its only
+    // method.
+    answer(&mut core, &ops["b.eth"], json!({ "failure": "error" }));
+    let reply = core.response(11);
+    assert!(reply["error"].is_object(), "{reply}");
+    // Lookup 12, from a normal window, joins a.eth's session while its
+    // operation runs. A Myotis transition then crosses the attempt: the
+    // session restarts, with an operation for both lookups.
+    core.send(&resolve(12, "a.eth", false));
+    let lifecycle = core.call(13, "naming.availability", ready);
+    assert_eq!(lifecycle["result"], json!({ "lifecycle": 2 }));
+    answer(&mut core, &ops["a.eth"], json!({ "failure": "lifecycle" }));
+    let (name, op) = next_verified(&mut core);
+    assert_eq!(name, "a.eth");
+    assert_eq!(op["params"]["serves"], json!([10, 12]));
+    assert_eq!(op["params"]["generations"], json!({ "lifecycle": 2 }));
+    answer(&mut core, &op, json!({ "failure": "error" }));
+    let mut replied = BTreeSet::new();
+    while replied.len() < 2 {
+        let message = core.recv();
+        assert_eq!(message["type"], "response", "{message}");
+        replied.insert(message["id"].as_u64().unwrap());
+    }
+    assert_eq!(replied, BTreeSet::from([10, 12]));
+}

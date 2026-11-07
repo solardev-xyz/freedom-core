@@ -812,7 +812,7 @@ fn myotis_and_colibri_operations_take_the_designs_forms() {
     assert_eq!(op["method"], "shell.verified");
     assert_eq!(
         op["params"],
-        json!({ "myotis": "account", "chain_id": 1, "address": address, "generation": 1 })
+        json!({ "myotis": "account", "chain_id": 1, "address": address, "generation": 1, "serves": [3] })
     );
     let answer = json!({
         "payload": { "verify_method": "proof", "balance_wei": "1000", "exists": true },
@@ -832,6 +832,7 @@ fn myotis_and_colibri_operations_take_the_designs_forms() {
     t.call(id, "chain.request", &params);
     let op = requests(&t.written())[0].clone();
     assert_eq!(op["params"]["myotis"], "code");
+    assert_eq!(op["params"]["serves"], json!([4]));
     assert!(
         t.answer(
             op["id"].as_u64().unwrap(),
@@ -844,6 +845,7 @@ fn myotis_and_colibri_operations_take_the_designs_forms() {
     assert_eq!(op["params"]["colibri"], "request");
     assert_eq!(op["params"]["method"], "eth_getCode");
     assert_eq!(op["params"]["generation"], 1);
+    assert_eq!(op["params"]["serves"], json!([4]));
     assert!(op["params"]["deadline_ms"].as_u64().unwrap() > 0);
     assert!(
         t.answer(
@@ -890,7 +892,7 @@ fn a_call_takes_myotiss_call_tx_form_and_skips_colibri() {
     assert_eq!(op["method"], "shell.verified");
     assert_eq!(
         op["params"],
-        json!({ "myotis": "call_tx", "chain_id": 1, "tx": tx, "generation": 1 })
+        json!({ "myotis": "call_tx", "chain_id": 1, "tx": tx, "generation": 1, "serves": [3] })
     );
     assert!(
         t.answer(
@@ -1680,8 +1682,9 @@ fn mains_answers_take_one_closed_shape() {
 
 /// A `shell.*` request: its method, how to read the answer, and its
 /// params, `left` written in their `deadline_ms` slot when they have one.
+/// A verified operation serves main's request 9.
 fn shell_request(request: &Request, generation: u64, left: Ms) -> (&'static str, Kind, Vec<u8>) {
-    let (method, (mut params, deadline)) = shell_params(request, generation);
+    let (method, (mut params, deadline)) = shell_params(request, generation, &[9]);
     if let Some(at) = deadline {
         requests::write_slot(&mut params[at..at + requests::SLOT], left);
     }
@@ -1728,7 +1731,7 @@ fn requests_to_main_take_the_designs_forms() {
     // An `undefined` argument is left out.
     assert_eq!(
         value,
-        json!({ "myotis": "storage", "chain_id": 100, "address": "0xab", "generation": 2 })
+        json!({ "myotis": "storage", "chain_id": 100, "address": "0xab", "generation": 2, "serves": [9] })
     );
     let (_, _, params) = shell_request(
         &Request::Verified(VerifiedOp::MyotisBroadcast {
@@ -1741,7 +1744,7 @@ fn requests_to_main_take_the_designs_forms() {
     let value: Value = serde_json::from_slice(&params).unwrap();
     assert_eq!(
         value,
-        json!({ "myotis": "broadcast", "chain_id": 1, "raw": "0x02", "generation": 1 })
+        json!({ "myotis": "broadcast", "chain_id": 1, "raw": "0x02", "generation": 1, "serves": [9] })
     );
     let mut quoted = Vec::new();
     quote_into(&mut quoted, "a\"b\\c\n\u{1}é");
@@ -1810,6 +1813,75 @@ fn a_queued_operation_of_an_ended_request_never_goes_and_frees_its_slot() {
     let ops = verified(&frames);
     assert_eq!(ops.len(), 1, "{frames:?}");
     assert_eq!(ops[0]["params"]["myotis"], "account");
+}
+
+/// Each verified operation names the chain request it serves, by main's ID
+/// (freedom-core #285): reads in flight together each name their own; a
+/// Myotis slot passed on names the waiter that takes it, not the read
+/// whose answer freed it; and an operation that waited for a slot at main
+/// names its own as it goes.
+#[test]
+fn each_operation_serves_the_request_that_made_it() {
+    // Main takes two of the core's requests at a time.
+    let mut t = test_with(Bounds::default(), usize::MAX, 2, true);
+    let mut myotis = chain_snapshot(&["myotis"], &[]);
+    myotis["myotis"] = json!(true);
+    let mut colibri = chain_snapshot(&["colibri"], &[]);
+    colibri["chain_id"] = json!(100);
+    colibri["prover"] = json!({ "endpoint": "p1", "zk": true });
+    t.configure(json!([myotis, colibri]));
+    t.call(
+        2,
+        "chain.availability",
+        &json!({ "chain_id": 1, "ready": true }),
+    );
+    t.written();
+    // Myotis reads for main's requests 10 and 11, the second waiting for
+    // chain 1's one slot; Colibri reads for 12 and 13 on chain 100, the
+    // second waiting for a slot at main.
+    for (id, chain_id, address) in [
+        (10, 1, "0x1111111111111111111111111111111111111111"),
+        (11, 1, "0x2222222222222222222222222222222222222222"),
+        (12, 100, "0x3333333333333333333333333333333333333333"),
+        (13, 100, "0x4444444444444444444444444444444444444444"),
+    ] {
+        let (id, mut params) = read(id, "eth_getBalance", json!([address, "latest"]));
+        params["chain_id"] = json!(chain_id);
+        t.call(id, "chain.request", &params);
+    }
+    let frames = t.written();
+    let ops = verified(&frames);
+    assert_eq!(ops.len(), 2, "{frames:?}");
+    assert_eq!(ops[0]["params"]["myotis"], "account");
+    assert_eq!(ops[0]["params"]["serves"], json!([10]));
+    assert_eq!(ops[1]["params"]["colibri"], "request");
+    assert_eq!(ops[1]["params"]["serves"], json!([12]));
+    assert_eq!(t.chain.queued.len(), 1);
+    // Read 10's answer frees main's slot and chain 1's Myotis slot: read
+    // 13's operation goes first, as it waited, then read 11's.
+    let answer = json!({
+        "payload": { "verify_method": "proof", "balance_wei": "1", "exists": true },
+        "block_before": 7,
+        "block_after": 7,
+    });
+    assert!(t.answer(ops[0]["id"].as_u64().unwrap(), Ok(answer)).is_ok());
+    let frames = t.written();
+    assert!(
+        frames
+            .iter()
+            .any(|f| f["id"] == 10 && f["type"] == "response")
+    );
+    let ops = verified(&frames);
+    assert_eq!(ops.len(), 1, "{frames:?}");
+    assert_eq!(ops[0]["params"]["colibri"], "request");
+    assert_eq!(ops[0]["params"]["serves"], json!([13]));
+    let colibri = ops[0]["id"].as_u64().unwrap();
+    assert!(t.answer(colibri, Ok(json!({ "result": "0x1" }))).is_ok());
+    let frames = t.written();
+    let ops = verified(&frames);
+    assert_eq!(ops.len(), 1, "{frames:?}");
+    assert_eq!(ops[0]["params"]["myotis"], "account");
+    assert_eq!(ops[0]["params"]["serves"], json!([11]));
 }
 
 #[test]
@@ -2360,7 +2432,7 @@ fn a_broadcast_late_once_its_frame_is_made_never_goes() {
         "ab".repeat((fc_protocol::frame::MAX_PAYLOAD - 1024) / 2)
     );
     // Within one frame: it would go.
-    let (method, (params, deadline)) = shell_params(&t.chain.queued[0].request, 1);
+    let (method, (params, deadline)) = shell_params(&t.chain.queued[0].request, 1, &[3]);
     assert!(requests::request_frame(method, &params, deadline).is_some());
     let clock = std::rc::Rc::clone(&t.clock);
     let made = std::rc::Rc::new(std::cell::Cell::new(0));

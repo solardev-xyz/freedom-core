@@ -448,7 +448,7 @@ fn myotis_reads_through_shell_verified() {
         assert_eq!(request["method"], "shell.verified");
         assert_eq!(
             request["params"],
-            json!({ "myotis": "account", "chain_id": 1, "address": ADDRESS, "generation": 1 })
+            json!({ "myotis": "account", "chain_id": 1, "address": ADDRESS, "generation": 1, "serves": [4] })
         );
         Some(json!({ "result": {
             "payload": { "verify_method": "proof", "balance_wei": "1000", "exists": true },
@@ -475,6 +475,80 @@ fn myotis_reads_through_shell_verified() {
     assert_eq!(seen.requests[0]["params"]["myotis"], "code");
     assert_eq!(reply["result"]["result"], "0x6001");
     assert_eq!(reply["result"]["source"], "direct");
+}
+
+/// Each `shell.verified` names main's request it serves (freedom-core
+/// #285), so main can tell a private window's operation from a normal
+/// one's: reads from two windows at once each name their own, Colibri's
+/// and Myotis's alike, and a Myotis slot passed on names the read that
+/// waited for it, not the one whose answer freed it.
+#[test]
+fn verified_operations_name_the_request_they_serve() {
+    let (_root, mut core) = core();
+    let mut myotis = snapshot(&["myotis"], &["a"], 5000);
+    myotis["myotis"] = json!(true);
+    let mut colibri = snapshot(&["colibri"], &["a"], 5000);
+    colibri["chain_id"] = json!(100);
+    colibri["prover"] = json!({ "endpoint": "p1", "zk": true });
+    configure(&mut core, 2, &[myotis, colibri]);
+    let ready = call(
+        &mut core,
+        3,
+        "chain.availability",
+        json!({ "chain_id": 1, "ready": true }),
+    );
+    assert_eq!(ready["result"], json!({}));
+    // Reads 10 (a page's) and 11 (another window's) on chain 1, whose one
+    // Myotis slot 11 waits for; 12 and 13 on chain 100, through Colibri.
+    for (id, chain_id, address, origin) in [
+        (10, 1, ADDRESS, Some("https://a.example")),
+        (11, 1, "0x2222222222222222222222222222222222222222", None),
+        (12, 100, ADDRESS, Some("https://b.example")),
+        (13, 100, "0x3333333333333333333333333333333333333333", None),
+    ] {
+        let mut params = read("eth_getBalance", json!([address, "latest"]));
+        params["chain_id"] = json!(chain_id);
+        if let Some(origin) = origin {
+            params["origin"] = json!(origin);
+        }
+        core.send(&request(id, "chain.request", params));
+    }
+    let ops = requests_only(&mut core, 3);
+    let served = |ops: &[Value]| {
+        ops.iter()
+            .map(|op| {
+                assert_eq!(op["method"], "shell.verified", "{op}");
+                let verifier = if op["params"]["colibri"].is_string() {
+                    "colibri"
+                } else {
+                    "myotis"
+                };
+                (verifier, op["params"]["serves"].clone())
+            })
+            .collect::<Vec<_>>()
+    };
+    let mut first = served(&ops);
+    first.sort_by_key(|(_, serves)| serves.to_string());
+    assert_eq!(
+        first,
+        vec![
+            ("myotis", json!([10])),
+            ("colibri", json!([12])),
+            ("colibri", json!([13])),
+        ]
+    );
+    // Read 10's answer passes the slot on to read 11.
+    let myotis_op = ops
+        .iter()
+        .find(|op| op["params"]["serves"] == json!([10]))
+        .unwrap();
+    reply(
+        &mut core,
+        myotis_op,
+        json!({ "result": { "failure": "queue_full" } }),
+    );
+    let next = requests_only(&mut core, 1);
+    assert_eq!(served(&next), vec![("myotis", json!([11]))]);
 }
 
 #[test]
