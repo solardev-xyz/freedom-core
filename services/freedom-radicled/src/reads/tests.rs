@@ -591,6 +591,14 @@ fn not_found_is_todays_message_test() {
         error.message,
         libradicle::Error::NotABlob("src".into()).to_string()
     );
+    // An identity with no project payload (libradicle #34): `not_found`,
+    // with the text heartwood's `PayloadError::NotFound` had, as before.
+    let error = read_error(libradicle::Error::NoProject);
+    assert_eq!(error.code, ErrorCode::NotFound);
+    assert_eq!(
+        error.message,
+        "payload 'xyz.radicle.project' not found in identity document"
+    );
 }
 
 /// 0008, "Errors" (deviation `pathless-errors`): libradicle's message goes

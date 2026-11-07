@@ -12,7 +12,12 @@
 //! - `FREEDOM_RADICLED_TEST_UNIT_LIMIT_MS` replaces a repair unit's 30 s.
 //! - `FREEDOM_RADICLED_TEST_HANG_UNIT=<kind>` makes the first repair unit of
 //!   that kind (`cache`, `namespace`, … as heartwood's driver names them)
-//!   never return, once its watchdog is armed: a unit that hangs.
+//!   never return, once its watchdog is armed: a unit that hangs. With
+//!   `FREEDOM_RADICLED_TEST_HANG_LIMIT_MS`, units of that kind alone get that
+//!   limit; every other unit keeps its own (30 s, or the one above). So a
+//!   test can end the hung unit quickly while every unit before it, however
+//!   much a slow runner's disk slows its fsyncs, still returns within its
+//!   limit: the bound that fires is the hung unit's.
 //! - `FREEDOM_RADICLED_TEST_THREADS=1` logs, at the confinement point, how
 //!   many threads the process has (`/proc/self/task`), and what each
 //!   descriptor above stderr is (its `/proc/self/fd` link: a test may log a
@@ -185,6 +190,20 @@ pub fn unit_limit(default: Duration) -> Duration {
         return Duration::from_millis(ms);
     }
     default
+}
+
+/// The time limit of a repair unit of `kind`, whose units otherwise get
+/// `limit`: the hung kind's own, if asked.
+pub fn unit_limit_of(kind: &str, limit: Duration) -> Duration {
+    #[cfg(feature = "testhooks")]
+    if std::env::var("FREEDOM_RADICLED_TEST_HANG_UNIT").is_ok_and(|hang| hang == kind)
+        && let Some(ms) = millis("FREEDOM_RADICLED_TEST_HANG_LIMIT_MS")
+    {
+        return Duration::from_millis(ms);
+    }
+    #[cfg(not(feature = "testhooks"))]
+    let _ = kind;
+    limit
 }
 
 /// As a repair unit of `kind` starts, its watchdog armed: hangs, if asked.

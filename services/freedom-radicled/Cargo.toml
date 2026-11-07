@@ -34,13 +34,16 @@ fc-service = { path = "../../crates/fc-service" }
 # The sealed release of the node key (0008, "The sealed release"): the
 # service's X25519 key for one start, and opening what the core sealed to it.
 fc-seal = { path = "../../crates/fc-seal" }
-# libradicle at `integration/rust-core` (46cf9d9, #33's merge),
+# libradicle at `integration/rust-core` (216ced6, #34's merge),
 # built with `no-spawn`,
 # explicitly (0008, "Spawn and lock"): serving runs in process and `git gc`
 # is skipped. It carries the upstream changes 0008 lists for the service's
 # first steps: the routing, `isolated` and `control_socket` options, the
 # bounded reads and shutdown, the node's health, the host key
-# (`HostKey`, `start_with_key`), and heartwood at 003fd9ca, whose
+# (`HostKey`, `start_with_key`), and heartwood at 338a9638 (upstream
+# 1.10.3 merged in, heartwood #29: the identity COB injection fix, the frame
+# allocation cap, the Subscribe panic, routingMaxSize, dead-socket
+# termination), whose
 # reconciliation driver `rad.reconcile` runs on, with its seed gate and its
 # host failures (`driver::Error::Host`). It also has the shipped seeds for a
 # main-network profile only, an isolated node with no proxy, onion, I2P or
@@ -57,10 +60,11 @@ fc-seal = { path = "../../crates/fc-seal" }
 # `rad.blob`), and the import with no node (#33: `import::Import`, a libgit2
 # fetch into a temporary clone moved into place last, the working copy never
 # written, its `Moved` stage told after the move), which the import process
-# runs. Pinned by commit until those changes are released (deny.toml allows
+# runs. A missing project payload is `Error::NoProject` (#34), with the old
+# text. Pinned by commit until those changes are released (deny.toml allows
 # solardev-xyz).
 # src/build_info.rs reports the same commit.
-libradicle = { git = "https://github.com/solardev-xyz/libradicle", rev = "46cf9d99ec868c938ffed13b6a38fbeda0a50857", features = ["no-spawn"] }
+libradicle = { git = "https://github.com/solardev-xyz/libradicle", rev = "216ced6dddccd7cb1103b2cfda238936cd618897", features = ["no-spawn"] }
 # libgit2's process-wide options, which heartwood's `radicle::git::raw`
 # doesn't re-export: the object cache turned off (src/reads.rs, `uncache`),
 # and the probe of it. Already in libradicle's graph, at its version and with
@@ -77,7 +81,7 @@ libz-sys = { version = "1", default-features = false, features = ["static"] }
 # to one package (build_info's test holds them to one commit): the node
 # identity's public forms (`did:key`, the node ID), and, from the next step,
 # the reconciliation driver. Already in libradicle's graph.
-radicle = { git = "https://github.com/solardev-xyz/heartwood", rev = "003fd9ca59d1269e4b81fb696bec3bdb4068fe67" }
+radicle = { git = "https://github.com/solardev-xyz/heartwood", rev = "338a9638fbf0b5ad5fc104a271faf21181a893df" }
 # The dial gate's address policy (0008, "The address policy": "one table and
 # one classifier serve both services"): 0007's target classification, its
 # table of refused blocks and the configured-target exemption, as

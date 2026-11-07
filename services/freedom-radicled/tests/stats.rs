@@ -226,6 +226,14 @@ fn dirty_home(dirs: &Dirs, name: &str) -> RepoId {
 }
 
 /// The unit in progress, as `rad.stats` reports it, its kind `kind`.
+/// The hung unit's limit in the tests of a hung unit
+/// (`FREEDOM_RADICLED_TEST_HANG_LIMIT_MS`): room for the test to read
+/// `rad.stats` twice, 600 ms apart, before it fires, however slowly a
+/// runner answers. Only the hung unit's kind gets it: every unit before it
+/// keeps its 30 s, so one that a slow runner's disk holds up never fires in
+/// its place.
+const HANG_LIMIT_MS: u64 = 8000;
+
 fn unit_of(radicled: &mut Radicled, kind: &str) -> Value {
     let result = stats_until(radicled, |r| r["unit"]["kind"] == kind);
     result["unit"].clone()
@@ -240,11 +248,12 @@ fn a_hung_unit_of_reconciliation_is_reported_until_the_watchdog_fires() {
     let dirs = Dirs::new();
     configure(&dirs.home, json!({}));
     dirty_home(&dirs, "hung");
+    let limit = HANG_LIMIT_MS.to_string();
     let mut radicled = Radicled::serve(
         &dirs,
         &[
-            ("FREEDOM_RADICLED_TEST_UNIT_LIMIT_MS", "4000"),
             ("FREEDOM_RADICLED_TEST_HANG_UNIT", "cache"),
+            ("FREEDOM_RADICLED_TEST_HANG_LIMIT_MS", &limit),
         ],
     );
     let hello = radicled.hello();
@@ -252,7 +261,7 @@ fn a_hung_unit_of_reconciliation_is_reported_until_the_watchdog_fires() {
     assert!(identity["result"].is_object(), "{identity}");
     radicled.request("rad.reconcile", json!({}));
     let first = unit_of(&mut radicled, "cache");
-    assert_eq!(first["limit_ms"], 4000, "{first}");
+    assert_eq!(first["limit_ms"], HANG_LIMIT_MS, "{first}");
     std::thread::sleep(Duration::from_millis(600));
     let later = unit_of(&mut radicled, "cache");
     let (first_ms, later_ms) = (
@@ -260,13 +269,14 @@ fn a_hung_unit_of_reconciliation_is_reported_until_the_watchdog_fires() {
         later["elapsed_ms"].as_u64().unwrap(),
     );
     assert!(later_ms >= first_ms + 500, "{first} {later}");
-    assert!(later_ms <= 4000 + 1000, "{later}");
+    assert!(later_ms <= HANG_LIMIT_MS + 1000, "{later}");
     let result = stats(&mut radicled);
     assert_eq!(result["node"], "waiting", "{result}");
     assert_eq!(result["quarantined_count"], Value::Null, "{result}");
-    assert_eq!(radicled.exit_code(EXIT_TIMEOUT), Some(70));
+    assert_eq!(radicled.exit_code(OVERRUN_EXIT_TIMEOUT), Some(70));
+    // The bound that ran out is the one `rad.stats` reported.
     let log = radicled.stderr();
-    assert!(log.contains(r#""reason":"unit_overrun""#), "{log}");
+    assert_eq!(overrun(&log)["bound_ms"], HANG_LIMIT_MS, "{log}");
 }
 
 /// 0008, "Tests first" ("a COB that never returns during an online
@@ -280,11 +290,12 @@ fn a_hung_unit_of_an_online_repair_is_reported_while_the_node_runs() {
     let rid = fixture::repository(&dirs.home, &SEED, "hanging");
     fixture::unsigned_ref(&dirs.home, rid, NID);
     // No marker: the first cache unit is the online repair's.
+    let limit = HANG_LIMIT_MS.to_string();
     let mut radicled = Radicled::serve(
         &dirs,
         &[
             ("FREEDOM_RADICLED_TEST_HANG_UNIT", "cache"),
-            ("FREEDOM_RADICLED_TEST_UNIT_LIMIT_MS", "4000"),
+            ("FREEDOM_RADICLED_TEST_HANG_LIMIT_MS", &limit),
         ],
     );
     assert!(radicled.start()["result"].is_object());
@@ -295,7 +306,7 @@ fn a_hung_unit_of_an_online_repair_is_reported_while_the_node_runs() {
     let reply = radicled.call("rad.write", uncertain);
     assert_eq!(code(&reply), "outcome_unknown", "{reply}");
     let first = unit_of(&mut radicled, "cache");
-    assert_eq!(first["limit_ms"], 4000, "{first}");
+    assert_eq!(first["limit_ms"], HANG_LIMIT_MS, "{first}");
     let result = stats(&mut radicled);
     assert_eq!(result["node"], "running", "{result}");
     assert_eq!(result["node_alive"], true, "{result}");
@@ -308,9 +319,9 @@ fn a_hung_unit_of_an_online_repair_is_reported_while_the_node_runs() {
         later["elapsed_ms"].as_u64().unwrap() >= first["elapsed_ms"].as_u64().unwrap() + 500,
         "{first} {later}"
     );
-    assert_eq!(radicled.exit_code(EXIT_TIMEOUT), Some(70));
+    assert_eq!(radicled.exit_code(OVERRUN_EXIT_TIMEOUT), Some(70));
     let log = radicled.stderr();
-    assert!(log.contains(r#""reason":"unit_overrun""#), "{log}");
+    assert_eq!(overrun(&log)["bound_ms"], HANG_LIMIT_MS, "{log}");
 }
 
 /// 0008, "Pools and budgets": each pool's requests running and queued, as

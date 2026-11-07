@@ -698,7 +698,9 @@ fn an_unfinished_or_cut_off_reconciliation_imports_nothing() {
         &[],
         &[
             ("FREEDOM_RADICLED_TEST_HANG_UNIT", "ref-locks"),
-            ("FREEDOM_RADICLED_TEST_UNIT_LIMIT_MS", "3000"),
+            // The hung unit's alone: the units before it keep their 30 s
+            // (src/testhooks.rs).
+            ("FREEDOM_RADICLED_TEST_HANG_LIMIT_MS", "3000"),
         ],
     );
     let hello = radicled.hello();
@@ -706,7 +708,8 @@ fn an_unfinished_or_cut_off_reconciliation_imports_nothing() {
     let reconcile = radicled.request("rad.reconcile", json!({}));
     let early = radicled.call("rad.import_repo", params(&work.source));
     assert_eq!(early["error"]["code"], "stopped", "{early}");
-    assert_eq!(radicled.exit_code(EXIT_TIMEOUT), Some(70));
+    assert_eq!(radicled.exit_code(OVERRUN_EXIT_TIMEOUT), Some(70));
+    assert_eq!(overrun(&radicled.stderr())["bound_ms"], 3000);
     let _ = reconcile;
     assert_eq!(storage(&dirs), [rid.canonical()]);
     assert_eq!(fixture::marked(&dirs.home), Some(vec![NID.to_owned()]));

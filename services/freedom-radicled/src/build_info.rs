@@ -4,13 +4,15 @@
 
 /// The libradicle version the pinned commit carries.
 pub const LIBRADICLE_VERSION: &str = "0.8.0";
-/// The pinned commit: `integration/rust-core` at libradicle#33's merge (the
-/// import with no node, `import::Import`, and its `Moved` stage), with #32
+/// The pinned commit: `integration/rust-core` at libradicle#34's merge
+/// (heartwood at 338a9638, upstream 1.10.3 merged in, and a missing project
+/// payload as `Error::NoProject` with the old text), with #33 (the import
+/// with no node, `import::Import`, and its `Moved` stage), #32
 /// (the bounded reads' charges for what libgit2 holds), #31 (R-19: a commit's
 /// non-UTF-8 diff decoded lossily, never a panic), #30 (the stop's
 /// `Shutdown` outcome), #22 (the host's repository gate), #23 (the hermetic
 /// test guard) and #28 (`Options::seeding_policy`).
-pub const LIBRADICLE_COMMIT: &str = "46cf9d99ec868c938ffed13b6a38fbeda0a50857";
+pub const LIBRADICLE_COMMIT: &str = "216ced6dddccd7cb1103b2cfda238936cd618897";
 
 #[cfg(test)]
 mod tests {

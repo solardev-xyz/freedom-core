@@ -15,7 +15,7 @@
 //!   which unit overran, reruns it in its smallest form, and quarantines its
 //!   repository after a second process ends during it.
 //! - **What is running** is kept for `rad.stats` ([`crate::stats`]): the
-//!   unit's kind, how long it has run, and its limit.
+//!   unit's kind, how long it has run, and the limit it armed.
 //!
 //! The same watch is reconciliation's at a start, and the online repair's
 //! while the node runs ([`crate::repair`]): the service holds it.
@@ -38,6 +38,7 @@ const OVERRUN: &str = "unit_overrun";
 struct Running {
     kind: String,
     started: Instant,
+    limit: Duration,
     armed: Armed,
 }
 
@@ -59,16 +60,15 @@ impl UnitWatch {
         })
     }
 
-    /// The unit running, by its kind, and how long it has run.
-    pub fn current(&self) -> Option<(String, Duration)> {
-        self.lock()
-            .as_ref()
-            .map(|running| (running.kind.clone(), running.started.elapsed()))
-    }
-
-    /// Each unit's time limit.
-    pub fn limit(&self) -> Duration {
-        self.limit
+    /// The unit running: its kind, how long it has run, and its limit.
+    pub fn current(&self) -> Option<(String, Duration, Duration)> {
+        self.lock().as_ref().map(|running| {
+            (
+                running.kind.clone(),
+                running.started.elapsed(),
+                running.limit,
+            )
+        })
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, Option<Running>> {
@@ -78,13 +78,15 @@ impl UnitWatch {
 
 impl Watch for UnitWatch {
     fn started(&self, unit: &Unit) {
+        let limit = crate::testhooks::unit_limit_of(&unit.kind, self.limit);
         let mut running = self.lock();
         // A unit starts only after the one before it ended; if one hadn't,
         // this bound replaces its.
         *running = Some(Running {
             kind: unit.kind.clone(),
             started: Instant::now(),
-            armed: self.watchdog.arm(self.limit),
+            limit,
+            armed: self.watchdog.arm(limit),
         });
         drop(running);
         crate::testhooks::at_unit_start(&unit.kind);
@@ -117,7 +119,11 @@ mod tests {
         let watch = UnitWatch::start(Duration::from_millis(200)).unwrap();
         for kind in ["cache", "namespace", "publish"] {
             watch.started(&unit(kind));
-            assert_eq!(watch.current().map(|(k, _)| k).as_deref(), Some(kind));
+            let (running, _, limit) = watch.current().unwrap();
+            assert_eq!(
+                (running.as_str(), limit),
+                (kind, Duration::from_millis(200))
+            );
             watch.ended();
             assert!(watch.current().is_none());
         }
