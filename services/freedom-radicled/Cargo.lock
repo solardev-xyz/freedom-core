@@ -1070,6 +1070,7 @@ dependencies = [
  "freedom-ipfs-addr",
  "freedom-ipfs-socks",
  "getrandom 0.4.3",
+ "git2",
  "libc",
  "libradicle",
  "radicle",

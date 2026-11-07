@@ -168,9 +168,251 @@ pub fn repository_with(
     (rid, ids)
 }
 
+/// One entry of a tree built object by object: its path, its git mode, and
+/// its content; for a gitlink (`0o160000`), the commit it names, in hex.
+pub type Entry<'a> = (&'a str, i32, &'a [u8]);
+
+/// The tree of `entries`, nested at each `/`, written into `repo`.
+fn tree_of(repo: &git2::Repository, entries: &[Entry<'_>]) -> git2::Oid {
+    let mut builder = repo.treebuilder(None).unwrap();
+    let mut dirs: std::collections::BTreeMap<&str, Vec<Entry<'_>>> = Default::default();
+    for &(path, mode, content) in entries {
+        match path.split_once('/') {
+            Some((dir, rest)) => dirs.entry(dir).or_default().push((rest, mode, content)),
+            None => {
+                let oid = if mode == 0o160000 {
+                    git2::Oid::from_str(std::str::from_utf8(content).unwrap()).unwrap()
+                } else {
+                    repo.blob(content).unwrap()
+                };
+                builder.insert(path, oid, mode).unwrap();
+            }
+        }
+    }
+    for (dir, inner) in dirs {
+        let oid = tree_of(repo, &inner);
+        builder.insert(dir, oid, 0o040000).unwrap();
+    }
+    builder.write().unwrap()
+}
+
+/// Imports a repository into `home` as `seed`'s identity whose `master` is
+/// one commit of exactly `entries`, written object by object (any mode, on
+/// any OS: a symlink, a submodule), with one issue; and the commit's ID.
+pub fn repository_of(
+    home: &Path,
+    seed: &[u8; 32],
+    name: &str,
+    entries: &[Entry<'_>],
+) -> (RepoId, String) {
+    let work = tempfile::tempdir().unwrap();
+    let repo = git2::Repository::init(work.path()).unwrap();
+    let tree = repo.find_tree(tree_of(&repo, entries)).unwrap();
+    let signature = git2::Signature::new(
+        "Fixture",
+        "fixture@example.invalid",
+        &git2::Time::new(1_700_000_000, 0),
+    )
+    .unwrap();
+    let commit = repo
+        .commit(
+            Some("refs/heads/master"),
+            &signature,
+            &signature,
+            "Files",
+            &tree,
+            &[],
+        )
+        .unwrap();
+    let rid = with_node(home, seed, |node| {
+        let rid = node
+            .import_repo(work.path(), name, "A fixture.", "master")
+            .unwrap();
+        node.create_issue(rid, "First", "Its description.", vec![])
+            .unwrap();
+        rid
+    });
+    (rid, commit.to_string())
+}
+
+/// Imports a repository into `home` as `seed`'s identity with a `README.md`
+/// and a tree `wide` of `entries` files, `f0000000` on, each the same small
+/// blob: a tree object of 36 bytes an entry. Its commit's ID.
+pub fn repository_with_wide_tree(
+    home: &Path,
+    seed: &[u8; 32],
+    name: &str,
+    entries: usize,
+) -> (RepoId, String) {
+    let work = tempfile::tempdir().unwrap();
+    let repo = git2::Repository::init(work.path()).unwrap();
+    let small = repo.blob(b"x\n").unwrap();
+    let mut wide = repo.treebuilder(None).unwrap();
+    for n in 0..entries {
+        wide.insert(format!("f{n:07}"), small, 0o100644).unwrap();
+    }
+    let wide = wide.write().unwrap();
+    let mut root = repo.treebuilder(None).unwrap();
+    root.insert("README.md", repo.blob(b"# Wide\n").unwrap(), 0o100644)
+        .unwrap();
+    root.insert("wide", wide, 0o040000).unwrap();
+    let tree = repo.find_tree(root.write().unwrap()).unwrap();
+    let signature = git2::Signature::new(
+        "Fixture",
+        "fixture@example.invalid",
+        &git2::Time::new(1_700_000_000, 0),
+    )
+    .unwrap();
+    let commit = repo
+        .commit(
+            Some("refs/heads/master"),
+            &signature,
+            &signature,
+            "Wide",
+            &tree,
+            &[],
+        )
+        .unwrap();
+    let rid = with_node(home, seed, |node| {
+        node.import_repo(work.path(), name, "A fixture.", "master")
+            .unwrap()
+    });
+    (rid, commit.to_string())
+}
+
+/// Imports a repository into `home` as `seed`'s identity whose one commit's
+/// root tree has `filler` files, `f0000000` on, and a tree for each of
+/// `dirs`, its name and its count of such files: each file the same small
+/// blob, so each entry of those trees is 36 bytes. Its commit's ID.
+pub fn repository_with_trees(
+    home: &Path,
+    seed: &[u8; 32],
+    name: &str,
+    filler: usize,
+    dirs: &[(&str, usize)],
+) -> (RepoId, String) {
+    let work = tempfile::tempdir().unwrap();
+    let repo = git2::Repository::init(work.path()).unwrap();
+    let small = repo.blob(b"x\n").unwrap();
+    let files = |count: usize| {
+        let mut builder = repo.treebuilder(None).unwrap();
+        for n in 0..count {
+            builder.insert(format!("f{n:07}"), small, 0o100644).unwrap();
+        }
+        builder.write().unwrap()
+    };
+    let mut root = repo
+        .treebuilder(Some(&repo.find_tree(files(filler)).unwrap()))
+        .unwrap();
+    for &(dir, count) in dirs {
+        root.insert(dir, files(count), 0o040000).unwrap();
+    }
+    let tree = repo.find_tree(root.write().unwrap()).unwrap();
+    let signature = git2::Signature::new(
+        "Fixture",
+        "fixture@example.invalid",
+        &git2::Time::new(1_700_000_000, 0),
+    )
+    .unwrap();
+    let commit = repo
+        .commit(
+            Some("refs/heads/master"),
+            &signature,
+            &signature,
+            "Trees",
+            &tree,
+            &[],
+        )
+        .unwrap();
+    let rid = with_node(home, seed, |node| {
+        node.import_repo(work.path(), name, "A fixture.", "master")
+            .unwrap()
+    });
+    (rid, commit.to_string())
+}
+
+/// A commit written straight into `rid`'s repository in `home`'s storage,
+/// on no ref, whose tree nests a tree `d` `depth` times, each tree with a
+/// file `f` of `content`: `d/…/d/f` is there at every depth up to `depth`.
+/// Its ID. Written in storage rather than imported: libgit2's own walks of
+/// a tree recurse, and the import's packing is one.
+pub fn deep_commit(home: &Path, rid: RepoId, depth: usize, content: &[u8]) -> String {
+    let repo = git2::Repository::open_bare(storage_of(home, rid)).unwrap();
+    let file = repo.blob(content).unwrap();
+    let mut tree = {
+        let mut builder = repo.treebuilder(None).unwrap();
+        builder.insert("f", file, 0o100644).unwrap();
+        builder.write().unwrap()
+    };
+    for _ in 0..depth {
+        let mut builder = repo.treebuilder(None).unwrap();
+        builder.insert("d", tree, 0o040000).unwrap();
+        builder.insert("f", file, 0o100644).unwrap();
+        tree = builder.write().unwrap();
+    }
+    let tree = repo.find_tree(tree).unwrap();
+    let signature = git2::Signature::new(
+        "Fixture",
+        "fixture@example.invalid",
+        &git2::Time::new(1_700_000_000, 0),
+    )
+    .unwrap();
+    repo.commit(None, &signature, &signature, "Deep", &tree, &[])
+        .unwrap()
+        .to_string()
+}
+
 /// `rid`'s repository in `home`'s storage.
 pub fn storage_of(home: &Path, rid: RepoId) -> PathBuf {
     home.join("storage").join(rid.canonical())
+}
+
+/// `rid`'s identity document in `home`'s storage: `embeds/radicle.json` in
+/// the tree of the commit `refs/rad/id` names, as libradicle reads it.
+pub fn identity_document(home: &Path, rid: RepoId) -> Vec<u8> {
+    let repo = git2::Repository::open_bare(storage_of(home, rid)).unwrap();
+    let head = repo.refname_to_id("refs/rad/id").unwrap();
+    let tree = repo.find_commit(head).unwrap().tree().unwrap();
+    let entry = tree.get_path(Path::new("embeds/radicle.json")).unwrap();
+    repo.find_blob(entry.id()).unwrap().content().to_vec()
+}
+
+/// `rid`'s identity document in `home`'s storage replaced by `document`: a
+/// commit whose tree holds it at `embeds/radicle.json`, after the
+/// identity's head, set at `refs/rad/id`. Written straight into storage
+/// and unsigned: the reads load the document from there and check no
+/// signature.
+pub fn set_identity_document(home: &Path, rid: RepoId, document: &[u8]) {
+    let repo = git2::Repository::open_bare(storage_of(home, rid)).unwrap();
+    let parent = repo
+        .find_commit(repo.refname_to_id("refs/rad/id").unwrap())
+        .unwrap();
+    let blob = repo.blob(document).unwrap();
+    let mut embeds = repo.treebuilder(None).unwrap();
+    embeds.insert("radicle.json", blob, 0o100644).unwrap();
+    let embeds = embeds.write().unwrap();
+    let mut root = repo.treebuilder(None).unwrap();
+    root.insert("embeds", embeds, 0o040000).unwrap();
+    let root = repo.find_tree(root.write().unwrap()).unwrap();
+    let signature = git2::Signature::new(
+        "Fixture",
+        "fixture@example.invalid",
+        &git2::Time::new(1_700_000_000, 0),
+    )
+    .unwrap();
+    let commit = repo
+        .commit(None, &signature, &signature, "Update", &root, &[&parent])
+        .unwrap();
+    repo.reference("refs/rad/id", commit, true, "fixture")
+        .unwrap();
+}
+
+/// `rid`'s `HEAD` in `home`'s storage set to a branch that isn't there: a
+/// read without a revision then takes the canonical head, which libradicle
+/// computes from the identity document.
+pub fn dangling_head(home: &Path, rid: RepoId) {
+    let repo = git2::Repository::open_bare(storage_of(home, rid)).unwrap();
+    repo.set_head("refs/heads/does-not-exist").unwrap();
 }
 
 /// A ref of `namespace` in `rid`, set without signing it: what a kill

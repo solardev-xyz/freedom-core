@@ -2,10 +2,10 @@
 //! "Pools and budgets", "Deadlines" and "Start, stop and reconciliation"):
 //! they open as `rad.start` answers, refuse past their bounds, enforce
 //! their deadlines and main's cancel, and drain at the stop before the node
-//! is asked to stop. This build serves quarantine's pooled methods
-//! (tests/quarantine.rs), the writes (tests/writes.rs), `rad.read`'s ops
-//! (tests/reads.rs, tests/composed.rs) and the network operations
-//! (tests/clone.rs, tests/network.rs): `rad.blob`'s work answers `stopped`.
+//! is asked to stop. This build serves every pooled method: quarantine's
+//! (tests/quarantine.rs), the writes (tests/writes.rs), `rad.read`
+//! (tests/reads.rs, tests/composed.rs), `rad.blob` (tests/blob.rs) and the
+//! network operations (tests/clone.rs, tests/network.rs).
 //! `FREEDOM_RADICLED_TEST_HOLD_WORK` holds each in its slot first, the
 //! writes before their mutation starts, and the reads before their build.
 //!
@@ -32,19 +32,6 @@ const POOLED: [&str; 8] = [
     "rad.quarantine_list",
     "rad.read",
     "rad.blob",
-    "rad.connect_seeds",
-    "rad.clone",
-    "rad.remove_repo",
-    "rad.unseed",
-    "rad.write",
-];
-
-/// The pooled methods this build serves: quarantine's (tests/quarantine.rs),
-/// the writes (tests/writes.rs), `rad.read` (tests/reads.rs) and the
-/// network operations (tests/clone.rs).
-const SERVED: [&str; 7] = [
-    "rad.quarantine_list",
-    "rad.read",
     "rad.connect_seeds",
     "rad.clone",
     "rad.remove_repo",
@@ -82,19 +69,10 @@ fn pooled_methods_are_admitted_once_the_node_runs_and_the_stop_is_clean() {
     }
     let started = radicled.call("rad.start", json!({ "alias": "pools" }));
     assert!(started["result"].is_object(), "{started}");
-    // Admitted, and run: each one's work answers. The served methods check
-    // their params.
+    // Admitted, and run: each one's work answers, checking its params.
     for method in POOLED {
         let reply = radicled.call(method, json!({}));
-        if SERVED.contains(&method) {
-            assert_eq!(code(&reply), "invalid_argument", "{method}: {reply}");
-            continue;
-        }
-        assert_eq!(code(&reply), "stopped", "{method}: {reply}");
-        assert_eq!(
-            reply["error"]["message"], "not served in this build",
-            "{method}: {reply}"
-        );
+        assert_eq!(code(&reply), "invalid_argument", "{method}: {reply}");
     }
 
     radicled.shutdown();

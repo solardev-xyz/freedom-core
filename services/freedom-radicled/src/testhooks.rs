@@ -17,6 +17,9 @@
 //!   many threads the process has (`/proc/self/task`), and what each
 //!   descriptor above stderr is (its `/proc/self/fd` link: a test may log a
 //!   path). Linux only.
+//! - `FREEDOM_RADICLED_TEST_OBJECT_CACHE=1` logs, once libgit2's object
+//!   cache should be off, whether it keeps what a repository loads
+//!   (`libgit2's object cache`, with `on`: [`crate::reads::object_cache_on`]).
 //! - `FREEDOM_RADICLED_TEST_START_DEADLINE_MS` replaces `rad.start`'s 30 s.
 //! - `FREEDOM_RADICLED_TEST_SHUTDOWN_WITHIN_MS` replaces how long the stop
 //!   takes, the pools' drain and then the node's ([`crate::node`]'s 3 s).
@@ -235,6 +238,19 @@ pub fn at_confinement_point() {
         fc_service::log::info(
             "confinement point",
             serde_json::json!({ "threads": threads, "descriptors": descriptors }),
+        );
+    }
+}
+
+/// Once libgit2's object cache should be off: logs whether it is, when
+/// asked.
+pub fn object_cache() {
+    #[cfg(feature = "testhooks")]
+    if std::env::var_os("FREEDOM_RADICLED_TEST_OBJECT_CACHE").is_some() {
+        let on = crate::reads::object_cache_on().map_err(|e| e.to_string());
+        fc_service::log::info(
+            "libgit2's object cache",
+            serde_json::json!({ "on": on.as_ref().ok(), "error": on.as_ref().err() }),
         );
     }
 }

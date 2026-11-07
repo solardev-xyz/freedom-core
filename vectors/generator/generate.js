@@ -16,6 +16,7 @@ const { buildChainReplay } = require('./chain-replay');
 const { buildDweb, buildVerifyPlans } = require('./dweb');
 const { buildStreams } = require('./streams');
 const { buildRadicleReads } = require('./radicle-reads');
+const { buildRadicleBlob } = require('./radicle-blob');
 const { buildRadicleNetwork } = require('./radicle-network');
 const { buildRadicleStats } = require('./radicle-stats');
 const { buildRadicleImport } = require('./radicle-import');
@@ -543,6 +544,9 @@ async function main() {
     // Design 0008's composed reads, from main's radapi handlers over a
     // scripted add-on.
     'radicle-reads.json': await buildRadicleReads(reference.checkout, reference.meta),
+    // Design 0008's rad.blob: its ranges are the design's; main's /blob/
+    // route over the same files.
+    'radicle-blob.json': await buildRadicleBlob(reference.checkout, reference.meta),
     // Design 0008's network operations, from main's manager and seed
     // status over a scripted add-on, and the design's progress queue.
     'radicle-network.json': await buildRadicleNetwork(reference.checkout, reference.meta),

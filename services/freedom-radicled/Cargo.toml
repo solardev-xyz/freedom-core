@@ -52,13 +52,20 @@ fc-seal = { path = "../../crates/fc-seal" }
 # R-19's fix (libradicle #31): a commit's diff that isn't UTF-8 is decoded
 # lossily, and serialized without a `Value` copy, instead of panicking, and
 # an alias Radicle refuses is `Error::Alias`. Then the bounded reads' charges
-# for what libgit2 holds of a tree or commit (libradicle #32), and the import
-# with no node (#33: `import::Import`, a libgit2 fetch into a temporary clone
-# moved into place last, the working copy never written, its `Moved` stage
-# told after the move), which the import process runs. Pinned by commit
-# until those changes are released (deny.toml allows solardev-xyz).
+# for what libgit2 holds of a tree or commit, and the walk to a file bounded
+# (libradicle #32: `blob_header_bounded`, `read_blob_at_bounded`, for
+# `rad.blob`), and the import with no node (#33: `import::Import`, a libgit2
+# fetch into a temporary clone moved into place last, the working copy never
+# written, its `Moved` stage told after the move), which the import process
+# runs. Pinned by commit until those changes are released (deny.toml allows
+# solardev-xyz).
 # src/build_info.rs reports the same commit.
 libradicle = { git = "https://github.com/solardev-xyz/libradicle", rev = "46cf9d99ec868c938ffed13b6a38fbeda0a50857", features = ["no-spawn"] }
+# libgit2's process-wide options, which heartwood's `radicle::git::raw`
+# doesn't re-export: the object cache turned off (src/reads.rs, `uncache`),
+# and the probe of it. Already in libradicle's graph, at its version and with
+# its features (none of the defaults).
+git2 = { version = "0.21", default-features = false }
 # heartwood's `radicle`, at the commit libradicle pins, so that both resolve
 # to one package (build_info's test holds them to one commit): the node
 # identity's public forms (`did:key`, the node ID), and, from the next step,

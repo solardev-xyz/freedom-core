@@ -102,8 +102,11 @@ const SECOND: &[(&str, &[u8])] = &[
 /// `{ content_type, bytes }` and the add-on's exact JSON as its body, with
 /// today's arguments. A commit whose diff isn't UTF-8 is served, its text
 /// decoded lossily (R-19). libradicle's errors are `not_found` by today's
-/// message test, otherwise `failed`, with its message; what doesn't parse
-/// is `invalid_argument`.
+/// message test, otherwise `failed`, with its message where that can't
+/// name a filesystem path: a repository the node doesn't have, whose text
+/// names its storage path, is `not_found` with `repository not found`, and
+/// no reply names the home or any absolute path. What doesn't parse is
+/// `invalid_argument`.
 #[test]
 fn each_pass_through_op_answers_the_add_ons_bytes() {
     let dirs = Dirs::new();
@@ -319,8 +322,17 @@ fn each_pass_through_op_answers_the_add_ons_bytes() {
     }
     for (op, args, message) in &errors {
         let reply = radicled.read(op, args.clone()).unwrap_err();
-        assert_eq!(code(&reply), todays(message), "{op} {args}: {reply}");
-        assert_eq!(reply["error"]["message"], message.as_str(), "{reply}");
+        assert_pathless(&reply, &dirs.home);
+        // Only the missing repository's text names a path: its storage's.
+        let missing = args["rid"] == missing_rid.to_string();
+        assert_eq!(absolute(message), missing, "{message}");
+        if missing {
+            assert_eq!(code(&reply), "not_found", "{op} {args}: {reply}");
+            assert_eq!(reply["error"]["message"], "repository not found", "{reply}");
+        } else {
+            assert_eq!(code(&reply), todays(message), "{op} {args}: {reply}");
+            assert_eq!(reply["error"]["message"], message.as_str(), "{reply}");
+        }
     }
     // What doesn't parse.
     let reply = radicled

@@ -231,6 +231,48 @@ fn what_doesnt_parse_is_invalid_argument() {
     }
 }
 
+/// Review of #277, round 2: a path of more than libradicle's
+/// `MAX_TREE_DEPTH` components is `invalid_argument` in each op that takes
+/// one, before anything opens the repository; one at the limit is taken,
+/// as is one whose empty components (as libradicle skips them) leave it at
+/// the limit.
+#[test]
+fn a_path_past_the_depth_limit_is_invalid_argument() {
+    let at = vec!["d"; MAX_TREE_DEPTH].join("/");
+    let past = vec!["d"; MAX_TREE_DEPTH + 1].join("/");
+    let padded = format!("/{}//", vec!["d"; MAX_TREE_DEPTH].join("//"));
+    let message = format!("path has more than {MAX_TREE_DEPTH} components");
+    for (name, rev) in [
+        ("tree", false),
+        ("tree_at", true),
+        ("blob", false),
+        ("blob_at", true),
+    ] {
+        let args = |path: &str| {
+            if rev {
+                json!({ "rid": RID, "revision": REV, "path": path })
+            } else {
+                json!({ "rid": RID, "path": path })
+            }
+        };
+        for path in [&at, &padded] {
+            assert!(read(name, args(path)).is_ok(), "{name}");
+        }
+        let error = read(name, args(&past)).unwrap_err();
+        assert_eq!(error.code, ErrorCode::InvalidArgument, "{name}");
+        assert_eq!(error.message, message, "{name}");
+    }
+    assert_eq!(MAX_TREE_DEPTH, 4096);
+}
+
+/// libgit2's object cache as the probe sees it: on in this process, which
+/// no `main` has run in (`main` turns it off, which `tests/process.rs`
+/// checks through the binary).
+#[test]
+fn the_probe_sees_the_object_cache() {
+    assert!(object_cache_on().unwrap());
+}
+
 /// The composed ops, and those of main's serialization, take their args
 /// by name: a COB ID as libradicle checks it, refused with its text; a
 /// page's `status`, `page` and `per_page` as strings or null.
@@ -543,12 +585,152 @@ fn not_found_is_todays_message_test() {
     for message in ["invalid revision", "found", "not a blob", "exists"] {
         assert!(!not_found(message), "{message}");
     }
-    let error = radicle_error(libradicle::Error::NotABlob("src".into()));
+    let error = read_error(libradicle::Error::NotABlob("src".into()));
     assert_eq!(error.code, ErrorCode::Failed);
     assert_eq!(
         error.message,
         libradicle::Error::NotABlob("src".into()).to_string()
     );
+}
+
+/// 0008, "Errors" (deviation `pathless-errors`): libradicle's message goes
+/// to main only where it can't name a filesystem path. A repository the
+/// node doesn't have is `repository not found`; every other text that
+/// could name a path is fixed by its code, as today's test gives it on
+/// libradicle's message, so main's 404 and 500 stay; the rest are as today.
+#[test]
+fn a_message_that_could_name_a_path_is_fixed() {
+    use libradicle::Error as E;
+    use radicle::git::raw::{Error as Git, ErrorClass as Class, ErrorCode as Code};
+    let home = "/home/someone/.config/Freedom/radicle";
+    let storage = format!("{home}/storage/z3gqcJUoA1n9HaHKufZs5FCSGazv5");
+    let windows = r"C:\Users\someone\AppData\Roaming\Freedom\radicle";
+    let git = |code, class, message: &str| Git::new(code, class, message);
+    let answered = |e: E| {
+        let text = e.to_string();
+        let body = read_error(e);
+        (text, body.code, body.message)
+    };
+
+    // A repository the node doesn't have: not there, or not a repository.
+    for (class, message) in [
+        (
+            Class::Os,
+            format!("failed to resolve path '{storage}': No such file or directory"),
+        ),
+        (
+            Class::Repository,
+            format!("could not find repository at '{storage}'"),
+        ),
+        (Class::Os, format!("failed to resolve path '{windows}'")),
+    ] {
+        let e = E::Repository(RepositoryError::Git(git(Code::NotFound, class, &message)));
+        let (text, code, message) = answered(e);
+        assert!(text.contains(&storage) || text.contains(windows), "{text}");
+        assert_eq!((code, message.as_str()), (ErrorCode::NotFound, MISSING));
+    }
+
+    // Any other text that could name a path: fixed, by today's code.
+    let storage_error = |code, class, message: &str| {
+        E::Storage(radicle::storage::Error::Git(git(code, class, message)))
+    };
+    for e in [
+        E::Git(git(
+            Code::NotFound,
+            Class::Os,
+            &format!("failed to open '{storage}/objects/pack'"),
+        )),
+        E::Git(git(
+            Code::GenericError,
+            Class::Odb,
+            &format!("failed to read '{storage}/objects/12/3456'"),
+        )),
+        E::Git(git(
+            Code::GenericError,
+            Class::Config,
+            &format!("failed to parse '{home}/config'"),
+        )),
+        E::Repository(RepositoryError::Git(git(
+            Code::GenericError,
+            Class::Os,
+            &format!("failed to open '{storage}/HEAD'"),
+        ))),
+        E::Repository(RepositoryError::Git(git(
+            Code::NotFound,
+            Class::Reference,
+            &format!("reference 'refs/rad/id' not found in '{storage}'"),
+        ))),
+        storage_error(
+            Code::Locked,
+            Class::Os,
+            &format!("failed to lock '{storage}/config'"),
+        ),
+        E::NodeThread(format!(
+            "the runtime failed: unable to open '{home}/node/node.db'"
+        )),
+        E::NodeThread(format!("{windows} is locked")),
+        E::Io(std::io::Error::other(format!("{storage} not found"))),
+    ] {
+        let (text, code, message) = answered(e);
+        assert!(text.contains(home) || text.contains(windows), "{text}");
+        if not_found(&text) {
+            assert_eq!(
+                (code, message.as_str()),
+                (ErrorCode::NotFound, NOT_FOUND),
+                "{text}"
+            );
+        } else {
+            assert_eq!(
+                (code, message.as_str()),
+                (ErrorCode::Failed, FAILED),
+                "{text}"
+            );
+        }
+        assert!(
+            !message.contains('/') && !message.contains('\\'),
+            "{message}"
+        );
+    }
+    assert!(not_found(NOT_FOUND) && not_found(MISSING) && !not_found(FAILED));
+
+    // As today: libradicle's own texts, libgit2's tree and object errors and
+    // its object database's not-found, and any text with no separator.
+    for e in [
+        E::NotABlob("dir/sub".into()),
+        E::NotATree("README.md/x".into()),
+        E::InvalidCobId("ABCDEF".into()),
+        E::Git(git(
+            Code::NotFound,
+            Class::Tree,
+            "the path 'nodir/x.txt' does not exist in the given tree",
+        )),
+        E::Git(git(
+            Code::NotFound,
+            Class::Odb,
+            "object not found - no match for id (1111111111111111111111111111111111111111)",
+        )),
+        E::Git(git(
+            Code::InvalidSpec,
+            Class::Object,
+            "the object 1111111111111111111111111111111111111111 is a tree, not a blob",
+        )),
+        E::NodeThread("issue 0123abcd not found".into()),
+        E::NodeThread("seeds for rad:z3gqcJUoA1n9HaHKufZs5FCSGazv5 unavailable".into()),
+        storage_error(
+            Code::GenericError,
+            Class::Zlib,
+            "error inflating zlib stream",
+        ),
+    ] {
+        let (text, code, message) = answered(e);
+        assert_eq!(message, text);
+        let todays = if not_found(&text) {
+            ErrorCode::NotFound
+        } else {
+            ErrorCode::Failed
+        };
+        assert_eq!(code, todays, "{text}");
+    }
 }
 
 fn text(content: &[u8]) -> Blob {
@@ -601,9 +783,8 @@ fn a_blobs_held_bytes() {
 /// if its JSON's writing would hold more than it.
 #[test]
 fn a_blob_is_bounded_by_the_built_budget() {
-    let bounds = |budget| Bounds::new(libradicle::CancelToken::new(), budget);
     let mut asked = None;
-    let blob = bounded_blob(&bounds(100), |limit| {
+    let blob = bounded_blob(100, |limit| {
         asked = Some(limit);
         Ok(text(&[b'a'; 50]))
     })
@@ -611,7 +792,7 @@ fn a_blob_is_bounded_by_the_built_budget() {
     assert_eq!(asked, Some(50));
     assert_eq!(blob.content.len(), 50);
     // 26 bytes of Latin-1: 26 + 2 × 78 held.
-    let refused = bounded_blob(&bounds(100), |_| Ok(text(&[0xe9; 26]))).unwrap_err();
+    let refused = bounded_blob(100, |_| Ok(text(&[0xe9; 26]))).unwrap_err();
     assert!(
         matches!(
             refused,
@@ -624,10 +805,10 @@ fn a_blob_is_bounded_by_the_built_budget() {
     );
     // 20 bytes of Latin-1 hold 20 + 2 × 60: at the budget, taken; one byte
     // over, refused.
-    assert!(bounded_blob(&bounds(140), |_| Ok(text(&[0xe9; 20]))).is_ok());
-    assert!(bounded_blob(&bounds(139), |_| Ok(text(&[0xe9; 20]))).is_err());
+    assert!(bounded_blob(140, |_| Ok(text(&[0xe9; 20]))).is_ok());
+    assert!(bounded_blob(139, |_| Ok(text(&[0xe9; 20]))).is_err());
     // libradicle's own refusal stands.
-    let refused = bounded_blob(&bounds(100), |limit| {
+    let refused = bounded_blob(100, |limit| {
         Err(libradicle::Error::TooLarge { size: 51, limit })
     })
     .unwrap_err();
@@ -641,13 +822,15 @@ fn a_blob_is_bounded_by_the_built_budget() {
 }
 
 /// 0008's figures: a blob read as JSON is at most 16 MiB, the add-on's cap,
-/// so its loading's two copies fit the built budget.
+/// so its loading's two copies fit the built budget, with libgit2's NUL and
+/// structs beside them reserved apart.
 #[test]
 fn the_figures() {
     assert_eq!(output::BUILT / 2, 16 << 20);
     assert_eq!(output::BUILT / 2, libradicle::BINDING_READ_BUDGET);
-    let bounds = Bounds::new(libradicle::CancelToken::new(), output::BUILT).with_loads(7);
-    let half = halved(&bounds);
-    assert_eq!(half.budget, output::BUILT / 2);
-    assert_eq!(half.loads, 7);
+    assert_eq!(BESIDE, 257);
+    assert_eq!(
+        libradicle::raw_held(output::BUILT / 2) + output::BUILT / 2,
+        output::BUILT + BESIDE
+    );
 }

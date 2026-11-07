@@ -94,6 +94,10 @@ pub enum ErrorCode {
     /// or any read for a `namespace` quarantine; `data` holds its `kind`
     /// and `step` (design 0008, "The escape").
     Quarantined,
+    /// `rad.blob`: its `range` is outside the blob, or the blob is empty;
+    /// `data.size` holds the blob's size, for main's 416 with
+    /// `Content-Range: bytes */size` (design 0008, "Ranges").
+    RangeNotSatisfiable,
     /// `rad.import_repo`: the working copy's roots can't be granted (one
     /// fails main's check, or there are more roots or depth than the bound),
     /// so nothing is imported (design 0010, D5).
@@ -196,8 +200,8 @@ mod tests {
         // Design 0008, Errors, "The escape" and "Writes": a read's
         // libradicle error for a missing thing, any other libradicle error,
         // a removal whose `qid` no record has, a write past its start that
-        // isn't proven, a COB write under a throwaway key, and a write to a
-        // quarantined repository.
+        // isn't proven, a COB write under a throwaway key, a write to a
+        // quarantined repository, and a blob's range outside it.
         for (code, wire) in [
             (ErrorCode::NotFound, "not_found"),
             (ErrorCode::Failed, "failed"),
@@ -205,6 +209,7 @@ mod tests {
             (ErrorCode::OutcomeUnknown, "outcome_unknown"),
             (ErrorCode::NeedsVault, "needs_vault"),
             (ErrorCode::Quarantined, "quarantined"),
+            (ErrorCode::RangeNotSatisfiable, "range_not_satisfiable"),
             (ErrorCode::UnsupportedLayout, "unsupported_layout"),
         ] {
             assert_eq!(

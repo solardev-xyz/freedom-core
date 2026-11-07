@@ -36,7 +36,10 @@
 //!    on, `busy` past its bounds;
 //! 2. params that don't parse, read at admission and answered by the work:
 //!    `invalid_argument`. That is an op 0008 doesn't list, args it doesn't
-//!    take, a RID, or a revision or `parent` that isn't 40 lowercase hex;
+//!    take, a RID, or a revision or `parent` that isn't 40 lowercase hex,
+//!    and a path (`tree`, `tree_at`, `blob`, `blob_at`) of more than
+//!    libradicle's `MAX_TREE_DEPTH` components, 4096 ([`path`]): each is a
+//!    tree its walk would load;
 //! 3. **the fence** ([`fence`]), for an op that names a repository:
 //!    - quarantined at the gate: `quarantined`, with `data.kind` and
 //!      `data.step` from the record ([`crate::quarantine::refusal`]), for
@@ -57,28 +60,51 @@
 //! **The build and its JSON** ([`crate::output::json_read`]) reserve from
 //! the process's output budget before they allocate, inside the read's
 //! deadline and its token: the walk's whole 32 MiB first, then the JSON in
-//! 64 KiB steps, at most 32 MiB of it. A read past a cap is `too_large`; one
-//! whose deadline ends a wait is `deadline`. One whose token is cancelled,
+//! 64 KiB steps, at most 32 MiB of it. The walk gets half of those 32 MiB
+//! for the items it builds and half for the objects it loads, the add-on's
+//! 16 MiB of each, as a walk can hold both at once. libradicle charges
+//! each commit and tree a walk loads what libgit2 holds of it once parsed,
+//! from its header (`libradicle::commit_held`, `libradicle::tree_held`),
+//! and libgit2's object cache, which would keep them past the walk, is off
+//! ([`uncache`]). A read past a cap is `too_large`; one whose deadline
+//! ends a wait is `deadline`. One whose token is cancelled,
 //! in a wait or in its walk, is answered by whoever cancelled it: main's
 //! cancel `cancelled`, the timer `deadline`, the stop `stopped`. The
 //! node is held for the build alone, never while the body waits for credit.
 //! Two results are copied as libradicle writes them, with a `json!` value,
 //! so their build is bounded for the copy too:
-//! - **`repo_info`'s** walk takes half the built budget, so the value's
-//!   copy, about the result's size, fits in the other half;
+//! - **`repo_info`'s** walk gets the add-on's 16 MiB of items and of loads,
+//!   as every walk does. Once it returns, its repository and the objects it
+//!   loaded are dropped (libgit2's cache is off), so the result, at most
+//!   16 MiB, and the value's copy, about its size, are held together within
+//!   the same 32 MiB while it is written;
 //! - **a blob** is loaded only up to half the built budget, 16 MiB (the
 //!   add-on's cap too, `libradicle::BINDING_READ_BUDGET`), its size read
 //!   from its header first ([`bounded_blob`]), as libgit2's buffer and
-//!   libradicle's copy of it are both held while it loads. Then what its
-//!   JSON's writing holds beside the JSON ([`blob_held`]): its content,
-//!   and for text the value's copy of it, and before that the lossy copy of
-//!   one that isn't UTF-8, three bytes for each invalid sequence. Past the
-//!   built budget it is `too_large`.
+//!   libradicle's copy of it are both held while it loads; libgit2's NUL
+//!   and structs beside them, 257 bytes, are reserved with the build
+//!   ([`BESIDE`]). Its walk is libradicle's, within the add-on's 16 MiB of
+//!   loads, and dropped before the blob loads. Then what its JSON's writing
+//!   holds beside the JSON ([`blob_held`]): its content, and for text the
+//!   value's copy of it, and before that the lossy copy of one that isn't
+//!   UTF-8, three bytes for each invalid sequence. Past the built budget it
+//!   is `too_large`.
+//!
+//! **An identity document over 64 KiB** is refused before the walk parses
+//! it ([`identity`], 0008's deviation `identity-cap`): `repo_info`,
+//! `tree` and `blob` without a revision when `HEAD` doesn't resolve, the
+//! listings, and the composed reads of them check its blob's size first,
+//! within the build's bounds, and answer `too_large` with a fixed text.
 //!
 //! **libradicle's errors:** `not_found` when the message matches today's
 //! test (`not found`, `does not exist` or `NotFound`, in any case),
-//! otherwise `failed`, with libradicle's message as today. Neither is
-//! logged.
+//! otherwise `failed` ([`read_error`]). The message is libradicle's, as
+//! today, only where it can't name a filesystem path ([`pathless`]); main
+//! sends it on to pages. A repository the node doesn't have, whose
+//! libradicle text names its storage path under the home, is `not_found`
+//! with `repository not found`, the text main's public route gives it; any
+//! other error that could name a path is `not found` or `the read failed`,
+//! by its code (0008's deviation `pathless-errors`). Neither is logged.
 //!
 //! **The head** is queued only before the deadline, with its bytes reserved
 //! until it is written; from the deadline on the reply is `deadline`. Then
@@ -96,25 +122,65 @@ use std::time::Duration;
 
 use fc_protocol::error::{ErrorBody, ErrorCode};
 use fc_service::conn::{Connection, Headed};
-use libradicle::{BINDING_MAX_PER_PAGE, Blob, Bounds, json};
+use libradicle::{BINDING_MAX_PER_PAGE, Blob, Bounds, MAX_TREE_DEPTH, json};
+use radicle::git::raw::{ErrorClass as GitClass, ErrorCode as GitCode};
 use radicle::node::gate::{self, RepoGate, RepoState};
 use radicle::prelude::RepoId;
+use radicle::storage::RepositoryError;
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
 use serde_json::value::RawValue;
 use serde_json::{Value, json};
 
 use crate::node::{Handle, Node};
-use crate::output::{Body, Budget, Failure, Refused, Until, json_read};
+use crate::output::{BUILT, Body, Budget, Failure, Refused, Until, json_read, json_read_beside};
 use crate::pools::{Pools, Ticket, Work};
 use crate::{quarantine, testhooks};
 use composed::Cobs;
 
+mod blob;
 mod composed;
+mod identity;
 mod js;
+
+pub use blob::blob;
 
 /// How often a body waiting for credit looks at its token.
 const POLL: Duration = Duration::from_millis(10);
+
+/// Turns libgit2's object cache off, for the whole process (0008, "Pools
+/// and budgets"). With it on, every commit and tree under 4 KiB that a
+/// repository handle loads stays parsed in its cache until the handle
+/// closes, against a limit of 256 MiB counted in the objects' bytes, not in
+/// what their parse holds: past any read's reservation. With it off, what a
+/// walk loads is freed once the walk drops it, so a walk holds at most what
+/// libradicle has charged it.
+///
+/// Nothing in the service needs the cache: heartwood's node, its fetches,
+/// the reconciliation, the repairs, the writes and the reads all read
+/// objects through libgit2 the same way with it off, each object read from
+/// the object database again where it would have been found in the cache.
+/// The packs' own delta-base caches aren't this option's, and stay.
+///
+/// libgit2 keeps the option in a global it reads unlocked, as it does its
+/// search paths: `main` sets it once, before any thread can use libgit2.
+pub fn uncache() {
+    git2::opts::enable_caching(false);
+}
+
+/// Whether libgit2's object cache keeps what a repository loads: whether a
+/// tree looked up twice, in a repository held in memory, is one object.
+#[cfg(any(test, feature = "testhooks"))]
+pub fn object_cache_on() -> Result<bool, git2::Error> {
+    use git2::{Binding as _, ObjectType, Odb, Repository};
+    let odb = Odb::new()?;
+    odb.add_new_mempack_backend(1)?;
+    let repo = Repository::from_odb(odb)?;
+    let tree = repo.odb()?.write(ObjectType::Tree, &[])?;
+    let first = repo.find_tree(tree)?;
+    let second = repo.find_tree(tree)?;
+    Ok(first.raw() == second.raw())
+}
 
 /// `rad.read`'s params.
 #[derive(Deserialize)]
@@ -342,6 +408,20 @@ fn rid(rid: &str) -> Result<RepoId, ErrorBody> {
     RepoId::from_str(rid).map_err(|_| invalid("rid isn't a repository ID"))
 }
 
+/// A path of at most libradicle's `MAX_TREE_DEPTH` components (4096, git's
+/// own default `core.maxTreeDepth`), as libradicle walks a path: `/` its
+/// separator, empty components skipped. Each component is a tree the walk
+/// loads, so a longer one is refused here, before the repository is opened
+/// (0008, "Pools and budgets"; deviation `path-depth`).
+fn path(path: String) -> Result<String, ErrorBody> {
+    if path.split('/').filter(|c| !c.is_empty()).count() > MAX_TREE_DEPTH {
+        return Err(invalid(&format!(
+            "path has more than {MAX_TREE_DEPTH} components"
+        )));
+    }
+    Ok(path)
+}
+
 /// A full commit ID, as main checks it: 40 lowercase hex digits.
 fn revision(revision: String, what: &str) -> Result<String, ErrorBody> {
     let hex = revision
@@ -397,7 +477,7 @@ fn op(params: Option<&RawValue>) -> Result<Op, ErrorBody> {
             let a: PathArgs = args(given, "tree takes { rid, path }")?;
             Ok(Op::Tree {
                 rid: rid(&a.rid)?,
-                path: a.path,
+                path: path(a.path)?,
             })
         }
         "tree_at" => {
@@ -405,14 +485,14 @@ fn op(params: Option<&RawValue>) -> Result<Op, ErrorBody> {
             Ok(Op::TreeAt {
                 rid: rid(&a.rid)?,
                 revision: revision(a.revision, "revision")?,
-                path: a.path,
+                path: path(a.path)?,
             })
         }
         "blob" => {
             let a: PathArgs = args(given, "blob takes { rid, path }")?;
             Ok(Op::Blob {
                 rid: rid(&a.rid)?,
-                path: a.path,
+                path: path(a.path)?,
             })
         }
         "blob_at" => {
@@ -420,7 +500,7 @@ fn op(params: Option<&RawValue>) -> Result<Op, ErrorBody> {
             Ok(Op::BlobAt {
                 rid: rid(&a.rid)?,
                 revision: revision(a.revision, "revision")?,
-                path: a.path,
+                path: path(a.path)?,
             })
         }
         "commits" => {
@@ -515,16 +595,27 @@ fn fence(
     writing: impl Fn(&RepoId) -> bool,
     op: &Op,
 ) -> Option<ErrorBody> {
-    let rid = op.rid()?;
+    fenced(home, gate, writing, op.rid()?, op.cob())
+}
+
+/// Why a read of `rid` can't read it now, if it can't: [`fence`]'s, for a
+/// COB op when `cob` says so (`rad.blob` isn't one).
+fn fenced(
+    home: &Path,
+    gate: &RepoGate,
+    writing: impl Fn(&RepoId) -> bool,
+    rid: RepoId,
+    cob: bool,
+) -> Option<ErrorBody> {
     match gate.state(&rid) {
-        RepoState::Quarantined(kind) if op.cob() || kind == gate::Quarantine::Namespace => {
+        RepoState::Quarantined(kind) if cob || kind == gate::Quarantine::Namespace => {
             Some(quarantine::refusal(home, rid, kind))
         }
-        RepoState::Repairing if op.cob() => Some(ErrorBody::new(
+        RepoState::Repairing if cob => Some(ErrorBody::new(
             ErrorCode::Stopped,
             "the repository is being repaired",
         )),
-        _ if op.cob() && writing(&rid) => Some(ErrorBody::new(
+        _ if cob && writing(&rid) => Some(ErrorBody::new(
             ErrorCode::Stopped,
             "a write to the repository is under way, and its outcome isn't proven yet",
         )),
@@ -532,8 +623,19 @@ fn fence(
     }
 }
 
-/// libradicle's error, answered (see the module's doc); a network
-/// operation's too ([`crate::network`]).
+/// A repository the node doesn't have: the text main's public route gives
+/// one, never libradicle's, which names its storage path.
+const MISSING: &str = "repository not found";
+
+/// A not-found error of libradicle's whose text could name a path.
+const NOT_FOUND: &str = "not found";
+
+/// Any other error of libradicle's whose text could name a path.
+const FAILED: &str = "the read failed";
+
+/// libradicle's error, as a network operation answers it
+/// ([`crate::network`]): `not_found` or `failed` by today's message test,
+/// with libradicle's message. A read's goes through [`read_error`].
 pub(crate) fn radicle_error(e: libradicle::Error) -> ErrorBody {
     let message = e.to_string();
     let code = if not_found(&message) {
@@ -542,6 +644,85 @@ pub(crate) fn radicle_error(e: libradicle::Error) -> ErrorBody {
         ErrorCode::Failed
     };
     ErrorBody::new(code, message)
+}
+
+/// A read's libradicle error, answered (see the module's doc): `not_found`
+/// or `failed` by today's message test, with libradicle's message only when
+/// it can't name a filesystem path ([`pathless`]). A repository the node
+/// doesn't have is [`MISSING`]; any other error that could name a path is
+/// [`NOT_FOUND`] or [`FAILED`], by its code, so main's 404 and 500 stay
+/// what they are today.
+fn read_error(e: libradicle::Error) -> ErrorBody {
+    if missing(&e) {
+        return ErrorBody::new(ErrorCode::NotFound, MISSING);
+    }
+    let message = e.to_string();
+    let code = if not_found(&message) {
+        ErrorCode::NotFound
+    } else {
+        ErrorCode::Failed
+    };
+    if pathless(&e, &message) {
+        return ErrorBody::new(code, message);
+    }
+    let fixed = match code {
+        ErrorCode::NotFound => NOT_FOUND,
+        _ => FAILED,
+    };
+    ErrorBody::new(code, fixed)
+}
+
+/// Whether `e` is heartwood's for a repository that isn't in storage: its
+/// open fails with libgit2's `NotFound`, for a directory that isn't there
+/// (`Os`: "failed to resolve path '<home>/storage/<rid>'") or isn't a
+/// repository (`Repository`: "could not find repository at '…'").
+fn missing(e: &libradicle::Error) -> bool {
+    matches!(
+        e,
+        libradicle::Error::Repository(RepositoryError::Git(git))
+            if git.code() == GitCode::NotFound
+                && matches!(git.class(), GitClass::Os | GitClass::Repository)
+    )
+}
+
+/// Whether libradicle's text for `e`, `message`, can't name a filesystem
+/// path, so that it goes to main as today:
+/// - libradicle's own errors whose texts hold only what the request named
+///   (a path in the tree, a revision, a COB ID, a RID) or a bound;
+/// - libgit2's errors of a tree (a path in it), of an object (its ID), and
+///   its object database's not-found (`Odb`, the ID): classes that never
+///   wrap the OS's errors or name a file;
+/// - any text with no path separator in it, `/` or `\`.
+///
+/// Every other text can: libgit2's other classes (`Os`, `Filesystem`,
+/// `Repository`, `Config`, `Index`, `Odb` past a not-found, `Reference` and
+/// the rest) name files under the home, and heartwood's storage, identity,
+/// COB, cache and node errors, SQLite's, and libradicle's `NodeThread`,
+/// `FetchFailed`, `Announce` and `GitConfig`, can carry them.
+fn pathless(e: &libradicle::Error, message: &str) -> bool {
+    use libradicle::Error as E;
+    let own = match e {
+        E::NotABlob(_)
+        | E::NotATree(_)
+        | E::InvalidCobId(_)
+        | E::InvalidRevision(_)
+        | E::TooLarge { .. }
+        | E::TooDeep { .. }
+        | E::Cancelled
+        | E::NoIdentityHead(_)
+        | E::NoCanonicalHead(_)
+        | E::NoSeeds(_)
+        | E::Timeout(_)
+        | E::Gated { .. }
+        | E::Open(_)
+        | E::ShutdownTimeout(_) => true,
+        E::Git(git) => {
+            matches!(git.class(), GitClass::Tree | GitClass::Object)
+                || (git.class() == GitClass::Odb && git.code() == GitCode::NotFound)
+        }
+        _ => false,
+    };
+    own || !message.contains(['/', '\\'])
 }
 
 /// Today's test of a libradicle message: `/not found|does not exist|NotFound/i`.
@@ -582,45 +763,87 @@ fn lossy_len(bytes: &[u8]) -> Option<u64> {
     )
 }
 
-/// A blob, loaded within `bounds` (see the module's doc), then refused
-/// `too_large` if its JSON's writing would hold more than the built budget.
+/// What libgit2 holds of a blob beside its bytes while it loads it: their
+/// NUL and its structs (`libradicle::raw_held` of none). A blob read as
+/// JSON is loaded up to half of its build's reservation, and libradicle
+/// copies it while libgit2's buffer lives: twice the blob is that
+/// reservation, and these bytes are past it, reserved with it
+/// ([`blob_read`], and `readme_at`'s).
+const BESIDE: u64 = libradicle::raw_held(0);
+
+/// A blob, loaded up to half of `built`, the reservation of what its read
+/// builds (see the module's doc), then refused `too_large` if its JSON's
+/// writing would hold more than `built`.
 fn bounded_blob(
-    bounds: &Bounds,
+    built: u64,
     load: impl FnOnce(u64) -> Result<Blob, libradicle::Error>,
 ) -> Result<Blob, libradicle::Error> {
-    let blob = load(bounds.budget / 2)?;
+    let blob = load(built / 2)?;
     let held = blob_held(&blob);
-    if held > bounds.budget {
+    if held > built {
         return Err(libradicle::Error::TooLarge {
             size: held,
-            limit: bounds.budget,
+            limit: built,
         });
     }
     Ok(blob)
 }
 
-/// `bounds` with half its JSON budget: for a result libradicle copies as it
-/// writes it.
-fn halved(bounds: &Bounds) -> Bounds {
-    Bounds {
-        budget: bounds.budget / 2,
-        ..bounds.clone()
-    }
+/// `blob` or `blob_at`: the blob `load` loads, as JSON, within the build's
+/// reservation and libgit2's bytes beside it ([`BESIDE`]), once `check`
+/// has passed within the read's bounds (`blob`'s identity document,
+/// [`identity::check_headless`]).
+fn blob_read(
+    budget: &Arc<Budget>,
+    until: &Until,
+    path: &str,
+    check: impl FnOnce(&Bounds) -> Result<(), Failure>,
+    load: impl FnOnce(u64) -> Result<Blob, libradicle::Error>,
+) -> Result<Body, Failure> {
+    json_read_beside(
+        BESIDE,
+        budget,
+        until,
+        |bounds| {
+            check(bounds)?;
+            bounded_blob(BUILT, load).map_err(Failure::from)
+        },
+        |w, blob| json::blob(w, path, blob),
+    )
 }
 
-/// `op`'s JSON, built and written within the budget (see the module's doc).
-fn body(handle: &Handle, budget: &Arc<Budget>, until: &Until, op: Op) -> Result<Body, Failure> {
+/// `op`'s JSON, built and written within the budget (see the module's
+/// doc), on the node whose home is `home`.
+fn body(
+    handle: &Handle,
+    home: &Path,
+    budget: &Arc<Budget>,
+    until: &Until,
+    op: Op,
+) -> Result<Body, Failure> {
     match op {
         Op::RepoInfo { rid } => json_read(
             budget,
             until,
-            |bounds| handle.node().repo_info_bounded(rid, &halved(bounds)),
+            |bounds| {
+                identity::check(&handle.node(), home, rid, bounds)?;
+                handle
+                    .node()
+                    .repo_info_bounded(rid, bounds)
+                    .map_err(Failure::from)
+            },
             json::repo_info,
         ),
         Op::Tree { rid, path } => json_read(
             budget,
             until,
-            |bounds| handle.node().tree_bounded(rid, &path, bounds),
+            |bounds| {
+                identity::check_headless(&handle.node(), home, rid, bounds)?;
+                handle
+                    .node()
+                    .tree_bounded(rid, &path, bounds)
+                    .map_err(Failure::from)
+            },
             |w, entries| json::tree(w, entries),
         ),
         Op::TreeAt {
@@ -633,31 +856,27 @@ fn body(handle: &Handle, budget: &Arc<Budget>, until: &Until, op: Op) -> Result<
             |bounds| handle.node().tree_at_bounded(rid, &revision, &path, bounds),
             |w, (entries, commit)| json::tree_at(w, entries, commit),
         ),
-        Op::Blob { rid, path } => json_read(
+        Op::Blob { rid, path } => blob_read(
             budget,
             until,
-            |bounds| {
-                bounded_blob(bounds, |limit| {
-                    handle.node().read_blob_capped(rid, &path, limit)
-                })
-            },
-            |w, blob| json::blob(w, &path, blob),
+            &path,
+            |bounds| identity::check_headless(&handle.node(), home, rid, bounds),
+            |limit| handle.node().read_blob_capped(rid, &path, limit),
         ),
         Op::BlobAt {
             rid,
             revision,
             path,
-        } => json_read(
+        } => blob_read(
             budget,
             until,
-            |bounds| {
-                bounded_blob(bounds, |limit| {
-                    handle
-                        .node()
-                        .read_blob_at_capped(rid, &revision, &path, limit)
-                })
+            &path,
+            |_| Ok(()),
+            |limit| {
+                handle
+                    .node()
+                    .read_blob_at_capped(rid, &revision, &path, limit)
             },
-            |w, blob| json::blob(w, &path, blob),
         ),
         Op::Commits {
             rid,
@@ -695,13 +914,25 @@ fn body(handle: &Handle, budget: &Arc<Budget>, until: &Until, op: Op) -> Result<
         Op::ListRepos => json_read(
             budget,
             until,
-            |bounds| handle.node().list_repos_bounded(bounds),
+            |bounds| {
+                identity::check_listed(&handle.node(), home, bounds)?;
+                handle
+                    .node()
+                    .list_repos_bounded(bounds)
+                    .map_err(Failure::from)
+            },
             |w, repos| json::repos(w, repos),
         ),
         Op::ListSeededRepos => json_read(
             budget,
             until,
-            |bounds| handle.node().list_seeded_repos_bounded(bounds),
+            |bounds| {
+                identity::check_listed(&handle.node(), home, bounds)?;
+                handle
+                    .node()
+                    .list_seeded_repos_bounded(bounds)
+                    .map_err(Failure::from)
+            },
             |w, repos| json::seeded_repos(w, repos),
         ),
         Op::Seeders { rid } => json_read(
@@ -713,7 +944,7 @@ fn body(handle: &Handle, budget: &Arc<Budget>, until: &Until, op: Op) -> Result<
         Op::Identity => json_read(
             budget,
             until,
-            |_| Ok(handle.node().identity()),
+            |_| Ok::<_, libradicle::Error>(handle.node().identity()),
             json::identity,
         ),
         Op::Status => json_read(
@@ -724,15 +955,15 @@ fn body(handle: &Handle, budget: &Arc<Budget>, until: &Until, op: Op) -> Result<
         ),
         Op::Issue { rid, id } => composed::issue(handle, budget, until, rid, &id),
         Op::Patch { rid, id } => composed::patch(handle, budget, until, rid, &id),
-        Op::Remotes { rid } => composed::remotes(handle, budget, until, rid),
+        Op::Remotes { rid } => composed::remotes(handle, home, budget, until, rid),
         Op::RepoStats { rid, revision } => {
-            composed::repo_stats(handle, budget, until, rid, &revision)
+            composed::repo_stats(handle, home, budget, until, rid, &revision)
         }
         Op::ReadmeAt { rid, revision } => {
             composed::readme_at(handle, budget, until, rid, &revision)
         }
-        Op::RepoMeta { rid } => composed::repo_meta(handle, budget, until, rid),
-        Op::ReposMeta => composed::repos_meta(handle, budget, until),
+        Op::RepoMeta { rid } => composed::repo_meta(handle, home, budget, until, rid),
+        Op::ReposMeta => composed::repos_meta(handle, home, budget, until),
         Op::Page {
             rid,
             cobs,
@@ -747,7 +978,7 @@ fn body(handle: &Handle, budget: &Arc<Budget>, until: &Until, op: Op) -> Result<
             cobs,
             (status.as_deref(), page.as_deref(), per_page.as_deref()),
         ),
-        Op::NodeInfo => composed::node_info(handle, budget, until),
+        Op::NodeInfo => composed::node_info(handle, home, budget, until),
     }
 }
 
@@ -797,23 +1028,33 @@ pub fn read(
         }
         testhooks::hold_work(&ticket.cancel);
         let until = Until::new(ticket.deadline, ticket.cancel.clone());
-        let built = body(&handle, &budget, &until, op);
+        let built = body(&handle, &home, &budget, &until, op);
         drop(handle);
         match built {
-            Ok(body) => stream(&conn, ticket, &budget, &until, body),
+            Ok(body) => {
+                let head = json!({ "content_type": "application/json", "bytes": body.bytes() });
+                stream(&conn, ticket, &budget, &until, &head, Some(body));
+            }
             // Whoever cancelled its token answers it: main's cancel, the
             // deadline's timer, or the stop.
             Err(Failure::Refused(Refused::Cancelled)) => {}
-            Err(failure) => refuse(&conn, ticket, &failure.error(radicle_error)),
+            Err(failure) => refuse(&conn, ticket, &failure.error(read_error)),
         }
     })
 }
 
-/// The head, then `body`, then its end (see the module's doc).
-fn stream(conn: &Connection, ticket: &Ticket, budget: &Arc<Budget>, until: &Until, body: Body) {
-    let head = json!({ "content_type": "application/json", "bytes": body.bytes() });
+/// `head`, then `body` and its end, if it has one (see the module's doc):
+/// without one, the head opens no stream.
+fn stream(
+    conn: &Connection,
+    ticket: &Ticket,
+    budget: &Arc<Budget>,
+    until: &Until,
+    head: &Value,
+    body: Option<Body>,
+) {
     // What the pending head holds, reserved until the writer has written it.
-    let charge = match fc_service::conn::head_len(ticket.id, &head) {
+    let charge = match fc_service::conn::head_len(ticket.id, head) {
         Ok(size) => budget.reserve(size as u64, until),
         Err(_) => {
             return refuse(
@@ -830,8 +1071,8 @@ fn stream(conn: &Connection, ticket: &Ticket, budget: &Arc<Budget>, until: &Unti
     };
     match conn.head_by(
         ticket.id,
-        &head,
-        true,
+        head,
+        body.is_some(),
         ticket.deadline,
         &late(),
         Some(Box::new(charge)),
@@ -840,6 +1081,9 @@ fn stream(conn: &Connection, ticket: &Ticket, budget: &Arc<Budget>, until: &Unti
         // `deadline` is its reply; or it is settled already, or closing.
         Ok(Headed::Late) | Err(_) => return,
     }
+    let Some(body) = body else {
+        return;
+    };
     for chunk in body {
         if !send(conn, ticket, chunk.as_slice()) {
             // Cancelled, aborted or closing: the rest is dropped, and its

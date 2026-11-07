@@ -323,6 +323,27 @@ fn the_confinement_point_is_single_threaded() {
     );
 }
 
+/// libgit2's object cache is off before anything reads (0008, "Pools and
+/// budgets"; review of #277, round 2): a tree looked up twice in a
+/// repository in memory is two objects, so nothing a walk loads outlives
+/// it. The probe sees the cache on in a process that hasn't turned it off
+/// (the unit test `reads::tests::the_probe_sees_the_object_cache`).
+#[test]
+fn libgit2s_object_cache_is_off() {
+    let dirs = Dirs::new();
+    let mut radicled = Radicled::serve(&dirs, &[("FREEDOM_RADICLED_TEST_OBJECT_CACHE", "1")]);
+    radicled.hello();
+    radicled.close_stdin();
+    assert_eq!(radicled.exit_code(EXIT_TIMEOUT), Some(0));
+    let log = radicled.stderr();
+    let line = log
+        .lines()
+        .find(|line| line.contains("libgit2's object cache"))
+        .unwrap_or_else(|| panic!("no probe in {log}"));
+    let line: Value = serde_json::from_str(line).unwrap();
+    assert_eq!(line["on"], false, "{line}");
+}
+
 /// Under `socks5`, `rad.hello` reports the policy as passed.
 #[test]
 fn hello_reports_a_socks5_policy() {

@@ -88,7 +88,8 @@ fn the_designs_figures() {
     assert_eq!(BUILT, 32 << 20);
     assert_eq!(JSON_READ, 64 << 20);
     assert_eq!(BLOB, 64 << 20);
-    assert_eq!(BLOB_LOADING, 128 << 20);
+    // Twice the blob, and libgit2's NUL and 256 bytes of structs.
+    assert_eq!(BLOB_LOADING, (128 << 20) + 257);
     assert_eq!(Budget::new(BUDGET).total(), BUDGET);
     assert_eq!(
         READ,
@@ -499,13 +500,16 @@ fn a_json_read_reserves_its_whole_build_before_it_walks_and_releases_it_once_wri
     let until = within(10_000);
     let body = json_read_within(
         limits,
+        0,
         &budget,
         &until,
         |bounds| {
             assert_eq!(budget.used(), 1000);
-            assert_eq!((bounds.budget, bounds.loads), (1000, 1000));
+            // Half for what it builds, half for what it loads, both held at
+            // once within the one reservation (review of #277, round 3).
+            assert_eq!((bounds.budget, bounds.loads), (500, 500));
             assert!(!bounds.cancel.is_cancelled());
-            Ok("x".repeat(100))
+            Ok::<_, libradicle::Error>("x".repeat(100))
         },
         |json, text| {
             serde_json::to_writer(&mut *json, text)?;
@@ -530,7 +534,9 @@ fn a_json_reads_walk_has_the_reads_token() {
         &budget,
         &until,
         |bounds| -> Result<(), _> {
-            assert_eq!((bounds.budget, bounds.loads), (BUILT, BUILT));
+            // The add-on's bounds: 16 MiB of items, 16 of loads.
+            assert_eq!((bounds.budget, bounds.loads), (BUILT / 2, BUILT / 2));
+            assert_eq!(BUILT / 2, libradicle::BINDING_READ_BUDGET);
             until.cancel.cancel();
             assert!(bounds.cancel.is_cancelled());
             Err(libradicle::Error::Cancelled)
@@ -588,9 +594,10 @@ fn a_json_read_that_cant_reserve_its_build_never_walks() {
     let started = Instant::now();
     let failure = json_read_within(
         limits,
+        0,
         &budget,
         &within(50),
-        |_| -> Result<(), _> { panic!("walked without its reservation") },
+        |_| -> Result<(), libradicle::Error> { panic!("walked without its reservation") },
         |_, _| unreachable!(),
     )
     .unwrap_err();
@@ -608,9 +615,10 @@ fn a_json_read_past_its_json_is_too_large_and_holds_nothing() {
     };
     let failure = json_read_within(
         limits,
+        0,
         &budget,
         &within(10_000),
-        |_| Ok("y".repeat(20)),
+        |_| Ok::<_, libradicle::Error>("y".repeat(20)),
         |json, text| serde_json::to_writer(json, text),
     )
     .unwrap_err();
@@ -629,7 +637,7 @@ fn the_6_mib_nul_blob_is_too_large_while_it_is_written() {
         &budget,
         &within(60_000),
         |_| {
-            Ok(libradicle::Blob {
+            Ok::<_, libradicle::Error>(libradicle::Blob {
                 binary: false,
                 content: vec![0; 6 << 20],
             })
@@ -654,7 +662,7 @@ fn json_at_the_cap_is_served_and_one_byte_more_is_too_large() {
         json_read(
             &budget,
             &within(60_000),
-            |_| Ok("j".repeat(len as usize - 2)),
+            |_| Ok::<_, libradicle::Error>("j".repeat(len as usize - 2)),
             |json, text| serde_json::to_writer(json, text),
         )
     };
@@ -685,7 +693,7 @@ fn four_reads_at_their_most_fill_the_budget_and_a_fifth_waits() {
                 json_read(
                     &budget,
                     &within(30_000),
-                    |_| Ok(()),
+                    |_| Ok::<_, libradicle::Error>(()),
                     |json, _| {
                         let step = [b' '; STEP];
                         for _ in 0..JSON / STEP as u64 {
@@ -706,7 +714,12 @@ fn four_reads_at_their_most_fill_the_budget_and_a_fifth_waits() {
             .expect("four reads at their most didn't fit the budget");
     }
     assert_eq!(budget.used(), BUDGET);
-    let fifth = json_read(&budget, &within(100), |_| Ok(()), |_, _| unreachable!());
+    let fifth = json_read(
+        &budget,
+        &within(100),
+        |_| Ok::<_, libradicle::Error>(()),
+        |_, _| unreachable!(),
+    );
     assert!(matches!(fifth, Err(Failure::Refused(Refused::Deadline))));
     drop(go);
     let bodies: Vec<Body> = readers
@@ -718,4 +731,68 @@ fn four_reads_at_their_most_fill_the_budget_and_a_fifth_waits() {
     assert!(bodies.iter().all(|body| body.bytes() == JSON));
     drop(bodies);
     assert_eq!(budget.used(), 0);
+}
+
+/// A reservation split gives nothing back: the part is released as it
+/// drops, the rest as the rest does.
+#[test]
+fn a_split_reservation_releases_each_part_as_it_drops() {
+    let budget = Budget::new(1000);
+    let mut whole = budget.reserve(600, &within(1000)).unwrap();
+    let part = whole.split(200);
+    assert_eq!(
+        (whole.bytes(), part.bytes(), budget.used()),
+        (400, 200, 600)
+    );
+    drop(part);
+    assert_eq!(budget.used(), 400);
+    // Past what it holds: all of it.
+    let rest = whole.split(10_000);
+    assert_eq!((whole.bytes(), rest.bytes(), budget.used()), (0, 400, 400));
+    drop(whole);
+    assert_eq!(budget.used(), 400);
+    drop(rest);
+    assert_eq!(budget.used(), 0);
+}
+
+/// `rad.blob`'s range copied into a body: chunks of at most 64 KiB, each
+/// holding its own share of the reservation, released as it drops; the
+/// rest stays with the reservation. One the reservation doesn't cover is
+/// refused, and takes nothing.
+#[test]
+fn bytes_copied_into_a_body_hold_their_share_of_the_reservation() {
+    let budget = Budget::new(BUDGET);
+    let bytes: Vec<u8> = (0..3 * STEP + 7).map(|i| (i % 251) as u8).collect();
+    let mut held = budget
+        .reserve(2 * bytes.len() as u64, &within(1000))
+        .unwrap();
+    let mut body = Body::copied(&bytes, &mut held).unwrap();
+    assert_eq!(body.bytes(), bytes.len() as u64);
+    assert_eq!(held.bytes(), bytes.len() as u64);
+    assert_eq!(budget.used(), 2 * bytes.len() as u64);
+    drop(held);
+    assert_eq!(budget.used(), bytes.len() as u64);
+    let first = body.next().unwrap();
+    assert_eq!(first.as_slice(), &bytes[..STEP]);
+    assert_eq!(first.reservation.bytes(), STEP as u64);
+    assert_eq!(first.bytes.capacity(), STEP);
+    drop(first);
+    assert_eq!(budget.used(), (bytes.len() - STEP) as u64);
+    let mut out = bytes[..STEP].to_vec();
+    for chunk in body {
+        assert!(!chunk.as_slice().is_empty() && chunk.as_slice().len() <= STEP);
+        out.extend_from_slice(chunk.as_slice());
+    }
+    assert_eq!(out, bytes);
+    assert_eq!(budget.used(), 0);
+
+    let mut short = budget.reserve(10, &within(1000)).unwrap();
+    assert!(matches!(
+        Body::copied(&[0; 11], &mut short),
+        Err(Failure::Internal(_))
+    ));
+    assert_eq!(short.bytes(), 10);
+    // Empty: no chunk.
+    let empty = Body::copied(&[], &mut short).unwrap();
+    assert_eq!((empty.bytes(), empty.count(), short.bytes()), (0, 0, 10));
 }
