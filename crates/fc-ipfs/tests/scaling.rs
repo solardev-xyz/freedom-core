@@ -27,10 +27,18 @@ fn cpu_ns() -> u128 {
         .unwrap_or_else(|| START.get_or_init(Instant::now).elapsed().as_nanos())
 }
 
-/// What one read of `text` costs in CPU time, in nanoseconds, repeated
-/// until 200 ms are used, since the scheduler brings a running thread's
-/// account up to date only at its ticks.
+/// What one read of `text` costs, in nanoseconds: the least of three
+/// measurements. Off Linux the clock is the wall's, and a runner that
+/// deschedules this thread for a moment inflates one measurement (#294:
+/// 14.8 times on a macOS runner); the least of three drops that moment.
 fn cost(text: &str) -> f64 {
+    (0..3).map(|_| measured(text)).fold(f64::INFINITY, f64::min)
+}
+
+/// One measurement of what a read of `text` costs in CPU time, in
+/// nanoseconds, repeated until 200 ms are used, since the scheduler
+/// brings a running thread's account up to date only at its ticks.
+fn measured(text: &str) -> f64 {
     let start = cpu_ns();
     let mut runs = 0u32;
     loop {
