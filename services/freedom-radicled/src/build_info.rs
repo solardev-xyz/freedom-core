@@ -10,7 +10,7 @@ pub const LIBRADICLE_VERSION: &str = "0.8.0";
 /// non-UTF-8 diff decoded lossily, never a panic), #30 (the stop's
 /// `Shutdown` outcome), #22 (the host's repository gate), #23 (the hermetic
 /// test guard) and #28 (`Options::seeding_policy`).
-pub const LIBRADICLE_COMMIT: &str = "46cf9d99ec868c938ffed13b6a38fbeda0a50857";
+pub const LIBRADICLE_COMMIT: &str = "216ced6dddccd7cb1103b2cfda238936cd618897";
 
 #[cfg(test)]
 mod tests {

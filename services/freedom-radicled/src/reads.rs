@@ -712,6 +712,7 @@ fn pathless(e: &libradicle::Error, message: &str) -> bool {
         | E::NoIdentityHead(_)
         | E::NoCanonicalHead(_)
         | E::NoSeeds(_)
+        | E::NoProject
         | E::Timeout(_)
         | E::Gated { .. }
         | E::Open(_)
