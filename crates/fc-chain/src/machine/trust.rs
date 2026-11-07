@@ -106,11 +106,15 @@ pub(crate) fn colibri_trust(prover: Option<&Prover>) -> String {
     )
 }
 
-/// Blockscout's pairing: the log index and the RPC endpoint that agreed.
-pub(crate) fn blockscout_trust(index: &str, rpc: &str) -> String {
+/// Blockscout's pairing: the log index and the RPC endpoint that agreed,
+/// at `verified` when the chain's quorum verifies, otherwise `unverified`:
+/// its newest blocks are that quorum's (deviation `singleton-quorum`;
+/// #297). The rest is the same either way.
+pub(crate) fn blockscout_trust(index: &str, rpc: &str, verified: bool) -> String {
     let both = refs(&[index.to_owned(), rpc.to_owned()]);
+    let level = if verified { "verified" } else { "unverified" };
     format!(
-        "{{\"level\":\"verified\",\"method\":\"blockscout\",\"block\":null,\"agreed\":{both},\"dissented\":[],\"queried\":{both},\"quorum\":{}}}",
+        "{{\"level\":\"{level}\",\"method\":\"blockscout\",\"block\":null,\"agreed\":{both},\"dissented\":[],\"queried\":{both},\"quorum\":{}}}",
         quorum_label(2, 2.0, true)
     )
 }
