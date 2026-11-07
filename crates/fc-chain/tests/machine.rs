@@ -3541,3 +3541,115 @@ fn fee_quote_myotis_block_through_the_read_path() {
         r#"{"type":"legacy","gasPrice":"50000125","effectiveGasPrice":"50000125","source":"myotis","verified":true}"#
     );
 }
+
+// ---------------------------------------------------------------------------
+// singleton-quorum: Blockscout's label (#297). Its answer takes its newest
+// blocks from the RPC quorum, so it is verified only as the quorum is: with
+// m = 1, one endpoint's word. No vector reads Blockscout with m = 1.
+
+const LOG_INDEX: &str = "index";
+const SCAN_TO: u64 = 30_000_000;
+
+/// Chain 100 with the log index and three endpoints, each refusing more
+/// than 10,000 blocks once it has said so.
+fn ant_chain(m: &str) -> ChainConfig {
+    ChainConfig {
+        display_name: "Gnosis".into(),
+        blockscout: Some(LOG_INDEX.into()),
+        ..chain(
+            100,
+            &["myotis", "colibri", "quorum", "direct"],
+            &["a", "b", "c"],
+            ("3", m, "5000"),
+        )
+    }
+}
+
+/// The Ant profile's xBZZ Transfer scan by sender over 10,500 blocks, with
+/// trust: wider than any endpoint serves once it has refused 10,000, so
+/// Blockscout pairs with one for the leading 9,500 and the quorum reads
+/// the newest 1,000.
+fn ant_scan() -> Call {
+    Call::Read {
+        chain_id: 100,
+        method: "eth_getLogs".into(),
+        params: format!(
+            r#"[{{"address":"0xdBF3Ea6F5beE45c02255B2c26a16F300502F68da","fromBlock":"0x{:x}","toBlock":"0x{SCAN_TO:x}","topics":["0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef","0x000000000000000000000000971f31aaeac713b47aa55e50c06409afc1de46b9"]}}]"#,
+            SCAN_TO - 10_499
+        ),
+        options: ReadOptions {
+            include_trust: true,
+            ..ReadOptions::ant_scan()
+        },
+    }
+}
+
+/// Answers every request made from `from` on, and each one those answers
+/// lead to: an RPC request with `rpc`'s answer, a Blockscout page with an
+/// empty last page.
+fn serve(world: &mut World, from: usize, rpc: &dyn Fn() -> Answer) {
+    let mut next = from;
+    while let Some((io, _, request, _)) = world.requests.get(next).cloned() {
+        next += 1;
+        let answer = match request {
+            Request::Rpc { .. } => rpc(),
+            Request::Blockscout { .. } => Answer::Blockscout {
+                status: 200,
+                headers: Vec::new(),
+                body: br#"{"items":[],"next_page_params":null}"#.to_vec(),
+            },
+            other => panic!("{other:?}"),
+        };
+        world.answer(io, answer);
+    }
+}
+
+#[test]
+fn blockscouts_label_follows_its_quorums() {
+    for (m, verified, level) in [
+        ("1", false, "unverified"),
+        ("2", true, "verified"),
+        ("3", true, "verified"),
+    ] {
+        let mut world = World::new(Bounds::default(), &[ant_chain(m)]);
+        // The first scan teaches the caps: every endpoint refuses it, and
+        // Blockscout isn't asked while a quorum may serve the span.
+        let first = world.submit(ant_scan(), None);
+        serve(&mut world, 0, &|| {
+            node_error(-32701, "exceed maximum block range: 10000")
+        });
+        assert!(world.reply(first).result.is_err(), "m = {m}");
+        let asked = world.requests.len();
+        assert!(
+            !world
+                .requests
+                .iter()
+                .any(|(_, _, request, _)| matches!(request, Request::Blockscout { .. })),
+            "m = {m}"
+        );
+        // The second is Blockscout's: the pair, the index and the newest
+        // blocks' quorum agree, on no log.
+        let second = world.submit(ant_scan(), None);
+        serve(&mut world, asked, &|| ok("[]"));
+        assert!(
+            world.requests[asked..]
+                .iter()
+                .any(|(_, _, request, _)| matches!(request, Request::Blockscout { .. })),
+            "m = {m}"
+        );
+        let both = format!(r#"[{{"ref":"{LOG_INDEX}"}},{{"ref":"a"}}]"#);
+        let trust = format!(
+            r#"{{"level":"{level}","method":"blockscout","block":null,"agreed":{both},"dissented":[],"queried":{both},"quorum":{{"k":2,"m":2,"achieved":true}}}}"#
+        );
+        assert_eq!(
+            world.reply(second).result,
+            Ok(Success::Read {
+                result: Some("[]".into()),
+                source: "blockscout",
+                verified,
+                trust: Some(trust),
+            }),
+            "m = {m}"
+        );
+    }
+}

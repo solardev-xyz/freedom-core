@@ -192,9 +192,11 @@ fn answered(
         result: answer.result,
         source,
         verified: match source {
-            "myotis" | "colibri" | "blockscout" => true,
+            "myotis" | "colibri" => true,
             // m = 1 is one endpoint's answer (deviation `singleton-quorum`).
-            "quorum" => req.chain.quorum_verifies(),
+            // Blockscout's newest blocks are that quorum's, so its answer
+            // follows the same rule (#297, main's freedom-browser #1097).
+            "quorum" | "blockscout" => req.chain.quorum_verifies(),
             _ => false,
         },
         trust: if include_trust { answer.trust } else { None },

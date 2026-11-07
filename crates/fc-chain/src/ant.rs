@@ -16,8 +16,9 @@ use fc_json::index::{Index, Kind};
 use crate::js::{is_safe_integer, string_to_number};
 use crate::pattern::{JsPattern, MatchText, lowercase};
 
-/// What the profile's callers exclude: only two independent providers that
-/// agree answer a scan (the quorum, or Blockscout with one RPC endpoint).
+/// What the profile's callers exclude: only two sources that agree answer a
+/// scan (the quorum, or Blockscout with one RPC endpoint). Their operator
+/// independence isn't enforced yet (#297).
 pub const ANT_EXCLUDE_SOURCES: [&str; 3] = ["myotis", "colibri", "direct"];
 
 /// The opt-in source the profile names.
