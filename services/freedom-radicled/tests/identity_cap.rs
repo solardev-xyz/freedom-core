@@ -1,8 +1,8 @@
 //! The identity document's cap through the real binary (design 0008's
 //! deviation `identity-cap`): every read that parses a repository's
-//! identity document refuses one whose blob is over 1 MiB, from the blob's
+//! identity document refuses one whose blob is over 64 KiB, from the blob's
 //! size, before anything parses it, with a fixed `too_large`; one of
-//! exactly 1 MiB is served.
+//! exactly 64 KiB is served.
 //!
 //! The documents are written straight into storage before the service
 //! starts, each a commit after the identity's head at `refs/rad/id`
@@ -26,11 +26,11 @@ use libradicle::{Bounds, json};
 use radicle::prelude::RepoId;
 use serde_json::{Value, json};
 
-/// The cap: 1 MiB, the document blob's size.
-const DOCUMENT: usize = 1 << 20;
+/// The cap: 64 KiB, the document blob's size.
+const DOCUMENT: usize = 64 << 10;
 
 /// The fixed answer past it.
-const OVER: &str = "the repository's identity document is over 1 MiB";
+const OVER: &str = "the repository's identity document is over 64 KiB";
 
 fn served(dirs: &Dirs) -> Radicled {
     let mut radicled = Radicled::serve(dirs, &[]);
@@ -91,7 +91,7 @@ fn is_over(reply: &Result<Vec<u8>, Value>) -> bool {
 }
 
 /// 0008, "Errors" and deviation `identity-cap`: four repositories, whose
-/// documents are exactly 1 MiB (`at`), one byte more (`over`), one byte
+/// documents are exactly 64 KiB (`at`), one byte more (`over`), one byte
 /// more that isn't JSON (`unparsed`), and one byte more whose project
 /// payload isn't a project (`unprojected`).
 /// - The reads of one repository that parse its document, `repo_info`,
@@ -106,7 +106,7 @@ fn is_over(reply: &Result<Vec<u8>, Value>) -> bool {
 ///   whose listing by libradicle would fail with its own error first;
 ///   once all three are unseeded, served, `at` alone.
 #[test]
-fn an_identity_document_over_1_mib_is_refused_before_it_is_parsed() {
+fn an_identity_document_over_64_kib_is_refused_before_it_is_parsed() {
     let dirs = Dirs::new();
     configure(&dirs.home, json!({}));
     let (at, at_commit) = repository(&dirs.home, "at");

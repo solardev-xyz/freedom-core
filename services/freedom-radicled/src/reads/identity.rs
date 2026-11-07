@@ -1,6 +1,6 @@
 //! The identity document's cap (design 0008's deviation `identity-cap`): a
 //! read that would parse a repository's identity document refuses one
-//! whose blob is over [`DOCUMENT`], 1 MiB, from the blob's header, before
+//! whose blob is over [`DOCUMENT`], 64 KiB, from the blob's header, before
 //! anything parses it. It answers `too_large` with a fixed text, [`OVER`].
 //!
 //! **Why:** the document is `embeds/radicle.json` in the tree of the commit
@@ -8,8 +8,9 @@
 //! (`Doc::load_at`). libradicle sizes the blob from its header before that
 //! and charges its bytes, but not what the parse holds: a document's
 //! payloads are any JSON, and a dense one holds many times its size once
-//! parsed. Real documents are a few KB; 1 MiB holds thousands of delegates
-//! or allowed DIDs. Main reads it today with no cap (the add-on's
+//! parsed. Real documents are a few KB; 64 KiB holds about a thousand
+//! delegates or allowed DIDs, and a parse of it holds about 9 MB at the
+//! densest measured (143 times its size), inside one read's 32 MiB. Main reads it today with no cap (the add-on's
 //! `repo_info` and the rest), as heartwood does.
 //!
 //! **The reads that parse it,** each through libradicle, and the check
@@ -51,12 +52,12 @@ use radicle::storage::git::Repository;
 use crate::node::SEEDING;
 use crate::output::{Failure, Refused};
 
-/// The largest identity document a read parses: 1 MiB, its blob's size.
-pub const DOCUMENT: u64 = 1 << 20;
+/// The largest identity document a read parses: 64 KiB, its blob's size.
+pub const DOCUMENT: u64 = 64 << 10;
 
 /// What a read answers for a repository whose identity document is over
 /// [`DOCUMENT`]: `too_large`, with this text, whatever its size.
-pub const OVER: &str = "the repository's identity document is over 1 MiB";
+pub const OVER: &str = "the repository's identity document is over 64 KiB";
 
 /// The document's path in the tree of the commit `refs/rad/id` names, as
 /// heartwood reads it (`Doc::blob_at`).
@@ -182,8 +183,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_cap_is_1_mib_and_its_answer_is_fixed() {
-        assert_eq!(DOCUMENT, 1_048_576);
+    fn the_cap_is_64_kib_and_its_answer_is_fixed() {
+        assert_eq!(DOCUMENT, 65_536);
         let answer = over();
         assert_eq!(answer.code, ErrorCode::TooLarge);
         assert_eq!(answer.message, OVER);
