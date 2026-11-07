@@ -450,11 +450,11 @@ dependencies = [
  "fc-swarm",
  "hex",
  "mime_guess",
- "peak_alloc",
  "serde_json",
  "sha2",
  "sha3",
  "thiserror",
+ "tracking-allocator",
  "url",
 ]
 
@@ -1055,12 +1055,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "peak_alloc"
-version = "0.3.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ccc90935a8dd139fdf341762773687a1e361d3f54b396a55d9dd1f7001e484bb"
-
-[[package]]
 name = "percent-encoding"
 version = "2.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1576,6 +1570,12 @@ name = "tinyvec"
 version = "1.13.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "fd3ca314f692efd6c868f8408f53fe444634a845f96c028b97d35f6a1f79f0ee"
+
+[[package]]
+name = "tracking-allocator"
+version = "0.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1b61e0cb3385e17df7db29c565b40fd0350dfe8a076c7eea83d416e30cfd0581"
 
 [[package]]
 name = "typenum"
