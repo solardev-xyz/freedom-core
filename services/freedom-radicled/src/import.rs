@@ -387,6 +387,7 @@ fn stage_name(stage: libradicle::import::Stage) -> &'static str {
         Stage::Fetched => "fetched",
         Stage::Signed => "signed",
         Stage::Seeded => "seeded",
+        Stage::Moved => "moved",
         _ => "other",
     }
 }

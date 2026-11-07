@@ -2163,7 +2163,7 @@ checksum = "b6d2cec3eae94f9f509c767b45932f1ada8350c4bdb85af2fcab4a3c14807981"
 [[package]]
 name = "libradicle"
 version = "0.8.0"
-source = "git+https://github.com/solardev-xyz/libradicle?rev=a9a9d35ef72800637c0af67fdfc35fda4d653110#a9a9d35ef72800637c0af67fdfc35fda4d653110"
+source = "git+https://github.com/solardev-xyz/libradicle?rev=46cf9d99ec868c938ffed13b6a38fbeda0a50857#46cf9d99ec868c938ffed13b6a38fbeda0a50857"
 dependencies = [
  "dunce",
  "ed25519-dalek",

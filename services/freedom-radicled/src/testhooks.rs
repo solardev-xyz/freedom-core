@@ -87,7 +87,8 @@
 //! - `FREEDOM_RADICLED_TEST_HOLD_IMPORT=<stage>@<hold>` holds the import at
 //!   `<stage>`: `admitted`, on its thread before libradicle's checks and
 //!   the start; `start`, just past its start, before libradicle's call; or
-//!   `created`, `fetched`, `signed` or `seeded`, each once libradicle has
+//!   `created`, `fetched`, `signed`, `seeded` or `moved` (the repository in
+//!   place, before the storage directory's flush), each once libradicle has
 //!   done that durable step. `<hold>` is a number of milliseconds,
 //!   `until:<path>` (until a file exists there, or 30 s), or `panic`. While
 //!   it is set, each stage reached logs `test hook: the import reached a

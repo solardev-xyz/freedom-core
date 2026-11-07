@@ -34,7 +34,7 @@ fc-service = { path = "../../crates/fc-service" }
 # The sealed release of the node key (0008, "The sealed release"): the
 # service's X25519 key for one start, and opening what the core sealed to it.
 fc-seal = { path = "../../crates/fc-seal" }
-# libradicle at its #33 (a9a9d35, on `integration/rust-core` 0bc2c72),
+# libradicle at `integration/rust-core` (46cf9d9, #33's merge),
 # built with `no-spawn`,
 # explicitly (0008, "Spawn and lock"): serving runs in process and `git gc`
 # is skipped. It carries the upstream changes 0008 lists for the service's
@@ -54,11 +54,11 @@ fc-seal = { path = "../../crates/fc-seal" }
 # an alias Radicle refuses is `Error::Alias`. Then the bounded reads' charges
 # for what libgit2 holds of a tree or commit (libradicle #32), and the import
 # with no node (#33: `import::Import`, a libgit2 fetch into a temporary clone
-# moved into place last, the working copy never written), which the import
-# process runs. Pinned by commit until those changes are released (deny.toml
-# allows solardev-xyz).
+# moved into place last, the working copy never written, its `Moved` stage
+# told after the move), which the import process runs. Pinned by commit
+# until those changes are released (deny.toml allows solardev-xyz).
 # src/build_info.rs reports the same commit.
-libradicle = { git = "https://github.com/solardev-xyz/libradicle", rev = "a9a9d35ef72800637c0af67fdfc35fda4d653110", features = ["no-spawn"] }
+libradicle = { git = "https://github.com/solardev-xyz/libradicle", rev = "46cf9d99ec868c938ffed13b6a38fbeda0a50857", features = ["no-spawn"] }
 # heartwood's `radicle`, at the commit libradicle pins, so that both resolve
 # to one package (build_info's test holds them to one commit): the node
 # identity's public forms (`did:key`, the node ID), and, from the next step,
