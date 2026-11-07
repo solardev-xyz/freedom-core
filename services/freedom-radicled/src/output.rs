@@ -191,20 +191,12 @@ impl Budget {
         self.used.lock().unwrap_or_else(|p| p.into_inner())
     }
 
-    /// Its total.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "rad.stats reports it, a later step")
-    )]
+    /// Its total: `rad.stats`'s budget limit.
     pub fn total(&self) -> u64 {
         self.total
     }
 
     /// The bytes reserved now: `rad.stats`'s budget use.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "rad.stats reports it, a later step")
-    )]
     pub fn used(&self) -> u64 {
         *self.lock()
     }

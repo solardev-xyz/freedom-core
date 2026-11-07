@@ -430,7 +430,7 @@ The rules this design relies on, as 0007 specifies them:
 | `rad.quarantine_list` | `page` | `{ entries, next_page }`: up to 64 entries `{ rid, qid, kind, step, unit, since }` per page | read pool; 60 s |
 | `rad.remove_repo` | `rid`, `qid` | `{ removed }`, or `not_quarantined` when no record with that `qid` exists ([the escape](#the-escape)) | write queue; 60 s |
 | `rad.start` | `alias` | `did`, `nid`, `alias`; the node runs as the key from `rad.identity` | 30 s; on failure, the process exits |
-| `rad.stats` | none | `connected_peers`, `node_alive`, the repair unit in progress and its elapsed time, `quarantined_count`, pool and budget use | inline; 5 s |
+| `rad.stats` | none | `node`, `node_alive`, `connected_peers`, the repair unit in progress and its elapsed time, `quarantined_count`, pool and budget use, and the network's NAT64 state ([below](#stats)) | inline: answered at once on the reader, in every phase from the handshake on, never waiting |
 | `rad.shutdown` | none | none: the process exits | main kills after 10 s |
 | `rad.read` | `op`, `args` | head `{ content_type: "application/json", bytes }`, then the JSON as a body stream | read pool; 60 s to the head |
 | `rad.blob` | `rid`, `revision`, `path`, `range?`, `head_only?` | head `{ oid, size, binary?, range }`, then the bytes | read pool; 60 s to the head |
@@ -447,6 +447,17 @@ The rules this design relies on, as 0007 specifies them:
   - `comment_patch`: `{ rid, revision_id, body }`, giving `{ id }`.
 
   The service checks what libradicle would refuse of them (the RID, a COB ID, a title, a label, the state) before the write starts, so each of those is `invalid_argument`, never `outcome_unknown` ([Writes](#writes)).
+- <a id="stats"></a>**`rad.stats`'s result** is what the service holds in memory, each part behind a lock held only briefly. Nothing in it takes the node's lock, asks heartwood or reads the disk, so a full read pool, a repair on the writer or a busy reactor never delays it:
+  - `node`, the node's phase: `waiting` before `rad.start`, `starting`, `running`, `down` once its thread ended while it should run (the process is ending), and `stopped` once the start failed or the connection ended;
+  - `node_alive`: `running`, and its thread still runs, as `Embedded::node_alive` says. The node's lock is only tried: while work holds it exclusively, the node's watch, which asks once a second, hasn't found it down;
+  - `connected_peers`: the node's connected sessions, as the node's watch last counted them. heartwood answers its sessions only through its reactor, so the watch asks `Embedded::connected_peers` once a second, holding the node shared outside the phase's lock, and the stop waits for a count under way, within its time, before it asks the node to stop. Null until the first count, after a count that failed, and whenever the node isn't `running`;
+  - `unit`: the repair unit in progress, reconciliation's or the online repair's, `{ kind, elapsed_ms, limit_ms }`, or null ([the unit watchdog](#the-unit-watchdog));
+  - `quarantined_count`: the repositories the quarantine record holds, from `rad.reconcile`'s report, then counted again from the record wherever the service changes it: after an online repair quarantines a repository, and after `rad.remove_repo`'s removal. Null before `rad.reconcile` has counted them, and after a count that failed;
+  - `pools`: each pool's requests `running` and `queued`, its `threads` and its `queue`'s places, and the write queue's online `repairs` queued;
+  - `budget.output`: the output budget's bytes reserved (`used`) and its total (`limit`);
+  - `network`: the process's `mode`, and `nat64`: in `direct` mode, while the node runs, discovery's `state`, its `prefixes` and the names of why its last round's resolvers failed, as freedom-ipfsd reports them; otherwise null.
+
+  Every list is cut, the prefixes to the 16 a state holds and the failures to the first 16, whatever the OS lists, so the result is at most 4 KiB, one frame. It reserves nothing from the output budget: it reports it, and must answer while the budget is full. Params are none, null or `{}`; anything else is `invalid_argument`, and the process goes on. `vectors/radicle-stats.json` pins the result for each state of the service (the design's cases, `source: design`), and ties `connected_peers` to the count main shows today.
 - **`rad.read`'s `op`** is one of the ops below, in three classes. Each body is JSON, and its class says whose bytes it reproduces ([Parity](#parity)).
   - **Pass-through:** the exact JSON text the v0.8.0 add-on returns for that export, with today's arguments:
     - `repo_info`, `tree`, `tree_at`, `blob`, `blob_at`;
@@ -1340,6 +1351,7 @@ Measured against the add-on on linux-x64, macOS arm64 and win-x64:
 | other callers in main | 64 outstanding, 64 waiting | `busy` |
 | admission in main | shared with dweb fetches: 256 active, 512 waiting | 503 |
 | health | `rad.stats` every 5 s; main's watchdog at 20 s | kill |
+| `rad.stats` | inline; one reply of at most 4 KiB; NAT64's prefixes and failures at most 16 each; the peers counted once a second | the lists are cut |
 | heartwood internals | not bounded by the service ([Pools and budgets](#pools-and-budgets)) | an [open question](#open-questions) |
 
 ## Deviations

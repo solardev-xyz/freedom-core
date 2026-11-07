@@ -18,6 +18,7 @@ FILES.push('dweb.json', 'dweb-verify-plans.json', 'generator/dweb.js');
 FILES.push('streams.json', 'generator/streams.js');
 FILES.push('radicle-reads.json', 'generator/radicle-reads.js');
 FILES.push('radicle-network.json', 'generator/radicle-network.js');
+FILES.push('radicle-stats.json', 'generator/radicle-stats.js');
 
 function corruptedCheck(filename, corrupt) {
   const copy = fs.mkdtempSync(path.join(os.tmpdir(), 'freedom-core-vectors-'));
@@ -682,4 +683,12 @@ test('check rejects a changed progress envelope', () => {
     entry.written[8] = entry.written[8].replace('"count\\":12', '"count\\":13');
   });
   assert.match(stderr, /Byte mismatch: radicle-network.json/);
+});
+
+test('check rejects a changed stats result', () => {
+  const stderr = corruptedCheck('radicle-stats.json', (contents) => {
+    const entry = contents.cases.find((item) => item.id === 'nat64-past-its-bounds');
+    entry.result_text = entry.result_text.replace('"over_limit"]', '"over_limit","over_limit"]');
+  });
+  assert.match(stderr, /Byte mismatch: radicle-stats.json/);
 });

@@ -67,6 +67,7 @@ use serde_json::json;
 
 use crate::node::{Handle, Node};
 use crate::pools::{Repairer, Turn};
+use crate::stats::Quarantined;
 use crate::testhooks;
 use crate::units::UnitWatch;
 
@@ -88,17 +89,27 @@ pub struct Online {
     node: Weak<Node>,
     home: PathBuf,
     watch: Arc<UnitWatch>,
+    /// The record's count, for `rad.stats`: counted again after a
+    /// quarantine.
+    quarantined: Arc<Quarantined>,
     active: Mutex<HashMap<RepoId, Active>>,
 }
 
 impl Online {
     /// The repair of `node`'s repositories, in the home at `home`, its
-    /// units told to `watch`.
-    pub fn new(node: Weak<Node>, home: PathBuf, watch: Arc<UnitWatch>) -> Self {
+    /// units told to `watch`, and the record counted again into
+    /// `quarantined` after it quarantines one.
+    pub fn new(
+        node: Weak<Node>,
+        home: PathBuf,
+        watch: Arc<UnitWatch>,
+        quarantined: Arc<Quarantined>,
+    ) -> Self {
         Self {
             node,
             home,
             watch,
+            quarantined,
             active: Mutex::new(HashMap::new()),
         }
     }
@@ -251,6 +262,7 @@ impl Repairer for Online {
                     handle
                         .repositories
                         .close(rid, RepoState::Quarantined(kind), Duration::ZERO);
+                self.quarantined.recount(&entry.record);
                 log::error(
                     "an online repair quarantined its repository",
                     json!({

@@ -28,6 +28,10 @@
 //!   published `Down`, before it claims exit 70: it logs `test hook: the
 //!   watch holds the node down` and never goes on, so only a stop that takes
 //!   the `Down` node can end the process with 70.
+//! - `FREEDOM_RADICLED_TEST_HOLD_LOOK=<ms>` holds each of the node's
+//!   watch's looks at its peers that many milliseconds, with the node held
+//!   shared, before it asks heartwood ([`crate::node`]), logging `test
+//!   hook: the watch's look holds the node`: a look the stop meets.
 //! - `FREEDOM_RADICLED_TEST_WORK_DEADLINE_MS` replaces the read pool's and
 //!   the write queue's 60 s deadlines.
 //! - `FREEDOM_RADICLED_TEST_BUDGET=<bytes>` replaces the output budget's
@@ -471,6 +475,19 @@ pub fn stop_node() -> bool {
         return true;
     }
     false
+}
+
+/// In the node's watch's look at its peers, with the node held shared:
+/// holds it, if asked.
+pub fn hold_look() {
+    #[cfg(feature = "testhooks")]
+    if let Some(ms) = millis("FREEDOM_RADICLED_TEST_HOLD_LOOK") {
+        fc_service::log::info(
+            "test hook: the watch's look holds the node",
+            serde_json::json!({}),
+        );
+        std::thread::sleep(Duration::from_millis(ms));
+    }
 }
 
 /// After the node's watch has published `Down`, before it claims the exit:

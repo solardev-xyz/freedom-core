@@ -70,9 +70,10 @@ fn the_node_runs_as_the_sealed_key_and_a_clean_stop_clears_the_marker() {
     );
     // Present while the node runs.
     assert_eq!(fixture::marked(&dirs.home), Some(vec![NID.to_owned()]));
-    // Still starting nothing else: the reads come with later steps.
+    // `rad.stats` says it runs (tests/stats.rs).
     let reply = radicled.call("rad.stats", json!({}));
-    assert_eq!(reply["error"]["code"], "stopped", "{reply}");
+    assert_eq!(reply["result"]["node"], "running", "{reply}");
+    assert_eq!(reply["result"]["node_alive"], true, "{reply}");
 
     radicled.shutdown();
     assert_eq!(radicled.exit_code(EXIT_TIMEOUT), Some(0));

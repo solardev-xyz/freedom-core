@@ -57,11 +57,8 @@ impl Discovery {
         self.inner.lease()
     }
 
-    /// What `rad.stats` will report of it.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "rad.stats reports it, a later step")
-    )]
+    /// What `rad.stats` reports of it ([`crate::stats`]): its state, its
+    /// prefixes and why the last round's resolvers failed.
     pub fn stats(&self) -> serde_json::Value {
         self.inner.stats()
     }
