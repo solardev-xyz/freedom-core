@@ -68,14 +68,6 @@ pub enum VerifiedOp {
     },
     /// `myotisManager.ethCall` at `latest`, then the optimistic block.
     MyotisCall { to: [u8; 20], data: Vec<u8> },
-    /// `resolveCallViaColibri(name, callData, callResolver)`.
-    ColibriResolve {
-        name: String,
-        call_data: Vec<u8>,
-        resolver: &'static str,
-    },
-    /// `resolveReverseViaColibri(address, coinType)`.
-    ColibriReverse { address: String, coin_type: u64 },
 }
 
 /// A verifier operation's outcome, without text.
@@ -118,7 +110,9 @@ pub struct Config {
     /// `network.quorum`, raw: the reference coerces it where it reads it.
     pub quorum: JsValue,
     pub myotis_enabled: bool,
-    /// The Colibri prover, and whether proofs are zk.
+    /// The Colibri prover, and whether proofs are zk. Naming asks Colibri
+    /// nothing (main's #1076); main still sends it, and a change still
+    /// starts a new ENS generation.
     pub prover: Option<(Endpoint, bool)>,
     /// Tezos RPC endpoints, in order.
     pub tezos: Vec<Endpoint>,

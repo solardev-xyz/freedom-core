@@ -381,7 +381,8 @@ pub(crate) fn reverse_conflict(
     ])
 }
 
-/// `resolveEnsReverseWithMethod`: `Ok(None)` when unavailable.
+/// `resolveEnsReverseWithMethod`: `Ok(None)` when unavailable, as Colibri
+/// always is (main's #1076).
 pub(crate) async fn ens_reverse_with(
     ctx: &Ctx,
     machine: &crate::session::machine::Shared,
@@ -389,9 +390,6 @@ pub(crate) async fn ens_reverse_with(
     address: &str,
     coin_type: u64,
 ) -> Result<Option<JsValue>, Thrown> {
-    if method == "colibri" {
-        return colibri_reverse(ctx, address, coin_type).await.map(Some);
-    }
     let lookup = Lookup {
         name: address,
         call_data: &[],

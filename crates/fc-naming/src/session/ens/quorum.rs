@@ -486,7 +486,10 @@ pub(crate) async fn direct(ctx: &Ctx, lookup: &Lookup<'_>) -> Option<Consensus> 
     }
 }
 
-/// `resolveWithMethod`: `Ok(None)` when the method is unavailable.
+/// `resolveWithMethod`: `Ok(None)` when the method is unavailable. Colibri
+/// is no name-resolution method (main's #1076): main leaves it out of the
+/// order, and an order that still names it skips it here, as any unknown
+/// method.
 pub(crate) async fn with_method(
     ctx: &Ctx,
     machine: &crate::session::machine::Shared,
@@ -497,7 +500,6 @@ pub(crate) async fn with_method(
         "quorum" => via_quorum(ctx, machine, lookup).await.map(Some),
         "direct" => Ok(direct(ctx, lookup).await),
         "myotis" => myotis(ctx, lookup).await,
-        "colibri" => colibri(ctx, lookup).await.map(Some),
         _ => Ok(None),
     }
 }
