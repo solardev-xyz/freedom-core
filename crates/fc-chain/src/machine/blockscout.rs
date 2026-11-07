@@ -331,7 +331,7 @@ pub(crate) async fn log_index(
         result: within!(super::exchange::owned(json, reserved)),
         trust: options
             .include_trust
-            .then(|| blockscout_trust(&index, &rpc_url)),
+            .then(|| blockscout_trust(&index, &rpc_url, chain.quorum_verifies())),
     })
 }
 
