@@ -9,6 +9,8 @@ const test = require('node:test');
 
 const SOURCE = path.resolve(__dirname, '..');
 const REFERENCE = process.env.FREEDOM_BROWSER_CHECKOUT || '/root/herdr/freedom-browser';
+// The Radicle vectors' reference (generate.js, RADICLE_REFERENCE_COMMIT).
+const RADICLE_REFERENCE = process.env.FREEDOM_BROWSER_RADICLE_CHECKOUT || '/root/herdr/freedom-browser-wt/radicle-reference';
 const FILES = ['keys.json', 'mnemonic-validation.json', 'identity-formats.json', 'signing.json', 'naming.json', 'naming-replay.json',
   'chain.json', 'chain-replay.json', 'fixtures/vaults.json', 'fixtures/bee-keystores.json', 'fixtures/radicle-openssh.json',
   'generator/generate.js', 'generator/signing.js', 'generator/naming.js', 'generator/naming-replay.js', 'generator/chain.js',
@@ -37,7 +39,7 @@ function corruptedCheck(filename, corrupt) {
     corrupt(contents);
     fs.writeFileSync(destination, JSON.stringify(contents, null, 2) + '\n');
     result = spawnSync(process.execPath, [path.join(copy, 'generator/generate.js'),
-      'check', '--freedom-browser', REFERENCE], { encoding: 'utf8', timeout: 60000 });
+      'check', '--freedom-browser', REFERENCE, '--radicle-browser', RADICLE_REFERENCE], { encoding: 'utf8', timeout: 60000 });
   } finally {
     fs.rmSync(copy, { recursive: true, force: true });
   }
@@ -709,4 +711,22 @@ test('check rejects a changed import answer', () => {
     entry.expect.error.message = 'the import timed out';
   });
   assert.match(stderr, /Byte mismatch: radicle-import.json/);
+});
+
+test('check takes the Radicle vectors from their own reference, at its pinned commit', () => {
+  // The shared reference is at another commit: refused before anything is built.
+  const result = spawnSync(process.execPath, [path.join(SOURCE, 'generator/generate.js'),
+    'check', '--freedom-browser', REFERENCE, '--radicle-browser', REFERENCE], { encoding: 'utf8', timeout: 60000 });
+  assert.equal(result.status, 1, result.stdout + result.stderr);
+  assert.match(result.stderr, /Use the pinned Radicle reference commit/);
+  // And each Radicle file records it.
+  const radicle = (name) => JSON.parse(fs.readFileSync(path.join(SOURCE, name), 'utf8')).meta.freedomBrowserCommit;
+  const commit = spawnSync('git', ['rev-parse', 'HEAD'], { cwd: RADICLE_REFERENCE, encoding: 'utf8' }).stdout.trim();
+  for (const name of ['radicle-reads.json', 'radicle-blob.json', 'radicle-network.json', 'radicle-stats.json', 'radicle-import.json']) {
+    assert.equal(radicle(name), commit, name);
+  }
+  const stderr = corruptedCheck('radicle-network.json', (contents) => {
+    contents.meta.freedomBrowserCommit = 'fb540328162839e68150fe2c5e517edb86734d1c';
+  });
+  assert.match(stderr, /Byte mismatch: radicle-network.json/);
 });
