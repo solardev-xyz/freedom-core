@@ -11,6 +11,24 @@
 //! cap fails, which aborts this test binary ("memory allocation of N bytes
 //! failed"). The gateway's answers are built before the cap is set.
 //!
+//! What the tests read from the allocator, what it holds and the most it
+//! held, is the count of one thread: the test's. Each test runs holding
+//! [`one_at_a_time`], which marks its thread counted, and the allocator
+//! reports every allocation and release to [`Counted`], which counts only
+//! a counted thread's. The request, its machine and the driver, which runs
+//! the hashing jobs too, all run on that thread, so the count is still all
+//! the request allocates; what the test harness's own threads allocate
+//! beside it (the next test's thread started, a finished test's result
+//! taken) isn't in it.
+//!
+//! The cap stays the process's. It refuses an allocation before it is
+//! made, and refusing by thread would take an allocator of this file's
+//! own, which the workspace's `forbid(unsafe_code)` rules out. Another
+//! thread's allocations only bring its abort sooner; what one frees during
+//! a request (the harness's few bytes) gives the request that much more
+//! room beside its 256 KiB allowance. The bounds the tests assert are on
+//! the thread's count.
+//!
 //! For the Swarm lookup, the allocator's own high-water mark is read too,
 //! from the request's start: what it allocated at its peak, beside what the
 //! machine reserved at its peak by its own count ([`Verifier::peak`]), must
@@ -37,6 +55,8 @@
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
+use std::alloc::System;
+use std::cell::Cell;
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -49,12 +69,82 @@ use fc_dweb::verifier::{
 use fc_dweb::{
     Backend, ContentTrust, Ipfs, Node, Refusal, ResponseOp, Root, Trust, Verify, retry, timers,
 };
-use peak_alloc::PeakAlloc;
 use sha2::Digest;
+use tracking_allocator::{AllocationGroupId, AllocationRegistry, AllocationTracker, Allocator};
 
-/// The cap around an allocator that keeps a high-water mark it can reset.
+/// The cap around an allocator that reports every allocation and release
+/// to [`Counted`].
 #[global_allocator]
-static ALLOC: Cap<PeakAlloc> = Cap::new(PeakAlloc, usize::MAX);
+static ALLOC: Cap<Allocator<System>> = Cap::new(Allocator::system(), usize::MAX);
+
+thread_local! {
+    /// Whether the allocator counts this thread: while it runs a test here
+    /// ([`one_at_a_time`]). Const, with nothing to drop, so the allocator
+    /// reads it without allocating, and still can while the thread's other
+    /// locals are torn down.
+    static COUNTED: Cell<bool> = const { Cell::new(false) };
+}
+
+/// What the counted thread holds, and the most it held since
+/// [`Counted::reset_peak_usage`]. One thread is counted at a time.
+static HELD: AtomicUsize = AtomicUsize::new(0);
+static MOST: AtomicUsize = AtomicUsize::new(0);
+
+/// The counted thread's allocations, with a high-water mark that resets,
+/// for each request's real peak.
+#[derive(Clone, Copy)]
+struct Counted;
+
+impl Counted {
+    /// What the counted thread holds.
+    fn current_usage(self) -> usize {
+        HELD.load(Ordering::Relaxed)
+    }
+
+    /// The most the counted thread held since the last reset.
+    fn peak_usage(self) -> usize {
+        MOST.load(Ordering::Relaxed)
+    }
+
+    /// Starts the high-water mark again from what the thread holds now.
+    fn reset_peak_usage(self) {
+        MOST.store(HELD.load(Ordering::Relaxed), Ordering::Relaxed);
+    }
+}
+
+/// Whether the allocator counts the thread it runs on.
+fn counted() -> bool {
+    COUNTED.try_with(Cell::get).unwrap_or(false)
+}
+
+/// Called by the allocator on every thread, after each allocation and
+/// release: it counts the counted thread's, and allocates nothing.
+impl AllocationTracker for Counted {
+    fn allocated(&self, _addr: usize, size: usize, _wrapped: usize, _group: AllocationGroupId) {
+        if counted() {
+            let held = HELD.fetch_add(size, Ordering::Relaxed) + size;
+            MOST.fetch_max(held, Ordering::Relaxed);
+        }
+    }
+
+    fn deallocated(
+        &self,
+        _addr: usize,
+        size: usize,
+        _wrapped: usize,
+        _source: AllocationGroupId,
+        _current: AllocationGroupId,
+    ) {
+        if counted() {
+            // A release of what the thread held before it was counted
+            // (nothing a test here releases) can't take the count below
+            // nothing.
+            HELD.update(Ordering::Relaxed, Ordering::Relaxed, |held| {
+                held.saturating_sub(size)
+            });
+        }
+    }
+}
 
 /// The most the last request reserved at any step.
 static PEAK: AtomicUsize = AtomicUsize::new(0);
@@ -68,8 +158,40 @@ static AT_RELEASE_RESERVED: AtomicUsize = AtomicUsize::new(0);
 /// The most the allocator held past the machine's reservation between two
 /// inputs, the request's outputs taken, in the last request.
 static BETWEEN: AtomicUsize = AtomicUsize::new(0);
-/// The tests here one at a time: the allocator's counts are the process's.
+/// The tests here one at a time: the cap is the process's, and one thread
+/// at a time is counted.
 static ONE_AT_A_TIME: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// A test's hold on the binary: no other test here runs, and the allocator
+/// counts the test's thread until the hold is dropped.
+struct OneAtATime {
+    _lock: std::sync::MutexGuard<'static, ()>,
+}
+
+impl Drop for OneAtATime {
+    /// The thread stops being counted before the next test's starts.
+    fn drop(&mut self) {
+        COUNTED.set(false);
+    }
+}
+
+/// Waits for the other tests here, then counts this thread. A test takes
+/// it first, so its other locals are released while it is still counted.
+fn one_at_a_time() -> OneAtATime {
+    static TRACKER: std::sync::Once = std::sync::Once::new();
+    let lock = ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
+    TRACKER.call_once(|| {
+        AllocationRegistry::set_global_tracker(Counted).unwrap();
+        AllocationRegistry::enable_tracking();
+    });
+    // The allocator's own state for this thread is set up at its first
+    // report here, which may allocate (a destructor's registration, on some
+    // platforms): before the thread is counted.
+    drop(std::hint::black_box(Box::new(0u8)));
+    COUNTED.set(true);
+    OneAtATime { _lock: lock }
+}
+
 /// The most credits main took with no input between them, in the last
 /// request: what waited among the outputs at once.
 static CREDITS_WAITING: AtomicUsize = AtomicUsize::new(0);
@@ -112,15 +234,15 @@ static IN_INPUT: AtomicUsize = AtomicUsize::new(0);
 fn input<R>(v: &mut Verifier, f: impl FnOnce(&mut Verifier) -> R) -> R {
     #[cfg(feature = "memory-probe")]
     {
-        ALLOC_BEFORE.fetch_max(PeakAlloc.peak_usage(), Ordering::Relaxed);
+        ALLOC_BEFORE.fetch_max(Counted.peak_usage(), Ordering::Relaxed);
         LEDGER_BEFORE.fetch_max(v.peak(), Ordering::Relaxed);
-        PeakAlloc.reset_peak_usage();
+        Counted.reset_peak_usage();
         v.reset_peak();
     }
     let r = f(v);
     #[cfg(feature = "memory-probe")]
     {
-        let reached = PeakAlloc
+        let reached = Counted
             .peak_usage()
             .saturating_sub(BASE.load(Ordering::Relaxed));
         IN_INPUT.fetch_max(reached.saturating_sub(v.peak()), Ordering::Relaxed);
@@ -130,7 +252,7 @@ fn input<R>(v: &mut Verifier, f: impl FnOnce(&mut Verifier) -> R) -> R {
 
 /// Between inputs, the outputs taken: what is live past the reservation.
 fn between(v: &Verifier) {
-    let now = PeakAlloc
+    let now = Counted
         .current_usage()
         .saturating_sub(BASE.load(Ordering::Relaxed));
     BETWEEN.fetch_max(now.saturating_sub(v.reserved()), Ordering::Relaxed);
@@ -139,7 +261,7 @@ fn between(v: &Verifier) {
 /// At a release of the walk's memory: what is live past the reservation.
 #[cfg(feature = "memory-probe")]
 fn at_release(reserved: usize) {
-    let now = PeakAlloc
+    let now = Counted
         .current_usage()
         .saturating_sub(BASE.load(Ordering::Relaxed));
     let past = now.saturating_sub(reserved);
@@ -501,8 +623,8 @@ fn capped_as<R>(
     LEDGER_BEFORE.store(0, Ordering::Relaxed);
     let before = ALLOC.allocated();
     ALLOC.set_limit(before + budget + SLACK).unwrap();
-    PeakAlloc.reset_peak_usage();
-    let base = PeakAlloc.current_usage();
+    Counted.reset_peak_usage();
+    let base = Counted.current_usage();
     BASE.store(base, Ordering::Relaxed);
     AT_RELEASE.store(0, Ordering::Relaxed);
     AT_RELEASE_RESERVED.store(0, Ordering::Relaxed);
@@ -516,7 +638,7 @@ fn capped_as<R>(
     };
     #[cfg(feature = "memory-probe")]
     fc_dweb::verifier::probe::at_release(None);
-    let allocated = PeakAlloc
+    let allocated = Counted
         .peak_usage()
         .max(ALLOC_BEFORE.load(Ordering::Relaxed))
         .saturating_sub(base);
@@ -736,7 +858,7 @@ fn swarm_drive_watching(
         }
         // Between inputs, its outputs taken, what is allocated is what the
         // machine holds, and the jobs and pieces it handed out.
-        let now = PeakAlloc
+        let now = Counted
             .current_usage()
             .saturating_sub(BASE.load(Ordering::Relaxed));
         if poll == Poll::Each {
@@ -931,12 +1053,11 @@ fn flood_then(n: usize, tail: usize) -> (Vec<u8>, World) {
 /// 2.02 MB). What the allocator holds for them past the store and its
 /// partitions, and with them.
 ///
-/// The structure is the same every time: in a quiet process every reading
-/// is the same (2,184,048 bytes on 64-bit Linux). But the count is the
-/// process's, and the harness's other threads may allocate or free beside
-/// a reading (a test that just ended, the next one spawned), once by
-/// 9,713 bytes. So the floors are measured until two readings in a row
-/// agree, which a disturbed reading doesn't.
+/// The structure is the same every time, and so is every reading of it
+/// (2,184,048 bytes on 64-bit Linux): the count is the test thread's (the
+/// module doc), so the harness's other threads, which once moved a reading
+/// by 9,713 bytes while the count was the process's, aren't in it. The
+/// floors are measured until two readings in a row agree all the same.
 fn floors_fully_occupied() -> (usize, usize) {
     let mut readings = vec![floors_reading()];
     while readings.len() < 8 {
@@ -952,7 +1073,7 @@ fn floors_fully_occupied() -> (usize, usize) {
 /// One reading of [`floors_fully_occupied`].
 fn floors_reading() -> (usize, usize) {
     use fc_dweb::store::{FLOOR_NAMES, FloorCheck, PRIVATE_PARTITIONS, Store};
-    let start = PeakAlloc.current_usage();
+    let start = Counted.current_usage();
     let mut store = Store::new();
     let partitions: Vec<Option<String>> = std::iter::once(None)
         .chain((0..PRIVATE_PARTITIONS).map(|i| Some(format!("private-{i}"))))
@@ -961,7 +1082,7 @@ fn floors_reading() -> (usize, usize) {
         .iter()
         .map(|p| store.begin(p.as_deref()))
         .collect();
-    let base = PeakAlloc.current_usage();
+    let base = Counted.current_usage();
     let mut name = [0u8; 40];
     name[..8].copy_from_slice(&[0x01, 0x72, 0x00, 0x24, 0x08, 0x01, 0x12, 0x20]);
     for (t, ticket) in tickets.iter().enumerate() {
@@ -975,14 +1096,14 @@ fn floors_reading() -> (usize, usize) {
     for p in &partitions {
         assert_eq!(store.floors(p.as_deref()), FLOOR_NAMES, "{p:?}");
     }
-    let now = PeakAlloc.current_usage();
+    let now = Counted.current_usage();
     drop((store, tickets, partitions));
     (now.saturating_sub(base), now.saturating_sub(start))
 }
 
 #[test]
 fn dense_structure_stays_within_the_budget() {
-    let _one = ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
+    let _one = one_at_a_time();
     // The IPNS floors, fully occupied, within their 3 MiB reserve beside
     // the structure cache, and the 2.18 MB 0009 states for them.
     let (held, with_setup) = floors_fully_occupied();
@@ -1367,7 +1488,7 @@ fn within_allowance(case: &str, m: Measured, allowance: usize) {
 
 #[test]
 fn allocations_stay_within_the_grant() {
-    let _one = ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
+    let _one = one_at_a_time();
     let raw = |budget| Options {
         budget,
         car: false,
@@ -1594,7 +1715,7 @@ fn allocations_stay_within_the_grant() {
 /// stream, at the Swarm budget.
 #[test]
 fn a_window_of_one_byte_frames_unpolled_stays_within_the_grant() {
-    let _one = ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
+    let _one = one_at_a_time();
     let block: Vec<u8> = (0..3 * STREAM_WINDOW + 1_000)
         .map(|i| (i % 251) as u8)
         .collect();
@@ -1794,7 +1915,7 @@ fn past_the_reservation() -> [usize; 3] {
 /// Swarm walk is, these were the IPFS part of the grant's allowance.
 #[test]
 fn an_uncharged_ipfs_value_shows_past_the_reservation() {
-    let _one = ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
+    let _one = one_at_a_time();
     let options = |car| Options {
         budget: IPFS_BUDGET,
         car,
@@ -1890,21 +2011,21 @@ fn a_plan_past_its_path_bound_is_refused_before_it_is_copied() {
         use std::io::Write;
         let _ = writeln!(std::io::stderr(), "{line}");
     };
-    let _one = ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
+    let _one = one_at_a_time();
     let leaf = b"a raw leaf".to_vec();
     let raw_root = plan(&sha256_cid(0x55, &leaf));
     let swarm = swarm_plan(&"ab".repeat(32), "");
     // What the allocator reached making the request, and what the machine
     // reserved at its peak.
     let made = |p: &Verify| {
-        PeakAlloc.reset_peak_usage();
-        let base = PeakAlloc.current_usage();
+        Counted.reset_peak_usage();
+        let base = Counted.current_usage();
         let options = Options {
             budget: 0,
             ..Options::default()
         };
         let made = Verifier::new(1, p, Method::Get, None, false, options).map(|v| v.peak());
-        (made, PeakAlloc.peak_usage() - base)
+        (made, Counted.peak_usage() - base)
     };
     let with = |p: &Verify, path: String, query: &str, headers: Vec<(String, String)>| {
         let mut p = p.clone();
@@ -2024,7 +2145,7 @@ fn a_plan_past_its_path_bound_is_refused_before_it_is_copied() {
 /// they hold.
 #[test]
 fn a_cars_request_is_counted_until_main_takes_it() {
-    let _one = ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
+    let _one = one_at_a_time();
     let (p, _) = file_named_car(MAX_PATH - 2);
     let mut v = Verifier::new(1, &p, Method::Get, None, false, Options::default()).unwrap();
     let before = v.reserved();
@@ -2055,7 +2176,7 @@ fn a_cars_request_is_counted_until_main_takes_it() {
 /// answer within the budget.
 #[test]
 fn a_section_without_room_gives_the_car_way() {
-    let _one = ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
+    let _one = one_at_a_time();
     let (root, world) = flood();
     for i in 0..64 {
         let budget = (3 << 20) + i * 517;
