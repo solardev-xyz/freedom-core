@@ -41,7 +41,7 @@
 //!    (a directory, a submodule) is `blob_at`'s `NotABlob`; libradicle's
 //!    errors are `not_found` or `failed` by today's message test, with its
 //!    message where that can't name a filesystem path, as `rad.read`'s
-//!    ([`super::radicle_error`]): a repository the node doesn't have is
+//!    ([`super::read_error`]): a repository the node doesn't have is
 //!    `repository not found`;
 //! 4. a blob over 64 MiB ([`BLOB`]) is `too_large`, `HEAD` too;
 //! 5. the range normalized against the size ([`span`]):
@@ -76,7 +76,7 @@ use serde::Deserialize;
 use serde_json::value::RawValue;
 use serde_json::{Value, json};
 
-use super::{fenced, invalid, parse, path, radicle_error, refuse, revision, rid, stream};
+use super::{fenced, invalid, parse, path, read_error, refuse, revision, rid, stream};
 use crate::node::{Handle, Node};
 use crate::output::{BLOB, BLOB_LOADING, BUILT, Body, Budget, Failure, Refused, Until};
 use crate::pools::{Ticket, Work};
@@ -356,7 +356,7 @@ pub fn blob(
             Ok(Served { head, body }) => stream(&conn, ticket, &budget, &until, &head, body),
             // Whoever cancelled its token answers it, as `rad.read`'s.
             Err(Failure::Refused(Refused::Cancelled)) => {}
-            Err(failure) => refuse(&conn, ticket, &failure.error(radicle_error)),
+            Err(failure) => refuse(&conn, ticket, &failure.error(read_error)),
         }
     })
 }

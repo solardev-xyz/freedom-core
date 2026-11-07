@@ -98,7 +98,7 @@
 //!
 //! **libradicle's errors:** `not_found` when the message matches today's
 //! test (`not found`, `does not exist` or `NotFound`, in any case),
-//! otherwise `failed` ([`radicle_error`]). The message is libradicle's, as
+//! otherwise `failed` ([`read_error`]). The message is libradicle's, as
 //! today, only where it can't name a filesystem path ([`pathless`]); main
 //! sends it on to pages. A repository the node doesn't have, whose
 //! libradicle text names its storage path under the home, is `not_found`
@@ -633,14 +633,26 @@ const NOT_FOUND: &str = "not found";
 /// Any other error of libradicle's whose text could name a path.
 const FAILED: &str = "the read failed";
 
-/// libradicle's error, answered (see the module's doc): `not_found` or
-/// `failed` by today's message test, with libradicle's message only when it
-/// can't name a filesystem path ([`pathless`]). A repository the node
+/// libradicle's error, as a network operation answers it
+/// ([`crate::network`]): `not_found` or `failed` by today's message test,
+/// with libradicle's message. A read's goes through [`read_error`].
+pub(crate) fn radicle_error(e: libradicle::Error) -> ErrorBody {
+    let message = e.to_string();
+    let code = if not_found(&message) {
+        ErrorCode::NotFound
+    } else {
+        ErrorCode::Failed
+    };
+    ErrorBody::new(code, message)
+}
+
+/// A read's libradicle error, answered (see the module's doc): `not_found`
+/// or `failed` by today's message test, with libradicle's message only when
+/// it can't name a filesystem path ([`pathless`]). A repository the node
 /// doesn't have is [`MISSING`]; any other error that could name a path is
 /// [`NOT_FOUND`] or [`FAILED`], by its code, so main's 404 and 500 stay
-/// what they are today. A network operation's error is answered the same
-/// way ([`crate::network`]).
-pub(crate) fn radicle_error(e: libradicle::Error) -> ErrorBody {
+/// what they are today.
+fn read_error(e: libradicle::Error) -> ErrorBody {
     if missing(&e) {
         return ErrorBody::new(ErrorCode::NotFound, MISSING);
     }
@@ -1026,7 +1038,7 @@ pub fn read(
             // Whoever cancelled its token answers it: main's cancel, the
             // deadline's timer, or the stop.
             Err(Failure::Refused(Refused::Cancelled)) => {}
-            Err(failure) => refuse(&conn, ticket, &failure.error(radicle_error)),
+            Err(failure) => refuse(&conn, ticket, &failure.error(read_error)),
         }
     })
 }

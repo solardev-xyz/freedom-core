@@ -27,7 +27,7 @@
 //!   listing past its bound too, is `repos_error`, libradicle's message,
 //!   with `repos_total` null, as main reads such a failure today; a
 //!   message that could name a filesystem path is the fixed text the reads'
-//!   errors give it (`super::radicle_error`).
+//!   errors give it (`super::read_error`).
 //!
 //! **Bounds** (0008, "Pools and budgets"): a composed read holds what any
 //! JSON read may, 64 MiB: its JSON, at most 32 MiB, in a
@@ -453,7 +453,7 @@ pub fn node_info(
             // name a filesystem path: as the reads' errors give it. An
             // identity document over its cap is its fixed text.
             Err(failure) => {
-                error = failure.error(super::radicle_error).message;
+                error = failure.error(super::read_error).message;
                 Err(error.as_str())
             }
         };

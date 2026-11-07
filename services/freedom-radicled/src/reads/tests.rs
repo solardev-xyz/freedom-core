@@ -585,7 +585,7 @@ fn not_found_is_todays_message_test() {
     for message in ["invalid revision", "found", "not a blob", "exists"] {
         assert!(!not_found(message), "{message}");
     }
-    let error = radicle_error(libradicle::Error::NotABlob("src".into()));
+    let error = read_error(libradicle::Error::NotABlob("src".into()));
     assert_eq!(error.code, ErrorCode::Failed);
     assert_eq!(
         error.message,
@@ -608,7 +608,7 @@ fn a_message_that_could_name_a_path_is_fixed() {
     let git = |code, class, message: &str| Git::new(code, class, message);
     let answered = |e: E| {
         let text = e.to_string();
-        let body = radicle_error(e);
+        let body = read_error(e);
         (text, body.code, body.message)
     };
 
