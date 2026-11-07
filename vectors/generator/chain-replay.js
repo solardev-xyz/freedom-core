@@ -236,23 +236,25 @@ const BLOCKSCOUT_PAGES = `
 // requestDirectFeeQuote and getFeeQuote, whole, but for #749's two new
 // log lines, which the stubbed logger drops.
 //
-// `colibri-unproven` is freedom-browser #1048 (head b69c137c, fixes #1046
-// and #1060), open against main and not merged yet: Colibri 3.0.3 answers
-// eth_gasPrice, eth_feeHistory and any read at a `pending` or `earliest`
-// block from a public RPC host, unproven (#1046), and proves other reads
-// from a block without checking that it is the one asked for (#1060): an
-// account read or a call at a number, a hash, `safe` or `finalized`, any
-// read at a block that isn't a string (an EIP-1898 object),
-// eth_getBlockByNumber at `safe` or `finalized`, eth_getBlockByHash at
-// anything but a 32-byte hash. So Colibri doesn't serve the two methods;
-// requestColibri asks Colibri only what it ties to the requested block
-// (colibriRequestParams; COLIBRI_BLOCK_PARAM: each method's block
-// parameter), with `latest` appended for an account read or a call without
-// its block, and refuses the rest before Colibri is asked; and feeQuote no
-// longer counts Colibri as verified. Its edits are #1048's lines; they
-// apply after `tx-lookups` and `fee-headroom` (a scenario names it last),
-// whose functions three of them touch. It moves to main's commit, or to a
-// moved pin, once #1048 merges.
+// `colibri-unproven` is freedom-browser #1048 (head a515f9a7,
+// fixes #1046 and #1060), open against main and not merged yet: Colibri
+// 3.0.3 answers eth_gasPrice, eth_feeHistory and any read at a `pending`
+// or `earliest` block from a public RPC host, unproven (#1046); in privacy
+// mode it runs eth_call and eth_estimateGas on contract code from such a
+// host, unchecked, and a call that reads no storage fetches no proof; and
+// it proves other reads from a block without checking that it is the one
+// asked for (#1060): an account read at a number, a hash, `safe`,
+// `finalized` or `justified`, any read at a block that isn't a string (an
+// EIP-1898 object), eth_getBlockByNumber at any string but `latest`, a
+// number or a hash, eth_getBlockByHash at anything but a 32-byte hash. So
+// Colibri doesn't serve the four methods; requestColibri asks Colibri only
+// what it ties to the requested block (colibriRequestParams;
+// COLIBRI_BLOCK_PARAM: each method's block parameter), with `latest`
+// appended for an account read without its block, and refuses the rest
+// before Colibri is asked; and feeQuote no longer counts Colibri as
+// verified. Its edits are #1048's lines; they apply after `tx-lookups` and
+// `fee-headroom` (a scenario names it last), whose functions three of them
+// touch. It moves to main's commit, or to a moved pin, once #1048 merges.
 const PATCHES = {
   'tx-lookups': {
     edits: [
@@ -727,8 +729,15 @@ async function feeQuote(source, gasPriceValue, priorityValue = null, getBlock = 
   },
   'colibri-unproven': {
     edits: [
-      ["    unsupported: new Set([...SINGLE_NODE_METHODS, 'eth_getLogs']),\n",
-        "    unsupported: new Set([...SINGLE_NODE_METHODS, 'eth_getLogs', 'eth_gasPrice', 'eth_feeHistory']),\n"],
+      ["    unsupported: new Set([...SINGLE_NODE_METHODS, 'eth_getLogs']),\n", `    unsupported: new Set([
+      ...SINGLE_NODE_METHODS,
+      'eth_getLogs',
+      'eth_gasPrice',
+      'eth_feeHistory',
+      'eth_call',
+      'eth_estimateGas',
+    ]),
+`],
       ['    throw new SourceUnavailableError(`Colibri does not support ${method}`);\n  }\n', `    throw new SourceUnavailableError(\`Colibri does not support \${method}\`);
   }
   const asked = colibriRequestParams(method, params);
@@ -745,8 +754,6 @@ async function feeQuote(source, gasPriceValue, priorityValue = null, getBlock = 
   ['eth_getBalance', 1],
   ['eth_getCode', 1],
   ['eth_getTransactionCount', 1],
-  ['eth_call', 1],
-  ['eth_estimateGas', 1],
   ['eth_getStorageAt', 2],
   ['eth_getBlockByNumber', 0],
 ]);
@@ -755,16 +762,8 @@ const COLIBRI_LATEST_ONLY = new Set([
   'eth_getCode',
   'eth_getTransactionCount',
   'eth_getStorageAt',
-  'eth_call',
-  'eth_estimateGas',
 ]);
-const COLIBRI_BLOCK_LAST = new Set([
-  'eth_getBalance',
-  'eth_getCode',
-  'eth_getTransactionCount',
-  'eth_getStorageAt',
-]);
-const COLIBRI_UNBOUND_TAGS = new Set(['pending', 'earliest', 'safe', 'finalized']);
+const COLIBRI_BLOCK_NUMBER = /^0x(?:0|[1-9a-fA-F][0-9a-fA-F]{0,15})$/;
 const COLIBRI_BLOCK_HASH = /^0x[0-9a-fA-F]{64}$/;
 const COLIBRI_NOT_A_STRING = 'at a block that isn\\'t a string';
 function colibriRequestParams(method, params) {
@@ -782,12 +781,13 @@ function colibriRequestParams(method, params) {
     if (index >= params.length) return { params };
     const block = params[index];
     if (typeof block !== 'string') return { refusal: COLIBRI_NOT_A_STRING };
-    return COLIBRI_UNBOUND_TAGS.has(block) ? { refusal: \`at block "\${block}"\` } : { params };
+    return block === 'latest' || COLIBRI_BLOCK_NUMBER.test(block) || COLIBRI_BLOCK_HASH.test(block)
+      ? { params }
+      : { refusal: \`at block "\${block}"\` };
   }
   if (!Array.isArray(params)) return { refusal: 'with params that aren\\'t an array' };
   if (params.length === index) return { params: [...params, 'latest'] };
-  if (params.length < index ||
-      (COLIBRI_BLOCK_LAST.has(method) && params.length > index + 1)) {
+  if (params.length < index || params.length > index + 1) {
     return { refusal: \`with params of length \${params.length}\` };
   }
   const block = params[index];
@@ -1592,10 +1592,17 @@ const routerWorld = ({ network = ROUTER_NETWORK, endpoints = [RPC], prover = [PR
   ...rest,
 });
 const T = (line) => `chain-data-router.test.js:${line}`;
+// freedom-browser #1048's head, whose tests the `colibri-unproven-*`
+// scenarios port, and whose versions of the pinned Colibri tests drive
+// Colibri with an account read: it serves no call since #1046 (PATCHES).
+const COLIBRI_UNPROVEN_HEAD = 'a515f9a7';
+const H = (line) => `chain-data-router.test.js@${COLIBRI_UNPROVEN_HEAD}:${line}`;
 
 /** chain-data-router.test.js, describe 'chain-data-router'. */
 function routerScenarios(tx) {
   const call = (data) => [{ to: '0xabc', data }, 'latest'];
+  // What drives Colibri's mechanics since it serves no call (#1046).
+  const balance = ['0xabc', 'latest'];
   const fullTx = {
     from: '0x1111111111111111111111111111111111111111',
     to: '0x2222222222222222222222222222222222222222',
@@ -1646,7 +1653,7 @@ function routerScenarios(tx) {
       myotis: myotisOn(100, { storage: [{ payload: { verifyMethod: 'headerChain', valueHex: '0x2A' } }, { payload: { verifyMethod: 'headerChain', valueHex: null } }] }),
     }), req(100, 'eth_getStorageAt', ['0xabc', '0x0', 'latest']), req(100, 'eth_getStorageAt', ['0xabc', '0x0'])),
     // With main's #1060 (`colibri-unproven`) the RPC answers, as the test
-    // scripts it at #1048's head (chain-data-router.test.js@b69c137c:151).
+    // scripts it at #1048's head (H(149)).
     scenario('router-myotis-tagged-state-reads', T(142), routerWorld({ colibri: ok('0x'), rpc: { [RPC]: ok('0x') } }),
       req(1, 'eth_getCode', ['0xabc', 'finalized']), req(1, 'eth_getStorageAt', ['0xabc', '0x0', '0x10'])),
     scenario('router-myotis-revert-final', T(152), routerWorld({
@@ -1655,9 +1662,12 @@ function routerScenarios(tx) {
         estimate_tx: { payload: { status: 'revert', dataHex: '0x08c379a0abcd' } },
       }),
     }), req(1, 'eth_call', [{ to: '0xabc' }]), req(1, 'eth_estimateGas', [{ to: '0xabc' }])),
+    // With main's #1046 (`colibri-unproven`) Colibri serves no call, and the
+    // RPC answers, as the test scripts it at #1048's head (H(169)).
     scenario('router-myotis-unavailable-shapes', T(161), routerWorld({
       myotis: myotisOn(1, { call_tx: [{ payload: { status: 'unavailable', reason: 'cancelled' } }, { payload: { error: 'deadline exceeded' } }] }),
-      colibri: ok('0xfallback'),
+      colibri: ok('0xcolibri'),
+      rpc: { [RPC]: ok('0xfallback') },
     }), req(1, 'eth_call', [{ to: '0xabc' }]), req(1, 'eth_call', [{ to: '0xabc' }])),
     scenario('router-myotis-broadcast-rejected', T(169), routerWorld({
       myotis: myotisOn(1, { broadcast: { throws: 'rejected', reason: 'nonce too low: next nonce 5, tx nonce 4' } }),
@@ -1666,27 +1676,28 @@ function routerScenarios(tx) {
       myotis: myotisOn(1, { broadcast: { payload: { error: 'connection lost' } } }),
     }), send(1, tx.mainnet.raw)),
     // With main's #1046 (`colibri-unproven`) the RPC answers, as the test
-    // scripts it at #1048's head (chain-data-router.test.js@b69c137c:210).
+    // scripts it at #1048's head (H(212)).
     scenario('router-pending-nonce-to-colibri', T(186), routerWorld({
       myotis: myotisOn(100, { account: { payload: { verifyMethod: 'headerChain', exists: true, nonce: 3 } } }),
       colibri: ok('0x5'),
       rpc: { [RPC]: ok('0x6') },
     }), req(100, 'eth_getTransactionCount', ['0xabc', 'pending'])),
     // With main's #1060 (`colibri-unproven`) the RPC answers (the test at
-    // #1048's head, chain-data-router.test.js@b69c137c:231).
+    // #1048's head, H(233)).
     scenario('router-historical-balance-to-colibri', T(204), routerWorld({
       myotis: myotisOn(100, { account: { payload: { verifyMethod: 'headerChain', exists: true, balanceWei: '42' } } }),
       colibri: ok('0x1'),
       rpc: { [RPC]: ok('0x2') },
     }), req(100, 'eth_getBalance', ['0xabc', '0x1234'])),
-    // With main's #1046 (`colibri-unproven`) the RPC answers.
+    // With main's #1046 (`colibri-unproven`) the RPC answers (H(247)).
     scenario('router-tagged-estimate-to-colibri', T(215), routerWorld({ colibri: ok('0x5208'), rpc: { [RPC]: ok('0x5209') } }),
       req(100, 'eth_estimateGas', [{ to: '0xabc' }, 'pending'])),
-    // With main's #1060 (`colibri-unproven`) the RPC answers (the test at
-    // #1048's head, chain-data-router.test.js@b69c137c:257).
+    // With main's #1046 (`colibri-unproven`) the RPC answers (the test at
+    // #1048's head, H(259)).
     scenario('router-historical-call-to-colibri', T(225), routerWorld({ colibri: ok('0xhistoric'), rpc: { [RPC]: ok('0xhistoric') } }),
       req(100, 'eth_call', [{ to: '0xabc', data: '0x70a08231' }, '0x10d4f00'])),
-    scenario('router-state-overrides-to-colibri', T(235), routerWorld({ colibri: ok('0xsimulated') }),
+    // With main's #1046 (`colibri-unproven`) the RPC answers (H(271)).
+    scenario('router-state-overrides-to-colibri', T(235), routerWorld({ colibri: ok('0xcolibri'), rpc: { [RPC]: ok('0xsimulated') } }),
       req(100, 'eth_call', [{ to: '0xabc', data: '0x70a08231' }, 'latest', { '0xabc': { balance: '0x1' } }])),
     scenario('router-myotis-whole-transaction', T(252), routerWorld({
       myotis: myotisOn(100, { call_tx: { payload: { status: 'ok', resultHex: '0x2a' } }, estimate_tx: { payload: { status: 'ok', gas: 61000 } } }),
@@ -1707,11 +1718,15 @@ function routerScenarios(tx) {
         'block 23000000 is an Amsterdam block but its header has no slot number (EIP-7843); refusing to run SLOTNUM against a made-up value',
         'the call ran out of this node\'s 30000000-gas call budget, below the 50000000 gas it allows',
       ].map((error) => ({ payload: { error, code: -32602 } })) }),
-      colibri: ok('0xelsewhere'),
+      // With main's #1046 (`colibri-unproven`) the RPC answers (H(364)).
+      colibri: ok('0xcolibri'),
+      rpc: { [RPC]: ok('0xelsewhere') },
     }), req(1, 'eth_call', [{ to: '0xabc' }]), req(1, 'eth_call', [{ to: '0xabc' }]), req(1, 'eth_call', [{ to: '0xabc' }])),
     scenario('router-myotis-blob-transaction', T(332), routerWorld({
       myotis: myotisOn(1, { estimate_tx: { payload: { status: 'ok', gas: 21000 } } }),
+      // With main's #1046 (`colibri-unproven`) the RPC answers (H(374)).
       colibri: ok('0x5208'),
+      rpc: { [RPC]: ok('0x5208') },
     }), req(1, 'eth_estimateGas', [{ to: '0xabc', blobVersionedHashes: ['0x01' + '00'.repeat(31)], maxFeePerBlobGas: '0x1' }]),
     req(1, 'eth_estimateGas', [{ to: '0xabc', blobVersionedHashes: [] }])),
     scenario('router-myotis-infeasible', T(345), routerWorld({
@@ -1737,10 +1752,12 @@ function routerScenarios(tx) {
       myotis: myotisOn(100, { code: { payload: null } }),
       colibri: ok('0x6000'),
     }), req(100, 'eth_getCode', ['0xabc', 'latest'])),
-    scenario('router-colibri-deadline', T(433), routerWorld({
+    // Colibri's mechanics, as #1048's tests drive them since it serves no
+    // call: with an account read at `latest`.
+    scenario('router-colibri-deadline', H(477), routerWorld({
       network: { access: { readOrder: ['colibri', 'direct'] }, quorum: { timeoutMs: 7000 } },
       colibri: ok('0x1'),
-    }), req(100, 'eth_call', [{ to: '0xabc', data: '0x' }, 'latest']), req(100, 'eth_call', [{ to: '0xabc', data: '0x01' }, 'latest'], { origin: 'https://app.example' })),
+    }), req(100, 'eth_getBalance', ['0xabc', 'latest']), req(100, 'eth_getBalance', ['0xdef', 'latest'], { origin: 'https://app.example' })),
     scenario('router-myotis-broadcast-uncertain', T(451), routerWorld({ myotis: myotisOn(100, { broadcast: { throws: 'uncertain_dispatched' } }) }),
       send(100, tx.gnosis.raw)),
     scenario('router-myotis-broadcast', T(460), routerWorld({ myotis: myotisOn(100, { broadcast: { payload: { txHash: tx.gnosis.hash } } }) }),
@@ -1780,7 +1797,9 @@ function routerScenarios(tx) {
       req(1, 'eth_call', [{ to: '0xabc', type: 0 }, 'latest'])),
     scenario('router-myotis-gas-refused', T(649), routerWorld({
       myotis: myotisOn(1, { estimate_tx: ['21000', '0x5208', 21000.5, 2 ** 53, -1].map((gas) => ({ payload: { status: 'ok', gas } })) }),
-      colibri: ok('0x5208'),
+      // With main's #1046 (`colibri-unproven`) the RPC answers (H(919)).
+      colibri: ok('0x5209'),
+      rpc: { [RPC]: ok('0x5208') },
     }), ...Array.from({ length: 5 }, () => req(1, 'eth_estimateGas', [{ to: '0xabc' }]))),
     scenario('router-myotis-input-alias-call', T(665), routerWorld({ myotis: myotisOn(1, { call_tx: { payload: { resultHex: '0x2a' } } }) }),
       req(1, 'eth_call', [{ to: '0xabc', input: '0x70a08231' }, 'latest'])),
@@ -1809,16 +1828,16 @@ function routerScenarios(tx) {
       chains: { 777: chainEntry({ access: {}, quorum: { timeoutMs: 1000 } }, [RPC]) },
       rpc: { [RPC]: ok('0x6000') },
     }, req(777, 'eth_getCode', ['0xabc', 'latest'])),
-    scenario('router-colibri-interactive-bypass', T(789), routerWorld({
+    scenario('router-colibri-interactive-bypass', H(1055), routerWorld({
       network: colibriFirst,
       colibri: { hang: true },
       rpc: { [RPC]: ok('0xrpc', 0) },
-    }), req(1, 'eth_call', call('0x1234'), { ...swap, ...settles(2000) }), req(1, 'eth_call', call('0x1234'), { ...swap, ...settles(0) })),
-    scenario('router-excluded-source', T(814), routerWorld({
+    }), req(1, 'eth_getBalance', balance, { ...swap, ...settles(2000) }), req(1, 'eth_getBalance', balance, { ...swap, ...settles(0) })),
+    scenario('router-excluded-source', H(1080), routerWorld({
       network: colibriFirst,
       colibri: ok('0xcolibri'),
       rpc: { [RPC]: ok('0xrpc') },
-    }), req(100, 'eth_call', [{}, 'latest'], { options: { excludeSources: ['colibri'] } }), req(100, 'eth_call', [{}, 'latest'])),
+    }), req(100, 'eth_getBalance', balance, { options: { excludeSources: ['colibri'] } }), req(100, 'eth_getBalance', balance)),
     scenario('router-getlogs-never-colibri', T(839), routerWorld({
       network: colibriFirst,
       colibri: ok(['0xtruncated']),
@@ -1869,13 +1888,13 @@ function routerScenarios(tx) {
     req(1, 'eth_call', [{ to: '0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', data: '0x1234' }, 'latest'], { include_trust: true })),
     // The cooldown opens for 15, 30 and then 60 s: each step starts at the
     // boundary the test probes (the direct answer comes at once).
-    scenario('router-colibri-cooldown-escalation', T(1092), routerWorld({
+    scenario('router-colibri-cooldown-escalation', H(1358), routerWorld({
       network: colibriFirst,
       colibri: [ok('0xlate', 2000), ok('0xlate', 2000), ok('0xlate', 2000), ok('0xverified')],
       rpc: { [RPC]: ok('0xrpc', 0) },
     }), ...[[0, 2000], [0, 0], [15_000, 2000], [29_999, 0], [1, 2000], [59_999, 0], [1, 0], [0, 0]]
-      .map(([after, ms]) => ({ after, calls: [req(1, 'eth_call', call('0x1234'), { ...swap, ...settles(ms) })] }))),
-    scenario('router-colibri-capacity-demotion', T(1145), routerWorld({
+      .map(([after, ms]) => ({ after, calls: [req(1, 'eth_getBalance', balance, { ...swap, ...settles(ms) })] }))),
+    scenario('router-colibri-capacity-demotion', H(1413), routerWorld({
       network: colibriFirst,
       colibri: { error: { message: 'prover execution failed: Out of gas' } },
       rpc: { [RPC]: ok('0xrpc') },
@@ -1884,12 +1903,12 @@ function routerScenarios(tx) {
       ['0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', 'https://swap.example'],
       ['0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb', 'https://swap.example'],
       ['0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', 'https://other.example'],
-    ].map(([to, origin]) => req(1, 'eth_call', [{ to, data: '0x1234' }, 'latest'], { origin }))),
-    scenario('router-colibri-route-limit', T(1181), routerWorld({
+    ].map(([address, origin]) => req(1, 'eth_getBalance', [address, 'latest'], { origin }))),
+    scenario('router-colibri-route-limit', H(1443), routerWorld({
       network: colibriFirst,
       colibri: { hang: true },
       rpc: { [RPC]: ok('0xrpc', 0) },
-    }), [2000, 2000, 0].map((ms) => req(1, 'eth_call', call('0x1234'), { ...swap, ...settles(ms) }))),
+    }), [2000, 2000, 0].map((ms) => req(1, 'eth_getBalance', balance, { ...swap, ...settles(ms) }))),
     scenario('router-quorum-settles-at-m', T(1206), {
       chains: { 1: chainEntry(quorumOnly, ABC) },
       rpc: { [A]: ok('0x42'), [B]: ok('0x42'), [C]: { hang: true } },
@@ -1898,11 +1917,11 @@ function routerScenarios(tx) {
       chains: { 1: chainEntry(quorumDirect, [A, B, C, D]) },
       rpc: { [A]: [{ hang: true }, ok('0xrpc', 0)], [B]: { hang: true }, [C]: { hang: true }, [D]: ok('0xrpc', 0) },
     }, req(1, 'eth_call', call('0x1234'), { ...swap, ...settles(5000) }), req(1, 'eth_call', call('0x1234'), { ...swap, ...settles(0) })),
-    scenario('router-quorum-no-extension-before-colibri', T(1285), {
+    scenario('router-quorum-no-extension-before-colibri', H(1547), {
       chains: { 1: chainEntry({ access: { readOrder: ['quorum', 'colibri', 'direct'] }, quorum: { k: 3, m: 2, timeoutMs: 5000 } }, ABC, [PROVER]) },
       rpc: { [A]: { hang: true }, [B]: { hang: true }, [C]: { hang: true } },
       colibri: ok('0xverified'),
-    }, req(1, 'eth_call', [{ to: '0xabc' }, 'latest'], { ...swap, ...settles(2000) })),
+    }, req(1, 'eth_getBalance', balance, { ...swap, ...settles(2000) })),
     scenario('router-quorum-wallet-read-stays-verified', T(1318), {
       chains: { 1: chainEntry(quorumDirect, ABC) },
       rpc: Object.fromEntries(ABC.map((u) => [u, ok('0x42', 3000)])),
@@ -1911,10 +1930,10 @@ function routerScenarios(tx) {
       chains: { 1: chainEntry(quorumOnly, ABC) },
       rpc: Object.fromEntries(ABC.map((u) => [u, ok('0x42', 3000)])),
     }, req(1, 'eth_call', [{ to: '0xabc' }, 'latest'], { ...swap, ...settles(3000) })),
-    scenario('router-colibri-last-source', T(1388), routerWorld({
+    scenario('router-colibri-last-source', H(1650), routerWorld({
       network: { access: { readOrder: ['colibri'] }, quorum: { timeoutMs: 5000 } },
       colibri: ok('0xverified', 3000),
-    }), req(1, 'eth_call', [{ to: '0xabc' }, 'latest'], { ...swap, ...settles(3000) })),
+    }), req(1, 'eth_getBalance', balance, { ...swap, ...settles(3000) })),
     scenario('router-myotis-last-source', T(1410), routerWorld({
       network: { access: { readOrder: ['myotis'] }, quorum: { timeoutMs: 5000 } },
       myotis: myotisOn(1, { call_tx: { payload: { resultHex: '0xverified' }, delay: 3000 } }),
@@ -2441,6 +2460,8 @@ function boundaryScenarios(ethers, tx) {
   const app = '0x5555555555555555555555555555555555555555';
   const web3 = { include_trust: true, origin: `web3://${app}:1` };
   const swap = { origin: 'https://swap.example' };
+  // What drives Colibri since it serves no call (main's #1046).
+  const balance = ['0xabc', 'latest'];
   const target = (index) => `0x${String(index + 1).padStart(40, '0')}`;
   const sendWorld = (endpoints, rpc, extra = {}) => ({
     chains: { 1: chainEntry({ access: { broadcastOrder: ['direct'] }, quorum: { timeoutMs: 5000 } }, endpoints) },
@@ -2513,19 +2534,22 @@ function boundaryScenarios(ethers, tx) {
       ...w(1, net(['quorum', 'direct']), [A, B, C, D]),
       rpc: Object.fromEntries([A, B, C, D].map((u) => [u, revert])),
     }, req(1, 'eth_call', [{ to: '0xabc', data: '0x12345678' }, 'latest'])),
+    // Colibri serves no call since main's #1046 (`colibri-unproven`), so
+    // the Colibri cases here and below drive it with an account read at
+    // `latest`: the router's handling of an answer or an error is the
+    // source's, whatever the method.
     scenario('boundary-quorum-reverts-colibri-revert-survives', `${D_}: Colibri; Direct, Gnosis`, {
       ...w(100, net(['colibri', 'quorum', 'direct']), ABC),
       colibri: { error: { message: 'execution reverted', code: 3, data: revert.error.data } },
       rpc: Object.fromEntries(ABC.map((u) => [u, revert])),
-    }, req(100, 'eth_call', [{ to: '0xabc', data: '0x12345678' }, 'latest'])),
+    }, req(100, 'eth_getBalance', balance)),
     // A verified revert whose error is also a capacity failure: the read
     // rejects with the revert, and the app's Colibri route is blocked, so
-    // the same call again never asks Colibri.
+    // the same read again never asks Colibri.
     scenario('boundary-colibri-revert-capacity', `${D_}: Verified operations, Colibri's outcomes`, {
       ...w(1, net(['colibri']), []),
       colibri: { error: { message: 'out of gas', code: 3, data: '0x' } },
-    }, req(1, 'eth_call', [{ to: '0xabc', data: '0x1234' }, 'latest'], swap),
-    req(1, 'eth_call', [{ to: '0xabc', data: '0x1234' }, 'latest'], swap)),
+    }, req(1, 'eth_getBalance', balance, swap), req(1, 'eth_getBalance', balance, swap)),
     // Colibri resolves undefined: a verified result of undefined, its own
     // `result` property present.
     scenario('boundary-colibri-undefined-result', `${D_}: Verified operations, Colibri's outcomes`, {
@@ -2636,25 +2660,28 @@ function boundaryScenarios(ethers, tx) {
       chains: { 1: chainEntry({ access: { broadcastOrder: ['quorum', 'colibri'] } }, [A]) },
     }, send(1, tx.mainnet.raw)),
     // The adaptive bypass.
+    // The Colibri cases drive it with an account read (see above).
     scenario('boundary-adaptive-quorum-deadline-not-a-timeout', `${D_}: Adaptive bypass`, {
       ...w(1, net(['quorum', 'colibri', 'direct']), ABC),
       rpc: Object.fromEntries(ABC.map((u) => [u, { hang: true }])),
       colibri: ok('0xverified'),
-    }, req(1, 'eth_call', [{ to: '0xabc' }, 'latest'], swap), req(1, 'eth_call', [{ to: '0xabc' }, 'latest'], swap)),
+    }, req(1, 'eth_getBalance', balance, swap), req(1, 'eth_getBalance', balance, swap)),
     scenario('boundary-adaptive-capacity-survives-success', `${D_}: Adaptive bypass`, {
       ...w(1, net(['colibri', 'direct']), [RPC]),
       colibri: [{ error: { message: 'execution gas limit reached' } }, ok('0x2a', 20)],
       rpc: { [RPC]: ok('0xrpc') },
-    }, [req(1, 'eth_call', [{ to: '0xabc' }, 'latest'], swap), req(1, 'eth_call', [{ to: '0xabc' }, 'latest'], swap)],
-    req(1, 'eth_call', [{ to: '0xabc' }, 'latest'], swap)),
+    }, [req(1, 'eth_getBalance', balance, swap), req(1, 'eth_getBalance', balance, swap)],
+    req(1, 'eth_getBalance', balance, swap)),
+    // The route's target is the account read's address, trimmed and lower
+    // case, as a call's `to` is.
     scenario('boundary-adaptive-route-target-case', `${D_}: Adaptive bypass`, {
       ...w(1, net(['colibri', 'direct']), [RPC]),
       colibri: { error: { message: 'out of gas' } },
       rpc: { [RPC]: ok('0xrpc') },
-    }, req(1, 'eth_call', [{ to: ` 0x${'AB'.repeat(20)}`, data: '0x01' }, 'latest'], swap),
-    req(1, 'eth_call', [{ to: `0x${'ab'.repeat(20)}`, data: '0x02' }, 'latest'], swap),
-    req(1, 'eth_call', [{ to: `0x${'ab'.repeat(20)}`, data: '0x03' }, 'latest'], { origin: '  https://swap.example  ' }),
-    req(1, 'eth_call', [{ to: `0x${'ab'.repeat(20)}`, data: '0x04' }, 'latest'], { origin: 'https://Swap.example' })),
+    }, req(1, 'eth_getBalance', [` 0x${'AB'.repeat(20)}`, 'latest'], swap),
+    req(1, 'eth_getBalance', [`0x${'ab'.repeat(20)}`, 'latest'], swap),
+    req(1, 'eth_getBalance', [`0x${'ab'.repeat(20)}`, 'latest'], { origin: '  https://swap.example  ' }),
+    req(1, 'eth_getBalance', [`0x${'ab'.repeat(20)}`, 'latest'], { origin: 'https://Swap.example' })),
     // isCapacityFailure(error): an error's own failureKind first, then the
     // pattern on safeErrorMessage's text, not the raw message: whitespace
     // runs collapse, long hex is elided, and the text is cut at 500 units.
@@ -2667,14 +2694,14 @@ function boundaryScenarios(ethers, tx) {
       ...w(1, net(['colibri', 'direct']), [RPC]),
       colibri: { error },
       rpc: { [RPC]: ok('0xrpc') },
-    }, req(1, 'eth_call', [{ to: '0xabc' }, 'latest'], swap), req(1, 'eth_call', [{ to: '0xabc' }, 'latest'], swap))),
+    }, req(1, 'eth_getBalance', balance, swap), req(1, 'eth_getBalance', balance, swap))),
     scenario('boundary-origin-not-interactive', `${D_}: Adaptive bypass, origin`, {
       ...w(1, net(['colibri', 'direct']), [RPC]),
       colibri: ok('0xverified', 3000),
       rpc: { [RPC]: ok('0xrpc') },
-    }, req(1, 'eth_call', [{ to: '0xabc' }, 'latest'], { origin: 'https://swap.example\u0001' }),
-    req(1, 'eth_call', [{ to: '0xabc' }, 'latest'], { origin: `https://${'x'.repeat(2041)}` }),
-    req(1, 'eth_call', [{ to: '0xabc' }, 'latest'], { origin: '   ' })),
+    }, req(1, 'eth_getBalance', balance, { origin: 'https://swap.example\u0001' }),
+    req(1, 'eth_getBalance', balance, { origin: `https://${'x'.repeat(2041)}` }),
+    req(1, 'eth_getBalance', balance, { origin: '   ' })),
     // Myotis' slot.
     scenario('boundary-myotis-waiter-abandons-at-deadline', `${D_}: Myotis, admission`, {
       ...w(1, net(['myotis', 'direct']), [RPC]),
@@ -2714,29 +2741,30 @@ function boundaryScenarios(ethers, tx) {
       rpc: { [RPC]: ok('0xrpc') },
     }, { events: [{ at: 5, myotis: { 1: { ready: false } } }], calls: [req(1, 'eth_call', [{ to: '0xabc' }, 'latest'])] },
     req(1, 'eth_call', [{ to: '0xabc' }, 'latest'])),
-    // Colibri.
+    // Colibri, driven with an account read (see above).
     scenario('boundary-colibri-global-limit', `${D_}: Colibri, admission`, {
       ...w(1, net(['colibri', 'direct']), [RPC]),
       colibri: { hang: true },
       rpc: { [RPC]: ok('0xrpc') },
-    }, Array.from({ length: 9 }, (_, i) => req(1, 'eth_call', [{ to: target(i), data: '0x1234' }, 'latest'], swap))),
+    }, Array.from({ length: 9 }, (_, i) => req(1, 'eth_getBalance', [target(i), 'latest'], swap))),
     scenario('boundary-colibri-errors-fall-through', `${D_}: Colibri`, {
       ...w(1, net(['colibri', 'direct']), [RPC]),
       colibri: [{ error: { message: 'proof verification failed', code: -32000, data: '0x01' } }, { error: { message: 'Colibri prover timed out' } }],
       rpc: { [RPC]: ok('0xrpc') },
-    }, req(1, 'eth_call', [{ to: '0xabc' }, 'latest']), req(1, 'eth_call', [{ to: '0xabc' }, 'latest'])),
+    }, req(1, 'eth_getBalance', balance), req(1, 'eth_getBalance', balance)),
     scenario('boundary-colibri-revert-last-error', `${D_}: Colibri`, {
       ...w(1, net(['colibri', 'quorum']), [RPC]),
       colibri: { error: { message: 'execution reverted', code: 3, data: '0x08c379a0' } },
-    }, req(1, 'eth_call', [{ to: '0xabc' }, 'latest'])),
+    }, req(1, 'eth_getBalance', balance)),
     // Configuration.
     scenario('boundary-registry-change-mid-request', `${D_}: deviation config-change`, {
       ...w(1, net(['quorum', 'direct']), [A, B, C, D]),
       rpc: { [A]: { hang: true }, [B]: { hang: true }, [C]: { hang: true }, [D]: ok('0xrpc'), [url('e')]: ok('0xnew') },
     }, { events: [{ at: 1000, chains: { 1: chainEntry(net(['quorum', 'direct']), [A, B, C, url('e')]) } }], calls: [req(1, 'eth_call', [{ to: '0xabc' }, 'latest'])] }),
+    // An account read, which Colibri serves.
     scenario('boundary-order-duplicates-and-unknown', `${D_}: deviation order-validation`, {
       chains: { 1: chainEntry(net(['colibri', 'nope', 'colibri', 'direct']), [], []) },
-    }, req(1, 'eth_call', [{ to: '0xabc' }, 'latest'])),
+    }, req(1, 'eth_getBalance', balance)),
     {
       // k, m and the timeout as the router clamps them: k=0 is 3, m=5 is
       // k, 100 ms is 500; strings count as their numbers.
@@ -2818,7 +2846,7 @@ function boundaryScenarios(ethers, tx) {
         [{ zkProof: null }, ['not a url']],
       ].map(([extra, prover]) => ({
         world: { chains: { 1: chainEntry(net(['colibri'], undefined, extra), [], prover) } },
-        calls: [req(1, 'eth_call', [{ to: '0xabc' }, 'latest'], { include_trust: true })],
+        calls: [req(1, 'eth_getBalance', balance, { include_trust: true })],
       })),
     },
     // The recorder keeps every value apart from its own encodings: a result
@@ -2934,7 +2962,9 @@ function txLookupScenarios() {
   const app = { origin: 'https://app.example' };
   // A call target the router keys a route by: an address.
   const address = (n) => `0x${String(n).repeat(40)}`;
-  const call = (to = '0xabc') => req(1, 'eth_call', [{ to, data: '0x' }, 'latest']);
+  // Colibri serves no call since main's #1046 (`colibri-unproven`), so the
+  // fault tests drive it with an account read, as #1048's versions do.
+  const call = (to = '0xabc') => req(1, 'eth_getCode', [to, 'latest']);
   const byMethod = (answers) => ({ rules: Object.entries(answers).map(([method, then]) => ({ when: { method }, then })) });
   const patched = (s, keep = true) => (keep ? { ...s, patches: ['tx-lookups'] } : s);
   return [
@@ -2989,14 +3019,14 @@ function txLookupScenarios() {
     // 1938: two faults within 60 s back Colibri off that method on that
     // chain, for 60 s, then 5 min; another method and another chain still
     // go to it.
-    patched(scenario('colibri-fault-backoff-escalates', M(1938), lookupWorld({
-      rpc: { [RPC]: byMethod({ eth_call: ok('0xrpc'), eth_getBalance: ok('0x1') }) },
+    patched(scenario('colibri-fault-backoff-escalates', H(1969), lookupWorld({
+      rpc: { [RPC]: byMethod({ eth_getCode: ok('0xrpc'), eth_getBalance: ok('0x1') }) },
       colibri: [trap(), replaced(), ok('0xproven'), ok('0xproven'), trap(), trap(), ok('0xproven')],
-    }), call(), call(), call(), req(1, 'eth_getBalance', ['0xabc', 'latest']), req(100, 'eth_call', [{ to: '0xabc', data: '0x' }, 'latest']),
+    }), call(), call(), call(), req(1, 'eth_getBalance', ['0xabc', 'latest']), req(100, 'eth_getCode', ['0xabc', 'latest']),
     { after: 60_000, calls: [call()] }, call(), { after: 299_999, calls: [call()] }, { after: 1, calls: [call()] })),
     // 1971: only verifier faults count, and a Colibri answer clears them;
     // faults 60 s apart never meet.
-    patched(scenario('colibri-fault-only-faults-count', M(1971), lookupWorld({
+    patched(scenario('colibri-fault-only-faults-count', H(2002), lookupWorld({
       rpc: { [RPC]: ok('0xrpc') },
       colibri: [
         failing('Request to https://p failed: fetch failed', { code: -32603 }), failing('Request to https://p failed: fetch failed', { code: -32603 }),
@@ -3005,7 +3035,7 @@ function txLookupScenarios() {
     }), call(), call(), call(), call(), call(), call(), call(), { after: 60_000, calls: [call()] }, call())),
     // 1995: a request the worker host failed only because another one
     // trapped or overran on its worker counts for nothing.
-    patched(scenario('colibri-fault-bystander-not-counted', M(1995), lookupWorld({
+    patched(scenario('colibri-fault-bystander-not-counted', H(2026), lookupWorld({
       rpc: { [RPC]: ok('0xrpc') },
       colibri: [
         replaced(undefined, { colibriBystander: true }),
@@ -3017,11 +3047,11 @@ function txLookupScenarios() {
     // 2019: a fault that lands after the caller's deadline moved it on
     // still counts. Each lands 1 ms after its page's budget (the chain's
     // 1 s timeout), and the next step starts as it lands.
-    patched(scenario('colibri-fault-late-still-counts', M(2019), lookupWorld({
+    patched(scenario('colibri-fault-late-still-counts', H(2050), lookupWorld({
       rpc: { [RPC]: ok('0xrpc') },
       colibri: [replaced(1001), replaced(1001), ok('0xproven')],
-    }), req(1, 'eth_call', [{ to: address(0), data: '0x' }, 'latest'], { ...app, ...settles(1000) }),
-    { after: 1, calls: [req(1, 'eth_call', [{ to: address(1), data: '0x' }, 'latest'], { ...app, ...settles(1000) })] },
+    }), req(1, 'eth_getCode', [address(0), 'latest'], { ...app, ...settles(1000) }),
+    { after: 1, calls: [req(1, 'eth_getCode', [address(1), 'latest'], { ...app, ...settles(1000) })] },
     { after: 1, calls: [call('0xdef')] })),
 
     // The design's boundary cases.
@@ -3043,7 +3073,7 @@ function txLookupScenarios() {
     patched(scenario('boundary-colibri-fault-answer-ends-cooldown', DF, lookupWorld({
       rpc: { [RPC]: ok('0xrpc') },
       colibri: [trap(10), trap(20), ok('0xlate', 1500), ok('0xproven')],
-    }), [call(address(1)), call(address(2)), req(1, 'eth_call', [{ to: address(3), data: '0x' }, 'latest'], { ...app, ...settles(1000) })],
+    }), [call(address(1)), call(address(2)), req(1, 'eth_getCode', [address(3), 'latest'], { ...app, ...settles(1000) })],
     { after: 600, calls: [call()] })),
     // What counts as a fault: a RuntimeError by name, or the pattern on the
     // raw message, case aside; each answer in between clears the record.
@@ -3209,14 +3239,14 @@ function feeHeadroomScenarios() {
 }
 
 /**
- * Main's #1046 and #1060 (freedom-browser #1048 at b69c137c, open): its new
- * tests in chain-data-router.test.js's "Colibri's unproven and unbound
- * answers (#1046, #1060)", run on the pinned router with the
+ * Main's #1046 and #1060 (freedom-browser #1048 at a515f9a7,
+ * open): its new tests in chain-data-router.test.js's "Colibri's unproven
+ * and unbound answers (#1046, #1060)", run on the pinned router with the
  * `colibri-unproven` patch (PATCHES), and with `fee-headroom` before it for
  * the fee quotes. Each one's world is the test's.
  */
 function colibriUnprovenScenarios() {
-  const L = (line) => `chain-data-router.test.js@b69c137c:${line}`;
+  const L = H;
   const order = (readOrder) => ({ access: { readOrder }, quorum: { k: 3, m: 2, timeoutMs: 1000 } });
   const byMethod = (answers) => ({ rules: Object.entries(answers).map(([method, then]) => ({ when: { method }, then })) });
   const ABC = [A, B, C];
@@ -3228,10 +3258,13 @@ function colibriUnprovenScenarios() {
     ['balance', 'eth_getBalance', (tag) => ['0xabc', tag], ['0xabc']],
     ['code', 'eth_getCode', (tag) => ['0xabc', tag], ['0xabc']],
     ['nonce', 'eth_getTransactionCount', (tag) => ['0xabc', tag], ['0xabc']],
-    ['call', 'eth_call', (tag) => [CALL, tag], [CALL]],
-    ['estimate', 'eth_estimateGas', (tag) => [CALL, tag], [CALL]],
     ['storage', 'eth_getStorageAt', (tag) => ['0xabc', '0x0', tag], ['0xabc', '0x0']],
     ['block', 'eth_getBlockByNumber', (tag) => [tag, false], []],
+  ];
+  // The calls, which Colibri never serves, in the same form.
+  const CALLS = [
+    ['call', 'eth_call', (tag) => [CALL, tag], [CALL]],
+    ['estimate', 'eth_estimateGas', (tag) => [CALL, tag], [CALL]],
   ];
   const patched = (s) => ({ ...s, patches: ['colibri-unproven'] });
   const quoted = (s) => ({ ...s, patches: ['fee-headroom', 'colibri-unproven'] });
@@ -3239,19 +3272,46 @@ function colibriUnprovenScenarios() {
   // EIP-1898's two block objects, which Colibri binds to no block.
   const BY_HASH = { blockHash: '0x' + '11'.repeat(32), requireCanonical: true };
   const BY_NUMBER = { blockNumber: '0x10d4f00' };
-  // Every form of block the tests try, in their order.
-  const BLOCKS = ['0x10d4f00', HASH, 'latest', 'safe', 'finalized', 'pending', 'earliest', BY_HASH, BY_NUMBER];
+  // Every form of block the tests try, in their order: numbers (lower and
+  // upper case, 16 digits), a hash, the tags, the strings Colibri's matcher
+  // doesn't compare (after `0X` or `1x`, a leading zero, 17 digits), and
+  // EIP-1898's objects.
+  const BLOCKS = [
+    '0x10d4f00', '0x10D4F00', '0x1' + '0'.repeat(15), HASH,
+    'latest', 'safe', 'finalized', 'justified', 'pending', 'earliest',
+    '0X10d4f00', '1x10d4f00', '0X' + '22'.repeat(32), '0x010d4f00', '0x1' + '0'.repeat(16),
+    BY_HASH, BY_NUMBER,
+  ];
+  // The other values that aren't strings (a present `undefined` is sent
+  // as null).
+  const NON_STRINGS = [null, 16, true, ['latest']];
+  const OVERRIDES = { '0xabc': { balance: '0x1' } };
+  // Each call method at every form: at each block, at each other value
+  // that isn't a string, without a block, with state overrides, with no
+  // params and with params that aren't an array.
+  const callForms = (params, bare) => [
+    ...BLOCKS.map((block) => params(block)), ...NON_STRINGS.map((block) => params(block)),
+    bare, [CALL, 'latest', OVERRIDES], [], CALL,
+  ];
   return [
     // Each method at each block, and without its block parameter: Colibri
-    // asked as sent (2558) or at an appended `latest` (2633), or Direct,
-    // unverified (2572).
-    ...TAGGED.map(([slug, method, params, bare]) => patched(scenario(`colibri-unproven-${slug}`, L(2558), routerWorld({
+    // asked as sent (L(2588)) or at an appended `latest` (L(2662)), or
+    // Direct, unverified (L(2602)).
+    ...TAGGED.map(([slug, method, params, bare]) => patched(scenario(`colibri-unproven-${slug}`, L(2588), routerWorld({
       network: order(['colibri', 'direct']),
       rpc: { [RPC]: ok(`rpc:${method}`) },
       colibri: ok('colibri:proven'),
     }), ...BLOCKS.map((block) => req(1, method, params(block))), req(1, method, bare)))),
-    // The quorum answers the refused ones, and labels them as itself.
-    patched(scenario('colibri-unproven-quorum-labels', L(2586), {
+    // Neither call is Colibri's, at any form: Direct answers, unverified
+    // (L(2809)).
+    ...CALLS.map(([slug, method, params, bare]) => patched(scenario(`colibri-unproven-${slug}`, L(2809), routerWorld({
+      network: order(['colibri', 'direct']),
+      rpc: { [RPC]: ok(`rpc:${method}`) },
+      colibri: ok('colibri:unproven'),
+    }), ...callForms(params, bare).map((form) => req(1, method, form))))),
+    // The quorum answers the refused reads and the calls, and labels them
+    // as itself (L(2616), L(2825)).
+    patched(scenario('colibri-unproven-quorum-labels', L(2616), {
       chains: { 1: chainEntry(order(['myotis', 'colibri', 'quorum', 'direct']), ABC, [PROVER]) },
       myotis: myotisOn(1),
       rpc: Object.fromEntries(ABC.map((u) => [u, ok('0x6')])),
@@ -3259,96 +3319,106 @@ function colibriUnprovenScenarios() {
     }, req(1, 'eth_getTransactionCount', ['0xabc', 'pending']), req(1, 'eth_getStorageAt', ['0xabc', '0x0', 'earliest']),
     req(1, 'eth_call', [CALL, BY_HASH]), req(1, 'eth_estimateGas', [CALL, BY_NUMBER]),
     req(1, 'eth_getBalance', ['0xabc', '0x10d4f00']), req(1, 'eth_getCode', ['0xabc', HASH]),
-    req(1, 'eth_call', [CALL, 'safe']), req(1, 'eth_getBlockByNumber', ['finalized', false]))),
-    // A Colibri-only read order: the refusals' texts, and the two methods
-    // have no source at all.
-    patched(scenario('colibri-unproven-colibri-only', L(2599), routerWorld({
+    req(1, 'eth_call', [CALL, 'safe']), req(1, 'eth_getBlockByNumber', ['finalized', false]),
+    req(1, 'eth_getBalance', ['0xabc', 'justified']), req(1, 'eth_getBlockByNumber', ['justified', false]),
+    req(1, 'eth_getBlockByNumber', ['0X10d4f00', false]))),
+    patched(scenario('colibri-unproven-call-quorum', L(2825), {
+      chains: { 1: chainEntry(order(['colibri', 'quorum', 'direct']), ABC, [PROVER]) },
+      rpc: Object.fromEntries(ABC.map((u) => [u, ok('0x6')])),
+      colibri: ok('colibri:unproven'),
+    }, req(1, 'eth_call', [CALL, 'latest']), req(1, 'eth_estimateGas', [CALL, 'latest']),
+    req(1, 'eth_call', [CALL]), req(1, 'eth_estimateGas', [CALL]),
+    req(1, 'eth_call', [CALL, 'latest', OVERRIDES]), req(1, 'eth_estimateGas', [CALL, 'justified']))),
+    // A Colibri-only read order: the refusals' texts, and the fee methods
+    // and the calls have no source at all (L(2629), L(2838)).
+    patched(scenario('colibri-unproven-colibri-only', L(2629), routerWorld({
       network: order(['colibri']),
       colibri: ok('colibri:unbound'),
     }), req(1, 'eth_getTransactionCount', ['0xabc', 'pending']), req(1, 'eth_call', [CALL, 'earliest']),
     req(1, 'eth_call', [CALL, BY_HASH]), req(1, 'eth_getBalance', ['0xabc', BY_NUMBER]),
     req(1, 'eth_getStorageAt', ['0xabc', '0x0', '0x10d4f00']), req(1, 'eth_getCode', ['0xabc', 'finalized']),
     req(1, 'eth_estimateGas', [CALL, HASH]), req(1, 'eth_getBlockByNumber', ['safe', false]),
+    req(1, 'eth_getBlockByNumber', ['justified', false]), req(1, 'eth_getBlockByNumber', ['1x10d4f00', false]),
+    req(1, 'eth_getTransactionCount', ['0xabc', 'justified']),
+    req(1, 'eth_call', [CALL, 'latest']), req(1, 'eth_estimateGas', [CALL]),
     req(1, 'eth_gasPrice', []), req(1, 'eth_feeHistory', ['0x4', 'latest', [25, 75]]))),
-    // The other values that aren't strings, at one position each.
-    patched(scenario('colibri-unproven-non-strings', L(2616), routerWorld({
+    // The other values that aren't strings, at one position each (L(2645)).
+    patched(scenario('colibri-unproven-non-strings', L(2645), routerWorld({
       network: order(['colibri', 'direct']),
       rpc: { [RPC]: ok('rpc:answer') },
       colibri: ok('colibri:unbound'),
-    }), req(1, 'eth_call', [CALL, null]), req(1, 'eth_getBalance', ['0xabc', 16]),
+    }), req(1, 'eth_getCode', ['0xabc', null]), req(1, 'eth_getBalance', ['0xabc', 16]),
     req(1, 'eth_getStorageAt', ['0xabc', '0x0', true]), req(1, 'eth_getBlockByNumber', [['latest'], false]))),
     // The appended `latest` is Colibri's alone: when Colibri fails, Direct
-    // gets the params as sent.
-    patched(scenario('colibri-unproven-missing-block-fallback', L(2651), routerWorld({
+    // gets the params as sent (L(2680)).
+    patched(scenario('colibri-unproven-missing-block-fallback', L(2680), routerWorld({
       network: order(['colibri', 'direct']),
       rpc: { [RPC]: ok('rpc:answer') },
       colibri: { error: { message: 'prover down' } },
     }), ...TAGGED.filter(([slug]) => slug !== 'block').map(([, method, , bare]) => req(1, method, bare)))),
-    // State overrides after a call's block: asked as sent. The pinned
-    // router asks the same, so it is kept unpatched.
-    scenario('colibri-unproven-state-overrides', L(2685), routerWorld({
-      network: order(['colibri', 'direct']),
-      colibri: ok('colibri:proven'),
-    }), req(1, 'eth_call', [CALL, 'latest', { '0xabc': { balance: '0x1' } }]),
-    req(1, 'eth_estimateGas', [CALL, 'latest', { '0xabc': { balance: '0x1' } }])),
     // Params Colibri can't take a block from, refused with their texts
-    // (eth_getBlockByNumber's string read as `['safe']`).
-    patched(scenario('colibri-unproven-param-shapes', L(2711), routerWorld({
+    // (eth_getBlockByNumber's string read as `['safe']`) (L(2726)).
+    patched(scenario('colibri-unproven-param-shapes', L(2726), routerWorld({
       network: order(['colibri']),
       colibri: ok('colibri:unbound'),
-    }), req(1, 'eth_getBalance', []), req(1, 'eth_getStorageAt', ['0xabc']), req(1, 'eth_call', []),
-    req(1, 'eth_estimateGas', []), req(1, 'eth_getBalance', ['0xabc', 'latest', '0x1']),
+    }), req(1, 'eth_getBalance', []), req(1, 'eth_getStorageAt', ['0xabc']),
+    req(1, 'eth_getBalance', ['0xabc', 'latest', '0x1']),
     req(1, 'eth_getCode', ['0xabc', 'latest', 'latest']), req(1, 'eth_getTransactionCount', ['0xabc', 'latest', null]),
     req(1, 'eth_getStorageAt', ['0xabc', '0x0', 'latest', '0x1']), req(1, 'eth_getBalance', { address: '0xabc' }),
-    req(1, 'eth_call', CALL), req(1, 'eth_getBlockByNumber', 'safe'),
-    // Null params are eth_getBlockByNumber's at `latest` (2671): Colibri's.
+    req(1, 'eth_getBlockByNumber', 'safe'),
+    // Null params are eth_getBlockByNumber's at `latest` (L(2700)): Colibri's.
     req(1, 'eth_getBlockByNumber', null))),
-    // eth_getBlockByHash: Colibri's at a 32-byte hash, refused otherwise.
-    patched(scenario('colibri-unproven-block-hash', L(2737), routerWorld({
+    // eth_getBlockByHash: Colibri's at a 32-byte hash, refused otherwise
+    // (L(2754)).
+    patched(scenario('colibri-unproven-block-hash', L(2754), routerWorld({
       network: order(['colibri']),
       colibri: ok('colibri:proven'),
     }), req(1, 'eth_getBlockByHash', [HASH, false]), req(1, 'eth_getBlockByHash', ['0x' + 'AB'.repeat(32), true]),
     req(1, 'eth_getBlockByHash', ['0x' + '22'.repeat(31), false]), req(1, 'eth_getBlockByHash', ['0x10d4f00', false]),
     req(1, 'eth_getBlockByHash', ['latest', false]), req(1, 'eth_getBlockByHash', ['safe', false]),
-    req(1, 'eth_getBlockByHash', ['finalized', false]), req(1, 'eth_getBlockByHash', [{ blockHash: HASH }, false]),
+    req(1, 'eth_getBlockByHash', ['finalized', false]), req(1, 'eth_getBlockByHash', ['justified', false]),
+    req(1, 'eth_getBlockByHash', ['0X' + '22'.repeat(32), false]), req(1, 'eth_getBlockByHash', [{ blockHash: HASH }, false]),
     req(1, 'eth_getBlockByHash', []))),
     // A tag outside the method's block parameter: still Colibri's, an
-    // account read without its block at an appended `latest`.
-    patched(scenario('colibri-unproven-off-position', L(2770), routerWorld({
+    // account read without its block at an appended `latest` (L(2787)).
+    patched(scenario('colibri-unproven-off-position', L(2787), routerWorld({
       network: order(['colibri']),
       colibri: ok('colibri:proven'),
     }), req(1, 'eth_getStorageAt', ['0xabc', 'pending', 'latest']), req(1, 'eth_getBalance', ['pending']),
     req(1, 'eth_getBlockByNumber', ['latest', 'pending']), req(1, 'eth_getBlockByHash', [HASH, 'pending']),
     req(1, 'eth_getTransactionReceipt', ['pending']), req(1, 'eth_blockNumber', ['earliest']))),
-    patched(scenario('colibri-unproven-fee-methods', L(2778), routerWorld({
+    patched(scenario('colibri-unproven-fee-methods', L(2850), routerWorld({
       network: order(['colibri', 'direct']),
       rpc: { [RPC]: byMethod({ eth_gasPrice: ok('rpc:eth_gasPrice'), eth_feeHistory: ok('rpc:eth_feeHistory') }) },
       colibri: ok('colibri:unproven'),
     }), req(1, 'eth_gasPrice', []), req(1, 'eth_feeHistory', ['0x4', 'latest', [25, 75]]))),
-    quoted(scenario('colibri-unproven-fee-quote-quorum', L(2797), {
+    quoted(scenario('colibri-unproven-fee-quote-quorum', L(2869), {
       chains: { 1: chainEntry(order(['colibri', 'quorum', 'direct']), ABC, [PROVER]) },
       rpc: Object.fromEntries(ABC.map((u) => [u, FEES])),
       colibri: ok('0x1'),
     }, fee(1))),
-    quoted(scenario('colibri-unproven-fee-quote-direct', L(2819), routerWorld({
+    quoted(scenario('colibri-unproven-fee-quote-direct', L(2891), routerWorld({
       network: order(['colibri', 'direct']),
       rpc: { [RPC]: FEES },
       colibri: ok('0x1'),
     }), fee(1))),
-    // The trust a pending read carries is Direct's; at `latest`, Colibri's.
-    patched(scenario('colibri-unproven-trust', L(2851), routerWorld({
+    // The trust a call carries, at `pending` or `latest`, is Direct's; an
+    // account read's at `latest`, Colibri's (L(2924)).
+    patched(scenario('colibri-unproven-trust', L(2924), routerWorld({
       network: order(['colibri', 'direct']),
       rpc: { [RPC]: ok('0x2a') },
       colibri: ok('0x2a'),
-    }), req(1, 'eth_call', [CALL, 'pending'], { include_trust: true }), req(1, 'eth_call', [CALL, 'latest'], { include_trust: true }))),
+    }), req(1, 'eth_call', [CALL, 'pending'], { include_trust: true }), req(1, 'eth_call', [CALL, 'latest'], { include_trust: true }),
+    req(1, 'eth_getCode', ['0xabc', 'latest'], { include_trust: true }))),
   ];
 }
 
 // Main's #1046 and #1060 (`colibri-unproven`): the scenarios of the pinned
-// router and of #749 it changes, run patched; six of the pinned ones script
-// the RPC it then asks (their worlds above), and four ask Colibri at an
-// appended `latest`. Every other scenario comes out the same, so they stay
-// unpatched.
+// router and of #749 it changes, run patched; each of the pinned ones
+// scripts the RPC it then asks (their worlds above). Every other scenario
+// comes out the same, so they stay unpatched: the ones on Colibri's own
+// mechanics drive it with an account read at `latest`, as #1048's tests
+// do, since Colibri serves no call.
 const COLIBRI_UNPROVEN_PATCHED = [
   'router-myotis-tagged-state-reads',
   'router-myotis-unavailable-shapes',
@@ -3356,6 +3426,7 @@ const COLIBRI_UNPROVEN_PATCHED = [
   'router-historical-balance-to-colibri',
   'router-tagged-estimate-to-colibri',
   'router-historical-call-to-colibri',
+  'router-state-overrides-to-colibri',
   'router-myotis-capability-refusals',
   'router-myotis-blob-transaction',
   'router-myotis-gas-refused',

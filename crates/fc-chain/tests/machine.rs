@@ -181,6 +181,10 @@ fn result(reply: &Reply) -> Option<&str> {
 }
 
 const CALL: &str = r#"[{"to":"0xabc"},"latest"]"#;
+// What drives Colibri in these tests: an account read at `latest`. Colibri
+// serves no call (main's #1046), and the router handles its answers and
+// errors alike whatever the method.
+const BALANCE: &str = r#"["0xabc","latest"]"#;
 
 // ---------------------------------------------------------------------------
 // overall-deadline
@@ -797,8 +801,8 @@ fn cooldowns_run_on_the_machines_clock() {
     let mut world = World::new(Bounds::default(), &[config]);
     let interactive = || Call::Read {
         chain_id: 1,
-        method: "eth_call".into(),
-        params: CALL.into(),
+        method: "eth_getBalance".into(),
+        params: BALANCE.into(),
         options: ReadOptions {
             origin: Some("https://app.example".into()),
             ..ReadOptions::default()
@@ -850,8 +854,8 @@ fn the_adaptive_table_evicts_its_oldest_route() {
     {
         let call = Call::Read {
             chain_id: 1,
-            method: "eth_call".into(),
-            params: CALL.into(),
+            method: "eth_getBalance".into(),
+            params: BALANCE.into(),
             options: ReadOptions {
                 origin: Some((*origin).into()),
                 ..ReadOptions::default()
@@ -1188,7 +1192,7 @@ fn colibri_reverts_and_failures_carry_no_adapter_text() {
         zk: false,
     });
     let mut world = World::new(Bounds::default(), &[config]);
-    let id = world.submit(read(1, "eth_call", CALL), None);
+    let id = world.submit(read(1, "eth_getBalance", BALANCE), None);
     let op = world.requests[0].0;
     world.answer(
         op,
@@ -1287,7 +1291,11 @@ fn colibri_answers_over_the_budget_still_free_every_slot() {
     let ids: Vec<u64> = (0..8)
         .map(|i| {
             world.submit(
-                interactive("eth_call", CALL, &format!("https://app{i}.example")),
+                interactive(
+                    "eth_getBalance",
+                    BALANCE,
+                    &format!("https://app{i}.example"),
+                ),
                 None,
             )
         })
@@ -1311,7 +1319,7 @@ fn a_kept_colibri_revert_is_charged_while_it_lives() {
     // The revert is kept as the last error while Direct is asked: its data
     // is charged until the request ends.
     let mut world = World::new(Bounds::default(), &[colibri_chain(&["colibri", "direct"])]);
-    let id = world.submit(read(1, "eth_call", CALL), None);
+    let id = world.submit(read(1, "eth_getBalance", BALANCE), None);
     let before = world.machine.held();
     let data = format!("0x{}", "ab".repeat(400));
     world.answer(
@@ -1907,7 +1915,7 @@ fn a_colibri_reply_over_the_message_cap_is_no_answer_and_no_fault() {
         fault: false,
     });
     for answer in [fault(), too_large] {
-        world.submit(read(1, "eth_call", CALL), None);
+        world.submit(read(1, "eth_getBalance", BALANCE), None);
         let (op, ..) = world.requests.last().cloned().unwrap();
         world.answer(op, answer);
         let (io, ..) = world.rpcs().last().cloned().unwrap();
@@ -1916,11 +1924,11 @@ fn a_colibri_reply_over_the_message_cap_is_no_answer_and_no_fault() {
     // One fault, kept: `too_large` neither counted nor cleared it.
     let faults = world.machine.state_tables().colibri_faults;
     assert_eq!(faults.len(), 1);
-    assert_eq!(faults[0].0, "1 eth_call");
+    assert_eq!(faults[0].0, "1 eth_getBalance");
     assert_eq!(faults[0].1.faults.len(), 1);
     assert!(world.machine.take_backed_off().is_empty());
     // A second fault starts the cooldown, which the driver logs.
-    world.submit(read(1, "eth_call", CALL), None);
+    world.submit(read(1, "eth_getBalance", BALANCE), None);
     let (op, ..) = world.requests.last().cloned().unwrap();
     world.answer(op, fault());
     let started = world.machine.take_backed_off();
@@ -1931,7 +1939,7 @@ fn a_colibri_reply_over_the_message_cap_is_no_answer_and_no_fault() {
             started[0].method.as_str(),
             started[0].cooldown_ms
         ),
-        (1, "eth_call", 60_000)
+        (1, "eth_getBalance", 60_000)
     );
 }
 

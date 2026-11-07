@@ -66,63 +66,51 @@ pub fn source_serves_method(source: &str, method: &str) -> bool {
     }
 }
 
-/// The read methods Colibri never proves (main's #1046): Colibri 3.0.3
-/// answers them from one of its default public RPC hosts, as a success,
-/// even under `Strategy.VerifiedOnly` (`not_verifieable_yet_methods` in
-/// `eth_verify.c`, `rpc_handle_unproofable`). So Colibri doesn't serve
-/// them, and the next source answers, labelled as itself.
-pub const COLIBRI_UNPROVEN_METHODS: [&str; 2] = ["eth_gasPrice", "eth_feeHistory"];
-
-/// Where each read method Colibri serves takes its block parameter, as
-/// Colibri 3.0.3 reads it (`eth_block_tag_index` in `eth_verify.c`).
-/// Methods not listed take none.
-pub const COLIBRI_BLOCK_PARAM: [(&str, usize); 7] = [
-    ("eth_getBalance", 1),
-    ("eth_getCode", 1),
-    ("eth_getTransactionCount", 1),
-    ("eth_call", 1),
-    ("eth_estimateGas", 1),
-    ("eth_getStorageAt", 2),
-    ("eth_getBlockByNumber", 0),
-];
-
-/// The account reads and calls, which Colibri 3.0.3 ties to the requested
-/// block only at `latest` (main's #1060). Its verifiers check no other
-/// block: `verify_account_proof.c` compares no requested number or hash
-/// with the proven header; a call (privacy mode: `verify_call.c`'s
-/// `pap_verify_proof_response`) proves the state header without comparing
-/// it with the request, and `call_ctx.c`'s `call_lazy_fetch_block_header`
-/// compares a number only when the EVM reads the block context, and a hash
-/// never; `safe` and `finalized` pass unchecked everywhere. At `latest`
-/// each proof must be at most a minute old (`eth_check_latest_freshness`),
-/// which the account verifier applies to its last param and a call to
-/// `params[1]`, both only when that is the string `latest`.
-pub const COLIBRI_LATEST_ONLY: [&str; 6] = [
-    "eth_getBalance",
-    "eth_getCode",
-    "eth_getTransactionCount",
-    "eth_getStorageAt",
+/// The read methods Colibri never serves (main's #1046). Colibri 3.0.3
+/// answers `eth_gasPrice` and `eth_feeHistory` from one of its default
+/// public RPC hosts, as a success, even under `Strategy.VerifiedOnly`
+/// (`not_verifieable_yet_methods` in `eth_verify.c`,
+/// `rpc_handle_unproofable`). In privacy mode (`privacy_mode: 'basic'`,
+/// which the browser always sets) it runs `eth_call` and `eth_estimateGas`
+/// locally (`METHOD_LOCAL`) on contract code from one of those hosts, never
+/// checked against the proven code hash (`call_ctx.c`'s
+/// `call_account_get_code`, `eth_account.c`), and a call that reads no
+/// storage and no block context fetches no proof at all (`verify_call.c`'s
+/// `verify_call_result_and_finish`). So Colibri doesn't serve them, and the
+/// next source answers, labelled as itself.
+pub const COLIBRI_UNPROVEN_METHODS: [&str; 4] = [
+    "eth_gasPrice",
+    "eth_feeHistory",
     "eth_call",
     "eth_estimateGas",
 ];
 
-/// The account reads: Colibri's account verifier reads the block as their
-/// last param (`verify_account_proof.c`'s `account_block_tag`), so the
-/// block must be last.
-pub const COLIBRI_BLOCK_LAST: [&str; 4] = [
+/// Where each read method Colibri serves takes its block parameter, as
+/// Colibri 3.0.3 reads it (`eth_block_tag_index` in `eth_verify.c`).
+/// Methods not listed take none.
+pub const COLIBRI_BLOCK_PARAM: [(&str, usize); 5] = [
+    ("eth_getBalance", 1),
+    ("eth_getCode", 1),
+    ("eth_getTransactionCount", 1),
+    ("eth_getStorageAt", 2),
+    ("eth_getBlockByNumber", 0),
+];
+
+/// The account reads, which Colibri 3.0.3 ties to the requested block only
+/// at `latest` (main's #1060). `verify_account_proof.c` proves the account
+/// against the header in the proof and compares no requested number or
+/// hash with that header. No tag but `latest` is gated (`eth_verify.h`), so
+/// `safe`, `finalized` or `justified` would pass unchecked. At `latest` each
+/// proof must be at most a minute old (`eth_check_latest_freshness`). The
+/// verifier reads the block as the account read's last param
+/// (`account_block_tag`) and gates it only when that is the string
+/// `latest`, so the block must be last.
+pub const COLIBRI_LATEST_ONLY: [&str; 4] = [
     "eth_getBalance",
     "eth_getCode",
     "eth_getTransactionCount",
     "eth_getStorageAt",
 ];
-
-/// The block tags Colibri ties no answer to, for any method: `pending` and
-/// `earliest` it answers from a public RPC host, unproven (main's #1046);
-/// `safe` and `finalized` it proves for some block without checking that it
-/// is the safe or finalized one (`c4_eth_matches_blocknumber` passes every
-/// tag; main's #1060). Compared exactly, as Colibri compares the JSON
-/// string.
-pub const COLIBRI_UNBOUND_TAGS: [&str; 4] = ["pending", "earliest", "safe", "finalized"];
 
 /// How Colibri's refusal names a block that isn't a string
 /// ([`colibri_request_params`]).
@@ -144,24 +132,28 @@ pub enum ColibriParams {
 /// `colibriRequestParams(method, params)`: whether Colibri is asked this
 /// read, and with what (`params` is JSON text). Only a read whose answer
 /// Colibri ties to the requested block goes to it:
-/// - an account read or a call ([`COLIBRI_LATEST_ONLY`]) at `latest`.
-///   Without its block parameter it is read at `latest` by every source,
-///   and Colibri is asked with `latest` appended: left out, Colibri would
-///   apply no freshness gate. Any other block, params too short to append
-///   it in its place, an account read ([`COLIBRI_BLOCK_LAST`]) with params
-///   after its block, and params that aren't an array, are refused;
-/// - `eth_getBlockByNumber` at `latest`, a number, a hash or no block at
-///   all (`null` params included), which `verify_block.c` compares with the
-///   proven block or holds to the freshness gate; [`COLIBRI_UNBOUND_TAGS`]
-///   and other params that aren't an array (Colibri reads them as
-///   `[params]`) are refused;
+/// - an account read ([`COLIBRI_LATEST_ONLY`]) at `latest`. Without its
+///   block parameter it is read at `latest` by every source, and Colibri is
+///   asked with `latest` appended: left out, Colibri would apply no
+///   freshness gate. Any other block, params too short to append it in its
+///   place, params after its block, and params that aren't an array, are
+///   refused;
+/// - `eth_getBlockByNumber` at `latest`, a block number ([`is_block_number`])
+///   or a 32-byte hash, which `verify_block.c`'s `c4_eth_matches_blocknumber`
+///   compares with the proven block or holds to the freshness gate, or with
+///   no block at all (`null` params included). Every other string is
+///   refused: `pending` and `earliest` Colibri answers from a public RPC
+///   host; `safe`, `finalized` and any other string its validator lets
+///   through (`check_hex` also passes `0X10` or `1x10`) it matches with any
+///   proven block, as it compares only a string that starts with `0x`; and
+///   `justified` it names but doesn't gate (`eth_verify.h`). Params that
+///   aren't an array (Colibri reads them as `[params]`) are refused too;
 /// - `eth_getBlockByHash` at a 32-byte hash (`0x` and 64 hex digits), the
 ///   only string `c4_eth_matches_blocknumber` compares as a hash.
 ///
 /// A block that isn't a string (an EIP-1898 object, `null`, a number, a
 /// boolean, an array) is refused for each of them
-/// ([`COLIBRI_NOT_A_STRING`]): in privacy mode Colibri's call path reads any
-/// non-string as `latest`, and no verifier compares one. Every other method
+/// ([`COLIBRI_NOT_A_STRING`]): no verifier compares one. Every other method
 /// is asked as sent, as are params that don't parse.
 pub fn colibri_request_params(method: &str, params: &str) -> ColibriParams {
     let Some(position) = COLIBRI_BLOCK_PARAM
@@ -201,7 +193,7 @@ pub fn colibri_request_params(method: &str, params: &str) -> ColibriParams {
         if length == position {
             return ColibriParams::LatestAppended;
         }
-        if length < position || (COLIBRI_BLOCK_LAST.contains(&method) && length > position + 1) {
+        if length < position || length > position + 1 {
             return refused(format!("with params of length {length}").as_str());
         }
     } else if length <= position {
@@ -224,12 +216,27 @@ pub fn colibri_request_params(method: &str, params: &str) -> ColibriParams {
     } else if by_hash {
         is_block_hash(&units)
     } else {
-        !COLIBRI_UNBOUND_TAGS.iter().any(|tag| is(tag))
+        is("latest") || is_block_number(&units) || is_block_hash(&units)
     };
     if served {
         ColibriParams::AsSent
     } else {
         at_block(&units)
+    }
+}
+
+/// `/^0x(?:0|[1-9a-fA-F][0-9a-fA-F]{0,15})$/`: `0x` and at most 16 hex
+/// digits without a leading zero. Colibri's validator refuses a leading
+/// zero, and it compares the number as 64 bits (`json_as_uint64`).
+fn is_block_number(units: &[u16]) -> bool {
+    let Some(digits) = units.strip_prefix(&[u16::from(b'0'), u16::from(b'x')]) else {
+        return false;
+    };
+    let hex = |unit: &u16| u8::try_from(*unit).is_ok_and(|byte| byte.is_ascii_hexdigit());
+    match digits {
+        [only] => hex(only),
+        [first, ..] => *first != u16::from(b'0') && digits.len() <= 16 && digits.iter().all(hex),
+        [] => false,
     }
 }
 
@@ -346,31 +353,42 @@ mod tests {
         assert!(!is_read_method("eth_sendRawTransaction"));
     }
 
-    // Main's #1046: what Colibri would answer unproven.
+    // Main's #1046: what Colibri would answer unproven, or run on code it
+    // doesn't check.
     #[test]
     fn colibri_unproven() {
-        for method in ["eth_gasPrice", "eth_feeHistory"] {
+        for method in COLIBRI_UNPROVEN_METHODS {
             assert!(!source_serves_method("colibri", method), "{method}");
             for source in ["myotis", "quorum", "direct"] {
                 assert!(source_serves_method(source, method), "{source} {method}");
             }
         }
+        assert_eq!(
+            COLIBRI_UNPROVEN_METHODS,
+            [
+                "eth_gasPrice",
+                "eth_feeHistory",
+                "eth_call",
+                "eth_estimateGas"
+            ]
+        );
         assert!(source_serves_method("colibri", "eth_maxPriorityFeePerGas"));
-        let order = source_order(&["colibri", "direct"], &[], &[], "eth_gasPrice", false);
-        assert_eq!(order.order, ["direct"]);
-        assert_eq!(order.dropped, ["colibri"]);
+        for method in ["eth_gasPrice", "eth_call", "eth_estimateGas"] {
+            let order = source_order(&["colibri", "direct"], &[], &[], method, false);
+            assert_eq!(order.order, ["direct"], "{method}");
+            assert_eq!(order.dropped, ["colibri"], "{method}");
+        }
 
         let ask = colibri_request_params;
         let refused = |text: &str| ColibriParams::Refused(JsString::from(text));
         let not_a_string = refused(COLIBRI_NOT_A_STRING);
-        let call = r#"{"to":"0xabc"}"#;
         let hash = format!("\"0x{}\"", "22".repeat(32));
+        let sixteen = format!("\"0x1{}\"", "0".repeat(15));
+        let seventeen = format!("\"0x1{}\"", "0".repeat(16));
+        let upper_x_hash = format!("\"0X{}\"", "22".repeat(32));
         // A method's params with `value` at its block parameter.
-        let with = |method: &str, at: usize, value: &str| {
+        let with = |at: usize, value: &str| {
             let mut params: Vec<String> = vec![r#""0xabc""#.into(); at + 1];
-            if matches!(method, "eth_call" | "eth_estimateGas") {
-                params[0] = call.into();
-            }
             params[at] = value.into();
             params
         };
@@ -379,24 +397,34 @@ mod tests {
         for (method, at) in COLIBRI_BLOCK_PARAM {
             let latest_only = COLIBRI_LATEST_ONLY.contains(&method);
             assert_eq!(latest_only, method != "eth_getBlockByNumber", "{method}");
-            // Each string form: Colibri's, or refused naming it.
-            for value in [
-                r#""0x10d4f00""#,
-                hash.as_str(),
-                r#""latest""#,
-                r#""safe""#,
-                r#""finalized""#,
-                r#""pending""#,
-                r#""earliest""#,
+            // Each string form, and whether eth_getBlockByNumber is Colibri's
+            // at it; an account read is only at `latest`.
+            for (value, by_number) in [
+                (r#""0x10d4f00""#, true),
+                (r#""0x10D4F00""#, true),
+                (sixteen.as_str(), true),
+                (r#""0x0""#, true),
+                (hash.as_str(), true),
+                (r#""latest""#, true),
+                (r#""safe""#, false),
+                (r#""finalized""#, false),
+                (r#""justified""#, false),
+                (r#""pending""#, false),
+                (r#""earliest""#, false),
+                (r#""0X10d4f00""#, false),
+                (r#""1x10d4f00""#, false),
+                (upper_x_hash.as_str(), false),
+                (r#""0x010d4f00""#, false),
+                (seventeen.as_str(), false),
+                (r#""0x""#, false),
+                (r#""0x10g""#, false),
             ] {
                 let served = if latest_only {
                     value == r#""latest""#
                 } else {
-                    !COLIBRI_UNBOUND_TAGS
-                        .iter()
-                        .any(|tag| value == format!("\"{tag}\""))
+                    by_number
                 };
-                let params = with(method, at, value);
+                let params = with(at, value);
                 let expected = if served {
                     ColibriParams::AsSent
                 } else {
@@ -404,10 +432,11 @@ mod tests {
                 };
                 assert_eq!(ask(method, &text(&params)), expected, "{method} {value}");
             }
-            // A tag one place off is not the block.
-            let mut params = with(method, at, r#""latest""#);
+            // A tag one place off is not the block: an account read with
+            // params after its block is refused, a block read is Colibri's.
+            let mut params = with(at, r#""latest""#);
             params.push(r#""pending""#.into());
-            let expected = if COLIBRI_BLOCK_LAST.contains(&method) {
+            let expected = if latest_only {
                 refused(format!("with params of length {}", at + 2).as_str())
             } else {
                 ColibriParams::AsSent
@@ -422,7 +451,7 @@ mod tests {
                 "true",
                 r#"["latest"]"#,
             ] {
-                let params = with(method, at, other);
+                let params = with(at, other);
                 assert_eq!(
                     ask(method, &text(&params)),
                     not_a_string,
@@ -430,8 +459,8 @@ mod tests {
                 );
             }
             // Without the block parameter: `latest` appended for an account
-            // read or a call, as sent for a block.
-            let mut params = with(method, at, r#""latest""#);
+            // read, as sent for a block.
+            let mut params = with(at, r#""latest""#);
             params.truncate(at);
             let expected = if latest_only {
                 ColibriParams::LatestAppended
@@ -449,11 +478,11 @@ mod tests {
                 );
             }
         }
-        // A call's state overrides follow its block.
+        // The calls have no block rule: Colibri serves neither
+        // (`source_serves_method`), so nothing here asks it.
         for method in ["eth_call", "eth_estimateGas"] {
-            let params = format!(r#"[{call},"latest",{{"0xabc":{{"balance":"0x1"}}}}]"#);
-            assert_eq!(ask(method, &params), ColibriParams::AsSent, "{method}");
-            assert_eq!(ask(method, "[]"), refused("with params of length 0"));
+            assert!(!COLIBRI_BLOCK_PARAM.iter().any(|(name, _)| *name == method));
+            assert!(!COLIBRI_LATEST_ONLY.contains(&method));
         }
         // Exact strings only, in an array.
         assert_eq!(
@@ -474,7 +503,15 @@ mod tests {
         );
         assert_eq!(
             ask("eth_getBlockByNumber", r#"["PENDING",false]"#),
-            ColibriParams::AsSent
+            at_block(r#""PENDING""#)
+        );
+        assert_eq!(
+            ask("eth_getBlockByNumber", r#"["LATEST",false]"#),
+            at_block(r#""LATEST""#)
+        );
+        assert_eq!(
+            ask("eth_getBlockByNumber", r#"["0x10d4f00 ",false]"#),
+            at_block(r#""0x10d4f00 ""#)
         );
         for params in [r#"{"1":"latest"}"#, r#""safe""#, "null"] {
             assert_eq!(
@@ -504,6 +541,7 @@ mod tests {
             r#""latest""#.to_owned(),
             r#""safe""#.to_owned(),
             r#""finalized""#.to_owned(),
+            r#""justified""#.to_owned(),
         ] {
             assert_eq!(by_hash(&other), at_block(&other), "{other}");
         }

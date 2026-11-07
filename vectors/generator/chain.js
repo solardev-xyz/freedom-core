@@ -1137,9 +1137,13 @@ function sourceOrderScenarios(blockscout) {
   const transfer = blockscout.ERC20_TRANSFER_TOPIC;
   const scan = (fields) => jsonText([{ address: token, topics: [transfer, addressTopic(WALLET)], fromBlock: '0x1', toBlock: '0x186a0', ...fields }]);
   const call = jsonText([{ to: ADDRESS }]);
+  // A read every source serves: Colibri serves no call since main's #1046
+  // (`colibri-unproven`), which these cases, the pinned router's, don't
+  // patch in.
+  const balance = jsonText([ADDRESS, 'latest']);
   const all = ['myotis', 'colibri', 'quorum', 'direct'];
   return [
-    { id: 'all-tried', method: 'eth_call', params: call, readOrder: all },
+    { id: 'all-tried', method: 'eth_getBalance', params: balance, readOrder: all },
     { id: 'single-node-method', method: 'web3_clientVersion', params: '[]', readOrder: all },
     { id: 'single-node-method-no-direct', method: 'eth_newBlockFilter', params: '[]', readOrder: ['myotis', 'colibri', 'quorum'] },
     { id: 'all-excluded', method: 'eth_call', params: call, readOrder: ['quorum'], exclude: ['quorum'] },

@@ -5677,7 +5677,9 @@
           "web3_sha3",
           "eth_getLogs",
           "eth_gasPrice",
-          "eth_feeHistory"
+          "eth_feeHistory",
+          "eth_call",
+          "eth_estimateGas"
         ],
         "opt_in": false,
         "patches": [
@@ -5976,8 +5978,8 @@
     {
       "id": "all-tried",
       "chain_id": 1,
-      "method": "eth_call",
-      "params": "[{\"to\":\"0x1111111111111111111111111111111111111111\"}]",
+      "method": "eth_getBalance",
+      "params": "[\"0x1111111111111111111111111111111111111111\",\"latest\"]",
       "read_order": [
         "myotis",
         "colibri",
@@ -6010,7 +6012,7 @@
             "message_json": "\"No RPC endpoint configured\""
           }
         ],
-        "text_json": "\"All chain sources failed for eth_call (myotis: Myotis is not ready; colibri: No Colibri prover configured; quorum: RPC quorum needs 2 endpoints; direct: No RPC endpoint configured)\""
+        "text_json": "\"All chain sources failed for eth_getBalance (myotis: Myotis is not ready; colibri: No Colibri prover configured; quorum: RPC quorum needs 2 endpoints; direct: No RPC endpoint configured)\""
       }
     },
     {

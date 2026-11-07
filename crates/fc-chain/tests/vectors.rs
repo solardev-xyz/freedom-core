@@ -551,7 +551,8 @@ fn read_methods() {
         let unsupported = strings(&capability["unsupported"]);
         assert_eq!(capability["opt_in"] == true, source == BLOCKSCOUT);
         // Main's #1046 (`colibri-unproven`) changes Colibri's alone: it
-        // serves neither eth_gasPrice nor eth_feeHistory.
+        // serves none of eth_gasPrice, eth_feeHistory, eth_call and
+        // eth_estimateGas.
         if source == "colibri" {
             assert_eq!(
                 capability["patches"],

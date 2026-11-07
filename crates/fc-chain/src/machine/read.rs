@@ -688,8 +688,8 @@ pub(crate) async fn colibri(
     // A read whose answer Colibri doesn't tie to the requested block: a tag
     // it would answer from a public RPC host, unproven (main's #1046), or a
     // block it proves without checking that it is the one asked for (main's
-    // #1060). Refused before Colibri is asked. An account read or a call
-    // without its block parameter is asked at an appended `latest`.
+    // #1060). Refused before Colibri is asked. An account read without its
+    // block parameter is asked at an appended `latest`.
     let appended = match colibri_request_params(method, params) {
         ColibriParams::AsSent => false,
         ColibriParams::LatestAppended => true,

@@ -2434,7 +2434,7 @@ const DEVIATIONS: &[Expected] = &[
             Want::Thrown {
                 class: "Error",
                 name: "Error",
-                message: "All chain sources failed for eth_call (colibri: No Colibri prover configured; direct: No RPC endpoint configured)",
+                message: "All chain sources failed for eth_getBalance (colibri: No Colibri prover configured; direct: No RPC endpoint configured)",
                 props: &[],
             },
         )],
@@ -2826,7 +2826,7 @@ const NOT_REPLAYED: usize = 0;
 /// tick the reference's exchange settled, after what [`race`] names. Main
 /// withholds each quorum member's answer; a page's deadline failure is the
 /// machine's own timer.
-const RACES: &[(Race, usize)] = &[(Race::QuorumTail, 138), (Race::PageDeadline, 4)];
+const RACES: &[(Race, usize)] = &[(Race::QuorumTail, 147), (Race::PageDeadline, 4)];
 
 #[test]
 // The score is the test's report, printed with `--nocapture`.
