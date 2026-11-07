@@ -90,6 +90,12 @@
 //!   UTF-8, three bytes for each invalid sequence. Past the built budget it
 //!   is `too_large`.
 //!
+//! **An identity document over 1 MiB** is refused before the walk parses
+//! it ([`identity`], 0008's deviation `identity-cap`): `repo_info`,
+//! `tree` and `blob` without a revision when `HEAD` doesn't resolve, the
+//! listings, and the composed reads of them check its blob's size first,
+//! within the build's bounds, and answer `too_large` with a fixed text.
+//!
 //! **libradicle's errors:** `not_found` when the message matches today's
 //! test (`not found`, `does not exist` or `NotFound`, in any case),
 //! otherwise `failed` ([`radicle_error`]). The message is libradicle's, as
@@ -116,7 +122,7 @@ use std::time::Duration;
 
 use fc_protocol::error::{ErrorBody, ErrorCode};
 use fc_service::conn::{Connection, Headed};
-use libradicle::{BINDING_MAX_PER_PAGE, Blob, MAX_TREE_DEPTH, json};
+use libradicle::{BINDING_MAX_PER_PAGE, Blob, Bounds, MAX_TREE_DEPTH, json};
 use radicle::git::raw::{ErrorClass as GitClass, ErrorCode as GitCode};
 use radicle::node::gate::{self, RepoGate, RepoState};
 use radicle::prelude::RepoId;
@@ -134,6 +140,7 @@ use composed::Cobs;
 
 mod blob;
 mod composed;
+mod identity;
 mod js;
 
 pub use blob::blob;
@@ -771,35 +778,60 @@ fn bounded_blob(
 }
 
 /// `blob` or `blob_at`: the blob `load` loads, as JSON, within the build's
-/// reservation and libgit2's bytes beside it ([`BESIDE`]).
+/// reservation and libgit2's bytes beside it ([`BESIDE`]), once `check`
+/// has passed within the read's bounds (`blob`'s identity document,
+/// [`identity::check_headless`]).
 fn blob_read(
     budget: &Arc<Budget>,
     until: &Until,
     path: &str,
+    check: impl FnOnce(&Bounds) -> Result<(), Failure>,
     load: impl FnOnce(u64) -> Result<Blob, libradicle::Error>,
 ) -> Result<Body, Failure> {
     json_read_beside(
         BESIDE,
         budget,
         until,
-        |_| bounded_blob(BUILT, load),
+        |bounds| {
+            check(bounds)?;
+            bounded_blob(BUILT, load).map_err(Failure::from)
+        },
         |w, blob| json::blob(w, path, blob),
     )
 }
 
-/// `op`'s JSON, built and written within the budget (see the module's doc).
-fn body(handle: &Handle, budget: &Arc<Budget>, until: &Until, op: Op) -> Result<Body, Failure> {
+/// `op`'s JSON, built and written within the budget (see the module's
+/// doc), on the node whose home is `home`.
+fn body(
+    handle: &Handle,
+    home: &Path,
+    budget: &Arc<Budget>,
+    until: &Until,
+    op: Op,
+) -> Result<Body, Failure> {
     match op {
         Op::RepoInfo { rid } => json_read(
             budget,
             until,
-            |bounds| handle.node().repo_info_bounded(rid, bounds),
+            |bounds| {
+                identity::check(&handle.node(), home, rid, bounds)?;
+                handle
+                    .node()
+                    .repo_info_bounded(rid, bounds)
+                    .map_err(Failure::from)
+            },
             json::repo_info,
         ),
         Op::Tree { rid, path } => json_read(
             budget,
             until,
-            |bounds| handle.node().tree_bounded(rid, &path, bounds),
+            |bounds| {
+                identity::check_headless(&handle.node(), home, rid, bounds)?;
+                handle
+                    .node()
+                    .tree_bounded(rid, &path, bounds)
+                    .map_err(Failure::from)
+            },
             |w, entries| json::tree(w, entries),
         ),
         Op::TreeAt {
@@ -812,18 +844,28 @@ fn body(handle: &Handle, budget: &Arc<Budget>, until: &Until, op: Op) -> Result<
             |bounds| handle.node().tree_at_bounded(rid, &revision, &path, bounds),
             |w, (entries, commit)| json::tree_at(w, entries, commit),
         ),
-        Op::Blob { rid, path } => blob_read(budget, until, &path, |limit| {
-            handle.node().read_blob_capped(rid, &path, limit)
-        }),
+        Op::Blob { rid, path } => blob_read(
+            budget,
+            until,
+            &path,
+            |bounds| identity::check_headless(&handle.node(), home, rid, bounds),
+            |limit| handle.node().read_blob_capped(rid, &path, limit),
+        ),
         Op::BlobAt {
             rid,
             revision,
             path,
-        } => blob_read(budget, until, &path, |limit| {
-            handle
-                .node()
-                .read_blob_at_capped(rid, &revision, &path, limit)
-        }),
+        } => blob_read(
+            budget,
+            until,
+            &path,
+            |_| Ok(()),
+            |limit| {
+                handle
+                    .node()
+                    .read_blob_at_capped(rid, &revision, &path, limit)
+            },
+        ),
         Op::Commits {
             rid,
             parent,
@@ -860,13 +902,25 @@ fn body(handle: &Handle, budget: &Arc<Budget>, until: &Until, op: Op) -> Result<
         Op::ListRepos => json_read(
             budget,
             until,
-            |bounds| handle.node().list_repos_bounded(bounds),
+            |bounds| {
+                identity::check_listed(&handle.node(), home, bounds)?;
+                handle
+                    .node()
+                    .list_repos_bounded(bounds)
+                    .map_err(Failure::from)
+            },
             |w, repos| json::repos(w, repos),
         ),
         Op::ListSeededRepos => json_read(
             budget,
             until,
-            |bounds| handle.node().list_seeded_repos_bounded(bounds),
+            |bounds| {
+                identity::check_listed(&handle.node(), home, bounds)?;
+                handle
+                    .node()
+                    .list_seeded_repos_bounded(bounds)
+                    .map_err(Failure::from)
+            },
             |w, repos| json::seeded_repos(w, repos),
         ),
         Op::Seeders { rid } => json_read(
@@ -878,7 +932,7 @@ fn body(handle: &Handle, budget: &Arc<Budget>, until: &Until, op: Op) -> Result<
         Op::Identity => json_read(
             budget,
             until,
-            |_| Ok(handle.node().identity()),
+            |_| Ok::<_, libradicle::Error>(handle.node().identity()),
             json::identity,
         ),
         Op::Status => json_read(
@@ -889,15 +943,15 @@ fn body(handle: &Handle, budget: &Arc<Budget>, until: &Until, op: Op) -> Result<
         ),
         Op::Issue { rid, id } => composed::issue(handle, budget, until, rid, &id),
         Op::Patch { rid, id } => composed::patch(handle, budget, until, rid, &id),
-        Op::Remotes { rid } => composed::remotes(handle, budget, until, rid),
+        Op::Remotes { rid } => composed::remotes(handle, home, budget, until, rid),
         Op::RepoStats { rid, revision } => {
-            composed::repo_stats(handle, budget, until, rid, &revision)
+            composed::repo_stats(handle, home, budget, until, rid, &revision)
         }
         Op::ReadmeAt { rid, revision } => {
             composed::readme_at(handle, budget, until, rid, &revision)
         }
-        Op::RepoMeta { rid } => composed::repo_meta(handle, budget, until, rid),
-        Op::ReposMeta => composed::repos_meta(handle, budget, until),
+        Op::RepoMeta { rid } => composed::repo_meta(handle, home, budget, until, rid),
+        Op::ReposMeta => composed::repos_meta(handle, home, budget, until),
         Op::Page {
             rid,
             cobs,
@@ -912,7 +966,7 @@ fn body(handle: &Handle, budget: &Arc<Budget>, until: &Until, op: Op) -> Result<
             cobs,
             (status.as_deref(), page.as_deref(), per_page.as_deref()),
         ),
-        Op::NodeInfo => composed::node_info(handle, budget, until),
+        Op::NodeInfo => composed::node_info(handle, home, budget, until),
     }
 }
 
@@ -962,7 +1016,7 @@ pub fn read(
         }
         testhooks::hold_work(&ticket.cancel);
         let until = Until::new(ticket.deadline, ticket.cancel.clone());
-        let built = body(&handle, &budget, &until, op);
+        let built = body(&handle, &home, &budget, &until, op);
         drop(handle);
         match built {
             Ok(body) => {

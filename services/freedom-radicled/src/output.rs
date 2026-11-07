@@ -574,10 +574,13 @@ impl From<Refused> for Failure {
 
 /// A JSON read within 0008's limits (see the module's doc): `build` walks
 /// within the [`Bounds`] it is given, and `write` serializes what it built.
-pub fn json_read<T>(
+///
+/// `build` answers libradicle's errors, or the read's own refusal before
+/// its walk (an identity document over its cap, `crate::reads`).
+pub fn json_read<T, E: Into<Failure>>(
     budget: &Arc<Budget>,
     until: &Until,
-    build: impl FnOnce(&Bounds) -> Result<T, libradicle::Error>,
+    build: impl FnOnce(&Bounds) -> Result<T, E>,
     write: impl FnOnce(&mut Json, &T) -> serde_json::Result<()>,
 ) -> Result<Body, Failure> {
     json_read_within(READ, 0, budget, until, build, write)
@@ -587,22 +590,22 @@ pub fn json_read<T>(
 /// its build holds outside its walk's bounds (a blob's NUL and structs
 /// beside the libgit2 buffer and the copy that fill the build,
 /// `crate::reads`).
-pub fn json_read_beside<T>(
+pub fn json_read_beside<T, E: Into<Failure>>(
     beside: u64,
     budget: &Arc<Budget>,
     until: &Until,
-    build: impl FnOnce(&Bounds) -> Result<T, libradicle::Error>,
+    build: impl FnOnce(&Bounds) -> Result<T, E>,
     write: impl FnOnce(&mut Json, &T) -> serde_json::Result<()>,
 ) -> Result<Body, Failure> {
     json_read_within(READ, beside, budget, until, build, write)
 }
 
-fn json_read_within<T>(
+fn json_read_within<T, E: Into<Failure>>(
     limits: Limits,
     beside: u64,
     budget: &Arc<Budget>,
     until: &Until,
-    build: impl FnOnce(&Bounds) -> Result<T, libradicle::Error>,
+    build: impl FnOnce(&Bounds) -> Result<T, E>,
     write: impl FnOnce(&mut Json, &T) -> serde_json::Result<()>,
 ) -> Result<Body, Failure> {
     // The walk's whole budget, before it starts: half of it for what it
@@ -610,7 +613,7 @@ fn json_read_within<T>(
     let built = budget.reserve(limits.built + beside, until)?;
     let half = limits.built / 2;
     let bounds = Bounds::new(until.cancel.clone(), half).with_loads(half);
-    let value = build(&bounds)?;
+    let value = build(&bounds).map_err(Into::into)?;
     let mut json = Json::new(budget.clone(), until.clone(), limits.json);
     let written = write(&mut json, &value);
     drop(value);

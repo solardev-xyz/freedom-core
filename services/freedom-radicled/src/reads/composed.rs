@@ -59,8 +59,15 @@
 //!
 //! `repos_meta` looks at the read's token before each repository; a walk
 //! looks at it as it goes.
+//!
+//! **An identity document over 1 MiB** ([`super::identity`]): `remotes`,
+//! `repo_stats` and each `repo_meta` check the repository's before their
+//! walk, within its bounds, and the listings of `repos_meta` and
+//! `node_info` every seeded repository's; one over the cap is `too_large`
+//! with a fixed text, and `node_info`'s `repos_error`.
 
 use std::io;
+use std::path::Path;
 use std::sync::Arc;
 
 use fc_protocol::error::{ErrorBody, ErrorCode};
@@ -71,7 +78,7 @@ use serde::Serialize;
 use serde_json::json;
 
 use super::js::{self, Seeding, Work};
-use super::{BESIDE, bounded_blob};
+use super::{BESIDE, bounded_blob, identity};
 use crate::node::Handle;
 use crate::output::{
     BUILT, Body, Budget, Failure, Json, Refused, Until, composed_read, composed_read_beside,
@@ -201,14 +208,16 @@ pub fn patch(
     })
 }
 
-/// `remotes { rid }`.
+/// `remotes { rid }`, on the node whose home is `home`.
 pub fn remotes(
     handle: &Handle,
+    home: &Path,
     budget: &Arc<Budget>,
     until: &Until,
     rid: RepoId,
 ) -> Result<Body, Failure> {
     composed_read(budget, until, |out| {
+        identity::check(&handle.node(), home, rid, &bounds(until, TODAYS))?;
         let text = {
             let remotes = handle.node().remotes_bounded(rid, &bounds(until, TODAYS))?;
             capture(TODAYS, |mut w| json::remotes(&mut w, &remotes))?
@@ -217,15 +226,17 @@ pub fn remotes(
     })
 }
 
-/// `repo_stats { rid, revision }`.
+/// `repo_stats { rid, revision }`, on the node whose home is `home`.
 pub fn repo_stats(
     handle: &Handle,
+    home: &Path,
     budget: &Arc<Budget>,
     until: &Until,
     rid: RepoId,
     revision: &str,
 ) -> Result<Body, Failure> {
     composed_read(budget, until, |out| {
+        identity::check(&handle.node(), home, rid, &bounds(until, TODAYS))?;
         let text = {
             let stats = handle
                 .node()
@@ -315,8 +326,16 @@ pub fn readme_at(
     })
 }
 
-/// One repository's `repo_meta`, written into `out`.
-fn meta_into(handle: &Handle, until: &Until, rid: RepoId, out: &mut Json) -> Result<(), Failure> {
+/// One repository's `repo_meta`, written into `out`, on the node whose
+/// home is `home`.
+fn meta_into(
+    handle: &Handle,
+    home: &Path,
+    until: &Until,
+    rid: RepoId,
+    out: &mut Json,
+) -> Result<(), Failure> {
+    identity::check(&handle.node(), home, rid, &bounds(until, REPO_INFO))?;
     let info = {
         let info = handle
             .node()
@@ -343,19 +362,28 @@ fn meta_into(handle: &Handle, until: &Until, rid: RepoId, out: &mut Json) -> Res
     Ok(())
 }
 
-/// `repo_meta { rid }`.
+/// `repo_meta { rid }`, on the node whose home is `home`.
 pub fn repo_meta(
     handle: &Handle,
+    home: &Path,
     budget: &Arc<Budget>,
     until: &Until,
     rid: RepoId,
 ) -> Result<Body, Failure> {
-    composed_read(budget, until, |out| meta_into(handle, until, rid, out))
+    composed_read(budget, until, |out| {
+        meta_into(handle, home, until, rid, out)
+    })
 }
 
-/// `repos_meta`.
-pub fn repos_meta(handle: &Handle, budget: &Arc<Budget>, until: &Until) -> Result<Body, Failure> {
+/// `repos_meta`, on the node whose home is `home`.
+pub fn repos_meta(
+    handle: &Handle,
+    home: &Path,
+    budget: &Arc<Budget>,
+    until: &Until,
+) -> Result<Body, Failure> {
     composed_read(budget, until, |out| {
+        identity::check_listed(&handle.node(), home, &bounds(until, TODAYS))?;
         let rids = {
             let repos = handle.node().list_repos_bounded(&bounds(until, TODAYS))?;
             let mut rids: Vec<RepoId> = Vec::new();
@@ -372,7 +400,7 @@ pub fn repos_meta(handle: &Handle, budget: &Arc<Budget>, until: &Until) -> Resul
             if n > 0 {
                 io::Write::write_all(out, b",")?;
             }
-            meta_into(handle, until, rid, out)?;
+            meta_into(handle, home, until, rid, out)?;
         }
         io::Write::write_all(out, b"]")?;
         Ok(())
@@ -404,18 +432,28 @@ pub(super) fn write_node_info(
     )
 }
 
-/// `node_info`.
-pub fn node_info(handle: &Handle, budget: &Arc<Budget>, until: &Until) -> Result<Body, Failure> {
+/// `node_info`, on the node whose home is `home`.
+pub fn node_info(
+    handle: &Handle,
+    home: &Path,
+    budget: &Arc<Budget>,
+    until: &Until,
+) -> Result<Body, Failure> {
     composed_read(budget, until, |out| {
         let connected_peers = handle.node().connected_peers()?;
         let error;
-        let listed = match handle.node().list_repos_bounded(&bounds(until, TODAYS)) {
+        let listing = identity::check_listed(&handle.node(), home, &bounds(until, TODAYS))
+            .and_then(|()| Ok(handle.node().list_repos_bounded(&bounds(until, TODAYS))?));
+        let listed = match listing {
             Ok(repos) => Ok(repos.len()),
-            Err(libradicle::Error::Cancelled) => return Err(Failure::Refused(Refused::Cancelled)),
+            Err(Failure::Refused(Refused::Cancelled)) => {
+                return Err(Failure::Refused(Refused::Cancelled));
+            }
             // libradicle's message, as main reads it today, where it can't
-            // name a filesystem path: as the reads' errors give it.
-            Err(e) => {
-                error = super::radicle_error(e).message;
+            // name a filesystem path: as the reads' errors give it. An
+            // identity document over its cap is its fixed text.
+            Err(failure) => {
+                error = failure.error(super::radicle_error).message;
                 Err(error.as_str())
             }
         };

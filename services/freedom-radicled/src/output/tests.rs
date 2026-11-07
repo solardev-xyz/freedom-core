@@ -509,7 +509,7 @@ fn a_json_read_reserves_its_whole_build_before_it_walks_and_releases_it_once_wri
             // once within the one reservation (review of #277, round 3).
             assert_eq!((bounds.budget, bounds.loads), (500, 500));
             assert!(!bounds.cancel.is_cancelled());
-            Ok("x".repeat(100))
+            Ok::<_, libradicle::Error>("x".repeat(100))
         },
         |json, text| {
             serde_json::to_writer(&mut *json, text)?;
@@ -597,7 +597,7 @@ fn a_json_read_that_cant_reserve_its_build_never_walks() {
         0,
         &budget,
         &within(50),
-        |_| -> Result<(), _> { panic!("walked without its reservation") },
+        |_| -> Result<(), libradicle::Error> { panic!("walked without its reservation") },
         |_, _| unreachable!(),
     )
     .unwrap_err();
@@ -618,7 +618,7 @@ fn a_json_read_past_its_json_is_too_large_and_holds_nothing() {
         0,
         &budget,
         &within(10_000),
-        |_| Ok("y".repeat(20)),
+        |_| Ok::<_, libradicle::Error>("y".repeat(20)),
         |json, text| serde_json::to_writer(json, text),
     )
     .unwrap_err();
@@ -637,7 +637,7 @@ fn the_6_mib_nul_blob_is_too_large_while_it_is_written() {
         &budget,
         &within(60_000),
         |_| {
-            Ok(libradicle::Blob {
+            Ok::<_, libradicle::Error>(libradicle::Blob {
                 binary: false,
                 content: vec![0; 6 << 20],
             })
@@ -662,7 +662,7 @@ fn json_at_the_cap_is_served_and_one_byte_more_is_too_large() {
         json_read(
             &budget,
             &within(60_000),
-            |_| Ok("j".repeat(len as usize - 2)),
+            |_| Ok::<_, libradicle::Error>("j".repeat(len as usize - 2)),
             |json, text| serde_json::to_writer(json, text),
         )
     };
@@ -693,7 +693,7 @@ fn four_reads_at_their_most_fill_the_budget_and_a_fifth_waits() {
                 json_read(
                     &budget,
                     &within(30_000),
-                    |_| Ok(()),
+                    |_| Ok::<_, libradicle::Error>(()),
                     |json, _| {
                         let step = [b' '; STEP];
                         for _ in 0..JSON / STEP as u64 {
@@ -714,7 +714,12 @@ fn four_reads_at_their_most_fill_the_budget_and_a_fifth_waits() {
             .expect("four reads at their most didn't fit the budget");
     }
     assert_eq!(budget.used(), BUDGET);
-    let fifth = json_read(&budget, &within(100), |_| Ok(()), |_, _| unreachable!());
+    let fifth = json_read(
+        &budget,
+        &within(100),
+        |_| Ok::<_, libradicle::Error>(()),
+        |_, _| unreachable!(),
+    );
     assert!(matches!(fifth, Err(Failure::Refused(Refused::Deadline))));
     drop(go);
     let bodies: Vec<Body> = readers

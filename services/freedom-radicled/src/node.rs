@@ -164,6 +164,12 @@ pub const SHUTDOWN_WITHIN: Duration = Duration::from_secs(3);
 /// How often the node's watch asks whether the node thread runs.
 pub const WATCH_INTERVAL: Duration = Duration::from_secs(1);
 
+/// The node's default seeding policy, over `config.json`'s: a repository is
+/// seeded only by an explicit policy (0008, "Seeding and serving").
+/// libradicle's listings read the same (`crate::reads`' identity cap
+/// reads it as they do).
+pub const SEEDING: DefaultSeedingPolicy = DefaultSeedingPolicy::Block;
+
 /// The quarantine record's page, as the start reads it.
 const PAGE: usize = 64;
 
@@ -788,7 +794,7 @@ fn run(start: Start) -> Result<Running, ErrorBody> {
             listen: vec![],
             control_socket: false,
             routing: Some(routing),
-            seeding_policy: Some(DefaultSeedingPolicy::Block),
+            seeding_policy: Some(SEEDING),
             isolated: false,
             repositories: Some(repositories.clone()),
         },
@@ -1068,7 +1074,7 @@ mod tests {
                 listen: vec![],
                 control_socket: false,
                 routing: Some(routing),
-                seeding_policy: Some(DefaultSeedingPolicy::Block),
+                seeding_policy: Some(SEEDING),
                 isolated: true,
                 repositories: None,
             },

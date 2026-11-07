@@ -367,6 +367,54 @@ pub fn storage_of(home: &Path, rid: RepoId) -> PathBuf {
     home.join("storage").join(rid.canonical())
 }
 
+/// `rid`'s identity document in `home`'s storage: `embeds/radicle.json` in
+/// the tree of the commit `refs/rad/id` names, as libradicle reads it.
+pub fn identity_document(home: &Path, rid: RepoId) -> Vec<u8> {
+    let repo = git2::Repository::open_bare(storage_of(home, rid)).unwrap();
+    let head = repo.refname_to_id("refs/rad/id").unwrap();
+    let tree = repo.find_commit(head).unwrap().tree().unwrap();
+    let entry = tree.get_path(Path::new("embeds/radicle.json")).unwrap();
+    repo.find_blob(entry.id()).unwrap().content().to_vec()
+}
+
+/// `rid`'s identity document in `home`'s storage replaced by `document`: a
+/// commit whose tree holds it at `embeds/radicle.json`, after the
+/// identity's head, set at `refs/rad/id`. Written straight into storage
+/// and unsigned: the reads load the document from there and check no
+/// signature.
+pub fn set_identity_document(home: &Path, rid: RepoId, document: &[u8]) {
+    let repo = git2::Repository::open_bare(storage_of(home, rid)).unwrap();
+    let parent = repo
+        .find_commit(repo.refname_to_id("refs/rad/id").unwrap())
+        .unwrap();
+    let blob = repo.blob(document).unwrap();
+    let mut embeds = repo.treebuilder(None).unwrap();
+    embeds.insert("radicle.json", blob, 0o100644).unwrap();
+    let embeds = embeds.write().unwrap();
+    let mut root = repo.treebuilder(None).unwrap();
+    root.insert("embeds", embeds, 0o040000).unwrap();
+    let root = repo.find_tree(root.write().unwrap()).unwrap();
+    let signature = git2::Signature::new(
+        "Fixture",
+        "fixture@example.invalid",
+        &git2::Time::new(1_700_000_000, 0),
+    )
+    .unwrap();
+    let commit = repo
+        .commit(None, &signature, &signature, "Update", &root, &[&parent])
+        .unwrap();
+    repo.reference("refs/rad/id", commit, true, "fixture")
+        .unwrap();
+}
+
+/// `rid`'s `HEAD` in `home`'s storage set to a branch that isn't there: a
+/// read without a revision then takes the canonical head, which libradicle
+/// computes from the identity document.
+pub fn dangling_head(home: &Path, rid: RepoId) {
+    let repo = git2::Repository::open_bare(storage_of(home, rid)).unwrap();
+    repo.set_head("refs/heads/does-not-exist").unwrap();
+}
+
 /// A ref of `namespace` in `rid`, set without signing it: what a kill
 /// between a ref's update and its `rad/sigrefs` leaves.
 pub fn unsigned_ref(home: &Path, rid: RepoId, namespace: &str) {
