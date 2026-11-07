@@ -23,12 +23,13 @@ use super::route::{colibri_key, request_target, route_key, routing_origin};
 use super::text::Retained;
 use super::trust::{colibri_trust, direct_trust};
 use crate::ant::{ANT_EXCLUDE_SOURCES, ANT_INCLUDE_SOURCES, LOG_SCAN_QUORUM_TIMEOUT_MS};
-use crate::js::{Element, element};
+use crate::js::{Element, JsString, element};
 use crate::logs::{
     LOG_TRUNCATION_MIN_SPAN, LOG_TRUNCATION_TAIL_BLOCKS, block_number_value, log_query_span,
 };
 use crate::methods::{
-    colibri_unprovable_block, is_read_method, source_order, source_serves_method,
+    ColibriParams, LATEST_APPENDED, colibri_latest_appended, colibri_request_params,
+    is_read_method, source_order, source_serves_method,
 };
 use crate::myotis::{
     MYOTIS_NOT_READY, MyotisFailure, myotis_answer, myotis_call_span, myotis_operation,
@@ -684,14 +685,20 @@ pub(crate) async fn colibri(
             format!("Colibri does not support {method}").as_str(),
         ));
     }
-    // A block Colibri can't prove at: a tag it would answer from a public
-    // RPC host, unproven, or a block that isn't a string, which it binds to
-    // no block (main's #1046). Refused before Colibri is asked.
-    if let Some(block) = colibri_unprovable_block(method, params) {
-        return Err(Thrown::unavailable(
-            format!("Colibri cannot prove {method} at {block}").as_str(),
-        ));
-    }
+    // A read whose answer Colibri doesn't tie to the requested block: a tag
+    // it would answer from a public RPC host, unproven (main's #1046), or a
+    // block it proves without checking that it is the one asked for (main's
+    // #1060). Refused before Colibri is asked. An account read or a call
+    // without its block parameter is asked at an appended `latest`.
+    let appended = match colibri_request_params(method, params) {
+        ColibriParams::AsSent => false,
+        ColibriParams::LatestAppended => true,
+        ColibriParams::Refused(reason) => {
+            let mut message = JsString::from(format!("Colibri cannot prove {method} ").as_str());
+            message.push_units(reason.units());
+            return Err(Thrown::unavailable(message));
+        }
+    };
     let chain_id = req.chain.chain_id;
     if req
         .ctx
@@ -724,12 +731,20 @@ pub(crate) async fn colibri(
     let budget = deadline.filter(|d| *d != 0.0).unwrap_or(req.chain.timeout);
     let timer = started(req.ctx.rt.sleep(ms(budget)));
     // The operation's copies of the method and params, reserved first.
-    let made = reserve!(req.ctx, method.len() + params.len());
+    let made = reserve!(
+        req.ctx,
+        method.len() + params.len() + if appended { LATEST_APPENDED.len() } else { 0 }
+    );
+    let params = if appended {
+        colibri_latest_appended(params).unwrap_or_else(|| params.to_owned())
+    } else {
+        params.to_owned()
+    };
     req.ctx.add_colibri(&key);
     let request = Request::Verified(VerifiedOp::Colibri {
         chain_id,
         method: method.to_owned(),
-        params: params.to_owned(),
+        params,
         deadline_ms: ms(budget),
     });
     req.ctx.pend(made);

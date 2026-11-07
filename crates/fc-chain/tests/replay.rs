@@ -2820,13 +2820,13 @@ const DEVIATIONS: &[Expected] = &[
 
 /// The score: scenarios replayed exactly (deviation scenarios with their
 /// asserted difference included), and those not replayed yet.
-const PASSING: usize = 358;
+const PASSING: usize = 362;
 const NOT_REPLAYED: usize = 0;
 /// The permitted races, counted: each is a cancel the machine made in the
 /// tick the reference's exchange settled, after what [`race`] names. Main
 /// withholds each quorum member's answer; a page's deadline failure is the
 /// machine's own timer.
-const RACES: &[(Race, usize)] = &[(Race::QuorumTail, 134), (Race::PageDeadline, 4)];
+const RACES: &[(Race, usize)] = &[(Race::QuorumTail, 138), (Race::PageDeadline, 4)];
 
 #[test]
 // The score is the test's report, printed with `--nocapture`.

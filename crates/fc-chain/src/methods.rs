@@ -2,7 +2,9 @@
 //! sources): the router's `READ_METHODS`, `SINGLE_NODE_METHODS`,
 //! `SOURCE_CAPABILITIES` and the order a request tries its sources in.
 
-use fc_json::index::{Index, Kind};
+use fc_json::index::{Index, KeyOrder, Kind};
+
+use crate::js::JsString;
 
 /// `READ_METHODS`, in the reference's insertion order (the `web3_*` two are
 /// added last).
@@ -84,53 +86,184 @@ pub const COLIBRI_BLOCK_PARAM: [(&str, usize); 7] = [
     ("eth_getBlockByNumber", 0),
 ];
 
-/// The block tags Colibri can't prove a read at: a pending block has no
-/// beacon block, and the earliest predates the beacon chain. It answers
-/// such a read from a public RPC host, unproven (main's #1046). Each with
-/// the name Colibri's refusal gives it.
-pub const COLIBRI_UNPROVABLE_TAGS: [(&str, &str); 2] = [
-    ("pending", r#"block "pending""#),
-    ("earliest", r#"block "earliest""#),
+/// The account reads and calls, which Colibri 3.0.3 ties to the requested
+/// block only at `latest` (main's #1060). Its verifiers check no other
+/// block: `verify_account_proof.c` compares no requested number or hash
+/// with the proven header; a call (privacy mode: `verify_call.c`'s
+/// `pap_verify_proof_response`) proves the state header without comparing
+/// it with the request, and `call_ctx.c`'s `call_lazy_fetch_block_header`
+/// compares a number only when the EVM reads the block context, and a hash
+/// never; `safe` and `finalized` pass unchecked everywhere. At `latest`
+/// each proof must be at most a minute old (`eth_check_latest_freshness`),
+/// which the account verifier applies to its last param and a call to
+/// `params[1]`, both only when that is the string `latest`.
+pub const COLIBRI_LATEST_ONLY: [&str; 6] = [
+    "eth_getBalance",
+    "eth_getCode",
+    "eth_getTransactionCount",
+    "eth_getStorageAt",
+    "eth_call",
+    "eth_estimateGas",
 ];
 
-/// How Colibri's refusal names a block that isn't a string
-/// ([`colibri_unprovable_block`]).
-pub const COLIBRI_NOT_A_STRING: &str = "a block that isn't a string";
+/// The account reads: Colibri's account verifier reads the block as their
+/// last param (`verify_account_proof.c`'s `account_block_tag`), so the
+/// block must be last.
+pub const COLIBRI_BLOCK_LAST: [&str; 4] = [
+    "eth_getBalance",
+    "eth_getCode",
+    "eth_getTransactionCount",
+    "eth_getStorageAt",
+];
 
-/// `colibriUnprovableBlock(method, params)`: the block that makes this read
-/// one Colibri can't prove, as its refusal names it, or `None`. That is the
-/// element of `params` (JSON text) where `method` takes its block parameter
-/// ([`COLIBRI_BLOCK_PARAM`]), when it is:
-/// - a string of [`COLIBRI_UNPROVABLE_TAGS`] (`block "pending"`), compared
-///   exactly as Colibri's `eth_json_is_unproofable_tag` does;
-/// - anything but a string ([`COLIBRI_NOT_A_STRING`]): an EIP-1898 object,
-///   `null`, a number, a boolean, an array. Colibri 3.0.3 binds no such
-///   block: in privacy mode its call path reads any non-string as `latest`,
-///   and its account verifier compares no requested block with the proven
-///   one.
+/// The block tags Colibri ties no answer to, for any method: `pending` and
+/// `earliest` it answers from a public RPC host, unproven (main's #1046);
+/// `safe` and `finalized` it proves for some block without checking that it
+/// is the safe or finalized one (`c4_eth_matches_blocknumber` passes every
+/// tag; main's #1060). Compared exactly, as Colibri compares the JSON
+/// string.
+pub const COLIBRI_UNBOUND_TAGS: [&str; 4] = ["pending", "earliest", "safe", "finalized"];
+
+/// How Colibri's refusal names a block that isn't a string
+/// ([`colibri_request_params`]).
+pub const COLIBRI_NOT_A_STRING: &str = "at a block that isn't a string";
+
+/// What Colibri is asked for a read (`colibriRequestParams`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ColibriParams {
+    /// The params as sent.
+    AsSent,
+    /// The params with `"latest"` appended ([`colibri_latest_appended`]):
+    /// an account read or a call without its block parameter.
+    LatestAppended,
+    /// Refused before Colibri is asked: the text that completes `Colibri
+    /// cannot prove <method> `.
+    Refused(JsString),
+}
+
+/// `colibriRequestParams(method, params)`: whether Colibri is asked this
+/// read, and with what (`params` is JSON text). Only a read whose answer
+/// Colibri ties to the requested block goes to it:
+/// - an account read or a call ([`COLIBRI_LATEST_ONLY`]) at `latest`.
+///   Without its block parameter it is read at `latest` by every source,
+///   and Colibri is asked with `latest` appended: left out, Colibri would
+///   apply no freshness gate. Any other block, params too short to append
+///   it in its place, an account read ([`COLIBRI_BLOCK_LAST`]) with params
+///   after its block, and params that aren't an array, are refused;
+/// - `eth_getBlockByNumber` at `latest`, a number, a hash or no block at
+///   all (`null` params included), which `verify_block.c` compares with the
+///   proven block or holds to the freshness gate; [`COLIBRI_UNBOUND_TAGS`]
+///   and other params that aren't an array (Colibri reads them as
+///   `[params]`) are refused;
+/// - `eth_getBlockByHash` at a 32-byte hash (`0x` and 64 hex digits), the
+///   only string `c4_eth_matches_blocknumber` compares as a hash.
 ///
-/// `None` for params that aren't an array (`Array.isArray`) or don't
-/// parse, and for an array too short to hold the parameter: that asks for
-/// `latest`, which stays Colibri's.
-pub fn colibri_unprovable_block(method: &str, params: &str) -> Option<&'static str> {
-    let (_, position) = COLIBRI_BLOCK_PARAM
+/// A block that isn't a string (an EIP-1898 object, `null`, a number, a
+/// boolean, an array) is refused for each of them
+/// ([`COLIBRI_NOT_A_STRING`]): in privacy mode Colibri's call path reads any
+/// non-string as `latest`, and no verifier compares one. Every other method
+/// is asked as sent, as are params that don't parse.
+pub fn colibri_request_params(method: &str, params: &str) -> ColibriParams {
+    let Some(position) = COLIBRI_BLOCK_PARAM
         .iter()
-        .find(|(name, _)| *name == method)?;
+        .find(|(name, _)| *name == method)
+        .map(|(_, at)| *at)
+        .or_else(|| (method == "eth_getBlockByHash").then_some(0))
+    else {
+        return ColibriParams::AsSent;
+    };
+    let Ok(index) = Index::new(params) else {
+        return ColibriParams::AsSent;
+    };
+    let root = index.root();
+    let refused = |text: &str| ColibriParams::Refused(JsString::from(text));
+    let at_block = |units: &[u16]| {
+        let mut text = JsString::from("at block \"");
+        text.push_units(units);
+        text.push_str("\"");
+        ColibriParams::Refused(text)
+    };
+    let latest_only = COLIBRI_LATEST_ONLY.contains(&method);
+    let by_hash = method == "eth_getBlockByHash";
+    if root.kind() != Kind::Array {
+        return if by_hash {
+            refused("without a block hash")
+        } else if latest_only || root.kind() != Kind::Null {
+            // Colibri reads params that aren't an array as `[params]`, and
+            // `null` as `[]`.
+            refused("with params that aren't an array")
+        } else {
+            ColibriParams::AsSent
+        };
+    }
+    let length = root.children().count();
+    if latest_only {
+        if length == position {
+            return ColibriParams::LatestAppended;
+        }
+        if length < position || (COLIBRI_BLOCK_LAST.contains(&method) && length > position + 1) {
+            return refused(format!("with params of length {length}").as_str());
+        }
+    } else if length <= position {
+        return if by_hash {
+            refused("without a block hash")
+        } else {
+            ColibriParams::AsSent
+        };
+    }
+    let Some(block) = root.children().nth(position) else {
+        return ColibriParams::AsSent;
+    };
+    if block.kind() != Kind::String {
+        return refused(COLIBRI_NOT_A_STRING);
+    }
+    let units: Vec<u16> = block.units().collect();
+    let is = |tag: &str| tag.encode_utf16().eq(units.iter().copied());
+    let served = if latest_only {
+        is("latest")
+    } else if by_hash {
+        is_block_hash(&units)
+    } else {
+        !COLIBRI_UNBOUND_TAGS.iter().any(|tag| is(tag))
+    };
+    if served {
+        ColibriParams::AsSent
+    } else {
+        at_block(&units)
+    }
+}
+
+/// `/^0x[0-9a-fA-F]{64}$/`.
+fn is_block_hash(units: &[u16]) -> bool {
+    units.len() == 66
+        && units[0] == u16::from(b'0')
+        && units[1] == u16::from(b'x')
+        && units[2..]
+            .iter()
+            .all(|&unit| u8::try_from(unit).is_ok_and(|byte| byte.is_ascii_hexdigit()))
+}
+
+/// `[...params, 'latest']` as `JSON.stringify` writes it, for params that
+/// are an array (JSON text); `None` otherwise.
+pub fn colibri_latest_appended(params: &str) -> Option<String> {
     let index = Index::new(params).ok()?;
     let root = index.root();
     if root.kind() != Kind::Array {
         return None;
     }
-    let block = root.children().nth(*position)?;
-    if block.kind() != Kind::String {
-        return Some(COLIBRI_NOT_A_STRING);
+    let mut out = String::with_capacity(params.len() + LATEST_APPENDED.len());
+    out.push('[');
+    for item in root.children() {
+        item.write(KeyOrder::Property, &mut out);
+        out.push(',');
     }
-    let units: Vec<u16> = block.units().collect();
-    COLIBRI_UNPROVABLE_TAGS
-        .iter()
-        .find(|(tag, _)| tag.encode_utf16().eq(units.iter().copied()))
-        .map(|(_, named)| *named)
+    out.push_str("\"latest\"]");
+    Some(out)
 }
+
+/// What [`colibri_latest_appended`] adds to the params' length, at most:
+/// `,"latest"`.
+pub const LATEST_APPENDED: &str = ",\"latest\"";
 
 /// The sources of one request.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -227,8 +360,11 @@ mod tests {
         assert_eq!(order.order, ["direct"]);
         assert_eq!(order.dropped, ["colibri"]);
 
-        let block = colibri_unprovable_block;
+        let ask = colibri_request_params;
+        let refused = |text: &str| ColibriParams::Refused(JsString::from(text));
+        let not_a_string = refused(COLIBRI_NOT_A_STRING);
         let call = r#"{"to":"0xabc"}"#;
+        let hash = format!("\"0x{}\"", "22".repeat(32));
         // A method's params with `value` at its block parameter.
         let with = |method: &str, at: usize, value: &str| {
             let mut params: Vec<String> = vec![r#""0xabc""#.into(); at + 1];
@@ -239,24 +375,44 @@ mod tests {
             params
         };
         let text = |params: &[String]| format!("[{}]", params.join(","));
+        let at_block = |value: &str| refused(format!("at block {value}").as_str());
         for (method, at) in COLIBRI_BLOCK_PARAM {
-            for (tag, named) in COLIBRI_UNPROVABLE_TAGS {
-                // The tag in the method's block parameter, and nowhere else.
-                let mut params = with(method, at, &format!("\"{tag}\""));
-                assert_eq!(block(method, &text(&params)), Some(named), "{method}");
-                params[at] = r#""latest""#.into();
-                params.push(format!("\"{tag}\""));
-                assert_eq!(block(method, &text(&params)), None, "{method}");
-            }
-            for other in [
+            let latest_only = COLIBRI_LATEST_ONLY.contains(&method);
+            assert_eq!(latest_only, method != "eth_getBlockByNumber", "{method}");
+            // Each string form: Colibri's, or refused naming it.
+            for value in [
+                r#""0x10d4f00""#,
+                hash.as_str(),
                 r#""latest""#,
                 r#""safe""#,
                 r#""finalized""#,
-                r#""0x10d4f00""#,
+                r#""pending""#,
+                r#""earliest""#,
             ] {
-                let params = with(method, at, other);
-                assert_eq!(block(method, &text(&params)), None, "{method} {other}");
+                let served = if latest_only {
+                    value == r#""latest""#
+                } else {
+                    !COLIBRI_UNBOUND_TAGS
+                        .iter()
+                        .any(|tag| value == format!("\"{tag}\""))
+                };
+                let params = with(method, at, value);
+                let expected = if served {
+                    ColibriParams::AsSent
+                } else {
+                    at_block(value)
+                };
+                assert_eq!(ask(method, &text(&params)), expected, "{method} {value}");
             }
+            // A tag one place off is not the block.
+            let mut params = with(method, at, r#""latest""#);
+            params.push(r#""pending""#.into());
+            let expected = if COLIBRI_BLOCK_LAST.contains(&method) {
+                refused(format!("with params of length {}", at + 2).as_str())
+            } else {
+                ColibriParams::AsSent
+            };
+            assert_eq!(ask(method, &text(&params)), expected, "{method} {params:?}");
             // Anything there that isn't a string: EIP-1898's objects first.
             for other in [
                 r#"{"blockHash":"0x1111111111111111111111111111111111111111111111111111111111111111","requireCanonical":true}"#,
@@ -268,42 +424,122 @@ mod tests {
             ] {
                 let params = with(method, at, other);
                 assert_eq!(
-                    block(method, &text(&params)),
-                    Some(COLIBRI_NOT_A_STRING),
+                    ask(method, &text(&params)),
+                    not_a_string,
                     "{method} {other}"
                 );
             }
-            // Too short to hold it: `latest`.
+            // Without the block parameter: `latest` appended for an account
+            // read or a call, as sent for a block.
             let mut params = with(method, at, r#""latest""#);
             params.truncate(at);
-            assert_eq!(block(method, &text(&params)), None, "{method} {params:?}");
+            let expected = if latest_only {
+                ColibriParams::LatestAppended
+            } else {
+                ColibriParams::AsSent
+            };
+            assert_eq!(ask(method, &text(&params)), expected, "{method} {params:?}");
+            // Shorter still: nowhere to append it.
+            if at > 0 {
+                params.truncate(at - 1);
+                assert_eq!(
+                    ask(method, &text(&params)),
+                    refused(format!("with params of length {}", at - 1).as_str()),
+                    "{method} {params:?}"
+                );
+            }
+        }
+        // A call's state overrides follow its block.
+        for method in ["eth_call", "eth_estimateGas"] {
+            let params = format!(r#"[{call},"latest",{{"0xabc":{{"balance":"0x1"}}}}]"#);
+            assert_eq!(ask(method, &params), ColibriParams::AsSent, "{method}");
+            assert_eq!(ask(method, "[]"), refused("with params of length 0"));
         }
         // Exact strings only, in an array.
-        assert_eq!(block("eth_getBalance", r#"["0xabc","PENDING"]"#), None);
-        assert_eq!(block("eth_getBalance", r#"["0xabc","pending "]"#), None);
-        assert_eq!(block("eth_getBalance", r#"{"1":"pending"}"#), None);
         assert_eq!(
-            block("eth_getBalance", r#"{"1":{"blockNumber":"0x1"}}"#),
-            None
+            ask("eth_getBalance", r#"["0xabc","LATEST"]"#),
+            at_block(r#""LATEST""#)
         );
-        assert_eq!(block("eth_getBalance", r#""xpending""#), None);
-        assert_eq!(block("eth_getBalance", "not json"), None);
         assert_eq!(
-            block("eth_getBalance", r#"["0xabc","pend\u0069ng"]"#),
-            Some(r#"block "pending""#)
+            ask("eth_getBalance", r#"["0xabc","latest "]"#),
+            at_block(r#""latest ""#)
         );
+        assert_eq!(
+            ask("eth_getBalance", r#"["0xabc","lat\u0065st"]"#),
+            ColibriParams::AsSent
+        );
+        assert_eq!(
+            ask("eth_getBlockByNumber", r#"["pend\u0069ng",false]"#),
+            at_block(r#""pending""#)
+        );
+        assert_eq!(
+            ask("eth_getBlockByNumber", r#"["PENDING",false]"#),
+            ColibriParams::AsSent
+        );
+        for params in [r#"{"1":"latest"}"#, r#""safe""#, "null"] {
+            assert_eq!(
+                ask("eth_getBalance", params),
+                refused("with params that aren't an array"),
+                "{params}"
+            );
+            // Null is `[]` to Colibri: `latest`.
+            let expected = if params == "null" {
+                ColibriParams::AsSent
+            } else {
+                refused("with params that aren't an array")
+            };
+            assert_eq!(ask("eth_getBlockByNumber", params), expected, "{params}");
+        }
+        assert_eq!(ask("eth_getBalance", "not json"), ColibriParams::AsSent);
+        // eth_getBlockByHash: a 32-byte hash only.
+        let by_hash = |first: &str| ask("eth_getBlockByHash", &format!("[{first},false]"));
+        assert_eq!(by_hash(&hash), ColibriParams::AsSent);
+        let upper = format!("\"0x{}\"", "AB".repeat(32));
+        assert_eq!(by_hash(&upper), ColibriParams::AsSent);
+        for other in [
+            format!("\"0x{}\"", "22".repeat(31)),
+            format!("\"0x{}g\"", "2".repeat(63)),
+            format!("\"0X{}\"", "22".repeat(32)),
+            r#""0x10d4f00""#.to_owned(),
+            r#""latest""#.to_owned(),
+            r#""safe""#.to_owned(),
+            r#""finalized""#.to_owned(),
+        ] {
+            assert_eq!(by_hash(&other), at_block(&other), "{other}");
+        }
+        assert_eq!(by_hash(r#"{"blockHash":"0x1"}"#), not_a_string);
+        for params in ["[]", "{}", "null"] {
+            assert_eq!(
+                ask("eth_getBlockByHash", params),
+                refused("without a block hash"),
+                "{params}"
+            );
+        }
         // Methods that take no block parameter Colibri reads.
         for method in [
-            "eth_getBlockByHash",
             "eth_getTransactionReceipt",
             "eth_blockNumber",
             "eth_getLogs",
         ] {
             assert_eq!(
-                block(method, r#"["pending","pending","pending"]"#),
-                None,
+                ask(method, r#"["pending","pending","pending"]"#),
+                ColibriParams::AsSent,
                 "{method}"
             );
         }
+        // The params Colibri is then asked with.
+        assert_eq!(
+            colibri_latest_appended(r#"["0xabc"]"#).as_deref(),
+            Some(r#"["0xabc","latest"]"#)
+        );
+        assert_eq!(
+            colibri_latest_appended("[]").as_deref(),
+            Some(r#"["latest"]"#)
+        );
+        assert_eq!(
+            colibri_latest_appended(r#"[{"to":"0xabc","data":"0x1"}]"#).as_deref(),
+            Some(r#"[{"to":"0xabc","data":"0x1"},"latest"]"#)
+        );
+        assert_eq!(colibri_latest_appended("{}"), None);
     }
 }

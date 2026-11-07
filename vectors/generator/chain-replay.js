@@ -236,16 +236,22 @@ const BLOCKSCOUT_PAGES = `
 // requestDirectFeeQuote and getFeeQuote, whole, but for #749's two new
 // log lines, which the stubbed logger drops.
 //
-// `colibri-unproven` is freedom-browser #1048 (head 63c77545, fixes #1046),
-// open against main and not merged yet: Colibri 3.0.3 answers eth_gasPrice,
-// eth_feeHistory and any read at a `pending` or `earliest` block from a
-// public RPC host, unproven, and binds no block that isn't a string (an
-// EIP-1898 object). So Colibri doesn't serve the two methods,
-// requestColibri refuses a read at either tag or at a non-string block
-// before Colibri is asked (COLIBRI_BLOCK_PARAM: each method's block
-// parameter), and feeQuote no longer counts Colibri as verified. Its edits are #1048's lines; they
+// `colibri-unproven` is freedom-browser #1048 (head b69c137c, fixes #1046
+// and #1060), open against main and not merged yet: Colibri 3.0.3 answers
+// eth_gasPrice, eth_feeHistory and any read at a `pending` or `earliest`
+// block from a public RPC host, unproven (#1046), and proves other reads
+// from a block without checking that it is the one asked for (#1060): an
+// account read or a call at a number, a hash, `safe` or `finalized`, any
+// read at a block that isn't a string (an EIP-1898 object),
+// eth_getBlockByNumber at `safe` or `finalized`, eth_getBlockByHash at
+// anything but a 32-byte hash. So Colibri doesn't serve the two methods;
+// requestColibri asks Colibri only what it ties to the requested block
+// (colibriRequestParams; COLIBRI_BLOCK_PARAM: each method's block
+// parameter), with `latest` appended for an account read or a call without
+// its block, and refuses the rest before Colibri is asked; and feeQuote no
+// longer counts Colibri as verified. Its edits are #1048's lines; they
 // apply after `tx-lookups` and `fee-headroom` (a scenario names it last),
-// whose functions two of them touch. It moves to main's commit, or to a
+// whose functions three of them touch. It moves to main's commit, or to a
 // moved pin, once #1048 merges.
 const PATCHES = {
   'tx-lookups': {
@@ -725,11 +731,13 @@ async function feeQuote(source, gasPriceValue, priorityValue = null, getBlock = 
         "    unsupported: new Set([...SINGLE_NODE_METHODS, 'eth_getLogs', 'eth_gasPrice', 'eth_feeHistory']),\n"],
       ['    throw new SourceUnavailableError(`Colibri does not support ${method}`);\n  }\n', `    throw new SourceUnavailableError(\`Colibri does not support \${method}\`);
   }
-  const unprovable = colibriUnprovableBlock(method, params);
-  if (unprovable !== null) {
-    throw new SourceUnavailableError(\`Colibri cannot prove \${method} at \${unprovable}\`);
+  const asked = colibriRequestParams(method, params);
+  if (asked.refusal) {
+    throw new SourceUnavailableError(\`Colibri cannot prove \${method} \${asked.refusal}\`);
   }
 `],
+      ['requestViaColibri(chainId, method, params, { deadlineMs: budgetMs })',
+        'requestViaColibri(chainId, method, asked.params, { deadlineMs: budgetMs })'],
       ["    verified: source === 'myotis' || source === 'colibri' || source === 'quorum',\n",
         "    verified: source === 'myotis' || source === 'quorum',\n"],
     ],
@@ -742,13 +750,49 @@ async function feeQuote(source, gasPriceValue, priorityValue = null, getBlock = 
   ['eth_getStorageAt', 2],
   ['eth_getBlockByNumber', 0],
 ]);
-const COLIBRI_UNPROVABLE_TAGS = new Set(['pending', 'earliest']);
-function colibriUnprovableBlock(method, params) {
+const COLIBRI_LATEST_ONLY = new Set([
+  'eth_getBalance',
+  'eth_getCode',
+  'eth_getTransactionCount',
+  'eth_getStorageAt',
+  'eth_call',
+  'eth_estimateGas',
+]);
+const COLIBRI_BLOCK_LAST = new Set([
+  'eth_getBalance',
+  'eth_getCode',
+  'eth_getTransactionCount',
+  'eth_getStorageAt',
+]);
+const COLIBRI_UNBOUND_TAGS = new Set(['pending', 'earliest', 'safe', 'finalized']);
+const COLIBRI_BLOCK_HASH = /^0x[0-9a-fA-F]{64}$/;
+const COLIBRI_NOT_A_STRING = 'at a block that isn\\'t a string';
+function colibriRequestParams(method, params) {
+  if (method === 'eth_getBlockByHash') {
+    if (!Array.isArray(params) || params.length === 0) return { refusal: 'without a block hash' };
+    if (typeof params[0] !== 'string') return { refusal: COLIBRI_NOT_A_STRING };
+    return COLIBRI_BLOCK_HASH.test(params[0]) ? { params } : { refusal: \`at block "\${params[0]}"\` };
+  }
   const index = COLIBRI_BLOCK_PARAM.get(method);
-  if (index === undefined || !Array.isArray(params) || index >= params.length) return null;
+  if (index === undefined) return { params };
+  if (!COLIBRI_LATEST_ONLY.has(method)) {
+    if (!Array.isArray(params)) {
+      return params == null ? { params } : { refusal: 'with params that aren\\'t an array' };
+    }
+    if (index >= params.length) return { params };
+    const block = params[index];
+    if (typeof block !== 'string') return { refusal: COLIBRI_NOT_A_STRING };
+    return COLIBRI_UNBOUND_TAGS.has(block) ? { refusal: \`at block "\${block}"\` } : { params };
+  }
+  if (!Array.isArray(params)) return { refusal: 'with params that aren\\'t an array' };
+  if (params.length === index) return { params: [...params, 'latest'] };
+  if (params.length < index ||
+      (COLIBRI_BLOCK_LAST.has(method) && params.length > index + 1)) {
+    return { refusal: \`with params of length \${params.length}\` };
+  }
   const block = params[index];
-  if (typeof block !== 'string') return 'a block that isn\\'t a string';
-  return COLIBRI_UNPROVABLE_TAGS.has(block) ? \`block "\${block}"\` : null;
+  if (typeof block !== 'string') return { refusal: COLIBRI_NOT_A_STRING };
+  return block === 'latest' ? { params } : { refusal: \`at block "\${block}"\` };
 }`],
   },
 };
@@ -1601,7 +1645,9 @@ function routerScenarios(tx) {
     scenario('router-myotis-storage', T(130), routerWorld({
       myotis: myotisOn(100, { storage: [{ payload: { verifyMethod: 'headerChain', valueHex: '0x2A' } }, { payload: { verifyMethod: 'headerChain', valueHex: null } }] }),
     }), req(100, 'eth_getStorageAt', ['0xabc', '0x0', 'latest']), req(100, 'eth_getStorageAt', ['0xabc', '0x0'])),
-    scenario('router-myotis-tagged-state-reads', T(142), routerWorld({ colibri: ok('0x') }),
+    // With main's #1060 (`colibri-unproven`) the RPC answers, as the test
+    // scripts it at #1048's head (chain-data-router.test.js@b69c137c:151).
+    scenario('router-myotis-tagged-state-reads', T(142), routerWorld({ colibri: ok('0x'), rpc: { [RPC]: ok('0x') } }),
       req(1, 'eth_getCode', ['0xabc', 'finalized']), req(1, 'eth_getStorageAt', ['0xabc', '0x0', '0x10'])),
     scenario('router-myotis-revert-final', T(152), routerWorld({
       myotis: myotisOn(1, {
@@ -1620,20 +1666,25 @@ function routerScenarios(tx) {
       myotis: myotisOn(1, { broadcast: { payload: { error: 'connection lost' } } }),
     }), send(1, tx.mainnet.raw)),
     // With main's #1046 (`colibri-unproven`) the RPC answers, as the test
-    // scripts it at #1048's head (chain-data-router.test.js@63c77545:202).
+    // scripts it at #1048's head (chain-data-router.test.js@b69c137c:210).
     scenario('router-pending-nonce-to-colibri', T(186), routerWorld({
       myotis: myotisOn(100, { account: { payload: { verifyMethod: 'headerChain', exists: true, nonce: 3 } } }),
       colibri: ok('0x5'),
       rpc: { [RPC]: ok('0x6') },
     }), req(100, 'eth_getTransactionCount', ['0xabc', 'pending'])),
+    // With main's #1060 (`colibri-unproven`) the RPC answers (the test at
+    // #1048's head, chain-data-router.test.js@b69c137c:231).
     scenario('router-historical-balance-to-colibri', T(204), routerWorld({
       myotis: myotisOn(100, { account: { payload: { verifyMethod: 'headerChain', exists: true, balanceWei: '42' } } }),
       colibri: ok('0x1'),
+      rpc: { [RPC]: ok('0x2') },
     }), req(100, 'eth_getBalance', ['0xabc', '0x1234'])),
     // With main's #1046 (`colibri-unproven`) the RPC answers.
     scenario('router-tagged-estimate-to-colibri', T(215), routerWorld({ colibri: ok('0x5208'), rpc: { [RPC]: ok('0x5209') } }),
       req(100, 'eth_estimateGas', [{ to: '0xabc' }, 'pending'])),
-    scenario('router-historical-call-to-colibri', T(225), routerWorld({ colibri: ok('0xhistoric') }),
+    // With main's #1060 (`colibri-unproven`) the RPC answers (the test at
+    // #1048's head, chain-data-router.test.js@b69c137c:257).
+    scenario('router-historical-call-to-colibri', T(225), routerWorld({ colibri: ok('0xhistoric'), rpc: { [RPC]: ok('0xhistoric') } }),
       req(100, 'eth_call', [{ to: '0xabc', data: '0x70a08231' }, '0x10d4f00'])),
     scenario('router-state-overrides-to-colibri', T(235), routerWorld({ colibri: ok('0xsimulated') }),
       req(100, 'eth_call', [{ to: '0xabc', data: '0x70a08231' }, 'latest', { '0xabc': { balance: '0x1' } }])),
@@ -3158,28 +3209,29 @@ function feeHeadroomScenarios() {
 }
 
 /**
- * Main's #1046 (freedom-browser #1048 at 63c77545, open): its new tests in
- * chain-data-router.test.js's "Colibri's unproven answers (#1046)", run on
- * the pinned router with the `colibri-unproven` patch (PATCHES), and with
- * `fee-headroom` before it for the fee quotes. Each one's world is the
- * test's.
+ * Main's #1046 and #1060 (freedom-browser #1048 at b69c137c, open): its new
+ * tests in chain-data-router.test.js's "Colibri's unproven and unbound
+ * answers (#1046, #1060)", run on the pinned router with the
+ * `colibri-unproven` patch (PATCHES), and with `fee-headroom` before it for
+ * the fee quotes. Each one's world is the test's.
  */
 function colibriUnprovenScenarios() {
-  const L = (line) => `chain-data-router.test.js@63c77545:${line}`;
+  const L = (line) => `chain-data-router.test.js@b69c137c:${line}`;
   const order = (readOrder) => ({ access: { readOrder }, quorum: { k: 3, m: 2, timeoutMs: 1000 } });
   const byMethod = (answers) => ({ rules: Object.entries(answers).map(([method, then]) => ({ when: { method }, then })) });
   const ABC = [A, B, C];
   const CALL = { to: '0xabc', data: '0x70a08231' };
-  // Each read method with a block parameter Colibri reads, and its params
-  // with `tag` in that place.
+  const HASH = '0x' + '22'.repeat(32);
+  // Each read method with a block parameter Colibri reads, its params with
+  // `tag` in that place, and its params without it.
   const TAGGED = [
-    ['balance', 'eth_getBalance', (tag) => ['0xabc', tag]],
-    ['code', 'eth_getCode', (tag) => ['0xabc', tag]],
-    ['nonce', 'eth_getTransactionCount', (tag) => ['0xabc', tag]],
-    ['call', 'eth_call', (tag) => [CALL, tag]],
-    ['estimate', 'eth_estimateGas', (tag) => [CALL, tag]],
-    ['storage', 'eth_getStorageAt', (tag) => ['0xabc', '0x0', tag]],
-    ['block', 'eth_getBlockByNumber', (tag) => [tag, false]],
+    ['balance', 'eth_getBalance', (tag) => ['0xabc', tag], ['0xabc']],
+    ['code', 'eth_getCode', (tag) => ['0xabc', tag], ['0xabc']],
+    ['nonce', 'eth_getTransactionCount', (tag) => ['0xabc', tag], ['0xabc']],
+    ['call', 'eth_call', (tag) => [CALL, tag], [CALL]],
+    ['estimate', 'eth_estimateGas', (tag) => [CALL, tag], [CALL]],
+    ['storage', 'eth_getStorageAt', (tag) => ['0xabc', '0x0', tag], ['0xabc', '0x0']],
+    ['block', 'eth_getBlockByNumber', (tag) => [tag, false], []],
   ];
   const patched = (s) => ({ ...s, patches: ['colibri-unproven'] });
   const quoted = (s) => ({ ...s, patches: ['fee-headroom', 'colibri-unproven'] });
@@ -3187,69 +3239,104 @@ function colibriUnprovenScenarios() {
   // EIP-1898's two block objects, which Colibri binds to no block.
   const BY_HASH = { blockHash: '0x' + '11'.repeat(32), requireCanonical: true };
   const BY_NUMBER = { blockNumber: '0x10d4f00' };
-  // Each method's params without its block parameter: `latest`.
-  const UNTAGGED = {
-    eth_getBalance: ['0xabc'], eth_getCode: ['0xabc'], eth_getTransactionCount: ['0xabc'],
-    eth_call: [CALL], eth_estimateGas: [CALL], eth_getStorageAt: ['0xabc', '0x0'], eth_getBlockByNumber: [],
-  };
+  // Every form of block the tests try, in their order.
+  const BLOCKS = ['0x10d4f00', HASH, 'latest', 'safe', 'finalized', 'pending', 'earliest', BY_HASH, BY_NUMBER];
   return [
-    // Direct answers `pending`, `earliest` and both block objects,
-    // unverified; `latest` (2614) and no block parameter (2587) stay
-    // Colibri's, verified.
-    ...TAGGED.map(([slug, method, params]) => patched(scenario(`colibri-unproven-${slug}`, L(2529), routerWorld({
+    // Each method at each block, and without its block parameter: Colibri
+    // asked as sent (2558) or at an appended `latest` (2633), or Direct,
+    // unverified (2572).
+    ...TAGGED.map(([slug, method, params, bare]) => patched(scenario(`colibri-unproven-${slug}`, L(2558), routerWorld({
       network: order(['colibri', 'direct']),
       rpc: { [RPC]: ok(`rpc:${method}`) },
       colibri: ok('colibri:proven'),
-    }), req(1, method, params('pending')), req(1, method, params('earliest')), req(1, method, params(BY_HASH)),
-    req(1, method, params(BY_NUMBER)), req(1, method, params('latest')), req(1, method, UNTAGGED[method])))),
-    // The quorum answers them, and labels them as itself.
-    patched(scenario('colibri-unproven-quorum-labels', L(2543), {
+    }), ...BLOCKS.map((block) => req(1, method, params(block))), req(1, method, bare)))),
+    // The quorum answers the refused ones, and labels them as itself.
+    patched(scenario('colibri-unproven-quorum-labels', L(2586), {
       chains: { 1: chainEntry(order(['myotis', 'colibri', 'quorum', 'direct']), ABC, [PROVER]) },
       myotis: myotisOn(1),
       rpc: Object.fromEntries(ABC.map((u) => [u, ok('0x6')])),
-      colibri: ok('colibri:unproven'),
+      colibri: ok('colibri:unbound'),
     }, req(1, 'eth_getTransactionCount', ['0xabc', 'pending']), req(1, 'eth_getStorageAt', ['0xabc', '0x0', 'earliest']),
-    req(1, 'eth_call', [CALL, BY_HASH]), req(1, 'eth_estimateGas', [CALL, BY_NUMBER]))),
-    // A Colibri-only read order: the tags are Colibri's refusal, and the two
-    // methods have no source at all.
-    patched(scenario('colibri-unproven-colibri-only', L(2556), routerWorld({
+    req(1, 'eth_call', [CALL, BY_HASH]), req(1, 'eth_estimateGas', [CALL, BY_NUMBER]),
+    req(1, 'eth_getBalance', ['0xabc', '0x10d4f00']), req(1, 'eth_getCode', ['0xabc', HASH]),
+    req(1, 'eth_call', [CALL, 'safe']), req(1, 'eth_getBlockByNumber', ['finalized', false]))),
+    // A Colibri-only read order: the refusals' texts, and the two methods
+    // have no source at all.
+    patched(scenario('colibri-unproven-colibri-only', L(2599), routerWorld({
       network: order(['colibri']),
-      colibri: ok('colibri:unproven'),
+      colibri: ok('colibri:unbound'),
     }), req(1, 'eth_getTransactionCount', ['0xabc', 'pending']), req(1, 'eth_call', [CALL, 'earliest']),
     req(1, 'eth_call', [CALL, BY_HASH]), req(1, 'eth_getBalance', ['0xabc', BY_NUMBER]),
+    req(1, 'eth_getStorageAt', ['0xabc', '0x0', '0x10d4f00']), req(1, 'eth_getCode', ['0xabc', 'finalized']),
+    req(1, 'eth_estimateGas', [CALL, HASH]), req(1, 'eth_getBlockByNumber', ['safe', false]),
     req(1, 'eth_gasPrice', []), req(1, 'eth_feeHistory', ['0x4', 'latest', [25, 75]]))),
     // The other values that aren't strings, at one position each.
-    patched(scenario('colibri-unproven-non-strings', L(2573), routerWorld({
+    patched(scenario('colibri-unproven-non-strings', L(2616), routerWorld({
       network: order(['colibri', 'direct']),
       rpc: { [RPC]: ok('rpc:answer') },
-      colibri: ok('colibri:unproven'),
+      colibri: ok('colibri:unbound'),
     }), req(1, 'eth_call', [CALL, null]), req(1, 'eth_getBalance', ['0xabc', 16]),
     req(1, 'eth_getStorageAt', ['0xabc', '0x0', true]), req(1, 'eth_getBlockByNumber', [['latest'], false]))),
-    // A tag outside the method's block parameter: still Colibri's. The
-    // pinned router asks Colibri for these too, so it is kept unpatched.
-    scenario('colibri-unproven-off-position', L(2636), routerWorld({
+    // The appended `latest` is Colibri's alone: when Colibri fails, Direct
+    // gets the params as sent.
+    patched(scenario('colibri-unproven-missing-block-fallback', L(2651), routerWorld({
+      network: order(['colibri', 'direct']),
+      rpc: { [RPC]: ok('rpc:answer') },
+      colibri: { error: { message: 'prover down' } },
+    }), ...TAGGED.filter(([slug]) => slug !== 'block').map(([, method, , bare]) => req(1, method, bare)))),
+    // State overrides after a call's block: asked as sent. The pinned
+    // router asks the same, so it is kept unpatched.
+    scenario('colibri-unproven-state-overrides', L(2685), routerWorld({
+      network: order(['colibri', 'direct']),
+      colibri: ok('colibri:proven'),
+    }), req(1, 'eth_call', [CALL, 'latest', { '0xabc': { balance: '0x1' } }]),
+    req(1, 'eth_estimateGas', [CALL, 'latest', { '0xabc': { balance: '0x1' } }])),
+    // Params Colibri can't take a block from, refused with their texts
+    // (eth_getBlockByNumber's string read as `['safe']`).
+    patched(scenario('colibri-unproven-param-shapes', L(2711), routerWorld({
+      network: order(['colibri']),
+      colibri: ok('colibri:unbound'),
+    }), req(1, 'eth_getBalance', []), req(1, 'eth_getStorageAt', ['0xabc']), req(1, 'eth_call', []),
+    req(1, 'eth_estimateGas', []), req(1, 'eth_getBalance', ['0xabc', 'latest', '0x1']),
+    req(1, 'eth_getCode', ['0xabc', 'latest', 'latest']), req(1, 'eth_getTransactionCount', ['0xabc', 'latest', null]),
+    req(1, 'eth_getStorageAt', ['0xabc', '0x0', 'latest', '0x1']), req(1, 'eth_getBalance', { address: '0xabc' }),
+    req(1, 'eth_call', CALL), req(1, 'eth_getBlockByNumber', 'safe'),
+    // Null params are eth_getBlockByNumber's at `latest` (2671): Colibri's.
+    req(1, 'eth_getBlockByNumber', null))),
+    // eth_getBlockByHash: Colibri's at a 32-byte hash, refused otherwise.
+    patched(scenario('colibri-unproven-block-hash', L(2737), routerWorld({
+      network: order(['colibri']),
+      colibri: ok('colibri:proven'),
+    }), req(1, 'eth_getBlockByHash', [HASH, false]), req(1, 'eth_getBlockByHash', ['0x' + 'AB'.repeat(32), true]),
+    req(1, 'eth_getBlockByHash', ['0x' + '22'.repeat(31), false]), req(1, 'eth_getBlockByHash', ['0x10d4f00', false]),
+    req(1, 'eth_getBlockByHash', ['latest', false]), req(1, 'eth_getBlockByHash', ['safe', false]),
+    req(1, 'eth_getBlockByHash', ['finalized', false]), req(1, 'eth_getBlockByHash', [{ blockHash: HASH }, false]),
+    req(1, 'eth_getBlockByHash', []))),
+    // A tag outside the method's block parameter: still Colibri's, an
+    // account read without its block at an appended `latest`.
+    patched(scenario('colibri-unproven-off-position', L(2770), routerWorld({
       network: order(['colibri']),
       colibri: ok('colibri:proven'),
     }), req(1, 'eth_getStorageAt', ['0xabc', 'pending', 'latest']), req(1, 'eth_getBalance', ['pending']),
-    req(1, 'eth_getBlockByNumber', ['latest', 'pending']), req(1, 'eth_getBlockByHash', ['0x' + '11'.repeat(32), 'pending']),
-    req(1, 'eth_getTransactionReceipt', ['pending']), req(1, 'eth_blockNumber', ['earliest'])),
-    patched(scenario('colibri-unproven-fee-methods', L(2643), routerWorld({
+    req(1, 'eth_getBlockByNumber', ['latest', 'pending']), req(1, 'eth_getBlockByHash', [HASH, 'pending']),
+    req(1, 'eth_getTransactionReceipt', ['pending']), req(1, 'eth_blockNumber', ['earliest']))),
+    patched(scenario('colibri-unproven-fee-methods', L(2778), routerWorld({
       network: order(['colibri', 'direct']),
       rpc: { [RPC]: byMethod({ eth_gasPrice: ok('rpc:eth_gasPrice'), eth_feeHistory: ok('rpc:eth_feeHistory') }) },
       colibri: ok('colibri:unproven'),
     }), req(1, 'eth_gasPrice', []), req(1, 'eth_feeHistory', ['0x4', 'latest', [25, 75]]))),
-    quoted(scenario('colibri-unproven-fee-quote-quorum', L(2662), {
+    quoted(scenario('colibri-unproven-fee-quote-quorum', L(2797), {
       chains: { 1: chainEntry(order(['colibri', 'quorum', 'direct']), ABC, [PROVER]) },
       rpc: Object.fromEntries(ABC.map((u) => [u, FEES])),
       colibri: ok('0x1'),
     }, fee(1))),
-    quoted(scenario('colibri-unproven-fee-quote-direct', L(2684), routerWorld({
+    quoted(scenario('colibri-unproven-fee-quote-direct', L(2819), routerWorld({
       network: order(['colibri', 'direct']),
       rpc: { [RPC]: FEES },
       colibri: ok('0x1'),
     }), fee(1))),
     // The trust a pending read carries is Direct's; at `latest`, Colibri's.
-    patched(scenario('colibri-unproven-trust', L(2716), routerWorld({
+    patched(scenario('colibri-unproven-trust', L(2851), routerWorld({
       network: order(['colibri', 'direct']),
       rpc: { [RPC]: ok('0x2a') },
       colibri: ok('0x2a'),
@@ -3257,13 +3344,21 @@ function colibriUnprovenScenarios() {
   ];
 }
 
-// Main's #1046 (`colibri-unproven`): the scenarios of the pinned router and
-// of #749 it changes, run patched; three of the pinned ones script the RPC
-// it then asks (their worlds above). Every other scenario comes out the
-// same, so they stay unpatched.
+// Main's #1046 and #1060 (`colibri-unproven`): the scenarios of the pinned
+// router and of #749 it changes, run patched; six of the pinned ones script
+// the RPC it then asks (their worlds above), and four ask Colibri at an
+// appended `latest`. Every other scenario comes out the same, so they stay
+// unpatched.
 const COLIBRI_UNPROVEN_PATCHED = [
+  'router-myotis-tagged-state-reads',
+  'router-myotis-unavailable-shapes',
   'router-pending-nonce-to-colibri',
+  'router-historical-balance-to-colibri',
   'router-tagged-estimate-to-colibri',
+  'router-historical-call-to-colibri',
+  'router-myotis-capability-refusals',
+  'router-myotis-blob-transaction',
+  'router-myotis-gas-refused',
   'boundary-fee-myotis-non-positive-gas-price',
   'boundary-fee-all-sources-unavailable',
   'fee-headroom-colibri-inconsistent',
