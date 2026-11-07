@@ -32,10 +32,13 @@
 //! 3. the blob's header ([`header`]): its path resolved at the commit as
 //!    `blob_at` resolves it, each object on the way (the commit and the
 //!    trees) at most the add-on's 16 MiB (`BINDING_READ_BUDGET`), within
-//!    [`WALK`] reserved from the output budget; the blob's ID and size from
-//!    its object header. Anything that isn't a blob (a directory, a
-//!    submodule) is `blob_at`'s `NotABlob`; libradicle's errors are
-//!    `not_found` or `failed` by today's message test, with its message;
+//!    [`WALK`] reserved from the output budget, three such objects; the
+//!    blob's ID and size from its object header. Anything that isn't a blob
+//!    (a directory, a submodule) is `blob_at`'s `NotABlob`; libradicle's
+//!    errors are `not_found` or `failed` by today's message test, with its
+//!    message where that can't name a filesystem path, as `rad.read`'s
+//!    ([`super::radicle_error`]): a repository the node doesn't have is
+//!    `repository not found`;
 //! 4. a blob over 64 MiB ([`BLOB`]) is `too_large`, `HEAD` too;
 //! 5. the range normalized against the size ([`span`]):
 //!    `range_not_satisfiable`, with `data.size`, when it is outside the
@@ -75,8 +78,11 @@ use crate::pools::{Ticket, Work};
 use crate::testhooks;
 
 /// What a blob's walk may hold: the objects on the way to it, each at most
-/// the add-on's 16 MiB, two at once (a tree, and the next one).
-pub const WALK: u64 = 2 * BINDING_READ_BUDGET;
+/// the add-on's 16 MiB by its header, three at once. libradicle's walk (its
+/// `blob_header_in`, at the pinned commit) keeps the commit loaded until it
+/// returns, and loads each tree on the path before it drops the one above
+/// it: the commit, a tree and the next one.
+pub const WALK: u64 = 3 * BINDING_READ_BUDGET;
 
 /// `rad.blob`'s params.
 #[derive(Deserialize)]

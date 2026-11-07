@@ -244,7 +244,10 @@ const BARE: &[(&str, &[u8])] = &[
 /// each of main's serialization, answers a head and the bytes main writes
 /// today for the add-on's results on the same home; and fails as main's
 /// reads fail: libradicle's message, `not_found` by today's test,
-/// otherwise `failed`; `readme_at` with no README `not_found`, "no
+/// otherwise `failed`, where that message can't name a filesystem path (a
+/// repository the node doesn't have, whose text names its storage path, is
+/// `not_found` with `repository not found`, and no reply names the home or
+/// any absolute path); `readme_at` with no README `not_found`, "no
 /// readme"; args that don't parse `invalid_argument`.
 #[test]
 fn each_composed_op_answers_mains_bytes() {
@@ -496,13 +499,19 @@ fn each_composed_op_answers_mains_bytes() {
     }
     for (op, args, message) in &errors {
         let reply = radicled.read(op, args.clone()).unwrap_err();
-        let expected = if message == "no readme" {
-            "not_found"
+        assert_pathless(&reply, &dirs.home);
+        // Only the missing repository's texts name a path: its storage's.
+        let unstored = args["rid"] == missing.to_string();
+        assert_eq!(absolute(message), unstored, "{message}");
+        let (expected, text) = if message == "no readme" {
+            ("not_found", message.as_str())
+        } else if unstored {
+            ("not_found", "repository not found")
         } else {
-            todays(message)
+            (todays(message), message.as_str())
         };
         assert_eq!(code(&reply), expected, "{op} {args}: {reply}");
-        assert_eq!(reply["error"]["message"], message.as_str(), "{reply}");
+        assert_eq!(reply["error"]["message"], text, "{reply}");
     }
     // What doesn't parse: libradicle's text for a COB ID.
     for (op, args) in [

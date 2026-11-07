@@ -25,7 +25,9 @@
 //!   main's two callers that need the count: `status`, then `list_repos`'s
 //!   length. A `status` failure fails the call. A listing failure, a
 //!   listing past its bound too, is `repos_error`, libradicle's message,
-//!   with `repos_total` null, as main reads such a failure today.
+//!   with `repos_total` null, as main reads such a failure today; a
+//!   message that could name a filesystem path is the fixed text the reads'
+//!   errors give it (`super::radicle_error`).
 //!
 //! **Bounds** (0008, "Pools and budgets"): a composed read holds what any
 //! JSON read may, 64 MiB: its JSON, at most 32 MiB, in a
@@ -406,8 +408,10 @@ pub fn node_info(handle: &Handle, budget: &Arc<Budget>, until: &Until) -> Result
         let listed = match handle.node().list_repos_bounded(&bounds(until, TODAYS)) {
             Ok(repos) => Ok(repos.len()),
             Err(libradicle::Error::Cancelled) => return Err(Failure::Refused(Refused::Cancelled)),
+            // libradicle's message, as main reads it today, where it can't
+            // name a filesystem path: as the reads' errors give it.
             Err(e) => {
-                error = e.to_string();
+                error = super::radicle_error(e).message;
                 Err(error.as_str())
             }
         };

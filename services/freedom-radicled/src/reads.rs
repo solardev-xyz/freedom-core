@@ -77,8 +77,13 @@
 //!
 //! **libradicle's errors:** `not_found` when the message matches today's
 //! test (`not found`, `does not exist` or `NotFound`, in any case),
-//! otherwise `failed`, with libradicle's message as today. Neither is
-//! logged.
+//! otherwise `failed` ([`radicle_error`]). The message is libradicle's, as
+//! today, only where it can't name a filesystem path ([`pathless`]); main
+//! sends it on to pages. A repository the node doesn't have, whose
+//! libradicle text names its storage path under the home, is `not_found`
+//! with `repository not found`, the text main's public route gives it; any
+//! other error that could name a path is `not found` or `the read failed`,
+//! by its code (0008's deviation `pathless-errors`). Neither is logged.
 //!
 //! **The head** is queued only before the deadline, with its bytes reserved
 //! until it is written; from the deadline on the reply is `deadline`. Then
@@ -97,8 +102,10 @@ use std::time::Duration;
 use fc_protocol::error::{ErrorBody, ErrorCode};
 use fc_service::conn::{Connection, Headed};
 use libradicle::{BINDING_MAX_PER_PAGE, Blob, Bounds, json};
+use radicle::git::raw::{ErrorClass as GitClass, ErrorCode as GitCode};
 use radicle::node::gate::{self, RepoGate, RepoState};
 use radicle::prelude::RepoId;
+use radicle::storage::RepositoryError;
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
 use serde_json::value::RawValue;
@@ -546,15 +553,93 @@ fn fenced(
     }
 }
 
-/// libradicle's error, answered (see the module's doc).
+/// A repository the node doesn't have: the text main's public route gives
+/// one, never libradicle's, which names its storage path.
+const MISSING: &str = "repository not found";
+
+/// A not-found error of libradicle's whose text could name a path.
+const NOT_FOUND: &str = "not found";
+
+/// Any other error of libradicle's whose text could name a path.
+const FAILED: &str = "the read failed";
+
+/// libradicle's error, answered (see the module's doc): `not_found` or
+/// `failed` by today's message test, with libradicle's message only when it
+/// can't name a filesystem path ([`pathless`]). A repository the node
+/// doesn't have is [`MISSING`]; any other error that could name a path is
+/// [`NOT_FOUND`] or [`FAILED`], by its code, so main's 404 and 500 stay
+/// what they are today.
 fn radicle_error(e: libradicle::Error) -> ErrorBody {
+    if missing(&e) {
+        return ErrorBody::new(ErrorCode::NotFound, MISSING);
+    }
     let message = e.to_string();
     let code = if not_found(&message) {
         ErrorCode::NotFound
     } else {
         ErrorCode::Failed
     };
-    ErrorBody::new(code, message)
+    if pathless(&e, &message) {
+        return ErrorBody::new(code, message);
+    }
+    let fixed = match code {
+        ErrorCode::NotFound => NOT_FOUND,
+        _ => FAILED,
+    };
+    ErrorBody::new(code, fixed)
+}
+
+/// Whether `e` is heartwood's for a repository that isn't in storage: its
+/// open fails with libgit2's `NotFound`, for a directory that isn't there
+/// (`Os`: "failed to resolve path '<home>/storage/<rid>'") or isn't a
+/// repository (`Repository`: "could not find repository at '…'").
+fn missing(e: &libradicle::Error) -> bool {
+    matches!(
+        e,
+        libradicle::Error::Repository(RepositoryError::Git(git))
+            if git.code() == GitCode::NotFound
+                && matches!(git.class(), GitClass::Os | GitClass::Repository)
+    )
+}
+
+/// Whether libradicle's text for `e`, `message`, can't name a filesystem
+/// path, so that it goes to main as today:
+/// - libradicle's own errors whose texts hold only what the request named
+///   (a path in the tree, a revision, a COB ID, a RID) or a bound;
+/// - libgit2's errors of a tree (a path in it), of an object (its ID), and
+///   its object database's not-found (`Odb`, the ID): classes that never
+///   wrap the OS's errors or name a file;
+/// - any text with no path separator in it, `/` or `\`.
+///
+/// Every other text can: libgit2's other classes (`Os`, `Filesystem`,
+/// `Repository`, `Config`, `Index`, `Odb` past a not-found, `Reference` and
+/// the rest) name files under the home, and heartwood's storage, identity,
+/// COB, cache and node errors, SQLite's, and libradicle's `NodeThread`,
+/// `FetchFailed`, `Announce` and `GitConfig`, can carry them.
+fn pathless(e: &libradicle::Error, message: &str) -> bool {
+    use libradicle::Error as E;
+    let own = match e {
+        E::NotABlob(_)
+        | E::NotATree(_)
+        | E::InvalidCobId(_)
+        | E::InvalidRevision(_)
+        | E::TooLarge { .. }
+        | E::TooDeep { .. }
+        | E::Cancelled
+        | E::NoIdentityHead(_)
+        | E::NoCanonicalHead(_)
+        | E::NoSeeds(_)
+        | E::Timeout(_)
+        | E::Gated { .. }
+        | E::Open(_)
+        | E::ShutdownTimeout(_) => true,
+        E::Git(git) => {
+            matches!(git.class(), GitClass::Tree | GitClass::Object)
+                || (git.class() == GitClass::Odb && git.code() == GitCode::NotFound)
+        }
+        _ => false,
+    };
+    own || !message.contains(['/', '\\'])
 }
 
 /// Today's test of a libradicle message: `/not found|does not exist|NotFound/i`.

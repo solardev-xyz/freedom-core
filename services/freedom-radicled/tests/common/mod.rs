@@ -555,6 +555,50 @@ pub fn configure(home: &std::path::Path, node: Value) {
     .unwrap();
 }
 
+/// Whether `text` holds an absolute path: a `/` that starts a word (the
+/// text's start, or after a space, a quote, a bracket or `=`), a drive
+/// (`C:\` or `C:/`, as libgit2 writes one) that starts a word, or `\\`,
+/// which starts a UNC or verbatim path. A path in a tree (`dir/x.txt`)
+/// isn't one.
+pub fn absolute(text: &str) -> bool {
+    let bytes = text.as_bytes();
+    text.contains("\\\\")
+        || bytes.iter().enumerate().any(|(i, &b)| {
+            let starts = i == 0 || matches!(bytes[i - 1], b' ' | b'\'' | b'"' | b'(' | b'[' | b'=');
+            starts
+                && (b == b'/'
+                    || (b.is_ascii_alphabetic()
+                        && bytes.get(i + 1) == Some(&b':')
+                        && matches!(bytes.get(i + 2), Some(b'\\' | b'/'))))
+        })
+}
+
+/// 0008, "Errors" (deviation `pathless-errors`): no text in `reply` names
+/// the service's home, as given or canonical, or any absolute path.
+pub fn assert_pathless(reply: &Value, home: &std::path::Path) {
+    fn texts<'a>(value: &'a Value, out: &mut Vec<&'a str>) {
+        match value {
+            Value::String(text) => out.push(text),
+            Value::Array(items) => items.iter().for_each(|v| texts(v, out)),
+            Value::Object(members) => members.values().for_each(|v| texts(v, out)),
+            _ => {}
+        }
+    }
+    let homes: Vec<String> = [Some(home.to_path_buf()), home.canonicalize().ok()]
+        .into_iter()
+        .flatten()
+        .map(|h| h.to_string_lossy().into_owned())
+        .collect();
+    let mut found = Vec::new();
+    texts(reply, &mut found);
+    for text in found {
+        for home in &homes {
+            assert!(!text.contains(home.as_str()), "{reply}");
+        }
+        assert!(!absolute(text), "{reply}");
+    }
+}
+
 /// RFC 8032's first Ed25519 test key, and the node ID of its public key.
 pub const SEED: [u8; 32] = [
     0x9d, 0x61, 0xb1, 0x9d, 0xef, 0xfd, 0x5a, 0x60, 0xba, 0x84, 0x4a, 0xf4, 0x92, 0xec, 0x2c, 0xc4,

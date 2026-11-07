@@ -5,7 +5,9 @@
 //! errors with its messages, as main's `/blob/` route answers them today;
 //! the 64 MiB cap from the header, `HEAD` included; twice a blob's size
 //! reserved while it loads, and a wait for it that ends at main's cancel
-//! and at the deadline; a `namespace` quarantine refused.
+//! and at the deadline; the walk's three objects reserved; a `namespace`
+//! quarantine refused. No reply names the home or any absolute path: a
+//! repository the node doesn't have is `repository not found`.
 //!
 //! The vectors' files are committed object by object, so a symlink and a
 //! submodule are the same on every OS; libradicle reads them on the same
@@ -24,6 +26,7 @@ use std::time::{Duration, Instant};
 use common::fixture;
 use common::*;
 use libradicle::BINDING_READ_BUDGET;
+use radicle::git::raw as git2;
 use radicle::prelude::RepoId;
 use radicle::storage::git::reconcile::quarantine::Kind;
 use serde_json::{Value, json};
@@ -33,8 +36,11 @@ const VECTORS: &str = include_str!("../../../vectors/radicle-blob.json");
 /// 64 MiB: the largest blob `rad.blob` serves; twice it while it loads.
 const BLOB: u64 = 64 << 20;
 const BLOB_LOADING: u64 = 2 * BLOB;
-/// What a blob's walk reserves: two objects of the add-on's 16 MiB.
-const WALK: u64 = 2 * BINDING_READ_BUDGET;
+/// What a blob's walk reserves: three objects of the add-on's 16 MiB, the
+/// commit, a tree and the next, which libradicle's walk holds at once.
+const WALK: u64 = 3 * BINDING_READ_BUDGET;
+/// A repository the node doesn't have, as the service answers it.
+const MISSING: &str = "repository not found";
 /// A data frame's most.
 const CHUNK: u64 = 64 << 10;
 
@@ -183,9 +189,11 @@ fn vector_repository(home: &Path, vectors: &Value) -> (RepoId, String) {
 /// `range_not_satisfiable` with the size; past 64 MiB `too_large`, from the
 /// header. libradicle's errors are main's (`not_found` where main answers
 /// 404, `failed` where 500, with its message), the add-on's texts at
-/// v0.8.0; what doesn't parse is `invalid_argument`. The JSON route
-/// (`blob_at`) is unchanged beside it, and each file's `binary`, ID and
-/// bytes are libradicle's.
+/// v0.8.0; a repository the node doesn't have, whose libradicle text names
+/// its storage path, is `not_found` with `repository not found`; no reply
+/// names the home or any absolute path. What doesn't parse is
+/// `invalid_argument`. The JSON route (`blob_at`) is unchanged beside it,
+/// and each file's `binary`, ID and bytes are libradicle's.
 #[test]
 fn each_case_answers_the_vectors() {
     let vectors: Value = serde_json::from_str(VECTORS).unwrap();
@@ -263,6 +271,7 @@ fn each_case_answers_the_vectors() {
                 }
             }
             Err(reply) => {
+                assert_pathless(&reply, &dirs.home);
                 assert_eq!(code(&reply), expect["error"]["code"], "{id}: {reply}");
                 if let Some(message) = expect["error"].get("message") {
                     assert_eq!(&reply["error"]["message"], message, "{id}: {reply}");
@@ -277,6 +286,7 @@ fn each_case_answers_the_vectors() {
         let id = &e["id"];
         let (_, answered) = blob(&mut radicled, params(&e["path"], &e["params"]));
         let reply = answered.unwrap_err();
+        assert_pathless(&reply, &dirs.home);
         let error = &e["expect"]["error"];
         assert_eq!(code(&reply), error["code"], "{id}: {reply}");
         assert_eq!(reply["error"]["message"], error["message"], "{id}: {reply}");
@@ -290,15 +300,25 @@ fn each_case_answers_the_vectors() {
         let main: Value = serde_json::from_str(e["main"]["body"].as_str().unwrap()).unwrap();
         assert_eq!(main["error"], error["message"], "{id}");
     }
-    for (rid, revision, message) in &others {
+    // A repository the node doesn't have: libradicle's text names its
+    // storage path under the home, so the reply is the fixed text, still
+    // `not_found` (404). A revision it doesn't have: libradicle's text,
+    // which names only the revision, as today.
+    let [(_, _, absent), (_, _, unknown)] = &others;
+    assert!(absolute(absent), "{absent}");
+    assert_eq!(todays(absent), "not_found", "{absent}");
+    assert!(!absolute(unknown), "{unknown}");
+    let expected = [("not_found", MISSING), (todays(unknown), unknown.as_str())];
+    for ((rid, revision, _), (code_of, message)) in others.iter().zip(expected) {
         for head_only in [false, true] {
             let (_, answered) = blob(
                 &mut radicled,
                 json!({ "rid": rid, "revision": revision, "path": "README.md", "head_only": head_only }),
             );
             let reply = answered.unwrap_err();
-            assert_eq!(code(&reply), todays(message), "{reply}");
-            assert_eq!(reply["error"]["message"], message.as_str(), "{reply}");
+            assert_pathless(&reply, &dirs.home);
+            assert_eq!(code(&reply), code_of, "{reply}");
+            assert_eq!(reply["error"]["message"], message, "{reply}");
         }
     }
     for i in vectors["invalid"].as_array().unwrap() {
@@ -318,6 +338,7 @@ fn each_case_answers_the_vectors() {
         }
         let (_, answered) = blob(&mut radicled, given);
         let reply = answered.unwrap_err();
+        assert_pathless(&reply, &dirs.home);
         assert_eq!(code(&reply), "invalid_argument", "{}: {reply}", i["id"]);
     }
     // The JSON route beside it, unchanged: main's `/blob/` answer today; and
@@ -401,6 +422,62 @@ fn a_tree_past_16_mib_on_the_way_is_too_large() {
     shut_down(&mut radicled, &dirs.home);
 }
 
+/// 0008, "Pools and budgets": the walk to a blob holds three objects at
+/// once, each at most the add-on's 16 MiB: libradicle keeps the commit
+/// until its walk returns, and loads each tree on the path before it drops
+/// the one above it. Under a commit and two trees of nearly 16 MiB each,
+/// `dir/file.txt` holds more than two objects' worth while it walks, and
+/// its read reserves the three objects' [`WALK`], more than they hold:
+/// with a budget a byte short of their sizes, `GET` and `HEAD` are
+/// `too_large` at once, naming that reservation; with `WALK`, both are
+/// served, the content load's floor being the walk's too.
+#[test]
+fn a_walk_under_a_large_commit_reserves_three_objects() {
+    let dirs = Dirs::new();
+    configure(&dirs.home, json!({}));
+    let size = BINDING_READ_BUDGET - (64 << 10);
+    let (rid, revision) =
+        fixture::repository_with_large_walk(&dirs.home, &SEED, "walk", size, b"nested\n");
+    // The three objects' sizes, from their headers in the node's storage.
+    let held = {
+        let repo = git2::Repository::open_bare(fixture::storage_of(&dirs.home, rid)).unwrap();
+        let odb = repo.odb().unwrap();
+        let commit = git2::Oid::from_str(&revision).unwrap();
+        let root = repo.find_commit(commit).unwrap().tree_id();
+        let dir = repo.find_tree(root).unwrap().get_name("dir").unwrap().id();
+        let sizes: Vec<u64> = [commit, root, dir]
+            .into_iter()
+            .map(|oid| odb.read_header(oid).unwrap().0 as u64)
+            .collect();
+        for &object in &sizes {
+            assert!(object <= BINDING_READ_BUDGET && object + (128 << 10) > BINDING_READ_BUDGET);
+        }
+        sizes.iter().sum::<u64>()
+    };
+    assert!(held > 2 * BINDING_READ_BUDGET && held <= WALK, "{held}");
+
+    let budget = (held - 1).to_string();
+    let mut radicled = served(&dirs, &[("FREEDOM_RADICLED_TEST_BUDGET", &budget)]);
+    for head_only in [false, true] {
+        let (_, answered) = blob(&mut radicled, at(rid, &revision, "dir/file.txt", head_only));
+        let reply = answered.unwrap_err();
+        assert_eq!(code(&reply), "too_large", "{reply}");
+        assert_eq!(
+            reply["error"]["message"],
+            format!("{WALK} bytes is over the limit of {}", held - 1)
+        );
+    }
+    shut_down(&mut radicled, &dirs.home);
+
+    let budget = WALK.to_string();
+    let mut radicled = served(&dirs, &[("FREEDOM_RADICLED_TEST_BUDGET", &budget)]);
+    let (_, answered) = blob(&mut radicled, at(rid, &revision, "dir/file.txt", true));
+    assert_eq!(answered.unwrap().0["size"], 7);
+    let (_, answered) = blob(&mut radicled, at(rid, &revision, "dir/file.txt", false));
+    assert_eq!(answered.unwrap().1, b"nested\n");
+    shut_down(&mut radicled, &dirs.home);
+}
+
 /// The bounds' repository: a blob of exactly 64 MiB, and a small one.
 fn bounds_repository(home: &Path) -> (RepoId, String) {
     let cap = vec![b'b'; BLOB as usize];
@@ -420,7 +497,7 @@ fn at(rid: RepoId, revision: &str, path: &str, head_only: bool) -> Value {
 }
 
 /// 0008, "Pools and budgets": a blob reserves twice its size while it
-/// loads, and a walk's 32 MiB before it, from the header; `HEAD` only the
+/// loads, and a walk's 48 MiB before it, from the header; `HEAD` only the
 /// walk. With a budget of exactly 128 MiB the 64 MiB blob is served; with
 /// one byte less it is `too_large` at once, as a reservation past the whole
 /// budget is; a read whose walk the budget can't hold is too.

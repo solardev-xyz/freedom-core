@@ -205,13 +205,16 @@ fn a_range_is_normalized_against_the_size() {
     }
 }
 
-/// The walk's reservation, and a blob's while it loads.
+/// The walk's reservation, three objects of the add-on's 16 MiB (the
+/// commit, a tree and the next), and a blob's while it loads, never less
+/// than the walk's.
 #[test]
 fn the_figures() {
-    assert_eq!(WALK, 32 << 20);
+    assert_eq!(WALK, 48 << 20);
     assert_eq!(loading(BLOB), BLOB_LOADING);
     assert_eq!(loading(BLOB - 1), BLOB_LOADING - 2);
-    assert_eq!(loading(20 << 20), 40 << 20);
+    assert_eq!(loading(25 << 20), 50 << 20);
+    assert_eq!(loading(24 << 20), WALK);
     assert_eq!(loading(16 << 20), WALK);
     assert_eq!(loading(1), WALK);
     assert_eq!(loading(0), WALK);

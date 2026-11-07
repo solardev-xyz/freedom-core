@@ -467,7 +467,7 @@ The rules this design relies on, as 0007 specifies them:
 - **The args** are the add-on's, by name, in snake case: `issue { rid, issue_id }`, `patch { rid, patch_id }`, `remotes { rid }`, `repo_stats { rid, revision }`. A COB ID is 6 to 40 lowercase hex digits, as libradicle checks it, and one that isn't is `invalid_argument` with libradicle's text. A page's `status`, `page` and `per_page` are strings or null; an absent one is null.
 - **How the service composes:** each op reads the add-on's results as libradicle's serializers write them, then composes them as main's code does, on the text itself: `JSON.parse` then `JSON.stringify` drop whitespace, write numbers as JavaScript does (an integer past 2^53, such as a COB timestamp its author chose, loses its low digits), keep a repeated key's first place and last value, and move an object's array-index keys (a branch named `1`, in a remote's heads) first, in increasing order. `vectors/radicle-reads.json`, recorded from main's handlers at the reference over a scripted add-on, pins every op.
   - `repos_meta` reads each listed repository's `repo_info` and `seeders` again, in the listing's order, as main does; its first failure, in that order, fails the listing. It lists a repository quarantined for its namespace, as the listings do, though `repo_meta` of it is refused.
-  - `node_info`'s `repos_total` and `repos_error` are both always there, one of them null. A listing past its bound is a failure of the listing, with libradicle's message, as main reads it today.
+  - `node_info`'s `repos_total` and `repos_error` are both always there, one of them null. A listing past its bound is a failure of the listing, with libradicle's message, as main reads it today, where that can't name a filesystem path ([Errors](#errors)).
 - **The repair fence:** the COB ops (`issues`, `issue`, `patches`, `patch`, `issues_page`, `patches_page`) answer `stopped` (503) for a repository under repair, and `quarantined` (503) for a quarantined one ([Reconciliation](#reconciliation)).
   - They answer `stopped` too while a COB write to the repository is past its mutation start and not yet proven, whether or not it has been answered, and from its return until its online repair is over ([Writes](#writes)): until then what it left may be partial. This includes a write that then succeeds, so a COB read that races a write may get a 503.
   - The fence is looked at once, before the read's build. A read already building when a write starts, or a repair closes its repository, finishes on what it read, as a read just before them would have: the gate has no read pass, and a repair publishes the cache at its end.
@@ -494,8 +494,8 @@ The rules this design relies on, as 0007 specifies them:
 | Code | When | Main |
 |---|---|---|
 | `invalid_argument` | a RID, revision (40 hex), COB ID (6–40 hex), op or range that doesn't parse | 400, today's texts |
-| `not_found` | libradicle's not-found errors: the ones today's message test (`/not found\|does not exist\|NotFound/i`) matches | 404 with `{"error": message}` |
-| `failed` | any other libradicle error before a write has started; `message` is its `Display` text, as today | 500 with `{"error": message}` |
+| `not_found` | libradicle's not-found errors: the ones today's message test (`/not found\|does not exist\|NotFound/i`) matches; `message` as for `failed`, and `repository not found` for a repository the node doesn't have | 404 with `{"error": message}` |
+| `failed` | any other libradicle error before a write has started; `message` is its `Display` text, as today, where that can't name a filesystem path, and otherwise a fixed text (deviation `pathless-errors`, below) | 500 with `{"error": message}` |
 | `too_large` | a blob over 64 MiB, or a read whose JSON or materialized data passes its cap | 413 (new) |
 | `range_not_satisfiable` | `range` outside the blob; `data.size` | 416 with `Content-Range: bytes */size` |
 | `busy` | a pool's queue is full | 503 |
@@ -512,6 +512,13 @@ The rules this design relies on, as 0007 specifies them:
 | `no_identity` | `rad.reconcile` or `rad.start` before `rad.identity` succeeded | the manager's error state |
 | `start_failed` | `rad.start`; `message` is libradicle's | the manager's error state, with that message |
 | `needs_vault` | a COB write or `rad.import_repo` on a node with a throwaway key ([Profiles without a vault](#profiles-without-a-vault)) | refused in main before anything is sent; the provider's existing errors |
+
+**No read's error names a filesystem path** (deviation `pathless-errors`). Main sends a read's `message` on to pages, and libradicle's text for a repository the node doesn't have names its storage path under the profile, `failed to resolve path '<home>/storage/<rid>' …`. So `rad.read` and `rad.blob`, and `node_info`'s `repos_error`, keep libradicle's text only where it can't name one:
+- libradicle's own errors whose texts hold only what the request named (a path in the tree, a revision, a COB ID, a RID) or a bound: `NotABlob`, `NotATree`, `InvalidCobId`, `InvalidRevision`, `TooLarge`, `TooDeep` and the like;
+- libgit2's errors of the classes that never wrap the OS's or name a file: a tree's (a path in it), an object's (its ID), and the object database's not-found (the ID);
+- any other text with no path separator in it, `/` or `\`.
+
+Every other text can name one: libgit2's `Os`, `Filesystem`, `Repository`, `Config`, `Index`, `Reference`, its object database past a not-found, and the rest; heartwood's storage, identity, COB, cache and node errors, SQLite's, and libradicle's `NodeThread`, which wrap them. A repository that isn't in storage (libgit2's `NotFound` from its open, of class `Os` or `Repository`) is `not_found` with `repository not found`, the text main's public route gives it; any other is `not_found` with `not found`, or `failed` with `the read failed`. The code is today's message test on libradicle's text, so main's 404 and 500 are what they are today. Main logs the same fixed texts.
 
 Exit codes:
 - 0001's: 64, 74, 75 and 76;
@@ -543,7 +550,7 @@ All bounds are process-wide. The service hosts one node.
 - **The network pool:** 8 threads for `connect_seeds` and `clone`, with 16 queued.
 - **The write queue:** one writer, with 16 queued.
 - **The output budget: 256 MiB,** enforced by reservation, as 0007's budget is. Every byte a read holds is reserved before it is allocated, and released when it is freed.
-  - **A blob** reserves 32 MiB for its walk to the blob, two objects of at most 16 MiB, and releases it once it has the blob's size. It then reserves twice its size, never less than the walk's 32 MiB, which its load makes again, while libgit2's buffer and the service's copy both exist. Its range is copied out in 64 KiB chunks, each with its share of that reservation; the rest is released with the loaded copy, and each chunk once it is written. A `HEAD` reserves only the walk's.
+  - **A blob** reserves 48 MiB for its walk to the blob, three objects of at most 16 MiB: libradicle's walk keeps the commit until it returns, and loads each tree on the path before it drops the one above it, so the commit, a tree and the next are held at once. It releases that once it has the blob's size. It then reserves twice its size, never less than the walk's 48 MiB, which its load makes again, while libgit2's buffer and the service's copy both exist. Its range is copied out in 64 KiB chunks, each with its share of that reservation; the rest is released with the loaded copy, and each chunk once it is written. A `HEAD` reserves only the walk's.
   - **A JSON read** reserves both its materialized data and its serialized JSON ([JSON results](#json-results)).
   - **A blob read as JSON** (`blob`, `blob_at`) is loaded only up to 16 MiB, half its built data: libgit2's buffer and libradicle's copy both exist while it loads, and the size comes from the object's header first. Its built data is then what libradicle's serializer holds beside the JSON: the content, for text a copy of it in a JSON value, and, for text that isn't UTF-8, the lossy copy before that, 3 bytes for each invalid sequence. Past 32 MiB it is `too_large`, even when its JSON would fit.
   - **A composed read** (the composed ops, and those of main's serialization) holds the same 64 MiB: its JSON, at most 32 MiB, and, within one reservation of its 32 MiB of built data taken before it reads anything, its walks, the texts it composes from and its working set. Each walk gets the add-on's bounds, 16 MiB of JSON and as many of loaded objects, so it is `too_large` where the add-on is refused today; the text it composes from is counted, then held in a buffer of exactly its size, beside the walk's data; then the composition's working set, an object's members as they are reordered, gets the other half. `repo_info`, which libradicle copies as it writes it, gets a quarter of each. `readme_at`'s blob is read as `blob_at`'s is.
@@ -643,7 +650,7 @@ All bounds are process-wide. The service hosts one node.
 0006 requires raw, chunked and ranged bytes. libgit2 can't stream objects from packs (`Odb::reader` works only for loose objects), and fetched data lands in packs, often deltified. So **"chunked" means chunked over the pipe, from one bounded copy in memory**, not streamed from disk.
 
 - **`rad.blob { rid, revision, path, range?, head_only? }`:**
-  1. Resolve `path` at the commit, as `read_blob_at` does (`lr:1263`), refusing anything that isn't a blob (a directory, a submodule) with today's `NotABlob` message. Each object on the way, the commit and the trees, is at most the add-on's 16 MiB, sized from its header first, within 32 MiB reserved for the walk: the service resolves the path with `read_blob_at_capped` at a cap of 0, which refuses any blob that isn't empty from its header, before `blob_header`, which bounds none of them, walks the same objects again.
+  1. Resolve `path` at the commit, as `read_blob_at` does (`lr:1263`), refusing anything that isn't a blob (a directory, a submodule) with today's `NotABlob` message. Each object on the way, the commit and the trees, is at most the add-on's 16 MiB, sized from its header first, within 48 MiB reserved for the walk, three such objects (the commit and two trees are held at once, [Pools and budgets](#pools-and-budgets)): the service resolves the path with `read_blob_at_capped` at a cap of 0, which refuses any blob that isn't empty from its header, before `blob_header`, which bounds none of them, walks the same objects again.
   2. `Odb::read_header` gives the size and type without loading the content. Refuse a blob over 64 MiB with `too_large`, `head_only` too.
   3. Normalize and validate `range` against that size, before anything is loaded ([Ranges](#ranges)).
   4. With `head_only`, the head is written now, without `binary`, and nothing is loaded. This serves `HEAD`.
@@ -1364,6 +1371,7 @@ Measured against the add-on on linux-x64, macOS arm64 and win-x64:
 | `address-policy` | none | untrusted targets refused unless globally reachable unicast, with IPv6 forms that embed IPv4 judged by their IPv4 address (0007) | configured local seeds still work |
 | `address-families` | as `config.json` and the default features allow | IPv4, IPv6, DNS and onion dialled; I2P decoded, never dialled; every routing field set in memory | a conflicting `config.json` can't change routing |
 | `health` | none | `rad.stats` every 5 s | a dead node is noticed and restarted |
+| `pathless-errors` | a read's error is the add-on's text, which for a repository the node doesn't have names its storage path under the profile, and can name other files for storage, git and node errors | libradicle's text only where it can't name a filesystem path; a missing repository is `repository not found`; any other `not found` or `the read failed`, by today's message test ([Errors](#errors)) | pages never see the profile's paths; the same 404 and 500 |
 
 ## Implementation steps
 

@@ -551,6 +551,146 @@ fn not_found_is_todays_message_test() {
     );
 }
 
+/// 0008, "Errors" (deviation `pathless-errors`): libradicle's message goes
+/// to main only where it can't name a filesystem path. A repository the
+/// node doesn't have is `repository not found`; every other text that
+/// could name a path is fixed by its code, as today's test gives it on
+/// libradicle's message, so main's 404 and 500 stay; the rest are as today.
+#[test]
+fn a_message_that_could_name_a_path_is_fixed() {
+    use libradicle::Error as E;
+    use radicle::git::raw::{Error as Git, ErrorClass as Class, ErrorCode as Code};
+    let home = "/home/someone/.config/Freedom/radicle";
+    let storage = format!("{home}/storage/z3gqcJUoA1n9HaHKufZs5FCSGazv5");
+    let windows = r"C:\Users\someone\AppData\Roaming\Freedom\radicle";
+    let git = |code, class, message: &str| Git::new(code, class, message);
+    let answered = |e: E| {
+        let text = e.to_string();
+        let body = radicle_error(e);
+        (text, body.code, body.message)
+    };
+
+    // A repository the node doesn't have: not there, or not a repository.
+    for (class, message) in [
+        (
+            Class::Os,
+            format!("failed to resolve path '{storage}': No such file or directory"),
+        ),
+        (
+            Class::Repository,
+            format!("could not find repository at '{storage}'"),
+        ),
+        (Class::Os, format!("failed to resolve path '{windows}'")),
+    ] {
+        let e = E::Repository(RepositoryError::Git(git(Code::NotFound, class, &message)));
+        let (text, code, message) = answered(e);
+        assert!(text.contains(&storage) || text.contains(windows), "{text}");
+        assert_eq!((code, message.as_str()), (ErrorCode::NotFound, MISSING));
+    }
+
+    // Any other text that could name a path: fixed, by today's code.
+    let storage_error = |code, class, message: &str| {
+        E::Storage(radicle::storage::Error::Git(git(code, class, message)))
+    };
+    for e in [
+        E::Git(git(
+            Code::NotFound,
+            Class::Os,
+            &format!("failed to open '{storage}/objects/pack'"),
+        )),
+        E::Git(git(
+            Code::GenericError,
+            Class::Odb,
+            &format!("failed to read '{storage}/objects/12/3456'"),
+        )),
+        E::Git(git(
+            Code::GenericError,
+            Class::Config,
+            &format!("failed to parse '{home}/config'"),
+        )),
+        E::Repository(RepositoryError::Git(git(
+            Code::GenericError,
+            Class::Os,
+            &format!("failed to open '{storage}/HEAD'"),
+        ))),
+        E::Repository(RepositoryError::Git(git(
+            Code::NotFound,
+            Class::Reference,
+            &format!("reference 'refs/rad/id' not found in '{storage}'"),
+        ))),
+        storage_error(
+            Code::Locked,
+            Class::Os,
+            &format!("failed to lock '{storage}/config'"),
+        ),
+        E::NodeThread(format!(
+            "the runtime failed: unable to open '{home}/node/node.db'"
+        )),
+        E::NodeThread(format!("{windows} is locked")),
+        E::Io(std::io::Error::other(format!("{storage} not found"))),
+    ] {
+        let (text, code, message) = answered(e);
+        assert!(text.contains(home) || text.contains(windows), "{text}");
+        if not_found(&text) {
+            assert_eq!(
+                (code, message.as_str()),
+                (ErrorCode::NotFound, NOT_FOUND),
+                "{text}"
+            );
+        } else {
+            assert_eq!(
+                (code, message.as_str()),
+                (ErrorCode::Failed, FAILED),
+                "{text}"
+            );
+        }
+        assert!(
+            !message.contains('/') && !message.contains('\\'),
+            "{message}"
+        );
+    }
+    assert!(not_found(NOT_FOUND) && not_found(MISSING) && !not_found(FAILED));
+
+    // As today: libradicle's own texts, libgit2's tree and object errors and
+    // its object database's not-found, and any text with no separator.
+    for e in [
+        E::NotABlob("dir/sub".into()),
+        E::NotATree("README.md/x".into()),
+        E::InvalidCobId("ABCDEF".into()),
+        E::Git(git(
+            Code::NotFound,
+            Class::Tree,
+            "the path 'nodir/x.txt' does not exist in the given tree",
+        )),
+        E::Git(git(
+            Code::NotFound,
+            Class::Odb,
+            "object not found - no match for id (1111111111111111111111111111111111111111)",
+        )),
+        E::Git(git(
+            Code::InvalidSpec,
+            Class::Object,
+            "the object 1111111111111111111111111111111111111111 is a tree, not a blob",
+        )),
+        E::NodeThread("issue 0123abcd not found".into()),
+        E::NodeThread("seeds for rad:z3gqcJUoA1n9HaHKufZs5FCSGazv5 unavailable".into()),
+        storage_error(
+            Code::GenericError,
+            Class::Zlib,
+            "error inflating zlib stream",
+        ),
+    ] {
+        let (text, code, message) = answered(e);
+        assert_eq!(message, text);
+        let todays = if not_found(&text) {
+            ErrorCode::NotFound
+        } else {
+            ErrorCode::Failed
+        };
+        assert_eq!(code, todays, "{text}");
+    }
+}
+
 fn text(content: &[u8]) -> Blob {
     Blob {
         binary: false,
