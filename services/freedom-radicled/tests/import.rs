@@ -915,7 +915,7 @@ fn other_methods_are_unknown_to_the_import_process() {
         assert_eq!(reply["error"]["code"], "unknown_method", "{reply}");
     }
     radicled.shutdown();
-    assert_eq!(radicled.exit_code(Duration::from_secs(15)), Some(0));
+    assert_eq!(radicled.exit_code(EXIT_TIMEOUT), Some(0));
     // No import started: the home is as reconciliation left it.
     assert_eq!(fixture::marked(&dirs.home), None);
 }

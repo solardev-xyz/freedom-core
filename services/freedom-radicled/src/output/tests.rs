@@ -126,12 +126,12 @@ fn a_reservation_of_what_is_left_fits_and_one_byte_more_waits_to_its_deadline() 
 #[test]
 fn a_reservation_over_the_whole_budget_is_too_large_at_once() {
     let budget = Budget::new(1000);
-    let started = Instant::now();
     assert_eq!(
         budget.reserve(1001, &within(5_000)).unwrap_err(),
         too_large(1001, 1000)
     );
-    assert!(started.elapsed() < Duration::from_secs(4));
+    // At once: it never waited, rather than timed on a runner's clock.
+    assert_eq!(budget.waits.load(std::sync::atomic::Ordering::Relaxed), 0);
     assert_eq!(budget.used(), 0);
     assert_eq!(
         Refused::TooLarge {
@@ -162,7 +162,8 @@ fn a_reservation_waits_until_enough_is_released() {
     assert_eq!(budget.used(), 60);
     assert!(got.recv_timeout(Duration::from_millis(100)).is_err());
     drop(held);
-    got.recv_timeout(Duration::from_secs(5)).unwrap();
+    // A hang guard, never a timing assertion.
+    got.recv_timeout(Duration::from_secs(60)).unwrap();
     let reservation = waiter.join().unwrap().unwrap();
     assert_eq!((reservation.bytes(), budget.used()), (50, 50));
 }
@@ -171,7 +172,12 @@ fn a_reservation_waits_until_enough_is_released() {
 fn bytes_released_after_its_deadline_grant_a_waiting_reservation_nothing() {
     let budget = Budget::new(10);
     let mut held = budget.reserve(10, &within(0)).unwrap();
-    let until = within(1_000);
+    // Time for the waiter's thread to start and wait, and for this one to
+    // take the lock, before the deadline: microseconds, but the test fails
+    // if a stalled runner holds them up past it (the 1 s this had was
+    // tight: a Windows runner has stalled every process for seconds, issue
+    // #311). The test sleeps to the deadline, so not longer still.
+    let until = within(5_000);
     let deadline = until.deadline;
     let waiter = {
         let budget = budget.clone();
@@ -226,7 +232,7 @@ fn a_reservation_that_fits_at_its_first_look_is_granted_past_its_deadline() {
 fn a_waiting_reservation_ends_at_its_tokens_cancel() {
     let budget = Budget::new(10);
     let _held = budget.reserve(10, &within(0)).unwrap();
-    let until = within(30_000);
+    let until = within(120_000);
     let cancel = until.cancel.clone();
     let canceller = std::thread::spawn(move || {
         std::thread::sleep(Duration::from_millis(50));
@@ -234,7 +240,11 @@ fn a_waiting_reservation_ends_at_its_tokens_cancel() {
     });
     let started = Instant::now();
     assert_eq!(budget.reserve(1, &until).unwrap_err(), Refused::Cancelled);
-    assert!(started.elapsed() < Duration::from_secs(5));
+    // At the cancel, not the deadline: a wait that looked at its token only
+    // at its deadline would answer `cancelled` too, but 120 s on. The bound
+    // is the property, so it has headroom: a runner has stalled every
+    // thread for 5.9 s (Windows CI, issue #311).
+    assert!(started.elapsed() < Duration::from_secs(60));
     canceller.join().unwrap();
     assert_eq!(budget.used(), 10);
 }

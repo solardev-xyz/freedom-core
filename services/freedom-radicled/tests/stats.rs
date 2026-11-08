@@ -114,9 +114,11 @@ fn stats(radicled: &mut Radicled) -> Value {
     result
 }
 
-/// `rad.stats` asked until `done` holds of its result, within 20 s.
+/// `rad.stats` asked until `done` holds of its result. The wait is a hang
+/// guard, never a timing assertion: on Windows CI a hung unit has taken
+/// over 15 s to be reached (issue #311).
 fn stats_until(radicled: &mut Radicled, done: impl Fn(&Value) -> bool) -> Value {
-    let until = Instant::now() + Duration::from_secs(20);
+    let until = Instant::now() + READ_TIMEOUT;
     loop {
         let result = stats(radicled);
         if done(&result) {
@@ -202,7 +204,10 @@ fn stats_follow_the_service_from_the_handshake_to_a_clean_stop() {
     );
     assert_eq!(result["quarantined_count"], 0, "{result}");
     assert_eq!(result["unit"], Value::Null, "{result}");
-    // Many in a row, as fast as main could ask: each at once.
+    // Many in a row, as fast as main could ask: each at once. The bound is
+    // the property, so it has headroom: the 200 take well under a second,
+    // and 20 s is over three times the longest stall a runner has shown
+    // (5.9 s on Windows CI, issue #311).
     let asked = Instant::now();
     for _ in 0..200 {
         assert_eq!(stats(&mut radicled)["node_alive"], true);
@@ -225,15 +230,17 @@ fn dirty_home(dirs: &Dirs, name: &str) -> RepoId {
     rid
 }
 
-/// The unit in progress, as `rad.stats` reports it, its kind `kind`.
 /// The hung unit's limit in the tests of a hung unit
-/// (`FREEDOM_RADICLED_TEST_HANG_LIMIT_MS`): room for the test to read
-/// `rad.stats` twice, 600 ms apart, before it fires, however slowly a
-/// runner answers. Only the hung unit's kind gets it: every unit before it
-/// keeps its 30 s, so one that a slow runner's disk holds up never fires in
-/// its place.
-const HANG_LIMIT_MS: u64 = 8000;
+/// (`FREEDOM_RADICLED_TEST_HANG_LIMIT_MS`): the time the test has to read
+/// `rad.stats` twice, 600 ms apart, from the unit's start, before it fires.
+/// No signal can stand in for it, so it has headroom: on Windows CI one
+/// step has stalled for 5.9 s, and 4 s was once too little (issue #311);
+/// 15 s holds two such stalls and the reads. Only the hung unit's kind gets
+/// it: every unit before it keeps its 30 s, so one that a slow runner's
+/// disk holds up never fires in its place.
+const HANG_LIMIT_MS: u64 = 15_000;
 
+/// The unit in progress, as `rad.stats` reports it, its kind `kind`.
 fn unit_of(radicled: &mut Radicled, kind: &str) -> Value {
     let result = stats_until(radicled, |r| r["unit"]["kind"] == kind);
     result["unit"].clone()
@@ -462,10 +469,7 @@ fn the_quarantined_count_follows_the_record() {
         }),
     );
     assert_eq!(code(&reply), "outcome_unknown", "{reply}");
-    assert!(radicled.logs(
-        "an online repair quarantined its repository",
-        Duration::from_secs(30)
-    ));
+    assert!(radicled.logs("an online repair quarantined its repository", READ_TIMEOUT));
     stats_until(&mut radicled, |r| r["quarantined_count"] == 3);
     radicled.shutdown();
     assert_eq!(radicled.exit_code(EXIT_TIMEOUT), Some(0));
@@ -529,10 +533,7 @@ fn a_node_down_is_reported_down() {
         ],
     );
     assert!(radicled.start()["result"].is_object());
-    assert!(radicled.logs(
-        "test hook: the watch holds the node down",
-        Duration::from_secs(20)
-    ));
+    assert!(radicled.logs("test hook: the watch holds the node down", READ_TIMEOUT));
     let result = stats(&mut radicled);
     assert_eq!(result["node"], "down", "{result}");
     assert_eq!(result["node_alive"], false, "{result}");
@@ -552,7 +553,7 @@ fn the_stop_waits_for_the_watchs_look_in_its_time() {
     configure(&dirs.home, json!({}));
     let mut radicled = Radicled::serve(&dirs, &[("FREEDOM_RADICLED_TEST_HOLD_LOOK", "1500")]);
     assert!(radicled.start()["result"].is_object());
-    assert!(radicled.logs(LOOK_HOLDS, Duration::from_secs(20)));
+    assert!(radicled.logs(LOOK_HOLDS, READ_TIMEOUT));
     radicled.shutdown();
     assert_eq!(radicled.exit_code(EXIT_TIMEOUT), Some(0));
     let log = radicled.stderr();
@@ -567,11 +568,12 @@ fn the_stop_waits_for_the_watchs_look_in_its_time() {
         ],
     );
     assert!(radicled.start()["result"].is_object());
-    assert!(radicled.logs(LOOK_HOLDS, Duration::from_secs(20)));
-    let stopped = Instant::now();
+    assert!(radicled.logs(LOOK_HOLDS, READ_TIMEOUT));
     radicled.shutdown();
+    // 0, not the exit watchdog's 70 (`teardown_unproven`): the stop ended
+    // within the connection's 5 s exit, by the process's own clock, without
+    // waiting for the look's 20 s.
     assert_eq!(radicled.exit_code(EXIT_TIMEOUT), Some(0));
-    assert!(stopped.elapsed() < Duration::from_secs(8));
     let log = radicled.stderr();
     assert!(log.contains("the node didn't stop cleanly"), "{log}");
     assert!(

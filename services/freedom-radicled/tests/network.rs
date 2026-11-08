@@ -358,7 +358,7 @@ fn socks5_mode_resolves_through_the_proxy_and_connects_to_checked_addresses() {
         socks.asked()
     );
     assert!(
-        eventually(Duration::from_secs(10), || {
+        eventually(Duration::from_secs(30), || {
             let asked = socks.asked();
             asked.iter().any(|a| a.host == "nowhere.test") && asked.iter().any(|a| a.host == ONION)
         }),
@@ -567,7 +567,7 @@ fn connect_seeds_answers_libradicles_report_of_its_dials() {
     assert_eq!(failures.len(), 1, "{reply}");
     assert_eq!(failures[0]["nid"], nid(5));
     assert_eq!(failures[0]["addr"], refused.to_string());
-    assert!(eventually(Duration::from_secs(10), || peer.connected() > 0));
+    assert!(eventually(Duration::from_secs(30), || peer.connected() > 0));
     radicled.shutdown();
     assert_eq!(radicled.exit_code(EXIT_TIMEOUT), Some(0));
 }

@@ -224,32 +224,44 @@ fn a_write_to_a_quarantined_repository_is_refused_with_its_kind_and_step() {
 /// that passes its deadline, or that the stop meets, while held before its
 /// start, never starts. Each is answered so, nothing is written, and the
 /// run stays clean.
+///
+/// The 1.5 s deadline is the expired write's alone, admitted while `from`
+/// exists: the others keep their 60 s, so a slow runner can't let it pass
+/// before main's cancel or the stop reaches them.
 #[test]
 fn a_write_cancelled_expired_or_stopped_before_its_start_writes_nothing() {
     let dirs = Dirs::new();
     configure(&dirs.home, json!({}));
     let rid = fixture::repository(&dirs.home, &CREATOR, "untouched");
+    let from = dirs.own_home.join("deadline-from");
+    let from_arg = from.display().to_string();
     let mut radicled = served(
         &dirs,
         &[
             ("FREEDOM_RADICLED_TEST_HOLD_WORK", "1"),
             ("FREEDOM_RADICLED_TEST_WORK_DEADLINE_MS", "1500"),
+            ("FREEDOM_RADICLED_TEST_WORK_DEADLINE_FROM", &from_arg),
         ],
     );
 
     let cancelled = radicled.request("rad.write", create(rid, "Cancelled"));
-    assert!(radicled.logs_times(HELD, 1, Duration::from_secs(10)));
+    assert!(radicled.logs_times(HELD, 1, READ_TIMEOUT));
     radicled.send(&json!({ "type": "cancel", "id": cancelled }));
     assert_eq!(code(&radicled.reply(cancelled)), "cancelled");
 
+    std::fs::write(&from, b"").unwrap();
     let admitted = Instant::now();
     let expired = radicled.request("rad.write", create(rid, "Expired"));
     let reply = radicled.reply(expired);
     assert_eq!(code(&reply), "deadline", "{reply}");
     assert!(admitted.elapsed() >= Duration::from_millis(1500));
+    std::fs::remove_file(&from).unwrap();
 
+    // Its hold counted from the lines so far: the expired write logged one
+    // only if the writer took it before its deadline.
+    let held = radicled.logged(HELD);
     let met = radicled.request("rad.write", create(rid, "Stopped"));
-    assert!(radicled.logs_times(HELD, 3, Duration::from_secs(10)));
+    assert!(radicled.logs_times(HELD, held + 1, READ_TIMEOUT));
     radicled.shutdown();
     let reply = radicled.reply(met);
     assert_eq!(code(&reply), "stopped", "{reply}");
@@ -278,7 +290,7 @@ fn past_its_start_a_cancel_or_the_deadline_is_outcome_unknown_and_the_write_comp
     let (hold, gate) = dirs.held("until", "release-cancelled");
     let mut radicled = served(&dirs, &[("FREEDOM_RADICLED_TEST_HOLD_WRITE", &hold)]);
     let cancelled = radicled.request("rad.write", create(rid, "Cancelled late"));
-    assert!(radicled.logs_times(STARTED, 1, Duration::from_secs(10)));
+    assert!(radicled.logs_times(STARTED, 1, READ_TIMEOUT));
     radicled.send(&json!({ "type": "cancel", "id": cancelled }));
     let reply = radicled.reply(cancelled);
     assert_eq!(code(&reply), "outcome_unknown", "{reply}");
@@ -289,16 +301,21 @@ fn past_its_start_a_cancel_or_the_deadline_is_outcome_unknown_and_the_write_comp
     assert!(cleared);
     assert!(titled(&dirs.home, rid, "Cancelled late").is_some());
 
+    // The write must start before its deadline, which runs from its
+    // admission: no signal can stand in for that, so the deadline has
+    // headroom. Admission to start touches no disk, but a Windows runner
+    // has stalled every process for 5.9 s (issue #311); the 800 ms this
+    // had left no room for it.
     let (hold, gate) = dirs.held("until", "release-late");
     let mut radicled = served(
         &dirs,
         &[
             ("FREEDOM_RADICLED_TEST_HOLD_WRITE", &hold),
-            ("FREEDOM_RADICLED_TEST_WORK_DEADLINE_MS", "800"),
+            ("FREEDOM_RADICLED_TEST_WORK_DEADLINE_MS", "8000"),
         ],
     );
     let late = radicled.request("rad.write", create(rid, "Past its deadline"));
-    assert!(radicled.logs_times(STARTED, 1, Duration::from_secs(10)));
+    assert!(radicled.logs_times(STARTED, 1, READ_TIMEOUT));
     let behind = radicled.request("rad.write", create(rid, "Behind it"));
     let reply = radicled.reply(late);
     assert_eq!(code(&reply), "outcome_unknown", "{reply}");
@@ -339,7 +356,7 @@ fn past_its_start_an_error_or_a_panic_is_outcome_unknown_and_its_repository_is_r
         let reply = radicled.call("rad.write", json!({ "op": op, "args": args }));
         assert_eq!(code(&reply), "outcome_unknown", "{op}: {reply}");
     }
-    assert!(radicled.logs_times(DONE, 2, Duration::from_secs(30)));
+    assert!(radicled.logs_times(DONE, 2, READ_TIMEOUT));
     let (log, cleared) = stopped_cleanly(&mut radicled, &dirs.home);
     assert!(cleared, "{log}");
     assert!(log.contains("a write failed past its start"), "{log}");
@@ -348,7 +365,7 @@ fn past_its_start_an_error_or_a_panic_is_outcome_unknown_and_its_repository_is_r
     let mut radicled = served(&dirs, &[("FREEDOM_RADICLED_TEST_HOLD_WRITE", "panic")]);
     let reply = radicled.call("rad.write", create(rid, "Panicked"));
     assert_eq!(code(&reply), "outcome_unknown", "{reply}");
-    assert!(radicled.logs(DONE, Duration::from_secs(30)));
+    assert!(radicled.logs(DONE, READ_TIMEOUT));
     let (log, cleared) = stopped_cleanly(&mut radicled, &dirs.home);
     assert!(cleared, "{log}");
 
@@ -407,7 +424,7 @@ fn a_stop_during_a_write_keeps_its_reply_or_leaves_the_marker() {
         ],
     );
     let write = radicled.request("rad.write", create(rid, "Past the drain"));
-    assert!(radicled.logs_times(STARTED, 1, Duration::from_secs(10)));
+    assert!(radicled.logs_times(STARTED, 1, READ_TIMEOUT));
     radicled.shutdown();
     let reply = radicled.reply(write);
     assert_eq!(code(&reply), "outcome_unknown", "{reply}");

@@ -113,21 +113,23 @@ mod tests {
         }
     }
 
+    /// The limit of the units below that return: short, so that one left
+    /// armed fires within the test, yet far longer than the few
+    /// microseconds between a unit's start and its end here. A runner
+    /// stalled past it between the two would fire it all the same, so these
+    /// units run in a child process: a misfire fails that test alone, never
+    /// the whole test binary. On Windows CI every process of a test binary
+    /// has stalled for seconds at once (issue #311).
+    const RETURNING: Duration = Duration::from_secs(1);
+
+    /// Past [`RETURNING`]: a bound left armed has fired by then.
+    const PAST_RETURNING: Duration = Duration::from_millis(1500);
+
     #[test]
     fn a_unit_that_returns_in_time_is_disarmed() {
-        // A limit this short fires within the test unless disarmed.
-        let watch = UnitWatch::start(Duration::from_millis(200)).unwrap();
-        for kind in ["cache", "namespace", "publish"] {
-            watch.started(&unit(kind));
-            let (running, _, limit) = watch.current().unwrap();
-            assert_eq!(
-                (running.as_str(), limit),
-                (kind, Duration::from_millis(200))
-            );
-            watch.ended();
-            assert!(watch.current().is_none());
-        }
-        std::thread::sleep(Duration::from_millis(400));
+        let (code, stderr) = run_child("disarmed");
+        assert_eq!(code, Some(0), "{stderr}");
+        assert!(!stderr.contains("watchdog ends"), "{stderr}");
     }
 
     /// The kinds the units below cycle through.
@@ -173,11 +175,24 @@ mod tests {
             return;
         };
         match mode.as_str() {
+            "disarmed" => {
+                // A limit this short fires within the test unless disarmed.
+                let watch = UnitWatch::start(RETURNING).unwrap();
+                for kind in ["cache", "namespace", "publish"] {
+                    watch.started(&unit(kind));
+                    let (running, _, limit) = watch.current().unwrap();
+                    assert_eq!((running.as_str(), limit), (kind, RETURNING));
+                    watch.ended();
+                    assert!(watch.current().is_none());
+                }
+                std::thread::sleep(PAST_RETURNING);
+            }
             "successive" => {
                 let before = threads();
-                let watch = UnitWatch::start(Duration::from_millis(200)).unwrap();
-                // The watchdog's thread names itself as it starts.
-                let named_by = Instant::now() + Duration::from_secs(5);
+                let watch = UnitWatch::start(RETURNING).unwrap();
+                // The watchdog's thread names itself as it starts: a hang
+                // guard, never a timing assertion.
+                let named_by = Instant::now() + Duration::from_secs(60);
                 let started = loop {
                     let started = threads();
                     let named = started
@@ -204,7 +219,7 @@ mod tests {
                     assert_eq!(threads(), started, "{kind} ended");
                 }
                 // Past every unit's limit: each was stood down.
-                std::thread::sleep(Duration::from_millis(400));
+                std::thread::sleep(PAST_RETURNING);
                 assert_eq!(threads(), started);
             }
             "overrun" => {
@@ -228,12 +243,20 @@ mod tests {
         assert!(!stderr.contains("watchdog ends"), "{stderr}");
     }
 
+    /// The overrun ends the child with 70, by the 200 ms bound its unit
+    /// armed: the watchdog's line names the bound that ran out, so the
+    /// child's start, however slow, isn't timed. Without the overrun, the
+    /// child ends with 0 after its 10 s.
     #[test]
     fn the_rearmed_watchdog_still_ends_an_overrun() {
-        let started = Instant::now();
         let (code, stderr) = run_child("overrun");
         assert_eq!(code, Some(70), "{stderr}");
-        assert!(stderr.contains(r#""reason":"unit_overrun""#), "{stderr}");
-        assert!(started.elapsed() < Duration::from_secs(5), "{stderr}");
+        let fired = stderr
+            .lines()
+            .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+            .find(|line| line["msg"] == "a watchdog ends the process")
+            .unwrap_or_else(|| panic!("no watchdog line: {stderr}"));
+        assert_eq!(fired["reason"], OVERRUN, "{stderr}");
+        assert_eq!(fired["bound_ms"], 200, "{stderr}");
     }
 }

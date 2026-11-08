@@ -246,7 +246,12 @@ fn a_clone_past_its_deadline_is_deadline_and_keeps_its_slot() {
     let (release, released) = dirs.held("until", "release");
     let release = release.strip_prefix("until:").unwrap().to_owned();
     let hook = script(json!({ "failures": 1, "reason": "x", "then": "until", "release": release }));
-    let slack = ("FREEDOM_RADICLED_TEST_NETWORK_SLACK_MS", "400");
+    // Each clone must start, and so hold its slot, before its deadline,
+    // which runs from its admission: no signal can stand in for that, so
+    // the deadline has headroom. The start touches no disk, but a Windows
+    // runner has stalled every process for 5.9 s (issue #311); the 400 ms
+    // this had left no room for it.
+    let slack = ("FREEDOM_RADICLED_TEST_NETWORK_SLACK_MS", "8000");
     let mut radicled = started(&dirs, &[(hook.0, &hook.1), slack]);
     let sent = Instant::now();
     let cut: Vec<u64> = (0..8).map(|_| clone(&mut radicled, 0, true)).collect();
@@ -255,9 +260,11 @@ fn a_clone_past_its_deadline_is_deadline_and_keeps_its_slot() {
         assert_eq!(code(&reply), "deadline", "{reply}");
         assert!(phases(&events).iter().all(|p| p != "done"));
     }
-    assert!(sent.elapsed() >= Duration::from_millis(400));
+    assert!(sent.elapsed() >= Duration::from_secs(8));
+    // The test's slack, not the default 30 s: a generous bound, 17 s over
+    // the deadline.
     assert!(
-        sent.elapsed() < Duration::from_secs(20),
+        sent.elapsed() < Duration::from_secs(25),
         "{:?}",
         sent.elapsed()
     );

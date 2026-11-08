@@ -218,10 +218,17 @@ fn rad_identity_has_a_deadline() {
     assert_eq!(late.exit_code(EXIT_TIMEOUT), Some(76));
     assert!(late.stderr().contains("identity_deadline"));
 
-    let mut in_time = Radicled::serve(&dirs, &short);
+    // `rad.identity` must come in time, from `rad.hello`'s reply: no
+    // signal can stand in for that, so this deadline has headroom. A
+    // Windows runner has stalled every process for 5.9 s (issue #311);
+    // the 300 ms the first process has left no room for it.
+    let mut in_time = Radicled::serve(
+        &dirs,
+        &[("FREEDOM_RADICLED_TEST_IDENTITY_DEADLINE_MS", "8000")],
+    );
     in_time.hello();
     in_time.call("rad.identity", json!({ "ephemeral": true }));
-    std::thread::sleep(Duration::from_millis(800));
+    std::thread::sleep(Duration::from_millis(8_500));
     assert_eq!(
         in_time.exit_code(Duration::ZERO),
         None,

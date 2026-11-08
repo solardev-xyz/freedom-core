@@ -563,6 +563,11 @@ impl Radicled {
         self.logs_times(needle, 1, within)
     }
 
+    /// How many times `needle` is in stderr so far.
+    pub fn logged(&self, needle: &str) -> usize {
+        self.log.lock().unwrap().matches(needle).count()
+    }
+
     /// Waits up to `within` for `times` stderr lines containing `needle`,
     /// while the process runs.
     pub fn logs_times(&self, needle: &str, times: usize, within: Duration) -> bool {

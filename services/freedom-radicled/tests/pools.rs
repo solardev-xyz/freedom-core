@@ -111,7 +111,7 @@ fn the_pools_refuse_past_their_bounds_and_drain_at_a_clean_stop() {
         "{reply}"
     );
     // One read pool thread at least holds its slot.
-    assert!(radicled.logs("test hook: work holds its slot", Duration::from_secs(10)));
+    assert!(radicled.logs("test hook: work holds its slot", READ_TIMEOUT));
 
     // The newest read is queued: cancelled, it gives its place back.
     let cancelled = held.remove(4 + 320 - 1);
@@ -180,13 +180,14 @@ fn work_still_running_past_the_drain_keeps_the_marker() {
     );
     assert!(radicled.start()["result"].is_object());
     let write = radicled.request("rad.unseed", json!({ "rid": RID }));
-    assert!(radicled.logs("test hook: work holds its slot", Duration::from_secs(10)));
-    let asked = Instant::now();
+    assert!(radicled.logs("test hook: work holds its slot", READ_TIMEOUT));
     radicled.shutdown();
     let reply = radicled.reply(write);
     assert_eq!(code(&reply), "stopped", "{reply}");
-    assert_eq!(radicled.exit_code(Duration::from_secs(8)), Some(0));
-    assert!(asked.elapsed() < Duration::from_secs(8));
+    // 0, not the exit watchdog's 70 (`teardown_unproven`): the stop ended
+    // within the connection's 5 s exit, by the process's own clock, without
+    // waiting for the work's 30 s.
+    assert_eq!(radicled.exit_code(EXIT_TIMEOUT), Some(0));
     let log = radicled.stderr();
     assert!(
         log.contains("work was still running past the pools' drain"),

@@ -33,11 +33,15 @@ const STOPPED: &str = "an online repair stopped between units";
 const QUARANTINED: &str = "an online repair quarantined its repository";
 const FAILED: &str = "an online repair failed outside its repository";
 const HOLDS: &str = "test hook: a repair turn holds the node";
+const RETURNED: &str = "test hook: the write has returned";
 const FENCED: &str = "test hook: the stop has fenced the pools";
 const UNREPAIRED: &str = "an outcome is unknown: a write's whose repository isn't repaired, or a clone's that was cut off; the dirty marker stays";
 
-/// How long a repair of a fixture's repository may take, unheld.
-const REPAIRED_WITHIN: Duration = Duration::from_secs(30);
+/// How long a repair of a fixture's repository may take, unheld: a hang
+/// guard, never a timing assertion. On Windows CI each of a repair's units
+/// has taken up to 3.3 s, and each commit around one up to 4.9 s (issue
+/// #311).
+const REPAIRED_WITHIN: Duration = READ_TIMEOUT;
 
 fn code(reply: &Value) -> &str {
     reply["error"]["code"].as_str().unwrap_or_default()
@@ -225,39 +229,70 @@ fn a_stop_during_an_online_repair_keeps_the_marker_within_the_exit() {
 /// waiting for the writer, and a write to another repository runs between
 /// its units, ahead of a write to the repository under repair admitted
 /// before it. That one waits, and runs once its repository is open again.
+///
+/// Nothing here is timed. The repair's first turn holds the writer until
+/// the test releases it, once the read is answered, so the writes are
+/// queued during the repair on any runner. Where the write to another
+/// repository ran is read from the writer's log, in the order the writer
+/// logged it: a write logs its return, and each turn its start.
 #[test]
 fn reads_and_other_repositories_writes_go_on_during_a_repair_and_its_own_wait_behind_it() {
     let dirs = Dirs::new();
     configure(&dirs.home, json!({}));
     let repaired = owned(&dirs.home, "under-repair");
     let other = owned(&dirs.home, "elsewhere");
-    let mut radicled = served(&dirs, &[("FREEDOM_RADICLED_TEST_HOLD_REPAIR", "300")]);
+    let (hold, gate) = dirs.held("until", "release-turn");
+    let mut radicled = served(
+        &dirs,
+        &[
+            ("FREEDOM_RADICLED_TEST_HOLD_REPAIR", &hold),
+            // Holds no write: each logs its return.
+            ("FREEDOM_RADICLED_TEST_HOLD_WRITE", "0"),
+        ],
+    );
 
     let reply = radicled.call("rad.write", uncertain(repaired));
     assert_eq!(code(&reply), "outcome_unknown", "{reply}");
-    assert!(radicled.logs(HOLDS, Duration::from_secs(10)));
+    assert!(radicled.logs(HOLDS, READ_TIMEOUT));
     let behind = radicled.request("rad.write", create(repaired, "Behind its repair"));
     let between = radicled.request("rad.write", create(other, "Between its units"));
     let read = radicled.request("rad.quarantine_list", json!({ "page": 0 }));
-    radicled.arrivals(&[between, read]);
-    // Both before the repair was over: its units went on after them.
-    assert!(!radicled.logs(DONE, Duration::ZERO));
-    let order = radicled.arrivals(&[behind, between, read]);
-    assert_eq!(order.last(), Some(&behind), "{order:?}");
-
+    // Answered while the repair's turn holds the writer, the writes still
+    // queued.
     let reply = radicled.reply(read);
     assert_eq!(
         reply["result"],
         json!({ "entries": [], "next_page": null }),
         "{reply}"
     );
+    assert!(!radicled.any_within(between, Duration::ZERO));
+    assert!(!radicled.any_within(behind, Duration::ZERO));
+    std::fs::write(&gate, b"").unwrap();
+    let order = radicled.arrivals(&[behind, between]);
+    assert_eq!(order, [between, behind], "{order:?}");
     for id in [between, behind] {
         let reply = radicled.reply(id);
         assert!(reply["result"]["id"].is_string(), "{reply}");
     }
-    assert!(radicled.logs(DONE, Duration::from_secs(1)));
     let (log, cleared) = shut_down(&mut radicled, &dirs.home);
     assert!(cleared, "{log}");
+    // In the writer's order: the repair's first turn; the write to the
+    // other repository, the first to return after it (the one to the
+    // repository under repair waits); a turn after that write, before the
+    // repair was done; then the write that waited.
+    let lines: Vec<&str> = log.lines().collect();
+    let next = |needle: &str, after: usize| {
+        lines[after..]
+            .iter()
+            .position(|line| line.contains(needle))
+            .map(|at| at + after)
+            .unwrap_or_else(|| panic!("no {needle:?} after line {after}: {log}"))
+    };
+    let first_turn = next(HOLDS, 0);
+    let between_returned = next(RETURNED, first_turn);
+    let done = next(DONE, between_returned);
+    assert!(next(HOLDS, between_returned) < done, "{log}");
+    next(RETURNED, done);
     // One unit a turn, each held.
     assert!(log.matches(HOLDS).count() > 2, "{log}");
     assert!(titled(&dirs.home, repaired, "Behind its repair"));
