@@ -117,7 +117,13 @@ publish job that runs no repository code.
 0. **Notices.** `services/freedom-ipfsd/THIRD-PARTY-NOTICES` is generated and
    committed:
    `(cd services/freedom-ipfsd && cargo fetch --locked) && python3 scripts/third-party-notices.py --binary freedom-ipfsd`.
-   CI fails when it is stale. The archives also ship
+   CI fails when it is stale. Besides the crates and the runtime, it lists
+   **SQLite 3.51.3** (`libsqlite3-sys`'s amalgamation, `bundled`), public
+   domain, with the dedication its source carries, tied to that exact
+   `libsqlite3-sys` version, so a new one fails until its entry (`NATIVE`
+   in the script) is re-checked. Every shipped crate that declares `links`
+   must be such an entry, or be listed in the script's `LINKS_CHECKED` with
+   why its own files cover it. The archives also ship
    `THIRD-PARTY-NOTICES-rust-std.html` from the toolchain that built them.
 1. **Bump the version** in a PR: `version` in
    `services/freedom-ipfsd/Cargo.toml`, and its own `Cargo.lock`

@@ -25,11 +25,12 @@ Apache-2.0, BSD-3-Clause, ...) require their notices to ship with it:
    THIRD-PARTY-NOTICES-rust-std.html.
 3. C libraries a crate bundles and builds into the binary, whose notices
    aren't the crate's own: for freedom-radicled, libgit2 (with the code it
-   bundles), zlib and SQLite. Each is tied to the exact crate version that
-   bundles it, and its texts are read from that crate's source, so a new
-   version fails until its entry is re-checked. For a binary listed in
-   LINKS_CHECKED, every crate it ships that declares `links` must be one of
-   these, or say why its own files cover what it links.
+   bundles), zlib and SQLite; for freedom-ipfsd, SQLite. Each is tied to
+   the exact crate version that bundles it, and its texts are read from
+   that crate's source or kept in its workspace's notices/, so a new
+   version fails until its entry is re-checked. For every binary (each is
+   in LINKS_CHECKED), every crate it ships that declares `links` must be
+   one of these, or say why its own files cover what it links.
 
 A new proc-macro or build script can still emit code into the binary; when
 one is added, check where its generated code comes from.
@@ -158,7 +159,19 @@ NATIVE = {
             "notices/llvm-compiler-rt-LICENSE.TXT",
         ),
     ],
-    "freedom-ipfsd": zig_glibc_runtime("notices/glibc-2.17-startup-NOTICE"),
+    "freedom-ipfsd": [
+        *zig_glibc_runtime("notices/glibc-2.17-startup-NOTICE"),
+        # libsqlite3-sys's amalgamation (sqlite3/sqlite3.c), with `bundled`,
+        # which freedom-ipfs's rusqlite asks for. SQLite is in the public
+        # domain: its notice is the dedication its source carries.
+        Native(
+            "SQLite 3.51.3 (C library), built from libsqlite3-sys 0.37.0's "
+            "amalgamation",
+            "blessing (public domain)",
+            "services/freedom-ipfsd/notices/sqlite-3.51.3-NOTICE",
+            "libsqlite3-sys 0.37.0",
+        ),
+    ],
     "freedom-radicled": [
         *zig_glibc_runtime("notices/glibc-2.17-startup-freedom-radicled-NOTICE"),
         # libgit2-sys's `vendored` build, which heartwood's git2 asks for:
@@ -208,15 +221,22 @@ NATIVE = {
         ),
     ],
 }
-# Binaries whose shipped crates that declare `links` are all accounted for:
-# each must bundle a NATIVE entry's library (its `bundled_by`), or be listed
-# here with why its own license files cover what it links. freedom-ipfsd
-# isn't checked yet: its bundled SQLite (libsqlite3-sys) has no entry.
+# For each binary, every shipped crate that declares `links` is accounted
+# for: it bundles a NATIVE entry's library (its `bundled_by`), or is listed
+# here with why its own license files cover what it links. freedom-cored
+# ships none. A binary missing here would go unchecked, so the tests require
+# every binary.
+RING = (
+    "its C and assembly, its own and BoringSSL's, are covered by its LICENSE, "
+    "LICENSE-BoringSSL and LICENSE-other-bits"
+)
 LINKS_CHECKED = {
     BINARY: {},
+    "freedom-ipfsd": {
+        "ring": RING,
+    },
     "freedom-radicled": {
-        "ring": "its C and assembly, its own and BoringSSL's, are covered by "
-        "its LICENSE, LICENSE-BoringSSL and LICENSE-other-bits",
+        "ring": RING,
         "defmt": "no native code: `links` only keeps one copy in a graph",
     },
 }

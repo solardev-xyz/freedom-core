@@ -89,6 +89,11 @@ jobs:
         working-directory: services/freedom-ipfsd
     env:
       VERSION: ${{ needs.check.outputs.version }}
+      # The bundled SQLite the notices name, whatever the runner sets:
+      # libsqlite3-sys takes LIBSQLITE3_SYS_USE_PKG_CONFIG (anything but 0)
+      # before its `bundled` feature, and would link the system's (#315 review,
+      # round 1).
+      LIBSQLITE3_SYS_USE_PKG_CONFIG: "0"
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
@@ -133,6 +138,14 @@ jobs:
           echo "$tools/cargo-zigbuild/cargo_zigbuild-0.23.4.data/scripts" >> "$GITHUB_PATH"
           "$tools/zig/ziglang/zig" version
           "$tools/cargo-zigbuild/cargo_zigbuild-0.23.4.data/scripts/cargo-zigbuild" --version
+      - name: No SQLite build inputs from the runner
+        run: |
+          # libsqlite3-sys compiles LIBSQLITE3_FLAGS and SQLITE_* defines into
+          # the bundled SQLite: the notices name it as built, so refuse any.
+          if env | grep -qE '^(LIBSQLITE3_FLAGS|SQLITE_)'; then
+            echo "SQLite build variables are set: $(env | grep -oE '^(LIBSQLITE3_FLAGS|SQLITE_[A-Za-z0-9_]*)' | tr '\n' ' ')" >&2
+            exit 1
+          fi
       - name: Build
         env:
           # Windows: link the C runtime statically (no VC++ redistributable).
