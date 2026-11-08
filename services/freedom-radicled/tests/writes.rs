@@ -257,8 +257,8 @@ fn a_write_cancelled_expired_or_stopped_before_its_start_writes_nothing() {
     assert!(admitted.elapsed() >= Duration::from_millis(1500));
     std::fs::remove_file(&from).unwrap();
 
-    // Held, or still queued if the writer took the expired one only at its
-    // deadline: either way the stop meets it before its start.
+    // Its hold counted from the lines so far: the expired write logged one
+    // only if the writer took it before its deadline.
     let held = radicled.logged(HELD);
     let met = radicled.request("rad.write", create(rid, "Stopped"));
     assert!(radicled.logs_times(HELD, held + 1, READ_TIMEOUT));
