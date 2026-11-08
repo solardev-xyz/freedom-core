@@ -22,6 +22,13 @@ const { buildRadicleStats } = require('./radicle-stats');
 const { buildRadicleImport } = require('./radicle-import');
 
 const REFERENCE_COMMIT = 'fb540328162839e68150fe2c5e517edb86734d1c';
+// The Radicle vectors' own reference: freedom-browser's integration/rust-core,
+// whose main the service replaces (design 0008) and whose parity harness
+// (src/main/radicle/radicle-vectors.test.js) replays them against its main.
+// It moves on its own, when that main changes what the vectors record; the
+// shared reference above stays, since moving it would re-derive every other
+// file from another browser and break the random fixtures' meta.
+const RADICLE_REFERENCE_COMMIT = '1ea598373fcc406bed8a3df1e54b734dcc4e5ac5';
 const OUTPUT = path.resolve(__dirname, '..');
 const INDICES = [0, 1, 2, 1000, 2147483647];
 const MNEMONICS = [
@@ -84,12 +91,25 @@ function packageVersion(referenceRequire, name) {
   }
 }
 
-function loadReference(checkout) {
+/** The checkout's commit, after checking it is `expected` and clean. */
+function checkedCommit(checkout, expected, what) {
   const commit = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: checkout, encoding: 'utf8' }).trim();
-  assert.equal(commit, REFERENCE_COMMIT, 'Use the pinned reference commit');
+  assert.equal(commit, expected, `Use the pinned ${what} commit`);
   // Include staged, unstaged, and untracked source/config changes in this guard.
   const status = execFileSync('git', ['status', '--porcelain', '--untracked-files=all'], { cwd: checkout, encoding: 'utf8' });
-  assert.equal(status, '', 'The reference checkout must be clean (node_modules is ignored)');
+  assert.equal(status, '', `The ${what} checkout must be clean (node_modules is ignored)`);
+  return commit;
+}
+
+/** The Radicle vectors' reference: their generators load its main-process
+ * modules, and no package of its own is read, so its meta names none. */
+function loadRadicleReference(checkout) {
+  const commit = checkedCommit(checkout, RADICLE_REFERENCE_COMMIT, 'Radicle reference');
+  return { checkout, meta: { freedomBrowserCommit: commit, nodeVersion: process.version, generator: 'vectors/generator/generate.js' } };
+}
+
+function loadReference(checkout) {
+  const commit = checkedCommit(checkout, REFERENCE_COMMIT, 'reference');
   const referenceRequire = createRequire(path.join(checkout, 'package.json'));
   const packages = Object.fromEntries([
     'ethers', '@scure/bip39', '@scure/base', 'micro-key-producer', '@metamask/browser-passworder',
@@ -506,10 +526,12 @@ function buildRadicle({ meta, derivation: d, formats: f }, existing) {
 
 async function main() {
   const args = process.argv.slice(2);
-  assert.ok(args.length === 3 && ['generate', 'check'].includes(args[0]) && args[1] === '--freedom-browser',
-    'Usage: node vectors/generator/generate.js <generate|check> --freedom-browser <checkout>');
-  const [mode, , checkout] = args;
+  assert.ok(args.length === 5 && ['generate', 'check'].includes(args[0]) && args[1] === '--freedom-browser'
+    && args[3] === '--radicle-browser',
+    'Usage: node vectors/generator/generate.js <generate|check> --freedom-browser <checkout> --radicle-browser <checkout>');
+  const [mode, , checkout, , radicleCheckout] = args;
   const reference = loadReference(path.resolve(checkout));
+  const radicle = loadRadicleReference(path.resolve(radicleCheckout));
   const deterministic = {
     'keys.json': buildKeys(reference),
     'mnemonic-validation.json': buildValidation(reference),
@@ -543,19 +565,19 @@ async function main() {
     'streams.json': buildStreams(reference.meta),
     // Design 0008's composed reads, from main's radapi handlers over a
     // scripted add-on.
-    'radicle-reads.json': await buildRadicleReads(reference.checkout, reference.meta),
+    'radicle-reads.json': await buildRadicleReads(radicle.checkout, radicle.meta),
     // Design 0008's rad.blob: its ranges are the design's; main's /blob/
     // route over the same files.
-    'radicle-blob.json': await buildRadicleBlob(reference.checkout, reference.meta),
+    'radicle-blob.json': await buildRadicleBlob(radicle.checkout, radicle.meta),
     // Design 0008's network operations, from main's manager and seed
     // status over a scripted add-on, and the design's progress queue.
-    'radicle-network.json': await buildRadicleNetwork(reference.checkout, reference.meta),
+    'radicle-network.json': await buildRadicleNetwork(radicle.checkout, radicle.meta),
     // Design 0008's `rad.stats`: the design's result, with main's peer
     // count today.
-    'radicle-stats.json': await buildRadicleStats(reference.checkout, reference.meta),
+    'radicle-stats.json': await buildRadicleStats(radicle.checkout, radicle.meta),
     // Design 0008's import, from main's GitHub bridge over a scripted
     // add-on, and the service's answers.
-    'radicle-import.json': await buildRadicleImport(reference.checkout, reference.meta),
+    'radicle-import.json': await buildRadicleImport(radicle.checkout, radicle.meta),
   };
   // Check every deterministic file before doing the more expensive fixture checks.
   for (const [filename, contents] of Object.entries(deterministic)) {
