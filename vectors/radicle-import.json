@@ -1,13 +1,6 @@
 {
   "meta": {
-    "freedomBrowserCommit": "fb540328162839e68150fe2c5e517edb86734d1c",
-    "packages": {
-      "ethers": "6.17.0",
-      "@scure/bip39": "2.4.0",
-      "@scure/base": "1.2.6",
-      "micro-key-producer": "0.10.2",
-      "@metamask/browser-passworder": "6.0.0"
-    },
+    "freedomBrowserCommit": "1ea598373fcc406bed8a3df1e54b734dcc4e5ac5",
     "nodeVersion": "v24.15.0",
     "generator": "vectors/generator/generate.js"
   },

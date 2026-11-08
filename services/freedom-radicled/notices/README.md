@@ -23,6 +23,15 @@ Exceptions, also noted in `crates.json`:
 | `base256emoji` 1.0.2, `base45` 3.2.0 | Neither the crate nor its repository carries a license text, at the crate's commit or on its default branch. Each declares MIT, so SPDX's MIT text stands in: `spdx/MIT.txt`, from spdx/license-list-data v3.29.0 (`31ba1a50e5397e00a304dbadc76531740e89ee48`). |
 | `libradicle` 0.8.0 | Neither the crate nor solardev-xyz/libradicle carries a license text, at the pinned commit or on `main`. Its manifest and README declare MIT OR Apache-2.0, so SPDX's texts stand in: `spdx/MIT.txt` and `spdx/Apache-2.0.txt`, from the same release. |
 
+<!--
+libradicle's stand-in can be retired once Cargo.lock pins libradicle at or
+past the merge of solardev-xyz/libradicle#35 into integration/rust-core,
+which adds LICENSE-MIT and LICENSE-APACHE. The generator then fails ("ships
+its own license files") until the stand-in goes: drop libradicle's entry
+from crates.json and its row above, and spdx/Apache-2.0.txt, which nothing
+else uses (spdx/MIT.txt still stands in for base256emoji and base45).
+-->
+
 The C libraries crates bundle are listed apart, in the script's `NATIVE`:
 
 | Library | Bundled by | Text |

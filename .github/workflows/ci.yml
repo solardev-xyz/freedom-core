@@ -159,6 +159,15 @@ jobs:
           ref: fb540328162839e68150fe2c5e517edb86734d1c
           path: reference
           persist-credentials: false
+      # The Radicle vectors' own reference (generate.js,
+      # RADICLE_REFERENCE_COMMIT): integration/rust-core's main, which
+      # freedom-browser's parity harness replays them against.
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          repository: solardev-xyz/freedom-browser
+          ref: 1ea598373fcc406bed8a3df1e54b734dcc4e5ac5
+          path: radicle-reference
+          persist-credentials: false
       # The vectors' meta records the Node version; it is part of the check.
       - uses: actions/setup-node@2028fbc5c25fe9cf00d9f06a71cc4710d4507903 # v6.0.0
         with:
@@ -168,11 +177,18 @@ jobs:
         env:
           ELECTRON_SKIP_BINARY_DOWNLOAD: "1"
         run: npm ci --ignore-scripts --no-audit --no-fund
+      - name: Install the Radicle reference's dependencies
+        working-directory: radicle-reference
+        env:
+          ELECTRON_SKIP_BINARY_DOWNLOAD: "1"
+        run: npm ci --ignore-scripts --no-audit --no-fund
       - name: Check every vector against the reference
         env:
           FREEDOM_BROWSER_CHECKOUT: ${{ github.workspace }}/reference
+          FREEDOM_BROWSER_RADICLE_CHECKOUT: ${{ github.workspace }}/radicle-reference
         run: |
-          node vectors/generator/generate.js check --freedom-browser "$FREEDOM_BROWSER_CHECKOUT"
+          node vectors/generator/generate.js check --freedom-browser "$FREEDOM_BROWSER_CHECKOUT" \
+            --radicle-browser "$FREEDOM_BROWSER_RADICLE_CHECKOUT"
           node --test vectors/generator/check.test.js
 
   fuzz:

@@ -13,9 +13,9 @@
 // - `connections`: main's peer count today, `getConnections`'s `count`,
 //   which reads the add-on's `status` (`{"connectedPeers": n}`), through
 //   radicle-network.js's harness: `connected_peers` is that count;
-// - freedom-browser's contract suite on integration/rust-core (not at the
-//   pin) asks `rad.stats` for `budget.output` and holds its `used` to at
-//   most its `limit`, and its `limit` to 256 MiB
+// - freedom-browser's contract suite on integration/rust-core (at the
+//   Radicle reference) asks `rad.stats` for `budget.output` and holds its
+//   `used` to at most its `limit`, and its `limit` to 256 MiB
 //   (src/main/radicle-backend.contract.test.js, "four maximum-size results
 //   with paused consumers"); every case at the service's own budget meets
 //   it, and the generator checks that it does.
