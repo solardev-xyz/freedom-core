@@ -740,9 +740,12 @@ fn a_composed_read_waiting_for_the_budget_ends_at_its_cancel_and_its_deadline() 
         &[&[("big.txt", &big), ("README.md", &readme)]],
     );
     let r = rid.to_string();
-    // The 8 s deadline is the reads' under test, not the held body's: it
-    // applies once `from` exists, which the test makes after the body's
-    // head, however long that body took to build.
+    // The 8 s deadline is the waiting README's under test alone: it applies
+    // to the requests admitted while `from` exists, which the test makes
+    // just before that read and removes once it waits. The held body's,
+    // however long it took to build, and the others' keep their 60 s, so
+    // that a slow runner can't let theirs pass before their cancel or
+    // before the deadline frees the budget for them.
     let from = dirs.own_home.join("deadline-from");
     let from_arg = from.display().to_string();
     let mut radicled = served(
@@ -766,7 +769,6 @@ fn a_composed_read_waiting_for_the_budget_ends_at_its_cancel_and_its_deadline() 
         "{head}"
     );
     radicled.uncredited(held, 128 << 10);
-    std::fs::write(&from, b"").unwrap();
     let readme_at = json!({ "op": "readme_at", "args": { "rid": r, "revision": commits[0] } });
     let status = |radicled: &mut Radicled| radicled.request("rad.read", json!({ "op": "status" }));
 
@@ -786,19 +788,19 @@ fn a_composed_read_waiting_for_the_budget_ends_at_its_cancel_and_its_deadline() 
     );
 
     // So does its deadline. Its clock starts before it is sent, so never
-    // after its admission. The `status` comes 2 s after it waits, so that
-    // its own deadline is 2 s past the README's.
+    // after its admission. The `status` behind it keeps its 60 s.
+    std::fs::write(&from, b"").unwrap();
     let admitted = Instant::now();
     let waiting = radicled.request("rad.read", readme_at.clone());
     assert!(radicled.logs_times(WAITS, 3, READ_TIMEOUT));
-    std::thread::sleep(Duration::from_millis(2000));
+    std::fs::remove_file(&from).unwrap();
     let behind = status(&mut radicled);
     assert!(radicled.logs_times(WAITS, 4, READ_TIMEOUT));
     assert!(!radicled.any_within(behind, Duration::from_millis(2000)));
     assert_eq!(code(&radicled.reply(waiting)), "deadline");
     assert!(admitted.elapsed() >= Duration::from_secs(8));
-    // The test's 8 s, not the default 60 s: it was admitted once `from`
-    // existed.
+    // The test's 8 s, not the default 60 s: it was admitted while `from`
+    // existed. A generous bound: 52 s over the deadline.
     assert!(admitted.elapsed() < Duration::from_secs(60));
     assert_eq!(
         radicled.read_reply(behind).unwrap(),

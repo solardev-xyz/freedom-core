@@ -662,9 +662,12 @@ fn a_blob_waiting_for_the_budget_ends_at_its_cancel_and_its_deadline() {
     let (rid, revision) = bounds_repository(&dirs.home);
     let deadline = Duration::from_secs(8);
     let budget = (BLOB_LOADING + (1 << 20)).to_string();
-    // The 8 s deadline is the waiting loads' under test, not the held
-    // body's: it applies once `from` exists, which the test makes after the
-    // body's head, however long that body took to load.
+    // The 8 s deadline is the second waiting load's under test alone: it
+    // applies to the requests admitted while `from` exists, which the test
+    // makes just before that load and removes once it waits. The held
+    // body's, however long it took to load, and the others' keep their
+    // 60 s, so that a slow runner can't let theirs pass before their cancel
+    // or their answer.
     let from = dirs.own_home.join("deadline-from");
     let from_arg = from.display().to_string();
     let mut radicled = served(
@@ -680,7 +683,6 @@ fn a_blob_waiting_for_the_budget_ends_at_its_cancel_and_its_deadline() {
     assert_eq!(head["result"]["size"], BLOB, "{head}");
     // Its window's worth, and no credit.
     radicled.uncredited(held, 128 << 10);
-    std::fs::write(&from, b"").unwrap();
     let fits = |radicled: &mut Radicled| {
         let small = blob(radicled, at(rid, &revision, "small.txt", false)).1;
         assert_eq!(small.unwrap().1, b"small\n");
@@ -699,15 +701,17 @@ fn a_blob_waiting_for_the_budget_ends_at_its_cancel_and_its_deadline() {
 
     // So does its deadline, 8 s from its admission, which comes after the
     // request is sent: the reply is never sooner than 8 s from the send.
+    std::fs::write(&from, b"").unwrap();
     let sent = Instant::now();
     let waiting = radicled.request("rad.blob", at(rid, &revision, "cap.bin", false));
     assert!(radicled.logs_times(WAITS, 2, READ_TIMEOUT));
+    std::fs::remove_file(&from).unwrap();
     assert!(!radicled.any_within(waiting, Duration::from_millis(1500)));
     fits(&mut radicled);
     assert_eq!(code(&radicled.reply(waiting)), "deadline");
     assert!(sent.elapsed() >= deadline);
-    // The test's 8 s, not the default 60 s: it was admitted once `from`
-    // existed.
+    // The test's 8 s, not the default 60 s: it was admitted while `from`
+    // existed. A generous bound: 52 s over the deadline.
     assert!(sent.elapsed() < Duration::from_secs(60));
     // Nothing more of it.
     assert!(!radicled.any_within(waiting, Duration::from_millis(500)));

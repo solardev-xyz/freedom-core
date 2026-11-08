@@ -12,7 +12,6 @@
 mod common;
 
 use std::path::Path;
-use std::time::{Duration, Instant};
 
 use common::fixture;
 use common::*;
@@ -248,7 +247,7 @@ fn a_removal_cancelled_before_it_starts_removes_nothing() {
     assert!(radicled.start()["result"].is_object());
     let qid = qid_of(&mut radicled, rid).unwrap();
     let id = radicled.request("rad.remove_repo", removal(rid, &qid));
-    assert!(radicled.logs("test hook: work holds its slot", Duration::from_secs(10)));
+    assert!(radicled.logs("test hook: work holds its slot", READ_TIMEOUT));
     radicled.send(&json!({ "type": "cancel", "id": id }));
     assert_eq!(code(&radicled.reply(id)), "cancelled");
     // The stop's drain waits for the writer, so once the process has exited
@@ -282,13 +281,14 @@ fn a_removal_holding_the_node_past_the_drain_keeps_the_marker() {
     assert!(radicled.start()["result"].is_object());
     let qid = qid_of(&mut radicled, rid).unwrap();
     let id = radicled.request("rad.remove_repo", removal(rid, &qid));
-    assert!(radicled.logs("test hook: work holds its slot", Duration::from_secs(10)));
-    let asked = Instant::now();
+    assert!(radicled.logs("test hook: work holds its slot", READ_TIMEOUT));
     radicled.shutdown();
     let reply = radicled.reply(id);
     assert_eq!(code(&reply), "stopped", "{reply}");
-    assert_eq!(radicled.exit_code(Duration::from_secs(8)), Some(0));
-    assert!(asked.elapsed() < Duration::from_secs(8));
+    // 0, not the exit watchdog's 70 (`teardown_unproven`): the stop ended
+    // within the connection's 5 s exit, by the process's own clock, without
+    // waiting for the removal's 30 s.
+    assert_eq!(radicled.exit_code(EXIT_TIMEOUT), Some(0));
     let log = radicled.stderr();
     assert!(
         log.contains("work was still running past the pools' drain"),

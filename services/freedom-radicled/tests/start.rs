@@ -244,7 +244,7 @@ fn ended_while_the_watch_holds_the_node_down(end: impl FnOnce(&mut Radicled)) {
     );
     assert!(radicled.start()["result"].is_object());
     assert!(
-        radicled.logs("test hook: the watch holds the node down", EXIT_TIMEOUT),
+        radicled.logs("test hook: the watch holds the node down", READ_TIMEOUT),
         "the watch didn't publish Down"
     );
     end(&mut radicled);
@@ -278,11 +278,10 @@ fn a_stop_that_isnt_proven_clean_keeps_the_marker() {
     configure(&dirs.home, json!({}));
     let mut radicled = Radicled::serve(&dirs, &[("FREEDOM_RADICLED_TEST_SHUTDOWN_WITHIN_MS", "0")]);
     assert!(radicled.start()["result"].is_object());
-    let asked = Instant::now();
     radicled.shutdown();
-    // Within the connection's 5 s exit.
-    assert_eq!(radicled.exit_code(Duration::from_secs(8)), Some(0));
-    assert!(asked.elapsed() < Duration::from_secs(8));
+    // 0, not the exit watchdog's 70 (`teardown_unproven`): within the
+    // connection's 5 s exit, by the process's own clock.
+    assert_eq!(radicled.exit_code(EXIT_TIMEOUT), Some(0));
     let log = radicled.stderr();
     assert!(log.contains("the node didn't stop cleanly"), "{log}");
     assert_eq!(fixture::marked(&dirs.home), Some(vec![NID.to_owned()]));

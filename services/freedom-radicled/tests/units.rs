@@ -157,17 +157,26 @@ fn every_kind_of_unit_leaves_a_record_the_next_start_finds() {
     }
 }
 
+/// The limit every unit gets in [`units_that_return_in_time_never_fire`]:
+/// short, so that a bound left armed fires within the test. Every unit
+/// must return within it, so it is the property's own, and has headroom:
+/// three times the slowest unit seen on Windows CI (`begin`, 3.3 s), and
+/// more than the longest single stall there (5.9 s, issue #311). The 5 s
+/// this had was within 2 s of the slowest unit.
+const RETURNING_LIMIT_MS: u64 = 10_000;
+
 /// A unit that returns within its limit, as every unit of a healthy run
 /// does, never fires the watchdog: a run with a short limit completes.
 #[test]
 fn units_that_return_in_time_never_fire() {
     let dirs = Dirs::new();
     dirty_home(&dirs, "healthy");
-    let mut radicled = identified(&dirs, &[("FREEDOM_RADICLED_TEST_UNIT_LIMIT_MS", "5000")]);
+    let limit = RETURNING_LIMIT_MS.to_string();
+    let mut radicled = identified(&dirs, &[("FREEDOM_RADICLED_TEST_UNIT_LIMIT_MS", &limit)]);
     let reply = radicled.call("rad.reconcile", json!({}));
     assert_eq!(reply["result"]["repaired"]["resigned"], 1, "{reply}");
     // Past the limit, the process is still here, and starts its node.
-    std::thread::sleep(Duration::from_millis(5_500));
+    std::thread::sleep(Duration::from_millis(RETURNING_LIMIT_MS + 500));
     let reply = radicled.call("rad.start", json!({ "alias": "x" }));
     assert!(reply["result"].is_object(), "{reply}");
 }

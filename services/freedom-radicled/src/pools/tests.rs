@@ -189,11 +189,11 @@ impl Probe {
     }
 
     fn started(&self) -> u64 {
-        self.started.recv_timeout(Duration::from_secs(5)).unwrap()
+        self.started.recv_timeout(GUARD).unwrap()
     }
 
     fn returned(&self) -> (u64, bool) {
-        self.returned.recv_timeout(Duration::from_secs(5)).unwrap()
+        self.returned.recv_timeout(GUARD).unwrap()
     }
 
     /// Nothing more starts within a short wait.
@@ -205,6 +205,12 @@ impl Probe {
     }
 }
 
+/// How long a wait for something that should happen gets: a hang guard,
+/// never a timing assertion. Generous, because a slow runner's disk can
+/// stall every process of a test binary for seconds at once (on Windows
+/// CI, 5.9 s seen, issue #311), work that touches no disk included.
+const GUARD: Duration = Duration::from_secs(60);
+
 fn far() -> Instant {
     Instant::now() + Duration::from_secs(600)
 }
@@ -213,8 +219,25 @@ fn soon(ms: u64) -> Instant {
     Instant::now() + Duration::from_millis(ms)
 }
 
+/// A stop's or a drain's deadline when it should complete: [`GUARD`].
+fn guard() -> Instant {
+    Instant::now() + GUARD
+}
+
+/// Puts running request `id`'s deadline at now, and wakes the timer: past
+/// its deadline from the point the test chose, as after its work started.
+/// A short deadline given at admission would race the work's start, which
+/// a stalled runner can hold up past it.
+fn expire(pool: &Pool<Record>, id: u64) {
+    let mut state = pool.inner.lock();
+    let running = state.running.iter_mut().find(|r| r.id == id);
+    running.expect("it runs").deadline = Instant::now();
+    drop(state);
+    pool.inner.timer.notify_all();
+}
+
 fn until(done: impl Fn() -> bool) -> bool {
-    let end = Instant::now() + Duration::from_secs(5);
+    let end = Instant::now() + GUARD;
     while !done() {
         if Instant::now() >= end {
             return false;
@@ -261,7 +284,7 @@ fn the_pools_have_0008s_shapes_and_their_stop_joins_every_thread() {
         assert_eq!(pool.lock_threads().len(), threads);
     }
     pools.open();
-    assert!(pools.stop(soon(2000)));
+    assert!(pools.stop(guard()));
     for pool in pools.all() {
         assert_eq!(pool.inner.lock().alive, 0);
         assert!(pool.lock_threads().is_empty());
@@ -292,7 +315,7 @@ fn the_read_pool_admits_4_running_and_320_queued_then_is_busy() {
     assert_eq!(running, vec![1, 2, 3, 4]);
     probe.no_start();
 
-    assert!(pool.stop(soon(2000)));
+    assert!(pool.stop(guard()));
     assert_eq!(record.count(&Answer::Error(ErrorCode::Stopped)), 324);
     assert!(joined(&pool));
 }
@@ -332,7 +355,7 @@ fn a_running_request_keeps_its_slot_until_its_work_returns() {
     }
     // Released, they run at once; the stop comes after.
     assert!(until(|| (6..=8).all(|id| record.get(id).is_some())));
-    assert!(pool.stop(soon(2000)));
+    assert!(pool.stop(guard()));
     assert_eq!(record.get(1), Some(Answer::Error(ErrorCode::Cancelled)));
     for id in [2, 3, 6, 7, 8] {
         assert_eq!(record.get(id), Some(Answer::Done), "{id}");
@@ -350,7 +373,7 @@ fn requests_before_open_and_after_the_stop_are_stopped() {
     );
     assert_eq!(record.get(1), Some(Answer::Error(ErrorCode::Stopped)));
     pool.open();
-    assert!(pool.stop(soon(2000)));
+    assert!(pool.stop(guard()));
     // The stop is for good.
     pool.open();
     let work = probe.work(&record, &hold, Kind::Heeds);
@@ -385,7 +408,7 @@ fn the_queue_runs_in_admission_order() {
     hold.release();
     assert!(until(|| order.lock().unwrap().len() == 8));
     assert_eq!(*order.lock().unwrap(), (2..=9).collect::<Vec<u64>>());
-    assert!(pool.stop(soon(2000)));
+    assert!(pool.stop(guard()));
 }
 
 #[test]
@@ -417,7 +440,7 @@ fn a_cancelled_queued_request_never_runs_and_frees_its_place() {
     assert_eq!(record.get(2), Some(Answer::Error(ErrorCode::Cancelled)));
     // A request the pool doesn't hold.
     assert!(!pool.cancel(2));
-    assert!(pool.stop(soon(2000)));
+    assert!(pool.stop(guard()));
 }
 
 #[test]
@@ -431,7 +454,7 @@ fn a_cancelled_running_request_has_its_token_cancelled() {
     assert_eq!(probe.returned(), (1, true));
     // The connection answered it; its work answered nothing more.
     assert_eq!(record.get(1), Some(Answer::Error(ErrorCode::Cancelled)));
-    assert!(pool.stop(soon(2000)));
+    assert!(pool.stop(guard()));
 }
 
 #[test]
@@ -448,8 +471,9 @@ fn a_queued_request_past_its_deadline_is_deadline_and_never_runs() {
     pool.submit(3, Instant::now(), record.clone(), work);
     let work = probe.work(&record, &hold, Kind::Deaf);
     pool.submit(4, far(), record.clone(), work);
-    // Answered at its deadline, while the thread is still busy.
-    assert!(until(|| record.get(2).is_some()));
+    // Answered at its deadline, while the thread is still busy. A timer
+    // held up past both deadlines refuses the two in one pass, 2 first.
+    assert!(until(|| record.get(2).is_some() && record.get(3).is_some()));
     assert_eq!(record.get(2), Some(Answer::Error(ErrorCode::Deadline)));
     assert_eq!(record.get(3), Some(Answer::Error(ErrorCode::Deadline)));
     assert_eq!(record.get(1), None);
@@ -465,7 +489,7 @@ fn a_queued_request_past_its_deadline_is_deadline_and_never_runs() {
     let ran: Vec<u64> = (0..3).map(|_| probe.started()).collect();
     assert_eq!(ran, vec![4, 5, 6]);
     probe.no_start();
-    assert!(pool.stop(soon(2000)));
+    assert!(pool.stop(guard()));
 }
 
 #[test]
@@ -473,20 +497,30 @@ fn a_running_request_past_its_deadline_is_deadline_and_cancelled_unless_headed()
     let (record, hold, probe) = (Record::default(), Hold::default(), Probe::new());
     let pool = open(shape(2, 0));
     let work = probe.work(&record, &hold, Kind::Heeds);
-    pool.submit(1, soon(150), record.clone(), work);
+    pool.submit(1, far(), record.clone(), work);
     let work = probe.work(&record, &hold, Kind::Headed);
-    pool.submit(2, soon(150), record.clone(), work);
+    pool.submit(2, far(), record.clone(), work);
     probe.started();
     probe.started();
+    // Both running, 2's head queued: now past their deadlines.
+    assert!(until(|| record.get(2) == Some(Answer::Head)));
+    expire(&pool, 1);
     assert_eq!(probe.returned(), (1, true));
     assert_eq!(record.get(1), Some(Answer::Error(ErrorCode::Deadline)));
     // Its head was queued in time: no service deadline after it.
+    expire(&pool, 2);
+    assert!(until(|| pool
+        .inner
+        .lock()
+        .running
+        .iter()
+        .any(|r| r.id == 2 && r.expired)));
     std::thread::sleep(Duration::from_millis(100));
     assert_eq!(record.get(2), Some(Answer::Head));
     hold.release();
     assert_eq!(probe.returned(), (2, false));
     assert_eq!(record.get(2), Some(Answer::Done));
-    assert!(pool.stop(soon(2000)));
+    assert!(pool.stop(guard()));
 }
 
 #[test]
@@ -522,7 +556,7 @@ fn the_stop_answers_queued_stopped_settles_running_and_joins_every_thread() {
     for _ in 0..3 {
         probe.started();
     }
-    assert!(pool.stop(soon(3000)));
+    assert!(pool.stop(guard()));
     assert_eq!(record.get(1), Some(Answer::Error(ErrorCode::Stopped)));
     assert_eq!(record.get(2), Some(Answer::Abort(AbortCode::Stopped)));
     assert_eq!(record.get(3), Some(Answer::Done));
@@ -547,7 +581,11 @@ fn work_still_running_at_the_drains_deadline_is_settled_stopped() {
     let began = Instant::now();
     assert!(!pool.stop(soon(200)));
     assert!(began.elapsed() >= Duration::from_millis(200));
-    assert!(began.elapsed() < Duration::from_secs(2));
+    // At its deadline, not the work's end, which comes only below. The
+    // bound is the property, so it has headroom: 100 times the deadline,
+    // and over three times the longest stall a runner has shown (5.9 s on
+    // Windows CI, issue #311).
+    assert!(began.elapsed() < Duration::from_secs(20));
     assert_eq!(record.get(1), Some(Answer::Error(ErrorCode::Stopped)));
     // Its timer ended; its worker is the work's.
     assert_eq!(alive(&pool), 1);
@@ -555,7 +593,7 @@ fn work_still_running_at_the_drains_deadline_is_settled_stopped() {
     hold.release();
     assert_eq!(probe.returned(), (1, true));
     assert!(until(|| alive(&pool) == 0));
-    assert!(pool.drain(soon(1000)));
+    assert!(pool.drain(guard()));
     assert!(joined(&pool));
     // A reply after the settle is refused.
     assert_eq!(record.get(1), Some(Answer::Error(ErrorCode::Stopped)));
@@ -588,7 +626,7 @@ fn a_panic_is_internal_and_its_thread_goes_on() {
     assert_eq!(record.get(1), Some(Answer::Error(ErrorCode::Internal)));
     assert_eq!(record.get(2), Some(Answer::Abort(AbortCode::Internal)));
     assert_eq!(record.get(3), Some(Answer::Done));
-    assert!(pool.stop(soon(2000)));
+    assert!(pool.stop(guard()));
     assert!(joined(&pool));
 }
 
@@ -599,7 +637,7 @@ fn work_that_answers_nothing_is_internal() {
     pool.submit(1, far(), record.clone(), Box::new(|_: &Ticket| {}));
     assert!(until(|| record.get(1).is_some()));
     assert_eq!(record.get(1), Some(Answer::Error(ErrorCode::Internal)));
-    assert!(pool.stop(soon(2000)));
+    assert!(pool.stop(guard()));
 }
 
 #[test]
@@ -663,7 +701,7 @@ fn write(
 }
 
 fn began(rx: &mpsc::Receiver<bool>) -> bool {
-    rx.recv_timeout(Duration::from_secs(5)).unwrap()
+    rx.recv_timeout(GUARD).unwrap()
 }
 
 fn running(pool: &Pool<Record>) -> usize {
@@ -723,7 +761,7 @@ fn a_write_cancelled_before_its_boundary_never_starts() {
         );
     }
     assert!(!uncertain(&pool));
-    assert!(pool.stop(soon(2000)));
+    assert!(pool.stop(guard()));
 }
 
 /// A deadline the timer has decided, but not yet answered, keeps a write
@@ -739,10 +777,12 @@ fn a_write_past_its_deadline_before_its_boundary_never_starts() {
     record.stall(Some(1));
     pool.submit(
         1,
-        soon(50),
+        far(),
         record.clone(),
         write(&record, &go, &finish, &tx, Past::Proven),
     );
+    assert!(until(|| running(&pool) == 1));
+    expire(&pool, 1);
     assert!(until(|| pool
         .inner
         .lock()
@@ -752,12 +792,12 @@ fn a_write_past_its_deadline_before_its_boundary_never_starts() {
     // Behind it, the timer can't reach the second's deadline.
     pool.submit(
         2,
-        soon(100),
+        far(),
         record.clone(),
         write(&record, &go, &finish, &tx, Past::Proven),
     );
     assert!(until(|| running(&pool) == 2));
-    std::thread::sleep(Duration::from_millis(150));
+    expire(&pool, 2);
     go.release();
     assert!(!began(&rx));
     assert!(!began(&rx));
@@ -766,7 +806,7 @@ fn a_write_past_its_deadline_before_its_boundary_never_starts() {
     assert!(until(|| record.get(1).is_some()));
     assert_eq!(record.get(1), Some(Answer::Error(ErrorCode::Deadline)));
     assert!(!uncertain(&pool));
-    assert!(pool.stop(soon(2000)));
+    assert!(pool.stop(guard()));
 }
 
 /// A write the stop meets before its boundary never starts: `stopped`.
@@ -786,7 +826,7 @@ fn a_write_met_by_the_stop_before_its_boundary_never_starts() {
     pool.fence();
     go.release();
     assert!(!began(&rx));
-    assert!(pool.drain(soon(2000)));
+    assert!(pool.drain(guard()));
     assert_eq!(record.get(1), Some(Answer::Error(ErrorCode::Stopped)));
     assert!(!uncertain(&pool));
 }
@@ -802,11 +842,12 @@ fn past_its_boundary_a_deadline_is_outcome_unknown_and_the_write_runs_on() {
     let pool = open(shape(1, 0));
     pool.submit(
         1,
-        soon(150),
+        far(),
         record.clone(),
         write(&record, &go, &finish, &tx, Past::Proven),
     );
     assert!(began(&rx));
+    expire(&pool, 1);
     assert!(until(|| record.get(1).is_some()));
     assert_eq!(
         record.get(1),
@@ -822,7 +863,7 @@ fn past_its_boundary_a_deadline_is_outcome_unknown_and_the_write_runs_on() {
         Some(Answer::Error(ErrorCode::OutcomeUnknown))
     );
     assert!(!uncertain(&pool));
-    assert!(pool.stop(soon(2000)));
+    assert!(pool.stop(guard()));
 }
 
 /// Past its boundary, main's cancel queues nothing at the connection, and
@@ -848,7 +889,7 @@ fn past_its_boundary_a_cancel_is_outcome_unknown() {
     finish.release();
     assert!(until(|| running(&pool) == 0));
     assert!(uncertain(&pool));
-    assert!(pool.stop(soon(2000)));
+    assert!(pool.stop(guard()));
 }
 
 /// The stop waits for a started write within its drain, and a reply it
@@ -872,7 +913,7 @@ fn the_stop_keeps_a_started_writes_reply_and_settles_one_past_the_drain_unknown(
         std::thread::sleep(Duration::from_millis(100));
         finishing.release();
     });
-    assert!(pool.stop(soon(2000)));
+    assert!(pool.stop(guard()));
     later.join().unwrap();
     assert_eq!(record.get(1), Some(Answer::Done));
     assert!(!uncertain(&pool));
@@ -938,9 +979,9 @@ fn past_its_boundary_only_a_proven_outcome_leaves_the_run_certain() {
             assert!(until(|| record.get(2).is_some()));
             assert_eq!(record.get(2), Some(Answer::Error(ErrorCode::Internal)));
             assert!(!uncertain(&pool));
-            assert!(pool.stop(soon(2000)));
+            assert!(pool.stop(guard()));
         }
-        assert!(pool.stop(soon(2000)));
+        assert!(pool.stop(guard()));
     }
 }
 
@@ -1112,7 +1153,7 @@ fn an_unknown_outcome_queues_a_repair_that_takes_turns_and_holds_its_writes() {
     );
     assert!(!uncertain(&pool));
     assert_eq!(*fake.stops.lock().unwrap(), [false, false, false]);
-    assert!(pool.stop(soon(2000)));
+    assert!(pool.stop(guard()));
 }
 
 /// A repair alone runs turn after turn, and the run is uncertain until it
@@ -1149,7 +1190,7 @@ fn repairs_run_in_their_order_and_the_run_is_uncertain_until_they_are_over() {
         ]
     );
     assert!(until(|| !uncertain(&pool)));
-    assert!(pool.stop(soon(2000)));
+    assert!(pool.stop(guard()));
 }
 
 /// A proven write queues no repair. An unknown outcome that no repair
@@ -1174,14 +1215,14 @@ fn only_an_unknown_outcome_a_repair_covers_is_repaired() {
     assert!(until(|| running(&pool) == 0 && record.get(2).is_some()));
     assert!(uncertain(&pool));
     assert_eq!(events(&timeline), [Event::Write(1), Event::Write(2)]);
-    assert!(pool.stop(soon(2000)));
+    assert!(pool.stop(guard()));
 
     let pool = open(WRITE);
     submit(&pool, 3, far(), &record, work(false), writing(rid));
     assert!(until(|| running(&pool) == 0 && record.get(3).is_some()));
     assert!(uncertain(&pool));
     assert!(pool.inner.lock().repairs.is_empty());
-    assert!(pool.stop(soon(2000)));
+    assert!(pool.stop(guard()));
 }
 
 /// A repair that can't go on lets the writes to its repository run, and
@@ -1210,7 +1251,7 @@ fn an_abandoned_repair_lets_its_writes_run_and_leaves_the_run_uncertain() {
     assert!(until(|| running(&pool) == 0));
     assert!(uncertain(&pool));
     assert!(pool.inner.lock().repairs.is_empty());
-    assert!(pool.stop(soon(2000)));
+    assert!(pool.stop(guard()));
 }
 
 /// A write held behind a repair keeps its deadline, and main's cancel
@@ -1234,7 +1275,7 @@ fn a_write_held_behind_a_repair_keeps_its_deadline_and_its_cancel() {
     assert!(pool.inner.lock().queue.is_empty());
     assert!(!events(&timeline).contains(&Event::Write(2)));
     assert!(!events(&timeline).contains(&Event::Write(3)));
-    assert!(pool.stop(soon(2000)));
+    assert!(pool.stop(guard()));
 }
 
 /// 0008, "The deadline" ("`rad.shutdown` stops after the current unit"):
@@ -1256,7 +1297,7 @@ fn the_stop_reaches_the_turn_in_progress_and_no_turn_follows() {
     pool.fence();
     assert_eq!(record.get(2), Some(Answer::Error(ErrorCode::Stopped)));
     fake.hold.release();
-    assert!(pool.drain(soon(2000)));
+    assert!(pool.drain(guard()));
     assert_eq!(*fake.stops.lock().unwrap(), [true]);
     assert_eq!(
         events(&timeline),
@@ -1357,7 +1398,7 @@ fn a_cob_write_fences_its_repository_from_its_start_until_proven_or_repaired() {
     finish.release();
     assert!(until(|| running(&pool) == 0));
     assert!(!pool.writing(&fenced));
-    assert!(pool.stop(soon(2000)));
+    assert!(pool.stop(guard()));
 }
 
 /// How a network operation's libradicle call behaves past its start.
@@ -1459,7 +1500,7 @@ fn past_its_start_main_cancels_a_network_operation_through_its_token() {
     assert!(until(|| running(&pool) == 0));
     assert_eq!(record.get(3), Some(Answer::Cancelled));
     assert!(uncertain(&pool));
-    assert!(pool.stop(soon(2000)));
+    assert!(pool.stop(guard()));
 }
 
 /// Before its start, main's cancel is the connection's `cancelled`, as
@@ -1493,7 +1534,7 @@ fn a_network_operation_cancelled_before_its_start_never_starts() {
         assert_eq!(record.get(id), Some(Answer::Error(ErrorCode::Cancelled)));
     }
     assert!(!uncertain(&pool));
-    assert!(pool.stop(soon(2000)));
+    assert!(pool.stop(guard()));
 }
 
 /// 0008, "Deadlines": past its start, a network operation past its
@@ -1508,14 +1549,16 @@ fn past_its_start_a_network_deadline_is_deadline_and_keeps_its_slot() {
     let pool = open(shape(1, 0));
     pool.submit(
         1,
-        soon(150),
+        far(),
         record.clone(),
         network(&record, &go, &finish, &tx, Call::Deaf),
     );
     assert!(began(&rx));
+    expire(&pool, 1);
     assert!(until(|| record.get(1).is_some()));
     assert_eq!(record.get(1), Some(Answer::Error(ErrorCode::Deadline)));
-    assert!(pool.inner.lock().running[0].cancel.is_cancelled());
+    // The timer cancels its token once it has answered it.
+    assert!(until(|| pool.inner.lock().running[0].cancel.is_cancelled()));
     let work = network(&record, &go, &finish, &tx, Call::Heeds);
     assert_eq!(pool.submit(2, far(), record.clone(), work), Admission::Busy);
     finish.release();
@@ -1526,15 +1569,16 @@ fn past_its_start_a_network_deadline_is_deadline_and_keeps_its_slot() {
     let finish = Hold::default();
     pool.submit(
         3,
-        soon(150),
+        far(),
         record.clone(),
         network(&record, &go, &finish, &tx, Call::Heeds),
     );
     assert!(began(&rx));
+    expire(&pool, 3);
     assert!(until(|| running(&pool) == 0));
     assert_eq!(record.get(3), Some(Answer::Error(ErrorCode::Deadline)));
     assert!(uncertain(&pool));
-    assert!(pool.stop(soon(2000)));
+    assert!(pool.stop(guard()));
 }
 
 /// Before its start, the deadline and the stop keep it from starting, as
@@ -1546,10 +1590,13 @@ fn a_network_operation_past_its_deadline_or_met_by_the_stop_never_starts() {
     let pool = open(shape(1, 0));
     pool.submit(
         1,
-        soon(50),
+        far(),
         record.clone(),
         network(&record, &go, &finish, &tx, Call::Heeds),
     );
+    // Running, before its start: now past its deadline.
+    assert!(until(|| running(&pool) == 1));
+    expire(&pool, 1);
     assert!(until(|| record.get(1).is_some()));
     go.release();
     assert!(!began(&rx));
@@ -1567,7 +1614,7 @@ fn a_network_operation_past_its_deadline_or_met_by_the_stop_never_starts() {
     pool.fence();
     go.release();
     assert!(!began(&rx));
-    assert!(pool.drain(soon(2000)));
+    assert!(pool.drain(guard()));
     assert_eq!(record.get(2), Some(Answer::Error(ErrorCode::Stopped)));
     assert!(!uncertain(&pool));
 }
@@ -1589,7 +1636,7 @@ fn the_stop_answers_a_started_network_operation_stopped_and_marks_it() {
         network(&record, &go, &finish, &tx, Call::Heeds),
     );
     assert!(began(&rx));
-    assert!(pool.stop(soon(2000)));
+    assert!(pool.stop(guard()));
     assert_eq!(record.get(1), Some(Answer::Error(ErrorCode::Stopped)));
     assert!(uncertain(&pool));
 
@@ -1627,5 +1674,5 @@ fn a_panic_past_a_network_start_is_internal_and_marks_the_run() {
     assert!(until(|| running(&pool) == 0));
     assert_eq!(record.get(1), Some(Answer::Error(ErrorCode::Internal)));
     assert!(uncertain(&pool));
-    assert!(pool.stop(soon(2000)));
+    assert!(pool.stop(guard()));
 }
