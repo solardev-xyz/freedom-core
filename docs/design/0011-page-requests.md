@@ -432,7 +432,7 @@ One walk over a request gives two numbers. The preload and main walk the same wa
 **What the numbers give:**
 - the largest `swarm_publishFiles`: 2 × (50 MiB + 64 KiB), 2.4 MiB for the walk's most values and names, 1 MiB of buffers and 16 KiB for the record, about 103.6 MiB;
 - the largest `swarm_publishData`: 3 × (10 MiB + 64 KiB), 2.4 MiB and 16 KiB, about 32.6 MiB;
-- the largest request of any other method: 24 × 1 MiB, 2.4 MiB and 16 KiB, about 26.4 MiB.
+- the largest request of any other method: 24 × 1 MiB, 2.4 MiB and 16 KiB, about 26.5 MiB.
 
 So the budgets are set from the largest upload (all proposed). A document's 128 MiB holds one, with about 24 MiB to spare. A window's 256 MiB holds the two the browser runs at once, from two of its documents, with about 49 MiB to spare. The browser's 384 MiB holds those two and leaves about 177 MiB for everything else.
 
