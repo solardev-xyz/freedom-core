@@ -429,20 +429,20 @@ One walk over a request gives two numbers. The preload and main walk the same wa
 - **A BigInt is bounded and counted.** A BigInt is arbitrary precision, so one value could hold any amount of memory. The walk refuses a BigInt whose magnitude needs more than 256 bits (proposed; the widest any method takes today is `swarm_publishChunk`'s `span`, a `u64`, `swarm-provider-ipc.js:267–277`), and counts each one it takes as 32 bytes in the size. Main checks this in the walk, before method validation, so a method's later, narrower check is not what bounds it.
 - **A view counts its whole buffer.** Main counts a `Uint8Array` at its buffer's length (`buffer.byteLength`), whatever part of it the view shows. The preload sends a view that doesn't span its buffer as a copy of just its own bytes, so main gets what the preload measured.
 - **The size** is compared with the request's limit: the UTF-8 bytes of every string and property name, and the bytes of binary data, as `LIMITS` counts them. The `{ type: 'Buffer', data }` form that `normalizeBytes` also takes is an array of numbers to the walk, so it carries 10,000 bytes at most.
-- **The charge** is what main may hold for the request at once: the size times the method's copies (below), plus 128 bytes for each value and each property name (proposed), for its place in the heap, plus 16 KiB for main's own record of the request, which PRQ-2 measured at 6 to 9 KiB. So 10,000 near-empty values cost at least 1.2 MiB, and 2.4 MiB with a name each, not nothing. 1,024 such requests would need over 1.2 GiB, far past the browser's budget.
+- **The charge** is what main may hold for the request at once: the size times the method's copies (below), plus 128 bytes for each value and each property name (proposed), for its place in the heap, plus 32 KiB for main's own record of the request, which PRQ-2 measured at 6 to 9 KiB; 16 KiB left too little room on CI runners, where one run measured 1.8 KiB over. So 10,000 near-empty values cost at least 1.2 MiB, and 2.4 MiB with a name each, not nothing. 1,024 such requests would need over 1.2 GiB, far past the browser's budget.
 
 **Copies** counts every form of a request's bytes that main can hold at the same time, the IPC value included. The numbers come from today's code paths:
 
 | Method | Copies | What main holds at once |
 |---|---|---|
-| `swarm_publishFiles` | 2, and 1 MiB of stream buffers | The IPC value, and the `Buffer` that `normalizeBytes` copies a `Uint8Array` into (`Buffer.from`, `swarm-provider-ipc.js:698–701`). Both stay live until the upload ends. An `ArrayBuffer` becomes a view, with no copy. The files go to disk (`publish-service.js:239–247`) and reach the node through bounded read and send buffers |
-| `swarm_publishData` | 3 | The IPC value, `normalizeBytes`'s copy, and fetch's copy of the body: the Fetch standard extracts a body as a copy of its bytes, or as a string's UTF-8. A string gets no `normalizeBytes` copy, but its own form counts twice, since V8 may hold it in two bytes a character where UTF-8 takes one |
+| `swarm_publishFiles` | 2, and 1 MiB of stream buffers | Kept as a margin: since PRQ-7c, main holds the IPC value and sends it to the node itself (`page-upload.js`, in 64 KiB slices with no copy of the body; `normalizeBytes` makes a view of a `Uint8Array`), and PRQ-7c measured a 50 MiB upload's peak at 50.2 MiB. The first count assumed a `normalizeBytes` copy and bee-js's path, whose fetch held about 2.3 copies and reached about 250 MiB, so page uploads left bee-js |
+| `swarm_publishData` | 3 | Kept as a margin: the IPC value, sent by `page-upload.js` with no copy of a `Uint8Array`'s bytes, and a string's UTF-8, since V8 may hold the string at two bytes a character where UTF-8 takes one. PRQ-7c measured 10.1 MiB for a 10 MiB `Uint8Array` and 20.2 MiB for a 10 MiB two-byte string |
 | Every other method | 24 (proposed) | At most 1 MiB, which main may hold as the IPC value (a string in up to two bytes a character), as JSON for the core or a node (where a control character takes six characters, `\u0001`, and V8 keeps the JSON of a string with any character past U+00FF at two bytes a character too, so twelve bytes), and as that JSON's UTF-8 in a frame or a request body (six): 2 + 12 + 6, rounded up. PRQ-2 measured a peak of 20.03 MiB for a 1 MiB string of control characters held at two bytes a character |
 
 **What the numbers give:**
-- the largest `swarm_publishFiles`: 2 × (50 MiB + 64 KiB), 2.4 MiB for the walk's most values and names, 1 MiB of buffers and 16 KiB for the record, about 103.6 MiB;
-- the largest `swarm_publishData`: 3 × (10 MiB + 64 KiB), 2.4 MiB and 16 KiB, about 32.6 MiB;
-- the largest request of any other method: 24 × 1 MiB, 2.4 MiB and 16 KiB, about 26.5 MiB.
+- the largest `swarm_publishFiles`: 2 × (50 MiB + 64 KiB), 2.4 MiB for the walk's most values and names, 1 MiB of buffers and 32 KiB for the record, about 103.6 MiB;
+- the largest `swarm_publishData`: 3 × (10 MiB + 64 KiB), 2.4 MiB and 32 KiB, about 32.7 MiB;
+- the largest request of any other method: 24 × 1 MiB, 2.4 MiB and 32 KiB, about 26.5 MiB.
 
 So the budgets are set from the largest upload (all proposed). A document's 128 MiB holds one, with about 24 MiB to spare. A window's 256 MiB holds the two the browser runs at once, from two of its documents, with about 49 MiB to spare. The browser's 384 MiB holds those two and leaves about 177 MiB for everything else.
 
@@ -467,7 +467,7 @@ A request over 1 MiB first reserves its turn with `page:reserve { nonce, method,
 |---|---|
 | A request's size | `swarm_publishData` and `swarm_publishFiles`: their payload limit plus 64 KiB. Every other method: 1 MiB (proposed) |
 | The size walk | 10,000 values, 32 levels (proposed) |
-| A request's charge | Its size times its method's copies (`swarm_publishFiles` 2, `swarm_publishData` 3, every other method 24), 128 bytes for each value and property name, 16 KiB for main's record, and 1 MiB of stream buffers for `swarm_publishFiles` (proposed) |
+| A request's charge | Its size times its method's copies (`swarm_publishFiles` 2, `swarm_publishData` 3, every other method 24), 128 bytes for each value and property name, 32 KiB for main's record, and 1 MiB of stream buffers for `swarm_publishFiles` (proposed) |
 | In flight per document | 64 requests and 128 MiB of charges (proposed). The next gets `-32005` ("limit exceeded", EIP-1474) and doesn't run |
 | In flight per window | 256 requests and 256 MiB (proposed) |
 | In flight in the browser | 1,024 requests and 384 MiB (proposed) |
