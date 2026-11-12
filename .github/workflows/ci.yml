@@ -168,6 +168,16 @@ jobs:
           ref: 1ea598373fcc406bed8a3df1e54b734dcc4e5ac5
           path: radicle-reference
           persist-credentials: false
+      # The approvals vectors' own reference (generate.js,
+      # APPROVALS_REFERENCE_COMMIT): integration/rust-core with SEC-1's
+      # eleventh token kind and 0011's page tokens. Its generator reads no
+      # package, so nothing is installed there.
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          repository: solardev-xyz/freedom-browser
+          ref: 7f85551d82bddb1337df73b331785e969d62d1b9
+          path: approvals-reference
+          persist-credentials: false
       # The vectors' meta records the Node version; it is part of the check.
       - uses: actions/setup-node@2028fbc5c25fe9cf00d9f06a71cc4710d4507903 # v6.0.0
         with:
@@ -186,9 +196,11 @@ jobs:
         env:
           FREEDOM_BROWSER_CHECKOUT: ${{ github.workspace }}/reference
           FREEDOM_BROWSER_RADICLE_CHECKOUT: ${{ github.workspace }}/radicle-reference
+          FREEDOM_BROWSER_APPROVALS_CHECKOUT: ${{ github.workspace }}/approvals-reference
         run: |
           node vectors/generator/generate.js check --freedom-browser "$FREEDOM_BROWSER_CHECKOUT" \
-            --radicle-browser "$FREEDOM_BROWSER_RADICLE_CHECKOUT"
+            --radicle-browser "$FREEDOM_BROWSER_RADICLE_CHECKOUT" \
+            --approvals-browser "$FREEDOM_BROWSER_APPROVALS_CHECKOUT"
           node --test vectors/generator/check.test.js
 
   fuzz:

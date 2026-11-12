@@ -11,6 +11,8 @@ const SOURCE = path.resolve(__dirname, '..');
 const REFERENCE = process.env.FREEDOM_BROWSER_CHECKOUT || '/root/herdr/freedom-browser';
 // The Radicle vectors' reference (generate.js, RADICLE_REFERENCE_COMMIT).
 const RADICLE_REFERENCE = process.env.FREEDOM_BROWSER_RADICLE_CHECKOUT || '/root/herdr/freedom-browser-wt/radicle-reference';
+// The approvals vectors' reference (generate.js, APPROVALS_REFERENCE_COMMIT).
+const APPROVALS_REFERENCE = process.env.FREEDOM_BROWSER_APPROVALS_CHECKOUT || '/root/herdr/freedom-browser-wt/approvals-reference';
 const FILES = ['keys.json', 'mnemonic-validation.json', 'identity-formats.json', 'signing.json', 'naming.json', 'naming-replay.json',
   'chain.json', 'chain-replay.json', 'fixtures/vaults.json', 'fixtures/bee-keystores.json', 'fixtures/radicle-openssh.json',
   'generator/generate.js', 'generator/signing.js', 'generator/naming.js', 'generator/naming-replay.js', 'generator/chain.js',
@@ -23,6 +25,7 @@ FILES.push('radicle-blob.json', 'generator/radicle-blob.js');
 FILES.push('radicle-network.json', 'generator/radicle-network.js');
 FILES.push('radicle-stats.json', 'generator/radicle-stats.js');
 FILES.push('radicle-import.json', 'generator/radicle-import.js');
+FILES.push('approvals.json', 'generator/approvals.js');
 
 function corruptedCheck(filename, corrupt) {
   const copy = fs.mkdtempSync(path.join(os.tmpdir(), 'freedom-core-vectors-'));
@@ -39,7 +42,8 @@ function corruptedCheck(filename, corrupt) {
     corrupt(contents);
     fs.writeFileSync(destination, JSON.stringify(contents, null, 2) + '\n');
     result = spawnSync(process.execPath, [path.join(copy, 'generator/generate.js'),
-      'check', '--freedom-browser', REFERENCE, '--radicle-browser', RADICLE_REFERENCE], { encoding: 'utf8', timeout: 60000 });
+      'check', '--freedom-browser', REFERENCE, '--radicle-browser', RADICLE_REFERENCE,
+      '--approvals-browser', APPROVALS_REFERENCE], { encoding: 'utf8', timeout: 60000 });
   } finally {
     fs.rmSync(copy, { recursive: true, force: true });
   }
@@ -716,7 +720,8 @@ test('check rejects a changed import answer', () => {
 test('check takes the Radicle vectors from their own reference, at its pinned commit', () => {
   // The shared reference is at another commit: refused before anything is built.
   const result = spawnSync(process.execPath, [path.join(SOURCE, 'generator/generate.js'),
-    'check', '--freedom-browser', REFERENCE, '--radicle-browser', REFERENCE], { encoding: 'utf8', timeout: 60000 });
+    'check', '--freedom-browser', REFERENCE, '--radicle-browser', REFERENCE,
+    '--approvals-browser', APPROVALS_REFERENCE], { encoding: 'utf8', timeout: 60000 });
   assert.equal(result.status, 1, result.stdout + result.stderr);
   assert.match(result.stderr, /Use the pinned Radicle reference commit/);
   // And each Radicle file records it.
@@ -729,4 +734,24 @@ test('check takes the Radicle vectors from their own reference, at its pinned co
     contents.meta.freedomBrowserCommit = 'fb540328162839e68150fe2c5e517edb86734d1c';
   });
   assert.match(stderr, /Byte mismatch: radicle-network.json/);
+});
+
+test('check rejects a changed approvals decision', () => {
+  const stderr = corruptedCheck('approvals.json', (contents) => {
+    const pair = contents.pairs.find((item) => item.a === 'sign-typed-data/text' && item.b === 'sign-typed-data/text-spacing');
+    pair.core = 'apart';
+  });
+  assert.match(stderr, /Byte mismatch: approvals.json/);
+});
+
+test('check takes the approvals vectors from their own reference, at its pinned commit', () => {
+  // The shared reference is at another commit: refused before anything is built.
+  const result = spawnSync(process.execPath, [path.join(SOURCE, 'generator/generate.js'),
+    'check', '--freedom-browser', REFERENCE, '--radicle-browser', RADICLE_REFERENCE,
+    '--approvals-browser', REFERENCE], { encoding: 'utf8', timeout: 60000 });
+  assert.equal(result.status, 1, result.stdout + result.stderr);
+  assert.match(result.stderr, /Use the pinned approvals reference commit/);
+  // And the file records it.
+  const commit = spawnSync('git', ['rev-parse', 'HEAD'], { cwd: APPROVALS_REFERENCE, encoding: 'utf8' }).stdout.trim();
+  assert.equal(JSON.parse(fs.readFileSync(path.join(SOURCE, 'approvals.json'), 'utf8')).meta.freedomBrowserCommit, commit);
 });

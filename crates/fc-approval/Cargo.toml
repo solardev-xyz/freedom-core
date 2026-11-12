@@ -1,0 +1,28 @@
+[package]
+name = "fc-approval"
+description = "Approvals in the core (design 0012): approval tokens and what each binds, with the behavior of freedom-browser's signing-confirmation.js"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+# The parse `sign.*` uses (design 0002): transactions, addresses, quantities,
+# bytes, and the typed-data digest with its view (#88).
+fc-evm = { path = "../fc-evm" }
+# Token bytes come from the caller's RNG (AGENTS rule 2).
+rand_core = "0.10"
+# preserve_order: the typed-data view lists `types`' names in the order the
+# request gives them (fc-evm's eip712.rs reads the map's order), so this
+# crate enables it itself, as freedom-cored does, rather than rely on another
+# crate's features in its own tests and mobile builds (design 0012, "Crates
+# and clocks").
+serde_json = { version = "1", features = ["preserve_order"] }
+sha2 = { version = "0.11", default-features = false }
+thiserror = "2"
+# A token is a bearer secret: wiped when it is spent, dropped or evicted.
+zeroize = "1.8"
