@@ -1099,13 +1099,21 @@ fn the_overall_deadline() {
 #[test]
 fn admission_is_busy_past_64_running_and_256_waiting() {
     let (_root, mut core) = core();
-    configure(&mut core, 2, &[snapshot(&["direct"], &["a"], 60_000)]);
+    // Sixteen chains of one endpoint each, the reads dealt among them: an
+    // endpoint has four of its exchanges at main at once (design 0005, Per
+    // endpoint), so the 64 running reads all ask main.
+    let chains: Vec<Value> = (1..=16_u64)
+        .map(|chain| {
+            let mut snapshot = snapshot(&["direct"], &[&format!("a{chain}")], 60_000);
+            snapshot["chain_id"] = json!(chain);
+            snapshot
+        })
+        .collect();
+    configure(&mut core, 2, &chains);
     for i in 0..321 {
-        core.send(&request(
-            10 + i,
-            "chain.request",
-            read("eth_blockNumber", json!([])),
-        ));
+        let mut params = read("eth_blockNumber", json!([]));
+        params["chain_id"] = json!(i % 16 + 1);
+        core.send(&request(10 + i, "chain.request", params));
     }
     // 64 run and ask main; 256 wait; the last is busy at once.
     let mut asked = 0;
@@ -1992,18 +2000,26 @@ fn other_malformed_replies_to_an_attempt_end_the_connection() {
 fn naming_gets_a_slot_while_chain_holds_main_busy() {
     // The daemon review's fairness probe: chain fills main's 256 slots
     // (reads of nine members each); a naming lookup still gets one of the
-    // slots answers free, rather than waiting behind chain's queue.
+    // slots answers free, rather than waiting behind chain's queue. Eight
+    // chains of nine endpoints each, the reads dealt among them: an
+    // endpoint has four of its exchanges at main at once (design 0005, Per
+    // endpoint), so the 72 endpoints can fill main's 256.
     let (_root, mut core) = core();
-    let mut nine = snapshot(
-        &["quorum"],
-        &["c0", "c1", "c2", "c3", "c4", "c5", "c6", "c7", "c8"],
-        60_000,
-    );
-    nine["quorum"] = json!({ "k": 9, "m": 9, "timeout_ms": 60_000 });
+    let chains: Vec<Value> = (1..=8_u64)
+        .map(|chain| {
+            let endpoints: Vec<String> = (0..9).map(|j| format!("c{chain}-{j}")).collect();
+            let endpoints: Vec<&str> = endpoints.iter().map(String::as_str).collect();
+            let mut nine = snapshot(&["quorum"], &endpoints, 60_000);
+            nine["chain_id"] = json!(chain);
+            nine["quorum"] = json!({ "k": 9, "m": 9, "timeout_ms": 60_000 });
+            nine
+        })
+        .collect();
     call(&mut core, 2, "naming.configure", common::naming_snapshot());
-    configure(&mut core, 3, &[nine]);
+    configure(&mut core, 3, &chains);
     for i in 0..64 {
         let mut params = read("eth_blockNumber", json!([]));
+        params["chain_id"] = json!(i % 8 + 1);
         params["deadline_ms"] = json!(120_000);
         core.send(&request(100 + i, "chain.request", params));
     }
