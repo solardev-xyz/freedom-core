@@ -423,6 +423,18 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "da7c62ceae207dd37ea5b845da6a0696c799f85e97da1ab5b7910be3c1c80223"
 
 [[package]]
+name = "fc-approval"
+version = "0.12.2"
+dependencies = [
+ "fc-evm",
+ "rand_core 0.10.1",
+ "serde_json",
+ "sha2",
+ "thiserror",
+ "zeroize",
+]
+
+[[package]]
 name = "fc-chain"
 version = "0.12.2"
 dependencies = [
