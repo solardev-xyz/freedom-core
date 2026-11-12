@@ -69,8 +69,9 @@ pub(crate) fn lower_hex_32(text: &str) -> Option<[u8; 32]> {
     }
     let digit = |b: u8| if b <= b'9' { b - b'0' } else { b - b'a' + 10 };
     let mut out = [0u8; 32];
-    for (byte, pair) in out.iter_mut().zip(bytes.chunks_exact(2)) {
-        *byte = (digit(pair[0]) << 4) | digit(pair[1]);
+    let (pairs, _) = bytes.as_chunks::<2>();
+    for (byte, [high, low]) in out.iter_mut().zip(pairs) {
+        *byte = (digit(*high) << 4) | digit(*low);
     }
     Some(out)
 }
@@ -469,7 +470,10 @@ fn transaction(value: &Value, nonce_rule: Nonce) -> Result<Value, Error> {
         }
         if let Some((max_fee, priority)) = tx.eip1559_fees() {
             map.insert("max_fee_per_gas".into(), max_fee.to_decimal().into());
-            map.insert("max_priority_fee_per_gas".into(), priority.to_decimal().into());
+            map.insert(
+                "max_priority_fee_per_gas".into(),
+                priority.to_decimal().into(),
+            );
         }
         if nonce_rule == Nonce::Bound {
             map.insert("nonce".into(), tx.nonce().to_string().into());
@@ -540,7 +544,12 @@ fn x402(payload: &Value) -> Result<Value, Error> {
         &["detection", "accept_index", "accept"],
         &["grant"],
     )?;
-    let detection = object(&fields["detection"], "detection", &["tab", "id", "url"], &[])?;
+    let detection = object(
+        &fields["detection"],
+        "detection",
+        &["tab", "id", "url"],
+        &[],
+    )?;
     let tab = detection["tab"]
         .as_u64()
         .ok_or_else(|| invalid("Invalid tab"))?;

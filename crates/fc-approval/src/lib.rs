@@ -27,8 +27,8 @@ mod kind;
 mod tokens;
 
 pub use bind::{
-    Binding, Handle, Limits, MAX_ACCOUNT, MAX_CHAIN_ID, MAX_CLOSE_HASHES, MAX_NONCE, Page,
-    Request, bind,
+    Binding, Handle, Limits, MAX_ACCOUNT, MAX_CHAIN_ID, MAX_CLOSE_HASHES, MAX_NONCE, Page, Request,
+    bind,
 };
 pub use error::{Error, Refusal};
 pub use kind::{Kind, PageRule, Scope};
