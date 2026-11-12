@@ -23,8 +23,11 @@
 // - `core`: the request as the core takes it (fc-approval's `Request`:
 //   0012, "Tokens": "its own parse of the sign.* parameters"), from the
 //   case's own payload by `coreForm` below: names as the core spells them,
-//   a JS safe integer quantity as its decimal string, everything else as
-//   the payload has it, so a value the core's parse refuses stays refused.
+//   a JS safe integer quantity as its decimal string, a message's text as
+//   its UTF-8 bytes in hex (as main normalizes it), a typed-data text as the
+//   text the core parses, a Safe's address beside its index, and everything
+//   else as the payload has it, so a value the core's parse refuses stays
+//   refused.
 //   `null` where the reference's input has no form in the core's (a dApp
 //   send's site is its page there, not a payload field).
 // - `deviation`, on a case or a pair, and the core's expected answer
