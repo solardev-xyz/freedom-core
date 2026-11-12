@@ -309,22 +309,7 @@ pub fn dns() -> Option<crate::dns::Dns> {
             .ok()
             .and_then(|port| port.parse::<u16>().ok());
         let config = match port {
-            Some(port) if source == DnsSource::System => {
-                let servers: Vec<_> = parsed
-                    .config()
-                    .name_servers()
-                    .iter()
-                    .cloned()
-                    .map(|mut server| {
-                        server.socket_addr.set_port(port);
-                        server
-                    })
-                    .collect();
-                DnsConfig::custom(
-                    hickory_resolver::config::ResolverConfig::from_parts(None, Vec::new(), servers),
-                    parsed.options().clone(),
-                )
-            }
+            Some(port) if source == DnsSource::System => parsed.with_port(port),
             _ => parsed,
         };
         return Some(crate::dns::Dns { config, source });

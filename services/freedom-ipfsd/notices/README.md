@@ -25,7 +25,7 @@ The C library a crate bundles is listed apart, in the script's `NATIVE`:
 
 | Library | Bundled by | Text |
 |---|---|---|
-| SQLite 3.51.3 | `libsqlite3-sys` 0.37.0 (`bundled`, which freedom-ipfs's `rusqlite` asks for) | `sqlite-3.51.3-NOTICE` here: SQLite is in the public domain, and the file quotes the dedication its amalgamation carries |
+| SQLite 3.54.1 | `libsqlite3-sys` 0.39.1 (`bundled`, which freedom-ipfs's `rusqlite` asks for) | `sqlite-3.54.1-NOTICE` here: SQLite is in the public domain, and the file quotes the dedication its amalgamation carries |
 
 The runtime notices of the Linux builds, which link glibc 2.17 dynamically
 through Zig (glibc's startup and `libc_nonshared` objects, and LLVM's

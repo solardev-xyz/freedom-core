@@ -165,11 +165,11 @@ NATIVE = {
         # which freedom-ipfs's rusqlite asks for. SQLite is in the public
         # domain: its notice is the dedication its source carries.
         Native(
-            "SQLite 3.51.3 (C library), built from libsqlite3-sys 0.37.0's "
+            "SQLite 3.54.1 (C library), built from libsqlite3-sys 0.39.1's "
             "amalgamation",
             "blessing (public domain)",
-            "services/freedom-ipfsd/notices/sqlite-3.51.3-NOTICE",
-            "libsqlite3-sys 0.37.0",
+            "services/freedom-ipfsd/notices/sqlite-3.54.1-NOTICE",
+            "libsqlite3-sys 0.39.1",
         ),
     ],
     "freedom-radicled": [

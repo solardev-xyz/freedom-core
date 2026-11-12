@@ -1037,7 +1037,7 @@ dependencies = [
 [[package]]
 name = "freedom-ipfs-addr"
 version = "0.4.6"
-source = "git+https://github.com/solardev-xyz/freedom-ipfs?rev=8a2311c2316b830b8bb3fe02e201765b2f5c35e0#8a2311c2316b830b8bb3fe02e201765b2f5c35e0"
+source = "git+https://github.com/solardev-xyz/freedom-ipfs?rev=dbbceb80f374c15c63cf8f103bbf073b6dddd033#dbbceb80f374c15c63cf8f103bbf073b6dddd033"
 dependencies = [
  "data-encoding",
  "thiserror 2.0.20",
@@ -1047,7 +1047,7 @@ dependencies = [
 [[package]]
 name = "freedom-ipfs-socks"
 version = "0.4.6"
-source = "git+https://github.com/solardev-xyz/freedom-ipfs?rev=8a2311c2316b830b8bb3fe02e201765b2f5c35e0#8a2311c2316b830b8bb3fe02e201765b2f5c35e0"
+source = "git+https://github.com/solardev-xyz/freedom-ipfs?rev=dbbceb80f374c15c63cf8f103bbf073b6dddd033#dbbceb80f374c15c63cf8f103bbf073b6dddd033"
 dependencies = [
  "freedom-ipfs-addr",
  "thiserror 2.0.20",

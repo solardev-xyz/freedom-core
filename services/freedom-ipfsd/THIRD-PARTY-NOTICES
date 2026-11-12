@@ -118,14 +118,15 @@ Crates:
 - ghash 0.5.1: Apache-2.0 OR MIT
 - h2 0.4.16: MIT
 - hashbrown 0.15.5: MIT OR Apache-2.0
-- hashbrown 0.16.1: MIT OR Apache-2.0
 - hashbrown 0.17.0: MIT OR Apache-2.0
 - hashlink 0.10.0: MIT OR Apache-2.0
-- hashlink 0.11.0: MIT OR Apache-2.0
+- hashlink 0.12.2: MIT OR Apache-2.0
 - hex 0.4.3: MIT OR Apache-2.0
+- hickory-net 0.26.3: MIT OR Apache-2.0
 - hickory-proto 0.25.2: MIT OR Apache-2.0
 - hickory-proto 0.26.3: MIT OR Apache-2.0
 - hickory-resolver 0.25.2: MIT OR Apache-2.0
+- hickory-resolver 0.26.3: MIT OR Apache-2.0
 - hkdf 0.12.4: MIT OR Apache-2.0
 - hmac 0.12.1: MIT OR Apache-2.0
 - http 1.4.0: MIT OR Apache-2.0
@@ -181,7 +182,7 @@ Crates:
 - libp2p-upnp 0.5.0: MIT
 - libp2p-websocket 0.45.1: MIT
 - libp2p-yamux 0.47.0: MIT
-- libsqlite3-sys 0.37.0: MIT
+- libsqlite3-sys 0.39.1: MIT
 - linux-raw-sys 0.12.1: Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT
 - litemap 0.8.2: Unicode-3.0
 - lock_api 0.4.14: MIT OR Apache-2.0
@@ -230,6 +231,7 @@ Crates:
 - potential_utf 0.1.5: Unicode-3.0
 - powerfmt 0.2.0: MIT OR Apache-2.0
 - ppv-lite86 0.2.21: MIT OR Apache-2.0
+- prefix-trie 0.8.4: MIT OR Apache-2.0
 - prometheus-client 0.23.1: Apache-2.0 OR MIT
 - prost 0.14.3: Apache-2.0
 - quick-protobuf 0.8.1: MIT
@@ -254,7 +256,7 @@ Crates:
 - ring 0.17.14: Apache-2.0 AND ISC
 - ripemd 0.2.0: MIT OR Apache-2.0
 - rtnetlink 0.20.0: MIT
-- rusqlite 0.39.0: MIT
+- rusqlite 0.41.1: MIT
 - rustc-hash 2.1.2: Apache-2.0 OR MIT
 - rusticata-macros 4.1.0: MIT/Apache-2.0
 - rustix 1.1.6: Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT
@@ -371,7 +373,7 @@ of an executable be told where the source is. Each one's exact source:
 - attohttpc 0.30.1: https://static.crates.io/crates/attohttpc/attohttpc-0.30.1.crate (repository: https://github.com/sbstp/attohttpc)
 
 C libraries that crates above bundle, built into the binary:
-- SQLite 3.51.3 (C library), built from libsqlite3-sys 0.37.0's amalgamation: blessing (public domain)
+- SQLite 3.54.1 (C library), built from libsqlite3-sys 0.39.1's amalgamation: blessing (public domain)
 
 Rust 1.99 toolchain runtime:
 - addr2line 0.27.1 (Rust standard library): Apache-2.0 OR MIT
@@ -757,11 +759,11 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 THE SOFTWARE.
 
 ========================================================================
-Used by: SQLite 3.51.3 (C library), built from libsqlite3-sys 0.37.0's amalgamation (sqlite-3.51.3-NOTICE)
+Used by: SQLite 3.54.1 (C library), built from libsqlite3-sys 0.39.1's amalgamation (sqlite-3.54.1-NOTICE)
 ------------------------------------------------------------------------
-SQLite 3.51.3, as the libsqlite3-sys 0.37.0 crate bundles it (the
+SQLite 3.54.1, as the libsqlite3-sys 0.39.1 crate bundles it (the
 amalgamation sqlite3/sqlite3.c, from Fossil check-in
-737ae4a34738ffa0c3ff7f9bb18df914dd1c), is in the public domain
+555e07ef33f69a0957d24d8e555b702464a1), is in the public domain
 (https://sqlite.org/copyright.html). In place of a license, its source
 carries this dedication:
 
@@ -1841,7 +1843,7 @@ THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
 OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 ========================================================================
-Used by: arrayvec 0.7.6 (LICENSE-APACHE), asn1-rs 0.7.1 (LICENSE-APACHE), atomic-waker 1.1.2 (LICENSE-APACHE), base64 0.22.1 (LICENSE-APACHE), base64 0.23.1 (LICENSE-APACHE), bitflags 2.11.1 (LICENSE-APACHE), bs58 0.5.1 (LICENSE-APACHE), cfg-if 1.0.4 (LICENSE-APACHE), core-foundation 0.9.4 (LICENSE-APACHE), core-foundation-sys 0.8.7 (LICENSE-APACHE), critical-section 1.2.0 (LICENSE-APACHE), crossbeam-channel 0.5.15 (LICENSE-APACHE), crossbeam-epoch 0.9.20 (LICENSE-APACHE), crossbeam-utils 0.8.21 (LICENSE-APACHE), der-parser 10.0.0 (LICENSE-APACHE), either 1.15.0 (LICENSE-APACHE), equivalent 1.0.2 (LICENSE-APACHE), errno 0.3.14 (LICENSE-APACHE), fnv 1.0.7 (LICENSE-APACHE), form_urlencoded 1.2.2 (LICENSE-APACHE), futures-timer 3.0.3 (LICENSE-APACHE), hashbrown 0.15.5 (LICENSE-APACHE), hashbrown 0.16.1 (LICENSE-APACHE), hashbrown 0.17.0 (LICENSE-APACHE), httparse 1.10.1 (LICENSE-APACHE), hyper-rustls 0.27.9 (LICENSE-APACHE), idna 1.1.0 (LICENSE-APACHE), idna_adapter 1.2.2 (LICENSE-APACHE), indexmap 2.14.0 (LICENSE-APACHE), ipconfig 0.3.4 (LICENSE-APACHE), ipld-core 0.4.3 (LICENSE-APACHE), lazy_static 1.5.0 (LICENSE-APACHE), linux-raw-sys 0.12.1 (LICENSE-APACHE), lock_api 0.4.14 (LICENSE-APACHE), log 0.4.29 (LICENSE-APACHE), mime 0.3.17 (LICENSE-APACHE), num-bigint 0.4.6 (LICENSE-APACHE), num-integer 0.1.46 (LICENSE-APACHE), num-traits 0.2.19 (LICENSE-APACHE), oid-registry 0.8.1 (LICENSE-APACHE), once_cell 1.21.4 (LICENSE-APACHE), parking_lot 0.12.5 (LICENSE-APACHE), parking_lot_core 0.9.12 (LICENSE-APACHE), percent-encoding 2.3.2 (LICENSE-APACHE), prost 0.14.3 (LICENSE), regex-automata 0.4.14 (LICENSE-APACHE), regex-syntax 0.8.10 (LICENSE-APACHE), rusticata-macros 4.1.0 (LICENSE-APACHE), rustix 1.1.6 (LICENSE-APACHE), rustls 0.23.46 (LICENSE-APACHE), scopeguard 1.2.0 (LICENSE-APACHE), serde_ipld_dagcbor 0.6.4 (LICENSE-APACHE), signal-hook-registry 1.4.8 (LICENSE-APACHE), smallvec 1.15.1 (LICENSE-APACHE), socket2 0.5.10 (LICENSE-APACHE), socket2 0.6.3 (LICENSE-APACHE), soketto 0.8.1 (LICENSE-APACHE), stable_deref_trait 1.2.1 (LICENSE-APACHE), system-configuration 0.7.0 (LICENSE-APACHE), system-configuration-sys 0.6.0 (LICENSE-APACHE), thread_local 1.1.9 (LICENSE-APACHE), uint 0.10.0 (LICENSE-APACHE2), unicase 2.9.0 (LICENSE-APACHE), url 2.5.8 (LICENSE-APACHE), uuid 1.23.1 (LICENSE-APACHE), x509-parser 0.17.0 (LICENSE-APACHE), yasna 0.5.2 (LICENSE-APACHE), addr2line 0.27.1 (LICENSE-APACHE), cfg-if 1.0.4 (LICENSE-APACHE), gimli 0.34.0 (LICENSE-APACHE), hashbrown 0.17.1 (LICENSE-APACHE), object 0.39.1 (LICENSE-APACHE), rustc-demangle 0.1.28 (LICENSE-APACHE)
+Used by: arrayvec 0.7.6 (LICENSE-APACHE), asn1-rs 0.7.1 (LICENSE-APACHE), atomic-waker 1.1.2 (LICENSE-APACHE), base64 0.22.1 (LICENSE-APACHE), base64 0.23.1 (LICENSE-APACHE), bitflags 2.11.1 (LICENSE-APACHE), bs58 0.5.1 (LICENSE-APACHE), cfg-if 1.0.4 (LICENSE-APACHE), core-foundation 0.9.4 (LICENSE-APACHE), core-foundation-sys 0.8.7 (LICENSE-APACHE), critical-section 1.2.0 (LICENSE-APACHE), crossbeam-channel 0.5.15 (LICENSE-APACHE), crossbeam-epoch 0.9.20 (LICENSE-APACHE), crossbeam-utils 0.8.21 (LICENSE-APACHE), der-parser 10.0.0 (LICENSE-APACHE), either 1.15.0 (LICENSE-APACHE), equivalent 1.0.2 (LICENSE-APACHE), errno 0.3.14 (LICENSE-APACHE), fnv 1.0.7 (LICENSE-APACHE), form_urlencoded 1.2.2 (LICENSE-APACHE), futures-timer 3.0.3 (LICENSE-APACHE), hashbrown 0.15.5 (LICENSE-APACHE), hashbrown 0.17.0 (LICENSE-APACHE), httparse 1.10.1 (LICENSE-APACHE), hyper-rustls 0.27.9 (LICENSE-APACHE), idna 1.1.0 (LICENSE-APACHE), idna_adapter 1.2.2 (LICENSE-APACHE), indexmap 2.14.0 (LICENSE-APACHE), ipconfig 0.3.4 (LICENSE-APACHE), ipld-core 0.4.3 (LICENSE-APACHE), lazy_static 1.5.0 (LICENSE-APACHE), linux-raw-sys 0.12.1 (LICENSE-APACHE), lock_api 0.4.14 (LICENSE-APACHE), log 0.4.29 (LICENSE-APACHE), mime 0.3.17 (LICENSE-APACHE), num-bigint 0.4.6 (LICENSE-APACHE), num-integer 0.1.46 (LICENSE-APACHE), num-traits 0.2.19 (LICENSE-APACHE), oid-registry 0.8.1 (LICENSE-APACHE), once_cell 1.21.4 (LICENSE-APACHE), parking_lot 0.12.5 (LICENSE-APACHE), parking_lot_core 0.9.12 (LICENSE-APACHE), percent-encoding 2.3.2 (LICENSE-APACHE), prost 0.14.3 (LICENSE), regex-automata 0.4.14 (LICENSE-APACHE), regex-syntax 0.8.10 (LICENSE-APACHE), rusticata-macros 4.1.0 (LICENSE-APACHE), rustix 1.1.6 (LICENSE-APACHE), rustls 0.23.46 (LICENSE-APACHE), scopeguard 1.2.0 (LICENSE-APACHE), serde_ipld_dagcbor 0.6.4 (LICENSE-APACHE), signal-hook-registry 1.4.8 (LICENSE-APACHE), smallvec 1.15.1 (LICENSE-APACHE), socket2 0.5.10 (LICENSE-APACHE), socket2 0.6.3 (LICENSE-APACHE), soketto 0.8.1 (LICENSE-APACHE), stable_deref_trait 1.2.1 (LICENSE-APACHE), system-configuration 0.7.0 (LICENSE-APACHE), system-configuration-sys 0.6.0 (LICENSE-APACHE), thread_local 1.1.9 (LICENSE-APACHE), uint 0.10.0 (LICENSE-APACHE2), unicase 2.9.0 (LICENSE-APACHE), url 2.5.8 (LICENSE-APACHE), uuid 1.23.1 (LICENSE-APACHE), x509-parser 0.17.0 (LICENSE-APACHE), yasna 0.5.2 (LICENSE-APACHE), addr2line 0.27.1 (LICENSE-APACHE), cfg-if 1.0.4 (LICENSE-APACHE), gimli 0.34.0 (LICENSE-APACHE), hashbrown 0.17.1 (LICENSE-APACHE), object 0.39.1 (LICENSE-APACHE), rustc-demangle 0.1.28 (LICENSE-APACHE)
 ------------------------------------------------------------------------
 Apache License
                         Version 2.0, January 2004
@@ -6920,7 +6922,7 @@ IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 DEALINGS IN THE SOFTWARE.
 
 ========================================================================
-Used by: hashbrown 0.15.5 (LICENSE-MIT), hashbrown 0.16.1 (LICENSE-MIT), hashbrown 0.17.0 (LICENSE-MIT), hashbrown 0.17.1 (LICENSE-MIT)
+Used by: hashbrown 0.15.5 (LICENSE-MIT), hashbrown 0.17.0 (LICENSE-MIT), hashbrown 0.17.1 (LICENSE-MIT)
 ------------------------------------------------------------------------
 Copyright (c) 2016 Amanieu d'Antras
 
@@ -6949,7 +6951,7 @@ IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 DEALINGS IN THE SOFTWARE.
 
 ========================================================================
-Used by: hashlink 0.10.0 (LICENSE-APACHE), hashlink 0.11.0 (LICENSE-APACHE), minimal-lexical 0.2.1 (LICENSE-APACHE)
+Used by: hashlink 0.10.0 (LICENSE-APACHE), hashlink 0.12.2 (LICENSE-APACHE), minimal-lexical 0.2.1 (LICENSE-APACHE)
 ------------------------------------------------------------------------
 Apache License
                         Version 2.0, January 2004
@@ -7154,7 +7156,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 
 ========================================================================
-Used by: hashlink 0.10.0 (LICENSE-MIT), hashlink 0.11.0 (LICENSE-MIT)
+Used by: hashlink 0.10.0 (LICENSE-MIT), hashlink 0.12.2 (LICENSE-MIT)
 ------------------------------------------------------------------------
 This work is derived in part from the `linked-hash-map` crate, Copyright (c)
 2015 The Rust Project Developers
@@ -7208,7 +7210,7 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 
 ========================================================================
-Used by: hickory-proto 0.25.2 (LICENSE-APACHE), hickory-proto 0.26.3 (LICENSE-APACHE), hickory-resolver 0.25.2 (LICENSE-APACHE)
+Used by: hickory-net 0.26.3 (LICENSE-APACHE), hickory-proto 0.25.2 (LICENSE-APACHE), hickory-proto 0.26.3 (LICENSE-APACHE), hickory-resolver 0.25.2 (LICENSE-APACHE), hickory-resolver 0.26.3 (LICENSE-APACHE)
 ------------------------------------------------------------------------
 Apache License
                            Version 2.0, January 2004
@@ -7413,7 +7415,7 @@ Apache License
    limitations under the License.
 
 ========================================================================
-Used by: hickory-proto 0.25.2 (LICENSE-MIT), hickory-proto 0.26.3 (LICENSE-MIT), hickory-resolver 0.25.2 (LICENSE-MIT)
+Used by: hickory-net 0.26.3 (LICENSE-MIT), hickory-proto 0.25.2 (LICENSE-MIT), hickory-proto 0.26.3 (LICENSE-MIT), hickory-resolver 0.25.2 (LICENSE-MIT), hickory-resolver 0.26.3 (LICENSE-MIT)
 ------------------------------------------------------------------------
 Copyright (c) 2015 The Hickory DNS Developers
 Copyright (c) 2017 Google LLC.
@@ -8405,7 +8407,7 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 THE SOFTWARE.
 
 ========================================================================
-Used by: ipnet 2.12.0 (LICENSE-APACHE)
+Used by: ipnet 2.12.0 (LICENSE-APACHE), prefix-trie 0.8.4 (LICENSE-APACHE)
 ------------------------------------------------------------------------
 Apache License
                            Version 2.0, January 2004
@@ -9211,7 +9213,7 @@ WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
 CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 ========================================================================
-Used by: libsqlite3-sys 0.37.0 (LICENSE), rusqlite 0.39.0 (LICENSE)
+Used by: libsqlite3-sys 0.39.1 (LICENSE), rusqlite 0.41.1 (LICENSE)
 ------------------------------------------------------------------------
 Copyright (c) 2014 The rusqlite developers
 
@@ -11069,6 +11071,17 @@ CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
 OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR
 IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 DEALINGS IN THE SOFTWARE.
+
+========================================================================
+Used by: prefix-trie 0.8.4 (LICENSE-MIT)
+------------------------------------------------------------------------
+Copyright 2022 Tibor Schneider
+
+Permission is hereby granted, free of charge, to any person obtaining a copy of this software and associated documentation files (the "Software"), to deal in the Software without restriction, including without limitation the rights to use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of the Software, and to permit persons to whom the Software is furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 ========================================================================
 Used by: prometheus-client 0.23.1 (LICENSE-APACHE)
