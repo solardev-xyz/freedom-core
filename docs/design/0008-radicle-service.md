@@ -626,13 +626,15 @@ All bounds are process-wide. The service hosts one node.
 | `status` with a `listRepos` count | `/api/v1/stats`; the manager's connection count | collected `node_info` (64 KiB). The stats endpoint requires the count: a `repos_error` answers 503 `{error}`, as today. The manager takes `repos_total` as `reposCount`, which is null when enumeration failed, as today. A `status` failure is 503 for the endpoint and `GET_CONNECTIONS_FAILED` for the manager |
 | `repoInfo` | the `rad:` visibility check; the manager | collected (64 KiB) |
 | `seeders`, `identity`, `status` | the manager; `cob-service.js` | collected (64 KiB each) |
-| `listSeededRepos` | the manager; the provider | collected (4 MiB) |
-| `listRepos` | the GitHub bridge | collected (4 MiB) |
+| `listSeededRepos` | the manager; the provider | collected (3 MiB) |
+| `listRepos` | the GitHub bridge | collected (3 MiB) |
 | `tree`, `blob` (no revision) | none of the handlers today | `callStream` |
 | `start`, `shutdown`, `connectSeeds`, `cloneRepo`, `cloneRepoWithProgress`, `cancelClone`, `unseedRepo`, `importRepo`, and the four COB writes | as today | their own methods ([Methods](#methods)); small results |
 
 - **The collection budget:** 16 MiB in main, for the bytes being collected and the parsed value.
-  - It is reserved as bytes arrive. A call that can't reserve waits up to 5 s, then fails `busy`.
+  - **The charge** is five times the result's JSON length: the decoded text and the parsed value together. The browser's B7 measured every shape the service writes, at its cap in its worst form (a listing whose text V8 holds at two bytes a character, and the densest object listings), at 4.24 times at most in Node and 4.09 in Electron, after a full collection. Five times leaves margin over that. It covers the shapes libradicle writes, not arbitrary JSON.
+  - **The lists' cap is 3 MiB,** not 4, so the worst list's 15 MiB charge fits the budget alone; that is about 40,000 repositories in the densest form.
+  - It is reserved when the head gives the result's length, before any of the body arrives. A call that can't reserve waits up to 5 s, then fails `busy`. Reserving piece by piece could deadlock two calls that each hold part of the budget.
   - The result is handed to a scope: `callScoped(op, args, async (value) => …)`. The reservation is released when the scope's callback settles, which is the result's lifetime.
   - A value under 4 KiB (`identity`, `status`) may be kept after its scope. It is no longer charged.
 - **Cancel and ownership:**
@@ -1228,7 +1230,7 @@ The source research for this design found four ways the node gives away more tha
   - a history walk past its byte budget: `too_large`, stopped while it was being built;
   - collected results over their caps, and over the 16 MiB collection budget: `too_large`, then `busy`;
   - an aborted collecting call releases its bytes;
-  - a scope paused with a 4 MiB result, then aborted: its allowance stays reserved until the callback settles, and a new call can't use it;
+  - a scope paused with a 3 MiB result, then aborted: its allowance stays reserved until the callback settles, and a new call can't use it;
   - the budget tests include the composed issue and patch endpoints, and the callers outside the handlers: the manager, the provider, the GitHub bridge and `cob-service.js`.
 - **Deadlines:** a read queued past its deadline never starts; a read waiting for a reservation past its deadline gets `deadline`; a paused body after the head is never timed out by the service.
 - **Writes:**
@@ -1379,7 +1381,7 @@ Measured against the add-on on linux-x64, macOS arm64 and win-x64:
 | output budget | 256 MiB by reservation; a blob ≤ 64 MiB (128 MiB reserved while loading); a JSON read ≤ 64 MiB with ≤ 32 MiB of JSON | the read waits within its deadline; `too_large` per read |
 | progress events | per clone, ≤ 10 unwritten of ≤ 4 KiB encoded, plus the terminal; one more in the connection, shared; failures past 8 are summarized | the summary grows its count, not its size; reasons are cut |
 | streams | 0007's: a 128 KiB window, 64 KiB frames, one 128 KiB ring per stream in main | the service waits for credit |
-| collected results in main | per call: 64 KiB, or 4 MiB for the lists; 16 MiB in all, held until the scope's callback settles, even after an abort | `too_large`; `busy` after 5 s |
+| collected results in main | per call: 64 KiB, or 3 MiB for the lists, charged at five times the JSON; 16 MiB in all, held until the scope's callback settles, even after an abort | `too_large`; `busy` after 5 s |
 | other callers in main | 64 outstanding, 64 waiting | `busy` |
 | admission in main | shared with dweb fetches: 256 active, 512 waiting | 503 |
 | health | `rad.stats` every 5 s; main's watchdog at 20 s | kill |
