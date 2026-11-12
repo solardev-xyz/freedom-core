@@ -487,6 +487,7 @@ impl Radicled {
             return Err(head);
         }
         assert_eq!(head["result"]["content_type"], "application/json", "{head}");
+        assert_eq!(head["result"]["body"], true, "{head}");
         let (bytes, end) = self.body(id);
         assert_eq!(end["stream"], "end", "{end}");
         assert_eq!(

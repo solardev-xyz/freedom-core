@@ -409,6 +409,7 @@ The rules this design relies on, as 0007 specifies them:
   - the head, then data, then one terminal;
   - `end` is written only after the stream's last data frame;
   - `abort` purges the stream's unwritten data, and nothing of the stream follows it.
+- **Every head says whether a body follows,** in `body`, as 0007's heads do: a head that says `body: false` opens no stream. Main's service client, shared with freedom-ipfsd, opens a stream only for `body: true`, so data behind a head without it would be a protocol fault.
 - **Cancel against an unwritten head:** the head is dropped and `cancelled` is the only reply.
 - **Credit:** checked accounting on both sides. Data beyond the window, or credit beyond what was sent, is a protocol error. Late credit for an ended stream is ignored, which needs no table because request IDs strictly increase.
 - **Allocation:**
@@ -432,8 +433,8 @@ The rules this design relies on, as 0007 specifies them:
 | `rad.start` | `alias` | `did`, `nid`, `alias`; the node runs as the key from `rad.identity` | 30 s; on failure, the process exits |
 | `rad.stats` | none | `node`, `node_alive`, `connected_peers`, the repair unit in progress and its elapsed time, `quarantined_count`, pool and budget use, and the network's NAT64 state ([below](#stats)) | inline: answered at once on the reader, in every phase from the handshake on, never waiting |
 | `rad.shutdown` | none | none: the process exits | main kills after 10 s |
-| `rad.read` | `op`, `args` | head `{ content_type: "application/json", bytes }`, then the JSON as a body stream | read pool; 60 s to the head |
-| `rad.blob` | `rid`, `revision`, `path`, `range?`, `head_only?` | head `{ oid, size, binary?, range }`, then the bytes | read pool; 60 s to the head |
+| `rad.read` | `op`, `args` | head `{ content_type: "application/json", bytes, body: true }`, then the JSON as a body stream | read pool; 60 s to the head |
+| `rad.blob` | `rid`, `revision`, `path`, `range?`, `head_only?` | head `{ oid, size, binary?, range, body }`, then the bytes when `body` is true | read pool; 60 s to the head |
 | `rad.connect_seeds` | `timeout_ms` | today's report: the text libradicle's `json::seed_report` writes, byte for byte | network pool; `timeout_ms` + 30 s |
 | `rad.clone` | `rid`, `timeout_ms`, `progress` (a boolean; absent or null is `false`) | `{ ok }` or `{ cancelled }`; with `progress`, `rad.progress` events | network pool; `timeout_ms` + 30 s |
 | `rad.unseed` | `rid` | `{ unseeded }` | write queue; 60 s |
@@ -605,7 +606,7 @@ All bounds are process-wide. The service hosts one node.
   - **Serialization:**
     - The shared serializers write into a size-limited writer. It reserves in 64 KiB steps from the output budget, and fails as soon as the output passes 32 MiB.
     - The limit counts output bytes after escaping. So lossy text and escape expansion (`\u0000` is 6 bytes for 1) can't pass it.
-    - The finished JSON is then streamed, under credit, with its length in the head, in chunks of at most 64 KiB, one data frame each. Each chunk's reservation is released once it is written.
+    - The finished JSON is then streamed, under credit, with its length in the head (`bytes`, beside `body: true`), in chunks of at most 64 KiB, one data frame each. Each chunk's reservation is released once it is written.
 - **In main, handlers get streams.**
   - `serveRepoApi`'s reads become `callStream`, which returns the head and a body stream. The handler builds `new Response(body, …)` from it.
   - Main holds 0007's 128 KiB ring per stream and nothing more.
@@ -693,10 +694,10 @@ All bounds are process-wide. The service hosts one node.
   1. Resolve `path` at the commit, as `read_blob_at` does (`lr:1263`), refusing anything that isn't a blob (a directory, a submodule) with today's `NotABlob` message, and a path of more than 4096 components before anything is opened. The walk is libradicle's `blob_header_bounded`: each object on the way, the commit and the trees, sized from its header first and charged what libgit2 holds of it once parsed, all of them within 32 MiB reserved for the walk, the read's token checked at each ([Pools and budgets](#pools-and-budgets)).
   2. `Odb::read_header` gives the size and type without loading the content. Refuse a blob over 64 MiB with `too_large`, `head_only` too.
   3. Normalize and validate `range` against that size, before anything is loaded ([Ranges](#ranges)).
-  4. With `head_only`, the head is written now, without `binary`, and nothing is loaded. This serves `HEAD`.
+  4. With `head_only`, the head is written now, without `binary` and with `body: false`, and nothing is loaded. This serves `HEAD`.
   5. Otherwise, reserve the output budget, load the blob (libradicle's `read_blob_at_bounded`, its walk within the same bounds as step 1's), and compute `binary` with libgit2's rule (`git_blob_is_binary`, the first 8000 bytes). Copy the range out of it in 64 KiB chunks, then free it.
-  6. Write the head `{ oid, size, binary, range }`, where `range` is the range served, `{ start, end }` inclusive, or null for the whole blob; then stream the range in 64 KiB frames under credit. A zero-length body opens no stream: a head opens one exactly when its body has bytes. The head has no content type: main's comes from the extension ([The raw endpoint](#the-raw-endpoint)).
-  - `vectors/radicle-blob.json` pins the heads, bytes and errors over a fixture: the ranges are the design's, since main has no raw route yet, checked against the browser's pending `blob-api` contract tests; each file's `/blob/` answer and libradicle's error texts are main's at the reference.
+  6. Write the head `{ oid, size, binary, range, body }`, where `range` is the range served, `{ start, end }` inclusive, or null for the whole blob; then stream the range in 64 KiB frames under credit. A zero-length body opens no stream: a head opens one exactly when its body has bytes, and its `body` says which. The head has no content type: main's comes from the extension ([The raw endpoint](#the-raw-endpoint)).
+  - `vectors/radicle-blob.json` pins the heads, `body` included, bytes and errors over a fixture: the ranges are the design's, since main has no raw route yet, checked against the browser's pending `blob-api` contract tests; each file's `/blob/` answer and libradicle's error texts are main's at the reference.
 - **The JSON endpoint stays:**
   - `/blob/<rev>/<path>` on `rad:` and `radapi:` keeps returning `{ binary, name, content? }`, built by `rad.read`'s `blob_at` with v0.8.0's serializer, byte for byte;
   - that includes `from_utf8_lossy` for text and no content for binary.
@@ -1417,6 +1418,7 @@ Measured against the add-on on linux-x64, macOS arm64 and win-x64:
 | `path-depth` | any path is walked, a tree loaded for each component | a path of more than 4096 components (libradicle's `MAX_TREE_DEPTH`, git's default `core.maxTreeDepth`) is `invalid_argument` before the repository is opened ([Pools and budgets](#pools-and-budgets)) | a path no repository nests that deep in practice gets 400 |
 | `identity-cap` | heartwood parses a repository's identity document whatever its size | a read that parses one whose blob is over 64 KiB refuses it before the parse, from the blob's header: `too_large`, with a fixed text; a listing is refused while such a repository is seeded ([Pools and budgets](#pools-and-budgets)) | real documents, a few KB, are read as today; a repository whose document is over 64 KiB gets 413, and so does the listing |
 | `pathless-errors` | a read's error is the add-on's text, which for a repository the node doesn't have names its storage path under the profile, and can name other files for storage, git and node errors | libradicle's text only where it can't name a filesystem path; a missing repository is `repository not found`; any other `not found` or `the read failed`, by today's message test ([Errors](#errors)) | pages never see the profile's paths; the same 404 and 500 |
+| `libradicle-text` | an unknown issue or patch (`issue`, `patch`) gets the v0.8.0 add-on's text, which names the revspec it couldn't resolve | libradicle's text at the pinned commit, `node thread: issue <id> not found` (or `patch <id>`), which `vectors/radicle-reads.json` records | the same 404 (`not_found`, by today's message test); only the message text differs |
 
 ## Limits
 

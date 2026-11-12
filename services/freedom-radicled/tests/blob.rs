@@ -133,8 +133,9 @@ fn http_of(head: &Value) -> Value {
 }
 
 /// `rad.blob`'s answer to request `id`: its head and its body, each data
-/// frame at most 64 KiB, under main's credit; or its error reply. A head
-/// whose body is empty opens no stream: the caller checks that.
+/// frame at most 64 KiB, under main's credit; or its error reply. The head
+/// says whether a body follows, exactly when it has bytes. A head whose
+/// body is empty opens no stream: the caller checks that.
 fn answer(radicled: &mut Radicled, id: u64) -> Result<(Value, Vec<u8>), Value> {
     let reply = radicled.reply(id);
     if reply.get("error").is_some() {
@@ -142,6 +143,7 @@ fn answer(radicled: &mut Radicled, id: u64) -> Result<(Value, Vec<u8>), Value> {
     }
     let head = reply["result"].clone();
     let expected = body_len(&head);
+    assert_eq!(head["body"], expected > 0, "{head}");
     if expected == 0 {
         return Ok((head, Vec::new()));
     }
@@ -591,6 +593,69 @@ fn bounds_repository(home: &Path) -> (RepoId, String) {
 
 fn at(rid: RepoId, revision: &str, path: &str, head_only: bool) -> Value {
     json!({ "rid": rid.to_string(), "revision": revision, "path": path, "head_only": head_only })
+}
+
+/// 0008, "Frames and streams", as 0007's heads, which main's service client
+/// reads: every head says in `body` whether a body follows, and opens a
+/// stream exactly when it says `true`. A JSON result (`rad.read`) and a
+/// blob with content say `true`, and their bodies follow; `HEAD` and an
+/// empty blob say `false`, and nothing of them follows, not even at the
+/// stop.
+#[test]
+fn every_head_says_whether_a_body_follows() {
+    let dirs = Dirs::new();
+    configure(&dirs.home, json!({}));
+    let (rid, revision) = fixture::repository_of(
+        &dirs.home,
+        &SEED,
+        "heads",
+        &[
+            ("text.txt", 0o100644, b"text\n".as_slice()),
+            ("empty.txt", 0o100644, b"".as_slice()),
+        ],
+    );
+    let mut radicled = served(&dirs, &[]);
+
+    let id = radicled.request(
+        "rad.read",
+        json!({ "op": "blob_at", "args": { "rid": rid.to_string(), "revision": revision, "path": "text.txt" } }),
+    );
+    let head = radicled.reply(id);
+    assert_eq!(head["result"]["body"], true, "{head}");
+    let (json, end) = radicled.body(id);
+    assert_eq!(end["stream"], "end", "{end}");
+    assert_eq!(head["result"]["bytes"].as_u64(), Some(json.len() as u64));
+    let text: Value = serde_json::from_slice(&json).unwrap();
+    assert_eq!(text["content"], "text\n", "{text}");
+
+    let id = radicled.request("rad.blob", at(rid, &revision, "text.txt", false));
+    let head = radicled.reply(id);
+    assert_eq!(head["result"]["body"], true, "{head}");
+    let (bytes, end) = radicled.body(id);
+    assert_eq!(end["stream"], "end", "{end}");
+    assert_eq!(bytes, b"text\n");
+
+    let mut bodiless = Vec::new();
+    for (path, head_only) in [
+        ("text.txt", true),
+        ("empty.txt", false),
+        ("empty.txt", true),
+    ] {
+        let id = radicled.request("rad.blob", at(rid, &revision, path, head_only));
+        let head = radicled.reply(id);
+        assert_eq!(head["result"]["body"], false, "{path} {head_only}: {head}");
+        let size = if path == "text.txt" { 5 } else { 0 };
+        assert_eq!(head["result"]["size"], size, "{head}");
+        bodiless.push(id);
+    }
+    assert!(!radicled.any_within(u64::MAX, Duration::from_millis(500)));
+    for &id in &bodiless {
+        assert!(!radicled.any_within(id, Duration::ZERO), "{id}");
+    }
+    shut_down(&mut radicled, &dirs.home);
+    for id in bodiless {
+        assert!(!radicled.any_within(id, Duration::ZERO), "{id}");
+    }
 }
 
 /// 0008, "Pools and budgets": a blob reserves twice its size and libgit2's

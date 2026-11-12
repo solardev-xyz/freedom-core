@@ -145,9 +145,12 @@ function expectFor(file, params) {
     if (range === null) return { error: { code: 'range_not_satisfiable', data: { size } } };
   }
   const oid = oidOf(content);
-  if (params.head_only) return { head: { oid, size, range }, body: null };
+  // The head's `body` says whether a stream follows (0007's heads): exactly
+  // when the body has bytes.
+  if (params.head_only) return { head: { oid, size, range, body: false }, body: null };
   const [start, end] = range === null ? [0, size - 1] : [range.start, range.end];
-  return { head: { oid, size, binary: isBinary(content), range }, body: body(file, start, end) };
+  const bytes = body(file, start, end);
+  return { head: { oid, size, binary: isBinary(content), range, body: bytes !== null }, body: bytes };
 }
 
 /** Main's HTTP answer built on rad.blob's (0008, "Ranges" and "Errors"). */
@@ -341,7 +344,7 @@ async function buildRadicleBlob(checkout, meta) {
       meta,
       formats: {
         files: 'The fixture repository, one commit: each file\'s path, git mode, content (`hex`, or `fill`, one byte repeated `size` times), blob `oid`, `size` and `binary` (libgit2\'s `git_blob_is_binary`, as the add-on gives it), and `main`: what the reference answers for it today at `/blob/<rev>/<path>` (serveRepoApi with allowPrivate, the add-on scripted with libradicle\'s `blob_at` JSON for that content). A file given by `fill` has no `main`: its JSON is as long as it is (and past 64 MiB rad.blob refuses it, deviation `size-caps`). The `160000` entry is a submodule: a gitlink to `commit`.',
-        cases: 'rad.blob for a file (`source: design`, 0008 "The blob API" and "Ranges"): `header` is the Range header main gets and `params` what main sends for it (a single `bytes=` range parsed; several, or one that doesn\'t parse, none); `method` HEAD sends `head_only`. `expect` is the head (`oid`, `size`, `binary` but not for HEAD, `range` served or null) and the body (`hex`, or `fill` repeated `len` times; null for none: no stream), or the error (`code`, `data`). `http` is main\'s answer on it: status, Content-Length and Content-Range. The browser\'s pending blob-api and size-caps contract tests are checked against these.',
+        cases: 'rad.blob for a file (`source: design`, 0008 "The blob API" and "Ranges"): `header` is the Range header main gets and `params` what main sends for it (a single `bytes=` range parsed; several, or one that doesn\'t parse, none); `method` HEAD sends `head_only`. `expect` is the head (`oid`, `size`, `binary` but not for HEAD, `range` served or null, and `body`: whether a stream follows) and the body (`hex`, or `fill` repeated `len` times; null for none: no stream, and the head\'s `body` is false), or the error (`code`, `data`). `http` is main\'s answer on it: status, Content-Length and Content-Range. The browser\'s pending blob-api and size-caps contract tests are checked against these.',
         errors: 'libradicle\'s errors for a path (the add-on\'s v0.8.0 texts): the scripted `addon` answer, `main` (the reference\'s `/blob/` answer: 404 by its message test, else 500, with `{"error": message}`), and rad.blob\'s `expect`: `not_found` or `failed` with the same message, before any range.',
         invalid: 'rad.blob params that don\'t parse (`source: design`): `invalid_argument`. `$rid` and `$revision` stand for the fixture\'s; `$REVISION` for its revision in upper case.',
       },
