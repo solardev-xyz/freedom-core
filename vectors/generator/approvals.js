@@ -34,12 +34,10 @@
 //   (`expect` on a case, `core` on a pair or a run's step), from 0012's
 //   Deviations table: `token-strict` (the reference binds what the core's
 //   parse refuses), `token-clock`, `token-page` (the core binds a page's
-//   frame and navigation, which the reference doesn't), and
-//   `token-typed-parse` (typed data bound parsed, with its view). One more
-//   is inferred from 0012's Tokens table, which binds a message's bytes:
-//   `token-message-bytes`, the texts of one message (`hello`, its hex in
-//   either case) share a token, as they share the signature; the reference
-//   binds each text.
+//   frame and navigation, which the reference doesn't), `token-typed-parse`
+//   (typed data bound parsed, with its view) and `token-message-bytes` (a
+//   message bound as its bytes: `hello` and its hex in either case share a
+//   token, as they share the signature; the reference binds each text).
 
 const assert = require('node:assert/strict');
 const path = require('node:path');

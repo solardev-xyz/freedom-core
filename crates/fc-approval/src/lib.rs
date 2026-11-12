@@ -16,6 +16,8 @@
 //!   and navigation) and 0011's handle, a site's `safe-send` included.
 //! - `token-typed-parse`: typed data is bound parsed, with its view, so the
 //!   texts of one request share a token.
+//! - `token-message-bytes`: a message is bound as the bytes `sign.message`
+//!   signs, so its text and its hex in either case share a token.
 //!
 //! The crate does no I/O: the vault's clock comes in as `now_ms`, and token
 //! bytes from the caller's RNG.
