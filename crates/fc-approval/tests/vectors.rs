@@ -23,8 +23,9 @@ const LIMITS: Limits = Limits {
     max_view_len: 1 << 20,
 };
 
-/// Bytes 0, 1, 2, … in turn: every token differs, and each run is the same.
-struct CountingRng(u8);
+/// Each fill is the next of a counter's values, spread over the bytes:
+/// every token differs, and each run is the same.
+struct CountingRng(u64);
 
 impl rand_core::TryRng for CountingRng {
     type Error = Infallible;
@@ -42,10 +43,11 @@ impl rand_core::TryRng for CountingRng {
     }
 
     fn try_fill_bytes(&mut self, dst: &mut [u8]) -> Result<(), Infallible> {
-        for byte in dst {
-            *byte = self.0;
-            self.0 = self.0.wrapping_add(1);
+        let counter = self.0.to_le_bytes();
+        for (index, byte) in dst.iter_mut().enumerate() {
+            *byte = counter[index % 8] ^ (index as u8);
         }
+        self.0 += 1;
         Ok(())
     }
 }

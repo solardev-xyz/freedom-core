@@ -160,9 +160,11 @@ function corePage(c) {
 
 /** A message's bytes as main normalizes them (signing-utils.js,
  * `normalizeMessage` and `messageToBytes`): `0x` hex as it is, any other
- * text as its UTF-8. */
+ * non-empty text as its UTF-8. */
 function coreMessage(message) {
-  if (typeof message !== 'string') return message;
+  // An empty text is no message (the reference's "Message is required"),
+  // not an empty one: it stays empty, and the core's parse refuses it.
+  if (typeof message !== 'string' || message === '') return message;
   return message.startsWith('0x') ? message : '0x' + Buffer.from(message, 'utf8').toString('hex');
 }
 

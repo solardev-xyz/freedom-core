@@ -5815,7 +5815,7 @@
       "core": {
         "account": 0,
         "payload": {
-          "message": "0x"
+          "message": ""
         },
         "page": {
           "origin": "https://app.example",
