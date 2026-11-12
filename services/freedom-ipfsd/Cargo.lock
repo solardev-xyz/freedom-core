@@ -1188,7 +1188,7 @@ dependencies = [
 
 [[package]]
 name = "freedom-ipfsd"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "fc-nat64",
  "fc-protocol",
