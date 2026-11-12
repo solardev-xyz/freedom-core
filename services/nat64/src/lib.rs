@@ -1145,10 +1145,10 @@ mod tests {
             assert!(!sent.is_empty());
             for query in sent {
                 let message = hickory_proto::op::Message::from_vec(&query).unwrap();
-                assert_eq!(message.queries().len(), 1);
-                assert_eq!(message.queries()[0].name().to_ascii(), query::NAME);
+                assert_eq!(message.queries.len(), 1);
+                assert_eq!(message.queries[0].name().to_ascii(), query::NAME);
                 assert_eq!(
-                    message.queries()[0].query_type(),
+                    message.queries[0].query_type(),
                     hickory_proto::rr::RecordType::AAAA
                 );
             }

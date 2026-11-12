@@ -83,8 +83,9 @@ serde_json = "1"
 tokio = { version = "1", default-features = false, features = ["rt-multi-thread", "time"] }
 
 [dev-dependencies]
-# tests/nat64.rs's fixture resolver: the DNS messages it answers with.
-hickory-proto = { version = "0.25", default-features = false, features = ["std"] }
+# tests/nat64.rs's and tests/dns.rs's fixture resolvers: the DNS messages
+# they answer with, at fc-nat64's version.
+hickory-proto = { version = "0.26.2", default-features = false, features = ["std"] }
 # Upstream's SOCKS5 test proxy and test servers (its `test-util` feature),
 # for the `socks5` tests through the binary; the same pin as the gateway's.
 freedom-ipfs-net = { git = "https://github.com/solardev-xyz/freedom-ipfs", rev = "8a2311c2316b830b8bb3fe02e201765b2f5c35e0", features = ["test-util"] }
