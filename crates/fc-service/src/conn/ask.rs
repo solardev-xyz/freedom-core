@@ -36,6 +36,14 @@
 //!   (`unsolicited_response`), data before the reply or after the end
 //!   (`stream_not_open`), for an ID above the service's highest
 //!   (`stream_unknown`), or beyond the window (`window_overrun`).
+//! - **The end:** once the connection ends, nothing more of the service's
+//!   requests goes to main, and nothing more of main's answers is read.
+//!   Their unwritten requests, cancels and credit go at once, under the
+//!   lock that ends the connection, so the writer writes none of them; the
+//!   service's answers to main stay, for its teardown. A waiting [`Asked`]
+//!   resolves [`AskFailed::Closed`], and a [`Body`] gives what came and
+//!   then [`BodyError::Closed`]. Either, polled to that or dropped, leaves
+//!   nothing behind.
 
 use std::collections::VecDeque;
 use std::future::Future;
@@ -277,6 +285,24 @@ fn prune(state: &mut State, id: u64) {
     {
         state.deadlines.remove(&(at, id));
     }
+}
+
+/// The connection ended, and this end won: nothing more comes from main for
+/// the service's requests, and nothing more of them goes. Their records in
+/// the stream state go, with the credit owed for them, and so do the
+/// requests the service let go of and their deadlines. What the service
+/// still holds stays until its [`Asked`] or [`Body`] says `Closed` or is
+/// dropped, and neither waits on main any more. The unwritten requests and
+/// cancels are returned, to be freed outside the lock. The service's
+/// answers to main stay queued, for its teardown's writes.
+pub(super) fn close(state: &mut State) -> VecDeque<Outgoing> {
+    state.streams.close_inbound();
+    state.deadlines.clear();
+    state.asks.retain(|_, ask| {
+        ask.deadline = None;
+        ask.held
+    });
+    std::mem::take(&mut state.outbound)
 }
 
 /// Request `id`'s deadline passed: unless main's reply came, it is
@@ -641,5 +667,158 @@ impl Reader<'_> {
         self.link.writer.notify_one();
         wake(waker.into_iter().collect());
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    use serde_json::json;
+
+    use super::super::tests::written;
+    use super::super::{Hello, Link, Options, Request, Service};
+    use super::*;
+
+    struct Idle;
+
+    impl Service for Idle {
+        fn hello(
+            &self,
+            _hello: &Hello,
+        ) -> Result<serde_json::Map<String, serde_json::Value>, ErrorBody> {
+            Ok(serde_json::Map::new())
+        }
+        fn request(&self, _conn: &Connection, _request: Request<'_>) {}
+        fn cancel(&self, _conn: &Connection, _id: u64) {}
+        fn end(&self, _conn: &Connection, _end: End) {}
+    }
+
+    fn poll<F: Future + Unpin>(future: &mut F) -> Poll<F::Output> {
+        Pin::new(future).poll(&mut Context::from_waker(Waker::noop()))
+    }
+
+    fn json_frame(message: &serde_json::Value) -> Frame {
+        Frame {
+            kind: frame::KIND_JSON,
+            payload: message.to_string().into_bytes().into(),
+        }
+    }
+
+    /// Review of #334, round 1: the end closes every request of the
+    /// service's, waiting for main's reply or reading main's body. Their
+    /// unwritten requests, cancels and credit go at once, so the writer
+    /// writes none of them, and the service's answers to main are still
+    /// written in its teardown. What the service still holds, polled to
+    /// `Closed` or dropped, leaves nothing behind.
+    #[test]
+    fn the_end_leaves_nothing_of_the_services_requests() {
+        let mut options = Options::new("t", 1, Instant::now());
+        options.exit_watchdog = None;
+        options.two_way = true;
+        let link = Arc::new(Link::new(&options));
+        let conn = Connection { link: link.clone() };
+        let service = Idle;
+        let mut reader = Reader::new(&link, &conn, &service, &options);
+        // The handshake's reply is queued, unwritten, and main's request 2
+        // waits for its answer.
+        {
+            let mut state = link.lock();
+            state.streams.request(1).unwrap();
+            state.hello_id = Some(1);
+            state.hello_done = true;
+            state.streams.request(2).unwrap();
+        }
+        conn.reply(1, &"hello").unwrap();
+        // 1 and 2 wait for main's reply, 1 polled after the end and 2
+        // dropped; 3 is dropped now, its cancel queued; 4's and 5's bodies
+        // are open, 4 read after the end, with credit owed, and 5 dropped.
+        let later = Instant::now() + Duration::from_secs(60);
+        let mut waiting = conn.ask("t.one", &1, Some(later)).unwrap();
+        let dropped = conn.ask("t.two", &2, None).unwrap();
+        drop(conn.ask("t.three", &3, None).unwrap());
+        let mut fourth = conn.ask("t.four", &4, None).unwrap();
+        let mut fifth = conn.ask("t.five", &5, None).unwrap();
+        for id in [4u8, 5] {
+            let reply = json!({ "type": "response", "id": id, "result": { "body": true } });
+            reader.response(&json_frame(&reply)).unwrap();
+            let bytes = [id; 3];
+            reader
+                .inbound(StreamFrame::Data {
+                    id: u64::from(id),
+                    bytes: &bytes,
+                })
+                .unwrap();
+        }
+        let Poll::Ready(Ok(Answer {
+            body: Some(mut read),
+            ..
+        })) = poll(&mut fourth)
+        else {
+            panic!("4's body");
+        };
+        let Poll::Ready(Ok(Answer {
+            body: Some(held), ..
+        })) = poll(&mut fifth)
+        else {
+            panic!("5's body");
+        };
+        assert_eq!(poll(&mut read.chunk()), Poll::Ready(Ok(Some(vec![4; 3]))));
+        assert!(poll(&mut waiting).is_pending());
+        {
+            let state = link.lock();
+            assert_eq!(state.asks.len(), 5);
+            assert_eq!(state.outbound.len(), 6);
+            assert_eq!(state.deadlines.len(), 1);
+            assert_eq!(
+                (state.streams.inbound().outstanding(), state.streams.owed()),
+                (5, 1)
+            );
+        }
+
+        link.end(End::Eof);
+        {
+            let state = link.lock();
+            // 3, let go of, went with the end; the rest wait for the
+            // service.
+            assert_eq!(state.asks.len(), 4);
+            assert!(state.outbound.is_empty());
+            assert!(state.deadlines.is_empty());
+            assert_eq!(
+                (state.streams.inbound().outstanding(), state.streams.owed()),
+                (0, 0)
+            );
+        }
+        // Main's late frames are read no more.
+        let late = json!({ "type": "response", "id": 1, "result": "late" });
+        reader.response(&json_frame(&late)).unwrap();
+        reader
+            .inbound(StreamFrame::Data { id: 4, bytes: &[9] })
+            .unwrap();
+        assert!(matches!(
+            poll(&mut waiting),
+            Poll::Ready(Err(AskFailed::Closed))
+        ));
+        drop(dropped);
+        assert_eq!(poll(&mut read.chunk()), Poll::Ready(Err(BodyError::Closed)));
+        drop(held);
+        assert_eq!(conn.asks(), 0);
+        assert_eq!(link.lock().streams.inbound().outstanding(), 0);
+        drop((waiting, read, fourth, fifth));
+        assert_eq!(conn.asks(), 0);
+
+        // The teardown answers main's request; nothing of the service's
+        // requests is written, and no credit (`written` reads JSON only).
+        conn.reply(2, &"bye").unwrap();
+        assert_eq!(
+            written(&link),
+            [
+                json!({ "type": "response", "id": 1, "result": "hello" }),
+                json!({ "type": "response", "id": 2, "result": "bye" }),
+            ]
+        );
     }
 }

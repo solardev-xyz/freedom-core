@@ -214,6 +214,17 @@ impl Duplex {
         self.inbound.cancel(id)
     }
 
+    /// The connection ended: nothing more comes for the core's own
+    /// requests. Their records go ([`Inbound::close`]), and the credit owed
+    /// for them, so the writer writes nothing of them; the sender's streams
+    /// stay as they are, for the answers still owed to main (design 0014,
+    /// COL-3: a service's teardown).
+    pub fn close_inbound(&mut self) {
+        self.inbound.close();
+        self.owed.clear();
+        self.order.clear();
+    }
+
     /// Appends the next frame to write to `out` and says what it was, or
     /// returns `None` when there is nothing to write: credit first, then the
     /// sender's control entries, then its streams.
@@ -329,6 +340,43 @@ mod tests {
         assert_eq!(d.inbound.outstanding(), 0);
         let mut out = Vec::new();
         assert_eq!(d.next_frame(&mut out), None);
+    }
+
+    /// The connection's end (0014, COL-3): every request of the core's
+    /// goes, pending, open with credit owed, or retiring, and nothing of
+    /// them is written; main's request keeps its queued reply.
+    #[test]
+    fn closing_the_inbound_half_leaves_the_senders_answers() {
+        let mut d = Duplex::service(1 << 20);
+        d.request(1).unwrap();
+        d.sender_mut().reply(1, b"{}".to_vec()).unwrap();
+        d.ask(1).unwrap();
+        for id in 2..=3u64 {
+            d.ask(id).unwrap();
+            d.answered(id, true).unwrap();
+            d.receive(StreamFrame::Data { id, bytes: &[7, 7] }).unwrap();
+            d.release(id, 1).unwrap();
+        }
+        assert_eq!(d.withdraw(3), Retire::SendCancel);
+        assert_eq!(d.ask(4), Ok(()));
+        assert_eq!((d.inbound.outstanding(), d.owed()), (4, 1));
+        d.close_inbound();
+        check(&d);
+        assert_eq!((d.inbound.outstanding(), d.owed()), (0, 0));
+        for id in 1..=4 {
+            assert_eq!(d.inbound().info(id), None, "{id}");
+        }
+        // Nothing more is owed for what the consumer lets go of.
+        assert_eq!(d.release(2, 1), Ok(()));
+        assert_eq!(d.owed(), 0);
+        let mut out = Vec::new();
+        assert_eq!(
+            d.next_frame(&mut out),
+            Some(Wrote::Sent(Written::Reply { id: 1 }))
+        );
+        out.clear();
+        assert_eq!(d.next_frame(&mut out), None);
+        assert_eq!(d.failed(), None);
     }
 
     /// Many streams owed at once, some gone before the writer runs: what it

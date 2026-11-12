@@ -170,12 +170,18 @@ impl Service for Toy {
             // How many of its requests the connection holds.
             "t.asks" => conn.reply(id, &json!({ "asks": conn.asks() })).unwrap(),
             // An event waited for until written, within `wait_ms`: this
-            // request's reply says how that went.
+            // request's reply says how that went. A marker that may still
+            // arrive is cleared first, ahead of the reply, as 0014's step
+            // marker is: `t.stepped`.
             "t.mark" => {
                 let wait = Duration::from_millis(params["wait_ms"].as_u64().unwrap());
                 let conn = conn.clone();
                 std::thread::spawn(move || {
                     let marked = conn.event_written("t.marked", &json!({ "n": id }), wait);
+                    if marked == Err(fc_service::conn::WrittenError::Unfinished) {
+                        conn.event_for(id, "t.stepped", &json!({ "n": id }))
+                            .unwrap();
+                    }
                     conn.reply(id, &json!({ "marked": format!("{marked:?}") }))
                         .unwrap();
                 });
@@ -880,7 +886,13 @@ fn an_event_being_written_past_its_wait_may_still_arrive() {
     std::thread::sleep(Duration::from_millis(1000));
     gate.release();
     // Its write had begun: it arrives, whole, and its sender knew it might.
+    // Its clearing event, queued after it, comes after it and before the
+    // reply (0014, "The step marker": main never sees it left open).
     assert_eq!(main.message()["event"], "t.marked");
+    assert_eq!(
+        main.message(),
+        json!({ "type": "event", "event": "t.stepped", "data": { "n": 2 } })
+    );
     assert_eq!(main.message()["result"]["marked"], "Err(Unfinished)");
     main.close();
     assert_eq!(main.exit(), Exit::Ok);
@@ -925,4 +937,54 @@ fn nothing_is_asked_after_the_end() {
         conn.event_written("t.x", &json!({}), Duration::from_secs(1)),
         Err(fc_service::conn::WrittenError::Closed)
     );
+}
+
+/// Review of #334, round 1: once the connection ends, the service's
+/// requests leave nothing behind, whether the service polled what it held
+/// to `Closed` or dropped it in its teardown: requests main never answered,
+/// and bodies main never ended.
+#[test]
+fn the_end_leaves_no_request_behind() {
+    let mut main = start(options());
+    // Awaited: 1 never answered, 2's body never ended.
+    main.request(2, "t.ask", json!({ "params": {} }));
+    assert_eq!(main.message()["id"], 1);
+    main.request(3, "t.ask", json!({ "params": {} }));
+    assert_eq!(main.message()["id"], 2);
+    main.respond(2, json!({ "body": true }));
+    main.data(2, 0, 10);
+    // Held unpolled: 3, never answered; held unread: 4's body. Both are
+    // dropped in the teardown.
+    main.request(4, "t.ask", json!({ "params": {}, "mode": "unpolled" }));
+    let mut seen = vec![main.message(), main.message()];
+    seen.sort_by_key(|m| m["type"] == "response");
+    assert_eq!(seen[0]["id"], 3, "{seen:?}");
+    assert_eq!(seen[1]["result"]["asked"], 3, "{seen:?}");
+    main.request(5, "t.ask", json!({ "params": {}, "mode": "hold" }));
+    assert_eq!(main.message()["id"], 4);
+    main.respond(4, json!({ "body": true }));
+    main.data(4, 0, 10);
+    let held = main.message();
+    assert_eq!(held["result"]["held"], true, "{held}");
+    assert_eq!(main.asks(6), 4);
+    main.close();
+    assert_eq!(main.exit(), Exit::Ok);
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while main.toy.outcomes.lock().unwrap().len() < 3 {
+        assert!(Instant::now() < deadline, "a waiter never woke");
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    let outcomes = main.toy.outcomes.lock().unwrap().clone();
+    assert!(
+        outcomes.contains(&json!({ "asked": 1, "failed": "closed" })),
+        "{outcomes:?}"
+    );
+    assert!(
+        outcomes
+            .iter()
+            .any(|o| o["asked"] == 2 && o["body"]["ended"] == "closed"),
+        "{outcomes:?}"
+    );
+    let conn = main.toy.conn.lock().unwrap().clone().unwrap();
+    assert_eq!(conn.asks(), 0);
 }

@@ -395,6 +395,7 @@ struct State {
     written_ticket: u64,
     /// The service's requests to main and its cancels of them, in order:
     /// written behind the events, and only once the handshake's reply is.
+    /// Dropped at the end ([`ask::close`]).
     outbound: VecDeque<Outgoing>,
     /// The last ID the service's requests took.
     last_ask: u64,
@@ -512,17 +513,20 @@ impl Link {
         self.pump.notify_all();
     }
 
-    /// Ends the connection, once: the first end wins.
+    /// Ends the connection, once: the first end wins. Nothing more of the
+    /// service's own requests goes, or comes, from then on ([`ask::close`]).
     fn end(&self, end: End) {
-        let wakers = {
+        let (wakers, outbound) = {
             let mut state = self.lock();
             if state.end.is_some() {
                 return;
             }
             state.end = Some(end);
             self.result.store(end.exit().code(), Ordering::SeqCst);
-            state.all_waiters()
+            let outbound = ask::close(&mut state);
+            (state.all_waiters(), outbound)
         };
+        drop(outbound);
         self.notify_all();
         wake(wakers);
     }
@@ -531,19 +535,21 @@ impl Link {
     /// connection has ended, sets the process's result. A teardown's
     /// failure replaces the end's code; 70, once set, stays.
     fn fail(&self, exit: Exit) {
-        let wakers = {
+        let (wakers, outbound) = {
             let mut state = self.lock();
             if state.end.is_none() {
                 state.end = Some(End::Fatal(exit));
                 self.result.store(exit.code(), Ordering::SeqCst);
-                state.all_waiters()
+                let outbound = ask::close(&mut state);
+                (state.all_waiters(), outbound)
             } else {
                 if exit != Exit::Ok && self.result.load(Ordering::SeqCst) != Exit::Internal.code() {
                     self.result.store(exit.code(), Ordering::SeqCst);
                 }
-                Vec::new()
+                (Vec::new(), VecDeque::new())
             }
         };
+        drop(outbound);
         self.notify_all();
         wake(wakers);
     }
@@ -2138,7 +2144,7 @@ mod tests {
 
     /// The JSON messages `link`'s writer writes once the connection has
     /// closed, in order.
-    fn written(link: &Link) -> Vec<serde_json::Value> {
+    pub(super) fn written(link: &Link) -> Vec<serde_json::Value> {
         link.close();
         let mut out = Vec::new();
         write_loop(link, &mut out);

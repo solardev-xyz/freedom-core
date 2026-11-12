@@ -269,6 +269,13 @@ impl Inbound {
         })
     }
 
+    /// The connection ended: nothing more comes for the core's requests, so
+    /// every record goes, as on a failure, without the failure. The caller
+    /// sends no request after it.
+    pub fn close(&mut self) {
+        self.entries.clear();
+    }
+
     /// Requests with a record: pending, open or retiring.
     pub fn outstanding(&self) -> usize {
         self.entries.len()
