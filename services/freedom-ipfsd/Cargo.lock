@@ -894,6 +894,18 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7360491ce676a36bf9bb3c56c1aa791658183a54d2744120f27285738d90465a"
 
 [[package]]
+name = "fastbloom"
+version = "0.17.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ef975e30683b2d965054bb0a836f8973857c4ebf6acf274fe46617cd285060d8"
+dependencies = [
+ "foldhash 0.2.0",
+ "libm",
+ "portable-atomic",
+ "siphasher",
+]
+
+[[package]]
 name = "fastrand"
 version = "2.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -990,7 +1002,7 @@ dependencies = [
 [[package]]
 name = "freedom-ipfs-addr"
 version = "0.4.6"
-source = "git+https://github.com/solardev-xyz/freedom-ipfs?rev=8a2311c2316b830b8bb3fe02e201765b2f5c35e0#8a2311c2316b830b8bb3fe02e201765b2f5c35e0"
+source = "git+https://github.com/solardev-xyz/freedom-ipfs?rev=40df11b62ca4f619392a30fc276a777de6c5a80a#40df11b62ca4f619392a30fc276a777de6c5a80a"
 dependencies = [
  "data-encoding",
  "thiserror 2.0.18",
@@ -1000,7 +1012,7 @@ dependencies = [
 [[package]]
 name = "freedom-ipfs-core"
 version = "0.4.6"
-source = "git+https://github.com/solardev-xyz/freedom-ipfs?rev=8a2311c2316b830b8bb3fe02e201765b2f5c35e0#8a2311c2316b830b8bb3fe02e201765b2f5c35e0"
+source = "git+https://github.com/solardev-xyz/freedom-ipfs?rev=40df11b62ca4f619392a30fc276a777de6c5a80a#40df11b62ca4f619392a30fc276a777de6c5a80a"
 dependencies = [
  "bytes",
  "cid",
@@ -1014,7 +1026,7 @@ dependencies = [
 [[package]]
 name = "freedom-ipfs-gateway"
 version = "0.4.6"
-source = "git+https://github.com/solardev-xyz/freedom-ipfs?rev=8a2311c2316b830b8bb3fe02e201765b2f5c35e0#8a2311c2316b830b8bb3fe02e201765b2f5c35e0"
+source = "git+https://github.com/solardev-xyz/freedom-ipfs?rev=40df11b62ca4f619392a30fc276a777de6c5a80a#40df11b62ca4f619392a30fc276a777de6c5a80a"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1043,7 +1055,7 @@ dependencies = [
 [[package]]
 name = "freedom-ipfs-namesys"
 version = "0.4.6"
-source = "git+https://github.com/solardev-xyz/freedom-ipfs?rev=8a2311c2316b830b8bb3fe02e201765b2f5c35e0#8a2311c2316b830b8bb3fe02e201765b2f5c35e0"
+source = "git+https://github.com/solardev-xyz/freedom-ipfs?rev=40df11b62ca4f619392a30fc276a777de6c5a80a#40df11b62ca4f619392a30fc276a777de6c5a80a"
 dependencies = [
  "async-trait",
  "cid",
@@ -1064,7 +1076,7 @@ dependencies = [
 [[package]]
 name = "freedom-ipfs-net"
 version = "0.4.6"
-source = "git+https://github.com/solardev-xyz/freedom-ipfs?rev=8a2311c2316b830b8bb3fe02e201765b2f5c35e0#8a2311c2316b830b8bb3fe02e201765b2f5c35e0"
+source = "git+https://github.com/solardev-xyz/freedom-ipfs?rev=40df11b62ca4f619392a30fc276a777de6c5a80a#40df11b62ca4f619392a30fc276a777de6c5a80a"
 dependencies = [
  "data-encoding",
  "either",
@@ -1072,26 +1084,29 @@ dependencies = [
  "freedom-ipfs-socks",
  "futures",
  "getrandom 0.3.4",
- "hickory-resolver",
+ "hickory-resolver 0.26.3",
  "http",
  "hyper-util",
  "libc",
  "libp2p",
+ "libp2p-websocket",
  "multiaddr",
  "parking_lot",
  "reqwest",
+ "resolv-conf",
  "serde",
  "thiserror 2.0.18",
  "tokio",
  "tower-layer",
  "tower-service",
+ "tracing",
  "url",
 ]
 
 [[package]]
 name = "freedom-ipfs-retrieval"
 version = "0.4.6"
-source = "git+https://github.com/solardev-xyz/freedom-ipfs?rev=8a2311c2316b830b8bb3fe02e201765b2f5c35e0#8a2311c2316b830b8bb3fe02e201765b2f5c35e0"
+source = "git+https://github.com/solardev-xyz/freedom-ipfs?rev=40df11b62ca4f619392a30fc276a777de6c5a80a#40df11b62ca4f619392a30fc276a777de6c5a80a"
 dependencies = [
  "bytes",
  "cid",
@@ -1103,6 +1118,7 @@ dependencies = [
  "futures",
  "libp2p",
  "libp2p-stream",
+ "libp2p-websocket",
  "multihash",
  "multihash-codetable",
  "prost",
@@ -1118,7 +1134,7 @@ dependencies = [
 [[package]]
 name = "freedom-ipfs-routing"
 version = "0.4.6"
-source = "git+https://github.com/solardev-xyz/freedom-ipfs?rev=8a2311c2316b830b8bb3fe02e201765b2f5c35e0#8a2311c2316b830b8bb3fe02e201765b2f5c35e0"
+source = "git+https://github.com/solardev-xyz/freedom-ipfs?rev=40df11b62ca4f619392a30fc276a777de6c5a80a#40df11b62ca4f619392a30fc276a777de6c5a80a"
 dependencies = [
  "async-trait",
  "cid",
@@ -1138,7 +1154,7 @@ dependencies = [
 [[package]]
 name = "freedom-ipfs-socks"
 version = "0.4.6"
-source = "git+https://github.com/solardev-xyz/freedom-ipfs?rev=8a2311c2316b830b8bb3fe02e201765b2f5c35e0#8a2311c2316b830b8bb3fe02e201765b2f5c35e0"
+source = "git+https://github.com/solardev-xyz/freedom-ipfs?rev=40df11b62ca4f619392a30fc276a777de6c5a80a#40df11b62ca4f619392a30fc276a777de6c5a80a"
 dependencies = [
  "freedom-ipfs-addr",
  "thiserror 2.0.18",
@@ -1147,7 +1163,7 @@ dependencies = [
 [[package]]
 name = "freedom-ipfs-store"
 version = "0.4.6"
-source = "git+https://github.com/solardev-xyz/freedom-ipfs?rev=8a2311c2316b830b8bb3fe02e201765b2f5c35e0#8a2311c2316b830b8bb3fe02e201765b2f5c35e0"
+source = "git+https://github.com/solardev-xyz/freedom-ipfs?rev=40df11b62ca4f619392a30fc276a777de6c5a80a#40df11b62ca4f619392a30fc276a777de6c5a80a"
 dependencies = [
  "cid",
  "freedom-ipfs-core",
@@ -1161,7 +1177,7 @@ dependencies = [
 [[package]]
 name = "freedom-ipfs-unixfs"
 version = "0.4.6"
-source = "git+https://github.com/solardev-xyz/freedom-ipfs?rev=8a2311c2316b830b8bb3fe02e201765b2f5c35e0#8a2311c2316b830b8bb3fe02e201765b2f5c35e0"
+source = "git+https://github.com/solardev-xyz/freedom-ipfs?rev=40df11b62ca4f619392a30fc276a777de6c5a80a#40df11b62ca4f619392a30fc276a777de6c5a80a"
 dependencies = [
  "cid",
  "freedom-ipfs-core",
@@ -1184,7 +1200,6 @@ dependencies = [
  "freedom-ipfs-store",
  "futures-core",
  "hickory-proto 0.26.3",
- "hickory-resolver",
  "serde",
  "serde_json",
  "tempfile",
@@ -1419,6 +1434,9 @@ name = "hashbrown"
 version = "0.17.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4f467dd6dccf739c208452f8014c75c18bb8301b050ad1cfb27153803edb0f51"
+dependencies = [
+ "foldhash 0.2.0",
+]
 
 [[package]]
 name = "hashlink"
@@ -1431,11 +1449,11 @@ dependencies = [
 
 [[package]]
 name = "hashlink"
-version = "0.11.0"
+version = "0.12.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ea0b22561a9c04a7cb1a302c013e0259cd3b4bb619f145b32f72b8b4bcbed230"
+checksum = "a596f1b20ed2cc5ecac41a164aaebc7258057060f06c0cf7a2ba3991ee7990fb"
 dependencies = [
- "hashbrown 0.16.1",
+ "hashbrown 0.17.0",
 ]
 
 [[package]]
@@ -1455,6 +1473,30 @@ name = "hex"
 version = "0.4.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7f24254aa9a54b5c858eaee2f5bccdb46aaf0e486a595ed5fd8f86ba55232a70"
+
+[[package]]
+name = "hickory-net"
+version = "0.26.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c480823ed7c2c5d0f09c41020cb6b7c28029ce60ec42dc942158dcf22f8e0a4d"
+dependencies = [
+ "async-trait",
+ "cfg-if",
+ "data-encoding",
+ "futures-channel",
+ "futures-io",
+ "futures-util",
+ "hickory-proto 0.26.3",
+ "idna",
+ "ipnet",
+ "jni",
+ "rand 0.10.3",
+ "thiserror 2.0.18",
+ "tinyvec",
+ "tokio",
+ "tracing",
+ "url",
+]
 
 [[package]]
 name = "hickory-proto"
@@ -1493,6 +1535,7 @@ dependencies = [
  "ipnet",
  "jni",
  "once_cell",
+ "prefix-trie",
  "rand 0.10.3",
  "ring",
  "thiserror 2.0.18",
@@ -1517,6 +1560,32 @@ dependencies = [
  "rand 0.9.4",
  "resolv-conf",
  "smallvec",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "hickory-resolver"
+version = "0.26.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3f3da5255c95d5a716857d54b5b8f4e8d67c3484d3beaaaae2ce25063b3ba981"
+dependencies = [
+ "cfg-if",
+ "futures-util",
+ "hickory-net",
+ "hickory-proto 0.26.3",
+ "ipconfig",
+ "ipnet",
+ "jni",
+ "moka",
+ "ndk-context",
+ "once_cell",
+ "parking_lot",
+ "rand 0.10.3",
+ "resolv-conf",
+ "smallvec",
+ "system-configuration",
  "thiserror 2.0.18",
  "tokio",
  "tracing",
@@ -1869,6 +1938,9 @@ name = "ipnet"
 version = "2.12.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d98f6fed1fde3f8c21bc40a1abb88dd75e67924f9cffc3ef95607bad8017f8e2"
+dependencies = [
+ "serde",
+]
 
 [[package]]
 name = "iri-string"
@@ -2002,6 +2074,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "68ab91017fe16c622486840e4c83c9a37afeff978bd239b5293d61ece587de66"
 
 [[package]]
+name = "libm"
+version = "0.2.16"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b6d2cec3eae94f9f509c767b45932f1ada8350c4bdb85af2fcab4a3c14807981"
+
+[[package]]
 name = "libp2p"
 version = "0.56.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2028,7 +2106,6 @@ dependencies = [
  "libp2p-tcp",
  "libp2p-tls",
  "libp2p-upnp",
- "libp2p-websocket",
  "libp2p-yamux",
  "multiaddr",
  "pin-project",
@@ -2091,7 +2168,7 @@ checksum = "0b770c1c8476736ca98c578cba4b505104ff8e842c2876b528925f9766379f9a"
 dependencies = [
  "async-trait",
  "futures",
- "hickory-resolver",
+ "hickory-resolver 0.25.2",
  "libp2p-core",
  "libp2p-identity",
  "parking_lot",
@@ -2245,9 +2322,9 @@ dependencies = [
 
 [[package]]
 name = "libp2p-quic"
-version = "0.13.0"
+version = "0.13.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8dc448b2de9f4745784e3751fe8bc6c473d01b8317edd5ababcb0dec803d843f"
+checksum = "9dcc597d70bf7f6f30cbe07081802c836184e48416e89e9ce73a0ba2c56a319e"
 dependencies = [
  "futures",
  "futures-timer",
@@ -2256,6 +2333,7 @@ dependencies = [
  "libp2p-identity",
  "libp2p-tls",
  "quinn",
+ "quinn-proto",
  "rand 0.8.6",
  "ring",
  "rustls",
@@ -2400,9 +2478,9 @@ dependencies = [
 
 [[package]]
 name = "libsqlite3-sys"
-version = "0.37.0"
+version = "0.39.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b1f111c8c41e7c61a49cd34e44c7619462967221a6443b0ec299e0ac30cfb9b1"
+checksum = "14a5f01b87b92705d07b433c06f96cbc764637d81a0bffb5734ce17cf0f9a2b3"
 dependencies = [
  "cc",
  "pkg-config",
@@ -2618,6 +2696,12 @@ dependencies = [
  "smallvec",
  "unsigned-varint 0.7.2",
 ]
+
+[[package]]
+name = "ndk-context"
+version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "27b02d87554356db9e9a873add8782d4ea6e3e58ea071a9adb9a2e8ddb884a8b"
 
 [[package]]
 name = "netlink-packet-core"
@@ -2930,6 +3014,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "prefix-trie"
+version = "0.8.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4cf6e3177f0684016a5c209b00882e15f8bdd3f3bb48f0491df10cd102d0c6e7"
+dependencies = [
+ "either",
+ "ipnet",
+ "num-traits",
+]
+
+[[package]]
 name = "prettyplease"
 version = "0.2.37"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3053,6 +3148,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0e750cca55fe4f0439a15d0bb529da9651e79993e8e72c61a899a36d462befbe"
 dependencies = [
  "bytes",
+ "fastbloom",
  "getrandom 0.4.2",
  "lru-slab",
  "rand 0.10.3",
@@ -3327,14 +3423,14 @@ dependencies = [
 
 [[package]]
 name = "rusqlite"
-version = "0.39.0"
+version = "0.41.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a0d2b0146dd9661bf67bb107c0bb2a55064d556eeb3fc314151b957f313bcd4e"
+checksum = "da9bba6f3506135e120a6586df05be18b48d18896600646a4bec8f993d91a594"
 dependencies = [
  "bitflags",
  "fallible-iterator",
  "fallible-streaming-iterator",
- "hashlink 0.11.0",
+ "hashlink 0.12.2",
  "libsqlite3-sys",
  "smallvec",
  "sqlite-wasm-rs",
@@ -3656,6 +3752,12 @@ name = "simdutf8"
 version = "0.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e3a9fe34e3e7a50316060351f37187a3f546bce95496156754b601a5fa71b76e"
+
+[[package]]
+name = "siphasher"
+version = "1.0.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "33f4fe9184a62d842c9ef383018f3306d8ba224fd9d836f56d7288308847c256"
 
 [[package]]
 name = "slab"

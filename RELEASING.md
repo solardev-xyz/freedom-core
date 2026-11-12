@@ -118,7 +118,7 @@ publish job that runs no repository code.
    committed:
    `(cd services/freedom-ipfsd && cargo fetch --locked) && python3 scripts/third-party-notices.py --binary freedom-ipfsd`.
    CI fails when it is stale. Besides the crates and the runtime, it lists
-   **SQLite 3.51.3** (`libsqlite3-sys`'s amalgamation, `bundled`), public
+   **SQLite 3.54.1** (`libsqlite3-sys`'s amalgamation, `bundled`), public
    domain, with the dedication its source carries, tied to that exact
    `libsqlite3-sys` version, so a new one fails until its entry (`NATIVE`
    in the script) is re-checked. Every shipped crate that declares `links`

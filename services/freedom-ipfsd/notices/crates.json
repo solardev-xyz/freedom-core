@@ -136,12 +136,13 @@
       "libp2p-rust-libp2p/LICENSE"
     ]
   },
-  "libp2p-quic 0.13.0": {
+  "libp2p-quic 0.13.1": {
     "repository": "https://github.com/libp2p/rust-libp2p",
     "commit": "c9bd92ba2d4727d79b0c2623c20c998a4e60995a",
     "files": [
       "libp2p-rust-libp2p/LICENSE"
-    ]
+    ],
+    "note": "The commit the crate records (7b64d614aa5e97333e491c9cb13c840153cdb19c, the GHSA-5hq8-qhww-jm7q fix) isn't in the repository; these are the release tag libp2p-quic-v0.13.1's."
   },
   "libp2p-stream 0.4.0-alpha": {
     "repository": "https://github.com/libp2p/rust-libp2p",

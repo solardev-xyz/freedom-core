@@ -20,12 +20,13 @@ Exceptions, also noted in `crates.json`:
 |---|---|
 | `base256emoji` 1.0.2, `cid` 0.11.3, `futures-bounded` 0.2.4, `if-watch` 3.2.2 | Neither the crate nor its repository carries a license text, at the crate's commit or on its default branch. Each declares MIT (`if-watch`: MIT OR Apache-2.0), so SPDX's MIT text stands in: `spdx/MIT.txt`, from spdx/license-list-data v3.29.0 (`31ba1a50e5397e00a304dbadc76531740e89ee48`). |
 | `yamux` 0.13.10 | The commit the crate records isn't in its repository; the texts are the release tag `yamux-v0.13.10`'s. |
+| `libp2p-quic` 0.13.1 | The commit the crate records (the GHSA-5hq8-qhww-jm7q fix) isn't in its repository; the texts are the release tag `libp2p-quic-v0.13.1`'s, identical to the other libp2p crates'. |
 
 The C library a crate bundles is listed apart, in the script's `NATIVE`:
 
 | Library | Bundled by | Text |
 |---|---|---|
-| SQLite 3.51.3 | `libsqlite3-sys` 0.37.0 (`bundled`, which freedom-ipfs's `rusqlite` asks for) | `sqlite-3.51.3-NOTICE` here: SQLite is in the public domain, and the file quotes the dedication its amalgamation carries |
+| SQLite 3.54.1 | `libsqlite3-sys` 0.39.1 (`bundled`, which freedom-ipfs's `rusqlite` asks for) | `sqlite-3.54.1-NOTICE` here: SQLite is in the public domain, and the file quotes the dedication its amalgamation carries |
 
 The runtime notices of the Linux builds, which link glibc 2.17 dynamically
 through Zig (glibc's startup and `libc_nonshared` objects, and LLVM's

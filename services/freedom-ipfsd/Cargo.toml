@@ -27,7 +27,7 @@ members = [".", "../nat64"]
 # FREEDOM_IPFSD_TEST_* variables: see src/testhooks.rs. Without the feature
 # every hook is a no-op and no variable is read. build.rs refuses it in any
 # release-profile or optimized build, and CI checks that it does.
-testhooks = ["dep:hickory-resolver"]
+testhooks = []
 
 [dependencies]
 # The frame codec and error codes, shared with the core.
@@ -57,22 +57,19 @@ fc-service = { path = "../../crates/fc-service" }
 # once per process here, which `confinement.resolution` reports. Then the
 # store's eviction (#87): its order read off an index, its total off a row
 # kept by triggers, in bounded batches, with old stores migrated at open.
+# Then the service advisories (freedom-core #322): hickory-resolver 0.26,
+# with freedom-ipfs-net's own DNS layer in place of libp2p-dns 0.44, which
+# is on hickory 0.25 (RUSTSEC-2026-0491), and rusqlite 0.41, which bundles
+# SQLite 3.54.1 (RUSTSEC-2026-0459).
 # src/build_info.rs reports the same commit.
 # freedom-ipfs-core: the memory budget's `Reservation`, which the gateway
 # crate doesn't re-export.
-freedom-ipfs-core = { git = "https://github.com/solardev-xyz/freedom-ipfs", rev = "8a2311c2316b830b8bb3fe02e201765b2f5c35e0" }
-freedom-ipfs-gateway = { git = "https://github.com/solardev-xyz/freedom-ipfs", rev = "8a2311c2316b830b8bb3fe02e201765b2f5c35e0", features = ["socks"] }
-freedom-ipfs-store = { git = "https://github.com/solardev-xyz/freedom-ipfs", rev = "8a2311c2316b830b8bb3fe02e201765b2f5c35e0" }
+freedom-ipfs-core = { git = "https://github.com/solardev-xyz/freedom-ipfs", rev = "40df11b62ca4f619392a30fc276a777de6c5a80a" }
+freedom-ipfs-gateway = { git = "https://github.com/solardev-xyz/freedom-ipfs", rev = "40df11b62ca4f619392a30fc276a777de6c5a80a", features = ["socks"] }
+freedom-ipfs-store = { git = "https://github.com/solardev-xyz/freedom-ipfs", rev = "40df11b62ca4f619392a30fc276a777de6c5a80a" }
 # The `Stream` trait, to read a response's body as it comes; already in
 # freedom-ipfs's graph.
 futures-core = "0.3"
-# The `testhooks` feature's fixture DNS configuration (src/testhooks.rs:
-# a parsed resolv.conf's servers on a test's port), with the types
-# freedom-ipfs-net's `DnsConfig::custom` takes. Only this direct edge, and
-# the hook that uses it, are test-only: the crate itself is the real
-# resolver, a normal dependency of every build through freedom-ipfs-net and
-# libp2p-dns, at the same version.
-hickory-resolver = { version = "0.25", default-features = false, optional = true }
 # NAT64 discovery (0007, "Network-specific NAT64 prefixes"), shared with
 # the other services: a member of this workspace (see [workspace]).
 fc-nat64 = { path = "../nat64" }
@@ -88,7 +85,7 @@ tokio = { version = "1", default-features = false, features = ["rt-multi-thread"
 hickory-proto = { version = "0.26.2", default-features = false, features = ["std"] }
 # Upstream's SOCKS5 test proxy and test servers (its `test-util` feature),
 # for the `socks5` tests through the binary; the same pin as the gateway's.
-freedom-ipfs-net = { git = "https://github.com/solardev-xyz/freedom-ipfs", rev = "8a2311c2316b830b8bb3fe02e201765b2f5c35e0", features = ["test-util"] }
+freedom-ipfs-net = { git = "https://github.com/solardev-xyz/freedom-ipfs", rev = "40df11b62ca4f619392a30fc276a777de6c5a80a", features = ["test-util"] }
 tempfile = "3"
 
 # tests/confinement.rs: the kernel's Landlock ABI, which the report must name
