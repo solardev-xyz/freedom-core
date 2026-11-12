@@ -19,9 +19,12 @@
 //!   reader stop reading, which happens only when main sends requests
 //!   faster than they can be answered (0007). Even then, an EOF the pump
 //!   has seen ends the connection at once, without waiting for the writer.
-//! - **The writer** claims one frame at a time from `fc-protocol`'s stream
-//!   [`Sender`] (events first, then control frames, then the streams
-//!   round-robin) and writes it before it claims the next. The claim is the
+//! - **The writer** claims one frame at a time: events first, then the
+//!   service's own requests and cancels on a two-way connection, then from
+//!   `fc-protocol`'s stream [`Duplex`] (credit owed to main, control frames,
+//!   then the streams round-robin, as its
+//!   [`Sender`](fc_protocol::stream::Sender) orders them). It writes each
+//!   before it claims the next. The claim is the
 //!   commit: a head opens its stream, a reply or terminal ends its request.
 //!   Frames behind the one being written stay queued, so a cancel still
 //!   drops an unwritten head (`cancelled` is then the only reply) or beats
@@ -36,8 +39,23 @@
 //!   is queued only while nothing of that request is, so none follows the
 //!   request's answer, and every one queued before the answer is written
 //!   before it, events going first (0008, "Progress").
+//! - **An event may be waited for until it is written**
+//!   ([`Connection::event_written`]): the caller learns that the writer has
+//!   put it in the pipe, whole and flushed, or, past its wait, that it was
+//!   taken back unwritten, or that its write had begun and not finished
+//!   (0014, "The step marker").
+//! - **A service may turn on requests of its own to main**
+//!   ([`Options::two_way`], design 0014, COL-3): [`Connection::ask`] sends
+//!   one and resolves on main's reply, with a cancel to main when it is
+//!   dropped unanswered or its deadline passes, and a result that says
+//!   `body: true` opens a stream from main to the service: 0009's frames in
+//!   both directions on one connection, through `fc-protocol`'s
+//!   [`Duplex`]. A service that doesn't turn them on reads main's data, end
+//!   and abort frames as protocol errors (`stream_direction`) and any
+//!   response as `unsolicited_response`, as 0007 has it ([`ask`]).
 //! - **The lifecycle thread** enforces the handshake's deadline, polls the
-//!   parent every 2 s, and watches for the writer stall.
+//!   parent every 2 s, watches for the writer stall, and ends the service's
+//!   requests whose deadline passes.
 //! - **Wakers run outside the lock,** so a producer's waker may call back
 //!   into its [`Connection`].
 //!
@@ -65,7 +83,7 @@
 //! reader decodes `{ type, id, method, params }` and ignores a `context`.
 
 use std::borrow::Cow;
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use std::future::Future;
 use std::io::{Read, Write};
 use std::pin::Pin;
@@ -78,8 +96,8 @@ use fc_protocol::error::{ErrorBody, ErrorCode};
 use fc_protocol::frame::{self, Decoder, Frame, KIND_JSON, Kinds};
 use fc_protocol::message::{check_id, write_error, write_event, write_result};
 use fc_protocol::stream::{
-    Abort, Cancel, Credited, MAX_DATA, SendError, Sender, Settled, Side, StreamError, StreamFrame,
-    WRITER_DATA_CAP, Written,
+    Abort, Cancel, Credited, Duplex, MAX_DATA, Received, SendError, Settled, Side, StreamError,
+    StreamFrame, WRITER_DATA_CAP, Written, Wrote,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::value::RawValue;
@@ -88,6 +106,11 @@ use crate::exit::Exit;
 use crate::hardening;
 use crate::panic::{TaskKind, with_kind};
 use crate::watchdog::Watchdog;
+
+mod ask;
+
+pub use ask::{Answer, AskError, AskFailed, Asked, Body, BodyError, Chunk};
+use ask::{Ask, Outgoing};
 
 /// The handshake's deadline after spawn (0001: 10 s).
 pub const HELLO_TIMEOUT: Duration = Duration::from_secs(10);
@@ -112,6 +135,10 @@ pub const PARKED_BYTES: usize = 16 << 20;
 const PUMPED: usize = 256 << 10;
 /// How long [`run`] lets the writer write what the teardown queued.
 const FINAL_FLUSH: Duration = Duration::from_secs(1);
+/// The most of a service's own requests the connection holds at once, from
+/// [`Connection::ask`] until both main and the service are done with it:
+/// as many as main holds of the core's (0004, Bounds: Work; 0009).
+pub const MAX_ASKS: usize = 256;
 
 /// How a connection runs.
 #[derive(Debug, Clone)]
@@ -140,6 +167,14 @@ pub struct Options {
     /// [`PARKED_BYTES`]).
     pub parked_frames: usize,
     pub parked_bytes: usize,
+    /// Requests from the service to main, and main's bodies in answer to
+    /// them (design 0014, COL-3). Off, the connection keeps 0007's one
+    /// role: main's data, end and abort frames are refused at their header
+    /// (`stream_direction`), a response is `unsolicited_response`, and
+    /// [`Connection::ask`] is refused.
+    pub two_way: bool,
+    /// The most of the service's own requests held at once ([`MAX_ASKS`]).
+    pub max_asks: usize,
 }
 
 impl Options {
@@ -159,6 +194,8 @@ impl Options {
             max_requests: MAX_REQUESTS,
             parked_frames: PARKED_FRAMES,
             parked_bytes: PARKED_BYTES,
+            two_way: false,
+            max_asks: MAX_ASKS,
         }
     }
 }
@@ -282,6 +319,24 @@ pub enum EventError {
     Answered,
 }
 
+/// Why [`Connection::event_written`] didn't see its event written.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WrittenError {
+    /// Too many events wait for the writer: nothing was queued.
+    Full,
+    /// The event didn't serialize, or exceeds one frame: nothing was queued.
+    Encode,
+    /// The connection ended first. A queued event is taken back and never
+    /// written; one whose write had begun may still reach main.
+    Closed,
+    /// Its wait passed with the event still queued: it was taken back, and
+    /// is never written.
+    Withdrawn,
+    /// Its wait passed while the writer was writing it: it may still reach
+    /// main, whole, once main reads.
+    Unfinished,
+}
+
 /// The service's handle on its connection. Clones share it.
 #[derive(Clone)]
 pub struct Connection {
@@ -292,6 +347,9 @@ struct Link {
     state: Mutex<State>,
     /// Wakes the writer: something to write, or the end.
     writer: Condvar,
+    /// Wakes [`Connection::event_written`]: an event waited for is written,
+    /// or the end.
+    written: Condvar,
     /// Wakes [`run`] and the lifecycle thread: the end, the writer done, a
     /// callback returned.
     ended: Condvar,
@@ -305,15 +363,50 @@ struct Link {
     /// [`Service::end`] has returned.
     torn_down: AtomicBool,
     max_requests: usize,
+    /// [`Options::two_way`] and [`Options::max_asks`].
+    two_way: bool,
+    max_asks: usize,
     /// A failed writer has freed what was queued.
     #[cfg(test)]
     abandoned_freed: AtomicBool,
 }
 
+/// A queued event; `ticket` when its sender waits to see it written
+/// ([`Connection::event_written`]).
+struct Queued {
+    json: Vec<u8>,
+    ticket: Option<u64>,
+}
+
 struct State {
-    sender: Sender,
-    events: VecDeque<Vec<u8>>,
+    /// The bodies the service sends, under main's IDs, and, on a two-way
+    /// connection, those main sends in answer to the service's own
+    /// requests, under the service's ([`Duplex`]). A one-way connection
+    /// never takes a frame for the second.
+    streams: Duplex,
+    events: VecDeque<Queued>,
     max_events: usize,
+    /// The last ticket given to an event waited for, the one the writer is
+    /// writing, and the last one it wrote and flushed. Tickets are written
+    /// in their order, so every ticket up to `written_ticket` is written or
+    /// was taken back.
+    next_ticket: u64,
+    writing_ticket: Option<u64>,
+    written_ticket: u64,
+    /// The service's requests to main and its cancels of them, in order:
+    /// written behind the events, and only once the handshake's reply is.
+    /// Dropped at the end ([`ask::close`]).
+    outbound: VecDeque<Outgoing>,
+    /// The last ID the service's requests took.
+    last_ask: u64,
+    /// The service's requests, from [`Connection::ask`] until both sides
+    /// are done with them ([`ask`]).
+    asks: HashMap<u64, Ask>,
+    /// Their deadlines, while they wait for main's reply.
+    deadlines: BTreeSet<(Instant, u64)>,
+    /// The handshake's ID: nothing of the service's own goes before its
+    /// reply.
+    hello_id: Option<u64>,
     hello_done: bool,
     end: Option<End>,
     /// [`Service::end`] has returned: nothing more may be queued.
@@ -348,15 +441,33 @@ struct State {
     input_end: bool,
 }
 
+impl State {
+    /// Everyone waiting on the connection: producers, settled futures, and
+    /// the service's requests and bodies.
+    fn all_waiters(&mut self) -> Vec<Waker> {
+        let mut wakers = std::mem::take(&mut self.waiters);
+        wakers.extend(self.asks.values_mut().filter_map(|ask| ask.waker.take()));
+        wakers
+    }
+}
+
 impl Link {
     fn new(options: &Options) -> Link {
         Link {
             state: Mutex::new(State {
                 // The writer holds at most one data frame outside the
                 // queue: the cap covers both.
-                sender: Sender::with_data_cap(options.data_cap.saturating_sub(MAX_DATA)),
+                streams: Duplex::service(options.data_cap.saturating_sub(MAX_DATA)),
                 events: VecDeque::new(),
                 max_events: options.max_events,
+                next_ticket: 0,
+                writing_ticket: None,
+                written_ticket: 0,
+                outbound: VecDeque::new(),
+                last_ask: 0,
+                asks: HashMap::new(),
+                deadlines: BTreeSet::new(),
+                hello_id: None,
                 hello_done: false,
                 end: None,
                 closed: false,
@@ -374,12 +485,15 @@ impl Link {
                 input_end: false,
             }),
             writer: Condvar::new(),
+            written: Condvar::new(),
             ended: Condvar::new(),
             reader: Condvar::new(),
             pump: Condvar::new(),
             result: AtomicU8::new(Exit::Ok.code()),
             torn_down: AtomicBool::new(false),
             max_requests: options.max_requests.max(1),
+            two_way: options.two_way,
+            max_asks: options.max_asks,
             #[cfg(test)]
             abandoned_freed: AtomicBool::new(false),
         }
@@ -393,22 +507,26 @@ impl Link {
 
     fn notify_all(&self) {
         self.writer.notify_all();
+        self.written.notify_all();
         self.ended.notify_all();
         self.reader.notify_all();
         self.pump.notify_all();
     }
 
-    /// Ends the connection, once: the first end wins.
+    /// Ends the connection, once: the first end wins. Nothing more of the
+    /// service's own requests goes, or comes, from then on ([`ask::close`]).
     fn end(&self, end: End) {
-        let wakers = {
+        let (wakers, outbound) = {
             let mut state = self.lock();
             if state.end.is_some() {
                 return;
             }
             state.end = Some(end);
             self.result.store(end.exit().code(), Ordering::SeqCst);
-            std::mem::take(&mut state.waiters)
+            let outbound = ask::close(&mut state);
+            (state.all_waiters(), outbound)
         };
+        drop(outbound);
         self.notify_all();
         wake(wakers);
     }
@@ -417,19 +535,21 @@ impl Link {
     /// connection has ended, sets the process's result. A teardown's
     /// failure replaces the end's code; 70, once set, stays.
     fn fail(&self, exit: Exit) {
-        let wakers = {
+        let (wakers, outbound) = {
             let mut state = self.lock();
             if state.end.is_none() {
                 state.end = Some(End::Fatal(exit));
                 self.result.store(exit.code(), Ordering::SeqCst);
-                std::mem::take(&mut state.waiters)
+                let outbound = ask::close(&mut state);
+                (state.all_waiters(), outbound)
             } else {
                 if exit != Exit::Ok && self.result.load(Ordering::SeqCst) != Exit::Internal.code() {
                     self.result.store(exit.code(), Ordering::SeqCst);
                 }
-                Vec::new()
+                (Vec::new(), VecDeque::new())
             }
         };
+        drop(outbound);
         self.notify_all();
         wake(wakers);
     }
@@ -523,14 +643,18 @@ impl Connection {
     pub fn reply<T: Serialize>(&self, id: u64, result: &T) -> Result<(), SendError> {
         let mut json = Vec::new();
         write_result(&mut json, id, result).map_err(|_| SendError::TooLarge)?;
-        self.queue(Need::Owed, |state| (state.sender.reply(id, json), false))
+        self.queue(Need::Owed, |state| {
+            (state.streams.sender_mut().reply(id, json), false)
+        })
     }
 
     /// Answers request `id` with `error`: its one reply.
     pub fn reply_error(&self, id: u64, error: &ErrorBody) -> Result<(), SendError> {
         let mut json = Vec::new();
         write_error(&mut json, id, error).map_err(|_| SendError::TooLarge)?;
-        self.queue(Need::Owed, |state| (state.sender.reply(id, json), false))
+        self.queue(Need::Owed, |state| {
+            (state.streams.sender_mut().reply(id, json), false)
+        })
     }
 
     /// Answers request `id` with `result`, as [`Connection::reply`] does,
@@ -588,9 +712,17 @@ impl Connection {
         write_error(&mut late_json, id, late).map_err(|_| SendError::TooLarge)?;
         let queued = self.queue(Need::Owed, |state| {
             let queued = if Instant::now() < deadline {
-                state.sender.reply(id, json).map(|()| Headed::Queued)
+                state
+                    .streams
+                    .sender_mut()
+                    .reply(id, json)
+                    .map(|()| Headed::Queued)
             } else {
-                state.sender.reply(id, late_json).map(|()| Headed::Late)
+                state
+                    .streams
+                    .sender_mut()
+                    .reply(id, late_json)
+                    .map(|()| Headed::Late)
             };
             if let Ok(Headed::Queued) = queued
                 && let Some(charge) = charge.take()
@@ -611,7 +743,9 @@ impl Connection {
         let mut json = Vec::new();
         write_result(&mut json, id, result).map_err(|_| SendError::TooLarge)?;
         let need = if body { Need::Open } else { Need::Owed };
-        self.queue(need, |state| (state.sender.head(id, json, body), false))
+        self.queue(need, |state| {
+            (state.streams.sender_mut().head(id, json, body), false)
+        })
     }
 
     /// Answers request `id` with a head, as [`Connection::head`] does, only
@@ -647,9 +781,17 @@ impl Connection {
         let need = if body { Need::Open } else { Need::Owed };
         let queued = self.queue(need, |state| {
             let queued = if Instant::now() < deadline {
-                state.sender.head(id, json, body).map(|()| Headed::Queued)
+                state
+                    .streams
+                    .sender_mut()
+                    .head(id, json, body)
+                    .map(|()| Headed::Queued)
             } else {
-                state.sender.reply(id, late_json).map(|()| Headed::Late)
+                state
+                    .streams
+                    .sender_mut()
+                    .reply(id, late_json)
+                    .map(|()| Headed::Late)
             };
             if let Ok(Headed::Queued) = queued
                 && let Some(charge) = charge.take()
@@ -668,7 +810,9 @@ impl Connection {
     /// Queues as much of `bytes` as stream `id`'s window and the writer's cap
     /// allow, without waiting.
     pub fn push(&self, id: u64, bytes: &[u8]) -> Result<usize, SendError> {
-        self.queue(Need::Open, |state| (state.sender.push(id, bytes), false))
+        self.queue(Need::Open, |state| {
+            (state.streams.sender_mut().push(id, bytes), false)
+        })
     }
 
     /// Queues all of `bytes` on stream `id`, waiting for room as often as
@@ -684,13 +828,15 @@ impl Connection {
 
     /// Queues stream `id`'s end, behind every byte queued.
     pub fn finish(&self, id: u64) -> Result<(), SendError> {
-        self.queue(Need::Owed, |state| (state.sender.finish(id), false))
+        self.queue(Need::Owed, |state| {
+            (state.streams.sender_mut().finish(id), false)
+        })
     }
 
     /// Aborts stream `id`.
     pub fn abort(&self, id: u64, abort: &Abort) -> Result<(), SendError> {
         self.queue(Need::Owed, |state| {
-            let result = state.sender.abort(id, abort);
+            let result = state.streams.sender_mut().abort(id, abort);
             // Its purge made room under the writer's cap.
             let room = result.is_ok();
             (result, room)
@@ -701,12 +847,12 @@ impl Connection {
     /// is settled already (0007, "Panics"): `error` is its one reply if
     /// nothing of it was written (a queued head is dropped, as for a
     /// cancel), `abort` ends its stream if the stream is open. See
-    /// [`Sender::settle`].
+    /// [`Sender::settle`](fc_protocol::stream::Sender::settle).
     pub fn settle(&self, id: u64, error: &ErrorBody, abort: &Abort) -> Result<Settled, SendError> {
         let mut json = Vec::new();
         write_error(&mut json, id, error).map_err(|_| SendError::TooLarge)?;
         self.queue(Need::Owed, |state| {
-            let result = state.sender.settle(id, json, abort);
+            let result = state.streams.sender_mut().settle(id, json, abort);
             // A purge made room under the writer's cap.
             let room = result.is_ok();
             (result, room)
@@ -727,14 +873,14 @@ impl Connection {
     /// `cancelled`, or after it.
     pub fn commit(&self, id: u64) -> bool {
         let mut state = self.link.lock();
-        if !state.sender.is_unanswered(id) {
+        if !state.streams.sender().is_unanswered(id) {
             return false;
         }
         let State {
-            sender, committed, ..
+            streams, committed, ..
         } = &mut *state;
         // Only requests still held keep their claim.
-        committed.retain(|held| sender.is_live(*held));
+        committed.retain(|held| streams.sender().is_live(*held));
         committed.insert(id);
         true
     }
@@ -763,7 +909,7 @@ impl Connection {
         if state.events.len() >= state.max_events {
             return Err(EventError::Full);
         }
-        state.events.push_back(json);
+        state.events.push_back(Queued { json, ticket: None });
         drop(state);
         self.link.writer.notify_one();
         Ok(())
@@ -796,16 +942,83 @@ impl Connection {
         if state.end.is_some() || state.closed || state.writer_done {
             return Err(EventError::Closed);
         }
-        if !state.sender.is_unanswered(id) {
+        if !state.streams.sender().is_unanswered(id) {
             return Err(EventError::Answered);
         }
         if state.events.len() >= state.max_events {
             return Err(EventError::Full);
         }
-        state.events.push_back(json);
+        state.events.push_back(Queued { json, ticket: None });
         drop(state);
         self.link.writer.notify_one();
         Ok(())
+    }
+
+    /// Queues an event for main, as [`Connection::event`] does, and waits
+    /// until the writer has written it to stdout, whole and flushed, for at
+    /// most `wait` (0014, "The step marker": a marker main reads even if the
+    /// process dies right after). Blocks the calling thread: never call it
+    /// from a [`Service`] callback.
+    ///
+    /// Past `wait`, an event still queued is taken back and never written
+    /// ([`WrittenError::Withdrawn`]); one the writer is writing can't be,
+    /// and may still reach main ([`WrittenError::Unfinished`]). The check
+    /// and the taking back are one step under the connection's lock, as the
+    /// writer's claim is, so an event is either claimed in time or not at
+    /// all. Events go ahead of every other frame, so the wait is for the
+    /// frame being written, if any, and the events queued before this one.
+    pub fn event_written<T: Serialize>(
+        &self,
+        event: &str,
+        data: &T,
+        wait: Duration,
+    ) -> Result<(), WrittenError> {
+        let mut json = Vec::new();
+        write_event(&mut json, event, data).map_err(|_| WrittenError::Encode)?;
+        if json.len() > frame::MAX_PAYLOAD {
+            return Err(WrittenError::Encode);
+        }
+        let started = Instant::now();
+        let mut state = self.link.lock();
+        if state.end.is_some() || state.closed || state.writer_done {
+            return Err(WrittenError::Closed);
+        }
+        if state.events.len() >= state.max_events {
+            return Err(WrittenError::Full);
+        }
+        state.next_ticket += 1;
+        let ticket = state.next_ticket;
+        state.events.push_back(Queued {
+            json,
+            ticket: Some(ticket),
+        });
+        self.link.writer.notify_one();
+        loop {
+            if state.written_ticket >= ticket {
+                return Ok(());
+            }
+            let ended = state.end.is_some() || state.writer_done;
+            let left = wait.checked_sub(started.elapsed());
+            if ended || left.is_none() {
+                let queued = state
+                    .events
+                    .iter()
+                    .position(|queued| queued.ticket == Some(ticket));
+                if let Some(at) = queued {
+                    drop(state.events.remove(at));
+                }
+                return Err(match (ended, queued) {
+                    (true, _) => WrittenError::Closed,
+                    (false, Some(_)) => WrittenError::Withdrawn,
+                    (false, None) => WrittenError::Unfinished,
+                });
+            }
+            state = wait_timeout(
+                &self.link.written,
+                state,
+                left.unwrap_or_default().max(Duration::from_millis(1)),
+            );
+        }
     }
 
     /// The service can't go on: ends the connection with `exit`. During
@@ -825,8 +1038,8 @@ impl Connection {
     pub fn stats(&self) -> ConnectionStats {
         let state = self.link.lock();
         ConnectionStats {
-            live_requests: state.sender.live(),
-            held_bytes: state.sender.held(),
+            live_requests: state.streams.sender().live(),
+            held_bytes: state.streams.sender().held(),
             events: state.events.len(),
         }
     }
@@ -911,7 +1124,8 @@ impl Future for SettledFuture<'_> {
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<()> {
         let mut state = self.conn.link.lock();
-        let held = state.sender.is_live(self.id) || state.writing_terminal == Some(self.id);
+        let held =
+            state.streams.sender().is_live(self.id) || state.writing_terminal == Some(self.id);
         // An accepted cancel being handed to the service holds it, even
         // once the connection has ended: the callback is never cut short.
         let cancelling = state.cancelling == Some(self.id);
@@ -956,7 +1170,7 @@ impl Future for SendBytes<'_> {
             if rest.is_empty() {
                 return Poll::Ready(Ok(()));
             }
-            match state.sender.push(this.id, rest) {
+            match state.streams.sender_mut().push(this.id, rest) {
                 Ok(0) => {
                     if !state.waiters.iter().any(|w| w.will_wake(cx.waker())) {
                         state.waiters.push(cx.waker().clone());
@@ -1230,7 +1444,12 @@ impl<'a> Reader<'a> {
             service,
             options,
             hello_deadline: options.started + options.hello_timeout,
-            decoder: Decoder::with_kinds(Kinds::service(Side::Sender)),
+            // A two-way connection takes main's bodies too (0014, COL-3).
+            decoder: Decoder::with_kinds(Kinds::service(if link.two_way {
+                Side::Both
+            } else {
+                Side::Sender
+            })),
             parked: VecDeque::new(),
             parked_bytes: 0,
             highest: 0,
@@ -1281,7 +1500,9 @@ impl<'a> Reader<'a> {
                     if state.end.is_some() {
                         return Ok(None);
                     }
-                    if !self.parked.is_empty() && state.sender.live() < self.link.max_requests {
+                    if !self.parked.is_empty()
+                        && state.streams.sender().live() < self.link.max_requests
+                    {
                         break;
                     }
                     if let Some(chunk) = state.input.pop_front() {
@@ -1302,7 +1523,7 @@ impl<'a> Reader<'a> {
 
     fn handle(&mut self, frame: Frame) -> Result<(), End> {
         if frame.kind != KIND_JSON {
-            return self.credit(&frame);
+            return self.stream_frame(&frame);
         }
         let (kind, id, method) = {
             let envelope = envelope(&frame)?;
@@ -1333,6 +1554,8 @@ impl<'a> Reader<'a> {
                 crate::log::warn("ignoring an event from main", serde_json::json!({}));
                 Ok(())
             }
+            // One of the service's own requests, on a two-way connection.
+            Kind::Response if self.link.two_way => self.response(&frame),
             // The service makes no requests: a response answers nothing.
             Kind::Response => Err(End::Protocol("unsolicited_response")),
             Kind::Other => Err(End::Protocol("invalid_message")),
@@ -1385,16 +1608,16 @@ impl<'a> Reader<'a> {
             if state.end.is_some() {
                 return Ok(Admitted::Ended);
             }
-            if state.sender.live() >= self.link.max_requests {
+            if state.streams.sender().live() >= self.link.max_requests {
                 return Ok(Admitted::Full);
             }
             state
-                .sender
+                .streams
                 .request(id)
                 .map_err(|e| End::Protocol(e.category()))?;
             self.admitted = id;
             if cancelled {
-                let _ = state.sender.cancel(id);
+                let _ = state.streams.cancel(id);
                 drop(state);
                 self.link.writer.notify_one();
                 return Ok(Admitted::Yes);
@@ -1453,7 +1676,7 @@ impl<'a> Reader<'a> {
             if state.end.is_some() {
                 return Room::Ended;
             }
-            if state.sender.live() < self.link.max_requests {
+            if state.streams.sender().live() < self.link.max_requests {
                 return Room::Free;
             }
             if state.input_end {
@@ -1494,10 +1717,11 @@ impl<'a> Reader<'a> {
             }
             // Its work claimed its commit point: nothing is queued, and
             // the service answers it ([`Connection::commit`]).
-            let committed = state.committed.contains(&id) && state.sender.is_unanswered(id);
+            let committed =
+                state.committed.contains(&id) && state.streams.sender().is_unanswered(id);
             let cancelled = committed
                 || state
-                    .sender
+                    .streams
                     .cancel(id)
                     .map_err(|e| End::Protocol(e.category()))?
                     == Cancel::Cancelled;
@@ -1529,12 +1753,18 @@ impl<'a> Reader<'a> {
         Ok(())
     }
 
-    fn credit(&mut self, frame: &Frame) -> Result<(), End> {
+    /// A stream frame from main: credit for a body the service sends, or,
+    /// on a two-way connection, data, end or abort of one main sends in
+    /// answer to the service's own request ([`ask`]). A one-way
+    /// connection's decoder refused those three at their header.
+    fn stream_frame(&mut self, frame: &Frame) -> Result<(), End> {
         if !self.hello_seen {
             return Err(End::Protocol("not_hello_first"));
         }
         let frame = StreamFrame::from_frame(frame).map_err(|e| End::Protocol(e.category()))?;
-        let id = frame.id();
+        let StreamFrame::Credit { id, .. } = frame else {
+            return self.inbound(frame);
+        };
         if id > self.admitted && id <= self.highest {
             // A parked request: nothing of it was sent.
             return Err(End::Protocol(StreamError::Overgrant(id).category()));
@@ -1545,12 +1775,13 @@ impl<'a> Reader<'a> {
                 return Ok(());
             }
             match state
-                .sender
+                .streams
                 .receive(frame)
                 .map_err(|e| End::Protocol(e.category()))?
             {
-                Credited::Taken(_) => std::mem::take(&mut state.waiters),
-                Credited::Late => Vec::new(),
+                Received::Credited(Credited::Taken(_)) => std::mem::take(&mut state.waiters),
+                // Credit arrives only through the sender.
+                Received::Credited(Credited::Late) | Received::Arrived(_) => Vec::new(),
             }
         };
         wake(wakers);
@@ -1574,9 +1805,10 @@ impl<'a> Reader<'a> {
                 return Ok(());
             }
             state
-                .sender
+                .streams
                 .request(id)
                 .map_err(|e| End::Protocol(e.category()))?;
+            state.hello_id = Some(id);
         }
         self.admitted = id;
         let mismatch = if hello.protocol != self.options.protocol {
@@ -1626,7 +1858,8 @@ impl<'a> Reader<'a> {
             return Err(End::HelloTimeout);
         }
         state
-            .sender
+            .streams
+            .sender_mut()
             .reply(id, json)
             .map_err(|_| End::Fatal(Exit::Internal))?;
         state.hello_done = true;
@@ -1640,7 +1873,7 @@ impl<'a> Reader<'a> {
         if write_error(&mut json, id, error).is_ok() {
             let mut state = self.link.lock();
             if state.end.is_none() {
-                let _ = state.sender.reply(id, json);
+                let _ = state.streams.sender_mut().reply(id, json);
             }
         }
         self.link.writer.notify_one();
@@ -1710,6 +1943,11 @@ fn write_loop(link: &Link, mut output: impl Write) {
         let mut state = link.lock();
         state.writing = false;
         state.progress = Instant::now();
+        // An event waited for, written and flushed: its sender sees it.
+        if let Some(ticket) = state.writing_ticket.take() {
+            state.written_ticket = ticket;
+            link.written.notify_all();
+        }
         // A terminal written and flushed: its request is settled now.
         let settled = if state.writing_terminal.take().is_some() {
             std::mem::take(&mut state.waiters)
@@ -1721,31 +1959,57 @@ fn write_loop(link: &Link, mut output: impl Write) {
     }
 }
 
+/// A claimed frame that is all in the writer's buffer, and ends nothing.
+fn claimed_alone(state: &mut State) -> Claimed {
+    state.writing = true;
+    state.progress = Instant::now();
+    Claimed {
+        wakers: Vec::new(),
+        freed: false,
+        payload: None,
+        charge: None,
+    }
+}
+
 /// Claims the next frame into `frame`, waiting for one: an event, else the
-/// stream state machine's next. `None` once nothing more will be written:
-/// the connection closed (or its stream state failed) with nothing queued.
+/// service's own request or cancel once the handshake's reply is written,
+/// else the stream state machine's next (credit owed to main first). `None`
+/// once nothing more will be written: the connection closed (or its stream
+/// state failed) with nothing queued.
 fn claim(link: &Link, frame: &mut Vec<u8>) -> Option<Claimed> {
     let mut state = link.lock();
     loop {
-        let failed = state.sender.failed().is_some();
+        let failed = state.streams.failed().is_some();
         if !failed {
             if let Some(event) = state.events.pop_front() {
-                if frame::encode_json(&event, frame).is_ok() {
-                    state.writing = true;
-                    state.progress = Instant::now();
-                    return Some(Claimed {
-                        wakers: Vec::new(),
-                        freed: false,
-                        payload: None,
-                        charge: None,
-                    });
+                if frame::encode_json(&event.json, frame).is_ok() {
+                    state.writing_ticket = event.ticket;
+                    return Some(claimed_alone(&mut state));
                 }
                 frame.clear();
                 continue;
             }
-            let live = state.sender.live();
-            if let Some((written, json)) = state.sender.next_frame_owned(frame) {
-                let freed = state.sender.live() < live;
+            // Nothing of the service's own goes before the handshake's
+            // reply: once it is claimed, it is no longer live.
+            let greeted = state.hello_done
+                && state
+                    .hello_id
+                    .is_some_and(|id| !state.streams.sender().is_live(id));
+            if greeted && let Some(outgoing) = state.outbound.pop_front() {
+                if frame::encode_json(outgoing.json(), frame).is_ok() {
+                    return Some(claimed_alone(&mut state));
+                }
+                frame.clear();
+                continue;
+            }
+            let live = state.streams.sender().live();
+            if let Some((wrote, json)) = state.streams.next_frame_owned(frame) {
+                let written = match wrote {
+                    // Credit owed for one of main's bodies: control.
+                    Wrote::Credit { .. } => return Some(claimed_alone(&mut state)),
+                    Wrote::Sent(written) => written,
+                };
+                let freed = state.streams.sender().live() < live;
                 // A terminal: its request is settled once it is written
                 // and flushed, not now ([`Connection::settled`]).
                 state.writing_terminal = freed.then(|| written_id(written));
@@ -1788,6 +2052,7 @@ fn claim(link: &Link, frame: &mut Vec<u8>) -> Option<Claimed> {
             drop(state);
             drop(charges);
             link.ended.notify_all();
+            link.written.notify_all();
             return None;
         }
         state = wait(&link.writer, state);
@@ -1808,12 +2073,15 @@ fn writer_failed(link: &Link) {
     let mut state = link.lock();
     state.writing = false;
     state.writer_done = true;
-    let abandoned = std::mem::replace(&mut state.sender, Sender::with_data_cap(0));
+    state.writing_ticket = None;
+    let abandoned = std::mem::replace(&mut state.streams, Duplex::service(0));
     let events = std::mem::take(&mut state.events);
+    let outbound = std::mem::take(&mut state.outbound);
     let charges = std::mem::take(&mut state.charges);
     drop(state);
     drop(abandoned);
     drop(events);
+    drop(outbound);
     #[cfg(test)]
     link.abandoned_freed.store(true, Ordering::SeqCst);
     drop(charges);
@@ -1849,7 +2117,22 @@ fn lifecycle_loop(link: &Link, options: &Options) {
             state = link.lock();
             continue;
         }
-        state = wait_timeout(&link.ended, state, tick);
+        // The service's requests whose deadline passed: their cancels go to
+        // main, and their askers wake.
+        if let Some(expired) = ask::expire_due(&mut state, now) {
+            drop(state);
+            link.writer.notify_one();
+            wake(expired);
+            state = link.lock();
+            continue;
+        }
+        // Until the next deadline, if it comes before the tick; a new
+        // request wakes this thread to look again.
+        let wait = state
+            .deadlines
+            .first()
+            .map_or(tick, |(at, _)| at.saturating_duration_since(now).min(tick));
+        state = wait_timeout(&link.ended, state, wait.max(Duration::from_millis(1)));
     }
 }
 
@@ -1861,7 +2144,7 @@ mod tests {
 
     /// The JSON messages `link`'s writer writes once the connection has
     /// closed, in order.
-    fn written(link: &Link) -> Vec<serde_json::Value> {
+    pub(super) fn written(link: &Link) -> Vec<serde_json::Value> {
         link.close();
         let mut out = Vec::new();
         write_loop(link, &mut out);
@@ -1895,7 +2178,7 @@ mod tests {
             Err(EventError::Answered)
         );
         for id in 1..=3 {
-            link.lock().sender.request(id).unwrap();
+            link.lock().streams.request(id).unwrap();
         }
         assert_eq!(conn.event_for(1, "t.progress", &1), Ok(()));
         // Its commit point claimed, main's cancel queues nothing for it
@@ -1904,7 +2187,7 @@ mod tests {
         assert_eq!(conn.event_for(1, "t.progress", &2), Ok(()));
         // Another, cancelled before any claim: `cancelled` is queued.
         assert_eq!(
-            link.lock().sender.cancel(2).unwrap(),
+            link.lock().streams.cancel(2).unwrap(),
             fc_protocol::stream::Cancel::Cancelled
         );
         assert_eq!(
@@ -1925,7 +2208,7 @@ mod tests {
         // The bound: two of three wait, and one more fills it.
         assert_eq!(conn.event("t.other", &6), Ok(()));
         assert_eq!(conn.event("t.other", &7), Err(EventError::Full));
-        link.lock().sender.request(4).unwrap();
+        link.lock().streams.request(4).unwrap();
         assert_eq!(conn.event_for(4, "t.progress", &8), Err(EventError::Full));
 
         let messages = written(&link);
@@ -1958,6 +2241,46 @@ mod tests {
         assert_eq!(conn.event_for(4, "t.progress", &9), Err(EventError::Closed));
     }
 
+    /// 0014, COL-3: nothing of the service's own goes before the
+    /// handshake's reply, though events go first otherwise; then its
+    /// requests and cancels in their order, ahead of the streams, with the
+    /// credit it owes main first among those.
+    #[test]
+    fn the_services_requests_wait_for_the_handshakes_reply() {
+        let mut options = Options::new("t", 1, Instant::now());
+        options.exit_watchdog = None;
+        options.two_way = true;
+        let link = Arc::new(Link::new(&options));
+        let conn = Connection { link: link.clone() };
+        {
+            let mut state = link.lock();
+            state.streams.request(1).unwrap();
+            state.hello_id = Some(1);
+        }
+        let asked = conn.ask("t.first", &[1], None).unwrap();
+        assert_eq!(asked.id(), 1);
+        drop(asked);
+        {
+            let mut state = link.lock();
+            let mut json = Vec::new();
+            write_result(&mut json, 1, &"hello").unwrap();
+            state.streams.sender_mut().reply(1, json).unwrap();
+            state.hello_done = true;
+            state.streams.request(2).unwrap();
+        }
+        conn.reply(2, &"two").unwrap();
+        let messages = written(&link);
+        assert_eq!(
+            messages,
+            [
+                serde_json::json!({ "type": "response", "id": 1, "result": "hello" }),
+                serde_json::json!({ "type": "request", "id": 1, "method": "t.first", "params": [1] }),
+                serde_json::json!({ "type": "cancel", "id": 1 }),
+                serde_json::json!({ "type": "response", "id": 2, "result": "two" }),
+            ]
+        );
+    }
+
     /// Review of #141, round 2: when the writer fails, every queued head's
     /// JSON is freed before what its head held: a charge dropped while its
     /// buffer still lived would let others spend those bytes again. A
@@ -1988,7 +2311,7 @@ mod tests {
         let conn = Connection { link: link.clone() };
         let seen = Arc::new(Mutex::new(Vec::new()));
         for (id, pad) in [(1, "small".to_owned()), (2, "x".repeat(100_000))] {
-            link.lock().sender.request(id).unwrap();
+            link.lock().streams.request(id).unwrap();
             let head = serde_json::json!({ "pad": pad });
             let charge: Charge = Box::new(Witness(link.clone(), seen.clone()));
             let late = ErrorBody::new(ErrorCode::Deadline, "late");
@@ -2009,9 +2332,12 @@ mod tests {
         assert_eq!(*seen.lock().unwrap(), [false, true]);
         let mut frame = Vec::new();
         let state = link.lock();
-        assert_eq!((state.sender.live(), state.sender.held()), (0, 0));
+        assert_eq!(
+            (state.streams.sender().live(), state.streams.sender().held()),
+            (0, 0)
+        );
         drop(state);
-        assert!(link.lock().sender.next_frame_owned(&mut frame).is_none());
+        assert!(link.lock().streams.next_frame_owned(&mut frame).is_none());
         // And nothing more is queued.
         assert_eq!(conn.reply(3, &()), Err(SendError::Closed));
     }

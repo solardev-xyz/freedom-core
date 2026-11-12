@@ -1,6 +1,7 @@
 //! Replays vectors/streams.json: design 0007's stream frames, their order,
-//! credit and coalescing, and design 0009's two directions on the core's
-//! connection. Every outcome there is the design's, written by
+//! credit and coalescing, design 0009's two directions on the core's
+//! connection, and design 0014's on a service connection that takes main's
+//! bodies. Every outcome there is the design's, written by
 //! hand in vectors/generator/streams.js; main's frame.js runs the same
 //! cases. The formats are in the file's `formats` member.
 
@@ -70,6 +71,7 @@ fn kinds(side: &str) -> Kinds {
         "sender" => Kinds::service(Side::Sender),
         "core" => Kinds::CORE,
         "core_streams" => Kinds::CORE_STREAMS,
+        "service_streams" => Kinds::service(Side::Both),
         other => panic!("side {other}"),
     }
 }
@@ -226,8 +228,39 @@ fn encodings() {
 
 // ---- the service's side ------------------------------------------------------
 
-/// The side that sends bodies: a service's [`Sender`], or the core's
-/// [`Duplex`].
+/// Which connection a case plays.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum On {
+    /// A service's, one-way (0007).
+    Service,
+    /// A service's that takes main's bodies (0014, COL-3).
+    ServiceTwoWay,
+    /// The core's at protocol 2 (0009).
+    Core,
+}
+
+impl On {
+    /// The kinds this side reads.
+    fn reads(self) -> Kinds {
+        match self {
+            On::Service => Kinds::service(Side::Sender),
+            On::ServiceTwoWay => Kinds::service(Side::Both),
+            On::Core => Kinds::CORE_STREAMS,
+        }
+    }
+
+    /// The kinds main reads from it.
+    fn main_reads(self) -> Kinds {
+        match self {
+            On::Service => Kinds::service(Side::Receiver),
+            On::ServiceTwoWay => Kinds::service(Side::Both),
+            On::Core => Kinds::CORE_STREAMS,
+        }
+    }
+}
+
+/// The side that sends bodies: a one-way service's [`Sender`], or the
+/// [`Duplex`] of the core or of a two-way service.
 enum Conn {
     Service(Sender, Inbound),
     Core(Duplex),
@@ -258,7 +291,7 @@ impl Conn {
     fn core(&mut self) -> &mut Duplex {
         match self {
             Conn::Core(d) => d,
-            Conn::Service(..) => panic!("the core's own requests on a service connection"),
+            Conn::Service(..) => panic!("its own requests on a one-way service connection"),
         }
     }
 
@@ -323,8 +356,7 @@ struct Service {
     /// A `sender` case on the core's connection: its codes as [`on_core`]
     /// maps them.
     mapped: bool,
-    /// The core's connection at protocol 2, rather than a service's.
-    core: bool,
+    on: On,
     /// The next body byte main sends on each of the core's own streams.
     inbound: BTreeMap<u64, u64>,
     /// The next body byte each producer offers.
@@ -371,16 +403,16 @@ impl Service {
         if self.mapped { on_core(code) } else { code }
     }
 
-    fn new(core: bool, mapped: bool, data_cap: usize) -> Self {
-        let d = if core {
-            Conn::Core(Duplex::with_data_cap(data_cap))
-        } else {
-            Conn::Service(Sender::with_data_cap(data_cap), Inbound::new())
+    fn new(on: On, mapped: bool, data_cap: usize) -> Self {
+        let d = match on {
+            On::Core => Conn::Core(Duplex::with_data_cap(data_cap)),
+            On::ServiceTwoWay => Conn::Core(Duplex::service(data_cap)),
+            On::Service => Conn::Service(Sender::with_data_cap(data_cap), Inbound::new()),
         };
         Self {
             d,
             mapped,
-            core,
+            on,
             inbound: BTreeMap::new(),
             offered: BTreeMap::new(),
             written: BTreeMap::new(),
@@ -389,18 +421,9 @@ impl Service {
         }
     }
 
-    /// The kinds this side reads.
-    fn reads(&self) -> Kinds {
-        if self.core {
-            Kinds::CORE_STREAMS
-        } else {
-            Kinds::service(Side::Sender)
-        }
-    }
-
     /// A stream frame from main, through the codec as this side reads it.
     fn main_sends(&mut self, frame: &[u8]) -> Result<Received, fc_protocol::stream::StreamError> {
-        let mut decoder = Decoder::with_kinds(self.reads());
+        let mut decoder = Decoder::with_kinds(self.on.reads());
         assert_eq!(decoder.push(frame).unwrap(), frame.len());
         let frame = decoder.pop().unwrap();
         self.d.receive(StreamFrame::from_frame(&frame).unwrap())
@@ -535,12 +558,7 @@ impl Service {
             .next_frame(&mut out)
             .unwrap_or_else(|| panic!("{at}: nothing written, expected {expected}"));
         // As main reads it.
-        let kinds = if self.core {
-            Kinds::CORE_STREAMS
-        } else {
-            Kinds::service(Side::Receiver)
-        };
-        let mut decoder = Decoder::with_kinds(kinds);
+        let mut decoder = Decoder::with_kinds(self.on.main_reads());
         assert_eq!(decoder.push(&out).unwrap(), out.len(), "{at}");
         let frame = decoder.pop().unwrap();
         assert!(
@@ -672,13 +690,13 @@ impl Service {
     }
 }
 
-/// Runs a `sender` or `duplex` case.
-fn play(case: &Json, core: bool, mapped: bool) {
+/// Runs a `sender`, `duplex` or `service_duplex` case.
+fn play(case: &Json, on: On, mapped: bool) {
     let id = case["id"].as_str().unwrap();
     let cap = case["config"]["data_cap"]
         .as_u64()
         .map_or(WRITER_DATA_CAP, |cap| usize::try_from(cap).unwrap());
-    let mut service = Service::new(core, mapped, cap);
+    let mut service = Service::new(on, mapped, cap);
     for (i, step) in case["steps"].as_array().unwrap().iter().enumerate() {
         let at = format!("{id} step {i}");
         if let Some(frames) = step.get("write").or_else(|| step.get("write_some")) {
@@ -718,7 +736,22 @@ fn play(case: &Json, core: bool, mapped: bool) {
 fn sender() {
     let v = vectors();
     for case in cases(&v, "sender") {
-        play(case, false, false);
+        play(case, On::Service, false);
+    }
+}
+
+/// Design 0014, COL-3: a service connection that takes main's bodies. The
+/// sender's cases hold there as they are, its codes being a service's.
+#[test]
+fn service_duplex() {
+    let v = vectors();
+    let duplex = cases(&v, "service_duplex");
+    assert!(duplex.len() >= 14);
+    for case in duplex {
+        play(case, On::ServiceTwoWay, false);
+    }
+    for case in cases(&v, "sender") {
+        play(case, On::ServiceTwoWay, false);
     }
 }
 
@@ -728,7 +761,7 @@ fn duplex() {
     let duplex = cases(&v, "duplex");
     assert!(duplex.len() >= 18);
     for case in duplex {
-        play(case, true, false);
+        play(case, On::Core, false);
     }
     // The sender's cases hold on the core's connection too, each of 0007's
     // codes standing for one of the verified body's; but for the service's
@@ -741,7 +774,7 @@ fn duplex() {
         {
             continue;
         }
-        play(case, true, true);
+        play(case, On::Core, true);
     }
 }
 

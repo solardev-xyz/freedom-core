@@ -19,7 +19,10 @@
 //!   holds, the rest parked; a writer that claims each frame only to write
 //!   it, so what is unwritten stays cancellable; the handshake within its
 //!   deadline, `<service>.shutdown`, parent death, the writer-stall exit,
-//!   a closing phase for the teardown, and the exit watchdog.
+//!   a closing phase for the teardown, and the exit watchdog; events a
+//!   service waits to see written; and, for a service that turns them on,
+//!   requests of its own to main with main's bodies in answer (0014,
+//!   COL-3).
 //! - [`confine`]: OS confinement (design 0010), applied once on the main
 //!   thread while it is the only one: Landlock and seccomp on Linux,
 //!   Seatbelt on macOS, a job object and mitigation policies on Windows,

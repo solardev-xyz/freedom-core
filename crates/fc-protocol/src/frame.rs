@@ -112,7 +112,9 @@ impl Kinds {
 
     /// A service connection whose handshake granted `stream` (design 0007,
     /// `frames: ["stream"]`), as `side` reads it: whole messages and the
-    /// stream frames the other side sends.
+    /// stream frames the other side sends. [`Side::Both`] on a service that
+    /// takes main's bodies (design 0014, COL-3): all four stream kinds, and
+    /// still no fragments.
     pub const fn service(side: Side) -> Kinds {
         Kinds {
             fragments: false,

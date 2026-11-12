@@ -34,12 +34,14 @@
 //!   ([`Inbound`]), each in its requester's ID space, so a frame's kind says
 //!   which. The core holds no ring: data goes straight to the stream's
 //!   consumer, which holds it in room it reserved, and its credit is sent,
-//!   ahead of the sender's frames, once the consumer lets the bytes go.
+//!   ahead of the sender's frames, once the consumer lets the bytes go. A
+//!   service that takes main's bodies (design 0014, COL-3) holds the same,
+//!   with a service's codes ([`Duplex::service`]).
 //! - **The abort codes** ([`AbortCode`], [`Codes`]): every code decodes,
 //!   and which a stream may end with depends on who sends it. A service's
 //!   bodies keep 0007's five; the core's verified bodies end only with
-//!   0009's, and main's pieces only with `cancelled`, `stalled` or
-//!   `body_stream_error`. The sender refuses any other, and the receiving
+//!   0009's, and main's pieces and bodies only with `cancelled`, `stalled`
+//!   or `body_stream_error`. The sender refuses any other, and the receiving
 //!   side takes any other as a protocol error.
 //!
 //! Sans-I/O, like the rest of the crate: the caller feeds frames and events
@@ -94,9 +96,10 @@ pub enum Side {
     Receiver,
     /// Sends bodies (the service): takes credit; sends data, end and abort.
     Sender,
-    /// Both (`freedom-cored`'s connection at protocol 2, design 0009): it
-    /// takes all four, and a frame's kind says which of its streams it
-    /// names ([`Duplex`]).
+    /// Both (`freedom-cored`'s connection at protocol 2, design 0009, and
+    /// a service connection that takes main's bodies, 0014): it takes all
+    /// four, and a frame's kind says which of its streams it names
+    /// ([`Duplex`]).
     Both,
 }
 
@@ -291,9 +294,10 @@ pub enum Codes {
     /// (0009, Failures: after the head): `verification_failed`,
     /// `unverifiable`, `malformed`, `piece_failed`, `busy`, `cancelled`.
     CoreBody,
-    /// A piece main sends the core (`shell.dweb_get`, 0009): `cancelled`
-    /// (the core's cancel), `stalled` (main's body idle timer) and
-    /// `body_stream_error` (the node's body failed).
+    /// A body main sends: a piece to the core (`shell.dweb_get`, 0009), or
+    /// a body to a service that takes them (0014): `cancelled` (the
+    /// requester's cancel, or main's), `stalled` (main's body idle timer)
+    /// and `body_stream_error` (the body failed in main).
     Piece,
 }
 
