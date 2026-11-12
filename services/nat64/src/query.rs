@@ -185,13 +185,9 @@ fn oversize(error: &std::io::Error) -> bool {
 /// AAAA, IN), and EDNS0 offering [`PAYLOAD`] bytes.
 pub fn encode(id: u16) -> Result<Vec<u8>, Failure> {
     let name = Name::from_ascii(NAME).map_err(|_| Failure::Malformed)?;
-    let mut message = Message::new();
-    message
-        .set_id(id)
-        .set_message_type(MessageType::Query)
-        .set_op_code(OpCode::Query)
-        .set_recursion_desired(true)
-        .add_query(Query::query(name, RecordType::AAAA));
+    let mut message = Message::new(id, MessageType::Query, OpCode::Query);
+    message.metadata.recursion_desired = true;
+    message.add_query(Query::query(name, RecordType::AAAA));
     let mut edns = Edns::new();
     edns.set_max_payload(PAYLOAD);
     message.set_edns(edns);
@@ -206,7 +202,7 @@ pub fn answer(reply: &[u8], id: u16) -> Option<Result<Answer, Failure>> {
         let ours = reply.get(..2).is_some_and(|head| head == id.to_be_bytes());
         return ours.then_some(Err(Failure::Malformed));
     };
-    if message.id() != id {
+    if message.metadata.id != id {
         return None;
     }
     Some(read(&message))
@@ -215,20 +211,20 @@ pub fn answer(reply: &[u8], id: u16) -> Option<Result<Answer, Failure>> {
 /// A reply to our query, read.
 fn read(message: &Message) -> Result<Answer, Failure> {
     let ours = Name::from_ascii(NAME).map_err(|_| Failure::Malformed)?;
-    let question_matches = matches!(message.queries(), [query]
+    let question_matches = matches!(message.queries.as_slice(), [query]
         if *query.name() == ours
             && query.query_type() == RecordType::AAAA
             && query.query_class() == DNSClass::IN);
-    if message.message_type() != MessageType::Response
-        || message.op_code() != OpCode::Query
+    if message.metadata.message_type != MessageType::Response
+        || message.metadata.op_code != OpCode::Query
         || !question_matches
     {
         return Err(Failure::Malformed);
     }
-    if message.truncated() {
+    if message.metadata.truncation {
         return Err(Failure::Truncated);
     }
-    let nxdomain = match message.response_code() {
+    let nxdomain = match message.metadata.response_code {
         ResponseCode::NoError => false,
         ResponseCode::NXDomain => true,
         other => return Err(Failure::Rcode(u16::from(other))),
@@ -237,20 +233,24 @@ fn read(message: &Message) -> Result<Answer, Failure> {
     let mut ttl: Option<u32> = None;
     // NXDOMAIN: the name doesn't exist, so no prefix is advertised (RFC 7050
     // §3), whatever its answer section holds.
-    let answers = if nxdomain { &[][..] } else { message.answers() };
+    let answers = if nxdomain {
+        &[][..]
+    } else {
+        &message.answers[..]
+    };
     for record in answers {
-        if let RData::AAAA(aaaa) = record.data() {
+        if let RData::AAAA(aaaa) = &record.data {
             prefixes.extend(Nat64Prefix::in_ipv4only_answer(aaaa.0));
-            ttl = Some(ttl.map_or(record.ttl(), |ttl| ttl.min(record.ttl())));
+            ttl = Some(ttl.map_or(record.ttl, |ttl| ttl.min(record.ttl)));
         }
     }
     if ttl.is_none() {
         // No AAAA record: the negative answer's TTL (RFC 2308 §5).
         ttl = message
-            .name_servers()
+            .authorities
             .iter()
-            .find_map(|record| match record.data() {
-                RData::SOA(soa) => Some(record.ttl().min(soa.minimum())),
+            .find_map(|record| match &record.data {
+                RData::SOA(soa) => Some(record.ttl.min(soa.minimum)),
                 _ => None,
             });
     }
@@ -278,17 +278,11 @@ pub mod tests {
         edit: impl FnOnce(&mut Message),
     ) -> Vec<u8> {
         let query = Message::from_vec(query).unwrap();
-        let mut message = Message::new();
-        message
-            .set_id(query.id())
-            .set_message_type(MessageType::Response)
-            .set_op_code(OpCode::Query)
-            .set_recursion_desired(true)
-            .set_recursion_available(true)
-            .set_response_code(rcode);
-        for question in query.queries() {
-            message.add_query(question.clone());
-        }
+        let mut message = Message::response(query.metadata.id, OpCode::Query);
+        message.metadata.recursion_desired = true;
+        message.metadata.recursion_available = true;
+        message.metadata.response_code = rcode;
+        message.add_queries(query.queries.iter().cloned());
         let name = Name::from_ascii(NAME).unwrap();
         for (addr, ttl) in records {
             message.add_answer(Record::from_rdata(
@@ -307,7 +301,7 @@ pub mod tests {
                 86400,
                 minimum,
             );
-            message.add_name_server(Record::from_rdata(
+            message.add_authority(Record::from_rdata(
                 Name::from_ascii("arpa.").unwrap(),
                 ttl,
                 soa.into_rdata(),
@@ -355,17 +349,17 @@ pub mod tests {
     #[test]
     fn the_query_is_one_aaaa_question_for_ipv4only_arpa_with_edns() {
         let query = Message::from_vec(&encode(0x1234).unwrap()).unwrap();
-        assert_eq!(query.id(), 0x1234);
-        assert_eq!(query.message_type(), MessageType::Query);
-        assert_eq!(query.op_code(), OpCode::Query);
-        assert!(query.recursion_desired());
-        assert_eq!(query.queries().len(), 1);
-        let question = &query.queries()[0];
+        assert_eq!(query.metadata.id, 0x1234);
+        assert_eq!(query.metadata.message_type, MessageType::Query);
+        assert_eq!(query.metadata.op_code, OpCode::Query);
+        assert!(query.metadata.recursion_desired);
+        assert_eq!(query.queries.len(), 1);
+        let question = &query.queries[0];
         assert_eq!(question.name().to_ascii(), NAME);
         assert_eq!(question.query_type(), RecordType::AAAA);
         assert_eq!(question.query_class(), DNSClass::IN);
-        assert_eq!(query.extensions().as_ref().unwrap().max_payload(), PAYLOAD);
-        assert!(query.answers().is_empty());
+        assert_eq!(query.edns.as_ref().unwrap().max_payload(), PAYLOAD);
+        assert!(query.answers.is_empty());
     }
 
     #[test]
@@ -532,7 +526,7 @@ pub mod tests {
                 &[],
                 None,
                 |message| {
-                    message.set_truncated(true);
+                    message.metadata.truncation = true;
                 },
             )]
         });
@@ -543,25 +537,20 @@ pub mod tests {
     fn a_reply_to_another_question_or_not_a_response_is_malformed() {
         let edits: [fn(&mut Message); 4] = [
             |message| {
-                message.set_message_type(MessageType::Query);
+                message.metadata.message_type = MessageType::Query;
             },
             |message| {
-                message.set_op_code(OpCode::Status);
+                message.metadata.op_code = OpCode::Status;
             },
             |message| {
-                let mut other = message.clone();
-                other.take_queries();
-                other.add_query(Query::query(
+                message.queries = vec![Query::query(
                     Name::from_ascii("example.com.").unwrap(),
                     RecordType::AAAA,
-                ));
-                *message = other;
+                )];
             },
             |message| {
-                let mut other = message.clone();
-                other.take_queries();
-                other.add_query(Query::query(Name::from_ascii(NAME).unwrap(), RecordType::A));
-                *message = other;
+                message.queries =
+                    vec![Query::query(Name::from_ascii(NAME).unwrap(), RecordType::A)];
             },
         ];
         for edit in edits {

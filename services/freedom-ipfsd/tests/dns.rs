@@ -74,14 +74,14 @@ impl Dns {
                 let Ok(query) = Message::from_vec(&buffer[..read]) else {
                     continue;
                 };
-                let mut reply = Message::new();
-                reply
-                    .set_id(query.id())
-                    .set_message_type(MessageType::Response)
-                    .set_op_code(query.op_code())
-                    .set_recursion_desired(true)
-                    .set_recursion_available(true);
-                for question in query.queries() {
+                let mut reply = Message::new(
+                    query.metadata.id,
+                    MessageType::Response,
+                    query.metadata.op_code,
+                );
+                reply.metadata.recursion_desired = true;
+                reply.metadata.recursion_available = true;
+                for question in &query.queries {
                     let name = question.name().to_ascii();
                     let name = name.trim_end_matches('.').to_ascii_lowercase();
                     recorded
@@ -90,7 +90,7 @@ impl Dns {
                         .push(format!("{name} {}", question.query_type()));
                     reply.add_query(question.clone());
                     if name != ROUTER && name != PEER_NAME {
-                        reply.set_response_code(ResponseCode::NXDomain);
+                        reply.metadata.response_code = ResponseCode::NXDomain;
                     } else if question.query_type() == RecordType::A {
                         reply.add_answer(Record::from_rdata(
                             question.name().clone(),

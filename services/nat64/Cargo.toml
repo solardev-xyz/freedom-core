@@ -28,11 +28,13 @@ fc-service = { path = "../../crates/fc-service" }
 # stack (freedom-ipfs #55), at the commit freedom-ipfsd pins, so both resolve
 # to one package, which freedom-ipfs-net re-exports as its gate.
 freedom-ipfs-addr = { git = "https://github.com/solardev-xyz/freedom-ipfs", rev = "8a2311c2316b830b8bb3fe02e201765b2f5c35e0" }
-# Discovery's one query and its answers (src/query.rs): DNS messages, already
-# in every platform's graph (freedom-ipfs-net's resolver, libp2p-dns). It
-# encodes only its own one-question query, and decodes the answers, as
-# freedom-ipfsd's deny.toml's hickory-proto ignores require.
-hickory-proto = { version = "0.25", default-features = false, features = ["std"] }
+# Discovery's one query and its answers (src/query.rs): DNS messages. It
+# encodes only its own one-question query, and decodes what the resolver
+# answers, from the network: 0.26.2 at least, whose decoder no longer
+# reserves room for as many records as a header claims before reading any
+# (RUSTSEC-2026-0491). Without `text-parsing`: no zone file or record text
+# is ever parsed here.
+hickory-proto = { version = "0.26.2", default-features = false, features = ["std"] }
 serde_json = "1"
 
 # The resolvers per OS (src/resolvers.rs), each crate already in that
