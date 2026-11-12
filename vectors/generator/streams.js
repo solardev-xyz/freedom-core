@@ -1,7 +1,8 @@
 'use strict';
 
 // Stream frame vectors (design 0007, implementation step 3; design 0009's
-// streams in both directions on freedom-cored's connection, step 4). No reference
+// streams in both directions on freedom-cored's connection, step 4; design
+// 0014's on a service connection that takes main's bodies, COL-3). No reference
 // implementation exists yet: freedom-browser's frame.js gains the stream
 // kinds in step 6. So every case and every outcome here is the design's
 // (0007, "Frames"), written out by hand below; nothing is computed by a model
@@ -32,15 +33,16 @@ const CORE_BODY_CODES = ['verification_failed', 'unverifiable', 'malformed', 'pi
 // A piece main sends the core: the core's cancel, main's idle timer, the node's failing body.
 const PIECE_CODES = ['cancelled', 'stalled', 'body_stream_error'];
 const ABORT_CODES = [...SERVICE_CODES, 'verification_failed', 'unverifiable', 'malformed', 'piece_failed', 'stalled'];
-const SIDES = ['receiver', 'sender', 'core', 'core_streams'];
+const SIDES = ['receiver', 'sender', 'core', 'core_streams', 'service_streams'];
 
 const FORMATS = {
   body_bytes: 'Byte k of stream id\'s body is ((id mod 251) + (k mod 251)) mod 251, with k counted from the body\'s start.',
   bytes: 'A list of parts, concatenated: {"hex": "<lowercase hex>"} or {"fill": [byte, count]}.',
-  frames: 'Decoding. `side` is the decoder: "receiver" (main, after a handshake that granted stream), "sender" (the service, likewise), "core" (a freedom-cored connection before its hello settles protocol 2, which takes no stream frame; protocol 1, which never granted stream, is gone) or "core_streams" (a freedom-cored connection at protocol 2, which takes stream frames in both directions, design 0009). `input` is fed whole, and in any chunking the outcome is the same. `expect.frames` lists every frame decoded, as ["json", text], ["data", id, bytes], ["end", id], ["abort", id, code, message] or ["credit", id, n]. `expect.truncated` means the input stops inside a frame: EOF there truncates it. `expect.error` is the first failure\'s category, from the header check, the ID or the payload; frames before it are not asserted.',
+  frames: 'Decoding. `side` is the decoder: "receiver" (main, after a handshake that granted stream), "sender" (the service, likewise), "core" (a freedom-cored connection before its hello settles protocol 2, which takes no stream frame; protocol 1, which never granted stream, is gone), "core_streams" (a freedom-cored connection at protocol 2, which takes stream frames in both directions, design 0009) or "service_streams" (either end of a service connection that takes main\'s bodies, design 0014: all four stream kinds, both ways, and still no fragments). `input` is fed whole, and in any chunking the outcome is the same. `expect.frames` lists every frame decoded, as ["json", text], ["data", id, bytes], ["end", id], ["abort", id, code, message] or ["credit", id, n]. `expect.truncated` means the input stops inside a frame: EOF there truncates it. `expect.error` is the first failure\'s category, from the header check, the ID or the payload; frames before it are not asserted.',
   encodings: '`frame` encodes to exactly `hex`, or is refused with `error` and nothing written. `frame` is as in `frames`.',
   sender: 'The service\'s side. Steps run in order. A step with `do` is an action with its `expect`ed result: ["request", id] main\'s request (ok, or a protocol error); ["cancel", id] main\'s cancel ("cancelled": the reply or abort is queued and the work is to stop; "late": nothing changes); ["credit", id, n] main\'s credit frame ("taken" into the stream\'s account, "late" for a stream that has ended, or a protocol error); ["head", id, body] the response that heads request id, opening a stream if body is true; ["reply", id] the request\'s one reply without a body (an error, or a result); ["push", id, n] the producer offers its next n body bytes (`taken` says how many were queued; the producer keeps the rest); ["finish", id] the end, after every byte queued; ["abort", id, code]. Producer refusals are `refused`: gone, unknown, answered, not_open, ended, too_large or closed. A step with `write` takes frames from the writer until it has none, and they must be exactly those listed; `write_some` takes exactly those listed and may leave more. Written frames are ["head", id], ["reply", id], ["cancelled", id] (the reply a cancel made the request\'s only one), ["data", id, offset, length] (bytes of the body from offset), ["end", id] and ["abort", id, code]. `check` compares the writer\'s held bytes (queued body bytes across streams) and, per ID, whether the request is live, its producer\'s room (the window\'s room within the writer\'s, null without a body that takes bytes) and its queued bytes (null without a body). A push takes as much as the room allows, except that one the writer\'s cap would cut below 4 KiB takes nothing. `repeat` runs its step that many times. `config.data_cap` replaces the writer\'s 16 MiB cap. After a protocol error, every main step reports the same error, every producer step is refused with `closed`, and nothing is written.',
   duplex: 'freedom-cored\'s side at protocol 2 (design 0009, Streams in the core): one connection, the bodies the core sends in answer to main\'s requests and those main sends in answer to the core\'s. The two are numbered apart, each in its requester\'s ID space, so one number may name a stream in each; a frame\'s kind says which. The steps for main\'s requests are `sender`\'s, with ["credit", id, n] main\'s credit frame through a core_streams decoder. The core\'s own: ["ask", id] the core sends request id (ok, or request_order for the core\'s own bug); ["answered", id, opens] main\'s reply to it, a head with body: true when opens ("deliver", "retired", or a protocol error); ["data", id, n] a data frame from main with its next n bytes of the core\'s stream id ("data": they go to the stream\'s consumer, "dropped", or a protocol error); ["end", id] ("end", "dropped", or an error); ["aborted", id, code] an abort frame from main ("abort", "dropped", or an error); ["release", id, n] the stream\'s consumer lets go of n bytes ("ok": their credit is owed while the stream is open, nothing otherwise; or refused overcredit, past what the stream holds, which changes nothing); ["drop", id] the core cancels its request ("send_cancel": what is owed for it is dropped, and its frames are dropped as they come; or "nothing"). `write` and `write_some` are `sender`\'s, its frames with ["credit", id, n] among them: owed credit, merged per stream while unwritten, written before the sender\'s frames. `check` compares `sender`\'s fields, and `inbound`, per ID: the core\'s record ({state: pending, retired_pending, open or retiring, received, returned}, or null), and `owed`: the streams with credit owed and unwritten. After a protocol error in either direction, every step that takes a frame or a reply reports the same error, producer steps are refused with closed, release is ok and owes nothing, and nothing is written.',
+  service_duplex: 'A service\'s side of a connection that takes main\'s bodies (design 0014, COL-3): the bodies the service sends in answer to main\'s requests, and those main sends in answer to the service\'s own requests, on one service connection. Steps, writes and checks are `duplex`\'s, with ["ask", id] the service sending its own request and every frame from main through a service_streams decoder, and main reading what is written through one too. The rules are the core\'s, with a service\'s codes: the bodies the service sends end only with a service\'s five (cancelled, internal, body_stream_error, stopped, busy), and main\'s only with a piece\'s (cancelled, stalled, body_stream_error); any other from main is abort_code. Every `sender` case also holds on this side, as it is.',
   abort_codes: 'Every abort code decodes; which a stream may end with depends on who sends it (0007, Errors; 0009, Failures and Streams in the core). A service\'s body, on a service connection: cancelled, internal, body_stream_error, stopped, busy. A verified body the core sends main on its protocol-2 connection: verification_failed, unverifiable, malformed, piece_failed, busy, cancelled. A piece main streams to the core: cancelled, stalled, body_stream_error. A sender refuses to write any other (refused code), and a receiver takes any other as a protocol error (abort_code). The receiver cases are main\'s side of a service connection; the sender cases are the service\'s, and, replayed on the core\'s connection, each 0007 code stands for one of the verified body\'s.',
   receiver: 'Main\'s side. ["request", id] main sends request id (ok, or request_order for main\'s own bug); ["reply", id, opens] its reply arrives, a head with body: true when opens ("deliver", "retired", or a protocol error); ["data", id, n] a data frame with the service\'s next n bytes of stream id; ["end", id]; ["abort", id, code]. Frames give "data", "end" (bytes are left to pull), "end_drained" (nothing is left: the record and ring are gone), "abort", "dropped" (the stream is retiring), or a protocol error. ["pull", id, max] the consumer pulls: null without a record, else the chunk as [offset, length] of the body, the credit to send (null for none) and whether it is the last. ["cancel", id] a local cancel: "send_cancel", "freed" (end had arrived: nothing is sent) or "nothing". `check` compares, per ID, the record (null for none) with its state (pending, retired_pending, open, eof, retiring), whether its ring is allocated, the bytes in it, and received and returned bytes; and the outstanding records. After a protocol error, every frame and reply reports the same error.',
 };
@@ -249,6 +251,33 @@ function frameCases() {
     [abortFrame(42, '{"code":"busy"}')], { error: 'abort_payload' });
   add('core-streams-reserved-kind', 'kinds 0x06 to 0x0F stay reserved', 'core_streams',
     [framed(0x06, [H(be64(1))])], { error: 'unknown_kind' });
+
+  // A service connection that takes main's bodies (design 0014, COL-3):
+  // all four kinds at either end, and still no fragments.
+  add('service-streams-takes-data', 'a service that takes main\'s bodies takes data, end and abort for its own requests', 'service_streams',
+    [dataFrame(42, H([7]))], ok(['data', 42, H([7])]));
+  add('service-streams-takes-end', 'a service that takes main\'s bodies takes data, end and abort for its own requests', 'service_streams',
+    [endFrame(42)], ok(['end', 42]));
+  add('service-streams-takes-abort', 'a service that takes main\'s bodies takes data, end and abort for its own requests', 'service_streams',
+    [abortFrame(42, abortJson('cancelled', 'm'))], ok(['abort', 42, 'cancelled', 'm']));
+  add('service-streams-takes-credit', 'a service that takes main\'s bodies still takes credit for the bodies it sends', 'service_streams',
+    [creditFrame(42, 4096)], ok(['credit', 42, 4096]));
+  add('service-streams-both-ways', 'one service connection, both directions: one number may name a stream in each', 'service_streams',
+    [creditFrame(7, 100), dataFrame(7, H([1, 2])), endFrame(7), jsonFrame('{}')],
+    ok(['credit', 7, 100], ['data', 7, H([1, 2])], ['end', 7], ['json', '{}']));
+  add('service-streams-data-empty', 'the lengths are checked as on any stream connection', 'service_streams',
+    [stream(KINDS.data, 42)], { error: 'data_empty' });
+  add('service-streams-end-overlong', 'the lengths are checked as on any stream connection', 'service_streams',
+    [stream(KINDS.end, 42, [H([0])])], { error: 'stream_length' });
+  add('service-streams-credit-zero', 'credit: above zero', 'service_streams', [creditFrame(42, 0)], { error: 'credit_zero' });
+  add('service-streams-abort-payload', 'abort: JSON { code, message }', 'service_streams',
+    [abortFrame(42, '{"code":"busy"}')], { error: 'abort_payload' });
+  add('service-streams-reserved-kind', 'kinds 0x06 to 0x0F stay reserved', 'service_streams',
+    [framed(0x06, [H(be64(1))])], { error: 'unknown_kind' });
+  for (const kind of [0x10, 0x11, 0x12, 0x13]) {
+    add(`service-streams-refuses-fragments-${kind}`, 'a service connection takes no fragment kinds, two-way or not (frames: ["stream"])', 'service_streams',
+      [framed(kind, [H([0])])], { error: 'unknown_kind' });
+  }
 
   // Kinds a connection doesn't take.
   for (const kind of [KINDS.data, KINDS.end, KINDS.abort, KINDS.credit]) {
@@ -999,6 +1028,104 @@ function duplexCases() {
 }
 
 // ---------------------------------------------------------------------------
+// A service connection that takes main's bodies (design 0014, COL-3): the
+// core's two directions, with a service's codes.
+
+function serviceDuplexCases() {
+  const cases = [];
+  const add = (id, rule, steps) => cases.push({ id, rule, steps });
+
+  add('one-number-both-ways', 'main\'s request 7 and the service\'s request 7 are different streams: data names the service\'s, credit main\'s', [
+    S.request(7), D.ask(7),
+    S.head(7, true), S.push(7, 100), S.write(W.head(7), W.data(7, 0, 100)),
+    D.answered(7, true), D.data(7, 60),
+    S.credit(7, 100),
+    D.release(7, 60), S.write(credit(7, 60)),
+    D.check({ 7: live(WINDOW, 0) }, { 7: inOpen(60, 60) }, 0),
+  ]);
+  add('a-body-from-main', 'main\'s head opens its body; the service takes it within the window and credits what its consumer took', [
+    D.ask(1), D.answered(1, true),
+    D.data(1, MAX_DATA), D.data(1, MAX_DATA), D.data(1, 1, error('window_overrun')),
+  ]);
+  add('the-window-moves-with-what-is-taken', 'credit goes back as the consumer takes the bytes, and the window moves with it', [
+    D.ask(1), D.answered(1, true),
+    D.data(1, MAX_DATA), D.data(1, MAX_DATA), D.release(1, MAX_DATA), S.write(credit(1, MAX_DATA)),
+    D.data(1, MAX_DATA), D.release(1, MAX_DATA), D.release(1, MAX_DATA), D.end(1),
+    D.check({}, { 1: null }, 0), S.write(),
+  ]);
+  add('a-reply-without-a-body', 'a reply that opens no body ends the request: nothing more may come for it', [
+    D.ask(1), D.answered(1, false), D.check({}, { 1: null }),
+    D.data(1, 1, error('stream_not_open')),
+  ]);
+  add('credit-goes-first', 'credit the service owes main is written before its own frames, heads included', [
+    S.request(1), S.head(1, true), S.push(1, 10),
+    ...asked(2), D.data(2, 100), D.release(2, 100),
+    S.write(credit(2, 100), W.head(1), W.data(1, 0, 10)),
+  ]);
+  add('drop-an-open-stream', 'the service\'s cancel drops what is owed and the stream\'s frames until its terminal', [
+    ...asked(5), D.data(5, 50), D.release(5, 50), D.drop(5, 'send_cancel'),
+    D.check({}, { 5: { state: 'retiring', received: 0, returned: 0 } }, 0),
+    S.write(),
+    D.data(5, 10, 'dropped'), D.release(5, 10), D.aborted(5, 'cancelled', 'dropped'),
+    D.check({}, { 5: null }, 0),
+    D.data(5, 1, error('stream_not_open')),
+  ]);
+  add('drop-before-the-reply', 'a head that crossed the service\'s cancel opens a retiring stream; a reply without one ends it', [
+    D.ask(10), D.drop(10, 'send_cancel'), D.answered(10, true, 'retired'),
+    D.data(10, 5, 'dropped'), D.end(10, 'dropped'), D.check({}, { 10: null }),
+    D.ask(11), D.drop(11, 'send_cancel'), D.answered(11, false, 'retired'), D.check({}, { 11: null }),
+    D.drop(12, 'nothing'),
+  ]);
+  add('the-services-ids-increase', 'the service\'s request IDs strictly increase, apart from main\'s', [
+    S.request(5), D.ask(3), D.ask(3, error('request_order')), D.ask(2, error('request_order')), D.ask(5), S.request(6),
+  ]);
+  add('data-for-a-request-the-service-never-sent', 'a frame above the service\'s highest request is a protocol error, whatever main\'s requests are', [
+    S.request(8), D.ask(3), D.data(8, 1, error('stream_unknown')),
+    S.head(8, true, refused('closed')), D.answered(3, true, error('stream_unknown')), S.write(),
+  ]);
+  add('data-before-the-reply', 'no data before the service\'s request has its head', [
+    D.ask(6), D.data(6, 1, error('stream_not_open')),
+  ]);
+  add('credit-for-a-stream-the-service-never-opened', 'credit names a request the service answered with a body: one of its own requests is no such stream', [
+    ...asked(9), S.credit(9, 1, error('stream_unknown')), D.data(9, 1, error('stream_unknown')),
+  ]);
+  add('unsolicited-reply', 'a reply to no pending request of the service\'s is a protocol error', [
+    D.ask(1), D.answered(2, false, error('unsolicited_response')),
+  ]);
+  add('a-protocol-error-fails-both-ways', 'credit beyond the bytes sent fails the connection, the service\'s requests with it', [
+    S.request(1), S.head(1, true), S.push(1, 10), ...asked(2), D.data(2, 10),
+    S.credit(1, 11, error('credit_overgrant')),
+    D.data(2, 1, error('credit_overgrant')), D.answered(2, false, error('credit_overgrant')),
+    D.release(2, 10), S.write(),
+  ]);
+  // The service's bodies keep a service's five codes, two-way or not, and
+  // main's end only with a piece's.
+  ABORT_CODES.forEach((code, i) => {
+    const id = 21 + i;
+    const allowed = SERVICE_CODES.includes(code);
+    add(`service-body-${allowed ? 'ends-with' : 'never-ends-with'}-${code}`, allowed
+      ? 'the service\'s body ends with one of 0007\'s codes, two-way or not'
+      : 'the service\'s body never ends with a code outside 0007\'s: refused, and the stream stays open', [
+      S.request(id), S.head(id, true),
+      allowed ? S.abort(id, code) : S.abort(id, code, refused('code')),
+      allowed ? S.write(W.head(id), W.abort(id, code)) : S.write(W.head(id)),
+    ]);
+  });
+  ABORT_CODES.forEach((code, i) => {
+    const id = 41 + i;
+    const allowed = PIECE_CODES.includes(code);
+    add(`main-body-${allowed ? 'ends-with' : 'never-ends-with'}-${code}`, allowed
+      ? 'main ends a body it sends a service with cancelled, stalled or body_stream_error'
+      : 'main ends a body it sends a service only with cancelled, stalled or body_stream_error: any other code is a protocol error', [
+      ...asked(id), D.data(id, 10),
+      allowed ? D.aborted(id, code) : D.aborted(id, code, error('abort_code')),
+      D.check({}, { [id]: null }),
+    ]);
+  });
+  return cases;
+}
+
+// ---------------------------------------------------------------------------
 // Shape checks: every case is well formed before it is written.
 
 // IDs up to 2^53, the first invalid one, which JSON and JS still carry exactly.
@@ -1152,6 +1279,7 @@ function buildStreams(meta) {
   const sender = senderCases();
   const receiver = receiverCases();
   const duplex = duplexCases();
+  const serviceDuplex = serviceDuplexCases();
   const ids = new Set();
   for (const c of frames) {
     assert.ok(!ids.has(c.id), c.id);
@@ -1169,9 +1297,10 @@ function buildStreams(meta) {
   checkCases(sender, checkSenderStep);
   checkCases(receiver, checkReceiverStep);
   checkCases(duplex, checkDuplexStep);
+  checkCases(serviceDuplex, checkDuplexStep);
   return {
     meta,
-    source: 'design 0007 (Frames) and design 0009 (Streams in the core): every outcome is the design\'s, written by hand in vectors/generator/streams.js; no reference implementation exists yet',
+    source: 'design 0007 (Frames), design 0009 (Streams in the core) and design 0014 (Requests the service makes, Bodies): every outcome is the design\'s, written by hand in vectors/generator/streams.js; no reference implementation exists yet',
     constants: {
       kinds: KINDS,
       id_bytes: ID_BYTES,
@@ -1194,6 +1323,7 @@ function buildStreams(meta) {
     sender,
     receiver,
     duplex,
+    service_duplex: serviceDuplex,
   };
 }
 

@@ -1,5 +1,6 @@
 //! Both ends of the streams on one connection: `freedom-cored`'s, at
-//! protocol 2 (design 0009, Streams in the core).
+//! protocol 2 (design 0009, Streams in the core), and a service's that
+//! takes main's bodies (design 0014, COL-3: [`Duplex::service`]).
 //!
 //! A stream is the body of a response, sent by whichever side answers the
 //! request, and its ID is the request's, in the requester's ID space. So
@@ -80,8 +81,21 @@ impl Duplex {
     /// A duplex whose sender's writer holds at most `data_cap` queued body
     /// bytes ([`Sender::with_data_cap`]).
     pub fn with_data_cap(data_cap: usize) -> Self {
+        Self::with_sender(Sender::with_data_cap(data_cap).with_codes(Codes::CoreBody))
+    }
+
+    /// A service connection's streams, for a service that takes main's
+    /// bodies (design 0014, COL-3): the bodies it sends keep 0007's five
+    /// codes, as every service's do, and main's end only with a piece's
+    /// ([`Codes`]). Its sender's writer holds at most `data_cap` queued body
+    /// bytes.
+    pub fn service(data_cap: usize) -> Self {
+        Self::with_sender(Sender::with_data_cap(data_cap).with_codes(Codes::Service))
+    }
+
+    fn with_sender(sender: Sender) -> Self {
         Self {
-            sender: Sender::with_data_cap(data_cap).with_codes(Codes::CoreBody),
+            sender,
             inbound: Inbound::new(),
             owed: BTreeMap::new(),
             order: BTreeMap::new(),
