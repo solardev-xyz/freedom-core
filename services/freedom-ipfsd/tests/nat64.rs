@@ -67,19 +67,19 @@ impl Dns64 {
                 let Ok(query) = Message::from_vec(&buffer[..read]) else {
                     continue;
                 };
-                let mut reply = Message::new();
-                reply
-                    .set_id(query.id())
-                    .set_message_type(MessageType::Response)
-                    .set_op_code(query.op_code())
-                    .set_recursion_desired(true)
-                    .set_recursion_available(true)
-                    .set_response_code(if failing {
-                        ResponseCode::ServFail
-                    } else {
-                        ResponseCode::NoError
-                    });
-                for question in query.queries() {
+                let mut reply = Message::new(
+                    query.metadata.id,
+                    MessageType::Response,
+                    query.metadata.op_code,
+                );
+                reply.metadata.recursion_desired = true;
+                reply.metadata.recursion_available = true;
+                reply.metadata.response_code = if failing {
+                    ResponseCode::ServFail
+                } else {
+                    ResponseCode::NoError
+                };
+                for question in &query.queries {
                     reply.add_query(question.clone());
                     if !failing {
                         for addr in &records {
