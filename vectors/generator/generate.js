@@ -20,6 +20,7 @@ const { buildRadicleBlob } = require('./radicle-blob');
 const { buildRadicleNetwork } = require('./radicle-network');
 const { buildRadicleStats } = require('./radicle-stats');
 const { buildRadicleImport } = require('./radicle-import');
+const { buildApprovals } = require('./approvals');
 
 const REFERENCE_COMMIT = 'fb540328162839e68150fe2c5e517edb86734d1c';
 // The Radicle vectors' own reference: freedom-browser's integration/rust-core,
@@ -29,6 +30,10 @@ const REFERENCE_COMMIT = 'fb540328162839e68150fe2c5e517edb86734d1c';
 // shared reference above stays, since moving it would re-derive every other
 // file from another browser and break the random fixtures' meta.
 const RADICLE_REFERENCE_COMMIT = '1ea598373fcc406bed8a3df1e54b734dcc4e5ac5';
+// The approvals vectors' own reference (design 0012): freedom-browser's
+// integration/rust-core, with SEC-1's eleventh token kind (#1016) and 0011's
+// page tokens (PRQ-5a). Like the Radicle reference, it moves on its own.
+const APPROVALS_REFERENCE_COMMIT = '7f85551d82bddb1337df73b331785e969d62d1b9';
 const OUTPUT = path.resolve(__dirname, '..');
 const INDICES = [0, 1, 2, 1000, 2147483647];
 const MNEMONICS = [
@@ -105,6 +110,13 @@ function checkedCommit(checkout, expected, what) {
  * modules, and no package of its own is read, so its meta names none. */
 function loadRadicleReference(checkout) {
   const commit = checkedCommit(checkout, RADICLE_REFERENCE_COMMIT, 'Radicle reference');
+  return { checkout, meta: { freedomBrowserCommit: commit, nodeVersion: process.version, generator: 'vectors/generator/generate.js' } };
+}
+
+/** The approvals vectors' reference: their generator loads its
+ * signing-confirmation.js, which reads no package, so its meta names none. */
+function loadApprovalsReference(checkout) {
+  const commit = checkedCommit(checkout, APPROVALS_REFERENCE_COMMIT, 'approvals reference');
   return { checkout, meta: { freedomBrowserCommit: commit, nodeVersion: process.version, generator: 'vectors/generator/generate.js' } };
 }
 
@@ -526,12 +538,13 @@ function buildRadicle({ meta, derivation: d, formats: f }, existing) {
 
 async function main() {
   const args = process.argv.slice(2);
-  assert.ok(args.length === 5 && ['generate', 'check'].includes(args[0]) && args[1] === '--freedom-browser'
-    && args[3] === '--radicle-browser',
-    'Usage: node vectors/generator/generate.js <generate|check> --freedom-browser <checkout> --radicle-browser <checkout>');
-  const [mode, , checkout, , radicleCheckout] = args;
+  assert.ok(args.length === 7 && ['generate', 'check'].includes(args[0]) && args[1] === '--freedom-browser'
+    && args[3] === '--radicle-browser' && args[5] === '--approvals-browser',
+    'Usage: node vectors/generator/generate.js <generate|check> --freedom-browser <checkout> --radicle-browser <checkout> --approvals-browser <checkout>');
+  const [mode, , checkout, , radicleCheckout, , approvalsCheckout] = args;
   const reference = loadReference(path.resolve(checkout));
   const radicle = loadRadicleReference(path.resolve(radicleCheckout));
+  const approvals = loadApprovalsReference(path.resolve(approvalsCheckout));
   const deterministic = {
     'keys.json': buildKeys(reference),
     'mnemonic-validation.json': buildValidation(reference),
@@ -578,6 +591,8 @@ async function main() {
     // Design 0008's import, from main's GitHub bridge over a scripted
     // add-on, and the service's answers.
     'radicle-import.json': await buildRadicleImport(radicle.checkout, radicle.meta),
+    // Design 0012's tokens, from main's signing-confirmation.js.
+    'approvals.json': buildApprovals(approvals.checkout, approvals.meta),
   };
   // Check every deterministic file before doing the more expensive fixture checks.
   for (const [filename, contents] of Object.entries(deterministic)) {
