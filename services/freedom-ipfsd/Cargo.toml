@@ -64,9 +64,9 @@ fc-service = { path = "../../crates/fc-service" }
 # src/build_info.rs reports the same commit.
 # freedom-ipfs-core: the memory budget's `Reservation`, which the gateway
 # crate doesn't re-export.
-freedom-ipfs-core = { git = "https://github.com/solardev-xyz/freedom-ipfs", rev = "7cb69e37f0548c4c83021664cdc6a1b020067cb7" }
-freedom-ipfs-gateway = { git = "https://github.com/solardev-xyz/freedom-ipfs", rev = "7cb69e37f0548c4c83021664cdc6a1b020067cb7", features = ["socks"] }
-freedom-ipfs-store = { git = "https://github.com/solardev-xyz/freedom-ipfs", rev = "7cb69e37f0548c4c83021664cdc6a1b020067cb7" }
+freedom-ipfs-core = { git = "https://github.com/solardev-xyz/freedom-ipfs", rev = "deb240d60ad0053a441e3e032bdb529cc705dfaa" }
+freedom-ipfs-gateway = { git = "https://github.com/solardev-xyz/freedom-ipfs", rev = "deb240d60ad0053a441e3e032bdb529cc705dfaa", features = ["socks"] }
+freedom-ipfs-store = { git = "https://github.com/solardev-xyz/freedom-ipfs", rev = "deb240d60ad0053a441e3e032bdb529cc705dfaa" }
 # The `Stream` trait, to read a response's body as it comes; already in
 # freedom-ipfs's graph.
 futures-core = "0.3"
@@ -85,7 +85,7 @@ tokio = { version = "1", default-features = false, features = ["rt-multi-thread"
 hickory-proto = { version = "0.26.2", default-features = false, features = ["std"] }
 # Upstream's SOCKS5 test proxy and test servers (its `test-util` feature),
 # for the `socks5` tests through the binary; the same pin as the gateway's.
-freedom-ipfs-net = { git = "https://github.com/solardev-xyz/freedom-ipfs", rev = "7cb69e37f0548c4c83021664cdc6a1b020067cb7", features = ["test-util"] }
+freedom-ipfs-net = { git = "https://github.com/solardev-xyz/freedom-ipfs", rev = "deb240d60ad0053a441e3e032bdb529cc705dfaa", features = ["test-util"] }
 tempfile = "3"
 
 # tests/confinement.rs: the kernel's Landlock ABI, which the report must name

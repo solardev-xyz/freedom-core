@@ -1002,7 +1002,7 @@ dependencies = [
 [[package]]
 name = "freedom-ipfs-addr"
 version = "0.4.6"
-source = "git+https://github.com/solardev-xyz/freedom-ipfs?rev=7cb69e37f0548c4c83021664cdc6a1b020067cb7#7cb69e37f0548c4c83021664cdc6a1b020067cb7"
+source = "git+https://github.com/solardev-xyz/freedom-ipfs?rev=deb240d60ad0053a441e3e032bdb529cc705dfaa#deb240d60ad0053a441e3e032bdb529cc705dfaa"
 dependencies = [
  "data-encoding",
  "thiserror 2.0.18",
@@ -1012,7 +1012,7 @@ dependencies = [
 [[package]]
 name = "freedom-ipfs-core"
 version = "0.4.6"
-source = "git+https://github.com/solardev-xyz/freedom-ipfs?rev=7cb69e37f0548c4c83021664cdc6a1b020067cb7#7cb69e37f0548c4c83021664cdc6a1b020067cb7"
+source = "git+https://github.com/solardev-xyz/freedom-ipfs?rev=deb240d60ad0053a441e3e032bdb529cc705dfaa#deb240d60ad0053a441e3e032bdb529cc705dfaa"
 dependencies = [
  "bytes",
  "cid",
@@ -1026,7 +1026,7 @@ dependencies = [
 [[package]]
 name = "freedom-ipfs-gateway"
 version = "0.4.6"
-source = "git+https://github.com/solardev-xyz/freedom-ipfs?rev=7cb69e37f0548c4c83021664cdc6a1b020067cb7#7cb69e37f0548c4c83021664cdc6a1b020067cb7"
+source = "git+https://github.com/solardev-xyz/freedom-ipfs?rev=deb240d60ad0053a441e3e032bdb529cc705dfaa#deb240d60ad0053a441e3e032bdb529cc705dfaa"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1055,7 +1055,7 @@ dependencies = [
 [[package]]
 name = "freedom-ipfs-namesys"
 version = "0.4.6"
-source = "git+https://github.com/solardev-xyz/freedom-ipfs?rev=7cb69e37f0548c4c83021664cdc6a1b020067cb7#7cb69e37f0548c4c83021664cdc6a1b020067cb7"
+source = "git+https://github.com/solardev-xyz/freedom-ipfs?rev=deb240d60ad0053a441e3e032bdb529cc705dfaa#deb240d60ad0053a441e3e032bdb529cc705dfaa"
 dependencies = [
  "async-trait",
  "cid",
@@ -1076,7 +1076,7 @@ dependencies = [
 [[package]]
 name = "freedom-ipfs-net"
 version = "0.4.6"
-source = "git+https://github.com/solardev-xyz/freedom-ipfs?rev=7cb69e37f0548c4c83021664cdc6a1b020067cb7#7cb69e37f0548c4c83021664cdc6a1b020067cb7"
+source = "git+https://github.com/solardev-xyz/freedom-ipfs?rev=deb240d60ad0053a441e3e032bdb529cc705dfaa#deb240d60ad0053a441e3e032bdb529cc705dfaa"
 dependencies = [
  "data-encoding",
  "either",
@@ -1106,7 +1106,7 @@ dependencies = [
 [[package]]
 name = "freedom-ipfs-retrieval"
 version = "0.4.6"
-source = "git+https://github.com/solardev-xyz/freedom-ipfs?rev=7cb69e37f0548c4c83021664cdc6a1b020067cb7#7cb69e37f0548c4c83021664cdc6a1b020067cb7"
+source = "git+https://github.com/solardev-xyz/freedom-ipfs?rev=deb240d60ad0053a441e3e032bdb529cc705dfaa#deb240d60ad0053a441e3e032bdb529cc705dfaa"
 dependencies = [
  "bytes",
  "cid",
@@ -1134,7 +1134,7 @@ dependencies = [
 [[package]]
 name = "freedom-ipfs-routing"
 version = "0.4.6"
-source = "git+https://github.com/solardev-xyz/freedom-ipfs?rev=7cb69e37f0548c4c83021664cdc6a1b020067cb7#7cb69e37f0548c4c83021664cdc6a1b020067cb7"
+source = "git+https://github.com/solardev-xyz/freedom-ipfs?rev=deb240d60ad0053a441e3e032bdb529cc705dfaa#deb240d60ad0053a441e3e032bdb529cc705dfaa"
 dependencies = [
  "async-trait",
  "cid",
@@ -1154,7 +1154,7 @@ dependencies = [
 [[package]]
 name = "freedom-ipfs-socks"
 version = "0.4.6"
-source = "git+https://github.com/solardev-xyz/freedom-ipfs?rev=7cb69e37f0548c4c83021664cdc6a1b020067cb7#7cb69e37f0548c4c83021664cdc6a1b020067cb7"
+source = "git+https://github.com/solardev-xyz/freedom-ipfs?rev=deb240d60ad0053a441e3e032bdb529cc705dfaa#deb240d60ad0053a441e3e032bdb529cc705dfaa"
 dependencies = [
  "freedom-ipfs-addr",
  "thiserror 2.0.18",
@@ -1163,7 +1163,7 @@ dependencies = [
 [[package]]
 name = "freedom-ipfs-store"
 version = "0.4.6"
-source = "git+https://github.com/solardev-xyz/freedom-ipfs?rev=7cb69e37f0548c4c83021664cdc6a1b020067cb7#7cb69e37f0548c4c83021664cdc6a1b020067cb7"
+source = "git+https://github.com/solardev-xyz/freedom-ipfs?rev=deb240d60ad0053a441e3e032bdb529cc705dfaa#deb240d60ad0053a441e3e032bdb529cc705dfaa"
 dependencies = [
  "cid",
  "freedom-ipfs-core",
@@ -1177,7 +1177,7 @@ dependencies = [
 [[package]]
 name = "freedom-ipfs-unixfs"
 version = "0.4.6"
-source = "git+https://github.com/solardev-xyz/freedom-ipfs?rev=7cb69e37f0548c4c83021664cdc6a1b020067cb7#7cb69e37f0548c4c83021664cdc6a1b020067cb7"
+source = "git+https://github.com/solardev-xyz/freedom-ipfs?rev=deb240d60ad0053a441e3e032bdb529cc705dfaa#deb240d60ad0053a441e3e032bdb529cc705dfaa"
 dependencies = [
  "cid",
  "freedom-ipfs-core",
