@@ -144,6 +144,59 @@ impl Transaction {
         })
     }
 
+    /// The type: 0 (legacy) or 2 (EIP-1559).
+    pub fn tx_type(&self) -> u8 {
+        match self.fees {
+            Fees::Legacy { .. } => 0,
+            Fees::Eip1559 { .. } => 2,
+        }
+    }
+
+    pub fn chain_id(&self) -> &U256 {
+        &self.chain_id
+    }
+
+    pub fn nonce(&self) -> u64 {
+        self.nonce
+    }
+
+    pub fn gas_limit(&self) -> &U256 {
+        &self.gas_limit
+    }
+
+    /// `None` for a contract creation.
+    pub fn to(&self) -> Option<&[u8; 20]> {
+        self.to.as_ref()
+    }
+
+    pub fn value(&self) -> &U256 {
+        &self.value
+    }
+
+    pub fn data(&self) -> &[u8] {
+        &self.data
+    }
+
+    /// A legacy transaction's gas price; `None` for EIP-1559.
+    pub fn gas_price(&self) -> Option<&U256> {
+        match &self.fees {
+            Fees::Legacy { gas_price } => Some(gas_price),
+            Fees::Eip1559 { .. } => None,
+        }
+    }
+
+    /// An EIP-1559 transaction's `(max_fee_per_gas,
+    /// max_priority_fee_per_gas)`; `None` for legacy.
+    pub fn eip1559_fees(&self) -> Option<(&U256, &U256)> {
+        match &self.fees {
+            Fees::Legacy { .. } => None,
+            Fees::Eip1559 {
+                max_fee_per_gas,
+                max_priority_fee_per_gas,
+            } => Some((max_fee_per_gas, max_priority_fee_per_gas)),
+        }
+    }
+
     /// The fields every type shares, after its fee fields.
     fn common(&self, out: &mut Vec<u8>) {
         rlp::uint(out, &self.gas_limit);
