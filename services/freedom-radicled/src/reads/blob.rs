@@ -4,12 +4,13 @@
 //! them, chunked over the stream.
 //!
 //! **`rad.blob { rid, revision, path, range?, head_only? }`** answers a
-//! head, `{ oid, size, binary, range }`, then the bytes as a body stream.
-//! `range` is the range served, `{ start, end }` inclusive, or null for the
-//! whole blob; `binary` is libgit2's rule (`git_blob_is_binary`, the first
-//! 8000 bytes), as the add-on's `blob_at` gives it. With `head_only` the
-//! head has no `binary` and nothing is loaded: it serves `HEAD`. A head
-//! whose body is empty (`head_only`, or an empty blob) opens no stream.
+//! head, `{ oid, size, binary, range, body }`, then the bytes as a body
+//! stream. `range` is the range served, `{ start, end }` inclusive, or null
+//! for the whole blob; `binary` is libgit2's rule (`git_blob_is_binary`, the
+//! first 8000 bytes), as the add-on's `blob_at` gives it. With `head_only`
+//! the head has no `binary` and nothing is loaded: it serves `HEAD`. `body`
+//! says whether a stream follows, as 0007's heads do: a head whose body is
+//! empty (`head_only`, or an empty blob) says `false` and opens no stream.
 //! Main sets the content type, from the path's extension; the head has
 //! none.
 //!
@@ -264,7 +265,7 @@ fn header(
 }
 
 /// What a read answers before its body: the head, and the body, if it has
-/// one.
+/// one. `stream` adds the head's `body`.
 struct Served {
     head: Value,
     body: Option<Body>,
@@ -353,7 +354,7 @@ pub fn blob(
         let served = serve(&handle, &budget, &until, &r);
         drop(handle);
         match served {
-            Ok(Served { head, body }) => stream(&conn, ticket, &budget, &until, &head, body),
+            Ok(Served { head, body }) => stream(&conn, ticket, &budget, &until, head, body),
             // Whoever cancelled its token answers it, as `rad.read`'s.
             Err(Failure::Refused(Refused::Cancelled)) => {}
             Err(failure) => refuse(&conn, ticket, &failure.error(read_error)),

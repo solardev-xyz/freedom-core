@@ -4,10 +4,11 @@
 //! ops and those of main's serialization in [`composed`].
 //!
 //! **`rad.read { op, args }`** answers a head, `{ content_type:
-//! "application/json", bytes }`, then the JSON as a body stream: the exact
-//! text the add-on returns for that export, with today's arguments, by
-//! name. Each op is libradicle's bounded read, and libradicle's own
-//! serializer (`libradicle::json`), unchanged:
+//! "application/json", bytes, body: true }`, then the JSON as a body
+//! stream: the exact text the add-on returns for that export, with today's
+//! arguments, by name. `body` says that a stream follows, as 0007's heads
+//! do ([`stream`]). Each op is libradicle's bounded read, and libradicle's
+//! own serializer (`libradicle::json`), unchanged:
 //! - `repo_info { rid }`;
 //! - `tree { rid, path }` and `tree_at { rid, revision, path }`;
 //! - `blob { rid, path }` and `blob_at { rid, revision, path }`;
@@ -1034,7 +1035,7 @@ pub fn read(
         match built {
             Ok(body) => {
                 let head = json!({ "content_type": "application/json", "bytes": body.bytes() });
-                stream(&conn, ticket, &budget, &until, &head, Some(body));
+                stream(&conn, ticket, &budget, &until, head, Some(body));
             }
             // Whoever cancelled its token answers it: main's cancel, the
             // deadline's timer, or the stop.
@@ -1044,18 +1045,28 @@ pub fn read(
     })
 }
 
-/// `head`, then `body` and its end, if it has one (see the module's doc):
-/// without one, the head opens no stream.
+/// `head`, then `body` and its end, if it has one (see the module's doc).
+/// The head says which, in its `body`, as 0007's heads do: main opens a
+/// stream only for `true`. Without a body, the head opens no stream.
 fn stream(
     conn: &Connection,
     ticket: &Ticket,
     budget: &Arc<Budget>,
     until: &Until,
-    head: &Value,
+    mut head: Value,
     body: Option<Body>,
 ) {
+    // Before its size is counted, so that the reservation is exact.
+    let Some(members) = head.as_object_mut() else {
+        return refuse(
+            conn,
+            ticket,
+            &ErrorBody::new(ErrorCode::Internal, "Internal error"),
+        );
+    };
+    members.insert("body".to_owned(), Value::Bool(body.is_some()));
     // What the pending head holds, reserved until the writer has written it.
-    let charge = match fc_service::conn::head_len(ticket.id, head) {
+    let charge = match fc_service::conn::head_len(ticket.id, &head) {
         Ok(size) => budget.reserve(size as u64, until),
         Err(_) => {
             return refuse(
@@ -1072,7 +1083,7 @@ fn stream(
     };
     match conn.head_by(
         ticket.id,
-        head,
+        &head,
         body.is_some(),
         ticket.deadline,
         &late(),

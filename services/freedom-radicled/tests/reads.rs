@@ -99,9 +99,9 @@ const SECOND: &[(&str, &[u8])] = &[
 ];
 
 /// 0008, "Methods" and "Parity": each pass-through op answers a head
-/// `{ content_type, bytes }` and the add-on's exact JSON as its body, with
-/// today's arguments. A commit whose diff isn't UTF-8 is served, its text
-/// decoded lossily (R-19). libradicle's errors are `not_found` by today's
+/// `{ content_type, bytes, body: true }` and the add-on's exact JSON as its
+/// body, with today's arguments. A commit whose diff isn't UTF-8 is served,
+/// its text decoded lossily (R-19). libradicle's errors are `not_found` by today's
 /// message test, otherwise `failed`, with its message where that can't
 /// name a filesystem path: a repository the node doesn't have, whose text
 /// names its storage path, is `not_found` with `repository not found`, and
@@ -425,7 +425,7 @@ fn a_reply_at_32_mib_is_served_and_one_byte_more_is_too_large() {
     let head = radicled.reply(id);
     assert_eq!(
         head["result"],
-        json!({ "content_type": "application/json", "bytes": JSON_CAP }),
+        json!({ "content_type": "application/json", "bytes": JSON_CAP, "body": true }),
         "{head}"
     );
     let mut frames = 0;

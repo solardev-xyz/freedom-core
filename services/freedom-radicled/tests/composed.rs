@@ -490,7 +490,7 @@ fn each_composed_op_answers_mains_bytes() {
         let head = radicled.reply(id);
         assert_eq!(
             head["result"],
-            json!({ "content_type": "application/json", "bytes": bytes.len() }),
+            json!({ "content_type": "application/json", "bytes": bytes.len(), "body": true }),
             "{op} {args}: {head}"
         );
         let (body, end) = radicled.body(id);
