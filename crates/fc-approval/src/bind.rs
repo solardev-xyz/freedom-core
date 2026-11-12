@@ -46,9 +46,11 @@ impl Handle {
     }
 
     pub fn parse(text: &str) -> Result<Self, Error> {
-        lower_hex_32(text)
-            .map(Handle)
-            .ok_or_else(|| invalid("A page confirmation needs its handle"))
+        let mut bytes = [0u8; 32];
+        if !lower_hex_32(text, &mut bytes) {
+            return Err(invalid("A page confirmation needs its handle"));
+        }
+        Ok(Handle(bytes))
     }
 
     pub fn as_bytes(&self) -> &[u8; 32] {
@@ -61,19 +63,21 @@ impl Handle {
     }
 }
 
-/// 64 lowercase hex digits, exactly, as 32 bytes.
-pub(crate) fn lower_hex_32(text: &str) -> Option<[u8; 32]> {
+/// 64 lowercase hex digits, exactly, as 32 bytes, written into `out`,
+/// which the caller owns (a presented token's buffer wipes on drop): no copy
+/// is returned, so none is left behind. Whether `text` is such digits; when
+/// it isn't, `out` is untouched.
+pub(crate) fn lower_hex_32(text: &str, out: &mut [u8; 32]) -> bool {
     let bytes = text.as_bytes();
     if bytes.len() != 64 || !bytes.iter().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')) {
-        return None;
+        return false;
     }
     let digit = |b: u8| if b <= b'9' { b - b'0' } else { b - b'a' + 10 };
-    let mut out = [0u8; 32];
     let (pairs, _) = bytes.as_chunks::<2>();
     for (byte, [high, low]) in out.iter_mut().zip(pairs) {
         *byte = (digit(*high) << 4) | digit(*low);
     }
-    Some(out)
+    true
 }
 
 /// The page a page kind is for: `PageContext`'s `origin`, `frame` and

@@ -164,8 +164,8 @@ impl Tokens {
         if token.is_empty() {
             return Err(Refusal::NoToken);
         }
-        let entry = lower_hex_32(token)
-            .and_then(|bytes| self.position(&bytes))
+        let entry = self
+            .presented(token)
             .map(|index| self.entries.remove(index))
             .ok_or(Refusal::UnknownToken)?;
         if entry.expires_at_ms <= now_ms {
@@ -195,9 +195,19 @@ impl Tokens {
     /// a request to check the token against (the reference's
     /// `discardConfirmation`).
     pub fn discard(&mut self, token: &str) {
-        if let Some(index) = lower_hex_32(token).and_then(|bytes| self.position(&bytes)) {
+        if let Some(index) = self.presented(token) {
             self.entries.remove(index);
         }
+    }
+
+    /// The outstanding entry for a presented token's text. The text is
+    /// decoded into a buffer that is wiped when this returns, matched or not.
+    fn presented(&self, token: &str) -> Option<usize> {
+        let mut bytes = Zeroizing::new([0u8; 32]);
+        if !lower_hex_32(token, &mut bytes) {
+            return None;
+        }
+        self.position(&bytes)
     }
 
     /// The outstanding entry for `token`, compared against every one.
@@ -772,6 +782,27 @@ mod tests {
                 )
                 .is_ok()
         );
+    }
+
+    /// A presented token is decoded into the caller's buffer, which
+    /// `presented` holds in a `Zeroizing` and so wipes on return: the decoder
+    /// returns no copy, and writes nothing for text that isn't a token.
+    #[test]
+    fn a_presented_token_is_decoded_in_place() {
+        let mut buffer = Zeroizing::new([0x55u8; 32]);
+        for bad in [
+            "",
+            "AB",
+            &"0a".repeat(31),
+            &"0A".repeat(32),
+            &format!("0x{}", "0a".repeat(31)),
+        ] {
+            assert!(!lower_hex_32(bad, &mut buffer), "{bad}");
+            assert_eq!(*buffer, [0x55; 32]);
+        }
+        let text: String = (0..32u8).map(|i| format!("{i:02x}")).collect();
+        assert!(lower_hex_32(&text, &mut buffer));
+        assert_eq!(*buffer, core::array::from_fn::<u8, 32, _>(|i| i as u8));
     }
 
     #[test]
