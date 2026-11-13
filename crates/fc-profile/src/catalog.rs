@@ -19,6 +19,14 @@ use crate::{PROFILE_META_FILE, PROFILE_REGISTRY_FILE, PROFILES_DIR};
 
 /// Where the catalog's files are read and written. Paths are text, as the
 /// reference's are: what the catalog records.
+///
+/// A store may refuse any operation on a path it won't follow (a symlink
+/// below the app root), and may refuse a change, a directory made included,
+/// once its writes can no longer commit (the catalog's write lock lost).
+/// Each operation here makes a profile's directory only after the catalog
+/// that lists it is written, and asks about that directory before the
+/// catalog changes, so either refusal leaves no directory the catalog
+/// doesn't list and no catalog change for a directory refused.
 pub trait Store {
     /// The text of the file at `path`, `None` when nothing is there
     /// (`existsSync`, then `readFileSync`).
@@ -382,7 +390,6 @@ pub(crate) fn ensure_profile(
     };
 
     let dir = record_dir(&profiles(&catalog)[index], &path)?;
-    store.ensure_dir(&dir)?;
     let mut metadata_changed = false;
     let mut metadata = if adopted {
         metadata_changed = true;
@@ -429,9 +436,16 @@ pub(crate) fn ensure_profile(
         }
     }
 
+    // The directory is made only once the catalog that lists it is written
+    // (the reference makes it first): a run that loses the catalog's write
+    // lock, or fails to write the catalog, before then leaves no directory
+    // the catalog doesn't list, which would refuse the next run (review of
+    // #336). One that fails after leaves a listed profile, whose directory
+    // the next run makes.
     if catalog_changed {
         save_catalog(store, app_root, &catalog, style)?;
     }
+    store.ensure_dir(&dir)?;
     if metadata_changed {
         write_metadata(store, &dir, &metadata, style)?;
     }
@@ -479,10 +493,14 @@ pub fn create(
         opts,
         now,
     );
+    let dir = record_dir(&record, "")?;
+    // Asked first, so a store that refuses the directory's path refuses
+    // before the catalog changes.
+    store.is_dir(&dir)?;
     profiles_mut(&mut catalog, &catalog_path(app_root, style))?.push(record.clone());
     save_catalog(store, app_root, &catalog, style)?;
     let metadata = new_metadata(&record);
-    write_metadata(store, &record_dir(&record, "")?, &metadata, style)?;
+    write_metadata(store, &dir, &metadata, style)?;
     Ok(result(catalog, record, metadata))
 }
 
@@ -505,6 +523,12 @@ pub fn rename(
     let Some(index) = find_index(profiles(&catalog), &id) else {
         return Err(Error::Refused(format!("Profile not found: {id}")));
     };
+    // Asked first, so a store that refuses the directory's path refuses
+    // before the catalog changes (a directory that isn't text fails below,
+    // as before).
+    if let Ok(dir) = record_dir(&profiles(&catalog)[index], &path) {
+        store.is_dir(&dir)?;
+    }
     profiles_mut(&mut catalog, &path)?[index].set("displayName", string(display_name));
     save_catalog(store, app_root, &catalog, style)?;
     let record = profiles(&catalog)[index].clone();
@@ -659,6 +683,9 @@ pub fn update_nodes(
     let path = catalog_path(app_root, style);
     let mut catalog = load_records(store, app_root, style)?;
     let index = find_index(profiles(&catalog), id);
+    // Asked first, so a store that refuses the directory's path refuses
+    // before the catalog changes.
+    store.is_dir(user_data_dir)?;
     if let Some(index) = index {
         let record = &mut profiles_mut(&mut catalog, &path)?[index];
         set_node_block(record, protocol, &normalized, force_native_managed, &path)?;

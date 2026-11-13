@@ -169,7 +169,7 @@ freedom-cored profile open --app-root <dir> --lock-dir <dir>
 ```
 
 - **What it does:** it applies `resolveProfile`'s rules as `fc-profile` ports them (the order above, sanitizing, first-run registration, the fallback, `lastOpenedAt`), creates or updates the catalog record and `profile.json`, and prints one JSON object: `{ outcome: "opened" | "switch_refused", id, display_name, user_data_dir, slot, nodes, switch_only?, lock_fresh, gate_held, layout, forget_pending }`. `layout` is `"root"`, `"freedom"` (the marker exists) or `"pending"` (a move's journal exists), which tells main whether to run `profile migrate` ([The move](#the-move)). `forget_pending` counts the items in the app's forget file, which main forgets after its first window ([Forgetting an item](#forgetting-an-item)). `profile open` never fails over that file: one it can't read counts as pending, and `forget-list` sets it aside.
-  - **Exits:** 0 with that object; 74 (`storage`, with the kind on stderr: unreadable or unsupported catalog, a network filesystem, a path that isn't the user's); 75 when the catalog's write lock stays held; 64 for bad arguments.
+  - **Exits:** 0 with that object; 74 (`storage`, with the kind on stderr: unreadable or unsupported catalog, a network filesystem, a path that isn't the user's, a symlink below the app root); 75 when the catalog's write lock stays held; 64 for bad arguments.
   - **A switch** to a profile that isn't open answers `switch_refused`, as `PROFILE_SWITCH_REJECTED` does today.
 - **What stays in main:**
   - parsing argv and the `x-freedom-profile:` URL, which are Electron's and the OS's;

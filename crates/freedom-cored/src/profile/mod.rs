@@ -31,9 +31,9 @@
 //! with `{ "error": "refused", "message": <its message> }` on stdout; 74 for
 //! storage (an unreadable, unsupported or malformed catalog or
 //! `profile.json`, a network filesystem, a file that isn't the user's, a
-//! lost lock), with `{ "error": <kind> }` on stdout and the kind logged on
-//! stderr; 75 when the catalog's write lock stays held, or `hold-profile`'s
-//! gate is another's; 64 for bad arguments.
+//! lost lock, a symlink below the app root), with `{ "error": <kind> }` on
+//! stdout and the kind logged on stderr; 75 when the catalog's write lock
+//! stays held, or `hold-profile`'s gate is another's; 64 for bad arguments.
 //!
 //! **The catalog's write lock** is taken by each subcommand that writes,
 //! for its whole run, as the reference's `withCatalogWriteLock` (5 retries,
@@ -242,9 +242,13 @@ fn failed(error: &Error) -> Exit {
         Error::Unsupported { .. } => storage("unsupported", "the catalog isn't version 1"),
         Error::Unreadable { path } => storage("unreadable", file_name(path)),
         Error::Malformed { path } => storage("malformed", file_name(path)),
-        Error::Store(e) if e.message == "lock_lost" => {
+        Error::Store(e) if e.message == store::LOCK_LOST => {
             storage("lock_lost", "the catalog's write lock was taken over")
         }
+        Error::Store(e) if e.message == store::SYMLINK => storage(
+            "symlink",
+            "a symlink, or another file that isn't a directory, below the app root",
+        ),
         Error::Store(e) => storage("io", &e.message),
     }
 }
@@ -378,7 +382,10 @@ fn open_profile(app_root: &str, lock_dir: &Path, opts: &Options, args: &OpenArgs
         Err(exit) => return exit,
     };
     let commit = || lock.held();
-    let mut store = DiskStore { commit: &commit };
+    let mut store = match DiskStore::open(app_root, &commit) {
+        Ok(store) => store,
+        Err(e) => return storage("io", &e.kind().to_string()),
+    };
     let dev = opts.dev;
     let mut is_open = |_id: &str, dir: &str| Openness::of(Path::new(dir), lock_dir, dev).open();
     let outcome = fc_profile::open(&mut store, app_root, opts, args, &now, &mut is_open);
@@ -557,7 +564,10 @@ fn run_catalog(app_root: &str, writes: bool, operation: Operation) -> Exit {
     let now = now_iso();
     if !writes {
         let commit = || false;
-        let mut store = DiskStore { commit: &commit };
+        let mut store = match DiskStore::open(app_root, &commit) {
+            Ok(store) => store,
+            Err(e) => return storage("io", &e.kind().to_string()),
+        };
         return match operation(&mut store, &now) {
             Ok(value) => print(&value),
             Err(error) => failed(&error),
@@ -571,7 +581,10 @@ fn run_catalog(app_root: &str, writes: bool, operation: Operation) -> Exit {
         Err(exit) => return exit,
     };
     let commit = || lock.held();
-    let mut store = DiskStore { commit: &commit };
+    let mut store = match DiskStore::open(app_root, &commit) {
+        Ok(store) => store,
+        Err(e) => return storage("io", &e.kind().to_string()),
+    };
     let result = operation(&mut store, &now);
     let released = lock.release();
     match result {
@@ -656,7 +669,12 @@ fn hold(user_data_dir: &Path, lock_dir: &Path, listed: Option<(String, String)>)
 /// Whether the catalog lists `id` at the directory `canonical` (the gate's).
 fn still_listed(app_root: &str, id: &str, canonical: &Path) -> Result<bool, Error> {
     let commit = || false;
-    let mut store = DiskStore { commit: &commit };
+    let mut store = DiskStore::open(app_root, &commit).map_err(|e| {
+        Error::Store(fc_profile::StoreError {
+            path: app_root.to_owned(),
+            message: e.kind().to_string(),
+        })
+    })?;
     let catalog = fc_profile::load_catalog(&mut store, app_root, Style::native())?;
     let records = catalog
         .get("profiles")
