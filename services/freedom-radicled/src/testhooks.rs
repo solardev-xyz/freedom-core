@@ -74,6 +74,14 @@
 //!   returned and the write's outcome is marked and answered, it logs
 //!   `test hook: the write has returned`, so that a test waits for the
 //!   write's end instead of guessing how long a write takes.
+//! - `FREEDOM_RADICLED_TEST_HOLD_READ=until:<path>` holds two reads where
+//!   `rad.unseed` meets them (#338), until a file exists at `<path>` or for
+//!   30 s, logging `test hook: the read holds` with its `op`: `node_info`
+//!   between its steps, once the listing's identity check has returned and
+//!   before the listing ([`crate::reads`]), and `repo_info` inside its
+//!   step, with the node held shared, before libradicle's call. While it is
+//!   set, `rad.unseed` logs `test hook: the unseed waits for the node` just
+//!   before it waits to hold the node exclusively ([`crate::writes`]).
 //! - `FREEDOM_RADICLED_TEST_HOLD_REPAIR` holds each turn of an online
 //!   repair, with the node held shared, just before its unit, whatever the
 //!   stop, as a slow unit holds the writer ([`crate::repair`]): with a
@@ -141,6 +149,13 @@
 //!   stop has fenced the pools` once every pool is fenced, before their
 //!   drain ([`crate::pools`]): a test that releases held work only then
 //!   knows the stop met it.
+//!
+//! **One hold on the node per thread** ([`Holding`]): in a build with the
+//! feature, a thread that takes the node through `crate::node::Handle`
+//! while it holds it panics, before it waits for the lock. Such a second
+//! hold deadlocks once `rad.unseed` waits between the two (#338,
+//! [`crate::node`]); this finds it in any test that runs the step, with no
+//! writer to meet it.
 //!
 //! **Hermetic by construction:** a build with the feature never reaches
 //! off this host, whatever a test asks of it.
@@ -378,6 +393,64 @@ pub fn at_write_end() {
     #[cfg(feature = "testhooks")]
     if std::env::var_os("FREEDOM_RADICLED_TEST_HOLD_WRITE").is_some() {
         fc_service::log::info("test hook: the write has returned", serde_json::json!({}));
+    }
+}
+
+#[cfg(feature = "testhooks")]
+thread_local! {
+    /// Whether this thread holds the node through `crate::node::Handle`.
+    static HOLDING: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// A thread's hold on the node through `crate::node::Handle`, taken
+/// before its lock is waited for and let go of with it (see the module's
+/// doc). Without the feature it counts nothing.
+pub struct Holding(());
+
+impl Holding {
+    /// The calling thread's hold. With the feature, a thread that holds
+    /// the node already panics here, before it waits for the lock.
+    // The panic is how a test finds the second hold, and only with the
+    // feature.
+    #[allow(clippy::panic)]
+    pub fn take() -> Holding {
+        #[cfg(feature = "testhooks")]
+        if HOLDING.with(|holding| holding.replace(true)) {
+            panic!("test hook: a thread took the node while it held it (#338)");
+        }
+        Holding(())
+    }
+}
+
+impl Drop for Holding {
+    fn drop(&mut self) {
+        #[cfg(feature = "testhooks")]
+        HOLDING.with(|holding| holding.set(false));
+    }
+}
+
+/// Where `rad.unseed` meets read `op`: holds it, if asked.
+pub fn hold_read(op: &str) {
+    #[cfg(feature = "testhooks")]
+    if let Ok(hold) = std::env::var("FREEDOM_RADICLED_TEST_HOLD_READ")
+        && let Some(release) = hold.strip_prefix("until:")
+    {
+        fc_service::log::info("test hook: the read holds", serde_json::json!({ "op": op }));
+        until_released(release);
+    }
+    #[cfg(not(feature = "testhooks"))]
+    let _ = op;
+}
+
+/// Just before `rad.unseed` waits to hold the node exclusively: logs it,
+/// if `FREEDOM_RADICLED_TEST_HOLD_READ` is set.
+pub fn at_unseed_wait() {
+    #[cfg(feature = "testhooks")]
+    if std::env::var_os("FREEDOM_RADICLED_TEST_HOLD_READ").is_some() {
+        fc_service::log::info(
+            "test hook: the unseed waits for the node",
+            serde_json::json!({}),
+        );
     }
 }
 
@@ -831,5 +904,22 @@ pub fn hold_end() {
         while std::time::Instant::now() < until && !std::path::Path::new(&release).exists() {
             std::thread::sleep(Duration::from_millis(5));
         }
+    }
+}
+
+#[cfg(all(test, feature = "testhooks"))]
+mod tests {
+    use super::Holding;
+
+    /// A thread holds the node once: a second hold under the first panics,
+    /// before it would wait; one on another thread, or after the first is
+    /// let go of, doesn't.
+    #[test]
+    fn a_thread_holds_the_node_once() {
+        let first = Holding::take();
+        assert!(std::panic::catch_unwind(Holding::take).is_err());
+        assert!(std::thread::spawn(|| drop(Holding::take())).join().is_ok());
+        drop(first);
+        drop(Holding::take());
     }
 }

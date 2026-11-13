@@ -568,6 +568,7 @@ All bounds are process-wide. The service hosts one node.
 - **The read pool:** 4 threads, with **320 queued requests**: main's dweb admission of 256, plus 64 for other callers ([Main's side](#mains-side)). Beyond that, `busy`.
   - Reads run concurrently, under a shared lock on the node; there is no process-wide mutex.
   - Three methods take `&mut self` and take that lock exclusively: `seeders` (`lr:1143`), `unseed_repo` (`lr:847`) and `import_repo` (`lr:1012`). `seeders` is a short query on the read pool, and `unseed_repo` is on the write queue. `import_repo` runs only in the import process, which has no running node ([Writes](#writes)).
+  - A thread holds that lock at most once at a time. A new shared hold waits behind an exclusive one that waits, so a read that took the lock again under its own hold would wait behind `unseed_repo` waiting for that first hold, and neither would go on (freedom-core #338). Each step of a read takes the lock and lets go of it before the next; the service's test build panics on a second hold.
 - **The network pool:** 8 threads for `connect_seeds` and `clone`, with 16 queued.
 - **The write queue:** one writer, with 16 queued.
 - **The output budget: 256 MiB,** enforced by reservation, as 0007's budget is. Every byte a read holds is reserved before it is allocated, and released when it is freed.
