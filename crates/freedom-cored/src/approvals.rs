@@ -553,14 +553,16 @@ impl Approvals {
         };
         // A phone account's send: main knows the account's kind (it owns
         // `vault-meta.json` until PRF-6a).
+        // The field is a send's only: present on another kind, whatever its
+        // value, it is refused.
         let phone = match fields.get("phone") {
             None => false,
+            Some(_) if !matches!(kind, Kind::WalletSend | Kind::DappSend) => {
+                return Err(invalid("phone: only a wallet-send's or a dapp-send's"));
+            }
             Some(Value::Bool(phone)) => *phone,
             Some(_) => return Err(invalid("phone: expected a boolean")),
         };
-        if phone && !matches!(kind, Kind::WalletSend | Kind::DappSend) {
-            return Err(invalid("phone: only a wallet-send's or a dapp-send's"));
-        }
         let payload = &fields["payload"];
         // The fee check at minting (design 0012, "The fee check"), as
         // `wallet:confirm-signing` runs it: never for a phone account,
@@ -1107,7 +1109,9 @@ mod tests {
         text["phone"] = json!("yes");
         let executor =
             json!({ "kind": "executor-send", "account": 0, "payload": send(), "phone": true });
-        for params in [text, executor] {
+        let executor_false =
+            json!({ "kind": "executor-send", "account": 0, "payload": send(), "phone": false });
+        for params in [text, executor, executor_false] {
             let refused = approvals
                 .request(1, "approval.issue", &params, &shell(), CLOCKS)
                 .unwrap_err();
