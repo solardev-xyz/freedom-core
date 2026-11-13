@@ -289,7 +289,27 @@ pub fn overlaps(
         let other = if same(&app, &dir) {
             Removes::AppRoot
         } else if inside(&app, &dir) {
-            if dir.len() == app.len() + 1 && shared_key(&dir[app.len()].key) {
+            // A record at a shared entry is the app's own directory, not a
+            // profile's. For the packaged default profile, whose delete
+            // removes the app root but the shared entries, only an exact name
+            // is spared ([`is_app_root_shared_entry`]), so only an exact name
+            // is the app's: a record at another spelling (`LOCKS`, `locks.`)
+            // would go with the app root.
+            let first = &dir[app.len()];
+            // For another profile's delete, a folded spelling of a shared
+            // entry is the app's own too (on a volume that folds, it names
+            // the same directory), unless the target is below that very
+            // spelling: on a case-sensitive volume `profiles` is then a
+            // directory of its own, and the target is inside its data.
+            let apps_own = match &target {
+                Removes::AppRoot => is_app_root_shared_entry(first.text),
+                Removes::Dir(t) => {
+                    shared_key(&first.key)
+                        && (is_app_root_shared_entry(first.text)
+                            || t.get(app.len()).is_none_or(|own| own.text != first.text))
+                }
+            };
+            if dir.len() == app.len() + 1 && apps_own {
                 return false;
             }
             Removes::Dir(dir)
@@ -603,6 +623,70 @@ mod tests {
             &roots
         ));
         assert!(!overlaps(w, app, app, true, &roots));
+    }
+
+    /// The packaged default profile's delete spares only exact shared names,
+    /// so a record at another spelling of one is a profile it would remove
+    /// (review of #337, round 3).
+    #[test]
+    fn the_default_profiles_delete_spares_only_exact_shared_names() {
+        let app = "/Users/u/fb";
+        let p = Style::Posix;
+        // Exact shared names are the app's own, and stay.
+        for name in [
+            "locks",
+            "logs",
+            "R",
+            "Profiles",
+            "profile-registry.json.forget",
+        ] {
+            assert!(
+                !overlaps(p, app, app, true, &[format!("{app}/{name}")]),
+                "{name}"
+            );
+        }
+        // Another spelling of one is a profile's directory the default
+        // profile's delete would remove: refused.
+        for name in [
+            "LOCKS",
+            "Logs",
+            "r",
+            "profiles",
+            "PROFILE-REGISTRY.JSON.forget",
+        ] {
+            assert!(
+                overlaps(p, app, app, true, &[format!("{app}/{name}")]),
+                "{name}"
+            );
+        }
+        assert!(overlaps(
+            Style::Windows,
+            "C:\\fb",
+            "C:\\fb",
+            true,
+            &["C:\\fb\\locks.".to_owned()]
+        ));
+    }
+
+    /// Another profile's delete, beside a record at a folded spelling of
+    /// `Profiles`: below that very spelling it is inside the record's data on
+    /// a case-sensitive volume, and refused; below the exact `Profiles` it is
+    /// not (review of #337, round 4).
+    #[test]
+    fn a_folded_shared_spelling_is_a_record_s_own_for_a_target_below_it() {
+        let app = "/app";
+        let p = Style::Posix;
+        let peer = ["/app/profiles".to_owned()];
+        assert!(overlaps(p, app, "/app/profiles/lone", false, &peer));
+        assert!(overlaps(p, app, "/app/profiles/lone/x", false, &peer));
+        assert!(!overlaps(p, app, "/app/Profiles/lone", false, &peer));
+        assert!(!overlaps(
+            p,
+            app,
+            "/app/Profiles/lone",
+            false,
+            &["/app/Profiles".to_owned()]
+        ));
     }
 
     /// The overlap check on names that are one directory's on macOS, whose
