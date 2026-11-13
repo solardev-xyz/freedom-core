@@ -240,7 +240,7 @@ Crates:
 - quick-protobuf-codec 0.3.1: MIT
 - quinn 0.11.9: MIT OR Apache-2.0
 - quinn-proto 0.11.19: MIT OR Apache-2.0
-- quinn-udp 0.5.14: MIT OR Apache-2.0
+- quinn-udp 0.5.16: MIT OR Apache-2.0
 - rand 0.10.3: MIT OR Apache-2.0
 - rand 0.8.6: MIT OR Apache-2.0
 - rand 0.9.4: MIT OR Apache-2.0
@@ -347,13 +347,10 @@ Crates:
 - windows-result 0.4.1: MIT OR Apache-2.0
 - windows-strings 0.5.1: MIT OR Apache-2.0
 - windows-sys 0.52.0: MIT OR Apache-2.0
-- windows-sys 0.60.2: MIT OR Apache-2.0
 - windows-sys 0.61.2: MIT OR Apache-2.0
 - windows-targets 0.52.6: MIT OR Apache-2.0
-- windows-targets 0.53.5: MIT OR Apache-2.0
 - windows-threading 0.2.1: MIT OR Apache-2.0
 - windows_x86_64_msvc 0.52.6: MIT OR Apache-2.0
-- windows_x86_64_msvc 0.53.1: MIT OR Apache-2.0
 - writeable 0.6.3: Unicode-3.0
 - x25519-dalek 2.0.1: BSD-3-Clause
 - x509-parser 0.17.0: MIT OR Apache-2.0
@@ -8655,7 +8652,7 @@ The above copyright notice and this permission notice shall be included in all c
 THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 ========================================================================
-Used by: iri-string 0.7.12 (LICENSE-APACHE.txt), lru-slab 0.1.2 (LICENSE-APACHE), nohash-hasher 0.2.0 (LICENSE-APACHE), quinn 0.11.9 (LICENSE-APACHE), quinn-proto 0.11.19 (LICENSE-APACHE), quinn-udp 0.5.14 (LICENSE-APACHE), seccompiler 0.5.0 (LICENSE-APACHE), siphasher 1.0.4 (LICENSE-APACHE), static_assertions 1.1.0 (LICENSE-APACHE), tinyvec 1.11.0 (LICENSE-APACHE.md), utf8_iter 1.0.4 (LICENSE-APACHE), yamux 0.12.1 (LICENSE-APACHE), yamux 0.13.10 (LICENSE-APACHE), zeroize 1.8.2 (LICENSE-APACHE)
+Used by: iri-string 0.7.12 (LICENSE-APACHE.txt), lru-slab 0.1.2 (LICENSE-APACHE), nohash-hasher 0.2.0 (LICENSE-APACHE), quinn 0.11.9 (LICENSE-APACHE), quinn-proto 0.11.19 (LICENSE-APACHE), quinn-udp 0.5.16 (LICENSE-APACHE), seccompiler 0.5.0 (LICENSE-APACHE), siphasher 1.0.4 (LICENSE-APACHE), static_assertions 1.1.0 (LICENSE-APACHE), tinyvec 1.11.0 (LICENSE-APACHE.md), utf8_iter 1.0.4 (LICENSE-APACHE), yamux 0.12.1 (LICENSE-APACHE), yamux 0.13.10 (LICENSE-APACHE), zeroize 1.8.2 (LICENSE-APACHE)
 ------------------------------------------------------------------------
 Apache License
                            Version 2.0, January 2004
@@ -11635,7 +11632,7 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 THE SOFTWARE.
 
 ========================================================================
-Used by: quinn 0.11.9 (LICENSE-MIT), quinn-proto 0.11.19 (LICENSE-MIT), quinn-udp 0.5.14 (LICENSE-MIT)
+Used by: quinn 0.11.9 (LICENSE-MIT), quinn-proto 0.11.19 (LICENSE-MIT), quinn-udp 0.5.16 (LICENSE-MIT)
 ------------------------------------------------------------------------
 Copyright (c) 2018 The quinn Developers
 
@@ -15310,7 +15307,7 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 
 ========================================================================
-Used by: windows 0.62.2 (license-apache-2.0), windows-collections 0.3.2 (license-apache-2.0), windows-core 0.62.2 (license-apache-2.0), windows-future 0.3.2 (license-apache-2.0), windows-link 0.2.1 (license-apache-2.0), windows-numerics 0.3.1 (license-apache-2.0), windows-registry 0.6.1 (license-apache-2.0), windows-result 0.4.1 (license-apache-2.0), windows-strings 0.5.1 (license-apache-2.0), windows-sys 0.52.0 (license-apache-2.0), windows-sys 0.60.2 (license-apache-2.0), windows-sys 0.61.2 (license-apache-2.0), windows-targets 0.52.6 (license-apache-2.0), windows-targets 0.53.5 (license-apache-2.0), windows-threading 0.2.1 (license-apache-2.0), windows_x86_64_msvc 0.52.6 (license-apache-2.0), windows_x86_64_msvc 0.53.1 (license-apache-2.0)
+Used by: windows 0.62.2 (license-apache-2.0), windows-collections 0.3.2 (license-apache-2.0), windows-core 0.62.2 (license-apache-2.0), windows-future 0.3.2 (license-apache-2.0), windows-link 0.2.1 (license-apache-2.0), windows-numerics 0.3.1 (license-apache-2.0), windows-registry 0.6.1 (license-apache-2.0), windows-result 0.4.1 (license-apache-2.0), windows-strings 0.5.1 (license-apache-2.0), windows-sys 0.52.0 (license-apache-2.0), windows-sys 0.61.2 (license-apache-2.0), windows-targets 0.52.6 (license-apache-2.0), windows-threading 0.2.1 (license-apache-2.0), windows_x86_64_msvc 0.52.6 (license-apache-2.0)
 ------------------------------------------------------------------------
 Apache License
                            Version 2.0, January 2004
@@ -15515,7 +15512,7 @@ Apache License
    limitations under the License.
 
 ========================================================================
-Used by: windows 0.62.2 (license-mit), windows-collections 0.3.2 (license-mit), windows-core 0.62.2 (license-mit), windows-future 0.3.2 (license-mit), windows-link 0.2.1 (license-mit), windows-numerics 0.3.1 (license-mit), windows-registry 0.6.1 (license-mit), windows-result 0.4.1 (license-mit), windows-strings 0.5.1 (license-mit), windows-sys 0.52.0 (license-mit), windows-sys 0.60.2 (license-mit), windows-sys 0.61.2 (license-mit), windows-targets 0.52.6 (license-mit), windows-targets 0.53.5 (license-mit), windows-threading 0.2.1 (license-mit), windows_x86_64_msvc 0.52.6 (license-mit), windows_x86_64_msvc 0.53.1 (license-mit)
+Used by: windows 0.62.2 (license-mit), windows-collections 0.3.2 (license-mit), windows-core 0.62.2 (license-mit), windows-future 0.3.2 (license-mit), windows-link 0.2.1 (license-mit), windows-numerics 0.3.1 (license-mit), windows-registry 0.6.1 (license-mit), windows-result 0.4.1 (license-mit), windows-strings 0.5.1 (license-mit), windows-sys 0.52.0 (license-mit), windows-sys 0.61.2 (license-mit), windows-targets 0.52.6 (license-mit), windows-threading 0.2.1 (license-mit), windows_x86_64_msvc 0.52.6 (license-mit)
 ------------------------------------------------------------------------
 MIT License
 

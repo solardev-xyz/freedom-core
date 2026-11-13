@@ -427,6 +427,7 @@ name = "fc-approval"
 version = "0.13.0"
 dependencies = [
  "fc-evm",
+ "fc-json",
  "rand_core 0.10.1",
  "serde_json",
  "sha2",

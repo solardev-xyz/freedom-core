@@ -25,8 +25,9 @@ FILES.push('radicle-blob.json', 'generator/radicle-blob.js');
 FILES.push('radicle-network.json', 'generator/radicle-network.js');
 FILES.push('radicle-stats.json', 'generator/radicle-stats.js');
 FILES.push('radicle-import.json', 'generator/radicle-import.js');
-FILES.push('approvals.json', 'generator/approvals.js');
+FILES.push('approvals.json', 'generator/approvals.js', 'generator/approval-stores.js');
 FILES.push('profiles.json', 'generator/profiles.js');
+FILES.push('generator/approval-rules.js', 'generator/approval-decisions.js');
 
 function corruptedCheck(filename, corrupt) {
   const copy = fs.mkdtempSync(path.join(os.tmpdir(), 'freedom-core-vectors-'));

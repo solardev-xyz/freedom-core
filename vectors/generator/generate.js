@@ -122,7 +122,8 @@ function loadRadicleReference(checkout) {
 }
 
 /** The approvals vectors' reference: their generator loads its
- * signing-confirmation.js, which reads no package, so its meta names none. */
+ * signing-confirmation.js and its four grant stores, which read no package,
+ * so its meta names none. */
 function loadApprovalsReference(checkout) {
   const commit = checkedCommit(checkout, APPROVALS_REFERENCE_COMMIT, 'approvals reference');
   return { checkout, meta: { freedomBrowserCommit: commit, nodeVersion: process.version, generator: 'vectors/generator/generate.js' } };
@@ -599,8 +600,9 @@ async function main() {
     // Design 0008's import, from main's GitHub bridge over a scripted
     // add-on, and the service's answers.
     'radicle-import.json': await buildRadicleImport(radicle.checkout, radicle.meta),
-    // Design 0012's tokens, from main's signing-confirmation.js.
-    'approvals.json': buildApprovals(approvals.checkout, approvals.meta),
+    // Design 0012's tokens, from main's signing-confirmation.js, and its
+    // grant files, from main's four stores.
+    'approvals.json': await buildApprovals(approvals.checkout, approvals.meta),
     // Design 0013's profile catalog, from main's profile-catalog.js and
     // profile-resolver.js.
     'profiles.json': buildProfiles(approvals.checkout, reference.checkout, {
