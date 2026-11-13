@@ -93,9 +93,10 @@ impl OpenDir {
         self.identity
     }
 
-    /// The open directory: Landlock's rule is made from it.
-    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
-    pub(super) fn file(&self) -> &File {
+    /// The open directory: Landlock's rule is made from it, and the profile
+    /// gate makes its lock directory's missing names below it
+    /// (`gate::create_lock_dir`).
+    pub(crate) fn file(&self) -> &File {
         &self.dir
     }
 
