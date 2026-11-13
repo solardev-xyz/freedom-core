@@ -115,7 +115,8 @@ zeroize = "1.8"
 
 [target.'cfg(windows)'.dependencies]
 # GetDriveTypeW, for storage qualification; a directory's file ID, for a
-# profile delete's walk (design 0013, "Deletion").
+# profile delete's walk (design 0013, "Deletion"); a permission file's
+# owner (design 0012, "The files (Q10)").
 fc-sys = { path = "../fc-sys" }
 
 [target.'cfg(target_os = "macos")'.dependencies]

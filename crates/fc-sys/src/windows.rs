@@ -1,9 +1,10 @@
 //! Windows calls: storage qualification, error reporting, a file's
-//! identity, a directory opened or made relative to its parent's handle,
-//! and confinement's job object and process mitigation policies (design
-//! 0010, "Windows").
+//! identity and whether this process's user owns it, a directory opened or
+//! made relative to its parent's handle, and confinement's job object and
+//! process mitigation policies (design 0010, "Windows").
 //!
-//! None of these calls closes a handle but [`Job`]'s own, which it owns.
+//! None of these calls closes a handle but its own: [`Job`]'s, and the
+//! process token [`owned_by_current_user`] opens.
 
 use std::ffi::OsStr;
 use std::io;
@@ -16,7 +17,13 @@ use windows_sys::Wdk::Storage::FileSystem::{
     NtCreateFile,
 };
 use windows_sys::Win32::Foundation::{
-    HANDLE, OBJ_CASE_INSENSITIVE, RtlNtStatusToDosError, UNICODE_STRING,
+    HANDLE, LocalFree, OBJ_CASE_INSENSITIVE, RtlNtStatusToDosError, UNICODE_STRING,
+};
+use windows_sys::Win32::Security::Authorization::{GetSecurityInfo, SE_FILE_OBJECT};
+use windows_sys::Win32::Security::{
+    EqualSid, GetTokenInformation, OWNER_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, PSID,
+    SECURITY_MAX_SID_SIZE, TOKEN_INFORMATION_CLASS, TOKEN_OWNER, TOKEN_QUERY, TOKEN_USER,
+    TokenOwner, TokenUser,
 };
 use windows_sys::Win32::Storage::FileSystem::{
     BY_HANDLE_FILE_INFORMATION, FILE_ATTRIBUTE_NORMAL, FILE_ID_INFO, FILE_LIST_DIRECTORY,
@@ -40,7 +47,7 @@ use windows_sys::Win32::System::SystemServices::{
     PROCESS_MITIGATION_IMAGE_LOAD_POLICY,
 };
 use windows_sys::Win32::System::Threading::{
-    GetCurrentProcess, GetProcessMitigationPolicy, PROCESS_MITIGATION_POLICY,
+    GetCurrentProcess, GetProcessMitigationPolicy, OpenProcessToken, PROCESS_MITIGATION_POLICY,
     ProcessDynamicCodePolicy, ProcessExtensionPointDisablePolicy, ProcessImageLoadPolicy,
     SetProcessMitigationPolicy,
 };
@@ -110,6 +117,213 @@ pub fn file_index(file: BorrowedHandle<'_>) -> io::Result<(u64, u128)> {
         u64::from(info.dwVolumeSerialNumber),
         (u128::from(info.nFileIndexHigh) << 32) | u128::from(info.nFileIndexLow),
     ))
+}
+
+/// A SID that stays valid while `'a` lasts: the owner in a security
+/// descriptor [`file_owner`] read, a token's SID [`token_sid`] read, or
+/// [`administrators`]. Nothing else makes one, so [`equal_sid`] only ever
+/// reads a valid SID.
+#[derive(Clone, Copy)]
+struct Sid<'a>(PSID, std::marker::PhantomData<&'a ()>);
+
+/// BUILTIN\Administrators (S-1-5-32-544), as a SID's memory: revision 1 and
+/// two sub-authorities, the NT authority (`{0, 0, 0, 0, 0, 5}`), then the
+/// sub-authorities 32 and 544. Words, so it is aligned as a SID's `DWORD`
+/// sub-authorities need.
+static ADMINISTRATORS_SID: [u32; 4] = [
+    u32::from_ne_bytes([1, 2, 0, 0]),
+    u32::from_ne_bytes([0, 0, 0, 5]),
+    32,
+    544,
+];
+
+/// [`ADMINISTRATORS_SID`] as a [`Sid`]. `EqualSid` only reads it, though
+/// it takes a `PSID`.
+fn administrators() -> Sid<'static> {
+    Sid(
+        ADMINISTRATORS_SID.as_ptr().cast_mut().cast(),
+        std::marker::PhantomData,
+    )
+}
+
+/// `EqualSid` on two valid SIDs. `false` when they differ (or, which a
+/// [`Sid`] rules out, one isn't valid).
+#[allow(unsafe_code)]
+fn equal_sid(one: Sid<'_>, two: Sid<'_>) -> bool {
+    // SAFETY: a `Sid` points to a valid SID for its lifetime, which spans
+    // the call; EqualSid only reads both and keeps no reference.
+    let equal = unsafe { EqualSid(one.0, two.0) };
+    equal != 0
+}
+
+/// A security descriptor `GetSecurityInfo` allocated, with the owner SID
+/// inside it, freed (`LocalFree`) once, on drop.
+struct OwnerDescriptor {
+    descriptor: PSECURITY_DESCRIPTOR,
+    owner: PSID,
+}
+
+impl OwnerDescriptor {
+    /// The owner, which lives inside the descriptor; `None` if it has none.
+    fn owner(&self) -> Option<Sid<'_>> {
+        (!self.owner.is_null()).then_some(Sid(self.owner, std::marker::PhantomData))
+    }
+}
+
+impl Drop for OwnerDescriptor {
+    #[allow(unsafe_code)]
+    fn drop(&mut self) {
+        // SAFETY: `descriptor` is the buffer GetSecurityInfo allocated for
+        // this value alone (or NULL, which LocalFree ignores), freed once
+        // here; no `Sid` borrowed from it outlives `self`.
+        unsafe { LocalFree(self.descriptor) };
+    }
+}
+
+/// The owner of the file `file` is open on (`GetSecurityInfo`,
+/// `OWNER_SECURITY_INFORMATION`), read from the handle, which needs
+/// `READ_CONTROL`: a handle without it fails (`PermissionDenied`).
+#[allow(unsafe_code)]
+fn file_owner(file: BorrowedHandle<'_>) -> io::Result<OwnerDescriptor> {
+    let mut owner: PSID = std::ptr::null_mut();
+    let mut descriptor: PSECURITY_DESCRIPTOR = std::ptr::null_mut();
+    // SAFETY: `owner` and `descriptor` are ours, borrowed mutably for the
+    // call, which writes only them: the owner's address inside the
+    // descriptor, and the descriptor it allocates, which OwnerDescriptor
+    // frees. The group, DACL and SACL pointers are NULL, since only the
+    // owner is asked for. The handle is open for its borrow, and one that
+    // isn't a file's fails the call.
+    let status = unsafe {
+        GetSecurityInfo(
+            file.as_raw_handle(),
+            SE_FILE_OBJECT,
+            OWNER_SECURITY_INFORMATION,
+            &raw mut owner,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            &raw mut descriptor,
+        )
+    };
+    // Owned from here, so freed on every path.
+    let read = OwnerDescriptor { descriptor, owner };
+    if status != 0 {
+        return Err(io::Error::from_raw_os_error(status as i32));
+    }
+    Ok(read)
+}
+
+/// This process's token, open to query (`OpenProcessToken`, `TOKEN_QUERY`),
+/// closed on drop.
+#[allow(unsafe_code)]
+fn process_token() -> io::Result<OwnedHandle> {
+    let mut token: HANDLE = std::ptr::null_mut();
+    // SAFETY: the process handle is this process's pseudo-handle; `token` is
+    // ours, borrowed mutably for the call, which writes only it.
+    let ok = unsafe { OpenProcessToken(current_process(), TOKEN_QUERY, &raw mut token) };
+    win32(ok)?;
+    // SAFETY: the call succeeded, so `token` is a handle it opened for this
+    // process, which nothing else owns or closes.
+    Ok(unsafe { OwnedHandle::from_raw_handle(token) })
+}
+
+/// A token information class whose structure is a SID's address, which
+/// `GetTokenInformation` writes followed by the SID itself.
+trait SidClass: Copy + Default {
+    const CLASS: TOKEN_INFORMATION_CLASS;
+    fn sid(&self) -> PSID;
+}
+
+/// `TokenUser`: the token's user.
+impl SidClass for TOKEN_USER {
+    const CLASS: TOKEN_INFORMATION_CLASS = TokenUser;
+    fn sid(&self) -> PSID {
+        self.User.Sid
+    }
+}
+
+/// `TokenOwner`: the owner the token gives the objects it creates.
+impl SidClass for TOKEN_OWNER {
+    const CLASS: TOKEN_INFORMATION_CLASS = TokenOwner;
+    fn sid(&self) -> PSID {
+        self.Owner
+    }
+}
+
+/// A [`SidClass`] structure and room for the largest SID after it, as
+/// `GetTokenInformation` lays them out.
+#[repr(C)]
+struct TokenSid<T> {
+    head: T,
+    sid: [u8; SECURITY_MAX_SID_SIZE as usize],
+}
+
+impl<T: SidClass> TokenSid<T> {
+    /// The SID, which the call that filled `self` placed in it.
+    fn sid(&self) -> Sid<'_> {
+        Sid(self.head.sid(), std::marker::PhantomData)
+    }
+}
+
+/// `token`'s SID of class `T` (`GetTokenInformation`), on the heap, so the
+/// address the call writes stays the SID's while the box lives. A SID past
+/// [`SECURITY_MAX_SID_SIZE`], which no SID is, fails the call.
+#[allow(unsafe_code)]
+fn token_sid<T: SidClass>(token: BorrowedHandle<'_>) -> io::Result<Box<TokenSid<T>>> {
+    let mut info = Box::new(TokenSid {
+        head: T::default(),
+        sid: [0; SECURITY_MAX_SID_SIZE as usize],
+    });
+    let size = u32::try_from(size_of::<TokenSid<T>>()).map_err(io::Error::other)?;
+    let mut written = 0u32;
+    // SAFETY: `info` is a whole TokenSid<T> of `size` bytes on the heap,
+    // aligned for T, borrowed mutably for the call, which writes at most
+    // that many: the class's structure, which is T, and the SID it points
+    // to, inside the same buffer; `written` is ours. The token is open for
+    // its borrow, with TOKEN_QUERY.
+    let ok = unsafe {
+        GetTokenInformation(
+            token.as_raw_handle(),
+            T::CLASS,
+            (&raw mut *info).cast(),
+            size,
+            &raw mut written,
+        )
+    };
+    win32(ok)?;
+    Ok(info)
+}
+
+/// Whether this process's user owns the file `file` is open on, read from
+/// the handle (`GetSecurityInfo`): its owner is the process token's user
+/// (`TokenUser`), or BUILTIN\Administrators when that group is the token's
+/// default owner (`TokenOwner`): an elevated administrator's token, whose
+/// new files Windows gives to the group rather than the user under the
+/// policy "Default owner for objects created by members of the
+/// Administrators group". Only an administrator can give a file to that
+/// group (short of the restore privilege, which could name the user just as
+/// well). No other group counts, not even a token's default owner, since
+/// another member could give a file to it.
+///
+/// `Err` when it can't tell: the handle lacks `READ_CONTROL`
+/// (`PermissionDenied`), or a token call fails. A file with no owner isn't
+/// the user's.
+pub fn owned_by_current_user(file: BorrowedHandle<'_>) -> io::Result<bool> {
+    use std::os::windows::io::AsHandle;
+    let descriptor = file_owner(file)?;
+    let token = process_token()?;
+    let user = token_sid::<TOKEN_USER>(token.as_handle())?;
+    let Some(owner) = descriptor.owner() else {
+        return Ok(false);
+    };
+    if equal_sid(owner, user.sid()) {
+        return Ok(true);
+    }
+    if !equal_sid(owner, administrators()) {
+        return Ok(false);
+    }
+    let default_owner = token_sid::<TOKEN_OWNER>(token.as_handle())?;
+    Ok(equal_sid(default_owner.sid(), administrators()))
 }
 
 /// Whether a path component, in UTF-16, is one Win32 paths read as
@@ -572,6 +786,98 @@ mod tests {
         let renamed = dir.join("renamed");
         std::fs::rename(&one, &renamed).unwrap();
         assert_eq!(ids(&renamed), (id, index));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// Makes the SID `sid` (`S-1-...`) `path`'s owner (`icacls /setowner`),
+    /// which takes an administrator's restore privilege, as CI's runner has.
+    fn set_owner(path: &std::path::Path, sid: &str) {
+        let output = std::process::Command::new("icacls")
+            .arg(path)
+            .arg("/setowner")
+            .arg(format!("*{sid}"))
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "icacls /setowner {sid} (run as an administrator): {}",
+            String::from_utf8_lossy(&output.stdout)
+        );
+    }
+
+    /// This process's user's SID, as `whoami /user` prints it.
+    fn user_sid() -> String {
+        let output = std::process::Command::new("whoami")
+            .args(["/user", "/fo", "csv", "/nh"])
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "whoami /user");
+        let line = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+        let sid = line
+            .rsplit(',')
+            .next()
+            .unwrap()
+            .trim_matches('"')
+            .to_owned();
+        assert!(sid.starts_with("S-1-"), "{line}");
+        sid
+    }
+
+    #[test]
+    fn a_file_is_the_user_s_only_if_its_owner_is() {
+        use std::os::windows::fs::OpenOptionsExt;
+        use std::os::windows::io::AsHandle;
+        let dir = std::env::temp_dir().join(format!("fc-sys-owner-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let owned = |path: &std::path::Path| {
+            owned_by_current_user(std::fs::File::open(path).unwrap().as_handle())
+        };
+        let token = process_token().unwrap();
+        // An elevated administrator's token gives its new files to the
+        // Administrators group by default; any other, to its user.
+        let to_administrators = equal_sid(
+            token_sid::<TOKEN_OWNER>(token.as_handle()).unwrap().sid(),
+            administrators(),
+        );
+        // A file this process makes is its user's, whichever owner it got.
+        let made = dir.join("made");
+        std::fs::write(&made, b"x").unwrap();
+        assert!(
+            owned(&made).unwrap(),
+            "made by a token whose default owner is Administrators: {to_administrators}"
+        );
+        // The user named as the owner, elevated or not.
+        let user = dir.join("user");
+        std::fs::write(&user, b"x").unwrap();
+        set_owner(&user, &user_sid());
+        assert!(owned(&user).unwrap());
+        // The Administrators group: read as the SID it is, and the user's
+        // only when it is the token's default owner.
+        let administrators_owned = dir.join("administrators");
+        std::fs::write(&administrators_owned, b"x").unwrap();
+        set_owner(&administrators_owned, "S-1-5-32-544");
+        let file = std::fs::File::open(&administrators_owned).unwrap();
+        let descriptor = file_owner(file.as_handle()).unwrap();
+        assert!(equal_sid(descriptor.owner().unwrap(), administrators()));
+        assert_eq!(owned(&administrators_owned).unwrap(), to_administrators);
+        // BUILTIN\Users, a group the user is in: not the user's.
+        let users = dir.join("users");
+        std::fs::write(&users, b"x").unwrap();
+        set_owner(&users, "S-1-5-32-545");
+        assert!(!owned(&users).unwrap());
+        // SYSTEM: another account, not the user's.
+        let system = dir.join("system");
+        std::fs::write(&system, b"x").unwrap();
+        set_owner(&system, "S-1-5-18");
+        assert!(!owned(&system).unwrap());
+        // A handle without READ_CONTROL can't tell: an error, not "owned".
+        let attributes_only = std::fs::OpenOptions::new()
+            .access_mode(FILE_READ_ATTRIBUTES)
+            .open(&made)
+            .unwrap();
+        let denied = owned_by_current_user(attributes_only.as_handle()).unwrap_err();
+        assert_eq!(denied.kind(), io::ErrorKind::PermissionDenied);
+        drop((attributes_only, file, descriptor));
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

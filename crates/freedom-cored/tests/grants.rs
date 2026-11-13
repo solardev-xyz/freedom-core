@@ -1,11 +1,12 @@
 //! Design 0012's grant stores through the real binary (APR-3b): the hello's
 //! `grant_root` and `grant_moved`; the four files read from APR-3, main's
 //! own until each moves (`not_moved`, nothing in `grant_root` touched); a
-//! moved file written atomically, `0600`, renamed aside when unreadable,
-//! within the bounds, with one `approval.changed` per change and the
-//! failed-write rule at each step; today's rules answering until `dapp`
-//! moves; a flagged `dapp-send`'s rule; and an `intent-replace` spent at
-//! `sign.transaction`.
+//! moved file written atomically, `0600`, renamed aside when unreadable
+//! (on Windows, another account's file too), within the bounds, with one
+//! `approval.changed` per change and the failed-write rule at each step;
+//! today's rules answering until `dapp` moves; a flagged `dapp-send`'s
+//! rule; an `intent-replace` spent at `sign.transaction`; and a page's SOC
+//! checked against its Swarm grant (APR-3c).
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
@@ -406,6 +407,87 @@ fn main_s_file_answers_at_the_next_check() {
         not_covered("no_rule")
     );
     assert!(!dir.join("dapp-permissions.json.unreadable").exists());
+}
+
+/// Makes the SID `sid` `path`'s owner (`icacls /setowner`), which takes an
+/// administrator's restore privilege, as CI's runner has.
+#[cfg(windows)]
+fn set_owner(path: &Path, sid: &str) {
+    let output = std::process::Command::new("icacls")
+        .arg(path)
+        .arg("/setowner")
+        .arg(format!("*{sid}"))
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "icacls /setowner {sid} (run as an administrator): {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+}
+
+/// The dApp store's records, as the chrome reads them.
+#[cfg(windows)]
+fn dapp_records(core: &mut Core, id: &mut u64) -> Value {
+    let records = call_as(
+        core,
+        id,
+        &chrome(),
+        "approval.grants",
+        json!({ "store": "dapp" }),
+    );
+    result(&records)["records"].clone()
+}
+
+/// On Windows, as on Unix, a file another account owns reads as an empty
+/// store (freedom-core#360): main's stays where it is, and a moved one is
+/// renamed aside at the hello, as any moved file that can't be read.
+/// BUILTIN\Users stands for the other account: a group the user is in, and
+/// never the user.
+#[cfg(windows)]
+#[test]
+fn a_file_another_account_owns_reads_as_empty() {
+    // Before the move: read, then not once another account owns it.
+    let root = tempfile::tempdir().unwrap();
+    let mut core = start(root.path(), &[], true, &[]);
+    let dir = core.grant_root.clone();
+    let file = dir.join("dapp-permissions.json");
+    let mut id = 10;
+    std::fs::write(&file, today_dapp()).unwrap();
+    assert_eq!(
+        check_message(&mut core, &mut id, &site()),
+        json!({ "covered": true })
+    );
+    assert_eq!(dapp_records(&mut core, &mut id)[0]["walletIndex"], 0);
+    set_owner(&file, "S-1-5-32-545");
+    assert_eq!(
+        check_message(&mut core, &mut id, &site()),
+        not_covered("no_rule")
+    );
+    assert_eq!(dapp_records(&mut core, &mut id), json!([]));
+    assert_eq!(std::fs::read_to_string(&file).unwrap(), today_dapp());
+    assert!(!dir.join("dapp-permissions.json.unreadable").exists());
+    drop(core);
+
+    // Moved: renamed aside, the store empty.
+    let root = tempfile::tempdir().unwrap();
+    let dir = root.path().join("userData");
+    std::fs::create_dir_all(&dir).unwrap();
+    let file = dir.join("dapp-permissions.json");
+    std::fs::write(&file, today_dapp()).unwrap();
+    set_owner(&file, "S-1-5-32-545");
+    let mut core = start(root.path(), &["dapp"], true, &[]);
+    let mut id = 10;
+    assert_eq!(dapp_records(&mut core, &mut id), json!([]));
+    assert_eq!(
+        check_message(&mut core, &mut id, &site()),
+        not_covered("no_rule")
+    );
+    assert!(!file.exists());
+    assert_eq!(
+        std::fs::read_to_string(dir.join("dapp-permissions.json.unreadable")).unwrap(),
+        today_dapp()
+    );
 }
 
 /// Before the move, a flagged `dapp-send` signs, writes no rule, and says
@@ -1025,4 +1107,402 @@ fn a_failed_revoke_forgets_the_buckets_and_a_failed_touch_sends_nothing() {
     connect_and_sign(&mut core, &mut id);
     let again = sign(&mut core, &mut id);
     assert!(result(&again)["signature"].is_string(), "{again}");
+}
+
+/// A Swarm file as main writes it: each key connected, with its flags.
+fn swarm_file(sites: &[(&str, &[&str])]) -> String {
+    let mut map = serde_json::Map::new();
+    for (key, flags) in sites {
+        let on = |flag: &str| flags.contains(&flag);
+        map.insert(
+            (*key).to_owned(),
+            json!({
+                "origin": key, "connectedAt": 1_762_000_000_000_u64, "lastUsed": 1_762_000_000_000_u64,
+                "autoApprove": {
+                    "publish": on("publish"), "feeds": on("feeds"),
+                    "signing": on("signing"), "messaging": on("messaging"),
+                },
+            }),
+        );
+    }
+    serde_json::to_string_pretty(&Value::Object(map)).unwrap()
+}
+
+/// Main's Swarm file, renamed into place as main writes it.
+fn main_writes_swarm(dir: &Path, text: &str) {
+    std::fs::write(dir.join("staged"), text).unwrap();
+    std::fs::rename(dir.join("staged"), dir.join("swarm-permissions.json")).unwrap();
+}
+
+/// `swarm.sign_soc` for the site's publisher key, with `authorization`
+/// when given.
+fn sign_soc(core: &mut Core, id: &mut u64, context: &Value, authorization: Option<Value>) -> Value {
+    let mut params = json!({
+        "key": { "kind": "publisher", "origin_index": 3 },
+        "identifier": format!("0x{}", "ab".repeat(32)),
+        "payload": "0x68656c6c6f",
+    });
+    if let Some(authorization) = authorization {
+        params["authorization"] = authorization;
+    }
+    call_as(core, id, context, "swarm.sign_soc", params)
+}
+
+fn soc_auth(swarm: &str, soc: &str) -> Option<Value> {
+    Some(json!({ "swarm": swarm, "soc": soc }))
+}
+
+fn soc_refused(reply: &Value, reason: &str) {
+    assert_eq!(reply["error"]["code"], "not_authorized", "{reply}");
+    assert_eq!(reply["error"]["data"]["reason"], reason, "{reply}");
+    assert!(reply.get("result").is_none(), "{reply}");
+}
+
+/// Design 0012, "A page's SOC" (APR-3c): `swarm.sign_soc` under `page`,
+/// with `{ swarm, soc }`, checked against the page's Swarm grant for its
+/// origin, read from main's file at each request: connected for `user`;
+/// for `auto` also `agent` false and the request's flag, `feeds` for a feed
+/// write and `signing` for a raw SOC. Main's own SOCs under `shell` sign
+/// as before; a page's without an authorization too, until APR-4.
+#[test]
+fn a_page_s_soc_needs_its_swarm_grant() {
+    let root = tempfile::tempdir().unwrap();
+    let mut core = start(root.path(), &[], true, &[]);
+    let dir = core.grant_root.clone();
+    let mut id = 10;
+    // Main's own SOC, the signature every passing request below gives.
+    let mine = sign_soc(&mut core, &mut id, &shell(), None);
+    let signature = result(&mine)["signature"].clone();
+    let signs = |reply: &Value| assert_eq!(result(reply)["signature"], signature, "{reply}");
+    let all = [
+        ("user", "feed"),
+        ("user", "raw"),
+        ("auto", "feed"),
+        ("auto", "raw"),
+    ];
+
+    // No grant: the file missing, then empty.
+    for (swarm, soc) in all {
+        soc_refused(
+            &sign_soc(&mut core, &mut id, &site(), soc_auth(swarm, soc)),
+            "no_rule",
+        );
+    }
+    main_writes_swarm(&dir, "{}");
+    for (swarm, soc) in all {
+        soc_refused(
+            &sign_soc(&mut core, &mut id, &site(), soc_auth(swarm, soc)),
+            "no_rule",
+        );
+    }
+    // Another origin's grant, with every flag, answers nothing for this one.
+    let every: &[&str] = &["publish", "feeds", "signing", "messaging"];
+    main_writes_swarm(&dir, &swarm_file(&[("https://other.example", every)]));
+    for (swarm, soc) in all {
+        soc_refused(
+            &sign_soc(&mut core, &mut id, &site(), soc_auth(swarm, soc)),
+            "no_rule",
+        );
+    }
+    // Connected with no flag: `user` signs, in or out of custody; `auto`
+    // doesn't.
+    main_writes_swarm(&dir, &swarm_file(&[(SITE, &[])]));
+    for soc in ["feed", "raw"] {
+        signs(&sign_soc(
+            &mut core,
+            &mut id,
+            &site(),
+            soc_auth("user", soc),
+        ));
+        signs(&sign_soc(
+            &mut core,
+            &mut id,
+            &page_as(SITE, true),
+            soc_auth("user", soc),
+        ));
+        soc_refused(
+            &sign_soc(&mut core, &mut id, &site(), soc_auth("auto", soc)),
+            "no_rule",
+        );
+    }
+    // The other flags answer no SOC.
+    main_writes_swarm(&dir, &swarm_file(&[(SITE, &["publish", "messaging"])]));
+    for soc in ["feed", "raw"] {
+        soc_refused(
+            &sign_soc(&mut core, &mut id, &site(), soc_auth("auto", soc)),
+            "no_rule",
+        );
+    }
+    // `feeds` answers a feed write only, `signing` a raw SOC only.
+    main_writes_swarm(&dir, &swarm_file(&[(SITE, &["feeds"])]));
+    signs(&sign_soc(
+        &mut core,
+        &mut id,
+        &site(),
+        soc_auth("auto", "feed"),
+    ));
+    soc_refused(
+        &sign_soc(&mut core, &mut id, &site(), soc_auth("auto", "raw")),
+        "no_rule",
+    );
+    main_writes_swarm(&dir, &swarm_file(&[(SITE, &["signing"])]));
+    signs(&sign_soc(
+        &mut core,
+        &mut id,
+        &site(),
+        soc_auth("auto", "raw"),
+    ));
+    soc_refused(
+        &sign_soc(&mut core, &mut id, &site(), soc_auth("auto", "feed")),
+        "no_rule",
+    );
+    // `auto` never with the agent holding the tab, nor without `agent`.
+    main_writes_swarm(&dir, &swarm_file(&[(SITE, every)]));
+    let unknown = json!({ "caller": "page", "page": {
+        "origin": SITE, "top_origin": SITE, "frame": 1, "navigation": 1,
+    } });
+    for soc in ["feed", "raw"] {
+        signs(&sign_soc(
+            &mut core,
+            &mut id,
+            &site(),
+            soc_auth("auto", soc),
+        ));
+        for context in [page_as(SITE, true), unknown.clone()] {
+            soc_refused(
+                &sign_soc(&mut core, &mut id, &context, soc_auth("auto", soc)),
+                "custody",
+            );
+        }
+        signs(&sign_soc(
+            &mut core,
+            &mut id,
+            &unknown,
+            soc_auth("user", soc),
+        ));
+        // Another origin's page under this site's grant.
+        soc_refused(
+            &sign_soc(
+                &mut core,
+                &mut id,
+                &page_as("https://other.example", false),
+                soc_auth("user", soc),
+            ),
+            "no_rule",
+        );
+    }
+    // A grant main removes stops answering at the next request.
+    main_writes_swarm(&dir, "{}");
+    soc_refused(
+        &sign_soc(&mut core, &mut id, &site(), soc_auth("user", "feed")),
+        "no_rule",
+    );
+    main_writes_swarm(&dir, &swarm_file(&[(SITE, every)]));
+
+    // Main's own SOCs take no Swarm grant: `shell` and `chrome` sign as
+    // before, and are refused one.
+    signs(&sign_soc(&mut core, &mut id, &shell(), None));
+    signs(&sign_soc(&mut core, &mut id, &chrome(), None));
+    for context in [shell(), chrome()] {
+        let reply = sign_soc(&mut core, &mut id, &context, soc_auth("user", "feed"));
+        refused(&reply, "forbidden");
+    }
+    // A page without an authorization signs as before (APR-3; APR-4
+    // requires one), but not without its `PageContext`.
+    signs(&sign_soc(&mut core, &mut id, &site(), None));
+    let bare = json!({ "caller": "page" });
+    refused(
+        &sign_soc(&mut core, &mut id, &bare, None),
+        "invalid_argument",
+    );
+    refused(
+        &sign_soc(&mut core, &mut id, &bare, soc_auth("user", "feed")),
+        "invalid_argument",
+    );
+    // Only `{ swarm, soc }`, with their values.
+    for authorization in [
+        json!("user"),
+        json!({ "swarm": "user" }),
+        json!({ "soc": "feed" }),
+        json!({ "swarm": "always", "soc": "feed" }),
+        json!({ "swarm": "user", "soc": "publish" }),
+        json!({ "swarm": true, "soc": "feed" }),
+        json!({ "swarm": "user", "soc": "feed", "standing": {} }),
+        json!({ "standing": {} }),
+        json!({ "safe": "00" }),
+        json!({ "token": "00", "handle": HANDLE }),
+    ] {
+        let reply = sign_soc(&mut core, &mut id, &site(), Some(authorization.clone()));
+        refused(&reply, "invalid_argument");
+        assert!(reply.get("result").is_none(), "{authorization}: {reply}");
+    }
+}
+
+/// A page's SOC is refused before any key is derived: with the vault
+/// locked, a request its grant doesn't cover is `not_authorized`, and one
+/// it covers `vault_locked`, as main's own. A token presented to
+/// `swarm.sign_soc`, which no token kind binds, is burnt.
+#[test]
+fn a_page_s_soc_is_refused_before_the_key() {
+    let root = tempfile::tempdir().unwrap();
+    let mut core = start(root.path(), &[], true, &[]);
+    let dir = core.grant_root.clone();
+    let mut id = 10;
+    main_writes_swarm(&dir, &swarm_file(&[(SITE, &["feeds"])]));
+    let mint = |core: &mut Core, id: &mut u64| {
+        let issued = call_as(
+            core,
+            id,
+            &site(),
+            "approval.issue",
+            json!({ "kind": "sign-message", "account": 0, "payload": { "message": "0x68656c6c6f" }, "handle": HANDLE }),
+        );
+        result(&issued)["token"].as_str().unwrap().to_owned()
+    };
+    let token = mint(&mut core, &mut id);
+    let control = mint(&mut core, &mut id);
+    assert!(
+        result(&call_as(
+            &mut core,
+            &mut id,
+            &shell(),
+            "vault.lock",
+            json!({})
+        ))
+        .is_object()
+    );
+    soc_refused(
+        &sign_soc(&mut core, &mut id, &site(), soc_auth("auto", "raw")),
+        "no_rule",
+    );
+    soc_refused(
+        &sign_soc(
+            &mut core,
+            &mut id,
+            &page_as(SITE, true),
+            soc_auth("auto", "feed"),
+        ),
+        "custody",
+    );
+    soc_refused(
+        &sign_soc(
+            &mut core,
+            &mut id,
+            &page_as("https://other.example", false),
+            soc_auth("user", "feed"),
+        ),
+        "no_rule",
+    );
+    for authorization in [soc_auth("auto", "feed"), soc_auth("user", "raw"), None] {
+        refused(
+            &sign_soc(&mut core, &mut id, &site(), authorization),
+            "vault_locked",
+        );
+    }
+    refused(
+        &sign_soc(&mut core, &mut id, &shell(), None),
+        "vault_locked",
+    );
+    let presented = sign_soc(
+        &mut core,
+        &mut id,
+        &site(),
+        Some(json!({ "token": token, "handle": HANDLE })),
+    );
+    refused(&presented, "invalid_argument");
+    let unlocked = call_as(
+        &mut core,
+        &mut id,
+        &shell(),
+        "vault.unlock",
+        json!({ "password_b64": STANDARD.encode("testpass1") }),
+    );
+    assert!(result(&unlocked).is_object());
+    let spend = |core: &mut Core, id: &mut u64, token: &str| {
+        call_as(
+            core,
+            id,
+            &site(),
+            "sign.message",
+            json!({ "key": account(0), "message": "0x68656c6c6f", "authorization": { "token": token, "handle": HANDLE } }),
+        )
+    };
+    let burnt = spend(&mut core, &mut id, &token);
+    assert_eq!(burnt["error"]["data"]["reason"], "unknown_token", "{burnt}");
+    assert!(result(&spend(&mut core, &mut id, &control))["signature"].is_string());
+}
+
+/// Once `swarm` has moved, a page's SOC is checked against the core's own
+/// Swarm store: the grants a page makes through `approval.grant` answer,
+/// and a revoke ends them; a file another process writes there doesn't.
+#[test]
+fn a_page_s_soc_reads_the_moved_swarm_store() {
+    let root = tempfile::tempdir().unwrap();
+    let mut core = start(root.path(), &["swarm"], true, &[]);
+    let dir = core.grant_root.clone();
+    let mut id = 10;
+    // Not the core's: written behind its back after the hello.
+    main_writes_swarm(&dir, &swarm_file(&[(SITE, &["feeds", "signing"])]));
+    soc_refused(
+        &sign_soc(&mut core, &mut id, &site(), soc_auth("user", "feed")),
+        "no_rule",
+    );
+    assert!(
+        result(&grant(
+            &mut core,
+            &mut id,
+            &site(),
+            "swarm",
+            json!({ "op": "connect" })
+        ))
+        .is_object()
+    );
+    assert!(
+        result(&sign_soc(
+            &mut core,
+            &mut id,
+            &site(),
+            soc_auth("user", "raw")
+        ))["signature"]
+            .is_string()
+    );
+    soc_refused(
+        &sign_soc(&mut core, &mut id, &site(), soc_auth("auto", "feed")),
+        "no_rule",
+    );
+    let flag = grant(
+        &mut core,
+        &mut id,
+        &site(),
+        "swarm",
+        json!({ "op": "flag", "flag": "feeds" }),
+    );
+    assert!(result(&flag).is_object());
+    assert!(
+        result(&sign_soc(
+            &mut core,
+            &mut id,
+            &site(),
+            soc_auth("auto", "feed")
+        ))["signature"]
+            .is_string()
+    );
+    soc_refused(
+        &sign_soc(&mut core, &mut id, &site(), soc_auth("auto", "raw")),
+        "no_rule",
+    );
+    let revoked = call_as(
+        &mut core,
+        &mut id,
+        &site(),
+        "approval.revoke",
+        json!({ "store": "swarm", "key": SITE, "what": "grant" }),
+    );
+    assert!(result(&revoked).is_object());
+    for (swarm, soc) in [("user", "feed"), ("auto", "feed")] {
+        soc_refused(
+            &sign_soc(&mut core, &mut id, &site(), soc_auth(swarm, soc)),
+            "no_rule",
+        );
+    }
 }
