@@ -284,17 +284,7 @@ fn acquire_with(
 
     let lock_path = canonical_locks.join(lock_file_name(namespace, &canonical_data));
     let file = open_lock_file(&lock_path)?;
-    let started = Instant::now();
-    loop {
-        match file.try_lock() {
-            Ok(()) => break,
-            Err(TryLockError::WouldBlock) if started.elapsed() < retry => {
-                std::thread::sleep(Duration::from_millis(100));
-            }
-            Err(TryLockError::WouldBlock) => return Err(GateError::Held),
-            Err(TryLockError::Error(e)) => return Err(GateError::Storage(e)),
-        }
-    }
+    lock_within(&file, retry)?;
     // Resolve again under the lock: if the path now points elsewhere, this
     // gate doesn't protect the directory we would be using.
     if std::fs::canonicalize(data_dir).map_err(GateError::Storage)? != canonical_data {
@@ -310,6 +300,117 @@ fn acquire_with(
         data_dir: canonical_data,
         identity,
     })
+}
+
+/// Takes `file`'s lock, retrying contention for up to `retry` (none at
+/// zero).
+fn lock_within(file: &File, retry: Duration) -> Result<(), GateError> {
+    let started = Instant::now();
+    loop {
+        match file.try_lock() {
+            Ok(()) => return Ok(()),
+            Err(TryLockError::WouldBlock) if started.elapsed() < retry => {
+                std::thread::sleep(Duration::from_millis(100));
+            }
+            Err(TryLockError::WouldBlock) => return Err(GateError::Held),
+            Err(TryLockError::Error(e)) => return Err(GateError::Storage(e)),
+        }
+    }
+}
+
+/// A gate a profile delete takes on a directory it is about to remove
+/// (design 0013, "Deletion"): its lock tried for `retry` (the delete's is
+/// zero), with nothing made but the lock directory and the lock file, so a
+/// refused delete leaves the profile as it was.
+///
+/// - **A `data_dir` that isn't there** is gated at the path it would have:
+///   its nearest existing ancestor's canonical path with the missing names
+///   below it. A holder that makes it meanwhile and takes its gate finds
+///   this one held.
+/// - **`file_name`** names the lock file from that path: [`lock_file_name`]
+///   with a service's namespace, or the core's own name, which has none.
+/// - **`lock_inside_data`:** the lock directory may lie inside the data
+///   directory, as for [`acquire_profile`].
+///
+/// Otherwise as [`acquire_existing`]: storage qualified, the directories
+/// the user's own, and the path resolved again under the lock.
+pub fn acquire_for_delete(
+    data_dir: &Path,
+    lock_dir: &Path,
+    file_name: &dyn Fn(&Path) -> String,
+    lock_inside_data: bool,
+    retry: Duration,
+) -> Result<Gate, GateError> {
+    create_private_dir(lock_dir).map_err(GateError::Storage)?;
+    let (canonical_data, existing) = planned_canonical(data_dir).map_err(GateError::Storage)?;
+    let canonical_locks = std::fs::canonicalize(lock_dir).map_err(GateError::Storage)?;
+    if canonical_locks == canonical_data
+        || (!lock_inside_data && canonical_locks.starts_with(&canonical_data))
+    {
+        return Err(GateError::LockInsideData);
+    }
+    for dir in [&existing, &canonical_locks] {
+        match storage::qualify(dir) {
+            Qualification::Local => {}
+            Qualification::Network(fs) => {
+                return Err(GateError::Unqualified(format!("network filesystem {fs}")));
+            }
+            Qualification::Unknown(reason) => return Err(GateError::Unqualified(reason)),
+        }
+    }
+    if existing == canonical_data {
+        make_private(
+            &canonical_data,
+            "a data directory that isn't the user's own",
+        )?;
+    }
+    make_private(
+        &canonical_locks,
+        "a lock directory that isn't the user's own",
+    )?;
+    let lock_path = canonical_locks.join(file_name(&canonical_data));
+    let file = open_lock_file(&lock_path)?;
+    lock_within(&file, retry)?;
+    if planned_canonical(data_dir).map_err(GateError::Storage)?.0 != canonical_data {
+        return Err(GateError::Moved);
+    }
+    let identity = std::fs::symlink_metadata(&canonical_data)
+        .ok()
+        .and_then(|metadata| DirIdentity::of(&metadata));
+    Ok(Gate {
+        _file: file,
+        lock_path,
+        data_dir: canonical_data,
+        identity,
+    })
+}
+
+/// `dir`'s canonical path, or, while it isn't there, the path it would
+/// have: its nearest existing ancestor's canonical path with the missing
+/// names below it. Second, that ancestor's canonical path (the first, when
+/// `dir` is there).
+fn planned_canonical(dir: &Path) -> std::io::Result<(PathBuf, PathBuf)> {
+    let mut missing = Vec::new();
+    let mut current = dir;
+    loop {
+        match std::fs::canonicalize(current) {
+            Ok(found) => {
+                let mut planned = found.clone();
+                for name in missing.iter().rev() {
+                    planned.push(name);
+                }
+                return Ok((planned, found));
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                let (Some(name), Some(parent)) = (current.file_name(), current.parent()) else {
+                    return Err(e);
+                };
+                missing.push(name);
+                current = parent;
+            }
+            Err(e) => return Err(e),
+        }
+    }
 }
 
 /// Creates `dir` and its missing ancestors, private to the user on Unix
@@ -499,6 +600,47 @@ mod tests {
         // until it execs. Released means acquirable within the retry, here
         // and in every other test that reacquires after a release.
         assert!(acquire(&data, &locks, "ipfs", CONTENTION_RETRY).is_ok());
+    }
+
+    /// A delete's gate: tried once, nothing made but the lock file, and a
+    /// missing directory gated at the path it would have, so whoever makes
+    /// it and takes its gate finds it held.
+    #[test]
+    fn a_deletes_gate_makes_nothing_and_covers_a_missing_directory() {
+        let (_root, data, locks) = dirs();
+        let name = |dir: &Path| lock_file_name("ipfs", dir);
+        let inner = data.join("ipfs-data").join("freedom-ipfs");
+        let gate = acquire_for_delete(&inner, &locks, &name, false, Duration::ZERO).unwrap();
+        assert!(!data.exists());
+        assert!(gate.identity.is_none());
+        assert!(
+            gate.data_dir
+                .ends_with(Path::new("data/ipfs-data/freedom-ipfs"))
+        );
+        // A holder that makes it now waits on this gate.
+        assert!(matches!(
+            acquire(&inner, &locks, "ipfs", Duration::ZERO),
+            Err(GateError::Held)
+        ));
+        drop(gate);
+        let holder = acquire(&inner, &locks, "ipfs", CONTENTION_RETRY).unwrap();
+        assert!(matches!(
+            acquire_for_delete(&inner, &locks, &name, false, Duration::ZERO),
+            Err(GateError::Held)
+        ));
+        drop(holder);
+        let gate = acquire_for_delete(&inner, &locks, &name, false, CONTENTION_RETRY).unwrap();
+        assert!(gate.identity.is_some() || cfg!(windows));
+        // The lock directory inside the data directory is refused unless
+        // allowed, as for the profile gate.
+        let nested = inner.join("locks");
+        assert!(matches!(
+            acquire_for_delete(&inner, &nested, &name, false, Duration::ZERO),
+            Err(GateError::LockInsideData)
+        ));
+        assert!(
+            acquire_for_delete(&data, &data.join("locks"), &name, true, Duration::ZERO).is_ok()
+        );
     }
 
     /// `acquire_existing` never makes the data directory: a missing one is

@@ -1,5 +1,7 @@
 //! Profiles in the core (design 0013). This step, PRF-3: the profile
-//! catalog's rules, which the `freedom-cored profile …` subcommands run.
+//! catalog's rules, which the `freedom-cored profile …` subcommands run,
+//! with a delete's checks and paths ([`delete`]) and the forget file's form
+//! and bounds ([`forget`]).
 //!
 //! The reference is freedom-browser's `src/main/profile-catalog.js` and
 //! `profile-resolver.js` (with `profile-lock.js`'s staleness rule);
@@ -23,6 +25,8 @@
 //! or write what its spreads made of it.
 
 mod catalog;
+pub mod delete;
+pub mod forget;
 mod ids;
 mod js;
 pub mod lock;
@@ -34,6 +38,8 @@ pub use catalog::{
     Error, Options, Store, StoreError, create, import, list, load_catalog, rename, reserved_ports,
     update_nodes,
 };
+pub use delete::{Deletion, plan_deletion, validate_deletion};
+pub use forget::forget_pending;
 pub use ids::{
     DEFAULT_PROFILE_ID, checkout_id, dev_port_offset, display_name_from_id, hash_path,
     sanitize_profile_id,
@@ -61,31 +67,6 @@ pub const CATALOG_LOCK_DIR: &str = "profile-registry.write.lock";
 pub const PROFILE_LOCK_TARGET: &str = "profile-open";
 /// The profile lock's directory, in the profile's directory.
 pub const PROFILE_LOCK_DIR: &str = "profile-open.lock";
-
-/// The deleted profiles' key-store items `profile-registry.json.forget`
-/// names, for `profile open`'s `forget_pending` (design 0013, "Forgetting an
-/// item"): each `deleted[].items[]` entry counted. A file that can't be
-/// read (`text` absent with `unreadable`), doesn't parse or isn't in form
-/// counts as pending, so main runs `profile forget-list`, which sets it
-/// aside: `profile open` never fails over it.
-pub fn forget_pending(text: Option<&str>, unreadable: bool) -> u64 {
-    if unreadable {
-        return 1;
-    }
-    let Some(text) = text else {
-        return 0;
-    };
-    let counted = fc_json::parse(text).ok().and_then(|file| {
-        let deleted = file.get("deleted")?.as_array()?;
-        let mut count = 0u64;
-        for profile in deleted {
-            count =
-                count.checked_add(u64::try_from(profile.get("items")?.as_array()?.len()).ok()?)?;
-        }
-        Some(count)
-    });
-    counted.unwrap_or(1)
-}
 
 /// The forget file, at the app root.
 pub const FORGET_FILE: &str = "profile-registry.json.forget";

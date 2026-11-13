@@ -124,6 +124,11 @@ struct Step {
     protocol: Option<String>,
     metadata: Option<String>,
     updates: Option<String>,
+    confirm: Option<String>,
+    /// 0013's Deviations row where the core answers otherwise, with its
+    /// answer (`core`) beside the reference's (`result`).
+    deviation: Option<String>,
+    core: Option<Value>,
     result: Value,
     files: BTreeMap<String, String>,
     dirs: Vec<String>,
@@ -429,6 +434,23 @@ fn run(memory: &mut Memory, scenario: &Scenario, step: &Step) -> Value {
             Style::Posix,
             step.active.as_deref(),
         )),
+        "delete-validate" => {
+            let id = step.id.as_deref().unwrap();
+            let confirm = step.confirm.as_deref().unwrap();
+            let validated =
+                fc_profile::validate_deletion(memory, &app_root, Style::Posix, id, confirm);
+            // The delete itself checks the same, under the catalog's lock.
+            let planned = fc_profile::plan_deletion(memory, &app_root, &opts, id, confirm);
+            assert_eq!(
+                validated.clone().err(),
+                planned.err(),
+                "{id}: the delete's own checks"
+            );
+            match validated {
+                Ok(()) => serde_json::json!({ "value": "valid" }),
+                Err(error) => classified(&error),
+            }
+        }
         other => panic!("unknown step {other}"),
     }
 }
@@ -441,7 +463,15 @@ fn scenarios() {
         for (n, step) in scenario.steps.iter().enumerate() {
             let at = format!("{} step {n} ({})", scenario.id, step.op);
             let result = run(&mut memory, scenario, step);
-            assert_eq!(result, step.result, "{at}: result");
+            let expected = match (&step.deviation, &step.core) {
+                (None, None) => &step.result,
+                (Some(deviation), Some(core)) => {
+                    assert_eq!(deviation, "profile-delete-overlap", "{at}: a row of 0013's");
+                    core
+                }
+                _ => panic!("{at}: a deviation names its row and the core's answer"),
+            };
+            assert_eq!(&result, expected, "{at}: result");
             let files: BTreeMap<String, String> = memory
                 .files
                 .iter()
