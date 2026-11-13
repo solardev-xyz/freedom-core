@@ -76,11 +76,28 @@ pub fn replace(
     check: impl FnOnce(&File) -> Result<(), String>,
     commit: impl FnOnce() -> bool,
 ) -> Result<Done, WriteError> {
+    let name = target
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    replace_as(target, &format!(".{name}"), contents, check, commit)
+}
+
+/// [`replace`], with temp files named `<stem>.<pid>.<n>.tmp`: the profile
+/// catalog's keep its name as their prefix, which every build's delete of
+/// the packaged default profile spares (design 0013, 5.1).
+pub fn replace_as(
+    target: &Path,
+    stem: &str,
+    contents: &[u8],
+    check: impl FnOnce(&File) -> Result<(), String>,
+    commit: impl FnOnce() -> bool,
+) -> Result<Done, WriteError> {
     use std::io::Seek;
     let dir = target
         .parent()
         .ok_or_else(|| std::io::Error::other("target has no parent directory"))?;
-    let (temp_path, mut temp) = create_temp(dir, target)?;
+    let (temp_path, mut temp) = create_temp(dir, stem)?;
     let staged = (|| -> Result<(), WriteError> {
         temp.write_all(contents)?;
         temp.sync_all()?;
@@ -151,7 +168,7 @@ pub fn remove(target: &Path, commit: impl FnOnce() -> bool) -> std::io::Result<O
 }
 
 /// The outcome of the directory flush after a commit; a failure is logged.
-fn flushed(sync: std::io::Result<()>) -> Done {
+pub(crate) fn flushed(sync: std::io::Result<()>) -> Done {
     match sync {
         Ok(()) => Done::Durable,
         Err(e) => {
@@ -363,13 +380,9 @@ fn is_temp_of(file_name: &str, name: &str) -> bool {
 }
 
 /// Creates `<target>.<pid>.<n>.tmp` exclusively in `dir`.
-fn create_temp(dir: &Path, target: &Path) -> std::io::Result<(PathBuf, File)> {
-    let name = target
-        .file_name()
-        .map(|n| n.to_string_lossy().into_owned())
-        .unwrap_or_default();
+fn create_temp(dir: &Path, stem: &str) -> std::io::Result<(PathBuf, File)> {
     for attempt in 0u32..100 {
-        let path = dir.join(format!(".{name}.{}.{attempt}.tmp", std::process::id()));
+        let path = dir.join(format!("{stem}.{}.{attempt}.tmp", std::process::id()));
         let mut options = OpenOptions::new();
         // Read too: the check reads the file back through this handle.
         options.read(true).write(true).create_new(true);
@@ -482,7 +495,7 @@ mod tests {
         let target = dir.path().join("identity-vault.json");
         std::fs::write(&target, b"vault").unwrap();
         // What a write killed before its rename leaves.
-        let (left, file) = create_temp(dir.path(), &target).unwrap();
+        let (left, file) = create_temp(dir.path(), ".identity-vault.json").unwrap();
         drop(file);
         std::fs::write(&left, b"an encrypted copy").unwrap();
         std::fs::write(dir.path().join(".identity-vault.json.1.2.tmp"), b"x").unwrap();

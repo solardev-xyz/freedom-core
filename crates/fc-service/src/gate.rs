@@ -157,12 +157,97 @@ pub fn acquire_existing(
     acquire_as(data_dir, lock_dir, namespace, retry, false)
 }
 
+/// The profile gate (design 0013, "The lock"):
+/// `<lock-dir>/profile-<sha256(canonical userData)>.lock`, for a profile's
+/// `userData` that must already exist, as [`acquire_existing`]. The one
+/// difference: the lock directory may lie inside `userData`, as it does for
+/// the packaged default profile on macOS and Windows, whose `userData` is
+/// the app root holding `locks/`. That profile's delete spares `locks/`
+/// (0013, "The lock directory is kept"), so the gate's file outlives it.
+pub fn acquire_profile(
+    user_data_dir: &Path,
+    lock_dir: &Path,
+    retry: Duration,
+) -> Result<Gate, GateError> {
+    acquire_with(
+        user_data_dir,
+        lock_dir,
+        PROFILE_NAMESPACE,
+        retry,
+        false,
+        true,
+    )
+}
+
+/// The profile gate's namespace.
+pub const PROFILE_NAMESPACE: &str = "profile";
+
+/// Whether another process holds `namespace`'s gate for `data_dir`: its lock
+/// tried without waiting and let go at once, so a holder starting meanwhile,
+/// which retries contention for [`CONTENTION_RETRY`], never fails for it
+/// (design 0013, "Asking the gate"). A directory, lock directory or lock
+/// file that isn't there was never gated: `false`. Nothing is made.
+pub fn probe(data_dir: &Path, lock_dir: &Path, namespace: &str) -> Result<bool, GateError> {
+    let canonical_data = match std::fs::canonicalize(data_dir) {
+        Ok(path) => path,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(e) => return Err(GateError::Storage(e)),
+    };
+    let canonical_locks = match std::fs::canonicalize(lock_dir) {
+        Ok(path) => path,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(e) => return Err(GateError::Storage(e)),
+    };
+    let lock_path = canonical_locks.join(lock_file_name(namespace, &canonical_data));
+    let file = match open_existing_lock_file(&lock_path) {
+        Ok(file) => file,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(e) => return Err(GateError::Storage(e)),
+    };
+    match file.try_lock() {
+        Ok(()) => Ok(false),
+        Err(TryLockError::WouldBlock) => Ok(true),
+        Err(TryLockError::Error(e)) => Err(GateError::Storage(e)),
+    }
+}
+
+/// Opens an existing lock file to try its lock, never through a symlink
+/// (Unix) and never creating it.
+#[cfg(unix)]
+fn open_existing_lock_file(path: &Path) -> std::io::Result<File> {
+    use rustix::fs::{Mode, OFlags};
+    let flags = OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC;
+    let file = File::from(rustix::fs::open(path, flags, Mode::empty())?);
+    if !file.metadata()?.is_file() {
+        return Err(std::io::Error::other(
+            "a lock file that isn't a regular file",
+        ));
+    }
+    Ok(file)
+}
+
+#[cfg(not(unix))]
+fn open_existing_lock_file(path: &Path) -> std::io::Result<File> {
+    std::fs::OpenOptions::new().read(true).open(path)
+}
+
 fn acquire_as(
     data_dir: &Path,
     lock_dir: &Path,
     namespace: &str,
     retry: Duration,
     create: bool,
+) -> Result<Gate, GateError> {
+    acquire_with(data_dir, lock_dir, namespace, retry, create, false)
+}
+
+fn acquire_with(
+    data_dir: &Path,
+    lock_dir: &Path,
+    namespace: &str,
+    retry: Duration,
+    create: bool,
+    lock_inside_data: bool,
 ) -> Result<Gate, GateError> {
     // Without `create`, both directories must already exist: nothing is made,
     // so nothing can be made again in place of one renamed away.
@@ -174,7 +259,9 @@ fn acquire_as(
     #[cfg(test)]
     tests::after_data_resolved();
     let canonical_locks = std::fs::canonicalize(lock_dir).map_err(GateError::Storage)?;
-    if canonical_locks.starts_with(&canonical_data) {
+    if canonical_locks == canonical_data
+        || (!lock_inside_data && canonical_locks.starts_with(&canonical_data))
+    {
         return Err(GateError::LockInsideData);
     }
     for dir in [&canonical_data, &canonical_locks] {
@@ -702,5 +789,64 @@ mod tests {
         let exit = hold_lock(&data, &locks, "ipfs", std::io::empty(), Vec::new());
         assert_eq!(exit, Exit::LockHeld);
         assert!(started.elapsed() >= CONTENTION_RETRY);
+    }
+
+    /// The profile gate (design 0013): the lock directory may lie inside the
+    /// profile's `userData` (the packaged default profile's app root holds
+    /// `locks/`), never be it; the directory must exist; and it is its own
+    /// gate, apart from every service's on the same directory.
+    #[test]
+    fn the_profile_gate_allows_the_app_roots_own_lock_directory() {
+        let (_root, data, _) = dirs();
+        assert!(matches!(
+            acquire_profile(&data, &data.join("locks"), Duration::ZERO),
+            Err(GateError::Storage(e)) if e.kind() == std::io::ErrorKind::NotFound
+        ));
+        assert!(!data.exists(), "the profile gate makes no directory");
+        std::fs::create_dir_all(data.join("locks")).unwrap();
+        let gate = acquire_profile(&data, &data.join("locks"), Duration::ZERO).unwrap();
+        let name = gate
+            .lock_path
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        assert_eq!(
+            name,
+            lock_file_name(PROFILE_NAMESPACE, &std::fs::canonicalize(&data).unwrap())
+        );
+        assert!(name.starts_with("profile-"));
+        assert!(matches!(
+            acquire_profile(&data, &data.join("locks"), Duration::ZERO),
+            Err(GateError::Held)
+        ));
+        assert!(matches!(
+            acquire_profile(&data, &data, Duration::ZERO),
+            Err(GateError::LockInsideData)
+        ));
+        // Another namespace on the same directory is another gate.
+        let locks = data.join("locks");
+        let ipfs = acquire_existing(&data, &locks, "ipfs", Duration::ZERO);
+        assert!(matches!(ipfs, Err(GateError::LockInsideData)));
+    }
+
+    /// `probe` reports a held gate and leaves a free one free; it makes
+    /// nothing, and a directory never gated reads free.
+    #[test]
+    fn probe_tries_without_holding() {
+        let (_root, data, locks) = dirs();
+        assert!(!probe(&data, &locks, "profile").unwrap());
+        assert!(!locks.exists() && !data.exists());
+        std::fs::create_dir_all(&data).unwrap();
+        std::fs::create_dir_all(&locks).unwrap();
+        assert!(!probe(&data, &locks, "profile").unwrap());
+        assert_eq!(std::fs::read_dir(&locks).unwrap().count(), 0);
+        let gate = acquire_profile(&data, &locks, Duration::ZERO).unwrap();
+        assert!(probe(&data, &locks, "profile").unwrap());
+        assert!(!probe(&data, &locks, "ipfs").unwrap());
+        drop(gate);
+        // Free after the probe: taken within the retry (a child spawned by
+        // another test may hold a copy of the descriptor until it execs).
+        assert!(acquire_profile(&data, &locks, CONTENTION_RETRY).is_ok());
     }
 }
