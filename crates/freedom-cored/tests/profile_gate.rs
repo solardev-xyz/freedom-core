@@ -19,6 +19,13 @@
 //! What this can't measure: on Windows, an unsigned build's first antivirus
 //! scan. GitHub's Windows runners turn real-time scanning off, so 0013
 //! qualifies that cost apart, on a machine with it on, before PRF-4.
+//!
+//! **On Windows the gate reports and doesn't fail, for now** (0013, "The
+//! latency gate"): Windows keeps `profile open` in JS until that
+//! qualification, so a miss there blocks nothing the browser uses, while the
+//! runner's spawns run a p95 over 100 ms in some runs (p50 near 27 ms). The
+//! PR that moves Windows's `profile open` to the core sets
+//! [`WINDOWS_BLOCKS`], and the gate fails there again.
 
 #![allow(clippy::unwrap_used, clippy::print_stderr)]
 
@@ -27,6 +34,10 @@ use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 const BIN: &str = env!("CARGO_BIN_EXE_freedom-cored");
+
+/// Whether a miss fails the gate on Windows: not while Windows keeps
+/// `profile open` in JS (see the module's comment).
+const WINDOWS_BLOCKS: bool = false;
 
 /// An optimized build, as the release's: the test and the binary come from
 /// one Cargo run, so they share its profile.
@@ -126,6 +137,13 @@ fn profile_open_is_fast_enough() {
             percentile(&again, 95),
             pooled.len()
         );
+        if cfg!(windows) && !WINDOWS_BLOCKS && pooled_p95 >= GATE_P95 {
+            eprintln!(
+                "pooled p95 {pooled_p95:?} misses the gate on Windows, which reports only while \
+                 profile open stays in JS there (0013)"
+            );
+            return;
+        }
         assert!(
             pooled_p95 < GATE_P95,
             "pooled p95 {pooled_p95:?} misses the gate (first run p95 {p95:?}): {times:?} then {again:?}"
