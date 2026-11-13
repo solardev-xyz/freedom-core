@@ -15,12 +15,17 @@
 //! freedom-cored profile reserved-ports --app-root <dir> [--dev [--checkout-hash <hex8>]]
 //!     [--exclude <id>]
 //! freedom-cored profile status --lock-dir <dir> [--dev] --user-data-dir <dir>...
+//! freedom-cored profile delete --app-root <dir> --lock-dir <dir> --id <id>
+//!     --confirm-display-name <name> [--dev [--checkout-hash <hex8>]]
+//! freedom-cored profile forget-list --app-root <dir>
+//! freedom-cored profile forget-done --app-root <dir> --item <32 hex>...
 //! freedom-cored hold-profile --user-data-dir <dir> --lock-dir <dir> [--app-root <dir> --id <id>]
 //! ```
 //!
 //! **Results** are one JSON line on stdout: the reference's result for each
 //! catalog operation (`{ catalog, record, metadata }`, the summaries, the
-//! ports), `profile open`'s object, `status`'s list.
+//! ports), `profile open`'s object, `status`'s list, and `delete`'s and the
+//! forget file's (`delete.rs`, `forget.rs`).
 //!
 //! **Exits:** 0 with the result; 65 for a request the reference refuses,
 //! with `{ "error": "refused", "message": <its message> }` on stdout; 74 for
@@ -32,10 +37,14 @@
 //!
 //! **The catalog's write lock** is taken by each subcommand that writes,
 //! for its whole run, as the reference's `withCatalogWriteLock` (5 retries,
-//! 50 to 250 ms apart), and refreshed from a thread of its own. The reads,
+//! 50 to 250 ms apart), and refreshed from a thread of its own (`delete`,
+//! `forget-list` and `forget-done` included). The reads,
 //! `list` and `reserved-ports`, take none, as the reference's don't.
 
+mod delete;
+mod forget;
 mod lock;
+mod remove;
 mod store;
 
 use std::ffi::OsString;
@@ -51,7 +60,7 @@ use crate::log;
 use lock::Lock;
 use store::DiskStore;
 
-const USAGE: &str = "usage: freedom-cored profile <open|list|create|rename|import|update-nodes|reserved-ports|status> … | freedom-cored hold-profile --user-data-dir <dir> --lock-dir <dir> [--app-root <dir> --id <id>]";
+const USAGE: &str = "usage: freedom-cored profile <open|list|create|rename|import|update-nodes|reserved-ports|status|delete|forget-list|forget-done> … | freedom-cored hold-profile --user-data-dir <dir> --lock-dir <dir> [--app-root <dir> --id <id>]";
 
 /// The flags that take no value.
 const SWITCHES: [&str; 2] = ["--dev", "--runtime"];
@@ -155,6 +164,8 @@ pub fn run(mut args: impl Iterator<Item = OsString>) -> Exit {
             match sub.as_deref() {
                 Some("open") => open(args),
                 Some("status") => status(args),
+                Some("delete") => delete::run(args),
+                Some(sub @ ("forget-list" | "forget-done")) => forget::run(sub, args),
                 Some(
                     sub @ ("list" | "create" | "rename" | "import" | "update-nodes"
                     | "reserved-ports"),
