@@ -202,6 +202,19 @@ jobs:
             --radicle-browser "$FREEDOM_BROWSER_RADICLE_CHECKOUT" \
             --approvals-browser "$FREEDOM_BROWSER_APPROVALS_CHECKOUT"
           node --test vectors/generator/check.test.js
+      # Design 0013's interop harness: the profiles reference's catalog code
+      # and freedom-cored's subcommands on one app root, the catalog's write
+      # lock held both ways (vectors/generator/interop.test.js). It needs a
+      # build with the test hooks.
+      - run: rustup toolchain install
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - run: cargo build --locked -p freedom-cored --features testhooks
+      - name: The profile catalog's interop harness
+        env:
+          FREEDOM_BROWSER_CHECKOUT: ${{ github.workspace }}/reference
+          FREEDOM_BROWSER_APPROVALS_CHECKOUT: ${{ github.workspace }}/approvals-reference
+          FREEDOM_CORED: ${{ github.workspace }}/target/debug/freedom-cored
+        run: node --test vectors/generator/interop.test.js
 
   fuzz:
     # cargo-fuzz targets for the parsers that take untrusted bytes (design
