@@ -17,6 +17,9 @@ workspace = true
 fc-json = { path = "../fc-json" }
 # `hashPath`: a checkout's id, and the profile gate's name.
 sha2 = { version = "0.11", default-features = false }
+# The delete's overlap check compares names canonically decomposed (NFD),
+# as macOS's volumes compare them (design 0013, "Deletion").
+unicode-normalization = "0.1.25"
 
 [dev-dependencies]
 serde = { version = "1", features = ["derive"] }

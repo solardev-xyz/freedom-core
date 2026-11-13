@@ -52,6 +52,10 @@ name = "profiles"
 required-features = ["testhooks"]
 
 [[test]]
+name = "profile_delete"
+required-features = ["testhooks"]
+
+[[test]]
 name = "radicle_custody"
 required-features = ["testhooks"]
 
@@ -100,7 +104,8 @@ sha2 = { version = "0.11", default-features = false, features = ["zeroize"] }
 zeroize = "1.8"
 
 [target.'cfg(windows)'.dependencies]
-# GetDriveTypeW, for storage qualification.
+# GetDriveTypeW, for storage qualification; a directory's file ID, for a
+# profile delete's walk (design 0013, "Deletion").
 fc-sys = { path = "../fc-sys" }
 
 [target.'cfg(unix)'.dependencies]

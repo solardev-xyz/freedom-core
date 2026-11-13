@@ -19,7 +19,9 @@
 // - scenarios: the reference's own operations (`resolveProfile`,
 //   `createProfile`, `renameProfile`, `importProfile`,
 //   `updateProfileNodeConfig`, `getReservedManagedPorts`,
-//   `listProfileSummaries`) run in order on one app root on disk under a
+//   `listProfileSummaries`, and `validateProfileDeletion`, the delete's
+//   refusals, as `delete-validate`, whose value is `valid` where it throws
+//   nothing) run in order on one app root on disk under a
 //   fixed clock, each step's result (or refusal) and every file's text after
 //   it. The app root lives in a temp directory, whose path is written
 //   `/vectors` throughout, so the core replays it at that path.
@@ -27,6 +29,16 @@
 // A refusal is the reference's message; an unsupported catalog its message
 // too; a file that isn't JSON is `unreadable` (the reference's SyntaxError,
 // whose text is V8's) and a TypeError `malformed`.
+//
+// A step where the core answers otherwise, by 0013's Deviations table, has
+// `deviation` (the row's id) and `core` (the core's answer) beside the
+// reference's `result`: `profile-delete-overlap`, a delete whose directory
+// is the profiles root or an app-owned shared entry, or inside one, or at,
+// above or inside another profile's directory (the packaged default
+// profile's being the app root's entries but the shared ones; names
+// compared canonically decomposed and case folded), or whose integer slot,
+// and so Radicle home, another record has too, which the reference lets
+// through and the core refuses.
 
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
@@ -312,12 +324,31 @@ function runStep(modules, scenario, appRoot, step) {
       return JSON.stringify([...catalog.getReservedManagedPorts(appRoot, { ...options, excludeProfileId: step.exclude })]);
     case 'list':
       return JSON.stringify(catalog.listProfileSummaries(appRoot, { activeProfileId: step.active }));
+    case 'delete-validate':
+      // Returns nothing; what it decides is whether it throws, and with what.
+      catalog.validateProfileDeletion(appRoot, step.id, step.confirm);
+      return 'valid';
     default:
       throw new Error(`unknown step ${step.op}`);
   }
 }
 
 const catalogText = (profiles) => JSON.stringify({ version: 1, profiles }, null, 2);
+// 0013's Deviations: each id a step's `deviation` may name.
+const DEVIATIONS = ['profile-delete-overlap'];
+// The core's refusal where a delete's directory overlaps another profile's
+// or the app's own data.
+const OVERLAP = {
+  error: 'refused',
+  message: "Refusing to delete a profile whose directory overlaps another profile's or the app's own data",
+};
+const overlapping = (step) => ({ ...step, deviation: 'profile-delete-overlap', core: OVERLAP });
+// The core's refusal where a delete's Radicle slot is another record's too.
+const SLOT = {
+  error: 'refused',
+  message: 'Refusing to delete a profile whose Radicle slot another profile also uses',
+};
+const sharingSlot = (step) => ({ ...step, deviation: 'profile-delete-overlap', core: SLOT });
 const at = (minute) => `2026-11-01T10:${String(minute).padStart(2, '0')}:00.000Z`;
 
 function scenarios(modules) {
@@ -530,6 +561,238 @@ function scenarios(modules) {
       steps: [{ op: 'open', args: {}, now: at(1) }, { op: 'list' }, { op: 'rename', id: 'default', displayName: 'Mine' }],
     },
     {
+      id: 'delete-validate',
+      dev: false,
+      files: {
+        'app/profile-registry.json': catalogText([
+          { id: 'default', displayName: 'My Profile', dir: `${ROOT}/app`, slot: 0 },
+          { id: 'work', displayName: 'Work', dir: `${ROOT}/app/Profiles/work`, slot: 1 },
+          { id: 'nameless', dir: `${ROOT}/app/Profiles/nameless`, slot: 2 },
+          { id: 'blank', displayName: '', dir: `${ROOT}/app/Profiles/blank`, slot: 3 },
+          { id: 'numbered', displayName: 5, dir: `${ROOT}/app/Profiles/numbered`, slot: 4 },
+          { id: 'outside', displayName: 'Outside', dir: `${ROOT}/elsewhere/outside`, slot: 5 },
+          { id: 'root', displayName: 'Root', dir: `${ROOT}/app`, slot: 6 },
+          { id: 'sibling', displayName: 'Sibling', dir: `${ROOT}/app-other`, slot: 7 },
+          { id: 'dotdot', displayName: 'Dot Dot', dir: `${ROOT}/app/Profiles/../../dotdot`, slot: 8 },
+          { id: 'trailing', displayName: 'Trailing', dir: `${ROOT}/app/Profiles/trailing/`, slot: 9 },
+          { id: 'nodir', displayName: 'No Dir', dir: 42, slot: 10 },
+          { id: 'profiles', displayName: 'Profiles', dir: `${ROOT}/app/Profiles`, slot: 11 },
+        ]),
+      },
+      dirs: [],
+      steps: [
+        { op: 'delete-validate', id: 'work', confirm: 'Work' },
+        { op: 'delete-validate', id: '  WORK ', confirm: 'Work' },
+        { op: 'delete-validate', id: 'work', confirm: 'work' },
+        { op: 'delete-validate', id: 'work', confirm: 'Work ' },
+        { op: 'delete-validate', id: 'work', confirm: '' },
+        { op: 'delete-validate', id: 'missing', confirm: 'Missing' },
+        { op: 'delete-validate', id: '../work', confirm: 'Work' },
+        { op: 'delete-validate', id: '   ', confirm: '' },
+        // `root` claims the same directory.
+        overlapping({ op: 'delete-validate', id: 'default', confirm: 'My Profile' }),
+        { op: 'delete-validate', id: 'nameless', confirm: 'Nameless' },
+        { op: 'delete-validate', id: 'blank', confirm: '' },
+        { op: 'delete-validate', id: 'blank', confirm: 'Blank' },
+        { op: 'delete-validate', id: 'numbered', confirm: '5' },
+        { op: 'delete-validate', id: 'outside', confirm: 'Outside' },
+        { op: 'delete-validate', id: 'outside', confirm: 'wrong' },
+        { op: 'delete-validate', id: 'root', confirm: 'Root' },
+        { op: 'delete-validate', id: 'sibling', confirm: 'Sibling' },
+        { op: 'delete-validate', id: 'dotdot', confirm: 'Dot Dot' },
+        { op: 'delete-validate', id: 'trailing', confirm: 'Trailing' },
+        { op: 'delete-validate', id: 'nodir', confirm: 'No Dir' },
+        // The profiles root: every other profile's directory is inside it.
+        overlapping({ op: 'delete-validate', id: 'profiles', confirm: 'Profiles' }),
+      ],
+    },
+    {
+      id: 'delete-validate-overlap',
+      dev: false,
+      files: {
+        'app/profile-registry.json': catalogText([
+          { id: 'default', displayName: 'My Profile', dir: `${ROOT}/app`, slot: 0 },
+          { id: 'outer', displayName: 'Outer', dir: `${ROOT}/app/Profiles/outer`, slot: 1 },
+          { id: 'inner', displayName: 'Inner', dir: `${ROOT}/app/Profiles/outer/inner`, slot: 2 },
+          { id: 'peer', displayName: 'Peer', dir: `${ROOT}/app/Profiles/peer`, slot: 3 },
+          { id: 'twin', displayName: 'Twin', dir: `${ROOT}/app/Profiles/twin/../peer`, slot: 4 },
+          { id: 'cased', displayName: 'Cased', dir: `${ROOT}/app/profiles`, slot: 5 },
+          { id: 'home', displayName: 'Home', dir: `${ROOT}/app/R/9`, slot: 6 },
+          { id: 'logs', displayName: 'Logs', dir: `${ROOT}/app/logs`, slot: 7 },
+          { id: 'forget', displayName: 'Forget', dir: `${ROOT}/app/profile-registry.json.forget`, slot: 8 },
+          { id: 'loose', displayName: 'Loose', dir: `${ROOT}/app/loose`, slot: 9 },
+          { id: 'lone', displayName: 'Lone', dir: `${ROOT}/app/Profiles/lone`, slot: 10 },
+        ]),
+      },
+      dirs: [],
+      steps: [
+        // Above `inner`'s directory, and inside `outer`'s.
+        overlapping({ op: 'delete-validate', id: 'outer', confirm: 'Outer' }),
+        overlapping({ op: 'delete-validate', id: 'inner', confirm: 'Inner' }),
+        // Before the confirmation, as the reference's refusal of a directory
+        // outside the root.
+        overlapping({ op: 'delete-validate', id: 'outer', confirm: 'wrong' }),
+        // One directory, two records.
+        overlapping({ op: 'delete-validate', id: 'peer', confirm: 'Peer' }),
+        overlapping({ op: 'delete-validate', id: 'twin', confirm: 'Twin' }),
+        // The profiles root on a volume that ignores case (macOS's and
+        // Windows' default ones).
+        overlapping({ op: 'delete-validate', id: 'cased', confirm: 'Cased' }),
+        // Inside the Radicle homes, a shared entry, and the forget file.
+        overlapping({ op: 'delete-validate', id: 'home', confirm: 'Home' }),
+        overlapping({ op: 'delete-validate', id: 'logs', confirm: 'Logs' }),
+        overlapping({ op: 'delete-validate', id: 'forget', confirm: 'Forget' }),
+        // Inside the packaged default profile's data, which its delete
+        // removes with the rest: refused both ways.
+        overlapping({ op: 'delete-validate', id: 'loose', confirm: 'Loose' }),
+        overlapping({ op: 'delete-validate', id: 'default', confirm: 'My Profile' }),
+        { op: 'delete-validate', id: 'lone', confirm: 'Lone' },
+        { op: 'delete-validate', id: 'lone', confirm: 'wrong' },
+      ],
+    },
+    {
+      id: 'delete-validate-default',
+      dev: false,
+      files: {
+        'app/profile-registry.json': catalogText([
+          { id: 'default', displayName: 'My Profile', dir: `${ROOT}/app`, slot: 0 },
+          { id: 'work', displayName: 'Work', dir: `${ROOT}/app/Profiles/work`, slot: 1 },
+        ]),
+      },
+      dirs: [],
+      steps: [
+        { op: 'delete-validate', id: 'default', confirm: 'My Profile' },
+        { op: 'delete-validate', id: 'work', confirm: 'Work' },
+      ],
+    },
+    {
+      // Names one directory on macOS's volumes, which ignore normalization
+      // and, by default, case, or on Windows', which ignore case: the core
+      // compares them so on every OS.
+      id: 'delete-validate-unicode',
+      dev: false,
+      files: {
+        'app/profile-registry.json': catalogText([
+          { id: 'default', displayName: 'My Profile', dir: `${ROOT}/app`, slot: 0 },
+          { id: 'nfc', displayName: 'NFC', dir: `${ROOT}/app/Profiles/caf\u{e9}`, slot: 1 },
+          { id: 'nfd', displayName: 'NFD', dir: `${ROOT}/app/Profiles/cafe\u{301}`, slot: 2 },
+          { id: 'upper', displayName: 'Upper', dir: `${ROOT}/app/Profiles/\u{c9}t\u{e9}`, slot: 3 },
+          { id: 'lower', displayName: 'Lower', dir: `${ROOT}/app/Profiles/\u{e9}t\u{e9}/inner`, slot: 4 },
+          { id: 'sharp', displayName: 'Sharp', dir: `${ROOT}/app/Profiles/stra\u{df}e`, slot: 5 },
+          { id: 'double', displayName: 'Double', dir: `${ROOT}/app/Profiles/STRASSE`, slot: 6 },
+          { id: 'plain', displayName: 'Plain', dir: `${ROOT}/app/Profiles/cafe`, slot: 7 },
+          { id: 'grave', displayName: 'Grave', dir: `${ROOT}/app/Profiles/caf\u{e8}`, slot: 8 },
+          { id: 'kelvin', displayName: 'Kelvin', dir: `${ROOT}/app/Profiles/LOC\u{212a}S`, slot: 9 },
+        ]),
+      },
+      dirs: [],
+      steps: [
+        // NFC and NFD.
+        overlapping({ op: 'delete-validate', id: 'nfc', confirm: 'NFC' }),
+        overlapping({ op: 'delete-validate', id: 'nfd', confirm: 'NFD' }),
+        // Non-ASCII case, above and inside.
+        overlapping({ op: 'delete-validate', id: 'upper', confirm: 'Upper' }),
+        overlapping({ op: 'delete-validate', id: 'lower', confirm: 'Lower' }),
+        // A fold wider than a volume's: `ß` and `SS`.
+        overlapping({ op: 'delete-validate', id: 'sharp', confirm: 'Sharp' }),
+        overlapping({ op: 'delete-validate', id: 'double', confirm: 'Double' }),
+        // Names no volume takes for another's.
+        { op: 'delete-validate', id: 'plain', confirm: 'Plain' },
+        { op: 'delete-validate', id: 'grave', confirm: 'Grave' },
+        // `Profiles/locks` is a profile's directory, not the shared lock
+        // directory, whatever its spelling.
+        { op: 'delete-validate', id: 'kelvin', confirm: 'Kelvin' },
+      ],
+    },
+    {
+      // Two records with one slot have one Radicle home (`R/<slot>`, or a
+      // dev build's `R/<checkout>/<slot>`): either's delete would remove
+      // the other's.
+      id: 'delete-validate-slot',
+      dev: false,
+      files: {
+        'app/profile-registry.json': catalogText([
+          { id: 'default', displayName: 'My Profile', dir: `${ROOT}/app`, slot: 0 },
+          { id: 'work', displayName: 'Work', dir: `${ROOT}/app/Profiles/work`, slot: 1 },
+          { id: 'copy', displayName: 'Copy', dir: `${ROOT}/app/Profiles/copy`, slot: 1 },
+          { id: 'zero', displayName: 'Zero', dir: `${ROOT}/app/Profiles/zero`, slot: 0 },
+          { id: 'big', displayName: 'Big', dir: `${ROOT}/app/Profiles/big`, slot: 1e21 },
+          { id: 'bigger', displayName: 'Bigger', dir: `${ROOT}/app/Profiles/bigger`, slot: 1e21 },
+          { id: 'half', displayName: 'Half', dir: `${ROOT}/app/Profiles/half`, slot: 2.5 },
+          { id: 'text', displayName: 'Text', dir: `${ROOT}/app/Profiles/text`, slot: '2.5' },
+          { id: 'none', displayName: 'None', dir: `${ROOT}/app/Profiles/none` },
+          { id: 'lone', displayName: 'Lone', dir: `${ROOT}/app/Profiles/lone`, slot: 3 },
+        ]),
+      },
+      dirs: [],
+      steps: [
+        // Before the confirmation, as the directories' overlaps.
+        sharingSlot({ op: 'delete-validate', id: 'work', confirm: 'wrong' }),
+        sharingSlot({ op: 'delete-validate', id: 'work', confirm: 'Work' }),
+        sharingSlot({ op: 'delete-validate', id: 'copy', confirm: 'Copy' }),
+        // The packaged default profile's slot.
+        sharingSlot({ op: 'delete-validate', id: 'zero', confirm: 'Zero' }),
+        sharingSlot({ op: 'delete-validate', id: 'default', confirm: 'My Profile' }),
+        // A slot JavaScript writes with an exponent (`R/1e+21`).
+        sharingSlot({ op: 'delete-validate', id: 'big', confirm: 'Big' }),
+        // A slot that isn't an integer is no home's, and a missing one.
+        { op: 'delete-validate', id: 'half', confirm: 'Half' },
+        { op: 'delete-validate', id: 'text', confirm: 'Text' },
+        { op: 'delete-validate', id: 'none', confirm: 'None' },
+        { op: 'delete-validate', id: 'lone', confirm: 'Lone' },
+      ],
+    },
+    {
+      id: 'delete-validate-last',
+      dev: false,
+      files: {
+        'app/profile-registry.json': catalogText([
+          { id: 'work', displayName: 'Work', dir: `${ROOT}/app/Profiles/work`, slot: 1 },
+        ]),
+      },
+      dirs: [],
+      steps: [
+        { op: 'delete-validate', id: 'work', confirm: 'Work' },
+        { op: 'delete-validate', id: 'work', confirm: 'nope' },
+        { op: 'delete-validate', id: 'missing', confirm: 'Missing' },
+      ],
+    },
+    {
+      id: 'delete-validate-no-catalog',
+      dev: false,
+      files: {},
+      dirs: [],
+      steps: [{ op: 'delete-validate', id: 'default', confirm: 'My Profile' }],
+    },
+    {
+      id: 'delete-validate-null-records',
+      dev: false,
+      files: {
+        'app/profile-registry.json': JSON.stringify({
+          version: 1,
+          profiles: [
+            5,
+            { id: 'a', displayName: 'A', dir: `${ROOT}/app/Profiles/a` },
+            null,
+            { id: 'b', displayName: 'B', dir: `${ROOT}/app/Profiles/b` },
+          ],
+        }),
+      },
+      dirs: [],
+      steps: [
+        { op: 'delete-validate', id: 'a', confirm: 'A' },
+        { op: 'delete-validate', id: 'b', confirm: 'B' },
+        { op: 'delete-validate', id: 'c', confirm: 'C' },
+      ],
+    },
+    {
+      id: 'delete-validate-unsupported',
+      dev: false,
+      files: { 'app/profile-registry.json': '{"version":2,"profiles":[]}' },
+      dirs: [],
+      steps: [{ op: 'delete-validate', id: 'work', confirm: 'Work' }],
+    },
+    {
       id: 'null-record',
       dev: false,
       files: { 'app/profile-registry.json': '{"version":1,"profiles":[null]}' },
@@ -561,6 +824,11 @@ function buildScenarios(modules) {
           const classified = classify(error);
           if (classified.message) classified.message = subst(classified.message);
           result = classified;
+        }
+        if (step.deviation !== undefined) {
+          // A deviation is a named row, and the core's answer differs.
+          assert.ok(DEVIATIONS.includes(step.deviation), `unknown deviation ${step.deviation}`);
+          assert.notDeepStrictEqual(step.core, result, `${scenario.id}: ${step.deviation} shows no deviation`);
         }
         const after = snapshot(base);
         for (const name of Object.keys(after.files)) after.files[name] = subst(after.files[name]);

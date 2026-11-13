@@ -207,6 +207,24 @@ impl Dir {
     pub fn subdirs(&self) -> io::Result<Vec<OsString>> {
         imp::subdirs(self)
     }
+
+    /// The names of everything in this one, read from its handle on Unix.
+    pub fn names(&self) -> io::Result<Vec<OsString>> {
+        imp::names(self)
+    }
+
+    /// This directory's identity: on Unix its device and inode, from its
+    /// handle; on Windows its volume's serial number and file ID, from its
+    /// path (the module's Windows limit).
+    pub fn identity(&self) -> io::Result<(u64, u128)> {
+        imp::identity_of(self)
+    }
+
+    /// Removes the directory `name` in this one if it is empty, following
+    /// no symlink. Whether it went: not there, or not empty, is `false`.
+    pub fn remove_empty(&self, name: &OsStr) -> io::Result<bool> {
+        imp::remove_empty(self, name)
+    }
 }
 
 #[cfg(unix)]
@@ -528,6 +546,23 @@ mod imp {
         }
         Ok(names)
     }
+
+    pub fn names(dir: &Dir) -> io::Result<Vec<std::ffi::OsString>> {
+        entries(&dir.fd)
+    }
+
+    pub fn identity_of(dir: &Dir) -> io::Result<(u64, u128)> {
+        let (dev, ino) = identity(&dir.fd)?;
+        Ok((dev, u128::from(ino)))
+    }
+
+    pub fn remove_empty(dir: &Dir, name: &OsStr) -> io::Result<bool> {
+        match rustix::fs::unlinkat(&dir.fd, name, AtFlags::REMOVEDIR) {
+            Ok(()) => Ok(true),
+            Err(Errno::NOENT | Errno::NOTEMPTY | Errno::EXIST) => Ok(false),
+            Err(e) => Err(refused(e)),
+        }
+    }
 }
 
 #[cfg(not(unix))]
@@ -706,6 +741,57 @@ mod imp {
             }
         }
         Ok(names)
+    }
+
+    pub fn names(dir: &Dir) -> io::Result<Vec<std::ffi::OsString>> {
+        let mut names = Vec::new();
+        for entry in std::fs::read_dir(&dir.path)? {
+            names.push(entry?.file_name());
+        }
+        Ok(names)
+    }
+
+    /// From a handle on the path that opens a reparse point itself
+    /// (`FILE_FLAG_OPEN_REPARSE_POINT`), with `FILE_FLAG_BACKUP_SEMANTICS`,
+    /// which a directory needs.
+    #[cfg(windows)]
+    pub fn identity_of(dir: &Dir) -> io::Result<(u64, u128)> {
+        use std::os::windows::fs::OpenOptionsExt as _;
+        use std::os::windows::io::AsHandle as _;
+        // FILE_READ_ATTRIBUTES; FILE_FLAG_BACKUP_SEMANTICS |
+        // FILE_FLAG_OPEN_REPARSE_POINT.
+        let handle = OpenOptions::new()
+            .access_mode(0x0080)
+            .custom_flags(0x0200_0000 | 0x0020_0000)
+            .open(&dir.path)?;
+        fc_sys::windows::file_id(handle.as_handle())
+            .or_else(|_| fc_sys::windows::file_index(handle.as_handle()))
+    }
+
+    #[cfg(not(windows))]
+    pub fn identity_of(_dir: &Dir) -> io::Result<(u64, u128)> {
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "no file identity on this OS",
+        ))
+    }
+
+    pub fn remove_empty(dir: &Dir, name: &OsStr) -> io::Result<bool> {
+        if kind(dir, name)? != Kind::Dir {
+            return Ok(false);
+        }
+        match std::fs::remove_dir(dir.path.join(name)) {
+            Ok(()) => Ok(true),
+            Err(e)
+                if matches!(
+                    e.kind(),
+                    io::ErrorKind::NotFound | io::ErrorKind::DirectoryNotEmpty
+                ) =>
+            {
+                Ok(false)
+            }
+            Err(e) => Err(e),
+        }
     }
 }
 
