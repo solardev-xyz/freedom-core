@@ -48,6 +48,10 @@ name = "nodes"
 required-features = ["testhooks"]
 
 [[test]]
+name = "profiles"
+required-features = ["testhooks"]
+
+[[test]]
 name = "radicle_custody"
 required-features = ["testhooks"]
 
@@ -76,6 +80,9 @@ fc-evm = { path = "../fc-evm" }
 fc-json = { path = "../fc-json" }
 fc-keys = { path = "../fc-keys" }
 fc-naming = { path = "../fc-naming" }
+# The profile catalog's rules and text, which the profile subcommands run
+# (design 0013).
+fc-profile = { path = "../fc-profile" }
 fc-protocol = { path = "../fc-protocol" }
 # The sealed release of the Radicle node key (design 0008).
 fc-seal = { path = "../fc-seal" }
