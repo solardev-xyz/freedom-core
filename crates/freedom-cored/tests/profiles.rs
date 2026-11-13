@@ -820,3 +820,54 @@ fn hold_profile_checks_the_catalog() {
     child.stdin.take().unwrap().write_all(b"").unwrap();
     assert_eq!(child.wait().unwrap().code(), Some(0));
 }
+
+/// `hold-profile` makes a missing lock directory, as `hold-lock` does: on a
+/// machine no new build has run on, nothing else makes it before the first
+/// launch's gate. A profile directory that isn't there makes nothing.
+#[test]
+fn hold_profile_makes_its_lock_directory() {
+    let d = dirs();
+    assert_eq!(code(&open(&d, &["--profile", "work"])), 0);
+    let work = d.app.join("Profiles").join("work");
+    let locks = d.locks.join("Freedom").join("locks");
+    assert!(!d.locks.exists());
+
+    let missing = d.app.join("Profiles").join("missing");
+    let (mut child, line) = hold_profile(&missing, &locks, None);
+    assert_eq!(line, "");
+    assert_eq!(child.wait().unwrap().code(), Some(74));
+    assert!(!missing.exists());
+    assert!(!d.locks.exists(), "nothing made for a missing profile");
+
+    let (mut holder, line) = hold_profile(&work, &locks, Some((&d.app, "work")));
+    assert_eq!(line, "locked\n");
+    assert!(locks.is_dir());
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        for dir in [&d.locks.join("Freedom"), &locks] {
+            let mode = std::fs::metadata(dir).unwrap().permissions().mode() & 0o7777;
+            assert_eq!(mode & 0o077, 0, "{}: {mode:o}", dir.display());
+        }
+    }
+    let answer = run(&[
+        "profile",
+        "status",
+        "--lock-dir",
+        s(&locks),
+        "--user-data-dir",
+        s(&work),
+    ]);
+    assert_eq!(json(&answer)[0]["gate_held"], true);
+    drop(holder.stdin.take());
+    assert_eq!(holder.wait().unwrap().code(), Some(0));
+
+    // The packaged default profile's, inside its app root.
+    let inner = d.app.join("locks");
+    assert!(!inner.exists());
+    let (mut child, line) = hold_profile(&d.app, &inner, Some((&d.app, "default")));
+    assert_eq!(line, "locked\n");
+    assert!(inner.is_dir());
+    drop(child.stdin.take());
+    assert_eq!(child.wait().unwrap().code(), Some(0));
+}

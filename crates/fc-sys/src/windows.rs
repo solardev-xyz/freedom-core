@@ -1,16 +1,27 @@
 //! Windows calls: storage qualification, error reporting, a file's
-//! identity, and confinement's job object and process mitigation policies
-//! (design 0010, "Windows").
+//! identity, a directory opened or made relative to its parent's handle,
+//! and confinement's job object and process mitigation policies (design
+//! 0010, "Windows").
 //!
 //! None of these calls closes a handle but [`Job`]'s own, which it owns.
 
+use std::ffi::OsStr;
 use std::io;
+use std::os::windows::ffi::OsStrExt;
 use std::os::windows::io::{AsRawHandle, BorrowedHandle, FromRawHandle, OwnedHandle};
 
-use windows_sys::Win32::Foundation::HANDLE;
+use windows_sys::Wdk::Foundation::OBJECT_ATTRIBUTES;
+use windows_sys::Wdk::Storage::FileSystem::{
+    FILE_DIRECTORY_FILE, FILE_OPEN_IF, FILE_OPEN_REPARSE_POINT, FILE_SYNCHRONOUS_IO_NONALERT,
+    NtCreateFile,
+};
+use windows_sys::Win32::Foundation::{
+    HANDLE, OBJ_CASE_INSENSITIVE, RtlNtStatusToDosError, UNICODE_STRING,
+};
 use windows_sys::Win32::Storage::FileSystem::{
-    BY_HANDLE_FILE_INFORMATION, FILE_ID_INFO, FileIdInfo, GetDriveTypeW,
-    GetFileInformationByHandle, GetFileInformationByHandleEx,
+    BY_HANDLE_FILE_INFORMATION, FILE_ATTRIBUTE_NORMAL, FILE_ID_INFO, FILE_LIST_DIRECTORY,
+    FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, FileIdInfo,
+    GetDriveTypeW, GetFileInformationByHandle, GetFileInformationByHandleEx, SYNCHRONIZE,
 };
 use windows_sys::Win32::System::Diagnostics::Debug::{
     SEM_FAILCRITICALERRORS, SEM_NOGPFAULTERRORBOX, SEM_NOOPENFILEERRORBOX, SetErrorMode,
@@ -18,6 +29,7 @@ use windows_sys::Win32::System::Diagnostics::Debug::{
 use windows_sys::Win32::System::ErrorReporting::{
     WER_FAULT_REPORTING_FLAG_NOHEAP, WER_FAULT_REPORTING_NO_UI, WerSetFlags,
 };
+use windows_sys::Win32::System::IO::IO_STATUS_BLOCK;
 use windows_sys::Win32::System::JobObjects::{
     AssignProcessToJobObject, CreateJobObjectW, IsProcessInJob, JOBOBJECT_BASIC_LIMIT_INFORMATION,
     JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JobObjectExtendedLimitInformation,
@@ -98,6 +110,143 @@ pub fn file_index(file: BorrowedHandle<'_>) -> io::Result<(u64, u128)> {
         u64::from(info.dwVolumeSerialNumber),
         (u128::from(info.nFileIndexHigh) << 32) | u128::from(info.nFileIndexLow),
     ))
+}
+
+/// Whether a path component, in UTF-16, is one Win32 paths read as
+/// something other than the directory entry it spells, which `NtCreateFile`
+/// would still make as spelled:
+///
+/// - **A DOS device:** `CON`, `PRN`, `AUX`, `NUL`, `CONIN$`, `CONOUT$`,
+///   `COM0`–`COM9` and `LPT0`–`LPT9`, and `COM`/`LPT` with a superscript
+///   `¹`, `²` or `³`, in any case, alone or before an extension, and with
+///   spaces before that extension (`NUL.txt`, `con .log`).
+/// - **A name ending in a space or a period,** which Win32 strips.
+fn win32_reserved(wide: &[u16]) -> bool {
+    if matches!(wide.last(), Some(0x20 | 0x2e)) {
+        return true;
+    }
+    let end = wide
+        .iter()
+        .position(|&unit| unit == 0x2e)
+        .unwrap_or(wide.len());
+    let mut base = &wide[..end];
+    while let [rest @ .., 0x20] = base {
+        base = rest;
+    }
+    let upper: Vec<u16> = base
+        .iter()
+        .map(|&unit| {
+            if (0x61..=0x7a).contains(&unit) {
+                unit - 0x20
+            } else {
+                unit
+            }
+        })
+        .collect();
+    let spells = |text: &str| text.encode_utf16().eq(upper.iter().copied());
+    if ["CON", "PRN", "AUX", "NUL", "CONIN$", "CONOUT$"]
+        .into_iter()
+        .any(spells)
+    {
+        return true;
+    }
+    if let &[a, b, c, digit] = upper.as_slice() {
+        let prefix = [a, b, c];
+        let port = "COM".encode_utf16().eq(prefix) || "LPT".encode_utf16().eq(prefix);
+        // `0`–`9`, `¹`, `²` and `³`.
+        let digit = (0x30..=0x39).contains(&digit) || matches!(digit, 0xb9 | 0xb2 | 0xb3);
+        return port && digit;
+    }
+    false
+}
+
+/// The size of `OBJECT_ATTRIBUTES`, its `Length`.
+const OBJECT_ATTRIBUTES_SIZE: u32 = size_of::<OBJECT_ATTRIBUTES>() as u32;
+const _: () = assert!(size_of::<OBJECT_ATTRIBUTES>() <= u32::MAX as usize);
+
+/// Opens the directory `name` in the directory `parent` is open on, making
+/// it first if it is missing (`NtCreateFile`, `FILE_OPEN_IF`, relative to
+/// `parent`): `name` is looked up in that directory itself, wherever it now
+/// is, never by a path, so a parent renamed or replaced meanwhile can't
+/// redirect it.
+///
+/// - **A reparse point** at `name` (a symlink or a junction) is opened
+///   itself, never followed (`FILE_OPEN_REPARSE_POINT`), and nothing is made
+///   through it: the caller refuses it by its attributes. A file there fails
+///   (`NotADirectory`).
+/// - **A directory made** inherits its parent's ACL, as `CreateDirectoryW`
+///   without security attributes does.
+/// - **The handle** lists the directory and reads its attributes, and shares
+///   reading, writing and deletion, as std's opens do.
+/// - **`name`** must be one plain component: not empty, not `.` or `..`,
+///   without a separator, a stream's `:` or a NUL, and not a name Win32
+///   paths would read as something else ([`win32_reserved`]), so that a
+///   path ending in it names the directory made (`InvalidInput`).
+#[allow(unsafe_code)]
+pub fn open_dir_at(parent: BorrowedHandle<'_>, name: &OsStr) -> io::Result<OwnedHandle> {
+    let mut wide: Vec<u16> = name.encode_wide().collect();
+    // NUL, `/`, `:` and `\`.
+    let separator = |unit: &u16| matches!(*unit, 0x00 | 0x2f | 0x3a | 0x5c);
+    let plain = !wide.is_empty()
+        && name != "."
+        && name != ".."
+        && !wide.iter().any(separator)
+        && !win32_reserved(&wide);
+    let bytes = wide
+        .len()
+        .checked_mul(2)
+        .and_then(|n| u16::try_from(n).ok());
+    let (true, Some(bytes)) = (plain, bytes) else {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "not one plain path component",
+        ));
+    };
+    let object_name = UNICODE_STRING {
+        Length: bytes,
+        MaximumLength: bytes,
+        Buffer: wide.as_mut_ptr(),
+    };
+    let attributes = OBJECT_ATTRIBUTES {
+        Length: OBJECT_ATTRIBUTES_SIZE,
+        RootDirectory: parent.as_raw_handle(),
+        ObjectName: &raw const object_name,
+        Attributes: OBJ_CASE_INSENSITIVE,
+        SecurityDescriptor: std::ptr::null(),
+        SecurityQualityOfService: std::ptr::null(),
+    };
+    let mut handle: HANDLE = std::ptr::null_mut();
+    let mut status_block = IO_STATUS_BLOCK::default();
+    // SAFETY: `handle` and `status_block` are borrowed mutably for the call,
+    // which writes only them; `attributes` and the UNICODE_STRING it points
+    // to live for the whole call, and that string's buffer holds `bytes`
+    // bytes of `wide`, which the call only reads; `parent` is open for its
+    // borrow; no allocation size or extended attributes are passed (null,
+    // 0).
+    let status = unsafe {
+        NtCreateFile(
+            &raw mut handle,
+            FILE_LIST_DIRECTORY | FILE_READ_ATTRIBUTES | SYNCHRONIZE,
+            &raw const attributes,
+            &raw mut status_block,
+            std::ptr::null(),
+            FILE_ATTRIBUTE_NORMAL,
+            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+            FILE_OPEN_IF,
+            FILE_DIRECTORY_FILE | FILE_OPEN_REPARSE_POINT | FILE_SYNCHRONOUS_IO_NONALERT,
+            std::ptr::null(),
+            0,
+        )
+    };
+    if status < 0 {
+        // SAFETY: RtlNtStatusToDosError takes a status by value and reads no
+        // memory of ours.
+        let code = unsafe { RtlNtStatusToDosError(status) };
+        return Err(io::Error::from_raw_os_error(code as i32));
+    }
+    // SAFETY: the call succeeded, so `handle` is a handle it opened for this
+    // process, which nothing else owns or closes.
+    Ok(unsafe { OwnedHandle::from_raw_handle(handle) })
 }
 
 /// No fault dialog, and no heap in Windows Error Reporting's reports, for
@@ -424,6 +573,91 @@ mod tests {
         std::fs::rename(&one, &renamed).unwrap();
         assert_eq!(ids(&renamed), (id, index));
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_directory_is_opened_or_made_at_its_parent_never_through_a_junction() {
+        use std::os::windows::fs::{MetadataExt, OpenOptionsExt};
+        use std::os::windows::io::AsHandle;
+        const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
+        const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0400;
+        let dir = std::env::temp_dir().join(format!("fc-sys-dir-at-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let parent = std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
+            .open(&dir)
+            .unwrap();
+        let attributes = |handle: OwnedHandle| {
+            std::fs::File::from(handle)
+                .metadata()
+                .unwrap()
+                .file_attributes()
+        };
+        // Made, then opened as it is.
+        let made = open_dir_at(parent.as_handle(), OsStr::new("made")).unwrap();
+        assert!(dir.join("made").is_dir());
+        assert_eq!(attributes(made) & FILE_ATTRIBUTE_REPARSE_POINT, 0);
+        open_dir_at(parent.as_handle(), OsStr::new("made")).unwrap();
+        // Relative to the handle: the parent renamed, it is still the one.
+        let moved =
+            std::env::temp_dir().join(format!("fc-sys-dir-at-{}-moved", std::process::id()));
+        std::fs::rename(&dir, &moved).unwrap();
+        open_dir_at(parent.as_handle(), OsStr::new("after")).unwrap();
+        assert!(moved.join("after").is_dir());
+        // A file fails; a junction is opened itself, nothing made through it.
+        std::fs::write(moved.join("file"), b"x").unwrap();
+        let file = open_dir_at(parent.as_handle(), OsStr::new("file")).unwrap_err();
+        assert_eq!(file.kind(), io::ErrorKind::NotADirectory);
+        let target = moved.join("target");
+        std::fs::create_dir(&target).unwrap();
+        let status = std::process::Command::new("cmd")
+            .arg("/C")
+            .arg("mklink")
+            .arg("/J")
+            .arg(moved.join("junction"))
+            .arg(&target)
+            .stdout(std::process::Stdio::null())
+            .status()
+            .unwrap();
+        assert!(status.success(), "mklink /J");
+        let junction = open_dir_at(parent.as_handle(), OsStr::new("junction")).unwrap();
+        assert_ne!(attributes(junction) & FILE_ATTRIBUTE_REPARSE_POINT, 0);
+        assert_eq!(std::fs::read_dir(&target).unwrap().count(), 0);
+        for name in [
+            "",
+            ".",
+            "..",
+            "a\\b",
+            "a/b",
+            "a:b",
+            "CON",
+            "con",
+            "Nul.txt",
+            "aux .log",
+            "PRN",
+            "COM1",
+            "lpt9.log",
+            "COM\u{b9}",
+            "lpt\u{b3}",
+            "COM0",
+            "CONIN$",
+            "conout$.x",
+            "name.",
+            "name ",
+            "NUL ",
+        ] {
+            let refused = open_dir_at(parent.as_handle(), OsStr::new(name)).unwrap_err();
+            assert_eq!(refused.kind(), io::ErrorKind::InvalidInput, "{name:?}");
+        }
+        // Names that only look like a device are made, and a path ending in
+        // one names the directory made.
+        for name in ["COM10", "console", "nul-x", "LPT", "a.CON", ".nul"] {
+            open_dir_at(parent.as_handle(), OsStr::new(name)).unwrap();
+            assert!(moved.join(name).is_dir(), "{name:?}");
+        }
+        drop(parent);
+        std::fs::remove_dir_all(&moved).unwrap();
     }
 
     #[test]
