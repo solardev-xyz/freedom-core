@@ -1,6 +1,6 @@
 # 0002: Signing in the core (Phase 2)
 
-**Status:** proposed. Builds on [0001](0001-freedom-cored.md). After this phase, no raw signing key leaves the core except through the permanent, user-requested backup exports. The node identities are separate exceptions: Bee's keystore file, and the sealed release of the Radicle node key to its service ([0001](0001-freedom-cored.md), *Deliberate exceptions*).
+**Status:** proposed. Builds on [0001](0001-freedom-cored.md). [0012](0012-approvals.md#amendments) (decided) amends its non-goal on approval and policy and its callers: policy moves into the core in Stage 1. After this phase, no raw signing key leaves the core except through the permanent, user-requested backup exports. The node identities are separate exceptions: Bee's keystore file, and the sealed release of the Radicle node key to its service ([0001](0001-freedom-cored.md), *Deliberate exceptions*).
 
 ## Summary
 
@@ -39,12 +39,12 @@ Each returns exactly the bytes ethers or bee-js return today, and each signing m
   - **Accounts don't sign SOCs.** An account's 32-byte `sign.message` is exactly a SOC signature, so the binding above holds only for keys that sign nothing else. `swarm.sign_soc` refuses account keys, and main no longer offers accounts as feed owners ([Accounts as feed owners](#amendment-accounts-as-feed-owners-89), decided).
 
 **Non-goals**
-- **Approval and policy.** As in 0001's threat model, stage 1 trusts main: it runs the approval UI and decides what gets signed. A compromised main can still:
+- **Approval and policy.** Stage 1 trusts main, which shows the prompts. From [0012](0012-approvals.md) the core keeps the tokens, grants and standing rules, and refuses a page's signature without a check it made itself. A compromised main can still:
   - ask for signatures;
   - make a backup export with a password it knows or has recovered;
   - read the Bee node's keystore and its config password.
 
-  Phase 2 removes routine key *exposure*, not main's authority. No signature can be recalled once delivered. Policy moves with the Chromium work.
+  Phase 2 removes routine key *exposure*, not main's authority. No signature can be recalled once delivered.
 - **Transaction building:** nonces, gas limits and receipts stay in main. The core signs a fully specified transaction. Fee quotes, chain reads and broadcast routing move into the core with [0005](0005-chain-data.md); until then they stay in main too.
 - **Other transaction types:** EIP-2930 access lists, blob (EIP-4844) and set-code (EIP-7702) transactions. Freedom doesn't send them today, and the core rejects them.
 - **`eth_sign`** (raw digest signing). Freedom rejects it today and the core doesn't offer it.
@@ -64,7 +64,7 @@ The signing methods take `key`:
 - **Index range:** the same as `compat.private_key` and `compat.publisher_key` (`0..=2147483647`).
 - **Wrong method:** a key kind used outside its row returns `invalid_argument`.
 - **Main keeps its guards.** Main still refuses hardware-range indices and non-mnemonic wallet records before it asks the core, as `vault-access.js` does today.
-- **Callers:** all five methods accept the `chrome` and `shell` callers, like Phase 1. The `page` caller stays reserved: binding a page's approval to a key and an operation belongs to the policy phase, not this one. Main keeps making these requests on a page's behalf after its own approval.
+- **Callers:** all five methods accept the `chrome` and `shell` callers, like Phase 1. [0012](0012-approvals.md#pagecontext) admits `page` on the three EVM signing methods and on `swarm.sign_soc`, with an authorization the core checks itself, and `shell` signs a `SafeTx`, a `SafeMessage` or an `execTransaction` only with a Safe approval or a token that binds it ([0012](0012-approvals.md#a-pages-safe-and-swarm-signatures)). Until main sends a page's requests under `page` (0012's APB-1 and APB-3), it makes them on the page's behalf after its own approval.
 - **Locking and the timer:**
   - The signing methods need an unlocked vault and return `vault_locked` otherwise. `typed_data.hash` is public and works while locked.
   - The signing methods don't touch the auto-lock timer. Main keeps calling `vault.touch` where it does today.

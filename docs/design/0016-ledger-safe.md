@@ -1,6 +1,6 @@
 # 0016: Ledger and Safe in the core
 
-**Status:** proposed. Roadmap items 2.5 (Ledger) and 2.6 (Safe). Builds on [0001](0001-freedom-cored.md) (the process, core-to-main requests, cancel), [0002](0002-signing.md) (signing, and the typed-data view of #88), [0005](0005-chain-data.md) (chain reads, the fee check, the one-nonce rule), [0011](0011-page-requests.md) (handles, the approvals document), [0012](0012-approvals.md) (tokens and grants, which list Ledger and Safe signatures as "advised until 0016") and [0013](0013-profiles.md) (`vault-meta.json` and `safe-pending.json` in the core). It amends 0002's non-goal on Ledger and Safe accounts ([Amendments](#amendments)). Nothing here is built yet. The user decides the [open questions](#open-questions).
+**Status:** proposed. Roadmap items 2.5 (Ledger) and 2.6 (Safe). Builds on [0001](0001-freedom-cored.md) (the process, core-to-main requests, cancel), [0002](0002-signing.md) (signing, and the typed-data view of #88), [0005](0005-chain-data.md) (chain reads, the fee check, the one-nonce rule), [0011](0011-page-requests.md) (handles, the approvals document), [0012](0012-approvals.md) (tokens and grants: it enforces a Safe's vault owners' and executor's signatures from APR-4, through Safe approvals, and lists a Ledger's, a Safe's Ledger owner's included, as "advised until 0016") and [0013](0013-profiles.md) (`vault-meta.json` and `safe-pending.json` in the core). It amends 0002's non-goal on Ledger and Safe accounts ([Amendments](#amendments)). Nothing here is built yet. The user decides the [open questions](#open-questions).
 
 **The references:**
 - **freedom-browser** at `32532528` (`integration/rust-core`), in `src/main/`:
@@ -18,7 +18,7 @@
 - **Typed data on the device ([Q23](#open-questions)):** field by field, as today. Proposed: refuse the hash-only fallback, which shows the user two hashes and nothing else.
 - **Bounds:** one device operation at a time, 15 s for an APDU the user doesn't confirm, 5 minutes for one they do, a Cancel, and a defined end when the device is unplugged. Today a signature can wait forever, and only the device can end it.
 - **Safe (proposed, [Q24](#open-questions)):** only the Safes Freedom creates today, Safe 1.4.1 on Gnosis. Their deployment addresses and the factory's proxy code are pinned in a new logic crate, `fc-safe`, which computes the address, the deployment, the SafeTx, its hash, the SafeMessage and the `execTransaction` calldata. The Safe's nonce, owners, threshold and setup are read through 0005's chain machine, must each be verified, and are checked before anyone signs; without that evidence nothing is signed. The executor's transaction is prepared by the core. protocol-kit leaves the browser.
-- **Approvals:** Ledger and Safe signatures become enforced in the core, as 0012's other signatures are. A `safe-send` token binds the whole SafeTx the core built, not only its `to`, `value` and `data`.
+- **Approvals:** a Ledger's signatures, a Safe's Ledger owner's included, become enforced in the core, as 0012's other signatures are. A Safe's vault owners' and executor's already are, from 0012's APR-4, through Safe approvals. A `safe-send` token binds the whole SafeTx the core built, not only its `to`, `value` and `data`.
 - **Vectors:** recorded APDU exchanges from the JS reference over a scripted device, and from real devices for a smaller set; Safe vectors from protocol-kit through the browser's own modules.
 - **Steps:** LDG-1 to LDG-3 and SAFE-1 to SAFE-3.
 - **Found while checking the code:** Ledger signatures are used unchecked (F-1); hw-app-eth sends some typed data wrong (F-2); an added Ledger account's address is the chrome's word (F-3); a Safe's address rests on one endpoint's answer (F-4); and two smaller ones (F-5, F-6). Each is a public browser issue, #1063 to #1068. See [Facts](#facts-found-while-checking-the-code).
@@ -31,7 +31,7 @@
 - **A faulty core can't make the device sign** anything main didn't derive itself from the request it sent or the approval it recorded.
 - **No Safe transaction, address or calldata that the core didn't build.**
 - **No Safe read on one endpoint's word** where the chain machine can do better.
-- **Enforced approvals** for both, as 0012 enforces the vault's.
+- **Enforced approvals** for both, as 0012 enforces the vault's, and a Safe's vault owners' and executor's through its Safe approvals.
 - **Parity** with the JS reference, shown by vectors, with every [deviation](#deviations) listed.
 - **Bounded, cancellable device work.**
 
@@ -95,7 +95,7 @@
 
 - **For a vault account,** under 0002: a Safe's vault owners' SafeTx and SafeMessage signatures (`sign.typed_data`, with the core's own hash as `expected_hash`, `signers.js:117`) and the executor's transaction (`sign.transaction`). The core also hashes a Ledger's typed data before the device is asked (`signers.js:200–205`).
 - **Main's:** every APDU, every Ledger signature's assembly, every SafeTx field, the Safe's address, the deployment and the `execTransaction` calldata.
-- **0012:** Ledger and Safe signatures are advised (`approval.spend`) until this design.
+- **0012:** from APR-4 the core enforces every signature it makes for a page (Q8), a Safe's vault owners' and its executor's included, through the Safe approval a `safe-send` or `safe-message` token gives. It asks a Safe approval of the wallet's own Safe send too (0012, *A page's Safe and Swarm signatures*). A Ledger's signature, a Safe's Ledger owner's included, is advised (`approval.spend`) until this design.
 
 ### Facts found while checking the code
 
@@ -367,13 +367,13 @@ After SAFE-3, main's `wallet/safe/` modules are thin clients of the core's `safe
 
 ## Approvals: enforced
 
-0012 lists Ledger and Safe signatures as advised until this design. From LDG-2 and SAFE-2 they are enforced, under 0012's rules: checked when present at first (APR-3's rule), and required once APR-4's rule applies.
+0012 lists a Ledger's signatures, a Safe's Ledger owner's included, as advised until this design, and enforces a Safe's vault owners' and executor's from APR-4, through Safe approvals. From LDG-2 a Ledger's are enforced too, and from SAFE-2 a Safe's tokens bind the SafeTx the core built, under 0012's rules: checked when present at first (APR-3's rule), and required once APR-4's rule applies.
 - **A Ledger account** is treated as a vault account is. A page's signature needs a token or a standing rule the core checked for that page; a `chrome` call needs a wallet-kind token; a `shell` call carries none. A standing rule skips the browser's prompt, never the device's. For x402, `x402.authorize` (X402-1) takes main's `now_s` for a Ledger account and returns its authorization as typed data, which main rebuilds, compares and sends through `sign.typed_data` with the Ledger key ([x402 from a Ledger account](#x402-from-a-ledger-account)).
 - **`safe-send`** binds the SafeTx the core built at `safe.prepare`: the Safe's address, the chain, all ten fields (the nonce included) and its hash, and, for a site's, the page and the handle (0012). `safe.propose` spends it.
 - **Owner signatures** need no token each: the spent `safe-send` authorized every local owner's signature over that SafeTx, as today.
 - **The executor's transaction** is signed only as `safe.execute` or `safe.deploy` prepared it, or with an `executor-send` token for a fee the check stopped.
 - **`safe-message`** binds the method, a digest of the request, the digest the SafeMessage carries and the SafeMessage's hash, the page and the handle. `safe.message_start` spends it.
-- **0012's table** loses its "advised until 0016" rows ([Amendments](#amendments)).
+- **0012's table** loses its "advised until 0016" row, a Ledger's ([Amendments](#amendments)).
 
 ## API
 
@@ -463,7 +463,7 @@ One PR per step: the core's against `main`, the browser's against `integration/r
 
 Once decided:
 - **0002:** the non-goal "Ledger, phone and Safe accounts" reads "Phone accounts (0012's phone jobs)". The key reference table gains `ledger`, for the three EVM signing methods. *Execution* adds: a Ledger key runs on the device lane, not in one turn of the loop.
-- **0012:** *What the core enforces* has Ledger and Safe signatures enforced from LDG-2 and SAFE-2. The token table: `safe-send` binds the core's SafeTx and its hash; `safe-message` also binds the SafeMessage's digest and hash. `eip1193.request` drives a Ledger itself, and answers a Safe account's request with `{ safe }`. X402-1's `x402.authorize` takes main's `now_s` for a Ledger account and returns its authorization as typed data rather than signing it.
+- **0012:** *What the core enforces* has a Ledger's signatures, a Safe's Ledger owner's included, enforced from LDG-2; a Safe's vault owners' and executor's stay enforced, as from APR-4. The token table: `safe-send` binds the core's SafeTx and its hash; `safe-message` also binds the SafeMessage's digest and hash. `eip1193.request` drives a Ledger itself, and answers a Safe account's request with `{ safe }`. X402-1's `x402.authorize` takes main's `now_s` for a Ledger account and returns its authorization as typed data rather than signing it.
 - **0013:** `safe-pending.json`'s codec lives in `fc-safe`, which `fc-wallet-state` uses. PRF-6(d) and SAFE-3 are one move, whichever lands first. Main's SafeTx approval records are set-A state by 0013's test (they decide what a Ledger may sign), held by main as its check on the core, in memory only ([Approval records](#approval-records)); no store is added to either set.
 - **0005:** "provider-manager's Safe reads bypass the router" is closed by SAFE-2.
 - **0011:** "A Ledger signs in main" reads "A Ledger signs in the core, through main's relay".
