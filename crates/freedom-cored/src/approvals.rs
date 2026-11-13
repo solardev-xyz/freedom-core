@@ -26,6 +26,9 @@
 //!   standing }`, checked after the request's public work and before any
 //!   key is derived. Without one, `sign.*` signs as before (APR-3; APR-4
 //!   requires it).
+//! - `swarm.sign_soc`'s `authorization` (APR-3c): `{ swarm, soc }` from a
+//!   page, checked against the page's Swarm grant at the same point. Main's
+//!   own SOCs, under `shell`, take none.
 //!
 //! - The grant stores (APR-3b; [`crate::grants`] holds the files):
 //!   `approval.check { request, chain_id?, paused? }` asks a site's
@@ -48,7 +51,8 @@ use fc_approval::safe::{
     Approved, ExecutorCheck, Holder, OwnerCheck, SafeApprovals, SafeRefusal, SafeSigned,
 };
 use fc_approval::standing::{
-    AccountKind, DappAsk, DappRequest, Decision, Rules, Send, Signed as RuleSigned, Standing,
+    AccountKind, DappAsk, DappRequest, Decision, Rules, Send, Signed as RuleSigned, SocApproval,
+    SocAsk, SocRequest, Standing, page_soc,
 };
 use fc_approval::stores::{
     Applied, CapStore, DappStore, Effect, JsValue, RadicleFlag, RadicleStore, StoreKind, SwarmFlag,
@@ -1042,6 +1046,57 @@ impl Approvals {
     /// authorization was checked. A spent token is already gone.
     pub fn burn(&mut self, token: &str) {
         self.tokens.discard(token);
+    }
+
+    /// Checks `swarm.sign_soc`'s `authorization`, `{ swarm, soc }`, after
+    /// the chunk's public work and before any key is derived (design 0012,
+    /// "A page's SOC"). Only a page presents one: the core reads the page's
+    /// Swarm grant for `PageContext.origin` from the swarm store as it
+    /// stands, main's file until it moves. `swarm` is `user` (main's word
+    /// that its prompt was answered) or `auto` (the site's flag); `soc`
+    /// names the request, `feed` (a feed write) or `raw` (a raw SOC), as
+    /// main names the key and the identifier until 0015.
+    pub fn authorize_soc(
+        &self,
+        context: &Context,
+        authorization: &Value,
+        clocks: Clocks,
+    ) -> Result<(), ErrorBody> {
+        if !authorization.is_object() {
+            return Err(invalid("authorization: expected an object"));
+        }
+        let fields = object(authorization, &["swarm", "soc"], &[])?;
+        let approval = match string(fields, "swarm")? {
+            "user" => SocApproval::User,
+            "auto" => SocApproval::Auto,
+            _ => return Err(invalid("swarm: expected user or auto")),
+        };
+        let request = match string(fields, "soc")? {
+            "feed" => SocRequest::Feed,
+            "raw" => SocRequest::Raw,
+            _ => return Err(invalid("soc: expected feed or raw")),
+        };
+        let Some(page) = page_context(context)? else {
+            return Err(forbidden("a Swarm grant answers only a page's SOC"));
+        };
+        let store = self.grants.view::<SwarmStore>(clocks.wall_ms / 1000);
+        let ask = SocAsk {
+            key: &page.origin,
+            agent: page.agent,
+            approval,
+            request,
+            // The feed grant is in main's feed store (`swarm-feeds.json`)
+            // until 0015 moves it: main's word, as main sends a page's SOC
+            // only once the site holds it, after its prompt has granted it.
+            feed_grant: true,
+        };
+        match page_soc(&store, &ask) {
+            Decision::Covered => Ok(()),
+            Decision::NotCovered(reason) => Err(not_authorized(
+                reason.name(),
+                "the page's Swarm grant doesn't cover this SOC",
+            )),
+        }
     }
 }
 

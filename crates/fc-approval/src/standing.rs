@@ -31,7 +31,8 @@
 //! which counts nothing; `sign.*` with `{ standing }` asks
 //! [`Standing::authorize_dapp`], which decides again and counts what it
 //! covers. Swarm's flags and Radicle's keep today's rules, R-6 included
-//! ([`swarm`], [`Standing::authorize_radicle`]).
+//! ([`swarm`], [`Standing::authorize_radicle`]). A page's SOC, which the
+//! core signs, is decided by [`page_soc`].
 //!
 //! **The order of the checks**, so that one reason is given: custody
 //! first, then the grant and its rule (`no_rule`), then what the rule never
@@ -261,6 +262,42 @@ pub struct SwarmAsk<'a> {
     pub request: SwarmRequest,
 }
 
+/// How main says a page's SOC was approved (design 0012, "A page's SOC";
+/// 0015's `approval`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SocApproval {
+    /// Main's prompt was answered: main's word, since Swarm has no token
+    /// kind.
+    User,
+    /// The site's standing flag for the request.
+    Auto,
+}
+
+/// Which SOC a page asks the core to sign: main names it, as it names the
+/// key and the identifier until 0015.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SocRequest {
+    /// A feed's update or entry (`updateFeed`, `writeFeedEntry`): the
+    /// `feeds` flag.
+    Feed,
+    /// A raw SOC (`writeSingleOwnerChunk`): the `signing` flag.
+    Raw,
+}
+
+/// A page's SOC, for the page that sent it.
+#[derive(Debug, Clone, Copy)]
+pub struct SocAsk<'a> {
+    /// `PageContext.origin`.
+    pub key: &'a str,
+    /// `PageContext.agent`; `None` when it wasn't sent.
+    pub agent: Option<bool>,
+    pub approval: SocApproval,
+    pub request: SocRequest,
+    /// Whether the site has feed access (`hasFeedGrant`, main's feed
+    /// store's until 0015).
+    pub feed_grant: bool,
+}
+
 /// A Radicle request a site's flags may answer
 /// (`radicle-provider-ipc.js`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -415,6 +452,35 @@ impl Standing {
 /// rules.
 pub fn swarm(store: &SwarmStore, ask: &SwarmAsk<'_>) -> Decision {
     Decision::of(swarm_rule(store, ask))
+}
+
+/// Whether the core signs a page's SOC (design 0012, "A page's SOC"): the
+/// site's Swarm grant for its key, connected with the feed grant, under
+/// either approval; `auto` also needs `agent` false and the request's flag,
+/// `feeds` for a feed write and `signing` for a raw SOC ([`swarm`]). Not
+/// covered is a refusal: nothing is signed.
+pub fn page_soc(store: &SwarmStore, ask: &SocAsk<'_>) -> Decision {
+    Decision::of(match ask.approval {
+        SocApproval::User => require(
+            store.entry(ask.key).is_some() && ask.feed_grant,
+            Reason::NoRule,
+        ),
+        SocApproval::Auto => {
+            let feed_grant = ask.feed_grant;
+            let request = match ask.request {
+                SocRequest::Feed => SwarmRequest::Feeds { feed_grant },
+                SocRequest::Raw => SwarmRequest::Signing { feed_grant },
+            };
+            swarm_rule(
+                store,
+                &SwarmAsk {
+                    key: ask.key,
+                    agent: ask.agent,
+                    request,
+                },
+            )
+        }
+    })
 }
 
 fn within(admitted: bool) -> Result<(), Reason> {
