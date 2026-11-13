@@ -10,7 +10,8 @@ use std::path::PathBuf;
 use fc_approval::fee::{Evidence, Fees};
 use fc_approval::standing::{
     AccountKind, Clocks, DappAsk, DappRequest, Decision, RadicleAsk, RadicleRequest, Reason, Rules,
-    Send, Signed, Standing, SwarmAsk, SwarmRequest, swarm,
+    Send, Signed, SocApproval, SocAsk, SocRequest, Standing, SwarmAsk, SwarmRequest, page_soc,
+    swarm,
 };
 use fc_approval::stores::{
     DappStore, RULE_TTL_MS, RadicleFlag, RadicleStore, SwarmFlag, SwarmStore,
@@ -693,6 +694,136 @@ fn swarm_flags_per_request() {
     }
     for _ in 0..100 {
         assert!(swarm(&store, &ask(SwarmRequest::Publish, Some(false))).is_covered());
+    }
+}
+
+/// Design 0012, "A page's SOC": the site's grant, connected with the feed
+/// grant, under either approval; `auto` also outside custody, with the
+/// request's own flag (`feeds` for a feed write, `signing` for a raw SOC).
+#[test]
+fn a_page_s_soc_needs_its_grant() {
+    let mut store = SwarmStore::new();
+    let ask = |approval, request, agent, feed_grant| SocAsk {
+        key: SITE,
+        agent,
+        approval,
+        request,
+        feed_grant,
+    };
+    let requests = [SocRequest::Feed, SocRequest::Raw];
+    let approvals = [SocApproval::User, SocApproval::Auto];
+    // Not connected: nothing, whatever the approval.
+    for approval in approvals {
+        for request in requests {
+            assert_eq!(
+                page_soc(&store, &ask(approval, request, Some(false), true)),
+                Decision::NotCovered(Reason::NoRule)
+            );
+        }
+    }
+    // Another site's grant answers nothing for this one.
+    let _ = store.connect("https://other.example", T);
+    for flag in SwarmFlag::ALL {
+        assert!(store.set_flag("https://other.example", flag, true).value);
+    }
+    for approval in approvals {
+        for request in requests {
+            assert_eq!(
+                page_soc(&store, &ask(approval, request, Some(false), true)).reason(),
+                Some(Reason::NoRule)
+            );
+        }
+    }
+    let _ = store.connect(SITE, T);
+    // `user`: connected with the feed grant, in or out of custody.
+    for request in requests {
+        for agent in [None, Some(true), Some(false)] {
+            assert!(page_soc(&store, &ask(SocApproval::User, request, agent, true)).is_covered());
+            assert_eq!(
+                page_soc(&store, &ask(SocApproval::User, request, agent, false)).reason(),
+                Some(Reason::NoRule)
+            );
+        }
+    }
+    // `auto`: the request's flag, and no other.
+    for request in requests {
+        assert_eq!(
+            page_soc(&store, &ask(SocApproval::Auto, request, Some(false), true)).reason(),
+            Some(Reason::NoRule)
+        );
+    }
+    for flag in [SwarmFlag::Publish, SwarmFlag::Messaging] {
+        assert!(store.set_flag(SITE, flag, true).value);
+    }
+    assert!(store.grant_messaging(SITE, T).value);
+    for request in requests {
+        assert_eq!(
+            page_soc(&store, &ask(SocApproval::Auto, request, Some(false), true)).reason(),
+            Some(Reason::NoRule)
+        );
+    }
+    assert!(store.set_flag(SITE, SwarmFlag::Feeds, true).value);
+    assert!(
+        page_soc(
+            &store,
+            &ask(SocApproval::Auto, SocRequest::Feed, Some(false), true)
+        )
+        .is_covered()
+    );
+    assert_eq!(
+        page_soc(
+            &store,
+            &ask(SocApproval::Auto, SocRequest::Raw, Some(false), true)
+        )
+        .reason(),
+        Some(Reason::NoRule)
+    );
+    assert!(store.set_flag(SITE, SwarmFlag::Feeds, false).value);
+    assert!(store.set_flag(SITE, SwarmFlag::Signing, true).value);
+    assert!(
+        page_soc(
+            &store,
+            &ask(SocApproval::Auto, SocRequest::Raw, Some(false), true)
+        )
+        .is_covered()
+    );
+    assert_eq!(
+        page_soc(
+            &store,
+            &ask(SocApproval::Auto, SocRequest::Feed, Some(false), true)
+        )
+        .reason(),
+        Some(Reason::NoRule)
+    );
+    assert!(store.set_flag(SITE, SwarmFlag::Feeds, true).value);
+    // `auto` never in custody, nor without `agent`, nor without the feed
+    // grant; and no rate.
+    for request in requests {
+        for agent in [None, Some(true)] {
+            assert_eq!(
+                page_soc(&store, &ask(SocApproval::Auto, request, agent, true)),
+                Decision::NotCovered(Reason::Custody)
+            );
+        }
+        assert_eq!(
+            page_soc(&store, &ask(SocApproval::Auto, request, Some(false), false)).reason(),
+            Some(Reason::NoRule)
+        );
+        for _ in 0..100 {
+            assert!(
+                page_soc(&store, &ask(SocApproval::Auto, request, Some(false), true)).is_covered()
+            );
+        }
+    }
+    // A disconnect ends both.
+    assert!(store.revoke(SITE).value);
+    for approval in approvals {
+        for request in requests {
+            assert_eq!(
+                page_soc(&store, &ask(approval, request, Some(false), true)).reason(),
+                Some(Reason::NoRule)
+            );
+        }
     }
 }
 
