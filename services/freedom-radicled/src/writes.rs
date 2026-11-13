@@ -430,6 +430,7 @@ pub fn unseed(
         let Some(handle) = node.handle() else {
             return refuse(&conn, ticket.id, &not_running());
         };
+        testhooks::at_unseed_wait();
         let mut embedded = handle.node_mut();
         testhooks::hold_work(&ticket.cancel);
         if !ticket.begin() {

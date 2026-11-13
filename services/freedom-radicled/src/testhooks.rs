@@ -74,6 +74,14 @@
 //!   returned and the write's outcome is marked and answered, it logs
 //!   `test hook: the write has returned`, so that a test waits for the
 //!   write's end instead of guessing how long a write takes.
+//! - `FREEDOM_RADICLED_TEST_HOLD_READ=until:<path>` holds two reads where
+//!   `rad.unseed` meets them (#338), until a file exists at `<path>` or for
+//!   30 s, logging `test hook: the read holds` with its `op`: `node_info`
+//!   between its steps, once the listing's identity check has returned and
+//!   before the listing ([`crate::reads`]), and `repo_info` inside its
+//!   step, with the node held shared, before libradicle's call. While it is
+//!   set, `rad.unseed` logs `test hook: the unseed waits for the node` just
+//!   before it waits to hold the node exclusively ([`crate::writes`]).
 //! - `FREEDOM_RADICLED_TEST_HOLD_REPAIR` holds each turn of an online
 //!   repair, with the node held shared, just before its unit, whatever the
 //!   stop, as a slow unit holds the writer ([`crate::repair`]): with a
@@ -378,6 +386,31 @@ pub fn at_write_end() {
     #[cfg(feature = "testhooks")]
     if std::env::var_os("FREEDOM_RADICLED_TEST_HOLD_WRITE").is_some() {
         fc_service::log::info("test hook: the write has returned", serde_json::json!({}));
+    }
+}
+
+/// Where `rad.unseed` meets read `op`: holds it, if asked.
+pub fn hold_read(op: &str) {
+    #[cfg(feature = "testhooks")]
+    if let Ok(hold) = std::env::var("FREEDOM_RADICLED_TEST_HOLD_READ")
+        && let Some(release) = hold.strip_prefix("until:")
+    {
+        fc_service::log::info("test hook: the read holds", serde_json::json!({ "op": op }));
+        until_released(release);
+    }
+    #[cfg(not(feature = "testhooks"))]
+    let _ = op;
+}
+
+/// Just before `rad.unseed` waits to hold the node exclusively: logs it,
+/// if `FREEDOM_RADICLED_TEST_HOLD_READ` is set.
+pub fn at_unseed_wait() {
+    #[cfg(feature = "testhooks")]
+    if std::env::var_os("FREEDOM_RADICLED_TEST_HOLD_READ").is_some() {
+        fc_service::log::info(
+            "test hook: the unseed waits for the node",
+            serde_json::json!({}),
+        );
     }
 }
 
