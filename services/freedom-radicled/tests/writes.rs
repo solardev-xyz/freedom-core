@@ -10,6 +10,8 @@
 //! some milliseconds, or until the test releases it ([`Dirs::held`]),
 //! before libradicle's call (`until`) or once it has returned (`after`),
 //! and it logs the write's end, which a test waits for ([`release`]).
+//! `FREEDOM_RADICLED_TEST_HOLD_READ` holds a read where `rad.unseed` meets
+//! it (#338).
 //! Every node here reaches no one, as in tests/start.rs.
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
@@ -33,6 +35,8 @@ const RETURNED: &str = "test hook: the write has returned";
 const CALLED: &str = "test hook: libradicle's call has returned";
 const FENCED: &str = "test hook: the stop has fenced the pools";
 const HELD: &str = "test hook: work holds its slot";
+const READ_HELD: &str = "test hook: the read holds";
+const UNSEED_WAITS: &str = "test hook: the unseed waits for the node";
 
 fn code(reply: &Value) -> &str {
     reply["error"]["code"].as_str().unwrap_or_default()
@@ -439,6 +443,90 @@ fn a_stop_during_a_write_keeps_its_reply_or_leaves_the_marker() {
     // Still held as the process ended.
     assert!(!log.contains(RETURNED), "{log}");
     assert_eq!(fixture::marked(&dirs.home), Some(vec![NID.to_owned()]));
+}
+
+/// #338: `rad.unseed` beside a `node_info` read on a node that just
+/// started. `FREEDOM_RADICLED_TEST_HOLD_READ` holds the read between its
+/// steps, once the listing's identity check has returned and before the
+/// listing, where it stalled, until the test releases it. The read holds
+/// nothing of the node there, so the unseed completes while the read is
+/// held; then the read completes too, listing only what is still seeded,
+/// and the stop drains and clears the marker.
+///
+/// The read used to hold the node shared through the identity check and
+/// take it shared again for the listing. The unseed waited for that first
+/// hold, and std's lock makes a new shared hold wait behind a waiting
+/// exclusive one, on every platform: so the listing waited for the unseed,
+/// the unseed for the read, and neither answered; the reads after them
+/// waited behind the unseed, and the stop's drain didn't complete.
+#[test]
+fn an_unseed_beside_a_node_info_read_completes_and_so_does_the_read() {
+    let dirs = Dirs::new();
+    configure(&dirs.home, json!({}));
+    let rid = fixture::repository(&dirs.home, &CREATOR, "unseeded");
+    fixture::repository(&dirs.home, &CREATOR, "kept");
+    let (hold, gate) = dirs.held("until", "release-node-info");
+    let mut radicled = served(&dirs, &[("FREEDOM_RADICLED_TEST_HOLD_READ", &hold)]);
+
+    let read = radicled.request("rad.read", json!({ "op": "node_info", "args": {} }));
+    assert!(radicled.logs(READ_HELD, READ_TIMEOUT));
+    let unseed = radicled.request("rad.unseed", json!({ "rid": rid.to_string() }));
+    // While the read is held: a hang guard, never a timing assertion.
+    assert!(
+        radicled.any_within(unseed, READ_TIMEOUT),
+        "the unseed didn't answer beside the held node_info read"
+    );
+    let reply = radicled.reply(unseed);
+    assert_eq!(reply["result"], json!({ "unseeded": true }), "{reply}");
+    assert_eq!(radicled.logged(READ_HELD), 1);
+
+    std::fs::write(&gate, b"").unwrap();
+    let info: Value = serde_json::from_slice(&radicled.read_reply(read).unwrap()).unwrap();
+    assert_eq!(
+        info,
+        json!({ "connected_peers": 0, "repos_total": 1, "repos_error": null })
+    );
+    // And the reads after them.
+    let info: Value =
+        serde_json::from_slice(&radicled.read("node_info", json!({})).unwrap()).unwrap();
+    assert_eq!(info["repos_total"], 1, "{info}");
+    let (_, cleared) = stopped_cleanly(&mut radicled, &dirs.home);
+    assert!(cleared);
+}
+
+/// #338's other read: `rad.unseed` beside a `repo_info` read, held inside
+/// its step with the node held shared. The unseed waits for it, as a write
+/// waits for any read's step; released, the read completes without taking
+/// the node again, then the unseed, and the stop drains and clears the
+/// marker. This one never stalled: each of its steps takes the node once.
+#[test]
+fn an_unseed_beside_a_repo_read_waits_for_its_step_and_both_complete() {
+    let dirs = Dirs::new();
+    configure(&dirs.home, json!({}));
+    let rid = fixture::repository(&dirs.home, &CREATOR, "read");
+    let (hold, gate) = dirs.held("until", "release-repo-info");
+    let mut radicled = served(&dirs, &[("FREEDOM_RADICLED_TEST_HOLD_READ", &hold)]);
+
+    let read = radicled.request(
+        "rad.read",
+        json!({ "op": "repo_info", "args": { "rid": rid.to_string() } }),
+    );
+    assert!(radicled.logs(READ_HELD, READ_TIMEOUT));
+    let unseed = radicled.request("rad.unseed", json!({ "rid": rid.to_string() }));
+    assert!(radicled.logs(UNSEED_WAITS, READ_TIMEOUT));
+    // The read holds the node shared: the unseed can't have it yet.
+    assert!(!radicled.any_within(unseed, Duration::ZERO));
+
+    std::fs::write(&gate, b"").unwrap();
+    let info: Value = serde_json::from_slice(&radicled.read_reply(read).unwrap()).unwrap();
+    assert_eq!(info["rid"], rid.to_string(), "{info}");
+    let reply = radicled.reply(unseed);
+    assert_eq!(reply["result"], json!({ "unseeded": true }), "{reply}");
+    let info: Value =
+        serde_json::from_slice(&radicled.read("node_info", json!({})).unwrap()).unwrap();
+    assert_eq!(info["repos_total"], 0, "{info}");
+    let (_, cleared) = stopped_cleanly(&mut radicled, &dirs.home);
+    assert!(cleared);
 }
 
 /// As [`stopped_cleanly`], once `rad.shutdown` was sent.

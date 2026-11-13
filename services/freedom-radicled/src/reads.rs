@@ -829,10 +829,9 @@ fn body(
             until,
             |bounds| {
                 identity::check(&handle.node(), home, rid, bounds)?;
-                handle
-                    .node()
-                    .repo_info_bounded(rid, bounds)
-                    .map_err(Failure::from)
+                let node = handle.node();
+                testhooks::hold_read("repo_info");
+                node.repo_info_bounded(rid, bounds).map_err(Failure::from)
             },
             json::repo_info,
         ),
