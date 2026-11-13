@@ -22,7 +22,6 @@
 //!   and reported (`set_aside: true`, and on stderr); nothing it names is
 //!   forgotten, and the next delete starts a new one.
 
-use std::ffi::OsString;
 use std::path::Path;
 
 use fc_json::JsValue;
@@ -31,6 +30,7 @@ use fc_profile::{Deletion, Store as _, Style};
 
 use super::store::DiskStore;
 use super::{Flags, catalog_lock, failed, object, prepare_app_root, print, storage};
+use crate::anchor::{Dir, Kind, Resolve};
 use crate::exit::Exit;
 use crate::log;
 
@@ -72,17 +72,25 @@ fn load(
             "the catalog's write lock was taken over",
         ));
     }
-    let aside = Style::native().join(&[app_root, FORGET_ASIDE]);
-    match std::fs::rename(&path, &aside) {
+    // Renamed through the app root's handle, as the store reaches it: a
+    // link at the name is moved itself, never followed.
+    let set_aside = app_dir(app_root).and_then(|dir| {
+        dir.rename(
+            std::ffi::OsStr::new(fc_profile::FORGET_FILE),
+            std::ffi::OsStr::new(FORGET_ASIDE),
+        )?;
+        if dir.sync().is_err() {
+            log::warn(
+                "the forget file was set aside, but not flushed",
+                serde_json::json!({}),
+            );
+        }
+        Ok(())
+    });
+    match set_aside {
         Ok(()) => {}
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
         Err(e) => return Err(storage("io", &e.kind().to_string())),
-    }
-    if crate::fsx::sync_rename(Path::new(app_root), Path::new(&aside)).is_err() {
-        log::warn(
-            "the forget file was set aside, but not flushed",
-            serde_json::json!({}),
-        );
     }
     log::warn(
         "the forget file was malformed or unreadable, and is set aside; nothing it names is forgotten",
@@ -111,20 +119,28 @@ fn is_forget_temp(name: &str) -> bool {
     matches!(middle.split_once('.'), Some((pid, n)) if digits(pid) && digits(n))
 }
 
-/// Removes the forget file's leftover temp files, under the catalog's
-/// write lock, which every writer holds while its temp file exists: only
-/// while it is still this process's.
+/// The app root's handle, as the catalog's store opens it.
+fn app_dir(app_root: &str) -> std::io::Result<Dir> {
+    Dir::open_root(Path::new(app_root), Resolve::Follow)?
+        .ok_or_else(|| std::io::Error::from(std::io::ErrorKind::NotFound))
+}
+
+/// Removes the forget file's leftover temp files, through the app root's
+/// handle, under the catalog's write lock, which every writer holds while
+/// its temp file exists: only while it is still this process's.
 fn remove_temps(app_root: &str, held: &dyn Fn() -> bool) {
-    let Ok(entries) = std::fs::read_dir(app_root) else {
+    let Ok(dir) = app_dir(app_root) else {
         return;
     };
-    for entry in entries.flatten() {
-        let name: OsString = entry.file_name();
+    let Ok(names) = dir.names() else {
+        return;
+    };
+    for name in names {
         if name.to_str().is_some_and(is_forget_temp)
-            && entry.file_type().is_ok_and(|t| t.is_file())
+            && dir.kind(&name).is_ok_and(|kind| kind == Kind::File)
             && held()
         {
-            let _ = std::fs::remove_file(entry.path());
+            let _ = dir.unlink(&name);
         }
     }
 }
@@ -160,21 +176,11 @@ pub fn record(
     held: &dyn Fn() -> bool,
 ) -> Result<Recorded, Exit> {
     let style = Style::native();
-    // A secrets file reached through a link (`freedom/` made one, say) may
-    // be another profile's, whose items must not be forgotten: unknown.
-    let data_root = Path::new(&plan.data_root);
-    let linked = fc_profile::forget::secrets_paths(&plan.data_root, style)
-        .iter()
-        .any(|path| {
-            Path::new(path)
-                .parent()
-                .is_some_and(|dir| !super::remove::no_links_below(data_root, dir))
-        });
-    let named = if linked {
-        Err(fc_profile::forget::Malformed)
-    } else {
-        fc_profile::forget::secrets_named(store, &plan.data_root, style)
-    };
+    // Read through the store, which reaches them from the app root's
+    // handle through no symlink: one reached through a link (`freedom/`
+    // made one, say), which may be another profile's, isn't read, and its
+    // items are unknown.
+    let named = fc_profile::forget::secrets_named(store, &plan.data_root, style);
     let (items, unknown) = match named {
         Ok(items) => (
             items
