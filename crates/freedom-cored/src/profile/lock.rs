@@ -40,12 +40,10 @@ pub fn mtime_ms(path: &Path) -> std::io::Result<i64> {
     })
 }
 
-/// Sets a directory's access and modification times (`fs.utimes`), on
-/// Unix with `futimens` on the open directory: the one form a confined
-/// subcommand's seccomp filter lets through (fc-service's `Policy::times`),
-/// and on macOS Seatbelt's `file-write-times` (std's `set_times` uses
-/// `fsetattrlist` there).
-#[cfg(unix)]
+/// Sets a directory's access and modification times (`fs.utimes`), with
+/// `futimens` on the open directory: the one form a confined subcommand's
+/// seccomp filter lets through on Linux (fc-service's `Policy::times`).
+#[cfg(all(unix, not(target_os = "macos")))]
 fn set_mtime(dir: &Path, ms: i64) -> std::io::Result<()> {
     let time = rustix::fs::Timespec {
         tv_sec: ms.div_euclid(1000),
@@ -60,6 +58,21 @@ fn set_mtime(dir: &Path, ms: i64) -> std::io::Result<()> {
         },
     )?;
     Ok(())
+}
+
+/// Sets a directory's access and modification times (`fs.utimes`), with
+/// `futimes` on the open directory: the call Seatbelt checks as
+/// `file-write-times`, which a confined subcommand's profile allows in its
+/// read-write grants (fc-service's `Policy::times`). libSystem's `futimens`
+/// and std's `set_times` go through `setattrlist`, which that rule doesn't
+/// cover.
+#[cfg(target_os = "macos")]
+fn set_mtime(dir: &Path, ms: i64) -> std::io::Result<()> {
+    use std::os::fd::AsFd;
+    let microseconds = i32::try_from(ms.rem_euclid(1000) * 1000)
+        .map_err(|_| std::io::Error::from(std::io::ErrorKind::InvalidInput))?;
+    let file = std::fs::File::open(dir)?;
+    fc_sys::macos::set_times(file.as_fd(), ms.div_euclid(1000), microseconds)
 }
 
 /// Sets a directory's access and modification times (`fs.utimes`).

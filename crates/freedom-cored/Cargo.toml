@@ -116,6 +116,11 @@ zeroize = "1.8"
 # profile delete's walk (design 0013, "Deletion").
 fc-sys = { path = "../fc-sys" }
 
+[target.'cfg(target_os = "macos")'.dependencies]
+# futimes, for the profile lock's mtime in a confined subcommand (design
+# 0013, "The lock").
+fc-sys = { path = "../fc-sys" }
+
 [target.'cfg(unix)'.dependencies]
 rustix = { version = "1.1", default-features = false, features = ["fs", "process", "std"] }
 

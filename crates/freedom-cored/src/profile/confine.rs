@@ -119,7 +119,6 @@ pub fn confine(grant: Grant) -> Result<(), Exit> {
                 serde_json::json!({ "confinement": report.to_json() }),
             );
             crate::testhooks::profile_confined(&report);
-            crate::testhooks::profile_times_probe();
             Ok(())
         }
         Err(invalid) => {

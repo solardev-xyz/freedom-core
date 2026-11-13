@@ -15,9 +15,13 @@
 //!   writing (truncating included), unlinking and `ioctl`, plus hard links
 //!   with `refer`. No mode, owner, flags, times or xattr change is allowed
 //!   anywhere (`file-write-mode` and the rest stay denied), but times in
-//!   the read-write grants with `times` (a lock's mtime). Metadata is
-//!   readable only on each grant's ancestors, so other files' names and
-//!   modes stay hidden.
+//!   the read-write grants with `times` (a lock's mtime). Seatbelt checks
+//!   `utimes` and `futimes` as `file-write-times`, but not `setattrlist`,
+//!   through which libSystem's `futimens` and `utimensat` and std's
+//!   `set_times` set times: a profile allows that only with every
+//!   `file-write*` operation, so a confined process sets times with
+//!   `futimes` (fc-sys's `set_times`). Metadata is readable only on each
+//!   grant's ancestors, so other files' names and modes stay hidden.
 //! - **Processes:** no exec and no fork (denied by default); signals and
 //!   process information for the process itself only. The exec self-test's
 //!   one program, `/usr/bin/true`, is readable and mappable, so the only

@@ -13,6 +13,7 @@
 )]
 
 use std::net::{TcpListener, TcpStream};
+use std::os::fd::AsFd;
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::PathBuf;
@@ -142,8 +143,10 @@ fn child(case: &str) {
     };
     let (registered, held) = registered(&p);
     let refer = case == "refer";
+    let times = case == "times";
     let policy = |p: &Paths, network: Network, descriptors: Vec<i32>| Policy {
         refer,
+        times,
         ..policy(p, network, descriptors)
     };
     match case {
@@ -241,6 +244,7 @@ fn child(case: &str) {
     match case {
         "files" | "reexec" | "ports" => files(&p),
         "refer" => refer_links(&p),
+        "times" => set_times(&p),
         "sysctl" => sysctls(&p),
         "exec-direct" => exec_direct(),
         "processes" => processes(),
@@ -341,6 +345,12 @@ fn files(p: &Paths) {
             .and_then(|f| f.set_modified(std::time::UNIX_EPOCH))
             .is_err(),
     );
+    check(
+        "futimes inside refused",
+        std::fs::File::open(&mode_inside)
+            .and_then(|f| fc_sys::macos::set_times(f.as_fd(), 1, 0))
+            .is_err(),
+    );
     let canary = p.outside.join("canary");
     check("read outside refused", std::fs::read(&canary).is_err());
     check(
@@ -403,6 +413,39 @@ fn refer_links(p: &Paths) {
     check(
         "a hard link from the read-only grant refused",
         std::fs::hard_link(p.read_only.join("file"), p.data.join("from-read-only")).is_err(),
+    );
+}
+
+/// With `times`, a directory's and a file's times set inside the grant
+/// through `futimes`, as the profile lock sets its mtime; still no mode
+/// change there, and no times on the read-only grant.
+fn set_times(p: &Paths) {
+    use std::time::{Duration, UNIX_EPOCH};
+    let at = UNIX_EPOCH + Duration::new(1_700_000_001, 5_000_000);
+    let lock = p.data.join(format!("lock-{}", std::process::id()));
+    check("a directory inside", std::fs::create_dir(&lock).is_ok());
+    for (what, path) in [("a directory", &lock), ("a file", &p.data.join("lock"))] {
+        check(
+            &format!("times on {what} inside"),
+            std::fs::File::open(path)
+                .and_then(|f| fc_sys::macos::set_times(f.as_fd(), 1_700_000_001, 5_000))
+                .is_ok(),
+        );
+        check(
+            &format!("{what}'s times read back"),
+            std::fs::metadata(path)
+                .is_ok_and(|m| m.modified().ok() == Some(at) && m.accessed().ok() == Some(at)),
+        );
+    }
+    check(
+        "chmod inside refused",
+        std::fs::set_permissions(&lock, std::fs::Permissions::from_mode(0o700)).is_err(),
+    );
+    check(
+        "times on the read-only grant refused",
+        std::fs::File::open(p.read_only.join("file"))
+            .and_then(|f| fc_sys::macos::set_times(f.as_fd(), 1, 0))
+            .is_err(),
     );
 }
 
@@ -750,6 +793,7 @@ fn parent() {
         "lan",
         "offline",
         "refer",
+        "times",
         "sysctl",
         "exec-direct",
         "resolv-conf",
@@ -772,8 +816,19 @@ fn parent() {
         for property in ["files", "exec"] {
             expect(
                 &mut failures,
-                report[property] == "enforced",
+                report[property] == "enforced" || (case == "times" && property == "files"),
                 format!("{case}: {property} {report}"),
+            );
+        }
+        // With times, files are partial, naming them.
+        if case == "times" {
+            expect(
+                &mut failures,
+                report["files"] == "partial"
+                    && report["gaps"]
+                        .as_array()
+                        .is_some_and(|gaps| gaps.iter().any(|g| g == "times")),
+                format!("{case}: files {report}"),
             );
         }
         // Partial, naming what stays open: another process's arguments
