@@ -118,7 +118,9 @@ jobs:
     # 95th percentile on each OS's runner, cold start included, measured on
     # the optimized binary main ships: each OS's release target and flags,
     # as the Release workflow builds them. The test job's debug run checks
-    # only a loose bound (crates/freedom-cored/tests/profile_gate.rs).
+    # only a loose bound (crates/freedom-cored/tests/profile_gate.rs). The
+    # Windows runner has real-time scanning off, so an unsigned build's first
+    # scan isn't measured here: 0013 qualifies it apart, before PRF-4.
     name: profile gate (${{ matrix.os }})
     strategy:
       fail-fast: false

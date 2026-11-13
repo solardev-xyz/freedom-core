@@ -13,6 +13,10 @@
 //!
 //! No test hooks: a release build refuses them (build.rs), and `profile
 //! open` needs none.
+//!
+//! What this can't measure: on Windows, an unsigned build's first antivirus
+//! scan. GitHub's Windows runners turn real-time scanning off, so 0013
+//! qualifies that cost apart, on a machine with it on, before PRF-4.
 
 #![allow(clippy::unwrap_used, clippy::print_stderr)]
 
