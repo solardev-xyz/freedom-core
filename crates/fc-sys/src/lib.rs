@@ -15,6 +15,9 @@
 //! - [`windows::file_id`] and [`windows::file_index`]: a directory's
 //!   identity, for `fc-service`'s `OpenDir` (design 0010, D5: the import's
 //!   roots, checked again once confined);
+//! - [`windows::open_dir_at`]: a directory opened or made relative to its
+//!   parent's handle, never through a reparse point, for `fc-service`'s
+//!   profile gate's lock directory (design 0013, "The lock");
 //! - [`windows::Job`], [`windows::own_job_limits`] and
 //!   [`windows::Mitigation`]: its confinement on Windows (design 0010), a job
 //!   object of one process and the process mitigation policies, each read
