@@ -123,10 +123,10 @@ enum Read {
 
 /// Reads `path` under 0001's rules: a regular file, opened without
 /// following a symlink and judged on the open handle, owned by the user,
-/// and no more than [`MAX_FILE_BYTES`]. On Windows ownership is 0001's:
-/// the default root's per-user `%APPDATA%` ACL, with no owner check here;
-/// an alternate root waits for 0001's owner-only DACL follow-up, as the
-/// vault does.
+/// and no more than [`MAX_FILE_BYTES`]. On Windows there is no owner check
+/// yet: the default root's per-user `%APPDATA%` ACL protects the file, as
+/// 0001 has it, and design 0012 requires a check before APB-1 sends
+/// `{ standing }` (freedom-core#360), for split roots.
 fn read_file(path: &Path) -> Read {
     let file = match fsx::open_regular(path, false) {
         Ok(fsx::Regular::File(file)) => file,
