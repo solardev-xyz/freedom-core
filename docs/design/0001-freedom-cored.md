@@ -1,6 +1,6 @@
 # 0001: `freedom-cored`, the desktop core process
 
-**Status:** draft, revision 6. It incorporates Codex's four reviews on PR #1. Revision 6 replaces the core's exit on a full reply queue with backpressure ([Transport and framing](#transport-and-framing)). **Scope:** Phase 1 of [freedom-browser#644](https://github.com/solardev-xyz/freedom-browser/issues/644), plus the protocol contract that Phases 2–5 extend.
+**Status:** draft, revision 6. It incorporates Codex's four reviews on PR #1. Revision 6 replaces the core's exit on a full reply queue with backpressure ([Transport and framing](#transport-and-framing)). [0012](0012-approvals.md#amendments) (decided) amends [Messages](#messages): the methods that admit `page`, the `not_authorized` and `not_moved` errors, and `core.hello`'s `grant_root` and `grant_moved`. **Scope:** Phase 1 of [freedom-browser#644](https://github.com/solardev-xyz/freedom-browser/issues/644), plus the protocol contract that Phases 2–5 extend.
 
 ## Summary
 
@@ -185,21 +185,24 @@ Electron main (profile P) ──spawn──▶ freedom-cored serve --data-dir <i
   - Main binds its pending-request map, timers and event handlers to the child's generation, a counter local to main. A late callback from a retired child is ignored.
 - **Exactly one terminal response per request:** a result, or an error such as `cancelled` or `deadline`. The core owns deadlines (see below). Main keeps every pending entry, even after its own caller has gone away, until that terminal response arrives. So a slow reply is never a protocol error; only an unsolicited or a second response is.
 - **Handshake:**
-  - The first message must be main's `core.hello`: `{ protocol: 1, shell_version, auto_lock_ms, node_roots? }`. Main sends `auto_lock_ms = 900000` (15 minutes), as `vault.js` does today.
+  - The first message must be main's `core.hello`: `{ protocol: 1, shell_version, auto_lock_ms, node_roots?, grant_root, grant_moved? }`. Main sends `auto_lock_ms = 900000` (15 minutes), as `vault.js` does today.
   - `node_roots: { bee?, radicle? }` gives each node's root as an absolute path: Bee's `data_dir`, Radicle's `home`. The core tightens the node identity files under those roots ([Existing files](#writes-and-durability)). A root that isn't absolute is ignored, and so is the whole field in an older core.
+  - `grant_root` gives the profile's `userData` as an absolute path, from [0012](0012-approvals.md#the-files-q10)'s APR-3. The core opens the four permission files there, in today's format, under this design's reading rules: a regular file the user owns, no symlink, a size bound.
+    - **Required from APR-3:** main starts sending it in the same browser change that pins the first APR-3 core, so no core that requires it is paired with a main that doesn't send it, and the core has no mode without it. An APR-3 core refuses a hello without it, or with a path that isn't absolute, as it refuses any malformed hello: it answers `invalid_argument` and exits, a protocol error. An older core ignores the field.
+  - `grant_moved: ["dapp" | "swarm" | "radicle" | "x402"]` names the permission files main has handed to the core. Each is added by the browser change that stops main's own writes to it, 0012's move step for that file (APB-2, APB-3, X402-2). The core writes only the files listed. Until a file is listed, main is its only writer: the core reads it for its checks, and answers `not_moved` to each method that would write it. Absent, no file has moved. A name the core doesn't know makes the hello malformed.
   - The core replies `{ protocol: 1, core_version, capabilities }`, or with `protocol_mismatch`.
   - Main and core ship pinned together, so a mismatch is a packaging bug, and main fails loudly.
 - **Caller context:** main fills it in and never takes it from the renderer. Kinds use shell-neutral names, so a Chromium browser process can fill them in later.
   - `"chrome"`: the browser UI.
   - `"shell"`: main-internal work with no IPC event behind it, such as the x402 client and background jobs.
-  - `{ "page": { origin, top_origin, frame, navigation } }`: web content. This is reserved for Phase 2, which also defines how a page's approval binds to a key and an operation.
+  - `{ "page": { origin, top_origin, frame, navigation, agent, transport_key } }`: web content. [0011](0011-page-requests.md#pagecontext) fixes the first four fields, and [0012](0012-approvals.md#pagecontext) adds `agent` (from APR-3) and `transport_key` (from APR-5). 0012 defines how a page's approval binds to a key and an operation.
 
   Each method declares the caller kinds it accepts, in `fc-protocol`'s method table, and the core checks every request against it once, before dispatching anything (#101). A method the table doesn't list is `unknown_method`; a caller it doesn't list for the method gets `forbidden`. Nothing is allowed by default.
   - Most methods accept `chrome` and `shell`.
   - Main's own methods accept only `shell`: `core.hello`, `core.shutdown`, `vault.reconcile`, `nodes.op_status`, `compat.*`, `dweb.open` and `nodes.seal_radicle_key` ([0008](0008-radicle-service.md#the-sealed-release)). A main bug that forwarded a renderer's `core.shutdown` under `chrome` would otherwise wipe the vault and, through the restart, reset the in-memory throttle.
-  - No method accepts `page` yet (Phase 2).
+  - `page` is admitted only on the methods in [0012's PageContext](0012-approvals.md#pagecontext): `approval.issue`, `approval.discard`, `approval.spend`, `approval.end`, `approval.check`, `approval.grant`, `approval.revoke`, `approval.touch`, `sign.transaction`, `sign.message`, `sign.typed_data`, `swarm.sign_soc` and `phone.job`, and later `eip1193.request`. APR-7 takes it off `approval.issue`, and off `approval.grant` for the dApp store. No method accepts it before APR-3.
 - **Error codes:**
-  - **Request errors:** `vault_locked`, `incorrect_password`, `throttled` (with `data.retry_after_ms`), `no_vault`, `vault_exists`, `unsupported_vault_version`, `corrupt_vault`, `invalid_mnemonic`, `invalid_argument`, `weak_password`, `storage` (with `data.kind`), `lock_held` (a node's gate held by another process: a Radicle identity write while the Radicle service runs, [0008](0008-radicle-service.md#identity-changes)).
+  - **Request errors:** `vault_locked`, `incorrect_password`, `throttled` (with `data.retry_after_ms`), `no_vault`, `vault_exists`, `unsupported_vault_version`, `corrupt_vault`, `invalid_mnemonic`, `invalid_argument`, `weak_password`, `storage` (with `data.kind`), `lock_held` (a node's gate held by another process: a Radicle identity write while the Radicle service runs, [0008](0008-radicle-service.md#identity-changes)), `not_authorized` (with `data.reason`: a signature or an approval without an authorization the core accepts, [0012](0012-approvals.md#api)), `not_moved` (with `data.store`: a write to a permission file main still writes, before that file's move step in [0012](0012-approvals.md#the-files-q10)).
   - **Protocol-level:** `forbidden`, `busy`, `cancelled`, `deadline`, `internal`.
   - Main maps each code to the exact JS string per method; see [Parity contract](#parity-contract).
 - **Schema:**

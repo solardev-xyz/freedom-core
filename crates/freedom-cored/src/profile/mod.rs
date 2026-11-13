@@ -701,7 +701,9 @@ fn run_catalog(app_root: &str, writes: bool, extra: Option<&Path>, operation: Op
 
 /// `hold-profile`: takes the profile gate, checks a catalog profile is still
 /// listed at its directory, says `locked`, and holds the gate until stdin
-/// closes (design 0013, "The lock").
+/// closes (design 0013, "The lock"). A missing lock directory is made, as
+/// `hold-lock` makes it, and the profile's directory never is
+/// (`fc_service::gate::acquire_profile`).
 fn hold_profile(args: impl Iterator<Item = OsString>) -> Result<Exit, ()> {
     let flags = Flags::parse(
         args,
