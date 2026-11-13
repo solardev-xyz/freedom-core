@@ -112,10 +112,6 @@ jobs:
       # inherit and refuse (design 0010).
       - run: python3 scripts/stdio-only.py cargo test --locked --workspace --all-features
         if: runner.os != 'Windows'
-      # TEMPORARY (#342 macOS diagnostic): the sandbox's denials.
-      - run: |
-          log show --last 15m --style compact --predicate 'sender == "Sandbox"' | grep -i deny | sed -e 's/^.*Sandbox: //' | sort | uniq -c | head -200 || true
-        if: failure() && runner.os == 'macOS'
 
   confine-aarch64:
     # Confinement's seccomp filters name syscalls by number, which differ on
