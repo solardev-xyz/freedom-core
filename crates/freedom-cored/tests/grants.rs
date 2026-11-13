@@ -943,3 +943,86 @@ fn an_intent_replace_signs_its_intent_again() {
     );
     assert_eq!(reply["error"]["data"]["reason"], "mismatch", "{reply}");
 }
+
+/// A narrowing whose write fails stands in memory, and so does what goes
+/// with it: a full revoke forgets the site's rate buckets, so a grant made
+/// again starts full. A neutral change (a last use) whose write fails sends
+/// no `approval.changed`, as a saved one sends none.
+#[test]
+fn a_failed_revoke_forgets_the_buckets_and_a_failed_touch_sends_nothing() {
+    let root = tempfile::tempdir().unwrap();
+    let hook = root.path().join("hook");
+    let hook_env = hook.to_string_lossy().into_owned();
+    let mut core = start(
+        root.path(),
+        &["dapp"],
+        true,
+        &[("FREEDOM_CORED_TEST_GRANT_WRITE_FAIL", &hook_env)],
+    );
+    let mut id = 10;
+    let connect_and_sign = |core: &mut Core, id: &mut u64| {
+        let connected = grant(
+            core,
+            id,
+            &site(),
+            "dapp",
+            json!({ "op": "connect", "account": 0, "chain_id": 100 }),
+        );
+        assert_eq!(result(&connected)["grant"]["walletIndex"], 0, "{connected}");
+        let signing = grant(core, id, &site(), "dapp", json!({ "op": "signing" }));
+        assert!(result(&signing)["grant"].is_object(), "{signing}");
+    };
+    let sign = |core: &mut Core, id: &mut u64| {
+        call_as(
+            core,
+            id,
+            &site(),
+            "sign.message",
+            json!({ "key": account(0), "message": "0x68656c6c6f", "authorization": { "standing": {} } }),
+        )
+    };
+    connect_and_sign(&mut core, &mut id);
+    // Q9's rate: the burst signs, then the bucket is empty.
+    let mut signed = 0;
+    loop {
+        let reply = sign(&mut core, &mut id);
+        if reply.get("error").is_some() {
+            assert_eq!(reply["error"]["data"]["reason"], "rate_limited", "{reply}");
+            break;
+        }
+        assert!(result(&reply)["signature"].is_string(), "{reply}");
+        signed += 1;
+        assert!(signed <= 10, "no rate on a limited rule");
+    }
+    changed(&mut core, &mut id);
+    // A last use whose write fails: a storage error, and no event.
+    std::fs::write(&hook, "dapp:rename").unwrap();
+    let touched = call_as(
+        &mut core,
+        &mut id,
+        &site(),
+        "approval.touch",
+        json!({ "store": "dapp" }),
+    );
+    assert_eq!(touched["error"]["code"], "storage", "{touched}");
+    assert!(changed(&mut core, &mut id).is_empty());
+    // A revoke whose write fails stands, with its event, and forgets the
+    // buckets.
+    let revoked = call_as(
+        &mut core,
+        &mut id,
+        &chrome(),
+        "approval.revoke",
+        json!({ "store": "dapp", "key": SITE, "what": "grant" }),
+    );
+    assert_eq!(
+        revoked["error"]["data"],
+        json!({ "store": "dapp", "applied": true }),
+        "{revoked}"
+    );
+    assert_eq!(changed(&mut core, &mut id).len(), 1);
+    std::fs::write(&hook, "").unwrap();
+    connect_and_sign(&mut core, &mut id);
+    let again = sign(&mut core, &mut id);
+    assert!(result(&again)["signature"].is_string(), "{again}");
+}

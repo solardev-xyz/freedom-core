@@ -1177,23 +1177,49 @@ impl Approvals {
         }
     }
 
-    /// Writes a moved store; one `approval.changed` for `key` when the
-    /// change took effect, saved or not.
+    /// Writes a moved store; one `approval.changed` for `key` when a
+    /// widening or narrowing took effect, saved or not (a neutral change,
+    /// a last use or a chain, sends none, whether its write failed or not).
     fn write<S: StoreFile, T>(
         &mut self,
         key: &str,
         change: impl FnOnce(&mut S) -> Applied<T>,
     ) -> Result<Written<T>, ErrorBody> {
-        match self.grants.write::<S, T>(change) {
+        self.write_then(key, change, |_| {})
+    }
+
+    /// As [`Self::write`], and `then` runs once the change is active in
+    /// memory: written, or a narrowing (or neutral change) whose write
+    /// failed, which stands all the same.
+    fn write_then<S: StoreFile, T>(
+        &mut self,
+        key: &str,
+        change: impl FnOnce(&mut S) -> Applied<T>,
+        then: impl FnOnce(&mut Self),
+    ) -> Result<Written<T>, ErrorBody> {
+        let mut effect = Effect::Unchanged;
+        let result = self.grants.write::<S, T>(|store| {
+            let applied = change(store);
+            effect = applied.effect;
+            applied
+        });
+        let grants = |effect: Effect| matches!(effect, Effect::Widening | Effect::Narrowing);
+        match result {
             Ok(written) => {
-                if matches!(written.effect, Effect::Widening | Effect::Narrowing) {
+                if grants(written.effect) {
                     self.changed(S::KIND, key);
                 }
+                then(self);
                 Ok(written)
             }
             Err(failure) => {
                 if matches!(failure, WriteFailure::Io { applied: true }) {
-                    self.changed(S::KIND, key);
+                    // The effect the change reported, as the write's own
+                    // result isn't returned on a failure.
+                    if grants(effect) {
+                        self.changed(S::KIND, key);
+                    }
+                    then(self);
                 }
                 Err(write_error(S::KIND, failure))
             }
@@ -1539,11 +1565,13 @@ impl Approvals {
         let what = &fields["what"];
         let flag = what.get("flag").and_then(Value::as_str);
         let written = match (kind, what.as_str()) {
-            (StoreKind::Dapp, Some("grant")) => {
-                let written = self.write::<DappStore, _>(&key, |store| store.revoke(&key))?;
-                self.standing.forget_dapp(&key);
-                written
-            }
+            // The buckets go once the revoke stands, saved or not: a grant
+            // made again starts full.
+            (StoreKind::Dapp, Some("grant")) => self.write_then::<DappStore, _>(
+                &key,
+                |store| store.revoke(&key),
+                |this| this.standing.forget_dapp(&key),
+            )?,
             (StoreKind::Dapp, Some("signing")) => {
                 self.write::<DappStore, _>(&key, |store| store.signing_off(&key))?
             }
@@ -1573,11 +1601,13 @@ impl Approvals {
                     .ok_or_else(|| invalid("flag: unknown"))?;
                 self.write::<SwarmStore, _>(&key, |store| store.set_flag(&key, flag, false))?
             }
-            (StoreKind::Radicle, Some("grant")) => {
-                let written = self.write::<RadicleStore, _>(&key, |store| store.revoke(&key))?;
-                self.standing.forget_radicle(&key);
-                written
-            }
+            (StoreKind::Radicle, Some("grant")) => self.write_then::<RadicleStore, _>(
+                &key,
+                |store| store.revoke(&key),
+                |this| {
+                    this.standing.forget_radicle(&key);
+                },
+            )?,
             (StoreKind::Radicle, None) if flag.is_some() => {
                 object(what, &["flag"], &[])?;
                 let flag = RadicleFlag::from_name(flag.unwrap_or(""))
