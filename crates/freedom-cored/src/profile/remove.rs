@@ -224,11 +224,16 @@ pub struct Place {
     pub fences: Vec<Fence>,
 }
 
-/// A gated directory to check: its names below the data root, and what it
-/// holds (`identity data`, `IPFS data`).
+/// A gated directory to check: its names below the data root, what it
+/// holds (`identity data`, `IPFS data`), and whether a regular file at its
+/// name is the move's placeholder (design 0013, "The move", step 4: the
+/// root's `identity` while a move's journal is pending), which is gated at
+/// its path and goes as a file. Anything else that isn't a directory there
+/// is refused.
 pub struct Gated<'a> {
     pub names: &'a [&'a str],
     pub what: &'static str,
+    pub placeholder: bool,
 }
 
 /// `identitiesUp(target)`: the identities of `target` and of every
@@ -268,7 +273,12 @@ pub fn gated_place(
         gated: false,
     }];
     let mut fences = Vec::new();
-    for Gated { names, what } in gated {
+    for Gated {
+        names,
+        what,
+        placeholder,
+    } in gated
+    {
         let names: Vec<OsString> = names.iter().map(OsString::from).collect();
         let Some((last, _)) = names.split_last() else {
             continue;
@@ -281,7 +291,11 @@ pub fn gated_place(
         for (i, name) in names.iter().enumerate() {
             path.push(name);
             let here = current.take();
+            let last = i + 1 == names.len();
             let next = match &here {
+                // The placeholder: no directory there, so nothing below it
+                // to spare; the fence moves it aside as a file.
+                Some(dir) if *placeholder && last && dir.kind(name)? == Kind::File => None,
                 Some(dir) => real_child(dir, name, &|link| {
                     layout_refused(
                         what,
@@ -301,12 +315,12 @@ pub fn gated_place(
                         name: Some(name.clone()),
                         id,
                         parent: Some(parent),
-                        gated: i + 1 == names.len(),
+                        gated: last,
                     });
                     nodes.len() - 1
                 }
             };
-            if i + 1 == names.len() {
+            if last {
                 holder = here;
             }
             current = next;
@@ -671,10 +685,12 @@ mod tests {
         Gated {
             names: &["identity"],
             what: "identity data",
+            placeholder: false,
         },
         Gated {
             names: &["ipfs-data", "freedom-ipfs"],
             what: "IPFS data",
+            placeholder: false,
         },
     ];
 
@@ -702,6 +718,57 @@ mod tests {
         assert!(!data.join("ipfs-data/other").exists());
         assert!(!data.join("Cookies").exists());
         assert!(std::fs::symlink_metadata(data.join("link")).is_err());
+    }
+
+    /// A regular file at a gated name is refused, but where it is the
+    /// move's placeholder: then it is no directory to spare and goes as a
+    /// file, while the moved directory beside it is spared. A link there is
+    /// refused either way.
+    #[test]
+    fn the_placeholder_goes_as_a_file() {
+        let pending: [Gated<'static>; 2] = [
+            Gated {
+                names: &["identity"],
+                what: "identity data",
+                placeholder: true,
+            },
+            Gated {
+                names: &["freedom", "identity"],
+                what: "identity data",
+                placeholder: false,
+            },
+        ];
+        let root = tempfile::tempdir().unwrap();
+        let data = std::fs::canonicalize(root.path()).unwrap().join("p");
+        std::fs::create_dir_all(data.join("freedom/identity")).unwrap();
+        std::fs::write(data.join("freedom/identity/vault.json"), "x").unwrap();
+        std::fs::write(data.join("freedom/settings.json"), "x").unwrap();
+        std::fs::write(data.join("identity"), "moved to freedom/identity").unwrap();
+        let dir = open(&data);
+        match gated_place(Some(&dir), &data, &GATED, &[]) {
+            Err(Failure::Refused(message)) => assert!(
+                message.starts_with("The profile's identity data is reached through a link"),
+                "{message}"
+            ),
+            Err(other) => panic!("{other:?}"),
+            Ok(_) => panic!("a file at a gated directory's name"),
+        }
+        let place = gated_place(Some(&dir), &data, &pending, &[])
+            .unwrap()
+            .unwrap();
+        assert!(place.fences[0].parent.is_some() && place.fences[0].id.is_none());
+        let held = always;
+        let mut removal = Removal::new(&held);
+        removal.remove_sparing(&dir, &place, 0, None).unwrap();
+        assert!(std::fs::symlink_metadata(data.join("identity")).is_err());
+        assert!(data.join("freedom/identity/vault.json").exists());
+        assert!(!data.join("freedom/settings.json").exists());
+
+        std::os::unix::fs::symlink(data.join("freedom/identity"), data.join("identity")).unwrap();
+        assert!(matches!(
+            gated_place(Some(&dir), &data, &pending, &[]),
+            Err(Failure::Refused(_))
+        ));
     }
 
     #[test]

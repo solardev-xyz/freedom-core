@@ -77,6 +77,61 @@ pub const MOVED_ENTRIES: &[&str] = &[
     "run",
 ];
 
+/// A profile's layout, as the reader release reads it (0013, "Readers, and
+/// the downgrade"; `profile open`'s `layout`):
+/// - **[`Layout::Pending`]** while a move's journal is there, before its
+///   marker or after it: the entries may be in either place;
+/// - **[`Layout::Freedom`]** once the marker is: the Freedom root is
+///   `freedom/`;
+/// - **[`Layout::Root`]** otherwise: the Freedom root is the profile's
+///   directory itself.
+///
+/// The caller looks for the journal and the marker as `lstat` would (a
+/// symlink at either name is there); it reads the layout only under the
+/// profile gate, which a move holds for its whole run, so the layout can't
+/// change under it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Layout {
+    Root,
+    Freedom,
+    Pending,
+}
+
+impl Layout {
+    /// From whether `freedom/.move.json` and `freedom/layout.json` are
+    /// there.
+    pub fn read(journal: bool, marker: bool) -> Layout {
+        if journal {
+            Layout::Pending
+        } else if marker {
+            Layout::Freedom
+        } else {
+            Layout::Root
+        }
+    }
+
+    /// `profile open`'s word for it.
+    pub fn word(self) -> &'static str {
+        match self {
+            Layout::Root => "root",
+            Layout::Freedom => "freedom",
+            Layout::Pending => "pending",
+        }
+    }
+
+    /// The Freedom roots a reader may find the profile's Freedom-owned
+    /// entries in, as names below the profile's directory: the directory
+    /// itself (no name), `freedom/`, or, while a journal is pending, both,
+    /// the root's first.
+    pub fn freedom_roots(self) -> &'static [&'static [&'static str]] {
+        match self {
+            Layout::Root => &[&[]],
+            Layout::Freedom => &[&[FREEDOM_DIR]],
+            Layout::Pending => &[&[], &[FREEDOM_DIR]],
+        }
+    }
+}
+
 /// The journal's entries, or `None` for a journal out of form: not JSON,
 /// another version, another key, a key twice, a name not in
 /// [`MOVED_ENTRIES`], or one named twice.
@@ -292,6 +347,23 @@ mod tests {
             parse_journal(r#"{"version":1,"entries":["\u0069dentity"]}"#),
             Some(vec!["identity".to_owned()])
         );
+    }
+
+    #[test]
+    fn the_layout_as_the_reader_release_reads_it() {
+        assert_eq!(Layout::read(false, false), Layout::Root);
+        assert_eq!(Layout::read(false, true), Layout::Freedom);
+        // A journal is pending before its marker and after it.
+        assert_eq!(Layout::read(true, false), Layout::Pending);
+        assert_eq!(Layout::read(true, true), Layout::Pending);
+        assert_eq!(
+            [Layout::Root, Layout::Freedom, Layout::Pending].map(Layout::word),
+            ["root", "freedom", "pending"]
+        );
+        let empty: &[&str] = &[];
+        assert_eq!(Layout::Root.freedom_roots(), [empty]);
+        assert_eq!(Layout::Freedom.freedom_roots(), [[FREEDOM_DIR]]);
+        assert_eq!(Layout::Pending.freedom_roots(), [empty, &[FREEDOM_DIR]]);
     }
 
     #[test]

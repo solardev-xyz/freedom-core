@@ -89,12 +89,11 @@ pub struct Deletion {
     /// The packaged default profile, whose directory is the app root.
     pub shares_app_root: bool,
     /// Where its data lives: the app root (resolved) when it shares it, its
-    /// directory otherwise.
+    /// directory otherwise. The core's and freedom-ipfsd's gated directories
+    /// are below it, in the Freedom root its layout names
+    /// ([`crate::layout::Layout`]), which freedom-cored reads under the
+    /// profile gate.
     pub data_root: String,
-    /// `<data root>/identity`: the core's gated directory.
-    pub identity_dir: String,
-    /// `<data root>/ipfs-data/freedom-ipfs`: freedom-ipfsd's.
-    pub ipfs_dir: String,
     /// A catalog profile with an integer slot's Radicle home.
     pub radicle: Option<RadicleHome>,
 }
@@ -519,8 +518,6 @@ pub fn plan_deletion(
     } else {
         profile_dir.clone()
     };
-    let identity_dir = style.join(&[&data_root, "identity"]);
-    let ipfs_dir = style.join(&[&data_root, "ipfs-data", "freedom-ipfs"]);
     let radicle = radicle_home(store, app_root, &record, opts)?;
     Ok(Deletion {
         catalog,
@@ -533,8 +530,6 @@ pub fn plan_deletion(
         profile_dir,
         shares_app_root,
         data_root,
-        identity_dir,
-        ipfs_dir,
         radicle,
     })
 }

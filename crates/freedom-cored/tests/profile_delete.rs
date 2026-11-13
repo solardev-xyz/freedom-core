@@ -285,6 +285,8 @@ fn release(mut child: Child) {
 enum Hold {
     Child(Child),
     Gate(fc_service::gate::Gate),
+    /// A gate's lock file, locked ([`hold_named`]).
+    File(std::fs::File),
 }
 
 /// **The stale-lease case** (0013, PRF-3's acceptance): with the profile's
@@ -338,6 +340,7 @@ fn a_stale_lease_with_any_gate_held_refuses_the_delete() {
         match hold {
             Hold::Child(child) => release(child),
             Hold::Gate(gate) => drop(gate),
+            Hold::File(file) => drop(file),
         }
     }
 
@@ -377,6 +380,272 @@ fn a_stale_lease_with_any_gate_held_refuses_the_delete() {
     assert!(d.app.join("Profiles").is_dir());
     assert!(!d.app.join("profile-registry.write.lock").exists());
     assert_eq!(forget_list(&d)["items"], listed(&ids));
+}
+
+/// The move's marker, `freedom/layout.json` (design 0013, "The move").
+const MARKER: &str = r#"{"version":1,"moved_at":"2026-11-13T00:00:00.000Z","by":"test"}"#;
+
+/// The move's journal, `freedom/.move.json`, listing `entries`.
+fn journal(data: &Path, entries: &[&str]) {
+    let names: Vec<String> = entries.iter().map(|e| format!("{e:?}")).collect();
+    std::fs::write(
+        data.join("freedom").join(".move.json"),
+        format!(r#"{{"version":1,"entries":[{}]}}"#, names.join(",")),
+    )
+    .unwrap();
+}
+
+/// `data`'s identity directory moved into `freedom/` (the move's step 3),
+/// and the placeholder file in its old place (step 4).
+fn move_identity(data: &Path) {
+    std::fs::create_dir_all(data.join("freedom")).unwrap();
+    std::fs::rename(data.join("identity"), data.join("freedom").join("identity")).unwrap();
+    std::fs::write(data.join("identity"), "moved to freedom/identity").unwrap();
+}
+
+/// `data`'s IPFS data moved into `freedom/`.
+fn move_ipfs(data: &Path) {
+    std::fs::rename(
+        data.join("ipfs-data"),
+        data.join("freedom").join("ipfs-data"),
+    )
+    .unwrap();
+}
+
+/// A gate held as its service holds it, on `dir`, whether it is there,
+/// missing or a file, with nothing made but the lock file: the file named
+/// from the path the gate gives `dir` (its nearest existing ancestor's
+/// canonical path, with the missing names below it), locked. `namespace`:
+/// fc-service's, or `None` for the core's own name, which has none.
+fn hold_named(locks: &Path, namespace: Option<&str>, dir: &Path) -> std::fs::File {
+    use sha2::{Digest, Sha256};
+    let mut missing = Vec::new();
+    let mut existing = dir;
+    let found = loop {
+        match std::fs::canonicalize(existing) {
+            Ok(found) => break found,
+            Err(_) => {
+                missing.push(existing.file_name().unwrap());
+                existing = existing.parent().unwrap();
+            }
+        }
+    };
+    let planned = missing
+        .iter()
+        .rev()
+        .fold(found, |path, name| path.join(name));
+    let digest = Sha256::digest(planned.as_os_str().as_encoded_bytes());
+    let hex: String = digest.iter().map(|b| format!("{b:02x}")).collect();
+    let name = match namespace {
+        Some(namespace) => format!("{namespace}-{hex}.lock"),
+        None => format!("{hex}.lock"),
+    };
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(locks.join(name))
+        .unwrap();
+    file.lock().unwrap();
+    file
+}
+
+/// The profile `work`'s holders, each refusing its delete with `lock_held`
+/// and its gate's name while it holds, with nothing changed. `hold` takes
+/// one, by its label, and gives the gate's name and the holder.
+fn assert_each_refuses(d: &Dirs, labels: &[&str], hold: &dyn Fn(&str) -> (&'static str, Hold)) {
+    let before = snapshot(d);
+    for label in labels {
+        let (gate, held) = hold(label);
+        let out = delete(d, "work", "Work", &[]);
+        assert_eq!(code(&out), 75, "{label}: {out:?}");
+        assert_eq!(
+            json_of(&out),
+            json!({ "error": "lock_held", "gate": gate }),
+            "{label}"
+        );
+        assert_eq!(snapshot(d), before, "{label}: nothing changed");
+        match held {
+            Hold::Child(child) => release(child),
+            Hold::Gate(gate) => drop(gate),
+            Hold::File(file) => drop(file),
+        }
+    }
+}
+
+/// `work` deleted with no gate held: gone, its moved identity's items
+/// recorded.
+fn assert_deleted(d: &Dirs, work: &Path, ids: &[String]) {
+    let out = delete(d, "work", "Work", &[]);
+    assert_eq!(code(&out), 0, "{out:?}");
+    assert_eq!(json_of(&out)["forget"], listed(ids));
+    assert_eq!(catalog_ids(d), ["default"]);
+    assert!(std::fs::symlink_metadata(work).is_err());
+    assert!(d.app.join("Profiles").is_dir());
+    assert!(!d.app.join("R").join("1").exists());
+}
+
+/// **The stale-lease case in the moved layout** (0013, "Readers, and the
+/// downgrade"): with `freedom/layout.json` there, the core's and
+/// freedom-ipfsd's gates are taken on `freedom/identity` and
+/// `freedom/ipfs-data/freedom-ipfs`, so with the profile's lock backdated
+/// 31 s a holder of either (or of the profile gate) refuses the delete,
+/// with nothing changed. With none held, the profile goes, `freedom/` and
+/// the placeholder with it.
+#[test]
+fn in_the_moved_layout_the_moved_directories_are_gated() {
+    let d = dirs();
+    let ids = [hex('a'), hex('b')];
+    let (work, _) = setup(&d, &ids);
+    move_identity(&work);
+    move_ipfs(&work);
+    std::fs::write(work.join("freedom").join("layout.json"), MARKER).unwrap();
+    profile_lock(&work, Duration::from_secs(31));
+    let freedom = work.join("freedom");
+    assert_each_refuses(&d, &["profile", "core", "ipfs"], &|label| match label {
+        "profile" => (
+            "profile",
+            Hold::Child(holder(&[
+                "hold-profile",
+                "--user-data-dir",
+                s(&work),
+                "--lock-dir",
+                s(&d.locks),
+                "--app-root",
+                s(&d.app),
+                "--id",
+                "work",
+            ])),
+        ),
+        "core" => (
+            "core",
+            Hold::Child(holder(&[
+                "hold-lock",
+                "--data-dir",
+                s(&freedom.join("identity")),
+                "--lock-dir",
+                s(&d.locks),
+            ])),
+        ),
+        _ => (
+            "ipfs",
+            Hold::Gate(
+                fc_service::gate::acquire(
+                    &freedom.join("ipfs-data").join("freedom-ipfs"),
+                    &d.locks,
+                    "ipfs",
+                    Duration::ZERO,
+                )
+                .unwrap(),
+            ),
+        ),
+    });
+    assert_deleted(&d, &work, &ids);
+}
+
+/// **A pending journal gates both layouts:** while `freedom/.move.json` is
+/// there, before the marker or after it, the core's gate is taken on
+/// `identity` (the placeholder file, gated at its path) and on
+/// `freedom/identity`, and freedom-ipfsd's on `ipfs-data/freedom-ipfs` and
+/// `freedom/ipfs-data/freedom-ipfs`, whichever of them are there. A holder
+/// of any one, with the profile's lock backdated 31 s, refuses the delete
+/// with nothing changed; with none held, the profile goes, the placeholder
+/// and the journal with it.
+#[test]
+fn a_pending_journal_gates_both_layouts() {
+    let d = dirs();
+    let ids = [hex('a'), hex('b')];
+    let (work, _) = setup(&d, &ids);
+    // Cut short before the marker: the identity moved, its placeholder
+    // left, the IPFS data not moved yet.
+    move_identity(&work);
+    journal(&work, &["identity", "ipfs-data"]);
+    profile_lock(&work, Duration::from_secs(31));
+    let freedom = work.join("freedom");
+    let hold = |label: &str| -> (&'static str, Hold) {
+        let (gate, namespace, dir) = match label {
+            "core, root" => ("core", None, work.join("identity")),
+            "core, moved" => ("core", None, freedom.join("identity")),
+            "ipfs, root" => (
+                "ipfs",
+                Some("ipfs"),
+                work.join("ipfs-data").join("freedom-ipfs"),
+            ),
+            _ => (
+                "ipfs",
+                Some("ipfs"),
+                freedom.join("ipfs-data").join("freedom-ipfs"),
+            ),
+        };
+        (gate, Hold::File(hold_named(&d.locks, namespace, &dir)))
+    };
+    let labels = ["core, root", "core, moved", "ipfs, root", "ipfs, moved"];
+    assert!(std::fs::metadata(work.join("identity")).unwrap().is_file());
+    assert!(!freedom.join("ipfs-data").exists());
+    assert_each_refuses(&d, &labels, &hold);
+
+    // After the marker, the journal still there: both, still.
+    move_ipfs(&work);
+    std::fs::write(freedom.join("layout.json"), MARKER).unwrap();
+    assert_each_refuses(&d, &labels, &hold);
+
+    assert_deleted(&d, &work, &ids);
+}
+
+/// The packaged default profile in the moved layout: its gates are on
+/// `<app root>/freedom/…`, and its delete removes `freedom/` and the
+/// placeholder with its other entries, keeping the shared ones.
+#[test]
+fn the_default_profiles_moved_data_goes_with_it() {
+    let d = dirs();
+    open(&d, &[]);
+    open(&d, &["--profile", "work"]);
+    let ids = [hex('c')];
+    let freedom = d.app.join("freedom");
+    std::fs::create_dir_all(freedom.join("identity")).unwrap();
+    std::fs::write(freedom.join("identity").join("secrets.json"), secrets(&ids)).unwrap();
+    std::fs::create_dir_all(freedom.join("ipfs-data").join("freedom-ipfs")).unwrap();
+    std::fs::write(freedom.join("settings.json"), "{}").unwrap();
+    std::fs::write(freedom.join("layout.json"), MARKER).unwrap();
+    std::fs::write(d.app.join("identity"), "moved to freedom/identity").unwrap();
+    std::fs::write(d.app.join("Cookies"), "c").unwrap();
+    std::fs::create_dir_all(&d.locks).unwrap();
+    let before = snapshot(&d);
+    let core = holder(&[
+        "hold-lock",
+        "--data-dir",
+        s(&freedom.join("identity")),
+        "--lock-dir",
+        s(&d.locks),
+    ]);
+    let out = delete(&d, "default", "My Profile", &[]);
+    assert_eq!(code(&out), 75, "{out:?}");
+    assert_eq!(
+        json_of(&out),
+        json!({ "error": "lock_held", "gate": "core" })
+    );
+    assert_eq!(snapshot(&d), before);
+    release(core);
+
+    let out = delete(&d, "default", "My Profile", &[]);
+    assert_eq!(code(&out), 0, "{out:?}");
+    assert_eq!(json_of(&out)["forget"], listed(&ids));
+    let mut names: Vec<String> = std::fs::read_dir(&d.app)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().into_string().unwrap())
+        .collect();
+    names.sort();
+    assert_eq!(
+        names,
+        [
+            "Profiles",
+            "profile-registry.json",
+            "profile-registry.json.forget",
+            "profile-registry.write-lock-target",
+        ]
+    );
+    assert_eq!(catalog_ids(&d), ["work"]);
 }
 
 /// The packaged default profile's delete removes its entries at the app
@@ -699,7 +968,8 @@ fn the_forget_files_rules() {
 
 /// The profile's data reached through a link is refused before anything
 /// changes: the profile's directory itself, a step above it, or a gated
-/// directory inside it.
+/// directory inside it; in the moved layout, `freedom/` or a gated
+/// directory below it.
 #[cfg(unix)]
 #[test]
 fn links_are_refused_with_nothing_changed() {
@@ -749,6 +1019,46 @@ fn links_are_refused_with_nothing_changed() {
             .join("Profiles")
             .join("work")
             .join("Cookies")
+            .exists()
+    );
+    // In the moved layout, `freedom/` through a link, or a gated directory
+    // below it.
+    std::fs::remove_file(&profiles).unwrap();
+    std::fs::rename(elsewhere.join("Profiles"), &profiles).unwrap();
+    std::fs::rename(elsewhere.join("identity"), work.join("identity")).unwrap();
+    move_identity(&work);
+    move_ipfs(&work);
+    std::fs::write(work.join("freedom").join("layout.json"), MARKER).unwrap();
+    std::fs::rename(work.join("freedom"), elsewhere.join("freedom")).unwrap();
+    std::os::unix::fs::symlink(elsewhere.join("freedom"), work.join("freedom")).unwrap();
+    let before = snapshot(&d);
+    let out = delete(&d, "work", "Work", &[]);
+    assert_eq!(code(&out), 65, "{out:?}");
+    let message = json_of(&out)["message"].as_str().unwrap().to_owned();
+    assert!(
+        message.starts_with("The profile's identity data is reached through a link"),
+        "{message}"
+    );
+    assert_eq!(snapshot(&d), before);
+    std::fs::remove_file(work.join("freedom")).unwrap();
+    std::fs::rename(elsewhere.join("freedom"), work.join("freedom")).unwrap();
+    let ipfs = work.join("freedom").join("ipfs-data").join("freedom-ipfs");
+    std::fs::rename(&ipfs, elsewhere.join("freedom-ipfs")).unwrap();
+    std::os::unix::fs::symlink(elsewhere.join("freedom-ipfs"), &ipfs).unwrap();
+    let before = snapshot(&d);
+    let out = delete(&d, "work", "Work", &[]);
+    assert_eq!(code(&out), 65, "{out:?}");
+    let message = json_of(&out)["message"].as_str().unwrap().to_owned();
+    assert!(
+        message.starts_with("The profile's IPFS data is reached through a link"),
+        "{message}"
+    );
+    assert_eq!(snapshot(&d), before);
+    assert!(
+        elsewhere
+            .join("freedom-ipfs")
+            .join("blocks")
+            .join("b")
             .exists()
     );
 }

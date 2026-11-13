@@ -12,13 +12,23 @@
 //!    confirmed. A fresh profile lock is open, as `isProfileLocked` reads it
 //!    (`Profile is currently open: …`).
 //! 2. **The target's gates, each tried once:** its profile gate, the core's
-//!    identity gate (`<data root>/identity`), freedom-ipfsd's
-//!    (`<data root>/ipfs-data/freedom-ipfs`) and, for a profile with a slot,
-//!    freedom-radicled's on its Radicle home. Any one held refuses the
-//!    delete with `lock_held` (exit 75) before anything changes, whatever
-//!    the profile lock's age: a live profile whose main has stalled holds
-//!    its profile gate. A missing directory is gated at the path it would
-//!    have, and nothing is made.
+//!    identity gate (`identity`) and freedom-ipfsd's (`ipfs-data/
+//!    freedom-ipfs`) in the Freedom root the profile's layout names, and,
+//!    for a profile with a slot, freedom-radicled's on its Radicle home.
+//!    Any one held refuses the delete with `lock_held` (exit 75) before
+//!    anything changes, whatever the profile lock's age: a live profile
+//!    whose main has stalled holds its profile gate. A missing directory is
+//!    gated at the path it would have, and nothing is made.
+//!    - **The layout** (`fc_profile::layout::Layout`, as `profile open`
+//!      reports it and the reader release resolves it) is read once the
+//!      profile gate is held: a move, and its recovery, hold that gate for
+//!      their whole run, so the layout can't change under the delete. The
+//!      root layout's directories are `<data root>/identity` and
+//!      `<data root>/ipfs-data/freedom-ipfs`; the moved layout's, the same
+//!      below `<data root>/freedom/`; while a move's journal is pending,
+//!      before its marker or after it, both, the root's first. There the
+//!      root's `identity` may be the move's placeholder file, gated at its
+//!      path and removed as a file.
 //! 3. **Confinement** (`confine.rs`): read-write on the app root and, in a
 //!    dev build, the `R/` root of the Radicle homes beside it, with the
 //!    gates' descriptors; no network, no process. The plan was read before
@@ -54,6 +64,7 @@
 use std::path::{Path, PathBuf};
 
 use fc_json::JsValue;
+use fc_profile::layout::{Layout, PLACEHOLDER};
 use fc_profile::{Deletion, Options, Style};
 use fc_service::gate::{GateError, PROFILE_NAMESPACE};
 
@@ -147,18 +158,79 @@ fn take(which: Which, dir: &Path, lock_dir: &Path) -> Result<fc_service::gate::G
     }
 }
 
-fn gates(plan: &Deletion, lock_dir: &Path) -> Result<Vec<fc_service::gate::Gate>, Exit> {
+/// The services' gated directories, below a Freedom root: the core's
+/// identity directory and freedom-ipfsd's.
+const SERVICE_DIRS: [(Which, &[&str], &str); 2] = [
+    (Which::Core, &["identity"], "identity data"),
+    (Which::Ipfs, &["ipfs-data", "freedom-ipfs"], "IPFS data"),
+];
+
+/// A gated directory of the profile's data: the gate its service takes on
+/// it, and its place below the data root.
+struct GatedDir {
+    which: Which,
+    names: Vec<&'static str>,
+    what: &'static str,
+    placeholder: bool,
+}
+
+impl GatedDir {
+    fn place(&self) -> Gated<'_> {
+        Gated {
+            names: &self.names,
+            what: self.what,
+            placeholder: self.placeholder,
+        }
+    }
+}
+
+/// The directories gated for `layout`: [`SERVICE_DIRS`] in each Freedom
+/// root it names (the root layout's, the moved one's, or, while a journal
+/// is pending, both).
+fn gated_dirs(layout: Layout) -> Vec<GatedDir> {
+    let mut dirs = Vec::new();
+    for root in layout.freedom_roots() {
+        for (which, names, what) in SERVICE_DIRS {
+            dirs.push(GatedDir {
+                which,
+                names: root.iter().chain(names).copied().collect(),
+                what,
+                // The move's step 4 leaves a file at the root's
+                // `identity`, before the marker, and the journal is removed
+                // only after it: while one is pending, a regular file there
+                // is the placeholder.
+                placeholder: layout == Layout::Pending && root.is_empty() && names == [PLACEHOLDER],
+            });
+        }
+    }
+    dirs
+}
+
+/// The gates, in order: the profile gate, then, with the layout read under
+/// it, the core's and freedom-ipfsd's in each Freedom root it names, then
+/// freedom-radicled's. Returns them and the gated directories.
+fn gates(
+    plan: &Deletion,
+    lock_dir: &Path,
+) -> Result<(Vec<fc_service::gate::Gate>, Vec<GatedDir>), Exit> {
     let mut held = vec![take(
         Which::Profile,
         Path::new(&plan.profile_dir),
         lock_dir,
     )?];
-    held.push(take(Which::Core, Path::new(&plan.identity_dir), lock_dir)?);
-    held.push(take(Which::Ipfs, Path::new(&plan.ipfs_dir), lock_dir)?);
+    let data_root = Path::new(&plan.data_root);
+    let gated = gated_dirs(super::layout(data_root));
+    for dir in &gated {
+        let path = dir
+            .names
+            .iter()
+            .fold(data_root.to_path_buf(), |path, name| path.join(name));
+        held.push(take(dir.which, &path, lock_dir)?);
+    }
     if let Some(home) = &plan.radicle {
         held.push(take(Which::Radicle, Path::new(&home.dir), lock_dir)?);
     }
-    Ok(held)
+    Ok((held, gated))
 }
 
 /// A failure as an exit.
@@ -232,13 +304,13 @@ fn delete_locked(
         )));
     }
     // Held to the end of the run; dropped after the result is made.
-    let gates = gates(&plan, lock_dir)?;
+    let (gates, gated) = gates(&plan, lock_dir)?;
     let base = open_home_base(&plan).map_err(ended)?;
     confine::confine(grant(&plan, app_root, &gates, base.as_ref()))?;
     keep(lock)?;
     let mut store = open_store(app_root, held)?;
     let store = &mut store;
-    let place = check_layout(&plan, base).map_err(ended)?;
+    let place = check_layout(&plan, base, &gated).map_err(ended)?;
     step("before-record");
     let recorded = forget::record(store, app_root, &plan, held)?;
     step("after-record");
@@ -281,23 +353,11 @@ fn open_home_base(plan: &Deletion) -> Result<Option<Dir>, Failure> {
     }
 }
 
-/// The gated directories, below the data root.
-const GATED: [Gated<'static>; 2] = [
-    Gated {
-        names: &["identity"],
-        what: "identity data",
-    },
-    Gated {
-        names: &["ipfs-data", "freedom-ipfs"],
-        what: "IPFS data",
-    },
-];
-
 /// What the layout check found, every directory reached through no
 /// symlink: the app root's handle; the data root (`None` for the packaged
 /// default profile, whose data root is the app root, kept); the gated
 /// directories' place; and the Radicle home.
-struct Layout {
+struct Found {
     app: Dir,
     data: Option<Located>,
     place: Option<remove::Place>,
@@ -311,8 +371,9 @@ fn open_app_root(plan: &Deletion) -> Result<Dir, Failure> {
 }
 
 /// `base`: the Radicle homes' base where it isn't the app root, opened
-/// before confinement ([`open_home_base`]).
-fn check_layout(plan: &Deletion, base: Option<Dir>) -> Result<Layout, Failure> {
+/// before confinement ([`open_home_base`]); `gated`: the directories
+/// gated, for the profile's layout ([`gated_dirs`]).
+fn check_layout(plan: &Deletion, base: Option<Dir>, gated: &[GatedDir]) -> Result<Found, Failure> {
     let app_path = PathBuf::from(&plan.app_root);
     let app = open_app_root(plan)?;
     let data_path = PathBuf::from(&plan.data_root);
@@ -363,8 +424,9 @@ fn check_layout(plan: &Deletion, base: Option<Dir>) -> Result<Layout, Failure> {
         Some(data) => data.dir.as_ref(),
         None => Some(&app),
     };
-    let place = remove::gated_place(data_dir, &data_path, &GATED, &other_roots)?;
-    Ok(Layout {
+    let gated: Vec<Gated<'_>> = gated.iter().map(GatedDir::place).collect();
+    let place = remove::gated_place(data_dir, &data_path, &gated, &other_roots)?;
+    Ok(Found {
         app,
         data,
         place,
@@ -393,10 +455,10 @@ fn commit_and_remove(
     store: &mut DiskStore<'_>,
     plan: &Deletion,
     app_root: &str,
-    layout: Layout,
+    layout: Found,
     held: &dyn Fn() -> bool,
 ) -> Result<(), Failure> {
-    let Layout {
+    let Found {
         app,
         data,
         place,
