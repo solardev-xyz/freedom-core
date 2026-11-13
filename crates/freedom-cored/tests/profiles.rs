@@ -1,7 +1,8 @@
 //! The profile subcommands (design 0013, PRF-3), run as main runs them:
 //! `profile open` and the catalog's operations on disk, their exits, the
-//! catalog's write lock against another holder, the profile gate through
-//! `hold-profile` and `profile status`, and `profile open`'s time.
+//! catalog's write lock against another holder, and the profile gate through
+//! `hold-profile` and `profile status`. `profile open`'s time is
+//! profile_gate.rs's.
 
 #![allow(
     clippy::unwrap_used,
@@ -818,31 +819,4 @@ fn hold_profile_checks_the_catalog() {
     assert_eq!(json(&answer)[0]["gate_held"], true);
     child.stdin.take().unwrap().write_all(b"").unwrap();
     assert_eq!(child.wait().unwrap().code(), Some(0));
-}
-
-/// The latency gate (design 0013, 5.1): `profile open` on an existing
-/// catalog, timed around the spawn as main times it, under 100 ms at the
-/// 95th percentile, the first (cold) run included.
-#[test]
-fn profile_open_is_fast_enough() {
-    let d = dirs();
-    for id in ["work", "play", "news"] {
-        assert_eq!(code(&open(&d, &["--profile", id])), 0);
-    }
-    let mut times: Vec<Duration> = (0..20)
-        .map(|_| {
-            let started = Instant::now();
-            let out = open(&d, &[]);
-            let took = started.elapsed();
-            assert_eq!(code(&out), 0);
-            took
-        })
-        .collect();
-    times.sort();
-    let p95 = times[18];
-    eprintln!(
-        "profile open: p50 {:?}, p95 {:?}, max {:?}",
-        times[10], p95, times[19]
-    );
-    assert!(p95 < Duration::from_millis(100), "p95 {p95:?}: {times:?}");
 }
