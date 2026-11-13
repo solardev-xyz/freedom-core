@@ -33,8 +33,8 @@
 use std::fmt;
 
 use fc_evm::{
-    Transaction, U256, eip191_digest, keccak256, parse_address, parse_bytes, parse_json,
-    parse_unsigned, to_hex, typed_data_hash,
+    Transaction, TypedDataView, U256, ViewRequest, eip191_digest, keccak256, parse_address,
+    parse_bytes, parse_json, parse_unsigned, to_hex, typed_data_hash, typed_data_view,
 };
 use rand_core::TryCryptoRng;
 use serde_json::{Map, Value, json};
@@ -196,6 +196,86 @@ impl Approved {
             Approved::Send { safe, .. } => Some(safe),
             Approved::Message { .. } => None,
         }
+    }
+}
+
+/// What a Safe message signs, as a standing rule judges it (design 0012,
+/// "The rules": a Safe message goes as a message or typed data, for the
+/// Safe's grant).
+#[derive(Debug, Clone)]
+pub enum SafeSigned {
+    /// `personal_sign`: the bytes, as `normalizeMessage` reads them.
+    Message(Vec<u8>),
+    /// `eth_signTypedData_v4`: the core's view of the typed data, which
+    /// says whether it warns.
+    TypedData(TypedDataView),
+}
+
+/// A `safe-message`'s payload (`{ safe, chain_id, method, params }`) as a
+/// standing rule reads it: the message's bytes, or the view of its typed
+/// data (`domain` as `{}` when falsy, `types` without `EIP712Domain`, the
+/// request's `primaryType`) on the Safe's chain, the one the page asked on.
+pub fn standing_signed(payload: &Value, max_view_len: usize) -> Result<SafeSigned, Error> {
+    let fields = bind::object(
+        payload,
+        "payload",
+        &["safe", "chain_id", "method", "params"],
+        &[],
+    )?;
+    let (_, chain_id) = safe_and_chain(fields)?;
+    let params = fields["params"]
+        .as_array()
+        .ok_or_else(|| invalid("Signature request is required"))?;
+    match fields["method"].as_str() {
+        Some("personal_sign") => {
+            let message = params
+                .first()
+                .and_then(Value::as_str)
+                .ok_or_else(|| invalid("Message is required"))?;
+            Ok(SafeSigned::Message(message_bytes(message)?))
+        }
+        Some("eth_signTypedData_v4") => {
+            let parsed;
+            let typed = match params.get(1) {
+                Some(Value::String(text)) => {
+                    parsed = parse_json(text).map_err(|_| invalid("Typed data is not JSON"))?;
+                    &parsed
+                }
+                Some(value) => value,
+                None => return Err(invalid("Typed data is required")),
+            };
+            let typed = typed
+                .as_object()
+                .ok_or_else(|| invalid("Typed data is required"))?;
+            let empty = Value::Object(Map::new());
+            let domain = if falsy(typed.get("domain")) {
+                &empty
+            } else {
+                &typed["domain"]
+            };
+            let mut types = typed
+                .get("types")
+                .and_then(Value::as_object)
+                .cloned()
+                .ok_or_else(|| invalid("types: expected an object"))?;
+            types.shift_remove("EIP712Domain");
+            let message = typed
+                .get("message")
+                .ok_or_else(|| invalid("missing field message"))?;
+            let view = typed_data_view(
+                domain,
+                &Value::Object(types),
+                message,
+                &ViewRequest {
+                    primary_type: typed.get("primaryType"),
+                    chain_id: Some(U256::from_u64(chain_id)),
+                    max_len: max_view_len,
+                },
+            )
+            .map_err(|e| invalid(e.to_string()))?;
+            Ok(SafeSigned::TypedData(view))
+        }
+        _ => Err(invalid("Unsupported signing method for Safe accounts")),
     }
 }
 
@@ -1219,5 +1299,37 @@ mod tests {
             ),
             "SafeId(..)"
         );
+    }
+
+    /// A Safe message, as a standing rule reads it: a message's bytes, or
+    /// the view of its typed data on the Safe's chain.
+    #[test]
+    fn a_safe_message_as_a_rule_reads_it() {
+        let safe = "0x1111111111111111111111111111111111111111";
+        let message = json!({ "safe": safe, "chain_id": "100", "method": "personal_sign", "params": ["hello", "0x11"] });
+        match standing_signed(&message, 1 << 16).unwrap() {
+            SafeSigned::Message(bytes) => assert_eq!(bytes, b"hello"),
+            other => panic!("{other:?}"),
+        }
+        let typed = |chain_id: &str| {
+            json!({ "safe": safe, "chain_id": chain_id, "method": "eth_signTypedData_v4", "params": ["0x11", {
+                "types": { "EIP712Domain": [{ "name": "chainId", "type": "uint256" }],
+                    "Order": [{ "name": "amount", "type": "uint256" }] },
+                "domain": { "chainId": 100 }, "primaryType": "Order", "message": { "amount": "1" },
+            }] })
+        };
+        let chain = |chain_id: &str| match standing_signed(&typed(chain_id), 1 << 16).unwrap() {
+            SafeSigned::TypedData(view) => {
+                let view: Value = serde_json::from_str(&view.view).unwrap();
+                view["chain"].clone()
+            }
+            other => panic!("{other:?}"),
+        };
+        assert_eq!(chain("100"), "match");
+        assert_eq!(chain("1"), "mismatch");
+        let other = json!({ "safe": safe, "chain_id": "100", "method": "eth_sign", "params": [] });
+        assert!(standing_signed(&other, 1 << 16).is_err());
+        let unbound = json!({ "method": "personal_sign", "params": ["hello"] });
+        assert!(standing_signed(&unbound, 1 << 16).is_err());
     }
 }

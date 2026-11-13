@@ -45,6 +45,12 @@
 //!   `checked` right after a staged or temp file was checked and before its
 //!   identity is compared, `renaming` right before a staged node file is
 //!   renamed. It stands for a same-user process winning a race.
+//! - `FREEDOM_CORED_TEST_GRANT_WRITE_FAIL` names a file: while it holds
+//!   `<store>:<step>` lines (`dapp`, `swarm`, `radicle`, `x402`; `write`,
+//!   `fsync`, `rename`, `flush`), each write of that store's permission
+//!   file fails at that step as if the OS had failed it (design 0012, "The
+//!   files": a failed write). Read at each write, so a test turns it on
+//!   and off while the core runs.
 //! - `FREEDOM_CORED_TEST_METHODS` enables the `test.*` methods
 //!   (`testmethods`), which make responses of any size. Builds without the
 //!   feature don't compile them, nor this hook.
@@ -233,6 +239,22 @@ pub fn swap(stage: &str, path: &std::path::Path) {
     {
         let _ = std::fs::rename(replacement, path);
     }
+}
+
+#[cfg(feature = "testhooks")]
+pub fn grant_write_fails(store: &str, step: &str) -> bool {
+    let Some(path) = std::env::var_os("FREEDOM_CORED_TEST_GRANT_WRITE_FAIL") else {
+        return false;
+    };
+    std::fs::read_to_string(path).is_ok_and(|spec| {
+        spec.lines()
+            .any(|line| line.trim().split_once(':') == Some((store, step)))
+    })
+}
+
+#[cfg(not(feature = "testhooks"))]
+pub fn grant_write_fails(_store: &str, _step: &str) -> bool {
+    false
 }
 
 #[cfg(feature = "testhooks")]

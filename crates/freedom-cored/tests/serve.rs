@@ -69,7 +69,7 @@ fn errors_are_typed() {
     let again = core.call_shell(
         4,
         "core.hello",
-        json!({ "protocol": 2, "shell_version": "t", "auto_lock_ms": 0, "frames": ["stream"] }),
+        json!({ "protocol": 2, "shell_version": "t", "auto_lock_ms": 0, "frames": ["stream"], "grant_root": core.grant_root }),
     );
     assert_eq!(again["error"]["code"], "invalid_argument");
     core.close_stdin();
@@ -155,7 +155,7 @@ fn handshake_rules() {
 fn the_method_table_decides_who_may_call() {
     let (_root, data, locks) = dirs();
     let mut core = spawn("serve", &data, &locks, &[]);
-    let hello = json!({ "protocol": 2, "shell_version": "t", "auto_lock_ms": 900_000, "frames": ["stream"] });
+    let hello = json!({ "protocol": 2, "shell_version": "t", "auto_lock_ms": 900_000, "frames": ["stream"], "grant_root": core.grant_root });
     let refused = core.call(1, "core.hello", hello.clone());
     assert_eq!(refused["error"]["code"], "forbidden", "{refused}");
     assert_eq!(
@@ -525,7 +525,7 @@ fn slow_storage_at_startup_is_bounded_by_the_hello_deadline() {
     core.send(&shell_request(
         1,
         "core.hello",
-        json!({ "protocol": 2, "shell_version": "test", "auto_lock_ms": 900000, "frames": ["stream"] }),
+        json!({ "protocol": 2, "shell_version": "test", "auto_lock_ms": 900000, "frames": ["stream"], "grant_root": core.grant_root }),
     ));
     assert_eq!(core.exit_code(Duration::from_secs(5)), 76);
     assert!(started.elapsed() < Duration::from_secs(4));
@@ -628,6 +628,12 @@ fn only_protocol_2_is_spoken() {
         "approval.discard",
         "approval.spend",
         "approval.end",
+        "approval.check",
+        "approval.grant",
+        "approval.revoke",
+        "approval.touch",
+        "approval.grants",
+        "approval.forget_account",
         "dweb.open",
         "dweb.verify",
         "dweb.forget",

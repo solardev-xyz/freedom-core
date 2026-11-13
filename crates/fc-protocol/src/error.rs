@@ -21,6 +21,10 @@ pub enum ErrorCode {
     /// API): `data.reason` says why (`no_token`, `unknown_token`,
     /// `expired`, `mismatch`, `no_rule`, `fee_check`, …).
     NotAuthorized,
+    /// A write to a permission file main still writes, one not in
+    /// `core.hello`'s `grant_moved` (design 0012, "The files"): nothing
+    /// changed, and `data.store` names the store.
+    NotMoved,
     WeakPassword,
     Storage,
     NodeIdentityCorrupt,
@@ -237,6 +241,15 @@ mod tests {
         assert_eq!(
             serde_json::from_value::<ErrorCode>("not_authorized".into()).ok(),
             Some(ErrorCode::NotAuthorized)
+        );
+    }
+
+    /// Design 0012, "The files": a write to a file that hasn't moved.
+    #[test]
+    fn not_moved_on_the_wire() {
+        assert_eq!(
+            serde_json::to_value(ErrorCode::NotMoved).ok(),
+            Some(serde_json::Value::from("not_moved"))
         );
     }
 

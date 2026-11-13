@@ -380,7 +380,7 @@ fn is_temp_of(file_name: &str, name: &str) -> bool {
 }
 
 /// Creates `<target>.<pid>.<n>.tmp` exclusively in `dir`.
-fn create_temp(dir: &Path, stem: &str) -> std::io::Result<(PathBuf, File)> {
+pub(crate) fn create_temp(dir: &Path, stem: &str) -> std::io::Result<(PathBuf, File)> {
     for attempt in 0u32..100 {
         let path = dir.join(format!("{stem}.{}.{attempt}.tmp", std::process::id()));
         let mut options = OpenOptions::new();

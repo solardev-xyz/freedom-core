@@ -14,7 +14,10 @@
 //!   in Q9's limited form, for 30 days of the wall clock from its
 //!   `grantedAt`, and a transaction rule for no more `value` than the send
 //!   it came from ([`DappStore::signing_rule`],
-//!   [`DappStore::transaction_rule`]).
+//!   [`DappStore::transaction_rule`]). That is [`Rules::Limited`], from
+//!   the dApp file's move; before it, [`Rules::Today`] answers today's
+//!   rules in the file main writes, as the reference does, with no expiry
+//!   and no rate.
 //! - `rule-rate`: R-6's limiter for each key and [`RequestClass`], counted
 //!   only for a request every other check covers. Over it, the request is
 //!   asked ([`Reason::RateLimited`]), never refused; one the user approves
@@ -277,6 +280,21 @@ pub struct RadicleAsk<'a> {
     pub request: RadicleRequest,
 }
 
+/// Which of a site's dApp rules answer (design 0012, "The files" and
+/// `rule-legacy`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Rules {
+    /// Before `dapp-permissions.json` moves (it isn't in `grant_moved`):
+    /// main writes the file, and the core answers today's rules in it as
+    /// the reference does ([`DappStore::today_signing`],
+    /// [`DappStore::today_transaction`]). Q9's limits wait for the move:
+    /// no expiry, no rate, and a limited rule answers nothing.
+    Today,
+    /// From the move (APB-2): Q9's limited rules only, with their expiry,
+    /// their value and their rate.
+    Limited,
+}
+
 /// The standing rules' memory: Q9's buckets and R-6's, in memory only, so a
 /// restart (a new `Standing`) starts every bucket full and empty.
 #[derive(Debug, Clone, Default)]
@@ -294,7 +312,22 @@ impl Standing {
     /// nothing: advice, for the choice between a prompt and none
     /// (`approval.check`).
     pub fn check_dapp(&self, store: &DappStore, ask: &DappAsk<'_>, clocks: Clocks) -> Decision {
-        Decision::of(dapp_rule(store, ask, clocks).and_then(|class| {
+        self.check_dapp_under(Rules::Limited, store, ask, clocks)
+    }
+
+    /// [`Standing::check_dapp`], under `rules`: today's rules answer with
+    /// no rate.
+    pub fn check_dapp_under(
+        &self,
+        rules: Rules,
+        store: &DappStore,
+        ask: &DappAsk<'_>,
+        clocks: Clocks,
+    ) -> Decision {
+        Decision::of(dapp_rule(rules, store, ask, clocks).and_then(|class| {
+            if rules == Rules::Today {
+                return Ok(());
+            }
             let bucket = (ask.key.to_owned(), class);
             within(self.dapp.would_admit(&bucket, clocks.vault_ms))
         }))
@@ -309,7 +342,22 @@ impl Standing {
         ask: &DappAsk<'_>,
         clocks: Clocks,
     ) -> Decision {
-        Decision::of(dapp_rule(store, ask, clocks).and_then(|class| {
+        self.authorize_dapp_under(Rules::Limited, store, ask, clocks)
+    }
+
+    /// [`Standing::authorize_dapp`], under `rules`: today's rules answer,
+    /// and count, nothing in Q9's buckets.
+    pub fn authorize_dapp_under(
+        &mut self,
+        rules: Rules,
+        store: &DappStore,
+        ask: &DappAsk<'_>,
+        clocks: Clocks,
+    ) -> Decision {
+        Decision::of(dapp_rule(rules, store, ask, clocks).and_then(|class| {
+            if rules == Rules::Today {
+                return Ok(());
+            }
             let bucket = (ask.key.to_owned(), class);
             within(self.dapp.admit(&bucket, clocks.vault_ms))
         }))
@@ -391,15 +439,20 @@ fn require(holds: bool, reason: Reason) -> Result<(), Reason> {
 }
 
 /// Every check but the rate; the bucket the request counts in.
-fn dapp_rule(store: &DappStore, ask: &DappAsk<'_>, clocks: Clocks) -> Result<RequestClass, Reason> {
+fn dapp_rule(
+    rules: Rules,
+    store: &DappStore,
+    ask: &DappAsk<'_>,
+    clocks: Clocks,
+) -> Result<RequestClass, Reason> {
     outside_custody(ask.agent)?;
     match &ask.request {
         DappRequest::Signature(signed) => {
-            signature(store, ask.key, ask.account, signed, clocks)?;
+            signature(rules, store, ask.key, ask.account, signed, clocks)?;
             Ok(RequestClass::Signature)
         }
         DappRequest::Transaction(send) => {
-            transaction(store, ask.key, ask.account, send, clocks)?;
+            transaction(rules, store, ask.key, ask.account, send, clocks)?;
             Ok(RequestClass::Transaction)
         }
     }
@@ -408,6 +461,7 @@ fn dapp_rule(store: &DappStore, ask: &DappAsk<'_>, clocks: Clocks) -> Result<Req
 /// `ruleCovers`: the grant exposes the account and its signing rule
 /// answers; never 32 bytes, nor a warned view.
 fn signature(
+    rules: Rules,
     store: &DappStore,
     key: &str,
     account: u32,
@@ -415,10 +469,11 @@ fn signature(
     clocks: Clocks,
 ) -> Result<(), Reason> {
     require(store.exposes(key, account), Reason::NoRule)?;
-    require(
-        store.signing_rule(key, clocks.wall_ms) == SigningRule::Active,
-        Reason::NoRule,
-    )?;
+    let ruled = match rules {
+        Rules::Today => store.today_signing(key),
+        Rules::Limited => store.signing_rule(key, clocks.wall_ms) == SigningRule::Active,
+    };
+    require(ruled, Reason::NoRule)?;
     match signed {
         // `signsRawHash`: exactly 32 bytes, as main normalizes them.
         Signed::Message(bytes) => require(bytes.len() != 32, Reason::Warning),
@@ -440,6 +495,7 @@ fn warned(view: &TypedDataView) -> bool {
 /// `ruleChosen` and `autoSend`: the grant exposes the account; a contract
 /// call a rule covers; not paused; the fee check.
 fn transaction(
+    rules: Rules,
     store: &DappStore,
     key: &str,
     account: u32,
@@ -456,8 +512,14 @@ fn transaction(
         .to_u64()
         .filter(|chain_id| (1..=MAX_CHAIN_ID).contains(chain_id))
         .ok_or(Reason::NoRule)?;
-    let rule = store.transaction_rule(key, to, selector, chain_id, send.value, clocks.wall_ms);
-    require(rule == TransactionRule::Covered, Reason::NoRule)?;
+    let ruled = match rules {
+        Rules::Today => store.today_transaction(key, to, selector, chain_id, send.value),
+        Rules::Limited => {
+            store.transaction_rule(key, to, selector, chain_id, send.value, clocks.wall_ms)
+                == TransactionRule::Covered
+        }
+    };
+    require(ruled, Reason::NoRule)?;
     require(send.paused == Some(false), Reason::Paused)?;
     if send.kind != AccountKind::Phone {
         // `namesOwnFees`; then `judgeFees` against the reference.

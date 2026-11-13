@@ -27,12 +27,20 @@ pub enum Callers {
     /// caller may do (a page kind's token only under `page`, a wallet
     /// kind's never).
     PageChromeOrShell,
+    /// A page only, for its own key (design 0012, API: `approval.check`,
+    /// `approval.touch`).
+    Page,
+    /// A page, for its own key, and main itself (design 0012, API:
+    /// `approval.grant`, main's for a Swarm manifest's projection).
+    PageOrShell,
 }
 
 impl Callers {
     pub fn allow(self, caller: CallerKind) -> bool {
         match (self, caller) {
             (Callers::PageChromeOrShell, _) => true,
+            (Callers::Page, caller) => caller == CallerKind::Page,
+            (Callers::PageOrShell, caller) => caller != CallerKind::Chrome,
             (_, CallerKind::Page) => false,
             (Callers::Shell, CallerKind::Shell) => true,
             (Callers::Shell, CallerKind::Chrome) => false,
@@ -45,6 +53,8 @@ impl Callers {
             Callers::Shell => &["shell"],
             Callers::ChromeOrShell => &["chrome", "shell"],
             Callers::PageChromeOrShell => &["page", "chrome", "shell"],
+            Callers::Page => &["page"],
+            Callers::PageOrShell => &["page", "shell"],
         }
     }
 }
@@ -112,7 +122,9 @@ const fn row_v2(name: &'static str, callers: Callers, mutates: bool, deadline: D
     }
 }
 
-use Callers::{ChromeOrShell as CS, PageChromeOrShell as PCS, Shell as SHELL};
+use Callers::{
+    ChromeOrShell as CS, Page as PAGE, PageChromeOrShell as PCS, PageOrShell as PS, Shell as SHELL,
+};
 use Deadline::{Head as HEAD, Immediate as NOW, Session as SESSION, Vault as VAULT};
 
 /// Every method, in `core.hello`'s capability order, then the `chain.*`
@@ -161,6 +173,14 @@ pub const METHODS: &[Method] = &[
     row("approval.discard", PCS, false, NOW),
     row("approval.spend", PCS, false, NOW),
     row("approval.end", PCS, false, NOW),
+    // Design 0012, API: the grant stores (APR-3b). Reads from APR-3; each
+    // file's writes from its move step (`grant_moved`), `not_moved` before.
+    row("approval.check", PAGE, false, NOW),
+    row("approval.grant", PS, false, NOW),
+    row("approval.revoke", PCS, false, NOW),
+    row("approval.touch", PAGE, false, NOW),
+    row("approval.grants", CS, false, NOW),
+    row("approval.forget_account", SHELL, false, NOW),
     row("dweb.open", SHELL, false, SESSION),
     // Design 0009: verified fetches, whose bodies stream; protocol 2 only.
     row_v2("dweb.verify", SHELL, false, HEAD),
@@ -270,9 +290,14 @@ mod tests {
             ));
         }
         // A page reaches only design 0012's rows.
+        let page_callers = [
+            Callers::PageChromeOrShell,
+            Callers::Page,
+            Callers::PageOrShell,
+        ];
         for m in METHODS {
             let page = admit(m.name, CallerKind::Page, V2);
-            if m.callers == Callers::PageChromeOrShell {
+            if page_callers.contains(&m.callers) {
                 assert!(matches!(page, Admission::Allowed(_)), "{}", m.name);
             } else {
                 assert_eq!(page, Admission::Forbidden, "{}", m.name);
@@ -280,7 +305,7 @@ mod tests {
         }
         let page_rows: Vec<&str> = METHODS
             .iter()
-            .filter(|m| m.callers == Callers::PageChromeOrShell)
+            .filter(|m| page_callers.contains(&m.callers))
             .map(|m| m.name)
             .collect();
         assert_eq!(
@@ -293,8 +318,33 @@ mod tests {
                 "approval.discard",
                 "approval.spend",
                 "approval.end",
+                "approval.check",
+                "approval.grant",
+                "approval.revoke",
+                "approval.touch",
             ]
         );
+        // Design 0012, API: who reaches each grant method.
+        for (name, page, chrome, shell) in [
+            ("approval.check", true, false, false),
+            ("approval.grant", true, false, true),
+            ("approval.revoke", true, true, true),
+            ("approval.touch", true, false, false),
+            ("approval.grants", false, true, true),
+            ("approval.forget_account", false, false, true),
+        ] {
+            for (caller, allowed) in [
+                (CallerKind::Page, page),
+                (CallerKind::Chrome, chrome),
+                (CallerKind::Shell, shell),
+            ] {
+                assert_eq!(
+                    matches!(admit(name, caller, V2), Admission::Allowed(_)),
+                    allowed,
+                    "{name} {caller:?}"
+                );
+            }
+        }
         assert_eq!(
             admit("vault.unlock", CallerKind::Chrome, V2),
             Admission::Allowed(&METHODS[5])

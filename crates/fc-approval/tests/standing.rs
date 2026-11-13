@@ -9,8 +9,8 @@ use std::path::PathBuf;
 
 use fc_approval::fee::{Evidence, Fees};
 use fc_approval::standing::{
-    AccountKind, Clocks, DappAsk, DappRequest, Decision, RadicleAsk, RadicleRequest, Reason, Send,
-    Signed, Standing, SwarmAsk, SwarmRequest, swarm,
+    AccountKind, Clocks, DappAsk, DappRequest, Decision, RadicleAsk, RadicleRequest, Reason, Rules,
+    Send, Signed, Standing, SwarmAsk, SwarmRequest, swarm,
 };
 use fc_approval::stores::{
     DappStore, RULE_TTL_MS, RadicleFlag, RadicleStore, SwarmFlag, SwarmStore,
@@ -215,6 +215,158 @@ fn decision_vectors() {
         }
     }
     assert!(requests >= 150, "{requests}");
+}
+
+/// Before the dApp file moves (APR-3), the core answers today's rules in the
+/// file main writes, as the reference does: the same runs, from the
+/// reference's own start file (`start.js`), under [`Rules::Today`], cover
+/// exactly what the reference's rule covered (`js.outcome` `rule`), with no
+/// rate; every other request gets the core's reason. Runs whose steps change
+/// the store in Q9's form are left out: their store isn't the reference's.
+#[test]
+fn today_rules_answer_as_the_reference() {
+    let decisions = decisions();
+    let mut requests = 0;
+    for run in decisions["runs"].as_array().unwrap() {
+        let id = text(&run["id"]);
+        let steps = run["steps"].as_array().unwrap();
+        if steps
+            .iter()
+            .any(|step| !matches!(text(&step["op"]), "request" | "restart"))
+        {
+            continue;
+        }
+        let mut store = match run["start"]["js"].as_str() {
+            Some(start) => DappStore::load(start.as_bytes()).unwrap(),
+            None => DappStore::new(),
+        };
+        let mut standing = Standing::new();
+        for (index, step) in steps.iter().enumerate() {
+            if text(&step["op"]) != "request" {
+                continue;
+            }
+            let label = format!("{id} step {index}");
+            let at = number(&step["at"]);
+            let core = &step["core"];
+            if let Some(moved) = core.get("moveTo") {
+                let account = u32::try_from(number(moved)).unwrap();
+                assert!(store.set_account(SITE, account, at).value, "{label}");
+            }
+            let clocks = Clocks {
+                wall_ms: at,
+                vault_ms: number(&step["vaultAt"]),
+            };
+            let kind = account_kind(text(&core["accountKind"]));
+            let request = &core["request"];
+            let bytes;
+            let view;
+            let tx;
+            let evidence;
+            let request = match text(&request["kind"]) {
+                "message" => {
+                    bytes = parse_bytes(text(&request["bytes"]), "message").unwrap();
+                    DappRequest::Signature(Signed::Message(&bytes))
+                }
+                "typed-data" => {
+                    let data = &request["typedData"];
+                    view = typed_data_view(
+                        &data["domain"],
+                        &data["types"],
+                        &data["message"],
+                        &ViewRequest {
+                            primary_type: request.get("primaryType"),
+                            chain_id: request["chainId"].as_u64().map(U256::from_u64),
+                            max_len: 1 << 20,
+                        },
+                    )
+                    .unwrap();
+                    DappRequest::Signature(Signed::TypedData(&view))
+                }
+                _ => {
+                    tx = transaction(&request["tx"]);
+                    evidence = request["evidence"].as_object().map(|evidence| {
+                        Evidence::read(&evidence["reply"], number(&evidence["requestedAt"]))
+                    });
+                    DappRequest::Transaction(Send::of(
+                        &tx,
+                        kind,
+                        request["paused"].as_bool(),
+                        evidence.as_ref(),
+                    ))
+                }
+            };
+            let ask = DappAsk {
+                key: SITE,
+                agent: core["agent"].as_bool(),
+                account: u32::try_from(number(&core["account"])).unwrap(),
+                request,
+            };
+            let expect = if text(&step["js"]["outcome"]) == "rule" {
+                Decision::Covered
+            } else {
+                expected(text(&core["expect"]))
+            };
+            assert_ne!(expect, Decision::NotCovered(Reason::RateLimited), "{label}");
+            assert_eq!(
+                standing.check_dapp_under(Rules::Today, &store, &ask, clocks),
+                expect,
+                "{label}: advice"
+            );
+            assert_eq!(
+                standing.authorize_dapp_under(Rules::Today, &store, &ask, clocks),
+                expect,
+                "{label}"
+            );
+            requests += 1;
+        }
+    }
+    assert!(requests >= 80, "{requests}");
+}
+
+/// Today's lookups as the reference makes them: `signing === true` only;
+/// a transaction rule's `maxValue` of decimal digits (leading zeros, past
+/// 2^256) or 0 for anything else; `to` and `selector` in any case; and Q9's
+/// limited rule answers nothing here.
+#[test]
+fn today_lookups() {
+    let file = |rules: Value| {
+        let text =
+            json!({ SITE: { "origin": SITE, "walletIndex": 0, "autoApprove": rules } }).to_string();
+        DappStore::load(text.as_bytes()).unwrap()
+    };
+    assert!(file(json!({ "signing": true })).today_signing(SITE));
+    for flag in [json!(1), json!("true"), json!(false)] {
+        assert!(!file(json!({ "signing": flag })).today_signing(SITE));
+    }
+    assert!(
+        !file(json!({ "signing": false, "limited": { "signing": { "grantedAt": T } } }))
+            .today_signing(SITE)
+    );
+    let covers = |max: Value, value: u64| {
+        file(json!({ "transactions": [
+            { "to": "0xABABABABABABABABABABABABABABABABABABABAB", "selector": "0x095EA7B3", "chainId": 1, "maxValue": max },
+        ] }))
+        .today_transaction(SITE, &ROUTER, &APPROVE, 1, &U256::from_u64(value))
+    };
+    assert!(covers(json!("5"), 5));
+    assert!(!covers(json!("5"), 6));
+    assert!(covers(json!("0007"), 7));
+    assert!(covers(json!("9".repeat(100)), u64::MAX));
+    for max in [
+        json!(5),
+        json!("5.0"),
+        json!(" 5"),
+        json!("0x5"),
+        json!(null),
+    ] {
+        assert!(covers(max.clone(), 0), "{max}");
+        assert!(!covers(max.clone(), 1), "{max}");
+    }
+    // Another chain, or a chain as text, matches nothing.
+    let store = file(json!({ "transactions": [
+        { "to": "0xabababababababababababababababababababab", "selector": "0x095ea7b3", "chainId": "1", "maxValue": "5" },
+    ] }));
+    assert!(!store.today_transaction(SITE, &ROUTER, &APPROVE, 1, &U256::ZERO));
 }
 
 // ---------------------------------------------------------------------------

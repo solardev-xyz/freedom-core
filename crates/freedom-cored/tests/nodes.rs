@@ -517,6 +517,7 @@ fn existing_node_files_are_tightened_at_adoption() {
         "core.hello",
         json!({
             "protocol": 2, "shell_version": "test", "auto_lock_ms": 900_000, "frames": ["stream"],
+            "grant_root": core.grant_root,
             "node_roots": { "bee": bee, "radicle": radicle },
         }),
     );
@@ -553,6 +554,7 @@ fn a_relative_node_root_is_ignored() {
         "core.hello",
         json!({
             "protocol": 2, "shell_version": "test", "auto_lock_ms": 900_000, "frames": ["stream"],
+            "grant_root": core.grant_root,
             "node_roots": { "bee": "relative/bee", "radicle": "/abs/../radicle" },
         }),
     );

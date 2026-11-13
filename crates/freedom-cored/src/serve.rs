@@ -53,6 +53,7 @@ use std::sync::Arc;
 use std::sync::mpsc::{self, RecvTimeoutError, Sender, TryRecvError};
 use std::time::{Duration, Instant};
 
+use fc_approval::stores::StoreKind;
 use fc_protocol::error::{ErrorBody, ErrorCode};
 use fc_protocol::frame::{Frame, KIND_JSON};
 use fc_protocol::message::{self, CallerKind, Context, Message, MessageError};
@@ -193,6 +194,13 @@ const CAPABILITIES: &[&str] = &[
     "approval.discard",
     "approval.spend",
     "approval.end",
+    // Design 0012: the grant stores (APR-3b).
+    "approval.check",
+    "approval.grant",
+    "approval.revoke",
+    "approval.touch",
+    "approval.grants",
+    "approval.forget_account",
     "dweb.open",
     // Design 0009: verified fetches, whose bodies stream.
     "dweb.verify",
@@ -637,6 +645,36 @@ struct HelloParams {
     /// #85). Optional.
     #[serde(default)]
     node_roots: Option<NodeRoots>,
+    /// The profile's `userData`, as an absolute path, where the four
+    /// permission files live (design 0012, "The files"). Required.
+    #[serde(default)]
+    grant_root: Option<String>,
+    /// The permission files main has handed to the core (`dapp`, `swarm`,
+    /// `radicle`, `x402`): the core writes these, and only reads the
+    /// others.
+    #[serde(default)]
+    grant_moved: Vec<String>,
+}
+
+/// The hello's grant files: `grant_root`, an absolute path, and the stores
+/// in `grant_moved`. A hello without the root, with a relative one, or
+/// naming a store the core doesn't know, is malformed (design 0012, APR-3).
+fn grant_files(params: &HelloParams) -> Result<(PathBuf, Vec<StoreKind>), &'static str> {
+    let root = params
+        .grant_root
+        .as_deref()
+        .map(PathBuf::from)
+        .filter(|root| crate::journal::normalized_absolute(root))
+        .ok_or("core.hello needs grant_root, an absolute path")?;
+    let mut moved = Vec::new();
+    for name in &params.grant_moved {
+        let kind =
+            StoreKind::from_name(name).ok_or("core.hello's grant_moved names an unknown store")?;
+        if !moved.contains(&kind) {
+            moved.push(kind);
+        }
+    }
+    Ok((root, moved))
 }
 
 #[derive(Deserialize)]
@@ -1286,12 +1324,20 @@ impl Core {
             );
             return Flow::Exit(Exit::Protocol);
         }
+        let grants = match grant_files(&params) {
+            Ok(grants) => grants,
+            Err(message) => {
+                let _ = self.error(id, ErrorBody::new(ErrorCode::InvalidArgument, message));
+                return Flow::Exit(Exit::Protocol);
+            }
+        };
         if self.hello_done || self.pending_hello.is_some() {
             return self.error(
                 id,
                 ErrorBody::new(ErrorCode::InvalidArgument, "core.hello was already sent"),
             );
         }
+        self.vault.configure_grants(grants.0, grants.1);
         // The dweb thread, and stream frames from now on: before the reply,
         // so nothing main sends after reading it is refused.
         let Some(start) = self.dweb_start.take() else {
