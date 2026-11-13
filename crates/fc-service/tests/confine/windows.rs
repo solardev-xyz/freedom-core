@@ -114,6 +114,7 @@ fn child(case: &str) {
         resolver: Resolver::None,
         descriptors: Vec::new(),
         interface_index: false,
+        times: false,
     };
     match case {
         "control" => {

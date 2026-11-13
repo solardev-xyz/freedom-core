@@ -435,6 +435,7 @@ mod linux {
             resolver: confine::Resolver::System,
             descriptors,
             interface_index: false,
+            times: false,
         }
     }
 

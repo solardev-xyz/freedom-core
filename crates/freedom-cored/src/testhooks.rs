@@ -53,14 +53,26 @@
 //!   waits in the loop's outbox as if the writer had no room, until the
 //!   loop's next frame or room moves it.
 //! - `FREEDOM_CORED_TEST_PROFILE_HOLD` (`<marker>=<release>`): a profile
-//!   subcommand that holds the catalog's write lock creates the file
-//!   `<marker>` once it has the lock, then waits, before it changes
-//!   anything, until the file `<release>` exists (at most 120 s). So a
-//!   test holds the lock as long as it needs.
+//!   subcommand that holds the catalog's write lock (or `migrate`, the
+//!   profile lock) creates the file `<marker>` once it has the lock, then
+//!   waits, before it changes anything, until the file `<release>` exists
+//!   (at most 120 s). So a test holds the lock as long as it needs.
+//!   The directories holding both files are added to the subcommand's
+//!   read-write grant (`profile/confine.rs`), so the hook works confined;
+//!   nothing else is.
 //! - `FREEDOM_CORED_TEST_PROFILE_DELETE_CRASH` names a step of `profile
 //!   delete` (`before-record`, `after-record`, `after-catalog`,
 //!   `mid-removal`, `before-result`): there the process exits at once with
 //!   99, as if killed, its locks and files left as they are.
+//! - `FREEDOM_CORED_TEST_PROFILE_MIGRATE_CRASH` names a step of `profile
+//!   migrate --finish-only` (`after-exclusion`, `mid-recovery`,
+//!   `before-journal-removed`): there the process exits at once with 99.
+//! - `FREEDOM_CORED_TEST_PROFILE_CONFINED` lists paths (the OS's path-list
+//!   separator): right after a profile subcommand confines itself, it reads
+//!   each (a file's bytes, a directory's entries) and logs one line on
+//!   stderr, `test: confined`, with its confinement report and, for each
+//!   path, whether the read worked. So a test sees what the confined
+//!   process can and can't read.
 
 use std::time::Duration;
 
@@ -252,6 +264,66 @@ pub fn profile_delete_step(step: &str) {
         std::process::exit(99);
     }
 }
+
+#[cfg(feature = "testhooks")]
+pub fn profile_migrate_step(step: &str) {
+    if std::env::var("FREEDOM_CORED_TEST_PROFILE_MIGRATE_CRASH").is_ok_and(|s| s == step) {
+        std::process::exit(99);
+    }
+}
+
+/// The directories `FREEDOM_CORED_TEST_PROFILE_HOLD`'s files live in, which
+/// a confined subcommand's grant takes so the hook still works.
+#[cfg(feature = "testhooks")]
+pub fn profile_hook_dirs() -> Vec<std::path::PathBuf> {
+    let Ok(spec) = std::env::var("FREEDOM_CORED_TEST_PROFILE_HOLD") else {
+        return Vec::new();
+    };
+    let Some((marker, release)) = spec.split_once('=') else {
+        return Vec::new();
+    };
+    [marker, release]
+        .iter()
+        .filter_map(|file| std::path::Path::new(file).parent())
+        .filter(|dir| dir.is_dir())
+        .map(std::path::Path::to_path_buf)
+        .collect()
+}
+
+#[cfg(feature = "testhooks")]
+pub fn profile_confined(report: &fc_service::confine::Report) {
+    let Some(list) = std::env::var_os("FREEDOM_CORED_TEST_PROFILE_CONFINED") else {
+        return;
+    };
+    let reads: Vec<serde_json::Value> = std::env::split_paths(&list)
+        .map(|path| {
+            let read = if path.is_dir() {
+                std::fs::read_dir(&path).map(|_| ())
+            } else {
+                std::fs::read(&path).map(|_| ())
+            };
+            serde_json::json!({
+                "path": path.to_string_lossy(),
+                "ok": read.is_ok(),
+            })
+        })
+        .collect();
+    crate::log::info(
+        "test: confined",
+        serde_json::json!({ "confinement": report.to_json(), "reads": reads }),
+    );
+}
+
+#[cfg(not(feature = "testhooks"))]
+pub fn profile_migrate_step(_step: &str) {}
+
+#[cfg(not(feature = "testhooks"))]
+pub fn profile_hook_dirs() -> Vec<std::path::PathBuf> {
+    Vec::new()
+}
+
+#[cfg(not(feature = "testhooks"))]
+pub fn profile_confined(_report: &fc_service::confine::Report) {}
 
 #[cfg(not(feature = "testhooks"))]
 pub fn profile_delete_step(_step: &str) {}

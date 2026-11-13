@@ -29,7 +29,7 @@ use fc_profile::forget::{Backend, FORGET_ASIDE, ForgetFile, Item, Record};
 use fc_profile::{Deletion, Store as _, Style};
 
 use super::store::DiskStore;
-use super::{Flags, catalog_lock, failed, object, prepare_app_root, print, storage};
+use super::{Flags, confined_catalog_lock, failed, object, prepare_app_root, print, storage};
 use crate::anchor::{Dir, Kind, Resolve};
 use crate::exit::Exit;
 use crate::log;
@@ -240,7 +240,8 @@ fn run_locked(app_root: &str, list: bool, done: &[String]) -> Exit {
     if let Err(exit) = prepare_app_root(root) {
         return exit;
     }
-    let lock = match catalog_lock(root) {
+    let grant = super::confine::Grant::locking().read_write(root);
+    let lock = match confined_catalog_lock(root, grant) {
         Ok(lock) => lock,
         Err(exit) => return exit,
     };

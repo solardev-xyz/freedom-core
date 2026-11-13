@@ -203,8 +203,8 @@ pub(super) fn confine(policy: &Policy, options: &Options) -> Result<Report, Inva
         return Ok(blocked("the process is in a sandbox already"));
     }
     let grants = grants(policy)?;
-    let profile =
-        seatbelt::profile(policy.network, policy.refer, &grants).map_err(Invalid::Rules)?;
+    let profile = seatbelt::profile(policy.network, policy.refer, policy.times, &grants)
+        .map_err(Invalid::Rules)?;
     let mut text = profile.text;
     if let Some(extra) = &options.seatbelt_extra {
         text.push_str(extra);
@@ -401,7 +401,7 @@ fn derive(policy: &Policy, grants: &Grants) -> Report {
     for dir in &dirs {
         file_checks.push(sys::check(c"file-write-mode", Filter::Path(dir)));
     }
-    let files = status("files", &file_checks);
+    let mut files = status("files", &file_checks);
     // A new process (fork, `posix_spawn`) and an exec in place are two
     // things. The sandbox answers `sandbox_check` for `process-fork`, not
     // for `process-exec` (it returns -1, macOS CI), so the exec is asked of
@@ -427,6 +427,11 @@ fn derive(policy: &Policy, grants: &Grants) -> Report {
         ipc = Status::Partial;
     }
     gaps.push("process_args");
+    // The profile allows times in the read-write grants: a lock's mtime.
+    if policy.times && files == Status::Enforced {
+        gaps.push("times");
+        files = Status::Partial;
+    }
     // The network rule names the proxy's port (and loopback host) alone:
     // the profile holds no other, and the sandbox can't be asked about an
     // address.
@@ -483,6 +488,7 @@ mod tests {
             resolver: crate::confine::Resolver::None,
             descriptors: Vec::new(),
             interface_index: false,
+            times: false,
         };
         let grants = grants(&policy).unwrap();
         // macOS's temporary directories live under /private.
@@ -508,6 +514,7 @@ mod tests {
             resolver: crate::confine::Resolver::ResolvConf,
             descriptors: Vec::new(),
             interface_index: false,
+            times: false,
         };
         let grants = grants(&policy).unwrap();
         for file in ["/etc/resolv.conf", "/etc/hosts"] {

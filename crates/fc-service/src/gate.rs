@@ -327,6 +327,9 @@ fn lock_within(file: &File, retry: Duration) -> Result<(), GateError> {
 ///   its nearest existing ancestor's canonical path with the missing names
 ///   below it. A holder that makes it meanwhile and takes its gate finds
 ///   this one held.
+/// - **A `data_dir` that is a file,** as a moved identity's placeholder
+///   (design 0013, "The move"), is gated at its path, and nothing is
+///   tightened: no service uses a file as its directory.
 /// - **`file_name`** names the lock file from that path: [`lock_file_name`]
 ///   with a service's namespace, or the core's own name, which has none.
 /// - **`lock_inside_data`:** the lock directory may lie inside the data
@@ -358,7 +361,9 @@ pub fn acquire_for_delete(
             Qualification::Unknown(reason) => return Err(GateError::Unqualified(reason)),
         }
     }
-    if existing == canonical_data {
+    if existing == canonical_data
+        && std::fs::metadata(&canonical_data).is_ok_and(|metadata| metadata.is_dir())
+    {
         make_private(
             &canonical_data,
             "a data directory that isn't the user's own",
@@ -641,6 +646,16 @@ mod tests {
         assert!(
             acquire_for_delete(&data, &data.join("locks"), &name, true, Duration::ZERO).is_ok()
         );
+        // A file in the directory's place (a moved identity's placeholder)
+        // is gated at its path.
+        let placeholder = data.join("identity");
+        std::fs::write(&placeholder, "moved").unwrap();
+        let gate = acquire_for_delete(&placeholder, &locks, &name, false, Duration::ZERO).unwrap();
+        assert_eq!(gate.data_dir, std::fs::canonicalize(&placeholder).unwrap());
+        assert!(matches!(
+            acquire_for_delete(&placeholder, &locks, &name, false, Duration::ZERO),
+            Err(GateError::Held)
+        ));
     }
 
     /// `acquire_existing` never makes the data directory: a missing one is

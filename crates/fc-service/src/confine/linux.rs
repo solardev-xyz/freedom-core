@@ -49,8 +49,9 @@ pub(super) fn confine(policy: &Policy, options: &Options) -> Result<Report, Inva
     let seccomp = match seccomp::target() {
         None => Installed::Unavailable("no seccomp filter for this architecture".into()),
         Some(arch) => {
-            let mut programs = seccomp::programs(policy.network, arch, policy.interface_index)
-                .map_err(Invalid::Rules)?;
+            let mut programs =
+                seccomp::programs(policy.network, arch, policy.interface_index, policy.times)
+                    .map_err(Invalid::Rules)?;
             if options.seccomp_invalid {
                 programs.insert(0, seccomp::invalid_program());
             }
@@ -434,6 +435,11 @@ fn derive(policy: &Policy, landlock: &Landlock, seccomp: &Installed) -> Report {
     };
 
     let files = match (abi, filters) {
+        // `futimens` on what Landlock let the process open.
+        (Some(_), true) if policy.times => {
+            gaps.push("times");
+            Status::Partial
+        }
         (Some(_), true) => Status::Enforced,
         (Some(_), false) => {
             gaps.push("metadata");
@@ -544,6 +550,7 @@ mod tests {
             resolver: Resolver::None,
             descriptors: Vec::new(),
             interface_index: false,
+            times: false,
         }
     }
 
@@ -594,6 +601,26 @@ mod tests {
             )
         );
         assert!(report.gaps.is_empty() && report.reasons.is_empty());
+    }
+
+    /// `times` leaves `files` partial, naming it, once both mechanisms
+    /// hold; nothing else changes.
+    #[test]
+    fn times_leave_files_partial() {
+        let mut timed = policy(Network::Offline);
+        timed.times = true;
+        let report = derive(&timed, &Landlock::Applied(6), &Installed::All);
+        assert_eq!(
+            (report.files, report.exec, report.ipc, report.network),
+            (
+                Status::Partial,
+                Status::Enforced,
+                Status::Enforced,
+                Status::Enforced
+            )
+        );
+        assert_eq!(report.gaps, ["times"]);
+        assert!(report.reasons.is_empty());
     }
 
     #[test]

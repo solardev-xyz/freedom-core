@@ -103,6 +103,16 @@ impl Timing {
         stale_ms: rules::STALE_MS,
         update_ms: rules::UPDATE_MS,
     };
+
+    /// A profile's lock (`profile-lock.js`): 30 s and 10 s, or a dev
+    /// build's 5 s and 1 s.
+    pub fn profile(dev: bool) -> Timing {
+        let (stale_ms, update_ms) = rules::profile_lock_timing(dev);
+        Timing {
+            stale_ms,
+            update_ms,
+        }
+    }
 }
 
 struct State {
@@ -124,15 +134,34 @@ struct Shared {
 /// A held lock. Dropping it lets go.
 pub struct Lock {
     lock_dir: PathBuf,
+    timing: Timing,
     shared: Arc<Shared>,
-    refresher: Option<std::thread::JoinHandle<()>>,
+    /// Started by [`Lock::keep`], from a run's shared borrow of the lock.
+    refresher: Mutex<Option<std::thread::JoinHandle<()>>>,
 }
 
 impl Lock {
     /// Takes the lock at `lock_dir`, with `retries` more tries after the
     /// first, waiting `delay(n)` before try `n + 1`, then keeps it from a
-    /// thread of its own.
+    /// thread of its own. The subcommands take and keep in two steps, with
+    /// their confinement between.
+    #[cfg(test)]
     pub fn acquire(
+        lock_dir: &Path,
+        timing: Timing,
+        retries: u32,
+        delay: impl Fn(u32) -> u64,
+    ) -> Result<Lock, LockError> {
+        let lock = Lock::take(lock_dir, timing, retries, delay)?;
+        lock.keep()?;
+        Ok(lock)
+    }
+
+    /// [`Lock::acquire`] without the refresher: [`Lock::keep`] starts it. A
+    /// subcommand confines itself between the two, while it is still the
+    /// process's one thread (design 0010). A lock just taken stays fresh
+    /// for its whole stale time, far longer than that moment.
+    pub fn take(
         lock_dir: &Path,
         timing: Timing,
         retries: u32,
@@ -159,23 +188,37 @@ impl Lock {
             }),
             wake: Condvar::new(),
         });
-        let refresher = {
-            let shared = Arc::clone(&shared);
-            let lock_dir = lock_dir.to_owned();
-            std::thread::Builder::new()
-                .name("profile-lock".into())
-                .spawn(move || refresh(&lock_dir, &shared, timing))
-                .map_err(LockError::Io)?
-        };
         Ok(Lock {
             lock_dir: lock_dir.to_owned(),
+            timing,
             shared,
-            refresher: Some(refresher),
+            refresher: Mutex::new(None),
         })
     }
 
-    /// The catalog's write lock at `app_root`: its target file made if
-    /// missing, as the reference does, and five retries 50 to 250 ms apart.
+    /// Starts keeping the lock from a thread of its own, once.
+    pub fn keep(&self) -> Result<(), LockError> {
+        let mut refresher = self
+            .refresher
+            .lock()
+            .map_err(|_| LockError::Io(std::io::Error::other("the lock's state is poisoned")))?;
+        if refresher.is_some() {
+            return Ok(());
+        }
+        let shared = Arc::clone(&self.shared);
+        let lock_dir = self.lock_dir.clone();
+        let timing = self.timing;
+        let thread = std::thread::Builder::new()
+            .name("profile-lock".into())
+            .spawn(move || refresh(&lock_dir, &shared, timing))
+            .map_err(LockError::Io)?;
+        *refresher = Some(thread);
+        Ok(())
+    }
+
+    /// The catalog's write lock at `app_root`, taken but not yet kept
+    /// ([`Lock::take`]): its target file made if missing, as the reference
+    /// does, and five retries 50 to 250 ms apart.
     pub fn catalog(app_root: &Path, created_at: &str) -> Result<Lock, LockError> {
         let target = app_root.join(fc_profile::CATALOG_LOCK_TARGET);
         if std::fs::symlink_metadata(&target).is_err() {
@@ -183,7 +226,7 @@ impl Lock {
             // Nothing reads it: a failed write doesn't stop the lock.
             let _ = std::fs::write(&target, text);
         }
-        Lock::acquire(
+        Lock::take(
             &app_root.join(fc_profile::CATALOG_LOCK_DIR),
             Timing::CATALOG,
             rules::CATALOG_LOCK_RETRIES,
@@ -218,7 +261,11 @@ impl Lock {
             Err(_) => true,
         };
         self.shared.wake.notify_all();
-        if let Some(refresher) = self.refresher.take() {
+        let refresher = match self.refresher.get_mut() {
+            Ok(refresher) => refresher.take(),
+            Err(poisoned) => poisoned.into_inner().take(),
+        };
+        if let Some(refresher) = refresher {
             let _ = refresher.join();
         }
         if compromised {
@@ -376,6 +423,25 @@ mod tests {
             Lock::acquire(&path, SHORT, 2, |_| 10),
             Err(LockError::Held)
         ));
+        assert!(lock.release());
+        assert!(!path.exists());
+    }
+
+    /// Taken without a refresher, it is held but not refreshed until kept.
+    #[test]
+    fn taken_then_kept() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("x.lock");
+        let lock = Lock::take(&path, SHORT, 0, retries_none).unwrap();
+        assert!(lock.held());
+        let taken = mtime_ms(&path).unwrap();
+        std::thread::sleep(Duration::from_millis(1_300));
+        assert_eq!(mtime_ms(&path).unwrap(), taken, "not refreshed before keep");
+        lock.keep().unwrap();
+        lock.keep().unwrap();
+        std::thread::sleep(Duration::from_millis(1_300));
+        assert_ne!(mtime_ms(&path).unwrap(), taken, "refreshed once kept");
+        assert!(lock.held());
         assert!(lock.release());
         assert!(!path.exists());
     }

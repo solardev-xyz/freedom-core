@@ -4,11 +4,15 @@
 //! freedom-cored serve     --data-dir <identity dir> --lock-dir <lock dir> [--parent-pid <pid>]
 //! freedom-cored hold-lock --data-dir <identity dir> --lock-dir <lock dir>
 //! freedom-cored recover   --data-dir <identity dir> --lock-dir <lock dir>
-//! freedom-cored profile <open|list|create|rename|import|update-nodes|reserved-ports|status> …
+//! freedom-cored profile <open|list|create|rename|import|update-nodes|reserved-ports|status|delete|forget-list|forget-done|migrate> …
 //! freedom-cored hold-profile --user-data-dir <dir> --lock-dir <dir> [--app-root <dir> --id <id>]
 //! ```
 //!
-//! The profile subcommands are [`profile`]'s.
+//! The profile subcommands are [`profile`]'s. Each confines itself (design
+//! 0013, 0010), so it starts as a service does: before anything opens a
+//! descriptor, inherited ones are dropped by one re-exec
+//! (`fc_service::confine::clean_entry`), and no thread starts before its
+//! confinement, logging's writer included (its lines are written directly).
 
 mod anchor;
 mod chain;
@@ -80,14 +84,6 @@ fn parse_args() -> Option<Args> {
 
 fn main() -> ExitCode {
     let started = Instant::now();
-    log::init();
-    let exit = run(started);
-    log::finish(Duration::from_millis(500));
-    ExitCode::from(exit.code())
-}
-
-fn run(started: Instant) -> Exit {
-    // The profile subcommands (design 0013) take their own arguments.
     if matches!(
         std::env::args_os()
             .nth(1)
@@ -95,8 +91,16 @@ fn run(started: Instant) -> Exit {
             .as_deref(),
         Some("profile" | "hold-profile")
     ) {
-        return profile::run(std::env::args_os().skip(1));
+        let entry = fc_service::confine::clean_entry();
+        return ExitCode::from(profile::run(std::env::args_os().skip(1), &entry).code());
     }
+    log::init();
+    let exit = run(started);
+    log::finish(Duration::from_millis(500));
+    ExitCode::from(exit.code())
+}
+
+fn run(started: Instant) -> Exit {
     let Some(args) = parse_args() else {
         log::error(USAGE, serde_json::json!({}));
         return Exit::Usage;

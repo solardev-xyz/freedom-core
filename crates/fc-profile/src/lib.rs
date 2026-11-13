@@ -1,7 +1,8 @@
 //! Profiles in the core (design 0013). This step, PRF-3: the profile
 //! catalog's rules, which the `freedom-cored profile …` subcommands run,
-//! with a delete's checks and paths ([`delete`]) and the forget file's form
-//! and bounds ([`forget`]).
+//! with a delete's checks and paths ([`delete`]), the forget file's form
+//! and bounds ([`forget`]), and the move's journal as its recovery reads it
+//! ([`layout`]).
 //!
 //! The reference is freedom-browser's `src/main/profile-catalog.js` and
 //! `profile-resolver.js` (with `profile-lock.js`'s staleness rule);
@@ -29,6 +30,7 @@ pub mod delete;
 pub mod forget;
 mod ids;
 mod js;
+pub mod layout;
 pub mod lock;
 mod nodes;
 mod open;

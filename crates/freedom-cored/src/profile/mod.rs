@@ -19,6 +19,7 @@
 //!     --confirm-display-name <name> [--dev [--checkout-hash <hex8>]]
 //! freedom-cored profile forget-list --app-root <dir>
 //! freedom-cored profile forget-done --app-root <dir> --item <32 hex>...
+//! freedom-cored profile migrate --profile-dir <dir> --lock-dir <dir> [--dev] --finish-only
 //! freedom-cored hold-profile --user-data-dir <dir> --lock-dir <dir> [--app-root <dir> --id <id>]
 //! ```
 //!
@@ -33,7 +34,14 @@
 //! `profile.json`, a network filesystem, a file that isn't the user's, a
 //! lost lock, a symlink below the app root), with `{ "error": <kind> }` on
 //! stdout and the kind logged on stderr; 75 when the catalog's write lock
-//! stays held, or `hold-profile`'s gate is another's; 64 for bad arguments.
+//! stays held, or `hold-profile`'s gate is another's; 77 when confinement
+//! refuses the process (`confine.rs`); 64 for bad arguments. `migrate`'s
+//! are its own (`migrate.rs`).
+//!
+//! **Confinement:** each run confines itself before it reads the catalog or
+//! a profile's files, with read-write on what it writes, no network and no
+//! child process (`confine.rs`, design 0010). `delete` confines itself once
+//! its gates are taken, after its plan.
 //!
 //! **The catalog's write lock** is taken by each subcommand that writes,
 //! for its whole run, as the reference's `withCatalogWriteLock` (5 retries,
@@ -41,9 +49,11 @@
 //! `forget-list` and `forget-done` included). The reads,
 //! `list` and `reserved-ports`, take none, as the reference's don't.
 
+mod confine;
 mod delete;
 mod forget;
 mod lock;
+mod migrate;
 mod remove;
 mod store;
 
@@ -57,13 +67,14 @@ use fc_service::gate::{CONTENTION_RETRY, GateError, PROFILE_NAMESPACE};
 
 use crate::exit::Exit;
 use crate::log;
+use confine::Grant;
 use lock::Lock;
 use store::DiskStore;
 
-const USAGE: &str = "usage: freedom-cored profile <open|list|create|rename|import|update-nodes|reserved-ports|status|delete|forget-list|forget-done> … | freedom-cored hold-profile --user-data-dir <dir> --lock-dir <dir> [--app-root <dir> --id <id>]";
+const USAGE: &str = "usage: freedom-cored profile <open|list|create|rename|import|update-nodes|reserved-ports|status|delete|forget-list|forget-done|migrate> … | freedom-cored hold-profile --user-data-dir <dir> --lock-dir <dir> [--app-root <dir> --id <id>]";
 
 /// The flags that take no value.
-const SWITCHES: [&str; 2] = ["--dev", "--runtime"];
+const SWITCHES: [&str; 3] = ["--dev", "--runtime", "--finish-only"];
 
 /// A subcommand's flags: each `--name value`, and the bare switches.
 struct Flags {
@@ -154,8 +165,10 @@ impl Flags {
 }
 
 /// Runs `profile <sub> …` or `hold-profile …`; `args` follow the binary's
-/// name.
-pub fn run(mut args: impl Iterator<Item = OsString>) -> Exit {
+/// name. `entry` is how the process's entry went (fc-service's
+/// `clean_entry`, run before anything else).
+pub fn run(mut args: impl Iterator<Item = OsString>, entry: &fc_service::confine::Entry) -> Exit {
+    confine::log_entry(entry);
     let command = args.next().and_then(|c| c.into_string().ok());
     let result = match command.as_deref() {
         Some("hold-profile") => hold_profile(args),
@@ -166,6 +179,7 @@ pub fn run(mut args: impl Iterator<Item = OsString>) -> Exit {
                 Some("status") => status(args),
                 Some("delete") => delete::run(args),
                 Some(sub @ ("forget-list" | "forget-done")) => forget::run(sub, args),
+                Some("migrate") => migrate::run(args),
                 Some(
                     sub @ ("list" | "create" | "rename" | "import" | "update-nodes"
                     | "reserved-ports"),
@@ -275,9 +289,17 @@ fn prepare_app_root(app_root: &Path) -> Result<(), Exit> {
     }
 }
 
-/// Takes the catalog's write lock, and clears the temp files a killed
-/// writer left.
+/// Takes and keeps the catalog's write lock, and clears the temp files a
+/// killed writer left.
 fn catalog_lock(app_root: &Path) -> Result<Lock, Exit> {
+    let lock = take_catalog_lock(app_root)?;
+    keep(&lock)?;
+    Ok(lock)
+}
+
+/// [`catalog_lock`] without the refresher: [`keep`] starts it, once the run
+/// is confined.
+fn take_catalog_lock(app_root: &Path) -> Result<Lock, Exit> {
     let lock = match Lock::catalog(app_root, &now_iso()) {
         Ok(lock) => lock,
         Err(lock::LockError::Held) => return Err(busy()),
@@ -289,8 +311,34 @@ fn catalog_lock(app_root: &Path) -> Result<Lock, Exit> {
             serde_json::json!({ "error": e.kind().to_string() }),
         );
     }
-    crate::testhooks::profile_hold();
     Ok(lock)
+}
+
+/// Starts the lock's refresher, after confinement.
+fn keep(lock: &Lock) -> Result<(), Exit> {
+    match lock.keep() {
+        Ok(()) => {
+            crate::testhooks::profile_hold();
+            Ok(())
+        }
+        Err(lock::LockError::Held) => Err(busy()),
+        Err(lock::LockError::Io(e)) => Err(storage("io", &e.kind().to_string())),
+    }
+}
+
+/// Confines the run to `grant`, then takes and keeps the catalog's write
+/// lock: a writing subcommand without gates.
+fn confined_catalog_lock(app_root: &Path, grant: Grant) -> Result<Lock, Exit> {
+    confine::confine(grant)?;
+    catalog_lock(app_root)
+}
+
+/// `dir`, when it lies outside `app_root`: a directory main names that the
+/// app root's grant doesn't cover.
+fn outside(app_root: &Path, dir: &Path) -> Option<PathBuf> {
+    let canonical = |p: &Path| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_owned());
+    let (root, dir) = (canonical(app_root), canonical(dir));
+    (!dir.starts_with(&root)).then_some(dir)
 }
 
 /// Whether a profile reads open: its lock fresh, or its profile gate held
@@ -302,13 +350,22 @@ struct Openness {
 }
 
 impl Openness {
-    fn of(user_data_dir: &Path, lock_dir: &Path, dev: bool) -> Openness {
+    /// `gates` is whether the lock directory was there before the run
+    /// confined itself: without it no gate is held, and nothing is asked
+    /// (confined, a path outside the grant may not even read as missing).
+    fn of(user_data_dir: &Path, lock_dir: &Path, dev: bool, gates: bool) -> Openness {
         let (stale_ms, _) = fc_profile::lock::profile_lock_timing(dev);
         let lock_fresh = lock::is_fresh(
             &user_data_dir.join(fc_profile::PROFILE_LOCK_TARGET),
             &user_data_dir.join(fc_profile::PROFILE_LOCK_DIR),
             stale_ms,
         );
+        if !gates {
+            return Openness {
+                lock_fresh,
+                gate_held: false,
+            };
+        }
         let gate_held = match fc_service::gate::probe(user_data_dir, lock_dir, PROFILE_NAMESPACE) {
             Ok(held) => held,
             Err(e) => {
@@ -376,8 +433,20 @@ fn open_profile(app_root: &str, lock_dir: &Path, opts: &Options, args: &OpenArgs
     if let Err(exit) = prepare_app_root(root) {
         return exit;
     }
+    // The app root, the gates' probes in the lock directory, and a default
+    // profile directory main names outside the app root.
+    let mut grant = Grant::locking().read_write(root).read_only(lock_dir);
+    if let Some(dir) = opts
+        .default_profile_dir
+        .as_deref()
+        .filter(|dir| !dir.is_empty())
+        .and_then(|dir| outside(root, Path::new(dir)))
+    {
+        grant = grant.read_write(&dir);
+    }
     let now = now_iso();
-    let lock = match catalog_lock(root) {
+    let gates = lock_dir.is_dir();
+    let lock = match confined_catalog_lock(root, grant) {
         Ok(lock) => lock,
         Err(exit) => return exit,
     };
@@ -387,7 +456,8 @@ fn open_profile(app_root: &str, lock_dir: &Path, opts: &Options, args: &OpenArgs
         Err(e) => return storage("io", &e.kind().to_string()),
     };
     let dev = opts.dev;
-    let mut is_open = |_id: &str, dir: &str| Openness::of(Path::new(dir), lock_dir, dev).open();
+    let mut is_open =
+        |_id: &str, dir: &str| Openness::of(Path::new(dir), lock_dir, dev, gates).open();
     let outcome = fc_profile::open(&mut store, app_root, opts, args, &now, &mut is_open);
     let forget = forget_pending(&mut store, app_root);
     drop(lock);
@@ -402,7 +472,7 @@ fn open_profile(app_root: &str, lock_dir: &Path, opts: &Options, args: &OpenArgs
         Err(error) => return failed(&error),
     };
     let dir = Path::new(&opened.user_data_dir);
-    let openness = Openness::of(dir, lock_dir, dev);
+    let openness = Openness::of(dir, lock_dir, dev, gates);
     let mut out = object(vec![
         ("outcome", JsValue::string("opened")),
         ("id", opened.id.clone()),
@@ -456,10 +526,23 @@ fn status(args: impl Iterator<Item = OsString>) -> Result<Exit, ()> {
         return Err(());
     }
     let dev = flags.has("--dev");
+    // Each profile's lock and the gates' probes, read only. A directory
+    // that isn't there before confinement holds no gate.
+    let mut grant = Grant::none().read_only(&lock_dir);
+    let gates = lock_dir.is_dir();
+    let mut present = Vec::with_capacity(dirs.len());
+    for dir in &dirs {
+        grant = grant.read_only(Path::new(dir));
+        present.push(Path::new(dir).is_dir());
+    }
+    if let Err(exit) = confine::confine(grant) {
+        return Ok(exit);
+    }
     let answers = dirs
         .iter()
-        .map(|dir| {
-            let openness = Openness::of(Path::new(dir), &lock_dir, dev);
+        .zip(present)
+        .map(|(dir, present)| {
+            let openness = Openness::of(Path::new(dir), &lock_dir, dev, gates && present);
             object(vec![
                 ("user_data_dir", JsValue::string(*dir)),
                 ("open", JsValue::Bool(openness.open())),
@@ -501,6 +584,15 @@ fn catalog(sub: &str, args: impl Iterator<Item = OsString>) -> Result<Exit, ()> 
     let opts = flags.options()?;
     let style = opts.style;
     let writes = !matches!(sub, "list" | "reserved-ports");
+    // `update-nodes` writes `profile.json` in the directory main names,
+    // which may lie outside the app root.
+    let extra = match sub {
+        "update-nodes" => flags
+            .path("--user-data-dir")
+            .ok()
+            .and_then(|dir| outside(Path::new(&app_root), Path::new(dir))),
+        _ => None,
+    };
     // Every argument checked before anything is touched.
     let operation: Operation = match sub {
         "list" => {
@@ -556,13 +648,17 @@ fn catalog(sub: &str, args: impl Iterator<Item = OsString>) -> Result<Exit, ()> 
             })
         }
     };
-    Ok(run_catalog(&app_root, writes, operation))
+    Ok(run_catalog(&app_root, writes, extra.as_deref(), operation))
 }
 
-fn run_catalog(app_root: &str, writes: bool, operation: Operation) -> Exit {
+fn run_catalog(app_root: &str, writes: bool, extra: Option<&Path>, operation: Operation) -> Exit {
     let root = Path::new(app_root);
     let now = now_iso();
     if !writes {
+        // The reads take no lock, and change nothing.
+        if let Err(exit) = confine::confine(Grant::none().read_only(root)) {
+            return exit;
+        }
         let commit = || false;
         let mut store = match DiskStore::open(app_root, &commit) {
             Ok(store) => store,
@@ -576,7 +672,11 @@ fn run_catalog(app_root: &str, writes: bool, operation: Operation) -> Exit {
     if let Err(exit) = prepare_app_root(root) {
         return exit;
     }
-    let lock = match catalog_lock(root) {
+    let mut grant = Grant::locking().read_write(root);
+    if let Some(dir) = extra {
+        grant = grant.read_write(dir);
+    }
+    let lock = match confined_catalog_lock(root, grant) {
         Ok(lock) => lock,
         Err(exit) => return exit,
     };
@@ -645,6 +745,11 @@ fn hold(user_data_dir: &Path, lock_dir: &Path, listed: Option<(String, String)>)
             }
             Err(error) => return failed(&error),
         }
+    }
+    // From here, stdin, stdout and the gate alone: no file, no network, no
+    // process.
+    if let Err(exit) = confine::confine(Grant::none().descriptors(gate.descriptors())) {
+        return exit;
     }
     let mut stdout = std::io::stdout().lock();
     if stdout

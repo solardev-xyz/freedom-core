@@ -20,6 +20,10 @@ pub enum Exit {
     LockHeld,
     /// Protocol violation or handshake failure.
     Protocol,
+    /// A profile subcommand's confinement refused the process (design
+    /// 0010's `Invalid`): a thread or a descriptor it can't confine, or
+    /// rules the OS refused halfway.
+    Confinement,
 }
 
 impl Exit {
@@ -32,6 +36,7 @@ impl Exit {
             Exit::Storage => 74,
             Exit::LockHeld => 75,
             Exit::Protocol => 76,
+            Exit::Confinement => 77,
         }
     }
 }

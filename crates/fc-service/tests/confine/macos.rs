@@ -288,6 +288,7 @@ fn policy(p: &Paths, network: Network, descriptors: Vec<i32>) -> Policy {
         resolver: confine::Resolver::System,
         descriptors,
         interface_index: false,
+        times: false,
     }
 }
 
