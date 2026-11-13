@@ -467,6 +467,13 @@ fn create_lock_dir(lock_dir: &Path, canonical_data: &Path) -> std::io::Result<()
         .strip_prefix(&existing)
         .map_err(std::io::Error::other)?
         .to_path_buf();
+    let mut builder = std::fs::DirBuilder::new();
+    builder.recursive(false);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        builder.mode(0o700);
+    }
     let mut dir = existing;
     for name in missing.components() {
         dir.push(name);
@@ -475,12 +482,6 @@ fn create_lock_dir(lock_dir: &Path, canonical_data: &Path) -> std::io::Result<()
                 std::io::ErrorKind::NotFound,
                 "the data directory would be made through its lock directory",
             ));
-        }
-        let mut builder = std::fs::DirBuilder::new();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::DirBuilderExt;
-            builder.mode(0o700);
         }
         match builder.create(&dir) {
             Ok(()) => {}
