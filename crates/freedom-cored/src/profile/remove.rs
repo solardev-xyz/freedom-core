@@ -227,8 +227,8 @@ pub struct Place {
 /// A gated directory to check: its names below the data root, what it
 /// holds (`identity data`, `IPFS data`), and whether a regular file at its
 /// name is the move's placeholder (design 0013, "The move", step 4: the
-/// root's `identity` while a move's journal is pending), which is gated at
-/// its path and goes as a file. Anything else that isn't a directory there
+/// root's `identity` once a move has begun), which is gated at its path and
+/// goes as a file. Anything else that isn't a directory there
 /// is refused.
 pub struct Gated<'a> {
     pub names: &'a [&'a str],

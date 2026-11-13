@@ -13,8 +13,9 @@
 //!    (`Profile is currently open: …`).
 //! 2. **The target's gates, each tried once:** its profile gate, the core's
 //!    identity gate (`identity`) and freedom-ipfsd's (`ipfs-data/
-//!    freedom-ipfs`) in the Freedom root the profile's layout names, and,
-//!    for a profile with a slot, freedom-radicled's on its Radicle home.
+//!    freedom-ipfs`) in each Freedom root the profile's layout calls for,
+//!    and, for a profile with a slot, freedom-radicled's on its Radicle
+//!    home.
 //!    Any one held refuses the delete with `lock_held` (exit 75) before
 //!    anything changes, whatever the profile lock's age: a live profile
 //!    whose main has stalled holds its profile gate. A missing directory is
@@ -24,11 +25,13 @@
 //!      profile gate is held: a move, and its recovery, hold that gate for
 //!      their whole run, so the layout can't change under the delete. The
 //!      root layout's directories are `<data root>/identity` and
-//!      `<data root>/ipfs-data/freedom-ipfs`; the moved layout's, the same
-//!      below `<data root>/freedom/`; while a move's journal is pending,
-//!      before its marker or after it, both, the root's first. There the
-//!      root's `identity` may be the move's placeholder file, gated at its
-//!      path and removed as a file.
+//!      `<data root>/ipfs-data/freedom-ipfs`. Once a move has begun (its
+//!      journal pending, before its marker or after it, or the marker
+//!      there), the same below `<data root>/freedom/` too, the root's
+//!      first: the root's stay gated, since a build from before the reader
+//!      release, run after a downgrade, starts its services there. The
+//!      root's `identity` is then the move's placeholder file, or may be:
+//!      gated at its path, and removed as a file.
 //! 3. **Confinement** (`confine.rs`): read-write on the app root and, in a
 //!    dev build, the `R/` root of the Radicle homes beside it, with the
 //!    gates' descriptors; no network, no process. The plan was read before
@@ -185,21 +188,21 @@ impl GatedDir {
 }
 
 /// The directories gated for `layout`: [`SERVICE_DIRS`] in each Freedom
-/// root it names (the root layout's, the moved one's, or, while a journal
-/// is pending, both).
+/// root it calls for (`Layout::gated_roots`: the root's, and once a move
+/// has begun, `freedom/`'s too).
 fn gated_dirs(layout: Layout) -> Vec<GatedDir> {
     let mut dirs = Vec::new();
-    for root in layout.freedom_roots() {
+    for root in layout.gated_roots() {
         for (which, names, what) in SERVICE_DIRS {
             dirs.push(GatedDir {
                 which,
                 names: root.iter().chain(names).copied().collect(),
                 what,
                 // The move's step 4 leaves a file at the root's
-                // `identity`, before the marker, and the journal is removed
-                // only after it: while one is pending, a regular file there
-                // is the placeholder.
-                placeholder: layout == Layout::Pending && root.is_empty() && names == [PLACEHOLDER],
+                // `identity`, before the marker, and nothing removes it
+                // after: once a move has begun, a regular file there is the
+                // placeholder.
+                placeholder: layout != Layout::Root && root.is_empty() && names == [PLACEHOLDER],
             });
         }
     }
@@ -207,8 +210,8 @@ fn gated_dirs(layout: Layout) -> Vec<GatedDir> {
 }
 
 /// The gates, in order: the profile gate, then, with the layout read under
-/// it, the core's and freedom-ipfsd's in each Freedom root it names, then
-/// freedom-radicled's. Returns them and the gated directories.
+/// it, the core's and freedom-ipfsd's in each Freedom root it calls for,
+/// then freedom-radicled's. Returns them and the gated directories.
 fn gates(
     plan: &Deletion,
     lock_dir: &Path,

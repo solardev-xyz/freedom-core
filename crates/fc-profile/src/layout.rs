@@ -119,15 +119,17 @@ impl Layout {
         }
     }
 
-    /// The Freedom roots a reader may find the profile's Freedom-owned
-    /// entries in, as names below the profile's directory: the directory
-    /// itself (no name), `freedom/`, or, while a journal is pending, both,
-    /// the root's first.
-    pub fn freedom_roots(self) -> &'static [&'static [&'static str]] {
+    /// The Freedom roots a delete gates the core's and freedom-ipfsd's
+    /// directories in, as names below the profile's directory: the
+    /// directory itself (no name) and, once a move has begun (a journal
+    /// pending, or the marker there), `freedom/` too, the root's first. The
+    /// root stays gated after the move: a build from before the reader
+    /// release, run after a downgrade, looks for its stores at the root and
+    /// starts its services there (0013, "Readers, and the downgrade").
+    pub fn gated_roots(self) -> &'static [&'static [&'static str]] {
         match self {
             Layout::Root => &[&[]],
-            Layout::Freedom => &[&[FREEDOM_DIR]],
-            Layout::Pending => &[&[], &[FREEDOM_DIR]],
+            Layout::Freedom | Layout::Pending => &[&[], &[FREEDOM_DIR]],
         }
     }
 }
@@ -361,9 +363,10 @@ mod tests {
             ["root", "freedom", "pending"]
         );
         let empty: &[&str] = &[];
-        assert_eq!(Layout::Root.freedom_roots(), [empty]);
-        assert_eq!(Layout::Freedom.freedom_roots(), [[FREEDOM_DIR]]);
-        assert_eq!(Layout::Pending.freedom_roots(), [empty, &[FREEDOM_DIR]]);
+        assert_eq!(Layout::Root.gated_roots(), [empty]);
+        for moved in [Layout::Freedom, Layout::Pending] {
+            assert_eq!(moved.gated_roots(), [empty, &[FREEDOM_DIR]]);
+        }
     }
 
     #[test]

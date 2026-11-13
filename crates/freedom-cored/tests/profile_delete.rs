@@ -489,12 +489,15 @@ fn assert_deleted(d: &Dirs, work: &Path, ids: &[String]) {
 /// **The stale-lease case in the moved layout** (0013, "Readers, and the
 /// downgrade"): with `freedom/layout.json` there, the core's and
 /// freedom-ipfsd's gates are taken on `freedom/identity` and
-/// `freedom/ipfs-data/freedom-ipfs`, so with the profile's lock backdated
-/// 31 s a holder of either (or of the profile gate) refuses the delete,
-/// with nothing changed. With none held, the profile goes, `freedom/` and
-/// the placeholder with it.
+/// `freedom/ipfs-data/freedom-ipfs`, and on the root's `identity` (the
+/// placeholder, gated at its path) and `ipfs-data/freedom-ipfs` too, where
+/// a downgraded build's freedom-ipfsd runs, whether that directory is there
+/// or missing. With the profile's lock backdated 31 s, a holder of any one
+/// (or of the profile gate) refuses the delete, with nothing changed. With
+/// none held, the profile goes, `freedom/`, the placeholder and the root's
+/// IPFS data with it.
 #[test]
-fn in_the_moved_layout_the_moved_directories_are_gated() {
+fn in_the_moved_layout_both_layouts_paths_are_gated() {
     let d = dirs();
     let ids = [hex('a'), hex('b')];
     let (work, _) = setup(&d, &ids);
@@ -503,7 +506,9 @@ fn in_the_moved_layout_the_moved_directories_are_gated() {
     std::fs::write(work.join("freedom").join("layout.json"), MARKER).unwrap();
     profile_lock(&work, Duration::from_secs(31));
     let freedom = work.join("freedom");
-    assert_each_refuses(&d, &["profile", "core", "ipfs"], &|label| match label {
+    let root_ipfs = work.join("ipfs-data").join("freedom-ipfs");
+    let labels = ["profile", "core", "ipfs", "core, root", "ipfs, root"];
+    let hold = |label: &str| match label {
         "profile" => (
             "profile",
             Hold::Child(holder(&[
@@ -528,7 +533,7 @@ fn in_the_moved_layout_the_moved_directories_are_gated() {
                 s(&d.locks),
             ])),
         ),
-        _ => (
+        "ipfs" => (
             "ipfs",
             Hold::Gate(
                 fc_service::gate::acquire(
@@ -540,6 +545,29 @@ fn in_the_moved_layout_the_moved_directories_are_gated() {
                 .unwrap(),
             ),
         ),
+        "core, root" => (
+            "core",
+            Hold::File(hold_named(&d.locks, None, &work.join("identity"))),
+        ),
+        // Missing at first: gated at the path it would have.
+        _ => (
+            "ipfs",
+            Hold::File(hold_named(&d.locks, Some("ipfs"), &root_ipfs)),
+        ),
+    };
+    assert!(std::fs::metadata(work.join("identity")).unwrap().is_file());
+    assert!(!work.join("ipfs-data").exists());
+    assert_each_refuses(&d, &labels, &hold);
+    // A downgraded build's freedom-ipfsd, holding its gate at the root.
+    std::fs::create_dir_all(root_ipfs.join("blocks")).unwrap();
+    std::fs::write(root_ipfs.join("blocks").join("c"), "c").unwrap();
+    assert_each_refuses(&d, &["ipfs, root (there)"], &|_| {
+        (
+            "ipfs",
+            Hold::Gate(
+                fc_service::gate::acquire(&root_ipfs, &d.locks, "ipfs", Duration::ZERO).unwrap(),
+            ),
+        )
     });
     assert_deleted(&d, &work, &ids);
 }
