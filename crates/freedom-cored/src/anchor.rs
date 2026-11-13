@@ -195,6 +195,18 @@ impl Dir {
     pub fn sync(&self) -> io::Result<()> {
         imp::sync(self)
     }
+
+    /// This directory again, as a handle of its own (Unix: the descriptor
+    /// duplicated).
+    pub fn try_clone(&self) -> io::Result<Dir> {
+        imp::try_clone(self)
+    }
+
+    /// The names of the directories in this one, not following a symlink
+    /// (one is no directory), read from its handle on Unix.
+    pub fn subdirs(&self) -> io::Result<Vec<OsString>> {
+        imp::subdirs(self)
+    }
 }
 
 #[cfg(unix)]
@@ -506,6 +518,16 @@ mod imp {
         rustix::fs::fsync(&dir.fd)?;
         Ok(())
     }
+
+    pub fn subdirs(dir: &Dir) -> io::Result<Vec<std::ffi::OsString>> {
+        let mut names = Vec::new();
+        for name in entries(&dir.fd)? {
+            if kind(dir, &name)? == Kind::Dir {
+                names.push(name);
+            }
+        }
+        Ok(names)
+    }
 }
 
 #[cfg(not(unix))]
@@ -671,6 +693,19 @@ mod imp {
 
     pub fn sync(_dir: &Dir) -> io::Result<()> {
         Ok(())
+    }
+
+    /// By path, each entry judged without following it: std's `is_dir` is
+    /// false for a symlink and a junction.
+    pub fn subdirs(dir: &Dir) -> io::Result<Vec<std::ffi::OsString>> {
+        let mut names = Vec::new();
+        for entry in std::fs::read_dir(&dir.path)? {
+            let entry = entry?;
+            if entry.file_type()?.is_dir() {
+                names.push(entry.file_name());
+            }
+        }
+        Ok(names)
     }
 }
 

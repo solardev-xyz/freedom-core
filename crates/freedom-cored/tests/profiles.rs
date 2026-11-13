@@ -455,6 +455,217 @@ fn a_long_holder_refreshes_the_lock() {
     assert!(!lock.exists());
 }
 
+/// A run that loses the catalog's write lock changes nothing, and leaves no
+/// directory behind to refuse the next run (review of #336): `profile open`
+/// of a new profile, held under the lock while another holder takes it
+/// over, exits `lock_lost` with no `Profiles/<id>`, and a retry opens it.
+#[test]
+fn a_run_that_lost_the_lock_leaves_no_directory() {
+    let d = dirs();
+    assert_eq!(code(&open(&d, &[])), 0);
+    let catalog = std::fs::read(d.app.join("profile-registry.json")).unwrap();
+    let lock = d.app.join("profile-registry.write.lock");
+    let marker = d.app.join("held");
+    let release = d.app.join("release");
+    let holder = Command::new(BIN)
+        .args([
+            "profile",
+            "open",
+            "--app-root",
+            s(&d.app),
+            "--lock-dir",
+            s(&d.locks),
+            "--profile",
+            "lost",
+        ])
+        .env(
+            "FREEDOM_CORED_TEST_PROFILE_HOLD",
+            format!("{}={}", marker.display(), release.display()),
+        )
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    wait_for(&marker);
+    // Another holder's takeover, as the refresher sees it: the mtime isn't
+    // the one it set. At its first refresh, 10 s after the lock was taken,
+    // it finds the lock lost and sets the mtime no more.
+    backdate(&lock, Duration::from_secs(60));
+    let taken_over = std::fs::metadata(&lock).unwrap().modified().unwrap();
+    std::thread::sleep(Duration::from_millis(11_500));
+    assert_eq!(
+        std::fs::metadata(&lock).unwrap().modified().unwrap(),
+        taken_over,
+        "the refresher found the lock lost"
+    );
+    std::fs::write(&release, "").unwrap();
+    let out = holder.wait_with_output().unwrap();
+    assert_eq!(code(&out), 74, "{out:?}");
+    assert_eq!(json(&out)["error"], "lock_lost");
+    let lost = d.app.join("Profiles").join("lost");
+    assert!(!lost.exists(), "a directory made under a lost lock");
+    assert_eq!(
+        std::fs::read(d.app.join("profile-registry.json")).unwrap(),
+        catalog
+    );
+    assert!(lock.exists(), "a lost lock is the new holder's to remove");
+
+    // The other holder lets go; a retry registers and makes the profile.
+    std::fs::remove_dir(&lock).unwrap();
+    let out = open(&d, &["--profile", "lost"]);
+    assert_eq!(code(&out), 0, "{out:?}");
+    assert_eq!(json(&out)["id"], "lost");
+    assert!(lost.join("profile.json").exists());
+}
+
+/// A directory symlink at `link` to `target`; on Windows a junction, which
+/// needs no privilege, and which the core refuses as it does a symlink.
+fn dir_link(target: &Path, link: &Path) {
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(target, link).unwrap();
+    #[cfg(windows)]
+    {
+        let status = Command::new("cmd")
+            .arg("/C")
+            .arg("mklink")
+            .arg("/J")
+            .arg(link)
+            .arg(target)
+            .stdout(Stdio::null())
+            .status()
+            .unwrap();
+        assert!(status.success(), "mklink /J");
+    }
+}
+
+/// Every file in `dir` and below, with its contents.
+fn snapshot(dir: &Path) -> Vec<(PathBuf, Vec<u8>)> {
+    let mut out = Vec::new();
+    let mut stack = vec![dir.to_path_buf()];
+    while let Some(at) = stack.pop() {
+        for entry in std::fs::read_dir(&at).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                stack.push(path);
+            } else {
+                let bytes = std::fs::read(&path).unwrap();
+                out.push((path, bytes));
+            }
+        }
+    }
+    out.sort();
+    out
+}
+
+/// A symlinked profile directory takes no read or write to its target
+/// (review of #336): `Profiles/alias`, a link to another profile's
+/// directory, is refused by `import`, `open`, `create` and `update-nodes`
+/// (exit 74, `symlink`), and neither the target nor the catalog changes.
+/// `profile list` leaves it out, as before.
+#[test]
+fn a_symlinked_profile_directory_is_refused() {
+    let d = dirs();
+    let app = s(&d.app);
+    assert_eq!(code(&open(&d, &[])), 0);
+    let out = run(&[
+        "profile",
+        "create",
+        "--app-root",
+        app,
+        "--display-name",
+        "Victim",
+    ]);
+    assert_eq!(code(&out), 0, "{out:?}");
+    let profiles = d.app.join("Profiles");
+    let victim = profiles.join("victim");
+    let alias = profiles.join("alias");
+    dir_link(&victim, &alias);
+    let before = (snapshot(&victim), snapshot(&d.app));
+    let refusals = [
+        run(&["profile", "import", "--app-root", app, "--id", "alias"]),
+        open(&d, &["--profile", "alias"]),
+        run(&[
+            "profile",
+            "create",
+            "--app-root",
+            app,
+            "--display-name",
+            "Alias",
+        ]),
+        run(&[
+            "profile",
+            "update-nodes",
+            "--app-root",
+            app,
+            "--id",
+            "alias",
+            "--user-data-dir",
+            s(&alias),
+            "--protocol",
+            "bee",
+            "--updates",
+            r#"{"mode":"disabled"}"#,
+            "--metadata",
+            "{}",
+        ]),
+    ];
+    for out in &refusals {
+        assert_eq!(code(out), 74, "{out:?}");
+        assert_eq!(json(out)["error"], "symlink", "{out:?}");
+    }
+    assert_eq!((snapshot(&victim), snapshot(&d.app)), before);
+    let listed = json(&run(&["profile", "list", "--app-root", app]));
+    let ids: Vec<&str> = listed
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|p| p["id"].as_str().unwrap())
+        .collect();
+    assert_eq!(ids, ["default", "victim"]);
+}
+
+/// The app root's `Profiles` entry itself a symlink to elsewhere: a new
+/// profile is refused (exit 74, `symlink`) and nothing is made there
+/// (review of #336).
+#[test]
+fn a_symlinked_profiles_directory_is_refused() {
+    let d = dirs();
+    let app = s(&d.app);
+    assert_eq!(code(&open(&d, &[])), 0);
+    let profiles = d.app.join("Profiles");
+    assert!(
+        !profiles.exists(),
+        "the packaged default lives at the app root"
+    );
+    let elsewhere = d.app.parent().unwrap().join("elsewhere");
+    std::fs::create_dir(&elsewhere).unwrap();
+    dir_link(&elsewhere, &profiles);
+    let catalog = std::fs::read(d.app.join("profile-registry.json")).unwrap();
+    let refusals = [
+        open(&d, &["--profile", "work"]),
+        run(&[
+            "profile",
+            "create",
+            "--app-root",
+            app,
+            "--display-name",
+            "Work",
+        ]),
+        run(&["profile", "list", "--app-root", app]),
+    ];
+    for out in &refusals {
+        assert_eq!(code(out), 74, "{out:?}");
+        assert_eq!(json(out)["error"], "symlink", "{out:?}");
+    }
+    assert_eq!(std::fs::read_dir(&elsewhere).unwrap().count(), 0);
+    assert_eq!(
+        std::fs::read(d.app.join("profile-registry.json")).unwrap(),
+        catalog
+    );
+    // The default profile, at the app root itself, still opens.
+    assert_eq!(code(&open(&d, &[])), 0);
+}
+
 fn wait_for(path: &Path) {
     let until = Instant::now() + Duration::from_secs(30);
     while !path.exists() {
