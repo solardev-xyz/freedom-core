@@ -239,7 +239,10 @@ fn run_locked(app_root: &str, list: bool, done: &[String]) -> Exit {
         Err(exit) => return exit,
     };
     let held = || lock.held();
-    let mut store = DiskStore { commit: &held };
+    let mut store = match DiskStore::open(app_root, &held) {
+        Ok(store) => store,
+        Err(e) => return storage("io", &e.kind().to_string()),
+    };
     let result = if list {
         list_items(&mut store, app_root, &held)
     } else {

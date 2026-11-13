@@ -161,7 +161,10 @@ fn delete(app_root: &str, lock_dir: &Path, opts: &Options, id: &str, confirm: &s
         Err(exit) => return exit,
     };
     let held = || lock.held();
-    let mut store = DiskStore { commit: &held };
+    let mut store = match DiskStore::open(app_root, &held) {
+        Ok(store) => store,
+        Err(e) => return storage("io", &e.kind().to_string()),
+    };
     let result = delete_locked(&mut store, app_root, lock_dir, opts, id, confirm, &held);
     if result.is_ok() {
         step("before-result");
