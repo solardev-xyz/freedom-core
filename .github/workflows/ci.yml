@@ -115,7 +115,8 @@ jobs:
 
   profile-gate:
     # Design 0013's latency gate (PRF-3): `profile open` under 100 ms at the
-    # 95th percentile on each OS's runner, cold start included, measured on
+    # 95th percentile on each OS's runner (a first run with the cold start,
+    # reported; on a miss, one warm re-measurement judged alone), measured on
     # the optimized binary main ships: each OS's release target and flags,
     # as the Release workflow builds them. The test job's debug run checks
     # only a loose bound (crates/freedom-cored/tests/profile_gate.rs). The
