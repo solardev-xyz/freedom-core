@@ -596,7 +596,7 @@ fn it_acts_only_on_a_profiles_own_directory() {
     let work = app.join("Profiles").join("work");
     let catalog = |extra: &str| {
         format!(
-            r#"{{"version":1,"profiles":[{{"id":"default","dir":{:?}}},{{"id":"work","dir":{:?}}}{extra}]}}"#,
+            r#"{{"version":1,"profiles":[{{"id":"default","dir":{:?},"slot":0}},{{"id":"work","dir":{:?},"slot":1}}{extra}]}}"#,
             s(&app),
             s(&work)
         )
@@ -622,6 +622,25 @@ fn it_acts_only_on_a_profiles_own_directory() {
         assert!(said(&out).contains("overlap"), "{out:?}");
         assert_eq!(snapshot(&app), before);
         std::fs::remove_dir_all(dir.join("freedom")).unwrap();
+    }
+    // Another record at the profile's directory, in another case (one
+    // directory on macOS and Windows), or sharing its Radicle slot.
+    for extra in [
+        format!(
+            r#",{{"id":"twin","dir":{:?}}}"#,
+            s(&app.join("Profiles").join("WORK"))
+        ),
+        format!(
+            r#",{{"id":"other","dir":{:?},"slot":1}}"#,
+            s(&app.join("Profiles").join("other"))
+        ),
+    ] {
+        write(&app.join("profile-registry.json"), &catalog(&extra));
+        let before = snapshot(&app);
+        let out = migrate_env(&work, &d.locks, &[], &[]);
+        assert_eq!(code(&out), 74, "{extra}: {out:?}");
+        assert!(said(&out).contains("overlap"), "{out:?}");
+        assert_eq!(snapshot(&app), before);
     }
     // A catalog it can't read proves nothing.
     write(&app.join("profile-registry.json"), "{");

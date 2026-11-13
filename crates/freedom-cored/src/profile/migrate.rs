@@ -10,14 +10,15 @@
 //! Starting a move is PRF-9's: without `--finish-only` the arguments are
 //! refused (64).
 //!
-//! 1. **Where it may act:** by a delete's overlap rule
-//!    (`fc_profile::delete::overlaps`, against every catalog at or above
+//! 1. **Where it may act:** by a delete's rules (`fc_profile::delete`'s
+//!    `overlaps`, `fold` and `home_slot`, against every catalog at or above
 //!    the profile's directory), the directory is no shared entry of the app
 //!    root (`Profiles`, `R`, `locks`, …, or inside one but the profiles
 //!    root), and is neither at, above nor inside another record's
-//!    directory. The packaged default profile's, the app root itself, holds
-//!    no other record among its entries but the shared ones. Refused with
-//!    `overlap` (74) before anything is taken. Below it, it acts on the
+//!    directory; the packaged default profile's, the app root itself, holds
+//!    no other record among its entries but the shared ones; and its record
+//!    shares its Radicle slot with no other. Refused with `overlap` (74)
+//!    before anything is taken. Below it, it acts on the
 //!    journal's names alone, each one of `fc_profile::layout`'s list, which
 //!    holds no shared entry of the app root.
 //! 2. **The move's own exclusion,** for the whole run, each held by another
@@ -222,15 +223,22 @@ fn take_profile_lock(canonical: &Path, dev: bool) -> Result<Lock, Exit> {
     }
 }
 
-/// Why the profile's directory isn't one the move may act on: by a
-/// delete's rule (`fc_profile::delete::overlaps`), against each catalog at
-/// or above it, the directory is the profiles root or another shared entry
-/// of the app root (or inside one but the profiles root), or at, above or
-/// inside another record's directory; for the packaged default profile, the
-/// app root, another record among its entries but the shared ones. A
+/// Why the profile's directory isn't one the move may act on, by a
+/// delete's rules against each catalog at or above it:
+/// - **overlap** (`fc_profile::delete::overlaps`): the directory is the
+///   profiles root or another shared entry of the app root (or inside one
+///   but the profiles root), or at, above or inside another record's
+///   directory; for the packaged default profile, the app root, another
+///   record among its entries but the shared ones;
+/// - **a shared slot** (`home_slot`): the profile's record has a Radicle
+///   slot another record has too.
+///
+/// Names compare through `fc_profile::delete::fold`, so a record naming
+/// this directory in another spelling or case is the profile's own. A
 /// directory under no catalog is checked against none. `Err` for a catalog
 /// that can't be read: nothing proves the directory overlaps nothing.
 fn overlap(canonical: &Path) -> Result<Option<String>, Exit> {
+    use fc_profile::delete::{fold, home_slot};
     let style = fc_profile::Style::native();
     for app_root in canonical.ancestors() {
         let catalog = app_root.join(fc_profile::PROFILE_REGISTRY_FILE);
@@ -245,17 +253,35 @@ fn overlap(canonical: &Path) -> Result<Option<String>, Exit> {
         };
         let records = read_records(&catalog)
             .ok_or_else(|| storage("unreadable", fc_profile::PROFILE_REGISTRY_FILE))?;
-        // Every other record's directory, resolved; those naming this very
-        // directory are the profile's own.
-        let others: Vec<String> = records
-            .iter()
-            .filter_map(|dir| {
-                let resolved = std::fs::canonicalize(dir)
-                    .or_else(|_| std::path::absolute(dir))
-                    .ok()?;
-                (resolved != canonical).then(|| resolved.to_string_lossy().into_owned())
-            })
-            .collect();
+        let target_key = fold(target);
+        // Each record's directory, resolved, and whether it is this one.
+        let mut own_slots = Vec::new();
+        let mut others = Vec::new();
+        let mut other_slots = Vec::new();
+        for record in &records {
+            let resolved = record
+                .get("dir")
+                .and_then(fc_json::JsValue::as_str)
+                .and_then(|dir| {
+                    std::fs::canonicalize(dir)
+                        .or_else(|_| std::path::absolute(dir))
+                        .ok()
+                })
+                .map(|path| path.to_string_lossy().into_owned());
+            let slot = home_slot(record);
+            match resolved {
+                Some(dir) if fold(&dir) == target_key => own_slots.extend(slot),
+                Some(dir) => {
+                    others.push(dir);
+                    other_slots.extend(slot);
+                }
+                None => other_slots.extend(slot),
+            }
+        }
+        // Two records at this one directory: another record's directory.
+        if own_slots.len() > 1 || records_at(&records, &target_key) > 1 {
+            return Ok(Some("another record names this directory too".to_owned()));
+        }
         let shares_app_root = app_root == canonical;
         if fc_profile::delete::overlaps(style, app, target, shares_app_root, &others) {
             return Ok(Some(format!(
@@ -267,13 +293,32 @@ fn overlap(canonical: &Path) -> Result<Option<String>, Exit> {
                 }
             )));
         }
+        if own_slots.iter().any(|slot| other_slots.contains(slot)) {
+            return Ok(Some(
+                "the profile's Radicle slot is another profile's too".to_owned(),
+            ));
+        }
     }
     Ok(None)
 }
 
-/// The directories a catalog's records name, or `None` for a catalog that
-/// can't be read or isn't one.
-fn read_records(catalog: &Path) -> Option<Vec<String>> {
+/// How many records name the directory whose folded path is `key`.
+fn records_at(records: &[fc_json::JsValue], key: &str) -> usize {
+    records
+        .iter()
+        .filter_map(|record| record.get("dir").and_then(fc_json::JsValue::as_str))
+        .filter_map(|dir| {
+            std::fs::canonicalize(dir)
+                .or_else(|_| std::path::absolute(dir))
+                .ok()
+        })
+        .filter(|path| fc_profile::delete::fold(&path.to_string_lossy()) == key)
+        .count()
+}
+
+/// A catalog's records, or `None` for a catalog that can't be read or
+/// isn't one.
+fn read_records(catalog: &Path) -> Option<Vec<fc_json::JsValue>> {
     let file = std::fs::File::open(catalog).ok()?;
     let mut text = String::new();
     file.take(super::store::MAX_FILE + 1)
@@ -283,14 +328,7 @@ fn read_records(catalog: &Path) -> Option<Vec<String>> {
         return None;
     }
     let parsed = fc_json::parse(&text).ok()?;
-    let records = parsed.get("profiles")?.as_array()?;
-    Some(
-        records
-            .iter()
-            .filter_map(|record| record.get("dir").and_then(fc_json::JsValue::as_str))
-            .map(str::to_owned)
-            .collect(),
-    )
+    Some(parsed.get("profiles")?.as_array()?.to_vec())
 }
 
 fn migrate(profile_dir: &Path, lock_dir: &Path, dev: bool) -> Exit {
