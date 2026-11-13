@@ -47,6 +47,6 @@ jobs:
       - name: Sandbox log
         if: always()
         run: |
-          log show --last 10m --style compact --predicate 'sender == "Sandbox"' | grep -i 'deny' | sed -e 's/^.*Sandbox: //' | sort | uniq -c | head -200 || true
-          echo ---- kernel
-          log show --last 10m --style compact --predicate 'eventMessage CONTAINS "deny(1)"' | sed -e 's/^.*Sandbox: //' | sort | uniq -c | head -200 || true
+          log show --last 10m --style compact --predicate 'sender == "Sandbox"' | grep -i 'python' | grep 'T/tmp\.' | sed -e 's/^.*Sandbox: //' -e 's/([0-9]*)//' | sort | uniq -c | head -100 || true
+          echo ---- any process, the temp path
+          log show --last 10m --style compact --predicate 'eventMessage CONTAINS "T/tmp."' | sed -e 's/^.*Sandbox: //' | sort | uniq -c | head -100 || true
