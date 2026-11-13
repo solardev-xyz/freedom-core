@@ -561,6 +561,16 @@ impl From<libradicle::Error> for Failure {
                 Failure::Refused(Refused::TooLarge { size, limit })
             }
             libradicle::Error::Cancelled => Failure::Refused(Refused::Cancelled),
+            // The node's reactor didn't answer within the read's deadline
+            // left, which is its bound (#340, `crate::node`).
+            libradicle::Error::NodeDeadline { .. } => Failure::Refused(Refused::Deadline),
+            // Not sent: as many calls already wait on the node's reactor as
+            // may. A reactor that answers none of them answers this read in
+            // no time either: `deadline` at once, with libradicle's text,
+            // which names the call and how many wait.
+            error @ libradicle::Error::NodeBusy { .. } => {
+                Failure::Answered(ErrorBody::new(ErrorCode::Deadline, error.to_string()))
+            }
             error => Failure::Radicle(error),
         }
     }
