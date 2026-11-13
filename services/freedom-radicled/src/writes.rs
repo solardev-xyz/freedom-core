@@ -15,10 +15,14 @@
 //! The COB writes take the node shared: libradicle's calls take `&self`.
 //!
 //! **`rad.unseed { rid }`** answers `{ unseeded }`, with the node held
-//! exclusively, as libradicle's `unseed_repo` takes `&mut self`. It is
-//! refused neither under a throwaway key, since seeding works on any
+//! exclusively, as libradicle's `unseed_repo_within` takes `&mut self`. It
+//! is refused neither under a throwaway key, since seeding works on any
 //! profile, nor for a quarantined repository: unseeding changes the
-//! policy, not the record (0008, "The escape").
+//! policy, not the record (0008, "The escape"). It waits for the node's
+//! reactor up to its deadline left, and lets go of the node then (#340,
+//! [`crate::node`]): libradicle's `NodeDeadline` is `outcome_unknown`, as
+//! the reactor may still carry it out, and its `NodeBusy`, with nothing
+//! sent, `deadline`, proven: the policy is as it was.
 //!
 //! **Before the mutation-start boundary, each refusal is definitive,** in
 //! this order, and nothing ran:
@@ -63,6 +67,7 @@
 use std::path::Path;
 use std::str::FromStr as _;
 use std::sync::Arc;
+use std::time::Instant;
 
 use fc_protocol::error::{ErrorBody, ErrorCode};
 use fc_service::conn::Connection;
@@ -437,13 +442,30 @@ pub fn unseed(
             return;
         }
         testhooks::at_write_start();
-        let called = embedded.unseed_repo(rid);
+        // The node's reactor is waited for up to the deadline left (#340):
+        // the node is let go of at it, whatever the reactor does.
+        let called = {
+            let _call = handle.waiting_call("unseed");
+            let within = ticket.deadline.saturating_duration_since(Instant::now());
+            embedded.unseed_repo_within(rid, within)
+        };
         testhooks::at_write_call_end();
         match called {
             Ok(unseeded) => {
                 ticket.proven();
                 let _ = conn.reply(ticket.id, &json!({ "unseeded": unseeded }));
             }
+            // Not sent: nothing of the unseed reached the node, so its
+            // policy is as it was, and the answer is definitive.
+            Err(e @ libradicle::Error::NodeBusy { .. }) => {
+                ticket.proven();
+                let _ = conn.reply_error(
+                    ticket.id,
+                    &ErrorBody::new(ErrorCode::Deadline, e.to_string()),
+                );
+            }
+            // `NodeDeadline` among them: sent, and the node may still carry
+            // it out.
             Err(e) => failed_past_start(&conn, ticket.id, "unseed", rid, &e),
         }
         testhooks::at_write_end();
