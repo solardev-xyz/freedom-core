@@ -588,19 +588,25 @@ fn a_kill_at_each_step_is_finished_by_the_next_run() {
 fn it_acts_only_on_a_profiles_own_directory() {
     let d = dirs();
     let app = d.base.join("app");
-    write(
-        &app.join("profile-registry.json"),
-        r#"{"version":1,"profiles":[]}"#,
-    );
     let work = app.join("Profiles").join("work");
+    let catalog = |extra: &str| {
+        format!(
+            r#"{{"version":1,"profiles":[{{"id":"default","dir":{:?}}},{{"id":"work","dir":{:?}}}{extra}]}}"#,
+            s(&app),
+            s(&work)
+        )
+    };
+    write(&app.join("profile-registry.json"), &catalog(""));
     cut_short(&work);
-    // `Profiles` itself, the Radicle homes, the lock directory, and a
-    // directory inside another profile: refused before anything is taken.
+    // By a delete's overlap rule: `Profiles` itself, the Radicle homes, the
+    // lock directory, a directory inside another profile's, and one among
+    // the default profile's entries: refused before anything is taken.
     for dir in [
         app.join("Profiles"),
         app.join("R"),
         app.join("locks"),
         work.join("identity-sub"),
+        app.join("loose"),
     ] {
         std::fs::create_dir_all(&dir).unwrap();
         journal(&dir, &["settings.json"]);
@@ -612,8 +618,16 @@ fn it_acts_only_on_a_profiles_own_directory() {
         assert_eq!(snapshot(&app), before);
         std::fs::remove_dir_all(dir.join("freedom")).unwrap();
     }
+    // A catalog it can't read proves nothing.
+    write(&app.join("profile-registry.json"), "{");
+    let out = migrate_env(&work, &d.locks, &[], &[]);
+    assert_eq!(
+        (code(&out), said(&out)),
+        (74, r#"{"error":"unreadable"}"#.into())
+    );
     // A profile's own directory, and the app root itself (the packaged
     // default profile, whose directory holds every other).
+    write(&app.join("profile-registry.json"), &catalog(""));
     let out = migrate_env(&work, &d.locks, &[], &[]);
     assert_eq!(said(&out), "rolled_back", "{out:?}");
     assert_old_layout(&work);
@@ -623,4 +637,19 @@ fn it_acts_only_on_a_profiles_own_directory() {
     assert_old_layout(&app);
     assert!(app.join("profile-registry.json").is_file());
     assert!(work.join("identity").join("vault.json").is_file());
+    // Not while another record lies among the app root's own entries.
+    let loose = app.join("loose");
+    write(
+        &app.join("profile-registry.json"),
+        &catalog(&format!(r#",{{"id":"loose","dir":{:?}}}"#, s(&loose))),
+    );
+    for moved in ["identity", "ipfs-data", "ant-data"] {
+        std::fs::remove_dir_all(app.join(moved)).unwrap();
+    }
+    cut_short(&app);
+    let before = snapshot(&app);
+    let out = migrate_env(&app, &app.join("locks"), &[], &[]);
+    assert_eq!(code(&out), 74, "{out:?}");
+    assert!(said(&out).contains("overlap"), "{out:?}");
+    assert_eq!(snapshot(&app), before);
 }

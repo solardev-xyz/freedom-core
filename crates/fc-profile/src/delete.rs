@@ -231,7 +231,10 @@ fn removes_overlap(app: &[Name<'_>], a: &Removes<'_>, b: &Removes<'_>) -> bool {
 ///
 /// Names are compared as [`Name`] has them, so a case or a trailing dot
 /// that names the same directory on macOS or Windows doesn't get past.
-fn overlaps(
+///
+/// `profile migrate --finish-only`, which acts on a profile's directory
+/// too, refuses by the same rule (design 0013, "The move").
+pub fn overlaps(
     style: Style,
     app: &str,
     target: &str,

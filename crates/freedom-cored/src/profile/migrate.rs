@@ -10,13 +10,16 @@
 //! Starting a move is PRF-9's: without `--finish-only` the arguments are
 //! refused (64).
 //!
-//! 1. **Where it may act:** the profile's directory is no shared root and
-//!    lies inside no other profile. Below a directory holding a catalog (an
-//!    app root), it is that app root (the packaged default profile) or a
-//!    profile's own `Profiles/<id>`, and nothing else: not `Profiles`, `R`
-//!    or `locks`, and nothing inside another profile. Below it, it acts on
-//!    the journal's names alone, each one of `fc_profile::layout`'s list,
-//!    which holds no shared entry of the app root.
+//! 1. **Where it may act:** by a delete's overlap rule
+//!    (`fc_profile::delete::overlaps`, against every catalog at or above
+//!    the profile's directory), the directory is no shared entry of the app
+//!    root (`Profiles`, `R`, `locks`, …, or inside one but the profiles
+//!    root), and is neither at, above nor inside another record's
+//!    directory. The packaged default profile's, the app root itself, holds
+//!    no other record among its entries but the shared ones. Refused with
+//!    `overlap` (74) before anything is taken. Below it, it acts on the
+//!    journal's names alone, each one of `fc_profile::layout`'s list, which
+//!    holds no shared entry of the app root.
 //! 2. **The move's own exclusion,** for the whole run, each held by another
 //!    process ending it with `busy` (75) and nothing changed:
 //!    - the profile gate first, so a new build sees the profile open;
@@ -219,27 +222,75 @@ fn take_profile_lock(canonical: &Path, dev: bool) -> Result<Lock, Exit> {
     }
 }
 
-/// Why the profile's directory isn't one the move may act on: inside a
-/// directory that holds a catalog (an app root), only that app root itself
-/// or a profile's own `Profiles/<id>` is.
-fn overlap(canonical: &Path) -> Option<String> {
-    for app_root in canonical.ancestors().skip(1) {
+/// Why the profile's directory isn't one the move may act on: by a
+/// delete's rule (`fc_profile::delete::overlaps`), against each catalog at
+/// or above it, the directory is the profiles root or another shared entry
+/// of the app root (or inside one but the profiles root), or at, above or
+/// inside another record's directory; for the packaged default profile, the
+/// app root, another record among its entries but the shared ones. A
+/// directory under no catalog is checked against none. `Err` for a catalog
+/// that can't be read: nothing proves the directory overlaps nothing.
+fn overlap(canonical: &Path) -> Result<Option<String>, Exit> {
+    let style = fc_profile::Style::native();
+    for app_root in canonical.ancestors() {
         let catalog = app_root.join(fc_profile::PROFILE_REGISTRY_FILE);
         if !std::fs::symlink_metadata(&catalog).is_ok_and(|m| m.is_file()) {
             continue;
         }
-        let below: Vec<&OsStr> = canonical
-            .strip_prefix(app_root)
-            .map(|rest| rest.iter().collect())
-            .unwrap_or_default();
-        if !(below.len() == 2 && below[0] == OsStr::new(fc_profile::PROFILES_DIR)) {
-            return Some(format!(
-                "{} below an app root, which is no profile's own directory",
-                below.len()
+        let (Some(app), Some(target)) = (app_root.to_str(), canonical.to_str()) else {
+            return Err(storage(
+                "overlap",
+                "a path that isn't text below an app root",
             ));
+        };
+        let records = read_records(&catalog)
+            .ok_or_else(|| storage("unreadable", fc_profile::PROFILE_REGISTRY_FILE))?;
+        // Every other record's directory, resolved; those naming this very
+        // directory are the profile's own.
+        let others: Vec<String> = records
+            .iter()
+            .filter_map(|dir| {
+                let resolved = std::fs::canonicalize(dir)
+                    .or_else(|_| std::path::absolute(dir))
+                    .ok()?;
+                (resolved != canonical).then(|| resolved.to_string_lossy().into_owned())
+            })
+            .collect();
+        let shares_app_root = app_root == canonical;
+        if fc_profile::delete::overlaps(style, app, target, shares_app_root, &others) {
+            return Ok(Some(format!(
+                "the profile's directory overlaps another profile's or the app's own data ({})",
+                if shares_app_root {
+                    "the app root"
+                } else {
+                    "below an app root"
+                }
+            )));
         }
     }
-    None
+    Ok(None)
+}
+
+/// The directories a catalog's records name, or `None` for a catalog that
+/// can't be read or isn't one.
+fn read_records(catalog: &Path) -> Option<Vec<String>> {
+    let file = std::fs::File::open(catalog).ok()?;
+    let mut text = String::new();
+    file.take(super::store::MAX_FILE + 1)
+        .read_to_string(&mut text)
+        .ok()?;
+    if text.len() as u64 > super::store::MAX_FILE {
+        return None;
+    }
+    let parsed = fc_json::parse(&text).ok()?;
+    let records = parsed.get("profiles")?.as_array()?;
+    Some(
+        records
+            .iter()
+            .filter_map(|record| record.get("dir").and_then(fc_json::JsValue::as_str))
+            .map(str::to_owned)
+            .collect(),
+    )
 }
 
 fn migrate(profile_dir: &Path, lock_dir: &Path, dev: bool) -> Exit {
@@ -252,8 +303,10 @@ fn migrate(profile_dir: &Path, lock_dir: &Path, dev: bool) -> Exit {
     if !canonical.is_dir() {
         return storage("io", "the profile's directory isn't a directory");
     }
-    if let Some(why) = overlap(&canonical) {
-        return storage("overlap", &why);
+    match overlap(&canonical) {
+        Ok(None) => {}
+        Ok(Some(why)) => return storage("overlap", &why),
+        Err(exit) => return exit,
     }
     // The move's exclusion, in its order.
     let mut gates = match take(Which::Profile, &canonical, lock_dir) {
