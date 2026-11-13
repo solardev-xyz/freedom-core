@@ -113,6 +113,44 @@ jobs:
       - run: python3 scripts/stdio-only.py cargo test --locked --workspace --all-features
         if: runner.os != 'Windows'
 
+  profile-gate:
+    # Design 0013's latency gate (PRF-3): `profile open` under 100 ms at the
+    # 95th percentile on each OS's runner, cold start included, measured on
+    # the optimized binary main ships: each OS's release target and flags,
+    # as the Release workflow builds them. The test job's debug run checks
+    # only a loose bound (crates/freedom-cored/tests/profile_gate.rs).
+    name: profile gate (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-latest, target: x86_64-unknown-linux-musl }
+          - { os: macos-latest, target: aarch64-apple-darwin }
+          - { os: windows-latest, target: x86_64-pc-windows-msvc }
+    runs-on: ${{ matrix.os }}
+    env:
+      # As the Release workflow links Windows: the C runtime statically.
+      RUSTFLAGS: ${{ contains(matrix.target, 'windows') && '-C target-feature=+crt-static' || '' }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - name: Toolchain
+        shell: bash
+        run: |
+          rustup toolchain install
+          rustup target add ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      # This test alone, so nothing else runs beside the spawns it times. On
+      # Linux and macOS with stdio alone, as main spawns the core: the runner
+      # leaks a pipe into each step, which the subcommands' confinement
+      # (design 0013, 0010) refuses once it lands.
+      - name: profile open, optimized
+        shell: bash
+        run: |
+          gate="cargo test --locked --release -p freedom-cored --target ${{ matrix.target }} --test profile_gate -- --nocapture"
+          if [ "$RUNNER_OS" = Windows ]; then $gate; else python3 scripts/stdio-only.py $gate; fi
+
   confine-aarch64:
     # Confinement's seccomp filters name syscalls by number, which differ on
     # AArch64 (design 0010, "Linux"): its tests run there too.
