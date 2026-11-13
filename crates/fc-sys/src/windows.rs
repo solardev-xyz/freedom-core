@@ -112,6 +112,54 @@ pub fn file_index(file: BorrowedHandle<'_>) -> io::Result<(u64, u128)> {
     ))
 }
 
+/// Whether a path component, in UTF-16, is one Win32 paths read as
+/// something other than the directory entry it spells, which `NtCreateFile`
+/// would still make as spelled:
+///
+/// - **A DOS device:** `CON`, `PRN`, `AUX`, `NUL`, `CONIN$`, `CONOUT$`,
+///   `COM0`–`COM9` and `LPT0`–`LPT9`, and `COM`/`LPT` with a superscript
+///   `¹`, `²` or `³`, in any case, alone or before an extension, and with
+///   spaces before that extension (`NUL.txt`, `con .log`).
+/// - **A name ending in a space or a period,** which Win32 strips.
+fn win32_reserved(wide: &[u16]) -> bool {
+    if matches!(wide.last(), Some(0x20 | 0x2e)) {
+        return true;
+    }
+    let end = wide
+        .iter()
+        .position(|&unit| unit == 0x2e)
+        .unwrap_or(wide.len());
+    let mut base = &wide[..end];
+    while let [rest @ .., 0x20] = base {
+        base = rest;
+    }
+    let upper: Vec<u16> = base
+        .iter()
+        .map(|&unit| {
+            if (0x61..=0x7a).contains(&unit) {
+                unit - 0x20
+            } else {
+                unit
+            }
+        })
+        .collect();
+    let spells = |text: &str| text.encode_utf16().eq(upper.iter().copied());
+    if ["CON", "PRN", "AUX", "NUL", "CONIN$", "CONOUT$"]
+        .into_iter()
+        .any(spells)
+    {
+        return true;
+    }
+    if let &[a, b, c, digit] = upper.as_slice() {
+        let prefix = [a, b, c];
+        let port = "COM".encode_utf16().eq(prefix) || "LPT".encode_utf16().eq(prefix);
+        // `0`–`9`, `¹`, `²` and `³`.
+        let digit = (0x30..=0x39).contains(&digit) || matches!(digit, 0xb9 | 0xb2 | 0xb3);
+        return port && digit;
+    }
+    false
+}
+
 /// The size of `OBJECT_ATTRIBUTES`, its `Length`.
 const OBJECT_ATTRIBUTES_SIZE: u32 = size_of::<OBJECT_ATTRIBUTES>() as u32;
 const _: () = assert!(size_of::<OBJECT_ATTRIBUTES>() <= u32::MAX as usize);
@@ -130,14 +178,20 @@ const _: () = assert!(size_of::<OBJECT_ATTRIBUTES>() <= u32::MAX as usize);
 ///   without security attributes does.
 /// - **The handle** lists the directory and reads its attributes, and shares
 ///   reading, writing and deletion, as std's opens do.
-/// - **`name`** must be one plain component: not empty, not `.` or `..`, and
-///   without a separator, a stream's `:` or a NUL (`InvalidInput`).
+/// - **`name`** must be one plain component: not empty, not `.` or `..`,
+///   without a separator, a stream's `:` or a NUL, and not a name Win32
+///   paths would read as something else ([`win32_reserved`]), so that a
+///   path ending in it names the directory made (`InvalidInput`).
 #[allow(unsafe_code)]
 pub fn open_dir_at(parent: BorrowedHandle<'_>, name: &OsStr) -> io::Result<OwnedHandle> {
     let mut wide: Vec<u16> = name.encode_wide().collect();
     // NUL, `/`, `:` and `\`.
     let separator = |unit: &u16| matches!(*unit, 0x00 | 0x2f | 0x3a | 0x5c);
-    let plain = !wide.is_empty() && name != "." && name != ".." && !wide.iter().any(separator);
+    let plain = !wide.is_empty()
+        && name != "."
+        && name != ".."
+        && !wide.iter().any(separator)
+        && !win32_reserved(&wide);
     let bytes = wide
         .len()
         .checked_mul(2)
@@ -570,9 +624,37 @@ mod tests {
         let junction = open_dir_at(parent.as_handle(), OsStr::new("junction")).unwrap();
         assert_ne!(attributes(junction) & FILE_ATTRIBUTE_REPARSE_POINT, 0);
         assert_eq!(std::fs::read_dir(&target).unwrap().count(), 0);
-        for name in ["", ".", "..", "a\\b", "a/b", "a:b"] {
+        for name in [
+            "",
+            ".",
+            "..",
+            "a\\b",
+            "a/b",
+            "a:b",
+            "CON",
+            "con",
+            "Nul.txt",
+            "aux .log",
+            "PRN",
+            "COM1",
+            "lpt9.log",
+            "COM\u{b9}",
+            "lpt\u{b3}",
+            "COM0",
+            "CONIN$",
+            "conout$.x",
+            "name.",
+            "name ",
+            "NUL ",
+        ] {
             let refused = open_dir_at(parent.as_handle(), OsStr::new(name)).unwrap_err();
             assert_eq!(refused.kind(), io::ErrorKind::InvalidInput, "{name:?}");
+        }
+        // Names that only look like a device are made, and a path ending in
+        // one names the directory made.
+        for name in ["COM10", "console", "nul-x", "LPT", "a.CON", ".nul"] {
+            open_dir_at(parent.as_handle(), OsStr::new(name)).unwrap();
+            assert!(moved.join(name).is_dir(), "{name:?}");
         }
         drop(parent);
         std::fs::remove_dir_all(&moved).unwrap();

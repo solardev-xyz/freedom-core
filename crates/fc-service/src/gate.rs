@@ -451,9 +451,9 @@ fn create_private_dir(dir: &Path) -> std::io::Result<()> {
 
 /// Makes a missing lock directory and its missing ancestors, private to the
 /// user on Unix (`0700`, less the umask) as [`create_private_dir`] does, but
-/// anchored: nothing is made through a link, or through a parent replaced
-/// since its path resolved, and never the data directory (`data_dir`,
-/// resolved to `canonical_data`) or one of its ancestors.
+/// anchored: nothing is made through a link, nothing through a parent
+/// renamed or replaced once the anchor is open, and never the data directory
+/// (`data_dir`, resolved to `canonical_data`) or one of its ancestors.
 ///
 /// - **Never the data directory:** a missing name at the data directory's
 ///   path or above it is refused (`NotFound`) before anything is opened, so
@@ -467,7 +467,11 @@ fn create_private_dir(dir: &Path) -> std::io::Result<()> {
 ///   as it did (else [`GateError::Moved`]: one replaced by a link since it
 ///   resolved makes nothing at the link's target through a lock directory
 ///   inside it); the lock directory's path still leads where it did; and the
-///   anchor's canonical path still names the directory opened.
+///   anchor's canonical path still names the directory opened. A plain
+///   directory put at the anchor's path before it is opened is the one
+///   that path names, so it is anchored as such: the lock directory is
+///   made at its planned path, as if the swap had come before the plan,
+///   never through a link and never at the data directory or above.
 /// - **One name at a time, relative to its parent's handle:** each missing
 ///   name is made (`mkdirat`; on Windows `NtCreateFile`) and opened, without
 ///   following a link at it, in the directory opened before it, never by a
