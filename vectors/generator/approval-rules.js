@@ -19,6 +19,7 @@
 
 const assert = require('node:assert/strict');
 const { loadWithInternals } = require('./naming');
+const { buildDecisions, DECISIONS_FORMAT } = require('./approval-decisions');
 
 // The vault's clock, in milliseconds.
 const T0 = 5_000_000;
@@ -286,10 +287,10 @@ function buildFees(checkout) {
   return { evidence, judged };
 }
 
-function buildRules(checkout) {
-  return { limiter: buildLimiter(checkout), fees: buildFees(checkout) };
+async function buildRules(checkout) {
+  return { limiter: buildLimiter(checkout), fees: buildFees(checkout), decisions: await buildDecisions(checkout) };
 }
 
-const RULES_FORMAT = 'The R-6 limiter (`limiter`): its `limits`, and `runs` of `admit` and `forget` for a `key` under the limiter\'s own clock (`at`, the vault\'s, in milliseconds), each with its `result`; Q9\'s rate reuses it, one bucket per key and request class. The fee check (`fees`): `evidence`, a `chain.fee_reference` `reply` read at `requestedAt` (`readEvidence`, its BigInts as decimal strings) and its `reference` (`referenceFee` at `wallNow` and `monotonicNow`, or null); `judged`, a transaction\'s fee fields (`tx`) judged against a `reference` (or none) by `judgeFees`, with its `verdict`.';
+const RULES_FORMAT = 'The R-6 limiter (`limiter`): its `limits`, and `runs` of `admit` and `forget` for a `key` under the limiter\'s own clock (`at`, the vault\'s, in milliseconds), each with its `result`; Q9\'s rate reuses it, one bucket per key and request class. The fee check (`fees`): `evidence`, a `chain.fee_reference` `reply` read at `requestedAt` (`readEvidence`, its BigInts as decimal strings) and its `reference` (`referenceFee` at `wallNow` and `monotonicNow`, or null); `judged`, a transaction\'s fee fields (`tx`) judged against a `reference` (or none) by `judgeFees`, with its `verdict`. The standing rules\' decisions (`decisions`): ' + DECISIONS_FORMAT;
 
 module.exports = { buildRules, RULES_FORMAT };
