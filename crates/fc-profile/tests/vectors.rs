@@ -124,6 +124,7 @@ struct Step {
     protocol: Option<String>,
     metadata: Option<String>,
     updates: Option<String>,
+    confirm: Option<String>,
     result: Value,
     files: BTreeMap<String, String>,
     dirs: Vec<String>,
@@ -429,6 +430,23 @@ fn run(memory: &mut Memory, scenario: &Scenario, step: &Step) -> Value {
             Style::Posix,
             step.active.as_deref(),
         )),
+        "delete-validate" => {
+            let id = step.id.as_deref().unwrap();
+            let confirm = step.confirm.as_deref().unwrap();
+            let validated =
+                fc_profile::validate_deletion(memory, &app_root, Style::Posix, id, confirm);
+            // The delete itself checks the same, under the catalog's lock.
+            let planned = fc_profile::plan_deletion(memory, &app_root, &opts, id, confirm);
+            assert_eq!(
+                validated.clone().err(),
+                planned.err(),
+                "{id}: the delete's own checks"
+            );
+            match validated {
+                Ok(()) => serde_json::json!({ "value": "valid" }),
+                Err(error) => classified(&error),
+            }
+        }
         other => panic!("unknown step {other}"),
     }
 }

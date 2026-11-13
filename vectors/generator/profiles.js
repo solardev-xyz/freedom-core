@@ -19,7 +19,9 @@
 // - scenarios: the reference's own operations (`resolveProfile`,
 //   `createProfile`, `renameProfile`, `importProfile`,
 //   `updateProfileNodeConfig`, `getReservedManagedPorts`,
-//   `listProfileSummaries`) run in order on one app root on disk under a
+//   `listProfileSummaries`, and `validateProfileDeletion`, the delete's
+//   refusals, as `delete-validate`, whose value is `valid` where it throws
+//   nothing) run in order on one app root on disk under a
 //   fixed clock, each step's result (or refusal) and every file's text after
 //   it. The app root lives in a temp directory, whose path is written
 //   `/vectors` throughout, so the core replays it at that path.
@@ -312,6 +314,10 @@ function runStep(modules, scenario, appRoot, step) {
       return JSON.stringify([...catalog.getReservedManagedPorts(appRoot, { ...options, excludeProfileId: step.exclude })]);
     case 'list':
       return JSON.stringify(catalog.listProfileSummaries(appRoot, { activeProfileId: step.active }));
+    case 'delete-validate':
+      // Returns nothing; what it decides is whether it throws, and with what.
+      catalog.validateProfileDeletion(appRoot, step.id, step.confirm);
+      return 'valid';
     default:
       throw new Error(`unknown step ${step.op}`);
   }
@@ -528,6 +534,100 @@ function scenarios(modules) {
       },
       dirs: [],
       steps: [{ op: 'open', args: {}, now: at(1) }, { op: 'list' }, { op: 'rename', id: 'default', displayName: 'Mine' }],
+    },
+    {
+      id: 'delete-validate',
+      dev: false,
+      files: {
+        'app/profile-registry.json': catalogText([
+          { id: 'default', displayName: 'My Profile', dir: `${ROOT}/app`, slot: 0 },
+          { id: 'work', displayName: 'Work', dir: `${ROOT}/app/Profiles/work`, slot: 1 },
+          { id: 'nameless', dir: `${ROOT}/app/Profiles/nameless`, slot: 2 },
+          { id: 'blank', displayName: '', dir: `${ROOT}/app/Profiles/blank`, slot: 3 },
+          { id: 'numbered', displayName: 5, dir: `${ROOT}/app/Profiles/numbered`, slot: 4 },
+          { id: 'outside', displayName: 'Outside', dir: `${ROOT}/elsewhere/outside`, slot: 5 },
+          { id: 'root', displayName: 'Root', dir: `${ROOT}/app`, slot: 6 },
+          { id: 'sibling', displayName: 'Sibling', dir: `${ROOT}/app-other`, slot: 7 },
+          { id: 'dotdot', displayName: 'Dot Dot', dir: `${ROOT}/app/Profiles/../../dotdot`, slot: 8 },
+          { id: 'trailing', displayName: 'Trailing', dir: `${ROOT}/app/Profiles/trailing/`, slot: 9 },
+          { id: 'nodir', displayName: 'No Dir', dir: 42, slot: 10 },
+          { id: 'profiles', displayName: 'Profiles', dir: `${ROOT}/app/Profiles`, slot: 11 },
+        ]),
+      },
+      dirs: [],
+      steps: [
+        { op: 'delete-validate', id: 'work', confirm: 'Work' },
+        { op: 'delete-validate', id: '  WORK ', confirm: 'Work' },
+        { op: 'delete-validate', id: 'work', confirm: 'work' },
+        { op: 'delete-validate', id: 'work', confirm: 'Work ' },
+        { op: 'delete-validate', id: 'work', confirm: '' },
+        { op: 'delete-validate', id: 'missing', confirm: 'Missing' },
+        { op: 'delete-validate', id: '../work', confirm: 'Work' },
+        { op: 'delete-validate', id: '   ', confirm: '' },
+        { op: 'delete-validate', id: 'default', confirm: 'My Profile' },
+        { op: 'delete-validate', id: 'nameless', confirm: 'Nameless' },
+        { op: 'delete-validate', id: 'blank', confirm: '' },
+        { op: 'delete-validate', id: 'blank', confirm: 'Blank' },
+        { op: 'delete-validate', id: 'numbered', confirm: '5' },
+        { op: 'delete-validate', id: 'outside', confirm: 'Outside' },
+        { op: 'delete-validate', id: 'outside', confirm: 'wrong' },
+        { op: 'delete-validate', id: 'root', confirm: 'Root' },
+        { op: 'delete-validate', id: 'sibling', confirm: 'Sibling' },
+        { op: 'delete-validate', id: 'dotdot', confirm: 'Dot Dot' },
+        { op: 'delete-validate', id: 'trailing', confirm: 'Trailing' },
+        { op: 'delete-validate', id: 'nodir', confirm: 'No Dir' },
+        { op: 'delete-validate', id: 'profiles', confirm: 'Profiles' },
+      ],
+    },
+    {
+      id: 'delete-validate-last',
+      dev: false,
+      files: {
+        'app/profile-registry.json': catalogText([
+          { id: 'work', displayName: 'Work', dir: `${ROOT}/app/Profiles/work`, slot: 1 },
+        ]),
+      },
+      dirs: [],
+      steps: [
+        { op: 'delete-validate', id: 'work', confirm: 'Work' },
+        { op: 'delete-validate', id: 'work', confirm: 'nope' },
+        { op: 'delete-validate', id: 'missing', confirm: 'Missing' },
+      ],
+    },
+    {
+      id: 'delete-validate-no-catalog',
+      dev: false,
+      files: {},
+      dirs: [],
+      steps: [{ op: 'delete-validate', id: 'default', confirm: 'My Profile' }],
+    },
+    {
+      id: 'delete-validate-null-records',
+      dev: false,
+      files: {
+        'app/profile-registry.json': JSON.stringify({
+          version: 1,
+          profiles: [
+            5,
+            { id: 'a', displayName: 'A', dir: `${ROOT}/app/Profiles/a` },
+            null,
+            { id: 'b', displayName: 'B', dir: `${ROOT}/app/Profiles/b` },
+          ],
+        }),
+      },
+      dirs: [],
+      steps: [
+        { op: 'delete-validate', id: 'a', confirm: 'A' },
+        { op: 'delete-validate', id: 'b', confirm: 'B' },
+        { op: 'delete-validate', id: 'c', confirm: 'C' },
+      ],
+    },
+    {
+      id: 'delete-validate-unsupported',
+      dev: false,
+      files: { 'app/profile-registry.json': '{"version":2,"profiles":[]}' },
+      dirs: [],
+      steps: [{ op: 'delete-validate', id: 'work', confirm: 'Work' }],
     },
     {
       id: 'null-record',

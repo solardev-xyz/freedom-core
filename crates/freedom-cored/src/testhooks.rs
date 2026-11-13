@@ -57,6 +57,10 @@
 //!   `<marker>` once it has the lock, then waits, before it changes
 //!   anything, until the file `<release>` exists (at most 120 s). So a
 //!   test holds the lock as long as it needs.
+//! - `FREEDOM_CORED_TEST_PROFILE_DELETE_CRASH` names a step of `profile
+//!   delete` (`before-record`, `after-record`, `after-catalog`,
+//!   `mid-removal`, `before-result`): there the process exits at once with
+//!   99, as if killed, its locks and files left as they are.
 
 use std::time::Duration;
 
@@ -241,6 +245,16 @@ pub fn profile_hold() {
         hold(std::ffi::OsStr::new(release), || false);
     }
 }
+
+#[cfg(feature = "testhooks")]
+pub fn profile_delete_step(step: &str) {
+    if std::env::var("FREEDOM_CORED_TEST_PROFILE_DELETE_CRASH").is_ok_and(|s| s == step) {
+        std::process::exit(99);
+    }
+}
+
+#[cfg(not(feature = "testhooks"))]
+pub fn profile_delete_step(_step: &str) {}
 
 #[cfg(not(feature = "testhooks"))]
 pub fn profile_hold() {}
