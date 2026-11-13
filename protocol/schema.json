@@ -25,7 +25,7 @@
     { "name": "sign.transaction", "callers": ["page", "chrome", "shell"], "mutates": false, "deadline_ms": null },
     { "name": "sign.message", "callers": ["page", "chrome", "shell"], "mutates": false, "deadline_ms": null },
     { "name": "sign.typed_data", "callers": ["page", "chrome", "shell"], "mutates": false, "deadline_ms": null },
-    { "name": "swarm.sign_soc", "callers": ["chrome", "shell"], "mutates": false, "deadline_ms": null },
+    { "name": "swarm.sign_soc", "callers": ["page", "chrome", "shell"], "mutates": false, "deadline_ms": null },
     { "name": "typed_data.hash", "callers": ["chrome", "shell"], "mutates": false, "deadline_ms": null },
     { "name": "naming.configure", "callers": ["chrome", "shell"], "mutates": false, "deadline_ms": null },
     { "name": "naming.availability", "callers": ["chrome", "shell"], "mutates": false, "deadline_ms": null },

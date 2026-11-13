@@ -13,8 +13,10 @@
 //! `authorization` (design 0012, API): a token, a Safe approval or a
 //! standing rule, checked by [`crate::approvals`] once the public work is
 //! done and before the key is derived. A token is burnt however the
-//! request ends. Without one they sign as before (APR-3; APR-4 requires
-//! it). A `page` caller sends its `PageContext`.
+//! request ends. `swarm.sign_soc` takes a page's `{ swarm, soc }`, checked
+//! at the same point against the page's Swarm grant. Without one they sign
+//! as before (APR-3; APR-4 requires it). A `page` caller sends its
+//! `PageContext`.
 //!
 //! Typed data comes with the view of exactly what is signed (#88), which
 //! fc-evm writes as JSON text in the pass that hashes; the reply carries it
@@ -241,8 +243,15 @@ pub struct Checks<'a> {
     pub clocks: Clocks,
 }
 
-/// The methods that take an `authorization`.
-const AUTHORIZED: [&str; 3] = ["sign.transaction", "sign.message", "sign.typed_data"];
+/// The methods that take an `authorization`, and a page's `PageContext`.
+/// A token presented to any of them is burnt, `swarm.sign_soc`'s included,
+/// though no token kind binds a SOC.
+const AUTHORIZED: [&str; 4] = [
+    "sign.transaction",
+    "sign.message",
+    "sign.typed_data",
+    "swarm.sign_soc",
+];
 
 /// An account key's index.
 fn account_index(key: KeyRef) -> Result<u32, ErrorBody> {
@@ -403,7 +412,11 @@ fn other(
             Ok(json!({ "signature": to_hex(&signature) }))
         }
         "swarm.sign_soc" => {
-            let fields = object(params, &["key", "identifier", "payload"], &["span"])?;
+            let fields = object(
+                params,
+                &["key", "identifier", "payload"],
+                &["span", "authorization"],
+            )?;
             let key = key_ref(&fields["key"], Allowed::ChunkKeysOnly)?;
             let identifier: [u8; 32] = parse_bytes(string(fields, "identifier")?, "identifier")
                 .map_err(evm_error)?
@@ -421,6 +434,13 @@ fn other(
             };
             let prepared = fc_swarm::prepare_soc(&identifier, span, &payload)
                 .map_err(|e| invalid(e.to_string()))?;
+            // A page's SOC, against its Swarm grant (design 0012): after the
+            // public work, before the key.
+            if let Some(authorization) = fields.get("authorization") {
+                checks
+                    .approvals
+                    .authorize_soc(checks.context, authorization, checks.clocks)?;
+            }
             let (signature, owner) = {
                 // The key lives only for the signature and its address.
                 let derived = derive(state, key)?;
