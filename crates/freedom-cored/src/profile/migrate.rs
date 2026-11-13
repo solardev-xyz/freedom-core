@@ -55,7 +55,11 @@
 //!      empty: `rolled_back`;
 //!    - **after the marker,** every entry must be in `freedom/`; nothing at
 //!      the root is removed (see `fc_profile::layout::roll_forward`), and
-//!      the journal is removed: `migrated`.
+//!      the journal is removed: `migrated`;
+//!    - **either way,** an entry the journal names but found in no place
+//!      (not at the root, in `freedom/` or as its `.moving` copy) is
+//!      `corrupt`, with the journal kept: the journal lists the entries
+//!      present, and no step of the move removes every copy of one.
 //!
 //!    Before each change the profile lock must still be this run's: lost
 //!    (the run was frozen past the stale time and another build took it
@@ -235,15 +239,22 @@ fn take_profile_lock(canonical: &Path, dev: bool) -> Result<Lock, Exit> {
 ///
 /// Names compare through `fc_profile::delete::fold`, so a record naming
 /// this directory in another spelling or case is the profile's own. A
-/// directory under no catalog is checked against none. `Err` for a catalog
-/// that can't be read: nothing proves the directory overlaps nothing.
+/// directory under no catalog is checked against none, and only a missing
+/// catalog is none. `Err` (`unreadable`) for a catalog that can't be read,
+/// and for anything but a regular file at a catalog's name (a symlink, a
+/// directory, a name that can't be looked at): nothing proves the
+/// directory overlaps nothing.
 fn overlap(canonical: &Path) -> Result<Option<String>, Exit> {
     use fc_profile::delete::{fold, home_slot};
     let style = fc_profile::Style::native();
     for app_root in canonical.ancestors() {
         let catalog = app_root.join(fc_profile::PROFILE_REGISTRY_FILE);
-        if !std::fs::symlink_metadata(&catalog).is_ok_and(|m| m.is_file()) {
-            continue;
+        match std::fs::symlink_metadata(&catalog) {
+            Ok(meta) if meta.is_file() => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+            Ok(_) | Err(_) => {
+                return Err(storage("unreadable", fc_profile::PROFILE_REGISTRY_FILE));
+            }
         }
         let (Some(app), Some(target)) = (app_root.to_str(), canonical.to_str()) else {
             return Err(storage(

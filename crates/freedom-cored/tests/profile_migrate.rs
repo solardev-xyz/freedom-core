@@ -317,10 +317,7 @@ fn after_the_marker_it_rolls_forward_and_removes_nothing_at_the_root() {
     // names can't tell, so it stays for PRF-9's set-aside.
     write(&freedom.join("ant-data").join("config.yaml"), "ant");
     write(&d.profile.join("ant-data").join("config.yaml"), "ant");
-    journal(
-        &d.profile,
-        &["identity", "settings.json", "ant-data", "run"],
-    );
+    journal(&d.profile, &["identity", "settings.json", "ant-data"]);
     marker(&d.profile);
     let out = migrate(&d);
     assert_eq!((code(&out), said(&out)), (0, "migrated".into()), "{out:?}");
@@ -676,4 +673,121 @@ fn it_acts_only_on_a_profiles_own_directory() {
     assert_eq!(code(&out), 74, "{out:?}");
     assert!(said(&out).contains("overlap"), "{out:?}");
     assert_eq!(snapshot(&app), before);
+}
+
+#[test]
+fn a_journal_key_twice_is_corrupt_with_nothing_changed() {
+    // JavaScript keeps a duplicate key's last value; the journal's keys are
+    // exact, so neither of two is trusted, in either order.
+    const ALL: &str = r#"["settings.json","identity","ipfs-data","ant-data"]"#;
+    for text in [
+        format!(r#"{{"version":1,"entries":{ALL},"entries":[]}}"#),
+        format!(r#"{{"version":1,"entries":[],"entries":{ALL}}}"#),
+        format!(r#"{{"version":2,"entries":{ALL},"version":1}}"#),
+        format!(r#"{{"version":1,"entries":{ALL},"version":2}}"#),
+    ] {
+        let d = dirs();
+        cut_short(&d.profile);
+        write(&d.profile.join("freedom").join(".move.json"), &text);
+        let before = snapshot(&d.profile);
+        let out = migrate(&d);
+        assert_eq!(
+            (code(&out), said(&out)),
+            (74, "corrupt".into()),
+            "{text}: {out:?}"
+        );
+        assert_eq!(snapshot(&d.profile), before, "{text}");
+    }
+}
+
+/// A journal naming `tor-data`, which is in no place at all: `corrupt`,
+/// nothing changed, the journal kept. The journal lists only entries
+/// present, and no step of the move removes every copy of one.
+fn assert_in_no_place_is_corrupt(d: &Dirs) {
+    assert!(!d.profile.join("tor-data").exists());
+    let before = snapshot(&d.profile);
+    let out = migrate(d);
+    assert_eq!((code(&out), said(&out)), (74, "corrupt".into()), "{out:?}");
+    assert_eq!(snapshot(&d.profile), before);
+    assert!(d.profile.join("freedom").join(".move.json").is_file());
+}
+
+#[test]
+fn an_entry_in_no_place_is_corrupt_before_the_marker() {
+    let d = dirs();
+    cut_short(&d.profile);
+    journal(
+        &d.profile,
+        &[
+            "settings.json",
+            "identity",
+            "tor-data",
+            "ipfs-data",
+            "ant-data",
+        ],
+    );
+    assert_in_no_place_is_corrupt(&d);
+}
+
+#[test]
+fn an_entry_in_no_place_is_corrupt_after_the_marker() {
+    let d = dirs();
+    write(&d.profile.join("freedom").join("settings.json"), "{}");
+    journal(&d.profile, &["settings.json", "tor-data"]);
+    marker(&d.profile);
+    assert_in_no_place_is_corrupt(&d);
+}
+
+/// A profile inside an app root whose catalog, `catalog`, is made by
+/// `make`: `unreadable`, refused before anything is taken, with nothing
+/// changed. Only a missing catalog is none. With the catalog a regular
+/// file again, the same profile is recovered.
+fn assert_catalog_unreadable(make: impl FnOnce(&Path, &Path)) {
+    let d = dirs();
+    let app = d.base.join("app");
+    let work = app.join("Profiles").join("work");
+    let elsewhere = d.base.join("elsewhere.json");
+    write(
+        &elsewhere,
+        &format!(
+            r#"{{"version":1,"profiles":[{{"id":"work","dir":{:?},"slot":1}}]}}"#,
+            s(&work)
+        ),
+    );
+    cut_short(&work);
+    let catalog = app.join("profile-registry.json");
+    make(&catalog, &elsewhere);
+    let before = snapshot(&app);
+    let out = migrate_env(&work, &d.locks, &[], &[]);
+    assert_eq!(
+        (code(&out), said(&out)),
+        (74, r#"{"error":"unreadable"}"#.into()),
+        "{out:?}"
+    );
+    assert_eq!(snapshot(&app), before);
+    assert!(!work.join("profile-open.lock").exists());
+    assert!(!d.locks.exists(), "no gate taken");
+    if std::fs::symlink_metadata(&catalog).unwrap().is_dir() {
+        std::fs::remove_dir_all(&catalog).unwrap();
+    } else {
+        std::fs::remove_file(&catalog).unwrap();
+    }
+    std::fs::copy(&elsewhere, &catalog).unwrap();
+    let out = migrate_env(&work, &d.locks, &[], &[]);
+    assert_eq!(said(&out), "rolled_back", "{out:?}");
+    assert_old_layout(&work);
+}
+
+#[test]
+fn a_directory_at_the_catalogs_name_is_unreadable() {
+    assert_catalog_unreadable(|catalog, _| std::fs::create_dir_all(catalog.join("x")).unwrap());
+}
+
+#[cfg(unix)]
+#[test]
+fn a_symlink_at_the_catalogs_name_is_unreadable() {
+    // Even to a catalog that would allow the recovery.
+    assert_catalog_unreadable(|catalog, elsewhere| {
+        std::os::unix::fs::symlink(elsewhere, catalog).unwrap();
+    });
 }

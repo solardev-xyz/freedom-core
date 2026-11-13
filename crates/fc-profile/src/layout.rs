@@ -5,7 +5,10 @@
 //! the journal's entries; until then this takes the narrowest reading:
 //!
 //! - **The journal,** `freedom/.move.json`: `{ "version": 1, "entries":
-//!   [<name>, …] }` and nothing else, each name once, in the order moved.
+//!   [<name>, …] }` and nothing else, each key once and each name once,
+//!   in the order moved. The journal lists the entries present ("The
+//!   move", step 2), so an entry it names is somewhere: at the root, in
+//!   `freedom/`, or as its cross-device copy.
 //! - **A name** is one of [`MOVED_ENTRIES`], the table "What moves" spells
 //!   out: never a shared entry of the app root (`Profiles`, `R`, `locks`,
 //!   the catalog's files), so a packaged default profile's recovery, whose
@@ -16,7 +19,7 @@
 //! The crate does no I/O: freedom-cored reads the directory, and asks
 //! [`rollback`] or [`roll_forward`] what each entry's state calls for.
 
-use fc_json::JsValue;
+use fc_json::index::{Index, Kind};
 
 /// The Freedom directory, in a profile's directory.
 pub const FREEDOM_DIR: &str = "freedom";
@@ -75,32 +78,48 @@ pub const MOVED_ENTRIES: &[&str] = &[
 ];
 
 /// The journal's entries, or `None` for a journal out of form: not JSON,
-/// another version, another key, a name not in [`MOVED_ENTRIES`], or one
-/// named twice.
+/// another version, another key, a key twice, a name not in
+/// [`MOVED_ENTRIES`], or one named twice.
+///
+/// Read from the text's own members, duplicates included, not through
+/// `fc_json::parse`, whose JavaScript semantics keep a duplicate key's last
+/// value: `{"version":1,"entries":["identity"],"entries":[]}` would read as
+/// a journal of nothing. Neither of two lists is trusted.
 pub fn parse_journal(text: &str) -> Option<Vec<String>> {
-    let journal = fc_json::parse(text).ok()?;
-    let JsValue::Object(entries) = &journal else {
+    let index = Index::new(text).ok()?;
+    let journal = index.root();
+    if journal.kind() != Kind::Object {
         return None;
-    };
+    }
     let mut version = None;
     let mut names = None;
-    for (key, value) in entries {
-        match &**key {
-            "version" => version = Some(value),
-            "entries" => names = Some(value),
-            _ => return None,
+    for (key, value) in journal.members() {
+        let slot = if key.is_str("version") {
+            &mut version
+        } else if key.is_str("entries") {
+            &mut names
+        } else {
+            return None;
+        };
+        if slot.replace(value).is_some() {
+            return None;
         }
     }
-    if !matches!(version, Some(JsValue::Number(v)) if *v == 1.0) {
+    let version = version?;
+    if version.kind() != Kind::Number || version.number() != 1.0 {
+        return None;
+    }
+    let names = names?;
+    if names.kind() != Kind::Array {
         return None;
     }
     let mut out: Vec<String> = Vec::new();
-    for name in names?.as_array()? {
-        let name = name.as_str()?;
-        if !MOVED_ENTRIES.contains(&name) || out.iter().any(|seen| seen == name) {
+    for name in names.children() {
+        let name = MOVED_ENTRIES.iter().find(|known| name.is_str(known))?;
+        if out.iter().any(|seen| seen == name) {
             return None;
         }
-        out.push(name.to_owned());
+        out.push((*name).to_owned());
     }
     Some(out)
 }
@@ -131,6 +150,13 @@ pub struct EntryState {
     pub moving: Found,
 }
 
+impl EntryState {
+    /// In no place at all.
+    fn nowhere(self) -> bool {
+        !self.at_root.present() && !self.moved.present() && !self.moving.present()
+    }
+}
+
 /// What an entry's recovery does, in order.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Steps {
@@ -157,10 +183,19 @@ pub enum Unsettled {
     /// After the marker, a copy still in progress, or the entry at the
     /// root alone.
     NotMoved,
+    /// The entry in no place at all, before the marker or after it. The
+    /// journal lists only entries present, and no step of the move removes
+    /// every copy of one: a rename leaves one side, and a cross-device copy
+    /// keeps its source past the marker. The journal is the last record that
+    /// the entry existed, so it stays.
+    Nowhere,
 }
 
 /// Before the marker: the entry put back at the root.
 pub fn rollback(name: &str, state: EntryState) -> Result<Steps, Unsettled> {
+    if state.nowhere() {
+        return Err(Unsettled::Nowhere);
+    }
     let mut steps = Steps::default();
     if state.moving.present() {
         if !state.at_root.present() {
@@ -186,9 +221,12 @@ pub fn rollback(name: &str, state: EntryState) -> Result<Steps, Unsettled> {
 /// removed. A root entry beside a moved one (a cross-device copy's source,
 /// or one an older build made since) is left for PRF-9's set-aside, which
 /// moves such entries, unmerged, and deletes nothing; the placeholder
-/// stays. An entry in neither place was removed since: nothing to do.
+/// stays. An entry in no place at all is [`Unsettled::Nowhere`].
 pub fn roll_forward(state: EntryState) -> Result<(), Unsettled> {
-    if state.moving.present() || (!state.moved.present() && state.at_root.present()) {
+    if state.nowhere() {
+        return Err(Unsettled::Nowhere);
+    }
+    if state.moving.present() || !state.moved.present() {
         return Err(Unsettled::NotMoved);
     }
     Ok(())
@@ -233,9 +271,27 @@ mod tests {
             r#"{"version":1,"entries":["../identity"]}"#,
             r#"{"version":1,"entries":["ipfs-data/freedom-ipfs"]}"#,
             r#"{"version":1,"entries":[""]}"#,
+            // A key twice, in either order: JavaScript would keep the last
+            // value, but the journal's keys are exact, so neither is
+            // trusted.
+            r#"{"version":1,"entries":["identity"],"entries":[]}"#,
+            r#"{"version":1,"entries":[],"entries":["identity"]}"#,
+            r#"{"entries":[],"version":1,"entries":["identity"]}"#,
+            r#"{"version":1,"entries":[],"version":1}"#,
+            r#"{"version":2,"entries":[],"version":1}"#,
+            r#"{"version":1,"entries":[],"version":2}"#,
+            r#"{"version":1,"version":1,"entries":[]}"#,
+            // The same key in another spelling is the same key.
+            r#"{"version":1,"entries":[],"entri\u0065s":["identity"]}"#,
+            r#"{"vers\u0069on":1,"entries":[],"version":1}"#,
         ] {
             assert_eq!(parse_journal(text), None, "{text}");
         }
+        // An escaped name is the name.
+        assert_eq!(
+            parse_journal(r#"{"version":1,"entries":["\u0069dentity"]}"#),
+            Some(vec!["identity".to_owned()])
+        );
     }
 
     #[test]
@@ -298,12 +354,12 @@ mod tests {
             rollback("ant-data", state(Dir, Missing, Dir)),
             Ok(steps(true, false, false))
         );
-        // Neither place: gone since.
+        // Guesses refused. Nowhere: the journal lists only entries present,
+        // and no step of the move removes every copy of one.
         assert_eq!(
             rollback("run", state(Missing, Missing, Missing)),
-            Ok(Steps::default())
+            Err(Unsettled::Nowhere)
         );
-        // Guesses refused.
         assert_eq!(
             rollback("ant-data", state(Missing, Missing, Dir)),
             Err(Unsettled::MovingWithoutSource)
@@ -335,10 +391,13 @@ mod tests {
             state(Missing, Dir, Missing),
             state(File, Dir, Missing),
             state(Dir, Dir, Missing),
-            state(Missing, Missing, Missing),
         ] {
             assert_eq!(roll_forward(ok), Ok(()), "{ok:?}");
         }
+        assert_eq!(
+            roll_forward(state(Missing, Missing, Missing)),
+            Err(Unsettled::Nowhere)
+        );
         for unsettled in [
             state(Missing, Dir, Dir),
             state(Dir, Missing, Missing),
