@@ -218,7 +218,7 @@ fn take_profile_lock(canonical: &Path, dev: bool) -> Result<Lock, Exit> {
             );
             Err(say(Outcome::Busy))
         }
-        Err(LockError::Io(e)) => Err(storage("io", &e.kind().to_string())),
+        Err(LockError::Io(e)) => Err(storage("io", &e.to_string())),
     }
 }
 

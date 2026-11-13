@@ -303,7 +303,7 @@ fn take_catalog_lock(app_root: &Path) -> Result<Lock, Exit> {
     let lock = match Lock::catalog(app_root, &now_iso()) {
         Ok(lock) => lock,
         Err(lock::LockError::Held) => return Err(busy()),
-        Err(lock::LockError::Io(e)) => return Err(storage("io", &e.kind().to_string())),
+        Err(lock::LockError::Io(e)) => return Err(storage("io", &e.to_string())),
     };
     if let Err(e) = store::remove_catalog_temps(app_root) {
         log::warn(

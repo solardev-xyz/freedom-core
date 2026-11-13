@@ -40,7 +40,30 @@ pub fn mtime_ms(path: &Path) -> std::io::Result<i64> {
     })
 }
 
+/// Sets a directory's access and modification times (`fs.utimes`), on
+/// Unix with `futimens` on the open directory: the one form a confined
+/// subcommand's seccomp filter lets through (fc-service's `Policy::times`),
+/// and on macOS Seatbelt's `file-write-times` (std's `set_times` uses
+/// `fsetattrlist` there).
+#[cfg(unix)]
+fn set_mtime(dir: &Path, ms: i64) -> std::io::Result<()> {
+    let time = rustix::fs::Timespec {
+        tv_sec: ms.div_euclid(1000),
+        tv_nsec: (ms.rem_euclid(1000) * 1_000_000) as _,
+    };
+    let file = std::fs::File::open(dir)?;
+    rustix::fs::futimens(
+        &file,
+        &rustix::fs::Timestamps {
+            last_access: time,
+            last_modification: time,
+        },
+    )?;
+    Ok(())
+}
+
 /// Sets a directory's access and modification times (`fs.utimes`).
+#[cfg(windows)]
 fn set_mtime(dir: &Path, ms: i64) -> std::io::Result<()> {
     let time = if ms >= 0 {
         UNIX_EPOCH + Duration::from_millis(ms.unsigned_abs())
@@ -51,11 +74,6 @@ fn set_mtime(dir: &Path, ms: i64) -> std::io::Result<()> {
         .set_accessed(time)
         .set_modified(time);
     open_dir_for_times(dir)?.set_times(times)
-}
-
-#[cfg(unix)]
-fn open_dir_for_times(dir: &Path) -> std::io::Result<std::fs::File> {
-    std::fs::File::open(dir)
 }
 
 #[cfg(windows)]
@@ -322,7 +340,9 @@ fn take(lock_dir: &Path, stale_ms: u64) -> Result<Taken, LockError> {
 /// proper-lockfile's precision probe, on a lock just made.
 fn probe(lock_dir: &Path) -> Result<Taken, LockError> {
     let set = rules::probe_mtime_ms(now_ms());
-    let read = set_mtime(lock_dir, set).and_then(|()| mtime_ms(lock_dir));
+    let read = set_mtime(lock_dir, set)
+        .map_err(|e| std::io::Error::new(e.kind(), format!("setting the lock's mtime: {e}")))
+        .and_then(|()| mtime_ms(lock_dir));
     match read {
         Ok(mtime) => Ok(Taken {
             mtime_ms: mtime,

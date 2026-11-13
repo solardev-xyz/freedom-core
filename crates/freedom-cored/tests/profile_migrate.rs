@@ -443,7 +443,12 @@ fn any_of_its_exclusion_held_by_another_is_busy() {
         .join("freedom")
         .join("ipfs-data")
         .join("freedom-ipfs");
-    let ipfs_gate = d.locks.join(fc_service_lock_name("ipfs", &ipfs_dir));
+    // Named from the canonical path, as the gate names it (Windows'
+    // verbatim form included).
+    let ipfs_gate = d.locks.join(fc_service_lock_name(
+        "ipfs",
+        &std::fs::canonicalize(&ipfs_dir).unwrap(),
+    ));
     let ipfs = std::fs::OpenOptions::new()
         .read(true)
         .write(true)
