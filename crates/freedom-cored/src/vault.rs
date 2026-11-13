@@ -52,7 +52,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use fc_keys::freedom::{self, FreedomKeys};
 use fc_keys::{Mnemonic, WordCount, multiformats};
 use fc_protocol::error::{ErrorBody, ErrorCode};
-use fc_protocol::message;
+use fc_protocol::message::{self, Context};
 use fc_protocol::secret::{SecretBytes, SecretResponse};
 use fc_vault::format::{self, SealParams};
 use fc_vault::state::{LockReason, Locked, Prepared, Ticket, VaultState};
@@ -61,6 +61,7 @@ use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::value::RawValue;
 use zeroize::{Zeroize, Zeroizing};
 
+use crate::approvals::{Approvals, Clocks};
 use crate::clock::Clock;
 use crate::fsx::{self, Done};
 use crate::journal;
@@ -520,8 +521,13 @@ pub struct Vault {
     state: VaultState,
     throttle: Throttle,
     auto_lock_ms: u64,
-    /// The auto-lock's and the throttle's time, sleep included.
+    /// The auto-lock's and the throttle's time, sleep included; the
+    /// approvals' too (design 0012, "Crates and clocks").
     clock: Clock,
+    /// Approval tokens, Safe approvals and the fee evidence (design 0012):
+    /// `sign.*` checks an authorization against them inline. A lock leaves
+    /// them: a token presented while locked is burnt, as today.
+    approvals: Approvals,
     queue: VecDeque<Pending>,
     running: Option<Running>,
     next_job: u64,
@@ -722,6 +728,7 @@ impl Vault {
             throttle: Throttle::new(),
             auto_lock_ms,
             clock: Clock::new(),
+            approvals: Approvals::new(),
             queue: VecDeque::new(),
             running: None,
             next_job: 1,
@@ -745,6 +752,31 @@ impl Vault {
 
     fn now_ms(&self) -> u64 {
         self.clock.now_ms()
+    }
+
+    /// The vault's clock and the wall clock, for the approvals.
+    fn clocks(&self) -> Clocks {
+        let wall_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |since| {
+                u64::try_from(since.as_millis()).unwrap_or(u64::MAX)
+            });
+        Clocks {
+            vault_ms: self.now_ms(),
+            wall_ms,
+        }
+    }
+
+    /// Main asked for `chain.fee_reference`: its reply is the chain's fee
+    /// evidence (design 0012, "The fee check").
+    pub fn fee_asked(&mut self, id: u64, params: Option<&str>) {
+        let now = self.now_ms();
+        self.approvals.fee_asked(id, params, now);
+    }
+
+    /// The chain thread served `chain.fee_reference`'s reply to `id`.
+    pub fn fee_answered(&mut self, id: u64, payload: &[u8]) {
+        self.approvals.fee_answered(id, payload);
     }
 
     /// Whether this module handles `method`.
@@ -771,13 +803,21 @@ impl Vault {
                 | "keys.addresses"
                 | "keys.radicle_did"
         ) || crate::signing::METHODS.contains(&method)
+            || Approvals::handles(method)
     }
 
     /// Handles a request. Inline methods reply at once; KDF methods are
     /// queued and reply when their job finishes. The caller was checked
     /// against fc-protocol's method table before this (#101):
-    /// `vault.reconcile` and `nodes.op_status` are main's own.
-    pub fn request(&mut self, id: u64, method: &str, raw: Option<&str>) -> Vec<Out> {
+    /// `vault.reconcile` and `nodes.op_status` are main's own; the signing
+    /// and approval methods check what each caller may do (design 0012).
+    pub fn request(
+        &mut self,
+        id: u64,
+        method: &str,
+        raw: Option<&str>,
+        context: &Context,
+    ) -> Vec<Out> {
         let mut out = Vec::new();
         let result = match method {
             "vault.status" => self.status(id),
@@ -808,8 +848,21 @@ impl Vault {
                 params::<PublicKeyParams>(raw).and_then(|p| radicle_did(id, &p.public_key))
             }
             _ if crate::signing::METHODS.contains(&method) => {
-                crate::signing::handle(&self.state, method, raw)
+                let clocks = self.clocks();
+                let mut checks = crate::signing::Checks {
+                    approvals: &mut self.approvals,
+                    context,
+                    clocks,
+                };
+                crate::signing::handle(&self.state, &mut checks, method, raw)
                     .map(|result| json_result(id, &result))
+            }
+            _ if Approvals::handles(method) => {
+                let clocks = self.clocks();
+                fc_evm::parse_json(raw.unwrap_or("{}"))
+                    .map_err(|_| ErrorBody::new(ErrorCode::InvalidArgument, "Invalid parameters"))
+                    .and_then(|params| self.approvals.request(id, method, &params, context, clocks))
+                    .map(Some)
             }
             _ => match self.enqueue(id, method, raw) {
                 Ok(()) => {
@@ -2679,7 +2732,8 @@ mod tests {
                 "expected_hash": case["result"]["hash"],
             })
             .to_string();
-            let payload = sent(vault.request(MAX_ID, "sign.typed_data", Some(&params)));
+            let payload =
+                sent(vault.request(MAX_ID, "sign.typed_data", Some(&params), &Context::chrome()));
             assert_eq!(
                 payload.len(),
                 overhead + hashed.view.len(),
@@ -2705,7 +2759,8 @@ mod tests {
                 "expected_hash": fc_evm::to_hex(&hash),
             })
             .to_string();
-            let payload = sent(vault.request(MAX_ID, "sign.typed_data", Some(&params)));
+            let payload =
+                sent(vault.request(MAX_ID, "sign.typed_data", Some(&params), &Context::chrome()));
             let reply: serde_json::Value = serde_json::from_slice(&payload).unwrap();
             if fits {
                 assert_eq!(payload.len(), MAX_PAYLOAD);

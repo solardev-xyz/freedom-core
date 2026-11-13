@@ -22,11 +22,17 @@ pub enum Callers {
     Shell,
     /// The browser UI (`chrome`) and main itself (`shell`).
     ChromeOrShell,
+    /// A page (`page`, with its `PageContext`) as well: the rows 0011 left
+    /// for 0012 (design 0012, "PageContext"). The method checks what each
+    /// caller may do (a page kind's token only under `page`, a wallet
+    /// kind's never).
+    PageChromeOrShell,
 }
 
 impl Callers {
     pub fn allow(self, caller: CallerKind) -> bool {
         match (self, caller) {
+            (Callers::PageChromeOrShell, _) => true,
             (_, CallerKind::Page) => false,
             (Callers::Shell, CallerKind::Shell) => true,
             (Callers::Shell, CallerKind::Chrome) => false,
@@ -38,6 +44,7 @@ impl Callers {
         match self {
             Callers::Shell => &["shell"],
             Callers::ChromeOrShell => &["chrome", "shell"],
+            Callers::PageChromeOrShell => &["page", "chrome", "shell"],
         }
     }
 }
@@ -105,7 +112,7 @@ const fn row_v2(name: &'static str, callers: Callers, mutates: bool, deadline: D
     }
 }
 
-use Callers::{ChromeOrShell as CS, Shell as SHELL};
+use Callers::{ChromeOrShell as CS, PageChromeOrShell as PCS, Shell as SHELL};
 use Deadline::{Head as HEAD, Immediate as NOW, Session as SESSION, Vault as VAULT};
 
 /// Every method, in `core.hello`'s capability order, then the `chain.*`
@@ -134,9 +141,11 @@ pub const METHODS: &[Method] = &[
     row("keys.validate_mnemonic", CS, false, NOW),
     row("keys.addresses", CS, false, NOW),
     row("keys.radicle_did", CS, false, NOW),
-    row("sign.transaction", CS, false, NOW),
-    row("sign.message", CS, false, NOW),
-    row("sign.typed_data", CS, false, NOW),
+    // Design 0012: a page signs as `page`, with its `PageContext`, and an
+    // authorization is checked when one is present (APR-3).
+    row("sign.transaction", PCS, false, NOW),
+    row("sign.message", PCS, false, NOW),
+    row("sign.typed_data", PCS, false, NOW),
     row("swarm.sign_soc", CS, false, NOW),
     row("typed_data.hash", CS, false, NOW),
     row("naming.configure", CS, false, NOW),
@@ -147,6 +156,11 @@ pub const METHODS: &[Method] = &[
     row("naming.resolve_tezos", CS, false, SESSION),
     row("naming.invalidate_content", CS, false, NOW),
     row("naming.invalidate_tezos", CS, false, NOW),
+    // Design 0012, API: approval tokens and Safe approvals (APR-3).
+    row("approval.issue", PCS, false, NOW),
+    row("approval.discard", PCS, false, NOW),
+    row("approval.spend", PCS, false, NOW),
+    row("approval.end", PCS, false, NOW),
     row("dweb.open", SHELL, false, SESSION),
     // Design 0009: verified fetches, whose bodies stream; protocol 2 only.
     row_v2("dweb.verify", SHELL, false, HEAD),
@@ -255,9 +269,32 @@ mod tests {
                 Admission::Allowed(_)
             ));
         }
+        // A page reaches only design 0012's rows.
         for m in METHODS {
-            assert_eq!(admit(m.name, CallerKind::Page, V2), Admission::Forbidden);
+            let page = admit(m.name, CallerKind::Page, V2);
+            if m.callers == Callers::PageChromeOrShell {
+                assert!(matches!(page, Admission::Allowed(_)), "{}", m.name);
+            } else {
+                assert_eq!(page, Admission::Forbidden, "{}", m.name);
+            }
         }
+        let page_rows: Vec<&str> = METHODS
+            .iter()
+            .filter(|m| m.callers == Callers::PageChromeOrShell)
+            .map(|m| m.name)
+            .collect();
+        assert_eq!(
+            page_rows,
+            [
+                "sign.transaction",
+                "sign.message",
+                "sign.typed_data",
+                "approval.issue",
+                "approval.discard",
+                "approval.spend",
+                "approval.end",
+            ]
+        );
         assert_eq!(
             admit("vault.unlock", CallerKind::Chrome, V2),
             Admission::Allowed(&METHODS[5])

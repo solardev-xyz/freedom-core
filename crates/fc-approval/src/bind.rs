@@ -319,7 +319,7 @@ fn page_facts(page: &Page) -> Result<Value, Error> {
 }
 
 /// `value` as an object with exactly these members.
-fn object<'a>(
+pub(crate) fn object<'a>(
     value: &'a Value,
     what: &str,
     required: &[&str],
@@ -353,7 +353,7 @@ fn account(value: Option<&Value>) -> Result<u32, Error> {
 }
 
 /// A quantity string, decimal or `0x` hex, as `sign.transaction` reads one.
-fn quantity(value: &Value, field: &str) -> Result<U256, Error> {
+pub(crate) fn quantity(value: &Value, field: &str) -> Result<U256, Error> {
     value
         .as_str()
         .and_then(fc_evm::parse_unsigned)
@@ -389,7 +389,7 @@ fn address(value: &Value, field: &str) -> Result<String, Error> {
 }
 
 /// `0x` hex bytes, as `sign.*` reads them.
-fn bytes(value: &Value, field: &str) -> Result<Vec<u8>, Error> {
+pub(crate) fn bytes(value: &Value, field: &str) -> Result<Vec<u8>, Error> {
     let text = value
         .as_str()
         .ok_or_else(|| invalid(format!("Invalid {field}")))?;

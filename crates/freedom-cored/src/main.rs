@@ -15,6 +15,7 @@
 //! confinement, logging's writer included (its lines are written directly).
 
 mod anchor;
+mod approvals;
 mod chain;
 mod clock;
 mod dweb;

@@ -1,6 +1,7 @@
 //! Approvals in the core (design 0012): approval tokens and what each binds
-//! (APR-1); the four grant files and their codecs (APR-2, [`stores`]); and
-//! the standing rules that answer from them ([`standing`]).
+//! (APR-1); the four grant files and their codecs (APR-2, [`stores`]); the
+//! standing rules that answer from them ([`standing`]); and the Safe
+//! approvals a Safe's token gives (APR-3, [`safe`]).
 //!
 //! A token is the core's record that the user confirmed one request: minted
 //! for exactly that request ([`Tokens::issue`]), and spent once, for that
@@ -40,10 +41,14 @@ pub mod rate;
 // check, per request kind.
 pub mod standing;
 
+// Safe approvals (APR-3): what a spent `safe-send` or `safe-message` token
+// gives its owners' and executor's signatures.
+pub mod safe;
+
 pub use bind::{
     Binding, Handle, Limits, MAX_ACCOUNT, MAX_CHAIN_ID, MAX_CLOSE_HASHES, MAX_NONCE, Page, Request,
     bind,
 };
 pub use error::{Error, Refusal};
 pub use kind::{Kind, PageRule, Scope};
-pub use tokens::{Issued, MAX_OUTSTANDING, Spent, TOKEN_TTL_MS, Token, Tokens};
+pub use tokens::{Issued, MAX_OUTSTANDING, Minter, Spent, TOKEN_TTL_MS, Token, Tokens};

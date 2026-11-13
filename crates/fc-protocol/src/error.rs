@@ -17,6 +17,10 @@ pub enum ErrorCode {
     CorruptVault,
     InvalidMnemonic,
     InvalidArgument,
+    /// A signature or a spend the core's approvals refuse (design 0012,
+    /// API): `data.reason` says why (`no_token`, `unknown_token`,
+    /// `expired`, `mismatch`, `no_rule`, `fee_check`, …).
+    NotAuthorized,
     WeakPassword,
     Storage,
     NodeIdentityCorrupt,
@@ -221,6 +225,19 @@ mod tests {
                 Some(code)
             );
         }
+    }
+
+    /// Design 0012, API: an approvals refusal.
+    #[test]
+    fn not_authorized_on_the_wire() {
+        assert_eq!(
+            serde_json::to_value(ErrorCode::NotAuthorized).ok(),
+            Some(serde_json::Value::from("not_authorized"))
+        );
+        assert_eq!(
+            serde_json::from_value::<ErrorCode>("not_authorized".into()).ok(),
+            Some(ErrorCode::NotAuthorized)
+        );
     }
 
     #[test]
