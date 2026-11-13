@@ -104,13 +104,14 @@ pub struct Page {
 ///
 /// | Kind | `account` | `payload` |
 /// |---|---|---|
-/// | `wallet-send`, `executor-send`, `dapp-send` | the account's index | `{ tx }`: `sign.transaction`'s `tx`, whose `nonce` is optional and never bound |
+/// | `wallet-send`, `executor-send` | the account's index | `{ tx }`: `sign.transaction`'s `tx`, whose `nonce` is optional and never bound |
+/// | `dapp-send` | the account's index | `{ tx, remember? }`: as `wallet-send`, and whether "Always allow" was ticked, a boolean the token keeps beside its digest |
 /// | `sign-message` | the account's index | `{ message }`: `sign.message`'s bytes, as hex |
 /// | `sign-typed-data` | the account's index | `{ typed_data, primary_type?, chain_id? }`, as `sign.typed_data` takes them |
 /// | `safe-send` | the Safe's index | `{ safe, chain_id, tx: { to, value, data } }`: the Safe's address and the SafeTx |
 /// | `safe-message` | the Safe's index | `{ method, params }`: the dApp's request |
 /// | `intent-resend` | none | `{ intent_id, chain_id, sender, nonce, hash }` |
-/// | `intent-replace` | none | `{ intent_id, sender, tx }`: `tx` as `sign.transaction` takes it, its `nonce` required and bound |
+/// | `intent-replace` | none, or the index of the account that signs it again, which `sign.transaction` requires | `{ intent_id, sender, tx }`: `tx` as `sign.transaction` takes it, its `nonce` required and bound |
 /// | `intent-close` | none | `{ intent_id, chain_id, sender, nonce, hashes }` |
 /// | `x402-payment` | the account's index | `{ detection: { tab, id, url }, accept_index, accept, grant? }`; `grant` is `null` or `{ cap_amount, window_seconds }` |
 ///
@@ -143,9 +144,23 @@ pub struct Binding {
     facts: String,
     digest: [u8; 32],
     typed_data: Option<TypedDataView>,
+    remember: bool,
+    sender: Option<String>,
 }
 
 impl Binding {
+    /// For `dapp-send`: whether "Always allow" was ticked (`remember`),
+    /// which the token keeps outside its digest.
+    pub fn remember(&self) -> bool {
+        self.remember
+    }
+
+    /// For `intent-replace`: the sender's address it binds, main's word at
+    /// minting, as `0x` and lowercase hex.
+    pub fn sender(&self) -> Option<&str> {
+        self.sender.as_deref()
+    }
+
     pub fn kind(&self) -> Kind {
         self.kind
     }
@@ -198,14 +213,33 @@ pub fn bind(request: &Request<'_>, limits: &Limits) -> Result<Binding, Error> {
     } else {
         match request.account {
             None | Some(Value::Null) => None,
+            // An `intent-replace` may bind the account that signs it again,
+            // which `sign.transaction` then requires (design 0012, Tokens):
+            // the reference's record names only the sender's address.
+            Some(given) if kind == Kind::IntentReplace => Some(account(Some(given))?),
             Some(_) => return Err(invalid(format!("{}: binds no account", kind.name()))),
         }
     };
     let mut typed_data = None;
+    let mut remember = false;
+    let mut sender = None;
     let payload = request.payload;
     let body = match kind {
-        Kind::WalletSend | Kind::ExecutorSend | Kind::DappSend => {
+        Kind::WalletSend | Kind::ExecutorSend => {
             let fields = object(payload, "payload", &["tx"], &[])?;
+            json!({ "tx": transaction(&fields["tx"], Nonce::Unbound)? })
+        }
+        Kind::DappSend => {
+            // "Always allow" rides in the token, not in its digest: the
+            // token keeps the flag it was minted with, and
+            // `sign.transaction`, which names no flag, reads it from there
+            // (design 0012, `token-remember`).
+            let fields = object(payload, "payload", &["tx"], &["remember"])?;
+            remember = match fields.get("remember") {
+                None => false,
+                Some(Value::Bool(flag)) => *flag,
+                Some(_) => return Err(invalid("remember: expected a boolean")),
+            };
             json!({ "tx": transaction(&fields["tx"], Nonce::Unbound)? })
         }
         Kind::SignMessage => {
@@ -259,9 +293,11 @@ pub fn bind(request: &Request<'_>, limits: &Limits) -> Result<Binding, Error> {
         }
         Kind::IntentReplace => {
             let fields = object(payload, "payload", &["intent_id", "sender", "tx"], &[])?;
+            let address = address(&fields["sender"], "sender")?;
+            sender = Some(address.clone());
             json!({
                 "intent_id": intent_id(&fields["intent_id"])?,
-                "sender": address(&fields["sender"], "sender")?,
+                "sender": address,
                 "tx": transaction(&fields["tx"], Nonce::Bound)?,
             })
         }
@@ -303,6 +339,8 @@ pub fn bind(request: &Request<'_>, limits: &Limits) -> Result<Binding, Error> {
         facts,
         digest,
         typed_data,
+        remember,
+        sender,
     })
 }
 

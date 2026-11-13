@@ -329,11 +329,12 @@ fn handle_parsed(
                     account: account_index(key)?,
                     fields,
                     hash: &hashed.hash,
+                    view: &hashed,
                 },
             )?;
-            let view = view_value(hashed.view)?;
             let signature = sign_with(state, key, &hashed.hash)?;
-            checks.approvals.signed(after);
+            let _ = checks.approvals.signed(after, checks.clocks);
+            let view = view_value(hashed.view)?;
             raw(&SignedView {
                 signature: to_hex(&signature),
                 view: &view,
@@ -375,9 +376,15 @@ fn other(
                 },
             )?;
             let signature = sign_with(state, key, &prepared.digest())?;
-            checks.approvals.signed(after);
+            // A flagged `dapp-send`'s rule, written as it signs (design
+            // 0012, `token-remember`): the reply says what became of it.
+            let rule = checks.approvals.signed(after, checks.clocks);
             let signed = prepared.finish(&signature).map_err(evm_error)?;
-            Ok(json!({ "raw": to_hex(&signed.raw), "hash": to_hex(&signed.hash) }))
+            let mut result = json!({ "raw": to_hex(&signed.raw), "hash": to_hex(&signed.hash) });
+            if let Some(rule) = rule {
+                result["rule"] = rule;
+            }
+            Ok(result)
         }
         "sign.message" => {
             let fields = object(params, &["key", "message"], &["authorization"])?;
@@ -392,7 +399,7 @@ fn other(
                 },
             )?;
             let signature = sign_with(state, key, &fc_evm::eip191_digest(&message))?;
-            checks.approvals.signed(after);
+            let _ = checks.approvals.signed(after, checks.clocks);
             Ok(json!({ "signature": to_hex(&signature) }))
         }
         "swarm.sign_soc" => {

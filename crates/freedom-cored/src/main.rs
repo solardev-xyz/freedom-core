@@ -22,6 +22,7 @@ mod dweb;
 mod exit;
 mod fsx;
 mod gate;
+mod grants;
 mod hardening;
 mod journal;
 mod log;

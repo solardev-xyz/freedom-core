@@ -72,6 +72,9 @@ pub struct Spent {
     /// signs as `expected_hash`, and the view, built again and equal to the
     /// one confirmed.
     pub typed_data: Option<TypedDataView>,
+    /// For `dapp-send`: whether "Always allow" was ticked when it was
+    /// minted (the spending request's own flag, if any, is ignored).
+    pub remember: bool,
 }
 
 /// The caller kind that minted a token, for a store that keeps its callers
@@ -95,6 +98,10 @@ struct Entry {
     scope: Scope,
     digest: [u8; 32],
     expires_at_ms: u64,
+    /// A `dapp-send`'s "Always allow".
+    remember: bool,
+    /// An `intent-replace`'s sender.
+    sender: Option<String>,
 }
 
 /// The outstanding tokens, oldest first.
@@ -172,6 +179,8 @@ impl Tokens {
             scope: binding.scope(),
             digest: *binding.digest(),
             expires_at_ms,
+            remember: binding.remember(),
+            sender: binding.sender().map(str::to_owned),
         });
         Ok(Issued {
             token: Token(token),
@@ -251,6 +260,7 @@ impl Tokens {
         Ok(Spent {
             kind: entry.kind,
             typed_data: binding.into_typed_data(),
+            remember: entry.remember,
         })
     }
 
@@ -265,6 +275,19 @@ impl Tokens {
 
     /// The outstanding entry for a presented token's text. The text is
     /// decoded into a buffer that is wiped when this returns, matched or not.
+    /// The sender an outstanding `intent-replace` token binds, without
+    /// spending it: `sign.transaction` names the intent, not its sender,
+    /// which is main's word at minting (design 0012, Tokens). The spend
+    /// that follows binds the request with it, so every other fact is
+    /// compared.
+    pub fn intent_sender(&self, token: &str) -> Option<&str> {
+        let entry = &self.entries[self.presented(token)?];
+        match entry.kind {
+            Kind::IntentReplace => entry.sender.as_deref(),
+            _ => None,
+        }
+    }
+
     fn presented(&self, token: &str) -> Option<usize> {
         let mut bytes = Zeroizing::new([0u8; 32]);
         if !lower_hex_32(token, &mut bytes) {
@@ -943,6 +966,109 @@ mod tests {
         let text: String = (0..32u8).map(|i| format!("{i:02x}")).collect();
         assert!(lower_hex_32(&text, &mut buffer));
         assert_eq!(*buffer, core::array::from_fn::<u8, 32, _>(|i| i as u8));
+    }
+
+    /// A `dapp-send` keeps its "Always allow" beside its digest, and a spend
+    /// that names no flag (`sign.transaction`'s) reads it from the token.
+    #[test]
+    fn a_dapp_send_keeps_its_flag() {
+        let account = json!(0);
+        let page = page();
+        let mut store = Tokens::new(LIMITS);
+        let mut source = rng();
+        let spent_payload = json!({ "tx": tx() });
+        for remember in [true, false] {
+            let minted_payload = json!({ "tx": tx(), "remember": remember });
+            let minted = store
+                .issue(
+                    &request(Kind::DappSend, &account, &minted_payload, Some(&page)),
+                    0,
+                    &mut source,
+                )
+                .unwrap();
+            let spent = store
+                .spend(
+                    &minted.token.to_text(),
+                    &request(Kind::DappSend, &account, &spent_payload, Some(&page)),
+                    0,
+                )
+                .unwrap();
+            assert_eq!(spent.remember, remember);
+        }
+        let bad = json!({ "tx": tx(), "remember": "yes" });
+        assert!(
+            store
+                .issue(
+                    &request(Kind::DappSend, &account, &bad, Some(&page)),
+                    0,
+                    &mut source
+                )
+                .is_err()
+        );
+    }
+
+    /// An `intent-replace` may bind the account that signs it again, which
+    /// a spend for another account then mismatches; its sender is read back
+    /// without spending it.
+    #[test]
+    fn an_intent_replace_binds_its_account() {
+        let mut replacement = tx();
+        replacement["nonce"] = json!("7");
+        let payload = json!({
+            "intent_id": "7b0c6c1e-0c62-4a6e-9a49-0d6a3f6d1a07",
+            "sender": "0x".to_owned() + &"AB".repeat(20),
+            "tx": replacement,
+        });
+        let (zero, one) = (json!(0), json!(1));
+        let mut store = Tokens::new(LIMITS);
+        let mut source = rng();
+        let minted = store
+            .issue(
+                &request(Kind::IntentReplace, &zero, &payload, None),
+                0,
+                &mut source,
+            )
+            .unwrap();
+        let token = minted.token.to_text();
+        let lower = "0x".to_owned() + &"ab".repeat(20);
+        assert_eq!(store.intent_sender(&token), Some(lower.as_str()));
+        assert_eq!(
+            store
+                .spend(
+                    &token,
+                    &request(Kind::IntentReplace, &one, &payload, None),
+                    0
+                )
+                .unwrap_err(),
+            Refusal::Mismatch
+        );
+        assert_eq!(store.intent_sender(&token), None);
+        let minted = store
+            .issue(
+                &request(Kind::IntentReplace, &zero, &payload, None),
+                0,
+                &mut source,
+            )
+            .unwrap();
+        assert!(
+            store
+                .spend(
+                    &minted.token.to_text(),
+                    &request(Kind::IntentReplace, &zero, &payload, None),
+                    0
+                )
+                .is_ok()
+        );
+        // Another kind's token has no intent sender.
+        let send = json!({ "tx": tx() });
+        let minted = store
+            .issue(
+                &request(Kind::WalletSend, &zero, &send, None),
+                0,
+                &mut source,
+            )
+            .unwrap();
+        assert_eq!(store.intent_sender(&minted.token.to_text()), None);
     }
 
     #[test]

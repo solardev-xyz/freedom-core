@@ -112,6 +112,11 @@ pub struct Core {
     paused: Arc<(Mutex<bool>, Condvar)>,
     /// Set: pause right after the next begin frame.
     pause_on_begin: Arc<AtomicBool>,
+    /// The `grant_root` the handshake names: `userData` beside the data
+    /// directory (design 0012, "The files"), not created.
+    pub grant_root: PathBuf,
+    /// The `grant_moved` the handshake names.
+    pub grant_moved: Vec<&'static str>,
 }
 
 impl Drop for Core {
@@ -249,6 +254,10 @@ pub fn spawn_env(
         arrived: Instant::now(),
         paused,
         pause_on_begin,
+        grant_root: data
+            .parent()
+            .map_or_else(|| data.join("userData"), |root| root.join("userData")),
+        grant_moved: Vec::new(),
     }
 }
 
@@ -576,7 +585,11 @@ impl Core {
         self.call_shell(
             1,
             "core.hello",
-            json!({ "protocol": 2, "shell_version": "test", "auto_lock_ms": 900_000, "frames": ["fragment", "stream"] }),
+            json!({
+                "protocol": 2, "shell_version": "test", "auto_lock_ms": 900_000,
+                "frames": ["fragment", "stream"],
+                "grant_root": self.grant_root, "grant_moved": self.grant_moved,
+            }),
         )
     }
 
@@ -586,7 +599,11 @@ impl Core {
         self.call_shell(
             1,
             "core.hello",
-            json!({ "protocol": 2, "shell_version": "test", "auto_lock_ms": auto_lock_ms, "frames": ["stream"] }),
+            json!({
+                "protocol": 2, "shell_version": "test", "auto_lock_ms": auto_lock_ms,
+                "frames": ["stream"],
+                "grant_root": self.grant_root, "grant_moved": self.grant_moved,
+            }),
         )
     }
 

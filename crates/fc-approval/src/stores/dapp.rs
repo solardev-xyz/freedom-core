@@ -476,6 +476,65 @@ impl DappStore {
         }
         answer
     }
+
+    /// Today's signing rule, as the reference reads it while main writes
+    /// the file (`getSigningAutoApprove`: `autoApprove.signing === true`).
+    /// Q9's limited rule answers nothing here: until the file moves, the
+    /// core answers the rules main wrote, as main does (design 0012,
+    /// `rule-legacy`).
+    pub fn today_signing(&self, key: &str) -> bool {
+        matches!(
+            self.entries
+                .get(key)
+                .and_then(|entry| entry.get("autoApprove"))
+                .and_then(|rules| rules.get("signing")),
+            Some(JsValue::Bool(true))
+        )
+    }
+
+    /// Today's transaction rules, as the reference reads them while main
+    /// writes the file (`isTransactionAutoApproved`): a rule in
+    /// `autoApprove.transactions` for the call (`sameCall`) whose
+    /// `maxValue` (`ruleMaxValue`: a string of decimal digits, else 0)
+    /// is at least `value`. No expiry and no rate: Q9's limits wait for the
+    /// move.
+    pub fn today_transaction(
+        &self,
+        key: &str,
+        to: &[u8; 20],
+        selector: &[u8; 4],
+        chain_id: u64,
+        value: &U256,
+    ) -> bool {
+        let Some(list) = self
+            .entries
+            .get(key)
+            .and_then(|entry| entry.get("autoApprove"))
+            .and_then(|rules| rules.get("transactions"))
+            .and_then(JsValue::as_array)
+        else {
+            return false;
+        };
+        let (to, selector) = (lower_hex(to), lower_hex(selector));
+        list.iter()
+            .filter(|rule| same_call(rule, &to, &selector, chain_id))
+            .any(|rule| today_max_covers(rule.get("maxValue"), value))
+    }
+}
+
+/// `wei <= ruleMaxValue(rule)`: a `maxValue` of decimal digits (JS's
+/// `/^\d+$/`, leading zeros allowed) as its BigInt, anything else as 0. A
+/// value past 2^256 - 1 covers every `value` a transaction can carry.
+fn today_max_covers(max: Option<&JsValue>, value: &U256) -> bool {
+    let digits = max.and_then(JsValue::as_str).unwrap_or("");
+    if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
+        return value.is_zero();
+    }
+    match U256::parse_decimal(digits) {
+        Some(max) => *value <= max,
+        // Only an overflow fails on ASCII digits.
+        None => true,
+    }
 }
 
 /// Whether a stored rule is for the call: `to` and `selector` the same in

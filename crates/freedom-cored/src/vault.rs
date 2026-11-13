@@ -767,6 +767,13 @@ impl Vault {
         }
     }
 
+    /// The hello's `grant_root` and `grant_moved` (design 0012, "The
+    /// files"): the moved files are loaded now.
+    pub fn configure_grants(&mut self, root: PathBuf, moved: Vec<fc_approval::stores::StoreKind>) {
+        let wall_ms = self.clocks().wall_ms;
+        self.approvals.configure_grants(root, moved, wall_ms);
+    }
+
     /// Main asked for `chain.fee_reference`: its reply is the chain's fee
     /// evidence (design 0012, "The fee check").
     pub fn fee_asked(&mut self, id: u64, params: Option<&str>) {
@@ -880,6 +887,9 @@ impl Vault {
             ))),
             Err(error) => self.reply_error(&mut out, id, error),
         }
+        // Design 0012: one `approval.changed` per grant change, after the
+        // reply that made it.
+        out.extend(self.approvals.take_events().into_iter().map(Out::Send));
         out
     }
 

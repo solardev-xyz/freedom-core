@@ -371,7 +371,7 @@ fn a_page_token_signs_only_its_document() {
         "invalid_argument",
         None,
     );
-    // A standing rule reads the grants, which APR-3b brings: none answers.
+    // A standing rule reads the dApp grants: with no file, none answers.
     let standing = json!({ "key": account(0), "message": "0x68656c6c6f", "authorization": { "standing": { "paused": false } } });
     refused(
         &call_as(&mut core, &mut id, &site(), "sign.message", standing),
@@ -762,7 +762,7 @@ fn a_site_safe_approval_is_its_documents() {
         "not_authorized",
         Some("mismatch"),
     );
-    // A Safe message a standing rule answers: no grants are read yet.
+    // A Safe message a standing rule answers: with no file, none does.
     let standing = json!({ "standing": {}, "kind": "safe-message", "account": 0,
         "payload": { "method": "personal_sign", "params": ["0x01"] } });
     refused(
