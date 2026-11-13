@@ -805,7 +805,7 @@ function runAll(sc, byId) {
 
 // ---- the vector -----------------------------------------------------------------
 
-function buildApprovals(checkout, meta) {
+async function buildApprovals(checkout, meta) {
   const sc = loadReference(checkout);
   assert.equal(sc.CONFIRMATION_TTL_MS, 2 * MINUTE);
   assert.equal(sc.MAX_OUTSTANDING, 32);
@@ -884,7 +884,7 @@ function buildApprovals(checkout, meta) {
     constants: { ttlMs: sc.CONFIRMATION_TTL_MS, maxOutstanding: sc.MAX_OUTSTANDING },
     kinds,
     // Design 0012's R-6 limiter and fee check (APR-2).
-    rules: require('./approval-rules').buildRules(checkout),
+    rules: await require('./approval-rules').buildRules(checkout),
     bindings: built,
     pairs: builtPairs,
     runs,

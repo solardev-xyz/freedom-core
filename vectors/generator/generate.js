@@ -602,7 +602,7 @@ async function main() {
     'radicle-import.json': await buildRadicleImport(radicle.checkout, radicle.meta),
     // Design 0012's tokens, from main's signing-confirmation.js, and its
     // grant files, from main's four stores.
-    'approvals.json': buildApprovals(approvals.checkout, approvals.meta),
+    'approvals.json': await buildApprovals(approvals.checkout, approvals.meta),
     // Design 0013's profile catalog, from main's profile-catalog.js and
     // profile-resolver.js.
     'profiles.json': buildProfiles(approvals.checkout, reference.checkout, {
