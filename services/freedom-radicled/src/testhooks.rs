@@ -150,6 +150,13 @@
 //!   drain ([`crate::pools`]): a test that releases held work only then
 //!   knows the stop met it.
 //!
+//! **One hold on the node per thread** ([`Holding`]): in a build with the
+//! feature, a thread that takes the node through `crate::node::Handle`
+//! while it holds it panics, before it waits for the lock. Such a second
+//! hold deadlocks once `rad.unseed` waits between the two (#338,
+//! [`crate::node`]); this finds it in any test that runs the step, with no
+//! writer to meet it.
+//!
 //! **Hermetic by construction:** a build with the feature never reaches
 //! off this host, whatever a test asks of it.
 //! - **The node's dial gate** ([`dial_gate`]) holds the service's own gate
@@ -386,6 +393,39 @@ pub fn at_write_end() {
     #[cfg(feature = "testhooks")]
     if std::env::var_os("FREEDOM_RADICLED_TEST_HOLD_WRITE").is_some() {
         fc_service::log::info("test hook: the write has returned", serde_json::json!({}));
+    }
+}
+
+#[cfg(feature = "testhooks")]
+thread_local! {
+    /// Whether this thread holds the node through `crate::node::Handle`.
+    static HOLDING: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// A thread's hold on the node through `crate::node::Handle`, taken
+/// before its lock is waited for and let go of with it (see the module's
+/// doc). Without the feature it counts nothing.
+pub struct Holding(());
+
+impl Holding {
+    /// The calling thread's hold. With the feature, a thread that holds
+    /// the node already panics here, before it waits for the lock.
+    // The panic is how a test finds the second hold, and only with the
+    // feature.
+    #[allow(clippy::panic)]
+    pub fn take() -> Holding {
+        #[cfg(feature = "testhooks")]
+        if HOLDING.with(|holding| holding.replace(true)) {
+            panic!("test hook: a thread took the node while it held it (#338)");
+        }
+        Holding(())
+    }
+}
+
+impl Drop for Holding {
+    fn drop(&mut self) {
+        #[cfg(feature = "testhooks")]
+        HOLDING.with(|holding| holding.set(false));
     }
 }
 
@@ -864,5 +904,22 @@ pub fn hold_end() {
         while std::time::Instant::now() < until && !std::path::Path::new(&release).exists() {
             std::thread::sleep(Duration::from_millis(5));
         }
+    }
+}
+
+#[cfg(all(test, feature = "testhooks"))]
+mod tests {
+    use super::Holding;
+
+    /// A thread holds the node once: a second hold under the first panics,
+    /// before it would wait; one on another thread, or after the first is
+    /// let go of, doesn't.
+    #[test]
+    fn a_thread_holds_the_node_once() {
+        let first = Holding::take();
+        assert!(std::panic::catch_unwind(Holding::take).is_err());
+        assert!(std::thread::spawn(|| drop(Holding::take())).join().is_ok());
+        drop(first);
+        drop(Holding::take());
     }
 }

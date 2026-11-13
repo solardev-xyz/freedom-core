@@ -67,6 +67,18 @@
 //! ask the node to stop; `seeders` comes with a later step. Work gets the
 //! node only while it runs, and lets go of it as its work returns.
 //!
+//! **A thread holds the node at most once** ([`Held`]). std's lock makes a
+//! new shared hold wait behind an exclusive one that waits, on every
+//! platform (Linux's and Windows' futex lock, and the queue lock
+//! elsewhere). So work that took the node again while it held it would
+//! wait behind `rad.unseed` waiting for its first hold: neither would ever
+//! go on, nor the reads behind them, and the stop's drain wouldn't
+//! complete (#338). Each step of a read takes the node and lets go of it
+//! before the next. A build with the test hooks panics where a thread
+//! takes the node while it holds it, before it waits for the lock
+//! ([`testhooks::Holding`]), so the tests find such a step without a
+//! writer to meet it.
+//!
 //! **The stop** ([`Node::stop`], at the connection's end), within 3 s
 //! ([`SHUTDOWN_WITHIN`]), inside the connection's 5 s exit:
 //! 1. the pools are fenced and drained (0008: "the service fences new work,
@@ -132,6 +144,7 @@
 //! otherwise an incomplete drain leaves the stop unproven. Anything else
 //! leaves the marker, and the next start runs the full repair.
 
+use std::ops::{Deref, DerefMut};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{
@@ -231,18 +244,49 @@ pub struct Handle {
 }
 
 impl Handle {
-    /// The node, shared (see the module's doc).
-    pub fn node(&self) -> RwLockReadGuard<'_, libradicle::Embedded> {
-        self.embedded.read().unwrap_or_else(PoisonError::into_inner)
+    /// The node, shared (see the module's doc): never while this thread
+    /// holds it.
+    pub fn node(&self) -> Held<RwLockReadGuard<'_, libradicle::Embedded>> {
+        let holding = testhooks::Holding::take();
+        Held {
+            guard: self.embedded.read().unwrap_or_else(PoisonError::into_inner),
+            _holding: holding,
+        }
     }
 
-    /// The node, exclusively: once every other holder has let go of it.
-    /// A panic holding it poisons the lock; the node stays whole, as any
-    /// call that unwinds leaves it.
-    pub fn node_mut(&self) -> RwLockWriteGuard<'_, libradicle::Embedded> {
-        self.embedded
-            .write()
-            .unwrap_or_else(PoisonError::into_inner)
+    /// The node, exclusively: once every other holder has let go of it,
+    /// and never while this thread holds it. A panic holding it poisons
+    /// the lock; the node stays whole, as any call that unwinds leaves it.
+    pub fn node_mut(&self) -> Held<RwLockWriteGuard<'_, libradicle::Embedded>> {
+        let holding = testhooks::Holding::take();
+        Held {
+            guard: self
+                .embedded
+                .write()
+                .unwrap_or_else(PoisonError::into_inner),
+            _holding: holding,
+        }
+    }
+}
+
+/// The node as work holds it through [`Handle`], shared or exclusively:
+/// its lock's guard, and the thread's one hold (see the module's doc).
+pub struct Held<G> {
+    guard: G,
+    _holding: testhooks::Holding,
+}
+
+impl<G: Deref> Deref for Held<G> {
+    type Target = G::Target;
+
+    fn deref(&self) -> &G::Target {
+        &self.guard
+    }
+}
+
+impl<G: DerefMut> DerefMut for Held<G> {
+    fn deref_mut(&mut self) -> &mut G::Target {
+        &mut self.guard
     }
 }
 
