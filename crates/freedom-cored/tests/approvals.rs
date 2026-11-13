@@ -782,3 +782,62 @@ fn a_site_safe_approval_is_its_documents() {
         None,
     );
 }
+
+fn sized(count: usize, len: usize) -> Value {
+    json!({
+        "domain": {},
+        "types": { "M": [{ "name": "v", "type": "uint8[]" }, { "name": "s", "type": "string" }] },
+        "message": { "v": vec![0; count], "s": "x".repeat(len) },
+    })
+}
+
+/// `approval.issue`'s reply is longer than `sign.typed_data`'s: a token
+/// binds only a view whose reply fits one frame at the largest ID, so the
+/// longest view `sign.typed_data` takes gets none, and the core stays up.
+#[test]
+fn a_typed_data_token_fits_its_reply() {
+    const MAX_ID: u64 = (1 << 53) - 1;
+    const FRAME: usize = 1 << 20;
+    let (_root, mut core) = unlocked();
+    let mut id = 10;
+    let signing = format!(
+        r#"{{"type":"response","id":{MAX_ID},"result":{{"signature":"0x{}","view":}}}}"#,
+        "00".repeat(65)
+    )
+    .len();
+    let issuing = format!(
+        r#"{{"type":"response","id":{MAX_ID},"result":{{"expires_in_ms":120000,"hash":"0x{}","view":,"token":"{}"}}}}"#,
+        "00".repeat(32),
+        "0".repeat(64)
+    )
+    .len();
+    let view_len = |reply: &Value| {
+        serde_json::to_string(&reply["result"]["view"])
+            .unwrap()
+            .len()
+    };
+    let probe = call_as(
+        &mut core,
+        &mut id,
+        &chrome(),
+        "typed_data.hash",
+        json!({ "typed_data": sized(90_000, 0) }),
+    );
+    let longest = FRAME - signing - view_len(&probe);
+    let issue_sized = |core: &mut Core, id: &mut u64, len: usize| {
+        let params = json!({ "kind": "sign-typed-data", "account": 0, "handle": HANDLE,
+            "payload": { "typed_data": sized(90_000, len) } });
+        issue(core, id, &site(), params)
+    };
+    let refused_reply = issue_sized(&mut core, &mut id, longest);
+    refused(&refused_reply, "invalid_argument", None);
+    let fits = longest - (issuing - signing);
+    let minted = issue_sized(&mut core, &mut id, fits);
+    assert_eq!(view_len(&minted), FRAME - issuing);
+    assert_eq!(token_of(&minted).len(), 64);
+    refused(
+        &issue_sized(&mut core, &mut id, fits + 1),
+        "invalid_argument",
+        None,
+    );
+}

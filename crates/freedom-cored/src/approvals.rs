@@ -28,6 +28,7 @@
 //! approvals are kept in memory and never logged.
 
 use std::collections::VecDeque;
+use std::sync::OnceLock;
 
 use fc_approval::fee::{Evidence, Fees, Verdict, at_approval};
 use fc_approval::safe::{Approved, ExecutorCheck, Holder, OwnerCheck, SafeApprovals, SafeRefusal};
@@ -257,10 +258,40 @@ enum HandleError {
     Handle,
 }
 
+/// The longest typed-data view a token binds: what `sign.typed_data` would
+/// reply with, and what `approval.issue`'s own reply carries in one frame
+/// at the largest request ID, whichever is shorter. A view past it gets no
+/// token (fc-approval refuses it as `view-size`), so no reply here is ever
+/// too large to frame.
 fn limits() -> Limits {
     Limits {
-        max_view_len: crate::signing::max_view_len(),
+        max_view_len: crate::signing::max_view_len().min(max_issued_view_len()),
     }
+}
+
+/// The longest view `approval.issue`'s reply holds in one frame, at the
+/// largest ID, with a typed-data token's hash and its full life.
+fn max_issued_view_len() -> usize {
+    static LIMIT: OnceLock<usize> = OnceLock::new();
+    *LIMIT.get_or_init(|| {
+        let Ok(view) = serde_json::value::RawValue::from_string("0".to_owned()) else {
+            return 0;
+        };
+        let token = "0".repeat(64);
+        let reply = IssuedReply {
+            expires_in_ms: fc_approval::TOKEN_TTL_MS,
+            hash: Some(fc_evm::to_hex(&[0; 32])),
+            view: Some(&view),
+            fee_check: None,
+            token: &token,
+        };
+        let mut out = Vec::new();
+        if message::write_result(&mut out, message::MAX_ID, &reply).is_err() {
+            return 0;
+        }
+        // Everything but the view has a fixed length.
+        fc_protocol::frame::MAX_PAYLOAD.saturating_sub(out.len().saturating_sub(1))
+    })
 }
 
 /// The verdict as the screen reads it.
@@ -536,7 +567,7 @@ impl Approvals {
             None => None,
         };
         let size = view.as_ref().map_or(0, |view| view.get().len());
-        secret_reply(
+        let reply = secret_reply(
             id,
             &IssuedReply {
                 expires_in_ms: issued.expires_at_ms.saturating_sub(clocks.vault_ms),
@@ -549,7 +580,16 @@ impl Approvals {
                 token: &token,
             },
             size,
-        )
+        );
+        // Never a reply too large to frame (the limit above keeps every
+        // view under it): its token isn't left outstanding.
+        match reply {
+            Ok(payload) if payload.len() <= fc_protocol::frame::MAX_PAYLOAD => Ok(payload),
+            _ => {
+                self.tokens.discard(&token);
+                Err(crate::vault::internal())
+            }
+        }
     }
 
     fn spend(
@@ -901,6 +941,16 @@ mod tests {
         let params = json!({ "kind": "wallet-send", "account": 0, "payload": send() });
         let stale = approvals.request(1, "approval.issue", &params, &shell(), later);
         assert!(stale.is_ok());
+    }
+
+    /// A token's view fits `approval.issue`'s reply, which is longer than
+    /// `sign.typed_data`'s: the binding takes the shorter limit.
+    #[test]
+    fn an_issued_view_fits_one_frame() {
+        let issued = max_issued_view_len();
+        assert!(issued > 0);
+        assert!(issued < crate::signing::max_view_len());
+        assert_eq!(limits().max_view_len, issued);
     }
 
     #[test]
