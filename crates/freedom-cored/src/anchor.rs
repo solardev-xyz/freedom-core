@@ -210,6 +210,20 @@ impl Dir {
         imp::try_clone(self)
     }
 
+    /// The handle's descriptor (Unix), for confinement's list of those that
+    /// cross it; `None` elsewhere.
+    pub fn descriptor(&self) -> Option<i32> {
+        #[cfg(unix)]
+        {
+            use std::os::fd::AsRawFd;
+            Some(self.fd.as_raw_fd())
+        }
+        #[cfg(not(unix))]
+        {
+            None
+        }
+    }
+
     /// The names of the directories in this one, not following a symlink
     /// (one is no directory), read from its handle on Unix.
     pub fn subdirs(&self) -> io::Result<Vec<OsString>> {

@@ -306,3 +306,72 @@ fn each_subcommand_confined_reads_nothing_outside_its_grant() {
     );
     check("hold-profile's own files", &out, 0, 2);
 }
+
+/// A dev build's delete, confined: its Radicle home lies beside the app
+/// root (`R/<hash>/<slot>`), reached from the directory above it, and goes
+/// with the profile.
+#[test]
+fn a_dev_delete_confined_removes_the_home_beside_the_app_root() {
+    let root = tempfile::tempdir().unwrap();
+    let base: PathBuf = if cfg!(windows) {
+        root.path().to_path_buf()
+    } else {
+        std::fs::canonicalize(root.path()).unwrap()
+    };
+    let app = base.join("app");
+    let locks = base.join("locks");
+    std::fs::create_dir_all(&locks).unwrap();
+    let dev = ["--dev", "--checkout-hash", "0000002a"];
+    for extra in [&[][..], &["--profile", "work"][..]] {
+        let out = Command::new(BIN)
+            .args([
+                "profile",
+                "open",
+                "--app-root",
+                s(&app),
+                "--lock-dir",
+                s(&locks),
+            ])
+            .args(dev)
+            .args(extra)
+            .output()
+            .unwrap();
+        assert_eq!(out.status.code(), Some(0), "{out:?}");
+    }
+    let catalog: Value =
+        serde_json::from_str(&std::fs::read_to_string(app.join("profile-registry.json")).unwrap())
+            .unwrap();
+    let slot = catalog["profiles"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|p| p["id"] == "work")
+        .unwrap()["slot"]
+        .as_u64()
+        .unwrap();
+    let home = base.join("R").join("0000002a").join(slot.to_string());
+    std::fs::create_dir_all(home.join("node")).unwrap();
+    std::fs::write(home.join("node").join("n"), "n").unwrap();
+    let out = run(
+        &[
+            "profile",
+            "delete",
+            "--app-root",
+            s(&app),
+            "--lock-dir",
+            s(&locks),
+            "--id",
+            "work",
+            "--confirm-display-name",
+            "Work",
+            "--dev",
+            "--checkout-hash",
+            "0000002a",
+        ],
+        &[&home.join("node").join("n"), &base.join("elsewhere")],
+    );
+    assert_eq!(out.status.code(), Some(0), "{out:?}");
+    check("dev delete", &out, 1, 1);
+    assert!(!home.exists());
+    assert!(!app.join("Profiles").join("work").exists());
+}
