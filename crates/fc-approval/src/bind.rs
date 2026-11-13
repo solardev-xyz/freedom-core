@@ -108,7 +108,7 @@ pub struct Page {
 /// | `sign-message` | the account's index | `{ message }`: `sign.message`'s bytes, as hex |
 /// | `sign-typed-data` | the account's index | `{ typed_data, primary_type?, chain_id? }`, as `sign.typed_data` takes them |
 /// | `safe-send` | the Safe's index | `{ safe, chain_id, tx: { to, value, data } }`: the Safe's address and the SafeTx |
-/// | `safe-message` | the Safe's index | `{ method, params }`: the dApp's request |
+/// | `safe-message` | the Safe's index | `{ safe, chain_id, method, params }`: the Safe's address and chain, and the dApp's request |
 /// | `intent-resend` | none | `{ intent_id, chain_id, sender, nonce, hash }` |
 /// | `intent-replace` | none | `{ intent_id, sender, tx }`: `tx` as `sign.transaction` takes it, its `nonce` required and bound |
 /// | `intent-close` | none | `{ intent_id, chain_id, sender, nonce, hashes }` |
@@ -230,7 +230,14 @@ pub fn bind(request: &Request<'_>, limits: &Limits) -> Result<Binding, Error> {
             })
         }
         Kind::SafeMessage => {
-            let fields = object(payload, "payload", &["method", "params"], &[])?;
+            let fields = object(
+                payload,
+                "payload",
+                &["safe", "chain_id", "method", "params"],
+                &[],
+            )?;
+            let safe = address(&fields["safe"], "safe")?;
+            let chain_id = chain(&fields["chain_id"], "chain_id")?;
             let method = fields["method"]
                 .as_str()
                 .ok_or_else(|| invalid("Signature request is required"))?;
@@ -238,6 +245,8 @@ pub fn bind(request: &Request<'_>, limits: &Limits) -> Result<Binding, Error> {
                 return Err(invalid("Signature request is required"));
             }
             json!({
+                "safe": safe,
+                "chain_id": chain_id,
                 "method": method,
                 "params_sha256": hex32(&canonical::digest(&fields["params"])),
             })
