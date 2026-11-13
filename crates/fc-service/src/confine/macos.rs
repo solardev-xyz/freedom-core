@@ -428,9 +428,21 @@ fn derive(policy: &Policy, grants: &Grants) -> Report {
     }
     gaps.push("process_args");
     // The profile allows times in the read-write grants: a lock's mtime.
-    if policy.times && files == Status::Enforced {
-        gaps.push("times");
-        files = Status::Partial;
+    // What the sandbox answers for them is reported.
+    if policy.times {
+        if files == Status::Enforced {
+            gaps.push("times");
+            files = Status::Partial;
+        }
+        let answers: Vec<String> = dirs
+            .iter()
+            .map(|dir| {
+                let times = sys::check(c"file-write-times", Filter::Path(dir));
+                let data = sys::check(c"file-write-data", Filter::Path(dir));
+                format!("file-write-times {times:?}, file-write-data {data:?}")
+            })
+            .collect();
+        reasons.insert("times", answers.join("; "));
     }
     // The network rule names the proxy's port (and loopback host) alone:
     // the profile holds no other, and the sandbox can't be asked about an
