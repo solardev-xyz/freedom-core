@@ -9,6 +9,7 @@
     "kinds": "The reference's `KINDS`: whether each is a page kind (`always`, `with-site` for a Safe send that names a site, `never`), and whether design 0012 takes it (`design`; the cap edit, #1023, is not one of its eleven).",
     "bindings": "One request each: `kind`, `account`, `payload` and `page` (`{ handle, key }`, for main's page issuer) as the reference takes them; `js`, `bindingFor`'s facts or its error message; `core`, the request in fc-approval's form (`account`, `payload` or `payload_text`, the payload's JSON text the core parses itself, and `page`: `{ origin, frame, navigation, handle }`), or null where the reference's input has none; `expect`, whether the core issues a token for it (`issued`) or refuses it (`refused`), from 0012 (`deviation: token-strict` where the reference binds what the core refuses); `sameHash`, set where the case was built to share the EIP-712 hash of the case it is paired with.",
     "pairs": "Two requests the reference binds: `js`, whether a token minted for either spends for the other (`alike`) or is refused (`apart`), asked of the reference both ways; `changed`, the facts (and `kind`, `page`, `page.handle`, `page.key`) in which the reference's bindings differ; `core`, the core's answer, from 0012's Deviations table where `deviation` is set.",
+    "stores": "Each grant store's file (`file`): `runs`, from a `start` text (or none), each step an operation of the reference's store (`op`, its `args`) at `at` (the wall clock, in milliseconds, as `Date.now()` gives it), its `result` (or `error`), whether it wrote the file (`wrote`) and the file's text after it (`text`, null while there is none); a `reload` drops the store's cache, as a new process would. `core: load` where the core makes no such change itself (an older build's rule, or x402's cap operations, which are X402-1's): the core reads the text the reference wrote and writes it back byte for byte. `core: legacy`: the reference's lookup of today's rule, which the new build answers none of (`rule-legacy`). `malformed`: a file's `text`, what the reference's store loads from it (`loaded`, `getAllPermissions()` or its error), the text a connect of another site then leaves (`afterGrant`, or its error), and the core's reading (`core`: `unreadable`, renamed aside with the store empty, or `parsed`).",
     "runs": "Steps in order under `_setNow`, on a fresh store: `issue` (a case's request, minted as `token`), `consume` (a case's request, presented with `token`, or with `literal` text; `route: wallet` presents it without its page), `discard` and `count` (the outstanding tokens); `at` is the reference's clock, and `vaultAt` the vault's where they differ (`token-clock`); each step's `outcome` (`ok`, with what the token bound; `error`, the reference's message; or `count`), and `core` where the core's differs."
   },
   "constants": {
@@ -16682,5 +16683,2421 @@
         }
       ]
     }
-  ]
+  ],
+  "stores": {
+    "dapp": {
+      "file": "dapp-permissions.json",
+      "runs": [
+        {
+          "id": "connect-use-revoke",
+          "start": null,
+          "steps": [
+            {
+              "op": "grantPermission",
+              "args": [
+                "https://app.example",
+                0,
+                1
+              ],
+              "at": 1762000000000,
+              "result": {
+                "origin": "https://app.example",
+                "connectedAt": 1762000000000,
+                "lastUsed": 1762000000000,
+                "walletIndex": 0,
+                "chainId": 1,
+                "autoApprove": {
+                  "signing": false,
+                  "transactions": []
+                }
+              },
+              "wrote": true,
+              "text": "{\n  \"https://app.example\": {\n    \"origin\": \"https://app.example\",\n    \"connectedAt\": 1762000000000,\n    \"lastUsed\": 1762000000000,\n    \"walletIndex\": 0,\n    \"chainId\": 1,\n    \"autoApprove\": {\n      \"signing\": false,\n      \"transactions\": []\n    }\n  }\n}"
+            },
+            {
+              "op": "grantPermission",
+              "args": [
+                "myapp.eth",
+                2,
+                100
+              ],
+              "at": 1762000000001,
+              "result": {
+                "origin": "myapp.eth",
+                "connectedAt": 1762000000001,
+                "lastUsed": 1762000000001,
+                "walletIndex": 2,
+                "chainId": 100,
+                "autoApprove": {
+                  "signing": false,
+                  "transactions": []
+                }
+              },
+              "wrote": true,
+              "text": "{\n  \"https://app.example\": {\n    \"origin\": \"https://app.example\",\n    \"connectedAt\": 1762000000000,\n    \"lastUsed\": 1762000000000,\n    \"walletIndex\": 0,\n    \"chainId\": 1,\n    \"autoApprove\": {\n      \"signing\": false,\n      \"transactions\": []\n    }\n  },\n  \"myapp.eth\": {\n    \"origin\": \"myapp.eth\",\n    \"connectedAt\": 1762000000001,\n    \"lastUsed\": 1762000000001,\n    \"walletIndex\": 2,\n    \"chainId\": 100,\n    \"autoApprove\": {\n      \"signing\": false,\n      \"transactions\": []\n    }\n  }\n}"
+            },
+            {
+              "op": "updateLastUsed",
+              "args": [
+                "https://app.example"
+              ],
+              "at": 1762000000005,
+              "result": true,
+              "wrote": true,
+              "text": "{\n  \"https://app.example\": {\n    \"origin\": \"https://app.example\",\n    \"connectedAt\": 1762000000000,\n    \"lastUsed\": 1762000000005,\n    \"walletIndex\": 0,\n    \"chainId\": 1,\n    \"autoApprove\": {\n      \"signing\": false,\n      \"transactions\": []\n    }\n  },\n  \"myapp.eth\": {\n    \"origin\": \"myapp.eth\",\n    \"connectedAt\": 1762000000001,\n    \"lastUsed\": 1762000000001,\n    \"walletIndex\": 2,\n    \"chainId\": 100,\n    \"autoApprove\": {\n      \"signing\": false,\n      \"transactions\": []\n    }\n  }\n}"
+            },
+            {
+              "op": "updateLastUsed",
+              "args": [
+                "https://app.example",
+                137
+              ],
+              "at": 1762000000006,
+              "result": true,
+              "wrote": true,
+              "text": "{\n  \"https://app.example\": {\n    \"origin\": \"https://app.example\",\n    \"connectedAt\": 1762000000000,\n    \"lastUsed\": 1762000000006,\n    \"walletIndex\": 0,\n    \"chainId\": 137,\n    \"autoApprove\": {\n      \"signing\": false,\n      \"transactions\": []\n    }\n  },\n  \"myapp.eth\": {\n    \"origin\": \"myapp.eth\",\n    \"connectedAt\": 1762000000001,\n    \"lastUsed\": 1762000000001,\n    \"walletIndex\": 2,\n    \"chainId\": 100,\n    \"autoApprove\": {\n      \"signing\": false,\n      \"transactions\": []\n    }\n  }\n}"
+            },
+            {
+              "op": "updateWalletIndex",
+              "args": [
+                "myapp.eth",
+                3
+              ],
+              "at": 1762000000007,
+              "result": true,
+              "wrote": true,
+              "text": "{\n  \"https://app.example\": {\n    \"origin\": \"https://app.example\",\n    \"connectedAt\": 1762000000000,\n    \"lastUsed\": 1762000000006,\n    \"walletIndex\": 0,\n    \"chainId\": 137,\n    \"autoApprove\": {\n      \"signing\": false,\n      \"transactions\": []\n    }\n  },\n  \"myapp.eth\": {\n    \"origin\": \"myapp.eth\",\n    \"connectedAt\": 1762000000001,\n    \"lastUsed\": 1762000000007,\n    \"walletIndex\": 3,\n    \"chainId\": 100,\n    \"autoApprove\": {\n      \"signing\": false,\n      \"transactions\": []\n    }\n  }\n}"
+            },
+            {
+              "op": "updateWalletIndex",
+              "args": [
+                "myapp.eth",
+                3
+              ],
+              "at": 1762000000008,
+              "result": true,
+              "wrote": true,
+              "text": "{\n  \"https://app.example\": {\n    \"origin\": \"https://app.example\",\n    \"connectedAt\": 1762000000000,\n    \"lastUsed\": 1762000000006,\n    \"walletIndex\": 0,\n    \"chainId\": 137,\n    \"autoApprove\": {\n      \"signing\": false,\n      \"transactions\": []\n    }\n  },\n  \"myapp.eth\": {\n    \"origin\": \"myapp.eth\",\n    \"connectedAt\": 1762000000001,\n    \"lastUsed\": 1762000000008,\n    \"walletIndex\": 3,\n    \"chainId\": 100,\n    \"autoApprove\": {\n      \"signing\": false,\n      \"transactions\": []\n    }\n  }\n}"
+            },
+            {
+              "op": "updateLastUsed",
+              "args": [
+                "https://other.example"
+              ],
+              "at": 1762000000009,
+              "result": false,
+              "wrote": false,
+              "text": "{\n  \"https://app.example\": {\n    \"origin\": \"https://app.example\",\n    \"connectedAt\": 1762000000000,\n    \"lastUsed\": 1762000000006,\n    \"walletIndex\": 0,\n    \"chainId\": 137,\n    \"autoApprove\": {\n      \"signing\": false,\n      \"transactions\": []\n    }\n  },\n  \"myapp.eth\": {\n    \"origin\": \"myapp.eth\",\n    \"connectedAt\": 1762000000001,\n    \"lastUsed\": 1762000000008,\n    \"walletIndex\": 3,\n    \"chainId\": 100,\n    \"autoApprove\": {\n      \"signing\": false,\n      \"transactions\": []\n    }\n  }\n}"
+            },
+            {
+              "op": "updateWalletIndex",
+              "args": [
+                "https://other.example",
+                1
+              ],
+              "at": 1762000000009,
+              "result": false,
+              "wrote": false,
+              "text": "{\n  \"https://app.example\": {\n    \"origin\": \"https://app.example\",\n    \"connectedAt\": 1762000000000,\n    \"lastUsed\": 1762000000006,\n    \"walletIndex\": 0,\n    \"chainId\": 137,\n    \"autoApprove\": {\n      \"signing\": false,\n      \"transactions\": []\n    }\n  },\n  \"myapp.eth\": {\n    \"origin\": \"myapp.eth\",\n    \"connectedAt\": 1762000000001,\n    \"lastUsed\": 1762000000008,\n    \"walletIndex\": 3,\n    \"chainId\": 100,\n    \"autoApprove\": {\n      \"signing\": false,\n      \"transactions\": []\n    }\n  }\n}"
+            },
+            {
+              "op": "getAllPermissions",
+              "args": [],
+              "at": 1762000000010,
+              "result": [
+                {
+                  "origin": "myapp.eth",
+                  "connectedAt": 1762000000001,
+                  "lastUsed": 1762000000008,
+                  "walletIndex": 3,
+                  "chainId": 100,
+                  "autoApprove": {
+                    "signing": false,
+                    "transactions": []
+                  }
+                },
+                {
+                  "origin": "https://app.example",
+                  "connectedAt": 1762000000000,
+                  "lastUsed": 1762000000006,
+                  "walletIndex": 0,
+                  "chainId": 137,
+                  "autoApprove": {
+                    "signing": false,
+                    "transactions": []
+                  }
+                }
+              ],
+              "wrote": false,
+              "text": "{\n  \"https://app.example\": {\n    \"origin\": \"https://app.example\",\n    \"connectedAt\": 1762000000000,\n    \"lastUsed\": 1762000000006,\n    \"walletIndex\": 0,\n    \"chainId\": 137,\n    \"autoApprove\": {\n      \"signing\": false,\n      \"transactions\": []\n    }\n  },\n  \"myapp.eth\": {\n    \"origin\": \"myapp.eth\",\n    \"connectedAt\": 1762000000001,\n    \"lastUsed\": 1762000000008,\n    \"walletIndex\": 3,\n    \"chainId\": 100,\n    \"autoApprove\": {\n      \"signing\": false,\n      \"transactions\": []\n    }\n  }\n}"
+            },
+            {
+              "op": "revokePermission",
+              "args": [
+                "myapp.eth"
+              ],
+              "at": 1762000000011,
+              "result": true,
+              "wrote": true,
+              "text": "{\n  \"https://app.example\": {\n    \"origin\": \"https://app.example\",\n    \"connectedAt\": 1762000000000,\n    \"lastUsed\": 1762000000006,\n    \"walletIndex\": 0,\n    \"chainId\": 137,\n    \"autoApprove\": {\n      \"signing\": false,\n      \"transactions\": []\n    }\n  }\n}"
+            },
+            {
+              "op": "revokePermission",
+              "args": [
+                "myapp.eth"
+              ],
+              "at": 1762000000012,
+              "result": false,
+              "wrote": false,
+              "text": "{\n  \"https://app.example\": {\n    \"origin\": \"https://app.example\",\n    \"connectedAt\": 1762000000000,\n    \"lastUsed\": 1762000000006,\n    \"walletIndex\": 0,\n    \"chainId\": 137,\n    \"autoApprove\": {\n      \"signing\": false,\n      \"transactions\": []\n    }\n  }\n}"
+            },
+            {
+              "op": "getPermission",
+              "args": [
+                "myapp.eth"
+              ],
+              "at": 1762000000012,
+              "result": null,
+              "wrote": false,
+              "text": "{\n  \"https://app.example\": {\n    \"origin\": \"https://app.example\",\n    \"connectedAt\": 1762000000000,\n    \"lastUsed\": 1762000000006,\n    \"walletIndex\": 0,\n    \"chainId\": 137,\n    \"autoApprove\": {\n      \"signing\": false,\n      \"transactions\": []\n    }\n  }\n}"
+            },
+            {
+              "op": "grantPermission",
+              "args": [
+                "bzz://abababababababababababababababababababababababababababababababab",
+                4,
+                10
+              ],
+              "at": 1762000000013,
+              "result": {
+                "origin": "bzz://abababababababababababababababababababababababababababababababab",
+                "connectedAt": 1762000000013,
+                "lastUsed": 1762000000013,
+                "walletIndex": 4,
+                "chainId": 10,
+                "autoApprove": {
+                  "signing": false,
+                  "transactions": []
+                }
+              },
+              "wrote": true,
+              "text": "{\n  \"https://app.example\": {\n    \"origin\": \"https://app.example\",\n    \"connectedAt\": 1762000000000,\n    \"lastUsed\": 1762000000006,\n    \"walletIndex\": 0,\n    \"chainId\": 137,\n    \"autoApprove\": {\n      \"signing\": false,\n      \"transactions\": []\n    }\n  },\n  \"bzz://abababababababababababababababababababababababababababababababab\": {\n    \"origin\": \"bzz://abababababababababababababababababababababababababababababababab\",\n    \"connectedAt\": 1762000000013,\n    \"lastUsed\": 1762000000013,\n    \"walletIndex\": 4,\n    \"chainId\": 10,\n    \"autoApprove\": {\n      \"signing\": false,\n      \"transactions\": []\n    }\n  }\n}"
+            },
+            {
+              "op": "grantPermission",
+              "args": [
+                "https://app.example",
+                5,
+                8453
+              ],
+              "at": 1762000000014,
+              "result": {
+                "origin": "https://app.example",
+                "connectedAt": 1762000000014,
+                "lastUsed": 1762000000014,
+                "walletIndex": 5,
+                "chainId": 8453,
+                "autoApprove": {
+                  "signing": false,
+                  "transactions": []
+                }
+              },
+              "wrote": true,
+              "text": "{\n  \"https://app.example\": {\n    \"origin\": \"https://app.example\",\n    \"connectedAt\": 1762000000014,\n    \"lastUsed\": 1762000000014,\n    \"walletIndex\": 5,\n    \"chainId\": 8453,\n    \"autoApprove\": {\n      \"signing\": false,\n      \"transactions\": []\n    }\n  },\n  \"bzz://abababababababababababababababababababababababababababababababab\": {\n    \"origin\": \"bzz://abababababababababababababababababababababababababababababababab\",\n    \"connectedAt\": 1762000000013,\n    \"lastUsed\": 1762000000013,\n    \"walletIndex\": 4,\n    \"chainId\": 10,\n    \"autoApprove\": {\n      \"signing\": false,\n      \"transactions\": []\n    }\n  }\n}"
+            },
+            {
+              "op": "getAllPermissions",
+              "args": [],
+              "at": 1762000000015,
+              "result": [
+                {
+                  "origin": "https://app.example",
+                  "connectedAt": 1762000000014,
+                  "lastUsed": 1762000000014,
+                  "walletIndex": 5,
+                  "chainId": 8453,
+                  "autoApprove": {
+                    "signing": false,
+                    "transactions": []
+                  }
+                },
+                {
+                  "origin": "bzz://abababababababababababababababababababababababababababababababab",
+                  "connectedAt": 1762000000013,
+                  "lastUsed": 1762000000013,
+                  "walletIndex": 4,
+                  "chainId": 10,
+                  "autoApprove": {
+                    "signing": false,
+                    "transactions": []
+                  }
+                }
+              ],
+              "wrote": false,
+              "text": "{\n  \"https://app.example\": {\n    \"origin\": \"https://app.example\",\n    \"connectedAt\": 1762000000014,\n    \"lastUsed\": 1762000000014,\n    \"walletIndex\": 5,\n    \"chainId\": 8453,\n    \"autoApprove\": {\n      \"signing\": false,\n      \"transactions\": []\n    }\n  },\n  \"bzz://abababababababababababababababababababababababababababababababab\": {\n    \"origin\": \"bzz://abababababababababababababababababababababababababababababababab\",\n    \"connectedAt\": 1762000000013,\n    \"lastUsed\": 1762000000013,\n    \"walletIndex\": 4,\n    \"chainId\": 10,\n    \"autoApprove\": {\n      \"signing\": false,\n      \"transactions\": []\n    }\n  }\n}"
+            },
+            {
+              "op": "getPermission",
+              "args": [
+                "https://app.example"
+              ],
+              "at": 1762000000015,
+              "result": {
+                "origin": "https://app.example",
+                "connectedAt": 1762000000014,
+                "lastUsed": 1762000000014,
+                "walletIndex": 5,
+                "chainId": 8453,
+                "autoApprove": {
+                  "signing": false,
+                  "transactions": []
+                }
+              },
+              "wrote": false,
+              "text": "{\n  \"https://app.example\": {\n    \"origin\": \"https://app.example\",\n    \"connectedAt\": 1762000000014,\n    \"lastUsed\": 1762000000014,\n    \"walletIndex\": 5,\n    \"chainId\": 8453,\n    \"autoApprove\": {\n      \"signing\": false,\n      \"transactions\": []\n    }\n  },\n  \"bzz://abababababababababababababababababababababababababababababababab\": {\n    \"origin\": \"bzz://abababababababababababababababababababababababababababababababab\",\n    \"connectedAt\": 1762000000013,\n    \"lastUsed\": 1762000000013,\n    \"walletIndex\": 4,\n    \"chainId\": 10,\n    \"autoApprove\": {\n      \"signing\": false,\n      \"transactions\": []\n    }\n  }\n}"
+            }
+          ]
+        },
+        {
+          "id": "legacy-rules-and-narrowing",
+          "start": null,
+          "steps": [
+            {
+              "op": "grantPermission",
+              "args": [
+                "https://app.example",
+                0,
+                1
+              ],
+              "at": 1762000000000,
+              "result": {
+                "origin": "https://app.example",
+                "connectedAt": 1762000000000,
+                "lastUsed": 1762000000000,
+                "walletIndex": 0,
+                "chainId": 1,
+                "autoApprove": {
+                  "signing": false,
+                  "transactions": []
+                }
+              },
+              "wrote": true,
+              "text": "{\n  \"https://app.example\": {\n    \"origin\": \"https://app.example\",\n    \"connectedAt\": 1762000000000,\n    \"lastUsed\": 1762000000000,\n    \"walletIndex\": 0,\n    \"chainId\": 1,\n    \"autoApprove\": {\n      \"signing\": false,\n      \"transactions\": []\n    }\n  }\n}"
+            },
+            {
+              "op": "setSigningAutoApprove",
+              "args": [
+                "https://app.example",
+                true
+              ],
+              "at": 1762000000001,
+              "result": true,
+              "wrote": true,
+              "text": "{\n  \"https://app.example\": {\n    \"origin\": \"https://app.example\",\n    \"connectedAt\": 1762000000000,\n    \"lastUsed\": 1762000000000,\n    \"walletIndex\": 0,\n    \"chainId\": 1,\n    \"autoApprove\": {\n      \"signing\": true,\n      \"transactions\": []\n    }\n  }\n}",
+              "core": "load"
+            },
+            {
+              "op": "addTransactionAutoApprove",
+              "args": [
+                "https://app.example",
+                "0xAbAbAbAbAbAbAbAbAbAbAbAbAbAbAbAbAbAbAbAb",
+                "0x095ea7b300000000",
+                1,
+                "1000"
+              ],
+              "at": 1762000000002,
+              "result": true,
+              "wrote": true,
+              "text": "{\n  \"https://app.example\": {\n    \"origin\": \"https://app.example\",\n    \"connectedAt\": 1762000000000,\n    \"lastUsed\": 1762000000000,\n    \"walletIndex\": 0,\n    \"chainId\": 1,\n    \"autoApprove\": {\n      \"signing\": true,\n      \"transactions\": [\n        {\n          \"to\": \"0xabababababababababababababababababababab\",\n          \"selector\": \"0x095ea7b3\",\n          \"chainId\": 1,\n          \"maxValue\": \"1000\"\n        }\n      ]\n    }\n  }\n}",
+              "core": "load"
+            },
+            {
+              "op": "addTransactionAutoApprove",
+              "args": [
+                "https://app.example",
+                "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+                "0xA9059CBB",
+                8453,
+                null
+              ],
+              "at": 1762000000003,
+              "result": true,
+              "wrote": true,
+              "text": "{\n  \"https://app.example\": {\n    \"origin\": \"https://app.example\",\n    \"connectedAt\": 1762000000000,\n    \"lastUsed\": 1762000000000,\n    \"walletIndex\": 0,\n    \"chainId\": 1,\n    \"autoApprove\": {\n      \"signing\": true,\n      \"transactions\": [\n        {\n          \"to\": \"0xabababababababababababababababababababab\",\n          \"selector\": \"0x095ea7b3\",\n          \"chainId\": 1,\n          \"maxValue\": \"1000\"\n        },\n        {\n          \"to\": \"0x833589fcd6edb6e08f4c7c32d4f71b54bda02913\",\n          \"selector\": \"0xa9059cbb\",\n          \"chainId\": 8453,\n          \"maxValue\": \"0\"\n        }\n      ]\n    }\n  }\n}",
+              "core": "load"
+            },
+            {
+              "op": "addTransactionAutoApprove",
+              "args": [
+                "https://app.example",
+                "0xAbAbAbAbAbAbAbAbAbAbAbAbAbAbAbAbAbAbAbAb",
+                "0x095ea7b3",
+                1,
+                "0x10000"
+              ],
+              "at": 1762000000004,
+              "result": true,
+              "wrote": true,
+              "text": "{\n  \"https://app.example\": {\n    \"origin\": \"https://app.example\",\n    \"connectedAt\": 1762000000000,\n    \"lastUsed\": 1762000000000,\n    \"walletIndex\": 0,\n    \"chainId\": 1,\n    \"autoApprove\": {\n      \"signing\": true,\n      \"transactions\": [\n        {\n          \"to\": \"0xabababababababababababababababababababab\",\n          \"selector\": \"0x095ea7b3\",\n          \"chainId\": 1,\n          \"maxValue\": \"65536\"\n        },\n        {\n          \"to\": \"0x833589fcd6edb6e08f4c7c32d4f71b54bda02913\",\n          \"selector\": \"0xa9059cbb\",\n          \"chainId\": 8453,\n          \"maxValue\": \"0\"\n        }\n      ]\n    }\n  }\n}",
+              "core": "load"
+            },
+            {
+              "op": "getSigningAutoApprove",
+              "args": [
+                "https://app.example"
+              ],
+              "at": 1762000000005,
+              "result": true,
+              "wrote": false,
+              "text": "{\n  \"https://app.example\": {\n    \"origin\": \"https://app.example\",\n    \"connectedAt\": 1762000000000,\n    \"lastUsed\": 1762000000000,\n    \"walletIndex\": 0,\n    \"chainId\": 1,\n    \"autoApprove\": {\n      \"signing\": true,\n      \"transactions\": [\n        {\n          \"to\": \"0xabababababababababababababababababababab\",\n          \"selector\": \"0x095ea7b3\",\n          \"chainId\": 1,\n          \"maxValue\": \"65536\"\n        },\n        {\n          \"to\": \"0x833589fcd6edb6e08f4c7c32d4f71b54bda02913\",\n          \"selector\": \"0xa9059cbb\",\n          \"chainId\": 8453,\n          \"maxValue\": \"0\"\n        }\n      ]\n    }\n  }\n}",
+              "core": "legacy"
+            },
+            {
+              "op": "isTransactionAutoApproved",
+              "args": [
+                "https://app.example",
+                "0xABABABABABABABABABABABABABABABABABABABAB",
+                "0x095ea7b3",
+                1,
+                "65536"
+              ],
+              "at": 1762000000005,
+              "result": true,
+              "wrote": false,
+              "text": "{\n  \"https://app.example\": {\n    \"origin\": \"https://app.example\",\n    \"connectedAt\": 1762000000000,\n    \"lastUsed\": 1762000000000,\n    \"walletIndex\": 0,\n    \"chainId\": 1,\n    \"autoApprove\": {\n      \"signing\": true,\n      \"transactions\": [\n        {\n          \"to\": \"0xabababababababababababababababababababab\",\n          \"selector\": \"0x095ea7b3\",\n          \"chainId\": 1,\n          \"maxValue\": \"65536\"\n        },\n        {\n          \"to\": \"0x833589fcd6edb6e08f4c7c32d4f71b54bda02913\",\n          \"selector\": \"0xa9059cbb\",\n          \"chainId\": 8453,\n          \"maxValue\": \"0\"\n        }\n      ]\n    }\n  }\n}",
+              "core": "legacy"
+            },
+            {
+              "op": "isTransactionAutoApproved",
+              "args": [
+                "https://app.example",
+                "0xAbAbAbAbAbAbAbAbAbAbAbAbAbAbAbAbAbAbAbAb",
+                "0x095ea7b3",
+                1,
+                "65537"
+              ],
+              "at": 1762000000005,
+              "result": false,
+              "wrote": false,
+              "text": "{\n  \"https://app.example\": {\n    \"origin\": \"https://app.example\",\n    \"connectedAt\": 1762000000000,\n    \"lastUsed\": 1762000000000,\n    \"walletIndex\": 0,\n    \"chainId\": 1,\n    \"autoApprove\": {\n      \"signing\": true,\n      \"transactions\": [\n        {\n          \"to\": \"0xabababababababababababababababababababab\",\n          \"selector\": \"0x095ea7b3\",\n          \"chainId\": 1,\n          \"maxValue\": \"65536\"\n        },\n        {\n          \"to\": \"0x833589fcd6edb6e08f4c7c32d4f71b54bda02913\",\n          \"selector\": \"0xa9059cbb\",\n          \"chainId\": 8453,\n          \"maxValue\": \"0\"\n        }\n      ]\n    }\n  }\n}",
+              "core": "legacy"
+            },
+            {
+              "op": "isTransactionAutoApproved",
+              "args": [
+                "https://app.example",
+                "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+                "0xa9059cbb",
+                8453,
+                "0"
+              ],
+              "at": 1762000000005,
+              "result": true,
+              "wrote": false,
+              "text": "{\n  \"https://app.example\": {\n    \"origin\": \"https://app.example\",\n    \"connectedAt\": 1762000000000,\n    \"lastUsed\": 1762000000000,\n    \"walletIndex\": 0,\n    \"chainId\": 1,\n    \"autoApprove\": {\n      \"signing\": true,\n      \"transactions\": [\n        {\n          \"to\": \"0xabababababababababababababababababababab\",\n          \"selector\": \"0x095ea7b3\",\n          \"chainId\": 1,\n          \"maxValue\": \"65536\"\n        },\n        {\n          \"to\": \"0x833589fcd6edb6e08f4c7c32d4f71b54bda02913\",\n          \"selector\": \"0xa9059cbb\",\n          \"chainId\": 8453,\n          \"maxValue\": \"0\"\n        }\n      ]\n    }\n  }\n}",
+              "core": "legacy"
+            },
+            {
+              "op": "isTransactionAutoApproved",
+              "args": [
+                "https://app.example",
+                "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+                "0xA9059CBB",
+                8453,
+                "1"
+              ],
+              "at": 1762000000005,
+              "result": false,
+              "wrote": false,
+              "text": "{\n  \"https://app.example\": {\n    \"origin\": \"https://app.example\",\n    \"connectedAt\": 1762000000000,\n    \"lastUsed\": 1762000000000,\n    \"walletIndex\": 0,\n    \"chainId\": 1,\n    \"autoApprove\": {\n      \"signing\": true,\n      \"transactions\": [\n        {\n          \"to\": \"0xabababababababababababababababababababab\",\n          \"selector\": \"0x095ea7b3\",\n          \"chainId\": 1,\n          \"maxValue\": \"65536\"\n        },\n        {\n          \"to\": \"0x833589fcd6edb6e08f4c7c32d4f71b54bda02913\",\n          \"selector\": \"0xa9059cbb\",\n          \"chainId\": 8453,\n          \"maxValue\": \"0\"\n        }\n      ]\n    }\n  }\n}",
+              "core": "legacy"
+            },
+            {
+              "op": "updateLastUsed",
+              "args": [
+                "https://app.example",
+                10
+              ],
+              "at": 1762000000006,
+              "result": true,
+              "wrote": true,
+              "text": "{\n  \"https://app.example\": {\n    \"origin\": \"https://app.example\",\n    \"connectedAt\": 1762000000000,\n    \"lastUsed\": 1762000000006,\n    \"walletIndex\": 0,\n    \"chainId\": 10,\n    \"autoApprove\": {\n      \"signing\": true,\n      \"transactions\": [\n        {\n          \"to\": \"0xabababababababababababababababababababab\",\n          \"selector\": \"0x095ea7b3\",\n          \"chainId\": 1,\n          \"maxValue\": \"65536\"\n        },\n        {\n          \"to\": \"0x833589fcd6edb6e08f4c7c32d4f71b54bda02913\",\n          \"selector\": \"0xa9059cbb\",\n          \"chainId\": 8453,\n          \"maxValue\": \"0\"\n        }\n      ]\n    }\n  }\n}"
+            },
+            {
+              "op": "removeTransactionAutoApprove",
+              "args": [
+                "https://app.example",
+                "0xabababababababababababababababababababab",
+                "0x095EA7B3",
+                1
+              ],
+              "at": 1762000000007,
+              "result": true,
+              "wrote": true,
+              "text": "{\n  \"https://app.example\": {\n    \"origin\": \"https://app.example\",\n    \"connectedAt\": 1762000000000,\n    \"lastUsed\": 1762000000006,\n    \"walletIndex\": 0,\n    \"chainId\": 10,\n    \"autoApprove\": {\n      \"signing\": true,\n      \"transactions\": [\n        {\n          \"to\": \"0x833589fcd6edb6e08f4c7c32d4f71b54bda02913\",\n          \"selector\": \"0xa9059cbb\",\n          \"chainId\": 8453,\n          \"maxValue\": \"0\"\n        }\n      ]\n    }\n  }\n}"
+            },
+            {
+              "op": "removeTransactionAutoApprove",
+              "args": [
+                "https://app.example",
+                "0xAbAbAbAbAbAbAbAbAbAbAbAbAbAbAbAbAbAbAbAb",
+                "0x095ea7b3",
+                1
+              ],
+              "at": 1762000000008,
+              "result": false,
+              "wrote": false,
+              "text": "{\n  \"https://app.example\": {\n    \"origin\": \"https://app.example\",\n    \"connectedAt\": 1762000000000,\n    \"lastUsed\": 1762000000006,\n    \"walletIndex\": 0,\n    \"chainId\": 10,\n    \"autoApprove\": {\n      \"signing\": true,\n      \"transactions\": [\n        {\n          \"to\": \"0x833589fcd6edb6e08f4c7c32d4f71b54bda02913\",\n          \"selector\": \"0xa9059cbb\",\n          \"chainId\": 8453,\n          \"maxValue\": \"0\"\n        }\n      ]\n    }\n  }\n}"
+            },
+            {
+              "op": "removeTransactionAutoApprove",
+              "args": [
+                "https://app.example",
+                "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+                "0xA9059CBB",
+                1
+              ],
+              "at": 1762000000009,
+              "result": false,
+              "wrote": false,
+              "text": "{\n  \"https://app.example\": {\n    \"origin\": \"https://app.example\",\n    \"connectedAt\": 1762000000000,\n    \"lastUsed\": 1762000000006,\n    \"walletIndex\": 0,\n    \"chainId\": 10,\n    \"autoApprove\": {\n      \"signing\": true,\n      \"transactions\": [\n        {\n          \"to\": \"0x833589fcd6edb6e08f4c7c32d4f71b54bda02913\",\n          \"selector\": \"0xa9059cbb\",\n          \"chainId\": 8453,\n          \"maxValue\": \"0\"\n        }\n      ]\n    }\n  }\n}"
+            },
+            {
+              "op": "setSigningAutoApprove",
+              "args": [
+                "https://app.example",
+                false
+              ],
+              "at": 1762000000010,
+              "result": true,
+              "wrote": true,
+              "text": "{\n  \"https://app.example\": {\n    \"origin\": \"https://app.example\",\n    \"connectedAt\": 1762000000000,\n    \"lastUsed\": 1762000000006,\n    \"walletIndex\": 0,\n    \"chainId\": 10,\n    \"autoApprove\": {\n      \"signing\": false,\n      \"transactions\": [\n        {\n          \"to\": \"0x833589fcd6edb6e08f4c7c32d4f71b54bda02913\",\n          \"selector\": \"0xa9059cbb\",\n          \"chainId\": 8453,\n          \"maxValue\": \"0\"\n        }\n      ]\n    }\n  }\n}"
+            },
+            {
+              "op": "setSigningAutoApprove",
+              "args": [
+                "https://app.example",
+                false
+              ],
+              "at": 1762000000011,
+              "result": true,
+              "wrote": true,
+              "text": "{\n  \"https://app.example\": {\n    \"origin\": \"https://app.example\",\n    \"connectedAt\": 1762000000000,\n    \"lastUsed\": 1762000000006,\n    \"walletIndex\": 0,\n    \"chainId\": 10,\n    \"autoApprove\": {\n      \"signing\": false,\n      \"transactions\": [\n        {\n          \"to\": \"0x833589fcd6edb6e08f4c7c32d4f71b54bda02913\",\n          \"selector\": \"0xa9059cbb\",\n          \"chainId\": 8453,\n          \"maxValue\": \"0\"\n        }\n      ]\n    }\n  }\n}"
+            },
+            {
+              "op": "setSigningAutoApprove",
+              "args": [
+                "https://other.example",
+                false
+              ],
+              "at": 1762000000012,
+              "result": false,
+              "wrote": false,
+              "text": "{\n  \"https://app.example\": {\n    \"origin\": \"https://app.example\",\n    \"connectedAt\": 1762000000000,\n    \"lastUsed\": 1762000000006,\n    \"walletIndex\": 0,\n    \"chainId\": 10,\n    \"autoApprove\": {\n      \"signing\": false,\n      \"transactions\": [\n        {\n          \"to\": \"0x833589fcd6edb6e08f4c7c32d4f71b54bda02913\",\n          \"selector\": \"0xa9059cbb\",\n          \"chainId\": 8453,\n          \"maxValue\": \"0\"\n        }\n      ]\n    }\n  }\n}"
+            },
+            {
+              "op": "removeTransactionAutoApprove",
+              "args": [
+                "https://other.example",
+                "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+                "0xA9059CBB",
+                8453
+              ],
+              "at": 1762000000012,
+              "result": false,
+              "wrote": false,
+              "text": "{\n  \"https://app.example\": {\n    \"origin\": \"https://app.example\",\n    \"connectedAt\": 1762000000000,\n    \"lastUsed\": 1762000000006,\n    \"walletIndex\": 0,\n    \"chainId\": 10,\n    \"autoApprove\": {\n      \"signing\": false,\n      \"transactions\": [\n        {\n          \"to\": \"0x833589fcd6edb6e08f4c7c32d4f71b54bda02913\",\n          \"selector\": \"0xa9059cbb\",\n          \"chainId\": 8453,\n          \"maxValue\": \"0\"\n        }\n      ]\n    }\n  }\n}"
+            },
+            {
+              "op": "removeTransactionAutoApprove",
+              "args": [
+                "https://app.example",
+                "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+                "0xA9059CBB",
+                8453
+              ],
+              "at": 1762000000013,
+              "result": true,
+              "wrote": true,
+              "text": "{\n  \"https://app.example\": {\n    \"origin\": \"https://app.example\",\n    \"connectedAt\": 1762000000000,\n    \"lastUsed\": 1762000000006,\n    \"walletIndex\": 0,\n    \"chainId\": 10,\n    \"autoApprove\": {\n      \"signing\": false,\n      \"transactions\": []\n    }\n  }\n}"
+            },
+            {
+              "op": "getPermission",
+              "args": [
+                "https://app.example"
+              ],
+              "at": 1762000000014,
+              "result": {
+                "origin": "https://app.example",
+                "connectedAt": 1762000000000,
+                "lastUsed": 1762000000006,
+                "walletIndex": 0,
+                "chainId": 10,
+                "autoApprove": {
+                  "signing": false,
+                  "transactions": []
+                }
+              },
+              "wrote": false,
+              "text": "{\n  \"https://app.example\": {\n    \"origin\": \"https://app.example\",\n    \"connectedAt\": 1762000000000,\n    \"lastUsed\": 1762000000006,\n    \"walletIndex\": 0,\n    \"chainId\": 10,\n    \"autoApprove\": {\n      \"signing\": false,\n      \"transactions\": []\n    }\n  }\n}"
+            }
+          ]
+        },
+        {
+          "id": "forget-account",
+          "start": null,
+          "steps": [
+            {
+              "op": "grantPermission",
+              "args": [
+                "https://app.example",
+                0,
+                1
+              ],
+              "at": 1762000000000,
+              "result": {
+                "origin": "https://app.example",
+                "connectedAt": 1762000000000,
+                "lastUsed": 1762000000000,
+                "walletIndex": 0,
+                "chainId": 1,
+                "autoApprove": {
+                  "signing": false,
+                  "transactions": []
+                }
+              },
+              "wrote": true,
+              "text": "{\n  \"https://app.example\": {\n    \"origin\": \"https://app.example\",\n    \"connectedAt\": 1762000000000,\n    \"lastUsed\": 1762000000000,\n    \"walletIndex\": 0,\n    \"chainId\": 1,\n    \"autoApprove\": {\n      \"signing\": false,\n      \"transactions\": []\n    }\n  }\n}"
+            },
+            {
+              "op": "grantPermission",
+              "args": [
+                "https://other.example",
+                1,
+                1
+              ],
+              "at": 1762000000001,
+              "result": {
+                "origin": "https://other.example",
+                "connectedAt": 1762000000001,
+                "lastUsed": 1762000000001,
+                "walletIndex": 1,
+                "chainId": 1,
+                "autoApprove": {
+                  "signing": false,
+                  "transactions": []
+                }
+              },
+              "wrote": true,
+              "text": "{\n  \"https://app.example\": {\n    \"origin\": \"https://app.example\",\n    \"connectedAt\": 1762000000000,\n    \"lastUsed\": 1762000000000,\n    \"walletIndex\": 0,\n    \"chainId\": 1,\n    \"autoApprove\": {\n      \"signing\": false,\n      \"transactions\": []\n    }\n  },\n  \"https://other.example\": {\n    \"origin\": \"https://other.example\",\n    \"connectedAt\": 1762000000001,\n    \"lastUsed\": 1762000000001,\n    \"walletIndex\": 1,\n    \"chainId\": 1,\n    \"autoApprove\": {\n      \"signing\": false,\n      \"transactions\": []\n    }\n  }\n}"
+            },
+            {
+              "op": "grantPermission",
+              "args": [
+                "myapp.eth",
+                0,
+                100
+              ],
+              "at": 1762000000002,
+              "result": {
+                "origin": "myapp.eth",
+                "connectedAt": 1762000000002,
+                "lastUsed": 1762000000002,
+                "walletIndex": 0,
+                "chainId": 100,
+                "autoApprove": {
+                  "signing": false,
+                  "transactions": []
+                }
+              },
+              "wrote": true,
+              "text": "{\n  \"https://app.example\": {\n    \"origin\": \"https://app.example\",\n    \"connectedAt\": 1762000000000,\n    \"lastUsed\": 1762000000000,\n    \"walletIndex\": 0,\n    \"chainId\": 1,\n    \"autoApprove\": {\n      \"signing\": false,\n      \"transactions\": []\n    }\n  },\n  \"https://other.example\": {\n    \"origin\": \"https://other.example\",\n    \"connectedAt\": 1762000000001,\n    \"lastUsed\": 1762000000001,\n    \"walletIndex\": 1,\n    \"chainId\": 1,\n    \"autoApprove\": {\n      \"signing\": false,\n      \"transactions\": []\n    }\n  },\n  \"myapp.eth\": {\n    \"origin\": \"myapp.eth\",\n    \"connectedAt\": 1762000000002,\n    \"lastUsed\": 1762000000002,\n    \"walletIndex\": 0,\n    \"chainId\": 100,\n    \"autoApprove\": {\n      \"signing\": false,\n      \"transactions\": []\n    }\n  }\n}"
+            },
+            {
+              "op": "grantPermission",
+              "args": [
+                "bzz://abababababababababababababababababababababababababababababababab",
+                2,
+                1
+              ],
+              "at": 1762000000003,
+              "result": {
+                "origin": "bzz://abababababababababababababababababababababababababababababababab",
+                "connectedAt": 1762000000003,
+                "lastUsed": 1762000000003,
+                "walletIndex": 2,
+                "chainId": 1,
+                "autoApprove": {
+                  "signing": false,
+                  "transactions": []
+                }
+              },
+              "wrote": true,
+              "text": "{\n  \"https://app.example\": {\n    \"origin\": \"https://app.example\",\n    \"connectedAt\": 1762000000000,\n    \"lastUsed\": 1762000000000,\n    \"walletIndex\": 0,\n    \"chainId\": 1,\n    \"autoApprove\": {\n      \"signing\": false,\n      \"transactions\": []\n    }\n  },\n  \"https://other.example\": {\n    \"origin\": \"https://other.example\",\n    \"connectedAt\": 1762000000001,\n    \"lastUsed\": 1762000000001,\n    \"walletIndex\": 1,\n    \"chainId\": 1,\n    \"autoApprove\": {\n      \"signing\": false,\n      \"transactions\": []\n    }\n  },\n  \"myapp.eth\": {\n    \"origin\": \"myapp.eth\",\n    \"connectedAt\": 1762000000002,\n    \"lastUsed\": 1762000000002,\n    \"walletIndex\": 0,\n    \"chainId\": 100,\n    \"autoApprove\": {\n      \"signing\": false,\n      \"transactions\": []\n    }\n  },\n  \"bzz://abababababababababababababababababababababababababababababababab\": {\n    \"origin\": \"bzz://abababababababababababababababababababababababababababababababab\",\n    \"connectedAt\": 1762000000003,\n    \"lastUsed\": 1762000000003,\n    \"walletIndex\": 2,\n    \"chainId\": 1,\n    \"autoApprove\": {\n      \"signing\": false,\n      \"transactions\": []\n    }\n  }\n}"
+            },
+            {
+              "op": "revokePermissionsForWalletIndex",
+              "args": [
+                0
+              ],
+              "at": 1762000000004,
+              "result": [
+                "https://app.example",
+                "myapp.eth"
+              ],
+              "wrote": true,
+              "text": "{\n  \"https://other.example\": {\n    \"origin\": \"https://other.example\",\n    \"connectedAt\": 1762000000001,\n    \"lastUsed\": 1762000000001,\n    \"walletIndex\": 1,\n    \"chainId\": 1,\n    \"autoApprove\": {\n      \"signing\": false,\n      \"transactions\": []\n    }\n  },\n  \"bzz://abababababababababababababababababababababababababababababababab\": {\n    \"origin\": \"bzz://abababababababababababababababababababababababababababababababab\",\n    \"connectedAt\": 1762000000003,\n    \"lastUsed\": 1762000000003,\n    \"walletIndex\": 2,\n    \"chainId\": 1,\n    \"autoApprove\": {\n      \"signing\": false,\n      \"transactions\": []\n    }\n  }\n}"
+            },
+            {
+              "op": "revokePermissionsForWalletIndex",
+              "args": [
+                0
+              ],
+              "at": 1762000000005,
+              "result": [],
+              "wrote": false,
+              "text": "{\n  \"https://other.example\": {\n    \"origin\": \"https://other.example\",\n    \"connectedAt\": 1762000000001,\n    \"lastUsed\": 1762000000001,\n    \"walletIndex\": 1,\n    \"chainId\": 1,\n    \"autoApprove\": {\n      \"signing\": false,\n      \"transactions\": []\n    }\n  },\n  \"bzz://abababababababababababababababababababababababababababababababab\": {\n    \"origin\": \"bzz://abababababababababababababababababababababababababababababababab\",\n    \"connectedAt\": 1762000000003,\n    \"lastUsed\": 1762000000003,\n    \"walletIndex\": 2,\n    \"chainId\": 1,\n    \"autoApprove\": {\n      \"signing\": false,\n      \"transactions\": []\n    }\n  }\n}"
+            },
+            {
+              "op": "revokePermissionsForWalletIndex",
+              "args": [
+                2
+              ],
+              "at": 1762000000006,
+              "result": [
+                "bzz://abababababababababababababababababababababababababababababababab"
+              ],
+              "wrote": true,
+              "text": "{\n  \"https://other.example\": {\n    \"origin\": \"https://other.example\",\n    \"connectedAt\": 1762000000001,\n    \"lastUsed\": 1762000000001,\n    \"walletIndex\": 1,\n    \"chainId\": 1,\n    \"autoApprove\": {\n      \"signing\": false,\n      \"transactions\": []\n    }\n  }\n}"
+            },
+            {
+              "op": "getAllPermissions",
+              "args": [],
+              "at": 1762000000007,
+              "result": [
+                {
+                  "origin": "https://other.example",
+                  "connectedAt": 1762000000001,
+                  "lastUsed": 1762000000001,
+                  "walletIndex": 1,
+                  "chainId": 1,
+                  "autoApprove": {
+                    "signing": false,
+                    "transactions": []
+                  }
+                }
+              ],
+              "wrote": false,
+              "text": "{\n  \"https://other.example\": {\n    \"origin\": \"https://other.example\",\n    \"connectedAt\": 1762000000001,\n    \"lastUsed\": 1762000000001,\n    \"walletIndex\": 1,\n    \"chainId\": 1,\n    \"autoApprove\": {\n      \"signing\": false,\n      \"transactions\": []\n    }\n  }\n}"
+            }
+          ]
+        },
+        {
+          "id": "foreign-fields",
+          "start": "{\n  \"https://app.example\": {\"origin\": \"https://app.example\", \"connectedAt\": 1761999999991, \"lastUsed\": 1761999999991, \"walletIndex\": 0, \"chainId\": 1,\n    \"autoApprove\": {\"signing\": true, \"transactions\": [{\"to\": \"0xAbAbAbAbAbAbAbAbAbAbAbAbAbAbAbAbAbAbAbAb\", \"selector\": \"0x095ea7b3\", \"chainId\": 1}], \"future\": {\"b\": 1, \"10\": 2, \"2\": 3, \"a\": 4}},\n    \"numbers\": [1.5, 1e21, 1E-7, 0.000001, -0, 12345678901234567890, 2.50, 100e-2, -1.25e-10, 9007199254740993],\n    \"text\": \"q\\\"b\\\\s\\/\\u0001\\u001F\\t\\u2028é\\uD83D\\uDE00\\u007f\"},\n  \"https://other.example\": {\"origin\": \"https://other.example\", \"connectedAt\": 1761999999992, \"lastUsed\": 1761999999992, \"walletIndex\": 1, \"chainId\": 100},\n  \"myapp.eth\": {\"origin\": \"myapp.eth\", \"lastUsed\": 1761999999993}\n}",
+          "steps": [
+            {
+              "op": "getAllPermissions",
+              "args": [],
+              "at": 1762000000000,
+              "result": [
+                {
+                  "origin": "myapp.eth",
+                  "lastUsed": 1761999999993
+                },
+                {
+                  "origin": "https://other.example",
+                  "connectedAt": 1761999999992,
+                  "lastUsed": 1761999999992,
+                  "walletIndex": 1,
+                  "chainId": 100
+                },
+                {
+                  "origin": "https://app.example",
+                  "connectedAt": 1761999999991,
+                  "lastUsed": 1761999999991,
+                  "walletIndex": 0,
+                  "chainId": 1,
+                  "autoApprove": {
+                    "signing": true,
+                    "transactions": [
+                      {
+                        "to": "0xAbAbAbAbAbAbAbAbAbAbAbAbAbAbAbAbAbAbAbAb",
+                        "selector": "0x095ea7b3",
+                        "chainId": 1
+                      }
+                    ],
+                    "future": {
+                      "2": 3,
+                      "10": 2,
+                      "b": 1,
+                      "a": 4
+                    }
+                  },
+                  "numbers": [
+                    1.5,
+                    1e+21,
+                    1e-7,
+                    0.000001,
+                    0,
+                    12345678901234567000,
+                    2.5,
+                    1,
+                    -1.25e-10,
+                    9007199254740992
+                  ],
+                  "text": "q\"b\\s/\u0001\u001f\t é😀"
+                }
+              ],
+              "wrote": false,
+              "text": "{\n  \"https://app.example\": {\"origin\": \"https://app.example\", \"connectedAt\": 1761999999991, \"lastUsed\": 1761999999991, \"walletIndex\": 0, \"chainId\": 1,\n    \"autoApprove\": {\"signing\": true, \"transactions\": [{\"to\": \"0xAbAbAbAbAbAbAbAbAbAbAbAbAbAbAbAbAbAbAbAb\", \"selector\": \"0x095ea7b3\", \"chainId\": 1}], \"future\": {\"b\": 1, \"10\": 2, \"2\": 3, \"a\": 4}},\n    \"numbers\": [1.5, 1e21, 1E-7, 0.000001, -0, 12345678901234567890, 2.50, 100e-2, -1.25e-10, 9007199254740993],\n    \"text\": \"q\\\"b\\\\s\\/\\u0001\\u001F\\t\\u2028é\\uD83D\\uDE00\\u007f\"},\n  \"https://other.example\": {\"origin\": \"https://other.example\", \"connectedAt\": 1761999999992, \"lastUsed\": 1761999999992, \"walletIndex\": 1, \"chainId\": 100},\n  \"myapp.eth\": {\"origin\": \"myapp.eth\", \"lastUsed\": 1761999999993}\n}"
+            },
+            {
+              "op": "updateLastUsed",
+              "args": [
+                "https://app.example"
+              ],
+              "at": 1762000000001,
+              "result": true,
+              "wrote": true,
+              "text": "{\n  \"https://app.example\": {\n    \"origin\": \"https://app.example\",\n    \"connectedAt\": 1761999999991,\n    \"lastUsed\": 1762000000001,\n    \"walletIndex\": 0,\n    \"chainId\": 1,\n    \"autoApprove\": {\n      \"signing\": true,\n      \"transactions\": [\n        {\n          \"to\": \"0xAbAbAbAbAbAbAbAbAbAbAbAbAbAbAbAbAbAbAbAb\",\n          \"selector\": \"0x095ea7b3\",\n          \"chainId\": 1\n        }\n      ],\n      \"future\": {\n        \"2\": 3,\n        \"10\": 2,\n        \"b\": 1,\n        \"a\": 4\n      }\n    },\n    \"numbers\": [\n      1.5,\n      1e+21,\n      1e-7,\n      0.000001,\n      0,\n      12345678901234567000,\n      2.5,\n      1,\n      -1.25e-10,\n      9007199254740992\n    ],\n    \"text\": \"q\\\"b\\\\s/\\u0001\\u001f\\t é😀\"\n  },\n  \"https://other.example\": {\n    \"origin\": \"https://other.example\",\n    \"connectedAt\": 1761999999992,\n    \"lastUsed\": 1761999999992,\n    \"walletIndex\": 1,\n    \"chainId\": 100\n  },\n  \"myapp.eth\": {\n    \"origin\": \"myapp.eth\",\n    \"lastUsed\": 1761999999993\n  }\n}"
+            },
+            {
+              "op": "setSigningAutoApprove",
+              "args": [
+                "https://other.example",
+                false
+              ],
+              "at": 1762000000002,
+              "result": true,
+              "wrote": true,
+              "text": "{\n  \"https://app.example\": {\n    \"origin\": \"https://app.example\",\n    \"connectedAt\": 1761999999991,\n    \"lastUsed\": 1762000000001,\n    \"walletIndex\": 0,\n    \"chainId\": 1,\n    \"autoApprove\": {\n      \"signing\": true,\n      \"transactions\": [\n        {\n          \"to\": \"0xAbAbAbAbAbAbAbAbAbAbAbAbAbAbAbAbAbAbAbAb\",\n          \"selector\": \"0x095ea7b3\",\n          \"chainId\": 1\n        }\n      ],\n      \"future\": {\n        \"2\": 3,\n        \"10\": 2,\n        \"b\": 1,\n        \"a\": 4\n      }\n    },\n    \"numbers\": [\n      1.5,\n      1e+21,\n      1e-7,\n      0.000001,\n      0,\n      12345678901234567000,\n      2.5,\n      1,\n      -1.25e-10,\n      9007199254740992\n    ],\n    \"text\": \"q\\\"b\\\\s/\\u0001\\u001f\\t é😀\"\n  },\n  \"https://other.example\": {\n    \"origin\": \"https://other.example\",\n    \"connectedAt\": 1761999999992,\n    \"lastUsed\": 1761999999992,\n    \"walletIndex\": 1,\n    \"chainId\": 100,\n    \"autoApprove\": {\n      \"signing\": false,\n      \"transactions\": []\n    }\n  },\n  \"myapp.eth\": {\n    \"origin\": \"myapp.eth\",\n    \"lastUsed\": 1761999999993\n  }\n}"
+            },
+            {
+              "op": "removeTransactionAutoApprove",
+              "args": [
+                "https://app.example",
+                "0xAbAbAbAbAbAbAbAbAbAbAbAbAbAbAbAbAbAbAbAb",
+                "0x095ea7b3",
+                1
+              ],
+              "at": 1762000000003,
+              "result": true,
+              "wrote": true,
+              "text": "{\n  \"https://app.example\": {\n    \"origin\": \"https://app.example\",\n    \"connectedAt\": 1761999999991,\n    \"lastUsed\": 1762000000001,\n    \"walletIndex\": 0,\n    \"chainId\": 1,\n    \"autoApprove\": {\n      \"signing\": true,\n      \"transactions\": [],\n      \"future\": {\n        \"2\": 3,\n        \"10\": 2,\n        \"b\": 1,\n        \"a\": 4\n      }\n    },\n    \"numbers\": [\n      1.5,\n      1e+21,\n      1e-7,\n      0.000001,\n      0,\n      12345678901234567000,\n      2.5,\n      1,\n      -1.25e-10,\n      9007199254740992\n    ],\n    \"text\": \"q\\\"b\\\\s/\\u0001\\u001f\\t é😀\"\n  },\n  \"https://other.example\": {\n    \"origin\": \"https://other.example\",\n    \"connectedAt\": 1761999999992,\n    \"lastUsed\": 1761999999992,\n    \"walletIndex\": 1,\n    \"chainId\": 100,\n    \"autoApprove\": {\n      \"signing\": false,\n      \"transactions\": []\n    }\n  },\n  \"myapp.eth\": {\n    \"origin\": \"myapp.eth\",\n    \"lastUsed\": 1761999999993\n  }\n}"
+            },
+            {
+              "op": "revokePermission",
+              "args": [
+                "myapp.eth"
+              ],
+              "at": 1762000000004,
+              "result": true,
+              "wrote": true,
+              "text": "{\n  \"https://app.example\": {\n    \"origin\": \"https://app.example\",\n    \"connectedAt\": 1761999999991,\n    \"lastUsed\": 1762000000001,\n    \"walletIndex\": 0,\n    \"chainId\": 1,\n    \"autoApprove\": {\n      \"signing\": true,\n      \"transactions\": [],\n      \"future\": {\n        \"2\": 3,\n        \"10\": 2,\n        \"b\": 1,\n        \"a\": 4\n      }\n    },\n    \"numbers\": [\n      1.5,\n      1e+21,\n      1e-7,\n      0.000001,\n      0,\n      12345678901234567000,\n      2.5,\n      1,\n      -1.25e-10,\n      9007199254740992\n    ],\n    \"text\": \"q\\\"b\\\\s/\\u0001\\u001f\\t é😀\"\n  },\n  \"https://other.example\": {\n    \"origin\": \"https://other.example\",\n    \"connectedAt\": 1761999999992,\n    \"lastUsed\": 1761999999992,\n    \"walletIndex\": 1,\n    \"chainId\": 100,\n    \"autoApprove\": {\n      \"signing\": false,\n      \"transactions\": []\n    }\n  }\n}"
+            },
+            {
+              "op": "getPermission",
+              "args": [
+                "https://app.example"
+              ],
+              "at": 1762000000005,
+              "result": {
+                "origin": "https://app.example",
+                "connectedAt": 1761999999991,
+                "lastUsed": 1762000000001,
+                "walletIndex": 0,
+                "chainId": 1,
+                "autoApprove": {
+                  "signing": true,
+                  "transactions": [],
+                  "future": {
+                    "2": 3,
+                    "10": 2,
+                    "b": 1,
+                    "a": 4
+                  }
+                },
+                "numbers": [
+                  1.5,
+                  1e+21,
+                  1e-7,
+                  0.000001,
+                  0,
+                  12345678901234567000,
+                  2.5,
+                  1,
+                  -1.25e-10,
+                  9007199254740992
+                ],
+                "text": "q\"b\\s/\u0001\u001f\t é😀"
+              },
+              "wrote": false,
+              "text": "{\n  \"https://app.example\": {\n    \"origin\": \"https://app.example\",\n    \"connectedAt\": 1761999999991,\n    \"lastUsed\": 1762000000001,\n    \"walletIndex\": 0,\n    \"chainId\": 1,\n    \"autoApprove\": {\n      \"signing\": true,\n      \"transactions\": [],\n      \"future\": {\n        \"2\": 3,\n        \"10\": 2,\n        \"b\": 1,\n        \"a\": 4\n      }\n    },\n    \"numbers\": [\n      1.5,\n      1e+21,\n      1e-7,\n      0.000001,\n      0,\n      12345678901234567000,\n      2.5,\n      1,\n      -1.25e-10,\n      9007199254740992\n    ],\n    \"text\": \"q\\\"b\\\\s/\\u0001\\u001f\\t é😀\"\n  },\n  \"https://other.example\": {\n    \"origin\": \"https://other.example\",\n    \"connectedAt\": 1761999999992,\n    \"lastUsed\": 1761999999992,\n    \"walletIndex\": 1,\n    \"chainId\": 100,\n    \"autoApprove\": {\n      \"signing\": false,\n      \"transactions\": []\n    }\n  }\n}"
+            }
+          ]
+        },
+        {
+          "id": "duplicate-keys",
+          "start": "{\"https://app.example\":{\"origin\":\"https://app.example\",\"walletIndex\":0},\"https://other.example\":{\"origin\":\"https://other.example\"},\"https://app.example\":{\"origin\":\"https://app.example\",\"walletIndex\":7,\"lastUsed\":1}}",
+          "steps": [
+            {
+              "op": "getPermission",
+              "args": [
+                "https://app.example"
+              ],
+              "at": 1762000000000,
+              "result": {
+                "origin": "https://app.example",
+                "walletIndex": 7,
+                "lastUsed": 1
+              },
+              "wrote": false,
+              "text": "{\"https://app.example\":{\"origin\":\"https://app.example\",\"walletIndex\":0},\"https://other.example\":{\"origin\":\"https://other.example\"},\"https://app.example\":{\"origin\":\"https://app.example\",\"walletIndex\":7,\"lastUsed\":1}}"
+            },
+            {
+              "op": "updateLastUsed",
+              "args": [
+                "https://other.example"
+              ],
+              "at": 1762000000001,
+              "result": true,
+              "wrote": true,
+              "text": "{\n  \"https://app.example\": {\n    \"origin\": \"https://app.example\",\n    \"walletIndex\": 7,\n    \"lastUsed\": 1\n  },\n  \"https://other.example\": {\n    \"origin\": \"https://other.example\",\n    \"lastUsed\": 1762000000001\n  }\n}"
+            }
+          ]
+        }
+      ],
+      "malformed": [
+        {
+          "id": "truncated",
+          "text": "{\n  \"https://app.example\": {\n    \"origin\": \"https://app.example\",\n    \"connectedAt\": 1762000000000",
+          "loaded": {
+            "value": []
+          },
+          "afterGrant": {
+            "text": "{\n  \"https://other.example\": {\n    \"origin\": \"https://other.example\",\n    \"connectedAt\": 1762000000000,\n    \"lastUsed\": 1762000000000,\n    \"walletIndex\": 0,\n    \"chainId\": 1,\n    \"autoApprove\": {\n      \"signing\": false,\n      \"transactions\": []\n    }\n  }\n}"
+          },
+          "core": "unreadable"
+        },
+        {
+          "id": "not-json",
+          "text": "not json",
+          "loaded": {
+            "value": []
+          },
+          "afterGrant": {
+            "text": "{\n  \"https://other.example\": {\n    \"origin\": \"https://other.example\",\n    \"connectedAt\": 1762000000000,\n    \"lastUsed\": 1762000000000,\n    \"walletIndex\": 0,\n    \"chainId\": 1,\n    \"autoApprove\": {\n      \"signing\": false,\n      \"transactions\": []\n    }\n  }\n}"
+          },
+          "core": "unreadable"
+        },
+        {
+          "id": "empty",
+          "text": "",
+          "loaded": {
+            "value": []
+          },
+          "afterGrant": {
+            "text": "{\n  \"https://other.example\": {\n    \"origin\": \"https://other.example\",\n    \"connectedAt\": 1762000000000,\n    \"lastUsed\": 1762000000000,\n    \"walletIndex\": 0,\n    \"chainId\": 1,\n    \"autoApprove\": {\n      \"signing\": false,\n      \"transactions\": []\n    }\n  }\n}"
+          },
+          "core": "unreadable"
+        },
+        {
+          "id": "byte-order-mark",
+          "text": "﻿{}",
+          "loaded": {
+            "value": []
+          },
+          "afterGrant": {
+            "text": "{\n  \"https://other.example\": {\n    \"origin\": \"https://other.example\",\n    \"connectedAt\": 1762000000000,\n    \"lastUsed\": 1762000000000,\n    \"walletIndex\": 0,\n    \"chainId\": 1,\n    \"autoApprove\": {\n      \"signing\": false,\n      \"transactions\": []\n    }\n  }\n}"
+          },
+          "core": "unreadable"
+        },
+        {
+          "id": "trailing-comma",
+          "text": "{\"https://app.example\": {\"origin\": \"https://app.example\"},}",
+          "loaded": {
+            "value": []
+          },
+          "afterGrant": {
+            "text": "{\n  \"https://other.example\": {\n    \"origin\": \"https://other.example\",\n    \"connectedAt\": 1762000000000,\n    \"lastUsed\": 1762000000000,\n    \"walletIndex\": 0,\n    \"chainId\": 1,\n    \"autoApprove\": {\n      \"signing\": false,\n      \"transactions\": []\n    }\n  }\n}"
+          },
+          "core": "unreadable"
+        },
+        {
+          "id": "array",
+          "text": "[]",
+          "loaded": {
+            "value": []
+          },
+          "afterGrant": {
+            "text": "[]"
+          },
+          "core": "unreadable"
+        },
+        {
+          "id": "array-of-entries",
+          "text": "[{\"origin\": \"https://app.example\", \"walletIndex\": 0}]",
+          "loaded": {
+            "value": [
+              {
+                "origin": "https://app.example",
+                "walletIndex": 0
+              }
+            ]
+          },
+          "afterGrant": {
+            "text": "[\n  {\n    \"origin\": \"https://app.example\",\n    \"walletIndex\": 0\n  }\n]"
+          },
+          "core": "unreadable"
+        },
+        {
+          "id": "number",
+          "text": "42",
+          "loaded": {
+            "value": []
+          },
+          "afterGrant": {
+            "text": "42"
+          },
+          "core": "unreadable"
+        },
+        {
+          "id": "string",
+          "text": "\"text\"",
+          "loaded": {
+            "value": [
+              "t",
+              "e",
+              "x",
+              "t"
+            ]
+          },
+          "afterGrant": {
+            "text": "\"text\""
+          },
+          "core": "unreadable"
+        },
+        {
+          "id": "null",
+          "text": "null",
+          "loaded": {
+            "error": "Cannot convert undefined or null to object"
+          },
+          "afterGrant": {
+            "error": "Cannot set properties of null (setting 'https://other.example')"
+          },
+          "core": "unreadable"
+        },
+        {
+          "id": "entry-not-object",
+          "text": "{\"https://app.example\": 5}",
+          "loaded": {
+            "value": [
+              5
+            ]
+          },
+          "afterGrant": {
+            "text": "{\n  \"https://app.example\": 5,\n  \"https://other.example\": {\n    \"origin\": \"https://other.example\",\n    \"connectedAt\": 1762000000000,\n    \"lastUsed\": 1762000000000,\n    \"walletIndex\": 0,\n    \"chainId\": 1,\n    \"autoApprove\": {\n      \"signing\": false,\n      \"transactions\": []\n    }\n  }\n}"
+          },
+          "core": "unreadable"
+        },
+        {
+          "id": "entry-null",
+          "text": "{\"https://app.example\": null}",
+          "loaded": {
+            "value": [
+              null
+            ]
+          },
+          "afterGrant": {
+            "text": "{\n  \"https://app.example\": null,\n  \"https://other.example\": {\n    \"origin\": \"https://other.example\",\n    \"connectedAt\": 1762000000000,\n    \"lastUsed\": 1762000000000,\n    \"walletIndex\": 0,\n    \"chainId\": 1,\n    \"autoApprove\": {\n      \"signing\": false,\n      \"transactions\": []\n    }\n  }\n}"
+          },
+          "core": "unreadable"
+        },
+        {
+          "id": "whitespace-around",
+          "text": "\n \t{\"https://app.example\": {\"origin\": \"https://app.example\", \"lastUsed\": 1}}\r\n ",
+          "loaded": {
+            "value": [
+              {
+                "origin": "https://app.example",
+                "lastUsed": 1
+              }
+            ]
+          },
+          "afterGrant": {
+            "text": "{\n  \"https://app.example\": {\n    \"origin\": \"https://app.example\",\n    \"lastUsed\": 1\n  },\n  \"https://other.example\": {\n    \"origin\": \"https://other.example\",\n    \"connectedAt\": 1762000000000,\n    \"lastUsed\": 1762000000000,\n    \"walletIndex\": 0,\n    \"chainId\": 1,\n    \"autoApprove\": {\n      \"signing\": false,\n      \"transactions\": []\n    }\n  }\n}"
+          },
+          "core": "parsed"
+        },
+        {
+          "id": "empty-object",
+          "text": "{}",
+          "loaded": {
+            "value": []
+          },
+          "afterGrant": {
+            "text": "{\n  \"https://other.example\": {\n    \"origin\": \"https://other.example\",\n    \"connectedAt\": 1762000000000,\n    \"lastUsed\": 1762000000000,\n    \"walletIndex\": 0,\n    \"chainId\": 1,\n    \"autoApprove\": {\n      \"signing\": false,\n      \"transactions\": []\n    }\n  }\n}"
+          },
+          "core": "parsed"
+        }
+      ]
+    },
+    "swarm": {
+      "file": "swarm-permissions.json",
+      "runs": [
+        {
+          "id": "tiers",
+          "start": null,
+          "steps": [
+            {
+              "op": "grantPermission",
+              "args": [
+                "https://app.example"
+              ],
+              "at": 1762000000000,
+              "result": {
+                "origin": "https://app.example",
+                "connectedAt": 1762000000000,
+                "lastUsed": 1762000000000,
+                "autoApprove": {
+                  "publish": false,
+                  "feeds": false,
+                  "signing": false,
+                  "messaging": false
+                }
+              },
+              "wrote": true,
+              "text": "{\n  \"https://app.example\": {\n    \"origin\": \"https://app.example\",\n    \"connectedAt\": 1762000000000,\n    \"lastUsed\": 1762000000000,\n    \"autoApprove\": {\n      \"publish\": false,\n      \"feeds\": false,\n      \"signing\": false,\n      \"messaging\": false\n    }\n  }\n}"
+            },
+            {
+              "op": "grantPermission",
+              "args": [
+                "myapp.eth"
+              ],
+              "at": 1762000000001,
+              "result": {
+                "origin": "myapp.eth",
+                "connectedAt": 1762000000001,
+                "lastUsed": 1762000000001,
+                "autoApprove": {
+                  "publish": false,
+                  "feeds": false,
+                  "signing": false,
+                  "messaging": false
+                }
+              },
+              "wrote": true,
+              "text": "{\n  \"https://app.example\": {\n    \"origin\": \"https://app.example\",\n    \"connectedAt\": 1762000000000,\n    \"lastUsed\": 1762000000000,\n    \"autoApprove\": {\n      \"publish\": false,\n      \"feeds\": false,\n      \"signing\": false,\n      \"messaging\": false\n    }\n  },\n  \"myapp.eth\": {\n    \"origin\": \"myapp.eth\",\n    \"connectedAt\": 1762000000001,\n    \"lastUsed\": 1762000000001,\n    \"autoApprove\": {\n      \"publish\": false,\n      \"feeds\": false,\n      \"signing\": false,\n      \"messaging\": false\n    }\n  }\n}"
+            },
+            {
+              "op": "setAutoApprove",
+              "args": [
+                "https://app.example",
+                "publish",
+                true
+              ],
+              "at": 1762000000002,
+              "result": true,
+              "wrote": true,
+              "text": "{\n  \"https://app.example\": {\n    \"origin\": \"https://app.example\",\n    \"connectedAt\": 1762000000000,\n    \"lastUsed\": 1762000000000,\n    \"autoApprove\": {\n      \"publish\": true,\n      \"feeds\": false,\n      \"signing\": false,\n      \"messaging\": false\n    }\n  },\n  \"myapp.eth\": {\n    \"origin\": \"myapp.eth\",\n    \"connectedAt\": 1762000000001,\n    \"lastUsed\": 1762000000001,\n    \"autoApprove\": {\n      \"publish\": false,\n      \"feeds\": false,\n      \"signing\": false,\n      \"messaging\": false\n    }\n  }\n}"
+            },
+            {
+              "op": "setAutoApprove",
+              "args": [
+                "https://app.example",
+                "feeds",
+                true
+              ],
+              "at": 1762000000003,
+              "result": true,
+              "wrote": true,
+              "text": "{\n  \"https://app.example\": {\n    \"origin\": \"https://app.example\",\n    \"connectedAt\": 1762000000000,\n    \"lastUsed\": 1762000000000,\n    \"autoApprove\": {\n      \"publish\": true,\n      \"feeds\": true,\n      \"signing\": false,\n      \"messaging\": false\n    }\n  },\n  \"myapp.eth\": {\n    \"origin\": \"myapp.eth\",\n    \"connectedAt\": 1762000000001,\n    \"lastUsed\": 1762000000001,\n    \"autoApprove\": {\n      \"publish\": false,\n      \"feeds\": false,\n      \"signing\": false,\n      \"messaging\": false\n    }\n  }\n}"
+            },
+            {
+              "op": "setAutoApprove",
+              "args": [
+                "https://app.example",
+                "bogus",
+                true
+              ],
+              "at": 1762000000004,
+              "result": false,
+              "wrote": false,
+              "text": "{\n  \"https://app.example\": {\n    \"origin\": \"https://app.example\",\n    \"connectedAt\": 1762000000000,\n    \"lastUsed\": 1762000000000,\n    \"autoApprove\": {\n      \"publish\": true,\n      \"feeds\": true,\n      \"signing\": false,\n      \"messaging\": false\n    }\n  },\n  \"myapp.eth\": {\n    \"origin\": \"myapp.eth\",\n    \"connectedAt\": 1762000000001,\n    \"lastUsed\": 1762000000001,\n    \"autoApprove\": {\n      \"publish\": false,\n      \"feeds\": false,\n      \"signing\": false,\n      \"messaging\": false\n    }\n  }\n}"
+            },
+            {
+              "op": "setAutoApprove",
+              "args": [
+                "https://other.example",
+                "publish",
+                true
+              ],
+              "at": 1762000000004,
+              "result": false,
+              "wrote": false,
+              "text": "{\n  \"https://app.example\": {\n    \"origin\": \"https://app.example\",\n    \"connectedAt\": 1762000000000,\n    \"lastUsed\": 1762000000000,\n    \"autoApprove\": {\n      \"publish\": true,\n      \"feeds\": true,\n      \"signing\": false,\n      \"messaging\": false\n    }\n  },\n  \"myapp.eth\": {\n    \"origin\": \"myapp.eth\",\n    \"connectedAt\": 1762000000001,\n    \"lastUsed\": 1762000000001,\n    \"autoApprove\": {\n      \"publish\": false,\n      \"feeds\": false,\n      \"signing\": false,\n      \"messaging\": false\n    }\n  }\n}"
+            },
+            {
+              "op": "grantMessaging",
+              "args": [
+                "https://app.example"
+              ],
+              "at": 1762000000005,
+              "result": true,
+              "wrote": true,
+              "text": "{\n  \"https://app.example\": {\n    \"origin\": \"https://app.example\",\n    \"connectedAt\": 1762000000000,\n    \"lastUsed\": 1762000000000,\n    \"autoApprove\": {\n      \"publish\": true,\n      \"feeds\": true,\n      \"signing\": false,\n      \"messaging\": false\n    },\n    \"messaging\": {\n      \"grantedAt\": 1762000000005\n    }\n  },\n  \"myapp.eth\": {\n    \"origin\": \"myapp.eth\",\n    \"connectedAt\": 1762000000001,\n    \"lastUsed\": 1762000000001,\n    \"autoApprove\": {\n      \"publish\": false,\n      \"feeds\": false,\n      \"signing\": false,\n      \"messaging\": false\n    }\n  }\n}"
+            },
+            {
+              "op": "grantMessaging",
+              "args": [
+                "https://other.example"
+              ],
+              "at": 1762000000005,
+              "result": false,
+              "wrote": false,
+              "text": "{\n  \"https://app.example\": {\n    \"origin\": \"https://app.example\",\n    \"connectedAt\": 1762000000000,\n    \"lastUsed\": 1762000000000,\n    \"autoApprove\": {\n      \"publish\": true,\n      \"feeds\": true,\n      \"signing\": false,\n      \"messaging\": false\n    },\n    \"messaging\": {\n      \"grantedAt\": 1762000000005\n    }\n  },\n  \"myapp.eth\": {\n    \"origin\": \"myapp.eth\",\n    \"connectedAt\": 1762000000001,\n    \"lastUsed\": 1762000000001,\n    \"autoApprove\": {\n      \"publish\": false,\n      \"feeds\": false,\n      \"signing\": false,\n      \"messaging\": false\n    }\n  }\n}"
+            },
+            {
+              "op": "setAutoApprove",
+              "args": [
+                "https://app.example",
+                "messaging",
+                true
+              ],
+              "at": 1762000000006,
+              "result": true,
+              "wrote": true,
+              "text": "{\n  \"https://app.example\": {\n    \"origin\": \"https://app.example\",\n    \"connectedAt\": 1762000000000,\n    \"lastUsed\": 1762000000000,\n    \"autoApprove\": {\n      \"publish\": true,\n      \"feeds\": true,\n      \"signing\": false,\n      \"messaging\": true\n    },\n    \"messaging\": {\n      \"grantedAt\": 1762000000005\n    }\n  },\n  \"myapp.eth\": {\n    \"origin\": \"myapp.eth\",\n    \"connectedAt\": 1762000000001,\n    \"lastUsed\": 1762000000001,\n    \"autoApprove\": {\n      \"publish\": false,\n      \"feeds\": false,\n      \"signing\": false,\n      \"messaging\": false\n    }\n  }\n}"
+            },
+            {
+              "op": "setAutoApprove",
+              "args": [
+                "https://app.example",
+                "signing",
+                true
+              ],
+              "at": 1762000000007,
+              "result": true,
+              "wrote": true,
+              "text": "{\n  \"https://app.example\": {\n    \"origin\": \"https://app.example\",\n    \"connectedAt\": 1762000000000,\n    \"lastUsed\": 1762000000000,\n    \"autoApprove\": {\n      \"publish\": true,\n      \"feeds\": true,\n      \"signing\": true,\n      \"messaging\": true\n    },\n    \"messaging\": {\n      \"grantedAt\": 1762000000005\n    }\n  },\n  \"myapp.eth\": {\n    \"origin\": \"myapp.eth\",\n    \"connectedAt\": 1762000000001,\n    \"lastUsed\": 1762000000001,\n    \"autoApprove\": {\n      \"publish\": false,\n      \"feeds\": false,\n      \"signing\": false,\n      \"messaging\": false\n    }\n  }\n}"
+            },
+            {
+              "op": "getAutoApprove",
+              "args": [
+                "https://app.example",
+                "feeds"
+              ],
+              "at": 1762000000008,
+              "result": true,
+              "wrote": false,
+              "text": "{\n  \"https://app.example\": {\n    \"origin\": \"https://app.example\",\n    \"connectedAt\": 1762000000000,\n    \"lastUsed\": 1762000000000,\n    \"autoApprove\": {\n      \"publish\": true,\n      \"feeds\": true,\n      \"signing\": true,\n      \"messaging\": true\n    },\n    \"messaging\": {\n      \"grantedAt\": 1762000000005\n    }\n  },\n  \"myapp.eth\": {\n    \"origin\": \"myapp.eth\",\n    \"connectedAt\": 1762000000001,\n    \"lastUsed\": 1762000000001,\n    \"autoApprove\": {\n      \"publish\": false,\n      \"feeds\": false,\n      \"signing\": false,\n      \"messaging\": false\n    }\n  }\n}"
+            },
+            {
+              "op": "getAutoApprove",
+              "args": [
+                "https://app.example",
+                "bogus"
+              ],
+              "at": 1762000000008,
+              "result": false,
+              "wrote": false,
+              "text": "{\n  \"https://app.example\": {\n    \"origin\": \"https://app.example\",\n    \"connectedAt\": 1762000000000,\n    \"lastUsed\": 1762000000000,\n    \"autoApprove\": {\n      \"publish\": true,\n      \"feeds\": true,\n      \"signing\": true,\n      \"messaging\": true\n    },\n    \"messaging\": {\n      \"grantedAt\": 1762000000005\n    }\n  },\n  \"myapp.eth\": {\n    \"origin\": \"myapp.eth\",\n    \"connectedAt\": 1762000000001,\n    \"lastUsed\": 1762000000001,\n    \"autoApprove\": {\n      \"publish\": false,\n      \"feeds\": false,\n      \"signing\": false,\n      \"messaging\": false\n    }\n  }\n}"
+            },
+            {
+              "op": "hasMessagingGrant",
+              "args": [
+                "https://app.example"
+              ],
+              "at": 1762000000008,
+              "result": true,
+              "wrote": false,
+              "text": "{\n  \"https://app.example\": {\n    \"origin\": \"https://app.example\",\n    \"connectedAt\": 1762000000000,\n    \"lastUsed\": 1762000000000,\n    \"autoApprove\": {\n      \"publish\": true,\n      \"feeds\": true,\n      \"signing\": true,\n      \"messaging\": true\n    },\n    \"messaging\": {\n      \"grantedAt\": 1762000000005\n    }\n  },\n  \"myapp.eth\": {\n    \"origin\": \"myapp.eth\",\n    \"connectedAt\": 1762000000001,\n    \"lastUsed\": 1762000000001,\n    \"autoApprove\": {\n      \"publish\": false,\n      \"feeds\": false,\n      \"signing\": false,\n      \"messaging\": false\n    }\n  }\n}"
+            },
+            {
+              "op": "updateLastUsed",
+              "args": [
+                "myapp.eth"
+              ],
+              "at": 1762000000009,
+              "result": true,
+              "wrote": true,
+              "text": "{\n  \"https://app.example\": {\n    \"origin\": \"https://app.example\",\n    \"connectedAt\": 1762000000000,\n    \"lastUsed\": 1762000000000,\n    \"autoApprove\": {\n      \"publish\": true,\n      \"feeds\": true,\n      \"signing\": true,\n      \"messaging\": true\n    },\n    \"messaging\": {\n      \"grantedAt\": 1762000000005\n    }\n  },\n  \"myapp.eth\": {\n    \"origin\": \"myapp.eth\",\n    \"connectedAt\": 1762000000001,\n    \"lastUsed\": 1762000000009,\n    \"autoApprove\": {\n      \"publish\": false,\n      \"feeds\": false,\n      \"signing\": false,\n      \"messaging\": false\n    }\n  }\n}"
+            },
+            {
+              "op": "updateLastUsed",
+              "args": [
+                "https://other.example"
+              ],
+              "at": 1762000000009,
+              "result": false,
+              "wrote": false,
+              "text": "{\n  \"https://app.example\": {\n    \"origin\": \"https://app.example\",\n    \"connectedAt\": 1762000000000,\n    \"lastUsed\": 1762000000000,\n    \"autoApprove\": {\n      \"publish\": true,\n      \"feeds\": true,\n      \"signing\": true,\n      \"messaging\": true\n    },\n    \"messaging\": {\n      \"grantedAt\": 1762000000005\n    }\n  },\n  \"myapp.eth\": {\n    \"origin\": \"myapp.eth\",\n    \"connectedAt\": 1762000000001,\n    \"lastUsed\": 1762000000009,\n    \"autoApprove\": {\n      \"publish\": false,\n      \"feeds\": false,\n      \"signing\": false,\n      \"messaging\": false\n    }\n  }\n}"
+            },
+            {
+              "op": "getAllPermissions",
+              "args": [],
+              "at": 1762000000010,
+              "result": [
+                {
+                  "origin": "myapp.eth",
+                  "connectedAt": 1762000000001,
+                  "lastUsed": 1762000000009,
+                  "autoApprove": {
+                    "publish": false,
+                    "feeds": false,
+                    "signing": false,
+                    "messaging": false
+                  }
+                },
+                {
+                  "origin": "https://app.example",
+                  "connectedAt": 1762000000000,
+                  "lastUsed": 1762000000000,
+                  "autoApprove": {
+                    "publish": true,
+                    "feeds": true,
+                    "signing": true,
+                    "messaging": true
+                  },
+                  "messaging": {
+                    "grantedAt": 1762000000005
+                  }
+                }
+              ],
+              "wrote": false,
+              "text": "{\n  \"https://app.example\": {\n    \"origin\": \"https://app.example\",\n    \"connectedAt\": 1762000000000,\n    \"lastUsed\": 1762000000000,\n    \"autoApprove\": {\n      \"publish\": true,\n      \"feeds\": true,\n      \"signing\": true,\n      \"messaging\": true\n    },\n    \"messaging\": {\n      \"grantedAt\": 1762000000005\n    }\n  },\n  \"myapp.eth\": {\n    \"origin\": \"myapp.eth\",\n    \"connectedAt\": 1762000000001,\n    \"lastUsed\": 1762000000009,\n    \"autoApprove\": {\n      \"publish\": false,\n      \"feeds\": false,\n      \"signing\": false,\n      \"messaging\": false\n    }\n  }\n}"
+            },
+            {
+              "op": "revokeMessaging",
+              "args": [
+                "https://app.example"
+              ],
+              "at": 1762000000011,
+              "result": true,
+              "wrote": true,
+              "text": "{\n  \"https://app.example\": {\n    \"origin\": \"https://app.example\",\n    \"connectedAt\": 1762000000000,\n    \"lastUsed\": 1762000000000,\n    \"autoApprove\": {\n      \"publish\": true,\n      \"feeds\": true,\n      \"signing\": true,\n      \"messaging\": false\n    }\n  },\n  \"myapp.eth\": {\n    \"origin\": \"myapp.eth\",\n    \"connectedAt\": 1762000000001,\n    \"lastUsed\": 1762000000009,\n    \"autoApprove\": {\n      \"publish\": false,\n      \"feeds\": false,\n      \"signing\": false,\n      \"messaging\": false\n    }\n  }\n}"
+            },
+            {
+              "op": "revokeMessaging",
+              "args": [
+                "https://app.example"
+              ],
+              "at": 1762000000012,
+              "result": false,
+              "wrote": false,
+              "text": "{\n  \"https://app.example\": {\n    \"origin\": \"https://app.example\",\n    \"connectedAt\": 1762000000000,\n    \"lastUsed\": 1762000000000,\n    \"autoApprove\": {\n      \"publish\": true,\n      \"feeds\": true,\n      \"signing\": true,\n      \"messaging\": false\n    }\n  },\n  \"myapp.eth\": {\n    \"origin\": \"myapp.eth\",\n    \"connectedAt\": 1762000000001,\n    \"lastUsed\": 1762000000009,\n    \"autoApprove\": {\n      \"publish\": false,\n      \"feeds\": false,\n      \"signing\": false,\n      \"messaging\": false\n    }\n  }\n}"
+            },
+            {
+              "op": "setAutoApprove",
+              "args": [
+                "https://app.example",
+                "feeds",
+                false
+              ],
+              "at": 1762000000013,
+              "result": true,
+              "wrote": true,
+              "text": "{\n  \"https://app.example\": {\n    \"origin\": \"https://app.example\",\n    \"connectedAt\": 1762000000000,\n    \"lastUsed\": 1762000000000,\n    \"autoApprove\": {\n      \"publish\": true,\n      \"feeds\": false,\n      \"signing\": true,\n      \"messaging\": false\n    }\n  },\n  \"myapp.eth\": {\n    \"origin\": \"myapp.eth\",\n    \"connectedAt\": 1762000000001,\n    \"lastUsed\": 1762000000009,\n    \"autoApprove\": {\n      \"publish\": false,\n      \"feeds\": false,\n      \"signing\": false,\n      \"messaging\": false\n    }\n  }\n}"
+            },
+            {
+              "op": "revokePermission",
+              "args": [
+                "myapp.eth"
+              ],
+              "at": 1762000000014,
+              "result": true,
+              "wrote": true,
+              "text": "{\n  \"https://app.example\": {\n    \"origin\": \"https://app.example\",\n    \"connectedAt\": 1762000000000,\n    \"lastUsed\": 1762000000000,\n    \"autoApprove\": {\n      \"publish\": true,\n      \"feeds\": false,\n      \"signing\": true,\n      \"messaging\": false\n    }\n  }\n}"
+            },
+            {
+              "op": "revokePermission",
+              "args": [
+                "myapp.eth"
+              ],
+              "at": 1762000000015,
+              "result": false,
+              "wrote": false,
+              "text": "{\n  \"https://app.example\": {\n    \"origin\": \"https://app.example\",\n    \"connectedAt\": 1762000000000,\n    \"lastUsed\": 1762000000000,\n    \"autoApprove\": {\n      \"publish\": true,\n      \"feeds\": false,\n      \"signing\": true,\n      \"messaging\": false\n    }\n  }\n}"
+            },
+            {
+              "op": "grantPermission",
+              "args": [
+                "https://app.example"
+              ],
+              "at": 1762000000016,
+              "result": {
+                "origin": "https://app.example",
+                "connectedAt": 1762000000016,
+                "lastUsed": 1762000000016,
+                "autoApprove": {
+                  "publish": false,
+                  "feeds": false,
+                  "signing": false,
+                  "messaging": false
+                }
+              },
+              "wrote": true,
+              "text": "{\n  \"https://app.example\": {\n    \"origin\": \"https://app.example\",\n    \"connectedAt\": 1762000000016,\n    \"lastUsed\": 1762000000016,\n    \"autoApprove\": {\n      \"publish\": false,\n      \"feeds\": false,\n      \"signing\": false,\n      \"messaging\": false\n    }\n  }\n}"
+            }
+          ]
+        },
+        {
+          "id": "foreign-fields",
+          "start": "{\n  \"https://app.example\": {\"origin\": \"https://app.example\", \"connectedAt\": 1761999999991, \"lastUsed\": 1761999999991, \"messaging\": {\"grantedAt\": 1761999999991, \"scope\": \"x\"}},\n  \"myapp.eth\": {\"origin\": \"myapp.eth\", \"lastUsed\": 1761999999992, \"autoApprove\": {\"publish\": true, \"extra\": 1}}\n}",
+          "steps": [
+            {
+              "op": "setAutoApprove",
+              "args": [
+                "https://app.example",
+                "publish",
+                true
+              ],
+              "at": 1762000000000,
+              "result": true,
+              "wrote": true,
+              "text": "{\n  \"https://app.example\": {\n    \"origin\": \"https://app.example\",\n    \"connectedAt\": 1761999999991,\n    \"lastUsed\": 1761999999991,\n    \"messaging\": {\n      \"grantedAt\": 1761999999991,\n      \"scope\": \"x\"\n    },\n    \"autoApprove\": {\n      \"publish\": true,\n      \"feeds\": false,\n      \"signing\": false,\n      \"messaging\": false\n    }\n  },\n  \"myapp.eth\": {\n    \"origin\": \"myapp.eth\",\n    \"lastUsed\": 1761999999992,\n    \"autoApprove\": {\n      \"publish\": true,\n      \"extra\": 1\n    }\n  }\n}"
+            },
+            {
+              "op": "revokeMessaging",
+              "args": [
+                "https://app.example"
+              ],
+              "at": 1762000000001,
+              "result": true,
+              "wrote": true,
+              "text": "{\n  \"https://app.example\": {\n    \"origin\": \"https://app.example\",\n    \"connectedAt\": 1761999999991,\n    \"lastUsed\": 1761999999991,\n    \"autoApprove\": {\n      \"publish\": true,\n      \"feeds\": false,\n      \"signing\": false,\n      \"messaging\": false\n    }\n  },\n  \"myapp.eth\": {\n    \"origin\": \"myapp.eth\",\n    \"lastUsed\": 1761999999992,\n    \"autoApprove\": {\n      \"publish\": true,\n      \"extra\": 1\n    }\n  }\n}"
+            },
+            {
+              "op": "setAutoApprove",
+              "args": [
+                "myapp.eth",
+                "signing",
+                true
+              ],
+              "at": 1762000000002,
+              "result": true,
+              "wrote": true,
+              "text": "{\n  \"https://app.example\": {\n    \"origin\": \"https://app.example\",\n    \"connectedAt\": 1761999999991,\n    \"lastUsed\": 1761999999991,\n    \"autoApprove\": {\n      \"publish\": true,\n      \"feeds\": false,\n      \"signing\": false,\n      \"messaging\": false\n    }\n  },\n  \"myapp.eth\": {\n    \"origin\": \"myapp.eth\",\n    \"lastUsed\": 1761999999992,\n    \"autoApprove\": {\n      \"publish\": true,\n      \"extra\": 1,\n      \"signing\": true\n    }\n  }\n}"
+            }
+          ]
+        }
+      ],
+      "malformed": [
+        {
+          "id": "truncated",
+          "text": "{\n  \"https://app.example\": {\n    \"origin\": \"https://app.example\",\n    \"connectedAt\": 1762000000000",
+          "loaded": {
+            "value": []
+          },
+          "afterGrant": {
+            "text": "{\n  \"https://other.example\": {\n    \"origin\": \"https://other.example\",\n    \"connectedAt\": 1762000000000,\n    \"lastUsed\": 1762000000000,\n    \"autoApprove\": {\n      \"publish\": false,\n      \"feeds\": false,\n      \"signing\": false,\n      \"messaging\": false\n    }\n  }\n}"
+          },
+          "core": "unreadable"
+        },
+        {
+          "id": "not-json",
+          "text": "not json",
+          "loaded": {
+            "value": []
+          },
+          "afterGrant": {
+            "text": "{\n  \"https://other.example\": {\n    \"origin\": \"https://other.example\",\n    \"connectedAt\": 1762000000000,\n    \"lastUsed\": 1762000000000,\n    \"autoApprove\": {\n      \"publish\": false,\n      \"feeds\": false,\n      \"signing\": false,\n      \"messaging\": false\n    }\n  }\n}"
+          },
+          "core": "unreadable"
+        },
+        {
+          "id": "empty",
+          "text": "",
+          "loaded": {
+            "value": []
+          },
+          "afterGrant": {
+            "text": "{\n  \"https://other.example\": {\n    \"origin\": \"https://other.example\",\n    \"connectedAt\": 1762000000000,\n    \"lastUsed\": 1762000000000,\n    \"autoApprove\": {\n      \"publish\": false,\n      \"feeds\": false,\n      \"signing\": false,\n      \"messaging\": false\n    }\n  }\n}"
+          },
+          "core": "unreadable"
+        },
+        {
+          "id": "byte-order-mark",
+          "text": "﻿{}",
+          "loaded": {
+            "value": []
+          },
+          "afterGrant": {
+            "text": "{\n  \"https://other.example\": {\n    \"origin\": \"https://other.example\",\n    \"connectedAt\": 1762000000000,\n    \"lastUsed\": 1762000000000,\n    \"autoApprove\": {\n      \"publish\": false,\n      \"feeds\": false,\n      \"signing\": false,\n      \"messaging\": false\n    }\n  }\n}"
+          },
+          "core": "unreadable"
+        },
+        {
+          "id": "trailing-comma",
+          "text": "{\"https://app.example\": {\"origin\": \"https://app.example\"},}",
+          "loaded": {
+            "value": []
+          },
+          "afterGrant": {
+            "text": "{\n  \"https://other.example\": {\n    \"origin\": \"https://other.example\",\n    \"connectedAt\": 1762000000000,\n    \"lastUsed\": 1762000000000,\n    \"autoApprove\": {\n      \"publish\": false,\n      \"feeds\": false,\n      \"signing\": false,\n      \"messaging\": false\n    }\n  }\n}"
+          },
+          "core": "unreadable"
+        },
+        {
+          "id": "array",
+          "text": "[]",
+          "loaded": {
+            "value": []
+          },
+          "afterGrant": {
+            "text": "[]"
+          },
+          "core": "unreadable"
+        },
+        {
+          "id": "array-of-entries",
+          "text": "[{\"origin\": \"https://app.example\", \"walletIndex\": 0}]",
+          "loaded": {
+            "value": [
+              {
+                "origin": "https://app.example",
+                "walletIndex": 0
+              }
+            ]
+          },
+          "afterGrant": {
+            "text": "[\n  {\n    \"origin\": \"https://app.example\",\n    \"walletIndex\": 0\n  }\n]"
+          },
+          "core": "unreadable"
+        },
+        {
+          "id": "number",
+          "text": "42",
+          "loaded": {
+            "value": []
+          },
+          "afterGrant": {
+            "text": "42"
+          },
+          "core": "unreadable"
+        },
+        {
+          "id": "string",
+          "text": "\"text\"",
+          "loaded": {
+            "value": [
+              "t",
+              "e",
+              "x",
+              "t"
+            ]
+          },
+          "afterGrant": {
+            "text": "\"text\""
+          },
+          "core": "unreadable"
+        },
+        {
+          "id": "null",
+          "text": "null",
+          "loaded": {
+            "error": "Cannot convert undefined or null to object"
+          },
+          "afterGrant": {
+            "error": "Cannot set properties of null (setting 'https://other.example')"
+          },
+          "core": "unreadable"
+        },
+        {
+          "id": "entry-not-object",
+          "text": "{\"https://app.example\": 5}",
+          "loaded": {
+            "value": [
+              5
+            ]
+          },
+          "afterGrant": {
+            "text": "{\n  \"https://app.example\": 5,\n  \"https://other.example\": {\n    \"origin\": \"https://other.example\",\n    \"connectedAt\": 1762000000000,\n    \"lastUsed\": 1762000000000,\n    \"autoApprove\": {\n      \"publish\": false,\n      \"feeds\": false,\n      \"signing\": false,\n      \"messaging\": false\n    }\n  }\n}"
+          },
+          "core": "unreadable"
+        },
+        {
+          "id": "entry-null",
+          "text": "{\"https://app.example\": null}",
+          "loaded": {
+            "value": [
+              null
+            ]
+          },
+          "afterGrant": {
+            "text": "{\n  \"https://app.example\": null,\n  \"https://other.example\": {\n    \"origin\": \"https://other.example\",\n    \"connectedAt\": 1762000000000,\n    \"lastUsed\": 1762000000000,\n    \"autoApprove\": {\n      \"publish\": false,\n      \"feeds\": false,\n      \"signing\": false,\n      \"messaging\": false\n    }\n  }\n}"
+          },
+          "core": "unreadable"
+        },
+        {
+          "id": "whitespace-around",
+          "text": "\n \t{\"https://app.example\": {\"origin\": \"https://app.example\", \"lastUsed\": 1}}\r\n ",
+          "loaded": {
+            "value": [
+              {
+                "origin": "https://app.example",
+                "lastUsed": 1
+              }
+            ]
+          },
+          "afterGrant": {
+            "text": "{\n  \"https://app.example\": {\n    \"origin\": \"https://app.example\",\n    \"lastUsed\": 1\n  },\n  \"https://other.example\": {\n    \"origin\": \"https://other.example\",\n    \"connectedAt\": 1762000000000,\n    \"lastUsed\": 1762000000000,\n    \"autoApprove\": {\n      \"publish\": false,\n      \"feeds\": false,\n      \"signing\": false,\n      \"messaging\": false\n    }\n  }\n}"
+          },
+          "core": "parsed"
+        },
+        {
+          "id": "empty-object",
+          "text": "{}",
+          "loaded": {
+            "value": []
+          },
+          "afterGrant": {
+            "text": "{\n  \"https://other.example\": {\n    \"origin\": \"https://other.example\",\n    \"connectedAt\": 1762000000000,\n    \"lastUsed\": 1762000000000,\n    \"autoApprove\": {\n      \"publish\": false,\n      \"feeds\": false,\n      \"signing\": false,\n      \"messaging\": false\n    }\n  }\n}"
+          },
+          "core": "parsed"
+        }
+      ]
+    },
+    "radicle": {
+      "file": "radicle-permissions.json",
+      "runs": [
+        {
+          "id": "tiers",
+          "start": null,
+          "steps": [
+            {
+              "op": "grantPermission",
+              "args": [
+                "https://app.example"
+              ],
+              "at": 1762000000000,
+              "result": {
+                "origin": "https://app.example",
+                "connectedAt": 1762000000000,
+                "lastUsed": 1762000000000,
+                "signing": false,
+                "autoApprove": {
+                  "node": false,
+                  "signing": false
+                }
+              },
+              "wrote": true,
+              "text": "{\n  \"https://app.example\": {\n    \"origin\": \"https://app.example\",\n    \"connectedAt\": 1762000000000,\n    \"lastUsed\": 1762000000000,\n    \"signing\": false,\n    \"autoApprove\": {\n      \"node\": false,\n      \"signing\": false\n    }\n  }\n}"
+            },
+            {
+              "op": "grantPermission",
+              "args": [
+                "bzz://abababababababababababababababababababababababababababababababab"
+              ],
+              "at": 1762000000001,
+              "result": {
+                "origin": "bzz://abababababababababababababababababababababababababababababababab",
+                "connectedAt": 1762000000001,
+                "lastUsed": 1762000000001,
+                "signing": false,
+                "autoApprove": {
+                  "node": false,
+                  "signing": false
+                }
+              },
+              "wrote": true,
+              "text": "{\n  \"https://app.example\": {\n    \"origin\": \"https://app.example\",\n    \"connectedAt\": 1762000000000,\n    \"lastUsed\": 1762000000000,\n    \"signing\": false,\n    \"autoApprove\": {\n      \"node\": false,\n      \"signing\": false\n    }\n  },\n  \"bzz://abababababababababababababababababababababababababababababababab\": {\n    \"origin\": \"bzz://abababababababababababababababababababababababababababababababab\",\n    \"connectedAt\": 1762000000001,\n    \"lastUsed\": 1762000000001,\n    \"signing\": false,\n    \"autoApprove\": {\n      \"node\": false,\n      \"signing\": false\n    }\n  }\n}"
+            },
+            {
+              "op": "updateLastUsed",
+              "args": [
+                "https://app.example"
+              ],
+              "at": 1762000059999,
+              "result": true,
+              "wrote": false,
+              "text": "{\n  \"https://app.example\": {\n    \"origin\": \"https://app.example\",\n    \"connectedAt\": 1762000000000,\n    \"lastUsed\": 1762000000000,\n    \"signing\": false,\n    \"autoApprove\": {\n      \"node\": false,\n      \"signing\": false\n    }\n  },\n  \"bzz://abababababababababababababababababababababababababababababababab\": {\n    \"origin\": \"bzz://abababababababababababababababababababababababababababababababab\",\n    \"connectedAt\": 1762000000001,\n    \"lastUsed\": 1762000000001,\n    \"signing\": false,\n    \"autoApprove\": {\n      \"node\": false,\n      \"signing\": false\n    }\n  }\n}"
+            },
+            {
+              "op": "updateLastUsed",
+              "args": [
+                "https://app.example"
+              ],
+              "at": 1762000060000,
+              "result": true,
+              "wrote": true,
+              "text": "{\n  \"https://app.example\": {\n    \"origin\": \"https://app.example\",\n    \"connectedAt\": 1762000000000,\n    \"lastUsed\": 1762000060000,\n    \"signing\": false,\n    \"autoApprove\": {\n      \"node\": false,\n      \"signing\": false\n    }\n  },\n  \"bzz://abababababababababababababababababababababababababababababababab\": {\n    \"origin\": \"bzz://abababababababababababababababababababababababababababababababab\",\n    \"connectedAt\": 1762000000001,\n    \"lastUsed\": 1762000000001,\n    \"signing\": false,\n    \"autoApprove\": {\n      \"node\": false,\n      \"signing\": false\n    }\n  }\n}"
+            },
+            {
+              "op": "updateLastUsed",
+              "args": [
+                "https://other.example"
+              ],
+              "at": 1762000060000,
+              "result": false,
+              "wrote": false,
+              "text": "{\n  \"https://app.example\": {\n    \"origin\": \"https://app.example\",\n    \"connectedAt\": 1762000000000,\n    \"lastUsed\": 1762000060000,\n    \"signing\": false,\n    \"autoApprove\": {\n      \"node\": false,\n      \"signing\": false\n    }\n  },\n  \"bzz://abababababababababababababababababababababababababababababababab\": {\n    \"origin\": \"bzz://abababababababababababababababababababababababababababababababab\",\n    \"connectedAt\": 1762000000001,\n    \"lastUsed\": 1762000000001,\n    \"signing\": false,\n    \"autoApprove\": {\n      \"node\": false,\n      \"signing\": false\n    }\n  }\n}"
+            },
+            {
+              "op": "grantSigning",
+              "args": [
+                "https://app.example"
+              ],
+              "at": 1762000060001,
+              "result": true,
+              "wrote": true,
+              "text": "{\n  \"https://app.example\": {\n    \"origin\": \"https://app.example\",\n    \"connectedAt\": 1762000000000,\n    \"lastUsed\": 1762000060000,\n    \"signing\": true,\n    \"autoApprove\": {\n      \"node\": false,\n      \"signing\": false\n    }\n  },\n  \"bzz://abababababababababababababababababababababababababababababababab\": {\n    \"origin\": \"bzz://abababababababababababababababababababababababababababababababab\",\n    \"connectedAt\": 1762000000001,\n    \"lastUsed\": 1762000000001,\n    \"signing\": false,\n    \"autoApprove\": {\n      \"node\": false,\n      \"signing\": false\n    }\n  }\n}"
+            },
+            {
+              "op": "grantSigning",
+              "args": [
+                "https://other.example"
+              ],
+              "at": 1762000060001,
+              "result": false,
+              "wrote": false,
+              "text": "{\n  \"https://app.example\": {\n    \"origin\": \"https://app.example\",\n    \"connectedAt\": 1762000000000,\n    \"lastUsed\": 1762000060000,\n    \"signing\": true,\n    \"autoApprove\": {\n      \"node\": false,\n      \"signing\": false\n    }\n  },\n  \"bzz://abababababababababababababababababababababababababababababababab\": {\n    \"origin\": \"bzz://abababababababababababababababababababababababababababababababab\",\n    \"connectedAt\": 1762000000001,\n    \"lastUsed\": 1762000000001,\n    \"signing\": false,\n    \"autoApprove\": {\n      \"node\": false,\n      \"signing\": false\n    }\n  }\n}"
+            },
+            {
+              "op": "hasSigningGrant",
+              "args": [
+                "https://app.example"
+              ],
+              "at": 1762000060002,
+              "result": true,
+              "wrote": false,
+              "text": "{\n  \"https://app.example\": {\n    \"origin\": \"https://app.example\",\n    \"connectedAt\": 1762000000000,\n    \"lastUsed\": 1762000060000,\n    \"signing\": true,\n    \"autoApprove\": {\n      \"node\": false,\n      \"signing\": false\n    }\n  },\n  \"bzz://abababababababababababababababababababababababababababababababab\": {\n    \"origin\": \"bzz://abababababababababababababababababababababababababababababababab\",\n    \"connectedAt\": 1762000000001,\n    \"lastUsed\": 1762000000001,\n    \"signing\": false,\n    \"autoApprove\": {\n      \"node\": false,\n      \"signing\": false\n    }\n  }\n}"
+            },
+            {
+              "op": "setAutoApprove",
+              "args": [
+                "https://app.example",
+                "signing",
+                true
+              ],
+              "at": 1762000060003,
+              "result": true,
+              "wrote": true,
+              "text": "{\n  \"https://app.example\": {\n    \"origin\": \"https://app.example\",\n    \"connectedAt\": 1762000000000,\n    \"lastUsed\": 1762000060000,\n    \"signing\": true,\n    \"autoApprove\": {\n      \"node\": false,\n      \"signing\": true\n    }\n  },\n  \"bzz://abababababababababababababababababababababababababababababababab\": {\n    \"origin\": \"bzz://abababababababababababababababababababababababababababababababab\",\n    \"connectedAt\": 1762000000001,\n    \"lastUsed\": 1762000000001,\n    \"signing\": false,\n    \"autoApprove\": {\n      \"node\": false,\n      \"signing\": false\n    }\n  }\n}"
+            },
+            {
+              "op": "setAutoApprove",
+              "args": [
+                "https://app.example",
+                "node",
+                true
+              ],
+              "at": 1762000060004,
+              "result": true,
+              "wrote": true,
+              "text": "{\n  \"https://app.example\": {\n    \"origin\": \"https://app.example\",\n    \"connectedAt\": 1762000000000,\n    \"lastUsed\": 1762000060000,\n    \"signing\": true,\n    \"autoApprove\": {\n      \"node\": true,\n      \"signing\": true\n    }\n  },\n  \"bzz://abababababababababababababababababababababababababababababababab\": {\n    \"origin\": \"bzz://abababababababababababababababababababababababababababababababab\",\n    \"connectedAt\": 1762000000001,\n    \"lastUsed\": 1762000000001,\n    \"signing\": false,\n    \"autoApprove\": {\n      \"node\": false,\n      \"signing\": false\n    }\n  }\n}"
+            },
+            {
+              "op": "setAutoApprove",
+              "args": [
+                "https://app.example",
+                "bogus",
+                true
+              ],
+              "at": 1762000060005,
+              "result": false,
+              "wrote": false,
+              "text": "{\n  \"https://app.example\": {\n    \"origin\": \"https://app.example\",\n    \"connectedAt\": 1762000000000,\n    \"lastUsed\": 1762000060000,\n    \"signing\": true,\n    \"autoApprove\": {\n      \"node\": true,\n      \"signing\": true\n    }\n  },\n  \"bzz://abababababababababababababababababababababababababababababababab\": {\n    \"origin\": \"bzz://abababababababababababababababababababababababababababababababab\",\n    \"connectedAt\": 1762000000001,\n    \"lastUsed\": 1762000000001,\n    \"signing\": false,\n    \"autoApprove\": {\n      \"node\": false,\n      \"signing\": false\n    }\n  }\n}"
+            },
+            {
+              "op": "getAutoApprove",
+              "args": [
+                "https://app.example",
+                "node"
+              ],
+              "at": 1762000060006,
+              "result": true,
+              "wrote": false,
+              "text": "{\n  \"https://app.example\": {\n    \"origin\": \"https://app.example\",\n    \"connectedAt\": 1762000000000,\n    \"lastUsed\": 1762000060000,\n    \"signing\": true,\n    \"autoApprove\": {\n      \"node\": true,\n      \"signing\": true\n    }\n  },\n  \"bzz://abababababababababababababababababababababababababababababababab\": {\n    \"origin\": \"bzz://abababababababababababababababababababababababababababababababab\",\n    \"connectedAt\": 1762000000001,\n    \"lastUsed\": 1762000000001,\n    \"signing\": false,\n    \"autoApprove\": {\n      \"node\": false,\n      \"signing\": false\n    }\n  }\n}"
+            },
+            {
+              "op": "setAutoApprove",
+              "args": [
+                "https://app.example",
+                "node",
+                false
+              ],
+              "at": 1762000060007,
+              "result": true,
+              "wrote": true,
+              "text": "{\n  \"https://app.example\": {\n    \"origin\": \"https://app.example\",\n    \"connectedAt\": 1762000000000,\n    \"lastUsed\": 1762000060000,\n    \"signing\": true,\n    \"autoApprove\": {\n      \"node\": false,\n      \"signing\": true\n    }\n  },\n  \"bzz://abababababababababababababababababababababababababababababababab\": {\n    \"origin\": \"bzz://abababababababababababababababababababababababababababababababab\",\n    \"connectedAt\": 1762000000001,\n    \"lastUsed\": 1762000000001,\n    \"signing\": false,\n    \"autoApprove\": {\n      \"node\": false,\n      \"signing\": false\n    }\n  }\n}"
+            },
+            {
+              "op": "getAllPermissions",
+              "args": [],
+              "at": 1762000060008,
+              "result": [
+                {
+                  "origin": "https://app.example",
+                  "connectedAt": 1762000000000,
+                  "lastUsed": 1762000060000,
+                  "signing": true,
+                  "autoApprove": {
+                    "node": false,
+                    "signing": true
+                  }
+                },
+                {
+                  "origin": "bzz://abababababababababababababababababababababababababababababababab",
+                  "connectedAt": 1762000000001,
+                  "lastUsed": 1762000000001,
+                  "signing": false,
+                  "autoApprove": {
+                    "node": false,
+                    "signing": false
+                  }
+                }
+              ],
+              "wrote": false,
+              "text": "{\n  \"https://app.example\": {\n    \"origin\": \"https://app.example\",\n    \"connectedAt\": 1762000000000,\n    \"lastUsed\": 1762000060000,\n    \"signing\": true,\n    \"autoApprove\": {\n      \"node\": false,\n      \"signing\": true\n    }\n  },\n  \"bzz://abababababababababababababababababababababababababababababababab\": {\n    \"origin\": \"bzz://abababababababababababababababababababababababababababababababab\",\n    \"connectedAt\": 1762000000001,\n    \"lastUsed\": 1762000000001,\n    \"signing\": false,\n    \"autoApprove\": {\n      \"node\": false,\n      \"signing\": false\n    }\n  }\n}"
+            },
+            {
+              "op": "revokePermission",
+              "args": [
+                "https://app.example"
+              ],
+              "at": 1762000060009,
+              "result": true,
+              "wrote": true,
+              "text": "{\n  \"bzz://abababababababababababababababababababababababababababababababab\": {\n    \"origin\": \"bzz://abababababababababababababababababababababababababababababababab\",\n    \"connectedAt\": 1762000000001,\n    \"lastUsed\": 1762000000001,\n    \"signing\": false,\n    \"autoApprove\": {\n      \"node\": false,\n      \"signing\": false\n    }\n  }\n}"
+            },
+            {
+              "op": "revokePermission",
+              "args": [
+                "https://app.example"
+              ],
+              "at": 1762000060010,
+              "result": false,
+              "wrote": false,
+              "text": "{\n  \"bzz://abababababababababababababababababababababababababababababababab\": {\n    \"origin\": \"bzz://abababababababababababababababababababababababababababababababab\",\n    \"connectedAt\": 1762000000001,\n    \"lastUsed\": 1762000000001,\n    \"signing\": false,\n    \"autoApprove\": {\n      \"node\": false,\n      \"signing\": false\n    }\n  }\n}"
+            }
+          ]
+        },
+        {
+          "id": "last-used",
+          "start": "{\"https://app.example\": {\"origin\": \"https://app.example\", \"signing\": true}, \"myapp.eth\": {\"origin\": \"myapp.eth\", \"lastUsed\": 1762003600000}}",
+          "steps": [
+            {
+              "op": "updateLastUsed",
+              "args": [
+                "https://app.example"
+              ],
+              "at": 1762000000000,
+              "result": true,
+              "wrote": true,
+              "text": "{\n  \"https://app.example\": {\n    \"origin\": \"https://app.example\",\n    \"signing\": true,\n    \"lastUsed\": 1762000000000\n  },\n  \"myapp.eth\": {\n    \"origin\": \"myapp.eth\",\n    \"lastUsed\": 1762003600000\n  }\n}"
+            },
+            {
+              "op": "updateLastUsed",
+              "args": [
+                "myapp.eth"
+              ],
+              "at": 1762000000001,
+              "result": true,
+              "wrote": false,
+              "text": "{\n  \"https://app.example\": {\n    \"origin\": \"https://app.example\",\n    \"signing\": true,\n    \"lastUsed\": 1762000000000\n  },\n  \"myapp.eth\": {\n    \"origin\": \"myapp.eth\",\n    \"lastUsed\": 1762003600000\n  }\n}"
+            },
+            {
+              "op": "setAutoApprove",
+              "args": [
+                "https://app.example",
+                "signing",
+                true
+              ],
+              "at": 1762000000002,
+              "result": true,
+              "wrote": true,
+              "text": "{\n  \"https://app.example\": {\n    \"origin\": \"https://app.example\",\n    \"signing\": true,\n    \"lastUsed\": 1762000000000,\n    \"autoApprove\": {\n      \"node\": false,\n      \"signing\": true\n    }\n  },\n  \"myapp.eth\": {\n    \"origin\": \"myapp.eth\",\n    \"lastUsed\": 1762003600000\n  }\n}"
+            }
+          ]
+        }
+      ],
+      "malformed": [
+        {
+          "id": "truncated",
+          "text": "{\n  \"https://app.example\": {\n    \"origin\": \"https://app.example\",\n    \"connectedAt\": 1762000000000",
+          "loaded": {
+            "value": []
+          },
+          "afterGrant": {
+            "text": "{\n  \"https://other.example\": {\n    \"origin\": \"https://other.example\",\n    \"connectedAt\": 1762000000000,\n    \"lastUsed\": 1762000000000,\n    \"signing\": false,\n    \"autoApprove\": {\n      \"node\": false,\n      \"signing\": false\n    }\n  }\n}"
+          },
+          "core": "unreadable"
+        },
+        {
+          "id": "not-json",
+          "text": "not json",
+          "loaded": {
+            "value": []
+          },
+          "afterGrant": {
+            "text": "{\n  \"https://other.example\": {\n    \"origin\": \"https://other.example\",\n    \"connectedAt\": 1762000000000,\n    \"lastUsed\": 1762000000000,\n    \"signing\": false,\n    \"autoApprove\": {\n      \"node\": false,\n      \"signing\": false\n    }\n  }\n}"
+          },
+          "core": "unreadable"
+        },
+        {
+          "id": "empty",
+          "text": "",
+          "loaded": {
+            "value": []
+          },
+          "afterGrant": {
+            "text": "{\n  \"https://other.example\": {\n    \"origin\": \"https://other.example\",\n    \"connectedAt\": 1762000000000,\n    \"lastUsed\": 1762000000000,\n    \"signing\": false,\n    \"autoApprove\": {\n      \"node\": false,\n      \"signing\": false\n    }\n  }\n}"
+          },
+          "core": "unreadable"
+        },
+        {
+          "id": "byte-order-mark",
+          "text": "﻿{}",
+          "loaded": {
+            "value": []
+          },
+          "afterGrant": {
+            "text": "{\n  \"https://other.example\": {\n    \"origin\": \"https://other.example\",\n    \"connectedAt\": 1762000000000,\n    \"lastUsed\": 1762000000000,\n    \"signing\": false,\n    \"autoApprove\": {\n      \"node\": false,\n      \"signing\": false\n    }\n  }\n}"
+          },
+          "core": "unreadable"
+        },
+        {
+          "id": "trailing-comma",
+          "text": "{\"https://app.example\": {\"origin\": \"https://app.example\"},}",
+          "loaded": {
+            "value": []
+          },
+          "afterGrant": {
+            "text": "{\n  \"https://other.example\": {\n    \"origin\": \"https://other.example\",\n    \"connectedAt\": 1762000000000,\n    \"lastUsed\": 1762000000000,\n    \"signing\": false,\n    \"autoApprove\": {\n      \"node\": false,\n      \"signing\": false\n    }\n  }\n}"
+          },
+          "core": "unreadable"
+        },
+        {
+          "id": "array",
+          "text": "[]",
+          "loaded": {
+            "value": []
+          },
+          "afterGrant": {
+            "text": "[]"
+          },
+          "core": "unreadable"
+        },
+        {
+          "id": "array-of-entries",
+          "text": "[{\"origin\": \"https://app.example\", \"walletIndex\": 0}]",
+          "loaded": {
+            "value": [
+              {
+                "origin": "https://app.example",
+                "walletIndex": 0
+              }
+            ]
+          },
+          "afterGrant": {
+            "text": "[\n  {\n    \"origin\": \"https://app.example\",\n    \"walletIndex\": 0\n  }\n]"
+          },
+          "core": "unreadable"
+        },
+        {
+          "id": "number",
+          "text": "42",
+          "loaded": {
+            "value": []
+          },
+          "afterGrant": {
+            "text": "42"
+          },
+          "core": "unreadable"
+        },
+        {
+          "id": "string",
+          "text": "\"text\"",
+          "loaded": {
+            "value": [
+              "t",
+              "e",
+              "x",
+              "t"
+            ]
+          },
+          "afterGrant": {
+            "text": "\"text\""
+          },
+          "core": "unreadable"
+        },
+        {
+          "id": "null",
+          "text": "null",
+          "loaded": {
+            "error": "Cannot convert undefined or null to object"
+          },
+          "afterGrant": {
+            "error": "Cannot set properties of null (setting 'https://other.example')"
+          },
+          "core": "unreadable"
+        },
+        {
+          "id": "entry-not-object",
+          "text": "{\"https://app.example\": 5}",
+          "loaded": {
+            "value": [
+              5
+            ]
+          },
+          "afterGrant": {
+            "text": "{\n  \"https://app.example\": 5,\n  \"https://other.example\": {\n    \"origin\": \"https://other.example\",\n    \"connectedAt\": 1762000000000,\n    \"lastUsed\": 1762000000000,\n    \"signing\": false,\n    \"autoApprove\": {\n      \"node\": false,\n      \"signing\": false\n    }\n  }\n}"
+          },
+          "core": "unreadable"
+        },
+        {
+          "id": "entry-null",
+          "text": "{\"https://app.example\": null}",
+          "loaded": {
+            "value": [
+              null
+            ]
+          },
+          "afterGrant": {
+            "text": "{\n  \"https://app.example\": null,\n  \"https://other.example\": {\n    \"origin\": \"https://other.example\",\n    \"connectedAt\": 1762000000000,\n    \"lastUsed\": 1762000000000,\n    \"signing\": false,\n    \"autoApprove\": {\n      \"node\": false,\n      \"signing\": false\n    }\n  }\n}"
+          },
+          "core": "unreadable"
+        },
+        {
+          "id": "whitespace-around",
+          "text": "\n \t{\"https://app.example\": {\"origin\": \"https://app.example\", \"lastUsed\": 1}}\r\n ",
+          "loaded": {
+            "value": [
+              {
+                "origin": "https://app.example",
+                "lastUsed": 1
+              }
+            ]
+          },
+          "afterGrant": {
+            "text": "{\n  \"https://app.example\": {\n    \"origin\": \"https://app.example\",\n    \"lastUsed\": 1\n  },\n  \"https://other.example\": {\n    \"origin\": \"https://other.example\",\n    \"connectedAt\": 1762000000000,\n    \"lastUsed\": 1762000000000,\n    \"signing\": false,\n    \"autoApprove\": {\n      \"node\": false,\n      \"signing\": false\n    }\n  }\n}"
+          },
+          "core": "parsed"
+        },
+        {
+          "id": "empty-object",
+          "text": "{}",
+          "loaded": {
+            "value": []
+          },
+          "afterGrant": {
+            "text": "{\n  \"https://other.example\": {\n    \"origin\": \"https://other.example\",\n    \"connectedAt\": 1762000000000,\n    \"lastUsed\": 1762000000000,\n    \"signing\": false,\n    \"autoApprove\": {\n      \"node\": false,\n      \"signing\": false\n    }\n  }\n}"
+          },
+          "core": "parsed"
+        }
+      ]
+    },
+    "x402": {
+      "file": "x402-permissions.json",
+      "runs": [
+        {
+          "id": "caps",
+          "start": null,
+          "steps": [
+            {
+              "op": "grant",
+              "args": [
+                "https://app.example",
+                8453,
+                "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+                "10000000",
+                3600
+              ],
+              "at": 1762000000000,
+              "result": {
+                "origin": "https://app.example",
+                "chainId": 8453,
+                "asset": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+                "capAmount": "10000000",
+                "spentAmount": "0",
+                "createdAt": 1762000000,
+                "expiresAt": 1762003600
+              },
+              "wrote": true,
+              "text": "{\n  \"https://app.example\": {\n    \"8453:0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913\": {\n      \"capAmount\": \"10000000\",\n      \"spentAmount\": \"0\",\n      \"createdAt\": 1762000000,\n      \"expiresAt\": 1762003600\n    }\n  }\n}",
+              "core": "load"
+            },
+            {
+              "op": "grant",
+              "args": [
+                "https://app.example",
+                1,
+                "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913",
+                "5",
+                60
+              ],
+              "at": 1762000000001,
+              "result": {
+                "origin": "https://app.example",
+                "chainId": 1,
+                "asset": "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913",
+                "capAmount": "5",
+                "spentAmount": "0",
+                "createdAt": 1762000000,
+                "expiresAt": 1762000060
+              },
+              "wrote": true,
+              "text": "{\n  \"https://app.example\": {\n    \"8453:0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913\": {\n      \"capAmount\": \"10000000\",\n      \"spentAmount\": \"0\",\n      \"createdAt\": 1762000000,\n      \"expiresAt\": 1762003600\n    },\n    \"1:0x833589fcd6edb6e08f4c7c32d4f71b54bda02913\": {\n      \"capAmount\": \"5\",\n      \"spentAmount\": \"0\",\n      \"createdAt\": 1762000000,\n      \"expiresAt\": 1762000060\n    }\n  }\n}",
+              "core": "load"
+            },
+            {
+              "op": "charge",
+              "args": [
+                "https://app.example",
+                8453,
+                "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+                "2500000"
+              ],
+              "at": 1762000000002,
+              "result": {
+                "origin": "https://app.example",
+                "chainId": 8453,
+                "asset": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+                "amount": "2500000",
+                "generation": 1
+              },
+              "wrote": true,
+              "text": "{\n  \"https://app.example\": {\n    \"8453:0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913\": {\n      \"capAmount\": \"10000000\",\n      \"spentAmount\": \"2500000\",\n      \"createdAt\": 1762000000,\n      \"expiresAt\": 1762003600\n    },\n    \"1:0x833589fcd6edb6e08f4c7c32d4f71b54bda02913\": {\n      \"capAmount\": \"5\",\n      \"spentAmount\": \"0\",\n      \"createdAt\": 1762000000,\n      \"expiresAt\": 1762000060\n    }\n  }\n}",
+              "core": "load"
+            },
+            {
+              "op": "charge",
+              "args": [
+                "https://app.example",
+                8453,
+                "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+                "7500001"
+              ],
+              "at": 1762000000003,
+              "result": null,
+              "wrote": false,
+              "text": "{\n  \"https://app.example\": {\n    \"8453:0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913\": {\n      \"capAmount\": \"10000000\",\n      \"spentAmount\": \"2500000\",\n      \"createdAt\": 1762000000,\n      \"expiresAt\": 1762003600\n    },\n    \"1:0x833589fcd6edb6e08f4c7c32d4f71b54bda02913\": {\n      \"capAmount\": \"5\",\n      \"spentAmount\": \"0\",\n      \"createdAt\": 1762000000,\n      \"expiresAt\": 1762000060\n    }\n  }\n}",
+              "core": "load"
+            },
+            {
+              "op": "updatePermission",
+              "args": [
+                "https://app.example",
+                8453,
+                "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+                {
+                  "capAmount": "20000000"
+                }
+              ],
+              "at": 1762000000004,
+              "result": {
+                "origin": "https://app.example",
+                "chainId": 8453,
+                "asset": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+                "capAmount": "20000000",
+                "spentAmount": "2500000",
+                "createdAt": 1762000000,
+                "expiresAt": 1762003600
+              },
+              "wrote": true,
+              "text": "{\n  \"https://app.example\": {\n    \"8453:0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913\": {\n      \"capAmount\": \"20000000\",\n      \"spentAmount\": \"2500000\",\n      \"createdAt\": 1762000000,\n      \"expiresAt\": 1762003600\n    },\n    \"1:0x833589fcd6edb6e08f4c7c32d4f71b54bda02913\": {\n      \"capAmount\": \"5\",\n      \"spentAmount\": \"0\",\n      \"createdAt\": 1762000000,\n      \"expiresAt\": 1762000060\n    }\n  }\n}",
+              "core": "load"
+            },
+            {
+              "op": "grant",
+              "args": [
+                "myapp.eth",
+                100,
+                "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+                "1",
+                10
+              ],
+              "at": 1762000000005,
+              "result": {
+                "origin": "myapp.eth",
+                "chainId": 100,
+                "asset": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+                "capAmount": "1",
+                "spentAmount": "0",
+                "createdAt": 1762000000,
+                "expiresAt": 1762000010
+              },
+              "wrote": true,
+              "text": "{\n  \"https://app.example\": {\n    \"8453:0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913\": {\n      \"capAmount\": \"20000000\",\n      \"spentAmount\": \"2500000\",\n      \"createdAt\": 1762000000,\n      \"expiresAt\": 1762003600\n    },\n    \"1:0x833589fcd6edb6e08f4c7c32d4f71b54bda02913\": {\n      \"capAmount\": \"5\",\n      \"spentAmount\": \"0\",\n      \"createdAt\": 1762000000,\n      \"expiresAt\": 1762000060\n    }\n  },\n  \"myapp.eth\": {\n    \"100:0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913\": {\n      \"capAmount\": \"1\",\n      \"spentAmount\": \"0\",\n      \"createdAt\": 1762000000,\n      \"expiresAt\": 1762000010\n    }\n  }\n}",
+              "core": "load"
+            },
+            {
+              "op": "revoke",
+              "args": [
+                "https://app.example",
+                1,
+                "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913"
+              ],
+              "at": 1762000000006,
+              "result": null,
+              "wrote": true,
+              "text": "{\n  \"https://app.example\": {\n    \"8453:0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913\": {\n      \"capAmount\": \"20000000\",\n      \"spentAmount\": \"2500000\",\n      \"createdAt\": 1762000000,\n      \"expiresAt\": 1762003600\n    }\n  },\n  \"myapp.eth\": {\n    \"100:0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913\": {\n      \"capAmount\": \"1\",\n      \"spentAmount\": \"0\",\n      \"createdAt\": 1762000000,\n      \"expiresAt\": 1762000010\n    }\n  }\n}",
+              "core": "load"
+            },
+            {
+              "op": "revokeAllForOrigin",
+              "args": [
+                "myapp.eth"
+              ],
+              "at": 1762000000007,
+              "result": null,
+              "wrote": true,
+              "text": "{\n  \"https://app.example\": {\n    \"8453:0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913\": {\n      \"capAmount\": \"20000000\",\n      \"spentAmount\": \"2500000\",\n      \"createdAt\": 1762000000,\n      \"expiresAt\": 1762003600\n    }\n  }\n}",
+              "core": "load"
+            }
+          ]
+        },
+        {
+          "id": "compaction",
+          "start": "{\n  \"https://app.example\": {\n    \"8453:0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913\": {\n      \"capAmount\": \"10\",\n      \"spentAmount\": \"0\",\n      \"createdAt\": 1761999900,\n      \"expiresAt\": 1762000000\n    },\n    \"1:0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913\": {\n      \"capAmount\": \"10\",\n      \"spentAmount\": \"3\",\n      \"createdAt\": 1761999900,\n      \"expiresAt\": 1762000001\n    },\n    \"10:0xabc\": \"not a record\"\n  },\n  \"myapp.eth\": {\n    \"8453:0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913\": {\n      \"capAmount\": \"1\",\n      \"spentAmount\": \"0\",\n      \"createdAt\": 1761999950,\n      \"expiresAt\": 1761999999\n    }\n  },\n  \"https://other.example\": \"not an object\"\n}",
+          "steps": [
+            {
+              "op": "getAllPermissions",
+              "args": [],
+              "at": 1762000000000,
+              "result": [
+                {
+                  "origin": "https://app.example",
+                  "chainId": 1,
+                  "asset": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+                  "capAmount": "10",
+                  "spentAmount": "3",
+                  "createdAt": 1761999900,
+                  "expiresAt": 1762000001
+                }
+              ],
+              "wrote": false,
+              "text": "{\n  \"https://app.example\": {\n    \"8453:0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913\": {\n      \"capAmount\": \"10\",\n      \"spentAmount\": \"0\",\n      \"createdAt\": 1761999900,\n      \"expiresAt\": 1762000000\n    },\n    \"1:0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913\": {\n      \"capAmount\": \"10\",\n      \"spentAmount\": \"3\",\n      \"createdAt\": 1761999900,\n      \"expiresAt\": 1762000001\n    },\n    \"10:0xabc\": \"not a record\"\n  },\n  \"myapp.eth\": {\n    \"8453:0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913\": {\n      \"capAmount\": \"1\",\n      \"spentAmount\": \"0\",\n      \"createdAt\": 1761999950,\n      \"expiresAt\": 1761999999\n    }\n  },\n  \"https://other.example\": \"not an object\"\n}"
+            },
+            {
+              "op": "grant",
+              "args": [
+                "https://other.example",
+                8453,
+                "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+                "1",
+                60
+              ],
+              "at": 1762000000001,
+              "result": {
+                "origin": "https://other.example",
+                "chainId": 8453,
+                "asset": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+                "capAmount": "1",
+                "spentAmount": "0",
+                "createdAt": 1762000000,
+                "expiresAt": 1762000060
+              },
+              "wrote": true,
+              "text": "{\n  \"https://app.example\": {\n    \"1:0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913\": {\n      \"capAmount\": \"10\",\n      \"spentAmount\": \"3\",\n      \"createdAt\": 1761999900,\n      \"expiresAt\": 1762000001\n    }\n  },\n  \"https://other.example\": {\n    \"8453:0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913\": {\n      \"capAmount\": \"1\",\n      \"spentAmount\": \"0\",\n      \"createdAt\": 1762000000,\n      \"expiresAt\": 1762000060\n    }\n  }\n}",
+              "core": "load"
+            },
+            {
+              "op": "getAllPermissions",
+              "args": [],
+              "at": 1762000001000,
+              "result": [
+                {
+                  "origin": "https://other.example",
+                  "chainId": 8453,
+                  "asset": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+                  "capAmount": "1",
+                  "spentAmount": "0",
+                  "createdAt": 1762000000,
+                  "expiresAt": 1762000060
+                }
+              ],
+              "wrote": false,
+              "text": "{\n  \"https://app.example\": {\n    \"1:0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913\": {\n      \"capAmount\": \"10\",\n      \"spentAmount\": \"3\",\n      \"createdAt\": 1761999900,\n      \"expiresAt\": 1762000001\n    }\n  },\n  \"https://other.example\": {\n    \"8453:0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913\": {\n      \"capAmount\": \"1\",\n      \"spentAmount\": \"0\",\n      \"createdAt\": 1762000000,\n      \"expiresAt\": 1762000060\n    }\n  }\n}"
+            },
+            {
+              "op": "reload",
+              "args": [],
+              "at": 1762000001000,
+              "result": null,
+              "wrote": false,
+              "text": "{\n  \"https://app.example\": {\n    \"1:0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913\": {\n      \"capAmount\": \"10\",\n      \"spentAmount\": \"3\",\n      \"createdAt\": 1761999900,\n      \"expiresAt\": 1762000001\n    }\n  },\n  \"https://other.example\": {\n    \"8453:0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913\": {\n      \"capAmount\": \"1\",\n      \"spentAmount\": \"0\",\n      \"createdAt\": 1762000000,\n      \"expiresAt\": 1762000060\n    }\n  }\n}"
+            },
+            {
+              "op": "getAllPermissions",
+              "args": [],
+              "at": 1762000001000,
+              "result": [
+                {
+                  "origin": "https://other.example",
+                  "chainId": 8453,
+                  "asset": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+                  "capAmount": "1",
+                  "spentAmount": "0",
+                  "createdAt": 1762000000,
+                  "expiresAt": 1762000060
+                }
+              ],
+              "wrote": false,
+              "text": "{\n  \"https://app.example\": {\n    \"1:0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913\": {\n      \"capAmount\": \"10\",\n      \"spentAmount\": \"3\",\n      \"createdAt\": 1761999900,\n      \"expiresAt\": 1762000001\n    }\n  },\n  \"https://other.example\": {\n    \"8453:0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913\": {\n      \"capAmount\": \"1\",\n      \"spentAmount\": \"0\",\n      \"createdAt\": 1762000000,\n      \"expiresAt\": 1762000060\n    }\n  }\n}"
+            }
+          ]
+        }
+      ],
+      "malformed": [
+        {
+          "id": "truncated",
+          "text": "{\n  \"https://app.example\": {\n    \"origin\": \"https://app.example\",\n    \"connectedAt\": 1762000000000",
+          "loaded": {
+            "value": []
+          },
+          "afterGrant": {
+            "text": "{\n  \"https://other.example\": {\n    \"8453:0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913\": {\n      \"capAmount\": \"1\",\n      \"spentAmount\": \"0\",\n      \"createdAt\": 1762000000,\n      \"expiresAt\": 1762000060\n    }\n  }\n}"
+          },
+          "core": "unreadable"
+        },
+        {
+          "id": "not-json",
+          "text": "not json",
+          "loaded": {
+            "value": []
+          },
+          "afterGrant": {
+            "text": "{\n  \"https://other.example\": {\n    \"8453:0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913\": {\n      \"capAmount\": \"1\",\n      \"spentAmount\": \"0\",\n      \"createdAt\": 1762000000,\n      \"expiresAt\": 1762000060\n    }\n  }\n}"
+          },
+          "core": "unreadable"
+        },
+        {
+          "id": "empty",
+          "text": "",
+          "loaded": {
+            "value": []
+          },
+          "afterGrant": {
+            "text": "{\n  \"https://other.example\": {\n    \"8453:0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913\": {\n      \"capAmount\": \"1\",\n      \"spentAmount\": \"0\",\n      \"createdAt\": 1762000000,\n      \"expiresAt\": 1762000060\n    }\n  }\n}"
+          },
+          "core": "unreadable"
+        },
+        {
+          "id": "byte-order-mark",
+          "text": "﻿{}",
+          "loaded": {
+            "value": []
+          },
+          "afterGrant": {
+            "text": "{\n  \"https://other.example\": {\n    \"8453:0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913\": {\n      \"capAmount\": \"1\",\n      \"spentAmount\": \"0\",\n      \"createdAt\": 1762000000,\n      \"expiresAt\": 1762000060\n    }\n  }\n}"
+          },
+          "core": "unreadable"
+        },
+        {
+          "id": "trailing-comma",
+          "text": "{\"https://app.example\": {\"origin\": \"https://app.example\"},}",
+          "loaded": {
+            "value": []
+          },
+          "afterGrant": {
+            "text": "{\n  \"https://other.example\": {\n    \"8453:0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913\": {\n      \"capAmount\": \"1\",\n      \"spentAmount\": \"0\",\n      \"createdAt\": 1762000000,\n      \"expiresAt\": 1762000060\n    }\n  }\n}"
+          },
+          "core": "unreadable"
+        },
+        {
+          "id": "array",
+          "text": "[]",
+          "loaded": {
+            "value": []
+          },
+          "afterGrant": {
+            "text": "{\n  \"https://other.example\": {\n    \"8453:0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913\": {\n      \"capAmount\": \"1\",\n      \"spentAmount\": \"0\",\n      \"createdAt\": 1762000000,\n      \"expiresAt\": 1762000060\n    }\n  }\n}"
+          },
+          "core": "unreadable"
+        },
+        {
+          "id": "array-of-entries",
+          "text": "[{\"origin\": \"https://app.example\", \"walletIndex\": 0}]",
+          "loaded": {
+            "value": []
+          },
+          "afterGrant": {
+            "text": "{\n  \"https://other.example\": {\n    \"8453:0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913\": {\n      \"capAmount\": \"1\",\n      \"spentAmount\": \"0\",\n      \"createdAt\": 1762000000,\n      \"expiresAt\": 1762000060\n    }\n  }\n}"
+          },
+          "core": "unreadable"
+        },
+        {
+          "id": "number",
+          "text": "42",
+          "loaded": {
+            "value": []
+          },
+          "afterGrant": {
+            "text": "{\n  \"https://other.example\": {\n    \"8453:0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913\": {\n      \"capAmount\": \"1\",\n      \"spentAmount\": \"0\",\n      \"createdAt\": 1762000000,\n      \"expiresAt\": 1762000060\n    }\n  }\n}"
+          },
+          "core": "unreadable"
+        },
+        {
+          "id": "string",
+          "text": "\"text\"",
+          "loaded": {
+            "value": []
+          },
+          "afterGrant": {
+            "text": "{\n  \"https://other.example\": {\n    \"8453:0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913\": {\n      \"capAmount\": \"1\",\n      \"spentAmount\": \"0\",\n      \"createdAt\": 1762000000,\n      \"expiresAt\": 1762000060\n    }\n  }\n}"
+          },
+          "core": "unreadable"
+        },
+        {
+          "id": "null",
+          "text": "null",
+          "loaded": {
+            "value": []
+          },
+          "afterGrant": {
+            "text": "{\n  \"https://other.example\": {\n    \"8453:0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913\": {\n      \"capAmount\": \"1\",\n      \"spentAmount\": \"0\",\n      \"createdAt\": 1762000000,\n      \"expiresAt\": 1762000060\n    }\n  }\n}"
+          },
+          "core": "unreadable"
+        },
+        {
+          "id": "entry-not-object",
+          "text": "{\"https://app.example\": 5}",
+          "loaded": {
+            "value": []
+          },
+          "afterGrant": {
+            "text": "{\n  \"https://other.example\": {\n    \"8453:0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913\": {\n      \"capAmount\": \"1\",\n      \"spentAmount\": \"0\",\n      \"createdAt\": 1762000000,\n      \"expiresAt\": 1762000060\n    }\n  }\n}"
+          },
+          "core": "parsed"
+        },
+        {
+          "id": "entry-null",
+          "text": "{\"https://app.example\": null}",
+          "loaded": {
+            "value": []
+          },
+          "afterGrant": {
+            "text": "{\n  \"https://other.example\": {\n    \"8453:0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913\": {\n      \"capAmount\": \"1\",\n      \"spentAmount\": \"0\",\n      \"createdAt\": 1762000000,\n      \"expiresAt\": 1762000060\n    }\n  }\n}"
+          },
+          "core": "parsed"
+        },
+        {
+          "id": "whitespace-around",
+          "text": "\n \t{\"https://app.example\": {\"origin\": \"https://app.example\", \"lastUsed\": 1}}\r\n ",
+          "loaded": {
+            "value": []
+          },
+          "afterGrant": {
+            "text": "{\n  \"https://other.example\": {\n    \"8453:0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913\": {\n      \"capAmount\": \"1\",\n      \"spentAmount\": \"0\",\n      \"createdAt\": 1762000000,\n      \"expiresAt\": 1762000060\n    }\n  }\n}"
+          },
+          "core": "parsed"
+        },
+        {
+          "id": "empty-object",
+          "text": "{}",
+          "loaded": {
+            "value": []
+          },
+          "afterGrant": {
+            "text": "{\n  \"https://other.example\": {\n    \"8453:0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913\": {\n      \"capAmount\": \"1\",\n      \"spentAmount\": \"0\",\n      \"createdAt\": 1762000000,\n      \"expiresAt\": 1762000060\n    }\n  }\n}"
+          },
+          "core": "parsed"
+        }
+      ]
+    }
+  }
 }
