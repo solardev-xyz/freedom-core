@@ -335,6 +335,71 @@ pub fn profile_confined(report: &fc_service::confine::Report) {
     );
 }
 
+/// `FREEDOM_CORED_TEST_PROFILE_TIMES` names a directory to make inside a
+/// confined subcommand's grant: right after confinement it is made, opened,
+/// and its times set each way the lock could set them, and one line,
+/// `test: times`, logs how each went (a diagnostic for the OS's sandbox).
+#[cfg(feature = "testhooks")]
+pub fn profile_times_probe() {
+    let Some(dir) = std::env::var_os("FREEDOM_CORED_TEST_PROFILE_TIMES") else {
+        return;
+    };
+    let dir = std::path::PathBuf::from(dir);
+    let outcome = |r: std::io::Result<()>| match r {
+        Ok(()) => "ok".to_owned(),
+        Err(e) => format!("{:?} {e}", e.raw_os_error()),
+    };
+    let mkdir = outcome(std::fs::create_dir(&dir));
+    let opened = std::fs::File::open(&dir);
+    let open = outcome(
+        opened
+            .as_ref()
+            .map(|_| ())
+            .map_err(|e| std::io::Error::from(e.kind())),
+    );
+    let now = std::time::SystemTime::now();
+    let std_times = opened.as_ref().map_or("not opened".to_owned(), |file| {
+        outcome(
+            file.set_times(
+                std::fs::FileTimes::new()
+                    .set_modified(now)
+                    .set_accessed(now),
+            ),
+        )
+    });
+    #[cfg(unix)]
+    let (futimens, utimensat) = {
+        let time = rustix::fs::Timespec {
+            tv_sec: 1_700_000_000,
+            tv_nsec: 5_000_000,
+        };
+        let times = rustix::fs::Timestamps {
+            last_access: time,
+            last_modification: time,
+        };
+        let futimens = opened.as_ref().map_or("not opened".to_owned(), |file| {
+            outcome(rustix::fs::futimens(file, &times).map_err(std::io::Error::from))
+        });
+        let utimensat = outcome(
+            rustix::fs::utimensat(rustix::fs::CWD, &dir, &times, rustix::fs::AtFlags::empty())
+                .map_err(std::io::Error::from),
+        );
+        (futimens, utimensat)
+    };
+    #[cfg(not(unix))]
+    let (futimens, utimensat) = (String::new(), String::new());
+    crate::log::info(
+        "test: times",
+        serde_json::json!({
+            "mkdir": mkdir, "open": open, "std_set_times": std_times,
+            "futimens": futimens, "utimensat": utimensat,
+        }),
+    );
+}
+
+#[cfg(not(feature = "testhooks"))]
+pub fn profile_times_probe() {}
+
 #[cfg(not(feature = "testhooks"))]
 pub fn profile_migrate_step(_step: &str) {}
 

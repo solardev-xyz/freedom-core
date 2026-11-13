@@ -121,7 +121,11 @@ fn each_subcommand_confined_reads_nothing_outside_its_grant() {
             "work",
         ],
     ] {
-        let out = Command::new(BIN).args(&args).output().unwrap();
+        let out = Command::new(BIN)
+            .args(&args)
+            .env("FREEDOM_CORED_TEST_PROFILE_TIMES", app.join("times-probe"))
+            .output()
+            .unwrap();
         assert_eq!(out.status.code(), Some(0), "{out:?}");
     }
     let catalog = app.join("profile-registry.json");
