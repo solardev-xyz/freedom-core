@@ -14,6 +14,11 @@ workspace = true
 # The parse `sign.*` uses (design 0002): transactions, addresses, quantities,
 # bytes, and the typed-data digest with its view (#88).
 fc-evm = { path = "../fc-evm" }
+# The grant files as JSON.parse reads them and JSON.stringify writes them:
+# doubles (`1e400` is Infinity, written `null`), ECMAScript's number text,
+# lone surrogates, JS's key order (design 0012, "The files"). fc-evm
+# already links it.
+fc-json = { path = "../fc-json" }
 # Token bytes come from the caller's RNG (AGENTS rule 2).
 rand_core = "0.10"
 # preserve_order: the typed-data view lists `types`' names in the order the
