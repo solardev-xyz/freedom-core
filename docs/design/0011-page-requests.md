@@ -1,6 +1,6 @@
 # 0011: Page requests and the approval surface
 
-**Status:** decided (the user, 2026-11-07 and 2026-11-08): open questions 1–4, which [Open questions](#open-questions) records. Roadmap items 2.3 (page provider calls go straight to main) and 2.8 step 1 (a trusted approval surface). Builds on [0001](0001-freedom-cored.md) (the threat model, and the caller context that reserves `page` for Phase 2) and [0002](0002-signing.md) (signing, its approval tokens, and the signed view of #88). Design 0012 follows: grants, tokens and the EIP-1193 dispatcher in the core (`fc-eip1193`). Nothing here is built yet.
+**Status:** decided (the user, 2026-11-07 and 2026-11-08): open questions 1–4, which [Open questions](#open-questions) records. Roadmap items 2.3 (page provider calls go straight to main) and 2.8 step 1 (a trusted approval surface). Builds on [0001](0001-freedom-cored.md) (the threat model, and the caller context that reserves `page` for Phase 2) and [0002](0002-signing.md) (signing, its approval tokens, and the signed view of #88). Design 0012 follows: grants, tokens and the EIP-1193 dispatcher in the core (`fc-eip1193`). [0012](0012-approvals.md#amendments) (decided) amends it: `PageContext` gains `agent` and `transport_key`, the internal issuer calls the core's `approval.issue` until APR-7, and from APR-5 a handle record keeps the core's prompt id. Nothing here is built yet.
 
 **The references:**
 - **freedom-browser** at `f19705ad` (`integration/rust-core`):
@@ -223,10 +223,11 @@ Main fills `fc-protocol`'s `PageContext` from the record:
 | `top_origin` | `topKey` |
 | `frame` | the frame's `frameTreeNodeId` |
 | `navigation` | the document number |
+| `agent` | `isAgentPage(event.sender)`, read as main sends the request, not the record's `agent` from the hello ([Agent custody](#agent-custody)). [0012](0012-approvals.md#pagecontext) adds it, from APR-3: a page request without it gets no standing rule |
+| `transport_key` | `transportKey`, for the core's own name check ([Names over IPNS](#names-over-ipns)). 0012 adds it, from APR-5 |
 
 - A document without a key has no `PageContext`, and none of its site methods reach the core.
-- **Until 0012 nothing sends it.** No core method accepts `page` (`methods.rs`, `Callers::allow`), and main's core calls for a page's request keep the caller kinds they have today (`service-client.js` defaults to `chrome`). 0012 admits `page` on the methods whose grants the core checks.
-- 0012 may also need the Agent-custody flag, which `PageContext` doesn't carry.
+- **[0012](0012-approvals.md#pagecontext) admits `page`** on the methods whose tokens and grants the core checks, from its APR-3. Until then no core method accepts `page` (`methods.rs`, `Callers::allow`), and main's core calls for a page's request keep the caller kinds they have today (`service-client.js` defaults to `chrome`).
 
 ## Documents
 
@@ -288,7 +289,8 @@ Main fills `fc-protocol`'s `PageContext` from the record:
 
 **Approval tokens.** Today the chrome asks `wallet:confirm-signing` for a token of any of `signing-confirmation.js`'s ten kinds, with an account and a payload of its choosing (`wallet-ipc.js:621–643`). From PRQ-5 the kinds that serve page requests have one issuer, inside main:
 - **The page kinds:** `dapp-send`, `sign-message`, `sign-typed-data`, `safe-message`, and a `safe-send` that names a site (a dApp's transaction from a Safe account, `wallet/dapp-tx.js:819`).
-- **The internal issuer** is the dispatcher's. It mints a token of a page kind only on an approval of an open handle, shown at that moment, whose request record is live. It takes the handle and the attested key from that record, and the account and the payload from the request main holds, never from a caller. The token never leaves main: the dispatcher spends it.
+- **The internal issuer** is the dispatcher's. It mints a token of a page kind only on an approval of an open handle, shown at that moment, whose request record is live. It takes the handle and the attested key from that record, and the account and the payload from the request main holds, never from a caller. The dispatcher spends the token, and it never reaches a renderer.
+  - **With 0012** the issuer becomes a caller of the core's `approval.issue`, under `page` with the request's `PageContext` (0012's APB-1): the core mints and binds the token on the issuer's request, and the dispatcher presents it to the core's signing methods. That lasts until APR-7, when the core mints the page kinds itself, on an approve answer to its own `approval.request` ([The core's prompts](#the-prompt-protocol), below). A token still never reaches a renderer.
 - **The chrome's `wallet:confirm-signing` refuses the page kinds** from PRQ-5 on. It goes on minting the wallet's own six (`wallet-send`, a `safe-send` with no site, `intent-resend`, `intent-replace`, `intent-close`, `executor-send`) until APS-3.
 - **The auto-approve route moves too.** The signing handlers refuse the chrome's `{ autoApprove, webContentsId }` authorization for the page kinds. The dispatcher reads the site's rule itself, for the request record's key, with [Agent custody](#agent-custody) read live.
 
@@ -297,6 +299,8 @@ A page kind's binding gains two fields, both from the record:
 - **the attested key,** so a token minted for one site's request can't sign another's. A `dapp-send` token binds a site today, but the chrome supplies it (`signing-confirmation.js`, "What a token binds"). Now it is the requester's.
 
 The dispatcher checks the document again before it spends the token. If the document has gone, the token is refused and burnt.
+
+**The core's prompts ([0012](0012-approvals.md#fc-eip1193-and-approvalrequest), from APR-5).** Once the core runs the Ethereum dispatcher (`fc-eip1193`), it asks main for each prompt with a core-to-main `approval.request`, under a `prompt` id of its own. Main opens a handle for it on that request's record, as for any prompt, and the handle record also keeps the core's `prompt` id. Main answers each `approval.request` only with a decision on the handle it opened for it, echoes the prompt id and the handle, and answers `closed` when that handle closes. A token still never reaches a renderer.
 
 **Device steps** keep today's paths after the decision. A Ledger signs in main. A phone account's job goes to the chrome's openlv session through main's bridge, which accepts answers only from the chrome it sent the job to and checks every signature against the account (`wallet/remote/bridge.js`). Roadmap 2.7 moves the job into the core.
 
