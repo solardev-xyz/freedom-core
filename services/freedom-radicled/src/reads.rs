@@ -19,7 +19,10 @@
 //! - `issues { rid }` and `patches { rid }`, the COB ops;
 //! - `list_repos` and `list_seeded_repos`;
 //! - `seeders { rid }`, with the node held exclusively, as libradicle's
-//!   `seeders` takes `&mut self`; `identity` and `status`.
+//!   `seeders` takes `&mut self`; `identity`; and `status`, which waits for
+//!   the node's reactor up to the read's deadline, then answers `deadline`
+//!   (#340, [`crate::node`]): libradicle's `NodeDeadline`, or its
+//!   `NodeBusy` at once, with nothing sent.
 //!
 //! The other ops 0008 lists ([`composed`]): of main's serialization,
 //! `issue { rid, issue_id }`, `patch { rid, patch_id }`, `remotes { rid }`
@@ -119,7 +122,7 @@ use std::path::Path;
 use std::str::FromStr as _;
 use std::sync::Arc;
 use std::task::{Context, Poll, Wake, Waker};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use fc_protocol::error::{ErrorBody, ErrorCode};
 use fc_service::conn::{Connection, Headed};
@@ -951,7 +954,7 @@ fn body(
         Op::Status => json_read(
             budget,
             until,
-            |_| handle.node().connected_peers(),
+            |_| connected_peers(handle, until),
             |w, peers| json::connected_peers(w, *peers),
         ),
         Op::Issue { rid, id } => composed::issue(handle, budget, until, rid, &id),
@@ -981,6 +984,17 @@ fn body(
         ),
         Op::NodeInfo => composed::node_info(handle, home, budget, until),
     }
+}
+
+/// The node's connected peers, for `status` and `node_info`: its reactor
+/// waited for up to the read's deadline left, then `deadline`, the node let
+/// go of (#340, `crate::node`). At or past the deadline, nothing is asked.
+fn connected_peers(handle: &Handle, until: &Until) -> Result<usize, Failure> {
+    let within = until.deadline.saturating_duration_since(Instant::now());
+    if within.is_zero() {
+        return Err(Failure::Refused(Refused::Deadline));
+    }
+    Ok(handle.connected_peers_within(within)?)
 }
 
 /// What a read's answer before its head is from its deadline on.

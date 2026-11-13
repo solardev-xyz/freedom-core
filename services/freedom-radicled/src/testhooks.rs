@@ -40,6 +40,13 @@
 //!   watch's looks at its peers that many milliseconds, with the node held
 //!   shared, before it asks heartwood ([`crate::node`]), logging `test
 //!   hook: the watch's look holds the node`: a look the stop meets.
+//! - `FREEDOM_RADICLED_TEST_WEDGE_REACTOR=<path>` wedges the node's
+//!   reactor (#340): while a file exists at `<path>`, each ask of the
+//!   node's dial gate, which heartwood makes on its reactor's thread before
+//!   a dial, holds that thread until the file is gone, or for 60 s, then
+//!   goes on as the gate would ([`routing`]), each hold logging `test hook:
+//!   the gate holds the reactor`. Arming it once the node runs leaves the
+//!   start alone; a dial then wedges it (`rad.connect_seeds` of a seed).
 //! - `FREEDOM_RADICLED_TEST_WORK_DEADLINE_MS` replaces the read pool's and
 //!   the write queue's 60 s deadlines. With
 //!   `FREEDOM_RADICLED_TEST_WORK_DEADLINE_FROM=<path>` it replaces them
@@ -779,8 +786,30 @@ mod hermetic {
         addr.ip().to_canonical().is_loopback()
     }
 
+    /// The reactor's wedge (`FREEDOM_RADICLED_TEST_WEDGE_REACTOR`, see the
+    /// module's doc): holds the reactor's thread while the file exists, at
+    /// most 60 s.
+    fn wedge() {
+        let Some(armed) = std::env::var_os("FREEDOM_RADICLED_TEST_WEDGE_REACTOR") else {
+            return;
+        };
+        let armed = std::path::Path::new(&armed);
+        if !armed.exists() {
+            return;
+        }
+        fc_service::log::info(
+            "test hook: the gate holds the reactor",
+            serde_json::json!({}),
+        );
+        let until = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        while std::time::Instant::now() < until && armed.exists() {
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+    }
+
     impl Gate for LoopbackOnly {
         fn allows(&self, target: &Address, addr: &SocketAddr) -> bool {
+            wedge();
             let allowed = self.inner.allows(target, addr);
             if allowed && !on_host(addr) {
                 off_host(format_args!("{target} at {addr}"));

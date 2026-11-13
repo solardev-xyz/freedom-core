@@ -34,7 +34,7 @@ fc-service = { path = "../../crates/fc-service" }
 # The sealed release of the node key (0008, "The sealed release"): the
 # service's X25519 key for one start, and opening what the core sealed to it.
 fc-seal = { path = "../../crates/fc-seal" }
-# libradicle at `integration/rust-core` (216ced6, #34's merge),
+# libradicle at `integration/rust-core` (e35d5b0, #39's merge),
 # built with `no-spawn`,
 # explicitly (0008, "Spawn and lock"): serving runs in process and `git gc`
 # is skipped. It carries the upstream changes 0008 lists for the service's
@@ -61,10 +61,13 @@ fc-seal = { path = "../../crates/fc-seal" }
 # fetch into a temporary clone moved into place last, the working copy never
 # written, its `Moved` stage told after the move), which the import process
 # runs. A missing project payload is `Error::NoProject` (#34), with the old
-# text. Pinned by commit until those changes are released (deny.toml allows
-# solardev-xyz).
+# text. The two calls that wait on the node's reactor, `connected_peers` and
+# `unseed_repo`, wait within a bound (#39, freedom-core #340:
+# `connected_peers_within`, `unseed_repo_within`, `Error::NodeDeadline`,
+# `Error::NodeBusy`, `waiting_on_node`). Pinned by commit until those
+# changes are released (deny.toml allows solardev-xyz).
 # src/build_info.rs reports the same commit.
-libradicle = { git = "https://github.com/solardev-xyz/libradicle", rev = "216ced6dddccd7cb1103b2cfda238936cd618897", features = ["no-spawn"] }
+libradicle = { git = "https://github.com/solardev-xyz/libradicle", rev = "e35d5b0b12e6a8b18352a8157b330f58dfee3666", features = ["no-spawn"] }
 # libgit2's process-wide options, which heartwood's `radicle::git::raw`
 # doesn't re-export: the object cache turned off (src/reads.rs, `uncache`),
 # and the probe of it. Already in libradicle's graph, at its version and with

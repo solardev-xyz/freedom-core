@@ -23,7 +23,9 @@
 //!   and `per_page` as its query's raw string, or null.
 //! - **`node_info`:** `{ connected_peers, repos_total, repos_error }`, for
 //!   main's two callers that need the count: `status`, then `list_repos`'s
-//!   length. A `status` failure fails the call. A listing failure, a
+//!   length. A `status` failure fails the call: as `status`'s, its wait for
+//!   the node's reactor is bounded by the read's deadline, then `deadline`
+//!   (#340). A listing failure, a
 //!   listing past its bound too, is `repos_error`, libradicle's message,
 //!   with `repos_total` null, as main reads such a failure today; a
 //!   message that could name a filesystem path is the fixed text the reads'
@@ -441,7 +443,7 @@ pub fn node_info(
     until: &Until,
 ) -> Result<Body, Failure> {
     composed_read(budget, until, |out| {
-        let connected_peers = handle.node().connected_peers()?;
+        let connected_peers = super::connected_peers(handle, until)?;
         let error;
         // Two statements, so the check's hold on the node ends before the
         // listing takes it: a second shared hold under the first waits
