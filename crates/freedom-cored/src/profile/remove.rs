@@ -113,12 +113,46 @@ fn real_child(
 
 /// A directory the delete acts on, reached from a handle: the handle of
 /// the directory holding it (`None` when that is missing: nothing below it
-/// exists), its name there, and its own handle if it is there.
+/// exists), its name there, and its own handle if it is there. Where a
+/// step on the way was missing, the last directory that was there, and the
+/// names from it down to the one holding it, so what is made there later
+/// can still be reached from it ([`Located::parent_now`]).
 pub struct Located {
     pub parent: Option<Dir>,
     pub name: OsString,
     pub dir: Option<Dir>,
     pub path: PathBuf,
+    anchor: Option<(Dir, Vec<OsString>)>,
+}
+
+impl Located {
+    /// The handle of the directory holding it, now: the one the layout
+    /// check found or, where a step on the way was missing then, reached
+    /// again from the last directory that was there, step by step through
+    /// real directories only. A start makes its missing directories before
+    /// it waits on the gate the delete holds (`gate::acquire`), so they
+    /// may be there by now (review of #337). `None` while a step is still
+    /// missing, or isn't a real directory: nothing below it is the
+    /// profile's.
+    pub fn parent_now(&self) -> Result<Option<Dir>, Failure> {
+        if let Some(parent) = &self.parent {
+            return Ok(Some(parent.try_clone()?));
+        }
+        let Some((anchor, names)) = &self.anchor else {
+            return Ok(None);
+        };
+        let mut dir = anchor.try_clone()?;
+        for name in names {
+            if dir.kind(name)? != Kind::Dir {
+                return Ok(None);
+            }
+            match dir.child(name, false)? {
+                Some(child) => dir = child,
+                None => return Ok(None),
+            }
+        }
+        Ok(Some(dir))
+    }
 }
 
 /// `target`, below `base` (whose handle is `base_dir`), reached step by
@@ -136,11 +170,18 @@ pub fn locate(
         return Err(refused(target));
     };
     let mut parent = Some(base_dir.try_clone()?);
-    for step in parents {
-        parent = match &parent {
-            Some(dir) => real_child(dir, step, refused)?,
-            None => None,
+    let mut anchor = None;
+    for (at, step) in parents.iter().enumerate() {
+        let Some(dir) = parent.take() else {
+            break;
         };
+        match real_child(&dir, step, refused)? {
+            Some(child) => parent = Some(child),
+            None => {
+                anchor = Some((dir, parents[at..].to_vec()));
+                break;
+            }
+        }
     }
     let dir = match &parent {
         Some(parent) => real_child(parent, name, refused)?,
@@ -151,6 +192,7 @@ pub fn locate(
         name: name.clone(),
         dir,
         path: target.to_owned(),
+        anchor,
     })
 }
 

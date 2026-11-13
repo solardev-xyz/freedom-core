@@ -152,9 +152,129 @@ fn strictly_under(style: Style, parent: &str, child: &str) -> bool {
     child != parent && child.starts_with(&format!("{parent}{}", sep(style)))
 }
 
+/// One name of a resolved path, as written and as compared: ASCII case
+/// folded, as macOS's and Windows' default volumes compare names, and on
+/// Windows without the trailing dots and spaces Win32 drops from a name.
+struct Name<'a> {
+    text: &'a str,
+    key: String,
+}
+
+fn names(style: Style, path: &str) -> Vec<Name<'_>> {
+    path.split(|c| c == '/' || (style == Style::Windows && c == '\\'))
+        .filter(|name| !name.is_empty())
+        .map(|text| {
+            let kept = match style {
+                Style::Posix => text,
+                Style::Windows => text.trim_end_matches(['.', ' ']),
+            };
+            Name {
+                text,
+                key: kept.to_ascii_lowercase(),
+            }
+        })
+        .collect()
+}
+
+fn same(a: &[Name<'_>], b: &[Name<'_>]) -> bool {
+    a.len() == b.len() && a.iter().zip(b).all(|(a, b)| a.key == b.key)
+}
+
+fn inside(parent: &[Name<'_>], child: &[Name<'_>]) -> bool {
+    child.len() > parent.len() && same(parent, &child[..parent.len()])
+}
+
+/// [`is_app_root_shared_entry`], for a name compared as [`Name`] has it.
+fn shared_key(key: &str) -> bool {
+    let registry = PROFILE_REGISTRY_FILE.to_ascii_lowercase();
+    APP_ROOT_SHARED_ENTRIES
+        .iter()
+        .any(|entry| entry.to_ascii_lowercase() == key)
+        || key
+            .strip_prefix(registry.as_str())
+            .is_some_and(|rest| rest.starts_with('.'))
+}
+
+/// What a profile's delete removes.
+enum Removes<'a> {
+    /// The packaged default profile's: the app root's entries but the
+    /// shared ones (by their names exactly, as its removal spares them).
+    AppRoot,
+    /// A directory below the app root, and all below it.
+    Dir(Vec<Name<'a>>),
+}
+
+/// Whether two deletes would remove some of the same data.
+fn removes_overlap(app: &[Name<'_>], a: &Removes<'_>, b: &Removes<'_>) -> bool {
+    match (a, b) {
+        (Removes::AppRoot, Removes::AppRoot) => true,
+        (Removes::AppRoot, Removes::Dir(dir)) | (Removes::Dir(dir), Removes::AppRoot) => dir
+            .get(app.len())
+            .is_none_or(|first| !is_app_root_shared_entry(first.text)),
+        (Removes::Dir(a), Removes::Dir(b)) => same(a, b) || inside(a, b) || inside(b, a),
+    }
+}
+
+/// Whether deleting the profile at `target` (resolved, inside the app root
+/// `app`, or the app root for the packaged default profile) would remove
+/// the app's own data or another profile's (beyond the reference, which
+/// checks only that the directory is inside the app root; 0013's
+/// `profile-delete-overlap`; review of #337):
+/// - **the app's own:** the target is the profiles root or another of the
+///   app root's shared entries, or inside one but the profiles root;
+/// - **another profile's:** the target is at, above or inside another
+///   record's directory, both resolved, or, for the packaged default
+///   profile, at the app root, whose delete removes the app root's entries
+///   but the shared ones. A record at a shared entry (`Profiles` itself) is
+///   the app's directory, not a profile's; one outside the app root, or
+///   above it, is no delete's to remove (its own is refused).
+///
+/// Names are compared as [`Name`] has them, so a case or a trailing dot
+/// that names the same directory on macOS or Windows doesn't get past.
+fn overlaps(
+    style: Style,
+    app: &str,
+    target: &str,
+    shares_app_root: bool,
+    others: &[String],
+) -> bool {
+    let app = names(style, app);
+    let target = if shares_app_root {
+        Removes::AppRoot
+    } else {
+        let dir = names(style, target);
+        if !inside(&app, &dir) {
+            return true;
+        }
+        let first = &dir[app.len()];
+        let profiles = first.key == PROFILES_DIR.to_ascii_lowercase();
+        if shared_key(&first.key) && !(profiles && dir.len() > app.len() + 1) {
+            return true;
+        }
+        Removes::Dir(dir)
+    };
+    others.iter().any(|other| {
+        let dir = names(style, other);
+        let other = if same(&app, &dir) {
+            Removes::AppRoot
+        } else if inside(&app, &dir) {
+            if dir.len() == app.len() + 1 && shared_key(&dir[app.len()].key) {
+                return false;
+            }
+            Removes::Dir(dir)
+        } else {
+            return false;
+        };
+        removes_overlap(&app, &target, &other)
+    })
+}
+
 /// `assertProfileDeletable(appRoot, catalog, id)`, on the loaded catalog.
 /// A record before the match that is `null` is the reference's `TypeError`
-/// in `findIndex` ([`Error::Malformed`]).
+/// in `findIndex` ([`Error::Malformed`]). Then, beyond the reference, a
+/// directory that overlaps another profile's or the app's own data is
+/// refused ([`overlaps`]), before the confirmation as the reference's
+/// refusal of a directory outside the app root is.
 fn assert_deletable(
     store: &dyn Store,
     app_root: &str,
@@ -193,6 +313,20 @@ fn assert_deletable(
             "Refusing to delete a profile outside the app data root".into(),
         ));
     }
+    // Every other record's directory, resolved; one with none is no
+    // profile's directory.
+    let others: Vec<String> = records
+        .iter()
+        .enumerate()
+        .filter(|(n, _)| *n != index)
+        .filter_map(|(_, other)| match other.get("dir") {
+            Some(JsValue::String(dir)) => Some(resolved(store, style, dir.as_str())),
+            _ => None,
+        })
+        .collect();
+    if overlaps(style, &app, &profile_dir, shares_app_root, &others) {
+        return Err(Error::Refused(OVERLAP_REFUSED.into()));
+    }
     Ok((
         index,
         record,
@@ -202,6 +336,11 @@ fn assert_deletable(
         shares_app_root,
     ))
 }
+
+/// The refusal of a directory that overlaps another profile's or the app's
+/// own data (0013's `profile-delete-overlap`).
+pub const OVERLAP_REFUSED: &str =
+    "Refusing to delete a profile whose directory overlaps another profile's or the app's own data";
 
 /// `assertDisplayNameConfirmation(expectedDisplayName, displayName)`: the
 /// confirmation must be the display name exactly (a name that isn't text
@@ -283,7 +422,9 @@ fn radicle_home(
 /// What `deleteProfile(appRoot, profileId, expectedDisplayName, options)`
 /// acts on, checked as it checks it: the id sanitized, the record found,
 /// not the last, inside the app root (or the packaged default profile at
-/// it), the display name confirmed, and its Radicle home inside its root.
+/// it), overlapping no other profile's directory and none of the app's own
+/// (beyond the reference), the display name confirmed, and its Radicle home
+/// inside its root.
 pub fn plan_deletion(
     store: &mut dyn Store,
     app_root: &str,
@@ -328,6 +469,86 @@ mod tests {
     #![allow(clippy::unwrap_used)]
 
     use super::*;
+
+    /// The overlap check on Windows paths: a case or a trailing dot or
+    /// space names the same directory there.
+    #[test]
+    fn overlaps_on_windows() {
+        let app = r"C:\Users\u\fb";
+        let others = |dirs: &[&str]| dirs.iter().map(|d| (*d).to_owned()).collect::<Vec<_>>();
+        let w = Style::Windows;
+        let none = others(&[]);
+        for target in [
+            r"C:\Users\u\fb\Profiles",
+            r"C:\Users\u\fb\profiles",
+            r"C:\Users\u\fb\Profiles.",
+            r"C:\Users\u\fb\Profiles .",
+            r"C:\Users\u\fb\LOCKS",
+            r"C:\Users\u\fb\R\3",
+            r"C:\Users\u\fb\profile-registry.json.forget",
+        ] {
+            assert!(overlaps(w, app, target, false, &none), "{target}");
+        }
+        assert!(!overlaps(w, app, r"C:\Users\u\fb\Profiles\a", false, &none));
+        // Another profile's directory under another case or a trailing dot.
+        let peer = others(&[r"c:\users\U\FB\profiles\A"]);
+        assert!(overlaps(w, app, r"C:\Users\u\fb\Profiles\a.", false, &peer));
+        assert!(overlaps(
+            w,
+            app,
+            r"C:\Users\u\fb\Profiles\a\b",
+            false,
+            &peer
+        ));
+        assert!(!overlaps(
+            w,
+            app,
+            r"C:\Users\u\fb\Profiles\ab",
+            false,
+            &peer
+        ));
+        // The packaged default profile's data: the app root's entries but
+        // the shared ones, by their names exactly.
+        let default = others(&[app]);
+        assert!(overlaps(w, app, r"C:\Users\u\fb\loose", false, &default));
+        assert!(!overlaps(
+            w,
+            app,
+            r"C:\Users\u\fb\Profiles\a",
+            false,
+            &default
+        ));
+        assert!(overlaps(
+            w,
+            app,
+            app,
+            true,
+            &others(&[r"C:\Users\u\fb\Loose"])
+        ));
+        assert!(!overlaps(
+            w,
+            app,
+            app,
+            true,
+            &others(&[r"C:\Users\u\fb\R\3"])
+        ));
+        // A name that is a shared entry's only ignoring case may be removed
+        // there (the removal spares the names exactly): it counts.
+        assert!(overlaps(w, app, app, true, &peer));
+        let exact = others(&[r"c:\users\U\FB\Profiles\A"]);
+        assert!(!overlaps(w, app, app, true, &exact));
+        // The profiles root's record is the app's, and one above the app
+        // root no delete's.
+        let roots = others(&[r"C:\Users\u\fb\Profiles", r"C:\Users\u", r"D:\fb"]);
+        assert!(!overlaps(
+            w,
+            app,
+            r"C:\Users\u\fb\Profiles\a",
+            false,
+            &roots
+        ));
+        assert!(!overlaps(w, app, app, true, &roots));
+    }
 
     #[test]
     fn shared_entries() {

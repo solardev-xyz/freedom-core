@@ -780,3 +780,124 @@ fn a_secrets_file_through_a_link_is_unknown() {
     assert!(other.join("identity").join("secrets.json").exists());
     assert_eq!(forget_list(&d)["items"], json!([]));
 }
+
+/// The lock directory's entries: a gate tried leaves its lock file there.
+fn lock_files(d: &Dirs) -> Vec<String> {
+    let mut names: Vec<String> = std::fs::read_dir(&d.locks)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    names.sort();
+    names
+}
+
+/// **A record whose directory overlaps another profile's** (review of
+/// #337): the profiles root, a directory above another profile's, and one
+/// inside another profile's are each refused before any gate is tried or
+/// anything changes, where the reference's check (inside the app root)
+/// would let the delete remove the other profiles' data
+/// (`profile-delete-overlap`).
+#[test]
+fn a_record_overlapping_another_profiles_directory_is_refused() {
+    let d = dirs();
+    let (work, _home) = setup(&d, &[hex('a')]);
+    profile_lock(&work, Duration::from_secs(31));
+    let path = d.app.join("profile-registry.json");
+    let mut catalog: Value =
+        serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    let records = catalog["profiles"].as_array_mut().unwrap();
+    records.push(
+        json!({ "id": "all", "displayName": "All", "dir": s(&d.app.join("Profiles")), "slot": 7 }),
+    );
+    records.push(json!({ "id": "inner", "displayName": "Inner", "dir": s(&work.join("identity")), "slot": 8 }));
+    std::fs::write(&path, serde_json::to_string_pretty(&catalog).unwrap()).unwrap();
+    // The profiles root; `work`, above `inner`'s directory; `inner`, inside
+    // `work`'s.
+    for (id, confirm) in [("all", "All"), ("work", "Work"), ("inner", "Inner")] {
+        let before = snapshot(&d);
+        let locks = lock_files(&d);
+        let out = delete(&d, id, confirm, &[]);
+        assert_eq!(code(&out), 65, "{id}: {out:?}");
+        assert_eq!(
+            json_of(&out)["message"],
+            "Refusing to delete a profile whose directory overlaps another profile's or the \
+             app's own data",
+            "{id}"
+        );
+        assert_eq!(snapshot(&d), before, "{id}");
+        assert_eq!(lock_files(&d), locks, "{id}: no gate tried");
+    }
+    assert_eq!(catalog_ids(&d), ["default", "work", "all", "inner"]);
+}
+
+/// **A Radicle home made after the layout check** (review of #337): with
+/// `R/` missing when the delete checks its layout, a service start made
+/// `R/1` meanwhile and waits on the Radicle gate the delete holds (a gate's
+/// `acquire` makes its directory before it locks). The delete reaches the
+/// home from the app root still, and removes it under that gate, so the
+/// start finds its directory gone once the gate is released, and no `R/1`
+/// is left for a later profile with that slot.
+#[test]
+fn a_radicle_home_made_after_the_layout_check_goes_with_the_profile() {
+    let d = dirs();
+    let (work, home) = setup(&d, &[hex('a')]);
+    std::fs::remove_dir_all(d.app.join("R")).unwrap();
+    profile_lock(&work, Duration::from_secs(31));
+    let marker = d.base.join("paused");
+    let release = d.base.join("release");
+    let pause = format!("before-record={}={}", s(&marker), s(&release));
+    let child = Command::new(BIN)
+        .args([
+            "profile",
+            "delete",
+            "--app-root",
+            s(&d.app),
+            "--lock-dir",
+            s(&d.locks),
+            "--id",
+            "work",
+            "--confirm-display-name",
+            "Work",
+        ])
+        .env("FREEDOM_CORED_TEST_PROFILE_DELETE_PAUSE", &pause)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let until = std::time::Instant::now() + Duration::from_secs(60);
+    while !marker.exists() {
+        assert!(std::time::Instant::now() < until, "the delete never paused");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    // The layout is checked and every gate held: a start makes the home and
+    // waits.
+    let start = {
+        let (home, locks) = (home.clone(), d.locks.clone());
+        std::thread::spawn(move || {
+            fc_service::gate::acquire(&home, &locks, "radicle", Duration::from_secs(60))
+        })
+    };
+    while !home.exists() {
+        assert!(
+            std::time::Instant::now() < until,
+            "the start never made its home"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    std::fs::write(&release, "").unwrap();
+    let out = child.wait_with_output().unwrap();
+    assert_eq!(code(&out), 0, "{out:?}");
+    assert_eq!(catalog_ids(&d), ["default"]);
+    assert!(!work.exists());
+    assert!(
+        !home.exists(),
+        "the home made after the layout check is gone"
+    );
+    match start.join().unwrap() {
+        Err(fc_service::gate::GateError::Storage(e)) => {
+            assert_eq!(e.kind(), std::io::ErrorKind::NotFound);
+        }
+        other => panic!("the start that waited went on: {other:?}"),
+    }
+    assert!(!home.exists(), "no orphan once the gate is released");
+}

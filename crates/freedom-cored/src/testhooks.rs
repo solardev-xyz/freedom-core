@@ -61,6 +61,10 @@
 //!   delete` (`before-record`, `after-record`, `after-catalog`,
 //!   `mid-removal`, `before-result`): there the process exits at once with
 //!   99, as if killed, its locks and files left as they are.
+//! - `FREEDOM_CORED_TEST_PROFILE_DELETE_PAUSE` (`<step>=<marker>=<release>`):
+//!   at that step `profile delete` creates the file `<marker>`, then waits,
+//!   its locks and gates held, until the file `<release>` exists (at most
+//!   120 s). So a test acts between two steps.
 
 use std::time::Duration;
 
@@ -250,6 +254,14 @@ pub fn profile_hold() {
 pub fn profile_delete_step(step: &str) {
     if std::env::var("FREEDOM_CORED_TEST_PROFILE_DELETE_CRASH").is_ok_and(|s| s == step) {
         std::process::exit(99);
+    }
+    if let Ok(spec) = std::env::var("FREEDOM_CORED_TEST_PROFILE_DELETE_PAUSE")
+        && let Some((at, files)) = spec.split_once('=')
+        && at == step
+        && let Some((marker, release)) = files.split_once('=')
+    {
+        let _ = std::fs::write(marker, b"paused");
+        hold(std::ffi::OsStr::new(release), || false);
     }
 }
 
