@@ -387,17 +387,15 @@ impl Openness {
     }
 }
 
-/// `layout`: `pending` while a move's journal is there, `freedom` once its
-/// marker is, `root` otherwise (design 0013, "The move").
-fn layout(user_data_dir: &Path) -> &'static str {
-    let freedom = user_data_dir.join("freedom");
-    if std::fs::symlink_metadata(freedom.join(".move.json")).is_ok() {
-        "pending"
-    } else if std::fs::symlink_metadata(freedom.join("layout.json")).is_ok() {
-        "freedom"
-    } else {
-        "root"
-    }
+/// The profile's layout (design 0013, "Readers, and the downgrade";
+/// `fc_profile::layout::Layout`): `pending` while a move's journal is
+/// there, `freedom` once its marker is, `root` otherwise. `profile open`
+/// reports it, and a delete gates the directories it names.
+fn layout(user_data_dir: &Path) -> fc_profile::layout::Layout {
+    use fc_profile::layout::{FREEDOM_DIR, LAYOUT_MARKER, Layout, MOVE_JOURNAL};
+    let freedom = user_data_dir.join(FREEDOM_DIR);
+    let there = |name: &str| std::fs::symlink_metadata(freedom.join(name)).is_ok();
+    Layout::read(there(MOVE_JOURNAL), there(LAYOUT_MARKER))
 }
 
 fn open(args: impl Iterator<Item = OsString>) -> Result<Exit, ()> {
@@ -500,7 +498,7 @@ fn open_profile(app_root: &str, lock_dir: &Path, opts: &Options, args: &OpenArgs
     }
     out.set("lock_fresh", JsValue::Bool(openness.lock_fresh));
     out.set("gate_held", JsValue::Bool(openness.gate_held));
-    out.set("layout", JsValue::string(layout(dir)));
+    out.set("layout", JsValue::string(layout(dir).word()));
     #[allow(clippy::cast_precision_loss)]
     out.set("forget_pending", JsValue::Number(forget as f64));
     out.set("catalog_path", JsValue::string(&opened.catalog_path));
