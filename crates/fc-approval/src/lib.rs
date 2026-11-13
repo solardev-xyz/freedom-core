@@ -28,6 +28,11 @@ mod error;
 mod kind;
 mod tokens;
 
+// The checks a standing rule makes besides its grant (APR-2): R-6's and
+// Q9's rate, and 0005's fee check.
+pub mod fee;
+pub mod rate;
+
 pub use bind::{
     Binding, Handle, Limits, MAX_ACCOUNT, MAX_CHAIN_ID, MAX_CLOSE_HASHES, MAX_NONCE, Page, Request,
     bind,

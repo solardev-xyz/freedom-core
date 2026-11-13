@@ -872,12 +872,15 @@ function buildApprovals(checkout, meta) {
     formats: {
       constants: 'The reference\'s `CONFIRMATION_TTL_MS` and `MAX_OUTSTANDING`.',
       kinds: 'The reference\'s `KINDS`: whether each is a page kind (`always`, `with-site` for a Safe send that names a site, `never`), and whether design 0012 takes it (`design`; the cap edit, #1023, is not one of its eleven).',
+      rules: require('./approval-rules').RULES_FORMAT,
       bindings: 'One request each: `kind`, `account`, `payload` and `page` (`{ handle, key }`, for main\'s page issuer) as the reference takes them; `js`, `bindingFor`\'s facts or its error message; `core`, the request in fc-approval\'s form (`account`, `payload` or `payload_text`, the payload\'s JSON text the core parses itself, and `page`: `{ origin, frame, navigation, handle }`), or null where the reference\'s input has none; `expect`, whether the core issues a token for it (`issued`) or refuses it (`refused`), from 0012 (`deviation: token-strict` where the reference binds what the core refuses); `sameHash`, set where the case was built to share the EIP-712 hash of the case it is paired with.',
       pairs: 'Two requests the reference binds: `js`, whether a token minted for either spends for the other (`alike`) or is refused (`apart`), asked of the reference both ways; `changed`, the facts (and `kind`, `page`, `page.handle`, `page.key`) in which the reference\'s bindings differ; `core`, the core\'s answer, from 0012\'s Deviations table where `deviation` is set.',
       runs: 'Steps in order under `_setNow`, on a fresh store: `issue` (a case\'s request, minted as `token`), `consume` (a case\'s request, presented with `token`, or with `literal` text; `route: wallet` presents it without its page), `discard` and `count` (the outstanding tokens); `at` is the reference\'s clock, and `vaultAt` the vault\'s where they differ (`token-clock`); each step\'s `outcome` (`ok`, with what the token bound; `error`, the reference\'s message; or `count`), and `core` where the core\'s differs.',
     },
     constants: { ttlMs: sc.CONFIRMATION_TTL_MS, maxOutstanding: sc.MAX_OUTSTANDING },
     kinds,
+    // Design 0012's R-6 limiter and fee check (APR-2).
+    rules: require('./approval-rules').buildRules(checkout),
     bindings: built,
     pairs: builtPairs,
     runs,
