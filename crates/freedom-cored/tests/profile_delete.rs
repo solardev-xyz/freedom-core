@@ -636,15 +636,17 @@ fn the_default_profiles_moved_data_goes_with_it() {
         .map(|e| e.unwrap().file_name().into_string().unwrap())
         .collect();
     names.sort();
-    assert_eq!(
-        names,
-        [
-            "Profiles",
-            "profile-registry.json",
-            "profile-registry.json.forget",
-            "profile-registry.write-lock-target",
-        ]
-    );
+    // The forget file, where the backend's items are recorded (not DPAPI's).
+    let mut kept = vec![
+        "Profiles",
+        "profile-registry.json",
+        "profile-registry.json.forget",
+        "profile-registry.write-lock-target",
+    ];
+    if !backend().1 {
+        kept.retain(|name| *name != "profile-registry.json.forget");
+    }
+    assert_eq!(names, kept);
     assert_eq!(catalog_ids(&d), ["work"]);
 }
 
