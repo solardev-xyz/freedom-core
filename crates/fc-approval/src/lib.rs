@@ -1,5 +1,5 @@
-//! Approvals in the core (design 0012). This step, APR-1: approval tokens
-//! and what each binds.
+//! Approvals in the core (design 0012): approval tokens and what each binds
+//! (APR-1); the four grant files and their codecs (APR-2, [`stores`]).
 //!
 //! A token is the core's record that the user confirmed one request: minted
 //! for exactly that request ([`Tokens::issue`]), and spent once, for that
@@ -25,7 +25,9 @@
 mod bind;
 mod canonical;
 mod error;
+mod js;
 mod kind;
+pub mod stores;
 mod tokens;
 
 // The checks a standing rule makes besides its grant (APR-2): R-6's and
