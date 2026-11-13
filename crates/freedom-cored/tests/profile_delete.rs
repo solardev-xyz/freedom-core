@@ -830,6 +830,115 @@ fn a_record_overlapping_another_profiles_directory_is_refused() {
     assert_eq!(catalog_ids(&d), ["default", "work", "all", "inner"]);
 }
 
+/// Adds `records` to the catalog as they are.
+fn add_records(d: &Dirs, records: &[Value]) {
+    let path = d.app.join("profile-registry.json");
+    let mut catalog: Value =
+        serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    catalog["profiles"]
+        .as_array_mut()
+        .unwrap()
+        .extend_from_slice(records);
+    std::fs::write(&path, serde_json::to_string_pretty(&catalog).unwrap()).unwrap();
+}
+
+/// Each delete of `ids` refused with `message`, nothing changed and no gate
+/// tried.
+fn refused_untouched(d: &Dirs, ids: &[(&str, &str)], message: &str) {
+    for (id, confirm) in ids {
+        let before = snapshot(d);
+        let locks = lock_files(d);
+        let out = delete(d, id, confirm, &[]);
+        assert_eq!(code(&out), 65, "{id}: {out:?}");
+        assert_eq!(json_of(&out)["message"], message, "{id}");
+        assert_eq!(snapshot(d), before, "{id}");
+        assert_eq!(lock_files(d), locks, "{id}: no gate tried");
+    }
+}
+
+/// **Unicode-equivalent directories** (review of #337): macOS's volumes
+/// ignore normalization, and its default ones case, so `café` composed and
+/// decomposed, or `Été` and `été`, are one directory there. Either record's
+/// delete would remove the other's data: refused on every OS, nothing
+/// changed, no gate tried.
+#[test]
+fn unicode_equivalent_directories_are_refused() {
+    let d = dirs();
+    let (work, _home) = setup(&d, &[hex('a')]);
+    profile_lock(&work, Duration::from_secs(31));
+    let profiles = d.app.join("Profiles");
+    let nfc = profiles.join("caf\u{e9}");
+    let nfd = profiles.join("cafe\u{301}");
+    let upper = profiles.join("\u{c9}t\u{e9}");
+    let lower = profiles.join("\u{e9}t\u{e9}");
+    std::fs::create_dir_all(nfc.join("identity")).unwrap();
+    std::fs::write(nfc.join("identity").join("vault.json"), "vault").unwrap();
+    std::fs::create_dir_all(&upper).unwrap();
+    std::fs::write(upper.join("Cookies"), "c").unwrap();
+    if cfg!(target_os = "macos") {
+        // Both spellings reach the one directory on APFS.
+        assert_eq!(
+            std::fs::read_to_string(nfd.join("identity").join("vault.json")).unwrap(),
+            "vault"
+        );
+    }
+    if cfg!(windows) {
+        // NTFS ignores case.
+        assert_eq!(std::fs::read_to_string(lower.join("Cookies")).unwrap(), "c");
+    }
+    add_records(
+        &d,
+        &[
+            json!({ "id": "nfc", "displayName": "NFC", "dir": s(&nfc), "slot": 7 }),
+            json!({ "id": "nfd", "displayName": "NFD", "dir": s(&nfd), "slot": 8 }),
+            json!({ "id": "upper", "displayName": "Upper", "dir": s(&upper), "slot": 9 }),
+            json!({ "id": "lower", "displayName": "Lower", "dir": s(&lower), "slot": 10 }),
+        ],
+    );
+    refused_untouched(
+        &d,
+        &[
+            ("nfc", "NFC"),
+            ("nfd", "NFD"),
+            ("upper", "Upper"),
+            ("lower", "Lower"),
+        ],
+        "Refusing to delete a profile whose directory overlaps another profile's or the app's \
+         own data",
+    );
+    assert_eq!(
+        catalog_ids(&d),
+        ["default", "work", "nfc", "nfd", "upper", "lower"]
+    );
+}
+
+/// **A Radicle slot two records share** (review of #337): both have the
+/// home `R/<slot>`, so either's delete would remove the other's Radicle
+/// data. Refused before the confirmation and any gate, nothing changed.
+#[test]
+fn a_radicle_slot_another_record_shares_is_refused() {
+    let d = dirs();
+    let (work, home) = setup(&d, &[hex('a')]);
+    profile_lock(&work, Duration::from_secs(31));
+    let path = d.app.join("profile-registry.json");
+    let catalog: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    let slot = catalog["profiles"][1]["slot"].clone();
+    assert_eq!(slot, json!(1), "work's home is R/1");
+    let copy = d.app.join("Profiles").join("copy");
+    std::fs::create_dir_all(&copy).unwrap();
+    add_records(
+        &d,
+        &[json!({ "id": "copy", "displayName": "Copy", "dir": s(&copy), "slot": slot })],
+    );
+    refused_untouched(
+        &d,
+        &[("work", "Work"), ("copy", "Copy"), ("copy", "wrong")],
+        "Refusing to delete a profile whose Radicle slot another profile also uses",
+    );
+    assert!(home.join("node").join("n").exists());
+    assert_eq!(catalog_ids(&d), ["default", "work", "copy"]);
+}
+
 /// **A Radicle home made after the layout check** (review of #337): with
 /// `R/` missing when the delete checks its layout, a service start made
 /// `R/1` meanwhile and waits on the Radicle gate the delete holds (a gate's

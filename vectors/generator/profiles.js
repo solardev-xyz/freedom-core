@@ -35,8 +35,10 @@
 // reference's `result`: `profile-delete-overlap`, a delete whose directory
 // is the profiles root or an app-owned shared entry, or inside one, or at,
 // above or inside another profile's directory (the packaged default
-// profile's being the app root's entries but the shared ones), which the
-// reference lets through and the core refuses.
+// profile's being the app root's entries but the shared ones; names
+// compared canonically decomposed and case folded), or whose integer slot,
+// and so Radicle home, another record has too, which the reference lets
+// through and the core refuses.
 
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
@@ -341,6 +343,12 @@ const OVERLAP = {
   message: "Refusing to delete a profile whose directory overlaps another profile's or the app's own data",
 };
 const overlapping = (step) => ({ ...step, deviation: 'profile-delete-overlap', core: OVERLAP });
+// The core's refusal where a delete's Radicle slot is another record's too.
+const SLOT = {
+  error: 'refused',
+  message: 'Refusing to delete a profile whose Radicle slot another profile also uses',
+};
+const sharingSlot = (step) => ({ ...step, deviation: 'profile-delete-overlap', core: SLOT });
 const at = (minute) => `2026-11-01T10:${String(minute).padStart(2, '0')}:00.000Z`;
 
 function scenarios(modules) {
@@ -655,6 +663,83 @@ function scenarios(modules) {
       steps: [
         { op: 'delete-validate', id: 'default', confirm: 'My Profile' },
         { op: 'delete-validate', id: 'work', confirm: 'Work' },
+      ],
+    },
+    {
+      // Names one directory on macOS's volumes, which ignore normalization
+      // and, by default, case, or on Windows', which ignore case: the core
+      // compares them so on every OS.
+      id: 'delete-validate-unicode',
+      dev: false,
+      files: {
+        'app/profile-registry.json': catalogText([
+          { id: 'default', displayName: 'My Profile', dir: `${ROOT}/app`, slot: 0 },
+          { id: 'nfc', displayName: 'NFC', dir: `${ROOT}/app/Profiles/caf\u{e9}`, slot: 1 },
+          { id: 'nfd', displayName: 'NFD', dir: `${ROOT}/app/Profiles/cafe\u{301}`, slot: 2 },
+          { id: 'upper', displayName: 'Upper', dir: `${ROOT}/app/Profiles/\u{c9}t\u{e9}`, slot: 3 },
+          { id: 'lower', displayName: 'Lower', dir: `${ROOT}/app/Profiles/\u{e9}t\u{e9}/inner`, slot: 4 },
+          { id: 'sharp', displayName: 'Sharp', dir: `${ROOT}/app/Profiles/stra\u{df}e`, slot: 5 },
+          { id: 'double', displayName: 'Double', dir: `${ROOT}/app/Profiles/STRASSE`, slot: 6 },
+          { id: 'plain', displayName: 'Plain', dir: `${ROOT}/app/Profiles/cafe`, slot: 7 },
+          { id: 'grave', displayName: 'Grave', dir: `${ROOT}/app/Profiles/caf\u{e8}`, slot: 8 },
+          { id: 'kelvin', displayName: 'Kelvin', dir: `${ROOT}/app/Profiles/LOC\u{212a}S`, slot: 9 },
+        ]),
+      },
+      dirs: [],
+      steps: [
+        // NFC and NFD.
+        overlapping({ op: 'delete-validate', id: 'nfc', confirm: 'NFC' }),
+        overlapping({ op: 'delete-validate', id: 'nfd', confirm: 'NFD' }),
+        // Non-ASCII case, above and inside.
+        overlapping({ op: 'delete-validate', id: 'upper', confirm: 'Upper' }),
+        overlapping({ op: 'delete-validate', id: 'lower', confirm: 'Lower' }),
+        // A fold wider than a volume's: `ß` and `SS`.
+        overlapping({ op: 'delete-validate', id: 'sharp', confirm: 'Sharp' }),
+        overlapping({ op: 'delete-validate', id: 'double', confirm: 'Double' }),
+        // Names no volume takes for another's.
+        { op: 'delete-validate', id: 'plain', confirm: 'Plain' },
+        { op: 'delete-validate', id: 'grave', confirm: 'Grave' },
+        // `Profiles/locks` is a profile's directory, not the shared lock
+        // directory, whatever its spelling.
+        { op: 'delete-validate', id: 'kelvin', confirm: 'Kelvin' },
+      ],
+    },
+    {
+      // Two records with one slot have one Radicle home (`R/<slot>`, or a
+      // dev build's `R/<checkout>/<slot>`): either's delete would remove
+      // the other's.
+      id: 'delete-validate-slot',
+      dev: false,
+      files: {
+        'app/profile-registry.json': catalogText([
+          { id: 'default', displayName: 'My Profile', dir: `${ROOT}/app`, slot: 0 },
+          { id: 'work', displayName: 'Work', dir: `${ROOT}/app/Profiles/work`, slot: 1 },
+          { id: 'copy', displayName: 'Copy', dir: `${ROOT}/app/Profiles/copy`, slot: 1 },
+          { id: 'zero', displayName: 'Zero', dir: `${ROOT}/app/Profiles/zero`, slot: 0 },
+          { id: 'big', displayName: 'Big', dir: `${ROOT}/app/Profiles/big`, slot: 1e21 },
+          { id: 'bigger', displayName: 'Bigger', dir: `${ROOT}/app/Profiles/bigger`, slot: 1e21 },
+          { id: 'half', displayName: 'Half', dir: `${ROOT}/app/Profiles/half`, slot: 2.5 },
+          { id: 'text', displayName: 'Text', dir: `${ROOT}/app/Profiles/text`, slot: '2.5' },
+          { id: 'none', displayName: 'None', dir: `${ROOT}/app/Profiles/none` },
+          { id: 'lone', displayName: 'Lone', dir: `${ROOT}/app/Profiles/lone`, slot: 3 },
+        ]),
+      },
+      dirs: [],
+      steps: [
+        // Before the confirmation, as the directories' overlaps.
+        sharingSlot({ op: 'delete-validate', id: 'work', confirm: 'wrong' }),
+        sharingSlot({ op: 'delete-validate', id: 'work', confirm: 'Work' }),
+        sharingSlot({ op: 'delete-validate', id: 'copy', confirm: 'Copy' }),
+        // The packaged default profile's slot.
+        sharingSlot({ op: 'delete-validate', id: 'zero', confirm: 'Zero' }),
+        sharingSlot({ op: 'delete-validate', id: 'default', confirm: 'My Profile' }),
+        // A slot JavaScript writes with an exponent (`R/1e+21`).
+        sharingSlot({ op: 'delete-validate', id: 'big', confirm: 'Big' }),
+        // A slot that isn't an integer is no home's, and a missing one.
+        { op: 'delete-validate', id: 'half', confirm: 'Half' },
+        { op: 'delete-validate', id: 'text', confirm: 'Text' },
+        { op: 'delete-validate', id: 'none', confirm: 'None' },
+        { op: 'delete-validate', id: 'lone', confirm: 'Lone' },
       ],
     },
     {

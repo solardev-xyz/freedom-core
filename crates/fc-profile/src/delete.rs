@@ -7,6 +7,7 @@
 //! "Deletion").
 
 use fc_json::JsValue;
+use unicode_normalization::UnicodeNormalization;
 
 use crate::catalog::{
     Error, Options, Store, catalog_path, find_index, load_catalog, profiles, record_dir,
@@ -152,9 +153,35 @@ fn strictly_under(style: Style, parent: &str, child: &str) -> bool {
     child != parent && child.starts_with(&format!("{parent}{}", sep(style)))
 }
 
-/// One name of a resolved path, as written and as compared: ASCII case
-/// folded, as macOS's and Windows' default volumes compare names, and on
-/// Windows without the trailing dots and spaces Win32 drops from a name.
+/// A name as [`overlaps`] compares it, on every OS: canonically
+/// decomposed (NFD), as macOS's volumes compare names whatever their case
+/// rule, and case folded at least as widely as any volume folds case (the
+/// default ones on macOS and Windows): each character's uppercase
+/// lowercased, decomposed again, until nothing changes. So `é` and `e` with
+/// its accent, `É` and `é`, `ß`, `ẞ` and `SS`, `ς` and `Σ`, and the Kelvin
+/// sign and `k` each make one key. A fold wider than a volume's only
+/// refuses more.
+fn fold(text: &str) -> String {
+    let mut key: String = text.nfd().collect();
+    // Two rounds reach the end for every character (`ẞ`, `ß`, `ss`); the
+    // bound only keeps a future table from looping (`the_fold_is_stable`).
+    for _ in 0..8 {
+        let next: String = key
+            .chars()
+            .flat_map(char::to_uppercase)
+            .flat_map(char::to_lowercase)
+            .nfd()
+            .collect();
+        if next == key {
+            break;
+        }
+        key = next;
+    }
+    key
+}
+
+/// One name of a resolved path, as written and as compared: [`fold`]ed, and
+/// on Windows without the trailing dots and spaces Win32 drops from a name.
 struct Name<'a> {
     text: &'a str,
     key: String,
@@ -170,7 +197,7 @@ fn names(style: Style, path: &str) -> Vec<Name<'_>> {
             };
             Name {
                 text,
-                key: kept.to_ascii_lowercase(),
+                key: fold(kept),
             }
         })
         .collect()
@@ -186,10 +213,10 @@ fn inside(parent: &[Name<'_>], child: &[Name<'_>]) -> bool {
 
 /// [`is_app_root_shared_entry`], for a name compared as [`Name`] has it.
 fn shared_key(key: &str) -> bool {
-    let registry = PROFILE_REGISTRY_FILE.to_ascii_lowercase();
+    let registry = fold(PROFILE_REGISTRY_FILE);
     APP_ROOT_SHARED_ENTRIES
         .iter()
-        .any(|entry| entry.to_ascii_lowercase() == key)
+        .any(|entry| fold(entry) == key)
         || key
             .strip_prefix(registry.as_str())
             .is_some_and(|rest| rest.starts_with('.'))
@@ -229,8 +256,9 @@ fn removes_overlap(app: &[Name<'_>], a: &Removes<'_>, b: &Removes<'_>) -> bool {
 ///   the app's directory, not a profile's; one outside the app root, or
 ///   above it, is no delete's to remove (its own is refused).
 ///
-/// Names are compared as [`Name`] has them, so a case or a trailing dot
-/// that names the same directory on macOS or Windows doesn't get past.
+/// Names are compared as [`Name`] has them, so a spelling, a case or a
+/// trailing dot that names the same directory on macOS or Windows doesn't
+/// get past.
 fn overlaps(
     style: Style,
     app: &str,
@@ -247,7 +275,7 @@ fn overlaps(
             return true;
         }
         let first = &dir[app.len()];
-        let profiles = first.key == PROFILES_DIR.to_ascii_lowercase();
+        let profiles = first.key == fold(PROFILES_DIR);
         if shared_key(&first.key) && !(profiles && dir.len() > app.len() + 1) {
             return true;
         }
@@ -273,8 +301,9 @@ fn overlaps(
 /// A record before the match that is `null` is the reference's `TypeError`
 /// in `findIndex` ([`Error::Malformed`]). Then, beyond the reference, a
 /// directory that overlaps another profile's or the app's own data is
-/// refused ([`overlaps`]), before the confirmation as the reference's
-/// refusal of a directory outside the app root is.
+/// refused ([`overlaps`]), and so is a Radicle slot another record also
+/// has, before the confirmation as the reference's refusal of a directory
+/// outside the app root is.
 fn assert_deletable(
     store: &dyn Store,
     app_root: &str,
@@ -327,6 +356,16 @@ fn assert_deletable(
     if overlaps(style, &app, &profile_dir, shares_app_root, &others) {
         return Err(Error::Refused(OVERLAP_REFUSED.into()));
     }
+    // A slot another record has too: one Radicle home, `R/<slot>` (or a dev
+    // build's `R/<checkout>/<slot>`), which this delete would remove.
+    if let Some(slot) = home_slot(&record)
+        && records
+            .iter()
+            .enumerate()
+            .any(|(n, other)| n != index && home_slot(other).as_deref() == Some(slot.as_str()))
+    {
+        return Err(Error::Refused(SLOT_REFUSED.into()));
+    }
     Ok((
         index,
         record,
@@ -341,6 +380,23 @@ fn assert_deletable(
 /// own data (0013's `profile-delete-overlap`).
 pub const OVERLAP_REFUSED: &str =
     "Refusing to delete a profile whose directory overlaps another profile's or the app's own data";
+
+/// The refusal of a Radicle slot another record also has, so a Radicle home
+/// another profile's too (0013's `profile-delete-overlap`).
+pub const SLOT_REFUSED: &str =
+    "Refusing to delete a profile whose Radicle slot another profile also uses";
+
+/// A record's Radicle home's name in its directory: its slot as
+/// `String(slot)` writes it, when the slot is an integer
+/// ([`radicle_home`]'s rule).
+fn home_slot(record: &JsValue) -> Option<String> {
+    match prop(record, "slot") {
+        JsValue::Number(slot) if is_integer(&JsValue::Number(slot)) => {
+            Some(fc_json::number_to_string(slot))
+        }
+        _ => None,
+    }
+}
 
 /// `assertDisplayNameConfirmation(expectedDisplayName, displayName)`: the
 /// confirmation must be the display name exactly (a name that isn't text
@@ -379,14 +435,9 @@ fn radicle_home(
     opts: &Options,
 ) -> Result<Option<RadicleHome>, Error> {
     let style = opts.style;
-    let slot = prop(record, "slot");
-    if !is_integer(&slot) {
-        return Ok(None);
-    }
-    let JsValue::Number(slot) = slot else {
+    let Some(slot) = home_slot(record) else {
         return Ok(None);
     };
-    let slot = fc_json::number_to_string(slot);
     let parent = style.dirname(app_root);
     let (dir, root) = if opts.dev {
         let hash = opts
@@ -423,8 +474,8 @@ fn radicle_home(
 /// acts on, checked as it checks it: the id sanitized, the record found,
 /// not the last, inside the app root (or the packaged default profile at
 /// it), overlapping no other profile's directory and none of the app's own
-/// (beyond the reference), the display name confirmed, and its Radicle home
-/// inside its root.
+/// and sharing no other record's Radicle slot (beyond the reference), the
+/// display name confirmed, and its Radicle home inside its root.
 pub fn plan_deletion(
     store: &mut dyn Store,
     app_root: &str,
@@ -548,6 +599,100 @@ mod tests {
             &roots
         ));
         assert!(!overlaps(w, app, app, true, &roots));
+    }
+
+    /// The overlap check on names that are one directory's on macOS, whose
+    /// volumes ignore normalization and, by default, case, or on Windows,
+    /// whose default ones ignore case: compared so on every OS (review of
+    /// #337).
+    #[test]
+    fn overlaps_unicode_equivalent_names() {
+        let app = "/Users/u/fb";
+        let p = Style::Posix;
+        let at = |name: &str| format!("{app}/Profiles/{name}");
+        for (target, peer) in [
+            // NFC and NFD.
+            ("caf\u{e9}", "cafe\u{301}"),
+            ("cafe\u{301}", "caf\u{e9}"),
+            // Marks in another order that is canonically the same.
+            ("a\u{323}\u{301}", "a\u{301}\u{323}"),
+            // Non-ASCII case, composed or not.
+            ("\u{c9}t\u{e9}", "\u{e9}t\u{e9}"),
+            ("\u{c9}T\u{c9}", "e\u{301}te\u{301}"),
+            ("\u{3a9}", "\u{3c9}"),
+            // Wider than a volume's fold: `ß`, `ẞ` and `SS`, final sigma,
+            // the Kelvin and Ohm signs, `ﬀ`, and the dotted capital I.
+            ("stra\u{df}e", "STRASSE"),
+            ("stra\u{1e9e}e", "strasse"),
+            ("\u{3c3}\u{3c2}", "\u{3a3}\u{3a3}"),
+            ("\u{212a}", "k"),
+            ("\u{2126}", "\u{3c9}"),
+            ("\u{fb00}", "FF"),
+            ("\u{130}", "i\u{307}"),
+        ] {
+            let peers = [at(peer)];
+            assert!(
+                overlaps(p, app, &at(target), false, &peers),
+                "{target:?} {peer:?}"
+            );
+            assert!(
+                overlaps(p, app, &format!("{}/x", at(target)), false, &peers),
+                "inside {target:?} {peer:?}"
+            );
+            assert!(
+                overlaps(p, app, &at(peer), false, &[format!("{}/x", at(target))]),
+                "above {target:?} {peer:?}"
+            );
+        }
+        // Names no volume takes for one another.
+        for (target, peer) in [
+            ("cafe", "caf\u{e9}"),
+            ("e\u{301}", "e\u{300}"),
+            ("\u{e9}", "\u{e8}"),
+            ("ss", "s"),
+        ] {
+            assert!(
+                !overlaps(p, app, &at(target), false, &[at(peer)]),
+                "{target:?} {peer:?}"
+            );
+        }
+        // The app's own entries under another spelling.
+        let none: [String; 0] = [];
+        for name in [
+            "Profile\u{17f}",
+            "LOC\u{212a}S",
+            "r",
+            "profile-registry.json.forget",
+        ] {
+            let target = format!("{app}/{name}");
+            assert!(overlaps(p, app, &target, false, &none), "{name:?}");
+        }
+        assert!(!overlaps(
+            p,
+            app,
+            &format!("{app}/Profile\u{17f}/a"),
+            false,
+            &none
+        ));
+        // The app root itself, spelled otherwise by another record.
+        let app = "/Users/u/caf\u{e9}";
+        assert!(overlaps(
+            p,
+            app,
+            &format!("{app}/loose"),
+            false,
+            &["/Users/u/CAFE\u{301}".to_owned()]
+        ));
+    }
+
+    /// The fold ends within its bound for every character: folding a key
+    /// again changes nothing.
+    #[test]
+    fn the_fold_is_stable() {
+        for c in (0..=0x10_FFFF).filter_map(char::from_u32) {
+            let once = fold(c.encode_utf8(&mut [0; 4]));
+            assert_eq!(fold(&once), once, "U+{:04X}", u32::from(c));
+        }
     }
 
     #[test]
