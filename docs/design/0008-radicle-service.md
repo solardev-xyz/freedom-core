@@ -200,7 +200,7 @@ Electron main (profile P) ──spawn──▶ freedom-radicled serve --home <ra
 - **Stop is the process's end:**
   1. main sends `rad.shutdown` and closes stdin;
   2. the service fences new work, answers waiting requests `stopped`, and calls `Embedded::shutdown`;
-  3. it exits 0 when that returns, or after 5 s whatever its state (`lr:1343` joins with no timeout);
+  3. it exits 0 when that returns, or after 5 s whatever its state (`lr:1343` joins with no timeout). A stop that doesn't prove the node stopped cleanly logs the calls still waiting on its reactor, by name ([Deadlines](#deadlines));
   4. main kills it 10 s after `rad.shutdown`.
 - **Quit:** Radicle gets a 10 s leg in the wind-down. That equals Tor's, so the 20 s watchdog stands.
 - **Parent death:**
@@ -503,6 +503,7 @@ The rules this design relies on, as 0007 specifies them:
   - **After the head there is no service deadline.** A stalled or paused body is main's to judge: 0006's pull-driven idle timer cancels a body that leaves a pull unanswered for 60 s, and a paused reader is never timed out. The service ends a stream early only with `abort`: `cancelled`, `stopped` or `internal`. Its caps are checked before the head (a JSON read's JSON is complete before it, and a blob's size comes from its header), so `too_large` is always a reply, never an abort.
 - **Network operations:** `timeout_ms` + 30 s, from admission. A network operation past it gets `deadline`, but keeps its slot until libradicle returns, and its token is flipped. A clone's progress stops with that answer.
 - **Writes:** 60 s, and 300 s for the import in its own process, with the outcome rules in [Writes](#writes).
+- **The node's reactor** (#340): heartwood answers the node's sessions and an unseed only through its reactor. The calls that wait on it (`status`, `node_info`, `rad.unseed`) wait at most their request's deadline left, then let go of the node: a read answers `deadline`, and `rad.unseed` `outcome_unknown`, as it was sent. While as many calls wait as libradicle allows (`NODE_WAIT_LIMIT`, 8), a call isn't sent and answers `deadline` at once, which for `rad.unseed` is definitive. **Not bounded yet** ([#363](https://github.com/solardev-xyz/freedom-core/issues/363)): `seeders` (`repo_meta`, `repos_meta`), `rad.write`'s announce and `rad.remove_repo`'s unseed still wait on the reactor with the node held, so a wedged reactor can still hold the writer and the stop through them, and the stop's log doesn't name them.
 - **Main's watchdogs** are each deadline + 15 s, as 0001.
 
 ### Errors

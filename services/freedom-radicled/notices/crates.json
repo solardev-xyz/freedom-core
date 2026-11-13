@@ -43,15 +43,6 @@
       "Cyphernet-DAO-rust-cyphernet/LICENSE"
     ]
   },
-  "libradicle 0.8.0": {
-    "repository": "https://github.com/solardev-xyz/libradicle",
-    "commit": "46cf9d99ec868c938ffed13b6a38fbeda0a50857",
-    "files": [
-      "spdx/Apache-2.0.txt",
-      "spdx/MIT.txt"
-    ],
-    "note": "Neither the crate nor its repository (at this commit or on main) carries a license text; its manifest and README declare MIT OR Apache-2.0. SPDX's Apache-2.0 and MIT texts (license-list-data v3.29.0, 31ba1a50e5397e00a304dbadc76531740e89ee48) stand in."
-  },
   "noise-framework 0.4.1": {
     "repository": "https://github.com/Cyphernet-DAO/rust-cyphernet",
     "commit": "fe39e18392a775b42857e6fa3e92bd001ecfe1c3",

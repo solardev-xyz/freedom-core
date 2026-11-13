@@ -593,6 +593,32 @@ fn libradicles_too_large_is_the_reads_too_large_and_its_other_errors_its_own() {
     assert_eq!(budget.used(), 0);
 }
 
+/// #340: the node's reactor unanswered within the read's deadline left, or
+/// not asked as too many calls wait on it, is the read's `deadline`, never
+/// libradicle's `failed`.
+#[test]
+fn a_reactor_past_its_bound_or_too_busy_to_ask_is_the_reads_deadline() {
+    let failure = Failure::from(libradicle::Error::NodeDeadline {
+        call: "sessions",
+        within: std::time::Duration::from_secs(1),
+    });
+    assert_eq!(
+        failure.error(|_| unreachable!()),
+        ErrorBody::new(ErrorCode::Deadline, "past its deadline")
+    );
+    let failure = Failure::from(libradicle::Error::NodeBusy {
+        call: "sessions",
+        waiting: 8,
+    });
+    assert_eq!(
+        failure.error(|_| unreachable!()),
+        ErrorBody::new(
+            ErrorCode::Deadline,
+            "sessions wasn't sent: 8 calls are already waiting on the node"
+        )
+    );
+}
+
 #[test]
 fn a_json_read_that_cant_reserve_its_build_never_walks() {
     let budget = Budget::new(100);

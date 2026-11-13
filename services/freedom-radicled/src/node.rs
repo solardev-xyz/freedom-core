@@ -47,9 +47,13 @@
 //! ask heartwood itself: heartwood answers its sessions only through its
 //! reactor, and may take any time to. Each interval, once the node is found
 //! alive, the watch holds the node shared, trying its lock as above, and
-//! asks `Embedded::connected_peers`; the count is published for `rad.stats`
+//! asks `Embedded::connected_peers_within`, waiting up to [`LOOK_WITHIN`]
+//! for the node's reactor (#340); the count is published for `rad.stats`
 //! ([`Node::view`]), kept when the look is skipped, and unknown after one
-//! that failed. The look is marked under the phase's lock, then made
+//! that failed or wasn't answered in time. While a call waits on the
+//! reactor past its bound, the look asks nothing and the count is unknown:
+//! a reactor that doesn't answer gets at most one call from the watch. The
+//! look is marked under the phase's lock, then made
 //! outside it, so the phase's lock is never held while heartwood answers,
 //! and the stop, which takes the node out of the phase under that lock,
 //! waits for a look already under way before it asks the node to stop
@@ -66,6 +70,23 @@
 //! libradicle's `unseed_repo` takes `&mut self`, and so does the stop, to
 //! ask the node to stop; `seeders` comes with a later step. Work gets the
 //! node only while it runs, and lets go of it as its work returns.
+//!
+//! **The calls that wait on the node's reactor wait within a bound**
+//! (#340): `rad.read`'s `status` and `node_info`, `rad.unseed` and the
+//! watch's look ask libradicle's `connected_peers_within` and
+//! `unseed_repo_within`, with the request's deadline left (the look, with
+//! [`LOOK_WITHIN`]). heartwood's handle waits for its reactor with no bound,
+//! so a reactor that never answered held the call, and the node's lock with
+//! it, for good, and so every `rad.unseed` and the stop behind it. Now the
+//! call returns at its bound, `NodeDeadline`, and lets go of the node;
+//! libradicle goes on waiting for the answer on a thread of its own, and
+//! lists the call ([`waiting`]). While `NODE_WAIT_LIMIT` calls wait, a call
+//! isn't sent (`NodeBusy`). A read answers either `deadline`. `rad.unseed`
+//! answers a `NodeDeadline` `outcome_unknown`, as it was sent, and a
+//! `NodeBusy` `deadline`, as nothing was ([`crate::writes`]). The service
+//! also lists its own calls while they wait within their bounds
+//! ([`NodeCalls`]): the stop names those when work holds the node
+//! exclusively, or waits to, so that libradicle's list can't be read.
 //!
 //! **A thread holds the node at most once** ([`Held`]). std's lock makes a
 //! new shared hold wait behind an exclusive one that waits, on every
@@ -91,6 +112,12 @@
 //!    running past the drain may hold it, or a look past that time: the
 //!    stop never waits for it, and asks nothing ([`unasked`]). The node then
 //!    stops as that work lets go of it, or with the process.
+//!
+//! A stop that doesn't prove the node stopped cleanly (`Unproven`: an
+//! incomplete drain, or a node that didn't stop in time) logs the calls
+//! still waiting on its reactor with its error ([`waiting`]): a wedged
+//! reactor's calls are named, with how long each has waited and whether its
+//! caller stopped waiting at its bound (#340).
 //!
 //! **How the node ended is one decision,** whichever of the watch and the
 //! stop comes first:
@@ -177,6 +204,11 @@ pub const SHUTDOWN_WITHIN: Duration = Duration::from_secs(3);
 /// How often the node's watch asks whether the node thread runs.
 pub const WATCH_INTERVAL: Duration = Duration::from_secs(1);
 
+/// How long the watch's look at the node's peers waits for its reactor
+/// (see the module's doc): one interval, inside the stop's time, which
+/// waits for a look under way.
+pub const LOOK_WITHIN: Duration = WATCH_INTERVAL;
+
 /// The node's default seeding policy, over `config.json`'s: a repository is
 /// seeded only by an explicit policy (0008, "Seeding and serving").
 /// libradicle's listings read the same (`crate::reads`' identity cap
@@ -192,6 +224,9 @@ type Shared = Arc<RwLock<libradicle::Embedded>>;
 /// A running node, and what runs with it.
 struct Running {
     embedded: Shared,
+    /// The service's calls waiting on the node's reactor within their
+    /// bounds ([`NodeCalls`]).
+    calls: NodeCalls,
     /// The host's half of the node's repository gate: quarantine's removal
     /// opens a repository it removed through it, and the online repair
     /// closes and opens them, through [`Handle`].
@@ -239,6 +274,7 @@ impl Running {
 #[derive(Clone)]
 pub struct Handle {
     embedded: Shared,
+    calls: NodeCalls,
     /// The host's half of the node's repository gate.
     pub repositories: RepoGate,
 }
@@ -266,6 +302,78 @@ impl Handle {
                 .unwrap_or_else(PoisonError::into_inner),
             _holding: holding,
         }
+    }
+
+    /// The node's connected peers, holding it shared, its reactor waited
+    /// for up to `within` (see the module's doc): `NodeDeadline` past it,
+    /// and `NodeBusy`, with nothing sent, while too many calls wait.
+    pub fn connected_peers_within(&self, within: Duration) -> Result<usize, libradicle::Error> {
+        let node = self.node();
+        let _call = self.calls.enter("sessions");
+        node.connected_peers_within(within)
+    }
+
+    /// Lists `call` among the service's calls waiting on the node's reactor
+    /// until the returned place drops: for a call made on the node this
+    /// thread holds (`rad.unseed`'s, see the module's doc).
+    pub fn waiting_call(&self, call: &'static str) -> NodeCall {
+        self.calls.enter(call)
+    }
+}
+
+/// The service's calls waiting on the node's reactor, each within its
+/// bound, by name (see the module's doc): listed from just before
+/// libradicle's call until it returns, whatever it returns. libradicle's
+/// own list (`Embedded::waiting_on_node`) also holds the calls whose callers
+/// stopped waiting at their bounds, but it can be read only through the
+/// node's lock.
+#[derive(Clone, Default)]
+pub struct NodeCalls(Arc<Mutex<Calls>>);
+
+#[derive(Default)]
+struct Calls {
+    next: u64,
+    waiting: Vec<(u64, &'static str, Instant)>,
+}
+
+/// A call's place in [`NodeCalls`], given up as it drops.
+pub struct NodeCall {
+    calls: NodeCalls,
+    id: u64,
+}
+
+impl Drop for NodeCall {
+    fn drop(&mut self) {
+        self.calls.lock().waiting.retain(|(id, ..)| *id != self.id);
+    }
+}
+
+impl NodeCalls {
+    fn lock(&self) -> MutexGuard<'_, Calls> {
+        self.0.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    fn enter(&self, call: &'static str) -> NodeCall {
+        let id = {
+            let mut calls = self.lock();
+            calls.next += 1;
+            let id = calls.next;
+            calls.waiting.push((id, call, Instant::now()));
+            id
+        };
+        NodeCall {
+            calls: self.clone(),
+            id,
+        }
+    }
+
+    /// The calls listed, oldest first, with how long each has waited.
+    fn waiting(&self) -> Vec<(&'static str, Duration)> {
+        self.lock()
+            .waiting
+            .iter()
+            .map(|(_, call, since)| (*call, since.elapsed()))
+            .collect()
     }
 }
 
@@ -401,8 +509,8 @@ impl Node {
     /// count published, then the look's end. The node is let go of before
     /// that end, so a stop that waited for it is never left a holder of the
     /// node but its own.
-    fn look(&self, embedded: Shared) {
-        let looked = count(&embedded);
+    fn look(&self, embedded: Shared, calls: &NodeCalls) {
+        let looked = count(&embedded, calls);
         drop(embedded);
         let counted = counted(self.peers(), looked);
         // A count can't reach `NO_COUNT`: no node holds 2^64 - 1 sessions.
@@ -440,6 +548,7 @@ impl Node {
         match &*self.lock() {
             Phase::Running(running) => Some(Handle {
                 embedded: running.embedded.clone(),
+                calls: running.calls.clone(),
                 repositories: running.repositories.clone(),
             }),
             Phase::Waiting | Phase::Starting | Phase::Down(_) | Phase::Over => None,
@@ -585,9 +694,10 @@ impl Node {
                 // the module's doc).
                 Phase::Running(running) if running.alive() != Some(false) => {
                     let embedded = running.embedded.clone();
+                    let calls = running.calls.clone();
                     *self.lock_looking() = true;
                     drop(phase);
-                    self.look(embedded);
+                    self.look(embedded, &calls);
                     phase = self.lock();
                 }
                 Phase::Running(_) => {
@@ -652,9 +762,9 @@ impl Node {
         };
         let Running {
             embedded,
+            calls,
             repositories,
             nat64,
-            ..
         } = running;
         drop(nat64);
         drop(repositories);
@@ -689,7 +799,7 @@ impl Node {
             Ending::Down => node_down(conn),
             Ending::Unproven(why) => log::error(
                 "the node didn't stop cleanly; the dirty marker stays",
-                json!({ "error": why }),
+                json!({ "error": why, "waiting_on_node": waiting(&embedded, &calls) }),
             ),
         }
         // A node that didn't stop in time is waited for once more as it
@@ -772,16 +882,69 @@ fn unasked(watched: bool, alive: Option<bool>, why: &'static str) -> Ending {
     }
 }
 
-/// The node's connected peers, holding it shared: `None`, asking nothing,
-/// while work holds it exclusively, as the lock is only tried.
-fn count(embedded: &Shared) -> Option<Result<usize, libradicle::Error>> {
+/// The node's connected peers, holding it shared, its reactor waited for
+/// up to [`LOOK_WITHIN`]: `None`, asking nothing, while work holds it
+/// exclusively, as the lock is only tried. While a call waits on the
+/// reactor past its bound, nothing is asked either, and the count is
+/// unknown: libradicle's `NodeBusy`, as for a call it doesn't send (see the
+/// module's doc).
+fn count(embedded: &Shared, calls: &NodeCalls) -> Option<Result<usize, libradicle::Error>> {
     let node = match embedded.try_read() {
         Ok(node) => node,
         Err(TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
         Err(TryLockError::WouldBlock) => return None,
     };
     testhooks::hold_look();
-    Some(node.connected_peers())
+    let waiting = node.waiting_on_node();
+    if waiting.iter().any(|wait| wait.overdue) {
+        return Some(Err(libradicle::Error::NodeBusy {
+            call: "sessions",
+            waiting: waiting.len(),
+        }));
+    }
+    let _call = calls.enter("sessions");
+    Some(node.connected_peers_within(LOOK_WITHIN))
+}
+
+/// The calls waiting on the node's reactor, for the stop's log (see the
+/// module's doc): libradicle's list (`Embedded::waiting_on_node`), the
+/// node's lock only tried, with those whose callers stopped waiting at
+/// their bounds (`overdue`); or, while work holds the node exclusively, or
+/// waits to, the service's own calls still waiting within their bounds
+/// ([`NodeCalls`]). `listed` says which.
+fn waiting(embedded: &Shared, calls: &NodeCalls) -> serde_json::Value {
+    let millis = |waited: Duration| u64::try_from(waited.as_millis()).unwrap_or(u64::MAX);
+    let node = match embedded.try_read() {
+        Ok(node) => Some(node),
+        Err(TryLockError::Poisoned(poisoned)) => Some(poisoned.into_inner()),
+        Err(TryLockError::WouldBlock) => None,
+    };
+    match node {
+        Some(node) => {
+            let listed: Vec<_> = node
+                .waiting_on_node()
+                .iter()
+                .map(|wait| {
+                    json!({
+                        "call": wait.call,
+                        "waited_ms": millis(wait.waited),
+                        "overdue": wait.overdue,
+                    })
+                })
+                .collect();
+            json!({ "listed": "node", "calls": listed })
+        }
+        None => {
+            let listed: Vec<_> = calls
+                .waiting()
+                .into_iter()
+                .map(|(call, waited)| {
+                    json!({ "call": call, "waited_ms": millis(waited), "overdue": false })
+                })
+                .collect();
+            json!({ "listed": "service", "calls": listed })
+        }
+    }
 }
 
 /// The peers' count after a look, from the one before it, `previous`: kept
@@ -847,6 +1010,7 @@ fn run(start: Start) -> Result<Running, ErrorBody> {
     .map_err(|e| start_failed(e.to_string()))?;
     Ok(Running {
         embedded: Arc::new(RwLock::new(embedded)),
+        calls: NodeCalls::default(),
         repositories,
         nat64,
     })
@@ -1075,6 +1239,27 @@ mod tests {
         }
     }
 
+    /// The service's own list of its calls waiting on the reactor: each
+    /// listed while its place is held, oldest first, and gone as it drops,
+    /// whatever the order.
+    #[test]
+    fn a_call_is_listed_while_it_waits_on_the_node() {
+        let calls = NodeCalls::default();
+        let read = calls.enter("sessions");
+        let unseed = calls.enter("unseed");
+        let names = |calls: &NodeCalls| -> Vec<&str> {
+            calls.waiting().into_iter().map(|(call, _)| call).collect()
+        };
+        assert_eq!(names(&calls), ["sessions", "unseed"]);
+        drop(read);
+        assert_eq!(names(&calls), ["unseed"]);
+        let again = calls.enter("sessions");
+        assert_eq!(names(&calls), ["unseed", "sessions"]);
+        drop(unseed);
+        drop(again);
+        assert!(calls.waiting().is_empty());
+    }
+
     /// The peers' count (`rad.stats`): a look's count replaces the last,
     /// a skipped look keeps it, and a failed one leaves it unknown.
     #[test]
@@ -1139,6 +1324,7 @@ mod tests {
         let node = Node::new(Arc::new(Pools::start().unwrap()));
         *node.lock() = Phase::Running(Running {
             embedded: Arc::new(RwLock::new(embedded)),
+            calls: NodeCalls::default(),
             repositories: RepoGate::new(),
             nat64: Some((discovery, lease)),
         });
