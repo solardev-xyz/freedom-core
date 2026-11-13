@@ -544,6 +544,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "fc-profile"
+version = "0.12.2"
+dependencies = [
+ "fc-json",
+ "serde",
+ "serde_json",
+ "sha2",
+]
+
+[[package]]
 name = "fc-protocol"
 version = "0.12.2"
 dependencies = [
@@ -669,6 +679,7 @@ dependencies = [
  "fc-json",
  "fc-keys",
  "fc-naming",
+ "fc-profile",
  "fc-protocol",
  "fc-seal",
  "fc-service",

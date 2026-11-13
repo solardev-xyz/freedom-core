@@ -1,0 +1,23 @@
+[package]
+name = "fc-profile"
+description = "Profiles in the core (design 0013): the profile catalog's rules and text, with the behavior of freedom-browser's profile-catalog.js and profile-resolver.js"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+# The catalog's JSON with JavaScript's semantics: property order, doubles,
+# and `JSON.stringify(…, null, 2)`'s text (design 0013, "How the core
+# writes them").
+fc-json = { path = "../fc-json" }
+# `hashPath`: a checkout's id, and the profile gate's name.
+sha2 = { version = "0.11", default-features = false }
+
+[dev-dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["preserve_order"] }

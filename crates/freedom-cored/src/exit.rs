@@ -9,6 +9,9 @@ pub enum Exit {
     Ok,
     /// Bad command line.
     Usage,
+    /// A profile subcommand refused the request, as the reference throws
+    /// (design 0013): its message is on stdout.
+    Refused,
     /// A bug.
     Internal,
     /// Storage failure or refused filesystem: don't restart.
@@ -24,6 +27,7 @@ impl Exit {
         match self {
             Exit::Ok => 0,
             Exit::Usage => 64,
+            Exit::Refused => 65,
             Exit::Internal => 70,
             Exit::Storage => 74,
             Exit::LockHeld => 75,

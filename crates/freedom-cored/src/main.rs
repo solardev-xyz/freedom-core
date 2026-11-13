@@ -4,7 +4,11 @@
 //! freedom-cored serve     --data-dir <identity dir> --lock-dir <lock dir> [--parent-pid <pid>]
 //! freedom-cored hold-lock --data-dir <identity dir> --lock-dir <lock dir>
 //! freedom-cored recover   --data-dir <identity dir> --lock-dir <lock dir>
+//! freedom-cored profile <open|list|create|rename|import|update-nodes|reserved-ports|status> …
+//! freedom-cored hold-profile --user-data-dir <dir> --lock-dir <dir> [--app-root <dir> --id <id>]
 //! ```
+//!
+//! The profile subcommands are [`profile`]'s.
 
 mod anchor;
 mod chain;
@@ -18,6 +22,7 @@ mod journal;
 mod log;
 mod naming;
 mod nodes;
+mod profile;
 mod requests;
 mod rng;
 mod serve;
@@ -82,6 +87,16 @@ fn main() -> ExitCode {
 }
 
 fn run(started: Instant) -> Exit {
+    // The profile subcommands (design 0013) take their own arguments.
+    if matches!(
+        std::env::args_os()
+            .nth(1)
+            .and_then(|c| c.into_string().ok())
+            .as_deref(),
+        Some("profile" | "hold-profile")
+    ) {
+        return profile::run(std::env::args_os().skip(1));
+    }
     let Some(args) = parse_args() else {
         log::error(USAGE, serde_json::json!({}));
         return Exit::Usage;

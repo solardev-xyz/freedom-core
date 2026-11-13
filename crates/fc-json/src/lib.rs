@@ -182,6 +182,50 @@ impl JsValue {
         stringify_into(self, &mut out);
         out
     }
+
+    /// `JSON.stringify(value, null, 2)`: two spaces a level, `": "` after
+    /// each key, and `[]` and `{}` for an empty array or object (one whose
+    /// members all hold `undefined` included).
+    pub fn stringify_pretty(&self) -> String {
+        let mut out = String::new();
+        stringify_pretty_into(self, &mut out);
+        out
+    }
+
+    /// A property, for changing it in place (`None` when absent or when
+    /// this isn't an object).
+    pub fn get_mut(&mut self, key: &str) -> Option<&mut JsValue> {
+        match self {
+            JsValue::Object(props) => props.iter_mut().find(|(k, _)| k == key).map(|(_, v)| v),
+            _ => None,
+        }
+    }
+
+    /// `object[key] = value` on an object: a key it has keeps its place and
+    /// takes the value; a new one goes where JavaScript puts it, an array
+    /// index among the others in ascending order, before every other key,
+    /// and any other key last. Nothing happens to a value that isn't an
+    /// object.
+    pub fn set(&mut self, key: impl Into<JsString>, value: JsValue) {
+        let JsValue::Object(props) = self else {
+            return;
+        };
+        let key = key.into();
+        if let Some(slot) = props.iter_mut().find(|(k, _)| *k == key) {
+            slot.1 = value;
+            return;
+        }
+        match array_index(&key) {
+            Some(index) => {
+                let at = props
+                    .iter()
+                    .position(|(k, _)| array_index(k).is_none_or(|other| other > index))
+                    .unwrap_or(props.len());
+                props.insert(at, (key, value));
+            }
+            None => props.push((key, value)),
+        }
+    }
 }
 
 /// What a string holds on the heap, as an allocator lays it out: each of
@@ -656,6 +700,81 @@ fn stringify_into(value: &JsValue, out: &mut String) {
     }
 }
 
+/// `JSON.stringify(value, null, 2)`, without recursion, as
+/// [`stringify_into`].
+fn stringify_pretty_into(value: &JsValue, out: &mut String) {
+    enum Piece<'a> {
+        Value(&'a JsValue, usize),
+        Key(&'a JsString),
+        Text(&'static str),
+        /// A newline, then this many levels of indentation.
+        Break(usize),
+    }
+    let mut stack = vec![Piece::Value(value, 0)];
+    while let Some(piece) = stack.pop() {
+        match piece {
+            Piece::Text(text) => out.push_str(text),
+            Piece::Break(level) => {
+                out.push('\n');
+                for _ in 0..level {
+                    out.push_str("  ");
+                }
+            }
+            Piece::Key(key) => {
+                key.quote_into(out);
+                out.push_str(": ");
+            }
+            Piece::Value(JsValue::Undefined | JsValue::Null, _) => out.push_str("null"),
+            Piece::Value(JsValue::Bool(b), _) => out.push_str(if *b { "true" } else { "false" }),
+            Piece::Value(JsValue::Number(n), _) => {
+                out.push_str(&if n.is_finite() {
+                    number_to_string(*n)
+                } else {
+                    "null".into()
+                });
+            }
+            Piece::Value(JsValue::String(s), _) => s.quote_into(out),
+            Piece::Value(JsValue::Array(items), level) => {
+                if items.is_empty() {
+                    out.push_str("[]");
+                    continue;
+                }
+                out.push('[');
+                stack.push(Piece::Text("]"));
+                stack.push(Piece::Break(level));
+                for (i, item) in items.iter().enumerate().rev() {
+                    stack.push(Piece::Value(item, level + 1));
+                    stack.push(Piece::Break(level + 1));
+                    if i > 0 {
+                        stack.push(Piece::Text(","));
+                    }
+                }
+            }
+            Piece::Value(JsValue::Object(props), level) => {
+                let props: Vec<&(JsString, JsValue)> = props
+                    .iter()
+                    .filter(|(_, v)| !matches!(v, JsValue::Undefined))
+                    .collect();
+                if props.is_empty() {
+                    out.push_str("{}");
+                    continue;
+                }
+                out.push('{');
+                stack.push(Piece::Text("}"));
+                stack.push(Piece::Break(level));
+                for (i, (key, item)) in props.iter().enumerate().rev() {
+                    stack.push(Piece::Value(item, level + 1));
+                    stack.push(Piece::Key(key));
+                    stack.push(Piece::Break(level + 1));
+                    if i > 0 {
+                        stack.push(Piece::Text(","));
+                    }
+                }
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -866,5 +985,43 @@ mod tests {
             parse(r#"[[{"toString":1}]]"#).unwrap().js_string(),
             Err(ToPrimitiveError)
         );
+    }
+
+    /// `JSON.stringify(value, null, 2)`'s layout, as the profile catalog is
+    /// written (design 0013).
+    #[test]
+    fn pretty_text_is_javascripts() {
+        let v =
+            parse(r#"{"version":1,"profiles":[{"id":"a","n":[],"o":{},"u":null}],"e":[1,[2]]}"#)
+                .unwrap();
+        assert_eq!(
+            v.stringify_pretty(),
+            "{\n  \"version\": 1,\n  \"profiles\": [\n    {\n      \"id\": \"a\",\n      \"n\": [],\n      \"o\": {},\n      \"u\": null\n    }\n  ],\n  \"e\": [\n    1,\n    [\n      2\n    ]\n  ]\n}"
+        );
+        // Members holding undefined are left out; an object of nothing else
+        // is `{}`.
+        let mut o = JsValue::Object(Vec::new());
+        o.set("u", JsValue::Undefined);
+        assert_eq!(o.stringify_pretty(), "{}");
+        assert_eq!(JsValue::Array(Vec::new()).stringify_pretty(), "[]");
+        assert_eq!(JsValue::string("x").stringify_pretty(), "\"x\"");
+    }
+
+    /// `set` puts a new key where JavaScript would, and keeps an old one's
+    /// place.
+    #[test]
+    fn set_keeps_javascripts_order() {
+        let mut o = parse(r#"{"b":1,"a":2}"#).unwrap();
+        o.set("b", JsValue::Number(3.0));
+        o.set("c", JsValue::Number(4.0));
+        o.set("7", JsValue::Number(5.0));
+        o.set("2", JsValue::Number(6.0));
+        o.set("01", JsValue::Number(7.0));
+        assert_eq!(o.stringify(), r#"{"2":6,"7":5,"b":3,"a":2,"c":4,"01":7}"#);
+        let mut not_object = JsValue::Number(1.0);
+        not_object.set("a", JsValue::Null);
+        assert_eq!(not_object, JsValue::Number(1.0));
+        *o.get_mut("a").unwrap() = JsValue::Bool(true);
+        assert_eq!(o.get("a"), Some(&JsValue::Bool(true)));
     }
 }

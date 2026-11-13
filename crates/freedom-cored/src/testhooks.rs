@@ -52,6 +52,11 @@
 //!   is one valid only under the vault's epoch (`nodes.seal_radicle_key`),
 //!   waits in the loop's outbox as if the writer had no room, until the
 //!   loop's next frame or room moves it.
+//! - `FREEDOM_CORED_TEST_PROFILE_HOLD` (`<marker>=<release>`): a profile
+//!   subcommand that holds the catalog's write lock creates the file
+//!   `<marker>` once it has the lock, then waits, before it changes
+//!   anything, until the file `<release>` exists (at most 120 s). So a
+//!   test holds the lock as long as it needs.
 
 use std::time::Duration;
 
@@ -225,6 +230,20 @@ pub fn hold_reply(_id: u64) -> bool {
 pub fn test_methods() -> bool {
     std::env::var_os("FREEDOM_CORED_TEST_METHODS").is_some()
 }
+
+#[cfg(feature = "testhooks")]
+pub fn profile_hold() {
+    let Ok(spec) = std::env::var("FREEDOM_CORED_TEST_PROFILE_HOLD") else {
+        return;
+    };
+    if let Some((marker, release)) = spec.split_once('=') {
+        let _ = std::fs::write(marker, b"held");
+        hold(std::ffi::OsStr::new(release), || false);
+    }
+}
+
+#[cfg(not(feature = "testhooks"))]
+pub fn profile_hold() {}
 
 #[cfg(not(feature = "testhooks"))]
 pub fn snapshot_delay() {}

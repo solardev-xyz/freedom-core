@@ -21,6 +21,7 @@ const { buildRadicleNetwork } = require('./radicle-network');
 const { buildRadicleStats } = require('./radicle-stats');
 const { buildRadicleImport } = require('./radicle-import');
 const { buildApprovals } = require('./approvals');
+const { buildProfiles } = require('./profiles');
 
 const REFERENCE_COMMIT = 'fb540328162839e68150fe2c5e517edb86734d1c';
 // The Radicle vectors' own reference: freedom-browser's integration/rust-core,
@@ -34,6 +35,13 @@ const RADICLE_REFERENCE_COMMIT = '1ea598373fcc406bed8a3df1e54b734dcc4e5ac5';
 // integration/rust-core, with SEC-1's eleventh token kind (#1016) and 0011's
 // page tokens (PRQ-5a). Like the Radicle reference, it moves on its own.
 const APPROVALS_REFERENCE_COMMIT = '7f85551d82bddb1337df73b331785e969d62d1b9';
+// The profile vectors' reference (design 0013, PRF-3): the approvals
+// reference's checkout, whose profile modules (profile-catalog.js,
+// profile-resolver.js, profile-lock.js, profile-switch-scheme.js) are byte
+// for byte integration/rust-core's at 2f0c571f. Their one package,
+// proper-lockfile, comes from the main reference's install, the same version
+// (profiles.js).
+const PROFILES_REFERENCE_COMMIT = APPROVALS_REFERENCE_COMMIT;
 const OUTPUT = path.resolve(__dirname, '..');
 const INDICES = [0, 1, 2, 1000, 2147483647];
 const MNEMONICS = [
@@ -593,6 +601,14 @@ async function main() {
     'radicle-import.json': await buildRadicleImport(radicle.checkout, radicle.meta),
     // Design 0012's tokens, from main's signing-confirmation.js.
     'approvals.json': buildApprovals(approvals.checkout, approvals.meta),
+    // Design 0013's profile catalog, from main's profile-catalog.js and
+    // profile-resolver.js.
+    'profiles.json': buildProfiles(approvals.checkout, reference.checkout, {
+      freedomBrowserCommit: checkedCommit(approvals.checkout, PROFILES_REFERENCE_COMMIT, 'profiles reference'),
+      packages: { 'proper-lockfile': packageVersion(createRequire(path.join(reference.checkout, 'package.json')), 'proper-lockfile') },
+      nodeVersion: process.version,
+      generator: 'vectors/generator/generate.js',
+    }),
   };
   // Check every deterministic file before doing the more expensive fixture checks.
   for (const [filename, contents] of Object.entries(deterministic)) {
