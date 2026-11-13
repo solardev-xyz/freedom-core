@@ -125,6 +125,10 @@ struct Step {
     metadata: Option<String>,
     updates: Option<String>,
     confirm: Option<String>,
+    /// 0013's Deviations row where the core answers otherwise, with its
+    /// answer (`core`) beside the reference's (`result`).
+    deviation: Option<String>,
+    core: Option<Value>,
     result: Value,
     files: BTreeMap<String, String>,
     dirs: Vec<String>,
@@ -459,7 +463,15 @@ fn scenarios() {
         for (n, step) in scenario.steps.iter().enumerate() {
             let at = format!("{} step {n} ({})", scenario.id, step.op);
             let result = run(&mut memory, scenario, step);
-            assert_eq!(result, step.result, "{at}: result");
+            let expected = match (&step.deviation, &step.core) {
+                (None, None) => &step.result,
+                (Some(deviation), Some(core)) => {
+                    assert_eq!(deviation, "profile-delete-overlap", "{at}: a row of 0013's");
+                    core
+                }
+                _ => panic!("{at}: a deviation names its row and the core's answer"),
+            };
+            assert_eq!(&result, expected, "{at}: result");
             let files: BTreeMap<String, String> = memory
                 .files
                 .iter()

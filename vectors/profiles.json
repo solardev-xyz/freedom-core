@@ -2934,6 +2934,11 @@
           "op": "delete-validate",
           "id": "default",
           "confirm": "My Profile",
+          "deviation": "profile-delete-overlap",
+          "core": {
+            "error": "refused",
+            "message": "Refusing to delete a profile whose directory overlaps another profile's or the app's own data"
+          },
           "result": {
             "value": "valid"
           },
@@ -3109,11 +3114,303 @@
           "op": "delete-validate",
           "id": "profiles",
           "confirm": "Profiles",
+          "deviation": "profile-delete-overlap",
+          "core": {
+            "error": "refused",
+            "message": "Refusing to delete a profile whose directory overlaps another profile's or the app's own data"
+          },
           "result": {
             "value": "valid"
           },
           "files": {
             "app/profile-registry.json": "{\n  \"version\": 1,\n  \"profiles\": [\n    {\n      \"id\": \"default\",\n      \"displayName\": \"My Profile\",\n      \"dir\": \"/vectors/app\",\n      \"slot\": 0\n    },\n    {\n      \"id\": \"work\",\n      \"displayName\": \"Work\",\n      \"dir\": \"/vectors/app/Profiles/work\",\n      \"slot\": 1\n    },\n    {\n      \"id\": \"nameless\",\n      \"dir\": \"/vectors/app/Profiles/nameless\",\n      \"slot\": 2\n    },\n    {\n      \"id\": \"blank\",\n      \"displayName\": \"\",\n      \"dir\": \"/vectors/app/Profiles/blank\",\n      \"slot\": 3\n    },\n    {\n      \"id\": \"numbered\",\n      \"displayName\": 5,\n      \"dir\": \"/vectors/app/Profiles/numbered\",\n      \"slot\": 4\n    },\n    {\n      \"id\": \"outside\",\n      \"displayName\": \"Outside\",\n      \"dir\": \"/vectors/elsewhere/outside\",\n      \"slot\": 5\n    },\n    {\n      \"id\": \"root\",\n      \"displayName\": \"Root\",\n      \"dir\": \"/vectors/app\",\n      \"slot\": 6\n    },\n    {\n      \"id\": \"sibling\",\n      \"displayName\": \"Sibling\",\n      \"dir\": \"/vectors/app-other\",\n      \"slot\": 7\n    },\n    {\n      \"id\": \"dotdot\",\n      \"displayName\": \"Dot Dot\",\n      \"dir\": \"/vectors/app/Profiles/../../dotdot\",\n      \"slot\": 8\n    },\n    {\n      \"id\": \"trailing\",\n      \"displayName\": \"Trailing\",\n      \"dir\": \"/vectors/app/Profiles/trailing/\",\n      \"slot\": 9\n    },\n    {\n      \"id\": \"nodir\",\n      \"displayName\": \"No Dir\",\n      \"dir\": 42,\n      \"slot\": 10\n    },\n    {\n      \"id\": \"profiles\",\n      \"displayName\": \"Profiles\",\n      \"dir\": \"/vectors/app/Profiles\",\n      \"slot\": 11\n    }\n  ]\n}"
+          },
+          "dirs": [
+            "app"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "delete-validate-overlap",
+      "dev": false,
+      "files": {
+        "app/profile-registry.json": "{\n  \"version\": 1,\n  \"profiles\": [\n    {\n      \"id\": \"default\",\n      \"displayName\": \"My Profile\",\n      \"dir\": \"/vectors/app\",\n      \"slot\": 0\n    },\n    {\n      \"id\": \"outer\",\n      \"displayName\": \"Outer\",\n      \"dir\": \"/vectors/app/Profiles/outer\",\n      \"slot\": 1\n    },\n    {\n      \"id\": \"inner\",\n      \"displayName\": \"Inner\",\n      \"dir\": \"/vectors/app/Profiles/outer/inner\",\n      \"slot\": 2\n    },\n    {\n      \"id\": \"peer\",\n      \"displayName\": \"Peer\",\n      \"dir\": \"/vectors/app/Profiles/peer\",\n      \"slot\": 3\n    },\n    {\n      \"id\": \"twin\",\n      \"displayName\": \"Twin\",\n      \"dir\": \"/vectors/app/Profiles/twin/../peer\",\n      \"slot\": 4\n    },\n    {\n      \"id\": \"cased\",\n      \"displayName\": \"Cased\",\n      \"dir\": \"/vectors/app/profiles\",\n      \"slot\": 5\n    },\n    {\n      \"id\": \"home\",\n      \"displayName\": \"Home\",\n      \"dir\": \"/vectors/app/R/9\",\n      \"slot\": 6\n    },\n    {\n      \"id\": \"logs\",\n      \"displayName\": \"Logs\",\n      \"dir\": \"/vectors/app/logs\",\n      \"slot\": 7\n    },\n    {\n      \"id\": \"forget\",\n      \"displayName\": \"Forget\",\n      \"dir\": \"/vectors/app/profile-registry.json.forget\",\n      \"slot\": 8\n    },\n    {\n      \"id\": \"loose\",\n      \"displayName\": \"Loose\",\n      \"dir\": \"/vectors/app/loose\",\n      \"slot\": 9\n    },\n    {\n      \"id\": \"lone\",\n      \"displayName\": \"Lone\",\n      \"dir\": \"/vectors/app/Profiles/lone\",\n      \"slot\": 10\n    }\n  ]\n}"
+      },
+      "dirs": [],
+      "steps": [
+        {
+          "op": "delete-validate",
+          "id": "outer",
+          "confirm": "Outer",
+          "deviation": "profile-delete-overlap",
+          "core": {
+            "error": "refused",
+            "message": "Refusing to delete a profile whose directory overlaps another profile's or the app's own data"
+          },
+          "result": {
+            "value": "valid"
+          },
+          "files": {
+            "app/profile-registry.json": "{\n  \"version\": 1,\n  \"profiles\": [\n    {\n      \"id\": \"default\",\n      \"displayName\": \"My Profile\",\n      \"dir\": \"/vectors/app\",\n      \"slot\": 0\n    },\n    {\n      \"id\": \"outer\",\n      \"displayName\": \"Outer\",\n      \"dir\": \"/vectors/app/Profiles/outer\",\n      \"slot\": 1\n    },\n    {\n      \"id\": \"inner\",\n      \"displayName\": \"Inner\",\n      \"dir\": \"/vectors/app/Profiles/outer/inner\",\n      \"slot\": 2\n    },\n    {\n      \"id\": \"peer\",\n      \"displayName\": \"Peer\",\n      \"dir\": \"/vectors/app/Profiles/peer\",\n      \"slot\": 3\n    },\n    {\n      \"id\": \"twin\",\n      \"displayName\": \"Twin\",\n      \"dir\": \"/vectors/app/Profiles/twin/../peer\",\n      \"slot\": 4\n    },\n    {\n      \"id\": \"cased\",\n      \"displayName\": \"Cased\",\n      \"dir\": \"/vectors/app/profiles\",\n      \"slot\": 5\n    },\n    {\n      \"id\": \"home\",\n      \"displayName\": \"Home\",\n      \"dir\": \"/vectors/app/R/9\",\n      \"slot\": 6\n    },\n    {\n      \"id\": \"logs\",\n      \"displayName\": \"Logs\",\n      \"dir\": \"/vectors/app/logs\",\n      \"slot\": 7\n    },\n    {\n      \"id\": \"forget\",\n      \"displayName\": \"Forget\",\n      \"dir\": \"/vectors/app/profile-registry.json.forget\",\n      \"slot\": 8\n    },\n    {\n      \"id\": \"loose\",\n      \"displayName\": \"Loose\",\n      \"dir\": \"/vectors/app/loose\",\n      \"slot\": 9\n    },\n    {\n      \"id\": \"lone\",\n      \"displayName\": \"Lone\",\n      \"dir\": \"/vectors/app/Profiles/lone\",\n      \"slot\": 10\n    }\n  ]\n}"
+          },
+          "dirs": [
+            "app"
+          ]
+        },
+        {
+          "op": "delete-validate",
+          "id": "inner",
+          "confirm": "Inner",
+          "deviation": "profile-delete-overlap",
+          "core": {
+            "error": "refused",
+            "message": "Refusing to delete a profile whose directory overlaps another profile's or the app's own data"
+          },
+          "result": {
+            "value": "valid"
+          },
+          "files": {
+            "app/profile-registry.json": "{\n  \"version\": 1,\n  \"profiles\": [\n    {\n      \"id\": \"default\",\n      \"displayName\": \"My Profile\",\n      \"dir\": \"/vectors/app\",\n      \"slot\": 0\n    },\n    {\n      \"id\": \"outer\",\n      \"displayName\": \"Outer\",\n      \"dir\": \"/vectors/app/Profiles/outer\",\n      \"slot\": 1\n    },\n    {\n      \"id\": \"inner\",\n      \"displayName\": \"Inner\",\n      \"dir\": \"/vectors/app/Profiles/outer/inner\",\n      \"slot\": 2\n    },\n    {\n      \"id\": \"peer\",\n      \"displayName\": \"Peer\",\n      \"dir\": \"/vectors/app/Profiles/peer\",\n      \"slot\": 3\n    },\n    {\n      \"id\": \"twin\",\n      \"displayName\": \"Twin\",\n      \"dir\": \"/vectors/app/Profiles/twin/../peer\",\n      \"slot\": 4\n    },\n    {\n      \"id\": \"cased\",\n      \"displayName\": \"Cased\",\n      \"dir\": \"/vectors/app/profiles\",\n      \"slot\": 5\n    },\n    {\n      \"id\": \"home\",\n      \"displayName\": \"Home\",\n      \"dir\": \"/vectors/app/R/9\",\n      \"slot\": 6\n    },\n    {\n      \"id\": \"logs\",\n      \"displayName\": \"Logs\",\n      \"dir\": \"/vectors/app/logs\",\n      \"slot\": 7\n    },\n    {\n      \"id\": \"forget\",\n      \"displayName\": \"Forget\",\n      \"dir\": \"/vectors/app/profile-registry.json.forget\",\n      \"slot\": 8\n    },\n    {\n      \"id\": \"loose\",\n      \"displayName\": \"Loose\",\n      \"dir\": \"/vectors/app/loose\",\n      \"slot\": 9\n    },\n    {\n      \"id\": \"lone\",\n      \"displayName\": \"Lone\",\n      \"dir\": \"/vectors/app/Profiles/lone\",\n      \"slot\": 10\n    }\n  ]\n}"
+          },
+          "dirs": [
+            "app"
+          ]
+        },
+        {
+          "op": "delete-validate",
+          "id": "outer",
+          "confirm": "wrong",
+          "deviation": "profile-delete-overlap",
+          "core": {
+            "error": "refused",
+            "message": "Refusing to delete a profile whose directory overlaps another profile's or the app's own data"
+          },
+          "result": {
+            "error": "refused",
+            "message": "Profile display name confirmation did not match"
+          },
+          "files": {
+            "app/profile-registry.json": "{\n  \"version\": 1,\n  \"profiles\": [\n    {\n      \"id\": \"default\",\n      \"displayName\": \"My Profile\",\n      \"dir\": \"/vectors/app\",\n      \"slot\": 0\n    },\n    {\n      \"id\": \"outer\",\n      \"displayName\": \"Outer\",\n      \"dir\": \"/vectors/app/Profiles/outer\",\n      \"slot\": 1\n    },\n    {\n      \"id\": \"inner\",\n      \"displayName\": \"Inner\",\n      \"dir\": \"/vectors/app/Profiles/outer/inner\",\n      \"slot\": 2\n    },\n    {\n      \"id\": \"peer\",\n      \"displayName\": \"Peer\",\n      \"dir\": \"/vectors/app/Profiles/peer\",\n      \"slot\": 3\n    },\n    {\n      \"id\": \"twin\",\n      \"displayName\": \"Twin\",\n      \"dir\": \"/vectors/app/Profiles/twin/../peer\",\n      \"slot\": 4\n    },\n    {\n      \"id\": \"cased\",\n      \"displayName\": \"Cased\",\n      \"dir\": \"/vectors/app/profiles\",\n      \"slot\": 5\n    },\n    {\n      \"id\": \"home\",\n      \"displayName\": \"Home\",\n      \"dir\": \"/vectors/app/R/9\",\n      \"slot\": 6\n    },\n    {\n      \"id\": \"logs\",\n      \"displayName\": \"Logs\",\n      \"dir\": \"/vectors/app/logs\",\n      \"slot\": 7\n    },\n    {\n      \"id\": \"forget\",\n      \"displayName\": \"Forget\",\n      \"dir\": \"/vectors/app/profile-registry.json.forget\",\n      \"slot\": 8\n    },\n    {\n      \"id\": \"loose\",\n      \"displayName\": \"Loose\",\n      \"dir\": \"/vectors/app/loose\",\n      \"slot\": 9\n    },\n    {\n      \"id\": \"lone\",\n      \"displayName\": \"Lone\",\n      \"dir\": \"/vectors/app/Profiles/lone\",\n      \"slot\": 10\n    }\n  ]\n}"
+          },
+          "dirs": [
+            "app"
+          ]
+        },
+        {
+          "op": "delete-validate",
+          "id": "peer",
+          "confirm": "Peer",
+          "deviation": "profile-delete-overlap",
+          "core": {
+            "error": "refused",
+            "message": "Refusing to delete a profile whose directory overlaps another profile's or the app's own data"
+          },
+          "result": {
+            "value": "valid"
+          },
+          "files": {
+            "app/profile-registry.json": "{\n  \"version\": 1,\n  \"profiles\": [\n    {\n      \"id\": \"default\",\n      \"displayName\": \"My Profile\",\n      \"dir\": \"/vectors/app\",\n      \"slot\": 0\n    },\n    {\n      \"id\": \"outer\",\n      \"displayName\": \"Outer\",\n      \"dir\": \"/vectors/app/Profiles/outer\",\n      \"slot\": 1\n    },\n    {\n      \"id\": \"inner\",\n      \"displayName\": \"Inner\",\n      \"dir\": \"/vectors/app/Profiles/outer/inner\",\n      \"slot\": 2\n    },\n    {\n      \"id\": \"peer\",\n      \"displayName\": \"Peer\",\n      \"dir\": \"/vectors/app/Profiles/peer\",\n      \"slot\": 3\n    },\n    {\n      \"id\": \"twin\",\n      \"displayName\": \"Twin\",\n      \"dir\": \"/vectors/app/Profiles/twin/../peer\",\n      \"slot\": 4\n    },\n    {\n      \"id\": \"cased\",\n      \"displayName\": \"Cased\",\n      \"dir\": \"/vectors/app/profiles\",\n      \"slot\": 5\n    },\n    {\n      \"id\": \"home\",\n      \"displayName\": \"Home\",\n      \"dir\": \"/vectors/app/R/9\",\n      \"slot\": 6\n    },\n    {\n      \"id\": \"logs\",\n      \"displayName\": \"Logs\",\n      \"dir\": \"/vectors/app/logs\",\n      \"slot\": 7\n    },\n    {\n      \"id\": \"forget\",\n      \"displayName\": \"Forget\",\n      \"dir\": \"/vectors/app/profile-registry.json.forget\",\n      \"slot\": 8\n    },\n    {\n      \"id\": \"loose\",\n      \"displayName\": \"Loose\",\n      \"dir\": \"/vectors/app/loose\",\n      \"slot\": 9\n    },\n    {\n      \"id\": \"lone\",\n      \"displayName\": \"Lone\",\n      \"dir\": \"/vectors/app/Profiles/lone\",\n      \"slot\": 10\n    }\n  ]\n}"
+          },
+          "dirs": [
+            "app"
+          ]
+        },
+        {
+          "op": "delete-validate",
+          "id": "twin",
+          "confirm": "Twin",
+          "deviation": "profile-delete-overlap",
+          "core": {
+            "error": "refused",
+            "message": "Refusing to delete a profile whose directory overlaps another profile's or the app's own data"
+          },
+          "result": {
+            "value": "valid"
+          },
+          "files": {
+            "app/profile-registry.json": "{\n  \"version\": 1,\n  \"profiles\": [\n    {\n      \"id\": \"default\",\n      \"displayName\": \"My Profile\",\n      \"dir\": \"/vectors/app\",\n      \"slot\": 0\n    },\n    {\n      \"id\": \"outer\",\n      \"displayName\": \"Outer\",\n      \"dir\": \"/vectors/app/Profiles/outer\",\n      \"slot\": 1\n    },\n    {\n      \"id\": \"inner\",\n      \"displayName\": \"Inner\",\n      \"dir\": \"/vectors/app/Profiles/outer/inner\",\n      \"slot\": 2\n    },\n    {\n      \"id\": \"peer\",\n      \"displayName\": \"Peer\",\n      \"dir\": \"/vectors/app/Profiles/peer\",\n      \"slot\": 3\n    },\n    {\n      \"id\": \"twin\",\n      \"displayName\": \"Twin\",\n      \"dir\": \"/vectors/app/Profiles/twin/../peer\",\n      \"slot\": 4\n    },\n    {\n      \"id\": \"cased\",\n      \"displayName\": \"Cased\",\n      \"dir\": \"/vectors/app/profiles\",\n      \"slot\": 5\n    },\n    {\n      \"id\": \"home\",\n      \"displayName\": \"Home\",\n      \"dir\": \"/vectors/app/R/9\",\n      \"slot\": 6\n    },\n    {\n      \"id\": \"logs\",\n      \"displayName\": \"Logs\",\n      \"dir\": \"/vectors/app/logs\",\n      \"slot\": 7\n    },\n    {\n      \"id\": \"forget\",\n      \"displayName\": \"Forget\",\n      \"dir\": \"/vectors/app/profile-registry.json.forget\",\n      \"slot\": 8\n    },\n    {\n      \"id\": \"loose\",\n      \"displayName\": \"Loose\",\n      \"dir\": \"/vectors/app/loose\",\n      \"slot\": 9\n    },\n    {\n      \"id\": \"lone\",\n      \"displayName\": \"Lone\",\n      \"dir\": \"/vectors/app/Profiles/lone\",\n      \"slot\": 10\n    }\n  ]\n}"
+          },
+          "dirs": [
+            "app"
+          ]
+        },
+        {
+          "op": "delete-validate",
+          "id": "cased",
+          "confirm": "Cased",
+          "deviation": "profile-delete-overlap",
+          "core": {
+            "error": "refused",
+            "message": "Refusing to delete a profile whose directory overlaps another profile's or the app's own data"
+          },
+          "result": {
+            "value": "valid"
+          },
+          "files": {
+            "app/profile-registry.json": "{\n  \"version\": 1,\n  \"profiles\": [\n    {\n      \"id\": \"default\",\n      \"displayName\": \"My Profile\",\n      \"dir\": \"/vectors/app\",\n      \"slot\": 0\n    },\n    {\n      \"id\": \"outer\",\n      \"displayName\": \"Outer\",\n      \"dir\": \"/vectors/app/Profiles/outer\",\n      \"slot\": 1\n    },\n    {\n      \"id\": \"inner\",\n      \"displayName\": \"Inner\",\n      \"dir\": \"/vectors/app/Profiles/outer/inner\",\n      \"slot\": 2\n    },\n    {\n      \"id\": \"peer\",\n      \"displayName\": \"Peer\",\n      \"dir\": \"/vectors/app/Profiles/peer\",\n      \"slot\": 3\n    },\n    {\n      \"id\": \"twin\",\n      \"displayName\": \"Twin\",\n      \"dir\": \"/vectors/app/Profiles/twin/../peer\",\n      \"slot\": 4\n    },\n    {\n      \"id\": \"cased\",\n      \"displayName\": \"Cased\",\n      \"dir\": \"/vectors/app/profiles\",\n      \"slot\": 5\n    },\n    {\n      \"id\": \"home\",\n      \"displayName\": \"Home\",\n      \"dir\": \"/vectors/app/R/9\",\n      \"slot\": 6\n    },\n    {\n      \"id\": \"logs\",\n      \"displayName\": \"Logs\",\n      \"dir\": \"/vectors/app/logs\",\n      \"slot\": 7\n    },\n    {\n      \"id\": \"forget\",\n      \"displayName\": \"Forget\",\n      \"dir\": \"/vectors/app/profile-registry.json.forget\",\n      \"slot\": 8\n    },\n    {\n      \"id\": \"loose\",\n      \"displayName\": \"Loose\",\n      \"dir\": \"/vectors/app/loose\",\n      \"slot\": 9\n    },\n    {\n      \"id\": \"lone\",\n      \"displayName\": \"Lone\",\n      \"dir\": \"/vectors/app/Profiles/lone\",\n      \"slot\": 10\n    }\n  ]\n}"
+          },
+          "dirs": [
+            "app"
+          ]
+        },
+        {
+          "op": "delete-validate",
+          "id": "home",
+          "confirm": "Home",
+          "deviation": "profile-delete-overlap",
+          "core": {
+            "error": "refused",
+            "message": "Refusing to delete a profile whose directory overlaps another profile's or the app's own data"
+          },
+          "result": {
+            "value": "valid"
+          },
+          "files": {
+            "app/profile-registry.json": "{\n  \"version\": 1,\n  \"profiles\": [\n    {\n      \"id\": \"default\",\n      \"displayName\": \"My Profile\",\n      \"dir\": \"/vectors/app\",\n      \"slot\": 0\n    },\n    {\n      \"id\": \"outer\",\n      \"displayName\": \"Outer\",\n      \"dir\": \"/vectors/app/Profiles/outer\",\n      \"slot\": 1\n    },\n    {\n      \"id\": \"inner\",\n      \"displayName\": \"Inner\",\n      \"dir\": \"/vectors/app/Profiles/outer/inner\",\n      \"slot\": 2\n    },\n    {\n      \"id\": \"peer\",\n      \"displayName\": \"Peer\",\n      \"dir\": \"/vectors/app/Profiles/peer\",\n      \"slot\": 3\n    },\n    {\n      \"id\": \"twin\",\n      \"displayName\": \"Twin\",\n      \"dir\": \"/vectors/app/Profiles/twin/../peer\",\n      \"slot\": 4\n    },\n    {\n      \"id\": \"cased\",\n      \"displayName\": \"Cased\",\n      \"dir\": \"/vectors/app/profiles\",\n      \"slot\": 5\n    },\n    {\n      \"id\": \"home\",\n      \"displayName\": \"Home\",\n      \"dir\": \"/vectors/app/R/9\",\n      \"slot\": 6\n    },\n    {\n      \"id\": \"logs\",\n      \"displayName\": \"Logs\",\n      \"dir\": \"/vectors/app/logs\",\n      \"slot\": 7\n    },\n    {\n      \"id\": \"forget\",\n      \"displayName\": \"Forget\",\n      \"dir\": \"/vectors/app/profile-registry.json.forget\",\n      \"slot\": 8\n    },\n    {\n      \"id\": \"loose\",\n      \"displayName\": \"Loose\",\n      \"dir\": \"/vectors/app/loose\",\n      \"slot\": 9\n    },\n    {\n      \"id\": \"lone\",\n      \"displayName\": \"Lone\",\n      \"dir\": \"/vectors/app/Profiles/lone\",\n      \"slot\": 10\n    }\n  ]\n}"
+          },
+          "dirs": [
+            "app"
+          ]
+        },
+        {
+          "op": "delete-validate",
+          "id": "logs",
+          "confirm": "Logs",
+          "deviation": "profile-delete-overlap",
+          "core": {
+            "error": "refused",
+            "message": "Refusing to delete a profile whose directory overlaps another profile's or the app's own data"
+          },
+          "result": {
+            "value": "valid"
+          },
+          "files": {
+            "app/profile-registry.json": "{\n  \"version\": 1,\n  \"profiles\": [\n    {\n      \"id\": \"default\",\n      \"displayName\": \"My Profile\",\n      \"dir\": \"/vectors/app\",\n      \"slot\": 0\n    },\n    {\n      \"id\": \"outer\",\n      \"displayName\": \"Outer\",\n      \"dir\": \"/vectors/app/Profiles/outer\",\n      \"slot\": 1\n    },\n    {\n      \"id\": \"inner\",\n      \"displayName\": \"Inner\",\n      \"dir\": \"/vectors/app/Profiles/outer/inner\",\n      \"slot\": 2\n    },\n    {\n      \"id\": \"peer\",\n      \"displayName\": \"Peer\",\n      \"dir\": \"/vectors/app/Profiles/peer\",\n      \"slot\": 3\n    },\n    {\n      \"id\": \"twin\",\n      \"displayName\": \"Twin\",\n      \"dir\": \"/vectors/app/Profiles/twin/../peer\",\n      \"slot\": 4\n    },\n    {\n      \"id\": \"cased\",\n      \"displayName\": \"Cased\",\n      \"dir\": \"/vectors/app/profiles\",\n      \"slot\": 5\n    },\n    {\n      \"id\": \"home\",\n      \"displayName\": \"Home\",\n      \"dir\": \"/vectors/app/R/9\",\n      \"slot\": 6\n    },\n    {\n      \"id\": \"logs\",\n      \"displayName\": \"Logs\",\n      \"dir\": \"/vectors/app/logs\",\n      \"slot\": 7\n    },\n    {\n      \"id\": \"forget\",\n      \"displayName\": \"Forget\",\n      \"dir\": \"/vectors/app/profile-registry.json.forget\",\n      \"slot\": 8\n    },\n    {\n      \"id\": \"loose\",\n      \"displayName\": \"Loose\",\n      \"dir\": \"/vectors/app/loose\",\n      \"slot\": 9\n    },\n    {\n      \"id\": \"lone\",\n      \"displayName\": \"Lone\",\n      \"dir\": \"/vectors/app/Profiles/lone\",\n      \"slot\": 10\n    }\n  ]\n}"
+          },
+          "dirs": [
+            "app"
+          ]
+        },
+        {
+          "op": "delete-validate",
+          "id": "forget",
+          "confirm": "Forget",
+          "deviation": "profile-delete-overlap",
+          "core": {
+            "error": "refused",
+            "message": "Refusing to delete a profile whose directory overlaps another profile's or the app's own data"
+          },
+          "result": {
+            "value": "valid"
+          },
+          "files": {
+            "app/profile-registry.json": "{\n  \"version\": 1,\n  \"profiles\": [\n    {\n      \"id\": \"default\",\n      \"displayName\": \"My Profile\",\n      \"dir\": \"/vectors/app\",\n      \"slot\": 0\n    },\n    {\n      \"id\": \"outer\",\n      \"displayName\": \"Outer\",\n      \"dir\": \"/vectors/app/Profiles/outer\",\n      \"slot\": 1\n    },\n    {\n      \"id\": \"inner\",\n      \"displayName\": \"Inner\",\n      \"dir\": \"/vectors/app/Profiles/outer/inner\",\n      \"slot\": 2\n    },\n    {\n      \"id\": \"peer\",\n      \"displayName\": \"Peer\",\n      \"dir\": \"/vectors/app/Profiles/peer\",\n      \"slot\": 3\n    },\n    {\n      \"id\": \"twin\",\n      \"displayName\": \"Twin\",\n      \"dir\": \"/vectors/app/Profiles/twin/../peer\",\n      \"slot\": 4\n    },\n    {\n      \"id\": \"cased\",\n      \"displayName\": \"Cased\",\n      \"dir\": \"/vectors/app/profiles\",\n      \"slot\": 5\n    },\n    {\n      \"id\": \"home\",\n      \"displayName\": \"Home\",\n      \"dir\": \"/vectors/app/R/9\",\n      \"slot\": 6\n    },\n    {\n      \"id\": \"logs\",\n      \"displayName\": \"Logs\",\n      \"dir\": \"/vectors/app/logs\",\n      \"slot\": 7\n    },\n    {\n      \"id\": \"forget\",\n      \"displayName\": \"Forget\",\n      \"dir\": \"/vectors/app/profile-registry.json.forget\",\n      \"slot\": 8\n    },\n    {\n      \"id\": \"loose\",\n      \"displayName\": \"Loose\",\n      \"dir\": \"/vectors/app/loose\",\n      \"slot\": 9\n    },\n    {\n      \"id\": \"lone\",\n      \"displayName\": \"Lone\",\n      \"dir\": \"/vectors/app/Profiles/lone\",\n      \"slot\": 10\n    }\n  ]\n}"
+          },
+          "dirs": [
+            "app"
+          ]
+        },
+        {
+          "op": "delete-validate",
+          "id": "loose",
+          "confirm": "Loose",
+          "deviation": "profile-delete-overlap",
+          "core": {
+            "error": "refused",
+            "message": "Refusing to delete a profile whose directory overlaps another profile's or the app's own data"
+          },
+          "result": {
+            "value": "valid"
+          },
+          "files": {
+            "app/profile-registry.json": "{\n  \"version\": 1,\n  \"profiles\": [\n    {\n      \"id\": \"default\",\n      \"displayName\": \"My Profile\",\n      \"dir\": \"/vectors/app\",\n      \"slot\": 0\n    },\n    {\n      \"id\": \"outer\",\n      \"displayName\": \"Outer\",\n      \"dir\": \"/vectors/app/Profiles/outer\",\n      \"slot\": 1\n    },\n    {\n      \"id\": \"inner\",\n      \"displayName\": \"Inner\",\n      \"dir\": \"/vectors/app/Profiles/outer/inner\",\n      \"slot\": 2\n    },\n    {\n      \"id\": \"peer\",\n      \"displayName\": \"Peer\",\n      \"dir\": \"/vectors/app/Profiles/peer\",\n      \"slot\": 3\n    },\n    {\n      \"id\": \"twin\",\n      \"displayName\": \"Twin\",\n      \"dir\": \"/vectors/app/Profiles/twin/../peer\",\n      \"slot\": 4\n    },\n    {\n      \"id\": \"cased\",\n      \"displayName\": \"Cased\",\n      \"dir\": \"/vectors/app/profiles\",\n      \"slot\": 5\n    },\n    {\n      \"id\": \"home\",\n      \"displayName\": \"Home\",\n      \"dir\": \"/vectors/app/R/9\",\n      \"slot\": 6\n    },\n    {\n      \"id\": \"logs\",\n      \"displayName\": \"Logs\",\n      \"dir\": \"/vectors/app/logs\",\n      \"slot\": 7\n    },\n    {\n      \"id\": \"forget\",\n      \"displayName\": \"Forget\",\n      \"dir\": \"/vectors/app/profile-registry.json.forget\",\n      \"slot\": 8\n    },\n    {\n      \"id\": \"loose\",\n      \"displayName\": \"Loose\",\n      \"dir\": \"/vectors/app/loose\",\n      \"slot\": 9\n    },\n    {\n      \"id\": \"lone\",\n      \"displayName\": \"Lone\",\n      \"dir\": \"/vectors/app/Profiles/lone\",\n      \"slot\": 10\n    }\n  ]\n}"
+          },
+          "dirs": [
+            "app"
+          ]
+        },
+        {
+          "op": "delete-validate",
+          "id": "default",
+          "confirm": "My Profile",
+          "deviation": "profile-delete-overlap",
+          "core": {
+            "error": "refused",
+            "message": "Refusing to delete a profile whose directory overlaps another profile's or the app's own data"
+          },
+          "result": {
+            "value": "valid"
+          },
+          "files": {
+            "app/profile-registry.json": "{\n  \"version\": 1,\n  \"profiles\": [\n    {\n      \"id\": \"default\",\n      \"displayName\": \"My Profile\",\n      \"dir\": \"/vectors/app\",\n      \"slot\": 0\n    },\n    {\n      \"id\": \"outer\",\n      \"displayName\": \"Outer\",\n      \"dir\": \"/vectors/app/Profiles/outer\",\n      \"slot\": 1\n    },\n    {\n      \"id\": \"inner\",\n      \"displayName\": \"Inner\",\n      \"dir\": \"/vectors/app/Profiles/outer/inner\",\n      \"slot\": 2\n    },\n    {\n      \"id\": \"peer\",\n      \"displayName\": \"Peer\",\n      \"dir\": \"/vectors/app/Profiles/peer\",\n      \"slot\": 3\n    },\n    {\n      \"id\": \"twin\",\n      \"displayName\": \"Twin\",\n      \"dir\": \"/vectors/app/Profiles/twin/../peer\",\n      \"slot\": 4\n    },\n    {\n      \"id\": \"cased\",\n      \"displayName\": \"Cased\",\n      \"dir\": \"/vectors/app/profiles\",\n      \"slot\": 5\n    },\n    {\n      \"id\": \"home\",\n      \"displayName\": \"Home\",\n      \"dir\": \"/vectors/app/R/9\",\n      \"slot\": 6\n    },\n    {\n      \"id\": \"logs\",\n      \"displayName\": \"Logs\",\n      \"dir\": \"/vectors/app/logs\",\n      \"slot\": 7\n    },\n    {\n      \"id\": \"forget\",\n      \"displayName\": \"Forget\",\n      \"dir\": \"/vectors/app/profile-registry.json.forget\",\n      \"slot\": 8\n    },\n    {\n      \"id\": \"loose\",\n      \"displayName\": \"Loose\",\n      \"dir\": \"/vectors/app/loose\",\n      \"slot\": 9\n    },\n    {\n      \"id\": \"lone\",\n      \"displayName\": \"Lone\",\n      \"dir\": \"/vectors/app/Profiles/lone\",\n      \"slot\": 10\n    }\n  ]\n}"
+          },
+          "dirs": [
+            "app"
+          ]
+        },
+        {
+          "op": "delete-validate",
+          "id": "lone",
+          "confirm": "Lone",
+          "result": {
+            "value": "valid"
+          },
+          "files": {
+            "app/profile-registry.json": "{\n  \"version\": 1,\n  \"profiles\": [\n    {\n      \"id\": \"default\",\n      \"displayName\": \"My Profile\",\n      \"dir\": \"/vectors/app\",\n      \"slot\": 0\n    },\n    {\n      \"id\": \"outer\",\n      \"displayName\": \"Outer\",\n      \"dir\": \"/vectors/app/Profiles/outer\",\n      \"slot\": 1\n    },\n    {\n      \"id\": \"inner\",\n      \"displayName\": \"Inner\",\n      \"dir\": \"/vectors/app/Profiles/outer/inner\",\n      \"slot\": 2\n    },\n    {\n      \"id\": \"peer\",\n      \"displayName\": \"Peer\",\n      \"dir\": \"/vectors/app/Profiles/peer\",\n      \"slot\": 3\n    },\n    {\n      \"id\": \"twin\",\n      \"displayName\": \"Twin\",\n      \"dir\": \"/vectors/app/Profiles/twin/../peer\",\n      \"slot\": 4\n    },\n    {\n      \"id\": \"cased\",\n      \"displayName\": \"Cased\",\n      \"dir\": \"/vectors/app/profiles\",\n      \"slot\": 5\n    },\n    {\n      \"id\": \"home\",\n      \"displayName\": \"Home\",\n      \"dir\": \"/vectors/app/R/9\",\n      \"slot\": 6\n    },\n    {\n      \"id\": \"logs\",\n      \"displayName\": \"Logs\",\n      \"dir\": \"/vectors/app/logs\",\n      \"slot\": 7\n    },\n    {\n      \"id\": \"forget\",\n      \"displayName\": \"Forget\",\n      \"dir\": \"/vectors/app/profile-registry.json.forget\",\n      \"slot\": 8\n    },\n    {\n      \"id\": \"loose\",\n      \"displayName\": \"Loose\",\n      \"dir\": \"/vectors/app/loose\",\n      \"slot\": 9\n    },\n    {\n      \"id\": \"lone\",\n      \"displayName\": \"Lone\",\n      \"dir\": \"/vectors/app/Profiles/lone\",\n      \"slot\": 10\n    }\n  ]\n}"
+          },
+          "dirs": [
+            "app"
+          ]
+        },
+        {
+          "op": "delete-validate",
+          "id": "lone",
+          "confirm": "wrong",
+          "result": {
+            "error": "refused",
+            "message": "Profile display name confirmation did not match"
+          },
+          "files": {
+            "app/profile-registry.json": "{\n  \"version\": 1,\n  \"profiles\": [\n    {\n      \"id\": \"default\",\n      \"displayName\": \"My Profile\",\n      \"dir\": \"/vectors/app\",\n      \"slot\": 0\n    },\n    {\n      \"id\": \"outer\",\n      \"displayName\": \"Outer\",\n      \"dir\": \"/vectors/app/Profiles/outer\",\n      \"slot\": 1\n    },\n    {\n      \"id\": \"inner\",\n      \"displayName\": \"Inner\",\n      \"dir\": \"/vectors/app/Profiles/outer/inner\",\n      \"slot\": 2\n    },\n    {\n      \"id\": \"peer\",\n      \"displayName\": \"Peer\",\n      \"dir\": \"/vectors/app/Profiles/peer\",\n      \"slot\": 3\n    },\n    {\n      \"id\": \"twin\",\n      \"displayName\": \"Twin\",\n      \"dir\": \"/vectors/app/Profiles/twin/../peer\",\n      \"slot\": 4\n    },\n    {\n      \"id\": \"cased\",\n      \"displayName\": \"Cased\",\n      \"dir\": \"/vectors/app/profiles\",\n      \"slot\": 5\n    },\n    {\n      \"id\": \"home\",\n      \"displayName\": \"Home\",\n      \"dir\": \"/vectors/app/R/9\",\n      \"slot\": 6\n    },\n    {\n      \"id\": \"logs\",\n      \"displayName\": \"Logs\",\n      \"dir\": \"/vectors/app/logs\",\n      \"slot\": 7\n    },\n    {\n      \"id\": \"forget\",\n      \"displayName\": \"Forget\",\n      \"dir\": \"/vectors/app/profile-registry.json.forget\",\n      \"slot\": 8\n    },\n    {\n      \"id\": \"loose\",\n      \"displayName\": \"Loose\",\n      \"dir\": \"/vectors/app/loose\",\n      \"slot\": 9\n    },\n    {\n      \"id\": \"lone\",\n      \"displayName\": \"Lone\",\n      \"dir\": \"/vectors/app/Profiles/lone\",\n      \"slot\": 10\n    }\n  ]\n}"
+          },
+          "dirs": [
+            "app"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "delete-validate-default",
+      "dev": false,
+      "files": {
+        "app/profile-registry.json": "{\n  \"version\": 1,\n  \"profiles\": [\n    {\n      \"id\": \"default\",\n      \"displayName\": \"My Profile\",\n      \"dir\": \"/vectors/app\",\n      \"slot\": 0\n    },\n    {\n      \"id\": \"work\",\n      \"displayName\": \"Work\",\n      \"dir\": \"/vectors/app/Profiles/work\",\n      \"slot\": 1\n    }\n  ]\n}"
+      },
+      "dirs": [],
+      "steps": [
+        {
+          "op": "delete-validate",
+          "id": "default",
+          "confirm": "My Profile",
+          "result": {
+            "value": "valid"
+          },
+          "files": {
+            "app/profile-registry.json": "{\n  \"version\": 1,\n  \"profiles\": [\n    {\n      \"id\": \"default\",\n      \"displayName\": \"My Profile\",\n      \"dir\": \"/vectors/app\",\n      \"slot\": 0\n    },\n    {\n      \"id\": \"work\",\n      \"displayName\": \"Work\",\n      \"dir\": \"/vectors/app/Profiles/work\",\n      \"slot\": 1\n    }\n  ]\n}"
+          },
+          "dirs": [
+            "app"
+          ]
+        },
+        {
+          "op": "delete-validate",
+          "id": "work",
+          "confirm": "Work",
+          "result": {
+            "value": "valid"
+          },
+          "files": {
+            "app/profile-registry.json": "{\n  \"version\": 1,\n  \"profiles\": [\n    {\n      \"id\": \"default\",\n      \"displayName\": \"My Profile\",\n      \"dir\": \"/vectors/app\",\n      \"slot\": 0\n    },\n    {\n      \"id\": \"work\",\n      \"displayName\": \"Work\",\n      \"dir\": \"/vectors/app/Profiles/work\",\n      \"slot\": 1\n    }\n  ]\n}"
           },
           "dirs": [
             "app"

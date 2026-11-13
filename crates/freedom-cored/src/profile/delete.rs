@@ -34,6 +34,12 @@
 //!    the gated directories' places, then the tombstones, the Radicle home
 //!    and its staging siblings, then anything made again empty.
 //!
+//! A directory on the way that was missing at the layout check may be made
+//! by a start meanwhile, before it waits on a gate this process holds: the
+//! profile's data and its Radicle home are reached again from the last
+//! directory that was there, as the reference reaches them by path, so
+//! what was made goes too, under the gates (review of #337).
+//!
 //! **Result:** `{ catalog, record, forget: [{ policy, item }] }`, with
 //! `forget_unknown: true` when the target's secrets file couldn't be read.
 //! Refusals as the other catalog subcommands', and `{ "error": "lock_held",
@@ -352,15 +358,17 @@ fn commit_and_remove(
             }
         }
     }
-    if let Some(Located {
-        parent: Some(parent),
-        name,
-        ..
-    }) = &home
-    {
+    // The home's parent, reached again where it was missing at the layout
+    // check (`R/`, or a dev build's `R/<checkout>/`, made since by a start
+    // that now waits on the Radicle gate).
+    let home_parent = match &home {
+        Some(home) => home.parent_now()?,
+        None => None,
+    };
+    if let (Some(home), Some(parent)) = (&home, &home_parent) {
         fences.push(ToFence {
             parent,
-            name,
+            name: &home.name,
             what: "Radicle data",
         });
     }
@@ -397,24 +405,31 @@ fn commit_and_remove(
             }
         }
         // No data root when the layout was checked: anything made there
-        // since goes as the reference's ungated removal has it.
+        // since goes as the reference's ungated removal has it, reached
+        // again where a directory above it was missing too.
         (Some(data), None) => {
-            if let Some(parent) = &data.parent {
-                removal.remove_tree(parent, &data.name)?;
+            if let Some(parent) = data.parent_now()? {
+                removal.remove_tree(&parent, &data.name)?;
             }
         }
     }
-    if let Some(Located {
-        parent: Some(parent),
-        name,
-        ..
-    }) = &home
-    {
-        let fenced = tombstones.last().cloned().flatten();
-        removal.remove_tree(parent, fenced.as_deref().unwrap_or(name))?;
-        // Listed again, as `removeRadicleStagingSiblings` does.
-        for sibling in remove::radicle_staging_siblings(parent, name)? {
-            removal.remove_tree(parent, &sibling)?;
+    if let Some(home) = &home {
+        // The fenced home's tombstone (the last fence), or the home by its
+        // name: one made since, its parent reached again if it was missing
+        // at the fence too.
+        let (parent, fenced) = match &home_parent {
+            Some(parent) => (
+                Some(parent.try_clone()?),
+                tombstones.last().cloned().flatten(),
+            ),
+            None => (home.parent_now()?, None),
+        };
+        if let Some(parent) = parent {
+            removal.remove_tree(&parent, fenced.as_deref().unwrap_or(&home.name))?;
+            // Listed again, as `removeRadicleStagingSiblings` does.
+            for sibling in remove::radicle_staging_siblings(&parent, &home.name)? {
+                removal.remove_tree(&parent, &sibling)?;
+            }
         }
     }
     // `removeEmptyRemade`: each gated directory made again since the fence,
@@ -437,14 +452,12 @@ fn commit_and_remove(
             }
         }
     }
-    // The Radicle home made again since its fence, empty.
-    if let Some(Located {
-        parent: Some(parent),
-        name,
-        ..
-    }) = &home
+    // The Radicle home made again since its fence, empty, its parent
+    // reached again if it was missing until now.
+    if let Some(home) = &home
+        && let Some(parent) = home.parent_now()?
     {
-        removal.remove_empty(parent, name)?;
+        removal.remove_empty(&parent, &home.name)?;
     }
     Ok(())
 }

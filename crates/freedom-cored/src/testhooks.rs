@@ -64,6 +64,12 @@
 //!   delete` (`before-record`, `after-record`, `after-catalog`,
 //!   `mid-removal`, `before-result`): there the process exits at once with
 //!   99, as if killed, its locks and files left as they are.
+//! - `FREEDOM_CORED_TEST_PROFILE_DELETE_PAUSE` (`<step>=<marker>=<release>`):
+//!   at that step `profile delete` creates the file `<marker>`, then waits,
+//!   its locks and gates held, until the file `<release>` exists (at most
+//!   120 s). So a test acts between two steps. Like
+//!   `FREEDOM_CORED_TEST_PROFILE_HOLD`'s, its files' directories are in the
+//!   delete's grant.
 //! - `FREEDOM_CORED_TEST_PROFILE_MIGRATE_CRASH` names a step of `profile
 //!   migrate --finish-only` (`after-exclusion`, `mid-recovery`,
 //!   `before-journal-removed`): there the process exits at once with 99.
@@ -263,6 +269,14 @@ pub fn profile_delete_step(step: &str) {
     if std::env::var("FREEDOM_CORED_TEST_PROFILE_DELETE_CRASH").is_ok_and(|s| s == step) {
         std::process::exit(99);
     }
+    if let Ok(spec) = std::env::var("FREEDOM_CORED_TEST_PROFILE_DELETE_PAUSE")
+        && let Some((at, files)) = spec.split_once('=')
+        && at == step
+        && let Some((marker, release)) = files.split_once('=')
+    {
+        let _ = std::fs::write(marker, b"paused");
+        hold(std::ffi::OsStr::new(release), || false);
+    }
 }
 
 #[cfg(feature = "testhooks")]
@@ -272,17 +286,24 @@ pub fn profile_migrate_step(step: &str) {
     }
 }
 
-/// The directories `FREEDOM_CORED_TEST_PROFILE_HOLD`'s files live in, which
-/// a confined subcommand's grant takes so the hook still works.
+/// The directories `FREEDOM_CORED_TEST_PROFILE_HOLD`'s and
+/// `FREEDOM_CORED_TEST_PROFILE_DELETE_PAUSE`'s files live in, which a
+/// confined subcommand's grant takes so the hooks still work.
 #[cfg(feature = "testhooks")]
 pub fn profile_hook_dirs() -> Vec<std::path::PathBuf> {
-    let Ok(spec) = std::env::var("FREEDOM_CORED_TEST_PROFILE_HOLD") else {
-        return Vec::new();
-    };
-    let Some((marker, release)) = spec.split_once('=') else {
-        return Vec::new();
-    };
-    [marker, release]
+    let mut files = Vec::new();
+    if let Ok(spec) = std::env::var("FREEDOM_CORED_TEST_PROFILE_HOLD")
+        && let Some((marker, release)) = spec.split_once('=')
+    {
+        files.extend([marker.to_owned(), release.to_owned()]);
+    }
+    if let Ok(spec) = std::env::var("FREEDOM_CORED_TEST_PROFILE_DELETE_PAUSE")
+        && let Some((_, rest)) = spec.split_once('=')
+        && let Some((marker, release)) = rest.split_once('=')
+    {
+        files.extend([marker.to_owned(), release.to_owned()]);
+    }
+    files
         .iter()
         .filter_map(|file| std::path::Path::new(file).parent())
         .filter(|dir| dir.is_dir())
