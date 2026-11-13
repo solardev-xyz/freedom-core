@@ -10,6 +10,7 @@
 
 use std::ffi::{CStr, OsString, c_char, c_int};
 use std::io;
+use std::os::fd::{AsRawFd, BorrowedFd};
 use std::os::unix::ffi::OsStringExt;
 use std::path::PathBuf;
 
@@ -227,6 +228,35 @@ pub fn check(operation: &CStr, filter: Filter<'_>) -> Result<bool, i32> {
         0 => Ok(true),
         1 => Ok(false),
         other => Err(other),
+    }
+}
+
+/// Sets the access and modification times of the file or directory open as
+/// `fd` to one instant, `seconds` and `microseconds` (`0..1_000_000`) since
+/// the epoch (`futimes`).
+///
+/// Seatbelt checks this call as `file-write-times`, so a profile that allows
+/// that alone lets it through. libSystem's `futimens` and `utimensat`, and
+/// std's `set_times`, set times through `setattrlist`, which Seatbelt doesn't
+/// check as `file-write-times`: a profile allows it only with every
+/// `file-write*` operation (macOS CI, freedom-core#342). The profile lock's
+/// mtime is set through this in a confined subcommand (design 0010).
+#[allow(unsafe_code)]
+pub fn set_times(fd: BorrowedFd<'_>, seconds: i64, microseconds: i32) -> io::Result<()> {
+    let time = libc::timeval {
+        tv_sec: seconds,
+        tv_usec: microseconds,
+    };
+    let times = [time, time];
+    // SAFETY: futimes reads two timevals from `times`, an array of two that
+    // lives on this frame for the call, and takes the descriptor `fd`
+    // borrows, open for the call. It writes no memory of ours, and on
+    // failure returns -1 with errno, changing nothing.
+    let result = unsafe { libc::futimes(fd.as_raw_fd(), times.as_ptr()) };
+    if result == 0 {
+        Ok(())
+    } else {
+        Err(io::Error::last_os_error())
     }
 }
 
@@ -499,6 +529,23 @@ mod tests {
         assert!(thread_count().unwrap() >= 2);
         drop(tx);
         handle.join().unwrap();
+    }
+
+    #[test]
+    fn times_are_set_to_the_microsecond_on_a_directory() {
+        use std::os::fd::AsFd;
+        use std::time::{Duration, UNIX_EPOCH};
+        let dir = std::env::temp_dir().join(format!("fc-sys-times-{}", std::process::id()));
+        let _ = std::fs::remove_dir(&dir);
+        std::fs::create_dir(&dir).unwrap();
+        let open = std::fs::File::open(&dir).unwrap();
+        let set = set_times(open.as_fd(), 1_700_000_001, 5_000);
+        let metadata = std::fs::metadata(&dir).unwrap();
+        let _ = std::fs::remove_dir(&dir);
+        set.unwrap();
+        let at = UNIX_EPOCH + Duration::new(1_700_000_001, 5_000_000);
+        assert_eq!(metadata.modified().unwrap(), at);
+        assert_eq!(metadata.accessed().unwrap(), at);
     }
 
     #[test]

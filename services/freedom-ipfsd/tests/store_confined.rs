@@ -49,6 +49,7 @@ fn child(case: &str) {
         resolver: confine::Resolver::None,
         descriptors: Vec::new(),
         interface_index: false,
+        times: false,
     })
     .unwrap();
     println!("FILES {}", report.files == Status::Enforced);

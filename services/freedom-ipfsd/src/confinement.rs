@@ -38,6 +38,7 @@ pub fn policy(
         resolver: confine::Resolver::ResolvConf,
         descriptors,
         interface_index: matches!(network, NetworkPolicy::Direct),
+        times: false,
     }
 }
 

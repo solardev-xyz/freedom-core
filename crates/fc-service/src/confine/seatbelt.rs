@@ -14,9 +14,14 @@
 //!   read-only grants; and in the read-write grants, reads, creating,
 //!   writing (truncating included), unlinking and `ioctl`, plus hard links
 //!   with `refer`. No mode, owner, flags, times or xattr change is allowed
-//!   anywhere (`file-write-mode` and the rest stay denied). Metadata is
-//!   readable only on each grant's ancestors, so other files' names and
-//!   modes stay hidden.
+//!   anywhere (`file-write-mode` and the rest stay denied), but times in
+//!   the read-write grants with `times` (a lock's mtime). Seatbelt checks
+//!   `utimes` and `futimes` as `file-write-times`, but not `setattrlist`,
+//!   through which libSystem's `futimens` and `utimensat` and std's
+//!   `set_times` set times: a profile allows that only with every
+//!   `file-write*` operation, so a confined process sets times with
+//!   `futimes` (fc-sys's `set_times`). Metadata is readable only on each
+//!   grant's ancestors, so other files' names and modes stay hidden.
 //! - **Processes:** no exec and no fork (denied by default); signals and
 //!   process information for the process itself only. The exec self-test's
 //!   one program, `/usr/bin/true`, is readable and mappable, so the only
@@ -141,8 +146,13 @@ const DIRECT_IPC: &str = r#"(allow mach-lookup
     (remote unix-socket (path-literal "/private/var/run/mDNSResponder")))
 "#;
 
-/// The profile for `network`, `refer` and `grants`.
-pub fn profile(network: Network, refer: bool, grants: &Grants) -> Result<Profile, String> {
+/// The profile for `network`, `refer`, `times` and `grants`.
+pub fn profile(
+    network: Network,
+    refer: bool,
+    times: bool,
+    grants: &Grants,
+) -> Result<Profile, String> {
     let mut params = Vec::new();
     let mut param = |prefix: &str, path: &Path| -> Result<String, String> {
         let value = path
@@ -219,6 +229,11 @@ pub fn profile(network: Network, refer: bool, grants: &Grants) -> Result<Profile
         ));
         if refer {
             text.push_str(&format!("(allow file-link (subpath (param \"{name}\")))\n"));
+        }
+        if times {
+            text.push_str(&format!(
+                "(allow file-write-times (subpath (param \"{name}\")))\n"
+            ));
         }
     }
 
@@ -298,7 +313,7 @@ SYSCTLS(allow file-read*
 
     #[test]
     fn the_persistent_process_in_direct_mode() {
-        let profile = profile(Network::Direct, false, &grants()).unwrap();
+        let profile = profile(Network::Direct, false, false, &grants()).unwrap();
         assert_eq!(profile.text, PERSISTENT_DIRECT.replace("SYSCTLS", SYSCTLS));
         let value = |name: &str| {
             profile
@@ -342,7 +357,7 @@ SYSCTLS(allow file-read*
     fn a_link_a_read_only_path_crosses_gets_metadata_alone() {
         let mut linked = grants();
         linked.links.push("/private/etc/resolv.conf".into());
-        let profile = profile(Network::Direct, false, &linked).unwrap();
+        let profile = profile(Network::Direct, false, false, &linked).unwrap();
         let name_of = |path: &str| {
             profile
                 .params
@@ -362,7 +377,7 @@ SYSCTLS(allow file-read*
                 .text
                 .contains(&format!("(allow file-read* (literal (param \"{link}\")))"))
         );
-        let unlinked = super::profile(Network::Direct, false, &grants()).unwrap();
+        let unlinked = super::profile(Network::Direct, false, false, &grants()).unwrap();
         assert_eq!(
             profile.text.matches("(allow file-read* ").count(),
             unlinked.text.matches("(allow file-read* ").count()
@@ -377,6 +392,7 @@ SYSCTLS(allow file-read*
                 loopback: true,
             },
             false,
+            false,
             &Grants::default(),
         )
         .unwrap();
@@ -390,6 +406,7 @@ SYSCTLS(allow file-read*
                 port: 9150,
                 loopback: false,
             },
+            false,
             false,
             &Grants::default(),
         )
@@ -409,7 +426,7 @@ SYSCTLS(allow file-read*
 
     #[test]
     fn offline_and_ephemeral_profiles_write_nothing_and_reach_nothing() {
-        let offline = profile(Network::Offline, false, &Grants::default()).unwrap();
+        let offline = profile(Network::Offline, false, false, &Grants::default()).unwrap();
         assert!(!offline.text.contains("network-"));
         assert!(!offline.text.contains("mach-lookup"));
         // The one write: /dev/null.
@@ -425,12 +442,12 @@ SYSCTLS(allow file-read*
     fn refer_adds_hard_links_in_each_read_write_grant_only() {
         let mut both = grants();
         both.read_write.push("/Users/u/.radicle-home".into());
-        let text = profile(Network::Direct, true, &both).unwrap().text;
+        let text = profile(Network::Direct, true, false, &both).unwrap().text;
         assert!(text.contains("(allow file-link (subpath (param \"RW_0\")))"));
         assert!(text.contains("(allow file-link (subpath (param \"RW_1\")))"));
         assert_eq!(text.matches("file-link").count(), 2);
         assert!(
-            !profile(Network::Direct, false, &both)
+            !profile(Network::Direct, false, false, &both)
                 .unwrap()
                 .text
                 .contains("file-link")
@@ -438,8 +455,40 @@ SYSCTLS(allow file-read*
     }
 
     #[test]
+    fn times_add_file_times_in_each_read_write_grant_only() {
+        let mut both = grants();
+        both.read_write
+            .push("/Users/u/Library/Freedom/locks".into());
+        let text = profile(Network::Offline, false, true, &both).unwrap().text;
+        assert!(text.contains("(allow file-write-times (subpath (param \"RW_0\")))"));
+        assert!(text.contains("(allow file-write-times (subpath (param \"RW_1\")))"));
+        assert_eq!(text.matches("file-write-times").count(), 2);
+        for operation in [
+            "file-write-mode",
+            "file-write-owner",
+            "file-write-flags",
+            "file-write-xattr",
+            "file-write*",
+        ] {
+            assert!(!text.contains(operation), "{operation}");
+        }
+        let read_only = Grants {
+            read_only_dirs: vec!["/Users/u/Library/Freedom".into()],
+            ..Grants::default()
+        };
+        assert!(
+            !profile(Network::Offline, false, true, &read_only)
+                .unwrap()
+                .text
+                .contains("file-write-times")
+        );
+    }
+
+    #[test]
     fn no_metadata_change_is_allowed_anywhere() {
-        let text = profile(Network::Direct, true, &grants()).unwrap().text;
+        let text = profile(Network::Direct, true, false, &grants())
+            .unwrap()
+            .text;
         for operation in [
             "file-write-mode",
             "file-write-owner",
@@ -465,7 +514,7 @@ SYSCTLS(allow file-read*
             },
             Network::Offline,
         ] {
-            let text = profile(network, false, &grants()).unwrap().text;
+            let text = profile(network, false, false, &grants()).unwrap().text;
             // Never unrestricted, never another process's.
             assert!(!text.contains("(allow sysctl-read)"), "{text}");
             assert!(!text.contains("kern.proc"), "{text}");
@@ -486,7 +535,7 @@ SYSCTLS(allow file-read*
             read_write: vec![PathBuf::from("/Users/u/\"quoted\" (dir)")],
             ..Grants::default()
         };
-        let profile = profile(Network::Offline, false, &odd).unwrap();
+        let profile = profile(Network::Offline, false, false, &odd).unwrap();
         assert!(!profile.text.contains("quoted"));
         assert!(
             profile
@@ -497,6 +546,6 @@ SYSCTLS(allow file-read*
             read_write: vec![PathBuf::from("relative/dir")],
             ..Grants::default()
         };
-        assert!(super::profile(Network::Offline, false, &relative).is_err());
+        assert!(super::profile(Network::Offline, false, false, &relative).is_err());
     }
 }

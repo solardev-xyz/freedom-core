@@ -19,17 +19,22 @@
 //!    the profile lock's age: a live profile whose main has stalled holds
 //!    its profile gate. A missing directory is gated at the path it would
 //!    have, and nothing is made.
-//! 3. **The layout:** every step from the app root to the profile's data,
+//! 3. **Confinement** (`confine.rs`): read-write on the app root and, in a
+//!    dev build, the `R/` root of the Radicle homes beside it, with the
+//!    gates' descriptors; no network, no process. The plan was read before
+//!    (the gates it names come first), and the store is opened again under
+//!    the same lock, confined.
+//! 4. **The layout:** every step from the app root to the profile's data,
 //!    and to each gated directory and the Radicle home, a real directory,
 //!    or refused before anything changes. Each is reached from the app
 //!    root's handle (`anchor::Dir`), as the catalog's store reaches its
 //!    files, and every change below is made through those handles
 //!    (`remove.rs`).
-//! 4. **The forget record** (`forget::record`), before the catalog changes.
-//! 5. **The fence and the catalog's change** in one step: each gated
+//! 5. **The forget record** (`forget::record`), before the catalog changes.
+//! 6. **The fence and the catalog's change** in one step: each gated
 //!    directory moved aside to its tombstone, then the catalog written
 //!    without the record.
-//! 6. **The removal:** the profile's directory (or, for the packaged
+//! 7. **The removal:** the profile's directory (or, for the packaged
 //!    default profile, the app root's entries but the shared ones), sparing
 //!    the gated directories' places, then the tombstones, the Radicle home
 //!    and its staging siblings, then anything made again empty.
@@ -52,11 +57,15 @@ use fc_json::JsValue;
 use fc_profile::{Deletion, Options, Style};
 use fc_service::gate::{GateError, PROFILE_NAMESPACE};
 
+use super::confine::{self, Grant};
 use super::forget::{self, Recorded};
 use super::lock;
 use super::remove::{self, Failure, Gated, Located, Removal, ToFence};
 use super::store::{self, DiskStore};
-use super::{Flags, catalog_lock, failed, object, prepare_app_root, print, refused, storage};
+use super::{
+    Flags, failed, keep, object, outside, prepare_app_root, print, refused, storage,
+    take_catalog_lock,
+};
 use crate::anchor::{Dir, Resolve};
 use crate::exit::Exit;
 use crate::log;
@@ -166,16 +175,12 @@ fn delete(app_root: &str, lock_dir: &Path, opts: &Options, id: &str, confirm: &s
     if let Err(exit) = prepare_app_root(root) {
         return exit;
     }
-    let lock = match catalog_lock(root) {
+    let lock = match take_catalog_lock(root) {
         Ok(lock) => lock,
         Err(exit) => return exit,
     };
     let held = || lock.held();
-    let mut store = match DiskStore::open(app_root, &held) {
-        Ok(store) => store,
-        Err(e) => return storage("io", &e.kind().to_string()),
-    };
-    let result = delete_locked(&mut store, app_root, lock_dir, opts, id, confirm, &held);
+    let result = delete_locked(&lock, app_root, lock_dir, opts, id, confirm, &held);
     if result.is_ok() {
         step("before-result");
     }
@@ -194,8 +199,12 @@ fn delete(app_root: &str, lock_dir: &Path, opts: &Options, id: &str, confirm: &s
     }
 }
 
+fn open_store<'a>(app_root: &str, held: &'a dyn Fn() -> bool) -> Result<DiskStore<'a>, Exit> {
+    DiskStore::open(app_root, held).map_err(|e| storage("io", &e.kind().to_string()))
+}
+
 fn delete_locked(
-    store: &mut DiskStore<'_>,
+    lock: &lock::Lock,
     app_root: &str,
     lock_dir: &Path,
     opts: &Options,
@@ -203,8 +212,13 @@ fn delete_locked(
     confirm: &str,
     held: &dyn Fn() -> bool,
 ) -> Result<JsValue, Exit> {
-    let plan =
-        fc_profile::plan_deletion(store, app_root, opts, id, confirm).map_err(|e| failed(&e))?;
+    // The plan, from the catalog read under the lock; its store closed
+    // before confinement, which keeps no descriptor it doesn't know.
+    let plan = {
+        let mut store = open_store(app_root, held)?;
+        fc_profile::plan_deletion(&mut store, app_root, opts, id, confirm)
+            .map_err(|e| failed(&e))?
+    };
     let profile_dir = Path::new(&plan.profile_dir);
     let (stale_ms, _) = fc_profile::lock::profile_lock_timing(opts.dev);
     if lock::is_fresh(
@@ -218,13 +232,53 @@ fn delete_locked(
         )));
     }
     // Held to the end of the run; dropped after the result is made.
-    let _gates = gates(&plan, lock_dir)?;
-    let place = check_layout(&plan).map_err(ended)?;
+    let gates = gates(&plan, lock_dir)?;
+    let base = open_home_base(&plan).map_err(ended)?;
+    confine::confine(grant(&plan, app_root, &gates, base.as_ref()))?;
+    keep(lock)?;
+    let mut store = open_store(app_root, held)?;
+    let store = &mut store;
+    let place = check_layout(&plan, base).map_err(ended)?;
     step("before-record");
     let recorded = forget::record(store, app_root, &plan, held)?;
     step("after-record");
     commit_and_remove(store, &plan, app_root, place, held).map_err(ended)?;
     Ok(result(&plan, &recorded))
+}
+
+/// The delete's grant: the app root, the Radicle homes' root where it lies
+/// outside it (a dev build's `R/`, beside the app root), the gates and the
+/// homes' base kept, and renames across directories (the fence).
+fn grant(
+    plan: &Deletion,
+    app_root: &str,
+    gates: &[fc_service::gate::Gate],
+    base: Option<&Dir>,
+) -> Grant {
+    let root = Path::new(app_root);
+    let mut grant = Grant::locking().refer().read_write(root);
+    if let Some(home) = &plan.radicle
+        && let Some(homes) = outside(root, Path::new(&home.root))
+    {
+        grant = grant.read_write(&homes);
+    }
+    grant
+        .descriptors(gates.iter().flat_map(fc_service::gate::Gate::descriptors))
+        .descriptors(base.and_then(Dir::descriptor))
+}
+
+/// A dev build's Radicle home is reached from the directory above the app
+/// root, which the grant doesn't cover: its handle is opened before
+/// confinement and crosses it. `None` where the base is the app root.
+fn open_home_base(plan: &Deletion) -> Result<Option<Dir>, Failure> {
+    match &plan.radicle {
+        Some(home) if Path::new(&home.base) != Path::new(&plan.app_root) => {
+            Dir::open_root(Path::new(&home.base), Resolve::Follow)?
+                .map(Some)
+                .ok_or_else(|| Failure::Io(std::io::Error::from(std::io::ErrorKind::NotFound)))
+        }
+        _ => Ok(None),
+    }
 }
 
 /// The gated directories, below the data root.
@@ -256,7 +310,9 @@ fn open_app_root(plan: &Deletion) -> Result<Dir, Failure> {
         .ok_or_else(|| Failure::Io(std::io::Error::from(std::io::ErrorKind::NotFound)))
 }
 
-fn check_layout(plan: &Deletion) -> Result<Layout, Failure> {
+/// `base`: the Radicle homes' base where it isn't the app root, opened
+/// before confinement ([`open_home_base`]).
+fn check_layout(plan: &Deletion, base: Option<Dir>) -> Result<Layout, Failure> {
     let app_path = PathBuf::from(&plan.app_root);
     let app = open_app_root(plan)?;
     let data_path = PathBuf::from(&plan.data_root);
@@ -278,12 +334,12 @@ fn check_layout(plan: &Deletion) -> Result<Layout, Failure> {
     let home = match &plan.radicle {
         Some(home) => {
             let base_path = PathBuf::from(&home.base);
-            let base = if base_path == app_path {
-                app.try_clone()?
-            } else {
-                Dir::open_root(&base_path, Resolve::Follow)?.ok_or_else(|| {
+            let base = match base {
+                Some(base) => base,
+                None if base_path == app_path => app.try_clone()?,
+                None => Dir::open_root(&base_path, Resolve::Follow)?.ok_or_else(|| {
                     Failure::Io(std::io::Error::from(std::io::ErrorKind::NotFound))
-                })?
+                })?,
             };
             Some(remove::locate(
                 &base,

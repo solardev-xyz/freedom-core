@@ -184,6 +184,14 @@ impl Dir {
         imp::rename(self, from, to)
     }
 
+    /// Renames `from` in this directory to `to` in `target`, both reached
+    /// through their handles on Unix (`renameat`), replacing whatever `to`
+    /// is without following it. A profile's move recovery puts an entry
+    /// back from `freedom/` (design 0013).
+    pub fn rename_into(&self, from: &OsStr, target: &Dir, to: &OsStr) -> io::Result<()> {
+        imp::rename_into(self, from, target, to)
+    }
+
     /// Whether `name` is the file `handle` holds (Unix: the same device and
     /// inode); `false` if nothing is there. Elsewhere, `true`: no file
     /// identity is exposed (design 0001).
@@ -200,6 +208,20 @@ impl Dir {
     /// duplicated).
     pub fn try_clone(&self) -> io::Result<Dir> {
         imp::try_clone(self)
+    }
+
+    /// The handle's descriptor (Unix), for confinement's list of those that
+    /// cross it; `None` elsewhere.
+    pub fn descriptor(&self) -> Option<i32> {
+        #[cfg(unix)]
+        {
+            use std::os::fd::AsRawFd;
+            Some(self.fd.as_raw_fd())
+        }
+        #[cfg(not(unix))]
+        {
+            None
+        }
     }
 
     /// The names of the directories in this one, not following a symlink
@@ -395,6 +417,11 @@ mod imp {
 
     pub fn rename(dir: &Dir, from: &OsStr, to: &OsStr) -> io::Result<()> {
         rustix::fs::renameat(&dir.fd, from, &dir.fd, to)?;
+        Ok(())
+    }
+
+    pub fn rename_into(dir: &Dir, from: &OsStr, target: &Dir, to: &OsStr) -> io::Result<()> {
+        rustix::fs::renameat(&dir.fd, from, &target.fd, to)?;
         Ok(())
     }
 
@@ -705,6 +732,10 @@ mod imp {
 
     pub fn rename(dir: &Dir, from: &OsStr, to: &OsStr) -> io::Result<()> {
         std::fs::rename(dir.path.join(from), dir.path.join(to))
+    }
+
+    pub fn rename_into(dir: &Dir, from: &OsStr, target: &Dir, to: &OsStr) -> io::Result<()> {
+        std::fs::rename(dir.path.join(from), target.path.join(to))
     }
 
     /// std's `remove_dir_all`: a reparse point in the tree's place, or in

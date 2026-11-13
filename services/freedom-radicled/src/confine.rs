@@ -77,6 +77,7 @@ impl Grant {
             resolver: confine::Resolver::System,
             descriptors,
             interface_index: direct,
+            times: false,
         }
     }
 }
@@ -129,6 +130,7 @@ impl Grant {
             resolver: confine::Resolver::None,
             descriptors,
             interface_index: false,
+            times: false,
         }
     }
 }

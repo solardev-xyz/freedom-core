@@ -107,6 +107,18 @@ pub struct Policy {
     /// Sysfs's `/sys/class/net/<name>` resolves into `/sys/devices`, far
     /// more than a grant should cover, so no grant does it.
     pub interface_index: bool,
+    /// Whether the process sets file times on descriptors it holds open:
+    /// proper-lockfile's lock, which `freedom-cored`'s profile subcommands
+    /// take and refresh by setting its directory's mtime (design 0013). On
+    /// Linux, seccomp then lets `utimensat` through with no path and no
+    /// flags (`futimens`, on an open descriptor) and refuses it as before
+    /// with a path, so a file is reached only through what Landlock let the
+    /// process open; the legacy calls (`utime`, `utimes`, `futimesat`) stay
+    /// refused. On macOS, the profile allows `file-write-times` in the
+    /// read-write grants alone. The report's `files` is then `partial`,
+    /// naming `times`. No mode, owner, flag or xattr change is allowed
+    /// either way.
+    pub times: bool,
 }
 
 /// The network policy, fixed for the process's life (0007's `--network`).

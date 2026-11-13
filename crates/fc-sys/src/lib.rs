@@ -24,7 +24,10 @@
 //!   0010);
 //! - [`macos::executable_path`], [`macos::thread_count`],
 //!   [`macos::apply_profile`], [`macos::sandboxed`], [`macos::check`] and [`macos::exec_allowed`]:
-//!   its confinement on macOS, through Seatbelt's private calls.
+//!   its confinement on macOS, through Seatbelt's private calls;
+//! - [`macos::set_times`]: the profile lock's mtime in `freedom-cored`,
+//!   through the one call a confined process's `file-write-times` covers
+//!   (design 0013, "The lock").
 //!
 //! On every other platform the crate is empty.
 

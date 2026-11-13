@@ -56,6 +56,14 @@ name = "profile_delete"
 required-features = ["testhooks"]
 
 [[test]]
+name = "profile_migrate"
+required-features = ["testhooks"]
+
+[[test]]
+name = "profile_confined"
+required-features = ["testhooks"]
+
+[[test]]
 name = "radicle_custody"
 required-features = ["testhooks"]
 
@@ -106,6 +114,11 @@ zeroize = "1.8"
 [target.'cfg(windows)'.dependencies]
 # GetDriveTypeW, for storage qualification; a directory's file ID, for a
 # profile delete's walk (design 0013, "Deletion").
+fc-sys = { path = "../fc-sys" }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+# futimes, for the profile lock's mtime in a confined subcommand (design
+# 0013, "The lock").
 fc-sys = { path = "../fc-sys" }
 
 [target.'cfg(unix)'.dependencies]

@@ -160,8 +160,8 @@ fn strictly_under(style: Style, parent: &str, child: &str) -> bool {
 /// lowercased, decomposed again, until nothing changes. So `é` and `e` with
 /// its accent, `É` and `é`, `ß`, `ẞ` and `SS`, `ς` and `Σ`, and the Kelvin
 /// sign and `k` each make one key. A fold wider than a volume's only
-/// refuses more.
-fn fold(text: &str) -> String {
+/// refuses more. `profile migrate --finish-only` compares by it too.
+pub fn fold(text: &str) -> String {
     let mut key: String = text.nfd().collect();
     // Two rounds reach the end for every character (`ẞ`, `ß`, `ss`); the
     // bound only keeps a future table from looping (`the_fold_is_stable`).
@@ -259,7 +259,10 @@ fn removes_overlap(app: &[Name<'_>], a: &Removes<'_>, b: &Removes<'_>) -> bool {
 /// Names are compared as [`Name`] has them, so a spelling, a case or a
 /// trailing dot that names the same directory on macOS or Windows doesn't
 /// get past.
-fn overlaps(
+///
+/// `profile migrate --finish-only`, which acts on a profile's directory
+/// too, refuses by the same rule (design 0013, "The move").
+pub fn overlaps(
     style: Style,
     app: &str,
     target: &str,
@@ -408,8 +411,9 @@ pub const SLOT_REFUSED: &str =
 
 /// A record's Radicle home's name in its directory: its slot as
 /// `String(slot)` writes it, when the slot is an integer
-/// ([`radicle_home`]'s rule).
-fn home_slot(record: &JsValue) -> Option<String> {
+/// ([`radicle_home`]'s rule). `profile migrate --finish-only` refuses a
+/// slot another record shares, as a delete does.
+pub fn home_slot(record: &JsValue) -> Option<String> {
     match prop(record, "slot") {
         JsValue::Number(slot) if is_integer(&JsValue::Number(slot)) => {
             Some(fc_json::number_to_string(slot))
