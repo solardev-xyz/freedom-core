@@ -239,6 +239,12 @@ pub fn refuse_links_below(app_root: &Path, data_root: &Path) -> Result<(), Failu
     steps_are_dirs(app_root, data_root, data_layout_refused)
 }
 
+/// Whether every step below `base` down to `dir`, as far as it exists, is
+/// a real directory: what is read there is the profile's own.
+pub fn no_links_below(base: &Path, dir: &Path) -> bool {
+    steps_are_dirs(base, dir, data_layout_refused).is_ok()
+}
+
 /// One directory on the way from the data root to a gated one.
 #[derive(Debug)]
 struct Node {

@@ -160,7 +160,22 @@ pub fn record(
     held: &dyn Fn() -> bool,
 ) -> Result<Recorded, Exit> {
     let style = Style::native();
-    let (items, unknown) = match fc_profile::forget::secrets_named(store, &plan.data_root, style) {
+    // A secrets file reached through a link (`freedom/` made one, say) may
+    // be another profile's, whose items must not be forgotten: unknown.
+    let data_root = Path::new(&plan.data_root);
+    let linked = fc_profile::forget::secrets_paths(&plan.data_root, style)
+        .iter()
+        .any(|path| {
+            Path::new(path)
+                .parent()
+                .is_some_and(|dir| !super::remove::no_links_below(data_root, dir))
+        });
+    let named = if linked {
+        Err(fc_profile::forget::Malformed)
+    } else {
+        fc_profile::forget::secrets_named(store, &plan.data_root, style)
+    };
+    let (items, unknown) = match named {
         Ok(items) => (
             items
                 .into_iter()

@@ -752,3 +752,31 @@ fn links_are_refused_with_nothing_changed() {
             .exists()
     );
 }
+
+/// A secrets file reached through a link in the moved layout may be
+/// another profile's: the delete goes on, records none of its items, and
+/// says `forget_unknown`.
+#[cfg(unix)]
+#[test]
+fn a_secrets_file_through_a_link_is_unknown() {
+    let d = dirs();
+    let (work, _home) = setup(&d, &[hex('a')]);
+    std::fs::remove_file(work.join("identity").join("secrets.json")).unwrap();
+    let other = d.base.join("other");
+    std::fs::create_dir_all(other.join("identity")).unwrap();
+    std::fs::write(
+        other.join("identity").join("secrets.json"),
+        secrets(&[hex('7')]),
+    )
+    .unwrap();
+    std::os::unix::fs::symlink(&other, work.join("freedom")).unwrap();
+    let out = delete(&d, "work", "Work", &[]);
+    assert_eq!(code(&out), 0, "{out:?}");
+    let result = json_of(&out);
+    assert_eq!(result["forget"], json!([]));
+    assert_eq!(result["forget_unknown"], true);
+    assert!(!work.exists());
+    // The link went as a link.
+    assert!(other.join("identity").join("secrets.json").exists());
+    assert_eq!(forget_list(&d)["items"], json!([]));
+}
