@@ -18,9 +18,13 @@
 //! ([`RequestClass`]): a site's signatures and its transactions apart, and
 //! all its transaction rules sharing one.
 //!
-//! The reference counts the refill in doubles (`tokens + elapsed /
-//! REFILL_MS`); the core counts it in whole milliseconds of refill, which is
-//! the same arithmetic without rounding.
+//! The refill is counted in doubles, as the reference counts it: the same
+//! operations in the same order (`min(BURST, tokens + max(0, elapsed) /
+//! REFILL_MS)`, then `tokens - 1` for a use), so that the core rounds where
+//! the reference rounds and is never more permissive. Exact credit would
+//! not be: two partial refills of 19,185 and 1,887 ms then one of 8,928 ms
+//! add up to 30,000 ms, but their doubles to 0.9999999999999999 of a token,
+//! and the reference refuses.
 
 use std::collections::{HashMap, VecDeque};
 use std::hash::Hash;
@@ -53,9 +57,9 @@ pub enum RequestClass {
 
 #[derive(Debug, Clone)]
 struct Bucket {
-    /// Tokens, in milliseconds of refill (`tokens × refill_ms`).
-    refill: u64,
-    /// When `refill` was last brought up to date.
+    /// Tokens, as the reference's double.
+    tokens: f64,
+    /// When `tokens` was last brought up to date.
     at: u64,
     /// When each use in the last `day_ms` was counted, oldest first.
     recent: VecDeque<u64>,
@@ -88,16 +92,17 @@ impl<K: Eq + Hash + Clone> RateLimiter<K> {
     /// the clock ran back, and its time moves back with it), and its uses
     /// older than a day dropped.
     fn current(&self, key: &K, now_ms: u64) -> Bucket {
-        let full = self.limits.burst.saturating_mul(self.limits.refill_ms);
+        // The vault's clock and the limits stay below 2^53, where the
+        // reference's numbers hold them exactly: these conversions are
+        // exact, and so is the elapsed time, as JS's `time - state.at`.
+        let burst = self.limits.burst as f64;
         let mut bucket = self.buckets.get(key).cloned().unwrap_or(Bucket {
-            refill: full,
+            tokens: burst,
             at: now_ms,
             recent: VecDeque::new(),
         });
-        bucket.refill = bucket
-            .refill
-            .saturating_add(now_ms.saturating_sub(bucket.at))
-            .min(full);
+        let elapsed = now_ms.saturating_sub(bucket.at) as f64;
+        bucket.tokens = burst.min(bucket.tokens + elapsed / self.limits.refill_ms as f64);
         bucket.at = now_ms;
         while bucket.recent.front().is_some_and(|first| {
             now_ms
@@ -110,7 +115,7 @@ impl<K: Eq + Hash + Clone> RateLimiter<K> {
     }
 
     fn allows(&self, bucket: &Bucket) -> bool {
-        bucket.refill >= self.limits.refill_ms && bucket.recent.len() < self.limits.daily_max
+        bucket.tokens >= 1.0 && bucket.recent.len() < self.limits.daily_max
     }
 
     /// Counts one use for `key` if the limit allows it (the reference's
@@ -119,7 +124,7 @@ impl<K: Eq + Hash + Clone> RateLimiter<K> {
         let mut bucket = self.current(key, now_ms);
         let allowed = self.allows(&bucket);
         if allowed {
-            bucket.refill -= self.limits.refill_ms;
+            bucket.tokens -= 1.0;
             bucket.recent.push_back(now_ms);
         }
         self.buckets.insert(key.clone(), bucket);
@@ -170,6 +175,21 @@ mod tests {
         // A revoked grant forgets both.
         limiter.forget_where(|(key, _)| key == "https://app.example");
         assert!(limiter.would_admit(&site(RequestClass::Transaction), T0));
+    }
+
+    #[test]
+    fn refills_round_as_the_references_doubles() {
+        // 19,185 + 1,887 + 8,928 ms is 30 s, but the doubles add up to
+        // 0.9999999999999999 of a token: refused, as the reference refuses.
+        let mut limiter: RateLimiter<&str> = RateLimiter::default();
+        for _ in 0..5 {
+            assert!(limiter.admit(&"a", T0));
+        }
+        assert!(!limiter.admit(&"a", T0 + 19_185));
+        assert!(!limiter.admit(&"a", T0 + 21_072));
+        assert!(!limiter.would_admit(&"a", T0 + 30_000));
+        assert!(!limiter.admit(&"a", T0 + 30_000));
+        assert!(limiter.admit(&"a", T0 + 30_001));
     }
 
     #[test]

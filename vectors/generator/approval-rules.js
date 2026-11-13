@@ -50,6 +50,59 @@ function dailyRun() {
   return steps;
 }
 
+// Generated partitions of one refill: an emptied bucket, then admits at
+// cuts of 30 s (and one at 30 s itself), each refused until the doubles
+// reach one token. Cuts come from a seeded generator (mulberry32); of every
+// partition tried, the first ten whose doubles fall short of one token at
+// 30 s and the first ten that reach it are kept, each with a last admit at
+// 30,001 ms. The kept partitions' answers are the reference's.
+function partitionRuns() {
+  let seed = 0x0012_0006;
+  const next = () => {
+    seed = (seed + 0x6d2b79f5) | 0;
+    let t = Math.imul(seed ^ (seed >>> 15), 1 | seed);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return (t ^ (t >>> 14)) >>> 0;
+  };
+  // What the limiter's doubles hold at 30 s, for choosing cases only.
+  const tokensAt30s = (cuts) => {
+    let tokens = 0;
+    let at = 0;
+    for (const cut of [...cuts, 30_000]) {
+      tokens = Math.min(5, tokens + (cut - at) / 30_000);
+      at = cut;
+    }
+    return tokens;
+  };
+  const short = [];
+  const whole = [];
+  for (let tried = 0; tried < 100_000 && (short.length < 10 || whole.length < 10); tried += 1) {
+    const count = 1 + (next() % 5);
+    const cuts = [...new Set(Array.from({ length: count }, () => 1 + (next() % 29_999)))].sort((a, b) => a - b);
+    const into = tokensAt30s(cuts) < 1 ? short : whole;
+    if (into.length < 10) into.push(cuts);
+  }
+  assert.equal(short.length, 10);
+  assert.equal(whole.length, 10);
+  const partitions = [...short.map((cuts, i) => ['short', i, cuts]), ...whole.map((cuts, i) => ['whole', i, cuts])]
+    .map(([kind, i, cuts]) => ({
+      id: `partition-${kind}-${i}`,
+      steps: [
+        ...admitAt(SITE, [T0, T0, T0, T0, T0]),
+        ...admitAt(SITE, [...cuts, 30_000, 30_001].map((cut) => T0 + cut)),
+      ],
+    }));
+  // And a walk of 60 admits at seeded gaps of 0 to 45 s, whose fractions
+  // carry from one refill to the next.
+  let clock = T0;
+  const walk = [];
+  for (let i = 0; i < 60; i += 1) {
+    clock += next() % 45_001;
+    walk.push(clock);
+  }
+  return [...partitions, { id: 'random-walk', steps: admitAt(SITE, walk) }];
+}
+
 const LIMITER_RUNS = [
   {
     id: 'burst-then-refill',
@@ -86,6 +139,17 @@ const LIMITER_RUNS = [
       ...admitAt(OTHER, [T0 + 2, T0 + 2, T0 + 2, T0 + 2]),
     ],
   },
+  {
+    // Two partial refills, then the rest of 30 s: 19,185 + 1,887 + 8,928 ms
+    // add up to 30,000, but their doubles to 0.9999999999999999 of a token,
+    // so the reference refuses the last.
+    id: 'partial-refills-short-of-one',
+    steps: [
+      ...admitAt(SITE, [T0, T0, T0, T0, T0]),
+      ...admitAt(SITE, [T0 + 19_185, T0 + 21_072, T0 + 30_000, T0 + 30_001]),
+    ],
+  },
+  ...partitionRuns(),
   {
     // A clock that runs back (the vault's never does): no refill, and the
     // bucket's time moves back with it.

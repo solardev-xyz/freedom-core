@@ -28,7 +28,7 @@ fn limiter_runs() {
         json!({ "burst": LIMITS.burst, "refillMs": LIMITS.refill_ms, "dailyMax": LIMITS.daily_max, "dayMs": LIMITS.day_ms })
     );
     let runs = limiter["runs"].as_array().unwrap();
-    assert!(runs.len() >= 6);
+    assert!(runs.len() >= 28);
     for run in runs {
         let id = run["id"].as_str().unwrap();
         let mut r6: RateLimiter<String> = RateLimiter::default();
