@@ -136,7 +136,7 @@ pub fn acquire(
     namespace: &str,
     retry: Duration,
 ) -> Result<Gate, GateError> {
-    acquire_as(data_dir, lock_dir, namespace, retry, true)
+    acquire_with(data_dir, lock_dir, namespace, retry, Make::Both, false)
 }
 
 /// [`acquire`], for a `data_dir` and a `lock_dir` that must already exist:
@@ -154,16 +154,24 @@ pub fn acquire_existing(
     namespace: &str,
     retry: Duration,
 ) -> Result<Gate, GateError> {
-    acquire_as(data_dir, lock_dir, namespace, retry, false)
+    acquire_with(data_dir, lock_dir, namespace, retry, Make::Nothing, false)
 }
 
 /// The profile gate (design 0013, "The lock"):
 /// `<lock-dir>/profile-<sha256(canonical userData)>.lock`, for a profile's
-/// `userData` that must already exist, as [`acquire_existing`]. The one
-/// difference: the lock directory may lie inside `userData`, as it does for
-/// the packaged default profile on macOS and Windows, whose `userData` is
-/// the app root holding `locks/`. That profile's delete spares `locks/`
-/// (0013, "The lock directory is kept"), so the gate's file outlives it.
+/// `userData` that must already exist, as [`acquire_existing`]. Two
+/// differences:
+///
+/// - **The lock directory may lie inside `userData`,** as it does for the
+///   packaged default profile on macOS and Windows, whose `userData` is the
+///   app root holding `locks/`. That profile's delete spares `locks/` (0013,
+///   "The lock directory is kept"), so the gate's file outlives it.
+/// - **A missing lock directory is made,** with its missing ancestors, as
+///   [`acquire`] makes it (`0700`), once `userData` has resolved: on a
+///   machine no new build has run on, nothing else makes it before the first
+///   launch's gate. `userData` and its ancestors are never made through it
+///   (`create_lock_dir`), so a missing or renamed-away `userData` makes
+///   nothing at all.
 pub fn acquire_profile(
     user_data_dir: &Path,
     lock_dir: &Path,
@@ -174,7 +182,7 @@ pub fn acquire_profile(
         lock_dir,
         PROFILE_NAMESPACE,
         retry,
-        false,
+        Make::LockDir,
         true,
     )
 }
@@ -231,14 +239,17 @@ fn open_existing_lock_file(path: &Path) -> std::io::Result<File> {
     std::fs::OpenOptions::new().read(true).open(path)
 }
 
-fn acquire_as(
-    data_dir: &Path,
-    lock_dir: &Path,
-    namespace: &str,
-    retry: Duration,
-    create: bool,
-) -> Result<Gate, GateError> {
-    acquire_with(data_dir, lock_dir, namespace, retry, create, false)
+/// What taking a gate may make.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Make {
+    /// The data and lock directories, with their missing ancestors
+    /// ([`acquire`]).
+    Both,
+    /// The lock directory alone, once the data directory has resolved, and
+    /// never the data directory through it ([`acquire_profile`]).
+    LockDir,
+    /// Nothing: both must exist ([`acquire_existing`]).
+    Nothing,
 }
 
 fn acquire_with(
@@ -246,18 +257,21 @@ fn acquire_with(
     lock_dir: &Path,
     namespace: &str,
     retry: Duration,
-    create: bool,
+    make: Make,
     lock_inside_data: bool,
 ) -> Result<Gate, GateError> {
-    // Without `create`, both directories must already exist: nothing is made,
-    // so nothing can be made again in place of one renamed away.
-    if create {
+    // Without `Make::Both`, the data directory must already exist: it is never
+    // made, so it can't be made again in place of one renamed away.
+    if make == Make::Both {
         create_private_dir(data_dir).map_err(GateError::Storage)?;
         create_private_dir(lock_dir).map_err(GateError::Storage)?;
     }
     let canonical_data = std::fs::canonicalize(data_dir).map_err(GateError::Storage)?;
     #[cfg(test)]
     tests::after_data_resolved();
+    if make == Make::LockDir {
+        create_lock_dir(lock_dir, &canonical_data).map_err(GateError::Storage)?;
+    }
     let canonical_locks = std::fs::canonicalize(lock_dir).map_err(GateError::Storage)?;
     if canonical_locks == canonical_data
         || (!lock_inside_data && canonical_locks.starts_with(&canonical_data))
@@ -429,6 +443,54 @@ fn create_private_dir(dir: &Path) -> std::io::Result<()> {
         builder.mode(0o700);
     }
     builder.create(dir)
+}
+
+/// Makes a missing lock directory and its missing ancestors, private to the
+/// user on Unix (`0700`, less the umask) as [`create_private_dir`] does, but
+/// never the data directory, resolved to `canonical_data`, or one of its
+/// ancestors.
+///
+/// - **One name at a time:** each missing name is one `mkdir` below a parent
+///   that exists, never a recursive one, so a data directory renamed away
+///   after it resolved isn't made again through a lock directory inside it:
+///   the name at its path is refused (`NotFound`), and a name below it finds
+///   no parent.
+/// - **Race-safe:** a name another process makes meanwhile (another holder,
+///   `hold-lock`) is taken if it is a directory; a link or anything else
+///   there is refused (`AlreadyExists`), and nothing is made through it.
+/// - **An existing lock directory** is left to the gate's own checks, as
+///   [`acquire`] leaves it: resolved, then a directory the user owns, with
+///   its group and other bits removed (`make_private`).
+fn create_lock_dir(lock_dir: &Path, canonical_data: &Path) -> std::io::Result<()> {
+    let (planned, existing) = planned_canonical(lock_dir)?;
+    let missing = planned
+        .strip_prefix(&existing)
+        .map_err(std::io::Error::other)?
+        .to_path_buf();
+    let mut dir = existing;
+    for name in missing.components() {
+        dir.push(name);
+        if canonical_data.starts_with(&dir) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                "the data directory would be made through its lock directory",
+            ));
+        }
+        let mut builder = std::fs::DirBuilder::new();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::DirBuilderExt;
+            builder.mode(0o700);
+        }
+        match builder.create(&dir) {
+            Ok(()) => {}
+            Err(e)
+                if e.kind() == std::io::ErrorKind::AlreadyExists
+                    && std::fs::symlink_metadata(&dir).is_ok_and(|m| m.is_dir()) => {}
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(())
 }
 
 /// Unix: `dir` (canonical) must be a directory the user owns; its group and
@@ -686,7 +748,7 @@ mod tests {
     }
 
     std::thread_local! {
-        /// Run once, on this thread, right after `acquire_as` resolves the
+        /// Run once, on this thread, right after `acquire_with` resolves the
         /// data directory.
         static AFTER_DATA_RESOLVED: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
             const { std::cell::RefCell::new(None) };
@@ -985,6 +1047,138 @@ mod tests {
         let locks = data.join("locks");
         let ipfs = acquire_existing(&data, &locks, "ipfs", Duration::ZERO);
         assert!(matches!(ipfs, Err(GateError::LockInsideData)));
+    }
+
+    /// On a machine no new build has run on, the profile gate makes its
+    /// missing lock directory and missing ancestors, private to the user, as
+    /// `acquire` does; inside `userData` too (the packaged default profile).
+    #[test]
+    fn the_profile_gate_makes_its_lock_directory() {
+        let root = tempfile::tempdir().unwrap();
+        let data = root.path().join("profile");
+        std::fs::create_dir(&data).unwrap();
+        let parent = root.path().join("Freedom");
+        let locks = parent.join("locks");
+        let gate = acquire_profile(&data, &locks, Duration::ZERO).unwrap();
+        assert!(locks.is_dir());
+        assert_eq!(
+            gate.lock_path.parent().unwrap(),
+            std::fs::canonicalize(&locks).unwrap()
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            for dir in [&parent, &locks] {
+                let mode = std::fs::metadata(dir).unwrap().permissions().mode() & 0o7777;
+                assert_eq!(mode & 0o077, 0, "{dir:?}: {mode:o}");
+            }
+        }
+        // Taken again with the directory there.
+        drop(gate);
+        acquire_profile(&data, &locks, CONTENTION_RETRY).unwrap();
+        let inner = data.join("locks");
+        acquire_profile(&data, &inner, Duration::ZERO).unwrap();
+        assert!(inner.is_dir());
+    }
+
+    /// A missing `userData`, or one renamed away right after it resolves,
+    /// makes nothing through a lock directory under it or beside it.
+    #[test]
+    fn the_profile_gate_never_makes_user_data_through_its_lock_directory() {
+        let root = tempfile::tempdir().unwrap();
+        let data = root.path().join("missing");
+        for locks in [
+            data.join("locks"),
+            data.join("a").join("locks"),
+            root.path().join("locks"),
+        ] {
+            let result = acquire_profile(&data, &locks, Duration::ZERO);
+            assert!(
+                matches!(result, Err(GateError::Storage(ref e))
+                    if e.kind() == std::io::ErrorKind::NotFound),
+                "{locks:?}: {result:?}"
+            );
+            assert!(!data.exists() && !locks.exists(), "{locks:?}");
+        }
+        for inside in ["locks", "a/locks"] {
+            let root = tempfile::tempdir().unwrap();
+            let data = root.path().join("data");
+            let moved = root.path().join("moved");
+            std::fs::create_dir(&data).unwrap();
+            let locks = data.join(inside);
+            let (from, to) = (data.clone(), moved.clone());
+            AFTER_DATA_RESOLVED.with(|slot| {
+                *slot.borrow_mut() = Some(Box::new(move || std::fs::rename(from, to).unwrap()));
+            });
+            let result = acquire_profile(&data, &locks, Duration::ZERO);
+            assert!(
+                matches!(result, Err(GateError::Storage(ref e))
+                    if e.kind() == std::io::ErrorKind::NotFound),
+                "{inside}: {result:?}"
+            );
+            assert!(!data.exists(), "{inside}: made again");
+            assert_eq!(std::fs::read_dir(&moved).unwrap().count(), 0, "{inside}");
+        }
+    }
+
+    /// A file where the lock directory goes is refused, and so is a link
+    /// that leads nowhere (Unix), with nothing made through it.
+    #[test]
+    fn the_profile_gate_refuses_a_lock_directory_that_isnt_one() {
+        let (root, data, locks) = dirs();
+        std::fs::create_dir(&data).unwrap();
+        std::fs::write(&locks, b"file").unwrap();
+        let result = acquire_profile(&data, &locks, Duration::ZERO);
+        #[cfg(unix)]
+        assert!(
+            matches!(result, Err(GateError::NotPrivate(_))),
+            "{result:?}"
+        );
+        #[cfg(not(unix))]
+        assert!(result.is_err());
+        assert_eq!(std::fs::read(&locks).unwrap(), b"file");
+        #[cfg(unix)]
+        {
+            let target = root.path().join("target");
+            let link = root.path().join("link");
+            std::os::unix::fs::symlink(&target, &link).unwrap();
+            for lock_dir in [link.clone(), link.join("locks")] {
+                let result = acquire_profile(&data, &lock_dir, Duration::ZERO);
+                assert!(
+                    matches!(result, Err(GateError::Storage(ref e))
+                        if e.kind() == std::io::ErrorKind::AlreadyExists),
+                    "{lock_dir:?}: {result:?}"
+                );
+                assert!(!target.exists(), "made through {lock_dir:?}");
+            }
+        }
+        #[cfg(not(unix))]
+        let _ = root;
+    }
+
+    /// Holders racing to make one lock directory all take their gates.
+    #[test]
+    fn profile_gates_racing_to_make_one_lock_directory() {
+        const HOLDERS: usize = 8;
+        let root = tempfile::tempdir().unwrap();
+        let locks = root.path().join("a").join("b").join("locks");
+        let start = std::sync::Arc::new(std::sync::Barrier::new(HOLDERS));
+        let holders: Vec<_> = (0..HOLDERS)
+            .map(|i| {
+                let data = root.path().join(format!("profile-{i}"));
+                std::fs::create_dir(&data).unwrap();
+                let (locks, start) = (locks.clone(), start.clone());
+                std::thread::spawn(move || {
+                    start.wait();
+                    acquire_profile(&data, &locks, Duration::ZERO).map(|_| ())
+                })
+            })
+            .collect();
+        for holder in holders {
+            let result = holder.join().unwrap();
+            assert!(result.is_ok(), "{result:?}");
+        }
+        assert_eq!(std::fs::read_dir(&locks).unwrap().count(), HOLDERS);
     }
 
     /// `probe` reports a held gate and leaves a free one free; it makes
