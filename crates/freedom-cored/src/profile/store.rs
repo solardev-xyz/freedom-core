@@ -322,7 +322,7 @@ impl Store for DiskStore<'_> {
                 let Walked::Dir(dir) = self.walk(parents, path, true)? else {
                     return Err(error(path, "not a directory"));
                 };
-                replace_in(&dir, name, text.as_bytes(), self.commit)
+                replace_in(&dir, name, text.as_bytes(), self.commit).map(|_| ())
             }
         };
         match written {
@@ -342,13 +342,14 @@ impl Store for DiskStore<'_> {
 /// `<name>.<pid>.<n>.tmp` (`0600`) made in `dir`, written and flushed; the
 /// rename over `name` made only if `commit` allows it and the temp file is
 /// still the one written; then `dir` flushed. A failed flush after the
-/// rename leaves the change made, as `replace_as`'s `NotDurable` does.
+/// rename leaves the change made and is reported as `replace_as` reports it:
+/// logged, and [`fsx::Done::NotDurable`].
 fn replace_in(
     dir: &Dir,
     name: &OsStr,
     contents: &[u8],
     commit: &dyn Fn() -> bool,
-) -> Result<(), WriteError> {
+) -> Result<fsx::Done, WriteError> {
     use std::io::Write as _;
     let (temp_name, mut temp) = create_temp_in(dir, name)?;
     let staged = (|| -> Result<(), WriteError> {
@@ -371,10 +372,10 @@ fn replace_in(
         return Err(error);
     }
     #[cfg(unix)]
-    let _ = dir.sync();
+    let synced = dir.sync();
     #[cfg(not(unix))]
-    let _ = fsx::sync_rename(dir.location(), &dir.path(name));
-    Ok(())
+    let synced = fsx::sync_rename(dir.location(), &dir.path(name));
+    Ok(fsx::flushed(synced))
 }
 
 /// Creates `<name>.<pid>.<n>.tmp` exclusively in `dir`.

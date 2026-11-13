@@ -168,7 +168,7 @@ pub fn remove(target: &Path, commit: impl FnOnce() -> bool) -> std::io::Result<O
 }
 
 /// The outcome of the directory flush after a commit; a failure is logged.
-fn flushed(sync: std::io::Result<()>) -> Done {
+pub(crate) fn flushed(sync: std::io::Result<()>) -> Done {
     match sync {
         Ok(()) => Done::Durable,
         Err(e) => {
