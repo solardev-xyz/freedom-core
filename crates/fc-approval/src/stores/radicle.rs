@@ -6,12 +6,11 @@
 //! most once a minute. Q9's limits don't cover it: its rules keep today's,
 //! R-6 included.
 
-use serde_json::{Map, Value};
-
 use super::{
-    Applied, Effect, Refused, Unreadable, assign, number, parse_sites, records_by_last_used,
-    set_auto_approve, text_of, truthy,
+    Applied, Effect, JsValue, Refused, ToPrimitiveError, Unreadable, assign, number, object,
+    parse_sites, records_by_last_used, remove, set_auto_approve, text_of,
 };
+use crate::js;
 
 /// How fresh a `lastUsed` stays unwritten (the reference's 60 s).
 pub const LAST_USED_FRESH_MS: u64 = 60_000;
@@ -42,18 +41,24 @@ impl RadicleFlag {
     }
 }
 
-fn default_auto_approve() -> Value {
-    let mut rules = Map::new();
+fn default_auto_approve() -> JsValue {
+    let mut rules = object();
     for flag in RadicleFlag::ALL {
-        rules.insert(flag.name().to_owned(), Value::Bool(false));
+        rules.set(flag.name(), JsValue::Bool(false));
     }
-    Value::Object(rules)
+    rules
 }
 
 /// The Radicle store.
-#[derive(Debug, Clone, Default, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct RadicleStore {
-    entries: Map<String, Value>,
+    entries: JsValue,
+}
+
+impl Default for RadicleStore {
+    fn default() -> Self {
+        RadicleStore { entries: object() }
+    }
 }
 
 impl RadicleStore {
@@ -72,30 +77,31 @@ impl RadicleStore {
     }
 
     /// The key's entry (`getPermission`): the site is connected.
-    pub fn entry(&self, key: &str) -> Option<&Value> {
+    pub fn entry(&self, key: &str) -> Option<&JsValue> {
         self.entries.get(key)
     }
 
-    pub fn records(&self) -> Vec<&Value> {
+    /// Every entry, most recently used first (`getAllPermissions`), or the
+    /// reference's throw.
+    pub fn records(&self) -> Result<Vec<&JsValue>, ToPrimitiveError> {
         records_by_last_used(&self.entries)
     }
 
     /// A connect (`grantPermission`): new or replaced where it stands, with
     /// no signing grant and no rule.
-    pub fn connect(&mut self, key: &str, now_ms: u64) -> Applied<Value> {
-        let mut entry = Map::new();
-        entry.insert("origin".to_owned(), Value::String(key.to_owned()));
-        entry.insert("connectedAt".to_owned(), number(now_ms));
-        entry.insert("lastUsed".to_owned(), number(now_ms));
-        entry.insert("signing".to_owned(), Value::Bool(false));
-        entry.insert("autoApprove".to_owned(), default_auto_approve());
-        let entry = Value::Object(entry);
-        self.entries.insert(key.to_owned(), entry.clone());
+    pub fn connect(&mut self, key: &str, now_ms: u64) -> Applied<JsValue> {
+        let mut entry = object();
+        entry.set("origin", JsValue::string(key));
+        entry.set("connectedAt", number(now_ms));
+        entry.set("lastUsed", number(now_ms));
+        entry.set("signing", JsValue::Bool(false));
+        entry.set("autoApprove", default_auto_approve());
+        self.entries.set(key, entry.clone());
         Applied::new(entry, Effect::Widening)
     }
 
     pub fn revoke(&mut self, key: &str) -> Applied<bool> {
-        if self.entries.shift_remove(key).is_some() {
+        if remove(&mut self.entries, key).is_some() {
             Applied::new(true, Effect::Narrowing)
         } else {
             Applied::new(false, Effect::Unchanged)
@@ -103,31 +109,30 @@ impl RadicleStore {
     }
 
     /// A use (`updateLastUsed`): written only once the stored `lastUsed` is
-    /// a minute old (`now - (lastUsed || 0) < 60000` writes nothing, a
-    /// `lastUsed` ahead of the clock included). Whether the key has an
-    /// entry.
-    pub fn touch(&mut self, key: &str, now_ms: u64) -> Applied<bool> {
+    /// a minute old. `now - (lastUsed || 0) < 60000` writes nothing, as JS
+    /// computes it: a `lastUsed` ahead of the clock, or a numeric string a
+    /// minute fresh, included; a `NaN` (a non-numeric `lastUsed`) is never
+    /// below, and writes. Whether the key has an entry, or the reference's
+    /// throw (a `lastUsed` with its own `toString`), with nothing written.
+    pub fn touch(&mut self, key: &str, now_ms: u64) -> Result<Applied<bool>, ToPrimitiveError> {
         let Some(entry) = self.entries.get_mut(key) else {
-            return Applied::new(false, Effect::Unchanged);
+            return Ok(Applied::new(false, Effect::Unchanged));
         };
-        // `lastUsed || 0`; a value that isn't a number reads as 0 (JS would
-        // coerce a numeric string).
-        let last = if truthy(entry.get("lastUsed")) {
-            entry.get("lastUsed").and_then(Value::as_f64).unwrap_or(0.0)
-        } else {
-            0.0
+        let last = match entry.get("lastUsed") {
+            Some(last) if last.truthy() => js::to_number(last)?,
+            _ => 0.0,
         };
         if (now_ms as f64) - last < LAST_USED_FRESH_MS as f64 {
-            return Applied::new(true, Effect::Unchanged);
+            return Ok(Applied::new(true, Effect::Unchanged));
         }
         assign(entry, "lastUsed", number(now_ms));
-        Applied::new(true, Effect::Neutral)
+        Ok(Applied::new(true, Effect::Neutral))
     }
 
     /// Whether the key holds the signing grant (`hasSigningGrant`: `signing
     /// === true`).
     pub fn has_signing(&self, key: &str) -> bool {
-        self.entries.get(key).and_then(|entry| entry.get("signing")) == Some(&Value::Bool(true))
+        self.entries.get(key).and_then(|entry| entry.get("signing")) == Some(&JsValue::Bool(true))
     }
 
     /// The signing grant (`grantSigning`), for a connected site.
@@ -135,7 +140,7 @@ impl RadicleStore {
         let Some(entry) = self.entries.get_mut(key) else {
             return Applied::new(false, Effect::Unchanged);
         };
-        assign(entry, "signing", Value::Bool(true));
+        assign(entry, "signing", JsValue::Bool(true));
         Applied::new(true, Effect::Widening)
     }
 
@@ -145,7 +150,7 @@ impl RadicleStore {
             .get(key)
             .and_then(|entry| entry.get("autoApprove"))
             .and_then(|rules| rules.get(flag.name()))
-            == Some(&Value::Bool(true))
+            == Some(&JsValue::Bool(true))
     }
 
     /// A flag turned on or off (`setAutoApprove`).

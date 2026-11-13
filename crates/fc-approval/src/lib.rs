@@ -25,7 +25,7 @@
 mod bind;
 mod canonical;
 mod error;
-mod json;
+mod js;
 mod kind;
 pub mod stores;
 mod tokens;

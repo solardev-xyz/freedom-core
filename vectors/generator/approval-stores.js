@@ -15,9 +15,11 @@
 //   `result`, whether it wrote the file (`wrote`) and the file's text after
 //   it (`text`, null while there is no file). A `reload` step drops the
 //   store's cache, as a new process would, before it reads.
-// - `malformed`: a file's text, and what each store loads from it: `loaded`
-//   (`getAllPermissions()`, or its error) and the text after a connect of
-//   another site (`afterGrant`, or its error).
+// - `malformed`: a file's text (or bytes, as hex), and what each store
+//   loads from it: `loaded` (`getAllPermissions()`, or its error) and the
+//   text after a connect of another site (`afterGrant`, or its error).
+// - `sorts`: getAllPermissions' order over generated files whose entries'
+//   `lastUsed` are of mixed types (the comparator's NaN, V8's sort).
 //
 // What the design adds: `core` on a step, where the core doesn't do the
 // operation itself: `load`, an older build's write (the legacy signing flag
@@ -71,9 +73,11 @@ function memoryFs() {
     files,
     state,
     existsSync: (file) => files.has(file),
-    readFileSync: (file) => {
+    readFileSync: (file, encoding) => {
       if (!files.has(file)) throw enoent(file);
-      return files.get(file);
+      const contents = files.get(file);
+      // Bytes as Node decodes them (an invalid sequence is U+FFFD).
+      return Buffer.isBuffer(contents) ? contents.toString(encoding) : contents;
     },
     writeFileSync: (file, text) => {
       state.writes += 1;
@@ -214,6 +218,43 @@ const dappRuns = [
     ],
   },
   {
+    // Numbers as JSON.parse reads them (doubles: 1e400 is Infinity, written
+    // null) and as JSON.stringify writes them (ECMAScript's digits: of the
+    // shortest that read back, the closest, ties to even).
+    id: 'numbers',
+    start: () => numbersFile(),
+    steps: [
+      STEP('getAllPermissions', [], T),
+      STEP('updateLastUsed', [SITE], T + 1),
+      STEP('reload', [], T + 1),
+      STEP('getPermission', [SITE], T + 2),
+    ],
+  },
+  {
+    // getAllPermissions' sort, `b.lastUsed - a.lastUsed`: each lastUsed
+    // through ToNumber, and a NaN comparison read as equal by V8's sort.
+    id: 'last-used-coercion',
+    start: () => lastUsedFile(['', '"3"', '2', '1', '"abc"', 'null', '[5]', 'true', '" 0x10 "', '1e400', '-1e400', '"1e3"', '{}', '[]', '""']),
+    steps: [
+      STEP('getAllPermissions', [], T),
+      STEP('updateLastUsed', [key(0)], T + 1),
+      STEP('getAllPermissions', [], T + 2),
+    ],
+  },
+  {
+    // A lastUsed that can't be converted to a number: the sort throws once
+    // there are two entries to compare, and a touch's number mends it.
+    id: 'last-used-throws',
+    start: () => lastUsedFile([`{"toString": 1}`, '5']),
+    steps: [
+      STEP('getAllPermissions', [], T),
+      STEP('updateLastUsed', [key(0)], T + 1),
+      STEP('getAllPermissions', [], T + 2),
+      STEP('revokePermission', [key(1)], T + 3),
+      STEP('getAllPermissions', [], T + 4),
+    ],
+  },
+  {
     // Duplicate keys: the last value wins, where the first stood.
     id: 'duplicate-keys',
     start: () => '{"' + SITE + '":{"origin":"' + SITE + '","walletIndex":0},"' + OTHER + '":{"origin":"' + OTHER + '"},"' + SITE + '":{"origin":"' + SITE + '","walletIndex":7,"lastUsed":1}}',
@@ -223,6 +264,67 @@ const dappRuns = [
     ],
   },
 ];
+
+// Doubles whose shortest round-trip digits tie: ECMAScript takes the even
+// one, where Rust's shortest formatting takes the other (found by
+// differential runs against Node).
+const TIE_BITS = [
+  '43156beba02c4669', 'c302ad5b3a8cc592', '42a160bc0da27e20', 'c2addcc6da0d92a0', 'c2be8d5c7336ce50',
+  'c30b5e61f7b0740a', 'c31e3ea2897db8f1', 'c3130ff6041ea7f9', 'c2ec2389da388464', 'c311043cc92c4f5d',
+  '43106d28a392ea79', '42d40d2e118845e8', 'c2e5d0e324708d14',
+];
+
+/** A dApp file whose entry holds numbers in spellings JS rewrites: the ties
+ * at 21 significant digits, seeded doubles at 21 digits and in exponent
+ * form, and the edges (overflow to Infinity, underflow to 0, -0). */
+function numbersFile() {
+  const view = new DataView(new ArrayBuffer(8));
+  const double = (hex) => {
+    view.setBigUint64(0, BigInt('0x' + hex));
+    return view.getFloat64(0);
+  };
+  let seed = 0x0012_0349;
+  const next = () => {
+    seed = (seed + 0x6d2b79f5) | 0;
+    let t = Math.imul(seed ^ (seed >>> 15), 1 | seed);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return (t ^ (t >>> 14)) >>> 0;
+  };
+  const seeded = [];
+  while (seeded.length < 24) {
+    view.setUint32(0, next());
+    view.setUint32(4, next());
+    const x = view.getFloat64(0);
+    if (Number.isFinite(x)) seeded.push(seeded.length % 2 ? x.toExponential(19) : x.toPrecision(21));
+  }
+  const ties = TIE_BITS.map((hex) => double(hex).toPrecision(21));
+  const edges = ['1e400', '-1e400', '1e-400', '-0', '-0.0', '5e-324', '2.4703282292062328e-324', '1.7976931348623158e308', '1.7976931348623157e308', '0.1e1', '100E-2', '123456789012345678901234567890'];
+  return [
+    '{',
+    `  "${SITE}": {"origin": "${SITE}", "connectedAt": ${T - 9}, "lastUsed": ${T - 9}, "walletIndex": 0, "chainId": 1,`,
+    `    "ties": [${ties.join(', ')}],`,
+    `    "seeded": [${seeded.join(', ')}],`,
+    `    "edges": [${edges.join(', ')}], "big": 1e400},`,
+    `  "${OTHER}": {"origin": "${OTHER}", "lastUsed": 1e400}`,
+    '}',
+  ].join('\n');
+}
+
+
+/** The key of a coercion file's `index`th entry. */
+function key(index) {
+  return `https://site${index}.example`;
+}
+
+/** A site-keyed file of entries whose `lastUsed` is each JSON text given
+ * (none for ''). */
+function lastUsedFile(values) {
+  const entries = values.map((value, index) => {
+    const field = value === '' ? '' : `, "lastUsed": ${value}`;
+    return `  "${key(index)}": {"origin": "${key(index)}"${field}}`;
+  });
+  return `{\n${entries.join(',\n')}\n}`;
+}
 
 /** A dApp file with what a rewrite must keep, built here so its escapes are
  * the file's own. */
@@ -321,6 +423,20 @@ const radicleRuns = [
       STEP('setAutoApprove', [SITE, 'signing', true], T + 2),
     ],
   },
+  {
+    // `now - (lastUsed || 0) < 60000`, as JS computes it: a numeric string
+    // a minute fresh writes nothing, a non-numeric one (NaN) writes, an
+    // Infinity is always fresh, and an object with its own toString throws.
+    id: 'last-used-coercion',
+    start: () => lastUsedFile([`"${T - 30_000}"`, `"${T - 90_000}"`, '"abc"', '1e400', `[${T - 1000}]`, 'true', '0', `" ${T} "`, `{"toString": 1}`, '{}', '""']),
+    steps: [
+      ...Array.from({ length: 11 }, (_, index) => STEP('updateLastUsed', [key(index)], T + index)),
+      STEP('getAllPermissions', [], T + 20),
+      // Without the one that throws, the sort of what's left.
+      STEP('revokePermission', [key(8)], T + 21),
+      STEP('getAllPermissions', [], T + 22),
+    ],
+  },
 ];
 
 // x402's caps: X402-1's operations; the core reads and writes each text.
@@ -363,6 +479,35 @@ const x402Runs = [
     ],
   },
 ];
+
+// x402's compaction (`record?.expiresAt > now`) with JS's coercions: a
+// numeric string or a one-number array is its number, anything else that
+// isn't a number is NaN (dropped); Infinity stays, until the next write
+// makes it null and the next read drops it; an origin's caps as an array
+// are its records by index, as a string none.
+x402Runs.push({
+  id: 'coercion',
+  start: () => {
+    const cap = (expires) => `{"capAmount": "10", "spentAmount": "0", "createdAt": ${S - 100}, "expiresAt": ${expires}}`;
+    return [
+      '{',
+      `  "${SITE}": {"8453:${USDC}": ${cap(`"${S + 100}"`)}, "1:${USDC}": ${cap('"abc"')}, "10:0xa": ${cap(`[${S + 100}]`)},`,
+      `    "100:0xb": ${cap('null')}, "137:0xc": ${cap('true')}, "42161:0xd": ${cap('1e400')}, "56:0xe": ${cap(`"${S}"`)}, "250:0xf": ${cap(`" 0x${(S + 5).toString(16)} "`)}},`,
+      `  "${OTHER}": [${cap(S + 100)}, ${cap(S - 1)}],`,
+      `  "${NAME}": "${S + 100}",`,
+      `  "${DWEB}": ${S + 100}`,
+      '}',
+    ].join('\n');
+  },
+  steps: [
+    STEP('getAllPermissions', [], T),
+    // The reference writes the Infinity it holds as null, which its next
+    // read drops: the core, reading that text, drops it at once.
+    STEP('grant', [SITE, 8453, '0x' + '11'.repeat(20), '1', 60], T + 1, { core: 'load-compacts' }),
+    STEP('reload', [], T + 2),
+    STEP('getAllPermissions', [], T + 2),
+  ],
+});
 
 // The reference's lookups of today's rules (`rule-legacy`).
 const LEGACY_LOOKUPS = new Set(['getSigningAutoApprove', 'isTransactionAutoApproved']);
@@ -431,22 +576,49 @@ const MALFORMED = [
   { id: 'entry-null', text: () => `{"${SITE}": null}`, core: 'unreadable' },
   { id: 'whitespace-around', text: () => `\n \t{"${SITE}": {"origin": "${SITE}", "lastUsed": 1}}\r\n `, core: 'parsed' },
   { id: 'empty-object', text: () => '{}', core: 'parsed' },
+  // Valid JSON the reference reads: a number past the doubles (Infinity,
+  // written null), and an escaped lone surrogate (kept, written escaped).
+  { id: 'number-overflow', text: () => `{"${SITE}": {"origin": "${SITE}", "lastUsed": 1e400, "n": -1e400}}`, core: 'parsed' },
+  // Its `loaded` is recorded as `JSON.stringify`'s text (`loaded.json`),
+  // which escapes the surrogates, so a reader that refuses a lone surrogate
+  // in this file's own JSON can still read it.
+  { id: 'lone-surrogate', text: () => `{"${SITE}": {"origin": "${SITE}", "note": "a${BACKSLASH}ud800b${BACKSLASH}udc00"}}`, core: 'parsed', loadedAsJson: true },
+  // Bytes that aren't UTF-8: Node reads each invalid sequence as U+FFFD.
+  {
+    id: 'invalid-utf8',
+    bytes: () => Buffer.concat([
+      Buffer.from(`{"${SITE}": {"origin": "${SITE}", "note": "`),
+      Buffer.from([0xff, 0x61, 0xed, 0xa0, 0x80, 0xc3, 0x28, 0xf0, 0x9f, 0x98]),
+      Buffer.from('"}}'),
+    ]),
+    core: 'parsed',
+  },
+];
+
+// x402's own: files its load throws on (`Object.entries(null)`, an
+// expiresAt whose ToPrimitive throws), which it reads as empty, and the
+// core as unreadable.
+const X402_MALFORMED = [
+  { id: 'caps-null-beside-live', text: () => `{"${SITE}": {"8453:${USDC}": {"capAmount": "1", "spentAmount": "0", "createdAt": ${S}, "expiresAt": ${S + 100}}}, "${OTHER}": null}`, core: 'unreadable' },
+  { id: 'expires-at-throws', text: () => `{"${SITE}": {"8453:${USDC}": {"capAmount": "1", "spentAmount": "0", "createdAt": ${S}, "expiresAt": {"toString": 1}}}}`, core: 'unreadable' },
 ];
 
 // x402 drops what isn't a live record as it reads: its entries' shapes are
-// the cap codec's, read alike in the core.
-const X402_PARSED = new Set(['entry-not-object', 'entry-null']);
+// the cap codec's, read alike in the core. A null origin makes its load
+// throw (`Object.entries(null)`): the core reads that file as unreadable.
+const X402_PARSED = new Set(['entry-not-object']);
 
 function malformedFor(checkout, store) {
-  return MALFORMED.map((c) => {
-    const text = c.text();
+  return [...MALFORMED, ...(store === 'x402' ? X402_MALFORMED : [])].map((c) => {
+    const contents = c.bytes ? c.bytes() : c.text();
     const load = () => {
       const fs = memoryFs();
-      fs.files.set(`${USER_DATA}/${FILES[store]}`, text);
+      fs.files.set(`${USER_DATA}/${FILES[store]}`, contents);
       return { fs, mod: loadStore(checkout, store, fs) };
     };
     const first = load();
-    const loaded = at(T, () => attempt(() => first.mod.getAllPermissions()));
+    let loaded = at(T, () => attempt(() => first.mod.getAllPermissions()));
+    if (c.loadedAsJson && loaded.error === undefined) loaded = { json: JSON.stringify(loaded.value) };
     const second = load();
     const grant = store === 'x402'
       ? () => second.mod.grant(OTHER, 8453, USDC, '1', 60)
@@ -457,8 +629,55 @@ function malformedFor(checkout, store) {
       ? { error: granted.error }
       : { text: second.fs.files.has(file) ? second.fs.files.get(file) : null };
     const core = store === 'x402' && X402_PARSED.has(c.id) ? 'parsed' : c.core;
-    return { id: c.id, text, loaded, afterGrant, core };
+    // Bytes as their hex; text as it is.
+    const source = Buffer.isBuffer(contents) ? { hex: contents.toString('hex') } : { text: contents };
+    return { id: c.id, ...source, loaded, afterGrant, core };
   });
+}
+
+// ---------------------------------------------------------------------------
+// getAllPermissions' sort over generated files: each entry's lastUsed one of
+// the JSON texts below (or none), from a seeded generator, in files of
+// sizes that take V8's sort through its insertion sort, its runs, its
+// merges and its galloping. The order is the reference's (dApp store; the
+// Swarm and Radicle stores sort alike).
+
+const SORT_VALUES = ['', '7', '7', '12', '3', '"5"', '"abc"', 'null', 'true', '[9]', '{}', '1e400', '-1e400', '" 0x10 "', '""', '[]'];
+const SORT_SIZES = [2, 3, 7, 31, 32, 33, 64, 65, 100, 150, 257, 400];
+
+function buildSorts(checkout) {
+  let seed = 0x0012_5047;
+  const next = () => {
+    seed = (seed + 0x6d2b79f5) | 0;
+    let t = Math.imul(seed ^ (seed >>> 15), 1 | seed);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return (t ^ (t >>> 14)) >>> 0;
+  };
+  const cases = [];
+  for (const size of SORT_SIZES) {
+    for (const kind of ['mixed', 'runs']) {
+      // `runs`: ascending and descending stretches of numbers with an odd
+      // value now and then, which make V8 gallop; `mixed`: any value.
+      let level = next() % 1000;
+      const values = Array.from({ length: size }, () => {
+        if (kind === 'mixed') return SORT_VALUES[next() % SORT_VALUES.length];
+        if (next() % 12 === 0) return SORT_VALUES[next() % SORT_VALUES.length];
+        if (next() % 30 === 0) level = next() % 1000;
+        level += next() % 3 === 0 ? -1 : 1;
+        return String(level);
+      });
+      const text = '{' + values.map((value, index) => {
+        const field = value === '' ? '' : `,"lastUsed":${value}`;
+        return `"k${index}":{"origin":"k${index}"${field}}`;
+      }).join(',') + '}';
+      const fs = memoryFs();
+      fs.files.set(`${USER_DATA}/${FILES.dapp}`, text);
+      const mod = loadStore(checkout, 'dapp', fs);
+      const order = at(T, () => mod.getAllPermissions()).map((entry) => Number(entry.origin.slice(1)));
+      cases.push({ id: `${kind}-${size}`, text, order });
+    }
+  }
+  return cases;
 }
 
 function buildStores(checkout) {
@@ -472,6 +691,7 @@ function buildStores(checkout) {
       malformed: malformedFor(checkout, store),
     };
   }
+  out.sorts = buildSorts(checkout);
   return out;
 }
 
@@ -635,6 +855,6 @@ function buildRollback(checkout) {
 
 const ROLLBACK_FORMAT = `Q9's legacy transition, for the site \`key\`: \`texts.before\`, the entry with today's signing flag and transaction rules as an older build wrote it, and the same file after an "Always allow" for the signing flag (\`signing\`), for the call ${JSON.stringify(REPLACED)} from a confirmed send of its \`value\` (\`transaction\`), for both (\`both\`, signing first), and after both and then both rules turned off (\`off\`), each written as design 0012 writes it, with \`grantedAt\` ${GRANTED}. \`reference\`: what the reference's dapp-permissions.js answers for each text, at ${OFF_AT}: \`getSigningAutoApprove\` (\`signing\`), and \`isTransactionAutoApproved\` with a value of 0 for the replaced call (\`replaced\`) and for ${JSON.stringify(KEPT)}, a rule no change replaces (\`kept\`).`;
 
-const STORES_FORMAT = 'Each grant store\'s file (`file`): `runs`, from a `start` text (or none), each step an operation of the reference\'s store (`op`, its `args`) at `at` (the wall clock, in milliseconds, as `Date.now()` gives it), its `result` (or `error`), whether it wrote the file (`wrote`) and the file\'s text after it (`text`, null while there is none); a `reload` drops the store\'s cache, as a new process would. `core: load` where the core makes no such change itself (an older build\'s rule, or x402\'s cap operations, which are X402-1\'s): the core reads the text the reference wrote and writes it back byte for byte. `core: legacy`: the reference\'s lookup of today\'s rule, which the new build answers none of (`rule-legacy`). `malformed`: a file\'s `text`, what the reference\'s store loads from it (`loaded`, `getAllPermissions()` or its error), the text a connect of another site then leaves (`afterGrant`, or its error), and the core\'s reading (`core`: `unreadable`, renamed aside with the store empty, or `parsed`).';
+const STORES_FORMAT = 'Each grant store\'s file (`file`): `runs`, from a `start` text (or none), each step an operation of the reference\'s store (`op`, its `args`) at `at` (the wall clock, in milliseconds, as `Date.now()` gives it), its `result` (or `error`), whether it wrote the file (`wrote`) and the file\'s text after it (`text`, null while there is none); a `reload` drops the store\'s cache, as a new process would. `core: load` where the core makes no such change itself (an older build\'s rule, or x402\'s cap operations, which are X402-1\'s): the core reads the text the reference wrote and writes it back byte for byte; `core: load-compacts`, the same but for what the reference\'s own next read of that text drops (a cap whose expiresAt the write made null), which the core drops as it reads. `core: legacy`: the reference\'s lookup of today\'s rule, which the new build answers none of (`rule-legacy`). `malformed`: a file\'s `text` (or its bytes in `hex`, which Node decodes as UTF-8 with U+FFFD for each invalid sequence), what the reference\'s store loads from it (`loaded`, `getAllPermissions()` as `value`, or as its `JSON.stringify` text in `json` where it holds a lone surrogate, or its `error`), the text a connect of another site then leaves (`afterGrant`, or its error), and the core\'s reading (`core`: `unreadable`, renamed aside with the store empty, or `parsed`). `sorts`: generated dApp files (`text`) whose entries `k<i>` hold a `lastUsed` of mixed types or none, and the order of `i` the reference\'s `getAllPermissions()` gives (`order`: `b.lastUsed - a.lastUsed` through ToNumber, under V8\'s sort).';
 
 module.exports = { buildStores, STORES_FORMAT, buildRollback, ROLLBACK_FORMAT, GRANTED, RULE_TTL_MS, T, SITE, OTHER, NAME, DWEB, USDC, ROUTER, APPROVE, TRANSFER, memoryFs, loadStore, at, attempt, plain };

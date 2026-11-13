@@ -4,11 +4,9 @@
 //! signing, messaging }, messaging?: { grantedAt } }`, times in wall-clock
 //! milliseconds. Q9's limits don't cover it: its flags keep today's rules.
 
-use serde_json::{Map, Value};
-
 use super::{
-    Applied, Effect, Refused, Unreadable, assign, number, parse_sites, records_by_last_used,
-    set_auto_approve, text_of, truthy,
+    Applied, Effect, JsValue, Refused, ToPrimitiveError, Unreadable, assign, number, object,
+    parse_sites, records_by_last_used, remove, set_auto_approve, text_of, truthy,
 };
 
 /// A Swarm rule ("Always allow" for one kind of request).
@@ -46,18 +44,24 @@ impl SwarmFlag {
 }
 
 /// The reference's `DEFAULT_AUTO_APPROVE`.
-fn default_auto_approve() -> Value {
-    let mut rules = Map::new();
+fn default_auto_approve() -> JsValue {
+    let mut rules = object();
     for flag in SwarmFlag::ALL {
-        rules.insert(flag.name().to_owned(), Value::Bool(false));
+        rules.set(flag.name(), JsValue::Bool(false));
     }
-    Value::Object(rules)
+    rules
 }
 
 /// The Swarm store.
-#[derive(Debug, Clone, Default, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct SwarmStore {
-    entries: Map<String, Value>,
+    entries: JsValue,
+}
+
+impl Default for SwarmStore {
+    fn default() -> Self {
+        SwarmStore { entries: object() }
+    }
 }
 
 impl SwarmStore {
@@ -76,31 +80,31 @@ impl SwarmStore {
     }
 
     /// The key's entry (`getPermission`): the site is connected.
-    pub fn entry(&self, key: &str) -> Option<&Value> {
+    pub fn entry(&self, key: &str) -> Option<&JsValue> {
         self.entries.get(key)
     }
 
-    /// Every entry, most recently used first (`getAllPermissions`).
-    pub fn records(&self) -> Vec<&Value> {
+    /// Every entry, most recently used first (`getAllPermissions`), or the
+    /// reference's throw.
+    pub fn records(&self) -> Result<Vec<&JsValue>, ToPrimitiveError> {
         records_by_last_used(&self.entries)
     }
 
     /// A connect (`grantPermission`): the key's entry, new or replaced where
     /// it stands, with no rule and no messaging grant.
-    pub fn connect(&mut self, key: &str, now_ms: u64) -> Applied<Value> {
-        let mut entry = Map::new();
-        entry.insert("origin".to_owned(), Value::String(key.to_owned()));
-        entry.insert("connectedAt".to_owned(), number(now_ms));
-        entry.insert("lastUsed".to_owned(), number(now_ms));
-        entry.insert("autoApprove".to_owned(), default_auto_approve());
-        let entry = Value::Object(entry);
-        self.entries.insert(key.to_owned(), entry.clone());
+    pub fn connect(&mut self, key: &str, now_ms: u64) -> Applied<JsValue> {
+        let mut entry = object();
+        entry.set("origin", JsValue::string(key));
+        entry.set("connectedAt", number(now_ms));
+        entry.set("lastUsed", number(now_ms));
+        entry.set("autoApprove", default_auto_approve());
+        self.entries.set(key, entry.clone());
         Applied::new(entry, Effect::Widening)
     }
 
     /// A disconnect (`revokePermission`): whether the key had an entry.
     pub fn revoke(&mut self, key: &str) -> Applied<bool> {
-        if self.entries.shift_remove(key).is_some() {
+        if remove(&mut self.entries, key).is_some() {
             Applied::new(true, Effect::Narrowing)
         } else {
             Applied::new(false, Effect::Unchanged)
@@ -122,7 +126,7 @@ impl SwarmStore {
             .get(key)
             .and_then(|entry| entry.get("autoApprove"))
             .and_then(|rules| rules.get(flag.name()))
-            == Some(&Value::Bool(true))
+            == Some(&JsValue::Bool(true))
     }
 
     /// A flag turned on or off (`setAutoApprove`). Whether the key has an
@@ -155,9 +159,9 @@ impl SwarmStore {
         let Some(entry) = self.entries.get_mut(key) else {
             return Applied::new(false, Effect::Unchanged);
         };
-        let mut grant = Map::new();
-        grant.insert("grantedAt".to_owned(), number(now_ms));
-        assign(entry, "messaging", Value::Object(grant));
+        let mut grant = object();
+        grant.set("grantedAt", number(now_ms));
+        assign(entry, "messaging", grant);
         Applied::new(true, Effect::Widening)
     }
 
@@ -170,13 +174,11 @@ impl SwarmStore {
         if !truthy(entry.get("messaging")) {
             return Applied::new(false, Effect::Unchanged);
         }
-        if let Value::Object(map) = entry {
-            map.shift_remove("messaging");
-        }
+        remove(entry, "messaging");
         if truthy(entry.get("autoApprove"))
             && let Some(rules) = entry.get_mut("autoApprove")
         {
-            assign(rules, SwarmFlag::Messaging.name(), Value::Bool(false));
+            assign(rules, SwarmFlag::Messaging.name(), JsValue::Bool(false));
         }
         Applied::new(true, Effect::Narrowing)
     }
