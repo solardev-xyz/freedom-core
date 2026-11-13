@@ -35,7 +35,7 @@ mod radicle;
 mod swarm;
 
 pub use caps::CapStore;
-pub use dapp::{DappStore, LIMITED_FIELD};
+pub use dapp::{DappStore, LIMITED_FIELD, RULE_TTL_MS, SigningRule, TransactionRule};
 pub use radicle::{RadicleFlag, RadicleStore};
 pub use swarm::{SwarmFlag, SwarmStore};
 

@@ -42,7 +42,7 @@
 
 const assert = require('node:assert/strict');
 const path = require('node:path');
-const { buildStores, STORES_FORMAT } = require('./approval-stores');
+const { buildStores, STORES_FORMAT, buildRollback, ROLLBACK_FORMAT } = require('./approval-stores');
 const { createRequire } = require('node:module');
 
 const BACKSLASH = String.fromCharCode(92);
@@ -877,6 +877,7 @@ function buildApprovals(checkout, meta) {
       bindings: 'One request each: `kind`, `account`, `payload` and `page` (`{ handle, key }`, for main\'s page issuer) as the reference takes them; `js`, `bindingFor`\'s facts or its error message; `core`, the request in fc-approval\'s form (`account`, `payload` or `payload_text`, the payload\'s JSON text the core parses itself, and `page`: `{ origin, frame, navigation, handle }`), or null where the reference\'s input has none; `expect`, whether the core issues a token for it (`issued`) or refuses it (`refused`), from 0012 (`deviation: token-strict` where the reference binds what the core refuses); `sameHash`, set where the case was built to share the EIP-712 hash of the case it is paired with.',
       pairs: 'Two requests the reference binds: `js`, whether a token minted for either spends for the other (`alike`) or is refused (`apart`), asked of the reference both ways; `changed`, the facts (and `kind`, `page`, `page.handle`, `page.key`) in which the reference\'s bindings differ; `core`, the core\'s answer, from 0012\'s Deviations table where `deviation` is set.',
       stores: STORES_FORMAT,
+      rollback: ROLLBACK_FORMAT,
       runs: 'Steps in order under `_setNow`, on a fresh store: `issue` (a case\'s request, minted as `token`), `consume` (a case\'s request, presented with `token`, or with `literal` text; `route: wallet` presents it without its page), `discard` and `count` (the outstanding tokens); `at` is the reference\'s clock, and `vaultAt` the vault\'s where they differ (`token-clock`); each step\'s `outcome` (`ok`, with what the token bound; `error`, the reference\'s message; or `count`), and `core` where the core\'s differs.',
     },
     constants: { ttlMs: sc.CONFIRMATION_TTL_MS, maxOutstanding: sc.MAX_OUTSTANDING },
@@ -886,6 +887,8 @@ function buildApprovals(checkout, meta) {
     runs,
     // Design 0012's grant files (APR-2), from the reference's four stores.
     stores: buildStores(checkout),
+    // Q9's legacy transition: the design's texts, read by the reference.
+    rollback: buildRollback(checkout),
   };
 }
 

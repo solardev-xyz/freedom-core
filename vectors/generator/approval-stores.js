@@ -475,6 +475,166 @@ function buildStores(checkout) {
   return out;
 }
 
+// ---------------------------------------------------------------------------
+// Q9's legacy transition (`rollback`): a site's entry with today's signing
+// flag and transaction rules, as an older build wrote it, and the same entry
+// after each limited replacement, as design 0012 writes it ("Limits on
+// 'Always allow' (Q9)"). The texts are the design's, written here from its
+// words; the reference loads each and is asked its real lookups,
+// `getSigningAutoApprove` and `isTransactionAutoApproved`, as
+// `wallet-ipc.js`'s `isDappSigningAutoApproved` and `isDappTxAutoApproved`
+// call them. The before entry answers both; after each replacement, the
+// replaced rule answers none, so an older build prompts for it; a rule not
+// replaced still answers.
+
+const GRANTED = T + 100_000;
+const OFF_AT = T + 200_000;
+const RULE_TTL_MS = 30 * 24 * 60 * 60 * 1000;
+
+const isObject = (value) => value !== null && typeof value === 'object' && !Array.isArray(value);
+
+function sameCall(rule, to, selector, chainId) {
+  return typeof rule?.to === 'string' && typeof rule?.selector === 'string'
+    && rule.to.toLowerCase() === to && rule.selector.toLowerCase() === selector && rule.chainId === chainId;
+}
+
+/** The entry's `autoApprove`, an object (the reference's default where it
+ * isn't one), and its `limited`, an object. */
+function autoApprove(entry) {
+  if (!isObject(entry.autoApprove)) entry.autoApprove = { signing: false, transactions: [] };
+  return entry.autoApprove;
+}
+
+function limited(rules) {
+  if (!isObject(rules.limited)) rules.limited = { signing: null, transactions: [] };
+  return rules.limited;
+}
+
+/** "Always allow" for signing: the limited rule in, today's flag off. */
+function allowSigning(entry, now) {
+  const rules = autoApprove(entry);
+  rules.signing = false;
+  limited(rules).signing = { grantedAt: now };
+}
+
+/** "Always allow" for a call: the limited rule in (one per call), every
+ * entry of today's list `isTransactionAutoApproved` matches for it out. */
+function allowTransaction(entry, call, now) {
+  const rules = autoApprove(entry);
+  const same = (rule) => sameCall(rule, call.to, call.selector, call.chainId);
+  if (Array.isArray(rules.transactions)) rules.transactions = rules.transactions.filter((rule) => !same(rule));
+  const lim = limited(rules);
+  if (!Array.isArray(lim.transactions)) lim.transactions = [];
+  const rule = { to: call.to, selector: call.selector, chainId: call.chainId, maxValue: call.value, grantedAt: now };
+  const at = lim.transactions.findIndex(same);
+  if (at < 0) lim.transactions.push(rule);
+  else lim.transactions = lim.transactions.map((old, index) => (index === at ? rule : old)).filter((old, index) => index <= at || !same(old));
+}
+
+/** Turning both rules off: today's and the limited one, each. */
+function turnOff(entry, call) {
+  const rules = entry.autoApprove;
+  rules.signing = false;
+  if (isObject(rules.limited)) rules.limited.signing = null;
+  const keep = (list) => list.filter((rule) => !sameCall(rule, call.to, call.selector, call.chainId));
+  if (Array.isArray(rules.transactions)) rules.transactions = keep(rules.transactions);
+  if (isObject(rules.limited) && Array.isArray(rules.limited.transactions)) rules.limited.transactions = keep(rules.limited.transactions);
+}
+
+const lower = (text) => text.toLowerCase();
+const REPLACED = Object.freeze({ to: lower(ROUTER), selector: APPROVE, chainId: 1, value: '500' });
+const KEPT = Object.freeze({ to: lower(USDC), selector: lower(TRANSFER), chainId: 8453 });
+
+/** An older build's file: the reference's own operations where they can
+ * write it, edited where an earlier build wrote what this one doesn't. */
+function olderBuildFile(checkout, edit) {
+  const fs = memoryFs();
+  const mod = loadStore(checkout, 'dapp', fs);
+  at(T, () => {
+    mod.grantPermission(OTHER, 1, 1);
+    mod.grantPermission(SITE, 0, 1);
+    mod.setSigningAutoApprove(SITE, true);
+    mod.addTransactionAutoApprove(SITE, ROUTER, APPROVE, 1, '1000');
+    mod.addTransactionAutoApprove(SITE, USDC, TRANSFER, 8453, '0');
+  });
+  const all = JSON.parse(fs.files.get(`${USER_DATA}/${FILES.dapp}`));
+  if (edit) edit(all[SITE]);
+  return JSON.stringify(all, null, 2);
+}
+
+const ROLLBACK = [
+  { id: 'signing-and-rules' },
+  {
+    // `to` and `selector` in mixed case, which isTransactionAutoApproved
+    // matches in lowercase, and a second entry for the same call.
+    id: 'mixed-case',
+    edit: (entry) => {
+      entry.autoApprove.transactions[0] = { to: ROUTER, selector: APPROVE.toUpperCase().replace('0X', '0x'), chainId: 1, maxValue: '1000' };
+      entry.autoApprove.transactions.push({ to: lower(ROUTER), selector: APPROVE, chainId: 1, maxValue: '7' });
+    },
+  },
+  {
+    // A rule an earlier build stored, before rules carried a value.
+    id: 'no-max-value',
+    edit: (entry) => {
+      delete entry.autoApprove.transactions[0].maxValue;
+    },
+  },
+  {
+    // A limited rule for the call already, given before a rollback; the old
+    // rule ticked again in the older build since.
+    id: 'limited-and-old',
+    edit: (entry) => {
+      entry.autoApprove.limited = { signing: { grantedAt: T - 5 }, transactions: [{ to: REPLACED.to, selector: REPLACED.selector, chainId: 1, maxValue: '9', grantedAt: T - 5 }] };
+    },
+  },
+];
+
+function lookups(checkout, text) {
+  const fs = memoryFs();
+  fs.files.set(`${USER_DATA}/${FILES.dapp}`, text);
+  const mod = loadStore(checkout, 'dapp', fs);
+  return at(OFF_AT, () => ({
+    signing: mod.getSigningAutoApprove(SITE),
+    replaced: mod.isTransactionAutoApproved(SITE, REPLACED.to, REPLACED.selector, REPLACED.chainId, '0'),
+    kept: mod.isTransactionAutoApproved(SITE, KEPT.to, KEPT.selector, KEPT.chainId, '0'),
+  }));
+}
+
+function buildRollback(checkout) {
+  return ROLLBACK.map((c) => {
+    const before = olderBuildFile(checkout, c.edit);
+    const write = (change) => {
+      const all = JSON.parse(before);
+      change(all[SITE]);
+      return JSON.stringify(all, null, 2);
+    };
+    const texts = {
+      before,
+      signing: write((entry) => allowSigning(entry, GRANTED)),
+      transaction: write((entry) => allowTransaction(entry, REPLACED, GRANTED)),
+      both: write((entry) => {
+        allowSigning(entry, GRANTED);
+        allowTransaction(entry, REPLACED, GRANTED);
+      }),
+      off: write((entry) => {
+        allowSigning(entry, GRANTED);
+        allowTransaction(entry, REPLACED, GRANTED);
+        turnOff(entry, REPLACED);
+      }),
+    };
+    const reference = Object.fromEntries(Object.entries(texts).map(([name, text]) => [name, lookups(checkout, text)]));
+    // What the design promises of the older build.
+    assert.deepEqual(reference.before, { signing: true, replaced: true, kept: true }, c.id);
+    assert.deepEqual(reference.signing, { signing: false, replaced: true, kept: true }, c.id);
+    assert.deepEqual(reference.transaction, { signing: true, replaced: false, kept: true }, c.id);
+    for (const name of ['both', 'off']) assert.deepEqual(reference[name], { signing: false, replaced: false, kept: true }, `${c.id}: ${name}`);
+    return { id: c.id, key: SITE, texts, reference };
+  });
+}
+
+const ROLLBACK_FORMAT = `Q9's legacy transition, for the site \`key\`: \`texts.before\`, the entry with today's signing flag and transaction rules as an older build wrote it, and the same file after an "Always allow" for the signing flag (\`signing\`), for the call ${JSON.stringify(REPLACED)} from a confirmed send of its \`value\` (\`transaction\`), for both (\`both\`, signing first), and after both and then both rules turned off (\`off\`), each written as design 0012 writes it, with \`grantedAt\` ${GRANTED}. \`reference\`: what the reference's dapp-permissions.js answers for each text, at ${OFF_AT}: \`getSigningAutoApprove\` (\`signing\`), and \`isTransactionAutoApproved\` with a value of 0 for the replaced call (\`replaced\`) and for ${JSON.stringify(KEPT)}, a rule no change replaces (\`kept\`).`;
+
 const STORES_FORMAT = 'Each grant store\'s file (`file`): `runs`, from a `start` text (or none), each step an operation of the reference\'s store (`op`, its `args`) at `at` (the wall clock, in milliseconds, as `Date.now()` gives it), its `result` (or `error`), whether it wrote the file (`wrote`) and the file\'s text after it (`text`, null while there is none); a `reload` drops the store\'s cache, as a new process would. `core: load` where the core makes no such change itself (an older build\'s rule, or x402\'s cap operations, which are X402-1\'s): the core reads the text the reference wrote and writes it back byte for byte. `core: legacy`: the reference\'s lookup of today\'s rule, which the new build answers none of (`rule-legacy`). `malformed`: a file\'s `text`, what the reference\'s store loads from it (`loaded`, `getAllPermissions()` or its error), the text a connect of another site then leaves (`afterGrant`, or its error), and the core\'s reading (`core`: `unreadable`, renamed aside with the store empty, or `parsed`).';
 
-module.exports = { buildStores, STORES_FORMAT, T, SITE, OTHER, NAME, DWEB, USDC, ROUTER, APPROVE, TRANSFER, memoryFs, loadStore, at, attempt, plain };
+module.exports = { buildStores, STORES_FORMAT, buildRollback, ROLLBACK_FORMAT, GRANTED, RULE_TTL_MS, T, SITE, OTHER, NAME, DWEB, USDC, ROUTER, APPROVE, TRANSFER, memoryFs, loadStore, at, attempt, plain };
