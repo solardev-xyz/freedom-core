@@ -27,12 +27,13 @@ change that needs a newer core pins a freedom-core release (design 0001,
    The release builds with `--locked`, so a stale lockfile fails it.
    The repository's other workspaces take workspace crates by path, so
    their lockfiles record those versions too, and CI builds them with
-   `--locked`: `fuzz/` (`fc-json`, `fc-keys`, `fc-protocol`, `fc-vault`) and
-   each `services/*` (`fc-protocol`, `fc-service`). In each, run
-   `cargo update -p <crate> … --offline` for the crates it takes, check
-   that `cargo metadata --locked --offline --format-version 1` passes, and
-   commit its `Cargo.lock`. `find . -name Cargo.lock -not -path '*/target/*'`
-   lists them all.
+   `--locked`. In each, run `cargo metadata --offline --format-version 1`,
+   which rewrites only the path crates' version lines, check that
+   `cargo metadata --locked --offline --format-version 1` then passes, and
+   commit its `Cargo.lock`; the diff should hold version lines only.
+   (`cargo update -p <crate> --offline` also re-resolves unrelated
+   dependency selections, so don't use it here.)
+   `find . -name Cargo.lock -not -path '*/target/*'` lists them all.
    `core.hello` reports this version as `core_version`.
 2. **Tag the merged commit on `main`** once its CI is green:
    `git tag cored-vX.Y.Z <commit> && git push origin cored-vX.Y.Z`. Only a
