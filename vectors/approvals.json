@@ -7,6 +7,7 @@
   "formats": {
     "constants": "The reference's `CONFIRMATION_TTL_MS` and `MAX_OUTSTANDING`.",
     "kinds": "The reference's `KINDS`: whether each is a page kind (`always`, `with-site` for a Safe send that names a site, `never`), and whether design 0012 takes it (`design`; the cap edit, #1023, is not one of its eleven).",
+    "rules": "The R-6 limiter (`limiter`): its `limits`, and `runs` of `admit` and `forget` for a `key` under the limiter's own clock (`at`, the vault's, in milliseconds), each with its `result`; Q9's rate reuses it, one bucket per key and request class. The fee check (`fees`): `evidence`, a `chain.fee_reference` `reply` read at `requestedAt` (`readEvidence`, its BigInts as decimal strings) and its `reference` (`referenceFee` at `wallNow` and `monotonicNow`, or null); `judged`, a transaction's fee fields (`tx`) judged against a `reference` (or none) by `judgeFees`, with its `verdict`.",
     "bindings": "One request each: `kind`, `account`, `payload` and `page` (`{ handle, key }`, for main's page issuer) as the reference takes them; `js`, `bindingFor`'s facts or its error message; `core`, the request in fc-approval's form (`account`, `payload` or `payload_text`, the payload's JSON text the core parses itself, and `page`: `{ origin, frame, navigation, handle }`), or null where the reference's input has none; `expect`, whether the core issues a token for it (`issued`) or refuses it (`refused`), from 0012 (`deviation: token-strict` where the reference binds what the core refuses); `sameHash`, set where the case was built to share the EIP-712 hash of the case it is paired with.",
     "pairs": "Two requests the reference binds: `js`, whether a token minted for either spends for the other (`alike`) or is refused (`apart`), asked of the reference both ways; `changed`, the facts (and `kind`, `page`, `page.handle`, `page.key`) in which the reference's bindings differ; `core`, the core's answer, from 0012's Deviations table where `deviation` is set.",
     "stores": "Each grant store's file (`file`): `runs`, from a `start` text (or none), each step an operation of the reference's store (`op`, its `args`) at `at` (the wall clock, in milliseconds, as `Date.now()` gives it), its `result` (or `error`), whether it wrote the file (`wrote`) and the file's text after it (`text`, null while there is none); a `reload` drops the store's cache, as a new process would. `core: load` where the core makes no such change itself (an older build's rule, or x402's cap operations, which are X402-1's): the core reads the text the reference wrote and writes it back byte for byte; `core: load-compacts`, the same but for what the reference's own next read of that text drops (a cap whose expiresAt the write made null), which the core drops as it reads. `core: legacy`: the reference's lookup of today's rule, which the new build answers none of (`rule-legacy`). `malformed`: a file's `text` (or its bytes in `hex`, which Node decodes as UTF-8 with U+FFFD for each invalid sequence), what the reference's store loads from it (`loaded`, `getAllPermissions()` as `value`, or as its `JSON.stringify` text in `json` where it holds a lone surrogate, or its `error`), the text a connect of another site then leaves (`afterGrant`, or its error), and the core's reading (`core`: `unreadable`, renamed aside with the store empty, or `parsed`). `sorts`: generated dApp files (`text`) whose entries `k<i>` hold a `lastUsed` of mixed types or none, and the order of `i` the reference's `getAllPermissions()` gives (`order`: `b.lastUsed - a.lastUsed` through ToNumber, under V8's sort).",
@@ -79,6 +80,4185 @@
       "design": false
     }
   ],
+  "rules": {
+    "limiter": {
+      "limits": {
+        "burst": 5,
+        "refillMs": 30000,
+        "dailyMax": 50,
+        "dayMs": 86400000
+      },
+      "runs": [
+        {
+          "id": "burst-then-refill",
+          "steps": [
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5000000,
+              "result": true
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5000000,
+              "result": true
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5000000,
+              "result": true
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5000000,
+              "result": true
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5000000,
+              "result": true
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5000000,
+              "result": false
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5029999,
+              "result": false
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5030000,
+              "result": true
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5030000,
+              "result": false
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5059999,
+              "result": false
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5060000,
+              "result": true
+            }
+          ]
+        },
+        {
+          "id": "partial-refills",
+          "steps": [
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5000000,
+              "result": true
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5000000,
+              "result": true
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5000000,
+              "result": true
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5000000,
+              "result": true
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5000000,
+              "result": true
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5010000,
+              "result": false
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5020000,
+              "result": false
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5030000,
+              "result": true
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5037500,
+              "result": false
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5045000,
+              "result": false
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5052500,
+              "result": false
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5060000,
+              "result": true
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5060001,
+              "result": false
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5061000,
+              "result": false
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5062000,
+              "result": false
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5089999,
+              "result": false
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5090000,
+              "result": true
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5090001,
+              "result": false
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5091001,
+              "result": false
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5092001,
+              "result": false
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5093001,
+              "result": false
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5094001,
+              "result": false
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5095001,
+              "result": false
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5096001,
+              "result": false
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5097001,
+              "result": false
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5098001,
+              "result": false
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5099001,
+              "result": false
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5100001,
+              "result": false
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5101001,
+              "result": false
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5102001,
+              "result": false
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5103001,
+              "result": false
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5104001,
+              "result": false
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5105001,
+              "result": false
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5106001,
+              "result": false
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5107001,
+              "result": false
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5108001,
+              "result": false
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5109001,
+              "result": false
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5110001,
+              "result": false
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5111001,
+              "result": false
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5112001,
+              "result": false
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5113001,
+              "result": false
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5114001,
+              "result": false
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5115001,
+              "result": false
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5116001,
+              "result": false
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5117001,
+              "result": false
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5118001,
+              "result": false
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5119001,
+              "result": false
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5120001,
+              "result": true
+            }
+          ]
+        },
+        {
+          "id": "daily-cap",
+          "steps": [
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5000000,
+              "result": true
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5000000,
+              "result": true
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5000000,
+              "result": true
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5000000,
+              "result": true
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5000000,
+              "result": true
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5030000,
+              "result": true
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5060000,
+              "result": true
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5090000,
+              "result": true
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5120000,
+              "result": true
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5150000,
+              "result": true
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5180000,
+              "result": true
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5210000,
+              "result": true
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5240000,
+              "result": true
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5270000,
+              "result": true
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5300000,
+              "result": true
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5330000,
+              "result": true
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5360000,
+              "result": true
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5390000,
+              "result": true
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5420000,
+              "result": true
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5450000,
+              "result": true
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5480000,
+              "result": true
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5510000,
+              "result": true
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5540000,
+              "result": true
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5570000,
+              "result": true
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5600000,
+              "result": true
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5630000,
+              "result": true
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5660000,
+              "result": true
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5690000,
+              "result": true
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5720000,
+              "result": true
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5750000,
+              "result": true
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5780000,
+              "result": true
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5810000,
+              "result": true
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5840000,
+              "result": true
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5870000,
+              "result": true
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5900000,
+              "result": true
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5930000,
+              "result": true
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5960000,
+              "result": true
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5990000,
+              "result": true
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 6020000,
+              "result": true
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 6050000,
+              "result": true
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 6080000,
+              "result": true
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 6110000,
+              "result": true
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 6140000,
+              "result": true
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 6170000,
+              "result": true
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 6200000,
+              "result": true
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 6230000,
+              "result": true
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 6260000,
+              "result": true
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 6290000,
+              "result": true
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 6320000,
+              "result": true
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 6350000,
+              "result": true
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 12200000,
+              "result": false
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 91399999,
+              "result": false
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 91400000,
+              "result": true
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 91400000,
+              "result": true
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 91400000,
+              "result": true
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 91400000,
+              "result": true
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 91400000,
+              "result": true
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 91400000,
+              "result": false
+            }
+          ]
+        },
+        {
+          "id": "refill-caps-at-burst",
+          "steps": [
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5000000,
+              "result": true
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5600000,
+              "result": true
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5600000,
+              "result": true
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5600000,
+              "result": true
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5600000,
+              "result": true
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5600000,
+              "result": true
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5600000,
+              "result": false
+            }
+          ]
+        },
+        {
+          "id": "keys-apart-and-forget",
+          "steps": [
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5000000,
+              "result": true
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5000000,
+              "result": true
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5000000,
+              "result": true
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5000000,
+              "result": true
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5000000,
+              "result": true
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5000000,
+              "result": false
+            },
+            {
+              "op": "admit",
+              "key": "rad://z3gqcJUoA1n9HaHKufZs5FCSGazv5",
+              "at": 5000000,
+              "result": true
+            },
+            {
+              "op": "admit",
+              "key": "rad://z3gqcJUoA1n9HaHKufZs5FCSGazv5",
+              "at": 5000000,
+              "result": true
+            },
+            {
+              "op": "forget",
+              "key": "https://app.example",
+              "at": 5000001,
+              "result": true
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5000001,
+              "result": true
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5000001,
+              "result": true
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5000001,
+              "result": true
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5000001,
+              "result": true
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5000001,
+              "result": true
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5000001,
+              "result": false
+            },
+            {
+              "op": "forget",
+              "key": "never-seen",
+              "at": 5000002,
+              "result": false
+            },
+            {
+              "op": "admit",
+              "key": "rad://z3gqcJUoA1n9HaHKufZs5FCSGazv5",
+              "at": 5000002,
+              "result": true
+            },
+            {
+              "op": "admit",
+              "key": "rad://z3gqcJUoA1n9HaHKufZs5FCSGazv5",
+              "at": 5000002,
+              "result": true
+            },
+            {
+              "op": "admit",
+              "key": "rad://z3gqcJUoA1n9HaHKufZs5FCSGazv5",
+              "at": 5000002,
+              "result": true
+            },
+            {
+              "op": "admit",
+              "key": "rad://z3gqcJUoA1n9HaHKufZs5FCSGazv5",
+              "at": 5000002,
+              "result": false
+            }
+          ]
+        },
+        {
+          "id": "partial-refills-short-of-one",
+          "steps": [
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5000000,
+              "result": true
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5000000,
+              "result": true
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5000000,
+              "result": true
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5000000,
+              "result": true
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5000000,
+              "result": true
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5019185,
+              "result": false
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5021072,
+              "result": false
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5030000,
+              "result": false
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5030001,
+              "result": true
+            }
+          ]
+        },
+        {
+          "id": "partition-short-0",
+          "steps": [
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5000000,
+              "result": true
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5000000,
+              "result": true
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5000000,
+              "result": true
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5000000,
+              "result": true
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5000000,
+              "result": true
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5018555,
+              "result": false
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5018806,
+              "result": false
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5020111,
+              "result": false
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5027405,
+              "result": false
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5028929,
+              "result": false
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5030000,
+              "result": false
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5030001,
+              "result": true
+            }
+          ]
+        },
+        {
+          "id": "partition-short-1",
+          "steps": [
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5000000,
+              "result": true
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5000000,
+              "result": true
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5000000,
+              "result": true
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5000000,
+              "result": true
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5000000,
+              "result": true
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5009573,
+              "result": false
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5010776,
+              "result": false
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5016117,
+              "result": false
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5020011,
+              "result": false
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5023166,
+              "result": false
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5030000,
+              "result": false
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5030001,
+              "result": true
+            }
+          ]
+        },
+        {
+          "id": "partition-short-2",
+          "steps": [
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5000000,
+              "result": true
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5000000,
+              "result": true
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5000000,
+              "result": true
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5000000,
+              "result": true
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5000000,
+              "result": true
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5001363,
+              "result": false
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5001991,
+              "result": false
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5004913,
+              "result": false
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5011831,
+              "result": false
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5026934,
+              "result": false
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5030000,
+              "result": false
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5030001,
+              "result": true
+            }
+          ]
+        },
+        {
+          "id": "partition-short-3",
+          "steps": [
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5000000,
+              "result": true
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5000000,
+              "result": true
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5000000,
+              "result": true
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5000000,
+              "result": true
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5000000,
+              "result": true
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5000084,
+              "result": false
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5005514,
+              "result": false
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5009901,
+              "result": false
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5020549,
+              "result": false
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5029661,
+              "result": false
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5030000,
+              "result": false
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5030001,
+              "result": true
+            }
+          ]
+        },
+        {
+          "id": "partition-short-4",
+          "steps": [
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5000000,
+              "result": true
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5000000,
+              "result": true
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5000000,
+              "result": true
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5000000,
+              "result": true
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5000000,
+              "result": true
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5002386,
+              "result": false
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5010465,
+              "result": false
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5015983,
+              "result": false
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5017024,
+              "result": false
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5022266,
+              "result": false
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5030000,
+              "result": false
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5030001,
+              "result": true
+            }
+          ]
+        },
+        {
+          "id": "partition-short-5",
+          "steps": [
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5000000,
+              "result": true
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5000000,
+              "result": true
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5000000,
+              "result": true
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5000000,
+              "result": true
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5000000,
+              "result": true
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5000034,
+              "result": false
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5011854,
+              "result": false
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5023344,
+              "result": false
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5024024,
+              "result": false
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5024973,
+              "result": false
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5030000,
+              "result": false
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5030001,
+              "result": true
+            }
+          ]
+        },
+        {
+          "id": "partition-short-6",
+          "steps": [
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5000000,
+              "result": true
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5000000,
+              "result": true
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5000000,
+              "result": true
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5000000,
+              "result": true
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5000000,
+              "result": true
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5024904,
+              "result": false
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5025031,
+              "result": false
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5030000,
+              "result": false
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5030001,
+              "result": true
+            }
+          ]
+        },
+        {
+          "id": "partition-short-7",
+          "steps": [
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5000000,
+              "result": true
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5000000,
+              "result": true
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5000000,
+              "result": true
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5000000,
+              "result": true
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5000000,
+              "result": true
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5006938,
+              "result": false
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5007510,
+              "result": false
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5013073,
+              "result": false
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5024328,
+              "result": false
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5027908,
+              "result": false
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5030000,
+              "result": false
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5030001,
+              "result": true
+            }
+          ]
+        },
+        {
+          "id": "partition-short-8",
+          "steps": [
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5000000,
+              "result": true
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5000000,
+              "result": true
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5000000,
+              "result": true
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5000000,
+              "result": true
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5000000,
+              "result": true
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5018489,
+              "result": false
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5026574,
+              "result": false
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5026727,
+              "result": false
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5030000,
+              "result": false
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5030001,
+              "result": true
+            }
+          ]
+        },
+        {
+          "id": "partition-short-9",
+          "steps": [
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5000000,
+              "result": true
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5000000,
+              "result": true
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5000000,
+              "result": true
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5000000,
+              "result": true
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5000000,
+              "result": true
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5009788,
+              "result": false
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5014709,
+              "result": false
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5018651,
+              "result": false
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5027189,
+              "result": false
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5030000,
+              "result": false
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5030001,
+              "result": true
+            }
+          ]
+        },
+        {
+          "id": "partition-whole-0",
+          "steps": [
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5000000,
+              "result": true
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5000000,
+              "result": true
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5000000,
+              "result": true
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5000000,
+              "result": true
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5000000,
+              "result": true
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5015941,
+              "result": false
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5030000,
+              "result": true
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5030001,
+              "result": false
+            }
+          ]
+        },
+        {
+          "id": "partition-whole-1",
+          "steps": [
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5000000,
+              "result": true
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5000000,
+              "result": true
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5000000,
+              "result": true
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5000000,
+              "result": true
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5000000,
+              "result": true
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5002135,
+              "result": false
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5013468,
+              "result": false
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5029544,
+              "result": false
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5030000,
+              "result": true
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5030001,
+              "result": false
+            }
+          ]
+        },
+        {
+          "id": "partition-whole-2",
+          "steps": [
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5000000,
+              "result": true
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5000000,
+              "result": true
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5000000,
+              "result": true
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5000000,
+              "result": true
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5000000,
+              "result": true
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5001439,
+              "result": false
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5005975,
+              "result": false
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5006772,
+              "result": false
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5016069,
+              "result": false
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5026223,
+              "result": false
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5030000,
+              "result": true
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5030001,
+              "result": false
+            }
+          ]
+        },
+        {
+          "id": "partition-whole-3",
+          "steps": [
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5000000,
+              "result": true
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5000000,
+              "result": true
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5000000,
+              "result": true
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5000000,
+              "result": true
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5000000,
+              "result": true
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5008964,
+              "result": false
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5013285,
+              "result": false
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5025264,
+              "result": false
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5025476,
+              "result": false
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5030000,
+              "result": true
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5030001,
+              "result": false
+            }
+          ]
+        },
+        {
+          "id": "partition-whole-4",
+          "steps": [
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5000000,
+              "result": true
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5000000,
+              "result": true
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5000000,
+              "result": true
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5000000,
+              "result": true
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5000000,
+              "result": true
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5007393,
+              "result": false
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5010132,
+              "result": false
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5028844,
+              "result": false
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5030000,
+              "result": true
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5030001,
+              "result": false
+            }
+          ]
+        },
+        {
+          "id": "partition-whole-5",
+          "steps": [
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5000000,
+              "result": true
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5000000,
+              "result": true
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5000000,
+              "result": true
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5000000,
+              "result": true
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5000000,
+              "result": true
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5002990,
+              "result": false
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5009460,
+              "result": false
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5020754,
+              "result": false
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5030000,
+              "result": true
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5030001,
+              "result": false
+            }
+          ]
+        },
+        {
+          "id": "partition-whole-6",
+          "steps": [
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5000000,
+              "result": true
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5000000,
+              "result": true
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5000000,
+              "result": true
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5000000,
+              "result": true
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5000000,
+              "result": true
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5013576,
+              "result": false
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5014427,
+              "result": false
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5014907,
+              "result": false
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5030000,
+              "result": true
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5030001,
+              "result": false
+            }
+          ]
+        },
+        {
+          "id": "partition-whole-7",
+          "steps": [
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5000000,
+              "result": true
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5000000,
+              "result": true
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5000000,
+              "result": true
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5000000,
+              "result": true
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5000000,
+              "result": true
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5014554,
+              "result": false
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5019989,
+              "result": false
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5021930,
+              "result": false
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5026438,
+              "result": false
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5030000,
+              "result": true
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5030001,
+              "result": false
+            }
+          ]
+        },
+        {
+          "id": "partition-whole-8",
+          "steps": [
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5000000,
+              "result": true
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5000000,
+              "result": true
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5000000,
+              "result": true
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5000000,
+              "result": true
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5000000,
+              "result": true
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5010006,
+              "result": false
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5016771,
+              "result": false
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5030000,
+              "result": true
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5030001,
+              "result": false
+            }
+          ]
+        },
+        {
+          "id": "partition-whole-9",
+          "steps": [
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5000000,
+              "result": true
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5000000,
+              "result": true
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5000000,
+              "result": true
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5000000,
+              "result": true
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5000000,
+              "result": true
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5016139,
+              "result": false
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5020547,
+              "result": false
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5030000,
+              "result": true
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5030001,
+              "result": false
+            }
+          ]
+        },
+        {
+          "id": "random-walk",
+          "steps": [
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5023407,
+              "result": true
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5066388,
+              "result": true
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5067269,
+              "result": true
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5079692,
+              "result": true
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5119380,
+              "result": true
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5134643,
+              "result": true
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5155541,
+              "result": true
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5170104,
+              "result": true
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5172017,
+              "result": true
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5199562,
+              "result": true
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5226146,
+              "result": true
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5255782,
+              "result": true
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5296283,
+              "result": true
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5322408,
+              "result": true
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5361393,
+              "result": true
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5374177,
+              "result": true
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5389456,
+              "result": false
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5427828,
+              "result": true
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5445639,
+              "result": true
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5465868,
+              "result": true
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5495384,
+              "result": true
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5518321,
+              "result": true
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5532368,
+              "result": false
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5574762,
+              "result": true
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5592789,
+              "result": true
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5630801,
+              "result": true
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5659998,
+              "result": true
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5681934,
+              "result": true
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5712422,
+              "result": true
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5751175,
+              "result": true
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5775773,
+              "result": true
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5793087,
+              "result": true
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5832696,
+              "result": true
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5841170,
+              "result": false
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5875602,
+              "result": true
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5879755,
+              "result": true
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5920260,
+              "result": true
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5945361,
+              "result": true
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5989408,
+              "result": true
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 6003442,
+              "result": true
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 6037206,
+              "result": true
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 6061448,
+              "result": true
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 6104568,
+              "result": true
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 6127355,
+              "result": true
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 6162379,
+              "result": true
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 6197479,
+              "result": true
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 6234154,
+              "result": true
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 6267954,
+              "result": true
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 6308162,
+              "result": true
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 6316290,
+              "result": true
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 6354544,
+              "result": true
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 6397097,
+              "result": true
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 6415431,
+              "result": true
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 6454386,
+              "result": false
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 6459893,
+              "result": false
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 6475336,
+              "result": false
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 6492484,
+              "result": false
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 6493011,
+              "result": false
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 6502740,
+              "result": false
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 6509082,
+              "result": false
+            }
+          ]
+        },
+        {
+          "id": "clock-back",
+          "steps": [
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5000000,
+              "result": true
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5000000,
+              "result": true
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5000000,
+              "result": true
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5000000,
+              "result": true
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5000000,
+              "result": true
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 4940000,
+              "result": false
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 4970000,
+              "result": true
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 4999999,
+              "result": false
+            },
+            {
+              "op": "admit",
+              "key": "https://app.example",
+              "at": 5000000,
+              "result": true
+            }
+          ]
+        }
+      ]
+    },
+    "fees": {
+      "evidence": [
+        {
+          "id": "header",
+          "reply": {
+            "header": {
+              "source": "colibri",
+              "number": "21000000",
+              "timestamp": "1762000000",
+              "base_fee": "10000000000"
+            },
+            "lowest_priority": "1000000000",
+            "quote": {
+              "source": "direct",
+              "type": "eip1559",
+              "maxFeePerGas": "30000000000",
+              "maxPriorityFeePerGas": "2000000000",
+              "answered": 3
+            }
+          },
+          "requestedAt": 5000000,
+          "wallNow": 1762000000000,
+          "monotonicNow": 5000000,
+          "evidence": {
+            "requestedAt": 5000000,
+            "header": {
+              "number": "21000000",
+              "timestamp": "1762000000",
+              "baseFee": "10000000000"
+            },
+            "lowestPriority": "1000000000",
+            "quote": {
+              "type": "eip1559",
+              "perGas": "30000000000",
+              "answered": 3
+            }
+          },
+          "reference": {
+            "fee": "21000000000",
+            "basis": "header",
+            "oneEndpoint": false
+          }
+        },
+        {
+          "id": "header-no-lowest-priority",
+          "reply": {
+            "header": {
+              "source": "colibri",
+              "number": "21000000",
+              "timestamp": "1762000000",
+              "base_fee": "10000000000"
+            },
+            "lowest_priority": null,
+            "quote": {
+              "source": "direct",
+              "type": "eip1559",
+              "maxFeePerGas": "30000000000",
+              "maxPriorityFeePerGas": "2000000000",
+              "answered": 3
+            }
+          },
+          "requestedAt": 5000000,
+          "wallNow": 1762000000000,
+          "monotonicNow": 5000000,
+          "evidence": {
+            "requestedAt": 5000000,
+            "header": {
+              "number": "21000000",
+              "timestamp": "1762000000",
+              "baseFee": "10000000000"
+            },
+            "lowestPriority": null,
+            "quote": {
+              "type": "eip1559",
+              "perGas": "30000000000",
+              "answered": 3
+            }
+          },
+          "reference": {
+            "fee": "20050000000",
+            "basis": "header",
+            "oneEndpoint": false
+          }
+        },
+        {
+          "id": "header-lowest-priority-missing",
+          "reply": {
+            "header": {
+              "source": "colibri",
+              "number": "21000000",
+              "timestamp": "1762000000",
+              "base_fee": "10000000000"
+            },
+            "quote": {
+              "source": "direct",
+              "type": "eip1559",
+              "maxFeePerGas": "30000000000",
+              "maxPriorityFeePerGas": "2000000000",
+              "answered": 3
+            }
+          },
+          "requestedAt": 5000000,
+          "wallNow": 1762000000000,
+          "monotonicNow": 5000000,
+          "evidence": {
+            "requestedAt": 5000000,
+            "header": {
+              "number": "21000000",
+              "timestamp": "1762000000",
+              "baseFee": "10000000000"
+            },
+            "lowestPriority": null,
+            "quote": {
+              "type": "eip1559",
+              "perGas": "30000000000",
+              "answered": 3
+            }
+          },
+          "reference": {
+            "fee": "20050000000",
+            "basis": "header",
+            "oneEndpoint": false
+          }
+        },
+        {
+          "id": "header-60s-old",
+          "reply": {
+            "header": {
+              "source": "colibri",
+              "number": "21000000",
+              "timestamp": "1761999940",
+              "base_fee": "10000000000"
+            },
+            "lowest_priority": "1000000000",
+            "quote": null
+          },
+          "requestedAt": 5000000,
+          "wallNow": 1762000000000,
+          "monotonicNow": 5000000,
+          "evidence": {
+            "requestedAt": 5000000,
+            "header": {
+              "number": "21000000",
+              "timestamp": "1761999940",
+              "baseFee": "10000000000"
+            },
+            "lowestPriority": "1000000000",
+            "quote": null
+          },
+          "reference": {
+            "fee": "21000000000",
+            "basis": "header",
+            "oneEndpoint": false
+          }
+        },
+        {
+          "id": "header-61s-old",
+          "reply": {
+            "header": {
+              "source": "colibri",
+              "number": "21000000",
+              "timestamp": "1761999939",
+              "base_fee": "10000000000"
+            },
+            "lowest_priority": "1000000000",
+            "quote": {
+              "source": "direct",
+              "type": "eip1559",
+              "maxFeePerGas": "30000000000",
+              "maxPriorityFeePerGas": "2000000000",
+              "answered": 3
+            }
+          },
+          "requestedAt": 5000000,
+          "wallNow": 1762000000000,
+          "monotonicNow": 5000000,
+          "evidence": {
+            "requestedAt": 5000000,
+            "header": {
+              "number": "21000000",
+              "timestamp": "1761999939",
+              "baseFee": "10000000000"
+            },
+            "lowestPriority": "1000000000",
+            "quote": {
+              "type": "eip1559",
+              "perGas": "30000000000",
+              "answered": 3
+            }
+          },
+          "reference": {
+            "fee": "30000000000",
+            "basis": "quote",
+            "oneEndpoint": false
+          }
+        },
+        {
+          "id": "header-60s-ahead",
+          "reply": {
+            "header": {
+              "source": "colibri",
+              "number": "21000000",
+              "timestamp": "1762000060",
+              "base_fee": "10000000000"
+            },
+            "lowest_priority": null,
+            "quote": null
+          },
+          "requestedAt": 5000000,
+          "wallNow": 1762000000000,
+          "monotonicNow": 5000000,
+          "evidence": {
+            "requestedAt": 5000000,
+            "header": {
+              "number": "21000000",
+              "timestamp": "1762000060",
+              "baseFee": "10000000000"
+            },
+            "lowestPriority": null,
+            "quote": null
+          },
+          "reference": {
+            "fee": "20050000000",
+            "basis": "header",
+            "oneEndpoint": false
+          }
+        },
+        {
+          "id": "header-61s-ahead",
+          "reply": {
+            "header": {
+              "source": "colibri",
+              "number": "21000000",
+              "timestamp": "1762000061",
+              "base_fee": "10000000000"
+            },
+            "lowest_priority": null,
+            "quote": null
+          },
+          "requestedAt": 5000000,
+          "wallNow": 1762000000000,
+          "monotonicNow": 5000000,
+          "evidence": {
+            "requestedAt": 5000000,
+            "header": {
+              "number": "21000000",
+              "timestamp": "1762000061",
+              "baseFee": "10000000000"
+            },
+            "lowestPriority": null,
+            "quote": null
+          },
+          "reference": null
+        },
+        {
+          "id": "header-no-base-fee",
+          "reply": {
+            "header": {
+              "source": "colibri",
+              "number": "21000000",
+              "timestamp": "1762000000",
+              "base_fee": null
+            },
+            "lowest_priority": "1000000000",
+            "quote": {
+              "source": "direct",
+              "type": "eip1559",
+              "maxFeePerGas": "30000000000",
+              "maxPriorityFeePerGas": "2000000000",
+              "answered": 3
+            }
+          },
+          "requestedAt": 5000000,
+          "wallNow": 1762000000000,
+          "monotonicNow": 5000000,
+          "evidence": {
+            "requestedAt": 5000000,
+            "header": {
+              "number": "21000000",
+              "timestamp": "1762000000",
+              "baseFee": null
+            },
+            "lowestPriority": "1000000000",
+            "quote": {
+              "type": "eip1559",
+              "perGas": "30000000000",
+              "answered": 3
+            }
+          },
+          "reference": {
+            "fee": "30000000000",
+            "basis": "quote",
+            "oneEndpoint": false
+          }
+        },
+        {
+          "id": "header-base-fee-missing",
+          "reply": {
+            "header": {
+              "source": "colibri",
+              "number": "21000000",
+              "timestamp": "1762000000"
+            },
+            "lowest_priority": "1000000000",
+            "quote": {
+              "source": "direct",
+              "type": "eip1559",
+              "maxFeePerGas": "30000000000",
+              "maxPriorityFeePerGas": "2000000000",
+              "answered": 3
+            }
+          },
+          "requestedAt": 5000000,
+          "wallNow": 1762000000000,
+          "monotonicNow": 5000000,
+          "evidence": {
+            "requestedAt": 5000000,
+            "header": null,
+            "lowestPriority": "1000000000",
+            "quote": {
+              "type": "eip1559",
+              "perGas": "30000000000",
+              "answered": 3
+            }
+          },
+          "reference": {
+            "fee": "30000000000",
+            "basis": "quote",
+            "oneEndpoint": false
+          }
+        },
+        {
+          "id": "header-zero-base-fee",
+          "reply": {
+            "header": {
+              "source": "colibri",
+              "number": "21000000",
+              "timestamp": "1762000000",
+              "base_fee": "0"
+            },
+            "lowest_priority": "0",
+            "quote": {
+              "source": "direct",
+              "type": "eip1559",
+              "maxFeePerGas": "30000000000",
+              "maxPriorityFeePerGas": "2000000000",
+              "answered": 3
+            }
+          },
+          "requestedAt": 5000000,
+          "wallNow": 1762000000000,
+          "monotonicNow": 5000000,
+          "evidence": {
+            "requestedAt": 5000000,
+            "header": {
+              "number": "21000000",
+              "timestamp": "1762000000",
+              "baseFee": "0"
+            },
+            "lowestPriority": "0",
+            "quote": {
+              "type": "eip1559",
+              "perGas": "30000000000",
+              "answered": 3
+            }
+          },
+          "reference": null
+        },
+        {
+          "id": "header-not-colibri",
+          "reply": {
+            "header": {
+              "source": "direct",
+              "number": "21000000",
+              "timestamp": "1762000000",
+              "base_fee": "10000000000"
+            },
+            "lowest_priority": null,
+            "quote": {
+              "source": "direct",
+              "type": "eip1559",
+              "maxFeePerGas": "30000000000",
+              "maxPriorityFeePerGas": "2000000000",
+              "answered": 3
+            }
+          },
+          "requestedAt": 5000000,
+          "wallNow": 1762000000000,
+          "monotonicNow": 5000000,
+          "evidence": {
+            "requestedAt": 5000000,
+            "header": null,
+            "lowestPriority": null,
+            "quote": {
+              "type": "eip1559",
+              "perGas": "30000000000",
+              "answered": 3
+            }
+          },
+          "reference": {
+            "fee": "30000000000",
+            "basis": "quote",
+            "oneEndpoint": false
+          }
+        },
+        {
+          "id": "header-number-hex",
+          "reply": {
+            "header": {
+              "source": "colibri",
+              "number": "0x10",
+              "timestamp": "1762000000",
+              "base_fee": "10000000000"
+            },
+            "lowest_priority": null,
+            "quote": {
+              "source": "direct",
+              "type": "eip1559",
+              "maxFeePerGas": "30000000000",
+              "maxPriorityFeePerGas": "2000000000",
+              "answered": 3
+            }
+          },
+          "requestedAt": 5000000,
+          "wallNow": 1762000000000,
+          "monotonicNow": 5000000,
+          "evidence": {
+            "requestedAt": 5000000,
+            "header": null,
+            "lowestPriority": null,
+            "quote": {
+              "type": "eip1559",
+              "perGas": "30000000000",
+              "answered": 3
+            }
+          },
+          "reference": {
+            "fee": "30000000000",
+            "basis": "quote",
+            "oneEndpoint": false
+          }
+        },
+        {
+          "id": "header-leading-zero",
+          "reply": {
+            "header": {
+              "source": "colibri",
+              "number": "21000000",
+              "timestamp": "1762000000",
+              "base_fee": "010"
+            },
+            "lowest_priority": null,
+            "quote": {
+              "source": "direct",
+              "type": "eip1559",
+              "maxFeePerGas": "30000000000",
+              "maxPriorityFeePerGas": "2000000000",
+              "answered": 3
+            }
+          },
+          "requestedAt": 5000000,
+          "wallNow": 1762000000000,
+          "monotonicNow": 5000000,
+          "evidence": {
+            "requestedAt": 5000000,
+            "header": null,
+            "lowestPriority": null,
+            "quote": {
+              "type": "eip1559",
+              "perGas": "30000000000",
+              "answered": 3
+            }
+          },
+          "reference": {
+            "fee": "30000000000",
+            "basis": "quote",
+            "oneEndpoint": false
+          }
+        },
+        {
+          "id": "header-78-digits",
+          "reply": {
+            "header": {
+              "source": "colibri",
+              "number": "21000000",
+              "timestamp": "1762000000",
+              "base_fee": "999999999999999999999999999999999999999999999999999999999999999999999999999999"
+            },
+            "lowest_priority": null,
+            "quote": null
+          },
+          "requestedAt": 5000000,
+          "wallNow": 1762000000000,
+          "monotonicNow": 5000000,
+          "evidence": {
+            "requestedAt": 5000000,
+            "header": {
+              "number": "21000000",
+              "timestamp": "1762000000",
+              "baseFee": "999999999999999999999999999999999999999999999999999999999999999999999999999999"
+            },
+            "lowestPriority": null,
+            "quote": null
+          },
+          "reference": {
+            "fee": "2000000000000000000000000000000000000000000000000000000000000000000000049999998",
+            "basis": "header",
+            "oneEndpoint": false
+          }
+        },
+        {
+          "id": "header-79-digits",
+          "reply": {
+            "header": {
+              "source": "colibri",
+              "number": "21000000",
+              "timestamp": "1762000000",
+              "base_fee": "1000000000000000000000000000000000000000000000000000000000000000000000000000000"
+            },
+            "lowest_priority": null,
+            "quote": {
+              "source": "direct",
+              "type": "eip1559",
+              "maxFeePerGas": "30000000000",
+              "maxPriorityFeePerGas": "2000000000",
+              "answered": 3
+            }
+          },
+          "requestedAt": 5000000,
+          "wallNow": 1762000000000,
+          "monotonicNow": 5000000,
+          "evidence": {
+            "requestedAt": 5000000,
+            "header": null,
+            "lowestPriority": null,
+            "quote": {
+              "type": "eip1559",
+              "perGas": "30000000000",
+              "answered": 3
+            }
+          },
+          "reference": {
+            "fee": "30000000000",
+            "basis": "quote",
+            "oneEndpoint": false
+          }
+        },
+        {
+          "id": "lowest-priority-bad",
+          "reply": {
+            "header": {
+              "source": "colibri",
+              "number": "21000000",
+              "timestamp": "1762000000",
+              "base_fee": "10000000000"
+            },
+            "lowest_priority": "1.5",
+            "quote": {
+              "source": "direct",
+              "type": "eip1559",
+              "maxFeePerGas": "30000000000",
+              "maxPriorityFeePerGas": "2000000000",
+              "answered": 3
+            }
+          },
+          "requestedAt": 5000000,
+          "wallNow": 1762000000000,
+          "monotonicNow": 5000000,
+          "evidence": {
+            "requestedAt": 5000000,
+            "header": {
+              "number": "21000000",
+              "timestamp": "1762000000",
+              "baseFee": "10000000000"
+            },
+            "lowestPriority": null,
+            "quote": {
+              "type": "eip1559",
+              "perGas": "30000000000",
+              "answered": 3
+            }
+          },
+          "reference": {
+            "fee": "20050000000",
+            "basis": "header",
+            "oneEndpoint": false
+          }
+        },
+        {
+          "id": "quote",
+          "reply": {
+            "header": null,
+            "lowest_priority": null,
+            "quote": {
+              "source": "direct",
+              "type": "eip1559",
+              "maxFeePerGas": "30000000000",
+              "maxPriorityFeePerGas": "2000000000",
+              "answered": 3
+            }
+          },
+          "requestedAt": 5000000,
+          "wallNow": 1762000000000,
+          "monotonicNow": 5000000,
+          "evidence": {
+            "requestedAt": 5000000,
+            "header": null,
+            "lowestPriority": null,
+            "quote": {
+              "type": "eip1559",
+              "perGas": "30000000000",
+              "answered": 3
+            }
+          },
+          "reference": {
+            "fee": "30000000000",
+            "basis": "quote",
+            "oneEndpoint": false
+          }
+        },
+        {
+          "id": "quote-one-endpoint",
+          "reply": {
+            "header": null,
+            "lowest_priority": null,
+            "quote": {
+              "source": "direct",
+              "type": "eip1559",
+              "maxFeePerGas": "30000000000",
+              "maxPriorityFeePerGas": "2000000000",
+              "answered": 1
+            }
+          },
+          "requestedAt": 5000000,
+          "wallNow": 1762000000000,
+          "monotonicNow": 5000000,
+          "evidence": {
+            "requestedAt": 5000000,
+            "header": null,
+            "lowestPriority": null,
+            "quote": {
+              "type": "eip1559",
+              "perGas": "30000000000",
+              "answered": 1
+            }
+          },
+          "reference": {
+            "fee": "30000000000",
+            "basis": "quote",
+            "oneEndpoint": true
+          }
+        },
+        {
+          "id": "quote-legacy",
+          "reply": {
+            "header": null,
+            "lowest_priority": null,
+            "quote": {
+              "source": "direct",
+              "type": "legacy",
+              "gasPrice": "20000000000",
+              "answered": 2
+            }
+          },
+          "requestedAt": 5000000,
+          "wallNow": 1762000000000,
+          "monotonicNow": 5000000,
+          "evidence": {
+            "requestedAt": 5000000,
+            "header": null,
+            "lowestPriority": null,
+            "quote": {
+              "type": "legacy",
+              "perGas": "20000000000",
+              "answered": 2
+            }
+          },
+          "reference": {
+            "fee": "20000000000",
+            "basis": "quote",
+            "oneEndpoint": false
+          }
+        },
+        {
+          "id": "quote-legacy-no-gas-price",
+          "reply": {
+            "header": null,
+            "lowest_priority": null,
+            "quote": {
+              "source": "direct",
+              "type": "legacy",
+              "maxFeePerGas": "20000000000",
+              "answered": 2
+            }
+          },
+          "requestedAt": 5000000,
+          "wallNow": 1762000000000,
+          "monotonicNow": 5000000,
+          "evidence": {
+            "requestedAt": 5000000,
+            "header": null,
+            "lowestPriority": null,
+            "quote": null
+          },
+          "reference": null
+        },
+        {
+          "id": "quote-answered-zero",
+          "reply": {
+            "header": null,
+            "lowest_priority": null,
+            "quote": {
+              "source": "direct",
+              "type": "eip1559",
+              "maxFeePerGas": "30000000000",
+              "maxPriorityFeePerGas": "2000000000",
+              "answered": 0
+            }
+          },
+          "requestedAt": 5000000,
+          "wallNow": 1762000000000,
+          "monotonicNow": 5000000,
+          "evidence": {
+            "requestedAt": 5000000,
+            "header": null,
+            "lowestPriority": null,
+            "quote": null
+          },
+          "reference": null
+        },
+        {
+          "id": "quote-answered-text",
+          "reply": {
+            "header": null,
+            "lowest_priority": null,
+            "quote": {
+              "source": "direct",
+              "type": "eip1559",
+              "maxFeePerGas": "30000000000",
+              "maxPriorityFeePerGas": "2000000000",
+              "answered": "3"
+            }
+          },
+          "requestedAt": 5000000,
+          "wallNow": 1762000000000,
+          "monotonicNow": 5000000,
+          "evidence": {
+            "requestedAt": 5000000,
+            "header": null,
+            "lowestPriority": null,
+            "quote": null
+          },
+          "reference": null
+        },
+        {
+          "id": "quote-answered-fraction",
+          "reply": {
+            "header": null,
+            "lowest_priority": null,
+            "quote": {
+              "source": "direct",
+              "type": "eip1559",
+              "maxFeePerGas": "30000000000",
+              "maxPriorityFeePerGas": "2000000000",
+              "answered": 1.5
+            }
+          },
+          "requestedAt": 5000000,
+          "wallNow": 1762000000000,
+          "monotonicNow": 5000000,
+          "evidence": {
+            "requestedAt": 5000000,
+            "header": null,
+            "lowestPriority": null,
+            "quote": null
+          },
+          "reference": null
+        },
+        {
+          "id": "quote-not-direct",
+          "reply": {
+            "header": null,
+            "lowest_priority": null,
+            "quote": {
+              "source": "quorum",
+              "type": "eip1559",
+              "maxFeePerGas": "30000000000",
+              "maxPriorityFeePerGas": "2000000000",
+              "answered": 3
+            }
+          },
+          "requestedAt": 5000000,
+          "wallNow": 1762000000000,
+          "monotonicNow": 5000000,
+          "evidence": {
+            "requestedAt": 5000000,
+            "header": null,
+            "lowestPriority": null,
+            "quote": null
+          },
+          "reference": null
+        },
+        {
+          "id": "quote-unknown-type",
+          "reply": {
+            "header": null,
+            "lowest_priority": null,
+            "quote": {
+              "source": "direct",
+              "type": "blob",
+              "maxFeePerGas": "30000000000",
+              "maxPriorityFeePerGas": "2000000000",
+              "answered": 3
+            }
+          },
+          "requestedAt": 5000000,
+          "wallNow": 1762000000000,
+          "monotonicNow": 5000000,
+          "evidence": {
+            "requestedAt": 5000000,
+            "header": null,
+            "lowestPriority": null,
+            "quote": null
+          },
+          "reference": null
+        },
+        {
+          "id": "quote-zero",
+          "reply": {
+            "header": null,
+            "lowest_priority": null,
+            "quote": {
+              "source": "direct",
+              "type": "eip1559",
+              "maxFeePerGas": "0",
+              "maxPriorityFeePerGas": "2000000000",
+              "answered": 3
+            }
+          },
+          "requestedAt": 5000000,
+          "wallNow": 1762000000000,
+          "monotonicNow": 5000000,
+          "evidence": {
+            "requestedAt": 5000000,
+            "header": null,
+            "lowestPriority": null,
+            "quote": {
+              "type": "eip1559",
+              "perGas": "0",
+              "answered": 3
+            }
+          },
+          "reference": null
+        },
+        {
+          "id": "quote-60s-old",
+          "reply": {
+            "header": null,
+            "lowest_priority": null,
+            "quote": {
+              "source": "direct",
+              "type": "eip1559",
+              "maxFeePerGas": "30000000000",
+              "maxPriorityFeePerGas": "2000000000",
+              "answered": 3
+            }
+          },
+          "requestedAt": 4940000,
+          "wallNow": 1762000000000,
+          "monotonicNow": 5000000,
+          "evidence": {
+            "requestedAt": 4940000,
+            "header": null,
+            "lowestPriority": null,
+            "quote": {
+              "type": "eip1559",
+              "perGas": "30000000000",
+              "answered": 3
+            }
+          },
+          "reference": {
+            "fee": "30000000000",
+            "basis": "quote",
+            "oneEndpoint": false
+          }
+        },
+        {
+          "id": "quote-61s-old",
+          "reply": {
+            "header": null,
+            "lowest_priority": null,
+            "quote": {
+              "source": "direct",
+              "type": "eip1559",
+              "maxFeePerGas": "30000000000",
+              "maxPriorityFeePerGas": "2000000000",
+              "answered": 3
+            }
+          },
+          "requestedAt": 4939999,
+          "wallNow": 1762000000000,
+          "monotonicNow": 5000000,
+          "evidence": {
+            "requestedAt": 4939999,
+            "header": null,
+            "lowestPriority": null,
+            "quote": {
+              "type": "eip1559",
+              "perGas": "30000000000",
+              "answered": 3
+            }
+          },
+          "reference": null
+        },
+        {
+          "id": "nothing",
+          "reply": {
+            "header": null,
+            "lowest_priority": null,
+            "quote": null
+          },
+          "requestedAt": 5000000,
+          "wallNow": 1762000000000,
+          "monotonicNow": 5000000,
+          "evidence": {
+            "requestedAt": 5000000,
+            "header": null,
+            "lowestPriority": null,
+            "quote": null
+          },
+          "reference": null
+        },
+        {
+          "id": "reply-null",
+          "reply": null,
+          "requestedAt": 5000000,
+          "wallNow": 1762000000000,
+          "monotonicNow": 5000000,
+          "evidence": {
+            "requestedAt": 5000000,
+            "header": null,
+            "lowestPriority": null,
+            "quote": null
+          },
+          "reference": null
+        },
+        {
+          "id": "reply-array",
+          "reply": [],
+          "requestedAt": 5000000,
+          "wallNow": 1762000000000,
+          "monotonicNow": 5000000,
+          "evidence": {
+            "requestedAt": 5000000,
+            "header": null,
+            "lowestPriority": null,
+            "quote": null
+          },
+          "reference": null
+        }
+      ],
+      "judged": [
+        {
+          "id": "at-3r",
+          "tx": {
+            "maxFeePerGas": "30000000000",
+            "maxPriorityFeePerGas": "1",
+            "gasLimit": "21000"
+          },
+          "reference": {
+            "fee": "10000000000",
+            "basis": "quote",
+            "oneEndpoint": false
+          },
+          "verdict": {
+            "maxCost": "630000000000000",
+            "comparable": true,
+            "ratio": "3",
+            "above": false,
+            "oneEndpoint": false,
+            "basis": "quote",
+            "autoApprove": true
+          }
+        },
+        {
+          "id": "above-3r",
+          "tx": {
+            "maxFeePerGas": "30000000001",
+            "maxPriorityFeePerGas": "1",
+            "gasLimit": "21000"
+          },
+          "reference": {
+            "fee": "10000000000",
+            "basis": "quote",
+            "oneEndpoint": false
+          },
+          "verdict": {
+            "maxCost": "630000000021000",
+            "comparable": true,
+            "ratio": "3",
+            "above": true,
+            "oneEndpoint": false,
+            "basis": "quote",
+            "autoApprove": false
+          }
+        },
+        {
+          "id": "below",
+          "tx": {
+            "maxFeePerGas": "5000000000",
+            "maxPriorityFeePerGas": "1",
+            "gasLimit": "21000"
+          },
+          "reference": {
+            "fee": "10000000000",
+            "basis": "header",
+            "oneEndpoint": false
+          },
+          "verdict": {
+            "maxCost": "105000000000000",
+            "comparable": true,
+            "ratio": "0.5",
+            "above": false,
+            "oneEndpoint": false,
+            "basis": "header",
+            "autoApprove": true
+          }
+        },
+        {
+          "id": "one-endpoint",
+          "tx": {
+            "maxFeePerGas": "10000000000",
+            "maxPriorityFeePerGas": "1",
+            "gasLimit": "21000"
+          },
+          "reference": {
+            "fee": "10000000000",
+            "basis": "quote",
+            "oneEndpoint": true
+          },
+          "verdict": {
+            "maxCost": "210000000000000",
+            "comparable": true,
+            "ratio": "1",
+            "above": false,
+            "oneEndpoint": true,
+            "basis": "quote",
+            "autoApprove": false
+          }
+        },
+        {
+          "id": "one-endpoint-above",
+          "tx": {
+            "maxFeePerGas": "40000000000",
+            "maxPriorityFeePerGas": "1",
+            "gasLimit": "21000"
+          },
+          "reference": {
+            "fee": "10000000000",
+            "basis": "quote",
+            "oneEndpoint": true
+          },
+          "verdict": {
+            "maxCost": "840000000000000",
+            "comparable": true,
+            "ratio": "4",
+            "above": true,
+            "oneEndpoint": true,
+            "basis": "quote",
+            "autoApprove": false
+          }
+        },
+        {
+          "id": "no-reference",
+          "tx": {
+            "maxFeePerGas": "10000000000",
+            "maxPriorityFeePerGas": "1",
+            "gasLimit": "21000"
+          },
+          "reference": null,
+          "verdict": {
+            "maxCost": "210000000000000",
+            "comparable": false,
+            "ratio": null,
+            "above": false,
+            "oneEndpoint": false,
+            "basis": null,
+            "autoApprove": false
+          }
+        },
+        {
+          "id": "legacy",
+          "tx": {
+            "gasPrice": "20000000000",
+            "gasLimit": "100000"
+          },
+          "reference": {
+            "fee": "10000000000",
+            "basis": "quote",
+            "oneEndpoint": false
+          },
+          "verdict": {
+            "maxCost": "2000000000000000",
+            "comparable": true,
+            "ratio": "2",
+            "above": false,
+            "oneEndpoint": false,
+            "basis": "quote",
+            "autoApprove": true
+          }
+        },
+        {
+          "id": "max-fee-without-priority",
+          "tx": {
+            "maxFeePerGas": "10000000000",
+            "gasPrice": "50000000000",
+            "gasLimit": "21000"
+          },
+          "reference": {
+            "fee": "10000000000",
+            "basis": "quote",
+            "oneEndpoint": false
+          },
+          "verdict": {
+            "maxCost": "1050000000000000",
+            "comparable": true,
+            "ratio": "5",
+            "above": true,
+            "oneEndpoint": false,
+            "basis": "quote",
+            "autoApprove": false
+          }
+        },
+        {
+          "id": "max-fee-alone",
+          "tx": {
+            "maxFeePerGas": "10000000000",
+            "gasLimit": "21000"
+          },
+          "reference": {
+            "fee": "10000000000",
+            "basis": "quote",
+            "oneEndpoint": false
+          },
+          "verdict": {
+            "maxCost": null,
+            "comparable": false,
+            "ratio": null,
+            "above": false,
+            "oneEndpoint": false,
+            "basis": null,
+            "autoApprove": false
+          }
+        },
+        {
+          "id": "no-fee",
+          "tx": {
+            "gasLimit": "21000"
+          },
+          "reference": {
+            "fee": "10000000000",
+            "basis": "quote",
+            "oneEndpoint": false
+          },
+          "verdict": {
+            "maxCost": null,
+            "comparable": false,
+            "ratio": null,
+            "above": false,
+            "oneEndpoint": false,
+            "basis": null,
+            "autoApprove": false
+          }
+        },
+        {
+          "id": "no-gas-limit",
+          "tx": {
+            "maxFeePerGas": "10000000000",
+            "maxPriorityFeePerGas": "1"
+          },
+          "reference": {
+            "fee": "10000000000",
+            "basis": "quote",
+            "oneEndpoint": false
+          },
+          "verdict": {
+            "maxCost": null,
+            "comparable": true,
+            "ratio": "1",
+            "above": false,
+            "oneEndpoint": false,
+            "basis": "quote",
+            "autoApprove": true
+          }
+        },
+        {
+          "id": "no-fee-no-reference",
+          "tx": {
+            "gasLimit": "21000"
+          },
+          "reference": null,
+          "verdict": {
+            "maxCost": null,
+            "comparable": false,
+            "ratio": null,
+            "above": false,
+            "oneEndpoint": false,
+            "basis": null,
+            "autoApprove": false
+          }
+        },
+        {
+          "id": "ratio-tenths",
+          "tx": {
+            "maxFeePerGas": "25000000000",
+            "maxPriorityFeePerGas": "1",
+            "gasLimit": "21000"
+          },
+          "reference": {
+            "fee": "10000000000",
+            "basis": "quote",
+            "oneEndpoint": false
+          },
+          "verdict": {
+            "maxCost": "525000000000000",
+            "comparable": true,
+            "ratio": "2.5",
+            "above": false,
+            "oneEndpoint": false,
+            "basis": "quote",
+            "autoApprove": true
+          }
+        },
+        {
+          "id": "ratio-rounds-half-up",
+          "tx": {
+            "maxFeePerGas": "1250000000",
+            "maxPriorityFeePerGas": "1",
+            "gasLimit": "21000"
+          },
+          "reference": {
+            "fee": "1000000000",
+            "basis": "quote",
+            "oneEndpoint": false
+          },
+          "verdict": {
+            "maxCost": "26250000000000",
+            "comparable": true,
+            "ratio": "1.3",
+            "above": false,
+            "oneEndpoint": false,
+            "basis": "quote",
+            "autoApprove": true
+          }
+        },
+        {
+          "id": "ratio-just-under-ten",
+          "tx": {
+            "maxFeePerGas": "9949999999",
+            "maxPriorityFeePerGas": "1",
+            "gasLimit": "21000"
+          },
+          "reference": {
+            "fee": "1000000000",
+            "basis": "quote",
+            "oneEndpoint": false
+          },
+          "verdict": {
+            "maxCost": "208949999979000",
+            "comparable": true,
+            "ratio": "9.9",
+            "above": true,
+            "oneEndpoint": false,
+            "basis": "quote",
+            "autoApprove": false
+          }
+        },
+        {
+          "id": "ratio-rounds-to-ten",
+          "tx": {
+            "maxFeePerGas": "9950000000",
+            "maxPriorityFeePerGas": "1",
+            "gasLimit": "21000"
+          },
+          "reference": {
+            "fee": "1000000000",
+            "basis": "quote",
+            "oneEndpoint": false
+          },
+          "verdict": {
+            "maxCost": "208950000000000",
+            "comparable": true,
+            "ratio": "10",
+            "above": true,
+            "oneEndpoint": false,
+            "basis": "quote",
+            "autoApprove": false
+          }
+        },
+        {
+          "id": "ratio-whole",
+          "tx": {
+            "maxFeePerGas": "123456000000000",
+            "maxPriorityFeePerGas": "1",
+            "gasLimit": "21000"
+          },
+          "reference": {
+            "fee": "1000000000",
+            "basis": "quote",
+            "oneEndpoint": false
+          },
+          "verdict": {
+            "maxCost": "2592576000000000000",
+            "comparable": true,
+            "ratio": "123456",
+            "above": true,
+            "oneEndpoint": false,
+            "basis": "quote",
+            "autoApprove": false
+          }
+        },
+        {
+          "id": "ratio-tiny",
+          "tx": {
+            "maxFeePerGas": "1",
+            "maxPriorityFeePerGas": "1",
+            "gasLimit": "21000"
+          },
+          "reference": {
+            "fee": "3",
+            "basis": "quote",
+            "oneEndpoint": false
+          },
+          "verdict": {
+            "maxCost": "21000",
+            "comparable": true,
+            "ratio": "0.3",
+            "above": false,
+            "oneEndpoint": false,
+            "basis": "quote",
+            "autoApprove": true
+          }
+        },
+        {
+          "id": "ratio-zero-fee",
+          "tx": {
+            "maxFeePerGas": "0",
+            "maxPriorityFeePerGas": "1",
+            "gasLimit": "21000"
+          },
+          "reference": {
+            "fee": "10000000000",
+            "basis": "quote",
+            "oneEndpoint": false
+          },
+          "verdict": {
+            "maxCost": "0",
+            "comparable": true,
+            "ratio": "0",
+            "above": false,
+            "oneEndpoint": false,
+            "basis": "quote",
+            "autoApprove": true
+          }
+        },
+        {
+          "id": "huge",
+          "tx": {
+            "maxFeePerGas": "115792089237316195423570985008687907853269984665640564039457584007913129639935",
+            "maxPriorityFeePerGas": "1",
+            "gasLimit": "115792089237316195423570985008687907853269984665640564039457584007913129639935"
+          },
+          "reference": {
+            "fee": "57896044618658097711785492504343953926634992332820282019728792003956564819968",
+            "basis": "quote",
+            "oneEndpoint": false
+          },
+          "verdict": {
+            "maxCost": "13407807929942597099574024998205846127479365820592393377723561443721764030073315392623399665776056285720014482370779510884422601683867654778417822746804225",
+            "comparable": true,
+            "ratio": "2",
+            "above": false,
+            "oneEndpoint": false,
+            "basis": "quote",
+            "autoApprove": true
+          }
+        },
+        {
+          "id": "huge-reference",
+          "tx": {
+            "maxFeePerGas": "1606938044258990275541962092341162602522202993782792835301376",
+            "maxPriorityFeePerGas": "1",
+            "gasLimit": "21000"
+          },
+          "reference": {
+            "fee": "2000000000000000000000000000000000000000000000000000000000000000000000049999998",
+            "basis": "header",
+            "oneEndpoint": false
+          },
+          "verdict": {
+            "maxCost": "33745698929438795786381203939164414652966262869438649541328896000",
+            "comparable": true,
+            "ratio": "0",
+            "above": false,
+            "oneEndpoint": false,
+            "basis": "header",
+            "autoApprove": true
+          }
+        }
+      ]
+    }
+  },
   "bindings": [
     {
       "id": "wallet-send/base",
