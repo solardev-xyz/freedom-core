@@ -9,6 +9,13 @@
 //! held while untrusted input is processed, and no key byte leaves this
 //! module.
 //!
+//! `sign.transaction`, `sign.message` and `sign.typed_data` take an
+//! `authorization` (design 0012, API): a token, a Safe approval or a
+//! standing rule, checked by [`crate::approvals`] once the public work is
+//! done and before the key is derived. A token is burnt however the
+//! request ends. Without one they sign as before (APR-3; APR-4 requires
+//! it). A `page` caller sends its `PageContext`.
+//!
 //! Typed data comes with the view of exactly what is signed (#88), which
 //! fc-evm writes as JSON text in the pass that hashes; the reply carries it
 //! as written. `sign.typed_data` signs only the digest the caller confirmed
@@ -20,7 +27,10 @@ use std::sync::OnceLock;
 use fc_evm::{Transaction, ViewRequest, checksum_address, parse_bytes, to_hex};
 use fc_keys::Secp256k1Key;
 use fc_protocol::error::{ErrorBody, ErrorCode};
+use fc_protocol::message::Context;
 use fc_vault::state::VaultState;
+
+use crate::approvals::{After, Approvals, Clocks, Signed};
 use serde::Serialize;
 use serde_json::value::RawValue;
 use serde_json::{Map, Value, json};
@@ -223,9 +233,46 @@ fn string<'a>(object: &'a Map<String, Value>, field: &str) -> Result<&'a str, Er
         .ok_or_else(|| invalid(format!("{field}: expected a string")))
 }
 
+/// What a signing method needs beside its params: the approvals it checks
+/// an authorization against, the caller, and the clocks.
+pub struct Checks<'a> {
+    pub approvals: &'a mut Approvals,
+    pub context: &'a Context,
+    pub clocks: Clocks,
+}
+
+/// The methods that take an `authorization`.
+const AUTHORIZED: [&str; 3] = ["sign.transaction", "sign.message", "sign.typed_data"];
+
+/// An account key's index.
+fn account_index(key: KeyRef) -> Result<u32, ErrorBody> {
+    match key {
+        KeyRef::Account(index) => Ok(index),
+        _ => Err(crate::vault::internal()),
+    }
+}
+
+/// Checks the request's `authorization`, if it has one, for what it signs
+/// (design 0012: APR-3 checks one when present).
+fn authorize(
+    checks: &mut Checks<'_>,
+    fields: &Map<String, Value>,
+    signed: Signed<'_>,
+) -> Result<After, ErrorBody> {
+    match fields.get("authorization") {
+        None => Ok(After::Nothing),
+        Some(authorization) => {
+            checks
+                .approvals
+                .authorize(checks.context, authorization, signed, checks.clocks)
+        }
+    }
+}
+
 /// Handles one of [`METHODS`]; returns the JSON result, as written.
 pub fn handle(
     state: &VaultState,
+    checks: &mut Checks<'_>,
     method: &str,
     params: Option<&str>,
 ) -> Result<Box<RawValue>, ErrorBody> {
@@ -233,12 +280,34 @@ pub fn handle(
     // ethers signs and the approval UI shows (#87).
     let params: Value =
         fc_evm::parse_json(params.unwrap_or("{}")).map_err(|_| invalid("Invalid parameters"))?;
+    // A presented token is burnt however the request ends (design 0012,
+    // "Tokens"): one the check spent is already gone.
+    let presented = AUTHORIZED
+        .contains(&method)
+        .then(|| crate::approvals::presented_token(&params, true))
+        .flatten();
+    let result = handle_parsed(state, checks, method, &params);
+    if let Some(token) = presented {
+        checks.approvals.burn(&token);
+    }
+    result
+}
+
+fn handle_parsed(
+    state: &VaultState,
+    checks: &mut Checks<'_>,
+    method: &str,
+    params: &Value,
+) -> Result<Box<RawValue>, ErrorBody> {
+    if AUTHORIZED.contains(&method) {
+        crate::approvals::page_context(checks.context)?;
+    }
     match method {
         "sign.typed_data" => {
             let fields = object(
-                &params,
+                params,
                 &["key", "typed_data", "expected_hash"],
-                &["primary_type", "chain_id"],
+                &["primary_type", "chain_id", "authorization"],
             )?;
             let key = key_ref(&fields["key"], Allowed::AccountsOnly)?;
             let expected: [u8; 32] = parse_bytes(string(fields, "expected_hash")?, "expected_hash")
@@ -253,15 +322,25 @@ pub fn handle(
                     "typed data hash is not the confirmed one (expected_hash)",
                 ));
             }
+            let after = authorize(
+                checks,
+                fields,
+                Signed::TypedData {
+                    account: account_index(key)?,
+                    fields,
+                    hash: &hashed.hash,
+                },
+            )?;
             let view = view_value(hashed.view)?;
             let signature = sign_with(state, key, &hashed.hash)?;
+            checks.approvals.signed(after);
             raw(&SignedView {
                 signature: to_hex(&signature),
                 view: &view,
             })
         }
         "typed_data.hash" => {
-            let fields = object(&params, &["typed_data"], &["primary_type", "chain_id"])?;
+            let fields = object(params, &["typed_data"], &["primary_type", "chain_id"])?;
             let hashed = typed_data_view(fields)?;
             let view = view_value(hashed.view)?;
             raw(&HashedView {
@@ -269,28 +348,51 @@ pub fn handle(
                 view: &view,
             })
         }
-        _ => other(state, method, &params).and_then(|result| raw(&result)),
+        _ => other(state, checks, method, params).and_then(|result| raw(&result)),
     }
 }
 
 /// The methods without a view.
-fn other(state: &VaultState, method: &str, params: &Value) -> Result<Value, ErrorBody> {
+fn other(
+    state: &VaultState,
+    checks: &mut Checks<'_>,
+    method: &str,
+    params: &Value,
+) -> Result<Value, ErrorBody> {
     match method {
         "sign.transaction" => {
-            let fields = object(params, &["key", "tx"], &[])?;
+            let fields = object(params, &["key", "tx"], &["authorization"])?;
             let key = key_ref(&fields["key"], Allowed::AccountsOnly)?;
-            let prepared = Transaction::from_json(&fields["tx"])
-                .and_then(|tx| tx.prepare())
-                .map_err(evm_error)?;
+            let tx = Transaction::from_json(&fields["tx"]).map_err(evm_error)?;
+            let prepared = tx.prepare().map_err(evm_error)?;
+            let after = authorize(
+                checks,
+                fields,
+                Signed::Transaction {
+                    account: account_index(key)?,
+                    tx_json: &fields["tx"],
+                    tx: &tx,
+                },
+            )?;
             let signature = sign_with(state, key, &prepared.digest())?;
+            checks.approvals.signed(after);
             let signed = prepared.finish(&signature).map_err(evm_error)?;
             Ok(json!({ "raw": to_hex(&signed.raw), "hash": to_hex(&signed.hash) }))
         }
         "sign.message" => {
-            let fields = object(params, &["key", "message"], &[])?;
+            let fields = object(params, &["key", "message"], &["authorization"])?;
             let key = key_ref(&fields["key"], Allowed::AccountsOnly)?;
             let message = parse_bytes(string(fields, "message")?, "message").map_err(evm_error)?;
+            let after = authorize(
+                checks,
+                fields,
+                Signed::Message {
+                    account: account_index(key)?,
+                    message: &fields["message"],
+                },
+            )?;
             let signature = sign_with(state, key, &fc_evm::eip191_digest(&message))?;
+            checks.approvals.signed(after);
             Ok(json!({ "signature": to_hex(&signature) }))
         }
         "swarm.sign_soc" => {

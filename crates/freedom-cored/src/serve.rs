@@ -134,6 +134,13 @@ pub enum Event {
     /// after the hello, for the dweb thread: outside the frame credits,
     /// under the reader's stream cap.
     Stream(transport::StreamMark),
+    /// The chain thread served `chain.fee_reference`'s reply to main's
+    /// request `id` (its payload): the chain's fee evidence for the
+    /// approvals (design 0012, "The fee check").
+    FeeReference {
+        id: u64,
+        payload: Box<[u8]>,
+    },
 }
 
 // A stream mark's slot here is within what the reader charges its entry.
@@ -181,6 +188,11 @@ const CAPABILITIES: &[&str] = &[
     "naming.resolve_tezos",
     "naming.invalidate_content",
     "naming.invalidate_tezos",
+    // Design 0012: approval tokens and Safe approvals (APR-3).
+    "approval.issue",
+    "approval.discard",
+    "approval.spend",
+    "approval.end",
     "dweb.open",
     // Design 0009: verified fetches, whose bodies stream.
     "dweb.verify",
@@ -466,6 +478,9 @@ pub fn run(options: &Options) -> Exit {
                 if !thread.send(dweb::In::Stream(mark), None) {
                     break Exit::Internal;
                 }
+            }
+            Ok(Event::FeeReference { id, payload }) => {
+                core.vault.fee_answered(id, &payload);
             }
             Err(RecvTimeoutError::Timeout) => {}
             Err(RecvTimeoutError::Disconnected) => break Exit::Ok,
@@ -1145,7 +1160,7 @@ impl Core {
                 }
             }
             method if Vault::handles(method) => {
-                let outs = self.vault.request(id, method, params);
+                let outs = self.vault.request(id, method, params, context);
                 self.dispatch(outs)
             }
             method if naming::handles(method) => {
@@ -1168,6 +1183,9 @@ impl Core {
                 }
             }
             method if chain::handles(method) => {
+                if method == "chain.fee_reference" {
+                    self.vault.fee_asked(id, params);
+                }
                 let params = match params.map(|p| RawValue::from_string(p.to_owned())) {
                     Some(Ok(params)) => Some(params),
                     Some(Err(_)) => return Flow::Exit(Exit::Internal),

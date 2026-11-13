@@ -10,7 +10,7 @@ use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
 
 use base64::Engine as _;
-use common::{Core, Wire, dirs, fragmented, request, spawn};
+use common::{Core, Wire, dirs, fragmented, request, shell_request, spawn};
 use serde_json::{Value, json};
 
 const MIB: usize = 1 << 20;
@@ -661,6 +661,81 @@ fn a_fee_reference() {
             "generation": 1,
         })
     );
+}
+
+/// Design 0012, "The fee check": the fee reference the core served is the
+/// approvals' evidence. A wallet send above three times its quote gets no
+/// token without `fee_ack` (the header, from 2023, is too old to count),
+/// but a phone account's, which picks its own fees, isn't judged.
+#[test]
+fn a_served_fee_reference_judges_a_send_at_minting() {
+    let (_root, mut core) = core();
+    reference_chain(&mut core);
+    // Main mints a wallet send, as `shell`.
+    let issue = |core: &mut Core, id: u64, params: Value| {
+        core.send(&shell_request(id, "approval.issue", params));
+        response_to(core, id)
+    };
+    let send = |max_fee: &str| {
+        json!({ "kind": "wallet-send", "account": 0, "payload": { "tx": {
+            "type": 2, "chain_id": "1", "gas_limit": "21000",
+            "to": "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913", "value": "1", "data": "0x",
+            "max_fee_per_gas": max_fee, "max_priority_fee_per_gas": "1000000000",
+        } } })
+    };
+    // Before any reference: nothing to compare with.
+    let before = issue(&mut core, 4, send("7000000000"));
+    assert_eq!(
+        before["result"]["fee_check"]["comparable"], false,
+        "{before}"
+    );
+    core.send(&request(
+        5,
+        "chain.fee_reference",
+        json!({ "chain_id": 1, "deadline_ms": 30_000 }),
+    ));
+    let (reply, _) = serve(&mut core, 5, |request| {
+        let endpoint = request["params"]["endpoint"].as_str().unwrap_or("");
+        Some(
+            match (request["method"].as_str(), rpc_method(request).as_str()) {
+                (Some("shell.verified"), _) => json!({ "result": { "result": {
+                    "number": "0x1312d00",
+                    "timestamp": "0x6553f100",
+                    "baseFeePerGas": "0x3b9aca00",
+                } } }),
+                (_, "eth_gasPrice") if endpoint == "a" => rpc_result(r#""0x3b9aca00""#),
+                (_, "eth_gasPrice") => rpc_result(r#""0x77359400""#),
+                (_, "eth_maxPriorityFeePerGas") if endpoint == "a" => rpc_result(r#""0x5f5e100""#),
+                (_, "eth_maxPriorityFeePerGas") => rpc_result(r#""0xbebc200""#),
+                (_, other) => panic!("{other}"),
+            },
+        )
+    });
+    assert_eq!(reply["result"]["quote"]["maxFeePerGas"], "1900000000");
+    let above = issue(&mut core, 6, send("7000000000"));
+    assert_eq!(above["error"]["code"], "not_authorized", "{above}");
+    assert_eq!(above["error"]["data"]["reason"], "fee_check");
+    let verdict = &above["error"]["data"]["fee_check"];
+    assert_eq!(verdict["basis"], "quote");
+    assert_eq!(verdict["ratio"], "3.7");
+    assert_eq!(verdict["max_cost"], "147000000000000");
+    let mut acknowledged = send("7000000000");
+    acknowledged["fee_ack"] = json!(true);
+    let minted = issue(&mut core, 7, acknowledged);
+    assert_eq!(minted["result"]["fee_check"]["above"], true, "{minted}");
+    assert!(minted["result"]["token"].is_string());
+    let mut phone = send("7000000000");
+    phone["phone"] = json!(true);
+    let minted = issue(&mut core, 8, phone);
+    assert!(minted["result"]["token"].is_string(), "{minted}");
+    assert!(minted["result"].get("fee_check").is_none());
+    let mut not_phone = send("7000000000");
+    not_phone["phone"] = json!(false);
+    let refused = issue(&mut core, 9, not_phone);
+    assert_eq!(refused["error"]["data"]["reason"], "fee_check", "{refused}");
+    let within = issue(&mut core, 10, send("2000000000"));
+    assert_eq!(within["result"]["fee_check"]["ratio"], "1.1", "{within}");
+    assert_eq!(within["result"]["fee_check"]["auto_approve"], true);
 }
 
 #[test]

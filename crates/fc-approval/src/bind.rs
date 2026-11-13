@@ -108,7 +108,7 @@ pub struct Page {
 /// | `sign-message` | the account's index | `{ message }`: `sign.message`'s bytes, as hex |
 /// | `sign-typed-data` | the account's index | `{ typed_data, primary_type?, chain_id? }`, as `sign.typed_data` takes them |
 /// | `safe-send` | the Safe's index | `{ safe, chain_id, tx: { to, value, data } }`: the Safe's address and the SafeTx |
-/// | `safe-message` | the Safe's index | `{ method, params }`: the dApp's request |
+/// | `safe-message` | the Safe's index | `{ safe, chain_id, method, params }`: the Safe's address and chain, and the dApp's request |
 /// | `intent-resend` | none | `{ intent_id, chain_id, sender, nonce, hash }` |
 /// | `intent-replace` | none | `{ intent_id, sender, tx }`: `tx` as `sign.transaction` takes it, its `nonce` required and bound |
 /// | `intent-close` | none | `{ intent_id, chain_id, sender, nonce, hashes }` |
@@ -230,7 +230,14 @@ pub fn bind(request: &Request<'_>, limits: &Limits) -> Result<Binding, Error> {
             })
         }
         Kind::SafeMessage => {
-            let fields = object(payload, "payload", &["method", "params"], &[])?;
+            let fields = object(
+                payload,
+                "payload",
+                &["safe", "chain_id", "method", "params"],
+                &[],
+            )?;
+            let safe = address(&fields["safe"], "safe")?;
+            let chain_id = chain(&fields["chain_id"], "chain_id")?;
             let method = fields["method"]
                 .as_str()
                 .ok_or_else(|| invalid("Signature request is required"))?;
@@ -238,6 +245,8 @@ pub fn bind(request: &Request<'_>, limits: &Limits) -> Result<Binding, Error> {
                 return Err(invalid("Signature request is required"));
             }
             json!({
+                "safe": safe,
+                "chain_id": chain_id,
                 "method": method,
                 "params_sha256": hex32(&canonical::digest(&fields["params"])),
             })
@@ -319,7 +328,7 @@ fn page_facts(page: &Page) -> Result<Value, Error> {
 }
 
 /// `value` as an object with exactly these members.
-fn object<'a>(
+pub(crate) fn object<'a>(
     value: &'a Value,
     what: &str,
     required: &[&str],
@@ -353,7 +362,7 @@ fn account(value: Option<&Value>) -> Result<u32, Error> {
 }
 
 /// A quantity string, decimal or `0x` hex, as `sign.transaction` reads one.
-fn quantity(value: &Value, field: &str) -> Result<U256, Error> {
+pub(crate) fn quantity(value: &Value, field: &str) -> Result<U256, Error> {
     value
         .as_str()
         .and_then(fc_evm::parse_unsigned)
@@ -389,7 +398,7 @@ fn address(value: &Value, field: &str) -> Result<String, Error> {
 }
 
 /// `0x` hex bytes, as `sign.*` reads them.
-fn bytes(value: &Value, field: &str) -> Result<Vec<u8>, Error> {
+pub(crate) fn bytes(value: &Value, field: &str) -> Result<Vec<u8>, Error> {
     let text = value
         .as_str()
         .ok_or_else(|| invalid(format!("Invalid {field}")))?;

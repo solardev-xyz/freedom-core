@@ -18,7 +18,7 @@
 //! 640 bits: a reply's decimals have at most 78 digits, and a
 //! transaction's fields are 256-bit quantities.
 
-use fc_evm::U256;
+use fc_evm::{Transaction, U256};
 use serde_json::Value;
 
 /// The threshold: a fee above three times the reference.
@@ -153,6 +153,22 @@ pub struct Fees {
     pub max_priority_fee_per_gas: Option<U256>,
     pub gas_price: Option<U256>,
     pub gas_limit: Option<U256>,
+}
+
+impl Fees {
+    /// The fees `tx` is signed with.
+    pub fn of(tx: &Transaction) -> Fees {
+        let (max_fee_per_gas, max_priority_fee_per_gas) = match tx.eip1559_fees() {
+            Some((max_fee, priority)) => (Some(*max_fee), Some(*priority)),
+            None => (None, None),
+        };
+        Fees {
+            max_fee_per_gas,
+            max_priority_fee_per_gas,
+            gas_price: tx.gas_price().copied(),
+            gas_limit: Some(*tx.gas_limit()),
+        }
+    }
 }
 
 /// The verdict on a transaction's fees (`judgeFees`), for the screen and
@@ -309,6 +325,23 @@ fn ratio_text(fee: &wide::Wide, reference: &wide::Wide) -> String {
     } else {
         format!("{whole}.{rest}")
     }
+}
+
+/// `atApproval`: the check at the moment the user approves a send (design
+/// 0012, "Tokens": at minting), against the chain's evidence now. The
+/// second value is `askAgain`: above the threshold and not `acknowledged`,
+/// so nothing may be minted until the user confirms the fee again.
+pub fn at_approval(
+    fees: &Fees,
+    evidence: Option<&Evidence>,
+    wall_now_ms: u64,
+    monotonic_now_ms: u64,
+    acknowledged: bool,
+) -> (Verdict, bool) {
+    let reference = reference_fee(evidence, wall_now_ms, monotonic_now_ms);
+    let verdict = judge_fees(fees, reference.as_ref());
+    let ask_again = verdict.above && !acknowledged;
+    (verdict, ask_again)
 }
 
 /// `judgeFees`: the verdict on a transaction's fees against the reference.

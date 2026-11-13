@@ -82,6 +82,8 @@ required-features = ["testhooks"]
 [dependencies]
 # Response bodies from main's shell.* executors travel as base64.
 base64 = "0.22.1"
+# Design 0012's approvals: tokens, Safe approvals and the fee check (APR-3).
+fc-approval = { path = "../fc-approval" }
 # The chain-data machine the chain thread drives (design 0005).
 fc-chain = { path = "../fc-chain" }
 # dweb.open's planning (design 0006), on the naming thread.

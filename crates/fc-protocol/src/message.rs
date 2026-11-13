@@ -77,13 +77,19 @@ pub enum CallerKind {
     Page,
 }
 
-/// The attested page behind a `Page` caller (Phase 2).
+/// The attested page behind a `Page` caller (designs 0011 and 0012,
+/// "PageContext").
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PageContext {
     pub origin: String,
     pub top_origin: String,
     pub frame: u64,
     pub navigation: u64,
+    /// Whether the agent holds the page's tab (`isAgentPage`), read as main
+    /// sends the request (design 0012, APR-3). A request without it gets no
+    /// standing rule.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent: Option<bool>,
 }
 
 /// A decoded message, borrowing its raw JSON parts from the frame.

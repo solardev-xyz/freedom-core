@@ -26,7 +26,8 @@
 //   case's own payload by `coreForm` below: names as the core spells them,
 //   a JS safe integer quantity as its decimal string, a message's text as
 //   its UTF-8 bytes in hex (as main normalizes it), a typed-data text as the
-//   text the core parses, a Safe's address beside its index, and everything
+//   text the core parses, a Safe's address beside its index (and a Safe
+//   message's chain, which main reads from the Safe's record), and everything
 //   else as the payload has it, so a value the core's parse refuses stays
 //   refused.
 //   `null` where the reference's input has no form in the core's (a dApp
@@ -58,6 +59,10 @@ const TYPED_HASH = '0x' + 'ab'.repeat(32);
 // The Safe's address the core binds beside its index (0012: "the Safe and
 // its address"); the reference binds the index alone.
 const SAFE_ADDRESSES = { 7: '0x' + '5a'.repeat(19) + '07', 8: '0x' + '5a'.repeat(19) + '08' };
+// A Safe message's chain, which the core binds beside the Safe's index
+// (0012: "the Safe's index, address and chain"); the reference reads it
+// from the Safe's record.
+const SAFE_CHAIN = '100';
 
 const USDC = '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913';
 const OTHER_TO = '0x' + '33'.repeat(20);
@@ -206,7 +211,7 @@ function coreForm(c) {
         tx: p.tx && typeof p.tx === 'object' ? { to: p.tx.to, value: quantity(p.tx.value), data: p.tx.data } : p.tx,
       });
     case 'safe-message':
-      return form({ method: p.method, params: p.params });
+      return form({ safe: SAFE_ADDRESSES[c.account], chain_id: SAFE_CHAIN, method: p.method, params: p.params });
     case 'intent-resend':
       return form({ intent_id: p.intentId, chain_id: quantity(p.chainId), sender: p.sender, nonce: quantity(p.nonce), hash: p.hash });
     case 'intent-replace':

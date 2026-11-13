@@ -23,7 +23,7 @@ use zeroize::Zeroizing;
 
 use crate::bind::{Limits, Request, bind, lower_hex_32};
 use crate::error::{Error, Refusal};
-use crate::kind::{Kind, Scope};
+use crate::kind::{Kind, PageRule, Scope};
 
 /// Two minutes (the reference's `CONFIRMATION_TTL_MS`).
 pub const TOKEN_TTL_MS: u64 = 2 * 60 * 1000;
@@ -74,8 +74,40 @@ pub struct Spent {
     pub typed_data: Option<TypedDataView>,
 }
 
+/// The caller kind that minted a token, for a store that keeps its callers
+/// apart: freedom-cored spends a token only under the caller kind that
+/// minted it (design 0012, API: `approval.spend`). [`Tokens::issue`] and
+/// [`Tokens::spend`] use [`Minter::Unnamed`], which no named caller
+/// spends.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Minter {
+    #[default]
+    Unnamed,
+    Page,
+    Chrome,
+    Shell,
+}
+
+impl Minter {
+    /// Whether this caller kind mints `kind` (design 0012, "Tokens": who
+    /// mints them): `page` the page kinds (a `safe-send` with its site),
+    /// `shell` the wallet kinds (a `safe-send` with none). `chrome` mints
+    /// none: it lost the page kinds at PRQ-5, the wallet kinds at APS-3
+    /// and `x402-payment` at APS-5. [`Minter::Unnamed`], a store without
+    /// callers, mints any.
+    pub fn mints(self, kind: Kind) -> bool {
+        match self {
+            Minter::Unnamed => true,
+            Minter::Page => kind.page_rule() != PageRule::Forbidden,
+            Minter::Chrome => false,
+            Minter::Shell => kind.page_rule() != PageRule::Required,
+        }
+    }
+}
+
 struct Entry {
     token: Zeroizing<[u8; 32]>,
+    minter: Minter,
     kind: Kind,
     scope: Scope,
     digest: [u8; 32],
@@ -125,6 +157,18 @@ impl Tokens {
         now_ms: u64,
         rng: &mut R,
     ) -> Result<Issued, Error> {
+        self.issue_as(Minter::Unnamed, request, now_ms, rng)
+    }
+
+    /// [`Tokens::issue`], for `minter`: the token is spent only by the same
+    /// minter ([`Tokens::spend_as`]).
+    pub fn issue_as<R: TryCryptoRng + ?Sized>(
+        &mut self,
+        minter: Minter,
+        request: &Request<'_>,
+        now_ms: u64,
+        rng: &mut R,
+    ) -> Result<Issued, Error> {
         let binding = bind(request, &self.limits)?;
         let mut token = Zeroizing::new([0u8; 32]);
         rng.try_fill_bytes(&mut token[..])
@@ -140,6 +184,7 @@ impl Tokens {
         let expires_at_ms = now_ms.saturating_add(TOKEN_TTL_MS);
         self.entries.push(Entry {
             token: token.clone(),
+            minter,
             kind: binding.kind(),
             scope: binding.scope(),
             digest: *binding.digest(),
@@ -161,6 +206,36 @@ impl Tokens {
         request: &Request<'_>,
         now_ms: u64,
     ) -> Result<Spent, Refusal> {
+        self.spend_as(Minter::Unnamed, token, request, now_ms)
+    }
+
+    /// [`Tokens::spend`], by `minter`: a token another minter minted is
+    /// refused as another request ([`Refusal::Mismatch`]), and burnt.
+    pub fn spend_as(
+        &mut self,
+        minter: Minter,
+        token: &str,
+        request: &Request<'_>,
+        now_ms: u64,
+    ) -> Result<Spent, Refusal> {
+        self.spend_with(minter, token, now_ms, |kind| {
+            (kind == request.kind).then_some(*request)
+        })
+    }
+
+    /// Spends `token` on the request `request_for` makes for the kind it
+    /// was minted for, burning it first: for a caller that presents a token
+    /// without naming its kind, where more than one kind binds the same
+    /// request (`sign.transaction`'s `wallet-send` and `executor-send`).
+    /// `None` from `request_for` is a kind this request can't be, refused
+    /// as [`Refusal::Mismatch`].
+    pub fn spend_with<'a>(
+        &mut self,
+        minter: Minter,
+        token: &str,
+        now_ms: u64,
+        request_for: impl FnOnce(Kind) -> Option<Request<'a>>,
+    ) -> Result<Spent, Refusal> {
         if token.is_empty() {
             return Err(Refusal::NoToken);
         }
@@ -171,6 +246,11 @@ impl Tokens {
         if entry.expires_at_ms <= now_ms {
             return Err(Refusal::Expired);
         }
+        if entry.minter != minter {
+            return Err(Refusal::Mismatch);
+        }
+        let request = request_for(entry.kind).ok_or(Refusal::Mismatch)?;
+        let request = &request;
         // A site's token is never spent as a wallet's, nor a wallet's as a
         // site's (a `safe-send` is either).
         let scope = if request.page.is_some() {
@@ -339,6 +419,83 @@ mod tests {
         // The RNG's first 32 bytes, in lowercase hex.
         let expected: String = (0..32u8).map(|i| format!("{i:02x}")).collect();
         assert_eq!(*first, expected);
+    }
+
+    /// A token is spent only by the caller kind that minted it, and burnt
+    /// when another presents it.
+    #[test]
+    fn a_token_is_spent_only_by_its_minter() {
+        let payload = json!({ "tx": tx() });
+        let account = json!(0);
+        let send = request(Kind::WalletSend, &account, &payload, None);
+        let mut store = Tokens::new(LIMITS);
+        let mut source = rng();
+        let chrome = store
+            .issue_as(Minter::Chrome, &send, 0, &mut source)
+            .unwrap();
+        let text = chrome.token.to_text();
+        assert_eq!(
+            store.spend_as(Minter::Shell, &text, &send, 0).unwrap_err(),
+            Refusal::Mismatch
+        );
+        assert_eq!(
+            store.spend_as(Minter::Chrome, &text, &send, 0).unwrap_err(),
+            Refusal::UnknownToken
+        );
+        let chrome = store
+            .issue_as(Minter::Chrome, &send, 0, &mut source)
+            .unwrap();
+        assert!(
+            store
+                .spend_as(Minter::Chrome, &chrome.token.to_text(), &send, 0)
+                .is_ok()
+        );
+        // An unnamed minter's token is no named caller's.
+        let unnamed = store.issue(&send, 0, &mut source).unwrap();
+        assert_eq!(
+            store
+                .spend_as(Minter::Shell, &unnamed.token.to_text(), &send, 0)
+                .unwrap_err(),
+            Refusal::Mismatch
+        );
+    }
+
+    /// `spend_with` spends a token as the kind it was minted for, when the
+    /// caller can make that kind's request, and burns it otherwise.
+    #[test]
+    fn spend_with_takes_the_minted_kind() {
+        let payload = json!({ "tx": tx() });
+        let account = json!(0);
+        let executor = request(Kind::ExecutorSend, &account, &payload, None);
+        let mut store = Tokens::new(LIMITS);
+        let mut source = rng();
+        let either = |kind: Kind| {
+            matches!(kind, Kind::WalletSend | Kind::ExecutorSend)
+                .then(|| request(kind, &account, &payload, None))
+        };
+        let issued = store
+            .issue_as(Minter::Shell, &executor, 0, &mut source)
+            .unwrap();
+        let spent = store
+            .spend_with(Minter::Shell, &issued.token.to_text(), 0, either)
+            .unwrap();
+        assert_eq!(spent.kind, Kind::ExecutorSend);
+        let issued = store
+            .issue_as(Minter::Shell, &executor, 0, &mut source)
+            .unwrap();
+        let text = issued.token.to_text();
+        assert_eq!(
+            store
+                .spend_with(Minter::Shell, &text, 0, |_| None)
+                .unwrap_err(),
+            Refusal::Mismatch
+        );
+        assert_eq!(
+            store
+                .spend_with(Minter::Shell, &text, 0, either)
+                .unwrap_err(),
+            Refusal::UnknownToken
+        );
     }
 
     #[test]
@@ -816,6 +973,36 @@ mod tests {
             "g1".repeat(32),
         ] {
             assert!(Handle::parse(&bad).is_err(), "{bad}");
+        }
+    }
+
+    /// `page` mints the page kinds and a site's `safe-send`, `shell` the
+    /// wallet kinds and a wallet's `safe-send`, and `chrome` none.
+    #[test]
+    fn each_caller_mints_only_its_kinds() {
+        for kind in Kind::ALL {
+            let page = matches!(
+                kind,
+                Kind::DappSend
+                    | Kind::SignMessage
+                    | Kind::SignTypedData
+                    | Kind::SafeMessage
+                    | Kind::SafeSend
+            );
+            let wallet = matches!(
+                kind,
+                Kind::WalletSend
+                    | Kind::SafeSend
+                    | Kind::IntentResend
+                    | Kind::IntentReplace
+                    | Kind::IntentClose
+                    | Kind::ExecutorSend
+                    | Kind::X402Payment
+            );
+            assert_eq!(Minter::Page.mints(kind), page, "{}", kind.name());
+            assert_eq!(Minter::Shell.mints(kind), wallet, "{}", kind.name());
+            assert!(!Minter::Chrome.mints(kind), "{}", kind.name());
+            assert!(Minter::Unnamed.mints(kind));
         }
     }
 }

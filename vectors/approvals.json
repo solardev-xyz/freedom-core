@@ -21704,6 +21704,8 @@
       "core": {
         "account": 7,
         "payload": {
+          "safe": "0x5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a07",
+          "chain_id": "100",
           "method": "personal_sign",
           "params": [
             "0xdead",
@@ -21744,6 +21746,8 @@
       "core": {
         "account": 7,
         "payload": {
+          "safe": "0x5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a07",
+          "chain_id": "100",
           "method": "personal_sign",
           "params": [
             "0xbeef",
@@ -21784,6 +21788,8 @@
       "core": {
         "account": 7,
         "payload": {
+          "safe": "0x5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a07",
+          "chain_id": "100",
           "method": "eth_sign",
           "params": [
             "0xdead",
@@ -21824,6 +21830,8 @@
       "core": {
         "account": 8,
         "payload": {
+          "safe": "0x5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a08",
+          "chain_id": "100",
           "method": "personal_sign",
           "params": [
             "0xdead",
@@ -21864,6 +21872,8 @@
       "core": {
         "account": 7,
         "payload": {
+          "safe": "0x5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a07",
+          "chain_id": "100",
           "method": "personal_sign",
           "params": [
             "0xdead",
@@ -21904,6 +21914,8 @@
       "core": {
         "account": 7,
         "payload": {
+          "safe": "0x5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a07",
+          "chain_id": "100",
           "method": "personal_sign",
           "params": [
             "0xdead",
@@ -21944,6 +21956,8 @@
       "core": {
         "account": 7,
         "payload": {
+          "safe": "0x5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a07",
+          "chain_id": "100",
           "method": "personal_sign",
           "params": [
             "0xdead",
@@ -21984,6 +21998,8 @@
       "core": {
         "account": 7,
         "payload": {
+          "safe": "0x5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a07",
+          "chain_id": "100",
           "method": "personal_sign",
           "params": [
             "0xdead",
@@ -22069,6 +22085,8 @@
       "core": {
         "account": 7,
         "payload": {
+          "safe": "0x5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a07",
+          "chain_id": "100",
           "method": "eth_signTypedData_v4",
           "params": [
             "0x5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a07",
@@ -22199,6 +22217,8 @@
       "core": {
         "account": 7,
         "payload": {
+          "safe": "0x5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a07",
+          "chain_id": "100",
           "method": "eth_signTypedData_v4",
           "params": [
             "0x5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a07",
@@ -22277,6 +22297,8 @@
       "core": {
         "account": 7,
         "payload": {
+          "safe": "0x5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a07",
+          "chain_id": "100",
           "method": 5,
           "params": []
         },
@@ -22307,6 +22329,8 @@
       "core": {
         "account": 7,
         "payload": {
+          "safe": "0x5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a07",
+          "chain_id": "100",
           "method": "personal_sign",
           "params": "0xdead"
         },

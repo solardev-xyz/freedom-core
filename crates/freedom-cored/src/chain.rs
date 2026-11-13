@@ -161,7 +161,7 @@ pub fn spawn(
             // The thread's monotonic clock, in milliseconds from its start.
             let started = Instant::now();
             let clock = move || u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
-            let chain = Chain::new(
+            let mut chain = Chain::new(
                 Machine::new(0, crate::testhooks::chain_bounds(Bounds::default())),
                 out,
                 link,
@@ -172,6 +172,14 @@ pub fn spawn(
                 requests,
                 Box::new(clock),
             );
+            // Each fee reference served is the approvals' fee evidence.
+            let loop_events = events.clone();
+            chain.fee_served = Some(Box::new(move |id, payload| {
+                let _ = loop_events.send(Event::FeeReference {
+                    id,
+                    payload: payload.into(),
+                });
+            }));
             let event = match run(&rx, chain) {
                 Stop::Protocol(category) => Event::ProtocolError(category),
                 Stop::Writer => Event::WriterFailed,
@@ -350,6 +358,9 @@ impl Clock {
     }
 }
 
+/// Told of each `chain.fee_reference` reply served.
+type FeeServed = Box<dyn Fn(u64, &[u8]) + Send>;
+
 struct Chain {
     /// Read whenever the machine is brought to now, and again as each
     /// request takes its slot at main, so nothing is dispatched against a
@@ -382,6 +393,10 @@ struct Chain {
     outgoing: BTreeMap<u64, Outgoing>,
     /// Message IDs by the machine's request id.
     by_io: BTreeMap<u64, u64>,
+    /// Told of each `chain.fee_reference` reply served (main's request ID,
+    /// the reply's payload): the event loop keeps it as the approvals' fee
+    /// evidence (design 0012, "The fee check").
+    fee_served: Option<FeeServed>,
     /// Runs as each reply is queued: a test's way to act while this thread
     /// serializes one (PR #57 review, round 4).
     #[cfg(test)]
@@ -427,6 +442,7 @@ impl Chain {
             by_main: BTreeMap::new(),
             outgoing: BTreeMap::new(),
             by_io: BTreeMap::new(),
+            fee_served: None,
             #[cfg(test)]
             on_reply: None,
             #[cfg(test)]
@@ -915,12 +931,16 @@ impl Chain {
             self.by_main.remove(&caller.id);
             log_outcome(&caller, &done);
             let (generation, outcome) = (done.generation, done.outcome);
+            let fee_reference = matches!(done.result, Ok(Success::FeeReference(_)));
             let message = reply_message(caller.id, &done);
             let payload = if message.len() <= MAX_MESSAGE {
                 message.write()
             } else {
                 too_large_payload(caller.id, generation, outcome)
             };
+            if fee_reference && let Some(served) = &self.fee_served {
+                served(caller.id, &payload);
+            }
             drop(message);
             drop(done);
             // Over one frame for a main that didn't offer fragments (or over
