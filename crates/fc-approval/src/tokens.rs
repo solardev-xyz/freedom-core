@@ -23,7 +23,7 @@ use zeroize::Zeroizing;
 
 use crate::bind::{Limits, Request, bind, lower_hex_32};
 use crate::error::{Error, Refusal};
-use crate::kind::{Kind, Scope};
+use crate::kind::{Kind, PageRule, Scope};
 
 /// Two minutes (the reference's `CONFIRMATION_TTL_MS`).
 pub const TOKEN_TTL_MS: u64 = 2 * 60 * 1000;
@@ -89,6 +89,23 @@ pub enum Minter {
     Page,
     Chrome,
     Shell,
+}
+
+impl Minter {
+    /// Whether this caller kind mints `kind` (design 0012, "Tokens": who
+    /// mints them): `page` the page kinds (a `safe-send` with its site),
+    /// `shell` the wallet kinds (a `safe-send` with none). `chrome` mints
+    /// none: it lost the page kinds at PRQ-5, the wallet kinds at APS-3
+    /// and `x402-payment` at APS-5. [`Minter::Unnamed`], a store without
+    /// callers, mints any.
+    pub fn mints(self, kind: Kind) -> bool {
+        match self {
+            Minter::Unnamed => true,
+            Minter::Page => kind.page_rule() != PageRule::Forbidden,
+            Minter::Chrome => false,
+            Minter::Shell => kind.page_rule() != PageRule::Required,
+        }
+    }
 }
 
 struct Entry {
@@ -1082,6 +1099,36 @@ mod tests {
             "g1".repeat(32),
         ] {
             assert!(Handle::parse(&bad).is_err(), "{bad}");
+        }
+    }
+
+    /// `page` mints the page kinds and a site's `safe-send`, `shell` the
+    /// wallet kinds and a wallet's `safe-send`, and `chrome` none.
+    #[test]
+    fn each_caller_mints_only_its_kinds() {
+        for kind in Kind::ALL {
+            let page = matches!(
+                kind,
+                Kind::DappSend
+                    | Kind::SignMessage
+                    | Kind::SignTypedData
+                    | Kind::SafeMessage
+                    | Kind::SafeSend
+            );
+            let wallet = matches!(
+                kind,
+                Kind::WalletSend
+                    | Kind::SafeSend
+                    | Kind::IntentResend
+                    | Kind::IntentReplace
+                    | Kind::IntentClose
+                    | Kind::ExecutorSend
+                    | Kind::X402Payment
+            );
+            assert_eq!(Minter::Page.mints(kind), page, "{}", kind.name());
+            assert_eq!(Minter::Shell.mints(kind), wallet, "{}", kind.name());
+            assert!(!Minter::Chrome.mints(kind), "{}", kind.name());
+            assert!(Minter::Unnamed.mints(kind));
         }
     }
 }

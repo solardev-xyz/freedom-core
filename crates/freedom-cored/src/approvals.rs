@@ -4,12 +4,15 @@
 //! the callers, the vault's clock, the wall clock, the OS's RNG and the fee
 //! evidence the core served.
 //!
-//! - `approval.issue { kind, account, payload, handle?, fee_ack? }` mints a
-//!   token: a page kind only under `page`, with its `PageContext` and 0011's
-//!   handle; a wallet kind only under `chrome` or `shell`. A send is judged
-//!   by the fee check first (`wallet-send`, `dapp-send`, `intent-replace`,
-//!   `executor-send`).
-//! - `approval.discard { token }` burns one.
+//! - `approval.issue { kind, account, payload, handle?, fee_ack?, phone? }`
+//!   mints a token: a page kind only under `page`, with its `PageContext`
+//!   and 0011's handle; a wallet kind only under `shell`. `chrome` mints
+//!   none (APS-3, APS-5). A send is judged by the fee check first
+//!   (`wallet-send`, `dapp-send`, `intent-replace`, `executor-send`), but a
+//!   phone account's (`phone: true` on a `wallet-send` or `dapp-send`),
+//!   which picks its own fees.
+//! - `approval.discard { token }` burns one: a presented token is burnt
+//!   whatever the outcome, a malformed request's included.
 //! - `approval.spend { token, kind, account, payload, handle? }` spends one
 //!   under the caller kind that minted it; a `safe-send`'s or
 //!   `safe-message`'s gives a Safe approval. `{ standing, … }` (a Safe
@@ -51,7 +54,7 @@ use fc_approval::stores::{
     Applied, CapStore, DappStore, Effect, JsValue, RadicleFlag, RadicleStore, StoreKind, SwarmFlag,
     SwarmStore,
 };
-use fc_approval::{Handle, Kind, Limits, Minter, Page, PageRule, Refusal, Request, Tokens};
+use fc_approval::{Handle, Kind, Limits, Minter, Page, Refusal, Request, Tokens};
 use fc_evm::{Transaction, TypedDataView, U256};
 use fc_protocol::error::{ErrorBody, ErrorCode};
 use fc_protocol::message::{self, CallerKind, Context, PageContext};
@@ -117,33 +120,62 @@ impl std::fmt::Debug for Approvals {
 /// The newest `chain.fee_reference` reply the core served for each chain,
 /// read as the fee check's evidence, with the vault-clock time it was asked
 /// for (design 0012, "The fee check").
+///
+/// Which is newest is the order the requests were asked in, by a sequence
+/// this core counts, never their vault-clock times: two asked in the same
+/// millisecond are still ordered. The time is only the evidence's age.
 #[derive(Default)]
 struct FeeEvidence {
-    /// Requests not yet answered: main's ID, the chain, when it was asked.
-    asked: VecDeque<(u64, u64, u64)>,
-    /// Chain → evidence, oldest first.
-    chains: VecDeque<(u64, Evidence)>,
+    /// The next ask's sequence.
+    next: u64,
+    /// Requests not yet answered, oldest first.
+    asked: VecDeque<Asked>,
+    /// Chain → the evidence and its ask's sequence, oldest first.
+    chains: VecDeque<(u64, u64, Evidence)>,
+}
+
+/// A `chain.fee_reference` request not yet answered.
+struct Asked {
+    /// Main's request ID.
+    id: u64,
+    chain_id: u64,
+    /// When it was asked, on the vault's clock.
+    vault_ms: u64,
+    /// Its place in the order of asks.
+    sequence: u64,
 }
 
 impl FeeEvidence {
     fn asked(&mut self, id: u64, chain_id: u64, vault_ms: u64) {
-        self.asked.retain(|(asked, _, _)| *asked != id);
+        self.asked.retain(|asked| asked.id != id);
         while self.asked.len() >= MAX_FEE_ASKED {
             self.asked.pop_front();
         }
-        self.asked.push_back((id, chain_id, vault_ms));
+        let sequence = self.next;
+        self.next = self.next.saturating_add(1);
+        self.asked.push_back(Asked {
+            id,
+            chain_id,
+            vault_ms,
+            sequence,
+        });
     }
 
     fn answered(&mut self, id: u64, result: &Value) {
-        let Some(index) = self.asked.iter().position(|(asked, _, _)| *asked == id) else {
+        let Some(index) = self.asked.iter().position(|asked| asked.id == id) else {
             return;
         };
-        let Some((_, chain_id, requested_at_ms)) = self.asked.remove(index) else {
+        let Some(asked) = self.asked.remove(index) else {
             return;
         };
-        // An older request answered late doesn't replace newer evidence.
-        if let Some(index) = self.chains.iter().position(|(chain, _)| *chain == chain_id) {
-            if self.chains[index].1.requested_at_ms > requested_at_ms {
+        // A request asked before the evidence's, answered late, doesn't
+        // replace it.
+        if let Some(index) = self
+            .chains
+            .iter()
+            .position(|(chain, _, _)| *chain == asked.chain_id)
+        {
+            if self.chains[index].1 > asked.sequence {
                 return;
             }
             self.chains.remove(index);
@@ -151,15 +183,18 @@ impl FeeEvidence {
         while self.chains.len() >= MAX_FEE_CHAINS {
             self.chains.pop_front();
         }
-        self.chains
-            .push_back((chain_id, Evidence::read(result, requested_at_ms)));
+        self.chains.push_back((
+            asked.chain_id,
+            asked.sequence,
+            Evidence::read(result, asked.vault_ms),
+        ));
     }
 
     fn get(&self, chain_id: u64) -> Option<&Evidence> {
         self.chains
             .iter()
-            .find(|(chain, _)| *chain == chain_id)
-            .map(|(_, evidence)| evidence)
+            .find(|(chain, _, _)| *chain == chain_id)
+            .map(|(_, _, evidence)| evidence)
     }
 }
 
@@ -506,9 +541,17 @@ impl Approvals {
         match method {
             "approval.issue" => self.issue(id, params, context, clocks),
             "approval.discard" => {
-                let fields = object(params, &["token"], &[])?;
-                self.tokens.discard(string(fields, "token")?);
-                json_reply(id, &json!({}))
+                // Burnt at its presentation, whatever the outcome: a
+                // malformed request's, or one refused for its context.
+                let presented = presented_token(params, false);
+                let reply = page_context(context)
+                    .and_then(|_| object(params, &["token"], &[]))
+                    .and_then(|fields| string(fields, "token"))
+                    .and_then(|_| json_reply(id, &json!({})));
+                if let Some(token) = presented {
+                    self.tokens.discard(&token);
+                }
+                reply
             }
             "approval.spend" => {
                 let presented = presented_token(params, false);
@@ -519,6 +562,7 @@ impl Approvals {
                 reply
             }
             "approval.end" => {
+                page_context(context)?;
                 let fields = object(params, &["safe"], &[])?;
                 self.safes.end(string(fields, "safe")?);
                 json_reply(id, &json!({}))
@@ -543,19 +587,13 @@ impl Approvals {
         let fields = object(
             params,
             &["kind", "payload"],
-            &["account", "handle", "fee_ack"],
+            &["account", "handle", "fee_ack", "phone"],
         )?;
         let kind = Kind::from_name(string(fields, "kind")?)
             .ok_or_else(|| invalid("unknown confirmation kind"))?;
-        // Design 0012, "Tokens": page kinds only under `page`; wallet kinds
-        // never.
-        let allowed = match (context.caller, kind.page_rule()) {
-            (CallerKind::Page, PageRule::Forbidden) => false,
-            (CallerKind::Page, _) => true,
-            (_, PageRule::Required) => false,
-            (_, _) => true,
-        };
-        if !allowed {
+        // Design 0012, "Tokens": page kinds only under `page`, wallet kinds
+        // only under `shell`.
+        if !minter(context.caller).mints(kind) {
             return Err(forbidden("this caller can't confirm this kind"));
         }
         let page = match token_page(context, fields.get("handle")) {
@@ -571,15 +609,28 @@ impl Approvals {
             Some(Value::Bool(ack)) => *ack,
             Some(_) => return Err(invalid("fee_ack: expected a boolean")),
         };
+        // A phone account's send: main knows the account's kind (it owns
+        // `vault-meta.json` until PRF-6a).
+        let phone = match fields.get("phone") {
+            None => false,
+            Some(Value::Bool(phone)) => *phone,
+            Some(_) => return Err(invalid("phone: expected a boolean")),
+        };
+        if phone && !matches!(kind, Kind::WalletSend | Kind::DappSend) {
+            return Err(invalid("phone: only a wallet-send's or a dapp-send's"));
+        }
         let payload = &fields["payload"];
         // The fee check at minting (design 0012, "The fee check"), as
-        // `wallet:confirm-signing` runs it. A request that doesn't parse is
-        // refused by the binding below.
+        // `wallet:confirm-signing` runs it: never for a phone account,
+        // which picks its own fees. A request that doesn't parse is refused
+        // by the binding below.
         let mut fee_check = None;
-        if matches!(
-            kind,
-            Kind::WalletSend | Kind::DappSend | Kind::IntentReplace | Kind::ExecutorSend
-        ) && let Some(tx) = send_tx(payload)
+        if !phone
+            && matches!(
+                kind,
+                Kind::WalletSend | Kind::DappSend | Kind::IntentReplace | Kind::ExecutorSend
+            )
+            && let Some(tx) = send_tx(payload)
         {
             let evidence = tx
                 .chain_id()
@@ -1243,9 +1294,10 @@ impl Approvals {
         json_reply(id, &reply)
     }
 
-    /// `approval.spend { standing: { chain_id?, paused? }, kind, account,
-    /// payload }`: a Safe message a site's signing rule answers, for the
-    /// Safe's grant; it gives a Safe approval held by the page.
+    /// `approval.spend { standing: { paused? }, kind, account, payload }`: a
+    /// Safe message a site's signing rule answers, for the Safe's grant; it
+    /// gives a Safe approval held by the page. Typed data is judged on the
+    /// payload's chain, the Safe's.
     fn spend_standing(
         &mut self,
         id: u64,
@@ -1258,8 +1310,7 @@ impl Approvals {
             (CallerKind::Page, Some(page)) => page.clone(),
             _ => return Err(forbidden("a standing rule answers only a page")),
         };
-        let standing = object(&fields["standing"], &[], &["chain_id", "paused"])?;
-        let chain = optional_chain_id(standing, "chain_id")?;
+        let standing = object(&fields["standing"], &[], &["paused"])?;
         optional_bool(standing, "paused")?;
         if Kind::from_name(string(fields, "kind")?) != Some(Kind::SafeMessage) {
             return Err(invalid(
@@ -1268,7 +1319,7 @@ impl Approvals {
         }
         let account = account(fields.get("account"), "account")?;
         let payload = &fields["payload"];
-        let signed = fc_approval::safe::standing_signed(payload, chain, limits().max_view_len)
+        let signed = fc_approval::safe::standing_signed(payload, limits().max_view_len)
             .map_err(approval_error)?;
         let approved = Approved::message(payload).map_err(approval_error)?;
         let request = match &signed {
@@ -1916,6 +1967,28 @@ mod tests {
         fees.answered(2, &result("3"));
         fees.answered(1, &result("4"));
         assert_eq!(fees.get(100).unwrap().requested_at_ms, 2_000);
+        // Two asked in one millisecond: the later ask is the newer, and the
+        // earlier one, answered late with a higher quote, doesn't replace
+        // it.
+        fees.asked(3, 100, 2_500);
+        fees.asked(4, 100, 2_500);
+        fees.answered(4, &result("3"));
+        fees.answered(3, &result("9"));
+        assert_eq!(*fees.get(100).unwrap(), Evidence::read(&result("3"), 2_500));
+        // Answered in order, the later ask replaces the earlier.
+        fees.asked(5, 100, 2_600);
+        fees.asked(6, 100, 2_600);
+        fees.answered(5, &result("7"));
+        assert_eq!(*fees.get(100).unwrap(), Evidence::read(&result("7"), 2_600));
+        fees.answered(6, &result("5"));
+        assert_eq!(*fees.get(100).unwrap(), Evidence::read(&result("5"), 2_600));
+        // The same ID asked again is a new ask: its old place is gone.
+        fees.asked(7, 100, 2_700);
+        fees.asked(8, 100, 2_700);
+        fees.asked(7, 100, 2_700);
+        fees.answered(8, &result("2"));
+        fees.answered(7, &result("6"));
+        assert_eq!(*fees.get(100).unwrap(), Evidence::read(&result("6"), 2_700));
         // At most 32 chains: the oldest goes.
         for chain in 0..MAX_FEE_CHAINS as u64 {
             fees.asked(chain + 10, chain + 1_000, 3_000);
@@ -1927,5 +2000,132 @@ mod tests {
             fees.asked(id + 10, 1, 0);
         }
         assert_eq!(fees.asked.len(), MAX_FEE_ASKED);
+    }
+
+    /// A phone account picks its own fees: `phone: true` on a
+    /// `wallet-send` or `dapp-send` mints without the fee check, while the
+    /// same send without it needs `fee_ack`. No other kind takes it.
+    #[test]
+    fn a_phone_send_skips_the_fee_check() {
+        let mut approvals = Approvals::new();
+        approvals.fee_asked(6, Some(r#"{"chain_id":100,"deadline_ms":15000}"#), 9_000);
+        let answer = String::from_utf8(quote("2000000000"))
+            .unwrap()
+            .replace(r#""id":5"#, r#""id":6"#);
+        approvals.fee_answered(6, answer.as_bytes());
+        let wallet = json!({ "kind": "wallet-send", "account": 0, "payload": send() });
+        let refused = approvals
+            .request(1, "approval.issue", &wallet, &shell(), CLOCKS)
+            .unwrap_err();
+        assert_eq!(refused.data.unwrap()["reason"], "fee_check");
+        let mut not_phone = wallet.clone();
+        not_phone["phone"] = json!(false);
+        let refused = approvals
+            .request(1, "approval.issue", &not_phone, &shell(), CLOCKS)
+            .unwrap_err();
+        assert_eq!(refused.data.unwrap()["reason"], "fee_check");
+        let mut phone = wallet.clone();
+        phone["phone"] = json!(true);
+        let minted = reply(
+            &approvals
+                .request(1, "approval.issue", &phone, &shell(), CLOCKS)
+                .unwrap(),
+        );
+        assert_eq!(minted["result"]["token"].as_str().unwrap().len(), 64);
+        assert!(minted["result"].get("fee_check").is_none());
+        // A page's send for a phone account.
+        let site = Context {
+            caller: CallerKind::Page,
+            page: Some(PageContext {
+                origin: "https://app.example".into(),
+                top_origin: "https://app.example".into(),
+                frame: 1,
+                navigation: 1,
+                agent: Some(false),
+            }),
+        };
+        let mut dapp = json!({ "kind": "dapp-send", "account": 0, "payload": send(), "handle": "a1".repeat(32) });
+        let refused = approvals
+            .request(1, "approval.issue", &dapp, &site, CLOCKS)
+            .unwrap_err();
+        assert_eq!(refused.data.unwrap()["reason"], "fee_check");
+        dapp["phone"] = json!(true);
+        let minted = reply(
+            &approvals
+                .request(1, "approval.issue", &dapp, &site, CLOCKS)
+                .unwrap(),
+        );
+        assert!(minted["result"].get("fee_check").is_none());
+        // Not a boolean, or on another kind.
+        let mut text = phone.clone();
+        text["phone"] = json!("yes");
+        let executor =
+            json!({ "kind": "executor-send", "account": 0, "payload": send(), "phone": true });
+        for params in [text, executor] {
+            let refused = approvals
+                .request(1, "approval.issue", &params, &shell(), CLOCKS)
+                .unwrap_err();
+            assert_eq!(refused.code, ErrorCode::InvalidArgument, "{params}");
+        }
+    }
+
+    /// `approval.discard` burns a presented token whatever the outcome: a
+    /// malformed request's, and a page's refused for its missing
+    /// `PageContext`. `approval.end` under `page` needs one too.
+    #[test]
+    fn a_discard_burns_its_token_whatever_the_outcome() {
+        let mut approvals = Approvals::new();
+        let mint = |approvals: &mut Approvals| {
+            let params = json!({ "kind": "wallet-send", "account": 0, "payload": send() });
+            let minted = reply(
+                &approvals
+                    .request(1, "approval.issue", &params, &shell(), CLOCKS)
+                    .unwrap(),
+            );
+            minted["result"]["token"].as_str().unwrap().to_owned()
+        };
+        let bare_page = Context {
+            caller: CallerKind::Page,
+            page: None,
+        };
+        for (extra, context) in [(Some(json!(1)), shell()), (None, bare_page.clone())] {
+            let token = mint(&mut approvals);
+            let mut params = json!({ "token": token });
+            if let Some(extra) = extra {
+                params["extra"] = extra;
+            }
+            let refused = approvals
+                .request(1, "approval.discard", &params, &context, CLOCKS)
+                .unwrap_err();
+            assert_eq!(refused.code, ErrorCode::InvalidArgument);
+            let spend =
+                json!({ "token": token, "kind": "wallet-send", "account": 0, "payload": send() });
+            let refused = approvals
+                .request(1, "approval.spend", &spend, &shell(), CLOCKS)
+                .unwrap_err();
+            assert_eq!(refused.data.unwrap()["reason"], "unknown_token");
+        }
+        assert!(
+            approvals
+                .request(
+                    1,
+                    "approval.end",
+                    &json!({ "safe": "00".repeat(16) }),
+                    &bare_page,
+                    CLOCKS
+                )
+                .is_err()
+        );
+        assert!(
+            approvals
+                .request(
+                    1,
+                    "approval.end",
+                    &json!({ "safe": "00".repeat(16) }),
+                    &shell(),
+                    CLOCKS
+                )
+                .is_ok()
+        );
     }
 }

@@ -11,9 +11,12 @@
 //!   compared in constant time against every open approval.
 //! - **The owners** sign through `sign.typed_data` ([`SafeApprovals::check_owner`]).
 //!   The first signs the SafeTx the token approved (its Safe, chain, `to`,
-//!   `value` and `data`, under the request's nonce) or a SafeMessage over
-//!   the digest computed at the spend; its signature fixes that hash
-//!   ([`SafeApprovals::owner_signed`]), and every later owner signs only it.
+//!   `value` and `data`, under the request's nonce); its signature fixes
+//!   that hash ([`SafeApprovals::owner_signed`]), and every later owner
+//!   signs only it. Every owner of a Safe message signs the SafeMessage of
+//!   the Safe and chain the token approved, over the digest computed at the
+//!   spend: a domain with another `chainId` or `verifyingContract` is
+//!   refused, at the first signature and every later one.
 //! - **The executor** signs `execTransaction` to the Safe, with `value` 0
 //!   and the approved SafeTx, field for field, while the fee check allows it
 //!   ([`SafeApprovals::check_executor`]); its signature ends the approval.
@@ -118,9 +121,13 @@ pub enum Approved {
         value: U256,
         data: Vec<u8>,
     },
-    /// A `safe-message`'s digest: EIP-191's for a message, the EIP-712 hash
-    /// for typed data, as a verifier computes it.
-    Message { digest: [u8; 32] },
+    /// A `safe-message`'s Safe, its chain, and the digest: EIP-191's for a
+    /// message, the EIP-712 hash for typed data, as a verifier computes it.
+    Message {
+        safe: [u8; 20],
+        chain_id: u64,
+        digest: [u8; 32],
+    },
 }
 
 fn invalid(message: impl Into<String>) -> Error {
@@ -133,12 +140,9 @@ impl Approved {
     pub fn send(payload: &Value) -> Result<Approved, Error> {
         let fields = bind::object(payload, "payload", &["safe", "chain_id", "tx"], &[])?;
         let tx = bind::object(&fields["tx"], "tx", &["to", "value", "data"], &[])?;
-        let chain_id = bind::quantity(&fields["chain_id"], "chain_id")?
-            .to_u64()
-            .filter(|n| (1..=MAX_CHAIN_ID).contains(n))
-            .ok_or_else(|| invalid("Invalid chainId"))?;
+        let (safe, chain_id) = safe_and_chain(fields)?;
         Ok(Approved::Send {
-            safe: address(&fields["safe"], "safe")?,
+            safe,
             chain_id,
             to: address(&tx["to"], "to")?,
             value: bind::quantity(&tx["value"], "value")?,
@@ -146,16 +150,25 @@ impl Approved {
         })
     }
 
-    /// A `safe-message`'s payload (`{ method, params }`, the dApp's
-    /// request): the digest its SafeMessage carries, as the reference's
-    /// `requestDigest` computes it (`safe-messages.js`):
+    /// A `safe-message`'s payload (`{ safe, chain_id, method, params }`:
+    /// the Safe's address and chain, which main reads from the Safe's
+    /// record as the reference does before any owner signs, and the dApp's
+    /// request), as its token bound it: the Safe, its chain, and the digest
+    /// its SafeMessage carries, as the reference's `requestDigest` computes
+    /// it (`safe-messages.js`):
     /// - `personal_sign`: EIP-191 over `params[0]`, `0x` hex as its bytes
     ///   (`normalizeMessage`), any other text as its UTF-8;
     /// - `eth_signTypedData_v4`: the EIP-712 hash of `params[1]`, an object
     ///   or its JSON text, with `domain` as `{}` when it is falsy and
     ///   `types` without `EIP712Domain` (`toCoreTypedData`).
     pub fn message(payload: &Value) -> Result<Approved, Error> {
-        let fields = bind::object(payload, "payload", &["method", "params"], &[])?;
+        let fields = bind::object(
+            payload,
+            "payload",
+            &["safe", "chain_id", "method", "params"],
+            &[],
+        )?;
+        let (safe, chain_id) = safe_and_chain(fields)?;
         let params = fields["params"]
             .as_array()
             .ok_or_else(|| invalid("Signature request is required"))?;
@@ -170,10 +183,15 @@ impl Approved {
             Some("eth_signTypedData_v4") => typed_digest(params.get(1))?,
             _ => return Err(invalid("Unsupported signing method for Safe accounts")),
         };
-        Ok(Approved::Message { digest })
+        Ok(Approved::Message {
+            safe,
+            chain_id,
+            digest,
+        })
     }
 
-    fn safe(&self) -> Option<&[u8; 20]> {
+    /// A `safe-send`'s Safe: a Safe has one pending SafeTx.
+    fn sent_safe(&self) -> Option<&[u8; 20]> {
         match self {
             Approved::Send { safe, .. } => Some(safe),
             Approved::Message { .. } => None,
@@ -193,17 +211,18 @@ pub enum SafeSigned {
     TypedData(TypedDataView),
 }
 
-/// A `safe-message`'s payload (`{ method, params }`) as a standing rule
-/// reads it: the message's bytes, or the view of its typed data (`domain`
-/// as `{}` when falsy, `types` without `EIP712Domain`, the payload's
-/// `primaryType`) on the page's chain, `chain_id`. Without a chain the
-/// view can't say the domain's chain is the page's, and warns.
-pub fn standing_signed(
-    payload: &Value,
-    chain_id: Option<u64>,
-    max_view_len: usize,
-) -> Result<SafeSigned, Error> {
-    let fields = bind::object(payload, "payload", &["method", "params"], &[])?;
+/// A `safe-message`'s payload (`{ safe, chain_id, method, params }`) as a
+/// standing rule reads it: the message's bytes, or the view of its typed
+/// data (`domain` as `{}` when falsy, `types` without `EIP712Domain`, the
+/// request's `primaryType`) on the Safe's chain, the one the page asked on.
+pub fn standing_signed(payload: &Value, max_view_len: usize) -> Result<SafeSigned, Error> {
+    let fields = bind::object(
+        payload,
+        "payload",
+        &["safe", "chain_id", "method", "params"],
+        &[],
+    )?;
+    let (_, chain_id) = safe_and_chain(fields)?;
     let params = fields["params"]
         .as_array()
         .ok_or_else(|| invalid("Signature request is required"))?;
@@ -249,7 +268,7 @@ pub fn standing_signed(
                 message,
                 &ViewRequest {
                     primary_type: typed.get("primaryType"),
-                    chain_id: chain_id.map(U256::from_u64),
+                    chain_id: Some(U256::from_u64(chain_id)),
                     max_len: max_view_len,
                 },
             )
@@ -258,6 +277,15 @@ pub fn standing_signed(
         }
         _ => Err(invalid("Unsupported signing method for Safe accounts")),
     }
+}
+
+/// The payload's Safe and its chain, as the binding reads them.
+fn safe_and_chain(fields: &Map<String, Value>) -> Result<([u8; 20], u64), Error> {
+    let chain_id = bind::quantity(&fields["chain_id"], "chain_id")?
+        .to_u64()
+        .filter(|n| (1..=MAX_CHAIN_ID).contains(n))
+        .ok_or_else(|| invalid("Invalid chainId"))?;
+    Ok((address(&fields["safe"], "safe")?, chain_id))
 }
 
 fn address(value: &Value, field: &str) -> Result<[u8; 20], Error> {
@@ -358,7 +386,8 @@ struct Entry {
     id: Zeroizing<[u8; 16]>,
     holder: Holder,
     approved: Approved,
-    /// The SafeTx's or SafeMessage's EIP-712 hash, once an owner signed it.
+    /// The SafeTx's EIP-712 hash, once an owner signed it. A SafeMessage's
+    /// is known from the spend.
     fixed: Option<[u8; 32]>,
 }
 
@@ -405,9 +434,9 @@ impl SafeApprovals {
         let mut id = Zeroizing::new([0u8; 16]);
         rng.try_fill_bytes(&mut id[..])
             .map_err(|_| Error::Randomness)?;
-        if let Some(safe) = approved.safe() {
+        if let Some(safe) = approved.sent_safe() {
             self.entries
-                .retain(|entry| entry.approved.safe() != Some(safe));
+                .retain(|entry| entry.approved.sent_safe() != Some(safe));
         }
         // An id is one entry: drawn again, it replaces the old one.
         if let Some(index) = self.position(&id) {
@@ -451,7 +480,30 @@ impl SafeApprovals {
     ) -> Result<OwnerCheck, SafeRefusal> {
         let entry = self.entry(id, presenter)?;
         let expected = match (&entry.fixed, &entry.approved) {
-            (Some(fixed), _) => *fixed,
+            // The approved Safe's domain, at every owner's signature: the
+            // request can't choose the Safe or the chain.
+            (
+                _,
+                Approved::Message {
+                    safe,
+                    chain_id,
+                    digest,
+                },
+            ) => {
+                let chain_id = U256::from_u64(*chain_id);
+                let domain = typed_data.get("domain").ok_or(SafeRefusal::Mismatch)?;
+                let same_chain = domain.get("chainId").and_then(quantity) == Some(chain_id);
+                let same_safe = domain
+                    .get("verifyingContract")
+                    .and_then(Value::as_str)
+                    .and_then(|text| parse_address(text).ok())
+                    .is_some_and(|verifying| verifying == *safe);
+                if !(same_chain && same_safe) {
+                    return Err(SafeRefusal::Mismatch);
+                }
+                safe_message_hash(safe, &chain_id, digest).ok_or(SafeRefusal::Mismatch)?
+            }
+            (Some(fixed), Approved::Send { .. }) => *fixed,
             (
                 None,
                 Approved::Send {
@@ -470,19 +522,6 @@ impl SafeApprovals {
                 safe_tx_hash(safe, &U256::from_u64(*chain_id), to, value, data, &nonce)
                     .ok_or(SafeRefusal::Mismatch)?
             }
-            (None, Approved::Message { digest }) => {
-                let domain = typed_data.get("domain").ok_or(SafeRefusal::Mismatch)?;
-                let chain_id = domain
-                    .get("chainId")
-                    .and_then(quantity)
-                    .ok_or(SafeRefusal::Mismatch)?;
-                let safe = domain
-                    .get("verifyingContract")
-                    .and_then(Value::as_str)
-                    .and_then(|text| parse_address(text).ok())
-                    .ok_or(SafeRefusal::Mismatch)?;
-                safe_message_hash(&safe, &chain_id, digest).ok_or(SafeRefusal::Mismatch)?
-            }
         };
         if expected != *hash {
             return Err(SafeRefusal::Mismatch);
@@ -494,12 +533,14 @@ impl SafeApprovals {
     }
 
     /// An owner signed what [`SafeApprovals::check_owner`] checked: the
-    /// first fixes the approval's SafeTx or SafeMessage. Nothing, if the
-    /// approval has ended since.
+    /// first fixes a SafeTx's hash (a SafeMessage's is fixed at the spend).
+    /// Nothing, if the approval has ended since.
     pub fn owner_signed(&mut self, check: OwnerCheck) {
         if let Some(index) = self.position(&check.id) {
             let entry = &mut self.entries[index];
-            entry.fixed.get_or_insert(check.hash);
+            if matches!(entry.approved, Approved::Send { .. }) {
+                entry.fixed.get_or_insert(check.hash);
+            }
         }
     }
 
@@ -917,45 +958,121 @@ mod tests {
         );
     }
 
+    /// A Safe message for [`SAFE`] on chain 100.
+    fn safe_message_of(digest: u8) -> Approved {
+        Approved::Message {
+            safe: parse_address(SAFE).unwrap(),
+            chain_id: 100,
+            digest: [digest; 32],
+        }
+    }
+
+    fn message_payload(method: &str, params: Value) -> Value {
+        json!({ "safe": SAFE, "chain_id": "100", "method": method, "params": params })
+    }
+
+    fn envelope(safe: &str, chain_id: Value, digest: &[u8]) -> Value {
+        json!({
+            "domain": { "chainId": chain_id, "verifyingContract": safe },
+            "types": { "SafeMessage": [{ "name": "message", "type": "bytes" }] },
+            "message": { "message": to_hex(digest) },
+        })
+    }
+
     #[test]
     fn a_safe_message_signs_its_digest() {
         let mut safes = SafeApprovals::new();
         let mut rng = Counter(0);
-        let payload = json!({ "method": "personal_sign", "params": ["0x68656c6c6f", SAFE] });
+        let payload = message_payload("personal_sign", json!(["0x68656c6c6f", SAFE]));
         let approved = Approved::message(&payload).unwrap();
         let digest = eip191_digest(b"hello");
-        assert_eq!(approved, Approved::Message { digest });
+        assert_eq!(
+            approved,
+            Approved::Message {
+                safe: parse_address(SAFE).unwrap(),
+                chain_id: 100,
+                digest,
+            }
+        );
         // Its text is the same message (`normalizeMessage`).
-        let text = json!({ "method": "personal_sign", "params": ["hello"] });
+        let text = message_payload("personal_sign", json!(["hello"]));
         assert_eq!(Approved::message(&text).unwrap(), approved);
         let id = safes.record(page(1), approved, &mut rng).unwrap().to_text();
-        let envelope = |safe: &str, digest: &[u8]| {
-            json!({
-                "domain": { "chainId": "100", "verifyingContract": safe },
-                "types": { "SafeMessage": [{ "name": "message", "type": "bytes" }] },
-                "message": { "message": to_hex(digest) },
-            })
-        };
-        let other = envelope(SAFE, &eip191_digest(b"other"));
+        let other = envelope(SAFE, json!("100"), &eip191_digest(b"other"));
         assert_eq!(
             safes
                 .check_owner(&id, Some(&page(1)), &other, &hash_of(&other))
                 .unwrap_err(),
             SafeRefusal::Mismatch
         );
-        let first = envelope(SAFE, &digest);
+        let first = envelope(SAFE, json!("100"), &digest);
         let check = safes
             .check_owner(&id, Some(&page(1)), &first, &hash_of(&first))
             .unwrap();
         safes.owner_signed(check);
-        // Fixed: the same digest under another Safe is another SafeMessage.
-        let moved = envelope(OTHER_SAFE, &digest);
-        assert_eq!(
-            safes
-                .check_owner(&id, Some(&page(1)), &moved, &hash_of(&moved))
-                .unwrap_err(),
-            SafeRefusal::Mismatch
-        );
+        // Every later owner signs the same SafeMessage, its chain spelled
+        // as any quantity.
+        for chain_id in [json!("100"), json!(100), json!("0x64")] {
+            let later = envelope(SAFE, chain_id, &digest);
+            assert!(
+                safes
+                    .check_owner(&id, Some(&page(1)), &later, &hash_of(&later))
+                    .is_ok()
+            );
+        }
+    }
+
+    /// A Safe message is the approved Safe's, on its chain: Safe B's
+    /// address, another chain, or both are refused at the first owner's
+    /// signature and at every later one, each with its own correct hash
+    /// and the approved digest.
+    #[test]
+    fn a_safe_message_is_the_approved_safes() {
+        let mut safes = SafeApprovals::new();
+        let mut rng = Counter(0);
+        let digest = eip191_digest(b"hello");
+        let approved = Approved::message(&message_payload("personal_sign", json!(["hello"])));
+        let id = safes
+            .record(page(1), approved.unwrap(), &mut rng)
+            .unwrap()
+            .to_text();
+        let mut elsewhere = vec![
+            envelope(OTHER_SAFE, json!("100"), &digest),
+            envelope(SAFE, json!("1"), &digest),
+            envelope(OTHER_SAFE, json!("1"), &digest),
+        ];
+        // A domain without its chain or its Safe, and none at all.
+        let mut bare = envelope(SAFE, json!("100"), &digest);
+        bare["domain"] = json!({ "verifyingContract": SAFE });
+        elsewhere.push(bare.clone());
+        bare["domain"] = json!({ "chainId": "100" });
+        elsewhere.push(bare.clone());
+        bare.as_object_mut().unwrap().remove("domain");
+        let refused = |safes: &SafeApprovals, elsewhere: &[Value]| {
+            for typed in elsewhere {
+                let hash = typed_data_hash(
+                    typed.get("domain").unwrap_or(&json!({})),
+                    &typed["types"],
+                    &typed["message"],
+                )
+                .unwrap();
+                assert_eq!(
+                    safes
+                        .check_owner(&id, Some(&page(1)), typed, &hash)
+                        .unwrap_err(),
+                    SafeRefusal::Mismatch,
+                    "{typed}"
+                );
+            }
+        };
+        refused(&safes, &elsewhere);
+        refused(&safes, std::slice::from_ref(&bare));
+        let first = envelope(SAFE, json!("100"), &digest);
+        let check = safes
+            .check_owner(&id, Some(&page(1)), &first, &hash_of(&first))
+            .unwrap();
+        safes.owner_signed(check);
+        refused(&safes, &elsewhere);
         assert!(
             safes
                 .check_owner(&id, Some(&page(1)), &first, &hash_of(&first))
@@ -984,19 +1101,43 @@ mod tests {
             json!([SAFE, typed.clone()]),
             json!([SAFE, typed.to_string()]),
         ] {
-            let payload = json!({ "method": "eth_signTypedData_v4", "params": params });
+            let payload = message_payload("eth_signTypedData_v4", params);
             assert_eq!(
                 Approved::message(&payload).unwrap(),
-                Approved::Message { digest: expected }
+                Approved::Message {
+                    safe: parse_address(SAFE).unwrap(),
+                    chain_id: 100,
+                    digest: expected,
+                }
             );
         }
-        for payload in [
-            json!({ "method": "eth_sign", "params": [SAFE, "0x00"] }),
-            json!({ "method": "personal_sign", "params": ["0x6"] }),
-            json!({ "method": "personal_sign", "params": [7] }),
-            json!({ "method": "eth_signTypedData_v4", "params": [SAFE] }),
-            json!({ "method": "personal_sign", "params": "hello" }),
+        let mut refused = vec![
+            message_payload("eth_sign", json!([SAFE, "0x00"])),
+            message_payload("personal_sign", json!(["0x6"])),
+            message_payload("personal_sign", json!([7])),
+            message_payload("eth_signTypedData_v4", json!([SAFE])),
+            message_payload("personal_sign", json!("hello")),
+        ];
+        // The Safe and its chain are required, and checked.
+        let hello = message_payload("personal_sign", json!(["hello"]));
+        for (field, value) in [
+            ("safe", None),
+            ("chain_id", None),
+            ("safe", Some(json!("0x12"))),
+            ("chain_id", Some(json!("0"))),
+            ("chain_id", Some(json!(100))),
+            ("chain_id", Some(json!(format!("{}", MAX_CHAIN_ID + 1)))),
         ] {
+            let mut payload = hello.clone();
+            match value {
+                Some(value) => payload[field] = value,
+                None => {
+                    payload.as_object_mut().unwrap().remove(field);
+                }
+            }
+            refused.push(payload);
+        }
+        for payload in refused {
             assert!(Approved::message(&payload).is_err(), "{payload}");
         }
     }
@@ -1124,8 +1265,12 @@ mod tests {
             )
             .unwrap()
             .to_text();
-        let message = Approved::Message { digest: [7; 32] };
-        let message = safes.record(page(1), message, &mut rng).unwrap().to_text();
+        // A message for the same Safe neither ends its send nor is ended by
+        // a newer one.
+        let message = safes
+            .record(page(1), safe_message_of(7), &mut rng)
+            .unwrap()
+            .to_text();
         let second = safes
             .record(
                 page(1),
@@ -1137,9 +1282,7 @@ mod tests {
         assert!(!safes.end(&first));
         assert_eq!(safes.len(), 3);
         for _ in 0..MAX_SAFE_APPROVALS - 1 {
-            safes
-                .record(page(1), Approved::Message { digest: [1; 32] }, &mut rng)
-                .unwrap();
+            safes.record(page(1), safe_message_of(1), &mut rng).unwrap();
         }
         assert_eq!(safes.len(), MAX_SAFE_APPROVALS);
         // The two oldest went.
@@ -1151,11 +1294,7 @@ mod tests {
             format!(
                 "{:?}",
                 safes
-                    .record(
-                        Holder::Wallet,
-                        Approved::Message { digest: [0; 32] },
-                        &mut rng
-                    )
+                    .record(Holder::Wallet, safe_message_of(0), &mut rng)
                     .unwrap()
             ),
             "SafeId(..)"
@@ -1163,32 +1302,34 @@ mod tests {
     }
 
     /// A Safe message, as a standing rule reads it: a message's bytes, or
-    /// the view of its typed data on the page's chain, which warns without
-    /// one.
+    /// the view of its typed data on the Safe's chain.
     #[test]
     fn a_safe_message_as_a_rule_reads_it() {
-        let message = json!({ "method": "personal_sign", "params": ["hello", "0x11"] });
-        match standing_signed(&message, None, 1 << 16).unwrap() {
+        let safe = "0x1111111111111111111111111111111111111111";
+        let message = json!({ "safe": safe, "chain_id": "100", "method": "personal_sign", "params": ["hello", "0x11"] });
+        match standing_signed(&message, 1 << 16).unwrap() {
             SafeSigned::Message(bytes) => assert_eq!(bytes, b"hello"),
             other => panic!("{other:?}"),
         }
-        let typed = json!({ "method": "eth_signTypedData_v4", "params": ["0x11", {
-            "types": { "EIP712Domain": [{ "name": "chainId", "type": "uint256" }],
-                "Order": [{ "name": "amount", "type": "uint256" }] },
-            "domain": { "chainId": 100 }, "primaryType": "Order", "message": { "amount": "1" },
-        }] });
-        let chain =
-            |chain_id: Option<u64>| match standing_signed(&typed, chain_id, 1 << 16).unwrap() {
-                SafeSigned::TypedData(view) => {
-                    let view: Value = serde_json::from_str(&view.view).unwrap();
-                    view["chain"].clone()
-                }
-                other => panic!("{other:?}"),
-            };
-        assert_eq!(chain(Some(100)), "match");
-        assert_eq!(chain(Some(1)), "mismatch");
-        assert_ne!(chain(None), "match");
-        let other = json!({ "method": "eth_sign", "params": [] });
-        assert!(standing_signed(&other, None, 1 << 16).is_err());
+        let typed = |chain_id: &str| {
+            json!({ "safe": safe, "chain_id": chain_id, "method": "eth_signTypedData_v4", "params": ["0x11", {
+                "types": { "EIP712Domain": [{ "name": "chainId", "type": "uint256" }],
+                    "Order": [{ "name": "amount", "type": "uint256" }] },
+                "domain": { "chainId": 100 }, "primaryType": "Order", "message": { "amount": "1" },
+            }] })
+        };
+        let chain = |chain_id: &str| match standing_signed(&typed(chain_id), 1 << 16).unwrap() {
+            SafeSigned::TypedData(view) => {
+                let view: Value = serde_json::from_str(&view.view).unwrap();
+                view["chain"].clone()
+            }
+            other => panic!("{other:?}"),
+        };
+        assert_eq!(chain("100"), "match");
+        assert_eq!(chain("1"), "mismatch");
+        let other = json!({ "safe": safe, "chain_id": "100", "method": "eth_sign", "params": [] });
+        assert!(standing_signed(&other, 1 << 16).is_err());
+        let unbound = json!({ "method": "personal_sign", "params": ["hello"] });
+        assert!(standing_signed(&unbound, 1 << 16).is_err());
     }
 }

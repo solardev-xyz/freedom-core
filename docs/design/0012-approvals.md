@@ -230,7 +230,7 @@ APR-4 carries a checked authorization into these too. 0016 and 0015 still decide
 | `sign-typed-data` | the account; the EIP-712 hash, which the core computes at minting and returns with the view; a SHA-256 of the whole request as the core parsed it, and one of that view ([below](#typed-data)); the page; the handle | `sign.typed_data` (page), whose `expected_hash` must equal the bound hash |
 | `safe-send`, with a site | the Safe and its address; the SafeTx's chain, `to`, `value` and `data`; the site, as `PageContext.origin`; the page; the handle | `approval.spend` (page), which gives a [Safe approval](#a-pages-safe-and-swarm-signatures) from APR-3 |
 | `safe-send`, with no site | the Safe and its address; the SafeTx's chain, `to`, `value` and `data` | `approval.spend` (chrome or shell), which gives a Safe approval from APR-3 |
-| `safe-message` | the Safe; the method and a digest of its params; the page; the handle | `approval.spend` (page), which gives a Safe approval from APR-3 |
+| `safe-message` | the Safe's index, address and chain, which main reads from the Safe's record at minting, as the reference resolves `safeIndex` before any owner signs; the method and a digest of its params; the page; the handle | `approval.spend` (page), which gives a Safe approval from APR-3: every owner's SafeMessage must name that address and chain |
 | `intent-resend` | the intent's id, chain, sender and nonce, and the hash sent again, from main's record | `approval.spend` (advised) |
 | `intent-replace` | the account that signs it again; the intent's id, sender and nonce, the payment it keeps, and the new fees | `sign.transaction`, at that nonce, with `{ token, intent: { id } }` ([below](#replacing-an-intent)) |
 | `intent-close` | the intent's id, chain, sender and nonce, and every hash, in order | `approval.spend` (advised) |
@@ -308,8 +308,8 @@ Each is today's, evaluated in the core for `PageContext.origin` and pinned by ve
 
 ### The fee check
 0005's check A moves with the tokens and the rules: `fee-check.js`'s `referenceFee` and `judgeFees`, ported with vectors.
-- **The evidence is the core's own:** the newest `chain.fee_reference` reply it served for that chain, aged from when it admitted the request, and at most 60 s old. Main fetches one before the prompt, as it does today. A figure main sends is never used.
-- **At minting:** a send above the threshold gets no token without `fee_ack`, and the reply carries the verdict for the screen.
+- **The evidence is the core's own:** the newest `chain.fee_reference` reply it served for that chain, aged from when it admitted the request, and at most 60 s old. Newest is the order the requests were admitted in, not their times, so an older request answered late never replaces a newer one admitted in the same millisecond. Main fetches one before the prompt, as it does today. A figure main sends is never used.
+- **At minting:** a send above the threshold gets no token without `fee_ack`, and the reply carries the verdict for the screen. A phone account's send (`approval.issue`'s `phone: true`) isn't judged: the phone picks its own fees.
 - **Under a standing rule:** a send with no reference, with one endpoint's reference, or with a fee above the threshold isn't covered.
 
 ## The files (Q10)
@@ -380,10 +380,10 @@ Every method is in `fc-protocol`'s table with its callers. A refusal is `not_aut
 
 | Method | Callers | Params → result |
 |---|---|---|
-| `approval.issue` | page (page kinds, until APR-7); chrome (wallet kinds, until APS-3; `x402-payment` until APS-5); shell (wallet kinds) | `{ kind, account, payload, handle?, fee_ack? }` → `{ token, expires_in_ms, hash?, view?, fee_check? }` |
+| `approval.issue` | page (page kinds, until APR-7); chrome (wallet kinds, until APS-3; `x402-payment` until APS-5); shell (wallet kinds) | `{ kind, account, payload, handle?, fee_ack?, phone? }` → `{ token, expires_in_ms, hash?, view?, fee_check? }`. `phone: true`, only on a `wallet-send` or a `dapp-send`, names a phone account's send, which the fee check skips: main knows the account's kind (`vault-meta.json`, main's until PRF-6a) |
 | `approval.discard` | page, chrome, shell | `{ token }` → `{}` |
 | `approval.end` | page, chrome, shell | `{ safe }` → `{}`: ends a Safe approval; the same answer for one already ended or unknown |
-| `approval.spend` | the caller kind that minted the token; page, for a Safe message a rule answers | `{ token, kind, account, payload, handle? }`, or `{ standing: { chain_id?, paused? }, kind, account, payload }` → `{ bound, safe? }`: the advised kinds, and a `safe-send`'s or `safe-message`'s Safe approval. `chain_id` is the page's chain, which a Safe message's typed data is judged on: without it the view warns |
+| `approval.spend` | the caller kind that minted the token; page, for a Safe message a rule answers | `{ token, kind, account, payload, handle? }`, or `{ standing: { paused? }, kind, account, payload }` → `{ bound, safe? }`: the advised kinds, and a `safe-send`'s or `safe-message`'s Safe approval. A Safe message's typed data is judged on the payload's `chain_id`, the Safe's |
 | `approval.check` | page | `{ request, chain_id?, paused? }` → `{ covered, reason? }`: whether a standing rule would answer, for the choice between a prompt and none. Advice: `sign.*` decides again. `request` is `{ kind, account, account_kind, … }`: `message` with `message` (hex), `typed_data` with `typed_data` and `primary_type?` (viewed on `chain_id`), or `transaction` with `tx` (whose chain `chain_id`, if sent, must be); `account_kind` is `vault`, `ledger`, `phone` or `safe` |
 | `approval.grant` | page (the dApp store until APR-7; never a transaction rule); shell (a manifest's projection) | `{ store, change }` → `{ grant }` |
 | `approval.revoke` | page, chrome, shell | `{ store, key, what }` → `{ revoked }` |

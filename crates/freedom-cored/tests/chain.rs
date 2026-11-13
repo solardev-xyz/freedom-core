@@ -10,7 +10,7 @@ use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
 
 use base64::Engine as _;
-use common::{Core, Wire, dirs, fragmented, request, spawn};
+use common::{Core, Wire, dirs, fragmented, request, shell_request, spawn};
 use serde_json::{Value, json};
 
 const MIB: usize = 1 << 20;
@@ -665,11 +665,17 @@ fn a_fee_reference() {
 
 /// Design 0012, "The fee check": the fee reference the core served is the
 /// approvals' evidence. A wallet send above three times its quote gets no
-/// token without `fee_ack` (the header, from 2023, is too old to count).
+/// token without `fee_ack` (the header, from 2023, is too old to count),
+/// but a phone account's, which picks its own fees, isn't judged.
 #[test]
 fn a_served_fee_reference_judges_a_send_at_minting() {
     let (_root, mut core) = core();
     reference_chain(&mut core);
+    // Main mints a wallet send, as `shell`.
+    let issue = |core: &mut Core, id: u64, params: Value| {
+        core.send(&shell_request(id, "approval.issue", params));
+        response_to(core, id)
+    };
     let send = |max_fee: &str| {
         json!({ "kind": "wallet-send", "account": 0, "payload": { "tx": {
             "type": 2, "chain_id": "1", "gas_limit": "21000",
@@ -678,7 +684,7 @@ fn a_served_fee_reference_judges_a_send_at_minting() {
         } } })
     };
     // Before any reference: nothing to compare with.
-    let before = call(&mut core, 4, "approval.issue", send("7000000000"));
+    let before = issue(&mut core, 4, send("7000000000"));
     assert_eq!(
         before["result"]["fee_check"]["comparable"], false,
         "{before}"
@@ -706,7 +712,7 @@ fn a_served_fee_reference_judges_a_send_at_minting() {
         )
     });
     assert_eq!(reply["result"]["quote"]["maxFeePerGas"], "1900000000");
-    let above = call(&mut core, 6, "approval.issue", send("7000000000"));
+    let above = issue(&mut core, 6, send("7000000000"));
     assert_eq!(above["error"]["code"], "not_authorized", "{above}");
     assert_eq!(above["error"]["data"]["reason"], "fee_check");
     let verdict = &above["error"]["data"]["fee_check"];
@@ -715,10 +721,19 @@ fn a_served_fee_reference_judges_a_send_at_minting() {
     assert_eq!(verdict["max_cost"], "147000000000000");
     let mut acknowledged = send("7000000000");
     acknowledged["fee_ack"] = json!(true);
-    let minted = call(&mut core, 7, "approval.issue", acknowledged);
+    let minted = issue(&mut core, 7, acknowledged);
     assert_eq!(minted["result"]["fee_check"]["above"], true, "{minted}");
     assert!(minted["result"]["token"].is_string());
-    let within = call(&mut core, 8, "approval.issue", send("2000000000"));
+    let mut phone = send("7000000000");
+    phone["phone"] = json!(true);
+    let minted = issue(&mut core, 8, phone);
+    assert!(minted["result"]["token"].is_string(), "{minted}");
+    assert!(minted["result"].get("fee_check").is_none());
+    let mut not_phone = send("7000000000");
+    not_phone["phone"] = json!(false);
+    let refused = issue(&mut core, 9, not_phone);
+    assert_eq!(refused["error"]["data"]["reason"], "fee_check", "{refused}");
+    let within = issue(&mut core, 10, send("2000000000"));
     assert_eq!(within["result"]["fee_check"]["ratio"], "1.1", "{within}");
     assert_eq!(within["result"]["fee_check"]["auto_approve"], true);
 }

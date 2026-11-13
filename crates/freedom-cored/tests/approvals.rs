@@ -122,8 +122,12 @@ fn safe_tx(safe: &str, nonce: u64) -> Value {
 }
 
 fn safe_message(safe: &str, digest: &str) -> Value {
+    safe_message_on(safe, "100", digest)
+}
+
+fn safe_message_on(safe: &str, chain_id: &str, digest: &str) -> Value {
     json!({
-        "domain": { "chainId": "100", "verifyingContract": safe },
+        "domain": { "chainId": chain_id, "verifyingContract": safe },
         "types": { "SafeMessage": [{ "name": "message", "type": "bytes" }] },
         "message": { "message": digest },
     })
@@ -174,8 +178,8 @@ fn token_of(reply: &Value) -> String {
     result(reply)["token"].as_str().unwrap().to_owned()
 }
 
-/// Page kinds only under `page`, wallet kinds never; a page caller needs
-/// its `PageContext` and the handle.
+/// Page kinds only under `page`, wallet kinds only under `shell`, and
+/// `chrome` none; a page caller needs its `PageContext` and the handle.
 #[test]
 fn each_caller_mints_only_its_kinds() {
     let (_root, mut core) = unlocked();
@@ -226,15 +230,21 @@ fn each_caller_mints_only_its_kinds() {
         "invalid_argument",
         None,
     );
-    // A wallet's handle is refused; a wallet send without one mints.
+    // A wallet's handle is refused; a wallet send without one mints, under
+    // shell only.
     let mut wallet = json!({ "kind": "wallet-send", "account": 0, "payload": { "tx": send_tx() }, "handle": HANDLE });
     refused(
-        &issue(&mut core, &mut id, &chrome(), wallet.clone()),
+        &issue(&mut core, &mut id, &shell(), wallet.clone()),
         "invalid_argument",
         None,
     );
     wallet.as_object_mut().unwrap().remove("handle");
-    let minted = issue(&mut core, &mut id, &chrome(), wallet);
+    refused(
+        &issue(&mut core, &mut id, &chrome(), wallet.clone()),
+        "forbidden",
+        None,
+    );
+    let minted = issue(&mut core, &mut id, &shell(), wallet);
     assert_eq!(token_of(&minted).len(), 64);
     assert_eq!(result(&minted)["expires_in_ms"], 120_000);
     // Without a fee reference, the check has nothing to compare with.
@@ -242,6 +252,38 @@ fn each_caller_mints_only_its_kinds() {
     let minted = issue(&mut core, &mut id, &site(), with_handle);
     assert_eq!(token_of(&minted).len(), 64);
     assert!(result(&minted).get("fee_check").is_none());
+    // Chrome mints no wallet kind (APS-3) and no x402 payment (APS-5):
+    // what shell mints, chrome is refused, and so is every other wallet
+    // kind, before its payload is read.
+    for (kind, payload) in [
+        ("wallet-send", json!({ "tx": send_tx() })),
+        ("executor-send", json!({ "tx": send_tx() })),
+        ("safe-send", safe_send(SAFE)),
+    ] {
+        let params = json!({ "kind": kind, "account": 0, "payload": payload });
+        refused(
+            &issue(&mut core, &mut id, &chrome(), params.clone()),
+            "forbidden",
+            None,
+        );
+        assert_eq!(
+            token_of(&issue(&mut core, &mut id, &shell(), params)).len(),
+            64
+        );
+    }
+    for kind in [
+        "intent-resend",
+        "intent-replace",
+        "intent-close",
+        "x402-payment",
+    ] {
+        let params = json!({ "kind": kind, "payload": {} });
+        refused(
+            &issue(&mut core, &mut id, &chrome(), params),
+            "forbidden",
+            None,
+        );
+    }
     // Unknown kinds and members.
     let unknown = json!({ "kind": "x402-cap-update", "account": 0, "payload": {} });
     refused(
@@ -381,20 +423,21 @@ fn a_page_token_signs_only_its_document() {
 }
 
 /// A presented token is burnt however the request ends: a malformed
-/// request, a locked vault, a discard.
+/// request, a locked vault, a discard, a malformed discard and a page's
+/// discard without its `PageContext`.
 #[test]
 fn a_presented_token_is_burnt_whatever_the_outcome() {
     let (_root, mut core) = unlocked();
     let mut id = 10;
     let mint = |core: &mut Core, id: &mut u64| {
         let params = json!({ "kind": "wallet-send", "account": 0, "payload": { "tx": send_tx() } });
-        token_of(&issue(core, id, &chrome(), params))
+        token_of(&issue(core, id, &shell(), params))
     };
     let sign = |core: &mut Core, id: &mut u64, tx: Value, token: &str| {
         call_as(
             core,
             id,
-            &chrome(),
+            &shell(),
             "sign.transaction",
             json!({ "key": account(0), "tx": tx, "authorization": { "token": token } }),
         )
@@ -429,12 +472,44 @@ fn a_presented_token_is_burnt_whatever_the_outcome() {
         "not_authorized",
         Some("unknown_token"),
     );
-    // Under shell, though chrome minted it.
+    // A discard with another member, and a page's without its
+    // PageContext: refused, and the token burnt all the same.
+    for (params, context) in [
+        (json!({ "extra": 1 }), shell()),
+        (json!({}), json!({ "caller": "page" })),
+    ] {
+        let token = mint(&mut core, &mut id);
+        let mut params = params;
+        params["token"] = json!(token);
+        refused(
+            &call_as(&mut core, &mut id, &context, "approval.discard", params),
+            "invalid_argument",
+            None,
+        );
+        refused(
+            &sign(&mut core, &mut id, send_tx(), &token),
+            "not_authorized",
+            Some("unknown_token"),
+        );
+    }
+    // A page's end needs its PageContext too.
+    refused(
+        &call_as(
+            &mut core,
+            &mut id,
+            &json!({ "caller": "page" }),
+            "approval.end",
+            json!({ "safe": "00".repeat(16) }),
+        ),
+        "invalid_argument",
+        None,
+    );
+    // Under chrome, though shell minted it.
     let token = mint(&mut core, &mut id);
     let reply = call_as(
         &mut core,
         &mut id,
-        &shell(),
+        &chrome(),
         "sign.transaction",
         json!({ "key": account(0), "tx": send_tx(), "authorization": { "token": token } }),
     );
@@ -518,22 +593,22 @@ fn a_wallet_safe_approval_covers_its_owners_and_executor() {
     let (_root, mut core) = unlocked();
     let mut id = 10;
     let params = json!({ "kind": "safe-send", "account": 0, "payload": safe_send(SAFE) });
-    let token = token_of(&issue(&mut core, &mut id, &chrome(), params.clone()));
+    let token = token_of(&issue(&mut core, &mut id, &shell(), params.clone()));
     let mut spend = params.clone();
     spend["token"] = json!(token);
     // Spent only by the caller kind that minted it.
     refused(
-        &call_as(&mut core, &mut id, &shell(), "approval.spend", spend),
+        &call_as(&mut core, &mut id, &chrome(), "approval.spend", spend),
         "not_authorized",
         Some("mismatch"),
     );
-    let token = token_of(&issue(&mut core, &mut id, &chrome(), params.clone()));
+    let token = token_of(&issue(&mut core, &mut id, &shell(), params.clone()));
     let mut spend = params.clone();
     spend["token"] = json!(token);
     let spent = call_as(
         &mut core,
         &mut id,
-        &chrome(),
+        &shell(),
         "approval.spend",
         spend.clone(),
     );
@@ -541,7 +616,7 @@ fn a_wallet_safe_approval_covers_its_owners_and_executor() {
     let safe = result(&spent)["safe"].as_str().unwrap().to_owned();
     assert_eq!(safe.len(), 32);
     refused(
-        &call_as(&mut core, &mut id, &chrome(), "approval.spend", spend),
+        &call_as(&mut core, &mut id, &shell(), "approval.spend", spend),
         "not_authorized",
         Some("unknown_token"),
     );
@@ -723,24 +798,37 @@ fn a_site_safe_approval_is_its_documents() {
             .is_string()
     );
 
-    // A Safe message: its digest is EIP-191's of `hello`.
-    let message = json!({ "kind": "safe-message", "account": 0, "handle": HANDLE,
+    // A Safe message: its digest is EIP-191's of `hello`, for the Safe and
+    // chain main read from the Safe's record. Without them, no token.
+    let mut message = json!({ "kind": "safe-message", "account": 0, "handle": HANDLE,
         "payload": { "method": "personal_sign", "params": ["0x68656c6c6f", SAFE] } });
+    refused(
+        &issue(&mut core, &mut id, &site(), message.clone()),
+        "invalid_argument",
+        None,
+    );
+    message["payload"]["safe"] = json!(SAFE);
+    message["payload"]["chain_id"] = json!("100");
     let spent = spend_as(&mut core, &mut id, &site(), &message);
     let safe = result(&spent)["safe"].as_str().unwrap().to_owned();
     let digest = "0x50b2c43fd39106bafbba0da34fc430e1f91e3c96ea2acee2bc34119f92b37750";
     let other = "0x".to_owned() + &"00".repeat(32);
-    refused(
-        &owner(
-            &mut core,
-            &mut id,
-            &site(),
-            safe_message(SAFE, &other),
-            &safe,
-        ),
-        "not_authorized",
-        Some("mismatch"),
-    );
+    // Another digest; and the approved digest for Safe B, on another
+    // chain, or both: refused at the first owner's signature and at a
+    // later one.
+    let elsewhere = [
+        safe_message(SAFE, &other),
+        safe_message(OTHER_SAFE, digest),
+        safe_message_on(SAFE, "1", digest),
+        safe_message_on(OTHER_SAFE, "1", digest),
+    ];
+    for typed in &elsewhere {
+        refused(
+            &owner(&mut core, &mut id, &site(), typed.clone(), &safe),
+            "not_authorized",
+            Some("mismatch"),
+        );
+    }
     assert!(
         result(&owner(
             &mut core,
@@ -751,20 +839,24 @@ fn a_site_safe_approval_is_its_documents() {
         ))["signature"]
             .is_string()
     );
-    refused(
-        &owner(
-            &mut core,
-            &mut id,
-            &site(),
-            safe_message(OTHER_SAFE, digest),
-            &safe,
-        ),
-        "not_authorized",
-        Some("mismatch"),
+    for typed in &elsewhere {
+        refused(
+            &owner(&mut core, &mut id, &site(), typed.clone(), &safe),
+            "not_authorized",
+            Some("mismatch"),
+        );
+    }
+    let later = owner(
+        &mut core,
+        &mut id,
+        &site(),
+        safe_message(SAFE, digest),
+        &safe,
     );
+    assert!(result(&later)["signature"].is_string());
     // A Safe message a standing rule answers: with no file, none does.
     let standing = json!({ "standing": {}, "kind": "safe-message", "account": 0,
-        "payload": { "method": "personal_sign", "params": ["0x01"] } });
+        "payload": { "safe": SAFE, "chain_id": "100", "method": "personal_sign", "params": ["0x01"] } });
     refused(
         &call_as(
             &mut core,
