@@ -15,6 +15,9 @@
 //! - [`windows::file_id`] and [`windows::file_index`]: a directory's
 //!   identity, for `fc-service`'s `OpenDir` (design 0010, D5: the import's
 //!   roots, checked again once confined);
+//! - [`windows::owned_by_current_user`]: whether this process's user owns
+//!   a permission file `freedom-cored` reads, from its handle (design 0012,
+//!   "The files (Q10)", freedom-core#360);
 //! - [`windows::open_dir_at`]: a directory opened or made relative to its
 //!   parent's handle, never through a reparse point, for `fc-service`'s
 //!   profile gate's lock directory (design 0013, "The lock");
