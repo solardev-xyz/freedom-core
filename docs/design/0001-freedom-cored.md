@@ -185,9 +185,10 @@ Electron main (profile P) ──spawn──▶ freedom-cored serve --data-dir <i
   - Main binds its pending-request map, timers and event handlers to the child's generation, a counter local to main. A late callback from a retired child is ignored.
 - **Exactly one terminal response per request:** a result, or an error such as `cancelled` or `deadline`. The core owns deadlines (see below). Main keeps every pending entry, even after its own caller has gone away, until that terminal response arrives. So a slow reply is never a protocol error; only an unsolicited or a second response is.
 - **Handshake:**
-  - The first message must be main's `core.hello`: `{ protocol: 1, shell_version, auto_lock_ms, node_roots?, grant_root }`. Main sends `auto_lock_ms = 900000` (15 minutes), as `vault.js` does today.
+  - The first message must be main's `core.hello`: `{ protocol: 1, shell_version, auto_lock_ms, node_roots?, grant_root? }`. Main sends `auto_lock_ms = 900000` (15 minutes), as `vault.js` does today.
   - `node_roots: { bee?, radicle? }` gives each node's root as an absolute path: Bee's `data_dir`, Radicle's `home`. The core tightens the node identity files under those roots ([Existing files](#writes-and-durability)). A root that isn't absolute is ignored, and so is the whole field in an older core.
   - `grant_root` gives the profile's `userData` as an absolute path, from [0012](0012-approvals.md#the-files-q10)'s APR-3. The core takes over the four permission files there, in today's format, opening them under this design's reading rules: a regular file the user owns, no symlink, a size bound.
+    - **Optional while the files move:** a hello without it starts the core as before, with no grant store: the `approval.*` calls that read or write one answer `no_grant_root`, and everything else works. Main sends it from the step that moves the first permission file into the core (0012's APB-2), so an APR-3 core can be pinned first. An older core ignores the field.
   - The core replies `{ protocol: 1, core_version, capabilities }`, or with `protocol_mismatch`.
   - Main and core ship pinned together, so a mismatch is a packaging bug, and main fails loudly.
 - **Caller context:** main fills it in and never takes it from the renderer. Kinds use shell-neutral names, so a Chromium browser process can fill them in later.

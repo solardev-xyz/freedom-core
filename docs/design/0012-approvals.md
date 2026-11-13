@@ -310,7 +310,7 @@ Each is today's, evaluated in the core for `PageContext.origin` and pinned by ve
 ## The files (Q10)
 
 **Decided: older builds still read the files in Stage 1** ([Q10](#decided-questions)), **so the core takes the four over in place.**
-- **Where:** `core.hello` gains `grant_root`, the profile's `userData` as an absolute path, beside `node_roots`. The core opens the four files there under 0001's reading rules: a regular file the user owns, no symlink, a size bound.
+- **Where:** `core.hello` gains `grant_root`, the profile's `userData` as an absolute path, beside `node_roots`. The core opens the four files there under 0001's reading rules: a regular file the user owns, no symlink, a size bound. The field is optional while the files move: without it the core has no grant store, the `approval.*` calls that read or write one answer `no_grant_root`, and the rest works; main sends it from APB-2, so APR-3's core can be pinned first.
 - **The format** is today's, byte for byte: the same keys, `JSON.stringify(…, null, 2)`'s text, and JS's key order (insertion order, as each store's operations leave it). Vectors pin the text after each operation.
 - **Writes** are 0001's single-file writes: a temp file, fsync, a rename, the directory flushed, mode `0600`. Each store has one writer: from its APB step on, main reads and writes it only through the core.
 - **Bounds** (proposed): 4 MiB (4,194,304 bytes) per file, 4,096 keys per store, 256 transaction rules per key, `autoApprove.transactions` and `autoApprove.limited.transactions` counted together. A file exactly at each bound is read and written. A write that would pass one is refused (`invalid_argument`), and the store is unchanged. A file past one is read as unreadable.
@@ -532,7 +532,7 @@ One PR per step: the core's against `main`, the browser's against `integration/r
 
 With Q3 and Q8 decided, 0012 amends:
 - **0002, Non-goals:** "Approval and policy" reads: "Stage 1 trusts main, which shows the prompts. From 0012 the core keeps the tokens, grants and standing rules, and refuses a page's signature without a check it made itself." "Policy moves with the Chromium work" goes. The *Callers* bullet admits `page` on the three EVM signing methods and on `swarm.sign_soc`, and `shell` signs a `SafeTx`, a `SafeMessage` or an `execTransaction` only with a Safe approval or a token that binds it.
-- **0001, Messages:** `page` is admitted on the methods in [PageContext](#pagecontext); `not_authorized` joins the request errors; `core.hello` takes `grant_root`.
+- **0001, Messages:** `page` is admitted on the methods in [PageContext](#pagecontext); `not_authorized` joins the request errors; `core.hello` takes an optional `grant_root` (absent: `no_grant_root` from the grant calls).
 - **0011:** `PageContext` gains `agent` and `transport_key`, and its internal issuer becomes a caller of `approval.issue`, until APR-7, when the core mints the page kinds itself. From APR-5 a prompt's handle record also keeps the core's `prompt` id: main answers each `approval.request` only with a decision on the handle it opened for it, echoes the prompt id and the handle, and answers `closed` when that handle closes. A token still never reaches a renderer.
 
 ## Options weighed
