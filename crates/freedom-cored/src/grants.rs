@@ -123,10 +123,13 @@ enum Read {
 
 /// Reads `path` under 0001's rules: a regular file, opened without
 /// following a symlink and judged on the open handle, owned by the user,
-/// and no more than [`MAX_FILE_BYTES`]. On Windows there is no owner check
-/// yet: the default root's per-user `%APPDATA%` ACL protects the file, as
-/// 0001 has it, and design 0012 requires a check before APB-1 sends
-/// `{ standing }` (freedom-core#360), for split roots.
+/// and no more than [`MAX_FILE_BYTES`]. On Windows the owner is read from
+/// the handle too (freedom-core#360), so a file another account planted in
+/// a split root (`--profile-dir`) reads as empty, as does one whose owner
+/// can't be read; an elevated administrator's own files, which Windows may
+/// give to the Administrators group, count as the user's
+/// ([`fc_sys::windows::owned_by_current_user`]). A file the user owns that
+/// another account may still edit is 0001's owner-only DACL follow-up.
 fn read_file(path: &Path) -> Read {
     let file = match fsx::open_regular(path, false) {
         Ok(fsx::Regular::File(file)) => file,
@@ -139,6 +142,16 @@ fn read_file(path: &Path) -> Read {
         match file.metadata() {
             Ok(metadata) if metadata.uid() == rustix::process::getuid().as_raw() => {}
             _ => return Read::Unreadable,
+        }
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::io::AsHandle;
+        if !matches!(
+            fc_sys::windows::owned_by_current_user(file.as_handle()),
+            Ok(true)
+        ) {
+            return Read::Unreadable;
         }
     }
     match fsx::read_at_most(&file, MAX_FILE_BYTES as u64) {

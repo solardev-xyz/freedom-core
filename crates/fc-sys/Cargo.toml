@@ -50,7 +50,10 @@ libc = "0.2"
 
 # GetDriveTypeW, SetErrorMode and WerSetFlags; a file's identity
 # (GetFileInformationByHandleEx and GetFileInformationByHandle, in
-# Storage_FileSystem); a directory opened or made relative to its parent's
+# Storage_FileSystem); its owner (GetSecurityInfo, in Security_Authorization)
+# against the process token's (OpenProcessToken, GetTokenInformation,
+# EqualSid: Threading and Security), freed with LocalFree (Foundation); a
+# directory opened or made relative to its parent's
 # handle (NtCreateFile: the Wdk features, and System_IO for its status
 # block); and confinement's job object and process mitigation policies
 # (design 0010, "Windows"): JobObjects and Threading for the calls,
@@ -63,6 +66,7 @@ windows-sys = { version = "0.61", features = [
     "Wdk_Storage_FileSystem",
     "Win32_Foundation",
     "Win32_Security",
+    "Win32_Security_Authorization",
     "Win32_Storage_FileSystem",
     "Win32_System_Diagnostics_Debug",
     "Win32_System_ErrorReporting",

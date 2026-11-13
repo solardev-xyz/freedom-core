@@ -1,12 +1,12 @@
 //! Design 0012's grant stores through the real binary (APR-3b): the hello's
 //! `grant_root` and `grant_moved`; the four files read from APR-3, main's
 //! own until each moves (`not_moved`, nothing in `grant_root` touched); a
-//! moved file written atomically, `0600`, renamed aside when unreadable,
-//! within the bounds, with one `approval.changed` per change and the
-//! failed-write rule at each step; today's rules answering until `dapp`
-//! moves; a flagged `dapp-send`'s rule; an `intent-replace` spent at
-//! `sign.transaction`; and a page's SOC checked against its Swarm grant
-//! (APR-3c).
+//! moved file written atomically, `0600`, renamed aside when unreadable
+//! (on Windows, another account's file too), within the bounds, with one
+//! `approval.changed` per change and the failed-write rule at each step;
+//! today's rules answering until `dapp` moves; a flagged `dapp-send`'s
+//! rule; an `intent-replace` spent at `sign.transaction`; and a page's SOC
+//! checked against its Swarm grant (APR-3c).
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
@@ -407,6 +407,87 @@ fn main_s_file_answers_at_the_next_check() {
         not_covered("no_rule")
     );
     assert!(!dir.join("dapp-permissions.json.unreadable").exists());
+}
+
+/// Makes the SID `sid` `path`'s owner (`icacls /setowner`), which takes an
+/// administrator's restore privilege, as CI's runner has.
+#[cfg(windows)]
+fn set_owner(path: &Path, sid: &str) {
+    let output = std::process::Command::new("icacls")
+        .arg(path)
+        .arg("/setowner")
+        .arg(format!("*{sid}"))
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "icacls /setowner {sid} (run as an administrator): {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+}
+
+/// The dApp store's records, as the chrome reads them.
+#[cfg(windows)]
+fn dapp_records(core: &mut Core, id: &mut u64) -> Value {
+    let records = call_as(
+        core,
+        id,
+        &chrome(),
+        "approval.grants",
+        json!({ "store": "dapp" }),
+    );
+    result(&records)["records"].clone()
+}
+
+/// On Windows, as on Unix, a file another account owns reads as an empty
+/// store (freedom-core#360): main's stays where it is, and a moved one is
+/// renamed aside at the hello, as any moved file that can't be read.
+/// BUILTIN\Users stands for the other account: a group the user is in, and
+/// never the user.
+#[cfg(windows)]
+#[test]
+fn a_file_another_account_owns_reads_as_empty() {
+    // Before the move: read, then not once another account owns it.
+    let root = tempfile::tempdir().unwrap();
+    let mut core = start(root.path(), &[], true, &[]);
+    let dir = core.grant_root.clone();
+    let file = dir.join("dapp-permissions.json");
+    let mut id = 10;
+    std::fs::write(&file, today_dapp()).unwrap();
+    assert_eq!(
+        check_message(&mut core, &mut id, &site()),
+        json!({ "covered": true })
+    );
+    assert_eq!(dapp_records(&mut core, &mut id)[0]["walletIndex"], 0);
+    set_owner(&file, "S-1-5-32-545");
+    assert_eq!(
+        check_message(&mut core, &mut id, &site()),
+        not_covered("no_rule")
+    );
+    assert_eq!(dapp_records(&mut core, &mut id), json!([]));
+    assert_eq!(std::fs::read_to_string(&file).unwrap(), today_dapp());
+    assert!(!dir.join("dapp-permissions.json.unreadable").exists());
+    drop(core);
+
+    // Moved: renamed aside, the store empty.
+    let root = tempfile::tempdir().unwrap();
+    let dir = root.path().join("userData");
+    std::fs::create_dir_all(&dir).unwrap();
+    let file = dir.join("dapp-permissions.json");
+    std::fs::write(&file, today_dapp()).unwrap();
+    set_owner(&file, "S-1-5-32-545");
+    let mut core = start(root.path(), &["dapp"], true, &[]);
+    let mut id = 10;
+    assert_eq!(dapp_records(&mut core, &mut id), json!([]));
+    assert_eq!(
+        check_message(&mut core, &mut id, &site()),
+        not_covered("no_rule")
+    );
+    assert!(!file.exists());
+    assert_eq!(
+        std::fs::read_to_string(dir.join("dapp-permissions.json.unreadable")).unwrap(),
+        today_dapp()
+    );
 }
 
 /// Before the move, a flagged `dapp-send` signs, writes no rule, and says
