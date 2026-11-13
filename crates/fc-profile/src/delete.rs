@@ -293,9 +293,18 @@ fn overlaps(
             // is the app's: a record at another spelling (`LOCKS`, `locks.`)
             // would go with the app root.
             let first = &dir[app.len()];
+            // For another profile's delete, a folded spelling of a shared
+            // entry is the app's own too (on a volume that folds, it names
+            // the same directory), unless the target is below that very
+            // spelling: on a case-sensitive volume `profiles` is then a
+            // directory of its own, and the target is inside its data.
             let apps_own = match &target {
                 Removes::AppRoot => is_app_root_shared_entry(first.text),
-                Removes::Dir(_) => shared_key(&first.key),
+                Removes::Dir(t) => {
+                    shared_key(&first.key)
+                        && (is_app_root_shared_entry(first.text)
+                            || t.get(app.len()).is_none_or(|own| own.text != first.text))
+                }
             };
             if dir.len() == app.len() + 1 && apps_own {
                 return false;
@@ -652,6 +661,27 @@ mod tests {
             "C:\\fb",
             true,
             &["C:\\fb\\locks.".to_owned()]
+        ));
+    }
+
+    /// Another profile's delete, beside a record at a folded spelling of
+    /// `Profiles`: below that very spelling it is inside the record's data on
+    /// a case-sensitive volume, and refused; below the exact `Profiles` it is
+    /// not (review of #337, round 4).
+    #[test]
+    fn a_folded_shared_spelling_is_a_record_s_own_for_a_target_below_it() {
+        let app = "/app";
+        let p = Style::Posix;
+        let peer = ["/app/profiles".to_owned()];
+        assert!(overlaps(p, app, "/app/profiles/lone", false, &peer));
+        assert!(overlaps(p, app, "/app/profiles/lone/x", false, &peer));
+        assert!(!overlaps(p, app, "/app/Profiles/lone", false, &peer));
+        assert!(!overlaps(
+            p,
+            app,
+            "/app/Profiles/lone",
+            false,
+            &["/app/Profiles".to_owned()]
         ));
     }
 
