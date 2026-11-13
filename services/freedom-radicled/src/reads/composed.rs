@@ -83,6 +83,7 @@ use crate::node::Handle;
 use crate::output::{
     BUILT, Body, Budget, Failure, Json, Refused, Until, composed_read, composed_read_beside,
 };
+use crate::testhooks;
 
 /// The add-on's bounds of a walk: libradicle's `BINDING_READ_BUDGET`, half
 /// the built budget.
@@ -442,8 +443,16 @@ pub fn node_info(
     composed_read(budget, until, |out| {
         let connected_peers = handle.node().connected_peers()?;
         let error;
-        let listing = identity::check_listed(&handle.node(), home, &bounds(until, TODAYS))
-            .and_then(|()| Ok(handle.node().list_repos_bounded(&bounds(until, TODAYS))?));
+        // Two statements, so the check's hold on the node ends before the
+        // listing takes it: a second shared hold under the first waits
+        // behind `rad.unseed` waiting to hold it exclusively, which waits
+        // for the first (#338; `crate::node`: a thread holds the node at
+        // most once).
+        let checked = identity::check_listed(&handle.node(), home, &bounds(until, TODAYS));
+        let listing = checked.and_then(|()| {
+            testhooks::hold_read("node_info");
+            Ok(handle.node().list_repos_bounded(&bounds(until, TODAYS))?)
+        });
         let listed = match listing {
             Ok(repos) => Ok(repos.len()),
             Err(Failure::Refused(Refused::Cancelled)) => {
