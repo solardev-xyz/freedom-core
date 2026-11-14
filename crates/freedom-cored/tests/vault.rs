@@ -112,7 +112,7 @@ fn create_lock_unlock_export_change_delete() {
         json!({ "password_b64": b64("testpass1") }),
     );
     assert_eq!(decoded(&exported["result"]["mnemonic_b64"]), phrase);
-    let signed = core.call(
+    let signed = core.call_shell(
         10,
         "sign.message",
         json!({ "key": { "kind": "account", "index": 0 }, "message": "0x01" }),
@@ -233,7 +233,7 @@ fn compat_exports_are_gone() {
     }
     // Still unlocked: the keys are there, and only sign inside the core.
     id += 1;
-    let signed = core.call(
+    let signed = core.call_shell(
         id,
         "sign.message",
         json!({ "key": { "kind": "account", "index": 0 }, "message": "0x01" }),

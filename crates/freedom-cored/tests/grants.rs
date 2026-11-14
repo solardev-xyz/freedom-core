@@ -1163,7 +1163,8 @@ fn soc_refused(reply: &Value, reason: &str) {
 /// origin, read from main's file at each request: connected for `user`;
 /// for `auto` also `agent` false and the request's flag, `feeds` for a feed
 /// write and `signing` for a raw SOC. Main's own SOCs under `shell` sign
-/// as before; a page's without an authorization too, until APR-4.
+/// as before; a page's without an authorization too, until APR-4c. The
+/// chrome's are refused (APR-4a).
 #[test]
 fn a_page_s_soc_needs_its_swarm_grant() {
     let root = tempfile::tempdir().unwrap();
@@ -1299,15 +1300,16 @@ fn a_page_s_soc_needs_its_swarm_grant() {
     );
     main_writes_swarm(&dir, &swarm_file(&[(SITE, every)]));
 
-    // Main's own SOCs take no Swarm grant: `shell` and `chrome` sign as
-    // before, and are refused one.
+    // Main's own SOCs take no Swarm grant: `shell` signs as before, and is
+    // refused one. The chrome's SOC, which no wallet-kind token binds, is
+    // refused without one (APR-4a).
     signs(&sign_soc(&mut core, &mut id, &shell(), None));
-    signs(&sign_soc(&mut core, &mut id, &chrome(), None));
+    soc_refused(&sign_soc(&mut core, &mut id, &chrome(), None), "no_token");
     for context in [shell(), chrome()] {
         let reply = sign_soc(&mut core, &mut id, &context, soc_auth("user", "feed"));
         refused(&reply, "forbidden");
     }
-    // A page without an authorization signs as before (APR-3; APR-4
+    // A page without an authorization signs as before (APR-3; APR-4c
     // requires one), but not without its `PageContext`.
     signs(&sign_soc(&mut core, &mut id, &site(), None));
     let bare = json!({ "caller": "page" });

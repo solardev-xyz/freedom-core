@@ -1,6 +1,8 @@
 //! The Phase 2 signing methods through the real binary (design 0002): every
 //! vectors/signing.json case for the `abandon` keys, over the wire, plus key
-//! kinds, locking and malformed input.
+//! kinds, locking and malformed input. Each signs as main's own, under
+//! `shell`: a page's and the chrome's signatures need an authorization
+//! (design 0012, APR-4; `tests/enforced.rs`).
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
@@ -90,7 +92,7 @@ fn every_vector_case_over_the_wire() {
                 }
             };
             id += 1;
-            let reply = core.call(id, method, params);
+            let reply = core.call_shell(id, method, params);
             let label = case["id"].as_str().unwrap();
             checked += 1;
             // bee-js signs a chunk with an account key, and the vector
@@ -182,7 +184,7 @@ fn every_vector_case_over_the_wire() {
         let mut send = |method: &str, params: String| {
             id += 1;
             let frame = format!(
-                r#"{{"type":"request","id":{id},"method":"{method}","params":{params},"context":{{"caller":"chrome"}}}}"#
+                r#"{{"type":"request","id":{id},"method":"{method}","params":{params},"context":{{"caller":"shell"}}}}"#
             );
             core.send_raw(&raw_frame(1, frame.as_bytes()));
             core.response(id)
@@ -238,7 +240,7 @@ fn every_vector_case_over_the_wire() {
         params["key"] = key.clone();
         params["expected_hash"] = case["result"]["hash"].clone();
         id += 1;
-        let signed = core.call(id, "sign.typed_data", params);
+        let signed = core.call_shell(id, "sign.typed_data", params);
         assert_eq!(
             hashed["result"]["hash"], case["result"]["hash"],
             "{label}: {hashed}"
@@ -326,7 +328,7 @@ fn typed_data_signs_only_the_confirmed_hash() {
         if let Some(expected) = expected {
             params["expected_hash"] = json!(expected);
         }
-        core.call(id, "sign.typed_data", params)
+        core.call_shell(id, "sign.typed_data", params)
     };
     let signed = sign(&mut core, 5, Some(&hash));
     assert!(signed["result"]["signature"].is_string(), "{signed}");
@@ -406,7 +408,7 @@ fn typed_data_too_large_to_show_is_refused_at_one_bound() {
         ))
     };
     let sign_at = |core: &mut Core, id: u64, data: &Value| {
-        core.call(
+        core.call_shell(
             id,
             "sign.typed_data",
             json!({ "key": account, "typed_data": data, "expected_hash": confirmed(data) }),
@@ -518,14 +520,14 @@ fn bee_and_publisher_keys_sign_only_chunks() {
             ),
         ] {
             id += 1;
-            let reply = core.call(id, method, params);
+            let reply = core.call_shell(id, method, params);
             assert_eq!(
                 reply["error"]["code"], "invalid_argument",
                 "{method} {key}: {reply}"
             );
         }
         id += 1;
-        let soc = core.call(id, "swarm.sign_soc", json!({ "key": key, "identifier": format!("0x{}", "00".repeat(32)), "payload": "0x01" }));
+        let soc = core.call_shell(id, "swarm.sign_soc", json!({ "key": key, "identifier": format!("0x{}", "00".repeat(32)), "payload": "0x01" }));
         assert!(soc["result"]["signature"].is_string(), "{soc}");
     }
 }
@@ -550,7 +552,7 @@ fn account_keys_never_sign_chunks() {
                 json!({ "key": key, "identifier": identifier, "payload": "0x01", "span": "0" }),
             ] {
                 id += 1;
-                let reply = core.call(id, "swarm.sign_soc", params);
+                let reply = core.call_shell(id, "swarm.sign_soc", params);
                 assert_eq!(
                     reply["error"]["code"], "invalid_argument",
                     "locked {locked}, index {index}: {reply}"
@@ -564,7 +566,7 @@ fn account_keys_never_sign_chunks() {
             json!({ "kind": "publisher", "origin_index": 2_147_483_647u64 }),
         ] {
             id += 1;
-            let reply = core.call(
+            let reply = core.call_shell(
                 id,
                 "swarm.sign_soc",
                 json!({ "key": key, "identifier": identifier, "payload": "0x01" }),
@@ -586,13 +588,13 @@ fn locked_vault_and_malformed_requests() {
     // Chunks are signed by publisher and Bee wallet keys only (#89), so a
     // malformed chunk request names one, and fails for its malformation.
     let publisher = json!({ "kind": "publisher", "origin_index": 0 });
-    let reply = core.call(
+    let reply = core.call_shell(
         4,
         "sign.message",
         json!({ "key": account, "message": "0x01" }),
     );
     assert_eq!(reply["error"]["code"], "vault_locked", "{reply}");
-    let reply = core.call(
+    let reply = core.call_shell(
         5,
         "swarm.sign_soc",
         json!({ "key": publisher, "identifier": format!("0x{}", "00".repeat(32)), "payload": "0x01" }),
@@ -639,7 +641,7 @@ fn locked_vault_and_malformed_requests() {
         ),
     ] {
         id += 1;
-        let reply = core.call(id, method, params.clone());
+        let reply = core.call_shell(id, method, params.clone());
         assert_eq!(
             reply["error"]["code"], "invalid_argument",
             "{method} {params}: {reply}"
@@ -701,7 +703,7 @@ fn errors_quoting_malformed_input_stay_small() {
         ("sign.message", unknown),
     ];
     for (id, (method, params)) in (2..).zip(requests) {
-        let reply = core.call(id, method, params);
+        let reply = core.call_shell(id, method, params);
         assert_eq!(reply["error"]["code"], "invalid_argument", "{method}");
         let message = reply["error"]["message"].as_str().unwrap();
         assert!(message.len() < 1024, "{method}: {} bytes", message.len());

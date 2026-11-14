@@ -1,7 +1,8 @@
 //! Design 0012's approvals through the real binary (APR-3a): tokens over
 //! the wire with each caller kind, a page's token bound to its document,
 //! Safe approvals for owners and the executor, and `sign.*` checking an
-//! authorization when one is present.
+//! authorization. That a page's and the chrome's signatures need one
+//! (APR-4a) is `tests/enforced.rs`'s.
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
@@ -309,7 +310,7 @@ fn a_page_token_signs_only_its_document() {
     let plain = call_as(
         &mut core,
         &mut id,
-        &chrome(),
+        &shell(),
         "sign.message",
         json!({ "key": account(0), "message": "0x68656c6c6f" }),
     );
@@ -389,18 +390,13 @@ fn a_page_token_signs_only_its_document() {
         "not_authorized",
         Some("no_token"),
     );
-    // Without an authorization a page still signs (APR-3), with its
-    // PageContext; without one it is refused.
+    // Without an authorization a page's signature is refused (APR-4a), and
+    // without its PageContext it is malformed.
     let bare = json!({ "key": account(0), "message": "0x68656c6c6f" });
-    assert_eq!(
-        result(&call_as(
-            &mut core,
-            &mut id,
-            &site(),
-            "sign.message",
-            bare.clone()
-        ))["signature"],
-        signature
+    refused(
+        &call_as(&mut core, &mut id, &site(), "sign.message", bare.clone()),
+        "not_authorized",
+        Some("no_token"),
     );
     refused(
         &call_as(
