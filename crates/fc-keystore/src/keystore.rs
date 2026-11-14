@@ -583,6 +583,17 @@ mod tests {
     }
 
     #[test]
+    fn unavailable_carries_its_reason() {
+        let error = KeyStoreError::Unavailable(UnavailableReason::new("timeout"));
+        assert_eq!(error.code(), "unavailable");
+        assert_eq!(error.to_string(), "the key store is unavailable: timeout");
+        match error {
+            KeyStoreError::Unavailable(why) => assert_eq!(why.reason(), "timeout"),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
     fn take_wipes_the_source() {
         let mut bytes = [9u8; 32];
         let key = WrapKey::take(&mut bytes);
