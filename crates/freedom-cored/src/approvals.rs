@@ -1,7 +1,8 @@
 //! Design 0012's approvals in the daemon (APR-3a): approval tokens and Safe
 //! approvals over the wire, and the authorization `sign.*` checks, which a
 //! page's and the chrome's signatures need (APR-4a), and a Safe's under
-//! every caller (APR-4b). The decisions are
+//! every caller (APR-4b); a page's SOC needs its Swarm grant (APR-4c). The
+//! decisions are
 //! `fc-approval`'s; this module wires them to
 //! the callers, the vault's clock, the wall clock, the OS's RNG and the fee
 //! evidence the core served.
@@ -51,9 +52,12 @@
 //!   `executor-send`'s signature ends the approval whose SafeTx it
 //!   executes, as the approval's own executor signature does.
 //! - `swarm.sign_soc`'s `authorization` (APR-3c): `{ swarm, soc }` from a
-//!   page, checked against the page's Swarm grant at the same point. Main's
-//!   own SOCs, under `shell`, take none. The chrome's, which no token kind
-//!   binds, are refused; a page's without one still sign until APR-4c.
+//!   page, checked against the page's Swarm grant at the same point. **A
+//!   page's SOC needs it** (APR-4c): without one it is refused `no_token`,
+//!   and where the grant doesn't cover it with the grant's reason, before a
+//!   key is touched. Main's own SOCs, under `shell`, take none and sign on
+//!   main's word. The chrome's, which no token kind binds, are refused, and
+//!   so is a `{ swarm, soc }` from `chrome` or `shell` (`no_rule`).
 //!
 //! - The grant stores (APR-3b; [`crate::grants`] holds the files):
 //!   `approval.check { request, chain_id?, paused? }` asks a site's
@@ -65,6 +69,12 @@
 //!   `approval.forget_account` write one, and answer `not_moved` until its
 //!   file has moved. Each change sends one `approval.changed { store, key
 //!   }`.
+//! - `approval.radicle_write { key }` (#372): a page's Radicle COB write,
+//!   judged with the core's own Radicle grant for its key and counted in
+//!   R-6 when the rule answers it (`Standing::authorize_radicle`). It
+//!   answers `not_moved` until `radicle` is in `grant_moved`, as main's
+//!   limiter counts until then. A revoked Radicle grant forgets the key's
+//!   bucket, as `radicle_disconnect` does in the reference.
 //!
 //! Tokens, Safe approvals and receipts are kept in memory and never logged.
 
@@ -79,8 +89,8 @@ use fc_approval::safe::{
     Approved, ExecutorCheck, Holder, OwnerCheck, SafeApprovals, SafeRefusal, SafeSigned,
 };
 use fc_approval::standing::{
-    AccountKind, DappAsk, DappRequest, Decision, Rules, Send, Signed as RuleSigned, SocApproval,
-    SocAsk, SocRequest, Standing, page_soc,
+    AccountKind, DappAsk, DappRequest, Decision, RadicleAsk, RadicleRequest, Rules, Send,
+    Signed as RuleSigned, SocApproval, SocAsk, SocRequest, Standing, page_soc,
 };
 use fc_approval::stores::{
     Applied, CapStore, DappStore, Effect, JsValue, RadicleFlag, RadicleStore, StoreKind, SwarmFlag,
@@ -98,7 +108,7 @@ use crate::grants::{Grants, StoreFile, WriteFailure, Written};
 use crate::rng::OsRng;
 
 /// The methods this module serves.
-pub const METHODS: [&str; 11] = [
+pub const METHODS: [&str; 12] = [
     "approval.issue",
     "approval.discard",
     "approval.spend",
@@ -107,6 +117,7 @@ pub const METHODS: [&str; 11] = [
     "approval.grant",
     "approval.revoke",
     "approval.touch",
+    "approval.radicle_write",
     "approval.grants",
     "approval.forget_account",
     "approval.remember",
@@ -361,14 +372,19 @@ fn safe_needs_approval() -> ErrorBody {
     )
 }
 
-/// `swarm.sign_soc` without an `authorization`: main's own SOC signs as
-/// before, and a page's too until APR-4c requires its Swarm grant. The
-/// chrome's is refused, as no token kind binds a SOC (Q8: the chrome needs
-/// a wallet-kind token for every signature).
+/// `swarm.sign_soc` without an `authorization` (design 0012, Q8): main's
+/// own SOC, under `shell`, signs on main's word as before. A page's needs
+/// its Swarm grant, presented as `{ swarm, soc }` (APR-4c), and the
+/// chrome's a wallet-kind token, which no kind binds for a SOC: both are
+/// refused before a key is touched.
 pub fn soc_without_authorization(context: &Context) -> Result<(), ErrorBody> {
     match context.caller {
+        CallerKind::Shell => Ok(()),
+        CallerKind::Page => Err(not_authorized(
+            "no_token",
+            "a page's SOC needs its Swarm grant, presented as { swarm, soc }",
+        )),
         CallerKind::Chrome => Err(chrome_needs_token()),
-        CallerKind::Page | CallerKind::Shell => Ok(()),
     }
 }
 
@@ -692,6 +708,7 @@ impl Approvals {
             "approval.grant" => self.grant(id, params, context, clocks),
             "approval.revoke" => self.revoke(id, params, context),
             "approval.touch" => self.touch(id, params, context, clocks),
+            "approval.radicle_write" => self.radicle_write(id, params, context, clocks),
             "approval.grants" => self.records(id, params, clocks),
             "approval.forget_account" => self.forget_account(id, params),
             "approval.remember" => {
@@ -1244,9 +1261,10 @@ impl Approvals {
 
     /// Checks `swarm.sign_soc`'s `authorization`, `{ swarm, soc }`, after
     /// the chunk's public work and before any key is derived (design 0012,
-    /// "A page's SOC"). Only a page presents one: the core reads the page's
-    /// Swarm grant for `PageContext.origin` from the swarm store as it
-    /// stands, main's file until it moves. `swarm` is `user` (main's word
+    /// "A page's SOC"), which a page's SOC needs (APR-4c). Only a page
+    /// presents one (`no_rule` from another caller): the core reads the
+    /// page's Swarm grant for `PageContext.origin` from the swarm store as
+    /// it stands, main's file until it moves. `swarm` is `user` (main's word
     /// that its prompt was answered) or `auto` (the site's flag); `soc`
     /// names the request, `feed` (a feed write) or `raw` (a raw SOC), as
     /// main names the key and the identifier until 0015.
@@ -1270,8 +1288,14 @@ impl Approvals {
             "raw" => SocRequest::Raw,
             _ => return Err(invalid("soc: expected feed or raw")),
         };
+        // A grant answers only a page, as a standing rule does on `sign.*`:
+        // main's own SOC takes none, and the chrome's needs a wallet-kind
+        // token, which no kind binds for a SOC.
         let Some(page) = page_context(context)? else {
-            return Err(forbidden("a Swarm grant answers only a page's SOC"));
+            return Err(not_authorized(
+                "no_rule",
+                "a Swarm grant answers only a page's SOC",
+            ));
         };
         let store = self.grants.view::<SwarmStore>(clocks.wall_ms / 1000);
         let ask = SocAsk {
@@ -1339,6 +1363,15 @@ fn account(value: Option<&Value>, field: &str) -> Result<u32, ErrorBody> {
         .filter(|index| *index <= u64::from(fc_approval::MAX_ACCOUNT))
         .and_then(|index| u32::try_from(index).ok())
         .ok_or_else(|| invalid(format!("{field}: expected an account index")))
+}
+
+/// A standing rule's answer, as `approval.check` and
+/// `approval.radicle_write` give it: `{ covered, reason? }`.
+fn covered(decision: Decision) -> Value {
+    match decision.reason() {
+        None => json!({ "covered": true }),
+        Some(reason) => json!({ "covered": false, "reason": reason.name() }),
+    }
 }
 
 fn rule_clocks(clocks: Clocks) -> fc_approval::standing::Clocks {
@@ -1584,11 +1617,43 @@ impl Approvals {
         if safes && kind != AccountKind::Safe && decision.is_covered() {
             decision = Decision::NotCovered(fc_approval::standing::Reason::NoRule);
         }
-        let reply = match decision.reason() {
-            None => json!({ "covered": true }),
-            Some(reason) => json!({ "covered": false, "reason": reason.name() }),
+        json_reply(id, &covered(decision))
+    }
+
+    /// `approval.radicle_write { key }` (#372): whether a page's Radicle COB
+    /// write goes without a prompt, decided with the core's own Radicle
+    /// grant for its key: connected, outside custody, with the signing grant
+    /// and its rule, and within R-6. Only a write the rule answers is
+    /// counted; over the limit, the write is asked, not refused. A decision,
+    /// not advice: `freedom-radicled` makes the write, and main forwards it
+    /// only when this answers `covered`.
+    fn radicle_write(
+        &mut self,
+        id: u64,
+        params: &Value,
+        context: &Context,
+        clocks: Clocks,
+    ) -> Result<Zeroizing<Vec<u8>>, ErrorBody> {
+        let fields = object(params, &["key"], &[])?;
+        let page = page_context(context)?
+            .ok_or_else(|| forbidden("a standing rule answers only a page"))?;
+        if string(fields, "key")? != page.origin {
+            return Err(forbidden("a page asks only for its own key"));
+        }
+        // R-6 moves with the file (APB-3): until then main's limiter counts.
+        if !self.grants.moved(StoreKind::Radicle) {
+            return Err(not_moved(StoreKind::Radicle));
+        }
+        let ask = RadicleAsk {
+            key: &page.origin,
+            agent: page.agent,
+            request: RadicleRequest::CobWrite,
         };
-        json_reply(id, &reply)
+        let store = self.grants.view::<RadicleStore>(clocks.wall_ms / 1000);
+        let decision = self
+            .standing
+            .authorize_radicle(&store, &ask, clocks.vault_ms);
+        json_reply(id, &covered(decision))
     }
 
     /// `approval.spend { standing: { paused? }, kind, account, payload }`: a

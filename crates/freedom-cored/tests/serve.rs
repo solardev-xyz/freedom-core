@@ -638,6 +638,7 @@ fn only_protocol_2_is_spoken() {
         "approval.grant",
         "approval.revoke",
         "approval.touch",
+        "approval.radicle_write",
         "approval.grants",
         "approval.forget_account",
         "approval.remember",
