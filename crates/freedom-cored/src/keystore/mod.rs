@@ -25,7 +25,7 @@ use std::time::Duration;
 
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD;
-use fc_keystore::{Backend, Blob, Capabilities, ItemId, KeyStoreError};
+use fc_keystore::{Backend, Blob, Capabilities, ItemId, KeyStoreError, UnavailableReason};
 use sha2::{Digest, Sha256};
 
 /// The HPKE `info` of every answer's seal, and the first part of its
@@ -256,7 +256,9 @@ impl Answer {
                 let error = match string(wire.error.as_ref())?.ok_or("answer_form")? {
                     "not_found" => KeyStoreError::NotFound,
                     "cancelled" => KeyStoreError::Cancelled,
-                    "unavailable" => KeyStoreError::Unavailable,
+                    "unavailable" => {
+                        KeyStoreError::Unavailable(known_unavailable(reason.as_deref()))
+                    }
                     "invalidated" => KeyStoreError::Invalidated,
                     "denied" => KeyStoreError::Denied,
                     "backend" => KeyStoreError::Backend(fc_keystore::BackendError::new(
@@ -269,6 +271,23 @@ impl Answer {
             _ => Err("answer_form"),
         }
     }
+}
+
+/// `Unavailable` with a fixed-form reason ([`UnavailableReason`]).
+pub fn unavailable(reason: &'static str) -> KeyStoreError {
+    KeyStoreError::Unavailable(UnavailableReason::new(reason))
+}
+
+/// An `unavailable` answer's reason, as one of the helper's own or main's
+/// `timeout`: anything else, or none, is `helper`.
+fn known_unavailable(reason: Option<&str>) -> UnavailableReason {
+    UnavailableReason::new(match reason {
+        Some("unsupported") => "unsupported",
+        Some("no_keychain") => "no_keychain",
+        Some("read_only") => "read_only",
+        Some("timeout") => "timeout",
+        _ => "helper",
+    })
 }
 
 /// A `backend` answer's reason, as one of the helper's own: anything else
@@ -329,7 +348,7 @@ mod tests {
                 blob: Some(blob),
             },
             Answer::Done,
-            Answer::failed(KeyStoreError::Unavailable, "unsupported"),
+            Answer::failed(unavailable("unsupported"), "unsupported"),
             Answer::Failed {
                 error: KeyStoreError::NotFound,
                 reason: None,

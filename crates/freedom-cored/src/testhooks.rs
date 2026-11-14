@@ -62,6 +62,18 @@
 //!   once it has refused child processes and checked the request, tries to
 //!   start `/usr/bin/true` instead of calling the OS, and answers
 //!   `backend` with `reason` `spawned` or `no_spawn`.
+//! - `FREEDOM_CORED_TEST_KEYSTORE_BACKEND=macos-keychain`: the core's key
+//!   store offers the macOS Keychain's `Unattended` on any OS, as macOS
+//!   does, so a test playing main answers its `shell.keystore` requests
+//!   from a keychain of its own (design 0013, PRF-1c's forgetting tests).
+//!   The helper is unchanged: it still has no backend off macOS.
+//! - `FREEDOM_CORED_TEST_SECRETS_CRASH` names a step of a secrets-file
+//!   change (`before-pending`, `after-pending`, `before-commit`,
+//!   `after-commit`, `before-remove`, `after-remove`, `before-forgotten`,
+//!   `after-forgotten`, and `before-startup`, `after-startup` for the start's
+//!   settling write): there the core exits at once with 99, as if
+//!   killed, the file as that step left it (design 0013, PRF-1: "a crash
+//!   hook before and after each write").
 //! - `FREEDOM_CORED_TEST_RECEIPT_TTL_MS` replaces a device send's receipt's
 //!   10-minute life (design 0012, "A device send's rule"), so a test sees
 //!   one expire over the wire, which has no clock to inject. Read once, as
@@ -184,6 +196,25 @@ pub fn keystore_spawn_probe() -> Option<bool> {
             .status()
             .is_ok(),
     )
+}
+
+#[cfg(feature = "testhooks")]
+pub fn keystore_capabilities(native: fc_keystore::Capabilities) -> fc_keystore::Capabilities {
+    match std::env::var("FREEDOM_CORED_TEST_KEYSTORE_BACKEND").as_deref() {
+        Ok("macos-keychain") => fc_keystore::Capabilities {
+            backend: Some(fc_keystore::Backend::MacosKeychain),
+            unattended: true,
+            user_presence: false,
+        },
+        _ => native,
+    }
+}
+
+#[cfg(feature = "testhooks")]
+pub fn secrets_step(step: &str) {
+    if std::env::var("FREEDOM_CORED_TEST_SECRETS_CRASH").is_ok_and(|s| s == step) {
+        std::process::exit(99);
+    }
 }
 
 #[cfg(feature = "testhooks")]
@@ -456,6 +487,14 @@ pub fn keystore_exit_after_store() -> bool {
 pub fn keystore_spawn_probe() -> Option<bool> {
     None
 }
+
+#[cfg(not(feature = "testhooks"))]
+pub fn keystore_capabilities(native: fc_keystore::Capabilities) -> fc_keystore::Capabilities {
+    native
+}
+
+#[cfg(not(feature = "testhooks"))]
+pub fn secrets_step(_step: &str) {}
 
 #[cfg(not(feature = "testhooks"))]
 pub fn stall(default: Duration) -> Duration {

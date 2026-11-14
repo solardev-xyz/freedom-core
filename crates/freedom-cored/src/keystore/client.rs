@@ -41,7 +41,7 @@ use fc_keystore::{
 };
 use zeroize::Zeroizing;
 
-use super::{Answer, LABEL, MAX_ANSWER_BYTES, Op, associated_data};
+use super::{Answer, LABEL, MAX_ANSWER_BYTES, Op, associated_data, unavailable};
 use crate::requests::{self, Dispatch, Owner, Requests, Start};
 use crate::rng::OsRng;
 use crate::transport::{Allowance, Out};
@@ -85,7 +85,8 @@ pub struct DesktopKeyStore {
 impl DesktopKeyStore {
     /// This OS's key store, through main.
     pub fn new(requests: Arc<Requests>, out: Sender<Out>) -> Arc<Self> {
-        Self::with(super::capabilities(), requests, out, |op| {
+        let capabilities = crate::testhooks::keystore_capabilities(super::capabilities());
+        Self::with(capabilities, requests, out, |op| {
             crate::testhooks::keystore_deadline(op.deadline() + GRACE)
         })
     }
@@ -180,7 +181,7 @@ impl DesktopKeyStore {
             {
                 let mut state = self.state.lock().map_err(|_| internal())?;
                 let Some(out) = state.out.clone() else {
-                    return Err(KeyStoreError::Unavailable);
+                    return Err(unavailable("closed"));
                 };
                 // Under the state's lock, so the answer can't be routed
                 // before its waiter is in place.
@@ -200,7 +201,7 @@ impl DesktopKeyStore {
                     }
                     Dispatch::Full | Dispatch::NoRoom => {}
                     Dispatch::Closed | Dispatch::WriterGone => {
-                        return Err(KeyStoreError::Unavailable);
+                        return Err(unavailable("closed"));
                     }
                     Dispatch::TooLarge | Dispatch::Late => return Err(backend("request")),
                 }
@@ -211,18 +212,22 @@ impl DesktopKeyStore {
             while *count == seen {
                 let left = until.saturating_duration_since(Instant::now());
                 if left.is_zero() {
-                    return Err(KeyStoreError::Unavailable);
+                    return Err(unavailable("timeout"));
                 }
                 count = changed.wait_timeout(count, left).map_err(|_| internal())?.0;
             }
         };
         let relayed = match rx.recv_timeout(until.saturating_duration_since(Instant::now())) {
             Ok(relayed) => relayed,
-            Err(RecvTimeoutError::Timeout | RecvTimeoutError::Disconnected) => {
+            Err(error) => {
                 if let Ok(mut state) = self.state.lock() {
                     state.waiting.remove(&id);
                 }
-                return Err(KeyStoreError::Unavailable);
+                return Err(unavailable(match error {
+                    RecvTimeoutError::Timeout => "timeout",
+                    // Closed while it waited: the core is exiting.
+                    RecvTimeoutError::Disconnected => "closed",
+                }));
             }
         };
         match relayed {
@@ -230,11 +235,9 @@ impl DesktopKeyStore {
             Relayed::TooLong => Err(backend("answer_too_long")),
             // An older main with no executor, or one that ran out of time
             // or closed: no key store answered.
-            Relayed::Error(code)
-                if matches!(code.as_str(), "unknown_method" | "timeout" | "cancelled") =>
-            {
-                Err(KeyStoreError::Unavailable)
-            }
+            Relayed::Error(code) if code == "unknown_method" => Err(unavailable("no_executor")),
+            Relayed::Error(code) if code == "timeout" => Err(unavailable("timeout")),
+            Relayed::Error(code) if code == "cancelled" => Err(unavailable("closed")),
             Relayed::Error(_) => Err(backend("shell_error")),
         }
     }
@@ -370,7 +373,9 @@ impl KeyStore for DesktopKeyStore {
     }
 
     fn create(&self, policy: Policy, label: &Label) -> Result<(WrapKey, Sealed), KeyStoreError> {
-        let backend_kind = self.backend_for(policy).ok_or(KeyStoreError::Unavailable)?;
+        let backend_kind = self
+            .backend_for(policy)
+            .ok_or_else(|| unavailable("unsupported"))?;
         let item = label.item();
         let recipient = reply_pair()?;
         let request = params(
@@ -407,7 +412,7 @@ impl KeyStore for DesktopKeyStore {
             return Err(KeyStoreError::NotFound);
         }
         if self.backend_for(policy).is_none() {
-            return Err(KeyStoreError::Unavailable);
+            return Err(unavailable("unsupported"));
         }
         let item = sealed.item();
         let recipient = reply_pair()?;
@@ -703,7 +708,7 @@ mod tests {
             ),
             (
                 r#"{"ok":false,"error":"unavailable","reason":"timeout"}"#,
-                KeyStoreError::Unavailable,
+                unavailable("timeout"),
             ),
             (
                 r#"{"ok":false,"error":"invalidated"}"#,
@@ -735,8 +740,9 @@ mod tests {
         }
         // Main's own errors.
         for (code, expected) in [
-            ("unknown_method", KeyStoreError::Unavailable),
-            ("timeout", KeyStoreError::Unavailable),
+            ("unknown_method", unavailable("no_executor")),
+            ("timeout", unavailable("timeout")),
+            ("cancelled", unavailable("closed")),
             ("invalid_argument", backend("shell_error")),
         ] {
             let (ks, main) = store(keychain(), long, move |_| Some(Err(code.to_owned())));
@@ -773,12 +779,12 @@ mod tests {
         // dropped.
         let (ks, main) = store(keychain(), short, |_| None);
         let started = Instant::now();
-        assert_eq!(ks.forget(&sealed), Err(KeyStoreError::Unavailable));
+        assert_eq!(ks.forget(&sealed), Err(unavailable("timeout")));
         assert!(started.elapsed() >= Duration::from_millis(200));
         ks.deliver(1, Ok(0..11), br#"{"ok":true}"#);
         // Closing makes later calls Unavailable at once.
         ks.close();
-        assert_eq!(ks.forget(&sealed), Err(KeyStoreError::Unavailable));
+        assert_eq!(ks.forget(&sealed), Err(unavailable("closed")));
         main.join().unwrap();
     }
 
@@ -790,14 +796,14 @@ mod tests {
         // UserPresence isn't offered; without a reason it's refused first.
         assert_eq!(
             ks.create(Policy::UserPresence, &Label::new(item())).err(),
-            Some(KeyStoreError::Unavailable)
+            Some(unavailable("unsupported"))
         );
         let presence =
             Sealed::new(Backend::MacosKeychain, Policy::UserPresence, item(), None).unwrap();
         assert_eq!(ks.open(&presence, None).err(), Some(backend("no_reason")));
         assert_eq!(
             ks.open(&presence, Some(Reason::Export)).err(),
-            Some(KeyStoreError::Unavailable)
+            Some(unavailable("unsupported"))
         );
         // Another OS's key: its item isn't here.
         let foreign =
@@ -820,7 +826,7 @@ mod tests {
         });
         assert_eq!(
             ks.create(Policy::Unattended, &Label::new(item())).err(),
-            Some(KeyStoreError::Unavailable)
+            Some(unavailable("unsupported"))
         );
         let keychain_key =
             Sealed::new(Backend::MacosKeychain, Policy::Unattended, item(), None).unwrap();

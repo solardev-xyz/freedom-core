@@ -72,6 +72,10 @@ name = "profile_confined"
 required-features = ["testhooks"]
 
 [[test]]
+name = "quick_unlock"
+required-features = ["testhooks"]
+
+[[test]]
 name = "radicle_custody"
 required-features = ["testhooks"]
 

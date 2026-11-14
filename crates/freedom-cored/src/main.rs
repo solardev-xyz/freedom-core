@@ -36,6 +36,7 @@ mod nodes;
 mod profile;
 mod requests;
 mod rng;
+mod secrets;
 mod serve;
 mod signing;
 mod storage;

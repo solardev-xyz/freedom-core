@@ -144,6 +144,16 @@ pub const METHODS: &[Method] = &[
     row("vault.create", CS, true, VAULT),
     row("vault.import", CS, true, VAULT),
     row("vault.reconcile", SHELL, false, VAULT),
+    // Design 0013, "The re-wrap": the vault password in the core's key
+    // store. Enroll is main's own, with the password it unsealed; the
+    // chrome calls the rest after main's Touch ID prompt. The secrets file
+    // isn't the vault, and nothing reconciles them: not 0001's mutations.
+    row("quick_unlock.enroll", SHELL, false, VAULT),
+    row("quick_unlock.unlock", CS, false, VAULT),
+    row("quick_unlock.export_mnemonic", CS, false, VAULT),
+    row("quick_unlock.export_private_key", CS, false, VAULT),
+    row("quick_unlock.status", CS, false, NOW),
+    row("quick_unlock.disable", CS, false, VAULT),
     row("nodes.write_identity", CS, true, VAULT),
     row("nodes.op_status", SHELL, false, VAULT),
     // Design 0008, "The sealed release": the Radicle node key, sealed to the
@@ -280,6 +290,7 @@ mod tests {
             "core.hello",
             "core.shutdown",
             "vault.reconcile",
+            "quick_unlock.enroll",
             "dweb.open",
         ] {
             assert_eq!(
