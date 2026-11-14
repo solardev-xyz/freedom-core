@@ -22,6 +22,7 @@
 mod common;
 
 use std::io::Read;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
@@ -546,8 +547,9 @@ fn the_core_refuses_answers_not_its_own_and_gives_up_in_time() {
 
 // ----- The macOS Keychain, in CI's temporary keychain only
 
-/// Whether CI made a temporary keychain the default. Panics if it names
-/// one that isn't the default: then the login keychain would be used.
+/// Whether CI made a temporary keychain the default. Panics, before any
+/// Keychain call, if it names one that isn't the default: then the login
+/// keychain would be used.
 fn temporary_keychain() -> bool {
     if !cfg!(target_os = "macos") {
         return false;
@@ -555,20 +557,136 @@ fn temporary_keychain() -> bool {
     let Some(path) = std::env::var_os("FREEDOM_TEST_KEYCHAIN") else {
         return false;
     };
-    let path = std::path::PathBuf::from(path);
+    let path = PathBuf::from(path);
     let shown = Command::new("security")
         .args(["default-keychain", "-d", "user"])
         .output()
         .unwrap();
+    assert!(shown.status.success(), "security default-keychain failed");
     let shown = String::from_utf8(shown.stdout).unwrap();
-    let shown = std::path::PathBuf::from(shown.trim().trim_matches('"'));
-    let name = path.file_name().unwrap().to_string_lossy().into_owned();
-    let shown_name = shown.file_name().unwrap().to_string_lossy().into_owned();
+    let shown = PathBuf::from(shown.trim().trim_matches('"'));
     assert!(
-        shown_name == name || shown_name == format!("{name}-db"),
+        is_the_keychain(&path, &shown),
         "the default keychain is {shown:?}, not the temporary {path:?}"
     );
     true
+}
+
+/// A keychain's path in canonical form: the file itself, symlinks and dot
+/// segments resolved, when it exists; else its canonical directory joined
+/// with its name, since `security` shows a keychain the Keychain stores as
+/// `<name>-db` by `<name>`. `None` for a relative path, or one whose
+/// directory doesn't exist.
+fn canonical_keychain(path: &Path) -> Option<PathBuf> {
+    if !path.is_absolute() {
+        return None;
+    }
+    if let Ok(canonical) = std::fs::canonicalize(path) {
+        return Some(canonical);
+    }
+    let name = path.file_name()?;
+    Some(std::fs::canonicalize(path.parent()?).ok()?.join(name))
+}
+
+/// Whether `shown`, the default keychain as `security` shows it, is the
+/// keychain `expected` names: once both are canonical, the same complete
+/// path, or the complete expected path with `-db` appended. Anything else
+/// is refused: the same name in another directory, `-db` anywhere else, a
+/// relative path, a path that can't be resolved.
+fn is_the_keychain(expected: &Path, shown: &Path) -> bool {
+    let (Some(expected), Some(shown)) = (canonical_keychain(expected), canonical_keychain(shown))
+    else {
+        return false;
+    };
+    let mut stored = expected.clone().into_os_string();
+    stored.push("-db");
+    shown == expected || shown == PathBuf::from(stored)
+}
+
+/// The guard itself, on every OS: complete canonical paths, `-db` on the
+/// expected path only.
+#[test]
+fn the_keychain_guard_compares_complete_canonical_paths() {
+    let root = tempfile::tempdir().unwrap();
+    let temp = root.path().join("temp");
+    let other = root.path().join("other");
+    std::fs::create_dir(&temp).unwrap();
+    std::fs::create_dir(&other).unwrap();
+    let name = "freedom-keystore-test.keychain";
+    let expected = temp.join(name);
+    // As the Keychain stores a new keychain: `<name>-db`.
+    std::fs::write(temp.join(format!("{name}-db")), b"").unwrap();
+    std::fs::write(other.join(format!("{name}-db")), b"").unwrap();
+
+    // The exact path, and the exact path with `-db`.
+    assert!(is_the_keychain(&expected, &expected));
+    assert!(is_the_keychain(&expected, &temp.join(format!("{name}-db"))));
+    // Dot segments resolve to the same path.
+    assert!(is_the_keychain(
+        &expected,
+        &other.join("..").join("temp").join(name)
+    ));
+
+    // The same name in another directory, with or without `-db`, existing
+    // or not: refused. The review's case: a temporary `login.keychain`
+    // against the real `login.keychain-db`.
+    assert!(!is_the_keychain(&expected, &other.join(name)));
+    assert!(!is_the_keychain(
+        &expected,
+        &other.join(format!("{name}-db"))
+    ));
+    assert!(!is_the_keychain(
+        &temp.join("login.keychain"),
+        &other.join("login.keychain-db")
+    ));
+    // `-db` only on the complete expected path.
+    assert!(!is_the_keychain(
+        &temp.join(format!("{name}-db")),
+        &expected
+    ));
+    assert!(!is_the_keychain(
+        &expected,
+        &temp.join("freedom-keystore-test-db.keychain")
+    ));
+    assert!(!is_the_keychain(
+        &expected,
+        &temp.join(format!("{name}-db-db"))
+    ));
+    assert!(!is_the_keychain(
+        &expected,
+        &temp.join("freedom-keystore-test.keychai")
+    ));
+    assert!(!is_the_keychain(&expected, &temp));
+    // Relative paths, and a directory that doesn't exist: refused.
+    assert!(!is_the_keychain(Path::new(name), Path::new(name)));
+    let gone = root.path().join("gone").join(name);
+    assert!(!is_the_keychain(&gone, &gone));
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::symlink;
+        // A symlinked directory and a symlinked file name the same keychain
+        // once canonical.
+        let alias = root.path().join("alias");
+        symlink(&temp, &alias).unwrap();
+        assert!(is_the_keychain(&alias.join(name), &expected));
+        assert!(is_the_keychain(&expected, &alias.join(name)));
+        assert!(is_the_keychain(
+            &expected,
+            &alias.join(format!("{name}-db"))
+        ));
+        let link = other.join("link.keychain-db");
+        symlink(temp.join(format!("{name}-db")), &link).unwrap();
+        assert!(is_the_keychain(&expected, &link));
+        // The same name through a link to another directory: refused.
+        let other_alias = root.path().join("other-alias");
+        symlink(&other, &other_alias).unwrap();
+        assert!(!is_the_keychain(&expected, &other_alias.join(name)));
+        assert!(!is_the_keychain(
+            &expected,
+            &other_alias.join(format!("{name}-db"))
+        ));
+    }
 }
 
 /// Whether the temporary keychain itself holds Freedom's item `item`, read

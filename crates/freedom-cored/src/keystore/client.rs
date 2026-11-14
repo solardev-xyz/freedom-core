@@ -226,7 +226,7 @@ impl DesktopKeyStore {
             }
         };
         match relayed {
-            Relayed::Answer(text) => Answer::parse(&text).map_err(backend),
+            Relayed::Answer(text) => relayed_answer(&text),
             Relayed::TooLong => Err(backend("answer_too_long")),
             // An older main with no executor, or one that ran out of time
             // or closed: no key store answered.
@@ -301,6 +301,65 @@ fn open_key(
     Ok(WrapKey::take(&mut key))
 }
 
+/// What an answer to a call yields, once [`take`] has checked it.
+pub(super) enum Taken {
+    /// `create` and `open`: the wrapping key, opened, and the blob a
+    /// `create` of a backend that keeps one carries.
+    Key(WrapKey, Option<Blob>),
+    /// `forget`: done, or the item was already gone.
+    Done,
+}
+
+/// The answer a relayed `result` holds ([`Answer::parse`]): anything out of
+/// form, or over [`MAX_ANSWER_BYTES`], is `Backend`.
+pub(super) fn relayed_answer(text: &[u8]) -> Result<Answer, KeyStoreError> {
+    Answer::parse(text).map_err(backend)
+}
+
+/// What the core makes of the answer to `op` on `item` (0013, "The
+/// answer"): the kind the op needs, with a blob on a `create` exactly when
+/// the backend keeps one (`keeps_blob`) and never on an `open`, and a key
+/// that opens under `recipient`, the op, the item and the answer's blob. A
+/// failure answer is its error, and a `forget`'s `not_found` is done.
+/// Anything else is `Backend`. `recipient` is the request's private half,
+/// for `create` and `open`.
+pub(super) fn take(
+    op: Op,
+    item: ItemId,
+    keeps_blob: bool,
+    recipient: Option<fc_seal::RecipientKey>,
+    answer: Answer,
+) -> Result<Taken, KeyStoreError> {
+    match (op, answer) {
+        (Op::Create, Answer::Key { sealed_key, blob }) if blob.is_some() == keeps_blob => {
+            let recipient = recipient.ok_or_else(internal)?;
+            let key = open_key(recipient, op, item, &sealed_key, blob.as_ref())?;
+            Ok(Taken::Key(key, blob))
+        }
+        (
+            Op::Open,
+            Answer::Key {
+                sealed_key,
+                blob: None,
+            },
+        ) => {
+            let recipient = recipient.ok_or_else(internal)?;
+            let key = open_key(recipient, op, item, &sealed_key, None)?;
+            Ok(Taken::Key(key, None))
+        }
+        (
+            Op::Forget,
+            Answer::Done
+            | Answer::Failed {
+                error: KeyStoreError::NotFound,
+                ..
+            },
+        ) => Ok(Taken::Done),
+        (_, Answer::Failed { error, .. }) => Err(error),
+        _ => Err(backend("answer_form")),
+    }
+}
+
 fn reply_pair() -> Result<fc_seal::RecipientKey, KeyStoreError> {
     fc_seal::RecipientKey::generate(&mut OsRng).map_err(|_| backend("rng"))
 }
@@ -322,15 +381,20 @@ impl KeyStore for DesktopKeyStore {
             Some(&recipient.public_key()),
             None,
         );
-        match self.ask(Op::Create, &request)? {
-            Answer::Key { sealed_key, blob } if blob.is_some() == backend_kind.keeps_blob() => {
-                let key = open_key(recipient, Op::Create, item, &sealed_key, blob.as_ref())?;
+        let answer = self.ask(Op::Create, &request)?;
+        match take(
+            Op::Create,
+            item,
+            backend_kind.keeps_blob(),
+            Some(recipient),
+            answer,
+        )? {
+            Taken::Key(key, blob) => {
                 let sealed = Sealed::new(backend_kind, policy, item, blob)
                     .map_err(|_| backend("answer_form"))?;
                 Ok((key, sealed))
             }
-            Answer::Failed { error, .. } => Err(error),
-            _ => Err(backend("answer_form")),
+            Taken::Done => Err(backend("answer_form")),
         }
     }
 
@@ -355,13 +419,10 @@ impl KeyStore for DesktopKeyStore {
             Some(&recipient.public_key()),
             reason,
         );
-        match self.ask(Op::Open, &request)? {
-            Answer::Key {
-                sealed_key,
-                blob: None,
-            } => open_key(recipient, Op::Open, item, &sealed_key, None),
-            Answer::Failed { error, .. } => Err(error),
-            _ => Err(backend("answer_form")),
+        let answer = self.ask(Op::Open, &request)?;
+        match take(Op::Open, item, false, Some(recipient), answer)? {
+            Taken::Key(key, _) => Ok(key),
+            Taken::Done => Err(backend("answer_form")),
         }
     }
 
@@ -370,14 +431,10 @@ impl KeyStore for DesktopKeyStore {
             return Ok(());
         }
         let request = params(Op::Forget, sealed.policy(), sealed.item(), None, None, None);
-        match self.ask(Op::Forget, &request)? {
-            Answer::Done
-            | Answer::Failed {
-                error: KeyStoreError::NotFound,
-                ..
-            } => Ok(()),
-            Answer::Failed { error, .. } => Err(error),
-            Answer::Key { .. } => Err(backend("answer_form")),
+        let answer = self.ask(Op::Forget, &request)?;
+        match take(Op::Forget, sealed.item(), false, None, answer)? {
+            Taken::Done => Ok(()),
+            Taken::Key(..) => Err(backend("answer_form")),
         }
     }
 }

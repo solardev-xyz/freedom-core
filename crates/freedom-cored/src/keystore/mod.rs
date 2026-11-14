@@ -18,6 +18,8 @@ pub mod client;
 pub mod helper;
 #[cfg(target_os = "macos")]
 mod macos;
+#[cfg(test)]
+mod vectors;
 
 use std::time::Duration;
 

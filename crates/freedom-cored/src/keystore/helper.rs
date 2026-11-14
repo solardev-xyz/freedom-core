@@ -141,7 +141,7 @@ fn bad_request() -> Answer {
 
 /// The answer to the request in `args`, with `stdin` read first; `None`
 /// only for the test hook that leaves no answer.
-fn answer<R: TryCryptoRng + ?Sized>(
+pub(super) fn answer<R: TryCryptoRng + ?Sized>(
     args: impl Iterator<Item = OsString>,
     stdin: &mut dyn Read,
     store: Option<(&dyn OsStore, Capabilities)>,
