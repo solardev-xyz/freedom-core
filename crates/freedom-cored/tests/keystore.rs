@@ -600,7 +600,7 @@ fn is_the_keychain(expected: &Path, shown: &Path) -> bool {
     };
     let mut stored = expected.clone().into_os_string();
     stored.push("-db");
-    shown == expected || shown == PathBuf::from(stored)
+    shown == expected || shown == stored
 }
 
 /// The guard itself, on every OS: complete canonical paths, `-db` on the
