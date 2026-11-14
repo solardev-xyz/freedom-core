@@ -28,7 +28,7 @@ pub enum Callers {
     /// kind's never).
     PageChromeOrShell,
     /// A page only, for its own key (design 0012, API: `approval.check`,
-    /// `approval.touch`, `approval.remember`).
+    /// `approval.touch`, `approval.radicle_write`, `approval.remember`).
     Page,
     /// A page, for its own key, and main itself (design 0012, API:
     /// `approval.grant`, main's for a Swarm manifest's projection).
@@ -179,6 +179,9 @@ pub const METHODS: &[Method] = &[
     row("approval.grant", PS, false, NOW),
     row("approval.revoke", PCS, false, NOW),
     row("approval.touch", PAGE, false, NOW),
+    // Design 0012, "A page's Radicle write" (#372): R-6 counted in the core,
+    // for a page's own key; no other caller reaches it.
+    row("approval.radicle_write", PAGE, false, NOW),
     row("approval.grants", CS, false, NOW),
     row("approval.forget_account", SHELL, false, NOW),
     // Design 0012, "A device send's rule" (#373): a page presents its own
@@ -326,6 +329,7 @@ mod tests {
                 "approval.grant",
                 "approval.revoke",
                 "approval.touch",
+                "approval.radicle_write",
                 "approval.remember",
             ]
         );
@@ -335,6 +339,7 @@ mod tests {
             ("approval.grant", true, false, true),
             ("approval.revoke", true, true, true),
             ("approval.touch", true, false, false),
+            ("approval.radicle_write", true, false, false),
             ("approval.grants", false, true, true),
             ("approval.forget_account", false, false, true),
             ("approval.remember", true, false, false),
