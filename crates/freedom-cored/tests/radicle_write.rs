@@ -7,7 +7,8 @@
 //!
 //! The approvals' vault clock is the test's
 //! (`FREEDOM_CORED_TEST_APPROVAL_CLOCK`), so each of R-6's runs lands on
-//! the millisecond it names.
+//! the millisecond it names; the vault's auto-lock and throttle keep the
+//! real clock.
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
@@ -16,8 +17,13 @@ mod common;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
+use base64::Engine;
+use base64::engine::general_purpose::STANDARD;
 use common::*;
 use serde_json::{Value, json};
+
+const ABANDON: &str =
+    "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about";
 
 const SITE: &str = "https://issues.example";
 const OTHER: &str = "https://other.example";
@@ -25,6 +31,8 @@ const OTHER: &str = "https://other.example";
 const T0: u64 = 1_000_000;
 const REFILL_MS: u64 = 30_000;
 const DAY_MS: u64 = 24 * 60 * 60 * 1000;
+const CLOCK: &str = "FREEDOM_CORED_TEST_APPROVAL_CLOCK";
+const WRITE_FAIL: &str = "FREEDOM_CORED_TEST_GRANT_WRITE_FAIL";
 
 fn page_as(origin: &str, agent: Option<bool>) -> Value {
     let mut page = json!({ "origin": origin, "top_origin": origin, "frame": 1, "navigation": 1 });
@@ -89,15 +97,22 @@ struct Run {
 
 impl Run {
     fn start(root: &Path, moved: &[&'static str]) -> Run {
+        Run::start_env(root, moved, &[])
+    }
+
+    /// As [`Run::start`], with more of the core's environment.
+    fn start_env(root: &Path, moved: &[&'static str], env: &[(&str, &str)]) -> Run {
         let clock = root.join("clock");
         std::fs::write(&clock, T0.to_string()).unwrap();
         let clock_env = clock.to_string_lossy().into_owned();
+        let mut env = env.to_vec();
+        env.push((CLOCK, &clock_env));
         let mut core = spawn_env(
             "serve",
             &root.join("identity"),
             &root.join("locks"),
             &[],
-            &[("FREEDOM_CORED_TEST_APPROVAL_CLOCK", &clock_env)],
+            &env,
         );
         std::fs::create_dir_all(&core.grant_root).unwrap();
         core.grant_moved = moved.to_vec();
@@ -317,4 +332,81 @@ fn a_revoke_forgets_the_bucket() {
     drop(run);
     let mut run = Run::start(root.path(), &["radicle"]);
     run.burst(&site());
+}
+
+/// A revoke whose write fails before the rename still stands in memory, a
+/// narrowing (`applied: true`), and so the key's bucket is forgotten all
+/// the same: the grant made again starts full.
+#[test]
+fn a_failed_revoke_forgets_the_bucket() {
+    let root = tempfile::tempdir().unwrap();
+    let hook = root.path().join("write-fail");
+    let hook_env = hook.to_string_lossy().into_owned();
+    let mut run = Run::start_env(root.path(), &["radicle"], &[(WRITE_FAIL, &hook_env)]);
+    run.allow_writes(&site());
+    run.burst(&site());
+    std::fs::write(&hook, "radicle:rename").unwrap();
+    let revoked = run.call(
+        &site(),
+        "approval.revoke",
+        json!({ "store": "radicle", "key": SITE, "what": "grant" }),
+    );
+    refused(&revoked, "storage");
+    assert_eq!(
+        revoked["error"]["data"],
+        json!({ "store": "radicle", "applied": true }),
+        "{revoked}"
+    );
+    assert_eq!(run.write(&site()), not_covered("no_rule"));
+    std::fs::write(&hook, "").unwrap();
+    run.allow_writes(&site());
+    run.burst(&site());
+}
+
+/// The approval clock is the approvals' alone. Moved two days ahead while
+/// the real clock has run a few seconds, it neither locks the vault (the
+/// auto-lock's 15 minutes) nor opens the throttle (a second after the
+/// fifth wrong password, an attempt is still refused).
+#[test]
+fn the_approval_clock_moves_neither_the_auto_lock_nor_the_throttle() {
+    let root = tempfile::tempdir().unwrap();
+    let mut run = Run::start(root.path(), &[]);
+    let b64 = |text: &str| STANDARD.encode(text);
+    let imported = run.call(
+        &shell(),
+        "vault.import",
+        json!({ "password_b64": b64("testpass1"), "mnemonic_b64": b64(ABANDON) }),
+    );
+    assert!(imported["result"].is_object(), "{imported}");
+    assert_eq!(run.core.event()["event"], "vault.unlocked");
+    for n in 1..=5 {
+        let wrong = run.call(
+            &shell(),
+            "vault.unlock",
+            json!({ "password_b64": b64("wrong-password") }),
+        );
+        assert_eq!(wrong["error"]["code"], "incorrect_password", "{n}: {wrong}");
+    }
+    run.at(T0 + 2 * DAY_MS);
+    // Both read before either is asserted, so a failure shows each.
+    let status = run.call(&shell(), "vault.status", json!({}));
+    let attempt = run.call(
+        &shell(),
+        "vault.verify_password",
+        json!({ "password_b64": b64("testpass1") }),
+    );
+    let locked = run
+        .core
+        .events()
+        .iter()
+        .any(|e| e["event"] == "vault.locked");
+    assert_eq!(
+        (
+            status["result"]["unlocked"].clone(),
+            locked,
+            attempt["error"]["code"].clone()
+        ),
+        (json!(true), false, json!("throttled")),
+        "{status} {attempt}"
+    );
 }
