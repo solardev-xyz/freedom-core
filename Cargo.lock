@@ -529,6 +529,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "fc-keystore"
+version = "0.15.0"
+dependencies = [
+ "aes-gcm",
+ "base64",
+ "fc-json",
+ "hex",
+ "rand_core 0.10.1",
+ "serde_json",
+ "thiserror",
+ "zeroize",
+]
+
+[[package]]
 name = "fc-naming"
 version = "0.15.0"
 dependencies = [
@@ -549,6 +563,8 @@ name = "fc-profile"
 version = "0.15.0"
 dependencies = [
  "fc-json",
+ "fc-keystore",
+ "hex",
  "serde",
  "serde_json",
  "sha2",
@@ -681,6 +697,7 @@ dependencies = [
  "fc-evm",
  "fc-json",
  "fc-keys",
+ "fc-keystore",
  "fc-naming",
  "fc-profile",
  "fc-protocol",

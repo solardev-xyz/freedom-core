@@ -114,21 +114,76 @@ fn hex(c: char) -> String {
     c.to_string().repeat(32)
 }
 
-/// A secrets file naming `ids` (the first the unattended key in use, the
-/// rest in its `forget` list), as PRF-1 will write it.
+/// Nonces for the secrets files the tests write: a counter.
+struct Nonces(u8);
+
+#[derive(Debug)]
+struct NoError;
+
+impl std::fmt::Display for NoError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("never")
+    }
+}
+
+impl std::error::Error for NoError {}
+
+impl rand_core::TryRng for Nonces {
+    type Error = NoError;
+
+    fn try_next_u32(&mut self) -> Result<u32, NoError> {
+        Err(NoError)
+    }
+
+    fn try_next_u64(&mut self) -> Result<u64, NoError> {
+        Err(NoError)
+    }
+
+    fn try_fill_bytes(&mut self, dst: &mut [u8]) -> Result<(), NoError> {
+        self.0 += 1;
+        dst.fill(self.0);
+        Ok(())
+    }
+}
+
+impl rand_core::TryCryptoRng for Nonces {}
+
+/// A secrets file naming `ids`, as fc-keystore writes it: the first the
+/// unattended key in use, with one entry under it, the rest in its `forget`
+/// list (each a `user_presence` key that never committed). DPAPI makes no
+/// `forget` record, so on Windows it names the first alone.
 fn secrets(ids: &[String]) -> String {
-    let (backend, _) = backend();
-    let forget: Vec<Value> = ids[1..]
-        .iter()
-        .map(|id| json!({ "backend": backend, "policy": "user_presence", "item": id }))
-        .collect();
-    json!({
-        "version": 1,
-        "keys": { "unattended": { "backend": backend, "item": ids[0], "sealed": null, "pending": null } },
-        "forget": forget,
-        "entries": {}
-    })
-    .to_string()
+    use fc_keystore::{
+        Backend, Binding, Blob, EntryName, ItemId, Policy, Put, Sealed, SecretsFile, WrapKey,
+    };
+    let backend = Backend::parse(backend().0).unwrap();
+    let id = |text: &str| ItemId::parse(text).unwrap();
+    let mut file = SecretsFile::new();
+    for item in &ids[1..] {
+        file = file
+            .begin_create(Policy::UserPresence, backend, id(item))
+            .unwrap()
+            .settle();
+    }
+    let blob = backend
+        .keeps_blob()
+        .then(|| Blob::new(vec![1; 64]).unwrap());
+    let sealed = Sealed::new(backend, Policy::Unattended, id(&ids[0]), blob).unwrap();
+    file.begin_create(Policy::Unattended, backend, id(&ids[0]))
+        .unwrap()
+        .commit(
+            &sealed,
+            &WrapKey::take(&mut [7; 32]),
+            None,
+            Some(Put {
+                name: EntryName::new("quick-unlock").unwrap(),
+                binding: Binding::empty(),
+                secret: b"password",
+            }),
+            &mut Nonces(0),
+        )
+        .unwrap()
+        .text()
 }
 
 /// What a delete or `forget-list` gives for `ids`, as `secrets` names them:
@@ -1091,6 +1146,49 @@ fn links_are_refused_with_nothing_changed() {
             .join("b")
             .exists()
     );
+}
+
+/// Every text `vectors/secrets.json` calls malformed (design 0013, PRF-1a):
+/// the delete goes on, records none of its items, and says
+/// `forget_unknown`, however the file is out of form (0013, "What this
+/// doesn't cover").
+#[test]
+fn every_malformed_secrets_file_is_unknown() {
+    let vectors: Value =
+        serde_json::from_str(include_str!("../../../vectors/secrets.json")).unwrap();
+    let cases = vectors["malformed"].as_array().unwrap();
+    assert_eq!(cases.len(), 77);
+    let d = dirs();
+    open(&d, &[]);
+    let work = d.app.join("Profiles").join("work");
+    for case in cases {
+        let id = case["id"].as_str().unwrap();
+        let bytes = if let Some(text) = case.get("text") {
+            text.as_str().unwrap().as_bytes().to_vec()
+        } else if let Some(hex) = case.get("text_hex") {
+            (0..hex.as_str().unwrap().len())
+                .step_by(2)
+                .map(|i| u8::from_str_radix(&hex.as_str().unwrap()[i..i + 2], 16).unwrap())
+                .collect()
+        } else {
+            let repeat = case["text_repeat"].as_array().unwrap();
+            repeat[0]
+                .as_str()
+                .unwrap()
+                .repeat(repeat[1].as_u64().unwrap() as usize)
+                .into_bytes()
+        };
+        open(&d, &["--profile", "work"]);
+        std::fs::create_dir_all(work.join("identity")).unwrap();
+        std::fs::write(work.join("identity").join("secrets.json"), &bytes).unwrap();
+        let out = delete(&d, "work", "Work", &[]);
+        assert_eq!(code(&out), 0, "{id}: {out:?}");
+        let result = json_of(&out);
+        assert_eq!(result["forget"], json!([]), "{id}");
+        assert_eq!(result["forget_unknown"], true, "{id}");
+        assert!(!work.exists(), "{id}");
+        assert!(!d.app.join("profile-registry.json.forget").exists(), "{id}");
+    }
 }
 
 /// A secrets file reached through a link in the moved layout may be

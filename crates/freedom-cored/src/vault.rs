@@ -2749,7 +2749,7 @@ mod tests {
             })
             .to_string();
             let payload =
-                sent(vault.request(MAX_ID, "sign.typed_data", Some(&params), &Context::chrome()));
+                sent(vault.request(MAX_ID, "sign.typed_data", Some(&params), &Context::shell()));
             assert_eq!(
                 payload.len(),
                 overhead + hashed.view.len(),
@@ -2776,7 +2776,7 @@ mod tests {
             })
             .to_string();
             let payload =
-                sent(vault.request(MAX_ID, "sign.typed_data", Some(&params), &Context::chrome()));
+                sent(vault.request(MAX_ID, "sign.typed_data", Some(&params), &Context::shell()));
             let reply: serde_json::Value = serde_json::from_slice(&payload).unwrap();
             if fits {
                 assert_eq!(payload.len(), MAX_PAYLOAD);
