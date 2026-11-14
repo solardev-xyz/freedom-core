@@ -22,15 +22,16 @@
 //!   (`profile-registry.json.forget.unreadable`).
 //! - **Its text** is the catalog's: `JSON.stringify(…, null, 2)`.
 //!
-//! The backend and policy lists are PRF-1's (`fc-keystore`, not yet built).
-//! Until then they are the names 0013 uses: the policies `unattended` and
-//! `user_presence`, and the backends `macos-keychain`, `dpapi` and
-//! `secret-service` (0013 names the Secret Service but gives no spelling).
+//! The backend and policy lists are `fc-keystore`'s (PRF-1): the policies
+//! `unattended` and `user_presence`, and the backends `macos-keychain`,
+//! `dpapi` and `secret-service`.
 //!
 //! A deleted profile's items come from its secrets file
 //! (`identity/secrets.json`, or `freedom/identity/secrets.json` in the moved
-//! layout), whose form is PRF-1's too: [`secrets_items`] reads the narrowest
-//! one 0013 shows.
+//! layout), whose form is `fc-keystore`'s too. [`secrets_items`] reads it
+//! more loosely than `fc-keystore` does, so a delete records what it can;
+//! `fc-keystore`'s vector tests check that it reads, from every file in
+//! `vectors/secrets.json`, the items `fc-keystore` names.
 
 use fc_json::JsValue;
 
