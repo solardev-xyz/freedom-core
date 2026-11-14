@@ -21,8 +21,14 @@
 //!   and the approved SafeTx, field for field, while the fee check allows it
 //!   ([`SafeApprovals::check_executor`]); its signature ends the approval.
 //! - **Ended** by [`SafeApprovals::end`], by a newer `safe-send` approval
-//!   for the same Safe, and by the executor's signature. At most
-//!   [`MAX_SAFE_APPROVALS`] are open, the oldest dropped.
+//!   for the same Safe, and by the executor's signature: under the
+//!   approval, or under an `executor-send` token when the fee check stopped
+//!   it ([`SafeApprovals::executing`]). At most [`MAX_SAFE_APPROVALS`] are
+//!   open, the oldest dropped.
+//! - **What is a Safe's** to sign, under any caller (APR-4):
+//!   [`is_safe_typed_data`], typed data that declares a `SafeTx` or a
+//!   `SafeMessage`, and [`calls_exec_transaction`], a transaction calling
+//!   `execTransaction`. Each needs a token that binds it or a Safe approval.
 //!
 //! The SafeTx is the one protocol-kit's `createTransaction` makes for one
 //! call, as the reference builds it (`safe-executor.js`): operation 0
@@ -53,6 +59,31 @@ fn exec_selector() -> [u8; 4] {
         b"execTransaction(address,uint256,bytes,uint8,uint256,uint256,uint256,address,address,bytes)",
     );
     [hash[0], hash[1], hash[2], hash[3]]
+}
+
+/// The EIP-712 types a Safe's owners sign: a SafeTx, a transaction's
+/// confirmation (`checkSignatures`), and a SafeMessage, EIP-1271's
+/// (`CompatibilityFallbackHandler`).
+pub const SAFE_TYPES: [&str; 2] = ["SafeTx", "SafeMessage"];
+
+/// Whether typed data (`{ domain, types, message }`) is a Safe's: its
+/// `types` declare a `SafeTx` or a `SafeMessage`. A Safe checks a
+/// signature over the hash of its own primary type, whose type hash
+/// starts with that name, so a signature over typed data that declares
+/// neither is never a Safe's. One that declares either, primary or not, is
+/// treated as a Safe's: wider than the primary type, so that it needs no
+/// inference of its own.
+pub fn is_safe_typed_data(typed_data: &Value) -> bool {
+    typed_data
+        .get("types")
+        .and_then(Value::as_object)
+        .is_some_and(|types| SAFE_TYPES.iter().any(|name| types.contains_key(*name)))
+}
+
+/// Whether a transaction's `data` calls `execTransaction`, whatever
+/// contract it goes to.
+pub fn calls_exec_transaction(data: &[u8]) -> bool {
+    data.starts_with(&exec_selector())
 }
 
 /// A Safe approval's id.
@@ -565,22 +596,7 @@ impl SafeApprovals {
         vault_ms: u64,
     ) -> Result<ExecutorCheck, SafeRefusal> {
         let entry = self.entry(id, presenter)?;
-        let Approved::Send {
-            safe,
-            chain_id,
-            to,
-            value,
-            data,
-        } = &entry.approved
-        else {
-            return Err(SafeRefusal::Mismatch);
-        };
-        let covered = tx.to() == Some(safe)
-            && tx.value().is_zero()
-            && tx.chain_id().to_u64() == Some(*chain_id)
-            && exec_signatures(tx.data())
-                .is_some_and(|signatures| exec_call(to, value, data, signatures) == tx.data());
-        if !covered {
+        if !executes(&entry.approved, tx) {
             return Err(SafeRefusal::Mismatch);
         }
         let reference = reference_fee(evidence, wall_ms, vault_ms);
@@ -590,6 +606,21 @@ impl SafeApprovals {
         Ok(ExecutorCheck {
             id: entry.id.clone(),
         })
+    }
+
+    /// The open `safe-send` approval whose SafeTx `tx` executes, as
+    /// [`SafeApprovals::check_executor`] compares it, whoever holds it: for
+    /// the executor's signature under an `executor-send` token, when the
+    /// fee check stopped the approval's own. Its signature ends the
+    /// approval, as the approval's would ([`SafeApprovals::executor_signed`]).
+    /// A Safe has one such approval at a time.
+    pub fn executing(&self, tx: &Transaction) -> Option<ExecutorCheck> {
+        self.entries
+            .iter()
+            .find(|entry| executes(&entry.approved, tx))
+            .map(|entry| ExecutorCheck {
+                id: entry.id.clone(),
+            })
     }
 
     /// The executor signed: the approval ends.
@@ -628,6 +659,27 @@ impl SafeApprovals {
         }
         found
     }
+}
+
+/// Whether `tx` executes the approved SafeTx: `execTransaction` to the
+/// Safe on its chain, `value` 0, and the SafeTx field for field, whatever
+/// its signatures. A SafeMessage is executed by nothing.
+fn executes(approved: &Approved, tx: &Transaction) -> bool {
+    let Approved::Send {
+        safe,
+        chain_id,
+        to,
+        value,
+        data,
+    } = approved
+    else {
+        return false;
+    };
+    tx.to() == Some(safe)
+        && tx.value().is_zero()
+        && tx.chain_id().to_u64() == Some(*chain_id)
+        && exec_signatures(tx.data())
+            .is_some_and(|signatures| exec_call(to, value, data, signatures) == tx.data())
 }
 
 /// A typed-data quantity: a decimal or `0x` string, or a JSON integer.
@@ -1248,6 +1300,102 @@ mod tests {
             at(&safes, &tx, Some(&good)).unwrap_err(),
             SafeRefusal::Unknown
         );
+    }
+
+    /// The executor's signature under an `executor-send` token ends the
+    /// approval whose SafeTx it executes, whoever holds it; a SafeMessage's,
+    /// another Safe's and another SafeTx's are left.
+    #[test]
+    fn an_executor_send_finds_the_approval_it_executes() {
+        let mut safes = SafeApprovals::new();
+        let mut rng = Counter(0);
+        let message = safes
+            .record(page(1), safe_message_of(7), &mut rng)
+            .unwrap()
+            .to_text();
+        let other = safes
+            .record(
+                Holder::Wallet,
+                Approved::send(&send_payload(OTHER_SAFE)).unwrap(),
+                &mut rng,
+            )
+            .unwrap()
+            .to_text();
+        let id = safes
+            .record(
+                page(1),
+                Approved::send(&send_payload(SAFE)).unwrap(),
+                &mut rng,
+            )
+            .unwrap()
+            .to_text();
+        let to = parse_address(TO).unwrap();
+        let call = |value: u64| {
+            exec_call(
+                &to,
+                &U256::from_u64(value),
+                &[0xa9, 0x05, 0x9c, 0xbb],
+                &[0x5a; 65],
+            )
+        };
+        // Another SafeTx, a value sent, another chain: none.
+        let elsewhere = Transaction::from_json(&json!({
+            "type": 2, "chain_id": "1", "nonce": "4", "gas_limit": "100000", "to": SAFE,
+            "value": "0", "data": to_hex(&call(1000)), "max_fee_per_gas": "7000000000",
+            "max_priority_fee_per_gas": "1000000000",
+        }))
+        .unwrap();
+        for tx in [
+            executor_tx(SAFE, "0", &call(1001), "7000000000"),
+            executor_tx(SAFE, "1", &call(1000), "7000000000"),
+            elsewhere,
+        ] {
+            assert!(safes.executing(&tx).is_none());
+        }
+        // Its own, at any fee: ended once signed.
+        let tx = executor_tx(SAFE, "0", &call(1000), "7000000000");
+        let check = safes.executing(&tx).unwrap();
+        safes.executor_signed(check);
+        assert!(safes.executing(&tx).is_none());
+        assert!(!safes.end(&id));
+        assert!(safes.end(&message));
+        assert!(safes.end(&other));
+    }
+
+    /// What a Safe signs: typed data declaring a `SafeTx` or a
+    /// `SafeMessage`, primary or not, and a call to `execTransaction`.
+    #[test]
+    fn what_is_a_safes_to_sign() {
+        assert!(is_safe_typed_data(&safe_tx(SAFE, json!("1"), "0")));
+        let message = json!({
+            "domain": { "chainId": "100", "verifyingContract": SAFE },
+            "types": { "SafeMessage": [{ "name": "message", "type": "bytes" }] },
+            "message": { "message": "0x01" },
+        });
+        assert!(is_safe_typed_data(&message));
+        let nested = json!({
+            "domain": {},
+            "types": {
+                "Wrapper": [{ "name": "inner", "type": "SafeMessage" }],
+                "SafeMessage": [{ "name": "message", "type": "bytes" }],
+            },
+            "message": { "inner": { "message": "0x01" } },
+        });
+        assert!(is_safe_typed_data(&nested));
+        for other in [
+            json!({ "domain": {}, "types": { "Mail": [{ "name": "a", "type": "string" }] }, "message": {} }),
+            json!({ "domain": {}, "types": { "safeTx": [{ "name": "a", "type": "string" }] }, "message": {} }),
+            json!({ "domain": {}, "types": [], "message": {} }),
+            json!("SafeTx"),
+        ] {
+            assert!(!is_safe_typed_data(&other), "{other}");
+        }
+        let call = exec_call(&[0x11; 20], &U256::from_u64(1), &[], &[]);
+        assert!(calls_exec_transaction(&call));
+        assert!(calls_exec_transaction(&exec_selector()));
+        assert!(!calls_exec_transaction(&call[1..]));
+        assert!(!calls_exec_transaction(&[0xa9, 0x05, 0x9c, 0xbb]));
+        assert!(!calls_exec_transaction(&[]));
     }
 
     #[test]

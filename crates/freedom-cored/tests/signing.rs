@@ -2,7 +2,9 @@
 //! vectors/signing.json case for the `abandon` keys, over the wire, plus key
 //! kinds, locking and malformed input. Each signs as main's own, under
 //! `shell`: a page's and the chrome's signatures need an authorization
-//! (design 0012, APR-4; `tests/enforced.rs`).
+//! (design 0012, APR-4; `tests/enforced.rs`). A Safe's typed data, which
+//! main's word no longer signs (APR-4b; `tests/enforced_safe.rs`), signs as
+//! a page's own `eth_signTypedData_v4`, under its `sign-typed-data` token.
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
@@ -63,6 +65,7 @@ fn every_vector_case_over_the_wire() {
     let mut refused_account_socs = 0;
     let mut chunk_key_socs = 0;
     let mut binary_32 = 0;
+    let mut safe_cases = 0;
     for (section, method) in [
         ("transactions", "sign.transaction"),
         ("messages", "sign.message"),
@@ -92,8 +95,15 @@ fn every_vector_case_over_the_wire() {
                 }
             };
             id += 1;
-            let reply = core.call_shell(id, method, params);
             let label = case["id"].as_str().unwrap();
+            let reply = if section == "typedData"
+                && !must_fail(case)
+                && fc_approval::safe::is_safe_typed_data(&case["typed_data"])
+            {
+                safe_typed_data(&mut core, &mut id, label, params)
+            } else {
+                core.call_shell(id, method, params)
+            };
             checked += 1;
             // bee-js signs a chunk with an account key, and the vector
             // records that; the core refuses it (#89), and signs nothing.
@@ -140,6 +150,9 @@ fn every_vector_case_over_the_wire() {
                 }
                 "typedData" => {
                     assert_eq!(result["signature"], expected["signature"], "{label}");
+                    if fc_approval::safe::is_safe_typed_data(&case["typed_data"]) {
+                        safe_cases += 1;
+                    }
                     id += 1;
                     let hash = core.call(
                         id,
@@ -173,6 +186,7 @@ fn every_vector_case_over_the_wire() {
     assert_eq!(refused_account_socs, 16);
     assert_eq!(chunk_key_socs, 16);
     assert_eq!(binary_32, 2);
+    assert_eq!(safe_cases, 4);
     // Typed data as JSON text, sent in the frame as written (#87): the core
     // reads each number as JSON.parse does, whatever its spelling.
     for case in vectors["typedDataText"].as_array().unwrap() {
@@ -267,6 +281,40 @@ fn every_vector_case_over_the_wire() {
 
 /// No hash anyone confirmed.
 const ZERO_HASH: &str = "0x0000000000000000000000000000000000000000000000000000000000000000";
+
+/// A Safe's typed data (a `SafeTx`, a `SafeMessage`): refused as main's
+/// own, under `shell`, without a Safe approval (design 0012, APR-4b); then
+/// signed as a page's own `eth_signTypedData_v4`, under the `sign-typed-data`
+/// token the page minted for it. The reply is the page's signature.
+fn safe_typed_data(core: &mut Core, id: &mut u64, label: &str, params: Value) -> Value {
+    const HANDLE: &str = "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1";
+    let refused = core.call_shell(*id, "sign.typed_data", params.clone());
+    assert_eq!(
+        refused["error"]["code"], "not_authorized",
+        "{label}: {refused}"
+    );
+    assert_eq!(refused["error"]["data"]["reason"], "no_token", "{label}");
+    let page = json!({ "caller": "page", "page": {
+        "origin": "https://safe.example", "top_origin": "https://safe.example",
+        "frame": 1, "navigation": 1, "agent": false,
+    } });
+    let mut call = |method: &str, params: Value| {
+        *id += 1;
+        core.send(&json!({
+            "type": "request", "id": *id, "method": method, "params": params, "context": page,
+        }));
+        core.response(*id)
+    };
+    let minted = call(
+        "approval.issue",
+        json!({ "kind": "sign-typed-data", "account": params["key"]["index"], "handle": HANDLE,
+            "payload": { "typed_data": params["typed_data"] } }),
+    );
+    let token = minted["result"]["token"].as_str().unwrap().to_owned();
+    let mut params = params;
+    params["authorization"] = json!({ "token": token, "handle": HANDLE });
+    call("sign.typed_data", params)
+}
 
 /// The view is the reference's getPayload (#88), with primaryType as
 /// primary_type, in its order: the request's types then EIP712Domain, the

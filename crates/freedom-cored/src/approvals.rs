@@ -1,6 +1,7 @@
 //! Design 0012's approvals in the daemon (APR-3a): approval tokens and Safe
 //! approvals over the wire, and the authorization `sign.*` checks, which a
-//! page's and the chrome's signatures need (APR-4a). The decisions are
+//! page's and the chrome's signatures need (APR-4a), and a Safe's under
+//! every caller (APR-4b). The decisions are
 //! `fc-approval`'s; this module wires them to
 //! the callers, the vault's clock, the wall clock, the OS's RNG and the fee
 //! evidence the core served.
@@ -41,7 +42,14 @@
 //!   token, which it presents as any token. Anything else is refused with
 //!   `not_authorized` before a key is touched. Main's own signature, under
 //!   `shell`, signs on main's word without one, and has one checked when
-//!   it comes.
+//!   it comes. **A Safe's signature** (APR-4b), typed data declaring a
+//!   `SafeTx` or a `SafeMessage` or a transaction calling
+//!   `execTransaction`, needs under any caller a token that binds it or a
+//!   Safe approval of the caller's own kind: a page's under `page` with its
+//!   origin, frame and navigation, a wallet's under `shell`. Main's word
+//!   and a standing rule sign none (`approval.check` says so), and an
+//!   `executor-send`'s signature ends the approval whose SafeTx it
+//!   executes, as the approval's own executor signature does.
 //! - `swarm.sign_soc`'s `authorization` (APR-3c): `{ swarm, soc }` from a
 //!   page, checked against the page's Swarm grant at the same point. Main's
 //!   own SOCs, under `shell`, take none. The chrome's, which no token kind
@@ -319,21 +327,38 @@ pub fn page_context(context: &Context) -> Result<Option<&PageContext>, ErrorBody
 }
 
 /// A signature that comes without an `authorization` (design 0012, Q8;
-/// APR-4a requires one): main's own, under `shell`, signs on main's word; a
-/// page's needs a token or a rule the core checks, and the chrome's a
-/// wallet-kind token, so both are refused before a key is touched.
-pub fn without_authorization(context: &Context) -> Result<(), ErrorBody> {
+/// APR-4a requires one): main's own, under `shell`, signs on main's word,
+/// but for a Safe's (APR-4b); a page's needs a token or a rule the core
+/// checks, and the chrome's a wallet-kind token, so both are refused before
+/// a key is touched.
+pub fn without_authorization(context: &Context, signed: &Signed<'_>) -> Result<(), ErrorBody> {
     match context.caller {
+        CallerKind::Shell if signed.is_safes() => Err(safe_needs_approval()),
         CallerKind::Shell => Ok(()),
         CallerKind::Page => Err(not_authorized(
             "no_token",
             "a page's signature needs its token or a standing rule",
         )),
-        CallerKind::Chrome => Err(not_authorized(
-            "no_token",
-            "the chrome's signature needs a wallet-kind token",
-        )),
+        CallerKind::Chrome => Err(chrome_needs_token()),
     }
+}
+
+fn chrome_needs_token() -> ErrorBody {
+    not_authorized(
+        "no_token",
+        "the chrome's signature needs a wallet-kind token",
+    )
+}
+
+/// A Safe's signature without its authorization (APR-4b): under any
+/// caller, it needs a token that binds it or a Safe approval of the
+/// caller's own kind. The core can't tell a page's SafeTx from the
+/// wallet's own, so main's word doesn't sign one.
+fn safe_needs_approval() -> ErrorBody {
+    not_authorized(
+        "no_token",
+        "a Safe's signature needs its Safe approval or a token that binds it",
+    )
 }
 
 /// `swarm.sign_soc` without an `authorization`: main's own SOC signs as
@@ -342,7 +367,7 @@ pub fn without_authorization(context: &Context) -> Result<(), ErrorBody> {
 /// a wallet-kind token for every signature).
 pub fn soc_without_authorization(context: &Context) -> Result<(), ErrorBody> {
     match context.caller {
-        CallerKind::Chrome => without_authorization(context),
+        CallerKind::Chrome => Err(chrome_needs_token()),
         CallerKind::Page | CallerKind::Shell => Ok(()),
     }
 }
@@ -541,6 +566,24 @@ pub enum Signed<'a> {
     },
 }
 
+impl Signed<'_> {
+    /// Whether it is a Safe's signature (design 0012, "A page's Safe and
+    /// Swarm signatures"): typed data declaring a `SafeTx` or a
+    /// `SafeMessage`, or a transaction calling `execTransaction`. Under any
+    /// caller, one signs only with a token that binds it or a Safe approval
+    /// of the caller's own kind: never on main's word, and never by a
+    /// standing rule (APR-4b).
+    pub fn is_safes(&self) -> bool {
+        match self {
+            Signed::Transaction { tx, .. } => fc_approval::safe::calls_exec_transaction(tx.data()),
+            Signed::Message { .. } => false,
+            Signed::TypedData { fields, .. } => {
+                fc_approval::safe::is_safe_typed_data(&fields["typed_data"])
+            }
+        }
+    }
+}
+
 /// What a checked authorization does once its signature is made.
 #[derive(Debug)]
 pub enum After {
@@ -548,7 +591,8 @@ pub enum After {
     /// The first owner's signature fixes the Safe approval's SafeTx or
     /// SafeMessage.
     Owner(OwnerCheck),
-    /// The executor's signature ends the Safe approval.
+    /// The executor's signature ends the Safe approval: its own, or the one
+    /// whose SafeTx an `executor-send` executes.
     Executor(ExecutorCheck),
     /// A `dapp-send` with "Always allow" ticked: once signed, the rule for
     /// the call is written for the token's page, if the dApp file has
@@ -960,6 +1004,15 @@ impl Approvals {
             let fields = object(authorization, &["standing"], &[])?;
             let standing = object(&fields["standing"], &[], &["paused"])?;
             let paused = optional_bool(standing, "paused")?;
+            // A Safe's signature needs its approval or a token (APR-4b): a
+            // Safe message a rule answers gets its approval from
+            // `approval.spend { standing }`, and signs with it.
+            if signed.is_safes() {
+                return Err(not_authorized(
+                    "no_rule",
+                    "no standing rule answers a Safe's signature",
+                ));
+            }
             let Some(page) = page_context(context)? else {
                 return Err(not_authorized(
                     "no_rule",
@@ -1106,6 +1159,14 @@ impl Approvals {
                             rule: ProposedRule::of(tx),
                         }))
                     }
+                    // The executor's signature, when the fee check stopped
+                    // its approval and the user confirmed the fee: it ends
+                    // the approval whose SafeTx it executes, as the
+                    // approval's own would (design 0012, "The executor").
+                    _ if spent.kind == Kind::ExecutorSend => Ok(self
+                        .safes
+                        .executing(tx)
+                        .map_or(After::Nothing, After::Executor)),
                     _ => Ok(After::Nothing),
                 }
             }
@@ -1458,6 +1519,8 @@ impl Approvals {
         let bytes;
         let view;
         let tx;
+        // A Safe's signature, which no rule answers (APR-4b).
+        let mut safes = false;
         let rule_request = match string(request, "kind")? {
             "message" => {
                 bytes = fc_evm::parse_bytes(string(request, "message")?, "message")
@@ -1483,6 +1546,7 @@ impl Approvals {
                     },
                 )
                 .map_err(|e| invalid(e.to_string()))?;
+                safes = fc_approval::safe::is_safe_typed_data(&request["typed_data"]);
                 DappRequest::Signature(RuleSigned::TypedData(&view))
             }
             "transaction" => {
@@ -1498,6 +1562,7 @@ impl Approvals {
                     .chain_id()
                     .to_u64()
                     .and_then(|chain_id| self.fees.get(chain_id));
+                safes = fc_approval::safe::calls_exec_transaction(tx.data());
                 DappRequest::Transaction(Send::of(&tx, kind, paused, evidence))
             }
             _ => return Err(invalid("kind: expected message, typed_data or transaction")),
@@ -1509,9 +1574,16 @@ impl Approvals {
             request: rule_request,
         };
         let store = self.grants.view::<DappStore>(clocks.wall_ms / 1000);
-        let decision =
+        let mut decision =
             self.standing
                 .check_dapp_under(self.rules(), &store, &ask, rule_clocks(clocks));
+        // A Safe's signature is never a rule's (APR-4b): `sign.*` refuses
+        // `{ standing }` for it, so the page's prompt answers it. A Safe
+        // account's own message is the exception: a rule answers it through
+        // `approval.spend { standing }`, which gives its Safe approval.
+        if safes && kind != AccountKind::Safe && decision.is_covered() {
+            decision = Decision::NotCovered(fc_approval::standing::Reason::NoRule);
+        }
         let reply = match decision.reason() {
             None => json!({ "covered": true }),
             Some(reason) => json!({ "covered": false, "reason": reason.name() }),
