@@ -1207,7 +1207,9 @@ fn sha256_hex(bytes: &[u8]) -> String {
 
 impl Main {
     fn vault_digest(&self) -> Option<String> {
-        std::fs::read(self.vault_path()).ok().map(|v| sha256_hex(&v))
+        std::fs::read(self.vault_path())
+            .ok()
+            .map(|v| sha256_hex(&v))
     }
 
     /// The file's entries, each with the vault digest it is bound to.
@@ -1224,8 +1226,7 @@ impl Main {
     /// Sends the request `text` as it is, and serves the keychain until
     /// the response to `id`.
     fn raw_call(&mut self, id: u64, text: &str) -> Value {
-        self.core()
-            .send_raw(&common::raw_frame(1, text.as_bytes()));
+        self.core().send_raw(&common::raw_frame(1, text.as_bytes()));
         let until = Instant::now() + Duration::from_secs(60);
         while Instant::now() < until {
             if let Ok(Some(message)) = self.serve_one(Duration::from_millis(200))
@@ -1360,11 +1361,7 @@ fn rewrapped(
     mut main: Main,
     op: fn(&mut Main) -> Option<Value>,
     new_password: &str,
-    (hook, fails, fault): (
-        Option<&str>,
-        Option<&str>,
-        Option<(&'static str, Fault)>,
-    ),
+    (hook, fails, fault): (Option<&str>, Option<&str>, Option<(&'static str, Fault)>),
     pair: Pair,
 ) -> Option<Value> {
     let label = format!("{hook:?} {fails:?} {fault:?}");
@@ -1383,7 +1380,11 @@ fn rewrapped(
     let response = op(&mut main);
     if hook.is_some() {
         assert!(response.is_none(), "{label}: answered {response:?}");
-        assert_eq!(main.core().exit_code(Duration::from_secs(10)), 99, "{label}");
+        assert_eq!(
+            main.core().exit_code(Duration::from_secs(10)),
+            99,
+            "{label}"
+        );
         main.core = None;
     } else {
         let answer = response.clone().expect("an answer");
@@ -1597,7 +1598,10 @@ fn a_password_change_rewraps_quick_unlock() {
     std::fs::write(main.secrets_path(), moved).unwrap();
     let unlock = main.call("quick_unlock.unlock", json!({}));
     assert_eq!(error_code(&unlock), "key_store_unavailable", "{unlock}");
-    assert_eq!(unlock["error"]["data"]["reason"], "entry_refused", "{unlock}");
+    assert_eq!(
+        unlock["error"]["data"]["reason"], "entry_refused",
+        "{unlock}"
+    );
     std::fs::write(main.secrets_path(), &new_secrets).unwrap();
     // Enroll checks against the new vault.
     let wrong = main.shell(
@@ -1784,7 +1788,13 @@ fn a_rewrap_over_a_dead_key_killed_at_each_step() {
         );
     }
     // Uninterrupted: a new key, and the old one forgotten.
-    rewrapped(gone(), change_op, NEW_PASSWORD, (None, None, None), Pair::New);
+    rewrapped(
+        gone(),
+        change_op,
+        NEW_PASSWORD,
+        (None, None, None),
+        Pair::New,
+    );
     rewrapped(
         invalidated(),
         import_quick_op,
@@ -1880,10 +1890,7 @@ fn the_credential_under_its_second_name() {
     assert!(main.keychain.items.is_empty());
     // The vault delete: in its journal, and its key forgotten.
     let mut main = next();
-    let deleted = main.call(
-        "vault.delete",
-        json!({ "password_b64": b64(NEW_PASSWORD) }),
-    );
+    let deleted = main.call("vault.delete", json!({ "password_b64": b64(NEW_PASSWORD) }));
     assert_eq!(deleted["result"], json!({}), "{deleted}");
     assert!(main.entries().is_empty());
     assert!(!main.vault_path().exists());
