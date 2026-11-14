@@ -754,6 +754,12 @@ impl Vault {
         self.clock.now_ms()
     }
 
+    /// The vault's clock as the approvals read it: the clock's own, or with
+    /// the `testhooks` feature a test's (`FREEDOM_CORED_TEST_APPROVAL_CLOCK`).
+    fn approval_ms(&self) -> u64 {
+        crate::testhooks::approval_clock(self.now_ms())
+    }
+
     /// The vault's clock and the wall clock, for the approvals.
     fn clocks(&self) -> Clocks {
         let wall_ms = std::time::SystemTime::now()
@@ -762,7 +768,7 @@ impl Vault {
                 u64::try_from(since.as_millis()).unwrap_or(u64::MAX)
             });
         Clocks {
-            vault_ms: self.now_ms(),
+            vault_ms: self.approval_ms(),
             wall_ms,
         }
     }
@@ -777,7 +783,7 @@ impl Vault {
     /// Main asked for `chain.fee_reference`: its reply is the chain's fee
     /// evidence (design 0012, "The fee check").
     pub fn fee_asked(&mut self, id: u64, params: Option<&str>) {
-        let now = self.now_ms();
+        let now = self.approval_ms();
         self.approvals.fee_asked(id, params, now);
     }
 
