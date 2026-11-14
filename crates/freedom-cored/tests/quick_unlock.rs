@@ -1221,6 +1221,23 @@ impl Main {
             .collect()
     }
 
+    /// Sends the request `text` as it is, and serves the keychain until
+    /// the response to `id`.
+    fn raw_call(&mut self, id: u64, text: &str) -> Value {
+        self.core()
+            .send_raw(&common::raw_frame(1, text.as_bytes()));
+        let until = Instant::now() + Duration::from_secs(60);
+        while Instant::now() < until {
+            if let Ok(Some(message)) = self.serve_one(Duration::from_millis(200))
+                && message["type"] == "response"
+                && message["id"] == id
+            {
+                return message;
+            }
+        }
+        panic!("no response to {id}");
+    }
+
     fn create_quick(&mut self) -> Value {
         create_quick_op(self).expect("the core exited during vault.create")
     }
@@ -1462,7 +1479,7 @@ fn create_and_import_with_quick_unlock() {
     assert!(imported["result"].is_object(), "{imported}");
     assert_eq!(std::fs::read(main.secrets_path()).unwrap(), secrets);
     assert_eq!(main.status()["enabled"], false);
-    // `quick_unlock` is a boolean or absent.
+    // `quick_unlock` is a boolean or absent, and given once.
     for bad in [json!("yes"), json!(1), Value::Null] {
         let refused = main.call(
             "vault.import",
@@ -1470,6 +1487,14 @@ fn create_and_import_with_quick_unlock() {
         );
         assert_eq!(error_code(&refused), "invalid_argument", "{bad}: {refused}");
     }
+    let twice = format!(
+        r#"{{"type":"request","id":900,"method":"vault.import","params":{{"password_b64":"{}","mnemonic_b64":"{}","overwrite":true,"quick_unlock":false,"quick_unlock":true}},"context":{{"caller":"chrome"}}}}"#,
+        b64(PASSWORD),
+        b64(ABANDON),
+    );
+    let refused = main.raw_call(900, &twice);
+    assert_eq!(error_code(&refused), "invalid_argument", "{refused}");
+    assert_eq!(std::fs::read(main.secrets_path()).unwrap(), secrets);
     // A create with the credential into an empty profile, with no key made
     // yet: `pending`, `create`, then the entry.
     let mut main = Main::new();
@@ -1895,10 +1920,25 @@ fn a_rewrap_refused_with_nothing_changed() {
     // A new password past the 1 KiB quick unlock holds: refused while
     // quick unlock is on.
     let long = "p".repeat(1025);
+    let too_long = "The password is too long for quick unlock";
+    let calls = main.keychain.calls.len();
     let refused = main.change(PASSWORD, &long);
     assert_eq!(error_code(&refused), "invalid_argument", "{refused}");
+    assert_eq!(refused["error"]["message"], too_long, "{refused}");
     assert_eq!(std::fs::read(main.vault_path()).unwrap(), vault);
     assert_eq!(std::fs::read(main.secrets_path()).unwrap(), secrets);
+    assert_eq!(main.keychain.calls.len(), calls);
+    // And for a create, before any key is made for it.
+    let mut fresh = Main::new();
+    fresh.start(&[]);
+    let refused = fresh.call(
+        "vault.create",
+        json!({ "password_b64": b64(&long), "words": 12, "quick_unlock": true }),
+    );
+    assert_eq!(refused["error"]["message"], too_long, "{refused}");
+    assert!(fresh.keychain.calls.is_empty());
+    assert!(!fresh.vault_path().exists());
+    assert!(!fresh.secrets_path().exists());
     // A full `forget` list, its forgets failing: a create with quick unlock
     // is refused before its vault, as the `create` it needs.
     let mut main = Main::new();

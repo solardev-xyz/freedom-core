@@ -463,8 +463,8 @@ pub enum KeyStoreError { NotFound, Cancelled, Unavailable, Invalidated, Denied, 
   - `quick_unlock.enroll { password }` checks the password against the vault, sharing 0001's throttle. It then writes the `quick-unlock` entry, bound to the vault file's SHA-256 (today's binding, without the path), under `UserPresence` where available and `Unattended` otherwise.
   - `quick_unlock.unlock {}` unlocks with it, so the password stays in the core. `quick_unlock.export_mnemonic` and `export_private_key` are the Touch ID exports.
   - `quick_unlock.status` and `quick_unlock.disable` complete the set.
-  - `vault.create` and `vault.import` gain `quick_unlock: true`. That writes the entry before the vault commits, bound to the new vault's digest, so a Quick Setup vault never exists without its credential. A crash between the two leaves an entry that names no vault, which the core removes at start.
-  - `vault.change_password` writes the new vault and the re-wrapped entry as one operation.
+  - `vault.create` and `vault.import` gain `quick_unlock: true`. That writes the entry before the vault commits, bound to the new vault's digest, so a Quick Setup vault never exists without its credential. A crash between the two leaves an entry that names no vault, which the core removes at start ([The re-wrap's two entries](#the-re-wraps-two-entries)).
+  - `vault.change_password` writes the new vault and the re-wrapped entry as one operation ([The re-wrap's two entries](#the-re-wraps-two-entries)).
 - **PRF-2 (browser):**
   - Main's `shell.keystore` executor, which checks the request and runs the helper.
   - At the next Touch ID unlock or export, a profile with only `quick-unlock.dat` goes through it once, as today. Main then sends the password it unsealed to `quick_unlock.enroll`. Later unlocks call `quick_unlock.unlock` behind main's Touch ID prompt.
@@ -473,6 +473,34 @@ pub enum KeyStoreError { NotFound, Cancelled, Unavailable, Invalidated, Denied, 
   - The release before any shell switch prompts each macOS profile that has a vault but no core credential for Touch ID once, to enroll. A profile never opened in that window keeps only its recovery phrase. The design states that risk; it doesn't hide it.
 - **The policy for a Quick Setup vault is `userPresence`,** never `biometryCurrentSet`. The latter destroys the item when a fingerprint is added, and a Quick Setup user has no other copy of the password. Which fallback `userPresence` may use is the [open question](#open-questions) on the Mac's password.
 - **The core never reads `quick-unlock.dat`.** Its ciphertext is Electron's: Chromium's keychain item for the app, and the app's signature. Reading it would mean reimplementing `safeStorage` and borrowing the app's keychain access.
+
+### The re-wrap's two entries
+
+**Proposed: a create or import with `quick_unlock: true`, and a password change on a vault with quick unlock, write the new vault's credential before the vault commits, under a second name while the first still holds the old vault's. The vault's rename is the one commit point, and no journal is needed.**
+
+- **The names:** `quick-unlock` and `quick-unlock.next`. Each is the vault password, bound to `{ "vault_fingerprint": <sha256 of the vault file> }`, under the policy's key, as enroll writes it. The credential for a vault is whichever of the two is bound to that vault file's digest, and `quick_unlock.unlock`, the exports and `status` read it there. Outside a re-wrap the file holds only `quick-unlock`.
+- **The steps:**
+  1. **Seal:** the new vault file is made in memory, in 0001's envelope, and its SHA-256 taken.
+  2. **Stage:** the new vault's credential, bound to that digest, is written as `quick-unlock`. When `quick-unlock` holds the credential of the vault being replaced, it is written as `quick-unlock.next` instead.
+     - **The key:** the policy's key if it opens. Otherwise a new key, through the `pending` write, `create` and the commit, as for enroll.
+     - **A dead key** (`not_found`, `invalidated`) is replaced as enroll replaces it: its entries can't be re-wrapped, and leave in the `pending` write. The old vault then has no credential, as it had none that opened.
+     - **The other name,** if it isn't the old vault's credential, names no vault, and leaves in the same write.
+  3. **Commit:** the vault's write (0001). Its claim, right before the rename, is the operation's commit point.
+  4. **After the commit,** one write leaves only `quick-unlock`, bound to the new digest, and the old vault's entry goes. A credential staged as `quick-unlock.next` is sealed again under `quick-unlock` with the key the job already holds, so no key-store call follows the commit. A failure of this write is logged, not answered, since the commit has happened.
+  5. **After a failure before the commit** (the vault's write failing, or its claim refused), one write takes the staged entry off again, and its key goes into `forget` if nothing else is under it.
+- **Why no journal:** the binding ties each entry to one vault file. Until the rename the file holds the old vault's credential, and from before it the new one's, so whichever vault is on disk, its credential is there. A crash leaves at most one other entry, which names no vault, and the start rule removes it. The vault delete needs its journal because it removes the credential together with the vault ([The vault delete's journal](#the-vault-deletes-journal)). The re-wrap only adds one before it replaces the vault.
+- **The start rule** covers both names: each entry bound to anything but the vault file's digest, or with no vault there, is removed, and its key goes into `forget` if nothing else is under it.
+  - **A crash before the rename** leaves the old vault with its credential.
+  - **A crash after it** leaves the new vault with its own. That is `quick-unlock.next` until the next write that touches quick unlock (enroll, a re-wrap, disable, the vault delete), which leaves only `quick-unlock`.
+- **Refusals,** each before anything is written, with the vault and the file as they were:
+  - `quick_unlock: true` where the key store offers no policy: `key_store_unavailable` (`unsupported`), after 0001's parity checks;
+  - a secrets file that doesn't read (malformed, past its bound, unreadable): `storage` (`data.file: "secrets"`). That covers a create or import with `quick_unlock: true`, and every password change, which can't tell otherwise whether the vault has a credential;
+  - a key-store refusal: `key_store_unavailable` (with `timeout`, `forget_backlog`, …) or `key_store_cancelled`;
+  - a new password longer than the 1 KiB an entry holds, while quick unlock is on: `invalid_argument`.
+
+  A password change on a vault without quick unlock changes nothing in the file, and asks the key store nothing.
+- **Callers:** `vault.create` and `vault.import` keep 0001's, `chrome` and `shell`. Their caller supplies the password the credential holds, so the credential gives it nothing it didn't have.
+- **Downgrade:** no release before PRF-1c-2 writes quick unlock's entries, and older builds don't read `secrets.json`.
 
 ## 5.4b The Freedom directory (Q12)
 
@@ -632,6 +660,7 @@ Rule 4 gains: "OS key-store items hold wrapping keys only, one per profile and p
 - **A main loop stalled past 30 s** keeps its lock if nobody took it over meanwhile. If an older build did, main finds the lock compromised at its next refresh and throws (`profile-lock.js:77–80`), as today. A new build no longer takes it over, since the gate is held.
 - **The gate's holder dies while main runs:** main starts another at once. The lock, still fresh, covers the moment, and a main that can't take the gate again within 5 s quits, as on a compromised lock.
 - **A key-store helper that fails, hangs or is killed:** the secrets file's committed keys and entries stay as they were, and every item the helper may have made, or failed to remove, stays named: a `pending` item moves into the `forget` list at the next open, and a failed `forget` keeps its record and is tried again. The request fails with `key_store_unavailable` or `key_store_cancelled` ([The helper](#the-helper-freedom-cored-keystore), [Forgetting an item](#forgetting-an-item)).
+- **A crash or a kill in a re-wrap** (a create or import with `quick_unlock: true`, a password change with quick unlock): before the vault's rename, the old vault with its credential; after it, the new vault with its own. The next start removes the entry that names no vault ([The re-wrap's two entries](#the-re-wraps-two-entries)).
 - **A crash or a kill in a profile delete:** before the catalog changes, the forget record names items that the profile's own file still names, so the next run drops them without a `forget`, and the profile opens as before. After it, every item is in the forget file, and main forgets it at the next start of any profile, whether or not the data's removal finished. A main killed between the helper's answer and `forget-done` leaves a record whose next `forget` answers `not_found`, which counts as success.
 - **The key store unavailable or reset:** each secret falls back to its documented path (re-inject, quick unlock off, RPC keys re-entered). Nothing is deleted on a failed open, and a Quick Setup credential is never removed except by an explicit disable or a vault delete (0001: nothing destructive is inferred from a missing credential).
 - **A full disk:** a write fails before its rename, and the store is unchanged. A move fails before its marker, and rolls back.
@@ -655,6 +684,8 @@ Rule 4 gains: "OS key-store items hold wrapping keys only, one per profile and p
 | `intents.*` | shell | `intent-store.js`'s record kinds: commit, handoff, outcome, settle, void, retire, track, and the reads |
 | `payments.*`, `safe_pending.*` | shell, chrome | the modules' operations |
 | `quick_unlock.enroll`, `.unlock`, `.export_mnemonic`, `.export_private_key`, `.status`, `.disable` | chrome only (after main's Touch ID prompt), except enroll: shell only | [The re-wrap](#the-re-wrap); enroll's `password` travels as `password_b64`, 0001's convention for secret fields |
+| `vault.create`, `vault.import` | 0001's: chrome, shell | gain `quick_unlock: true` (a boolean, absent meaning `false`) ([The re-wrap's two entries](#the-re-wraps-two-entries)) |
+| `vault.change_password` | 0001's: chrome, shell | re-wraps quick unlock's credential; after 0001's errors it may answer `storage` (`data.file: "secrets"`), `key_store_unavailable`, `key_store_cancelled` or `invalid_argument` ([The re-wrap's two entries](#the-re-wraps-two-entries)) |
 | `secrets.rpc_api_keys` | shell only | the keys main needs for the requests it runs |
 | `secrets.rpc_api_key_status`, `secrets.set_rpc_api_key`, `secrets.remove_rpc_api_key` | chrome, shell | `{ providers: [{ id, present }] }`, never a key; a set replaces any key the provider had |
 | `nodes.bee_handoff`, `nodes.bee_handoff_done`, `nodes.adopt_bee_password` | shell | [5.4c](#54c-bees-keystore-password-q16) |
