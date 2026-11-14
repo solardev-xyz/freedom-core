@@ -1,7 +1,8 @@
 //! Design 0012's approvals in the daemon (APR-3a): approval tokens and Safe
 //! approvals over the wire, and the authorization `sign.*` checks, which a
 //! page's and the chrome's signatures need (APR-4a), and a Safe's under
-//! every caller (APR-4b). The decisions are
+//! every caller (APR-4b); a page's SOC needs its Swarm grant (APR-4c). The
+//! decisions are
 //! `fc-approval`'s; this module wires them to
 //! the callers, the vault's clock, the wall clock, the OS's RNG and the fee
 //! evidence the core served.
@@ -51,9 +52,12 @@
 //!   `executor-send`'s signature ends the approval whose SafeTx it
 //!   executes, as the approval's own executor signature does.
 //! - `swarm.sign_soc`'s `authorization` (APR-3c): `{ swarm, soc }` from a
-//!   page, checked against the page's Swarm grant at the same point. Main's
-//!   own SOCs, under `shell`, take none. The chrome's, which no token kind
-//!   binds, are refused; a page's without one still sign until APR-4c.
+//!   page, checked against the page's Swarm grant at the same point. **A
+//!   page's SOC needs it** (APR-4c): without one it is refused `no_token`,
+//!   and where the grant doesn't cover it with the grant's reason, before a
+//!   key is touched. Main's own SOCs, under `shell`, take none and sign on
+//!   main's word. The chrome's, which no token kind binds, are refused, and
+//!   so is a `{ swarm, soc }` from `chrome` or `shell` (`no_rule`).
 //!
 //! - The grant stores (APR-3b; [`crate::grants`] holds the files):
 //!   `approval.check { request, chain_id?, paused? }` asks a site's
@@ -361,14 +365,19 @@ fn safe_needs_approval() -> ErrorBody {
     )
 }
 
-/// `swarm.sign_soc` without an `authorization`: main's own SOC signs as
-/// before, and a page's too until APR-4c requires its Swarm grant. The
-/// chrome's is refused, as no token kind binds a SOC (Q8: the chrome needs
-/// a wallet-kind token for every signature).
+/// `swarm.sign_soc` without an `authorization` (design 0012, Q8): main's
+/// own SOC, under `shell`, signs on main's word as before. A page's needs
+/// its Swarm grant, presented as `{ swarm, soc }` (APR-4c), and the
+/// chrome's a wallet-kind token, which no kind binds for a SOC: both are
+/// refused before a key is touched.
 pub fn soc_without_authorization(context: &Context) -> Result<(), ErrorBody> {
     match context.caller {
+        CallerKind::Shell => Ok(()),
+        CallerKind::Page => Err(not_authorized(
+            "no_token",
+            "a page's SOC needs its Swarm grant, presented as { swarm, soc }",
+        )),
         CallerKind::Chrome => Err(chrome_needs_token()),
-        CallerKind::Page | CallerKind::Shell => Ok(()),
     }
 }
 
@@ -1244,9 +1253,10 @@ impl Approvals {
 
     /// Checks `swarm.sign_soc`'s `authorization`, `{ swarm, soc }`, after
     /// the chunk's public work and before any key is derived (design 0012,
-    /// "A page's SOC"). Only a page presents one: the core reads the page's
-    /// Swarm grant for `PageContext.origin` from the swarm store as it
-    /// stands, main's file until it moves. `swarm` is `user` (main's word
+    /// "A page's SOC"), which a page's SOC needs (APR-4c). Only a page
+    /// presents one (`no_rule` from another caller): the core reads the
+    /// page's Swarm grant for `PageContext.origin` from the swarm store as
+    /// it stands, main's file until it moves. `swarm` is `user` (main's word
     /// that its prompt was answered) or `auto` (the site's flag); `soc`
     /// names the request, `feed` (a feed write) or `raw` (a raw SOC), as
     /// main names the key and the identifier until 0015.
@@ -1270,8 +1280,14 @@ impl Approvals {
             "raw" => SocRequest::Raw,
             _ => return Err(invalid("soc: expected feed or raw")),
         };
+        // A grant answers only a page, as a standing rule does on `sign.*`:
+        // main's own SOC takes none, and the chrome's needs a wallet-kind
+        // token, which no kind binds for a SOC.
         let Some(page) = page_context(context)? else {
-            return Err(forbidden("a Swarm grant answers only a page's SOC"));
+            return Err(not_authorized(
+                "no_rule",
+                "a Swarm grant answers only a page's SOC",
+            ));
         };
         let store = self.grants.view::<SwarmStore>(clocks.wall_ms / 1000);
         let ask = SocAsk {
