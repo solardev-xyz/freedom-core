@@ -84,7 +84,7 @@ use serde_json::json;
 
 use super::js::{self, Seeding, Work};
 use super::{BESIDE, bounded_blob, identity};
-use crate::node::Handle;
+use crate::node::{ByDeadline, Handle};
 use crate::output::{
     BUILT, Body, Budget, Failure, Json, Refused, Until, composed_read, composed_read_beside,
 };
@@ -348,12 +348,15 @@ fn meta_into(
             .repo_info_bounded(rid, &bounds(until, REPO_INFO))?;
         capture(REPO_INFO, |mut w| json::repo_info(&mut w, &info))?
     };
-    let seeders = handle.seeders_within(rid, super::left(until)?);
+    let seeders = handle.seeders_by(rid, until.deadline);
     let seeders = match seeders {
         Ok(n) => Some(capture(REPO_INFO, |mut w| json::seeding(&mut w, n))?),
         Err(
-            error @ (libradicle::Error::NodeDeadline { .. } | libradicle::Error::NodeBusy { .. }),
-        ) => return Err(error.into()),
+            unanswered @ (ByDeadline::Past
+            | ByDeadline::Node(
+                libradicle::Error::NodeDeadline { .. } | libradicle::Error::NodeBusy { .. },
+            )),
+        ) => return Err(unanswered.into()),
         Err(_) => {
             // Its message may quote the RID.
             log::warn(

@@ -572,6 +572,15 @@ fn wedge(radicled: &mut Radicled, armed: &Path) {
     assert!(radicled.logs(WEDGED, READ_TIMEOUT));
 }
 
+/// The stop's log line that can't prove the node stopped.
+fn unproven(log: &str) -> Value {
+    let line = log
+        .lines()
+        .find(|line| line.contains(UNPROVEN))
+        .unwrap_or_else(|| panic!("no unproven stop: {log}"));
+    serde_json::from_str(line).unwrap()
+}
+
 /// The `qid` `rad.quarantine_list`'s first page gives `rid`.
 fn qid_of(radicled: &mut Radicled, rid: RepoId) -> Option<String> {
     let reply = radicled.call("rad.quarantine_list", json!({ "page": 0 }));
@@ -586,11 +595,7 @@ fn qid_of(radicled: &mut Radicled, rid: RepoId) -> Option<String> {
 /// The calls the stop's log names as waiting on the node's reactor (#340),
 /// each with whether it is overdue, and which list named them.
 fn named_waiting(log: &str) -> (String, Vec<(String, bool)>) {
-    let line = log
-        .lines()
-        .find(|line| line.contains(UNPROVEN))
-        .unwrap_or_else(|| panic!("no unproven stop: {log}"));
-    let line: Value = serde_json::from_str(line).unwrap();
+    let line = unproven(log);
     let waiting = &line["waiting_on_node"];
     let calls = waiting["calls"]
         .as_array()
@@ -758,6 +763,57 @@ fn a_wedged_reactor_answers_each_call_at_its_deadline_and_the_stop_names_them() 
     let (listed, calls) = named_waiting(&log);
     assert_eq!(listed, "service", "{log}");
     assert_eq!(calls, [("seeds_for".to_owned(), false)], "{log}");
+    std::fs::remove_file(&armed).unwrap();
+}
+
+/// #370's review: a read that waits for the node behind an exclusive
+/// holder until past its deadline. It takes its time left once it holds
+/// the node, so it asks the reactor nothing then, and lets go of the node
+/// at once:
+/// - a `rad.unseed`, held just past its start, holds the node exclusively;
+/// - a `seeders` read behind it answers `deadline` at its deadline;
+/// - the unseed is let go: its call, past its own deadline, is sent and not
+///   waited for, and it lets go of the node;
+/// - the read, holding the node then, asks nothing. The stop finds the node
+///   free and asks it to stop. The wedged reactor keeps every call it was
+///   sent listed, and the stop's log names no `seeds_for` among them.
+#[test]
+fn a_read_that_waited_for_the_node_past_its_deadline_asks_the_reactor_nothing() {
+    let dirs = Dirs::new();
+    configure(&dirs.home, json!({}));
+    let rid = fixture::repository(&dirs.home, &CREATOR, "behind");
+    let (hold, gate) = dirs.held("until", "release-unseed");
+    let (mut radicled, armed) = wedgeable(
+        &dirs,
+        &[
+            ("FREEDOM_RADICLED_TEST_WORK_DEADLINE_MS", "3000"),
+            ("FREEDOM_RADICLED_TEST_SHUTDOWN_WITHIN_MS", "1000"),
+            ("FREEDOM_RADICLED_TEST_HOLD_WRITE", &hold),
+        ],
+    );
+    wedge(&mut radicled, &armed);
+    let unseed = radicled.request("rad.unseed", json!({ "rid": rid.to_string() }));
+    assert!(radicled.logs_times(STARTED, 1, READ_TIMEOUT));
+    let read = radicled.request(
+        "rad.read",
+        json!({ "op": "seeders", "args": { "rid": rid.to_string() } }),
+    );
+    let late = radicled.read_reply(read).unwrap_err();
+    assert_eq!(code(&late), "deadline", "{late}");
+    let reply = radicled.reply(unseed);
+    assert_eq!(code(&reply), "outcome_unknown", "{reply}");
+    release(&radicled, &gate);
+
+    radicled.shutdown();
+    assert!(radicled.exit_code(EXIT_TIMEOUT).is_some());
+    let log = radicled.stderr();
+    // Asked: no work held the node as the stop came.
+    let line = unproven(&log);
+    assert_ne!(line["error"], "work was still running", "{line}");
+    let (listed, calls) = named_waiting(&log);
+    assert_eq!(listed, "node", "{log}");
+    assert!(calls.contains(&("unseed".to_owned(), true)), "{log}");
+    assert!(!calls.iter().any(|call| call.0 == "seeds_for"), "{log}");
     std::fs::remove_file(&armed).unwrap();
 }
 

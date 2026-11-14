@@ -72,8 +72,11 @@
 //! runs, and lets go of it as its work returns.
 //!
 //! **The calls that wait on the node's reactor wait within a bound**
-//! (#340, #363), each with the request's deadline left (the watch's look,
-//! with [`LOOK_WITHIN`]):
+//! (#340, #363), each with the request's deadline left, taken once the
+//! call holds the node (the watch's look, with [`LOOK_WITHIN`]): a call
+//! that waited for the node past its deadline, behind an exclusive holder,
+//! asks nothing, and lets go of the node at once ([`ByDeadline::Past`]).
+//! Each is:
 //! - `rad.read`'s `status` and `node_info`, and the watch's look: libradicle's
 //!   `connected_peers_within` (`sessions`);
 //! - `rad.read`'s `seeders`, `repo_meta` and `repos_meta`:
@@ -317,26 +320,30 @@ impl Handle {
     }
 
     /// The node's connected peers, holding it shared, its reactor waited
-    /// for up to `within` (see the module's doc): `NodeDeadline` past it,
-    /// and `NodeBusy`, with nothing sent, while too many calls wait.
-    pub fn connected_peers_within(&self, within: Duration) -> Result<usize, libradicle::Error> {
+    /// for until `deadline` (see the module's doc): `NodeDeadline` at it,
+    /// and `NodeBusy`, with nothing sent, while too many calls wait. The
+    /// time left is taken once the node is held: a call that waited for the
+    /// node past `deadline`, behind an exclusive holder, asks nothing
+    /// ([`ByDeadline::Past`]).
+    pub fn connected_peers_by(&self, deadline: Instant) -> Result<usize, ByDeadline> {
         let node = self.node();
+        let within = left(deadline)?;
         let _call = self.calls.enter("sessions");
-        node.connected_peers_within(within)
+        Ok(node.connected_peers_within(within)?)
     }
 
     /// The number of nodes known to seed `rid`, holding the node shared,
-    /// its reactor waited for up to `within` (see the module's doc):
-    /// `NodeDeadline` past it, and `NodeBusy`, with nothing sent, while too
-    /// many calls wait.
-    pub fn seeders_within(
+    /// its reactor waited for until `deadline`, as
+    /// [`Handle::connected_peers_by`].
+    pub fn seeders_by(
         &self,
         rid: radicle::prelude::RepoId,
-        within: Duration,
-    ) -> Result<usize, libradicle::Error> {
+        deadline: Instant,
+    ) -> Result<usize, ByDeadline> {
         let node = self.node();
+        let within = left(deadline)?;
         let _call = self.calls.enter("seeds_for");
-        node.seeders_within(rid, within)
+        Ok(node.seeders_within(rid, within)?)
     }
 
     /// Lists `call` among the service's calls waiting on the node's reactor
@@ -346,6 +353,33 @@ impl Handle {
     pub fn waiting_call(&self, call: &'static str) -> NodeCall {
         self.calls.enter(call)
     }
+}
+
+/// Why a call through [`Handle`] that waits on the node's reactor by a
+/// deadline has no answer.
+#[derive(Debug)]
+pub enum ByDeadline {
+    /// libradicle's error: `NodeDeadline` and `NodeBusy` among them.
+    Node(libradicle::Error),
+    /// The deadline passed while the call waited for the node: nothing was
+    /// asked.
+    Past,
+}
+
+impl From<libradicle::Error> for ByDeadline {
+    fn from(error: libradicle::Error) -> Self {
+        ByDeadline::Node(error)
+    }
+}
+
+/// The time left until `deadline`, taken with the node held: none,
+/// [`ByDeadline::Past`], at or past it.
+fn left(deadline: Instant) -> Result<Duration, ByDeadline> {
+    let within = deadline.saturating_duration_since(Instant::now());
+    if within.is_zero() {
+        return Err(ByDeadline::Past);
+    }
+    Ok(within)
 }
 
 /// The service's calls waiting on the node's reactor, each within its
