@@ -64,6 +64,7 @@ use zeroize::Zeroizing;
 
 use crate::dweb::thread as dweb;
 use crate::exit::Exit;
+use crate::keystore::client::DesktopKeyStore;
 use crate::requests::{self, Owner, Requests};
 use crate::transport::{self, Allowance, Credits, Link, Pending};
 use crate::vault::{FileSnapshot, Finished, NodeRecovery, Out, Vault};
@@ -295,9 +296,18 @@ pub fn run(options: &Options) -> Exit {
     ) else {
         return Exit::Internal;
     };
+    // The key store (design 0013): its calls go to main as `shell.keystore`
+    // from the threads that make them, never from this loop, which only
+    // routes main's answers back.
+    let keystore = DesktopKeyStore::new(Arc::clone(&requests), writer.queue.clone());
     #[cfg(feature = "testhooks")]
     let test = if testhooks::test_methods() {
-        match testmethods::spawn(writer.queue.clone(), Arc::clone(&link), events_tx.clone()) {
+        match testmethods::spawn(
+            writer.queue.clone(),
+            Arc::clone(&link),
+            events_tx.clone(),
+            Arc::clone(&keystore),
+        ) {
             Ok(test) => Some(test),
             Err(_) => return Exit::Internal,
         }
@@ -353,6 +363,7 @@ pub fn run(options: &Options) -> Exit {
         ),
         worker,
         requests,
+        keystore,
         naming,
         chain,
         dweb: None,
@@ -505,8 +516,10 @@ pub fn run(options: &Options) -> Exit {
             break exit;
         }
     };
-    // No more requests to main, whatever ended the loop.
+    // No more requests to main, whatever ended the loop; a key-store call
+    // still waiting is Unavailable, and lets the writer go.
     core.requests.close();
+    core.keystore.close();
     // The dweb thread stops: it hands the writer the frames it made, drops
     // the bodies still queued (main fails them as it closes), and joins its
     // hashing pool.
@@ -612,6 +625,9 @@ struct Core {
     worker: Worker,
     /// The core's requests to main: where main's responses go back to.
     requests: Arc<Requests>,
+    /// The key store over `shell.keystore` (design 0013), whose answers
+    /// this loop routes.
+    keystore: Arc<DesktopKeyStore>,
     naming: naming::Handle,
     chain: chain::Handle,
     /// The dweb thread, once the hello has settled (design 0009).
@@ -1154,6 +1170,12 @@ impl Core {
                 },
                 self.credit.take(),
             ),
+            // The key store copies its answer out, at most its cap, for the
+            // call waiting on it.
+            (Owner::KeyStore, outcome) => {
+                self.keystore.deliver(id, outcome, &message);
+                true
+            }
             // The dweb thread reads its piece's reply where it lies, as the
             // chain thread does.
             (Owner::Dweb, outcome) => self.dweb.as_ref().is_some_and(|thread| {
@@ -1275,7 +1297,14 @@ impl Core {
                     None => None,
                 };
                 let sent = self.test.as_ref().is_some_and(|test| {
-                    test.send(testmethods::In::Request { id, params }, self.credit.take())
+                    test.send(
+                        testmethods::In::Request {
+                            id,
+                            method: method.to_owned(),
+                            params,
+                        },
+                        self.credit.take(),
+                    )
                 });
                 if sent {
                     Flow::Continue

@@ -44,6 +44,10 @@ name = "fragments"
 required-features = ["testhooks"]
 
 [[test]]
+name = "keystore"
+required-features = ["testhooks"]
+
+[[test]]
 name = "naming"
 required-features = ["testhooks"]
 
@@ -97,12 +101,16 @@ fc-evm = { path = "../fc-evm" }
 # dweb.verify's plan reads back as dweb.open wrote it (design 0009).
 fc-json = { path = "../fc-json" }
 fc-keys = { path = "../fc-keys" }
+# The key store's trait and types (design 0013): the core's desktop
+# KeyStore over `shell.keystore`, and the helper's answers.
+fc-keystore = { path = "../fc-keystore" }
 fc-naming = { path = "../fc-naming" }
 # The profile catalog's rules and text, which the profile subcommands run
 # (design 0013).
 fc-profile = { path = "../fc-profile" }
 fc-protocol = { path = "../fc-protocol" }
-# The sealed release of the Radicle node key (design 0008).
+# The sealed release of the Radicle node key (design 0008), and the key
+# store's answers, sealed to each request's reply key (design 0013).
 fc-seal = { path = "../fc-seal" }
 # The Radicle home's gate, the Radicle service's own (design 0008, "Spawn
 # and lock"), which every Radicle identity write and recovery takes.
@@ -127,14 +135,20 @@ fc-sys = { path = "../fc-sys" }
 # futimes, for the profile lock's mtime in a confined subcommand (design
 # 0013, "The lock").
 fc-sys = { path = "../fc-sys" }
+# The key-store helper's Keychain backend (design 0013, "Backends and
+# dependencies"): SecItemAdd, SecItemCopyMatching and SecItemDelete on a
+# generic password, and user interaction off. Pinned exactly, as 0013
+# says; its unsafe stays inside it. No default features: none is used.
+security-framework = { version = "=3.7.0", default-features = false }
+# The item's data for SecItemAdd (`CFData`): the version security-framework
+# itself links, already in the graph.
+core-foundation = "0.10"
+
 
 [target.'cfg(unix)'.dependencies]
 rustix = { version = "1.1", default-features = false, features = ["fs", "process", "std"] }
 
 [dev-dependencies]
-# The profile-delete tests write secrets files in the core's own form
-# (design 0013, PRF-1a).
-fc-keystore = { path = "../fc-keystore" }
 # The seal test checks the opened key against the Radicle public key.
 ed25519-dalek = { version = "3.0", default-features = false }
 tempfile = "3"
