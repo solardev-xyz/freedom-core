@@ -12,6 +12,13 @@
 //!   vault worker's jobs (enroll, disable, a vault delete) and the drain
 //!   share it. A file that doesn't read, or doesn't parse, is never
 //!   written over: nothing it names is acted on.
+//! - **A vault delete** ([`Secrets::delete_vault`]) with quick unlock's
+//!   entry is one journaled operation over the vault and this file
+//!   ([`crate::delete_journal`]): a crash leaves the vault, the entry and
+//!   its key in use, or none of them and the key in `forget`. A file that
+//!   can't be read, or a write that fails, refuses the delete with the vault
+//!   intact. Every read of the file first finishes a delete whose journal
+//!   committed.
 //! - **Quick unlock** is the entry `quick-unlock`: the vault password,
 //!   bound to the vault file's SHA-256 (`vault_fingerprint`), under the
 //!   `UserPresence` key where the device offers it and `Unattended`
@@ -61,6 +68,9 @@ pub enum Error {
     Unreadable(&'static str),
     /// A write failed before its rename: the file is as it was.
     Write(&'static str),
+    /// A vault delete without quick unlock's entry: the vault's own unlink
+    /// failed (a storage error's kind), and nothing changed.
+    VaultStorage(&'static str),
     /// The key store refused or didn't answer.
     KeyStore(KeyStoreError),
     /// A `create` would name a fifth item, even after the `forget` list was
@@ -169,9 +179,13 @@ impl Secrets {
         self.dir.join(SECRETS_FILE)
     }
 
-    /// The file as it stands: empty if there is none.
+    /// The file as it stands: empty if there is none. A vault delete whose
+    /// journal committed is finished first ([`crate::delete_journal`]):
+    /// while it can't be, the file is neither read nor written.
     fn load(&self) -> Result<SecretsFile, Error> {
-        let loaded = read(&self.path());
+        let loaded = crate::delete_journal::settle(&self.dir)
+            .map_err(|e| Error::Unreadable(io_kind(&e)))
+            .and_then(|_| read(&self.path()));
         if loaded.is_err() {
             self.set_view(View {
                 unreadable: true,
@@ -529,27 +543,50 @@ impl Secrets {
         Ok(())
     }
 
-    /// After a vault delete has committed: the entry goes as for a disable.
-    /// A failure is only logged, since the delete has happened; the entry
-    /// then names no vault, and the next start removes it.
-    pub fn vault_deleted(&self) {
-        let removed = quick_unlock().and_then(|name| {
-            let _held = self.lock()?;
-            let file = self.load()?;
-            if file.entry_key(&name).is_none() {
-                return Ok(false);
+    /// `vault.delete`, once the password opened the vault file, whose
+    /// digest is `vault` (design 0013, "Forgetting an item"). `claim` is the
+    /// vault's commit claim.
+    ///
+    /// - **With quick unlock's entry:** the entry's removal (its key moved
+    ///   into `forget` if nothing else is under it) and the vault's are one
+    ///   journaled operation ([`crate::delete_journal`]), committed by the
+    ///   journal's write. Then the drain forgets the key.
+    /// - **Without it:** the file doesn't change, and the vault is removed
+    ///   as 0001 removes it, committed at the unlink.
+    ///
+    /// A file that can't be read (missing is empty, and has no entry), or
+    /// a staged write or journal write that fails, refuses the delete: the
+    /// vault, the entry and its key stay as they were, so nothing the file
+    /// names is ever left unnamed.
+    pub fn delete_vault(&self, vault: &str, claim: &dyn Fn() -> bool) -> Result<Done, Error> {
+        let name = quick_unlock()?;
+        let _held = self.lock()?;
+        let file = self.load()?;
+        if file.entry_key(&name).is_none() {
+            return match fsx::remove(&self.dir.join(crate::vault::VAULT_FILE), claim) {
+                Ok(Some(done)) => Ok(done),
+                Ok(None) => Err(Error::Abandoned),
+                Err(e) => Err(Error::VaultStorage(io_kind(&e))),
+            };
+        }
+        let next = file.remove(&name).map_err(refused)?;
+        let text = next.text();
+        let check = |bytes: &[u8]| SecretsFile::parse(bytes).is_ok_and(|read| read == next);
+        match crate::delete_journal::delete(&self.dir, text.as_bytes(), vault, &check, claim) {
+            Ok(done) => {
+                self.set_view(view_of(&next));
+                self.poke();
+                Ok(done)
             }
-            let next = file.remove(&name).map_err(refused)?;
-            self.write(&next, "remove", &|| true)?;
-            Ok(true)
-        });
-        match removed {
-            Ok(true) => self.poke(),
-            Ok(false) => {}
-            Err(error) => crate::log::warn(
-                "could not remove quick unlock's entry after a vault delete",
-                serde_json::json!({ "error": format!("{error:?}") }),
-            ),
+            Err(crate::delete_journal::Error::Abandoned) => Err(Error::Abandoned),
+            Err(crate::delete_journal::Error::Io(e)) => Err(Error::Write(io_kind(&e))),
+            Err(crate::delete_journal::Error::Check) => {
+                crate::log::error(
+                    "the staged secrets file of a vault delete failed its check",
+                    serde_json::json!({}),
+                );
+                Err(Error::Internal)
+            }
         }
     }
 }

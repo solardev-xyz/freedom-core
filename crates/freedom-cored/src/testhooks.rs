@@ -71,9 +71,16 @@
 //!   change (`before-pending`, `after-pending`, `before-commit`,
 //!   `after-commit`, `before-remove`, `after-remove`, `before-forgotten`,
 //!   `after-forgotten`, and `before-startup`, `after-startup` for the start's
-//!   settling write): there the core exits at once with 99, as if
-//!   killed, the file as that step left it (design 0013, PRF-1: "a crash
-//!   hook before and after each write").
+//!   settling write), or of a journaled vault delete (`before-delete-stage`,
+//!   `before-delete-journal`, `after-delete-journal`, `after-delete-secrets`,
+//!   `after-delete-vault`, `after-delete-done`): there the core exits at
+//!   once with 99, as if killed, the files as that step left them (design
+//!   0013, PRF-1: "a crash hook before and after each write").
+//! - `FREEDOM_CORED_TEST_SECRETS_FAIL` names a write of a journaled vault
+//!   delete (`delete-stage`, the staged secrets file; `delete-journal`, the
+//!   journal's rename, after the commit claim; `delete-install`, the staged
+//!   file's rename over the secrets file, after the commit): its first
+//!   attempt in the process fails as if the OS had failed it.
 //! - `FREEDOM_CORED_TEST_RECEIPT_TTL_MS` replaces a device send's receipt's
 //!   10-minute life (design 0012, "A device send's rule"), so a test sees
 //!   one expire over the wire, which has no clock to inject. Read once, as
@@ -215,6 +222,14 @@ pub fn secrets_step(step: &str) {
     if std::env::var("FREEDOM_CORED_TEST_SECRETS_CRASH").is_ok_and(|s| s == step) {
         std::process::exit(99);
     }
+}
+
+/// Whether this write fails, once per process.
+#[cfg(feature = "testhooks")]
+pub fn secrets_fails(step: &str) -> bool {
+    static FAILED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    std::env::var("FREEDOM_CORED_TEST_SECRETS_FAIL").is_ok_and(|s| s == step)
+        && !FAILED.swap(true, std::sync::atomic::Ordering::SeqCst)
 }
 
 #[cfg(feature = "testhooks")]
@@ -495,6 +510,11 @@ pub fn keystore_capabilities(native: fc_keystore::Capabilities) -> fc_keystore::
 
 #[cfg(not(feature = "testhooks"))]
 pub fn secrets_step(_step: &str) {}
+
+#[cfg(not(feature = "testhooks"))]
+pub fn secrets_fails(_step: &str) -> bool {
+    false
+}
 
 #[cfg(not(feature = "testhooks"))]
 pub fn stall(default: Duration) -> Duration {

@@ -73,7 +73,7 @@ use crate::worker::Job;
 /// The vault file inside the identity directory.
 pub const VAULT_FILE: &str = "identity-vault.json";
 /// The largest vault file read. Real vaults are about 1 KB.
-const MAX_VAULT_BYTES: u64 = 1 << 20;
+pub(crate) const MAX_VAULT_BYTES: u64 = 1 << 20;
 /// Total budget for a KDF method, from admission (design 0001).
 const KDF_DEADLINE: Duration = Duration::from_secs(30);
 /// Queued KDF requests before `busy`.
@@ -145,6 +145,7 @@ impl OpError {
     fn from_secrets(error: secrets::Error) -> Self {
         match error {
             secrets::Error::Abandoned => OpError::Abandoned,
+            secrets::Error::VaultStorage(kind) => OpError::Storage(kind),
             error => OpError::Secrets(error),
         }
     }
@@ -200,8 +201,8 @@ impl OpError {
     fn throttle_outcome(&self) -> Outcome {
         match self {
             OpError::Incorrect => Outcome::Failure,
-            // Only an enroll reaches the secrets file with an attempt
-            // reserved, and only once its password checked out.
+            // An enroll or a delete reaches the secrets file with an
+            // attempt reserved only once its password checked out.
             OpError::Secrets(_) => Outcome::Success,
             _ => Outcome::NotTried,
         }
@@ -2061,6 +2062,7 @@ fn secrets_body(error: secrets::Error) -> ErrorBody {
             ErrorBody::new(ErrorCode::Storage, "Storage error")
                 .with_data(serde_json::json!({ "kind": kind, "file": "secrets" }))
         }
+        secrets::Error::VaultStorage(kind) => OpError::Storage(kind).body(false),
         secrets::Error::Abandoned | secrets::Error::Internal => internal(),
     }
 }
@@ -2219,6 +2221,20 @@ pub fn startup_snapshot(dir: &Path, lock_dir: &Path) -> (FileSnapshot, NodeRecov
     // Finish an interrupted node identity write before anything else
     // (design 0001: before core.hello is answered and before any node write).
     let recovery = startup_recovery(dir, lock_dir);
+    // Then a vault delete's journal (design 0013, "Forgetting an item"):
+    // committed, it is finished; never committed, its staged secrets file
+    // goes. Left pending, every read of the vault tries it again first.
+    match crate::delete_journal::startup(dir) {
+        Ok(crate::delete_journal::Settled::Nothing) => {}
+        Ok(settled) => crate::log::info(
+            "a vault delete's journal at start",
+            serde_json::json!({ "outcome": format!("{settled:?}") }),
+        ),
+        Err(e) => crate::log::error(
+            "could not finish a vault delete's journal",
+            serde_json::json!({ "error": e.kind().to_string() }),
+        ),
+    }
     match fsx::tighten(&dir.join(VAULT_FILE)) {
         Ok(true) => crate::log::info("tightened the vault file to 0600", serde_json::json!({})),
         Ok(false) => {}
@@ -2353,7 +2369,12 @@ fn snapshot(dir: &Path) -> FileSnapshot {
 /// symlink, and at most [`MAX_VAULT_BYTES`], so nothing swapped in between a
 /// check and the read (a FIFO, a symlink, a growing file) can stall the
 /// worker or be read whole.
+///
+/// A vault delete whose journal committed is finished first (design 0013;
+/// [`crate::delete_journal`]): while it can't be, the vault isn't read, so
+/// no job sees the vault the delete removed.
 fn read_vault(dir: &Path) -> Result<Option<String>, OpError> {
+    crate::delete_journal::settle(dir).map_err(|e| storage(&e))?;
     read_bounded(&dir.join(VAULT_FILE))
 }
 
@@ -2516,6 +2537,11 @@ fn claim(control: &JobControl) -> bool {
     claimed
 }
 
+/// `vault.delete`: the password checked, then the vault removed. With quick
+/// unlock's entry, its removal joins the delete's journal (design 0013,
+/// "Forgetting an item"; [`Secrets::delete_vault`]): a secrets file that
+/// can't be read or written refuses the delete, with the vault intact.
+/// Without [`Secrets`] (the unit tests' vault), the plain unlink of 0001.
 fn job_delete(
     dir: &Path,
     password: &SecretBytes,
@@ -2529,11 +2555,26 @@ fn job_delete(
     if control.abandoned() {
         return not_committed(OpError::Abandoned);
     }
-    if let Err(error) = open(dir, password) {
-        return not_committed(error);
+    let contents = match read_vault(dir) {
+        Ok(Some(contents)) => contents,
+        Ok(None) => return not_committed(OpError::NoVault),
+        Err(error) => return not_committed(error),
+    };
+    if let Err(error) = format::open(&contents, password.as_bytes()) {
+        return not_committed(OpError::from_vault(error));
     }
-    match fsx::remove(&dir.join(VAULT_FILE), || claim(control)) {
-        Ok(Some(done)) => {
+    let removed = match secrets {
+        Some(secrets) => secrets
+            .delete_vault(&sha256_hex(contents.as_bytes()), &|| claim(control))
+            .map_err(OpError::from_secrets),
+        None => match fsx::remove(&dir.join(VAULT_FILE), || claim(control)) {
+            Ok(Some(done)) => Ok(done),
+            Ok(None) => Err(OpError::Abandoned),
+            Err(e) => Err(storage(&e)),
+        },
+    };
+    match removed {
+        Ok(done) => {
             // Copies a killed write left go with the vault (#81). No other
             // job runs, so none of them is live. The delete has committed:
             // a failure here is only logged.
@@ -2543,20 +2584,12 @@ fn job_delete(
                     serde_json::json!({ "error": e.kind().to_string() }),
                 );
             }
-            // Quick unlock's entry goes with the vault, and its key into
-            // `forget` (design 0013, "Forgetting an item"). A crash before
-            // this leaves an entry naming no vault, which the next start
-            // removes the same way.
-            if let Some(secrets) = secrets {
-                secrets.vault_deleted();
-            }
             JobOutput::Checked {
                 result: Ok(()),
                 commit: Some(Commit { done, file: None }),
             }
         }
-        Ok(None) => not_committed(OpError::Abandoned),
-        Err(e) => not_committed(storage(&e)),
+        Err(error) => not_committed(error),
     }
 }
 
@@ -2987,6 +3020,34 @@ mod tests {
     }
 
     const ABANDON: &str = "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about";
+
+    /// Design 0013, "Forgetting an item": a vault delete whose journal
+    /// committed is finished before the vault is read, so no job sees the
+    /// vault it removes (an install that failed after the commit).
+    #[test]
+    fn a_committed_delete_is_finished_before_the_vault_is_read() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join(VAULT_FILE), b"the vault").unwrap();
+        std::fs::write(dir.path().join(secrets::SECRETS_FILE), b"before").unwrap();
+        std::fs::write(dir.path().join(crate::delete_journal::STAGED), b"after").unwrap();
+        let journal = serde_json::json!({ "op": "vault.delete", "files": [
+            { "target": secrets::SECRETS_FILE, "staged": crate::delete_journal::STAGED,
+              "sha256": sha256_hex(b"after") },
+            { "target": VAULT_FILE, "sha256": sha256_hex(b"the vault"), "remove": true },
+        ] });
+        std::fs::write(
+            dir.path().join(crate::delete_journal::JOURNAL),
+            journal.to_string(),
+        )
+        .unwrap();
+        assert!(matches!(read_vault(dir.path()), Ok(None)));
+        assert!(!dir.path().join(VAULT_FILE).exists());
+        assert!(!dir.path().join(crate::delete_journal::JOURNAL).exists());
+        assert_eq!(
+            std::fs::read(dir.path().join(secrets::SECRETS_FILE)).unwrap(),
+            b"after"
+        );
+    }
 
     /// A vault unlocked now, with a 15-minute auto-lock.
     fn unlocked() -> Vault {

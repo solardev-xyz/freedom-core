@@ -632,7 +632,7 @@ Rule 4 gains: "OS key-store items hold wrapping keys only, one per profile and p
 | `accounts.*` | chrome, shell | one per `vault-meta.json` change |
 | `intents.*` | shell | `intent-store.js`'s record kinds: commit, handoff, outcome, settle, void, retire, track, and the reads |
 | `payments.*`, `safe_pending.*` | shell, chrome | the modules' operations |
-| `quick_unlock.enroll`, `.unlock`, `.export_mnemonic`, `.export_private_key`, `.status`, `.disable` | chrome (after main's Touch ID prompt), shell (enroll) | [The re-wrap](#the-re-wrap) |
+| `quick_unlock.enroll`, `.unlock`, `.export_mnemonic`, `.export_private_key`, `.status`, `.disable` | chrome only (after main's Touch ID prompt), except enroll: shell only | [The re-wrap](#the-re-wrap); enroll's `password` travels as `password_b64`, 0001's convention for secret fields |
 | `secrets.rpc_api_keys` | shell only | the keys main needs for the requests it runs |
 | `secrets.rpc_api_key_status`, `secrets.set_rpc_api_key`, `secrets.remove_rpc_api_key` | chrome, shell | `{ providers: [{ id, present }] }`, never a key; a set replaces any key the provider had |
 | `nodes.bee_handoff`, `nodes.bee_handoff_done`, `nodes.adopt_bee_password` | shell | [5.4c](#54c-bees-keystore-password-q16) |

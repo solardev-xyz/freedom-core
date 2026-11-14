@@ -16,10 +16,18 @@
 //! - **Forgetting, killed at each step:** for an enroll's new key, a
 //!   replace, a disable and a vault delete, a crash hook before and after
 //!   each write, and main holding a `create` or a `forget` past the core's
-//!   deadline or killing the helper after the store. After a restart at
-//!   each point the file names every item the keychain holds, the entry is
-//!   the old one or the new, and after the next open the keychain holds
-//!   only the key in use and the file no record.
+//!   deadline or killing the helper after the OS acted (the item stored,
+//!   or forgotten, and the answer lost). After a restart at each point the
+//!   file names every item the keychain holds, the entry is the old one or
+//!   the new, and after the next open the keychain holds only the key in
+//!   use and the file no record. The start's own settling write, killed
+//!   before and after it, is finished by the next start.
+//! - **The vault delete** is one journaled operation with the secrets file:
+//!   a crash leaves the vault, the entry and its key, or none of them and
+//!   the key in `forget`; a secrets file that can't be read, or a write
+//!   that fails before the commit, refuses the delete with the vault
+//!   intact; an install that fails after it is finished before anything
+//!   reads the vault again.
 //! - **The rest of the row:** `forget_backlog` with `forget` made to fail;
 //!   a record whose item was removed by hand, or whose backend this OS
 //!   doesn't have, dropped without an error; an entry naming no vault
@@ -79,8 +87,9 @@ enum Fault {
     Hold,
     /// `unavailable` (`timeout`), as main answers a helper it killed.
     Timeout,
-    /// The item is stored, then `unavailable` (`timeout`): a helper killed
-    /// after the OS stored it and before it answered.
+    /// The OS acts, then `unavailable` (`timeout`): a helper killed after
+    /// the OS stored a `create`'s item, or forgot a `forget`'s, and before
+    /// it answered.
     KilledAfterStore,
 }
 
@@ -113,6 +122,11 @@ impl Keychain {
                 let mut key = [0u8; 32];
                 getrandom::fill(&mut key).unwrap();
                 self.items.insert(item, key);
+                Some(timeout)
+            }
+            // The OS forgot the item; the answer is lost.
+            ("forget", Some(Fault::KilledAfterStore)) => {
+                self.items.remove(&item);
                 Some(timeout)
             }
             (_, Some(Fault::Timeout | Fault::KilledAfterStore)) => Some(timeout),
@@ -195,6 +209,17 @@ impl Main {
         self.core = Some(core);
     }
 
+    /// Starts a core with the backend hook and `env`, which stops it before
+    /// the hello is answered (the start's work runs without one): its exit
+    /// code.
+    fn start_killed(&mut self, env: &[(&str, &str)]) -> i32 {
+        self.stop();
+        let mut all = vec![BACKEND, DEADLINE];
+        all.extend_from_slice(env);
+        let mut core = common::spawn_env("serve", &self.data, &self.locks, &[], &all);
+        core.exit_code(Duration::from_secs(10))
+    }
+
     fn stop(&mut self) {
         self.core = None;
     }
@@ -224,11 +249,16 @@ impl Main {
     /// Sends `method` from `caller` and serves the keychain until its
     /// response; `None` if the core exited first.
     fn try_call(&mut self, caller: &str, method: &str, params: Value) -> Option<Value> {
+        self.try_call_in(json!({ "caller": caller }), method, params)
+    }
+
+    /// [`Main::try_call`] with a whole caller context.
+    fn try_call_in(&mut self, context: Value, method: &str, params: Value) -> Option<Value> {
         let id = self.next_id;
         self.next_id += 1;
         self.core().send(&json!({
             "type": "request", "id": id, "method": method, "params": params,
-            "context": { "caller": caller },
+            "context": context,
         }));
         let until = Instant::now() + Duration::from_secs(60);
         while Instant::now() < until {
@@ -298,6 +328,18 @@ impl Main {
 
     fn secrets_path(&self) -> PathBuf {
         self.data.join("secrets.json")
+    }
+
+    fn vault_path(&self) -> PathBuf {
+        self.data.join("identity-vault.json")
+    }
+
+    /// No vault delete's journal, and no staged secrets file: nothing of a
+    /// delete is left over.
+    fn no_delete_left(&self) {
+        for name in ["vault-delete-journal.json", "secrets.json.freedom-new"] {
+            assert!(!self.data.join(name).exists(), "{name}");
+        }
     }
 
     /// The secrets file, as the core wrote it (empty if none).
@@ -494,20 +536,70 @@ fn enroll_checks_the_password_and_shares_the_throttle() {
     assert!(main.keychain.calls.is_empty());
 }
 
+/// Design 0013, API: enroll is main's own (`shell`); the rest are the
+/// chrome's, behind main's Touch ID prompt; a page reaches none. Each
+/// refused call is `forbidden` and asks the key store nothing.
 #[test]
-fn callers_and_no_key_store() {
-    let mut main = Main::new();
-    main.start(&[]);
-    main.import();
-    // Enroll is main's own.
-    let forbidden = main.call(
-        "quick_unlock.enroll",
-        json!({ "password_b64": b64(PASSWORD) }),
-    );
-    assert_eq!(error_code(&forbidden), "forbidden");
+fn callers() {
+    let mut main = enrolled();
+    let page = json!({ "caller": "page", "page": {
+        "origin": "https://app.example", "top_origin": "https://app.example",
+        "frame": 1, "navigation": 1, "agent": false,
+    } });
+    let calls = main.keychain.calls.clone();
+    for (method, params) in [
+        (
+            "quick_unlock.enroll",
+            json!({ "password_b64": b64(PASSWORD) }),
+        ),
+        ("quick_unlock.unlock", json!({})),
+        ("quick_unlock.export_mnemonic", json!({})),
+        ("quick_unlock.export_private_key", json!({ "account": 0 })),
+        ("quick_unlock.status", json!({})),
+        ("quick_unlock.disable", json!({})),
+    ] {
+        let enroll = method == "quick_unlock.enroll";
+        for (context, allowed) in [
+            (json!({ "caller": "chrome" }), !enroll),
+            (json!({ "caller": "shell" }), enroll),
+            (page.clone(), false),
+        ] {
+            let response = main
+                .try_call_in(context.clone(), method, params.clone())
+                .unwrap();
+            if allowed {
+                assert!(
+                    response["result"].is_object(),
+                    "{method} {context}: {response}"
+                );
+                // Put back what the call changed.
+                if method == "quick_unlock.disable" {
+                    main.drained();
+                    assert_eq!(main.enroll()["result"], json!({}));
+                }
+            } else {
+                assert_eq!(
+                    error_code(&response),
+                    "forbidden",
+                    "{method} {context}: {response}"
+                );
+                assert!(response["result"].is_null(), "{method} {context}");
+            }
+        }
+    }
+    // Only the allowed calls reached the keychain.
+    assert!(calls.len() < main.keychain.calls.len());
+    assert!(main.enrolled());
+}
+
+#[test]
+fn no_key_store() {
     if cfg!(target_os = "macos") {
         return;
     }
+    let mut main = Main::new();
+    main.start(&[]);
+    main.import();
     // Without the hook this OS has no backend: nothing is asked of main.
     main.start_with(&[]);
     assert_eq!(
@@ -546,12 +638,14 @@ fn a_failed_open_deletes_nothing() {
 /// What quick unlock is after the crash, the restart and the drain.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum After {
-    /// No entry.
+    /// No entry; the vault stays.
     Off,
     /// The entry, and unlock works.
     Works,
     /// The entry, its key's item gone (a replace killed before it began).
     Dead,
+    /// No vault, and no entry.
+    Deleted,
 }
 
 /// Runs `op` on `main` with the crash hook `hook` (exit 99) or main failing
@@ -586,26 +680,53 @@ fn killed(
         }
         main.stop();
     }
+    if fault == Some(("forget", Fault::KilledAfterStore)) {
+        // The OS forgot the item and the answer was lost: the record stays,
+        // naming an item the keychain no longer holds.
+        let records: Vec<String> = main
+            .file()
+            .forget_list()
+            .iter()
+            .map(|sealed| sealed.item().hex())
+            .collect();
+        assert_eq!(records.len(), 1, "{:?}", main.file().items());
+        assert!(!main.keychain.items.contains_key(&records[0]));
+        assert!(main.keychain.calls.iter().any(|c| c == "forget"));
+    }
     main.file_names_the_keychain();
     main.keychain.faults.clear();
     main.start(&[]);
     main.file_names_the_keychain();
     main.drained();
     main.only_the_key_in_use();
+    main.no_delete_left();
     let entry = main.enrolled();
-    assert_eq!(entry, after != After::Off, "{hook:?} {fault:?}");
+    let expect_entry = matches!(after, After::Works | After::Dead);
+    assert_eq!(entry, expect_entry, "{hook:?} {fault:?}");
+    assert_eq!(
+        main.vault_path().exists(),
+        after != After::Deleted,
+        "{hook:?} {fault:?}"
+    );
     let unlock = main.call("quick_unlock.unlock", json!({}));
     match after {
         After::Works => assert!(unlock["result"].is_object(), "{hook:?} {fault:?}: {unlock}"),
-        // `no_vault` after a vault delete.
-        After::Off => assert!(
-            matches!(error_code(&unlock), "not_found" | "no_vault"),
+        After::Off => assert_eq!(
+            error_code(&unlock),
+            "not_found",
             "{hook:?} {fault:?}: {unlock}"
         ),
         After::Dead => assert_eq!(
             unlock["error"]["data"]["reason"], "not_found",
             "{hook:?} {fault:?}: {unlock}"
         ),
+        After::Deleted => {
+            assert_eq!(
+                error_code(&unlock),
+                "no_vault",
+                "{hook:?} {fault:?}: {unlock}"
+            )
+        }
     }
 }
 
@@ -690,6 +811,7 @@ fn a_replace_killed_at_each_step() {
         ("create", Fault::KilledAfterStore, After::Off),
         ("forget", Fault::Hold, After::Works),
         ("forget", Fault::Timeout, After::Works),
+        ("forget", Fault::KilledAfterStore, After::Works),
     ] {
         killed(replace(), enroll_op, None, Some((op, fault)), after);
     }
@@ -705,7 +827,7 @@ fn a_disable_killed_at_each_step() {
     ] {
         killed(enrolled_stopped(), disable_op, Some(hook), None, after);
     }
-    for fault in [Fault::Hold, Fault::Timeout] {
+    for fault in [Fault::Hold, Fault::Timeout, Fault::KilledAfterStore] {
         killed(
             enrolled_stopped(),
             disable_op,
@@ -716,27 +838,108 @@ fn a_disable_killed_at_each_step() {
     }
 }
 
-/// Before or after the removal the vault is gone: a removal the crash
-/// prevented is the next start's (an entry naming no vault).
+/// The vault delete is one journaled operation with the secrets file
+/// (design 0013, "Forgetting an item"). Killed before its journal, the
+/// vault, the entry and its key stay, and the staged file goes at the next
+/// start; killed after it, the next start finishes the delete: no vault, no
+/// entry, and the key forgotten.
 #[test]
 fn a_vault_delete_killed_at_each_step() {
-    for hook in [
-        "before-remove",
-        "after-remove",
-        "before-forgotten",
-        "after-forgotten",
+    for (hook, after) in [
+        ("before-delete-stage", After::Works),
+        ("before-delete-journal", After::Works),
+        ("after-delete-journal", After::Deleted),
+        ("after-delete-secrets", After::Deleted),
+        ("after-delete-vault", After::Deleted),
+        ("after-delete-done", After::Deleted),
+        ("before-forgotten", After::Deleted),
+        ("after-forgotten", After::Deleted),
     ] {
-        killed(enrolled_stopped(), delete_op, Some(hook), None, After::Off);
+        killed(enrolled_stopped(), delete_op, Some(hook), None, after);
     }
-    for fault in [Fault::Hold, Fault::Timeout] {
+    for fault in [Fault::Hold, Fault::Timeout, Fault::KilledAfterStore] {
         killed(
             enrolled_stopped(),
             delete_op,
             None,
             Some(("forget", fault)),
-            After::Off,
+            After::Deleted,
         );
     }
+}
+
+/// A secrets file that can't be read, or a write of the delete's that fails
+/// before its commit, refuses the delete: the vault, the entry and its key
+/// stay as they were (review of #381).
+#[test]
+fn a_vault_delete_refused_while_the_secrets_file_cant_change() {
+    let mut main = enrolled();
+    let vault = std::fs::read(main.vault_path()).unwrap();
+    let secrets = std::fs::read(main.secrets_path()).unwrap();
+    let password = json!({ "password_b64": b64(PASSWORD) });
+    std::fs::write(main.secrets_path(), b"{\"version\":1").unwrap();
+    let refused = main.call("vault.delete", password.clone());
+    assert_eq!(error_code(&refused), "storage", "{refused}");
+    assert_eq!(
+        refused["error"]["data"],
+        json!({ "kind": "malformed", "file": "secrets" })
+    );
+    assert_eq!(std::fs::read(main.vault_path()).unwrap(), vault);
+    assert_eq!(
+        std::fs::read(main.secrets_path()).unwrap(),
+        b"{\"version\":1"
+    );
+    main.no_delete_left();
+    assert_eq!(main.keychain.calls, ["create"]);
+    assert_eq!(main.keychain.items.len(), 1);
+    // The staged write fails, or the journal's after the claim: refused
+    // the same way, nothing changed.
+    std::fs::write(main.secrets_path(), &secrets).unwrap();
+    for step in ["delete-stage", "delete-journal"] {
+        main.start(&[("FREEDOM_CORED_TEST_SECRETS_FAIL", step)]);
+        let refused = main.call("vault.delete", password.clone());
+        assert_eq!(error_code(&refused), "storage", "{step}: {refused}");
+        assert_eq!(refused["error"]["data"]["file"], "secrets", "{step}");
+        assert_eq!(std::fs::read(main.vault_path()).unwrap(), vault, "{step}");
+        assert_eq!(
+            std::fs::read(main.secrets_path()).unwrap(),
+            secrets,
+            "{step}"
+        );
+        main.no_delete_left();
+        let unlock = main.call("quick_unlock.unlock", json!({}));
+        assert!(unlock["result"].is_object(), "{step}: {unlock}");
+    }
+    assert!(!main.keychain.calls.iter().any(|c| c == "forget"));
+    assert_eq!(main.keychain.items.len(), 1);
+    // Once the file can change, the delete goes through.
+    main.start(&[]);
+    let deleted = main.call("vault.delete", password);
+    assert_eq!(deleted["result"], json!({}), "{deleted}");
+    main.drained();
+    assert!(!main.vault_path().exists());
+    assert!(!main.enrolled());
+    assert!(main.keychain.items.is_empty());
+    main.no_delete_left();
+}
+
+/// The install fails after the journal committed: the delete has happened,
+/// and answers so, not durable yet. Nothing reads the vault it removes:
+/// the journal is finished first, in the same start.
+#[test]
+fn a_vault_delete_whose_install_fails_after_its_commit() {
+    let mut main = enrolled_stopped();
+    main.start(&[("FREEDOM_CORED_TEST_SECRETS_FAIL", "delete-install")]);
+    let deleted = delete_op(&mut main).unwrap();
+    assert_eq!(deleted["result"], json!({ "durable": false }), "{deleted}");
+    let unlock = main.call("vault.unlock", json!({ "password_b64": b64(PASSWORD) }));
+    assert_eq!(error_code(&unlock), "no_vault", "{unlock}");
+    main.drained();
+    assert!(!main.vault_path().exists());
+    assert!(!main.enrolled());
+    assert!(main.keychain.items.is_empty());
+    main.no_delete_left();
+    main.only_the_key_in_use();
 }
 
 // ----- The rest of the row
@@ -847,6 +1050,62 @@ fn an_entry_naming_no_vault_is_removed_at_start() {
     main.drained();
     assert!(!main.enrolled());
     assert!(main.keychain.items.is_empty());
+}
+
+/// The start's settling write, killed before it and after it: the file
+/// names every item the keychain holds at each point, nothing is forgotten
+/// before the hello, and the next start settles what is left and drains
+/// it. Two states need settling: a `pending` item a helper killed after the
+/// OS stored it left, and an entry naming no vault.
+#[test]
+fn the_start_killed_before_and_after_its_settling_write() {
+    let pending = || {
+        let mut main = with_vault();
+        main.start(&[]);
+        main.keychain
+            .faults
+            .insert("create", Fault::KilledAfterStore);
+        let refused = main.enroll();
+        assert_eq!(error_code(&refused), "key_store_unavailable", "{refused}");
+        main.stop();
+        main.keychain.faults.clear();
+        main
+    };
+    let no_vault = || {
+        let main = enrolled_stopped();
+        std::fs::remove_file(main.vault_path()).unwrap();
+        main
+    };
+    let states: [(&str, &dyn Fn() -> Main); 2] = [("pending", &pending), ("no vault", &no_vault)];
+    for (state, make) in states {
+        for hook in ["before-startup", "after-startup"] {
+            let mut main = make();
+            assert_eq!(main.keychain.items.len(), 1, "{state}");
+            let before = main.file();
+            assert!(before.forget_list().is_empty(), "{state}");
+            let code = main.start_killed(&[("FREEDOM_CORED_TEST_SECRETS_CRASH", hook)]);
+            assert_eq!(code, 99, "{state} {hook}");
+            main.file_names_the_keychain();
+            assert_eq!(main.keychain.items.len(), 1, "{state} {hook}");
+            assert!(main.keychain.calls.iter().all(|c| c != "forget"));
+            let file = main.file();
+            if hook == "before-startup" {
+                assert_eq!(file, before, "{state}: the file as it was");
+            } else {
+                // Settled: the item moved into `forget`, the entry gone.
+                assert_eq!(file.forget_list().len(), 1, "{state}: {:?}", file.items());
+                assert!(!main.enrolled(), "{state}");
+            }
+            // The next start settles anything left, and drains.
+            main.start(&[]);
+            main.file_names_the_keychain();
+            main.drained();
+            main.only_the_key_in_use();
+            assert!(main.file().items().is_empty(), "{state} {hook}");
+            assert!(main.keychain.items.is_empty(), "{state} {hook}");
+            assert!(!main.enrolled());
+        }
+    }
 }
 
 /// A malformed secrets file is never written over: nothing it names is
