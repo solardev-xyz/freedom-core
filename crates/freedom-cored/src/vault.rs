@@ -2742,8 +2742,44 @@ mod tests {
                 "expected_hash": case["result"]["hash"],
             })
             .to_string();
-            let payload =
+            let mut payload =
                 sent(vault.request(MAX_ID, "sign.typed_data", Some(&params), &Context::shell()));
+            // A Safe's typed data isn't main's to sign without its Safe
+            // approval (design 0012, APR-4b): it signs as a page's own
+            // `eth_signTypedData_v4`, under its `sign-typed-data` token.
+            if fc_approval::safe::is_safe_typed_data(data) {
+                let reply: serde_json::Value = serde_json::from_slice(&payload).unwrap();
+                assert_eq!(reply["error"]["code"], "not_authorized", "{reply}");
+                const HANDLE: &str =
+                    "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1";
+                let page = Context {
+                    caller: fc_protocol::message::CallerKind::Page,
+                    page: Some(fc_protocol::message::PageContext {
+                        origin: "https://safe.example".to_owned(),
+                        top_origin: "https://safe.example".to_owned(),
+                        frame: 1,
+                        navigation: 1,
+                        agent: Some(false),
+                    }),
+                };
+                let issue = serde_json::json!({
+                    "kind": "sign-typed-data", "account": 0, "handle": HANDLE,
+                    "payload": { "typed_data": data },
+                })
+                .to_string();
+                let minted: serde_json::Value = serde_json::from_slice(&sent(vault.request(
+                    1,
+                    "approval.issue",
+                    Some(&issue),
+                    &page,
+                )))
+                .unwrap();
+                let mut params: serde_json::Value = serde_json::from_str(&params).unwrap();
+                params["authorization"] =
+                    serde_json::json!({ "token": minted["result"]["token"], "handle": HANDLE });
+                let params = params.to_string();
+                payload = sent(vault.request(MAX_ID, "sign.typed_data", Some(&params), &page));
+            }
             assert_eq!(
                 payload.len(),
                 overhead + hashed.view.len(),
