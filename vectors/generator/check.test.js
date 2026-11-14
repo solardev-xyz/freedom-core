@@ -27,6 +27,7 @@ FILES.push('radicle-stats.json', 'generator/radicle-stats.js');
 FILES.push('radicle-import.json', 'generator/radicle-import.js');
 FILES.push('approvals.json', 'generator/approvals.js', 'generator/approval-stores.js');
 FILES.push('profiles.json', 'generator/profiles.js');
+FILES.push('secrets.json', 'generator/secrets.js');
 FILES.push('generator/approval-rules.js', 'generator/approval-decisions.js');
 
 function corruptedCheck(filename, corrupt) {
@@ -677,6 +678,22 @@ test('check rejects a changed stream expectation', () => {
     entry.steps.find((step) => step.write)?.write.unshift(['data', 41, 1000, 50000]);
   });
   assert.match(stderr, /Byte mismatch: streams.json/);
+});
+
+test('check rejects a changed secrets-file transition', () => {
+  const stderr = corruptedCheck('secrets.json', (contents) => {
+    const entry = contents.transitions.find((item) => item.id === 'begin-fifth-refused');
+    entry.refused = 'named';
+  });
+  assert.match(stderr, /Byte mismatch: secrets.json/);
+});
+
+test('check rejects a changed secrets-file ciphertext', () => {
+  const stderr = corruptedCheck('secrets.json', (contents) => {
+    const entry = contents.files.find((item) => item.id === 'enrolled');
+    entry.text = entry.text.replace('"ciphertext": "', '"ciphertext": "A');
+  });
+  assert.match(stderr, /Byte mismatch: secrets.json/);
 });
 
 test('check rejects a changed composed read', () => {
