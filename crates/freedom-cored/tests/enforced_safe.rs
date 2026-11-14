@@ -8,13 +8,16 @@
 //! `executor-send` token, and its signature ends the approval;
 //! `approval.end` ends one, and a signature racing it either finishes
 //! before the end replies or is refused; at most 64 are kept, and none
-//! across a restart.
+//! across a restart. A rule's refusal comes before custody, the pause and
+//! the rate, and takes no slot; only an `executor-send` ends the approval
+//! whose SafeTx it executes.
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
 mod common;
 
 use std::path::Path;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
@@ -66,20 +69,21 @@ fn shell() -> Value {
 }
 
 /// A core with its grant root, holding `dapp` (the dApp file's text) if
-/// given, the vault locked.
-fn start(root: &Path, dapp: Option<&str>) -> Core {
+/// given, with `grant_moved`, the vault locked.
+fn start(root: &Path, dapp: Option<&str>, moved: &[&'static str]) -> Core {
     let mut core = spawn("serve", &root.join("identity"), &root.join("locks"), &[]);
     std::fs::create_dir_all(&core.grant_root).unwrap();
     if let Some(dapp) = dapp {
         std::fs::write(core.grant_root.join("dapp-permissions.json"), dapp).unwrap();
     }
+    core.grant_moved = moved.to_vec();
     assert_eq!(core.hello()["result"]["protocol"], 2);
     core
 }
 
 /// A new vault from the `abandon` mnemonic, unlocked.
-fn imported(root: &Path, dapp: Option<&str>) -> Core {
-    let mut core = start(root, dapp);
+fn imported(root: &Path, dapp: Option<&str>, moved: &[&'static str]) -> Core {
+    let mut core = start(root, dapp, moved);
     let mut id = 1;
     let reply = call_as(
         &mut core,
@@ -94,7 +98,7 @@ fn imported(root: &Path, dapp: Option<&str>) -> Core {
 
 /// The same vault after a restart, unlocked.
 fn restarted(root: &Path) -> Core {
-    let mut core = start(root, None);
+    let mut core = start(root, None, &[]);
     let mut id = 1;
     let reply = call_as(
         &mut core,
@@ -486,7 +490,7 @@ fn a_safes_signature_needs_its_approval_or_a_token() {
         "walletIndex": 0, "chainId": 100, "autoApprove": rules,
     } }))
     .unwrap();
-    let mut core = imported(root.path(), Some(&file));
+    let mut core = imported(root.path(), Some(&file), &[]);
     let mut id = 10;
     serve_fee_reference(&mut core, &mut id);
     let exec = executor_tx(SAFE, &Exec::approved(), CHEAP);
@@ -660,7 +664,7 @@ fn a_safes_signature_needs_its_approval_or_a_token() {
 #[test]
 fn the_first_owner_fixes_what_every_owner_signs() {
     let root = tempfile::tempdir().unwrap();
-    let mut core = imported(root.path(), None);
+    let mut core = imported(root.path(), None, &[]);
     let mut id = 10;
     let approval = send_approval(&mut core, &mut id, &shell(), SAFE);
     let other = send_approval(&mut core, &mut id, &shell(), OTHER_SAFE);
@@ -789,7 +793,7 @@ fn the_first_owner_fixes_what_every_owner_signs() {
 #[test]
 fn the_executor_signs_within_the_fee_check_or_with_its_token() {
     let root = tempfile::tempdir().unwrap();
-    let mut core = imported(root.path(), None);
+    let mut core = imported(root.path(), None, &[]);
     let mut id = 10;
     serve_fee_reference(&mut core, &mut id);
     let approval = send_approval(&mut core, &mut id, &shell(), SAFE);
@@ -903,7 +907,7 @@ fn the_executor_signs_within_the_fee_check_or_with_its_token() {
 #[test]
 fn an_approval_signs_only_for_its_holder() {
     let root = tempfile::tempdir().unwrap();
-    let mut core = imported(root.path(), None);
+    let mut core = imported(root.path(), None, &[]);
     let mut id = 10;
     serve_fee_reference(&mut core, &mut id);
     let cheap = executor_tx(SAFE, &Exec::approved(), CHEAP);
@@ -1009,7 +1013,7 @@ fn an_approval_signs_only_for_its_holder() {
 #[test]
 fn an_ended_approval_signs_nothing() {
     let root = tempfile::tempdir().unwrap();
-    let mut core = imported(root.path(), None);
+    let mut core = imported(root.path(), None, &[]);
     let mut id = 10;
     serve_fee_reference(&mut core, &mut id);
     let cheap = executor_tx(SAFE, &Exec::approved(), CHEAP);
@@ -1161,7 +1165,7 @@ fn together(
 #[test]
 fn an_end_racing_a_signature_finishes_first_or_is_refused() {
     let root = tempfile::tempdir().unwrap();
-    let mut core = imported(root.path(), None);
+    let mut core = imported(root.path(), None, &[]);
     let mut id = 10;
     serve_fee_reference(&mut core, &mut id);
     let cheap = executor_tx(SAFE, &Exec::approved(), CHEAP);
@@ -1247,7 +1251,7 @@ fn an_end_racing_a_signature_finishes_first_or_is_refused() {
 #[test]
 fn sixty_four_approvals_are_kept_and_none_across_a_restart() {
     let root = tempfile::tempdir().unwrap();
-    let mut core = imported(root.path(), None);
+    let mut core = imported(root.path(), None, &[]);
     let mut id = 10;
     // Each its own Safe: a Safe's newer `safe-send` would end its older.
     let safe_of = |n: u64| format!("0x{:040x}", 0x1000 + n);
@@ -1335,4 +1339,306 @@ fn sixty_four_approvals_are_kept_and_none_across_a_restart() {
     ));
     let token = executor_send(&mut core, &mut id, &tx);
     signs(&executor(&mut core, &mut id, &shell(), &tx, token));
+}
+
+fn wall_ms() -> u64 {
+    u64::try_from(
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_millis(),
+    )
+    .unwrap()
+}
+
+/// `origin`'s document with `agent` as sent, or not sent at all.
+fn page_agent(origin: &str, agent: Option<bool>) -> Value {
+    let mut context = page_as(origin, 1, 1);
+    match agent {
+        Some(agent) => context["page"]["agent"] = json!(agent),
+        None => {
+            context["page"].as_object_mut().unwrap().remove("agent");
+        }
+    }
+    context
+}
+
+/// `sign.typed_data` under `{ standing }`, by account 0, the one the
+/// site's grant exposes, on chain 100.
+fn standing_typed(core: &mut Core, id: &mut u64, context: &Value, typed: &Value) -> Value {
+    let params = json!({ "key": account(0), "typed_data": typed, "expected_hash": typed_hash(typed),
+        "chain_id": "100", "authorization": { "standing": {} } });
+    call_as(core, id, context, "sign.typed_data", params)
+}
+
+/// `sign.transaction` under `{ standing }`, by account 0, with `paused`
+/// as sent.
+fn standing_send(
+    core: &mut Core,
+    id: &mut u64,
+    context: &Value,
+    tx: &Value,
+    paused: Option<bool>,
+) -> Value {
+    let standing = match paused {
+        Some(paused) => json!({ "paused": paused }),
+        None => json!({}),
+    };
+    let params = json!({ "key": account(0), "tx": tx, "authorization": { "standing": standing } });
+    call_as(core, id, context, "sign.transaction", params)
+}
+
+/// A rule never answers a Safe's signature, whatever state the site's
+/// rules are in: with the dApp file moved, a site whose limited rules cover
+/// its typed data, its `approve` to `TO` and its `execTransaction` to the
+/// Safe is refused `no_rule` for a SafeTx, a SafeMessage and the
+/// `execTransaction`, where its own requests answer `custody` (in custody,
+/// or with custody unknown), `paused` (paused, or no pause sent) and
+/// `rate_limited` (its burst of five spent). The refusal takes no slot:
+/// after nine refused Safe attempts, another site still has its full
+/// allowance of five signatures and five sends.
+#[test]
+fn a_rule_refuses_a_safe_before_custody_pause_or_rate() {
+    let root = tempfile::tempdir().unwrap();
+    let live = wall_ms() - 600_000;
+    let rules = json!({ "signing": false, "transactions": [], "limited": {
+        "signing": { "grantedAt": live },
+        "transactions": [
+            { "to": SAFE, "selector": "0x6a761202", "chainId": 100, "maxValue": "5", "grantedAt": live },
+            { "to": TO, "selector": "0x095ea7b3", "chainId": 100, "maxValue": "5", "grantedAt": live },
+        ],
+    } });
+    let fresh = "https://fresh.example";
+    let entry = |origin: &str| {
+        json!({ "origin": origin, "connectedAt": 1_762_000_000_000_u64,
+            "lastUsed": 1_762_000_000_000_u64, "walletIndex": 0, "chainId": 100, "autoApprove": rules })
+    };
+    let file =
+        serde_json::to_string_pretty(&json!({ SITE: entry(SITE), fresh: entry(fresh) })).unwrap();
+    let mut core = imported(root.path(), Some(&file), &["dapp"]);
+    let mut id = 10;
+    serve_fee_reference(&mut core, &mut id);
+    let exec = executor_tx(SAFE, &Exec::approved(), CHEAP);
+    let approve = json!({
+        "type": 2, "chain_id": "100", "nonce": "3", "gas_limit": "60000", "to": TO, "value": "1",
+        "data": "0x095ea7b30000000000000000000000000000000000000000000000000000000000000001",
+        "max_fee_per_gas": CHEAP, "max_priority_fee_per_gas": "1000000000",
+    });
+    let safes = [safe_tx(SAFE, 1), hello()];
+    // Refused Safe attempts take no slot: three rounds, nine refusals,
+    // then the site's full allowance in each class, and no more.
+    let page = page_agent(fresh, Some(false));
+    for _ in 0..3 {
+        for typed in &safes {
+            refused(
+                &standing_typed(&mut core, &mut id, &page, typed),
+                "not_authorized",
+                Some("no_rule"),
+            );
+        }
+        refused(
+            &standing_send(&mut core, &mut id, &page, &exec, Some(false)),
+            "not_authorized",
+            Some("no_rule"),
+        );
+    }
+    for _ in 0..5 {
+        signs(&standing_typed(&mut core, &mut id, &page, &mail()));
+        signs(&standing_send(
+            &mut core,
+            &mut id,
+            &page,
+            &approve,
+            Some(false),
+        ));
+    }
+    refused(
+        &standing_typed(&mut core, &mut id, &page, &mail()),
+        "not_authorized",
+        Some("rate_limited"),
+    );
+    refused(
+        &standing_send(&mut core, &mut id, &page, &approve, Some(false)),
+        "not_authorized",
+        Some("rate_limited"),
+    );
+
+    // In custody, and with custody unknown: the site's own requests answer
+    // `custody`, a Safe's `no_rule`.
+    for agent in [Some(true), None] {
+        let page = page_agent(SITE, agent);
+        refused(
+            &standing_typed(&mut core, &mut id, &page, &mail()),
+            "not_authorized",
+            Some("custody"),
+        );
+        refused(
+            &standing_send(&mut core, &mut id, &page, &approve, Some(false)),
+            "not_authorized",
+            Some("custody"),
+        );
+        for typed in &safes {
+            refused(
+                &standing_typed(&mut core, &mut id, &page, typed),
+                "not_authorized",
+                Some("no_rule"),
+            );
+        }
+        refused(
+            &standing_send(&mut core, &mut id, &page, &exec, Some(false)),
+            "not_authorized",
+            Some("no_rule"),
+        );
+    }
+    // Paused, and no pause sent: the site's send answers `paused`, the
+    // `execTransaction` `no_rule`.
+    let page = page_agent(SITE, Some(false));
+    for paused in [Some(true), None] {
+        refused(
+            &standing_send(&mut core, &mut id, &page, &approve, paused),
+            "not_authorized",
+            Some("paused"),
+        );
+        refused(
+            &standing_send(&mut core, &mut id, &page, &exec, paused),
+            "not_authorized",
+            Some("no_rule"),
+        );
+    }
+    // The burst spent in both classes: the site's own requests answer
+    // `rate_limited`, a Safe's `no_rule`.
+    for _ in 0..5 {
+        signs(&standing_typed(&mut core, &mut id, &page, &mail()));
+        signs(&standing_send(
+            &mut core,
+            &mut id,
+            &page,
+            &approve,
+            Some(false),
+        ));
+    }
+    refused(
+        &standing_typed(&mut core, &mut id, &page, &mail()),
+        "not_authorized",
+        Some("rate_limited"),
+    );
+    refused(
+        &standing_send(&mut core, &mut id, &page, &approve, Some(false)),
+        "not_authorized",
+        Some("rate_limited"),
+    );
+    for typed in &safes {
+        refused(
+            &standing_typed(&mut core, &mut id, &page, typed),
+            "not_authorized",
+            Some("no_rule"),
+        );
+    }
+    refused(
+        &standing_send(&mut core, &mut id, &page, &exec, Some(false)),
+        "not_authorized",
+        Some("no_rule"),
+    );
+}
+
+/// Only an `executor-send` ends the approval whose SafeTx it executes:
+/// the same `execTransaction`, signed under a `wallet-send`, a `dapp-send`
+/// or an `intent-replace` that binds it, leaves the matching approval open,
+/// for the next owner and for its own executor; signed under an
+/// `executor-send`, it ends the approval, a wallet's or a site's.
+#[test]
+fn only_an_executor_send_ends_the_approval_it_executes() {
+    const INTENT: &str = "7b0c6c1e-0c62-4a6e-9a49-0d6a3f6d1a07";
+    let root = tempfile::tempdir().unwrap();
+    let mut core = imported(root.path(), None, &[]);
+    let mut id = 10;
+    serve_fee_reference(&mut core, &mut id);
+    let tx = executor_tx(SAFE, &Exec::approved(), CHEAP);
+    let typed = safe_tx(SAFE, 4);
+    // Each kind: who mints and signs it, what it binds, and how it is
+    // presented; the approval it runs beside, a wallet's or the site's.
+    let kinds = [
+        (
+            "wallet-send",
+            shell(),
+            json!({ "kind": "wallet-send", "account": 2, "payload": { "tx": tx } }),
+        ),
+        (
+            "dapp-send",
+            site(),
+            json!({ "kind": "dapp-send", "account": 2, "handle": HANDLE, "payload": { "tx": tx } }),
+        ),
+        (
+            "intent-replace",
+            shell(),
+            json!({ "kind": "intent-replace", "account": 2, "payload": {
+                "intent_id": INTENT, "sender": "0x9858effd232b4033e47d90003d41ec34ecaeda94", "tx": tx,
+            } }),
+        ),
+    ];
+    for (kind, context, params) in kinds {
+        let approval = send_approval(&mut core, &mut id, &context, SAFE);
+        signs(&owner(
+            &mut core,
+            &mut id,
+            &context,
+            0,
+            &typed,
+            safe(&approval),
+        ));
+        let token = token_of(&call_as(
+            &mut core,
+            &mut id,
+            &context,
+            "approval.issue",
+            params,
+        ));
+        let authorization = match kind {
+            "dapp-send" => json!({ "token": token, "kind": kind, "handle": HANDLE }),
+            "intent-replace" => json!({ "token": token, "intent": { "id": INTENT } }),
+            _ => json!({ "token": token, "kind": kind }),
+        };
+        let reply = executor(&mut core, &mut id, &context, &tx, Some(authorization));
+        assert!(result(&reply)["raw"].is_string(), "{kind}: {reply}");
+        // Still open: the next owner signs, and its own executor, whose
+        // signature ends it.
+        let next = owner(&mut core, &mut id, &context, 1, &typed, safe(&approval));
+        assert!(result(&next)["signature"].is_string(), "{kind}: {next}");
+        signs(&executor(
+            &mut core,
+            &mut id,
+            &context,
+            &tx,
+            safe(&approval),
+        ));
+        refused(
+            &owner(&mut core, &mut id, &context, 3, &typed, safe(&approval)),
+            "not_authorized",
+            Some("unknown_token"),
+        );
+    }
+    // An `executor-send` ends it, whoever holds it.
+    for context in [shell(), site()] {
+        let approval = send_approval(&mut core, &mut id, &context, SAFE);
+        signs(&owner(
+            &mut core,
+            &mut id,
+            &context,
+            0,
+            &typed,
+            safe(&approval),
+        ));
+        let token = executor_send(&mut core, &mut id, &tx);
+        signs(&executor(&mut core, &mut id, &shell(), &tx, token));
+        refused(
+            &owner(&mut core, &mut id, &context, 1, &typed, safe(&approval)),
+            "not_authorized",
+            Some("unknown_token"),
+        );
+        refused(
+            &executor(&mut core, &mut id, &context, &tx, safe(&approval)),
+            "not_authorized",
+            Some("unknown_token"),
+        );
+    }
 }
