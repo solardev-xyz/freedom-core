@@ -18,10 +18,11 @@
 //! under `shell`, signs as before, but for a Safe's: typed data declaring a
 //! `SafeTx` or a `SafeMessage`, or a transaction calling `execTransaction`,
 //! signs under any caller only with a token that binds it or a Safe
-//! approval of the caller's own kind (APR-4b). `swarm.sign_soc` takes a page's `{
-//! swarm, soc }`, checked at the same point against the page's Swarm
-//! grant; the chrome's is refused, and a page's without one signs until
-//! APR-4c. A `page` caller sends its `PageContext`.
+//! approval of the caller's own kind (APR-4b). `swarm.sign_soc` under
+//! `page` needs `{ swarm, soc }`, checked at the same point against the
+//! page's Swarm grant (APR-4c); main's own SOC, under `shell`, signs as
+//! before, and the chrome's is refused. A `page` caller sends its
+//! `PageContext`.
 //!
 //! Typed data comes with the view of exactly what is signed (#88), which
 //! fc-evm writes as JSON text in the pass that hashes; the reply carries it
@@ -442,8 +443,8 @@ fn other(
             };
             let prepared = fc_swarm::prepare_soc(&identifier, span, &payload)
                 .map_err(|e| invalid(e.to_string()))?;
-            // A page's SOC, against its Swarm grant (design 0012): after the
-            // public work, before the key.
+            // A page's SOC needs its Swarm grant (design 0012, APR-4c),
+            // checked after the public work and before the key.
             match fields.get("authorization") {
                 Some(authorization) => {
                     checks
