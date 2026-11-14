@@ -13,10 +13,12 @@
 //! `authorization` (design 0012, API): a token, a Safe approval or a
 //! standing rule, checked by [`crate::approvals`] once the public work is
 //! done and before the key is derived. A token is burnt however the
-//! request ends. `swarm.sign_soc` takes a page's `{ swarm, soc }`, checked
-//! at the same point against the page's Swarm grant. Without one they sign
-//! as before (APR-3; APR-4 requires it). A `page` caller sends its
-//! `PageContext`.
+//! request ends. A page's signature and the chrome's need one (Q8,
+//! APR-4a), and are refused with `not_authorized` without it; main's own,
+//! under `shell`, signs as before. `swarm.sign_soc` takes a page's `{
+//! swarm, soc }`, checked at the same point against the page's Swarm
+//! grant; the chrome's is refused, and a page's without one signs until
+//! APR-4c. A `page` caller sends its `PageContext`.
 //!
 //! Typed data comes with the view of exactly what is signed (#88), which
 //! fc-evm writes as JSON text in the pass that hashes; the reply carries it
@@ -261,15 +263,16 @@ fn account_index(key: KeyRef) -> Result<u32, ErrorBody> {
     }
 }
 
-/// Checks the request's `authorization`, if it has one, for what it signs
-/// (design 0012: APR-3 checks one when present).
+/// Checks the request's `authorization` for what it signs (design 0012,
+/// Q8): a page's and the chrome's signatures need one (APR-4a), main's own
+/// under `shell` has one checked when it comes.
 fn authorize(
     checks: &mut Checks<'_>,
     fields: &Map<String, Value>,
     signed: Signed<'_>,
 ) -> Result<After, ErrorBody> {
     match fields.get("authorization") {
-        None => Ok(After::Nothing),
+        None => crate::approvals::without_authorization(checks.context).map(|()| After::Nothing),
         Some(authorization) => {
             checks
                 .approvals
@@ -436,10 +439,13 @@ fn other(
                 .map_err(|e| invalid(e.to_string()))?;
             // A page's SOC, against its Swarm grant (design 0012): after the
             // public work, before the key.
-            if let Some(authorization) = fields.get("authorization") {
-                checks
-                    .approvals
-                    .authorize_soc(checks.context, authorization, checks.clocks)?;
+            match fields.get("authorization") {
+                Some(authorization) => {
+                    checks
+                        .approvals
+                        .authorize_soc(checks.context, authorization, checks.clocks)?;
+                }
+                None => crate::approvals::soc_without_authorization(checks.context)?,
             }
             let (signature, owner) = {
                 // The key lives only for the signature and its address.
@@ -458,5 +464,255 @@ fn other(
             }))
         }
         _ => Err(invalid("unknown method")),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+
+    use super::*;
+    use fc_protocol::message::{CallerKind, PageContext};
+
+    const ABANDON: &str = "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about";
+    const HANDLE: &str = "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1";
+    const TO: &str = "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913";
+    const MINTED: Clocks = Clocks {
+        vault_ms: 10_000,
+        wall_ms: 1_700_000_000_000,
+    };
+
+    fn unlocked() -> VaultState {
+        let mut state = VaultState::new();
+        let ticket = state.ticket();
+        let prepared = fc_vault::state::Prepared::new(fc_keys::Mnemonic::parse(ABANDON).unwrap());
+        state.install(ticket, prepared, 0, 0).unwrap();
+        state
+    }
+
+    fn site() -> Context {
+        Context {
+            caller: CallerKind::Page,
+            page: Some(PageContext {
+                origin: "https://app.example".to_owned(),
+                top_origin: "https://app.example".to_owned(),
+                frame: 1,
+                navigation: 1,
+                agent: Some(false),
+            }),
+        }
+    }
+
+    fn sign(
+        state: &VaultState,
+        approvals: &mut Approvals,
+        clocks: Clocks,
+        method: &str,
+        params: &Value,
+    ) -> Result<Value, ErrorBody> {
+        let context = site();
+        let mut checks = Checks {
+            approvals,
+            context: &context,
+            clocks,
+        };
+        handle(state, &mut checks, method, Some(&params.to_string()))
+            .map(|raw| serde_json::from_str(raw.get()).unwrap())
+    }
+
+    fn reason(refused: &ErrorBody) -> String {
+        assert_eq!(refused.code, ErrorCode::NotAuthorized, "{refused:?}");
+        refused.data.as_ref().unwrap()["reason"]
+            .as_str()
+            .unwrap()
+            .to_owned()
+    }
+
+    fn tx(max_fee: &str, data: &str) -> Value {
+        json!({
+            "type": 2, "chain_id": "100", "nonce": "3", "gas_limit": "60000", "to": TO,
+            "value": "1", "data": data,
+            "max_fee_per_gas": max_fee, "max_priority_fee_per_gas": "1000000000",
+        })
+    }
+
+    fn mail() -> Value {
+        json!({
+            "domain": { "name": "Ether Mail", "chainId": "100" },
+            "types": { "Mail": [{ "name": "contents", "type": "string" }] },
+            "message": { "contents": "Hello" },
+        })
+    }
+
+    /// A method's request, given the token it presents.
+    type Request = Box<dyn Fn(&str) -> Value>;
+
+    /// Each method's page-kind token and its request, with the token.
+    fn requests() -> [(&'static str, Value, Request); 3] {
+        let typed = mail();
+        let hash = fc_evm::to_hex(
+            &fc_evm::typed_data_hash(&typed["domain"], &typed["types"], &typed["message"]).unwrap(),
+        );
+        let account = json!({ "kind": "account", "index": 0 });
+        let (a, b, c) = (account.clone(), account.clone(), account);
+        [
+            (
+                "sign.transaction",
+                json!({ "kind": "dapp-send", "account": 0, "handle": HANDLE,
+                    "payload": { "tx": tx("2000000000", "0x") } }),
+                Box::new(move |token: &str| {
+                    json!({ "key": a, "tx": tx("2000000000", "0x"),
+                        "authorization": { "token": token, "kind": "dapp-send", "handle": HANDLE } })
+                }),
+            ),
+            (
+                "sign.message",
+                json!({ "kind": "sign-message", "account": 0, "handle": HANDLE,
+                    "payload": { "message": "0x68656c6c6f" } }),
+                Box::new(move |token: &str| {
+                    json!({ "key": b, "message": "0x68656c6c6f",
+                        "authorization": { "token": token, "handle": HANDLE } })
+                }),
+            ),
+            (
+                "sign.typed_data",
+                json!({ "kind": "sign-typed-data", "account": 0, "handle": HANDLE,
+                    "payload": { "typed_data": mail() } }),
+                Box::new(move |token: &str| {
+                    json!({ "key": c, "typed_data": mail(), "expected_hash": hash,
+                        "authorization": { "token": token, "handle": HANDLE } })
+                }),
+            ),
+        ]
+    }
+
+    fn issue(approvals: &mut Approvals, params: &Value) -> String {
+        let reply = approvals
+            .request(1, "approval.issue", params, &site(), MINTED)
+            .unwrap();
+        let reply: Value = serde_json::from_slice(&reply).unwrap();
+        reply["result"]["token"].as_str().unwrap().to_owned()
+    }
+
+    /// Design 0012, APR-4: a page's token signs for two minutes of the
+    /// vault's clock, each method's at 119,999 ms after minting, and is
+    /// refused as `expired` at 120,000, before any key is derived: with the
+    /// vault locked too, and burnt.
+    #[test]
+    fn an_expired_token_signs_nothing() {
+        let state = unlocked();
+        let locked = VaultState::new();
+        let mut approvals = Approvals::new();
+        let at = |ms: u64| Clocks {
+            vault_ms: MINTED.vault_ms + ms,
+            ..MINTED
+        };
+        for (method, mint, request) in requests() {
+            let token = issue(&mut approvals, &mint);
+            let signed = sign(
+                &state,
+                &mut approvals,
+                at(119_999),
+                method,
+                &request(&token),
+            );
+            assert!(signed.is_ok(), "{method}: {signed:?}");
+            for state in [&state, &locked] {
+                let token = issue(&mut approvals, &mint);
+                let expired = sign(state, &mut approvals, at(120_000), method, &request(&token));
+                assert_eq!(reason(&expired.unwrap_err()), "expired", "{method}");
+                let again = sign(state, &mut approvals, at(0), method, &request(&token));
+                assert_eq!(reason(&again.unwrap_err()), "unknown_token", "{method}");
+            }
+        }
+    }
+
+    /// `chain.fee_reference`'s reply, as served, quoting `per_gas`.
+    fn quote(id: u64, per_gas: &str) -> Vec<u8> {
+        serde_json::to_vec(&json!({
+            "type": "response",
+            "id": id,
+            "result": {
+                "header": null,
+                "lowest_priority": null,
+                "quote": { "source": "direct", "type": "eip1559", "maxFeePerGas": per_gas, "answered": 2 },
+                "generation": 0,
+            },
+        }))
+        .unwrap()
+    }
+
+    /// Design 0012, APR-4: a standing rule answers a page's send only
+    /// within the fee check, against the newest fee reference the core
+    /// served for the chain: within three times its quote the send signs,
+    /// above it the rule is refused (`fee_check`), and so it is once the
+    /// reference is more than 60 s old.
+    #[test]
+    fn a_standing_send_over_the_fee_threshold_is_refused() {
+        let root = tempfile::tempdir().unwrap();
+        let file = json!({ "https://app.example": {
+            "origin": "https://app.example", "connectedAt": 1_762_000_000_000_u64,
+            "lastUsed": 1_762_000_000_000_u64, "walletIndex": 0, "chainId": 100,
+            "autoApprove": { "signing": false, "transactions": [
+                { "to": TO, "selector": "0x095ea7b3", "chainId": 100, "maxValue": "5" },
+            ] },
+        } });
+        std::fs::write(
+            root.path().join("dapp-permissions.json"),
+            serde_json::to_string_pretty(&file).unwrap(),
+        )
+        .unwrap();
+        let mut approvals = Approvals::new();
+        approvals.configure_grants(root.path().to_path_buf(), Vec::new(), MINTED.wall_ms);
+        let state = unlocked();
+        let approve = "0x095ea7b30000000000000000000000000000000000000000000000000000000000000001";
+        let send = |max_fee: &str| {
+            json!({ "key": { "kind": "account", "index": 0 }, "tx": tx(max_fee, approve),
+                "authorization": { "standing": { "paused": false } } })
+        };
+        // No reference yet: nothing to judge against.
+        let none = sign(
+            &state,
+            &mut approvals,
+            MINTED,
+            "sign.transaction",
+            &send("2000000000"),
+        );
+        assert_eq!(reason(&none.unwrap_err()), "fee_check");
+        approvals.fee_asked(5, Some(r#"{"chain_id":100,"deadline_ms":15000}"#), 9_000);
+        approvals.fee_answered(5, &quote(5, "2000000000"));
+        let within = sign(
+            &state,
+            &mut approvals,
+            MINTED,
+            "sign.transaction",
+            &send("2000000000"),
+        );
+        assert!(within.unwrap()["raw"].is_string());
+        let above = sign(
+            &state,
+            &mut approvals,
+            MINTED,
+            "sign.transaction",
+            &send("7000000000"),
+        );
+        assert_eq!(reason(&above.unwrap_err()), "fee_check");
+        // A plain transfer at the same fee: no rule names it.
+        let mut plain = send("2000000000");
+        plain["tx"]["data"] = json!("0x");
+        let plain = sign(&state, &mut approvals, MINTED, "sign.transaction", &plain);
+        assert_eq!(reason(&plain.unwrap_err()), "no_rule");
+        let stale = Clocks {
+            vault_ms: 9_000 + 60_001,
+            ..MINTED
+        };
+        let old = sign(
+            &state,
+            &mut approvals,
+            stale,
+            "sign.transaction",
+            &send("2000000000"),
+        );
+        assert_eq!(reason(&old.unwrap_err()), "fee_check");
     }
 }

@@ -1,6 +1,7 @@
 //! Design 0012's approvals in the daemon (APR-3a): approval tokens and Safe
-//! approvals over the wire, and the authorization `sign.*` checks when one
-//! is present. The decisions are `fc-approval`'s; this module wires them to
+//! approvals over the wire, and the authorization `sign.*` checks, which a
+//! page's and the chrome's signatures need (APR-4a). The decisions are
+//! `fc-approval`'s; this module wires them to
 //! the callers, the vault's clock, the wall clock, the OS's RNG and the fee
 //! evidence the core served.
 //!
@@ -28,11 +29,17 @@
 //!   `{ token, kind, handle? }` (`wallet-send`, `executor-send` or
 //!   `dapp-send`), or an `intent-replace`'s intent, `{ token, intent: { id }
 //!   }`: a token of another kind, or one naming neither, is a `mismatch`,
-//!   and burnt. Without an authorization, `sign.*` signs as before (APR-3;
-//!   APR-4 requires it).
+//!   and burnt. **One is required** (Q8, APR-4a): a page's signature
+//!   needs a page-kind token for its `PageContext` and the request, a
+//!   standing rule or a Safe approval; the chrome's needs a wallet-kind
+//!   token, which it presents as any token. Anything else is refused with
+//!   `not_authorized` before a key is touched. Main's own signature, under
+//!   `shell`, signs on main's word without one, and has one checked when
+//!   it comes.
 //! - `swarm.sign_soc`'s `authorization` (APR-3c): `{ swarm, soc }` from a
 //!   page, checked against the page's Swarm grant at the same point. Main's
-//!   own SOCs, under `shell`, take none.
+//!   own SOCs, under `shell`, take none. The chrome's, which no token kind
+//!   binds, are refused; a page's without one still sign until APR-4c.
 //!
 //! - The grant stores (APR-3b; [`crate::grants`] holds the files):
 //!   `approval.check { request, chain_id?, paused? }` asks a site's
@@ -285,6 +292,35 @@ pub fn page_context(context: &Context) -> Result<Option<&PageContext>, ErrorBody
         (CallerKind::Page, Some(page)) => Ok(Some(page)),
         (CallerKind::Page, None) => Err(invalid("a page request needs its page context")),
         _ => Ok(None),
+    }
+}
+
+/// A signature that comes without an `authorization` (design 0012, Q8;
+/// APR-4a requires one): main's own, under `shell`, signs on main's word; a
+/// page's needs a token or a rule the core checks, and the chrome's a
+/// wallet-kind token, so both are refused before a key is touched.
+pub fn without_authorization(context: &Context) -> Result<(), ErrorBody> {
+    match context.caller {
+        CallerKind::Shell => Ok(()),
+        CallerKind::Page => Err(not_authorized(
+            "no_token",
+            "a page's signature needs its token or a standing rule",
+        )),
+        CallerKind::Chrome => Err(not_authorized(
+            "no_token",
+            "the chrome's signature needs a wallet-kind token",
+        )),
+    }
+}
+
+/// `swarm.sign_soc` without an `authorization`: main's own SOC signs as
+/// before, and a page's too until APR-4c requires its Swarm grant. The
+/// chrome's is refused, as no token kind binds a SOC (Q8: the chrome needs
+/// a wallet-kind token for every signature).
+pub fn soc_without_authorization(context: &Context) -> Result<(), ErrorBody> {
+    match context.caller {
+        CallerKind::Chrome => without_authorization(context),
+        CallerKind::Page | CallerKind::Shell => Ok(()),
     }
 }
 
@@ -844,7 +880,10 @@ impl Approvals {
             let standing = object(&fields["standing"], &[], &["paused"])?;
             let paused = optional_bool(standing, "paused")?;
             let Some(page) = page_context(context)? else {
-                return Err(forbidden("a standing rule answers only a page"));
+                return Err(not_authorized(
+                    "no_rule",
+                    "a standing rule answers only a page",
+                ));
             };
             let bytes;
             let (account, request) = match signed {
