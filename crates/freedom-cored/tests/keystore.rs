@@ -414,7 +414,10 @@ fn without_a_backend_the_core_asks_nothing() {
         let Next::Answer(result) = next(&mut core, 2) else {
             panic!("asked main");
         };
-        assert_eq!(result, json!({ "ok": false, "error": "unavailable" }));
+        assert_eq!(
+            result,
+            json!({ "ok": false, "error": "unavailable", "reason": "unsupported" })
+        );
         return;
     }
     call(
@@ -425,7 +428,10 @@ fn without_a_backend_the_core_asks_nothing() {
     let Next::Answer(result) = next(&mut core, 2) else {
         panic!("asked main");
     };
-    assert_eq!(result, json!({ "ok": false, "error": "unavailable" }));
+    assert_eq!(
+        result,
+        json!({ "ok": false, "error": "unavailable", "reason": "unsupported" })
+    );
     call(
         &mut core,
         3,
@@ -533,13 +539,19 @@ fn the_core_refuses_answers_not_its_own_and_gives_up_in_time() {
     let (_, result) = ask_core(&mut core, &|_| {
         Some(json!({ "ok": false, "error": "unavailable", "reason": "timeout" }))
     });
-    assert_eq!(result, json!({ "ok": false, "error": "unavailable" }));
+    assert_eq!(
+        result,
+        json!({ "ok": false, "error": "unavailable", "reason": "timeout" })
+    );
     // No answer within the deadline: unavailable. The late answer that
     // follows is dropped, and the core goes on.
     let started = Instant::now();
     let (late, result) = ask_core(&mut core, &|_| None);
     assert!(started.elapsed() >= Duration::from_millis(1500));
-    assert_eq!(result, json!({ "ok": false, "error": "unavailable" }));
+    assert_eq!(
+        result,
+        json!({ "ok": false, "error": "unavailable", "reason": "timeout" })
+    );
     respond(&mut core, late, json!({ "ok": true }));
     let status = core.call(100, "vault.status", json!({}));
     assert!(status.get("result").is_some(), "{status}");

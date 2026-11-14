@@ -66,6 +66,7 @@ use crate::dweb::thread as dweb;
 use crate::exit::Exit;
 use crate::keystore::client::DesktopKeyStore;
 use crate::requests::{self, Owner, Requests};
+use crate::secrets::Secrets;
 use crate::transport::{self, Allowance, Credits, Link, Pending};
 use crate::vault::{FileSnapshot, Finished, NodeRecovery, Out, Vault};
 use crate::worker::Worker;
@@ -170,6 +171,13 @@ const CAPABILITIES: &[&str] = &[
     "vault.create",
     "vault.import",
     "vault.reconcile",
+    // Design 0013: quick unlock in the core's key store (PRF-1c).
+    "quick_unlock.enroll",
+    "quick_unlock.unlock",
+    "quick_unlock.export_mnemonic",
+    "quick_unlock.export_private_key",
+    "quick_unlock.status",
+    "quick_unlock.disable",
     "nodes.write_identity",
     "nodes.op_status",
     "nodes.seal_radicle_key",
@@ -300,6 +308,13 @@ pub fn run(options: &Options) -> Exit {
     // from the threads that make them, never from this loop, which only
     // routes main's answers back.
     let keystore = DesktopKeyStore::new(Arc::clone(&requests), writer.queue.clone());
+    // The profile's secrets file over that key store (design 0013): quick
+    // unlock's jobs run on the vault worker, its drain on a thread of its
+    // own once the hello is answered.
+    let secrets = Secrets::new(
+        gate.identity_dir.clone(),
+        Arc::clone(&keystore) as Arc<dyn fc_keystore::KeyStore + Send + Sync>,
+    );
     #[cfg(feature = "testhooks")]
     let test = if testhooks::test_methods() {
         match testmethods::spawn(
@@ -328,6 +343,7 @@ pub fn run(options: &Options) -> Exit {
         || !spawn_snapshot(
             gate.identity_dir.clone(),
             options.lock_dir.clone(),
+            Arc::clone(&secrets),
             events_tx.clone(),
         )
         || !spawn_parent_watch(options.parent_pid, events_tx.clone())
@@ -356,11 +372,16 @@ pub fn run(options: &Options) -> Exit {
         credit: None,
         hello_done: false,
         last_request_id: 0,
-        vault: Vault::new(
-            gate.identity_dir.clone(),
-            options.lock_dir.clone(),
-            fc_vault::state::DEFAULT_AUTO_LOCK_MS,
-        ),
+        vault: {
+            let mut vault = Vault::new(
+                gate.identity_dir.clone(),
+                options.lock_dir.clone(),
+                fc_vault::state::DEFAULT_AUTO_LOCK_MS,
+            );
+            vault.set_secrets(Arc::clone(&secrets));
+            vault
+        },
+        secrets,
         worker,
         requests,
         keystore,
@@ -570,12 +591,25 @@ pub fn run(options: &Options) -> Exit {
 
 /// Reads the status snapshot on its own thread. False if the thread can't be
 /// created. If the read never finishes, the hello deadline ends the process.
-fn spawn_snapshot(identity_dir: PathBuf, lock_dir: PathBuf, events: Sender<Event>) -> bool {
+fn spawn_snapshot(
+    identity_dir: PathBuf,
+    lock_dir: PathBuf,
+    secrets: Arc<Secrets>,
+    events: Sender<Event>,
+) -> bool {
     std::thread::Builder::new()
         .name("snapshot".into())
         .spawn(move || {
             crate::testhooks::snapshot_delay();
             let (snapshot, recovery) = crate::vault::startup_snapshot(&identity_dir, &lock_dir);
+            // The secrets file settles against the vault as it stands, before
+            // the hello is answered and any job runs (design 0013).
+            secrets.startup(
+                snapshot
+                    .as_ref()
+                    .map(|fingerprint| fingerprint.as_deref())
+                    .map_err(|_| ()),
+            );
             let _ = events.send(Event::Snapshot(snapshot, recovery));
         })
         .is_ok()
@@ -625,6 +659,9 @@ struct Core {
     worker: Worker,
     /// The core's requests to main: where main's responses go back to.
     requests: Arc<Requests>,
+    /// The secrets file (design 0013): its drain starts with the hello's
+    /// reply.
+    secrets: Arc<Secrets>,
     /// The key store over `shell.keystore` (design 0013), whose answers
     /// this loop routes.
     keystore: Arc<DesktopKeyStore>,
@@ -1409,10 +1446,17 @@ impl Core {
                 node_recovery: &self.node_recovery,
             },
         );
-        match written {
+        let flow = match written {
             Ok(()) => self.send(&payload),
-            Err(_) => Flow::Exit(Exit::Internal),
+            Err(_) => return Flow::Exit(Exit::Internal),
+        };
+        // Main runs `shell.keystore` from now on: the records the start
+        // left are forgotten (design 0013, "Forgetting an item").
+        if self.secrets.start_drain().is_err() {
+            log::error("cannot start a thread", serde_json::json!({}));
+            return Flow::Exit(Exit::Internal);
         }
+        flow
     }
 
     /// Sends the vault's payloads and submits its jobs.

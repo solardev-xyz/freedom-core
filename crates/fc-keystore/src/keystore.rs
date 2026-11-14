@@ -418,6 +418,33 @@ impl fmt::Display for BackendError {
     }
 }
 
+/// Why no key store answered, in a fixed form: `key_store_unavailable`'s
+/// `data.reason` (0013, API). The helper's own (`unsupported`,
+/// `no_keychain`, `read_only`), or the core's: `timeout` (main killed the
+/// helper past its deadline, or no answer came in time), `closed` (the
+/// core is exiting, or main closed the call), `no_executor` (main has no
+/// `shell.keystore`), and `helper` for a reason the core doesn't know.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct UnavailableReason {
+    reason: &'static str,
+}
+
+impl UnavailableReason {
+    pub const fn new(reason: &'static str) -> UnavailableReason {
+        UnavailableReason { reason }
+    }
+
+    pub fn reason(&self) -> &'static str {
+        self.reason
+    }
+}
+
+impl fmt::Display for UnavailableReason {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.reason)
+    }
+}
+
 /// Why a key-store call failed (0013, "The trait").
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum KeyStoreError {
@@ -427,9 +454,9 @@ pub enum KeyStoreError {
     /// The user cancelled the OS's prompt.
     #[error("cancelled")]
     Cancelled,
-    /// No key store answers, or the call ran past its deadline.
-    #[error("the key store is unavailable")]
-    Unavailable,
+    /// No key store answers, or the call ran past its deadline, and why.
+    #[error("the key store is unavailable: {0}")]
+    Unavailable(UnavailableReason),
     /// The OS refuses the item or blob as no longer valid.
     #[error("the key-store item is invalidated")]
     Invalidated,
@@ -446,7 +473,7 @@ impl KeyStoreError {
         match self {
             KeyStoreError::NotFound => "not_found",
             KeyStoreError::Cancelled => "cancelled",
-            KeyStoreError::Unavailable => "unavailable",
+            KeyStoreError::Unavailable(_) => "unavailable",
             KeyStoreError::Invalidated => "invalidated",
             KeyStoreError::Denied => "denied",
             KeyStoreError::Backend(_) => "backend",

@@ -30,7 +30,7 @@ pub use file::{
 };
 pub use keystore::{
     Backend, BackendError, Blob, Capabilities, ItemId, KeyStore, KeyStoreError, Label,
-    MAX_BLOB_BYTES, Policy, Randomness, Reason, Sealed, SealedForm, WrapKey,
+    MAX_BLOB_BYTES, Policy, Randomness, Reason, Sealed, SealedForm, UnavailableReason, WrapKey,
 };
 
 #[cfg(test)]
