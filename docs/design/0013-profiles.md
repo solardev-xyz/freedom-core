@@ -403,7 +403,7 @@ pub enum KeyStoreError { NotFound, Cancelled, Unavailable, Invalidated, Denied, 
 - **The `forget` list** of the secrets file holds `{ backend, policy, item }` for each item the profile no longer uses. The write that stops using a key adds it there, in the same atomic write:
   - **a replace:** the write that commits the new key and its entries moves the old key into `forget`;
   - **quick unlock disabled:** the write that removes the entry moves its key, if no other entry is under it;
-  - **the vault deleted:** the secrets file joins `vault.delete`'s journaled operation (0001's multi-file journal), with the entry removed and its key moved the same way. A crash before the journal commits leaves the vault, the entry and the key in use; after it, none of them, and the key in `forget`;
+  - **the vault deleted:** the secrets file joins `vault.delete` in one journaled operation ([The vault delete's journal](#the-vault-deletes-journal)), with the entry removed and its key moved the same way. A crash before the journal commits leaves the vault, the entry and the key in use; after it, none of them, and the key in `forget`;
   - **a `pending` key that never committed:** moved into `forget` at the next open.
 
   The core then asks main for the `forget` through `shell.keystore`. It writes the file without the record once the answer is `ok` or `not_found`. Anything else leaves the record.
@@ -433,6 +433,28 @@ pub enum KeyStoreError { NotFound, Cancelled, Unavailable, Invalidated, Denied, 
   - **A profile deleted by an older build, or by hand,** goes with its secrets file, and its items stay. So no build lets the core make an item before its deletes go through `profile delete`: PRF-2, which adds main's executor, needs PRF-4 ([Migration](#migration)).
   - **A copy on this machine,** a profile directory copied into `Profiles/` and imported, names its original's items. A `forget` from either sends the other's secrets to their fallback path, as for a copy on another machine. On Windows each copy has its own blob and drops only that, so the other's key still opens. Telling the two apart would need a binding to the path, which a moved profile can't keep.
 - **Mobile** keeps the same `forget` list and runs it in the app's process, at the same moments.
+
+### The vault delete's journal
+
+**Proposed: a vault delete with quick unlock's entry is one journaled operation, in 0001's multi-file steps but with a record of its own, `vault-delete-journal.json` in the identity directory.** It doesn't share 0001's `node-identity-journal.json`: those records are keyed by node, carry main's `op_id` for `nodes.op_status`'s done list, and are recovered under node gates, and a vault delete has none of those.
+
+- **When:** only while the secrets file holds the `quick-unlock` entry. Without it the file doesn't change, and the delete is 0001's unlink. Either way the file must read. A secrets file that doesn't (malformed, past its bound, unreadable), or a staged or journal write that fails, refuses the delete with `storage` (`data.file: "secrets"`), and the vault stays.
+- **The steps:**
+  1. **Stage:** the secrets file as the delete leaves it (the entry removed, its key moved into `forget`) is written as `secrets.json.freedom-new`: exclusive create, 0600, fsync, read back through the handle that wrote it, directory flush.
+  2. **Commit:** `vault-delete-journal.json` is written by 0001's single-file write. The vault's commit claim comes right before its rename, and that claim is the delete's commit point (0001: "before the journal write of a multi-file operation").
+  3. **Install:** the secrets file first, then the vault, with a directory flush after each.
+     - **The secrets file** is done if it already has the journaled digest. Otherwise the staged file, if it has that digest and is still the file hashed, is renamed over it.
+     - **The vault** is done if it is gone, and removed if it has the journaled digest.
+  4. **Finish:** the journal is removed, and the directory flushed.
+- **The record:** `{ "op": "vault.delete", "files": [ { "target": "secrets.json", "staged": "secrets.json.freedom-new", "sha256": "<64 hex>" }, { "target": "identity-vault.json", "remove": true, "sha256": "<64 hex>" } ] }`. It has fixed names only, and no member the writer doesn't write. The vault's digest is that of the file the password opened.
+- **The digest guard:** the vault is removed only while it is that file. Any other file at its name is left, so a journal never removes a vault written after it.
+- **Recovery:**
+  - **When it runs:** at start, before `core.hello` is answered, and in `freedom-cored recover`. It also runs first in every read of the vault and every secrets-file operation, which fail with `storage` while it can't finish.
+  - **An install that fails after the commit** answers `{ durable: false }`, since the delete has committed, and leaves the journal for that recovery.
+  - **One lock** serializes the delete and every recovery. Where both are held, it is taken after the secrets file's lock.
+  - **At start,** a `secrets.json.freedom-new` that no journal names is removed, and so are the journal's temp files (0001's rule for leftover temp files).
+- **A record that isn't exactly a writer's,** or one whose secrets file has neither the journaled digest nor a staged file with it, is renamed to `vault-delete-journal.json.corrupt`. The staged file is removed, and nothing else changes: the vault, the entry and its key stay together.
+- **Downgrade:** a core from before PRF-1c reads none of these files, so a journal still pending leaves the vault and the secrets file as its install left them. The next core of this design finishes it, and removes the vault only if it still has the journaled digest. JS-backend builds that run `freedom-cored recover` finish it first.
 
 ### The re-wrap
 
@@ -682,7 +704,7 @@ One PR per step: the core's against `main`, the browser's against `integration/r
 ## Rollback and downgrade
 
 - **Each core step is additive** until the browser step that uses it. PRF-8 is too: it keeps protocol 2, so the browser before PRF-8b runs on it unchanged, and PRF-8b's browser runs on an older core at 2. Each browser step reverts on its own until the next one builds on it.
-- **No format changes before PRF-9,** except the new files (`secrets.json`, the core's credential, `layout.json`), which older builds don't read. So an older build reads every store at every step up to the move.
+- **No format changes before PRF-9,** except the new files (`secrets.json`, the core's credential, `layout.json`, and the vault delete's `vault-delete-journal.json`, `secrets.json.freedom-new` and `vault-delete-journal.json.corrupt`), which older builds don't read. So an older build reads every store at every step up to the move.
 - **Each step's tests read the core's output with the reference's code.** That is the rollback guarantee, as in 0001 and 0012.
 - **Key-store items and older builds:** a build before PRF-4 deletes a profile without reading its secrets file, so a profile it deletes after a downgrade leaves its items in the key store, named by nothing. Older builds keep the forget file, since their default-profile delete spares its prefix, and don't read it.
 - **Secrets that move out of a file** (RPC API keys, Bee's password) leave behind what older builds need, or nothing they would misread:

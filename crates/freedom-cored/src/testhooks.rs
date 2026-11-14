@@ -72,7 +72,8 @@
 //!   `after-commit`, `before-remove`, `after-remove`, `before-forgotten`,
 //!   `after-forgotten`, and `before-startup`, `after-startup` for the start's
 //!   settling write), or of a journaled vault delete (`before-delete-stage`,
-//!   `before-delete-journal`, `after-delete-journal`, `after-delete-secrets`,
+//!   `before-delete-journal`, `before-delete-journal-rename` (its temp file
+//!   written, the claim taken), `after-delete-journal`, `after-delete-secrets`,
 //!   `after-delete-vault`, `after-delete-done`): there the core exits at
 //!   once with 99, as if killed, the files as that step left them (design
 //!   0013, PRF-1: "a crash hook before and after each write").

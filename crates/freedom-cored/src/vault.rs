@@ -2256,13 +2256,15 @@ pub fn startup_snapshot(dir: &Path, lock_dir: &Path) -> (FileSnapshot, NodeRecov
 /// The files the core replaces atomically in the identity directory, whose
 /// temp files a killed write can leave (#81). The vault's is an encrypted
 /// copy of the mnemonic; the journal's records hold no secret, but are
-/// litter all the same.
-const REPLACED: [&str; 5] = [
+/// litter all the same, and so is a vault delete's journal (design 0013)
+/// killed before its rename.
+const REPLACED: [&str; 6] = [
     VAULT_FILE,
     journal::JOURNAL,
     journal::DONE,
     journal::STAGING,
     journal::UNRESOLVED,
+    crate::delete_journal::JOURNAL,
 ];
 
 /// Removes the temp files writes killed before their rename left (#81).

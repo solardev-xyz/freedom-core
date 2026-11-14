@@ -337,12 +337,18 @@ impl Main {
         self.data.join("identity-vault.json")
     }
 
-    /// No vault delete's journal, and no staged secrets file: nothing of a
-    /// delete is left over.
+    /// No vault delete's journal or its temp files, and no staged secrets
+    /// file: nothing of a delete is left over.
     fn no_delete_left(&self) {
         for name in ["vault-delete-journal.json", "secrets.json.freedom-new"] {
             assert!(!self.data.join(name).exists(), "{name}");
         }
+        let temps: Vec<String> = std::fs::read_dir(&self.data)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .filter(|name| name.starts_with(".vault-delete-journal.json."))
+            .collect();
+        assert!(temps.is_empty(), "{temps:?}");
     }
 
     /// The secrets file, as the core wrote it (empty if none).
@@ -683,6 +689,22 @@ fn killed(
         }
         main.stop();
     }
+    if hook == Some("before-delete-journal-rename") {
+        // Killed with the journal's temp file written, before its rename:
+        // the next start removes it.
+        let temps = std::fs::read_dir(&main.data)
+            .unwrap()
+            .filter(|e| {
+                e.as_ref()
+                    .unwrap()
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(".vault-delete-journal.json.")
+            })
+            .count();
+        assert_eq!(temps, 1);
+        assert!(!main.data.join("vault-delete-journal.json").exists());
+    }
     if fault == Some(("forget", Fault::KilledAfterStore)) {
         // The OS forgot the item and the answer was lost: the record stays,
         // naming an item the keychain no longer holds.
@@ -879,6 +901,7 @@ fn a_vault_delete_killed_at_each_step() {
     for (hook, after) in [
         ("before-delete-stage", After::Works),
         ("before-delete-journal", After::Works),
+        ("before-delete-journal-rename", After::Works),
         ("after-delete-journal", After::Deleted),
         ("after-delete-secrets", After::Deleted),
         ("after-delete-vault", After::Deleted),

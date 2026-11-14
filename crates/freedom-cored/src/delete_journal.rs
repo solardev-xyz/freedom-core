@@ -222,6 +222,10 @@ pub fn delete(
         },
         || {
             claimed.set(claim());
+            if claimed.get() {
+                // Its temp file written and flushed, not yet renamed.
+                crate::testhooks::secrets_step("before-delete-journal-rename");
+            }
             // As if the journal's rename failed, after the claim.
             claimed.get() && !crate::testhooks::secrets_fails("delete-journal")
         },
