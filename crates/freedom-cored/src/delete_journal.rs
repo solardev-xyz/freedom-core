@@ -148,6 +148,17 @@ impl Plan {
     }
 }
 
+/// The plan of a record that is exactly what [`delete`] writes for it: its
+/// shape ([`Plan::of`]) and its very members, so a member the writer omits
+/// (`"staged": null` on the vault, `"remove": false` on the secrets file)
+/// makes it no writer's, as does any other (0013, "The vault delete's
+/// journal").
+fn plan_of_record(record: &serde_json::Value) -> Option<Plan> {
+    let journal = serde_json::from_value::<Journal>(record.clone()).ok()?;
+    let plan = Plan::of(&journal)?;
+    (serde_json::to_value(plan.journal()).ok()? == *record).then_some(plan)
+}
+
 fn is_digest(value: &str) -> bool {
     value.len() == 64
         && value
@@ -410,9 +421,9 @@ pub fn settle(dir: &Path) -> std::io::Result<Settled> {
         fsx::Regular::Missing => return Ok(Settled::Nothing),
         fsx::Regular::Other => None,
         fsx::Regular::File(file) => fsx::read_at_most(&file, MAX_JOURNAL)?
-            .and_then(|bytes| serde_json::from_slice::<Journal>(&bytes).ok())
+            .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
             .as_ref()
-            .and_then(Plan::of),
+            .and_then(plan_of_record),
     };
     let Some(plan) = plan else {
         set_aside(dir)?;
@@ -494,12 +505,16 @@ mod tests {
         let changed = |change: &dyn Fn(&mut serde_json::Value)| {
             let mut value = text.clone();
             change(&mut value);
-            serde_json::from_value::<Journal>(value)
-                .ok()
-                .as_ref()
-                .and_then(Plan::of)
+            plan_of_record(&value)
         };
-        let refused: [&dyn Fn(&mut serde_json::Value); 9] = [
+        assert_eq!(changed(&|_| {}), Some(plan()));
+        let refused: [&dyn Fn(&mut serde_json::Value); 13] = [
+            // A member the writer omits, present with its default.
+            &|v| v["files"][1]["staged"] = serde_json::Value::Null,
+            &|v| v["files"][0]["remove"] = false.into(),
+            // Or present with any value, or one it never writes.
+            &|v| v["files"][1]["staged"] = STAGED.into(),
+            &|v| v["files"][0]["extra"] = 1.into(),
             &|v| v["op"] = "nodes.write_identity".into(),
             &|v| v["files"][0]["target"] = "../secrets.json".into(),
             &|v| v["files"][0]["staged"] = "other".into(),
@@ -542,6 +557,40 @@ mod tests {
             b"secrets"
         );
         assert_eq!(settle(dir.path()).unwrap(), Settled::Nothing);
+    }
+
+    /// A journal that would install, with a member the writer omits
+    /// present at its default: set aside, nothing changed (review of #381,
+    /// round 3).
+    #[test]
+    fn an_omitted_member_present_at_its_default_is_set_aside() {
+        let aliases: [(usize, &str, serde_json::Value); 2] = [
+            (1, "staged", serde_json::Value::Null),
+            (0, "remove", false.into()),
+        ];
+        for (entry, member, value) in aliases {
+            let dir = tempfile::tempdir().unwrap();
+            std::fs::write(dir.path().join(VAULT_FILE), b"vault").unwrap();
+            std::fs::write(dir.path().join(SECRETS_FILE), b"before").unwrap();
+            std::fs::write(dir.path().join(STAGED), b"next").unwrap();
+            let plan = Plan {
+                secrets: sha256_hex(b"next"),
+                vault: sha256_hex(b"vault"),
+            };
+            let mut record = serde_json::to_value(plan.journal()).unwrap();
+            record["files"][entry][member] = value;
+            std::fs::write(dir.path().join(JOURNAL), record.to_string()).unwrap();
+            assert_eq!(settle(dir.path()).unwrap(), Settled::SetAside, "{member}");
+            assert_eq!(
+                std::fs::read(dir.path().join(VAULT_FILE)).unwrap(),
+                b"vault"
+            );
+            assert_eq!(
+                std::fs::read(dir.path().join(SECRETS_FILE)).unwrap(),
+                b"before"
+            );
+            assert!(dir.path().join(CORRUPT).exists());
+        }
     }
 
     #[test]
