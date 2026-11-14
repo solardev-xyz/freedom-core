@@ -152,11 +152,14 @@ impl Plan {
 /// shape ([`Plan::of`]) and its very members, so a member the writer omits
 /// (`"staged": null` on the vault, `"remove": false` on the secrets file)
 /// makes it no writer's, as does any other (0013, "The vault delete's
-/// journal").
-fn plan_of_record(record: &serde_json::Value) -> Option<Plan> {
-    let journal = serde_json::from_value::<Journal>(record.clone()).ok()?;
+/// journal"). The derived parse runs on the bytes themselves, so a member
+/// given twice, at the top or in an entry, is refused before a `Value`
+/// would keep only its last occurrence (review of #381, round 4).
+fn plan_of_record(bytes: &[u8]) -> Option<Plan> {
+    let journal = serde_json::from_slice::<Journal>(bytes).ok()?;
+    let record = serde_json::from_slice::<serde_json::Value>(bytes).ok()?;
     let plan = Plan::of(&journal)?;
-    (serde_json::to_value(plan.journal()).ok()? == *record).then_some(plan)
+    (serde_json::to_value(plan.journal()).ok()? == record).then_some(plan)
 }
 
 fn is_digest(value: &str) -> bool {
@@ -421,8 +424,7 @@ pub fn settle(dir: &Path) -> std::io::Result<Settled> {
         fsx::Regular::Missing => return Ok(Settled::Nothing),
         fsx::Regular::Other => None,
         fsx::Regular::File(file) => fsx::read_at_most(&file, MAX_JOURNAL)?
-            .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
-            .as_ref()
+            .as_deref()
             .and_then(plan_of_record),
     };
     let Some(plan) = plan else {
@@ -505,7 +507,7 @@ mod tests {
         let changed = |change: &dyn Fn(&mut serde_json::Value)| {
             let mut value = text.clone();
             change(&mut value);
-            plan_of_record(&value)
+            plan_of_record(value.to_string().as_bytes())
         };
         assert_eq!(changed(&|_| {}), Some(plan()));
         let refused: [&dyn Fn(&mut serde_json::Value); 13] = [
@@ -591,6 +593,66 @@ mod tests {
             );
             assert!(dir.path().join(CORRUPT).exists());
         }
+    }
+
+    /// A member given twice, its last occurrence the writer's: no plan, and
+    /// `settle` sets the journal aside (review of #381, round 4).
+    #[test]
+    fn a_member_given_twice_is_no_writers() {
+        let (a, b) = (digest('a'), digest('b'));
+        let secrets = format!(
+            r#"{{"target":"secrets.json","staged":"secrets.json.freedom-new","sha256":"{a}"}}"#
+        );
+        let vault = format!(r#"{{"target":"identity-vault.json","sha256":"{b}","remove":true}}"#);
+        let good = format!(r#"{{"op":"vault.delete","files":[{secrets},{vault}]}}"#);
+        assert_eq!(plan_of_record(good.as_bytes()), Some(plan()));
+        let twice = [
+            format!(
+                r#"{{"op":"nodes.write_identity","op":"vault.delete","files":[{secrets},{vault}]}}"#
+            ),
+            format!(r#"{{"op":"vault.delete","files":[],"files":[{secrets},{vault}]}}"#),
+            format!(
+                r#"{{"op":"vault.delete","files":[{{"target":"secrets.json","target":"secrets.json","staged":"secrets.json.freedom-new","sha256":"{a}"}},{vault}]}}"#
+            ),
+            format!(
+                r#"{{"op":"vault.delete","files":[{{"target":"secrets.json","staged":"x","staged":"secrets.json.freedom-new","sha256":"{a}"}},{vault}]}}"#
+            ),
+            format!(
+                r#"{{"op":"vault.delete","files":[{{"target":"secrets.json","staged":"secrets.json.freedom-new","sha256":"{b}","sha256":"{a}"}},{vault}]}}"#
+            ),
+            format!(
+                r#"{{"op":"vault.delete","files":[{secrets},{{"target":"secrets.json","target":"identity-vault.json","sha256":"{b}","remove":true}}]}}"#
+            ),
+            format!(
+                r#"{{"op":"vault.delete","files":[{secrets},{{"target":"identity-vault.json","sha256":"{a}","sha256":"{b}","remove":true}}]}}"#
+            ),
+            format!(
+                r#"{{"op":"vault.delete","files":[{secrets},{{"target":"identity-vault.json","sha256":"{b}","remove":false,"remove":true}}]}}"#
+            ),
+        ];
+        for record in &twice {
+            assert_eq!(plan_of_record(record.as_bytes()), None, "{record}");
+        }
+        // Through `settle`, with files it would otherwise install.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join(VAULT_FILE), b"vault").unwrap();
+        std::fs::write(dir.path().join(SECRETS_FILE), b"before").unwrap();
+        std::fs::write(dir.path().join(STAGED), b"next").unwrap();
+        let record = format!(
+            r#"{{"op":"nodes.write_identity","op":"vault.delete","files":[{{"target":"secrets.json","staged":"secrets.json.freedom-new","sha256":"{}"}},{{"target":"identity-vault.json","sha256":"{}","remove":true}}]}}"#,
+            sha256_hex(b"next"),
+            sha256_hex(b"vault"),
+        );
+        std::fs::write(dir.path().join(JOURNAL), record).unwrap();
+        assert_eq!(settle(dir.path()).unwrap(), Settled::SetAside);
+        assert_eq!(
+            std::fs::read(dir.path().join(VAULT_FILE)).unwrap(),
+            b"vault"
+        );
+        assert_eq!(
+            std::fs::read(dir.path().join(SECRETS_FILE)).unwrap(),
+            b"before"
+        );
     }
 
     #[test]
