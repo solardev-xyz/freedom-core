@@ -23,14 +23,25 @@
 //!   bound to the vault file's SHA-256 (`vault_fingerprint`), under the
 //!   `UserPresence` key where the device offers it and `Unattended`
 //!   otherwise. An entry bound to another digest is quick unlock off.
+//! - **The re-wrap** ([`Secrets::stage`]): `vault.create` and `vault.import`
+//!   with `quick_unlock: true`, and `vault.change_password` on a vault with
+//!   quick unlock, write the new vault's credential, bound to the new
+//!   vault's digest, before the vault commits: as `quick-unlock`, or as
+//!   `quick-unlock.next` while `quick-unlock` still holds the credential of
+//!   the vault being replaced. The vault's rename is the commit point. After
+//!   it, one write leaves only `quick-unlock`, bound to the new vault
+//!   ([`Staged::committed`]); a failure before it takes the new entry off
+//!   again ([`Staged::rolled_back`]). The credential for a vault is
+//!   whichever of the two names is bound to its digest, so at every point
+//!   the vault on disk has its own (design 0013, "The re-wrap").
 //! - **At start** ([`Secrets::startup`]), before `core.hello` is answered
 //!   and before any job runs: temp files a killed write left are removed;
 //!   each `pending` item moves into `forget`, since its `create` never
 //!   committed; `forget` records of a backend this OS doesn't have are
-//!   dropped, since their items aren't here; and a `quick-unlock` entry
-//!   naming no vault (none there, or another vault's digest) is removed,
-//!   its key moving into `forget` if nothing else is under it. One write,
-//!   if anything changed. Nothing here asks the key store.
+//!   dropped, since their items aren't here; and each quick-unlock entry
+//!   (either name) naming no vault (none there, or another vault's digest)
+//!   is removed, its key moving into `forget` if nothing else is under it.
+//!   One write, if anything changed. Nothing here asks the key store.
 //! - **The drain** ([`Secrets::drain`]) asks the key store to forget each
 //!   `forget` record, and drops the record once the answer is done (`ok`,
 //!   or `not_found`, which the key store counts as done). It runs on its own
@@ -44,8 +55,8 @@ use std::sync::mpsc::{self, SyncSender};
 use std::sync::{Arc, Mutex, MutexGuard, Weak};
 
 use fc_keystore::{
-    Binding, EntryName, ItemId, KeyStore, KeyStoreError, Label, MAX_FILE_BYTES, MAX_SECRET_BYTES,
-    OpenError, Policy, Put, Reason, Refused, Secret, SecretsFile,
+    Backend, Binding, EntryName, ItemId, KeyStore, KeyStoreError, Label, MAX_FILE_BYTES,
+    MAX_SECRET_BYTES, OpenError, Policy, Put, Reason, Refused, Secret, SecretsFile, WrapKey,
 };
 
 use crate::fsx::{self, Done};
@@ -55,6 +66,10 @@ use crate::rng::OsRng;
 pub const SECRETS_FILE: &str = "secrets.json";
 /// Quick unlock's entry.
 pub const QUICK_UNLOCK: &str = "quick-unlock";
+/// Where a re-wrap writes the next vault's credential while `quick-unlock`
+/// still holds the credential of the vault it replaces (design 0013, "The
+/// re-wrap").
+pub const QUICK_UNLOCK_NEXT: &str = "quick-unlock.next";
 /// The binding member that holds the vault file's SHA-256.
 pub const FINGERPRINT: &str = "vault_fingerprint";
 
@@ -92,9 +107,9 @@ pub enum Error {
 /// by every write, so the loop never reads storage.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct View {
-    /// The `quick-unlock` entry's policy, and the vault digest it is bound
-    /// to.
-    pub quick_unlock: Option<(Policy, String)>,
+    /// Each quick-unlock entry's policy, and the vault digest it is bound
+    /// to: `quick-unlock`'s, then `quick-unlock.next`'s.
+    pub quick_unlock: Vec<(Policy, String)>,
     /// The file didn't read or parse at its last read.
     pub unreadable: bool,
     /// The file holds `forget` records.
@@ -120,8 +135,37 @@ pub struct Secrets {
     drain: Mutex<Option<SyncSender<()>>>,
 }
 
-fn quick_unlock() -> Result<EntryName, Error> {
-    EntryName::new(QUICK_UNLOCK).ok_or(Error::Internal)
+/// Quick unlock's two names: `quick-unlock`, then `quick-unlock.next`.
+fn names() -> Result<[EntryName; 2], Error> {
+    match (
+        EntryName::new(QUICK_UNLOCK),
+        EntryName::new(QUICK_UNLOCK_NEXT),
+    ) {
+        (Some(main), Some(next)) => Ok([main, next]),
+        _ => Err(Error::Internal),
+    }
+}
+
+/// The quick-unlock entry bound to the vault file with digest
+/// `fingerprint`: `quick-unlock` if it is, else `quick-unlock.next` if it
+/// is.
+fn credential(file: &SecretsFile, fingerprint: &str) -> Option<EntryName> {
+    names().ok()?.into_iter().find(|name| {
+        file.binding(name)
+            .is_some_and(|binding| binding.get(FINGERPRINT) == Some(fingerprint))
+    })
+}
+
+/// How a quick-unlock entry is written ([`Secrets::write_entry`]): its
+/// name, binding and secret, the entries the write that puts it also takes
+/// off, and the step names of its `pending` write and of the write that
+/// puts it.
+struct Writing<'a> {
+    name: EntryName,
+    binding: Binding,
+    secret: &'a [u8],
+    drop: Vec<EntryName>,
+    steps: [&'static str; 2],
 }
 
 fn io_kind(error: &std::io::Error) -> &'static str {
@@ -204,6 +248,10 @@ impl Secrets {
         commit: &dyn Fn() -> bool,
     ) -> Result<(), Error> {
         crate::testhooks::secrets_step(&format!("before-{step}"));
+        if crate::testhooks::secrets_fails(step) {
+            // As if the OS had failed the write before its rename.
+            return Err(Error::Write("other"));
+        }
         std::fs::create_dir_all(&self.dir).map_err(|e| Error::Write(io_kind(&e)))?;
         let text = next.text();
         let written = fsx::replace(
@@ -276,18 +324,25 @@ impl Secrets {
         let mut next = file
             .settle()
             .drop_foreign(self.store.capabilities().backend);
+        // Either name: a re-wrap killed before its vault's rename leaves the
+        // new vault's entry naming no vault, and one killed after it the old
+        // vault's (design 0013, "The re-wrap").
         if let Ok(fingerprint) = vault
-            && let Ok(name) = quick_unlock()
-            && next
-                .binding(&name)
-                .is_some_and(|binding| binding.get(FINGERPRINT) != fingerprint)
-            && let Ok(without) = next.remove(&name)
+            && let Ok(names) = names()
         {
-            crate::log::info(
-                "removed a quick-unlock entry that names no vault",
-                serde_json::json!({}),
-            );
-            next = without;
+            for name in names {
+                if next
+                    .binding(&name)
+                    .is_some_and(|binding| binding.get(FINGERPRINT) != fingerprint)
+                    && let Ok(without) = next.remove(&name)
+                {
+                    crate::log::info(
+                        "removed a quick-unlock entry that names no vault",
+                        serde_json::json!({ "entry": name.as_str() }),
+                    );
+                    next = without;
+                }
+            }
         }
         if next == file {
             self.set_view(view_of(&file));
@@ -387,24 +442,10 @@ impl Secrets {
         Ok(file)
     }
 
-    /// `quick_unlock.enroll`: writes `password` as the `quick-unlock`
-    /// entry, bound to `fingerprint`, once the caller has checked it against
-    /// the vault with that digest.
-    ///
-    /// - Under the policy's committed key, if it opens: one write, the
-    ///   entry put (replaced) under it.
-    /// - Otherwise a new key: the `pending` write, `create`, then the commit
-    ///   that makes the key the policy's and writes the entry under it. A
-    ///   committed key whose item is gone (`not_found`, `invalidated`) is
-    ///   replaced so: its entry, which can't be re-wrapped, leaves in the
-    ///   `pending` write, which moves the key into `forget`.
-    /// - An entry under the other policy leaves in the first write.
-    ///
-    /// Only the last write is the commit, claimed through `gate`.
-    pub fn enroll(&self, password: &[u8], fingerprint: &str, gate: &Gate<'_>) -> Result<(), Error> {
-        if !(1..=MAX_SECRET_BYTES).contains(&password.len()) {
-            return Err(Error::TooLong);
-        }
+    /// The policy quick unlock's entries go under, and the backend its keys
+    /// are made in: `UserPresence` where the device offers it, `Unattended`
+    /// otherwise.
+    fn policy(&self) -> Result<(Policy, Backend), Error> {
         let caps = self.store.capabilities();
         let policy = if caps.offers(Policy::UserPresence) {
             Policy::UserPresence
@@ -413,45 +454,87 @@ impl Secrets {
         } else {
             return Err(Error::KeyStore(crate::keystore::unavailable("unsupported")));
         };
-        let backend = caps.backend.ok_or(Error::Internal)?;
-        let name = quick_unlock()?;
-        let binding = Binding::new([(FINGERPRINT, fingerprint)]).ok_or(Error::Internal)?;
+        Ok((policy, caps.backend.ok_or(Error::Internal)?))
+    }
+
+    /// Writes a quick-unlock entry under `policy`'s key, with the file's
+    /// lock held. `file` is the file as it stands.
+    ///
+    /// - Under the policy's committed key, if it opens: one write, the
+    ///   entry put (replaced) under it.
+    /// - Otherwise a new key: the `pending` write, `create`, then the commit
+    ///   that makes the key the policy's and writes the entry under it. A
+    ///   committed key whose item is gone (`not_found`, `invalidated`) is
+    ///   replaced so: the quick-unlock entries under it, which can't be
+    ///   re-wrapped, leave in the `pending` write, which moves the key into
+    ///   `forget`.
+    /// - The first write takes off an entry of the same name under the
+    ///   other policy's key; the write that puts the entry also takes off
+    ///   `writing.drop`, after the put, so that a key it shares stays.
+    ///
+    /// Only the last write is claimed through `gate`. The result is the
+    /// file as written, with the key the entry is under.
+    fn write_entry(
+        &self,
+        file: SecretsFile,
+        writing: &Writing<'_>,
+        (policy, backend): (Policy, Backend),
+        gate: &Gate<'_>,
+    ) -> Result<(SecretsFile, WrapKey), Error> {
+        let [main, next_name] = names()?;
         let put = || Put {
-            name: name.clone(),
-            binding: binding.clone(),
-            secret: password,
+            name: writing.name.clone(),
+            binding: writing.binding.clone(),
+            secret: writing.secret,
         };
-        let _held = self.lock()?;
-        let file = self.load()?;
-        // What the first write takes off: the entry under the other
-        // policy's key, and, once known, the entry under a dead key.
-        let mut drop_entry = file.entry_key(&name).is_some_and(|key| key != policy);
-        let base = |file: &SecretsFile, drop_entry: bool| -> Result<SecretsFile, Error> {
-            if drop_entry && file.entry_key(&name).is_some() {
-                file.remove(&name).map_err(refused)
-            } else {
-                Ok(file.clone())
+        // What the first write takes off: an entry of the same name under
+        // the other policy's key, which `put` can't replace; once the key
+        // is known dead, every quick-unlock entry under it too.
+        let base = |file: &SecretsFile, dead: bool| -> Result<SecretsFile, Error> {
+            let mut out = file.clone();
+            for name in [&main, &next_name] {
+                let Some(key) = out.entry_key(name) else {
+                    continue;
+                };
+                if (*name == writing.name && key != policy) || (dead && key == policy) {
+                    out = out.remove(name).map_err(refused)?;
+                }
             }
+            Ok(out)
         };
-        let mut start = base(&file, drop_entry)?;
+        // `writing.drop` leaves in the write that puts the entry, after it,
+        // so that a key it shares stays.
+        let finish = |file: SecretsFile| -> Result<SecretsFile, Error> {
+            let mut out = file;
+            for name in &writing.drop {
+                if out.entry_key(name).is_some() {
+                    out = out.remove(name).map_err(refused)?;
+                }
+            }
+            Ok(out)
+        };
+        let mut dead = false;
+        let mut start = base(&file, dead)?;
         if let Some(sealed) = start.key(policy) {
             match self.store.open(&sealed, Some(Reason::QuickUnlock)) {
                 Ok(key) => {
-                    let next = start
-                        .put(policy, &key, put(), &mut OsRng)
-                        .map_err(refused)?;
+                    let next = finish(
+                        start
+                            .put(policy, &key, put(), &mut OsRng)
+                            .map_err(refused)?,
+                    )?;
                     if (gate.abandoned)() {
                         return Err(Error::Abandoned);
                     }
-                    self.write(&next, "commit", gate.claim)?;
+                    self.write(&next, writing.steps[1], gate.claim)?;
                     if !next.forget_list().is_empty() {
                         self.poke();
                     }
-                    return Ok(());
+                    return Ok((next, key));
                 }
                 Err(error @ (KeyStoreError::NotFound | KeyStoreError::Invalidated)) => {
-                    drop_entry = true;
-                    start = base(&file, drop_entry)?;
+                    dead = true;
+                    start = base(&file, dead)?;
                     // Other secrets still under the dead key can't be
                     // re-wrapped; quick unlock doesn't take them down.
                     if start.key(policy).is_some() {
@@ -468,7 +551,7 @@ impl Secrets {
                 // The `forget` list is tried again first (0013, "The
                 // bounds").
                 let drained = self.drain_held(file)?;
-                base(&drained, drop_entry)?
+                base(&drained, dead)?
                     .begin_create(policy, backend, item)
                     .map_err(refused)?
             }
@@ -477,7 +560,7 @@ impl Secrets {
         if (gate.abandoned)() {
             return Err(Error::Abandoned);
         }
-        self.write(&pending, "pending", &|| true)?;
+        self.write(&pending, writing.steps[0], &|| true)?;
         if !pending.forget_list().is_empty() {
             self.poke();
         }
@@ -488,29 +571,145 @@ impl Secrets {
         if sealed.item() != item || sealed.policy() != policy || sealed.backend() != backend {
             return Err(Error::Internal);
         }
-        let next = pending
-            .commit(&sealed, &key, None, Some(put()), &mut OsRng)
-            .map_err(refused)?;
-        self.write(&next, "commit", gate.claim)?;
+        let next = finish(
+            pending
+                .commit(&sealed, &key, None, Some(put()), &mut OsRng)
+                .map_err(refused)?,
+        )?;
+        self.write(&next, writing.steps[1], gate.claim)?;
         if !next.forget_list().is_empty() {
             self.poke();
         }
+        Ok((next, key))
+    }
+
+    /// `quick_unlock.enroll`: writes `password` as the `quick-unlock`
+    /// entry, bound to `fingerprint`, once the caller has checked it against
+    /// the vault with that digest ([`Secrets::write_entry`]: under the
+    /// policy's key if it opens, a new key otherwise). A `quick-unlock.next`
+    /// leaves in the write that puts the entry: it is this vault's
+    /// credential, which the entry replaces, or names no vault. Only the
+    /// last write is the commit, claimed through `gate`.
+    pub fn enroll(&self, password: &[u8], fingerprint: &str, gate: &Gate<'_>) -> Result<(), Error> {
+        if !(1..=MAX_SECRET_BYTES).contains(&password.len()) {
+            return Err(Error::TooLong);
+        }
+        let policy = self.policy()?;
+        let [main, next] = names()?;
+        let binding = Binding::new([(FINGERPRINT, fingerprint)]).ok_or(Error::Internal)?;
+        let _held = self.lock()?;
+        let file = self.load()?;
+        self.write_entry(
+            file,
+            &Writing {
+                name: main,
+                binding,
+                secret: password,
+                drop: vec![next],
+                steps: ["pending", "commit"],
+            },
+            policy,
+            gate,
+        )?;
         Ok(())
     }
 
+    /// A re-wrap's first half (design 0013, "The re-wrap"): the new vault's
+    /// credential, `password` bound to `after` (the digest of the vault file
+    /// about to be written), written before that vault commits. `before` is
+    /// the digest of the vault file it replaces, if there is one.
+    ///
+    /// - **Where:** as `quick-unlock`, unless `quick-unlock` holds the
+    ///   credential for `before`; then as `quick-unlock.next`, so the vault
+    ///   on disk keeps its own until the new one's rename. The other name, if
+    ///   it isn't that credential, names no vault, and leaves in the write
+    ///   that puts the new entry.
+    /// - **How:** as enroll writes ([`Secrets::write_entry`]), with the step
+    ///   names `stage-pending` and `stage`. None of these writes is the
+    ///   commit: the vault's rename is, so each is refused once the job is
+    ///   `abandoned`.
+    /// - **When:** `required` (create and import with `quick_unlock: true`)
+    ///   always; otherwise (a password change) only when there is a
+    ///   credential for `before`: `Ok(None)` then means the vault is written
+    ///   alone, and the file is unchanged.
+    ///
+    /// The result holds the file's lock until [`Staged::committed`] or
+    /// [`Staged::rolled_back`]. A file that doesn't read, a key-store
+    /// refusal, or a write that fails refuses the operation before its
+    /// vault is written; a `pending` item it leaves is settled at the next
+    /// start, as enroll's.
+    pub fn stage<'a>(
+        &'a self,
+        password: &[u8],
+        before: Option<&str>,
+        after: &str,
+        required: bool,
+        abandoned: &dyn Fn() -> bool,
+    ) -> Result<Option<Staged<'a>>, Error> {
+        let [main, next] = names()?;
+        let held = self.lock()?;
+        let file = self.load()?;
+        let current = before.and_then(|digest| credential(&file, digest));
+        if !required && current.is_none() {
+            return Ok(None);
+        }
+        if !(1..=MAX_SECRET_BYTES).contains(&password.len()) {
+            return Err(Error::TooLong);
+        }
+        let policy = self.policy()?;
+        if before == Some(after) {
+            // A vault written again has a fresh salt and nonce: never the
+            // digest it replaces.
+            return Err(Error::Internal);
+        }
+        let name = if current.as_ref() == Some(&main) {
+            next.clone()
+        } else {
+            main.clone()
+        };
+        let drop = [main, next]
+            .into_iter()
+            .filter(|other| *other != name && Some(other) != current.as_ref())
+            .collect();
+        let binding = Binding::new([(FINGERPRINT, after)]).ok_or(Error::Internal)?;
+        let not_abandoned = || !abandoned();
+        let (file, key) = self.write_entry(
+            file,
+            &Writing {
+                name: name.clone(),
+                binding: binding.clone(),
+                secret: password,
+                drop,
+                steps: ["stage-pending", "stage"],
+            },
+            policy,
+            &Gate {
+                abandoned,
+                claim: &not_abandoned,
+            },
+        )?;
+        Ok(Some(Staged {
+            secrets: self,
+            _held: held,
+            file,
+            name,
+            binding,
+            key,
+            policy: policy.0,
+        }))
+    }
+
     /// The password quick unlock holds for the vault with digest
-    /// `fingerprint`, opened under its key with `reason`. Nothing is
-    /// changed or deleted on a failure.
+    /// `fingerprint` (in whichever of its two names is bound to it), opened
+    /// under its key with `reason`. Nothing is changed or deleted on a
+    /// failure.
     pub fn password(&self, fingerprint: &str, reason: Reason) -> Result<Secret, Error> {
-        let name = quick_unlock()?;
         let file = {
             let _held = self.lock()?;
             self.load()?
         };
+        let name = credential(&file, fingerprint).ok_or(Error::NotEnabled)?;
         let binding = file.binding(&name).ok_or(Error::NotEnabled)?.clone();
-        if binding.get(FINGERPRINT) != Some(fingerprint) {
-            return Err(Error::NotEnabled);
-        }
         let policy = file.entry_key(&name).ok_or(Error::NotEnabled)?;
         let sealed = file.key(policy).ok_or(Error::NotEnabled)?;
         let key = self
@@ -524,17 +723,16 @@ impl Secrets {
             })
     }
 
-    /// `quick_unlock.disable`: the entry removed, and its key moved into
-    /// `forget` if nothing else is under it, in one write, claimed through
-    /// `gate`. No entry: nothing to do.
+    /// `quick_unlock.disable`: the entry removed (both names), and its key
+    /// moved into `forget` if nothing else is under it, in one write,
+    /// claimed through `gate`. No entry: nothing to do.
     pub fn disable(&self, gate: &Gate<'_>) -> Result<(), Error> {
-        let name = quick_unlock()?;
         let _held = self.lock()?;
         let file = self.load()?;
-        if file.entry_key(&name).is_none() {
+        let next = without_quick_unlock(&file)?;
+        if next == file {
             return Ok(());
         }
-        let next = file.remove(&name).map_err(refused)?;
         if (gate.abandoned)() {
             return Err(Error::Abandoned);
         }
@@ -547,10 +745,11 @@ impl Secrets {
     /// digest is `vault` (design 0013, "Forgetting an item"). `claim` is the
     /// vault's commit claim.
     ///
-    /// - **With quick unlock's entry:** the entry's removal (its key moved
-    ///   into `forget` if nothing else is under it) and the vault's are one
-    ///   journaled operation ([`crate::delete_journal`]), committed by the
-    ///   journal's write. Then the drain forgets the key.
+    /// - **With quick unlock's entry** (under either name): the entries'
+    ///   removal (their key moved into `forget` if nothing else is under
+    ///   it) and the vault's are one journaled operation
+    ///   ([`crate::delete_journal`]), committed by the journal's write. Then
+    ///   the drain forgets the key.
     /// - **Without it:** the file doesn't change, and the vault is removed
     ///   as 0001 removes it, committed at the unlink.
     ///
@@ -559,17 +758,18 @@ impl Secrets {
     /// vault, the entry and its key stay as they were, so nothing the file
     /// names is ever left unnamed.
     pub fn delete_vault(&self, vault: &str, claim: &dyn Fn() -> bool) -> Result<Done, Error> {
-        let name = quick_unlock()?;
         let _held = self.lock()?;
         let file = self.load()?;
-        if file.entry_key(&name).is_none() {
+        // Quick unlock's entry under either name (design 0013, "The
+        // re-wrap"): both leave with the vault.
+        let next = without_quick_unlock(&file)?;
+        if next == file {
             return match fsx::remove(&self.dir.join(crate::vault::VAULT_FILE), claim) {
                 Ok(Some(done)) => Ok(done),
                 Ok(None) => Err(Error::Abandoned),
                 Err(e) => Err(Error::VaultStorage(io_kind(&e))),
             };
         }
-        let next = file.remove(&name).map_err(refused)?;
         let text = next.text();
         let check = |bytes: &[u8]| SecretsFile::parse(bytes).is_ok_and(|read| read == next);
         match crate::delete_journal::delete(&self.dir, text.as_bytes(), vault, &check, claim) {
@@ -591,6 +791,108 @@ impl Secrets {
     }
 }
 
+/// A re-wrap's credential, written before its vault commits
+/// ([`Secrets::stage`]). It holds the secrets file's lock, the file as
+/// written, and the key the entry is under, until the vault's write ends:
+/// then [`Staged::committed`] or [`Staged::rolled_back`].
+pub struct Staged<'a> {
+    secrets: &'a Secrets,
+    _held: MutexGuard<'a, ()>,
+    file: SecretsFile,
+    name: EntryName,
+    binding: Binding,
+    key: WrapKey,
+    policy: Policy,
+}
+
+impl Staged<'_> {
+    /// The vault committed: one write leaves only `quick-unlock`, the new
+    /// vault's credential. Staged as `quick-unlock.next`, the entry is
+    /// sealed again under `quick-unlock` with the key this holds, so no
+    /// key-store call follows the commit; staged as `quick-unlock`, the old
+    /// vault's `quick-unlock.next` leaves. A failure is logged, not
+    /// answered: the commit has happened, and the entry staged is the new
+    /// vault's credential under either name until the next start removes
+    /// the other.
+    pub fn committed(self, password: &[u8]) {
+        let folded = (|| -> Result<SecretsFile, Error> {
+            let [main, next] = names()?;
+            let mut out = self.file.clone();
+            if self.name == next {
+                if out.entry_key(&main).is_some() {
+                    out = out.remove(&main).map_err(refused)?;
+                }
+                out = out
+                    .put(
+                        self.policy,
+                        &self.key,
+                        Put {
+                            name: main,
+                            binding: self.binding.clone(),
+                            secret: password,
+                        },
+                        &mut OsRng,
+                    )
+                    .map_err(refused)?;
+                out = out.remove(&next).map_err(refused)?;
+            } else if out.entry_key(&next).is_some() {
+                out = out.remove(&next).map_err(refused)?;
+            }
+            Ok(out)
+        })();
+        let written = folded.and_then(|out| {
+            if out != self.file {
+                self.secrets.write(&out, "fold", &|| true)?;
+                if !out.forget_list().is_empty() {
+                    self.secrets.poke();
+                }
+            }
+            Ok(())
+        });
+        if let Err(error) = written {
+            crate::log::warn(
+                "could not fold a re-wrapped quick-unlock entry; the next start settles it",
+                serde_json::json!({ "error": format!("{error:?}") }),
+            );
+        }
+    }
+
+    /// The vault didn't commit: the entry staged leaves again, its key into
+    /// `forget` if nothing else is under it. A failure is logged: the entry
+    /// names no vault, and the next start removes it.
+    pub fn rolled_back(self) {
+        let written = (|| -> Result<(), Error> {
+            if self.file.entry_key(&self.name).is_none() {
+                return Ok(());
+            }
+            let out = self.file.remove(&self.name).map_err(refused)?;
+            self.secrets.write(&out, "rollback", &|| true)?;
+            if !out.forget_list().is_empty() {
+                self.secrets.poke();
+            }
+            Ok(())
+        })();
+        if let Err(error) = written {
+            crate::log::warn(
+                "could not take back a re-wrap's quick-unlock entry; the next start removes it",
+                serde_json::json!({ "error": format!("{error:?}") }),
+            );
+        }
+    }
+}
+
+/// `file` without quick unlock's entries, under either name, each key left
+/// with nothing under it moved into `forget`.
+fn without_quick_unlock(file: &SecretsFile) -> Result<SecretsFile, Error> {
+    let mut out = file.clone();
+    for name in names()? {
+        if out.entry_key(&name).is_some() {
+            out = out.remove(&name).map_err(refused)?;
+        }
+    }
+    Ok(out)
+}
+
 /// Reads the file at `path`: empty if there is none.
 fn read(path: &Path) -> Result<SecretsFile, Error> {
     let file = match fsx::open_regular(path, false) {
@@ -606,11 +908,18 @@ fn read(path: &Path) -> Result<SecretsFile, Error> {
 }
 
 fn view_of(file: &SecretsFile) -> View {
-    let quick_unlock = quick_unlock().ok().and_then(|name| {
-        let policy = file.entry_key(&name)?;
-        let bound = file.binding(&name)?.get(FINGERPRINT)?.to_owned();
-        Some((policy, bound))
-    });
+    let quick_unlock = names()
+        .map(|names| {
+            names
+                .iter()
+                .filter_map(|name| {
+                    let policy = file.entry_key(name)?;
+                    let bound = file.binding(name)?.get(FINGERPRINT)?.to_owned();
+                    Some((policy, bound))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
     View {
         quick_unlock,
         unreadable: false,

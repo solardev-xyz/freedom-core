@@ -1082,8 +1082,9 @@ fn main_call(
 }
 
 /// Quick unlock end to end in the temporary keychain: enroll makes the
-/// Keychain item, unlock opens it with the vault locked, and disable's
-/// forget removes it.
+/// Keychain item, unlock opens it with the vault locked, a password change
+/// re-wraps the credential under the same item, and disable's forget
+/// removes it.
 #[test]
 fn quick_unlock_through_main_and_the_helper() {
     use base64::Engine as _;
@@ -1129,9 +1130,33 @@ fn quick_unlock_through_main_and_the_helper() {
     );
     assert!(unlocked["result"]["addresses"].is_object(), "{unlocked}");
     assert_eq!(asked.last().unwrap(), &("open".to_owned(), item.clone()));
-    let disabled = main_call(
+    // The re-wrap (design 0013): the new vault's credential under the same
+    // item, and quick unlock opens the new vault.
+    let changed = main_call(
         &mut core,
         6,
+        "chrome",
+        "vault.change_password",
+        json!({ "password_b64": b64("testpass1"), "new_password_b64": b64("testpass2") }),
+        &mut asked,
+    );
+    assert_eq!(changed["result"], json!({}), "{changed}");
+    assert_eq!(asked.last().unwrap(), &("open".to_owned(), item.clone()));
+    main_call(&mut core, 7, "chrome", "vault.lock", json!({}), &mut asked);
+    let unlocked = main_call(
+        &mut core,
+        8,
+        "chrome",
+        "quick_unlock.unlock",
+        json!({}),
+        &mut asked,
+    );
+    assert!(unlocked["result"]["addresses"].is_object(), "{unlocked}");
+    assert_eq!(asked.last().unwrap(), &("open".to_owned(), item.clone()));
+    assert!(!asked.iter().skip(1).any(|(op, _)| op == "create"));
+    let disabled = main_call(
+        &mut core,
+        9,
         "chrome",
         "quick_unlock.disable",
         json!({}),
