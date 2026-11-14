@@ -202,6 +202,8 @@ const CAPABILITIES: &[&str] = &[
     "approval.touch",
     "approval.grants",
     "approval.forget_account",
+    // Design 0012: a device send's "Always allow" (#373).
+    "approval.remember",
     "dweb.open",
     // Design 0009: verified fetches, whose bodies stream.
     "dweb.verify",

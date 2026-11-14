@@ -61,14 +61,19 @@ pub struct SafeId(Zeroizing<[u8; 16]>);
 impl SafeId {
     /// The id's text, for the reply that carries it to its caller.
     pub fn to_text(&self) -> Zeroizing<String> {
-        const HEX: &[u8; 16] = b"0123456789abcdef";
-        let mut text = Zeroizing::new(String::with_capacity(32));
-        for byte in self.0.iter() {
-            text.push(char::from(HEX[usize::from(byte >> 4)]));
-            text.push(char::from(HEX[usize::from(byte & 0xf)]));
-        }
-        text
+        text_16(&self.0)
     }
+}
+
+/// 16 bytes as 32 lowercase hex digits, in a buffer wiped when dropped.
+pub(crate) fn text_16(bytes: &[u8; 16]) -> Zeroizing<String> {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut text = Zeroizing::new(String::with_capacity(32));
+    for byte in bytes {
+        text.push(char::from(HEX[usize::from(byte >> 4)]));
+        text.push(char::from(HEX[usize::from(byte & 0xf)]));
+    }
+    text
 }
 
 impl fmt::Debug for SafeId {
@@ -78,7 +83,7 @@ impl fmt::Debug for SafeId {
 }
 
 /// 32 lowercase hex digits, exactly, into `out`; whether `text` is such.
-fn lower_hex_16(text: &str, out: &mut [u8; 16]) -> bool {
+pub(crate) fn lower_hex_16(text: &str, out: &mut [u8; 16]) -> bool {
     let bytes = text.as_bytes();
     if bytes.len() != 32 || !bytes.iter().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')) {
         return false;
@@ -91,7 +96,7 @@ fn lower_hex_16(text: &str, out: &mut [u8; 16]) -> bool {
     true
 }
 
-fn constant_time_eq(a: &[u8; 16], b: &[u8; 16]) -> bool {
+pub(crate) fn constant_time_eq(a: &[u8; 16], b: &[u8; 16]) -> bool {
     let diff = a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y));
     std::hint::black_box(diff) == 0
 }

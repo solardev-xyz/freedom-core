@@ -28,7 +28,7 @@ pub enum Callers {
     /// kind's never).
     PageChromeOrShell,
     /// A page only, for its own key (design 0012, API: `approval.check`,
-    /// `approval.touch`).
+    /// `approval.touch`, `approval.remember`).
     Page,
     /// A page, for its own key, and main itself (design 0012, API:
     /// `approval.grant`, main's for a Swarm manifest's projection).
@@ -181,6 +181,9 @@ pub const METHODS: &[Method] = &[
     row("approval.touch", PAGE, false, NOW),
     row("approval.grants", CS, false, NOW),
     row("approval.forget_account", SHELL, false, NOW),
+    // Design 0012, "A device send's rule" (#373): a page presents its own
+    // receipt; no other caller reaches it.
+    row("approval.remember", PAGE, false, NOW),
     row("dweb.open", SHELL, false, SESSION),
     // Design 0009: verified fetches, whose bodies stream; protocol 2 only.
     row_v2("dweb.verify", SHELL, false, HEAD),
@@ -323,6 +326,7 @@ mod tests {
                 "approval.grant",
                 "approval.revoke",
                 "approval.touch",
+                "approval.remember",
             ]
         );
         // Design 0012, API: who reaches each grant method.
@@ -333,6 +337,7 @@ mod tests {
             ("approval.touch", true, false, false),
             ("approval.grants", false, true, true),
             ("approval.forget_account", false, false, true),
+            ("approval.remember", true, false, false),
         ] {
             for (caller, allowed) in [
                 (CallerKind::Page, page),
