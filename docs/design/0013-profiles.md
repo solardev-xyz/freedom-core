@@ -478,7 +478,7 @@ pub enum KeyStoreError { NotFound, Cancelled, Unavailable, Invalidated, Denied, 
 
 **Proposed: a create or import with `quick_unlock: true`, and a password change on a vault with quick unlock, write the new vault's credential before the vault commits, under a second name while the first still holds the old vault's. The vault's rename is the one commit point, and no journal is needed.**
 
-- **The names:** `quick-unlock` and `quick-unlock.next`. Each is the vault password, bound to `{ "vault_fingerprint": <sha256 of the vault file> }`, under the policy's key, as enroll writes it. The credential for a vault is whichever of the two is bound to that vault file's digest, and `quick_unlock.unlock`, the exports and `status` read it there. Outside a re-wrap the file holds only `quick-unlock`.
+- **The names:** `quick-unlock` and `quick-unlock.next`. Each is the vault password, bound to `{ "vault_fingerprint": <sha256 of the vault file> }`, under the policy's key, as enroll writes it. The credential for a vault is whichever of the two is bound to that vault file's digest, and `quick_unlock.unlock`, the exports and `status` read it there. Once a re-wrap has finished, the file holds only `quick-unlock`.
 - **The steps:**
   1. **Seal:** the new vault file is made in memory, in 0001's envelope, and its SHA-256 taken.
   2. **Stage:** the new vault's credential, bound to that digest, is written as `quick-unlock`. When `quick-unlock` holds the credential of the vault being replaced, it is written as `quick-unlock.next` instead.

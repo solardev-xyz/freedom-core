@@ -1082,8 +1082,9 @@ fn main_call(
 }
 
 /// Quick unlock end to end in the temporary keychain: enroll makes the
-/// Keychain item, unlock opens it with the vault locked, and disable's
-/// forget removes it.
+/// Keychain item, unlock opens it with the vault locked, a password change
+/// re-wraps the credential under the same item, and disable's forget
+/// removes it.
 #[test]
 fn quick_unlock_through_main_and_the_helper() {
     use base64::Engine as _;
