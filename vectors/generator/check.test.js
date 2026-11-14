@@ -28,6 +28,7 @@ FILES.push('radicle-import.json', 'generator/radicle-import.js');
 FILES.push('approvals.json', 'generator/approvals.js', 'generator/approval-stores.js');
 FILES.push('profiles.json', 'generator/profiles.js');
 FILES.push('secrets.json', 'generator/secrets.js');
+FILES.push('keystore.json', 'generator/keystore.js', 'generator/hpke.js');
 FILES.push('generator/approval-rules.js', 'generator/approval-decisions.js');
 
 function corruptedCheck(filename, corrupt) {
@@ -694,6 +695,114 @@ test('check rejects a changed secrets-file ciphertext', () => {
     entry.text = entry.text.replace('"ciphertext": "', '"ciphertext": "A');
   });
   assert.match(stderr, /Byte mismatch: secrets.json/);
+});
+
+test('check rejects a changed key-store answer', () => {
+  const stderr = corruptedCheck('keystore.json', (contents) => {
+    const entry = contents.answers.find((item) => item.id === 'open-sealed-for-another-item');
+    entry.outcome = { key: entry.sealed.wrap };
+  });
+  assert.match(stderr, /Byte mismatch: keystore.json/);
+});
+
+test('check rejects a changed key-store seal', () => {
+  const stderr = corruptedCheck('keystore.json', (contents) => {
+    const entry = contents.helper.find((item) => item.id === 'create');
+    entry.line = entry.line.replace('"key":"', '"key":"A');
+  });
+  assert.match(stderr, /Byte mismatch: keystore.json/);
+});
+
+// RFC 9180's own test vectors, as data: hpke.js's composition of
+// node:crypto's primitives must give every intermediate value and the
+// ciphertext. Appendix A.1.1 is the printed base-mode vector of
+// DHKEM(X25519, HKDF-SHA256), HKDF-SHA256, AES-128-GCM; the second is the
+// base-mode entry (mode 0, kem_id 32, kdf_id 1, aead_id 2) of the suite the
+// key store uses, AES-256-GCM, from the JSON file Appendix A cites as
+// [TestVectors] (cfrg/draft-irtf-cfrg-hpke at commit
+// 5f503c564da00b0687b3de75f1dfbdfc4079ad31, test-vectors.json), which the
+// RFC prints only for its other suites. Each with its first two
+// encryptions (sequence numbers 0 and 1).
+const RFC9180_VECTORS = [
+  {
+    source: 'RFC 9180, Appendix A.1.1 (Base Setup Information) and A.1.1.1 (Encryptions)',
+    aead: 'aes-128-gcm', kem_id: 32, kdf_id: 1, aead_id: 1,
+    info: '4f6465206f6e2061204772656369616e2055726e',
+    ikmE: '7268600d403fce431561aef583ee1613527cff655c1343f29812e66706df3234',
+    pkEm: '37fda3567bdbd628e88668c3c8d7e97d1d1253b6d4ea6d44c150f741f1bf4431',
+    skEm: '52c4a758a802cd8b936eceea314432798d5baf2d7e9235dc084ab1b9cfa2f736',
+    ikmR: '6db9df30aa07dd42ee5e8181afdb977e538f5e1fec8a06223f33f7013e525037',
+    pkRm: '3948cfe0ad1ddb695d780e59077195da6c56506b027329794ab02bca80815c4d',
+    skRm: '4612c550263fc8ad58375df3f557aac531d26850903e55a9f23f21d8534e8ac8',
+    enc: '37fda3567bdbd628e88668c3c8d7e97d1d1253b6d4ea6d44c150f741f1bf4431',
+    shared_secret: 'fe0e18c9f024ce43799ae393c7e8fe8fce9d218875e8227b0187c04e7d2ea1fc',
+    key_schedule_context: '00725611c9d98c07c03f60095cd32d400d8347d45ed67097bbad50fc56da742d07cb6cffde367bb0565ba28bb02c90744a20f5ef37f30523526106f637abb05449',
+    secret: '12fff91991e93b48de37e7daddb52981084bd8aa64289c3788471d9a9712f397',
+    key: '4531685d41d65f03dc48f6b8302c05b0',
+    base_nonce: '56d890e5accaaf011cff4b7d',
+    exporter_secret: '45ff1c2e220db587171952c0592d5f5ebe103f1561a2614e38f2ffd47e99e3f8',
+    encryptions: [
+      { seq: 0, pt: '4265617574792069732074727574682c20747275746820626561757479', aad: '436f756e742d30', nonce: '56d890e5accaaf011cff4b7d',
+        ct: 'f938558b5d72f1a23810b4be2ab4f84331acc02fc97babc53a52ae8218a355a96d8770ac83d07bea87e13c512a' },
+      { seq: 1, pt: '4265617574792069732074727574682c20747275746820626561757479', aad: '436f756e742d31', nonce: '56d890e5accaaf011cff4b7c',
+        ct: 'af2d7e9ac9ae7e270f46ba1f975be53c09f8d875bdc8535458c2494e8a6eab251c03d0c22a56b8ca42c2063b84' },
+    ],
+  },
+  {
+    source: 'RFC 9180, Appendix A, [TestVectors]: test-vectors.json at 5f503c564da00b0687b3de75f1dfbdfc4079ad31, mode 0, kem_id 32, kdf_id 1, aead_id 2',
+    aead: 'aes-256-gcm', kem_id: 32, kdf_id: 1, aead_id: 2,
+    info: '4f6465206f6e2061204772656369616e2055726e',
+    ikmE: '2cd7c601cefb3d42a62b04b7a9041494c06c7843818e0ce28a8f704ae7ab20f9',
+    pkEm: '6c93e09869df3402d7bf231bf540fadd35cd56be14f97178f0954db94b7fc256',
+    skEm: '179d4b53b6365c45b600c4163b61d95cbc2f4d9e36f1695558dce265ab8bab11',
+    ikmR: 'dac33b0e9db1b59dbbea58d59a14e7b5896e9bdf98fad6891e99d1686492b9ee',
+    pkRm: '430f4b9859665145a6b1ba274024487bd66f03a2dd577d7753c68d7d7d00c00c',
+    skRm: '497b4502664cfea5d5af0b39934dac72242a74f8480451e1aee7d6a53320333d',
+    enc: '6c93e09869df3402d7bf231bf540fadd35cd56be14f97178f0954db94b7fc256',
+    shared_secret: '3101c54c3a4f87439eaac080699ed9bbcc726ffe44e860c0424ccb7e3e2ead7b',
+    key_schedule_context: '004ce5472ecdd5093ba0aecb8f871ff13f1fbc90ee76f0e18ace1a1b7e565bafa306f6ef962c9ee7cea40407b5d60f0f26990472faae3ac44c78366f1cac1ecde1',
+    secret: '2058ac9b02c1f52c1aaf08bedbec9198219751a94ef67b7d5f0c8b6e2b54ebfb',
+    key: 'f50b0609186798729ed0564b36ef2ef8044f1f9d05636874d1f46c819c7a669f',
+    base_nonce: '151d9929e2449747889bc923',
+    exporter_secret: '86017151bbff6a1940e8abae2ac9e0e7032e33df1eaaecc02ca6259b130d62df',
+    encryptions: [
+      { seq: 0, pt: '4265617574792069732074727574682c20747275746820626561757479', aad: '436f756e742d30', nonce: '151d9929e2449747889bc923',
+        ct: 'e5d84cd531cfb583096e7cfa9641bd3079cf3a91cda813c52deb5f512be9931980a41de125a925cdad859d5b7a' },
+      { seq: 1, pt: '4265617574792069732074727574682c20747275746820626561757479', aad: '436f756e742d31', nonce: '151d9929e2449747889bc922',
+        ct: '2c43aff25343fdbff864506f0818b9d87df84ea01b1a2144d23b4d40c26bf655fdf197fe40297a8aebeed5cc2d' },
+    ],
+  },
+];
+
+test('hpke.js gives RFC 9180\'s own test vectors', () => {
+  const hpke = require('./hpke');
+  const hex = (text) => Buffer.from(text, 'hex');
+  for (const v of RFC9180_VECTORS) {
+    assert.deepEqual([v.kem_id, v.kdf_id, v.aead_id], [hpke.KEM_ID, hpke.KDF_ID, hpke.AEADS[v.aead].id], v.source);
+    for (const e of v.encryptions) {
+      const t = hpke.trace({ aead: v.aead, ikmR: hex(v.ikmR), ikmE: hex(v.ikmE), info: hex(v.info), aad: hex(e.aad), pt: hex(e.pt), seq: e.seq });
+      const got = {
+        skRm: t.skR, pkRm: t.pkR, skEm: t.skE, pkEm: t.pkE, enc: t.enc, shared_secret: t.sharedSecret,
+        key_schedule_context: t.keyScheduleContext, secret: t.secret, key: t.key, base_nonce: t.baseNonce,
+        exporter_secret: t.exporterSecret,
+      };
+      for (const [name, value] of Object.entries(got)) assert.equal(value.toString('hex'), v[name], `${v.source}: ${name}`);
+      assert.equal(t.nonce.toString('hex'), e.nonce, `${v.source}: nonce ${e.seq}`);
+      assert.equal(t.ct.toString('hex'), e.ct, `${v.source}: ct ${e.seq}`);
+    }
+    // Single-shot, as the key store seals and opens: sequence number 0.
+    const [first] = v.encryptions;
+    const sealed = hpke.sealBase({ aead: v.aead, pkR: hex(v.pkRm), ikmE: hex(v.ikmE), info: hex(v.info), aad: hex(first.aad), pt: hex(first.pt) });
+    assert.equal(sealed.enc.toString('hex'), v.enc, v.source);
+    assert.equal(sealed.ct.toString('hex'), first.ct, v.source);
+    const opened = hpke.openBase({ aead: v.aead, enc: hex(v.enc), skR: hex(v.skRm), info: hex(v.info), aad: hex(first.aad), ct: hex(first.ct) });
+    assert.equal(opened.toString('hex'), first.pt, v.source);
+    // One changed byte of the ciphertext, or another aad, doesn't open.
+    const damaged = hex(first.ct);
+    damaged[0] ^= 1;
+    assert.throws(() => hpke.openBase({ aead: v.aead, enc: hex(v.enc), skR: hex(v.skRm), info: hex(v.info), aad: hex(first.aad), ct: damaged }), v.source);
+    assert.throws(() => hpke.openBase({ aead: v.aead, enc: hex(v.enc), skR: hex(v.skRm), info: hex(v.info), aad: hex(v.encryptions[1].aad), ct: hex(first.ct) }), v.source);
+  }
 });
 
 test('check rejects a changed composed read', () => {

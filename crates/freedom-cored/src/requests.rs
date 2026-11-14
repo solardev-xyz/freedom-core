@@ -1,5 +1,6 @@
-//! The core's own requests to main (`shell.*`, designs 0004, 0005 and
-//! 0009): one gate for the naming, chain and dweb threads.
+//! The core's own requests to main (`shell.*`, designs 0004, 0005, 0009
+//! and 0013): one gate for the naming, chain and dweb threads and the key
+//! store.
 //!
 //! - **One ID counter.** Main requires the core's request IDs to increase
 //!   in the order it reads them (`reused_id` in `core-client.js`). Each ID
@@ -46,6 +47,9 @@ pub enum Owner {
     Chain,
     /// The dweb thread's `shell.dweb_get` pieces (design 0009).
     Dweb,
+    /// The key store's `shell.keystore` calls (design 0013), from whichever
+    /// thread made them.
+    KeyStore,
 }
 
 /// What became of a request offered to [`Requests::send`].

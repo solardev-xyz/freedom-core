@@ -1,6 +1,6 @@
 [package]
 name = "fc-seal"
-description = "The sealed release of the Radicle node key (design 0008): HPKE base mode, single-shot, for exactly one suite"
+description = "The sealed release of the Radicle node key (design 0008) and of the key store's wrapping keys (design 0013): HPKE base mode, single-shot, for exactly one suite"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

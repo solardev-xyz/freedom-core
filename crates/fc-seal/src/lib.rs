@@ -13,6 +13,11 @@
 //! private half, so a ciphertext opens in one process, once, and one
 //! captured from an earlier start opens nowhere.
 //!
+//! **The key store's answers** (design 0013, "The secret transfer") use the
+//! same suite with their own `info` and `aad` ([`seal_with`],
+//! [`RecipientKey::open_with`]): the helper seals a wrapping key to the key
+//! the core made for that one request.
+//!
 //! **The implementation is the `hpke` crate** (0.14.1, pinned exactly),
 //! which resolves to the RustCrypto versions the workspace already uses
 //! (`aead` 0.6, `aes-gcm` 0.11, `hmac` 0.13, `sha2` 0.11, `curve25519-dalek`
@@ -124,6 +129,20 @@ pub fn seal<R: TryCryptoRng + ?Sized>(
     key: &[u8; KEY_LEN],
     rng: &mut R,
 ) -> Result<Sealed, SealError> {
+    seal_with(recipient, key, INFO, &[], rng)
+}
+
+/// Seals `key` to `recipient` in the same suite, under another `info` and
+/// `aad`: the key store's answers (design 0013, "The secret transfer"),
+/// whose `info` names their own purpose, so a seal of one kind never opens
+/// as the other.
+pub fn seal_with<R: TryCryptoRng + ?Sized>(
+    recipient: &[u8; PUBLIC_KEY_LEN],
+    key: &[u8; KEY_LEN],
+    info: &[u8],
+    aad: &[u8],
+    rng: &mut R,
+) -> Result<Sealed, SealError> {
     let pk = <Kem as hpke::Kem>::PublicKey::from_bytes(recipient)
         .map_err(|_| SealError::InvalidRecipient)?;
     let mut ikm = Zeroizing::new([0u8; IKM_LEN]);
@@ -134,9 +153,9 @@ pub fn seal<R: TryCryptoRng + ?Sized>(
     let sealed = hpke::single_shot_seal_inout_detached_with_rng::<Aead, Kdf, Kem>(
         &OpModeS::Base,
         &pk,
-        INFO,
+        info,
         InOutBuf::from(buffer.as_mut_slice()),
-        &[],
+        aad,
         &mut fixed,
     );
     let exhausted = fixed.overrun;
@@ -214,6 +233,18 @@ impl RecipientKey {
         enc: &[u8],
         ciphertext: &[u8],
     ) -> Result<Zeroizing<[u8; KEY_LEN]>, OpenError> {
+        self.open_with(enc, ciphertext, INFO, &[])
+    }
+
+    /// Opens a key sealed with [`seal_with`] under `info` and `aad`, on the
+    /// same terms as [`RecipientKey::open`].
+    pub fn open_with(
+        self,
+        enc: &[u8],
+        ciphertext: &[u8],
+        info: &[u8],
+        aad: &[u8],
+    ) -> Result<Zeroizing<[u8; KEY_LEN]>, OpenError> {
         let Self { secret, .. } = self;
         if enc.len() != ENC_LEN || ciphertext.len() != CIPHERTEXT_LEN {
             return Err(OpenError);
@@ -226,9 +257,9 @@ impl RecipientKey {
             &OpModeR::Base,
             &secret,
             &encapped,
-            INFO,
+            info,
             InOutBuf::from(key.as_mut_slice()),
-            &[],
+            aad,
             &tag,
         );
         drop(secret);

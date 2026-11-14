@@ -15,7 +15,10 @@
 //! done and before the key is derived. A token is burnt however the
 //! request ends. A page's signature and the chrome's need one (Q8,
 //! APR-4a), and are refused with `not_authorized` without it; main's own,
-//! under `shell`, signs as before. `swarm.sign_soc` takes a page's `{
+//! under `shell`, signs as before, but for a Safe's: typed data declaring a
+//! `SafeTx` or a `SafeMessage`, or a transaction calling `execTransaction`,
+//! signs under any caller only with a token that binds it or a Safe
+//! approval of the caller's own kind (APR-4b). `swarm.sign_soc` takes a page's `{
 //! swarm, soc }`, checked at the same point against the page's Swarm
 //! grant; the chrome's is refused, and a page's without one signs until
 //! APR-4c. A `page` caller sends its `PageContext`.
@@ -264,15 +267,17 @@ fn account_index(key: KeyRef) -> Result<u32, ErrorBody> {
 }
 
 /// Checks the request's `authorization` for what it signs (design 0012,
-/// Q8): a page's and the chrome's signatures need one (APR-4a), main's own
-/// under `shell` has one checked when it comes.
+/// Q8): a page's and the chrome's signatures need one (APR-4a), and a
+/// Safe's under any caller (APR-4b); main's own under `shell` has one
+/// checked when it comes.
 fn authorize(
     checks: &mut Checks<'_>,
     fields: &Map<String, Value>,
     signed: Signed<'_>,
 ) -> Result<After, ErrorBody> {
     match fields.get("authorization") {
-        None => crate::approvals::without_authorization(checks.context).map(|()| After::Nothing),
+        None => crate::approvals::without_authorization(checks.context, &signed)
+            .map(|()| After::Nothing),
         Some(authorization) => {
             checks
                 .approvals

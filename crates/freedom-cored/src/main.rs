@@ -6,7 +6,11 @@
 //! freedom-cored recover   --data-dir <identity dir> --lock-dir <lock dir>
 //! freedom-cored profile <open|list|create|rename|import|update-nodes|reserved-ports|status|delete|forget-list|forget-done|migrate> …
 //! freedom-cored hold-profile --user-data-dir <dir> --lock-dir <dir> [--app-root <dir> --id <id>]
+//! freedom-cored keystore --op <op> --policy <policy> --item <id> [--reply-key <base64>] [--reason <kind>]
 //! ```
+//!
+//! `keystore` is the one-shot key-store helper ([`keystore::helper`],
+//! design 0013): one call to the OS's key store, one line on stdout.
 //!
 //! The profile subcommands are [`profile`]'s. Each confines itself (design
 //! 0013, 0010), so it starts as a service does: before anything opens a
@@ -25,6 +29,7 @@ mod gate;
 mod grants;
 mod hardening;
 mod journal;
+mod keystore;
 mod log;
 mod naming;
 mod nodes;
@@ -86,13 +91,14 @@ fn parse_args() -> Option<Args> {
 
 fn main() -> ExitCode {
     let started = Instant::now();
-    if matches!(
-        std::env::args_os()
-            .nth(1)
-            .and_then(|c| c.into_string().ok())
-            .as_deref(),
-        Some("profile" | "hold-profile")
-    ) {
+    let command = std::env::args_os()
+        .nth(1)
+        .and_then(|c| c.into_string().ok());
+    if command.as_deref() == Some("keystore") {
+        // No logging thread, no gate: one OS call and one line.
+        return ExitCode::from(keystore::helper::run(std::env::args_os().skip(2)).code());
+    }
+    if matches!(command.as_deref(), Some("profile" | "hold-profile")) {
         let entry = fc_service::confine::clean_entry();
         return ExitCode::from(profile::run(std::env::args_os().skip(1), &entry).code());
     }
