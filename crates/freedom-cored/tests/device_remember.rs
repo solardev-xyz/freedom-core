@@ -26,8 +26,13 @@ const APPROVE: &str = "0x095ea7b300000000000000000000000000000000000000000000000
 const DIGITS: &str = "0123456789abcdef";
 
 fn page_as(origin: &str, frame: u64, navigation: u64) -> Value {
+    page_in(origin, origin, frame, navigation)
+}
+
+/// A page whose document is framed in `top_origin`'s.
+fn page_in(origin: &str, top_origin: &str, frame: u64, navigation: u64) -> Value {
     json!({ "caller": "page", "page": {
-        "origin": origin, "top_origin": origin, "frame": frame, "navigation": navigation, "agent": false,
+        "origin": origin, "top_origin": top_origin, "frame": frame, "navigation": navigation, "agent": false,
     } })
 }
 
@@ -189,15 +194,38 @@ fn changed(core: &mut Core, id: &mut u64) -> Vec<Value> {
 /// Whether the site's rule answers a send of `value`. A phone's send isn't
 /// judged by the fee check, so this asks only the rule.
 fn check_send(core: &mut Core, id: &mut u64, value: &str) -> Value {
+    check_send_as(core, id, &site(), 0, value)
+}
+
+/// As [`check_send`], for `account` and the page `context`.
+fn check_send_as(
+    core: &mut Core,
+    id: &mut u64,
+    context: &Value,
+    account: u32,
+    value: &str,
+) -> Value {
     let reply = call_as(
         core,
         id,
-        &site(),
+        context,
         "approval.check",
-        json!({ "request": { "kind": "transaction", "account": 0, "account_kind": "phone", "tx": tx(value) },
+        json!({ "request": { "kind": "transaction", "account": account, "account_kind": "phone", "tx": tx(value) },
             "chain_id": 100, "paused": false }),
     );
     result(&reply).clone()
+}
+
+/// `approval.grant` of a dApp `change` for `context`'s own key.
+fn grant_as(core: &mut Core, id: &mut u64, context: &Value, change: Value) -> Value {
+    let granted = call_as(
+        core,
+        id,
+        context,
+        "approval.grant",
+        json!({ "store": "dapp", "change": change }),
+    );
+    result(&granted).clone()
 }
 
 fn no_rule() -> Value {
@@ -537,6 +565,158 @@ fn a_narrowing_after_the_spend_writes_nothing() {
         Some("unknown_token"),
     );
     assert_eq!(check_send(&mut core, &mut id, "3"), no_rule());
+}
+
+/// A receipt binds the document and the account its own spend named: here
+/// an embedded origin under another top origin, frame 7, navigation 9 and
+/// account 3, none of them the other tests' values. Only that document
+/// presents it (each of the origin, the frame and the navigation changed
+/// alone is a `mismatch`), and its rule is written, for that origin's key,
+/// only once the key's grant exposes account 3.
+#[test]
+fn a_receipt_binds_its_own_spend_s_document_and_account() {
+    const DEX: &str = "https://dex.example";
+    let root = tempfile::tempdir().unwrap();
+    let mut core = start(root.path(), &["dapp"], &[]);
+    let mut id = 10;
+    let framed = page_in(DEX, "https://portal.example", 7, 9);
+    let granted = grant_as(
+        &mut core,
+        &mut id,
+        &framed,
+        json!({ "op": "connect", "account": 0, "chain_id": 100 }),
+    );
+    assert_eq!(granted["grant"]["walletIndex"], 0, "{granted}");
+    let _ = changed(&mut core, &mut id);
+    let spend = |core: &mut Core, id: &mut u64| {
+        let spent = device_spend(core, id, &framed, Device::Ledger, 3, tx("3"), true);
+        spent["receipt"].as_str().unwrap().to_owned()
+    };
+    // Its own document, while the grant exposes account 0: not account 3's.
+    let receipt = spend(&mut core, &mut id);
+    let reply = remember(&mut core, &mut id, &framed, &receipt);
+    assert_eq!(
+        *result(&reply),
+        json!({ "rule": { "added": false, "reason": "not_exposed" } })
+    );
+    // Each of its facts changed alone: another document's, and consumed.
+    for other in [
+        page_in(SITE, "https://portal.example", 7, 9),
+        page_in(DEX, "https://portal.example", 1, 9),
+        page_in(DEX, "https://portal.example", 7, 1),
+    ] {
+        let receipt = spend(&mut core, &mut id);
+        refused(
+            &remember(&mut core, &mut id, &other, &receipt),
+            "not_authorized",
+            Some("mismatch"),
+        );
+        refused(
+            &remember(&mut core, &mut id, &framed, &receipt),
+            "not_authorized",
+            Some("unknown_token"),
+        );
+    }
+    assert!(changed(&mut core, &mut id).is_empty());
+    assert_eq!(
+        check_send_as(&mut core, &mut id, &framed, 3, "3")["covered"],
+        false
+    );
+    // The grant moved to account 3: its own document writes the rule, for
+    // its own key.
+    let moved = grant_as(
+        &mut core,
+        &mut id,
+        &framed,
+        json!({ "op": "account", "account": 3 }),
+    );
+    assert_eq!(moved["grant"]["walletIndex"], 3, "{moved}");
+    let _ = changed(&mut core, &mut id);
+    let receipt = spend(&mut core, &mut id);
+    let reply = remember(&mut core, &mut id, &framed, &receipt);
+    assert_eq!(*result(&reply), json!({ "rule": { "added": true } }));
+    assert_eq!(
+        changed(&mut core, &mut id),
+        [json!({ "store": "dapp", "key": DEX })]
+    );
+    let file = stored(&core);
+    assert_eq!(
+        file[DEX]["autoApprove"]["limited"]["transactions"][0]["maxValue"],
+        "3"
+    );
+    assert!(file.get(SITE).is_none(), "{file}");
+    assert!(file.get("https://portal.example").is_none(), "{file}");
+    assert_eq!(
+        check_send_as(&mut core, &mut id, &framed, 3, "3"),
+        json!({ "covered": true })
+    );
+    assert_eq!(
+        check_send_as(&mut core, &mut id, &framed, 0, "3")["covered"],
+        false
+    );
+}
+
+/// `approval.forget_account` drops the account's receipts itself, not only
+/// those of the keys it revokes: a receipt for account 1, spent while the
+/// key's grant exposes account 0, writes nothing once account 1 is
+/// deleted, even after the grant moves to account 1. Without the deletion
+/// the same sequence writes the rule.
+#[test]
+fn forgetting_an_account_drops_its_receipts() {
+    let root = tempfile::tempdir().unwrap();
+    let (mut core, mut id) = connected(root.path(), &[]);
+    let to_account = |core: &mut Core, id: &mut u64, account: u32| {
+        let moved = grant_as(
+            core,
+            id,
+            &site(),
+            json!({ "op": "account", "account": account }),
+        );
+        assert_eq!(moved["grant"]["walletIndex"], account, "{moved}");
+        let _ = changed(core, id);
+    };
+    let spend = |core: &mut Core, id: &mut u64| {
+        let spent = device_spend(core, id, &site(), Device::Ledger, 1, tx("3"), true);
+        spent["receipt"].as_str().unwrap().to_owned()
+    };
+    // Without the deletion: written once the grant exposes account 1.
+    let receipt = spend(&mut core, &mut id);
+    to_account(&mut core, &mut id, 1);
+    let reply = remember(&mut core, &mut id, &site(), &receipt);
+    assert_eq!(*result(&reply), json!({ "rule": { "added": true } }));
+    let off = call_as(
+        &mut core,
+        &mut id,
+        &site(),
+        "approval.revoke",
+        json!({ "store": "dapp", "key": SITE,
+            "what": { "transaction": { "to": TO, "selector": "0x095ea7b3", "chain_id": 100 } } }),
+    );
+    assert_eq!(*result(&off), json!({ "revoked": true }));
+    to_account(&mut core, &mut id, 0);
+    // With it: account 1 deleted while the grant exposes account 0, so no
+    // key is revoked.
+    let receipt = spend(&mut core, &mut id);
+    let gone = call_as(
+        &mut core,
+        &mut id,
+        &shell(),
+        "approval.forget_account",
+        json!({ "wallet_index": 1 }),
+    );
+    assert_eq!(*result(&gone), json!({ "keys": [] }));
+    assert!(changed(&mut core, &mut id).is_empty());
+    to_account(&mut core, &mut id, 1);
+    refused(
+        &remember(&mut core, &mut id, &site(), &receipt),
+        "not_authorized",
+        Some("unknown_token"),
+    );
+    assert!(changed(&mut core, &mut id).is_empty());
+    assert_eq!(
+        check_send_as(&mut core, &mut id, &site(), 1, "3"),
+        no_rule()
+    );
 }
 
 /// At most 64 receipts are open: the 65th spend drops the oldest.
