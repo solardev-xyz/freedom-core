@@ -15,6 +15,7 @@ const { buildChain } = require('./chain');
 const { buildChainReplay } = require('./chain-replay');
 const { buildDweb, buildVerifyPlans } = require('./dweb');
 const { buildStreams } = require('./streams');
+const { buildSecrets } = require('./secrets');
 const { buildRadicleReads } = require('./radicle-reads');
 const { buildRadicleBlob } = require('./radicle-blob');
 const { buildRadicleNetwork } = require('./radicle-network');
@@ -585,6 +586,9 @@ async function main() {
     'dweb-verify-plans.json': await buildVerifyPlans(reference.checkout, reference.meta),
     // The design's, with no reference: its meta is the shared one.
     'streams.json': buildStreams(reference.meta),
+    // Design 0013's secrets file (PRF-1a): the design's, with no reference;
+    // its meta is the shared one.
+    'secrets.json': buildSecrets(reference.meta),
     // Design 0008's composed reads, from main's radapi handlers over a
     // scripted add-on.
     'radicle-reads.json': await buildRadicleReads(radicle.checkout, radicle.meta),

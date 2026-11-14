@@ -185,7 +185,7 @@ pub fn record(
         Ok(items) => (
             items
                 .into_iter()
-                .filter(|item| item.backend.recorded() && Some(item.backend) == NATIVE)
+                .filter(|item| item.backend.holds_item() && Some(item.backend) == NATIVE)
                 .collect::<Vec<_>>(),
             false,
         ),
