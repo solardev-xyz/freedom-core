@@ -34,16 +34,17 @@ fc-service = { path = "../../crates/fc-service" }
 # The sealed release of the node key (0008, "The sealed release"): the
 # service's X25519 key for one start, and opening what the core sealed to it.
 fc-seal = { path = "../../crates/fc-seal" }
-# libradicle at `integration/rust-core` (e35d5b0, #39's merge),
+# libradicle at `integration/rust-core` (36b176b, #40's merge),
 # built with `no-spawn`,
 # explicitly (0008, "Spawn and lock"): serving runs in process and `git gc`
 # is skipped. It carries the upstream changes 0008 lists for the service's
 # first steps: the routing, `isolated` and `control_socket` options, the
 # bounded reads and shutdown, the node's health, the host key
-# (`HostKey`, `start_with_key`), and heartwood at 338a9638 (upstream
+# (`HostKey`, `start_with_key`), and heartwood at bef1fc97 (upstream
 # 1.10.3 merged in, heartwood #29: the identity COB injection fix, the frame
 # allocation cap, the Subscribe panic, routingMaxSize, dead-socket
-# termination), whose
+# termination; heartwood #31: a Connect command redials a disconnected
+# session, outbound, libradicle #38's stale seed session), whose
 # reconciliation driver `rad.reconcile` runs on, with its seed gate and its
 # host failures (`driver::Error::Host`). It also has the shipped seeds for a
 # main-network profile only, an isolated node with no proxy, onion, I2P or
@@ -64,10 +65,13 @@ fc-seal = { path = "../../crates/fc-seal" }
 # text. The two calls that wait on the node's reactor, `connected_peers` and
 # `unseed_repo`, wait within a bound (#39, freedom-core #340:
 # `connected_peers_within`, `unseed_repo_within`, `Error::NodeDeadline`,
-# `Error::NodeBusy`, `waiting_on_node`). Pinned by commit until those
+# `Error::NodeBusy`, `waiting_on_node`), and so do `seeders`, the
+# announcement of a COB change and `remove_quarantined`'s unseed (#40,
+# freedom-core #363: `seeders_within`, the four COB writes' `_within` forms,
+# `remove_quarantined_within`, `Error::is_announce`). Pinned by commit until those
 # changes are released (deny.toml allows solardev-xyz).
 # src/build_info.rs reports the same commit.
-libradicle = { git = "https://github.com/solardev-xyz/libradicle", rev = "e35d5b0b12e6a8b18352a8157b330f58dfee3666", features = ["no-spawn"] }
+libradicle = { git = "https://github.com/solardev-xyz/libradicle", rev = "36b176bc3e2667c8c1500bf0eb6fc80407bd9d84", features = ["no-spawn"] }
 # libgit2's process-wide options, which heartwood's `radicle::git::raw`
 # doesn't re-export: the object cache turned off (src/reads.rs, `uncache`),
 # and the probe of it. Already in libradicle's graph, at its version and with
@@ -84,7 +88,7 @@ libz-sys = { version = "1", default-features = false, features = ["static"] }
 # to one package (build_info's test holds them to one commit): the node
 # identity's public forms (`did:key`, the node ID), and, from the next step,
 # the reconciliation driver. Already in libradicle's graph.
-radicle = { git = "https://github.com/solardev-xyz/heartwood", rev = "338a9638fbf0b5ad5fc104a271faf21181a893df" }
+radicle = { git = "https://github.com/solardev-xyz/heartwood", rev = "bef1fc97245f088d48c483cdc3e1c001539bc97c" }
 # The dial gate's address policy (0008, "The address policy": "one table and
 # one classifier serve both services"): 0007's target classification, its
 # table of refused blocks and the configured-target exemption, as

@@ -13,6 +13,13 @@
 //! - `comment_patch`, `{ rid, revision_id, body }`: `{ id }`.
 //!
 //! The COB writes take the node shared: libradicle's calls take `&self`.
+//! Each commits its change, then announces it, waiting for the node's
+//! reactor up to the write's deadline left (#363, [`crate::node`]): the
+//! node is let go of at it. An error of the announcement (libradicle's
+//! `is_announce`: its `NodeDeadline`, its `NodeBusy`, or `Announce`) comes
+//! after the commit, so it is `outcome_unknown`, as any error past the
+//! boundary, never `deadline`: the change is in storage, unannounced or
+//! unconfirmed, and the repository is repaired online as below.
 //!
 //! **`rad.unseed { rid }`** answers `{ unseeded }`, with the node held
 //! exclusively, as libradicle's `unseed_repo_within` takes `&mut self`. It
@@ -67,7 +74,7 @@
 use std::path::Path;
 use std::str::FromStr as _;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use fc_protocol::error::{ErrorBody, ErrorCode};
 use fc_service::conn::Connection;
@@ -330,28 +337,34 @@ fn failed_past_start(conn: &Connection, id: u64, op: &str, rid: RepoId, e: &libr
     );
 }
 
-/// The COB write itself, past the boundary.
-fn call(node: &libradicle::Embedded, rid: RepoId, op: Op) -> Result<Value, libradicle::Error> {
+/// The COB write itself, past the boundary, its announcement waiting for
+/// the node's reactor up to `within`.
+fn call(
+    node: &libradicle::Embedded,
+    rid: RepoId,
+    op: Op,
+    within: Duration,
+) -> Result<Value, libradicle::Error> {
     match op {
         Op::CreateIssue {
             title,
             description,
             labels,
         } => node
-            .create_issue(rid, &title, &description, labels)
+            .create_issue_within(rid, &title, &description, labels, within)
             .map(|id| json!({ "id": id })),
         Op::CommentIssue {
             issue_id,
             body,
             reply_to,
         } => node
-            .comment_issue(rid, &issue_id, &body, reply_to.as_deref())
+            .comment_issue_within(rid, &issue_id, &body, reply_to.as_deref(), within)
             .map(|id| json!({ "id": id })),
         Op::EditIssueState { issue_id, state } => node
-            .edit_issue_state(rid, &issue_id, state)
+            .edit_issue_state_within(rid, &issue_id, state, within)
             .map(|id| json!({ "id": id, "state": state })),
         Op::CommentPatch { revision_id, body } => node
-            .comment_patch(rid, &revision_id, &body)
+            .comment_patch_within(rid, &revision_id, &body, within)
             .map(|id| json!({ "id": id })),
     }
 }
@@ -397,13 +410,22 @@ pub fn write(
         }
         testhooks::at_write_start();
         let name = op.name();
-        let called = call(&embedded, rid, op);
+        // The announcement waits for the node's reactor up to the deadline
+        // left (#363): the node is let go of at it, whatever the reactor
+        // does.
+        let called = {
+            let _call = handle.waiting_call("announce_refs_for");
+            let within = ticket.deadline.saturating_duration_since(Instant::now());
+            call(&embedded, rid, op, within)
+        };
         testhooks::at_write_call_end();
         match called {
             Ok(result) => {
                 ticket.proven();
                 let _ = conn.reply(ticket.id, &result);
             }
+            // An announcement's error among them (`is_announce`): the
+            // change is committed before it.
             Err(e) => failed_past_start(&conn, ticket.id, name, rid, &e),
         }
         testhooks::at_write_end();

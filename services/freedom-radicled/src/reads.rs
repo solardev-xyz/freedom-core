@@ -18,11 +18,10 @@
 //!   where it isn't UTF-8;
 //! - `issues { rid }` and `patches { rid }`, the COB ops;
 //! - `list_repos` and `list_seeded_repos`;
-//! - `seeders { rid }`, with the node held exclusively, as libradicle's
-//!   `seeders` takes `&mut self`; `identity`; and `status`, which waits for
-//!   the node's reactor up to the read's deadline, then answers `deadline`
-//!   (#340, [`crate::node`]): libradicle's `NodeDeadline`, or its
-//!   `NodeBusy` at once, with nothing sent.
+//! - `seeders { rid }` and `status`, which wait for the node's reactor up
+//!   to the read's deadline, then answer `deadline` (#340, #363,
+//!   [`crate::node`]): libradicle's `NodeDeadline`, or its `NodeBusy` at
+//!   once, with nothing sent; and `identity`.
 //!
 //! The other ops 0008 lists ([`composed`]): of main's serialization,
 //! `issue { rid, issue_id }`, `patch { rid, patch_id }`, `remotes { rid }`
@@ -942,7 +941,7 @@ fn body(
         Op::Seeders { rid } => json_read(
             budget,
             until,
-            |_| handle.node_mut().seeders(rid),
+            |_| seeders(handle, until, rid),
             |w, seeders| json::seeding(w, *seeders),
         ),
         Op::Identity => json_read(
@@ -990,11 +989,24 @@ fn body(
 /// waited for up to the read's deadline left, then `deadline`, the node let
 /// go of (#340, `crate::node`). At or past the deadline, nothing is asked.
 fn connected_peers(handle: &Handle, until: &Until) -> Result<usize, Failure> {
+    Ok(handle.connected_peers_within(left(until)?)?)
+}
+
+/// The number of nodes known to seed `rid`, for `seeders`: its reactor
+/// waited for up to the read's deadline left, then `deadline`, as
+/// [`connected_peers`] (#363). At or past the deadline, nothing is asked.
+fn seeders(handle: &Handle, until: &Until, rid: RepoId) -> Result<usize, Failure> {
+    Ok(handle.seeders_within(rid, left(until)?)?)
+}
+
+/// The read's deadline left, for a call that waits on the node's reactor:
+/// `deadline`, with nothing asked, at or past it.
+fn left(until: &Until) -> Result<Duration, Failure> {
     let within = until.deadline.saturating_duration_since(Instant::now());
     if within.is_zero() {
         return Err(Failure::Refused(Refused::Deadline));
     }
-    Ok(handle.connected_peers_within(within)?)
+    Ok(within)
 }
 
 /// What a read's answer before its head is from its deadline on.
