@@ -42,6 +42,14 @@
 //! quarantine again, and a retry that finds the record gone is
 //! `not_quarantined`.
 //!
+//! **The node's unseed waits for its reactor** up to the removal's
+//! deadline left, and lets go of the node then (#363, [`crate::node`]).
+//! libradicle's `NodeDeadline` is `outcome_unknown`: the unseed was sent,
+//! and the node may still carry it out, but nothing after it ran, so the
+//! record stays, and a retry with the same `qid` completes the removal. Its
+//! `NodeBusy`, with nothing sent, is `deadline`, proven: nothing was
+//! touched.
+//!
 //! **A write to a quarantined repository** is refused with `quarantined`,
 //! and the record's `kind` and `step` ([`refusal`], [`crate::writes`]).
 //!
@@ -54,6 +62,7 @@
 use std::path::{Path, PathBuf};
 use std::str::FromStr as _;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use fc_protocol::error::{ErrorBody, ErrorCode};
 use fc_service::conn::Connection;
@@ -67,7 +76,7 @@ use serde_json::value::RawValue;
 use serde_json::{Value, json};
 
 use crate::node::Node;
-use crate::pools::{Mutates, Ticket, Work};
+use crate::pools::{self, Mutates, Ticket, Work};
 use crate::reconcile::{entry, record_error};
 use crate::stats::Quarantined;
 use crate::testhooks;
@@ -215,12 +224,30 @@ pub fn remove(
             return;
         }
         testhooks::at_write_start();
-        let removed = removal(&embedded, &handle.repositories, removing, &mut record);
+        // The node's unseed waits for its reactor up to the deadline left
+        // (#363): the node is let go of at it, whatever the reactor does.
+        let removed = {
+            let _call = handle.waiting_call("unseed");
+            let within = ticket.deadline.saturating_duration_since(Instant::now());
+            removal(
+                &embedded,
+                &handle.repositories,
+                removing,
+                &mut record,
+                within,
+            )
+        };
         quarantined.recount(&record);
         testhooks::at_write_call_end();
-        // Removed, nothing to remove, or a failure that keeps the record.
-        ticket.proven();
-        answer(&conn, ticket.id, removed);
+        match removed {
+            // Removed, nothing to remove, or a failure that keeps the
+            // record.
+            Removed::Proven(removed) => {
+                ticket.proven();
+                answer(&conn, ticket.id, removed);
+            }
+            Removed::Unknown(e) => unseed_unanswered(&conn, ticket.id, removing.rid, &e),
+        }
         testhooks::at_write_end();
     });
     (work, mutates)
@@ -238,34 +265,69 @@ fn precondition(home: &Path, removing: Removing) -> Result<Quarantine, ErrorBody
     Ok(record)
 }
 
+/// How a removal ended: proven, with its answer, or with its outcome
+/// unknown, its unseed sent and not answered in time.
+enum Removed {
+    Proven(Result<Value, ErrorBody>),
+    Unknown(libradicle::Error),
+}
+
 /// The removal, steps 2 and 3 of the module's doc, on `node`, whose gate's
-/// host half is `gate`, through `record`.
+/// host half is `gate`, through `record`, the node's unseed waiting for its
+/// reactor up to `within`.
 fn removal(
     node: &libradicle::Embedded,
     gate: &RepoGate,
     removing: Removing,
     record: &mut Quarantine,
-) -> Result<Value, ErrorBody> {
+    within: Duration,
+) -> Removed {
     let Removing { rid, qid } = removing;
-    match node.remove_quarantined(rid, qid, record) {
-        Ok(Removal::Removed) => {
-            gate.open(rid);
-            log::info(
-                "a quarantined repository was removed",
-                json!({ "rid": rid.to_string() }),
-            );
-            Ok(json!({ "removed": true }))
-        }
-        Ok(Removal::NotQuarantined) => Err(not_quarantined(rid)),
-        Err(e) => {
-            let error = removal_failed(&e);
-            log::error(
-                "a quarantined repository's removal failed; its record stays",
-                json!({ "rid": rid.to_string(), "error": error.message }),
-            );
-            Err(error)
-        }
+    Removed::Proven(
+        match node.remove_quarantined_within(rid, qid, record, within) {
+            Ok(Removal::Removed) => {
+                gate.open(rid);
+                log::info(
+                    "a quarantined repository was removed",
+                    json!({ "rid": rid.to_string() }),
+                );
+                Ok(json!({ "removed": true }))
+            }
+            Ok(Removal::NotQuarantined) => Err(not_quarantined(rid)),
+            // Not sent: nothing was touched, and the answer is definitive.
+            Err(e @ libradicle::Error::NodeBusy { .. }) => {
+                log::error(
+                    "a quarantined repository's removal wasn't started: too many calls wait on the node",
+                    json!({ "rid": rid.to_string() }),
+                );
+                Err(ErrorBody::new(ErrorCode::Deadline, e.to_string()))
+            }
+            // Sent, and not answered within its bound: the node may still
+            // carry it out.
+            Err(e @ libradicle::Error::NodeDeadline { .. }) => return Removed::Unknown(e),
+            Err(e) => {
+                let error = removal_failed(&e);
+                log::error(
+                    "a quarantined repository's removal failed; its record stays",
+                    json!({ "rid": rid.to_string(), "error": error.message }),
+                );
+                Err(error)
+            }
+        },
+    )
+}
+
+/// Answers removal `id` of `rid` `outcome_unknown`: the node's unseed, `e`,
+/// was sent and not answered within its bound. The record stays.
+fn unseed_unanswered(conn: &Connection, id: u64, rid: RepoId, e: &libradicle::Error) {
+    let why = "the node didn't answer its unseed in time";
+    if conn.reply_error(id, &pools::outcome_unknown(why)).is_ok() {
+        pools::unknown_logged(id, why);
     }
+    log::error(
+        "a quarantined repository's removal is unknown past its unseed; its record stays",
+        json!({ "rid": rid.to_string(), "error": e.to_string() }),
+    );
 }
 
 /// The refusal of a write to `rid`, which the gate holds quarantined for

@@ -471,7 +471,7 @@ The rules this design relies on, as 0007 specifies them:
 | Op | Params | Result | Notes |
 |---|---|---|---|
 | `readme_at` | `rid`, `revision` | the README blob's JSON with `"path"` spliced in, as `readmeAtRaw` builds it from `tree_at` and `blob_at` | `not_found` ("no readme") when there is none |
-| `repo_meta` | `rid` | `buildRepoMeta`'s object | a `seeders` failure gives `seeding: 0`, logged without the RID |
+| `repo_meta` | `rid` | `buildRepoMeta`'s object | a `seeders` failure gives `seeding: 0`, logged without the RID; a node whose reactor doesn't answer in time, or has too many calls waiting, gives `deadline` ([the node's reactor](#deadlines)) |
 | `repos_meta` | none | an array of `repo_meta`, one per `list_repos` entry, in its order | any failure fails the whole listing (500), as today |
 | `issues_page`, `patches_page` | `rid`; `status`, `page` and `per_page` as the raw query strings, or null | the page main's `paginate` returns: filtered by `state.status`; `page` from `Number.parseInt`, at least 0; `per_page` clamped to 1–100, with 30 by default | JavaScript's `parseInt` rules, pinned by vectors |
 | `node_info` | none | `{ connected_peers, repos_total, repos_error }`, where `repos_total` is null and `repos_error` holds the message when enumeration fails | a `status` failure fails the call; collected, at most 64 KiB |
@@ -503,7 +503,12 @@ The rules this design relies on, as 0007 specifies them:
   - **After the head there is no service deadline.** A stalled or paused body is main's to judge: 0006's pull-driven idle timer cancels a body that leaves a pull unanswered for 60 s, and a paused reader is never timed out. The service ends a stream early only with `abort`: `cancelled`, `stopped` or `internal`. Its caps are checked before the head (a JSON read's JSON is complete before it, and a blob's size comes from its header), so `too_large` is always a reply, never an abort.
 - **Network operations:** `timeout_ms` + 30 s, from admission. A network operation past it gets `deadline`, but keeps its slot until libradicle returns, and its token is flipped. A clone's progress stops with that answer.
 - **Writes:** 60 s, and 300 s for the import in its own process, with the outcome rules in [Writes](#writes).
-- **The node's reactor** (#340): heartwood answers the node's sessions and an unseed only through its reactor. The calls that wait on it (`status`, `node_info`, `rad.unseed`) wait at most their request's deadline left, then let go of the node: a read answers `deadline`, and `rad.unseed` `outcome_unknown`, as it was sent. While as many calls wait as libradicle allows (`NODE_WAIT_LIMIT`, 8), a call isn't sent and answers `deadline` at once, which for `rad.unseed` is definitive. **Not bounded yet** ([#363](https://github.com/solardev-xyz/freedom-core/issues/363)): `seeders` (`repo_meta`, `repos_meta`), `rad.write`'s announce and `rad.remove_repo`'s unseed still wait on the reactor with the node held, so a wedged reactor can still hold the writer and the stop through them, and the stop's log doesn't name them.
+- **The node's reactor** (#340, #363): heartwood answers the node's sessions, a repository's seeders, an announcement of refs and an unseed only through its reactor. Every call that waits on it waits at most its request's deadline left, then lets go of the node:
+  - `status` and `node_info` (sessions), and `seeders`, `repo_meta` and `repos_meta` (seeders): a read, which answers `deadline`;
+  - `rad.unseed`, and `rad.remove_repo`'s first step, the node's unseed: `outcome_unknown`, as it was sent. A removal cut off there keeps its record, and a retry with the same `qid` completes it;
+  - `rad.write`'s announcement, after its COB change is committed: `outcome_unknown`, never `deadline`, its repository repaired online as any COB write's unknown outcome.
+
+  While as many calls wait as libradicle allows (`NODE_WAIT_LIMIT`, 8), a call isn't sent. A read, `rad.unseed` or a removal then answers `deadline` at once, which for the last two is definitive. A COB write still answers `outcome_unknown`, its change committed and unannounced. The stop's log names the calls left waiting.
 - **Main's watchdogs** are each deadline + 15 s, as 0001.
 
 ### Errors
@@ -568,7 +573,7 @@ All bounds are process-wide. The service hosts one node.
 
 - **The read pool:** 4 threads, with **320 queued requests**: main's dweb admission of 256, plus 64 for other callers ([Main's side](#mains-side)). Beyond that, `busy`.
   - Reads run concurrently, under a shared lock on the node; there is no process-wide mutex.
-  - Three methods take `&mut self` and take that lock exclusively: `seeders` (`lr:1143`), `unseed_repo` (`lr:847`) and `import_repo` (`lr:1012`). `seeders` is a short query on the read pool, and `unseed_repo` is on the write queue. `import_repo` runs only in the import process, which has no running node ([Writes](#writes)).
+  - Two methods take `&mut self` and take that lock exclusively: `unseed_repo` (`lr:847`) and `import_repo` (`lr:1012`). `unseed_repo` is on the write queue. `seeders` took `&mut self` too, until libradicle #40 (freedom-core #363) made it `&self`: it is now a read under the shared lock. `import_repo` runs only in the import process, which has no running node ([Writes](#writes)).
   - A thread holds that lock at most once at a time. A new shared hold waits behind an exclusive one that waits, so a read that took the lock again under its own hold would wait behind `unseed_repo` waiting for that first hold, and neither would go on (freedom-core #338). Each step of a read takes the lock and lets go of it before the next; the service's test build panics on a second hold.
 - **The network pool:** 8 threads for `connect_seeds` and `clone`, with 16 queued.
 - **The write queue:** one writer, with 16 queued.

@@ -64,29 +64,44 @@
 //!
 //! **Pooled work reaches the node through its lock** ([`Node::handle`]):
 //! 0008's shared lock on the node ("Pools and budgets"). Work takes it
-//! shared, as reads, the COB writes, `rad.remove_repo` and the online
-//! repair's units ([`crate::repair`]) do: libradicle's calls for them take
-//! `&self`. `rad.unseed` takes it exclusively, as
-//! libradicle's `unseed_repo` takes `&mut self`, and so does the stop, to
-//! ask the node to stop; `seeders` comes with a later step. Work gets the
-//! node only while it runs, and lets go of it as its work returns.
+//! shared, as reads (`seeders` among them), the COB writes,
+//! `rad.remove_repo` and the online repair's units ([`crate::repair`]) do:
+//! libradicle's calls for them take `&self`. `rad.unseed` takes it
+//! exclusively, as libradicle's `unseed_repo` takes `&mut self`, and so
+//! does the stop, to ask the node to stop. Work gets the node only while it
+//! runs, and lets go of it as its work returns.
 //!
 //! **The calls that wait on the node's reactor wait within a bound**
-//! (#340): `rad.read`'s `status` and `node_info`, `rad.unseed` and the
-//! watch's look ask libradicle's `connected_peers_within` and
-//! `unseed_repo_within`, with the request's deadline left (the look, with
-//! [`LOOK_WITHIN`]). heartwood's handle waits for its reactor with no bound,
-//! so a reactor that never answered held the call, and the node's lock with
-//! it, for good, and so every `rad.unseed` and the stop behind it. Now the
-//! call returns at its bound, `NodeDeadline`, and lets go of the node;
-//! libradicle goes on waiting for the answer on a thread of its own, and
-//! lists the call ([`waiting`]). While `NODE_WAIT_LIMIT` calls wait, a call
-//! isn't sent (`NodeBusy`). A read answers either `deadline`. `rad.unseed`
-//! answers a `NodeDeadline` `outcome_unknown`, as it was sent, and a
-//! `NodeBusy` `deadline`, as nothing was ([`crate::writes`]). The service
-//! also lists its own calls while they wait within their bounds
-//! ([`NodeCalls`]): the stop names those when work holds the node
-//! exclusively, or waits to, so that libradicle's list can't be read.
+//! (#340, #363), each with the request's deadline left, taken once the
+//! call holds the node (the watch's look, with [`LOOK_WITHIN`]): a call
+//! that waited for the node past its deadline, behind an exclusive holder,
+//! asks nothing, and lets go of the node at once ([`ByDeadline::Past`]).
+//! Each is:
+//! - `rad.read`'s `status` and `node_info`, and the watch's look: libradicle's
+//!   `connected_peers_within` (`sessions`);
+//! - `rad.read`'s `seeders`, `repo_meta` and `repos_meta`:
+//!   `seeders_within` (`seeds_for`);
+//! - `rad.write`'s COB writes: their `_within` forms, whose announcement
+//!   waits (`announce_refs_for`);
+//! - `rad.unseed`: `unseed_repo_within` (`unseed`);
+//! - `rad.remove_repo`: `remove_quarantined_within`, whose unseed waits
+//!   (`unseed`).
+//!
+//! heartwood's handle waits for its reactor with no bound, so a reactor that
+//! never answered held the call, and the node's lock with it, for good, and
+//! so every `rad.unseed` and the stop behind it. Now the call returns at its
+//! bound, `NodeDeadline`, and lets go of the node; libradicle goes on
+//! waiting for the answer on a thread of its own, and lists the call
+//! ([`waiting`]). While `NODE_WAIT_LIMIT` calls wait, a call isn't sent
+//! (`NodeBusy`). A read answers either `deadline`. `rad.unseed` and
+//! `rad.remove_repo` answer a `NodeDeadline` `outcome_unknown`, as the
+//! unseed was sent, and a `NodeBusy` `deadline`, as nothing was
+//! ([`crate::writes`], [`crate::quarantine`]). A COB write answers every
+//! error of its announcement `outcome_unknown`, never `deadline`: the change
+//! is committed before it's announced. The service also lists its own calls
+//! while they wait within their bounds ([`NodeCalls`]): the stop names
+//! those when work holds the node exclusively, or waits to, so that
+//! libradicle's list can't be read.
 //!
 //! **A thread holds the node at most once** ([`Held`]). std's lock makes a
 //! new shared hold wait behind an exclusive one that waits, on every
@@ -305,20 +320,66 @@ impl Handle {
     }
 
     /// The node's connected peers, holding it shared, its reactor waited
-    /// for up to `within` (see the module's doc): `NodeDeadline` past it,
-    /// and `NodeBusy`, with nothing sent, while too many calls wait.
-    pub fn connected_peers_within(&self, within: Duration) -> Result<usize, libradicle::Error> {
+    /// for until `deadline` (see the module's doc): `NodeDeadline` at it,
+    /// and `NodeBusy`, with nothing sent, while too many calls wait. The
+    /// time left is taken once the node is held: a call that waited for the
+    /// node past `deadline`, behind an exclusive holder, asks nothing
+    /// ([`ByDeadline::Past`]).
+    pub fn connected_peers_by(&self, deadline: Instant) -> Result<usize, ByDeadline> {
         let node = self.node();
+        let within = left(deadline)?;
         let _call = self.calls.enter("sessions");
-        node.connected_peers_within(within)
+        Ok(node.connected_peers_within(within)?)
+    }
+
+    /// The number of nodes known to seed `rid`, holding the node shared,
+    /// its reactor waited for until `deadline`, as
+    /// [`Handle::connected_peers_by`].
+    pub fn seeders_by(
+        &self,
+        rid: radicle::prelude::RepoId,
+        deadline: Instant,
+    ) -> Result<usize, ByDeadline> {
+        let node = self.node();
+        let within = left(deadline)?;
+        let _call = self.calls.enter("seeds_for");
+        Ok(node.seeders_within(rid, within)?)
     }
 
     /// Lists `call` among the service's calls waiting on the node's reactor
     /// until the returned place drops: for a call made on the node this
-    /// thread holds (`rad.unseed`'s, see the module's doc).
+    /// thread holds (`rad.unseed`'s, `rad.remove_repo`'s and the COB
+    /// writes', see the module's doc).
     pub fn waiting_call(&self, call: &'static str) -> NodeCall {
         self.calls.enter(call)
     }
+}
+
+/// Why a call through [`Handle`] that waits on the node's reactor by a
+/// deadline has no answer.
+#[derive(Debug)]
+pub enum ByDeadline {
+    /// libradicle's error: `NodeDeadline` and `NodeBusy` among them.
+    Node(libradicle::Error),
+    /// The deadline passed while the call waited for the node: nothing was
+    /// asked.
+    Past,
+}
+
+impl From<libradicle::Error> for ByDeadline {
+    fn from(error: libradicle::Error) -> Self {
+        ByDeadline::Node(error)
+    }
+}
+
+/// The time left until `deadline`, taken with the node held: none,
+/// [`ByDeadline::Past`], at or past it.
+fn left(deadline: Instant) -> Result<Duration, ByDeadline> {
+    let within = deadline.saturating_duration_since(Instant::now());
+    if within.is_zero() {
+        return Err(ByDeadline::Past);
+    }
+    Ok(within)
 }
 
 /// The service's calls waiting on the node's reactor, each within its

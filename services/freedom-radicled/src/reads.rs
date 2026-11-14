@@ -18,11 +18,10 @@
 //!   where it isn't UTF-8;
 //! - `issues { rid }` and `patches { rid }`, the COB ops;
 //! - `list_repos` and `list_seeded_repos`;
-//! - `seeders { rid }`, with the node held exclusively, as libradicle's
-//!   `seeders` takes `&mut self`; `identity`; and `status`, which waits for
-//!   the node's reactor up to the read's deadline, then answers `deadline`
-//!   (#340, [`crate::node`]): libradicle's `NodeDeadline`, or its
-//!   `NodeBusy` at once, with nothing sent.
+//! - `seeders { rid }` and `status`, which wait for the node's reactor up
+//!   to the read's deadline, then answer `deadline` (#340, #363,
+//!   [`crate::node`]): libradicle's `NodeDeadline`, or its `NodeBusy` at
+//!   once, with nothing sent; and `identity`.
 //!
 //! The other ops 0008 lists ([`composed`]): of main's serialization,
 //! `issue { rid, issue_id }`, `patch { rid, patch_id }`, `remotes { rid }`
@@ -122,7 +121,7 @@ use std::path::Path;
 use std::str::FromStr as _;
 use std::sync::Arc;
 use std::task::{Context, Poll, Wake, Waker};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use fc_protocol::error::{ErrorBody, ErrorCode};
 use fc_service::conn::{Connection, Headed};
@@ -136,7 +135,7 @@ use serde::de::DeserializeOwned;
 use serde_json::value::RawValue;
 use serde_json::{Value, json};
 
-use crate::node::{Handle, Node};
+use crate::node::{ByDeadline, Handle, Node};
 use crate::output::{BUILT, Body, Budget, Failure, Refused, Until, json_read, json_read_beside};
 use crate::pools::{Pools, Ticket, Work};
 use crate::{quarantine, testhooks};
@@ -942,7 +941,7 @@ fn body(
         Op::Seeders { rid } => json_read(
             budget,
             until,
-            |_| handle.node_mut().seeders(rid),
+            |_| seeders(handle, until, rid),
             |w, seeders| json::seeding(w, *seeders),
         ),
         Op::Identity => json_read(
@@ -987,14 +986,30 @@ fn body(
 }
 
 /// The node's connected peers, for `status` and `node_info`: its reactor
-/// waited for up to the read's deadline left, then `deadline`, the node let
-/// go of (#340, `crate::node`). At or past the deadline, nothing is asked.
+/// waited for until the read's deadline, then `deadline`, the node let go
+/// of (#340, `crate::node`). The time left is taken once the node is held:
+/// past the deadline by then, nothing is asked (#370's review).
 fn connected_peers(handle: &Handle, until: &Until) -> Result<usize, Failure> {
-    let within = until.deadline.saturating_duration_since(Instant::now());
-    if within.is_zero() {
-        return Err(Failure::Refused(Refused::Deadline));
+    Ok(handle.connected_peers_by(until.deadline)?)
+}
+
+/// The number of nodes known to seed `rid`, for `seeders`: its reactor
+/// waited for until the read's deadline, then `deadline`, as
+/// [`connected_peers`] (#363).
+fn seeders(handle: &Handle, until: &Until, rid: RepoId) -> Result<usize, Failure> {
+    Ok(handle.seeders_by(rid, until.deadline)?)
+}
+
+/// A call that waits on the node's reactor by the read's deadline, unanswered:
+/// `deadline` if it wasn't answered in time or wasn't asked (see
+/// `From<libradicle::Error> for Failure`).
+impl From<ByDeadline> for Failure {
+    fn from(unanswered: ByDeadline) -> Self {
+        match unanswered {
+            ByDeadline::Node(error) => error.into(),
+            ByDeadline::Past => Failure::Refused(Refused::Deadline),
+        }
     }
-    Ok(handle.connected_peers_within(within)?)
 }
 
 /// What a read's answer before its head is from its deadline on.

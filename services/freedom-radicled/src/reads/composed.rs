@@ -14,7 +14,10 @@
 //!   brace. None is `not_found`, "no readme", main's 404.
 //! - **`repo_meta { rid }`:** main's `buildRepoMeta` of `repo_info` and
 //!   `seeders`. A `seeders` failure is `seeding: 0`, logged without the RID
-//!   or libradicle's message, which may quote it.
+//!   or libradicle's message, which may quote it. But a node whose reactor
+//!   doesn't answer within the read's deadline left, or has too many calls
+//!   waiting, fails the read with `deadline`, as `node_info`'s `status`
+//!   does (#363): the count wasn't read.
 //! - **`repos_meta`:** an array of `repo_meta`, one per `list_repos` entry,
 //!   in its order, each read again as main reads it: the first failure, in
 //!   that order, fails the whole.
@@ -81,7 +84,7 @@ use serde_json::json;
 
 use super::js::{self, Seeding, Work};
 use super::{BESIDE, bounded_blob, identity};
-use crate::node::Handle;
+use crate::node::{ByDeadline, Handle};
 use crate::output::{
     BUILT, Body, Budget, Failure, Json, Refused, Until, composed_read, composed_read_beside,
 };
@@ -345,9 +348,15 @@ fn meta_into(
             .repo_info_bounded(rid, &bounds(until, REPO_INFO))?;
         capture(REPO_INFO, |mut w| json::repo_info(&mut w, &info))?
     };
-    let seeders = handle.node_mut().seeders(rid);
+    let seeders = handle.seeders_by(rid, until.deadline);
     let seeders = match seeders {
         Ok(n) => Some(capture(REPO_INFO, |mut w| json::seeding(&mut w, n))?),
+        Err(
+            unanswered @ (ByDeadline::Past
+            | ByDeadline::Node(
+                libradicle::Error::NodeDeadline { .. } | libradicle::Error::NodeBusy { .. },
+            )),
+        ) => return Err(unanswered.into()),
         Err(_) => {
             // Its message may quote the RID.
             log::warn(
