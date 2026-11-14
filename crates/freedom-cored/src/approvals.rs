@@ -24,8 +24,12 @@
 //!   the end is read.
 //! - `sign.*`'s `authorization`: `{ token, handle? }`, `{ safe }`, or `{
 //!   standing }`, checked after the request's public work and before any
-//!   key is derived. Without one, `sign.*` signs as before (APR-3; APR-4
-//!   requires it).
+//!   key is derived. `sign.transaction`'s token names the kind it expects,
+//!   `{ token, kind, handle? }` (`wallet-send`, `executor-send` or
+//!   `dapp-send`), or an `intent-replace`'s intent, `{ token, intent: { id }
+//!   }`: a token of another kind, or one naming neither, is a `mismatch`,
+//!   and burnt. Without an authorization, `sign.*` signs as before (APR-3;
+//!   APR-4 requires it).
 //! - `swarm.sign_soc`'s `authorization` (APR-3c): `{ swarm, soc }` from a
 //!   page, checked against the page's Swarm grant at the same point. Main's
 //!   own SOCs, under `shell`, take none.
@@ -58,7 +62,7 @@ use fc_approval::stores::{
     Applied, CapStore, DappStore, Effect, JsValue, RadicleFlag, RadicleStore, StoreKind, SwarmFlag,
     SwarmStore,
 };
-use fc_approval::{Handle, Kind, Limits, Minter, Page, Refusal, Request, Tokens};
+use fc_approval::{Handle, Kind, Limits, Minter, Page, Presented, Refusal, Request, Tokens};
 use fc_evm::{Transaction, TypedDataView, U256};
 use fc_protocol::error::{ErrorBody, ErrorCode};
 use fc_protocol::message::{self, CallerKind, Context, PageContext};
@@ -797,13 +801,14 @@ impl Approvals {
             .as_object()
             .ok_or_else(|| invalid("authorization: expected an object"))?;
         if form.contains_key("token") {
-            let fields = object(authorization, &["token"], &["handle", "intent"])?;
-            let token = string(fields, "token")?;
-            let intent = match fields.get("intent") {
-                None => None,
-                Some(intent) => Some(intent_id(intent)?),
+            // Only `sign.transaction` names a kind: its token may be any of
+            // four, while each other method spends one kind alone.
+            let optional: &[&str] = match signed {
+                Signed::Transaction { .. } => &["handle", "intent", "kind"],
+                _ => &["handle", "intent"],
             };
-            self.authorize_token(context, token, fields.get("handle"), intent, signed, clocks)
+            let fields = object(authorization, &["token"], optional)?;
+            self.authorize_token(context, fields, signed, clocks)
         } else if form.contains_key("safe") {
             let fields = object(authorization, &["safe"], &[])?;
             let id = string(fields, "safe")?;
@@ -889,12 +894,30 @@ impl Approvals {
     fn authorize_token(
         &mut self,
         context: &Context,
-        token: &str,
-        handle: Option<&Value>,
-        intent: Option<&str>,
+        fields: &Map<String, Value>,
         signed: Signed<'_>,
         clocks: Clocks,
     ) -> Result<After, ErrorBody> {
+        let token = string(fields, "token")?;
+        let handle = fields.get("handle");
+        let intent = match fields.get("intent") {
+            None => None,
+            Some(intent) => Some(intent_id(intent)?),
+        };
+        let named = match fields.get("kind") {
+            None => None,
+            Some(kind) => Some(named_kind(kind)?),
+        };
+        let presented = match (named, intent) {
+            (Some(_), Some(_)) => {
+                return Err(invalid(
+                    "authorization: a token names its kind or its intent, not both",
+                ));
+            }
+            (Some(kind), None) => Presented::Kind(kind),
+            (None, Some(_)) => Presented::Intent,
+            (None, None) => Presented::Unnamed,
+        };
         // An intent names only an `intent-replace`, which `sign.transaction`
         // spends.
         if intent.is_some() && !matches!(signed, Signed::Transaction { .. }) {
@@ -930,20 +953,13 @@ impl Approvals {
                     })
                 });
                 // A page's send is a `dapp-send`; the wallet's own is a
-                // `wallet-send` or an `executor-send`, the kind it was
-                // minted as, or an `intent-replace` with its intent named.
+                // `wallet-send` or an `executor-send`, each named as the
+                // kind it was minted as, or an `intent-replace` with its
+                // intent named. Any other is a `mismatch`, the token burnt.
                 let spent = self
                     .tokens
                     .spend_with(minter, token, clocks.vault_ms, |kind| {
-                        let fits = match kind {
-                            Kind::DappSend => under_page && replace.is_none(),
-                            Kind::WalletSend | Kind::ExecutorSend => {
-                                !under_page && replace.is_none()
-                            }
-                            Kind::IntentReplace => !under_page && replace.is_some(),
-                            _ => false,
-                        };
-                        if !fits {
+                        if !presented.spends_transaction(kind, under_page) {
                             return None;
                         }
                         Some(match (&replace, kind) {
@@ -1098,6 +1114,15 @@ impl Approvals {
             )),
         }
     }
+}
+
+/// `sign.transaction`'s `authorization.kind`: one of the token kinds'
+/// names. Whether it names one `sign.transaction` spends, and the token's,
+/// is [`Presented::spends_transaction`]'s to say.
+fn named_kind(kind: &Value) -> Result<Kind, ErrorBody> {
+    kind.as_str()
+        .and_then(Kind::from_name)
+        .ok_or_else(|| invalid("authorization.kind: expected a token kind"))
 }
 
 /// An authorization's intent, `{ id }`: the id an `intent-replace` binds.

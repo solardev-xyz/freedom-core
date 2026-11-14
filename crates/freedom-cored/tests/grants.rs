@@ -514,7 +514,7 @@ fn a_flagged_send_before_the_move_writes_nothing() {
         &mut id,
         &site(),
         "sign.transaction",
-        json!({ "key": account(0), "tx": tx("1"), "authorization": { "token": token, "handle": HANDLE } }),
+        json!({ "key": account(0), "tx": tx("1"), "authorization": { "token": token, "kind": "dapp-send", "handle": HANDLE } }),
     );
     assert!(result(&signed)["raw"].is_string(), "{signed}");
     assert_eq!(
@@ -628,7 +628,7 @@ fn a_moved_dapp_file_is_the_core_s() {
             &site(),
             "sign.transaction",
             json!({ "key": account(account_index), "tx": tx("3"),
-                "authorization": { "token": token, "handle": HANDLE } }),
+                "authorization": { "token": token, "kind": "dapp-send", "handle": HANDLE } }),
         );
         result(&signed).clone()
     };
@@ -785,7 +785,7 @@ fn bounds_and_unreadable_moved_files() {
         &mut id,
         &site(),
         "sign.transaction",
-        json!({ "key": account(0), "tx": tx("0"), "authorization": { "token": token, "handle": HANDLE } }),
+        json!({ "key": account(0), "tx": tx("0"), "authorization": { "token": token, "kind": "dapp-send", "handle": HANDLE } }),
     );
     assert_eq!(
         result(&signed)["rule"],
