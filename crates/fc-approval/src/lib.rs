@@ -50,5 +50,5 @@ pub use bind::{
     bind,
 };
 pub use error::{Error, Refusal};
-pub use kind::{Kind, PageRule, Scope};
+pub use kind::{Kind, PageRule, Presented, Scope};
 pub use tokens::{Issued, MAX_OUTSTANDING, Minter, Spent, TOKEN_TTL_MS, Token, Tokens};

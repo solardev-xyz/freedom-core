@@ -439,7 +439,7 @@ fn a_presented_token_is_burnt_whatever_the_outcome() {
             id,
             &shell(),
             "sign.transaction",
-            json!({ "key": account(0), "tx": tx, "authorization": { "token": token } }),
+            json!({ "key": account(0), "tx": tx, "authorization": { "token": token, "kind": "wallet-send" } }),
         )
     };
     let token = mint(&mut core, &mut id);
@@ -511,7 +511,7 @@ fn a_presented_token_is_burnt_whatever_the_outcome() {
         &mut id,
         &chrome(),
         "sign.transaction",
-        json!({ "key": account(0), "tx": send_tx(), "authorization": { "token": token } }),
+        json!({ "key": account(0), "tx": send_tx(), "authorization": { "token": token, "kind": "wallet-send" } }),
     );
     refused(&reply, "not_authorized", Some("mismatch"));
     // Another nonce is the same send; another value isn't.
@@ -548,6 +548,270 @@ fn a_presented_token_is_burnt_whatever_the_outcome() {
         &sign(&mut core, &mut id, send_tx(), &token),
         "not_authorized",
         Some("unknown_token"),
+    );
+}
+
+/// `sign.transaction`'s token names the kind it was minted as (design 0012,
+/// API): presented as another kind, as a kind `sign.transaction` doesn't
+/// spend, or naming none, it is refused (`mismatch`) and burnt, under the
+/// caller that minted it; named as itself, it signs, once.
+#[test]
+fn a_transaction_token_signs_only_as_its_kind() {
+    let (_root, mut core) = unlocked();
+    let mut id = 10;
+    let mint = |core: &mut Core, id: &mut u64, kind: &str| {
+        let (context, params) = match kind {
+            "dapp-send" => (
+                site(),
+                json!({ "kind": kind, "account": 0, "payload": { "tx": send_tx() }, "handle": HANDLE }),
+            ),
+            _ => (
+                shell(),
+                json!({ "kind": kind, "account": 0, "payload": { "tx": send_tx() } }),
+            ),
+        };
+        token_of(&issue(core, id, &context, params))
+    };
+    // Under the caller that minted the token, with the handle for a page's.
+    let sign = |core: &mut Core, id: &mut u64, minted: &str, token: &str, kind: Option<&str>| {
+        let (context, mut authorization) = match minted {
+            "dapp-send" => (site(), json!({ "token": token, "handle": HANDLE })),
+            _ => (shell(), json!({ "token": token })),
+        };
+        if let Some(kind) = kind {
+            authorization["kind"] = json!(kind);
+        }
+        call_as(
+            core,
+            id,
+            &context,
+            "sign.transaction",
+            json!({ "key": account(0), "tx": send_tx(), "authorization": authorization }),
+        )
+    };
+    let kinds = ["wallet-send", "executor-send", "dapp-send"];
+    for minted in kinds {
+        let others = kinds
+            .into_iter()
+            .filter(|kind| *kind != minted)
+            .map(Some)
+            .chain([Some("intent-replace"), Some("sign-message"), None]);
+        for named in others {
+            let token = mint(&mut core, &mut id, minted);
+            let reply = sign(&mut core, &mut id, minted, &token, named);
+            refused(&reply, "not_authorized", Some("mismatch"));
+            assert!(reply.get("result").is_none(), "{minted} as {named:?}");
+            // Burnt: not even its own kind spends it now.
+            refused(
+                &sign(&mut core, &mut id, minted, &token, Some(minted)),
+                "not_authorized",
+                Some("unknown_token"),
+            );
+        }
+        let token = mint(&mut core, &mut id, minted);
+        let signed = sign(&mut core, &mut id, minted, &token, Some(minted));
+        assert!(result(&signed)["raw"].is_string(), "{minted}: {signed}");
+        refused(
+            &sign(&mut core, &mut id, minted, &token, Some(minted)),
+            "not_authorized",
+            Some("unknown_token"),
+        );
+    }
+    // A wallet kind named under a page, and a page's under shell: the
+    // token's caller decides, whatever it names.
+    let token = mint(&mut core, &mut id, "wallet-send");
+    let reply = call_as(
+        &mut core,
+        &mut id,
+        &site(),
+        "sign.transaction",
+        json!({ "key": account(0), "tx": send_tx(),
+            "authorization": { "token": token, "kind": "wallet-send", "handle": HANDLE } }),
+    );
+    refused(&reply, "not_authorized", Some("mismatch"));
+    refused(
+        &sign(
+            &mut core,
+            &mut id,
+            "wallet-send",
+            &token,
+            Some("wallet-send"),
+        ),
+        "not_authorized",
+        Some("unknown_token"),
+    );
+    let token = mint(&mut core, &mut id, "dapp-send");
+    let reply = call_as(
+        &mut core,
+        &mut id,
+        &shell(),
+        "sign.transaction",
+        json!({ "key": account(0), "tx": send_tx(),
+            "authorization": { "token": token, "kind": "dapp-send" } }),
+    );
+    refused(&reply, "not_authorized", Some("mismatch"));
+    refused(
+        &sign(&mut core, &mut id, "dapp-send", &token, Some("dapp-send")),
+        "not_authorized",
+        Some("unknown_token"),
+    );
+    // A kind that isn't a kind's name, a kind beside an intent, and a kind
+    // on a method that spends one kind alone: malformed, and burnt all the
+    // same.
+    for kind in [
+        json!("Wallet-Send"),
+        json!("x402-cap-update"),
+        json!(""),
+        json!(1),
+        json!(null),
+    ] {
+        let token = mint(&mut core, &mut id, "wallet-send");
+        let reply = call_as(
+            &mut core,
+            &mut id,
+            &shell(),
+            "sign.transaction",
+            json!({ "key": account(0), "tx": send_tx(),
+                "authorization": { "token": token, "kind": kind } }),
+        );
+        refused(&reply, "invalid_argument", None);
+        refused(
+            &sign(
+                &mut core,
+                &mut id,
+                "wallet-send",
+                &token,
+                Some("wallet-send"),
+            ),
+            "not_authorized",
+            Some("unknown_token"),
+        );
+    }
+    let token = mint(&mut core, &mut id, "wallet-send");
+    let reply = call_as(
+        &mut core,
+        &mut id,
+        &shell(),
+        "sign.transaction",
+        json!({ "key": account(0), "tx": send_tx(),
+            "authorization": { "token": token, "kind": "wallet-send", "intent": { "id": "intent-0001" } } }),
+    );
+    refused(&reply, "invalid_argument", None);
+    refused(
+        &sign(
+            &mut core,
+            &mut id,
+            "wallet-send",
+            &token,
+            Some("wallet-send"),
+        ),
+        "not_authorized",
+        Some("unknown_token"),
+    );
+    let params = json!({ "kind": "sign-message", "account": 0, "payload": { "message": "0x68656c6c6f" }, "handle": HANDLE });
+    let token = token_of(&issue(&mut core, &mut id, &site(), params));
+    let message = |token: &str, kind: Option<&str>| {
+        let mut authorization = json!({ "token": token, "handle": HANDLE });
+        if let Some(kind) = kind {
+            authorization["kind"] = json!(kind);
+        }
+        json!({ "key": account(0), "message": "0x68656c6c6f", "authorization": authorization })
+    };
+    refused(
+        &call_as(
+            &mut core,
+            &mut id,
+            &site(),
+            "sign.message",
+            message(&token, Some("sign-message")),
+        ),
+        "invalid_argument",
+        None,
+    );
+    refused(
+        &call_as(
+            &mut core,
+            &mut id,
+            &site(),
+            "sign.message",
+            message(&token, None),
+        ),
+        "not_authorized",
+        Some("unknown_token"),
+    );
+}
+
+/// A page request the Agent answers, in a tab it holds, is a page request
+/// (design 0012, "Enforced or advised (Q8)"): the Agent's decision mints the
+/// request's page-kind token, which signs under `page` with the live
+/// `PageContext` and `agent: true`, and nowhere else; no standing rule
+/// answers it.
+#[test]
+fn an_agent_answered_page_request_signs_under_page() {
+    let (_root, mut core) = unlocked();
+    let mut id = 10;
+    let mut agent = site();
+    agent["page"]["agent"] = json!(true);
+    let send = json!({ "kind": "dapp-send", "account": 0, "payload": { "tx": send_tx() }, "handle": HANDLE });
+    let sign_send = |core: &mut Core, id: &mut u64, context: &Value, authorization: Value| {
+        call_as(
+            core,
+            id,
+            context,
+            "sign.transaction",
+            json!({ "key": account(0), "tx": send_tx(), "authorization": authorization }),
+        )
+    };
+    // Under shell, and as a wallet's send: refused, and burnt.
+    let token = token_of(&issue(&mut core, &mut id, &agent, send.clone()));
+    refused(
+        &sign_send(
+            &mut core,
+            &mut id,
+            &shell(),
+            json!({ "token": token, "kind": "dapp-send" }),
+        ),
+        "not_authorized",
+        Some("mismatch"),
+    );
+    let token = token_of(&issue(&mut core, &mut id, &agent, send.clone()));
+    refused(
+        &sign_send(
+            &mut core,
+            &mut id,
+            &shell(),
+            json!({ "token": token, "kind": "wallet-send" }),
+        ),
+        "not_authorized",
+        Some("mismatch"),
+    );
+    // Under page, with its PageContext and `agent: true`: signs.
+    let token = token_of(&issue(&mut core, &mut id, &agent, send));
+    let signed = sign_send(
+        &mut core,
+        &mut id,
+        &agent,
+        json!({ "token": token, "kind": "dapp-send", "handle": HANDLE }),
+    );
+    assert!(result(&signed)["raw"].is_string(), "{signed}");
+    let params = json!({ "kind": "sign-message", "account": 0, "payload": { "message": "0x68656c6c6f" }, "handle": HANDLE });
+    let token = token_of(&issue(&mut core, &mut id, &agent, params));
+    let signed = call_as(
+        &mut core,
+        &mut id,
+        &agent,
+        "sign.message",
+        json!({ "key": account(0), "message": "0x68656c6c6f",
+            "authorization": { "token": token, "handle": HANDLE } }),
+    );
+    assert!(result(&signed)["signature"].is_string(), "{signed}");
+    // A standing rule answers no tab the Agent holds.
+    let standing = json!({ "key": account(0), "message": "0x68656c6c6f",
+        "authorization": { "standing": { "paused": false } } });
+    refused(
+        &call_as(&mut core, &mut id, &agent, "sign.message", standing),
+        "not_authorized",
+        Some("custody"),
     );
 }
 

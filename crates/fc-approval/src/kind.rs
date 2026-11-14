@@ -100,6 +100,40 @@ impl Kind {
     }
 }
 
+/// How a `sign.transaction` authorization presents its token (design 0012,
+/// API): a send names the kind it expects, and an `intent-replace` names
+/// its intent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Presented {
+    /// `{ token, kind, handle? }`: the kind named.
+    Kind(Kind),
+    /// `{ token, intent: { id } }`.
+    Intent,
+    /// Neither: a token that names no kind and no intent signs nothing.
+    Unnamed,
+}
+
+impl Presented {
+    /// Whether a token minted as `kind`, presented this way, is spent by
+    /// `sign.transaction`: under a page (`under_page`) a `dapp-send` named
+    /// as one; otherwise a `wallet-send` or an `executor-send` named as
+    /// itself, or an `intent-replace` with its intent. Anything else is a
+    /// `mismatch`, and the token is burnt by its presentation: an
+    /// `executor-send` named as a `wallet-send`, a `wallet-send` as an
+    /// `executor-send`, a `dapp-send` under `shell`, or a token that names
+    /// nothing.
+    pub fn spends_transaction(self, kind: Kind, under_page: bool) -> bool {
+        match self {
+            Presented::Kind(named) if named != kind => false,
+            Presented::Kind(Kind::DappSend) => under_page,
+            Presented::Kind(Kind::WalletSend | Kind::ExecutorSend) => !under_page,
+            Presented::Kind(_) => false,
+            Presented::Intent => kind == Kind::IntentReplace && !under_page,
+            Presented::Unnamed => false,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -113,6 +147,38 @@ mod tests {
         // 0012's eleven; nor is any other text.
         for other in ["x402-cap-update", "", "Wallet-Send", "wallet_send"] {
             assert_eq!(Kind::from_name(other), None, "{other}");
+        }
+    }
+
+    /// `sign.transaction` spends a token only as the kind it was minted as,
+    /// named, under its own caller: every other pairing of the token's kind,
+    /// the named one, and page or not refuses.
+    #[test]
+    fn a_transaction_spends_only_the_named_kind() {
+        let spends = [
+            (Presented::Kind(Kind::DappSend), Kind::DappSend, true),
+            (Presented::Kind(Kind::WalletSend), Kind::WalletSend, false),
+            (
+                Presented::Kind(Kind::ExecutorSend),
+                Kind::ExecutorSend,
+                false,
+            ),
+            (Presented::Intent, Kind::IntentReplace, false),
+        ];
+        let named = Kind::ALL
+            .into_iter()
+            .map(Presented::Kind)
+            .chain([Presented::Intent, Presented::Unnamed]);
+        for presented in named {
+            for kind in Kind::ALL {
+                for under_page in [false, true] {
+                    assert_eq!(
+                        presented.spends_transaction(kind, under_page),
+                        spends.contains(&(presented, kind, under_page)),
+                        "{presented:?} {kind:?} {under_page}"
+                    );
+                }
+            }
         }
     }
 }
