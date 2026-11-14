@@ -332,11 +332,14 @@ enum Kind {
     Create {
         password: SecretBytes,
         words: WordCount,
+        /// `quick_unlock: true`: the credential before the vault commits.
+        quick: bool,
     },
     Import {
         password: SecretBytes,
         mnemonic: Mnemonic,
         overwrite: bool,
+        quick: bool,
     },
     Reconcile {
         op: ReconcileOp,
@@ -620,6 +623,10 @@ struct CreateParams<'a> {
     #[allow(dead_code)]
     #[serde(default)]
     user_knows_password: bool,
+    /// Writes quick unlock's credential before the vault commits (design
+    /// 0013, "The re-wrap").
+    #[serde(default)]
+    quick_unlock: bool,
 }
 
 #[derive(Deserialize)]
@@ -630,6 +637,9 @@ struct ImportParams<'a> {
     mnemonic_b64: &'a RawValue,
     #[serde(default)]
     overwrite: bool,
+    /// As create's.
+    #[serde(default)]
+    quick_unlock: bool,
 }
 
 #[derive(Deserialize)]
@@ -1103,10 +1113,10 @@ impl Vault {
         ))
     }
 
-    /// `quick_unlock.status`, from what the loop knows: `enabled` when
-    /// quick unlock's entry is bound to the vault file as it stands,
-    /// `policy` its key's, and `available` when the key store offers a
-    /// policy to enroll under.
+    /// `quick_unlock.status`, from what the loop knows: `enabled` when a
+    /// quick-unlock entry (either name, design 0013, "The re-wrap") is bound
+    /// to the vault file as it stands, `policy` its key's, and `available`
+    /// when the key store offers a policy to enroll under.
     fn quick_status(&self, id: u64) -> Result<Option<Zeroizing<Vec<u8>>>, ErrorBody> {
         let secrets = self.secrets.as_ref().ok_or_else(internal)?;
         let view = secrets.view();
@@ -1114,8 +1124,8 @@ impl Vault {
         let fingerprint = self.file.as_ref().ok().and_then(Option::as_deref);
         let policy = view
             .quick_unlock
-            .as_ref()
-            .filter(|(_, bound)| Some(bound.as_str()) == fingerprint)
+            .iter()
+            .find(|(_, bound)| Some(bound.as_str()) == fingerprint)
             .map(|(policy, _)| policy.name());
         Ok(json_result(
             id,
@@ -1290,7 +1300,14 @@ impl Vault {
                 }
                 let password = secret(p.password_b64)?;
                 check_strength(&password)?;
-                Kind::Create { password, words }
+                if p.quick_unlock {
+                    self.quick_offered()?;
+                }
+                Kind::Create {
+                    password,
+                    words,
+                    quick: p.quick_unlock,
+                }
             }
             "vault.import" => {
                 let p = params::<ImportParams>(raw)?;
@@ -1308,10 +1325,14 @@ impl Vault {
                 }
                 let password = secret(p.password_b64)?;
                 check_strength(&password)?;
+                if p.quick_unlock {
+                    self.quick_offered()?;
+                }
                 Kind::Import {
                     password,
                     mnemonic,
                     overwrite: p.overwrite,
+                    quick: p.quick_unlock,
                 }
             }
             "vault.reconcile" => {
@@ -1393,6 +1414,23 @@ impl Vault {
             deadline: Instant::now() + self.kdf_deadline,
         });
         Ok(())
+    }
+
+    /// `quick_unlock: true` on create or import, at admission: refused
+    /// before any work where the key store offers no policy to write the
+    /// credential under (design 0013, "The re-wrap"). The job checks again.
+    fn quick_offered(&self) -> Result<(), ErrorBody> {
+        let secrets = self.secrets.as_ref().ok_or_else(internal)?;
+        let caps = secrets.capabilities();
+        if caps.offers(fc_keystore::Policy::UserPresence)
+            || caps.offers(fc_keystore::Policy::Unattended)
+        {
+            Ok(())
+        } else {
+            Err(secrets_body(secrets::Error::KeyStore(
+                crate::keystore::unavailable("unsupported"),
+            )))
+        }
     }
 
     /// Admission check from the snapshot; the job checks again at run time.
@@ -1524,24 +1562,46 @@ impl Vault {
                     }),
                 )
             }
-            Kind::ChangePassword { current, new } => (
-                RunningKind::ChangePassword,
-                Box::new(move |dir, control| job_change(dir, &current, &new, control)),
-            ),
-            Kind::Create { password, words } => (
-                RunningKind::Create,
-                Box::new(move |dir, control| job_create(dir, &password, words, control)),
-            ),
+            Kind::ChangePassword { current, new } => {
+                let secrets = self.secrets.clone();
+                (
+                    RunningKind::ChangePassword,
+                    Box::new(move |dir, control| {
+                        job_change(dir, &current, &new, secrets.as_deref(), control)
+                    }),
+                )
+            }
+            Kind::Create {
+                password,
+                words,
+                quick,
+            } => {
+                let secrets = self.secrets.clone();
+                let quick = quick.then_some(secrets);
+                (
+                    RunningKind::Create,
+                    Box::new(move |dir, control| {
+                        let quick = quick.as_ref().map(Option::as_deref);
+                        job_create(dir, &password, words, quick, control)
+                    }),
+                )
+            }
             Kind::Import {
                 password,
                 mnemonic,
                 overwrite,
-            } => (
-                RunningKind::Import,
-                Box::new(move |dir, control| {
-                    job_import(dir, &password, mnemonic, overwrite, control)
-                }),
-            ),
+                quick,
+            } => {
+                let secrets = self.secrets.clone();
+                let quick = quick.then_some(secrets);
+                (
+                    RunningKind::Import,
+                    Box::new(move |dir, control| {
+                        let quick = quick.as_ref().map(Option::as_deref);
+                        job_import(dir, &password, mnemonic, overwrite, quick, control)
+                    }),
+                )
+            }
             Kind::Reconcile {
                 op,
                 before,
@@ -2386,6 +2446,24 @@ fn read_vault(dir: &Path) -> Result<Option<String>, OpError> {
     read_bounded(&dir.join(VAULT_FILE))
 }
 
+/// The vault file's SHA-256, over its bytes as they are (`None` if
+/// missing), read as [`read_vault`] reads it: what quick unlock's entry for
+/// it is bound to.
+fn vault_digest(dir: &Path) -> Result<Option<String>, OpError> {
+    crate::delete_journal::settle(dir).map_err(|e| storage(&e))?;
+    let file = match fsx::open_regular(&dir.join(VAULT_FILE), false) {
+        Ok(fsx::Regular::Missing) => return Ok(None),
+        Ok(fsx::Regular::Other) => return Err(OpError::Storage("not_regular")),
+        Ok(fsx::Regular::File(file)) => file,
+        Err(e) => return Err(storage(&e)),
+    };
+    match fsx::read_at_most(&file, MAX_VAULT_BYTES) {
+        Ok(Some(bytes)) => Ok(Some(sha256_hex(&bytes))),
+        Ok(None) => Err(OpError::Storage("too_large")),
+        Err(e) => Err(storage(&e)),
+    }
+}
+
 /// [`read_vault`] for any path.
 fn read_bounded(path: &Path) -> Result<Option<String>, OpError> {
     let file = match fsx::open_regular(path, false) {
@@ -2601,14 +2679,9 @@ fn job_delete(
     }
 }
 
-/// Seals `mnemonic` under `password` and writes it durably, after checking
-/// that the staged file decrypts to the same mnemonic.
-fn write_vault(
-    dir: &Path,
-    mnemonic: &Mnemonic,
-    password: &[u8],
-    control: &JobControl,
-) -> Result<Commit, OpError> {
+/// Seals `mnemonic` under `password` in the JS envelope: the vault file's
+/// contents, not yet written.
+fn seal_vault(mnemonic: &Mnemonic, password: &[u8]) -> Result<String, OpError> {
     let millis = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_millis())
@@ -2616,11 +2689,47 @@ fn write_vault(
     let created_at =
         format::iso_timestamp(u64::try_from(millis).unwrap_or(0)).map_err(|_| OpError::Internal)?;
     let params = SealParams::random(&mut OsRng, created_at).map_err(|_| OpError::Internal)?;
-    let contents = format::seal(mnemonic, password, &params).map_err(|_| OpError::Internal)?;
+    format::seal(mnemonic, password, &params).map_err(|_| OpError::Internal)
+}
+
+/// Writes the vault file `contents` (sealing `mnemonic` under `password`)
+/// durably, after checking that the staged file decrypts to the same
+/// mnemonic. The job's claim, right before the rename, is the commit point.
+///
+/// With a re-wrap's credential `staged` ([`Secrets::stage`], written before
+/// this), the vault's commit folds it in, and a failure takes it back: the
+/// vault on disk keeps its own credential throughout (design 0013, "The
+/// re-wrap").
+fn write_vault(
+    dir: &Path,
+    contents: &str,
+    mnemonic: &Mnemonic,
+    password: &[u8],
+    staged: Option<secrets::Staged<'_>>,
+    control: &JobControl,
+) -> Result<Commit, OpError> {
+    let written = install_vault(dir, contents, mnemonic, password, control);
+    if let Some(staged) = staged {
+        match written {
+            Ok(_) => staged.committed(password),
+            Err(_) => staged.rolled_back(),
+        }
+    }
+    written
+}
+
+fn install_vault(
+    dir: &Path,
+    contents: &str,
+    mnemonic: &Mnemonic,
+    password: &[u8],
+    control: &JobControl,
+) -> Result<Commit, OpError> {
     std::fs::create_dir_all(dir).map_err(|e| storage(&e))?;
     let expected = mnemonic.phrase().to_owned();
     let expected = Zeroizing::new(expected);
-    fsx::replace(
+    let claimed = std::cell::Cell::new(false);
+    let written = fsx::replace(
         &dir.join(VAULT_FILE),
         contents.as_bytes(),
         |staged| {
@@ -2634,53 +2743,104 @@ fn write_vault(
                 Err("staged vault decrypts to a different mnemonic".into())
             }
         },
-        || claim(control),
-    )
-    .map(|done| Commit {
-        done,
-        file: Some(sha256_hex(contents.as_bytes())),
-    })
-    .map_err(|e| match e {
-        fsx::WriteError::Io(e) => storage(&e),
-        fsx::WriteError::Abandoned => OpError::Abandoned,
-        fsx::WriteError::Check(reason) => {
+        || {
+            if crate::testhooks::secrets_fails("vault-claim") {
+                // As if the claim came past its time (#127).
+                control.abandon();
+                return false;
+            }
+            claimed.set(claim(control));
+            if claimed.get() {
+                // The temp file written and checked, not yet renamed.
+                crate::testhooks::secrets_step("before-vault-rename");
+            }
+            // As if the rename failed, after the claim.
+            claimed.get() && !crate::testhooks::secrets_fails("vault-rename")
+        },
+    );
+    match written {
+        Ok(done) => {
+            crate::testhooks::secrets_step("after-vault-rename");
+            Ok(Commit {
+                done,
+                file: Some(sha256_hex(contents.as_bytes())),
+            })
+        }
+        Err(fsx::WriteError::Abandoned) if claimed.get() => Err(OpError::Storage("other")),
+        Err(fsx::WriteError::Abandoned) => Err(OpError::Abandoned),
+        Err(fsx::WriteError::Io(e)) => Err(storage(&e)),
+        Err(fsx::WriteError::Check(reason)) => {
             crate::log::error(
                 "the staged vault failed its check",
                 serde_json::json!({ "reason": reason }),
             );
-            OpError::Internal
+            Err(OpError::Internal)
         }
-    })
+    }
 }
 
+/// The re-wrap's first half for a job with `secrets`: see
+/// [`Secrets::stage`].
+fn stage<'a>(
+    secrets: Option<&'a Secrets>,
+    password: &SecretBytes,
+    before: Option<&str>,
+    contents: &str,
+    required: bool,
+    control: &JobControl,
+) -> Result<Option<secrets::Staged<'a>>, OpError> {
+    let Some(secrets) = secrets else {
+        return if required {
+            Err(OpError::Internal)
+        } else {
+            Ok(None)
+        };
+    };
+    secrets
+        .stage(
+            password.as_bytes(),
+            before,
+            &sha256_hex(contents.as_bytes()),
+            required,
+            &|| control.abandoned(),
+        )
+        .map_err(OpError::from_secrets)
+}
+
+/// `vault.change_password`. With quick unlock's credential for the vault
+/// the current password opened, the new vault's credential is written
+/// first and the two commit as one operation, at the vault's rename (design
+/// 0013, "The re-wrap"): a secrets file that doesn't read, or a key-store
+/// refusal, refuses the change with nothing written.
 fn job_change(
     dir: &Path,
     current: &SecretBytes,
     new: &SecretBytes,
+    secrets: Option<&Secrets>,
     control: &JobControl,
 ) -> JobOutput {
-    if control.abandoned() {
-        return JobOutput::Changed {
-            result: Err(OpError::Abandoned),
-            commit: None,
-        };
-    }
-    let opened = match open(dir, current) {
-        Ok(opened) => opened,
-        Err(error) => {
-            return JobOutput::Changed {
-                result: Err(error),
-                commit: None,
-            };
+    let result = (|| {
+        if control.abandoned() {
+            return Err(OpError::Abandoned);
         }
-    };
-    if !new.as_str().is_ok_and(format::is_strong_enough) {
-        return JobOutput::Changed {
-            result: Err(OpError::Weak),
-            commit: None,
-        };
-    }
-    match write_vault(dir, &opened.mnemonic, new.as_bytes(), control) {
+        let before = read_vault(dir)?.ok_or(OpError::NoVault)?;
+        let opened = format::open(&before, current.as_bytes()).map_err(OpError::from_vault)?;
+        if !new.as_str().is_ok_and(format::is_strong_enough) {
+            return Err(OpError::Weak);
+        }
+        let contents = seal_vault(&opened.mnemonic, new.as_bytes())?;
+        let before = sha256_hex(before.as_bytes());
+        let staged = stage(secrets, new, Some(&before), &contents, false, control)?;
+        write_vault(
+            dir,
+            &contents,
+            &opened.mnemonic,
+            new.as_bytes(),
+            staged,
+            control,
+        )
+    })();
+    match result {
         Ok(commit) => JobOutput::Changed {
             result: Ok(()),
             commit: Some(commit),
@@ -2692,10 +2852,13 @@ fn job_change(
     }
 }
 
+/// `vault.create`. `quick`: `quick_unlock: true`, with the job's secrets
+/// file, whose credential is written before the vault commits.
 fn job_create(
     dir: &Path,
     password: &SecretBytes,
     words: WordCount,
+    quick: Option<Option<&Secrets>>,
     control: &JobControl,
 ) -> JobOutput {
     written((|| {
@@ -2710,16 +2873,31 @@ fn job_create(
         let mnemonic = Mnemonic::generate(&mut OsRng, words).map_err(|_| OpError::Internal)?;
         let phrase = Mnemonic::parse(mnemonic.phrase()).map_err(|_| OpError::Internal)?;
         let addresses = addresses_of(&mnemonic)?;
-        let done = write_vault(dir, &mnemonic, password.as_bytes(), control)?;
+        let contents = seal_vault(&mnemonic, password.as_bytes())?;
+        let staged = match quick {
+            Some(secrets) => stage(secrets, password, None, &contents, true, control)?,
+            None => None,
+        };
+        let done = write_vault(
+            dir,
+            &contents,
+            &mnemonic,
+            password.as_bytes(),
+            staged,
+            control,
+        )?;
         Ok(((Prepared::new(mnemonic), addresses, Some(phrase)), done))
     })())
 }
 
+/// `vault.import`; `quick` as create's. Over a vault with quick unlock,
+/// that vault keeps its credential until the new one commits.
 fn job_import(
     dir: &Path,
     password: &SecretBytes,
     mnemonic: Mnemonic,
     overwrite: bool,
+    quick: Option<Option<&Secrets>>,
     control: &JobControl,
 ) -> JobOutput {
     written((|| {
@@ -2730,7 +2908,29 @@ fn job_import(
             return Err(OpError::Exists { import: true });
         }
         let addresses = addresses_of(&mnemonic)?;
-        let done = write_vault(dir, &mnemonic, password.as_bytes(), control)?;
+        let contents = seal_vault(&mnemonic, password.as_bytes())?;
+        let staged = match quick {
+            Some(secrets) => {
+                let before = vault_digest(dir)?;
+                stage(
+                    secrets,
+                    password,
+                    before.as_deref(),
+                    &contents,
+                    true,
+                    control,
+                )?
+            }
+            None => None,
+        };
+        let done = write_vault(
+            dir,
+            &contents,
+            &mnemonic,
+            password.as_bytes(),
+            staged,
+            control,
+        )?;
         Ok(((Prepared::new(mnemonic), addresses, None), done))
     })())
 }

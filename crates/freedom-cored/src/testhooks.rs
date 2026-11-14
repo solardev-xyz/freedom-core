@@ -74,14 +74,26 @@
 //!   settling write), or of a journaled vault delete (`before-delete-stage`,
 //!   `before-delete-journal`, `before-delete-journal-rename` (its temp file
 //!   written, the claim taken), `after-delete-journal`, `after-delete-secrets`,
-//!   `after-delete-vault`, `after-delete-done`): there the core exits at
-//!   once with 99, as if killed, the files as that step left them (design
-//!   0013, PRF-1: "a crash hook before and after each write").
-//! - `FREEDOM_CORED_TEST_SECRETS_FAIL` names a write of a journaled vault
-//!   delete (`delete-stage`, the staged secrets file; `delete-journal`, the
-//!   journal's rename, after the commit claim; `delete-install`, the staged
-//!   file's rename over the secrets file, after the commit): its first
-//!   attempt in the process fails as if the OS had failed it.
+//!   `after-delete-vault`, `after-delete-done`), or of a re-wrap (design
+//!   0013, "The re-wrap": `before-stage-pending`, `after-stage-pending`,
+//!   `before-stage`, `after-stage` for the writes of the new vault's
+//!   credential; `before-vault-rename` (the vault's temp file written and
+//!   checked, the claim taken), `after-vault-rename`; `before-fold`,
+//!   `after-fold` after the commit; `before-rollback`, `after-rollback`
+//!   after a failure): there the core exits at once with 99, as if killed,
+//!   the files as that step left them (design 0013, PRF-1: "a crash hook
+//!   before and after each write"). The vault's two steps are those of
+//!   every vault write.
+//! - `FREEDOM_CORED_TEST_SECRETS_FAIL` lists, comma-separated, writes that
+//!   fail: a journaled vault delete's (`delete-stage`, the staged secrets
+//!   file; `delete-journal`, the journal's rename, after the commit claim;
+//!   `delete-install`, the staged file's rename over the secrets file,
+//!   after the commit), any secrets-file write by its step (`pending`,
+//!   `commit`, `remove`, `stage-pending`, `stage`, `fold`, `rollback`, …:
+//!   before its rename), or a vault write's (`vault-claim`, its claim
+//!   refused as if past its time; `vault-rename`, its rename, after the
+//!   claim). The first attempt in the process of each listed write fails as
+//!   if the OS had failed it.
 //! - `FREEDOM_CORED_TEST_RECEIPT_TTL_MS` replaces a device send's receipt's
 //!   10-minute life (design 0012, "A device send's rule"), so a test sees
 //!   one expire over the wire, which has no clock to inject. Read once, as
@@ -232,12 +244,24 @@ pub fn secrets_step(step: &str) {
     }
 }
 
-/// Whether this write fails, once per process.
+/// Whether this write fails: once per process for each step the variable
+/// lists.
 #[cfg(feature = "testhooks")]
 pub fn secrets_fails(step: &str) -> bool {
-    static FAILED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-    std::env::var("FREEDOM_CORED_TEST_SECRETS_FAIL").is_ok_and(|s| s == step)
-        && !FAILED.swap(true, std::sync::atomic::Ordering::SeqCst)
+    static FAILED: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+    let listed = std::env::var("FREEDOM_CORED_TEST_SECRETS_FAIL")
+        .is_ok_and(|steps| steps.split(',').any(|s| s == step));
+    if !listed {
+        return false;
+    }
+    let Ok(mut failed) = FAILED.lock() else {
+        return false;
+    };
+    if failed.iter().any(|s| s == step) {
+        return false;
+    }
+    failed.push(step.to_owned());
+    true
 }
 
 #[cfg(feature = "testhooks")]

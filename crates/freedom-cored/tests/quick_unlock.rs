@@ -32,6 +32,15 @@
 //!   a record whose item was removed by hand, or whose backend this OS
 //!   doesn't have, dropped without an error; an entry naming no vault
 //!   removed at start.
+//! - **The re-wrap** (PRF-1c-2): `quick_unlock: true` on `vault.create` and
+//!   `vault.import`, and `vault.change_password` with quick unlock, each
+//!   killed by a crash hook before and after each write, failed at each
+//!   write, and with main failing the key store's `open` or `create`: after
+//!   the restart the vault is the old one with its credential or the new
+//!   one with its own, never a vault without its credential, and quick
+//!   unlock opens it. An old entry never opens the new vault; unlock works
+//!   locked and unlocked after a re-wrap; the credential under its second
+//!   name, `quick-unlock.next`, kept at start and folded by the next write.
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
@@ -1180,4 +1189,742 @@ fn a_malformed_file_is_left_alone() {
         b"{\"version\":1"
     );
     assert!(main.keychain.calls.is_empty());
+}
+
+// ----- Create and import with the credential, and the re-wrap (PRF-1c-2)
+
+/// BIP-39's own test phrase: a vault the import's tests tell apart from
+/// `ABANDON`'s.
+const LEGAL: &str = "legal winner thank year wave sausage worth useful legal winner thank yellow";
+const NEW_PASSWORD: &str = "testpass2";
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    <sha2::Sha256 as sha2::Digest>::digest(bytes)
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
+}
+
+impl Main {
+    fn vault_digest(&self) -> Option<String> {
+        std::fs::read(self.vault_path()).ok().map(|v| sha256_hex(&v))
+    }
+
+    /// The file's entries, each with the vault digest it is bound to.
+    fn entries(&self) -> BTreeMap<String, String> {
+        let file = self.file();
+        file.entry_names()
+            .map(|name| {
+                let bound = file.binding(name).unwrap().get("vault_fingerprint");
+                (name.as_str().to_owned(), bound.unwrap_or("").to_owned())
+            })
+            .collect()
+    }
+
+    fn create_quick(&mut self) -> Value {
+        create_quick_op(self).expect("the core exited during vault.create")
+    }
+
+    fn change(&mut self, current: &str, new: &str) -> Value {
+        self.call(
+            "vault.change_password",
+            json!({ "password_b64": b64(current), "new_password_b64": b64(new) }),
+        )
+    }
+
+    fn verifies(&mut self, password: &str) -> bool {
+        let verified = self.call(
+            "vault.verify_password",
+            json!({ "password_b64": b64(password) }),
+        );
+        verified["result"] == json!({})
+    }
+
+    /// What a re-wrap leaves holds, in this start or after a restart
+    /// (`settled`): the vault is the old one (`old_vault`, `None` for no
+    /// vault) or the new one, as `pair` says, and has exactly one
+    /// credential (none for no vault, or for [`Pair::OldOff`]), which quick
+    /// unlock opens. `tidy`: no other entry is left either.
+    fn pair_holds(
+        &mut self,
+        old_vault: Option<&[u8]>,
+        new_password: &str,
+        pair: Pair,
+        tidy: bool,
+        label: &str,
+    ) {
+        let vault = std::fs::read(self.vault_path()).ok();
+        match pair {
+            Pair::Old | Pair::OldOff => {
+                assert_eq!(vault.as_deref(), old_vault, "{label}: the old vault");
+            }
+            Pair::New => assert!(
+                vault.is_some() && vault.as_deref() != old_vault,
+                "{label}: the new vault"
+            ),
+        }
+        let digest = vault.as_deref().map(sha256_hex);
+        let entries = self.entries();
+        let bound = entries
+            .values()
+            .filter(|d| Some(d.as_str()) == digest.as_deref())
+            .count();
+        let credential = vault.is_some() && pair != Pair::OldOff;
+        assert_eq!(bound, usize::from(credential), "{label}: {entries:?}");
+        if tidy {
+            assert_eq!(entries.len(), bound, "{label}: {entries:?}");
+        }
+        assert_eq!(self.status()["enabled"], credential, "{label}");
+        let unlock = self.call("quick_unlock.unlock", json!({}));
+        if credential {
+            assert!(unlock["result"].is_object(), "{label}: {unlock}");
+        } else if vault.is_none() {
+            assert_eq!(error_code(&unlock), "no_vault", "{label}: {unlock}");
+        } else {
+            assert_eq!(error_code(&unlock), "not_found", "{label}: {unlock}");
+        }
+        if vault.is_some() {
+            let password = if pair == Pair::New {
+                new_password
+            } else {
+                PASSWORD
+            };
+            assert!(self.verifies(password), "{label}: the pair's password");
+        }
+    }
+}
+
+/// What a re-wrap leaves, after the crash or the failure, a restart and
+/// the drain.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Pair {
+    /// The vault as it was (none, for a create), with its credential.
+    Old,
+    /// The vault as it was, without its credential: its key was dead
+    /// (`invalidated`), so the replace's `pending` write took the entry
+    /// off, as enroll's does.
+    OldOff,
+    /// The new vault, with its own credential.
+    New,
+}
+
+fn create_quick_op(main: &mut Main) -> Option<Value> {
+    main.try_call(
+        "chrome",
+        "vault.create",
+        json!({ "password_b64": b64(PASSWORD), "words": 12, "quick_unlock": true }),
+    )
+}
+
+fn import_quick_op(main: &mut Main) -> Option<Value> {
+    main.try_call(
+        "chrome",
+        "vault.import",
+        json!({
+            "password_b64": b64(NEW_PASSWORD), "mnemonic_b64": b64(LEGAL),
+            "overwrite": true, "quick_unlock": true,
+        }),
+    )
+}
+
+fn change_op(main: &mut Main) -> Option<Value> {
+    main.try_call(
+        "chrome",
+        "vault.change_password",
+        json!({ "password_b64": b64(PASSWORD), "new_password_b64": b64(NEW_PASSWORD) }),
+    )
+}
+
+/// Runs a re-wrap `op` on `main` with the crash hook `hook` (exit 99), the
+/// writes `fails` failing, or main failing one key-store op with `fault`.
+/// Checks the pair in that start (when it answered), and again after a
+/// restart and the drain. Returns the answer, if there was one.
+fn rewrapped(
+    mut main: Main,
+    op: fn(&mut Main) -> Option<Value>,
+    new_password: &str,
+    (hook, fails, fault): (
+        Option<&str>,
+        Option<&str>,
+        Option<(&'static str, Fault)>,
+    ),
+    pair: Pair,
+) -> Option<Value> {
+    let label = format!("{hook:?} {fails:?} {fault:?}");
+    let old_vault = std::fs::read(main.vault_path()).ok();
+    let mut env = Vec::new();
+    if let Some(step) = hook {
+        env.push(("FREEDOM_CORED_TEST_SECRETS_CRASH", step));
+    }
+    if let Some(steps) = fails {
+        env.push(("FREEDOM_CORED_TEST_SECRETS_FAIL", steps));
+    }
+    main.start(&env);
+    if let Some((op, fault)) = fault {
+        main.keychain.faults.insert(op, fault);
+    }
+    let response = op(&mut main);
+    if hook.is_some() {
+        assert!(response.is_none(), "{label}: answered {response:?}");
+        assert_eq!(main.core().exit_code(Duration::from_secs(10)), 99, "{label}");
+        main.core = None;
+    } else {
+        let answer = response.clone().expect("an answer");
+        assert_eq!(
+            answer["result"].is_object(),
+            pair == Pair::New,
+            "{label}: {answer}"
+        );
+        main.keychain.faults.clear();
+        // A failed fold or rollback leaves an entry naming no vault, for
+        // the next start.
+        let tidy = !fails.is_some_and(|f| f.contains("fold") || f.contains("rollback"));
+        main.pair_holds(old_vault.as_deref(), new_password, pair, tidy, &label);
+        main.stop();
+    }
+    main.file_names_the_keychain();
+    main.keychain.faults.clear();
+    main.start(&[]);
+    main.file_names_the_keychain();
+    main.drained();
+    main.only_the_key_in_use();
+    main.no_delete_left();
+    main.pair_holds(old_vault.as_deref(), new_password, pair, true, &label);
+    response
+}
+
+fn hook(step: &str) -> (Option<&str>, Option<&str>, Option<(&'static str, Fault)>) {
+    (Some(step), None, None)
+}
+
+fn fails(steps: &str) -> (Option<&str>, Option<&str>, Option<(&'static str, Fault)>) {
+    (None, Some(steps), None)
+}
+
+fn fault(
+    op: &'static str,
+    fault: Fault,
+) -> (
+    Option<&'static str>,
+    Option<&'static str>,
+    Option<(&'static str, Fault)>,
+) {
+    (None, None, Some((op, fault)))
+}
+
+#[test]
+fn create_and_import_with_quick_unlock() {
+    let mut main = Main::new();
+    main.start(&[]);
+    let created = main.create_quick();
+    assert!(created["result"]["mnemonic_b64"].is_string(), "{created}");
+    assert_eq!(main.keychain.calls, ["create"]);
+    // The entry is `quick-unlock`, bound to the new vault's digest.
+    let digest = main.vault_digest().unwrap();
+    assert_eq!(
+        main.entries(),
+        BTreeMap::from([("quick-unlock".to_owned(), digest.clone())])
+    );
+    assert_eq!(
+        main.status(),
+        json!({ "enabled": true, "policy": "unattended", "available": true })
+    );
+    // Unlocked (create unlocks), then locked.
+    main.events();
+    for _ in 0..2 {
+        let unlocked = main.call("quick_unlock.unlock", json!({}));
+        assert!(unlocked["result"]["addresses"].is_object(), "{unlocked}");
+        assert_eq!(main.events(), ["vault.unlocked"]);
+        main.call("vault.lock", json!({}));
+        main.events();
+    }
+    // An import over it, with the credential: the old vault's entry is
+    // replaced under the same key, bound to the new vault.
+    let imported = import_quick_op(&mut main).unwrap();
+    assert!(imported["result"]["addresses"].is_object(), "{imported}");
+    assert_eq!(main.keychain.calls, ["create", "open", "open", "open"]);
+    let digest = main.vault_digest().unwrap();
+    assert_eq!(
+        main.entries(),
+        BTreeMap::from([("quick-unlock".to_owned(), digest)])
+    );
+    assert_eq!(main.keychain.items.len(), 1);
+    let unlocked = main.call("quick_unlock.unlock", json!({}));
+    assert!(unlocked["result"].is_object(), "{unlocked}");
+    assert!(main.verifies(NEW_PASSWORD));
+    // Without the credential, as before: the secrets file isn't touched,
+    // and the new vault has no quick unlock.
+    let secrets = std::fs::read(main.secrets_path()).unwrap();
+    let imported = main.call(
+        "vault.import",
+        json!({ "password_b64": b64(PASSWORD), "mnemonic_b64": b64(ABANDON), "overwrite": true, "quick_unlock": false }),
+    );
+    assert!(imported["result"].is_object(), "{imported}");
+    assert_eq!(std::fs::read(main.secrets_path()).unwrap(), secrets);
+    assert_eq!(main.status()["enabled"], false);
+    // `quick_unlock` is a boolean or absent.
+    for bad in [json!("yes"), json!(1), Value::Null] {
+        let refused = main.call(
+            "vault.import",
+            json!({ "password_b64": b64(PASSWORD), "mnemonic_b64": b64(ABANDON), "overwrite": true, "quick_unlock": bad }),
+        );
+        assert_eq!(error_code(&refused), "invalid_argument", "{bad}: {refused}");
+    }
+    // A create with the credential into an empty profile, with no key made
+    // yet: `pending`, `create`, then the entry.
+    let mut main = Main::new();
+    main.start(&[]);
+    let imported = main.call(
+        "vault.import",
+        json!({ "password_b64": b64(PASSWORD), "mnemonic_b64": b64(ABANDON), "quick_unlock": true }),
+    );
+    assert!(imported["result"].is_object(), "{imported}");
+    assert_eq!(main.keychain.calls, ["create"]);
+    assert_eq!(main.status()["enabled"], true);
+}
+
+#[test]
+fn quick_unlock_on_create_needs_a_key_store() {
+    if cfg!(target_os = "macos") {
+        return;
+    }
+    let mut main = Main::new();
+    main.start_with(&[]);
+    for (method, params) in [
+        (
+            "vault.create",
+            json!({ "password_b64": b64(PASSWORD), "words": 12, "quick_unlock": true }),
+        ),
+        (
+            "vault.import",
+            json!({ "password_b64": b64(PASSWORD), "mnemonic_b64": b64(ABANDON), "quick_unlock": true }),
+        ),
+    ] {
+        let refused = main.call(method, params);
+        assert_eq!(error_code(&refused), "key_store_unavailable", "{refused}");
+        assert_eq!(refused["error"]["data"]["reason"], "unsupported");
+        assert!(!main.vault_path().exists(), "{method}");
+        assert!(!main.secrets_path().exists(), "{method}");
+    }
+    // The parity checks come first: a weak password is `weak_password`.
+    let refused = main.call(
+        "vault.create",
+        json!({ "password_b64": b64("short"), "words": 12, "quick_unlock": true }),
+    );
+    assert_eq!(error_code(&refused), "weak_password", "{refused}");
+    assert!(main.keychain.calls.is_empty());
+}
+
+/// Design 0013, "The re-wrap": a password change keeps quick unlock, under
+/// the same key, bound to the new vault. Unlock works unlocked and locked,
+/// the old entry never opens the new vault, and enroll takes the new
+/// password, not the old.
+#[test]
+fn a_password_change_rewraps_quick_unlock() {
+    let mut main = enrolled();
+    let old_secrets = std::fs::read(main.secrets_path()).unwrap();
+    let old_digest = main.vault_digest().unwrap();
+    let calls = main.keychain.calls.len();
+    // A wrong current password: refused before anything, and throttled as
+    // `vault.unlock` is.
+    let wrong = main.change("wrongpass", NEW_PASSWORD);
+    assert_eq!(error_code(&wrong), "incorrect_password", "{wrong}");
+    assert_eq!(main.keychain.calls.len(), calls);
+    assert_eq!(std::fs::read(main.secrets_path()).unwrap(), old_secrets);
+    let changed = main.change(PASSWORD, NEW_PASSWORD);
+    assert_eq!(changed["result"], json!({}), "{changed}");
+    // One open, no new key: the entry is `quick-unlock`, bound to the new
+    // vault.
+    assert_eq!(&main.keychain.calls[calls..], ["open"]);
+    assert_eq!(main.keychain.items.len(), 1);
+    let new_digest = main.vault_digest().unwrap();
+    assert_ne!(new_digest, old_digest);
+    assert_eq!(
+        main.entries(),
+        BTreeMap::from([("quick-unlock".to_owned(), new_digest.clone())])
+    );
+    assert_eq!(main.status()["enabled"], true);
+    // Unlocked (the change kept the lock state), then locked.
+    main.events();
+    for _ in 0..2 {
+        let unlocked = main.call("quick_unlock.unlock", json!({}));
+        assert!(unlocked["result"]["addresses"].is_object(), "{unlocked}");
+        assert_eq!(main.events(), ["vault.unlocked"]);
+        main.call("vault.lock", json!({}));
+        main.events();
+    }
+    let phrase = main.call("quick_unlock.export_mnemonic", json!({}));
+    let phrase = STANDARD
+        .decode(phrase["result"]["mnemonic_b64"].as_str().unwrap())
+        .unwrap();
+    assert_eq!(phrase, ABANDON.as_bytes());
+    // The old entry never opens the new vault: as it was, it is bound to
+    // the old vault, and quick unlock is off for this one; bound to this
+    // one by hand, its associated data still names the old vault.
+    let new_secrets = std::fs::read(main.secrets_path()).unwrap();
+    std::fs::write(main.secrets_path(), &old_secrets).unwrap();
+    let unlock = main.call("quick_unlock.unlock", json!({}));
+    assert_eq!(error_code(&unlock), "not_found", "{unlock}");
+    let moved = String::from_utf8(old_secrets.clone())
+        .unwrap()
+        .replace(&old_digest, &new_digest);
+    assert!(SecretsFile::parse(moved.as_bytes()).is_ok());
+    std::fs::write(main.secrets_path(), moved).unwrap();
+    let unlock = main.call("quick_unlock.unlock", json!({}));
+    assert_eq!(error_code(&unlock), "key_store_unavailable", "{unlock}");
+    assert_eq!(unlock["error"]["data"]["reason"], "entry_refused", "{unlock}");
+    std::fs::write(main.secrets_path(), &new_secrets).unwrap();
+    // Enroll checks against the new vault.
+    let wrong = main.shell(
+        "quick_unlock.enroll",
+        json!({ "password_b64": b64(PASSWORD) }),
+    );
+    assert_eq!(error_code(&wrong), "incorrect_password", "{wrong}");
+    let enrolled = main.shell(
+        "quick_unlock.enroll",
+        json!({ "password_b64": b64(NEW_PASSWORD) }),
+    );
+    assert_eq!(enrolled["result"], json!({}), "{enrolled}");
+    // And it survives a restart.
+    main.start(&[]);
+    let unlocked = main.call("quick_unlock.unlock", json!({}));
+    assert!(unlocked["result"].is_object(), "{unlocked}");
+    // A change without quick unlock touches neither the secrets file nor
+    // the key store.
+    assert_eq!(
+        main.call("quick_unlock.disable", json!({}))["result"],
+        json!({})
+    );
+    main.drained();
+    let secrets = std::fs::read(main.secrets_path()).unwrap();
+    let calls = main.keychain.calls.len();
+    let changed = main.change(NEW_PASSWORD, PASSWORD);
+    assert_eq!(changed["result"], json!({}), "{changed}");
+    assert_eq!(std::fs::read(main.secrets_path()).unwrap(), secrets);
+    assert_eq!(main.keychain.calls.len(), calls);
+}
+
+#[test]
+fn a_create_with_quick_unlock_killed_or_failed_at_each_step() {
+    for (step, pair) in [
+        ("before-stage-pending", Pair::Old),
+        ("after-stage-pending", Pair::Old),
+        ("before-stage", Pair::Old),
+        ("after-stage", Pair::Old),
+        ("before-vault-rename", Pair::Old),
+        ("after-vault-rename", Pair::New),
+    ] {
+        rewrapped(Main::new(), create_quick_op, PASSWORD, hook(step), pair);
+    }
+    for (steps, code) in [
+        ("stage-pending", "storage"),
+        ("stage", "storage"),
+        ("vault-claim", "deadline"),
+        ("vault-rename", "storage"),
+        ("vault-rename,rollback", "storage"),
+    ] {
+        let answer = rewrapped(
+            Main::new(),
+            create_quick_op,
+            PASSWORD,
+            fails(steps),
+            Pair::Old,
+        )
+        .unwrap();
+        assert_eq!(error_code(&answer), code, "{steps}: {answer}");
+    }
+    // The rollback's own write, killed before and after it.
+    for step in ["before-rollback", "after-rollback"] {
+        rewrapped(
+            Main::new(),
+            create_quick_op,
+            PASSWORD,
+            (Some(step), Some("vault-rename"), None),
+            Pair::Old,
+        );
+    }
+    for failure in [Fault::Hold, Fault::Timeout, Fault::KilledAfterStore] {
+        let answer = rewrapped(
+            Main::new(),
+            create_quick_op,
+            PASSWORD,
+            fault("create", failure),
+            Pair::Old,
+        )
+        .unwrap();
+        assert_eq!(answer["error"]["data"]["reason"], "timeout", "{answer}");
+    }
+}
+
+/// The two re-wraps over a vault with quick unlock: the new vault's
+/// credential is `quick-unlock.next` until the fold.
+fn rewrap_matrix(op: fn(&mut Main) -> Option<Value>) {
+    for (step, pair) in [
+        ("before-stage", Pair::Old),
+        ("after-stage", Pair::Old),
+        ("before-vault-rename", Pair::Old),
+        ("after-vault-rename", Pair::New),
+        ("before-fold", Pair::New),
+        ("after-fold", Pair::New),
+    ] {
+        rewrapped(enrolled_stopped(), op, NEW_PASSWORD, hook(step), pair);
+    }
+    for (steps, pair) in [
+        ("stage", Pair::Old),
+        ("vault-claim", Pair::Old),
+        ("vault-rename", Pair::Old),
+        ("vault-rename,rollback", Pair::Old),
+        ("fold", Pair::New),
+    ] {
+        rewrapped(enrolled_stopped(), op, NEW_PASSWORD, fails(steps), pair);
+    }
+    for step in ["before-rollback", "after-rollback"] {
+        rewrapped(
+            enrolled_stopped(),
+            op,
+            NEW_PASSWORD,
+            (Some(step), Some("vault-rename"), None),
+            Pair::Old,
+        );
+    }
+    for failure in [Fault::Hold, Fault::Timeout] {
+        let answer = rewrapped(
+            enrolled_stopped(),
+            op,
+            NEW_PASSWORD,
+            fault("open", failure),
+            Pair::Old,
+        )
+        .unwrap();
+        assert_eq!(answer["error"]["data"]["reason"], "timeout", "{answer}");
+    }
+}
+
+#[test]
+fn an_import_with_quick_unlock_killed_or_failed_at_each_step() {
+    rewrap_matrix(import_quick_op);
+}
+
+#[test]
+fn a_password_change_killed_or_failed_at_each_step() {
+    rewrap_matrix(change_op);
+}
+
+/// The key under the old vault's credential is dead: the re-wrap replaces
+/// it as enroll does. The `pending` write takes the dead entry off and
+/// moves the key into `forget`; `create`; the commit writes the new
+/// vault's entry under the new key; then the vault. Dead two ways: its item
+/// gone (removed by hand), or still there but `invalidated` until the
+/// restart, so that the old item's own `forget` runs.
+#[test]
+fn a_rewrap_over_a_dead_key_killed_at_each_step() {
+    let gone = || {
+        let mut main = enrolled_stopped();
+        main.keychain.items.clear();
+        main
+    };
+    let invalidated = || {
+        let mut main = enrolled_stopped();
+        main.keychain.faults.insert("open", Fault::Invalidated);
+        main
+    };
+    for (step, gone_pair, invalidated_pair) in [
+        // Before the `pending` write the old entry stands: dead, its item
+        // gone; whole again once the fault clears.
+        ("before-stage-pending", Pair::OldOff, Pair::Old),
+        ("after-stage-pending", Pair::OldOff, Pair::OldOff),
+        ("before-stage", Pair::OldOff, Pair::OldOff),
+        ("after-stage", Pair::OldOff, Pair::OldOff),
+        ("before-vault-rename", Pair::OldOff, Pair::OldOff),
+        ("after-vault-rename", Pair::New, Pair::New),
+    ] {
+        if step != "before-stage-pending" {
+            rewrapped(gone(), change_op, NEW_PASSWORD, hook(step), gone_pair);
+        }
+        rewrapped(
+            invalidated(),
+            change_op,
+            NEW_PASSWORD,
+            hook(step),
+            invalidated_pair,
+        );
+    }
+    for failure in [Fault::Hold, Fault::KilledAfterStore] {
+        rewrapped(
+            invalidated(),
+            change_op,
+            NEW_PASSWORD,
+            fault("create", failure),
+            Pair::OldOff,
+        );
+    }
+    // Uninterrupted: a new key, and the old one forgotten.
+    rewrapped(gone(), change_op, NEW_PASSWORD, (None, None, None), Pair::New);
+    rewrapped(
+        invalidated(),
+        import_quick_op,
+        NEW_PASSWORD,
+        (None, None, None),
+        Pair::New,
+    );
+}
+
+/// The credential under its second name: a re-wrap killed between its
+/// vault's rename and its fold leaves the new vault's entry as
+/// `quick-unlock.next`, and the start removes the old vault's. Quick unlock
+/// works from it; enroll, a change, disable and the vault delete each take
+/// it in their one write.
+#[test]
+fn the_credential_under_its_second_name() {
+    let next = || {
+        let mut main = enrolled_stopped();
+        main.start(&[("FREEDOM_CORED_TEST_SECRETS_CRASH", "before-fold")]);
+        assert!(change_op(&mut main).is_none());
+        assert_eq!(main.core().exit_code(Duration::from_secs(10)), 99);
+        main.core = None;
+        main.start(&[]);
+        let digest = main.vault_digest().unwrap();
+        assert_eq!(
+            main.entries(),
+            BTreeMap::from([("quick-unlock.next".to_owned(), digest)])
+        );
+        assert_eq!(
+            main.status(),
+            json!({ "enabled": true, "policy": "unattended", "available": true })
+        );
+        let unlocked = main.call("quick_unlock.unlock", json!({}));
+        assert!(unlocked["result"].is_object(), "{unlocked}");
+        main
+    };
+    let only_main = |main: &Main| {
+        let digest = main.vault_digest().unwrap();
+        assert_eq!(
+            main.entries(),
+            BTreeMap::from([("quick-unlock".to_owned(), digest)])
+        );
+    };
+    // Enroll: `quick-unlock`, and `quick-unlock.next` gone, in one write.
+    let mut main = next();
+    let enrolled = main.shell(
+        "quick_unlock.enroll",
+        json!({ "password_b64": b64(NEW_PASSWORD) }),
+    );
+    assert_eq!(enrolled["result"], json!({}), "{enrolled}");
+    only_main(&main);
+    assert_eq!(main.keychain.items.len(), 1);
+    // A change from it: staged as `quick-unlock`, and the old vault's
+    // `quick-unlock.next` gone after the commit.
+    let mut main = next();
+    let changed = main.change(NEW_PASSWORD, PASSWORD);
+    assert_eq!(changed["result"], json!({}), "{changed}");
+    only_main(&main);
+    let unlocked = main.call("quick_unlock.unlock", json!({}));
+    assert!(unlocked["result"].is_object(), "{unlocked}");
+    assert!(main.verifies(PASSWORD));
+    // Killed between that change's staged write and its rename: the old
+    // vault keeps `quick-unlock.next`, its credential.
+    let mut main = next();
+    main.start(&[("FREEDOM_CORED_TEST_SECRETS_CRASH", "after-stage")]);
+    assert!(
+        main.try_call(
+            "chrome",
+            "vault.change_password",
+            json!({ "password_b64": b64(NEW_PASSWORD), "new_password_b64": b64(PASSWORD) }),
+        )
+        .is_none()
+    );
+    assert_eq!(main.core().exit_code(Duration::from_secs(10)), 99);
+    main.core = None;
+    main.start(&[]);
+    let digest = main.vault_digest().unwrap();
+    assert_eq!(
+        main.entries(),
+        BTreeMap::from([("quick-unlock.next".to_owned(), digest)])
+    );
+    assert!(main.verifies(NEW_PASSWORD));
+    let unlocked = main.call("quick_unlock.unlock", json!({}));
+    assert!(unlocked["result"].is_object(), "{unlocked}");
+    // Disable: gone, and its key forgotten.
+    let mut main = next();
+    assert_eq!(
+        main.call("quick_unlock.disable", json!({}))["result"],
+        json!({})
+    );
+    assert!(main.entries().is_empty());
+    main.drained();
+    assert!(main.keychain.items.is_empty());
+    // The vault delete: in its journal, and its key forgotten.
+    let mut main = next();
+    let deleted = main.call(
+        "vault.delete",
+        json!({ "password_b64": b64(NEW_PASSWORD) }),
+    );
+    assert_eq!(deleted["result"], json!({}), "{deleted}");
+    assert!(main.entries().is_empty());
+    assert!(!main.vault_path().exists());
+    main.drained();
+    assert!(main.keychain.items.is_empty());
+    main.no_delete_left();
+}
+
+/// A re-wrap that can't keep its promise is refused with nothing changed:
+/// a secrets file that doesn't read, a full `forget` list, a password too
+/// long for quick unlock. Without quick unlock, nothing of this applies.
+#[test]
+fn a_rewrap_refused_with_nothing_changed() {
+    let mut main = enrolled();
+    let vault = std::fs::read(main.vault_path()).unwrap();
+    let secrets = std::fs::read(main.secrets_path()).unwrap();
+    // A malformed secrets file: the change can't tell whether the vault
+    // has a credential, and is refused.
+    std::fs::write(main.secrets_path(), b"{\"version\":1").unwrap();
+    let refused = main.change(PASSWORD, NEW_PASSWORD);
+    assert_eq!(error_code(&refused), "storage", "{refused}");
+    assert_eq!(
+        refused["error"]["data"],
+        json!({ "kind": "malformed", "file": "secrets" })
+    );
+    assert_eq!(std::fs::read(main.vault_path()).unwrap(), vault);
+    let refused = main.call(
+        "vault.import",
+        json!({ "password_b64": b64(NEW_PASSWORD), "mnemonic_b64": b64(LEGAL), "overwrite": true, "quick_unlock": true }),
+    );
+    assert_eq!(error_code(&refused), "storage", "{refused}");
+    assert_eq!(std::fs::read(main.vault_path()).unwrap(), vault);
+    std::fs::write(main.secrets_path(), &secrets).unwrap();
+    // A new password past the 1 KiB quick unlock holds: refused while
+    // quick unlock is on.
+    let long = "p".repeat(1025);
+    let refused = main.change(PASSWORD, &long);
+    assert_eq!(error_code(&refused), "invalid_argument", "{refused}");
+    assert_eq!(std::fs::read(main.vault_path()).unwrap(), vault);
+    assert_eq!(std::fs::read(main.secrets_path()).unwrap(), secrets);
+    // A full `forget` list, its forgets failing: a create with quick unlock
+    // is refused before its vault, as the `create` it needs.
+    let mut main = Main::new();
+    main.start(&[]);
+    main.import();
+    main.keychain.faults.insert("forget", Fault::Timeout);
+    for _ in 0..4 {
+        assert_eq!(main.enroll()["result"], json!({}));
+        assert_eq!(
+            main.call("quick_unlock.disable", json!({}))["result"],
+            json!({})
+        );
+    }
+    let deleted = main.call("vault.delete", json!({ "password_b64": b64(PASSWORD) }));
+    assert_eq!(deleted["result"], json!({}), "{deleted}");
+    let before = std::fs::read(main.secrets_path()).unwrap();
+    let refused = main.create_quick();
+    assert_eq!(error_code(&refused), "key_store_unavailable", "{refused}");
+    assert_eq!(refused["error"]["data"]["reason"], "forget_backlog");
+    assert!(!main.vault_path().exists());
+    assert_eq!(std::fs::read(main.secrets_path()).unwrap(), before);
+    // Once a forget works, so does the create.
+    main.keychain.faults.clear();
+    let created = main.create_quick();
+    assert!(created["result"].is_object(), "{created}");
+    main.drained();
+    main.only_the_key_in_use();
+    assert_eq!(main.status()["enabled"], true);
 }
