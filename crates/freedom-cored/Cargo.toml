@@ -36,6 +36,10 @@ name = "dweb"
 required-features = ["testhooks"]
 
 [[test]]
+name = "device_remember"
+required-features = ["testhooks"]
+
+[[test]]
 name = "fragments"
 required-features = ["testhooks"]
 

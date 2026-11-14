@@ -634,6 +634,7 @@ fn only_protocol_2_is_spoken() {
         "approval.touch",
         "approval.grants",
         "approval.forget_account",
+        "approval.remember",
         "dweb.open",
         "dweb.verify",
         "dweb.forget",

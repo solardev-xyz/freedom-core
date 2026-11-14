@@ -51,6 +51,10 @@
 //!   file fails at that step as if the OS had failed it (design 0012, "The
 //!   files": a failed write). Read at each write, so a test turns it on
 //!   and off while the core runs.
+//! - `FREEDOM_CORED_TEST_RECEIPT_TTL_MS` replaces a device send's receipt's
+//!   10-minute life (design 0012, "A device send's rule"), so a test sees
+//!   one expire over the wire, which has no clock to inject. Read once, as
+//!   the core starts.
 //! - `FREEDOM_CORED_TEST_METHODS` enables the `test.*` methods
 //!   (`testmethods`), which make responses of any size. Builds without the
 //!   feature don't compile them, nor this hook.
@@ -239,6 +243,16 @@ pub fn swap(stage: &str, path: &std::path::Path) {
     {
         let _ = std::fs::rename(replacement, path);
     }
+}
+
+#[cfg(feature = "testhooks")]
+pub fn receipt_ttl_ms(default: u64) -> u64 {
+    millis("FREEDOM_CORED_TEST_RECEIPT_TTL_MS").unwrap_or(default)
+}
+
+#[cfg(not(feature = "testhooks"))]
+pub fn receipt_ttl_ms(default: u64) -> u64 {
+    default
 }
 
 #[cfg(feature = "testhooks")]
