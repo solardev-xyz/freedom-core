@@ -1163,8 +1163,9 @@ fn soc_refused(reply: &Value, reason: &str) {
 /// origin, read from main's file at each request: connected for `user`;
 /// for `auto` also `agent` false and the request's flag, `feeds` for a feed
 /// write and `signing` for a raw SOC. Main's own SOCs under `shell` sign
-/// as before; a page's without an authorization too, until APR-4c. The
-/// chrome's are refused (APR-4a).
+/// as before; a page's without an authorization is refused (APR-4c), and
+/// so is the chrome's (APR-4a). `tests/enforced_soc.rs` has the APR-4
+/// row's cases.
 #[test]
 fn a_page_s_soc_needs_its_swarm_grant() {
     let root = tempfile::tempdir().unwrap();
@@ -1301,17 +1302,18 @@ fn a_page_s_soc_needs_its_swarm_grant() {
     main_writes_swarm(&dir, &swarm_file(&[(SITE, every)]));
 
     // Main's own SOCs take no Swarm grant: `shell` signs as before, and is
-    // refused one. The chrome's SOC, which no wallet-kind token binds, is
-    // refused without one (APR-4a).
+    // refused one (`no_rule`, as a standing rule from another caller). The
+    // chrome's SOC, which no wallet-kind token binds, is refused without
+    // one (APR-4a).
     signs(&sign_soc(&mut core, &mut id, &shell(), None));
     soc_refused(&sign_soc(&mut core, &mut id, &chrome(), None), "no_token");
     for context in [shell(), chrome()] {
         let reply = sign_soc(&mut core, &mut id, &context, soc_auth("user", "feed"));
-        refused(&reply, "forbidden");
+        soc_refused(&reply, "no_rule");
     }
-    // A page without an authorization signs as before (APR-3; APR-4c
-    // requires one), but not without its `PageContext`.
-    signs(&sign_soc(&mut core, &mut id, &site(), None));
+    // A page without an authorization is refused (APR-4c), and one
+    // without its `PageContext` is malformed.
+    soc_refused(&sign_soc(&mut core, &mut id, &site(), None), "no_token");
     let bare = json!({ "caller": "page" });
     refused(
         &sign_soc(&mut core, &mut id, &bare, None),
@@ -1341,9 +1343,10 @@ fn a_page_s_soc_needs_its_swarm_grant() {
 }
 
 /// A page's SOC is refused before any key is derived: with the vault
-/// locked, a request its grant doesn't cover is `not_authorized`, and one
-/// it covers `vault_locked`, as main's own. A token presented to
-/// `swarm.sign_soc`, which no token kind binds, is burnt.
+/// locked, a request its grant doesn't cover, or with no authorization, is
+/// `not_authorized`, and one it covers `vault_locked`, as main's own. A
+/// token presented to `swarm.sign_soc`, which no token kind binds, is
+/// burnt.
 #[test]
 fn a_page_s_soc_is_refused_before_the_key() {
     let root = tempfile::tempdir().unwrap();
@@ -1395,7 +1398,8 @@ fn a_page_s_soc_is_refused_before_the_key() {
         ),
         "no_rule",
     );
-    for authorization in [soc_auth("auto", "feed"), soc_auth("user", "raw"), None] {
+    soc_refused(&sign_soc(&mut core, &mut id, &site(), None), "no_token");
+    for authorization in [soc_auth("auto", "feed"), soc_auth("user", "raw")] {
         refused(
             &sign_soc(&mut core, &mut id, &site(), authorization),
             "vault_locked",
