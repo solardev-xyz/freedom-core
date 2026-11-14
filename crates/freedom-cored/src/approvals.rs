@@ -15,9 +15,15 @@
 //!   whatever the outcome, a malformed request's included.
 //! - `approval.spend { token, kind, account, payload, handle? }` spends one
 //!   under the caller kind that minted it; a `safe-send`'s or
-//!   `safe-message`'s gives a Safe approval. `{ standing, … }` (a Safe
+//!   `safe-message`'s gives a Safe approval, and a `dapp-send`'s with
+//!   "Always allow" ticked, under `page`, a finalize receipt (#373): a
+//!   device send, which the core doesn't sign. `{ standing, … }` (a Safe
 //!   message a rule answers) reads the dApp grants, which APR-3b brings:
 //!   until then no rule answers it.
+//! - `approval.remember { receipt }` (#373), from the page the receipt was
+//!   given to, once the device signed and main recorded the send: it takes
+//!   the receipt and writes the rule its token's "Always allow" asked for,
+//!   as `sign.transaction` writes a vault send's (`token-remember`).
 //! - `approval.end { safe }` ends a Safe approval, and answers `{}` whatever
 //!   it was. Every method here runs inline on the event loop, as `sign.*`
 //!   does, so a signature that presented the approval has finished before
@@ -45,12 +51,15 @@
 //!   file has moved. Each change sends one `approval.changed { store, key
 //!   }`.
 //!
-//! Tokens and Safe approvals are kept in memory and never logged.
+//! Tokens, Safe approvals and receipts are kept in memory and never logged.
 
 use std::collections::VecDeque;
 use std::sync::OnceLock;
 
 use fc_approval::fee::{Evidence, Fees, Verdict, at_approval};
+use fc_approval::receipt::{
+    Document, ProposedRule, RECEIPT_TTL_MS, Receipt, ReceiptRefusal, Receipts,
+};
 use fc_approval::safe::{
     Approved, ExecutorCheck, Holder, OwnerCheck, SafeApprovals, SafeRefusal, SafeSigned,
 };
@@ -74,7 +83,7 @@ use crate::grants::{Grants, StoreFile, WriteFailure, Written};
 use crate::rng::OsRng;
 
 /// The methods this module serves.
-pub const METHODS: [&str; 10] = [
+pub const METHODS: [&str; 11] = [
     "approval.issue",
     "approval.discard",
     "approval.spend",
@@ -85,6 +94,7 @@ pub const METHODS: [&str; 10] = [
     "approval.touch",
     "approval.grants",
     "approval.forget_account",
+    "approval.remember",
 ];
 
 /// How many chains' fee evidence is kept (the reference's `MAX_CHAINS`).
@@ -107,6 +117,8 @@ pub struct Clocks {
 pub struct Approvals {
     tokens: Tokens,
     safes: SafeApprovals,
+    /// A device send's finalize receipts (#373).
+    receipts: Receipts,
     fees: FeeEvidence,
     /// The four permission files.
     grants: Grants,
@@ -121,6 +133,7 @@ impl std::fmt::Debug for Approvals {
         f.debug_struct("Approvals")
             .field("tokens", &self.tokens)
             .field("safes", &self.safes)
+            .field("receipts", &self.receipts)
             .finish_non_exhaustive()
     }
 }
@@ -236,6 +249,16 @@ fn safe_refusal(refusal: SafeRefusal) -> ErrorBody {
         SafeRefusal::Unknown => "unknown_token",
         SafeRefusal::Mismatch => "mismatch",
         SafeRefusal::FeeCheck => "fee_check",
+    };
+    not_authorized(reason, refusal.to_string())
+}
+
+/// A receipt that writes nothing (#373), in the approval errors' reasons.
+fn receipt_refusal(refusal: ReceiptRefusal) -> ErrorBody {
+    let reason = match refusal {
+        ReceiptRefusal::Unknown => "unknown_token",
+        ReceiptRefusal::Expired => "expired",
+        ReceiptRefusal::Mismatch => "mismatch",
     };
     not_authorized(reason, refusal.to_string())
 }
@@ -409,13 +432,15 @@ struct IssuedReply<'a> {
     token: &'a str,
 }
 
-/// `approval.spend`'s result; a Safe approval's id goes last, as a token
-/// does.
+/// `approval.spend`'s result; a Safe approval's id, or a receipt, goes
+/// last, as a token does.
 #[derive(Serialize)]
 struct SpentReply<'a> {
     bound: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     safe: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    receipt: Option<&'a str>,
 }
 
 fn secret_reply<R: Serialize>(
@@ -445,6 +470,15 @@ pub fn presented_token(params: &Value, nested: bool) -> Option<Zeroizing<String>
         .get("token")
         .and_then(Value::as_str)
         .map(|token| Zeroizing::new(token.to_owned()))
+}
+
+/// The receipt `approval.remember` presents, kept to be taken however the
+/// request ends.
+fn presented_receipt(params: &Value) -> Option<Zeroizing<String>> {
+    params
+        .get("receipt")
+        .and_then(Value::as_str)
+        .map(|receipt| Zeroizing::new(receipt.to_owned()))
 }
 
 /// What `sign.*` signs, for its authorization: its public work done.
@@ -486,15 +520,13 @@ pub enum After {
     Remember(Remember),
 }
 
-/// What a flagged `dapp-send` asks to remember.
+/// What a flagged `dapp-send` asks to remember: at `sign.transaction`, or
+/// from a device send's receipt at `approval.remember`.
 #[derive(Debug)]
 pub struct Remember {
     key: String,
     account: u32,
-    to: Option<[u8; 20]>,
-    selector: Option<[u8; 4]>,
-    chain_id: Option<u64>,
-    value: U256,
+    rule: ProposedRule,
 }
 
 impl Approvals {
@@ -502,6 +534,7 @@ impl Approvals {
         Approvals {
             tokens: Tokens::new(limits()),
             safes: SafeApprovals::new(),
+            receipts: Receipts::with_ttl(crate::testhooks::receipt_ttl_ms(RECEIPT_TTL_MS)),
             fees: FeeEvidence::default(),
             grants: Grants::new(),
             standing: Standing::new(),
@@ -581,6 +614,16 @@ impl Approvals {
             "approval.touch" => self.touch(id, params, context, clocks),
             "approval.grants" => self.records(id, params, clocks),
             "approval.forget_account" => self.forget_account(id, params),
+            "approval.remember" => {
+                // Taken at its presentation, whatever the outcome: a
+                // malformed request's too.
+                let presented = presented_receipt(params);
+                let reply = self.remember_receipt(id, params, context, clocks);
+                if let Some(receipt) = presented {
+                    self.receipts.discard(&receipt);
+                }
+                reply
+            }
             _ => Err(invalid("unknown method")),
         }
     }
@@ -746,9 +789,45 @@ impl Approvals {
             payload,
             page: page.as_ref(),
         };
-        self.tokens
+        let spent = self
+            .tokens
             .spend_as(minter(context.caller), token, &request, clocks.vault_ms)
             .map_err(refusal)?;
+        // A flagged `dapp-send` spent here is a device's (a Ledger, a
+        // phone), which the core doesn't sign: its rule waits for the
+        // receipt main presents once the device signed and the send is
+        // recorded (#373). The rule is the one `sign.transaction` would
+        // write for the token's transaction.
+        if let Some(page) = &page
+            && spent.kind == Kind::DappSend
+            && spent.remember
+        {
+            let receipt = Receipt {
+                document: Document {
+                    origin: page.origin.clone(),
+                    frame: page.frame,
+                    navigation: page.navigation,
+                },
+                account: account(fields.get("account"), "account")?,
+                rule: send_tx(payload)
+                    .map(|tx| ProposedRule::of(&tx))
+                    .unwrap_or_default(),
+            };
+            let receipt = self
+                .receipts
+                .record(receipt, clocks.vault_ms, &mut OsRng)
+                .map_err(approval_error)?
+                .to_text();
+            return secret_reply(
+                id,
+                &SpentReply {
+                    bound: true,
+                    safe: None,
+                    receipt: Some(&receipt),
+                },
+                0,
+            );
+        }
         let approved = match kind {
             Kind::SafeSend => Some(Approved::send(payload).map_err(approval_error)?),
             Kind::SafeMessage => Some(Approved::message(payload).map_err(approval_error)?),
@@ -760,6 +839,7 @@ impl Approvals {
                 &SpentReply {
                     bound: true,
                     safe: None,
+                    receipt: None,
                 },
             );
         };
@@ -781,6 +861,7 @@ impl Approvals {
             &SpentReply {
                 bound: true,
                 safe: Some(&safe),
+                receipt: None,
             },
             0,
         )
@@ -983,10 +1064,7 @@ impl Approvals {
                         Ok(After::Remember(Remember {
                             key: page.origin.clone(),
                             account,
-                            to: tx.to().copied(),
-                            selector: tx.data().first_chunk::<4>().copied(),
-                            chain_id: tx.chain_id().to_u64(),
-                            value: *tx.value(),
+                            rule: ProposedRule::of(tx),
                         }))
                     }
                     _ => Ok(After::Nothing),
@@ -1468,6 +1546,7 @@ impl Approvals {
             &SpentReply {
                 bound: true,
                 safe: Some(&safe),
+                receipt: None,
             },
             0,
         )
@@ -1644,16 +1723,23 @@ impl Approvals {
         }
         let what = &fields["what"];
         let flag = what.get("flag").and_then(Value::as_str);
+        // A device send's receipts for the key go with any dApp revoke that
+        // stands, saved or not (#373): a narrowing after the spend wins over
+        // the decision before it.
+        let forget = |this: &mut Self| this.receipts.forget_key(&key);
         let written = match (kind, what.as_str()) {
             // The buckets go once the revoke stands, saved or not: a grant
             // made again starts full.
             (StoreKind::Dapp, Some("grant")) => self.write_then::<DappStore, _>(
                 &key,
                 |store| store.revoke(&key),
-                |this| this.standing.forget_dapp(&key),
+                |this| {
+                    this.standing.forget_dapp(&key);
+                    forget(this);
+                },
             )?,
             (StoreKind::Dapp, Some("signing")) => {
-                self.write::<DappStore, _>(&key, |store| store.signing_off(&key))?
+                self.write_then::<DappStore, _>(&key, |store| store.signing_off(&key), forget)?
             }
             (StoreKind::Dapp, None) if what.get("transaction").is_some() => {
                 object(what, &["transaction"], &[])?;
@@ -1665,9 +1751,11 @@ impl Approvals {
                     .and_then(|bytes| bytes.try_into().ok())
                     .ok_or_else(|| invalid("selector: expected 4 bytes"))?;
                 let chain = chain_id(&call["chain_id"], "chain_id")?;
-                self.write::<DappStore, _>(&key, |store| {
-                    store.remove_transaction_rule(&key, &to, &selector, chain)
-                })?
+                self.write_then::<DappStore, _>(
+                    &key,
+                    |store| store.remove_transaction_rule(&key, &to, &selector, chain),
+                    forget,
+                )?
             }
             (StoreKind::Swarm, Some("grant")) => {
                 self.write::<SwarmStore, _>(&key, |store| store.revoke(&key))?
@@ -1827,8 +1915,12 @@ impl Approvals {
             }
             Err(failure) => return Err(write_error(StoreKind::Dapp, failure)),
         };
+        // A device send's receipts for the account, and for each key
+        // revoked, go with it (#373).
+        self.receipts.forget_account(account);
         for key in &keys {
             self.standing.forget_dapp(key);
+            self.receipts.forget_key(key);
             self.changed(StoreKind::Dapp, key);
         }
         if let Some(error) = error {
@@ -1841,9 +1933,48 @@ impl Approvals {
         json_reply(id, &reply)
     }
 
+    /// `approval.remember { receipt }` (#373): a device send's "Always
+    /// allow", once the device signed and main recorded the send. Only the
+    /// document the receipt was given to presents it; it is taken whatever
+    /// the outcome. The rule is then written as `sign.transaction` writes a
+    /// vault send's, and the reply says what became of it, `{ rule }`.
+    fn remember_receipt(
+        &mut self,
+        id: u64,
+        params: &Value,
+        context: &Context,
+        clocks: Clocks,
+    ) -> Result<Zeroizing<Vec<u8>>, ErrorBody> {
+        let fields = object(params, &["receipt"], &[])?;
+        let receipt = string(fields, "receipt")?;
+        let page = match (context.caller, page_context(context)?) {
+            (CallerKind::Page, Some(page)) => page,
+            _ => return Err(forbidden("a receipt is presented only by its page")),
+        };
+        let presenter = Document {
+            origin: page.origin.clone(),
+            frame: page.frame,
+            navigation: page.navigation,
+        };
+        let taken = self
+            .receipts
+            .take(receipt, &presenter, clocks.vault_ms)
+            .map_err(receipt_refusal)?;
+        let rule = self.remember(
+            Remember {
+                key: taken.document.origin,
+                account: taken.account,
+                rule: taken.rule,
+            },
+            clocks,
+        );
+        json_reply(id, &json!({ "rule": rule }))
+    }
+
     /// The rule a flagged `dapp-send` asked for, written once it signed
-    /// (design 0012, "The model"): only when the dApp file has moved, the
-    /// page's grant exposes the account, and the call has a selector.
+    /// (design 0012, "The model"), or once a device send's receipt came
+    /// back: only when the dApp file has moved, the page's grant exposes
+    /// the account, and the call has a selector.
     fn remember(&mut self, remember: Remember, clocks: Clocks) -> Value {
         let refused = |reason: &str| json!({ "added": false, "reason": reason });
         if !self.grants.moved(StoreKind::Dapp) {
@@ -1857,16 +1988,16 @@ impl Approvals {
         {
             return refused("not_exposed");
         }
+        let rule = remember.rule;
         let (Some(to), Some(selector), Some(chain)) = (
-            remember.to,
-            remember.selector,
-            remember
-                .chain_id
+            rule.to,
+            rule.selector,
+            rule.chain_id
                 .filter(|chain| (1..=fc_approval::MAX_CHAIN_ID).contains(chain)),
         ) else {
             return refused("no_rule");
         };
-        let value = remember.value;
+        let value = rule.value;
         let now = clocks.wall_ms;
         match self.write::<DappStore, _>(&key, |store| {
             store.allow_transaction(&key, &to, &selector, chain, &value, now)

@@ -45,6 +45,7 @@
     { "name": "approval.touch", "callers": ["page"], "mutates": false, "deadline_ms": null },
     { "name": "approval.grants", "callers": ["chrome", "shell"], "mutates": false, "deadline_ms": null },
     { "name": "approval.forget_account", "callers": ["shell"], "mutates": false, "deadline_ms": null },
+    { "name": "approval.remember", "callers": ["page"], "mutates": false, "deadline_ms": null },
     { "name": "dweb.open", "callers": ["shell"], "mutates": false, "deadline_ms": 120000 },
     { "name": "dweb.verify", "callers": ["shell"], "mutates": false, "deadline_ms": 360000, "protocol": 2 },
     { "name": "dweb.forget", "callers": ["shell"], "mutates": false, "deadline_ms": null, "protocol": 2 },
