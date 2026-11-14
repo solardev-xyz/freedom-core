@@ -110,6 +110,13 @@ pub enum ErrorCode {
     /// fails main's check, or there are more roots or depth than the bound),
     /// so nothing is imported (design 0010, D5).
     UnsupportedLayout,
+    /// No OS key store answered a key-store call, or the secrets file has
+    /// no room for another item; `data.reason` says which (`timeout`,
+    /// `unsupported`, `forget_backlog`, …), and the secret takes its
+    /// fallback path (design 0013, API).
+    KeyStoreUnavailable,
+    /// The user cancelled the OS key store's prompt (design 0013, API).
+    KeyStoreCancelled,
 }
 
 /// The `error` member of a response: a closed shape, so a member it
@@ -219,6 +226,24 @@ mod tests {
             (ErrorCode::Quarantined, "quarantined"),
             (ErrorCode::RangeNotSatisfiable, "range_not_satisfiable"),
             (ErrorCode::UnsupportedLayout, "unsupported_layout"),
+        ] {
+            assert_eq!(
+                serde_json::to_value(code).ok(),
+                Some(serde_json::Value::from(wire))
+            );
+            assert_eq!(
+                serde_json::from_value::<ErrorCode>(wire.into()).ok(),
+                Some(code)
+            );
+        }
+    }
+
+    /// Design 0013, API: the key store's two codes.
+    #[test]
+    fn key_store_codes_on_the_wire() {
+        for (code, wire) in [
+            (ErrorCode::KeyStoreUnavailable, "key_store_unavailable"),
+            (ErrorCode::KeyStoreCancelled, "key_store_cancelled"),
         ] {
             assert_eq!(
                 serde_json::to_value(code).ok(),

@@ -266,6 +266,10 @@ fn keystore_call(keystore: &DesktopKeyStore, params: Option<&str>) -> String {
                 serde_json::json!({ "ok": false, "error": "backend", "reason": backend.reason() })
                     .to_string()
             }
+            fc_keystore::KeyStoreError::Unavailable(why) => {
+                serde_json::json!({ "ok": false, "error": "unavailable", "reason": why.reason() })
+                    .to_string()
+            }
             other => serde_json::json!({ "ok": false, "error": other.code() }).to_string(),
         }
     }

@@ -156,10 +156,16 @@ pub(super) fn answer<R: TryCryptoRng + ?Sized>(
         return Some(bad_request());
     };
     let Some((store, offered)) = store else {
-        return Some(Answer::failed(KeyStoreError::Unavailable, "unsupported"));
+        return Some(Answer::failed(
+            super::unavailable("unsupported"),
+            "unsupported",
+        ));
     };
     if !offered.offers(request.policy) {
-        return Some(Answer::failed(KeyStoreError::Unavailable, "unsupported"));
+        return Some(Answer::failed(
+            super::unavailable("unsupported"),
+            "unsupported",
+        ));
     }
     if let Some(spawned) = crate::testhooks::keystore_spawn_probe() {
         return Some(Answer::failed(

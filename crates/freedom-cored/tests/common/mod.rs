@@ -430,6 +430,19 @@ impl Core {
         }
     }
 
+    /// The next whole message within `within`: `Ok(None)` if none came,
+    /// `Err(())` once stdout has closed (the core exited), for a test that
+    /// expects the core to exit as a crash hook makes it.
+    #[allow(dead_code)]
+    pub fn recv_or_closed(&mut self, within: Duration) -> Result<Option<Value>, ()> {
+        match self.next(within) {
+            Ok(Output::Frame(value)) => Ok(Some(value)),
+            Ok(_) => panic!("expected a whole message"),
+            Err(mpsc::RecvTimeoutError::Timeout) => Ok(None),
+            Err(mpsc::RecvTimeoutError::Disconnected) => Err(()),
+        }
+    }
+
     /// The next output, noting when it was read.
     fn next(&mut self, within: Duration) -> Result<Output, mpsc::RecvTimeoutError> {
         let (output, arrived) = self.output.recv_timeout(within)?;

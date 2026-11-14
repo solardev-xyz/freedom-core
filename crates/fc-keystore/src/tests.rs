@@ -778,7 +778,9 @@ impl KeyStore for MemoryStore {
 
     fn create(&self, policy: Policy, label: &Label) -> Result<(WrapKey, Sealed), KeyStoreError> {
         if !self.capabilities().offers(policy) {
-            return Err(KeyStoreError::Unavailable);
+            return Err(KeyStoreError::Unavailable(UnavailableReason::new(
+                "unsupported",
+            )));
         }
         let mut rng = self.rng.borrow_mut();
         let key = WrapKey::random(rng.get_or_insert_with(rng_fn))

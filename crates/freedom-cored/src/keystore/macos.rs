@@ -97,7 +97,10 @@ impl OsStore for Keychain {
 fn unattended(policy: Policy) -> Result<(), Answer> {
     match policy {
         Policy::Unattended => Ok(()),
-        Policy::UserPresence => Err(Answer::failed(KeyStoreError::Unavailable, "unsupported")),
+        Policy::UserPresence => Err(Answer::failed(
+            super::unavailable("unsupported"),
+            "unsupported",
+        )),
     }
 }
 
@@ -125,9 +128,9 @@ fn answer(status: i32) -> Answer {
             Answer::failed(KeyStoreError::Denied, "interaction_not_allowed")
         }
         ERR_SEC_NOT_AVAILABLE | ERR_SEC_NO_SUCH_KEYCHAIN | ERR_SEC_NO_DEFAULT_KEYCHAIN => {
-            Answer::failed(KeyStoreError::Unavailable, "no_keychain")
+            Answer::failed(super::unavailable("no_keychain"), "no_keychain")
         }
-        ERR_SEC_READ_ONLY => Answer::failed(KeyStoreError::Unavailable, "read_only"),
+        ERR_SEC_READ_ONLY => Answer::failed(super::unavailable("read_only"), "read_only"),
         ERR_SEC_DUPLICATE_ITEM => Answer::failed(
             KeyStoreError::Backend(BackendError::new("duplicate")),
             "duplicate",

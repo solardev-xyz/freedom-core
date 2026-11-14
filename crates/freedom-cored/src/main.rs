@@ -22,6 +22,7 @@ mod anchor;
 mod approvals;
 mod chain;
 mod clock;
+mod delete_journal;
 mod dweb;
 mod exit;
 mod fsx;
@@ -36,6 +37,7 @@ mod nodes;
 mod profile;
 mod requests;
 mod rng;
+mod secrets;
 mod serve;
 mod signing;
 mod storage;
@@ -175,6 +177,15 @@ fn recover(data_dir: &std::path::Path, lock_dir: &std::path::Path) -> Exit {
             return Exit::from(&e);
         }
     };
+    // A vault delete's journal a core left is finished first, as at the
+    // core's own start (design 0013, "Forgetting an item").
+    if let Err(e) = delete_journal::startup(data_dir) {
+        log::error(
+            "vault delete recovery failed",
+            serde_json::json!({ "error": e.kind().to_string() }),
+        );
+        return Exit::Storage;
+    }
     // Roll any interrupted node identity write forward (design 0001,
     // "Multi-file writes"). JS-backend builds run this at startup. A Radicle
     // journal waits for its home's gate, as long as 0001's retries allow;

@@ -400,13 +400,16 @@ pub(crate) fn create_temp(dir: &Path, stem: &str) -> std::io::Result<(PathBuf, F
     Err(std::io::Error::other("no free temp file name"))
 }
 
+/// Flushes `dir`, so that the names last changed in it survive power loss
+/// (design 0001, "Writes and durability"). Windows: std can't open a directory to flush
+/// it, so nothing is done (best effort, as for [`sync_rename`]).
 #[cfg(unix)]
-fn sync_dir(dir: &Path) -> std::io::Result<()> {
+pub(crate) fn sync_dir(dir: &Path) -> std::io::Result<()> {
     File::open(dir)?.sync_all()
 }
 
 #[cfg(not(unix))]
-fn sync_dir(_dir: &Path) -> std::io::Result<()> {
+pub(crate) fn sync_dir(_dir: &Path) -> std::io::Result<()> {
     Ok(())
 }
 

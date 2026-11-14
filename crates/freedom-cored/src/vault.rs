@@ -67,12 +67,13 @@ use crate::fsx::{self, Done};
 use crate::journal;
 use crate::nodes::{self, Custody, NodeSpec};
 use crate::rng::OsRng;
+use crate::secrets::{self, Secrets};
 use crate::worker::Job;
 
 /// The vault file inside the identity directory.
 pub const VAULT_FILE: &str = "identity-vault.json";
 /// The largest vault file read. Real vaults are about 1 KB.
-const MAX_VAULT_BYTES: u64 = 1 << 20;
+pub(crate) const MAX_VAULT_BYTES: u64 = 1 << 20;
 /// Total budget for a KDF method, from admission (design 0001).
 const KDF_DEADLINE: Duration = Duration::from_secs(30);
 /// Queued KDF requests before `busy`.
@@ -126,6 +127,8 @@ pub enum OpError {
         import: bool,
     },
     Storage(&'static str),
+    /// Quick unlock's secrets file or key store (design 0013, PRF-1c).
+    Secrets(secrets::Error),
     /// The loop abandoned the job before its commit point (it already
     /// answered the request).
     Abandoned,
@@ -139,6 +142,14 @@ pub enum OpError {
 }
 
 impl OpError {
+    fn from_secrets(error: secrets::Error) -> Self {
+        match error {
+            secrets::Error::Abandoned => OpError::Abandoned,
+            secrets::Error::VaultStorage(kind) => OpError::Storage(kind),
+            error => OpError::Secrets(error),
+        }
+    }
+
     fn from_vault(error: fc_vault::Error) -> Self {
         match error {
             fc_vault::Error::IncorrectPassword => OpError::Incorrect,
@@ -175,6 +186,7 @@ impl OpError {
             OpError::Storage(kind) => ErrorBody::new(ErrorCode::Storage, "Storage error")
                 .with_data(serde_json::json!({ "kind": kind })),
             OpError::Invalid(message) => ErrorBody::new(ErrorCode::InvalidArgument, *message),
+            OpError::Secrets(error) => secrets_body(*error),
             OpError::LockHeld => ErrorBody::new(ErrorCode::LockHeld, "The Radicle home is in use"),
             OpError::IdentityCorrupt => ErrorBody::new(
                 ErrorCode::NodeIdentityCorrupt,
@@ -189,6 +201,9 @@ impl OpError {
     fn throttle_outcome(&self) -> Outcome {
         match self {
             OpError::Incorrect => Outcome::Failure,
+            // An enroll or a delete reaches the secrets file with an
+            // attempt reserved only once its password checked out.
+            OpError::Secrets(_) => Outcome::Success,
             _ => Outcome::NotTried,
         }
     }
@@ -342,6 +357,16 @@ enum Kind {
     OpStatus {
         op_id: String,
     },
+    /// `quick_unlock.enroll` (design 0013, "The re-wrap").
+    QuickEnroll {
+        password: SecretBytes,
+    },
+    QuickUnlock,
+    QuickExportMnemonic,
+    QuickExportPrivateKey {
+        account: u32,
+    },
+    QuickDisable,
 }
 
 impl Kind {
@@ -355,22 +380,31 @@ impl Kind {
     fn precheck(&self) -> Option<bool> {
         match self {
             Kind::Unlock { .. } | Kind::ChangePassword { .. } | Kind::Delete { .. } => Some(true),
-            Kind::Verify { .. } | Kind::ExportMnemonic { .. } | Kind::ExportPrivateKey { .. } => {
-                Some(false)
-            }
+            Kind::Verify { .. }
+            | Kind::ExportMnemonic { .. }
+            | Kind::ExportPrivateKey { .. }
+            | Kind::QuickEnroll { .. } => Some(false),
             Kind::Create { .. }
             | Kind::Import { .. }
             | Kind::Reconcile { .. }
             | Kind::NodeWrite { .. }
-            | Kind::OpStatus { .. } => None,
+            | Kind::OpStatus { .. }
+            | Kind::QuickUnlock
+            | Kind::QuickExportMnemonic
+            | Kind::QuickExportPrivateKey { .. }
+            | Kind::QuickDisable => None,
         }
     }
 
-    /// verify and the exports say "No vault found".
+    /// verify and the exports say "No vault found", and so does
+    /// quick unlock's enroll, whose check is verify's.
     fn short_no_vault(&self) -> bool {
         matches!(
             self,
-            Kind::Verify { .. } | Kind::ExportMnemonic { .. } | Kind::ExportPrivateKey { .. }
+            Kind::Verify { .. }
+                | Kind::ExportMnemonic { .. }
+                | Kind::ExportPrivateKey { .. }
+                | Kind::QuickEnroll { .. }
         )
     }
 
@@ -383,6 +417,11 @@ impl Kind {
     /// way to the phrase while locked). An honest reconcile loses nothing:
     /// it follows a restart, so the counter starts at zero, and it sends the
     /// right password. A delete's reconcile decrypts nothing.
+    ///
+    /// Quick unlock's enroll checks the caller's password, so it shares the
+    /// counter (design 0013). Its unlock and exports check none: they
+    /// decrypt with the password the key store holds, which no caller
+    /// supplies or learns, so they are no oracle and reserve nothing.
     fn throttled(&self) -> bool {
         match self {
             Kind::Unlock { .. }
@@ -390,12 +429,17 @@ impl Kind {
             | Kind::ChangePassword { .. }
             | Kind::Delete { .. }
             | Kind::ExportMnemonic { .. }
-            | Kind::ExportPrivateKey { .. } => true,
+            | Kind::ExportPrivateKey { .. }
+            | Kind::QuickEnroll { .. } => true,
             Kind::Reconcile { op, .. } => *op != ReconcileOp::Delete,
             Kind::Create { .. }
             | Kind::Import { .. }
             | Kind::NodeWrite { .. }
-            | Kind::OpStatus { .. } => false,
+            | Kind::OpStatus { .. }
+            | Kind::QuickUnlock
+            | Kind::QuickExportMnemonic
+            | Kind::QuickExportPrivateKey { .. }
+            | Kind::QuickDisable => false,
         }
     }
 }
@@ -491,6 +535,11 @@ enum RunningKind {
     },
     NodeWrite,
     OpStatus,
+    QuickEnroll,
+    QuickUnlock,
+    QuickExportMnemonic,
+    QuickExportPrivateKey(u32),
+    QuickDisable,
     /// A password check the throttle refused, checking the file first.
     /// `ready_at`: when the throttle allows the next attempt (clock ms).
     Precheck {
@@ -532,6 +581,9 @@ pub struct Vault {
     running: Option<Running>,
     next_job: u64,
     kdf_deadline: Duration,
+    /// The secrets file and the key store, for quick unlock (design 0013):
+    /// `None` until serve sets it.
+    secrets: Option<Arc<Secrets>>,
 }
 
 #[derive(Deserialize)]
@@ -546,6 +598,11 @@ struct ChangeParams<'a> {
     password_b64: &'a RawValue,
     #[serde(borrow)]
     new_password_b64: &'a RawValue,
+}
+
+#[derive(Deserialize)]
+struct AccountParams {
+    account: u32,
 }
 
 #[derive(Deserialize)]
@@ -733,7 +790,13 @@ impl Vault {
             running: None,
             next_job: 1,
             kdf_deadline: crate::testhooks::kdf_deadline(KDF_DEADLINE),
+            secrets: None,
         }
+    }
+
+    /// The secrets file and key store quick unlock uses.
+    pub fn set_secrets(&mut self, secrets: Arc<Secrets>) {
+        self.secrets = Some(secrets);
     }
 
     /// Installs the startup snapshot.
@@ -808,6 +871,12 @@ impl Vault {
                 | "vault.create"
                 | "vault.import"
                 | "vault.reconcile"
+                | "quick_unlock.enroll"
+                | "quick_unlock.unlock"
+                | "quick_unlock.export_mnemonic"
+                | "quick_unlock.export_private_key"
+                | "quick_unlock.status"
+                | "quick_unlock.disable"
                 | "nodes.write_identity"
                 | "nodes.op_status"
                 | "nodes.seal_radicle_key"
@@ -834,6 +903,7 @@ impl Vault {
         let mut out = Vec::new();
         let result = match method {
             "vault.status" => self.status(id),
+            "quick_unlock.status" => self.quick_status(id),
             "vault.lock" => {
                 self.lock_now(LockReason::Manual, &mut out);
                 Ok(json_result(id, &serde_json::json!({})))
@@ -1030,6 +1100,31 @@ impl Vault {
                 epoch: self.state.epoch().map(|e| e.get()),
                 fingerprint,
             },
+        ))
+    }
+
+    /// `quick_unlock.status`, from what the loop knows: `enabled` when
+    /// quick unlock's entry is bound to the vault file as it stands,
+    /// `policy` its key's, and `available` when the key store offers a
+    /// policy to enroll under.
+    fn quick_status(&self, id: u64) -> Result<Option<Zeroizing<Vec<u8>>>, ErrorBody> {
+        let secrets = self.secrets.as_ref().ok_or_else(internal)?;
+        let view = secrets.view();
+        let caps = secrets.capabilities();
+        let fingerprint = self.file.as_ref().ok().and_then(Option::as_deref);
+        let policy = view
+            .quick_unlock
+            .as_ref()
+            .filter(|(_, bound)| Some(bound.as_str()) == fingerprint)
+            .map(|(policy, _)| policy.name());
+        Ok(json_result(
+            id,
+            &serde_json::json!({
+                "enabled": policy.is_some(),
+                "policy": policy,
+                "available": caps.offers(fc_keystore::Policy::Unattended)
+                    || caps.offers(fc_keystore::Policy::UserPresence),
+            }),
         ))
     }
 
@@ -1268,6 +1363,15 @@ impl Vault {
                     keys: None,
                 }
             }
+            "quick_unlock.enroll" => Kind::QuickEnroll {
+                password: secret(params::<PasswordParams>(raw)?.password_b64)?,
+            },
+            "quick_unlock.unlock" => Kind::QuickUnlock,
+            "quick_unlock.export_mnemonic" => Kind::QuickExportMnemonic,
+            "quick_unlock.export_private_key" => Kind::QuickExportPrivateKey {
+                account: params::<AccountParams>(raw)?.account,
+            },
+            "quick_unlock.disable" => Kind::QuickDisable,
             "nodes.op_status" => {
                 let p = params::<OpStatusParams>(raw)?;
                 if !journal::valid_op_id(&p.op_id) {
@@ -1411,10 +1515,15 @@ impl Vault {
                     commit: None,
                 }),
             ),
-            Kind::Delete { password } => (
-                RunningKind::Delete,
-                Box::new(move |dir, control| job_delete(dir, &password, control)),
-            ),
+            Kind::Delete { password } => {
+                let secrets = self.secrets.clone();
+                (
+                    RunningKind::Delete,
+                    Box::new(move |dir, control| {
+                        job_delete(dir, &password, secrets.as_deref(), control)
+                    }),
+                )
+            }
             Kind::ChangePassword { current, new } => (
                 RunningKind::ChangePassword,
                 Box::new(move |dir, control| job_change(dir, &current, &new, control)),
@@ -1462,6 +1571,51 @@ impl Vault {
                         JobOutput::NodeWritten(job_node_write(
                             dir, &lock_dir, &op_id, &spec, keys, control,
                         ))
+                    }),
+                )
+            }
+            Kind::QuickEnroll { password } => {
+                let secrets = self.secrets.clone();
+                (
+                    RunningKind::QuickEnroll,
+                    Box::new(move |dir, control| JobOutput::Checked {
+                        result: job_quick_enroll(dir, secrets.as_deref(), &password, control),
+                        commit: None,
+                    }),
+                )
+            }
+            Kind::QuickUnlock | Kind::QuickExportMnemonic | Kind::QuickExportPrivateKey { .. } => {
+                let (running, reason) = match kind {
+                    Kind::QuickExportMnemonic => (
+                        RunningKind::QuickExportMnemonic,
+                        fc_keystore::Reason::Export,
+                    ),
+                    Kind::QuickExportPrivateKey { account } => (
+                        RunningKind::QuickExportPrivateKey(account),
+                        fc_keystore::Reason::Export,
+                    ),
+                    _ => (RunningKind::QuickUnlock, fc_keystore::Reason::QuickUnlock),
+                };
+                let secrets = self.secrets.clone();
+                (
+                    running,
+                    Box::new(move |dir, control| {
+                        JobOutput::Unlocked(job_quick_unlock(
+                            dir,
+                            secrets.as_deref(),
+                            reason,
+                            control,
+                        ))
+                    }),
+                )
+            }
+            Kind::QuickDisable => {
+                let secrets = self.secrets.clone();
+                (
+                    RunningKind::QuickDisable,
+                    Box::new(move |_dir, control| JobOutput::Checked {
+                        result: job_quick_disable(secrets.as_deref(), control),
+                        commit: None,
                     }),
                 )
             }
@@ -1517,7 +1671,10 @@ impl Vault {
         }
         let short = matches!(
             running.kind,
-            RunningKind::Verify | RunningKind::ExportMnemonic | RunningKind::ExportPrivateKey(_)
+            RunningKind::Verify
+                | RunningKind::ExportMnemonic
+                | RunningKind::ExportPrivateKey(_)
+                | RunningKind::QuickEnroll
         );
         let outcome = match (&running.kind, output) {
             (RunningKind::Unlock, JobOutput::Unlocked(result)) => {
@@ -1549,6 +1706,61 @@ impl Vault {
                     }
                 };
                 (throttle, reply)
+            }
+            (
+                kind @ (RunningKind::QuickUnlock
+                | RunningKind::QuickExportMnemonic
+                | RunningKind::QuickExportPrivateKey(_)),
+                JobOutput::Unlocked(result),
+            ) => {
+                // Quick unlock unlocks, as `vault.unlock` does, and an
+                // export unlocks first, as the Touch ID path does today
+                // (`quick-unlock.js`): a lock meanwhile wins.
+                let reply = match result {
+                    Err(error) => Err(error.body(false)),
+                    Ok((prepared, addresses)) => {
+                        match self
+                            .state
+                            .install(running.ticket, prepared, self.auto_lock_ms, now)
+                        {
+                            Ok(epoch) => {
+                                out.push(Out::Send(event_payload(
+                                    "vault.unlocked",
+                                    &serde_json::json!({ "epoch": epoch.get() }),
+                                )));
+                                match kind {
+                                    RunningKind::QuickExportMnemonic => {
+                                        self.state.mnemonic().map_err(|_| locked()).and_then(
+                                            |mnemonic| {
+                                                secret_result(
+                                                    request,
+                                                    "mnemonic_b64",
+                                                    mnemonic.phrase().as_bytes(),
+                                                )
+                                            },
+                                        )
+                                    }
+                                    RunningKind::QuickExportPrivateKey(account) => self
+                                        .state
+                                        .user_wallet(*account)
+                                        .map_err(locked_or_internal)
+                                        .and_then(|key| {
+                                            private_key_result(
+                                                request,
+                                                key.to_secret_bytes().as_slice(),
+                                            )
+                                        }),
+                                    _ => Ok(json_result(
+                                        request,
+                                        &serde_json::json!({ "addresses": addresses }),
+                                    )),
+                                }
+                            }
+                            Err(_) => Err(locked()),
+                        }
+                    }
+                };
+                (Outcome::NotTried, reply)
             }
             (kind, JobOutput::Checked { result, commit }) => {
                 let throttle = match &result {
@@ -1693,7 +1905,9 @@ impl Vault {
         out: &mut Vec<Out>,
     ) -> Result<Option<Zeroizing<Vec<u8>>>, ErrorBody> {
         match kind {
-            RunningKind::Verify => Ok(json_result(request, &serde_json::json!({}))),
+            RunningKind::Verify | RunningKind::QuickEnroll | RunningKind::QuickDisable => {
+                Ok(json_result(request, &serde_json::json!({})))
+            }
             RunningKind::Delete => {
                 self.lock_now(LockReason::Delete, out);
                 Ok(json_result(
@@ -1817,6 +2031,48 @@ fn throttle_outcome(output: &JobOutput) -> Outcome {
 }
 
 /// `throttled`, with the wait (design 0001, Throttling).
+/// Quick unlock's errors (design 0013, API): `key_store_unavailable` with
+/// `data.reason`, `key_store_cancelled`, `not_found` with
+/// `quick-unlock.js`'s message when there is no entry for this vault, and
+/// `storage` for the secrets file.
+fn secrets_body(error: secrets::Error) -> ErrorBody {
+    use fc_keystore::KeyStoreError;
+    let unavailable = |reason: &str| {
+        ErrorBody::new(
+            ErrorCode::KeyStoreUnavailable,
+            "The key store is unavailable",
+        )
+        .with_data(serde_json::json!({ "reason": reason }))
+    };
+    match error {
+        secrets::Error::KeyStore(KeyStoreError::Cancelled) => {
+            ErrorBody::new(ErrorCode::KeyStoreCancelled, "Cancelled")
+        }
+        secrets::Error::KeyStore(KeyStoreError::Unavailable(why)) => unavailable(why.reason()),
+        secrets::Error::KeyStore(KeyStoreError::Backend(backend)) => ErrorBody::new(
+            ErrorCode::KeyStoreUnavailable,
+            "The key store is unavailable",
+        )
+        .with_data(serde_json::json!({ "reason": "backend", "backend": backend.reason() })),
+        secrets::Error::KeyStore(other) => unavailable(other.code()),
+        secrets::Error::ForgetBacklog => unavailable("forget_backlog"),
+        secrets::Error::EntryRefused => unavailable("entry_refused"),
+        secrets::Error::NotEnabled => {
+            ErrorBody::new(ErrorCode::NotFound, "Quick unlock not enabled")
+        }
+        secrets::Error::TooLong => ErrorBody::new(
+            ErrorCode::InvalidArgument,
+            "The password is too long for quick unlock",
+        ),
+        secrets::Error::Unreadable(kind) | secrets::Error::Write(kind) => {
+            ErrorBody::new(ErrorCode::Storage, "Storage error")
+                .with_data(serde_json::json!({ "kind": kind, "file": "secrets" }))
+        }
+        secrets::Error::VaultStorage(kind) => OpError::Storage(kind).body(false),
+        secrets::Error::Abandoned | secrets::Error::Internal => internal(),
+    }
+}
+
 fn throttled_error(retry_after_ms: u64) -> ErrorBody {
     let seconds = retry_after_ms.div_ceil(1000);
     ErrorBody::new(
@@ -1971,6 +2227,20 @@ pub fn startup_snapshot(dir: &Path, lock_dir: &Path) -> (FileSnapshot, NodeRecov
     // Finish an interrupted node identity write before anything else
     // (design 0001: before core.hello is answered and before any node write).
     let recovery = startup_recovery(dir, lock_dir);
+    // Then a vault delete's journal (design 0013, "Forgetting an item"):
+    // committed, it is finished; never committed, its staged secrets file
+    // goes. Left pending, every read of the vault tries it again first.
+    match crate::delete_journal::startup(dir) {
+        Ok(crate::delete_journal::Settled::Nothing) => {}
+        Ok(settled) => crate::log::info(
+            "a vault delete's journal at start",
+            serde_json::json!({ "outcome": format!("{settled:?}") }),
+        ),
+        Err(e) => crate::log::error(
+            "could not finish a vault delete's journal",
+            serde_json::json!({ "error": e.kind().to_string() }),
+        ),
+    }
     match fsx::tighten(&dir.join(VAULT_FILE)) {
         Ok(true) => crate::log::info("tightened the vault file to 0600", serde_json::json!({})),
         Ok(false) => {}
@@ -1986,13 +2256,15 @@ pub fn startup_snapshot(dir: &Path, lock_dir: &Path) -> (FileSnapshot, NodeRecov
 /// The files the core replaces atomically in the identity directory, whose
 /// temp files a killed write can leave (#81). The vault's is an encrypted
 /// copy of the mnemonic; the journal's records hold no secret, but are
-/// litter all the same.
-const REPLACED: [&str; 5] = [
+/// litter all the same, and so is a vault delete's journal (design 0013)
+/// killed before its rename.
+const REPLACED: [&str; 6] = [
     VAULT_FILE,
     journal::JOURNAL,
     journal::DONE,
     journal::STAGING,
     journal::UNRESOLVED,
+    crate::delete_journal::JOURNAL,
 ];
 
 /// Removes the temp files writes killed before their rename left (#81).
@@ -2105,7 +2377,12 @@ fn snapshot(dir: &Path) -> FileSnapshot {
 /// symlink, and at most [`MAX_VAULT_BYTES`], so nothing swapped in between a
 /// check and the read (a FIFO, a symlink, a growing file) can stall the
 /// worker or be read whole.
+///
+/// A vault delete whose journal committed is finished first (design 0013;
+/// [`crate::delete_journal`]): while it can't be, the vault isn't read, so
+/// no job sees the vault the delete removed.
 fn read_vault(dir: &Path) -> Result<Option<String>, OpError> {
+    crate::delete_journal::settle(dir).map_err(|e| storage(&e))?;
     read_bounded(&dir.join(VAULT_FILE))
 }
 
@@ -2173,6 +2450,77 @@ fn job_verify(dir: &Path, password: &SecretBytes, control: &JobControl) -> Resul
     format::verify_password(&contents, password.as_bytes()).map_err(OpError::from_vault)
 }
 
+/// `quick_unlock.enroll` (design 0013, "The re-wrap"): the password is
+/// checked as `vault.verify_password` checks it, then written as quick
+/// unlock's entry, bound to the digest of the vault file it opened.
+fn job_quick_enroll(
+    dir: &Path,
+    secrets: Option<&Secrets>,
+    password: &SecretBytes,
+    control: &JobControl,
+) -> Result<(), OpError> {
+    if control.abandoned() {
+        return Err(OpError::Abandoned);
+    }
+    let secrets = secrets.ok_or(OpError::Internal)?;
+    let contents = read_vault(dir)?.ok_or(OpError::NoVault)?;
+    format::verify_password(&contents, password.as_bytes()).map_err(OpError::from_vault)?;
+    let fingerprint = sha256_hex(contents.as_bytes());
+    let abandoned = || control.abandoned();
+    let claim = || claim(control);
+    secrets
+        .enroll(
+            password.as_bytes(),
+            &fingerprint,
+            &secrets::Gate {
+                abandoned: &abandoned,
+                claim: &claim,
+            },
+        )
+        .map_err(OpError::from_secrets)
+}
+
+/// `quick_unlock.unlock` and the exports: the vault opened with the
+/// password quick unlock holds for it, which stays in the core.
+fn job_quick_unlock(
+    dir: &Path,
+    secrets: Option<&Secrets>,
+    reason: fc_keystore::Reason,
+    control: &JobControl,
+) -> Result<(Prepared, Addresses), OpError> {
+    if control.abandoned() {
+        return Err(OpError::Abandoned);
+    }
+    let secrets = secrets.ok_or(OpError::Internal)?;
+    let contents = read_vault(dir)?.ok_or(OpError::NoVault)?;
+    let fingerprint = sha256_hex(contents.as_bytes());
+    let password = secrets
+        .password(&fingerprint, reason)
+        .map_err(OpError::from_secrets)?;
+    if control.abandoned() {
+        return Err(OpError::Abandoned);
+    }
+    let opened = format::open(&contents, password.expose()).map_err(OpError::from_vault)?;
+    let addresses = addresses_of(&opened.mnemonic)?;
+    Ok((Prepared::new(opened.mnemonic), addresses))
+}
+
+/// `quick_unlock.disable`: the entry removed, its key into `forget`.
+fn job_quick_disable(secrets: Option<&Secrets>, control: &JobControl) -> Result<(), OpError> {
+    if control.abandoned() {
+        return Err(OpError::Abandoned);
+    }
+    let secrets = secrets.ok_or(OpError::Internal)?;
+    let abandoned = || control.abandoned();
+    let claim = || claim(control);
+    secrets
+        .disable(&secrets::Gate {
+            abandoned: &abandoned,
+            claim: &claim,
+        })
+        .map_err(OpError::from_secrets)
+}
+
 /// A password check the throttle refused (#82): what the file says without
 /// the password, in design 0001's order (`no_vault`, then
 /// `unsupported_vault_version` if `version`, or a corrupt file). `Ok`: the
@@ -2197,7 +2545,17 @@ fn claim(control: &JobControl) -> bool {
     claimed
 }
 
-fn job_delete(dir: &Path, password: &SecretBytes, control: &JobControl) -> JobOutput {
+/// `vault.delete`: the password checked, then the vault removed. With quick
+/// unlock's entry, its removal joins the delete's journal (design 0013,
+/// "Forgetting an item"; [`Secrets::delete_vault`]): a secrets file that
+/// can't be read or written refuses the delete, with the vault intact.
+/// Without [`Secrets`] (the unit tests' vault), the plain unlink of 0001.
+fn job_delete(
+    dir: &Path,
+    password: &SecretBytes,
+    secrets: Option<&Secrets>,
+    control: &JobControl,
+) -> JobOutput {
     let not_committed = |error| JobOutput::Checked {
         result: Err(error),
         commit: None,
@@ -2205,11 +2563,26 @@ fn job_delete(dir: &Path, password: &SecretBytes, control: &JobControl) -> JobOu
     if control.abandoned() {
         return not_committed(OpError::Abandoned);
     }
-    if let Err(error) = open(dir, password) {
-        return not_committed(error);
+    let contents = match read_vault(dir) {
+        Ok(Some(contents)) => contents,
+        Ok(None) => return not_committed(OpError::NoVault),
+        Err(error) => return not_committed(error),
+    };
+    if let Err(error) = format::open(&contents, password.as_bytes()) {
+        return not_committed(OpError::from_vault(error));
     }
-    match fsx::remove(&dir.join(VAULT_FILE), || claim(control)) {
-        Ok(Some(done)) => {
+    let removed = match secrets {
+        Some(secrets) => secrets
+            .delete_vault(&sha256_hex(contents.as_bytes()), &|| claim(control))
+            .map_err(OpError::from_secrets),
+        None => match fsx::remove(&dir.join(VAULT_FILE), || claim(control)) {
+            Ok(Some(done)) => Ok(done),
+            Ok(None) => Err(OpError::Abandoned),
+            Err(e) => Err(storage(&e)),
+        },
+    };
+    match removed {
+        Ok(done) => {
             // Copies a killed write left go with the vault (#81). No other
             // job runs, so none of them is live. The delete has committed:
             // a failure here is only logged.
@@ -2224,8 +2597,7 @@ fn job_delete(dir: &Path, password: &SecretBytes, control: &JobControl) -> JobOu
                 commit: Some(Commit { done, file: None }),
             }
         }
-        Ok(None) => not_committed(OpError::Abandoned),
-        Err(e) => not_committed(storage(&e)),
+        Err(error) => not_committed(error),
     }
 }
 
@@ -2656,6 +3028,34 @@ mod tests {
     }
 
     const ABANDON: &str = "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about";
+
+    /// Design 0013, "Forgetting an item": a vault delete whose journal
+    /// committed is finished before the vault is read, so no job sees the
+    /// vault it removes (an install that failed after the commit).
+    #[test]
+    fn a_committed_delete_is_finished_before_the_vault_is_read() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join(VAULT_FILE), b"the vault").unwrap();
+        std::fs::write(dir.path().join(secrets::SECRETS_FILE), b"before").unwrap();
+        std::fs::write(dir.path().join(crate::delete_journal::STAGED), b"after").unwrap();
+        let journal = serde_json::json!({ "op": "vault.delete", "files": [
+            { "target": secrets::SECRETS_FILE, "staged": crate::delete_journal::STAGED,
+              "sha256": sha256_hex(b"after") },
+            { "target": VAULT_FILE, "sha256": sha256_hex(b"the vault"), "remove": true },
+        ] });
+        std::fs::write(
+            dir.path().join(crate::delete_journal::JOURNAL),
+            journal.to_string(),
+        )
+        .unwrap();
+        assert!(matches!(read_vault(dir.path()), Ok(None)));
+        assert!(!dir.path().join(VAULT_FILE).exists());
+        assert!(!dir.path().join(crate::delete_journal::JOURNAL).exists());
+        assert_eq!(
+            std::fs::read(dir.path().join(secrets::SECRETS_FILE)).unwrap(),
+            b"after"
+        );
+    }
 
     /// A vault unlocked now, with a 15-minute auto-lock.
     fn unlocked() -> Vault {

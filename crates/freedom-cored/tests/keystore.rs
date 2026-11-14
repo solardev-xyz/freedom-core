@@ -414,7 +414,10 @@ fn without_a_backend_the_core_asks_nothing() {
         let Next::Answer(result) = next(&mut core, 2) else {
             panic!("asked main");
         };
-        assert_eq!(result, json!({ "ok": false, "error": "unavailable" }));
+        assert_eq!(
+            result,
+            json!({ "ok": false, "error": "unavailable", "reason": "unsupported" })
+        );
         return;
     }
     call(
@@ -425,7 +428,10 @@ fn without_a_backend_the_core_asks_nothing() {
     let Next::Answer(result) = next(&mut core, 2) else {
         panic!("asked main");
     };
-    assert_eq!(result, json!({ "ok": false, "error": "unavailable" }));
+    assert_eq!(
+        result,
+        json!({ "ok": false, "error": "unavailable", "reason": "unsupported" })
+    );
     call(
         &mut core,
         3,
@@ -533,13 +539,19 @@ fn the_core_refuses_answers_not_its_own_and_gives_up_in_time() {
     let (_, result) = ask_core(&mut core, &|_| {
         Some(json!({ "ok": false, "error": "unavailable", "reason": "timeout" }))
     });
-    assert_eq!(result, json!({ "ok": false, "error": "unavailable" }));
+    assert_eq!(
+        result,
+        json!({ "ok": false, "error": "unavailable", "reason": "timeout" })
+    );
     // No answer within the deadline: unavailable. The late answer that
     // follows is dropped, and the core goes on.
     let started = Instant::now();
     let (late, result) = ask_core(&mut core, &|_| None);
     assert!(started.elapsed() >= Duration::from_millis(1500));
-    assert_eq!(result, json!({ "ok": false, "error": "unavailable" }));
+    assert_eq!(
+        result,
+        json!({ "ok": false, "error": "unavailable", "reason": "timeout" })
+    );
     respond(&mut core, late, json!({ "ok": true }));
     let status = core.call(100, "vault.status", json!({}));
     assert!(status.get("result").is_some(), "{status}");
@@ -1013,4 +1025,126 @@ fn the_core_uses_the_keychain_through_main_and_the_helper() {
     for bytes in &seen {
         assert!(!holds(bytes, &key), "{}", String::from_utf8_lossy(bytes));
     }
+}
+
+// ----- Quick unlock through main and the helper (PRF-1c)
+
+/// Main's executor for one `shell.keystore` request: the real helper, run
+/// with the request's fields as argv, its line relayed. Returns the op and
+/// the item.
+fn run_keystore_request(core: &mut common::Core, message: &Value) -> (String, String) {
+    let params = &message["params"];
+    assert!(params.get("sealed").is_none());
+    let op = params["op"].as_str().unwrap().to_owned();
+    let item = params["item"].as_str().unwrap().to_owned();
+    let mut args = vec![
+        "--op".to_owned(),
+        op.clone(),
+        "--policy".to_owned(),
+        params["policy"].as_str().unwrap().to_owned(),
+        "--item".to_owned(),
+        item.clone(),
+    ];
+    for (field, flag) in [("reply_key", "--reply-key"), ("reason", "--reason")] {
+        if let Some(value) = params.get(field) {
+            args.push(flag.to_owned());
+            args.push(value.as_str().unwrap().to_owned());
+        }
+    }
+    let refs: Vec<&str> = args.iter().map(String::as_str).collect();
+    let run = helper(&refs, None, &[], Duration::from_secs(60));
+    let line: Value = serde_json::from_str(run.line.as_deref().unwrap()).unwrap();
+    respond(core, message["id"].as_u64().unwrap(), line);
+    (op, item)
+}
+
+/// Sends a request and plays main until its response.
+fn main_call(
+    core: &mut common::Core,
+    id: u64,
+    caller: &str,
+    method: &str,
+    params: Value,
+    asked: &mut Vec<(String, String)>,
+) -> Value {
+    core.send(&json!({
+        "type": "request", "id": id, "method": method, "params": params,
+        "context": { "caller": caller },
+    }));
+    loop {
+        let message = core.recv();
+        if message["type"] == "request" && message["method"] == "shell.keystore" {
+            asked.push(run_keystore_request(core, &message));
+        } else if message["type"] == "response" && message["id"] == id {
+            return message;
+        }
+    }
+}
+
+/// Quick unlock end to end in the temporary keychain: enroll makes the
+/// Keychain item, unlock opens it with the vault locked, and disable's
+/// forget removes it.
+#[test]
+fn quick_unlock_through_main_and_the_helper() {
+    use base64::Engine as _;
+    if !temporary_keychain() {
+        return;
+    }
+    let b64 = |text: &str| base64::engine::general_purpose::STANDARD.encode(text);
+    let (_root, mut core) = serve(&[]);
+    let mut asked = Vec::new();
+    let imported = main_call(
+        &mut core,
+        2,
+        "chrome",
+        "vault.import",
+        json!({
+            "password_b64": b64("testpass1"),
+            "mnemonic_b64": b64("abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about"),
+        }),
+        &mut asked,
+    );
+    assert!(imported["result"].is_object(), "{imported}");
+    let enrolled = main_call(
+        &mut core,
+        3,
+        "shell",
+        "quick_unlock.enroll",
+        json!({ "password_b64": b64("testpass1") }),
+        &mut asked,
+    );
+    assert_eq!(enrolled["result"], json!({}), "{enrolled}");
+    assert_eq!(asked.len(), 1);
+    let (op, item) = asked[0].clone();
+    assert_eq!(op, "create");
+    assert!(in_temporary_keychain(&item));
+    main_call(&mut core, 4, "chrome", "vault.lock", json!({}), &mut asked);
+    let unlocked = main_call(
+        &mut core,
+        5,
+        "chrome",
+        "quick_unlock.unlock",
+        json!({}),
+        &mut asked,
+    );
+    assert!(unlocked["result"]["addresses"].is_object(), "{unlocked}");
+    assert_eq!(asked.last().unwrap(), &("open".to_owned(), item.clone()));
+    let disabled = main_call(
+        &mut core,
+        6,
+        "chrome",
+        "quick_unlock.disable",
+        json!({}),
+        &mut asked,
+    );
+    assert_eq!(disabled["result"], json!({}), "{disabled}");
+    // The drain's forget follows the reply.
+    while !asked.iter().any(|(op, _)| op == "forget") {
+        let message = core.recv();
+        if message["type"] == "request" && message["method"] == "shell.keystore" {
+            asked.push(run_keystore_request(&mut core, &message));
+        }
+    }
+    assert_eq!(asked.last().unwrap(), &("forget".to_owned(), item.clone()));
+    assert!(!in_temporary_keychain(&item));
 }

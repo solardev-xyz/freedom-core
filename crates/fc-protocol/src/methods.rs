@@ -22,6 +22,10 @@ pub enum Callers {
     Shell,
     /// The browser UI (`chrome`) and main itself (`shell`).
     ChromeOrShell,
+    /// The browser UI only (`chrome`): a call behind a prompt main shows
+    /// the user first, which main's own work (`shell`) never has (design
+    /// 0013, API: quick unlock's calls after main's Touch ID prompt).
+    Chrome,
     /// A page (`page`, with its `PageContext`) as well: the rows 0011 left
     /// for 0012 (design 0012, "PageContext"). The method checks what each
     /// caller may do (a page kind's token only under `page`, a wallet
@@ -45,6 +49,7 @@ impl Callers {
             (Callers::Shell, CallerKind::Shell) => true,
             (Callers::Shell, CallerKind::Chrome) => false,
             (Callers::ChromeOrShell, CallerKind::Chrome | CallerKind::Shell) => true,
+            (Callers::Chrome, caller) => caller == CallerKind::Chrome,
         }
     }
 
@@ -52,6 +57,7 @@ impl Callers {
         match self {
             Callers::Shell => &["shell"],
             Callers::ChromeOrShell => &["chrome", "shell"],
+            Callers::Chrome => &["chrome"],
             Callers::PageChromeOrShell => &["page", "chrome", "shell"],
             Callers::Page => &["page"],
             Callers::PageOrShell => &["page", "shell"],
@@ -123,7 +129,8 @@ const fn row_v2(name: &'static str, callers: Callers, mutates: bool, deadline: D
 }
 
 use Callers::{
-    ChromeOrShell as CS, Page as PAGE, PageChromeOrShell as PCS, PageOrShell as PS, Shell as SHELL,
+    Chrome as CHROME, ChromeOrShell as CS, Page as PAGE, PageChromeOrShell as PCS,
+    PageOrShell as PS, Shell as SHELL,
 };
 use Deadline::{Head as HEAD, Immediate as NOW, Session as SESSION, Vault as VAULT};
 
@@ -144,6 +151,17 @@ pub const METHODS: &[Method] = &[
     row("vault.create", CS, true, VAULT),
     row("vault.import", CS, true, VAULT),
     row("vault.reconcile", SHELL, false, VAULT),
+    // Design 0013, "The re-wrap" and API: the vault password in the core's
+    // key store. Enroll is main's own (`shell`), with the password it
+    // unsealed; the rest are the chrome's alone, after main's Touch ID
+    // prompt, which main's own work never has. The secrets file isn't the
+    // vault, and nothing reconciles them: not 0001's mutations.
+    row("quick_unlock.enroll", SHELL, false, VAULT),
+    row("quick_unlock.unlock", CHROME, false, VAULT),
+    row("quick_unlock.export_mnemonic", CHROME, false, VAULT),
+    row("quick_unlock.export_private_key", CHROME, false, VAULT),
+    row("quick_unlock.status", CHROME, false, NOW),
+    row("quick_unlock.disable", CHROME, false, VAULT),
     row("nodes.write_identity", CS, true, VAULT),
     row("nodes.op_status", SHELL, false, VAULT),
     // Design 0008, "The sealed release": the Radicle node key, sealed to the
@@ -283,6 +301,7 @@ mod tests {
             "core.hello",
             "core.shutdown",
             "vault.reconcile",
+            "quick_unlock.enroll",
             "dweb.open",
         ] {
             assert_eq!(
@@ -348,6 +367,39 @@ mod tests {
                 (CallerKind::Page, page),
                 (CallerKind::Chrome, chrome),
                 (CallerKind::Shell, shell),
+            ] {
+                assert_eq!(
+                    matches!(admit(name, caller, V2), Admission::Allowed(_)),
+                    allowed,
+                    "{name} {caller:?}"
+                );
+            }
+        }
+        // Design 0013, API: who reaches each quick-unlock method. Enroll is
+        // main's own; the rest are the chrome's, behind main's Touch ID
+        // prompt; a page reaches none.
+        let quick: Vec<&str> = METHODS
+            .iter()
+            .map(|m| m.name)
+            .filter(|name| name.starts_with("quick_unlock."))
+            .collect();
+        assert_eq!(
+            quick,
+            [
+                "quick_unlock.enroll",
+                "quick_unlock.unlock",
+                "quick_unlock.export_mnemonic",
+                "quick_unlock.export_private_key",
+                "quick_unlock.status",
+                "quick_unlock.disable",
+            ]
+        );
+        for name in quick {
+            let enroll = name == "quick_unlock.enroll";
+            for (caller, allowed) in [
+                (CallerKind::Page, false),
+                (CallerKind::Chrome, !enroll),
+                (CallerKind::Shell, enroll),
             ] {
                 assert_eq!(
                     matches!(admit(name, caller, V2), Admission::Allowed(_)),

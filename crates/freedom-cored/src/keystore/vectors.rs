@@ -115,7 +115,10 @@ fn error_of(code: &str, reason: Option<&str>) -> KeyStoreError {
     match code {
         "not_found" => KeyStoreError::NotFound,
         "cancelled" => KeyStoreError::Cancelled,
-        "unavailable" => KeyStoreError::Unavailable,
+        "unavailable" => super::unavailable(match reason {
+            Some("timeout") => "timeout",
+            _ => "unsupported",
+        }),
         "invalidated" => KeyStoreError::Invalidated,
         "denied" => KeyStoreError::Denied,
         // The line carries the reason; the error's own is the store's.
@@ -295,6 +298,16 @@ fn the_core_reads_each_answer_of_the_vectors() {
                 match error {
                     KeyStoreError::Backend(backend) => {
                         assert_eq!(backend.reason(), str_of(outcome, "reason"), "{id}");
+                    }
+                    // The line's reason comes through the trait.
+                    KeyStoreError::Unavailable(why) => {
+                        assert!(outcome.get("reason").is_none(), "{id}");
+                        let line: Value = serde_json::from_str(str_of(case, "text")).unwrap();
+                        let reason = line["reason"].as_str();
+                        assert!(
+                            reason == Some(why.reason()) || why.reason() == "helper",
+                            "{id}: {why}"
+                        );
                     }
                     _ => assert!(outcome.get("reason").is_none(), "{id}"),
                 }
