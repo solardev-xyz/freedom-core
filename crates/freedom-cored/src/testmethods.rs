@@ -21,6 +21,14 @@
 //! `z` repeating, so a fragment out of order shows. Its reply is made at
 //! once: a `cancel` always comes after it and changes nothing, as 0001's
 //! races between cancels and responses allow.
+//!
+//! `test.keystore { op, policy, item, backend?, blob?, reason? }` makes one
+//! call on the core's desktop key store (design 0013), on a thread of its
+//! own, as quick unlock's worker will, so main's `shell.keystore` answer is
+//! routed back meanwhile. It answers `{ ok: true, key?, item?, blob? }`, the
+//! wrapping key in hex so a test can compare `create`'s with `open`'s and
+//! look for it in what main saw, or `{ ok: false, error, reason? }`. A test
+//! build's method only: no release build compiles it.
 
 use std::collections::VecDeque;
 use std::sync::mpsc::{self, Receiver, Sender};
@@ -32,11 +40,12 @@ use serde::Deserialize;
 use serde_json::value::RawValue;
 use zeroize::Zeroizing;
 
+use crate::keystore::client::DesktopKeyStore;
 use crate::serve::Event;
 use crate::transport::{self, Allowance, Credit, Link, Out, Reply};
 
 /// The methods this thread answers.
-pub const METHODS: &[&str] = &["test.large"];
+pub const METHODS: &[&str] = &["test.large", "test.keystore"];
 
 /// The largest `bytes` asked for: past the cap, to see `too_large`.
 const MAX_TEST_BYTES: usize = 2 * fc_protocol::frame::MAX_MESSAGE;
@@ -49,10 +58,13 @@ pub fn handles(method: &str) -> bool {
 pub enum In {
     Request {
         id: u64,
+        method: String,
         params: Option<Box<RawValue>>,
     },
     /// The writer has room again for replies that wait here.
     Drained,
+    /// A `test.keystore` call finished: its reply.
+    KeyStoreDone(Reply),
 }
 
 /// A message, with the reader's credit for the frame it came in.
@@ -72,9 +84,15 @@ impl Handle {
 
 /// Starts the thread. It writes to `out`, and reports the writer's end to
 /// the event loop.
-pub fn spawn(out: Sender<Out>, link: Arc<Link>, events: Sender<Event>) -> std::io::Result<Handle> {
+pub fn spawn(
+    out: Sender<Out>,
+    link: Arc<Link>,
+    events: Sender<Event>,
+    keystore: Arc<DesktopKeyStore>,
+) -> std::io::Result<Handle> {
     let (tx, rx) = mpsc::channel();
     let tx = Arc::new(tx);
+    let done = Arc::downgrade(&tx);
     let allowance = Allowance::new(usize::MAX, transport::MAX_QUEUED_CHAIN_BYTES);
     let wake: Weak<Sender<Mail>> = Arc::downgrade(&tx);
     allowance.on_room(move || {
@@ -92,6 +110,7 @@ pub fn spawn(out: Sender<Out>, link: Arc<Link>, events: Sender<Event>) -> std::i
                 allowance,
                 outbox: VecDeque::new(),
                 max_backlog: 2 * transport::MAX_QUEUED_CHAIN_BYTES,
+                keystore: Some((keystore, done)),
             };
             if run(&rx, &mut producer).is_err() {
                 let _ = events.send(Event::WriterFailed);
@@ -107,8 +126,15 @@ fn run(rx: &Receiver<Mail>, producer: &mut Producer) -> Result<(), Gone> {
     // The frame's credit goes once its message is handled.
     while let Ok((message, _credit)) = rx.recv() {
         match message {
-            In::Request { id, params } => {
+            In::Request { id, method, params } if method == "test.keystore" => {
+                producer.keystore_call(id, params.as_deref());
+            }
+            In::Request { id, params, .. } => {
                 let reply = producer.answer(id, params.as_deref());
+                producer.outbox.push_back(reply);
+                producer.pump()?;
+            }
+            In::KeyStoreDone(reply) => {
                 producer.outbox.push_back(reply);
                 producer.pump()?;
             }
@@ -129,9 +155,42 @@ struct Producer {
     outbox: VecDeque<Reply>,
     /// What may wait, here and in the writer, before new requests are busy.
     max_backlog: usize,
+    /// The key store `test.keystore` calls, and where its calls' replies
+    /// come back.
+    keystore: Option<(Arc<DesktopKeyStore>, Weak<Sender<Mail>>)>,
 }
 
 impl Producer {
+    /// Starts a `test.keystore` call on its own thread; its reply comes
+    /// back as [`In::KeyStoreDone`].
+    fn keystore_call(&mut self, id: u64, params: Option<&RawValue>) {
+        let Some((keystore, done)) = self.keystore.clone() else {
+            self.outbox
+                .push_back(error(id, ErrorCode::Internal, "No key store"));
+            return;
+        };
+        let params = params.map(|p| p.get().to_owned());
+        let spawned = std::thread::Builder::new()
+            .name("test-keystore".into())
+            .spawn(move || {
+                let text = keystore_call(&keystore, params.as_deref());
+                let mut payload = Zeroizing::new(Vec::with_capacity(text.len() + 64));
+                let written = RawValue::from_string(text)
+                    .and_then(|raw| message::write_result(&mut *payload, id, &raw));
+                let reply = match written {
+                    Ok(()) => Reply::Whole(transport::frame(&payload).unwrap_or_default()),
+                    Err(_) => error(id, ErrorCode::Internal, "Internal error"),
+                };
+                if let Some(tx) = done.upgrade() {
+                    let _ = tx.send((In::KeyStoreDone(reply), None));
+                }
+            });
+        if spawned.is_err() {
+            self.outbox
+                .push_back(error(id, ErrorCode::Internal, "No thread"));
+        }
+    }
+
     fn answer(&self, id: u64, params: Option<&RawValue>) -> Reply {
         #[derive(Deserialize)]
         struct Params {
@@ -184,6 +243,88 @@ impl Producer {
     }
 }
 
+/// One `test.keystore` call: its reply's `result`, as JSON text.
+fn keystore_call(keystore: &DesktopKeyStore, params: Option<&str>) -> String {
+    use fc_keystore::{Backend, Blob, ItemId, KeyStore, Label, Policy, Reason, Sealed};
+
+    #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Params {
+        op: String,
+        policy: String,
+        item: String,
+        #[serde(default)]
+        backend: Option<String>,
+        #[serde(default)]
+        blob: Option<String>,
+        #[serde(default)]
+        reason: Option<String>,
+    }
+    fn failed(error: &fc_keystore::KeyStoreError) -> String {
+        match error {
+            fc_keystore::KeyStoreError::Backend(backend) => {
+                serde_json::json!({ "ok": false, "error": "backend", "reason": backend.reason() })
+                    .to_string()
+            }
+            other => serde_json::json!({ "ok": false, "error": other.code() }).to_string(),
+        }
+    }
+    fn hex(bytes: &[u8]) -> String {
+        bytes.iter().map(|b| format!("{b:02x}")).collect()
+    }
+    let bad = || serde_json::json!({ "ok": false, "error": "bad_test_params" }).to_string();
+    let Some(p) = params.and_then(|p| serde_json::from_str::<Params>(p).ok()) else {
+        return bad();
+    };
+    let (Some(policy), Some(item)) = (Policy::parse(&p.policy), ItemId::parse(&p.item)) else {
+        return bad();
+    };
+    let reason = match p.reason.as_deref().map(Reason::parse) {
+        Some(Some(reason)) => Some(reason),
+        Some(None) => return bad(),
+        None => None,
+    };
+    let backend = match p.backend.as_deref() {
+        Some(name) => match Backend::parse(name) {
+            Some(backend) => backend,
+            None => return bad(),
+        },
+        None => Backend::MacosKeychain,
+    };
+    let blob = match p.blob.as_deref().map(Blob::from_base64) {
+        Some(Some(blob)) => Some(blob),
+        Some(None) => return bad(),
+        None => None,
+    };
+    let sealed = || Sealed::new(backend, policy, item, blob.clone()).ok();
+    match p.op.as_str() {
+        "create" => match keystore.create(policy, &Label::new(item)) {
+            Ok((key, sealed)) => serde_json::json!({
+                "ok": true,
+                "key": hex(key.expose()),
+                "backend": sealed.backend().name(),
+                "item": sealed.item().hex(),
+                "blob": sealed.blob().map(Blob::base64),
+            })
+            .to_string(),
+            Err(e) => failed(&e),
+        },
+        "open" => match sealed().map(|s| keystore.open(&s, reason)) {
+            Some(Ok(key)) => {
+                serde_json::json!({ "ok": true, "key": hex(key.expose()) }).to_string()
+            }
+            Some(Err(e)) => failed(&e),
+            None => bad(),
+        },
+        "forget" => match sealed().map(|s| keystore.forget(&s)) {
+            Some(Ok(())) => serde_json::json!({ "ok": true }).to_string(),
+            Some(Err(e)) => failed(&e),
+            None => bad(),
+        },
+        _ => bad(),
+    }
+}
+
 /// A small error reply: always one frame.
 fn error(id: u64, code: ErrorCode, text: &str) -> Reply {
     let mut payload = Zeroizing::new(Vec::with_capacity(128));
@@ -203,6 +344,7 @@ mod tests {
             allowance: Allowance::new(usize::MAX, max_bytes),
             outbox: VecDeque::new(),
             max_backlog: 2 * transport::MAX_QUEUED_CHAIN_BYTES,
+            keystore: None,
         };
         (producer, written)
     }
