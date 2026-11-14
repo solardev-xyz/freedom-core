@@ -9,7 +9,7 @@
 [package]
 name = "freedom-radicled"
 description = "The libradicle service process: one Radicle node per process, over stdin and stdout frames (design 0008)"
-version = "0.1.2"
+version = "0.1.3"
 edition = "2024"
 rust-version = "1.99"
 publish = false
