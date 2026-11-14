@@ -51,6 +51,17 @@
 //!   file fails at that step as if the OS had failed it (design 0012, "The
 //!   files": a failed write). Read at each write, so a test turns it on
 //!   and off while the core runs.
+//! - `FREEDOM_CORED_TEST_KEYSTORE_DEADLINE_MS` replaces how long the core
+//!   waits for main's answer to a `shell.keystore` request (design 0013:
+//!   main's 60 s or 10 s, and 5 s more).
+//! - `FREEDOM_CORED_TEST_KEYSTORE_EXIT_AFTER_STORE` set: the key-store
+//!   helper exits after the OS stored a `create`'s item and before it
+//!   answers, as one killed there would (design 0013, "The failure
+//!   contract").
+//! - `FREEDOM_CORED_TEST_KEYSTORE_SPAWN_PROBE` set: the key-store helper,
+//!   once it has refused child processes and checked the request, tries to
+//!   start `/usr/bin/true` instead of calling the OS, and answers
+//!   `backend` with `reason` `spawned` or `no_spawn`.
 //! - `FREEDOM_CORED_TEST_METHODS` enables the `test.*` methods
 //!   (`testmethods`), which make responses of any size. Builds without the
 //!   feature don't compile them, nor this hook.
@@ -146,6 +157,29 @@ pub fn commit_delay() {
             EXITING.load(std::sync::atomic::Ordering::SeqCst)
         });
     }
+}
+
+#[cfg(feature = "testhooks")]
+pub fn keystore_deadline(default: Duration) -> Duration {
+    millis("FREEDOM_CORED_TEST_KEYSTORE_DEADLINE_MS").map_or(default, Duration::from_millis)
+}
+
+#[cfg(feature = "testhooks")]
+pub fn keystore_exit_after_store() -> bool {
+    std::env::var_os("FREEDOM_CORED_TEST_KEYSTORE_EXIT_AFTER_STORE").is_some()
+}
+
+#[cfg(feature = "testhooks")]
+pub fn keystore_spawn_probe() -> Option<bool> {
+    std::env::var_os("FREEDOM_CORED_TEST_KEYSTORE_SPAWN_PROBE")?;
+    Some(
+        std::process::Command::new("/usr/bin/true")
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .is_ok(),
+    )
 }
 
 #[cfg(feature = "testhooks")]
@@ -392,6 +426,21 @@ pub fn exiting() {}
 #[cfg(not(feature = "testhooks"))]
 pub fn kdf_deadline(default: Duration) -> Duration {
     default
+}
+
+#[cfg(not(feature = "testhooks"))]
+pub fn keystore_deadline(default: Duration) -> Duration {
+    default
+}
+
+#[cfg(not(feature = "testhooks"))]
+pub fn keystore_exit_after_store() -> bool {
+    false
+}
+
+#[cfg(not(feature = "testhooks"))]
+pub fn keystore_spawn_probe() -> Option<bool> {
+    None
 }
 
 #[cfg(not(feature = "testhooks"))]

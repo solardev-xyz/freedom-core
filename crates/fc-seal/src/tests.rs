@@ -259,6 +259,48 @@ fn seal_binds_info_and_an_empty_aad() {
     assert!(open(INFO, b"x").is_err());
 }
 
+/// [`seal_with`] binds the `info` and `aad` it is given: the key opens with
+/// [`RecipientKey::open_with`] under the same pair only, never under
+/// [`INFO`] and an empty `aad`, and a [`seal`] doesn't open under another
+/// pair.
+#[test]
+fn seal_with_binds_its_info_and_aad() {
+    let key = [11u8; KEY_LEN];
+    let fresh = || RecipientKey::generate(&mut Bytes(vec![4; 32])).unwrap();
+    let info: &[u8] = b"freedom-keystore/1";
+    let aad: &[u8] = b"freedom-keystore/1\0create\0item";
+    let sealed = seal_with(
+        &fresh().public_key(),
+        &key,
+        info,
+        aad,
+        &mut Bytes(vec![5; 32]),
+    )
+    .unwrap();
+    let opened = fresh()
+        .open_with(&sealed.enc, &sealed.ciphertext, info, aad)
+        .unwrap();
+    assert_eq!(*opened, key);
+    for (other_info, other_aad) in [
+        (INFO, &[][..]),
+        (info, &[][..]),
+        (INFO, aad),
+        (info, &b"freedom-keystore/1\0open\0item"[..]),
+        (&b"freedom-keystore/2"[..], aad),
+    ] {
+        assert_eq!(
+            fresh().open_with(&sealed.enc, &sealed.ciphertext, other_info, other_aad),
+            Err(OpenError)
+        );
+    }
+    let plain = seal(&fresh().public_key(), &key, &mut Bytes(vec![5; 32])).unwrap();
+    assert_eq!(
+        fresh().open_with(&plain.enc, &plain.ciphertext, info, aad),
+        Err(OpenError)
+    );
+    assert_eq!(*fresh().open(&plain.enc, &plain.ciphertext).unwrap(), key);
+}
+
 #[test]
 fn a_sealed_key_opens_once_with_its_recipient() {
     let recipient = RecipientKey::generate(&mut Bytes(vec![1; 32])).unwrap();
