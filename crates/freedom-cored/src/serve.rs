@@ -199,6 +199,8 @@ const CAPABILITIES: &[&str] = &[
     "approval.grant",
     "approval.revoke",
     "approval.touch",
+    // Design 0012: a page's Radicle write, counted in R-6 (#372).
+    "approval.radicle_write",
     "approval.grants",
     "approval.forget_account",
     "dweb.open",

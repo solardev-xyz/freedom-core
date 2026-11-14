@@ -68,6 +68,10 @@ name = "radicle_custody"
 required-features = ["testhooks"]
 
 [[test]]
+name = "radicle_write"
+required-features = ["testhooks"]
+
+[[test]]
 name = "seal"
 required-features = ["testhooks"]
 

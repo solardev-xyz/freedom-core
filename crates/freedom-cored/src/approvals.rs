@@ -44,6 +44,12 @@
 //!   `approval.forget_account` write one, and answer `not_moved` until its
 //!   file has moved. Each change sends one `approval.changed { store, key
 //!   }`.
+//! - `approval.radicle_write { key }` (#372): a page's Radicle COB write,
+//!   judged with the core's own Radicle grant for its key and counted in
+//!   R-6 when the rule answers it (`Standing::authorize_radicle`). It
+//!   answers `not_moved` until `radicle` is in `grant_moved`, as main's
+//!   limiter counts until then. A revoked Radicle grant forgets the key's
+//!   bucket, as `radicle_disconnect` does in the reference.
 //!
 //! Tokens and Safe approvals are kept in memory and never logged.
 
@@ -55,8 +61,8 @@ use fc_approval::safe::{
     Approved, ExecutorCheck, Holder, OwnerCheck, SafeApprovals, SafeRefusal, SafeSigned,
 };
 use fc_approval::standing::{
-    AccountKind, DappAsk, DappRequest, Decision, Rules, Send, Signed as RuleSigned, SocApproval,
-    SocAsk, SocRequest, Standing, page_soc,
+    AccountKind, DappAsk, DappRequest, Decision, RadicleAsk, RadicleRequest, Rules, Send,
+    Signed as RuleSigned, SocApproval, SocAsk, SocRequest, Standing, page_soc,
 };
 use fc_approval::stores::{
     Applied, CapStore, DappStore, Effect, JsValue, RadicleFlag, RadicleStore, StoreKind, SwarmFlag,
@@ -74,7 +80,7 @@ use crate::grants::{Grants, StoreFile, WriteFailure, Written};
 use crate::rng::OsRng;
 
 /// The methods this module serves.
-pub const METHODS: [&str; 10] = [
+pub const METHODS: [&str; 11] = [
     "approval.issue",
     "approval.discard",
     "approval.spend",
@@ -83,6 +89,7 @@ pub const METHODS: [&str; 10] = [
     "approval.grant",
     "approval.revoke",
     "approval.touch",
+    "approval.radicle_write",
     "approval.grants",
     "approval.forget_account",
 ];
@@ -579,6 +586,7 @@ impl Approvals {
             "approval.grant" => self.grant(id, params, context, clocks),
             "approval.revoke" => self.revoke(id, params, context),
             "approval.touch" => self.touch(id, params, context, clocks),
+            "approval.radicle_write" => self.radicle_write(id, params, context, clocks),
             "approval.grants" => self.records(id, params, clocks),
             "approval.forget_account" => self.forget_account(id, params),
             _ => Err(invalid("unknown method")),
@@ -1163,6 +1171,15 @@ fn account(value: Option<&Value>, field: &str) -> Result<u32, ErrorBody> {
         .ok_or_else(|| invalid(format!("{field}: expected an account index")))
 }
 
+/// A standing rule's answer, as `approval.check` and
+/// `approval.radicle_write` give it: `{ covered, reason? }`.
+fn covered(decision: Decision) -> Value {
+    match decision.reason() {
+        None => json!({ "covered": true }),
+        Some(reason) => json!({ "covered": false, "reason": reason.name() }),
+    }
+}
+
 fn rule_clocks(clocks: Clocks) -> fc_approval::standing::Clocks {
     fc_approval::standing::Clocks {
         wall_ms: clocks.wall_ms,
@@ -1395,11 +1412,43 @@ impl Approvals {
         let decision =
             self.standing
                 .check_dapp_under(self.rules(), &store, &ask, rule_clocks(clocks));
-        let reply = match decision.reason() {
-            None => json!({ "covered": true }),
-            Some(reason) => json!({ "covered": false, "reason": reason.name() }),
+        json_reply(id, &covered(decision))
+    }
+
+    /// `approval.radicle_write { key }` (#372): whether a page's Radicle COB
+    /// write goes without a prompt, decided with the core's own Radicle
+    /// grant for its key: connected, outside custody, with the signing grant
+    /// and its rule, and within R-6. Only a write the rule answers is
+    /// counted; over the limit, the write is asked, not refused. A decision,
+    /// not advice: `freedom-radicled` makes the write, and main forwards it
+    /// only when this answers `covered`.
+    fn radicle_write(
+        &mut self,
+        id: u64,
+        params: &Value,
+        context: &Context,
+        clocks: Clocks,
+    ) -> Result<Zeroizing<Vec<u8>>, ErrorBody> {
+        let fields = object(params, &["key"], &[])?;
+        let page = page_context(context)?
+            .ok_or_else(|| forbidden("a standing rule answers only a page"))?;
+        if string(fields, "key")? != page.origin {
+            return Err(forbidden("a page asks only for its own key"));
+        }
+        // R-6 moves with the file (APB-3): until then main's limiter counts.
+        if !self.grants.moved(StoreKind::Radicle) {
+            return Err(not_moved(StoreKind::Radicle));
+        }
+        let ask = RadicleAsk {
+            key: &page.origin,
+            agent: page.agent,
+            request: RadicleRequest::CobWrite,
         };
-        json_reply(id, &reply)
+        let store = self.grants.view::<RadicleStore>(clocks.wall_ms / 1000);
+        let decision = self
+            .standing
+            .authorize_radicle(&store, &ask, clocks.vault_ms);
+        json_reply(id, &covered(decision))
     }
 
     /// `approval.spend { standing: { paused? }, kind, account, payload }`: a

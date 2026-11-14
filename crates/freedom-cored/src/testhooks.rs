@@ -58,6 +58,13 @@
 //!   is one valid only under the vault's epoch (`nodes.seal_radicle_key`),
 //!   waits in the loop's outbox as if the writer had no room, until the
 //!   loop's next frame or room moves it.
+//! - `FREEDOM_CORED_TEST_APPROVAL_CLOCK` names a file: while it holds a
+//!   number, the approvals read it as the vault's clock, in milliseconds
+//!   (token lives, the fee evidence's age, R-6's and Q9's buckets), in
+//!   place of the clock's own reading; the vault's auto-lock and throttle
+//!   keep the clock's. Read at each request, so a test moves the time while
+//!   the core runs, to the millisecond. A missing file, or one that holds
+//!   no number, leaves the clock's reading.
 //! - `FREEDOM_CORED_TEST_PROFILE_HOLD` (`<marker>=<release>`): a profile
 //!   subcommand that holds the catalog's write lock (or `migrate`, the
 //!   profile lock) creates the file `<marker>` once it has the lock, then
@@ -268,6 +275,19 @@ pub fn hold_reply(id: u64) -> bool {
 #[cfg(not(feature = "testhooks"))]
 pub fn hold_reply(_id: u64) -> bool {
     false
+}
+
+#[cfg(feature = "testhooks")]
+pub fn approval_clock(now_ms: u64) -> u64 {
+    std::env::var_os("FREEDOM_CORED_TEST_APPROVAL_CLOCK")
+        .and_then(|path| std::fs::read_to_string(path).ok())
+        .and_then(|text| text.trim().parse().ok())
+        .unwrap_or(now_ms)
+}
+
+#[cfg(not(feature = "testhooks"))]
+pub fn approval_clock(now_ms: u64) -> u64 {
+    now_ms
 }
 
 #[cfg(feature = "testhooks")]

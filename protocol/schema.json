@@ -43,6 +43,7 @@
     { "name": "approval.grant", "callers": ["page", "shell"], "mutates": false, "deadline_ms": null },
     { "name": "approval.revoke", "callers": ["page", "chrome", "shell"], "mutates": false, "deadline_ms": null },
     { "name": "approval.touch", "callers": ["page"], "mutates": false, "deadline_ms": null },
+    { "name": "approval.radicle_write", "callers": ["page"], "mutates": false, "deadline_ms": null },
     { "name": "approval.grants", "callers": ["chrome", "shell"], "mutates": false, "deadline_ms": null },
     { "name": "approval.forget_account", "callers": ["shell"], "mutates": false, "deadline_ms": null },
     { "name": "dweb.open", "callers": ["shell"], "mutates": false, "deadline_ms": 120000 },
