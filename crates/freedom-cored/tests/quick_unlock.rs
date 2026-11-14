@@ -91,6 +91,8 @@ enum Fault {
     /// the OS stored a `create`'s item, or forgot a `forget`'s, and before
     /// it answered.
     KilledAfterStore,
+    /// `invalidated`: the item is there, but its key no longer opens.
+    Invalidated,
 }
 
 /// Main's keychain.
@@ -118,6 +120,7 @@ impl Keychain {
         let timeout = json!({ "ok": false, "error": "unavailable", "reason": "timeout" });
         match (op.as_str(), fault) {
             (_, Some(Fault::Hold)) => None,
+            (_, Some(Fault::Invalidated)) => Some(json!({ "ok": false, "error": "invalidated" })),
             ("create", Some(Fault::KilledAfterStore)) => {
                 let mut key = [0u8; 32];
                 getrandom::fill(&mut key).unwrap();
@@ -786,14 +789,23 @@ fn an_enroll_killed_at_each_step() {
     }
 }
 
-/// The committed key's item is gone (removed by hand): enroll replaces the
-/// key. Its pending write takes the dead entry off and moves the old key
-/// into `forget`; the commit writes the entry under the new key.
+/// The committed key is dead: enroll replaces it. Its pending write takes
+/// the dead entry off and moves the old key into `forget`; the commit writes
+/// the entry under the new key. Dead two ways: its item gone (removed by
+/// hand), or still there but `invalidated`, so that the old item's own
+/// `forget` is what the faults and hooks act on.
 #[test]
 fn a_replace_killed_at_each_step() {
     let replace = || {
         let mut main = enrolled_stopped();
         main.keychain.items.clear();
+        main
+    };
+    // The fault lasts until the restart, which clears it: the old key then
+    // opens again if nothing forgot it.
+    let invalidated = || {
+        let mut main = enrolled_stopped();
+        main.keychain.faults.insert("open", Fault::Invalidated);
         main
     };
     for (hook, after) in [
@@ -814,6 +826,25 @@ fn a_replace_killed_at_each_step() {
         ("forget", Fault::KilledAfterStore, After::Works),
     ] {
         killed(replace(), enroll_op, None, Some((op, fault)), after);
+    }
+    for (hook, after) in [
+        ("before-pending", After::Works),
+        ("after-pending", After::Off),
+        ("before-commit", After::Off),
+        ("after-commit", After::Works),
+        ("before-forgotten", After::Works),
+        ("after-forgotten", After::Works),
+    ] {
+        killed(invalidated(), enroll_op, Some(hook), None, after);
+    }
+    for (op, fault, after) in [
+        ("create", Fault::Hold, After::Off),
+        ("create", Fault::KilledAfterStore, After::Off),
+        ("forget", Fault::Hold, After::Works),
+        ("forget", Fault::Timeout, After::Works),
+        ("forget", Fault::KilledAfterStore, After::Works),
+    ] {
+        killed(invalidated(), enroll_op, None, Some((op, fault)), after);
     }
 }
 
