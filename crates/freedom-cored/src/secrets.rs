@@ -157,8 +157,9 @@ fn credential(file: &SecretsFile, fingerprint: &str) -> Option<EntryName> {
 }
 
 /// How a quick-unlock entry is written ([`Secrets::write_entry`]): its
-/// name, binding and secret, the entries its first write takes off, and
-/// the step names of its `pending` write and of the write that puts it.
+/// name, binding and secret, the entries the write that puts it also takes
+/// off, and the step names of its `pending` write and of the write that
+/// puts it.
 struct Writing<'a> {
     name: EntryName,
     binding: Binding,
