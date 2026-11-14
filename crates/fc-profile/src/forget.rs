@@ -22,18 +22,22 @@
 //!   (`profile-registry.json.forget.unreadable`).
 //! - **Its text** is the catalog's: `JSON.stringify(…, null, 2)`.
 //!
-//! The backend and policy lists are `fc-keystore`'s (PRF-1): the policies
-//! `unattended` and `user_presence`, and the backends `macos-keychain`,
-//! `dpapi` and `secret-service`.
+//! The backend and policy lists are `fc-keystore`'s (PRF-1), re-exported
+//! here: the policies `unattended` and `user_presence`, and the backends
+//! `macos-keychain`, `dpapi` and `secret-service`.
 //!
 //! A deleted profile's items come from its secrets file
 //! (`identity/secrets.json`, or `freedom/identity/secrets.json` in the moved
-//! layout), whose form is `fc-keystore`'s too. [`secrets_items`] reads it
-//! more loosely than `fc-keystore` does, so a delete records what it can;
-//! `fc-keystore`'s vector tests check that it reads, from every file in
-//! `vectors/secrets.json`, the items `fc-keystore` names.
+//! layout), read with `fc-keystore`'s own parser ([`secrets_items`]): the
+//! same canonical text, bounds and invariants the core writes. A file that
+//! parser refuses names nothing known: [`secrets_named`] is an error, never
+//! a partial or empty list, and the delete goes on with `forget_unknown`
+//! (0013, "What this doesn't cover"). A missing file names nothing: every
+//! id is in the file before the OS holds the item.
 
 use fc_json::JsValue;
+use fc_keystore::SecretsFile;
+pub use fc_keystore::{Backend, Policy};
 
 use crate::catalog::{Store, profiles};
 use crate::delete::resolved;
@@ -54,64 +58,6 @@ pub const MAX_FILE_BYTES: usize = 64 * 1024;
 pub const FORGET_ASIDE: &str = "profile-registry.json.forget.unreadable";
 /// A profile's secrets file, in its identity directory (PRF-1).
 pub const SECRETS_FILE: &str = "secrets.json";
-
-/// A key store's backend.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Backend {
-    MacosKeychain,
-    SecretService,
-    Dpapi,
-}
-
-impl Backend {
-    pub fn name(self) -> &'static str {
-        match self {
-            Backend::MacosKeychain => "macos-keychain",
-            Backend::SecretService => "secret-service",
-            Backend::Dpapi => "dpapi",
-        }
-    }
-
-    fn parse(name: &str) -> Option<Backend> {
-        match name {
-            "macos-keychain" => Some(Backend::MacosKeychain),
-            "secret-service" => Some(Backend::SecretService),
-            "dpapi" => Some(Backend::Dpapi),
-            _ => None,
-        }
-    }
-
-    /// Whether a deleted profile's item of this backend is recorded: DPAPI
-    /// keeps nothing in the OS, so dropping its blob is the whole `forget`,
-    /// and no record is made (0013, "Windows").
-    pub fn recorded(self) -> bool {
-        self != Backend::Dpapi
-    }
-}
-
-/// A key's policy.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Policy {
-    Unattended,
-    UserPresence,
-}
-
-impl Policy {
-    pub fn name(self) -> &'static str {
-        match self {
-            Policy::Unattended => "unattended",
-            Policy::UserPresence => "user_presence",
-        }
-    }
-
-    fn parse(name: &str) -> Option<Policy> {
-        match name {
-            "unattended" => Some(Policy::Unattended),
-            "user_presence" => Some(Policy::UserPresence),
-            _ => None,
-        }
-    }
-}
 
 /// One key-store item.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -311,7 +257,10 @@ impl ForgetFile {
     /// directory names in its own secrets file, without a `forget`: either
     /// the delete stopped before the catalog changed, or the directory was
     /// imported again, and the profile's own file names the item (0013, "A
-    /// record counts once its profile is gone"). Whether anything went.
+    /// record counts once its profile is gone"). A listed profile whose
+    /// secrets file can't be read may name any of them, so all its record's
+    /// items are dropped that way, and none is forgotten. Whether anything
+    /// went.
     pub fn drop_still_named(
         &mut self,
         store: &mut dyn Store,
@@ -324,11 +273,17 @@ impl ForgetFile {
                 continue;
             }
             let dir = resolved(store, style, &record.dir);
-            // A secrets file that can't be read names nothing.
-            let named = secrets_named(store, &dir, style).unwrap_or_default();
-            record
-                .items
-                .retain(|item| !named.iter().any(|n| n.item == item.item));
+            match secrets_named(store, &dir, style) {
+                Ok(named) => record
+                    .items
+                    .retain(|item| !named.iter().any(|n| n.item == item.item)),
+                // A listed profile's secrets file that can't be read may
+                // name any of them: none is forgotten, since an item still
+                // in use would send its secrets to their fallback path.
+                // Dropped from the record, they stay in the key store, as
+                // for a delete's `forget_unknown`.
+                Err(Malformed) => record.items.clear(),
+            }
         }
         let dropped = self.count() != before;
         self.drop_empty() || dropped
@@ -368,103 +323,22 @@ fn listed_at(store: &mut dyn Store, catalog: &JsValue, style: Style, id: &str, d
     })
 }
 
-/// A secrets file's `backend` and `item` (`item` may be `null` where a key
-/// holds only a `pending` one).
-fn key_items(value: &JsValue, policy: Policy, out: &mut Vec<Item>) -> Result<(), Malformed> {
-    if !matches!(value, JsValue::Object(_)) {
-        return Err(Malformed);
-    }
-    let backend = Backend::parse(text(value.get("backend"))?).ok_or(Malformed)?;
-    match value.get("item") {
-        None | Some(JsValue::Null) => {}
-        Some(item) => {
-            let item = text(Some(item))?;
-            if !is_item_id(item) {
-                return Err(Malformed);
-            }
-            out.push(Item {
-                backend,
-                policy,
-                item: item.to_owned(),
-            });
-        }
-    }
-    match value.get("pending") {
-        None | Some(JsValue::Null) => {}
-        Some(pending) => {
-            if !matches!(pending, JsValue::Object(_)) {
-                return Err(Malformed);
-            }
-            let backend = Backend::parse(text(pending.get("backend"))?).ok_or(Malformed)?;
-            let item = text(pending.get("item"))?;
-            if !is_item_id(item) {
-                return Err(Malformed);
-            }
-            out.push(Item {
-                backend,
-                policy,
-                item: item.to_owned(),
-            });
-        }
-    }
-    Ok(())
-}
-
-/// The items a secrets file names (0013, "The secrets file"): each key in
-/// use (`keys.<policy>.item`), each `pending` one (`keys.<policy>.pending`,
-/// `{ backend, item, … }`), and the `forget` list (`{ backend, policy, item
-/// }`). PRF-1 defines the file; until then this is the narrowest reading of
-/// 0013's example: `version` 1, `keys` an object keyed by policy, `forget`
-/// an array, other members ignored. A file in no such form, or naming more
-/// than four items, is [`Malformed`]: the delete goes on, with
-/// `forget_unknown`.
+/// The items a secrets file names (0013, "The secrets file"), in its
+/// order: each key's committed item then its `pending` one, by policy, then
+/// the `forget` list. The file is read with `fc-keystore`'s parser, so any
+/// text the core wouldn't write, or past a bound, is [`Malformed`]: what it
+/// names is unknown, and the delete goes on with `forget_unknown`.
 pub fn secrets_items(text_: &str) -> Result<Vec<Item>, Malformed> {
-    let value = fc_json::parse(text_).map_err(|_| Malformed)?;
-    if !matches!(value, JsValue::Object(_))
-        || !matches!(value.get("version"), Some(JsValue::Number(n)) if *n == 1.0)
-    {
-        return Err(Malformed);
-    }
-    let mut out = Vec::new();
-    match value.get("keys") {
-        None | Some(JsValue::Null) => {}
-        Some(JsValue::Object(keys)) => {
-            for (name, key) in keys {
-                if !name.is_well_formed() {
-                    return Err(Malformed);
-                }
-                let policy = Policy::parse(name.as_str()).ok_or(Malformed)?;
-                key_items(key, policy, &mut out)?;
-            }
-        }
-        Some(_) => return Err(Malformed),
-    }
-    match value.get("forget") {
-        None | Some(JsValue::Null) => {}
-        Some(JsValue::Array(items)) => {
-            for item in items {
-                let JsValue::Object(_) = item else {
-                    return Err(Malformed);
-                };
-                let backend = Backend::parse(text(item.get("backend"))?).ok_or(Malformed)?;
-                let policy = Policy::parse(text(item.get("policy"))?).ok_or(Malformed)?;
-                let id = text(item.get("item"))?;
-                if !is_item_id(id) {
-                    return Err(Malformed);
-                }
-                out.push(Item {
-                    backend,
-                    policy,
-                    item: id.to_owned(),
-                });
-            }
-        }
-        Some(_) => return Err(Malformed),
-    }
-    if out.len() > MAX_ITEMS {
-        return Err(Malformed);
-    }
-    Ok(out)
+    let file = SecretsFile::parse(text_.as_bytes()).map_err(|_| Malformed)?;
+    Ok(file
+        .items()
+        .into_iter()
+        .map(|named| Item {
+            backend: named.backend,
+            policy: named.policy,
+            item: named.item.hex(),
+        })
+        .collect())
 }
 
 /// The secrets files of the profile whose data is at `data_root`, in either
@@ -677,40 +551,49 @@ mod tests {
 
     #[test]
     fn secrets_files() {
+        use fc_keystore::ItemId;
         let id = |c: char| c.to_string().repeat(32);
-        let text = format!(
-            r#"{{"version":1,"keys":{{"unattended":{{"backend":"macos-keychain","item":"{}","sealed":null,"pending":{{"backend":"macos-keychain","item":"{}"}}}},"user_presence":{{"backend":"macos-keychain","item":null,"pending":null}}}},"forget":[{{"backend":"macos-keychain","policy":"user_presence","item":"{}"}}],"entries":{{}}}}"#,
-            id('a'),
-            id('b'),
-            id('c')
-        );
+        let item_id = |c: char| ItemId::parse(&id(c)).unwrap();
+        // A file in the core's form: a key's pending item, and a `forget`
+        // record left by an earlier one.
+        let file = SecretsFile::new()
+            .begin_create(Policy::UserPresence, Backend::MacosKeychain, item_id('c'))
+            .unwrap()
+            .settle()
+            .begin_create(Policy::Unattended, Backend::SecretService, item_id('a'))
+            .unwrap();
+        let text = file.text();
         let items = secrets_items(&text).unwrap();
         let ids: Vec<&str> = items.iter().map(|i| i.item.as_str()).collect();
-        assert_eq!(ids, [id('a'), id('b'), id('c')]);
-        assert_eq!(items[2].policy, Policy::UserPresence);
-        assert_eq!(secrets_items(r#"{"version":1}"#).unwrap(), Vec::new());
+        assert_eq!(ids, [id('a'), id('c')]);
+        assert_eq!(items[0].backend, Backend::SecretService);
+        assert_eq!(items[0].policy, Policy::Unattended);
+        assert_eq!(items[1].policy, Policy::UserPresence);
+        assert_eq!(
+            secrets_items(&SecretsFile::new().text()).unwrap(),
+            Vec::new()
+        );
+        // Anything else names nothing known, the loose forms an earlier
+        // reading took included: `{"version":1}`, a compact text, a key with
+        // no entry under it, a file past its bounds.
+        let compact = format!(
+            r#"{{"version":1,"keys":{{"unattended":{{"backend":"macos-keychain","item":"{}","sealed":null,"pending":null}}}},"forget":[],"entries":{{}}}}"#,
+            id('a')
+        );
+        let newline = format!("{text}\n");
+        let decimal = text.replacen("\"version\": 1", "\"version\": 1.0", 1);
         for bad in [
+            "",
             "{",
             "[]",
+            r#"{"version":1}"#,
             r#"{"version":2}"#,
-            r#"{"version":1,"keys":[]}"#,
-            r#"{"version":1,"keys":{"other":{"backend":"dpapi","item":null}}}"#,
-            r#"{"version":1,"keys":{"unattended":{"backend":"dpapi","item":"x"}}}"#,
-            r#"{"version":1,"forget":{}}"#,
-            r#"{"version":1,"forget":[{"backend":"dpapi","policy":"unattended"}]}"#,
+            r#"{"version":1,"keys":{},"forget":[],"entries":{}}"#,
+            compact.as_str(),
+            newline.as_str(),
+            decimal.as_str(),
         ] {
             assert_eq!(secrets_items(bad), Err(Malformed), "{bad}");
         }
-        // Five items are past the secrets file's bound.
-        let five = format!(
-            r#"{{"version":1,"forget":[{}]}}"#,
-            (0..5)
-                .map(|n| format!(
-                    r#"{{"backend":"dpapi","policy":"unattended","item":"{n:032x}"}}"#
-                ))
-                .collect::<Vec<_>>()
-                .join(",")
-        );
-        assert_eq!(secrets_items(&five), Err(Malformed));
     }
 }

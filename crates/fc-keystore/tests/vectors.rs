@@ -1,8 +1,9 @@
 //! `vectors/secrets.json` (design 0013, PRF-1a), byte for byte: every file
-//! in form reads and writes back exactly, names the items fc-profile's
-//! reader finds in it, and opens or refuses as recorded; every malformed
-//! text is refused with its reason; every change gives exactly the text
-//! after it, drawing exactly the recorded nonces, or is refused.
+//! in form reads and writes back exactly, names the recorded items, and
+//! opens or refuses as recorded; every malformed text is refused with its
+//! reason; every change gives exactly the text after it, drawing exactly
+//! the recorded nonces, or is refused. fc-profile's tests replay the same
+//! vectors through the reader a profile delete uses.
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
 use std::collections::VecDeque;
@@ -72,28 +73,13 @@ fn parse(text: &str) -> SecretsFile {
     SecretsFile::parse(text.as_bytes()).unwrap_or_else(|e| panic!("{e:?}: {text}"))
 }
 
-/// A file in form: it reads, writes back exactly, and names for a profile
-/// delete exactly the items fc-profile's reader finds in it (PRF-3).
+/// A file in form: it reads, writes back exactly, and names exactly the
+/// recorded items. fc-profile's tests replay the same files through the
+/// reader a profile delete uses.
 fn check_in_form(id: &str, text: &str, items: &Value) -> SecretsFile {
     let file = parse(text);
     assert_eq!(file.text(), text, "{id}");
     assert_eq!(items_json(&file.items()), *items, "{id}");
-    let profile: Vec<Value> = fc_profile::forget::secrets_items(text)
-        .unwrap_or_else(|_| panic!("{id}: fc-profile refuses it"))
-        .iter()
-        .map(|i| {
-            serde_json::json!({
-                "backend": i.backend.name(),
-                "policy": i.policy.name(),
-                "item": i.item,
-            })
-        })
-        .collect();
-    assert_eq!(
-        Value::Array(profile),
-        *items,
-        "{id}: fc-profile reads other items"
-    );
     file
 }
 

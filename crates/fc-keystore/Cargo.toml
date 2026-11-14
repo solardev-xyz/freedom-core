@@ -31,8 +31,5 @@ thiserror = "2"
 zeroize = "1.8"
 
 [dev-dependencies]
-# The vectors' cross-check: every file the codec accepts names, for a
-# profile delete, the items fc-profile's reader finds in it (PRF-3).
-fc-profile = { path = "../fc-profile" }
 hex = "0.4"
 serde_json = { version = "1", features = ["preserve_order"] }

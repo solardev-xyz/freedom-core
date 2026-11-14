@@ -535,7 +535,6 @@ dependencies = [
  "aes-gcm",
  "base64",
  "fc-json",
- "fc-profile",
  "hex",
  "rand_core 0.10.1",
  "serde_json",
@@ -564,6 +563,8 @@ name = "fc-profile"
 version = "0.15.0"
 dependencies = [
  "fc-json",
+ "fc-keystore",
+ "hex",
  "serde",
  "serde_json",
  "sha2",
@@ -696,6 +697,7 @@ dependencies = [
  "fc-evm",
  "fc-json",
  "fc-keys",
+ "fc-keystore",
  "fc-naming",
  "fc-profile",
  "fc-protocol",
