@@ -1568,6 +1568,72 @@ impl Approvals {
         let _ = self.write::<DappStore, _>(key, |store| store.touch(key, chain_id, wall_ms));
     }
 
+    /// Whether the site's standing rule answers a page's signature now, as
+    /// the core judges it with its own grant (design 0012, APR-5d-2):
+    /// custody, the grant exposing `account`, the rule (Q9's limited one
+    /// once the dApp store has moved), what it never answers, and the rate,
+    /// counting nothing. `sign.*` under `{ standing }` decides again, and
+    /// counts.
+    pub fn page_rule(
+        &self,
+        key: &str,
+        agent: Option<bool>,
+        query: &fc_eip1193::sign::RuleQuery<'_>,
+        clocks: Clocks,
+    ) -> fc_eip1193::sign::RuleNow {
+        use fc_eip1193::sign::{RuleNow, Signed as Page};
+        let viewed;
+        let signed = match query.signed {
+            Page::Message(bytes) => RuleSigned::Message(bytes),
+            Page::TypedData { hash, view } => {
+                let Some(hash) = fc_evm::parse_bytes(hash, "hash")
+                    .ok()
+                    .and_then(|bytes| <[u8; 32]>::try_from(bytes).ok())
+                else {
+                    return RuleNow::NotCovered;
+                };
+                viewed = TypedDataView {
+                    hash,
+                    view: view.to_owned(),
+                };
+                RuleSigned::TypedData(&viewed)
+            }
+        };
+        let ask = DappAsk {
+            key,
+            agent,
+            account: query.account,
+            request: DappRequest::Signature(signed),
+        };
+        let store = self.grants.view::<DappStore>(clocks.wall_ms / 1000);
+        match self
+            .standing
+            .check_dapp_under(self.rules(), &store, &ask, rule_clocks(clocks))
+        {
+            Decision::Covered => RuleNow::Covered,
+            Decision::NotCovered(fc_approval::standing::Reason::RateLimited) => {
+                RuleNow::RateLimited
+            }
+            Decision::NotCovered(_) => RuleNow::NotCovered,
+        }
+    }
+
+    /// "Always allow" ticked on a page's signature the core signed (design
+    /// 0012, APR-5d-2): Q9's limited signing rule for `key`, today's flag
+    /// cleared in the same write, while the key's grant still exposes
+    /// `account`, as the reference writes it only then. A failed write is
+    /// ignored: the signature stands. On success one `approval.changed`.
+    pub fn page_allow_signing(&mut self, key: &str, account: u32, wall_ms: u64) {
+        if !self
+            .grants
+            .view::<DappStore>(wall_ms / 1000)
+            .exposes(key, account)
+        {
+            return;
+        }
+        let _ = self.write::<DappStore, _>(key, |store| store.allow_signing(key, wall_ms));
+    }
+
     /// The page-kind token for a signature the user approved on the core's
     /// own prompt (design 0012, APR-5d-1): minted here, as `approval.issue`
     /// would mint it under `page`, for `page`'s document and the `handle`

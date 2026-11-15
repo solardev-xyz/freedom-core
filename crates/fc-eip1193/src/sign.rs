@@ -1,49 +1,72 @@
-//! `personal_sign` and `eth_signTypedData_v4` (design 0012, APR-5d-1), as
-//! the approvals reference's `page-signing.js` (`7f85551d`) runs them for a
-//! vault account, the prompt asked through the core's `approval.request`:
+//! `personal_sign` and `eth_signTypedData_v4` (design 0012, APR-5d), as
+//! the approvals reference's `page-signing.js` (`7f85551d`) runs them, the
+//! prompts asked through the core's `approval.request`:
 //!
 //! - **A document with no key** gets `4100` before anything else
 //!   ([`crate::start`]).
 //! - **Then, in the reference's order:** the key's grant (`4100` "Not
 //!   connected" without one); the account it exposes, from main's wallet
-//!   list (`-32603` once gone); a Safe off Gnosis refused; whether the
-//!   site's signing rule would answer, read only outside Agent custody
-//!   (`PageContext.agent`, a missing one counting as custody); and what is
+//!   list (`-32603` once gone); a Safe off Gnosis refused; and what is
 //!   signed, before any prompt: the message's bytes, or the core's view of
 //!   the typed data against the page's chain. One that can't be shown
 //!   answers `-32603` with the reference's message.
-//! - **The user decides** on `eth.sign`, with the reference's view. An
-//!   approve is checked against the core's own grant again: the key must
-//!   still expose the account shown. Then the daemon mints the page-kind
-//!   token itself, for the page and the handle of that answer, spends it on
-//!   the signature at once, and answers the signature
-//!   ([`Approved`]). A rejection or a closed handle answers `4001`, a busy
-//!   window `-32002`, and nothing is signed.
-//!
-//! **Left to APR-5d-2** (*inferred*, each answering `4200` "Method not
-//! supported" for now, as a method without its route does): a request the
-//! site's signing rule would answer with no prompt; a Ledger's, a phone's
-//! or a Safe's signature (`{ device }`); and "Always allow", which Q9
-//! writes as the limited rule. Until then the prompt offers
-//! `{ "alwaysAllow": [false] }`, and an approve that ticks it is
-//! [`Crossed`].
+//! - **The site's standing rule** (APR-5d-2) is chosen only outside Agent
+//!   custody (`PageContext.agent`, a missing one counting as custody), for
+//!   a vault account, never for a `personal_sign` of exactly 32 bytes (#89)
+//!   or a warned view (#88), and only when the core's own grant answers it
+//!   under Q9's limits ([`RuleNow`]: the limited rule within its 30 days,
+//!   and the rate). A rule past its rate, expired, or today's unlimited
+//!   one leaves the request to its prompt. The rule's request asks
+//!   `vault.unlock` while the vault is locked, then main's recheck just
+//!   before the effect ([`Ask::rechecked`]): custody, the rule gone or the
+//!   document gone refuses it with nothing signed.
+//! - **Otherwise the user decides** on `eth.sign`, with the reference's
+//!   view. An approve is checked against the core's own grant again: the
+//!   key must still expose the account shown. Then the daemon mints the
+//!   page-kind token itself, for the page and the handle of that answer,
+//!   and spends it on the signature at once ([`Approved`]). "Always allow"
+//!   ticked writes Q9's limited rule after the signature. A rejection or a
+//!   closed handle answers `4001`, a busy window `-32002`, and nothing is
+//!   signed.
+//! - **A Ledger's, a phone's or a Safe's account** (until 0016; *inferred*
+//!   for the phone) is asked as any account is, with "Always allow"
+//!   unticked only, and no rule answers it (*inferred*): the device's
+//!   outcome isn't the core's to see. An approve mints the token and
+//!   returns it to main with the approved request, `{ device }`
+//!   ([`DeviceApproval`]).
 
 use fc_json::{JsString, JsValue};
 
-use crate::prompt::{Crossed, Decision};
+use crate::connect::NO_ADDRESS;
+use crate::prompt::{Crossed, Decision, Recheck};
 use crate::{Answer, Request, World, strictly_equal, v8json};
 
 /// The prompt's kind (design 0011).
 pub const SIGN_KIND: &str = "eth.sign";
 
-/// What the prompt offers until APR-5d-2 (*inferred*): "Always allow"
-/// unticked only.
-const CHOICES: &str = r#"{"alwaysAllow":[false]}"#;
+/// The unlock a rule's request asks while the vault is locked.
+pub const UNLOCK_KIND: &str = "vault.unlock";
+
+/// What the prompt offers a vault account: "Always allow", unticked or
+/// ticked.
+const CHOICES: &str = r#"{"alwaysAllow":[false,true]}"#;
+
+/// What it offers a device's account until 0016 (*inferred*): unticked
+/// only, since the core can't see whether the device signed.
+const DEVICE_CHOICES: &str = r#"{"alwaysAllow":[false]}"#;
+
+/// The unlock's one form of approve: no picks.
+const UNLOCK_CHOICES: &str = "{}";
 
 const INTERNAL_ERROR_CODE: i64 = -32603;
 const NOT_CONNECTED: (i64, &str) = (4100, "Not connected. Call eth_requestAccounts first.");
 const USER_REJECTED: (i64, &str) = (4001, "User rejected the request");
 const BUSY: (i64, &str) = (-32002, "Another wallet request is already pending");
+const UNLOCK_CANCELLED: (i64, &str) = (4001, "User cancelled unlock");
+/// As Swarm and Radicle answer a request Agent custody refuses.
+const AGENT_CUSTODY: &str = r#"{"error":{"code":4100,"message":"The origin is not authorized for this operation","data":{"reason":"agent_custody"}}}"#;
+const RULE_GONE: &str =
+    "Signing was not confirmed: this request is not covered by the site's auto-approve rules";
 const ACCOUNT_GONE: &str = "The connected account is no longer available";
 const SAFE_OFF_GNOSIS: &str = "This multi-owner account can only sign on Gnosis Chain \u{2014} switch the app to Gnosis first.";
 /// `getSigner`'s refusal of an index no account can have (*inferred*: a
@@ -114,6 +137,86 @@ impl Method {
     }
 }
 
+/// A device's account (the reference's `account.type`): its signature is
+/// the device's, which main asks for until 0016.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Device {
+    /// `ledger`.
+    Ledger,
+    /// `remote`, a phone (*inferred*: the core can't reach the phone's
+    /// session; main relays its job with the token, PHN-2).
+    Phone,
+    /// `safe`: its owners sign through main's session.
+    Safe,
+}
+
+impl Device {
+    fn of(kind: Option<&str>) -> Option<Device> {
+        match kind {
+            Some("ledger") => Some(Device::Ledger),
+            Some("remote") => Some(Device::Phone),
+            Some("safe") => Some(Device::Safe),
+            _ => None,
+        }
+    }
+
+    /// Its `type` in main's wallet list.
+    pub fn name(self) -> &'static str {
+        match self {
+            Device::Ledger => "ledger",
+            Device::Phone => "remote",
+            Device::Safe => "safe",
+        }
+    }
+}
+
+/// What a rule would answer: the bytes `sign.message` signs, or the core's
+/// view of the typed data.
+#[derive(Debug, Clone, Copy)]
+pub enum Signed<'a> {
+    Message(&'a [u8]),
+    TypedData { hash: &'a str, view: &'a str },
+}
+
+/// A request the site's rule may answer, for the core to judge with its
+/// own grant (`fc_approval::standing`).
+#[derive(Debug, Clone, Copy)]
+pub struct RuleQuery<'a> {
+    /// `PageContext.origin`.
+    pub key: &'a str,
+    /// The account the grant exposes.
+    pub account: u32,
+    pub signed: Signed<'a>,
+}
+
+/// The core's standing rule for a request, counting nothing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RuleNow {
+    /// The rule answers it.
+    Covered,
+    /// It would, but for its rate (Q9): the request is asked.
+    RateLimited,
+    /// No rule answers it: none, off, expired, today's unlimited one, past
+    /// its account, in custody, or what the user must see.
+    NotCovered,
+}
+
+/// What the rule signs, as the core judges it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum RuleSigned {
+    Message(Vec<u8>),
+    TypedData { hash: String, view: String },
+}
+
+impl RuleSigned {
+    fn borrowed(&self) -> Signed<'_> {
+        match self {
+            RuleSigned::Message(bytes) => Signed::Message(bytes),
+            RuleSigned::TypedData { hash, view } => Signed::TypedData { hash, view },
+        }
+    }
+}
+
 /// A signature request from a document with a key.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Sign {
@@ -131,7 +234,8 @@ pub struct TypedView {
     pub view: String,
 }
 
-/// The `eth.sign` prompt, for a vault account.
+/// A signature past its checks: asked on `eth.sign`, or answered by the
+/// site's rule ([`Ask::ruled`]).
 #[derive(Debug, Clone, PartialEq)]
 pub struct Ask {
     method: Method,
@@ -141,6 +245,15 @@ pub struct Ask {
     view: String,
     payload: String,
     expected_hash: Option<String>,
+    /// The prompt's `account`, which an unlock shows too.
+    account_view: JsValue,
+    device: Option<Device>,
+    /// A Safe's address, which its `safe-message` token binds.
+    address: Option<JsValue>,
+    params: Option<JsValue>,
+    chain_id: u64,
+    signed: RuleSigned,
+    ruled: bool,
 }
 
 /// What a decision does.
@@ -151,16 +264,33 @@ pub enum Decided {
     /// Approved: the daemon mints the token for it, spends it on the
     /// signature, and answers by [`Approved::answer`].
     Sign(Approved),
+    /// Approved for a device's account: the daemon mints the token and
+    /// returns it to main ([`DeviceApproval::answer`]).
+    Device(DeviceApproval),
 }
 
-/// An approved signature: what the token binds and the core signs.
+/// What main's recheck leaves of a rule's request.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Rechecked {
+    /// Refused, with nothing signed.
+    Answer(Answer),
+    /// The rule answers: the daemon signs it under `{ standing }`.
+    Sign(Approved),
+    /// The rule is past its rate now: the user is asked on `eth.sign`.
+    Prompt,
+}
+
+/// An approved signature, or one the rule answers: what the core signs.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Approved {
     method: Method,
     account: u32,
-    handle: String,
+    /// The handle main opened for the prompt, which the token binds; none
+    /// for a rule's.
+    handle: Option<String>,
     payload: String,
     expected_hash: Option<String>,
+    always_allow: bool,
 }
 
 impl Approved {
@@ -173,9 +303,10 @@ impl Approved {
         self.account
     }
 
-    /// The handle main opened for the prompt, which the token binds.
-    pub fn handle(&self) -> &str {
-        &self.handle
+    /// The handle main opened for the prompt, which the token binds; `None`
+    /// for a request the rule answers, which signs under `{ standing }`.
+    pub fn handle(&self) -> Option<&str> {
+        self.handle.as_deref()
     }
 
     /// The token's payload in the core's form, which is also what the core
@@ -188,6 +319,12 @@ impl Approved {
     /// The hash the user was shown, `sign.typed_data`'s `expected_hash`.
     pub fn expected_hash(&self) -> Option<&str> {
         self.expected_hash.as_deref()
+    }
+
+    /// Whether "Always allow" was ticked: once signed, Q9's limited rule
+    /// is written for the key, while its grant still exposes the account.
+    pub fn always_allow(&self) -> bool {
+        self.always_allow
     }
 
     /// The answer: the signature, or the reference's failure. A locked
@@ -207,6 +344,71 @@ impl Approved {
     /// The answer when the wallet index can't name an account.
     fn invalid_index() -> Answer {
         Answer::error(INTERNAL_ERROR_CODE, INVALID_INDEX)
+    }
+}
+
+/// An approved signature for a device's account (until 0016): the token
+/// the daemon mints for it goes back to main with the approved request.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeviceApproval {
+    device: Device,
+    account: u32,
+    handle: String,
+    kind: &'static str,
+    payload: String,
+    expected_hash: Option<String>,
+}
+
+impl DeviceApproval {
+    pub fn device(&self) -> Device {
+        self.device
+    }
+
+    pub fn account(&self) -> u32 {
+        self.account
+    }
+
+    /// The handle main opened for the prompt, which the token binds.
+    pub fn handle(&self) -> &str {
+        &self.handle
+    }
+
+    /// The token's kind: `sign-message` or `sign-typed-data`, or a Safe's
+    /// `safe-message`.
+    pub fn token_kind(&self) -> &'static str {
+        self.kind
+    }
+
+    /// What the token binds, as JSON text: a vault signature's payload, or
+    /// a Safe's `{ safe, chain_id, method, params }`.
+    pub fn payload(&self) -> &str {
+        &self.payload
+    }
+
+    /// `{ device: { type, kind, account, payload, expected_hash?, handle,
+    /// token } }` (*inferred*): what main spends the token with
+    /// (`approval.spend`, or a phone's `phone.job`), and the account's
+    /// kind.
+    pub fn answer(&self, minted: Result<&str, &str>) -> Answer {
+        let token = match minted {
+            Ok(token) => token,
+            Err(message) => return failure(message, "Signing failed"),
+        };
+        let Ok(payload) = fc_json::parse(&self.payload) else {
+            return failure("", "Signing failed");
+        };
+        let mut device = vec![
+            prop("type", JsValue::string(self.device.name())),
+            prop("kind", JsValue::string(self.kind)),
+            prop("account", JsValue::Number(f64::from(self.account))),
+            prop("payload", payload),
+        ];
+        if let Some(hash) = &self.expected_hash {
+            device.push(prop("expected_hash", JsValue::string(hash.as_str())));
+        }
+        device.push(prop("handle", JsValue::string(self.handle.as_str())));
+        device.push(prop("token", JsValue::string(token)));
+        Answer::raw(JsValue::Object(vec![prop("device", JsValue::Object(device))]).stringify())
     }
 }
 
@@ -307,6 +509,19 @@ struct Prepared {
     payload: String,
     expected_hash: Option<String>,
     warned: bool,
+    signed: RuleSigned,
+}
+
+/// A grant's `walletIndex` as an account index, where it is one.
+fn account_index(wallet_index: &JsValue) -> Option<u32> {
+    match wallet_index {
+        JsValue::Number(index) if index.fract() == 0.0 && (0.0..=MAX_ACCOUNT).contains(index) => {
+            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+            let account = *index as u32;
+            Some(account)
+        }
+        _ => None,
+    }
 }
 
 impl Sign {
@@ -323,15 +538,17 @@ impl Sign {
         self.method
     }
 
-    /// Runs the request up to its prompt: the grant `grant` gives, the
-    /// account, the Safe's chain, the rule, and what is signed, `view`
-    /// giving the core's view of typed data from `typed_data.hash`'s params
-    /// as JSON text (its error's message when it refuses them). `agent` is
+    /// Runs the request up to its prompt or its rule: the grant `grant`
+    /// gives, the account, the Safe's chain, what is signed (`view` giving
+    /// the core's view of typed data from `typed_data.hash`'s params as
+    /// JSON text, or its error's message when it refuses them), and the
+    /// rule, which `rule` judges with the core's own grant. `agent` is
     /// `PageContext.agent`.
     pub fn ask(
         &self,
         agent: Option<bool>,
         grant: impl FnOnce(&str) -> Option<JsValue>,
+        rule: impl FnOnce(&RuleQuery<'_>) -> RuleNow,
         view: impl FnOnce(&str) -> Result<TypedView, String>,
     ) -> Result<Ask, Answer> {
         let world = &self.world;
@@ -350,12 +567,17 @@ impl Sign {
             .filter(|account| account.truthy())
             .ok_or_else(|| Answer::error(INTERNAL_ERROR_CODE, ACCOUNT_GONE))?;
         let kind = account.get("type").and_then(JsValue::as_str);
-        let safe = kind == Some("safe");
-        if safe && chain_id != GNOSIS_CHAIN_ID {
+        let device = Device::of(kind);
+        if device == Some(Device::Safe) && chain_id != GNOSIS_CHAIN_ID {
             return Err(Answer::error(INTERNAL_ERROR_CODE, SAFE_OFF_GNOSIS));
         }
-        // The rule, read only outside custody: unknown custody is custody.
-        let ruled = agent == Some(false) && self.rule_covers(&permission);
+        // The rule, chosen only outside custody (unknown custody is
+        // custody), for a vault account, and never for a raw 32-byte
+        // value (#89).
+        let rule_may_answer = agent == Some(false)
+            && device.is_none()
+            && !(self.method == Method::Message
+                && signs_raw_hash(&element(self.params.as_ref(), 0)));
         let prepared = self.prepare(chain_id, view).map_err(|unshowable| {
             let fallback = self.method.unshowable();
             match unshowable {
@@ -366,13 +588,17 @@ impl Sign {
             }
         })?;
         // A warned request always shows its prompt, rule or not (#88). The
-        // rule's own path, and a device's, are APR-5d-2's.
-        if ruled && !prepared.warned {
-            return Err(Answer::unsupported());
-        }
-        if matches!(kind, Some("ledger" | "remote" | "safe")) {
-            return Err(Answer::unsupported());
-        }
+        // core judges the rule last, with its own grant: the limited rule,
+        // its 30 days and its rate (Q9).
+        let ruled = rule_may_answer
+            && !prepared.warned
+            && account_index(&wallet_index).is_some_and(|account| {
+                rule(&RuleQuery {
+                    key: &self.key,
+                    account,
+                    signed: prepared.signed.borrowed(),
+                }) == RuleNow::Covered
+            });
         let account_view = JsValue::Object(vec![
             prop("index", index_of(account).clone()),
             prop(
@@ -412,7 +638,7 @@ impl Sign {
         ]);
         let mut view = vec![
             prop("method", JsValue::string(self.method.name())),
-            prop("account", account_view),
+            prop("account", account_view.clone()),
             prop("chain", chain),
         ];
         view.extend(prepared.shown);
@@ -423,17 +649,14 @@ impl Sign {
             view: JsValue::Object(view).stringify(),
             payload: prepared.payload,
             expected_hash: prepared.expected_hash,
+            account_view,
+            device,
+            address: account.get("address").cloned(),
+            params: self.params.clone(),
+            chain_id,
+            signed: prepared.signed,
+            ruled,
         })
-    }
-
-    /// `ruleCovers` before the view: the grant's signing rule on, and never
-    /// for a `personal_sign` of exactly 32 bytes (#89).
-    fn rule_covers(&self, permission: &JsValue) -> bool {
-        let on = permission
-            .get("autoApprove")
-            .and_then(|rules| rules.get("signing"))
-            == Some(&JsValue::Bool(true));
-        on && !(self.method == Method::Message && signs_raw_hash(&element(self.params.as_ref(), 0)))
     }
 
     /// `prepare`: the message's bytes, or the core's view of the typed data.
@@ -466,6 +689,7 @@ impl Sign {
                     payload: payload.stringify(),
                     expected_hash: None,
                     warned: raw_hash,
+                    signed: RuleSigned::Message(bytes),
                 })
             }
             Method::TypedData => self.prepare_typed(chain_id, view),
@@ -515,6 +739,10 @@ impl Sign {
             JsValue::Object(Vec::new())
         };
         let warned = !warnings.is_empty();
+        let signed = RuleSigned::TypedData {
+            hash: viewed.hash.clone(),
+            view: viewed.view.clone(),
+        };
         let shown = vec![
             prop(
                 "typedData",
@@ -534,6 +762,7 @@ impl Sign {
             payload,
             expected_hash: Some(viewed.hash),
             warned,
+            signed,
         })
     }
 }
@@ -746,9 +975,25 @@ impl Ask {
         &self.view
     }
 
-    /// The choices' JSON text.
+    /// The choices' JSON text: "Always allow" unticked or ticked, or
+    /// unticked only for a device's account.
     pub fn choices(&self) -> &'static str {
-        CHOICES
+        if self.device.is_some() {
+            DEVICE_CHOICES
+        } else {
+            CHOICES
+        }
+    }
+
+    /// The account's kind, for a device's.
+    pub fn device(&self) -> Option<Device> {
+        self.device
+    }
+
+    /// Whether the site's rule answers it, with no prompt but a locked
+    /// vault's unlock.
+    pub fn ruled(&self) -> bool {
+        self.ruled
     }
 
     /// What main's decision does, `grant` giving the key's grant as it
@@ -770,15 +1015,21 @@ impl Ask {
                 choices, handle, ..
             } => (choices, handle),
         };
-        // The one pick: "Always allow", unticked until APR-5d-2.
+        // The one pick: "Always allow", ticked only where it is offered.
         let JsValue::Object(picks) = &choices else {
             return Err(Crossed);
         };
-        let offered = picks.iter().all(|(name, value)| {
-            name.as_str() == "alwaysAllow" && matches!(value, JsValue::Bool(false))
-        });
-        if !offered {
-            return Err(Crossed);
+        let mut always_allow = false;
+        for (name, value) in picks {
+            match value {
+                JsValue::Bool(ticked) if name.as_str() == "alwaysAllow" => {
+                    if *ticked && self.device.is_some() {
+                        return Err(Crossed);
+                    }
+                    always_allow = *ticked;
+                }
+                _ => return Err(Crossed),
+            }
         }
         // The grant still exposing the account shown.
         let exposes = grant(&self.key)
@@ -795,23 +1046,131 @@ impl Ask {
                 NOT_CONNECTED.1,
             )));
         }
-        let account = match self.wallet_index {
-            JsValue::Number(index)
-                if index.fract() == 0.0 && (0.0..=MAX_ACCOUNT).contains(&index) =>
-            {
-                #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-                let account = index as u32;
-                account
-            }
-            _ => return Ok(Decided::Answer(Approved::invalid_index())),
+        let Some(account) = account_index(&self.wallet_index) else {
+            return Ok(Decided::Answer(Approved::invalid_index()));
         };
+        if let Some(device) = self.device {
+            return Ok(Decided::Device(
+                self.device_approval(device, account, handle),
+            ));
+        }
         Ok(Decided::Sign(Approved {
             method: self.method,
             account,
-            handle,
+            handle: Some(handle),
             payload: self.payload.clone(),
             expected_hash: self.expected_hash.clone(),
+            always_allow,
         }))
+    }
+
+    /// The token a device's approve gets: a Safe's is a `safe-message`,
+    /// binding the Safe, its chain and the page's request as sent.
+    fn device_approval(&self, device: Device, account: u32, handle: String) -> DeviceApproval {
+        let (kind, payload, expected_hash) = if device == Device::Safe {
+            let payload = JsValue::Object(vec![
+                prop("safe", self.address.clone().unwrap_or(JsValue::Null)),
+                prop("chain_id", JsValue::string(self.chain_id.to_string())),
+                prop("method", JsValue::string(self.method.name())),
+                prop("params", self.params.clone().unwrap_or(JsValue::Null)),
+            ]);
+            ("safe-message", payload.stringify(), None)
+        } else {
+            (
+                self.method.token_kind(),
+                self.payload.clone(),
+                self.expected_hash.clone(),
+            )
+        };
+        DeviceApproval {
+            device,
+            account,
+            handle,
+            kind,
+            payload,
+            expected_hash,
+        }
+    }
+
+    /// The unlock's kind, asked for a rule's request while the vault is
+    /// locked.
+    pub fn unlock_kind(&self) -> &'static str {
+        UNLOCK_KIND
+    }
+
+    /// The unlock's view: `{ account, reason: "sign" }`.
+    pub fn unlock_view(&self) -> String {
+        JsValue::Object(vec![
+            prop("account", self.account_view.clone()),
+            prop("reason", JsValue::string("sign")),
+        ])
+        .stringify()
+    }
+
+    /// The unlock's choices: none.
+    pub fn unlock_choices(&self) -> &'static str {
+        UNLOCK_CHOICES
+    }
+
+    /// What main's decision on the unlock does: `None` to go on to the
+    /// recheck; a refusal (`4001` "User cancelled unlock", `-32002` for a
+    /// busy window) otherwise. An approve with any pick is [`Crossed`].
+    pub fn unlocked(&self, decision: Decision) -> Result<Option<Answer>, Crossed> {
+        match decision {
+            Decision::Busy => Ok(Some(Answer::error(BUSY.0, BUSY.1))),
+            Decision::Reject | Decision::Closed => {
+                Ok(Some(Answer::error(UNLOCK_CANCELLED.0, UNLOCK_CANCELLED.1)))
+            }
+            Decision::Approve { choices, .. } => match &choices {
+                JsValue::Object(picks) if picks.is_empty() => Ok(None),
+                _ => Err(Crossed),
+            },
+        }
+    }
+
+    /// The rule's request, for the core to judge again just before the
+    /// effect; `None` for a request no rule answers.
+    pub fn query(&self) -> Option<RuleQuery<'_>> {
+        let account = account_index(&self.wallet_index)?;
+        self.ruled.then(|| RuleQuery {
+            key: &self.key,
+            account,
+            signed: self.signed.borrowed(),
+        })
+    }
+
+    /// Just before a rule's effect, after its last wait, in the reference's
+    /// order: a tab gone into custody refused (`agent_custody`); the rule
+    /// no longer answering (`now`, judged with the core's own grant and
+    /// main's fresh custody) refused, but one past its rate asked of the
+    /// user, as Q9 asks it (*inferred*); the document gone refused (`4100`
+    /// "This page has no address to connect from yet"). Otherwise the rule
+    /// answers it.
+    pub fn rechecked(&self, recheck: &Recheck, now: RuleNow) -> Rechecked {
+        if recheck.agent {
+            return Rechecked::Answer(Answer::raw(AGENT_CUSTODY));
+        }
+        if now == RuleNow::NotCovered {
+            return Rechecked::Answer(Answer::error(INTERNAL_ERROR_CODE, RULE_GONE));
+        }
+        if !recheck.live {
+            return Rechecked::Answer(Answer::error(NO_ADDRESS.0, NO_ADDRESS.1));
+        }
+        let account = match account_index(&self.wallet_index) {
+            Some(account) if self.ruled && self.device.is_none() => account,
+            _ => return Rechecked::Answer(Answer::error(INTERNAL_ERROR_CODE, RULE_GONE)),
+        };
+        if now == RuleNow::RateLimited {
+            return Rechecked::Prompt;
+        }
+        Rechecked::Sign(Approved {
+            method: self.method,
+            account,
+            handle: None,
+            payload: self.payload.clone(),
+            expected_hash: self.expected_hash.clone(),
+            always_allow: false,
+        })
     }
 }
 

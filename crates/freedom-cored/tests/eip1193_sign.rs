@@ -9,11 +9,17 @@
 //! only): there the view is fc-evm's own, its reports the scripted ones,
 //! and the chains a warning quotes include the one its domain names. Then
 //! the guarantees: a keyless document gets `4100` first, whatever its
-//! params; nothing is signed on a crossed answer; "Always allow" isn't
-//! offered yet; a rule's or a device's request is APR-5d-2's, and no
-//! Ledger, phone or Safe account reaches the vault; a grant index that is
-//! no account signs nothing; typed data nested past fc-json is `Invalid
-//! parameters`; and a locked vault signs nothing.
+//! params; nothing is signed on a crossed answer; no Ledger, phone or Safe
+//! account reaches the vault, each getting `{ device }` with a token bound
+//! to the page and the handle; a grant index that is no account signs
+//! nothing; typed data nested past fc-json is `Invalid parameters`; and a
+//! locked vault signs nothing.
+//!
+//! APR-5d-2's ten scenarios (a rule answering, "Always allow", a Ledger)
+//! replay with the reference's rule in Q9's form (`rule-legacy`: the core
+//! answers only the limited rule), the wall clock at the vectors' `now`.
+//! Then a rule's guarantees: custody or the document gone at the recheck
+//! refuses with nothing signed, and Q9 through the dispatcher.
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
@@ -232,11 +238,14 @@ fn every_vault_prompt_scenario_replays_through_the_core() {
                     let params = &asked["params"];
                     assert_eq!(params["request"], id, "{what}");
                     assert_eq!(params["kind"], prompt["args"]["kind"], "{what}");
-                    assert_eq!(
-                        params["choices"],
-                        json!({ "alwaysAllow": [false] }),
-                        "{what}"
-                    );
+                    let device = ["ledger", "remote", "safe"]
+                        .contains(&params["view"]["account"]["type"].as_str().unwrap_or(""));
+                    let offered = if device {
+                        json!({ "alwaysAllow": [false] })
+                    } else {
+                        json!({ "alwaysAllow": [false, true] })
+                    };
+                    assert_eq!(params["choices"], offered, "{what}");
                     let mut expected = prompt["args"]["view"].clone();
                     if expected.get("typedData").is_some() {
                         let shown = &params["view"]["typedData"]["view"];
@@ -393,8 +402,7 @@ fn a_keyless_document_gets_4100_first() {
 }
 
 /// A crossed answer signs nothing: another prompt's id, a handle an
-/// earlier answer named, or a pick not offered ("Always allow", until
-/// APR-5d-2). Each fails its request with `mismatch`; the grant is
+/// earlier answer named, or a pick not offered. Each fails its request with `mismatch`; the grant is
 /// untouched, and the next approve still signs.
 #[test]
 fn a_crossed_answer_signs_nothing() {
@@ -414,7 +422,7 @@ fn a_crossed_answer_signs_nothing() {
         approve(&json!("00".repeat(16)), &"cd".repeat(32), json!({}))
     });
     crossed(&mut core, 11, &|p| {
-        approve(p, &used, json!({ "alwaysAllow": true }))
+        approve(p, &used, json!({ "alwaysAllow": "yes" }))
     });
     crossed(&mut core, 12, &|p| approve(p, &used, json!({})));
     crossed(&mut core, 13, &|p| {
@@ -438,31 +446,6 @@ fn a_crossed_answer_signs_nothing() {
         before,
         "\"Always allow\" unticked writes nothing"
     );
-}
-
-/// A request the site's rule would answer outside custody, and a device's,
-/// are APR-5d-2's: `4200`, nothing asked. In custody (or with custody
-/// unknown) the rule doesn't answer, and the user is asked.
-#[test]
-fn a_rule_or_a_device_is_apr5d2s() {
-    let unsupported = json!({ "error": { "code": 4200, "message": "Method not supported" } });
-    let (_root, mut core) = core_with(&connected(0, true), true, false);
-    request(&mut core, 20, Some(SITE), Some(false), &hello_sign());
-    assert_eq!(response(&mut core, 20)["result"], unsupported);
-    for (id, agent) in [(21, Some(true)), (22, None)] {
-        request(&mut core, id, Some(SITE), agent, &hello_sign());
-        let asked = next_request(&mut core);
-        assert_eq!(asked["method"], "approval.request", "{asked}");
-        respond(
-            &mut core,
-            &asked,
-            json!({ "prompt": asked["params"]["prompt"], "closed": "closed" }),
-        );
-        assert_eq!(core.until_response(id)["result"]["error"]["code"], 4001);
-    }
-    let (_root, mut core) = core_with(&connected(1, false), true, false);
-    request(&mut core, 23, Some(SITE), Some(false), &hello_sign());
-    assert_eq!(response(&mut core, 23)["result"], unsupported);
 }
 
 /// Approved with the vault locked: the core's refusal, nothing signed.
@@ -508,27 +491,6 @@ fn a_decision_crossed_between_two_signatures() {
         core.until_response(41)["result"],
         json!({ "result": HELLO_SIGNATURE })
     );
-}
-
-/// A Ledger's, a phone's or a Safe's account never reaches the vault, the
-/// Safe on Gnosis (where it may sign) and the vault unlocked, holding keys
-/// at those indices: `4200`, and no `approval.request` (the very next
-/// message is the answer), so nothing to approve and nothing signed.
-#[test]
-fn no_device_account_reaches_the_vault() {
-    let unsupported = json!({ "error": { "code": 4200, "message": "Method not supported" } });
-    let sites = [
-        ("https://ledger.example", json!(1)),
-        ("https://phone.example", json!(2)),
-        ("https://safe.example", json!(1000)),
-    ];
-    let (_root, mut core) = core_with(&grants(&sites), true, true);
-    let before = grant_file(&core);
-    for (id, (site, _)) in (50..).zip(&sites) {
-        request(&mut core, id, Some(site), Some(false), &hello_sign());
-        assert_eq!(response(&mut core, id)["result"], unsupported, "{site}");
-    }
-    assert_eq!(grant_file(&core), before);
 }
 
 /// A grant whose `walletIndex` is no account index (a fraction, negative,
@@ -587,5 +549,553 @@ fn typed_data_nested_past_fc_json_is_invalid_parameters() {
     assert_eq!(
         response(&mut core, 70)["result"],
         json!({ "error": { "code": -32603, "message": "Invalid parameters" } })
+    );
+}
+
+/// APR-5d-2's scenarios: a rule answering, "Always allow", a Ledger.
+const APR5D2: [&str; 10] = [
+    "sign-always-allow",
+    "sign-always-allow-fails",
+    "sign-ledger-approved",
+    "sign-ledger-declined",
+    "sign-rule-answers",
+    "sign-rule-warned-prompts",
+    "sign-rule-locked-vault",
+    "sign-rule-unlock-cancelled",
+    "sign-rule-off-during-unlock",
+    "sign-rule-custody-during-unlock",
+];
+
+/// The vectors' wall clock, which every recorded time is.
+const NOW: u64 = 1_763_000_000_000;
+
+/// `rule-legacy`: the reference's signing rule, as Q9's limited rule given
+/// at `granted`, with today's flag cleared, as the core writes it.
+fn q9(mut grants: Value, granted: u64) -> Value {
+    for entry in grants.as_object_mut().unwrap().values_mut() {
+        let rules = &mut entry["autoApprove"];
+        if rules["signing"] == true {
+            rules["signing"] = json!(false);
+            rules["limited"] = json!({ "signing": { "grantedAt": granted }, "transactions": [] });
+        }
+    }
+    grants
+}
+
+/// A core as [`core_with`], with the wall clock at `wall` (rewritten
+/// through the returned file) and its vault locked if `locked`.
+fn core_at(grants: &Value, wall: u64, locked: bool) -> (tempfile::TempDir, Core, PathBuf) {
+    let (root, data, locks) = dirs();
+    let clock = root.path().join("wall");
+    std::fs::write(&clock, wall.to_string()).unwrap();
+    let env = [("FREEDOM_CORED_TEST_WALL_CLOCK", clock.to_str().unwrap())];
+    let mut core = spawn_env("serve", &data, &locks, &[], &env);
+    std::fs::create_dir_all(&core.grant_root).unwrap();
+    let text = serde_json::to_string_pretty(grants).unwrap();
+    std::fs::write(core.grant_root.join("dapp-permissions.json"), text).unwrap();
+    core.grant_moved = vec!["dapp"];
+    assert_eq!(core.hello_fragments()["result"]["protocol"], 2);
+    let imported = core.call(
+        2,
+        "vault.import",
+        json!({ "password_b64": STANDARD.encode("testpass1"), "mnemonic_b64": STANDARD.encode(ABANDON) }),
+    );
+    assert!(imported["result"].is_object(), "{imported}");
+    if locked {
+        let reply = core.call_shell(3, "vault.lock", json!({}));
+        assert!(reply["result"].is_object(), "{reply}");
+    }
+    (root, core, clock)
+}
+
+/// The next message that isn't an event.
+fn next_message(core: &mut Core) -> Value {
+    loop {
+        let message = core.recv();
+        if message["type"] != "event" {
+            return message;
+        }
+    }
+}
+
+fn unlock(core: &mut Core, id: u64) {
+    let reply = core.call_shell(
+        id,
+        "vault.unlock",
+        json!({ "password_b64": STANDARD.encode("testpass1") }),
+    );
+    assert!(reply["result"].is_object(), "{reply}");
+}
+
+/// The recheck main answers: `{ live, agent }`.
+fn recheck(core: &mut Core, id: u64, live: bool, agent: bool) {
+    let asked = next_message(core);
+    assert_eq!(asked["method"], "approval.recheck", "{asked}");
+    assert_eq!(asked["params"]["request"], id, "{asked}");
+    respond(core, &asked, json!({ "live": live, "agent": agent }));
+}
+
+/// The typed-data view the core shows for a recorded one: fc-evm's own,
+/// with the scripted reports, as the vault-prompt replay checks it.
+fn shown_typed(file: &Value, expected: &mut Value, shown: &Value, typed: &Value) {
+    assert_eq!(shown, &own_view(typed, 100));
+    for report in ["named_type", "chain"] {
+        assert_eq!(shown[report], expected["typedData"]["view"][report]);
+    }
+    expected["typedData"]["view"] = shown.clone();
+    if !expected["chains"].as_object().unwrap().is_empty() {
+        let mut chains = serde_json::Map::new();
+        for id in [1, 100] {
+            let name = &file["networks"][id.to_string()]["name"];
+            chains.insert(id.to_string(), json!({ "name": name }));
+        }
+        expected["chains"] = Value::Object(chains);
+    }
+}
+
+#[test]
+fn every_apr5d2_scenario_replays_through_the_core() {
+    let file = load();
+    let (mut scenarios, mut requests, mut asked, mut ruled, mut devices) = (0, 0, 0, 0, 0);
+    for scenario in file["scenarios"].as_array().unwrap() {
+        let name = scenario["id"].as_str().unwrap();
+        if !APR5D2.contains(&name) {
+            continue;
+        }
+        assert_eq!(scenario["step"], "APR-5d", "{name}");
+        scenarios += 1;
+        let before = q9(scenario["grants"]["before"].clone(), NOW);
+        let locked = scenario["world"]["vault"] == false;
+        let (_root, mut core, _clock) = core_at(&before, NOW, locked);
+        let world = world_of(&file, scenario);
+        let agent = scenario["world"]["custody"].as_bool();
+        assert_eq!(agent, Some(false), "{name}");
+        let mut expected_after = before.clone();
+        for (i, recorded) in scenario["requests"].as_array().unwrap().iter().enumerate() {
+            requests += 1;
+            let what = format!("{name} #{i} {}", recorded["method"]);
+            let id = 100 + u64::try_from(i).unwrap();
+            let mut body = json!({ "method": recorded["method"], "world": world });
+            if let Some(p) = recorded.get("params") {
+                body["params"] = p.clone();
+            }
+            let effects = recorded["effects"].as_array().unwrap();
+            // A view the vectors script as `match` for typed data whose
+            // domain names chain 1 (`sign-rule-answers`): the core's own
+            // view matches it with the window on chain 1, and the signature
+            // doesn't depend on the page's chain.
+            if let Some(view) = effects
+                .iter()
+                .find(|e| e["effect"] == "core.typed_data_view")
+            {
+                let own = own_view(&body["params"][1], 100);
+                if own["chain"] != view["answer"]["view"]["chain"] {
+                    assert_eq!(view["answer"]["view"]["chain"], "match", "{what}");
+                    assert_eq!(own_view(&body["params"][1], 1)["chain"], "match", "{what}");
+                    body["world"]["window_chain"] = json!(1);
+                }
+            }
+            request(&mut core, id, Some(SITE), agent, &body);
+            let changes: Vec<&str> = effects
+                .iter()
+                .filter(|e| e["effect"] == "world")
+                .map(|e| e["change"].as_str().unwrap())
+                .collect();
+            let prompt = effects.iter().find(|e| e["effect"] == "prompt");
+            let signs = effects
+                .iter()
+                .any(|e| e["effect"] == "sign.message" || e["effect"] == "sign.typed_data");
+            let mut expected = recorded["result"].clone();
+            let message = match prompt {
+                // The rule answers: no prompt, main's recheck, the signature.
+                None => {
+                    ruled += 1;
+                    recheck(&mut core, id, true, false);
+                    core.until_response(id)
+                }
+                Some(prompt) => {
+                    asked += 1;
+                    let ask = next_message(&mut core);
+                    assert_eq!(ask["method"], "approval.request", "{what}: {ask}");
+                    let params = &ask["params"];
+                    assert_eq!(params["request"], id, "{what}");
+                    let kind = prompt["args"]["kind"].as_str().unwrap();
+                    assert_eq!(params["kind"], kind, "{what}");
+                    let mut view = prompt["args"]["view"].clone();
+                    if view.get("typedData").is_some() {
+                        shown_typed(
+                            &file,
+                            &mut view,
+                            &params["view"]["typedData"]["view"],
+                            &body["params"][1],
+                        );
+                    }
+                    assert_eq!(params["view"].to_string(), view.to_string(), "{what}");
+                    let device = view["account"]["type"] == "ledger";
+                    let choices = match (kind, device) {
+                        ("vault.unlock", _) => json!({}),
+                        (_, true) => json!({ "alwaysAllow": [false] }),
+                        _ => json!({ "alwaysAllow": [false, true] }),
+                    };
+                    assert_eq!(params["choices"], choices, "{what}");
+                    // Main's world as it answers.
+                    for change in &changes {
+                        match *change {
+                            "vault-unlocked" => unlock(&mut core, id + 50),
+                            "signing-rule-off" => {
+                                let off = core.call_shell(
+                                    id + 60,
+                                    "approval.revoke",
+                                    json!({ "store": "dapp", "key": SITE, "what": "signing" }),
+                                );
+                                assert!(off.get("result").is_some(), "{off}");
+                                let rules = &mut expected_after[SITE]["autoApprove"];
+                                rules["limited"]["signing"] = Value::Null;
+                            }
+                            "custody-entered" => {}
+                            other => panic!("{what}: {other}"),
+                        }
+                    }
+                    // The vault locked as the signature is made.
+                    let throws = effects
+                        .iter()
+                        .find(|e| e["effect"] == "sign.message")
+                        .and_then(|e| e.get("throws"));
+                    if !device && throws.is_some() {
+                        let reply = core.call_shell(id + 70, "vault.lock", json!({}));
+                        assert!(reply["result"].is_object(), "{reply}");
+                        // The core's own words for it; the reference's
+                        // signer was scripted to throw this message.
+                        assert_eq!(expected["error"]["message"], "The vault is locked");
+                        expected["error"]["message"] = json!("Vault is locked");
+                    }
+                    let handle = format!("{:064x}", ask["id"].as_u64().unwrap());
+                    let answer = answer_of(&params["prompt"], &handle, &prompt["answer"], &world);
+                    respond(&mut core, &ask, answer);
+                    let unlocked = kind == "vault.unlock" && prompt["answer"]["approve"] == true;
+                    if unlocked {
+                        recheck(&mut core, id, true, changes.contains(&"custody-entered"));
+                    }
+                    let reply = core.until_response(id);
+                    if device && prompt["answer"]["approve"] == true {
+                        devices += 1;
+                        let device = &reply["result"]["device"];
+                        let issue = effects
+                            .iter()
+                            .find(|e| e["effect"] == "token.issue")
+                            .unwrap();
+                        assert_eq!(device["type"], "ledger", "{what}: {reply}");
+                        assert_eq!(device["kind"], issue["args"]["kind"], "{what}");
+                        assert_eq!(device["account"], issue["args"]["account"], "{what}");
+                        let payload = json!({ "message": issue["args"]["payload"] });
+                        assert_eq!(device["payload"], payload, "{what}");
+                        assert_eq!(device["handle"], handle.as_str(), "{what}");
+                        // Main spends it for the device, as the reference
+                        // spent `token-1`, under the page and its handle.
+                        let spent = spend_as(&mut core, id + 80, SITE, device);
+                        assert_eq!(spent["result"]["bound"], true, "{what}: {spent}");
+                        // What main answers once the device has: the
+                        // reference's result.
+                        continue;
+                    }
+                    reply
+                }
+            };
+            if signs && prompt.is_some_and(|p| p["answer"]["choices"]["alwaysAllow"] == true) {
+                let ok = expected.get("result").is_some();
+                if ok {
+                    let rules = &mut expected_after[SITE]["autoApprove"];
+                    rules["signing"] = json!(false);
+                    rules["limited"] =
+                        json!({ "signing": { "grantedAt": NOW }, "transactions": [] });
+                }
+            }
+            assert_eq!(
+                message["result"].to_string(),
+                expected.to_string(),
+                "{what}: {message}"
+            );
+        }
+        assert_eq!(grant_file(&core), expected_after, "{name}");
+    }
+    assert_eq!(
+        (scenarios, requests, asked, ruled, devices),
+        (10, 12, 10, 2, 2)
+    );
+}
+
+/// A site connected with `account` on Gnosis and Q9's signing rule given
+/// at `granted` (none for `None`), or today's unlimited one if `today`.
+fn ruled(site: &str, account: u64, granted: Option<u64>, today: bool) -> (String, Value) {
+    let mut rules = json!({ "signing": today, "transactions": [] });
+    if let Some(granted) = granted {
+        rules["limited"] = json!({ "signing": { "grantedAt": granted }, "transactions": [] });
+    }
+    let entry = json!({
+        "origin": site, "connectedAt": NOW, "lastUsed": NOW,
+        "walletIndex": account, "chainId": 100, "autoApprove": rules,
+    });
+    (site.to_owned(), entry)
+}
+
+fn store(entries: Vec<(String, Value)>) -> Value {
+    Value::Object(entries.into_iter().collect())
+}
+
+fn sign_from(core: &mut Core, id: u64, site: &str, agent: Option<bool>) {
+    request(core, id, Some(site), agent, &hello_sign());
+}
+
+/// The next message is main's prompt for request `id`: its params.
+fn prompted(core: &mut Core, id: u64) -> Value {
+    let asked = next_message(core);
+    assert_eq!(asked["method"], "approval.request", "{asked}");
+    assert_eq!(asked["params"]["request"], id, "{asked}");
+    asked
+}
+
+/// The rule answers request `id`: main's recheck, then the signature.
+fn rule_signs(core: &mut Core, id: u64) {
+    recheck(core, id, true, false);
+    assert_eq!(
+        core.until_response(id)["result"],
+        json!({ "result": HELLO_SIGNATURE }),
+        "{id}"
+    );
+}
+
+/// No Ledger, phone or Safe account reaches the vault, though the vault is
+/// unlocked holding keys at those indices, the Safe is on Gnosis, and each
+/// site has Q9's signing rule: no rule answers a device's account, its
+/// prompt offers "Always allow" unticked only, and an approve returns
+/// `{ device }` with nothing signed, its token bound to the page, the
+/// handle, the account and the payload (main's spend takes it once).
+#[test]
+fn no_device_account_reaches_the_vault() {
+    let sites = [
+        ("https://ledger.example", 1, "ledger", "sign-message"),
+        ("https://phone.example", 2, "remote", "sign-message"),
+        ("https://safe.example", 1000, "safe", "safe-message"),
+    ];
+    let entries = sites
+        .iter()
+        .map(|(site, index, _, _)| ruled(site, *index, Some(NOW), false))
+        .collect();
+    let (_root, mut core, _clock) = core_at(&store(entries), NOW, false);
+    let before = grant_file(&core);
+    for (n, (site, index, kind, token_kind)) in sites.iter().enumerate() {
+        let id = 50 + 10 * n as u64;
+        // "Always allow" ticked is a pick not offered: crossed.
+        sign_from(&mut core, id, site, Some(false));
+        let asked = prompted(&mut core, id);
+        assert_eq!(asked["params"]["kind"], "eth.sign");
+        assert_eq!(asked["params"]["view"]["account"]["type"], *kind);
+        assert_eq!(
+            asked["params"]["choices"],
+            json!({ "alwaysAllow": [false] })
+        );
+        let ticked = approve(
+            &asked["params"]["prompt"],
+            &format!("{:02x}", 0xa0 + n).repeat(32),
+            json!({ "alwaysAllow": true }),
+        );
+        respond(&mut core, &asked, ticked);
+        let reply = core.until_response(id);
+        assert_eq!(
+            reply["error"]["data"]["reason"], "mismatch",
+            "{site}: {reply}"
+        );
+        // Approved: `{ device }`, nothing signed.
+        sign_from(&mut core, id + 1, site, Some(false));
+        let asked = prompted(&mut core, id + 1);
+        let handle = format!("{:02x}", 0xb0 + n).repeat(32);
+        respond(
+            &mut core,
+            &asked,
+            approve(&asked["params"]["prompt"], &handle, json!({})),
+        );
+        let reply = core.until_response(id + 1);
+        let answer = &reply["result"];
+        assert!(answer.get("result").is_none(), "{site}: {reply}");
+        let device = &answer["device"];
+        assert_eq!(device["type"], *kind, "{site}: {reply}");
+        assert_eq!(device["kind"], *token_kind, "{site}");
+        assert_eq!(device["account"], *index, "{site}");
+        assert_eq!(device["handle"], handle.as_str(), "{site}");
+        let token = device["token"].as_str().unwrap();
+        assert_eq!(token.len(), 64, "{site}");
+        let mut device = device.clone();
+        let spent = spend_as(&mut core, id + 2, site, &device);
+        assert_eq!(spent["result"]["bound"], true, "{site}: {spent}");
+        // Spent once; under another handle it binds nothing.
+        let again = spend_as(&mut core, id + 3, site, &device);
+        assert_eq!(again["error"]["code"], "not_authorized", "{site}: {again}");
+        device["handle"] = json!("cd".repeat(32));
+        let other = spend_as(&mut core, id + 4, site, &device);
+        assert_eq!(other["error"]["code"], "not_authorized", "{site}: {other}");
+    }
+    assert_eq!(grant_file(&core), before);
+}
+
+fn spend_as(core: &mut Core, id: u64, site: &str, device: &Value) -> Value {
+    core.send(&json!({
+        "type": "request", "id": id, "method": "approval.spend",
+        "params": {
+            "token": device["token"], "kind": device["kind"], "account": device["account"],
+            "payload": device["payload"], "handle": device["handle"],
+        },
+        "context": page(Some(site), Some(false)),
+    }));
+    core.until_response(id)
+}
+
+/// A rule's request is rechecked just before its effect: a tab gone into
+/// custody, or the document gone, refuses it with nothing signed and the
+/// key's last use unmarked. In custody when it came (or with custody
+/// unknown) no rule answers it: the user is asked.
+#[test]
+fn a_rule_refuses_in_custody_or_with_its_document_gone() {
+    let (_root, mut core, clock) =
+        core_at(&store(vec![ruled(SITE, 0, Some(NOW), false)]), NOW, false);
+    std::fs::write(&clock, (NOW + 1000).to_string()).unwrap();
+    let before = grant_file(&core);
+    let custody = json!({ "error": { "code": 4100, "message": "The origin is not authorized for this operation", "data": { "reason": "agent_custody" } } });
+    sign_from(&mut core, 10, SITE, Some(false));
+    recheck(&mut core, 10, true, true);
+    assert_eq!(core.until_response(10)["result"], custody);
+    sign_from(&mut core, 11, SITE, Some(false));
+    recheck(&mut core, 11, false, false);
+    assert_eq!(
+        core.until_response(11)["result"],
+        json!({ "error": { "code": 4100, "message": "This page has no address to connect from yet" } })
+    );
+    assert_eq!(grant_file(&core), before, "nothing marked");
+    for (id, agent) in [(12, Some(true)), (13, None)] {
+        sign_from(&mut core, id, SITE, agent);
+        let asked = prompted(&mut core, id);
+        assert_eq!(asked["params"]["kind"], "eth.sign");
+        respond(
+            &mut core,
+            &asked,
+            json!({ "prompt": asked["params"]["prompt"], "closed": "closed" }),
+        );
+        assert_eq!(core.until_response(id)["result"]["error"]["code"], 4001);
+    }
+    // Live and outside custody: signed, and the last use marked.
+    sign_from(&mut core, 14, SITE, Some(false));
+    rule_signs(&mut core, 14);
+    assert_eq!(grant_file(&core)[SITE]["lastUsed"], NOW + 1000);
+}
+
+/// Q9 through the dispatcher: a request only today's unlimited rule, an
+/// expired rule or a rule past its rate would answer opens a prompt, never
+/// a refusal, and one approved there isn't counted; an "Always allow" in
+/// its answer writes the limited rule and clears today's in one write.
+#[test]
+fn q9_through_the_dispatcher() {
+    const DAY: u64 = 86_400_000;
+    let expired = NOW - 30 * DAY;
+    let entries = vec![
+        ruled("https://today.example", 0, None, true),
+        ruled("https://expired.example", 0, Some(expired), false),
+        ruled(SITE, 0, Some(expired + 1), false),
+    ];
+    let (_root, mut core, _clock) = core_at(&store(entries), NOW, false);
+    let mut id = 10;
+    for site in ["https://today.example", "https://expired.example"] {
+        sign_from(&mut core, id, site, Some(false));
+        let asked = prompted(&mut core, id);
+        assert_eq!(asked["params"]["kind"], "eth.sign", "{site}");
+        respond(
+            &mut core,
+            &asked,
+            json!({ "prompt": asked["params"]["prompt"], "closed": "closed" }),
+        );
+        assert_eq!(core.until_response(id)["result"]["error"]["code"], 4001);
+        id += 1;
+    }
+    // A burst of 5 the rule answers; the 6th is asked, and approved there
+    // it signs uncounted, so the 7th is asked too.
+    for _ in 0..5 {
+        sign_from(&mut core, id, SITE, Some(false));
+        rule_signs(&mut core, id);
+        id += 1;
+    }
+    for n in 0..2 {
+        sign_from(&mut core, id, SITE, Some(false));
+        let asked = prompted(&mut core, id);
+        let handle = format!("{:02x}", 0xc0 + n).repeat(32);
+        respond(
+            &mut core,
+            &asked,
+            approve(&asked["params"]["prompt"], &handle, json!({})),
+        );
+        assert_eq!(
+            core.until_response(id)["result"],
+            json!({ "result": HELLO_SIGNATURE })
+        );
+        id += 1;
+    }
+    // "Always allow" for today's rule: the limited rule, today's cleared,
+    // in one write and one `approval.changed`; then the rule answers.
+    core.events();
+    sign_from(&mut core, id, "https://today.example", Some(false));
+    let asked = prompted(&mut core, id);
+    let ticked = approve(
+        &asked["params"]["prompt"],
+        &"d1".repeat(32),
+        json!({ "alwaysAllow": true }),
+    );
+    respond(&mut core, &asked, ticked);
+    assert_eq!(
+        core.until_response(id)["result"],
+        json!({ "result": HELLO_SIGNATURE })
+    );
+    let rules = &grant_file(&core)["https://today.example"]["autoApprove"];
+    assert_eq!(
+        *rules,
+        json!({ "signing": false, "transactions": [], "limited": { "signing": { "grantedAt": NOW }, "transactions": [] } })
+    );
+    let changed = core.event();
+    assert_eq!(changed["event"], "approval.changed", "{changed}");
+    id += 1;
+    sign_from(&mut core, id, "https://today.example", Some(false));
+    rule_signs(&mut core, id);
+}
+
+/// The rate judged again at the effect: six requests the rule would
+/// answer, all waiting on main's rechecks at once, each chosen while none
+/// was counted. Five sign; the sixth, past the rate by its effect, is
+/// asked of the user (Q9: never a refusal).
+#[test]
+fn a_rule_past_its_rate_at_the_effect_asks() {
+    let (_root, mut core, _clock) =
+        core_at(&store(vec![ruled(SITE, 0, Some(NOW), false)]), NOW, false);
+    let mut rechecks = Vec::new();
+    for id in 20..26 {
+        sign_from(&mut core, id, SITE, Some(false));
+        let asked = next_message(&mut core);
+        assert_eq!(asked["method"], "approval.recheck", "{asked}");
+        rechecks.push(asked);
+    }
+    for (asked, id) in rechecks.iter().zip(20..) {
+        respond(&mut core, asked, json!({ "live": true, "agent": false }));
+        if id < 25 {
+            assert_eq!(
+                core.until_response(id)["result"],
+                json!({ "result": HELLO_SIGNATURE })
+            );
+        }
+    }
+    let asked = prompted(&mut core, 25);
+    assert_eq!(asked["params"]["kind"], "eth.sign");
+    respond(
+        &mut core,
+        &asked,
+        approve(&asked["params"]["prompt"], &"e1".repeat(32), json!({})),
+    );
+    assert_eq!(
+        core.until_response(25)["result"],
+        json!({ "result": HELLO_SIGNATURE })
     );
 }
