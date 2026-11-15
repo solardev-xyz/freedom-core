@@ -154,10 +154,14 @@ impl World {
     }
 
     pub(crate) fn network(&self, chain_id: u64) -> Option<&JsValue> {
-        let key = chain_id.to_string();
+        self.network_keyed(&chain_id.to_string())
+    }
+
+    /// The registry's entry under `key`, as `networks()[key]` reads it.
+    pub(crate) fn network_keyed(&self, key: &str) -> Option<&JsValue> {
         self.networks
             .iter()
-            .find(|(id, _)| *id == key)
+            .find(|(id, _)| id == key)
             .map(|(_, network)| network)
     }
 

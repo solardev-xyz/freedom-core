@@ -119,7 +119,7 @@ fn every_apr5b_scenario_replays() {
                     };
                     read.answer(outcome)
                 }
-                Step::Connect(_) => panic!("{what}: a read scenario connects"),
+                Step::Connect(_) | Step::Switch(_) => panic!("{what}: a read scenario prompts"),
             };
             assert_eq!(answer.as_str(), recorded["result"].to_string(), "{what}");
             // What main delivers is the dispatcher's answer.
@@ -284,7 +284,7 @@ fn accounts_and_refusals() {
             grant.map(|g| fc_json::parse(g).unwrap())
         }) {
             Step::Answer(answer) => answer.into_string(),
-            Step::Read(_) | Step::Connect(_) => panic!("{method}"),
+            Step::Read(_) | Step::Connect(_) | Step::Switch(_) => panic!("{method}"),
         }
     };
     let wallets = r#"[null,{"index":"1","address":"0xs"},{"index":1,"address":"0xn"},{"index":2}]"#;

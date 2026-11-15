@@ -50,8 +50,8 @@ pub enum Owner {
     /// The key store's `shell.keystore` calls (design 0013), from whichever
     /// thread made them.
     KeyStore,
-    /// A page's `approval.request`s and `approval.recheck`s (design 0012,
-    /// APR-5c), from the event loop.
+    /// A page's `approval.request`s, `approval.recheck`s and
+    /// `eip1193.select_chain`s (design 0012, APR-5c), from the event loop.
     Eip1193,
 }
 

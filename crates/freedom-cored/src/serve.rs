@@ -145,8 +145,9 @@ pub enum Event {
         id: u64,
         payload: Box<[u8]>,
     },
-    /// A page's `approval.request` or `approval.recheck` that waited for
-    /// room may go (design 0012, APR-5c).
+    /// A page's `approval.request`, `approval.recheck` or
+    /// `eip1193.select_chain` that waited for room may go (design 0012,
+    /// APR-5c).
     Eip1193Room,
     /// The chain thread answered one of the core's own reads (design
     /// 0012, "Phone jobs"): its tag, and the reply's payload.
@@ -1422,11 +1423,13 @@ impl Core {
     }
 
     /// A page's `eip1193.request` (design 0012, "fc-eip1193 and
-    /// approval.request"; APR-5b, the reads; APR-5c, connects):
+    /// approval.request"; APR-5b, the reads; APR-5c, connects and chain
+    /// switches):
     /// fc-eip1193's dispatcher, with the page's key (`PageContext.origin`;
     /// empty for a document with no key) and the dApp store. An answer goes
     /// now; a read goes to the chain thread, which answers from its
-    /// outcome; a connect waits on main's recheck or prompt.
+    /// outcome; a connect or a switch waits on main's recheck, prompt or
+    /// selection.
     fn eip1193(&mut self, id: u64, params: Option<&str>, context: &Context) -> Flow {
         // Its 120 s run from here (`Deadline::Steps`).
         let received = Instant::now();
@@ -1454,24 +1457,40 @@ impl Core {
                     Flow::Exit(Exit::Internal)
                 }
             }
-            // A connect for a document with a key (APR-5c): before the dApp
-            // store moves, main writes its grants, so the core takes none
-            // (*inferred*).
+            // A connect or a chain switch for a document with a key (APR-5c):
+            // before the dApp store moves, main writes its grants, so the
+            // core takes neither (*inferred*).
             fc_eip1193::Step::Connect(connect) => {
-                if !self.vault.dapp_moved() {
-                    let refusal = ErrorBody::new(
-                        ErrorCode::NotMoved,
-                        "main still writes this permission file (it isn't in grant_moved)",
-                    )
-                    .with_data(serde_json::json!({ "store": "dapp" }));
-                    return self.error(id, refusal);
+                if let Some(refused) = self.dapp_unmoved(id) {
+                    return refused;
                 }
-                let key = page.origin.clone();
-                let page = page.clone();
+                let (key, page) = (page.origin.clone(), page.clone());
                 let outs = self.connects.start(id, connect, &key, &page, received);
                 self.dispatch(outs)
             }
+            fc_eip1193::Step::Switch(switch) => {
+                if let Some(refused) = self.dapp_unmoved(id) {
+                    return refused;
+                }
+                let (key, page) = (page.origin.clone(), page.clone());
+                let outs = self.connects.switch(id, switch, &key, &page, received);
+                self.dispatch(outs)
+            }
         }
+    }
+
+    /// `not_moved` for a page request that would write the dApp store
+    /// before it moves.
+    fn dapp_unmoved(&mut self, id: u64) -> Option<Flow> {
+        if self.vault.dapp_moved() {
+            return None;
+        }
+        let refusal = ErrorBody::new(
+            ErrorCode::NotMoved,
+            "main still writes this permission file (it isn't in grant_moved)",
+        )
+        .with_data(serde_json::json!({ "store": "dapp" }));
+        Some(self.error(id, refusal))
     }
 
     fn hello(&mut self, id: u64, params: Option<&str>) -> Flow {

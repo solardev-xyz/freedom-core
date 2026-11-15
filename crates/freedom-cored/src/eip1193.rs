@@ -1,6 +1,7 @@
-//! A page's connect in the daemon (design 0012, "fc-eip1193 and
-//! approval.request"; APR-5c-1): the core's own requests to main for it,
-//! `approval.request` and `approval.recheck`, and main's answers.
+//! A page's connect and chain switch in the daemon (design 0012,
+//! "fc-eip1193 and approval.request"; APR-5c): the core's own requests to
+//! main for them, `approval.request`, `approval.recheck` and
+//! `eip1193.select_chain`, and main's answers.
 //!
 //! - **`approval.request { request, prompt, page, kind, view, choices }`**
 //!   asks main to open a prompt on the record of page request `request`
@@ -10,8 +11,16 @@
 //!   the three forms fails the request (`not_authorized`, `mismatch`), with
 //!   nothing written.
 //! - **`approval.recheck { request, page }`** asks main, just before a
-//!   connected key's last use is marked, whether the document still holds
-//!   its key.
+//!   connected key's last use is marked or a switch's chain is written,
+//!   whether the document still holds its key.
+//! - **`eip1193.select_chain { request, page, chain_id }`** (APR-5c-2,
+//!   *inferred*) asks main, once a chain switch's grant has its chain, to
+//!   select the chain for the window of page request `request` and send
+//!   `chainChanged` as the reference does (main holds the windows and the
+//!   documents). Main answers `{}` once it has; anything else fails the
+//!   request (`mismatch`), the grant's chain already written. The page's
+//!   answer, `null`, goes only after it, as the reference sends the events
+//!   before its answer.
 //! - **The clock** (`fc_eip1193::Budget`): 120 s from the loop's receipt,
 //!   stopped while the request's `approval.request` is open. Past it, a
 //!   request still waiting (for main's recheck, or for room to ask) answers
@@ -36,7 +45,7 @@ use std::sync::mpsc::Sender;
 use std::time::{Duration, Instant};
 
 use fc_eip1193::connect::{Ask, Connected, Decided};
-use fc_eip1193::{Answer, Budget, Connect, Crossed, PromptId, Prompts, Recheck};
+use fc_eip1193::{Answer, Budget, Connect, Crossed, PromptId, Prompts, Recheck, Switch};
 use fc_protocol::error::{ErrorBody, ErrorCode};
 use fc_protocol::message::{self, PageContext};
 use zeroize::Zeroizing;
@@ -91,7 +100,15 @@ enum Asked {
 
 enum Pending {
     Recheck(Connected),
-    Prompt { ask: Ask, id: PromptId },
+    Prompt {
+        ask: Ask,
+        id: PromptId,
+    },
+    /// A chain switch, waiting on main's recheck.
+    Switch(Switch),
+    /// A chain switch whose grant has its chain, waiting on main's
+    /// selection.
+    Select(Switch),
 }
 
 impl Connects {
@@ -131,15 +148,42 @@ impl Connects {
         page: &PageContext,
         received: Instant,
     ) -> Vec<Out> {
-        let Ok(page) = serde_json::to_string(page) else {
-            return vec![error(id, internal())];
-        };
         let step = match connect {
             Connect::Connected(connected) => Pending::Recheck(connected),
             Connect::Ask(ask) => match self.issue() {
                 Some(prompt) => Pending::Prompt { ask, id: prompt },
                 None => return vec![error(id, internal())],
             },
+        };
+        self.open_request(id, step, key, page, received)
+    }
+
+    /// Page request `id`'s chain switch, past its checks, for `key`
+    /// (APR-5c-2): main's recheck first.
+    pub fn switch(
+        &mut self,
+        id: u64,
+        switch: Switch,
+        key: &str,
+        page: &PageContext,
+        received: Instant,
+    ) -> Vec<Out> {
+        self.open_request(id, Pending::Switch(switch), key, page, received)
+    }
+
+    fn open_request(
+        &mut self,
+        id: u64,
+        step: Pending,
+        key: &str,
+        page: &PageContext,
+        received: Instant,
+    ) -> Vec<Out> {
+        let Ok(page) = serde_json::to_string(page) else {
+            if let Pending::Prompt { id: prompt, .. } = step {
+                self.prompts.forget(&prompt);
+            }
+            return vec![error(id, internal())];
         };
         let waited = u64::try_from(received.elapsed().as_millis()).unwrap_or(u64::MAX);
         let overall = crate::testhooks::eip1193_overall(fc_eip1193::OVERALL_MS);
@@ -186,9 +230,17 @@ impl Connects {
                 continue;
             }
             let (method, params) = match &open.step {
-                Pending::Recheck(_) => (
+                Pending::Recheck(_) | Pending::Switch(_) => (
                     "approval.recheck",
                     format!(r#"{{"request":{id},"page":{}}}"#, open.page),
+                ),
+                Pending::Select(switch) => (
+                    "eip1193.select_chain",
+                    format!(
+                        r#"{{"request":{id},"page":{},"chain_id":{}}}"#,
+                        open.page,
+                        switch.chain_id()
+                    ),
                 ),
                 Pending::Prompt { ask, id: prompt } => (
                     "approval.request",
@@ -299,10 +351,31 @@ impl Connects {
                     let rechecked = connected.answer(recheck.live);
                     let mut outs = vec![reply(id, &rechecked.answer)];
                     if rechecked.touch {
-                        outs.extend(vault.eip1193_touch(&open.key));
+                        outs.extend(vault.eip1193_touch(&open.key, None));
                     }
                     outs
                 }
+                Err(Crossed) => vec![error(id, crossed())],
+            },
+            // A switch: the document gone answers 4100 with nothing
+            // changed; otherwise the grant takes the chain, then main
+            // selects it.
+            Pending::Switch(switch) => match text.ok_or(Crossed).and_then(Recheck::parse) {
+                Ok(recheck) => match switch.rechecked(recheck.live) {
+                    Some(answer) => vec![reply(id, &answer)],
+                    None => {
+                        let events = vault.eip1193_touch(&open.key, Some(switch.chain_id()));
+                        open.step = Pending::Select(switch);
+                        open.asked = None;
+                        self.open.insert(id, open);
+                        self.queued.push_back(id);
+                        events
+                    }
+                },
+                Err(Crossed) => vec![error(id, crossed())],
+            },
+            Pending::Select(switch) => match text.ok_or(Crossed).and_then(Switch::selected) {
+                Ok(()) => vec![reply(id, &switch.answer())],
                 Err(Crossed) => vec![error(id, crossed())],
             },
             Pending::Prompt { ask, id: prompt } => {
@@ -361,7 +434,7 @@ impl Connects {
                 self.asked.insert(core, Asked::Ended(prompt));
                 self.prompting = self.prompting.saturating_sub(1);
             }
-            Pending::Recheck(_) => {
+            Pending::Recheck(_) | Pending::Switch(_) | Pending::Select(_) => {
                 self.asked.remove(&core);
             }
         }

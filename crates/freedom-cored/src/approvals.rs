@@ -1559,11 +1559,13 @@ impl Approvals {
             .is_ok()
     }
 
-    /// A connected key's connect (APR-5c): its grant's last use
-    /// (`updateLastUsed`), neutral, with no event. A failed write leaves it
-    /// active in memory, and the request is answered all the same.
-    pub fn page_touch(&mut self, key: &str, wall_ms: u64) {
-        let _ = self.write::<DappStore, _>(key, |store| store.touch(key, None, wall_ms));
+    /// A connected key's connect, or a chain switch (APR-5c): its grant's
+    /// last use, and a switch's chain (`updateLastUsed(key, chainId)`),
+    /// when the key has a grant. Neutral, with no event. A failed write
+    /// leaves it active in memory, and the request is answered all the
+    /// same, as the reference's `savePermissions` logs and goes on.
+    pub fn page_touch(&mut self, key: &str, chain_id: Option<u64>, wall_ms: u64) {
+        let _ = self.write::<DappStore, _>(key, |store| store.touch(key, chain_id, wall_ms));
     }
 
     /// The hello's `grant_root` and `grant_moved` (design 0012, "The
