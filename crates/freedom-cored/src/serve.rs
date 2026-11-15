@@ -63,6 +63,7 @@ use serde_json::value::RawValue;
 use zeroize::Zeroizing;
 
 use crate::dweb::thread as dweb;
+use crate::eip1193::Connects;
 use crate::exit::Exit;
 use crate::keystore::client::DesktopKeyStore;
 use crate::requests::{self, Owner, Requests};
@@ -144,6 +145,9 @@ pub enum Event {
         id: u64,
         payload: Box<[u8]>,
     },
+    /// A page's `approval.request` or `approval.recheck` that waited for
+    /// room may go (design 0012, APR-5c).
+    Eip1193Room,
     /// The chain thread answered one of the core's own reads (design
     /// 0012, "Phone jobs"): its tag, and the reply's payload.
     ChainRead {
@@ -374,6 +378,14 @@ pub fn run(options: &Options) -> Exit {
     // own handle goes to the outbox: once the producers' handles are gone,
     // the writer ends.
     let dweb_out = writer.queue.clone();
+    // A page's connects (design 0012, APR-5c): their requests to main go
+    // from this loop, through the gate.
+    let connects = {
+        let room = events_tx.clone();
+        Connects::new(Arc::clone(&requests), writer.queue.clone(), move || {
+            let _ = room.send(Event::Eip1193Room);
+        })
+    };
     let mut core = Core {
         snapshot_ready: false,
         node_recovery: None,
@@ -405,6 +417,7 @@ pub fn run(options: &Options) -> Exit {
         keystore,
         naming,
         chain,
+        connects,
         dweb: None,
         dweb_start: Some(DwebStart {
             out: dweb_out,
@@ -421,13 +434,17 @@ pub fn run(options: &Options) -> Exit {
         }
         let timeout = if core.hello_done {
             // The vault's timers, and the stall bound while frames wait.
-            [core.vault.next_wakeup(), core.outbox.deadline()]
-                .into_iter()
-                .flatten()
-                .min()
-                .map_or(Duration::from_secs(3600), |at| {
-                    at.saturating_duration_since(Instant::now())
-                })
+            [
+                core.vault.next_wakeup(),
+                core.outbox.deadline(),
+                core.connects.next_wakeup(),
+            ]
+            .into_iter()
+            .flatten()
+            .min()
+            .map_or(Duration::from_secs(3600), |at| {
+                at.saturating_duration_since(Instant::now())
+            })
         } else {
             hello_deadline.saturating_duration_since(Instant::now())
         };
@@ -444,7 +461,8 @@ pub fn run(options: &Options) -> Exit {
         // Whatever arrived, first apply what is due (auto-lock, deadlines):
         // a busy queue must not postpone either, nor a writer without room.
         if core.hello_done {
-            let outs = core.vault.tick();
+            let mut outs = core.vault.tick();
+            outs.extend(core.connects.tick());
             if let Flow::Exit(exit) = core.dispatch(outs) {
                 break exit;
             }
@@ -541,6 +559,12 @@ pub fn run(options: &Options) -> Exit {
             }
             Ok(Event::FeeReference { id, payload }) => {
                 core.vault.fee_answered(id, &payload);
+            }
+            Ok(Event::Eip1193Room) => {
+                let outs = core.connects.pump();
+                if let Flow::Exit(exit) = core.dispatch(outs) {
+                    break exit;
+                }
             }
             Ok(Event::ChainRead { tag, payload }) => {
                 let outs = core.vault.chain_read(tag, &payload);
@@ -691,6 +715,8 @@ struct Core {
     keystore: Arc<DesktopKeyStore>,
     naming: naming::Handle,
     chain: chain::Handle,
+    /// A page's connects waiting on main (design 0012, APR-5c).
+    connects: Connects,
     /// The dweb thread, once the hello has settled (design 0009).
     dweb: Option<dweb::Handle>,
     /// What starts it; taken when it starts.
@@ -1118,7 +1144,8 @@ impl Core {
                 {
                     return Flow::Exit(Exit::Internal);
                 }
-                let outs = self.vault.cancel(id);
+                let mut outs = self.vault.cancel(id);
+                outs.extend(self.connects.cancel(id));
                 self.dispatch(outs)
             }
             Message::Response { id, outcome } => {
@@ -1177,6 +1204,12 @@ impl Core {
             );
             return Flow::Exit(Exit::Protocol);
         };
+        if owner == Owner::Eip1193 {
+            let outs = self
+                .connects
+                .answered(id, outcome, &message, &mut self.vault);
+            return self.dispatch(outs);
+        }
         let sent = match (owner, outcome) {
             // Naming copies its result out of the message, and reads its
             // error whole.
@@ -1237,6 +1270,8 @@ impl Core {
                 self.keystore.deliver(id, outcome, &message);
                 true
             }
+            // Answered above.
+            (Owner::Eip1193, _) => true,
             // The dweb thread reads its piece's reply where it lies, as the
             // chain thread does.
             (Owner::Dweb, outcome) => self.dweb.as_ref().is_some_and(|thread| {
@@ -1387,10 +1422,11 @@ impl Core {
     }
 
     /// A page's `eip1193.request` (design 0012, "fc-eip1193 and
-    /// approval.request"; APR-5b, the reads): fc-eip1193's dispatcher, with
-    /// the page's key (`PageContext.origin`; empty for a document with no
-    /// key) and the dApp store. An answer goes now; a read goes to the
-    /// chain thread, which answers from its outcome.
+    /// approval.request"; APR-5b, the reads; APR-5c, connects):
+    /// fc-eip1193's dispatcher, with the page's key (`PageContext.origin`;
+    /// empty for a document with no key) and the dApp store. An answer goes
+    /// now; a read goes to the chain thread, which answers from its
+    /// outcome; a connect waits on main's recheck or prompt.
     fn eip1193(&mut self, id: u64, params: Option<&str>, context: &Context) -> Flow {
         // Its 120 s run from here (`Deadline::Steps`).
         let received = Instant::now();
@@ -1417,6 +1453,23 @@ impl Core {
                 } else {
                     Flow::Exit(Exit::Internal)
                 }
+            }
+            // A connect for a document with a key (APR-5c): before the dApp
+            // store moves, main writes its grants, so the core takes none
+            // (*inferred*).
+            fc_eip1193::Step::Connect(connect) => {
+                if !self.vault.dapp_moved() {
+                    let refusal = ErrorBody::new(
+                        ErrorCode::NotMoved,
+                        "main still writes this permission file (it isn't in grant_moved)",
+                    )
+                    .with_data(serde_json::json!({ "store": "dapp" }));
+                    return self.error(id, refusal);
+                }
+                let key = page.origin.clone();
+                let page = page.clone();
+                let outs = self.connects.start(id, connect, &key, &page, received);
+                self.dispatch(outs)
             }
         }
     }

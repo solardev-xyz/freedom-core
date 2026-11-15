@@ -1545,6 +1545,27 @@ impl Approvals {
             .cloned()
     }
 
+    /// Whether the dApp store has moved: a page's connect writes it
+    /// (design 0012, APR-5c).
+    pub fn dapp_moved(&self) -> bool {
+        self.grants.moved(StoreKind::Dapp)
+    }
+
+    /// A page's approved connect (APR-5c): the key's grant, from the
+    /// answer's choices. Whether it was written; on success one
+    /// `approval.changed`.
+    pub fn page_connect(&mut self, key: &str, account: u32, chain_id: u64, wall_ms: u64) -> bool {
+        self.write::<DappStore, _>(key, |store| store.connect(key, account, chain_id, wall_ms))
+            .is_ok()
+    }
+
+    /// A connected key's connect (APR-5c): its grant's last use
+    /// (`updateLastUsed`), neutral, with no event. A failed write leaves it
+    /// active in memory, and the request is answered all the same.
+    pub fn page_touch(&mut self, key: &str, wall_ms: u64) {
+        let _ = self.write::<DappStore, _>(key, |store| store.touch(key, None, wall_ms));
+    }
+
     /// The hello's `grant_root` and `grant_moved` (design 0012, "The
     /// files").
     pub fn configure_grants(
