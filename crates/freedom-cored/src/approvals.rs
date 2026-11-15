@@ -81,7 +81,7 @@
 use std::collections::VecDeque;
 use std::sync::OnceLock;
 
-use fc_approval::fee::{Evidence, Fees, Verdict, at_approval};
+use fc_approval::fee::{EVIDENCE_MAX_AGE_MS, Evidence, Fees, Verdict, at_approval};
 use fc_approval::phone::WaitingRule;
 use fc_approval::receipt::{
     Document, ProposedRule, RECEIPT_TTL_MS, Receipt, ReceiptRefusal, Receipts,
@@ -1667,6 +1667,62 @@ impl Approvals {
             .issue_as(Minter::Page, &request, clocks.vault_ms, &mut OsRng)
             .map_err(approval_error)?;
         Ok(issued.token.to_text())
+    }
+
+    /// Whether the chain's fee evidence was asked for at most
+    /// [`EVIDENCE_MAX_AGE_MS`] ago on the vault's clock: a page's send asks
+    /// for new evidence otherwise, as the reference's `evidenceFor` does
+    /// (design 0012, APR-5e-1).
+    pub fn fee_fresh(&self, chain_id: u64, vault_ms: u64) -> bool {
+        self.fees.get(chain_id).is_some_and(|evidence| {
+            vault_ms.saturating_sub(evidence.requested_at_ms) <= EVIDENCE_MAX_AGE_MS
+        })
+    }
+
+    /// The fee check on a page's prepared send (`tx`, `sign.transaction`'s
+    /// form without its nonce), against the chain's evidence now (design
+    /// 0012, APR-5e-1): before its prompt (`acknowledged` none, the
+    /// reference's `checkFees`), or at its approval (`atApproval`, with
+    /// whether the user confirmed the fee again). The verdict as the
+    /// reference names it, `askAgain` added at approval, and whether to ask
+    /// again. A transaction that doesn't parse is judged with no fees.
+    pub fn page_fee_check(
+        &self,
+        tx: &str,
+        acknowledged: Option<bool>,
+        clocks: Clocks,
+    ) -> (String, bool) {
+        let tx = serde_json::from_str::<Value>(tx)
+            .ok()
+            .and_then(|tx| send_tx(&json!({ "tx": tx })));
+        let fees = tx.as_ref().map(Fees::of).unwrap_or_default();
+        let evidence = tx
+            .as_ref()
+            .and_then(|tx| tx.chain_id().to_u64())
+            .and_then(|chain_id| self.fees.get(chain_id));
+        let (verdict, ask_again) = at_approval(
+            &fees,
+            evidence,
+            clocks.wall_ms,
+            clocks.vault_ms,
+            acknowledged == Some(true),
+        );
+        let mut view = serde_json::Map::new();
+        view.insert("maxCost".into(), json!(verdict.max_cost));
+        view.insert("comparable".into(), json!(verdict.comparable));
+        view.insert("ratio".into(), json!(verdict.ratio));
+        view.insert("above".into(), json!(verdict.above));
+        view.insert("oneEndpoint".into(), json!(verdict.one_endpoint));
+        view.insert(
+            "basis".into(),
+            json!(verdict.basis.map(|basis| basis.name())),
+        );
+        view.insert("autoApprove".into(), json!(verdict.auto_approve));
+        if acknowledged.is_some() {
+            view.insert("askAgain".into(), json!(ask_again));
+        }
+        let ask_again = acknowledged.is_some() && ask_again;
+        (Value::Object(view).to_string(), ask_again)
     }
 
     /// The hello's `grant_root` and `grant_moved` (design 0012, "The
