@@ -375,6 +375,22 @@ mod tests {
         syntax_error(&utf16(text)).map(|m| m.as_str().to_owned())
     }
 
+    /// Valid JSON nested deeper than fc-json reads, which V8 parses: the
+    /// core's `Invalid parameters` (*inferred*). At the limit it parses.
+    #[test]
+    fn nesting_past_fc_json_is_invalid_parameters() {
+        let nested = |depth: usize| {
+            JsString::from(format!("{}0{}", "[".repeat(depth), "]".repeat(depth)).as_str())
+        };
+        assert!(parse(&nested(fc_json::MAX_DEPTH)).is_ok());
+        assert_eq!(
+            parse(&nested(fc_json::MAX_DEPTH + 1))
+                .err()
+                .map(|m| m.as_str().to_owned()),
+            Some("Invalid parameters".to_owned())
+        );
+    }
+
     /// Each checked against Node 24.15's `JSON.parse`.
     #[test]
     fn the_messages_are_v8s() {

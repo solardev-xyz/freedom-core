@@ -8,9 +8,12 @@
 //! typed-data view, which the vectors script (`named_type` and `chain`
 //! only): there the view is fc-evm's own, its reports the scripted ones,
 //! and the chains a warning quotes include the one its domain names. Then
-//! the guarantees: a keyless document gets `4100` first, nothing is signed
-//! on a crossed answer, "Always allow" isn't offered yet, a rule's or a
-//! device's request is APR-5d-2's, and a locked vault signs nothing.
+//! the guarantees: a keyless document gets `4100` first, whatever its
+//! params; nothing is signed on a crossed answer; "Always allow" isn't
+//! offered yet; a rule's or a device's request is APR-5d-2's, and no
+//! Ledger, phone or Safe account reaches the vault; a grant index that is
+//! no account signs nothing; typed data nested past fc-json is `Invalid
+//! parameters`; and a locked vault signs nothing.
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
@@ -310,12 +313,30 @@ fn connected(account: u64, signing: bool) -> Value {
     } })
 }
 
+/// The dApp store holding each `(site, walletIndex)`, unruled.
+fn grants(entries: &[(&str, Value)]) -> Value {
+    let map: serde_json::Map<String, Value> = entries
+        .iter()
+        .map(|(site, index)| {
+            let entry = json!({
+                "origin": site, "connectedAt": 1_763_000_000_000_u64, "lastUsed": 1_763_000_000_000_u64,
+                "walletIndex": index, "chainId": 100,
+                "autoApprove": { "signing": false, "transactions": [] },
+            });
+            ((*site).to_owned(), entry)
+        })
+        .collect();
+    Value::Object(map)
+}
+
 fn world() -> Value {
     json!({
         "enabled": true, "window_chain": 100, "active": 0,
         "wallets": [
             { "index": 0, "name": "Main Wallet", "address": "0x9858EfFD232B4033E47d90003D41EC34EcaEda94", "type": "mnemonic" },
             { "index": 1, "name": "Ledger", "address": "0x6Fac4D18c912343BF86fa7049364Dd4E424Ab9C0", "type": "ledger" },
+            { "index": 2, "name": "Phone", "address": "0xb6716976A3ebe8D39aCEB04372f22Ff8e6802D7A", "type": "remote" },
+            { "index": 1000, "name": "Team Safe", "address": "0x4444444444444444444444444444444444444444", "type": "safe", "deployed": { "100": true } },
         ],
         "networks": { "100": { "name": "Gnosis", "available": true } },
     })
@@ -336,14 +357,38 @@ fn approve(prompt: &Value, handle: &str, choices: Value) -> Value {
 #[test]
 fn a_keyless_document_gets_4100_first() {
     let (_root, mut core) = core_with(&connected(0, false), false, false);
+    let no_address = json!({ "error": { "code": 4100, "message": "This page has no address to connect from yet" } });
     request(&mut core, 5, None, Some(false), &hello_sign());
-    assert_eq!(
-        response(&mut core, 5)["result"],
-        json!({ "error": { "code": 4100, "message": "This page has no address to connect from yet" } })
-    );
+    assert_eq!(response(&mut core, 5)["result"], no_address);
+    // Whatever the params: missing, null, malformed, or typed data that
+    // won't parse. The keyless answer comes before any of them is read.
+    let address = "0x9858EfFD232B4033E47d90003D41EC34EcaEda94";
+    let params = [
+        None,
+        Some(json!(null)),
+        Some(json!("0x68656c6c6f")),
+        Some(json!([])),
+        Some(json!({ "0": 1 })),
+        Some(json!([{}, 7])),
+        Some(json!([address])),
+        Some(json!([address, "{not json"])),
+        Some(json!([address, { "types": 1 }])),
+    ];
+    let mut id = 100;
+    for method in ["personal_sign", "eth_signTypedData_v4"] {
+        for param in &params {
+            let mut body = json!({ "method": method, "world": world() });
+            if let Some(param) = param {
+                body["params"] = param.clone();
+            }
+            request(&mut core, id, None, Some(false), &body);
+            assert_eq!(response(&mut core, id)["result"], no_address, "{body}");
+            id += 1;
+        }
+    }
     // With a key, the unmoved store refuses before any prompt.
-    request(&mut core, 6, Some(SITE), Some(false), &hello_sign());
-    let refused = response(&mut core, 6);
+    request(&mut core, 200, Some(SITE), Some(false), &hello_sign());
+    let refused = response(&mut core, 200);
     assert_eq!(refused["error"]["code"], "not_moved", "{refused}");
 }
 
@@ -462,5 +507,85 @@ fn a_decision_crossed_between_two_signatures() {
     assert_eq!(
         core.until_response(41)["result"],
         json!({ "result": HELLO_SIGNATURE })
+    );
+}
+
+/// A Ledger's, a phone's or a Safe's account never reaches the vault, the
+/// Safe on Gnosis (where it may sign) and the vault unlocked, holding keys
+/// at those indices: `4200`, and no `approval.request` (the very next
+/// message is the answer), so nothing to approve and nothing signed.
+#[test]
+fn no_device_account_reaches_the_vault() {
+    let unsupported = json!({ "error": { "code": 4200, "message": "Method not supported" } });
+    let sites = [
+        ("https://ledger.example", json!(1)),
+        ("https://phone.example", json!(2)),
+        ("https://safe.example", json!(1000)),
+    ];
+    let (_root, mut core) = core_with(&grants(&sites), true, true);
+    let before = grant_file(&core);
+    for (id, (site, _)) in (50..).zip(&sites) {
+        request(&mut core, id, Some(site), Some(false), &hello_sign());
+        assert_eq!(response(&mut core, id)["result"], unsupported, "{site}");
+    }
+    assert_eq!(grant_file(&core), before);
+}
+
+/// A grant whose `walletIndex` is no account index (a fraction, negative,
+/// past `MAX_ACCOUNT`, not a number) signs nothing, though main's wallets
+/// list it and the prompt shows it: the approve answers `Invalid wallet
+/// index`, where a cast would have picked a vault key.
+#[test]
+fn an_index_that_is_no_account_signs_nothing() {
+    let sites = [
+        ("https://half.example", json!(0.5)),
+        ("https://negative.example", json!(-1)),
+        ("https://past.example", json!(2_147_483_648_u64)),
+        ("https://text.example", json!("0")),
+    ];
+    let mut world = world();
+    for (_, index) in &sites {
+        world["wallets"].as_array_mut().unwrap().push(json!({
+            "index": index, "name": "Odd", "type": "mnemonic",
+            "address": "0x9858EfFD232B4033E47d90003D41EC34EcaEda94",
+        }));
+    }
+    let (_root, mut core) = core_with(&grants(&sites), true, true);
+    for (n, (site, index)) in sites.iter().enumerate() {
+        let id = 60 + n as u64;
+        let body = json!({ "method": "personal_sign", "params": ["0x68656c6c6f"], "world": world });
+        request(&mut core, id, Some(site), Some(false), &body);
+        let asked = next_request(&mut core);
+        assert_eq!(asked["method"], "approval.request", "{index}: {asked}");
+        let mut answer = approve(
+            &asked["params"]["prompt"],
+            &format!("{:02x}", 0x90 + n).repeat(32),
+            json!({}),
+        );
+        answer["world"] = world.clone();
+        respond(&mut core, &asked, answer);
+        assert_eq!(
+            core.until_response(id)["result"],
+            json!({ "error": { "code": -32603, "message": "Invalid wallet index" } }),
+            "{index}"
+        );
+    }
+}
+
+/// Typed data sent as text, valid but nested deeper than fc-json reads
+/// (V8 reads it): `-32603` "Invalid parameters", before any prompt.
+#[test]
+fn typed_data_nested_past_fc_json_is_invalid_parameters() {
+    let (_root, mut core) = core_with(&connected(0, false), true, false);
+    let deep = format!("{}0{}", "[".repeat(600), "]".repeat(600));
+    let body = json!({
+        "method": "eth_signTypedData_v4",
+        "params": ["0x9858EfFD232B4033E47d90003D41EC34EcaEda94", deep],
+        "world": world(),
+    });
+    request(&mut core, 70, Some(SITE), Some(false), &body);
+    assert_eq!(
+        response(&mut core, 70)["result"],
+        json!({ "error": { "code": -32603, "message": "Invalid parameters" } })
     );
 }
