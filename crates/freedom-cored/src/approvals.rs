@@ -82,6 +82,7 @@ use std::collections::VecDeque;
 use std::sync::OnceLock;
 
 use fc_approval::fee::{Evidence, Fees, Verdict, at_approval};
+use fc_approval::phone::WaitingRule;
 use fc_approval::receipt::{
     Document, ProposedRule, RECEIPT_TTL_MS, Receipt, ReceiptRefusal, Receipts,
 };
@@ -155,12 +156,10 @@ pub struct Approvals {
     standing: Standing,
     /// `approval.changed` events to send after the reply that made them.
     events: Vec<Zeroizing<Vec<u8>>>,
-    /// The dApp keys narrowed since the loop last asked: a phone payment's
-    /// waiting rule for one goes, as its receipts do.
-    narrowed: Vec<String>,
-    /// The latest `connectedAt` of a dApp grant this core read at its
-    /// start or made since.
-    connected_at: u64,
+    /// The dApp revokes and deleted accounts since the loop last asked: a
+    /// phone payment's waiting rule for one goes (design 0012, "A phone
+    /// payment's rule").
+    narrowed: Vec<Narrowed>,
     /// x402's cap generations and reservations (X402-1).
     x402: x402::X402State,
 }
@@ -634,28 +633,35 @@ pub struct Remember {
     key: String,
     account: u32,
     rule: ProposedRule,
-    /// A phone payment's: the grant it was confirmed under (its
-    /// `connectedAt`), which must still stand when the rule is written.
-    granted: Option<u64>,
 }
 
 impl Remember {
-    /// A phone payment's waiting rule, once its transaction is verified.
-    pub fn new(key: String, account: u32, rule: ProposedRule, granted: u64) -> Self {
-        Remember {
-            key,
-            account,
-            rule,
-            granted: Some(granted),
+    /// A phone payment's waiting rule, held in memory until its payment is
+    /// verified.
+    pub fn waiting(self) -> WaitingRule {
+        WaitingRule {
+            key: self.key,
+            account: self.account,
+            rule: self.rule,
         }
     }
 
-    /// What a phone payment's record keeps to write the rule later: the
-    /// selector and the grant it was confirmed under. None for a call no
-    /// rule covers, or a page whose grant didn't expose the account.
-    pub fn waiting(&self) -> Option<([u8; 4], u64)> {
-        Some((self.rule.selector?, self.granted?))
+    /// A waiting rule taken at its payment's verification, to write.
+    pub fn verified(waiting: WaitingRule) -> Self {
+        Remember {
+            key: waiting.key,
+            account: waiting.account,
+            rule: waiting.rule,
+        }
     }
+}
+
+/// A narrowing a phone payment's waiting rules follow: any dApp revoke for
+/// the key, whatever its outcome, and a deleted account.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Narrowed {
+    Key(String),
+    Account(u32),
 }
 
 impl Approvals {
@@ -669,7 +675,6 @@ impl Approvals {
             standing: Standing::new(),
             events: Vec::new(),
             narrowed: Vec::new(),
-            connected_at: 0,
             x402: x402::X402State::default(),
         }
     }
@@ -1249,16 +1254,10 @@ impl Approvals {
                     .map_err(refusal)?;
                 let after = match page {
                     Some(page) if spent.kind == Kind::DappSend && spent.remember => {
-                        let dapps = self.grants.view::<DappStore>(clocks.wall_ms / 1000);
-                        let granted = dapps
-                            .exposes(&page.origin, account)
-                            .then(|| dapps.connected_at(&page.origin))
-                            .flatten();
                         After::Remember(Remember {
                             key: page.origin.clone(),
                             account,
                             rule: ProposedRule::of(tx),
-                            granted,
                         })
                     }
                     // The executor's signature, when the fee check stopped
@@ -1526,9 +1525,6 @@ impl Approvals {
         wall_ms: u64,
     ) {
         self.grants.configure(root, moved, wall_ms / 1000);
-        // Every grant read now: one revoked later keeps its `connectedAt`
-        // here, so no connect after it takes the same.
-        self.connected_at = self.grants.view::<DappStore>(0).latest_connected_at();
         if self.grants.moved(StoreKind::X402) {
             let caps = self.grants.view::<CapStore>(wall_ms / 1000).into_owned();
             self.x402.loaded(&caps);
@@ -1541,16 +1537,9 @@ impl Approvals {
         std::mem::take(&mut self.events)
     }
 
-    /// The dApp keys narrowed since the last call.
-    pub fn take_narrowed(&mut self) -> Vec<String> {
+    /// The narrowings since the last call.
+    pub fn take_narrowed(&mut self) -> Vec<Narrowed> {
         std::mem::take(&mut self.narrowed)
-    }
-
-    /// A narrowing of `key`'s dApp grant: its device send's receipts go
-    /// (#373), and so do its phone payments' waiting rules.
-    fn forget_rules(&mut self, key: &str) {
-        self.receipts.forget_key(key);
-        self.narrowed.push(key.to_owned());
     }
 
     /// Which dApp rules answer: today's until the file moves.
@@ -1886,20 +1875,9 @@ impl Approvals {
                 object(&fields["change"], &with(&["account", "chain_id"]), keyed)?;
                 let account = account(change.get("account"), "account")?;
                 let chain = chain_id(&change["chain_id"], "chain_id")?;
-                // A new grant's `connectedAt` is later than any grant's this
-                // core has made or read, so no grant ended before it shares
-                // it, even within a millisecond or under a clock set back:
-                // a phone payment's waiting rule names its grant by it.
-                let latest = self
-                    .grants
-                    .view::<DappStore>(0)
-                    .latest_connected_at()
-                    .max(self.connected_at);
-                let connected_at = now.max(latest.saturating_add(1));
                 let written = self.write::<DappStore, _>(&key, |store| {
-                    store.connect(&key, account, chain, connected_at)
+                    store.connect(&key, account, chain, now)
                 })?;
-                self.connected_at = connected_at;
                 (true, written.durable)
             }
             (StoreKind::Dapp, "account") => {
@@ -2012,6 +1990,12 @@ impl Approvals {
         {
             return Err(forbidden("a page revokes only its own grant"));
         }
+        // A phone payment's waiting rule for the key goes with any dApp
+        // revoke, whatever its outcome: it is held in memory, and nothing
+        // can fail.
+        if kind == StoreKind::Dapp {
+            self.narrowed.push(Narrowed::Key(key.clone()));
+        }
         if !self.grants.moved(kind) {
             return Err(not_moved(kind));
         }
@@ -2020,7 +2004,7 @@ impl Approvals {
         // A device send's receipts for the key go with any dApp revoke that
         // stands, saved or not (#373): a narrowing after the spend wins over
         // the decision before it.
-        let forget = |this: &mut Self| this.forget_rules(&key);
+        let forget = |this: &mut Self| this.receipts.forget_key(&key);
         let written = match (kind, what.as_str()) {
             // The buckets go once the revoke stands, saved or not: a grant
             // made again starts full.
@@ -2204,6 +2188,9 @@ impl Approvals {
     fn forget_account(&mut self, id: u64, params: &Value) -> Result<Zeroizing<Vec<u8>>, ErrorBody> {
         let fields = object(params, &["wallet_index"], &[])?;
         let account = account(fields.get("wallet_index"), "wallet_index")?;
+        // A phone payment's waiting rule for the account goes, and one for
+        // each key that exposed it, whatever the write does.
+        self.narrowed.push(Narrowed::Account(account));
         if !self.grants.moved(StoreKind::Dapp) {
             return Err(not_moved(StoreKind::Dapp));
         }
@@ -2217,6 +2204,8 @@ impl Approvals {
                 .map(str::to_owned)
                 .collect()
         };
+        self.narrowed
+            .extend(exposing.iter().cloned().map(Narrowed::Key));
         let result = self
             .grants
             .write::<DappStore, _>(|store| store.forget_account(account));
@@ -2232,7 +2221,7 @@ impl Approvals {
         self.receipts.forget_account(account);
         for key in &keys {
             self.standing.forget_dapp(key);
-            self.forget_rules(key);
+            self.receipts.forget_key(key);
             self.changed(StoreKind::Dapp, key);
         }
         if let Some(error) = error {
@@ -2277,7 +2266,6 @@ impl Approvals {
                 key: taken.document.origin,
                 account: taken.account,
                 rule: taken.rule,
-                granted: None,
             },
             clocks,
         );
@@ -2294,14 +2282,10 @@ impl Approvals {
             return refused("not_moved");
         }
         let key = remember.key;
-        let dapps = self.grants.view::<DappStore>(clocks.wall_ms / 1000);
-        // A phone payment's rule only under the grant it was confirmed
-        // under: never after a revoke or a forgotten account, a connect
-        // made again included, whatever the phone's file still says.
-        if !dapps.exposes(&key, remember.account)
-            || remember
-                .granted
-                .is_some_and(|granted| dapps.connected_at(&key) != Some(granted))
+        if !self
+            .grants
+            .view::<DappStore>(clocks.wall_ms / 1000)
+            .exposes(&key, remember.account)
         {
             return refused("not_exposed");
         }

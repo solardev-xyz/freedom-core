@@ -26,6 +26,12 @@
 //!   payment's bound fields, `data` by its length and SHA-256, the hash the
 //!   phone reported and `answeredAt` on the wall clock. [`file_text`] writes
 //!   them and [`read_file`] reads exactly that form back, within the bounds.
+//! - **A waiting rule** ([`WaitingRule`]): a flagged `dapp-send`'s "Always
+//!   allow", held from its job until its payment is verified, in memory
+//!   only, as a device send's receipts are (#375). It goes when its job
+//!   ends without a record, when its record is dropped, at a narrowing of
+//!   its key or a deleted account, and at a restart; at most
+//!   [`MAX_WAITING_RULES`], the oldest dropped. A record never carries one.
 //! - **The comparison** ([`difference`]) is `phone-payments.js`'s: the
 //!   sender, then the recipient, the amount, the data and the chain; a
 //!   transaction without a chain id, or a field the core can't read, never
@@ -79,6 +85,11 @@ pub const MAX_RECHECK_MS: u64 = 10 * 60 * 1000;
 
 /// The file's format.
 const VERSION: u64 = 1;
+
+/// How many waiting rules are held at once, the oldest dropped: as many
+/// as a device send's receipts (#375's [`crate::receipt::MAX_RECEIPTS`]),
+/// each a flagged send's "Always allow" waiting for its device.
+pub const MAX_WAITING_RULES: usize = crate::receipt::MAX_RECEIPTS;
 
 /// A job's id: 16 random bytes, sent as 32 lowercase hex digits. Not a
 /// secret: the chrome relays it, and the sender check guards the job.
@@ -245,41 +256,18 @@ pub struct Record {
     pub fields: Fields,
     pub kind: String,
     pub site: Option<String>,
-    /// A flagged `dapp-send`'s "Always allow", waiting for the payment to
-    /// be verified. Its key, account, `to`, chain and value are the
-    /// record's `site`, `account`, `to`, `chain_id` and `value`. It is
-    /// written once, when the transaction shows and matches, and only
-    /// under the grant it was confirmed under; never on a mismatch, an
-    /// `unknown` end or a lost file.
-    pub rule: Option<WaitingRule>,
     /// The wall clock at the answer, in milliseconds.
     pub answered_at: u64,
 }
 
-/// A waiting rule: the call's selector, and the grant it was confirmed
-/// under, by the dApp grant's `connectedAt`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+/// A flagged `dapp-send`'s "Always allow", waiting for its payment to be
+/// verified: the rule's key, account and call, as a device send's receipt
+/// binds them (#373). Held in memory only ([`PhoneJobs::wait_rule`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WaitingRule {
-    #[serde(with = "selector_hex")]
-    pub selector: [u8; 4],
-    pub granted_at: u64,
-}
-
-mod selector_hex {
-    use serde::{Deserialize, Deserializer, Serializer, de::Error};
-
-    pub fn serialize<S: Serializer>(selector: &[u8; 4], s: S) -> Result<S::Ok, S::Error> {
-        s.serialize_str(&fc_evm::to_hex(selector))
-    }
-
-    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<[u8; 4], D::Error> {
-        let text = String::deserialize(d)?;
-        text.strip_prefix("0x")
-            .and_then(|digits| super::lower_hex(digits, 4))
-            .and_then(|bytes| bytes.try_into().ok())
-            .ok_or_else(|| D::Error::custom("selector: expected 4 bytes of lowercase hex"))
-    }
+    pub key: String,
+    pub account: u32,
+    pub rule: crate::receipt::ProposedRule,
 }
 
 /// A payment's bound fields, in the record's form: addresses as lowercase
@@ -634,6 +622,8 @@ pub struct PhoneJobs<T> {
     answering: Vec<JobId>,
     records: Vec<Record>,
     settled: VecDeque<(JobId, Ended)>,
+    /// The waiting rules, oldest first, each by its job.
+    rules: VecDeque<(JobId, WaitingRule)>,
 }
 
 impl<T> Default for PhoneJobs<T> {
@@ -643,6 +633,7 @@ impl<T> Default for PhoneJobs<T> {
             answering: Vec::new(),
             records: Vec::new(),
             settled: VecDeque::new(),
+            rules: VecDeque::new(),
         }
     }
 }
@@ -736,6 +727,7 @@ impl<T> PhoneJobs<T> {
     /// was.
     pub fn cancel(&mut self, id: &JobId) {
         self.open.retain(|job| job.id != *id);
+        self.take_rule(id);
     }
 
     fn known(&self, id: &JobId) -> bool {
@@ -755,6 +747,7 @@ impl<T> PhoneJobs<T> {
                 let job = self.open.remove(i);
                 let outcome_unknown = job.sent && matches!(job.binds, Binds::Payment(_));
                 self.settle(job.id, Ended::Expired { outcome_unknown });
+                self.take_rule(&job.id);
                 ended.push(job.id);
                 continue;
             }
@@ -818,6 +811,8 @@ impl<T> PhoneJobs<T> {
         self.settle(job.id, Ended::Answered);
         if hash && matches!(job.binds, Binds::Payment(_)) {
             self.answering.push(job.id);
+        } else {
+            self.take_rule(&job.id);
         }
         Ok(Taken {
             id: job.id,
@@ -834,6 +829,7 @@ impl<T> PhoneJobs<T> {
     /// visible at the answer): its slot comes back.
     pub fn release(&mut self, id: &JobId) {
         self.answering.retain(|answering| answering != id);
+        self.take_rule(id);
     }
 
     /// A payment being read is kept as `record`, in its job's slot.
@@ -845,6 +841,7 @@ impl<T> PhoneJobs<T> {
 
     /// Drops a record: its slot comes back.
     pub fn drop_record(&mut self, id: &JobId) -> Option<Record> {
+        self.take_rule(id);
         let index = self.records.iter().position(|record| record.job == *id)?;
         Some(self.records.remove(index))
     }
@@ -853,23 +850,47 @@ impl<T> PhoneJobs<T> {
         &self.records
     }
 
-    /// A narrowing of `site`'s grant: its records' waiting rules are
-    /// forgotten, as a device send's receipts are (#373). Whether any was.
-    pub fn forget_rules(&mut self, site: &str) -> bool {
-        let mut forgot = false;
-        for record in &mut self.records {
-            if record.rule.is_some() && record.site.as_deref() == Some(site) {
-                record.rule = None;
-                forgot = true;
-            }
+    /// Holds `rule` for the open payment job `id` until its payment is
+    /// verified ([`PhoneJobs::take_rule`]); past [`MAX_WAITING_RULES`] the
+    /// oldest is dropped. A job that isn't an open payment's holds none.
+    pub fn wait_rule(&mut self, id: &JobId, rule: WaitingRule) {
+        let payment = self
+            .open
+            .iter()
+            .any(|job| job.id == *id && matches!(job.binds, Binds::Payment(_)));
+        if !payment {
+            return;
         }
-        forgot
+        self.take_rule(id);
+        while self.rules.len() >= MAX_WAITING_RULES {
+            self.rules.pop_front();
+        }
+        self.rules.push_back((*id, rule));
+    }
+
+    /// Takes job `id`'s waiting rule: it is held once, and gone after this.
+    pub fn take_rule(&mut self, id: &JobId) -> Option<WaitingRule> {
+        let index = self.rules.iter().position(|(job, _)| job == id)?;
+        self.rules.remove(index).map(|(_, rule)| rule)
+    }
+
+    /// A dApp revoke for `key`, whatever its outcome: its waiting rules go,
+    /// as a device send's receipts do (#373).
+    pub fn forget_key(&mut self, key: &str) {
+        self.rules.retain(|(_, rule)| rule.key != key);
+    }
+
+    /// A deleted account: its waiting rules go.
+    pub fn forget_account(&mut self, account: u32) {
+        self.rules.retain(|(_, rule)| rule.account != account);
     }
 
     /// The records a start read (at most [`MAX_SLOTS`]: [`read_file`]
     /// refuses more).
     pub fn load(&mut self, records: Vec<Record>) {
         self.records = records;
+        // A start holds no waiting rule: a record never carries one.
+        self.rules.clear();
     }
 }
 
@@ -944,7 +965,6 @@ struct RecordOut<'a> {
     data_sha256: &'a str,
     kind: &'a str,
     site: Option<&'a str>,
-    rule: Option<WaitingRule>,
     answered_at: u64,
 }
 
@@ -962,7 +982,6 @@ impl<'a> RecordOut<'a> {
             data_sha256: &record.fields.data_sha256,
             kind: &record.kind,
             site: record.site.as_deref(),
-            rule: record.rule,
             answered_at: record.answered_at,
         }
     }
@@ -1005,9 +1024,6 @@ struct RecordIn {
     data_sha256: String,
     kind: String,
     site: Value,
-    // Required, `null` or the rule: never missing.
-    #[serde(deserialize_with = "Option::deserialize")]
-    rule: Option<WaitingRule>,
     answered_at: u64,
 }
 
@@ -1083,11 +1099,6 @@ fn read_record(text: &str) -> Option<Record> {
         Value::String(site) => Some(site),
         _ => return None,
     };
-    let rule = record.rule;
-    // Only a flagged page send waits to write a rule.
-    if rule.is_some() && (kind != "dapp-send" || site.is_none()) {
-        return None;
-    }
     Some(Record {
         job: JobId::parse(&record.job)?,
         hash,
@@ -1102,7 +1113,6 @@ fn read_record(text: &str) -> Option<Record> {
         },
         kind: kind.to_owned(),
         site,
-        rule,
         answered_at: record.answered_at,
     })
 }
@@ -1200,7 +1210,6 @@ mod tests {
             fields: Fields::bound(&ADDRESS, &payment(vec![1, 2, 3])),
             kind: "dapp-send".into(),
             site: site.map(str::to_owned),
-            rule: None,
             answered_at: 1_700_000_000_000,
         }
     }
@@ -1222,13 +1231,7 @@ mod tests {
     /// form is the reader's.
     #[test]
     fn the_file_is_read_as_written() {
-        let one = Record {
-            rule: Some(WaitingRule {
-                selector: [0x09, 0x5e, 0xa7, 0xb3],
-                granted_at: 1_699_000_000_000,
-            }),
-            ..record(1, Some("https://app.example"))
-        };
+        let one = record(1, Some("https://app.example"));
         let two = Record {
             site: None,
             kind: "standing".into(),
@@ -1240,10 +1243,9 @@ mod tests {
                 r#"{{"version":1,"payments":[{{"job":"{j1}","hash":"0x{h1}","account":3,"#,
                 r#""from":"0x{a}","chain_id":"100","to":"0x{t}","value":"5","data_length":3,"#,
                 r#""data_sha256":"{s}","kind":"dapp-send","site":"https://app.example","#,
-                r#""rule":{{"selector":"0x095ea7b3","granted_at":1699000000000}},"answered_at":1700000000000}},{{"job":"{j2}","hash":"0x{h2}","account":3,"#,
+                r#""answered_at":1700000000000}},{{"job":"{j2}","hash":"0x{h2}","account":3,"#,
                 r#""from":"0x{a}","chain_id":"100","to":"0x{t}","value":"5","data_length":3,"#,
-                r#""data_sha256":"{s}","kind":"standing","site":null,"rule":null,"#,
-                r#""answered_at":1700000000000}}]}}"#
+                r#""data_sha256":"{s}","kind":"standing","site":null,"answered_at":1700000000000}}]}}"#
             ),
             j1 = "01".repeat(16),
             h1 = "01".repeat(32),
@@ -1256,28 +1258,6 @@ mod tests {
         assert_eq!(String::from_utf8(text.clone()).unwrap(), expected);
         assert_eq!(read_file(&text).unwrap(), vec![one, two]);
         assert_eq!(read_file(&file_text(&[])).unwrap(), vec![]);
-    }
-
-    /// A narrowing of a site forgets its records' waiting rules, and no
-    /// other site's.
-    #[test]
-    fn a_narrowing_forgets_its_site_s_rules() {
-        let mut jobs: PhoneJobs<u32> = PhoneJobs::new();
-        let ruled = |job: u8, site: &str| Record {
-            rule: Some(WaitingRule {
-                selector: [job; 4],
-                granted_at: 1,
-            }),
-            ..record(job, Some(site))
-        };
-        jobs.load(vec![ruled(1, "a"), ruled(2, "b"), record(3, Some("a"))]);
-        assert!(!jobs.forget_rules("c"));
-        assert!(jobs.forget_rules("a"));
-        let rules: Vec<_> = jobs.records().iter().map(|r| r.rule).collect();
-        assert_eq!(rules[0], None);
-        assert_eq!(rules[1].map(|rule| rule.selector), Some([2; 4]));
-        assert_eq!(rules[2], None);
-        assert!(!jobs.forget_rules("a"));
     }
 
     /// Anything the writer wouldn't write is unreadable: a member missing,
@@ -1294,38 +1274,6 @@ mod tests {
             (r#""account":3,"#, String::new()),
             (r#""site":"s""#, r#""site":1"#.into()),
             (r#""site":"s","#, String::new()),
-            (r#""rule":null,"#, String::new()),
-            (r#""rule":null"#, r#""rule":null,"rule":null"#.into()),
-            (r#""rule":null"#, r#""rule":1"#.into()),
-            (r#""rule":null"#, r#""rule":"0x095ea7b3""#.into()),
-            (
-                r#""rule":null"#,
-                r#""rule":{"selector":"0x095EA7B3","granted_at":1}"#.into(),
-            ),
-            (
-                r#""rule":null"#,
-                r#""rule":{"selector":"0x095ea7","granted_at":1}"#.into(),
-            ),
-            (
-                r#""rule":null"#,
-                r#""rule":{"selector":"095ea7b3","granted_at":1}"#.into(),
-            ),
-            (
-                r#""rule":null"#,
-                r#""rule":{"selector":"0x095ea7b3"}"#.into(),
-            ),
-            (
-                r#""rule":null"#,
-                r#""rule":{"selector":"0x095ea7b3","granted_at":-1}"#.into(),
-            ),
-            (
-                r#""rule":null"#,
-                r#""rule":{"selector":"0x095ea7b3","granted_at":1,"granted_at":1}"#.into(),
-            ),
-            (
-                r#""rule":null"#,
-                r#""rule":{"selector":"0x095ea7b3","granted_at":1,"x":1}"#.into(),
-            ),
             (r#""kind":"dapp-send""#, r#""kind":"sign-message""#.into()),
             (r#""value":"5""#, r#""value":"05""#.into()),
             (r#""value":"5""#, r#""value":"0x5""#.into()),
@@ -1345,37 +1293,17 @@ mod tests {
             ("\"hash\":\"0x0101", "\"hash\":\"0x01".into()),
             ("\"job\":\"0101", "\"job\":\"0A01".into()),
             ("\"data_sha256\":\"039", "\"data_sha256\":\"03".into()),
+            // A waiting rule is never written: a record holding one is
+            // another form.
+            (
+                r#""answered_at":1700000000000"#,
+                r#""rule":null,"answered_at":1700000000000"#.into(),
+            ),
         ];
         for (from, to) in swaps {
             assert!(good.contains(from), "{from}");
             let bad = good.replacen(from, &to, 1);
             assert!(read_file(bad.as_bytes()).is_err(), "{bad}");
-        }
-        // A waiting rule reads only on a page's `dapp-send`.
-        let ruled = good.replacen(
-            r#""rule":null"#,
-            r#""rule":{"selector":"0x095ea7b3","granted_at":7}"#,
-            1,
-        );
-        assert_eq!(
-            read_file(ruled.as_bytes()).unwrap()[0].rule,
-            Some(WaitingRule {
-                selector: [0x09, 0x5e, 0xa7, 0xb3],
-                granted_at: 7
-            })
-        );
-        for (from, to) in [
-            (r#""kind":"dapp-send""#, r#""kind":"standing""#),
-            (r#""site":"s""#, r#""site":null"#),
-        ] {
-            assert!(
-                read_file(ruled.replacen(from, to, 1).as_bytes()).is_err(),
-                "{to}"
-            );
-            assert!(
-                read_file(good.replacen(from, to, 1).as_bytes()).is_ok(),
-                "{to}"
-            );
         }
         // The largest chain id and account the writer writes read.
         let edge = good
@@ -1465,12 +1393,8 @@ mod tests {
                 data_sha256: "f".repeat(64),
                 chain_id: crate::MAX_CHAIN_ID.to_string(),
             },
-            kind: "dapp-send".into(),
+            kind: "executor-send".into(),
             site: Some("\u{1}".repeat(MAX_SITE_BYTES / 6) + &"x".repeat(MAX_SITE_BYTES % 6)),
-            rule: Some(WaitingRule {
-                selector: [0xff; 4],
-                granted_at: u64::MAX,
-            }),
             answered_at: u64::MAX,
         };
         assert_eq!(
@@ -1868,6 +1792,112 @@ mod tests {
         jobs.load((0..=255u8).map(|job| record(job, None)).collect());
         assert_eq!(jobs.slots_used(), MAX_SLOTS);
         assert_eq!(jobs.check_room(true, None, 0), Err(OpenRefusal::Busy));
+    }
+
+    fn waiting(key: &str, account: u32) -> WaitingRule {
+        WaitingRule {
+            key: key.into(),
+            account,
+            rule: crate::receipt::ProposedRule {
+                to: Some(TO),
+                selector: Some([9; 4]),
+                chain_id: Some(100),
+                value: U256::from_u64(5),
+            },
+        }
+    }
+
+    /// An open payment job, holding a waiting rule for `key` and `account`.
+    fn ruled_job(jobs: &mut PhoneJobs<u32>, rng: &mut Counter, key: &str, account: u32) -> JobId {
+        let new = new_job(Binds::Payment(payment(vec![])), Some(key), 1);
+        let id = jobs.open(new, 0, rng).unwrap().job;
+        jobs.wait_rule(&id, waiting(key, account));
+        id
+    }
+
+    fn held(jobs: &PhoneJobs<u32>) -> Vec<JobId> {
+        jobs.rules.iter().map(|(id, _)| *id).collect()
+    }
+
+    /// A waiting rule is held from its job through the answer's read and
+    /// its record, and taken once; every other end of its payment drops it.
+    #[test]
+    fn a_waiting_rule_lives_with_its_payment() {
+        let mut jobs: PhoneJobs<u32> = PhoneJobs::new();
+        let mut rng = rng();
+        let kept = ruled_job(&mut jobs, &mut rng, "s", 3);
+        jobs.answer(&kept, 1, 0, true).unwrap();
+        jobs.record(Record {
+            job: kept,
+            ..record(1, Some("s"))
+        });
+        assert_eq!(held(&jobs), vec![kept]);
+        assert_eq!(jobs.take_rule(&kept), Some(waiting("s", 3)));
+        assert_eq!(jobs.take_rule(&kept), None);
+        // Held once: waited for again, it replaces the first.
+        let twice = ruled_job(&mut jobs, &mut rng, "s", 3);
+        jobs.wait_rule(&twice, waiting("s", 4));
+        assert_eq!(jobs.take_rule(&twice), Some(waiting("s", 4)));
+        assert_eq!(jobs.take_rule(&twice), None);
+        // An error, or an answer that isn't a hash.
+        let errored = ruled_job(&mut jobs, &mut rng, "s", 3);
+        jobs.answer(&errored, 1, 0, false).unwrap();
+        assert_eq!(held(&jobs), vec![]);
+        // A transaction visible at the answer.
+        let visible = ruled_job(&mut jobs, &mut rng, "s", 3);
+        jobs.answer(&visible, 1, 0, true).unwrap();
+        jobs.release(&visible);
+        assert_eq!(held(&jobs), vec![]);
+        // A job whose reply couldn't go.
+        let cancelled = ruled_job(&mut jobs, &mut rng, "s", 3);
+        jobs.cancel(&cancelled);
+        assert_eq!(held(&jobs), vec![]);
+        // A record dropped: a mismatch, an age-out, or a verification
+        // that didn't take it.
+        let dropped = ruled_job(&mut jobs, &mut rng, "s", 3);
+        jobs.answer(&dropped, 1, 0, true).unwrap();
+        jobs.record(Record {
+            job: dropped,
+            ..record(2, Some("s"))
+        });
+        assert!(jobs.drop_record(&dropped).is_some());
+        assert_eq!(held(&jobs), vec![]);
+        // An expiry.
+        ruled_job(&mut jobs, &mut rng, "s", 3);
+        jobs.expire(JOB_TTL_MS);
+        assert_eq!(held(&jobs), vec![]);
+        // A signature's job, or a payment no longer open, holds none.
+        let signature = jobs
+            .open(new_job(Binds::Message(vec![1]), Some("s"), 1), 0, &mut rng)
+            .unwrap()
+            .job;
+        jobs.wait_rule(&signature, waiting("s", 3));
+        jobs.wait_rule(&kept, waiting("s", 3));
+        assert_eq!(held(&jobs), vec![]);
+    }
+
+    /// A narrowing of a key forgets its waiting rules, a deleted account
+    /// its own, and a start holds none; at most 64 wait, the oldest
+    /// dropped.
+    #[test]
+    fn waiting_rules_are_forgotten_and_bounded() {
+        let mut jobs: PhoneJobs<u32> = PhoneJobs::new();
+        let mut rng = rng();
+        let ids: Vec<JobId> = [("a", 1), ("b", 1), ("a", 2), ("c", 3)]
+            .into_iter()
+            .map(|(key, account)| ruled_job(&mut jobs, &mut rng, key, account))
+            .collect();
+        jobs.forget_key("a");
+        assert_eq!(held(&jobs), vec![ids[1], ids[3]]);
+        jobs.forget_account(1);
+        assert_eq!(held(&jobs), vec![ids[3]]);
+        jobs.load(vec![]);
+        assert_eq!(held(&jobs), vec![]);
+        let ids: Vec<JobId> = (0..=MAX_WAITING_RULES)
+            .map(|_| ruled_job(&mut jobs, &mut rng, "s", 3))
+            .collect();
+        assert_eq!(held(&jobs), ids[1..].to_vec());
+        assert_eq!(MAX_WAITING_RULES, 64);
     }
 
     /// Signatures have places of their own.

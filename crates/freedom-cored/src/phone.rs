@@ -38,7 +38,7 @@ use std::time::{Duration, Instant};
 
 use fc_approval::phone::{
     self, Authorized, Binds, ErrorAnswer, Fields, JobId, Mapped, Observed, OpenRefusal, Payment,
-    PhoneJobs, Record, Refusal, Taken,
+    PhoneJobs, Record, Refusal, Taken, WaitingRule,
 };
 use fc_approval::standing::AccountKind;
 use fc_evm::{Transaction, to_hex};
@@ -49,7 +49,7 @@ use serde_json::value::RawValue;
 use serde_json::{Map, Value, json};
 use zeroize::Zeroizing;
 
-use crate::approvals::{After, Approvals, Clocks, Signed};
+use crate::approvals::{After, Approvals, Clocks, Narrowed, Remember, Signed};
 use crate::fsx::{self, Done};
 use crate::grants::{self, Read as FileRead};
 use crate::rng::OsRng;
@@ -548,6 +548,13 @@ impl Phone {
                 AccountKind::Phone,
             )?,
         };
+        // A flagged send's "Always allow" waits for its payment, in memory
+        // only: held by the job until it is verified (design 0012, "A phone
+        // payment's rule").
+        let (after, waiting) = match after {
+            After::Remember(remember) => (After::Nothing, Some(remember.waiting())),
+            after => (after, None),
+        };
         let kind = match binds {
             // A payment's record names it; a signature's job keeps none.
             Binds::Payment(_) => phone::record_kind(kind).unwrap_or("none"),
@@ -576,6 +583,9 @@ impl Phone {
                 "request": { "method": opened.method, "params": opened.params },
             }),
         );
+        if let Some(waiting) = waiting {
+            self.jobs.wait_rule(&opened.job, waiting);
+        }
         match payload {
             Ok(payload) if payload.len() <= fc_protocol::frame::MAX_PAYLOAD => Ok(payload),
             _ => {
@@ -734,6 +744,7 @@ impl Phone {
     ) -> Result<Value, ErrorBody> {
         let hash_text = to_hex(&hash);
         if let Lookup::Visible(tx) = lookup {
+            let waiting = self.jobs.take_rule(&taken.id);
             self.jobs.release(&taken.id);
             let seen = Observed::of(&tx);
             if let Some(difference) = phone::difference(&seen, &fields) {
@@ -744,25 +755,15 @@ impl Phone {
                 ));
             }
             let mut result = json!({ "outcome": "verified", "hash": hash_text });
-            if let Some(rule) = approvals.signed(taken.extra, clocks) {
-                result["rule"] = rule;
+            let _ = approvals.signed(taken.extra, clocks);
+            if let Some(waiting) = waiting {
+                result["rule"] = write_rule(approvals, waiting, clocks);
             }
             return Ok(result);
         }
-        // A flagged send's rule waits for its transaction: a hash alone is
-        // the chrome's word, and no evidence that the phone sent anything.
-        let (after, rule) = match taken.extra {
-            After::Remember(remember) => (
-                After::Nothing,
-                remember
-                    .waiting()
-                    .map(|(selector, granted_at)| phone::WaitingRule {
-                        selector,
-                        granted_at,
-                    }),
-            ),
-            after => (after, None),
-        };
+        // A flagged send's rule waits for its transaction, in memory: a
+        // hash alone is the chrome's word, and no evidence that the phone
+        // sent anything.
         let record = Record {
             job: taken.id,
             hash,
@@ -770,7 +771,6 @@ impl Phone {
             fields,
             kind: taken.authorized.kind.to_owned(),
             site: taken.authorized.site.clone(),
-            rule,
             answered_at,
         };
         self.jobs.record(record);
@@ -781,29 +781,22 @@ impl Phone {
             previous: Some(self.first_recheck_ms),
             reading: false,
         });
-        let mut result = match saved {
+        let result = match saved {
             Saved::Durable => json!({ "outcome": "unverified", "hash": hash_text }),
             Saved::NotDurable => {
                 json!({ "outcome": "unknown", "hash": hash_text, "durable": false })
             }
         };
-        if let Some(rule) = approvals.signed(after, clocks) {
-            result["rule"] = rule;
-        }
+        let _ = approvals.signed(taken.extra, clocks);
         Ok(result)
     }
 
-    /// A narrowing of `key`'s dApp grant: its records' waiting rules go,
-    /// and the file is written without them.
-    pub fn forget_rules(&mut self, key: &str) {
-        // A revoke or a forgotten account ends the grant a waiting rule
-        // names, and the dApp file keeps that whatever this write does: a
-        // rule is written only under the grant it was confirmed under.
-        if self.jobs.forget_rules(key) && self.save() == Saved::NotDurable {
-            crate::log::warn(
-                "a narrowed grant's waiting phone rules aren't saved",
-                json!({}),
-            );
+    /// A dApp revoke or a deleted account: the waiting rules it names go,
+    /// from memory, whatever its write did.
+    pub fn narrowed(&mut self, narrowed: &Narrowed) {
+        match narrowed {
+            Narrowed::Key(key) => self.jobs.forget_key(key),
+            Narrowed::Account(account) => self.jobs.forget_account(*account),
         }
     }
 
@@ -819,23 +812,18 @@ impl Phone {
         match lookup {
             Lookup::Visible(tx) => {
                 self.waiting.remove(index);
+                // Taken once: a restart, which verifies an unsaved drop
+                // again, holds no rule.
+                let waiting = self.jobs.take_rule(&job);
                 self.jobs.drop_record(&job);
-                let saved = self.save();
+                self.save();
                 let seen = Observed::of(&tx);
                 match phone::difference(&seen, &record.fields) {
                     None => {
-                        let rule = waiting_rule(&record).map(|remember| {
-                            // Once only: the rule is written once the drop
-                            // is saved, or a restart verifies it again.
-                            if saved == Saved::Durable {
-                                approvals
-                                    .signed(After::Remember(remember), clocks)
-                                    .unwrap_or(Value::Null)
-                            } else {
-                                json!({ "added": false, "reason": "not_saved" })
-                            }
-                        });
-                        self.checked(&job, "verified", rule.map(|rule| json!({ "rule": rule })));
+                        let rule = waiting.map(
+                            |waiting| json!({ "rule": write_rule(approvals, waiting, clocks) }),
+                        );
+                        self.checked(&job, "verified", rule);
                     }
                     Some(difference) => self.checked(
                         &job,
@@ -949,23 +937,12 @@ fn failed(id: u64, mapped: &Mapped) -> Result<Zeroizing<Vec<u8>>, ErrorBody> {
     }
 }
 
-/// A verified record's waiting rule: the flagged send's call, for its page
-/// and account, as the receipt binds it (#373).
-fn waiting_rule(record: &Record) -> Option<crate::approvals::Remember> {
-    let waiting = record.rule?;
-    let key = record.site.clone()?;
-    let rule = fc_approval::receipt::ProposedRule {
-        to: fc_evm::parse_address(&record.fields.to).ok(),
-        selector: Some(waiting.selector),
-        chain_id: record.fields.chain_id.parse().ok(),
-        value: fc_evm::U256::parse_decimal(&record.fields.value)?,
-    };
-    Some(crate::approvals::Remember::new(
-        key,
-        record.account,
-        rule,
-        waiting.granted_at,
-    ))
+/// A verified payment's waiting rule, written as `approval.remember`
+/// writes a device send's: only while the page's grant exposes the account.
+fn write_rule(approvals: &mut Approvals, waiting: WaitingRule, clocks: Clocks) -> Value {
+    approvals
+        .signed(After::Remember(Remember::verified(waiting)), clocks)
+        .unwrap_or(Value::Null)
 }
 
 fn read(tag: u64, chain_id: u64, hash: &[u8; 32]) -> Out {

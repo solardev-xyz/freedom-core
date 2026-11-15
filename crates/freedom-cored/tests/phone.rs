@@ -1187,7 +1187,6 @@ fn records(count: usize, answered_at: u64) -> Vec<Record> {
                 fields: Fields::bound(&address, &payment),
                 kind: "dapp-send".into(),
                 site: Some(SITE.into()),
-                rule: None,
                 answered_at,
             }
         })
@@ -1591,7 +1590,13 @@ impl Flagged {
     fn job(&mut self) -> (String, String) {
         self.selectors += 1;
         let data = format!("0x{:08x}{}", 0x1000_0000 + self.selectors, "00".repeat(32));
-        let tx = tx_with("5", &data);
+        (self.job_for(&data), data)
+    }
+
+    /// The call `data`, confirmed with "Always allow" and sent to the
+    /// phone: the job.
+    fn job_for(&mut self, data: &str) -> String {
+        let tx = tx_with("5", data);
         let token = self.world.token(
             &site(),
             "dapp-send",
@@ -1604,21 +1609,72 @@ impl Flagged {
             json!({ "tx": tx }),
             Some(json!({ "token": token, "kind": "dapp-send", "handle": HANDLE })),
         );
-        (job_of(&opened), data)
+        job_of(&opened)
+    }
+
+    /// The page's grant moved to `account`.
+    fn switch(&mut self, account: u32) {
+        let switched = self.world.call(
+            &site(),
+            "approval.grant",
+            json!({ "store": "dapp", "change": { "op": "account", "account": account } }),
+        );
+        assert!(switched["result"].is_object(), "{switched}");
+    }
+
+    /// A dApp revoke for the page, from `context`: its reply.
+    fn revoke(&mut self, context: &Value, what: Value) -> Value {
+        self.world.call(
+            context,
+            "approval.revoke",
+            json!({ "store": "dapp", "key": SITE, "what": what }),
+        )
+    }
+
+    fn forget_account(&mut self, account: u32) -> Value {
+        self.world.call(
+            &shell(),
+            "approval.forget_account",
+            json!({ "wallet_index": account }),
+        )
+    }
+
+    fn dapp_file(&self) -> String {
+        std::fs::read_to_string(self.world.core.grant_root.join("dapp-permissions.json")).unwrap()
+    }
+
+    /// The page's `connectedAt`, as the dApp file holds it.
+    fn connected_at(&self) -> Value {
+        serde_json::from_str::<Value>(&self.dapp_file()).unwrap()[SITE]["connectedAt"].clone()
+    }
+
+    /// The payment `job` (the call `data`, sent as `hash`) shows, and
+    /// matches: verified, and no rule written.
+    fn verified_without_rule(&mut self, job: &str, hash: &str, data: &str, case: &str) {
+        self.world.txs.insert(hash.to_owned(), seen("0x5", data));
+        let checked = self.world.checked(job);
+        assert_eq!(checked["outcome"], "verified", "{case}: {checked}");
+        assert!(checked.get("rule").is_none(), "{case}: {checked}");
+        assert!(!self.has_rule(data), "{case}");
+    }
+
+    /// An open flagged payment answered with `hash`, not visible yet.
+    fn unverified(&mut self, job: &str, hash: &str) {
+        let answer = self.world.result(job, TARGET, hash.into());
+        assert_eq!(answer["result"]["outcome"], "unverified", "{answer}");
     }
 
     /// Whether the dApp file holds the rule for the call `data` begins.
     fn has_rule(&self, data: &str) -> bool {
-        std::fs::read_to_string(self.world.core.grant_root.join("dapp-permissions.json"))
-            .unwrap()
-            .contains(&data[..10])
+        self.dapp_file().contains(&data[..10])
     }
 }
 
-/// The rule waits for the transaction: never written on the hash alone,
-/// written once when the payment shows and matches, at the answer or later,
-/// a restart between included; never on a swap, a mismatch, an `unknown`
-/// end, or after a revoke.
+/// The rule waits for the transaction, in memory (design 0012, "A phone
+/// payment's rule"): never written on the hash alone, written once when the
+/// payment shows and matches, at the answer or later in the same run; never
+/// on a swap, a mismatch, an `unknown` end, or after a restart, though the
+/// payment still verifies. The phone's file never holds it.
 #[test]
 fn a_flagged_send_s_rule_waits_for_its_transaction() {
     let root = tempfile::tempdir().unwrap();
@@ -1645,7 +1701,8 @@ fn a_flagged_send_s_rule_waits_for_its_transaction() {
         "{answer}"
     );
     assert!(f.has_rule(&data));
-    // Not visible: unverified, and nothing written on the hash alone.
+    // Not visible: unverified, and nothing written on the hash alone, nor
+    // in the phone's file.
     let (later, later_data) = f.job();
     let answer = f.world.result(&later, TARGET, hash(3).into());
     assert_eq!(
@@ -1653,170 +1710,193 @@ fn a_flagged_send_s_rule_waits_for_its_transaction() {
         json!({ "outcome": "unverified", "hash": hash(3) })
     );
     assert!(!f.has_rule(&later_data));
+    assert!(
+        !std::fs::read_to_string(f.world.file())
+            .unwrap()
+            .contains("rule")
+    );
     // Later another transaction: a mismatch, and no rule.
     let (other, other_data) = f.job();
-    assert_eq!(
-        outcome(&f.world.result(&other, TARGET, hash(4).into())),
-        "unverified"
-    );
+    f.unverified(&other, &hash(4));
     f.world.txs.insert(hash(4), seen("0x6", &other_data));
     let checked = f.world.checked(&other);
     assert_eq!(checked["outcome"], "mismatch");
     assert!(checked.get("rule").is_none(), "{checked}");
     assert!(!f.has_rule(&other_data));
-    // Later the same: verified, and the rule written then.
+    // Later the same: verified, and the rule written then, once.
     f.world.txs.insert(hash(3), seen("0x5", &later_data));
     let checked = f.world.checked(&later);
     assert_eq!(checked["outcome"], "verified");
     assert_eq!(checked["rule"], json!({ "added": true }), "{checked}");
-    assert!(f.has_rule(&later_data));
-    // A restart between the answer and the transaction.
+    assert_eq!(f.dapp_file().matches(&later_data[2..10]).count(), 1);
+    // A restart between the answer and the transaction: the payment
+    // verifies, and no rule is written.
     let (restarted, restarted_data) = f.job();
-    assert_eq!(
-        outcome(&f.world.result(&restarted, TARGET, hash(5).into())),
-        "unverified"
-    );
+    f.unverified(&restarted, &hash(5));
     let mut f = f.restart();
-    assert!(!f.has_rule(&restarted_data));
-    f.world.txs.insert(hash(5), seen("0x5", &restarted_data));
-    let checked = f.world.checked(&restarted);
-    assert_eq!(checked["rule"], json!({ "added": true }), "{checked}");
-    assert!(f.has_rule(&restarted_data));
-    // A revoke before the transaction shows: the rule is forgotten, saved,
-    // and not written even once the grant is made again.
-    let (revoked, revoked_data) = f.job();
-    assert_eq!(
-        outcome(&f.world.result(&revoked, TARGET, hash(6).into())),
-        "unverified"
-    );
-    let gone = f.world.call(
-        &chrome(),
-        "approval.revoke",
-        json!({ "store": "dapp", "key": SITE, "what": "grant" }),
-    );
-    assert!(gone["result"].is_object(), "{gone}");
-    f.connect();
-    let mut f = f.restart();
-    f.world.txs.insert(hash(6), seen("0x5", &revoked_data));
-    let checked = f.world.checked(&revoked);
-    assert_eq!(checked["outcome"], "verified");
-    assert!(checked.get("rule").is_none(), "{checked}");
-    assert!(!f.has_rule(&revoked_data));
-    // Written once: the verified records were dropped, so the restart
-    // wrote none of the revoked rules again.
-    assert!(!f.has_rule(&later_data) && !f.has_rule(&restarted_data));
-    // So does an account forgotten, and connected again.
-    let (forgot, forgot_data) = f.job();
-    assert_eq!(
-        outcome(&f.world.result(&forgot, TARGET, hash(8).into())),
-        "unverified"
-    );
-    let gone = f.world.call(
-        &shell(),
-        "approval.forget_account",
-        json!({ "wallet_index": ACCOUNT }),
-    );
-    assert!(gone["result"].is_object(), "{gone}");
-    f.connect();
-    f.world.txs.insert(hash(8), seen("0x5", &forgot_data));
-    let checked = f.world.checked(&forgot);
-    assert!(checked.get("rule").is_none(), "{checked}");
-    assert!(!f.has_rule(&forgot_data));
+    f.verified_without_rule(&restarted, &hash(5), &restarted_data, "restart");
     // A day passes with the transaction visible: unknown, and no rule.
     let (aged, aged_data) = f.job();
-    assert_eq!(
-        outcome(&f.world.result(&aged, TARGET, hash(7).into())),
-        "unverified"
-    );
+    f.unverified(&aged, &hash(7));
     f.world.hooks.set_wall(WALL + DAY);
     f.world.txs.insert(hash(7), seen("0x5", &aged_data));
     assert_eq!(f.world.checked(&aged)["outcome"], "unknown");
     assert!(!f.has_rule(&aged_data));
 }
 
-/// A narrower revoke (one rule) keeps the grant, and forgets the key's
-/// waiting rules all the same: saved, so a restart doesn't bring them back.
+/// Every dApp revoke for the key forgets its waiting rules, whatever it
+/// revokes, whoever asks and whatever its write does, and so does a deleted
+/// account: the payment verifies later in the same run, and no rule is
+/// written, a connect made again included.
 #[test]
-fn a_narrower_revoke_forgets_the_waiting_rule() {
+fn every_revoke_forgets_the_waiting_rule() {
     let root = tempfile::tempdir().unwrap();
     let mut f = Flagged::start(root.path());
-    let (first, first_data) = f.job();
-    f.world.txs.insert(hash(1), seen("0x5", &first_data));
-    let answer = f.world.result(&first, TARGET, hash(1).into());
-    assert_eq!(
-        answer["result"]["rule"],
-        json!({ "added": true }),
-        "{answer}"
-    );
+    // A rule the site holds, for the exact rule's revoke.
+    let (held, held_data) = f.job();
+    f.world.txs.insert(hash(1), seen("0x5", &held_data));
+    let answer = f.world.result(&held, TARGET, hash(1).into());
+    assert_eq!(answer["result"]["rule"], json!({ "added": true }));
+    let call = |selector: &str| json!({ "transaction": { "to": TO, "selector": selector, "chain_id": 100 } });
+    let cases = [
+        ("the exact rule", chrome(), call(&held_data[..10]), ""),
+        ("another rule", chrome(), call("0xdeadbeef"), ""),
+        ("signing", chrome(), json!("signing"), ""),
+        ("the grant", chrome(), json!("grant"), ""),
+        ("the page's own", site(), json!("grant"), ""),
+        ("an unsaved revoke", chrome(), json!("grant"), "dapp:write"),
+        ("a malformed revoke", chrome(), json!({ "flag": "x" }), ""),
+    ];
+    let mut n = 10;
+    for (case, context, what, fail) in cases {
+        n += 1;
+        let (job, data) = f.job();
+        f.unverified(&job, &hash(n));
+        f.world.hooks.fail(fail);
+        let revoked = f.revoke(&context, what);
+        f.world.hooks.fail("");
+        if case == "the exact rule" {
+            assert!(revoked["result"].is_object(), "{revoked}");
+            assert!(!f.has_rule(&held_data));
+        }
+        f.connect();
+        f.verified_without_rule(&job, &hash(n), &data, case);
+    }
+    // Revoked between the job and its answer, the transaction visible then.
+    for case in ["revoke", "forget_account"] {
+        n += 1;
+        let (job, data) = f.job();
+        match case {
+            "revoke" => f.revoke(&chrome(), json!("grant")),
+            _ => f.forget_account(ACCOUNT),
+        };
+        f.connect();
+        f.world.txs.insert(hash(n), seen("0x5", &data));
+        let answer = f.world.result(&job, TARGET, hash(n).into());
+        assert_eq!(answer["result"]["outcome"], "verified", "{case}");
+        assert!(answer["result"].get("rule").is_none(), "{case}: {answer}");
+        assert!(!f.has_rule(&data), "{case}");
+    }
+    // The account the rule names deleted, the page on another by then.
+    n += 1;
     let (job, data) = f.job();
-    assert_eq!(
-        outcome(&f.world.result(&job, TARGET, hash(2).into())),
-        "unverified"
-    );
-    let call = json!({ "to": TO, "selector": &first_data[..10], "chain_id": 100 });
-    let narrowed = f.world.call(
-        &chrome(),
-        "approval.revoke",
-        json!({ "store": "dapp", "key": SITE, "what": { "transaction": call } }),
-    );
-    assert!(narrowed["result"].is_object(), "{narrowed}");
-    assert!(!f.has_rule(&first_data));
-    let mut f = f.restart();
-    f.world.txs.insert(hash(2), seen("0x5", &data));
-    let checked = f.world.checked(&job);
-    assert_eq!(checked["outcome"], "verified");
-    assert!(checked.get("rule").is_none(), "{checked}");
-    assert!(!f.has_rule(&data));
+    f.unverified(&job, &hash(n));
+    f.switch(ACCOUNT + 1);
+    f.forget_account(ACCOUNT);
+    f.switch(ACCOUNT);
+    f.verified_without_rule(&job, &hash(n), &data, "its account");
+    // Another account deleted, which ends the page's grant.
+    n += 1;
+    let (job, data) = f.job();
+    f.unverified(&job, &hash(n));
+    f.switch(ACCOUNT + 1);
+    f.forget_account(ACCOUNT + 1);
+    f.connect();
+    f.verified_without_rule(&job, &hash(n), &data, "its grant's account");
+    // A deleted account whose write fails.
+    n += 1;
+    let (job, data) = f.job();
+    f.unverified(&job, &hash(n));
+    f.world.hooks.fail("dapp:write");
+    f.forget_account(ACCOUNT);
+    f.world.hooks.fail("");
+    f.connect();
+    f.verified_without_rule(&job, &hash(n), &data, "an unsaved deletion");
 }
 
-/// A revoke or a forgotten account whose phone write fails at any stage,
-/// then a connect made again and a restart: the file may still hold the
-/// waiting rule, but it names the grant that ended, so nothing is written.
+/// Review round 3's three ways for an old decision to write under a revoke,
+/// each writing nothing now: a revoke and a connect made again between the
+/// job and its visible answer, with a grant at the largest safe
+/// `connectedAt` in the file; the exact rule revoked, a failed phone write
+/// and a restart; and a revoke or a deleted account, a failed phone write,
+/// a restart, then a connect at the same millisecond.
 #[test]
-fn an_ended_grant_s_rule_stays_unwritten_whatever_the_file_says() {
+fn an_old_decision_never_writes_under_a_revoke() {
     let root = tempfile::tempdir().unwrap();
+    let dir = root.path().join("userData");
+    std::fs::create_dir_all(&dir).unwrap();
+    let far = 9_007_199_254_740_991_u64;
+    let other = "https://other.example";
+    let grant = json!({ other: {
+        "origin": other, "connectedAt": far, "lastUsed": far,
+        "walletIndex": ACCOUNT, "chainId": 100,
+        "autoApprove": {
+            "signing": false, "transactions": [],
+            "limited": { "signing": { "grantedAt": far }, "transactions": [] },
+        },
+    } });
+    std::fs::write(dir.join("dapp-permissions.json"), grant.to_string()).unwrap();
     let mut f = Flagged::start(root.path());
-    let mut n = 20;
-    for narrowing in ["revoke", "forget_account"] {
-        for stage in ["write", "fsync", "rename", "flush"] {
-            n += 1;
-            let (job, data) = f.job();
-            assert_eq!(
-                outcome(&f.world.result(&job, TARGET, hash(n).into())),
-                "unverified"
-            );
-            f.world.hooks.fail(&format!("phone:{stage}"));
-            let narrowed = match narrowing {
-                "revoke" => f.world.call(
-                    &chrome(),
-                    "approval.revoke",
-                    json!({ "store": "dapp", "key": SITE, "what": "grant" }),
-                ),
-                _ => f.world.call(
-                    &shell(),
-                    "approval.forget_account",
-                    json!({ "wallet_index": ACCOUNT }),
-                ),
-            };
-            assert!(narrowed["result"].is_object(), "{narrowed}");
-            f.world.hooks.fail("");
-            f.connect();
-            f = f.restart();
-            f.world.txs.insert(hash(n), seen("0x5", &data));
-            let checked = f.world.checked(&job);
-            assert_eq!(checked["outcome"], "verified", "{narrowing} {stage}");
-            assert_ne!(
-                checked["rule"]["added"], true,
-                "{narrowing} {stage}: {checked}"
-            );
-            assert!(!f.has_rule(&data), "{narrowing} {stage}");
-        }
+    // A connect writes the wall clock, as main does.
+    assert_eq!(f.connected_at(), json!(WALL));
+    let (job, data) = f.job();
+    f.revoke(&chrome(), json!("grant"));
+    f.connect();
+    assert_eq!(f.connected_at(), json!(WALL));
+    f.world.txs.insert(hash(1), seen("0x5", &data));
+    let answer = f.world.result(&job, TARGET, hash(1).into());
+    assert_eq!(answer["result"]["outcome"], "verified");
+    assert!(answer["result"].get("rule").is_none(), "{answer}");
+    assert!(!f.has_rule(&data));
+    // The exact rule, written; another payment of the same call; a failed
+    // phone write; the rule revoked; a restart.
+    let (first, data) = f.job();
+    f.world.txs.insert(hash(2), seen("0x5", &data));
+    let answer = f.world.result(&first, TARGET, hash(2).into());
+    assert_eq!(answer["result"]["rule"], json!({ "added": true }));
+    let job = f.job_for(&data);
+    f.unverified(&job, &hash(3));
+    f.world.hooks.fail("phone:write");
+    let call = json!({ "to": TO, "selector": &data[..10], "chain_id": 100 });
+    let revoked = f.revoke(&chrome(), json!({ "transaction": call }));
+    assert!(revoked["result"].is_object(), "{revoked}");
+    f.world.hooks.fail("");
+    assert!(!f.has_rule(&data));
+    let mut f = f.restart();
+    f.verified_without_rule(&job, &hash(3), &data, "the exact rule");
+    // A revoke or a deleted account, a failed phone write, a restart before
+    // the connect made again at the same millisecond.
+    for (n, case) in [(4, "revoke"), (5, "forget_account")] {
+        let (job, data) = f.job();
+        f.unverified(&job, &hash(n));
+        f.world.hooks.fail("phone:write");
+        let narrowed = match case {
+            "revoke" => f.revoke(&chrome(), json!("grant")),
+            _ => f.forget_account(ACCOUNT),
+        };
+        assert!(narrowed["result"].is_object(), "{narrowed}");
+        f.world.hooks.fail("");
+        f = f.restart();
+        f.connect();
+        assert_eq!(f.connected_at(), json!(WALL));
+        f.verified_without_rule(&job, &hash(n), &data, case);
     }
 }
 
-/// A failed save of the record, at each stage: `unknown`, no rule, and the
-/// rule written once the transaction shows. A failed drop writes none, and
-/// a restart verifies the payment again and writes it then.
+/// A failed save of the record, at each stage: `unknown`, no rule yet, and
+/// the rule written once the transaction shows in the same run. A failed
+/// drop writes it once: the restart that verifies the payment again writes
+/// none.
 #[test]
 fn a_flagged_send_s_rule_waits_through_a_failed_save() {
     let root = tempfile::tempdir().unwrap();
@@ -1845,24 +1925,20 @@ fn a_flagged_send_s_rule_waits_through_a_failed_save() {
         );
         assert!(f.has_rule(&data), "{stage}");
     }
-    // The drop unsaved: no rule yet, and the record found again.
+    // The drop unsaved: the rule written once, then revoked, and the record
+    // found again after a restart writes it no more.
     let (job, data) = f.job();
-    assert_eq!(
-        outcome(&f.world.result(&job, TARGET, hash(9).into())),
-        "unverified"
-    );
+    f.unverified(&job, &hash(9));
     f.world.hooks.fail("phone:write");
     f.world.txs.insert(hash(9), seen("0x5", &data));
     let checked = f.world.checked(&job);
-    assert_eq!(
-        checked["rule"],
-        json!({ "added": false, "reason": "not_saved" }),
-        "{checked}"
-    );
-    assert!(!f.has_rule(&data));
-    f.world.hooks.fail("");
-    let mut f = f.restart();
-    let checked = f.world.checked(&job);
     assert_eq!(checked["rule"], json!({ "added": true }), "{checked}");
     assert!(f.has_rule(&data));
+    f.world.hooks.fail("");
+    let call = json!({ "to": TO, "selector": &data[..10], "chain_id": 100 });
+    f.revoke(&chrome(), json!({ "transaction": call }));
+    assert!(!f.has_rule(&data));
+    assert!(f.world.recorded().contains(&job));
+    let mut f = f.restart();
+    f.verified_without_rule(&job, &hash(9), &data, "found again");
 }

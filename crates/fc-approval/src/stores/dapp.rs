@@ -205,29 +205,6 @@ impl DappStore {
             .is_some_and(|entry| number_is(entry.get("walletIndex"), f64::from(account)))
     }
 
-    /// The key's `connectedAt`, when the entry holds a whole number of
-    /// milliseconds: which grant it is. A connect makes a new grant; a
-    /// revoke or a forgotten account ends it.
-    pub fn connected_at(&self, key: &str) -> Option<u64> {
-        match self.entries.get(key)?.get("connectedAt") {
-            Some(JsValue::Number(n))
-                if n.fract() == 0.0 && (0.0..=9_007_199_254_740_991.0).contains(n) =>
-            {
-                Some(*n as u64)
-            }
-            _ => None,
-        }
-    }
-
-    /// The latest `connectedAt` of any entry (0 for none).
-    pub fn latest_connected_at(&self) -> u64 {
-        props(&self.entries)
-            .iter()
-            .filter_map(|(key, _)| self.connected_at(key.as_str()))
-            .max()
-            .unwrap_or(0)
-    }
-
     /// A connect (`grantPermission`): the key's entry, new or replaced where
     /// it stands, with no rule.
     pub fn connect(
