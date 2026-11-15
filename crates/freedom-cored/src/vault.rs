@@ -110,6 +110,9 @@ pub enum Out {
     },
     /// A job for the worker, with its ID.
     Job(u64, Job),
+    /// One of the core's own chain reads (design 0012, "Phone jobs"), for
+    /// the chain thread.
+    ChainRead(crate::phone::ChainRead),
 }
 
 /// Why a vault operation failed. Mapped to a code and the method's JS
@@ -580,6 +583,8 @@ pub struct Vault {
     /// `sign.*` checks an authorization against them inline. A lock leaves
     /// them: a token presented while locked is burnt, as today.
     approvals: Approvals,
+    /// Phone jobs and the payments' records (design 0012, PHN-1).
+    phone: crate::phone::Phone,
     queue: VecDeque<Pending>,
     running: Option<Running>,
     next_job: u64,
@@ -796,6 +801,7 @@ impl Vault {
             auto_lock_ms,
             clock: Clock::new(),
             approvals: Approvals::new(),
+            phone: crate::phone::Phone::new(),
             queue: VecDeque::new(),
             running: None,
             next_job: 1,
@@ -840,6 +846,7 @@ impl Vault {
             .map_or(0, |since| {
                 u64::try_from(since.as_millis()).unwrap_or(u64::MAX)
             });
+        let wall_ms = crate::testhooks::wall_clock(wall_ms);
         Clocks {
             vault_ms: self.approval_ms(),
             wall_ms,
@@ -850,6 +857,7 @@ impl Vault {
     /// files"): the moved files are loaded now.
     pub fn configure_grants(&mut self, root: PathBuf, moved: Vec<fc_approval::stores::StoreKind>) {
         let wall_ms = self.clocks().wall_ms;
+        self.phone.configure(root.clone(), wall_ms);
         self.approvals.configure_grants(root, moved, wall_ms);
     }
 
@@ -863,6 +871,18 @@ impl Vault {
     /// The chain thread served `chain.fee_reference`'s reply to `id`.
     pub fn fee_answered(&mut self, id: u64, payload: &[u8]) {
         self.approvals.fee_answered(id, payload);
+    }
+
+    /// The chain thread answered one of the core's own reads: a phone
+    /// payment's (design 0012, "Phone jobs").
+    pub fn chain_read(&mut self, tag: u64, payload: &[u8]) -> Vec<Out> {
+        let clocks = self.clocks();
+        let mut out = self
+            .phone
+            .chain_read(tag, payload, &mut self.approvals, clocks);
+        out.extend(self.approvals.take_events().into_iter().map(Out::Send));
+        out.extend(self.phone.take_events().into_iter().map(Out::Send));
+        out
     }
 
     /// Whether this module handles `method`.
@@ -896,6 +916,7 @@ impl Vault {
                 | "keys.radicle_did"
         ) || crate::signing::METHODS.contains(&method)
             || Approvals::handles(method)
+            || crate::phone::Phone::handles(method)
     }
 
     /// Handles a request. Inline methods reply at once; KDF methods are
@@ -949,6 +970,20 @@ impl Vault {
                 };
                 crate::signing::handle(&self.state, &mut checks, method, raw)
                     .map(|result| json_result(id, &result))
+            }
+            _ if crate::phone::Phone::handles(method) => {
+                let clocks = self.clocks();
+                out.extend(self.phone.request(
+                    id,
+                    method,
+                    raw,
+                    context,
+                    &mut self.approvals,
+                    clocks,
+                ));
+                out.extend(self.approvals.take_events().into_iter().map(Out::Send));
+                out.extend(self.phone.take_events().into_iter().map(Out::Send));
+                return out;
             }
             _ if Approvals::handles(method) => {
                 let clocks = self.clocks();
@@ -1025,6 +1060,10 @@ impl Vault {
                 self.reply_error(&mut out, pending.id, deadline_exceeded());
             }
         }
+        // Phone payments' rechecks, and the events a start left.
+        let clocks = self.clocks();
+        out.extend(self.phone.tick(instant, clocks));
+        out.extend(self.phone.take_events().into_iter().map(Out::Send));
         out
     }
 
@@ -1043,7 +1082,11 @@ impl Vault {
             .map(|r| r.deadline);
         // The queue is in admission order, so its front expires first.
         let queued = self.queue.front().map(|p| p.deadline);
-        [auto_lock, running, queued].into_iter().flatten().min()
+        let phone = self.phone.next_wakeup();
+        [auto_lock, running, queued, phone]
+            .into_iter()
+            .flatten()
+            .min()
     }
 
     /// Locks for shutdown: wipes everything and revokes all work that
@@ -2236,7 +2279,7 @@ fn private_key_result(id: u64, key: &[u8]) -> Result<Option<Zeroizing<Vec<u8>>>,
 /// An error reply. One that wouldn't fit a frame, say a message quoting
 /// input past fc-evm's bounds, would end the core when framed (#86): its code
 /// stays, its message becomes a fixed one, and its data goes.
-fn error_payload(id: u64, error: &ErrorBody) -> Zeroizing<Vec<u8>> {
+pub(crate) fn error_payload(id: u64, error: &ErrorBody) -> Zeroizing<Vec<u8>> {
     let mut payload = Zeroizing::new(Vec::with_capacity(256));
     let written = message::write_error(&mut *payload, id, error);
     if written.is_err() || payload.len() > fc_protocol::frame::MAX_PAYLOAD {
@@ -2247,7 +2290,7 @@ fn error_payload(id: u64, error: &ErrorBody) -> Zeroizing<Vec<u8>> {
     payload
 }
 
-fn event_payload<D: Serialize>(event: &str, data: &D) -> Zeroizing<Vec<u8>> {
+pub(crate) fn event_payload<D: Serialize>(event: &str, data: &D) -> Zeroizing<Vec<u8>> {
     let mut payload = Zeroizing::new(Vec::with_capacity(128));
     let _ = message::write_event(&mut *payload, event, data);
     payload

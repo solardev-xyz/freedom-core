@@ -87,6 +87,18 @@ pub enum In {
     },
     /// The writer has room again, or main a free slot, for what waits here.
     Drained,
+    /// A read the core makes for itself (design 0012, "Phone jobs": a phone
+    /// payment's `eth_getTransactionByHash`): `tag` is the asker's, and the
+    /// reply goes back to the event loop as [`Event::ChainRead`], never to
+    /// main. Main can't cancel it.
+    Internal {
+        tag: u64,
+        chain_id: u64,
+        method: &'static str,
+        /// The JSON-RPC params, as text.
+        params: String,
+        deadline_ms: u64,
+    },
 }
 
 /// Main's terminal reply to one of the chain thread's requests, as the
@@ -172,6 +184,14 @@ pub fn spawn(
                 requests,
                 Box::new(clock),
             );
+            // The core's own reads go back to the event loop.
+            let read_events = events.clone();
+            chain.internal_served = Some(Box::new(move |tag, payload| {
+                let _ = read_events.send(Event::ChainRead {
+                    tag,
+                    payload: payload.into(),
+                });
+            }));
             // Each fee reference served is the approvals' fee evidence.
             let loop_events = events.clone();
             chain.fee_served = Some(Box::new(move |id, payload| {
@@ -321,10 +341,13 @@ fn earliest(a: Option<Ms>, b: Option<Ms>) -> Option<Ms> {
     }
 }
 
-/// A request from main the machine is running.
+/// A request from main the machine is running, or one of the core's own.
 struct Caller {
-    /// Main's request ID.
+    /// Main's request ID, or for one of the core's own reads its tag.
     id: u64,
+    /// One of the core's own reads ([`In::Internal`]): its reply goes to
+    /// the event loop, and main's IDs never name it.
+    internal: bool,
     /// For the outcome's log line: never an origin, address or message.
     chain_id: u64,
     method: &'static str,
@@ -397,6 +420,9 @@ struct Chain {
     /// the reply's payload): the event loop keeps it as the approvals' fee
     /// evidence (design 0012, "The fee check").
     fee_served: Option<FeeServed>,
+    /// Told of each of the core's own reads' replies (its tag, the reply's
+    /// payload).
+    internal_served: Option<FeeServed>,
     /// Runs as each reply is queued: a test's way to act while this thread
     /// serializes one (PR #57 review, round 4).
     #[cfg(test)]
@@ -443,6 +469,7 @@ impl Chain {
             outgoing: BTreeMap::new(),
             by_io: BTreeMap::new(),
             fee_served: None,
+            internal_served: None,
             #[cfg(test)]
             on_reply: None,
             #[cfg(test)]
@@ -553,6 +580,37 @@ impl Chain {
             }
             In::Response { id, reply } => self.response(id, reply),
             In::Drained => self.pump(),
+            In::Internal {
+                tag,
+                chain_id,
+                method,
+                params,
+                deadline_ms,
+            } => {
+                let backlog = self.backlog();
+                self.machine.set_output_backlog(backlog);
+                let bounds = self.machine.bounds();
+                let deadline_ms = deadline_ms.min(bounds.deadline_ms);
+                let deadline = self.machine.now().saturating_add(deadline_ms);
+                let call = Call::Read {
+                    chain_id,
+                    method: method.to_owned(),
+                    params,
+                    options: ReadOptions::default(),
+                };
+                let caller = Caller {
+                    id: tag,
+                    internal: true,
+                    chain_id,
+                    method: label(&call),
+                    deadline,
+                    cutoff: None,
+                };
+                let call = self.machine.submit(call, Some(deadline_ms));
+                self.callers.insert(call, caller);
+                self.poll();
+                Ok(())
+            }
         }
     }
 
@@ -610,6 +668,7 @@ impl Chain {
                     .then(|| deadline.saturating_sub(bounds.reconcile_ms));
                 let caller = Caller {
                     id,
+                    internal: false,
                     chain_id: call_chain(&call),
                     method: label(&call),
                     deadline,
@@ -928,8 +987,17 @@ impl Chain {
             let Some(caller) = self.callers.remove(&done.id) else {
                 continue;
             };
-            self.by_main.remove(&caller.id);
             log_outcome(&caller, &done);
+            if caller.internal {
+                // The core's own read: back to the event loop, whatever it
+                // says; main never sees it.
+                let payload = reply_message(caller.id, &done).write();
+                if let Some(served) = &self.internal_served {
+                    served(caller.id, &payload);
+                }
+                continue;
+            }
+            self.by_main.remove(&caller.id);
             let (generation, outcome) = (done.generation, done.outcome);
             let fee_reference = matches!(done.result, Ok(Success::FeeReference(_)));
             let message = reply_message(caller.id, &done);

@@ -2,7 +2,8 @@
 //! (APR-1); the four grant files and their codecs (APR-2, [`stores`]); the
 //! standing rules that answer from them ([`standing`]); the Safe
 //! approvals a Safe's token gives (APR-3, [`safe`]); and the finalize
-//! receipts a device send's "Always allow" gives (#373, [`receipt`]).
+//! receipts a device send's "Always allow" gives (#373, [`receipt`]); and
+//! phone jobs and their payments' records (PHN-1, [`phone`]).
 //!
 //! A token is the core's record that the user confirmed one request: minted
 //! for exactly that request ([`Tokens::issue`]), and spent once, for that
@@ -49,6 +50,10 @@ pub mod safe;
 // Finalize receipts (#373): what a flagged `dapp-send` spent for a device
 // account gives, so its rule is written only after the device signed.
 pub mod receipt;
+
+// Phone jobs (PHN-1): the job's binding, the answer's checks, and
+// `phone-payments.json`'s records.
+pub mod phone;
 
 pub use bind::{
     Binding, Handle, Limits, MAX_ACCOUNT, MAX_CHAIN_ID, MAX_CLOSE_HASHES, MAX_NONCE, Page, Request,

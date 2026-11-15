@@ -205,6 +205,12 @@ pub const METHODS: &[Method] = &[
     // Design 0012, "A device send's rule" (#373): a page presents its own
     // receipt; no other caller reaches it.
     row("approval.remember", PAGE, false, NOW),
+    // Design 0012, "Phone jobs" (PHN-1): a job from a checked
+    // authorization, as `sign.*` checks it; its answer read on the job's
+    // chain before the reply.
+    row("phone.job", PCS, false, NOW),
+    row("phone.sent", PCS, false, NOW),
+    row("phone.result", PCS, false, SESSION),
     row("dweb.open", SHELL, false, SESSION),
     // Design 0009: verified fetches, whose bodies stream; protocol 2 only.
     row_v2("dweb.verify", SHELL, false, HEAD),
@@ -350,6 +356,9 @@ mod tests {
                 "approval.touch",
                 "approval.radicle_write",
                 "approval.remember",
+                "phone.job",
+                "phone.sent",
+                "phone.result",
             ]
         );
         // Design 0012, API: who reaches each grant method.
