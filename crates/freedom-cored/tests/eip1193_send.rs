@@ -396,3 +396,207 @@ fn every_prompted_send_replays_through_the_core() {
     }
     assert_eq!((requests, prompts, sent), (27, 16, 8));
 }
+
+fn connected() -> Value {
+    json!({ SITE: {
+        "origin": SITE, "connectedAt": NOW, "lastUsed": NOW, "walletIndex": 0, "chainId": 1,
+        "autoApprove": { "signing": false, "transactions": [] },
+    } })
+}
+
+fn world() -> Value {
+    json!({
+        "enabled": true, "chain": null, "window_chain": 1,
+        "wallets": [{ "index": 0, "name": "Main Wallet", "address": "0x9858EfFD232B4033E47d90003D41EC34EcaEda94", "type": "mnemonic" }],
+        "networks": { "1": { "name": "Ethereum", "available": true, "symbol": "ETH" } },
+    })
+}
+
+const TO: &str = "0xabababababababababababababababababababab";
+const APPROVE_DATA: &str = "0x095ea7b3000000000000000000000000555555555555555555555555555555555555555500000000000000000000000000000000000000000000000000000000000003e8";
+
+fn estimate() -> Value {
+    json!({ "args": { "params": [{
+        "from": "0x9858EfFD232B4033E47d90003D41EC34EcaEda94", "to": TO, "value": "5", "data": APPROVE_DATA,
+    }] }, "answer": { "result": "0xc350" } })
+}
+
+fn send_body() -> Value {
+    json!({ "method": "eth_sendTransaction", "world": world(),
+        "params": [{ "to": TO, "value": "0x5", "data": APPROVE_DATA }] })
+}
+
+/// A send asked and approved with `choices`: its prompt, and what main
+/// gets after the answer (another prompt, or the response).
+fn approve(core: &mut Core, id: u64, node: &mut Node, choices: Value) -> (Value, Next) {
+    request(core, id, Some(SITE), &send_body());
+    let Next::Prompt(asked) = next(core, id, node) else {
+        panic!("no prompt")
+    };
+    let handle = format!("{:064x}", 1000 + asked["id"].as_u64().unwrap());
+    let answer = json!({ "prompt": asked["params"]["prompt"], "handle": handle,
+        "approve": true, "choices": choices, "world": world() });
+    respond(core, &asked, json!({ "result": answer }));
+    let after = next(core, id, node);
+    (asked, after)
+}
+
+/// The row's test hook (design 0012, APR-5): main changes one field of
+/// `{ send }` before `sign.transaction`, which refuses it with nothing
+/// signed; with only the nonce added, it signs.
+#[test]
+fn each_prepared_field_changed_signs_nothing() {
+    let (_root, mut core, _clock) = core(&connected());
+    let mut node = Node::new(estimate());
+    let edits: Vec<(&str, Box<dyn Fn(&mut Value)>)> = vec![
+        (
+            "type",
+            Box::new(|tx| {
+                let fee = tx
+                    .as_object_mut()
+                    .unwrap()
+                    .remove("max_fee_per_gas")
+                    .unwrap();
+                tx.as_object_mut()
+                    .unwrap()
+                    .remove("max_priority_fee_per_gas");
+                tx["type"] = json!(0);
+                tx["gas_price"] = fee;
+            }),
+        ),
+        ("chain", Box::new(|tx| tx["chain_id"] = json!("100"))),
+        (
+            "to",
+            Box::new(|tx| tx["to"] = json!("0x5555555555555555555555555555555555555555")),
+        ),
+        ("value", Box::new(|tx| tx["value"] = json!("6"))),
+        ("data", Box::new(|tx| tx["data"] = json!("0x095ea7b4"))),
+        ("gas limit", Box::new(|tx| tx["gas_limit"] = json!("60001"))),
+        (
+            "max fee",
+            Box::new(|tx| tx["max_fee_per_gas"] = json!("30000000001")),
+        ),
+        (
+            "priority fee",
+            Box::new(|tx| tx["max_priority_fee_per_gas"] = json!("2000000001")),
+        ),
+    ];
+    let mut id = 100;
+    for (field, edit) in &edits {
+        id += 10;
+        let (_, after) = approve(&mut core, id, &mut node, json!({}));
+        let Next::Done(response) = after else {
+            panic!("{field}")
+        };
+        let send = &response["result"]["send"];
+        assert_eq!(send["tx"]["gas_limit"], "60000", "the estimate plus 20%");
+        assert_eq!(
+            send["tx"]["max_fee_per_gas"], "30000000000",
+            "the core's quote"
+        );
+        assert!(send["tx"].get("nonce").is_none());
+        let refused = sign(&mut core, id + 1, send, |tx| edit(tx));
+        assert_eq!(
+            refused["error"]["code"], "not_authorized",
+            "{field}: {refused}"
+        );
+        assert_eq!(refused["error"]["data"]["reason"], "mismatch", "{field}");
+        // The token was burnt by its presentation: nothing signs with it.
+        let again = sign(&mut core, id + 2, send, |_| {});
+        assert!(again.get("error").is_some(), "{field}: {again}");
+    }
+    let (_, after) = approve(&mut core, id + 10, &mut node, json!({}));
+    let Next::Done(response) = after else {
+        panic!()
+    };
+    let signed = sign(&mut core, id + 11, &response["result"]["send"], |_| {});
+    assert!(signed["result"]["raw"].is_string(), "{signed}");
+}
+
+/// A crossed answer (another prompt's id, a pick not offered, a choice
+/// that isn't a boolean) fails the request with no token minted.
+#[test]
+fn a_crossed_answer_mints_nothing() {
+    let (_root, mut core, _clock) = core(&connected());
+    let mut node = Node::new(estimate());
+    for (i, choices) in [
+        json!({ "alwaysAllow": "yes" }),
+        json!({ "other": true }),
+        json!([]),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let id = 100 + i as u64 * 10;
+        let (_, after) = approve(&mut core, id, &mut node, choices);
+        let Next::Done(response) = after else {
+            panic!()
+        };
+        assert_eq!(
+            response["error"]["data"]["reason"], "mismatch",
+            "{response}"
+        );
+    }
+    request(&mut core, 200, Some(SITE), &send_body());
+    let Next::Prompt(asked) = next(&mut core, 200, &mut node) else {
+        panic!()
+    };
+    let answer = json!({ "prompt": "00".repeat(16), "handle": "11".repeat(32),
+        "approve": true, "choices": {}, "world": world() });
+    respond(&mut core, &asked, json!({ "result": answer }));
+    let Next::Done(response) = next(&mut core, 200, &mut node) else {
+        panic!()
+    };
+    assert_eq!(
+        response["error"]["data"]["reason"], "mismatch",
+        "{response}"
+    );
+    assert_eq!(grant_file(&core), connected());
+}
+
+/// Fee evidence older than 60 s on the approvals' clock is asked for again
+/// at the approval, as the reference's `evidenceFor` asks: a fee now above
+/// three times it is asked again, and confirmed, minted.
+#[test]
+fn stale_evidence_is_asked_for_again_at_approval() {
+    let (_root, mut core, clock) = core(&connected());
+    let mut node = Node::new(estimate());
+    request(&mut core, 100, Some(SITE), &send_body());
+    let Next::Prompt(asked) = next(&mut core, 100, &mut node) else {
+        panic!()
+    };
+    assert_eq!(asked["params"]["view"]["feeCheck"]["above"], false);
+    std::fs::write(&clock, (1_000_000 + 60_001).to_string()).unwrap();
+    node.gas_price = 2 * GWEI;
+    node.priority = Some(GWEI);
+    let seen = node.seen.len();
+    let answer = json!({ "prompt": asked["params"]["prompt"], "handle": "22".repeat(32),
+        "approve": true, "choices": {}, "world": world() });
+    respond(&mut core, &asked, json!({ "result": answer }));
+    let Next::Prompt(again) = next(&mut core, 100, &mut node) else {
+        panic!("not asked again")
+    };
+    assert!(
+        node.seen[seen..].iter().any(|m| m == "eth_gasPrice"),
+        "new evidence"
+    );
+    let view = &again["params"]["view"];
+    assert_eq!(
+        (
+            view["feeAskAgain"].clone(),
+            view["feeCheck"]["askAgain"].clone()
+        ),
+        (json!(true), json!(true))
+    );
+    assert_eq!(view["feeCheck"]["ratio"], "10");
+    let answer = json!({ "prompt": again["params"]["prompt"], "handle": "33".repeat(32),
+        "approve": true, "choices": { "feeAcknowledged": true }, "world": world() });
+    respond(&mut core, &again, json!({ "result": answer }));
+    let Next::Done(response) = next(&mut core, 100, &mut node) else {
+        panic!()
+    };
+    assert!(
+        response["result"]["send"]["token"].is_string(),
+        "{response}"
+    );
+}
