@@ -642,6 +642,8 @@ fn only_protocol_2_is_spoken() {
         "approval.grants",
         "approval.forget_account",
         "approval.remember",
+        "x402.authorize",
+        "x402.settle",
         "dweb.open",
         "dweb.verify",
         "dweb.forget",
