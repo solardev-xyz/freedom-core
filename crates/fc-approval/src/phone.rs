@@ -246,13 +246,40 @@ pub struct Record {
     pub kind: String,
     pub site: Option<String>,
     /// A flagged `dapp-send`'s "Always allow", waiting for the payment to
-    /// be verified: the rule's selector. Its key, account, `to`, chain and
-    /// value are the record's `site`, `account`, `to`, `chain_id` and
-    /// `value`. It is written once, when the transaction shows and matches,
-    /// and never on a mismatch, an `unknown` end or a lost file.
-    pub rule: Option<[u8; 4]>,
+    /// be verified. Its key, account, `to`, chain and value are the
+    /// record's `site`, `account`, `to`, `chain_id` and `value`. It is
+    /// written once, when the transaction shows and matches, and only
+    /// under the grant it was confirmed under; never on a mismatch, an
+    /// `unknown` end or a lost file.
+    pub rule: Option<WaitingRule>,
     /// The wall clock at the answer, in milliseconds.
     pub answered_at: u64,
+}
+
+/// A waiting rule: the call's selector, and the grant it was confirmed
+/// under, by the dApp grant's `connectedAt`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WaitingRule {
+    #[serde(with = "selector_hex")]
+    pub selector: [u8; 4],
+    pub granted_at: u64,
+}
+
+mod selector_hex {
+    use serde::{Deserialize, Deserializer, Serializer, de::Error};
+
+    pub fn serialize<S: Serializer>(selector: &[u8; 4], s: S) -> Result<S::Ok, S::Error> {
+        s.serialize_str(&fc_evm::to_hex(selector))
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<[u8; 4], D::Error> {
+        let text = String::deserialize(d)?;
+        text.strip_prefix("0x")
+            .and_then(|digits| super::lower_hex(digits, 4))
+            .and_then(|bytes| bytes.try_into().ok())
+            .ok_or_else(|| D::Error::custom("selector: expected 4 bytes of lowercase hex"))
+    }
 }
 
 /// A payment's bound fields, in the record's form: addresses as lowercase
@@ -917,7 +944,7 @@ struct RecordOut<'a> {
     data_sha256: &'a str,
     kind: &'a str,
     site: Option<&'a str>,
-    rule: Option<String>,
+    rule: Option<WaitingRule>,
     answered_at: u64,
 }
 
@@ -935,7 +962,7 @@ impl<'a> RecordOut<'a> {
             data_sha256: &record.fields.data_sha256,
             kind: &record.kind,
             site: record.site.as_deref(),
-            rule: record.rule.map(|selector| to_hex(&selector)),
+            rule: record.rule,
             answered_at: record.answered_at,
         }
     }
@@ -978,7 +1005,9 @@ struct RecordIn {
     data_sha256: String,
     kind: String,
     site: Value,
-    rule: Value,
+    // Required, `null` or the rule: never missing.
+    #[serde(deserialize_with = "Option::deserialize")]
+    rule: Option<WaitingRule>,
     answered_at: u64,
 }
 
@@ -1054,16 +1083,7 @@ fn read_record(text: &str) -> Option<Record> {
         Value::String(site) => Some(site),
         _ => return None,
     };
-    let rule = match record.rule {
-        Value::Null => None,
-        Value::String(text) => {
-            let bytes = lower_hex(text.strip_prefix("0x")?, 4)?;
-            let mut selector = [0u8; 4];
-            selector.copy_from_slice(&bytes);
-            Some(selector)
-        }
-        _ => return None,
-    };
+    let rule = record.rule;
     // Only a flagged page send waits to write a rule.
     if rule.is_some() && (kind != "dapp-send" || site.is_none()) {
         return None;
@@ -1203,7 +1223,10 @@ mod tests {
     #[test]
     fn the_file_is_read_as_written() {
         let one = Record {
-            rule: Some([0x09, 0x5e, 0xa7, 0xb3]),
+            rule: Some(WaitingRule {
+                selector: [0x09, 0x5e, 0xa7, 0xb3],
+                granted_at: 1_699_000_000_000,
+            }),
             ..record(1, Some("https://app.example"))
         };
         let two = Record {
@@ -1217,7 +1240,7 @@ mod tests {
                 r#"{{"version":1,"payments":[{{"job":"{j1}","hash":"0x{h1}","account":3,"#,
                 r#""from":"0x{a}","chain_id":"100","to":"0x{t}","value":"5","data_length":3,"#,
                 r#""data_sha256":"{s}","kind":"dapp-send","site":"https://app.example","#,
-                r#""rule":"0x095ea7b3","answered_at":1700000000000}},{{"job":"{j2}","hash":"0x{h2}","account":3,"#,
+                r#""rule":{{"selector":"0x095ea7b3","granted_at":1699000000000}},"answered_at":1700000000000}},{{"job":"{j2}","hash":"0x{h2}","account":3,"#,
                 r#""from":"0x{a}","chain_id":"100","to":"0x{t}","value":"5","data_length":3,"#,
                 r#""data_sha256":"{s}","kind":"standing","site":null,"rule":null,"#,
                 r#""answered_at":1700000000000}}]}}"#
@@ -1241,14 +1264,19 @@ mod tests {
     fn a_narrowing_forgets_its_site_s_rules() {
         let mut jobs: PhoneJobs<u32> = PhoneJobs::new();
         let ruled = |job: u8, site: &str| Record {
-            rule: Some([job; 4]),
+            rule: Some(WaitingRule {
+                selector: [job; 4],
+                granted_at: 1,
+            }),
             ..record(job, Some(site))
         };
         jobs.load(vec![ruled(1, "a"), ruled(2, "b"), record(3, Some("a"))]);
         assert!(!jobs.forget_rules("c"));
         assert!(jobs.forget_rules("a"));
         let rules: Vec<_> = jobs.records().iter().map(|r| r.rule).collect();
-        assert_eq!(rules, vec![None, Some([2; 4]), None]);
+        assert_eq!(rules[0], None);
+        assert_eq!(rules[1].map(|rule| rule.selector), Some([2; 4]));
+        assert_eq!(rules[2], None);
         assert!(!jobs.forget_rules("a"));
     }
 
@@ -1269,9 +1297,35 @@ mod tests {
             (r#""rule":null,"#, String::new()),
             (r#""rule":null"#, r#""rule":null,"rule":null"#.into()),
             (r#""rule":null"#, r#""rule":1"#.into()),
-            (r#""rule":null"#, r#""rule":"0x095EA7B3""#.into()),
-            (r#""rule":null"#, r#""rule":"0x095ea7""#.into()),
-            (r#""rule":null"#, r#""rule":"095ea7b3""#.into()),
+            (r#""rule":null"#, r#""rule":"0x095ea7b3""#.into()),
+            (
+                r#""rule":null"#,
+                r#""rule":{"selector":"0x095EA7B3","granted_at":1}"#.into(),
+            ),
+            (
+                r#""rule":null"#,
+                r#""rule":{"selector":"0x095ea7","granted_at":1}"#.into(),
+            ),
+            (
+                r#""rule":null"#,
+                r#""rule":{"selector":"095ea7b3","granted_at":1}"#.into(),
+            ),
+            (
+                r#""rule":null"#,
+                r#""rule":{"selector":"0x095ea7b3"}"#.into(),
+            ),
+            (
+                r#""rule":null"#,
+                r#""rule":{"selector":"0x095ea7b3","granted_at":-1}"#.into(),
+            ),
+            (
+                r#""rule":null"#,
+                r#""rule":{"selector":"0x095ea7b3","granted_at":1,"granted_at":1}"#.into(),
+            ),
+            (
+                r#""rule":null"#,
+                r#""rule":{"selector":"0x095ea7b3","granted_at":1,"x":1}"#.into(),
+            ),
             (r#""kind":"dapp-send""#, r#""kind":"sign-message""#.into()),
             (r#""value":"5""#, r#""value":"05""#.into()),
             (r#""value":"5""#, r#""value":"0x5""#.into()),
@@ -1298,10 +1352,17 @@ mod tests {
             assert!(read_file(bad.as_bytes()).is_err(), "{bad}");
         }
         // A waiting rule reads only on a page's `dapp-send`.
-        let ruled = good.replacen(r#""rule":null"#, r#""rule":"0x095ea7b3""#, 1);
+        let ruled = good.replacen(
+            r#""rule":null"#,
+            r#""rule":{"selector":"0x095ea7b3","granted_at":7}"#,
+            1,
+        );
         assert_eq!(
             read_file(ruled.as_bytes()).unwrap()[0].rule,
-            Some([0x09, 0x5e, 0xa7, 0xb3])
+            Some(WaitingRule {
+                selector: [0x09, 0x5e, 0xa7, 0xb3],
+                granted_at: 7
+            })
         );
         for (from, to) in [
             (r#""kind":"dapp-send""#, r#""kind":"standing""#),
@@ -1406,7 +1467,10 @@ mod tests {
             },
             kind: "dapp-send".into(),
             site: Some("\u{1}".repeat(MAX_SITE_BYTES / 6) + &"x".repeat(MAX_SITE_BYTES % 6)),
-            rule: Some([0xff; 4]),
+            rule: Some(WaitingRule {
+                selector: [0xff; 4],
+                granted_at: u64::MAX,
+            }),
             answered_at: u64::MAX,
         };
         assert_eq!(

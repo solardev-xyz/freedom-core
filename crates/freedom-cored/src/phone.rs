@@ -752,7 +752,15 @@ impl Phone {
         // A flagged send's rule waits for its transaction: a hash alone is
         // the chrome's word, and no evidence that the phone sent anything.
         let (after, rule) = match taken.extra {
-            After::Remember(remember) => (After::Nothing, remember.selector()),
+            After::Remember(remember) => (
+                After::Nothing,
+                remember
+                    .waiting()
+                    .map(|(selector, granted_at)| phone::WaitingRule {
+                        selector,
+                        granted_at,
+                    }),
+            ),
             after => (after, None),
         };
         let record = Record {
@@ -788,8 +796,14 @@ impl Phone {
     /// A narrowing of `key`'s dApp grant: its records' waiting rules go,
     /// and the file is written without them.
     pub fn forget_rules(&mut self, key: &str) {
-        if self.jobs.forget_rules(key) {
-            self.save();
+        // A revoke or a forgotten account ends the grant a waiting rule
+        // names, and the dApp file keeps that whatever this write does: a
+        // rule is written only under the grant it was confirmed under.
+        if self.jobs.forget_rules(key) && self.save() == Saved::NotDurable {
+            crate::log::warn(
+                "a narrowed grant's waiting phone rules aren't saved",
+                json!({}),
+            );
         }
     }
 
@@ -938,15 +952,20 @@ fn failed(id: u64, mapped: &Mapped) -> Result<Zeroizing<Vec<u8>>, ErrorBody> {
 /// A verified record's waiting rule: the flagged send's call, for its page
 /// and account, as the receipt binds it (#373).
 fn waiting_rule(record: &Record) -> Option<crate::approvals::Remember> {
-    let selector = record.rule?;
+    let waiting = record.rule?;
     let key = record.site.clone()?;
     let rule = fc_approval::receipt::ProposedRule {
         to: fc_evm::parse_address(&record.fields.to).ok(),
-        selector: Some(selector),
+        selector: Some(waiting.selector),
         chain_id: record.fields.chain_id.parse().ok(),
         value: fc_evm::U256::parse_decimal(&record.fields.value)?,
     };
-    Some(crate::approvals::Remember::new(key, record.account, rule))
+    Some(crate::approvals::Remember::new(
+        key,
+        record.account,
+        rule,
+        waiting.granted_at,
+    ))
 }
 
 fn read(tag: u64, chain_id: u64, hash: &[u8; 32]) -> Out {

@@ -1734,6 +1734,51 @@ fn a_flagged_send_s_rule_waits_for_its_transaction() {
     assert!(!f.has_rule(&aged_data));
 }
 
+/// A revoke or a forgotten account whose phone write fails at any stage,
+/// then a connect made again and a restart: the file may still hold the
+/// waiting rule, but it names the grant that ended, so nothing is written.
+#[test]
+fn an_ended_grant_s_rule_stays_unwritten_whatever_the_file_says() {
+    let root = tempfile::tempdir().unwrap();
+    let mut f = Flagged::start(root.path());
+    let mut n = 20;
+    for narrowing in ["revoke", "forget_account"] {
+        for stage in ["write", "fsync", "rename", "flush"] {
+            n += 1;
+            let (job, data) = f.job();
+            assert_eq!(
+                outcome(&f.world.result(&job, TARGET, hash(n).into())),
+                "unverified"
+            );
+            f.world.hooks.fail(&format!("phone:{stage}"));
+            let narrowed = match narrowing {
+                "revoke" => f.world.call(
+                    &chrome(),
+                    "approval.revoke",
+                    json!({ "store": "dapp", "key": SITE, "what": "grant" }),
+                ),
+                _ => f.world.call(
+                    &shell(),
+                    "approval.forget_account",
+                    json!({ "wallet_index": ACCOUNT }),
+                ),
+            };
+            assert!(narrowed["result"].is_object(), "{narrowed}");
+            f.world.hooks.fail("");
+            f.connect();
+            f = f.restart();
+            f.world.txs.insert(hash(n), seen("0x5", &data));
+            let checked = f.world.checked(&job);
+            assert_eq!(checked["outcome"], "verified", "{narrowing} {stage}");
+            assert_ne!(
+                checked["rule"]["added"], true,
+                "{narrowing} {stage}: {checked}"
+            );
+            assert!(!f.has_rule(&data), "{narrowing} {stage}");
+        }
+    }
+}
+
 /// A failed save of the record, at each stage: `unknown`, no rule, and the
 /// rule written once the transaction shows. A failed drop writes none, and
 /// a restart verifies the payment again and writes it then.
