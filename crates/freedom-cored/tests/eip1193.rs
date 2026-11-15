@@ -408,3 +408,64 @@ fn accounts_read_the_pages_own_grant() {
         );
     }
 }
+
+/// A read carries the page's key as its routing hint (`origin`; design
+/// 0005, Deadlines and Adaptive bypass), as main's `chain.request` does: a
+/// keyed read is interactive, so a source with another after it has 2 s,
+/// and a route a source refused for capacity is closed to that key alone.
+/// A keyless read has none: each source has the chain's whole timeout.
+#[test]
+fn a_read_carries_the_page_s_key_as_its_routing_hint() {
+    let (_root, mut core) = core(&Value::Null);
+    // Chain 1 read by a one-member quorum with 20 s, then Colibri, which
+    // has no prover here and fails at once.
+    let chain = json!({
+        "chain_id": 1, "display_name": "Ethereum",
+        "read_order": ["quorum", "colibri"], "broadcast_order": ["direct"],
+        "quorum": { "k": 1, "m": 1, "timeout_ms": 20000 },
+        "rpc": [{ "endpoint": "e1", "user_configured": false }],
+        "prover": null, "myotis": false, "blockscout": null,
+    });
+    let reply = core.call(3, "chain.configure", json!({ "chains": [chain] }));
+    assert!(reply["result"]["generations"].is_object(), "{reply}");
+    let params = json!({ "method": "eth_blockNumber", "params": [], "world": read_world() });
+    let block = rpc(r#"{"jsonrpc":"2.0","id":1,"result":"0x10"}"#);
+    let busy = rpc(
+        r#"{"jsonrpc":"2.0","id":1,"error":{"code":-32000,"message":"execution gas limit reached"}}"#,
+    );
+    // The quorum member's exchange, with its deadline at main, answered.
+    let read = |core: &mut Core, id: u64, key: Option<&str>, deadline_ms: u64, outcome: &Value| {
+        send(core, id, &page(key), params.clone());
+        let asked = core.recv();
+        assert_eq!(asked["method"], "shell.rpc", "{id}: {asked}");
+        assert_eq!(body(&asked)["method"], "eth_blockNumber", "{id}");
+        // What is left of it: a few ms may have passed.
+        let left = asked["params"]["deadline_ms"].as_u64().unwrap();
+        assert!(
+            left <= deadline_ms && left + 1000 > deadline_ms,
+            "{id}: {asked}"
+        );
+        answer_rpc(core, &asked, outcome.clone());
+        let (reply, seen) = until(core, id, |_| None);
+        assert!(seen.is_empty(), "{id}: {seen:?}");
+        reply["result"].clone()
+    };
+
+    // A keyless document's read isn't interactive, and closes no route.
+    let result = read(&mut core, 60, None, 20000, &busy);
+    assert_eq!(result["error"]["code"], -32603, "{result}");
+    let result = read(&mut core, 61, None, 20000, &block);
+    assert_eq!(result, json!({ "result": "0x10" }));
+    // The page's is: its quorum member has 2 s, and a capacity refusal
+    // closes the route to the page.
+    let result = read(&mut core, 62, Some(SITE), 2000, &busy);
+    assert_eq!(result["error"]["code"], -32603, "{result}");
+    // Its next read skips the quorum: main is asked nothing.
+    send(&mut core, 63, &page(Some(SITE)), params.clone());
+    let (reply, seen) = until(&mut core, 63, |_| None);
+    assert!(seen.is_empty(), "{seen:?}");
+    assert_eq!(reply["result"]["error"]["code"], -32603, "{reply}");
+    // Another key's route is its own.
+    let result = read(&mut core, 64, Some("https://other.example"), 2000, &block);
+    assert_eq!(result, json!({ "result": "0x10" }));
+}

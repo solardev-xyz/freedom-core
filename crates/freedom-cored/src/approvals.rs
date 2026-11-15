@@ -333,9 +333,15 @@ fn string<'a>(object: &'a Map<String, Value>, field: &str) -> Result<&'a str, Er
 }
 
 /// The `PageContext` a `page` caller must send (0011): every page request
-/// here needs it.
+/// here needs it, with an origin. An empty one is a document with no key
+/// (design 0012, APR-5b), which `eip1193.request` alone takes: here it
+/// would be one key that every keyless document shares, for its grants,
+/// its standing rules and its tokens, so it is refused.
 pub fn page_context(context: &Context) -> Result<Option<&PageContext>, ErrorBody> {
     match (context.caller, &context.page) {
+        (CallerKind::Page, Some(page)) if page.origin.is_empty() => {
+            Err(invalid("a page request needs its page's origin"))
+        }
         (CallerKind::Page, Some(page)) => Ok(Some(page)),
         (CallerKind::Page, None) => Err(invalid("a page request needs its page context")),
         _ => Ok(None),

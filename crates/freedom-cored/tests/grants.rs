@@ -1512,3 +1512,93 @@ fn a_page_s_soc_reads_the_moved_swarm_store() {
         );
     }
 }
+
+/// A document with no key sends an empty `PageContext.origin` (design
+/// 0012, APR-5b). `eip1193.request` takes it; every other page method
+/// refuses it before a grant, a standing rule or a token is read, so no
+/// keyless document writes or uses a key that every other one shares.
+#[test]
+fn an_empty_origin_reaches_no_grant_rule_or_token() {
+    let root = tempfile::tempdir().unwrap();
+    let mut core = start(root.path(), &["dapp", "swarm", "radicle"], true, &[]);
+    let dir = core.grant_root.clone();
+    let mut id = 10;
+    let connect = json!({ "op": "connect", "account": 0, "chain_id": 1 });
+    // With its key, the same connect is written.
+    result(&grant(&mut core, &mut id, &site(), "dapp", connect.clone()));
+    assert_eq!(changed(&mut core, &mut id).len(), 1);
+    let before = snapshot(&dir);
+    let keyless = page_as("", false);
+    let message = json!({ "kind": "message", "account": 0, "account_kind": "vault",
+        "message": "0x68656c6c6f" });
+    let standing = json!({ "standing": {} });
+    for (method, params) in [
+        (
+            "approval.grant",
+            json!({ "store": "dapp", "change": connect }),
+        ),
+        (
+            "approval.grant",
+            json!({ "store": "dapp", "change": { "op": "signing" } }),
+        ),
+        (
+            "approval.grant",
+            json!({ "store": "swarm", "change": { "op": "connect" } }),
+        ),
+        (
+            "approval.grant",
+            json!({ "store": "radicle", "change": { "op": "connect" } }),
+        ),
+        ("approval.touch", json!({ "store": "dapp" })),
+        (
+            "approval.revoke",
+            json!({ "store": "dapp", "key": "", "what": "grant" }),
+        ),
+        ("approval.check", json!({ "request": message })),
+        ("approval.radicle_write", json!({ "key": "" })),
+        (
+            "approval.issue",
+            json!({ "kind": "sign-message", "account": 0,
+                "payload": { "message": "0x68656c6c6f" }, "handle": HANDLE }),
+        ),
+        (
+            "approval.spend",
+            json!({ "token": "t", "kind": "sign-message", "account": 0,
+                "payload": { "message": "0x68656c6c6f" }, "handle": HANDLE }),
+        ),
+        (
+            "approval.spend",
+            json!({ "standing": {}, "kind": "safe-message", "account": 0, "payload": {} }),
+        ),
+        ("approval.discard", json!({ "token": "t" })),
+        ("approval.end", json!({ "safe": "s" })),
+        ("approval.remember", json!({ "receipt": "r" })),
+        (
+            "sign.message",
+            json!({ "key": account(0), "message": "0x68656c6c6f", "authorization": standing }),
+        ),
+        (
+            "swarm.sign_soc",
+            json!({ "key": { "kind": "publisher", "origin_index": 3 },
+                "identifier": format!("0x{}", "ab".repeat(32)), "payload": "0x68656c6c6f",
+                "authorization": { "swarm": "auto", "soc": "raw" } }),
+        ),
+    ] {
+        let reply = call_as(&mut core, &mut id, &keyless, method, params);
+        refused(&reply, "invalid_argument");
+        assert_eq!(
+            reply["error"]["message"], "a page request needs its page's origin",
+            "{method}: {reply}"
+        );
+    }
+    assert_eq!(snapshot(&dir), before);
+    assert!(changed(&mut core, &mut id).is_empty());
+    // The page with its key is still answered from its grant.
+    result(&call_as(
+        &mut core,
+        &mut id,
+        &site(),
+        "approval.touch",
+        json!({ "store": "dapp" }),
+    ));
+}
