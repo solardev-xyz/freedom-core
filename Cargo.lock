@@ -490,6 +490,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "fc-eip1193"
+version = "0.17.0"
+dependencies = [
+ "serde_json",
+]
+
+[[package]]
 name = "fc-evm"
 version = "0.17.0"
 dependencies = [
