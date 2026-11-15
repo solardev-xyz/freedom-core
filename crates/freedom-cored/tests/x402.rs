@@ -513,8 +513,21 @@ fn a_cap_is_charged_as_it_signs() {
         Some("cap"),
     );
     let _ = changed(&mut core, &mut id);
-    // Agent custody, and a request main can't attribute: nothing charged.
+    // Under a cap the core picks the entry, and no grant comes with it.
     let before = file(&core);
+    for (field, value) in [
+        ("accept_index", json!(0)),
+        ("grant", json!({ "cap_amount": "1", "window_seconds": 60 })),
+    ] {
+        let mut params = cap_params(&one, &reqs, false, true);
+        params[field] = value;
+        refused(
+            &call(&mut core, &mut id, "x402.authorize", params),
+            "invalid_argument",
+            None,
+        );
+    }
+    // Agent custody, and a request main can't attribute: nothing charged.
     for (agent, attributable, reason) in [(true, true, "custody"), (false, false, "no_rule")] {
         let reply = call(
             &mut core,
