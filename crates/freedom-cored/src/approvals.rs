@@ -1479,6 +1479,19 @@ fn store_kind(object: &Map<String, Value>) -> Result<StoreKind, ErrorBody> {
         .ok_or_else(|| invalid("store: expected dapp, swarm, radicle or x402"))
 }
 
+/// A cap's key in its origin's object from `{ chain_id, asset }`, the asset
+/// in any case (`x402-asset-case`): `approval.revoke`'s and `x402.update`'s.
+fn cap_asset_key(value: &Value) -> Result<String, ErrorBody> {
+    let cap = object(value, &["chain_id", "asset"], &[])?;
+    let chain = cap["chain_id"]
+        .as_u64()
+        .ok_or_else(|| invalid("chain_id: expected a number"))?;
+    Ok(fc_approval::x402::asset_key(
+        chain as f64,
+        string(cap, "asset")?,
+    ))
+}
+
 /// `not_moved`, with `data.store` (design 0012, API).
 fn not_moved(kind: StoreKind) -> ErrorBody {
     ErrorBody::new(
@@ -2108,11 +2121,7 @@ impl Approvals {
             )?,
             (StoreKind::X402, None) if what.get("cap").is_some() => {
                 object(what, &["cap"], &[])?;
-                let cap = object(&what["cap"], &["chain_id", "asset"], &[])?;
-                let chain = cap["chain_id"]
-                    .as_u64()
-                    .ok_or_else(|| invalid("chain_id: expected a number"))?;
-                let asset_key = fc_approval::x402::asset_key(chain as f64, string(cap, "asset")?);
+                let asset_key = cap_asset_key(&what["cap"])?;
                 self.write_then::<CapStore, _>(
                     &key,
                     |store| store.revoke(&key, &asset_key),

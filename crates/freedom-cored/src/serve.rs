@@ -228,9 +228,10 @@ const CAPABILITIES: &[&str] = &[
     "phone.job",
     "phone.sent",
     "phone.result",
-    // Design 0012: x402's payments (X402-1).
+    // Design 0012: x402's payments (X402-1), and a cap's narrowing (#392).
     "x402.authorize",
     "x402.settle",
+    "x402.update",
     // Design 0012: a page's EIP-1193 request, run by the core (APR-5).
     "eip1193.request",
     "dweb.open",

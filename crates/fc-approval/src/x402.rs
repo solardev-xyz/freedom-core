@@ -20,6 +20,12 @@
 //! `name`, a fractional `maxTimeoutSeconds`), the core refuses instead
 //! (*inferred*, design 0012's X402-1 notes).
 //!
+//! For a Ledger or phone account (core #392) the core holds no key: a
+//! [`Built`] gives the typed data the client hands its signer
+//! ([`Built::typed_data`]), and the payload around the text the device
+//! returns ([`Built::payload_with`]), once
+//! [`crate::phone::check_signature`] has recovered the account from it.
+//!
 //! The crate does no I/O: the wall clock comes in as `now_s`, the nonce as
 //! bytes the caller drew, and the signature from the caller's key.
 
@@ -163,6 +169,15 @@ pub fn atomic(text: &str) -> Option<U256> {
         return None;
     }
     U256::parse_decimal(text)
+}
+
+/// A cap amount as the core takes one on the wire (core #392's narrowing):
+/// decimal digits with no leading zero (`0` itself aside), within 256 bits.
+pub fn canonical_amount(text: &str) -> Option<U256> {
+    if text.len() > 1 && text.starts_with('0') {
+        return None;
+    }
+    atomic(text)
 }
 
 /// The requirements as main holds them: `@x402/core`'s schema's output
@@ -586,8 +601,22 @@ impl<'a> Payment<'a> {
         };
         let digest = fc_evm::typed_data_hash(&domain, &types, &message)
             .map_err(|_| Unpayable("the authorization can't be hashed"))?;
+        // What the scheme hands its signer's `signTypedData`, in its order,
+        // its BigInts as decimal strings.
+        let primary_type = match self.method {
+            Method::Permit2 => "PermitWitnessTransferFrom",
+            Method::Eip3009 | Method::Eip3009V1 => "TransferWithAuthorization",
+        };
+        let typed_data = to_js(&json!({
+            "domain": domain,
+            "types": types,
+            "primaryType": primary_type,
+            "message": message,
+        }))?
+        .stringify();
         Ok(Built {
             digest,
+            typed_data,
             inner,
             wrapper: self.wrapper()?,
         })
@@ -597,12 +626,7 @@ impl<'a> Payment<'a> {
     /// V2's extensions, resource and the accepted entry, as the client
     /// writes them.
     fn wrapper(&self) -> Result<Wrapper, Unpayable> {
-        let js = |value: &Value| {
-            serde_json::to_string(value)
-                .ok()
-                .and_then(|text| fc_json::parse(&text).ok())
-                .ok_or(Unpayable("requirements: not JSON"))
-        };
+        let js = to_js;
         if self.requirements.version == 1 {
             return Ok(Wrapper::V1 {
                 scheme: js(&self.accept["scheme"])?,
@@ -641,19 +665,37 @@ enum Wrapper {
     },
 }
 
-/// A built authorization: the digest to sign, and its payload once signed.
+/// A built authorization: the digest to sign, the typed data a device
+/// signs, and its payload once signed.
 #[derive(Debug, Clone)]
 pub struct Built {
     pub digest: [u8; 32],
+    typed_data: String,
     inner: Inner,
     wrapper: Wrapper,
 }
 
 impl Built {
+    /// The typed data the client hands its signer's `signTypedData`, as
+    /// `JSON.stringify` writes it with each BigInt as its decimal string:
+    /// `{ domain, types, primaryType, message }`, whose EIP-712 hash is
+    /// [`Built::digest`]. A device account signs this (core #392).
+    pub fn typed_data(&self) -> &str {
+        &self.typed_data
+    }
+
     /// The payment payload with `signature`, as `JSON.stringify` writes the
     /// client's: the text main base64-encodes into the header.
     pub fn payload(&self, signature: &[u8; 65]) -> String {
-        let signature = js_str(&fc_evm::to_hex(signature));
+        self.payload_with(&fc_evm::to_hex(signature))
+    }
+
+    /// The payment payload with a device's signature text, as the device
+    /// returned it: the client writes its signer's answer as it came. The
+    /// caller has checked it ([`crate::phone::check_signature`]), so it is
+    /// `0x` and 130 hex digits.
+    pub fn payload_with(&self, signature: &str) -> String {
+        let signature = js_str(signature);
         let inner = match &self.inner {
             Inner::Eip3009(authorization) => js_object(vec![
                 ("authorization", authorization.clone()),
@@ -687,6 +729,14 @@ impl Built {
         };
         payload.stringify()
     }
+}
+
+/// A JSON value as JS holds it, in its own key order.
+fn to_js(value: &Value) -> Result<JsValue, Unpayable> {
+    serde_json::to_string(value)
+        .ok()
+        .and_then(|text| fc_json::parse(&text).ok())
+        .ok_or(Unpayable("requirements: not JSON"))
 }
 
 fn js_str(text: &str) -> JsValue {
@@ -830,6 +880,20 @@ mod tests {
         let payment = Payment::new(Requirements::parse(&v1).unwrap(), 0).unwrap();
         assert!(payment.build(&[1; 20], 600, &[0; 32]).is_ok());
         assert!(payment.build(&[1; 20], 599, &[0; 32]).is_err());
+    }
+
+    #[test]
+    fn canonical_amounts() {
+        for text in ["0", "1", "10000", &"9".repeat(77)] {
+            assert!(canonical_amount(text).is_some(), "{text}");
+        }
+        let past = U256::MAX.to_decimal() + "0";
+        for text in [
+            "", "00", "01", "+1", "-1", "1.0", " 1", "1 ", "0x10", "1e3", &past,
+        ] {
+            assert_eq!(canonical_amount(text), None, "{text}");
+        }
+        assert_eq!(canonical_amount(&U256::MAX.to_decimal()), Some(U256::MAX));
     }
 
     #[test]
