@@ -40,6 +40,39 @@ pub const SEALED_KEY_BYTES: usize = fc_seal::ENC_LEN + fc_seal::CIPHERTEXT_LEN;
 /// The longest `reason` an answer carries, in its fixed form.
 pub const MAX_REASON_BYTES: usize = 32;
 
+/// `errSecInvalidRecord`: what the macOS Keychain's `SecItemDelete` can
+/// answer the loser of two processes deleting one item at once. Two
+/// profiles' mains draining the same forget record 0–6 ms apart met it
+/// (freedom-browser#1271).
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+const ERR_SEC_INVALID_RECORD: i32 = -67701;
+
+/// How long a raced delete waits before its one retry. In #1271's
+/// measurements a delete started 10 ms or more after the other always
+/// found the item gone.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+const RACED_DELETE_PAUSE: Duration = Duration::from_millis(20);
+
+/// A forget's delete, tried once more after `pause` when the first met a
+/// record another process was removing (0013, "Forgetting an
+/// item"). A second `errSecInvalidRecord` is the answer. A damaged record
+/// answers the same and may still hold the item, so it's never read as
+/// gone. The helper answers it `backend`/`status`, and the drain keeps the
+/// record.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+fn delete_retrying_a_race(
+    mut delete: impl FnMut() -> Result<(), i32>,
+    pause: impl FnOnce(),
+) -> Result<(), i32> {
+    match delete() {
+        Err(ERR_SEC_INVALID_RECORD) => {
+            pause();
+            delete()
+        }
+        other => other,
+    }
+}
+
 /// A key-store call.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Op {
@@ -307,6 +340,46 @@ fn known_reason(reason: Option<&str>) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Runs `delete_retrying_a_race` over scripted statuses, returning its
+    /// answer, how many deletes ran and how many pauses.
+    fn raced(statuses: &[Result<(), i32>]) -> (Result<(), i32>, usize, usize) {
+        let mut calls = 0;
+        let mut pauses = 0;
+        let answer = delete_retrying_a_race(
+            || {
+                calls += 1;
+                statuses[calls - 1]
+            },
+            || pauses += 1,
+        );
+        (answer, calls, pauses)
+    }
+
+    #[test]
+    fn a_raced_delete_is_retried_once_after_its_pause() {
+        const NOT_FOUND: i32 = -25300;
+        // The raced loser, then the item gone or removed: the retry's
+        // answer.
+        assert_eq!(
+            raced(&[Err(ERR_SEC_INVALID_RECORD), Err(NOT_FOUND)]),
+            (Err(NOT_FOUND), 2, 1)
+        );
+        assert_eq!(
+            raced(&[Err(ERR_SEC_INVALID_RECORD), Ok(())]),
+            (Ok(()), 2, 1)
+        );
+        // Twice: a damaged record looks the same, so it stays an error.
+        assert_eq!(
+            raced(&[Err(ERR_SEC_INVALID_RECORD), Err(ERR_SEC_INVALID_RECORD)]),
+            (Err(ERR_SEC_INVALID_RECORD), 2, 1)
+        );
+        // Every other answer is final at once.
+        assert_eq!(raced(&[Ok(())]), (Ok(()), 1, 0));
+        assert_eq!(raced(&[Err(NOT_FOUND)]), (Err(NOT_FOUND), 1, 0));
+        assert_eq!(raced(&[Err(-25308)]), (Err(-25308), 1, 0));
+        assert_eq!(RACED_DELETE_PAUSE, Duration::from_millis(20));
+    }
 
     fn item() -> ItemId {
         ItemId::parse("00112233445566778899aabbccddeeff").unwrap()

@@ -15,6 +15,10 @@
 //! - **Added, never updated:** an item already under the id is
 //!   `backend`/`duplicate`, never overwritten. Each `create` draws a fresh
 //!   128-bit id, so that is never a key in use.
+//! - **A raced delete is retried once:** two mains' drains forgetting one
+//!   item at once can leave the loser's `SecItemDelete` with
+//!   `errSecInvalidRecord`. It's tried again after 20 ms, and a second one
+//!   is answered `backend`/`status` (0013, "Forgetting an item").
 //! - **The calls** are `security-framework`'s (0013 picks it, pinned
 //!   exactly): `SecItemAdd`, `SecItemCopyMatching` and `SecItemDelete`.
 //!   Its unsafe stays inside it. Core Foundation keeps its own copies of
@@ -86,8 +90,17 @@ impl OsStore for Keychain {
     fn forget(&self, policy: Policy, item: ItemId) -> Result<(), Answer> {
         unattended(policy)?;
         let _quiet = quiet()?;
-        delete_generic_password_options(PasswordOptions::new_generic_password(SERVICE, &item.hex()))
-            .map_err(|e| answer(e.code()))
+        super::delete_retrying_a_race(
+            || {
+                delete_generic_password_options(PasswordOptions::new_generic_password(
+                    SERVICE,
+                    &item.hex(),
+                ))
+                .map_err(|e| e.code())
+            },
+            || std::thread::sleep(super::RACED_DELETE_PAUSE),
+        )
+        .map_err(answer)
     }
 }
 
