@@ -82,6 +82,7 @@ use std::collections::VecDeque;
 use std::sync::OnceLock;
 
 use fc_approval::fee::{Evidence, Fees, Verdict, at_approval};
+use fc_approval::phone::WaitingRule;
 use fc_approval::receipt::{
     Document, ProposedRule, RECEIPT_TTL_MS, Receipt, ReceiptRefusal, Receipts,
 };
@@ -155,6 +156,10 @@ pub struct Approvals {
     standing: Standing,
     /// `approval.changed` events to send after the reply that made them.
     events: Vec<Zeroizing<Vec<u8>>>,
+    /// The dApp revokes and deleted accounts since the loop last asked: a
+    /// phone payment's waiting rule for one goes (design 0012, "A phone
+    /// payment's rule").
+    narrowed: Vec<Narrowed>,
     /// x402's cap generations and reservations (X402-1).
     x402: x402::X402State,
 }
@@ -636,6 +641,35 @@ pub struct Remember {
     rule: ProposedRule,
 }
 
+impl Remember {
+    /// A phone payment's waiting rule, held in memory until its payment is
+    /// verified.
+    pub fn waiting(self) -> WaitingRule {
+        WaitingRule {
+            key: self.key,
+            account: self.account,
+            rule: self.rule,
+        }
+    }
+
+    /// A waiting rule taken at its payment's verification, to write.
+    pub fn verified(waiting: WaitingRule) -> Self {
+        Remember {
+            key: waiting.key,
+            account: waiting.account,
+            rule: waiting.rule,
+        }
+    }
+}
+
+/// A narrowing a phone payment's waiting rules follow: any dApp revoke for
+/// the key, whatever its outcome, and a deleted account.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Narrowed {
+    Key(String),
+    Account(u32),
+}
+
 impl Approvals {
     pub fn new() -> Self {
         Approvals {
@@ -646,6 +680,7 @@ impl Approvals {
             grants: Grants::new(),
             standing: Standing::new(),
             events: Vec::new(),
+            narrowed: Vec::new(),
             x402: x402::X402State::default(),
         }
     }
@@ -987,6 +1022,24 @@ impl Approvals {
         signed: Signed<'_>,
         clocks: Clocks,
     ) -> Result<After, ErrorBody> {
+        self.authorize_for(context, authorization, signed, clocks, AccountKind::Vault)
+            .map(|(after, _)| after)
+    }
+
+    /// [`Approvals::authorize`], for an account of `account_kind`: a
+    /// phone's job is checked as `sign.*` checks a vault account's
+    /// signature, but a standing rule judges its send as a phone's, whose
+    /// fee the phone picks (design 0012, "Phone jobs"). Returns what the
+    /// authorization was, for a phone payment's record: the token's kind,
+    /// `standing` or `safe`.
+    pub fn authorize_for(
+        &mut self,
+        context: &Context,
+        authorization: &Value,
+        signed: Signed<'_>,
+        clocks: Clocks,
+        account_kind: AccountKind,
+    ) -> Result<(After, &'static str), ErrorBody> {
         let form = authorization
             .as_object()
             .ok_or_else(|| invalid("authorization: expected an object"))?;
@@ -1000,92 +1053,11 @@ impl Approvals {
             let fields = object(authorization, &["token"], optional)?;
             self.authorize_token(context, fields, signed, clocks)
         } else if form.contains_key("safe") {
-            let fields = object(authorization, &["safe"], &[])?;
-            let id = string(fields, "safe")?;
-            let presenter = presenter(context)?;
-            match signed {
-                Signed::TypedData { fields, hash, .. } => self
-                    .safes
-                    .check_owner(id, presenter.as_ref(), &fields["typed_data"], hash)
-                    .map(After::Owner)
-                    .map_err(safe_refusal),
-                Signed::Transaction { tx, .. } => {
-                    let evidence = tx
-                        .chain_id()
-                        .to_u64()
-                        .and_then(|chain_id| self.fees.get(chain_id));
-                    self.safes
-                        .check_executor(
-                            id,
-                            presenter.as_ref(),
-                            tx,
-                            evidence,
-                            clocks.wall_ms,
-                            clocks.vault_ms,
-                        )
-                        .map(After::Executor)
-                        .map_err(safe_refusal)
-                }
-                // A Safe's owners sign typed data, never a message.
-                Signed::Message { .. } => Err(safe_refusal(SafeRefusal::Mismatch)),
-            }
+            self.authorize_safe(context, authorization, signed, clocks)
+                .map(|after| (after, "safe"))
         } else if form.contains_key("standing") {
-            let fields = object(authorization, &["standing"], &[])?;
-            let standing = object(&fields["standing"], &[], &["paused"])?;
-            let paused = optional_bool(standing, "paused")?;
-            // A Safe's signature needs its approval or a token (APR-4b): a
-            // Safe message a rule answers gets its approval from
-            // `approval.spend { standing }`, and signs with it.
-            if signed.is_safes() {
-                return Err(not_authorized(
-                    "no_rule",
-                    "no standing rule answers a Safe's signature",
-                ));
-            }
-            let Some(page) = page_context(context)? else {
-                return Err(not_authorized(
-                    "no_rule",
-                    "a standing rule answers only a page",
-                ));
-            };
-            let bytes;
-            let (account, request) = match signed {
-                Signed::Message { account, message } => {
-                    bytes = fc_evm::parse_bytes(message.as_str().unwrap_or(""), "message")
-                        .map_err(|e| invalid(e.to_string()))?;
-                    (account, DappRequest::Signature(RuleSigned::Message(&bytes)))
-                }
-                Signed::TypedData { account, view, .. } => {
-                    (account, DappRequest::Signature(RuleSigned::TypedData(view)))
-                }
-                Signed::Transaction { account, tx, .. } => {
-                    let evidence = tx
-                        .chain_id()
-                        .to_u64()
-                        .and_then(|chain_id| self.fees.get(chain_id));
-                    // The core signs with the vault's own key.
-                    let send = Send::of(tx, AccountKind::Vault, paused, evidence);
-                    (account, DappRequest::Transaction(send))
-                }
-            };
-            let ask = DappAsk {
-                key: &page.origin,
-                agent: page.agent,
-                account,
-                request,
-            };
-            let rules = self.rules();
-            let store = self.grants.view::<DappStore>(clocks.wall_ms / 1000);
-            match self
-                .standing
-                .authorize_dapp_under(rules, &store, &ask, rule_clocks(clocks))
-            {
-                Decision::Covered => Ok(After::Nothing),
-                Decision::NotCovered(reason) => Err(not_authorized(
-                    reason.name(),
-                    "no standing rule covers this request",
-                )),
-            }
+            self.authorize_standing(context, authorization, signed, clocks, account_kind)
+                .map(|after| (after, "standing"))
         } else {
             Err(invalid(
                 "authorization: expected a token, a Safe approval or a standing rule",
@@ -1093,13 +1065,119 @@ impl Approvals {
         }
     }
 
+    fn authorize_safe(
+        &mut self,
+        context: &Context,
+        authorization: &Value,
+        signed: Signed<'_>,
+        clocks: Clocks,
+    ) -> Result<After, ErrorBody> {
+        let fields = object(authorization, &["safe"], &[])?;
+        let id = string(fields, "safe")?;
+        let presenter = presenter(context)?;
+        match signed {
+            Signed::TypedData { fields, hash, .. } => self
+                .safes
+                .check_owner(id, presenter.as_ref(), &fields["typed_data"], hash)
+                .map(After::Owner)
+                .map_err(safe_refusal),
+            Signed::Transaction { tx, .. } => {
+                let evidence = tx
+                    .chain_id()
+                    .to_u64()
+                    .and_then(|chain_id| self.fees.get(chain_id));
+                self.safes
+                    .check_executor(
+                        id,
+                        presenter.as_ref(),
+                        tx,
+                        evidence,
+                        clocks.wall_ms,
+                        clocks.vault_ms,
+                    )
+                    .map(After::Executor)
+                    .map_err(safe_refusal)
+            }
+            // A Safe's owners sign typed data, never a message.
+            Signed::Message { .. } => Err(safe_refusal(SafeRefusal::Mismatch)),
+        }
+    }
+
+    fn authorize_standing(
+        &mut self,
+        context: &Context,
+        authorization: &Value,
+        signed: Signed<'_>,
+        clocks: Clocks,
+        account_kind: AccountKind,
+    ) -> Result<After, ErrorBody> {
+        let fields = object(authorization, &["standing"], &[])?;
+        let standing = object(&fields["standing"], &[], &["paused"])?;
+        let paused = optional_bool(standing, "paused")?;
+        // A Safe's signature needs its approval or a token (APR-4b): a
+        // Safe message a rule answers gets its approval from
+        // `approval.spend { standing }`, and signs with it.
+        if signed.is_safes() {
+            return Err(not_authorized(
+                "no_rule",
+                "no standing rule answers a Safe's signature",
+            ));
+        }
+        let Some(page) = page_context(context)? else {
+            return Err(not_authorized(
+                "no_rule",
+                "a standing rule answers only a page",
+            ));
+        };
+        let bytes;
+        let (account, request) = match signed {
+            Signed::Message { account, message } => {
+                bytes = fc_evm::parse_bytes(message.as_str().unwrap_or(""), "message")
+                    .map_err(|e| invalid(e.to_string()))?;
+                (account, DappRequest::Signature(RuleSigned::Message(&bytes)))
+            }
+            Signed::TypedData { account, view, .. } => {
+                (account, DappRequest::Signature(RuleSigned::TypedData(view)))
+            }
+            Signed::Transaction { account, tx, .. } => {
+                let evidence = tx
+                    .chain_id()
+                    .to_u64()
+                    .and_then(|chain_id| self.fees.get(chain_id));
+                // The core signs with the vault's own key; a phone's
+                // job names its own kind.
+                let send = Send::of(tx, account_kind, paused, evidence);
+                (account, DappRequest::Transaction(send))
+            }
+        };
+        let ask = DappAsk {
+            key: &page.origin,
+            agent: page.agent,
+            account,
+            request,
+        };
+        let rules = self.rules();
+        let store = self.grants.view::<DappStore>(clocks.wall_ms / 1000);
+        match self
+            .standing
+            .authorize_dapp_under(rules, &store, &ask, rule_clocks(clocks))
+        {
+            Decision::Covered => Ok(After::Nothing),
+            Decision::NotCovered(reason) => Err(not_authorized(
+                reason.name(),
+                "no standing rule covers this request",
+            )),
+        }
+    }
+
+    /// A token's authorization, and the kind it was spent as.
     fn authorize_token(
         &mut self,
         context: &Context,
         fields: &Map<String, Value>,
         signed: Signed<'_>,
         clocks: Clocks,
-    ) -> Result<After, ErrorBody> {
+    ) -> Result<(After, &'static str), ErrorBody> {
         let token = string(fields, "token")?;
         let handle = fields.get("handle");
         let intent = match fields.get("intent") {
@@ -1180,24 +1258,25 @@ impl Approvals {
                         })
                     })
                     .map_err(refusal)?;
-                match page {
+                let after = match page {
                     Some(page) if spent.kind == Kind::DappSend && spent.remember => {
-                        Ok(After::Remember(Remember {
+                        After::Remember(Remember {
                             key: page.origin.clone(),
                             account,
                             rule: ProposedRule::of(tx),
-                        }))
+                        })
                     }
                     // The executor's signature, when the fee check stopped
                     // its approval and the user confirmed the fee: it ends
                     // the approval whose SafeTx it executes, as the
                     // approval's own would (design 0012, "The executor").
-                    _ if spent.kind == Kind::ExecutorSend => Ok(self
+                    _ if spent.kind == Kind::ExecutorSend => self
                         .safes
                         .executing(tx)
-                        .map_or(After::Nothing, After::Executor)),
-                    _ => Ok(After::Nothing),
-                }
+                        .map_or(After::Nothing, After::Executor),
+                    _ => After::Nothing,
+                };
+                Ok((after, spent.kind.name()))
             }
             Signed::Message { account, message } => {
                 let account = json!(account);
@@ -1211,7 +1290,7 @@ impl Approvals {
                             page,
                         })
                     })
-                    .map(|_| After::Nothing)
+                    .map(|_| (After::Nothing, Kind::SignMessage.name()))
                     .map_err(refusal)
             }
             Signed::TypedData {
@@ -1241,7 +1320,9 @@ impl Approvals {
                     .map_err(refusal)?;
                 // The confirmed hash is the one signed (`expected_hash`).
                 match spent.typed_data {
-                    Some(typed) if typed.hash == *hash => Ok(After::Nothing),
+                    Some(typed) if typed.hash == *hash => {
+                        Ok((After::Nothing, Kind::SignTypedData.name()))
+                    }
                     _ => Err(refusal(Refusal::Mismatch)),
                 }
             }
@@ -1491,6 +1572,11 @@ impl Approvals {
     /// its reply.
     pub fn take_events(&mut self) -> Vec<Zeroizing<Vec<u8>>> {
         std::mem::take(&mut self.events)
+    }
+
+    /// The narrowings since the last call.
+    pub fn take_narrowed(&mut self) -> Vec<Narrowed> {
+        std::mem::take(&mut self.narrowed)
     }
 
     /// Which dApp rules answer: today's until the file moves.
@@ -1941,6 +2027,12 @@ impl Approvals {
         {
             return Err(forbidden("a page revokes only its own grant"));
         }
+        // A phone payment's waiting rule for the key goes with any dApp
+        // revoke, whatever its outcome: it is held in memory, and nothing
+        // can fail.
+        if kind == StoreKind::Dapp {
+            self.narrowed.push(Narrowed::Key(key.clone()));
+        }
         if !self.grants.moved(kind) {
             return Err(not_moved(kind));
         }
@@ -2133,6 +2225,9 @@ impl Approvals {
     fn forget_account(&mut self, id: u64, params: &Value) -> Result<Zeroizing<Vec<u8>>, ErrorBody> {
         let fields = object(params, &["wallet_index"], &[])?;
         let account = account(fields.get("wallet_index"), "wallet_index")?;
+        // A phone payment's waiting rule for the account goes, and one for
+        // each key that exposed it, whatever the write does.
+        self.narrowed.push(Narrowed::Account(account));
         if !self.grants.moved(StoreKind::Dapp) {
             return Err(not_moved(StoreKind::Dapp));
         }
@@ -2146,6 +2241,8 @@ impl Approvals {
                 .map(str::to_owned)
                 .collect()
         };
+        self.narrowed
+            .extend(exposing.iter().cloned().map(Narrowed::Key));
         let result = self
             .grants
             .write::<DappStore, _>(|store| store.forget_account(account));

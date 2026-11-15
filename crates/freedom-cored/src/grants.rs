@@ -114,7 +114,7 @@ impl StoreFile for CapStore {
 }
 
 /// What reading a file found.
-enum Read {
+pub(crate) enum Read {
     Missing,
     /// Not a regular file the user owns, past the bound, or an I/O error.
     Unreadable,
@@ -123,14 +123,15 @@ enum Read {
 
 /// Reads `path` under 0001's rules: a regular file, opened without
 /// following a symlink and judged on the open handle, owned by the user,
-/// and no more than [`MAX_FILE_BYTES`]. On Windows the owner is read from
+/// and no more than `bound` bytes ([`MAX_FILE_BYTES`] for the four files).
+/// On Windows the owner is read from
 /// the handle too (freedom-core#360), so a file another account planted in
 /// a split root (`--profile-dir`) reads as empty, as does one whose owner
 /// can't be read; an elevated administrator's own files, which Windows may
 /// give to the Administrators group, count as the user's
 /// ([`fc_sys::windows::owned_by_current_user`]). A file the user owns that
 /// another account may still edit is 0001's owner-only DACL follow-up.
-fn read_file(path: &Path) -> Read {
+pub(crate) fn read_file(path: &Path, bound: usize) -> Read {
     let file = match fsx::open_regular(path, false) {
         Ok(fsx::Regular::File(file)) => file,
         Ok(fsx::Regular::Missing) => return Read::Missing,
@@ -154,7 +155,7 @@ fn read_file(path: &Path) -> Read {
             return Read::Unreadable;
         }
     }
-    match fsx::read_at_most(&file, MAX_FILE_BYTES as u64) {
+    match fsx::read_at_most(&file, bound as u64) {
         Ok(Some(bytes)) => Read::Bytes(bytes),
         Ok(None) | Err(_) => Read::Unreadable,
     }
@@ -239,7 +240,7 @@ impl Grants {
                 serde_json::json!({ "store": S::KIND.name(), "kind": e.kind().to_string() }),
             );
         }
-        let loaded = match read_file(&path) {
+        let loaded = match read_file(&path, MAX_FILE_BYTES) {
             Read::Missing => return S::default(),
             Read::Bytes(bytes) => S::from_bytes(&bytes, wall_s).ok(),
             Read::Unreadable => None,
@@ -268,7 +269,7 @@ impl Grants {
         let Some(path) = self.path(S::KIND) else {
             return Cow::Owned(S::default());
         };
-        let store = match read_file(&path) {
+        let store = match read_file(&path, MAX_FILE_BYTES) {
             Read::Bytes(bytes) => S::from_bytes(&bytes, wall_s).unwrap_or_default(),
             Read::Missing | Read::Unreadable => S::default(),
         };
@@ -330,7 +331,7 @@ impl Grants {
 /// each step (`write`, `fsync`, `rename`, `flush`). Before the rename an
 /// error leaves the target untouched and the temp file removed; after it,
 /// a failed flush is [`Done::NotDurable`].
-fn write_file(target: &Path, store: &str, contents: &[u8]) -> std::io::Result<Done> {
+pub(crate) fn write_file(target: &Path, store: &str, contents: &[u8]) -> std::io::Result<Done> {
     let fails = |step: &str| crate::testhooks::grant_write_fails(store, step);
     let dir = target
         .parent()

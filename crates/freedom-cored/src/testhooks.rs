@@ -46,7 +46,8 @@
 //!   identity is compared, `renaming` right before a staged node file is
 //!   renamed. It stands for a same-user process winning a race.
 //! - `FREEDOM_CORED_TEST_GRANT_WRITE_FAIL` names a file: while it holds
-//!   `<store>:<step>` lines (`dapp`, `swarm`, `radicle`, `x402`; `write`,
+//!   `<store>:<step>` lines (`dapp`, `swarm`, `radicle`, `x402`, and `phone`
+//!   for `phone-payments.json`; `write`,
 //!   `fsync`, `rename`, `flush`), each write of that store's permission
 //!   file fails at that step as if the OS had failed it (design 0012, "The
 //!   files": a failed write). Read at each write, so a test turns it on
@@ -120,6 +121,14 @@
 //!   keep the clock's. Read at each request, so a test moves the time while
 //!   the core runs, to the millisecond. A missing file, or one that holds
 //!   no number, leaves the clock's reading.
+//! - `FREEDOM_CORED_TEST_WALL_CLOCK` names a file: while it holds a
+//!   number, the approvals read it as the wall clock, in milliseconds (a
+//!   phone payment's `answeredAt` and its 24 hours, Q9's `grantedAt`, the
+//!   fee evidence's header), as `FREEDOM_CORED_TEST_APPROVAL_CLOCK` does
+//!   the vault's.
+//! - `FREEDOM_CORED_TEST_PHONE_RECHECK_MS` replaces a phone payment's
+//!   first recheck, 5 s after its answer or a start (design 0012,
+//!   "Unverified payments"); later ones still double, up to 10 minutes.
 //! - `FREEDOM_CORED_TEST_PROFILE_HOLD` (`<marker>=<release>`): a profile
 //!   subcommand that holds the catalog's write lock (or `migrate`, the
 //!   profile lock) creates the file `<marker>` once it has the lock, then
@@ -427,6 +436,29 @@ pub fn hold_reply(id: u64) -> bool {
 #[cfg(not(feature = "testhooks"))]
 pub fn hold_reply(_id: u64) -> bool {
     false
+}
+
+#[cfg(feature = "testhooks")]
+pub fn wall_clock(now_ms: u64) -> u64 {
+    std::env::var_os("FREEDOM_CORED_TEST_WALL_CLOCK")
+        .and_then(|path| std::fs::read_to_string(path).ok())
+        .and_then(|text| text.trim().parse().ok())
+        .unwrap_or(now_ms)
+}
+
+#[cfg(not(feature = "testhooks"))]
+pub fn wall_clock(now_ms: u64) -> u64 {
+    now_ms
+}
+
+#[cfg(feature = "testhooks")]
+pub fn phone_recheck_ms(default: u64) -> u64 {
+    millis("FREEDOM_CORED_TEST_PHONE_RECHECK_MS").unwrap_or(default)
+}
+
+#[cfg(not(feature = "testhooks"))]
+pub fn phone_recheck_ms(default: u64) -> u64 {
+    default
 }
 
 #[cfg(feature = "testhooks")]

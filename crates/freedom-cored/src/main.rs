@@ -35,6 +35,7 @@ mod keystore;
 mod log;
 mod naming;
 mod nodes;
+mod phone;
 mod profile;
 mod requests;
 mod rng;
