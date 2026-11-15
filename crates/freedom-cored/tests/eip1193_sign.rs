@@ -10,8 +10,9 @@
 //! and the chains a warning quotes include the one its domain names. Then
 //! the guarantees: a keyless document gets `4100` first, whatever its
 //! params; nothing is signed on a crossed answer; no Ledger, phone or Safe
-//! account reaches the vault, each getting `{ device }` with a token bound
-//! to the page and the handle; a grant index that is no account signs
+//! account reaches the vault, each getting `{ device }` for a message and
+//! for typed data, with a token bound to what the page's request alone
+//! says, the page and the handle; a grant index that is no account signs
 //! nothing; typed data nested past fc-json is `Invalid parameters`; and a
 //! locked vault signs nothing.
 //!
@@ -19,7 +20,8 @@
 //! replay with the reference's rule in Q9's form (`rule-legacy`: the core
 //! answers only the limited rule), the wall clock at the vectors' `now`.
 //! Then a rule's guarantees: custody or the document gone at the recheck
-//! refuses with nothing signed, and Q9 through the dispatcher.
+//! refuses with nothing signed, each form of main's answer to the unlock,
+//! and Q9 through the dispatcher.
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
@@ -791,8 +793,18 @@ fn every_apr5d2_scenario_replays_through_the_core() {
                         assert_eq!(device["payload"], payload, "{what}");
                         assert_eq!(device["handle"], handle.as_str(), "{what}");
                         // Main spends it for the device, as the reference
-                        // spent `token-1`, under the page and its handle.
-                        let spent = spend_as(&mut core, id + 80, SITE, device);
+                        // spent `token-1`, under the page and its handle,
+                        // with the reference's payload.
+                        let spent = spend(
+                            &mut core,
+                            id + 80,
+                            SITE,
+                            &device["token"],
+                            issue["args"]["kind"].as_str().unwrap(),
+                            issue["args"]["account"].as_u64().unwrap(),
+                            &payload,
+                            &handle,
+                        );
                         assert_eq!(spent["result"]["bound"], true, "{what}: {spent}");
                         // What main answers once the device has: the
                         // reference's result.
@@ -864,27 +876,103 @@ fn rule_signs(core: &mut Core, id: u64) {
     );
 }
 
+/// The typed data `sign-typed-approved` sends, as text, and the hash the
+/// reference showed for it: what a device's typed-data token must bind.
+fn reference_typed(file: &Value) -> (Value, String) {
+    let scenarios = file["scenarios"].as_array().unwrap();
+    let scenario = scenarios
+        .iter()
+        .find(|s| s["id"] == "sign-typed-approved")
+        .unwrap();
+    let request = &scenario["requests"][0];
+    let prompt = request["effects"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|e| e["effect"] == "prompt")
+        .unwrap();
+    let hash = prompt["args"]["view"]["typedData"]["hash"]
+        .as_str()
+        .unwrap();
+    (request["params"][1].clone(), hash.to_owned())
+}
+
+/// A typed-data token's payload, built from the page's typed data alone
+/// as `toCoreTypedData` reads it: the domain, the types but
+/// `EIP712Domain`, the message, the `primaryType`, and the page's chain.
+fn core_payload(typed: &Value, chain_id: u64) -> Value {
+    let typed: Value = match typed {
+        Value::String(text) => serde_json::from_str(text).unwrap(),
+        other => other.clone(),
+    };
+    let mut types = typed["types"].clone();
+    types.as_object_mut().unwrap().remove("EIP712Domain");
+    json!({
+        "typed_data": { "domain": typed["domain"], "types": types, "message": typed["message"] },
+        "primary_type": typed["primaryType"],
+        "chain_id": chain_id.to_string(),
+    })
+}
+
+/// Request `id` from `site`, approved on its prompt under `handle`: the
+/// `{ device }` it answers.
+fn device_approved(core: &mut Core, id: u64, site: &str, body: &Value, handle: &str) -> Value {
+    request(core, id, Some(site), Some(false), body);
+    let asked = prompted(core, id);
+    assert_eq!(asked["params"]["kind"], "eth.sign", "{site}: {asked}");
+    respond(
+        core,
+        &asked,
+        approve(&asked["params"]["prompt"], handle, json!({})),
+    );
+    let reply = core.until_response(id);
+    let answer = reply["result"].as_object().unwrap();
+    assert_eq!(answer.len(), 1, "{site}: {reply}");
+    answer["device"].clone()
+}
+
 /// No Ledger, phone or Safe account reaches the vault, though the vault is
 /// unlocked holding keys at those indices, the Safe is on Gnosis, and each
 /// site has Q9's signing rule: no rule answers a device's account, its
 /// prompt offers "Always allow" unticked only, and an approve returns
-/// `{ device }` with nothing signed, its token bound to the page, the
-/// handle, the account and the payload (main's spend takes it once).
+/// `{ device }` with nothing signed. For a message and for typed data,
+/// each token binds what the page's request alone says: the payload in
+/// the core's form and the hash the reference shows (a Safe's: the Safe,
+/// Gnosis, the method and the params as sent), the account, the page and
+/// the handle. A fresh token under another handle binds nothing (and is
+/// burnt); a separate one, presented as the request and its handle say,
+/// binds once.
 #[test]
 fn no_device_account_reaches_the_vault() {
+    const SAFE: &str = "0x4444444444444444444444444444444444444444";
+    let (typed, hash) = reference_typed(&load());
+    let typed_object: Value = serde_json::from_str(typed.as_str().unwrap()).unwrap();
     let sites = [
-        ("https://ledger.example", 1, "ledger", "sign-message"),
-        ("https://phone.example", 2, "remote", "sign-message"),
-        ("https://safe.example", 1000, "safe", "safe-message"),
+        (
+            "https://ledger.example",
+            1,
+            "ledger",
+            "0x6Fac4D18c912343BF86fa7049364Dd4E424Ab9C0",
+            typed.clone(),
+        ),
+        (
+            "https://phone.example",
+            2,
+            "remote",
+            "0xb6716976A3ebe8D39aCEB04372f22Ff8e6802D7A",
+            typed_object,
+        ),
+        ("https://safe.example", 1000, "safe", SAFE, typed.clone()),
     ];
     let entries = sites
         .iter()
-        .map(|(site, index, _, _)| ruled(site, *index, Some(NOW), false))
+        .map(|(site, index, ..)| ruled(site, *index, Some(NOW), false))
         .collect();
     let (_root, mut core, _clock) = core_at(&store(entries), NOW, false);
     let before = grant_file(&core);
-    for (n, (site, index, kind, token_kind)) in sites.iter().enumerate() {
-        let id = 50 + 10 * n as u64;
+    let mut id = 50;
+    let mut handles = (0x10_u8..).map(|n| format!("{n:02x}").repeat(32));
+    for (site, index, kind, address, typed) in &sites {
         // "Always allow" ticked is a pick not offered: crossed.
         sign_from(&mut core, id, site, Some(false));
         let asked = prompted(&mut core, id);
@@ -896,7 +984,7 @@ fn no_device_account_reaches_the_vault() {
         );
         let ticked = approve(
             &asked["params"]["prompt"],
-            &format!("{:02x}", 0xa0 + n).repeat(32),
+            &handles.next().unwrap(),
             json!({ "alwaysAllow": true }),
         );
         respond(&mut core, &asked, ticked);
@@ -905,44 +993,125 @@ fn no_device_account_reaches_the_vault() {
             reply["error"]["data"]["reason"], "mismatch",
             "{site}: {reply}"
         );
-        // Approved: `{ device }`, nothing signed.
-        sign_from(&mut core, id + 1, site, Some(false));
-        let asked = prompted(&mut core, id + 1);
-        let handle = format!("{:02x}", 0xb0 + n).repeat(32);
-        respond(
-            &mut core,
-            &asked,
-            approve(&asked["params"]["prompt"], &handle, json!({})),
-        );
-        let reply = core.until_response(id + 1);
-        let answer = &reply["result"];
-        assert!(answer.get("result").is_none(), "{site}: {reply}");
-        let device = &answer["device"];
-        assert_eq!(device["type"], *kind, "{site}: {reply}");
-        assert_eq!(device["kind"], *token_kind, "{site}");
-        assert_eq!(device["account"], *index, "{site}");
-        assert_eq!(device["handle"], handle.as_str(), "{site}");
-        let token = device["token"].as_str().unwrap();
-        assert_eq!(token.len(), 64, "{site}");
-        let mut device = device.clone();
-        let spent = spend_as(&mut core, id + 2, site, &device);
-        assert_eq!(spent["result"]["bound"], true, "{site}: {spent}");
-        // Spent once; under another handle it binds nothing.
-        let again = spend_as(&mut core, id + 3, site, &device);
-        assert_eq!(again["error"]["code"], "not_authorized", "{site}: {again}");
-        device["handle"] = json!("cd".repeat(32));
-        let other = spend_as(&mut core, id + 4, site, &device);
-        assert_eq!(other["error"]["code"], "not_authorized", "{site}: {other}");
+        id += 1;
+        let typed_body = json!({
+            "method": "eth_signTypedData_v4", "params": [address, typed], "world": world(),
+        });
+        for body in [hello_sign(), typed_body] {
+            let method = body["method"].as_str().unwrap();
+            let what = format!("{site} {method}");
+            // What the token must bind, from the page's request alone.
+            let (token_kind, payload, expected_hash) = match (*kind, method) {
+                ("safe", _) => (
+                    "safe-message",
+                    json!({ "safe": SAFE, "chain_id": "100", "method": method, "params": body["params"] }),
+                    None,
+                ),
+                (_, "personal_sign") => {
+                    ("sign-message", json!({ "message": "0x68656c6c6f" }), None)
+                }
+                _ => (
+                    "sign-typed-data",
+                    core_payload(&body["params"][1], 100),
+                    Some(hash.as_str()),
+                ),
+            };
+            // Two approves, each minting its own token.
+            let (handle1, handle2) = (handles.next().unwrap(), handles.next().unwrap());
+            let first = device_approved(&mut core, id, site, &body, &handle1);
+            let second = device_approved(&mut core, id + 1, site, &body, &handle2);
+            for (device, handle) in [(&first, &handle1), (&second, &handle2)] {
+                let fields = device.as_object().unwrap();
+                assert_eq!(
+                    fields.len(),
+                    6 + usize::from(expected_hash.is_some()),
+                    "{what}: {device}"
+                );
+                assert_eq!(device["type"], *kind, "{what}");
+                assert_eq!(device["kind"], token_kind, "{what}");
+                assert_eq!(device["account"], *index, "{what}");
+                assert_eq!(device["payload"], payload, "{what}");
+                assert_eq!(
+                    device.get("expected_hash").map(|h| h.as_str().unwrap()),
+                    expected_hash,
+                    "{what}"
+                );
+                assert_eq!(device["handle"], handle.as_str(), "{what}");
+                let token = device["token"].as_str().unwrap();
+                assert!(
+                    token.len() == 64 && token.bytes().all(|b| b.is_ascii_hexdigit()),
+                    "{what}"
+                );
+            }
+            assert_ne!(first["token"], second["token"], "{what}");
+            // The first, never presented before, under another handle:
+            // it binds nothing, and is burnt.
+            let spend_first = |core: &mut Core, id: u64, handle: &str| {
+                spend(
+                    core,
+                    id,
+                    site,
+                    &first["token"],
+                    token_kind,
+                    *index,
+                    &payload,
+                    handle,
+                )
+            };
+            let other = spend_first(&mut core, id + 2, &"cd".repeat(32));
+            assert_eq!(
+                other["error"]["data"]["reason"], "mismatch",
+                "{what}: {other}"
+            );
+            let burnt = spend_first(&mut core, id + 3, &handle1);
+            assert_eq!(
+                burnt["error"]["data"]["reason"], "unknown_token",
+                "{what}: {burnt}"
+            );
+            // The second, as the page's request and its handle say: bound,
+            // once.
+            let spend_second = |core: &mut Core, id: u64| {
+                spend(
+                    core,
+                    id,
+                    site,
+                    &second["token"],
+                    token_kind,
+                    *index,
+                    &payload,
+                    &handle2,
+                )
+            };
+            let spent = spend_second(&mut core, id + 4);
+            assert_eq!(spent["result"]["bound"], true, "{what}: {spent}");
+            let again = spend_second(&mut core, id + 5);
+            assert_eq!(
+                again["error"]["data"]["reason"], "unknown_token",
+                "{what}: {again}"
+            );
+            id += 10;
+        }
     }
     assert_eq!(grant_file(&core), before);
 }
 
-fn spend_as(core: &mut Core, id: u64, site: &str, device: &Value) -> Value {
+/// Main's `approval.spend` of a page-kind token for `site`.
+#[allow(clippy::too_many_arguments)]
+fn spend(
+    core: &mut Core,
+    id: u64,
+    site: &str,
+    token: &Value,
+    kind: &str,
+    account: u64,
+    payload: &Value,
+    handle: &str,
+) -> Value {
     core.send(&json!({
         "type": "request", "id": id, "method": "approval.spend",
         "params": {
-            "token": device["token"], "kind": device["kind"], "account": device["account"],
-            "payload": device["payload"], "handle": device["handle"],
+            "token": token, "kind": kind, "account": account,
+            "payload": payload, "handle": handle,
         },
         "context": page(Some(site), Some(false)),
     }));
@@ -984,6 +1153,78 @@ fn a_rule_refuses_in_custody_or_with_its_document_gone() {
     // Live and outside custody: signed, and the last use marked.
     sign_from(&mut core, 14, SITE, Some(false));
     rule_signs(&mut core, 14);
+    assert_eq!(grant_file(&core)[SITE]["lastUsed"], NOW + 1000);
+}
+
+/// The unlock a rule's request asks for while the vault is locked, in each
+/// form main answers it (Inferred 5): rejected or closed, `4001` "User
+/// cancelled unlock"; busy, `-32002`, the busy answer and not the cancel;
+/// a pick on the approve, crossed (`mismatch`). Approved with the vault
+/// still locked, the recheck comes and the vault refuses the signature:
+/// nothing signed, the last use unmarked. Once unlocked, the rule signs
+/// and marks it.
+#[test]
+fn every_unlock_answer_through_a_rule() {
+    let (_root, mut core, clock) =
+        core_at(&store(vec![ruled(SITE, 0, Some(NOW), false)]), NOW, true);
+    std::fs::write(&clock, (NOW + 1000).to_string()).unwrap();
+    let before = grant_file(&core);
+    let unlock_asked = |core: &mut Core, id: u64| {
+        sign_from(core, id, SITE, Some(false));
+        let asked = prompted(core, id);
+        let params = &asked["params"];
+        assert_eq!(params["kind"], "vault.unlock", "{asked}");
+        let view = json!({ "account": world()["wallets"][0], "reason": "sign" });
+        assert_eq!(params["view"], view, "{asked}");
+        assert_eq!(params["choices"], json!({}), "{asked}");
+        asked
+    };
+    let cancelled = json!({ "error": { "code": 4001, "message": "User cancelled unlock" } });
+    let busy = json!({ "error": { "code": -32002, "message": "Another wallet request is already pending" } });
+    let answers = [
+        (
+            10,
+            json!({ "handle": "a1".repeat(32), "approve": false, "choices": {} }),
+            &cancelled,
+        ),
+        (11, json!({ "closed": "closed" }), &cancelled),
+        (12, json!({ "busy": true }), &busy),
+    ];
+    for (id, mut answer, expected) in answers {
+        let asked = unlock_asked(&mut core, id);
+        answer["prompt"] = asked["params"]["prompt"].clone();
+        respond(&mut core, &asked, answer);
+        assert_eq!(core.until_response(id)["result"], *expected, "{id}");
+    }
+    // A pick on the unlock's approve: crossed, with nothing asked after it.
+    let asked = unlock_asked(&mut core, 13);
+    let picked = approve(
+        &asked["params"]["prompt"],
+        &"a2".repeat(32),
+        json!({ "alwaysAllow": false }),
+    );
+    respond(&mut core, &asked, picked);
+    let reply = next_message(&mut core);
+    assert_eq!(reply["type"], "response", "{reply}");
+    assert_eq!(reply["error"]["data"]["reason"], "mismatch", "{reply}");
+    // Approved with the vault still locked: the recheck, then the vault's
+    // refusal.
+    let asked = unlock_asked(&mut core, 14);
+    respond(
+        &mut core,
+        &asked,
+        approve(&asked["params"]["prompt"], &"a3".repeat(32), json!({})),
+    );
+    recheck(&mut core, 14, true, false);
+    assert_eq!(
+        core.until_response(14)["result"],
+        json!({ "error": { "code": -32603, "message": "Vault is locked" } })
+    );
+    assert_eq!(grant_file(&core), before, "nothing signed or marked");
+    // Unlocked: the rule signs, and marks the last use.
+    unlock(&mut core, 90);
+    sign_from(&mut core, 95, SITE, Some(false));
+    rule_signs(&mut core, 95);
     assert_eq!(grant_file(&core)[SITE]["lastUsed"], NOW + 1000);
 }
 
