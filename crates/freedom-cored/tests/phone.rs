@@ -1734,6 +1734,41 @@ fn a_flagged_send_s_rule_waits_for_its_transaction() {
     assert!(!f.has_rule(&aged_data));
 }
 
+/// A narrower revoke (one rule) keeps the grant, and forgets the key's
+/// waiting rules all the same: saved, so a restart doesn't bring them back.
+#[test]
+fn a_narrower_revoke_forgets_the_waiting_rule() {
+    let root = tempfile::tempdir().unwrap();
+    let mut f = Flagged::start(root.path());
+    let (first, first_data) = f.job();
+    f.world.txs.insert(hash(1), seen("0x5", &first_data));
+    let answer = f.world.result(&first, TARGET, hash(1).into());
+    assert_eq!(
+        answer["result"]["rule"],
+        json!({ "added": true }),
+        "{answer}"
+    );
+    let (job, data) = f.job();
+    assert_eq!(
+        outcome(&f.world.result(&job, TARGET, hash(2).into())),
+        "unverified"
+    );
+    let call = json!({ "to": TO, "selector": &first_data[..10], "chain_id": 100 });
+    let narrowed = f.world.call(
+        &chrome(),
+        "approval.revoke",
+        json!({ "store": "dapp", "key": SITE, "what": { "transaction": call } }),
+    );
+    assert!(narrowed["result"].is_object(), "{narrowed}");
+    assert!(!f.has_rule(&first_data));
+    let mut f = f.restart();
+    f.world.txs.insert(hash(2), seen("0x5", &data));
+    let checked = f.world.checked(&job);
+    assert_eq!(checked["outcome"], "verified");
+    assert!(checked.get("rule").is_none(), "{checked}");
+    assert!(!f.has_rule(&data));
+}
+
 /// A revoke or a forgotten account whose phone write fails at any stage,
 /// then a connect made again and a restart: the file may still hold the
 /// waiting rule, but it names the grant that ended, so nothing is written.
