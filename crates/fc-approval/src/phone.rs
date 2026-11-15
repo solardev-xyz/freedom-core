@@ -1272,7 +1272,9 @@ mod tests {
             )
         };
         assert_eq!(
-            read_file(file(&[at.clone()], 0).as_bytes()).unwrap().len(),
+            read_file(file(std::slice::from_ref(&at), 0).as_bytes())
+                .unwrap()
+                .len(),
             1
         );
         let over = padded_record(1, MAX_RECORD_BYTES + 1);
@@ -1332,7 +1334,7 @@ mod tests {
             record_len(&largest)
         );
         assert_eq!(
-            read_file(&file_text(&[largest.clone()])).unwrap(),
+            read_file(&file_text(std::slice::from_ref(&largest))).unwrap(),
             vec![largest]
         );
     }

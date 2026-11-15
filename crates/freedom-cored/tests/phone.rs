@@ -1506,6 +1506,45 @@ fn a_standing_rule_judges_a_phone_s_send_as_a_phone_s() {
     refused(&paused, "not_authorized", Some("paused"));
 }
 
+/// Room first: a job refused as busy spends none of the standing rule's
+/// rate (R-6's burst of 5), so once there is room the next job is still
+/// within it.
+#[test]
+fn a_busy_job_spends_none_of_the_rule_s_rate() {
+    let root = tempfile::tempdir().unwrap();
+    let dir = root.path().join("userData");
+    std::fs::create_dir_all(&dir).unwrap();
+    let granted = WALL - 600_000;
+    let grant = json!({ SITE: {
+        "origin": SITE, "connectedAt": granted, "lastUsed": granted,
+        "walletIndex": ACCOUNT, "chainId": 100,
+        "autoApprove": {
+            "signing": false, "transactions": [],
+            "limited": { "signing": { "grantedAt": granted }, "transactions": [] },
+        },
+    } });
+    std::fs::write(dir.join("dapp-permissions.json"), grant.to_string()).unwrap();
+    let hooks = Hooks::new(root.path());
+    let mut world = World::spawn_moved(root.path(), hooks, &["dapp"]);
+    let message = || json!({ "message": "0x68656c6c6f" });
+    let standing = || Some(json!({ "standing": { "paused": false } }));
+    // 64 signature jobs: no room for another.
+    let held: Vec<String> = (0..64)
+        .map(|_| job_of(&world.job(&shell(), "message", message(), None)))
+        .collect();
+    for _ in 0..5 {
+        refused(
+            &world.job(&site(), "message", message(), standing()),
+            "busy",
+            None,
+        );
+    }
+    // Room again: the rule still answers, its burst unspent.
+    world.error(&held[0], TARGET, json!({ "rpc_code": 4001 }));
+    let opened = world.job(&site(), "message", message(), standing());
+    assert_eq!(job_of(&opened).len(), 32, "{opened}");
+}
+
 /// A flagged `dapp-send`'s rule is written once the phone sent the payment
 /// confirmed, as `sign.transaction` writes a vault send's; never for a
 /// payment the phone swapped.

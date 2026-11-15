@@ -857,7 +857,7 @@ impl Vault {
     /// files"): the moved files are loaded now.
     pub fn configure_grants(&mut self, root: PathBuf, moved: Vec<fc_approval::stores::StoreKind>) {
         let wall_ms = self.clocks().wall_ms;
-        self.phone.configure(root.clone(), wall_ms);
+        self.phone.configure(root.clone());
         self.approvals.configure_grants(root, moved, wall_ms);
     }
 

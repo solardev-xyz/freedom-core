@@ -315,10 +315,11 @@ impl Phone {
     }
 
     /// The hello's `grant_root`: the file's leftover temp files removed and
-    /// its records read, at `wall_ms`. A file that can't be read is renamed
-    /// aside and `phone.lost` sent once; a record past its day ends
-    /// `unknown` before any read; the rest are rechecked at once.
-    pub fn configure(&mut self, root: PathBuf, wall_ms: u64) {
+    /// its records read. A file that can't be read is renamed aside and
+    /// `phone.lost` sent once. Every record is due at once: the loop ticks
+    /// before it handles anything after the hello, and [`Phone::tick`] ends
+    /// a record past its day `unknown` before any read.
+    pub fn configure(&mut self, root: PathBuf) {
         let path = root.join(FILE_NAME);
         self.path = Some(path.clone());
         if let Err(e) = fsx::remove_temps(&root, FILE_NAME) {
@@ -347,21 +348,6 @@ impl Phone {
             }
         };
         self.jobs.load(records);
-        // The age comes first, before any read.
-        let ended: Vec<JobId> = self
-            .jobs
-            .records()
-            .iter()
-            .filter(|record| !phone::within_window(record.answered_at, wall_ms))
-            .map(|record| record.job)
-            .collect();
-        for job in &ended {
-            self.jobs.drop_record(job);
-            self.checked(job, "unknown", None);
-        }
-        if !ended.is_empty() {
-            self.save();
-        }
         let now = Instant::now();
         self.waiting = self
             .jobs
