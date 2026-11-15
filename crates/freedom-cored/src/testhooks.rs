@@ -102,6 +102,10 @@
 //!   10-minute life (design 0012, "A device send's rule"), so a test sees
 //!   one expire over the wire, which has no clock to inject. Read once, as
 //!   the core starts.
+//! - `FREEDOM_CORED_TEST_EIP1193_DEQUEUE_DELAY_MS` stalls the chain thread
+//!   as it takes a page's EIP-1193 read, as if the read waited behind other
+//!   chain mail; `FREEDOM_CORED_TEST_EIP1193_OVERALL_MS` replaces the
+//!   read's 120 s in all.
 //! - `FREEDOM_CORED_TEST_METHODS` enables the `test.*` methods
 //!   (`testmethods`), which make responses of any size. Builds without the
 //!   feature don't compile them, nor this hook.
@@ -175,6 +179,18 @@ pub fn snapshot_delay() {
     if let Some(ms) = millis("FREEDOM_CORED_TEST_SNAPSHOT_DELAY_MS") {
         std::thread::sleep(Duration::from_millis(ms));
     }
+}
+
+#[cfg(feature = "testhooks")]
+pub fn eip1193_dequeue_delay() {
+    if let Some(ms) = millis("FREEDOM_CORED_TEST_EIP1193_DEQUEUE_DELAY_MS") {
+        std::thread::sleep(Duration::from_millis(ms));
+    }
+}
+
+#[cfg(feature = "testhooks")]
+pub fn eip1193_overall(overall: u64) -> u64 {
+    millis("FREEDOM_CORED_TEST_EIP1193_OVERALL_MS").unwrap_or(overall)
 }
 
 #[cfg(feature = "testhooks")]
@@ -594,6 +610,14 @@ pub fn naming_reply() {}
 
 #[cfg(not(feature = "testhooks"))]
 pub fn naming_drain(_frames: usize) {}
+
+#[cfg(not(feature = "testhooks"))]
+pub fn eip1193_dequeue_delay() {}
+
+#[cfg(not(feature = "testhooks"))]
+pub fn eip1193_overall(overall: u64) -> u64 {
+    overall
+}
 
 #[cfg(not(feature = "testhooks"))]
 pub fn chain_bounds(bounds: fc_chain::machine::Bounds) -> fc_chain::machine::Bounds {

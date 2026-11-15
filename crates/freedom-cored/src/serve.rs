@@ -217,6 +217,8 @@ const CAPABILITIES: &[&str] = &[
     // Design 0012: x402's payments (X402-1).
     "x402.authorize",
     "x402.settle",
+    // Design 0012: a page's EIP-1193 request, run by the core (APR-5).
+    "eip1193.request",
     "dweb.open",
     // Design 0009: verified fetches, whose bodies stream.
     "dweb.verify",
@@ -1263,6 +1265,7 @@ impl Core {
                     exit => exit,
                 }
             }
+            "eip1193.request" => self.eip1193(id, params, context),
             method if Vault::handles(method) => {
                 let outs = self.vault.request(id, method, params, context);
                 self.dispatch(outs)
@@ -1364,6 +1367,41 @@ impl Core {
             serde_json::json!({ "id": id, "method": loggable(method), "ms": started.elapsed().as_millis() as u64 }),
         );
         flow
+    }
+
+    /// A page's `eip1193.request` (design 0012, "fc-eip1193 and
+    /// approval.request"; APR-5b, the reads): fc-eip1193's dispatcher, with
+    /// the page's key (`PageContext.origin`; empty for a document with no
+    /// key) and the dApp store. An answer goes now; a read goes to the
+    /// chain thread, which answers from its outcome.
+    fn eip1193(&mut self, id: u64, params: Option<&str>, context: &Context) -> Flow {
+        // Its 120 s run from here (`Deadline::Steps`).
+        let received = Instant::now();
+        let invalid = || ErrorBody::new(ErrorCode::InvalidArgument, "Invalid parameters");
+        let Some(page) = context.page.as_ref() else {
+            return self.error(id, invalid());
+        };
+        let Ok(request) = fc_eip1193::Request::parse(params.unwrap_or("{}")) else {
+            return self.error(id, invalid());
+        };
+        let key = (!page.origin.is_empty()).then_some(page.origin.as_str());
+        let vault = &self.vault;
+        match fc_eip1193::start(&request, key, |key| vault.dapp_entry(key)) {
+            fc_eip1193::Step::Answer(answer) => match RawValue::from_string(answer.into_string()) {
+                Ok(answer) => self.result(id, &answer),
+                Err(_) => Flow::Exit(Exit::Internal),
+            },
+            fc_eip1193::Step::Read(read) => {
+                if self.chain.send(
+                    chain::In::Eip1193 { id, read, received },
+                    self.credit.take(),
+                ) {
+                    Flow::Continue
+                } else {
+                    Flow::Exit(Exit::Internal)
+                }
+            }
+        }
     }
 
     fn hello(&mut self, id: u64, params: Option<&str>) -> Flow {
@@ -1937,7 +1975,8 @@ mod tests {
                     || Vault::handles(name)
                     || naming::handles(name)
                     || chain::handles(name)
-                    || dweb::handles(name),
+                    || dweb::handles(name)
+                    || name == "eip1193.request",
                 "{name}"
             );
             assert_eq!(loggable(name), name);

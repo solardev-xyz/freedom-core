@@ -87,6 +87,16 @@ pub enum In {
     },
     /// The writer has room again, or main a free slot, for what waits here.
     Drained,
+    /// A page's `eip1193.request` that reads through this machine (design
+    /// 0012, APR-5b): the event loop's dispatcher asked it, and this thread
+    /// answers main's request `id` from the read's outcome.
+    Eip1193 {
+        id: u64,
+        read: fc_eip1193::Read,
+        /// When the event loop took the request: its time runs from then,
+        /// however long this mail waits here.
+        received: Instant,
+    },
 }
 
 /// Main's terminal reply to one of the chain thread's requests, as the
@@ -222,10 +232,16 @@ fn run(rx: &Receiver<Mail>, mut chain: Chain) -> Stop {
             // machine is brought to the clock before the message, and again
             // after it, before anything is dispatched: handling it can take
             // a while (R3-M1).
-            Ok((message, _credit)) => chain
-                .flush()
-                .and_then(|()| chain.handle(message))
-                .and_then(|()| chain.flush()),
+            Ok((message, _credit)) => {
+                if matches!(message, In::Eip1193 { .. }) {
+                    // As if it waited behind other mail.
+                    crate::testhooks::eip1193_dequeue_delay();
+                }
+                chain
+                    .flush()
+                    .and_then(|()| chain.handle(message))
+                    .and_then(|()| chain.flush())
+            }
             Err(RecvTimeoutError::Timeout) => Ok(()),
             // The event loop has gone (shutdown or EOF): the replies and
             // cancels still waiting go to the writer, which the loop gives
@@ -333,6 +349,20 @@ struct Caller {
     deadline: Ms,
     /// A broadcast's attempt cutoff: no attempt starts at or after it.
     cutoff: Option<Ms>,
+    /// A page's EIP-1193 read: its reply is the dispatcher's answer.
+    eip1193: Option<Box<Eip1193Read>>,
+}
+
+/// A page's EIP-1193 read (design 0012, APR-5b), as the dispatcher asked
+/// it, with its request's time.
+struct Eip1193Read {
+    read: fc_eip1193::Read,
+    /// The request's deadline class (`eip1193.request`'s): the read is one
+    /// step, with its own deadline within what is left.
+    budget: fc_eip1193::Budget,
+    /// Sent again once already: main's chain driver sends a read that a
+    /// configuration change ended again once, within its deadline.
+    retried: bool,
 }
 
 /// The thread's monotonic clock, in milliseconds. A reading is never
@@ -553,7 +583,61 @@ impl Chain {
             }
             In::Response { id, reply } => self.response(id, reply),
             In::Drained => self.pump(),
+            In::Eip1193 { id, read, received } => {
+                let backlog = self.backlog();
+                self.machine.set_output_backlog(backlog);
+                // What waited behind other mail is spent: the first step
+                // gets only what is left.
+                let waited = u64::try_from(received.elapsed().as_millis()).unwrap_or(u64::MAX);
+                let overall = crate::testhooks::eip1193_overall(fc_eip1193::OVERALL_MS);
+                let budget = fc_eip1193::Budget::with_left(
+                    self.machine.now(),
+                    overall.saturating_sub(waited),
+                );
+                self.submit_eip1193(
+                    id,
+                    Eip1193Read {
+                        read,
+                        budget,
+                        retried: false,
+                    },
+                );
+                // It starts now: its first I/O goes with this flush.
+                self.poll();
+                Ok(())
+            }
         }
+    }
+
+    /// Submits a page's EIP-1193 read as `chain.request` would, with no
+    /// options but its routing hint, and a deadline of its own: a chain
+    /// session's, within what is left of its request's 120 s. With nothing
+    /// left, its deadline is 0: the machine ends it as past its deadline
+    /// before it is sent.
+    fn submit_eip1193(&mut self, id: u64, pending: Eip1193Read) {
+        let now = self.machine.now();
+        let deadline_ms = pending.budget.step(now, self.machine.bounds().deadline_ms);
+        let read = &pending.read;
+        let call = Call::Read {
+            chain_id: read.chain_id,
+            method: read.method.to_owned(),
+            params: read.params.clone(),
+            options: ReadOptions {
+                origin: read.origin.clone(),
+                ..ReadOptions::default()
+            },
+        };
+        let caller = Caller {
+            id,
+            chain_id: read.chain_id,
+            method: label(&call),
+            deadline: now.saturating_add(deadline_ms),
+            cutoff: None,
+            eip1193: Some(Box::new(pending)),
+        };
+        let call = self.machine.submit(call, Some(deadline_ms));
+        self.callers.insert(call, caller);
+        self.by_main.insert(id, call);
     }
 
     fn request(&mut self, id: u64, method: &str, params: Option<&str>) -> Flow {
@@ -614,6 +698,7 @@ impl Chain {
                     method: label(&call),
                     deadline,
                     cutoff,
+                    eip1193: None,
                 };
                 let call = self.machine.submit(call, Some(deadline_ms));
                 self.callers.insert(call, caller);
@@ -925,23 +1010,48 @@ impl Chain {
     /// The machine's replies, each in its wire form, queued for the writer.
     fn take_replies(&mut self) -> Flow {
         for done in self.machine.take_replies() {
-            let Some(caller) = self.callers.remove(&done.id) else {
+            let Some(mut caller) = self.callers.remove(&done.id) else {
                 continue;
             };
             self.by_main.remove(&caller.id);
             log_outcome(&caller, &done);
             let (generation, outcome) = (done.generation, done.outcome);
-            let fee_reference = matches!(done.result, Ok(Success::FeeReference(_)));
-            let message = reply_message(caller.id, &done);
-            let payload = if message.len() <= MAX_MESSAGE {
-                message.write()
-            } else {
-                too_large_payload(caller.id, generation, outcome)
+            let eip1193 = caller.eip1193.take();
+            let payload = match eip1193 {
+                // A page's read that a configuration change ended goes again
+                // once, within what is left of its time, as main's chain
+                // driver sends it again (its next flush starts it).
+                Some(mut pending)
+                    if !pending.retried
+                        && matches!(
+                            done.result,
+                            Err(ChainError::Protocol(Protocol::Reconfigured))
+                        ) =>
+                {
+                    pending.retried = true;
+                    self.submit_eip1193(caller.id, *pending);
+                    continue;
+                }
+                Some(pending) => match eip1193_payload(caller.id, &pending.read, &done) {
+                    Some(payload) if payload.len() <= MAX_MESSAGE => payload,
+                    Some(_) => too_large_payload(caller.id, generation, outcome),
+                    // A cancel: 0001's `cancelled`, as any request's.
+                    None => reply_message(caller.id, &done).write(),
+                },
+                None => {
+                    let fee_reference = matches!(done.result, Ok(Success::FeeReference(_)));
+                    let message = reply_message(caller.id, &done);
+                    let payload = if message.len() <= MAX_MESSAGE {
+                        message.write()
+                    } else {
+                        too_large_payload(caller.id, generation, outcome)
+                    };
+                    if fee_reference && let Some(served) = &self.fee_served {
+                        served(caller.id, &payload);
+                    }
+                    payload
+                }
             };
-            if fee_reference && let Some(served) = &self.fee_served {
-                served(caller.id, &payload);
-            }
-            drop(message);
             drop(done);
             // Over one frame for a main that didn't offer fragments (or over
             // the cap): `too_large` in its place.
@@ -2714,6 +2824,42 @@ fn hex(bytes: &[u8]) -> String {
         out.push(char::from(DIGITS[usize::from(byte & 0xf)]));
     }
     out
+}
+
+/// A page's EIP-1193 read's reply (design 0012, APR-5b): the dispatcher's
+/// answer, `{ result }` or `{ error }`, as `eip1193.request`'s result.
+/// Its failure is what main's chain driver threw for it: today's error,
+/// with its own `code` and `data`, or 0001's text with neither (a deadline,
+/// a full machine, a reply too large). `None` for a cancel, which answers
+/// 0001's `cancelled`.
+fn eip1193_payload(id: u64, read: &fc_eip1193::Read, done: &Done) -> Option<Zeroizing<Vec<u8>>> {
+    use fc_eip1193::{Failure, ReadOutcome};
+    let answer = match &done.result {
+        Ok(Success::Read { result, .. }) => read.answer(ReadOutcome::Result(result.as_deref())),
+        Err(ChainError::Thrown(thrown)) => {
+            let message = fc_json::JsString::from_units(thrown.message.units());
+            read.answer(ReadOutcome::Failed(Failure {
+                code: thrown.prop("code").and_then(Prop::json),
+                message: &message,
+                data: thrown.prop("data").and_then(Prop::json),
+            }))
+        }
+        Err(ChainError::Protocol(Protocol::Cancelled)) | Ok(_) => return None,
+        Err(ChainError::Protocol(code)) => {
+            let text = fc_json::JsString::from(protocol_text(*code));
+            read.answer(ReadOutcome::Failed(Failure {
+                code: None,
+                message: &text,
+                data: None,
+            }))
+        }
+    };
+    let head = format!(r#"{{"type":"response","id":{id},"result":"#);
+    let mut payload = Zeroizing::new(Vec::with_capacity(head.len() + answer.as_str().len() + 1));
+    payload.extend_from_slice(head.as_bytes());
+    payload.extend_from_slice(answer.as_str().as_bytes());
+    payload.push(b'}');
+    Some(payload)
 }
 
 /// `too_large` in place of a reply that can't go out.

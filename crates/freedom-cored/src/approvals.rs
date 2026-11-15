@@ -333,9 +333,15 @@ fn string<'a>(object: &'a Map<String, Value>, field: &str) -> Result<&'a str, Er
 }
 
 /// The `PageContext` a `page` caller must send (0011): every page request
-/// here needs it.
+/// here needs it, with an origin. An empty one is a document with no key
+/// (design 0012, APR-5b), which `eip1193.request` alone takes: here it
+/// would be one key that every keyless document shares, for its grants,
+/// its standing rules and its tokens, so it is refused.
 pub fn page_context(context: &Context) -> Result<Option<&PageContext>, ErrorBody> {
     match (context.caller, &context.page) {
+        (CallerKind::Page, Some(page)) if page.origin.is_empty() => {
+            Err(invalid("a page request needs its page's origin"))
+        }
         (CallerKind::Page, Some(page)) => Ok(Some(page)),
         (CallerKind::Page, None) => Err(invalid("a page request needs its page context")),
         _ => Ok(None),
@@ -1435,6 +1441,16 @@ fn grant_key(context: &Context, change: &Map<String, Value>) -> Result<String, E
 }
 
 impl Approvals {
+    /// The key's entry in the dApp store (`getPermission`), as its file
+    /// holds it: the core's once moved, otherwise main's file as it stands
+    /// (design 0012, APR-5b: `eth_accounts`).
+    pub fn dapp_entry(&self, key: &str, wall_ms: u64) -> Option<fc_json::JsValue> {
+        self.grants
+            .view::<DappStore>(wall_ms / 1000)
+            .entry(key)
+            .cloned()
+    }
+
     /// The hello's `grant_root` and `grant_moved` (design 0012, "The
     /// files").
     pub fn configure_grants(
