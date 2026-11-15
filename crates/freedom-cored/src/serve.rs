@@ -1269,9 +1269,10 @@ impl Core {
                 self.keystore.deliver(id, outcome, &message);
                 true
             }
+            // Answered above.
+            (Owner::Eip1193, _) => true,
             // The dweb thread reads its piece's reply where it lies, as the
             // chain thread does.
-            (Owner::Eip1193, _) => true,
             (Owner::Dweb, outcome) => self.dweb.as_ref().is_some_and(|thread| {
                 thread.send(
                     dweb::In::Response {
