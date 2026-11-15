@@ -2,8 +2,9 @@
 //! (APR-1); the four grant files and their codecs (APR-2, [`stores`]); the
 //! standing rules that answer from them ([`standing`]); the Safe
 //! approvals a Safe's token gives (APR-3, [`safe`]); and the finalize
-//! receipts a device send's "Always allow" gives (#373, [`receipt`]); and
-//! phone jobs and their payments' records (PHN-1, [`phone`]).
+//! receipts a device send's "Always allow" gives (#373, [`receipt`]);
+//! phone jobs and their payments' records (PHN-1, [`phone`]); and
+//! x402's payments and caps (X402-1, [`x402`]).
 //!
 //! A token is the core's record that the user confirmed one request: minted
 //! for exactly that request ([`Tokens::issue`]), and spent once, for that
@@ -54,6 +55,9 @@ pub mod receipt;
 // Phone jobs (PHN-1): the job's binding, the answer's checks, and
 // `phone-payments.json`'s records.
 pub mod phone;
+// x402 (X402-1): the cap key, an entry's cap tuple, and the payment payload
+// built from one entry; the caps themselves are `stores::CapStore`'s.
+pub mod x402;
 
 pub use bind::{
     Binding, Handle, Limits, MAX_ACCOUNT, MAX_CHAIN_ID, MAX_CLOSE_HASHES, MAX_NONCE, Page, Request,

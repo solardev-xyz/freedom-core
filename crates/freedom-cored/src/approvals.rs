@@ -107,6 +107,9 @@ use zeroize::Zeroizing;
 use crate::grants::{Grants, StoreFile, WriteFailure, Written};
 use crate::rng::OsRng;
 
+// x402's payments (X402-1): `x402.authorize` and `x402.settle`.
+pub mod x402;
+
 /// The methods this module serves.
 pub const METHODS: [&str; 12] = [
     "approval.issue",
@@ -155,6 +158,8 @@ pub struct Approvals {
     /// The dApp keys narrowed since the loop last asked: a phone payment's
     /// waiting rule for one goes, as its receipts do.
     narrowed: Vec<String>,
+    /// x402's cap generations and reservations (X402-1).
+    x402: x402::X402State,
 }
 
 impl std::fmt::Debug for Approvals {
@@ -651,6 +656,7 @@ impl Approvals {
             standing: Standing::new(),
             events: Vec::new(),
             narrowed: Vec::new(),
+            x402: x402::X402State::default(),
         }
     }
 
@@ -1500,6 +1506,10 @@ impl Approvals {
         wall_ms: u64,
     ) {
         self.grants.configure(root, moved, wall_ms / 1000);
+        if self.grants.moved(StoreKind::X402) {
+            let caps = self.grants.view::<CapStore>(wall_ms / 1000).into_owned();
+            self.x402.loaded(&caps);
+        }
     }
 
     /// The `approval.changed` events the last request made, to send after
@@ -2032,9 +2042,27 @@ impl Approvals {
                     .ok_or_else(|| invalid("flag: unknown"))?;
                 self.write::<RadicleStore, _>(&key, |store| store.set_flag(&key, flag, false))?
             }
-            // A cap's revoke comes with X402-1's cap operations.
-            (StoreKind::X402, _) => {
-                return Err(invalid("x402 caps change through X402-1's methods"));
+            // Every cap of the origin (X402-1), or one: `{ cap: { chain_id,
+            // asset } }`, the asset in any case (`x402-asset-case`). Its
+            // generation goes once the revoke stands, so a charge taken
+            // from it is never given back to a cap granted again.
+            (StoreKind::X402, Some("grant")) => self.write_then::<CapStore, _>(
+                &key,
+                |store| store.revoke_all(&key),
+                |this| this.x402.revoked(&key, None),
+            )?,
+            (StoreKind::X402, None) if what.get("cap").is_some() => {
+                object(what, &["cap"], &[])?;
+                let cap = object(&what["cap"], &["chain_id", "asset"], &[])?;
+                let chain = cap["chain_id"]
+                    .as_u64()
+                    .ok_or_else(|| invalid("chain_id: expected a number"))?;
+                let asset_key = fc_approval::x402::asset_key(chain as f64, string(cap, "asset")?);
+                self.write_then::<CapStore, _>(
+                    &key,
+                    |store| store.revoke(&key, &asset_key),
+                    |this| this.x402.revoked(&key, Some(&asset_key)),
+                )?
             }
             _ => return Err(invalid("what: unknown for this store")),
         };
@@ -2307,12 +2335,8 @@ fn site_records<S: SiteRecords>(
 /// x402's records as `getAllPermissions` gives them: `{ origin, chainId,
 /// asset, ...record }` for each live cap.
 fn cap_records(store: &CapStore, key: Option<&str>, wall_s: u64) -> Vec<JsValue> {
-    // Read again at now, so a cap that expired since it loaded is dropped.
-    let live = store
-        .text()
-        .ok()
-        .and_then(|text| CapStore::load(text.as_bytes(), wall_s).ok())
-        .unwrap_or_default();
+    // At now, so a cap that expired since it loaded is dropped.
+    let live = store.live(wall_s);
     live.caps()
         .filter(|(origin, _, _)| key.is_none_or(|key| key == *origin))
         .map(|(origin, asset_key, record)| {

@@ -211,6 +211,10 @@ pub const METHODS: &[Method] = &[
     row("phone.job", PCS, false, NOW),
     row("phone.sent", PCS, false, NOW),
     row("phone.result", PCS, false, SESSION),
+    // Design 0012, "x402" (X402-1): main's own, as its x402 interception
+    // is; no renderer channel reaches them.
+    row("x402.authorize", SHELL, false, NOW),
+    row("x402.settle", SHELL, false, NOW),
     row("dweb.open", SHELL, false, SESSION),
     // Design 0009: verified fetches, whose bodies stream; protocol 2 only.
     row_v2("dweb.verify", SHELL, false, HEAD),
@@ -309,6 +313,8 @@ mod tests {
             "vault.reconcile",
             "quick_unlock.enroll",
             "dweb.open",
+            "x402.authorize",
+            "x402.settle",
         ] {
             assert_eq!(
                 admit(name, CallerKind::Chrome, V2),

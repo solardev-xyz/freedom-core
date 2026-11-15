@@ -810,7 +810,7 @@ function runAll(sc, byId) {
 
 // ---- the vector -----------------------------------------------------------------
 
-async function buildApprovals(checkout, meta) {
+async function buildApprovals(checkout, meta, mainCheckout) {
   const sc = loadReference(checkout);
   assert.equal(sc.CONFIRMATION_TTL_MS, 2 * MINUTE);
   assert.equal(sc.MAX_OUTSTANDING, 32);
@@ -884,6 +884,7 @@ async function buildApprovals(checkout, meta) {
       pairs: 'Two requests the reference binds: `js`, whether a token minted for either spends for the other (`alike`) or is refused (`apart`), asked of the reference both ways; `changed`, the facts (and `kind`, `page`, `page.handle`, `page.key`) in which the reference\'s bindings differ; `core`, the core\'s answer, from 0012\'s Deviations table where `deviation` is set.',
       stores: STORES_FORMAT,
       rollback: ROLLBACK_FORMAT,
+      x402: require('./approval-x402').X402_FORMAT,
       runs: 'Steps in order under `_setNow`, on a fresh store: `issue` (a case\'s request, minted as `token`), `consume` (a case\'s request, presented with `token`, or with `literal` text; `route: wallet` presents it without its page), `discard` and `count` (the outstanding tokens); `at` is the reference\'s clock, and `vaultAt` the vault\'s where they differ (`token-clock`); each step\'s `outcome` (`ok`, with what the token bound; `error`, the reference\'s message; or `count`), and `core` where the core\'s differs.',
     },
     constants: { ttlMs: sc.CONFIRMATION_TTL_MS, maxOutstanding: sc.MAX_OUTSTANDING },
@@ -897,6 +898,8 @@ async function buildApprovals(checkout, meta) {
     stores: buildStores(checkout),
     // Q9's legacy transition: the design's texts, read by the reference.
     rollback: buildRollback(checkout),
+    // x402's payments (X402-1): the reference's x402 code over the pinned SDK.
+    x402: await require('./approval-x402').buildX402(checkout, mainCheckout),
   };
 }
 

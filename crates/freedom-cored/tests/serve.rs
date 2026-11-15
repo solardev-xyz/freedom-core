@@ -645,6 +645,8 @@ fn only_protocol_2_is_spoken() {
         "phone.job",
         "phone.sent",
         "phone.result",
+        "x402.authorize",
+        "x402.settle",
         "dweb.open",
         "dweb.verify",
         "dweb.forget",

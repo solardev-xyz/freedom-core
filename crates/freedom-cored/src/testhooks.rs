@@ -52,6 +52,10 @@
 //!   file fails at that step as if the OS had failed it (design 0012, "The
 //!   files": a failed write). Read at each write, so a test turns it on
 //!   and off while the core runs.
+//! - `FREEDOM_CORED_TEST_X402_SIGN_MARKER` names a file `x402.authorize`
+//!   appends a line to (`sign`) each time it is about to sign a payment's
+//!   digest, so a test counts the signatures: none for a cap's charge the
+//!   file lacks (design 0012, `x402-at-sign`).
 //! - `FREEDOM_CORED_TEST_KEYSTORE_DEADLINE_MS` replaces how long the core
 //!   waits for main's answer to a `shell.keystore` request (design 0013:
 //!   main's 60 s or 10 s, and 5 s more).
@@ -355,6 +359,19 @@ pub fn naming_drain(frames: usize) {
 }
 
 #[cfg(feature = "testhooks")]
+pub fn x402_signing() {
+    use std::io::Write as _;
+    if let Some(marker) = std::env::var_os("FREEDOM_CORED_TEST_X402_SIGN_MARKER") {
+        // One write per line: the test reads the file between requests.
+        let _ = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(marker)
+            .and_then(|mut file| file.write_all(b"sign\n"));
+    }
+}
+
+#[cfg(feature = "testhooks")]
 pub fn swap(stage: &str, path: &std::path::Path) {
     let Ok(spec) = std::env::var("FREEDOM_CORED_TEST_SWAP") else {
         return;
@@ -600,6 +617,9 @@ pub fn stall(default: Duration) -> Duration {
 
 #[cfg(not(feature = "testhooks"))]
 pub fn swap(_stage: &str, _path: &std::path::Path) {}
+
+#[cfg(not(feature = "testhooks"))]
+pub fn x402_signing() {}
 
 #[cfg(not(feature = "testhooks"))]
 pub fn naming_reply() {}

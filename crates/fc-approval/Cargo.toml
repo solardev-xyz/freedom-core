@@ -35,5 +35,13 @@ serde_json = { version = "1", features = ["preserve_order", "raw_value"] }
 serde = { version = "1", features = ["derive"] }
 sha2 = { version = "0.11", default-features = false }
 thiserror = "2"
+# An x402 cap's key is the paid URL's origin (design 0012, Q11), as the
+# WHATWG URL parser serializes it; fc-naming, fc-dweb and fc-chain link it.
+url = "2"
 # A token is a bearer secret: wiped when it is spent, dropped or evicted.
 zeroize = "1.8"
+
+[dev-dependencies]
+# The x402 vectors' payloads are signed with a public test key, as the
+# reference's signer signs them.
+k256 = { version = "0.14", default-features = false, features = ["arithmetic", "ecdsa"] }

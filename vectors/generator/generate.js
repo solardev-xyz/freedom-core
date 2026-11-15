@@ -124,8 +124,9 @@ function loadRadicleReference(checkout) {
 }
 
 /** The approvals vectors' reference: their generator loads its
- * signing-confirmation.js and its four grant stores, which read no package,
- * so its meta names none. */
+ * signing-confirmation.js, its four grant stores and its x402 code. The x402
+ * code's SDK is the main reference's install, which buildApprovals' meta
+ * names (`packages`). */
 function loadApprovalsReference(checkout) {
   const commit = checkedCommit(checkout, APPROVALS_REFERENCE_COMMIT, 'approvals reference');
   return { checkout, meta: { freedomBrowserCommit: commit, nodeVersion: process.version, generator: 'vectors/generator/generate.js' } };
@@ -610,7 +611,12 @@ async function main() {
     'radicle-import.json': await buildRadicleImport(radicle.checkout, radicle.meta),
     // Design 0012's tokens, from main's signing-confirmation.js, and its
     // grant files, from main's four stores.
-    'approvals.json': await buildApprovals(approvals.checkout, approvals.meta),
+    // x402's payloads come from its code over the main reference's
+    // installed SDK (@x402/core and @x402/evm 2.28.0), which meta names.
+    'approvals.json': await buildApprovals(approvals.checkout, {
+      ...approvals.meta,
+      packages: require('./approval-x402').x402Packages(reference.checkout, packageVersion),
+    }, reference.checkout),
     // Design 0013's profile catalog, from main's profile-catalog.js and
     // profile-resolver.js.
     'profiles.json': buildProfiles(approvals.checkout, reference.checkout, {
