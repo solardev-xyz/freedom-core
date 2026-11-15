@@ -1568,6 +1568,41 @@ impl Approvals {
         let _ = self.write::<DappStore, _>(key, |store| store.touch(key, chain_id, wall_ms));
     }
 
+    /// The page-kind token for a signature the user approved on the core's
+    /// own prompt (design 0012, APR-5d-1): minted here, as `approval.issue`
+    /// would mint it under `page`, for `page`'s document and the `handle`
+    /// main's answer named, binding `account` and `payload` in the core's
+    /// form. Only the caller that holds the answer spends it, on that
+    /// request's signature, at once: it never leaves the core.
+    pub fn page_token(
+        &mut self,
+        page: &PageContext,
+        handle: &str,
+        kind: Kind,
+        account: u32,
+        payload: &Value,
+        clocks: Clocks,
+    ) -> Result<Zeroizing<String>, ErrorBody> {
+        let page = Page {
+            origin: page.origin.clone(),
+            frame: page.frame,
+            navigation: page.navigation,
+            handle: Handle::parse(handle).map_err(approval_error)?,
+        };
+        let account = json!(account);
+        let request = Request {
+            kind,
+            account: Some(&account),
+            payload,
+            page: Some(&page),
+        };
+        let issued = self
+            .tokens
+            .issue_as(Minter::Page, &request, clocks.vault_ms, &mut OsRng)
+            .map_err(approval_error)?;
+        Ok(issued.token.to_text())
+    }
+
     /// The hello's `grant_root` and `grant_moved` (design 0012, "The
     /// files").
     pub fn configure_grants(

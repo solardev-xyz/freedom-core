@@ -66,9 +66,13 @@ pub struct Crossed;
 /// Main's decision on a prompt.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Decision {
-    /// Approved, with the user's picks and main's wallet state as it
-    /// answered.
-    Approve { choices: JsValue, world: World },
+    /// Approved on `handle`, with the user's picks and main's wallet state
+    /// as it answered.
+    Approve {
+        choices: JsValue,
+        world: World,
+        handle: String,
+    },
     /// Rejected on its handle.
     Reject,
     /// Its handle closed with no decision.
@@ -138,16 +142,17 @@ impl Prompts {
             *slot = Some(value);
         }
         // A handle counts as seen as soon as an answer names it.
-        let handle = match fields.handle.as_ref() {
+        let named = match fields.handle.as_ref() {
             Some(handle) => {
                 let handle = handle.as_str().filter(|h| is_handle(h)).ok_or(Crossed)?;
                 if !self.remember(handle) {
                     return Err(Crossed);
                 }
-                true
+                Some(handle.to_owned())
             }
-            None => false,
+            None => None,
         };
+        let handle = named.is_some();
         let prompt = fields.prompt.as_ref().and_then(JsValue::as_str);
         if prompt != Some(id.hex().as_str()) {
             return Err(Crossed);
@@ -168,7 +173,11 @@ impl Prompts {
                     };
                 }
                 let world = World::from_value(world.ok_or(Crossed)?).map_err(|_| Crossed)?;
-                Ok(Decision::Approve { choices, world })
+                Ok(Decision::Approve {
+                    choices,
+                    world,
+                    handle: named.unwrap_or_default(),
+                })
             }
             Fields {
                 closed: Some(JsValue::String(ref reason)),
@@ -319,7 +328,7 @@ mod tests {
             handle(1)
         );
         match prompts.accept(&id, &approve) {
-            Ok(Decision::Approve { choices, world }) => {
+            Ok(Decision::Approve { choices, world, .. }) => {
                 assert_eq!(choices.stringify(), r#"{"walletIndex":0}"#);
                 assert!(world.enabled);
             }

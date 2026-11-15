@@ -38,10 +38,17 @@
 //! document, the key's grant takes the chain, and main selects it for the
 //! window. `wallet_addEthereumChain` isn't in main's table: `4200`.
 //!
-//! The later APR-5 steps add signatures (APR-5d), the prepared send
-//! (APR-5e) and names over IPNS (APR-5f). Until then, those methods answer
-//! as a dispatcher without their route does (`4200`, `Method not
-//! supported`), but `4900` while the switch is off.
+//! **APR-5d-1, signatures** ([`sign`]): `personal_sign` and
+//! `eth_signTypedData_v4` for a vault account, through `eth.sign`. A
+//! document with no key gets `4100` first. On an approve the daemon mints
+//! the page-kind token itself, for that answer's page and handle, and
+//! spends it on the signature at once: the token never leaves the core.
+//! Standing rules, Q9 and devices' `{ device }` results are APR-5d-2's.
+//!
+//! The later APR-5 steps add the prepared send (APR-5e) and names over
+//! IPNS (APR-5f). Until then, those methods answer as a dispatcher without
+//! their route does (`4200`, `Method not supported`), but `4900` while the
+//! switch is off.
 
 mod answer;
 pub mod connect;
@@ -49,7 +56,9 @@ mod deadline;
 mod methods;
 pub mod prompt;
 mod request;
+pub mod sign;
 pub mod switch;
+mod v8json;
 
 pub use answer::{Answer, Failure, Read, ReadOutcome};
 pub use connect::Connect;
@@ -57,6 +66,7 @@ pub use deadline::{Budget, OVERALL_MS};
 pub use methods::{Class, METHODS, Method, RPC_READS, method};
 pub use prompt::{Crossed, Decision, PromptId, Prompts, Recheck};
 pub use request::{Invalid, Request, World};
+pub use sign::Sign;
 pub use switch::Switch;
 
 use fc_json::JsValue;
@@ -78,6 +88,9 @@ pub enum Step {
     /// A chain switch past its checks (`wallet_switchEthereumChain`):
     /// main's recheck, the grant's chain, and main's selection.
     Switch(Switch),
+    /// A signature (`personal_sign`, `eth_signTypedData_v4`) for a document
+    /// with a key: [`Sign::ask`] runs it up to its prompt.
+    Sign(Sign),
 }
 
 /// Runs `request` for the document keyed `key` (`PageContext.origin`;
@@ -116,6 +129,10 @@ pub fn start(
                 Err(answer) => Step::Answer(answer),
             },
         },
+        name if sign::Method::of(name).is_some() => match (key, sign::Method::of(name)) {
+            (Some(key), Some(method)) => Step::Sign(Sign::new(request, method, key)),
+            _ => Step::Answer(Answer::error(connect::NO_ADDRESS.0, connect::NO_ADDRESS.1)),
+        },
         name if RPC_READS.contains(&name) => Step::Read(Read::new(
             chain_id,
             row.name,
@@ -123,7 +140,7 @@ pub fn start(
             key,
             world,
         )),
-        // APR-5d and APR-5e serve the rest.
+        // APR-5e serves the rest.
         _ => Step::Answer(Answer::unsupported()),
     }
 }

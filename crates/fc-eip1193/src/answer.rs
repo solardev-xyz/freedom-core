@@ -34,6 +34,15 @@ impl Answer {
         Answer(out)
     }
 
+    /// `{ error: { code, message } }`, the message as JavaScript holds it
+    /// (a `SyntaxError`'s may quote a lone surrogate).
+    pub(crate) fn error_js(code: i64, message: &JsString) -> Answer {
+        let mut out = format!(r#"{{"error":{{"code":{code},"message":"#);
+        message.quote_into(&mut out);
+        out.push_str("}}");
+        Answer(out)
+    }
+
     /// Every method while the Identity & Wallet switch is off.
     pub(crate) fn disconnected() -> Answer {
         Answer::error(4900, "Disconnected")

@@ -1476,6 +1476,33 @@ impl Core {
                 let outs = self.connects.switch(id, switch, &key, &page, received);
                 self.dispatch(outs)
             }
+            // A signature for a document with a key (APR-5d-1): before the
+            // dApp store moves its grant is main's, so the core takes none
+            // (*inferred*). Then the grant, the account, the rule and what
+            // is signed, up to its prompt; the core's view of typed data is
+            // `typed_data.hash`'s, as the reference asked the core for it.
+            fc_eip1193::Step::Sign(sign) => {
+                if let Some(refused) = self.dapp_unmoved(id) {
+                    return refused;
+                }
+                let vault = &self.vault;
+                let asked = sign.ask(
+                    page.agent,
+                    |key| vault.dapp_entry(key),
+                    crate::signing::page_typed_data_view,
+                );
+                match asked {
+                    Err(answer) => match RawValue::from_string(answer.into_string()) {
+                        Ok(answer) => self.result(id, &answer),
+                        Err(_) => Flow::Exit(Exit::Internal),
+                    },
+                    Ok(ask) => {
+                        let (key, page) = (page.origin.clone(), page.clone());
+                        let outs = self.connects.sign(id, ask, &key, &page, received);
+                        self.dispatch(outs)
+                    }
+                }
+            }
         }
     }
 
