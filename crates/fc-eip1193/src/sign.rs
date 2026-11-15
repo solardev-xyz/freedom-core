@@ -151,7 +151,7 @@ pub enum Device {
 }
 
 impl Device {
-    fn of(kind: Option<&str>) -> Option<Device> {
+    pub(crate) fn of(kind: Option<&str>) -> Option<Device> {
         match kind {
             Some("ledger") => Some(Device::Ledger),
             Some("remote") => Some(Device::Phone),
@@ -414,7 +414,7 @@ impl DeviceApproval {
 
 /// `failure(err, fallback)`: `-32603` with the error's message, or the
 /// fallback for an empty one.
-fn failure(message: &str, fallback: &str) -> Answer {
+pub(crate) fn failure(message: &str, fallback: &str) -> Answer {
     let message = if message.is_empty() {
         fallback
     } else {
@@ -423,10 +423,10 @@ fn failure(message: &str, fallback: &str) -> Answer {
     Answer::error(INTERNAL_ERROR_CODE, message)
 }
 
-static UNDEFINED: JsValue = JsValue::Undefined;
+pub(crate) static UNDEFINED: JsValue = JsValue::Undefined;
 
 /// `candidate?.index`.
-fn index_of(candidate: &JsValue) -> &JsValue {
+pub(crate) fn index_of(candidate: &JsValue) -> &JsValue {
     match candidate {
         JsValue::Null | JsValue::Undefined => &UNDEFINED,
         candidate => candidate.get("index").unwrap_or(&UNDEFINED),
@@ -434,7 +434,7 @@ fn index_of(candidate: &JsValue) -> &JsValue {
 }
 
 /// `params?.[n]`, as JavaScript reads it from what main sent.
-fn element(params: Option<&JsValue>, n: usize) -> JsValue {
+pub(crate) fn element(params: Option<&JsValue>, n: usize) -> JsValue {
     match params {
         Some(JsValue::Array(items)) => items.get(n).cloned().unwrap_or(JsValue::Undefined),
         Some(object @ JsValue::Object(_)) => object
@@ -487,7 +487,7 @@ fn signs_raw_hash(message: &JsValue) -> bool {
     }
 }
 
-fn prop(name: &str, value: JsValue) -> (JsString, JsValue) {
+pub(crate) fn prop(name: &str, value: JsValue) -> (JsString, JsValue) {
     (JsString::from(name), value)
 }
 
@@ -513,7 +513,7 @@ struct Prepared {
 }
 
 /// A grant's `walletIndex` as an account index, where it is one.
-fn account_index(wallet_index: &JsValue) -> Option<u32> {
+pub(crate) fn account_index(wallet_index: &JsValue) -> Option<u32> {
     match wallet_index {
         JsValue::Number(index) if index.fract() == 0.0 && (0.0..=MAX_ACCOUNT).contains(index) => {
             #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
@@ -831,7 +831,7 @@ fn warning_chains(world: &World, chain_id: u64, view: &JsValue) -> JsValue {
 }
 
 /// `BigInt(value).toString()`, or `None` where it throws.
-fn big_int(value: &JsValue) -> Option<String> {
+pub(crate) fn big_int(value: &JsValue) -> Option<String> {
     match value {
         JsValue::String(text) => string_to_big_int(text.as_str()),
         JsValue::Number(n) if n.is_finite() && n.fract() == 0.0 => Some(integer_text(*n)),
