@@ -314,9 +314,10 @@ impl Connects {
         vec![Out::Send(Zeroizing::new(cancel.into_bytes()))]
     }
 
-    /// Whether `open`'s clock runs: it isn't at an open prompt.
+    /// Whether `open`'s clock runs. Its budget alone says so: the budget
+    /// stops while the request's prompt is open.
     fn running(open: &Open) -> bool {
-        !(matches!(open.step, Pending::Prompt { .. }) && open.asked.is_some())
+        !open.budget.stopped()
     }
 
     /// When the next request's time runs out.

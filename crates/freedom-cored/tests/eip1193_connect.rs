@@ -5,7 +5,8 @@
 //! reference's prompt took, and the core's answer, the grant file it writes
 //! and its `approval.changed` events are the reference's. Then the
 //! guarantees: no grant without a decision, prompt ids and handles never
-//! reused, the clock stopped while a prompt is open, and a cancel.
+//! reused, the clock stopped while a prompt is open, a cancel, and the cap
+//! on open prompts.
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
@@ -105,16 +106,14 @@ fn respond(core: &mut Core, request: &Value, result: Value) {
     core.send(&json!({ "type": "response", "id": request["id"], "result": result }));
 }
 
-/// What arrives until the response to `id`: the core's requests to main,
-/// and the response.
+/// The next message, which must be one of the core's requests to main.
 fn next_request(core: &mut Core) -> Value {
-    loop {
-        let message = core.recv();
-        if message["type"] == "request" {
-            return message;
-        }
-        panic!("expected a request, got {message}");
-    }
+    let message = core.recv();
+    assert_eq!(
+        message["type"], "request",
+        "expected a request, got {message}"
+    );
+    message
 }
 
 fn response(core: &mut Core, id: u64) -> Value {
@@ -560,4 +559,76 @@ fn refused_before_any_approval_path() {
     let reply = response(&mut core, 10);
     assert_eq!(reply["error"]["code"], "not_moved", "{reply}");
     assert_eq!(reply["error"]["data"]["store"], "dapp", "{reply}");
+}
+
+/// At most 64 `approval.request`s are open at once (*inferred*): the 65th
+/// connect waits for room and goes, in order, once one is answered. A
+/// recheck isn't a prompt, so a connected key's goes while the 64 are open.
+#[test]
+fn at_most_64_prompts_are_open_at_once() {
+    const CONNECTED: &str = "https://connected.example";
+    let grant = json!({ CONNECTED: { "origin": CONNECTED, "connectedAt": 1, "lastUsed": 1,
+        "walletIndex": 0, "chainId": 100,
+        "autoApprove": { "signing": false, "transactions": [] } } });
+    let (_root, mut core) = core_with(&grant, &[]);
+    let world = plain_world();
+    let mut asked = Vec::new();
+    for id in 100..164 {
+        connect(&mut core, id, Some(SITE), &world);
+        let request = next_request(&mut core);
+        assert_eq!(request["method"], "approval.request");
+        assert_eq!(request["params"]["request"], id);
+        asked.push(request);
+    }
+    connect(&mut core, 164, Some(SITE), &world);
+    connect(&mut core, 165, Some(CONNECTED), &world);
+    let recheck = next_request(&mut core);
+    assert_eq!(
+        recheck["method"], "approval.recheck",
+        "the 65th prompt waits"
+    );
+    assert_eq!(recheck["params"]["request"], 165);
+    respond(&mut core, &recheck, json!({ "live": true, "agent": false }));
+    assert_eq!(
+        response(&mut core, 165)["result"],
+        json!({ "result": ["0xa"] })
+    );
+    // Still no 65th: the sentinel's reply comes with no request before it.
+    for event in events(&mut core, 200) {
+        assert_eq!(event["event"], "approval.changed", "{event}");
+    }
+    // One answered: the 65th goes (main may see it before the answer).
+    let first = &asked[0];
+    respond(
+        &mut core,
+        first,
+        json!({ "prompt": first["params"]["prompt"], "closed": "closed" }),
+    );
+    let (mut waited, mut answered) = (Value::Null, Value::Null);
+    for _ in 0..2 {
+        let message = core.recv();
+        match message["type"].as_str() {
+            Some("request") if waited.is_null() => waited = message,
+            Some("response") if answered.is_null() => answered = message,
+            _ => panic!("unexpected {message}"),
+        }
+    }
+    assert_eq!(answered["id"], 100);
+    assert_eq!(
+        answered["result"].to_string(),
+        r#"{"error":{"code":4001,"message":"User rejected the request"}}"#
+    );
+    assert_eq!(waited["method"], "approval.request");
+    assert_eq!(waited["params"]["request"], 164);
+    respond(
+        &mut core,
+        &waited,
+        json!({ "prompt": waited["params"]["prompt"], "handle": handle(164),
+        "approve": true, "choices": { "walletIndex": 1 }, "world": plain_world() }),
+    );
+    assert_eq!(
+        response(&mut core, 164)["result"],
+        json!({ "result": ["0xb"] })
+    );
+    assert_eq!(file_of(&core)[SITE]["walletIndex"], 1);
 }
