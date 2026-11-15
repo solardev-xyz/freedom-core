@@ -29,8 +29,9 @@
 //!   nothing signed and nothing granted. A handle is taken as seen once an
 //!   answer carries it, whether that answer is accepted or not: one that
 //!   has named a handle for one prompt never makes it count for another.
-//! - **Handles are kept for the last [`MAX_HANDLES`] answers that named
-//!   one** (*inferred*), the oldest dropped. Main mints each handle from
+//! - **The [`MAX_HANDLES`] handles answers named most recently are
+//!   kept** (*inferred*), a handle named again counting as named last, and
+//!   the one named longest ago dropped. Main mints each handle from
 //!   32 random bytes and never reuses one (0011), so the check guards
 //!   against main's bugs, not its intent. At most 64 prompts are open and
 //!   each cancelled one awaits one terminal answer, within main's 256
@@ -191,11 +192,13 @@ impl Prompts {
 }
 
 impl Prompts {
-    /// Keeps `handle` among the latest, the oldest dropped past
-    /// [`MAX_HANDLES`]: `false` when it is kept already.
+    /// Keeps `handle` as the latest, the oldest dropped past
+    /// [`MAX_HANDLES`]: `false` when it is kept already, and it is the
+    /// latest again.
     fn remember(&mut self, handle: &str) -> bool {
-        if !self.handles.insert(handle.to_owned()) {
-            return false;
+        let fresh = self.handles.insert(handle.to_owned());
+        if !fresh {
+            self.order.retain(|kept| kept != handle);
         }
         self.order.push_back(handle.to_owned());
         while self.order.len() > MAX_HANDLES {
@@ -203,7 +206,7 @@ impl Prompts {
                 self.handles.remove(&oldest);
             }
         }
-        true
+        fresh
     }
 }
 
@@ -490,6 +493,20 @@ mod tests {
             prompts.accept(&id, &reject(&id, &named(0))),
             Ok(Decision::Reject)
         );
+        assert_eq!(prompts.retained(), (1, MAX_HANDLES));
+        // A handle named again is the latest again: the window is full,
+        // the oldest is named (crossed), one new handle comes, and the old
+        // one is still refused.
+        let oldest = named(102);
+        let id = issued(&mut prompts, 1);
+        assert_eq!(prompts.accept(&id, &reject(&id, &oldest)), Err(Crossed));
+        let id = issued(&mut prompts, 1);
+        assert_eq!(
+            prompts.accept(&id, &reject(&id, &named(MAX_HANDLES + 100))),
+            Ok(Decision::Reject)
+        );
+        let id = issued(&mut prompts, 1);
+        assert_eq!(prompts.accept(&id, &reject(&id, &oldest)), Err(Crossed));
         assert_eq!(prompts.retained(), (1, MAX_HANDLES));
         let _ = open;
     }

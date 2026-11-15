@@ -308,10 +308,15 @@ impl Connects {
             Pending::Prompt { ask, id: prompt } => {
                 self.prompting = self.prompting.saturating_sub(1);
                 open.budget.prompt_closed(self.now_ms());
-                let decided = text
-                    .ok_or(Crossed)
-                    .and_then(|text| self.prompts.accept(&prompt, text))
-                    .and_then(|decision| ask.decide(decision));
+                // Main's error is terminal too: the prompt is retired.
+                let decided = match text {
+                    Some(text) => self.prompts.accept(&prompt, text),
+                    None => {
+                        self.prompts.forget(&prompt);
+                        Err(Crossed)
+                    }
+                }
+                .and_then(|decision| ask.decide(decision));
                 match decided {
                     Ok(Decided::Answer(answer)) => vec![reply(id, &answer)],
                     Ok(Decided::Grant(grant)) => {

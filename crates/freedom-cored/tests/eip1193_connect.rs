@@ -696,5 +696,38 @@ fn busy_cycles_leave_the_retained_state_bounded() {
     respond(&mut core, &held, approve_with(&held, &handle(5)));
     assert!(events(&mut core, 400).is_empty());
     assert_eq!(retained(), "0 1 0");
+    // Main's error for a live prompt is its terminal answer: retired.
+    connect(&mut core, 401, Some(SITE), &plain_world());
+    let asked = next_request(&mut core);
+    core.send(&json!({ "type": "response", "id": asked["id"],
+        "error": { "code": "internal", "message": "x" } }));
+    assert_eq!(
+        response(&mut core, 401)["error"]["data"]["reason"],
+        "mismatch"
+    );
+    assert_eq!(retained(), "0 1 0");
     assert_eq!(file_of(&core), Value::Null, "nothing written");
+}
+
+/// A prompt cancelled before its `approval.request` went is retired: with
+/// 64 open, the 65th waits, and its cancel leaves the 64 alone.
+#[test]
+fn a_prompt_never_sent_is_retired() {
+    let dir = tempfile::tempdir().unwrap();
+    let marker = dir.path().join("retained");
+    let (_root, mut core) = core_with(
+        &Value::Null,
+        &[(
+            "FREEDOM_CORED_TEST_EIP1193_RETAINED_MARKER",
+            marker.to_str().unwrap(),
+        )],
+    );
+    for id in 100..164 {
+        connect(&mut core, id, Some(SITE), &plain_world());
+        assert_eq!(next_request(&mut core)["method"], "approval.request");
+    }
+    connect(&mut core, 164, Some(SITE), &plain_world());
+    core.send(&json!({ "type": "cancel", "id": 164 }));
+    assert_eq!(response(&mut core, 164)["error"]["code"], "cancelled");
+    assert_eq!(std::fs::read_to_string(&marker).unwrap(), "64 0 0");
 }
