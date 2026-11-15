@@ -859,6 +859,36 @@ impl Vault {
         self.approvals.dapp_entry(key, self.clocks().wall_ms)
     }
 
+    /// Whether the dApp store has moved (design 0012, APR-5c).
+    pub fn dapp_moved(&self) -> bool {
+        self.approvals.dapp_moved()
+    }
+
+    /// A page's approved connect (design 0012, APR-5c): whether the grant
+    /// was written, and its `approval.changed`, to send after the reply.
+    pub fn eip1193_connect(&mut self, key: &str, account: u32, chain_id: u64) -> (bool, Vec<Out>) {
+        let wall_ms = self.clocks().wall_ms;
+        let written = self.approvals.page_connect(key, account, chain_id, wall_ms);
+        let events = self
+            .approvals
+            .take_events()
+            .into_iter()
+            .map(Out::Send)
+            .collect();
+        (written, events)
+    }
+
+    /// A connected key's last use (design 0012, APR-5c).
+    pub fn eip1193_touch(&mut self, key: &str) -> Vec<Out> {
+        let wall_ms = self.clocks().wall_ms;
+        self.approvals.page_touch(key, wall_ms);
+        self.approvals
+            .take_events()
+            .into_iter()
+            .map(Out::Send)
+            .collect()
+    }
+
     /// Main asked for `chain.fee_reference`: its reply is the chain's fee
     /// evidence (design 0012, "The fee check").
     pub fn fee_asked(&mut self, id: u64, params: Option<&str>) {

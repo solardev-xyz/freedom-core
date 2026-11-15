@@ -26,20 +26,30 @@
 //!   <id>` for none or an empty one; its `data` when it has one; and for a
 //!   chain the registry has no source for, the chrome's text instead.
 //!
-//! The later APR-5 steps add the prompts, connects and chain switches
-//! (APR-5c), signatures (APR-5d), the prepared send (APR-5e) and names over
-//! IPNS (APR-5f). Until then, those methods answer as a dispatcher without
-//! their route does (`4200`, `Method not supported`), but `4900` while the
-//! switch is off.
+//! **APR-5c, the prompts** ([`prompt`]): the core asks main for each
+//! prompt with its own `approval.request`, under an id it never reuses, and
+//! takes only main's decision on that prompt, on a handle no earlier answer
+//! named. `eth_requestAccounts` goes through it ([`connect`]): a document
+//! with no key gets `4100` before any of it, and a grant is written only
+//! from an approve's `choices`.
+//!
+//! The later APR-5 steps add the chain switches (APR-5c-2), signatures
+//! (APR-5d), the prepared send (APR-5e) and names over IPNS (APR-5f). Until
+//! then, those methods answer as a dispatcher without their route does
+//! (`4200`, `Method not supported`), but `4900` while the switch is off.
 
 mod answer;
+pub mod connect;
 mod deadline;
 mod methods;
+pub mod prompt;
 mod request;
 
 pub use answer::{Answer, Failure, Read, ReadOutcome};
+pub use connect::Connect;
 pub use deadline::{Budget, OVERALL_MS};
 pub use methods::{Class, METHODS, Method, RPC_READS, method};
+pub use prompt::{Crossed, Decision, PromptId, Prompts, Recheck};
 pub use request::{Invalid, Request, World};
 
 use fc_json::JsValue;
@@ -55,6 +65,9 @@ pub enum Step {
     /// It reads through the core's chain machine, and [`Read::answer`]
     /// answers it from the read's outcome.
     Read(Read),
+    /// A connect (`eth_requestAccounts`) for a document with a key: a
+    /// recheck or a prompt to main first.
+    Connect(Connect),
 }
 
 /// Runs `request` for the document keyed `key` (`PageContext.origin`;
@@ -81,6 +94,11 @@ pub fn start(
         "eth_chainId" => Step::Answer(Answer::result(&JsValue::string(format!("0x{chain_id:x}")))),
         "net_version" => Step::Answer(Answer::result(&JsValue::string(chain_id.to_string()))),
         "eth_accounts" => Step::Answer(Answer::result(&accounts(world, key, grant))),
+        // A document with no key: before any grant, recheck or prompt.
+        "eth_requestAccounts" => match key {
+            None => Step::Answer(Answer::error(connect::NO_ADDRESS.0, connect::NO_ADDRESS.1)),
+            Some(key) => Step::Connect(connect::start(world, key, grant)),
+        },
         name if RPC_READS.contains(&name) => Step::Read(Read::new(
             chain_id,
             row.name,
@@ -88,7 +106,7 @@ pub fn start(
             key,
             world,
         )),
-        // APR-5c to APR-5e serve the rest.
+        // APR-5c-2 to APR-5e serve the rest.
         _ => Step::Answer(Answer::unsupported()),
     }
 }
@@ -132,7 +150,7 @@ fn accounts(
 
 /// JS's `a === b` for parsed JSON: primitives by value, and an object or
 /// array never equal to anything else (no two are the same object).
-fn strictly_equal(a: &JsValue, b: &JsValue) -> bool {
+pub(crate) fn strictly_equal(a: &JsValue, b: &JsValue) -> bool {
     match (a, b) {
         (JsValue::Undefined, JsValue::Undefined) | (JsValue::Null, JsValue::Null) => true,
         (JsValue::Bool(a), JsValue::Bool(b)) => a == b,

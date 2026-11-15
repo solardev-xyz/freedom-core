@@ -24,6 +24,7 @@ mod chain;
 mod clock;
 mod delete_journal;
 mod dweb;
+mod eip1193;
 mod exit;
 mod fsx;
 mod gate;
