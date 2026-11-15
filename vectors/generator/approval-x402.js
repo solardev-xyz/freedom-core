@@ -21,6 +21,11 @@
 //   the header's JSON (what sign-flow.js base64-encodes), or the error.
 //   Requirements go through @x402/core's own schema first, as intercept.js
 //   parses a 402: `requirements` is the schema's output, what main holds.
+// - `devices`: the same payloads for a Ledger or phone account (core #392):
+//   the typed data @x402/evm hands the signer's `signTypedData`, its EIP-712
+//   hash (ethers' `TypedDataEncoder.hash`), the signature text the device
+//   returns, the header's JSON with that text in it, and whether ethers'
+//   `recoverAddress` (main's device check today) recovers the account.
 //
 // `core` is the core's answer (`payload` or `refused`); `inferred` marks
 // where it differs from the reference's, a narrowing design 0012's X402-1
@@ -47,9 +52,14 @@ const SIGNER = Object.freeze({
   privateKey: '0x1ab42cc412b618bdea3a599e3c9bae199ebf030895b039e9db1e30dafb12b727',
   address: '0x9858EfFD232B4033E47d90003D41EC34EcaEda94',
 });
+// keys.json's abandon-12, account 1: a device that signs with another key.
+const OTHER_KEY = Object.freeze({
+  privateKey: '0x318470c858f622e48a80120a1fc3c8460d67a7bf31b3273a6d27d4c013f2f8d3',
+  address: '0x78839F6054d7ed13918bAe0473BA31b1Ca9D7265',
+});
 const NONCE = Buffer.from(Array.from({ length: 32 }, (_, i) => (i * 37 + 11) & 0xff));
 
-const FORMAT = 'Design 0012\'s x402 (X402-1), from the approvals reference\'s src/main/x402/ over the main reference\'s @x402/core and @x402/evm (`meta.packages`). `defaultAssets`: the SDK\'s DEFAULT_ASSETS, which its client\'s default spend controls allow (`chainId`, `asset`, `decimals`), each confirmed by the scheme\'s `findDefaultAsset`. `keys`: `originKeyForUrl(url)` (`js`, null where the reference has none) and the core\'s (`core`, null where it refuses: x402 pays only an http or https resource). `tuples`: `tupleFromAccept(accept)`. `covering`: from a cap file (`start`) at `at` (wall-clock ms), `findCoveringPermission(origin, accepts)`\'s entry index (`js`, null for none, or `error`), whether `charge` then took its amount (`charged`), and the core\'s entry (`core`), with `deviation` where 0012 says it differs. `payloads`: `signAndQueueRetry` for `requirements.accepts[accept_index]` at `now` (wall-clock seconds) with `nonce` (the 32 bytes `getRandomValues` gave) and `signer`: `js.payload`, the JSON text sign-flow.js base64-encodes into the header, or `js.error`; `core`, `payload` (the same text) or `refused`; `inferred` where the core refuses what the reference signs.';
+const FORMAT = 'Design 0012\'s x402 (X402-1), from the approvals reference\'s src/main/x402/ over the main reference\'s @x402/core and @x402/evm (`meta.packages`). `defaultAssets`: the SDK\'s DEFAULT_ASSETS, which its client\'s default spend controls allow (`chainId`, `asset`, `decimals`), each confirmed by the scheme\'s `findDefaultAsset`. `keys`: `originKeyForUrl(url)` (`js`, null where the reference has none) and the core\'s (`core`, null where it refuses: x402 pays only an http or https resource). `tuples`: `tupleFromAccept(accept)`. `covering`: from a cap file (`start`) at `at` (wall-clock ms), `findCoveringPermission(origin, accepts)`\'s entry index (`js`, null for none, or `error`), whether `charge` then took its amount (`charged`), and the core\'s entry (`core`), with `deviation` where 0012 says it differs. `payloads`: `signAndQueueRetry` for `requirements.accepts[accept_index]` at `now` (wall-clock seconds) with `nonce` (the 32 bytes `getRandomValues` gave) and `signer`: `js.payload`, the JSON text sign-flow.js base64-encodes into the header, or `js.error`; `core`, `payload` (the same text) or `refused`; `inferred` where the core refuses what the reference signs. `devices`: the payloads of `payloads` that the core signs, for a device account (core #392) whose address is `address`: `typedData`, the JSON text of what @x402/evm hands the signer\'s `signTypedData` (`{ domain, types, primaryType, message }`, its BigInts as decimal strings); `hash`, its EIP-712 hash (ethers\' `TypedDataEncoder.hash`); `signature`, the text the device returns (`variant`: `ethers`, as ethers\' `Wallet.signTypedData` returns it; `upper`, its hex digits in upper case; `v-parity`, its last byte 0 or 1; `v-eip155`, its last byte 37 or 38; `high-s`, `s` replaced by the order minus `s` and the parity flipped; `other-key`, another account\'s signature); `js.payload`, the header\'s JSON with that text in it, as sign-flow.js base64-encodes it; `recovers`, what ethers\' `recoverAddress(hash, signature)` gives (main\'s device check today), or null where it throws; `core`, `payload` (the same text) or `{ refused }` with `wrong_account` or `bad_response`, the reason the core gives; `inferred` where the core refuses a signature ethers recovers to the account.';
 
 /** The main reference's SDK and ethers, and the approvals reference's x402 modules over them. */
 function load(checkout, mainCheckout) {
@@ -66,9 +76,19 @@ function load(checkout, mainCheckout) {
   assert.equal(wallet.address, SIGNER.address);
   // client.js' signer: `getSigner(index)` with `getAddress` and the
   // viem-style `signTypedData({ domain, types, primaryType, message })`.
+  // A device account's signer, when `device.sign` is set: what the scheme
+  // hands `signTypedData` is kept, and the device's text returned.
+  const device = { sign: null, asked: [] };
   const signer = {
     getAddress: async () => wallet.address,
-    signTypedData: async ({ domain, types, message }) => wallet.signTypedData(domain, types, message),
+    signTypedData: async (typedData) => {
+      if (device.sign) {
+        device.asked.push(typedData);
+        return device.sign(typedData);
+      }
+      const { domain, types, message } = typedData;
+      return wallet.signTypedData(domain, types, message);
+    },
   };
   const client = loadWithInternals(checkout, 'src/main/x402/client.js', [], {
     '@x402/core/client': sdk.client,
@@ -106,7 +126,7 @@ function load(checkout, mainCheckout) {
     '../wallet/vault-errors': { isVaultLockedError: () => false },
     '../wallet/agent-tab-custody': { isUserPageId: () => true },
   });
-  return { sdk, signer, signFlow, pending, originKeyForUrl: intercept.__internals.originKeyForUrl };
+  return { sdk, ethers, signer, device, signFlow, pending, originKeyForUrl: intercept.__internals.originKeyForUrl };
 }
 
 // ---------------------------------------------------------------------------
@@ -346,15 +366,114 @@ async function payloads(ref) {
   return out;
 }
 
+// The device payloads (core #392): each payload the core signs, for a
+// device account whose address is the test key's, with the device's
+// signature text in each variant.
+const ORDER = BigInt('0xfffffffffffffffffffffffffffffffebaaedce6af48a03bbfd25e8cd0364141');
+const ALL_VARIANTS = ['ethers', 'upper', 'v-parity', 'v-eip155', 'high-s', 'other-key'];
+const DEVICE_VARIANTS = {
+  'v2-eip3009': ALL_VARIANTS,
+  'v2-permit2': ['ethers', 'v-parity', 'other-key'],
+  'v1-base': ['ethers', 'upper', 'other-key'],
+};
+
+/** The text a device returns for `typedData`, in `variant`. */
+async function deviceSignature(ethers, variant, typedData) {
+  const { domain, types, message } = typedData;
+  const key = variant === 'other-key' ? OTHER_KEY.privateKey : SIGNER.privateKey;
+  const text = await new ethers.Wallet(key).signTypedData(domain, types, message);
+  const signature = ethers.Signature.from(text);
+  const parity = signature.v - 27;
+  const body = text.slice(0, 130);
+  switch (variant) {
+    case 'ethers':
+    case 'other-key':
+      return text;
+    case 'upper':
+      return '0x' + text.slice(2).toUpperCase();
+    case 'v-parity':
+      return body + (parity ? '01' : '00');
+    case 'v-eip155':
+      return body + (parity ? '26' : '25');
+    case 'high-s':
+      return signature.r + (ORDER - BigInt(signature.s)).toString(16).padStart(64, '0') + (parity ? '1b' : '1c');
+    default:
+      throw new Error(`unknown variant ${variant}`);
+  }
+}
+
+const bigintsAsText = (_key, value) => (typeof value === 'bigint' ? value.toString() : value);
+
+async function devices(ref, signed) {
+  const out = [];
+  for (const [id, raw, index] of PAYLOADS) {
+    const vault = signed.find((c) => c.id === id);
+    if (!vault || vault.core !== 'payload') continue;
+    for (const variant of DEVICE_VARIANTS[id] ?? ['ethers']) {
+      ref.device.asked = [];
+      let text = null;
+      ref.device.sign = async (typedData) => {
+        text = await deviceSignature(ref.ethers, variant, typedData);
+        return text;
+      };
+      let result;
+      try {
+        result = await payload(ref, raw, index);
+      } finally {
+        ref.device.sign = null;
+      }
+      assert.equal(ref.device.asked.length, 1, `${id}/${variant}: one signature asked`);
+      const asked = ref.device.asked[0];
+      const payloadText = result.js.payload;
+      assert.ok(payloadText !== undefined, `${id}/${variant}: ${result.js.error}`);
+      // The device's text goes into the header as it came.
+      assert.ok(payloadText.includes(JSON.stringify(text)), `${id}/${variant}`);
+      if (variant === 'ethers') assert.equal(payloadText, vault.js.payload, `${id}: the vault's payload`);
+      const hash = ref.ethers.TypedDataEncoder.hash(asked.domain, asked.types, asked.message);
+      let recovers = null;
+      try {
+        recovers = ref.ethers.recoverAddress(hash, text);
+      } catch {
+        recovers = null;
+      }
+      // The core's check is PHN-1's: 0x and 130 hex digits, a last byte of
+      // 0, 1, 27 or 28, a low s, and the account recovered.
+      const last = parseInt(text.slice(130), 16);
+      const core = recovers === null || ![0, 1, 27, 28].includes(last)
+        ? { refused: 'bad_response' }
+        : recovers === SIGNER.address ? 'payload' : { refused: 'wrong_account' };
+      const c = {
+        id: `${id}/${variant}`, payload: id, variant, requirements: result.requirements, accept_index: index,
+        now: S, nonce: '0x' + NONCE.toString('hex'), address: SIGNER.address,
+        typedData: JSON.stringify(asked, bigintsAsText), hash, signature: text,
+        js: { payload: payloadText }, recovers, core,
+      };
+      if (recovers === SIGNER.address && core !== 'payload') c.inferred = true;
+      out.push(c);
+    }
+  }
+  // Each kind of payload, a refusal of each reason, and an inferred one.
+  for (const kind of ['"authorization"', '"permit2Authorization"', '"x402Version":1']) {
+    assert.ok(out.some((c) => c.core === 'payload' && c.js.payload.includes(kind)), kind);
+  }
+  for (const reason of ['wrong_account', 'bad_response']) {
+    assert.ok(out.some((c) => c.core.refused === reason), reason);
+  }
+  assert.ok(out.some((c) => c.inferred), 'an inferred refusal');
+  return out;
+}
+
 async function buildX402(checkout, mainCheckout) {
   const ref = load(checkout, mainCheckout);
   const paymentUtils = loadWithInternals(checkout, 'src/main/x402/payment-utils.js', [], { './permissions': {} });
+  const signed = await payloads(ref);
   return {
     defaultAssets: defaultAssets(ref),
     keys: keys(ref),
     tuples: tuples(paymentUtils),
     covering: covering(checkout),
-    payloads: await payloads(ref),
+    payloads: signed,
+    devices: await devices(ref, signed),
   };
 }
 

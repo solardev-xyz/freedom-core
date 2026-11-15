@@ -225,6 +225,9 @@ pub const METHODS: &[Method] = &[
     // is; no renderer channel reaches them.
     row("x402.authorize", SHELL, false, NOW),
     row("x402.settle", SHELL, false, NOW),
+    // Core #392: a cap's narrowing, from the activity pane (or main); a
+    // page names no cap of its own (Q11 keys a cap on the seller).
+    row("x402.update", CS, false, NOW),
     // Design 0012, "fc-eip1193 and approval.request" (APR-5): a page's
     // EIP-1193 request, run by the core's dispatcher; no other caller
     // reaches it.
@@ -339,6 +342,19 @@ mod tests {
                 admit(name, CallerKind::Shell, V2),
                 Admission::Allowed(_)
             ));
+        }
+        // A cap's narrowing (#392): the activity pane and main, never a page.
+        for (caller, admitted) in [
+            (CallerKind::Chrome, true),
+            (CallerKind::Shell, true),
+            (CallerKind::Page, false),
+        ] {
+            let admission = admit("x402.update", caller, V2);
+            assert_eq!(
+                matches!(admission, Admission::Allowed(_)),
+                admitted,
+                "{caller:?}"
+            );
         }
         // A page reaches only design 0012's rows.
         let page_callers = [
