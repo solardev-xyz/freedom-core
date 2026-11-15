@@ -186,3 +186,36 @@ fn a_keyless_switch_and_wallet_add_ethereum_chain() {
         );
     }
 }
+
+/// A document with no key gets `4100` before its params are read: missing
+/// or invalid params, a pin they miss, or a chain the registry lacks.
+#[test]
+fn a_keyless_switch_is_refused_before_its_params() {
+    for (params, world) in [
+        ("", ""),
+        (r#","params":null"#, ""),
+        (r#","params":[]"#, ""),
+        (r#","params":[null]"#, ""),
+        (r#","params":["0x1"]"#, ""),
+        (r#","params":[1]"#, ""),
+        (r#","params":[{}]"#, ""),
+        (r#","params":[{"chainId":""}]"#, ""),
+        (r#","params":[{"chainId":"0xzz"}]"#, ""),
+        (r#","params":[{"chainId":"zz"}]"#, ""),
+        (r#","params":[{"chainId":"0x99"}]"#, ""),
+        (r#","params":[{"chainId":"0x1"}]"#, r#","chain":8453"#),
+    ] {
+        let request = Request::parse(&format!(
+            r#"{{"method":"wallet_switchEthereumChain"{params},"world":{{"enabled":true,"wallets":[],"networks":{{"1":{{"name":"Ethereum","available":true}}}}{world}}}}}"#
+        ))
+        .unwrap();
+        match start(&request, None, |_| panic!("no grant read")) {
+            Step::Answer(answer) => assert_eq!(
+                answer.into_string(),
+                r#"{"error":{"code":4100,"message":"This page has no address to connect from yet"}}"#,
+                "{params}{world}"
+            ),
+            other => panic!("{params}{world}: {other:?}"),
+        }
+    }
+}
