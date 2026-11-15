@@ -93,6 +93,9 @@ pub enum In {
     Eip1193 {
         id: u64,
         read: fc_eip1193::Read,
+        /// When the event loop took the request: its time runs from then,
+        /// however long this mail waits here.
+        received: Instant,
     },
 }
 
@@ -229,10 +232,16 @@ fn run(rx: &Receiver<Mail>, mut chain: Chain) -> Stop {
             // machine is brought to the clock before the message, and again
             // after it, before anything is dispatched: handling it can take
             // a while (R3-M1).
-            Ok((message, _credit)) => chain
-                .flush()
-                .and_then(|()| chain.handle(message))
-                .and_then(|()| chain.flush()),
+            Ok((message, _credit)) => {
+                if matches!(message, In::Eip1193 { .. }) {
+                    // As if it waited behind other mail.
+                    crate::testhooks::eip1193_dequeue_delay();
+                }
+                chain
+                    .flush()
+                    .and_then(|()| chain.handle(message))
+                    .and_then(|()| chain.flush())
+            }
             Err(RecvTimeoutError::Timeout) => Ok(()),
             // The event loop has gone (shutdown or EOF): the replies and
             // cancels still waiting go to the writer, which the loop gives
@@ -574,10 +583,17 @@ impl Chain {
             }
             In::Response { id, reply } => self.response(id, reply),
             In::Drained => self.pump(),
-            In::Eip1193 { id, read } => {
+            In::Eip1193 { id, read, received } => {
                 let backlog = self.backlog();
                 self.machine.set_output_backlog(backlog);
-                let budget = fc_eip1193::Budget::new(self.machine.now());
+                // What waited behind other mail is spent: the first step
+                // gets only what is left.
+                let waited = u64::try_from(received.elapsed().as_millis()).unwrap_or(u64::MAX);
+                let overall = crate::testhooks::eip1193_overall(fc_eip1193::OVERALL_MS);
+                let budget = fc_eip1193::Budget::with_left(
+                    self.machine.now(),
+                    overall.saturating_sub(waited),
+                );
                 self.submit_eip1193(
                     id,
                     Eip1193Read {
@@ -595,7 +611,9 @@ impl Chain {
 
     /// Submits a page's EIP-1193 read as `chain.request` would, with no
     /// options but its routing hint, and a deadline of its own: a chain
-    /// session's, within what is left of its request's 120 s.
+    /// session's, within what is left of its request's 120 s. With nothing
+    /// left, its deadline is 0: the machine ends it as past its deadline
+    /// before it is sent.
     fn submit_eip1193(&mut self, id: u64, pending: Eip1193Read) {
         let now = self.machine.now();
         let deadline_ms = pending.budget.step(now, self.machine.bounds().deadline_ms);

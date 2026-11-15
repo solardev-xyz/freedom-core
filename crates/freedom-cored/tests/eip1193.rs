@@ -12,7 +12,7 @@ mod common;
 use std::path::PathBuf;
 
 use base64::Engine as _;
-use common::{Core, dirs, spawn};
+use common::{Core, dirs, spawn_env};
 use serde_json::{Value, json};
 
 const SITE: &str = "https://app.example";
@@ -26,8 +26,13 @@ fn load() -> Value {
 /// null), with chains 1, 100 and 8453 read Direct from one endpoint each
 /// (`e<chain>`), and Sepolia configured with none.
 fn core(grants: &Value) -> (tempfile::TempDir, Core) {
+    core_with(grants, &[])
+}
+
+/// `core`, with the test hooks in `env`.
+fn core_with(grants: &Value, env: &[(&str, &str)]) -> (tempfile::TempDir, Core) {
     let (root, data, locks) = dirs();
-    let mut core = spawn("serve", &data, &locks, &[]);
+    let mut core = spawn_env("serve", &data, &locks, &[], env);
     std::fs::create_dir_all(&core.grant_root).unwrap();
     if !grants.is_null() {
         let text = serde_json::to_string_pretty(grants).unwrap();
@@ -468,4 +473,46 @@ fn a_read_carries_the_page_s_key_as_its_routing_hint() {
     // Another key's route is its own.
     let result = read(&mut core, 64, Some("https://other.example"), 2000, &block);
     assert_eq!(result, json!({ "result": "0x10" }));
+}
+
+/// A request's 120 s run from when the core took it, not from when the
+/// chain thread took its read: a read that waited behind other chain mail
+/// gets only what is left for its first step, or, with nothing left, ends
+/// without being sent. Here a request has 3 s in all, or 1 s, and the chain
+/// thread takes each read 1.5 s late.
+#[cfg(feature = "testhooks")]
+#[test]
+fn a_read_that_waited_gets_only_what_is_left() {
+    let params = json!({ "method": "eth_blockNumber", "params": [], "world": read_world() });
+    let delay = ("FREEDOM_CORED_TEST_EIP1193_DEQUEUE_DELAY_MS", "1500");
+    let (_root, mut core) = core_with(
+        &Value::Null,
+        &[delay, ("FREEDOM_CORED_TEST_EIP1193_OVERALL_MS", "3000")],
+    );
+    send(&mut core, 70, &page(Some(SITE)), params.clone());
+    let asked = core.recv();
+    assert_eq!(asked["method"], "shell.rpc", "{asked}");
+    // The source's own 5 s, within the 1.5 s left.
+    let left = asked["params"]["deadline_ms"].as_u64().unwrap();
+    assert!(left <= 1500 && left > 500, "{asked}");
+    answer_rpc(
+        &mut core,
+        &asked,
+        rpc(r#"{"jsonrpc":"2.0","id":1,"result":"0x10"}"#),
+    );
+    let (reply, _) = until(&mut core, 70, |_| None);
+    assert_eq!(reply["result"], json!({ "result": "0x10" }), "{reply}");
+
+    let (_root, mut core) = core_with(
+        &Value::Null,
+        &[delay, ("FREEDOM_CORED_TEST_EIP1193_OVERALL_MS", "1000")],
+    );
+    send(&mut core, 71, &page(Some(SITE)), params);
+    let (reply, seen) = until(&mut core, 71, |_| None);
+    assert!(seen.is_empty(), "{seen:?}");
+    assert_eq!(
+        reply["result"],
+        json!({ "error": { "code": -32603, "message": "The chain request's deadline passed" } }),
+        "{reply}"
+    );
 }

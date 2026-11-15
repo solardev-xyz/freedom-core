@@ -1375,6 +1375,8 @@ impl Core {
     /// key) and the dApp store. An answer goes now; a read goes to the
     /// chain thread, which answers from its outcome.
     fn eip1193(&mut self, id: u64, params: Option<&str>, context: &Context) -> Flow {
+        // Its 120 s run from here (`Deadline::Steps`).
+        let received = Instant::now();
         let invalid = || ErrorBody::new(ErrorCode::InvalidArgument, "Invalid parameters");
         let Some(page) = context.page.as_ref() else {
             return self.error(id, invalid());
@@ -1390,10 +1392,10 @@ impl Core {
                 Err(_) => Flow::Exit(Exit::Internal),
             },
             fc_eip1193::Step::Read(read) => {
-                if self
-                    .chain
-                    .send(chain::In::Eip1193 { id, read }, self.credit.take())
-                {
+                if self.chain.send(
+                    chain::In::Eip1193 { id, read, received },
+                    self.credit.take(),
+                ) {
                     Flow::Continue
                 } else {
                     Flow::Exit(Exit::Internal)

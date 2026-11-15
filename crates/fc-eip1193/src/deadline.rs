@@ -36,6 +36,16 @@ impl Budget {
         }
     }
 
+    /// A request with `left_ms` of its time left at `now`: one that waited
+    /// before its first step, whose clock ran meanwhile.
+    pub fn with_left(now: u64, left_ms: u64) -> Budget {
+        Budget {
+            left: left_ms.min(OVERALL_MS),
+            running_since: Some(now),
+            prompts: 0,
+        }
+    }
+
     /// What is left at `now`.
     pub fn left(&self, now: u64) -> u64 {
         match self.running_since {
@@ -70,6 +80,15 @@ impl Budget {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_request_that_waited_has_only_what_is_left() {
+        let budget = Budget::with_left(5_000, 2_000);
+        assert_eq!(budget.left(5_000), 2_000);
+        assert_eq!(budget.step(5_500, 120_000), 1_500);
+        assert_eq!(budget.left(7_000), 0);
+        assert_eq!(Budget::with_left(0, u64::MAX).left(0), OVERALL_MS);
+    }
 
     #[test]
     fn steps_keep_their_own_deadline_within_what_is_left() {
