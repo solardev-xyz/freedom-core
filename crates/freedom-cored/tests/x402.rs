@@ -228,6 +228,14 @@ fn changed(core: &mut Core, id: &mut u64) -> Vec<Value> {
         .collect()
 }
 
+/// How many digests `x402.authorize` has gone to sign, from the
+/// `FREEDOM_CORED_TEST_X402_SIGN_MARKER` file (none yet if it's missing).
+fn signs(marker: &Path) -> usize {
+    std::fs::read_to_string(marker)
+        .map(|text| text.lines().filter(|line| *line == "sign").count())
+        .unwrap_or(0)
+}
+
 fn key_of(asset: &str) -> String {
     format!("8453:{}", asset.to_lowercase())
 }
@@ -420,7 +428,13 @@ fn a_token_pays_what_it_binds() {
 #[test]
 fn a_cap_is_charged_as_it_signs() {
     let root = tempfile::tempdir().unwrap();
-    let mut core = start(root.path(), &["x402"], &[]);
+    let marker = root.path().join("signs");
+    let marker_env = marker.to_string_lossy().into_owned();
+    let mut core = start(
+        root.path(),
+        &["x402"],
+        &[("FREEDOM_CORED_TEST_X402_SIGN_MARKER", &marker_env)],
+    );
     let mut id = 10;
     unlock(&mut core, &mut id);
     let accept = entry(USDC, "10000");
@@ -456,6 +470,9 @@ fn a_cap_is_charged_as_it_signs() {
     let replies = [core.response(a), core.response(b)];
     let signed: Vec<&Value> = replies.iter().filter(|r| r["result"].is_object()).collect();
     assert_eq!(signed.len(), 1, "{replies:?}");
+    // The token's payment and the one charge that stood: the other signed
+    // nothing.
+    assert_eq!(signs(&marker), 2);
     let other = replies.iter().find(|r| r["error"].is_object()).unwrap();
     refused(other, "not_authorized", Some("cap"));
     check_payload(&signed[0]["result"]["payload"], ACCOUNT_0, &accept);
@@ -539,6 +556,8 @@ fn a_cap_is_charged_as_it_signs() {
     }
     assert_eq!(file(&core), before);
     assert!(changed(&mut core, &mut id).is_empty());
+    // Only the three payments above were signed.
+    assert_eq!(signs(&marker), 3);
 }
 
 /// The asset's case: a cap granted for an entry in mixed case is the cap a
@@ -620,12 +639,15 @@ fn the_asset_is_one_cap_in_any_case() {
 
 /// A cap expired, or behind a wall clock set back (created after now),
 /// covers nothing and stays in the file; a locked vault charges nothing;
-/// a charge whose write fails signs nothing and isn't applied.
+/// a charge whose write fails isn't applied, and nothing is signed (the
+/// sign hook counts no signature until a charge stands).
 #[test]
 fn no_signature_without_a_charge_that_stands() {
     let root = tempfile::tempdir().unwrap();
     let hook = root.path().join("hook");
     let hook_env = hook.to_string_lossy().into_owned();
+    let marker = root.path().join("signs");
+    let marker_env = marker.to_string_lossy().into_owned();
     let now = now_s();
     let dir = root.path().join("userData");
     std::fs::create_dir_all(&dir).unwrap();
@@ -640,7 +662,10 @@ fn no_signature_without_a_charge_that_stands() {
     let mut core = start(
         root.path(),
         &["x402"],
-        &[("FREEDOM_CORED_TEST_GRANT_WRITE_FAIL", &hook_env)],
+        &[
+            ("FREEDOM_CORED_TEST_GRANT_WRITE_FAIL", &hook_env),
+            ("FREEDOM_CORED_TEST_X402_SIGN_MARKER", &marker_env),
+        ],
     );
     let mut id = 10;
     let reqs = requirements(vec![entry(USDC, "10000")]);
@@ -649,6 +674,7 @@ fn no_signature_without_a_charge_that_stands() {
     let reply = pay_with_cap(&mut core, &mut id, &tab, &reqs);
     refused(&reply, "vault_locked", None);
     assert_eq!(file(&core).as_deref(), Some(text.as_str()));
+    assert_eq!(signs(&marker), 0);
     unlock(&mut core, &mut id);
     // Behind a clock set back: covers nothing, and stays.
     let later = detection(2, "https://later.example/a");
@@ -665,6 +691,7 @@ fn no_signature_without_a_charge_that_stands() {
         Some("cap"),
     );
     assert_eq!(file(&core).as_deref(), Some(text.as_str()));
+    assert_eq!(signs(&marker), 0);
     for step in ["write", "fsync", "rename"] {
         std::fs::write(&hook, format!("x402:{step}")).unwrap();
         let reply = pay_with_cap(&mut core, &mut id, &tab, &reqs);
@@ -674,6 +701,7 @@ fn no_signature_without_a_charge_that_stands() {
             json!({ "store": "x402", "applied": false })
         );
         assert_eq!(file(&core).as_deref(), Some(text.as_str()), "{step}");
+        assert_eq!(signs(&marker), 0, "{step}");
     }
     assert!(changed(&mut core, &mut id).is_empty());
     std::fs::write(&hook, "").unwrap();
@@ -683,11 +711,14 @@ fn no_signature_without_a_charge_that_stands() {
         assert_eq!(result(&reply)["charged"], true);
         assert_eq!(caps(&core)[SELLER][key_of(USDC)]["spentAmount"], spent);
     }
+    // The hook sees each signature: one per charge that stood.
+    assert_eq!(signs(&marker), 5);
     refused(
         &pay_with_cap(&mut core, &mut id, &tab, &reqs),
         "not_authorized",
         Some("cap"),
     );
+    assert_eq!(signs(&marker), 5);
     // A flush that fails after the rename: signed, and not durable.
     let reqs = requirements(vec![entry(USDC, "1")]);
     let t = token(
@@ -716,4 +747,5 @@ fn no_signature_without_a_charge_that_stands() {
         json!({ "added": true, "durable": false })
     );
     assert_eq!(caps(&core)[SELLER][key_of(USDC)]["spentAmount"], "1");
+    assert_eq!(signs(&marker), 6);
 }

@@ -30,6 +30,7 @@ use std::collections::{HashMap, VecDeque};
 
 use fc_approval::stores::{CapStore, Charge, StoreKind};
 use fc_approval::x402::{self, Payment, Requirements};
+use fc_keys::Secp256k1Key;
 use fc_vault::state::VaultState;
 use rand_core::TryRng;
 use serde_json::{Value, json};
@@ -125,6 +126,14 @@ impl X402State {
             .position(|(held, _)| held.as_bytes() == id.as_bytes())?;
         self.reservations.remove(at).map(|(_, held)| held)
     }
+}
+
+/// Signs a payment's digest. Every x402 signature goes through here, so a
+/// test counts them (`FREEDOM_CORED_TEST_X402_SIGN_MARKER`; a no-op
+/// without the `testhooks` feature).
+fn sign(key: &Secp256k1Key, digest: &[u8; 32]) -> Result<[u8; 65], fc_evm::Error> {
+    crate::testhooks::x402_signing();
+    fc_evm::sign_digest(key.signing_key(), digest)
 }
 
 /// How the payment is authorized.
@@ -282,8 +291,7 @@ impl Approvals {
                     .ok_or_else(|| not_authorized("cap", "no active cap covers this payment"))?,
             );
         }
-        let signature = fc_evm::sign_digest(key.signing_key(), &built.digest)
-            .map_err(|_| crate::vault::internal())?;
+        let signature = sign(&key, &built.digest).map_err(|_| crate::vault::internal())?;
         drop(key);
         let payload = built.payload(&signature);
         let mut durable = true;
