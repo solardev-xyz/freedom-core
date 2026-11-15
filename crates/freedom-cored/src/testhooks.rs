@@ -197,6 +197,18 @@ pub fn eip1193_dequeue_delay() {
     }
 }
 
+/// `eip1193::Connects` keeps `live` prompt ids, `handles` and `ended`
+/// tombstones: written to the marker file, when the test names one.
+#[cfg(feature = "testhooks")]
+pub fn eip1193_retained(live: usize, handles: usize, ended: usize) {
+    if let Some(marker) = std::env::var_os("FREEDOM_CORED_TEST_EIP1193_RETAINED_MARKER") {
+        let _ = std::fs::write(marker, format!("{live} {handles} {ended}"));
+    }
+}
+
+#[cfg(not(feature = "testhooks"))]
+pub fn eip1193_retained(_live: usize, _handles: usize, _ended: usize) {}
+
 #[cfg(feature = "testhooks")]
 pub fn eip1193_overall(overall: u64) -> u64 {
     millis("FREEDOM_CORED_TEST_EIP1193_OVERALL_MS").unwrap_or(overall)

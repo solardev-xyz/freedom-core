@@ -50,6 +50,9 @@ pub enum Owner {
     /// The key store's `shell.keystore` calls (design 0013), from whichever
     /// thread made them.
     KeyStore,
+    /// A page's `approval.request`s and `approval.recheck`s (design 0012,
+    /// APR-5c), from the event loop.
+    Eip1193,
 }
 
 /// What became of a request offered to [`Requests::send`].

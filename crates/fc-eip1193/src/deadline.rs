@@ -54,6 +54,11 @@ impl Budget {
         }
     }
 
+    /// Whether its clock is stopped: one of its prompts is open.
+    pub fn stopped(&self) -> bool {
+        self.running_since.is_none()
+    }
+
     /// A step's deadline from `now`: its own (`own_ms`), within what is
     /// left.
     pub fn step(&self, now: u64, own_ms: u64) -> u64 {
@@ -103,13 +108,17 @@ mod tests {
     #[test]
     fn no_overall_deadline_while_a_prompt_is_open() {
         let mut budget = Budget::new(0);
+        assert!(!budget.stopped());
         budget.prompt_opened(30_000);
+        assert!(budget.stopped());
         budget.prompt_opened(40_000);
         // An hour at the prompts costs nothing.
         assert_eq!(budget.left(3_600_000), 90_000);
         budget.prompt_closed(3_600_000);
         assert_eq!(budget.left(3_700_000), 90_000, "one is still open");
+        assert!(budget.stopped());
         budget.prompt_closed(3_700_000);
+        assert!(!budget.stopped());
         assert_eq!(budget.left(3_710_000), 80_000);
         assert_eq!(budget.step(3_710_000, 120_000), 80_000);
         // A close with none open changes nothing.
