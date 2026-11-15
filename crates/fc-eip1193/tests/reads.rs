@@ -119,7 +119,9 @@ fn every_apr5b_scenario_replays() {
                     };
                     read.answer(outcome)
                 }
-                Step::Connect(_) | Step::Switch(_) => panic!("{what}: a read scenario prompts"),
+                Step::Connect(_) | Step::Switch(_) | Step::Sign(_) => {
+                    panic!("{what}: a read scenario prompts")
+                }
             };
             assert_eq!(answer.as_str(), recorded["result"].to_string(), "{what}");
             // What main delivers is the dispatcher's answer.
@@ -284,7 +286,9 @@ fn accounts_and_refusals() {
             grant.map(|g| fc_json::parse(g).unwrap())
         }) {
             Step::Answer(answer) => answer.into_string(),
-            Step::Read(_) | Step::Connect(_) | Step::Switch(_) => panic!("{method}"),
+            Step::Read(_) | Step::Connect(_) | Step::Switch(_) | Step::Sign(_) => {
+                panic!("{method}")
+            }
         }
     };
     let wallets = r#"[null,{"index":"1","address":"0xs"},{"index":1,"address":"0xn"},{"index":2}]"#;
@@ -328,7 +332,7 @@ fn accounts_and_refusals() {
             r#"{"error":{"code":4200,"message":"eth_sign is deprecated for security reasons"}}"#,
         ),
         (
-            "personal_sign",
+            "eth_sendTransaction",
             r#"{"error":{"code":4200,"message":"Method not supported"}}"#,
         ),
     ] {
@@ -337,6 +341,7 @@ fn accounts_and_refusals() {
     // Main refuses those two before the switch; the rest answer 4900.
     assert!(ask("eth_foo", false, "[]", None).contains("4200"));
     assert!(ask("eth_sign", false, "[]", None).contains("4200"));
+    assert!(ask("eth_sendTransaction", false, "[]", None).contains("4900"));
     assert!(ask("personal_sign", false, "[]", None).contains("4900"));
 }
 

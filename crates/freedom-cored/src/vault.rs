@@ -898,6 +898,73 @@ impl Vault {
             .collect()
     }
 
+    /// A page's signature the user approved on the core's own prompt
+    /// (design 0012, APR-5d-1): the page-kind token is minted here for the
+    /// request's document and the handle of main's answer, and spent at
+    /// once on the signature, which `sign.message` or `sign.typed_data`
+    /// checks under `page` as it checks a page's own. The token never
+    /// leaves the core. The signature, or whether the vault was locked and
+    /// the refusal's message.
+    pub fn eip1193_sign(
+        &mut self,
+        page: &message::PageContext,
+        approved: &fc_eip1193::sign::Approved,
+    ) -> Result<String, (bool, String)> {
+        let failed = |body: ErrorBody| (body.code == ErrorCode::VaultLocked, body.message);
+        let internal = || failed(internal());
+        let method = approved.method();
+        let kind = fc_approval::Kind::from_name(method.token_kind()).ok_or_else(internal)?;
+        let Ok(serde_json::Value::Object(mut params)) = fc_evm::parse_json(approved.payload())
+        else {
+            return Err(internal());
+        };
+        let clocks = self.clocks();
+        let token = self
+            .approvals
+            .page_token(
+                page,
+                approved.handle(),
+                kind,
+                approved.account(),
+                &serde_json::Value::Object(params.clone()),
+                clocks,
+            )
+            .map_err(failed)?;
+        params.insert(
+            "key".to_owned(),
+            serde_json::json!({ "kind": "account", "index": approved.account() }),
+        );
+        if let Some(hash) = approved.expected_hash() {
+            params.insert("expected_hash".to_owned(), serde_json::json!(hash));
+        }
+        params.insert(
+            "authorization".to_owned(),
+            serde_json::json!({ "token": token.as_str(), "handle": approved.handle() }),
+        );
+        let text = Zeroizing::new(
+            serde_json::to_string(&serde_json::Value::Object(params)).map_err(|_| internal())?,
+        );
+        drop(token);
+        let context = Context {
+            caller: message::CallerKind::Page,
+            page: Some(page.clone()),
+        };
+        let mut checks = crate::signing::Checks {
+            approvals: &mut self.approvals,
+            context: &context,
+            clocks,
+        };
+        let result =
+            crate::signing::handle(&self.state, &mut checks, method.core_method(), Some(&text))
+                .map_err(failed)?;
+        let result: serde_json::Value =
+            serde_json::from_str(result.get()).map_err(|_| internal())?;
+        result["signature"]
+            .as_str()
+            .map(str::to_owned)
+            .ok_or_else(internal)
+    }
+
     /// Main asked for `chain.fee_reference`: its reply is the chain's fee
     /// evidence (design 0012, "The fee check").
     pub fn fee_asked(&mut self, id: u64, params: Option<&str>) {

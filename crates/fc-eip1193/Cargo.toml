@@ -18,6 +18,9 @@ workspace = true
 fc-json = { path = "../fc-json" }
 
 [dev-dependencies]
+# The signature replay checks each scripted typed-data view against
+# fc-evm's own (a workspace logic crate; no new external dependency).
+fc-evm = { path = "../fc-evm" }
 # The replays read vectors/eip1193.json; preserve_order keeps the
 # reference's key order in what they compare.
 serde_json = { version = "1", features = ["preserve_order"] }

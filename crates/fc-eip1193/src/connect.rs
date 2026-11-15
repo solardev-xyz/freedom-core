@@ -290,7 +290,7 @@ impl Ask {
                     USER_REJECTED.1,
                 )));
             }
-            Decision::Approve { choices, world } => (choices, world),
+            Decision::Approve { choices, world, .. } => (choices, world),
         };
         let JsValue::Object(picks) = &choices else {
             return Err(Crossed);

@@ -1,6 +1,6 @@
-//! A page's connect and chain switch in the daemon (design 0012,
-//! "fc-eip1193 and approval.request"; APR-5c): the core's own requests to
-//! main for them, `approval.request`, `approval.recheck` and
+//! A page's connect, chain switch and signature in the daemon (design 0012,
+//! "fc-eip1193 and approval.request"; APR-5c, APR-5d-1): the core's own
+//! requests to main for them, `approval.request`, `approval.recheck` and
 //! `eip1193.select_chain`, and main's answers.
 //!
 //! - **`approval.request { request, prompt, page, kind, view, choices }`**
@@ -10,6 +10,12 @@
 //!   prompt's id, a handle an earlier answer named, or anything but one of
 //!   the three forms fails the request (`not_authorized`, `mismatch`), with
 //!   nothing written.
+//! - **A signature** (APR-5d-1) is asked as `eth.sign`. On main's approve,
+//!   checked as above and against the key's grant again, the core mints the
+//!   page-kind token itself for the request's document and that answer's
+//!   handle, and spends it at once on the signature
+//!   ([`Vault::eip1193_sign`]): the token never leaves the core, and serves
+//!   that request alone.
 //! - **`approval.recheck { request, page }`** asks main, just before a
 //!   connected key's last use is marked or a switch's chain is written,
 //!   whether the document still holds its key.
@@ -45,7 +51,7 @@ use std::sync::mpsc::Sender;
 use std::time::{Duration, Instant};
 
 use fc_eip1193::connect::{Ask, Connected, Decided};
-use fc_eip1193::{Answer, Budget, Connect, Crossed, PromptId, Prompts, Recheck, Switch};
+use fc_eip1193::{Answer, Budget, Connect, Crossed, PromptId, Prompts, Recheck, Switch, sign};
 use fc_protocol::error::{ErrorBody, ErrorCode};
 use fc_protocol::message::{self, PageContext};
 use zeroize::Zeroizing;
@@ -83,6 +89,8 @@ struct Open {
     key: String,
     /// The request's `PageContext`, as JSON.
     page: String,
+    /// The request's `PageContext`, which a signature's token binds.
+    context: PageContext,
     budget: Budget,
     step: Pending,
     /// The core's request to main, once sent.
@@ -101,7 +109,7 @@ enum Asked {
 enum Pending {
     Recheck(Connected),
     Prompt {
-        ask: Ask,
+        ask: Asking,
         id: PromptId,
     },
     /// A chain switch, waiting on main's recheck.
@@ -109,6 +117,37 @@ enum Pending {
     /// A chain switch whose grant has its chain, waiting on main's
     /// selection.
     Select(Switch),
+}
+
+/// What a prompt asks.
+enum Asking {
+    /// A connect's `eth.connect`.
+    Connect(Ask),
+    /// A signature's `eth.sign` (APR-5d-1).
+    Sign(sign::Ask),
+}
+
+impl Asking {
+    fn kind(&self) -> &'static str {
+        match self {
+            Asking::Connect(ask) => ask.kind(),
+            Asking::Sign(ask) => ask.kind(),
+        }
+    }
+
+    fn view(&self) -> &str {
+        match self {
+            Asking::Connect(ask) => ask.view(),
+            Asking::Sign(ask) => ask.view(),
+        }
+    }
+
+    fn choices(&self) -> &str {
+        match self {
+            Asking::Connect(ask) => ask.choices(),
+            Asking::Sign(ask) => ask.choices(),
+        }
+    }
 }
 
 impl Connects {
@@ -151,9 +190,32 @@ impl Connects {
         let step = match connect {
             Connect::Connected(connected) => Pending::Recheck(connected),
             Connect::Ask(ask) => match self.issue() {
-                Some(prompt) => Pending::Prompt { ask, id: prompt },
+                Some(prompt) => Pending::Prompt {
+                    ask: Asking::Connect(ask),
+                    id: prompt,
+                },
                 None => return vec![error(id, internal())],
             },
+        };
+        self.open_request(id, step, key, page, received)
+    }
+
+    /// Page request `id`'s signature, up to its prompt, for `key`
+    /// (APR-5d-1): the user is asked.
+    pub fn sign(
+        &mut self,
+        id: u64,
+        ask: sign::Ask,
+        key: &str,
+        page: &PageContext,
+        received: Instant,
+    ) -> Vec<Out> {
+        let Some(prompt) = self.issue() else {
+            return vec![error(id, internal())];
+        };
+        let step = Pending::Prompt {
+            ask: Asking::Sign(ask),
+            id: prompt,
         };
         self.open_request(id, step, key, page, received)
     }
@@ -179,6 +241,7 @@ impl Connects {
         page: &PageContext,
         received: Instant,
     ) -> Vec<Out> {
+        let context = page.clone();
         let Ok(page) = serde_json::to_string(page) else {
             if let Pending::Prompt { id: prompt, .. } = step {
                 self.prompts.forget(&prompt);
@@ -193,6 +256,7 @@ impl Connects {
             Open {
                 key: key.to_owned(),
                 page,
+                context,
                 budget,
                 step,
                 asked: None,
@@ -388,18 +452,38 @@ impl Connects {
                         self.prompts.forget(&prompt);
                         Err(Crossed)
                     }
-                }
-                .and_then(|decision| ask.decide(decision));
-                match decided {
-                    Ok(Decided::Answer(answer)) => vec![reply(id, &answer)],
-                    Ok(Decided::Grant(grant)) => {
-                        let (written, events) =
-                            vault.eip1193_connect(&open.key, grant.account, grant.chain_id);
-                        let mut outs = vec![reply(id, &grant.answer(written))];
-                        outs.extend(events);
-                        outs
-                    }
-                    Err(Crossed) => vec![error(id, crossed())],
+                };
+                match ask {
+                    Asking::Connect(ask) => match decided.and_then(|decision| ask.decide(decision))
+                    {
+                        Ok(Decided::Answer(answer)) => vec![reply(id, &answer)],
+                        Ok(Decided::Grant(grant)) => {
+                            let (written, events) =
+                                vault.eip1193_connect(&open.key, grant.account, grant.chain_id);
+                            let mut outs = vec![reply(id, &grant.answer(written))];
+                            outs.extend(events);
+                            outs
+                        }
+                        Err(Crossed) => vec![error(id, crossed())],
+                    },
+                    // A signature: the key must still expose the account
+                    // shown, then the token is minted for this answer and
+                    // spent on the signature.
+                    Asking::Sign(ask) => match decided
+                        .and_then(|decision| ask.decide(decision, |key| vault.dapp_entry(key)))
+                    {
+                        Ok(sign::Decided::Answer(answer)) => vec![reply(id, &answer)],
+                        Ok(sign::Decided::Sign(approved)) => {
+                            let signed = vault.eip1193_sign(&open.context, &approved);
+                            let answer = approved.answer(
+                                signed
+                                    .as_deref()
+                                    .map_err(|(locked, message)| (*locked, message.as_str())),
+                            );
+                            vec![reply(id, &answer)]
+                        }
+                        Err(Crossed) => vec![error(id, crossed())],
+                    },
                 }
             }
         };

@@ -151,7 +151,7 @@ fn every_apr5c_connect_scenario_replays() {
                     assert!(effects.is_empty(), "{what}: {effects:?}");
                     answer
                 }
-                Step::Read(_) | Step::Switch(_) => panic!("{what}: not a connect"),
+                Step::Read(_) | Step::Switch(_) | Step::Sign(_) => panic!("{what}: not a connect"),
                 Step::Connect(Connect::Connected(connected)) => {
                     let rechecked = connected.answer(true);
                     assert!(rechecked.touch, "{what}");

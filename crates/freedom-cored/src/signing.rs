@@ -228,6 +228,20 @@ pub(crate) fn typed_data_view(
     fc_evm::typed_data_view(domain, types, message, &request).map_err(evm_error)
 }
 
+/// `typed_data.hash` for a page's typed data (design 0012, APR-5d-1): the
+/// core's view, which the reference asked the core for with the same
+/// params (`typedDataViewFor`), or the message of the error it answered.
+pub(crate) fn page_typed_data_view(params: &str) -> Result<fc_eip1193::sign::TypedView, String> {
+    let params = fc_evm::parse_json(params).map_err(|_| String::from("Invalid parameters"))?;
+    object(&params, &["typed_data"], &["primary_type", "chain_id"])
+        .and_then(typed_data_view)
+        .map(|viewed| fc_eip1193::sign::TypedView {
+            hash: to_hex(&viewed.hash),
+            view: viewed.view,
+        })
+        .map_err(|body| body.message)
+}
+
 fn view_value(view: String) -> Result<Box<RawValue>, ErrorBody> {
     RawValue::from_string(view).map_err(|_| crate::vault::internal())
 }
