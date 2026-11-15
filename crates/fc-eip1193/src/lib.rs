@@ -33,10 +33,15 @@
 //! with no key gets `4100` before any of it, and a grant is written only
 //! from an approve's `choices`.
 //!
-//! The later APR-5 steps add the chain switches (APR-5c-2), signatures
-//! (APR-5d), the prepared send (APR-5e) and names over IPNS (APR-5f). Until
-//! then, those methods answer as a dispatcher without their route does
-//! (`4200`, `Method not supported`), but `4900` while the switch is off.
+//! **APR-5c-2, the chain switch** ([`switch`]): `wallet_switchEthereumChain`
+//! opens no prompt, as in the reference. Past its checks, main rechecks the
+//! document, the key's grant takes the chain, and main selects it for the
+//! window. `wallet_addEthereumChain` isn't in main's table: `4200`.
+//!
+//! The later APR-5 steps add signatures (APR-5d), the prepared send
+//! (APR-5e) and names over IPNS (APR-5f). Until then, those methods answer
+//! as a dispatcher without their route does (`4200`, `Method not
+//! supported`), but `4900` while the switch is off.
 
 mod answer;
 pub mod connect;
@@ -44,6 +49,7 @@ mod deadline;
 mod methods;
 pub mod prompt;
 mod request;
+pub mod switch;
 
 pub use answer::{Answer, Failure, Read, ReadOutcome};
 pub use connect::Connect;
@@ -51,6 +57,7 @@ pub use deadline::{Budget, OVERALL_MS};
 pub use methods::{Class, METHODS, Method, RPC_READS, method};
 pub use prompt::{Crossed, Decision, PromptId, Prompts, Recheck};
 pub use request::{Invalid, Request, World};
+pub use switch::Switch;
 
 use fc_json::JsValue;
 
@@ -68,6 +75,9 @@ pub enum Step {
     /// A connect (`eth_requestAccounts`) for a document with a key: a
     /// recheck or a prompt to main first.
     Connect(Connect),
+    /// A chain switch past its checks (`wallet_switchEthereumChain`):
+    /// main's recheck, the grant's chain, and main's selection.
+    Switch(Switch),
 }
 
 /// Runs `request` for the document keyed `key` (`PageContext.origin`;
@@ -99,6 +109,13 @@ pub fn start(
             None => Step::Answer(Answer::error(connect::NO_ADDRESS.0, connect::NO_ADDRESS.1)),
             Some(key) => Step::Connect(connect::start(world, key, grant)),
         },
+        "wallet_switchEthereumChain" => match key {
+            None => Step::Answer(Answer::error(connect::NO_ADDRESS.0, connect::NO_ADDRESS.1)),
+            Some(_) => match switch::start(request) {
+                Ok(switch) => Step::Switch(switch),
+                Err(answer) => Step::Answer(answer),
+            },
+        },
         name if RPC_READS.contains(&name) => Step::Read(Read::new(
             chain_id,
             row.name,
@@ -106,7 +123,7 @@ pub fn start(
             key,
             world,
         )),
-        // APR-5c-2 to APR-5e serve the rest.
+        // APR-5d and APR-5e serve the rest.
         _ => Step::Answer(Answer::unsupported()),
     }
 }

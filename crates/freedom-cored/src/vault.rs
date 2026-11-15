@@ -886,10 +886,11 @@ impl Vault {
         (written, events)
     }
 
-    /// A connected key's last use (design 0012, APR-5c).
-    pub fn eip1193_touch(&mut self, key: &str) -> Vec<Out> {
+    /// A connected key's last use, and a switch's chain (design 0012,
+    /// APR-5c).
+    pub fn eip1193_touch(&mut self, key: &str, chain_id: Option<u64>) -> Vec<Out> {
         let wall_ms = self.clocks().wall_ms;
-        self.approvals.page_touch(key, wall_ms);
+        self.approvals.page_touch(key, chain_id, wall_ms);
         self.approvals
             .take_events()
             .into_iter()

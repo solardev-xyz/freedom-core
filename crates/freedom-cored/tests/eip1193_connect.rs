@@ -1,12 +1,15 @@
-//! A page's connect end to end (design 0012, APR-5c-1): the real binary,
-//! with the test playing main. Every connect scenario of `step: "APR-5c"`
-//! in vectors/eip1193.json is replayed: main answers the core's
-//! `approval.recheck` live and its `approval.request` with the decision the
-//! reference's prompt took, and the core's answer, the grant file it writes
-//! and its `approval.changed` events are the reference's. Then the
-//! guarantees: no grant without a decision, prompt ids and handles never
-//! reused, the clock stopped while a prompt is open, a cancel, and the cap
-//! on open prompts.
+//! A page's connect and chain switch end to end (design 0012, APR-5c): the
+//! real binary, with the test playing main. Every scenario of
+//! `step: "APR-5c"` in vectors/eip1193.json is replayed: main answers the
+//! core's `approval.recheck` live, its `approval.request` with the decision
+//! the reference's prompt took, and its `eip1193.select_chain` once it has
+//! selected the chain, and the core's answer, the grant file it writes and
+//! its `approval.changed` events are the reference's. Then the guarantees:
+//! no grant without a decision, prompt ids and handles never reused, the
+//! clock stopped while a prompt is open, a cancel, the cap on open prompts,
+//! a switch that changes nothing unless rechecked live, and the row's
+//! multi-prompt cases ("Two prompts from one document", "A decision
+//! crossed", "One handle closing alone").
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
@@ -730,4 +733,546 @@ fn a_prompt_never_sent_is_retired() {
     core.send(&json!({ "type": "cancel", "id": 164 }));
     assert_eq!(response(&mut core, 164)["error"]["code"], "cancelled");
     assert_eq!(std::fs::read_to_string(&marker).unwrap(), "64 0 0");
+}
+
+// ---- APR-5c-2: the chain switch, and the row's multi-prompt cases ----
+
+const REJECTED: &str = r#"{"error":{"code":4001,"message":"User rejected the request"}}"#;
+const BUSY: &str =
+    r#"{"error":{"code":-32002,"message":"Another wallet request is already pending"}}"#;
+const NO_ADDRESS: &str =
+    r#"{"error":{"code":4100,"message":"This page has no address to connect from yet"}}"#;
+
+/// A document of `key` in its own frame (each window's guest).
+fn page_of(key: &str, frame: u64) -> Value {
+    json!({ "caller": "page", "page": {
+        "origin": key, "top_origin": key, "frame": frame, "navigation": 1, "agent": false,
+    } })
+}
+
+fn request_in(core: &mut Core, id: u64, context: &Value, method: &str, params: Value) {
+    core.send(&json!({
+        "type": "request", "id": id, "method": "eip1193.request",
+        "params": { "method": method, "params": params, "world": plain_world() },
+        "context": context,
+    }));
+}
+
+fn connect_in(core: &mut Core, id: u64, context: &Value) {
+    request_in(core, id, context, "eth_requestAccounts", json!([]));
+}
+
+/// A switch to Gnosis, the one chain `plain_world` lists.
+fn switch_in(core: &mut Core, id: u64, context: &Value) {
+    request_in(
+        core,
+        id,
+        context,
+        "wallet_switchEthereumChain",
+        json!([{ "chainId": "0x64" }]),
+    );
+}
+
+/// The core's next `n` requests to main, by the page request each serves.
+fn asked_for(core: &mut Core, n: usize) -> std::collections::BTreeMap<u64, Value> {
+    (0..n)
+        .map(|_| {
+            let asked = next_request(core);
+            (asked["params"]["request"].as_u64().unwrap(), asked)
+        })
+        .collect()
+}
+
+fn approve_for(asked: &Value, handle: &str, index: u64) -> Value {
+    json!({ "prompt": asked["params"]["prompt"], "handle": handle, "approve": true,
+        "choices": { "walletIndex": index }, "world": plain_world() })
+}
+
+fn closed_for(asked: &Value, reason: &str) -> Value {
+    json!({ "prompt": asked["params"]["prompt"], "closed": reason })
+}
+
+fn result_of(core: &mut Core, id: u64) -> String {
+    let reply = response(core, id);
+    reply["result"].to_string()
+}
+
+fn assert_mismatch(core: &mut Core, id: u64) {
+    let reply = response(core, id);
+    assert_eq!(reply["error"]["code"], "not_authorized", "{reply}");
+    assert_eq!(reply["error"]["data"]["reason"], "mismatch", "{reply}");
+}
+
+/// The `approval.changed` events since the last reply, as the keys they
+/// name.
+fn changed_keys(core: &mut Core, sentinel: u64) -> Vec<String> {
+    events(core, sentinel)
+        .iter()
+        .map(|event| {
+            assert_eq!(event["event"], "approval.changed", "{event}");
+            event["data"]["key"].as_str().unwrap().to_owned()
+        })
+        .collect()
+}
+
+/// Main's selection, answered after the recheck: the core's
+/// `eip1193.select_chain` for page request `id`.
+fn select_after_recheck(core: &mut Core, id: u64, context: &Value, chain: u64) -> Value {
+    let recheck = next_request(core);
+    assert_eq!(recheck["method"], "approval.recheck", "{recheck}");
+    assert_eq!(
+        recheck["params"],
+        json!({ "request": id, "page": context["page"] })
+    );
+    respond(core, &recheck, json!({ "live": true, "agent": false }));
+    let select = next_request(core);
+    assert_eq!(select["method"], "eip1193.select_chain", "{select}");
+    assert_eq!(
+        select["params"],
+        json!({ "request": id, "page": context["page"], "chain_id": chain })
+    );
+    select
+}
+
+fn is_switch(scenario: &Value) -> bool {
+    scenario["step"] == "APR-5c"
+        && scenario["requests"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|r| r["method"] == "wallet_switchEthereumChain")
+}
+
+/// Every chain-switch scenario of `step: "APR-5c"`, through the real
+/// binary: no prompt; a switch past its checks is rechecked, its grant (if
+/// the key has one) takes the chain before main is asked to select it,
+/// main's world reads the chain selected from then on, and each answer is
+/// the reference's, byte for byte. A switch writes no `approval.changed`.
+#[test]
+fn every_apr5c_switch_scenario_replays_through_the_core() {
+    let file = load();
+    let now = file["now"].as_u64().unwrap();
+    let (mut scenarios, mut requests, mut switched) = (0, 0, 0);
+    for scenario in file["scenarios"].as_array().unwrap() {
+        if !is_switch(scenario) {
+            continue;
+        }
+        scenarios += 1;
+        let id = scenario["id"].as_str().unwrap();
+        let from = wall_ms();
+        let (_root, mut core) = core_with(&scenario["grants"]["before"], &[]);
+        let mut world = world_of(&file, scenario);
+        let key = scenario["world"]["documents"][0]["key"].as_str();
+        let context = page(key);
+        let mut next = 10;
+        for (i, recorded) in scenario["requests"].as_array().unwrap().iter().enumerate() {
+            requests += 1;
+            next += 2;
+            let what = format!("{id} #{i} {}", recorded["method"]);
+            let effects = recorded["effects"].as_array().unwrap();
+            let mut params = json!({ "method": recorded["method"], "world": world });
+            if let Some(p) = recorded.get("params") {
+                params["params"] = p.clone();
+            }
+            core.send(&json!({
+                "type": "request", "id": next, "method": "eip1193.request",
+                "params": params, "context": context,
+            }));
+            if let Some(select) = effects.iter().find(|e| e["effect"] == "chain.select") {
+                switched += 1;
+                let chain = select["args"]["chainId"].as_u64().unwrap();
+                let asked = select_after_recheck(&mut core, next, &context, chain);
+                // The grant has its chain before main selects it, as the
+                // reference writes it first.
+                match effects.iter().find(|e| e["effect"] == "grant.write") {
+                    Some(write) => {
+                        assert_eq!(write["args"]["chainId"], chain, "{what}");
+                        assert_eq!(file_of(&core)[key.unwrap()]["chainId"], chain, "{what}");
+                    }
+                    None => assert_eq!(file_of(&core), scenario["grants"]["before"], "{what}"),
+                }
+                world["window_chain"] = json!(chain);
+                respond(&mut core, &asked, json!({}));
+            }
+            assert_eq!(
+                result_of(&mut core, next),
+                recorded["result"].to_string(),
+                "{what}"
+            );
+            assert!(events(&mut core, next + 1).is_empty(), "{what}");
+        }
+        let to = wall_ms();
+        assert_eq!(
+            normalized(file_of(&core), from, to, now),
+            scenario["grants"]["after"],
+            "{id}"
+        );
+    }
+    assert_eq!((scenarios, requests, switched), (7, 17, 5));
+}
+
+/// A switch changes nothing unless main rechecks it live: a document gone
+/// answers 4100, and a crossed recheck or main's error fails it
+/// (`mismatch`), with no selection asked and the grant unchanged. Main's
+/// selection must be `{}`; anything else fails the request, the grant's
+/// chain already written. `wallet_addEthereumChain` asks nothing.
+#[test]
+fn a_switch_changes_nothing_unless_main_rechecks_it_live() {
+    let grant = json!({ SITE: { "origin": SITE, "connectedAt": 1, "lastUsed": 1, "walletIndex": 0,
+        "chainId": 1, "autoApprove": { "signing": false, "transactions": [] } } });
+    let (_root, mut core) = core_with(&grant, &[]);
+    let doc = page(Some(SITE));
+    switch_in(&mut core, 10, &doc);
+    let recheck = next_request(&mut core);
+    assert_eq!(recheck["method"], "approval.recheck");
+    respond(
+        &mut core,
+        &recheck,
+        json!({ "live": false, "agent": false }),
+    );
+    assert_eq!(result_of(&mut core, 10), NO_ADDRESS);
+    for (id, answer) in [
+        (11, json!({ "live": true })),
+        (12, json!({ "live": "yes", "agent": false })),
+        (13, json!({})),
+    ] {
+        switch_in(&mut core, id, &doc);
+        let recheck = next_request(&mut core);
+        respond(&mut core, &recheck, answer);
+        assert_mismatch(&mut core, id);
+    }
+    switch_in(&mut core, 14, &doc);
+    let recheck = next_request(&mut core);
+    core.send(&json!({ "type": "response", "id": recheck["id"],
+        "error": { "code": "internal", "message": "x" } }));
+    assert_mismatch(&mut core, 14);
+    assert!(events(&mut core, 15).is_empty());
+    assert_eq!(file_of(&core), grant, "nothing changed");
+    // Live: the grant takes the chain, then main selects it.
+    switch_in(&mut core, 16, &doc);
+    let select = select_after_recheck(&mut core, 16, &doc, 100);
+    assert_eq!(file_of(&core)[SITE]["chainId"], 100);
+    respond(&mut core, &select, json!({}));
+    assert_eq!(result_of(&mut core, 16), r#"{"result":null}"#);
+    // A selection that isn't `{}`, and main's error for it.
+    for (id, answer) in [
+        (17, Some(json!({ "selected": true }))),
+        (18, Some(json!(null))),
+        (19, None),
+    ] {
+        switch_in(&mut core, id, &doc);
+        let select = select_after_recheck(&mut core, id, &doc, 100);
+        match answer {
+            Some(answer) => respond(&mut core, &select, answer),
+            None => core.send(&json!({ "type": "response", "id": select["id"],
+                "error": { "code": "internal", "message": "x" } })),
+        }
+        assert_mismatch(&mut core, id);
+    }
+    // Not in main's table: 4200, nothing asked.
+    request_in(
+        &mut core,
+        20,
+        &doc,
+        "wallet_addEthereumChain",
+        json!([{ "chainId": "0x2105" }]),
+    );
+    assert_eq!(
+        result_of(&mut core, 20),
+        r#"{"error":{"code":4200,"message":"Method not supported"}}"#
+    );
+    assert!(
+        events(&mut core, 21).is_empty(),
+        "a switch is no grant event"
+    );
+    assert_eq!(file_of(&core)[SITE]["walletIndex"], 0);
+    // Before the dApp store moves: `not_moved`, nothing asked.
+    drop(core);
+    let (_root, data, locks) = dirs();
+    let mut core = spawn_env("serve", &data, &locks, &[], &[]);
+    std::fs::create_dir_all(&core.grant_root).unwrap();
+    core.hello_fragments();
+    switch_in(&mut core, 10, &doc);
+    let reply = response(&mut core, 10);
+    assert_eq!(reply["error"]["code"], "not_moved", "{reply}");
+    assert_eq!(reply["error"]["data"]["store"], "dapp", "{reply}");
+}
+
+/// A switch waiting on main has its clock (1 s here): a recheck or a
+/// selection main holds past it answers the deadline and cancels the core's
+/// request. One held at its recheck changes nothing; one held at its
+/// selection has its grant's chain already, as the reference writes it
+/// first (*inferred*).
+#[test]
+fn a_switch_waiting_on_main_has_its_deadline() {
+    let grant = json!({ SITE: { "origin": SITE, "connectedAt": 1, "lastUsed": 1, "walletIndex": 0,
+        "chainId": 1, "autoApprove": { "signing": false, "transactions": [] } } });
+    let (_root, mut core) = core_with(&grant, &[("FREEDOM_CORED_TEST_EIP1193_OVERALL_MS", "1000")]);
+    let doc = page(Some(SITE));
+    let deadline = r#"{"error":{"code":-32603,"message":"The request's deadline passed"}}"#;
+    let held = |core: &mut Core, asked: &Value, id: u64| {
+        assert_eq!(core.recv(), json!({ "type": "cancel", "id": asked["id"] }));
+        assert_eq!(result_of(core, id), deadline);
+    };
+    switch_in(&mut core, 10, &doc);
+    let recheck = next_request(&mut core);
+    held(&mut core, &recheck, 10);
+    respond(&mut core, &recheck, json!({ "live": true, "agent": false }));
+    assert!(events(&mut core, 11).is_empty());
+    assert_eq!(file_of(&core), grant, "nothing changed");
+    switch_in(&mut core, 12, &doc);
+    let select = select_after_recheck(&mut core, 12, &doc, 100);
+    held(&mut core, &select, 12);
+    respond(&mut core, &select, json!({}));
+    assert!(events(&mut core, 13).is_empty());
+    assert_eq!(file_of(&core)[SITE]["chainId"], 100);
+}
+
+/// The row's "Two prompts from one document": two requests at once, the
+/// second answered `busy` and a decision on the first answering only the
+/// first; two in turn, the second opened before the first's answer reaches
+/// the core, each answer reaching only its own request, in either order.
+#[test]
+fn two_prompts_from_one_document() {
+    let (_root, mut core) = core_with(&Value::Null, &[]);
+    // At once.
+    let doc = page_of(SITE, 1);
+    connect_in(&mut core, 10, &doc);
+    connect_in(&mut core, 11, &doc);
+    let asked = asked_for(&mut core, 2);
+    assert_ne!(
+        asked[&10]["params"]["prompt"],
+        asked[&11]["params"]["prompt"]
+    );
+    respond(
+        &mut core,
+        &asked[&11],
+        json!({ "prompt": asked[&11]["params"]["prompt"], "busy": true }),
+    );
+    assert_eq!(result_of(&mut core, 11), BUSY);
+    respond(
+        &mut core,
+        &asked[&10],
+        approve_for(&asked[&10], &handle(1), 0),
+    );
+    assert_eq!(result_of(&mut core, 10), r#"{"result":["0xa"]}"#);
+    assert_eq!(changed_keys(&mut core, 12), [SITE]);
+    // In turn: the first decided, its answer still on its way, when the
+    // second opens (the key has no grant yet, so it asks too). The second's
+    // answer reaches the core first.
+    let two = "https://two.example";
+    let doc = page_of(two, 3);
+    connect_in(&mut core, 20, &doc);
+    let first = next_request(&mut core);
+    connect_in(&mut core, 21, &doc);
+    let second = next_request(&mut core);
+    assert_eq!(second["params"]["request"], 21);
+    respond(
+        &mut core,
+        &second,
+        json!({ "prompt": second["params"]["prompt"], "handle": handle(3),
+            "approve": false, "choices": {} }),
+    );
+    assert_eq!(result_of(&mut core, 21), REJECTED);
+    respond(&mut core, &first, approve_for(&first, &handle(2), 1));
+    assert_eq!(result_of(&mut core, 20), r#"{"result":["0xb"]}"#);
+    assert_eq!(changed_keys(&mut core, 22), [two]);
+    // In turn, the first's answer first.
+    let three = "https://three.example";
+    let doc = page_of(three, 4);
+    connect_in(&mut core, 30, &doc);
+    let first = next_request(&mut core);
+    connect_in(&mut core, 31, &doc);
+    let second = next_request(&mut core);
+    respond(&mut core, &first, approve_for(&first, &handle(4), 0));
+    assert_eq!(result_of(&mut core, 30), r#"{"result":["0xa"]}"#);
+    assert_eq!(changed_keys(&mut core, 32), [three]);
+    respond(&mut core, &second, closed_for(&second, "navigated"));
+    assert_eq!(result_of(&mut core, 31), REJECTED);
+    assert!(changed_keys(&mut core, 33).is_empty());
+    let file = file_of(&core);
+    assert_eq!(file.as_object().unwrap().len(), 3);
+    for (key, index) in [(SITE, 0), (two, 1), (three, 0)] {
+        assert_eq!(file[key]["walletIndex"], index, "{key}");
+    }
+}
+
+/// The row's "A decision crossed": main answers one request's
+/// `approval.request` with the other's prompt id, its handle, or its whole
+/// decision. Refused (`mismatch`), with no grant for it, and the other's
+/// decision never grants for it. A decision relayed on the wrong request
+/// has named its handle, so on its own request it is refused too.
+#[test]
+fn a_decision_crossed() {
+    let (_root, mut core) = core_with(&Value::Null, &[]);
+    let pair = |core: &mut Core, ids: (u64, u64), keys: (&str, &str)| {
+        connect_in(core, ids.0, &page_of(keys.0, 1));
+        connect_in(core, ids.1, &page_of(keys.1, 2));
+        asked_for(core, 2)
+    };
+    // The other's prompt id.
+    let (a, b) = ("https://a.example", "https://b.example");
+    let asked = pair(&mut core, (10, 11), (a, b));
+    let mut crossed = approve_for(&asked[&10], &handle(1), 0);
+    crossed["prompt"] = asked[&11]["params"]["prompt"].clone();
+    respond(&mut core, &asked[&10], crossed);
+    assert_mismatch(&mut core, 10);
+    respond(
+        &mut core,
+        &asked[&11],
+        approve_for(&asked[&11], &handle(2), 1),
+    );
+    assert_eq!(result_of(&mut core, 11), r#"{"result":["0xb"]}"#);
+    assert_eq!(changed_keys(&mut core, 12), [b]);
+    // The other's handle, once its own answer named it.
+    let (c, d) = ("https://c.example", "https://d.example");
+    let asked = pair(&mut core, (20, 21), (c, d));
+    respond(
+        &mut core,
+        &asked[&21],
+        approve_for(&asked[&21], &handle(3), 0),
+    );
+    assert_eq!(result_of(&mut core, 21), r#"{"result":["0xa"]}"#);
+    assert_eq!(changed_keys(&mut core, 22), [d]);
+    respond(
+        &mut core,
+        &asked[&20],
+        approve_for(&asked[&20], &handle(3), 0),
+    );
+    assert_mismatch(&mut core, 20);
+    assert!(changed_keys(&mut core, 23).is_empty());
+    // The other's whole decision, relayed on this request, then on its own.
+    let (e, f) = ("https://e.example", "https://f.example");
+    let asked = pair(&mut core, (30, 31), (e, f));
+    let decision = approve_for(&asked[&31], &handle(4), 1);
+    respond(&mut core, &asked[&30], decision.clone());
+    assert_mismatch(&mut core, 30);
+    respond(&mut core, &asked[&31], decision);
+    assert_mismatch(&mut core, 31);
+    assert!(changed_keys(&mut core, 32).is_empty());
+    let file = file_of(&core);
+    let keys: Vec<&String> = file.as_object().unwrap().keys().collect();
+    assert_eq!(
+        keys,
+        [b, d],
+        "a grant only for the decisions made on its own prompt"
+    );
+}
+
+/// The row's "One handle closing alone": with prompts open in two windows,
+/// one document navigating, its guest destroyed or its window closed
+/// (main's `closed`), or main ending its request (a cancel), ends only its
+/// own request, with no grant, and the other's approval still grants.
+#[test]
+fn one_handle_closing_alone() {
+    let (_root, mut core) = core_with(&Value::Null, &[]);
+    let mut granted = Vec::new();
+    for (round, reason) in ["navigated", "closed", "closed", "cancel"]
+        .into_iter()
+        .enumerate()
+    {
+        let round = round as u64;
+        let (gone, other) = (
+            format!("https://gone{round}.example"),
+            format!("https://other{round}.example"),
+        );
+        let (ids, sentinel) = ((10 * round + 10, 10 * round + 11), 10 * round + 12);
+        connect_in(&mut core, ids.0, &page_of(&gone, 1));
+        connect_in(&mut core, ids.1, &page_of(&other, 2));
+        let asked = asked_for(&mut core, 2);
+        if reason == "cancel" {
+            core.send(&json!({ "type": "cancel", "id": ids.0 }));
+            assert_eq!(
+                core.recv(),
+                json!({ "type": "cancel", "id": asked[&ids.0]["id"] })
+            );
+            assert_eq!(response(&mut core, ids.0)["error"]["code"], "cancelled");
+            // Main's terminal answer to the core's cancelled request.
+            respond(
+                &mut core,
+                &asked[&ids.0],
+                closed_for(&asked[&ids.0], "closed"),
+            );
+        } else {
+            respond(
+                &mut core,
+                &asked[&ids.0],
+                closed_for(&asked[&ids.0], reason),
+            );
+            assert_eq!(result_of(&mut core, ids.0), REJECTED, "{reason}");
+        }
+        respond(
+            &mut core,
+            &asked[&ids.1],
+            approve_for(&asked[&ids.1], &handle(round + 1), 1),
+        );
+        assert_eq!(result_of(&mut core, ids.1), r#"{"result":["0xb"]}"#);
+        assert_eq!(
+            changed_keys(&mut core, sentinel),
+            std::slice::from_ref(&other)
+        );
+        granted.push(other);
+    }
+    let file = file_of(&core);
+    let keys: Vec<&String> = file.as_object().unwrap().keys().collect();
+    assert_eq!(keys, granted.iter().collect::<Vec<_>>());
+}
+
+/// The row's last "One handle closing alone" case: in one document, a
+/// prompt cancelled while another request waits on its recheck ends only
+/// the cancelled one; and the other way round, a switch cancelled at its
+/// recheck leaves the prompt to its decision.
+#[test]
+fn a_cancel_in_one_document_ends_only_its_own_request() {
+    let (_root, mut core) = core_with(&Value::Null, &[]);
+    let doc = page_of(SITE, 1);
+    // The prompt closed by main (`cancelled`), then by a cancel of its page
+    // request; the switch waiting on its recheck goes on each time.
+    for (round, by_cancel) in [(0u64, false), (1, true)] {
+        let (connect_id, switch_id) = (10 * round + 10, 10 * round + 11);
+        connect_in(&mut core, connect_id, &doc);
+        let prompt = next_request(&mut core);
+        assert_eq!(prompt["method"], "approval.request");
+        switch_in(&mut core, switch_id, &doc);
+        let recheck = next_request(&mut core);
+        assert_eq!(recheck["method"], "approval.recheck");
+        if by_cancel {
+            core.send(&json!({ "type": "cancel", "id": connect_id }));
+            assert_eq!(core.recv(), json!({ "type": "cancel", "id": prompt["id"] }));
+            assert_eq!(
+                response(&mut core, connect_id)["error"]["code"],
+                "cancelled"
+            );
+            respond(&mut core, &prompt, closed_for(&prompt, "cancelled"));
+        } else {
+            respond(&mut core, &prompt, closed_for(&prompt, "cancelled"));
+            assert_eq!(result_of(&mut core, connect_id), REJECTED);
+        }
+        respond(&mut core, &recheck, json!({ "live": true, "agent": false }));
+        let select = next_request(&mut core);
+        assert_eq!(
+            select["params"],
+            json!({ "request": switch_id, "page": doc["page"], "chain_id": 100 })
+        );
+        respond(&mut core, &select, json!({}));
+        assert_eq!(result_of(&mut core, switch_id), r#"{"result":null}"#);
+        assert!(events(&mut core, 10 * round + 12).is_empty());
+    }
+    assert_eq!(file_of(&core), Value::Null, "no grant");
+    // The switch cancelled at its recheck: the prompt still decides.
+    connect_in(&mut core, 40, &doc);
+    let prompt = next_request(&mut core);
+    switch_in(&mut core, 41, &doc);
+    let recheck = next_request(&mut core);
+    core.send(&json!({ "type": "cancel", "id": 41 }));
+    assert_eq!(
+        core.recv(),
+        json!({ "type": "cancel", "id": recheck["id"] })
+    );
+    assert_eq!(response(&mut core, 41)["error"]["code"], "cancelled");
+    respond(&mut core, &recheck, json!({ "live": true, "agent": false }));
+    respond(&mut core, &prompt, approve_for(&prompt, &handle(9), 0));
+    assert_eq!(result_of(&mut core, 40), r#"{"result":["0xa"]}"#);
+    assert_eq!(changed_keys(&mut core, 42), [SITE]);
+    assert_eq!(file_of(&core)[SITE]["walletIndex"], 0);
 }
