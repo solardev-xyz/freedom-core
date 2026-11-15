@@ -144,6 +144,12 @@ pub enum Event {
         id: u64,
         payload: Box<[u8]>,
     },
+    /// The chain thread answered one of the core's own reads (design
+    /// 0012, "Phone jobs"): its tag, and the reply's payload.
+    ChainRead {
+        tag: u64,
+        payload: Box<[u8]>,
+    },
 }
 
 // A stream mark's slot here is within what the reader charges its entry.
@@ -214,6 +220,10 @@ const CAPABILITIES: &[&str] = &[
     "approval.forget_account",
     // Design 0012: a device send's "Always allow" (#373).
     "approval.remember",
+    // Design 0012: phone jobs (PHN-1).
+    "phone.job",
+    "phone.sent",
+    "phone.result",
     // Design 0012: x402's payments (X402-1).
     "x402.authorize",
     "x402.settle",
@@ -530,6 +540,12 @@ pub fn run(options: &Options) -> Exit {
             }
             Ok(Event::FeeReference { id, payload }) => {
                 core.vault.fee_answered(id, &payload);
+            }
+            Ok(Event::ChainRead { tag, payload }) => {
+                let outs = core.vault.chain_read(tag, &payload);
+                if let Flow::Exit(exit) = core.dispatch(outs) {
+                    break exit;
+                }
             }
             Err(RecvTimeoutError::Timeout) => {}
             Err(RecvTimeoutError::Disconnected) => break Exit::Ok,
@@ -1510,6 +1526,22 @@ impl Core {
                 Out::SendUnder { payload, id, epoch } => self.send_under(&payload, id, epoch),
                 Out::Job(id, job) => {
                     if self.worker.submit(id, job) {
+                        Flow::Continue
+                    } else {
+                        Flow::Exit(Exit::Internal)
+                    }
+                }
+                Out::ChainRead(read) => {
+                    if self.chain.send(
+                        chain::In::Internal {
+                            tag: read.tag,
+                            chain_id: read.chain_id,
+                            method: read.method,
+                            params: read.params,
+                            deadline_ms: read.deadline_ms,
+                        },
+                        None,
+                    ) {
                         Flow::Continue
                     } else {
                         Flow::Exit(Exit::Internal)

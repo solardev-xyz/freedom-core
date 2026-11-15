@@ -207,7 +207,9 @@ fn signing_reply_len(signature: &[u8; 65], view: &str) -> Option<usize> {
 }
 
 /// The typed-data parameters both methods share: the digest and its view.
-fn typed_data_view(fields: &Map<String, Value>) -> Result<fc_evm::TypedDataView, ErrorBody> {
+pub(crate) fn typed_data_view(
+    fields: &Map<String, Value>,
+) -> Result<fc_evm::TypedDataView, ErrorBody> {
     let (domain, types, message) = typed_data(&fields["typed_data"])?;
     let chain_id = match fields.get("chain_id") {
         None => None,
