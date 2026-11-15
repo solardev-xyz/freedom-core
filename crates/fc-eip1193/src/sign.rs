@@ -388,14 +388,17 @@ impl DeviceApproval {
     /// `{ device: { type, kind, account, payload, expected_hash?, handle,
     /// token } }` (*inferred*): what main spends the token with
     /// (`approval.spend`, or a phone's `phone.job`), and the account's
-    /// kind.
-    pub fn answer(&self, minted: Result<&str, &str>) -> Answer {
-        let token = match minted {
-            Ok(token) => token,
-            Err(message) => return failure(message, "Signing failed"),
-        };
+    /// kind. The token is borrowed from the minter's wiping buffer and
+    /// never copied here: the daemon writes the answer straight into its
+    /// reply's own ([`DeviceAnswer::write_into`]). A token that isn't plain
+    /// hex (the minter's are 64 lowercase hex digits) is refused, not
+    /// quoted.
+    pub fn answer<'t>(&self, token: &'t str) -> Result<DeviceAnswer<'t>, Answer> {
+        if token.is_empty() || !token.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+            return Err(failure("", "Signing failed"));
+        }
         let Ok(payload) = fc_json::parse(&self.payload) else {
-            return failure("", "Signing failed");
+            return Err(failure("", "Signing failed"));
         };
         let mut device = vec![
             prop("type", JsValue::string(self.device.name())),
@@ -407,8 +410,63 @@ impl DeviceApproval {
             device.push(prop("expected_hash", JsValue::string(hash.as_str())));
         }
         device.push(prop("handle", JsValue::string(self.handle.as_str())));
-        device.push(prop("token", JsValue::string(token)));
-        Answer::raw(JsValue::Object(vec![prop("device", JsValue::Object(device))]).stringify())
+        // `{"type":…,"handle":"…"}` with its closing brace replaced by the
+        // token's field, up to its opening quote.
+        let mut before = String::from(r#"{"device":"#);
+        before.push_str(&JsValue::Object(device).stringify());
+        before.pop();
+        before.push_str(r#","token":""#);
+        Ok(DeviceAnswer { before, token })
+    }
+
+    /// The answer when the token couldn't be minted: `-32603` with the
+    /// refusal's message.
+    pub fn refused(message: &str) -> Answer {
+        failure(message, "Signing failed")
+    }
+}
+
+/// A `{ device }` answer: its public text, and the token it carries,
+/// borrowed from the minter's wiping buffer (design 0012, "Tokens": never
+/// in a plain copy, never in Debug output). Its `Debug` prints no token,
+/// and it has no `Clone`.
+pub struct DeviceAnswer<'t> {
+    /// The JSON text up to the token's opening quote.
+    before: String,
+    token: &'t str,
+}
+
+impl DeviceAnswer<'_> {
+    /// What follows the token: its closing quote and two braces.
+    const AFTER: &'static str = r#""}}"#;
+
+    /// The answer's length in bytes, for a reply sized before it is
+    /// written.
+    pub fn len(&self) -> usize {
+        self.before.len() + self.token.len() + Self::AFTER.len()
+    }
+
+    /// Never: the answer always holds its `device`.
+    pub fn is_empty(&self) -> bool {
+        false
+    }
+
+    /// Appends the answer's JSON text, its token in place, to `out`: the
+    /// caller's wiping buffer, sized for the whole reply first so that no
+    /// grown buffer leaves a copy behind.
+    pub fn write_into(&self, out: &mut Vec<u8>) {
+        out.extend_from_slice(self.before.as_bytes());
+        out.extend_from_slice(self.token.as_bytes());
+        out.extend_from_slice(Self::AFTER.as_bytes());
+    }
+}
+
+impl std::fmt::Debug for DeviceAnswer<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DeviceAnswer")
+            .field("before", &self.before)
+            .field("token", &"<redacted>")
+            .finish()
     }
 }
 
@@ -1240,6 +1298,51 @@ mod tests {
             "0x".to_owned() + &"zz".repeat(32)
         )));
         assert!(signs_raw_hash(&JsValue::Null));
+    }
+
+    /// A `{ device }` answer's token goes only into the reply's buffer: no
+    /// Debug output shows it, the answer's, its approval's or the
+    /// decision's. A token that isn't plain hex is refused, never quoted.
+    #[test]
+    fn a_device_token_is_in_no_debug_output() {
+        const MARKER: &str = "feedfacecafebeef0123456789abcdef";
+        let approval = DeviceApproval {
+            device: Device::Ledger,
+            account: 1,
+            handle: "ab".repeat(32),
+            kind: "sign-typed-data",
+            payload: r#"{"typed_data":{"domain":{},"types":{}},"chain_id":"100"}"#.to_owned(),
+            expected_hash: Some(format!("0x{}", "11".repeat(32))),
+        };
+        let answer = approval.answer(MARKER).unwrap();
+        let decided = Decided::Device(approval.clone());
+        for debug in [
+            format!("{answer:?}"),
+            format!("{answer:#?}"),
+            format!("{approval:?}"),
+            format!("{decided:?}"),
+        ] {
+            assert!(!debug.contains(MARKER), "{debug}");
+            assert!(!debug.contains("feedface"), "{debug}");
+        }
+        let mut out = Vec::with_capacity(answer.len());
+        answer.write_into(&mut out);
+        assert_eq!(out.len(), answer.len());
+        assert_eq!(
+            String::from_utf8(out).unwrap(),
+            format!(
+                r#"{{"device":{{"type":"ledger","kind":"sign-typed-data","account":1,"payload":{{"typed_data":{{"domain":{{}},"types":{{}}}},"chain_id":"100"}},"expected_hash":"0x{}","handle":"{}","token":"{MARKER}"}}}}"#,
+                "11".repeat(32),
+                "ab".repeat(32),
+            )
+        );
+        for bad in ["", "ab\"cd", "ab\\cd", "0xab", "ab cd"] {
+            assert_eq!(
+                approval.answer(bad).unwrap_err(),
+                failure("", "Signing failed"),
+                "{bad}"
+            );
+        }
     }
 
     #[test]

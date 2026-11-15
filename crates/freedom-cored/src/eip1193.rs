@@ -855,16 +855,18 @@ impl Connects {
                             outs
                         }
                         // A device's account: the token goes back to main
-                        // with the approved request.
+                        // with the approved request, from the minter's
+                        // wiping buffer straight into the reply's.
                         Ok(sign::Decided::Device(approved)) => {
-                            let minted = vault.eip1193_device(&open.context, &approved);
-                            let answer = approved.answer(
-                                minted
-                                    .as_ref()
-                                    .map(|token| token.as_str())
-                                    .map_err(String::as_str),
-                            );
-                            vec![reply(id, &answer)]
+                            match vault.eip1193_device(&open.context, &approved) {
+                                Ok(token) => match approved.answer(&token) {
+                                    Ok(answer) => vec![device_reply(id, &answer)],
+                                    Err(answer) => vec![reply(id, &answer)],
+                                },
+                                Err(message) => {
+                                    vec![reply(id, &sign::DeviceApproval::refused(&message))]
+                                }
+                            }
                         }
                         Err(Crossed) => vec![error(id, crossed())],
                     },
@@ -1024,6 +1026,21 @@ fn raw_reply(id: u64, answer: &str) -> Out {
     payload.extend_from_slice(head.as_bytes());
     payload.extend_from_slice(answer.as_bytes());
     payload.push(b'}');
+    Out::Send(payload)
+}
+
+/// A `{ device }` answer's reply: one wiping buffer sized for the whole
+/// reply before anything is written, so that the token, written from the
+/// minter's buffer, leaves no copy behind in a grown one (as
+/// `approval.issue`'s reply).
+fn device_reply(id: u64, answer: &sign::DeviceAnswer<'_>) -> Out {
+    let head = format!(r#"{{"type":"response","id":{id},"result":"#);
+    let size = head.len() + answer.len() + 1;
+    let mut payload = Zeroizing::new(Vec::with_capacity(size));
+    payload.extend_from_slice(head.as_bytes());
+    answer.write_into(&mut payload);
+    payload.push(b'}');
+    debug_assert_eq!(payload.capacity(), size, "no reallocation");
     Out::Send(payload)
 }
 
