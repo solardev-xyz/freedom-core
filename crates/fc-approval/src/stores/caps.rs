@@ -112,6 +112,16 @@ pub struct Charge {
     pub amount: String,
 }
 
+/// Why [`CapStore::narrow`] changes nothing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NarrowRefusal {
+    /// No cap under the key.
+    NoCap,
+    /// A field that wouldn't narrow the cap: equal, wider, or not
+    /// comparable with the cap's own value.
+    NotNarrower,
+}
+
 /// A cap as a lookup reads it: its amounts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Cap {
@@ -336,6 +346,70 @@ impl CapStore {
         Applied::new(Some(next), effect)
     }
 
+    /// A narrowing of the cap under `origin` and `key` (core #392, from the
+    /// activity pane): `cap_amount` (decimal digits) strictly below the
+    /// cap's `capAmount`, and `window_seconds` making `createdAt +
+    /// window_seconds` strictly before its `expiresAt`, each when given. The
+    /// record changes as `updatePermission` changes it: `capAmount`
+    /// replaced, `expiresAt` set to `createdAt + windowSeconds`, the rest
+    /// kept, in place.
+    ///
+    /// Refused, with the store unchanged, for no cap there
+    /// ([`NarrowRefusal::NoCap`]), and for a field equal to the cap's, wider,
+    /// or one the cap's values can't be compared with: an amount that isn't
+    /// decimal digits, a `createdAt` that isn't a number, an `expiresAt`
+    /// `ToNumber` makes `NaN` ([`NarrowRefusal::NotNarrower`]). The cap may
+    /// be expired, or its clock set back: narrowing it changes nothing it
+    /// answers.
+    pub fn narrow(
+        &mut self,
+        origin: &str,
+        key: &str,
+        cap_amount: Option<&str>,
+        window_seconds: Option<u64>,
+    ) -> Result<Applied<Option<JsValue>>, NarrowRefusal> {
+        let record = self
+            .record(origin, key)
+            .filter(|record| matches!(record, JsValue::Object(_)))
+            .ok_or(NarrowRefusal::NoCap)?;
+        let mut next = record.clone();
+        if let Some(text) = cap_amount {
+            let new = atomic(text).ok_or(NarrowRefusal::NotNarrower)?;
+            let old = record
+                .get("capAmount")
+                .and_then(JsValue::as_str)
+                .and_then(atomic)
+                .ok_or(NarrowRefusal::NotNarrower)?;
+            if new >= old {
+                return Err(NarrowRefusal::NotNarrower);
+            }
+            next.set("capAmount", JsValue::string(text));
+        }
+        if let Some(window) = window_seconds {
+            let Some(JsValue::Number(created)) = record.get("createdAt") else {
+                return Err(NarrowRefusal::NotNarrower);
+            };
+            let old = record
+                .get("expiresAt")
+                .and_then(|value| js::to_number(value).ok())
+                .unwrap_or(f64::NAN);
+            let expires = created + window as f64;
+            // Strictly sooner: `NaN` on either side is refused.
+            let sooner = expires.partial_cmp(&old) == Some(std::cmp::Ordering::Less);
+            if window == 0 || !sooner {
+                return Err(NarrowRefusal::NotNarrower);
+            }
+            next.set("expiresAt", JsValue::Number(expires));
+        }
+        if cap_amount.is_none() && window_seconds.is_none() {
+            return Err(NarrowRefusal::NotNarrower);
+        }
+        if let Some(slot) = self.entries.get_mut(origin).and_then(|c| c.get_mut(key)) {
+            *slot = next.clone();
+        }
+        Ok(Applied::new(Some(next), Effect::Narrowing))
+    }
+
     /// `revoke(origin, chainId, asset)`: the cap dropped, and its origin
     /// with its last cap. Whether there was one.
     pub fn revoke(&mut self, origin: &str, key: &str) -> Applied<bool> {
@@ -527,6 +601,134 @@ mod tests {
         let (mut store, _) = granted("1", NOW_S);
         assert_eq!(store.revoke_all(SITE).effect, Effect::Narrowing);
         assert_eq!(store.text().unwrap(), "{}");
+    }
+
+    /// A narrowing lowers the amount, shortens the window, or both, each
+    /// strictly; anything equal or wider, on either field, changes nothing.
+    #[test]
+    fn a_narrowing_only_narrows() {
+        let (store, key) = granted("100", NOW_S);
+        let text = store.text().unwrap();
+        let narrowed = |amount: Option<&str>, window: Option<u64>| {
+            let mut next = store.clone();
+            let result = next.narrow(SITE, &key, amount, window);
+            (result, next)
+        };
+        for (amount, window) in [
+            (Some("100"), None),
+            (Some("101"), None),
+            (None, Some(60)),
+            (None, Some(61)),
+            (None, Some(0)),
+            (Some("99"), Some(60)),
+            (Some("100"), Some(59)),
+            (Some("x"), None),
+            (Some(""), None),
+            (None, None),
+        ] {
+            let (result, next) = narrowed(amount, window);
+            assert_eq!(
+                result,
+                Err(NarrowRefusal::NotNarrower),
+                "{amount:?} {window:?}"
+            );
+            assert_eq!(next.text().unwrap(), text, "{amount:?} {window:?}");
+        }
+        let (result, next) = narrowed(Some("99"), None);
+        let applied = result.unwrap();
+        assert_eq!(applied.effect, Effect::Narrowing);
+        let record = applied.value.unwrap();
+        assert_eq!(
+            record.get("capAmount").and_then(JsValue::as_str),
+            Some("99")
+        );
+        assert_eq!(
+            record.get("expiresAt"),
+            Some(&JsValue::Number((NOW_S + 60) as f64))
+        );
+        assert_eq!(
+            next.active(SITE, &key, NOW_S).unwrap().cap,
+            U256::from_u64(99)
+        );
+        // In place, as updatePermission writes it.
+        assert_eq!(next.text().unwrap(), text.replace("\"100\"", "\"99\""));
+        let (result, next) = narrowed(None, Some(59));
+        assert_eq!(result.unwrap().effect, Effect::Narrowing);
+        assert!(next.active(SITE, &key, NOW_S + 58).is_some());
+        assert!(next.active(SITE, &key, NOW_S + 59).is_none());
+        let (result, next) = narrowed(Some("0"), Some(1));
+        assert_eq!(result.unwrap().effect, Effect::Narrowing);
+        let cap = next.active(SITE, &key, NOW_S).unwrap();
+        assert_eq!((cap.cap, cap.spent), (U256::ZERO, U256::ZERO));
+        // Another cap, another origin, or a record that isn't one: none.
+        let mut other = store.clone();
+        assert_eq!(
+            other.narrow(SITE, "1:0xabc", Some("1"), None),
+            Err(NarrowRefusal::NoCap)
+        );
+        assert_eq!(
+            other.narrow("https://other.example", &key, Some("1"), None),
+            Err(NarrowRefusal::NoCap)
+        );
+        let odd = "{\"o\": {\"1:0xa\": \"not a record\"}}";
+        let mut odd = CapStore::load(odd.as_bytes(), NOW_S).unwrap();
+        assert_eq!(
+            odd.narrow("o", "1:0xa", Some("0"), None),
+            Err(NarrowRefusal::NoCap)
+        );
+    }
+
+    /// Values the cap holds that a narrowing can't be compared with refuse
+    /// it; an expired cap, or one behind a clock set back, still narrows.
+    #[test]
+    fn a_narrowing_compares_with_what_the_cap_holds() {
+        let cap = |amount: &str, created: &str, expires: &str| {
+            let text = format!(
+                "{{\"o\": {{\"1:0xa\": {{\"capAmount\": {amount}, \"spentAmount\": \"0\", \"createdAt\": {created}, \"expiresAt\": {expires}}}}}}}"
+            );
+            CapStore::load(text.as_bytes(), 100).unwrap()
+        };
+        let narrow = |mut store: CapStore, amount: Option<&str>, window: Option<u64>| {
+            store.narrow("o", "1:0xa", amount, window).map(|a| a.effect)
+        };
+        let refused = Err(NarrowRefusal::NotNarrower);
+        assert_eq!(
+            narrow(cap("\"0x10\"", "1", "1000"), Some("1"), None),
+            refused
+        );
+        assert_eq!(narrow(cap("10", "1", "1000"), Some("1"), None), refused);
+        assert_eq!(
+            narrow(cap("\"10\"", "\"1\"", "1000"), None, Some(5)),
+            refused
+        );
+        assert_eq!(
+            narrow(cap("\"10\"", "1", "\"1000\""), None, Some(5)),
+            Ok(Effect::Narrowing)
+        );
+        // An `expiresAt` that isn't a number: the cap was dropped as read.
+        assert_eq!(
+            narrow(cap("\"10\"", "1", "\"abc\""), None, Some(5)),
+            Err(NarrowRefusal::NoCap)
+        );
+        assert_eq!(
+            narrow(cap("\"10\"", "1e400", "1e400"), None, Some(5)),
+            refused
+        );
+        // A leading zero in the file is its number.
+        assert_eq!(
+            narrow(cap("\"010\"", "1", "1000"), Some("9"), None),
+            Ok(Effect::Narrowing)
+        );
+        assert_eq!(
+            narrow(cap("\"010\"", "1", "1000"), Some("10"), None),
+            refused
+        );
+        // A narrowing reads no clock: a cap created after now (200 > 100)
+        // narrows too.
+        assert_eq!(
+            narrow(cap("\"10\"", "200", "300"), Some("5"), Some(50)),
+            Ok(Effect::Narrowing)
+        );
     }
 
     #[test]

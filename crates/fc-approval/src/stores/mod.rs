@@ -43,7 +43,7 @@ mod dapp;
 mod radicle;
 mod swarm;
 
-pub use caps::{Cap, CapStore, Charge};
+pub use caps::{Cap, CapStore, Charge, NarrowRefusal};
 pub use dapp::{DappStore, LIMITED_FIELD, RULE_TTL_MS, SigningRule, TransactionRule};
 pub use fc_json::{JsString, JsValue, ToPrimitiveError};
 pub use radicle::{RadicleFlag, RadicleStore};

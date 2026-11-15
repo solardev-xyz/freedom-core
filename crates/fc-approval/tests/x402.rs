@@ -2,11 +2,14 @@
 //! approvals reference's x402 code produced over the pinned @x402 SDK: the
 //! client's default assets, the cap key of a paid URL, `tupleFromAccept`,
 //! `findCoveringPermission` with its charge, and each payment payload, byte
-//! for byte, under the vector's clock, nonce and test key.
+//! for byte, under the vector's clock, nonce and test key; and for a device
+//! account (core #392), the typed data its signer is handed, the device's
+//! signature checked, and the payload around it.
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
 use std::path::PathBuf;
 
+use fc_approval::phone::check_signature;
 use fc_approval::stores::CapStore;
 use fc_approval::x402::{self, DEFAULT_ASSETS, Payment, Requirements};
 use serde_json::Value;
@@ -162,4 +165,64 @@ fn payloads_byte_for_byte() {
     }
     // EIP-3009 V2, Permit2 and EIP-3009 V1 each signed.
     assert!(kinds.iter().all(|n| *n >= 2), "{kinds:?}");
+}
+
+/// The device payloads (core #392): the typed data the client hands a
+/// device's signer, and its hash, byte for byte; the device's signature
+/// checked as PHN-1 checks a phone's; and the payload around the text the
+/// device returned, byte for byte, or the reason the core refuses it.
+#[test]
+fn device_payloads_byte_for_byte() {
+    let cases = x402()["devices"].as_array().unwrap().clone();
+    let (mut paid, mut refused, mut inferred) = (0, [0; 2], 0);
+    for case in &cases {
+        let id = case["id"].as_str().unwrap();
+        let requirements = Requirements::parse(&case["requirements"]).unwrap();
+        let payment = Payment::new(
+            requirements,
+            case["accept_index"].as_u64().unwrap() as usize,
+        )
+        .unwrap();
+        let from: [u8; 20] = hex(case["address"].as_str().unwrap()).try_into().unwrap();
+        let nonce: [u8; 32] = hex(case["nonce"].as_str().unwrap()).try_into().unwrap();
+        let built = payment
+            .build(&from, case["now"].as_u64().unwrap(), &nonce)
+            .unwrap();
+        assert_eq!(
+            built.typed_data(),
+            case["typedData"].as_str().unwrap(),
+            "{id}"
+        );
+        assert_eq!(
+            fc_evm::to_hex(&built.digest),
+            case["hash"].as_str().unwrap(),
+            "{id}"
+        );
+        let checked = check_signature(&case["signature"], &built.digest, &from);
+        if case["core"] == "payload" {
+            let text = checked.unwrap_or_else(|e| panic!("{id}: {e:?}"));
+            assert_eq!(text, case["signature"].as_str().unwrap(), "{id}");
+            assert_eq!(
+                built.payload_with(text),
+                case["js"]["payload"].as_str().unwrap(),
+                "{id}"
+            );
+            assert_eq!(case["recovers"], case["address"], "{id}");
+            paid += 1;
+        } else {
+            let reason = case["core"]["refused"].as_str().unwrap();
+            assert_eq!(checked.map_err(|e| e.reason()), Err(reason), "{id}");
+            refused[usize::from(reason == "bad_response")] += 1;
+            // A signature ethers recovers to the account is refused only
+            // where 0012 notes it.
+            if case["recovers"] == case["address"] {
+                assert_eq!(case["inferred"], true, "{id}");
+                inferred += 1;
+            }
+        }
+    }
+    assert!(
+        paid >= 20 && refused.iter().all(|n| *n >= 1) && inferred == 1,
+        "{paid} {refused:?} {inferred}"
+    );
 }

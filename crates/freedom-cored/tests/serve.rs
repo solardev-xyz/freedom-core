@@ -647,6 +647,7 @@ fn only_protocol_2_is_spoken() {
         "phone.result",
         "x402.authorize",
         "x402.settle",
+        "x402.update",
         "eip1193.request",
         "dweb.open",
         "dweb.verify",
