@@ -632,3 +632,69 @@ fn at_most_64_prompts_are_open_at_once() {
     );
     assert_eq!(file_of(&core)[SITE]["walletIndex"], 1);
 }
+
+fn approve_with(asked: &Value, handle: &str) -> Value {
+    json!({ "prompt": asked["params"]["prompt"], "handle": handle, "approve": true,
+        "choices": { "walletIndex": 0 }, "world": plain_world() })
+}
+
+/// A cancelled prompt's late answer still spends its handle: another
+/// prompt answered with that handle afterwards is crossed, and nothing is
+/// written.
+#[test]
+fn a_late_answer_to_a_cancelled_prompt_spends_its_handle() {
+    let (_root, mut core) = core_with(&Value::Null, &[]);
+    connect(&mut core, 10, Some(SITE), &plain_world());
+    let first = next_request(&mut core);
+    connect(&mut core, 11, Some(SITE), &plain_world());
+    let second = next_request(&mut core);
+    core.send(&json!({ "type": "cancel", "id": 10 }));
+    assert_eq!(core.recv(), json!({ "type": "cancel", "id": first["id"] }));
+    assert_eq!(response(&mut core, 10)["error"]["code"], "cancelled");
+    respond(&mut core, &first, approve_with(&first, &handle(7)));
+    respond(&mut core, &second, approve_with(&second, &handle(7)));
+    let reply = response(&mut core, 11);
+    assert_eq!(reply["error"]["code"], "not_authorized", "{reply}");
+    assert_eq!(reply["error"]["data"]["reason"], "mismatch", "{reply}");
+    assert!(events(&mut core, 12).is_empty(), "no approval.changed");
+    assert_eq!(file_of(&core), Value::Null, "nothing written");
+}
+
+/// Busy answers while one prompt stays open leave its id alone retained.
+/// Cancelled, it leaves a tombstone until main's late answer, which then
+/// leaves only the handle that answer named.
+#[test]
+fn busy_cycles_leave_the_retained_state_bounded() {
+    let dir = tempfile::tempdir().unwrap();
+    let marker = dir.path().join("retained");
+    let (_root, mut core) = core_with(
+        &Value::Null,
+        &[(
+            "FREEDOM_CORED_TEST_EIP1193_RETAINED_MARKER",
+            marker.to_str().unwrap(),
+        )],
+    );
+    let retained = || std::fs::read_to_string(&marker).unwrap();
+    let busy = r#"{"error":{"code":-32002,"message":"Another wallet request is already pending"}}"#;
+    connect(&mut core, 10, Some(SITE), &plain_world());
+    let held = next_request(&mut core);
+    for id in 11..311 {
+        connect(&mut core, id, Some(SITE), &plain_world());
+        let asked = next_request(&mut core);
+        respond(
+            &mut core,
+            &asked,
+            json!({ "prompt": asked["params"]["prompt"], "busy": true }),
+        );
+        assert_eq!(response(&mut core, id)["result"].to_string(), busy);
+    }
+    assert_eq!(retained(), "1 0 0", "live ids, handles, tombstones");
+    core.send(&json!({ "type": "cancel", "id": 10 }));
+    assert_eq!(core.recv(), json!({ "type": "cancel", "id": held["id"] }));
+    assert_eq!(response(&mut core, 10)["error"]["code"], "cancelled");
+    assert_eq!(retained(), "1 0 1");
+    respond(&mut core, &held, approve_with(&held, &handle(5)));
+    assert!(events(&mut core, 400).is_empty());
+    assert_eq!(retained(), "0 1 0");
+    assert_eq!(file_of(&core), Value::Null, "nothing written");
+}

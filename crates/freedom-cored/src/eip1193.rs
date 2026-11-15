@@ -22,7 +22,12 @@
 //!   takes. So at most [`MAX_OPEN_PROMPTS`] `approval.request`s are open at
 //!   once (*inferred*), and the rest wait their turn, their clocks running.
 //! - **A cancel** of the page request answers 0001's `cancelled` and
-//!   cancels the core's request to main; main's late answer is dropped.
+//!   cancels the core's request to main. A cancelled prompt leaves a
+//!   tombstone until main's terminal answer (0001: exactly one per
+//!   request): the answer is checked, so a handle it names is seen, and
+//!   nothing else comes of it. Each tombstone holds one of main's 256
+//!   slots for the core's requests until then ([`requests::MAX_OUTSTANDING`]),
+//!   so there are never more than that.
 
 use std::collections::{BTreeMap, VecDeque};
 use std::ops::Range;
@@ -57,8 +62,8 @@ pub struct Connects {
     base: Instant,
     /// The page requests waiting, by their 0001 id.
     open: BTreeMap<u64, Open>,
-    /// The core's requests to main: the page request each serves.
-    asked: BTreeMap<u64, u64>,
+    /// The core's requests to main: what each serves.
+    asked: BTreeMap<u64, Asked>,
     /// Page requests whose request to main waits for room, in order.
     queued: VecDeque<u64>,
     /// `approval.request`s open at main.
@@ -73,6 +78,15 @@ struct Open {
     step: Pending,
     /// The core's request to main, once sent.
     asked: Option<u64>,
+}
+
+/// What one of the core's requests to main serves.
+enum Asked {
+    /// A page request, by its 0001 id.
+    Request(u64),
+    /// A prompt whose page request ended first: main's answer is only
+    /// checked.
+    Ended(PromptId),
 }
 
 enum Pending {
@@ -198,7 +212,7 @@ impl Connects {
             match sent {
                 Dispatch::Sent(core) => {
                     let now = self.now_ms();
-                    self.asked.insert(core, id);
+                    self.asked.insert(core, Asked::Request(id));
                     if let Some(open) = self.open.get_mut(&id) {
                         open.asked = Some(core);
                         if prompt {
@@ -213,7 +227,7 @@ impl Connects {
                     break;
                 }
                 Dispatch::TooLarge | Dispatch::Late => {
-                    self.open.remove(&id);
+                    self.drop_unsent(id);
                     outs.push(error(
                         id,
                         ErrorBody::new(ErrorCode::TooLarge, "the prompt is over one frame"),
@@ -221,12 +235,30 @@ impl Connects {
                 }
                 // The core is exiting: nothing more goes.
                 Dispatch::Closed | Dispatch::WriterGone => {
-                    self.open.remove(&id);
+                    self.drop_unsent(id);
                 }
             }
         }
         self.queued = kept;
+        let (live, handles) = self.prompts.retained();
+        let ended = self
+            .asked
+            .values()
+            .filter(|asked| matches!(asked, Asked::Ended(_)))
+            .count();
+        crate::testhooks::eip1193_retained(live, handles, ended);
         outs
+    }
+
+    /// Page request `id`, never sent, is dropped: its prompt id retired.
+    fn drop_unsent(&mut self, id: u64) {
+        if let Some(Open {
+            step: Pending::Prompt { id: prompt, .. },
+            ..
+        }) = self.open.remove(&id)
+        {
+            self.prompts.forget(&prompt);
+        }
     }
 
     /// Main answered the core's request `core`: `outcome` spans its result
@@ -239,16 +271,28 @@ impl Connects {
         message: &[u8],
         vault: &mut Vault,
     ) -> Vec<Out> {
-        let Some(id) = self.asked.remove(&core) else {
-            return Vec::new();
-        };
-        let Some(mut open) = self.open.remove(&id) else {
-            return Vec::new();
-        };
         let text = outcome
             .ok()
             .and_then(|span| message.get(span))
             .and_then(|bytes| std::str::from_utf8(bytes).ok());
+        let id = match self.asked.remove(&core) {
+            Some(Asked::Request(id)) => id,
+            // Its page request ended: the answer spends its handle, and
+            // decides nothing.
+            Some(Asked::Ended(prompt)) => {
+                match text {
+                    Some(text) => {
+                        let _ = self.prompts.accept(&prompt, text);
+                    }
+                    None => self.prompts.forget(&prompt),
+                }
+                return self.pump();
+            }
+            None => return Vec::new(),
+        };
+        let Some(mut open) = self.open.remove(&id) else {
+            return Vec::new();
+        };
         let mut outs = match open.step {
             Pending::Recheck(connected) => match text.ok_or(Crossed).and_then(Recheck::parse) {
                 Ok(recheck) => {
@@ -297,18 +341,24 @@ impl Connects {
     }
 
     /// Ends page request `id` without main's answer: its request to main,
-    /// if sent, is cancelled.
+    /// if sent, is cancelled, and a prompt's leaves its tombstone.
     fn end(&mut self, id: u64) -> Vec<Out> {
+        self.queued.retain(|queued| *queued != id);
+        let Some(core) = self.open.get(&id).and_then(|open| open.asked) else {
+            self.drop_unsent(id);
+            return Vec::new();
+        };
         let Some(open) = self.open.remove(&id) else {
             return Vec::new();
         };
-        self.queued.retain(|queued| *queued != id);
-        let Some(core) = open.asked else {
-            return Vec::new();
-        };
-        self.asked.remove(&core);
-        if matches!(open.step, Pending::Prompt { .. }) {
-            self.prompting = self.prompting.saturating_sub(1);
+        match open.step {
+            Pending::Prompt { id: prompt, .. } => {
+                self.asked.insert(core, Asked::Ended(prompt));
+                self.prompting = self.prompting.saturating_sub(1);
+            }
+            Pending::Recheck(_) => {
+                self.asked.remove(&core);
+            }
         }
         let cancel = format!(r#"{{"type":"cancel","id":{core}}}"#);
         vec![Out::Send(Zeroizing::new(cancel.into_bytes()))]

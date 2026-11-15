@@ -3,8 +3,14 @@
 //! show one, and main's answer.
 //!
 //! - **A prompt's id** is 16 random bytes the core makes for it, written as
-//!   32 lowercase hex digits (*inferred*), and never reused: [`Prompts`]
-//!   refuses bytes it has issued before, and the caller draws again.
+//!   32 lowercase hex digits (*inferred*). [`Prompts`] refuses bytes that
+//!   name a prompt still live, and the caller draws again. A prompt is
+//!   live from its issue to main's terminal answer, which retires it (or
+//!   until the core forgets one it never sent). Ids are 16 random bytes
+//!   and answers reach the core by its own request ids, never reused, so
+//!   uniqueness needs only the live ids, not every id ever issued: a
+//!   retired id comes back only by drawing the same 128 bits again
+//!   (*inferred*).
 //! - **Main's answer** is one of three (*inferred* in part):
 //!   - `{ prompt, handle, approve, choices, world? }`: the decision made on
 //!     the handle main opened for the prompt, which is 0011's 32 random
@@ -23,8 +29,18 @@
 //!   nothing signed and nothing granted. A handle is taken as seen once an
 //!   answer carries it, whether that answer is accepted or not: one that
 //!   has named a handle for one prompt never makes it count for another.
+//! - **Handles are kept for the last [`MAX_HANDLES`] answers that named
+//!   one** (*inferred*), the oldest dropped. Main mints each handle from
+//!   32 random bytes and never reuses one (0011), so the check guards
+//!   against main's bugs, not its intent. At most 64 prompts are open and
+//!   each cancelled one awaits one terminal answer, within main's 256
+//!   slots for the core's requests: 4096 is well over the answers that
+//!   can be in play at once. A handle dropped from the window could be
+//!   accepted again only for an answer that names the current prompt's
+//!   own id, after 4096 later answers named handles: a decision main
+//!   relays for that prompt, as one with a fresh handle would be.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, VecDeque};
 
 use fc_json::JsValue;
 
@@ -64,12 +80,16 @@ pub enum Decision {
 /// 0011's reasons a handle closes without a decision.
 const CLOSED: &[&str] = &["navigated", "closed", "cancelled", "expired"];
 
-/// The core's prompt ids and the handles main has answered with, for as
-/// long as the core runs.
+/// The most handles kept: those the latest answers named.
+pub const MAX_HANDLES: usize = 4096;
+
+/// The core's live prompt ids, and the handles main's latest answers named.
 #[derive(Debug, Default)]
 pub struct Prompts {
-    issued: BTreeSet<[u8; 16]>,
+    live: BTreeSet<[u8; 16]>,
     handles: BTreeSet<String>,
+    /// `handles`, oldest first.
+    order: VecDeque<String>,
 }
 
 impl Prompts {
@@ -78,14 +98,26 @@ impl Prompts {
     }
 
     /// A new prompt's id from 16 random bytes: `None` when they name a
-    /// prompt issued before, and the caller draws again.
+    /// live prompt, and the caller draws again.
     pub fn issue(&mut self, bytes: [u8; 16]) -> Option<PromptId> {
-        self.issued.insert(bytes).then_some(PromptId(bytes))
+        self.live.insert(bytes).then_some(PromptId(bytes))
     }
 
-    /// Main's answer to prompt `id`, its `approval.request`'s result as
-    /// JSON text: the decision, or [`Crossed`].
+    /// Prompt `id` was never sent: it is retired with no answer.
+    pub fn forget(&mut self, id: &PromptId) {
+        self.live.remove(&id.0);
+    }
+
+    /// What is kept: the live ids, and the handles.
+    pub fn retained(&self) -> (usize, usize) {
+        (self.live.len(), self.handles.len())
+    }
+
+    /// Main's terminal answer to prompt `id`, its `approval.request`'s
+    /// result as JSON text: the decision, or [`Crossed`]. The prompt is
+    /// retired either way, and a handle the answer names is seen.
     pub fn accept(&mut self, id: &PromptId, answer: &str) -> Result<Decision, Crossed> {
+        self.live.remove(&id.0);
         let props = fc_json::parse(answer)
             .ok()
             .and_then(object)
@@ -108,7 +140,7 @@ impl Prompts {
         let handle = match fields.handle.as_ref() {
             Some(handle) => {
                 let handle = handle.as_str().filter(|h| is_handle(h)).ok_or(Crossed)?;
-                if !self.handles.insert(handle.to_owned()) {
+                if !self.remember(handle) {
                     return Err(Crossed);
                 }
                 true
@@ -155,6 +187,23 @@ impl Prompts {
             } if !handle => Ok(Decision::Busy),
             _ => Err(Crossed),
         }
+    }
+}
+
+impl Prompts {
+    /// Keeps `handle` among the latest, the oldest dropped past
+    /// [`MAX_HANDLES`]: `false` when it is kept already.
+    fn remember(&mut self, handle: &str) -> bool {
+        if !self.handles.insert(handle.to_owned()) {
+            return false;
+        }
+        self.order.push_back(handle.to_owned());
+        while self.order.len() > MAX_HANDLES {
+            if let Some(oldest) = self.order.pop_front() {
+                self.handles.remove(&oldest);
+            }
+        }
+        true
     }
 }
 
@@ -238,12 +287,19 @@ mod tests {
     }
 
     #[test]
-    fn an_id_is_never_issued_twice() {
+    fn an_id_is_never_issued_twice_while_live() {
         let mut prompts = Prompts::new();
         let id = issued(&mut prompts, 7);
         assert_eq!(id.hex(), "07".repeat(16));
         assert_eq!(prompts.issue([7; 16]), None);
-        assert!(prompts.issue([8; 16]).is_some());
+        let other = issued(&mut prompts, 8);
+        // Answered or forgotten, an id is retired.
+        let busy = format!(r#"{{"prompt":"{}","busy":true}}"#, id.hex());
+        assert_eq!(prompts.accept(&id, &busy), Ok(Decision::Busy));
+        assert_eq!(prompts.retained(), (1, 0));
+        prompts.forget(&other);
+        assert_eq!(prompts.retained(), (0, 0));
+        assert!(prompts.issue([7; 16]).is_some());
         let mut bytes = [0u8; 16];
         bytes[0] = 0xab;
         bytes[15] = 0x0c;
@@ -390,6 +446,52 @@ mod tests {
             assert_eq!(fresh.accept(&id, &text), Err(Crossed), "{text}");
         }
         let _ = prompts;
+    }
+
+    /// Many busy cycles while one prompt stays open keep one id and no
+    /// handle; many decisions keep the latest MAX_HANDLES handles.
+    #[test]
+    fn what_is_kept_stays_bounded() {
+        let mut prompts = Prompts::new();
+        let open = issued(&mut prompts, 0xff);
+        for n in 0..20_000u32 {
+            let mut bytes = [0u8; 16];
+            bytes[..4].copy_from_slice(&n.to_be_bytes());
+            let id = prompts.issue(bytes).unwrap();
+            let busy = format!(r#"{{"prompt":"{}","busy":true}}"#, id.hex());
+            assert_eq!(prompts.accept(&id, &busy), Ok(Decision::Busy));
+        }
+        assert_eq!(prompts.retained(), (1, 0));
+        let named = |n: usize| format!("{n:064x}");
+        let reject = |id: &PromptId, handle: &str| {
+            format!(
+                r#"{{"prompt":"{}","handle":"{handle}","approve":false,"choices":{{}}}}"#,
+                id.hex()
+            )
+        };
+        for n in 0..MAX_HANDLES + 100 {
+            let id = issued(&mut prompts, 1);
+            assert_eq!(
+                prompts.accept(&id, &reject(&id, &named(n))),
+                Ok(Decision::Reject)
+            );
+        }
+        assert_eq!(prompts.retained(), (1, MAX_HANDLES));
+        // The latest are refused again; one dropped from the window isn't.
+        let id = issued(&mut prompts, 1);
+        assert_eq!(
+            prompts.accept(&id, &reject(&id, &named(MAX_HANDLES + 99))),
+            Err(Crossed)
+        );
+        let id = issued(&mut prompts, 1);
+        assert_eq!(prompts.accept(&id, &reject(&id, &named(100))), Err(Crossed));
+        let id = issued(&mut prompts, 1);
+        assert_eq!(
+            prompts.accept(&id, &reject(&id, &named(0))),
+            Ok(Decision::Reject)
+        );
+        assert_eq!(prompts.retained(), (1, MAX_HANDLES));
+        let _ = open;
     }
 
     #[test]
