@@ -245,6 +245,12 @@ pub struct Record {
     pub fields: Fields,
     pub kind: String,
     pub site: Option<String>,
+    /// A flagged `dapp-send`'s "Always allow", waiting for the payment to
+    /// be verified: the rule's selector. Its key, account, `to`, chain and
+    /// value are the record's `site`, `account`, `to`, `chain_id` and
+    /// `value`. It is written once, when the transaction shows and matches,
+    /// and never on a mismatch, an `unknown` end or a lost file.
+    pub rule: Option<[u8; 4]>,
     /// The wall clock at the answer, in milliseconds.
     pub answered_at: u64,
 }
@@ -820,6 +826,19 @@ impl<T> PhoneJobs<T> {
         &self.records
     }
 
+    /// A narrowing of `site`'s grant: its records' waiting rules are
+    /// forgotten, as a device send's receipts are (#373). Whether any was.
+    pub fn forget_rules(&mut self, site: &str) -> bool {
+        let mut forgot = false;
+        for record in &mut self.records {
+            if record.rule.is_some() && record.site.as_deref() == Some(site) {
+                record.rule = None;
+                forgot = true;
+            }
+        }
+        forgot
+    }
+
     /// The records a start read (at most [`MAX_SLOTS`]: [`read_file`]
     /// refuses more).
     pub fn load(&mut self, records: Vec<Record>) {
@@ -898,6 +917,7 @@ struct RecordOut<'a> {
     data_sha256: &'a str,
     kind: &'a str,
     site: Option<&'a str>,
+    rule: Option<String>,
     answered_at: u64,
 }
 
@@ -915,6 +935,7 @@ impl<'a> RecordOut<'a> {
             data_sha256: &record.fields.data_sha256,
             kind: &record.kind,
             site: record.site.as_deref(),
+            rule: record.rule.map(|selector| to_hex(&selector)),
             answered_at: record.answered_at,
         }
     }
@@ -957,6 +978,7 @@ struct RecordIn {
     data_sha256: String,
     kind: String,
     site: Value,
+    rule: Value,
     answered_at: u64,
 }
 
@@ -1032,6 +1054,20 @@ fn read_record(text: &str) -> Option<Record> {
         Value::String(site) => Some(site),
         _ => return None,
     };
+    let rule = match record.rule {
+        Value::Null => None,
+        Value::String(text) => {
+            let bytes = lower_hex(text.strip_prefix("0x")?, 4)?;
+            let mut selector = [0u8; 4];
+            selector.copy_from_slice(&bytes);
+            Some(selector)
+        }
+        _ => return None,
+    };
+    // Only a flagged page send waits to write a rule.
+    if rule.is_some() && (kind != "dapp-send" || site.is_none()) {
+        return None;
+    }
     Some(Record {
         job: JobId::parse(&record.job)?,
         hash,
@@ -1046,6 +1082,7 @@ fn read_record(text: &str) -> Option<Record> {
         },
         kind: kind.to_owned(),
         site,
+        rule,
         answered_at: record.answered_at,
     })
 }
@@ -1143,6 +1180,7 @@ mod tests {
             fields: Fields::bound(&ADDRESS, &payment(vec![1, 2, 3])),
             kind: "dapp-send".into(),
             site: site.map(str::to_owned),
+            rule: None,
             answered_at: 1_700_000_000_000,
         }
     }
@@ -1164,7 +1202,10 @@ mod tests {
     /// form is the reader's.
     #[test]
     fn the_file_is_read_as_written() {
-        let one = record(1, Some("https://app.example"));
+        let one = Record {
+            rule: Some([0x09, 0x5e, 0xa7, 0xb3]),
+            ..record(1, Some("https://app.example"))
+        };
         let two = Record {
             site: None,
             kind: "standing".into(),
@@ -1176,9 +1217,10 @@ mod tests {
                 r#"{{"version":1,"payments":[{{"job":"{j1}","hash":"0x{h1}","account":3,"#,
                 r#""from":"0x{a}","chain_id":"100","to":"0x{t}","value":"5","data_length":3,"#,
                 r#""data_sha256":"{s}","kind":"dapp-send","site":"https://app.example","#,
-                r#""answered_at":1700000000000}},{{"job":"{j2}","hash":"0x{h2}","account":3,"#,
+                r#""rule":"0x095ea7b3","answered_at":1700000000000}},{{"job":"{j2}","hash":"0x{h2}","account":3,"#,
                 r#""from":"0x{a}","chain_id":"100","to":"0x{t}","value":"5","data_length":3,"#,
-                r#""data_sha256":"{s}","kind":"standing","site":null,"answered_at":1700000000000}}]}}"#
+                r#""data_sha256":"{s}","kind":"standing","site":null,"rule":null,"#,
+                r#""answered_at":1700000000000}}]}}"#
             ),
             j1 = "01".repeat(16),
             h1 = "01".repeat(32),
@@ -1191,6 +1233,23 @@ mod tests {
         assert_eq!(String::from_utf8(text.clone()).unwrap(), expected);
         assert_eq!(read_file(&text).unwrap(), vec![one, two]);
         assert_eq!(read_file(&file_text(&[])).unwrap(), vec![]);
+    }
+
+    /// A narrowing of a site forgets its records' waiting rules, and no
+    /// other site's.
+    #[test]
+    fn a_narrowing_forgets_its_site_s_rules() {
+        let mut jobs: PhoneJobs<u32> = PhoneJobs::new();
+        let ruled = |job: u8, site: &str| Record {
+            rule: Some([job; 4]),
+            ..record(job, Some(site))
+        };
+        jobs.load(vec![ruled(1, "a"), ruled(2, "b"), record(3, Some("a"))]);
+        assert!(!jobs.forget_rules("c"));
+        assert!(jobs.forget_rules("a"));
+        let rules: Vec<_> = jobs.records().iter().map(|r| r.rule).collect();
+        assert_eq!(rules, vec![None, Some([2; 4]), None]);
+        assert!(!jobs.forget_rules("a"));
     }
 
     /// Anything the writer wouldn't write is unreadable: a member missing,
@@ -1207,6 +1266,12 @@ mod tests {
             (r#""account":3,"#, String::new()),
             (r#""site":"s""#, r#""site":1"#.into()),
             (r#""site":"s","#, String::new()),
+            (r#""rule":null,"#, String::new()),
+            (r#""rule":null"#, r#""rule":null,"rule":null"#.into()),
+            (r#""rule":null"#, r#""rule":1"#.into()),
+            (r#""rule":null"#, r#""rule":"0x095EA7B3""#.into()),
+            (r#""rule":null"#, r#""rule":"0x095ea7""#.into()),
+            (r#""rule":null"#, r#""rule":"095ea7b3""#.into()),
             (r#""kind":"dapp-send""#, r#""kind":"sign-message""#.into()),
             (r#""value":"5""#, r#""value":"05""#.into()),
             (r#""value":"5""#, r#""value":"0x5""#.into()),
@@ -1231,6 +1296,25 @@ mod tests {
             assert!(good.contains(from), "{from}");
             let bad = good.replacen(from, &to, 1);
             assert!(read_file(bad.as_bytes()).is_err(), "{bad}");
+        }
+        // A waiting rule reads only on a page's `dapp-send`.
+        let ruled = good.replacen(r#""rule":null"#, r#""rule":"0x095ea7b3""#, 1);
+        assert_eq!(
+            read_file(ruled.as_bytes()).unwrap()[0].rule,
+            Some([0x09, 0x5e, 0xa7, 0xb3])
+        );
+        for (from, to) in [
+            (r#""kind":"dapp-send""#, r#""kind":"standing""#),
+            (r#""site":"s""#, r#""site":null"#),
+        ] {
+            assert!(
+                read_file(ruled.replacen(from, to, 1).as_bytes()).is_err(),
+                "{to}"
+            );
+            assert!(
+                read_file(good.replacen(from, to, 1).as_bytes()).is_ok(),
+                "{to}"
+            );
         }
         // The largest chain id and account the writer writes read.
         let edge = good
@@ -1320,8 +1404,9 @@ mod tests {
                 data_sha256: "f".repeat(64),
                 chain_id: crate::MAX_CHAIN_ID.to_string(),
             },
-            kind: "executor-send".into(),
+            kind: "dapp-send".into(),
             site: Some("\u{1}".repeat(MAX_SITE_BYTES / 6) + &"x".repeat(MAX_SITE_BYTES % 6)),
+            rule: Some([0xff; 4]),
             answered_at: u64::MAX,
         };
         assert_eq!(

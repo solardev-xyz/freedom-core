@@ -715,7 +715,7 @@ impl Phone {
                     },
                 ));
             }
-            Pending::Recheck { job } => self.rechecked(job, lookup, clocks),
+            Pending::Recheck { job } => self.rechecked(job, lookup, approvals, clocks),
         }
         out
     }
@@ -749,6 +749,12 @@ impl Phone {
             }
             return Ok(result);
         }
+        // A flagged send's rule waits for its transaction: a hash alone is
+        // the chrome's word, and no evidence that the phone sent anything.
+        let (after, rule) = match taken.extra {
+            After::Remember(remember) => (After::Nothing, remember.selector()),
+            after => (after, None),
+        };
         let record = Record {
             job: taken.id,
             hash,
@@ -756,6 +762,7 @@ impl Phone {
             fields,
             kind: taken.authorized.kind.to_owned(),
             site: taken.authorized.site.clone(),
+            rule,
             answered_at,
         };
         self.jobs.record(record);
@@ -772,14 +779,22 @@ impl Phone {
                 json!({ "outcome": "unknown", "hash": hash_text, "durable": false })
             }
         };
-        if let Some(rule) = approvals.signed(taken.extra, clocks) {
+        if let Some(rule) = approvals.signed(after, clocks) {
             result["rule"] = rule;
         }
         Ok(result)
     }
 
+    /// A narrowing of `key`'s dApp grant: its records' waiting rules go,
+    /// and the file is written without them.
+    pub fn forget_rules(&mut self, key: &str) {
+        if self.jobs.forget_rules(key) {
+            self.save();
+        }
+    }
+
     /// A record's recheck, read.
-    fn rechecked(&mut self, job: JobId, lookup: Lookup, clocks: Clocks) {
+    fn rechecked(&mut self, job: JobId, lookup: Lookup, approvals: &mut Approvals, clocks: Clocks) {
         let Some(index) = self.waiting.iter().position(|w| w.job == job) else {
             return;
         };
@@ -791,9 +806,23 @@ impl Phone {
             Lookup::Visible(tx) => {
                 self.waiting.remove(index);
                 self.jobs.drop_record(&job);
+                let saved = self.save();
                 let seen = Observed::of(&tx);
                 match phone::difference(&seen, &record.fields) {
-                    None => self.checked(&job, "verified", None),
+                    None => {
+                        let rule = waiting_rule(&record).map(|remember| {
+                            // Once only: the rule is written once the drop
+                            // is saved, or a restart verifies it again.
+                            if saved == Saved::Durable {
+                                approvals
+                                    .signed(After::Remember(remember), clocks)
+                                    .unwrap_or(Value::Null)
+                            } else {
+                                json!({ "added": false, "reason": "not_saved" })
+                            }
+                        });
+                        self.checked(&job, "verified", rule.map(|rule| json!({ "rule": rule })));
+                    }
                     Some(difference) => self.checked(
                         &job,
                         "mismatch",
@@ -803,7 +832,6 @@ impl Phone {
                         })),
                     ),
                 }
-                self.save();
             }
             Lookup::NotVisible => {
                 let waiting = &mut self.waiting[index];
@@ -905,6 +933,20 @@ fn failed(id: u64, mapped: &Mapped) -> Result<Zeroizing<Vec<u8>>, ErrorBody> {
             reply(id, &result)
         }
     }
+}
+
+/// A verified record's waiting rule: the flagged send's call, for its page
+/// and account, as the receipt binds it (#373).
+fn waiting_rule(record: &Record) -> Option<crate::approvals::Remember> {
+    let selector = record.rule?;
+    let key = record.site.clone()?;
+    let rule = fc_approval::receipt::ProposedRule {
+        to: fc_evm::parse_address(&record.fields.to).ok(),
+        selector: Some(selector),
+        chain_id: record.fields.chain_id.parse().ok(),
+        value: fc_evm::U256::parse_decimal(&record.fields.value)?,
+    };
+    Some(crate::approvals::Remember::new(key, record.account, rule))
 }
 
 fn read(tag: u64, chain_id: u64, hash: &[u8; 32]) -> Out {

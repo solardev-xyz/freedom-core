@@ -152,6 +152,9 @@ pub struct Approvals {
     standing: Standing,
     /// `approval.changed` events to send after the reply that made them.
     events: Vec<Zeroizing<Vec<u8>>>,
+    /// The dApp keys narrowed since the loop last asked: a phone payment's
+    /// waiting rule for one goes, as its receipts do.
+    narrowed: Vec<String>,
 }
 
 impl std::fmt::Debug for Approvals {
@@ -625,6 +628,18 @@ pub struct Remember {
     rule: ProposedRule,
 }
 
+impl Remember {
+    /// A phone payment's waiting rule, once its transaction is verified.
+    pub fn new(key: String, account: u32, rule: ProposedRule) -> Self {
+        Remember { key, account, rule }
+    }
+
+    /// The rule's selector: none for a call that no rule covers.
+    pub fn selector(&self) -> Option<[u8; 4]> {
+        self.rule.selector
+    }
+}
+
 impl Approvals {
     pub fn new() -> Self {
         Approvals {
@@ -635,6 +650,7 @@ impl Approvals {
             grants: Grants::new(),
             standing: Standing::new(),
             events: Vec::new(),
+            narrowed: Vec::new(),
         }
     }
 
@@ -1492,6 +1508,18 @@ impl Approvals {
         std::mem::take(&mut self.events)
     }
 
+    /// The dApp keys narrowed since the last call.
+    pub fn take_narrowed(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.narrowed)
+    }
+
+    /// A narrowing of `key`'s dApp grant: its device send's receipts go
+    /// (#373), and so do its phone payments' waiting rules.
+    fn forget_rules(&mut self, key: &str) {
+        self.receipts.forget_key(key);
+        self.narrowed.push(key.to_owned());
+    }
+
     /// Which dApp rules answer: today's until the file moves.
     fn rules(&self) -> Rules {
         if self.grants.moved(StoreKind::Dapp) {
@@ -1948,7 +1976,7 @@ impl Approvals {
         // A device send's receipts for the key go with any dApp revoke that
         // stands, saved or not (#373): a narrowing after the spend wins over
         // the decision before it.
-        let forget = |this: &mut Self| this.receipts.forget_key(&key);
+        let forget = |this: &mut Self| this.forget_rules(&key);
         let written = match (kind, what.as_str()) {
             // The buckets go once the revoke stands, saved or not: a grant
             // made again starts full.
@@ -2142,7 +2170,7 @@ impl Approvals {
         self.receipts.forget_account(account);
         for key in &keys {
             self.standing.forget_dapp(key);
-            self.receipts.forget_key(key);
+            self.forget_rules(key);
             self.changed(StoreKind::Dapp, key);
         }
         if let Some(error) = error {

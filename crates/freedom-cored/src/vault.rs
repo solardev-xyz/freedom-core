@@ -1011,6 +1011,10 @@ impl Vault {
         // Design 0012: one `approval.changed` per grant change, after the
         // reply that made it.
         out.extend(self.approvals.take_events().into_iter().map(Out::Send));
+        // A narrowed dApp grant: its phone payments' waiting rules go.
+        for key in self.approvals.take_narrowed() {
+            self.phone.forget_rules(&key);
+        }
         out
     }
 

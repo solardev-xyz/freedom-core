@@ -220,6 +220,11 @@ impl World {
     /// The same profile, started again (the old core killed): the table of
     /// transactions carries over.
     fn restart(self) -> World {
+        self.restart_moved(&[])
+    }
+
+    /// As [`World::restart`], with `moved` in the hello's `grant_moved`.
+    fn restart_moved(self, moved: &[&'static str]) -> World {
         let World {
             core,
             root,
@@ -228,7 +233,7 @@ impl World {
             ..
         } = self;
         drop(core);
-        let mut world = World::spawn(&root, hooks);
+        let mut world = World::spawn_moved(&root, hooks, moved);
         world.txs = txs;
         world
     }
@@ -1182,6 +1187,7 @@ fn records(count: usize, answered_at: u64) -> Vec<Record> {
                 fields: Fields::bound(&address, &payment),
                 kind: "dapp-send".into(),
                 site: Some(SITE.into()),
+                rule: None,
                 answered_at,
             }
         })
@@ -1545,73 +1551,238 @@ fn a_busy_job_spends_none_of_the_rule_s_rate() {
     assert_eq!(job_of(&opened).len(), 32, "{opened}");
 }
 
-/// A flagged `dapp-send`'s rule is written once the phone sent the payment
-/// confirmed, as `sign.transaction` writes a vault send's; never for a
-/// payment the phone swapped.
-#[test]
-fn a_flagged_send_writes_its_rule_once_the_phone_sent_it() {
-    let root = tempfile::tempdir().unwrap();
-    let hooks = Hooks::new(root.path());
-    let mut world = World::spawn_moved(root.path(), hooks, &["dapp"]);
-    let connected = world.call(
-        &site(),
-        "approval.grant",
-        json!({ "store": "dapp", "change": { "op": "connect", "account": ACCOUNT, "chain_id": 100 } }),
-    );
-    assert!(connected["result"].is_object(), "{connected}");
-    let flagged = |world: &mut World, tx: Value| {
-        let token = world.token(
+/// A flagged `dapp-send`'s "Always allow" (design 0012, "A phone
+/// payment's rule"): a page whose dApp file has moved, connected to the
+/// account, and the calls' rules it holds.
+struct Flagged {
+    world: World,
+    selectors: u32,
+}
+
+impl Flagged {
+    fn start(root: &Path) -> Flagged {
+        let hooks = Hooks::new(root);
+        let mut flagged = Flagged {
+            world: World::spawn_moved(root, hooks, &["dapp"]),
+            selectors: 0,
+        };
+        flagged.connect();
+        flagged
+    }
+
+    fn connect(&mut self) {
+        let connected = self.world.call(
+            &site(),
+            "approval.grant",
+            json!({ "store": "dapp", "change": { "op": "connect", "account": ACCOUNT, "chain_id": 100 } }),
+        );
+        assert!(connected["result"].is_object(), "{connected}");
+    }
+
+    fn restart(self) -> Flagged {
+        Flagged {
+            world: self.world.restart_moved(&["dapp"]),
+            selectors: self.selectors,
+        }
+    }
+
+    /// A new call (its own selector), confirmed with "Always allow" and
+    /// sent to the phone: the job, and the call's data.
+    fn job(&mut self) -> (String, String) {
+        self.selectors += 1;
+        let data = format!("0x{:08x}{}", 0x1000_0000 + self.selectors, "00".repeat(32));
+        let tx = tx_with("5", &data);
+        let token = self.world.token(
             &site(),
             "dapp-send",
             json!({ "tx": tx, "remember": true }),
             true,
         );
-        job_of(&world.job(
+        let opened = self.world.job(
             &site(),
             "transaction",
             json!({ "tx": tx }),
             Some(json!({ "token": token, "kind": "dapp-send", "handle": HANDLE })),
-        ))
-    };
-    let approve = format!("0x095ea7b3{}", "00".repeat(32));
-    let file = world.core.grant_root.join("dapp-permissions.json");
-    // Swapped: refused, and no rule.
-    let job = flagged(&mut world, tx_with("5", &approve));
-    let mut swapped = seen("0x5", &approve);
+        );
+        (job_of(&opened), data)
+    }
+
+    /// Whether the dApp file holds the rule for the call `data` begins.
+    fn has_rule(&self, data: &str) -> bool {
+        std::fs::read_to_string(self.world.core.grant_root.join("dapp-permissions.json"))
+            .unwrap()
+            .contains(&data[..10])
+    }
+}
+
+/// The rule waits for the transaction: never written on the hash alone,
+/// written once when the payment shows and matches, at the answer or later,
+/// a restart between included; never on a swap, a mismatch, an `unknown`
+/// end, or after a revoke.
+#[test]
+fn a_flagged_send_s_rule_waits_for_its_transaction() {
+    let root = tempfile::tempdir().unwrap();
+    let mut f = Flagged::start(root.path());
+    // Swapped at the answer: refused, and no rule.
+    let (job, data) = f.job();
+    let mut swapped = seen("0x5", &data);
     swapped["to"] = OTHER.into();
-    world.txs.insert(hash(1), swapped);
+    f.world.txs.insert(hash(1), swapped);
     refused(
-        &world.result(&job, TARGET, hash(1).into()),
+        &f.world.result(&job, TARGET, hash(1).into()),
         "not_authorized",
         Some("wrong_transaction"),
     );
-    assert!(
-        !std::fs::read_to_string(&file)
-            .unwrap()
-            .contains("0x095ea7b3")
-    );
-    // The one confirmed, visible: the rule is written.
-    let job = flagged(&mut world, tx_with("5", &approve));
-    world.txs.insert(hash(2), seen("0x5", &approve));
-    let answer = world.result(&job, TARGET, hash(2).into());
+    assert!(!f.has_rule(&data));
+    // Visible and the same at the answer: written.
+    let (job, data) = f.job();
+    f.world.txs.insert(hash(2), seen("0x5", &data));
+    let answer = f.world.result(&job, TARGET, hash(2).into());
     assert_eq!(answer["result"]["outcome"], "verified");
     assert_eq!(
         answer["result"]["rule"],
         json!({ "added": true }),
         "{answer}"
     );
-    assert!(
-        std::fs::read_to_string(&file)
-            .unwrap()
-            .contains("0x095ea7b3")
-    );
-    // Unverified: the phone says it sent it, as `sign.transaction` signs.
-    let job = flagged(&mut world, tx_with("4", &approve));
-    let answer = world.result(&job, TARGET, hash(3).into());
-    assert_eq!(answer["result"]["outcome"], "unverified");
+    assert!(f.has_rule(&data));
+    // Not visible: unverified, and nothing written on the hash alone.
+    let (later, later_data) = f.job();
+    let answer = f.world.result(&later, TARGET, hash(3).into());
     assert_eq!(
-        answer["result"]["rule"],
-        json!({ "added": true }),
-        "{answer}"
+        answer["result"],
+        json!({ "outcome": "unverified", "hash": hash(3) })
     );
+    assert!(!f.has_rule(&later_data));
+    // Later another transaction: a mismatch, and no rule.
+    let (other, other_data) = f.job();
+    assert_eq!(
+        outcome(&f.world.result(&other, TARGET, hash(4).into())),
+        "unverified"
+    );
+    f.world.txs.insert(hash(4), seen("0x6", &other_data));
+    let checked = f.world.checked(&other);
+    assert_eq!(checked["outcome"], "mismatch");
+    assert!(checked.get("rule").is_none(), "{checked}");
+    assert!(!f.has_rule(&other_data));
+    // Later the same: verified, and the rule written then.
+    f.world.txs.insert(hash(3), seen("0x5", &later_data));
+    let checked = f.world.checked(&later);
+    assert_eq!(checked["outcome"], "verified");
+    assert_eq!(checked["rule"], json!({ "added": true }), "{checked}");
+    assert!(f.has_rule(&later_data));
+    // A restart between the answer and the transaction.
+    let (restarted, restarted_data) = f.job();
+    assert_eq!(
+        outcome(&f.world.result(&restarted, TARGET, hash(5).into())),
+        "unverified"
+    );
+    let mut f = f.restart();
+    assert!(!f.has_rule(&restarted_data));
+    f.world.txs.insert(hash(5), seen("0x5", &restarted_data));
+    let checked = f.world.checked(&restarted);
+    assert_eq!(checked["rule"], json!({ "added": true }), "{checked}");
+    assert!(f.has_rule(&restarted_data));
+    // A revoke before the transaction shows: the rule is forgotten, saved,
+    // and not written even once the grant is made again.
+    let (revoked, revoked_data) = f.job();
+    assert_eq!(
+        outcome(&f.world.result(&revoked, TARGET, hash(6).into())),
+        "unverified"
+    );
+    let gone = f.world.call(
+        &chrome(),
+        "approval.revoke",
+        json!({ "store": "dapp", "key": SITE, "what": "grant" }),
+    );
+    assert!(gone["result"].is_object(), "{gone}");
+    f.connect();
+    let mut f = f.restart();
+    f.world.txs.insert(hash(6), seen("0x5", &revoked_data));
+    let checked = f.world.checked(&revoked);
+    assert_eq!(checked["outcome"], "verified");
+    assert!(checked.get("rule").is_none(), "{checked}");
+    assert!(!f.has_rule(&revoked_data));
+    // Written once: the verified records were dropped, so the restart
+    // wrote none of the revoked rules again.
+    assert!(!f.has_rule(&later_data) && !f.has_rule(&restarted_data));
+    // So does an account forgotten, and connected again.
+    let (forgot, forgot_data) = f.job();
+    assert_eq!(
+        outcome(&f.world.result(&forgot, TARGET, hash(8).into())),
+        "unverified"
+    );
+    let gone = f.world.call(
+        &shell(),
+        "approval.forget_account",
+        json!({ "wallet_index": ACCOUNT }),
+    );
+    assert!(gone["result"].is_object(), "{gone}");
+    f.connect();
+    f.world.txs.insert(hash(8), seen("0x5", &forgot_data));
+    let checked = f.world.checked(&forgot);
+    assert!(checked.get("rule").is_none(), "{checked}");
+    assert!(!f.has_rule(&forgot_data));
+    // A day passes with the transaction visible: unknown, and no rule.
+    let (aged, aged_data) = f.job();
+    assert_eq!(
+        outcome(&f.world.result(&aged, TARGET, hash(7).into())),
+        "unverified"
+    );
+    f.world.hooks.set_wall(WALL + DAY);
+    f.world.txs.insert(hash(7), seen("0x5", &aged_data));
+    assert_eq!(f.world.checked(&aged)["outcome"], "unknown");
+    assert!(!f.has_rule(&aged_data));
+}
+
+/// A failed save of the record, at each stage: `unknown`, no rule, and the
+/// rule written once the transaction shows. A failed drop writes none, and
+/// a restart verifies the payment again and writes it then.
+#[test]
+fn a_flagged_send_s_rule_waits_through_a_failed_save() {
+    let root = tempfile::tempdir().unwrap();
+    let mut f = Flagged::start(root.path());
+    for (n, stage) in ["write", "fsync", "rename", "flush"]
+        .into_iter()
+        .enumerate()
+    {
+        let n = u8::try_from(n).unwrap() + 1;
+        f.world.hooks.fail(&format!("phone:{stage}"));
+        let (job, data) = f.job();
+        let answer = f.world.result(&job, TARGET, hash(n).into());
+        assert_eq!(
+            answer["result"],
+            json!({ "outcome": "unknown", "hash": hash(n), "durable": false }),
+            "{stage}"
+        );
+        assert!(!f.has_rule(&data), "{stage}");
+        f.world.hooks.fail("");
+        f.world.txs.insert(hash(n), seen("0x5", &data));
+        let checked = f.world.checked(&job);
+        assert_eq!(
+            checked["rule"],
+            json!({ "added": true }),
+            "{stage}: {checked}"
+        );
+        assert!(f.has_rule(&data), "{stage}");
+    }
+    // The drop unsaved: no rule yet, and the record found again.
+    let (job, data) = f.job();
+    assert_eq!(
+        outcome(&f.world.result(&job, TARGET, hash(9).into())),
+        "unverified"
+    );
+    f.world.hooks.fail("phone:write");
+    f.world.txs.insert(hash(9), seen("0x5", &data));
+    let checked = f.world.checked(&job);
+    assert_eq!(
+        checked["rule"],
+        json!({ "added": false, "reason": "not_saved" }),
+        "{checked}"
+    );
+    assert!(!f.has_rule(&data));
+    f.world.hooks.fail("");
+    let mut f = f.restart();
+    let checked = f.world.checked(&job);
+    assert_eq!(checked["rule"], json!({ "added": true }), "{checked}");
+    assert!(f.has_rule(&data));
 }
