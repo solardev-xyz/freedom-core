@@ -24,6 +24,7 @@ const { buildRadicleStats } = require('./radicle-stats');
 const { buildRadicleImport } = require('./radicle-import');
 const { buildApprovals } = require('./approvals');
 const { buildProfiles } = require('./profiles');
+const { buildEip1193 } = require('./eip1193');
 
 const REFERENCE_COMMIT = 'fb540328162839e68150fe2c5e517edb86734d1c';
 // The Radicle vectors' own reference: freedom-browser's integration/rust-core,
@@ -44,6 +45,12 @@ const APPROVALS_REFERENCE_COMMIT = '7f85551d82bddb1337df73b331785e969d62d1b9';
 // proper-lockfile, comes from the main reference's install, the same version
 // (profiles.js).
 const PROFILES_REFERENCE_COMMIT = APPROVALS_REFERENCE_COMMIT;
+// The Ethereum dispatcher's vectors' reference (design 0012, APR-5a): the
+// approvals reference's checkout, whose src/main/page/ is 0011's dispatcher
+// whole (PRQ-3 to PRQ-6) before APB-1 to APB-3 moved its tokens, rules and
+// grants into the core. Its one package, ethers, comes from the main
+// reference's install, the same version (eip1193.js).
+const EIP1193_REFERENCE_COMMIT = APPROVALS_REFERENCE_COMMIT;
 const OUTPUT = path.resolve(__dirname, '..');
 const INDICES = [0, 1, 2, 1000, 2147483647];
 const MNEMONICS = [
@@ -616,6 +623,14 @@ async function main() {
     'profiles.json': buildProfiles(approvals.checkout, reference.checkout, {
       freedomBrowserCommit: checkedCommit(approvals.checkout, PROFILES_REFERENCE_COMMIT, 'profiles reference'),
       packages: { 'proper-lockfile': packageVersion(createRequire(path.join(reference.checkout, 'package.json')), 'proper-lockfile') },
+      nodeVersion: process.version,
+      generator: 'vectors/generator/generate.js',
+    }),
+    // Design 0012's Ethereum dispatcher (APR-5a), from main's
+    // page-ethereum.js, page-signing.js and page-sends.js.
+    'eip1193.json': await buildEip1193(approvals.checkout, reference.checkout, {
+      freedomBrowserCommit: checkedCommit(approvals.checkout, EIP1193_REFERENCE_COMMIT, 'eip1193 reference'),
+      packages: { ethers: packageVersion(createRequire(path.join(reference.checkout, 'package.json')), 'ethers') },
       nodeVersion: process.version,
       generator: 'vectors/generator/generate.js',
     }),
