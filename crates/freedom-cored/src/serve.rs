@@ -214,6 +214,9 @@ const CAPABILITIES: &[&str] = &[
     "approval.forget_account",
     // Design 0012: a device send's "Always allow" (#373).
     "approval.remember",
+    // Design 0012: x402's payments (X402-1).
+    "x402.authorize",
+    "x402.settle",
     "dweb.open",
     // Design 0009: verified fetches, whose bodies stream.
     "dweb.verify",

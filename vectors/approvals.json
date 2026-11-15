@@ -2,7 +2,12 @@
   "meta": {
     "freedomBrowserCommit": "7f85551d82bddb1337df73b331785e969d62d1b9",
     "nodeVersion": "v24.15.0",
-    "generator": "vectors/generator/generate.js"
+    "generator": "vectors/generator/generate.js",
+    "packages": {
+      "@x402/core": "2.28.0",
+      "@x402/evm": "2.28.0",
+      "ethers": "6.17.0"
+    }
   },
   "formats": {
     "constants": "The reference's `CONFIRMATION_TTL_MS` and `MAX_OUTSTANDING`.",
@@ -10,8 +15,9 @@
     "rules": "The R-6 limiter (`limiter`): its `limits`, and `runs` of `admit` and `forget` for a `key` under the limiter's own clock (`at`, the vault's, in milliseconds), each with its `result`; Q9's rate reuses it, one bucket per key and request class. The fee check (`fees`): `evidence`, a `chain.fee_reference` `reply` read at `requestedAt` (`readEvidence`, its BigInts as decimal strings) and its `reference` (`referenceFee` at `wallNow` and `monotonicNow`, or null); `judged`, a transaction's fee fields (`tx`) judged against a `reference` (or none) by `judgeFees`, with its `verdict`. The standing rules' decisions (`decisions`): Design 0012's standing rules, from the reference's page-signing.js and page-sends.js driven with injected dependencies: `accounts`, the wallet list (`type` as the reference names it, `kind` as the core does); `runs`, each for the site `key`, from `start` (the dApp file's text as the reference wrote it, `js`, and the same grants with each rule in Q9's limited form, `core`; null: no file). Each step is an op on both files (`allow-signing`, `allow-transaction` with its `args`, `revoke`, `connect`, at `at`, the wall clock, with the core's text after it, `coreText`; `restart`: a new process, every bucket full) or a `request`: the page's `method` and `params`, at `at` (the wall clock) and `vaultAt` (the vault's clock), on chain `chainId`, with `custody` (`unknown`: unreadable), the D12 `pause` and the quote (`gasPrices`) for a send, and `moveTo`, an account the grant moves to while the vault's unlock is open. `js`: what the reference did (`rule`, answered with no `eth.sign` or `eth.send` prompt; `prompt`; `error`, with the page's error) and the prompts it opened. `core`: the request as the core takes it (`agent`, `account` and its `accountKind`, `moveTo` applied to the core's file before it decides, and `request`: a message's `bytes`; typed data in the core's form with `primaryType` and `chainId` as the view is asked for, and the `view` fields the core's view must hold; or the `tx` main signs, `paused`, null when unreadable, and the fee check's `evidence`, a `chain.fee_reference` `reply` asked for at `requestedAt` on the vault's clock, or null for none), and `expect`, `covered` or the reason design 0012's API names, with `deviation` where Q9 or the request's inputs change the reference's answer.",
     "bindings": "One request each: `kind`, `account`, `payload` and `page` (`{ handle, key }`, for main's page issuer) as the reference takes them; `js`, `bindingFor`'s facts or its error message; `core`, the request in fc-approval's form (`account`, `payload` or `payload_text`, the payload's JSON text the core parses itself, and `page`: `{ origin, frame, navigation, handle }`), or null where the reference's input has none; `expect`, whether the core issues a token for it (`issued`) or refuses it (`refused`), from 0012 (`deviation: token-strict` where the reference binds what the core refuses); `sameHash`, set where the case was built to share the EIP-712 hash of the case it is paired with.",
     "pairs": "Two requests the reference binds: `js`, whether a token minted for either spends for the other (`alike`) or is refused (`apart`), asked of the reference both ways; `changed`, the facts (and `kind`, `page`, `page.handle`, `page.key`) in which the reference's bindings differ; `core`, the core's answer, from 0012's Deviations table where `deviation` is set.",
-    "stores": "Each grant store's file (`file`): `runs`, from a `start` text (or none), each step an operation of the reference's store (`op`, its `args`) at `at` (the wall clock, in milliseconds, as `Date.now()` gives it), its `result` (or `error`), whether it wrote the file (`wrote`) and the file's text after it (`text`, null while there is none); a `reload` drops the store's cache, as a new process would. `core: load` where the core makes no such change itself (an older build's rule, or x402's cap operations, which are X402-1's): the core reads the text the reference wrote and writes it back byte for byte; `core: load-compacts`, the same but for what the reference's own next read of that text drops (a cap whose expiresAt the write made null), which the core drops as it reads. `core: legacy`: the reference's lookup of today's rule, which the new build answers none of (`rule-legacy`). `malformed`: a file's `text` (or its bytes in `hex`, which Node decodes as UTF-8 with U+FFFD for each invalid sequence), what the reference's store loads from it (`loaded`, `getAllPermissions()` as `value`, or as its `JSON.stringify` text in `json` where it holds a lone surrogate, or its `error`), the text a connect of another site then leaves (`afterGrant`, or its error), and the core's reading (`core`: `unreadable`, renamed aside with the store empty, or `parsed`). `sorts`: generated dApp files (`text`) whose entries `k<i>` hold a `lastUsed` of mixed types or none, and the order of `i` the reference's `getAllPermissions()` gives (`order`: `b.lastUsed - a.lastUsed` through ToNumber, under V8's sort).",
+    "stores": "Each grant store's file (`file`): `runs`, from a `start` text (or none), each step an operation of the reference's store (`op`, its `args`) at `at` (the wall clock, in milliseconds, as `Date.now()` gives it), its `result` (or `error`), whether it wrote the file (`wrote`) and the file's text after it (`text`, null while there is none); a `reload` drops the store's cache, as a new process would. `core: load` where the core makes no such change itself (an older build's rule): the core reads the text the reference wrote and writes it back byte for byte. x402's steps carry the core's own answer to the same operation (`core`: its `result` or `error`, whether it `wrote`, and the `text` after it), which is the reference's with every asset argument in lowercase and a `clockBack` step's change not made; `deviation` (`x402-asset-case`, `x402-clock-back`) marks a step where it differs from the reference's, and every step after a divergence; `$charge` as an argument is the run's last charge. `core: legacy`: the reference's lookup of today's rule, which the new build answers none of (`rule-legacy`). `malformed`: a file's `text` (or its bytes in `hex`, which Node decodes as UTF-8 with U+FFFD for each invalid sequence), what the reference's store loads from it (`loaded`, `getAllPermissions()` as `value`, or as its `JSON.stringify` text in `json` where it holds a lone surrogate, or its `error`), the text a connect of another site then leaves (`afterGrant`, or its error), and the core's reading (`core`: `unreadable`, renamed aside with the store empty, or `parsed`). `sorts`: generated dApp files (`text`) whose entries `k<i>` hold a `lastUsed` of mixed types or none, and the order of `i` the reference's `getAllPermissions()` gives (`order`: `b.lastUsed - a.lastUsed` through ToNumber, under V8's sort).",
     "rollback": "Q9's legacy transition, for the site `key`: `texts.before`, the entry with today's signing flag and transaction rules as an older build wrote it, and the same file after an \"Always allow\" for the signing flag (`signing`), for the call {\"to\":\"0xabababababababababababababababababababab\",\"selector\":\"0x095ea7b3\",\"chainId\":1,\"value\":\"500\"} from a confirmed send of its `value` (`transaction`), for both (`both`, signing first), and after both and then both rules turned off (`off`), each written as design 0012 writes it, with `grantedAt` 1762000100000. `reference`: what the reference's dapp-permissions.js answers for each text, at 1762000200000: `getSigningAutoApprove` (`signing`), and `isTransactionAutoApproved` with a value of 0 for the replaced call (`replaced`) and for {\"to\":\"0x833589fcd6edb6e08f4c7c32d4f71b54bda02913\",\"selector\":\"0xa9059cbb\",\"chainId\":8453}, a rule no change replaces (`kept`).",
+    "x402": "Design 0012's x402 (X402-1), from the approvals reference's src/main/x402/ over the main reference's @x402/core and @x402/evm (`meta.packages`). `defaultAssets`: the SDK's DEFAULT_ASSETS, which its client's default spend controls allow (`chainId`, `asset`, `decimals`), each confirmed by the scheme's `findDefaultAsset`. `keys`: `originKeyForUrl(url)` (`js`, null where the reference has none) and the core's (`core`, null where it refuses: x402 pays only an http or https resource). `tuples`: `tupleFromAccept(accept)`. `covering`: from a cap file (`start`) at `at` (wall-clock ms), `findCoveringPermission(origin, accepts)`'s entry index (`js`, null for none, or `error`), whether `charge` then took its amount (`charged`), and the core's entry (`core`), with `deviation` where 0012 says it differs. `payloads`: `signAndQueueRetry` for `requirements.accepts[accept_index]` at `now` (wall-clock seconds) with `nonce` (the 32 bytes `getRandomValues` gave) and `signer`: `js.payload`, the JSON text sign-flow.js base64-encodes into the header, or `js.error`; `core`, `payload` (the same text) or `refused`; `inferred` where the core refuses what the reference signs.",
     "runs": "Steps in order under `_setNow`, on a fresh store: `issue` (a case's request, minted as `token`), `consume` (a case's request, presented with `token`, or with `literal` text; `route: wallet` presents it without its page), `discard` and `count` (the outstanding tokens); `at` is the reference's clock, and `vaultAt` the vault's where they differ (`token-clock`); each step's `outcome` (`ok`, with what the token bound; `error`, the reference's message; or `count`), and `core` where the core's differs."
   },
   "constants": {
@@ -32063,7 +32069,20 @@
               },
               "wrote": true,
               "text": "{\n  \"https://app.example\": {\n    \"8453:0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913\": {\n      \"capAmount\": \"10000000\",\n      \"spentAmount\": \"0\",\n      \"createdAt\": 1762000000,\n      \"expiresAt\": 1762003600\n    }\n  }\n}",
-              "core": "load"
+              "core": {
+                "result": {
+                  "origin": "https://app.example",
+                  "chainId": 8453,
+                  "asset": "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913",
+                  "capAmount": "10000000",
+                  "spentAmount": "0",
+                  "createdAt": 1762000000,
+                  "expiresAt": 1762003600
+                },
+                "wrote": true,
+                "text": "{\n  \"https://app.example\": {\n    \"8453:0x833589fcd6edb6e08f4c7c32d4f71b54bda02913\": {\n      \"capAmount\": \"10000000\",\n      \"spentAmount\": \"0\",\n      \"createdAt\": 1762000000,\n      \"expiresAt\": 1762003600\n    }\n  }\n}"
+              },
+              "deviation": "x402-asset-case"
             },
             {
               "op": "grant",
@@ -32086,7 +32105,20 @@
               },
               "wrote": true,
               "text": "{\n  \"https://app.example\": {\n    \"8453:0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913\": {\n      \"capAmount\": \"10000000\",\n      \"spentAmount\": \"0\",\n      \"createdAt\": 1762000000,\n      \"expiresAt\": 1762003600\n    },\n    \"1:0x833589fcd6edb6e08f4c7c32d4f71b54bda02913\": {\n      \"capAmount\": \"5\",\n      \"spentAmount\": \"0\",\n      \"createdAt\": 1762000000,\n      \"expiresAt\": 1762000060\n    }\n  }\n}",
-              "core": "load"
+              "core": {
+                "result": {
+                  "origin": "https://app.example",
+                  "chainId": 1,
+                  "asset": "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913",
+                  "capAmount": "5",
+                  "spentAmount": "0",
+                  "createdAt": 1762000000,
+                  "expiresAt": 1762000060
+                },
+                "wrote": true,
+                "text": "{\n  \"https://app.example\": {\n    \"8453:0x833589fcd6edb6e08f4c7c32d4f71b54bda02913\": {\n      \"capAmount\": \"10000000\",\n      \"spentAmount\": \"0\",\n      \"createdAt\": 1762000000,\n      \"expiresAt\": 1762003600\n    },\n    \"1:0x833589fcd6edb6e08f4c7c32d4f71b54bda02913\": {\n      \"capAmount\": \"5\",\n      \"spentAmount\": \"0\",\n      \"createdAt\": 1762000000,\n      \"expiresAt\": 1762000060\n    }\n  }\n}"
+              },
+              "deviation": "x402-asset-case"
             },
             {
               "op": "charge",
@@ -32106,7 +32138,18 @@
               },
               "wrote": true,
               "text": "{\n  \"https://app.example\": {\n    \"8453:0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913\": {\n      \"capAmount\": \"10000000\",\n      \"spentAmount\": \"2500000\",\n      \"createdAt\": 1762000000,\n      \"expiresAt\": 1762003600\n    },\n    \"1:0x833589fcd6edb6e08f4c7c32d4f71b54bda02913\": {\n      \"capAmount\": \"5\",\n      \"spentAmount\": \"0\",\n      \"createdAt\": 1762000000,\n      \"expiresAt\": 1762000060\n    }\n  }\n}",
-              "core": "load"
+              "core": {
+                "result": {
+                  "origin": "https://app.example",
+                  "chainId": 8453,
+                  "asset": "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913",
+                  "amount": "2500000",
+                  "generation": 1
+                },
+                "wrote": true,
+                "text": "{\n  \"https://app.example\": {\n    \"8453:0x833589fcd6edb6e08f4c7c32d4f71b54bda02913\": {\n      \"capAmount\": \"10000000\",\n      \"spentAmount\": \"2500000\",\n      \"createdAt\": 1762000000,\n      \"expiresAt\": 1762003600\n    },\n    \"1:0x833589fcd6edb6e08f4c7c32d4f71b54bda02913\": {\n      \"capAmount\": \"5\",\n      \"spentAmount\": \"0\",\n      \"createdAt\": 1762000000,\n      \"expiresAt\": 1762000060\n    }\n  }\n}"
+              },
+              "deviation": "x402-asset-case"
             },
             {
               "op": "charge",
@@ -32120,7 +32163,12 @@
               "result": null,
               "wrote": false,
               "text": "{\n  \"https://app.example\": {\n    \"8453:0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913\": {\n      \"capAmount\": \"10000000\",\n      \"spentAmount\": \"2500000\",\n      \"createdAt\": 1762000000,\n      \"expiresAt\": 1762003600\n    },\n    \"1:0x833589fcd6edb6e08f4c7c32d4f71b54bda02913\": {\n      \"capAmount\": \"5\",\n      \"spentAmount\": \"0\",\n      \"createdAt\": 1762000000,\n      \"expiresAt\": 1762000060\n    }\n  }\n}",
-              "core": "load"
+              "core": {
+                "result": null,
+                "wrote": false,
+                "text": "{\n  \"https://app.example\": {\n    \"8453:0x833589fcd6edb6e08f4c7c32d4f71b54bda02913\": {\n      \"capAmount\": \"10000000\",\n      \"spentAmount\": \"2500000\",\n      \"createdAt\": 1762000000,\n      \"expiresAt\": 1762003600\n    },\n    \"1:0x833589fcd6edb6e08f4c7c32d4f71b54bda02913\": {\n      \"capAmount\": \"5\",\n      \"spentAmount\": \"0\",\n      \"createdAt\": 1762000000,\n      \"expiresAt\": 1762000060\n    }\n  }\n}"
+              },
+              "deviation": "x402-asset-case"
             },
             {
               "op": "updatePermission",
@@ -32144,7 +32192,20 @@
               },
               "wrote": true,
               "text": "{\n  \"https://app.example\": {\n    \"8453:0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913\": {\n      \"capAmount\": \"20000000\",\n      \"spentAmount\": \"2500000\",\n      \"createdAt\": 1762000000,\n      \"expiresAt\": 1762003600\n    },\n    \"1:0x833589fcd6edb6e08f4c7c32d4f71b54bda02913\": {\n      \"capAmount\": \"5\",\n      \"spentAmount\": \"0\",\n      \"createdAt\": 1762000000,\n      \"expiresAt\": 1762000060\n    }\n  }\n}",
-              "core": "load"
+              "core": {
+                "result": {
+                  "origin": "https://app.example",
+                  "chainId": 8453,
+                  "asset": "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913",
+                  "capAmount": "20000000",
+                  "spentAmount": "2500000",
+                  "createdAt": 1762000000,
+                  "expiresAt": 1762003600
+                },
+                "wrote": true,
+                "text": "{\n  \"https://app.example\": {\n    \"8453:0x833589fcd6edb6e08f4c7c32d4f71b54bda02913\": {\n      \"capAmount\": \"20000000\",\n      \"spentAmount\": \"2500000\",\n      \"createdAt\": 1762000000,\n      \"expiresAt\": 1762003600\n    },\n    \"1:0x833589fcd6edb6e08f4c7c32d4f71b54bda02913\": {\n      \"capAmount\": \"5\",\n      \"spentAmount\": \"0\",\n      \"createdAt\": 1762000000,\n      \"expiresAt\": 1762000060\n    }\n  }\n}"
+              },
+              "deviation": "x402-asset-case"
             },
             {
               "op": "grant",
@@ -32167,7 +32228,20 @@
               },
               "wrote": true,
               "text": "{\n  \"https://app.example\": {\n    \"8453:0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913\": {\n      \"capAmount\": \"20000000\",\n      \"spentAmount\": \"2500000\",\n      \"createdAt\": 1762000000,\n      \"expiresAt\": 1762003600\n    },\n    \"1:0x833589fcd6edb6e08f4c7c32d4f71b54bda02913\": {\n      \"capAmount\": \"5\",\n      \"spentAmount\": \"0\",\n      \"createdAt\": 1762000000,\n      \"expiresAt\": 1762000060\n    }\n  },\n  \"myapp.eth\": {\n    \"100:0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913\": {\n      \"capAmount\": \"1\",\n      \"spentAmount\": \"0\",\n      \"createdAt\": 1762000000,\n      \"expiresAt\": 1762000010\n    }\n  }\n}",
-              "core": "load"
+              "core": {
+                "result": {
+                  "origin": "myapp.eth",
+                  "chainId": 100,
+                  "asset": "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913",
+                  "capAmount": "1",
+                  "spentAmount": "0",
+                  "createdAt": 1762000000,
+                  "expiresAt": 1762000010
+                },
+                "wrote": true,
+                "text": "{\n  \"https://app.example\": {\n    \"8453:0x833589fcd6edb6e08f4c7c32d4f71b54bda02913\": {\n      \"capAmount\": \"20000000\",\n      \"spentAmount\": \"2500000\",\n      \"createdAt\": 1762000000,\n      \"expiresAt\": 1762003600\n    },\n    \"1:0x833589fcd6edb6e08f4c7c32d4f71b54bda02913\": {\n      \"capAmount\": \"5\",\n      \"spentAmount\": \"0\",\n      \"createdAt\": 1762000000,\n      \"expiresAt\": 1762000060\n    }\n  },\n  \"myapp.eth\": {\n    \"100:0x833589fcd6edb6e08f4c7c32d4f71b54bda02913\": {\n      \"capAmount\": \"1\",\n      \"spentAmount\": \"0\",\n      \"createdAt\": 1762000000,\n      \"expiresAt\": 1762000010\n    }\n  }\n}"
+              },
+              "deviation": "x402-asset-case"
             },
             {
               "op": "revoke",
@@ -32180,7 +32254,12 @@
               "result": null,
               "wrote": true,
               "text": "{\n  \"https://app.example\": {\n    \"8453:0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913\": {\n      \"capAmount\": \"20000000\",\n      \"spentAmount\": \"2500000\",\n      \"createdAt\": 1762000000,\n      \"expiresAt\": 1762003600\n    }\n  },\n  \"myapp.eth\": {\n    \"100:0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913\": {\n      \"capAmount\": \"1\",\n      \"spentAmount\": \"0\",\n      \"createdAt\": 1762000000,\n      \"expiresAt\": 1762000010\n    }\n  }\n}",
-              "core": "load"
+              "core": {
+                "result": null,
+                "wrote": true,
+                "text": "{\n  \"https://app.example\": {\n    \"8453:0x833589fcd6edb6e08f4c7c32d4f71b54bda02913\": {\n      \"capAmount\": \"20000000\",\n      \"spentAmount\": \"2500000\",\n      \"createdAt\": 1762000000,\n      \"expiresAt\": 1762003600\n    }\n  },\n  \"myapp.eth\": {\n    \"100:0x833589fcd6edb6e08f4c7c32d4f71b54bda02913\": {\n      \"capAmount\": \"1\",\n      \"spentAmount\": \"0\",\n      \"createdAt\": 1762000000,\n      \"expiresAt\": 1762000010\n    }\n  }\n}"
+              },
+              "deviation": "x402-asset-case"
             },
             {
               "op": "revokeAllForOrigin",
@@ -32191,7 +32270,12 @@
               "result": null,
               "wrote": true,
               "text": "{\n  \"https://app.example\": {\n    \"8453:0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913\": {\n      \"capAmount\": \"20000000\",\n      \"spentAmount\": \"2500000\",\n      \"createdAt\": 1762000000,\n      \"expiresAt\": 1762003600\n    }\n  }\n}",
-              "core": "load"
+              "core": {
+                "result": null,
+                "wrote": true,
+                "text": "{\n  \"https://app.example\": {\n    \"8453:0x833589fcd6edb6e08f4c7c32d4f71b54bda02913\": {\n      \"capAmount\": \"20000000\",\n      \"spentAmount\": \"2500000\",\n      \"createdAt\": 1762000000,\n      \"expiresAt\": 1762003600\n    }\n  }\n}"
+              },
+              "deviation": "x402-asset-case"
             }
           ]
         },
@@ -32215,7 +32299,22 @@
                 }
               ],
               "wrote": false,
-              "text": "{\n  \"https://app.example\": {\n    \"8453:0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913\": {\n      \"capAmount\": \"10\",\n      \"spentAmount\": \"0\",\n      \"createdAt\": 1761999900,\n      \"expiresAt\": 1762000000\n    },\n    \"1:0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913\": {\n      \"capAmount\": \"10\",\n      \"spentAmount\": \"3\",\n      \"createdAt\": 1761999900,\n      \"expiresAt\": 1762000001\n    },\n    \"10:0xabc\": \"not a record\"\n  },\n  \"myapp.eth\": {\n    \"8453:0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913\": {\n      \"capAmount\": \"1\",\n      \"spentAmount\": \"0\",\n      \"createdAt\": 1761999950,\n      \"expiresAt\": 1761999999\n    }\n  },\n  \"https://other.example\": \"not an object\"\n}"
+              "text": "{\n  \"https://app.example\": {\n    \"8453:0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913\": {\n      \"capAmount\": \"10\",\n      \"spentAmount\": \"0\",\n      \"createdAt\": 1761999900,\n      \"expiresAt\": 1762000000\n    },\n    \"1:0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913\": {\n      \"capAmount\": \"10\",\n      \"spentAmount\": \"3\",\n      \"createdAt\": 1761999900,\n      \"expiresAt\": 1762000001\n    },\n    \"10:0xabc\": \"not a record\"\n  },\n  \"myapp.eth\": {\n    \"8453:0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913\": {\n      \"capAmount\": \"1\",\n      \"spentAmount\": \"0\",\n      \"createdAt\": 1761999950,\n      \"expiresAt\": 1761999999\n    }\n  },\n  \"https://other.example\": \"not an object\"\n}",
+              "core": {
+                "result": [
+                  {
+                    "origin": "https://app.example",
+                    "chainId": 1,
+                    "asset": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+                    "capAmount": "10",
+                    "spentAmount": "3",
+                    "createdAt": 1761999900,
+                    "expiresAt": 1762000001
+                  }
+                ],
+                "wrote": false,
+                "text": "{\n  \"https://app.example\": {\n    \"8453:0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913\": {\n      \"capAmount\": \"10\",\n      \"spentAmount\": \"0\",\n      \"createdAt\": 1761999900,\n      \"expiresAt\": 1762000000\n    },\n    \"1:0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913\": {\n      \"capAmount\": \"10\",\n      \"spentAmount\": \"3\",\n      \"createdAt\": 1761999900,\n      \"expiresAt\": 1762000001\n    },\n    \"10:0xabc\": \"not a record\"\n  },\n  \"myapp.eth\": {\n    \"8453:0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913\": {\n      \"capAmount\": \"1\",\n      \"spentAmount\": \"0\",\n      \"createdAt\": 1761999950,\n      \"expiresAt\": 1761999999\n    }\n  },\n  \"https://other.example\": \"not an object\"\n}"
+              }
             },
             {
               "op": "grant",
@@ -32238,7 +32337,20 @@
               },
               "wrote": true,
               "text": "{\n  \"https://app.example\": {\n    \"1:0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913\": {\n      \"capAmount\": \"10\",\n      \"spentAmount\": \"3\",\n      \"createdAt\": 1761999900,\n      \"expiresAt\": 1762000001\n    }\n  },\n  \"https://other.example\": {\n    \"8453:0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913\": {\n      \"capAmount\": \"1\",\n      \"spentAmount\": \"0\",\n      \"createdAt\": 1762000000,\n      \"expiresAt\": 1762000060\n    }\n  }\n}",
-              "core": "load"
+              "core": {
+                "result": {
+                  "origin": "https://other.example",
+                  "chainId": 8453,
+                  "asset": "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913",
+                  "capAmount": "1",
+                  "spentAmount": "0",
+                  "createdAt": 1762000000,
+                  "expiresAt": 1762000060
+                },
+                "wrote": true,
+                "text": "{\n  \"https://app.example\": {\n    \"1:0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913\": {\n      \"capAmount\": \"10\",\n      \"spentAmount\": \"3\",\n      \"createdAt\": 1761999900,\n      \"expiresAt\": 1762000001\n    }\n  },\n  \"https://other.example\": {\n    \"8453:0x833589fcd6edb6e08f4c7c32d4f71b54bda02913\": {\n      \"capAmount\": \"1\",\n      \"spentAmount\": \"0\",\n      \"createdAt\": 1762000000,\n      \"expiresAt\": 1762000060\n    }\n  }\n}"
+              },
+              "deviation": "x402-asset-case"
             },
             {
               "op": "getAllPermissions",
@@ -32256,7 +32368,23 @@
                 }
               ],
               "wrote": false,
-              "text": "{\n  \"https://app.example\": {\n    \"1:0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913\": {\n      \"capAmount\": \"10\",\n      \"spentAmount\": \"3\",\n      \"createdAt\": 1761999900,\n      \"expiresAt\": 1762000001\n    }\n  },\n  \"https://other.example\": {\n    \"8453:0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913\": {\n      \"capAmount\": \"1\",\n      \"spentAmount\": \"0\",\n      \"createdAt\": 1762000000,\n      \"expiresAt\": 1762000060\n    }\n  }\n}"
+              "text": "{\n  \"https://app.example\": {\n    \"1:0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913\": {\n      \"capAmount\": \"10\",\n      \"spentAmount\": \"3\",\n      \"createdAt\": 1761999900,\n      \"expiresAt\": 1762000001\n    }\n  },\n  \"https://other.example\": {\n    \"8453:0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913\": {\n      \"capAmount\": \"1\",\n      \"spentAmount\": \"0\",\n      \"createdAt\": 1762000000,\n      \"expiresAt\": 1762000060\n    }\n  }\n}",
+              "core": {
+                "result": [
+                  {
+                    "origin": "https://other.example",
+                    "chainId": 8453,
+                    "asset": "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913",
+                    "capAmount": "1",
+                    "spentAmount": "0",
+                    "createdAt": 1762000000,
+                    "expiresAt": 1762000060
+                  }
+                ],
+                "wrote": false,
+                "text": "{\n  \"https://app.example\": {\n    \"1:0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913\": {\n      \"capAmount\": \"10\",\n      \"spentAmount\": \"3\",\n      \"createdAt\": 1761999900,\n      \"expiresAt\": 1762000001\n    }\n  },\n  \"https://other.example\": {\n    \"8453:0x833589fcd6edb6e08f4c7c32d4f71b54bda02913\": {\n      \"capAmount\": \"1\",\n      \"spentAmount\": \"0\",\n      \"createdAt\": 1762000000,\n      \"expiresAt\": 1762000060\n    }\n  }\n}"
+              },
+              "deviation": "x402-asset-case"
             },
             {
               "op": "reload",
@@ -32264,7 +32392,13 @@
               "at": 1762000001000,
               "result": null,
               "wrote": false,
-              "text": "{\n  \"https://app.example\": {\n    \"1:0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913\": {\n      \"capAmount\": \"10\",\n      \"spentAmount\": \"3\",\n      \"createdAt\": 1761999900,\n      \"expiresAt\": 1762000001\n    }\n  },\n  \"https://other.example\": {\n    \"8453:0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913\": {\n      \"capAmount\": \"1\",\n      \"spentAmount\": \"0\",\n      \"createdAt\": 1762000000,\n      \"expiresAt\": 1762000060\n    }\n  }\n}"
+              "text": "{\n  \"https://app.example\": {\n    \"1:0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913\": {\n      \"capAmount\": \"10\",\n      \"spentAmount\": \"3\",\n      \"createdAt\": 1761999900,\n      \"expiresAt\": 1762000001\n    }\n  },\n  \"https://other.example\": {\n    \"8453:0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913\": {\n      \"capAmount\": \"1\",\n      \"spentAmount\": \"0\",\n      \"createdAt\": 1762000000,\n      \"expiresAt\": 1762000060\n    }\n  }\n}",
+              "core": {
+                "result": null,
+                "wrote": false,
+                "text": "{\n  \"https://app.example\": {\n    \"1:0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913\": {\n      \"capAmount\": \"10\",\n      \"spentAmount\": \"3\",\n      \"createdAt\": 1761999900,\n      \"expiresAt\": 1762000001\n    }\n  },\n  \"https://other.example\": {\n    \"8453:0x833589fcd6edb6e08f4c7c32d4f71b54bda02913\": {\n      \"capAmount\": \"1\",\n      \"spentAmount\": \"0\",\n      \"createdAt\": 1762000000,\n      \"expiresAt\": 1762000060\n    }\n  }\n}"
+              },
+              "deviation": "x402-asset-case"
             },
             {
               "op": "getAllPermissions",
@@ -32282,7 +32416,23 @@
                 }
               ],
               "wrote": false,
-              "text": "{\n  \"https://app.example\": {\n    \"1:0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913\": {\n      \"capAmount\": \"10\",\n      \"spentAmount\": \"3\",\n      \"createdAt\": 1761999900,\n      \"expiresAt\": 1762000001\n    }\n  },\n  \"https://other.example\": {\n    \"8453:0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913\": {\n      \"capAmount\": \"1\",\n      \"spentAmount\": \"0\",\n      \"createdAt\": 1762000000,\n      \"expiresAt\": 1762000060\n    }\n  }\n}"
+              "text": "{\n  \"https://app.example\": {\n    \"1:0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913\": {\n      \"capAmount\": \"10\",\n      \"spentAmount\": \"3\",\n      \"createdAt\": 1761999900,\n      \"expiresAt\": 1762000001\n    }\n  },\n  \"https://other.example\": {\n    \"8453:0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913\": {\n      \"capAmount\": \"1\",\n      \"spentAmount\": \"0\",\n      \"createdAt\": 1762000000,\n      \"expiresAt\": 1762000060\n    }\n  }\n}",
+              "core": {
+                "result": [
+                  {
+                    "origin": "https://other.example",
+                    "chainId": 8453,
+                    "asset": "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913",
+                    "capAmount": "1",
+                    "spentAmount": "0",
+                    "createdAt": 1762000000,
+                    "expiresAt": 1762000060
+                  }
+                ],
+                "wrote": false,
+                "text": "{\n  \"https://app.example\": {\n    \"1:0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913\": {\n      \"capAmount\": \"10\",\n      \"spentAmount\": \"3\",\n      \"createdAt\": 1761999900,\n      \"expiresAt\": 1762000001\n    }\n  },\n  \"https://other.example\": {\n    \"8453:0x833589fcd6edb6e08f4c7c32d4f71b54bda02913\": {\n      \"capAmount\": \"1\",\n      \"spentAmount\": \"0\",\n      \"createdAt\": 1762000000,\n      \"expiresAt\": 1762000060\n    }\n  }\n}"
+              },
+              "deviation": "x402-asset-case"
             }
           ]
         },
@@ -32343,7 +32493,59 @@
                 }
               ],
               "wrote": false,
-              "text": "{\n  \"https://app.example\": {\"8453:0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913\": {\"capAmount\": \"10\", \"spentAmount\": \"0\", \"createdAt\": 1761999900, \"expiresAt\": \"1762000100\"}, \"1:0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913\": {\"capAmount\": \"10\", \"spentAmount\": \"0\", \"createdAt\": 1761999900, \"expiresAt\": \"abc\"}, \"10:0xa\": {\"capAmount\": \"10\", \"spentAmount\": \"0\", \"createdAt\": 1761999900, \"expiresAt\": [1762000100]},\n    \"100:0xb\": {\"capAmount\": \"10\", \"spentAmount\": \"0\", \"createdAt\": 1761999900, \"expiresAt\": null}, \"137:0xc\": {\"capAmount\": \"10\", \"spentAmount\": \"0\", \"createdAt\": 1761999900, \"expiresAt\": true}, \"42161:0xd\": {\"capAmount\": \"10\", \"spentAmount\": \"0\", \"createdAt\": 1761999900, \"expiresAt\": 1e400}, \"56:0xe\": {\"capAmount\": \"10\", \"spentAmount\": \"0\", \"createdAt\": 1761999900, \"expiresAt\": \"1762000000\"}, \"250:0xf\": {\"capAmount\": \"10\", \"spentAmount\": \"0\", \"createdAt\": 1761999900, \"expiresAt\": \" 0x6905fc85 \"}},\n  \"https://other.example\": [{\"capAmount\": \"10\", \"spentAmount\": \"0\", \"createdAt\": 1761999900, \"expiresAt\": 1762000100}, {\"capAmount\": \"10\", \"spentAmount\": \"0\", \"createdAt\": 1761999900, \"expiresAt\": 1761999999}],\n  \"myapp.eth\": \"1762000100\",\n  \"bzz://abababababababababababababababababababababababababababababababab\": 1762000100\n}"
+              "text": "{\n  \"https://app.example\": {\"8453:0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913\": {\"capAmount\": \"10\", \"spentAmount\": \"0\", \"createdAt\": 1761999900, \"expiresAt\": \"1762000100\"}, \"1:0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913\": {\"capAmount\": \"10\", \"spentAmount\": \"0\", \"createdAt\": 1761999900, \"expiresAt\": \"abc\"}, \"10:0xa\": {\"capAmount\": \"10\", \"spentAmount\": \"0\", \"createdAt\": 1761999900, \"expiresAt\": [1762000100]},\n    \"100:0xb\": {\"capAmount\": \"10\", \"spentAmount\": \"0\", \"createdAt\": 1761999900, \"expiresAt\": null}, \"137:0xc\": {\"capAmount\": \"10\", \"spentAmount\": \"0\", \"createdAt\": 1761999900, \"expiresAt\": true}, \"42161:0xd\": {\"capAmount\": \"10\", \"spentAmount\": \"0\", \"createdAt\": 1761999900, \"expiresAt\": 1e400}, \"56:0xe\": {\"capAmount\": \"10\", \"spentAmount\": \"0\", \"createdAt\": 1761999900, \"expiresAt\": \"1762000000\"}, \"250:0xf\": {\"capAmount\": \"10\", \"spentAmount\": \"0\", \"createdAt\": 1761999900, \"expiresAt\": \" 0x6905fc85 \"}},\n  \"https://other.example\": [{\"capAmount\": \"10\", \"spentAmount\": \"0\", \"createdAt\": 1761999900, \"expiresAt\": 1762000100}, {\"capAmount\": \"10\", \"spentAmount\": \"0\", \"createdAt\": 1761999900, \"expiresAt\": 1761999999}],\n  \"myapp.eth\": \"1762000100\",\n  \"bzz://abababababababababababababababababababababababababababababababab\": 1762000100\n}",
+              "core": {
+                "result": [
+                  {
+                    "origin": "https://app.example",
+                    "chainId": 8453,
+                    "asset": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+                    "capAmount": "10",
+                    "spentAmount": "0",
+                    "createdAt": 1761999900,
+                    "expiresAt": "1762000100"
+                  },
+                  {
+                    "origin": "https://app.example",
+                    "chainId": 10,
+                    "asset": "0xa",
+                    "capAmount": "10",
+                    "spentAmount": "0",
+                    "createdAt": 1761999900,
+                    "expiresAt": [
+                      1762000100
+                    ]
+                  },
+                  {
+                    "origin": "https://app.example",
+                    "chainId": 42161,
+                    "asset": "0xd",
+                    "capAmount": "10",
+                    "spentAmount": "0",
+                    "createdAt": 1761999900,
+                    "expiresAt": null
+                  },
+                  {
+                    "origin": "https://app.example",
+                    "chainId": 250,
+                    "asset": "0xf",
+                    "capAmount": "10",
+                    "spentAmount": "0",
+                    "createdAt": 1761999900,
+                    "expiresAt": " 0x6905fc85 "
+                  },
+                  {
+                    "origin": "https://other.example",
+                    "chainId": 0,
+                    "capAmount": "10",
+                    "spentAmount": "0",
+                    "createdAt": 1761999900,
+                    "expiresAt": 1762000100
+                  }
+                ],
+                "wrote": false,
+                "text": "{\n  \"https://app.example\": {\"8453:0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913\": {\"capAmount\": \"10\", \"spentAmount\": \"0\", \"createdAt\": 1761999900, \"expiresAt\": \"1762000100\"}, \"1:0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913\": {\"capAmount\": \"10\", \"spentAmount\": \"0\", \"createdAt\": 1761999900, \"expiresAt\": \"abc\"}, \"10:0xa\": {\"capAmount\": \"10\", \"spentAmount\": \"0\", \"createdAt\": 1761999900, \"expiresAt\": [1762000100]},\n    \"100:0xb\": {\"capAmount\": \"10\", \"spentAmount\": \"0\", \"createdAt\": 1761999900, \"expiresAt\": null}, \"137:0xc\": {\"capAmount\": \"10\", \"spentAmount\": \"0\", \"createdAt\": 1761999900, \"expiresAt\": true}, \"42161:0xd\": {\"capAmount\": \"10\", \"spentAmount\": \"0\", \"createdAt\": 1761999900, \"expiresAt\": 1e400}, \"56:0xe\": {\"capAmount\": \"10\", \"spentAmount\": \"0\", \"createdAt\": 1761999900, \"expiresAt\": \"1762000000\"}, \"250:0xf\": {\"capAmount\": \"10\", \"spentAmount\": \"0\", \"createdAt\": 1761999900, \"expiresAt\": \" 0x6905fc85 \"}},\n  \"https://other.example\": [{\"capAmount\": \"10\", \"spentAmount\": \"0\", \"createdAt\": 1761999900, \"expiresAt\": 1762000100}, {\"capAmount\": \"10\", \"spentAmount\": \"0\", \"createdAt\": 1761999900, \"expiresAt\": 1761999999}],\n  \"myapp.eth\": \"1762000100\",\n  \"bzz://abababababababababababababababababababababababababababababababab\": 1762000100\n}"
+              }
             },
             {
               "op": "grant",
@@ -32366,7 +32568,19 @@
               },
               "wrote": true,
               "text": "{\n  \"https://app.example\": {\n    \"8453:0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913\": {\n      \"capAmount\": \"10\",\n      \"spentAmount\": \"0\",\n      \"createdAt\": 1761999900,\n      \"expiresAt\": \"1762000100\"\n    },\n    \"10:0xa\": {\n      \"capAmount\": \"10\",\n      \"spentAmount\": \"0\",\n      \"createdAt\": 1761999900,\n      \"expiresAt\": [\n        1762000100\n      ]\n    },\n    \"42161:0xd\": {\n      \"capAmount\": \"10\",\n      \"spentAmount\": \"0\",\n      \"createdAt\": 1761999900,\n      \"expiresAt\": null\n    },\n    \"250:0xf\": {\n      \"capAmount\": \"10\",\n      \"spentAmount\": \"0\",\n      \"createdAt\": 1761999900,\n      \"expiresAt\": \" 0x6905fc85 \"\n    },\n    \"8453:0x1111111111111111111111111111111111111111\": {\n      \"capAmount\": \"1\",\n      \"spentAmount\": \"0\",\n      \"createdAt\": 1762000000,\n      \"expiresAt\": 1762000060\n    }\n  },\n  \"https://other.example\": {\n    \"0\": {\n      \"capAmount\": \"10\",\n      \"spentAmount\": \"0\",\n      \"createdAt\": 1761999900,\n      \"expiresAt\": 1762000100\n    }\n  }\n}",
-              "core": "load-compacts"
+              "core": {
+                "result": {
+                  "origin": "https://app.example",
+                  "chainId": 8453,
+                  "asset": "0x1111111111111111111111111111111111111111",
+                  "capAmount": "1",
+                  "spentAmount": "0",
+                  "createdAt": 1762000000,
+                  "expiresAt": 1762000060
+                },
+                "wrote": true,
+                "text": "{\n  \"https://app.example\": {\n    \"8453:0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913\": {\n      \"capAmount\": \"10\",\n      \"spentAmount\": \"0\",\n      \"createdAt\": 1761999900,\n      \"expiresAt\": \"1762000100\"\n    },\n    \"10:0xa\": {\n      \"capAmount\": \"10\",\n      \"spentAmount\": \"0\",\n      \"createdAt\": 1761999900,\n      \"expiresAt\": [\n        1762000100\n      ]\n    },\n    \"42161:0xd\": {\n      \"capAmount\": \"10\",\n      \"spentAmount\": \"0\",\n      \"createdAt\": 1761999900,\n      \"expiresAt\": null\n    },\n    \"250:0xf\": {\n      \"capAmount\": \"10\",\n      \"spentAmount\": \"0\",\n      \"createdAt\": 1761999900,\n      \"expiresAt\": \" 0x6905fc85 \"\n    },\n    \"8453:0x1111111111111111111111111111111111111111\": {\n      \"capAmount\": \"1\",\n      \"spentAmount\": \"0\",\n      \"createdAt\": 1762000000,\n      \"expiresAt\": 1762000060\n    }\n  },\n  \"https://other.example\": {\n    \"0\": {\n      \"capAmount\": \"10\",\n      \"spentAmount\": \"0\",\n      \"createdAt\": 1761999900,\n      \"expiresAt\": 1762000100\n    }\n  }\n}"
+              }
             },
             {
               "op": "reload",
@@ -32374,7 +32588,12 @@
               "at": 1762000000002,
               "result": null,
               "wrote": false,
-              "text": "{\n  \"https://app.example\": {\n    \"8453:0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913\": {\n      \"capAmount\": \"10\",\n      \"spentAmount\": \"0\",\n      \"createdAt\": 1761999900,\n      \"expiresAt\": \"1762000100\"\n    },\n    \"10:0xa\": {\n      \"capAmount\": \"10\",\n      \"spentAmount\": \"0\",\n      \"createdAt\": 1761999900,\n      \"expiresAt\": [\n        1762000100\n      ]\n    },\n    \"42161:0xd\": {\n      \"capAmount\": \"10\",\n      \"spentAmount\": \"0\",\n      \"createdAt\": 1761999900,\n      \"expiresAt\": null\n    },\n    \"250:0xf\": {\n      \"capAmount\": \"10\",\n      \"spentAmount\": \"0\",\n      \"createdAt\": 1761999900,\n      \"expiresAt\": \" 0x6905fc85 \"\n    },\n    \"8453:0x1111111111111111111111111111111111111111\": {\n      \"capAmount\": \"1\",\n      \"spentAmount\": \"0\",\n      \"createdAt\": 1762000000,\n      \"expiresAt\": 1762000060\n    }\n  },\n  \"https://other.example\": {\n    \"0\": {\n      \"capAmount\": \"10\",\n      \"spentAmount\": \"0\",\n      \"createdAt\": 1761999900,\n      \"expiresAt\": 1762000100\n    }\n  }\n}"
+              "text": "{\n  \"https://app.example\": {\n    \"8453:0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913\": {\n      \"capAmount\": \"10\",\n      \"spentAmount\": \"0\",\n      \"createdAt\": 1761999900,\n      \"expiresAt\": \"1762000100\"\n    },\n    \"10:0xa\": {\n      \"capAmount\": \"10\",\n      \"spentAmount\": \"0\",\n      \"createdAt\": 1761999900,\n      \"expiresAt\": [\n        1762000100\n      ]\n    },\n    \"42161:0xd\": {\n      \"capAmount\": \"10\",\n      \"spentAmount\": \"0\",\n      \"createdAt\": 1761999900,\n      \"expiresAt\": null\n    },\n    \"250:0xf\": {\n      \"capAmount\": \"10\",\n      \"spentAmount\": \"0\",\n      \"createdAt\": 1761999900,\n      \"expiresAt\": \" 0x6905fc85 \"\n    },\n    \"8453:0x1111111111111111111111111111111111111111\": {\n      \"capAmount\": \"1\",\n      \"spentAmount\": \"0\",\n      \"createdAt\": 1762000000,\n      \"expiresAt\": 1762000060\n    }\n  },\n  \"https://other.example\": {\n    \"0\": {\n      \"capAmount\": \"10\",\n      \"spentAmount\": \"0\",\n      \"createdAt\": 1761999900,\n      \"expiresAt\": 1762000100\n    }\n  }\n}",
+              "core": {
+                "result": null,
+                "wrote": false,
+                "text": "{\n  \"https://app.example\": {\n    \"8453:0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913\": {\n      \"capAmount\": \"10\",\n      \"spentAmount\": \"0\",\n      \"createdAt\": 1761999900,\n      \"expiresAt\": \"1762000100\"\n    },\n    \"10:0xa\": {\n      \"capAmount\": \"10\",\n      \"spentAmount\": \"0\",\n      \"createdAt\": 1761999900,\n      \"expiresAt\": [\n        1762000100\n      ]\n    },\n    \"42161:0xd\": {\n      \"capAmount\": \"10\",\n      \"spentAmount\": \"0\",\n      \"createdAt\": 1761999900,\n      \"expiresAt\": null\n    },\n    \"250:0xf\": {\n      \"capAmount\": \"10\",\n      \"spentAmount\": \"0\",\n      \"createdAt\": 1761999900,\n      \"expiresAt\": \" 0x6905fc85 \"\n    },\n    \"8453:0x1111111111111111111111111111111111111111\": {\n      \"capAmount\": \"1\",\n      \"spentAmount\": \"0\",\n      \"createdAt\": 1762000000,\n      \"expiresAt\": 1762000060\n    }\n  },\n  \"https://other.example\": {\n    \"0\": {\n      \"capAmount\": \"10\",\n      \"spentAmount\": \"0\",\n      \"createdAt\": 1761999900,\n      \"expiresAt\": 1762000100\n    }\n  }\n}"
+              }
             },
             {
               "op": "getAllPermissions",
@@ -32429,7 +32648,643 @@
                 }
               ],
               "wrote": false,
-              "text": "{\n  \"https://app.example\": {\n    \"8453:0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913\": {\n      \"capAmount\": \"10\",\n      \"spentAmount\": \"0\",\n      \"createdAt\": 1761999900,\n      \"expiresAt\": \"1762000100\"\n    },\n    \"10:0xa\": {\n      \"capAmount\": \"10\",\n      \"spentAmount\": \"0\",\n      \"createdAt\": 1761999900,\n      \"expiresAt\": [\n        1762000100\n      ]\n    },\n    \"42161:0xd\": {\n      \"capAmount\": \"10\",\n      \"spentAmount\": \"0\",\n      \"createdAt\": 1761999900,\n      \"expiresAt\": null\n    },\n    \"250:0xf\": {\n      \"capAmount\": \"10\",\n      \"spentAmount\": \"0\",\n      \"createdAt\": 1761999900,\n      \"expiresAt\": \" 0x6905fc85 \"\n    },\n    \"8453:0x1111111111111111111111111111111111111111\": {\n      \"capAmount\": \"1\",\n      \"spentAmount\": \"0\",\n      \"createdAt\": 1762000000,\n      \"expiresAt\": 1762000060\n    }\n  },\n  \"https://other.example\": {\n    \"0\": {\n      \"capAmount\": \"10\",\n      \"spentAmount\": \"0\",\n      \"createdAt\": 1761999900,\n      \"expiresAt\": 1762000100\n    }\n  }\n}"
+              "text": "{\n  \"https://app.example\": {\n    \"8453:0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913\": {\n      \"capAmount\": \"10\",\n      \"spentAmount\": \"0\",\n      \"createdAt\": 1761999900,\n      \"expiresAt\": \"1762000100\"\n    },\n    \"10:0xa\": {\n      \"capAmount\": \"10\",\n      \"spentAmount\": \"0\",\n      \"createdAt\": 1761999900,\n      \"expiresAt\": [\n        1762000100\n      ]\n    },\n    \"42161:0xd\": {\n      \"capAmount\": \"10\",\n      \"spentAmount\": \"0\",\n      \"createdAt\": 1761999900,\n      \"expiresAt\": null\n    },\n    \"250:0xf\": {\n      \"capAmount\": \"10\",\n      \"spentAmount\": \"0\",\n      \"createdAt\": 1761999900,\n      \"expiresAt\": \" 0x6905fc85 \"\n    },\n    \"8453:0x1111111111111111111111111111111111111111\": {\n      \"capAmount\": \"1\",\n      \"spentAmount\": \"0\",\n      \"createdAt\": 1762000000,\n      \"expiresAt\": 1762000060\n    }\n  },\n  \"https://other.example\": {\n    \"0\": {\n      \"capAmount\": \"10\",\n      \"spentAmount\": \"0\",\n      \"createdAt\": 1761999900,\n      \"expiresAt\": 1762000100\n    }\n  }\n}",
+              "core": {
+                "result": [
+                  {
+                    "origin": "https://app.example",
+                    "chainId": 8453,
+                    "asset": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+                    "capAmount": "10",
+                    "spentAmount": "0",
+                    "createdAt": 1761999900,
+                    "expiresAt": "1762000100"
+                  },
+                  {
+                    "origin": "https://app.example",
+                    "chainId": 10,
+                    "asset": "0xa",
+                    "capAmount": "10",
+                    "spentAmount": "0",
+                    "createdAt": 1761999900,
+                    "expiresAt": [
+                      1762000100
+                    ]
+                  },
+                  {
+                    "origin": "https://app.example",
+                    "chainId": 250,
+                    "asset": "0xf",
+                    "capAmount": "10",
+                    "spentAmount": "0",
+                    "createdAt": 1761999900,
+                    "expiresAt": " 0x6905fc85 "
+                  },
+                  {
+                    "origin": "https://app.example",
+                    "chainId": 8453,
+                    "asset": "0x1111111111111111111111111111111111111111",
+                    "capAmount": "1",
+                    "spentAmount": "0",
+                    "createdAt": 1762000000,
+                    "expiresAt": 1762000060
+                  },
+                  {
+                    "origin": "https://other.example",
+                    "chainId": 0,
+                    "capAmount": "10",
+                    "spentAmount": "0",
+                    "createdAt": 1761999900,
+                    "expiresAt": 1762000100
+                  }
+                ],
+                "wrote": false,
+                "text": "{\n  \"https://app.example\": {\n    \"8453:0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913\": {\n      \"capAmount\": \"10\",\n      \"spentAmount\": \"0\",\n      \"createdAt\": 1761999900,\n      \"expiresAt\": \"1762000100\"\n    },\n    \"10:0xa\": {\n      \"capAmount\": \"10\",\n      \"spentAmount\": \"0\",\n      \"createdAt\": 1761999900,\n      \"expiresAt\": [\n        1762000100\n      ]\n    },\n    \"42161:0xd\": {\n      \"capAmount\": \"10\",\n      \"spentAmount\": \"0\",\n      \"createdAt\": 1761999900,\n      \"expiresAt\": null\n    },\n    \"250:0xf\": {\n      \"capAmount\": \"10\",\n      \"spentAmount\": \"0\",\n      \"createdAt\": 1761999900,\n      \"expiresAt\": \" 0x6905fc85 \"\n    },\n    \"8453:0x1111111111111111111111111111111111111111\": {\n      \"capAmount\": \"1\",\n      \"spentAmount\": \"0\",\n      \"createdAt\": 1762000000,\n      \"expiresAt\": 1762000060\n    }\n  },\n  \"https://other.example\": {\n    \"0\": {\n      \"capAmount\": \"10\",\n      \"spentAmount\": \"0\",\n      \"createdAt\": 1761999900,\n      \"expiresAt\": 1762000100\n    }\n  }\n}"
+              }
+            }
+          ]
+        },
+        {
+          "id": "asset-case",
+          "start": null,
+          "steps": [
+            {
+              "op": "grant",
+              "args": [
+                "https://app.example",
+                8453,
+                "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+                "30000",
+                3600
+              ],
+              "at": 1762000000000,
+              "result": {
+                "origin": "https://app.example",
+                "chainId": 8453,
+                "asset": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+                "capAmount": "30000",
+                "spentAmount": "0",
+                "createdAt": 1762000000,
+                "expiresAt": 1762003600
+              },
+              "wrote": true,
+              "text": "{\n  \"https://app.example\": {\n    \"8453:0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913\": {\n      \"capAmount\": \"30000\",\n      \"spentAmount\": \"0\",\n      \"createdAt\": 1762000000,\n      \"expiresAt\": 1762003600\n    }\n  }\n}",
+              "core": {
+                "result": {
+                  "origin": "https://app.example",
+                  "chainId": 8453,
+                  "asset": "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913",
+                  "capAmount": "30000",
+                  "spentAmount": "0",
+                  "createdAt": 1762000000,
+                  "expiresAt": 1762003600
+                },
+                "wrote": true,
+                "text": "{\n  \"https://app.example\": {\n    \"8453:0x833589fcd6edb6e08f4c7c32d4f71b54bda02913\": {\n      \"capAmount\": \"30000\",\n      \"spentAmount\": \"0\",\n      \"createdAt\": 1762000000,\n      \"expiresAt\": 1762003600\n    }\n  }\n}"
+              },
+              "deviation": "x402-asset-case"
+            },
+            {
+              "op": "getPermission",
+              "args": [
+                "https://app.example",
+                8453,
+                "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"
+              ],
+              "at": 1762000000001,
+              "result": {
+                "origin": "https://app.example",
+                "chainId": 8453,
+                "asset": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+                "capAmount": "30000",
+                "spentAmount": "0",
+                "createdAt": 1762000000,
+                "expiresAt": 1762003600
+              },
+              "wrote": false,
+              "text": "{\n  \"https://app.example\": {\n    \"8453:0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913\": {\n      \"capAmount\": \"30000\",\n      \"spentAmount\": \"0\",\n      \"createdAt\": 1762000000,\n      \"expiresAt\": 1762003600\n    }\n  }\n}",
+              "core": {
+                "result": {
+                  "origin": "https://app.example",
+                  "chainId": 8453,
+                  "asset": "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913",
+                  "capAmount": "30000",
+                  "spentAmount": "0",
+                  "createdAt": 1762000000,
+                  "expiresAt": 1762003600
+                },
+                "wrote": false,
+                "text": "{\n  \"https://app.example\": {\n    \"8453:0x833589fcd6edb6e08f4c7c32d4f71b54bda02913\": {\n      \"capAmount\": \"30000\",\n      \"spentAmount\": \"0\",\n      \"createdAt\": 1762000000,\n      \"expiresAt\": 1762003600\n    }\n  }\n}"
+              },
+              "deviation": "x402-asset-case"
+            },
+            {
+              "op": "getPermission",
+              "args": [
+                "https://app.example",
+                8453,
+                "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913"
+              ],
+              "at": 1762000000002,
+              "result": null,
+              "wrote": false,
+              "text": "{\n  \"https://app.example\": {\n    \"8453:0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913\": {\n      \"capAmount\": \"30000\",\n      \"spentAmount\": \"0\",\n      \"createdAt\": 1762000000,\n      \"expiresAt\": 1762003600\n    }\n  }\n}",
+              "core": {
+                "result": {
+                  "origin": "https://app.example",
+                  "chainId": 8453,
+                  "asset": "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913",
+                  "capAmount": "30000",
+                  "spentAmount": "0",
+                  "createdAt": 1762000000,
+                  "expiresAt": 1762003600
+                },
+                "wrote": false,
+                "text": "{\n  \"https://app.example\": {\n    \"8453:0x833589fcd6edb6e08f4c7c32d4f71b54bda02913\": {\n      \"capAmount\": \"30000\",\n      \"spentAmount\": \"0\",\n      \"createdAt\": 1762000000,\n      \"expiresAt\": 1762003600\n    }\n  }\n}"
+              },
+              "deviation": "x402-asset-case"
+            },
+            {
+              "op": "charge",
+              "args": [
+                "https://app.example",
+                8453,
+                "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+                "10000"
+              ],
+              "at": 1762000000003,
+              "result": {
+                "origin": "https://app.example",
+                "chainId": 8453,
+                "asset": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+                "amount": "10000",
+                "generation": 1
+              },
+              "wrote": true,
+              "text": "{\n  \"https://app.example\": {\n    \"8453:0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913\": {\n      \"capAmount\": \"30000\",\n      \"spentAmount\": \"10000\",\n      \"createdAt\": 1762000000,\n      \"expiresAt\": 1762003600\n    }\n  }\n}",
+              "core": {
+                "result": {
+                  "origin": "https://app.example",
+                  "chainId": 8453,
+                  "asset": "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913",
+                  "amount": "10000",
+                  "generation": 1
+                },
+                "wrote": true,
+                "text": "{\n  \"https://app.example\": {\n    \"8453:0x833589fcd6edb6e08f4c7c32d4f71b54bda02913\": {\n      \"capAmount\": \"30000\",\n      \"spentAmount\": \"10000\",\n      \"createdAt\": 1762000000,\n      \"expiresAt\": 1762003600\n    }\n  }\n}"
+              },
+              "deviation": "x402-asset-case"
+            },
+            {
+              "op": "charge",
+              "args": [
+                "https://app.example",
+                8453,
+                "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913",
+                "10000"
+              ],
+              "at": 1762000000004,
+              "result": null,
+              "wrote": false,
+              "text": "{\n  \"https://app.example\": {\n    \"8453:0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913\": {\n      \"capAmount\": \"30000\",\n      \"spentAmount\": \"10000\",\n      \"createdAt\": 1762000000,\n      \"expiresAt\": 1762003600\n    }\n  }\n}",
+              "core": {
+                "result": {
+                  "origin": "https://app.example",
+                  "chainId": 8453,
+                  "asset": "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913",
+                  "amount": "10000",
+                  "generation": 1
+                },
+                "wrote": true,
+                "text": "{\n  \"https://app.example\": {\n    \"8453:0x833589fcd6edb6e08f4c7c32d4f71b54bda02913\": {\n      \"capAmount\": \"30000\",\n      \"spentAmount\": \"20000\",\n      \"createdAt\": 1762000000,\n      \"expiresAt\": 1762003600\n    }\n  }\n}"
+              },
+              "deviation": "x402-asset-case"
+            },
+            {
+              "op": "updatePermission",
+              "args": [
+                "https://app.example",
+                8453,
+                "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+                {
+                  "capAmount": "25000"
+                }
+              ],
+              "at": 1762000000005,
+              "result": {
+                "origin": "https://app.example",
+                "chainId": 8453,
+                "asset": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+                "capAmount": "25000",
+                "spentAmount": "10000",
+                "createdAt": 1762000000,
+                "expiresAt": 1762003600
+              },
+              "wrote": true,
+              "text": "{\n  \"https://app.example\": {\n    \"8453:0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913\": {\n      \"capAmount\": \"25000\",\n      \"spentAmount\": \"10000\",\n      \"createdAt\": 1762000000,\n      \"expiresAt\": 1762003600\n    }\n  }\n}",
+              "core": {
+                "result": {
+                  "origin": "https://app.example",
+                  "chainId": 8453,
+                  "asset": "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913",
+                  "capAmount": "25000",
+                  "spentAmount": "20000",
+                  "createdAt": 1762000000,
+                  "expiresAt": 1762003600
+                },
+                "wrote": true,
+                "text": "{\n  \"https://app.example\": {\n    \"8453:0x833589fcd6edb6e08f4c7c32d4f71b54bda02913\": {\n      \"capAmount\": \"25000\",\n      \"spentAmount\": \"20000\",\n      \"createdAt\": 1762000000,\n      \"expiresAt\": 1762003600\n    }\n  }\n}"
+              },
+              "deviation": "x402-asset-case"
+            },
+            {
+              "op": "updatePermission",
+              "args": [
+                "https://app.example",
+                8453,
+                "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913",
+                {
+                  "windowSeconds": 60
+                }
+              ],
+              "at": 1762000000006,
+              "error": "x402-permissions: no permission to update",
+              "wrote": false,
+              "text": "{\n  \"https://app.example\": {\n    \"8453:0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913\": {\n      \"capAmount\": \"25000\",\n      \"spentAmount\": \"10000\",\n      \"createdAt\": 1762000000,\n      \"expiresAt\": 1762003600\n    }\n  }\n}",
+              "core": {
+                "result": {
+                  "origin": "https://app.example",
+                  "chainId": 8453,
+                  "asset": "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913",
+                  "capAmount": "25000",
+                  "spentAmount": "20000",
+                  "createdAt": 1762000000,
+                  "expiresAt": 1762000060
+                },
+                "wrote": true,
+                "text": "{\n  \"https://app.example\": {\n    \"8453:0x833589fcd6edb6e08f4c7c32d4f71b54bda02913\": {\n      \"capAmount\": \"25000\",\n      \"spentAmount\": \"20000\",\n      \"createdAt\": 1762000000,\n      \"expiresAt\": 1762000060\n    }\n  }\n}"
+              },
+              "deviation": "x402-asset-case"
+            },
+            {
+              "op": "getAllPermissions",
+              "args": [],
+              "at": 1762000000007,
+              "result": [
+                {
+                  "origin": "https://app.example",
+                  "chainId": 8453,
+                  "asset": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+                  "capAmount": "25000",
+                  "spentAmount": "10000",
+                  "createdAt": 1762000000,
+                  "expiresAt": 1762003600
+                }
+              ],
+              "wrote": false,
+              "text": "{\n  \"https://app.example\": {\n    \"8453:0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913\": {\n      \"capAmount\": \"25000\",\n      \"spentAmount\": \"10000\",\n      \"createdAt\": 1762000000,\n      \"expiresAt\": 1762003600\n    }\n  }\n}",
+              "core": {
+                "result": [
+                  {
+                    "origin": "https://app.example",
+                    "chainId": 8453,
+                    "asset": "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913",
+                    "capAmount": "25000",
+                    "spentAmount": "20000",
+                    "createdAt": 1762000000,
+                    "expiresAt": 1762000060
+                  }
+                ],
+                "wrote": false,
+                "text": "{\n  \"https://app.example\": {\n    \"8453:0x833589fcd6edb6e08f4c7c32d4f71b54bda02913\": {\n      \"capAmount\": \"25000\",\n      \"spentAmount\": \"20000\",\n      \"createdAt\": 1762000000,\n      \"expiresAt\": 1762000060\n    }\n  }\n}"
+              },
+              "deviation": "x402-asset-case"
+            },
+            {
+              "op": "revoke",
+              "args": [
+                "https://app.example",
+                8453,
+                "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"
+              ],
+              "at": 1762000000008,
+              "result": null,
+              "wrote": true,
+              "text": "{}",
+              "core": {
+                "result": null,
+                "wrote": true,
+                "text": "{}"
+              },
+              "deviation": "x402-asset-case"
+            },
+            {
+              "op": "getAllPermissions",
+              "args": [],
+              "at": 1762000000009,
+              "result": [],
+              "wrote": false,
+              "text": "{}",
+              "core": {
+                "result": [],
+                "wrote": false,
+                "text": "{}"
+              },
+              "deviation": "x402-asset-case"
+            }
+          ]
+        },
+        {
+          "id": "clock-back",
+          "start": null,
+          "steps": [
+            {
+              "op": "grant",
+              "args": [
+                "https://app.example",
+                8453,
+                "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913",
+                "20000",
+                3600
+              ],
+              "at": 1762000000000,
+              "result": {
+                "origin": "https://app.example",
+                "chainId": 8453,
+                "asset": "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913",
+                "capAmount": "20000",
+                "spentAmount": "0",
+                "createdAt": 1762000000,
+                "expiresAt": 1762003600
+              },
+              "wrote": true,
+              "text": "{\n  \"https://app.example\": {\n    \"8453:0x833589fcd6edb6e08f4c7c32d4f71b54bda02913\": {\n      \"capAmount\": \"20000\",\n      \"spentAmount\": \"0\",\n      \"createdAt\": 1762000000,\n      \"expiresAt\": 1762003600\n    }\n  }\n}",
+              "core": {
+                "result": {
+                  "origin": "https://app.example",
+                  "chainId": 8453,
+                  "asset": "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913",
+                  "capAmount": "20000",
+                  "spentAmount": "0",
+                  "createdAt": 1762000000,
+                  "expiresAt": 1762003600
+                },
+                "wrote": true,
+                "text": "{\n  \"https://app.example\": {\n    \"8453:0x833589fcd6edb6e08f4c7c32d4f71b54bda02913\": {\n      \"capAmount\": \"20000\",\n      \"spentAmount\": \"0\",\n      \"createdAt\": 1762000000,\n      \"expiresAt\": 1762003600\n    }\n  }\n}"
+              }
+            },
+            {
+              "op": "getPermission",
+              "args": [
+                "https://app.example",
+                8453,
+                "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913"
+              ],
+              "at": 1761999995000,
+              "result": {
+                "origin": "https://app.example",
+                "chainId": 8453,
+                "asset": "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913",
+                "capAmount": "20000",
+                "spentAmount": "0",
+                "createdAt": 1762000000,
+                "expiresAt": 1762003600
+              },
+              "wrote": false,
+              "text": "{\n  \"https://app.example\": {\n    \"8453:0x833589fcd6edb6e08f4c7c32d4f71b54bda02913\": {\n      \"capAmount\": \"20000\",\n      \"spentAmount\": \"0\",\n      \"createdAt\": 1762000000,\n      \"expiresAt\": 1762003600\n    }\n  }\n}",
+              "core": {
+                "result": null,
+                "wrote": false,
+                "text": "{\n  \"https://app.example\": {\n    \"8453:0x833589fcd6edb6e08f4c7c32d4f71b54bda02913\": {\n      \"capAmount\": \"20000\",\n      \"spentAmount\": \"0\",\n      \"createdAt\": 1762000000,\n      \"expiresAt\": 1762003600\n    }\n  }\n}"
+              },
+              "deviation": "x402-clock-back"
+            },
+            {
+              "op": "charge",
+              "args": [
+                "https://app.example",
+                8453,
+                "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913",
+                "10000"
+              ],
+              "at": 1761999995000,
+              "result": {
+                "origin": "https://app.example",
+                "chainId": 8453,
+                "asset": "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913",
+                "amount": "10000",
+                "generation": 1
+              },
+              "wrote": true,
+              "text": "{\n  \"https://app.example\": {\n    \"8453:0x833589fcd6edb6e08f4c7c32d4f71b54bda02913\": {\n      \"capAmount\": \"20000\",\n      \"spentAmount\": \"10000\",\n      \"createdAt\": 1762000000,\n      \"expiresAt\": 1762003600\n    }\n  }\n}",
+              "core": {
+                "result": null,
+                "wrote": false,
+                "text": "{\n  \"https://app.example\": {\n    \"8453:0x833589fcd6edb6e08f4c7c32d4f71b54bda02913\": {\n      \"capAmount\": \"20000\",\n      \"spentAmount\": \"0\",\n      \"createdAt\": 1762000000,\n      \"expiresAt\": 1762003600\n    }\n  }\n}"
+              },
+              "deviation": "x402-clock-back"
+            },
+            {
+              "op": "charge",
+              "args": [
+                "https://app.example",
+                8453,
+                "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913",
+                "10000"
+              ],
+              "at": 1762000000001,
+              "result": {
+                "origin": "https://app.example",
+                "chainId": 8453,
+                "asset": "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913",
+                "amount": "10000",
+                "generation": 1
+              },
+              "wrote": true,
+              "text": "{\n  \"https://app.example\": {\n    \"8453:0x833589fcd6edb6e08f4c7c32d4f71b54bda02913\": {\n      \"capAmount\": \"20000\",\n      \"spentAmount\": \"20000\",\n      \"createdAt\": 1762000000,\n      \"expiresAt\": 1762003600\n    }\n  }\n}",
+              "core": {
+                "result": {
+                  "origin": "https://app.example",
+                  "chainId": 8453,
+                  "asset": "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913",
+                  "amount": "10000",
+                  "generation": 1
+                },
+                "wrote": true,
+                "text": "{\n  \"https://app.example\": {\n    \"8453:0x833589fcd6edb6e08f4c7c32d4f71b54bda02913\": {\n      \"capAmount\": \"20000\",\n      \"spentAmount\": \"10000\",\n      \"createdAt\": 1762000000,\n      \"expiresAt\": 1762003600\n    }\n  }\n}"
+              },
+              "deviation": "x402-clock-back"
+            },
+            {
+              "op": "charge",
+              "args": [
+                "https://app.example",
+                8453,
+                "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913",
+                "10000"
+              ],
+              "at": 1762000000002,
+              "result": null,
+              "wrote": false,
+              "text": "{\n  \"https://app.example\": {\n    \"8453:0x833589fcd6edb6e08f4c7c32d4f71b54bda02913\": {\n      \"capAmount\": \"20000\",\n      \"spentAmount\": \"20000\",\n      \"createdAt\": 1762000000,\n      \"expiresAt\": 1762003600\n    }\n  }\n}",
+              "core": {
+                "result": {
+                  "origin": "https://app.example",
+                  "chainId": 8453,
+                  "asset": "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913",
+                  "amount": "10000",
+                  "generation": 1
+                },
+                "wrote": true,
+                "text": "{\n  \"https://app.example\": {\n    \"8453:0x833589fcd6edb6e08f4c7c32d4f71b54bda02913\": {\n      \"capAmount\": \"20000\",\n      \"spentAmount\": \"20000\",\n      \"createdAt\": 1762000000,\n      \"expiresAt\": 1762003600\n    }\n  }\n}"
+              },
+              "deviation": "x402-clock-back"
+            }
+          ]
+        },
+        {
+          "id": "refund",
+          "start": null,
+          "steps": [
+            {
+              "op": "grant",
+              "args": [
+                "https://app.example",
+                8453,
+                "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913",
+                "20000",
+                3600
+              ],
+              "at": 1762000000000,
+              "result": {
+                "origin": "https://app.example",
+                "chainId": 8453,
+                "asset": "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913",
+                "capAmount": "20000",
+                "spentAmount": "0",
+                "createdAt": 1762000000,
+                "expiresAt": 1762003600
+              },
+              "wrote": true,
+              "text": "{\n  \"https://app.example\": {\n    \"8453:0x833589fcd6edb6e08f4c7c32d4f71b54bda02913\": {\n      \"capAmount\": \"20000\",\n      \"spentAmount\": \"0\",\n      \"createdAt\": 1762000000,\n      \"expiresAt\": 1762003600\n    }\n  }\n}",
+              "core": {
+                "result": {
+                  "origin": "https://app.example",
+                  "chainId": 8453,
+                  "asset": "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913",
+                  "capAmount": "20000",
+                  "spentAmount": "0",
+                  "createdAt": 1762000000,
+                  "expiresAt": 1762003600
+                },
+                "wrote": true,
+                "text": "{\n  \"https://app.example\": {\n    \"8453:0x833589fcd6edb6e08f4c7c32d4f71b54bda02913\": {\n      \"capAmount\": \"20000\",\n      \"spentAmount\": \"0\",\n      \"createdAt\": 1762000000,\n      \"expiresAt\": 1762003600\n    }\n  }\n}"
+              }
+            },
+            {
+              "op": "charge",
+              "args": [
+                "https://app.example",
+                8453,
+                "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913",
+                "5000"
+              ],
+              "at": 1762000000001,
+              "result": {
+                "origin": "https://app.example",
+                "chainId": 8453,
+                "asset": "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913",
+                "amount": "5000",
+                "generation": 1
+              },
+              "wrote": true,
+              "text": "{\n  \"https://app.example\": {\n    \"8453:0x833589fcd6edb6e08f4c7c32d4f71b54bda02913\": {\n      \"capAmount\": \"20000\",\n      \"spentAmount\": \"5000\",\n      \"createdAt\": 1762000000,\n      \"expiresAt\": 1762003600\n    }\n  }\n}",
+              "core": {
+                "result": {
+                  "origin": "https://app.example",
+                  "chainId": 8453,
+                  "asset": "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913",
+                  "amount": "5000",
+                  "generation": 1
+                },
+                "wrote": true,
+                "text": "{\n  \"https://app.example\": {\n    \"8453:0x833589fcd6edb6e08f4c7c32d4f71b54bda02913\": {\n      \"capAmount\": \"20000\",\n      \"spentAmount\": \"5000\",\n      \"createdAt\": 1762000000,\n      \"expiresAt\": 1762003600\n    }\n  }\n}"
+              }
+            },
+            {
+              "op": "charge",
+              "args": [
+                "https://app.example",
+                8453,
+                "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913",
+                "7000"
+              ],
+              "at": 1762000000002,
+              "result": {
+                "origin": "https://app.example",
+                "chainId": 8453,
+                "asset": "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913",
+                "amount": "7000",
+                "generation": 1
+              },
+              "wrote": true,
+              "text": "{\n  \"https://app.example\": {\n    \"8453:0x833589fcd6edb6e08f4c7c32d4f71b54bda02913\": {\n      \"capAmount\": \"20000\",\n      \"spentAmount\": \"12000\",\n      \"createdAt\": 1762000000,\n      \"expiresAt\": 1762003600\n    }\n  }\n}",
+              "core": {
+                "result": {
+                  "origin": "https://app.example",
+                  "chainId": 8453,
+                  "asset": "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913",
+                  "amount": "7000",
+                  "generation": 1
+                },
+                "wrote": true,
+                "text": "{\n  \"https://app.example\": {\n    \"8453:0x833589fcd6edb6e08f4c7c32d4f71b54bda02913\": {\n      \"capAmount\": \"20000\",\n      \"spentAmount\": \"12000\",\n      \"createdAt\": 1762000000,\n      \"expiresAt\": 1762003600\n    }\n  }\n}"
+              }
+            },
+            {
+              "op": "refund",
+              "args": [
+                "$charge"
+              ],
+              "at": 1762000000003,
+              "result": true,
+              "wrote": true,
+              "text": "{\n  \"https://app.example\": {\n    \"8453:0x833589fcd6edb6e08f4c7c32d4f71b54bda02913\": {\n      \"capAmount\": \"20000\",\n      \"spentAmount\": \"5000\",\n      \"createdAt\": 1762000000,\n      \"expiresAt\": 1762003600\n    }\n  }\n}",
+              "core": {
+                "result": true,
+                "wrote": true,
+                "text": "{\n  \"https://app.example\": {\n    \"8453:0x833589fcd6edb6e08f4c7c32d4f71b54bda02913\": {\n      \"capAmount\": \"20000\",\n      \"spentAmount\": \"5000\",\n      \"createdAt\": 1762000000,\n      \"expiresAt\": 1762003600\n    }\n  }\n}"
+              }
+            },
+            {
+              "op": "refund",
+              "args": [
+                "$charge"
+              ],
+              "at": 1762000000004,
+              "result": true,
+              "wrote": true,
+              "text": "{\n  \"https://app.example\": {\n    \"8453:0x833589fcd6edb6e08f4c7c32d4f71b54bda02913\": {\n      \"capAmount\": \"20000\",\n      \"spentAmount\": \"0\",\n      \"createdAt\": 1762000000,\n      \"expiresAt\": 1762003600\n    }\n  }\n}",
+              "core": {
+                "result": true,
+                "wrote": true,
+                "text": "{\n  \"https://app.example\": {\n    \"8453:0x833589fcd6edb6e08f4c7c32d4f71b54bda02913\": {\n      \"capAmount\": \"20000\",\n      \"spentAmount\": \"0\",\n      \"createdAt\": 1762000000,\n      \"expiresAt\": 1762003600\n    }\n  }\n}"
+              }
+            },
+            {
+              "op": "refund",
+              "args": [
+                "$charge"
+              ],
+              "at": 1762000000005,
+              "result": true,
+              "wrote": true,
+              "text": "{\n  \"https://app.example\": {\n    \"8453:0x833589fcd6edb6e08f4c7c32d4f71b54bda02913\": {\n      \"capAmount\": \"20000\",\n      \"spentAmount\": \"0\",\n      \"createdAt\": 1762000000,\n      \"expiresAt\": 1762003600\n    }\n  }\n}",
+              "core": {
+                "result": true,
+                "wrote": true,
+                "text": "{\n  \"https://app.example\": {\n    \"8453:0x833589fcd6edb6e08f4c7c32d4f71b54bda02913\": {\n      \"capAmount\": \"20000\",\n      \"spentAmount\": \"0\",\n      \"createdAt\": 1762000000,\n      \"expiresAt\": 1762003600\n    }\n  }\n}"
+              }
             }
           ]
         }
@@ -35234,5 +36089,2305 @@
         }
       }
     }
-  ]
+  ],
+  "x402": {
+    "defaultAssets": [
+      {
+        "chainId": 8453,
+        "asset": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+        "decimals": 6
+      },
+      {
+        "chainId": 84532,
+        "asset": "0x036CbD53842c5426634e7929541eC2318f3dCF7e",
+        "decimals": 6
+      },
+      {
+        "chainId": 1,
+        "asset": "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48",
+        "decimals": 6
+      },
+      {
+        "chainId": 43114,
+        "asset": "0xB97EF9Ef8734C71904D8002F8b6Bc66Dd9c48a6E",
+        "decimals": 6
+      },
+      {
+        "chainId": 4326,
+        "asset": "0xFAfDdbb3FC7688494971a79cc65DCa3EF82079E7",
+        "decimals": 18
+      },
+      {
+        "chainId": 143,
+        "asset": "0x754704Bc059F8C67012fEd69BC8A327a5aafb603",
+        "decimals": 6
+      },
+      {
+        "chainId": 10143,
+        "asset": "0x534b2f3A21130d7a60830c2Df862319e593943A3",
+        "decimals": 6
+      },
+      {
+        "chainId": 988,
+        "asset": "0x779Ded0c9e1022225f8E0630b35a9b54bE713736",
+        "decimals": 6
+      },
+      {
+        "chainId": 2201,
+        "asset": "0x78Cf24370174180738C5B8E352B6D14c83a6c9A9",
+        "decimals": 6
+      },
+      {
+        "chainId": 137,
+        "asset": "0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359",
+        "decimals": 6
+      },
+      {
+        "chainId": 42161,
+        "asset": "0xaf88d065e77c8cC2239327C5EDb3A432268e5831",
+        "decimals": 6
+      },
+      {
+        "chainId": 421614,
+        "asset": "0x75faf114eafb1BDbe2F0316DF893fd58CE46AA4d",
+        "decimals": 6
+      },
+      {
+        "chainId": 31612,
+        "asset": "0xdD468A1DDc392dcdbEf6db6e34E89AA338F9F186",
+        "decimals": 18
+      },
+      {
+        "chainId": 31611,
+        "asset": "0x118917a40FAF1CD7a13dB0Ef56C86De7973Ac503",
+        "decimals": 18
+      },
+      {
+        "chainId": 723487,
+        "asset": "0x33ad9e4BD16B69B5BFdED37D8B5D9fF9aba014Fb",
+        "decimals": 6
+      },
+      {
+        "chainId": 72344,
+        "asset": "0x33ad9e4BD16B69B5BFdED37D8B5D9fF9aba014Fb",
+        "decimals": 6
+      },
+      {
+        "chainId": 36900,
+        "asset": "0x9cb8142aEBBcdc60AF7c97Af897A67A8f3CA71C2",
+        "decimals": 6
+      },
+      {
+        "chainId": 190415,
+        "asset": "0x401eCb1D350407f13ba348573E5630B83638E30D",
+        "decimals": 6
+      },
+      {
+        "chainId": 181228,
+        "asset": "0x401eCb1D350407f13ba348573E5630B83638E30D",
+        "decimals": 6
+      },
+      {
+        "chainId": 50,
+        "asset": "0xfA2958CB79b0491CC627c1557F441eF849Ca8eb1",
+        "decimals": 6
+      },
+      {
+        "chainId": 51,
+        "asset": "0xb5AB69F7bBada22B28e79C8FFAECe55eF1c771D4",
+        "decimals": 6
+      },
+      {
+        "chainId": 38833,
+        "asset": "0xA5b8BF902b2844dA17d4506cc827F7F1681735E7",
+        "decimals": 6
+      },
+      {
+        "chainId": 14,
+        "asset": "0xe7cd86e13AC4309349F30B3435a9d337750fC82D",
+        "decimals": 6
+      },
+      {
+        "chainId": 42220,
+        "asset": "0xcebA9300f2b948710d2653dD7B07f33A8B32118C",
+        "decimals": 6
+      },
+      {
+        "chainId": 42220,
+        "asset": "0x48065fbBE25f71C9282ddf5e1cD6D6A887483D5e",
+        "decimals": 6
+      },
+      {
+        "chainId": 42220,
+        "asset": "0xD2ab3C9A02DBBAB236BfEC45D1d755DF4267F771",
+        "decimals": 6
+      },
+      {
+        "chainId": 11142220,
+        "asset": "0x01C5C0122039549AD1493B8220cABEdD739BC44E",
+        "decimals": 6
+      },
+      {
+        "chainId": 1329,
+        "asset": "0xe15fC38F6D8c56aF07bbCBe3BAf5708A2Bf42392",
+        "decimals": 6
+      },
+      {
+        "chainId": 1328,
+        "asset": "0x4fCF1784B31630811181f670Aea7A7bEF803eaED",
+        "decimals": 6
+      },
+      {
+        "chainId": 5042,
+        "asset": "0x3600000000000000000000000000000000000000",
+        "decimals": 6
+      },
+      {
+        "chainId": 5042002,
+        "asset": "0x3600000000000000000000000000000000000000",
+        "decimals": 6
+      }
+    ],
+    "keys": [
+      {
+        "url": "https://paid.example/article?id=1#top",
+        "js": "https://paid.example",
+        "core": "https://paid.example"
+      },
+      {
+        "url": "https://Paid.Example:443/a",
+        "js": "https://paid.example",
+        "core": "https://paid.example"
+      },
+      {
+        "url": "http://paid.example:8080/a",
+        "js": "http://paid.example:8080",
+        "core": "http://paid.example:8080"
+      },
+      {
+        "url": "https://user:pw@paid.example/a",
+        "js": "https://paid.example",
+        "core": "https://paid.example"
+      },
+      {
+        "url": "https://bücher.example/a",
+        "js": "https://xn--bcher-kva.example",
+        "core": "https://xn--bcher-kva.example"
+      },
+      {
+        "url": "https://[::1]:8443/a",
+        "js": "https://[::1]:8443",
+        "core": "https://[::1]:8443"
+      },
+      {
+        "url": "https://192.168.000.001/a",
+        "js": "https://192.168.0.1",
+        "core": "https://192.168.0.1"
+      },
+      {
+        "url": "  https://paid.example/a  ",
+        "js": "https://paid.example",
+        "core": "https://paid.example"
+      },
+      {
+        "url": "bzz://abababababababababababababababababababababababababababababababab/a",
+        "js": "bzz://abababababababababababababababababababababababababababababababab",
+        "core": null
+      },
+      {
+        "url": "ipfs://bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi/a",
+        "js": "ipfs://bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi",
+        "core": null
+      },
+      {
+        "url": "file:///etc/passwd",
+        "js": "file:///etc/passwd",
+        "core": null
+      },
+      {
+        "url": "not a url",
+        "js": null,
+        "core": null
+      }
+    ],
+    "tuples": [
+      {
+        "accept": {
+          "scheme": "exact",
+          "network": "eip155:8453",
+          "amount": "10000",
+          "asset": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+          "payTo": "0x209693bc6afc0c5328ba36faf03c514ef312287c",
+          "maxTimeoutSeconds": 60,
+          "extra": {
+            "name": "USD Coin",
+            "version": "2"
+          }
+        },
+        "js": {
+          "chainId": 8453,
+          "asset": "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913",
+          "amount": "10000"
+        }
+      },
+      {
+        "accept": {
+          "scheme": "exact",
+          "network": "eip155:8453",
+          "amount": "10000",
+          "asset": "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913",
+          "payTo": "0x209693bc6afc0c5328ba36faf03c514ef312287c",
+          "maxTimeoutSeconds": 60,
+          "extra": {
+            "name": "USD Coin",
+            "version": "2"
+          }
+        },
+        "js": {
+          "chainId": 8453,
+          "asset": "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913",
+          "amount": "10000"
+        }
+      },
+      {
+        "accept": {
+          "scheme": "exact",
+          "network": "eip155:0x10",
+          "amount": "10000",
+          "asset": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+          "payTo": "0x209693bc6afc0c5328ba36faf03c514ef312287c",
+          "maxTimeoutSeconds": 60,
+          "extra": {
+            "name": "USD Coin",
+            "version": "2"
+          }
+        },
+        "js": {
+          "chainId": 16,
+          "asset": "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913",
+          "amount": "10000"
+        }
+      },
+      {
+        "accept": {
+          "scheme": "exact",
+          "network": "eip155: 8453",
+          "amount": "10000",
+          "asset": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+          "payTo": "0x209693bc6afc0c5328ba36faf03c514ef312287c",
+          "maxTimeoutSeconds": 60,
+          "extra": {
+            "name": "USD Coin",
+            "version": "2"
+          }
+        },
+        "js": {
+          "chainId": 8453,
+          "asset": "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913",
+          "amount": "10000"
+        }
+      },
+      {
+        "accept": {
+          "scheme": "exact",
+          "network": "eip155:8453.5",
+          "amount": "10000",
+          "asset": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+          "payTo": "0x209693bc6afc0c5328ba36faf03c514ef312287c",
+          "maxTimeoutSeconds": 60,
+          "extra": {
+            "name": "USD Coin",
+            "version": "2"
+          }
+        },
+        "js": {
+          "chainId": 8453.5,
+          "asset": "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913",
+          "amount": "10000"
+        }
+      },
+      {
+        "accept": {
+          "scheme": "exact",
+          "network": "eip155:",
+          "amount": "10000",
+          "asset": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+          "payTo": "0x209693bc6afc0c5328ba36faf03c514ef312287c",
+          "maxTimeoutSeconds": 60,
+          "extra": {
+            "name": "USD Coin",
+            "version": "2"
+          }
+        },
+        "js": {
+          "chainId": 0,
+          "asset": "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913",
+          "amount": "10000"
+        }
+      },
+      {
+        "accept": {
+          "scheme": "exact",
+          "network": "eip155:abc",
+          "amount": "10000",
+          "asset": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+          "payTo": "0x209693bc6afc0c5328ba36faf03c514ef312287c",
+          "maxTimeoutSeconds": 60,
+          "extra": {
+            "name": "USD Coin",
+            "version": "2"
+          }
+        },
+        "js": null
+      },
+      {
+        "accept": {
+          "scheme": "exact",
+          "network": "EIP155:8453",
+          "amount": "10000",
+          "asset": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+          "payTo": "0x209693bc6afc0c5328ba36faf03c514ef312287c",
+          "maxTimeoutSeconds": 60,
+          "extra": {
+            "name": "USD Coin",
+            "version": "2"
+          }
+        },
+        "js": null
+      },
+      {
+        "accept": {
+          "scheme": "exact",
+          "network": "eip155:8453",
+          "amount": 10000,
+          "asset": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+          "payTo": "0x209693bc6afc0c5328ba36faf03c514ef312287c",
+          "maxTimeoutSeconds": 60,
+          "extra": {
+            "name": "USD Coin",
+            "version": "2"
+          }
+        },
+        "js": null
+      },
+      {
+        "accept": {
+          "scheme": "exact",
+          "network": "eip155:8453",
+          "amount": "10000",
+          "asset": 7,
+          "payTo": "0x209693bc6afc0c5328ba36faf03c514ef312287c",
+          "maxTimeoutSeconds": 60,
+          "extra": {
+            "name": "USD Coin",
+            "version": "2"
+          }
+        },
+        "js": null
+      },
+      {
+        "accept": {
+          "scheme": "exact",
+          "network": "base",
+          "maxAmountRequired": "10000",
+          "resource": "https://paid.example/v1",
+          "description": "",
+          "payTo": "0x209693bc6afc0c5328ba36faf03c514ef312287c",
+          "maxTimeoutSeconds": 60,
+          "asset": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+          "extra": {
+            "name": "USD Coin",
+            "version": "2"
+          }
+        },
+        "js": null
+      },
+      {
+        "accept": null,
+        "js": null
+      }
+    ],
+    "covering": [
+      {
+        "id": "first-covered",
+        "start": "{\n  \"https://paid.example\": {\n    \"8453:0x833589fcd6edb6e08f4c7c32d4f71b54bda02913\": {\n      \"capAmount\": \"20000\",\n      \"spentAmount\": \"0\",\n      \"createdAt\": 1761999900,\n      \"expiresAt\": 1762003600\n    }\n  }\n}",
+        "at": 1762000000000,
+        "origin": "https://paid.example",
+        "accepts": [
+          {
+            "scheme": "exact",
+            "network": "eip155:8453",
+            "amount": "10000",
+            "asset": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+            "payTo": "0x209693bc6afc0c5328ba36faf03c514ef312287c",
+            "maxTimeoutSeconds": 60,
+            "extra": {
+              "name": "USD Coin",
+              "version": "2"
+            }
+          },
+          {
+            "scheme": "exact",
+            "network": "eip155:8453",
+            "amount": "1",
+            "asset": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+            "payTo": "0x209693bc6afc0c5328ba36faf03c514ef312287c",
+            "maxTimeoutSeconds": 60,
+            "extra": {
+              "name": "USD Coin",
+              "version": "2"
+            }
+          }
+        ],
+        "js": 0,
+        "charged": true,
+        "core": 0
+      },
+      {
+        "id": "seller-order",
+        "start": "{\n  \"https://paid.example\": {\n    \"8453:0x833589fcd6edb6e08f4c7c32d4f71b54bda02913\": {\n      \"capAmount\": \"20000\",\n      \"spentAmount\": \"0\",\n      \"createdAt\": 1761999900,\n      \"expiresAt\": 1762003600\n    },\n    \"1:0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48\": {\n      \"capAmount\": \"20000\",\n      \"spentAmount\": \"0\",\n      \"createdAt\": 1761999900,\n      \"expiresAt\": 1762003600\n    }\n  }\n}",
+        "at": 1762000000000,
+        "origin": "https://paid.example",
+        "accepts": [
+          {
+            "scheme": "exact",
+            "network": "eip155:1",
+            "amount": "10000",
+            "asset": "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48",
+            "payTo": "0x209693bc6afc0c5328ba36faf03c514ef312287c",
+            "maxTimeoutSeconds": 60,
+            "extra": {
+              "name": "USD Coin",
+              "version": "2"
+            }
+          },
+          {
+            "scheme": "exact",
+            "network": "eip155:8453",
+            "amount": "10000",
+            "asset": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+            "payTo": "0x209693bc6afc0c5328ba36faf03c514ef312287c",
+            "maxTimeoutSeconds": 60,
+            "extra": {
+              "name": "USD Coin",
+              "version": "2"
+            }
+          }
+        ],
+        "js": 0,
+        "charged": true,
+        "core": 0
+      },
+      {
+        "id": "over-cap-skipped",
+        "start": "{\n  \"https://paid.example\": {\n    \"8453:0x833589fcd6edb6e08f4c7c32d4f71b54bda02913\": {\n      \"capAmount\": \"20000\",\n      \"spentAmount\": \"15000\",\n      \"createdAt\": 1761999900,\n      \"expiresAt\": 1762003600\n    },\n    \"1:0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48\": {\n      \"capAmount\": \"20000\",\n      \"spentAmount\": \"0\",\n      \"createdAt\": 1761999900,\n      \"expiresAt\": 1762003600\n    }\n  }\n}",
+        "at": 1762000000000,
+        "origin": "https://paid.example",
+        "accepts": [
+          {
+            "scheme": "exact",
+            "network": "eip155:8453",
+            "amount": "10000",
+            "asset": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+            "payTo": "0x209693bc6afc0c5328ba36faf03c514ef312287c",
+            "maxTimeoutSeconds": 60,
+            "extra": {
+              "name": "USD Coin",
+              "version": "2"
+            }
+          },
+          {
+            "scheme": "exact",
+            "network": "eip155:1",
+            "amount": "10000",
+            "asset": "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48",
+            "payTo": "0x209693bc6afc0c5328ba36faf03c514ef312287c",
+            "maxTimeoutSeconds": 60,
+            "extra": {
+              "name": "USD Coin",
+              "version": "2"
+            }
+          }
+        ],
+        "js": 1,
+        "charged": true,
+        "core": 1
+      },
+      {
+        "id": "exactly-left",
+        "start": "{\n  \"https://paid.example\": {\n    \"8453:0x833589fcd6edb6e08f4c7c32d4f71b54bda02913\": {\n      \"capAmount\": \"20000\",\n      \"spentAmount\": \"10000\",\n      \"createdAt\": 1761999900,\n      \"expiresAt\": 1762003600\n    }\n  }\n}",
+        "at": 1762000000000,
+        "origin": "https://paid.example",
+        "accepts": [
+          {
+            "scheme": "exact",
+            "network": "eip155:8453",
+            "amount": "10000",
+            "asset": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+            "payTo": "0x209693bc6afc0c5328ba36faf03c514ef312287c",
+            "maxTimeoutSeconds": 60,
+            "extra": {
+              "name": "USD Coin",
+              "version": "2"
+            }
+          }
+        ],
+        "js": 0,
+        "charged": true,
+        "core": 0
+      },
+      {
+        "id": "one-over",
+        "start": "{\n  \"https://paid.example\": {\n    \"8453:0x833589fcd6edb6e08f4c7c32d4f71b54bda02913\": {\n      \"capAmount\": \"20000\",\n      \"spentAmount\": \"10001\",\n      \"createdAt\": 1761999900,\n      \"expiresAt\": 1762003600\n    }\n  }\n}",
+        "at": 1762000000000,
+        "origin": "https://paid.example",
+        "accepts": [
+          {
+            "scheme": "exact",
+            "network": "eip155:8453",
+            "amount": "10000",
+            "asset": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+            "payTo": "0x209693bc6afc0c5328ba36faf03c514ef312287c",
+            "maxTimeoutSeconds": 60,
+            "extra": {
+              "name": "USD Coin",
+              "version": "2"
+            }
+          }
+        ],
+        "js": null,
+        "charged": false,
+        "core": null
+      },
+      {
+        "id": "none",
+        "start": "{\n  \"https://paid.example\": {\n    \"1:0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48\": {\n      \"capAmount\": \"20000\",\n      \"spentAmount\": \"0\",\n      \"createdAt\": 1761999900,\n      \"expiresAt\": 1762003600\n    }\n  }\n}",
+        "at": 1762000000000,
+        "origin": "https://paid.example",
+        "accepts": [
+          {
+            "scheme": "exact",
+            "network": "eip155:8453",
+            "amount": "10000",
+            "asset": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+            "payTo": "0x209693bc6afc0c5328ba36faf03c514ef312287c",
+            "maxTimeoutSeconds": 60,
+            "extra": {
+              "name": "USD Coin",
+              "version": "2"
+            }
+          }
+        ],
+        "js": null,
+        "charged": false,
+        "core": null
+      },
+      {
+        "id": "no-file",
+        "start": null,
+        "at": 1762000000000,
+        "origin": "https://paid.example",
+        "accepts": [
+          {
+            "scheme": "exact",
+            "network": "eip155:8453",
+            "amount": "10000",
+            "asset": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+            "payTo": "0x209693bc6afc0c5328ba36faf03c514ef312287c",
+            "maxTimeoutSeconds": 60,
+            "extra": {
+              "name": "USD Coin",
+              "version": "2"
+            }
+          }
+        ],
+        "js": null,
+        "charged": false,
+        "core": null
+      },
+      {
+        "id": "other-origin",
+        "start": "{\"https://other.example\":{\"8453:0x833589fcd6edb6e08f4c7c32d4f71b54bda02913\":{\"capAmount\":\"20000\",\"spentAmount\":\"0\",\"createdAt\":1761999900,\"expiresAt\":1762003600}}}",
+        "at": 1762000000000,
+        "origin": "https://paid.example",
+        "accepts": [
+          {
+            "scheme": "exact",
+            "network": "eip155:8453",
+            "amount": "10000",
+            "asset": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+            "payTo": "0x209693bc6afc0c5328ba36faf03c514ef312287c",
+            "maxTimeoutSeconds": 60,
+            "extra": {
+              "name": "USD Coin",
+              "version": "2"
+            }
+          }
+        ],
+        "js": null,
+        "charged": false,
+        "core": null
+      },
+      {
+        "id": "expired-at-boundary",
+        "start": "{\n  \"https://paid.example\": {\n    \"8453:0x833589fcd6edb6e08f4c7c32d4f71b54bda02913\": {\n      \"capAmount\": \"20000\",\n      \"spentAmount\": \"0\",\n      \"createdAt\": 1761999900,\n      \"expiresAt\": 1762000000\n    }\n  }\n}",
+        "at": 1762000000000,
+        "origin": "https://paid.example",
+        "accepts": [
+          {
+            "scheme": "exact",
+            "network": "eip155:8453",
+            "amount": "10000",
+            "asset": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+            "payTo": "0x209693bc6afc0c5328ba36faf03c514ef312287c",
+            "maxTimeoutSeconds": 60,
+            "extra": {
+              "name": "USD Coin",
+              "version": "2"
+            }
+          }
+        ],
+        "js": null,
+        "charged": false,
+        "core": null
+      },
+      {
+        "id": "live-one-second-before",
+        "start": "{\n  \"https://paid.example\": {\n    \"8453:0x833589fcd6edb6e08f4c7c32d4f71b54bda02913\": {\n      \"capAmount\": \"20000\",\n      \"spentAmount\": \"0\",\n      \"createdAt\": 1761999900,\n      \"expiresAt\": 1762000001\n    }\n  }\n}",
+        "at": 1762000000000,
+        "origin": "https://paid.example",
+        "accepts": [
+          {
+            "scheme": "exact",
+            "network": "eip155:8453",
+            "amount": "10000",
+            "asset": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+            "payTo": "0x209693bc6afc0c5328ba36faf03c514ef312287c",
+            "maxTimeoutSeconds": 60,
+            "extra": {
+              "name": "USD Coin",
+              "version": "2"
+            }
+          }
+        ],
+        "js": 0,
+        "charged": true,
+        "core": 0
+      },
+      {
+        "id": "clock-set-back",
+        "start": "{\n  \"https://paid.example\": {\n    \"8453:0x833589fcd6edb6e08f4c7c32d4f71b54bda02913\": {\n      \"capAmount\": \"20000\",\n      \"spentAmount\": \"0\",\n      \"createdAt\": 1762000100,\n      \"expiresAt\": 1762003600\n    }\n  }\n}",
+        "at": 1762000000000,
+        "origin": "https://paid.example",
+        "accepts": [
+          {
+            "scheme": "exact",
+            "network": "eip155:8453",
+            "amount": "10000",
+            "asset": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+            "payTo": "0x209693bc6afc0c5328ba36faf03c514ef312287c",
+            "maxTimeoutSeconds": 60,
+            "extra": {
+              "name": "USD Coin",
+              "version": "2"
+            }
+          }
+        ],
+        "js": 0,
+        "charged": true,
+        "core": null,
+        "deviation": "x402-clock-back"
+      },
+      {
+        "id": "asset-mixed-in-entry",
+        "start": "{\n  \"https://paid.example\": {\n    \"8453:0x833589fcd6edb6e08f4c7c32d4f71b54bda02913\": {\n      \"capAmount\": \"20000\",\n      \"spentAmount\": \"0\",\n      \"createdAt\": 1761999900,\n      \"expiresAt\": 1762003600\n    }\n  }\n}",
+        "at": 1762000000000,
+        "origin": "https://paid.example",
+        "accepts": [
+          {
+            "scheme": "exact",
+            "network": "eip155:8453",
+            "amount": "10000",
+            "asset": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+            "payTo": "0x209693bc6afc0c5328ba36faf03c514ef312287c",
+            "maxTimeoutSeconds": 60,
+            "extra": {
+              "name": "USD Coin",
+              "version": "2"
+            }
+          }
+        ],
+        "js": 0,
+        "charged": true,
+        "core": 0
+      },
+      {
+        "id": "asset-mixed-in-key",
+        "start": "{\n  \"https://paid.example\": {\n    \"8453:0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913\": {\n      \"capAmount\": \"20000\",\n      \"spentAmount\": \"0\",\n      \"createdAt\": 1761999900,\n      \"expiresAt\": 1762003600\n    }\n  }\n}",
+        "at": 1762000000000,
+        "origin": "https://paid.example",
+        "accepts": [
+          {
+            "scheme": "exact",
+            "network": "eip155:8453",
+            "amount": "10000",
+            "asset": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+            "payTo": "0x209693bc6afc0c5328ba36faf03c514ef312287c",
+            "maxTimeoutSeconds": 60,
+            "extra": {
+              "name": "USD Coin",
+              "version": "2"
+            }
+          }
+        ],
+        "js": null,
+        "charged": false,
+        "core": null
+      },
+      {
+        "id": "v1-entry",
+        "start": "{\n  \"https://paid.example\": {\n    \"8453:0x833589fcd6edb6e08f4c7c32d4f71b54bda02913\": {\n      \"capAmount\": \"20000\",\n      \"spentAmount\": \"0\",\n      \"createdAt\": 1761999900,\n      \"expiresAt\": 1762003600\n    }\n  }\n}",
+        "at": 1762000000000,
+        "origin": "https://paid.example",
+        "accepts": [
+          {
+            "scheme": "exact",
+            "network": "base",
+            "maxAmountRequired": "10000",
+            "resource": "https://paid.example/v1",
+            "description": "",
+            "payTo": "0x209693bc6afc0c5328ba36faf03c514ef312287c",
+            "maxTimeoutSeconds": 60,
+            "asset": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+            "extra": {
+              "name": "USD Coin",
+              "version": "2"
+            }
+          },
+          {
+            "scheme": "exact",
+            "network": "eip155:8453",
+            "amount": "10000",
+            "asset": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+            "payTo": "0x209693bc6afc0c5328ba36faf03c514ef312287c",
+            "maxTimeoutSeconds": 60,
+            "extra": {
+              "name": "USD Coin",
+              "version": "2"
+            }
+          }
+        ],
+        "js": 1,
+        "charged": true,
+        "core": 1
+      },
+      {
+        "id": "hex-amount",
+        "start": "{\n  \"https://paid.example\": {\n    \"8453:0x833589fcd6edb6e08f4c7c32d4f71b54bda02913\": {\n      \"capAmount\": \"20000\",\n      \"spentAmount\": \"0\",\n      \"createdAt\": 1761999900,\n      \"expiresAt\": 1762003600\n    }\n  }\n}",
+        "at": 1762000000000,
+        "origin": "https://paid.example",
+        "accepts": [
+          {
+            "scheme": "exact",
+            "network": "eip155:8453",
+            "amount": "0x10",
+            "asset": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+            "payTo": "0x209693bc6afc0c5328ba36faf03c514ef312287c",
+            "maxTimeoutSeconds": 60,
+            "extra": {
+              "name": "USD Coin",
+              "version": "2"
+            }
+          },
+          {
+            "scheme": "exact",
+            "network": "eip155:8453",
+            "amount": "10000",
+            "asset": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+            "payTo": "0x209693bc6afc0c5328ba36faf03c514ef312287c",
+            "maxTimeoutSeconds": 60,
+            "extra": {
+              "name": "USD Coin",
+              "version": "2"
+            }
+          }
+        ],
+        "js": 0,
+        "charged": false,
+        "core": null
+      },
+      {
+        "id": "amount-not-a-number",
+        "start": "{\n  \"https://paid.example\": {\n    \"8453:0x833589fcd6edb6e08f4c7c32d4f71b54bda02913\": {\n      \"capAmount\": \"20000\",\n      \"spentAmount\": \"0\",\n      \"createdAt\": 1761999900,\n      \"expiresAt\": 1762003600\n    }\n  }\n}",
+        "at": 1762000000000,
+        "origin": "https://paid.example",
+        "accepts": [
+          {
+            "scheme": "exact",
+            "network": "eip155:8453",
+            "amount": "abc",
+            "asset": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+            "payTo": "0x209693bc6afc0c5328ba36faf03c514ef312287c",
+            "maxTimeoutSeconds": 60,
+            "extra": {
+              "name": "USD Coin",
+              "version": "2"
+            }
+          },
+          {
+            "scheme": "exact",
+            "network": "eip155:8453",
+            "amount": "10000",
+            "asset": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+            "payTo": "0x209693bc6afc0c5328ba36faf03c514ef312287c",
+            "maxTimeoutSeconds": 60,
+            "extra": {
+              "name": "USD Coin",
+              "version": "2"
+            }
+          }
+        ],
+        "error": "Cannot convert abc to a BigInt",
+        "charged": false,
+        "core": null
+      },
+      {
+        "id": "leading-zeros",
+        "start": "{\n  \"https://paid.example\": {\n    \"8453:0x833589fcd6edb6e08f4c7c32d4f71b54bda02913\": {\n      \"capAmount\": \"20000\",\n      \"spentAmount\": \"0\",\n      \"createdAt\": 1761999900,\n      \"expiresAt\": 1762003600\n    }\n  }\n}",
+        "at": 1762000000000,
+        "origin": "https://paid.example",
+        "accepts": [
+          {
+            "scheme": "exact",
+            "network": "eip155:8453",
+            "amount": "0010000",
+            "asset": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+            "payTo": "0x209693bc6afc0c5328ba36faf03c514ef312287c",
+            "maxTimeoutSeconds": 60,
+            "extra": {
+              "name": "USD Coin",
+              "version": "2"
+            }
+          }
+        ],
+        "js": 0,
+        "charged": true,
+        "core": 0
+      }
+    ],
+    "payloads": [
+      {
+        "id": "v2-eip3009",
+        "requirements": {
+          "x402Version": 2,
+          "resource": {
+            "url": "https://paid.example/article",
+            "description": "An article",
+            "mimeType": "text/html"
+          },
+          "accepts": [
+            {
+              "scheme": "exact",
+              "network": "eip155:8453",
+              "amount": "10000",
+              "asset": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+              "payTo": "0x209693bc6afc0c5328ba36faf03c514ef312287c",
+              "maxTimeoutSeconds": 60,
+              "extra": {
+                "name": "USD Coin",
+                "version": "2"
+              }
+            }
+          ]
+        },
+        "accept_index": 0,
+        "now": 1762000000,
+        "nonce": "0x0b30557a9fc4e90e33587da2c7ec11365b80a5caef14395e83a8cdf2173c6186",
+        "signer": {
+          "privateKey": "0x1ab42cc412b618bdea3a599e3c9bae199ebf030895b039e9db1e30dafb12b727",
+          "address": "0x9858EfFD232B4033E47d90003D41EC34EcaEda94"
+        },
+        "js": {
+          "payload": "{\"x402Version\":2,\"payload\":{\"authorization\":{\"from\":\"0x9858EfFD232B4033E47d90003D41EC34EcaEda94\",\"to\":\"0x209693Bc6afc0C5328bA36FaF03C514EF312287C\",\"value\":\"10000\",\"validAfter\":\"0\",\"validBefore\":\"1762000060\",\"nonce\":\"0x0b30557a9fc4e90e33587da2c7ec11365b80a5caef14395e83a8cdf2173c6186\"},\"signature\":\"0x7d71fdb8523ac69bad5537bb74a15c22ebf4e90b4aaf6dfd72bd05f95ebeee0e7d2eea2c0c52ff417d5c0ca523fde3f6c74d90ee2f7be4f2184aa2766e48dc931b\"},\"resource\":{\"url\":\"https://paid.example/article\",\"description\":\"An article\",\"mimeType\":\"text/html\"},\"accepted\":{\"scheme\":\"exact\",\"network\":\"eip155:8453\",\"amount\":\"10000\",\"asset\":\"0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913\",\"payTo\":\"0x209693bc6afc0c5328ba36faf03c514ef312287c\",\"maxTimeoutSeconds\":60,\"extra\":{\"name\":\"USD Coin\",\"version\":\"2\"}}}"
+        },
+        "core": "payload"
+      },
+      {
+        "id": "v2-second-entry",
+        "requirements": {
+          "x402Version": 2,
+          "resource": {
+            "url": "https://paid.example/article",
+            "description": "An article",
+            "mimeType": "text/html"
+          },
+          "accepts": [
+            {
+              "scheme": "exact",
+              "network": "eip155:1",
+              "amount": "10000",
+              "asset": "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48",
+              "payTo": "0x209693bc6afc0c5328ba36faf03c514ef312287c",
+              "maxTimeoutSeconds": 60,
+              "extra": {
+                "name": "USD Coin",
+                "version": "2"
+              }
+            },
+            {
+              "scheme": "exact",
+              "network": "eip155:8453",
+              "amount": "10000",
+              "asset": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+              "payTo": "0x209693bc6afc0c5328ba36faf03c514ef312287c",
+              "maxTimeoutSeconds": 60,
+              "extra": {
+                "name": "USD Coin",
+                "version": "2"
+              }
+            }
+          ]
+        },
+        "accept_index": 1,
+        "now": 1762000000,
+        "nonce": "0x0b30557a9fc4e90e33587da2c7ec11365b80a5caef14395e83a8cdf2173c6186",
+        "signer": {
+          "privateKey": "0x1ab42cc412b618bdea3a599e3c9bae199ebf030895b039e9db1e30dafb12b727",
+          "address": "0x9858EfFD232B4033E47d90003D41EC34EcaEda94"
+        },
+        "js": {
+          "payload": "{\"x402Version\":2,\"payload\":{\"authorization\":{\"from\":\"0x9858EfFD232B4033E47d90003D41EC34EcaEda94\",\"to\":\"0x209693Bc6afc0C5328bA36FaF03C514EF312287C\",\"value\":\"10000\",\"validAfter\":\"0\",\"validBefore\":\"1762000060\",\"nonce\":\"0x0b30557a9fc4e90e33587da2c7ec11365b80a5caef14395e83a8cdf2173c6186\"},\"signature\":\"0x7d71fdb8523ac69bad5537bb74a15c22ebf4e90b4aaf6dfd72bd05f95ebeee0e7d2eea2c0c52ff417d5c0ca523fde3f6c74d90ee2f7be4f2184aa2766e48dc931b\"},\"resource\":{\"url\":\"https://paid.example/article\",\"description\":\"An article\",\"mimeType\":\"text/html\"},\"accepted\":{\"scheme\":\"exact\",\"network\":\"eip155:8453\",\"amount\":\"10000\",\"asset\":\"0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913\",\"payTo\":\"0x209693bc6afc0c5328ba36faf03c514ef312287c\",\"maxTimeoutSeconds\":60,\"extra\":{\"name\":\"USD Coin\",\"version\":\"2\"}}}"
+        },
+        "core": "payload"
+      },
+      {
+        "id": "v2-permit2",
+        "requirements": {
+          "x402Version": 2,
+          "resource": {
+            "url": "https://paid.example/article",
+            "description": "An article",
+            "mimeType": "text/html"
+          },
+          "accepts": [
+            {
+              "scheme": "exact",
+              "network": "eip155:8453",
+              "amount": "10000",
+              "asset": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+              "payTo": "0x209693bc6afc0c5328ba36faf03c514ef312287c",
+              "maxTimeoutSeconds": 60,
+              "extra": {
+                "assetTransferMethod": "permit2"
+              }
+            }
+          ]
+        },
+        "accept_index": 0,
+        "now": 1762000000,
+        "nonce": "0x0b30557a9fc4e90e33587da2c7ec11365b80a5caef14395e83a8cdf2173c6186",
+        "signer": {
+          "privateKey": "0x1ab42cc412b618bdea3a599e3c9bae199ebf030895b039e9db1e30dafb12b727",
+          "address": "0x9858EfFD232B4033E47d90003D41EC34EcaEda94"
+        },
+        "js": {
+          "payload": "{\"x402Version\":2,\"payload\":{\"signature\":\"0xfab842a8ab8978c102c3d32909caa56dc183f375932106f27357af0c6868f91f5691718f655b30fa3da55b928c5d3091b3a0017d91a5840ae10c84012df3e9881c\",\"permit2Authorization\":{\"from\":\"0x9858EfFD232B4033E47d90003D41EC34EcaEda94\",\"permitted\":{\"token\":\"0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913\",\"amount\":\"10000\"},\"spender\":\"0x402085c248EeA27D92E8b30b2C58ed07f9E20001\",\"nonce\":\"5060839947903921914538611459712485827713361757932439949520908015661160882566\",\"deadline\":\"1762000060\",\"witness\":{\"to\":\"0x209693Bc6afc0C5328bA36FaF03C514EF312287C\",\"validAfter\":\"0\"}}},\"resource\":{\"url\":\"https://paid.example/article\",\"description\":\"An article\",\"mimeType\":\"text/html\"},\"accepted\":{\"scheme\":\"exact\",\"network\":\"eip155:8453\",\"amount\":\"10000\",\"asset\":\"0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913\",\"payTo\":\"0x209693bc6afc0c5328ba36faf03c514ef312287c\",\"maxTimeoutSeconds\":60,\"extra\":{\"assetTransferMethod\":\"permit2\"}}}"
+        },
+        "core": "payload"
+      },
+      {
+        "id": "v2-permit2-short-window",
+        "requirements": {
+          "x402Version": 2,
+          "resource": {
+            "url": "https://paid.example/article",
+            "description": "An article",
+            "mimeType": "text/html"
+          },
+          "accepts": [
+            {
+              "scheme": "exact",
+              "network": "eip155:8453",
+              "amount": "10000",
+              "asset": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+              "payTo": "0x209693bc6afc0c5328ba36faf03c514ef312287c",
+              "maxTimeoutSeconds": 5,
+              "extra": {
+                "assetTransferMethod": "permit2"
+              }
+            }
+          ]
+        },
+        "accept_index": 0,
+        "now": 1762000000,
+        "nonce": "0x0b30557a9fc4e90e33587da2c7ec11365b80a5caef14395e83a8cdf2173c6186",
+        "signer": {
+          "privateKey": "0x1ab42cc412b618bdea3a599e3c9bae199ebf030895b039e9db1e30dafb12b727",
+          "address": "0x9858EfFD232B4033E47d90003D41EC34EcaEda94"
+        },
+        "js": {
+          "payload": "{\"x402Version\":2,\"payload\":{\"signature\":\"0x94b41a4188fd51f0513355ee55a4746ec606d5d5b5759452f1c964664454222c59c52e7b741003254d6d9753b1281712b492d01ea31da83c0e943703cc51310b1c\",\"permit2Authorization\":{\"from\":\"0x9858EfFD232B4033E47d90003D41EC34EcaEda94\",\"permitted\":{\"token\":\"0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913\",\"amount\":\"10000\"},\"spender\":\"0x402085c248EeA27D92E8b30b2C58ed07f9E20001\",\"nonce\":\"5060839947903921914538611459712485827713361757932439949520908015661160882566\",\"deadline\":\"1762000005\",\"witness\":{\"to\":\"0x209693Bc6afc0C5328bA36FaF03C514EF312287C\",\"validAfter\":\"0\"}}},\"resource\":{\"url\":\"https://paid.example/article\",\"description\":\"An article\",\"mimeType\":\"text/html\"},\"accepted\":{\"scheme\":\"exact\",\"network\":\"eip155:8453\",\"amount\":\"10000\",\"asset\":\"0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913\",\"payTo\":\"0x209693bc6afc0c5328ba36faf03c514ef312287c\",\"maxTimeoutSeconds\":5,\"extra\":{\"assetTransferMethod\":\"permit2\"}}}"
+        },
+        "core": "payload"
+      },
+      {
+        "id": "v2-other-method-is-eip3009",
+        "requirements": {
+          "x402Version": 2,
+          "resource": {
+            "url": "https://paid.example/article",
+            "description": "An article",
+            "mimeType": "text/html"
+          },
+          "accepts": [
+            {
+              "scheme": "exact",
+              "network": "eip155:8453",
+              "amount": "10000",
+              "asset": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+              "payTo": "0x209693bc6afc0c5328ba36faf03c514ef312287c",
+              "maxTimeoutSeconds": 60,
+              "extra": {
+                "name": "USD Coin",
+                "version": "2",
+                "assetTransferMethod": "eip2612"
+              }
+            }
+          ]
+        },
+        "accept_index": 0,
+        "now": 1762000000,
+        "nonce": "0x0b30557a9fc4e90e33587da2c7ec11365b80a5caef14395e83a8cdf2173c6186",
+        "signer": {
+          "privateKey": "0x1ab42cc412b618bdea3a599e3c9bae199ebf030895b039e9db1e30dafb12b727",
+          "address": "0x9858EfFD232B4033E47d90003D41EC34EcaEda94"
+        },
+        "js": {
+          "payload": "{\"x402Version\":2,\"payload\":{\"authorization\":{\"from\":\"0x9858EfFD232B4033E47d90003D41EC34EcaEda94\",\"to\":\"0x209693Bc6afc0C5328bA36FaF03C514EF312287C\",\"value\":\"10000\",\"validAfter\":\"0\",\"validBefore\":\"1762000060\",\"nonce\":\"0x0b30557a9fc4e90e33587da2c7ec11365b80a5caef14395e83a8cdf2173c6186\"},\"signature\":\"0x7d71fdb8523ac69bad5537bb74a15c22ebf4e90b4aaf6dfd72bd05f95ebeee0e7d2eea2c0c52ff417d5c0ca523fde3f6c74d90ee2f7be4f2184aa2766e48dc931b\"},\"resource\":{\"url\":\"https://paid.example/article\",\"description\":\"An article\",\"mimeType\":\"text/html\"},\"accepted\":{\"scheme\":\"exact\",\"network\":\"eip155:8453\",\"amount\":\"10000\",\"asset\":\"0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913\",\"payTo\":\"0x209693bc6afc0c5328ba36faf03c514ef312287c\",\"maxTimeoutSeconds\":60,\"extra\":{\"name\":\"USD Coin\",\"version\":\"2\",\"assetTransferMethod\":\"eip2612\"}}}"
+        },
+        "core": "payload"
+      },
+      {
+        "id": "v2-extensions",
+        "requirements": {
+          "x402Version": 2,
+          "resource": {
+            "url": "https://paid.example/article",
+            "description": "An article",
+            "mimeType": "text/html"
+          },
+          "accepts": [
+            {
+              "scheme": "exact",
+              "network": "eip155:8453",
+              "amount": "10000",
+              "asset": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+              "payTo": "0x209693bc6afc0c5328ba36faf03c514ef312287c",
+              "maxTimeoutSeconds": 60,
+              "extra": {
+                "name": "USD Coin",
+                "version": "2"
+              }
+            }
+          ],
+          "extensions": {
+            "bazaar": {
+              "info": {
+                "n": 1.5,
+                "s": "x"
+              }
+            }
+          }
+        },
+        "accept_index": 0,
+        "now": 1762000000,
+        "nonce": "0x0b30557a9fc4e90e33587da2c7ec11365b80a5caef14395e83a8cdf2173c6186",
+        "signer": {
+          "privateKey": "0x1ab42cc412b618bdea3a599e3c9bae199ebf030895b039e9db1e30dafb12b727",
+          "address": "0x9858EfFD232B4033E47d90003D41EC34EcaEda94"
+        },
+        "js": {
+          "payload": "{\"x402Version\":2,\"payload\":{\"authorization\":{\"from\":\"0x9858EfFD232B4033E47d90003D41EC34EcaEda94\",\"to\":\"0x209693Bc6afc0C5328bA36FaF03C514EF312287C\",\"value\":\"10000\",\"validAfter\":\"0\",\"validBefore\":\"1762000060\",\"nonce\":\"0x0b30557a9fc4e90e33587da2c7ec11365b80a5caef14395e83a8cdf2173c6186\"},\"signature\":\"0x7d71fdb8523ac69bad5537bb74a15c22ebf4e90b4aaf6dfd72bd05f95ebeee0e7d2eea2c0c52ff417d5c0ca523fde3f6c74d90ee2f7be4f2184aa2766e48dc931b\"},\"extensions\":{\"bazaar\":{\"info\":{\"n\":1.5,\"s\":\"x\"}}},\"resource\":{\"url\":\"https://paid.example/article\",\"description\":\"An article\",\"mimeType\":\"text/html\"},\"accepted\":{\"scheme\":\"exact\",\"network\":\"eip155:8453\",\"amount\":\"10000\",\"asset\":\"0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913\",\"payTo\":\"0x209693bc6afc0c5328ba36faf03c514ef312287c\",\"maxTimeoutSeconds\":60,\"extra\":{\"name\":\"USD Coin\",\"version\":\"2\"}}}"
+        },
+        "core": "payload"
+      },
+      {
+        "id": "v2-extensions-null",
+        "requirements": {
+          "x402Version": 2,
+          "resource": {
+            "url": "https://paid.example/article",
+            "description": "An article",
+            "mimeType": "text/html"
+          },
+          "accepts": [
+            {
+              "scheme": "exact",
+              "network": "eip155:8453",
+              "amount": "10000",
+              "asset": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+              "payTo": "0x209693bc6afc0c5328ba36faf03c514ef312287c",
+              "maxTimeoutSeconds": 60,
+              "extra": {
+                "name": "USD Coin",
+                "version": "2"
+              }
+            }
+          ],
+          "extensions": null
+        },
+        "accept_index": 0,
+        "now": 1762000000,
+        "nonce": "0x0b30557a9fc4e90e33587da2c7ec11365b80a5caef14395e83a8cdf2173c6186",
+        "signer": {
+          "privateKey": "0x1ab42cc412b618bdea3a599e3c9bae199ebf030895b039e9db1e30dafb12b727",
+          "address": "0x9858EfFD232B4033E47d90003D41EC34EcaEda94"
+        },
+        "js": {
+          "payload": "{\"x402Version\":2,\"payload\":{\"authorization\":{\"from\":\"0x9858EfFD232B4033E47d90003D41EC34EcaEda94\",\"to\":\"0x209693Bc6afc0C5328bA36FaF03C514EF312287C\",\"value\":\"10000\",\"validAfter\":\"0\",\"validBefore\":\"1762000060\",\"nonce\":\"0x0b30557a9fc4e90e33587da2c7ec11365b80a5caef14395e83a8cdf2173c6186\"},\"signature\":\"0x7d71fdb8523ac69bad5537bb74a15c22ebf4e90b4aaf6dfd72bd05f95ebeee0e7d2eea2c0c52ff417d5c0ca523fde3f6c74d90ee2f7be4f2184aa2766e48dc931b\"},\"extensions\":null,\"resource\":{\"url\":\"https://paid.example/article\",\"description\":\"An article\",\"mimeType\":\"text/html\"},\"accepted\":{\"scheme\":\"exact\",\"network\":\"eip155:8453\",\"amount\":\"10000\",\"asset\":\"0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913\",\"payTo\":\"0x209693bc6afc0c5328ba36faf03c514ef312287c\",\"maxTimeoutSeconds\":60,\"extra\":{\"name\":\"USD Coin\",\"version\":\"2\"}}}"
+        },
+        "core": "payload"
+      },
+      {
+        "id": "v2-resource-text",
+        "requirements": {
+          "x402Version": 2,
+          "resource": {
+            "url": "https://paid.example/é?q=\"1\"",
+            "description": "line sep\u0001 \"quoted\" \\ é",
+            "serviceName": "Paid",
+            "tags": [
+              "a",
+              "b"
+            ]
+          },
+          "accepts": [
+            {
+              "scheme": "exact",
+              "network": "eip155:8453",
+              "amount": "10000",
+              "asset": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+              "payTo": "0x209693bc6afc0c5328ba36faf03c514ef312287c",
+              "maxTimeoutSeconds": 60,
+              "extra": {
+                "name": "USD Coin",
+                "version": "2"
+              }
+            }
+          ]
+        },
+        "accept_index": 0,
+        "now": 1762000000,
+        "nonce": "0x0b30557a9fc4e90e33587da2c7ec11365b80a5caef14395e83a8cdf2173c6186",
+        "signer": {
+          "privateKey": "0x1ab42cc412b618bdea3a599e3c9bae199ebf030895b039e9db1e30dafb12b727",
+          "address": "0x9858EfFD232B4033E47d90003D41EC34EcaEda94"
+        },
+        "js": {
+          "payload": "{\"x402Version\":2,\"payload\":{\"authorization\":{\"from\":\"0x9858EfFD232B4033E47d90003D41EC34EcaEda94\",\"to\":\"0x209693Bc6afc0C5328bA36FaF03C514EF312287C\",\"value\":\"10000\",\"validAfter\":\"0\",\"validBefore\":\"1762000060\",\"nonce\":\"0x0b30557a9fc4e90e33587da2c7ec11365b80a5caef14395e83a8cdf2173c6186\"},\"signature\":\"0x7d71fdb8523ac69bad5537bb74a15c22ebf4e90b4aaf6dfd72bd05f95ebeee0e7d2eea2c0c52ff417d5c0ca523fde3f6c74d90ee2f7be4f2184aa2766e48dc931b\"},\"resource\":{\"url\":\"https://paid.example/é?q=\\\"1\\\"\",\"description\":\"line sep\\u0001 \\\"quoted\\\" \\\\ é\",\"serviceName\":\"Paid\",\"tags\":[\"a\",\"b\"]},\"accepted\":{\"scheme\":\"exact\",\"network\":\"eip155:8453\",\"amount\":\"10000\",\"asset\":\"0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913\",\"payTo\":\"0x209693bc6afc0c5328ba36faf03c514ef312287c\",\"maxTimeoutSeconds\":60,\"extra\":{\"name\":\"USD Coin\",\"version\":\"2\"}}}"
+        },
+        "core": "payload"
+      },
+      {
+        "id": "v2-unknown-fields-stripped",
+        "requirements": {
+          "x402Version": 2,
+          "resource": {
+            "url": "https://paid.example/article",
+            "description": "An article",
+            "mimeType": "text/html"
+          },
+          "accepts": [
+            {
+              "scheme": "exact",
+              "network": "eip155:8453",
+              "amount": "10000",
+              "asset": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+              "payTo": "0x209693bc6afc0c5328ba36faf03c514ef312287c",
+              "maxTimeoutSeconds": 60,
+              "extra": {
+                "name": "USD Coin",
+                "version": "2"
+              }
+            }
+          ]
+        },
+        "accept_index": 0,
+        "now": 1762000000,
+        "nonce": "0x0b30557a9fc4e90e33587da2c7ec11365b80a5caef14395e83a8cdf2173c6186",
+        "signer": {
+          "privateKey": "0x1ab42cc412b618bdea3a599e3c9bae199ebf030895b039e9db1e30dafb12b727",
+          "address": "0x9858EfFD232B4033E47d90003D41EC34EcaEda94"
+        },
+        "js": {
+          "payload": "{\"x402Version\":2,\"payload\":{\"authorization\":{\"from\":\"0x9858EfFD232B4033E47d90003D41EC34EcaEda94\",\"to\":\"0x209693Bc6afc0C5328bA36FaF03C514EF312287C\",\"value\":\"10000\",\"validAfter\":\"0\",\"validBefore\":\"1762000060\",\"nonce\":\"0x0b30557a9fc4e90e33587da2c7ec11365b80a5caef14395e83a8cdf2173c6186\"},\"signature\":\"0x7d71fdb8523ac69bad5537bb74a15c22ebf4e90b4aaf6dfd72bd05f95ebeee0e7d2eea2c0c52ff417d5c0ca523fde3f6c74d90ee2f7be4f2184aa2766e48dc931b\"},\"resource\":{\"url\":\"https://paid.example/article\",\"description\":\"An article\",\"mimeType\":\"text/html\"},\"accepted\":{\"scheme\":\"exact\",\"network\":\"eip155:8453\",\"amount\":\"10000\",\"asset\":\"0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913\",\"payTo\":\"0x209693bc6afc0c5328ba36faf03c514ef312287c\",\"maxTimeoutSeconds\":60,\"extra\":{\"name\":\"USD Coin\",\"version\":\"2\"}}}"
+        },
+        "core": "payload"
+      },
+      {
+        "id": "v2-amount-leading-zeros",
+        "requirements": {
+          "x402Version": 2,
+          "resource": {
+            "url": "https://paid.example/article",
+            "description": "An article",
+            "mimeType": "text/html"
+          },
+          "accepts": [
+            {
+              "scheme": "exact",
+              "network": "eip155:8453",
+              "amount": "0010000",
+              "asset": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+              "payTo": "0x209693bc6afc0c5328ba36faf03c514ef312287c",
+              "maxTimeoutSeconds": 60,
+              "extra": {
+                "name": "USD Coin",
+                "version": "2"
+              }
+            }
+          ]
+        },
+        "accept_index": 0,
+        "now": 1762000000,
+        "nonce": "0x0b30557a9fc4e90e33587da2c7ec11365b80a5caef14395e83a8cdf2173c6186",
+        "signer": {
+          "privateKey": "0x1ab42cc412b618bdea3a599e3c9bae199ebf030895b039e9db1e30dafb12b727",
+          "address": "0x9858EfFD232B4033E47d90003D41EC34EcaEda94"
+        },
+        "js": {
+          "payload": "{\"x402Version\":2,\"payload\":{\"authorization\":{\"from\":\"0x9858EfFD232B4033E47d90003D41EC34EcaEda94\",\"to\":\"0x209693Bc6afc0C5328bA36FaF03C514EF312287C\",\"value\":\"0010000\",\"validAfter\":\"0\",\"validBefore\":\"1762000060\",\"nonce\":\"0x0b30557a9fc4e90e33587da2c7ec11365b80a5caef14395e83a8cdf2173c6186\"},\"signature\":\"0x7d71fdb8523ac69bad5537bb74a15c22ebf4e90b4aaf6dfd72bd05f95ebeee0e7d2eea2c0c52ff417d5c0ca523fde3f6c74d90ee2f7be4f2184aa2766e48dc931b\"},\"resource\":{\"url\":\"https://paid.example/article\",\"description\":\"An article\",\"mimeType\":\"text/html\"},\"accepted\":{\"scheme\":\"exact\",\"network\":\"eip155:8453\",\"amount\":\"0010000\",\"asset\":\"0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913\",\"payTo\":\"0x209693bc6afc0c5328ba36faf03c514ef312287c\",\"maxTimeoutSeconds\":60,\"extra\":{\"name\":\"USD Coin\",\"version\":\"2\"}}}"
+        },
+        "core": "payload"
+      },
+      {
+        "id": "v2-amount-at-limit",
+        "requirements": {
+          "x402Version": 2,
+          "resource": {
+            "url": "https://paid.example/article",
+            "description": "An article",
+            "mimeType": "text/html"
+          },
+          "accepts": [
+            {
+              "scheme": "exact",
+              "network": "eip155:8453",
+              "amount": "1000000",
+              "asset": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+              "payTo": "0x209693bc6afc0c5328ba36faf03c514ef312287c",
+              "maxTimeoutSeconds": 60,
+              "extra": {
+                "name": "USD Coin",
+                "version": "2"
+              }
+            }
+          ]
+        },
+        "accept_index": 0,
+        "now": 1762000000,
+        "nonce": "0x0b30557a9fc4e90e33587da2c7ec11365b80a5caef14395e83a8cdf2173c6186",
+        "signer": {
+          "privateKey": "0x1ab42cc412b618bdea3a599e3c9bae199ebf030895b039e9db1e30dafb12b727",
+          "address": "0x9858EfFD232B4033E47d90003D41EC34EcaEda94"
+        },
+        "js": {
+          "payload": "{\"x402Version\":2,\"payload\":{\"authorization\":{\"from\":\"0x9858EfFD232B4033E47d90003D41EC34EcaEda94\",\"to\":\"0x209693Bc6afc0C5328bA36FaF03C514EF312287C\",\"value\":\"1000000\",\"validAfter\":\"0\",\"validBefore\":\"1762000060\",\"nonce\":\"0x0b30557a9fc4e90e33587da2c7ec11365b80a5caef14395e83a8cdf2173c6186\"},\"signature\":\"0xe55ccc5cf2e164ca6354833c275e087023e5a25dfb6076344ad4576e5dc3064257dc50eac8284ea91b3a1562f68a1658912e9416746ff0546e60c8550735d2091b\"},\"resource\":{\"url\":\"https://paid.example/article\",\"description\":\"An article\",\"mimeType\":\"text/html\"},\"accepted\":{\"scheme\":\"exact\",\"network\":\"eip155:8453\",\"amount\":\"1000000\",\"asset\":\"0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913\",\"payTo\":\"0x209693bc6afc0c5328ba36faf03c514ef312287c\",\"maxTimeoutSeconds\":60,\"extra\":{\"name\":\"USD Coin\",\"version\":\"2\"}}}"
+        },
+        "core": "payload"
+      },
+      {
+        "id": "v2-amount-over-limit",
+        "requirements": {
+          "x402Version": 2,
+          "resource": {
+            "url": "https://paid.example/article",
+            "description": "An article",
+            "mimeType": "text/html"
+          },
+          "accepts": [
+            {
+              "scheme": "exact",
+              "network": "eip155:8453",
+              "amount": "1000001",
+              "asset": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+              "payTo": "0x209693bc6afc0c5328ba36faf03c514ef312287c",
+              "maxTimeoutSeconds": 60,
+              "extra": {
+                "name": "USD Coin",
+                "version": "2"
+              }
+            }
+          ]
+        },
+        "accept_index": 0,
+        "now": 1762000000,
+        "nonce": "0x0b30557a9fc4e90e33587da2c7ec11365b80a5caef14395e83a8cdf2173c6186",
+        "signer": {
+          "privateKey": "0x1ab42cc412b618bdea3a599e3c9bae199ebf030895b039e9db1e30dafb12b727",
+          "address": "0x9858EfFD232B4033E47d90003D41EC34EcaEda94"
+        },
+        "js": {
+          "error": "All payment requirements were rejected by spendControls.maxAmountPerPayment ($1, including USDC). Raise maxAmountPerPayment, set it to false to disable, set allowedAssets[].maxAmountPerPayment for a per-asset atomic cap, or set spendControls: false to disable all spend controls."
+        },
+        "core": "refused"
+      },
+      {
+        "id": "v2-amount-hex",
+        "requirements": {
+          "x402Version": 2,
+          "resource": {
+            "url": "https://paid.example/article",
+            "description": "An article",
+            "mimeType": "text/html"
+          },
+          "accepts": [
+            {
+              "scheme": "exact",
+              "network": "eip155:8453",
+              "amount": "0x10",
+              "asset": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+              "payTo": "0x209693bc6afc0c5328ba36faf03c514ef312287c",
+              "maxTimeoutSeconds": 60,
+              "extra": {
+                "name": "USD Coin",
+                "version": "2"
+              }
+            }
+          ]
+        },
+        "accept_index": 0,
+        "now": 1762000000,
+        "nonce": "0x0b30557a9fc4e90e33587da2c7ec11365b80a5caef14395e83a8cdf2173c6186",
+        "signer": {
+          "privateKey": "0x1ab42cc412b618bdea3a599e3c9bae199ebf030895b039e9db1e30dafb12b727",
+          "address": "0x9858EfFD232B4033E47d90003D41EC34EcaEda94"
+        },
+        "js": {
+          "error": "Invalid amount: 0x10"
+        },
+        "core": "refused"
+      },
+      {
+        "id": "v2-amount-decimal",
+        "requirements": {
+          "x402Version": 2,
+          "resource": {
+            "url": "https://paid.example/article",
+            "description": "An article",
+            "mimeType": "text/html"
+          },
+          "accepts": [
+            {
+              "scheme": "exact",
+              "network": "eip155:8453",
+              "amount": "0.5",
+              "asset": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+              "payTo": "0x209693bc6afc0c5328ba36faf03c514ef312287c",
+              "maxTimeoutSeconds": 60,
+              "extra": {
+                "name": "USD Coin",
+                "version": "2"
+              }
+            }
+          ]
+        },
+        "accept_index": 0,
+        "now": 1762000000,
+        "nonce": "0x0b30557a9fc4e90e33587da2c7ec11365b80a5caef14395e83a8cdf2173c6186",
+        "signer": {
+          "privateKey": "0x1ab42cc412b618bdea3a599e3c9bae199ebf030895b039e9db1e30dafb12b727",
+          "address": "0x9858EfFD232B4033E47d90003D41EC34EcaEda94"
+        },
+        "js": {
+          "error": "Cannot convert 0.5 to a BigInt"
+        },
+        "core": "refused"
+      },
+      {
+        "id": "v2-amount-negative",
+        "requirements": {
+          "x402Version": 2,
+          "resource": {
+            "url": "https://paid.example/article",
+            "description": "An article",
+            "mimeType": "text/html"
+          },
+          "accepts": [
+            {
+              "scheme": "exact",
+              "network": "eip155:8453",
+              "amount": "-1",
+              "asset": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+              "payTo": "0x209693bc6afc0c5328ba36faf03c514ef312287c",
+              "maxTimeoutSeconds": 60,
+              "extra": {
+                "name": "USD Coin",
+                "version": "2"
+              }
+            }
+          ]
+        },
+        "accept_index": 0,
+        "now": 1762000000,
+        "nonce": "0x0b30557a9fc4e90e33587da2c7ec11365b80a5caef14395e83a8cdf2173c6186",
+        "signer": {
+          "privateKey": "0x1ab42cc412b618bdea3a599e3c9bae199ebf030895b039e9db1e30dafb12b727",
+          "address": "0x9858EfFD232B4033E47d90003D41EC34EcaEda94"
+        },
+        "js": {
+          "error": "value out-of-bounds for uint256 (argument=\"value\", value=-1, code=INVALID_ARGUMENT, version=6.17.0)"
+        },
+        "core": "refused"
+      },
+      {
+        "id": "v2-asset-lowercase",
+        "requirements": {
+          "x402Version": 2,
+          "resource": {
+            "url": "https://paid.example/article",
+            "description": "An article",
+            "mimeType": "text/html"
+          },
+          "accepts": [
+            {
+              "scheme": "exact",
+              "network": "eip155:8453",
+              "amount": "10000",
+              "asset": "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913",
+              "payTo": "0x209693bc6afc0c5328ba36faf03c514ef312287c",
+              "maxTimeoutSeconds": 60,
+              "extra": {
+                "name": "USD Coin",
+                "version": "2"
+              }
+            }
+          ]
+        },
+        "accept_index": 0,
+        "now": 1762000000,
+        "nonce": "0x0b30557a9fc4e90e33587da2c7ec11365b80a5caef14395e83a8cdf2173c6186",
+        "signer": {
+          "privateKey": "0x1ab42cc412b618bdea3a599e3c9bae199ebf030895b039e9db1e30dafb12b727",
+          "address": "0x9858EfFD232B4033E47d90003D41EC34EcaEda94"
+        },
+        "js": {
+          "payload": "{\"x402Version\":2,\"payload\":{\"authorization\":{\"from\":\"0x9858EfFD232B4033E47d90003D41EC34EcaEda94\",\"to\":\"0x209693Bc6afc0C5328bA36FaF03C514EF312287C\",\"value\":\"10000\",\"validAfter\":\"0\",\"validBefore\":\"1762000060\",\"nonce\":\"0x0b30557a9fc4e90e33587da2c7ec11365b80a5caef14395e83a8cdf2173c6186\"},\"signature\":\"0x7d71fdb8523ac69bad5537bb74a15c22ebf4e90b4aaf6dfd72bd05f95ebeee0e7d2eea2c0c52ff417d5c0ca523fde3f6c74d90ee2f7be4f2184aa2766e48dc931b\"},\"resource\":{\"url\":\"https://paid.example/article\",\"description\":\"An article\",\"mimeType\":\"text/html\"},\"accepted\":{\"scheme\":\"exact\",\"network\":\"eip155:8453\",\"amount\":\"10000\",\"asset\":\"0x833589fcd6edb6e08f4c7c32d4f71b54bda02913\",\"payTo\":\"0x209693bc6afc0c5328ba36faf03c514ef312287c\",\"maxTimeoutSeconds\":60,\"extra\":{\"name\":\"USD Coin\",\"version\":\"2\"}}}"
+        },
+        "core": "payload"
+      },
+      {
+        "id": "v2-asset-upper-x",
+        "requirements": {
+          "x402Version": 2,
+          "resource": {
+            "url": "https://paid.example/article",
+            "description": "An article",
+            "mimeType": "text/html"
+          },
+          "accepts": [
+            {
+              "scheme": "exact",
+              "network": "eip155:8453",
+              "amount": "10000",
+              "asset": "0X833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+              "payTo": "0x209693bc6afc0c5328ba36faf03c514ef312287c",
+              "maxTimeoutSeconds": 60,
+              "extra": {
+                "name": "USD Coin",
+                "version": "2"
+              }
+            }
+          ]
+        },
+        "accept_index": 0,
+        "now": 1762000000,
+        "nonce": "0x0b30557a9fc4e90e33587da2c7ec11365b80a5caef14395e83a8cdf2173c6186",
+        "signer": {
+          "privateKey": "0x1ab42cc412b618bdea3a599e3c9bae199ebf030895b039e9db1e30dafb12b727",
+          "address": "0x9858EfFD232B4033E47d90003D41EC34EcaEda94"
+        },
+        "js": {
+          "error": "Address \"0X833589fCD6eDb6E08f4c7C32D4f71b54bdA02913\" is invalid.\n\n- Address must be a hex value of 20 bytes (40 hex characters).\n- Address must match its checksum counterpart.\n\nVersion: viem@2.57.4"
+        },
+        "core": "refused"
+      },
+      {
+        "id": "v2-asset-not-default",
+        "requirements": {
+          "x402Version": 2,
+          "resource": {
+            "url": "https://paid.example/article",
+            "description": "An article",
+            "mimeType": "text/html"
+          },
+          "accepts": [
+            {
+              "scheme": "exact",
+              "network": "eip155:8453",
+              "amount": "10000",
+              "asset": "0x1111111111111111111111111111111111111111",
+              "payTo": "0x209693bc6afc0c5328ba36faf03c514ef312287c",
+              "maxTimeoutSeconds": 60,
+              "extra": {
+                "name": "USD Coin",
+                "version": "2"
+              }
+            }
+          ]
+        },
+        "accept_index": 0,
+        "now": 1762000000,
+        "nonce": "0x0b30557a9fc4e90e33587da2c7ec11365b80a5caef14395e83a8cdf2173c6186",
+        "signer": {
+          "privateKey": "0x1ab42cc412b618bdea3a599e3c9bae199ebf030895b039e9db1e30dafb12b727",
+          "address": "0x9858EfFD232B4033E47d90003D41EC34EcaEda94"
+        },
+        "js": {
+          "error": "All payment requirements were rejected by spendControls: only default assets or entries in spendControls.allowedAssets are allowed. Add an allowedAssets entry for non-default tokens, set allowedAssets: true, or set spendControls: false."
+        },
+        "core": "refused"
+      },
+      {
+        "id": "v2-network-not-default",
+        "requirements": {
+          "x402Version": 2,
+          "resource": {
+            "url": "https://paid.example/article",
+            "description": "An article",
+            "mimeType": "text/html"
+          },
+          "accepts": [
+            {
+              "scheme": "exact",
+              "network": "eip155:10",
+              "amount": "10000",
+              "asset": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+              "payTo": "0x209693bc6afc0c5328ba36faf03c514ef312287c",
+              "maxTimeoutSeconds": 60,
+              "extra": {
+                "name": "USD Coin",
+                "version": "2"
+              }
+            }
+          ]
+        },
+        "accept_index": 0,
+        "now": 1762000000,
+        "nonce": "0x0b30557a9fc4e90e33587da2c7ec11365b80a5caef14395e83a8cdf2173c6186",
+        "signer": {
+          "privateKey": "0x1ab42cc412b618bdea3a599e3c9bae199ebf030895b039e9db1e30dafb12b727",
+          "address": "0x9858EfFD232B4033E47d90003D41EC34EcaEda94"
+        },
+        "js": {
+          "error": "All payment requirements were rejected by spendControls: only default assets or entries in spendControls.allowedAssets are allowed. Add an allowedAssets entry for non-default tokens, set allowedAssets: true, or set spendControls: false."
+        },
+        "core": "refused"
+      },
+      {
+        "id": "v2-network-padded",
+        "requirements": {
+          "x402Version": 2,
+          "resource": {
+            "url": "https://paid.example/article",
+            "description": "An article",
+            "mimeType": "text/html"
+          },
+          "accepts": [
+            {
+              "scheme": "exact",
+              "network": "eip155:08453",
+              "amount": "10000",
+              "asset": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+              "payTo": "0x209693bc6afc0c5328ba36faf03c514ef312287c",
+              "maxTimeoutSeconds": 60,
+              "extra": {
+                "name": "USD Coin",
+                "version": "2"
+              }
+            }
+          ]
+        },
+        "accept_index": 0,
+        "now": 1762000000,
+        "nonce": "0x0b30557a9fc4e90e33587da2c7ec11365b80a5caef14395e83a8cdf2173c6186",
+        "signer": {
+          "privateKey": "0x1ab42cc412b618bdea3a599e3c9bae199ebf030895b039e9db1e30dafb12b727",
+          "address": "0x9858EfFD232B4033E47d90003D41EC34EcaEda94"
+        },
+        "js": {
+          "error": "All payment requirements were rejected by spendControls: only default assets or entries in spendControls.allowedAssets are allowed. Add an allowedAssets entry for non-default tokens, set allowedAssets: true, or set spendControls: false."
+        },
+        "core": "refused"
+      },
+      {
+        "id": "v2-network-solana",
+        "requirements": {
+          "x402Version": 2,
+          "resource": {
+            "url": "https://paid.example/article",
+            "description": "An article",
+            "mimeType": "text/html"
+          },
+          "accepts": [
+            {
+              "scheme": "exact",
+              "network": "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp",
+              "amount": "10000",
+              "asset": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+              "payTo": "0x209693bc6afc0c5328ba36faf03c514ef312287c",
+              "maxTimeoutSeconds": 60,
+              "extra": {
+                "name": "USD Coin",
+                "version": "2"
+              }
+            }
+          ]
+        },
+        "accept_index": 0,
+        "now": 1762000000,
+        "nonce": "0x0b30557a9fc4e90e33587da2c7ec11365b80a5caef14395e83a8cdf2173c6186",
+        "signer": {
+          "privateKey": "0x1ab42cc412b618bdea3a599e3c9bae199ebf030895b039e9db1e30dafb12b727",
+          "address": "0x9858EfFD232B4033E47d90003D41EC34EcaEda94"
+        },
+        "js": {
+          "error": "No network/scheme registered for x402 version: 2 which comply with the payment requirements. {\"x402Version\":2,\"paymentRequirements\":[{\"scheme\":\"exact\",\"network\":\"solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp\",\"amount\":\"10000\",\"asset\":\"0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913\",\"payTo\":\"0x209693bc6afc0c5328ba36faf03c514ef312287c\",\"maxTimeoutSeconds\":60,\"extra\":{\"name\":\"USD Coin\",\"version\":\"2\"}}],\"x402Versions\":[2,1],\"networks\":[\"eip155:*\"],\"schemes\":[\"exact\"]}"
+        },
+        "core": "refused"
+      },
+      {
+        "id": "v2-scheme-other",
+        "requirements": {
+          "x402Version": 2,
+          "resource": {
+            "url": "https://paid.example/article",
+            "description": "An article",
+            "mimeType": "text/html"
+          },
+          "accepts": [
+            {
+              "scheme": "upto",
+              "network": "eip155:8453",
+              "amount": "10000",
+              "asset": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+              "payTo": "0x209693bc6afc0c5328ba36faf03c514ef312287c",
+              "maxTimeoutSeconds": 60,
+              "extra": {
+                "name": "USD Coin",
+                "version": "2"
+              }
+            }
+          ]
+        },
+        "accept_index": 0,
+        "now": 1762000000,
+        "nonce": "0x0b30557a9fc4e90e33587da2c7ec11365b80a5caef14395e83a8cdf2173c6186",
+        "signer": {
+          "privateKey": "0x1ab42cc412b618bdea3a599e3c9bae199ebf030895b039e9db1e30dafb12b727",
+          "address": "0x9858EfFD232B4033E47d90003D41EC34EcaEda94"
+        },
+        "js": {
+          "error": "No network/scheme registered for x402 version: 2 which comply with the payment requirements. {\"x402Version\":2,\"paymentRequirements\":[{\"scheme\":\"upto\",\"network\":\"eip155:8453\",\"amount\":\"10000\",\"asset\":\"0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913\",\"payTo\":\"0x209693bc6afc0c5328ba36faf03c514ef312287c\",\"maxTimeoutSeconds\":60,\"extra\":{\"name\":\"USD Coin\",\"version\":\"2\"}}],\"x402Versions\":[2,1],\"networks\":[\"eip155:*\"],\"schemes\":[\"exact\"]}"
+        },
+        "core": "refused"
+      },
+      {
+        "id": "v2-flow-escrow",
+        "requirements": {
+          "x402Version": 2,
+          "resource": {
+            "url": "https://paid.example/article",
+            "description": "An article",
+            "mimeType": "text/html"
+          },
+          "accepts": [
+            {
+              "scheme": "exact",
+              "network": "eip155:8453",
+              "amount": "10000",
+              "asset": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+              "payTo": "0x209693bc6afc0c5328ba36faf03c514ef312287c",
+              "maxTimeoutSeconds": 60,
+              "extra": {
+                "name": "USD Coin",
+                "version": "2",
+                "paymentFlow": "escrow"
+              }
+            }
+          ]
+        },
+        "accept_index": 0,
+        "now": 1762000000,
+        "nonce": "0x0b30557a9fc4e90e33587da2c7ec11365b80a5caef14395e83a8cdf2173c6186",
+        "signer": {
+          "privateKey": "0x1ab42cc412b618bdea3a599e3c9bae199ebf030895b039e9db1e30dafb12b727",
+          "address": "0x9858EfFD232B4033E47d90003D41EC34EcaEda94"
+        },
+        "js": {
+          "payload": "{\"x402Version\":2,\"payload\":{\"authorization\":{\"from\":\"0x9858EfFD232B4033E47d90003D41EC34EcaEda94\",\"to\":\"0x209693Bc6afc0C5328bA36FaF03C514EF312287C\",\"value\":\"10000\",\"validAfter\":\"0\",\"validBefore\":\"1762000060\",\"nonce\":\"0x0b30557a9fc4e90e33587da2c7ec11365b80a5caef14395e83a8cdf2173c6186\"},\"signature\":\"0x7d71fdb8523ac69bad5537bb74a15c22ebf4e90b4aaf6dfd72bd05f95ebeee0e7d2eea2c0c52ff417d5c0ca523fde3f6c74d90ee2f7be4f2184aa2766e48dc931b\"},\"resource\":{\"url\":\"https://paid.example/article\",\"description\":\"An article\",\"mimeType\":\"text/html\"},\"accepted\":{\"scheme\":\"exact\",\"network\":\"eip155:8453\",\"amount\":\"10000\",\"asset\":\"0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913\",\"payTo\":\"0x209693bc6afc0c5328ba36faf03c514ef312287c\",\"maxTimeoutSeconds\":60,\"extra\":{\"name\":\"USD Coin\",\"version\":\"2\",\"paymentFlow\":\"escrow\"}}}"
+        },
+        "core": "payload"
+      },
+      {
+        "id": "v2-flow-unknown",
+        "requirements": {
+          "x402Version": 2,
+          "resource": {
+            "url": "https://paid.example/article",
+            "description": "An article",
+            "mimeType": "text/html"
+          },
+          "accepts": [
+            {
+              "scheme": "exact",
+              "network": "eip155:8453",
+              "amount": "10000",
+              "asset": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+              "payTo": "0x209693bc6afc0c5328ba36faf03c514ef312287c",
+              "maxTimeoutSeconds": 60,
+              "extra": {
+                "name": "USD Coin",
+                "version": "2",
+                "paymentFlow": "stream"
+              }
+            }
+          ]
+        },
+        "accept_index": 0,
+        "now": 1762000000,
+        "nonce": "0x0b30557a9fc4e90e33587da2c7ec11365b80a5caef14395e83a8cdf2173c6186",
+        "signer": {
+          "privateKey": "0x1ab42cc412b618bdea3a599e3c9bae199ebf030895b039e9db1e30dafb12b727",
+          "address": "0x9858EfFD232B4033E47d90003D41EC34EcaEda94"
+        },
+        "js": {
+          "error": "No payment requirements with a recognized paymentFlow for x402 version: 2"
+        },
+        "core": "refused"
+      },
+      {
+        "id": "v2-no-version",
+        "requirements": {
+          "x402Version": 2,
+          "resource": {
+            "url": "https://paid.example/article",
+            "description": "An article",
+            "mimeType": "text/html"
+          },
+          "accepts": [
+            {
+              "scheme": "exact",
+              "network": "eip155:8453",
+              "amount": "10000",
+              "asset": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+              "payTo": "0x209693bc6afc0c5328ba36faf03c514ef312287c",
+              "maxTimeoutSeconds": 60,
+              "extra": {
+                "name": "USD Coin"
+              }
+            }
+          ]
+        },
+        "accept_index": 0,
+        "now": 1762000000,
+        "nonce": "0x0b30557a9fc4e90e33587da2c7ec11365b80a5caef14395e83a8cdf2173c6186",
+        "signer": {
+          "privateKey": "0x1ab42cc412b618bdea3a599e3c9bae199ebf030895b039e9db1e30dafb12b727",
+          "address": "0x9858EfFD232B4033E47d90003D41EC34EcaEda94"
+        },
+        "js": {
+          "error": "EIP-712 domain parameters (name, version) are required in payment requirements for asset 0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"
+        },
+        "core": "refused"
+      },
+      {
+        "id": "v2-extra-null",
+        "requirements": {
+          "x402Version": 2,
+          "resource": {
+            "url": "https://paid.example/article",
+            "description": "An article",
+            "mimeType": "text/html"
+          },
+          "accepts": [
+            {
+              "scheme": "exact",
+              "network": "eip155:8453",
+              "amount": "10000",
+              "asset": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+              "payTo": "0x209693bc6afc0c5328ba36faf03c514ef312287c",
+              "maxTimeoutSeconds": 60,
+              "extra": null
+            }
+          ]
+        },
+        "accept_index": 0,
+        "now": 1762000000,
+        "nonce": "0x0b30557a9fc4e90e33587da2c7ec11365b80a5caef14395e83a8cdf2173c6186",
+        "signer": {
+          "privateKey": "0x1ab42cc412b618bdea3a599e3c9bae199ebf030895b039e9db1e30dafb12b727",
+          "address": "0x9858EfFD232B4033E47d90003D41EC34EcaEda94"
+        },
+        "js": {
+          "error": "EIP-712 domain parameters (name, version) are required in payment requirements for asset 0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"
+        },
+        "core": "refused"
+      },
+      {
+        "id": "v2-name-not-string",
+        "requirements": {
+          "x402Version": 2,
+          "resource": {
+            "url": "https://paid.example/article",
+            "description": "An article",
+            "mimeType": "text/html"
+          },
+          "accepts": [
+            {
+              "scheme": "exact",
+              "network": "eip155:8453",
+              "amount": "10000",
+              "asset": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+              "payTo": "0x209693bc6afc0c5328ba36faf03c514ef312287c",
+              "maxTimeoutSeconds": 60,
+              "extra": {
+                "name": 5,
+                "version": "2"
+              }
+            }
+          ]
+        },
+        "accept_index": 0,
+        "now": 1762000000,
+        "nonce": "0x0b30557a9fc4e90e33587da2c7ec11365b80a5caef14395e83a8cdf2173c6186",
+        "signer": {
+          "privateKey": "0x1ab42cc412b618bdea3a599e3c9bae199ebf030895b039e9db1e30dafb12b727",
+          "address": "0x9858EfFD232B4033E47d90003D41EC34EcaEda94"
+        },
+        "js": {
+          "error": "invalid string value (argument=\"str\", value=5, code=INVALID_ARGUMENT, version=6.17.0)"
+        },
+        "core": "refused"
+      },
+      {
+        "id": "v2-version-not-string",
+        "requirements": {
+          "x402Version": 2,
+          "resource": {
+            "url": "https://paid.example/article",
+            "description": "An article",
+            "mimeType": "text/html"
+          },
+          "accepts": [
+            {
+              "scheme": "exact",
+              "network": "eip155:8453",
+              "amount": "10000",
+              "asset": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+              "payTo": "0x209693bc6afc0c5328ba36faf03c514ef312287c",
+              "maxTimeoutSeconds": 60,
+              "extra": {
+                "name": "USD Coin",
+                "version": 2
+              }
+            }
+          ]
+        },
+        "accept_index": 0,
+        "now": 1762000000,
+        "nonce": "0x0b30557a9fc4e90e33587da2c7ec11365b80a5caef14395e83a8cdf2173c6186",
+        "signer": {
+          "privateKey": "0x1ab42cc412b618bdea3a599e3c9bae199ebf030895b039e9db1e30dafb12b727",
+          "address": "0x9858EfFD232B4033E47d90003D41EC34EcaEda94"
+        },
+        "js": {
+          "error": "invalid string value (argument=\"str\", value=2, code=INVALID_ARGUMENT, version=6.17.0)"
+        },
+        "core": "refused"
+      },
+      {
+        "id": "v2-runway-19",
+        "requirements": {
+          "x402Version": 2,
+          "resource": {
+            "url": "https://paid.example/article",
+            "description": "An article",
+            "mimeType": "text/html"
+          },
+          "accepts": [
+            {
+              "scheme": "exact",
+              "network": "eip155:8453",
+              "amount": "10000",
+              "asset": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+              "payTo": "0x209693bc6afc0c5328ba36faf03c514ef312287c",
+              "maxTimeoutSeconds": 19,
+              "extra": {
+                "name": "USD Coin",
+                "version": "2"
+              }
+            }
+          ]
+        },
+        "accept_index": 0,
+        "now": 1762000000,
+        "nonce": "0x0b30557a9fc4e90e33587da2c7ec11365b80a5caef14395e83a8cdf2173c6186",
+        "signer": {
+          "privateKey": "0x1ab42cc412b618bdea3a599e3c9bae199ebf030895b039e9db1e30dafb12b727",
+          "address": "0x9858EfFD232B4033E47d90003D41EC34EcaEda94"
+        },
+        "js": {
+          "error": "Payment authorization expired while it was being confirmed. Please try again."
+        },
+        "core": "refused"
+      },
+      {
+        "id": "v2-runway-20",
+        "requirements": {
+          "x402Version": 2,
+          "resource": {
+            "url": "https://paid.example/article",
+            "description": "An article",
+            "mimeType": "text/html"
+          },
+          "accepts": [
+            {
+              "scheme": "exact",
+              "network": "eip155:8453",
+              "amount": "10000",
+              "asset": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+              "payTo": "0x209693bc6afc0c5328ba36faf03c514ef312287c",
+              "maxTimeoutSeconds": 20,
+              "extra": {
+                "name": "USD Coin",
+                "version": "2"
+              }
+            }
+          ]
+        },
+        "accept_index": 0,
+        "now": 1762000000,
+        "nonce": "0x0b30557a9fc4e90e33587da2c7ec11365b80a5caef14395e83a8cdf2173c6186",
+        "signer": {
+          "privateKey": "0x1ab42cc412b618bdea3a599e3c9bae199ebf030895b039e9db1e30dafb12b727",
+          "address": "0x9858EfFD232B4033E47d90003D41EC34EcaEda94"
+        },
+        "js": {
+          "payload": "{\"x402Version\":2,\"payload\":{\"authorization\":{\"from\":\"0x9858EfFD232B4033E47d90003D41EC34EcaEda94\",\"to\":\"0x209693Bc6afc0C5328bA36FaF03C514EF312287C\",\"value\":\"10000\",\"validAfter\":\"0\",\"validBefore\":\"1762000020\",\"nonce\":\"0x0b30557a9fc4e90e33587da2c7ec11365b80a5caef14395e83a8cdf2173c6186\"},\"signature\":\"0x342d9479356fe46c2101f6ffbe6edbb53c3feb6289c4738962e8ad84a116ef044677d747cae20e50c35f22a3796842db052b8f6162850f30f8a0390866445a5a1b\"},\"resource\":{\"url\":\"https://paid.example/article\",\"description\":\"An article\",\"mimeType\":\"text/html\"},\"accepted\":{\"scheme\":\"exact\",\"network\":\"eip155:8453\",\"amount\":\"10000\",\"asset\":\"0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913\",\"payTo\":\"0x209693bc6afc0c5328ba36faf03c514ef312287c\",\"maxTimeoutSeconds\":20,\"extra\":{\"name\":\"USD Coin\",\"version\":\"2\"}}}"
+        },
+        "core": "payload"
+      },
+      {
+        "id": "v2-timeout-fraction",
+        "requirements": {
+          "x402Version": 2,
+          "resource": {
+            "url": "https://paid.example/article",
+            "description": "An article",
+            "mimeType": "text/html"
+          },
+          "accepts": [
+            {
+              "scheme": "exact",
+              "network": "eip155:8453",
+              "amount": "10000",
+              "asset": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+              "payTo": "0x209693bc6afc0c5328ba36faf03c514ef312287c",
+              "maxTimeoutSeconds": 60.5,
+              "extra": {
+                "name": "USD Coin",
+                "version": "2"
+              }
+            }
+          ]
+        },
+        "accept_index": 0,
+        "now": 1762000000,
+        "nonce": "0x0b30557a9fc4e90e33587da2c7ec11365b80a5caef14395e83a8cdf2173c6186",
+        "signer": {
+          "privateKey": "0x1ab42cc412b618bdea3a599e3c9bae199ebf030895b039e9db1e30dafb12b727",
+          "address": "0x9858EfFD232B4033E47d90003D41EC34EcaEda94"
+        },
+        "js": {
+          "error": "Cannot convert 1762000060.5 to a BigInt"
+        },
+        "core": "refused"
+      },
+      {
+        "id": "v2-pay-to-invalid",
+        "requirements": {
+          "x402Version": 2,
+          "resource": {
+            "url": "https://paid.example/article",
+            "description": "An article",
+            "mimeType": "text/html"
+          },
+          "accepts": [
+            {
+              "scheme": "exact",
+              "network": "eip155:8453",
+              "amount": "10000",
+              "asset": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+              "payTo": "0x1234",
+              "maxTimeoutSeconds": 60,
+              "extra": {
+                "name": "USD Coin",
+                "version": "2"
+              }
+            }
+          ]
+        },
+        "accept_index": 0,
+        "now": 1762000000,
+        "nonce": "0x0b30557a9fc4e90e33587da2c7ec11365b80a5caef14395e83a8cdf2173c6186",
+        "signer": {
+          "privateKey": "0x1ab42cc412b618bdea3a599e3c9bae199ebf030895b039e9db1e30dafb12b727",
+          "address": "0x9858EfFD232B4033E47d90003D41EC34EcaEda94"
+        },
+        "js": {
+          "error": "Address \"0x1234\" is invalid.\n\n- Address must be a hex value of 20 bytes (40 hex characters).\n- Address must match its checksum counterpart.\n\nVersion: viem@2.57.4"
+        },
+        "core": "refused"
+      },
+      {
+        "id": "v2-celo-second-asset",
+        "requirements": {
+          "x402Version": 2,
+          "resource": {
+            "url": "https://paid.example/article",
+            "description": "An article",
+            "mimeType": "text/html"
+          },
+          "accepts": [
+            {
+              "scheme": "exact",
+              "network": "eip155:42220",
+              "amount": "10000",
+              "asset": "0x48065fbBE25f71C9282ddf5e1cD6D6A887483D5e",
+              "payTo": "0x209693bc6afc0c5328ba36faf03c514ef312287c",
+              "maxTimeoutSeconds": 60,
+              "extra": {
+                "name": "Tether USD",
+                "version": "1"
+              }
+            }
+          ]
+        },
+        "accept_index": 0,
+        "now": 1762000000,
+        "nonce": "0x0b30557a9fc4e90e33587da2c7ec11365b80a5caef14395e83a8cdf2173c6186",
+        "signer": {
+          "privateKey": "0x1ab42cc412b618bdea3a599e3c9bae199ebf030895b039e9db1e30dafb12b727",
+          "address": "0x9858EfFD232B4033E47d90003D41EC34EcaEda94"
+        },
+        "js": {
+          "payload": "{\"x402Version\":2,\"payload\":{\"authorization\":{\"from\":\"0x9858EfFD232B4033E47d90003D41EC34EcaEda94\",\"to\":\"0x209693Bc6afc0C5328bA36FaF03C514EF312287C\",\"value\":\"10000\",\"validAfter\":\"0\",\"validBefore\":\"1762000060\",\"nonce\":\"0x0b30557a9fc4e90e33587da2c7ec11365b80a5caef14395e83a8cdf2173c6186\"},\"signature\":\"0x4af93f789deb60b5e57dc83b2c6b3ce311784d5389e323796daa0fa850d60e15582b6dfb0e3c41eaa59b111a8e4861ef5915be5640874a251680f24bd49eeec31c\"},\"resource\":{\"url\":\"https://paid.example/article\",\"description\":\"An article\",\"mimeType\":\"text/html\"},\"accepted\":{\"scheme\":\"exact\",\"network\":\"eip155:42220\",\"amount\":\"10000\",\"asset\":\"0x48065fbBE25f71C9282ddf5e1cD6D6A887483D5e\",\"payTo\":\"0x209693bc6afc0c5328ba36faf03c514ef312287c\",\"maxTimeoutSeconds\":60,\"extra\":{\"name\":\"Tether USD\",\"version\":\"1\"}}}"
+        },
+        "core": "payload"
+      },
+      {
+        "id": "v2-18-decimals",
+        "requirements": {
+          "x402Version": 2,
+          "resource": {
+            "url": "https://paid.example/article",
+            "description": "An article",
+            "mimeType": "text/html"
+          },
+          "accepts": [
+            {
+              "scheme": "exact",
+              "network": "eip155:4326",
+              "amount": "1000000000000000000",
+              "asset": "0xFAfDdbb3FC7688494971a79cc65DCa3EF82079E7",
+              "payTo": "0x209693bc6afc0c5328ba36faf03c514ef312287c",
+              "maxTimeoutSeconds": 60,
+              "extra": {
+                "name": "MegaUSD",
+                "version": "1"
+              }
+            }
+          ]
+        },
+        "accept_index": 0,
+        "now": 1762000000,
+        "nonce": "0x0b30557a9fc4e90e33587da2c7ec11365b80a5caef14395e83a8cdf2173c6186",
+        "signer": {
+          "privateKey": "0x1ab42cc412b618bdea3a599e3c9bae199ebf030895b039e9db1e30dafb12b727",
+          "address": "0x9858EfFD232B4033E47d90003D41EC34EcaEda94"
+        },
+        "js": {
+          "payload": "{\"x402Version\":2,\"payload\":{\"authorization\":{\"from\":\"0x9858EfFD232B4033E47d90003D41EC34EcaEda94\",\"to\":\"0x209693Bc6afc0C5328bA36FaF03C514EF312287C\",\"value\":\"1000000000000000000\",\"validAfter\":\"0\",\"validBefore\":\"1762000060\",\"nonce\":\"0x0b30557a9fc4e90e33587da2c7ec11365b80a5caef14395e83a8cdf2173c6186\"},\"signature\":\"0x7f93a6c1347fcc426f6242e9aea005b7b2d3220bf523c1ea77c5d3fadcb036542f948cc636564808c988ee27b3e77122a59cc2afe97b31e93765091e10b074c01c\"},\"resource\":{\"url\":\"https://paid.example/article\",\"description\":\"An article\",\"mimeType\":\"text/html\"},\"accepted\":{\"scheme\":\"exact\",\"network\":\"eip155:4326\",\"amount\":\"1000000000000000000\",\"asset\":\"0xFAfDdbb3FC7688494971a79cc65DCa3EF82079E7\",\"payTo\":\"0x209693bc6afc0c5328ba36faf03c514ef312287c\",\"maxTimeoutSeconds\":60,\"extra\":{\"name\":\"MegaUSD\",\"version\":\"1\"}}}"
+        },
+        "core": "payload"
+      },
+      {
+        "id": "v1-base",
+        "requirements": {
+          "x402Version": 1,
+          "accepts": [
+            {
+              "scheme": "exact",
+              "network": "base",
+              "maxAmountRequired": "10000",
+              "resource": "https://paid.example/v1",
+              "description": "",
+              "payTo": "0x209693bc6afc0c5328ba36faf03c514ef312287c",
+              "maxTimeoutSeconds": 60,
+              "asset": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+              "extra": {
+                "name": "USD Coin",
+                "version": "2"
+              }
+            }
+          ]
+        },
+        "accept_index": 0,
+        "now": 1762000000,
+        "nonce": "0x0b30557a9fc4e90e33587da2c7ec11365b80a5caef14395e83a8cdf2173c6186",
+        "signer": {
+          "privateKey": "0x1ab42cc412b618bdea3a599e3c9bae199ebf030895b039e9db1e30dafb12b727",
+          "address": "0x9858EfFD232B4033E47d90003D41EC34EcaEda94"
+        },
+        "js": {
+          "payload": "{\"x402Version\":1,\"scheme\":\"exact\",\"network\":\"base\",\"payload\":{\"authorization\":{\"from\":\"0x9858EfFD232B4033E47d90003D41EC34EcaEda94\",\"to\":\"0x209693Bc6afc0C5328bA36FaF03C514EF312287C\",\"value\":\"10000\",\"validAfter\":\"1761999400\",\"validBefore\":\"1762000060\",\"nonce\":\"0x0b30557a9fc4e90e33587da2c7ec11365b80a5caef14395e83a8cdf2173c6186\"},\"signature\":\"0x60b20baa51a37b15c98617b4a182b6055c30d6e7f055bd78a405349da2eca7d401ee76b39e9b09010ab6af536b987d17c135a2ad91e59f076c13a56e9e963ec41c\"}}"
+        },
+        "core": "payload"
+      },
+      {
+        "id": "v1-ethereum",
+        "requirements": {
+          "x402Version": 1,
+          "accepts": [
+            {
+              "scheme": "exact",
+              "network": "ethereum",
+              "maxAmountRequired": "10000",
+              "resource": "https://paid.example/v1",
+              "description": "",
+              "payTo": "0x209693bc6afc0c5328ba36faf03c514ef312287c",
+              "maxTimeoutSeconds": 60,
+              "asset": "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48",
+              "extra": {
+                "name": "USD Coin",
+                "version": "2"
+              }
+            }
+          ]
+        },
+        "accept_index": 0,
+        "now": 1762000000,
+        "nonce": "0x0b30557a9fc4e90e33587da2c7ec11365b80a5caef14395e83a8cdf2173c6186",
+        "signer": {
+          "privateKey": "0x1ab42cc412b618bdea3a599e3c9bae199ebf030895b039e9db1e30dafb12b727",
+          "address": "0x9858EfFD232B4033E47d90003D41EC34EcaEda94"
+        },
+        "js": {
+          "payload": "{\"x402Version\":1,\"scheme\":\"exact\",\"network\":\"ethereum\",\"payload\":{\"authorization\":{\"from\":\"0x9858EfFD232B4033E47d90003D41EC34EcaEda94\",\"to\":\"0x209693Bc6afc0C5328bA36FaF03C514EF312287C\",\"value\":\"10000\",\"validAfter\":\"1761999400\",\"validBefore\":\"1762000060\",\"nonce\":\"0x0b30557a9fc4e90e33587da2c7ec11365b80a5caef14395e83a8cdf2173c6186\"},\"signature\":\"0xa0dbe7b3e063785588c37037ea2854351857aa98dc36223aeffb0d6b693a370e0a69d411a4bceeaf8aec91d61932cd7bfef075eb379e2bb82fefefdb70ff0efc1c\"}}"
+        },
+        "core": "payload"
+      },
+      {
+        "id": "v1-polygon",
+        "requirements": {
+          "x402Version": 1,
+          "accepts": [
+            {
+              "scheme": "exact",
+              "network": "polygon",
+              "maxAmountRequired": "10000",
+              "resource": "https://paid.example/v1",
+              "description": "",
+              "payTo": "0x209693bc6afc0c5328ba36faf03c514ef312287c",
+              "maxTimeoutSeconds": 60,
+              "asset": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+              "extra": {
+                "name": "USD Coin",
+                "version": "2"
+              }
+            }
+          ]
+        },
+        "accept_index": 0,
+        "now": 1762000000,
+        "nonce": "0x0b30557a9fc4e90e33587da2c7ec11365b80a5caef14395e83a8cdf2173c6186",
+        "signer": {
+          "privateKey": "0x1ab42cc412b618bdea3a599e3c9bae199ebf030895b039e9db1e30dafb12b727",
+          "address": "0x9858EfFD232B4033E47d90003D41EC34EcaEda94"
+        },
+        "js": {
+          "error": "No network/scheme registered for x402 version: 1 which comply with the payment requirements. {\"x402Version\":1,\"paymentRequirements\":[{\"scheme\":\"exact\",\"network\":\"polygon\",\"maxAmountRequired\":\"10000\",\"resource\":\"https://paid.example/v1\",\"description\":\"\",\"payTo\":\"0x209693bc6afc0c5328ba36faf03c514ef312287c\",\"maxTimeoutSeconds\":60,\"asset\":\"0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913\",\"extra\":{\"name\":\"USD Coin\",\"version\":\"2\"}}],\"x402Versions\":[2,1],\"networks\":[\"base\",\"ethereum\"],\"schemes\":[\"exact\",\"exact\"]}"
+        },
+        "core": "refused"
+      },
+      {
+        "id": "v1-permit2-ignored",
+        "requirements": {
+          "x402Version": 1,
+          "accepts": [
+            {
+              "scheme": "exact",
+              "network": "base",
+              "maxAmountRequired": "10000",
+              "resource": "https://paid.example/v1",
+              "description": "",
+              "payTo": "0x209693bc6afc0c5328ba36faf03c514ef312287c",
+              "maxTimeoutSeconds": 60,
+              "asset": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+              "extra": {
+                "name": "USD Coin",
+                "version": "2",
+                "assetTransferMethod": "permit2"
+              }
+            }
+          ]
+        },
+        "accept_index": 0,
+        "now": 1762000000,
+        "nonce": "0x0b30557a9fc4e90e33587da2c7ec11365b80a5caef14395e83a8cdf2173c6186",
+        "signer": {
+          "privateKey": "0x1ab42cc412b618bdea3a599e3c9bae199ebf030895b039e9db1e30dafb12b727",
+          "address": "0x9858EfFD232B4033E47d90003D41EC34EcaEda94"
+        },
+        "js": {
+          "payload": "{\"x402Version\":1,\"scheme\":\"exact\",\"network\":\"base\",\"payload\":{\"authorization\":{\"from\":\"0x9858EfFD232B4033E47d90003D41EC34EcaEda94\",\"to\":\"0x209693Bc6afc0C5328bA36FaF03C514EF312287C\",\"value\":\"10000\",\"validAfter\":\"1761999400\",\"validBefore\":\"1762000060\",\"nonce\":\"0x0b30557a9fc4e90e33587da2c7ec11365b80a5caef14395e83a8cdf2173c6186\"},\"signature\":\"0x60b20baa51a37b15c98617b4a182b6055c30d6e7f055bd78a405349da2eca7d401ee76b39e9b09010ab6af536b987d17c135a2ad91e59f076c13a56e9e963ec41c\"}}"
+        },
+        "core": "payload"
+      },
+      {
+        "id": "v1-runway-19",
+        "requirements": {
+          "x402Version": 1,
+          "accepts": [
+            {
+              "scheme": "exact",
+              "network": "base",
+              "maxAmountRequired": "10000",
+              "resource": "https://paid.example/v1",
+              "description": "",
+              "payTo": "0x209693bc6afc0c5328ba36faf03c514ef312287c",
+              "maxTimeoutSeconds": 19,
+              "asset": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+              "extra": {
+                "name": "USD Coin",
+                "version": "2"
+              }
+            }
+          ]
+        },
+        "accept_index": 0,
+        "now": 1762000000,
+        "nonce": "0x0b30557a9fc4e90e33587da2c7ec11365b80a5caef14395e83a8cdf2173c6186",
+        "signer": {
+          "privateKey": "0x1ab42cc412b618bdea3a599e3c9bae199ebf030895b039e9db1e30dafb12b727",
+          "address": "0x9858EfFD232B4033E47d90003D41EC34EcaEda94"
+        },
+        "js": {
+          "error": "Payment authorization expired while it was being confirmed. Please try again."
+        },
+        "core": "refused"
+      }
+    ]
+  }
 }
