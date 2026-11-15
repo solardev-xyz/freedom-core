@@ -494,21 +494,31 @@ mod tests {
             Ok(Decision::Reject)
         );
         assert_eq!(prompts.retained(), (1, MAX_HANDLES));
-        // A handle named again is the latest again: the window is full,
-        // the oldest is named (crossed), one new handle comes, and the old
-        // one is still refused.
-        let oldest = named(102);
-        let id = issued(&mut prompts, 1);
-        assert_eq!(prompts.accept(&id, &reject(&id, &oldest)), Err(Crossed));
-        let id = issued(&mut prompts, 1);
-        assert_eq!(
-            prompts.accept(&id, &reject(&id, &named(MAX_HANDLES + 100))),
-            Ok(Decision::Reject)
-        );
-        let id = issued(&mut prompts, 1);
-        assert_eq!(prompts.accept(&id, &reject(&id, &oldest)), Err(Crossed));
-        assert_eq!(prompts.retained(), (1, MAX_HANDLES));
         let _ = open;
+        // A handle named again is the latest again, from a fresh state: the
+        // window filled, its oldest named again (crossed), one new handle,
+        // and the oldest is still refused.
+        let mut prompts = Prompts::new();
+        for n in 0..MAX_HANDLES {
+            let id = issued(&mut prompts, 1);
+            assert_eq!(
+                prompts.accept(&id, &reject(&id, &named(n))),
+                Ok(Decision::Reject)
+            );
+        }
+        for (n, expected) in [
+            (0, Err(Crossed)),
+            (MAX_HANDLES, Ok(Decision::Reject)),
+            (0, Err(Crossed)),
+        ] {
+            let id = issued(&mut prompts, 1);
+            assert_eq!(
+                prompts.accept(&id, &reject(&id, &named(n))),
+                expected,
+                "{n}"
+            );
+        }
+        assert_eq!(prompts.retained(), (0, MAX_HANDLES));
     }
 
     #[test]
