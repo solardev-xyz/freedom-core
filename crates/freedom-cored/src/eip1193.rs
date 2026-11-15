@@ -338,7 +338,7 @@ impl Connects {
         page: &PageContext,
         received: Instant,
     ) -> Vec<Out> {
-        if let Err(step) = self.insert(id, step, key, page, received) {
+        if let Some(step) = self.insert(id, step, key, page, received) {
             if let Pending::Prompt { id: prompt, .. } = step {
                 self.prompts.forget(&prompt);
             }
@@ -350,6 +350,7 @@ impl Connects {
 
     /// Page request `id`, waiting with `step`, its 120 s counted from
     /// `received`. The step back if its `PageContext` can't be written.
+    #[must_use]
     fn insert(
         &mut self,
         id: u64,
@@ -357,10 +358,10 @@ impl Connects {
         key: &str,
         page: &PageContext,
         received: Instant,
-    ) -> Result<(), Pending> {
+    ) -> Option<Pending> {
         let context = page.clone();
         let Ok(page) = serde_json::to_string(page) else {
-            return Err(step);
+            return Some(step);
         };
         let waited = u64::try_from(received.elapsed().as_millis()).unwrap_or(u64::MAX);
         let overall = crate::testhooks::eip1193_overall(fc_eip1193::OVERALL_MS);
@@ -376,7 +377,7 @@ impl Connects {
                 asked: None,
             },
         );
-        Ok(())
+        None
     }
 
     /// Page request `id`'s send, past its checks, for `key` (APR-5e-1):
@@ -397,7 +398,7 @@ impl Connects {
             quote: None,
             reference: false,
         });
-        if self.insert(id, step, key, page, received).is_err() {
+        if self.insert(id, step, key, page, received).is_some() {
             return vec![error(id, internal())];
         }
         self.reads_for(id, vault)
@@ -566,7 +567,7 @@ impl Connects {
                 self.open.remove(&id);
                 vec![reply(id, &answer)]
             }
-            send::Judged::Ask(ask) => self.prompt_for(id, Asking::Send(ask)),
+            send::Judged::Ask(ask) => self.prompt_for(id, Asking::Send(*ask)),
             send::Judged::Send(prepared) => {
                 let Some(open) = self.open.remove(&id) else {
                     return Vec::new();

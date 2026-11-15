@@ -375,8 +375,7 @@ fn every_prompted_send_replays_through_the_core() {
             let mut expected = scenario["grants"]["after"].clone();
             let ticked = effects
                 .iter()
-                .filter(|e| e["effect"] == "prompt")
-                .last()
+                .rfind(|e| e["effect"] == "prompt")
                 .is_some_and(|p| p["answer"]["choices"]["alwaysAllow"] == true);
             if let (Some(_), true) = (
                 issued,
@@ -448,7 +447,8 @@ fn approve(core: &mut Core, id: u64, node: &mut Node, choices: Value) -> (Value,
 fn each_prepared_field_changed_signs_nothing() {
     let (_root, mut core, _clock) = core(&connected());
     let mut node = Node::new(estimate());
-    let edits: Vec<(&str, Box<dyn Fn(&mut Value)>)> = vec![
+    type Edit = Box<dyn Fn(&mut Value)>;
+    let edits: Vec<(&str, Edit)> = vec![
         (
             "type",
             Box::new(|tx| {
@@ -565,7 +565,17 @@ fn stale_evidence_is_asked_for_again_at_approval() {
     let Next::Prompt(asked) = next(&mut core, 100, &mut node) else {
         panic!()
     };
-    assert_eq!(asked["params"]["view"]["feeCheck"]["above"], false);
+    // The core asked for its own evidence before the prompt: the verdict
+    // compares the fee with its quote.
+    let check = &asked["params"]["view"]["feeCheck"];
+    assert_eq!(
+        (check["comparable"].clone(), check["above"].clone()),
+        (json!(true), json!(false))
+    );
+    assert_eq!(
+        (check["basis"].clone(), check["ratio"].clone()),
+        (json!("quote"), json!("1"))
+    );
     std::fs::write(&clock, (1_000_000 + 60_001).to_string()).unwrap();
     node.gas_price = 2 * GWEI;
     node.priority = Some(GWEI);

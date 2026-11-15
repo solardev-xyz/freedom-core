@@ -143,7 +143,7 @@ pub enum Judged {
     /// Refused, with nothing minted.
     Answer(Answer),
     /// The fee is newly above the threshold: asked again.
-    Ask(Ask),
+    Ask(Box<Ask>),
     /// The daemon mints the token, and answers `{ send }`.
     Send(Prepared),
 }
@@ -184,7 +184,7 @@ fn is_address(text: &JsString) -> bool {
 fn is_hex_data(text: &JsString) -> bool {
     let text = text.as_str();
     text.starts_with("0x")
-        && text.len() % 2 == 0
+        && text.len().is_multiple_of(2)
         && text[2..].bytes().all(|b| b.is_ascii_hexdigit())
         && !text.contains('\u{fffd}')
 }
@@ -553,11 +553,11 @@ impl Judge {
     ) -> Judged {
         if ask_again {
             let view = view(&self.prepare, Some(&self.quoted), Some(verdict), true);
-            return Judged::Ask(Ask {
+            return Judged::Ask(Box::new(Ask {
                 prepare: self.prepare,
                 quoted: Some(self.quoted),
                 view,
-            });
+            }));
         }
         let exposes = grant(&self.prepare.key)
             .filter(JsValue::truthy)
@@ -739,6 +739,24 @@ mod tests {
         assert_eq!(q(r#""0x""#), Err(()));
         assert_eq!(q("true"), Err(()));
         assert_eq!(q("9007199254740992"), Err(()));
+    }
+
+    /// A Ledger's, a phone's or a Safe's send (on Gnosis) is APR-5e-2's:
+    /// `4200`, nothing asked.
+    #[test]
+    fn a_device_send_is_apr5e2s() {
+        for (index, kind) in [(1, "ledger"), (2, "remote"), (1000, "safe")] {
+            let text = format!(
+                r#"{{"method":"eth_sendTransaction","params":[{{"to":"0x5555555555555555555555555555555555555555"}}],"world":{{"enabled":true,"window_chain":100,"wallets":[{{"index":{index},"address":"0x5555555555555555555555555555555555555555","type":"{kind}"}}],"networks":{{}}}}}}"#
+            );
+            let request = Request::parse(&text).unwrap();
+            let crate::Step::Send(send) = crate::start(&request, Some("k"), |_| None) else {
+                panic!("{kind}")
+            };
+            let grant = format!(r#"{{"walletIndex":{index}}}"#);
+            let answer = send.prepare(|_| fc_json::parse(&grant).ok()).unwrap_err();
+            assert_eq!(answer.as_str(), Answer::unsupported().as_str(), "{kind}");
+        }
     }
 
     #[test]

@@ -292,7 +292,7 @@ fn every_prompted_send_replays() {
                             break 'run Some(answer);
                         }
                         Judged::Ask(again) => {
-                            ask = again;
+                            ask = *again;
                             continue;
                         }
                         Judged::Send(approved) => approved,
