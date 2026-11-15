@@ -644,6 +644,7 @@ fn only_protocol_2_is_spoken() {
         "approval.remember",
         "x402.authorize",
         "x402.settle",
+        "eip1193.request",
         "dweb.open",
         "dweb.verify",
         "dweb.forget",

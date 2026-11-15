@@ -493,6 +493,7 @@ dependencies = [
 name = "fc-eip1193"
 version = "0.17.0"
 dependencies = [
+ "fc-json",
  "serde_json",
 ]
 
@@ -720,6 +721,7 @@ dependencies = [
  "fc-approval",
  "fc-chain",
  "fc-dweb",
+ "fc-eip1193",
  "fc-evm",
  "fc-json",
  "fc-keys",

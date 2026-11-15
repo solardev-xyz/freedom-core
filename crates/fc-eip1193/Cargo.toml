@@ -10,6 +10,14 @@ repository.workspace = true
 [lints]
 workspace = true
 
+[dependencies]
+# A request read as JSON.parse reads it and answers written as
+# JSON.stringify writes them: JS's key order, numbers and lone surrogates,
+# as main's dispatcher passed a page's params to the chain read (design
+# 0012, APR-5b). fc-approval and fc-chain already link it.
+fc-json = { path = "../fc-json" }
+
 [dev-dependencies]
-# The replay reads vectors/eip1193.json.
-serde_json = "1"
+# The replays read vectors/eip1193.json; preserve_order keeps the
+# reference's key order in what they compare.
+serde_json = { version = "1", features = ["preserve_order"] }

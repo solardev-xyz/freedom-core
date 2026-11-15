@@ -32,6 +32,10 @@ name = "chain"
 required-features = ["testhooks"]
 
 [[test]]
+name = "eip1193"
+required-features = ["testhooks"]
+
+[[test]]
 name = "dweb"
 required-features = ["testhooks"]
 
@@ -108,6 +112,8 @@ fc-approval = { path = "../fc-approval" }
 fc-chain = { path = "../fc-chain" }
 # dweb.open's planning (design 0006), on the naming thread.
 fc-dweb = { path = "../fc-dweb" }
+# Design 0012's Ethereum dispatcher: a page's eip1193.request (APR-5).
+fc-eip1193 = { path = "../fc-eip1193" }
 fc-evm = { path = "../fc-evm" }
 # The JavaScript-semantics JSON reader fc-dweb's plans are written with:
 # dweb.verify's plan reads back as dweb.open wrote it (design 0009).

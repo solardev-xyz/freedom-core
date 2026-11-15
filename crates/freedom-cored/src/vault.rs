@@ -853,6 +853,12 @@ impl Vault {
         self.approvals.configure_grants(root, moved, wall_ms);
     }
 
+    /// The key's entry in the dApp store, for a page's `eth_accounts`
+    /// (design 0012, APR-5b).
+    pub fn dapp_entry(&self, key: &str) -> Option<fc_json::JsValue> {
+        self.approvals.dapp_entry(key, self.clocks().wall_ms)
+    }
+
     /// Main asked for `chain.fee_reference`: its reply is the chain's fee
     /// evidence (design 0012, "The fee check").
     pub fn fee_asked(&mut self, id: u64, params: Option<&str>) {

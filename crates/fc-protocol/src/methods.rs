@@ -80,6 +80,13 @@ pub enum Deadline {
     /// (design 0009, Bounds: time to the head). After the head there is
     /// none.
     Head,
+    /// A page's EIP-1193 request (design 0012, "fc-eip1193 and
+    /// approval.request"; `fc_eip1193::Budget`): no overall deadline while
+    /// one of its own `approval.request`s is open, a session's 120 s in all
+    /// outside them, and each I/O step its own deadline within that. Main's
+    /// hang watchdog skips the request while main answers one of its
+    /// prompts.
+    Steps,
 }
 
 impl Deadline {
@@ -90,6 +97,7 @@ impl Deadline {
             Deadline::Vault => Some(30_000),
             Deadline::Session => Some(120_000),
             Deadline::Head => Some(360_000),
+            Deadline::Steps => Some(120_000),
         }
     }
 }
@@ -132,7 +140,9 @@ use Callers::{
     Chrome as CHROME, ChromeOrShell as CS, Page as PAGE, PageChromeOrShell as PCS,
     PageOrShell as PS, Shell as SHELL,
 };
-use Deadline::{Head as HEAD, Immediate as NOW, Session as SESSION, Vault as VAULT};
+use Deadline::{
+    Head as HEAD, Immediate as NOW, Session as SESSION, Steps as STEPS, Vault as VAULT,
+};
 
 /// Every method, in `core.hello`'s capability order, then the `chain.*`
 /// methods.
@@ -209,6 +219,10 @@ pub const METHODS: &[Method] = &[
     // is; no renderer channel reaches them.
     row("x402.authorize", SHELL, false, NOW),
     row("x402.settle", SHELL, false, NOW),
+    // Design 0012, "fc-eip1193 and approval.request" (APR-5): a page's
+    // EIP-1193 request, run by the core's dispatcher; no other caller
+    // reaches it.
+    row("eip1193.request", PAGE, false, STEPS),
     row("dweb.open", SHELL, false, SESSION),
     // Design 0009: verified fetches, whose bodies stream; protocol 2 only.
     row_v2("dweb.verify", SHELL, false, HEAD),
@@ -356,6 +370,7 @@ mod tests {
                 "approval.touch",
                 "approval.radicle_write",
                 "approval.remember",
+                "eip1193.request",
             ]
         );
         // Design 0012, API: who reaches each grant method.
@@ -368,6 +383,7 @@ mod tests {
             ("approval.grants", false, true, true),
             ("approval.forget_account", false, false, true),
             ("approval.remember", true, false, false),
+            ("eip1193.request", true, false, false),
         ] {
             for (caller, allowed) in [
                 (CallerKind::Page, page),
