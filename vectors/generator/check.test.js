@@ -30,6 +30,7 @@ FILES.push('profiles.json', 'generator/profiles.js');
 FILES.push('secrets.json', 'generator/secrets.js');
 FILES.push('keystore.json', 'generator/keystore.js', 'generator/hpke.js');
 FILES.push('generator/approval-rules.js', 'generator/approval-decisions.js');
+FILES.push('eip1193.json', 'generator/eip1193.js');
 
 function corruptedCheck(filename, corrupt) {
   const copy = fs.mkdtempSync(path.join(os.tmpdir(), 'freedom-core-vectors-'));
@@ -870,6 +871,14 @@ test('check rejects a changed approvals decision', () => {
     pair.core = 'apart';
   });
   assert.match(stderr, /Byte mismatch: approvals.json/);
+});
+
+test('check rejects a changed Ethereum dispatcher answer', () => {
+  const stderr = corruptedCheck('eip1193.json', (contents) => {
+    const scenario = contents.scenarios.find((item) => item.id === 'send-approved');
+    scenario.requests[0].effects.find((item) => item.effect === 'send.sign').args.tx.gasLimit = '50000';
+  });
+  assert.match(stderr, /Byte mismatch: eip1193.json/);
 });
 
 test('check takes the approvals vectors from their own reference, at its pinned commit', () => {

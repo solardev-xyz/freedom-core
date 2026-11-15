@@ -491,6 +491,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "fc-eip1193"
+version = "0.17.0"
+dependencies = [
+ "fc-json",
+ "serde_json",
+]
+
+[[package]]
 name = "fc-evm"
 version = "0.17.0"
 dependencies = [
@@ -714,6 +722,7 @@ dependencies = [
  "fc-approval",
  "fc-chain",
  "fc-dweb",
+ "fc-eip1193",
  "fc-evm",
  "fc-json",
  "fc-keys",
