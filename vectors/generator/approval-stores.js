@@ -447,14 +447,14 @@ const x402Runs = [
     id: 'caps',
     start: null,
     steps: [
-      STEP('grant', [SITE, 8453, USDC, '10000000', 3600], T, LOAD),
-      STEP('grant', [SITE, 1, USDC.toLowerCase(), '5', 60], T + 1, LOAD),
-      STEP('charge', [SITE, 8453, USDC, '2500000'], T + 2, LOAD),
-      STEP('charge', [SITE, 8453, USDC, '7500001'], T + 3, LOAD),
-      STEP('updatePermission', [SITE, 8453, USDC, { capAmount: '20000000' }], T + 4, LOAD),
-      STEP('grant', [NAME, 100, USDC, '1', 10], T + 5, LOAD),
-      STEP('revoke', [SITE, 1, USDC.toLowerCase()], T + 6, LOAD),
-      STEP('revokeAllForOrigin', [NAME], T + 7, LOAD),
+      STEP('grant', [SITE, 8453, USDC, '10000000', 3600], T),
+      STEP('grant', [SITE, 1, USDC.toLowerCase(), '5', 60], T + 1),
+      STEP('charge', [SITE, 8453, USDC, '2500000'], T + 2),
+      STEP('charge', [SITE, 8453, USDC, '7500001'], T + 3),
+      STEP('updatePermission', [SITE, 8453, USDC, { capAmount: '20000000' }], T + 4),
+      STEP('grant', [NAME, 100, USDC, '1', 10], T + 5),
+      STEP('revoke', [SITE, 1, USDC.toLowerCase()], T + 6),
+      STEP('revokeAllForOrigin', [NAME], T + 7),
     ],
   },
   {
@@ -472,7 +472,7 @@ const x402Runs = [
     }, null, 2),
     steps: [
       STEP('getAllPermissions', [], T),
-      STEP('grant', [OTHER, 8453, USDC, '1', 60], T + 1, LOAD),
+      STEP('grant', [OTHER, 8453, USDC, '1', 60], T + 1),
       STEP('getAllPermissions', [], T + 1000),
       STEP('reload', [], T + 1000),
       STEP('getAllPermissions', [], T + 1000),
@@ -502,10 +502,59 @@ x402Runs.push({
   steps: [
     STEP('getAllPermissions', [], T),
     // The reference writes the Infinity it holds as null, which its next
-    // read drops: the core, reading that text, drops it at once.
-    STEP('grant', [SITE, 8453, '0x' + '11'.repeat(20), '1', 60], T + 1, { core: 'load-compacts' }),
+    // read drops; so does the core, which holds the same Infinity.
+    STEP('grant', [SITE, 8453, '0x' + '11'.repeat(20), '1', 60], T + 1),
     STEP('reload', [], T + 2),
     STEP('getAllPermissions', [], T + 2),
+  ],
+});
+
+// The asset's case (`x402-asset-case`): the reference keys a cap by the
+// asset as each caller writes it; the core keys it in lowercase, as
+// tupleFromAccept hands it, so one cap answers throughout.
+x402Runs.push({
+  id: 'asset-case',
+  start: null,
+  steps: [
+    STEP('grant', [SITE, 8453, USDC, '30000', 3600], T),
+    STEP('getPermission', [SITE, 8453, USDC], T + 1),
+    STEP('getPermission', [SITE, 8453, USDC.toLowerCase()], T + 2),
+    STEP('charge', [SITE, 8453, USDC, '10000'], T + 3),
+    STEP('charge', [SITE, 8453, USDC.toLowerCase(), '10000'], T + 4),
+    STEP('updatePermission', [SITE, 8453, USDC, { capAmount: '25000' }], T + 5),
+    STEP('updatePermission', [SITE, 8453, USDC.toLowerCase(), { windowSeconds: 60 }], T + 6),
+    STEP('getAllPermissions', [], T + 7),
+    STEP('revoke', [SITE, 8453, USDC], T + 8),
+    STEP('getAllPermissions', [], T + 9),
+  ],
+});
+
+// A wall clock set before a cap's createdAt (`x402-clock-back`): the
+// reference's cap still answers; the core's answers nothing until the clock
+// is back, and the cap stays in the file.
+x402Runs.push({
+  id: 'clock-back',
+  start: null,
+  steps: [
+    STEP('grant', [SITE, 8453, USDC.toLowerCase(), '20000', 3600], T),
+    STEP('getPermission', [SITE, 8453, USDC.toLowerCase()], T - 5000, { clockBack: true }),
+    STEP('charge', [SITE, 8453, USDC.toLowerCase(), '10000'], T - 5000, { clockBack: true }),
+    STEP('charge', [SITE, 8453, USDC.toLowerCase(), '10000'], T + 1),
+    STEP('charge', [SITE, 8453, USDC.toLowerCase(), '10000'], T + 2),
+  ],
+});
+
+// A charge given back (`refund`, the payment withheld): never below zero.
+x402Runs.push({
+  id: 'refund',
+  start: null,
+  steps: [
+    STEP('grant', [SITE, 8453, USDC.toLowerCase(), '20000', 3600], T),
+    STEP('charge', [SITE, 8453, USDC.toLowerCase(), '5000'], T + 1),
+    STEP('charge', [SITE, 8453, USDC.toLowerCase(), '7000'], T + 2),
+    STEP('refund', ['$charge'], T + 3),
+    STEP('refund', ['$charge'], T + 4),
+    STEP('refund', ['$charge'], T + 5),
   ],
 });
 
@@ -524,21 +573,35 @@ function assertKeys(origins, runs) {
   }
 }
 
-function runStore(checkout, store, run) {
+// The asset argument of each x402 operation that takes one.
+const X402_ASSET_OPS = new Set(['grant', 'getPermission', 'charge', 'updatePermission', 'revoke']);
+
+/** One run of `store`'s operations over the reference; `variant` lowers
+ * every x402 asset and skips a clock-back step, as the core makes them. */
+function runSteps(checkout, store, run, variant) {
   const fs = memoryFs();
   const file = `${USER_DATA}/${FILES[store]}`;
   const start = typeof run.start === 'function' ? run.start() : run.start;
   if (start !== null) fs.files.set(file, start);
   let mod = loadStore(checkout, store, fs);
+  let lastCharge = null;
   const steps = run.steps.map((step) => {
     const before = fs.state.writes;
     let outcome;
+    const args = step.args.map((arg, i) => {
+      if (arg === '$charge') return lastCharge;
+      return variant && i === 2 && X402_ASSET_OPS.has(step.op) ? arg.toLowerCase() : arg;
+    });
     if (step.op === 'reload') {
       mod._resetCache();
       outcome = { value: null };
+    } else if (variant && step.clockBack) {
+      outcome = { value: null };
     } else {
       assert.equal(typeof mod[step.op], 'function', `${store}: ${step.op}`);
-      outcome = at(step.at, () => attempt(() => mod[step.op](...step.args)));
+      let returned;
+      outcome = at(step.at, () => attempt(() => { returned = mod[step.op](...args); return returned; }));
+      if (step.op === 'charge' && returned) lastCharge = returned;
     }
     const out = {
       op: step.op,
@@ -556,6 +619,29 @@ function runStore(checkout, store, run) {
   // No temp file is left behind (Swarm's rename).
   assert.deepEqual([...fs.files.keys()].filter((name) => name !== file), [], `${store}/${run.id}`);
   return { id: run.id, start, steps };
+}
+
+function runStore(checkout, store, run) {
+  const reference = runSteps(checkout, store, run, false);
+  if (store !== 'x402') return reference;
+  // The core makes x402's operations itself: its answers are the
+  // reference's with every asset in lowercase (`x402-asset-case`) and a
+  // clock-back step answering nothing (`x402-clock-back`).
+  const core = runSteps(checkout, store, run, true);
+  // The row of the first divergence, carried by every step after it.
+  let carried = null;
+  reference.steps.forEach((step, index) => {
+    const ours = core.steps[index];
+    const answer = ours.error !== undefined ? { error: ours.error } : { result: ours.result };
+    const differs = JSON.stringify(answer) !== JSON.stringify(step.error !== undefined ? { error: step.error } : { result: step.result })
+      || ours.text !== step.text;
+    step.core = { ...answer, wrote: ours.wrote, text: ours.text };
+    const row = run.steps[index].clockBack ? 'x402-clock-back' : 'x402-asset-case';
+    if (differs) carried ??= row;
+    if (run.steps[index].clockBack) step.deviation = row;
+    else if (differs || carried) step.deviation = carried ?? row;
+  });
+  return reference;
 }
 
 // ---------------------------------------------------------------------------
@@ -855,6 +941,6 @@ function buildRollback(checkout) {
 
 const ROLLBACK_FORMAT = `Q9's legacy transition, for the site \`key\`: \`texts.before\`, the entry with today's signing flag and transaction rules as an older build wrote it, and the same file after an "Always allow" for the signing flag (\`signing\`), for the call ${JSON.stringify(REPLACED)} from a confirmed send of its \`value\` (\`transaction\`), for both (\`both\`, signing first), and after both and then both rules turned off (\`off\`), each written as design 0012 writes it, with \`grantedAt\` ${GRANTED}. \`reference\`: what the reference's dapp-permissions.js answers for each text, at ${OFF_AT}: \`getSigningAutoApprove\` (\`signing\`), and \`isTransactionAutoApproved\` with a value of 0 for the replaced call (\`replaced\`) and for ${JSON.stringify(KEPT)}, a rule no change replaces (\`kept\`).`;
 
-const STORES_FORMAT = 'Each grant store\'s file (`file`): `runs`, from a `start` text (or none), each step an operation of the reference\'s store (`op`, its `args`) at `at` (the wall clock, in milliseconds, as `Date.now()` gives it), its `result` (or `error`), whether it wrote the file (`wrote`) and the file\'s text after it (`text`, null while there is none); a `reload` drops the store\'s cache, as a new process would. `core: load` where the core makes no such change itself (an older build\'s rule, or x402\'s cap operations, which are X402-1\'s): the core reads the text the reference wrote and writes it back byte for byte; `core: load-compacts`, the same but for what the reference\'s own next read of that text drops (a cap whose expiresAt the write made null), which the core drops as it reads. `core: legacy`: the reference\'s lookup of today\'s rule, which the new build answers none of (`rule-legacy`). `malformed`: a file\'s `text` (or its bytes in `hex`, which Node decodes as UTF-8 with U+FFFD for each invalid sequence), what the reference\'s store loads from it (`loaded`, `getAllPermissions()` as `value`, or as its `JSON.stringify` text in `json` where it holds a lone surrogate, or its `error`), the text a connect of another site then leaves (`afterGrant`, or its error), and the core\'s reading (`core`: `unreadable`, renamed aside with the store empty, or `parsed`). `sorts`: generated dApp files (`text`) whose entries `k<i>` hold a `lastUsed` of mixed types or none, and the order of `i` the reference\'s `getAllPermissions()` gives (`order`: `b.lastUsed - a.lastUsed` through ToNumber, under V8\'s sort).';
+const STORES_FORMAT = 'Each grant store\'s file (`file`): `runs`, from a `start` text (or none), each step an operation of the reference\'s store (`op`, its `args`) at `at` (the wall clock, in milliseconds, as `Date.now()` gives it), its `result` (or `error`), whether it wrote the file (`wrote`) and the file\'s text after it (`text`, null while there is none); a `reload` drops the store\'s cache, as a new process would. `core: load` where the core makes no such change itself (an older build\'s rule): the core reads the text the reference wrote and writes it back byte for byte. x402\'s steps carry the core\'s own answer to the same operation (`core`: its `result` or `error`, whether it `wrote`, and the `text` after it), which is the reference\'s with every asset argument in lowercase and a `clockBack` step\'s change not made; `deviation` (`x402-asset-case`, `x402-clock-back`) marks a step where it differs from the reference\'s, and every step after a divergence; `$charge` as an argument is the run\'s last charge. `core: legacy`: the reference\'s lookup of today\'s rule, which the new build answers none of (`rule-legacy`). `malformed`: a file\'s `text` (or its bytes in `hex`, which Node decodes as UTF-8 with U+FFFD for each invalid sequence), what the reference\'s store loads from it (`loaded`, `getAllPermissions()` as `value`, or as its `JSON.stringify` text in `json` where it holds a lone surrogate, or its `error`), the text a connect of another site then leaves (`afterGrant`, or its error), and the core\'s reading (`core`: `unreadable`, renamed aside with the store empty, or `parsed`). `sorts`: generated dApp files (`text`) whose entries `k<i>` hold a `lastUsed` of mixed types or none, and the order of `i` the reference\'s `getAllPermissions()` gives (`order`: `b.lastUsed - a.lastUsed` through ToNumber, under V8\'s sort).';
 
 module.exports = { buildStores, STORES_FORMAT, buildRollback, ROLLBACK_FORMAT, GRANTED, RULE_TTL_MS, T, SITE, OTHER, NAME, DWEB, USDC, ROUTER, APPROVE, TRANSFER, USER_DATA, FILES, memoryFs, loadStore, at, attempt, plain, allowSigning, allowTransaction };

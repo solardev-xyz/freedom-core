@@ -40,6 +40,10 @@ name = "device_remember"
 required-features = ["testhooks"]
 
 [[test]]
+name = "x402"
+required-features = ["testhooks"]
+
+[[test]]
 name = "fragments"
 required-features = ["testhooks"]
 

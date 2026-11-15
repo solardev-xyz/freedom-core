@@ -896,6 +896,7 @@ impl Vault {
                 | "keys.radicle_did"
         ) || crate::signing::METHODS.contains(&method)
             || Approvals::handles(method)
+            || crate::approvals::x402::METHODS.contains(&method)
     }
 
     /// Handles a request. Inline methods reply at once; KDF methods are
@@ -949,6 +950,18 @@ impl Vault {
                 };
                 crate::signing::handle(&self.state, &mut checks, method, raw)
                     .map(|result| json_result(id, &result))
+            }
+            // x402's payments (X402-1): the caps, the token and the
+            // authorization the core signs itself.
+            _ if crate::approvals::x402::METHODS.contains(&method) => {
+                let clocks = self.clocks();
+                fc_evm::parse_json(raw.unwrap_or("{}"))
+                    .map_err(|_| ErrorBody::new(ErrorCode::InvalidArgument, "Invalid parameters"))
+                    .and_then(|params| {
+                        self.approvals
+                            .x402_request(&self.state, id, method, &params, clocks)
+                    })
+                    .map(Some)
             }
             _ if Approvals::handles(method) => {
                 let clocks = self.clocks();

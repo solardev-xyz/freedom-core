@@ -444,10 +444,12 @@ version = "0.17.0"
 dependencies = [
  "fc-evm",
  "fc-json",
+ "k256",
  "rand_core 0.10.1",
  "serde_json",
  "sha2",
  "thiserror",
+ "url",
  "zeroize",
 ]
 

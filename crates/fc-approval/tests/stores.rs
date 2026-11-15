@@ -10,9 +10,10 @@
 use std::path::PathBuf;
 
 use fc_approval::stores::{
-    CapStore, DappStore, Effect, JsValue, RadicleFlag, RadicleStore, StoreKind, SwarmFlag,
+    CapStore, Charge, DappStore, Effect, JsValue, RadicleFlag, RadicleStore, StoreKind, SwarmFlag,
     SwarmStore, Unreadable, js_text,
 };
+use fc_approval::x402::asset_key;
 
 static UNDEFINED: JsValue = JsValue::Undefined;
 
@@ -415,55 +416,151 @@ fn site_store_runs() {
     assert!(count >= 13);
 }
 
+/// A cap's record as a result gives it: `{ origin, chainId, asset,
+/// ...record }` without the first three.
+fn record_of(result: &JsValue) -> String {
+    let JsValue::Object(props) = result else {
+        panic!("not a record: {result:?}");
+    };
+    let fields = props
+        .iter()
+        .filter(|(name, _)| !matches!(name.as_str(), "origin" | "chainId" | "asset"))
+        .cloned()
+        .collect();
+    js_text(&JsValue::Object(fields))
+}
+
+fn number(value: &JsValue) -> f64 {
+    match value {
+        JsValue::Number(n) => *n,
+        other => panic!("not a number: {other:?}"),
+    }
+}
+
+/// x402's runs (X402-1): the core makes each operation itself, and its
+/// answer and the text after it are the vector's `core`: the reference's
+/// with the asset in lowercase (`x402-asset-case`) and a clock set back
+/// answering nothing (`x402-clock-back`).
 #[test]
-fn cap_store_codec() {
-    let store = stores().at("x402").clone();
-    assert!(store.at("file").is(StoreKind::X402.file_name()));
-    for run in store.at("runs").items() {
+fn cap_store_operations() {
+    let vectors = stores().at("x402").clone();
+    assert!(vectors.at("file").is(StoreKind::X402.file_name()));
+    let mut deviations = std::collections::BTreeSet::new();
+    for run in vectors.at("runs").items() {
         let id = run.at("id").text();
-        let mut file = run.at("start").as_str().map(str::to_owned);
+        let mut store: Option<CapStore> = None;
+        let mut last_charge: Option<Charge> = None;
         for (index, step) in run.at("steps").items().iter().enumerate() {
             let label = format!("x402/{id} step {index}");
             let now_s = at(step) / 1000;
-            if step.at("wrote") == &boolean(true) {
-                let text = step.at("text").text();
-                let ours = CapStore::load(text.as_bytes(), now_s)
-                    .unwrap()
-                    .text()
-                    .unwrap();
-                match step.at("core").text() {
-                    // The reference's text, read and written back byte for
-                    // byte.
-                    "load" => assert_eq!(ours, text, "{label}"),
-                    // Less what the reference's next read drops (checked
-                    // by the run's later getAllPermissions), and then a
-                    // fixed point.
-                    "load-compacts" => {
-                        assert_ne!(ours, text, "{label}");
-                        assert_eq!(
-                            CapStore::load(ours.as_bytes(), now_s)
-                                .unwrap()
-                                .text()
-                                .unwrap(),
-                            ours,
-                            "{label}"
-                        );
-                    }
-                    other => panic!("{label}: core {other}"),
-                }
-                file = Some(text.to_owned());
+            let core = step.at("core");
+            if let Some(row) = step.at("deviation").as_str() {
+                deviations.insert(row.to_owned());
             }
-            if step.at("op").is("getAllPermissions") {
-                // The caps live at that time, as the file gives them.
-                let current = CapStore::load(file.as_deref().unwrap().as_bytes(), now_s).unwrap();
-                assert_eq!(
-                    js_text(&cap_list(&current)),
-                    js_text(step.at("result")),
-                    "{label}"
-                );
+            // Read at the first operation, as the reference's lazy load.
+            let s = store.get_or_insert_with(|| match run.at("start").as_str() {
+                Some(text) => CapStore::load(text.as_bytes(), now_s).unwrap(),
+                None => CapStore::new(),
+            });
+            let before = s.clone();
+            let args = step.at("args");
+            let origin = || args.index(0).text();
+            let key = || asset_key(number(args.index(1)), args.index(2).text());
+            let effect = match step.at("op").text() {
+                "grant" => {
+                    let applied = s.grant(
+                        origin(),
+                        &key(),
+                        args.index(3).text(),
+                        number(args.index(4)),
+                        now_s,
+                    );
+                    assert_eq!(
+                        js_text(applied.value.as_ref().unwrap()),
+                        record_of(core.at("result")),
+                        "{label}"
+                    );
+                    applied.effect
+                }
+                "charge" => {
+                    let applied = s.charge(origin(), &key(), args.index(3).text(), now_s);
+                    assert_eq!(
+                        applied.value.is_some(),
+                        matches!(core.at("result"), JsValue::Object(_)),
+                        "{label}"
+                    );
+                    if applied.value.is_some() {
+                        last_charge = applied.value;
+                    }
+                    applied.effect
+                }
+                "refund" => {
+                    let applied = s.refund(last_charge.as_ref().unwrap());
+                    assert_eq!(boolean(applied.value), *core.at("result"), "{label}");
+                    applied.effect
+                }
+                "updatePermission" => {
+                    let patch = args.index(3);
+                    let applied = s.update(
+                        origin(),
+                        &key(),
+                        patch.at("capAmount").as_str(),
+                        match patch.at("windowSeconds") {
+                            JsValue::Undefined => None,
+                            window => Some(number(window)),
+                        },
+                    );
+                    match core.at("result") {
+                        JsValue::Undefined => assert!(applied.value.is_none(), "{label}"),
+                        result => assert_eq!(
+                            js_text(applied.value.as_ref().unwrap()),
+                            record_of(result),
+                            "{label}"
+                        ),
+                    }
+                    applied.effect
+                }
+                "revoke" => s.revoke(origin(), &key()).effect,
+                "revokeAllForOrigin" => s.revoke_all(origin()).effect,
+                "getPermission" => {
+                    let active = s.active(origin(), &key(), now_s);
+                    assert_eq!(
+                        active.is_some(),
+                        matches!(core.at("result"), JsValue::Object(_)),
+                        "{label}"
+                    );
+                    Effect::Unchanged
+                }
+                "getAllPermissions" => {
+                    // The caps live at that time.
+                    assert_eq!(
+                        js_text(&cap_list(&s.live(now_s))),
+                        js_text(core.at("result")),
+                        "{label}"
+                    );
+                    Effect::Unchanged
+                }
+                "reload" => {
+                    *s = CapStore::load(s.text().unwrap().as_bytes(), now_s).unwrap();
+                    Effect::Unchanged
+                }
+                other => panic!("{label}: no core operation for {other}"),
+            };
+            if core.at("wrote") == &boolean(true) {
+                assert_eq!(s.text().unwrap(), core.at("text").text(), "{label}");
+            } else {
+                // The reference wrote nothing: neither does the core.
+                assert_eq!(effect, Effect::Unchanged, "{label}");
+                if !step.at("op").is("reload") {
+                    assert_eq!(*s, before, "{label}");
+                }
             }
         }
     }
+    assert_eq!(
+        deviations.into_iter().collect::<Vec<_>>(),
+        ["x402-asset-case", "x402-clock-back"]
+    );
 }
 
 /// The core's store after reading `bytes`, as getAllPermissions lists it,
@@ -483,6 +580,21 @@ fn read(kind: StoreKind, bytes: &[u8]) -> Result<JsValue, Unreadable> {
 
 /// A connect of `https://other.example` at the vectors' clock, on what the
 /// core read from `bytes` (an empty store for an unreadable file).
+/// Base's USDC, which the generator's x402 grant names in mixed case.
+const USDC: &str = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913";
+
+/// The reference's text after its grant, as the core writes it: the cap's
+/// key in lowercase (`x402-asset-case`), the only place the asset appears.
+fn expected_after(kind: StoreKind, text: &str) -> String {
+    match kind {
+        StoreKind::X402 => {
+            assert!(text.is_empty() || text.contains(USDC), "{text}");
+            text.replace(USDC, &USDC.to_lowercase())
+        }
+        _ => text.to_owned(),
+    }
+}
+
 fn connect_after(kind: StoreKind, bytes: &[u8]) -> String {
     const OTHER: &str = "https://other.example";
     const T: u64 = 1_762_000_000_000;
@@ -502,7 +614,13 @@ fn connect_after(kind: StoreKind, bytes: &[u8]) -> String {
             store.connect(OTHER, T);
             store.text().unwrap()
         }
-        StoreKind::X402 => unreachable!("x402's caps are X402-1's"),
+        // The reference's `grant(other, 8453, USDC, "1", 60)`, the asset
+        // in lowercase (`x402-asset-case`).
+        StoreKind::X402 => {
+            let mut store = CapStore::load(bytes, T / 1000).unwrap_or_default();
+            store.grant(OTHER, &asset_key(8453.0, USDC), "1", 60.0, T / 1000);
+            store.text().unwrap()
+        }
     }
 }
 
@@ -524,15 +642,14 @@ fn malformed_files() {
             match case.at("core").text() {
                 "unreadable" => {
                     assert!(read(kind, &bytes).is_err(), "{label}");
-                    if kind != StoreKind::X402 {
-                        // Renamed aside, the store starts empty: a connect
-                        // then writes what it writes on an empty file.
-                        assert_eq!(
-                            connect_after(kind, &bytes),
-                            empty.at("afterGrant").at("text").text(),
-                            "{label}"
-                        );
-                    }
+                    // Renamed aside, the store starts empty: a connect (a
+                    // grant, for x402) then writes what it writes on an
+                    // empty file.
+                    assert_eq!(
+                        connect_after(kind, &bytes),
+                        expected_after(kind, empty.at("afterGrant").at("text").text()),
+                        "{label}"
+                    );
                 }
                 "parsed" => {
                     let read = read(kind, &bytes).unwrap();
@@ -545,13 +662,11 @@ fn malformed_files() {
                             "{label}"
                         ),
                     }
-                    if kind != StoreKind::X402 {
-                        assert_eq!(
-                            connect_after(kind, &bytes),
-                            case.at("afterGrant").at("text").text(),
-                            "{label}"
-                        );
-                    }
+                    assert_eq!(
+                        connect_after(kind, &bytes),
+                        expected_after(kind, case.at("afterGrant").at("text").text()),
+                        "{label}"
+                    );
                 }
                 other => panic!("{label}: core {other}"),
             }
