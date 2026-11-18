@@ -965,6 +965,111 @@ fn a_rule_send_gone_or_unlock_refused_signs_nothing() {
     );
 }
 
+/// Main's own `chain.fee_reference` for chain 1, the node answering at 2
+/// gwei with a 1 gwei tip: a reference the core's quote (30 gwei) is far
+/// above.
+fn lower_the_reference(core: &mut Core, id: u64, node: &mut Node) {
+    node.gas_price = 2 * GWEI;
+    node.priority = Some(GWEI);
+    core.send(&json!({
+        "type": "request", "id": id, "method": "chain.fee_reference",
+        "params": { "chain_id": 1, "deadline_ms": 30_000 },
+        "context": { "caller": "chrome" },
+    }));
+    let reference = until_main(core, id, node);
+    assert!(reference.get("error").is_none(), "{reference}");
+}
+
+/// Six rule sends chosen while the rule had room, each held at its
+/// recheck. The first five answered and signed under `{ standing }` spend
+/// Q9's burst, so at the sixth's recheck the rule is past its rate: the
+/// user is asked with the sixth's own quote (*inferred*, as Q9 asks rather
+/// than refuses), never `{ send }` under the rule nor its refusal.
+/// Approved, the send is the user's: `{ send }` with its token.
+#[test]
+fn a_rule_past_its_rate_by_its_recheck_is_asked() {
+    let (_root, mut core, _clock) = core_for(&ruled_grants("5"), 2, false);
+    let mut node = Node::new(estimate());
+    let mut body = send_body();
+    body["world"]["paused"] = json!(false);
+    let mut rechecks = Vec::new();
+    for n in 0..6u64 {
+        let id = 100 + 10 * n;
+        request(&mut core, id, Some(SITE), &body);
+        let recheck = until_main(&mut core, id, &mut node);
+        assert_eq!(recheck["method"], "approval.recheck", "{n}: {recheck}");
+        rechecks.push((id, recheck));
+    }
+    let live = json!({ "result": { "live": true, "agent": false } });
+    let (sixth, last) = rechecks.pop().unwrap();
+    // Main's request IDs only increase: the signatures come after all six.
+    for (id, recheck) in &rechecks {
+        respond(&mut core, recheck, live.clone());
+        let send = until_main(&mut core, *id, &mut node)["result"]["send"].clone();
+        assert_eq!(send["standing"], true, "{id}: {send}");
+        let signed = sign_standing(&mut core, id + 100, &send, false);
+        assert!(signed["result"]["raw"].is_string(), "{id}: {signed}");
+    }
+    respond(&mut core, &last, live);
+    let asked = until_main(&mut core, sixth, &mut node);
+    assert_eq!(asked["method"], "approval.request", "{asked}");
+    assert_eq!(asked["params"]["kind"], "eth.send", "{asked}");
+    assert_eq!(asked["params"]["request"], sixth, "{asked}");
+    assert_eq!(
+        asked["params"]["view"]["fee"]["gasLimit"], "60000",
+        "{asked}"
+    );
+    assert_eq!(
+        asked["params"]["view"]["feeCheck"]["above"], false,
+        "{asked}"
+    );
+    let answer = json!({ "prompt": asked["params"]["prompt"], "handle": "66".repeat(32),
+        "approve": true, "choices": {}, "world": body["world"] });
+    respond(&mut core, &asked, json!({ "result": answer }));
+    let done = until_main(&mut core, sixth, &mut node);
+    let send = &done["result"]["send"];
+    assert!(send["token"].is_string(), "{done}");
+    assert!(send.get("standing").is_none(), "{done}");
+    let signed = sign(&mut core, 300, send, |_| {});
+    assert!(signed["result"]["raw"].is_string(), "{signed}");
+}
+
+/// A rule send the fee check let through at its quote, whose fee needs the
+/// user by its recheck: main's own fee reference, lowered while the recheck
+/// is open, finds the prepared fee newly above it, so the user is asked
+/// with the check's verdict now (*inferred*, as for the rate), never
+/// `{ send }` under the rule nor its refusal.
+#[test]
+fn a_rule_send_whose_fee_needs_the_user_by_its_recheck_is_asked() {
+    let (_root, mut core, _clock) = core_for(&ruled_grants("5"), 2, false);
+    let mut node = Node::new(estimate());
+    let mut body = send_body();
+    body["world"]["paused"] = json!(false);
+    request(&mut core, 100, Some(SITE), &body);
+    let recheck = until_main(&mut core, 100, &mut node);
+    assert_eq!(recheck["method"], "approval.recheck", "{recheck}");
+    lower_the_reference(&mut core, 103, &mut node);
+    respond(
+        &mut core,
+        &recheck,
+        json!({ "result": { "live": true, "agent": false } }),
+    );
+    let asked = until_main(&mut core, 100, &mut node);
+    assert_eq!(asked["method"], "approval.request", "{asked}");
+    assert_eq!(asked["params"]["kind"], "eth.send", "{asked}");
+    let check = &asked["params"]["view"]["feeCheck"];
+    assert_eq!(
+        (check["above"].clone(), check["autoApprove"].clone()),
+        (json!(true), json!(false)),
+        "{asked}"
+    );
+    let answer = json!({ "prompt": asked["params"]["prompt"], "handle": "55".repeat(32),
+        "approve": false, "choices": {} });
+    respond(&mut core, &asked, json!({ "result": answer }));
+    let rejected = until_main(&mut core, 100, &mut node);
+    assert_eq!(rejected["result"]["error"]["code"], 4001, "{rejected}");
+}
+
 /// A Ledger's send with "Always allow" ticked answers `{ device }`, whose
 /// `dapp-send` spent by main gives the device send's receipt. A Safe's is
 /// asked with its executor paying, "Always allow" not pickable, and answers
@@ -1048,5 +1153,60 @@ fn a_device_send_answers_its_token() {
         "tx": { "to": TO, "value": "5", "data": APPROVE_DATA } })
     );
     let spent = spend(&mut core, 121, device);
+    assert!(spent["result"].is_object(), "{spent}");
+}
+
+/// A phone picks and pays its own fee (design 0012, "Transaction
+/// building"): its send is judged on no fee evidence, before its prompt or
+/// at its approve. Main's own fee reference, lowered while the prompt is
+/// open so that a vault's fee would be asked again, leaves the phone's
+/// approve its `{ device }`, whose `dapp-send` main spends on `phone.job`.
+#[test]
+fn a_phone_send_is_never_fee_checked() {
+    const PHONE: &str = "0xb6716976A3ebe8D39aCEB04372f22Ff8e6802D7A";
+    let mut grants = connected();
+    grants[SITE]["walletIndex"] = json!(2);
+    let (_root, mut core, _clock) = core_for(&grants, 2, false);
+    let mut estimate = estimate();
+    estimate["args"]["params"][0]["from"] = json!(PHONE);
+    let mut node = Node::new(estimate);
+    let mut body = send_body();
+    body["world"]["wallets"] =
+        json!([{ "index": 2, "name": "Phone", "address": PHONE, "type": "remote" }]);
+    request(&mut core, 100, Some(SITE), &body);
+    let asked = until_main(&mut core, 100, &mut node);
+    assert_eq!(asked["params"]["kind"], "eth.send", "{asked}");
+    let view = &asked["params"]["view"];
+    assert_eq!(
+        (view["feeCheck"].clone(), view["feeAskAgain"].clone()),
+        (Value::Null, json!(false)),
+        "{asked}"
+    );
+    lower_the_reference(&mut core, 103, &mut node);
+    let answer = json!({ "prompt": asked["params"]["prompt"], "handle": "44".repeat(32),
+        "approve": true, "choices": {}, "world": body["world"] });
+    respond(&mut core, &asked, json!({ "result": answer }));
+    let done = until_main(&mut core, 100, &mut node);
+    let device = &done["result"]["device"];
+    assert_eq!(
+        (device["type"].clone(), device["kind"].clone()),
+        (json!("remote"), json!("dapp-send")),
+        "{done}"
+    );
+    let tx = &device["payload"]["tx"];
+    assert_eq!(
+        (tx["gas_limit"].clone(), tx["max_fee_per_gas"].clone()),
+        (json!("60000"), json!("30000000000")),
+        "{done}"
+    );
+    core.send(&json!({
+        "type": "request", "id": 110, "method": "phone.job",
+        "params": { "account": device["account"], "address": PHONE, "method": "transaction",
+            "payload": device["payload"],
+            "authorization": { "token": device["token"], "kind": "dapp-send", "handle": device["handle"] },
+            "target": 9 },
+        "context": page(Some(SITE)),
+    }));
+    let spent = core.until_response(110);
     assert!(spent["result"].is_object(), "{spent}");
 }
