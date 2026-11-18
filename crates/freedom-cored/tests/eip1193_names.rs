@@ -110,6 +110,15 @@ impl Main {
     /// imported from ABANDON and unlocked, naming read Direct from `n1`,
     /// and Gnosis read Direct from `e100`. `env` adds to the name hook.
     fn new(grants: &Value, env: &[(&str, &str)]) -> (tempfile::TempDir, Main) {
+        Main::with_timeout(grants, env, 5000)
+    }
+
+    /// As [`Main::new`], naming's calls timing out after `timeout_ms`.
+    fn with_timeout(
+        grants: &Value,
+        env: &[(&str, &str)],
+        timeout_ms: u64,
+    ) -> (tempfile::TempDir, Main) {
         let (root, data, locks) = dirs();
         let mut all = vec![("FREEDOM_CORED_TEST_EIP1193_NAMES_UNCACHED", "1")];
         all.extend_from_slice(env);
@@ -137,7 +146,7 @@ impl Main {
                 "direct": { "endpoint": "n1", "user_configured": true },
                 "prover": null,
                 "policy": { "order": ["direct"], "prefer_verified": false },
-                "quorum": { "k": 3, "m": 2, "timeout_ms": 5000, "anchor": "latest", "anchor_ttl_ms": 30000 },
+                "quorum": { "k": 3, "m": 2, "timeout_ms": timeout_ms, "anchor": "latest", "anchor_ttl_ms": 30000 },
                 "myotis_enabled": false,
                 "tezos": ["t1", "t2", "t3"],
             }),
@@ -782,15 +791,17 @@ fn without_a_binding_nothing_is_resolved() {
 /// ends the binding.
 #[test]
 fn a_check_has_the_requests_deadline_and_cancel() {
-    let (_root, mut main) = Main::new(
+    let (_root, mut main) = Main::with_timeout(
         &grants(),
-        &[("FREEDOM_CORED_TEST_EIP1193_OVERALL_MS", "1500")],
+        &[("FREEDOM_CORED_TEST_EIP1193_OVERALL_MS", "3000")],
+        90_000,
     );
     let world = plain_world();
     main.request(10, &named(1), "eth_accounts", json!([]), &world);
     // The lookup reaches main, which holds it.
     let held = loop {
         let message = main.core.recv();
+        assert_ne!(message["type"], "response", "{message}");
         if message["method"] == "shell.rpc" {
             let body: Value =
                 serde_json::from_str(message["params"]["body"].as_str().unwrap()).unwrap();
@@ -853,32 +864,22 @@ fn a_device_signature_moved_after_the_approve_gets_no_token() {
     main.all_checked("device");
 }
 
-/// main's cancel of a page request whose name check is out: `cancelled`,
-/// and the lookup's call cancelled at once, not at naming's own timeout.
+/// main's cancel of a page request whose name check is out: `cancelled`.
+/// Naming keeps the lookup's session running (design 0004), and its
+/// verdict, when it comes, decides nothing: the binding stands.
 #[test]
 fn a_cancel_ends_the_name_check() {
-    let (_root, mut main) = Main::new(&grants(), &[]);
+    let (_root, mut main) = Main::with_timeout(&grants(), &[], 90_000);
     let world = plain_world();
     main.request(10, &named(1), "eth_accounts", json!([]), &world);
     let held = main.held_call();
-    let started = std::time::Instant::now();
     main.core.send(&json!({ "type": "cancel", "id": 10 }));
-    let (mut cancelled, mut answered) = (false, false);
-    while !(cancelled && answered) {
-        let message = main.core.recv();
-        match message["type"].as_str() {
-            Some("cancel") => {
-                assert_eq!(message["id"], held["id"]);
-                cancelled = true;
-            }
-            Some("response") => {
-                assert_eq!(message["id"], 10);
-                assert_eq!(message["error"]["code"], "cancelled", "{message}");
-                answered = true;
-            }
-            _ => panic!("unexpected {message}"),
-        }
-    }
-    // At once: naming's own call timeout (5 s) would cancel it later.
-    assert!(started.elapsed() < Duration::from_secs(2));
+    let reply = main.next();
+    assert_eq!(reply["id"], 10, "{reply}");
+    assert_eq!(reply["error"]["code"], "cancelled", "{reply}");
+    main.node(&held, &resolve_body(OTHER_CONTENTHASH));
+    main.script(&[Name::Serves, Name::Serves]);
+    main.request(11, &named(1), "eth_accounts", json!([]), &world);
+    assert_eq!(main.answer(11), format!(r#"{{"result":["{ACCOUNT}"]}}"#));
+    main.all_checked("after the cancel");
 }
