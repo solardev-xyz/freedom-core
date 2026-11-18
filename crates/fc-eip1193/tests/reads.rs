@@ -119,7 +119,7 @@ fn every_apr5b_scenario_replays() {
                     };
                     read.answer(outcome)
                 }
-                Step::Connect(_) | Step::Switch(_) | Step::Sign(_) => {
+                Step::Connect(_) | Step::Switch(_) | Step::Sign(_) | Step::Send(_) => {
                     panic!("{what}: a read scenario prompts")
                 }
             };
@@ -274,8 +274,7 @@ fn the_chromes_text_for_a_chain_without_a_source() {
 }
 
 /// `eth_accounts` finds the grant's wallet by JS's `===`, and a method
-/// main doesn't list, `eth_sign`, or one without its route yet, is
-/// refused as main refuses it.
+/// main doesn't list, or `eth_sign`, is refused as main refuses it.
 #[test]
 fn accounts_and_refusals() {
     let ask = |method: &str, enabled: bool, wallets: &str, grant: Option<&str>| {
@@ -286,7 +285,7 @@ fn accounts_and_refusals() {
             grant.map(|g| fc_json::parse(g).unwrap())
         }) {
             Step::Answer(answer) => answer.into_string(),
-            Step::Read(_) | Step::Connect(_) | Step::Switch(_) | Step::Sign(_) => {
+            Step::Read(_) | Step::Connect(_) | Step::Switch(_) | Step::Sign(_) | Step::Send(_) => {
                 panic!("{method}")
             }
         }
@@ -330,10 +329,6 @@ fn accounts_and_refusals() {
         (
             "eth_sign",
             r#"{"error":{"code":4200,"message":"eth_sign is deprecated for security reasons"}}"#,
-        ),
-        (
-            "eth_sendTransaction",
-            r#"{"error":{"code":4200,"message":"Method not supported"}}"#,
         ),
     ] {
         assert_eq!(ask(method, true, "[]", None), answer, "{method}");

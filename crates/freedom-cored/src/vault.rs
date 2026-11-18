@@ -954,6 +954,44 @@ impl Vault {
             .map_err(|body| body.message)
     }
 
+    /// Whether the chain's fee evidence is young enough for a page's send
+    /// to be judged on it (design 0012, APR-5e-1).
+    pub fn eip1193_fee_fresh(&self, chain_id: u64) -> bool {
+        self.approvals.fee_fresh(chain_id, self.clocks().vault_ms)
+    }
+
+    /// The fee check on a page's prepared send: before its prompt, or at
+    /// its approval with `acknowledged` (design 0012, APR-5e-1).
+    pub fn eip1193_fee_check(&self, tx: &str, acknowledged: Option<bool>) -> (String, bool) {
+        self.approvals
+            .page_fee_check(tx, acknowledged, self.clocks())
+    }
+
+    /// The `dapp-send` token for a page's send the user approved on the
+    /// core's own prompt (design 0012, APR-5e-1): minted for the request's
+    /// document and the handle of main's answer, binding the prepared
+    /// transaction without its nonce and "Always allow", and returned to
+    /// main in the `{ send }` answer, which `sign.transaction` spends. The
+    /// token, or the refusal's message.
+    pub fn eip1193_send_token(
+        &mut self,
+        page: &message::PageContext,
+        prepared: &fc_eip1193::send::Prepared,
+    ) -> Result<Zeroizing<String>, String> {
+        let payload = fc_evm::parse_json(&prepared.payload()).map_err(|_| internal().message)?;
+        let clocks = self.clocks();
+        self.approvals
+            .page_token(
+                page,
+                prepared.handle(),
+                fc_approval::Kind::DappSend,
+                prepared.account(),
+                &payload,
+                clocks,
+            )
+            .map_err(|body| body.message)
+    }
+
     /// A page's signature the user approved on the core's own prompt, or
     /// one the site's standing rule answers (design 0012, APR-5d). For an
     /// approve, the page-kind token is minted here for the request's

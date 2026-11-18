@@ -45,10 +45,18 @@
 //! spends it on the signature at once: the token never leaves the core.
 //! Standing rules, Q9 and devices' `{ device }` results are APR-5d-2's.
 //!
-//! The later APR-5 steps add the prepared send (APR-5e) and names over
-//! IPNS (APR-5f). Until then, those methods answer as a dispatcher without
-//! their route does (`4200`, `Method not supported`), but `4900` while the
-//! switch is off.
+//! **APR-5e-1, the prepared send** ([`send`]): `eth_sendTransaction` for a
+//! vault account, through `eth.send`. A document with no key gets `4100`
+//! first. The core prepares the send itself (the estimate plus 20% and its
+//! own fee quote, through its chain machine), judges the fee with its own
+//! evidence, and on an approve the daemon mints the `dapp-send` token for
+//! that answer's page and handle. The answer is `{ send }`: the prepared
+//! transaction without its nonce, and its token, for main to add the nonce
+//! and have it signed. Device sends and rule-answered sends are APR-5e-2's.
+//!
+//! The last APR-5 step adds names over IPNS (APR-5f). Until then, a method
+//! without its route answers as a dispatcher without it does (`4200`,
+//! `Method not supported`), but `4900` while the switch is off.
 
 mod answer;
 pub mod connect;
@@ -56,6 +64,7 @@ mod deadline;
 mod methods;
 pub mod prompt;
 mod request;
+pub mod send;
 pub mod sign;
 pub mod switch;
 mod v8json;
@@ -66,6 +75,7 @@ pub use deadline::{Budget, OVERALL_MS};
 pub use methods::{Class, METHODS, Method, RPC_READS, method};
 pub use prompt::{Crossed, Decision, PromptId, Prompts, Recheck};
 pub use request::{Invalid, Request, World};
+pub use send::Send;
 pub use sign::Sign;
 pub use switch::Switch;
 
@@ -91,6 +101,9 @@ pub enum Step {
     /// A signature (`personal_sign`, `eth_signTypedData_v4`) for a document
     /// with a key: [`Sign::ask`] runs it up to its prompt.
     Sign(Sign),
+    /// A send (`eth_sendTransaction`) for a document with a key:
+    /// [`Send::prepare`] runs it up to its quote.
+    Send(Send),
 }
 
 /// Runs `request` for the document keyed `key` (`PageContext.origin`;
@@ -133,6 +146,10 @@ pub fn start(
             (Some(key), Some(method)) => Step::Sign(Sign::new(request, method, key)),
             _ => Step::Answer(Answer::error(connect::NO_ADDRESS.0, connect::NO_ADDRESS.1)),
         },
+        "eth_sendTransaction" => match key {
+            None => Step::Answer(Answer::error(connect::NO_ADDRESS.0, connect::NO_ADDRESS.1)),
+            Some(key) => Step::Send(Send::new(request, key)),
+        },
         name if RPC_READS.contains(&name) => Step::Read(Read::new(
             chain_id,
             row.name,
@@ -140,7 +157,7 @@ pub fn start(
             key,
             world,
         )),
-        // APR-5e serves the rest.
+        // APR-5f serves the rest.
         _ => Step::Answer(Answer::unsupported()),
     }
 }

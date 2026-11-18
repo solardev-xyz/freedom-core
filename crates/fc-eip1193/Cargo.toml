@@ -16,11 +16,11 @@ workspace = true
 # as main's dispatcher passed a page's params to the chain read (design
 # 0012, APR-5b). fc-approval and fc-chain already link it.
 fc-json = { path = "../fc-json" }
+# A send's prompt shows `to` checksummed, as main's `getAddress` does
+# (APR-5e-1): a workspace logic crate, no new external dependency.
+fc-evm = { path = "../fc-evm" }
 
 [dev-dependencies]
-# The signature replay checks each scripted typed-data view against
-# fc-evm's own (a workspace logic crate; no new external dependency).
-fc-evm = { path = "../fc-evm" }
 # The replays read vectors/eip1193.json; preserve_order keeps the
 # reference's key order in what they compare.
 serde_json = { version = "1", features = ["preserve_order"] }
