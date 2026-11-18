@@ -45,15 +45,22 @@
 //! spends it on the signature at once: the token never leaves the core.
 //! Standing rules, Q9 and devices' `{ device }` results are APR-5d-2's.
 //!
-//! The later APR-5 steps add the prepared send (APR-5e) and names over
-//! IPNS (APR-5f). Until then, those methods answer as a dispatcher without
-//! their route does (`4200`, `Method not supported`), but `4900` while the
-//! switch is off.
+//! **APR-5f, names over IPNS** ([`names`]): for a document whose key is a
+//! DNS name served over IPNS (`PageContext.transport_key`), the daemon
+//! resolves the name with the core's own naming at each of the reference's
+//! checks of a name-revalidated method, and a name that no longer answers
+//! its IPNS key ends the binding: the request, and the document's later
+//! ones, answer as a keyless document's would.
+//!
+//! The prepared send (APR-5e) comes later. Until then, `eth_sendTransaction`
+//! answers as a dispatcher without its route does (`4200`, `Method not
+//! supported`), but `4900` while the switch is off.
 
 mod answer;
 pub mod connect;
 mod deadline;
 mod methods;
+pub mod names;
 pub mod prompt;
 mod request;
 pub mod sign;

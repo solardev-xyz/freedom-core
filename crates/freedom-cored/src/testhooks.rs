@@ -209,6 +209,19 @@ pub fn eip1193_retained(live: usize, handles: usize, ended: usize) {
 #[cfg(not(feature = "testhooks"))]
 pub fn eip1193_retained(_live: usize, _handles: usize, _ended: usize) {}
 
+/// Whether each of a page request's name checks (design 0012, APR-5f)
+/// evicts the name from naming's cache first, so that a test plays every
+/// check's resolution through main, as it scripts it.
+#[cfg(feature = "testhooks")]
+pub fn eip1193_names_uncached() -> bool {
+    std::env::var_os("FREEDOM_CORED_TEST_EIP1193_NAMES_UNCACHED").is_some()
+}
+
+#[cfg(not(feature = "testhooks"))]
+pub fn eip1193_names_uncached() -> bool {
+    false
+}
+
 #[cfg(feature = "testhooks")]
 pub fn eip1193_overall(overall: u64) -> u64 {
     millis("FREEDOM_CORED_TEST_EIP1193_OVERALL_MS").unwrap_or(overall)

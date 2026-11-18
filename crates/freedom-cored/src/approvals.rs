@@ -2731,6 +2731,7 @@ mod tests {
                 frame: 1,
                 navigation: 1,
                 agent: Some(false),
+                transport_key: None,
             }),
         };
         let mut dapp = json!({ "kind": "dapp-send", "account": 0, "payload": send(), "handle": "a1".repeat(32) });

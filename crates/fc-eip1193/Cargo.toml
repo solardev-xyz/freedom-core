@@ -16,6 +16,10 @@ workspace = true
 # as main's dispatcher passed a page's params to the chain read (design
 # 0012, APR-5b). fc-approval and fc-chain already link it.
 fc-json = { path = "../fc-json" }
+# `ipnsMhToCidV1Base36`, which the reference's name check compares with
+# (APR-5f): fc-dweb's port of it. A workspace logic crate; no new external
+# dependency.
+fc-dweb = { path = "../fc-dweb" }
 
 [dev-dependencies]
 # The signature replay checks each scripted typed-data view against

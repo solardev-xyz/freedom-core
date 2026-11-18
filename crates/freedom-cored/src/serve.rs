@@ -155,6 +155,12 @@ pub enum Event {
         tag: u64,
         payload: Box<[u8]>,
     },
+    /// The naming thread checked a page request's name (design 0012,
+    /// APR-5f): whether it still serves the document's IPNS key.
+    NameChecked {
+        tag: u64,
+        holds: bool,
+    },
 }
 
 // A stream mark's slot here is within what the reader charges its entry.
@@ -569,6 +575,12 @@ pub fn run(options: &Options) -> Exit {
             }
             Ok(Event::ChainRead { tag, payload }) => {
                 let outs = core.vault.chain_read(tag, &payload);
+                if let Flow::Exit(exit) = core.dispatch(outs) {
+                    break exit;
+                }
+            }
+            Ok(Event::NameChecked { tag, holds }) => {
+                let outs = core.connects.name_checked(tag, holds, &mut core.vault);
                 if let Flow::Exit(exit) = core.dispatch(outs) {
                     break exit;
                 }
@@ -1424,12 +1436,12 @@ impl Core {
 
     /// A page's `eip1193.request` (design 0012, "fc-eip1193 and
     /// approval.request"; APR-5b, the reads; APR-5c, connects and chain
-    /// switches):
+    /// switches; APR-5d, signatures; APR-5f, names over IPNS):
     /// fc-eip1193's dispatcher, with the page's key (`PageContext.origin`;
     /// empty for a document with no key) and the dApp store. An answer goes
     /// now; a read goes to the chain thread, which answers from its
-    /// outcome; a connect or a switch waits on main's recheck, prompt or
-    /// selection.
+    /// outcome; a connect, a switch or a signature waits on main's recheck,
+    /// prompt or selection, and a name-keyed document's on its name checks.
     fn eip1193(&mut self, id: u64, params: Option<&str>, context: &Context) -> Flow {
         // Its 120 s run from here (`Deadline::Steps`).
         let received = Instant::now();
@@ -1441,6 +1453,26 @@ impl Core {
             return self.error(id, invalid());
         };
         let key = (!page.origin.is_empty()).then_some(page.origin.as_str());
+        // Names over IPNS (APR-5f): a name-revalidated method of a document
+        // whose key is a DNS name over IPNS checks the name before it first
+        // reads the key's grant (`not_moved` first, for one that writes the
+        // dApp store). A chain switch checks once its params pass.
+        let binding = fc_eip1193::names::Binding::of(&page.origin, page.transport_key.as_deref());
+        let first = fc_eip1193::names::checks_first(&request.method);
+        if let (Some(binding), Some(left), Some(_), true) =
+            (binding, first, key, request.world.enabled)
+        {
+            if request.method != "eth_accounts"
+                && let Some(refused) = self.dapp_unmoved(id)
+            {
+                return refused;
+            }
+            let page = page.clone();
+            let outs =
+                self.connects
+                    .named(id, request, &page, binding, left, received, &mut self.vault);
+            return self.dispatch(outs);
+        }
         let vault = &self.vault;
         match fc_eip1193::start(&request, key, |key| vault.dapp_entry(key)) {
             fc_eip1193::Step::Answer(answer) => match RawValue::from_string(answer.into_string()) {
@@ -1457,61 +1489,17 @@ impl Core {
                     Flow::Exit(Exit::Internal)
                 }
             }
-            // A connect or a chain switch for a document with a key (APR-5c):
-            // before the dApp store moves, main writes its grants, so the
-            // core takes neither (*inferred*).
-            fc_eip1193::Step::Connect(connect) => {
-                if let Some(refused) = self.dapp_unmoved(id) {
-                    return refused;
-                }
-                let (key, page) = (page.origin.clone(), page.clone());
-                let outs = self.connects.start(id, connect, &key, &page, received);
+            // A connect, a chain switch or a signature for a document with
+            // a key (APR-5c, APR-5d): before the dApp store moves, main
+            // writes its grants, so the core takes none (*inferred*). Then
+            // main's recheck, its prompt, or the signature's grant, account,
+            // view and rule, up to its prompt or its rule.
+            step => {
+                let page = page.clone();
+                let outs =
+                    self.connects
+                        .run(id, &request.method, step, &page, received, &mut self.vault);
                 self.dispatch(outs)
-            }
-            fc_eip1193::Step::Switch(switch) => {
-                if let Some(refused) = self.dapp_unmoved(id) {
-                    return refused;
-                }
-                let (key, page) = (page.origin.clone(), page.clone());
-                let outs = self.connects.switch(id, switch, &key, &page, received);
-                self.dispatch(outs)
-            }
-            // A signature for a document with a key (APR-5d): before the
-            // dApp store moves its grant is main's, so the core takes none
-            // (*inferred*). Then the grant, the account, what is signed and
-            // the rule, judged with the core's own grant, up to its prompt
-            // or its rule; the core's view of typed data is
-            // `typed_data.hash`'s, as the reference asked the core for it.
-            fc_eip1193::Step::Sign(sign) => {
-                if let Some(refused) = self.dapp_unmoved(id) {
-                    return refused;
-                }
-                let vault = &self.vault;
-                let asked = sign.ask(
-                    page.agent,
-                    |key| vault.dapp_entry(key),
-                    |query| vault.eip1193_rule(&page.origin, page.agent, query),
-                    crate::signing::page_typed_data_view,
-                );
-                match asked {
-                    Err(answer) => match RawValue::from_string(answer.into_string()) {
-                        Ok(answer) => self.result(id, &answer),
-                        Err(_) => Flow::Exit(Exit::Internal),
-                    },
-                    // The site's rule answers it (APR-5d-2): the unlock
-                    // first while the vault is locked, then main's recheck.
-                    Ok(ask) if ask.ruled() => {
-                        let locked = !self.vault.unlocked();
-                        let (key, page) = (page.origin.clone(), page.clone());
-                        let outs = self.connects.rule(id, ask, locked, &key, &page, received);
-                        self.dispatch(outs)
-                    }
-                    Ok(ask) => {
-                        let (key, page) = (page.origin.clone(), page.clone());
-                        let outs = self.connects.sign(id, ask, &key, &page, received);
-                        self.dispatch(outs)
-                    }
-                }
             }
         }
     }
@@ -1522,12 +1510,7 @@ impl Core {
         if self.vault.dapp_moved() {
             return None;
         }
-        let refusal = ErrorBody::new(
-            ErrorCode::NotMoved,
-            "main still writes this permission file (it isn't in grant_moved)",
-        )
-        .with_data(serde_json::json!({ "store": "dapp" }));
-        Some(self.error(id, refusal))
+        Some(self.dispatch(vec![crate::eip1193::not_moved(id)]))
     }
 
     fn hello(&mut self, id: u64, params: Option<&str>) -> Flow {
@@ -1636,6 +1619,28 @@ impl Core {
                 Out::SendUnder { payload, id, epoch } => self.send_under(&payload, id, epoch),
                 Out::Job(id, job) => {
                     if self.worker.submit(id, job) {
+                        Flow::Continue
+                    } else {
+                        Flow::Exit(Exit::Internal)
+                    }
+                }
+                // A page request's name check (APR-5f), and its cancel.
+                Out::NameCheck(check) => {
+                    if self.naming.send(
+                        naming::In::Check {
+                            tag: check.tag,
+                            binding: check.binding,
+                            deadline_ms: check.deadline_ms,
+                        },
+                        None,
+                    ) {
+                        Flow::Continue
+                    } else {
+                        Flow::Exit(Exit::Internal)
+                    }
+                }
+                Out::NameCancel(tag) => {
+                    if self.naming.send(naming::In::CancelCheck { tag }, None) {
                         Flow::Continue
                     } else {
                         Flow::Exit(Exit::Internal)
