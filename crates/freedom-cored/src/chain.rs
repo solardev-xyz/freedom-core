@@ -88,9 +88,11 @@ pub enum In {
     /// The writer has room again, or main a free slot, for what waits here.
     Drained,
     /// A read the core makes for itself (design 0012, "Phone jobs": a phone
-    /// payment's `eth_getTransactionByHash`): `tag` is the asker's, and the
-    /// reply goes back to the event loop as [`Event::ChainRead`], never to
-    /// main. Main can't cancel it.
+    /// payment's `eth_getTransactionByHash`; APR-5e-1: a page's send's
+    /// estimate, and with [`INTERNAL_FEE_QUOTE`] or
+    /// [`INTERNAL_FEE_REFERENCE`] as its method its fee quote or fee
+    /// evidence): `tag` is the asker's, and the reply goes back to the event
+    /// loop as [`Event::ChainRead`], never to main. Main can't cancel it.
     Internal {
         tag: u64,
         chain_id: u64,
@@ -110,6 +112,13 @@ pub enum In {
         received: Instant,
     },
 }
+
+/// [`In::Internal`]'s method for a fee quote, `chain.fee_quote`'s call.
+pub const INTERNAL_FEE_QUOTE: &str = "chain.fee_quote";
+
+/// [`In::Internal`]'s method for fee evidence, `chain.fee_reference`'s
+/// call.
+pub const INTERNAL_FEE_REFERENCE: &str = "chain.fee_reference";
 
 /// Main's terminal reply to one of the chain thread's requests, as the
 /// event loop hands it over.
@@ -622,11 +631,18 @@ impl Chain {
                 let bounds = self.machine.bounds();
                 let deadline_ms = deadline_ms.min(bounds.deadline_ms);
                 let deadline = self.machine.now().saturating_add(deadline_ms);
-                let call = Call::Read {
-                    chain_id,
-                    method: method.to_owned(),
-                    params,
-                    options: ReadOptions::default(),
+                // A send's quote and its fee evidence (design 0012,
+                // APR-5e-1) are the machine's own calls; anything else is a
+                // read.
+                let call = match method {
+                    INTERNAL_FEE_QUOTE => Call::FeeQuote { chain_id },
+                    INTERNAL_FEE_REFERENCE => Call::FeeReference { chain_id },
+                    _ => Call::Read {
+                        chain_id,
+                        method: method.to_owned(),
+                        params,
+                        options: ReadOptions::default(),
+                    },
                 };
                 let caller = Caller {
                     id: tag,
