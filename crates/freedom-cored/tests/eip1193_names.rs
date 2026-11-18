@@ -119,8 +119,22 @@ impl Main {
         env: &[(&str, &str)],
         timeout_ms: u64,
     ) -> (tempfile::TempDir, Main) {
+        Main::build(grants, env, timeout_ms, true)
+    }
+
+    /// As [`Main::with_timeout`]; with `uncached` false, naming's cache
+    /// stands, so concurrent checks of one name join one lookup.
+    fn build(
+        grants: &Value,
+        env: &[(&str, &str)],
+        timeout_ms: u64,
+        uncached: bool,
+    ) -> (tempfile::TempDir, Main) {
         let (root, data, locks) = dirs();
-        let mut all = vec![("FREEDOM_CORED_TEST_EIP1193_NAMES_UNCACHED", "1")];
+        let mut all = Vec::new();
+        if uncached {
+            all.push(("FREEDOM_CORED_TEST_EIP1193_NAMES_UNCACHED", "1"));
+        }
         all.extend_from_slice(env);
         let mut core = spawn_env("serve", &data, &locks, &[], &all);
         std::fs::create_dir_all(&core.grant_root).unwrap();
@@ -543,8 +557,10 @@ fn a_connect_moved_at_any_check_writes_nothing() {
     }
 }
 
-/// A connected key moved at its third check, or its binding ended by
-/// another request while main rechecks it: 4100, its last use unmarked.
+/// A connected key moved at its third check, its binding ended by another
+/// request while main rechecks it, or its name moved while main rechecks
+/// it, with no other request to see it (the core resolves the name again
+/// after the recheck): 4100, its last use unmarked.
 #[test]
 fn a_connected_key_moved_marks_nothing() {
     let (_root, mut main) = Main::new(&grants(), &[]);
@@ -568,19 +584,37 @@ fn a_connected_key_moved_marks_nothing() {
     assert_eq!(main.answer(20), NO_ADDRESS);
     main.all_checked("recheck");
     assert_eq!(main.file(), before);
+    let checks = main.checks;
 
-    // A new document binds again: its connect marks the last use.
+    // Moved while main's recheck is held: the check after it refuses.
     main.script(&[Name::Serves, Name::Serves, Name::Serves]);
     main.request(30, &named(3), "eth_requestAccounts", json!([]), &world);
     let recheck = main.asked("approval.recheck");
+    main.all_checked("before the recheck");
+    main.script(&[Name::Moved]);
     main.respond(&recheck, json!({ "live": true, "agent": false }));
-    assert_eq!(main.answer(30), format!(r#"{{"result":["{ACCOUNT}"]}}"#));
+    assert_eq!(main.answer(30), NO_ADDRESS);
+    main.all_checked("after the recheck");
+    assert_eq!(main.checks, checks + 4);
+    assert_eq!(main.file(), before);
+    assert!(main.events.is_empty(), "{:?}", main.events);
+
+    // A new document binds again: its connect marks the last use once the
+    // name still serves the key after main's recheck.
+    main.script(&[Name::Serves, Name::Serves, Name::Serves]);
+    main.request(40, &named(4), "eth_requestAccounts", json!([]), &world);
+    let recheck = main.asked("approval.recheck");
+    main.script(&[Name::Serves]);
+    main.respond(&recheck, json!({ "live": true, "agent": false }));
+    assert_eq!(main.answer(40), format!(r#"{{"result":["{ACCOUNT}"]}}"#));
     main.all_checked("new document");
     assert_ne!(main.file()[NAME]["lastUsed"], before[NAME]["lastUsed"]);
 }
 
-/// A chain switch: moved, or ended while main rechecks it: 4100, the
-/// grant's chain unchanged, and main never asked to select the chain.
+/// A chain switch: moved, ended while main rechecks it, or moved while
+/// main rechecks it (the core resolves the name again after the recheck):
+/// 4100, the grant's chain unchanged, and main never asked to select the
+/// chain. Honest at both checks, the chain is written and selected.
 #[test]
 fn a_switch_moved_changes_nothing() {
     let (_root, mut main) = Main::new(&grants(), &[]);
@@ -626,6 +660,44 @@ fn a_switch_moved_changes_nothing() {
     );
     assert!(main.answer(30).contains("-32602"));
     assert_eq!(main.checks, 3);
+
+    // Moved while main's recheck is held: the check after it refuses, and
+    // main is asked to select nothing (the page's answer comes next).
+    main.script(&[Name::Serves]);
+    main.request(
+        40,
+        &named(4),
+        "wallet_switchEthereumChain",
+        to_mainnet.clone(),
+        &world,
+    );
+    let recheck = main.asked("approval.recheck");
+    main.all_checked("before the recheck");
+    main.script(&[Name::Moved]);
+    main.respond(&recheck, json!({ "live": true, "agent": false }));
+    assert_eq!(main.answer(40), NO_ADDRESS);
+    main.all_checked("after the recheck");
+    assert_eq!(main.checks, 5);
+    assert_eq!(main.file(), before);
+
+    // Honest at both: the grant takes the chain, then main selects it.
+    main.script(&[Name::Serves]);
+    main.request(
+        50,
+        &named(5),
+        "wallet_switchEthereumChain",
+        to_mainnet,
+        &world,
+    );
+    let recheck = main.asked("approval.recheck");
+    main.script(&[Name::Serves]);
+    main.respond(&recheck, json!({ "live": true, "agent": false }));
+    let select = main.asked("eip1193.select_chain");
+    assert_eq!(select["params"]["chain_id"], 1, "{select}");
+    main.respond(&select, json!({}));
+    assert_eq!(main.answer(50), r#"{"result":null}"#);
+    main.all_checked("honest");
+    assert_eq!(main.file()[NAME]["chainId"], 1);
 }
 
 /// `personal_sign`'s prompted path: moved at each of its five checks
@@ -682,24 +754,70 @@ fn a_signature_moved_at_any_check_signs_nothing() {
     assert!(main.file()[NAME]["autoApprove"]["limited"].is_object());
 }
 
-/// A signature the site's rule answers: moved after the vault's unlock
-/// is known (before main's recheck), or after the signature: 4100, no
-/// signature returned, the last use unmarked.
-#[test]
-fn a_rule_signature_moved_signs_nothing() {
+/// The site's rule for signatures, in Q9's form.
+fn ruled() -> Value {
     let now = load()["now"].as_u64().unwrap();
     let mut ruled = grants();
     ruled[NAME]["autoApprove"]["limited"] =
         json!({ "signing": { "grantedAt": now }, "transactions": [] });
-    for moved_at in [3, 4] {
+    ruled
+}
+
+/// A core holding [`ruled`], its wall clock held at the vectors' `now`.
+fn ruled_core() -> (tempfile::TempDir, tempfile::TempDir, Main) {
+    let now = load()["now"].as_u64().unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let clock = root.path().join("wall");
+    std::fs::write(&clock, now.to_string()).unwrap();
+    let (core_root, main) = Main::new(
+        &ruled(),
+        &[("FREEDOM_CORED_TEST_WALL_CLOCK", clock.to_str().unwrap())],
+    );
+    (root, core_root, main)
+}
+
+/// A rule's `personal_sign` from document `navigation`, honest at its six
+/// checks: whether the rule signed it (main's recheck, then the signature)
+/// rather than asking the user (Q9's rate spent: the core counts each
+/// signature it makes under the rule).
+fn rule_signed(main: &mut Main, id: u64, navigation: u64, world: &Value) -> bool {
+    main.script(&[Name::Serves; 4]);
+    main.request(
+        id,
+        &named(navigation),
+        "personal_sign",
+        json!(["0x68656c6c6f"]),
+        world,
+    );
+    let asked = main.next();
+    if asked["method"] == "approval.request" {
+        // Asked after three checks: the rule's fourth isn't made.
+        assert_eq!(asked["params"]["kind"], "eth.sign", "{asked}");
+        assert_eq!(main.names.len(), 1, "{asked}");
+        main.names.clear();
+        return false;
+    }
+    assert_eq!(asked["method"], "approval.recheck", "{asked}");
+    main.all_checked("before the recheck");
+    main.script(&[Name::Serves; 2]);
+    main.respond(&asked, json!({ "live": true, "agent": false }));
+    let signed = main.answer(id);
+    assert!(signed.starts_with(r#"{"result":"0x"#), "{signed}");
+    main.all_checked("signed");
+    true
+}
+
+/// A signature the site's rule answers: moved after the vault's unlock
+/// is known (before main's recheck), while main's recheck is held (the
+/// core resolves the name again after it), or after the signature: 4100,
+/// no signature returned, the last use unmarked. Moved before the
+/// signature, nothing is signed: Q9's rate still has its five, where a
+/// signature made and dropped spends one.
+#[test]
+fn a_rule_signature_moved_signs_nothing() {
+    for moved_at in [3, 4, 5] {
         let what = format!("moved at check {moved_at}");
-        let root = tempfile::tempdir().unwrap();
-        let clock = root.path().join("wall");
-        std::fs::write(&clock, now.to_string()).unwrap();
-        let (_core_root, mut main) = Main::new(
-            &ruled,
-            &[("FREEDOM_CORED_TEST_WALL_CLOCK", clock.to_str().unwrap())],
-        );
+        let (_root, _core_root, mut main) = ruled_core();
         let world = plain_world();
         let before = main.file();
         let mut names = vec![Name::Serves; moved_at];
@@ -713,7 +831,7 @@ fn a_rule_signature_moved_signs_nothing() {
             json!(["0x68656c6c6f"]),
             &world,
         );
-        if moved_at == 4 {
+        if moved_at >= 4 {
             let recheck = main.asked("approval.recheck");
             main.script(after);
             main.respond(&recheck, json!({ "live": true, "agent": false }));
@@ -721,6 +839,53 @@ fn a_rule_signature_moved_signs_nothing() {
         assert_eq!(main.answer(10), NO_ADDRESS, "{what}");
         main.all_checked(&what);
         assert_eq!(main.file(), before, "{what}: no last use");
+        // Q9's rate: five signatures under the rule, unless one was spent.
+        let spent = usize::from(moved_at == 5);
+        for n in 0..5 {
+            let id = 20 + n;
+            let signed = rule_signed(&mut main, id, 2 + n, &world);
+            assert_eq!(signed, (n as usize) < 5 - spent, "{what}: #{n}");
+        }
+    }
+}
+
+/// A rule's signature with the vault locked: the name moved while main's
+/// unlock prompt is open is caught by the check after the unlock, before
+/// main is asked to recheck: 4100, nothing signed, the last use unmarked.
+#[test]
+fn a_rule_signature_moved_during_the_unlock_signs_nothing() {
+    let (_root, _core_root, mut main) = ruled_core();
+    let world = plain_world();
+    let before = main.file();
+    let locked = main.core.call_shell(5, "vault.lock", json!({}));
+    assert!(locked["result"].is_object(), "{locked}");
+    main.script(&[Name::Serves; 3]);
+    main.request(
+        10,
+        &named(1),
+        "personal_sign",
+        json!(["0x68656c6c6f"]),
+        &world,
+    );
+    let asked = main.asked("approval.request");
+    assert_eq!(asked["params"]["kind"], "vault.unlock", "{asked}");
+    main.all_checked("before the unlock");
+    // main's request ids only increase.
+    let unlocked = main.core.call_shell(
+        11,
+        "vault.unlock",
+        json!({ "password_b64": STANDARD.encode("testpass1") }),
+    );
+    assert!(unlocked["result"].is_object(), "{unlocked}");
+    main.script(&[Name::Moved]);
+    let approve = json!({ "approve": true, "choices": {} });
+    main.respond(&asked, decision_for(&asked, &approve, 1, &world));
+    // The page's answer comes next: main is asked no recheck.
+    assert_eq!(main.answer(10), NO_ADDRESS);
+    main.all_checked("after the unlock");
+    assert_eq!(main.file(), before, "no last use");
+    for n in 0..5 {
+        assert!(rule_signed(&mut main, 20 + n, 2 + n, &world), "#{n}");
     }
 }
 
@@ -882,4 +1047,39 @@ fn a_cancel_ends_the_name_check() {
     main.request(11, &named(1), "eth_accounts", json!([]), &world);
     assert_eq!(main.answer(11), format!(r#"{{"result":["{ACCOUNT}"]}}"#));
     main.all_checked("after the cancel");
+}
+
+/// Naming admits at most 64 callers to one name's lookup (design 0004,
+/// Admission). A page request's cancel takes its check's caller out of
+/// it: with 64 cancelled checks joined to one held lookup (naming's cache
+/// standing, so they join), a 65th live check still joins and answers,
+/// rather than failing busy and ending the binding.
+#[test]
+fn cancelled_checks_free_their_places_in_naming() {
+    let (_root, mut main) = Main::build(&grants(), &[], 90_000, false);
+    let world = plain_world();
+    for n in 0..64 {
+        main.request(100 + n, &named(1), "eth_accounts", json!([]), &world);
+    }
+    let held = main.held_call();
+    for n in 0..64 {
+        main.core.send(&json!({ "type": "cancel", "id": 100 + n }));
+    }
+    for n in 0..64 {
+        let reply = main.next();
+        assert_eq!(reply["id"], 100 + n, "{reply}");
+        assert_eq!(reply["error"]["code"], "cancelled", "{reply}");
+    }
+    main.request(200, &named(1), "eth_accounts", json!([]), &world);
+    // A keyless request's answer: the 65th check has gone to naming by
+    // then, ahead of the held lookup's answer, and waits on it.
+    let keyless = json!({ "caller": "page", "page": {
+        "origin": "", "top_origin": "", "frame": 9, "navigation": 9, "agent": false,
+    } });
+    main.request(201, &keyless, "eth_chainId", json!([]), &world);
+    let reply = main.next();
+    assert_eq!(reply["id"], 201, "the 65th check answered first: {reply}");
+    main.node(&held, &resolve_body(IPNS_CONTENTHASH));
+    assert_eq!(main.answer(200), format!(r#"{{"result":["{ACCOUNT}"]}}"#));
+    assert_eq!(main.checks, 1);
 }
