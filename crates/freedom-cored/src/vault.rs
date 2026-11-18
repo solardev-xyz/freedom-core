@@ -898,13 +898,72 @@ impl Vault {
             .collect()
     }
 
-    /// A page's signature the user approved on the core's own prompt
-    /// (design 0012, APR-5d-1): the page-kind token is minted here for the
-    /// request's document and the handle of main's answer, and spent at
-    /// once on the signature, which `sign.message` or `sign.typed_data`
-    /// checks under `page` as it checks a page's own. The token never
-    /// leaves the core. The signature, or whether the vault was locked and
-    /// the refusal's message.
+    /// Whether the vault is unlocked: a rule's signature asks main for the
+    /// unlock first while it isn't (design 0012, APR-5d-2).
+    pub fn unlocked(&self) -> bool {
+        self.state.is_unlocked()
+    }
+
+    /// Whether the site's standing rule answers a page's signature now,
+    /// judged with the core's own grant and `agent` as main read it,
+    /// counting nothing (design 0012, APR-5d-2).
+    pub fn eip1193_rule(
+        &self,
+        key: &str,
+        agent: Option<bool>,
+        query: &fc_eip1193::sign::RuleQuery<'_>,
+    ) -> fc_eip1193::sign::RuleNow {
+        self.approvals.page_rule(key, agent, query, self.clocks())
+    }
+
+    /// "Always allow" ticked on a page's signature the core signed (design
+    /// 0012, APR-5d-2): Q9's limited rule, and its `approval.changed`.
+    pub fn eip1193_allow_signing(&mut self, key: &str, account: u32) -> Vec<Out> {
+        let wall_ms = self.clocks().wall_ms;
+        self.approvals.page_allow_signing(key, account, wall_ms);
+        self.approvals
+            .take_events()
+            .into_iter()
+            .map(Out::Send)
+            .collect()
+    }
+
+    /// The token for a device's signature the user approved on the core's
+    /// own prompt (design 0012, APR-5d-2; until 0016): minted for the
+    /// request's document and the handle of main's answer, as for a vault
+    /// account's, and returned to main in the `{ device }` answer, since
+    /// the device signs through main. The token, or the refusal's message.
+    pub fn eip1193_device(
+        &mut self,
+        page: &message::PageContext,
+        approved: &fc_eip1193::sign::DeviceApproval,
+    ) -> Result<Zeroizing<String>, String> {
+        let kind = fc_approval::Kind::from_name(approved.token_kind())
+            .ok_or_else(|| internal().message)?;
+        let payload = fc_evm::parse_json(approved.payload()).map_err(|_| internal().message)?;
+        let clocks = self.clocks();
+        self.approvals
+            .page_token(
+                page,
+                approved.handle(),
+                kind,
+                approved.account(),
+                &payload,
+                clocks,
+            )
+            .map_err(|body| body.message)
+    }
+
+    /// A page's signature the user approved on the core's own prompt, or
+    /// one the site's standing rule answers (design 0012, APR-5d). For an
+    /// approve, the page-kind token is minted here for the request's
+    /// document and the handle of main's answer, and spent at once on the
+    /// signature; for a rule's, the signature goes under `{ standing }`,
+    /// which `sign.*` decides again with the core's own grant and counts in
+    /// Q9's rate. Either way `sign.message` or `sign.typed_data` checks it
+    /// under `page` as it checks a page's own. The token never leaves the
+    /// core. The signature, or whether the vault was locked and the
+    /// refusal's message.
     pub fn eip1193_sign(
         &mut self,
         page: &message::PageContext,
@@ -913,23 +972,30 @@ impl Vault {
         let failed = |body: ErrorBody| (body.code == ErrorCode::VaultLocked, body.message);
         let internal = || failed(internal());
         let method = approved.method();
-        let kind = fc_approval::Kind::from_name(method.token_kind()).ok_or_else(internal)?;
         let Ok(serde_json::Value::Object(mut params)) = fc_evm::parse_json(approved.payload())
         else {
             return Err(internal());
         };
         let clocks = self.clocks();
-        let token = self
-            .approvals
-            .page_token(
-                page,
-                approved.handle(),
-                kind,
-                approved.account(),
-                &serde_json::Value::Object(params.clone()),
-                clocks,
-            )
-            .map_err(failed)?;
+        let token = match approved.handle() {
+            Some(handle) => {
+                let kind =
+                    fc_approval::Kind::from_name(method.token_kind()).ok_or_else(internal)?;
+                Some(
+                    self.approvals
+                        .page_token(
+                            page,
+                            handle,
+                            kind,
+                            approved.account(),
+                            &serde_json::Value::Object(params.clone()),
+                            clocks,
+                        )
+                        .map_err(failed)?,
+                )
+            }
+            None => None,
+        };
         params.insert(
             "key".to_owned(),
             serde_json::json!({ "kind": "account", "index": approved.account() }),
@@ -937,10 +1003,13 @@ impl Vault {
         if let Some(hash) = approved.expected_hash() {
             params.insert("expected_hash".to_owned(), serde_json::json!(hash));
         }
-        params.insert(
-            "authorization".to_owned(),
-            serde_json::json!({ "token": token.as_str(), "handle": approved.handle() }),
-        );
+        let authorization = match (&token, approved.handle()) {
+            (Some(token), Some(handle)) => {
+                serde_json::json!({ "token": token.as_str(), "handle": handle })
+            }
+            _ => serde_json::json!({ "standing": {} }),
+        };
+        params.insert("authorization".to_owned(), authorization);
         let text = Zeroizing::new(
             serde_json::to_string(&serde_json::Value::Object(params)).map_err(|_| internal())?,
         );

@@ -16,9 +16,21 @@
 //!   handle, and spends it at once on the signature
 //!   ([`Vault::eip1193_sign`]): the token never leaves the core, and serves
 //!   that request alone.
+//! - **A signature the site's rule answers** (APR-5d-2) asks main to
+//!   unlock the vault first while it is locked (`vault.unlock`, an
+//!   `approval.request` like any prompt), then main's recheck just before
+//!   the effect: custody, the rule gone or the document gone refuses it with
+//!   nothing signed, and a rule past its rate by then asks the user
+//!   instead. Then it signs under `{ standing }`, which the core decides
+//!   again with its own grant and counts in Q9's rate, and marks the key's
+//!   last use.
+//! - **A device's account** (a Ledger, a phone or a Safe, until 0016): on
+//!   main's approve the core mints the token, and the answer returns it to
+//!   main, `{ device }`, for the device to sign through main.
 //! - **`approval.recheck { request, page }`** asks main, just before a
-//!   connected key's last use is marked or a switch's chain is written,
-//!   whether the document still holds its key.
+//!   connected key's last use is marked, a switch's chain is written or a
+//!   rule's signature is made, whether the document still holds its key,
+//!   and whether the agent holds its tab.
 //! - **`eip1193.select_chain { request, page, chain_id }`** (APR-5c-2,
 //!   *inferred*) asks main, once a chain switch's grant has its chain, to
 //!   select the chain for the window of page request `request` and send
@@ -54,6 +66,7 @@ use fc_eip1193::connect::{Ask, Connected, Decided};
 use fc_eip1193::{Answer, Budget, Connect, Crossed, PromptId, Prompts, Recheck, Switch, sign};
 use fc_protocol::error::{ErrorBody, ErrorCode};
 use fc_protocol::message::{self, PageContext};
+use std::borrow::Cow;
 use zeroize::Zeroizing;
 
 use crate::requests::{self, Dispatch, Owner, Requests, Start};
@@ -117,6 +130,9 @@ enum Pending {
     /// A chain switch whose grant has its chain, waiting on main's
     /// selection.
     Select(Switch),
+    /// A signature the site's rule answers, waiting on main's recheck
+    /// (APR-5d-2).
+    Rule(sign::Ask),
 }
 
 /// What a prompt asks.
@@ -125,6 +141,8 @@ enum Asking {
     Connect(Ask),
     /// A signature's `eth.sign` (APR-5d-1).
     Sign(sign::Ask),
+    /// A rule's signature asking for the vault's unlock (APR-5d-2).
+    Unlock(sign::Ask),
 }
 
 impl Asking {
@@ -132,13 +150,15 @@ impl Asking {
         match self {
             Asking::Connect(ask) => ask.kind(),
             Asking::Sign(ask) => ask.kind(),
+            Asking::Unlock(ask) => ask.unlock_kind(),
         }
     }
 
-    fn view(&self) -> &str {
+    fn view(&self) -> Cow<'_, str> {
         match self {
-            Asking::Connect(ask) => ask.view(),
-            Asking::Sign(ask) => ask.view(),
+            Asking::Connect(ask) => Cow::Borrowed(ask.view()),
+            Asking::Sign(ask) => Cow::Borrowed(ask.view()),
+            Asking::Unlock(ask) => Cow::Owned(ask.unlock_view()),
         }
     }
 
@@ -146,6 +166,7 @@ impl Asking {
         match self {
             Asking::Connect(ask) => ask.choices(),
             Asking::Sign(ask) => ask.choices(),
+            Asking::Unlock(ask) => ask.unlock_choices(),
         }
     }
 }
@@ -216,6 +237,32 @@ impl Connects {
         let step = Pending::Prompt {
             ask: Asking::Sign(ask),
             id: prompt,
+        };
+        self.open_request(id, step, key, page, received)
+    }
+
+    /// Page request `id`'s signature that the site's rule answers, for
+    /// `key` (APR-5d-2): the vault's unlock first if `locked`, then main's
+    /// recheck.
+    pub fn rule(
+        &mut self,
+        id: u64,
+        ask: sign::Ask,
+        locked: bool,
+        key: &str,
+        page: &PageContext,
+        received: Instant,
+    ) -> Vec<Out> {
+        let step = if locked {
+            let Some(prompt) = self.issue() else {
+                return vec![error(id, internal())];
+            };
+            Pending::Prompt {
+                ask: Asking::Unlock(ask),
+                id: prompt,
+            }
+        } else {
+            Pending::Rule(ask)
         };
         self.open_request(id, step, key, page, received)
     }
@@ -294,7 +341,7 @@ impl Connects {
                 continue;
             }
             let (method, params) = match &open.step {
-                Pending::Recheck(_) | Pending::Switch(_) => (
+                Pending::Recheck(_) | Pending::Switch(_) | Pending::Rule(_) => (
                     "approval.recheck",
                     format!(r#"{{"request":{id},"page":{}}}"#, open.page),
                 ),
@@ -442,6 +489,49 @@ impl Connects {
                 Ok(()) => vec![reply(id, &switch.answer())],
                 Err(Crossed) => vec![error(id, crossed())],
             },
+            // A rule's signature, just before its effect: custody, the rule
+            // judged again with the core's own grant and main's custody,
+            // and the document.
+            Pending::Rule(ask) => match text.ok_or(Crossed).and_then(Recheck::parse) {
+                Ok(recheck) => {
+                    let now = ask.query().map_or(sign::RuleNow::NotCovered, |query| {
+                        vault.eip1193_rule(&open.key, Some(recheck.agent), &query)
+                    });
+                    match ask.rechecked(&recheck, now) {
+                        sign::Rechecked::Answer(answer) => vec![reply(id, &answer)],
+                        sign::Rechecked::Sign(approved) => {
+                            let mut page = open.context.clone();
+                            page.agent = Some(recheck.agent);
+                            let signed = vault.eip1193_sign(&page, &approved);
+                            let answer = approved.answer(
+                                signed
+                                    .as_deref()
+                                    .map_err(|(locked, message)| (*locked, message.as_str())),
+                            );
+                            let mut outs = vec![reply(id, &answer)];
+                            if signed.is_ok() {
+                                outs.extend(vault.eip1193_touch(&open.key, None));
+                            }
+                            outs
+                        }
+                        // Past its rate by now: the user is asked.
+                        sign::Rechecked::Prompt => match self.issue() {
+                            Some(prompt) => {
+                                open.step = Pending::Prompt {
+                                    ask: Asking::Sign(ask),
+                                    id: prompt,
+                                };
+                                open.asked = None;
+                                self.open.insert(id, open);
+                                self.queued.push_back(id);
+                                Vec::new()
+                            }
+                            None => vec![error(id, internal())],
+                        },
+                    }
+                }
+                Err(Crossed) => vec![error(id, crossed())],
+            },
             Pending::Prompt { ask, id: prompt } => {
                 self.prompting = self.prompting.saturating_sub(1);
                 open.budget.prompt_closed(self.now_ms());
@@ -480,10 +570,46 @@ impl Connects {
                                     .as_deref()
                                     .map_err(|(locked, message)| (*locked, message.as_str())),
                             );
-                            vec![reply(id, &answer)]
+                            let mut outs = vec![reply(id, &answer)];
+                            // "Always allow": Q9's limited rule, once signed.
+                            if signed.is_ok() && approved.always_allow() {
+                                outs.extend(
+                                    vault.eip1193_allow_signing(&open.key, approved.account()),
+                                );
+                            }
+                            outs
+                        }
+                        // A device's account: the token goes back to main
+                        // with the approved request, from the minter's
+                        // wiping buffer straight into the reply's.
+                        Ok(sign::Decided::Device(approved)) => {
+                            match vault.eip1193_device(&open.context, &approved) {
+                                Ok(token) => match approved.answer(&token) {
+                                    Ok(answer) => vec![device_reply(id, &answer)],
+                                    Err(answer) => vec![reply(id, &answer)],
+                                },
+                                Err(message) => {
+                                    vec![reply(id, &sign::DeviceApproval::refused(&message))]
+                                }
+                            }
                         }
                         Err(Crossed) => vec![error(id, crossed())],
                     },
+                    // The unlock a rule's signature asked for: then main's
+                    // recheck.
+                    Asking::Unlock(ask) => {
+                        match decided.and_then(|decision| ask.unlocked(decision)) {
+                            Ok(Some(answer)) => vec![reply(id, &answer)],
+                            Ok(None) => {
+                                open.step = Pending::Rule(ask);
+                                open.asked = None;
+                                self.open.insert(id, open);
+                                self.queued.push_back(id);
+                                Vec::new()
+                            }
+                            Err(Crossed) => vec![error(id, crossed())],
+                        }
+                    }
                 }
             }
         };
@@ -518,7 +644,7 @@ impl Connects {
                 self.asked.insert(core, Asked::Ended(prompt));
                 self.prompting = self.prompting.saturating_sub(1);
             }
-            Pending::Recheck(_) | Pending::Switch(_) | Pending::Select(_) => {
+            Pending::Recheck(_) | Pending::Switch(_) | Pending::Select(_) | Pending::Rule(_) => {
                 self.asked.remove(&core);
             }
         }
@@ -576,6 +702,21 @@ fn raw_reply(id: u64, answer: &str) -> Out {
     payload.extend_from_slice(head.as_bytes());
     payload.extend_from_slice(answer.as_bytes());
     payload.push(b'}');
+    Out::Send(payload)
+}
+
+/// A `{ device }` answer's reply: one wiping buffer sized for the whole
+/// reply before anything is written, so that the token, written from the
+/// minter's buffer, leaves no copy behind in a grown one (as
+/// `approval.issue`'s reply).
+fn device_reply(id: u64, answer: &sign::DeviceAnswer<'_>) -> Out {
+    let head = format!(r#"{{"type":"response","id":{id},"result":"#);
+    let size = head.len() + answer.len() + 1;
+    let mut payload = Zeroizing::new(Vec::with_capacity(size));
+    payload.extend_from_slice(head.as_bytes());
+    answer.write_into(&mut payload);
+    payload.push(b'}');
+    debug_assert_eq!(payload.capacity(), size, "no reallocation");
     Out::Send(payload)
 }
 

@@ -43,6 +43,11 @@ impl Answer {
         Answer(out)
     }
 
+    /// An answer already written as JSON text.
+    pub(crate) fn raw(text: impl Into<String>) -> Answer {
+        Answer(text.into())
+    }
+
     /// Every method while the Identity & Wallet switch is off.
     pub(crate) fn disconnected() -> Answer {
         Answer::error(4900, "Disconnected")
