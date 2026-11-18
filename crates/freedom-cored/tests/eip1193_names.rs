@@ -252,6 +252,29 @@ impl Main {
             .send(&json!({ "type": "response", "id": request["id"], "result": result }));
     }
 
+    /// The next name check's `eth_call`, held: main doesn't answer it.
+    fn held_call(&mut self) -> Value {
+        loop {
+            let message = self.core.recv();
+            match (message["type"].as_str(), message["method"].as_str()) {
+                (Some("request"), Some("shell.rpc")) => {
+                    let body: Value =
+                        serde_json::from_str(message["params"]["body"].as_str().unwrap()).unwrap();
+                    let method = body["method"].as_str().unwrap().to_owned();
+                    if method == "eth_call" {
+                        self.checks += 1;
+                        return message;
+                    }
+                    let text = self.recorded[&method].clone();
+                    self.node(&message, &text);
+                }
+                (Some("request"), Some("shell.prefetch")) | (Some("cancel"), _) => {}
+                (Some("event"), _) => self.events.push(message),
+                _ => panic!("unexpected {message}"),
+            }
+        }
+    }
+
     /// The page's answer to request `id`, as text.
     fn answer(&mut self, id: u64) -> String {
         let message = self.next();
@@ -800,4 +823,62 @@ fn a_check_has_the_requests_deadline_and_cancel() {
     main.request(11, &named(1), "eth_accounts", json!([]), &world);
     assert_eq!(main.answer(11), format!(r#"{{"result":["{ACCOUNT}"]}}"#));
     main.all_checked("after the deadline");
+}
+
+/// A device's signature (a Ledger) whose name moved after the approve:
+/// 4100, and no `{ device }` token goes to main.
+#[test]
+fn a_device_signature_moved_after_the_approve_gets_no_token() {
+    let mut ledger = grants();
+    ledger[NAME]["walletIndex"] = json!(1);
+    let (_root, mut main) = Main::new(&ledger, &[]);
+    let world = plain_world();
+    main.script(&[Name::Serves; 3]);
+    main.request(
+        10,
+        &named(1),
+        "personal_sign",
+        json!(["0x68656c6c6f"]),
+        &world,
+    );
+    let asked = main.asked("approval.request");
+    assert_eq!(
+        asked["params"]["choices"],
+        json!({ "alwaysAllow": [false] })
+    );
+    main.script(&[Name::Moved]);
+    let approve = json!({ "approve": true, "choices": { "alwaysAllow": false } });
+    main.respond(&asked, decision_for(&asked, &approve, 1, &world));
+    assert_eq!(main.answer(10), NO_ADDRESS);
+    main.all_checked("device");
+}
+
+/// main's cancel of a page request whose name check is out: `cancelled`,
+/// and the lookup's call cancelled at once, not at naming's own timeout.
+#[test]
+fn a_cancel_ends_the_name_check() {
+    let (_root, mut main) = Main::new(&grants(), &[]);
+    let world = plain_world();
+    main.request(10, &named(1), "eth_accounts", json!([]), &world);
+    let held = main.held_call();
+    let started = std::time::Instant::now();
+    main.core.send(&json!({ "type": "cancel", "id": 10 }));
+    let (mut cancelled, mut answered) = (false, false);
+    while !(cancelled && answered) {
+        let message = main.core.recv();
+        match message["type"].as_str() {
+            Some("cancel") => {
+                assert_eq!(message["id"], held["id"]);
+                cancelled = true;
+            }
+            Some("response") => {
+                assert_eq!(message["id"], 10);
+                assert_eq!(message["error"]["code"], "cancelled", "{message}");
+                answered = true;
+            }
+            _ => panic!("unexpected {message}"),
+        }
+    }
+    // At once: naming's own call timeout (5 s) would cancel it later.
+    assert!(started.elapsed() < Duration::from_secs(2));
 }
