@@ -342,42 +342,44 @@ mod tests {
     use super::*;
 
     /// Runs `delete_retrying_a_race` over scripted statuses, returning its
-    /// answer, how many deletes ran and how many pauses.
-    fn raced(statuses: &[Result<(), i32>]) -> (Result<(), i32>, usize, usize) {
-        let mut calls = 0;
-        let mut pauses = 0;
+    /// answer and what ran, in order: `d` for a delete, `p` for a pause.
+    fn raced(statuses: &[Result<(), i32>]) -> (Result<(), i32>, String) {
+        let events = std::cell::RefCell::new(String::new());
+        let mut deletes = 0;
         let answer = delete_retrying_a_race(
             || {
-                calls += 1;
-                statuses[calls - 1]
+                events.borrow_mut().push('d');
+                deletes += 1;
+                statuses[deletes - 1]
             },
-            || pauses += 1,
+            || events.borrow_mut().push('p'),
         );
-        (answer, calls, pauses)
+        (answer, events.into_inner())
     }
 
     #[test]
     fn a_raced_delete_is_retried_once_after_its_pause() {
         const NOT_FOUND: i32 = -25300;
-        // The raced loser, then the item gone or removed: the retry's
-        // answer.
+        let ran = |answer: Result<(), i32>, events: &str| (answer, events.to_string());
+        // The raced loser, then the item gone or removed: the pause runs
+        // before the one retry, whose answer is final.
         assert_eq!(
             raced(&[Err(ERR_SEC_INVALID_RECORD), Err(NOT_FOUND)]),
-            (Err(NOT_FOUND), 2, 1)
+            ran(Err(NOT_FOUND), "dpd")
         );
         assert_eq!(
             raced(&[Err(ERR_SEC_INVALID_RECORD), Ok(())]),
-            (Ok(()), 2, 1)
+            ran(Ok(()), "dpd")
         );
         // Twice: a damaged record looks the same, so it stays an error.
         assert_eq!(
             raced(&[Err(ERR_SEC_INVALID_RECORD), Err(ERR_SEC_INVALID_RECORD)]),
-            (Err(ERR_SEC_INVALID_RECORD), 2, 1)
+            ran(Err(ERR_SEC_INVALID_RECORD), "dpd")
         );
         // Every other answer is final at once.
-        assert_eq!(raced(&[Ok(())]), (Ok(()), 1, 0));
-        assert_eq!(raced(&[Err(NOT_FOUND)]), (Err(NOT_FOUND), 1, 0));
-        assert_eq!(raced(&[Err(-25308)]), (Err(-25308), 1, 0));
+        assert_eq!(raced(&[Ok(())]), ran(Ok(()), "d"));
+        assert_eq!(raced(&[Err(NOT_FOUND)]), ran(Err(NOT_FOUND), "d"));
+        assert_eq!(raced(&[Err(-25308)]), ran(Err(-25308), "d"));
         assert_eq!(RACED_DELETE_PAUSE, Duration::from_millis(20));
     }
 
