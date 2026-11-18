@@ -82,6 +82,20 @@ fn every_apr5f_scenario_replays_at_the_logic_level() {
                 assert_eq!(effect["args"]["transportKey"], transport, "{what}");
                 assert_eq!(json!(verdict), effect["answer"], "{what}");
             }
+            // Once the binding has ended the reference resolves nothing
+            // (`recheckName`: the document has no key), and nothing is
+            // recorded: a name-revalidated method answers as a keyless
+            // document's.
+            if ended {
+                assert!(verdicts.is_empty(), "{what}: a check after the end");
+                if recorded.get("keyless").is_some() {
+                    assert_eq!(
+                        recorded["result"].to_string(),
+                        names::keyless(method).as_str(),
+                        "{what}"
+                    );
+                }
+            }
             checks += verdicts.len();
             let leading = effects
                 .iter()
@@ -89,23 +103,19 @@ fn every_apr5f_scenario_replays_at_the_logic_level() {
                 .count();
             match names::checks_first(method) {
                 // Each check before the grant is read, cut short by a name
-                // that moved, or none once the binding has ended (the
-                // recorded check then is the generator's stand-in's: the
-                // reference resolves nothing for a document with no key).
-                Some(first) if !ended => {
+                // that moved; none once the binding has ended (above).
+                Some(_) if ended => {}
+                Some(first) => {
                     let moved = verdicts.iter().position(|v| !v);
                     let expected =
                         moved.map_or(usize::from(first), |at| (at + 1).min(usize::from(first)));
                     assert!(leading >= expected, "{what}: {leading} < {expected}");
                 }
-                Some(_) => {
-                    assert_eq!(recorded["result"], json!({ "result": [] }), "{what}");
-                }
                 // A switch: its params' checks, then one name check.
                 None if method == "wallet_switchEthereumChain" => {
                     assert_eq!(verdicts.len(), 1, "{what}");
                 }
-                // The send's route is APR-5e's: its checks wait for it.
+                // The send's checks are a later step's.
                 None if method == "eth_sendTransaction" => {}
                 // A permission-free read: no check.
                 None => assert!(verdicts.is_empty(), "{what}"),
@@ -144,5 +154,5 @@ fn every_apr5f_scenario_replays_at_the_logic_level() {
             }
         }
     }
-    assert_eq!((scenarios, requests, checks), (8, 10, 21));
+    assert_eq!((scenarios, requests, checks), (8, 10, 20));
 }

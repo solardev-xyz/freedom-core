@@ -486,9 +486,11 @@ async function runRequest(ref, w, dispatchers, request) {
     isCurrent: () => doc.current,
     nameHolds: async ({ keyless } = {}) => {
       if (keyless !== undefined && record.keyless === undefined) record.keyless = keyless;
-      // Only a DNS name over IPNS resolves anything (`recheckName`); a name
-      // that no longer answers its IPNS key ends the binding.
-      if (doc.transportKey && doc.current) {
+      // Only a DNS name over IPNS whose binding stands resolves anything
+      // (`recheckName`: once `endNameBinding` has cleared the document's
+      // key, nothing is resolved); a name that no longer answers its IPNS
+      // key ends the binding.
+      if (doc.transportKey && doc.current && doc.holds) {
         const holds = await effect(w, 'name.check', { name: doc.key, transportKey: doc.transportKey },
           () => (w.names.length ? w.names.shift() : true));
         if (!holds) doc.holds = false;

@@ -9,7 +9,7 @@
 //! to other content, or a node that fails.
 //!
 //! Every `step: "APR-5f"` scenario of vectors/eip1193.json replays but the
-//! send's, which waits for APR-5e. Then the guarantees: a name moved at
+//! send's, whose name checks are a later step's. Then the guarantees: a name moved at
 //! each check point (before the prompt, while it is open, between the
 //! approve and the effect, after the signature) refuses with nothing
 //! written or signed; a binding ended by another request is read at main's
@@ -390,8 +390,8 @@ fn decision_for(asked: &Value, decision: &Value, handle: u64, world: &Value) -> 
     }
 }
 
-/// The one scenario that waits: the send's, until APR-5e's route is on
-/// main. The coordinator has it added once APR-5e-1 merges.
+/// The one scenario that waits: the send's. Its name checks are a later
+/// step's, once device and rule sends (APR-5e-2) are in.
 const PENDING: &[&str] = &["name-send-moved-during-prompt"];
 
 #[test]
@@ -425,15 +425,15 @@ fn every_apr5f_scenario_replays_through_the_core() {
             let effects = recorded["effects"].as_array().unwrap();
             // The checks in order, up to the prompt and after it. Once the
             // binding has ended, the reference resolves nothing more
-            // (`recheckName`: the document has no key): a check the
-            // generator's stand-in recorded then is not made.
+            // (`recheckName`: the document has no key), and none is
+            // recorded.
             let mut before = Vec::new();
             let mut after = Vec::new();
             let mut prompt = None;
             for effect in effects {
                 match effect["effect"].as_str().unwrap() {
-                    "name.check" if ended => {}
                     "name.check" => {
+                        assert!(!ended, "{what}: a check recorded after the end");
                         let name = if effect["answer"] == true {
                             Name::Serves
                         } else {
