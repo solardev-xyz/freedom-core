@@ -572,14 +572,15 @@ impl Connects {
                 let Some(open) = self.open.remove(&id) else {
                     return Vec::new();
                 };
-                let minted = vault.eip1193_send_token(&open.context, &prepared);
-                let answer = prepared.answer(
-                    minted
-                        .as_ref()
-                        .map(|token| token.as_str())
-                        .map_err(String::as_str),
-                );
-                vec![reply(id, &answer)]
+                // The token goes from the minter's wiping buffer straight
+                // into the reply's, as a `{ device }` answer's.
+                match vault.eip1193_send_token(&open.context, &prepared) {
+                    Ok(token) => match prepared.answer(&token) {
+                        Ok(answer) => vec![send_reply(id, &answer)],
+                        Err(answer) => vec![reply(id, &answer)],
+                    },
+                    Err(message) => vec![reply(id, &send::Prepared::refused(&message))],
+                }
             }
         }
     }
@@ -1034,6 +1035,20 @@ fn raw_reply(id: u64, answer: &str) -> Out {
 /// minter's buffer, leaves no copy behind in a grown one (as
 /// `approval.issue`'s reply).
 fn device_reply(id: u64, answer: &sign::DeviceAnswer<'_>) -> Out {
+    let head = format!(r#"{{"type":"response","id":{id},"result":"#);
+    let size = head.len() + answer.len() + 1;
+    let mut payload = Zeroizing::new(Vec::with_capacity(size));
+    payload.extend_from_slice(head.as_bytes());
+    answer.write_into(&mut payload);
+    payload.push(b'}');
+    debug_assert_eq!(payload.capacity(), size, "no reallocation");
+    Out::Send(payload)
+}
+
+/// A `{ send }` answer's reply, written as [`device_reply`] writes a
+/// `{ device }` answer's: one wiping buffer sized for the whole reply
+/// first, so the token leaves no copy behind in a grown one.
+fn send_reply(id: u64, answer: &send::SendAnswer<'_>) -> Out {
     let head = format!(r#"{{"type":"response","id":{id},"result":"#);
     let size = head.len() + answer.len() + 1;
     let mut payload = Zeroizing::new(Vec::with_capacity(size));

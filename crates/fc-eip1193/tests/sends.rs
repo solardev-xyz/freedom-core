@@ -337,14 +337,18 @@ fn every_prompted_send_replays() {
                         "{what}"
                     );
                     assert_eq!(signed["args"]["context"]["kind"], "dapp-send", "{what}");
-                    let answer = approved.answer(Ok("token-1"));
-                    let send: Value = serde_json::from_str(answer.as_str()).unwrap();
+                    let token = "0123456789abcdef".repeat(4);
+                    let answer = approved.answer(&token).unwrap();
+                    let mut written = Vec::with_capacity(answer.len());
+                    answer.write_into(&mut written);
+                    assert_eq!(written.len(), answer.len(), "{what}");
+                    let send: Value = serde_json::from_slice(&written).unwrap();
                     assert_eq!(
                         send,
                         json!({ "send": {
                             "kind": "dapp-send", "account": approved.account(),
                             "tx": serde_json::from_str::<Value>(approved.tx()).unwrap(),
-                            "handle": handle, "token": "token-1",
+                            "handle": handle, "token": token,
                         } }),
                         "{what}"
                     );

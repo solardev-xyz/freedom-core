@@ -613,24 +613,81 @@ impl Prepared {
 
     /// `{ send: { kind, account, tx, handle, token } }` (*inferred*): what
     /// main signs with `sign.transaction`, the nonce added, presenting
-    /// `{ token, kind, handle }`. A token the core can't mint answers
-    /// `-32603` with its message.
-    pub fn answer(&self, minted: Result<&str, &str>) -> Answer {
-        let token = match minted {
-            Ok(token) => token,
-            Err(message) => return failure(message, "Transaction failed"),
-        };
+    /// `{ token, kind, handle }`. The token is borrowed from the minter's
+    /// wiping buffer and never copied here: the daemon writes the answer
+    /// straight into its reply's own ([`SendAnswer::write_into`]), as a
+    /// `{ device }` answer's. A token that isn't plain hex (the minter's
+    /// are 64 lowercase hex digits) is refused, not quoted.
+    pub fn answer<'t>(&self, token: &'t str) -> Result<SendAnswer<'t>, Answer> {
+        if token.is_empty() || !token.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+            return Err(failure("", "Transaction failed"));
+        }
         let Ok(tx) = fc_json::parse(&self.tx) else {
-            return failure("", "Transaction failed");
+            return Err(failure("", "Transaction failed"));
         };
         let send = JsValue::Object(vec![
             prop("kind", JsValue::string(TOKEN_KIND)),
             prop("account", JsValue::Number(f64::from(self.account))),
             prop("tx", tx),
             prop("handle", JsValue::string(self.handle.as_str())),
-            prop("token", JsValue::string(token)),
         ]);
-        Answer::raw(JsValue::Object(vec![prop("send", send)]).stringify())
+        // `{"kind":…,"handle":"…"}` with its closing brace replaced by the
+        // token's field, up to its opening quote.
+        let mut before = String::from(r#"{"send":"#);
+        before.push_str(&send.stringify());
+        before.pop();
+        before.push_str(r#","token":""#);
+        Ok(SendAnswer { before, token })
+    }
+
+    /// The answer when the token couldn't be minted: `-32603` with the
+    /// refusal's message.
+    pub fn refused(message: &str) -> Answer {
+        failure(message, "Transaction failed")
+    }
+}
+
+/// A `{ send }` answer: its public text, and the token it carries,
+/// borrowed from the minter's wiping buffer (design 0012, "Tokens": never
+/// in a plain copy, never in Debug output), as a `{ device }` answer's.
+/// Its `Debug` prints no token, and it has no `Clone`.
+pub struct SendAnswer<'t> {
+    /// The JSON text up to the token's opening quote.
+    before: String,
+    token: &'t str,
+}
+
+impl SendAnswer<'_> {
+    /// What follows the token: its closing quote and two braces.
+    const AFTER: &'static str = r#""}}"#;
+
+    /// The answer's length in bytes, for a reply sized before it is
+    /// written.
+    pub fn len(&self) -> usize {
+        self.before.len() + self.token.len() + Self::AFTER.len()
+    }
+
+    /// Never: the answer always holds its `send`.
+    pub fn is_empty(&self) -> bool {
+        false
+    }
+
+    /// Appends the answer's JSON text, its token in place, to `out`: the
+    /// caller's wiping buffer, sized for the whole reply first so that no
+    /// grown buffer leaves a copy behind.
+    pub fn write_into(&self, out: &mut Vec<u8>) {
+        out.extend_from_slice(self.before.as_bytes());
+        out.extend_from_slice(self.token.as_bytes());
+        out.extend_from_slice(Self::AFTER.as_bytes());
+    }
+}
+
+impl std::fmt::Debug for SendAnswer<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SendAnswer")
+            .field("before", &self.before)
+            .field("token", &"<redacted>")
+            .finish()
     }
 }
 
@@ -757,6 +814,53 @@ mod tests {
             let answer = send.prepare(|_| fc_json::parse(&grant).ok()).unwrap_err();
             assert_eq!(answer.as_str(), Answer::unsupported().as_str(), "{kind}");
         }
+    }
+
+    /// A `{ send }` answer's token goes only into the reply's buffer: no
+    /// Debug output shows it, the answer's, the prepared send's or the
+    /// verdict's. A token that isn't plain hex is refused, never quoted.
+    #[test]
+    fn a_send_token_is_in_no_debug_output() {
+        const MARKER: &str = "feedfacecafebeef0123456789abcdef";
+        let prepared = Prepared {
+            account: 0,
+            handle: "ab".repeat(32),
+            tx: r#"{"type":2,"chain_id":"100","to":"0x5555555555555555555555555555555555555555","value":"0","data":"0x","gas_limit":"25200","max_fee_per_gas":"30000000000","max_priority_fee_per_gas":"2000000000"}"#.to_owned(),
+            remember: false,
+        };
+        let answer = prepared.answer(MARKER).unwrap();
+        let judged = Judged::Send(prepared.clone());
+        for debug in [
+            format!("{answer:?}"),
+            format!("{answer:#?}"),
+            format!("{prepared:?}"),
+            format!("{judged:?}"),
+        ] {
+            assert!(!debug.contains(MARKER), "{debug}");
+            assert!(!debug.contains("feedface"), "{debug}");
+        }
+        let mut out = Vec::with_capacity(answer.len());
+        answer.write_into(&mut out);
+        assert_eq!(out.len(), answer.len());
+        assert_eq!(
+            String::from_utf8(out).unwrap(),
+            format!(
+                r#"{{"send":{{"kind":"dapp-send","account":0,"tx":{},"handle":"{}","token":"{MARKER}"}}}}"#,
+                prepared.tx,
+                "ab".repeat(32),
+            )
+        );
+        for bad in ["", "ab\"cd", "ab\\cd", "0xab", "ab cd"] {
+            assert_eq!(
+                prepared.answer(bad).unwrap_err(),
+                failure("", "Transaction failed"),
+                "{bad}"
+            );
+        }
+        assert_eq!(
+            Prepared::refused("Vault is locked"),
+            failure("Vault is locked", "Transaction failed")
+        );
     }
 
     #[test]
