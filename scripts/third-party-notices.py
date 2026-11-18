@@ -204,10 +204,10 @@ NATIVE = {
         # libz-sys's own copy, on every target: freedom-radicled's
         # Cargo.toml asks for `static`.
         Native(
-            "zlib 1.3.2 (C library), built from libz-sys 1.1.31's copy",
+            "zlib 1.4 (C library), built from libz-sys 1.1.33's copy",
             "Zlib",
             "crate:src/zlib/LICENSE",
-            "libz-sys 1.1.31",
+            "libz-sys 1.1.33",
         ),
         # sqlite3-src's amalgamation (source/sqlite3.c), with `bundled`.
         # SQLite is in the public domain: its notice is the dedication its
