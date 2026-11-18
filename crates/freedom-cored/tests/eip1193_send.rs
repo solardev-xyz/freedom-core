@@ -45,6 +45,13 @@ fn load() -> Value {
 /// from the returned file, with chains 1, 100 and 8453 read Direct from one
 /// endpoint each.
 fn core(grants: &Value) -> (tempfile::TempDir, Core, PathBuf) {
+    core_for(grants, 1, false)
+}
+
+/// [`core`], with chain 1 read from `endpoints` endpoints (two give fee
+/// evidence that isn't one endpoint's word, which a rule needs) and the
+/// vault locked if `locked`.
+fn core_for(grants: &Value, endpoints: usize, locked: bool) -> (tempfile::TempDir, Core, PathBuf) {
     let (root, data, locks) = dirs();
     let (wall, clock) = (root.path().join("wall"), root.path().join("approval"));
     std::fs::write(&wall, NOW.to_string()).unwrap();
@@ -77,12 +84,16 @@ fn core(grants: &Value) -> (tempfile::TempDir, Core, PathBuf) {
         })
     };
     let chains = [
-        chain(1, &["e1"]),
+        chain(1, &["e1", "e1b"][..endpoints]),
         chain(100, &["e100"]),
         chain(8453, &["e8453"]),
     ];
     let reply = core.call(3, "chain.configure", json!({ "chains": chains }));
     assert!(reply["result"]["generations"].is_object(), "{reply}");
+    if locked {
+        let reply = core.call_shell(4, "vault.lock", json!({}));
+        assert!(reply["result"].is_object(), "{reply}");
+    }
     (root, core, clock)
 }
 
@@ -609,4 +620,433 @@ fn stale_evidence_is_asked_for_again_at_approval() {
         response["result"]["send"]["token"].is_string(),
         "{response}"
     );
+}
+
+/// The reference's transaction rules in Q9's form (`rule-legacy`): the
+/// limited rule, granted at the vectors' `now`.
+fn q9(mut grants: Value) -> Value {
+    for entry in grants.as_object_mut().unwrap().values_mut() {
+        let rules = &mut entry["autoApprove"];
+        let mut limited = Vec::new();
+        for rule in rules["transactions"].as_array().unwrap() {
+            let mut rule = rule.clone();
+            rule["grantedAt"] = json!(NOW);
+            limited.push(rule);
+        }
+        if !limited.is_empty() {
+            rules["transactions"] = json!([]);
+            rules["limited"] = json!({ "signing": null, "transactions": limited });
+        }
+    }
+    grants
+}
+
+/// `sign.transaction` under the site's rule, as main signs a rule's
+/// `{ send }` in the site's turn with D12's `paused`.
+fn sign_standing(core: &mut Core, id: u64, send: &Value, paused: bool) -> Value {
+    let mut tx = send["tx"].clone();
+    tx["nonce"] = json!("7");
+    core.send(&json!({
+        "type": "request", "id": id, "method": "sign.transaction",
+        "params": {
+            "key": { "kind": "account", "index": send["account"] }, "tx": tx,
+            "authorization": { "standing": { "paused": paused } },
+        },
+        "context": page(Some(SITE)),
+    }));
+    core.until_response(id)
+}
+
+/// APR-5e-2's 10 scenarios through the binary. A device's send runs to
+/// `{ device }`, whose token main spends on the device (a Ledger's
+/// `approval.spend`, a phone's `phone.job`); what the device does next is
+/// main's. A rule's send runs to `{ send }` under the rule, which main
+/// signs under `{ standing }` in the site's turn: a turn the reference
+/// found busy is main's refusal, and a payment waiting gives `paused`,
+/// which the core refuses. The rule is the reference's in Q9's form, and
+/// the fee evidence two endpoints' (one for `send-rule-fee-needs-user`,
+/// whose verdict is one endpoint's word).
+#[test]
+fn every_device_and_rule_send_replays_through_the_core() {
+    let file = load();
+    let (mut prompts, mut devices, mut ruled) = (0, 0, 0);
+    for scenario in file["scenarios"].as_array().unwrap() {
+        let name = scenario["id"].as_str().unwrap();
+        if !logic::APR5E2.contains(&name) {
+            continue;
+        }
+        let endpoints = if name == "send-rule-fee-needs-user" {
+            1
+        } else {
+            2
+        };
+        let locked = scenario["world"]["vault"] == false;
+        let (_root, mut core, _clock) =
+            core_for(&q9(scenario["grants"]["before"].clone()), endpoints, locked);
+        let recorded = &scenario["requests"][0];
+        let effects = recorded["effects"].as_array().unwrap();
+        let custody: Vec<bool> = effects
+            .iter()
+            .filter(|e| e["effect"] == "custody")
+            .map(|e| e["answer"] == true)
+            .collect();
+        let mut world = logic::world_of(&file, scenario);
+        world["paused"] = json!(false);
+        let estimate = effects
+            .iter()
+            .find(|e| e["effect"] == "chain.request")
+            .unwrap();
+        let mut node = Node::new(estimate.clone());
+        let mut body = json!({ "method": recorded["method"], "world": world });
+        body["params"] = recorded["params"].clone();
+        let id = 100;
+        request(&mut core, id, Some(SITE), &body);
+        let mut shown = effects.iter().filter(|e| e["effect"] == "prompt");
+        let response = loop {
+            let message = core.recv();
+            match (message["type"].as_str(), message["method"].as_str()) {
+                (Some("event"), _) => {}
+                (Some("request"), Some("shell.rpc")) => {
+                    let answer = node.answer(&message);
+                    respond(&mut core, &message, answer);
+                }
+                (Some("request"), Some("approval.recheck")) => {
+                    // Main's read just before the effect: the reference's
+                    // custody read after its turn.
+                    let agent = custody.get(2).copied().unwrap_or(false);
+                    respond(
+                        &mut core,
+                        &message,
+                        json!({ "result": { "live": true, "agent": agent } }),
+                    );
+                }
+                (Some("request"), Some("approval.request")) => {
+                    prompts += 1;
+                    let prompt = shown.next().unwrap_or_else(|| panic!("{name}: no prompt"));
+                    let params = &message["params"];
+                    assert_eq!(params["kind"], prompt["args"]["kind"], "{name}");
+                    let expected = if params["kind"] == "eth.send" {
+                        adapted(&prompt["args"]["view"], &params["view"])
+                    } else {
+                        // The unlock: main unlocks as the user approves.
+                        let reply = core.call_shell(
+                            id + 50,
+                            "vault.unlock",
+                            json!({ "password_b64": STANDARD.encode("testpass1") }),
+                        );
+                        assert!(reply["result"].is_object(), "{reply}");
+                        prompt["args"]["view"].clone()
+                    };
+                    assert_eq!(params["view"].to_string(), expected.to_string(), "{name}");
+                    let handle = format!("{:064x}", message["id"].as_u64().unwrap());
+                    let answer = answer_of(&params["prompt"], &handle, &prompt["answer"], &world);
+                    respond(&mut core, &message, json!({ "result": answer }));
+                }
+                (Some("response"), _) if message["id"] == id => break message,
+                _ => panic!("{name}: unexpected {message}"),
+            }
+        };
+        assert!(shown.next().is_none(), "{name}: a prompt not asked");
+        let result = &response["result"];
+        let issued = effects.iter().find(|e| e["effect"] == "token.issue");
+        if let Some(issued) = issued {
+            devices += 1;
+            let device = &result["device"];
+            let mut payload = issued["args"]["payload"].clone();
+            payload.as_object_mut().unwrap().remove("origin");
+            let tx = logic::core_tx(&payload);
+            assert_eq!(device["kind"], "dapp-send", "{name}");
+            assert_eq!(device["account"], issued["args"]["account"], "{name}");
+            assert_eq!(device["payload"], json!({ "tx": tx }), "{name}");
+            let account = device["account"].as_u64().unwrap();
+            let auth = json!({ "token": device["token"], "kind": "dapp-send", "handle": device["handle"] });
+            let spent = if device["type"] == "remote" {
+                core.send(&json!({
+                    "type": "request", "id": id + 170, "method": "phone.job",
+                    "params": { "account": account, "address": scenario["world"].get("wallets")
+                        .unwrap_or(&file["wallets"])[2]["address"], "method": "transaction",
+                        "payload": device["payload"], "authorization": auth, "target": 9 },
+                    "context": page(Some(SITE)),
+                }));
+                core.until_response(id + 170)
+            } else {
+                assert_eq!(device["type"], "ledger", "{name}");
+                core.send(&json!({
+                    "type": "request", "id": id + 170, "method": "approval.spend",
+                    "params": { "token": device["token"], "kind": "dapp-send", "account": account,
+                        "payload": device["payload"], "handle": device["handle"] },
+                    "context": page(Some(SITE)),
+                }));
+                core.until_response(id + 170)
+            };
+            assert!(spent["result"].is_object(), "{name}: {spent}");
+        } else if let Some(send) = result.get("send") {
+            ruled += 1;
+            assert_eq!(send["standing"], true, "{name}");
+            let signed = effects.iter().find(|e| e["effect"] == "send.sign");
+            match signed {
+                Some(signed) => {
+                    assert_eq!(send["tx"], logic::core_tx(&signed["args"]["tx"]), "{name}");
+                    let reply = sign_standing(&mut core, id + 190, send, false);
+                    assert!(reply["result"]["raw"].is_string(), "{name}: {reply}");
+                }
+                // Main's refusal in the site's turn; a payment waiting
+                // gives `paused`, which the core refuses as well.
+                None => {
+                    let reply = sign_standing(&mut core, id + 190, send, true);
+                    assert_eq!(
+                        reply["error"]["data"]["reason"], "paused",
+                        "{name}: {reply}"
+                    );
+                }
+            }
+        } else {
+            assert_eq!(result.to_string(), recorded["result"].to_string(), "{name}");
+        }
+        assert_eq!(
+            grant_file(&core),
+            q9(scenario["grants"]["after"].clone()),
+            "{name}"
+        );
+    }
+    assert_eq!((prompts, devices, ruled), (6, 2, 4));
+}
+
+/// A site's limited rule for the test's `approve` call, up to `max` wei.
+fn ruled_grants(max: &str) -> Value {
+    let mut grants = connected();
+    grants[SITE]["autoApprove"]["limited"] = json!({ "signing": null, "transactions": [{
+        "to": TO, "selector": "0x095ea7b3", "chainId": 1, "maxValue": max, "grantedAt": NOW,
+    }] });
+    grants
+}
+
+/// Plays the node until request `id`'s recheck, its prompt or its
+/// response.
+fn until_main(core: &mut Core, id: u64, node: &mut Node) -> Value {
+    loop {
+        let message = core.recv();
+        match (message["type"].as_str(), message["method"].as_str()) {
+            (Some("event"), _) => {}
+            (Some("request"), Some("shell.rpc")) => {
+                let answer = node.answer(&message);
+                respond(core, &message, answer);
+            }
+            (Some("request"), _) => return message,
+            (Some("response"), _) if message["id"] == id => return message,
+            _ => panic!("unexpected {message}"),
+        }
+    }
+}
+
+/// A rule's send (APR-5e-2) is rechecked just before its effect, in the
+/// reference's order: custody, then the rule (gone once revoked), then the
+/// document. Answered by the rule, it is `{ send }` under it: main signs it
+/// under `{ standing }`, which binds what the rule covers and counts, so
+/// after Q9's burst of five the next is asked, never refused.
+#[test]
+fn a_rule_send_is_rechecked_bound_and_counted() {
+    let (_root, mut core, _clock) = core_for(&ruled_grants("5"), 2, false);
+    let mut node = Node::new(estimate());
+    let mut body = send_body();
+    body["world"]["paused"] = json!(false);
+    let mut ask = |core: &mut Core, id: u64, live: bool, agent: bool| {
+        request(core, id, Some(SITE), &body);
+        let recheck = until_main(core, id, &mut node);
+        assert_eq!(recheck["method"], "approval.recheck", "{recheck}");
+        respond(
+            core,
+            &recheck,
+            json!({ "result": { "live": live, "agent": agent } }),
+        );
+        until_main(core, id, &mut node)
+    };
+    let custody = ask(&mut core, 100, true, true);
+    assert_eq!(
+        custody["result"]["error"]["data"]["reason"], "agent_custody",
+        "{custody}"
+    );
+    let gone = ask(&mut core, 110, false, false);
+    assert_eq!(gone["result"]["error"]["code"], 4100, "{gone}");
+    let mut id = 120;
+    for n in 0..5 {
+        let send = ask(&mut core, id, true, false)["result"]["send"].clone();
+        assert_eq!(send["standing"], true, "{send}");
+        assert_eq!(send["tx"]["gas_limit"], "60000");
+        if n == 0 {
+            // What the rule doesn't cover signs nothing: another `to`, or
+            // more value than the send it came from.
+            for (field, value) in [
+                ("to", json!("0x5555555555555555555555555555555555555555")),
+                ("value", json!("6")),
+            ] {
+                let mut other = send.clone();
+                other["tx"][field] = value;
+                let refused = sign_standing(&mut core, id + 1, &other, false);
+                assert_eq!(
+                    refused["error"]["data"]["reason"], "no_rule",
+                    "{field}: {refused}"
+                );
+                id += 1;
+            }
+        }
+        let signed = sign_standing(&mut core, id + 5, &send, false);
+        assert!(signed["result"]["raw"].is_string(), "{signed}");
+        id += 10;
+    }
+    // Past the rate: no rule is chosen, the user is asked.
+    request(&mut core, id, Some(SITE), &body);
+    let asked = until_main(&mut core, id, &mut node);
+    assert_eq!(asked["params"]["kind"], "eth.send", "{asked}");
+    let answer = json!({ "prompt": asked["params"]["prompt"], "handle": "77".repeat(32),
+        "approve": false, "choices": {} });
+    respond(&mut core, &asked, json!({ "result": answer }));
+    let rejected = until_main(&mut core, id, &mut node);
+    assert_eq!(rejected["result"]["error"]["code"], 4001, "{rejected}");
+}
+
+/// The rule revoked between its choice and the recheck: refused, nothing
+/// to sign. The vault locked: the unlock first, its refusals the user's.
+#[test]
+fn a_rule_send_gone_or_unlock_refused_signs_nothing() {
+    let (_root, mut core, _clock) = core_for(&ruled_grants("5"), 2, true);
+    let mut node = Node::new(estimate());
+    let mut body = send_body();
+    body["world"]["paused"] = json!(false);
+    for (id, answer, code) in [
+        (100, json!({ "approve": false, "choices": {} }), 4001),
+        (110, json!({ "busy": true }), -32002),
+        (120, json!({ "approve": true, "choices": { "x": true } }), 0),
+    ] {
+        request(&mut core, id, Some(SITE), &body);
+        let unlock = until_main(&mut core, id, &mut node);
+        assert_eq!(unlock["params"]["kind"], "vault.unlock", "{unlock}");
+        assert_eq!(unlock["params"]["view"]["reason"], "send");
+        let mut answer = answer;
+        answer["prompt"] = unlock["params"]["prompt"].clone();
+        if answer.get("approve").is_some() {
+            answer["handle"] = json!(format!("{id:064x}"));
+        }
+        if answer["approve"] == true {
+            answer["world"] = body["world"].clone();
+        }
+        respond(&mut core, &unlock, json!({ "result": answer }));
+        let refused = until_main(&mut core, id, &mut node);
+        match code {
+            0 => assert_eq!(refused["error"]["data"]["reason"], "mismatch", "{refused}"),
+            code => assert_eq!(refused["result"]["error"]["code"], code, "{refused}"),
+        }
+    }
+    let reply = core.call_shell(
+        125,
+        "vault.unlock",
+        json!({ "password_b64": STANDARD.encode("testpass1") }),
+    );
+    assert!(reply["result"].is_object(), "{reply}");
+    request(&mut core, 130, Some(SITE), &body);
+    let recheck = until_main(&mut core, 130, &mut node);
+    assert_eq!(recheck["method"], "approval.recheck", "{recheck}");
+    let revoked = core.call_shell(
+        135,
+        "approval.revoke",
+        json!({ "store": "dapp", "key": SITE, "what": "grant" }),
+    );
+    assert!(revoked.get("result").is_some(), "{revoked}");
+    respond(
+        &mut core,
+        &recheck,
+        json!({ "result": { "live": true, "agent": false } }),
+    );
+    let gone = until_main(&mut core, 130, &mut node);
+    assert_eq!(
+        gone["result"]["error"]["message"],
+        "Signing was not confirmed: this request is not covered by the site's auto-approve rules",
+        "{gone}"
+    );
+}
+
+/// A Ledger's send with "Always allow" ticked answers `{ device }`, whose
+/// `dapp-send` spent by main gives the device send's receipt. A Safe's is
+/// asked with its executor paying, "Always allow" not pickable, and answers
+/// `{ device }` with the site's `safe-send` for the Safe, its chain and the
+/// SafeTx, which main spends into a Safe approval.
+#[test]
+fn a_device_send_answers_its_token() {
+    const LEDGER: &str = "0x6Fac4D18c912343BF86fa7049364Dd4E424Ab9C0";
+    const SAFE: &str = "0x4444444444444444444444444444444444444444";
+    let mut grants = connected();
+    grants[SITE]["walletIndex"] = json!(1);
+    let (_root, mut core, _clock) = core_for(&grants, 2, false);
+    let mut estimate = estimate();
+    estimate["args"]["params"][0]["from"] = json!(LEDGER);
+    let mut node = Node::new(estimate);
+    let mut body = send_body();
+    body["world"]["wallets"] = json!([
+        { "index": 1, "name": "Ledger", "address": LEDGER, "type": "ledger" },
+        { "index": 1000, "name": "Team Safe", "address": SAFE, "type": "safe" },
+    ]);
+    let approve = |core: &mut Core, node: &mut Node, id: u64, body: &Value, choices: Value| {
+        request(core, id, Some(SITE), body);
+        let asked = until_main(core, id, node);
+        let answer = json!({ "prompt": asked["params"]["prompt"], "handle": format!("{id:064x}"),
+            "approve": true, "choices": choices, "world": body["world"] });
+        respond(core, &asked, json!({ "result": answer }));
+        (asked, until_main(core, id, node))
+    };
+    let spend = |core: &mut Core, id: u64, device: &Value| {
+        core.send(&json!({
+            "type": "request", "id": id, "method": "approval.spend",
+            "params": { "token": device["token"], "kind": device["kind"], "account": device["account"],
+                "payload": device["payload"], "handle": device["handle"] },
+            "context": page(Some(SITE)),
+        }));
+        core.until_response(id)
+    };
+    let (_, done) = approve(
+        &mut core,
+        &mut node,
+        100,
+        &body,
+        json!({ "alwaysAllow": true }),
+    );
+    let device = &done["result"]["device"];
+    assert_eq!(
+        (device["type"].clone(), device["kind"].clone()),
+        (json!("ledger"), json!("dapp-send"))
+    );
+    assert_eq!(device["payload"]["tx"]["gas_limit"], "60000", "{done}");
+    let spent = spend(&mut core, 101, device);
+    assert!(spent["result"]["receipt"].is_string(), "{spent}");
+    // A Safe's, on Gnosis.
+    let mut grants = connected();
+    grants[SITE]["walletIndex"] = json!(1000);
+    let (_root, mut core, _clock) = core_for(&grants, 2, false);
+    body["world"]["window_chain"] = json!(100);
+    let (asked, crossed) = approve(
+        &mut core,
+        &mut node,
+        110,
+        &body,
+        json!({ "alwaysAllow": true }),
+    );
+    assert_eq!(
+        asked["params"]["view"]["fee"],
+        json!({ "paidBy": "executor" }),
+        "{asked}"
+    );
+    assert_eq!(
+        asked["params"]["choices"],
+        json!({ "alwaysAllow": [false], "feeAcknowledged": [false, true] })
+    );
+    assert_eq!(crossed["error"]["data"]["reason"], "mismatch", "{crossed}");
+    let (_, done) = approve(&mut core, &mut node, 120, &body, json!({}));
+    let device = &done["result"]["device"];
+    assert_eq!(device["kind"], "safe-send", "{done}");
+    assert_eq!(
+        device["payload"],
+        json!({ "safe": SAFE, "chain_id": "100",
+        "tx": { "to": TO, "value": "5", "data": APPROVE_DATA } })
+    );
+    let spent = spend(&mut core, 121, device);
+    assert!(spent["result"].is_object(), "{spent}");
 }
