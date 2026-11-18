@@ -540,6 +540,89 @@ fn sends_name_their_own_fees_but_a_phones() {
     assert_eq!(standing.check_dapp(&store, &phone, NOW), Decision::Covered);
 }
 
+/// The choice before the quote (design 0012, APR-5e-2): a send's rule
+/// judged without its fee, which the check judges once quoted; everything
+/// else as `check_dapp`, the rate's room included, counting nothing.
+#[test]
+fn a_send_is_chosen_before_its_fee() {
+    let store = ruled_store();
+    let mut standing = Standing::new();
+    let one = U256::from_u64(1);
+    let data = APPROVE;
+    let unquoted = Fees::default();
+    let choose = |standing: &Standing, ask: &DappAsk<'_>| {
+        standing.choose_send_under(Rules::Limited, &store, ask, NOW)
+    };
+    let mut ask = send(
+        AccountKind::Vault,
+        Some(&ROUTER),
+        &data,
+        &one,
+        unquoted,
+        None,
+    );
+    assert_eq!(
+        standing.check_dapp(&store, &ask, NOW),
+        Decision::NotCovered(Reason::FeeCheck)
+    );
+    assert_eq!(choose(&standing, &ask), Decision::Covered);
+    // Custody, the pause, a Safe, another account: as the full check.
+    ask.agent = None;
+    assert_eq!(
+        choose(&standing, &ask),
+        Decision::NotCovered(Reason::Custody)
+    );
+    ask.agent = Some(false);
+    if let DappRequest::Transaction(send) = &mut ask.request {
+        send.paused = None;
+    }
+    assert_eq!(
+        choose(&standing, &ask),
+        Decision::NotCovered(Reason::Paused)
+    );
+    let safe = send(
+        AccountKind::Safe,
+        Some(&ROUTER),
+        &data,
+        &one,
+        Fees::default(),
+        None,
+    );
+    assert_eq!(
+        choose(&standing, &safe),
+        Decision::NotCovered(Reason::NoRule)
+    );
+    // The rate: five counted, the sixth not chosen; the choice counts none.
+    let evidence = evidence();
+    let full = send(
+        AccountKind::Vault,
+        Some(&ROUTER),
+        &data,
+        &one,
+        named_fees(),
+        Some(&evidence),
+    );
+    let ask = send(
+        AccountKind::Vault,
+        Some(&ROUTER),
+        &data,
+        &one,
+        Fees::default(),
+        None,
+    );
+    for _ in 0..5 {
+        assert_eq!(choose(&standing, &ask), Decision::Covered);
+        assert_eq!(
+            standing.authorize_dapp(&store, &full, NOW),
+            Decision::Covered
+        );
+    }
+    assert_eq!(
+        choose(&standing, &ask),
+        Decision::NotCovered(Reason::RateLimited)
+    );
+}
+
 #[test]
 fn custody_comes_first_and_a_missing_input_is_no_rule() {
     let store = ruled_store();

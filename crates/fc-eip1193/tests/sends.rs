@@ -1,5 +1,6 @@
-//! Replays the prompted vault sends of `step: "APR-5e"` in
-//! vectors/eip1193.json through the dispatcher (design 0012, APR-5e-1):
+//! Replays every `step: "APR-5e"` send in vectors/eip1193.json through the
+//! dispatcher (design 0012, APR-5e-1 the prompted vault sends, APR-5e-2 the
+//! device sends and the sends a rule answers):
 //! each request as main sends it, the estimate's params and chain checked
 //! against the reference's `chain.request` effect and answered from it,
 //! the fee quote answered from `chain.fee_quote`, the transaction the fee
@@ -26,8 +27,8 @@
 
 use std::path::PathBuf;
 
-use fc_eip1193::send::{Decided, Judged};
-use fc_eip1193::{Prompts, Request, Step, start};
+use fc_eip1193::send::{Decided, Judged, RuleNow, RuleRechecked, Ruled};
+use fc_eip1193::{Prompts, Recheck, Request, Step, start};
 use serde_json::{Value, json};
 
 /// The 19 scenarios a vault prompt answers, or that end before one; the
@@ -55,7 +56,7 @@ pub const PROMPTED: [&str; 19] = [
 ];
 
 /// APR-5e-2's: devices, and the sends a rule answers.
-pub const LATER: [&str; 10] = [
+pub const APR5E2: [&str; 10] = [
     "send-ledger-declined",
     "send-phone-outcome-unknown",
     "send-rule-answers",
@@ -272,6 +273,7 @@ fn every_prompted_send_replays() {
                             continue 'run;
                         }
                         Decided::Judge(judge) => judge,
+                        Decided::Safe(_) => panic!("{what}: a Safe's send"),
                     };
                     let at = next("fees.at_approval");
                     assert_eq!(judge.tx(), core_tx(&at["args"]["tx"]).to_string(), "{what}");
@@ -296,6 +298,7 @@ fn every_prompted_send_replays() {
                             continue;
                         }
                         Judged::Send(approved) => approved,
+                        Judged::Device(_) => panic!("{what}: a device's send"),
                     };
                     prepared += 1;
                     next("send.turn");
@@ -376,10 +379,9 @@ fn every_prompted_send_replays() {
     );
 }
 
-/// The scenarios this step replays and the ones left to APR-5e-2 are every
-/// step-APR-5e scenario.
+/// The two lists are every step-APR-5e scenario.
 #[test]
-fn the_rest_are_apr5e2s() {
+fn every_step_apr5e_scenario_is_replayed() {
     let file = load();
     let ids: Vec<&str> = file["scenarios"]
         .as_array()
@@ -388,8 +390,301 @@ fn the_rest_are_apr5e2s() {
         .filter(|s| s["step"] == "APR-5e")
         .map(|s| s["id"].as_str().unwrap())
         .collect();
-    assert_eq!(ids.len(), PROMPTED.len() + LATER.len());
+    assert_eq!(ids.len(), PROMPTED.len() + APR5E2.len());
     for id in ids {
-        assert!(PROMPTED.contains(&id) ^ LATER.contains(&id), "{id}");
+        assert!(PROMPTED.contains(&id) ^ APR5E2.contains(&id), "{id}");
     }
+}
+
+/// An effect's outcome as the core's read gives it: the answer's `result`
+/// (`nested`) or the answer, or the thrown message.
+fn outcome(effect: &Value, nested: bool) -> Result<fc_json::JsValue, String> {
+    match effect.get("answer") {
+        Some(answer) => {
+            let answer = if nested { &answer["result"] } else { answer };
+            Ok(fc_json::parse(&answer.to_string()).unwrap())
+        }
+        None => Err(effect["throws"]["message"].as_str().unwrap().to_owned()),
+    }
+}
+
+/// The 10 scenarios APR-5e-2 replays. A device's send is prepared and asked
+/// as a vault account's (a phone's fee unchecked); its approve mints the
+/// reference's `token.issue` payload and answers `{ device }`, and what the
+/// device does with it (`token.spend`, `send.sign`) is main's. A rule's
+/// send is chosen where the reference's rule matched (it read D12's pause,
+/// which main sends as `world.paused`), asks the unlock while the vault is
+/// locked, is quoted and judged by the scripted fee check, and is
+/// rechecked: the recheck's custody is the reference's read just before
+/// its signature. Main's turn (D12) comes after `{ send }` through the
+/// core, so a turn the reference found busy, or a payment it found
+/// waiting, is main's refusal after it. Custody reads before the choice
+/// are `PageContext.agent`.
+#[test]
+fn every_device_and_rule_send_replays() {
+    let file = load();
+    let mut prompts = Prompts::new();
+    let mut handles = 100u8;
+    let (mut scenarios, mut asked, mut devices, mut ruled, mut by_main) = (0, 0, 0, 0, 0);
+    let lookup = |grants: &Value, key: &str| {
+        grants
+            .get(key)
+            .map(|g| fc_json::parse(&g.to_string()).unwrap())
+    };
+    for scenario in file["scenarios"].as_array().unwrap() {
+        let id = scenario["id"].as_str().unwrap();
+        if !APR5E2.contains(&id) {
+            continue;
+        }
+        scenarios += 1;
+        let recorded = &scenario["requests"][0];
+        assert_eq!(scenario["requests"].as_array().unwrap().len(), 1, "{id}");
+        let effects: Vec<Value> = recorded["effects"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|e| e["effect"] != "world")
+            .cloned()
+            .collect();
+        let at = std::cell::Cell::new(0);
+        let next = |name: &str| {
+            let effect = effects
+                .get(at.get())
+                .unwrap_or_else(|| panic!("{id}: no {name}"));
+            assert_eq!(effect["effect"], name, "{id}: {effect}");
+            at.set(at.get() + 1);
+            effect.clone()
+        };
+        let peek = || {
+            effects
+                .get(at.get())
+                .map(|e| e["effect"].as_str().unwrap().to_owned())
+        };
+        // `PageContext.agent`: main's agent route and the rule's choice.
+        for _ in 0..2 {
+            assert_eq!(next("custody")["answer"], false, "{id}");
+        }
+        let paused = effects.iter().find(|e| e["effect"] == "send.paused");
+        let mut world = world_of(&file, scenario);
+        world["paused"] = paused.map_or(json!(false), |e| e["answer"].clone());
+        let key = scenario["world"]["documents"][0]["key"].as_str();
+        let grants = scenario["grants"]["before"].clone();
+        assert_eq!(grants, scenario["grants"]["after"], "{id}: nothing written");
+        let mut params =
+            json!({ "method": recorded["method"], "world": world, "params": recorded["params"] });
+        params["params"] = recorded["params"].clone();
+        let request = Request::parse(&params.to_string()).unwrap();
+        let Step::Send(send) = start(&request, key, |key| lookup(&grants, key)) else {
+            panic!("{id}")
+        };
+        let prepare = send.prepare(|key| lookup(&grants, key)).unwrap();
+        let mut decide = |view: &str, kind: &str, choices: &str| {
+            let prompt = next("prompt");
+            asked += 1;
+            assert_eq!(kind, prompt["args"]["kind"], "{id}");
+            assert_eq!(view, prompt["args"]["view"].to_string(), "{id}");
+            // A Ledger's and a phone's offer "Always allow" as a vault
+            // account's: the token carries it to the device's receipt.
+            if kind == "eth.send" {
+                assert_eq!(
+                    choices, r#"{"alwaysAllow":[false,true],"feeAcknowledged":[false,true]}"#,
+                    "{id}"
+                );
+            }
+            handles += 1;
+            let issued = prompts.issue([handles; 16]).unwrap();
+            let handle = format!("{handles:064x}");
+            let text = answer_of(&issued.hex(), &handle, &prompt["answer"], &world);
+            (prompts.accept(&issued, &text).unwrap(), handle, prompt)
+        };
+        // The core judges the rule with its own grant: scripted as the
+        // reference's match, which read the pause.
+        let query = prepare.rule_query(Some(false));
+        let device = prompt_type(&effects);
+        assert_eq!(query.is_some(), device == "mnemonic", "{id}");
+        let answer = match prepare.clone().ruled().filter(|_| paused.is_some()) {
+            Some(rule) => {
+                ruled += 1;
+                assert_eq!(next("send.paused")["answer"], false, "{id}");
+                if scenario["world"]["vault"] == false {
+                    let (decision, _, _) = decide(&rule.unlock_view(), rule.unlock_kind(), "{}");
+                    assert_eq!(rule.unlock_choices(), "{}");
+                    assert_eq!(rule.unlocked(decision).unwrap(), None, "{id}");
+                }
+                let estimate = next("chain.request");
+                assert_eq!(
+                    rule.prepare().estimate_params(),
+                    estimate["args"]["params"].to_string(),
+                    "{id}"
+                );
+                let fee = next("chain.fee_quote");
+                let (estimate, fee) = (outcome(&estimate, true), outcome(&fee, false));
+                let quoted = rule.prepare().quote(read(&estimate), read(&fee));
+                let judged = rule.judged(quoted, |tx| {
+                    let check = next("fees.check");
+                    assert_eq!(tx, core_tx(&check["args"]["tx"]).to_string(), "{id}");
+                    check["answer"].to_string()
+                });
+                match judged {
+                    Ruled::Answer(answer) => answer.as_str().to_owned(),
+                    Ruled::Ask(ask) => {
+                        let (decision, _, _) = decide(ask.view(), ask.kind(), ask.choices());
+                        let Decided::Answer(answer) = ask.decide(decision).unwrap() else {
+                            panic!("{id}")
+                        };
+                        answer.as_str().to_owned()
+                    }
+                    Ruled::Recheck(rule) => {
+                        let tx = rule.tx().unwrap();
+                        let verdict = effects
+                            .iter()
+                            .find(|e| e["effect"] == "fees.check")
+                            .unwrap()["answer"]
+                            .to_string();
+                        // Main's turn, which the reference took before its
+                        // last read of custody: main's, after `{ send }`.
+                        let turn = next("send.turn");
+                        assert_eq!(turn["args"]["wait"], false, "{id}");
+                        let waiting = (turn.get("answer").is_some()).then(|| next("send.waiting"));
+                        let refused = waiting.as_ref().is_none_or(|w| w["answer"] == true);
+                        let agent = if refused {
+                            false
+                        } else {
+                            next("custody")["answer"] == true
+                        };
+                        let rechecked = rule.rechecked(
+                            &Recheck { live: true, agent },
+                            RuleNow::Covered,
+                            &verdict,
+                        );
+                        let RuleRechecked::Answer(answer) = rechecked else {
+                            panic!("{id}")
+                        };
+                        if agent {
+                            answer.as_str().to_owned()
+                        } else {
+                            let sent: Value = serde_json::from_str(answer.as_str()).unwrap();
+                            assert_eq!(
+                                sent,
+                                json!({ "send": { "kind": "dapp-send", "account": 0,
+                                    "tx": serde_json::from_str::<Value>(&tx).unwrap(), "standing": true } }),
+                                "{id}"
+                            );
+                            by_main += 1;
+                            if !refused {
+                                let signed = next("send.sign");
+                                assert_eq!(tx, core_tx(&signed["args"]["tx"]).to_string(), "{id}");
+                                for name in ["custody", "send.broadcast", "grant.write"] {
+                                    next(name);
+                                }
+                            }
+                            // What the page gets is main's: the hash, or
+                            // the pause's refusal in the site's turn.
+                            recorded["result"].to_string()
+                        }
+                    }
+                }
+            }
+            None => {
+                let estimate = next("chain.request");
+                let fee = next("chain.fee_quote");
+                let (estimate, fee) = (outcome(&estimate, true), outcome(&fee, false));
+                let quoted = prepare.quote(read(&estimate), read(&fee)).ok();
+                let verdict = quoted
+                    .as_ref()
+                    .filter(|_| prepare.checks_fee())
+                    .map(|quoted| {
+                        let check = next("fees.check");
+                        assert_eq!(
+                            quoted.tx(&prepare),
+                            core_tx(&check["args"]["tx"]).to_string(),
+                            "{id}"
+                        );
+                        check["answer"].to_string()
+                    });
+                let ask = prepare.clone().ask(quoted, verdict.as_deref());
+                let (decision, handle, prompt) = decide(ask.view(), ask.kind(), ask.choices());
+                match ask.decide(decision).unwrap() {
+                    Decided::Answer(answer) => answer.as_str().to_owned(),
+                    Decided::Judge(judge) => {
+                        let (verdict, again) = if judge.checks_fee() {
+                            let at = next("fees.at_approval");
+                            assert_eq!(judge.tx(), core_tx(&at["args"]["tx"]).to_string(), "{id}");
+                            (at["answer"].to_string(), at["answer"]["askAgain"] == true)
+                        } else {
+                            (String::new(), false)
+                        };
+                        let Judged::Device(approved) =
+                            judge.judged(&verdict, again, |key| lookup(&grants, key))
+                        else {
+                            panic!("{id}")
+                        };
+                        devices += 1;
+                        next("send.turn");
+                        let issue = next("token.issue");
+                        let mut payload = issue["args"]["payload"].clone();
+                        payload.as_object_mut().unwrap().remove("origin");
+                        let remember = prompt["answer"]["choices"]["alwaysAllow"] == true;
+                        assert_eq!(approved.token_kind(), issue["args"]["kind"], "{id}");
+                        assert_eq!(approved.account(), issue["args"]["account"], "{id}");
+                        assert_eq!(approved.handle(), handle, "{id}");
+                        assert_eq!(approved.device().name(), device, "{id}");
+                        assert_eq!(
+                            approved.binds(),
+                            json!({ "tx": core_tx(&payload), "remember": remember }).to_string(),
+                            "{id}"
+                        );
+                        assert_eq!(
+                            approved.payload(),
+                            json!({ "tx": core_tx(&payload) }).to_string()
+                        );
+                        let token = "0123456789abcdef".repeat(4);
+                        let answer = approved.answer(&token).unwrap();
+                        let mut written = Vec::with_capacity(answer.len());
+                        answer.write_into(&mut written);
+                        let written: Value = serde_json::from_slice(&written).unwrap();
+                        assert_eq!(
+                            written,
+                            json!({ "device": {
+                            "type": device, "kind": "dapp-send", "account": approved.account(),
+                            "payload": { "tx": core_tx(&payload) }, "handle": handle, "token": token,
+                        } }),
+                            "{id}"
+                        );
+                        // The device's send, and its failure, are main's.
+                        next("token.spend");
+                        let signed = next("send.sign");
+                        assert_eq!(core_tx(&signed["args"]["tx"]), core_tx(&payload), "{id}");
+                        by_main += 1;
+                        recorded["result"].to_string()
+                    }
+                    other => panic!("{id}: {other:?}"),
+                }
+            }
+        };
+        assert_eq!(answer, recorded["result"].to_string(), "{id}");
+        assert_eq!(peek(), None, "{id}: an effect not replayed");
+    }
+    assert_eq!(
+        (scenarios, asked, devices, ruled, by_main),
+        (10, 6, 2, 7, 6)
+    );
+}
+
+/// The account type the scenario's prompt or grant names.
+fn prompt_type(effects: &[Value]) -> String {
+    effects
+        .iter()
+        .find(|e| e["effect"] == "send.sign")
+        .and_then(|e| e["args"]["walletIndex"].as_u64())
+        .map_or("mnemonic", |index| match index {
+            1 => "ledger",
+            2 => "remote",
+            _ => "mnemonic",
+        })
+        .to_owned()
+}
+
+fn read(outcome: &Result<fc_json::JsValue, String>) -> Result<&fc_json::JsValue, &str> {
+    outcome.as_ref().map_err(String::as_str)
 }

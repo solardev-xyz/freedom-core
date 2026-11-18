@@ -21,6 +21,10 @@
 //! - `active` (APR-5c), optional: the active account's index
 //!   (`getActiveWalletIndex`), any JSON value, compared with `===`; the
 //!   connect prompt's default.
+//! - `paused` (APR-5e-2, *inferred*), optional: D12's pause for the
+//!   request's key (`transactionAutoApprovePaused`), a boolean. A send's
+//!   rule is chosen only when it is `false`: a missing one reads as paused
+//!   (0012's `rule-inputs`).
 
 use fc_json::{JsString, JsValue, ToPrimitiveError};
 
@@ -51,6 +55,7 @@ pub struct World {
     wallets: Vec<JsValue>,
     networks: Vec<(String, JsValue)>,
     active: Option<JsValue>,
+    paused: Option<bool>,
 }
 
 impl Request {
@@ -95,7 +100,7 @@ impl World {
     pub(crate) fn from_value(value: JsValue) -> Result<World, Invalid> {
         let props = object(value).ok_or(Invalid)?;
         let (mut enabled, mut chain, mut window_chain) = (None, None, None);
-        let mut active = None;
+        let (mut active, mut paused) = (None, None);
         let (mut wallets, mut networks) = (None, None);
         for (key, value) in props {
             match key.as_str() {
@@ -121,6 +126,12 @@ impl World {
                     networks = Some(table);
                 }
                 "active" => active = Some(value),
+                // D12's pause for the request's key, as main reads it when
+                // it sends the request (APR-5e-2, *inferred*).
+                "paused" => match value {
+                    JsValue::Bool(on) => paused = Some(on),
+                    _ => return Err(Invalid),
+                },
                 _ => return Err(Invalid),
             }
         }
@@ -131,7 +142,15 @@ impl World {
             wallets: wallets.ok_or(Invalid)?,
             networks: networks.ok_or(Invalid)?,
             active,
+            paused,
         })
+    }
+
+    /// D12's pause for the request's key (`transactionAutoApprovePaused`),
+    /// as main read it when it sent the request; `None` when not sent,
+    /// which no rule answers (0012's `rule-inputs`).
+    pub fn paused(&self) -> Option<bool> {
+        self.paused
     }
 
     /// The active account's index as main sent it; `undefined` when absent.

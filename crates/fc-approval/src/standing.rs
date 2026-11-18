@@ -370,6 +370,32 @@ impl Standing {
         }))
     }
 
+    /// Whether a site's transaction rule is chosen for a send before its
+    /// fee is quoted (the reference's `ruleChosen`; design 0012, APR-5e-2),
+    /// counting nothing: as [`Standing::check_dapp_under`] for the send,
+    /// its fee left to the check once quoted. Any other request is judged
+    /// as `check_dapp_under` judges it.
+    pub fn choose_send_under(
+        &self,
+        rules: Rules,
+        store: &DappStore,
+        ask: &DappAsk<'_>,
+        clocks: Clocks,
+    ) -> Decision {
+        let DappRequest::Transaction(send) = &ask.request else {
+            return self.check_dapp_under(rules, store, ask, clocks);
+        };
+        let chosen = outside_custody(ask.agent)
+            .and_then(|()| transaction(rules, store, ask.key, ask.account, send, clocks, false));
+        Decision::of(chosen.and_then(|()| {
+            if rules == Rules::Today {
+                return Ok(());
+            }
+            let bucket = (ask.key.to_owned(), RequestClass::Transaction);
+            within(self.dapp.would_admit(&bucket, clocks.vault_ms))
+        }))
+    }
+
     /// Whether a site's rule answers the request, as `sign.*` decides it
     /// under `{ standing }`: covered, and counted in its bucket, only when
     /// every other check passes and the rate allows it.
@@ -518,7 +544,7 @@ fn dapp_rule(
             Ok(RequestClass::Signature)
         }
         DappRequest::Transaction(send) => {
-            transaction(rules, store, ask.key, ask.account, send, clocks)?;
+            transaction(rules, store, ask.key, ask.account, send, clocks, true)?;
             Ok(RequestClass::Transaction)
         }
     }
@@ -559,7 +585,8 @@ fn warned(view: &TypedDataView) -> bool {
 }
 
 /// `ruleChosen` and `autoSend`: the grant exposes the account; a contract
-/// call a rule covers; not paused; the fee check.
+/// call a rule covers; not paused; the fee check, unless `fee` is false (the
+/// choice before the quote).
 fn transaction(
     rules: Rules,
     store: &DappStore,
@@ -567,6 +594,7 @@ fn transaction(
     account: u32,
     send: &Send<'_>,
     clocks: Clocks,
+    fee: bool,
 ) -> Result<(), Reason> {
     require(send.kind != AccountKind::Safe, Reason::NoRule)?;
     require(store.exposes(key, account), Reason::NoRule)?;
@@ -587,7 +615,7 @@ fn transaction(
     };
     require(ruled, Reason::NoRule)?;
     require(send.paused == Some(false), Reason::Paused)?;
-    if send.kind != AccountKind::Phone {
+    if fee && send.kind != AccountKind::Phone {
         // `namesOwnFees`; then `judgeFees` against the reference.
         let fees = &send.fees;
         let named = (fees.max_fee_per_gas.is_some() && fees.max_priority_fee_per_gas.is_some())

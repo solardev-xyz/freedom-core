@@ -1,17 +1,24 @@
-//! `eth_sendTransaction` for a vault account (design 0012, APR-5e-1;
-//! "Transaction building"), as the approvals reference's `page-sends.js`
-//! (`7f85551d`) runs a prompted send, the prompt asked through the core's
-//! `approval.request`:
+//! `eth_sendTransaction` (design 0012, APR-5e; "Transaction building"), as
+//! the approvals reference's `page-sends.js` (`7f85551d`) runs it, the
+//! prompts asked through the core's `approval.request`:
 //!
 //! - **A document with no key** gets `4100` before anything else
 //!   ([`crate::start`]).
 //! - **Then, in the reference's order:** the transaction's form (`txOf`:
 //!   `-32602` with its message), the key's grant (`4100` "Not
 //!   connected"), the account it exposes in main's wallet list (`-32603`
-//!   once gone), and a Safe off Gnosis refused. A Ledger's, a phone's or a
-//!   Safe's account answers `4200` until APR-5e-2 (*inferred*), and no
-//!   standing rule answers a send through the dispatcher until then: every
-//!   vault send is asked (*inferred*: Q9 asks rather than refuses).
+//!   once gone), and a Safe off Gnosis refused.
+//! - **The site's standing rule** (APR-5e-2) is chosen, before the quote,
+//!   only outside custody, for a vault account's contract call (*inferred*:
+//!   no rule answers a device's), with D12's pause read as `false`
+//!   (`world.paused`), and only when the core's own grant answers it under
+//!   Q9's limits ([`Prepare::rule_query`]). It asks `vault.unlock` while the
+//!   vault is locked, then is quoted: a read failing answers the
+//!   reference's failure, and a fee the check doesn't let through goes to
+//!   the prompt ([`Rule::judged`]). Just before the effect main's recheck
+//!   refuses it for custody, the rule gone or the document gone; a rule past
+//!   its rate, or a fee needing the user, is asked instead. Otherwise the
+//!   answer is `{ send }` under the rule ([`Rule::rechecked`]).
 //! - **The core prepares the send** ([`Prepare`]): the gas limit is
 //!   `eth_estimateGas` plus 20% through the core's own chain machine, and
 //!   the fees are its own quote's, with the type they imply. Either failing
@@ -24,6 +31,14 @@
 //!   prompt. Then the key's grant must still expose the account, and the
 //!   daemon mints the `dapp-send` token for that answer's page and handle,
 //!   binding the prepared transaction and "Always allow" ([`Prepared`]).
+//! - **A Ledger's or a phone's send** (APR-5e-2) is prepared and asked as a
+//!   vault account's, "Always allow" included, which the token carries for
+//!   the device send's receipt or the phone payment's rule. A phone picks
+//!   its own fee, so its fee isn't checked. A Safe's is asked with its
+//!   executor paying, and "Always allow" unticked only (*inferred*). An
+//!   approve answers `{ device }` with the token ([`DeviceApproval`]): a
+//!   `dapp-send` binding the prepared transaction, or a Safe's `safe-send`
+//!   binding `{ safe, chain_id, tx: { to, value, data } }`.
 //! - **The answer is `{ send }`**: the prepared transaction without its
 //!   nonce, and its token, for main to add the nonce, have it signed by
 //!   `sign.transaction` with no other field changed, record it and
@@ -32,8 +47,12 @@
 
 use fc_json::{JsString, JsValue};
 
-use crate::prompt::{Crossed, Decision};
-use crate::sign::{Device, UNDEFINED, account_index, big_int, element, failure, index_of, prop};
+use crate::connect::NO_ADDRESS;
+use crate::prompt::{Crossed, Decision, Recheck};
+use crate::sign::{
+    AGENT_CUSTODY, Device, DeviceApproval, RULE_GONE, UNDEFINED, UNLOCK_CHOICES, account_index,
+    big_int, element, failure, index_of, prop,
+};
 use crate::{Answer, Request, World, strictly_equal};
 
 /// The prompt's kind (design 0011).
@@ -44,6 +63,13 @@ pub const SEND_KIND: &str = "eth.send";
 /// the view offers (*inferred*). "Always allow" on a plain transfer writes
 /// nothing, as in the reference.
 const CHOICES: &str = r#"{"alwaysAllow":[false,true],"feeAcknowledged":[false,true]}"#;
+
+/// A Safe's: "Always allow" unticked only, as no rule answers a Safe's
+/// send (*inferred*).
+const SAFE_CHOICES: &str = r#"{"alwaysAllow":[false],"feeAcknowledged":[false,true]}"#;
+
+/// The token a Safe's approve mints.
+pub const SAFE_TOKEN_KIND: &str = "safe-send";
 
 /// The token kind an approve mints.
 pub const TOKEN_KIND: &str = "dapp-send";
@@ -89,6 +115,10 @@ pub struct Prepare {
     chain_id: u64,
     chain_view: JsValue,
     tx: PageTx,
+    /// The account's kind, for a device's.
+    device: Option<Device>,
+    /// D12's pause, as main sent it.
+    paused: Option<bool>,
 }
 
 /// The fees a quote gives, in the type they imply.
@@ -125,6 +155,8 @@ pub enum Decided {
     Requote(Prepare),
     /// Approved: the fee is judged again ([`Judge::judged`]).
     Judge(Judge),
+    /// A Safe's approved send (APR-5e-2): its token ([`SafeSend::judged`]).
+    Safe(SafeSend),
 }
 
 /// An approve, before the fee check at the moment of approval.
@@ -146,6 +178,9 @@ pub enum Judged {
     Ask(Box<Ask>),
     /// The daemon mints the token, and answers `{ send }`.
     Send(Prepared),
+    /// A device's (APR-5e-2): the daemon mints the token, and answers
+    /// `{ device }`.
+    Device(DeviceApproval),
 }
 
 /// An approved send: what the token binds, and main signs with the nonce
@@ -295,10 +330,6 @@ impl Send {
         if device == Some(Device::Safe) && chain_id != GNOSIS_CHAIN_ID {
             return Err(Answer::error(INTERNAL_ERROR_CODE, SAFE_OFF_GNOSIS));
         }
-        // A device's send, and a Safe's, are APR-5e-2's.
-        if device.is_some() {
-            return Err(Answer::unsupported());
-        }
         Ok(Prepare {
             key: self.key.clone(),
             wallet_index,
@@ -310,6 +341,8 @@ impl Send {
             chain_id,
             chain_view: chain_view(&self.world, chain_id),
             tx,
+            device,
+            paused: self.world.paused(),
         })
     }
 }
@@ -332,42 +365,102 @@ impl Prepare {
         JsValue::Array(vec![estimate]).stringify()
     }
 
+    /// Whether the core quotes the send: every account's but a Safe's,
+    /// whose executor pays.
+    pub fn quotes(&self) -> bool {
+        self.device != Some(Device::Safe)
+    }
+
+    /// Whether its fee is checked: a phone picks and pays its own.
+    pub fn checks_fee(&self) -> bool {
+        self.device != Some(Device::Phone)
+    }
+
     /// `quote`: from the estimate's `result` and the fee quote, each `None`
     /// when its read failed. `None` when either failed or gives nothing to
     /// sign with.
     pub fn quoted(&self, estimate: Option<&JsValue>, quote: Option<&JsValue>) -> Option<Quoted> {
-        // `BigInt(result) * 120n / 100n`.
-        let gas = big_int(estimate?)?;
+        self.quote(estimate.ok_or(""), quote.ok_or("")).ok()
+    }
+
+    /// `quote`, from the estimate's `result` and the fee quote, each the
+    /// read's failure message when it failed: the quote, or the message
+    /// `quote` throws, as `estimateGas` and `getGasPrices` word it. With
+    /// both failed, the estimate's (*inferred*: the reference's is the
+    /// first to fail).
+    pub fn quote(
+        &self,
+        estimate: Result<&JsValue, &str>,
+        quote: Result<&JsValue, &str>,
+    ) -> Result<Quoted, String> {
+        // `estimateGas`: `BigInt(result) * 120n / 100n`.
+        let estimate = estimate.map_err(|message| format!("Gas estimation failed: {message}"))?;
+        let gas = big_int(estimate)
+            .ok_or_else(|| format!("Gas estimation failed: {}", big_int_error(estimate)))?;
+        let quote = quote.map_err(|message| format!("Failed to get gas prices: {message}"))?;
         if gas.starts_with('-') {
-            return None;
+            return Err(String::from("Invalid transaction gas"));
         }
         let gas_limit = div_small(&mul_small(&gas, 6), 5);
-        let quote = quote?;
         let field = |name: &str| quote.get(name).unwrap_or(&UNDEFINED);
+        let fee = |name: &str| {
+            quantity_of(field(name)).map_err(|()| String::from("Invalid transaction fee"))
+        };
         let eip1559 =
             matches!(quote.get("type"), Some(JsValue::String(kind)) if kind.as_str() == "eip1559");
         let fees = if eip1559 {
-            let max_fee = quantity_of(field("maxFeePerGas")).ok()?;
-            let priority = quantity_of(field("maxPriorityFeePerGas")).ok()?;
-            Fees::Eip1559 {
-                max_fee: max_fee?,
-                priority: priority?,
-            }
+            let max_fee = fee("maxFeePerGas")?;
+            let priority = fee("maxPriorityFeePerGas")?;
+            max_fee
+                .zip(priority)
+                .map(|(max_fee, priority)| Fees::Eip1559 { max_fee, priority })
         } else {
-            Fees::Legacy {
-                gas_price: quantity_of(field("gasPrice")).ok()??,
-            }
+            fee("gasPrice")?.map(|gas_price| Fees::Legacy { gas_price })
         };
-        let effective = quantity_of(field("effectiveGasPrice")).ok()?;
-        let per_gas = effective.unwrap_or_else(|| match &fees {
+        let fees = fees.ok_or_else(|| String::from("Unable to estimate the network fee"))?;
+        let per_gas = fee("effectiveGasPrice")?.unwrap_or_else(|| match &fees {
             Fees::Eip1559 { max_fee, .. } => max_fee.clone(),
             Fees::Legacy { gas_price } => gas_price.clone(),
         });
         let estimate = mul(&gas_limit, &per_gas);
-        Some(Quoted {
+        Ok(Quoted {
             gas_limit,
             fees,
             estimate,
+        })
+    }
+
+    /// The site's rule's request, when a rule may answer the send (the
+    /// reference's `ruleChosen`, before its quote): outside custody
+    /// (`agent`, a missing one counting as custody), for a vault account
+    /// (*inferred*: the core can't see a device's send, so no rule answers
+    /// one), and a contract call. The core judges it with its own grant.
+    pub fn rule_query(&self, agent: Option<bool>) -> Option<RuleQuery<'_>> {
+        if agent != Some(false) || self.device.is_some() {
+            return None;
+        }
+        selector_of(&self.tx.data)?;
+        Some(RuleQuery {
+            key: &self.key,
+            account: account_index(&self.wallet_index)?,
+            to: &self.tx.to,
+            data: &self.tx.data,
+            value: &self.tx.value,
+            chain_id: self.chain_id,
+            tx: None,
+            paused: self.paused,
+        })
+    }
+
+    /// The rule answers it: the unlock first while the vault is locked,
+    /// then its quote. `None` for a send [`Prepare::rule_query`] gives no
+    /// request for.
+    pub fn ruled(self) -> Option<Rule> {
+        let account = self.rule_query(Some(false)).map(|query| query.account)?;
+        Some(Rule {
+            prepare: self,
+            account,
+            quoted: None,
         })
     }
 
@@ -448,6 +541,13 @@ fn view(prepare: &Prepare, quoted: Option<&Quoted>, verdict: Option<&str>, again
     let verdict = verdict
         .and_then(|text| fc_json::parse(text).ok())
         .unwrap_or(JsValue::Null);
+    // A Safe's executor pays, at its execution.
+    let safe = prepare.device == Some(Device::Safe);
+    let fee = if safe {
+        JsValue::Object(vec![prop("paidBy", JsValue::string("executor"))])
+    } else {
+        quoted.map_or(JsValue::Null, Quoted::view)
+    };
     JsValue::Object(vec![
         prop("account", prepare.account_view.clone()),
         prop("chain", prepare.chain_view.clone()),
@@ -459,12 +559,13 @@ fn view(prepare: &Prepare, quoted: Option<&Quoted>, verdict: Option<&str>, again
                 prop("data", JsValue::string(tx.data.as_str())),
             ]),
         ),
-        prop("fee", quoted.map_or(JsValue::Null, Quoted::view)),
+        prop("fee", fee),
         prop("feeCheck", verdict),
         prop("feeAskAgain", JsValue::Bool(again)),
+        // "Always allow" is offered for a contract call, never a Safe's.
         prop(
             "alwaysAllow",
-            JsValue::Bool(selector_of(&tx.data).is_some()),
+            JsValue::Bool(!safe && selector_of(&tx.data).is_some()),
         ),
     ])
     .stringify()
@@ -482,7 +583,11 @@ impl Ask {
 
     /// The choices' JSON text.
     pub fn choices(&self) -> &'static str {
-        CHOICES
+        if self.prepare.device == Some(Device::Safe) {
+            SAFE_CHOICES
+        } else {
+            CHOICES
+        }
     }
 
     /// What main's decision does. An approve with a pick not offered is
@@ -506,10 +611,22 @@ impl Ask {
         let (mut always_allow, mut acknowledged) = (false, false);
         for (name, value) in picks {
             match (name.as_str(), value) {
-                ("alwaysAllow", JsValue::Bool(ticked)) => always_allow = *ticked,
+                ("alwaysAllow", JsValue::Bool(ticked)) => {
+                    if *ticked && self.prepare.device == Some(Device::Safe) {
+                        return Err(Crossed);
+                    }
+                    always_allow = *ticked;
+                }
                 ("feeAcknowledged", JsValue::Bool(ticked)) => acknowledged = *ticked,
                 _ => return Err(Crossed),
             }
+        }
+        // A Safe's send: its token, once the grant still exposes it.
+        if self.prepare.device == Some(Device::Safe) {
+            return Ok(Decided::Safe(SafeSend {
+                prepare: self.prepare,
+                handle,
+            }));
         }
         // No fee to confirm: the approval asks for the quote again.
         let Some(quoted) = self.quoted else {
@@ -542,6 +659,11 @@ impl Judge {
         self.acknowledged
     }
 
+    /// Whether the fee is judged at the approval: not a phone's.
+    pub fn checks_fee(&self) -> bool {
+        self.prepare.checks_fee()
+    }
+
     /// The check at approval's verdict (`verdict`, JSON text with
     /// `askAgain`): asked again when `ask_again`; otherwise the key's grant,
     /// as `grant` gives it now, must still expose the account shown.
@@ -559,29 +681,285 @@ impl Judge {
                 view,
             }));
         }
-        let exposes = grant(&self.prepare.key)
-            .filter(JsValue::truthy)
-            .is_some_and(|permission| {
-                strictly_equal(
-                    permission.get("walletIndex").unwrap_or(&UNDEFINED),
-                    &self.prepare.wallet_index,
-                )
-            });
-        if !exposes {
-            return Judged::Answer(Answer::error(NOT_CONNECTED.0, NOT_CONNECTED.1));
-        }
-        let Some(account) = account_index(&self.prepare.wallet_index) else {
-            return Judged::Answer(Answer::error(INTERNAL_ERROR_CODE, INVALID_INDEX));
+        let account = match exposed(&self.prepare, grant) {
+            Ok(account) => account,
+            Err(answer) => return Judged::Answer(answer),
         };
         // "Always allow" writes the contract rule, never one for a plain
         // transfer.
         let remember = self.always_allow && selector_of(&self.prepare.tx.data).is_some();
+        // A Ledger's or a phone's: the token goes back to main, which
+        // spends it on the device's send (`approval.spend`, or `phone.job`);
+        // "Always allow" rides in it, for the device send's receipt or the
+        // phone payment's rule (0012).
+        if let Some(device) = self.prepare.device {
+            let tx = self.tx();
+            return Judged::Device(DeviceApproval::send(
+                device,
+                account,
+                self.handle,
+                TOKEN_KIND,
+                format!(r#"{{"tx":{tx}}}"#),
+                Some(format!(r#"{{"tx":{tx},"remember":{remember}}}"#)),
+            ));
+        }
         Judged::Send(Prepared {
             account,
             tx: self.tx(),
             handle: self.handle,
             remember,
         })
+    }
+}
+
+/// The key's grant, as `grant` gives it now, still exposing the account
+/// shown: the account's index, or the refusal.
+fn exposed(prepare: &Prepare, grant: impl FnOnce(&str) -> Option<JsValue>) -> Result<u32, Answer> {
+    let exposes = grant(&prepare.key)
+        .filter(JsValue::truthy)
+        .is_some_and(|permission| {
+            strictly_equal(
+                permission.get("walletIndex").unwrap_or(&UNDEFINED),
+                &prepare.wallet_index,
+            )
+        });
+    if !exposes {
+        return Err(Answer::error(NOT_CONNECTED.0, NOT_CONNECTED.1));
+    }
+    account_index(&prepare.wallet_index)
+        .ok_or_else(|| Answer::error(INTERNAL_ERROR_CODE, INVALID_INDEX))
+}
+
+/// A Safe's approved send (APR-5e-2), before its token.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SafeSend {
+    prepare: Prepare,
+    handle: String,
+}
+
+impl SafeSend {
+    /// The key's grant, as `grant` gives it now, must still expose the
+    /// Safe; then the daemon mints the site's `safe-send` for the Safe, its
+    /// chain and the SafeTx, and main spends it on the SafeTx and its board
+    /// (*inferred*: the reference's `safeSend` from its token on).
+    pub fn judged(self, grant: impl FnOnce(&str) -> Option<JsValue>) -> Judged {
+        let account = match exposed(&self.prepare, grant) {
+            Ok(account) => account,
+            Err(answer) => return Judged::Answer(answer),
+        };
+        let tx = &self.prepare.tx;
+        let payload = JsValue::Object(vec![
+            prop("safe", self.prepare.address.clone()),
+            prop(
+                "chain_id",
+                JsValue::string(self.prepare.chain_id.to_string()),
+            ),
+            prop(
+                "tx",
+                JsValue::Object(vec![
+                    prop("to", JsValue::string(tx.to.as_str())),
+                    prop("value", JsValue::string(tx.value.as_str())),
+                    prop("data", JsValue::string(tx.data.as_str())),
+                ]),
+            ),
+        ]);
+        Judged::Device(DeviceApproval::send(
+            Device::Safe,
+            account,
+            self.handle,
+            SAFE_TOKEN_KIND,
+            payload.stringify(),
+            None,
+        ))
+    }
+}
+
+/// A send the site's rule may answer, for the core to judge with its own
+/// grant (`fc_approval::standing`'s transaction rule), counting nothing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RuleQuery<'a> {
+    /// `PageContext.origin`.
+    pub key: &'a str,
+    /// The account the grant exposes.
+    pub account: u32,
+    /// `to` as the page sent it, `value` in decimal and `data` as hex.
+    pub to: &'a str,
+    pub value: &'a str,
+    pub data: &'a str,
+    pub chain_id: u64,
+    /// The prepared transaction (`sign.transaction`'s form, no nonce), once
+    /// quoted: its fee is judged too. `None` for the choice before the
+    /// quote, which leaves the fee to the check.
+    pub tx: Option<String>,
+    /// D12's pause, as main sent it.
+    pub paused: Option<bool>,
+}
+
+/// The core's standing rule for a send, counting nothing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RuleNow {
+    /// The rule answers it.
+    Covered,
+    /// It would, but for its rate or its fee: the user is asked (Q9 asks
+    /// rather than refuses; *inferred* for the fee at the recheck).
+    Asked,
+    /// No rule answers it.
+    NotCovered,
+}
+
+/// A send the site's rule answers (APR-5e-2): no prompt but a locked
+/// vault's unlock, and only once the fee check lets it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Rule {
+    prepare: Prepare,
+    account: u32,
+    quoted: Option<Quoted>,
+}
+
+/// What a rule's quote leaves.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Ruled {
+    /// A read failed: the reference's failure, nothing asked.
+    Answer(Answer),
+    /// The fee check doesn't let it through: the user is asked, with this
+    /// quote and verdict.
+    Ask(Box<Ask>),
+    /// Main's recheck, just before the effect.
+    Recheck(Box<Rule>),
+}
+
+/// What main's recheck leaves of a rule's send.
+#[derive(Debug, Clone, PartialEq)]
+pub enum RuleRechecked {
+    /// Refused with nothing to sign, or `{ send }` under the rule.
+    Answer(Answer),
+    /// Past its rate, or its fee needing the user, by now: asked.
+    Ask(Box<Ask>),
+}
+
+impl Rule {
+    /// What the send is, before its quote.
+    pub fn prepare(&self) -> &Prepare {
+        &self.prepare
+    }
+
+    /// The unlock's kind, asked while the vault is locked.
+    pub fn unlock_kind(&self) -> &'static str {
+        crate::sign::UNLOCK_KIND
+    }
+
+    /// The unlock's view: `{ account, reason: "send" }`.
+    pub fn unlock_view(&self) -> String {
+        JsValue::Object(vec![
+            prop("account", self.prepare.account_view.clone()),
+            prop("reason", JsValue::string("send")),
+        ])
+        .stringify()
+    }
+
+    /// The unlock's choices: none.
+    pub fn unlock_choices(&self) -> &'static str {
+        UNLOCK_CHOICES
+    }
+
+    /// Main's decision on the unlock: `None` to go on to the quote; a
+    /// refusal otherwise. An approve with any pick is [`Crossed`].
+    pub fn unlocked(&self, decision: Decision) -> Result<Option<Answer>, Crossed> {
+        crate::sign::unlocked(decision)
+    }
+
+    /// The quote (or the message a failed read gives), and `verdict`
+    /// giving the fee check's on the prepared transaction (JSON text, the
+    /// reference's names): a failure answers it; a fee the check doesn't
+    /// auto-approve goes to the prompt; otherwise main's recheck.
+    pub fn judged(
+        mut self,
+        quoted: Result<Quoted, String>,
+        verdict: impl FnOnce(&str) -> String,
+    ) -> Ruled {
+        let quoted = match quoted {
+            Ok(quoted) => quoted,
+            Err(message) => return Ruled::Answer(failure(&message, "Transaction failed")),
+        };
+        let verdict = verdict(&quoted.tx(&self.prepare));
+        if !auto_approved(&verdict) {
+            return Ruled::Ask(Box::new(self.prepare.ask(Some(quoted), Some(&verdict))));
+        }
+        self.quoted = Some(quoted);
+        Ruled::Recheck(Box::new(self))
+    }
+
+    /// The prepared transaction, once quoted.
+    pub fn tx(&self) -> Option<String> {
+        self.quoted.as_ref().map(|quoted| quoted.tx(&self.prepare))
+    }
+
+    /// The rule's request with its prepared transaction, for the core to
+    /// judge again just before the effect.
+    pub fn query(&self) -> Option<RuleQuery<'_>> {
+        let mut query = self.prepare.rule_query(Some(false))?;
+        query.tx = Some(self.tx()?);
+        Some(query)
+    }
+
+    /// Just before the effect, after its last wait, in the reference's
+    /// order (`ruleStillAnswers`): a tab gone into custody refused
+    /// (`agent_custody`); the rule no longer answering (`now`, judged with
+    /// the core's own grant and main's fresh custody) refused; the document
+    /// gone refused (`4100`). A rule past its rate, or a fee needing the
+    /// user, by now, is asked (`verdict`, the fee check's now). Otherwise
+    /// `{ send: { kind, account, tx, standing: true } }` (*inferred*): main
+    /// takes the site's turn without waiting (D12), adds the nonce, and
+    /// signs under `{ standing }`, which the core decides again and counts.
+    pub fn rechecked(self, recheck: &Recheck, now: RuleNow, verdict: &str) -> RuleRechecked {
+        if recheck.agent {
+            return RuleRechecked::Answer(Answer::raw(AGENT_CUSTODY));
+        }
+        if now == RuleNow::NotCovered {
+            return RuleRechecked::Answer(Answer::error(INTERNAL_ERROR_CODE, RULE_GONE));
+        }
+        if !recheck.live {
+            return RuleRechecked::Answer(Answer::error(NO_ADDRESS.0, NO_ADDRESS.1));
+        }
+        let Some(quoted) = self.quoted else {
+            return RuleRechecked::Answer(Answer::error(INTERNAL_ERROR_CODE, RULE_GONE));
+        };
+        if now == RuleNow::Asked {
+            return RuleRechecked::Ask(Box::new(self.prepare.ask(Some(quoted), Some(verdict))));
+        }
+        let Ok(tx) = fc_json::parse(&quoted.tx(&self.prepare)) else {
+            return RuleRechecked::Answer(failure("", "Transaction failed"));
+        };
+        let send = JsValue::Object(vec![
+            prop("kind", JsValue::string(TOKEN_KIND)),
+            prop("account", JsValue::Number(f64::from(self.account))),
+            prop("tx", tx),
+            prop("standing", JsValue::Bool(true)),
+        ]);
+        RuleRechecked::Answer(Answer::raw(
+            JsValue::Object(vec![prop("send", send)]).stringify(),
+        ))
+    }
+}
+
+/// The verdict's `autoApprove`, true only when it says so.
+fn auto_approved(verdict: &str) -> bool {
+    fc_json::parse(verdict)
+        .ok()
+        .is_some_and(|verdict| matches!(verdict.get("autoApprove"), Some(JsValue::Bool(true))))
+}
+
+/// `BigInt(value)`'s error message, as V8 words it, for a value it refuses.
+fn big_int_error(value: &JsValue) -> String {
+    match value {
+        JsValue::Number(_) => format!(
+            "The number {} cannot be converted to a BigInt because it is not an integer",
+            value.stringify()
+        ),
+        JsValue::Undefined => String::from("Cannot convert undefined to a BigInt"),
+        JsValue::String(text) => format!("Cannot convert {} to a BigInt", text.as_str()),
+        JsValue::Object(_) => String::from("Cannot convert [object Object] to a BigInt"),
+        _ => format!("Cannot convert {} to a BigInt", value.stringify()),
     }
 }
 
@@ -798,22 +1176,110 @@ mod tests {
         assert_eq!(q("9007199254740992"), Err(()));
     }
 
-    /// A Ledger's, a phone's or a Safe's send (on Gnosis) is APR-5e-2's:
-    /// `4200`, nothing asked.
+    fn device_send(index: u32, kind: &str, data: &str) -> Prepare {
+        let text = format!(
+            r#"{{"method":"eth_sendTransaction","params":[{{"to":"0x5555555555555555555555555555555555555555","data":"{data}"}}],"world":{{"enabled":true,"window_chain":100,"paused":false,"wallets":[{{"index":{index},"address":"0x4444444444444444444444444444444444444444","type":"{kind}"}}],"networks":{{}}}}}}"#
+        );
+        let request = Request::parse(&text).unwrap();
+        let crate::Step::Send(send) = crate::start(&request, Some("k"), |_| None) else {
+            panic!("{kind}")
+        };
+        let grant = format!(r#"{{"walletIndex":{index}}}"#);
+        send.prepare(|_| fc_json::parse(&grant).ok()).unwrap()
+    }
+
+    /// A Ledger's, a phone's or a Safe's send (on Gnosis) is asked, and no
+    /// rule answers it. A Safe's executor pays: no quote, "Always allow"
+    /// neither shown nor pickable, and its approve gives a `safe-send`
+    /// binding the Safe, its chain and the SafeTx.
     #[test]
-    fn a_device_send_is_apr5e2s() {
+    fn a_device_send_is_asked_and_never_ruled() {
         for (index, kind) in [(1, "ledger"), (2, "remote"), (1000, "safe")] {
+            let prepare = device_send(index, kind, "0xa9059cbb00");
+            assert_eq!(prepare.rule_query(Some(false)), None, "{kind}");
+            assert_eq!(prepare.clone().ruled(), None, "{kind}");
+            assert_eq!(prepare.quotes(), kind != "safe", "{kind}");
+            assert_eq!(prepare.checks_fee(), kind != "remote", "{kind}");
+        }
+        let ask = device_send(1000, "safe", "0xa9059cbb00").ask(None, None);
+        let view = fc_json::parse(ask.view()).unwrap();
+        assert_eq!(
+            view.get("fee").unwrap().stringify(),
+            r#"{"paidBy":"executor"}"#
+        );
+        assert_eq!(view.get("alwaysAllow"), Some(&JsValue::Bool(false)));
+        assert_eq!(ask.choices(), SAFE_CHOICES);
+        let approve = |picks: &str| Decision::Approve {
+            choices: fc_json::parse(picks).unwrap(),
+            handle: "ab".repeat(32),
+            world: World::from_value(
+                fc_json::parse(r#"{"enabled":true,"wallets":[],"networks":{}}"#).unwrap(),
+            )
+            .unwrap(),
+        };
+        assert_eq!(
+            ask.clone().decide(approve(r#"{"alwaysAllow":true}"#)),
+            Err(Crossed)
+        );
+        let Ok(Decided::Safe(safe)) = ask.decide(approve(r#"{"feeAcknowledged":true}"#)) else {
+            panic!()
+        };
+        assert_eq!(
+            safe.clone().judged(|_| None),
+            Judged::Answer(Answer::error(NOT_CONNECTED.0, NOT_CONNECTED.1))
+        );
+        let Judged::Device(device) =
+            safe.judged(|_| fc_json::parse(r#"{"walletIndex":1000}"#).ok())
+        else {
+            panic!()
+        };
+        assert_eq!(device.token_kind(), "safe-send");
+        assert_eq!(
+            device.binds(),
+            r#"{"safe":"0x4444444444444444444444444444444444444444","chain_id":"100","tx":{"to":"0x5555555555555555555555555555555555555555","value":"0","data":"0xa9059cbb00"}}"#
+        );
+    }
+
+    /// A vault account's contract call outside custody, with D12's pause
+    /// read as `false`, is the rule's to judge; in custody, unknown custody,
+    /// a pause not `false`, or a plain transfer, it isn't.
+    #[test]
+    fn a_rule_is_judged_only_for_what_it_may_answer() {
+        let vault = |paused: &str, data: &str| {
             let text = format!(
-                r#"{{"method":"eth_sendTransaction","params":[{{"to":"0x5555555555555555555555555555555555555555"}}],"world":{{"enabled":true,"window_chain":100,"wallets":[{{"index":{index},"address":"0x5555555555555555555555555555555555555555","type":"{kind}"}}],"networks":{{}}}}}}"#
+                r#"{{"method":"eth_sendTransaction","params":[{{"to":"0x5555555555555555555555555555555555555555","data":"{data}"}}],"world":{{"enabled":true,"window_chain":1,{paused}"wallets":[{{"index":0,"address":"0x4444444444444444444444444444444444444444"}}],"networks":{{}}}}}}"#
             );
             let request = Request::parse(&text).unwrap();
             let crate::Step::Send(send) = crate::start(&request, Some("k"), |_| None) else {
-                panic!("{kind}")
+                panic!()
             };
-            let grant = format!(r#"{{"walletIndex":{index}}}"#);
-            let answer = send.prepare(|_| fc_json::parse(&grant).ok()).unwrap_err();
-            assert_eq!(answer.as_str(), Answer::unsupported().as_str(), "{kind}");
-        }
+            send.prepare(|_| fc_json::parse(r#"{"walletIndex":0}"#).ok())
+                .unwrap()
+        };
+        let query = vault(r#""paused":false,"#, "0xa9059cbb00");
+        let asked = query.rule_query(Some(false)).unwrap();
+        assert_eq!(
+            (asked.account, asked.chain_id, asked.paused),
+            (0, 1, Some(false))
+        );
+        assert_eq!(
+            (asked.data, asked.value, asked.tx),
+            ("0xa9059cbb00", "0", None)
+        );
+        assert!(query.rule_query(Some(true)).is_none());
+        assert!(query.rule_query(None).is_none());
+        assert!(
+            vault(r#""paused":false,"#, "0x")
+                .rule_query(Some(false))
+                .is_none()
+        );
+        assert_eq!(
+            vault("", "0xa9059cbb00")
+                .rule_query(Some(false))
+                .unwrap()
+                .paused,
+            None
+        );
     }
 
     /// A `{ send }` answer's token goes only into the reply's buffer: no
