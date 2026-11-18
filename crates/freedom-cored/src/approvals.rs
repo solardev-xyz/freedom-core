@@ -1618,6 +1618,62 @@ impl Approvals {
         }
     }
 
+    /// Whether the site's transaction rule answers a page's send now, as the
+    /// core judges it with its own grant (design 0012, APR-5e-2), counting
+    /// nothing: custody (`agent`), the grant exposing the account, a rule
+    /// for `to`, the selector and the chain with room for `value` (Q9's
+    /// limited rule once the dApp store has moved), D12's pause, and the
+    /// rate. Before the quote (`query.tx` none) the fee is left to the
+    /// check; once quoted, the prepared transaction's fee is judged on the
+    /// chain's evidence too. Past its rate or its fee, `Asked`.
+    /// `sign.transaction` under `{ standing }` decides again, and counts.
+    pub fn page_send_rule(
+        &self,
+        agent: Option<bool>,
+        query: &fc_eip1193::send::RuleQuery<'_>,
+        clocks: Clocks,
+    ) -> fc_eip1193::send::RuleNow {
+        use fc_approval::standing::Reason;
+        use fc_eip1193::send::RuleNow;
+        let quoted = query.tx.is_some();
+        // Before the quote, the page's fields in a transaction whose fee
+        // nothing reads.
+        let tx = match &query.tx {
+            Some(tx) => serde_json::from_str::<Value>(tx).ok(),
+            None => Some(json!({
+                "type": 0, "chain_id": query.chain_id.to_string(), "gas_limit": "21000",
+                "gas_price": "1", "to": query.to, "value": query.value, "data": query.data,
+            })),
+        };
+        let Some(tx) = tx.and_then(|tx| send_tx(&json!({ "tx": tx }))) else {
+            return RuleNow::NotCovered;
+        };
+        let evidence = self.fees.get(query.chain_id);
+        let mut send = Send::of(&tx, AccountKind::Vault, query.paused, evidence);
+        if !quoted {
+            send.fees = Fees::default();
+            send.evidence = None;
+        }
+        let ask = DappAsk {
+            key: query.key,
+            agent,
+            account: query.account,
+            request: DappRequest::Transaction(send),
+        };
+        let store = self.grants.view::<DappStore>(clocks.wall_ms / 1000);
+        let (rules, clocks) = (self.rules(), rule_clocks(clocks));
+        let decision = if quoted {
+            self.standing.check_dapp_under(rules, &store, &ask, clocks)
+        } else {
+            self.standing.choose_send_under(rules, &store, &ask, clocks)
+        };
+        match decision {
+            Decision::Covered => RuleNow::Covered,
+            Decision::NotCovered(Reason::RateLimited | Reason::FeeCheck) => RuleNow::Asked,
+            Decision::NotCovered(_) => RuleNow::NotCovered,
+        }
+    }
+
     /// "Always allow" ticked on a page's signature the core signed (design
     /// 0012, APR-5d-2): Q9's limited signing rule for `key`, today's flag
     /// cleared in the same write, while the key's grant still exposes

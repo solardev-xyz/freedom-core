@@ -1519,10 +1519,10 @@ impl Core {
                     }
                 }
             }
-            // A send for a document with a key (APR-5e-1): `not_moved`
+            // A send for a document with a key (APR-5e): `not_moved`
             // first, as for a signature (*inferred*). Then the form, the
-            // grant, the account and the Safe's chain, up to its quote,
-            // which the core's own chain machine gives.
+            // grant, the account and the Safe's chain, the rule, and the
+            // quote, which the core's own chain machine gives.
             fc_eip1193::Step::Send(send) => {
                 if let Some(refused) = self.dapp_unmoved(id) {
                     return refused;
@@ -1533,11 +1533,29 @@ impl Core {
                         Ok(answer) => self.result(id, &answer),
                         Err(_) => Flow::Exit(Exit::Internal),
                     },
+                    // The site's rule (APR-5e-2), chosen before the quote
+                    // with the core's own grant: the unlock first while the
+                    // vault is locked.
                     Ok(prepare) => {
+                        let chosen = prepare.rule_query(page.agent).is_some_and(|query| {
+                            vault.eip1193_send_rule(page.agent, &query)
+                                == fc_eip1193::send::RuleNow::Covered
+                        });
+                        let sending = match chosen.then(|| prepare.clone().ruled()).flatten() {
+                            Some(rule) => crate::eip1193::Sending::Rule(rule),
+                            None => crate::eip1193::Sending::Prompt(prepare),
+                        };
+                        let locked = !self.vault.unlocked();
                         let (key, page) = (page.origin.clone(), page.clone());
-                        let outs =
-                            self.connects
-                                .send(id, prepare, &key, &page, received, &mut self.vault);
+                        let outs = self.connects.send(
+                            id,
+                            sending,
+                            locked,
+                            &key,
+                            &page,
+                            received,
+                            &mut self.vault,
+                        );
                         self.dispatch(outs)
                     }
                 }

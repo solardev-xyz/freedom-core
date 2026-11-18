@@ -56,16 +56,16 @@ const CHOICES: &str = r#"{"alwaysAllow":[false,true]}"#;
 const DEVICE_CHOICES: &str = r#"{"alwaysAllow":[false]}"#;
 
 /// The unlock's one form of approve: no picks.
-const UNLOCK_CHOICES: &str = "{}";
+pub(crate) const UNLOCK_CHOICES: &str = "{}";
 
 const INTERNAL_ERROR_CODE: i64 = -32603;
 const NOT_CONNECTED: (i64, &str) = (4100, "Not connected. Call eth_requestAccounts first.");
 const USER_REJECTED: (i64, &str) = (4001, "User rejected the request");
 const BUSY: (i64, &str) = (-32002, "Another wallet request is already pending");
-const UNLOCK_CANCELLED: (i64, &str) = (4001, "User cancelled unlock");
+pub(crate) const UNLOCK_CANCELLED: (i64, &str) = (4001, "User cancelled unlock");
 /// As Swarm and Radicle answer a request Agent custody refuses.
-const AGENT_CUSTODY: &str = r#"{"error":{"code":4100,"message":"The origin is not authorized for this operation","data":{"reason":"agent_custody"}}}"#;
-const RULE_GONE: &str =
+pub(crate) const AGENT_CUSTODY: &str = r#"{"error":{"code":4100,"message":"The origin is not authorized for this operation","data":{"reason":"agent_custody"}}}"#;
+pub(crate) const RULE_GONE: &str =
     "Signing was not confirmed: this request is not covered by the site's auto-approve rules";
 const ACCOUNT_GONE: &str = "The connected account is no longer available";
 const SAFE_OFF_GNOSIS: &str = "This multi-owner account can only sign on Gnosis Chain \u{2014} switch the app to Gnosis first.";
@@ -357,9 +357,42 @@ pub struct DeviceApproval {
     kind: &'static str,
     payload: String,
     expected_hash: Option<String>,
+    /// What the token binds, where it isn't `payload`: a device send's
+    /// `{ tx, remember }` (APR-5e-2), whose answer shows `{ tx }`.
+    binds: Option<String>,
+    /// The refusal's text when the token can't be written.
+    fallback: &'static str,
 }
 
 impl DeviceApproval {
+    /// A device's approved send (APR-5e-2): its token kind, the payload
+    /// main spends it with, and what the token binds.
+    pub(crate) fn send(
+        device: Device,
+        account: u32,
+        handle: String,
+        kind: &'static str,
+        payload: String,
+        binds: Option<String>,
+    ) -> DeviceApproval {
+        DeviceApproval {
+            device,
+            account,
+            handle,
+            kind,
+            payload,
+            expected_hash: None,
+            binds,
+            fallback: "Transaction failed",
+        }
+    }
+
+    /// What the token binds, as JSON text: the payload, or a device send's
+    /// `{ tx, remember }`.
+    pub fn binds(&self) -> &str {
+        self.binds.as_deref().unwrap_or(&self.payload)
+    }
+
     pub fn device(&self) -> Device {
         self.device
     }
@@ -395,10 +428,10 @@ impl DeviceApproval {
     /// quoted.
     pub fn answer<'t>(&self, token: &'t str) -> Result<DeviceAnswer<'t>, Answer> {
         if token.is_empty() || !token.bytes().all(|byte| byte.is_ascii_hexdigit()) {
-            return Err(failure("", "Signing failed"));
+            return Err(failure("", self.fallback));
         }
         let Ok(payload) = fc_json::parse(&self.payload) else {
-            return Err(failure("", "Signing failed"));
+            return Err(failure("", self.fallback));
         };
         let mut device = vec![
             prop("type", JsValue::string(self.device.name())),
@@ -579,6 +612,22 @@ pub(crate) fn account_index(wallet_index: &JsValue) -> Option<u32> {
             Some(account)
         }
         _ => None,
+    }
+}
+
+/// Main's decision on a rule's `vault.unlock`: `None` to go on; a refusal
+/// (`4001` "User cancelled unlock", `-32002` for a busy window) otherwise.
+/// An approve with any pick is [`Crossed`].
+pub(crate) fn unlocked(decision: Decision) -> Result<Option<Answer>, Crossed> {
+    match decision {
+        Decision::Busy => Ok(Some(Answer::error(BUSY.0, BUSY.1))),
+        Decision::Reject | Decision::Closed => {
+            Ok(Some(Answer::error(UNLOCK_CANCELLED.0, UNLOCK_CANCELLED.1)))
+        }
+        Decision::Approve { choices, .. } => match &choices {
+            JsValue::Object(picks) if picks.is_empty() => Ok(None),
+            _ => Err(Crossed),
+        },
     }
 }
 
@@ -1147,6 +1196,8 @@ impl Ask {
             kind,
             payload,
             expected_hash,
+            binds: None,
+            fallback: "Signing failed",
         }
     }
 
@@ -1174,16 +1225,7 @@ impl Ask {
     /// recheck; a refusal (`4001` "User cancelled unlock", `-32002` for a
     /// busy window) otherwise. An approve with any pick is [`Crossed`].
     pub fn unlocked(&self, decision: Decision) -> Result<Option<Answer>, Crossed> {
-        match decision {
-            Decision::Busy => Ok(Some(Answer::error(BUSY.0, BUSY.1))),
-            Decision::Reject | Decision::Closed => {
-                Ok(Some(Answer::error(UNLOCK_CANCELLED.0, UNLOCK_CANCELLED.1)))
-            }
-            Decision::Approve { choices, .. } => match &choices {
-                JsValue::Object(picks) if picks.is_empty() => Ok(None),
-                _ => Err(Crossed),
-            },
-        }
+        unlocked(decision)
     }
 
     /// The rule's request, for the core to judge again just before the
@@ -1313,6 +1355,8 @@ mod tests {
             kind: "sign-typed-data",
             payload: r#"{"typed_data":{"domain":{},"types":{}},"chain_id":"100"}"#.to_owned(),
             expected_hash: Some(format!("0x{}", "11".repeat(32))),
+            binds: None,
+            fallback: "Signing failed",
         };
         let answer = approval.answer(MARKER).unwrap();
         let decided = Decided::Device(approval.clone());
