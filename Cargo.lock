@@ -440,7 +440,7 @@ checksum = "da7c62ceae207dd37ea5b845da6a0696c799f85e97da1ab5b7910be3c1c80223"
 
 [[package]]
 name = "fc-approval"
-version = "0.19.0"
+version = "0.20.0"
 dependencies = [
  "fc-evm",
  "fc-json",
@@ -456,7 +456,7 @@ dependencies = [
 
 [[package]]
 name = "fc-chain"
-version = "0.19.0"
+version = "0.20.0"
 dependencies = [
  "fc-dweb",
  "fc-json",
@@ -472,7 +472,7 @@ dependencies = [
 
 [[package]]
 name = "fc-dweb"
-version = "0.19.0"
+version = "0.20.0"
 dependencies = [
  "base64",
  "cap",
@@ -492,7 +492,7 @@ dependencies = [
 
 [[package]]
 name = "fc-eip1193"
-version = "0.19.0"
+version = "0.20.0"
 dependencies = [
  "fc-evm",
  "fc-json",
@@ -501,7 +501,7 @@ dependencies = [
 
 [[package]]
 name = "fc-evm"
-version = "0.19.0"
+version = "0.20.0"
 dependencies = [
  "fc-json",
  "fc-keys",
@@ -514,7 +514,7 @@ dependencies = [
 
 [[package]]
 name = "fc-ipfs"
-version = "0.19.0"
+version = "0.20.0"
 dependencies = [
  "base64",
  "ed25519-dalek",
@@ -526,14 +526,14 @@ dependencies = [
 
 [[package]]
 name = "fc-json"
-version = "0.19.0"
+version = "0.20.0"
 dependencies = [
  "thiserror",
 ]
 
 [[package]]
 name = "fc-keys"
-version = "0.19.0"
+version = "0.20.0"
 dependencies = [
  "aes",
  "base64",
@@ -558,7 +558,7 @@ dependencies = [
 
 [[package]]
 name = "fc-keystore"
-version = "0.19.0"
+version = "0.20.0"
 dependencies = [
  "aes-gcm",
  "base64",
@@ -572,7 +572,7 @@ dependencies = [
 
 [[package]]
 name = "fc-naming"
-version = "0.19.0"
+version = "0.20.0"
 dependencies = [
  "blake2",
  "ens-normalize",
@@ -588,7 +588,7 @@ dependencies = [
 
 [[package]]
 name = "fc-profile"
-version = "0.19.0"
+version = "0.20.0"
 dependencies = [
  "fc-json",
  "fc-keystore",
@@ -601,7 +601,7 @@ dependencies = [
 
 [[package]]
 name = "fc-protocol"
-version = "0.19.0"
+version = "0.20.0"
 dependencies = [
  "base64",
  "hex",
@@ -614,7 +614,7 @@ dependencies = [
 
 [[package]]
 name = "fc-seal"
-version = "0.19.0"
+version = "0.20.0"
 dependencies = [
  "aes-gcm",
  "hex",
@@ -629,7 +629,7 @@ dependencies = [
 
 [[package]]
 name = "fc-service"
-version = "0.19.0"
+version = "0.20.0"
 dependencies = [
  "fc-protocol",
  "fc-sys",
@@ -645,7 +645,7 @@ dependencies = [
 
 [[package]]
 name = "fc-swarm"
-version = "0.19.0"
+version = "0.20.0"
 dependencies = [
  "base64",
  "fc-evm",
@@ -659,7 +659,7 @@ dependencies = [
 
 [[package]]
 name = "fc-sys"
-version = "0.19.0"
+version = "0.20.0"
 dependencies = [
  "libc",
  "windows-sys",
@@ -667,7 +667,7 @@ dependencies = [
 
 [[package]]
 name = "fc-vault"
-version = "0.19.0"
+version = "0.20.0"
 dependencies = [
  "aes-gcm",
  "base64",
@@ -715,7 +715,7 @@ dependencies = [
 
 [[package]]
 name = "freedom-cored"
-version = "0.19.0"
+version = "0.20.0"
 dependencies = [
  "base64",
  "core-foundation",
