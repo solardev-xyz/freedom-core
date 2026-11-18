@@ -638,7 +638,7 @@ impl Connects {
                     send::Ruled::Answer(answer) => return vec![reply(id, &answer)],
                     send::Ruled::Ask(ask) => *ask,
                     send::Ruled::Recheck(rule) => {
-                        self.open.insert(id, rebuild(Pending::SendRule(rule)));
+                        self.open.insert(id, rebuild(Pending::SendRule(*rule)));
                         self.queued.push_back(id);
                         return self.pump();
                     }

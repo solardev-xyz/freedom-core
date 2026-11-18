@@ -825,7 +825,7 @@ pub enum Ruled {
     /// quote and verdict.
     Ask(Box<Ask>),
     /// Main's recheck, just before the effect.
-    Recheck(Rule),
+    Recheck(Box<Rule>),
 }
 
 /// What main's recheck leaves of a rule's send.
@@ -886,7 +886,7 @@ impl Rule {
             return Ruled::Ask(Box::new(self.prepare.ask(Some(quoted), Some(&verdict))));
         }
         self.quoted = Some(quoted);
-        Ruled::Recheck(self)
+        Ruled::Recheck(Box::new(self))
     }
 
     /// The prepared transaction, once quoted.
