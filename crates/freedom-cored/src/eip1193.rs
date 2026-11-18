@@ -26,7 +26,19 @@
 //!   last use.
 //! - **A device's account** (a Ledger, a phone or a Safe, until 0016): on
 //!   main's approve the core mints the token, and the answer returns it to
-//!   main, `{ device }`, for the device to sign through main.
+//!   main, `{ device }`, for the device to sign through main. A device's
+//!   send (APR-5e-2) is prepared and asked as a vault account's (a phone's
+//!   fee unchecked, a Safe's unquoted), and its `{ device }` carries a
+//!   `dapp-send` (a Safe's `safe-send`).
+//! - **A send the site's rule answers** (APR-5e-2) asks main to unlock the
+//!   vault first while it is locked, then is quoted by the core's own chain
+//!   machine and judged by the fee check: a read failing answers its
+//!   failure, a fee needing the user goes to the prompt. Main's recheck
+//!   then refuses it for custody, the rule gone or the document gone, and
+//!   a rule past its rate or a fee needing the user by then is asked
+//!   instead. Otherwise `{ send }` under the rule: main takes the site's
+//!   turn (D12), adds the nonce and signs it under `{ standing }`, which
+//!   the core decides again and counts.
 //! - **`approval.recheck { request, page }`** asks main, just before a
 //!   connected key's last use is marked, a switch's chain is written or a
 //!   rule's signature is made, whether the document still holds its key,
@@ -151,13 +163,40 @@ enum Part {
 }
 
 /// A send waiting on its chain reads: each `None` until it replies, then
-/// its result (`None` for a failure).
+/// its result (its failure's message for a failure).
 struct Quoting {
-    prepare: send::Prepare,
-    estimate: Option<Option<fc_json::JsValue>>,
-    quote: Option<Option<fc_json::JsValue>>,
+    send: Sending,
+    estimate: Option<Result<fc_json::JsValue, String>>,
+    quote: Option<Result<fc_json::JsValue, String>>,
     /// Waiting on new fee evidence.
     reference: bool,
+}
+
+/// A send past its checks: asked of the user, or answered by the site's
+/// rule (APR-5e-2).
+pub enum Sending {
+    Prompt(send::Prepare),
+    Rule(send::Rule),
+}
+
+impl Sending {
+    fn prepare(&self) -> &send::Prepare {
+        match self {
+            Sending::Prompt(prepare) => prepare,
+            Sending::Rule(rule) => rule.prepare(),
+        }
+    }
+}
+
+impl Quoting {
+    fn of(send: Sending) -> Quoting {
+        Quoting {
+            send,
+            estimate: None,
+            quote: None,
+            reference: false,
+        }
+    }
 }
 
 struct Open {
@@ -225,6 +264,9 @@ enum Pending {
     /// An approved send waiting on new fee evidence for the check at its
     /// approval (APR-5e-1).
     Judge(send::Judge),
+    /// A send the site's rule answers, quoted and within the fee check,
+    /// waiting on main's recheck (APR-5e-2).
+    SendRule(send::Rule),
     /// The page's name being resolved by the core's naming (APR-5f): what
     /// follows once it still serves the document's IPNS key.
     Name(Then),
@@ -282,6 +324,8 @@ enum Asking {
     Unlock(sign::Ask),
     /// A send's `eth.send` (APR-5e-1).
     Send(send::Ask),
+    /// A rule's send asking for the vault's unlock (APR-5e-2).
+    SendUnlock(send::Rule),
 }
 
 impl Asking {
@@ -291,6 +335,7 @@ impl Asking {
             Asking::Sign(ask) => ask.kind(),
             Asking::Unlock(ask) => ask.unlock_kind(),
             Asking::Send(ask) => ask.kind(),
+            Asking::SendUnlock(rule) => rule.unlock_kind(),
         }
     }
 
@@ -300,6 +345,7 @@ impl Asking {
             Asking::Sign(ask) => Cow::Borrowed(ask.view()),
             Asking::Unlock(ask) => Cow::Owned(ask.unlock_view()),
             Asking::Send(ask) => Cow::Borrowed(ask.view()),
+            Asking::SendUnlock(rule) => Cow::Owned(rule.unlock_view()),
         }
     }
 
@@ -309,6 +355,7 @@ impl Asking {
             Asking::Sign(ask) => ask.choices(),
             Asking::Unlock(ask) => ask.unlock_choices(),
             Asking::Send(ask) => ask.choices(),
+            Asking::SendUnlock(rule) => rule.unlock_choices(),
         }
     }
 }
@@ -631,12 +678,15 @@ impl Connects {
 
     /// Page request `id`'s send, past its checks (APR-5e-1): the core's
     /// own estimate and fee quote, and new fee evidence when the chain's is
-    /// stale. A name-keyed document's send checks no name yet: its checks
-    /// are a later step's.
+    /// stale. A Safe's goes to its prompt unquoted, and one the site's rule
+    /// answers (APR-5e-2) asks main for the vault's unlock first if
+    /// `locked`. A name-keyed document's send checks no name yet: its
+    /// checks are a later step's.
     pub fn send(
         &mut self,
         id: u64,
-        prepare: send::Prepare,
+        sending: Sending,
+        locked: bool,
         page: &PageContext,
         received: Instant,
         vault: &mut Vault,
@@ -646,21 +696,23 @@ impl Connects {
         let Some(held) = self.held(page, binding, keyless, received) else {
             return vec![error(id, internal())];
         };
-        let step = Pending::Quote(Quoting {
-            prepare,
-            estimate: None,
-            quote: None,
-            reference: false,
-        });
-        self.open.insert(
-            id,
-            Open {
-                held,
-                step,
-                asked: None,
-            },
-        );
-        self.reads_for(id, vault)
+        match sending {
+            Sending::Rule(rule) if locked => self.prompt(id, held, Asking::SendUnlock(rule), vault),
+            Sending::Prompt(prepare) if !prepare.quotes() => {
+                self.prompt(id, held, Asking::Send(prepare.ask(None, None)), vault)
+            }
+            sending => {
+                self.open.insert(
+                    id,
+                    Open {
+                        held,
+                        step: Pending::Quote(Quoting::of(sending)),
+                        asked: None,
+                    },
+                );
+                self.reads_for(id, vault)
+            }
+        }
     }
 
     /// The chain reads of page request `id`'s send, now waiting on them.
@@ -675,13 +727,12 @@ impl Connects {
             return Vec::new();
         };
         let budget = &held.budget;
-        let (chain_id, params) = (
-            quoting.prepare.chain_id(),
-            quoting.prepare.estimate_params(),
-        );
+        let prepare = quoting.send.prepare();
+        let (chain_id, params) = (prepare.chain_id(), prepare.estimate_params());
         let left = budget.left(now);
         let evidence = budget.step(now, EVIDENCE_DEADLINE_MS);
-        let stale = !vault.eip1193_fee_fresh(chain_id);
+        // A phone's fee isn't checked, so it needs no evidence.
+        let stale = prepare.checks_fee() && !vault.eip1193_fee_fresh(chain_id);
         quoting.reference = stale;
         let mut outs = vec![
             self.chain_read(
@@ -768,26 +819,77 @@ impl Connects {
         match (&mut open.step, part) {
             (Pending::Quote(quoting), _) => {
                 match part {
-                    Part::Estimate => quoting.estimate = Some(read_result(payload, true)),
-                    Part::Quote => quoting.quote = Some(read_result(payload, false)),
+                    Part::Estimate => quoting.estimate = Some(read_outcome(payload, true)),
+                    Part::Quote => quoting.quote = Some(read_outcome(payload, false)),
                     Part::Reference => quoting.reference = false,
                 }
-                let (Some(estimate), Some(quote), false) =
+                let (Some(_), Some(_), false) =
                     (&quoting.estimate, &quoting.quote, quoting.reference)
                 else {
                     return Vec::new();
                 };
-                let prepare = quoting.prepare.clone();
-                let quoted = prepare.quoted(estimate.as_ref(), quote.as_ref());
-                let verdict = quoted
-                    .as_ref()
-                    .map(|quoted| vault.eip1193_fee_check(&quoted.tx(&prepare), None).0);
-                let ask = prepare.ask(quoted, verdict.as_deref());
-                self.prompt_for(id, Asking::Send(ask))
+                self.quoted(id, vault)
             }
             (Pending::Judge(_), Part::Reference) => self.judge_for(id, vault),
             _ => Vec::new(),
         }
+    }
+
+    /// Page request `id`'s send, its reads all answered: its prompt, with
+    /// the quote (none when a read failed) and the fee check's verdict (none
+    /// for a phone's); or for a send the site's rule answers (APR-5e-2), a
+    /// failed read's failure, the prompt when the fee check doesn't let it
+    /// through, or main's recheck.
+    fn quoted(&mut self, id: u64, vault: &mut Vault) -> Vec<Out> {
+        let Some(Open { held, step, .. }) = self.open.remove(&id) else {
+            return Vec::new();
+        };
+        let Pending::Quote(Quoting {
+            send,
+            estimate: Some(estimate),
+            quote: Some(quote),
+            ..
+        }) = step
+        else {
+            return vec![error(id, internal())];
+        };
+        let rebuild = |step| Open {
+            held,
+            step,
+            asked: None,
+        };
+        let ask = match send {
+            Sending::Prompt(prepare) => {
+                let quoted = prepare.quote(read(&estimate), read(&quote)).ok();
+                let verdict = quoted
+                    .as_ref()
+                    .filter(|_| prepare.checks_fee())
+                    .map(|quoted| vault.eip1193_fee_check(&quoted.tx(&prepare), None).0);
+                prepare.ask(quoted, verdict.as_deref())
+            }
+            Sending::Rule(rule) => {
+                let quoted = rule.prepare().quote(read(&estimate), read(&quote));
+                match rule.judged(quoted, |tx| vault.eip1193_fee_check(tx, None).0) {
+                    send::Ruled::Answer(answer) => return vec![reply(id, &answer)],
+                    send::Ruled::Ask(ask) => *ask,
+                    send::Ruled::Recheck(rule) => {
+                        self.open.insert(id, rebuild(Pending::SendRule(*rule)));
+                        self.queued.push_back(id);
+                        return self.pump();
+                    }
+                }
+            }
+        };
+        let Some(prompt) = self.issue() else {
+            return vec![error(id, internal())];
+        };
+        let step = Pending::Prompt {
+            ask: Asking::Send(ask),
+            id: prompt,
+        };
+        self.open.insert(id, rebuild(step));
+        self.queued.push_back(id);
+        self.pump()
     }
 
     /// Page request `id`, open, asks main `asking` next.
@@ -821,27 +923,27 @@ impl Connects {
             return Vec::new();
         };
         let judge = judge.clone();
-        let (verdict, again) = vault.eip1193_fee_check(&judge.tx(), Some(judge.acknowledged()));
-        match judge.judged(&verdict, again, |key| vault.dapp_entry(key)) {
-            send::Judged::Answer(answer) => {
-                self.open.remove(&id);
-                vec![reply(id, &answer)]
-            }
-            send::Judged::Ask(ask) => self.prompt_for(id, Asking::Send(*ask)),
-            send::Judged::Send(prepared) => {
-                let Some(open) = self.open.remove(&id) else {
-                    return Vec::new();
-                };
-                // The token goes from the minter's wiping buffer straight
-                // into the reply's, as a `{ device }` answer's.
-                match vault.eip1193_send_token(&open.held.context, &prepared) {
-                    Ok(token) => match prepared.answer(&token) {
-                        Ok(answer) => vec![send_reply(id, &answer)],
-                        Err(answer) => vec![reply(id, &answer)],
-                    },
-                    Err(message) => vec![reply(id, &send::Prepared::refused(&message))],
-                }
-            }
+        // A phone's fee isn't checked: it picks its own.
+        let (verdict, again) = if judge.checks_fee() {
+            vault.eip1193_fee_check(&judge.tx(), Some(judge.acknowledged()))
+        } else {
+            (String::new(), false)
+        };
+        let judged = judge.judged(&verdict, again, |key| vault.dapp_entry(key));
+        self.send_judged(id, judged, vault)
+    }
+
+    /// What page request `id`'s approved send comes to: refused, asked
+    /// again, or its token minted for the request's document and that
+    /// answer's handle, from the minter's wiping buffer straight into the
+    /// reply's: `{ send }`, or a device's `{ device }` (APR-5e-2).
+    fn send_judged(&mut self, id: u64, judged: send::Judged, vault: &mut Vault) -> Vec<Out> {
+        if let send::Judged::Ask(ask) = judged {
+            return self.prompt_for(id, Asking::Send(*ask));
+        }
+        match self.open.remove(&id) {
+            Some(open) => minted(id, &open.held.context, judged, vault),
+            None => Vec::new(),
         }
     }
 
@@ -922,7 +1024,10 @@ impl Connects {
             let (method, params) = match &open.step {
                 // A send's own reads go to the chain thread, never here.
                 Pending::Quote(_) | Pending::Judge(_) => continue,
-                Pending::Recheck(_) | Pending::Switch(_) | Pending::Rule(_) => (
+                Pending::Recheck(_)
+                | Pending::Switch(_)
+                | Pending::Rule(_)
+                | Pending::SendRule(_) => (
                     "approval.recheck",
                     format!(r#"{{"request":{id},"page":{page}}}"#),
                 ),
@@ -1095,6 +1200,29 @@ impl Connects {
                 }
                 Err(Crossed) => vec![error(id, crossed())],
             },
+            // A rule's send, just before its effect: custody, the rule
+            // judged again with the core's own grant, main's custody and
+            // the prepared transaction's fee, and the document.
+            Pending::SendRule(rule) => match text.ok_or(Crossed).and_then(Recheck::parse) {
+                Ok(recheck) => {
+                    let now = rule.query().map_or(send::RuleNow::NotCovered, |query| {
+                        vault.eip1193_send_rule(Some(recheck.agent), &query)
+                    });
+                    let verdict = rule
+                        .tx()
+                        .map(|tx| vault.eip1193_fee_check(&tx, None).0)
+                        .unwrap_or_default();
+                    match rule.rechecked(&recheck, now, &verdict) {
+                        send::RuleRechecked::Answer(answer) => vec![reply(id, &answer)],
+                        // Past its rate, or its fee needing the user, by
+                        // now: the user is asked.
+                        send::RuleRechecked::Ask(ask) => {
+                            self.prompt(id, held, Asking::Send(*ask), vault)
+                        }
+                    }
+                }
+                Err(Crossed) => vec![error(id, crossed())],
+            },
             Pending::Prompt { ask, id: prompt } => {
                 self.prompting = self.prompting.saturating_sub(1);
                 held.budget.prompt_closed(self.now_ms());
@@ -1135,12 +1263,7 @@ impl Connects {
                     Asking::Send(ask) => match decided.and_then(|decision| ask.decide(decision)) {
                         Ok(send::Decided::Answer(answer)) => vec![reply(id, &answer)],
                         Ok(send::Decided::Requote(prepare)) => {
-                            let step = Pending::Quote(Quoting {
-                                prepare,
-                                estimate: None,
-                                quote: None,
-                                reference: false,
-                            });
+                            let step = Pending::Quote(Quoting::of(Sending::Prompt(prepare)));
                             self.open.insert(
                                 id,
                                 Open {
@@ -1151,8 +1274,14 @@ impl Connects {
                             );
                             self.reads_for(id, vault)
                         }
+                        // A Safe's (APR-5e-2): the grant, then its token.
+                        Ok(send::Decided::Safe(safe)) => {
+                            let judged = safe.judged(|key| vault.dapp_entry(key));
+                            minted(id, &held.context, judged, vault)
+                        }
                         Ok(send::Decided::Judge(judge)) => {
                             let chain_id = judge.chain_id();
+                            let checks = judge.checks_fee();
                             let now = self.now_ms();
                             let evidence = held.budget.step(now, EVIDENCE_DEADLINE_MS);
                             self.open.insert(
@@ -1163,7 +1292,7 @@ impl Connects {
                                     asked: None,
                                 },
                             );
-                            if vault.eip1193_fee_fresh(chain_id) {
+                            if !checks || vault.eip1193_fee_fresh(chain_id) {
                                 self.judge_for(id, vault)
                             } else {
                                 vec![self.evidence_read(id, chain_id, evidence, vault)]
@@ -1171,6 +1300,25 @@ impl Connects {
                         }
                         Err(Crossed) => vec![error(id, crossed())],
                     },
+                    // The unlock a rule's send asked for: then its quote.
+                    Asking::SendUnlock(rule) => {
+                        match decided.and_then(|decision| rule.unlocked(decision)) {
+                            Ok(Some(answer)) => vec![reply(id, &answer)],
+                            Ok(None) => {
+                                let step = Pending::Quote(Quoting::of(Sending::Rule(rule)));
+                                self.open.insert(
+                                    id,
+                                    Open {
+                                        held,
+                                        step,
+                                        asked: None,
+                                    },
+                                );
+                                self.reads_for(id, vault)
+                            }
+                            Err(Crossed) => vec![error(id, crossed())],
+                        }
+                    }
                     // The unlock a rule's signature asked for: the name
                     // again, then main's recheck.
                     Asking::Unlock(ask) => {
@@ -1238,6 +1386,7 @@ impl Connects {
             | Pending::Switch(_)
             | Pending::Select(_)
             | Pending::Rule(_)
+            | Pending::SendRule(_)
             | Pending::Quote(_)
             | Pending::Judge(_)
             | Pending::Name(_) => {
@@ -1300,16 +1449,62 @@ pub fn not_moved(id: u64) -> Out {
     )
 }
 
-/// A send's chain read's result, from its whole response: the node's
-/// result for a read (`nested`), the call's own for the fee quote; `None`
-/// for an error or none.
-fn read_result(payload: &[u8], nested: bool) -> Option<fc_json::JsValue> {
-    let response: serde_json::Value = serde_json::from_slice(payload).ok()?;
-    let mut result = response.get("result")?;
-    if nested {
-        result = result.get("result")?;
+/// A send's chain read's outcome, as `quote` takes it.
+fn read(outcome: &Result<fc_json::JsValue, String>) -> Result<&fc_json::JsValue, &str> {
+    outcome.as_ref().map_err(String::as_str)
+}
+
+/// An approved send's token minted for `context`'s document and that
+/// answer's handle, from the minter's wiping buffer straight into the
+/// reply's: `{ send }`, or a device's `{ device }` (APR-5e-2). Refused or
+/// asked again, the answer alone.
+fn minted(id: u64, context: &PageContext, judged: send::Judged, vault: &mut Vault) -> Vec<Out> {
+    match judged {
+        send::Judged::Answer(answer) => vec![reply(id, &answer)],
+        send::Judged::Ask(_) => vec![error(id, internal())],
+
+        send::Judged::Send(prepared) => match vault.eip1193_send_token(context, &prepared) {
+            Ok(token) => match prepared.answer(&token) {
+                Ok(answer) => vec![send_reply(id, &answer)],
+                Err(answer) => vec![reply(id, &answer)],
+            },
+            Err(message) => vec![reply(id, &send::Prepared::refused(&message))],
+        },
+        send::Judged::Device(approved) => match vault.eip1193_device(context, &approved) {
+            Ok(token) => match approved.answer(&token) {
+                Ok(answer) => vec![device_reply(id, &answer)],
+                Err(answer) => vec![reply(id, &answer)],
+            },
+            Err(message) => vec![reply(id, &send::Prepared::refused(&message))],
+        },
     }
-    fc_json::parse(&result.to_string()).ok()
+}
+
+/// A send's chain read's outcome, from its whole response: the node's
+/// result for a read (`nested`; `undefined` for none), the call's own for
+/// the fee quote; or the failure's message, as main's chain driver throws
+/// it: a thrown error's own, or one of 0001's codes' text (*inferred*).
+fn read_outcome(payload: &[u8], nested: bool) -> Result<fc_json::JsValue, String> {
+    let response: serde_json::Value =
+        serde_json::from_slice(payload).map_err(|_| String::from("Internal error"))?;
+    if let Some(error) = response.get("error") {
+        let thrown = (error["code"] == "chain_error")
+            .then(|| error.pointer("/data/message"))
+            .flatten();
+        let message = thrown.or_else(|| error.get("message"));
+        return Err(message
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("")
+            .to_owned());
+    }
+    let mut result = response.get("result").ok_or_else(String::new)?;
+    if nested {
+        match result.get("result") {
+            Some(inner) => result = inner,
+            None => return Ok(fc_json::JsValue::Undefined),
+        }
+    }
+    fc_json::parse(&result.to_string()).map_err(|_| String::new())
 }
 
 fn reply(id: u64, answer: &Answer) -> Out {

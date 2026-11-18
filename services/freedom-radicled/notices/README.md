@@ -26,7 +26,7 @@ The C libraries crates bundle are listed apart, in the script's `NATIVE`:
 | Library | Bundled by | Text |
 |---|---|---|
 | libgit2 1.9.6, with llhttp, xdiff, PCRE2, SHA-1 collision detection and RFC 6234's SHA-256 | `libgit2-sys` 0.18.7+1.9.6 (`vendored`) | `libgit2/COPYING`, read from the crate's source |
-| zlib 1.3.2 | `libz-sys` 1.1.31 (`static`, which `Cargo.toml` asks for) | `src/zlib/LICENSE`, read from the crate's source |
+| zlib 1.4 | `libz-sys` 1.1.33 (`static`, which `Cargo.toml` asks for) | `src/zlib/LICENSE`, read from the crate's source |
 | SQLite 3.49.1 | `sqlite3-src` 0.7.0 (`bundled`) | `sqlite-3.49.1-NOTICE` here: SQLite is in the public domain, and the file quotes the dedication its amalgamation carries |
 
 The runtime notices of the Linux builds, which link glibc 2.17 dynamically

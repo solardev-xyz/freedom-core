@@ -921,6 +921,17 @@ impl Vault {
         self.approvals.page_rule(key, agent, query, self.clocks())
     }
 
+    /// Whether the site's transaction rule answers a page's send now,
+    /// judged with the core's own grant and `agent` as main read it,
+    /// counting nothing (design 0012, APR-5e-2).
+    pub fn eip1193_send_rule(
+        &self,
+        agent: Option<bool>,
+        query: &fc_eip1193::send::RuleQuery<'_>,
+    ) -> fc_eip1193::send::RuleNow {
+        self.approvals.page_send_rule(agent, query, self.clocks())
+    }
+
     /// "Always allow" ticked on a page's signature the core signed (design
     /// 0012, APR-5d-2): Q9's limited rule, and its `approval.changed`.
     pub fn eip1193_allow_signing(&mut self, key: &str, account: u32) -> Vec<Out> {
@@ -933,8 +944,9 @@ impl Vault {
             .collect()
     }
 
-    /// The token for a device's signature the user approved on the core's
-    /// own prompt (design 0012, APR-5d-2; until 0016): minted for the
+    /// The token for a device's signature or send the user approved on the
+    /// core's own prompt (design 0012, APR-5d-2, APR-5e-2; until 0016),
+    /// binding what [`fc_eip1193::sign::DeviceApproval::binds`] gives: minted for the
     /// request's document and the handle of main's answer, as for a vault
     /// account's, and returned to main in the `{ device }` answer, since
     /// the device signs through main. The token, or the refusal's message.
@@ -945,7 +957,7 @@ impl Vault {
     ) -> Result<Zeroizing<String>, String> {
         let kind = fc_approval::Kind::from_name(approved.token_kind())
             .ok_or_else(|| internal().message)?;
-        let payload = fc_evm::parse_json(approved.payload()).map_err(|_| internal().message)?;
+        let payload = fc_evm::parse_json(approved.binds()).map_err(|_| internal().message)?;
         let clocks = self.clocks();
         self.approvals
             .page_token(
