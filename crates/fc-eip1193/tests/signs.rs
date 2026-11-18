@@ -19,12 +19,12 @@
 
 use std::path::PathBuf;
 
-use fc_eip1193::sign::{Decided, TypedView};
+use fc_eip1193::sign::{Decided, RuleNow, TypedView};
 use fc_eip1193::{Prompts, Request, Step, start};
 use serde_json::{Value, json};
 
 /// The scenarios a vault prompt answers, or that end before one; the rest
-/// (a rule answering, a device, "Always allow") are APR-5d-2's.
+/// (a rule answering, a device, "Always allow") replay through the daemon.
 pub const VAULT_PROMPT: [&str; 14] = [
     "sign-message-approved",
     "sign-message-text",
@@ -198,6 +198,8 @@ fn every_vault_prompt_scenario_replays() {
                     let ask = sign.ask(
                         agent,
                         |key| lookup(&grants, key),
+                        // No rule answers a vault-prompt scenario.
+                        |_| RuleNow::NotCovered,
                         |params| {
                             asked_view = true;
                             let effect = view_effect.expect("a view the reference asked for");
@@ -256,7 +258,8 @@ fn every_vault_prompt_scenario_replays() {
                                 }
                                 Decided::Sign(approved) => {
                                     signed += 1;
-                                    assert_eq!(approved.handle(), handle);
+                                    assert_eq!(approved.handle(), Some(handle.as_str()));
+                                    assert!(!approved.always_allow(), "{what}");
                                     let issue = &find("token.issue").unwrap()["args"];
                                     assert_eq!(approved.method().token_kind(), issue["kind"]);
                                     assert_eq!(json!(approved.account()), issue["account"]);
@@ -315,6 +318,7 @@ fn every_vault_prompt_scenario_replays() {
                                     );
                                     approved.answer(Ok(effect["answer"].as_str().unwrap()))
                                 }
+                                Decided::Device(device) => panic!("{what}: {device:?}"),
                             }
                         }
                     }
@@ -322,7 +326,7 @@ fn every_vault_prompt_scenario_replays() {
                 other => panic!("{what}: {other:?}"),
             };
             assert_eq!(answer.as_str(), recorded["result"].to_string(), "{what}");
-            // Nothing written: "Always allow" is APR-5d-2's.
+            // Nothing written: none of these ticks "Always allow".
             assert!(find("grant.write").is_none(), "{what}");
         }
     }
@@ -332,8 +336,10 @@ fn every_vault_prompt_scenario_replays() {
     );
 }
 
-/// Each step-"APR-5d" scenario is replayed here or left to APR-5d-2 by
-/// name.
+/// Each step-"APR-5d" scenario is replayed here, or by name in
+/// freedom-cored's `tests/eip1193_sign.rs` (APR-5d-2: a rule answering,
+/// "Always allow", a Ledger), which needs the core's own grant, rate and
+/// vault.
 #[test]
 fn the_rest_are_apr5d2s() {
     let file = load();

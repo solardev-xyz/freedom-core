@@ -1476,10 +1476,11 @@ impl Core {
                 let outs = self.connects.switch(id, switch, &key, &page, received);
                 self.dispatch(outs)
             }
-            // A signature for a document with a key (APR-5d-1): before the
+            // A signature for a document with a key (APR-5d): before the
             // dApp store moves its grant is main's, so the core takes none
-            // (*inferred*). Then the grant, the account, the rule and what
-            // is signed, up to its prompt; the core's view of typed data is
+            // (*inferred*). Then the grant, the account, what is signed and
+            // the rule, judged with the core's own grant, up to its prompt
+            // or its rule; the core's view of typed data is
             // `typed_data.hash`'s, as the reference asked the core for it.
             fc_eip1193::Step::Sign(sign) => {
                 if let Some(refused) = self.dapp_unmoved(id) {
@@ -1489,6 +1490,7 @@ impl Core {
                 let asked = sign.ask(
                     page.agent,
                     |key| vault.dapp_entry(key),
+                    |query| vault.eip1193_rule(&page.origin, page.agent, query),
                     crate::signing::page_typed_data_view,
                 );
                 match asked {
@@ -1496,6 +1498,14 @@ impl Core {
                         Ok(answer) => self.result(id, &answer),
                         Err(_) => Flow::Exit(Exit::Internal),
                     },
+                    // The site's rule answers it (APR-5d-2): the unlock
+                    // first while the vault is locked, then main's recheck.
+                    Ok(ask) if ask.ruled() => {
+                        let locked = !self.vault.unlocked();
+                        let (key, page) = (page.origin.clone(), page.clone());
+                        let outs = self.connects.rule(id, ask, locked, &key, &page, received);
+                        self.dispatch(outs)
+                    }
                     Ok(ask) => {
                         let (key, page) = (page.origin.clone(), page.clone());
                         let outs = self.connects.sign(id, ask, &key, &page, received);
