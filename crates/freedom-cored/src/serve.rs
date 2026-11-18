@@ -574,7 +574,13 @@ pub fn run(options: &Options) -> Exit {
                 }
             }
             Ok(Event::ChainRead { tag, payload }) => {
-                let outs = core.vault.chain_read(tag, &payload);
+                // A page send's reads (APR-5e-1), or a phone payment's.
+                let outs = if tag & crate::eip1193::SEND_TAG != 0 {
+                    core.connects
+                        .chain_read_done(tag, &payload, &mut core.vault)
+                } else {
+                    core.vault.chain_read(tag, &payload)
+                };
                 if let Flow::Exit(exit) = core.dispatch(outs) {
                     break exit;
                 }
@@ -1436,7 +1442,8 @@ impl Core {
 
     /// A page's `eip1193.request` (design 0012, "fc-eip1193 and
     /// approval.request"; APR-5b, the reads; APR-5c, connects and chain
-    /// switches; APR-5d, signatures; APR-5f, names over IPNS):
+    /// switches; APR-5d, signatures; APR-5e-1, sends; APR-5f, names over
+    /// IPNS):
     /// fc-eip1193's dispatcher, with the page's key (`PageContext.origin`;
     /// empty for a document with no key) and the dApp store. An answer goes
     /// now; a read goes to the chain thread, which answers from its
@@ -1487,6 +1494,29 @@ impl Core {
                     Flow::Continue
                 } else {
                     Flow::Exit(Exit::Internal)
+                }
+            }
+            // A send for a document with a key (APR-5e-1): `not_moved`
+            // first, as for a signature (*inferred*). Then the form, the
+            // grant, the account and the Safe's chain, up to its quote,
+            // which the core's own chain machine gives.
+            fc_eip1193::Step::Send(send) => {
+                if let Some(refused) = self.dapp_unmoved(id) {
+                    return refused;
+                }
+                let vault = &self.vault;
+                match send.prepare(|key| vault.dapp_entry(key)) {
+                    Err(answer) => match RawValue::from_string(answer.into_string()) {
+                        Ok(answer) => self.result(id, &answer),
+                        Err(_) => Flow::Exit(Exit::Internal),
+                    },
+                    Ok(prepare) => {
+                        let page = page.clone();
+                        let outs =
+                            self.connects
+                                .send(id, prepare, &page, received, &mut self.vault);
+                        self.dispatch(outs)
+                    }
                 }
             }
             // A connect, a chain switch or a signature for a document with
