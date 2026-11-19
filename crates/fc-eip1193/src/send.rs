@@ -50,6 +50,11 @@
 //!   only, whether the Agent's sheet or the user answers; an approve that
 //!   ticks it is [`Crossed`]. `feeAcknowledged` stays offered: it confirms
 //!   one fee and writes nothing.
+//! - **No "Always allow" for a Safe's call** (APR-4d): a send whose `data`
+//!   calls `execTransaction`, `approveHash` or a module's
+//!   `execTransactionFromModule`, which no standing rule answers
+//!   (`fc_approval::safe::is_safe_call`), is offered it unticked only, as
+//!   in custody; the core's rule choice doesn't choose a rule for one.
 
 use fc_json::{JsString, JsValue};
 
@@ -70,8 +75,9 @@ pub const SEND_KIND: &str = "eth.send";
 /// nothing, as in the reference.
 const CHOICES: &str = r#"{"alwaysAllow":[false,true],"feeAcknowledged":[false,true]}"#;
 
-/// A Safe's, as no rule answers a Safe's send (*inferred*), and any send in
-/// Agent custody (APR-7): "Always allow" unticked only.
+/// A Safe's, as no rule answers a Safe's send (*inferred*), any send in
+/// Agent custody (APR-7), and a Safe's call (APR-4d): "Always allow"
+/// unticked only.
 const UNTICKED_CHOICES: &str = r#"{"alwaysAllow":[false],"feeAcknowledged":[false,true]}"#;
 
 /// The token a Safe's approve mints.
@@ -372,10 +378,19 @@ impl Send {
 }
 
 impl Prepare {
-    /// Whether "Always allow" may be ticked: not for a Safe's send, and not
-    /// in Agent custody (APR-7).
+    /// Whether "Always allow" may be ticked: not for a Safe's send, not in
+    /// Agent custody (APR-7), and not for a Safe's call, which no rule
+    /// answers (APR-4d).
     fn offers_always_allow(&self) -> bool {
-        self.device != Some(Device::Safe) && !self.custody
+        self.device != Some(Device::Safe) && !self.custody && !self.calls_safe()
+    }
+
+    /// Whether the send's `data` is a Safe's call, by its selector, as the
+    /// core's signature checks it (`fc_approval::safe::is_safe_call`).
+    fn calls_safe(&self) -> bool {
+        selector_of(&self.tx.data)
+            .and_then(|selector| fc_evm::parse_bytes(&selector, "data").ok())
+            .is_some_and(|selector| fc_approval::safe::is_safe_call(&selector))
     }
 
     /// The chain the send is for: the page's.
@@ -593,8 +608,8 @@ fn view(prepare: &Prepare, quoted: Option<&Quoted>, verdict: Option<&str>, again
         prop("fee", fee),
         prop("feeCheck", verdict),
         prop("feeAskAgain", JsValue::Bool(again)),
-        // "Always allow" is offered for a contract call, never a Safe's,
-        // and never in Agent custody.
+        // "Always allow" is offered for a contract call, never a Safe's or
+        // a Safe's call, and never in Agent custody.
         prop(
             "alwaysAllow",
             JsValue::Bool(offered && selector_of(&tx.data).is_some()),

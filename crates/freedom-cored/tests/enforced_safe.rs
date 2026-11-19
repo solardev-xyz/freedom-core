@@ -11,6 +11,10 @@
 //! across a restart. A rule's refusal comes before custody, the pause and
 //! the rate, and takes no slot; only an `executor-send` ends the approval
 //! whose SafeTx it executes.
+//!
+//! APR-4d's other ways to authorize a Safe action: under `shell` a 32-byte
+//! message is refused, and `approveHash` and a module's call sign only with
+//! a token that binds them, as `execTransaction` does.
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
@@ -1646,5 +1650,300 @@ fn only_an_executor_send_ends_the_approval_it_executes() {
             "not_authorized",
             Some("unknown_token"),
         );
+    }
+}
+
+/// The selectors APR-4d adds to `execTransaction`'s: `approveHash`,
+/// `execTransactionFromModule` and `execTransactionFromModuleReturnData`.
+const SAFE_SELECTORS: [&str; 3] = ["0xd4d9bdcd", "0x468721a7", "0x5229073f"];
+
+/// A call to `to` with `data`, on chain 100, within the fee check.
+fn call_tx(to: &str, data: &str) -> Value {
+    json!({
+        "type": 2, "chain_id": "100", "nonce": "9", "gas_limit": "200000", "to": to, "value": "0",
+        "data": data, "max_fee_per_gas": CHEAP, "max_priority_fee_per_gas": "1000000000",
+    })
+}
+
+/// `sign.transaction` of `tx` by account `index`.
+fn sign_tx(
+    core: &mut Core,
+    id: &mut u64,
+    context: &Value,
+    index: u32,
+    tx: &Value,
+    authorization: Option<Value>,
+) -> Value {
+    let mut params = json!({ "key": account(index), "tx": tx });
+    if let Some(authorization) = authorization {
+        params["authorization"] = authorization;
+    }
+    call_as(core, id, context, "sign.transaction", params)
+}
+
+/// `sign.message` of `message` by account 0.
+fn sign_message(
+    core: &mut Core,
+    id: &mut u64,
+    context: &Value,
+    message: &str,
+    authorization: Option<Value>,
+) -> Value {
+    let mut params = json!({ "key": account(0), "message": message });
+    if let Some(authorization) = authorization {
+        params["authorization"] = authorization;
+    }
+    call_as(core, id, context, "sign.message", params)
+}
+
+/// A token of `kind` for account `index` and `payload`, minted under
+/// `context`, as the authorization that spends it.
+fn token(
+    core: &mut Core,
+    id: &mut u64,
+    context: &Value,
+    kind: &str,
+    index: u32,
+    payload: Value,
+) -> Value {
+    let mut params = json!({ "kind": kind, "account": index, "payload": payload });
+    let under_page = context["caller"] == "page";
+    if under_page {
+        params["handle"] = json!(HANDLE);
+    }
+    let token = token_of(&call_as(core, id, context, "approval.issue", params));
+    let mut authorization = json!({ "token": token });
+    if kind != "sign-message" {
+        authorization["kind"] = json!(kind);
+    }
+    if under_page {
+        authorization["handle"] = json!(HANDLE);
+    }
+    authorization
+}
+
+/// APR-4d: under `shell`, a 32-byte message is refused `no_token` before a
+/// key is derived, whatever it holds (32 zero bytes, a SafeTx's hash, a
+/// SafeMessage's), and no authorization admits one there: not a Safe
+/// approval, nor a standing rule. 31 and 33 bytes sign as before, and so
+/// do 15 bytes written in 32 characters. Under `page` the 32 bytes sign
+/// with the page's `sign-message` token, and stay refused under
+/// `{ standing }` (#89), where a shorter message signs.
+#[test]
+fn a_32_byte_message_signs_only_for_a_page() {
+    let root = tempfile::tempdir().unwrap();
+    let file = serde_json::to_string_pretty(&json!({ SITE: {
+        "origin": SITE, "connectedAt": 1_762_000_000_000_u64, "lastUsed": 1_762_000_000_000_u64,
+        "walletIndex": 0, "chainId": 100, "autoApprove": { "signing": true, "transactions": [] },
+    } }))
+    .unwrap();
+    let mut core = imported(root.path(), Some(&file), &[]);
+    let mut id = 10;
+    let hashes = [
+        format!("0x{}", "00".repeat(32)),
+        typed_hash(&safe_tx(SAFE, 1)),
+        typed_hash(&hello()),
+    ];
+    let approval = send_approval(&mut core, &mut id, &shell(), SAFE);
+    let standing = Some(json!({ "standing": { "paused": false } }));
+    for hash in &hashes {
+        refused(
+            &sign_message(&mut core, &mut id, &shell(), hash, None),
+            "not_authorized",
+            Some("no_token"),
+        );
+        refused(
+            &sign_message(&mut core, &mut id, &shell(), hash, safe(&approval)),
+            "not_authorized",
+            None,
+        );
+        refused(
+            &sign_message(&mut core, &mut id, &shell(), hash, standing.clone()),
+            "not_authorized",
+            None,
+        );
+    }
+    let fifteen = format!("0x{}", "ab".repeat(15));
+    assert_eq!(fifteen.len(), 32);
+    for message in [
+        format!("0x{}", "00".repeat(31)),
+        format!("0x{}", "00".repeat(33)),
+        fifteen,
+    ] {
+        signs(&sign_message(&mut core, &mut id, &shell(), &message, None));
+    }
+    // A page's own `personal_sign` of 32 bytes: its token signs it; a rule
+    // doesn't, though it signs the page's shorter message.
+    for hash in &hashes {
+        let authorization = token(
+            &mut core,
+            &mut id,
+            &site(),
+            "sign-message",
+            0,
+            json!({ "message": hash }),
+        );
+        signs(&sign_message(
+            &mut core,
+            &mut id,
+            &site(),
+            hash,
+            Some(authorization),
+        ));
+        refused(
+            &sign_message(&mut core, &mut id, &site(), hash, standing.clone()),
+            "not_authorized",
+            None,
+        );
+    }
+    signs(&sign_message(
+        &mut core,
+        &mut id,
+        &site(),
+        "0x68656c6c6f",
+        standing,
+    ));
+    // Before any key: locked, 32 bytes are still `not_authorized`.
+    result(&call_as(
+        &mut core,
+        &mut id,
+        &shell(),
+        "vault.lock",
+        json!({}),
+    ));
+    refused(
+        &sign_message(&mut core, &mut id, &shell(), &hashes[1], None),
+        "not_authorized",
+        Some("no_token"),
+    );
+    refused(
+        &sign_message(&mut core, &mut id, &shell(), "0x68656c6c6f", None),
+        "vault_locked",
+        None,
+    );
+}
+
+/// APR-4d: `approveHash` and both module calls are a Safe's, as
+/// `execTransaction` is, to the Safe or to any other address. Under
+/// `shell`, refused `no_token` without a token, and signed with a
+/// `wallet-send` that binds it; a Safe approval covers none. Under `page`,
+/// a matching rule answers none (`no_rule`, and `approval.check` agrees),
+/// and its `dapp-send` signs it. The selector counts only at the start of
+/// `data`: three bytes of one, one after the first byte and one a bit off
+/// sign on main's word, and a rule answers the one a bit off. Main's own
+/// other calls (a transfer, a token's, an ENS step's) sign as before.
+#[test]
+fn approve_hash_and_a_modules_call_need_a_token() {
+    let root = tempfile::tempdir().unwrap();
+    let args = "55".repeat(32);
+    let mut rules = Vec::new();
+    for to in [SAFE, TO] {
+        for selector in SAFE_SELECTORS.iter().chain(&["0xd4d9bdcc"]) {
+            rules.push(json!({ "to": to, "selector": selector, "chainId": 100, "maxValue": "5" }));
+        }
+    }
+    let file = serde_json::to_string_pretty(&json!({ SITE: {
+        "origin": SITE, "connectedAt": 1_762_000_000_000_u64, "lastUsed": 1_762_000_000_000_u64,
+        "walletIndex": 0, "chainId": 100,
+        "autoApprove": { "signing": false, "transactions": rules },
+    } }))
+    .unwrap();
+    let mut core = imported(root.path(), Some(&file), &[]);
+    let mut id = 10;
+    serve_fee_reference(&mut core, &mut id);
+    let approval = send_approval(&mut core, &mut id, &shell(), SAFE);
+    let standing = Some(json!({ "standing": { "paused": false } }));
+    let no_rule = json!({ "covered": false, "reason": "no_rule" });
+    for to in [SAFE, TO] {
+        for selector in SAFE_SELECTORS {
+            let tx = call_tx(to, &format!("{selector}{args}"));
+            let shown = format!("{to} {selector}");
+            for context in [shell(), chrome(), site()] {
+                let reply = sign_tx(&mut core, &mut id, &context, 0, &tx, None);
+                assert_eq!(
+                    reply["error"]["data"]["reason"], "no_token",
+                    "{shown}: {reply}"
+                );
+                refused(&reply, "not_authorized", None);
+            }
+            let wallet = token(
+                &mut core,
+                &mut id,
+                &shell(),
+                "wallet-send",
+                0,
+                json!({ "tx": tx }),
+            );
+            signs(&sign_tx(&mut core, &mut id, &shell(), 0, &tx, Some(wallet)));
+            let reply = sign_tx(&mut core, &mut id, &shell(), 0, &tx, safe(&approval));
+            assert!(reply.get("error").is_some(), "{shown}: {reply}");
+            refused(&reply, "not_authorized", None);
+            let reply = sign_tx(&mut core, &mut id, &site(), 0, &tx, standing.clone());
+            assert_eq!(
+                reply["error"]["data"]["reason"], "no_rule",
+                "{shown}: {reply}"
+            );
+            refused(&reply, "not_authorized", None);
+            let check = call_as(
+                &mut core,
+                &mut id,
+                &site(),
+                "approval.check",
+                json!({ "request": { "kind": "transaction", "account": 0, "account_kind": "vault",
+                    "tx": tx }, "chain_id": 100, "paused": false }),
+            );
+            assert_eq!(result(&check), &no_rule, "{shown}");
+            let dapp = token(
+                &mut core,
+                &mut id,
+                &site(),
+                "dapp-send",
+                0,
+                json!({ "tx": tx }),
+            );
+            signs(&sign_tx(&mut core, &mut id, &site(), 0, &tx, Some(dapp)));
+        }
+        // Not a Safe's call: the selector cut short, after the first byte,
+        // or a bit off.
+        for data in [
+            "0xd4d9bd".to_owned(),
+            format!("0x00d4d9bdcd{args}"),
+            format!("0x00468721a7{args}"),
+            format!("0x005229073f{args}"),
+            format!("0xd4d9bdcc{args}"),
+        ] {
+            signs(&sign_tx(
+                &mut core,
+                &mut id,
+                &shell(),
+                0,
+                &call_tx(to, &data),
+                None,
+            ));
+        }
+        let off = call_tx(to, &format!("0xd4d9bdcc{args}"));
+        signs(&sign_tx(
+            &mut core,
+            &mut id,
+            &site(),
+            0,
+            &off,
+            standing.clone(),
+        ));
+    }
+    // Main's own other sends: a transfer, a token's `transfer`, and an ENS
+    // step's `commit`, on chain 1.
+    for data in [
+        "0x".to_owned(),
+        format!(
+            "0xa9059cbb{}{}",
+            "00".repeat(12) + &"77".repeat(20),
+            "00".repeat(31) + "01"
+        ),
+        format!("0xf14fcbc8{args}"),
+    ] {
+        let mut tx = call_tx(TO, &data);
+        tx["chain_id"] = json!("1");
+        signs(&sign_tx(&mut core, &mut id, &shell(), 0, &tx, None));
     }
 }

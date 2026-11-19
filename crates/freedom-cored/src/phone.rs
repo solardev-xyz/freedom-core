@@ -464,6 +464,7 @@ impl Phone {
                     Signed::Message {
                         account,
                         message: &payload_fields["message"],
+                        bytes: &message,
                     },
                 )
             }

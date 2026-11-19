@@ -1,0 +1,21 @@
+[package]
+name = "fc-wallet-state"
+description = "The wallet's stores in the core (design 0013): vault-meta.json's codec and changes, with the behavior of freedom-browser's identity-manager.js"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+# The file as JSON.parse reads it and JSON.stringify writes it: doubles,
+# ECMAScript's number text, lone surrogates, JS's property order (design
+# 0013, "How the core writes them").
+fc-json = { path = "../fc-json" }
+# A device record's address as ethers' `isAddress` takes it: the EIP-55
+# checksum of a mixed-case address.
+fc-evm = { path = "../fc-evm" }
+thiserror = "2"
