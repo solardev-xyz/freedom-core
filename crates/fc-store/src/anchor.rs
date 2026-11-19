@@ -46,7 +46,17 @@ use std::io;
 use std::path::{Component, Path, PathBuf};
 
 use crate::fsx::Regular;
-pub use fc_service::gate::DirIdentity;
+
+/// A directory's identity: its device and inode (Unix), as a gate records
+/// it once its lock is held ([`Resolve::Canonical`]). The caller builds it
+/// from its gate's (fc-service's `gate::DirIdentity`, the same two fields),
+/// so this crate stays free of the service skeleton, which is empty on
+/// iOS and Android.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DirIdentity {
+    pub dev: u64,
+    pub ino: u64,
+}
 
 /// What is at a name, not following a symlink.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -459,6 +459,28 @@ pub fn grant_write_fails(_store: &str, _step: &str) -> bool {
     false
 }
 
+/// The hooks of every durable write but a store file's
+/// (`fc_store::fsx::replace`): `FREEDOM_CORED_TEST_SWAP`'s `checked` stage.
+/// No step fails.
+pub struct Swap;
+
+impl fc_store::Hooks for Swap {
+    fn checked(&self, temp: &std::path::Path) {
+        swap("checked", temp);
+    }
+}
+
+/// The hooks of a store file's write (`fc_store::file::write_file`): the
+/// steps `FREEDOM_CORED_TEST_GRANT_WRITE_FAIL` names for this store
+/// (`dapp`, `swarm`, `radicle`, `x402`, `phone`), read at each write.
+pub struct GrantWrite<'a>(pub &'a str);
+
+impl fc_store::Hooks for GrantWrite<'_> {
+    fn fails(&self, step: fc_store::Step) -> bool {
+        grant_write_fails(self.0, step.name())
+    }
+}
+
 #[cfg(feature = "testhooks")]
 pub fn hold_reply(id: u64) -> bool {
     std::env::var("FREEDOM_CORED_TEST_HOLD_REPLY")

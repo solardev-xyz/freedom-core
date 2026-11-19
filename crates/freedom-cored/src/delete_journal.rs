@@ -46,10 +46,10 @@ use std::io::{Seek, Write};
 use std::path::Path;
 use std::sync::{Mutex, MutexGuard};
 
+use fc_store::fsx::{self, Done};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use crate::fsx::{self, Done};
 use crate::secrets::SECRETS_FILE;
 use crate::vault::{MAX_VAULT_BYTES, VAULT_FILE};
 
@@ -243,6 +243,7 @@ pub fn delete(
             // As if the journal's rename failed, after the claim.
             claimed.get() && !crate::testhooks::secrets_fails("delete-journal")
         },
+        &crate::testhooks::Swap,
     );
     let journaled = match written {
         Ok(done) => done,
