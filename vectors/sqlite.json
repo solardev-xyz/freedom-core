@@ -1,0 +1,135 @@
+{
+  "meta": {
+    "freedomBrowserCommit": "9d4ea62516034731dea082c6d81765e355f1182f",
+    "nodeVersion": "v24.15.0",
+    "generator": "vectors/generator/generate.js",
+    "packages": {
+      "better-sqlite3": "13.0.3"
+    },
+    "sqliteVersion": "3.53.4"
+  },
+  "description": "Design 0013's SQLite stores (PRF-5g-1): each database as the stores reference's own module creates it through better-sqlite3 (getDb on a new file, then closeDb), read back: sqlite_master's rows in rowid order (type, name, tbl_name, rootpage, sql), user_version and journal_mode. The core creates each with the same DDL and must read back the same rows.",
+  "databases": [
+    {
+      "file": "payment-history.sqlite",
+      "module": "src/main/payment-history.js",
+      "user_version": 1,
+      "journal_mode": "wal",
+      "sqlite_master": [
+        {
+          "type": "table",
+          "name": "payments",
+          "tbl_name": "payments",
+          "rootpage": 2,
+          "sql": "CREATE TABLE payments (\n        id            INTEGER PRIMARY KEY AUTOINCREMENT,\n        kind          TEXT    NOT NULL,\n        chain_id      INTEGER NOT NULL,\n        tx_hash       TEXT,\n        from_address  TEXT,\n        to_address    TEXT,\n        asset         TEXT,\n        amount        TEXT    NOT NULL,\n        origin        TEXT,\n        url           TEXT,\n        status        TEXT    NOT NULL,\n        created_at    INTEGER NOT NULL,\n        confirmed_at  INTEGER,\n        gas_used      TEXT,\n        gas_price     TEXT,\n        metadata      TEXT\n      )"
+        },
+        {
+          "type": "table",
+          "name": "sqlite_sequence",
+          "tbl_name": "sqlite_sequence",
+          "rootpage": 3,
+          "sql": "CREATE TABLE sqlite_sequence(name,seq)"
+        },
+        {
+          "type": "index",
+          "name": "idx_payments_created",
+          "tbl_name": "payments",
+          "rootpage": 4,
+          "sql": "CREATE INDEX idx_payments_created ON payments(created_at DESC)"
+        },
+        {
+          "type": "index",
+          "name": "idx_payments_kind",
+          "tbl_name": "payments",
+          "rootpage": 5,
+          "sql": "CREATE INDEX idx_payments_kind    ON payments(kind)"
+        },
+        {
+          "type": "index",
+          "name": "idx_payments_chain",
+          "tbl_name": "payments",
+          "rootpage": 6,
+          "sql": "CREATE INDEX idx_payments_chain   ON payments(chain_id)"
+        },
+        {
+          "type": "index",
+          "name": "idx_payments_origin",
+          "tbl_name": "payments",
+          "rootpage": 7,
+          "sql": "CREATE INDEX idx_payments_origin  ON payments(origin)"
+        },
+        {
+          "type": "index",
+          "name": "idx_payments_tx_hash",
+          "tbl_name": "payments",
+          "rootpage": 8,
+          "sql": "CREATE INDEX idx_payments_tx_hash ON payments(tx_hash)"
+        },
+        {
+          "type": "index",
+          "name": "idx_payments_status",
+          "tbl_name": "payments",
+          "rootpage": 9,
+          "sql": "CREATE INDEX idx_payments_status  ON payments(status)"
+        }
+      ]
+    },
+    {
+      "file": "publish-history.sqlite",
+      "module": "src/main/swarm/publish-history.js",
+      "user_version": 1,
+      "journal_mode": "wal",
+      "sqlite_master": [
+        {
+          "type": "table",
+          "name": "publishes",
+          "tbl_name": "publishes",
+          "rootpage": 2,
+          "sql": "CREATE TABLE publishes (\n        id            INTEGER PRIMARY KEY AUTOINCREMENT,\n        type          TEXT NOT NULL,\n        name          TEXT,\n        status        TEXT NOT NULL,\n        reference     TEXT,\n        bzz_url       TEXT,\n        tag_uid       INTEGER,\n        batch_id      TEXT,\n        origin        TEXT,\n        bytes_size    INTEGER,\n        started_at    INTEGER NOT NULL,\n        completed_at  INTEGER,\n        error_message TEXT\n      )"
+        },
+        {
+          "type": "table",
+          "name": "sqlite_sequence",
+          "tbl_name": "sqlite_sequence",
+          "rootpage": 3,
+          "sql": "CREATE TABLE sqlite_sequence(name,seq)"
+        },
+        {
+          "type": "index",
+          "name": "idx_publishes_started",
+          "tbl_name": "publishes",
+          "rootpage": 4,
+          "sql": "CREATE INDEX idx_publishes_started   ON publishes(started_at DESC)"
+        },
+        {
+          "type": "index",
+          "name": "idx_publishes_type",
+          "tbl_name": "publishes",
+          "rootpage": 5,
+          "sql": "CREATE INDEX idx_publishes_type      ON publishes(type)"
+        },
+        {
+          "type": "index",
+          "name": "idx_publishes_status",
+          "tbl_name": "publishes",
+          "rootpage": 6,
+          "sql": "CREATE INDEX idx_publishes_status    ON publishes(status)"
+        },
+        {
+          "type": "index",
+          "name": "idx_publishes_reference",
+          "tbl_name": "publishes",
+          "rootpage": 7,
+          "sql": "CREATE INDEX idx_publishes_reference ON publishes(reference)"
+        },
+        {
+          "type": "index",
+          "name": "idx_publishes_origin",
+          "tbl_name": "publishes",
+          "rootpage": 8,
+          "sql": "CREATE INDEX idx_publishes_origin    ON publishes(origin)"
+        }
+      ]
+    }
+  ]
+}
