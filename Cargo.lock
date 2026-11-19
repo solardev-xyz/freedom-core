@@ -494,6 +494,7 @@ dependencies = [
 name = "fc-eip1193"
 version = "0.22.0"
 dependencies = [
+ "fc-approval",
  "fc-dweb",
  "fc-evm",
  "fc-json",
@@ -690,6 +691,15 @@ dependencies = [
  "sha2",
  "thiserror",
  "zeroize",
+]
+
+[[package]]
+name = "fc-wallet-state"
+version = "0.22.0"
+dependencies = [
+ "fc-evm",
+ "fc-json",
+ "thiserror",
 ]
 
 [[package]]

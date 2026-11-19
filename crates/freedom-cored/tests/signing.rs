@@ -4,7 +4,9 @@
 //! `shell`: a page's and the chrome's signatures need an authorization
 //! (design 0012, APR-4; `tests/enforced.rs`). A Safe's typed data, which
 //! main's word no longer signs (APR-4b; `tests/enforced_safe.rs`), signs as
-//! a page's own `eth_signTypedData_v4`, under its `sign-typed-data` token.
+//! a page's own `eth_signTypedData_v4`, under its `sign-typed-data` token;
+//! a 32-byte message, which main's word no longer signs either (APR-4d),
+//! as a page's own `personal_sign`, under its `sign-message` token.
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
@@ -25,8 +27,9 @@ fn signing_vectors() -> Value {
     serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap()
 }
 
-/// Unlocked, a page's `sign-typed-data` token for a Safe's typed data
-/// minted on main's word, as before APR-7 (the test build's hook).
+/// Unlocked, a page's `sign-typed-data` token for a Safe's typed data, or
+/// its `sign-message` token for a 32-byte message, minted on main's word,
+/// as before APR-7 (the test build's hook).
 fn unlocked() -> (tempfile::TempDir, Core) {
     let (root, data, locks) = dirs();
     let mut core = spawn_env("serve", &data, &locks, &[], &[MAINS_WORD]);
@@ -103,6 +106,8 @@ fn every_vector_case_over_the_wire() {
                 && fc_approval::safe::is_safe_typed_data(&case["typed_data"])
             {
                 safe_typed_data(&mut core, &mut id, label, params)
+            } else if section == "messages" && !must_fail(case) && hash_sized(&case["message"]) {
+                page_message(&mut core, &mut id, label, params)
             } else {
                 core.call_shell(id, method, params)
             };
@@ -144,9 +149,11 @@ fn every_vector_case_over_the_wire() {
                 }
                 "messages" => {
                     assert_eq!(result["signature"], expected["signature"], "{label}");
-                    // A 32-byte message signs as before (#89): the warning
-                    // is main's.
-                    if label.starts_with("binary-32/") {
+                    // A 32-byte message signs the same 65 bytes under the
+                    // page's token (APR-4d); the warning is the prompt's
+                    // (#89).
+                    if hash_sized(&case["message"]) {
+                        assert!(label.starts_with("binary-32/"), "{label}");
                         binary_32 += 1;
                     }
                 }
@@ -316,6 +323,49 @@ fn safe_typed_data(core: &mut Core, id: &mut u64, label: &str, params: Value) ->
     let mut params = params;
     params["authorization"] = json!({ "token": token, "handle": HANDLE });
     call("sign.typed_data", params)
+}
+
+/// Whether a vector's message is exactly 32 bytes (APR-4d).
+fn hash_sized(message: &Value) -> bool {
+    fc_evm::parse_bytes(message.as_str().unwrap(), "message")
+        .is_ok_and(|bytes| fc_approval::safe::is_hash_sized(&bytes))
+}
+
+/// A 32-byte message: refused as main's own, under `shell` (design 0012,
+/// APR-4d); then signed as a page's own `personal_sign`, under the
+/// `sign-message` token the page minted for it. The reply is the page's
+/// signature.
+fn page_message(core: &mut Core, id: &mut u64, label: &str, params: Value) -> Value {
+    const HANDLE: &str = "b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2";
+    let refused = core.call_shell(*id, "sign.message", params.clone());
+    assert_eq!(
+        refused["error"]["code"], "not_authorized",
+        "{label}: {refused}"
+    );
+    assert_eq!(refused["error"]["data"]["reason"], "no_token", "{label}");
+    let page = json!({ "caller": "page", "page": {
+        "origin": "https://safe.example", "top_origin": "https://safe.example",
+        "frame": 1, "navigation": 1, "agent": false,
+    } });
+    let mut call = |method: &str, params: Value| {
+        *id += 1;
+        core.send(&json!({
+            "type": "request", "id": *id, "method": method, "params": params, "context": page,
+        }));
+        core.response(*id)
+    };
+    let minted = call(
+        "approval.issue",
+        json!({ "kind": "sign-message", "account": params["key"]["index"], "handle": HANDLE,
+            "payload": { "message": params["message"] } }),
+    );
+    let token = minted["result"]["token"]
+        .as_str()
+        .unwrap_or_else(|| panic!("{label}: {minted}"))
+        .to_owned();
+    let mut params = params;
+    params["authorization"] = json!({ "token": token, "handle": HANDLE });
+    call("sign.message", params)
 }
 
 /// The view is the reference's getPayload (#88), with primaryType as

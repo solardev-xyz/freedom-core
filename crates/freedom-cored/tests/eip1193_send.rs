@@ -1291,3 +1291,81 @@ fn a_phone_send_is_never_fee_checked() {
     let spent = core.until_response(110);
     assert!(spent["result"].is_object(), "{spent}");
 }
+
+/// APR-4d: a site's rule for a vault account's `execTransaction`,
+/// `approveHash` or module call isn't chosen, though it matches: the send
+/// is asked, its view shows `alwaysAllow: false` and its choices offer it
+/// unticked only. An approve that ticks it is crossed (`mismatch`), with
+/// nothing minted, and one that doesn't signs with no rule written. The
+/// site's `approve` keeps its rule.
+#[test]
+fn a_safes_call_is_asked_and_never_always_allowed() {
+    let mut grants = ruled_grants("5");
+    let rules = grants[SITE]["autoApprove"]["limited"]["transactions"]
+        .as_array_mut()
+        .unwrap();
+    let selectors = ["0x6a761202", "0xd4d9bdcd", "0x468721a7", "0x5229073f"];
+    for selector in selectors {
+        rules.push(json!({
+            "to": TO, "selector": selector, "chainId": 1, "maxValue": "5", "grantedAt": NOW,
+        }));
+    }
+    let (_root, mut core, _clock) = core_for(&grants, 2, false);
+    let mut node = Node::new(estimate());
+    let mut id = 100;
+    for selector in selectors {
+        let data = format!("{selector}{}", "55".repeat(32));
+        node.estimate = json!({ "args": { "params": [{
+            "from": "0x9858EfFD232B4033E47d90003D41EC34EcaEda94", "to": TO, "value": "5", "data": data,
+        }] }, "answer": { "result": "0xc350" } });
+        let mut body = send_body();
+        body["params"][0]["data"] = json!(data);
+        body["world"]["paused"] = json!(false);
+        for ticked in [true, false] {
+            request(&mut core, id, Some(SITE), &body);
+            let asked = until_main(&mut core, id, &mut node);
+            assert_eq!(asked["method"], "approval.request", "{selector}: {asked}");
+            assert_eq!(asked["params"]["view"]["alwaysAllow"], false, "{selector}");
+            assert_eq!(
+                asked["params"]["choices"],
+                json!({ "alwaysAllow": [false], "feeAcknowledged": [false, true] }),
+                "{selector}"
+            );
+            let handle = format!("{:064x}", 1000 + asked["id"].as_u64().unwrap());
+            let answer = json!({ "prompt": asked["params"]["prompt"], "handle": handle,
+                "approve": true, "choices": { "alwaysAllow": ticked }, "world": world() });
+            respond(&mut core, &asked, json!({ "result": answer }));
+            let response = until_main(&mut core, id, &mut node);
+            if ticked {
+                assert_eq!(
+                    response["error"]["data"]["reason"], "mismatch",
+                    "{selector}: {response}"
+                );
+                assert!(response.get("result").is_none(), "{response}");
+            } else {
+                let signed = sign(&mut core, id + 1, &response["result"]["send"], |_| {});
+                assert!(signed["result"]["raw"].is_string(), "{selector}: {signed}");
+                assert!(signed["result"].get("rule").is_none(), "{signed}");
+            }
+            id += 10;
+        }
+    }
+    assert_eq!(
+        grant_file(&core)[SITE]["autoApprove"],
+        grants[SITE]["autoApprove"]
+    );
+    // The site's `approve`: its rule is chosen, and rechecked.
+    let mut body = send_body();
+    body["world"]["paused"] = json!(false);
+    node.estimate = estimate();
+    request(&mut core, id, Some(SITE), &body);
+    let recheck = until_main(&mut core, id, &mut node);
+    assert_eq!(recheck["method"], "approval.recheck", "{recheck}");
+    respond(
+        &mut core,
+        &recheck,
+        json!({ "result": { "live": true, "agent": false } }),
+    );
+    let ruled = until_main(&mut core, id, &mut node);
+    assert_eq!(ruled["result"]["send"]["standing"], true, "{ruled}");
+}

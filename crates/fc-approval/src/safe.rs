@@ -27,8 +27,12 @@
 //!   open, the oldest dropped.
 //! - **What is a Safe's** to sign, under any caller (APR-4):
 //!   [`is_safe_typed_data`], typed data that declares a `SafeTx` or a
-//!   `SafeMessage`, and [`calls_exec_transaction`], a transaction calling
-//!   `execTransaction`. Each needs a token that binds it or a Safe approval.
+//!   `SafeMessage`, and [`is_safe_call`], a transaction calling
+//!   `execTransaction`, `approveHash` or a module's `execTransactionFromModule`
+//!   (APR-4d). Each needs a token that binds it; a Safe approval covers only
+//!   the typed data and `execTransaction` it approved. And [`is_hash_sized`],
+//!   a 32-byte message, which an owner's eth_sign signature approves: main
+//!   signs none under `shell` (APR-4d).
 //!
 //! The SafeTx is the one protocol-kit's `createTransaction` makes for one
 //! call, as the reference builds it (`safe-executor.js`): operation 0
@@ -80,10 +84,35 @@ pub fn is_safe_typed_data(typed_data: &Value) -> bool {
         .is_some_and(|types| SAFE_TYPES.iter().any(|name| types.contains_key(*name)))
 }
 
-/// Whether a transaction's `data` calls `execTransaction`, whatever
-/// contract it goes to.
-pub fn calls_exec_transaction(data: &[u8]) -> bool {
-    data.starts_with(&exec_selector())
+/// The functions by which a Safe 1.4.1 acts for its owners or a module
+/// (design 0012, "Other ways to authorize a Safe action"): its execution
+/// with the owners' signatures (APR-4b), an owner's approval of a hash
+/// (`v` 1), and a module's call, which needs no signature (APR-4d).
+const SAFE_FUNCTIONS: [&str; 4] = [
+    "execTransaction(address,uint256,bytes,uint8,uint256,uint256,uint256,address,address,bytes)",
+    "approveHash(bytes32)",
+    "execTransactionFromModule(address,uint256,bytes,uint8)",
+    "execTransactionFromModuleReturnData(address,uint256,bytes,uint8)",
+];
+
+/// Whether a transaction's `data` is a Safe's call (APR-4b, APR-4d): it
+/// starts with the selector of one of [`SAFE_FUNCTIONS`], whatever contract
+/// it goes to, as another contract's function with the same selector is
+/// treated the same way. Only the start of `data` is read: a call wrapped
+/// in another contract reaches the Safe as that contract's, with no
+/// owner's weight (0012, "A call wrapped around `execTransaction`").
+pub fn is_safe_call(data: &[u8]) -> bool {
+    SAFE_FUNCTIONS.iter().any(|function| {
+        let hash = keccak256(function.as_bytes());
+        data.starts_with(&hash[..4])
+    })
+}
+
+/// Whether a message is exactly 32 bytes, as `sign.message` parses it: the
+/// form a Safe's owner signs with eth_sign (`v` above 30), over a SafeTx's
+/// or a SafeMessage's hash (APR-4d). Main signs none under `shell`.
+pub fn is_hash_sized(message: &[u8]) -> bool {
+    message.len() == 32
 }
 
 /// A Safe approval's id.
@@ -1391,11 +1420,46 @@ mod tests {
             assert!(!is_safe_typed_data(&other), "{other}");
         }
         let call = exec_call(&[0x11; 20], &U256::from_u64(1), &[], &[]);
-        assert!(calls_exec_transaction(&call));
-        assert!(calls_exec_transaction(&exec_selector()));
-        assert!(!calls_exec_transaction(&call[1..]));
-        assert!(!calls_exec_transaction(&[0xa9, 0x05, 0x9c, 0xbb]));
-        assert!(!calls_exec_transaction(&[]));
+        assert!(is_safe_call(&call));
+        assert!(is_safe_call(&exec_selector()));
+        assert!(!is_safe_call(&call[1..]));
+        assert!(!is_safe_call(&[0xa9, 0x05, 0x9c, 0xbb]));
+        assert!(!is_safe_call(&[]));
+    }
+
+    /// APR-4d: `approveHash` and both module calls are a Safe's, as
+    /// `execTransaction` is, by the selector at the start of `data` alone:
+    /// with arguments or none, but not three bytes of one, one after the
+    /// first byte, nor one a bit off. A message is hash-sized at exactly 32
+    /// bytes.
+    #[test]
+    fn approve_hash_and_a_modules_call_are_a_safes() {
+        let selectors: [[u8; 4]; 4] = [
+            [0x6a, 0x76, 0x12, 0x02],
+            [0xd4, 0xd9, 0xbd, 0xcd],
+            [0x46, 0x87, 0x21, 0xa7],
+            [0x52, 0x29, 0x07, 0x3f],
+        ];
+        for (function, selector) in SAFE_FUNCTIONS.iter().zip(selectors) {
+            assert_eq!(keccak256(function.as_bytes())[..4], selector, "{function}");
+            let mut call = selector.to_vec();
+            assert!(is_safe_call(&call), "{function}");
+            call.extend_from_slice(&[0x55; 32]);
+            assert!(is_safe_call(&call), "{function}");
+            assert!(!is_safe_call(&selector[..3]), "{function}");
+            let mut after = vec![0x00];
+            after.extend_from_slice(&call);
+            assert!(!is_safe_call(&after), "{function}");
+            for bit in 0..32 {
+                let mut off = call.clone();
+                off[bit / 8] ^= 1 << (bit % 8);
+                assert!(!is_safe_call(&off), "{function} bit {bit}");
+            }
+        }
+        assert!(is_hash_sized(&[0; 32]));
+        for len in [0, 1, 31, 33, 64] {
+            assert!(!is_hash_sized(&vec![0; len]), "{len}");
+        }
     }
 
     #[test]
