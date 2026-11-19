@@ -1,0 +1,27 @@
+[package]
+name = "fc-store"
+description = "The core's files on disk (design 0013, \"How the core writes them\"): 0001's durable single-file write, the handle-relative directory, and a store file's bounded read, hooked write and set-aside"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+repository.workspace = true
+
+# The workspace lints, `forbid(unsafe_code)` included. Its one Windows call
+# std lacks (a file's owner) is fc-sys's.
+[lints]
+workspace = true
+
+[target.'cfg(unix)'.dependencies]
+# openat, renameat, unlinkat, fstatat and O_NOFOLLOW for the handle-relative
+# directory; a non-blocking open for the bounded read; getuid for its owner
+# check. The features freedom-cored already builds rustix with.
+rustix = { version = "1.1", default-features = false, features = ["fs", "process", "std"] }
+
+[target.'cfg(windows)'.dependencies]
+# A file's owner, read from its handle (freedom-core#360), and a
+# directory's file ID: what freedom-cored used from it for these files.
+fc-sys = { path = "../fc-sys" }
+
+[dev-dependencies]
+tempfile = "3"

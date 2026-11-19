@@ -79,13 +79,13 @@ use std::time::Duration;
 
 use fc_profile::layout::{self, EntryState, Found, Unsettled};
 use fc_service::gate::{Gate, GateError, PROFILE_NAMESPACE};
+use fc_store::anchor::{Dir, Kind, Resolve};
+use fc_store::fsx::Regular;
 
 use super::confine::{self, Grant};
 use super::lock::{Lock, LockError, Timing};
 use super::{Flags, storage};
-use crate::anchor::{Dir, Kind, Resolve};
 use crate::exit::Exit;
-use crate::fsx::Regular;
 use crate::log;
 use crate::testhooks::profile_migrate_step as step;
 
@@ -463,8 +463,11 @@ fn recover(
     identity: Option<fc_service::gate::DirIdentity>,
     held: &dyn Fn() -> bool,
 ) -> std::io::Result<Outcome> {
-    let root = Dir::open_root(canonical, Resolve::Canonical(identity))?
-        .ok_or_else(|| std::io::Error::from(std::io::ErrorKind::NotFound))?;
+    let root = Dir::open_root(
+        canonical,
+        Resolve::Canonical(identity.map(crate::journal::anchored)),
+    )?
+    .ok_or_else(|| std::io::Error::from(std::io::ErrorKind::NotFound))?;
     let Some(freedom) = root.child(OsStr::new(layout::FREEDOM_DIR), false)? else {
         return Ok(Outcome::Nothing);
     };

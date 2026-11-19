@@ -1943,3 +1943,83 @@ fn a_flagged_send_s_rule_waits_through_a_failed_save() {
     let mut f = f.restart();
     f.verified_without_rule(&job, &hash(9), &data, "found again");
 }
+
+/// APR-4d at `phone.job`, as at `sign.*`: under `shell`, a 32-byte message
+/// job is refused `no_token`, where 31 and 33 bytes open; a job calling
+/// `approveHash` or a module's `execTransactionFromModule`, to any address,
+/// is refused without a token and opens with a `wallet-send` that binds
+/// it. Under `page`, a matching rule answers none (`no_rule`), and its
+/// `dapp-send` opens it. The selector counts only at the start of `data`.
+#[test]
+fn a_safe_route_needs_a_token_at_a_job() {
+    let root = tempfile::tempdir().unwrap();
+    let dir = root.path().join("userData");
+    std::fs::create_dir_all(&dir).unwrap();
+    let selectors = ["0xd4d9bdcd", "0x468721a7", "0x5229073f"];
+    let args = "55".repeat(32);
+    let mut rules = Vec::new();
+    for to in [TO, OTHER] {
+        for selector in selectors {
+            rules.push(json!({ "to": to, "selector": selector, "chainId": 100, "maxValue": "5" }));
+        }
+    }
+    let grant = json!({ SITE: {
+        "origin": SITE, "connectedAt": 1_762_000_000_000_u64, "lastUsed": 1_762_000_000_000_u64,
+        "walletIndex": ACCOUNT, "chainId": 100,
+        "autoApprove": { "signing": true, "transactions": rules },
+    } });
+    std::fs::write(dir.join("dapp-permissions.json"), grant.to_string()).unwrap();
+    let mut world = World::start(root.path());
+    let message = |len: usize| json!({ "message": format!("0x{}", "00".repeat(len)) });
+    let refused_job = world.job(&shell(), "message", message(32), None);
+    refused(&refused_job, "not_authorized", Some("no_token"));
+    for len in [31, 33] {
+        assert_eq!(
+            job_of(&world.job(&shell(), "message", message(len), None)).len(),
+            32
+        );
+    }
+    let call = |to: &str, data: &str| {
+        let mut tx = tx_with("0", data);
+        tx["to"] = json!(to);
+        json!({ "tx": tx })
+    };
+    for to in [TO, OTHER] {
+        for selector in selectors {
+            let payload = call(to, &format!("{selector}{args}"));
+            let refused_job = world.job(&shell(), "transaction", payload.clone(), None);
+            refused(&refused_job, "not_authorized", Some("no_token"));
+            let wallet = world.token(&shell(), "wallet-send", payload.clone(), true);
+            let opened = world.job(
+                &shell(),
+                "transaction",
+                payload.clone(),
+                Some(json!({ "token": wallet, "kind": "wallet-send" })),
+            );
+            assert_eq!(job_of(&opened).len(), 32);
+            let ruled = world.job(
+                &site(),
+                "transaction",
+                payload.clone(),
+                Some(json!({ "standing": { "paused": false } })),
+            );
+            refused(&ruled, "not_authorized", Some("no_rule"));
+            let dapp = world.token(&site(), "dapp-send", payload.clone(), true);
+            let opened = world.job(
+                &site(),
+                "transaction",
+                payload,
+                Some(json!({ "token": dapp, "kind": "dapp-send", "handle": HANDLE })),
+            );
+            assert_eq!(job_of(&opened).len(), 32);
+        }
+        for data in [
+            "0xd4d9bd".to_owned(),
+            format!("0x00468721a7{args}"),
+            format!("0x5229073e{args}"),
+        ] {
+            let opened = world.job(&shell(), "transaction", call(to, &data), None);
+            assert_eq!(job_of(&opened).len(), 32);
+        }
+    }
+}

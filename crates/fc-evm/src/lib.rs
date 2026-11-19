@@ -1,12 +1,15 @@
 //! Ethereum signing for Freedom with ethers v6 parity (design 0002):
 //! EIP-155 and EIP-1559 transactions, EIP-191 messages and EIP-712 typed
-//! data; and recovering a signer's address (design 0009, for single-owner
-//! chunks). `vectors/signing.json`, produced by the pinned JS, is the contract.
+//! data; recovering a signer's address (design 0009, for single-owner
+//! chunks); and reading a signed transaction back, as the intent store
+//! checks one (design 0013, PRF-5). `vectors/signing.json`, produced by
+//! the pinned JS, is the contract.
 //!
 //! Keys come in as `k256` signing keys borrowed from fc-keys and never leave.
 //! The crate does no I/O.
 
 mod address;
+mod decode;
 mod eip712;
 mod error;
 mod hex;
@@ -17,6 +20,7 @@ mod tx;
 mod u256;
 
 pub use address::{address_of, checksum_address, keccak256, parse_address};
+pub use decode::{AccessListEntry, DecodeError, SignedTx, decode_signed};
 pub use eip712::{TypedDataView, ViewRequest, typed_data_hash, typed_data_view};
 pub use error::{Error, MAX_QUOTED_CHARS, MAX_QUOTED_NAMES, quoted, quoted_list, shortened};
 pub use hex::{parse_bytes, to_hex};

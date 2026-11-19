@@ -494,6 +494,7 @@ dependencies = [
 name = "fc-eip1193"
 version = "0.22.0"
 dependencies = [
+ "fc-approval",
  "fc-dweb",
  "fc-evm",
  "fc-json",
@@ -645,6 +646,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "fc-store"
+version = "0.22.0"
+dependencies = [
+ "fc-sys",
+ "rustix",
+ "tempfile",
+]
+
+[[package]]
 name = "fc-swarm"
 version = "0.22.0"
 dependencies = [
@@ -743,6 +753,7 @@ dependencies = [
  "fc-protocol",
  "fc-seal",
  "fc-service",
+ "fc-store",
  "fc-swarm",
  "fc-sys",
  "fc-vault",

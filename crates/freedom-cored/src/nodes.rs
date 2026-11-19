@@ -32,9 +32,9 @@ use std::path::{Path, PathBuf};
 use fc_keys::freedom::FreedomKeys;
 use fc_keys::keystore::{self, KeystoreParams};
 use fc_keys::{multiformats, openssh};
+use fc_store::anchor::{Dir, Kind};
 use rand_core::TryCryptoRng;
 
-use crate::anchor::{Dir, Kind};
 use crate::journal;
 use serde_json::{Map, Value};
 use zeroize::Zeroizing;
@@ -239,7 +239,7 @@ struct Marker {
 /// gate's canonical path, opened once after the gate was taken
 /// ([`journal::write_root`]). Called with the home's gate held: what it
 /// reads can't change before the commit. Everything below the home is
-/// reached from that handle, through no symlink ([`crate::anchor::Dir`]): a
+/// reached from that handle, through no symlink ([`fc_store::anchor::Dir`]): a
 /// symlinked `keys` or `node` is an error, and nothing is touched (review of
 /// #177).
 pub fn radicle_sealed(top: &Dir, alias: &str, wipe: bool) -> Result<SealedPlan, BuildError> {
@@ -309,8 +309,8 @@ fn open_under(top: &Dir, path: &Path) -> Result<Option<std::fs::File>, BuildErro
         return Ok(None);
     };
     match dir.open_regular(&name, false).map_err(BuildError::Io)? {
-        crate::fsx::Regular::File(file) => Ok(Some(file)),
-        crate::fsx::Regular::Missing | crate::fsx::Regular::Other => Ok(None),
+        fc_store::fsx::Regular::File(file) => Ok(Some(file)),
+        fc_store::fsx::Regular::Missing | fc_store::fsx::Regular::Other => Ok(None),
     }
 }
 
@@ -341,7 +341,8 @@ fn public_line(top: &Dir, path: &Path) -> Result<Option<[u8; 32]>, BuildError> {
     let Some(file) = open_under(top, path)? else {
         return Ok(None);
     };
-    let Some(bytes) = crate::fsx::read_at_most(&file, journal::MAX_FILE).map_err(BuildError::Io)?
+    let Some(bytes) =
+        fc_store::fsx::read_at_most(&file, journal::MAX_FILE).map_err(BuildError::Io)?
     else {
         return Ok(None);
     };
@@ -358,10 +359,10 @@ fn read_marker(top: &Dir, path: &Path) -> Result<Option<Marker>, BuildError> {
         return Ok(None);
     };
     match dir.open_regular(&name, false).map_err(BuildError::Io)? {
-        crate::fsx::Regular::Missing => Ok(None),
-        crate::fsx::Regular::Other => Err(BuildError::IdentityCorrupt),
-        crate::fsx::Regular::File(file) => {
-            let bytes = crate::fsx::read_at_most(&file, journal::MAX_FILE)
+        fc_store::fsx::Regular::Missing => Ok(None),
+        fc_store::fsx::Regular::Other => Err(BuildError::IdentityCorrupt),
+        fc_store::fsx::Regular::File(file) => {
+            let bytes = fc_store::fsx::read_at_most(&file, journal::MAX_FILE)
                 .map_err(BuildError::Io)?
                 .ok_or(BuildError::IdentityCorrupt)?;
             serde_json::from_slice(&bytes)
@@ -397,7 +398,7 @@ pub fn tighten_existing(node: &str, root: &Path) -> usize {
     };
     let mut changed = 0;
     for file in files {
-        match crate::fsx::tighten(&file) {
+        match fc_store::fsx::tighten(&file) {
             Ok(true) => changed += 1,
             Ok(false) => {}
             Err(e) => crate::log::warn(
@@ -418,11 +419,11 @@ pub fn tighten_existing(node: &str, root: &Path) -> usize {
 fn read_config(top: &Dir) -> Result<Option<String>, BuildError> {
     let name = std::ffi::OsStr::new("config.json");
     let file = match top.open_following(name).map_err(BuildError::Io)? {
-        crate::fsx::Regular::Missing => return Ok(None),
-        crate::fsx::Regular::Other => return Err(BuildError::Config("not_regular")),
-        crate::fsx::Regular::File(file) => file,
+        fc_store::fsx::Regular::Missing => return Ok(None),
+        fc_store::fsx::Regular::Other => return Err(BuildError::Config("not_regular")),
+        fc_store::fsx::Regular::File(file) => file,
     };
-    let bytes = crate::fsx::read_at_most(&file, journal::MAX_FILE)
+    let bytes = fc_store::fsx::read_at_most(&file, journal::MAX_FILE)
         .map_err(BuildError::Io)?
         .ok_or(BuildError::Config("too_large"))?;
     Ok(Some(String::from_utf8(bytes).unwrap_or_default()))
