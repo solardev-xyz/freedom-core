@@ -1,23 +1,26 @@
 //! Windows calls: storage qualification, error reporting, a file's
-//! identity and whether this process's user owns it, a directory opened or
-//! made relative to its parent's handle, and confinement's job object and
-//! process mitigation policies (design 0010, "Windows").
+//! identity and whether this process's user owns it, files and directories
+//! opened, made, renamed, deleted and listed relative to a directory's
+//! handle (design 0013, "Windows handle I/O (#963)"), and confinement's job
+//! object and process mitigation policies (design 0010, "Windows").
 //!
 //! None of these calls closes a handle but its own: [`Job`]'s, and the
 //! process token [`owned_by_current_user`] opens.
 
-use std::ffi::OsStr;
+use std::ffi::{OsStr, OsString};
 use std::io;
 use std::os::windows::ffi::OsStrExt;
-use std::os::windows::io::{AsRawHandle, BorrowedHandle, FromRawHandle, OwnedHandle};
+use std::os::windows::io::{AsHandle, AsRawHandle, BorrowedHandle, FromRawHandle, OwnedHandle};
 
 use windows_sys::Wdk::Foundation::OBJECT_ATTRIBUTES;
 use windows_sys::Wdk::Storage::FileSystem::{
-    FILE_DIRECTORY_FILE, FILE_OPEN_IF, FILE_OPEN_REPARSE_POINT, FILE_SYNCHRONOUS_IO_NONALERT,
-    NtCreateFile,
+    FILE_CREATE, FILE_DIRECTORY_FILE, FILE_NON_DIRECTORY_FILE, FILE_OPEN, FILE_OPEN_IF,
+    FILE_OPEN_REPARSE_POINT, FILE_SYNCHRONOUS_IO_NONALERT, NtCreateFile,
 };
 use windows_sys::Win32::Foundation::{
-    HANDLE, LocalFree, OBJ_CASE_INSENSITIVE, RtlNtStatusToDosError, UNICODE_STRING,
+    ERROR_DIRECTORY_NOT_SUPPORTED, ERROR_INVALID_FUNCTION, ERROR_INVALID_PARAMETER,
+    ERROR_NO_MORE_FILES, ERROR_NOT_SUPPORTED, HANDLE, LocalFree, NTSTATUS, OBJ_CASE_INSENSITIVE,
+    RtlNtStatusToDosError, STATUS_FILE_IS_A_DIRECTORY, UNICODE_STRING,
 };
 use windows_sys::Win32::Security::Authorization::{GetSecurityInfo, SE_FILE_OBJECT};
 use windows_sys::Win32::Security::{
@@ -26,9 +29,15 @@ use windows_sys::Win32::Security::{
     TokenOwner, TokenUser,
 };
 use windows_sys::Win32::Storage::FileSystem::{
-    BY_HANDLE_FILE_INFORMATION, FILE_ATTRIBUTE_NORMAL, FILE_ID_INFO, FILE_LIST_DIRECTORY,
-    FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, FileIdInfo,
-    GetDriveTypeW, GetFileInformationByHandle, GetFileInformationByHandleEx, SYNCHRONIZE,
+    BY_HANDLE_FILE_INFORMATION, FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_NORMAL,
+    FILE_ATTRIBUTE_REPARSE_POINT, FILE_ATTRIBUTE_TAG_INFO, FILE_DISPOSITION_FLAG_DELETE,
+    FILE_DISPOSITION_FLAG_IGNORE_READONLY_ATTRIBUTE, FILE_DISPOSITION_FLAG_POSIX_SEMANTICS,
+    FILE_DISPOSITION_INFO, FILE_DISPOSITION_INFO_EX, FILE_ID_BOTH_DIR_INFO, FILE_ID_INFO,
+    FILE_INFO_BY_HANDLE_CLASS, FILE_READ_ATTRIBUTES, FILE_RENAME_INFO, FILE_SHARE_DELETE,
+    FILE_SHARE_READ, FILE_SHARE_WRITE, FileAttributeTagInfo, FileDispositionInfo,
+    FileDispositionInfoEx, FileIdBothDirectoryInfo, FileIdBothDirectoryRestartInfo, FileIdInfo,
+    FileRenameInfo, FileRenameInfoEx, GetDriveTypeW, GetFileInformationByHandle,
+    GetFileInformationByHandleEx, SYNCHRONIZE, SetFileInformationByHandle,
 };
 use windows_sys::Win32::System::Diagnostics::Debug::{
     SEM_FAILCRITICALERRORS, SEM_NOGPFAULTERRORBOX, SEM_NOOPENFILEERRORBOX, SetErrorMode,
@@ -378,27 +387,82 @@ fn win32_reserved(wide: &[u16]) -> bool {
 const OBJECT_ATTRIBUTES_SIZE: u32 = size_of::<OBJECT_ATTRIBUTES>() as u32;
 const _: () = assert!(size_of::<OBJECT_ATTRIBUTES>() <= u32::MAX as usize);
 
-/// Opens the directory `name` in the directory `parent` is open on, making
-/// it first if it is missing (`NtCreateFile`, `FILE_OPEN_IF`, relative to
-/// `parent`): `name` is looked up in that directory itself, wherever it now
-/// is, never by a path, so a parent renamed or replaced meanwhile can't
-/// redirect it.
-///
-/// - **A reparse point** at `name` (a symlink or a junction) is opened
-///   itself, never followed (`FILE_OPEN_REPARSE_POINT`), and nothing is made
-///   through it: the caller refuses it by its attributes. A file there fails
-///   (`NotADirectory`).
-/// - **A directory made** inherits its parent's ACL, as `CreateDirectoryW`
-///   without security attributes does.
-/// - **The handle** lists the directory and reads its attributes, and shares
-///   reading, writing and deletion, as std's opens do.
-/// - **`name`** must be one plain component: not empty, not `.` or `..`,
-///   without a separator, a stream's `:` or a NUL, and not a name Win32
-///   paths would read as something else ([`win32_reserved`]), so that a
-///   path ending in it names the directory made (`InvalidInput`).
-#[allow(unsafe_code)]
-pub fn open_dir_at(parent: BorrowedHandle<'_>, name: &OsStr) -> io::Result<OwnedHandle> {
-    let mut wide: Vec<u16> = name.encode_wide().collect();
+/// The access [`open_at`] asks for (`ACCESS_MASK` bits). Every open adds
+/// reading the attributes ([`attribute_tag`]) and waiting on the handle
+/// (its I/O is synchronous), which each handle here needs.
+pub mod access {
+    use windows_sys::Win32::Storage::FileSystem as fs;
+
+    /// Reading the data, the attributes and the security descriptor (an
+    /// owner check), as `GENERIC_READ` maps for a file.
+    pub const READ: u32 = fs::FILE_GENERIC_READ;
+    /// Writing the data and the attributes, as `GENERIC_WRITE` maps: a
+    /// flush needs it.
+    pub const WRITE: u32 = fs::FILE_GENERIC_WRITE;
+    /// Deleting or renaming what is opened ([`super::delete`],
+    /// [`super::rename_at`]).
+    pub const DELETE: u32 = fs::DELETE;
+    /// Listing a directory.
+    pub const LIST: u32 = fs::FILE_LIST_DIRECTORY;
+    /// Every open's alone: the attributes and the identity.
+    pub const ATTRIBUTES: u32 = fs::FILE_READ_ATTRIBUTES;
+}
+
+/// `CreateFileW` flags for a path std opens (`OpenOptionsExt::custom_flags`).
+pub mod flags {
+    use windows_sys::Win32::Storage::FileSystem as fs;
+
+    /// A directory may be opened.
+    pub const BACKUP_SEMANTICS: u32 = fs::FILE_FLAG_BACKUP_SEMANTICS;
+    /// A reparse point (a symlink or a junction) is opened itself, never
+    /// followed.
+    pub const OPEN_REPARSE_POINT: u32 = fs::FILE_FLAG_OPEN_REPARSE_POINT;
+}
+
+/// Whether [`open_at`] makes what it opens.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Create {
+    /// Only what is there (`FILE_OPEN`): nothing there is `NotFound`.
+    No,
+    /// Only something new (`FILE_CREATE`): anything there, a reparse point
+    /// included, is `AlreadyExists`.
+    New,
+    /// What is there, made first if nothing is (`FILE_OPEN_IF`).
+    IfMissing,
+}
+
+/// What [`open_at`] must find there, and makes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Expect {
+    /// A file or a directory; made as a file.
+    Any,
+    /// A directory (`FILE_DIRECTORY_FILE`): anything else is
+    /// `NotADirectory`. Made as one.
+    Directory,
+    /// Not a directory (`FILE_NON_DIRECTORY_FILE`): a directory (a junction
+    /// included) is `IsADirectory`. Made as a file.
+    File,
+}
+
+/// How [`open_at`] opens a name.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct OpenAt {
+    /// The access asked for ([`access`]).
+    pub access: u32,
+    pub create: Create,
+    pub expect: Expect,
+    /// Whether a reparse point at the name is followed. If not
+    /// (`FILE_OPEN_REPARSE_POINT`), it is opened itself, nothing is made
+    /// through it, and [`attribute_tag`] tells the caller what it is.
+    pub follow: bool,
+}
+
+/// `name` as UTF-16 if it is one plain component: not empty, not `.` or
+/// `..`, without a separator, a stream's `:` or a NUL, and not a name Win32
+/// paths would read as something else ([`win32_reserved`]), so that a path
+/// ending in it names what was opened (`InvalidInput`).
+fn plain_component(name: &OsStr) -> io::Result<Vec<u16>> {
+    let wide: Vec<u16> = name.encode_wide().collect();
     // NUL, `/`, `:` and `\`.
     let separator = |unit: &u16| matches!(*unit, 0x00 | 0x2f | 0x3a | 0x5c);
     let plain = !wide.is_empty()
@@ -406,14 +470,46 @@ pub fn open_dir_at(parent: BorrowedHandle<'_>, name: &OsStr) -> io::Result<Owned
         && name != ".."
         && !wide.iter().any(separator)
         && !win32_reserved(&wide);
-    let bytes = wide
-        .len()
-        .checked_mul(2)
-        .and_then(|n| u16::try_from(n).ok());
-    let (true, Some(bytes)) = (plain, bytes) else {
-        return Err(io::Error::new(
+    if plain {
+        Ok(wide)
+    } else {
+        Err(io::Error::new(
             io::ErrorKind::InvalidInput,
             "not one plain path component",
+        ))
+    }
+}
+
+/// An NTSTATUS failure as the Win32 error std reads its kind from. A
+/// directory where a file was asked for is `ERROR_DIRECTORY_NOT_SUPPORTED`
+/// (`IsADirectory`), which `RtlNtStatusToDosError` would blur into "access
+/// denied".
+#[allow(unsafe_code)]
+fn nt_error(status: NTSTATUS) -> io::Error {
+    if status == STATUS_FILE_IS_A_DIRECTORY {
+        return io::Error::from_raw_os_error(ERROR_DIRECTORY_NOT_SUPPORTED as i32);
+    }
+    // SAFETY: RtlNtStatusToDosError takes a status by value and reads no
+    // memory of ours.
+    let code = unsafe { RtlNtStatusToDosError(status) };
+    io::Error::from_raw_os_error(code as i32)
+}
+
+/// `NtCreateFile` of `wide` relative to `parent`, as `how` says, sharing
+/// reading, writing and deletion as std's opens do. A file or directory
+/// made inherits its parent's ACL, as `CreateFileW` and `CreateDirectoryW`
+/// without security attributes do. An empty `wide` opens `parent`'s file or
+/// directory again, as a handle of its own (as `ReOpenFile` does).
+#[allow(unsafe_code)]
+fn nt_create(parent: BorrowedHandle<'_>, wide: &mut [u16], how: OpenAt) -> io::Result<OwnedHandle> {
+    let Some(bytes) = wide
+        .len()
+        .checked_mul(2)
+        .and_then(|n| u16::try_from(n).ok())
+    else {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "a path component too long",
         ));
     };
     let object_name = UNICODE_STRING {
@@ -429,38 +525,453 @@ pub fn open_dir_at(parent: BorrowedHandle<'_>, name: &OsStr) -> io::Result<Owned
         SecurityDescriptor: std::ptr::null(),
         SecurityQualityOfService: std::ptr::null(),
     };
+    let disposition = match how.create {
+        Create::No => FILE_OPEN,
+        Create::New => FILE_CREATE,
+        Create::IfMissing => FILE_OPEN_IF,
+    };
+    let mut options = FILE_SYNCHRONOUS_IO_NONALERT
+        | match how.expect {
+            Expect::Any => 0,
+            Expect::Directory => FILE_DIRECTORY_FILE,
+            Expect::File => FILE_NON_DIRECTORY_FILE,
+        };
+    if !how.follow {
+        options |= FILE_OPEN_REPARSE_POINT;
+    }
     let mut handle: HANDLE = std::ptr::null_mut();
     let mut status_block = IO_STATUS_BLOCK::default();
     // SAFETY: `handle` and `status_block` are borrowed mutably for the call,
     // which writes only them; `attributes` and the UNICODE_STRING it points
     // to live for the whole call, and that string's buffer holds `bytes`
-    // bytes of `wide`, which the call only reads; `parent` is open for its
-    // borrow; no allocation size or extended attributes are passed (null,
-    // 0).
+    // bytes of `wide` (none when it is empty), which the call only reads;
+    // `parent` is open for its borrow; no allocation size or extended
+    // attributes are passed (null, 0).
     let status = unsafe {
         NtCreateFile(
             &raw mut handle,
-            FILE_LIST_DIRECTORY | FILE_READ_ATTRIBUTES | SYNCHRONIZE,
+            how.access | FILE_READ_ATTRIBUTES | SYNCHRONIZE,
             &raw const attributes,
             &raw mut status_block,
             std::ptr::null(),
             FILE_ATTRIBUTE_NORMAL,
             FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
-            FILE_OPEN_IF,
-            FILE_DIRECTORY_FILE | FILE_OPEN_REPARSE_POINT | FILE_SYNCHRONOUS_IO_NONALERT,
+            disposition,
+            options,
             std::ptr::null(),
             0,
         )
     };
     if status < 0 {
-        // SAFETY: RtlNtStatusToDosError takes a status by value and reads no
-        // memory of ours.
-        let code = unsafe { RtlNtStatusToDosError(status) };
-        return Err(io::Error::from_raw_os_error(code as i32));
+        return Err(nt_error(status));
     }
     // SAFETY: the call succeeded, so `handle` is a handle it opened for this
     // process, which nothing else owns or closes.
     Ok(unsafe { OwnedHandle::from_raw_handle(handle) })
+}
+
+/// Opens `name` in the directory `parent` is open on, as `how` says
+/// (`NtCreateFile` relative to `parent`): `name` is looked up in that
+/// directory itself, wherever it now is, never by a path, so a parent
+/// renamed, or replaced by a junction, meanwhile can't redirect it
+/// (design 0013, "Windows handle I/O (#963)").
+///
+/// - **A reparse point** at `name` is opened itself unless `how.follow`,
+///   and nothing is made through it; [`attribute_tag`] tells the caller.
+/// - **`name`** must be one plain component ([`plain_component`]):
+///   `InvalidInput` otherwise.
+/// - **Errors** carry the Win32 code std reads a kind from: `NotFound`,
+///   `AlreadyExists`, `NotADirectory`, `IsADirectory`, and so on.
+pub fn open_at(parent: BorrowedHandle<'_>, name: &OsStr, how: OpenAt) -> io::Result<OwnedHandle> {
+    let mut wide = plain_component(name)?;
+    nt_create(parent, &mut wide, how)
+}
+
+/// Opens the directory `name` in the directory `parent` is open on, making
+/// it first if it is missing ([`open_at`]: `FILE_OPEN_IF`, relative to
+/// `parent`).
+///
+/// - **A reparse point** at `name` (a symlink or a junction) is opened
+///   itself, never followed, and nothing is made through it: the caller
+///   refuses it by its attributes. A file there fails (`NotADirectory`).
+/// - **The handle** lists the directory and reads its attributes.
+pub fn open_dir_at(parent: BorrowedHandle<'_>, name: &OsStr) -> io::Result<OwnedHandle> {
+    let how = OpenAt {
+        access: access::LIST,
+        create: Create::IfMissing,
+        expect: Expect::Directory,
+        follow: false,
+    };
+    open_at(parent, name, how)
+}
+
+/// A file's attributes, as [`attribute_tag`] reads them from its handle or
+/// [`list_dir`] from its directory.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Attributes {
+    /// The `FILE_ATTRIBUTE_*` bits.
+    pub bits: u32,
+    /// A reparse point's tag (`IO_REPARSE_TAG_*`); 0 for anything else.
+    pub reparse_tag: u32,
+}
+
+impl Attributes {
+    /// A directory, a junction or a directory symlink included.
+    pub fn directory(self) -> bool {
+        self.bits & FILE_ATTRIBUTE_DIRECTORY != 0
+    }
+
+    /// A reparse point: a symlink, a junction, or another.
+    pub fn reparse_point(self) -> bool {
+        self.bits & FILE_ATTRIBUTE_REPARSE_POINT != 0
+    }
+}
+
+/// The size of `FILE_ATTRIBUTE_TAG_INFO`, as `GetFileInformationByHandleEx`
+/// takes it.
+const ATTRIBUTE_TAG_INFO_SIZE: u32 = size_of::<FILE_ATTRIBUTE_TAG_INFO>() as u32;
+const _: () = assert!(size_of::<FILE_ATTRIBUTE_TAG_INFO>() <= u32::MAX as usize);
+
+/// The attributes of what `file` is open on, and its reparse tag
+/// (`GetFileInformationByHandleEx`, `FileAttributeTagInfo`): a reparse
+/// point opened itself says so here. The handle needs
+/// `FILE_READ_ATTRIBUTES`, which every [`open_at`] handle has.
+#[allow(unsafe_code)]
+pub fn attribute_tag(file: BorrowedHandle<'_>) -> io::Result<Attributes> {
+    let mut info = FILE_ATTRIBUTE_TAG_INFO::default();
+    // SAFETY: `info` is a whole FILE_ATTRIBUTE_TAG_INFO of
+    // ATTRIBUTE_TAG_INFO_SIZE bytes, borrowed mutably for the call, which
+    // writes at most that many; the handle is open for its borrow, and one
+    // that isn't a file's fails the call.
+    let ok = unsafe {
+        GetFileInformationByHandleEx(
+            file.as_raw_handle(),
+            FileAttributeTagInfo,
+            (&raw mut info).cast(),
+            ATTRIBUTE_TAG_INFO_SIZE,
+        )
+    };
+    win32(ok)?;
+    Ok(Attributes {
+        bits: info.FileAttributes,
+        reparse_tag: info.ReparseTag,
+    })
+}
+
+/// Whether a `FileDispositionInfoEx` or `FileRenameInfoEx` failure means
+/// the call isn't served there: before Windows 10 1607 (1809 for the
+/// read-only flag), or on a file system without POSIX semantics, such as
+/// FAT. std's `remove_dir_all` reads these the same way.
+fn ex_unserved(error: &io::Error) -> bool {
+    matches!(
+        error.raw_os_error(),
+        Some(code) if code == ERROR_INVALID_PARAMETER as i32
+            || code == ERROR_NOT_SUPPORTED as i32
+            || code == ERROR_INVALID_FUNCTION as i32
+    )
+}
+
+/// The size of `FILE_DISPOSITION_INFO_EX`.
+const DISPOSITION_INFO_EX_SIZE: u32 = size_of::<FILE_DISPOSITION_INFO_EX>() as u32;
+const _: () = assert!(size_of::<FILE_DISPOSITION_INFO_EX>() <= u32::MAX as usize);
+/// The size of `FILE_DISPOSITION_INFO`.
+const DISPOSITION_INFO_SIZE: u32 = size_of::<FILE_DISPOSITION_INFO>() as u32;
+const _: () = assert!(size_of::<FILE_DISPOSITION_INFO>() <= u32::MAX as usize);
+
+#[allow(unsafe_code)]
+fn set_disposition_ex(file: BorrowedHandle<'_>, flags: u32) -> io::Result<()> {
+    let info = FILE_DISPOSITION_INFO_EX { Flags: flags };
+    // SAFETY: `info` is a whole FILE_DISPOSITION_INFO_EX of
+    // DISPOSITION_INFO_EX_SIZE bytes, borrowed for the call, which only
+    // reads it; the handle is open for its borrow.
+    let ok = unsafe {
+        SetFileInformationByHandle(
+            file.as_raw_handle(),
+            FileDispositionInfoEx,
+            (&raw const info).cast(),
+            DISPOSITION_INFO_EX_SIZE,
+        )
+    };
+    win32(ok)
+}
+
+#[allow(unsafe_code)]
+fn set_disposition(file: BorrowedHandle<'_>) -> io::Result<()> {
+    let info = FILE_DISPOSITION_INFO { DeleteFile: true };
+    // SAFETY: `info` is a whole FILE_DISPOSITION_INFO of
+    // DISPOSITION_INFO_SIZE bytes, borrowed for the call, which only reads
+    // it; the handle is open for its borrow.
+    let ok = unsafe {
+        SetFileInformationByHandle(
+            file.as_raw_handle(),
+            FileDispositionInfo,
+            (&raw const info).cast(),
+            DISPOSITION_INFO_SIZE,
+        )
+    };
+    win32(ok)
+}
+
+/// Deletes what `file` is open on, by its handle, which must have
+/// [`access::DELETE`]: the entry it was opened as, wherever that now is
+/// (`SetFileInformationByHandle`). A directory must be empty
+/// (`DirectoryNotEmpty`); a reparse point opened itself is deleted itself.
+///
+/// - **POSIX semantics** (`FileDispositionInfoEx`, Windows 10 1607 and
+///   NTFS): the name goes at once, though other handles stay open on the
+///   file, and the read-only attribute is ignored, as `unlink` ignores a
+///   file's mode.
+/// - **Where those aren't served** ([`ex_unserved`]), the fallback is
+///   `FileDispositionInfo`: still by this handle, but the name stays,
+///   delete-pending, until the last handle on the file closes, and a
+///   read-only file is refused.
+pub fn delete(file: BorrowedHandle<'_>) -> io::Result<()> {
+    let flags = FILE_DISPOSITION_FLAG_DELETE
+        | FILE_DISPOSITION_FLAG_POSIX_SEMANTICS
+        | FILE_DISPOSITION_FLAG_IGNORE_READONLY_ATTRIBUTE;
+    match set_disposition_ex(file, flags) {
+        Err(e) if ex_unserved(&e) => set_disposition(file),
+        result => result,
+    }
+}
+
+/// `FILE_RENAME_FLAG_REPLACE_IF_EXISTS` (winbase.h), which windows-sys
+/// keeps under `Win32_System_WindowsProgramming`, a feature this crate
+/// doesn't otherwise need.
+const FILE_RENAME_FLAG_REPLACE_IF_EXISTS: u32 = 0x1;
+/// `FILE_RENAME_FLAG_POSIX_SEMANTICS` (winbase.h), as above.
+const FILE_RENAME_FLAG_POSIX_SEMANTICS: u32 = 0x2;
+
+/// The longest name [`rename_at`] takes, in UTF-16 units: NTFS's limit on
+/// one component.
+const MAX_NAME: usize = 255;
+/// Where `FILE_RENAME_INFO`'s name starts.
+const RENAME_NAME_OFFSET: usize = std::mem::offset_of!(FILE_RENAME_INFO, FileName);
+/// A `FILE_RENAME_INFO` with the longest name and its NUL.
+const RENAME_BUFFER_SIZE: usize = RENAME_NAME_OFFSET + 2 * (MAX_NAME + 1);
+const _: () = assert!(align_of::<FILE_RENAME_INFO>() <= 8);
+const _: () = assert!(RENAME_BUFFER_SIZE >= size_of::<FILE_RENAME_INFO>());
+const _: () = assert!(RENAME_BUFFER_SIZE <= u32::MAX as usize);
+
+/// A `FILE_RENAME_INFO` as its bytes, aligned as the structure is, and the
+/// size of the part the call reads. Built only by [`RenameInfo::new`], so
+/// `size` never exceeds the buffer.
+#[repr(C, align(8))]
+struct RenameInfo {
+    bytes: [u8; RENAME_BUFFER_SIZE],
+    size: u32,
+}
+
+impl RenameInfo {
+    /// `flags` in the union's place (for `FileRenameInfo`, 1 is
+    /// `ReplaceIfExists = TRUE`: its BOOLEAN is the union's first byte),
+    /// `dir`'s handle as `RootDirectory`, and `name` with its length and a
+    /// NUL. The handle's value is copied in: the caller keeps it open for
+    /// the call that reads it.
+    fn new(flags: u32, dir: BorrowedHandle<'_>, name: &[u16]) -> io::Result<RenameInfo> {
+        let too_long =
+            || io::Error::new(io::ErrorKind::InvalidInput, "a name too long to rename to");
+        if name.len() > MAX_NAME {
+            return Err(too_long());
+        }
+        let mut info = RenameInfo {
+            bytes: [0; RENAME_BUFFER_SIZE],
+            size: 0,
+        };
+        let name_bytes = u32::try_from(2 * name.len()).map_err(|_| too_long())?;
+        let root = dir.as_raw_handle().addr();
+        let mut put = |offset: usize, bytes: &[u8]| -> io::Result<()> {
+            info.bytes
+                .get_mut(offset..offset + bytes.len())
+                .ok_or_else(too_long)?
+                .copy_from_slice(bytes);
+            Ok(())
+        };
+        put(
+            std::mem::offset_of!(FILE_RENAME_INFO, Anonymous),
+            &flags.to_ne_bytes(),
+        )?;
+        put(
+            std::mem::offset_of!(FILE_RENAME_INFO, RootDirectory),
+            &root.to_ne_bytes(),
+        )?;
+        put(
+            std::mem::offset_of!(FILE_RENAME_INFO, FileNameLength),
+            &name_bytes.to_ne_bytes(),
+        )?;
+        for (index, unit) in name.iter().enumerate() {
+            put(RENAME_NAME_OFFSET + 2 * index, &unit.to_ne_bytes())?;
+        }
+        // The name and its NUL, as std's rename sizes it.
+        info.size =
+            u32::try_from(RENAME_NAME_OFFSET + 2 * name.len() + 2).map_err(|_| too_long())?;
+        Ok(info)
+    }
+}
+
+#[allow(unsafe_code)]
+fn set_rename(
+    file: BorrowedHandle<'_>,
+    class: FILE_INFO_BY_HANDLE_CLASS,
+    info: &RenameInfo,
+) -> io::Result<()> {
+    // SAFETY: `info.bytes` holds a FILE_RENAME_INFO image of at least
+    // `info.size` bytes (RenameInfo::new keeps it within the buffer),
+    // aligned to 8 as the structure needs, borrowed for the call, which only
+    // reads it; the RootDirectory in it is a handle our caller borrows for
+    // the whole call; `file` is open for its borrow.
+    let ok = unsafe {
+        SetFileInformationByHandle(
+            file.as_raw_handle(),
+            class,
+            (&raw const info.bytes).cast(),
+            info.size,
+        )
+    };
+    win32(ok)
+}
+
+/// Renames what `file` is open on (with [`access::DELETE`]) to `name` in
+/// the directory `dir` is open on, replacing whatever is there without
+/// following it (`SetFileInformationByHandle` with `RootDirectory`): the
+/// entry `file` was opened as, wherever it now is, into that directory
+/// itself, wherever it now is, never by a path.
+///
+/// - **POSIX semantics** (`FileRenameInfoEx`, Windows 10 1607 and NTFS): a
+///   file there is replaced even while other handles are open on it (with
+///   `FILE_SHARE_DELETE`), as `renameat` replaces it.
+/// - **Where those aren't served** ([`ex_unserved`]), the fallback is
+///   `FileRenameInfo` with `ReplaceIfExists`: still relative to both
+///   handles, but a file there that is open is refused (`PermissionDenied`).
+/// - **A directory there** isn't replaced (`PermissionDenied`), a junction
+///   or directory symlink included.
+/// - **`name`** must be one plain component of at most 255 UTF-16 units
+///   (`InvalidInput`).
+pub fn rename_at(
+    file: BorrowedHandle<'_>,
+    dir: BorrowedHandle<'_>,
+    name: &OsStr,
+) -> io::Result<()> {
+    let wide = plain_component(name)?;
+    let posix = RenameInfo::new(
+        FILE_RENAME_FLAG_REPLACE_IF_EXISTS | FILE_RENAME_FLAG_POSIX_SEMANTICS,
+        dir,
+        &wide,
+    )?;
+    match set_rename(file, FileRenameInfoEx, &posix) {
+        Err(e) if ex_unserved(&e) => {
+            let legacy = RenameInfo::new(1, dir, &wide)?;
+            set_rename(file, FileRenameInfo, &legacy)
+        }
+        result => result,
+    }
+}
+
+/// The size of [`DirBuffer`]: a listing's entries are read this many bytes
+/// at a time.
+const DIR_BUFFER_SIZE: usize = 64 * 1024;
+const _: () = assert!(DIR_BUFFER_SIZE <= u32::MAX as usize);
+
+/// Bytes for `FILE_ID_BOTH_DIR_INFO` entries, aligned as they are.
+#[repr(C, align(8))]
+struct DirBuffer([u8; DIR_BUFFER_SIZE]);
+const _: () = assert!(align_of::<FILE_ID_BOTH_DIR_INFO>() <= 8);
+
+#[allow(unsafe_code)]
+fn fill_dir(
+    dir: BorrowedHandle<'_>,
+    class: FILE_INFO_BY_HANDLE_CLASS,
+    buffer: &mut DirBuffer,
+) -> io::Result<()> {
+    // SAFETY: `buffer` is DIR_BUFFER_SIZE bytes, aligned to 8 as the
+    // entries need, borrowed mutably for the call, which writes at most that
+    // many; the handle is open for its borrow, and one that isn't a
+    // directory's fails the call.
+    let ok = unsafe {
+        GetFileInformationByHandleEx(
+            dir.as_raw_handle(),
+            class,
+            (&raw mut buffer.0).cast(),
+            DIR_BUFFER_SIZE as u32,
+        )
+    };
+    win32(ok)
+}
+
+/// The `u32` at `offset` in `bytes`, if it is all there.
+fn u32_at(bytes: &[u8], offset: usize) -> Option<u32> {
+    let word = bytes.get(offset..offset.checked_add(4)?)?;
+    Some(u32::from_ne_bytes(word.try_into().ok()?))
+}
+
+/// The entries one fill wrote, from the buffer's start along each
+/// `NextEntryOffset`, read field by field and bounded by the buffer: no
+/// entry is trusted to fit.
+fn entries_in(bytes: &[u8], names: &mut Vec<(OsString, Attributes)>) -> io::Result<()> {
+    use std::mem::offset_of;
+    use std::os::windows::ffi::OsStringExt;
+    let malformed = || io::Error::other("a directory listing that doesn't parse");
+    let mut start = 0usize;
+    loop {
+        let entry = bytes.get(start..).ok_or_else(malformed)?;
+        let field = |offset| u32_at(entry, offset).ok_or_else(malformed);
+        let next = field(offset_of!(FILE_ID_BOTH_DIR_INFO, NextEntryOffset))?;
+        let bits = field(offset_of!(FILE_ID_BOTH_DIR_INFO, FileAttributes))?;
+        // A reparse point's tag is in EaSize.
+        let ea = field(offset_of!(FILE_ID_BOTH_DIR_INFO, EaSize))?;
+        let length = field(offset_of!(FILE_ID_BOTH_DIR_INFO, FileNameLength))? as usize;
+        let name_at = offset_of!(FILE_ID_BOTH_DIR_INFO, FileName);
+        let name = entry
+            .get(name_at..name_at.checked_add(length).ok_or_else(malformed)?)
+            .ok_or_else(malformed)?;
+        let units: Vec<u16> = name
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|pair| u16::from_ne_bytes(*pair))
+            .collect();
+        let name = OsString::from_wide(&units);
+        if name != "." && name != ".." {
+            let reparse_tag = if bits & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+                ea
+            } else {
+                0
+            };
+            names.push((name, Attributes { bits, reparse_tag }));
+        }
+        if next == 0 {
+            return Ok(());
+        }
+        start = start.checked_add(next as usize).ok_or_else(malformed)?;
+    }
+}
+
+/// The names in the directory `dir` is open on, but `.` and `..`, each
+/// with its attributes as the directory lists them
+/// (`GetFileInformationByHandleEx`, `FileIdBothDirectoryInfo`). A reparse
+/// point is listed as itself, never followed. They are read through a
+/// handle of their own, the directory opened again from `dir` (no name,
+/// relative to it), so that two listings of one directory never share a
+/// position.
+pub fn list_dir(dir: BorrowedHandle<'_>) -> io::Result<Vec<(OsString, Attributes)>> {
+    let how = OpenAt {
+        access: access::LIST,
+        create: Create::No,
+        expect: Expect::Directory,
+        follow: false,
+    };
+    let own = nt_create(dir, &mut [], how)?;
+    let mut buffer = Box::new(DirBuffer([0; DIR_BUFFER_SIZE]));
+    let mut names = Vec::new();
+    let mut class = FileIdBothDirectoryRestartInfo;
+    loop {
+        match fill_dir(own.as_handle(), class, &mut buffer) {
+            Ok(()) => entries_in(&buffer.0, &mut names)?,
+            Err(e) if e.raw_os_error() == Some(ERROR_NO_MORE_FILES as i32) => return Ok(names),
+            Err(e) => return Err(e),
+        }
+        class = FileIdBothDirectoryInfo;
+    }
 }
 
 /// No fault dialog, and no heap in Windows Error Reporting's reports, for
@@ -964,6 +1475,105 @@ mod tests {
         }
         drop(parent);
         std::fs::remove_dir_all(&moved).unwrap();
+    }
+
+    #[test]
+    fn files_are_opened_renamed_deleted_and_listed_by_handle() {
+        use std::os::windows::fs::OpenOptionsExt;
+        let dir = std::env::temp_dir().join(format!("fc-sys-at-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let parent: OwnedHandle = std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(flags::BACKUP_SEMANTICS)
+            .open(&dir)
+            .unwrap()
+            .into();
+        let how = |access, create, expect| OpenAt {
+            access,
+            create,
+            expect,
+            follow: false,
+        };
+        let at = |name: &str, how| open_at(parent.as_handle(), OsStr::new(name), how);
+        // Made new, then refused as there.
+        let made = at("file", how(access::WRITE, Create::New, Expect::File)).unwrap();
+        assert!(!attribute_tag(made.as_handle()).unwrap().directory());
+        drop(made);
+        let again = at("file", how(access::WRITE, Create::New, Expect::File)).unwrap_err();
+        assert_eq!(again.kind(), io::ErrorKind::AlreadyExists);
+        // A directory where a file is asked for, the reverse, and nothing.
+        std::fs::create_dir(dir.join("sub")).unwrap();
+        let directory = at("sub", how(access::READ, Create::No, Expect::File)).unwrap_err();
+        assert_eq!(directory.kind(), io::ErrorKind::IsADirectory);
+        let file = at("file", how(access::LIST, Create::No, Expect::Directory)).unwrap_err();
+        assert_eq!(file.kind(), io::ErrorKind::NotADirectory);
+        let missing = at("missing", how(access::ATTRIBUTES, Create::No, Expect::Any)).unwrap_err();
+        assert_eq!(missing.kind(), io::ErrorKind::NotFound);
+        // Listed with attributes: a junction as a reparse point, its tag
+        // IO_REPARSE_TAG_MOUNT_POINT.
+        let status = std::process::Command::new("cmd")
+            .arg("/C")
+            .arg("mklink")
+            .arg("/J")
+            .arg(dir.join("junction"))
+            .arg(dir.join("sub"))
+            .stdout(std::process::Stdio::null())
+            .status()
+            .unwrap();
+        assert!(status.success(), "mklink /J");
+        let mut listed = list_dir(parent.as_handle()).unwrap();
+        listed.sort_by(|one, two| one.0.cmp(&two.0));
+        let names: Vec<_> = listed.iter().map(|(name, _)| name.clone()).collect();
+        assert_eq!(names, ["file", "junction", "sub"]);
+        let [(_, file), (_, junction), (_, sub)] = listed.as_slice() else {
+            panic!("{listed:?}");
+        };
+        assert!(!file.directory() && !file.reparse_point());
+        assert!(junction.directory() && junction.reparse_point());
+        assert_eq!(junction.reparse_tag, 0xA000_0003);
+        assert!(sub.directory() && !sub.reparse_point());
+        let opened = at("junction", how(access::ATTRIBUTES, Create::No, Expect::Any)).unwrap();
+        assert_eq!(attribute_tag(opened.as_handle()).unwrap(), *junction);
+        drop(opened);
+        // Renamed into `sub` by both handles, then deleted by its handle
+        // where it now is.
+        let sub = at("sub", how(access::LIST, Create::No, Expect::Directory)).unwrap();
+        let file = at("file", how(access::DELETE, Create::No, Expect::Any)).unwrap();
+        rename_at(file.as_handle(), sub.as_handle(), OsStr::new("moved")).unwrap();
+        assert!(dir.join("sub/moved").is_file());
+        assert!(!dir.join("file").exists());
+        delete(file.as_handle()).unwrap();
+        assert!(!dir.join("sub/moved").exists());
+        drop(file);
+        // A non-empty directory isn't deleted.
+        std::fs::write(dir.join("sub/inner"), b"x").unwrap();
+        let full = at("sub", how(access::DELETE, Create::No, Expect::Directory)).unwrap();
+        let error = delete(full.as_handle()).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::DirectoryNotEmpty);
+        // Names that aren't one plain component of at most 255 units.
+        let other = at("other", how(access::DELETE, Create::New, Expect::File)).unwrap();
+        for name in [
+            "a\\b".to_owned(),
+            "..".to_owned(),
+            "NUL".to_owned(),
+            "x".repeat(256),
+        ] {
+            let refused = rename_at(other.as_handle(), sub.as_handle(), OsStr::new(&name));
+            assert_eq!(
+                refused.unwrap_err().kind(),
+                io::ErrorKind::InvalidInput,
+                "{name:?}"
+            );
+        }
+        rename_at(
+            other.as_handle(),
+            sub.as_handle(),
+            OsStr::new(&"x".repeat(255)),
+        )
+        .unwrap();
+        delete(other.as_handle()).unwrap();
+        drop((other, full, sub, parent));
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
