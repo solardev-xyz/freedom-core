@@ -28,8 +28,8 @@ pub enum Callers {
     Chrome,
     /// A page (`page`, with its `PageContext`) as well: the rows 0011 left
     /// for 0012 (design 0012, "PageContext"). The method checks what each
-    /// caller may do (a page kind's token only under `page`, a wallet
-    /// kind's never).
+    /// caller may do (a page kind's token presented only under `page`, a
+    /// wallet kind's never).
     PageChromeOrShell,
     /// A page only, for its own key (design 0012, API: `approval.check`,
     /// `approval.touch`, `approval.radicle_write`, `approval.remember`).
@@ -196,8 +196,10 @@ pub const METHODS: &[Method] = &[
     row("naming.resolve_tezos", CS, false, SESSION),
     row("naming.invalidate_content", CS, false, NOW),
     row("naming.invalidate_tezos", CS, false, NOW),
-    // Design 0012, API: approval tokens and Safe approvals (APR-3).
-    row("approval.issue", PCS, false, NOW),
+    // Design 0012, API: approval tokens and Safe approvals (APR-3). From
+    // APR-7 a page mints no token: the core mints the page kinds itself, on
+    // an approve answer to its own `approval.request`.
+    row("approval.issue", CS, false, NOW),
     row("approval.discard", PCS, false, NOW),
     row("approval.spend", PCS, false, NOW),
     row("approval.end", PCS, false, NOW),
@@ -382,7 +384,6 @@ mod tests {
                 "sign.message",
                 "sign.typed_data",
                 "swarm.sign_soc",
-                "approval.issue",
                 "approval.discard",
                 "approval.spend",
                 "approval.end",
@@ -398,8 +399,10 @@ mod tests {
                 "eip1193.request",
             ]
         );
-        // Design 0012, API: who reaches each grant method.
+        // Design 0012, API: who reaches each grant method, and
+        // `approval.issue`, which no page reaches from APR-7.
         for (name, page, chrome, shell) in [
+            ("approval.issue", false, true, true),
             ("approval.check", true, false, false),
             ("approval.grant", true, false, true),
             ("approval.revoke", true, true, true),

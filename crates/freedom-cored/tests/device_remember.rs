@@ -71,12 +71,14 @@ fn refused(reply: &Value, code: &str, reason: Option<&str>) {
 /// A core with `grant_moved`, its grant root created. No vault: a device's
 /// send needs none.
 fn start(root: &Path, moved: &[&'static str], env: &[(&str, &str)]) -> Core {
+    let mut env = env.to_vec();
+    env.push(MAINS_WORD);
     let mut core = spawn_env(
         "serve",
         &root.join("identity"),
         &root.join("locks"),
         &[],
-        env,
+        &env,
     );
     std::fs::create_dir_all(&core.grant_root).unwrap();
     core.grant_moved = moved.to_vec();

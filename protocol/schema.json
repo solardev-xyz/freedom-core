@@ -41,7 +41,7 @@
     { "name": "naming.resolve_tezos", "callers": ["chrome", "shell"], "mutates": false, "deadline_ms": 120000 },
     { "name": "naming.invalidate_content", "callers": ["chrome", "shell"], "mutates": false, "deadline_ms": null },
     { "name": "naming.invalidate_tezos", "callers": ["chrome", "shell"], "mutates": false, "deadline_ms": null },
-    { "name": "approval.issue", "callers": ["page", "chrome", "shell"], "mutates": false, "deadline_ms": null },
+    { "name": "approval.issue", "callers": ["chrome", "shell"], "mutates": false, "deadline_ms": null },
     { "name": "approval.discard", "callers": ["page", "chrome", "shell"], "mutates": false, "deadline_ms": null },
     { "name": "approval.spend", "callers": ["page", "chrome", "shell"], "mutates": false, "deadline_ms": null },
     { "name": "approval.end", "callers": ["page", "chrome", "shell"], "mutates": false, "deadline_ms": null },

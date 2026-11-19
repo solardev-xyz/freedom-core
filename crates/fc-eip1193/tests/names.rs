@@ -141,7 +141,8 @@ fn every_apr5f_scenario_replays_at_the_logic_level() {
                         panic!("{what}");
                     };
                     assert!(send.form().is_ok(), "{what}");
-                    let prepare = send.prepare(grant).unwrap();
+                    let agent = scenario["world"]["custody"].as_bool();
+                    let prepare = send.prepare(agent, grant).unwrap();
                     let estimate = effects
                         .iter()
                         .find(|e| e["effect"] == "chain.request")

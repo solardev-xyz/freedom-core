@@ -2090,9 +2090,15 @@ impl Approvals {
     }
 
     /// `approval.grant { store, change }`: a decision main relays (design
-    /// 0012, "The model"). A page writes its own grant in the dApp, Swarm
-    /// and Radicle stores; main (`shell`) writes a Swarm manifest's
-    /// projection. Never a transaction rule, and never an x402 cap.
+    /// 0012, "The model"). A page writes its own grant in the Swarm and
+    /// Radicle stores; main (`shell`) writes a Swarm manifest's projection.
+    /// Never a transaction rule, and never an x402 cap. From APR-7 a page
+    /// writes nothing in the dApp store here: its connects, signing flags
+    /// and rules come only from approve answers to the core's own prompts
+    /// (`eip1193.request`), so each dApp change is refused under `page`,
+    /// before the store's move is looked at. Only a test build's hook
+    /// admits them again (`testhooks::mains_word`), for the tests of the
+    /// store's writes.
     fn grant(
         &mut self,
         id: u64,
@@ -2104,6 +2110,11 @@ impl Approvals {
         let kind = store_kind(fields)?;
         let allowed = match (context.caller, kind) {
             (_, StoreKind::X402) => false,
+            (CallerKind::Page, StoreKind::Dapp) if !crate::testhooks::mains_word() => {
+                return Err(forbidden(
+                    "a dApp grant comes only from the core's own prompt",
+                ));
+            }
             (CallerKind::Page, _) => true,
             (CallerKind::Shell, StoreKind::Swarm) => true,
             _ => false,

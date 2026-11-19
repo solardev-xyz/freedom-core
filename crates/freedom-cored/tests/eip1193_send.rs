@@ -111,6 +111,21 @@ fn request(core: &mut Core, id: u64, key: Option<&str>, body: &Value) {
     }));
 }
 
+/// [`request`] with `PageContext.agent` as given: missing for `None`.
+fn request_as(core: &mut Core, id: u64, agent: Option<bool>, body: &Value) {
+    let mut context = page(Some(SITE));
+    match agent {
+        Some(agent) => context["page"]["agent"] = json!(agent),
+        None => {
+            context["page"].as_object_mut().unwrap().remove("agent");
+        }
+    }
+    core.send(&json!({
+        "type": "request", "id": id, "method": "eip1193.request",
+        "params": body, "context": context,
+    }));
+}
+
 /// How the test's node answers: the estimate as `estimate` scripts it (a
 /// `chain.request` effect), the gas price, and the priority fee (none: a
 /// legacy chain's node).
@@ -563,6 +578,72 @@ fn a_crossed_answer_mints_nothing() {
         "{response}"
     );
     assert_eq!(grant_file(&core), connected());
+}
+
+/// APR-7: in Agent custody (`agent` true, or missing) a contract call's
+/// prompt shows `alwaysAllow: false` and offers it unticked only, with
+/// `feeAcknowledged` still offered; an approve that ticks it mints nothing
+/// (`mismatch`), and one that doesn't gets a `{ send }` whose signature
+/// writes no rule. With `agent: false` it is shown and offered, and a tick
+/// rides in the token: the signature writes the site's rule.
+#[test]
+fn no_always_allow_in_custody() {
+    let (_root, mut core, _clock) = core(&connected());
+    let mut node = Node::new(estimate());
+    let ask = |core: &mut Core, node: &mut Node, id: u64, agent: Option<bool>| {
+        request_as(core, id, agent, &send_body());
+        let Next::Prompt(asked) = next(core, id, node) else {
+            panic!("{agent:?}: no prompt")
+        };
+        asked
+    };
+    let answer = |core: &mut Core, node: &mut Node, id: u64, asked: &Value, ticked: bool| {
+        let handle = format!("{:064x}", 1000 + asked["id"].as_u64().unwrap());
+        let answer = json!({ "prompt": asked["params"]["prompt"], "handle": handle,
+            "approve": true, "choices": { "alwaysAllow": ticked }, "world": world() });
+        respond(core, asked, json!({ "result": answer }));
+        let Next::Done(response) = next(core, id, node) else {
+            panic!("asked again")
+        };
+        response
+    };
+    let mut id = 100;
+    for agent in [Some(true), None, Some(false)] {
+        let offered = agent == Some(false);
+        let asked = ask(&mut core, &mut node, id, agent);
+        assert_eq!(asked["params"]["view"]["alwaysAllow"], offered, "{agent:?}");
+        let picks = if offered {
+            json!([false, true])
+        } else {
+            json!([false])
+        };
+        assert_eq!(
+            asked["params"]["choices"],
+            json!({ "alwaysAllow": picks, "feeAcknowledged": [false, true] }),
+            "{agent:?}"
+        );
+        if !offered {
+            let crossed = answer(&mut core, &mut node, id, &asked, true);
+            assert_eq!(crossed["error"]["data"]["reason"], "mismatch", "{crossed}");
+            id += 1;
+            let asked = ask(&mut core, &mut node, id, agent);
+            let response = answer(&mut core, &mut node, id, &asked, false);
+            let signed = sign(&mut core, id + 1, &response["result"]["send"], |_| {});
+            assert!(signed["result"]["raw"].is_string(), "{signed}");
+            assert!(signed["result"].get("rule").is_none(), "{signed}");
+            assert_eq!(grant_file(&core), connected(), "{agent:?}");
+        } else {
+            let response = answer(&mut core, &mut node, id, &asked, true);
+            let signed = sign(&mut core, id + 1, &response["result"]["send"], |_| {});
+            assert_eq!(
+                signed["result"]["rule"],
+                json!({ "added": true }),
+                "{signed}"
+            );
+            assert_ne!(grant_file(&core), connected());
+        }
+        id += 10;
+    }
 }
 
 /// Fee evidence older than 60 s on the approvals' clock is asked for again

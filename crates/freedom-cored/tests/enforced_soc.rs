@@ -98,7 +98,13 @@ fn not_authorized(reply: &Value, reason: &str) {
 
 /// A core with `grant_moved`, unlocked.
 fn start(root: &Path, moved: &[&'static str]) -> Core {
-    let mut core = spawn("serve", &root.join("identity"), &root.join("locks"), &[]);
+    let mut core = spawn_env(
+        "serve",
+        &root.join("identity"),
+        &root.join("locks"),
+        &[],
+        &[MAINS_WORD],
+    );
     std::fs::create_dir_all(&core.grant_root).unwrap();
     core.grant_moved = moved.to_vec();
     assert_eq!(core.hello()["result"]["protocol"], 2);

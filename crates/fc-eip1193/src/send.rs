@@ -44,6 +44,12 @@
 //!   `sign.transaction` with no other field changed, record it and
 //!   broadcast it. "Always allow" rides in the token: `sign.transaction`
 //!   writes Q9's limited rule once it has signed (`token-remember`).
+//! - **No "Always allow" in Agent custody** (APR-7): while
+//!   `PageContext.agent` isn't `false` (a missing one counting as custody),
+//!   the view shows `alwaysAllow: false` and the choices offer it unticked
+//!   only, whether the Agent's sheet or the user answers; an approve that
+//!   ticks it is [`Crossed`]. `feeAcknowledged` stays offered: it confirms
+//!   one fee and writes nothing.
 
 use fc_json::{JsString, JsValue};
 
@@ -64,9 +70,9 @@ pub const SEND_KIND: &str = "eth.send";
 /// nothing, as in the reference.
 const CHOICES: &str = r#"{"alwaysAllow":[false,true],"feeAcknowledged":[false,true]}"#;
 
-/// A Safe's: "Always allow" unticked only, as no rule answers a Safe's
-/// send (*inferred*).
-const SAFE_CHOICES: &str = r#"{"alwaysAllow":[false],"feeAcknowledged":[false,true]}"#;
+/// A Safe's, as no rule answers a Safe's send (*inferred*), and any send in
+/// Agent custody (APR-7): "Always allow" unticked only.
+const UNTICKED_CHOICES: &str = r#"{"alwaysAllow":[false],"feeAcknowledged":[false,true]}"#;
 
 /// The token a Safe's approve mints.
 pub const SAFE_TOKEN_KIND: &str = "safe-send";
@@ -117,6 +123,9 @@ pub struct Prepare {
     tx: PageTx,
     /// The account's kind, for a device's.
     device: Option<Device>,
+    /// Asked in Agent custody: `PageContext.agent` other than `false`
+    /// (APR-7).
+    custody: bool,
     /// D12's pause, as main sent it.
     paused: Option<bool>,
 }
@@ -313,8 +322,14 @@ impl Send {
     }
 
     /// Runs the request up to its quote: the form, the grant `grant`
-    /// gives, the account, and the Safe's chain.
-    pub fn prepare(&self, grant: impl FnOnce(&str) -> Option<JsValue>) -> Result<Prepare, Answer> {
+    /// gives, the account, and the Safe's chain. `agent` is
+    /// `PageContext.agent`, which decides whether "Always allow" is offered
+    /// (APR-7).
+    pub fn prepare(
+        &self,
+        agent: Option<bool>,
+        grant: impl FnOnce(&str) -> Option<JsValue>,
+    ) -> Result<Prepare, Answer> {
         let tx = tx_of(self.params.as_ref())
             .map_err(|message| Answer::error(INVALID_PARAMS, message))?;
         let Some(permission) = grant(&self.key).filter(JsValue::truthy) else {
@@ -350,12 +365,19 @@ impl Send {
             chain_view: chain_view(&self.world, chain_id),
             tx,
             device,
+            custody: agent != Some(false),
             paused: self.world.paused(),
         })
     }
 }
 
 impl Prepare {
+    /// Whether "Always allow" may be ticked: not for a Safe's send, and not
+    /// in Agent custody (APR-7).
+    fn offers_always_allow(&self) -> bool {
+        self.device != Some(Device::Safe) && !self.custody
+    }
+
     /// The chain the send is for: the page's.
     pub fn chain_id(&self) -> u64 {
         self.chain_id
@@ -551,6 +573,7 @@ fn view(prepare: &Prepare, quoted: Option<&Quoted>, verdict: Option<&str>, again
         .unwrap_or(JsValue::Null);
     // A Safe's executor pays, at its execution.
     let safe = prepare.device == Some(Device::Safe);
+    let offered = prepare.offers_always_allow();
     let fee = if safe {
         JsValue::Object(vec![prop("paidBy", JsValue::string("executor"))])
     } else {
@@ -570,10 +593,11 @@ fn view(prepare: &Prepare, quoted: Option<&Quoted>, verdict: Option<&str>, again
         prop("fee", fee),
         prop("feeCheck", verdict),
         prop("feeAskAgain", JsValue::Bool(again)),
-        // "Always allow" is offered for a contract call, never a Safe's.
+        // "Always allow" is offered for a contract call, never a Safe's,
+        // and never in Agent custody.
         prop(
             "alwaysAllow",
-            JsValue::Bool(!safe && selector_of(&tx.data).is_some()),
+            JsValue::Bool(offered && selector_of(&tx.data).is_some()),
         ),
     ])
     .stringify()
@@ -591,10 +615,10 @@ impl Ask {
 
     /// The choices' JSON text.
     pub fn choices(&self) -> &'static str {
-        if self.prepare.device == Some(Device::Safe) {
-            SAFE_CHOICES
-        } else {
+        if self.prepare.offers_always_allow() {
             CHOICES
+        } else {
+            UNTICKED_CHOICES
         }
     }
 
@@ -620,7 +644,7 @@ impl Ask {
         for (name, value) in picks {
             match (name.as_str(), value) {
                 ("alwaysAllow", JsValue::Bool(ticked)) => {
-                    if *ticked && self.prepare.device == Some(Device::Safe) {
+                    if *ticked && !self.prepare.offers_always_allow() {
                         return Err(Crossed);
                     }
                     always_allow = *ticked;
@@ -1206,7 +1230,8 @@ mod tests {
             panic!("{kind}")
         };
         let grant = format!(r#"{{"walletIndex":{index}}}"#);
-        send.prepare(|_| fc_json::parse(&grant).ok()).unwrap()
+        send.prepare(Some(false), |_| fc_json::parse(&grant).ok())
+            .unwrap()
     }
 
     /// A Ledger's, a phone's or a Safe's send (on Gnosis) is asked, and no
@@ -1229,7 +1254,7 @@ mod tests {
             r#"{"paidBy":"executor"}"#
         );
         assert_eq!(view.get("alwaysAllow"), Some(&JsValue::Bool(false)));
-        assert_eq!(ask.choices(), SAFE_CHOICES);
+        assert_eq!(ask.choices(), UNTICKED_CHOICES);
         let approve = |picks: &str| Decision::Approve {
             choices: fc_json::parse(picks).unwrap(),
             handle: "ab".repeat(32),
@@ -1261,6 +1286,80 @@ mod tests {
         );
     }
 
+    /// APR-7: while `agent` isn't `false` (true, or missing), a vault
+    /// account's contract call shows `alwaysAllow: false`, at its first
+    /// prompt and when its fee is asked again, and offers it unticked only;
+    /// an approve that ticks it is crossed, and one that doesn't goes on
+    /// with nothing to remember. `feeAcknowledged` stays offered. With
+    /// `agent: false` it is shown, offered and carried into the token.
+    #[test]
+    fn no_always_allow_in_custody() {
+        let text = r#"{"method":"eth_sendTransaction","params":[{"to":"0x5555555555555555555555555555555555555555","data":"0xa9059cbb00"}],"world":{"enabled":true,"window_chain":1,"paused":false,"wallets":[{"index":0,"address":"0x4444444444444444444444444444444444444444"}],"networks":{}}}"#;
+        let request = Request::parse(text).unwrap();
+        let crate::Step::Send(send) = crate::start(&request, Some("k"), |_| None) else {
+            panic!()
+        };
+        let grant = |_: &str| fc_json::parse(r#"{"walletIndex":0}"#).ok();
+        let approve = |picks: &str| Decision::Approve {
+            choices: fc_json::parse(picks).unwrap(),
+            handle: "ab".repeat(32),
+            world: World::from_value(
+                fc_json::parse(r#"{"enabled":true,"wallets":[],"networks":{}}"#).unwrap(),
+            )
+            .unwrap(),
+        };
+        let shown = |ask: &Ask| {
+            fc_json::parse(ask.view())
+                .unwrap()
+                .get("alwaysAllow")
+                .cloned()
+        };
+        for agent in [Some(true), None, Some(false)] {
+            let offered = agent == Some(false);
+            let prepare = send.prepare(agent, grant).unwrap();
+            let quoted = prepare.quoted(
+                Some(&JsValue::string("0x5208")),
+                Some(&fc_json::parse(r#"{"gasPrice":"0x1"}"#).unwrap()),
+            );
+            let ask = prepare.clone().ask(quoted, None);
+            assert_eq!(shown(&ask), Some(JsValue::Bool(offered)), "{agent:?}");
+            let ticked = r#"{"alwaysAllow":true,"feeAcknowledged":true}"#;
+            if offered {
+                assert_eq!(ask.choices(), CHOICES);
+            } else {
+                assert_eq!(ask.choices(), UNTICKED_CHOICES, "{agent:?}");
+                assert_eq!(ask.clone().decide(approve(ticked)), Err(Crossed));
+            }
+            let picks = if offered {
+                ticked
+            } else {
+                r#"{"alwaysAllow":false,"feeAcknowledged":true}"#
+            };
+            let Ok(Decided::Judge(judge)) = ask.decide(approve(picks)) else {
+                panic!("{agent:?}")
+            };
+            assert!(judge.acknowledged(), "{agent:?}");
+            // Asked again for its fee: the same offer.
+            let Judged::Ask(again) = judge.clone().judged("{}", true, grant) else {
+                panic!("{agent:?}")
+            };
+            assert_eq!(shown(&again), Some(JsValue::Bool(offered)), "{agent:?}");
+            assert_eq!(again.choices(), ask_choices(offered), "{agent:?}");
+            let Judged::Send(prepared) = judge.confirmed(grant) else {
+                panic!("{agent:?}")
+            };
+            assert_eq!(
+                prepared.payload().contains(r#""remember":true"#),
+                offered,
+                "{agent:?}"
+            );
+        }
+    }
+
+    fn ask_choices(offered: bool) -> &'static str {
+        if offered { CHOICES } else { UNTICKED_CHOICES }
+    }
+
     /// A vault account's contract call outside custody, with D12's pause
     /// read as `false`, is the rule's to judge; in custody, unknown custody,
     /// a pause not `false`, or a plain transfer, it isn't.
@@ -1274,7 +1373,7 @@ mod tests {
             let crate::Step::Send(send) = crate::start(&request, Some("k"), |_| None) else {
                 panic!()
             };
-            send.prepare(|_| fc_json::parse(r#"{"walletIndex":0}"#).ok())
+            send.prepare(Some(false), |_| fc_json::parse(r#"{"walletIndex":0}"#).ok())
                 .unwrap()
         };
         let query = vault(r#""paused":false,"#, "0xa9059cbb00");

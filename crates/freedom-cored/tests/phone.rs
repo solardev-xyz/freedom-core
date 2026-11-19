@@ -184,6 +184,7 @@ impl World {
                 hooks.fail.to_str().unwrap(),
             ),
             ("FREEDOM_CORED_TEST_PHONE_RECHECK_MS", "50"),
+            MAINS_WORD,
         ];
         let mut core = spawn_env(
             "serve",

@@ -25,9 +25,11 @@ fn signing_vectors() -> Value {
     serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap()
 }
 
+/// Unlocked, a page's `sign-typed-data` token for a Safe's typed data
+/// minted on main's word, as before APR-7 (the test build's hook).
 fn unlocked() -> (tempfile::TempDir, Core) {
     let (root, data, locks) = dirs();
-    let mut core = spawn("serve", &data, &locks, &[]);
+    let mut core = spawn_env("serve", &data, &locks, &[], &[MAINS_WORD]);
     core.hello();
     let imported = core.call(
         2,

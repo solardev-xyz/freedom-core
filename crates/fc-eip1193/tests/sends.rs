@@ -214,7 +214,8 @@ fn every_prompted_send_replays() {
                 Step::Send(send) => send,
                 _ => panic!("{what}: not a send"),
             };
-            let mut prepare = match send.prepare(|key| lookup(&grants, key)) {
+            let agent = scenario["world"]["custody"].as_bool();
+            let mut prepare = match send.prepare(agent, |key| lookup(&grants, key)) {
                 Err(answer) => {
                     assert_eq!(answer.as_str(), recorded["result"].to_string(), "{what}");
                     assert!(effects.is_empty(), "{what}");
@@ -477,7 +478,11 @@ fn every_device_and_rule_send_replays() {
         let Step::Send(send) = start(&request, key, |key| lookup(&grants, key)) else {
             panic!("{id}")
         };
-        let prepare = send.prepare(|key| lookup(&grants, key)).unwrap();
+        let prepare = send
+            .prepare(scenario["world"]["custody"].as_bool(), |key| {
+                lookup(&grants, key)
+            })
+            .unwrap();
         let mut decide = |view: &str, kind: &str, choices: &str| {
             let prompt = next("prompt");
             asked += 1;

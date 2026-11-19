@@ -126,6 +126,11 @@ impl Drop for Core {
     }
 }
 
+/// The test build's hook that admits a page's `approval.issue`, and its
+/// dApp `approval.grant`, on main's word as before APR-7 (design 0012), for
+/// the tests of what such a token or grant then allows.
+pub const MAINS_WORD: (&str, &str) = ("FREEDOM_CORED_TEST_MAINS_WORD", "1");
+
 pub fn spawn(command: &str, data: &Path, locks: &Path, extra: &[&str]) -> Core {
     spawn_env(command, data, locks, extra, &[])
 }

@@ -450,6 +450,74 @@ fn a_crossed_answer_signs_nothing() {
     );
 }
 
+/// APR-7: with `agent` true or missing, the prompt offers "Always allow"
+/// unticked only; an approve that ticks it is crossed (`mismatch`), nothing
+/// signed and no rule written, and one that doesn't signs. With `agent:
+/// false` it is offered, and a tick writes Q9's limited rule.
+#[test]
+fn no_always_allow_in_custody() {
+    let (_root, mut core) = core_with(&connected(0, false), true, true);
+    let before = grant_file(&core);
+    let ask = |core: &mut Core, id: u64, agent: Option<bool>| {
+        request(core, id, Some(SITE), agent, &hello_sign());
+        let asked = next_request(core);
+        assert_eq!(asked["method"], "approval.request", "{agent:?}");
+        asked
+    };
+    let mut id = 10;
+    for agent in [Some(true), None] {
+        let asked = ask(&mut core, id, agent);
+        assert_eq!(
+            asked["params"]["choices"],
+            json!({ "alwaysAllow": [false] }),
+            "{agent:?}"
+        );
+        let p = asked["params"]["prompt"].clone();
+        respond(
+            &mut core,
+            &asked,
+            approve(&p, &format!("{id:064x}"), json!({ "alwaysAllow": true })),
+        );
+        let reply = core.until_response(id);
+        assert_eq!(reply["error"]["data"]["reason"], "mismatch", "{reply}");
+        id += 1;
+        let asked = ask(&mut core, id, agent);
+        let p = asked["params"]["prompt"].clone();
+        respond(
+            &mut core,
+            &asked,
+            approve(&p, &format!("{id:064x}"), json!({ "alwaysAllow": false })),
+        );
+        assert_eq!(
+            core.until_response(id)["result"],
+            json!({ "result": HELLO_SIGNATURE }),
+            "{agent:?}"
+        );
+        id += 1;
+    }
+    assert_eq!(grant_file(&core), before);
+    let asked = ask(&mut core, id, Some(false));
+    assert_eq!(
+        asked["params"]["choices"],
+        json!({ "alwaysAllow": [false, true] })
+    );
+    let p = asked["params"]["prompt"].clone();
+    respond(
+        &mut core,
+        &asked,
+        approve(&p, &format!("{id:064x}"), json!({ "alwaysAllow": true })),
+    );
+    assert_eq!(
+        core.until_response(id)["result"],
+        json!({ "result": HELLO_SIGNATURE })
+    );
+    assert!(
+        grant_file(&core)[SITE]["autoApprove"]["limited"]["signing"]["grantedAt"].is_number(),
+        "{}",
+        grant_file(&core)
+    );
+}
+
 /// Approved with the vault locked: the core's refusal, nothing signed.
 #[test]
 fn a_locked_vault_signs_nothing() {

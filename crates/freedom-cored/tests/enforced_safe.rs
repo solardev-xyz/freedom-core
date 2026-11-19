@@ -71,7 +71,13 @@ fn shell() -> Value {
 /// A core with its grant root, holding `dapp` (the dApp file's text) if
 /// given, with `grant_moved`, the vault locked.
 fn start(root: &Path, dapp: Option<&str>, moved: &[&'static str]) -> Core {
-    let mut core = spawn("serve", &root.join("identity"), &root.join("locks"), &[]);
+    let mut core = spawn_env(
+        "serve",
+        &root.join("identity"),
+        &root.join("locks"),
+        &[],
+        &[MAINS_WORD],
+    );
     std::fs::create_dir_all(&core.grant_root).unwrap();
     if let Some(dapp) = dapp {
         std::fs::write(core.grant_root.join("dapp-permissions.json"), dapp).unwrap();

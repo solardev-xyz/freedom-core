@@ -7,6 +7,12 @@
 //! today's rules answering until `dapp` moves; a flagged `dapp-send`'s
 //! rule; an `intent-replace` spent at `sign.transaction`; and a page's SOC
 //! checked against its Swarm grant (APR-3c).
+//!
+//! From APR-7 a page writes no dApp grant and mints no token itself: the
+//! core does both on an approve answer to its own prompt. The tests of the
+//! dApp file's writes make them directly, through the test build's hook
+//! (`FREEDOM_CORED_TEST_MAINS_WORD`); without it both are refused
+//! ([`a_page_s_dapp_grant_is_refused_before_the_move`]).
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
@@ -75,7 +81,16 @@ fn account(index: u32) -> Value {
 }
 
 /// A core with `grant_moved`, its grant root created; unlocked if asked.
+/// A page's dApp grants and tokens are on main's word, as before APR-7
+/// (the test build's hook).
 fn start(root: &Path, moved: &[&'static str], unlock: bool, env: &[(&str, &str)]) -> Core {
+    let mut env = env.to_vec();
+    env.push(MAINS_WORD);
+    start_as_built(root, moved, unlock, &env)
+}
+
+/// [`start`] without the hook: as every release build runs.
+fn start_as_built(root: &Path, moved: &[&'static str], unlock: bool, env: &[(&str, &str)]) -> Core {
     let mut core = spawn_env(
         "serve",
         &root.join("identity"),
@@ -546,6 +561,72 @@ fn changed(core: &mut Core, id: &mut u64) -> Vec<Value> {
 fn mode(path: &Path) -> u32 {
     use std::os::unix::fs::PermissionsExt;
     std::fs::metadata(path).unwrap().permissions().mode() & 0o777
+}
+
+/// APR-7: under `page`, each dApp change is refused (`forbidden`), before
+/// and after the store's move, so before `not_moved`: the file unchanged,
+/// and no `approval.changed`. A page's Swarm and Radicle grants, and main's
+/// manifest projection, still write once their stores have moved.
+#[test]
+fn a_page_s_dapp_grant_is_refused_before_the_move() {
+    for moved in [&[][..], &["dapp", "swarm", "radicle"][..]] {
+        let root = tempfile::tempdir().unwrap();
+        let dir = root.path().join("userData");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("dapp-permissions.json"), today_dapp()).unwrap();
+        let mut core = start_as_built(root.path(), moved, false, &[]);
+        let mut id = 10;
+        let before = snapshot(&dir);
+        let mut agent = site();
+        agent["page"]["agent"] = json!(true);
+        for context in [site(), agent] {
+            for change in [
+                json!({ "op": "connect", "account": 0, "chain_id": 100 }),
+                json!({ "op": "account", "account": 1 }),
+                json!({ "op": "signing" }),
+                json!({ "op": "transaction" }),
+                json!({ "op": "unknown" }),
+                json!({}),
+            ] {
+                let reply = grant(&mut core, &mut id, &context, "dapp", change.clone());
+                refused(&reply, "forbidden");
+                assert_eq!(
+                    reply["error"]["message"], "a dApp grant comes only from the core's own prompt",
+                    "{moved:?} {change}"
+                );
+            }
+        }
+        assert!(changed(&mut core, &mut id).is_empty(), "{moved:?}");
+        assert_eq!(snapshot(&dir), before, "{moved:?}");
+        // Swarm and Radicle under `page`, and main's projection, as before.
+        let others = [
+            (site(), "swarm", json!({ "op": "connect" })),
+            (site(), "swarm", json!({ "op": "flag", "flag": "publish" })),
+            (site(), "radicle", json!({ "op": "connect" })),
+            (site(), "radicle", json!({ "op": "flag", "flag": "node" })),
+            (
+                shell(),
+                "swarm",
+                json!({ "op": "flag", "key": SITE, "flag": "feeds" }),
+            ),
+        ];
+        for (context, store, change) in others {
+            let reply = grant(&mut core, &mut id, &context, store, change.clone());
+            if moved.is_empty() {
+                refused(&reply, "not_moved");
+            } else {
+                assert!(
+                    result(&reply)["grant"].is_object(),
+                    "{store} {change}: {reply}"
+                );
+            }
+        }
+        if moved.is_empty() {
+            assert_eq!(snapshot(&dir), before);
+        } else {
+            assert_eq!(changed(&mut core, &mut id).len(), 5);
+        }
+    }
 }
 
 /// Once `dapp` moves, the core writes it: atomically, `0600`, one
