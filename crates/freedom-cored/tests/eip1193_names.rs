@@ -600,12 +600,15 @@ fn a_connected_key_moved_marks_nothing() {
     assert!(main.events.is_empty(), "{:?}", main.events);
 
     // A new document binds again: its connect marks the last use once the
-    // name still serves the key after main's recheck.
+    // name still serves the key after main's recheck, and main's last
+    // recheck after that lookup finds the document live.
     main.script(&[Name::Serves, Name::Serves, Name::Serves]);
     main.request(40, &named(4), "eth_requestAccounts", json!([]), &world);
     let recheck = main.asked("approval.recheck");
     main.script(&[Name::Serves]);
     main.respond(&recheck, json!({ "live": true, "agent": false }));
+    let last = main.asked("approval.recheck");
+    main.respond(&last, json!({ "live": true, "agent": false }));
     assert_eq!(main.answer(40), format!(r#"{{"result":["{ACCOUNT}"]}}"#));
     main.all_checked("new document");
     assert_ne!(main.file()[NAME]["lastUsed"], before[NAME]["lastUsed"]);
@@ -680,7 +683,8 @@ fn a_switch_moved_changes_nothing() {
     assert_eq!(main.checks, 5);
     assert_eq!(main.file(), before);
 
-    // Honest at both: the grant takes the chain, then main selects it.
+    // Honest at both: main's last recheck after the second lookup, then
+    // the grant takes the chain and main selects it.
     main.script(&[Name::Serves]);
     main.request(
         50,
@@ -692,6 +696,8 @@ fn a_switch_moved_changes_nothing() {
     let recheck = main.asked("approval.recheck");
     main.script(&[Name::Serves]);
     main.respond(&recheck, json!({ "live": true, "agent": false }));
+    let last = main.asked("approval.recheck");
+    main.respond(&last, json!({ "live": true, "agent": false }));
     let select = main.asked("eip1193.select_chain");
     assert_eq!(select["params"]["chain_id"], 1, "{select}");
     main.respond(&select, json!({}));
@@ -777,9 +783,9 @@ fn ruled_core() -> (tempfile::TempDir, tempfile::TempDir, Main) {
 }
 
 /// A rule's `personal_sign` from document `navigation`, honest at its six
-/// checks: whether the rule signed it (main's recheck, then the signature)
-/// rather than asking the user (Q9's rate spent: the core counts each
-/// signature it makes under the rule).
+/// checks: whether the rule signed it (main's recheck, the name, main's
+/// last recheck, then the signature) rather than asking the user (Q9's
+/// rate spent: the core counts each signature it makes under the rule).
 fn rule_signed(main: &mut Main, id: u64, navigation: u64, world: &Value) -> bool {
     main.script(&[Name::Serves; 4]);
     main.request(
@@ -801,6 +807,9 @@ fn rule_signed(main: &mut Main, id: u64, navigation: u64, world: &Value) -> bool
     main.all_checked("before the recheck");
     main.script(&[Name::Serves; 2]);
     main.respond(&asked, json!({ "live": true, "agent": false }));
+    let last = main.asked("approval.recheck");
+    assert_eq!(main.names.len(), 1, "{last}");
+    main.respond(&last, json!({ "live": true, "agent": false }));
     let signed = main.answer(id);
     assert!(signed.starts_with(r#"{"result":"0x"#), "{signed}");
     main.all_checked("signed");
@@ -835,6 +844,10 @@ fn a_rule_signature_moved_signs_nothing() {
             let recheck = main.asked("approval.recheck");
             main.script(after);
             main.respond(&recheck, json!({ "live": true, "agent": false }));
+        }
+        if moved_at == 5 {
+            let last = main.asked("approval.recheck");
+            main.respond(&last, json!({ "live": true, "agent": false }));
         }
         assert_eq!(main.answer(10), NO_ADDRESS, "{what}");
         main.all_checked(&what);
@@ -887,6 +900,136 @@ fn a_rule_signature_moved_during_the_unlock_signs_nothing() {
     for n in 0..5 {
         assert!(rule_signed(&mut main, 20 + n, 2 + n, &world), "#{n}");
     }
+}
+
+/// `agent_custody`'s refusal (`AGENT_CUSTODY` in the reference).
+const AGENT_CUSTODY: &str = r#"{"error":{"code":4100,"message":"The origin is not authorized for this operation","data":{"reason":"agent_custody"}}}"#;
+/// The rule no longer answering (`RULE_GONE` in the reference).
+const RULE_GONE: &str = r#"{"error":{"code":-32603,"message":"Signing was not confirmed: this request is not covered by the site's auto-approve rules"}}"#;
+/// Q9's limited rule answers for 30 days of the wall clock.
+const RULE_DAYS_MS: u64 = 30 * 24 * 60 * 60 * 1000;
+
+/// A rule's signature whose name lookup after main's recheck is held
+/// (#401's round 2). While it is out, the tab goes into the agent's
+/// custody, the document goes away, the rule expires, or (once the lookup
+/// has answered, during main's last recheck) another request of the
+/// document finds the name moved. The lookup answers that the name still
+/// serves the key, and main's last recheck, which the core asks once the
+/// lookup has answered, refuses it as the reference's reads after its
+/// last `nameHolds` would: `agent_custody`, `4100`, the rule gone, `4100`.
+/// Nothing is signed (Q9's rate keeps its five) and the last use isn't
+/// marked.
+#[test]
+fn a_rule_signature_rechecked_after_its_lookup_signs_nothing() {
+    for case in ["custody", "gone", "expired", "ended"] {
+        let (clock_root, _core_root, mut main) = ruled_core();
+        let clock = clock_root.path().join("wall");
+        let now = load()["now"].as_u64().unwrap();
+        let world = plain_world();
+        let before = main.file();
+        main.script(&[Name::Serves; 4]);
+        main.request(
+            10,
+            &named(1),
+            "personal_sign",
+            json!(["0x68656c6c6f"]),
+            &world,
+        );
+        let recheck = main.asked("approval.recheck");
+        main.all_checked("before the recheck");
+        main.respond(&recheck, json!({ "live": true, "agent": false }));
+        let held = main.held_call();
+        let mut answer = json!({ "live": true, "agent": false });
+        let expected = match case {
+            "custody" => {
+                answer["agent"] = json!(true);
+                AGENT_CUSTODY
+            }
+            "gone" => {
+                answer["live"] = json!(false);
+                NO_ADDRESS
+            }
+            "expired" => {
+                std::fs::write(&clock, (now + RULE_DAYS_MS).to_string()).unwrap();
+                RULE_GONE
+            }
+            _ => NO_ADDRESS,
+        };
+        main.node(&held, &resolve_body(IPNS_CONTENTHASH));
+        let last = main.asked("approval.recheck");
+        if case == "ended" {
+            main.script(&[Name::Moved]);
+            main.request(11, &named(1), "eth_accounts", json!([]), &world);
+            assert_eq!(main.answer(11), r#"{"result":[]}"#);
+        }
+        main.respond(&last, answer);
+        assert_eq!(main.answer(10), expected, "{case}");
+        main.all_checked(case);
+        assert_eq!(main.file(), before, "{case}: no last use");
+        std::fs::write(&clock, now.to_string()).unwrap();
+        for n in 0..5 {
+            assert!(
+                rule_signed(&mut main, 20 + n, 2 + n, &world),
+                "{case}: #{n}"
+            );
+        }
+    }
+}
+
+/// A connected key and a chain switch, past main's recheck and the name
+/// lookup after it: the document gone by main's last recheck, or the
+/// binding ended by another request while that recheck is out, refuses
+/// (`4100`) with the last use unmarked, the grant's chain unchanged, and
+/// main asked to select nothing.
+#[test]
+fn a_connected_key_or_switch_rechecked_after_its_lookup_changes_nothing() {
+    let (_root, mut main) = Main::new(&grants(), &[]);
+    let mut world = plain_world();
+    world["networks"]["1"] = json!({ "name": "Ethereum", "available": true });
+    let before = main.file();
+    let mut navigation = 0;
+    for (method, first) in [
+        ("eth_requestAccounts", 3),
+        ("wallet_switchEthereumChain", 1),
+    ] {
+        let params = if first == 1 {
+            json!([{ "chainId": "0x1" }])
+        } else {
+            json!([])
+        };
+        for case in ["gone", "ended"] {
+            let what = format!("{method} {case}");
+            navigation += 1;
+            let id = 10 * navigation;
+            main.script(&vec![Name::Serves; first]);
+            main.request(id, &named(navigation), method, params.clone(), &world);
+            let recheck = main.asked("approval.recheck");
+            main.all_checked(&what);
+            main.script(&[Name::Serves]);
+            main.respond(&recheck, json!({ "live": true, "agent": false }));
+            let last = main.asked("approval.recheck");
+            main.all_checked(&what);
+            let live = case != "gone";
+            if case == "ended" {
+                main.script(&[Name::Moved]);
+                main.request(
+                    id + 1,
+                    &named(navigation),
+                    "eth_accounts",
+                    json!([]),
+                    &world,
+                );
+                assert_eq!(main.answer(id + 1), r#"{"result":[]}"#, "{what}");
+            }
+            main.respond(&last, json!({ "live": live, "agent": false }));
+            // The page's answer comes next: main is asked to select nothing.
+            assert_eq!(main.answer(id), NO_ADDRESS, "{what}");
+            main.all_checked(&what);
+            assert_eq!(main.file(), before, "{what}");
+        }
+    }
+    main.flush(99, &world);
+    assert!(main.events.is_empty(), "{:?}", main.events);
 }
 
 /// A name the core can't resolve fails closed, as `nameServesIpnsKey`'s
