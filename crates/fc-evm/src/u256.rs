@@ -103,6 +103,18 @@ impl U256 {
         (!carry).then_some(U256(limbs))
     }
 
+    pub fn checked_sub(&self, other: &Self) -> Option<Self> {
+        let mut limbs = [0u64; 4];
+        let mut borrow = false;
+        for ((out, a), b) in limbs.iter_mut().zip(self.0).zip(other.0) {
+            let (difference, b1) = a.overflowing_sub(b);
+            let (difference, b2) = difference.overflowing_sub(u64::from(borrow));
+            *out = difference;
+            borrow = b1 || b2;
+        }
+        (!borrow).then_some(U256(limbs))
+    }
+
     /// Two's complement negation modulo 2^256.
     pub fn wrapping_neg(&self) -> Self {
         let inverted = U256(self.0.map(|limb| !limb));
@@ -117,7 +129,7 @@ impl U256 {
     }
 
     /// `(self / divisor, self % divisor)` for a nonzero `divisor`.
-    fn div_rem_small(&self, divisor: u64) -> (Self, u64) {
+    pub(crate) fn div_rem_small(&self, divisor: u64) -> (Self, u64) {
         let mut limbs = [0u64; 4];
         let mut remainder = 0u128;
         for (out, limb) in limbs.iter_mut().zip(self.0).rev() {
@@ -262,6 +274,19 @@ mod tests {
         assert_eq!(U256::from_u64(1).wrapping_neg(), U256::MAX);
         assert_eq!(U256::ZERO.wrapping_neg(), U256::ZERO);
         assert_eq!(U256::MAX.checked_add(&U256::from_u64(1)), None);
+        assert_eq!(U256::ZERO.checked_sub(&U256::from_u64(1)), None);
+        assert_eq!(U256::MAX.checked_sub(&U256::MAX), Some(U256::ZERO));
+        assert_eq!(
+            U256::mask(65).checked_sub(&U256::mask(64)),
+            Some(U256::from_be_slice(&[1, 0, 0, 0, 0, 0, 0, 0, 0]).unwrap())
+        );
+        assert_eq!(
+            U256::from_be_slice(&[1, 0, 0, 0, 0, 0, 0, 0, 0])
+                .unwrap()
+                .checked_sub(&U256::from_u64(1)),
+            Some(U256::mask(64))
+        );
+        assert_eq!(U256::from_u64(75).div_rem_small(2), (U256::from_u64(37), 1));
         assert_eq!(U256::from_u64(0x1234).to_minimal_be(), vec![0x12, 0x34]);
         assert!(U256::ZERO.to_minimal_be().is_empty());
         assert_eq!(U256::from_be_slice(&[1, 0]), Some(U256::from_u64(256)));
