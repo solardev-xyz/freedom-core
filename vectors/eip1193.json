@@ -14729,16 +14729,7 @@
         {
           "method": "eth_accounts",
           "params": [],
-          "effects": [
-            {
-              "effect": "name.check",
-              "args": {
-                "name": "docs.example.org",
-                "transportKey": "ipns://k51qzi5uqu5dlvj2baxnqndepeb86cbk3ng7n3i46uzyxzyqj2xjonzllnv0v8"
-              },
-              "answer": true
-            }
-          ],
+          "effects": [],
           "result": {
             "result": []
           },

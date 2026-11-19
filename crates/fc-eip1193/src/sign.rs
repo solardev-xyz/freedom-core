@@ -1103,6 +1103,37 @@ impl Ask {
         self.ruled
     }
 
+    /// Whether `decision` approves, with picks the prompt offered, so that
+    /// the name is checked before the approve is acted on (APR-5f): `false`
+    /// for a rejection, a close or a busy window, which [`Ask::decide`]
+    /// answers, and [`Crossed`] for any other pick.
+    pub fn approves(&self, decision: &Decision) -> Result<bool, Crossed> {
+        match decision {
+            Decision::Approve { choices, .. } => self.picks(choices).map(|_| true),
+            Decision::Reject | Decision::Closed | Decision::Busy => Ok(false),
+        }
+    }
+
+    /// The one pick: "Always allow", ticked only where it is offered.
+    fn picks(&self, choices: &JsValue) -> Result<bool, Crossed> {
+        let JsValue::Object(picks) = choices else {
+            return Err(Crossed);
+        };
+        let mut always_allow = false;
+        for (name, value) in picks {
+            match value {
+                JsValue::Bool(ticked) if name.as_str() == "alwaysAllow" => {
+                    if *ticked && self.device.is_some() {
+                        return Err(Crossed);
+                    }
+                    always_allow = *ticked;
+                }
+                _ => return Err(Crossed),
+            }
+        }
+        Ok(always_allow)
+    }
+
     /// What main's decision does, `grant` giving the key's grant as it
     /// stands now. An approve with a pick not offered is [`Crossed`].
     pub fn decide(
@@ -1122,22 +1153,7 @@ impl Ask {
                 choices, handle, ..
             } => (choices, handle),
         };
-        // The one pick: "Always allow", ticked only where it is offered.
-        let JsValue::Object(picks) = &choices else {
-            return Err(Crossed);
-        };
-        let mut always_allow = false;
-        for (name, value) in picks {
-            match value {
-                JsValue::Bool(ticked) if name.as_str() == "alwaysAllow" => {
-                    if *ticked && self.device.is_some() {
-                        return Err(Crossed);
-                    }
-                    always_allow = *ticked;
-                }
-                _ => return Err(Crossed),
-            }
-        }
+        let always_allow = self.picks(&choices)?;
         // The grant still exposing the account shown.
         let exposes = grant(&self.key)
             .filter(JsValue::truthy)

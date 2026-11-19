@@ -113,6 +113,11 @@ pub enum Out {
     /// One of the core's own chain reads (design 0012, "Phone jobs"), for
     /// the chain thread.
     ChainRead(crate::phone::ChainRead),
+    /// A page request's name check (design 0012, APR-5f), for the naming
+    /// thread.
+    NameCheck(crate::eip1193::NameCheck),
+    /// The name check of page request `tag` is no longer wanted.
+    NameCancel(u64),
 }
 
 /// Why a vault operation failed. Mapped to a code and the method's JS
@@ -3650,6 +3655,7 @@ mod tests {
                         frame: 1,
                         navigation: 1,
                         agent: Some(false),
+                        transport_key: None,
                     }),
                 };
                 let issue = serde_json::json!({

@@ -521,6 +521,7 @@ mod tests {
                 frame: 1,
                 navigation: 1,
                 agent: Some(false),
+                transport_key: None,
             }),
         }
     }

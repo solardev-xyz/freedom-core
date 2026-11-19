@@ -42,7 +42,8 @@
 //! - **`approval.recheck { request, page }`** asks main, just before a
 //!   connected key's last use is marked, a switch's chain is written or a
 //!   rule's signature is made, whether the document still holds its key,
-//!   and whether the agent holds its tab.
+//!   and whether the agent holds its tab. For a name-keyed document it is
+//!   asked again after the name lookup that follows it (APR-5f).
 //! - **`eip1193.select_chain { request, page, chain_id }`** (APR-5c-2,
 //!   *inferred*) asks main, once a chain switch's grant has its chain, to
 //!   select the chain for the window of page request `request` and send
@@ -67,6 +68,26 @@
 //!   nothing else comes of it. Each tombstone holds one of main's 256
 //!   slots for the core's requests until then ([`requests::MAX_OUTSTANDING`]),
 //!   so there are never more than that.
+//! - **Names over IPNS** (APR-5f): for a document whose key is a DNS name
+//!   served over IPNS (`PageContext.transport_key`), each of the
+//!   reference's name checks of a name-revalidated method is a lookup on
+//!   the core's own naming ([`NameCheck`], on the naming thread), within
+//!   the request's clock. A name that no longer serves the IPNS key ends
+//!   the document's binding ([`fc_eip1193::names`]): the request answers as
+//!   a keyless document's would, with nothing written or signed, and so do
+//!   the document's later name-revalidated requests. After main's recheck
+//!   the core checks the name once more, before the effect (a connected
+//!   key's account and last use, a switch's chain, a rule's signature):
+//!   the reference has no wait there, so the name could move during it
+//!   (*inferred*). A binding another request ended meanwhile refuses then
+//!   with nothing resolved, as the reference reads `holdsKey`. Once that
+//!   lookup has answered, main is asked to recheck once more, and the
+//!   effect follows its answer at once ([`Last`]): custody and the
+//!   document are read after the last lookup, as the reference reads them
+//!   in one run after its last `nameHolds`. The name could move during
+//!   that last recheck, main's own answer with nothing awaited, which is
+//!   the window the reference has between its last `nameHolds` and its
+//!   effect.
 
 use std::collections::{BTreeMap, VecDeque};
 use std::ops::Range;
@@ -74,9 +95,11 @@ use std::sync::Arc;
 use std::sync::mpsc::Sender;
 use std::time::{Duration, Instant};
 
-use fc_eip1193::connect::{Ask, Connected, Decided};
+use fc_eip1193::connect::{self, Ask, Connected, Decided, Grant};
+use fc_eip1193::names::{self, Binding, Document, Ended};
 use fc_eip1193::{
-    Answer, Budget, Connect, Crossed, PromptId, Prompts, Recheck, Switch, send, sign,
+    Answer, Budget, Connect, Crossed, Decision, PromptId, Prompts, Recheck, Request, Step, Switch,
+    send, sign,
 };
 use fc_protocol::error::{ErrorBody, ErrorCode};
 use fc_protocol::message::{self, PageContext};
@@ -103,6 +126,15 @@ const EVIDENCE_DEADLINE_MS: u64 = 15_000;
 /// The page's answer when its time ran out outside its prompt.
 const DEADLINE: &str = r#"{"error":{"code":-32603,"message":"The request's deadline passed"}}"#;
 
+/// A page request's name check (APR-5f), for the naming thread: the name
+/// of `binding` resolved within `deadline_ms`, and the verdict sent back
+/// under `tag`, the page request's id.
+pub struct NameCheck {
+    pub tag: u64,
+    pub binding: Binding,
+    pub deadline_ms: u64,
+}
+
 /// See the module documentation.
 pub struct Connects {
     prompts: Prompts,
@@ -119,6 +151,8 @@ pub struct Connects {
     queued: VecDeque<u64>,
     /// `approval.request`s open at main.
     prompting: usize,
+    /// The documents whose name binding has ended (APR-5f).
+    ended: Ended,
     /// A send's chain reads, by tag: its page request, and which read.
     reads: BTreeMap<u64, (u64, Part)>,
     /// The next chain read's tag, below [`SEND_TAG`].
@@ -174,15 +208,38 @@ impl Quoting {
 }
 
 struct Open {
+    held: Held,
+    step: Pending,
+    /// The core's request to main, once sent.
+    asked: Option<u64>,
+}
+
+/// What a page request holds through its steps.
+struct Held {
     key: String,
     /// The request's `PageContext`, as JSON.
     page: String,
     /// The request's `PageContext`, which a signature's token binds.
     context: PageContext,
     budget: Budget,
-    step: Pending,
-    /// The core's request to main, once sent.
-    asked: Option<u64>,
+    /// The document's name binding (APR-5f), when its key is a DNS name
+    /// over IPNS: each of the request's name checks resolves it.
+    binding: Option<Binding>,
+    /// What the request answers once its document no longer holds the
+    /// name: a keyless document's answer.
+    keyless: Answer,
+}
+
+impl Held {
+    fn document(&self) -> Document {
+        let context = &self.context;
+        Document::new(
+            &context.origin,
+            context.transport_key.as_deref().unwrap_or(""),
+            context.frame,
+            context.navigation,
+        )
+    }
 }
 
 /// What one of the core's requests to main serves.
@@ -218,6 +275,74 @@ enum Pending {
     /// A send the site's rule answers, quoted and within the fee check,
     /// waiting on main's recheck (APR-5e-2).
     SendRule(send::Rule),
+    /// The page's name being resolved by the core's naming (APR-5f): what
+    /// follows once it still serves the document's IPNS key.
+    Name(Then),
+    /// Main's recheck once more, after the name lookup that followed its
+    /// first (APR-5f): the effect follows its answer at once, with nothing
+    /// awaited between.
+    Last(Last),
+}
+
+/// An effect whose decision reads main's recheck, waiting on main's last
+/// recheck after a name lookup (APR-5f). The reference reads custody and
+/// `holdsKey` in the same run as its effect, after its last `nameHolds`;
+/// the core asks main for them again once its lookup has answered, and
+/// acts on that answer at once.
+enum Last {
+    /// A connected key: its account answered and its last use marked.
+    Touch(Connected),
+    /// A chain switch: the grant's chain written, then main's selection.
+    Chain(Switch),
+    /// A rule's signature, judged again with that recheck's custody.
+    Rule(Box<sign::Ask>),
+}
+
+/// What follows one of the reference's name checks once it passes
+/// (APR-5f). A request without a name binding goes straight on.
+enum Then {
+    /// The checks before the grant is first read, `left` of them still to
+    /// come, then the request's start.
+    Start { request: Box<Request>, left: u8 },
+    /// `eth_accounts`' last check: its answer, which reveals the account.
+    Answer(Answer),
+    /// A connected key: main's recheck.
+    Recheck(Connected),
+    /// A connected key past main's recheck: its account answered and its
+    /// last use marked, after main's last recheck when a lookup came
+    /// between ([`Last`]).
+    Touch(Connected),
+    /// A connect approved: the grant written.
+    Grant(Grant),
+    /// A chain switch past its checks: main's recheck.
+    Switch(Switch),
+    /// A chain switch past main's recheck: the grant's chain written, then
+    /// main's selection, after main's last recheck when a lookup came
+    /// between ([`Last`]).
+    Chain(Switch),
+    /// A signature, what is signed prepared: its prompt, or its rule's
+    /// path.
+    Prepared(sign::Ask),
+    /// A signature's prompt approved: the grant and the account checked
+    /// again, then the token minted and spent.
+    Approved(sign::Ask, Decision),
+    /// A rule's signature, the vault unlocked: main's recheck.
+    Rule(sign::Ask),
+    /// A rule's signature past main's recheck: signed under `{ standing }`
+    /// with the custody main's recheck gave, or, when a lookup came between,
+    /// judged again on main's last recheck ([`Last`]) and signed with its
+    /// custody.
+    Ruled {
+        ask: sign::Ask,
+        approved: sign::Approved,
+        agent: bool,
+    },
+    /// A signature made: its answer, and what is written with it.
+    Signed {
+        answer: Answer,
+        always_allow: Option<u32>,
+        touch: bool,
+    },
 }
 
 /// What a prompt asks.
@@ -286,6 +411,7 @@ impl Connects {
             asked: BTreeMap::new(),
             queued: VecDeque::new(),
             prompting: 0,
+            ended: Ended::new(),
             reads: BTreeMap::new(),
             next_tag: 1,
         }
@@ -295,192 +421,398 @@ impl Connects {
         u64::try_from(self.base.elapsed().as_millis()).unwrap_or(u64::MAX)
     }
 
-    /// Page request `id`'s connect, for `key`, received by the loop at
-    /// `received`.
-    pub fn start(
+    /// Page request `id`, a name-revalidated method of a document whose
+    /// key is a DNS name over IPNS (APR-5f): `left` name checks before its
+    /// start, which reads the key's grant, as the reference checks before
+    /// and after the agent's route.
+    #[allow(clippy::too_many_arguments)]
+    pub fn named(
         &mut self,
         id: u64,
-        connect: Connect,
-        key: &str,
+        request: Request,
         page: &PageContext,
+        binding: Binding,
+        left: u8,
         received: Instant,
+        vault: &mut Vault,
     ) -> Vec<Out> {
-        let step = match connect {
-            Connect::Connected(connected) => Pending::Recheck(connected),
-            Connect::Ask(ask) => match self.issue() {
-                Some(prompt) => Pending::Prompt {
-                    ask: Asking::Connect(ask),
-                    id: prompt,
-                },
-                None => return vec![error(id, internal())],
-            },
-        };
-        self.open_request(id, step, key, page, received)
-    }
-
-    /// Page request `id`'s signature, up to its prompt, for `key`
-    /// (APR-5d-1): the user is asked.
-    pub fn sign(
-        &mut self,
-        id: u64,
-        ask: sign::Ask,
-        key: &str,
-        page: &PageContext,
-        received: Instant,
-    ) -> Vec<Out> {
-        let Some(prompt) = self.issue() else {
+        let keyless = names::keyless(&request.method);
+        let Some(held) = self.held(page, Some(binding), keyless, received) else {
             return vec![error(id, internal())];
         };
-        let step = Pending::Prompt {
-            ask: Asking::Sign(ask),
-            id: prompt,
+        let then = Then::Start {
+            request: Box::new(request),
+            left,
         };
-        self.open_request(id, step, key, page, received)
+        self.go(id, held, Pending::Name(then), vault)
     }
 
-    /// Page request `id`'s signature that the site's rule answers, for
-    /// `key` (APR-5d-2): the vault's unlock first if `locked`, then main's
-    /// recheck.
-    pub fn rule(
+    /// Page request `id`'s connect, chain switch or signature (APR-5c,
+    /// APR-5d), from fc-eip1193's start: `not_moved` before the dApp store
+    /// moves (*inferred*), then main's recheck, its prompt, or the
+    /// signature's grant, account, view and rule. For a name-keyed
+    /// document, the name is checked at each of the reference's points
+    /// (APR-5f).
+    pub fn run(
         &mut self,
         id: u64,
-        ask: sign::Ask,
-        locked: bool,
-        key: &str,
+        method: &str,
+        step: Step,
         page: &PageContext,
         received: Instant,
+        vault: &mut Vault,
     ) -> Vec<Out> {
-        let step = if locked {
-            let Some(prompt) = self.issue() else {
-                return vec![error(id, internal())];
-            };
-            Pending::Prompt {
-                ask: Asking::Unlock(ask),
-                id: prompt,
-            }
-        } else {
-            Pending::Rule(ask)
-        };
-        self.open_request(id, step, key, page, received)
-    }
-
-    /// Page request `id`'s chain switch, past its checks, for `key`
-    /// (APR-5c-2): main's recheck first.
-    pub fn switch(
-        &mut self,
-        id: u64,
-        switch: Switch,
-        key: &str,
-        page: &PageContext,
-        received: Instant,
-    ) -> Vec<Out> {
-        self.open_request(id, Pending::Switch(switch), key, page, received)
-    }
-
-    fn open_request(
-        &mut self,
-        id: u64,
-        step: Pending,
-        key: &str,
-        page: &PageContext,
-        received: Instant,
-    ) -> Vec<Out> {
-        if let Some(step) = self.insert(id, step, key, page, received) {
-            if let Pending::Prompt { id: prompt, .. } = step {
-                self.prompts.forget(&prompt);
-            }
+        let binding = Binding::of(&page.origin, page.transport_key.as_deref());
+        let Some(held) = self.held(page, binding, names::keyless(method), received) else {
             return vec![error(id, internal())];
-        }
-        self.queued.push_back(id);
-        self.pump()
+        };
+        let mut outs = self.step(id, held, step, vault);
+        outs.extend(self.pump());
+        outs
     }
 
-    /// Page request `id`, waiting with `step`, its 120 s counted from
-    /// `received`. The step back if its `PageContext` can't be written.
-    #[must_use]
-    fn insert(
-        &mut self,
-        id: u64,
-        step: Pending,
-        key: &str,
+    fn held(
+        &self,
         page: &PageContext,
+        binding: Option<Binding>,
+        keyless: Answer,
         received: Instant,
-    ) -> Option<Pending> {
-        let context = page.clone();
-        let Ok(page) = serde_json::to_string(page) else {
-            return Some(step);
-        };
+    ) -> Option<Held> {
+        let text = serde_json::to_string(page).ok()?;
         let waited = u64::try_from(received.elapsed().as_millis()).unwrap_or(u64::MAX);
         let overall = crate::testhooks::eip1193_overall(fc_eip1193::OVERALL_MS);
-        let budget = Budget::with_left(self.now_ms(), overall.saturating_sub(waited));
+        Some(Held {
+            key: page.origin.clone(),
+            page: text,
+            context: page.clone(),
+            budget: Budget::with_left(self.now_ms(), overall.saturating_sub(waited)),
+            binding,
+            keyless,
+        })
+    }
+
+    /// What the request's start gives.
+    fn step(&mut self, id: u64, held: Held, step: Step, vault: &mut Vault) -> Vec<Out> {
+        match step {
+            // `eth_accounts`: the account goes only after one more check.
+            Step::Answer(answer) if held.binding.is_some() && names::reveals_account(&answer) => {
+                self.go(id, held, Pending::Name(Then::Answer(answer)), vault)
+            }
+            Step::Answer(answer) => vec![reply(id, &answer)],
+            // A read and a send are served.rs's own.
+            Step::Read(_) | Step::Send(_) => vec![error(id, internal())],
+            Step::Connect(_) | Step::Switch(_) | Step::Sign(_) if !vault.dapp_moved() => {
+                vec![not_moved(id)]
+            }
+            Step::Connect(Connect::Connected(connected)) => {
+                self.go(id, held, Pending::Name(Then::Recheck(connected)), vault)
+            }
+            Step::Connect(Connect::Ask(ask)) => self.prompt(id, held, Asking::Connect(ask), vault),
+            Step::Switch(switch) => self.go(id, held, Pending::Name(Then::Switch(switch)), vault),
+            // The grant, the account, what is signed and the rule, judged
+            // with the core's own grant; the core's view of typed data is
+            // `typed_data.hash`'s, as the reference asked the core for it.
+            Step::Sign(sign) => {
+                let agent = held.context.agent;
+                let asked = sign.ask(
+                    agent,
+                    |key| vault.dapp_entry(key),
+                    |query| vault.eip1193_rule(&held.key, agent, query),
+                    crate::signing::page_typed_data_view,
+                );
+                match asked {
+                    Err(answer) => vec![reply(id, &answer)],
+                    Ok(ask) => self.go(id, held, Pending::Name(Then::Prepared(ask)), vault),
+                }
+            }
+        }
+    }
+
+    /// The request asks main `ask`, under a new prompt id.
+    fn prompt(&mut self, id: u64, held: Held, ask: Asking, vault: &mut Vault) -> Vec<Out> {
+        match self.issue() {
+            Some(prompt) => self.go(id, held, Pending::Prompt { ask, id: prompt }, vault),
+            None => vec![error(id, internal())],
+        }
+    }
+
+    /// The request's next step: a name check goes to the naming thread
+    /// (or, without a binding, on at once), any other request to main
+    /// waits for room.
+    fn go(&mut self, id: u64, held: Held, step: Pending, vault: &mut Vault) -> Vec<Out> {
+        let Pending::Name(then) = step else {
+            self.open.insert(
+                id,
+                Open {
+                    held,
+                    step,
+                    asked: None,
+                },
+            );
+            self.queued.push_back(id);
+            return self.pump();
+        };
+        let Some(binding) = held.binding.clone() else {
+            return self.proceed(id, held, then, vault);
+        };
+        // A transport key that isn't `ipns://<key>`, or a binding that has
+        // ended: the check fails, with nothing resolved.
+        if !binding.resolvable() || self.ended.has(&held.document()) {
+            return vec![reply(id, &held.keyless)];
+        }
+        let left = held.budget.left(self.now_ms());
+        if left == 0 {
+            return vec![raw_reply(id, DEADLINE)];
+        }
         self.open.insert(
             id,
             Open {
-                key: key.to_owned(),
-                page,
-                context,
-                budget,
-                step,
+                held,
+                step: Pending::Name(then),
                 asked: None,
             },
         );
-        None
+        vec![Out::NameCheck(NameCheck {
+            tag: id,
+            binding,
+            deadline_ms: left,
+        })]
     }
 
-    /// Page request `id`'s send, past its checks, for `key` (APR-5e-1):
-    /// the core's own estimate and fee quote, and new fee evidence when
-    /// the chain's is stale. A Safe's goes to its prompt unquoted, and one
-    /// the site's rule answers (APR-5e-2) asks main for the vault's unlock
-    /// first if `locked`.
-    #[allow(clippy::too_many_arguments)]
+    /// The naming thread's verdict on page request `tag`'s name check
+    /// (APR-5f). A name that no longer serves the document's IPNS key, or
+    /// a resolution that failed, ends the binding, as `recheckName` does:
+    /// the request answers as a keyless document's would, and so does each
+    /// later name-revalidated request of the document. A verdict for a
+    /// request that ended is dropped.
+    pub fn name_checked(&mut self, tag: u64, holds: bool, vault: &mut Vault) -> Vec<Out> {
+        if !matches!(
+            self.open.get(&tag),
+            Some(Open {
+                step: Pending::Name(_),
+                ..
+            })
+        ) {
+            return Vec::new();
+        }
+        let Some(Open {
+            held,
+            step: Pending::Name(then),
+            ..
+        }) = self.open.remove(&tag)
+        else {
+            return Vec::new();
+        };
+        // A verdict at the request's deadline, the lookup's own timeout
+        // included, is the deadline's: it ends no binding.
+        if held.budget.left(self.now_ms()) == 0 {
+            let mut outs = vec![raw_reply(tag, DEADLINE)];
+            outs.extend(self.pump());
+            return outs;
+        }
+        let document = held.document();
+        if !holds {
+            self.ended.end(&document);
+        }
+        // Another check of the same document may have ended its binding
+        // while this one's answer waited.
+        let mut outs = if holds && !self.ended.has(&document) {
+            self.proceed(tag, held, then, vault)
+        } else {
+            vec![reply(tag, &held.keyless)]
+        };
+        outs.extend(self.pump());
+        outs
+    }
+
+    /// What follows a name check that passed.
+    fn proceed(&mut self, id: u64, held: Held, then: Then, vault: &mut Vault) -> Vec<Out> {
+        match then {
+            Then::Start { request, left } if left > 1 => {
+                let then = Then::Start {
+                    request,
+                    left: left - 1,
+                };
+                self.go(id, held, Pending::Name(then), vault)
+            }
+            Then::Start { request, .. } => {
+                let step =
+                    fc_eip1193::start(&request, Some(&held.key), |key| vault.dapp_entry(key));
+                self.step(id, held, step, vault)
+            }
+            Then::Answer(answer) => vec![reply(id, &answer)],
+            Then::Recheck(connected) => self.go(id, held, Pending::Recheck(connected), vault),
+            // Past main's recheck and the name check after it. A lookup ran
+            // (the document has a binding): main is asked once more, and
+            // the effect follows its answer at once. None ran: nothing has
+            // been awaited since main's recheck, which answered `live`.
+            Then::Touch(connected) if held.binding.is_some() => {
+                self.go(id, held, Pending::Last(Last::Touch(connected)), vault)
+            }
+            Then::Touch(connected) => touch(id, &held, connected.answer(true), vault),
+            Then::Grant(grant) => {
+                let (written, events) =
+                    vault.eip1193_connect(&held.key, grant.account, grant.chain_id);
+                let mut outs = vec![reply(id, &grant.answer(written))];
+                outs.extend(events);
+                outs
+            }
+            Then::Switch(switch) => self.go(id, held, Pending::Switch(switch), vault),
+            Then::Chain(switch) if held.binding.is_some() => {
+                self.go(id, held, Pending::Last(Last::Chain(switch)), vault)
+            }
+            Then::Chain(switch) => self.chain(id, held, switch, vault),
+            Then::Prepared(ask) if !ask.ruled() => self.prompt(id, held, Asking::Sign(ask), vault),
+            // The site's rule answers it (APR-5d-2): the vault's unlock
+            // first while it is locked, then the name again and main's
+            // recheck.
+            Then::Prepared(ask) if !vault.unlocked() => {
+                self.prompt(id, held, Asking::Unlock(ask), vault)
+            }
+            Then::Prepared(ask) => self.go(id, held, Pending::Name(Then::Rule(ask)), vault),
+            Then::Approved(ask, decision) => self.decided(id, held, &ask, decision, vault),
+            Then::Rule(ask) => self.go(id, held, Pending::Rule(ask), vault),
+            Then::Ruled { ask, .. } if held.binding.is_some() => {
+                self.go(id, held, Pending::Last(Last::Rule(Box::new(ask))), vault)
+            }
+            Then::Ruled {
+                approved, agent, ..
+            } => self.rule_sign(id, held, &approved, agent, vault),
+            Then::Signed {
+                answer,
+                always_allow,
+                touch,
+            } => {
+                let mut outs = vec![reply(id, &answer)];
+                // "Always allow": Q9's limited rule, once signed.
+                if let Some(account) = always_allow {
+                    outs.extend(vault.eip1193_allow_signing(&held.key, account));
+                }
+                if touch {
+                    outs.extend(vault.eip1193_touch(&held.key, None));
+                }
+                outs
+            }
+        }
+    }
+
+    /// Main's last recheck of an effect (APR-5f), `recheck.live` already
+    /// false for a binding ended meanwhile: decided on it, and acted on at
+    /// once.
+    fn last(
+        &mut self,
+        id: u64,
+        held: Held,
+        last: Last,
+        recheck: &Recheck,
+        vault: &mut Vault,
+    ) -> Vec<Out> {
+        match last {
+            Last::Touch(connected) => touch(id, &held, connected.answer(recheck.live), vault),
+            Last::Chain(switch) => match switch.rechecked(recheck.live) {
+                Some(answer) => vec![reply(id, &answer)],
+                None => self.chain(id, held, switch, vault),
+            },
+            Last::Rule(ask) => match rule_rechecked(&ask, &held, recheck, vault) {
+                sign::Rechecked::Answer(answer) => vec![reply(id, &answer)],
+                sign::Rechecked::Sign(approved) => {
+                    self.rule_sign(id, held, &approved, recheck.agent, vault)
+                }
+                // Past its rate by now: the user is asked.
+                sign::Rechecked::Prompt => self.prompt(id, held, Asking::Sign(*ask), vault),
+            },
+        }
+    }
+
+    /// A chain switch's effect: the grant takes the chain, then main
+    /// selects it.
+    fn chain(&mut self, id: u64, held: Held, switch: Switch, vault: &mut Vault) -> Vec<Out> {
+        let mut outs = vault.eip1193_touch(&held.key, Some(switch.chain_id()));
+        outs.extend(self.go(id, held, Pending::Select(switch), vault));
+        outs
+    }
+
+    /// A rule's signature, signed under `{ standing }` with the custody of
+    /// main's recheck just before it; then the name again (APR-5f), before
+    /// it goes back with the key's last use.
+    fn rule_sign(
+        &mut self,
+        id: u64,
+        held: Held,
+        approved: &sign::Approved,
+        agent: bool,
+        vault: &mut Vault,
+    ) -> Vec<Out> {
+        let mut page = held.context.clone();
+        page.agent = Some(agent);
+        let signed = vault.eip1193_sign(&page, approved);
+        let answer = approved.answer(
+            signed
+                .as_deref()
+                .map_err(|(locked, message)| (*locked, message.as_str())),
+        );
+        if signed.is_err() {
+            return vec![reply(id, &answer)];
+        }
+        let then = Then::Signed {
+            answer,
+            always_allow: None,
+            touch: true,
+        };
+        self.go(id, held, Pending::Name(then), vault)
+    }
+
+    /// Page request `id`'s send, past its checks (APR-5e-1): the core's
+    /// own estimate and fee quote, and new fee evidence when the chain's is
+    /// stale. A Safe's goes to its prompt unquoted, and one the site's rule
+    /// answers (APR-5e-2) asks main for the vault's unlock first if
+    /// `locked`. A name-keyed document's send checks no name yet: its
+    /// checks are a later step's.
     pub fn send(
         &mut self,
         id: u64,
         sending: Sending,
         locked: bool,
-        key: &str,
         page: &PageContext,
         received: Instant,
         vault: &mut Vault,
     ) -> Vec<Out> {
-        let step = match sending {
-            Sending::Rule(rule) if locked => match self.issue() {
-                Some(prompt) => Pending::Prompt {
-                    ask: Asking::SendUnlock(rule),
-                    id: prompt,
-                },
-                None => return vec![error(id, internal())],
-            },
-            Sending::Prompt(prepare) if !prepare.quotes() => match self.issue() {
-                Some(prompt) => Pending::Prompt {
-                    ask: Asking::Send(prepare.ask(None, None)),
-                    id: prompt,
-                },
-                None => return vec![error(id, internal())],
-            },
-            sending => Pending::Quote(Quoting::of(sending)),
+        let binding = Binding::of(&page.origin, page.transport_key.as_deref());
+        let keyless = names::keyless("eth_sendTransaction");
+        let Some(held) = self.held(page, binding, keyless, received) else {
+            return vec![error(id, internal())];
         };
-        let quoting = matches!(step, Pending::Quote(_));
-        if quoting {
-            if self.insert(id, step, key, page, received).is_some() {
-                return vec![error(id, internal())];
+        match sending {
+            Sending::Rule(rule) if locked => self.prompt(id, held, Asking::SendUnlock(rule), vault),
+            Sending::Prompt(prepare) if !prepare.quotes() => {
+                self.prompt(id, held, Asking::Send(prepare.ask(None, None)), vault)
             }
-            return self.reads_for(id, vault);
+            sending => {
+                self.open.insert(
+                    id,
+                    Open {
+                        held,
+                        step: Pending::Quote(Quoting::of(sending)),
+                        asked: None,
+                    },
+                );
+                self.reads_for(id, vault)
+            }
         }
-        self.open_request(id, step, key, page, received)
     }
 
     /// The chain reads of page request `id`'s send, now waiting on them.
     fn reads_for(&mut self, id: u64, vault: &mut Vault) -> Vec<Out> {
         let now = self.now_ms();
         let Some(Open {
-            budget,
+            held,
             step: Pending::Quote(quoting),
             ..
         }) = self.open.get_mut(&id)
         else {
             return Vec::new();
         };
+        let budget = &held.budget;
         let prepare = quoting.send.prepare();
         let (chain_id, params) = (prepare.chain_id(), prepare.estimate_params());
         let left = budget.left(now);
@@ -595,15 +927,7 @@ impl Connects {
     /// failed read's failure, the prompt when the fee check doesn't let it
     /// through, or main's recheck.
     fn quoted(&mut self, id: u64, vault: &mut Vault) -> Vec<Out> {
-        let Some(Open {
-            key,
-            page,
-            context,
-            budget,
-            step,
-            ..
-        }) = self.open.remove(&id)
-        else {
+        let Some(Open { held, step, .. }) = self.open.remove(&id) else {
             return Vec::new();
         };
         let Pending::Quote(Quoting {
@@ -616,10 +940,7 @@ impl Connects {
             return vec![error(id, internal())];
         };
         let rebuild = |step| Open {
-            key,
-            page,
-            context,
-            budget,
+            held,
             step,
             asked: None,
         };
@@ -707,8 +1028,54 @@ impl Connects {
             return self.prompt_for(id, Asking::Send(*ask));
         }
         match self.open.remove(&id) {
-            Some(open) => minted(id, &open.context, judged, vault),
+            Some(open) => minted(id, &open.held.context, judged, vault),
             None => Vec::new(),
+        }
+    }
+
+    /// A signature's prompt decided: the key must still expose the account
+    /// shown, then the token is minted for this answer and spent on the
+    /// signature, whose answer waits for the name's last check.
+    fn decided(
+        &mut self,
+        id: u64,
+        held: Held,
+        ask: &sign::Ask,
+        decision: Decision,
+        vault: &mut Vault,
+    ) -> Vec<Out> {
+        match ask.decide(decision, |key| vault.dapp_entry(key)) {
+            Ok(sign::Decided::Answer(answer)) => vec![reply(id, &answer)],
+            Ok(sign::Decided::Sign(approved)) => {
+                let signed = vault.eip1193_sign(&held.context, &approved);
+                let answer = approved.answer(
+                    signed
+                        .as_deref()
+                        .map_err(|(locked, message)| (*locked, message.as_str())),
+                );
+                if signed.is_err() {
+                    return vec![reply(id, &answer)];
+                }
+                let then = Then::Signed {
+                    answer,
+                    always_allow: approved.always_allow().then(|| approved.account()),
+                    touch: false,
+                };
+                self.go(id, held, Pending::Name(then), vault)
+            }
+            // A device's account: the token goes back to main with the
+            // approved request, from the minter's wiping buffer straight
+            // into the reply's.
+            Ok(sign::Decided::Device(approved)) => {
+                match vault.eip1193_device(&held.context, &approved) {
+                    Ok(token) => match approved.answer(&token) {
+                        Ok(answer) => vec![device_reply(id, &answer)],
+                        Err(answer) => vec![reply(id, &answer)],
+                    },
+                    Err(message) => vec![reply(id, &sign::DeviceApproval::refused(&message))],
+                }
+            }
+            Err(Crossed) => vec![error(id, crossed())],
         }
     }
 
@@ -739,35 +1106,37 @@ impl Connects {
                 kept.push_back(id);
                 continue;
             }
+            let page = &open.held.page;
             let (method, params) = match &open.step {
                 // A send's own reads go to the chain thread, never here.
                 Pending::Quote(_) | Pending::Judge(_) => continue,
                 Pending::Recheck(_)
                 | Pending::Switch(_)
                 | Pending::Rule(_)
-                | Pending::SendRule(_) => (
+                | Pending::SendRule(_)
+                | Pending::Last(_) => (
                     "approval.recheck",
-                    format!(r#"{{"request":{id},"page":{}}}"#, open.page),
+                    format!(r#"{{"request":{id},"page":{page}}}"#),
                 ),
                 Pending::Select(switch) => (
                     "eip1193.select_chain",
                     format!(
-                        r#"{{"request":{id},"page":{},"chain_id":{}}}"#,
-                        open.page,
+                        r#"{{"request":{id},"page":{page},"chain_id":{}}}"#,
                         switch.chain_id()
                     ),
                 ),
                 Pending::Prompt { ask, id: prompt } => (
                     "approval.request",
                     format!(
-                        r#"{{"request":{id},"prompt":"{}","page":{},"kind":"{}","view":{},"choices":{}}}"#,
+                        r#"{{"request":{id},"prompt":"{}","page":{page},"kind":"{}","view":{},"choices":{}}}"#,
                         prompt.hex(),
-                        open.page,
                         ask.kind(),
                         ask.view(),
                         ask.choices()
                     ),
                 ),
+                // A name check is the naming thread's, never queued here.
+                Pending::Name(_) => continue,
             };
             let sent = self.requests.send(
                 Owner::Eip1193,
@@ -783,7 +1152,7 @@ impl Connects {
                     if let Some(open) = self.open.get_mut(&id) {
                         open.asked = Some(core);
                         if prompt {
-                            open.budget.prompt_opened(now);
+                            open.held.budget.prompt_opened(now);
                             self.prompting += 1;
                         }
                     }
@@ -857,37 +1226,38 @@ impl Connects {
             }
             None => return Vec::new(),
         };
-        let Some(mut open) = self.open.remove(&id) else {
+        let Some(Open { mut held, step, .. }) = self.open.remove(&id) else {
             return Vec::new();
         };
-        let mut outs = match open.step {
+        let mut outs = match step {
             // No request to main is open for these.
             Pending::Quote(_) | Pending::Judge(_) => vec![error(id, internal())],
             Pending::Recheck(connected) => match text.ok_or(Crossed).and_then(Recheck::parse) {
                 Ok(recheck) => {
                     let rechecked = connected.answer(recheck.live);
-                    let mut outs = vec![reply(id, &rechecked.answer)];
+                    // The account goes, and its last use is marked, only
+                    // once the name still serves the key after main's
+                    // recheck (APR-5f): a binding another request ended
+                    // meanwhile refuses with nothing resolved, as
+                    // `holdsKey` does, and otherwise the core resolves the
+                    // name again, since the reference has no wait there,
+                    // and then asks main once more ([`Last`]).
                     if rechecked.touch {
-                        outs.extend(vault.eip1193_touch(&open.key, None));
+                        let then = Then::Touch(connected);
+                        self.go(id, held, Pending::Name(then), vault)
+                    } else {
+                        vec![reply(id, &rechecked.answer)]
                     }
-                    outs
                 }
                 Err(Crossed) => vec![error(id, crossed())],
             },
             // A switch: the document gone answers 4100 with nothing
-            // changed; otherwise the grant takes the chain, then main
-            // selects it.
+            // changed; otherwise the name again (APR-5f) and main's last
+            // recheck, then the grant takes the chain and main selects it.
             Pending::Switch(switch) => match text.ok_or(Crossed).and_then(Recheck::parse) {
                 Ok(recheck) => match switch.rechecked(recheck.live) {
                     Some(answer) => vec![reply(id, &answer)],
-                    None => {
-                        let events = vault.eip1193_touch(&open.key, Some(switch.chain_id()));
-                        open.step = Pending::Select(switch);
-                        open.asked = None;
-                        self.open.insert(id, open);
-                        self.queued.push_back(id);
-                        events
-                    }
+                    None => self.go(id, held, Pending::Name(Then::Chain(switch)), vault),
                 },
                 Err(Crossed) => vec![error(id, crossed())],
             },
@@ -897,44 +1267,37 @@ impl Connects {
             },
             // A rule's signature, just before its effect: custody, the rule
             // judged again with the core's own grant and main's custody,
-            // and the document.
+            // the document, then the name again (APR-5f) and, after its
+            // lookup, all of these once more on main's last recheck.
             Pending::Rule(ask) => match text.ok_or(Crossed).and_then(Recheck::parse) {
-                Ok(recheck) => {
-                    let now = ask.query().map_or(sign::RuleNow::NotCovered, |query| {
-                        vault.eip1193_rule(&open.key, Some(recheck.agent), &query)
-                    });
-                    match ask.rechecked(&recheck, now) {
-                        sign::Rechecked::Answer(answer) => vec![reply(id, &answer)],
-                        sign::Rechecked::Sign(approved) => {
-                            let mut page = open.context.clone();
-                            page.agent = Some(recheck.agent);
-                            let signed = vault.eip1193_sign(&page, &approved);
-                            let answer = approved.answer(
-                                signed
-                                    .as_deref()
-                                    .map_err(|(locked, message)| (*locked, message.as_str())),
-                            );
-                            let mut outs = vec![reply(id, &answer)];
-                            if signed.is_ok() {
-                                outs.extend(vault.eip1193_touch(&open.key, None));
-                            }
-                            outs
-                        }
-                        // Past its rate by now: the user is asked.
-                        sign::Rechecked::Prompt => match self.issue() {
-                            Some(prompt) => {
-                                open.step = Pending::Prompt {
-                                    ask: Asking::Sign(ask),
-                                    id: prompt,
-                                };
-                                open.asked = None;
-                                self.open.insert(id, open);
-                                self.queued.push_back(id);
-                                Vec::new()
-                            }
-                            None => vec![error(id, internal())],
-                        },
+                Ok(recheck) => match rule_rechecked(&ask, &held, &recheck, vault) {
+                    sign::Rechecked::Answer(answer) => vec![reply(id, &answer)],
+                    sign::Rechecked::Sign(approved) => {
+                        let then = Then::Ruled {
+                            ask,
+                            approved,
+                            agent: recheck.agent,
+                        };
+                        self.go(id, held, Pending::Name(then), vault)
                     }
+                    // Past its rate by now: the user is asked.
+                    sign::Rechecked::Prompt => self.prompt(id, held, Asking::Sign(ask), vault),
+                },
+                Err(Crossed) => vec![error(id, crossed())],
+            },
+            // Main's last recheck, after the name lookup that followed its
+            // first (APR-5f): the effect's decision read again and acted on
+            // at once, with nothing awaited after it, as the reference
+            // reads custody and `holdsKey` in one run after its last
+            // `nameHolds`. The document holds its key while main finds it
+            // live and no other request has ended its binding meanwhile.
+            Pending::Last(last) => match text.ok_or(Crossed).and_then(Recheck::parse) {
+                Ok(recheck) => {
+                    let recheck = Recheck {
+                        live: recheck.live && !self.ended.has(&held.document()),
+                        agent: recheck.agent,
+                    };
+                    self.last(id, held, last, &recheck, vault)
                 }
                 Err(Crossed) => vec![error(id, crossed())],
             },
@@ -954,26 +1317,16 @@ impl Connects {
                         send::RuleRechecked::Answer(answer) => vec![reply(id, &answer)],
                         // Past its rate, or its fee needing the user, by
                         // now: the user is asked.
-                        send::RuleRechecked::Ask(ask) => match self.issue() {
-                            Some(prompt) => {
-                                open.step = Pending::Prompt {
-                                    ask: Asking::Send(*ask),
-                                    id: prompt,
-                                };
-                                open.asked = None;
-                                self.open.insert(id, open);
-                                self.queued.push_back(id);
-                                Vec::new()
-                            }
-                            None => vec![error(id, internal())],
-                        },
+                        send::RuleRechecked::Ask(ask) => {
+                            self.prompt(id, held, Asking::Send(*ask), vault)
+                        }
                     }
                 }
                 Err(Crossed) => vec![error(id, crossed())],
             },
             Pending::Prompt { ask, id: prompt } => {
                 self.prompting = self.prompting.saturating_sub(1);
-                open.budget.prompt_closed(self.now_ms());
+                held.budget.prompt_closed(self.now_ms());
                 // Main's error is terminal too: the prompt is retired.
                 let decided = match text {
                     Some(text) => self.prompts.accept(&prompt, text),
@@ -983,57 +1336,27 @@ impl Connects {
                     }
                 };
                 match ask {
+                    // A connect approved: the name again, then the grant.
                     Asking::Connect(ask) => match decided.and_then(|decision| ask.decide(decision))
                     {
                         Ok(Decided::Answer(answer)) => vec![reply(id, &answer)],
                         Ok(Decided::Grant(grant)) => {
-                            let (written, events) =
-                                vault.eip1193_connect(&open.key, grant.account, grant.chain_id);
-                            let mut outs = vec![reply(id, &grant.answer(written))];
-                            outs.extend(events);
-                            outs
+                            self.go(id, held, Pending::Name(Then::Grant(grant)), vault)
                         }
                         Err(Crossed) => vec![error(id, crossed())],
                     },
-                    // A signature: the key must still expose the account
-                    // shown, then the token is minted for this answer and
-                    // spent on the signature.
-                    Asking::Sign(ask) => match decided
-                        .and_then(|decision| ask.decide(decision, |key| vault.dapp_entry(key)))
-                    {
-                        Ok(sign::Decided::Answer(answer)) => vec![reply(id, &answer)],
-                        Ok(sign::Decided::Sign(approved)) => {
-                            let signed = vault.eip1193_sign(&open.context, &approved);
-                            let answer = approved.answer(
-                                signed
-                                    .as_deref()
-                                    .map_err(|(locked, message)| (*locked, message.as_str())),
-                            );
-                            let mut outs = vec![reply(id, &answer)];
-                            // "Always allow": Q9's limited rule, once signed.
-                            if signed.is_ok() && approved.always_allow() {
-                                outs.extend(
-                                    vault.eip1193_allow_signing(&open.key, approved.account()),
-                                );
+                    // A signature approved: the name again, then the grant
+                    // and the account, the token and the signature.
+                    Asking::Sign(ask) => {
+                        match decided.and_then(|d| ask.approves(&d).map(|approves| (d, approves))) {
+                            Ok((decision, true)) => {
+                                let then = Then::Approved(ask, decision);
+                                self.go(id, held, Pending::Name(then), vault)
                             }
-                            outs
+                            Ok((decision, false)) => self.decided(id, held, &ask, decision, vault),
+                            Err(Crossed) => vec![error(id, crossed())],
                         }
-                        // A device's account: the token goes back to main
-                        // with the approved request, from the minter's
-                        // wiping buffer straight into the reply's.
-                        Ok(sign::Decided::Device(approved)) => {
-                            match vault.eip1193_device(&open.context, &approved) {
-                                Ok(token) => match approved.answer(&token) {
-                                    Ok(answer) => vec![device_reply(id, &answer)],
-                                    Err(answer) => vec![reply(id, &answer)],
-                                },
-                                Err(message) => {
-                                    vec![reply(id, &sign::DeviceApproval::refused(&message))]
-                                }
-                            }
-                        }
-                        Err(Crossed) => vec![error(id, crossed())],
-                    },
+                    }
                     // A send (APR-5e-1): rejected or closed answers 4001;
                     // approved with no fee quoted, the quote again; approved
                     // with one, the fee check at approval on the chain's
@@ -1041,24 +1364,35 @@ impl Connects {
                     Asking::Send(ask) => match decided.and_then(|decision| ask.decide(decision)) {
                         Ok(send::Decided::Answer(answer)) => vec![reply(id, &answer)],
                         Ok(send::Decided::Requote(prepare)) => {
-                            open.step = Pending::Quote(Quoting::of(Sending::Prompt(prepare)));
-                            open.asked = None;
-                            self.open.insert(id, open);
+                            let step = Pending::Quote(Quoting::of(Sending::Prompt(prepare)));
+                            self.open.insert(
+                                id,
+                                Open {
+                                    held,
+                                    step,
+                                    asked: None,
+                                },
+                            );
                             self.reads_for(id, vault)
                         }
                         // A Safe's (APR-5e-2): the grant, then its token.
                         Ok(send::Decided::Safe(safe)) => {
                             let judged = safe.judged(|key| vault.dapp_entry(key));
-                            minted(id, &open.context, judged, vault)
+                            minted(id, &held.context, judged, vault)
                         }
                         Ok(send::Decided::Judge(judge)) => {
                             let chain_id = judge.chain_id();
                             let checks = judge.checks_fee();
-                            open.step = Pending::Judge(judge);
-                            open.asked = None;
                             let now = self.now_ms();
-                            let evidence = open.budget.step(now, EVIDENCE_DEADLINE_MS);
-                            self.open.insert(id, open);
+                            let evidence = held.budget.step(now, EVIDENCE_DEADLINE_MS);
+                            self.open.insert(
+                                id,
+                                Open {
+                                    held,
+                                    step: Pending::Judge(judge),
+                                    asked: None,
+                                },
+                            );
                             if !checks || vault.eip1193_fee_fresh(chain_id) {
                                 self.judge_for(id, vault)
                             } else {
@@ -1072,30 +1406,42 @@ impl Connects {
                         match decided.and_then(|decision| rule.unlocked(decision)) {
                             Ok(Some(answer)) => vec![reply(id, &answer)],
                             Ok(None) => {
-                                open.step = Pending::Quote(Quoting::of(Sending::Rule(rule)));
-                                open.asked = None;
-                                self.open.insert(id, open);
+                                let step = Pending::Quote(Quoting::of(Sending::Rule(rule)));
+                                self.open.insert(
+                                    id,
+                                    Open {
+                                        held,
+                                        step,
+                                        asked: None,
+                                    },
+                                );
                                 self.reads_for(id, vault)
                             }
                             Err(Crossed) => vec![error(id, crossed())],
                         }
                     }
-                    // The unlock a rule's signature asked for: then main's
-                    // recheck.
+                    // The unlock a rule's signature asked for: the name
+                    // again, then main's recheck.
                     Asking::Unlock(ask) => {
                         match decided.and_then(|decision| ask.unlocked(decision)) {
                             Ok(Some(answer)) => vec![reply(id, &answer)],
-                            Ok(None) => {
-                                open.step = Pending::Rule(ask);
-                                open.asked = None;
-                                self.open.insert(id, open);
-                                self.queued.push_back(id);
-                                Vec::new()
-                            }
+                            Ok(None) => self.go(id, held, Pending::Name(Then::Rule(ask)), vault),
                             Err(Crossed) => vec![error(id, crossed())],
                         }
                     }
                 }
+            }
+            // Main never answers a name check; the core asked it nothing.
+            Pending::Name(then) => {
+                self.open.insert(
+                    id,
+                    Open {
+                        held,
+                        step: Pending::Name(then),
+                        asked: None,
+                    },
+                );
+                Vec::new()
             }
         };
         outs.extend(self.pump());
@@ -1114,10 +1460,18 @@ impl Connects {
     }
 
     /// Ends page request `id` without main's answer: its request to main,
-    /// if sent, is cancelled, and a prompt's leaves its tombstone.
+    /// if sent, is cancelled, and a prompt's leaves its tombstone. A name
+    /// check's lookup is cancelled, and its verdict never comes.
     fn end(&mut self, id: u64) -> Vec<Out> {
         self.queued.retain(|queued| *queued != id);
-        let Some(core) = self.open.get(&id).and_then(|open| open.asked) else {
+        let Some(open) = self.open.get(&id) else {
+            return Vec::new();
+        };
+        if matches!(open.step, Pending::Name(_)) {
+            self.open.remove(&id);
+            return vec![Out::NameCancel(id)];
+        }
+        let Some(core) = open.asked else {
             self.drop_unsent(id);
             return Vec::new();
         };
@@ -1135,7 +1489,9 @@ impl Connects {
             | Pending::Rule(_)
             | Pending::SendRule(_)
             | Pending::Quote(_)
-            | Pending::Judge(_) => {
+            | Pending::Judge(_)
+            | Pending::Name(_)
+            | Pending::Last(_) => {
                 self.asked.remove(&core);
             }
         }
@@ -1146,7 +1502,7 @@ impl Connects {
     /// Whether `open`'s clock runs. Its budget alone says so: the budget
     /// stops while the request's prompt is open.
     fn running(open: &Open) -> bool {
-        !open.budget.stopped()
+        !open.held.budget.stopped()
     }
 
     /// When the next request's time runs out.
@@ -1155,7 +1511,7 @@ impl Connects {
         self.open
             .values()
             .filter(|open| Self::running(open))
-            .map(|open| open.budget.left(now))
+            .map(|open| open.held.budget.left(now))
             .min()
             .map(|left| Instant::now() + Duration::from_millis(left))
     }
@@ -1166,7 +1522,7 @@ impl Connects {
         let due: Vec<u64> = self
             .open
             .iter()
-            .filter(|(_, open)| Self::running(open) && open.budget.left(now) == 0)
+            .filter(|(_, open)| Self::running(open) && open.held.budget.left(now) == 0)
             .map(|(id, _)| *id)
             .collect();
         if due.is_empty() {
@@ -1180,6 +1536,44 @@ impl Connects {
         outs.extend(self.pump());
         outs
     }
+}
+
+/// A connected key's answer once main has rechecked it: its account, with
+/// its last use marked, or `4100` with nothing marked.
+fn touch(id: u64, held: &Held, rechecked: connect::Rechecked, vault: &mut Vault) -> Vec<Out> {
+    let mut outs = vec![reply(id, &rechecked.answer)];
+    if rechecked.touch {
+        outs.extend(vault.eip1193_touch(&held.key, None));
+    }
+    outs
+}
+
+/// A rule's signature on main's recheck, in the reference's order:
+/// custody, the rule judged again with the core's own grant and that
+/// custody, the document.
+fn rule_rechecked(
+    ask: &sign::Ask,
+    held: &Held,
+    recheck: &Recheck,
+    vault: &mut Vault,
+) -> sign::Rechecked {
+    let now = ask.query().map_or(sign::RuleNow::NotCovered, |query| {
+        vault.eip1193_rule(&held.key, Some(recheck.agent), &query)
+    });
+    ask.rechecked(recheck, now)
+}
+
+/// `not_moved` for a page request that would write the dApp store before
+/// it moves.
+pub fn not_moved(id: u64) -> Out {
+    error(
+        id,
+        ErrorBody::new(
+            ErrorCode::NotMoved,
+            "main still writes this permission file (it isn't in grant_moved)",
+        )
+        .with_data(serde_json::json!({ "store": "dapp" })),
+    )
 }
 
 /// A send's chain read's outcome, as `quote` takes it.

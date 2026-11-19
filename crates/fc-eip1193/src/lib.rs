@@ -54,14 +54,18 @@
 //! transaction without its nonce, and its token, for main to add the nonce
 //! and have it signed. Device sends and rule-answered sends are APR-5e-2's.
 //!
-//! The last APR-5 step adds names over IPNS (APR-5f). Until then, a method
-//! without its route answers as a dispatcher without it does (`4200`,
-//! `Method not supported`), but `4900` while the switch is off.
+//! **APR-5f, names over IPNS** ([`names`]): for a document whose key is a
+//! DNS name served over IPNS (`PageContext.transport_key`), the daemon
+//! resolves the name with the core's own naming at each of the reference's
+//! checks of a name-revalidated method, and a name that no longer answers
+//! its IPNS key ends the binding: the request, and the document's later
+//! ones, answer as a keyless document's would.
 
 mod answer;
 pub mod connect;
 mod deadline;
 mod methods;
+pub mod names;
 pub mod prompt;
 mod request;
 pub mod send;
@@ -157,7 +161,8 @@ pub fn start(
             key,
             world,
         )),
-        // APR-5f serves the rest.
+        // Any other row of the table answers as a dispatcher without its
+        // route does.
         _ => Step::Answer(Answer::unsupported()),
     }
 }

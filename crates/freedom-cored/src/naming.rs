@@ -11,6 +11,12 @@
 //! a name host is a lookup on the machine first, under naming's admission,
 //! generations and deadlines. The plan waits only for its name; once
 //! returned, the core keeps nothing of it.
+//!
+//! A page request's name check (design 0012, APR-5f) runs here too: the
+//! event loop asks for a name-keyed document's name, the lookup runs as
+//! `naming.resolve_content` would, under the same admission and cache, and
+//! whether its answer serves the document's IPNS key goes back to the event
+//! loop ([`Event::NameChecked`]), never to main.
 
 use std::collections::{BTreeMap, VecDeque};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
@@ -74,6 +80,19 @@ pub enum In {
     },
     /// The writer has room again for frames that wait here.
     Drained,
+    /// A page request's name check (APR-5f): `binding`'s name resolved, its
+    /// answer judged against its IPNS key, and the verdict sent to the
+    /// event loop under `tag`, the page request's id.
+    Check {
+        tag: u64,
+        binding: fc_eip1193::names::Binding,
+        deadline_ms: u64,
+    },
+    /// The check under `tag` is no longer wanted: its lookup is cancelled,
+    /// and no verdict goes.
+    CancelCheck {
+        tag: u64,
+    },
 }
 
 /// A message, with the reader's credit for the frame it came in: the
@@ -123,7 +142,7 @@ pub fn spawn(
         .name("naming".into())
         .spawn(move || {
             let _notice = transport::DeathNotice::new(events.clone(), "naming");
-            let event = match run(&rx, out, allowance, requests) {
+            let event = match run(&rx, out, allowance, requests, events.clone()) {
                 Stop::Protocol(category) => Event::ProtocolError(category),
                 Stop::Writer => Event::WriterFailed,
                 // The event loop has gone: nothing to report to.
@@ -183,6 +202,7 @@ fn run(
     out: Sender<Out>,
     allowance: Arc<Allowance>,
     requests: Arc<Requests>,
+    events: Sender<Event>,
 ) -> Stop {
     let started = Instant::now();
     let mut machine = Machine::new(0, empty_config(), Box::new(OsRandom));
@@ -204,6 +224,8 @@ fn run(
         outgoing: BTreeMap::new(),
         by_io: BTreeMap::new(),
         queued: VecDeque::new(),
+        checks: BTreeMap::new(),
+        events,
     };
     let now = || u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
     loop {
@@ -299,6 +321,11 @@ struct Naming {
     outgoing: BTreeMap<u64, Outgoing>,
     /// Message IDs by the machine's request id.
     by_io: BTreeMap<u64, u64>,
+    /// Page requests' name checks (APR-5f), by the machine's caller for
+    /// the lookup: the page request's id and the binding judged.
+    checks: BTreeMap<u64, (u64, fc_eip1193::names::Binding)>,
+    /// The event loop, which takes the checks' verdicts.
+    events: Sender<Event>,
 }
 
 impl Naming {
@@ -335,6 +362,36 @@ impl Naming {
             }
             In::Response { id, outcome } => self.response(id, outcome),
             In::Drained => self.pump(),
+            In::Check {
+                tag,
+                binding,
+                deadline_ms,
+            } => {
+                if crate::testhooks::eip1193_names_uncached() {
+                    self.machine.invalidate_content(binding.name());
+                }
+                let options = CallOptions {
+                    attempts_used: 0,
+                    deadline_ms: Some(deadline_ms.min(Bounds::default().deadline_ms)),
+                };
+                let caller = self.machine.resolve_content_with(binding.name(), options);
+                self.checks.insert(caller, (tag, binding));
+                self.poll();
+                Ok(())
+            }
+            In::CancelCheck { tag } => {
+                let caller = self
+                    .checks
+                    .iter()
+                    .find(|(_, (t, _))| *t == tag)
+                    .map(|(caller, _)| *caller);
+                if let Some(caller) = caller {
+                    self.checks.remove(&caller);
+                    self.machine.cancel(caller);
+                    self.poll();
+                }
+                Ok(())
+            }
         }
     }
 
@@ -542,6 +599,14 @@ impl Naming {
             self.effects()?;
             let settled = self.dispatch()?;
             for reply in self.machine.take_replies() {
+                // A page request's name check: its verdict goes to the
+                // event loop, `resolveEnsContent`'s throw counting as a
+                // name that doesn't serve the key.
+                if let Some((tag, binding)) = self.checks.remove(&reply.caller) {
+                    let holds = binding.served_by(reply.outcome.as_ref().ok());
+                    let _ = self.events.send(Event::NameChecked { tag, holds });
+                    continue;
+                }
                 let pending = self.plans.remove(&reply.caller);
                 if let Some(pending) = &pending {
                     self.planned = self.planned.saturating_sub(pending.heap_bytes());
@@ -1340,6 +1405,8 @@ mod tests {
             outgoing: BTreeMap::new(),
             by_io: BTreeMap::new(),
             queued: VecDeque::new(),
+            checks: BTreeMap::new(),
+            events: mpsc::channel().0,
         };
         (naming, rx)
     }

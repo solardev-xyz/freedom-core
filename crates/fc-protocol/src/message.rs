@@ -90,6 +90,14 @@ pub struct PageContext {
     /// standing rule.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent: Option<bool>,
+    /// The document's transport key (design 0011's `transportKey`): the
+    /// committed URL's own key, with no name binding. It differs from
+    /// `origin` only for a DNS name over IPNS, where it is `ipns://<key>`
+    /// and `origin` is the name; the core then resolves the name itself
+    /// before each use of its grant (design 0012, APR-5f). Absent: no name
+    /// check, as before APR-5f.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transport_key: Option<String>,
 }
 
 /// A decoded message, borrowing its raw JSON parts from the frame.
