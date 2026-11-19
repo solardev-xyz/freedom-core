@@ -25,15 +25,20 @@
 //!   limit, with no byte-order mark; an object; a `derivedWallets` that is
 //!   falsy or an array of objects, each with an integer `index`; an
 //!   `activeWalletIndex` that is missing, `null` or an integer; and a Safe
-//!   record's `owners`, falsy or an array. What the reference does instead
-//!   depends on the damage: a file that doesn't parse (or `null`) reads as
-//!   missing; one past the bound or the nesting limit, or not an object, is
-//!   read, and its next list writes a fresh one-account list over it; a
-//!   list that isn't an array, or a `null` record, makes every list throw a
-//!   `TypeError`; an index that isn't an integer (`"1"`, `0.5`), a record
-//!   that isn't an object, or owners that aren't an array are listed as
-//!   found, and a lookup by index matches nothing. No reference writer
-//!   makes any of these. `stores.json`'s `vault_meta.malformed` pins each.
+//!   record's `owners`, falsy or an array. The reference has no size or
+//!   nesting limit, and what it does depends on the damage: a file that
+//!   doesn't parse (or `null`) reads as missing; a non-object, or an object
+//!   with no `derivedWallets` (the pinned oversized and deeply nested
+//!   examples among them), gets a fresh one-account list written over it
+//!   at the next list; a list that isn't an array, or a `null` record,
+//!   makes every list throw a `TypeError`; a record that isn't an object,
+//!   or an index or active index that isn't an integer (`"1"`, `0.5`), is
+//!   listed as found, and a lookup by index matches nothing; a Safe whose
+//!   `owners` isn't an array is listed and found, with `owners` as stored.
+//!   The bound and the nesting limit are resource limits; the shape rules
+//!   keep every record in a form this codec writes back byte for byte. No
+//!   reference writer makes any of these. `stores.json`'s
+//!   `vault_meta.malformed` pins each.
 //! - The identity core's answers come in from the caller: the addresses a
 //!   create, import or unlock gives, and the mnemonic accounts' addresses
 //!   through the closures [`VaultMeta::list`] and [`VaultMeta::add_mnemonic`]
@@ -84,7 +89,7 @@ pub enum Unreadable {
     TooLarge,
     /// Not JSON (a byte-order mark included): the reference reads no meta
     /// either. Or nested deeper than fc-json reads (512 levels), which the
-    /// reference reads, and its next list writes a fresh list over.
+    /// reference reads as it would any object (a resource limit).
     #[error("the file is not JSON")]
     NotJson,
     #[error("the file is not a JSON object")]
