@@ -187,6 +187,24 @@ fn a_link_or_a_directory_is_refused() {
     }
 }
 
+/// A directory reached through a link opens (macOS's temporary directories
+/// are under `/var`, a link to `/private/var`), and the file's own name as a
+/// link stays refused.
+#[cfg(unix)]
+#[test]
+fn a_directory_through_a_link_opens() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir(dir.path().join("real")).unwrap();
+    std::os::unix::fs::symlink(dir.path().join("real"), dir.path().join("linked")).unwrap();
+    let path = dir.path().join("linked/payment-history.sqlite");
+    drop(open(&path, &PAYMENTS).unwrap());
+    assert!(dir.path().join("real/payment-history.sqlite").is_file());
+    drop(open(&path, &PAYMENTS).unwrap());
+    std::os::unix::fs::symlink(&path, dir.path().join("real/link.sqlite")).unwrap();
+    let link = dir.path().join("linked/link.sqlite");
+    assert!(matches!(open(&link, &PAYMENTS), Err(Error::Refused)));
+}
+
 /// A database another user owns is refused. Only where the test can give a
 /// file away (as root): skipped otherwise.
 #[cfg(unix)]

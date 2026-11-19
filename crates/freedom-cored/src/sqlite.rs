@@ -4,15 +4,21 @@
 //! in `fc-wallet-state`, and this module is the glue.
 //!
 //! [`open`] opens one database under 0001's rules, as far as SQLite allows:
+//! - **The name**, on Unix, has its directory resolved once
+//!   (`canonicalize`), never the file's own name: SQLite's
+//!   `SQLITE_OPEN_NOFOLLOW` refuses a link anywhere in the name it is given,
+//!   so it then refuses only one swapped in later, while a root reached
+//!   through a link (macOS's `/var`, a linked home) still opens, as 0001's
+//!   roots do.
 //! - **The file** is a regular file the user owns, judged on a handle that
 //!   didn't follow a symlink, or is created here with mode `0600` (never
-//!   through a link), its directory flushed. SQLite then opens that path
-//!   without following a link (`SQLITE_OPEN_NOFOLLOW`) and without creating
-//!   it, and the path must still name the judged file. Its `-wal` and
-//!   `-shm` take the database's mode (SQLite's rule). SQLite opens by path,
-//!   so 0001's handle-relative directory can't reach into it: a directory
-//!   swapped above the file between the checks and SQLite's own opens is
-//!   outside them.
+//!   through a link), its directory flushed. SQLite then opens that name
+//!   without following a link (`SQLITE_OPEN_NOFOLLOW`, Unix only) and
+//!   without creating it, and the name must still be the judged file. Its
+//!   `-wal` and `-shm` take the database's mode (SQLite's rule). SQLite
+//!   opens by path, so 0001's handle-relative directory can't reach into it:
+//!   on Windows, a directory swapped above the file between the checks and
+//!   SQLite's own opens is outside them.
 //! - **WAL**, as the reference sets it (`journal_mode = WAL`), and refused
 //!   if SQLite answers another mode.
 //! - **`user_version`**, read in a write transaction: 0 is a new database,
@@ -30,7 +36,7 @@
 use std::fmt;
 use std::fs::File;
 use std::io;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use fc_store::fsx;
 use rusqlite::{Connection, OpenFlags, TransactionBehavior};
@@ -81,6 +87,7 @@ impl From<rusqlite::Error> for Error {
 /// Opens the database at `path` for `schema`, creating it if missing
 /// ([module docs](self)).
 pub fn open(path: &Path, schema: &Schema) -> Result<Connection, Error> {
+    let path = &resolved(path)?;
     let judged = judge(path)?;
     let mut conn = Connection::open_with_flags(
         path,
@@ -110,6 +117,23 @@ pub fn open(path: &Path, schema: &Schema) -> Result<Connection, Error> {
         drop(tx);
     }
     Ok(conn)
+}
+
+/// `path` with its directory resolved (Unix), its own name as given.
+#[cfg(unix)]
+fn resolved(path: &Path) -> Result<PathBuf, Error> {
+    let name = path.file_name().ok_or(Error::Refused)?;
+    let dir = match path.parent() {
+        Some(dir) if !dir.as_os_str().is_empty() => dir,
+        _ => Path::new("."),
+    };
+    Ok(dir.canonicalize()?.join(name))
+}
+
+/// Windows' SQLite has no `SQLITE_OPEN_NOFOLLOW`: the name as given.
+#[cfg(windows)]
+fn resolved(path: &Path) -> Result<PathBuf, Error> {
+    Ok(path.to_path_buf())
 }
 
 /// The file at `path`, judged on a handle: a regular file the user owns,
