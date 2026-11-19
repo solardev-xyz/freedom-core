@@ -37,6 +37,7 @@ mod phone;
 mod profile;
 mod requests;
 mod rng;
+mod rpc_keys;
 mod secrets;
 mod serve;
 mod signing;

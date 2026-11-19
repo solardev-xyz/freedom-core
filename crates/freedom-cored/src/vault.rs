@@ -276,6 +276,8 @@ pub enum JobOutput {
     /// A password check the throttle refused: what the file says, before
     /// `throttled` (#82).
     Prechecked(Result<(), OpError>),
+    /// An RPC-key method's answer (design 0013, "RPC API keys").
+    RpcKeys(Result<RpcAnswer, ErrorBody>),
 }
 
 /// What `vault.reconcile` found for a committed create or import.
@@ -311,7 +313,8 @@ impl JobOutput {
             | JobOutput::Reconciled { .. }
             | JobOutput::NodeWritten(_)
             | JobOutput::OpStatus(_)
-            | JobOutput::Prechecked(_) => None,
+            | JobOutput::Prechecked(_)
+            | JobOutput::RpcKeys(_) => None,
         }
     }
 }
@@ -378,7 +381,33 @@ enum Kind {
         account: u32,
     },
     QuickDisable,
+    /// A `secrets.*` RPC-key method (design 0013, "RPC API keys").
+    RpcKeys(RpcJob),
 }
+
+/// What an RPC-key job does.
+enum RpcJob {
+    Keys,
+    Status,
+    Change(crate::rpc_keys::Op),
+}
+
+/// What an RPC-key job found.
+pub enum RpcAnswer {
+    /// The providers with a key; a set's or a remove's provider is listed
+    /// with its presence after it, and whether its change is durable.
+    Providers(Vec<String>, Option<(String, bool)>, bool),
+    /// `secrets.rpc_api_keys`: each provider's key.
+    Keys(std::collections::BTreeMap<String, Zeroizing<String>>),
+}
+
+/// The RPC-key methods (design 0013, "RPC API keys").
+pub const RPC_KEY_METHODS: &[&str] = &[
+    "secrets.rpc_api_keys",
+    "secrets.rpc_api_key_status",
+    "secrets.set_rpc_api_key",
+    "secrets.remove_rpc_api_key",
+];
 
 impl Kind {
     /// What a password check the throttle refuses still checks, without the
@@ -403,7 +432,8 @@ impl Kind {
             | Kind::QuickUnlock
             | Kind::QuickExportMnemonic
             | Kind::QuickExportPrivateKey { .. }
-            | Kind::QuickDisable => None,
+            | Kind::QuickDisable
+            | Kind::RpcKeys(_) => None,
         }
     }
 
@@ -450,7 +480,8 @@ impl Kind {
             | Kind::QuickUnlock
             | Kind::QuickExportMnemonic
             | Kind::QuickExportPrivateKey { .. }
-            | Kind::QuickDisable => false,
+            | Kind::QuickDisable
+            | Kind::RpcKeys(_) => false,
         }
     }
 }
@@ -551,6 +582,7 @@ enum RunningKind {
     QuickExportMnemonic,
     QuickExportPrivateKey(u32),
     QuickDisable,
+    RpcKeys,
     /// A password check the throttle refused, checking the file first.
     /// `ready_at`: when the throttle allows the next attempt (clock ms).
     Precheck {
@@ -597,6 +629,19 @@ pub struct Vault {
     /// The secrets file and the key store, for quick unlock (design 0013):
     /// `None` until serve sets it.
     secrets: Option<Arc<Secrets>>,
+    /// The RPC API keys, once `core.hello` names `rpc_api_keys` in
+    /// `store_moved` (design 0013, "RPC API keys"): `None` before, and every
+    /// `secrets.*` RPC-key method answers `not_moved`.
+    rpc_keys: Option<Arc<crate::rpc_keys::RpcKeys>>,
+}
+
+#[derive(Deserialize)]
+struct RpcKeyParams<'a> {
+    id: String,
+    /// Read by [`crate::rpc_keys::key_param`], never into `serde_json`'s
+    /// growing buffer.
+    #[serde(borrow, default)]
+    api_key: Option<&'a RawValue>,
 }
 
 #[derive(Deserialize)]
@@ -812,6 +857,7 @@ impl Vault {
             next_job: 1,
             kdf_deadline: crate::testhooks::kdf_deadline(KDF_DEADLINE),
             secrets: None,
+            rpc_keys: None,
         }
     }
 
@@ -864,6 +910,57 @@ impl Vault {
         let wall_ms = self.clocks().wall_ms;
         self.phone.configure(root.clone());
         self.approvals.configure_grants(root, moved, wall_ms);
+    }
+
+    /// The hello's `store_moved` named `rpc_api_keys`: the core serves the
+    /// RPC-key methods, with `rpc-api-keys.json` under `root` (design 0013,
+    /// "RPC API keys"). Whether it took the store.
+    pub fn configure_rpc_keys(&mut self, root: PathBuf) -> bool {
+        match &self.secrets {
+            Some(secrets) => {
+                self.rpc_keys = Some(crate::rpc_keys::RpcKeys::new(root, secrets.clone()));
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// An RPC-key request's job, at admission: `not_moved` until the store
+    /// is named (and `rpc-api-keys.json` never opened), the parameters
+    /// checked.
+    fn rpc_job(&self, method: &str, raw: Option<&str>) -> Result<RpcJob, ErrorBody> {
+        if self.rpc_keys.is_none() {
+            return Err(ErrorBody::new(
+                ErrorCode::NotMoved,
+                "main still writes the RPC API keys (rpc_api_keys isn't in store_moved)",
+            )
+            .with_data(serde_json::json!({ "store": "rpc_api_keys" })));
+        }
+        let invalid = || ErrorBody::new(ErrorCode::InvalidArgument, "Invalid parameters");
+        Ok(match method {
+            "secrets.rpc_api_keys" => RpcJob::Keys,
+            "secrets.rpc_api_key_status" => RpcJob::Status,
+            "secrets.set_rpc_api_key" => {
+                let p = params::<RpcKeyParams>(raw)?;
+                let key = p
+                    .api_key
+                    .and_then(|raw| crate::rpc_keys::key_param(raw.get()))
+                    .ok_or_else(invalid)?;
+                RpcJob::Change(crate::rpc_keys::Op::Set {
+                    id: p.id,
+                    key,
+                    at_ms: self.clocks().wall_ms,
+                })
+            }
+            "secrets.remove_rpc_api_key" => {
+                let p = params::<RpcKeyParams>(raw)?;
+                if p.id.is_empty() || p.id.len() > crate::rpc_keys::MAX_FILE_BYTES {
+                    return Err(invalid());
+                }
+                RpcJob::Change(crate::rpc_keys::Op::Remove { id: p.id })
+            }
+            _ => return Err(internal()),
+        })
     }
 
     /// The key's entry in the dApp store, for a page's `eth_accounts`
@@ -1142,7 +1239,8 @@ impl Vault {
                 | "keys.validate_mnemonic"
                 | "keys.addresses"
                 | "keys.radicle_did"
-        ) || crate::signing::METHODS.contains(&method)
+        ) || RPC_KEY_METHODS.contains(&method)
+            || crate::signing::METHODS.contains(&method)
             || Approvals::handles(method)
             || crate::phone::Phone::handles(method)
             || crate::approvals::x402::METHODS.contains(&method)
@@ -1682,6 +1780,7 @@ impl Vault {
                 account: params::<AccountParams>(raw)?.account,
             },
             "quick_unlock.disable" => Kind::QuickDisable,
+            _ if RPC_KEY_METHODS.contains(&method) => Kind::RpcKeys(self.rpc_job(method, raw)?),
             "nodes.op_status" => {
                 let p = params::<OpStatusParams>(raw)?;
                 if !journal::valid_op_id(&p.op_id) {
@@ -1958,6 +2057,15 @@ impl Vault {
                     }),
                 )
             }
+            Kind::RpcKeys(job) => {
+                let rpc_keys = self.rpc_keys.clone();
+                (
+                    RunningKind::RpcKeys,
+                    Box::new(move |_dir, control| {
+                        JobOutput::RpcKeys(job_rpc_keys(rpc_keys.as_deref(), job, control))
+                    }),
+                )
+            }
             Kind::QuickDisable => {
                 let secrets = self.secrets.clone();
                 (
@@ -2189,6 +2297,9 @@ impl Vault {
                 };
                 (Outcome::NotTried, reply)
             }
+            (RunningKind::RpcKeys, JobOutput::RpcKeys(answer)) => {
+                (Outcome::NotTried, answer.map(|a| rpc_reply(request, &a)))
+            }
             (RunningKind::OpStatus, JobOutput::OpStatus(result)) => {
                 let reply = result
                     .map(|status| json_result(request, &serde_json::json!({ "status": status })))
@@ -2369,7 +2480,8 @@ fn throttle_outcome(output: &JobOutput) -> Outcome {
         JobOutput::Written { .. }
         | JobOutput::NodeWritten(_)
         | JobOutput::OpStatus(_)
-        | JobOutput::Prechecked(_) => return Outcome::NotTried,
+        | JobOutput::Prechecked(_)
+        | JobOutput::RpcKeys(_) => return Outcome::NotTried,
     };
     match result {
         Ok(_) => Outcome::Success,
@@ -2873,6 +2985,128 @@ fn job_quick_unlock(
 }
 
 /// `quick_unlock.disable`: the entry removed, its key into `forget`.
+/// An RPC-key method, on the worker (design 0013, "RPC API keys").
+fn job_rpc_keys(
+    rpc_keys: Option<&crate::rpc_keys::RpcKeys>,
+    job: RpcJob,
+    control: &JobControl,
+) -> Result<RpcAnswer, ErrorBody> {
+    use crate::rpc_keys::{Commit, Failure, Op};
+    let rpc_keys = rpc_keys.ok_or_else(internal)?;
+    if control.abandoned() {
+        return Err(deadline_exceeded());
+    }
+    let body = |failure: Failure| match failure {
+        Failure::Invalid(rule) => ErrorBody::new(ErrorCode::InvalidArgument, "Invalid parameters")
+            .with_data(serde_json::json!({ "rule": rule })),
+        // The loop has answered already.
+        Failure::Secrets(secrets::Error::Abandoned) => deadline_exceeded(),
+        Failure::Secrets(error) => secrets_body(error),
+        Failure::File(kind) => ErrorBody::new(ErrorCode::Storage, "Storage error")
+            .with_data(serde_json::json!({ "kind": kind, "file": "rpc_api_keys" })),
+        Failure::NotDurable => ErrorBody::new(ErrorCode::Storage, "Storage error")
+            .with_data(serde_json::json!({ "kind": "not_durable", "file": "secrets" })),
+    };
+    // Every write that changes an answer is claimed through the job's
+    // commit, at the first (design 0001; [`Commit`]).
+    let abandoned = || control.abandoned();
+    let claim = || claim(control);
+    let commit = Commit::new(&abandoned, &claim);
+    match job {
+        RpcJob::Keys => rpc_keys.keys(&commit).map(RpcAnswer::Keys).map_err(body),
+        RpcJob::Status => rpc_keys
+            .status(&commit)
+            .map(|ids| RpcAnswer::Providers(ids, None, true))
+            .map_err(body),
+        RpcJob::Change(op) => {
+            let done = rpc_keys.change(&op, &commit).map_err(body)?;
+            let touched = match &op {
+                Op::Set { id, .. } => (id.clone(), true),
+                Op::Remove { id } => (id.clone(), false),
+            };
+            let ids = rpc_keys.status(&commit).map_err(body)?;
+            Ok(RpcAnswer::Providers(
+                ids,
+                Some(touched),
+                done == fc_store::fsx::Done::Durable,
+            ))
+        }
+    }
+}
+
+/// Counts what a writer is given.
+struct Counted(usize);
+
+impl std::io::Write for Counted {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.0 = self.0.saturating_add(bytes.len());
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+/// An RPC-key job's answer: `{ providers: [{ id, present }] }`, never a key,
+/// with `durable: false` when a set's or a remove's change isn't durable;
+/// `secrets.rpc_api_keys`'s `{ keys: [{ id, api_key }] }`, written straight
+/// into the zeroized payload. That payload's size is counted first, by the
+/// same writer, so its buffer is allocated once, exactly, and never grows
+/// (a grown buffer would leave the keys in the allocation it freed).
+fn rpc_reply(id: u64, answer: &RpcAnswer) -> Option<Zeroizing<Vec<u8>>> {
+    #[derive(Serialize)]
+    struct Provider<'a> {
+        id: &'a str,
+        present: bool,
+    }
+    #[derive(Serialize)]
+    struct Key<'a> {
+        id: &'a str,
+        api_key: &'a str,
+    }
+    match answer {
+        RpcAnswer::Providers(ids, touched, durable) => {
+            let mut providers: Vec<Provider<'_>> = ids
+                .iter()
+                .map(|id| Provider { id, present: true })
+                .collect();
+            if let Some((touched, false)) = touched
+                && !ids.contains(touched)
+            {
+                providers.push(Provider {
+                    id: touched,
+                    present: false,
+                });
+            }
+            let mut result = serde_json::json!({ "providers": providers });
+            if !durable {
+                result["durable"] = serde_json::Value::Bool(false);
+            }
+            json_result(id, &result)
+        }
+        RpcAnswer::Keys(keys) => {
+            let keys: Vec<Key<'_>> = keys
+                .iter()
+                .map(|(id, key)| Key {
+                    id,
+                    api_key: key.as_str(),
+                })
+                .collect();
+            #[derive(Serialize)]
+            struct Keys<'a> {
+                keys: &'a [Key<'a>],
+            }
+            let keys = Keys { keys: &keys };
+            let mut size = Counted(0);
+            message::write_result(&mut size, id, &keys).ok()?;
+            let mut payload = Zeroizing::new(Vec::with_capacity(size.0));
+            message::write_result(&mut *payload, id, &keys).ok()?;
+            Some(payload)
+        }
+    }
+}
+
 fn job_quick_disable(secrets: Option<&Secrets>, control: &JobControl) -> Result<(), OpError> {
     if control.abandoned() {
         return Err(OpError::Abandoned);
@@ -3491,6 +3725,24 @@ fn written(result: Result<(NewVault, Commit), OpError>) -> JobOutput {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `secrets.rpc_api_keys`' payload is counted before it is written, so
+    /// its zeroizing buffer never grows: a control character, six bytes
+    /// escaped, in every byte of a 1,024-byte key, and an id that needs
+    /// escaping too.
+    #[test]
+    fn the_rpc_keys_reply_is_sized_exactly() {
+        let key = "\u{1}".repeat(1024);
+        let mut keys = std::collections::BTreeMap::new();
+        keys.insert("alchemy".to_owned(), Zeroizing::new(key.clone()));
+        keys.insert("a\u{1f}\"".to_owned(), Zeroizing::new("k\\".to_owned()));
+        let payload = rpc_reply(7, &RpcAnswer::Keys(keys)).unwrap();
+        assert!(payload.len() > 6 * 1024);
+        assert_eq!(payload.capacity(), payload.len());
+        let reply: serde_json::Value = serde_json::from_slice(&payload).unwrap();
+        assert_eq!(reply["result"]["keys"][1]["api_key"], key.as_str());
+        assert_eq!(reply["result"]["keys"][0]["id"], "a\u{1f}\"");
+    }
 
     /// #86: an error reply too large for a frame ended the core (exit 70)
     /// once framed. It is replaced by its code with a fixed message.

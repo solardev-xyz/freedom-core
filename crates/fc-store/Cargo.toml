@@ -20,6 +20,11 @@ fc-json = { path = "../fc-json" }
 # The journal's line checksum. Already in the tree (fc-approval, fc-profile,
 # fc-service and others build it the same way).
 sha2 = { version = "0.11", default-features = false }
+# A file of secrets read into one buffer that is wiped on drop
+# (`fsx::read_secret_at_most`, `file::read_secret_file`): the RPC API keys'
+# plaintext file. Already in the daemon and freedom-mobile-ffi (AGENTS.md
+# rule 7).
+zeroize = "1.8"
 
 [target.'cfg(unix)'.dependencies]
 # openat, renameat, unlinkat, fstatat and O_NOFOLLOW for the handle-relative

@@ -71,7 +71,9 @@
 //!   store offers the macOS Keychain's `Unattended` on any OS, as macOS
 //!   does, so a test playing main answers its `shell.keystore` requests
 //!   from a keychain of its own (design 0013, PRF-1c's forgetting tests).
-//!   The helper is unchanged: it still has no backend off macOS.
+//!   The helper is unchanged: it still has no backend off macOS. `=none`:
+//!   the key store offers nothing, on any OS (macOS's own Keychain
+//!   included), as on Linux and Windows until PRF-7.
 //! - `FREEDOM_CORED_TEST_SECRETS_CRASH` names a step of a secrets-file
 //!   change (`before-pending`, `after-pending`, `before-commit`,
 //!   `after-commit`, `before-remove`, `after-remove`, `before-forgotten`,
@@ -97,8 +99,10 @@
 //!   `commit`, `remove`, `stage-pending`, `stage`, `fold`, `rollback`, …:
 //!   before its rename), or a vault write's (`vault-claim`, its claim
 //!   refused as if past its time; `vault-rename`, its rename, after the
-//!   claim). The first attempt in the process of each listed write fails as
-//!   if the OS had failed it.
+//!   claim), or the directory flush after a secrets-file write's rename
+//!   (`<step>-flush`, `rpc-set-flush`, `rpc-file-flush`, …: the change in
+//!   place and reported not durable). The first attempt in the process of
+//!   each listed write fails as if the OS had failed it.
 //! - `FREEDOM_CORED_TEST_RECEIPT_TTL_MS` replaces a device send's receipt's
 //!   10-minute life (design 0012, "A device send's rule"), so a test sees
 //!   one expire over the wire, which has no clock to inject. Read once, as
@@ -296,6 +300,11 @@ pub fn keystore_capabilities(native: fc_keystore::Capabilities) -> fc_keystore::
             unattended: true,
             user_presence: false,
         },
+        Ok("none") => fc_keystore::Capabilities {
+            backend: None,
+            unattended: false,
+            user_presence: false,
+        },
         _ => native,
     }
 }
@@ -465,6 +474,22 @@ pub fn grant_write_fails(_store: &str, _step: &str) -> bool {
 pub struct Swap;
 
 impl fc_store::Hooks for Swap {
+    fn checked(&self, temp: &std::path::Path) {
+        swap("checked", temp);
+    }
+}
+
+/// The hooks of a secrets-file write, and of `rpc-api-keys.json`'s, named
+/// by its step: [`Swap`]'s, and the directory flush after the rename fails
+/// when `FREEDOM_CORED_TEST_SECRETS_FAIL` lists `<step>-flush` (once per
+/// process), the change in place and reported not durable.
+pub struct SecretsWrite<'a>(pub &'a str);
+
+impl fc_store::Hooks for SecretsWrite<'_> {
+    fn fails(&self, step: fc_store::Step) -> bool {
+        step == fc_store::Step::Flush && secrets_fails(&format!("{}-flush", self.0))
+    }
+
     fn checked(&self, temp: &std::path::Path) {
         swap("checked", temp);
     }
