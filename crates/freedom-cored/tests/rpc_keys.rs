@@ -509,6 +509,8 @@ fn the_migration_and_what_stays() {
     std::fs::write(main.file_path(), reference_text(&refs)).unwrap();
     main.start(&[]);
     assert_eq!(main.status().len(), 21);
+    assert!(main.keychain.calls.is_empty(), "status asked the key store");
+    assert!(main.entries().is_empty(), "status migrated");
     let answered = main.keys();
     assert_eq!(answered.len(), 21);
     for (id, key) in &keys {
@@ -574,6 +576,9 @@ fn a_replacing_set_over_the_file() {
         let reply = main.set("alchemy", "k-new");
         assert!(reply["error"].is_object(), "{step}: {reply}");
         assert_eq!(main.keys()["alchemy"], "k-old", "{step}");
+        assert!(main.set("alchemy", "k-new")["result"].is_object(), "{step}");
+        assert_eq!(main.keys()["alchemy"], "k-new", "{step}");
+        assert!(!main.file_path().exists(), "{step}");
     }
     let mut main = Main::new(true);
     main.start(&[("FREEDOM_CORED_TEST_SECRETS_CRASH", "after-rpc-set")]);
