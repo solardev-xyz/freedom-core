@@ -1497,44 +1497,26 @@ impl Core {
                 }
             }
             // A send for a document with a key (APR-5e): `not_moved`
-            // first, as for a signature (*inferred*). Then the form, the
-            // grant, the account and the Safe's chain, the rule, and the
-            // quote, which the core's own chain machine gives.
+            // first, as for a signature (*inferred*), then its form, before
+            // any name check (APR-5f-2), as the reference's `txOf`. Then the
+            // name's checks, the grant, the account and the Safe's chain,
+            // the rule, and the quote, which the core's own chain machine
+            // gives.
             fc_eip1193::Step::Send(send) => {
                 if let Some(refused) = self.dapp_unmoved(id) {
                     return refused;
                 }
-                let vault = &self.vault;
-                match send.prepare(|key| vault.dapp_entry(key)) {
-                    Err(answer) => match RawValue::from_string(answer.into_string()) {
+                if let Err(answer) = send.form() {
+                    return match RawValue::from_string(answer.into_string()) {
                         Ok(answer) => self.result(id, &answer),
                         Err(_) => Flow::Exit(Exit::Internal),
-                    },
-                    // The site's rule (APR-5e-2), chosen before the quote
-                    // with the core's own grant: the unlock first while the
-                    // vault is locked.
-                    Ok(prepare) => {
-                        let chosen = prepare.rule_query(page.agent).is_some_and(|query| {
-                            vault.eip1193_send_rule(page.agent, &query)
-                                == fc_eip1193::send::RuleNow::Covered
-                        });
-                        let sending = match chosen.then(|| prepare.clone().ruled()).flatten() {
-                            Some(rule) => crate::eip1193::Sending::Rule(rule),
-                            None => crate::eip1193::Sending::Prompt(prepare),
-                        };
-                        let locked = !self.vault.unlocked();
-                        let page = page.clone();
-                        let outs = self.connects.send(
-                            id,
-                            sending,
-                            locked,
-                            &page,
-                            received,
-                            &mut self.vault,
-                        );
-                        self.dispatch(outs)
-                    }
+                    };
                 }
+                let page = page.clone();
+                let outs = self
+                    .connects
+                    .send(id, send, &page, received, &mut self.vault);
+                self.dispatch(outs)
             }
             // A connect, a chain switch or a signature for a document with
             // a key (APR-5c, APR-5d): before the dApp store moves, main

@@ -8,14 +8,16 @@
 //! as the test scripts it: the name serving the document's IPNS key, moved
 //! to other content, or a node that fails.
 //!
-//! Every `step: "APR-5f"` scenario of vectors/eip1193.json replays but the
-//! send's, whose name checks are a later step's. Then the guarantees: a name moved at
-//! each check point (before the prompt, while it is open, between the
-//! approve and the effect, after the signature) refuses with nothing
-//! written or signed; a binding ended by another request is read at main's
-//! recheck; a name the core can't resolve fails closed; the binding ends
-//! for the document, not for a new one; a page without a binding resolves
-//! nothing; and a check has the request's deadline and cancel.
+//! Every `step: "APR-5f"` scenario of vectors/eip1193.json replays, the
+//! send's (APR-5f-2) with chain 1's node playing the core's own estimate and
+//! quote. Then the guarantees: a name moved at each check point (before the
+//! prompt, while it is open, between the approve and the effect, after the
+//! signature) refuses with nothing written or signed, and a send's (a
+//! vault's, a device's, a Safe's and a rule's) with nothing prepared or
+//! minted; a binding ended by another request is read at main's recheck; a
+//! name the core can't resolve fails closed; the binding ends for the
+//! document, not for a new one; a page without a binding resolves nothing;
+//! and a check has the request's deadline and cancel.
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
@@ -44,6 +46,7 @@ const ABANDON: &str =
 const NO_ADDRESS: &str =
     r#"{"error":{"code":4100,"message":"This page has no address to connect from yet"}}"#;
 const ACCOUNT: &str = "0x9858EfFD232B4033E47d90003D41EC34EcaEda94";
+const GWEI: u64 = 1_000_000_000;
 
 fn load() -> Value {
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../vectors/eip1193.json");
@@ -103,12 +106,21 @@ struct Main {
     /// The node's answers for naming's anchor, from the naming replay.
     recorded: std::collections::BTreeMap<String, String>,
     events: Vec<Value>,
+    /// Chain 1's node (APR-5f-2): the estimates the core asked for, the
+    /// params each must have when scripted, and the gas price and tip it
+    /// answers.
+    estimates: usize,
+    estimate_params: Option<Value>,
+    gas_price: u64,
+    priority: u64,
 }
 
 impl Main {
     /// A core whose dApp store has moved, holding `grants`, its vault
     /// imported from ABANDON and unlocked, naming read Direct from `n1`,
-    /// and Gnosis read Direct from `e100`. `env` adds to the name hook.
+    /// Gnosis read Direct from `e100`, and chain 1 from `e1` and `e1b` (two
+    /// endpoints, so that the fee evidence a rule needs isn't one's word).
+    /// `env` adds to the name hook.
     fn new(grants: &Value, env: &[(&str, &str)]) -> (tempfile::TempDir, Main) {
         Main::with_timeout(grants, env, 5000)
     }
@@ -173,7 +185,15 @@ impl Main {
             "rpc": [{ "endpoint": "e100", "user_configured": false }],
             "prover": null, "myotis": false, "blockscout": null,
         });
-        let reply = core.call(4, "chain.configure", json!({ "chains": [chain] }));
+        let ethereum = json!({
+            "chain_id": 1, "display_name": "Ethereum",
+            "read_order": ["direct"], "broadcast_order": ["direct"],
+            "quorum": { "k": 3, "m": 2, "timeout_ms": 5000 },
+            "rpc": [{ "endpoint": "e1", "user_configured": false },
+                { "endpoint": "e1b", "user_configured": false }],
+            "prover": null, "myotis": false, "blockscout": null,
+        });
+        let reply = core.call(4, "chain.configure", json!({ "chains": [chain, ethereum] }));
         assert!(reply["result"]["generations"].is_object(), "{reply}");
         let main = Main {
             core,
@@ -181,12 +201,40 @@ impl Main {
             checks: 0,
             recorded: naming_recorded(),
             events: Vec::new(),
+            estimates: 0,
+            estimate_params: None,
+            gas_price: 16 * GWEI,
+            priority: 2 * GWEI,
         };
         (root, main)
     }
 
     fn script(&mut self, names: &[Name]) {
         self.names.extend(names.iter().copied());
+    }
+
+    /// Chain 1's node, for a send's estimate and the core's fee quote and
+    /// evidence (APR-5f-2): `0xc350` (50 000 gas, so a gas limit of 60 000),
+    /// and a gas price and tip that the core's quote makes 30 gwei and 2
+    /// gwei, as the vectors' quote has them.
+    fn chain_node(&mut self, body: &Value) -> String {
+        let result = match body["method"].as_str().unwrap() {
+            "eth_estimateGas" => {
+                self.estimates += 1;
+                if let Some(expected) = &self.estimate_params {
+                    assert_eq!(&body["params"], expected);
+                }
+                json!("0xc350")
+            }
+            "eth_gasPrice" => json!(format!("{:#x}", self.gas_price)),
+            "eth_maxPriorityFeePerGas" => json!(format!("{:#x}", self.priority)),
+            _ => {
+                return json!({ "jsonrpc": "2.0", "id": 1,
+                    "error": { "code": -32601, "message": "the method does not exist" } })
+                .to_string();
+            }
+        };
+        json!({ "jsonrpc": "2.0", "id": 1, "result": result }).to_string()
     }
 
     /// main's answer to a `shell.rpc`: the node's `text`, under the
@@ -250,6 +298,7 @@ impl Main {
                             }
                         }
                         ("n1", method) => self.recorded[method].clone(),
+                        ("e1" | "e1b", _) => self.chain_node(&body),
                         _ => panic!("unexpected {message}"),
                     };
                     self.node(&message, &text);
@@ -288,7 +337,10 @@ impl Main {
                         self.checks += 1;
                         return message;
                     }
-                    let text = self.recorded[&method].clone();
+                    let text = match message["params"]["endpoint"].as_str().unwrap() {
+                        "e1" | "e1b" => self.chain_node(&body),
+                        _ => self.recorded[&method].clone(),
+                    };
                     self.node(&message, &text);
                 }
                 (Some("request"), Some("shell.prefetch")) | (Some("cancel"), _) => {}
@@ -404,25 +456,40 @@ fn decision_for(asked: &Value, decision: &Value, handle: u64, world: &Value) -> 
     }
 }
 
-/// The one scenario that waits: the send's. Its name checks are a later
-/// step's, once device and rule sends (APR-5e-2) are in.
-const PENDING: &[&str] = &["name-send-moved-during-prompt"];
+/// A send's view as the core shows a recorded one (APR-5f-2, as
+/// `eip1193_send.rs` adapts it): its fee estimate priced at the core's own
+/// effective price (16 gwei from chain 1's node), and the fee check's
+/// verdict the core's own on its own evidence, with the recorded keys,
+/// `maxCost` and `above`.
+fn adapted(recorded: &Value, shown: &Value) -> Value {
+    let mut expected = recorded.clone();
+    if let Some(fee) = expected["fee"].as_object_mut() {
+        let gas: u128 = fee["gasLimit"].as_str().unwrap().parse().unwrap();
+        fee["estimate"] = json!((gas * 16 * u128::from(GWEI)).to_string());
+    }
+    if let Some(check) = recorded["feeCheck"].as_object() {
+        let core = shown["feeCheck"].as_object().unwrap();
+        assert_eq!(
+            core.keys().collect::<Vec<_>>(),
+            check.keys().collect::<Vec<_>>()
+        );
+        assert_eq!(core["maxCost"], check["maxCost"]);
+        assert_eq!(core["above"], check["above"]);
+        expected["feeCheck"] = shown["feeCheck"].clone();
+    }
+    expected
+}
 
 #[test]
 fn every_apr5f_scenario_replays_through_the_core() {
     let file = load();
     let now = file["now"].as_u64().unwrap();
     let (mut scenarios, mut requests, mut checks, mut prompts) = (0, 0, 0, 0);
-    let mut pending = Vec::new();
     for scenario in file["scenarios"].as_array().unwrap() {
         if scenario["step"] != "APR-5f" {
             continue;
         }
         let id = scenario["id"].as_str().unwrap();
-        if PENDING.contains(&id) {
-            pending.push(id);
-            continue;
-        }
         scenarios += 1;
         let doc = &scenario["world"]["documents"][0];
         assert_eq!(doc["key"], NAME, "{id}");
@@ -461,8 +528,20 @@ fn every_apr5f_scenario_replays_through_the_core() {
                         }
                     }
                     "prompt" => prompt = Some(effect),
-                    // Main's: the agent's route and custody.
-                    "agent.request" | "custody" | "chain.request" | "grant.write" => {}
+                    // A send's estimate (APR-5f-2): the core's own, on chain
+                    // 1's node, its params the reference's (the value as a
+                    // quantity, as the machine writes it).
+                    "chain.request" if recorded["method"] == "eth_sendTransaction" => {
+                        let mut params = effect["args"]["params"].clone();
+                        let value: u128 = params[0]["value"].as_str().unwrap().parse().unwrap();
+                        params[0]["value"] = json!(format!("{value:#x}"));
+                        main.estimate_params = Some(params);
+                    }
+                    // Main's: the agent's route and custody, and a send's
+                    // turn (D12). The core's own: a send's fee quote and its
+                    // fee checks, before the prompt and at the approve.
+                    "agent.request" | "custody" | "chain.request" | "grant.write"
+                    | "chain.fee_quote" | "fees.check" | "fees.at_approval" | "send.turn" => {}
                     other => panic!("{what}: {other}"),
                 }
             }
@@ -481,9 +560,16 @@ fn every_apr5f_scenario_replays_through_the_core() {
                 let asked = main.asked("approval.request");
                 main.all_checked(&what);
                 assert_eq!(asked["params"]["kind"], prompt["args"]["kind"], "{what}");
+                let view = &prompt["args"]["view"];
+                let expected = if prompt["args"]["kind"] == "eth.send" {
+                    assert_eq!(main.estimates, 1, "{what}");
+                    adapted(view, &asked["params"]["view"])
+                } else {
+                    view.clone()
+                };
                 assert_eq!(
                     asked["params"]["view"].to_string(),
-                    prompt["args"]["view"].to_string(),
+                    expected.to_string(),
                     "{what}"
                 );
                 main.script(&after);
@@ -508,8 +594,7 @@ fn every_apr5f_scenario_replays_through_the_core() {
             "{id}"
         );
     }
-    assert_eq!(pending, PENDING);
-    assert_eq!((scenarios, requests, checks, prompts), (7, 9, 16, 3));
+    assert_eq!((scenarios, requests, checks, prompts), (8, 10, 20, 4));
 }
 
 /// The vectors' grants: the name's grant (account 0) and the IPNS key's
@@ -1091,6 +1176,16 @@ fn without_a_binding_nothing_is_resolved() {
     assert_eq!(main.answer(12), r#"{"result":"0x64"}"#);
     main.request(13, &named(3), "eth_blockNumber", json!([]), &world);
     assert_eq!(main.answer(13), r#"{"result":"0x1406f40"}"#);
+    // A send (APR-5f-2), to its prompt.
+    main.request(
+        14,
+        &plain,
+        "eth_sendTransaction",
+        send_params(),
+        &send_world(1),
+    );
+    let asked = main.asked("approval.request");
+    assert_eq!(asked["params"]["kind"], "eth.send", "{asked}");
     assert_eq!(main.checks, 0);
 }
 
@@ -1225,4 +1320,322 @@ fn cancelled_checks_free_their_places_in_naming() {
     main.node(&held, &resolve_body(IPNS_CONTENTHASH));
     assert_eq!(main.answer(200), format!(r#"{{"result":["{ACCOUNT}"]}}"#));
     assert_eq!(main.checks, 1);
+}
+
+// Sends (APR-5f-2).
+
+const TO: &str = "0xabababababababababababababababababababab";
+const APPROVE_DATA: &str = "0x095ea7b3000000000000000000000000555555555555555555555555555555555555555500000000000000000000000000000000000000000000000000000000000003e8";
+
+/// The name's grant for sends: account `index`, connected at the vectors'
+/// `now`.
+fn send_grants(index: u64) -> Value {
+    let now = load()["now"].as_u64().unwrap();
+    json!({ NAME: {
+        "origin": NAME, "connectedAt": now, "lastUsed": now, "walletIndex": index, "chainId": 1,
+        "autoApprove": { "signing": false, "transactions": [] },
+    } })
+}
+
+/// main's world for a send on `chain`, D12's pause off.
+fn send_world(chain: u64) -> Value {
+    let mut world = plain_world();
+    world["window_chain"] = json!(chain);
+    world["paused"] = json!(false);
+    world
+}
+
+/// An `approve` call to `TO`, with a value of 5.
+fn send_params() -> Value {
+    json!([{ "to": TO, "value": "0x5", "data": APPROVE_DATA }])
+}
+
+/// main approves send prompt `asked` of request `rid`, "Always allow"
+/// unticked.
+fn send_approve(main: &mut Main, asked: &Value, rid: u64, world: &Value) {
+    let approve = json!({ "approve": true, "choices": {} });
+    main.respond(asked, decision_for(asked, &approve, rid, world));
+}
+
+/// `sign.transaction` as main calls it on `send`, the page's `{ send }`,
+/// with the nonce added, under document 1: the token's, or the rule's
+/// `{ standing }`.
+fn sign_send(main: &mut Main, id: u64, send: &Value) -> Value {
+    let mut tx = send["tx"].clone();
+    tx["nonce"] = json!("7");
+    let authorization = if send["standing"] == true {
+        json!({ "standing": { "paused": false } })
+    } else {
+        json!({ "token": send["token"], "kind": send["kind"], "handle": send["handle"] })
+    };
+    main.core.send(&json!({
+        "type": "request", "id": id, "method": "sign.transaction",
+        "params": { "key": { "kind": "account", "index": send["account"] }, "tx": tx,
+            "authorization": authorization },
+        "context": named(1),
+    }));
+    let response = main.next();
+    assert_eq!(response["id"], id, "{response}");
+    response
+}
+
+/// A vault account's send moved at each of its checks: before and after
+/// the agent's route (before its grant is read), after the rule's choice
+/// (before its quote), and after the approve and the fee check at it
+/// (before the grant is read again and the token minted). Each answers
+/// `4100`: nothing prepared before its quote's check (no estimate asked),
+/// and no `{ send }`, so no token, after the approve; nothing written. The
+/// document's later send answers `4100` with nothing resolved. A malformed
+/// send is refused with nothing resolved, as the reference checks its form
+/// first. Honest at every check, `{ send }`, which signs with the nonce
+/// added.
+#[test]
+fn a_send_moved_at_any_check_prepares_and_mints_nothing() {
+    let world = send_world(1);
+    for moved_at in 0..4 {
+        let what = format!("moved at check {moved_at}");
+        let (_root, mut main) = Main::new(&send_grants(0), &[]);
+        let before = main.file();
+        let mut names = vec![Name::Serves; moved_at];
+        names.push(Name::Moved);
+        let (first, after) = names.split_at(names.len().min(3));
+        main.script(first);
+        main.request(10, &named(1), "eth_sendTransaction", send_params(), &world);
+        if moved_at >= 3 {
+            let asked = main.asked("approval.request");
+            assert_eq!(asked["params"]["kind"], "eth.send", "{what}");
+            main.script(after);
+            send_approve(&mut main, &asked, 10, &world);
+        }
+        assert_eq!(main.answer(10), NO_ADDRESS, "{what}");
+        main.all_checked(&what);
+        assert_eq!(main.estimates, usize::from(moved_at >= 3), "{what}");
+        main.request(11, &named(1), "eth_sendTransaction", send_params(), &world);
+        assert_eq!(main.answer(11), NO_ADDRESS, "{what}");
+        assert_eq!(main.checks, moved_at + 1, "{what}: resolved after the end");
+        assert_eq!(main.estimates, usize::from(moved_at >= 3), "{what}");
+        assert_eq!(main.file(), before, "{what}");
+    }
+    let (_root, mut main) = Main::new(&send_grants(0), &[]);
+    let malformed = json!([{ "to": "0x12" }]);
+    main.request(9, &named(1), "eth_sendTransaction", malformed, &world);
+    assert_eq!(
+        main.answer(9),
+        r#"{"error":{"code":-32602,"message":"The transaction needs a recipient address (to)"}}"#
+    );
+    assert_eq!(main.checks, 0);
+    main.script(&[Name::Serves; 3]);
+    main.request(10, &named(1), "eth_sendTransaction", send_params(), &world);
+    let asked = main.asked("approval.request");
+    main.script(&[Name::Serves]);
+    send_approve(&mut main, &asked, 10, &world);
+    let sent: Value = serde_json::from_str(&main.answer(10)).unwrap();
+    main.all_checked("honest");
+    assert_eq!(sent["send"]["kind"], "dapp-send", "{sent}");
+    assert_eq!(sent["send"]["tx"]["gas_limit"], "60000", "{sent}");
+    let signed = sign_send(&mut main, 20, &sent["send"]);
+    assert!(signed["result"]["raw"].is_string(), "{signed}");
+}
+
+/// A device's send (a Ledger's, a phone's, and a Safe's on Gnosis), moved
+/// after the rule's choice (no prompt; nothing prepared) or after its
+/// approve, before the grant is read again: `4100` and no `{ device }`, so
+/// no token for main to spend. Honest at every check, `{ device }`.
+#[test]
+fn a_device_send_moved_gets_no_token() {
+    for (index, kind, chain) in [(1, "ledger", 1), (2, "remote", 1), (1000, "safe", 100)] {
+        let world = send_world(chain);
+        for moved_at in [2, 3, 4] {
+            let what = format!("{kind}, moved at check {moved_at}");
+            let (_root, mut main) = Main::new(&send_grants(index), &[]);
+            let mut names = vec![Name::Serves; moved_at];
+            if moved_at < 4 {
+                names.push(Name::Moved);
+            }
+            let (first, after) = names.split_at(3);
+            main.script(first);
+            main.request(10, &named(1), "eth_sendTransaction", send_params(), &world);
+            if moved_at >= 3 {
+                let asked = main.asked("approval.request");
+                assert_eq!(asked["params"]["kind"], "eth.send", "{what}");
+                main.script(after);
+                send_approve(&mut main, &asked, 10, &world);
+            }
+            let answer = main.answer(10);
+            main.all_checked(&what);
+            let quoted = moved_at >= 3 && kind != "safe";
+            assert_eq!(main.estimates, usize::from(quoted), "{what}");
+            if moved_at < 4 {
+                assert_eq!(answer, NO_ADDRESS, "{what}");
+                continue;
+            }
+            let answer: Value = serde_json::from_str(&answer).unwrap();
+            let device = &answer["device"];
+            assert_eq!(device["type"], kind, "{what}: {answer}");
+            assert!(device["token"].is_string(), "{what}");
+        }
+    }
+}
+
+/// The site's rule for sends, in Q9's form: `approve` calls to `TO`, with
+/// no more value than 5, on chain 1.
+fn send_ruled() -> Value {
+    let now = load()["now"].as_u64().unwrap();
+    let mut grants = send_grants(0);
+    grants[NAME]["autoApprove"]["limited"] = json!({ "signing": null, "transactions": [{
+        "to": TO, "selector": "0x095ea7b3", "chainId": 1, "maxValue": "5", "grantedAt": now,
+    }] });
+    grants
+}
+
+/// A core holding [`send_ruled`], its wall clock held at the vectors'
+/// `now`.
+fn send_ruled_core() -> (tempfile::TempDir, tempfile::TempDir, Main) {
+    let now = load()["now"].as_u64().unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let clock = root.path().join("wall");
+    std::fs::write(&clock, now.to_string()).unwrap();
+    let (core_root, main) = Main::new(
+        &send_ruled(),
+        &[("FREEDOM_CORED_TEST_WALL_CLOCK", clock.to_str().unwrap())],
+    );
+    (root, core_root, main)
+}
+
+/// A send the site's rule answers. Moved after the rule's choice (before
+/// its quote: nothing prepared), or while main's recheck is out (caught by
+/// the lookup after it, and main is asked no last recheck): `4100`, no
+/// `{ send }`. With that lookup held and then answering that the name
+/// still serves the key, main's last recheck decides: the tab gone into
+/// the agent's custody (`agent_custody`), the document gone, or the binding
+/// ended by another of its requests while that recheck is out (`4100`).
+/// Honest, `{ send }` under the rule, which signs under `{ standing }`.
+#[test]
+fn a_rule_send_moved_or_rechecked_after_its_lookup_gets_no_send() {
+    let world = send_world(1);
+    let (_clock, _root, mut main) = send_ruled_core();
+    main.script(&[Name::Serves, Name::Serves, Name::Moved]);
+    main.request(10, &named(1), "eth_sendTransaction", send_params(), &world);
+    assert_eq!(main.answer(10), NO_ADDRESS, "after the rule's choice");
+    main.all_checked("after the rule's choice");
+    assert_eq!(main.estimates, 0);
+
+    let (_clock, _root, mut main) = send_ruled_core();
+    main.script(&[Name::Serves; 3]);
+    main.request(10, &named(1), "eth_sendTransaction", send_params(), &world);
+    let recheck = main.asked("approval.recheck");
+    main.all_checked("before the recheck");
+    assert_eq!(main.estimates, 1);
+    main.script(&[Name::Moved]);
+    main.respond(&recheck, json!({ "live": true, "agent": false }));
+    assert_eq!(main.answer(10), NO_ADDRESS, "during the recheck");
+    main.all_checked("during the recheck");
+
+    for case in ["honest", "custody", "gone", "ended"] {
+        let (_clock, _root, mut main) = send_ruled_core();
+        main.script(&[Name::Serves; 3]);
+        main.request(10, &named(1), "eth_sendTransaction", send_params(), &world);
+        let recheck = main.asked("approval.recheck");
+        main.respond(&recheck, json!({ "live": true, "agent": false }));
+        let held = main.held_call();
+        main.node(&held, &resolve_body(IPNS_CONTENTHASH));
+        let last = main.asked("approval.recheck");
+        let mut answer = json!({ "live": true, "agent": false });
+        match case {
+            "custody" => answer["agent"] = json!(true),
+            "gone" => answer["live"] = json!(false),
+            "ended" => {
+                main.script(&[Name::Moved]);
+                main.request(11, &named(1), "eth_accounts", json!([]), &world);
+                assert_eq!(main.answer(11), r#"{"result":[]}"#);
+            }
+            _ => {}
+        }
+        main.respond(&last, answer);
+        let out: Value = serde_json::from_str(&main.answer(10)).unwrap();
+        main.all_checked(case);
+        match case {
+            "honest" => {
+                assert_eq!(out["send"]["standing"], true, "{out}");
+                let signed = sign_send(&mut main, 20, &out["send"]);
+                assert!(signed["result"]["raw"].is_string(), "{signed}");
+            }
+            "custody" => assert_eq!(out.to_string(), AGENT_CUSTODY, "{case}"),
+            _ => assert_eq!(out.to_string(), NO_ADDRESS, "{case}"),
+        }
+    }
+}
+
+/// A rule's send with the vault locked: the name moved while main's
+/// unlock prompt is open. The reference checks no name between its unlock
+/// and its send's guard, so the send is quoted and main asked to recheck,
+/// and the lookup after that recheck catches it: `4100`, no `{ send }`.
+#[test]
+fn a_rule_send_moved_during_the_unlock_gets_no_send() {
+    let world = send_world(1);
+    let (_clock, _root, mut main) = send_ruled_core();
+    let locked = main.core.call_shell(5, "vault.lock", json!({}));
+    assert!(locked["result"].is_object(), "{locked}");
+    main.script(&[Name::Serves; 3]);
+    main.request(10, &named(1), "eth_sendTransaction", send_params(), &world);
+    let asked = main.asked("approval.request");
+    assert_eq!(asked["params"]["kind"], "vault.unlock", "{asked}");
+    assert_eq!(asked["params"]["view"]["reason"], "send");
+    main.all_checked("before the unlock");
+    assert_eq!(main.estimates, 0);
+    let unlocked = main.core.call_shell(
+        11,
+        "vault.unlock",
+        json!({ "password_b64": STANDARD.encode("testpass1") }),
+    );
+    assert!(unlocked["result"].is_object(), "{unlocked}");
+    send_approve(&mut main, &asked, 10, &world);
+    let recheck = main.asked("approval.recheck");
+    assert_eq!(
+        main.checks, 3,
+        "no check between the unlock and the recheck"
+    );
+    main.script(&[Name::Moved]);
+    main.respond(&recheck, json!({ "live": true, "agent": false }));
+    assert_eq!(main.answer(10), NO_ADDRESS);
+    main.all_checked("after the recheck");
+}
+
+/// A rule's send whose fee the check doesn't let through (main's own fee
+/// reference lowered first, so the core's quote is far above it) goes to
+/// its prompt after one more check, as the reference checks the name
+/// before the prompt it falls back to: moved there, `4100` and no prompt;
+/// honest, the prompt, its fee above the reference.
+#[test]
+fn a_rule_send_asked_for_its_fee_checks_the_name_first() {
+    let world = send_world(1);
+    for moved in [true, false] {
+        let (_clock, _root, mut main) = send_ruled_core();
+        main.gas_price = 2 * GWEI;
+        main.priority = GWEI;
+        main.core.send(&json!({
+            "type": "request", "id": 5, "method": "chain.fee_reference",
+            "params": { "chain_id": 1, "deadline_ms": 30_000 },
+            "context": { "caller": "chrome" },
+        }));
+        let reference = main.next();
+        assert!(reference["result"].is_object(), "{reference}");
+        main.gas_price = 16 * GWEI;
+        main.priority = 2 * GWEI;
+        main.script(&[Name::Serves; 3]);
+        main.script(&[if moved { Name::Moved } else { Name::Serves }]);
+        main.request(10, &named(1), "eth_sendTransaction", send_params(), &world);
+        if moved {
+            assert_eq!(main.answer(10), NO_ADDRESS);
+        } else {
+            let asked = main.asked("approval.request");
+            assert_eq!(asked["params"]["kind"], "eth.send", "{asked}");
+            assert_eq!(
+                asked["params"]["view"]["feeCheck"]["above"], true,
+                "{asked}"
+            );
+        }
+        main.all_checked(&format!("moved {moved}"));
+        assert_eq!(main.estimates, 1);
+    }
 }

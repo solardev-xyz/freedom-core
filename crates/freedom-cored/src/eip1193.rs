@@ -88,6 +88,15 @@
 //!   that last recheck, main's own answer with nothing awaited, which is
 //!   the window the reference has between its last `nameHolds` and its
 //!   effect.
+//! - **A send's names** (APR-5f-2), at the reference's checks: once its
+//!   form has passed, twice before its grant is read, once more after the
+//!   rule's choice, before its quote or unlock; before the prompt a rule's
+//!   send falls back to; after an approve (and the fee check at it),
+//!   before the grant is read again and the token minted, a device's and a
+//!   Safe's included; and for a rule's send after main's recheck, followed
+//!   by main's last recheck. The reference's checks after the site's turn
+//!   (D12), after the signature and before the last use or "Always allow"
+//!   are written are main's, which holds those steps (APB-4c).
 
 use std::collections::{BTreeMap, VecDeque};
 use std::ops::Range;
@@ -182,7 +191,7 @@ struct Quoting {
 
 /// A send past its checks: asked of the user, or answered by the site's
 /// rule (APR-5e-2).
-pub enum Sending {
+enum Sending {
     Prompt(send::Prepare),
     Rule(send::Rule),
 }
@@ -296,6 +305,9 @@ enum Last {
     Chain(Switch),
     /// A rule's signature, judged again with that recheck's custody.
     Rule(Box<sign::Ask>),
+    /// A rule's send (APR-5f-2), judged again with that recheck's custody
+    /// and the fee check now, then `{ send }` under the rule.
+    SendRule(Box<send::Rule>),
 }
 
 /// What follows one of the reference's name checks once it passes
@@ -343,6 +355,22 @@ enum Then {
         always_allow: Option<u32>,
         touch: bool,
     },
+    /// A send whose form passed (APR-5f-2): the checks before the grant is
+    /// first read, `left` of them still to come, then its grant, account
+    /// and Safe's chain, and the rule's choice.
+    Send { send: Box<send::Send>, left: u8 },
+    /// A send past those and the rule's choice: the vault's unlock for a
+    /// rule's while it is locked, its quote, or a Safe's prompt.
+    Sending(Sending),
+    /// A rule's send whose fee the check doesn't let through: its prompt.
+    Asked(Box<send::Ask>),
+    /// An approved send whose fee the check at approval let through: the
+    /// grant read again, then the token minted.
+    Confirmed(Box<send::Judge>),
+    /// A Safe's approved send: the grant read again, then its token.
+    Safe(Box<send::SafeSend>),
+    /// A rule's send past main's recheck: main's last recheck ([`Last`]).
+    SendRuled(Box<send::Rule>),
 }
 
 /// What a prompt asks.
@@ -693,6 +721,41 @@ impl Connects {
                 }
                 outs
             }
+            Then::Send { send, left } if left > 1 => {
+                let then = Then::Send {
+                    send,
+                    left: left - 1,
+                };
+                self.go(id, held, Pending::Name(then), vault)
+            }
+            // The grant, the account and the Safe's chain, read once the
+            // name holds; then the site's rule, chosen before the quote with
+            // the core's own grant, and the name once more.
+            Then::Send { send, .. } => match send.prepare(|key| vault.dapp_entry(key)) {
+                Err(answer) => vec![reply(id, &answer)],
+                Ok(prepare) => {
+                    let agent = held.context.agent;
+                    let chosen = prepare.rule_query(agent).is_some_and(|query| {
+                        vault.eip1193_send_rule(agent, &query) == send::RuleNow::Covered
+                    });
+                    let sending = match chosen.then(|| prepare.clone().ruled()).flatten() {
+                        Some(rule) => Sending::Rule(rule),
+                        None => Sending::Prompt(prepare),
+                    };
+                    self.go(id, held, Pending::Name(Then::Sending(sending)), vault)
+                }
+            },
+            Then::Sending(sending) => self.sending(id, held, sending, vault),
+            Then::Asked(ask) => self.prompt(id, held, Asking::Send(*ask), vault),
+            Then::Confirmed(judge) => {
+                let judged = judge.confirmed(|key| vault.dapp_entry(key));
+                minted(id, &held.context, judged, vault)
+            }
+            Then::Safe(safe) => {
+                let judged = safe.judged(|key| vault.dapp_entry(key));
+                minted(id, &held.context, judged, vault)
+            }
+            Then::SendRuled(rule) => self.go(id, held, Pending::Last(Last::SendRule(rule)), vault),
         }
     }
 
@@ -720,6 +783,13 @@ impl Connects {
                 }
                 // Past its rate by now: the user is asked.
                 sign::Rechecked::Prompt => self.prompt(id, held, Asking::Sign(*ask), vault),
+            },
+            Last::SendRule(rule) => match send_rechecked(*rule, recheck, vault) {
+                send::RuleRechecked::Answer(answer) | send::RuleRechecked::Send(answer) => {
+                    vec![reply(id, &answer)]
+                }
+                // Past its rate, or its fee needing the user, by now: asked.
+                send::RuleRechecked::Ask(ask) => self.prompt(id, held, Asking::Send(*ask), vault),
             },
         }
     }
@@ -762,17 +832,14 @@ impl Connects {
         self.go(id, held, Pending::Name(then), vault)
     }
 
-    /// Page request `id`'s send, past its checks (APR-5e-1): the core's
-    /// own estimate and fee quote, and new fee evidence when the chain's is
-    /// stale. A Safe's goes to its prompt unquoted, and one the site's rule
-    /// answers (APR-5e-2) asks main for the vault's unlock first if
-    /// `locked`. A name-keyed document's send checks no name yet: its
-    /// checks are a later step's.
+    /// Page request `id`'s send (APR-5e), its form passed: for a name-keyed
+    /// document the name's checks before the grant is read (APR-5f-2), then
+    /// the grant, the account and the Safe's chain, the site's rule chosen
+    /// (APR-5e-2), and the name once more before [`Connects::sending`].
     pub fn send(
         &mut self,
         id: u64,
-        sending: Sending,
-        locked: bool,
+        send: send::Send,
         page: &PageContext,
         received: Instant,
         vault: &mut Vault,
@@ -782,6 +849,20 @@ impl Connects {
         let Some(held) = self.held(page, binding, keyless, received) else {
             return vec![error(id, internal())];
         };
+        let then = Then::Send {
+            send: Box::new(send),
+            left: names::SEND_FIRST,
+        };
+        self.go(id, held, Pending::Name(then), vault)
+    }
+
+    /// Page request `id`'s send, past its checks (APR-5e-1): the core's
+    /// own estimate and fee quote, and new fee evidence when the chain's is
+    /// stale. A Safe's goes to its prompt unquoted, and one the site's rule
+    /// answers (APR-5e-2) asks main for the vault's unlock first while it
+    /// is locked.
+    fn sending(&mut self, id: u64, held: Held, sending: Sending, vault: &mut Vault) -> Vec<Out> {
+        let locked = !vault.unlocked();
         match sending {
             Sending::Rule(rule) if locked => self.prompt(id, held, Asking::SendUnlock(rule), vault),
             Sending::Prompt(prepare) if !prepare.quotes() => {
@@ -939,43 +1020,32 @@ impl Connects {
         else {
             return vec![error(id, internal())];
         };
-        let rebuild = |step| Open {
-            held,
-            step,
-            asked: None,
-        };
-        let ask = match send {
+        match send {
             Sending::Prompt(prepare) => {
                 let quoted = prepare.quote(read(&estimate), read(&quote)).ok();
                 let verdict = quoted
                     .as_ref()
                     .filter(|_| prepare.checks_fee())
                     .map(|quoted| vault.eip1193_fee_check(&quoted.tx(&prepare), None).0);
-                prepare.ask(quoted, verdict.as_deref())
+                let ask = prepare.ask(quoted, verdict.as_deref());
+                self.prompt(id, held, Asking::Send(ask), vault)
             }
             Sending::Rule(rule) => {
                 let quoted = rule.prepare().quote(read(&estimate), read(&quote));
                 match rule.judged(quoted, |tx| vault.eip1193_fee_check(tx, None).0) {
-                    send::Ruled::Answer(answer) => return vec![reply(id, &answer)],
-                    send::Ruled::Ask(ask) => *ask,
+                    send::Ruled::Answer(answer) => vec![reply(id, &answer)],
+                    // The rule doesn't answer it after all: the name again,
+                    // as the reference checks it before the prompt it falls
+                    // back to (APR-5f-2).
+                    send::Ruled::Ask(ask) => {
+                        self.go(id, held, Pending::Name(Then::Asked(ask)), vault)
+                    }
                     send::Ruled::Recheck(rule) => {
-                        self.open.insert(id, rebuild(Pending::SendRule(*rule)));
-                        self.queued.push_back(id);
-                        return self.pump();
+                        self.go(id, held, Pending::SendRule(*rule), vault)
                     }
                 }
             }
-        };
-        let Some(prompt) = self.issue() else {
-            return vec![error(id, internal())];
-        };
-        let step = Pending::Prompt {
-            ask: Asking::Send(ask),
-            id: prompt,
-        };
-        self.open.insert(id, rebuild(step));
-        self.queued.push_back(id);
-        self.pump()
+        }
     }
 
     /// Page request `id`, open, asks main `asking` next.
@@ -1015,8 +1085,18 @@ impl Connects {
         } else {
             (String::new(), false)
         };
-        let judged = judge.judged(&verdict, again, |key| vault.dapp_entry(key));
-        self.send_judged(id, judged, vault)
+        if again {
+            let judged = judge.judged(&verdict, again, |key| vault.dapp_entry(key));
+            return self.send_judged(id, judged, vault);
+        }
+        // Within the check: the name again for a name-keyed document
+        // (APR-5f-2), where the reference checks it in its send's guard,
+        // then the grant and the token.
+        let Some(open) = self.open.remove(&id) else {
+            return Vec::new();
+        };
+        let then = Then::Confirmed(Box::new(judge));
+        self.go(id, open.held, Pending::Name(then), vault)
     }
 
     /// What page request `id`'s approved send comes to: refused, asked
@@ -1304,24 +1384,22 @@ impl Connects {
             // A rule's send, just before its effect: custody, the rule
             // judged again with the core's own grant, main's custody and
             // the prepared transaction's fee, and the document.
+            // Answered by the rule, a name-keyed document's send resolves
+            // the name again (APR-5f-2), and main's last recheck follows.
             Pending::SendRule(rule) => match text.ok_or(Crossed).and_then(Recheck::parse) {
-                Ok(recheck) => {
-                    let now = rule.query().map_or(send::RuleNow::NotCovered, |query| {
-                        vault.eip1193_send_rule(Some(recheck.agent), &query)
-                    });
-                    let verdict = rule
-                        .tx()
-                        .map(|tx| vault.eip1193_fee_check(&tx, None).0)
-                        .unwrap_or_default();
-                    match rule.rechecked(&recheck, now, &verdict) {
-                        send::RuleRechecked::Answer(answer) => vec![reply(id, &answer)],
-                        // Past its rate, or its fee needing the user, by
-                        // now: the user is asked.
-                        send::RuleRechecked::Ask(ask) => {
-                            self.prompt(id, held, Asking::Send(*ask), vault)
-                        }
+                Ok(recheck) => match send_rechecked(rule.clone(), &recheck, vault) {
+                    send::RuleRechecked::Answer(answer) => vec![reply(id, &answer)],
+                    // Past its rate, or its fee needing the user, by now:
+                    // the user is asked.
+                    send::RuleRechecked::Ask(ask) => {
+                        self.prompt(id, held, Asking::Send(*ask), vault)
                     }
-                }
+                    send::RuleRechecked::Send(_) if held.binding.is_some() => {
+                        let then = Then::SendRuled(Box::new(rule));
+                        self.go(id, held, Pending::Name(then), vault)
+                    }
+                    send::RuleRechecked::Send(answer) => vec![reply(id, &answer)],
+                },
                 Err(Crossed) => vec![error(id, crossed())],
             },
             Pending::Prompt { ask, id: prompt } => {
@@ -1375,10 +1453,12 @@ impl Connects {
                             );
                             self.reads_for(id, vault)
                         }
-                        // A Safe's (APR-5e-2): the grant, then its token.
+                        // A Safe's (APR-5e-2): the name again (APR-5f-2), as
+                        // the reference's `safeSend` checks it first, then
+                        // the grant and its token.
                         Ok(send::Decided::Safe(safe)) => {
-                            let judged = safe.judged(|key| vault.dapp_entry(key));
-                            minted(id, &held.context, judged, vault)
+                            let then = Then::Safe(Box::new(safe));
+                            self.go(id, held, Pending::Name(then), vault)
                         }
                         Ok(send::Decided::Judge(judge)) => {
                             let chain_id = judge.chain_id();
@@ -1561,6 +1641,20 @@ fn rule_rechecked(
         vault.eip1193_rule(&held.key, Some(recheck.agent), &query)
     });
     ask.rechecked(recheck, now)
+}
+
+/// A rule's send on main's recheck, in the reference's order: custody, the
+/// rule judged again with the core's own grant, that custody and the
+/// prepared transaction's fee, the document.
+fn send_rechecked(rule: send::Rule, recheck: &Recheck, vault: &Vault) -> send::RuleRechecked {
+    let now = rule.query().map_or(send::RuleNow::NotCovered, |query| {
+        vault.eip1193_send_rule(Some(recheck.agent), &query)
+    });
+    let verdict = rule
+        .tx()
+        .map(|tx| vault.eip1193_fee_check(&tx, None).0)
+        .unwrap_or_default();
+    rule.rechecked(recheck, now, &verdict)
 }
 
 /// `not_moved` for a page request that would write the dApp store before
