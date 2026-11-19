@@ -18,6 +18,7 @@
 //! handover are `freedom-cored`'s.
 
 mod address;
+pub mod intents;
 mod js;
 pub mod vault_meta;
 
