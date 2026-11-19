@@ -354,6 +354,15 @@ fn write_synced(file: &mut File, bytes: &[u8], hooks: &dyn Hooks) -> io::Result<
     file.sync_all()
 }
 
+/// Cuts `path` back to `len` and fsyncs it, through a handle of its own:
+/// on Windows an append-only handle has no `FILE_WRITE_DATA`, so it can't
+/// truncate (where the reference's journal ends up broken instead).
+fn cut_back(path: &Path, len: u64) -> io::Result<()> {
+    let file = OpenOptions::new().write(true).open(path)?;
+    file.set_len(len)?;
+    file.sync_all()
+}
+
 /// A journal file, `<dir>/<name>`, written by this process alone.
 #[derive(Debug)]
 pub struct Journal {
@@ -479,20 +488,21 @@ impl Journal {
             self.exists = true;
             self.entry_unsynced = true;
         }
-        if let Err(error) = write_synced(&mut file, &line, hooks) {
+        let written = write_synced(&mut file, &line, hooks);
+        drop(file);
+        if let Err(error) = written {
             // Take the partial or unsynced line back off, so the file ends
             // where the last acknowledged append left it.
             let cut = if hooks.fails(Step::Truncate) {
                 Err(injected(Step::Truncate))
             } else {
-                file.set_len(self.size).and_then(|()| file.sync_all())
+                cut_back(&self.path, self.size)
             };
             if cut.is_err() {
                 self.broken = Some(error.kind());
             }
             return Err(Error::Io(error));
         }
-        drop(file);
         self.size += line.len() as u64;
         if self.entry_unsynced {
             let synced = if hooks.fails(Step::Flush) {
