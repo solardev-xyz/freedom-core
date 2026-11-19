@@ -14,8 +14,10 @@ use std::os::windows::io::{AsHandle, AsRawHandle, BorrowedHandle, FromRawHandle,
 
 use windows_sys::Wdk::Foundation::OBJECT_ATTRIBUTES;
 use windows_sys::Wdk::Storage::FileSystem::{
-    FILE_CREATE, FILE_DIRECTORY_FILE, FILE_NON_DIRECTORY_FILE, FILE_OPEN, FILE_OPEN_IF,
-    FILE_OPEN_REPARSE_POINT, FILE_SYNCHRONOUS_IO_NONALERT, NtCreateFile,
+    FILE_CREATE, FILE_DIRECTORY_FILE, FILE_INFORMATION_CLASS, FILE_NON_DIRECTORY_FILE, FILE_OPEN,
+    FILE_OPEN_IF, FILE_OPEN_REPARSE_POINT, FILE_RENAME_INFORMATION, FILE_RENAME_POSIX_SEMANTICS,
+    FILE_RENAME_REPLACE_IF_EXISTS, FILE_SYNCHRONOUS_IO_NONALERT, FileRenameInformation,
+    FileRenameInformationEx, NtCreateFile, NtSetInformationFile,
 };
 use windows_sys::Win32::Foundation::{
     ERROR_DIRECTORY_NOT_SUPPORTED, ERROR_INVALID_FUNCTION, ERROR_INVALID_PARAMETER,
@@ -33,11 +35,11 @@ use windows_sys::Win32::Storage::FileSystem::{
     FILE_ATTRIBUTE_REPARSE_POINT, FILE_ATTRIBUTE_TAG_INFO, FILE_DISPOSITION_FLAG_DELETE,
     FILE_DISPOSITION_FLAG_IGNORE_READONLY_ATTRIBUTE, FILE_DISPOSITION_FLAG_POSIX_SEMANTICS,
     FILE_DISPOSITION_INFO, FILE_DISPOSITION_INFO_EX, FILE_ID_BOTH_DIR_INFO, FILE_ID_INFO,
-    FILE_INFO_BY_HANDLE_CLASS, FILE_READ_ATTRIBUTES, FILE_RENAME_INFO, FILE_SHARE_DELETE,
-    FILE_SHARE_READ, FILE_SHARE_WRITE, FileAttributeTagInfo, FileDispositionInfo,
-    FileDispositionInfoEx, FileIdBothDirectoryInfo, FileIdBothDirectoryRestartInfo, FileIdInfo,
-    FileRenameInfo, FileRenameInfoEx, GetDriveTypeW, GetFileInformationByHandle,
-    GetFileInformationByHandleEx, SYNCHRONIZE, SetFileInformationByHandle,
+    FILE_INFO_BY_HANDLE_CLASS, FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE, FILE_SHARE_READ,
+    FILE_SHARE_WRITE, FileAttributeTagInfo, FileDispositionInfo, FileDispositionInfoEx,
+    FileIdBothDirectoryInfo, FileIdBothDirectoryRestartInfo, FileIdInfo, GetDriveTypeW,
+    GetFileInformationByHandle, GetFileInformationByHandleEx, SYNCHRONIZE,
+    SetFileInformationByHandle,
 };
 use windows_sys::Win32::System::Diagnostics::Debug::{
     SEM_FAILCRITICALERRORS, SEM_NOGPFAULTERRORBOX, SEM_NOOPENFILEERRORBOX, SetErrorMode,
@@ -658,7 +660,7 @@ pub fn attribute_tag(file: BorrowedHandle<'_>) -> io::Result<Attributes> {
     })
 }
 
-/// Whether a `FileDispositionInfoEx` or `FileRenameInfoEx` failure means
+/// Whether a `FileDispositionInfoEx` or `FileRenameInformationEx` failure means
 /// the call isn't served there: before Windows 10 1607 (1809 for the
 /// read-only flag), or on a file system without POSIX semantics, such as
 /// FAT. std's `remove_dir_all` reads these the same way.
@@ -735,25 +737,18 @@ pub fn delete(file: BorrowedHandle<'_>) -> io::Result<()> {
     }
 }
 
-/// `FILE_RENAME_FLAG_REPLACE_IF_EXISTS` (winbase.h), which windows-sys
-/// keeps under `Win32_System_WindowsProgramming`, a feature this crate
-/// doesn't otherwise need.
-const FILE_RENAME_FLAG_REPLACE_IF_EXISTS: u32 = 0x1;
-/// `FILE_RENAME_FLAG_POSIX_SEMANTICS` (winbase.h), as above.
-const FILE_RENAME_FLAG_POSIX_SEMANTICS: u32 = 0x2;
-
 /// The longest name [`rename_at`] takes, in UTF-16 units: NTFS's limit on
 /// one component.
 const MAX_NAME: usize = 255;
-/// Where `FILE_RENAME_INFO`'s name starts.
-const RENAME_NAME_OFFSET: usize = std::mem::offset_of!(FILE_RENAME_INFO, FileName);
-/// A `FILE_RENAME_INFO` with the longest name and its NUL.
+/// Where `FILE_RENAME_INFORMATION`'s name starts.
+const RENAME_NAME_OFFSET: usize = std::mem::offset_of!(FILE_RENAME_INFORMATION, FileName);
+/// A `FILE_RENAME_INFORMATION` with the longest name and its NUL.
 const RENAME_BUFFER_SIZE: usize = RENAME_NAME_OFFSET + 2 * (MAX_NAME + 1);
-const _: () = assert!(align_of::<FILE_RENAME_INFO>() <= 8);
-const _: () = assert!(RENAME_BUFFER_SIZE >= size_of::<FILE_RENAME_INFO>());
+const _: () = assert!(align_of::<FILE_RENAME_INFORMATION>() <= 8);
+const _: () = assert!(RENAME_BUFFER_SIZE >= size_of::<FILE_RENAME_INFORMATION>());
 const _: () = assert!(RENAME_BUFFER_SIZE <= u32::MAX as usize);
 
-/// A `FILE_RENAME_INFO` as its bytes, aligned as the structure is, and the
+/// A `FILE_RENAME_INFORMATION` as its bytes, aligned as the structure is, and the
 /// size of the part the call reads. Built only by [`RenameInfo::new`], so
 /// `size` never exceeds the buffer.
 #[repr(C, align(8))]
@@ -763,7 +758,7 @@ struct RenameInfo {
 }
 
 impl RenameInfo {
-    /// `flags` in the union's place (for `FileRenameInfo`, 1 is
+    /// `flags` in the union's place (for `FileRenameInformation`, 1 is
     /// `ReplaceIfExists = TRUE`: its BOOLEAN is the union's first byte),
     /// `dir`'s handle as `RootDirectory`, and `name` with its length and a
     /// NUL. The handle's value is copied in: the caller keeps it open for
@@ -788,15 +783,15 @@ impl RenameInfo {
             Ok(())
         };
         put(
-            std::mem::offset_of!(FILE_RENAME_INFO, Anonymous),
+            std::mem::offset_of!(FILE_RENAME_INFORMATION, Anonymous),
             &flags.to_ne_bytes(),
         )?;
         put(
-            std::mem::offset_of!(FILE_RENAME_INFO, RootDirectory),
+            std::mem::offset_of!(FILE_RENAME_INFORMATION, RootDirectory),
             &root.to_ne_bytes(),
         )?;
         put(
-            std::mem::offset_of!(FILE_RENAME_INFO, FileNameLength),
+            std::mem::offset_of!(FILE_RENAME_INFORMATION, FileNameLength),
             &name_bytes.to_ne_bytes(),
         )?;
         for (index, unit) in name.iter().enumerate() {
@@ -809,39 +804,48 @@ impl RenameInfo {
     }
 }
 
+/// `NtSetInformationFile`, not `SetFileInformationByHandle`: kernelbase
+/// turns a `FILE_RENAME_INFO`'s name into a full path from the current
+/// directory, which a name relative to `RootDirectory` can't survive.
 #[allow(unsafe_code)]
 fn set_rename(
     file: BorrowedHandle<'_>,
-    class: FILE_INFO_BY_HANDLE_CLASS,
+    class: FILE_INFORMATION_CLASS,
     info: &RenameInfo,
 ) -> io::Result<()> {
-    // SAFETY: `info.bytes` holds a FILE_RENAME_INFO image of at least
-    // `info.size` bytes (RenameInfo::new keeps it within the buffer),
+    let mut status_block = IO_STATUS_BLOCK::default();
+    // SAFETY: `status_block` is borrowed mutably for the call, which writes
+    // only it; `info.bytes` holds a FILE_RENAME_INFORMATION image of at
+    // least `info.size` bytes (RenameInfo::new keeps it within the buffer),
     // aligned to 8 as the structure needs, borrowed for the call, which only
     // reads it; the RootDirectory in it is a handle our caller borrows for
     // the whole call; `file` is open for its borrow.
-    let ok = unsafe {
-        SetFileInformationByHandle(
+    let status = unsafe {
+        NtSetInformationFile(
             file.as_raw_handle(),
-            class,
+            &raw mut status_block,
             (&raw const info.bytes).cast(),
             info.size,
+            class,
         )
     };
-    win32(ok)
+    if status < 0 {
+        return Err(nt_error(status));
+    }
+    Ok(())
 }
 
 /// Renames what `file` is open on (with [`access::DELETE`]) to `name` in
 /// the directory `dir` is open on, replacing whatever is there without
-/// following it (`SetFileInformationByHandle` with `RootDirectory`): the
+/// following it (`NtSetInformationFile` with `RootDirectory`): the
 /// entry `file` was opened as, wherever it now is, into that directory
 /// itself, wherever it now is, never by a path.
 ///
-/// - **POSIX semantics** (`FileRenameInfoEx`, Windows 10 1607 and NTFS): a
+/// - **POSIX semantics** (`FileRenameInformationEx`, Windows 10 1607 and NTFS): a
 ///   file there is replaced even while other handles are open on it (with
 ///   `FILE_SHARE_DELETE`), as `renameat` replaces it.
 /// - **Where those aren't served** ([`ex_unserved`]), the fallback is
-///   `FileRenameInfo` with `ReplaceIfExists`: still relative to both
+///   `FileRenameInformation` with `ReplaceIfExists`: still relative to both
 ///   handles, but a file there that is open is refused (`PermissionDenied`).
 /// - **A directory there** isn't replaced (`PermissionDenied`), a junction
 ///   or directory symlink included.
@@ -854,14 +858,14 @@ pub fn rename_at(
 ) -> io::Result<()> {
     let wide = plain_component(name)?;
     let posix = RenameInfo::new(
-        FILE_RENAME_FLAG_REPLACE_IF_EXISTS | FILE_RENAME_FLAG_POSIX_SEMANTICS,
+        FILE_RENAME_REPLACE_IF_EXISTS | FILE_RENAME_POSIX_SEMANTICS,
         dir,
         &wide,
     )?;
-    match set_rename(file, FileRenameInfoEx, &posix) {
+    match set_rename(file, FileRenameInformationEx, &posix) {
         Err(e) if ex_unserved(&e) => {
             let legacy = RenameInfo::new(1, dir, &wide)?;
-            set_rename(file, FileRenameInfo, &legacy)
+            set_rename(file, FileRenameInformation, &legacy)
         }
         result => result,
     }
@@ -1533,7 +1537,9 @@ mod tests {
         assert_eq!(junction.reparse_tag, 0xA000_0003);
         assert!(sub.directory() && !sub.reparse_point());
         let opened = at("junction", how(access::ATTRIBUTES, Create::No, Expect::Any)).unwrap();
-        assert_eq!(attribute_tag(opened.as_handle()).unwrap(), *junction);
+        let tag = attribute_tag(opened.as_handle()).unwrap();
+        assert!(tag.directory() && tag.reparse_point());
+        assert_eq!(tag.reparse_tag, junction.reparse_tag);
         drop(opened);
         // Renamed into `sub` by both handles, then deleted by its handle
         // where it now is.

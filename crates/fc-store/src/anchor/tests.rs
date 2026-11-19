@@ -352,15 +352,17 @@ fn a_deep_tree_is_removed_within_a_small_descriptor_limit() {
 }
 
 /// A junction at `link` to `target` (`mklink /J`), which an unprivileged
-/// process can make, unlike a symlink.
+/// process can make, unlike a symlink. Both paths are rebuilt from their
+/// components, so that a `/` joined in doesn't read to cmd as a switch.
 #[cfg(windows)]
 fn junction(link: &Path, target: &Path) {
+    let native = |path: &Path| path.components().collect::<PathBuf>();
     let status = std::process::Command::new("cmd")
         .arg("/C")
         .arg("mklink")
         .arg("/J")
-        .arg(link)
-        .arg(target)
+        .arg(native(link))
+        .arg(native(target))
         .stdout(std::process::Stdio::null())
         .status()
         .unwrap();
@@ -401,11 +403,12 @@ fn a_directory_swapped_for_a_junction_after_its_open_redirects_nothing() {
     read.read_to_string(&mut text).unwrap();
     assert_eq!(text, "original");
     assert!(dir.same_file(&read, &name).unwrap());
-    drop(read);
     let mut staged = dir.create_new(OsStr::new("staged")).unwrap();
     staged.write_all(b"new").unwrap();
     staged.sync_all().unwrap();
-    drop(staged);
+    assert!(!dir.same_file(&read, OsStr::new("staged")).unwrap());
+    assert!(dir.same_file(&staged, OsStr::new("staged")).unwrap());
+    drop((read, staged));
     assert_eq!(dir.kind(OsStr::new("staged")).unwrap(), Kind::File);
     dir.rename(OsStr::new("staged"), &name).unwrap();
     assert_eq!(std::fs::read(root.join("old-keys/key")).unwrap(), b"new");

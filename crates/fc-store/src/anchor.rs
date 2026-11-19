@@ -39,13 +39,13 @@
 //!   (design 0013, "Windows handle I/O (#963)"): each file is opened or
 //!   made by `NtCreateFile` relative to its directory's handle, never
 //!   following a reparse point at its name (one is refused, or removed
-//!   itself), and renamed (`FileRenameInfoEx`, with `RootDirectory`) and
-//!   deleted (`FileDispositionInfoEx`) through its own handle, POSIX
-//!   semantics where the system serves them (Windows 10 1607 and NTFS) and
-//!   the older classes, still by handle, where it doesn't. A directory
-//!   swapped for a junction after it was opened can't redirect anything:
-//!   the operation stays in the directory the handle holds. A tree is
-//!   walked by handle too. Only the root is opened by its path.
+//!   itself), and renamed (`FileRenameInformationEx`, with
+//!   `RootDirectory`) and deleted (`FileDispositionInfoEx`) through its own
+//!   handle, POSIX semantics where the system serves them (Windows 10 1607
+//!   and NTFS) and the older classes, still by handle, where it doesn't. A
+//!   directory swapped for a junction after it was opened can't redirect
+//!   anything: the operation stays in the directory the handle holds. A
+//!   tree is walked by handle too. Only the root is opened by its path.
 
 use std::ffi::{OsStr, OsString};
 use std::fs::File;
@@ -204,9 +204,9 @@ impl Dir {
     }
 
     /// Renames `from` in this directory to `to` in `target`, both reached
-    /// through their handles (`renameat`; Windows: `FileRenameInfoEx` with
-    /// `RootDirectory`), replacing whatever `to`
-    /// is without following it. A profile's move recovery puts an entry
+    /// through their handles (`renameat`; Windows: `FileRenameInformationEx`
+    /// with `RootDirectory`), replacing whatever `to` is without following
+    /// it. A profile's move recovery puts an entry
     /// back from `freedom/` (design 0013).
     pub fn rename_into(&self, from: &OsStr, target: &Dir, to: &OsStr) -> io::Result<()> {
         imp::rename_into(self, from, target, to)
