@@ -167,6 +167,8 @@ fc-service = { path = "../fc-service" }
 # directory, and a store file's bounded read, hooked write and set-aside
 # (design 0013, "How the core writes them").
 fc-store = { path = "../fc-store" }
+# vault-meta.json's codec and changes (design 0013, PRF-5a): `accounts.*`.
+fc-wallet-state = { path = "../fc-wallet-state" }
 fc-swarm = { path = "../fc-swarm" }
 fc-vault = { path = "../fc-vault" }
 getrandom = "0.4"

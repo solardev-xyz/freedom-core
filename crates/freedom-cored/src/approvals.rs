@@ -2503,6 +2503,31 @@ impl Approvals {
     fn forget_account(&mut self, id: u64, params: &Value) -> Result<Zeroizing<Vec<u8>>, ErrorBody> {
         let fields = object(params, &["wallet_index"], &[])?;
         let account = account(fields.get("wallet_index"), "wallet_index")?;
+        let (keys, durable) = self.forget(account)?;
+        let mut reply = json!({ "keys": keys });
+        if !durable {
+            reply["durable"] = json!(false);
+        }
+        json_reply(id, &reply)
+    }
+
+    /// `accounts.remove`'s last step (design 0013, "`vault-meta.json`"):
+    /// the removed account's dApp grants forgotten, as
+    /// `approval.forget_account` forgets them. Its events go after the
+    /// removal's reply ([`Approvals::take_events`]).
+    pub fn forget_removed_account(&mut self, account: u32) -> Result<(), ErrorBody> {
+        self.forget(account).map(|_| ())
+    }
+
+    /// Ends every open Safe approval for `safe`: its account is being
+    /// removed (design 0013, `accounts.remove`). How many it ended.
+    pub fn end_safe_approvals(&mut self, safe: &[u8; 20]) -> usize {
+        self.safes.end_safe(safe)
+    }
+
+    /// The account's dApp grants revoked: the keys revoked, and whether the
+    /// write is durable.
+    fn forget(&mut self, account: u32) -> Result<(Vec<String>, bool), ErrorBody> {
         // A phone payment's waiting rule for the account goes, and one for
         // each key that exposed it, whatever the write does.
         self.narrowed.push(Narrowed::Account(account));
@@ -2542,11 +2567,7 @@ impl Approvals {
         if let Some(error) = error {
             return Err(error);
         }
-        let mut reply = json!({ "keys": keys });
-        if !durable {
-            reply["durable"] = json!(false);
-        }
-        json_reply(id, &reply)
+        Ok((keys, durable))
     }
 
     /// `approval.remember { receipt }` (#373): a device send's "Always
