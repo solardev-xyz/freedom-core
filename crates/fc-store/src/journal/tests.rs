@@ -199,6 +199,50 @@ fn a_failed_directory_sync_at_create_keeps_the_line_and_breaks_the_journal() {
         .unwrap();
 }
 
+/// Reopening after a failed directory sync syncs the directory again before
+/// the journal takes appends: a create's sync and a compaction's.
+#[test]
+fn reopening_syncs_an_entry_whose_sync_failed() {
+    // A create whose directory sync failed.
+    let dir = tempfile::tempdir().unwrap();
+    let mut journal = Journal::new(dir.path(), "j.jsonl", DEFAULT_MAX_BYTES);
+    journal.open().unwrap();
+    assert!(
+        journal
+            .append(&record(r#"{"n":1}"#), &Fail(vec![Step::Flush]))
+            .is_err()
+    );
+    // The reopen's own sync fails: not ready, nothing acknowledged.
+    assert!(matches!(
+        journal.open_hooked(&Fail(vec![Step::Flush])),
+        Err(Error::Io(_))
+    ));
+    assert!(matches!(
+        journal.append(&record(r#"{"n":2}"#), &NoHooks),
+        Err(Error::NotOpen)
+    ));
+    // It succeeds: ready, and the record the failed append synced is kept.
+    let read = journal.open().unwrap();
+    assert_eq!(texts(&read.parsed.records), [ONE_TWO[0]]);
+    journal.append(&record(r#"{"n":2}"#), &NoHooks).unwrap();
+
+    // A compaction whose directory sync failed after its rename.
+    let (_dir, mut journal) = two();
+    assert!(journal.compact(&[], &Fail(vec![Step::Flush])).is_err());
+    assert!(matches!(
+        journal.open_hooked(&Fail(vec![Step::Flush])),
+        Err(Error::Io(_))
+    ));
+    let read = journal.open().unwrap();
+    assert!(read.parsed.records.is_empty());
+    journal.append(&record(r#"{"n":3}"#), &NoHooks).unwrap();
+
+    // A missing file has no entry to sync.
+    let dir = tempfile::tempdir().unwrap();
+    let mut journal = Journal::new(dir.path(), "j.jsonl", DEFAULT_MAX_BYTES);
+    journal.open_hooked(&Fail(vec![Step::Flush])).unwrap();
+}
+
 #[test]
 fn a_failed_compaction_before_the_rename_keeps_the_old_journal() {
     for step in [Step::Write, Step::Fsync, Step::Rename] {

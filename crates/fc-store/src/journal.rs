@@ -412,7 +412,18 @@ impl Journal {
     /// compaction's temp files, ends a whole last record with its newline or
     /// cuts a torn tail off, and sets the mode to `0600`. Opening again
     /// (after a failed write) reads the file again.
+    ///
+    /// An existing file's directory is synced before the journal is ready,
+    /// so an entry whose sync failed earlier (a create's, or a compaction's
+    /// rename), in this process or one before it, is durable before the
+    /// next append is acknowledged.
     pub fn open(&mut self) -> Result<Read, Error> {
+        self.open_hooked(&crate::NoHooks)
+    }
+
+    /// [`Journal::open`], with `hooks` able to fail the directory sync
+    /// ([`Step::Flush`]).
+    pub fn open_hooked(&mut self, hooks: &dyn Hooks) -> Result<Read, Error> {
         self.opened = false;
         self.remove_stale_temps()?;
         let result = read(&self.path, self.max_bytes)?;
@@ -429,6 +440,10 @@ impl Journal {
                 file.sync_all()?;
             }
             fsx::tighten(&self.path)?;
+            if hooks.fails(Step::Flush) {
+                return Err(Error::Io(injected(Step::Flush)));
+            }
+            sync_directory(&self.dir)?;
         }
         self.exists = !result.missing;
         self.entry_unsynced = false;
