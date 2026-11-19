@@ -27,7 +27,7 @@ const uuid = (n) => `00000000-0000-4000-8000-${String(n).padStart(12, '0')}`;
 const SILENT = { info() {}, warn() {}, error() {}, debug() {} };
 
 function loadModule(checkout, ethers, counter) {
-  return loadWithInternals(checkout, MODULE, [], {
+  return loadWithInternals(checkout, MODULE, ['RUN_ID'], {
     crypto: { randomUUID: () => uuid((counter.n += 1)) },
     '../freedom-root': { getFreedomDataPath: (name) => path.join(os.tmpdir(), 'unused', name) },
     ethers,
@@ -171,6 +171,49 @@ function runsOf() {
       ['handoff', { name: 'A', handoff: 'h2' }],
       ['commit', { name: 'A', via: 'replacement', tx: { nonce: 0, fee: 9 } }],
     ] },
+    { name: 'live bounds', limits: { held: 2, hashesPerIntent: 2, openHandoffsPerIntent: 1, rawBytes: 312 }, steps: [
+      ['commit', { name: 'A', tx: { nonce: 0 }, context: ctx({ key: 'a' }) }],
+      ['commit', { name: 'X', tx: { nonce: 1, data: '0x' + 'ab'.repeat(201) }, context: ctx() }],
+      ['commit', { name: 'X', tx: { nonce: 1 }, context: ctx(), sender: 1 }],
+      ['commit', { name: 'X', intentIdOf: 'A', tx: { nonce: 1 }, context: ctx() }],
+      ['commit', { name: 'B', tx: { key: 1, nonce: 0, data: '0x' + 'ab'.repeat(200) }, context: ctx({ key: 'b' }) }],
+      ['commit', { name: 'C', tx: { nonce: 1 }, context: ctx() }],
+      ['commit', { name: 'A', via: 'replacement', tx: { nonce: 0, fee: 2 } }],
+      ['commit', { name: 'A', via: 'replacement', tx: { nonce: 0, fee: 3 } }],
+      ['handoff', { name: 'A', handoff: 'h1' }],
+      ['handoff', { name: 'A', handoff: 'h2' }],
+      ['handoff', { name: 'A', id: 'not-an-intent-01', handoff: 'hx' }],
+      ['settle', { name: 'B', label: 'paid', hashOf: 0, block: 5, hashes: ['0x' + '00'.repeat(32)] }],
+      ['track', { name: 'A', bracket: { number: 7, hash: '0x' + 'ab'.repeat(32) }, unreadSince: T }],
+      ['restart', {}],
+      ['handoff', { name: 'A', handoff: 'h3', hashOf: 0 }],
+      ['outcome', { name: 'A', handoff: 'h1', outcome: 'sent', source: null, reasonClass: null }],
+      ['settle', { name: 'B', label: 'paid', hashOf: 0, block: 5, hashes: 'all' }],
+      ['track', { name: 'B', bracket: null, unreadSince: null }],
+      ['retire', { name: 'B', block: 6, hashes: 'all' }],
+      ['commit', { name: 'C', tx: { nonce: 1 }, context: ctx() }],
+    ] },
+    { name: "the file's budget", limits: { journalBytes: 7000 }, steps: [
+      ['commit', { name: 'A', tx: { nonce: 0 }, context: ctx({ origin: 'https://shop.example/' + 'p'.repeat(1900) }) }],
+      ['withdrawOrigin', { name: 'A' }],
+      ['commit', { name: 'B', tx: { nonce: 1 }, context: ctx() }],
+      ['restart', {}],
+      ['commit', { name: 'B', tx: { nonce: 1 }, context: ctx() }],
+      ['handoff', { name: 'A', handoff: 'h1' }],
+      ['handoff', { name: 'A', handoff: 'h2' }],
+      ['handoff', { name: 'A', handoff: 'h3' }],
+      ['outcome', { name: 'A', handoff: 'h1', outcome: 'not_sent', source: null, reasonClass: null }],
+      ['outcome', { name: 'A', handoff: 'h2', outcome: 'not_sent', source: null, reasonClass: null }],
+      ['handoff', { name: 'A', handoff: 'h4' }],
+      ['outcome', { name: 'A', handoff: 'h4', outcome: 'not_sent', source: null, reasonClass: null }],
+      ['handoff', { name: 'A', handoff: 'h5' }],
+      ['outcome', { name: 'A', handoff: 'h5', outcome: 'not_sent', source: null, reasonClass: null }],
+      ['handoff', { name: 'A', handoff: 'h6' }],
+      ['outcome', { name: 'A', handoff: 'h6', outcome: 'not_sent', source: null, reasonClass: null }],
+      ['handoff', { name: 'B', handoff: 'h7' }],
+      ['track', { name: 'B', bracket: { number: 1, hash: '0x' + '01'.repeat(32) }, unreadSince: null }],
+      ['void', { name: 'A' }],
+    ] },
   ];
 }
 
@@ -190,6 +233,10 @@ async function runOf(checkout, ethers, dir, encodeLine, s, run) {
   for (const [op, args] of run.steps) {
     time += 1000;
     let refusal = null;
+    // What the store was called with, and the ids `crypto.randomUUID` gave
+    // during the call: the core's write is given both.
+    let call = null;
+    const before = counter.n;
     try {
       if (op === 'restart') {
         mod = loadModule(checkout, ethers, counter);
@@ -198,29 +245,40 @@ async function runOf(checkout, ethers, dir, encodeLine, s, run) {
       } else if (op === 'commit') {
         const tx = s.sign(args.tx);
         const via = args.via ?? 'original';
-        const view = await store.commit({
-          ...(via === 'replacement' ? { intentId: ids[args.name] } : {}),
-          chainId: tx.chainId, sender: tx.sender.toUpperCase().replace('0X', '0x'), nonce: args.tx.nonce,
+        const sender = args.sender === undefined ? tx.sender : s.senders[args.sender];
+        const intentId = args.intentIdOf !== undefined ? ids[args.intentIdOf] : via === 'replacement' ? ids[args.name] : undefined;
+        call = {
+          ...(intentId !== undefined ? { intentId } : {}),
+          chainId: tx.chainId, sender: sender.toUpperCase().replace('0X', '0x'), nonce: args.tx.nonce,
           hash: tx.hash, raw: tx.raw, via, context: args.context,
-        });
+        };
+        const view = await store.commit(call);
         ids[args.name] = view.intentId;
         (hashes[args.name] ??= []).push(tx.hash);
       } else if (op === 'handoff') {
         const hash = args.hashOf === undefined ? undefined : hashes[args.name][args.hashOf];
-        handoffs[args.handoff] = (await store.handoff(ids[args.name], hash)).handoffId;
+        call = { intentId: args.id ?? ids[args.name], hash };
+        handoffs[args.handoff] = (await store.handoff(call.intentId, hash)).handoffId;
       } else if (op === 'outcome') {
-        await store.outcome({ intentId: ids[args.name], handoffId: handoffs[args.handoff], outcome: args.outcome, source: args.source, reasonClass: args.reasonClass });
+        call = { intentId: ids[args.name], handoffId: handoffs[args.handoff], outcome: args.outcome, source: args.source, reasonClass: args.reasonClass };
+        await store.outcome(call);
       } else if (op === 'settle') {
         const hash = args.hashOf === undefined ? args.hash : hashes[args.name][args.hashOf];
-        await store.settle({ intentId: ids[args.name], label: args.label, hash, block: args.block });
+        const seen = args.hashes === 'all' ? hashes[args.name] : args.hashes;
+        call = { intentId: ids[args.name], label: args.label, hash, block: args.block, ...(seen !== undefined ? { hashes: seen } : {}) };
+        await store.settle(call);
       } else if (op === 'void') {
-        await store.void(ids[args.name], args.lock === null ? null : LOCK);
+        call = { intentId: ids[args.name], lock: args.lock !== null };
+        await store.void(call.intentId, call.lock ? LOCK : null);
       } else if (op === 'retire') {
-        await store.retire({ intentId: ids[args.name], block: args.block, hashes: args.hashes === 'all' ? hashes[args.name] : args.hashes }, LOCK);
+        call = { intentId: ids[args.name], block: args.block, hashes: args.hashes === 'all' ? hashes[args.name] : args.hashes, lock: true };
+        await store.retire({ intentId: call.intentId, block: call.block, hashes: call.hashes }, LOCK);
       } else if (op === 'track') {
-        await store.track({ intentId: ids[args.name], bracket: args.bracket, unreadSince: args.unreadSince });
+        call = { intentId: ids[args.name], bracket: args.bracket, unreadSince: args.unreadSince };
+        await store.track(call);
       } else if (op === 'withdrawOrigin') {
-        await store.withdrawOrigin(ids[args.name]);
+        call = { intentId: ids[args.name] };
+        call.result = await store.withdrawOrigin(call.intentId);
       } else if (op === 'compact') {
         await store.compact();
       } else {
@@ -230,8 +288,14 @@ async function runOf(checkout, ethers, dir, encodeLine, s, run) {
       if (!error.code) throw error;
       refusal = { code: error.code, message: error.message };
     }
+    const uuids = [];
+    for (let n = before + 1; n <= counter.n; n += 1) uuids.push(uuid(n));
     const records = readRecords(file);
-    steps.push({ op, args: plain(args), at: time, refusal, records, load: await probe(checkout, ethers, records, probeFile, run.limits, encodeLine) });
+    // The live store after the step. `usage()` sizes each held intent's
+    // snapshot, which the store caches until the intent has a new hash.
+    const list = plain(store.list());
+    const live = { usage: plain(store.usage()), list, void_refusal: list.map((v) => store.voidRefusal(v.intentId)) };
+    steps.push({ op, args: plain(args), at: time, run: mod.__internals.RUN_ID, call: plain(call), uuids, refusal, records, live, load: await probe(checkout, ethers, records, probeFile, run.limits, encodeLine) });
   }
   return { name: run.name, limits: run.limits ?? null, steps };
 }
@@ -357,7 +421,7 @@ function snapshotCases(held, s) {
 }
 
 const INTENTS_FORMAT =
-  'wallet-intents.jsonl, from the stores reference\'s src/main/wallet/intent-store.js over its lib/durable-journal.js, `crypto.randomUUID` numbered (RUN_ID at each load of the module, then the intent and handoff ids) and the clock fixed. `runs`: one live store per run, with its `limits` overrides, each step an operation (`op`, `args`, at `at`; `restart` loads the module again, a new run of main; `void` without a `lock` is refused) with its `refusal` (`code`, `message`) or null, the file\'s `records` after it, and `load`: a fresh store loading those records, its `reason` for moving the file aside (null: loaded), the records it rewrote the file to (`compacted`, null when unchanged), `list()`, the ids of `held()`, `byKey` of each key, `heldNonces` of each account, `voidRefusal` of each listed intent, and `usage()`. `damaged`: records the reference loads, with its `reason` (null when it loads them).';
+  'wallet-intents.jsonl, from the stores reference\'s src/main/wallet/intent-store.js over its lib/durable-journal.js, `crypto.randomUUID` numbered (RUN_ID at each load of the module, then the intent and handoff ids) and the clock fixed. `runs`: one live store per run, with its `limits` overrides, each step an operation (`op`, `args`, at `at`; `restart` loads the module again, a new run of main; `void` without a `lock` is refused) with main\'s `run` (the live store\'s RUN_ID), the `call` the store method got (ids resolved; `lock` for void and retire; withdrawOrigin\'s `result`), the `uuids` `crypto.randomUUID` gave during it, its `refusal` (`code`, `message`) or null, the file\'s `records` after it, `live`: the live store\'s `usage()` (which sizes each held snapshot, cached until a new hash), `list()` and `voidRefusal` of each listed intent after it, and `load`: a fresh store loading those records, its `reason` for moving the file aside (null: loaded), the records it rewrote the file to (`compacted`, null when unchanged), `list()`, the ids of `held()`, `byKey` of each key, `heldNonces` of each account, `voidRefusal` of each listed intent, and `usage()`. `damaged`: records the reference loads, with its `reason` (null when it loads them).';
 
 async function buildIntents(checkout, ethers) {
   const { encodeLine } = require(path.join(checkout, 'src/main/lib/durable-journal.js'));
