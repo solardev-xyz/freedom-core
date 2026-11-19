@@ -3,8 +3,8 @@
 //! The test plays main, as `quick_unlock.rs` does: it answers the core's
 //! `shell.keystore` requests from a keychain of its own, with
 //! `FREEDOM_CORED_TEST_KEYSTORE_BACKEND` offering the Keychain's
-//! `Unattended` on every OS; without it the core has no key store, as on
-//! Linux and Windows until PRF-7. The keychain outlives each core, so a
+//! `Unattended` on every OS; with `none` the core has no key store on any
+//! OS, as on Linux and Windows until PRF-7. The keychain outlives each core, so a
 //! crash hook's exit and a restart show what each place holds.
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
@@ -146,6 +146,9 @@ impl Main {
         if self.key_store {
             all.push((BACKEND.0, BACKEND.1.into()));
             all.push((DEADLINE.0, DEADLINE.1.into()));
+        } else {
+            // macOS's own Keychain off too.
+            all.push((BACKEND.0, "none".into()));
         }
         for (k, v) in env {
             let k: &'static str = Box::leak(k.to_string().into_boxed_str());

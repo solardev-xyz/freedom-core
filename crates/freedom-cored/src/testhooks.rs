@@ -71,7 +71,9 @@
 //!   store offers the macOS Keychain's `Unattended` on any OS, as macOS
 //!   does, so a test playing main answers its `shell.keystore` requests
 //!   from a keychain of its own (design 0013, PRF-1c's forgetting tests).
-//!   The helper is unchanged: it still has no backend off macOS.
+//!   The helper is unchanged: it still has no backend off macOS. `=none`:
+//!   the key store offers nothing, on any OS (macOS's own Keychain
+//!   included), as on Linux and Windows until PRF-7.
 //! - `FREEDOM_CORED_TEST_SECRETS_CRASH` names a step of a secrets-file
 //!   change (`before-pending`, `after-pending`, `before-commit`,
 //!   `after-commit`, `before-remove`, `after-remove`, `before-forgotten`,
@@ -296,6 +298,11 @@ pub fn keystore_capabilities(native: fc_keystore::Capabilities) -> fc_keystore::
         Ok("macos-keychain") => fc_keystore::Capabilities {
             backend: Some(fc_keystore::Backend::MacosKeychain),
             unattended: true,
+            user_presence: false,
+        },
+        Ok("none") => fc_keystore::Capabilities {
+            backend: None,
+            unattended: false,
             user_presence: false,
         },
         _ => native,
