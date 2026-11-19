@@ -421,3 +421,39 @@ fn move_aside_takes_the_first_free_name_and_starts_an_empty_journal() {
         encode_line(&record(ONE_TWO[0])).unwrap()
     );
 }
+
+#[test]
+fn the_first_append_creates_the_file_exclusively_and_syncs_the_directory_once() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut journal = Journal::new(dir.path(), "j.jsonl", DEFAULT_MAX_BYTES);
+    journal.open().unwrap();
+    // A file that appeared after the open isn't appended to.
+    std::fs::write(journal.path(), b"theirs").unwrap();
+    let refused = journal.append(&record(ONE_TWO[0]), &NoHooks);
+    assert!(
+        matches!(&refused, Err(Error::Io(e)) if e.kind() == io::ErrorKind::AlreadyExists),
+        "{refused:?}"
+    );
+    assert_eq!(std::fs::read(journal.path()).unwrap(), b"theirs");
+    std::fs::remove_file(journal.path()).unwrap();
+    // Created by the next append, whose directory sync is the only one.
+    journal.append(&record(ONE_TWO[0]), &NoHooks).unwrap();
+    journal
+        .append(&record(ONE_TWO[1]), &Fail(vec![Step::Flush]))
+        .unwrap();
+}
+
+/// Another account's file is refused as 0001 reads it. Only root can give a
+/// file away, so elsewhere this checks nothing.
+#[cfg(unix)]
+#[test]
+fn another_accounts_file_is_not_read() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("j.jsonl");
+    std::fs::write(&path, encode_line(&record(ONE_TWO[0])).unwrap()).unwrap();
+    let nobody = rustix::process::Uid::from_raw(65534);
+    if rustix::fs::chown(&path, Some(nobody), None).is_err() {
+        return;
+    }
+    assert!(matches!(read(&path, 100), Err(Error::NotAFile)));
+}
