@@ -263,6 +263,7 @@ function damagedCases(base, s) {
     ['negative time', [set(A, { at: -1 })]],
     ['fractional time', [set(A, { at: 1.5 })]],
     ['short intent id', [set(A, { intent_id: 'short' })]],
+    ['intent id of seven', [set(A, { intent_id: 'abcdefg' })]],
     ['bad run', [set(A, { run: 'a b c d e f g h' })]],
     ['chain id zero', [set(A, { chain_id: 0 })]],
     ['sender not hex', [set(A, { sender: '0x' + 'zz'.repeat(20) })]],
@@ -288,6 +289,7 @@ function damagedCases(base, s) {
     ['empty origin', [set(A, { context: { ...A.context, origin: '' } })]],
     ['nonce below a held one', [A, set(resign(B, { nonce: 0 }), { nonce: 0 })]],
     ['the same key held twice', [A, set(B, { context: { ...B.context, key: A.context.key } })]],
+    ['replacement paying other data', [A, resign(replacement, { nonce: A.nonce, fee: 2, data: '0x12' })]],
     ['replacement paying another value', [A, resign(replacement, { nonce: A.nonce, fee: 2, value: 1n })]],
     ['replacement after its settle', [A, { type: 'settle', run: A.run, at: 5, intent_id: A.intent_id, label: 'failed', hash: A.hash, block: 1 }, replacement]],
     ['settle of an uncommitted hash', [A, { type: 'settle', run: A.run, at: 5, intent_id: A.intent_id, label: 'paid', hash: B.hash, block: 1 }]],
@@ -319,6 +321,7 @@ function damagedCases(base, s) {
     ['track with a bad bracket', [A, { type: 'track', run: A.run, at: 5, intent_id: A.intent_id, bracket: { number: 1 } }]],
     ['held snapshot written live', [set(A, { type: 'held' })]],
     ['tombstone with hashes', [{ type: 'tombstone', at: 1, intent_id: A.intent_id, chain_id: 1, sender: A.sender, nonce: 0, closed: 'voided', hashes: [A.hash] }]],
+    ['voided tombstone with a label', [{ type: 'tombstone', at: 1, intent_id: A.intent_id, chain_id: 1, sender: A.sender, nonce: 0, closed: 'voided', label: 'paid' }]],
     ['tombstone with a bad state', [{ type: 'tombstone', at: 1, intent_id: A.intent_id, chain_id: 1, sender: A.sender, nonce: 0, closed: 'held' }]],
     ['retired tombstone without hashes', [{ type: 'tombstone', at: 1, intent_id: A.intent_id, chain_id: 1, sender: A.sender, nonce: 0, closed: 'retired', hashes: [] }]],
     ['settled tombstone without a label', [{ type: 'tombstone', at: 1, intent_id: A.intent_id, chain_id: 1, sender: A.sender, nonce: 0, closed: 'settled' }]],
@@ -338,6 +341,7 @@ function snapshotCases(held) {
     ['bad count', [set({ handoffs: { count: -1, possibly_sent: false } })]],
     ['bad unread time', [set({ unread_since: 'soon' })]],
     ['snapshot then its replacement', [held, held]],
+    ['void after a possibly sent handoff', [set({ handoffs: { count: 1, possibly_sent: true } }), { type: 'void', run: held.run, at: held.at + 1, intent_id: held.intent_id }]],
   ].map(([name, records]) => ({ name, records: plain(records) }));
 }
 

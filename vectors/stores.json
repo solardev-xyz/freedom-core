@@ -22354,6 +22354,40 @@
         "reason": "Invalid wallet intent record: bad intent id"
       },
       {
+        "name": "intent id of seven",
+        "records": [
+          {
+            "type": "commit",
+            "run": "00000000-0000-4000-8000-000000000001",
+            "at": 1763000001000,
+            "intent_id": "abcdefg",
+            "chain_id": 1,
+            "sender": "0x19e7e376e7c213b7e7e7e46cc70a5dd086daff2a",
+            "nonce": 0,
+            "hash": "0xdc73dc71844f2d4c4e5cb2b00d0e6405dd492bf5dd5b6f2beef49bc6fdba1ed1",
+            "raw": "0x02f86b0180830f4240843b9aca0082520a94abababababababababababababababababababab8203e880c001a02644459f6ab31bf0db55c141a13f502a033e88a3da72dbe6dc64a98923ab2235a074ab8d5254c073f67f42a262c28cc5d1557db4c7392f4442b79eccc86734b375",
+            "via": "original",
+            "context": {
+              "kind": "payment",
+              "origin": "https://shop.example",
+              "key": "order-1",
+              "wallet_index": 0
+            },
+            "fields": {
+              "type": 2,
+              "to": "0xabababababababababababababababababababab",
+              "value": "1000",
+              "data": "0x",
+              "gas_limit": "21002",
+              "max_fee_per_gas": "1000000000",
+              "max_priority_fee_per_gas": "1000000",
+              "gas_price": null
+            }
+          }
+        ],
+        "reason": "Invalid wallet intent record: bad intent id"
+      },
+      {
         "name": "bad run",
         "records": [
           {
@@ -23268,6 +23302,62 @@
           }
         ],
         "reason": "Invalid wallet intent record: another held intent has the same key"
+      },
+      {
+        "name": "replacement paying other data",
+        "records": [
+          {
+            "type": "commit",
+            "run": "00000000-0000-4000-8000-000000000001",
+            "at": 1763000001000,
+            "intent_id": "00000000-0000-4000-8000-000000000002",
+            "chain_id": 1,
+            "sender": "0x19e7e376e7c213b7e7e7e46cc70a5dd086daff2a",
+            "nonce": 0,
+            "hash": "0xdc73dc71844f2d4c4e5cb2b00d0e6405dd492bf5dd5b6f2beef49bc6fdba1ed1",
+            "raw": "0x02f86b0180830f4240843b9aca0082520a94abababababababababababababababababababab8203e880c001a02644459f6ab31bf0db55c141a13f502a033e88a3da72dbe6dc64a98923ab2235a074ab8d5254c073f67f42a262c28cc5d1557db4c7392f4442b79eccc86734b375",
+            "via": "original",
+            "context": {
+              "kind": "payment",
+              "origin": "https://shop.example",
+              "key": "order-1",
+              "wallet_index": 0
+            },
+            "fields": {
+              "type": 2,
+              "to": "0xabababababababababababababababababababab",
+              "value": "1000",
+              "data": "0x",
+              "gas_limit": "21002",
+              "max_fee_per_gas": "1000000000",
+              "max_priority_fee_per_gas": "1000000",
+              "gas_price": null
+            }
+          },
+          {
+            "type": "commit",
+            "run": "00000000-0000-4000-8000-000000000001",
+            "at": 1763000002000,
+            "intent_id": "00000000-0000-4000-8000-000000000002",
+            "chain_id": 1,
+            "sender": "0x19e7e376e7c213b7e7e7e46cc70a5dd086daff2a",
+            "nonce": 0,
+            "hash": "0xd97782c8590ac1ef9c71ace170300cd3258d7e815fe627043f5c22f4be8b60c0",
+            "raw": "0x02f86b0180830f4240847735940082520c94abababababababababababababababababababab8203e812c001a031983d7a1dbe325ea264f25c6a4623ae3d83554d89ac53254da5862bb3563e34a06023f90b7d7e9553d9d3bfb04a49cdab295b49c4e2c62b1e46b704b701bd053f",
+            "via": "replacement",
+            "fields": {
+              "type": 2,
+              "to": "0xabababababababababababababababababababab",
+              "value": "1000",
+              "data": "0x12",
+              "gas_limit": "21004",
+              "max_fee_per_gas": "2000000000",
+              "max_priority_fee_per_gas": "1000000",
+              "gas_price": null
+            }
+          }
+        ],
+        "reason": "Invalid wallet intent record: a replacement of intent 00000000-0000-4000-8000-000000000002 must pay what the original pays"
       },
       {
         "name": "replacement paying another value",
@@ -24733,6 +24823,22 @@
         "reason": "Invalid wallet intent record: voided intent 00000000-0000-4000-8000-000000000002 keeps no hashes"
       },
       {
+        "name": "voided tombstone with a label",
+        "records": [
+          {
+            "type": "tombstone",
+            "at": 1,
+            "intent_id": "00000000-0000-4000-8000-000000000002",
+            "chain_id": 1,
+            "sender": "0x19e7e376e7c213b7e7e7e46cc70a5dd086daff2a",
+            "nonce": 0,
+            "closed": "voided",
+            "label": "paid"
+          }
+        ],
+        "reason": "Invalid wallet intent record: bad label"
+      },
+      {
         "name": "tombstone with a bad state",
         "records": [
           {
@@ -25260,6 +25366,63 @@
           }
         ],
         "reason": "Invalid wallet intent record: intent 00000000-0000-4000-8000-000000000002 is already committed"
+      },
+      {
+        "name": "void after a possibly sent handoff",
+        "records": [
+          {
+            "type": "held",
+            "run": "00000000-0000-4000-8000-000000000001",
+            "at": 1763000001000,
+            "intent_id": "00000000-0000-4000-8000-000000000002",
+            "chain_id": 1,
+            "sender": "0x19e7e376e7c213b7e7e7e46cc70a5dd086daff2a",
+            "nonce": 0,
+            "hash": "0x64d686efbe06ba607297980e3a04594180dbd6be3a6b7cb8b2b55690aac64594",
+            "raw": "0x02f86c0180830f424085012a05f20082520a94abababababababababababababababababababab8203e880c080a091edaf55d6dc68a2abd27429eba0426d3396d7cb6c68f8421cc84d6f1729d8b2a06744328b4bfc9e1459f85ab7f23a4d64ea190bbf4bd0a8e2ef38d259da2098bb",
+            "fields": {
+              "type": 2,
+              "to": "0xabababababababababababababababababababab",
+              "value": "1000",
+              "data": "0x",
+              "gas_limit": "21002",
+              "max_fee_per_gas": "5000000000",
+              "max_priority_fee_per_gas": "1000000",
+              "gas_price": null
+            },
+            "context": {
+              "kind": "payment",
+              "origin": "https://shop.example",
+              "key": "a",
+              "wallet_index": 0
+            },
+            "hashes": [
+              {
+                "hash": "0xdc73dc71844f2d4c4e5cb2b00d0e6405dd492bf5dd5b6f2beef49bc6fdba1ed1",
+                "via": "original",
+                "at": 1763000001000,
+                "run": "00000000-0000-4000-8000-000000000001"
+              },
+              {
+                "hash": "0x64d686efbe06ba607297980e3a04594180dbd6be3a6b7cb8b2b55690aac64594",
+                "via": "replacement",
+                "at": 1763000009000,
+                "run": "00000000-0000-4000-8000-000000000001"
+              }
+            ],
+            "handoffs": {
+              "count": 1,
+              "possibly_sent": true
+            }
+          },
+          {
+            "type": "void",
+            "run": "00000000-0000-4000-8000-000000000001",
+            "at": 1763000001001,
+            "intent_id": "00000000-0000-4000-8000-000000000002"
+          }
+        ],
+        "reason": "Invalid wallet intent record: void of intent 00000000-0000-4000-8000-000000000002: an earlier handoff may have been sent"
       }
     ]
   }
