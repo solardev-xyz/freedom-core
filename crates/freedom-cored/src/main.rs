@@ -40,6 +40,7 @@ mod rng;
 mod secrets;
 mod serve;
 mod signing;
+mod sqlite;
 mod storage;
 mod testhooks;
 // The `testhooks` feature only (build.rs refuses it in a release build):
