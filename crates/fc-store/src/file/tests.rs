@@ -120,7 +120,9 @@ fn the_write_hook_fires_before_the_bytes_are_written() {
             for entry in std::fs::read_dir(&self.dir).unwrap() {
                 let entry = entry.unwrap();
                 if entry.file_name() != "dapp-permissions.json" {
-                    self.sizes.borrow_mut().push(entry.metadata().unwrap().len());
+                    self.sizes
+                        .borrow_mut()
+                        .push(entry.metadata().unwrap().len());
                 }
             }
             true
