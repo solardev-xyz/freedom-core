@@ -36,7 +36,7 @@ FILES.push('eip1193.json', 'generator/eip1193.js');
 FILES.push('stores.json', 'generator/stores.js', 'generator/stores-intents.js');
 FILES.push('generator/tx-decode.js');
 FILES.push('journal.json', 'generator/journal.js');
-FILES.push('sqlite.json', 'generator/sqlite.js');
+FILES.push('sqlite.json', 'generator/sqlite.js', 'generator/sqlite-payments.js');
 
 function corruptedCheck(filename, corrupt) {
   const copy = fs.mkdtempSync(path.join(os.tmpdir(), 'freedom-core-vectors-'));

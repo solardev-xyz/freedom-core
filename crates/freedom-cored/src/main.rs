@@ -33,6 +33,7 @@ mod keystore;
 mod log;
 mod naming;
 mod nodes;
+mod payments;
 mod phone;
 mod profile;
 mod requests;

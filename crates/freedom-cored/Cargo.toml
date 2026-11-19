@@ -148,6 +148,9 @@ fc-evm = { path = "../fc-evm" }
 # The JavaScript-semantics JSON reader fc-dweb's plans are written with:
 # dweb.verify's plan reads back as dweb.open wrote it (design 0009).
 fc-json = { path = "../fc-json" }
+# payment-history.sqlite's codec (design 0013, "Where SQLite lives"): the
+# rows, checks and statements, pure; SQLite stays in this binary.
+fc-wallet-state = { path = "../fc-wallet-state" }
 fc-keys = { path = "../fc-keys" }
 # The key store's trait and types (design 0013): the core's desktop
 # KeyStore over `shell.keystore`, and the helper's answers.
