@@ -846,6 +846,7 @@ fn a_failed_forget_refuses_the_removal() {
     let (mut core, _) = start(root.path(), &["vault_meta"], &["dapp"], &env);
     let mut id = 1;
     import(&mut core, &mut id);
+    write_meta(root.path(), "{\n  \"userKnowsPassword\": true\n}");
     assert_eq!(add_mnemonic(&mut core, &mut id, "Second"), 1);
     let meta_before = read_meta(root.path());
     let dapp_before = std::fs::read(grant_root.join("dapp-permissions.json")).unwrap();
@@ -868,8 +869,13 @@ fn a_failed_forget_refuses_the_removal() {
     assert_eq!(*result(&remove(&mut core, &mut id, 1)), json!({}));
     assert_eq!(listed_indices(root.path()), [0]);
     assert_eq!(dapp_sites(&grant_root), ["https://main.example"]);
-    // The index is handed out again.
+    // The index is handed out again. Once the file has caught up, a
+    // removal with nothing to forget doesn't write it.
     assert_eq!(add_mnemonic(&mut core, &mut id, "Third"), 1);
+    std::fs::write(&hook, "dapp:write\n").unwrap();
+    assert_eq!(*result(&remove(&mut core, &mut id, 1)), json!({}));
+    std::fs::write(&hook, "").unwrap();
+    assert_eq!(add_mnemonic(&mut core, &mut id, "Fourth"), 1);
     drop(core);
     let (mut core, _) = start(root.path(), &["vault_meta"], &["dapp"], &env);
     let mut id = 1;
@@ -909,6 +915,7 @@ fn a_forget_then_a_failed_metadata_write_and_durability() {
     );
     let mut id = 1;
     import(&mut core, &mut id);
+    write_meta(root.path(), "{\n  \"userKnowsPassword\": true\n}");
     assert_eq!(add_mnemonic(&mut core, &mut id, "Second"), 1);
     assert_eq!(add_mnemonic(&mut core, &mut id, "Third"), 2);
     let meta_before = read_meta(root.path());
@@ -943,6 +950,7 @@ fn a_forget_then_a_failed_metadata_write_and_durability() {
     let (mut core, _) = start(root.path(), &["vault_meta"], &[], &[]);
     let mut id = 1;
     import(&mut core, &mut id);
+    write_meta(root.path(), "{\n  \"userKnowsPassword\": true\n}");
     assert_eq!(add_mnemonic(&mut core, &mut id, "Second"), 1);
     let meta_before = read_meta(root.path());
     let dapp_before = std::fs::read(grant_root.join("dapp-permissions.json")).unwrap();
