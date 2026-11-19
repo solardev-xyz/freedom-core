@@ -70,6 +70,7 @@ use fc_json::JsValue;
 use fc_profile::layout::{Layout, PLACEHOLDER};
 use fc_profile::{Deletion, Options, Style};
 use fc_service::gate::{GateError, PROFILE_NAMESPACE};
+use fc_store::anchor::{Dir, Resolve};
 
 use super::confine::{self, Grant};
 use super::forget::{self, Recorded};
@@ -80,7 +81,6 @@ use super::{
     Flags, failed, keep, object, outside, prepare_app_root, print, refused, storage,
     take_catalog_lock,
 };
-use crate::anchor::{Dir, Resolve};
 use crate::exit::Exit;
 use crate::log;
 use crate::testhooks::profile_delete_step as step;
