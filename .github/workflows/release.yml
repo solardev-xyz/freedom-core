@@ -75,13 +75,22 @@ jobs:
           - { runner: macos-latest, target: aarch64-apple-darwin, asset: darwin-arm64, native: true }
           - { runner: macos-latest, target: x86_64-apple-darwin, asset: darwin-amd64, native: false }
           # Static musl binaries (crt-static is the musl default): no
-          # dependency on the distribution's glibc.
+          # dependency on the distribution's glibc. Zig compiles their C, the
+          # bundled SQLite (design 0013, "Where SQLite lives"); the Rust link
+          # is as before. The macOS and Windows runners compile it with
+          # their own C compilers.
           - { runner: ubuntu-latest, target: x86_64-unknown-linux-musl, asset: linux-amd64, native: true }
           - { runner: ubuntu-24.04-arm, target: aarch64-unknown-linux-musl, asset: linux-arm64, native: true }
           - { runner: windows-latest, target: x86_64-pc-windows-msvc, asset: windows-amd64, native: true }
     runs-on: ${{ matrix.runner }}
     env:
       VERSION: ${{ needs.check.outputs.version }}
+      # The bundled SQLite the notices name, whatever the runner sets:
+      # libsqlite3-sys takes LIBSQLITE3_SYS_USE_PKG_CONFIG (anything but 0)
+      # before its `bundled` feature, and would link the system's.
+      LIBSQLITE3_SYS_USE_PKG_CONFIG: "0"
+      # Windows: link the C runtime statically (no VC++ redistributable).
+      RUSTFLAGS: ${{ contains(matrix.target, 'windows') && '-C target-feature=+crt-static' || '' }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
@@ -91,11 +100,21 @@ jobs:
         run: |
           rustup toolchain install
           rustup target add ${{ matrix.target }}
+      - name: Zig, the musl targets' C compiler
+        if: contains(matrix.target, 'musl')
+        shell: bash
+        run: scripts/zig-install.sh "$RUNNER_TEMP/zig" ${{ matrix.target }}
+      - name: No SQLite build inputs from the runner
+        shell: bash
+        run: |
+          # libsqlite3-sys compiles LIBSQLITE3_FLAGS and SQLITE_* defines into
+          # the bundled SQLite: the notices name it as built, so refuse any.
+          if env | grep -qE '^(LIBSQLITE3_FLAGS|SQLITE_)'; then
+            echo "SQLite build variables are set: $(env | grep -oE '^(LIBSQLITE3_FLAGS|SQLITE_[A-Za-z0-9_]*)' | tr '\n' ' ')" >&2
+            exit 1
+          fi
       - name: Build
         shell: bash
-        env:
-          # Windows: link the C runtime statically (no VC++ redistributable).
-          RUSTFLAGS: ${{ contains(matrix.target, 'windows') && '-C target-feature=+crt-static' || '' }}
         run: cargo build --locked --release -p freedom-cored --target ${{ matrix.target }}
       - name: Smoke test (usage exits 64)
         if: matrix.native
@@ -109,6 +128,13 @@ jobs:
           set -e
           echo "exit code $code"
           [ "$code" = 64 ]
+      # SQLite as this target's release build compiles it, linked and run:
+      # the sqlite module's tests, optimized. Until the payments store calls
+      # it (PRF-5g-2), the binary itself links no SQLite.
+      - name: Smoke test (SQLite)
+        if: matrix.native
+        shell: bash
+        run: cargo test --locked --release -p freedom-cored --bin freedom-cored --target ${{ matrix.target }} sqlite::tests
       - name: Package
         shell: bash
         run: |
