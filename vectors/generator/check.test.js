@@ -33,7 +33,7 @@ FILES.push('secrets.json', 'generator/secrets.js');
 FILES.push('keystore.json', 'generator/keystore.js', 'generator/hpke.js');
 FILES.push('generator/approval-rules.js', 'generator/approval-decisions.js');
 FILES.push('eip1193.json', 'generator/eip1193.js');
-FILES.push('stores.json', 'generator/stores.js');
+FILES.push('stores.json', 'generator/stores.js', 'generator/stores-intents.js');
 FILES.push('generator/tx-decode.js');
 FILES.push('journal.json', 'generator/journal.js');
 FILES.push('sqlite.json', 'generator/sqlite.js');

@@ -46,8 +46,10 @@
 
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Write};
+
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
+use zeroize::Zeroizing;
 
 use crate::{Hooks, Step};
 
@@ -401,6 +403,47 @@ pub fn read_at_most(file: &File, max: u64) -> std::io::Result<Option<Vec<u8>>> {
     Ok((bytes.len() as u64 <= max).then_some(bytes))
 }
 
+/// [`read_at_most`] for a file that holds secrets: into one buffer, sized
+/// from the handle's length and wiped on drop, read straight into it (no
+/// buffer of std's in between). It grows only if the file grew since its
+/// length was read: each larger buffer is a copy, and the smaller one is
+/// wiped as it goes.
+pub fn read_secret_at_most(file: &File, max: u64) -> std::io::Result<Option<Zeroizing<Vec<u8>>>> {
+    let max = usize::try_from(max).unwrap_or(usize::MAX);
+    let hint = usize::try_from(file.metadata()?.len())
+        .unwrap_or(usize::MAX)
+        .min(max);
+    // One byte past the length: a read that fills it has found more.
+    let mut buf = Zeroizing::new(vec![0u8; hint.saturating_add(1)]);
+    let mut filled = 0usize;
+    let mut reader = file;
+    loop {
+        if filled == buf.len() {
+            if filled > max {
+                return Ok(None);
+            }
+            let size = filled
+                .saturating_mul(2)
+                .min(max.saturating_add(1))
+                .max(filled.saturating_add(1));
+            let mut bigger = Zeroizing::new(vec![0u8; size]);
+            bigger[..filled].copy_from_slice(&buf[..filled]);
+            buf = bigger;
+        }
+        match reader.read(&mut buf[filled..]) {
+            Ok(0) => break,
+            Ok(n) => filled += n,
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(e) => return Err(e),
+        }
+    }
+    if filled > max {
+        return Ok(None);
+    }
+    buf.truncate(filled);
+    Ok(Some(buf))
+}
+
 /// Removes the temp files [`replace`] left in `dir` for its target `name`
 /// (`.<name>.<pid>.<n>.tmp`), then flushes the directory if it removed any.
 /// Only call it while nothing can be writing `name`: under the gate, with
@@ -632,6 +675,23 @@ mod tests {
             remove_temps(&dir.path().join("missing"), "identity-vault.json").unwrap(),
             0
         );
+    }
+
+    #[test]
+    fn a_secret_read_fills_one_buffer_and_keeps_the_bound() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("f");
+        std::fs::write(&path, b"0123456789").unwrap();
+        let file = File::open(&path).unwrap();
+        let bytes = read_secret_at_most(&file, 10).unwrap().unwrap();
+        assert_eq!(&bytes[..], b"0123456789");
+        // Sized from the length, one byte over to see the end: never grown.
+        assert_eq!(bytes.capacity(), 11);
+        let file = File::open(&path).unwrap();
+        assert!(read_secret_at_most(&file, 9).unwrap().is_none());
+        std::fs::write(&path, b"").unwrap();
+        let file = File::open(&path).unwrap();
+        assert!(read_secret_at_most(&file, 0).unwrap().unwrap().is_empty());
     }
 
     #[test]

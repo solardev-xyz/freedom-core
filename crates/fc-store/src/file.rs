@@ -14,6 +14,8 @@
 use std::io;
 use std::path::Path;
 
+use zeroize::Zeroizing;
+
 use crate::Hooks;
 use crate::fsx::{self, Done};
 
@@ -36,17 +38,57 @@ pub enum Read {
 /// (`fc_sys::windows::owned_by_current_user`). A file the user owns that
 /// another account may still edit is 0001's owner-only DACL follow-up.
 pub fn read_file(path: &Path, bound: usize) -> Read {
+    let Some(file) = open_owned(path) else {
+        return Read::Missing;
+    };
+    let Ok(file) = file else {
+        return Read::Unreadable;
+    };
+    match fsx::read_at_most(&file, bound as u64) {
+        Ok(Some(bytes)) => Read::Bytes(bytes),
+        Ok(None) | Err(_) => Read::Unreadable,
+    }
+}
+
+/// What [`read_secret_file`] found. No `Debug`: the bytes are secret.
+pub enum SecretRead {
+    Missing,
+    /// As [`Read::Unreadable`].
+    Unreadable,
+    /// In one buffer, wiped on drop.
+    Bytes(Zeroizing<Vec<u8>>),
+}
+
+/// [`read_file`] for a file that holds secrets (the RPC API keys'
+/// plaintext file): the same rules, the bytes read by
+/// [`fsx::read_secret_at_most`].
+pub fn read_secret_file(path: &Path, bound: usize) -> SecretRead {
+    let Some(file) = open_owned(path) else {
+        return SecretRead::Missing;
+    };
+    let Ok(file) = file else {
+        return SecretRead::Unreadable;
+    };
+    match fsx::read_secret_at_most(&file, bound as u64) {
+        Ok(Some(bytes)) => SecretRead::Bytes(bytes),
+        Ok(None) | Err(_) => SecretRead::Unreadable,
+    }
+}
+
+/// `path` opened as [`read_file`] reads it: `None` when missing, `Err` when
+/// it isn't a regular file the user owns.
+fn open_owned(path: &Path) -> Option<Result<std::fs::File, ()>> {
     let file = match fsx::open_regular(path, false) {
         Ok(fsx::Regular::File(file)) => file,
-        Ok(fsx::Regular::Missing) => return Read::Missing,
-        Ok(fsx::Regular::Other) | Err(_) => return Read::Unreadable,
+        Ok(fsx::Regular::Missing) => return None,
+        Ok(fsx::Regular::Other) | Err(_) => return Some(Err(())),
     };
     #[cfg(unix)]
     {
         use std::os::unix::fs::MetadataExt;
         match file.metadata() {
             Ok(metadata) if metadata.uid() == rustix::process::getuid().as_raw() => {}
-            _ => return Read::Unreadable,
+            _ => return Some(Err(())),
         }
     }
     #[cfg(windows)]
@@ -56,13 +98,10 @@ pub fn read_file(path: &Path, bound: usize) -> Read {
             fc_sys::windows::owned_by_current_user(file.as_handle()),
             Ok(true)
         ) {
-            return Read::Unreadable;
+            return Some(Err(()));
         }
     }
-    match fsx::read_at_most(&file, bound as u64) {
-        Ok(Some(bytes)) => Read::Bytes(bytes),
-        Ok(None) | Err(_) => Read::Unreadable,
-    }
+    Some(Ok(file))
 }
 
 /// 0001's single-file write of `target` ([`fsx::replace`], nothing checked

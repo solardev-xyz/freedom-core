@@ -117,6 +117,8 @@ pub struct Core {
     pub grant_root: PathBuf,
     /// The `grant_moved` the handshake names.
     pub grant_moved: Vec<&'static str>,
+    /// The `store_moved` the handshake names (design 0013).
+    pub store_moved: Vec<&'static str>,
 }
 
 impl Drop for Core {
@@ -263,6 +265,7 @@ pub fn spawn_env(
             .parent()
             .map_or_else(|| data.join("userData"), |root| root.join("userData")),
         grant_moved: Vec::new(),
+        store_moved: Vec::new(),
     }
 }
 
@@ -607,6 +610,7 @@ impl Core {
                 "protocol": 2, "shell_version": "test", "auto_lock_ms": 900_000,
                 "frames": ["fragment", "stream"],
                 "grant_root": self.grant_root, "grant_moved": self.grant_moved,
+                "store_moved": self.store_moved,
             }),
         )
     }
@@ -621,6 +625,7 @@ impl Core {
                 "protocol": 2, "shell_version": "test", "auto_lock_ms": auto_lock_ms,
                 "frames": ["stream"],
                 "grant_root": self.grant_root, "grant_moved": self.grant_moved,
+                "store_moved": self.store_moved,
             }),
         )
     }

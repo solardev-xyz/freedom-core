@@ -676,6 +676,7 @@ dependencies = [
  "rustix",
  "sha2",
  "tempfile",
+ "zeroize",
 ]
 
 [[package]]
