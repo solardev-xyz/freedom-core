@@ -156,7 +156,8 @@ fn a_new_database_is_the_users_alone() {
     drop(conn);
 }
 
-/// A database of another `user_version` is refused, nothing written.
+/// A database of another `user_version` is refused, nothing written: not
+/// its bytes, and not its journal mode (`journal_mode = WAL` persists).
 #[test]
 fn another_version_is_refused() {
     let dir = tempfile::tempdir().unwrap();
@@ -164,10 +165,29 @@ fn another_version_is_refused() {
     let conn = Connection::open(&path).unwrap();
     conn.pragma_update(None, "user_version", 2).unwrap();
     drop(conn);
+    let before = std::fs::read(&path).unwrap();
     assert!(matches!(open(&path, &PAYMENTS), Err(Error::Version(2))));
+    assert_eq!(std::fs::read(&path).unwrap(), before);
+    assert!(!dir.path().join("payment-history.sqlite-wal").exists());
     let conn = read_only(&path);
     assert_eq!(schema_rows(&conn), json!([]));
     assert_eq!(pragma(&conn, "user_version"), json!(2));
+    assert_eq!(pragma(&conn, "journal_mode"), json!("delete"));
+}
+
+/// Every connection syncs each commit (`synchronous` FULL, 2), on a new
+/// database and on reopening an existing WAL one, whatever the build's
+/// default.
+#[test]
+fn every_connection_syncs_each_commit() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("payment-history.sqlite");
+    let conn = open(&path, &PAYMENTS).unwrap();
+    assert_eq!(pragma(&conn, "synchronous"), json!(2));
+    drop(conn);
+    let conn = open(&path, &PAYMENTS).unwrap();
+    assert_eq!(pragma(&conn, "synchronous"), json!(2));
+    assert_eq!(pragma(&conn, "journal_mode"), json!("wal"));
 }
 
 /// Neither a link (to a valid database) nor a directory is opened.

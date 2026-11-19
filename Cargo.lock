@@ -671,8 +671,10 @@ dependencies = [
 name = "fc-store"
 version = "0.22.0"
 dependencies = [
+ "fc-json",
  "fc-sys",
  "rustix",
+ "sha2",
  "tempfile",
 ]
 

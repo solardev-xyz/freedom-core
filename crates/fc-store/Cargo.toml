@@ -7,10 +7,19 @@ rust-version.workspace = true
 publish.workspace = true
 repository.workspace = true
 
-# The workspace lints, `forbid(unsafe_code)` included. Its one Windows call
-# std lacks (a file's owner) is fc-sys's.
+# The workspace lints, `forbid(unsafe_code)` included. The Windows calls
+# std lacks (a file's owner, its identity, and the handle-relative opens,
+# renames, deletes and listings) are fc-sys's.
 [lints]
 workspace = true
+
+[dependencies]
+# The journal's records: V8's JSON.parse and JSON.stringify, as the
+# reference reads and writes them. A workspace logic crate.
+fc-json = { path = "../fc-json" }
+# The journal's line checksum. Already in the tree (fc-approval, fc-profile,
+# fc-service and others build it the same way).
+sha2 = { version = "0.11", default-features = false }
 
 [target.'cfg(unix)'.dependencies]
 # openat, renameat, unlinkat, fstatat and O_NOFOLLOW for the handle-relative
@@ -19,8 +28,9 @@ workspace = true
 rustix = { version = "1.1", default-features = false, features = ["fs", "process", "std"] }
 
 [target.'cfg(windows)'.dependencies]
-# A file's owner, read from its handle (freedom-core#360), and a
-# directory's file ID: what freedom-cored used from it for these files.
+# A file's owner, read from its handle (freedom-core#360); a file's or a
+# directory's file ID; and the anchor's handle-relative calls (design 0013,
+# "Windows handle I/O (#963)").
 fc-sys = { path = "../fc-sys" }
 
 [dev-dependencies]

@@ -99,12 +99,24 @@ pub fn open(path: &Path, schema: &Schema) -> Result<Connection, Error> {
     if !fsx::same_file(&judged, path)? {
         return Err(Error::Refused);
     }
+    // The version first: `journal_mode = WAL` is persistent, so a database
+    // this core refuses (another schema's) is refused before anything about
+    // it changes.
+    let version: i32 = conn.query_row("PRAGMA user_version", [], |row| row.get(0))?;
+    if version != 0 && version != schema.version {
+        return Err(Error::Version(version));
+    }
     let mode: String = conn.query_row("PRAGMA journal_mode = WAL", [], |row| row.get(0))?;
     if !mode.eq_ignore_ascii_case("wal") {
         return Err(Error::JournalMode(mode));
     }
+    // FULL, set on every connection rather than inherited from the build:
+    // each commit of a money record is synced (deviation
+    // `sqlite-synchronous`; better-sqlite3 reopens a WAL database at NORMAL).
+    conn.pragma_update(None, "synchronous", "FULL")?;
     // Rolled back when dropped uncommitted: nothing written but the DDL's
-    // one commit.
+    // one commit. The version is read again inside it, against a writer
+    // between the first read and here.
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
     let version: i32 = tx.query_row("PRAGMA user_version", [], |row| row.get(0))?;
     if version == 0 {

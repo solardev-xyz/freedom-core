@@ -10,6 +10,8 @@
 //! - [`file`]: one store file (0012's permission files, the phone payments,
 //!   and 0013's stores as they move): read under 0001's rules, written with
 //!   a test build's failure hooks, and renamed aside when it can't be read.
+//! - [`journal`]: the JSON Lines journal, in freedom-browser's
+//!   `durable-journal.js` format and rules (the intent journal's).
 //!
 //! A service crate: it does file I/O, and nothing else. It reads no
 //! environment variable and writes no log. A test build's hooks come in as
@@ -20,6 +22,7 @@
 pub mod anchor;
 pub mod file;
 pub mod fsx;
+pub mod journal;
 
 use std::path::Path;
 
@@ -36,17 +39,21 @@ pub enum Step {
     /// The directory's flush after the rename (the change is in place, and
     /// reported as not durable).
     Flush,
+    /// Cutting a failed append back off a journal ([`journal`]): the end of
+    /// the file is then unknown.
+    Truncate,
 }
 
 impl Step {
     /// The step's name in a test hook's spec: `write`, `fsync`, `rename`,
-    /// `flush`.
+    /// `flush`, `truncate`.
     pub fn name(self) -> &'static str {
         match self {
             Step::Write => "write",
             Step::Fsync => "fsync",
             Step::Rename => "rename",
             Step::Flush => "flush",
+            Step::Truncate => "truncate",
         }
     }
 }
