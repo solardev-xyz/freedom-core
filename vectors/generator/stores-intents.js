@@ -236,6 +236,19 @@ async function runOf(checkout, ethers, dir, encodeLine, s, run) {
   return { name: run.name, limits: run.limits ?? null, steps };
 }
 
+// Signed again: the bytes, their hash and the fields they have (as the
+// store's fieldsOf).
+function resigned(s, tx) {
+  const t = s.sign(tx);
+  const d = s.decode(t.raw);
+  const fee = (name) => (d.type === 2 ? d[name].toString() : null);
+  const fields = {
+    type: d.type, to: d.to.toLowerCase(), value: d.value.toString(), data: d.data, gas_limit: d.gasLimit.toString(),
+    max_fee_per_gas: fee('maxFeePerGas'), max_priority_fee_per_gas: fee('maxPriorityFeePerGas'), gas_price: d.type === 0 ? d.gasPrice.toString() : null,
+  };
+  return { raw: t.raw, hash: t.hash, fields };
+}
+
 // A damaged file: the records of a run's step with one changed, and the
 // reason the reference moves the file aside for (null: not damaged).
 function damagedCases(base, s) {
@@ -243,17 +256,7 @@ function damagedCases(base, s) {
   const B = base.find((r) => r.type === 'commit' && r.via === 'original' && r.intent_id !== A.intent_id);
   const set = (record, fields) => ({ ...record, ...fields });
   const drop = (record, key) => Object.fromEntries(Object.entries(record).filter(([k]) => k !== key));
-  // Signed again, with the fields its bytes have (as the store's fieldsOf).
-  const resign = (record, tx) => {
-    const t = s.sign(tx);
-    const d = s.decode(t.raw);
-    const fee = (name) => (d.type === 2 ? d[name].toString() : null);
-    const fields = {
-      type: d.type, to: d.to.toLowerCase(), value: d.value.toString(), data: d.data, gas_limit: d.gasLimit.toString(),
-      max_fee_per_gas: fee('maxFeePerGas'), max_priority_fee_per_gas: fee('maxPriorityFeePerGas'), gas_price: d.type === 0 ? d.gasPrice.toString() : null,
-    };
-    return set(record, { raw: t.raw, hash: t.hash, fields });
-  };
+  const resign = (record, tx) => set(record, resigned(s, tx));
   const replacement = base.find((r) => r.type === 'commit' && r.via === 'replacement');
   const handoff = base.find((r) => r.type === 'handoff' && r.hash === A.hash);
   const outcome = base.find((r) => r.type === 'outcome' && r.handoff_id === handoff.handoff_id);
@@ -330,12 +333,20 @@ function damagedCases(base, s) {
   return cases.map(([name, records]) => ({ name, records: plain(records) }));
 }
 
-function snapshotCases(held) {
+// A damaged snapshot: `held`, the latest of its two hashes, changed. Each
+// is well formed up to the check it names.
+function snapshotCases(held, s) {
   const set = (fields) => ({ ...held, ...fields });
+  const [first, latest] = held.hashes;
+  // Its bytes signed again by the other key, listed as its latest hash.
+  const other = resigned(s, { key: 1, nonce: held.nonce, fee: 5 });
   return [
     ['no hashes', [set({ hashes: [] })]],
-    ['a hash listed twice', [set({ hashes: [held.hashes[0], { ...held.hashes[0], via: 'replacement' }] })]],
-    ['latest not its bytes', [set({ hashes: [...held.hashes].reverse() })]],
+    ['a hash listed twice', [set({ hashes: [first, { ...first, via: 'replacement' }] })]],
+    // The entries keep their order (and `via`); only their hashes swap.
+    ['latest not its bytes', [set({ hashes: [{ ...first, hash: latest.hash }, { ...latest, hash: first.hash }] })]],
+    ['snapshot fields not its bytes', [set({ fields: { ...held.fields, to: '0x' + 'cd'.repeat(20) } })]],
+    ['snapshot signed by another key', [set({ ...other, hashes: [first, { ...latest, hash: other.hash }] })]],
     ['bad hash entry', [set({ hashes: [{ ...held.hashes[0], via: 'replacement' }, ...held.hashes.slice(1)] })]],
     ['bad summary', [set({ handoffs: { count: 1 } })]],
     ['bad count', [set({ handoffs: { count: -1, possibly_sent: false } })]],
@@ -365,7 +376,7 @@ async function buildIntents(checkout, ethers) {
     const damaged = [];
     const probeFile = path.join(dir, 'damaged', FILE);
     fs.mkdirSync(path.dirname(probeFile));
-    for (const c of [...damagedCases(base, s), ...snapshotCases(held)]) {
+    for (const c of [...damagedCases(base, s), ...snapshotCases(held, s)]) {
       const { reason } = await probe(checkout, ethers, c.records, probeFile, null, encodeLine);
       damaged.push({ ...c, reason });
     }

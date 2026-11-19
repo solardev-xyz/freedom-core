@@ -25048,14 +25048,14 @@
             "hashes": [
               {
                 "hash": "0x64d686efbe06ba607297980e3a04594180dbd6be3a6b7cb8b2b55690aac64594",
-                "via": "replacement",
-                "at": 1763000009000,
+                "via": "original",
+                "at": 1763000001000,
                 "run": "00000000-0000-4000-8000-000000000001"
               },
               {
                 "hash": "0xdc73dc71844f2d4c4e5cb2b00d0e6405dd492bf5dd5b6f2beef49bc6fdba1ed1",
-                "via": "original",
-                "at": 1763000001000,
+                "via": "replacement",
+                "at": 1763000009000,
                 "run": "00000000-0000-4000-8000-000000000001"
               }
             ],
@@ -25065,7 +25065,109 @@
             }
           }
         ],
-        "reason": "Invalid wallet intent record: intent 00000000-0000-4000-8000-000000000002 lists a bad hash"
+        "reason": "Invalid wallet intent record: intent 00000000-0000-4000-8000-000000000002's bytes are not its latest hash"
+      },
+      {
+        "name": "snapshot fields not its bytes",
+        "records": [
+          {
+            "type": "held",
+            "run": "00000000-0000-4000-8000-000000000001",
+            "at": 1763000001000,
+            "intent_id": "00000000-0000-4000-8000-000000000002",
+            "chain_id": 1,
+            "sender": "0x19e7e376e7c213b7e7e7e46cc70a5dd086daff2a",
+            "nonce": 0,
+            "hash": "0x64d686efbe06ba607297980e3a04594180dbd6be3a6b7cb8b2b55690aac64594",
+            "raw": "0x02f86c0180830f424085012a05f20082520a94abababababababababababababababababababab8203e880c080a091edaf55d6dc68a2abd27429eba0426d3396d7cb6c68f8421cc84d6f1729d8b2a06744328b4bfc9e1459f85ab7f23a4d64ea190bbf4bd0a8e2ef38d259da2098bb",
+            "fields": {
+              "type": 2,
+              "to": "0xcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd",
+              "value": "1000",
+              "data": "0x",
+              "gas_limit": "21002",
+              "max_fee_per_gas": "5000000000",
+              "max_priority_fee_per_gas": "1000000",
+              "gas_price": null
+            },
+            "context": {
+              "kind": "payment",
+              "origin": "https://shop.example",
+              "key": "a",
+              "wallet_index": 0
+            },
+            "hashes": [
+              {
+                "hash": "0xdc73dc71844f2d4c4e5cb2b00d0e6405dd492bf5dd5b6f2beef49bc6fdba1ed1",
+                "via": "original",
+                "at": 1763000001000,
+                "run": "00000000-0000-4000-8000-000000000001"
+              },
+              {
+                "hash": "0x64d686efbe06ba607297980e3a04594180dbd6be3a6b7cb8b2b55690aac64594",
+                "via": "replacement",
+                "at": 1763000009000,
+                "run": "00000000-0000-4000-8000-000000000001"
+              }
+            ],
+            "handoffs": {
+              "count": 2,
+              "possibly_sent": false
+            }
+          }
+        ],
+        "reason": "Invalid wallet intent record: the fields of 0x64d686efbe06ba607297980e3a04594180dbd6be3a6b7cb8b2b55690aac64594 do not match its transaction"
+      },
+      {
+        "name": "snapshot signed by another key",
+        "records": [
+          {
+            "type": "held",
+            "run": "00000000-0000-4000-8000-000000000001",
+            "at": 1763000001000,
+            "intent_id": "00000000-0000-4000-8000-000000000002",
+            "chain_id": 1,
+            "sender": "0x19e7e376e7c213b7e7e7e46cc70a5dd086daff2a",
+            "nonce": 0,
+            "hash": "0xf66e886b3742c2e476fc698d5d677f40621d8c6a7a67310149d78f8baf673425",
+            "raw": "0x02f86c0180830f424085012a05f20082520a94abababababababababababababababababababab8203e880c001a03045f61835c8ce9c6717bc0ac321555c0ccb45637e7453cb1ea1c919753a3226a004e2468d5b4cbef5ce1a88187c87dc3a0dfd4ad8014db4d3f84b3308f77cf279",
+            "fields": {
+              "type": 2,
+              "to": "0xabababababababababababababababababababab",
+              "value": "1000",
+              "data": "0x",
+              "gas_limit": "21002",
+              "max_fee_per_gas": "5000000000",
+              "max_priority_fee_per_gas": "1000000",
+              "gas_price": null
+            },
+            "context": {
+              "kind": "payment",
+              "origin": "https://shop.example",
+              "key": "a",
+              "wallet_index": 0
+            },
+            "hashes": [
+              {
+                "hash": "0xdc73dc71844f2d4c4e5cb2b00d0e6405dd492bf5dd5b6f2beef49bc6fdba1ed1",
+                "via": "original",
+                "at": 1763000001000,
+                "run": "00000000-0000-4000-8000-000000000001"
+              },
+              {
+                "hash": "0xf66e886b3742c2e476fc698d5d677f40621d8c6a7a67310149d78f8baf673425",
+                "via": "replacement",
+                "at": 1763000009000,
+                "run": "00000000-0000-4000-8000-000000000001"
+              }
+            ],
+            "handoffs": {
+              "count": 2,
+              "possibly_sent": false
+            }
+          }
+        ],
+        "reason": "Invalid wallet intent record: intent 00000000-0000-4000-8000-000000000002's bytes are not signed by its sender"
       },
       {
         "name": "bad hash entry",
