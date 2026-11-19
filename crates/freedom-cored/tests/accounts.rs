@@ -361,7 +361,9 @@ fn every_vault_meta_vector_through_the_daemon() {
     for run in runs.as_array().unwrap() {
         let name = run["id"].as_str().unwrap();
         let root = tempfile::tempdir().unwrap();
-        let (mut core, hello) = start(root.path(), &["vault_meta"], &[], &[]);
+        // The dApp file moved too, as on every browser that names
+        // `vault_meta`: `accounts.remove` forgets its grants first.
+        let (mut core, hello) = start(root.path(), &["vault_meta"], &["dapp"], &[]);
         assert_eq!(hello["result"]["store_moved"], json!(["vault_meta"]));
         let mut id = 1;
         import(&mut core, &mut id);
@@ -768,4 +770,188 @@ fn removing_a_safe_ends_its_approvals_and_forgets_its_grants() {
     assert!(reply.get("result").is_none(), "{reply}");
     let reply = owner_signs(&mut core, &mut id, OTHER_SAFE, &other);
     assert!(result(&reply)["signature"].is_string(), "{reply}");
+}
+
+/// The dApp grants file with one grant per `(site, account)`.
+fn write_dapp(grant_root: &Path, grants: &[(&str, u32)]) {
+    let mut file = serde_json::Map::new();
+    for (site, account) in grants {
+        file.insert(
+            (*site).to_owned(),
+            json!({ "origin": site, "connectedAt": 1, "lastUsed": 1, "walletIndex": account, "chainId": 100 }),
+        );
+    }
+    std::fs::write(
+        grant_root.join("dapp-permissions.json"),
+        serde_json::to_string_pretty(&Value::Object(file)).unwrap(),
+    )
+    .unwrap();
+}
+
+/// The sites the dApp grants file names.
+fn dapp_sites(grant_root: &Path) -> Vec<String> {
+    let text = std::fs::read_to_string(grant_root.join("dapp-permissions.json")).unwrap();
+    let file: Value = serde_json::from_str(&text).unwrap();
+    file.as_object().unwrap().keys().cloned().collect()
+}
+
+/// A mnemonic account added over the wire: its index.
+fn add_mnemonic(core: &mut Core, id: &mut u64, name: &str) -> u64 {
+    let reply = call_as(
+        core,
+        id,
+        &chrome(),
+        "accounts.add_mnemonic",
+        json!({ "name": name }),
+    );
+    result(&reply)["wallet"]["index"].as_u64().unwrap()
+}
+
+fn remove(core: &mut Core, id: &mut u64, index: u64) -> Value {
+    call_as(
+        core,
+        id,
+        &chrome(),
+        "accounts.remove",
+        json!({ "index": index, "swarm_references": [] }),
+    )
+}
+
+/// The indices `vault-meta.json` lists.
+fn listed_indices(root: &Path) -> Vec<u64> {
+    let meta: Value = serde_json::from_str(&read_meta(root).unwrap()).unwrap();
+    meta["derivedWallets"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|w| w["index"].as_u64().unwrap())
+        .collect()
+}
+
+/// `accounts-remove-forget-first`: a forget whose write fails refuses the
+/// removal, with the account and the grant's file as they were, and so
+/// does a retry while the file is still behind memory. Once the forget
+/// reaches the file the removal goes, and an account given the same index
+/// later finds no grant of the old one's after a restart.
+#[test]
+fn a_failed_forget_refuses_the_removal() {
+    let root = tempfile::tempdir().unwrap();
+    let grant_root = root.path().join("userData");
+    std::fs::create_dir_all(&grant_root).unwrap();
+    write_dapp(&grant_root, &[(SITE, 1), ("https://main.example", 0)]);
+    let hook = root.path().join("hook");
+    std::fs::write(&hook, "").unwrap();
+    let hook_env = hook.to_str().unwrap().to_owned();
+    let env = [(HOOK, hook_env.as_str())];
+    let (mut core, _) = start(root.path(), &["vault_meta"], &["dapp"], &env);
+    let mut id = 1;
+    import(&mut core, &mut id);
+    assert_eq!(add_mnemonic(&mut core, &mut id, "Second"), 1);
+    let meta_before = read_meta(root.path());
+    let dapp_before = std::fs::read(grant_root.join("dapp-permissions.json")).unwrap();
+    std::fs::write(&hook, "dapp:write\n").unwrap();
+    // The first attempt, and a retry: memory forgot the grant at the
+    // first, so the retry has no change of its own, and writes all the same.
+    for attempt in 0..2 {
+        let reply = remove(&mut core, &mut id, 1);
+        assert_eq!(code(&reply), "storage", "{attempt}: {reply}");
+        assert_eq!(reply["error"]["data"]["store"], "dapp", "{reply}");
+        assert_eq!(read_meta(root.path()), meta_before, "{attempt}");
+        assert_eq!(listed_indices(root.path()), [0, 1]);
+        assert_eq!(
+            std::fs::read(grant_root.join("dapp-permissions.json")).unwrap(),
+            dapp_before,
+            "{attempt}: the grant stays in the file"
+        );
+    }
+    std::fs::write(&hook, "").unwrap();
+    assert_eq!(*result(&remove(&mut core, &mut id, 1)), json!({}));
+    assert_eq!(listed_indices(root.path()), [0]);
+    assert_eq!(dapp_sites(&grant_root), ["https://main.example"]);
+    // The index is handed out again.
+    assert_eq!(add_mnemonic(&mut core, &mut id, "Third"), 1);
+    drop(core);
+    let (mut core, _) = start(root.path(), &["vault_meta"], &["dapp"], &env);
+    let mut id = 1;
+    set_unlocked(&mut core, &mut id, true);
+    let records = call_as(
+        &mut core,
+        &mut id,
+        &chrome(),
+        "approval.grants",
+        json!({ "store": "dapp" }),
+    );
+    let records = result(&records)["records"].as_array().unwrap().clone();
+    assert_eq!(records.len(), 1, "{records:?}");
+    assert_eq!(records[0]["walletIndex"], 0, "{records:?}");
+    assert_eq!(dapp_sites(&grant_root), ["https://main.example"]);
+}
+
+/// A forget that reached the file, then a failed metadata write: the
+/// account is still there, with no grant. The answer is `durable: false`
+/// when either store's flush failed. With `vault_meta` moved and the dApp
+/// file not, the removal is `not_moved` for the dApp file, and nothing
+/// changes.
+#[test]
+fn a_forget_then_a_failed_metadata_write_and_durability() {
+    let root = tempfile::tempdir().unwrap();
+    let grant_root = root.path().join("userData");
+    std::fs::create_dir_all(&grant_root).unwrap();
+    write_dapp(&grant_root, &[(SITE, 1), ("https://two.example", 2)]);
+    let hook = root.path().join("hook");
+    std::fs::write(&hook, "").unwrap();
+    let hook_env = hook.to_str().unwrap().to_owned();
+    let (mut core, _) = start(
+        root.path(),
+        &["vault_meta"],
+        &["dapp"],
+        &[(HOOK, &hook_env)],
+    );
+    let mut id = 1;
+    import(&mut core, &mut id);
+    assert_eq!(add_mnemonic(&mut core, &mut id, "Second"), 1);
+    assert_eq!(add_mnemonic(&mut core, &mut id, "Third"), 2);
+    let meta_before = read_meta(root.path());
+    std::fs::write(&hook, "vault_meta:write\n").unwrap();
+    let reply = remove(&mut core, &mut id, 1);
+    assert_eq!(code(&reply), "storage", "{reply}");
+    assert_eq!(reply["error"]["data"]["file"], "vault_meta", "{reply}");
+    assert_eq!(read_meta(root.path()), meta_before);
+    assert_eq!(listed_indices(root.path()), [0, 1, 2]);
+    assert_eq!(dapp_sites(&grant_root), ["https://two.example"]);
+    // The dApp file's flush fails: the metadata's is durable, the answer not.
+    std::fs::write(&hook, "dapp:flush\n").unwrap();
+    assert_eq!(
+        *result(&remove(&mut core, &mut id, 2)),
+        json!({ "durable": false })
+    );
+    assert_eq!(listed_indices(root.path()), [0, 1]);
+    assert!(dapp_sites(&grant_root).is_empty());
+    // The metadata's flush fails, with nothing left to forget.
+    std::fs::write(&hook, "vault_meta:flush\n").unwrap();
+    assert_eq!(
+        *result(&remove(&mut core, &mut id, 1)),
+        json!({ "durable": false })
+    );
+    assert_eq!(listed_indices(root.path()), [0]);
+    drop(core);
+    // The dApp file still main's: refused, the account and grant there.
+    let root = tempfile::tempdir().unwrap();
+    let grant_root = root.path().join("userData");
+    std::fs::create_dir_all(&grant_root).unwrap();
+    write_dapp(&grant_root, &[(SITE, 1)]);
+    let (mut core, _) = start(root.path(), &["vault_meta"], &[], &[]);
+    let mut id = 1;
+    import(&mut core, &mut id);
+    assert_eq!(add_mnemonic(&mut core, &mut id, "Second"), 1);
+    let meta_before = read_meta(root.path());
+    let dapp_before = std::fs::read(grant_root.join("dapp-permissions.json")).unwrap();
+    let reply = remove(&mut core, &mut id, 1);
+    assert_eq!(code(&reply), "not_moved", "{reply}");
+    assert_eq!(reply["error"]["data"]["store"], "dapp", "{reply}");
+    assert_eq!(read_meta(root.path()), meta_before);
+    assert_eq!(
+        std::fs::read(grant_root.join("dapp-permissions.json")).unwrap(),
+        dapp_before
+    );
 }

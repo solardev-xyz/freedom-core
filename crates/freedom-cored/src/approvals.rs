@@ -2511,12 +2511,14 @@ impl Approvals {
         json_reply(id, &reply)
     }
 
-    /// `accounts.remove`'s last step (design 0013, "`vault-meta.json`"):
-    /// the removed account's dApp grants forgotten, as
-    /// `approval.forget_account` forgets them. Its events go after the
-    /// removal's reply ([`Approvals::take_events`]).
-    pub fn forget_removed_account(&mut self, account: u32) -> Result<(), ErrorBody> {
-        self.forget(account).map(|_| ())
+    /// `accounts.remove`'s step before its record goes (design 0013,
+    /// "`vault-meta.json`", `accounts-remove-forget-first`): the account's
+    /// dApp grants forgotten, as `approval.forget_account` forgets them.
+    /// Whether the write is durable; an error means the file may still
+    /// name the account, and the removal is refused. Its events go after
+    /// the removal's reply ([`Approvals::take_events`]).
+    pub fn forget_removed_account(&mut self, account: u32) -> Result<bool, ErrorBody> {
+        self.forget(account).map(|(_, durable)| durable)
     }
 
     /// Ends every open Safe approval for `safe`: its account is being
@@ -2526,7 +2528,10 @@ impl Approvals {
     }
 
     /// The account's dApp grants revoked: the keys revoked, and whether the
-    /// write is durable.
+    /// write is durable. A file a failed narrowing left behind memory is
+    /// written even when memory names none of the account's grants
+    /// ([`Grants::write_through`]), so a retry after a failed write reaches
+    /// the disk.
     fn forget(&mut self, account: u32) -> Result<(Vec<String>, bool), ErrorBody> {
         // A phone payment's waiting rule for the account goes, and one for
         // each key that exposed it, whatever the write does.
@@ -2548,7 +2553,7 @@ impl Approvals {
             .extend(exposing.iter().cloned().map(Narrowed::Key));
         let result = self
             .grants
-            .write::<DappStore, _>(|store| store.forget_account(account));
+            .write_through::<DappStore, _>(|store| store.forget_account(account));
         let (keys, durable, error) = match result {
             Ok(written) => (written.value, written.durable, None),
             Err(failure @ WriteFailure::Io { applied: true }) => {

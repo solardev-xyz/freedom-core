@@ -29,12 +29,17 @@
 //!   `storage` (`data.file: "vault_meta"`), and the file is as it was. A
 //!   failed directory flush after the rename answers the change with
 //!   `durable: false`.
-//! - **`accounts.remove`** keeps `deleteDerivedWallet`'s order: the
-//!   refusals, a Swarm feed's among them from main's `swarm_references`;
-//!   for a Safe, every open Safe approval for its address ended (its
-//!   `safe-pending.json` entry is main's until `safe_pending` moves, PRF-5f);
-//!   the record removed; then the account's dApp grants forgotten, as
-//!   `approval.forget_account` forgets them, a failure logged.
+//! - **`accounts.remove`:** the refusals, a Swarm feed's among them from
+//!   main's `swarm_references`; for a Safe, every open Safe approval for
+//!   its address ended (its `safe-pending.json` entry is main's until
+//!   `safe_pending` moves, PRF-5f); the account's dApp grants forgotten, as
+//!   `approval.forget_account` forgets them; then the record removed. The
+//!   forget comes before the record, where the reference forgets after and
+//!   logs a failure (0013's `accounts-remove-forget-first`): a removed index
+//!   is handed out again, so a grant left in the file would be the next
+//!   account's after a restart. A forget that fails, `not_moved` for the
+//!   dApp file included, refuses the removal with the account still there.
+//!   The answer is `durable: false` if either write wasn't.
 
 use std::path::PathBuf;
 
@@ -470,8 +475,9 @@ impl Store {
     }
 
     /// `accounts.remove`: the refusals; a Safe's approvals ended before
-    /// its record goes ("cleanup precedes the meta write"); the record
-    /// removed; the account's dApp grants forgotten, a failure logged.
+    /// its record goes ("cleanup precedes the meta write"); the account's
+    /// dApp grants forgotten, a failure refusing the removal; the record
+    /// removed. `durable: false` if either write wasn't.
     fn remove(
         &self,
         mut meta: VaultMeta,
@@ -494,19 +500,23 @@ impl Store {
                 ),
             }
         }
+        // The grants before the record (`accounts-remove-forget-first`): a
+        // forget that didn't reach the file refuses the removal, so no
+        // grant outlives its account to be the next one's at that index. A
+        // later failed write leaves the account there, disconnected. An
+        // index past `u32` is none a grant can name (`approval.connect`'s
+        // account), and has nothing to forget.
+        let mut durable = match account_index(index) {
+            Some(account) => approvals.forget_removed_account(account)?,
+            None => true,
+        };
         let changed = meta.remove(index, swarm_origins).map_err(refused)?;
-        let mut answer = JsValue::Object(Vec::new());
-        if changed.wrote && !self.save(&meta)? {
-            answer.set("durable", JsValue::Bool(false));
+        if changed.wrote {
+            durable &= self.save(&meta)?;
         }
-        let forgotten = account_index(index)
-            .ok_or_else(invalid)
-            .and_then(|account| approvals.forget_removed_account(account));
-        if let Err(error) = forgotten {
-            crate::log::warn(
-                "a removed account's dApp grants weren't forgotten",
-                json!({ "code": error.code }),
-            );
+        let mut answer = JsValue::Object(Vec::new());
+        if !durable {
+            answer.set("durable", JsValue::Bool(false));
         }
         Ok(answer)
     }
