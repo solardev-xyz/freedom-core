@@ -171,7 +171,8 @@ fn members(raw: Option<&str>, allowed: &[&str]) -> Result<JsValue, ErrorBody> {
 }
 
 /// A member as given, `undefined` when absent (`createDerivedWallet(name)`
-/// called without one).
+/// called without one): the codec refuses what the reference refuses
+/// (a missing address or path, a Safe's owners).
 fn any(params: &JsValue, key: &str) -> JsValue {
     params.get(key).cloned().unwrap_or(JsValue::Undefined)
 }
@@ -181,11 +182,6 @@ fn number(params: &JsValue, key: &str) -> Result<f64, ErrorBody> {
         Some(JsValue::Number(n)) => Ok(*n),
         _ => Err(invalid()),
     }
-}
-
-/// A required member, any JSON value.
-fn present(params: &JsValue, key: &str) -> Result<JsValue, ErrorBody> {
-    params.get(key).cloned().ok_or_else(invalid)
 }
 
 /// `swarm_references`: the references main's feed store found, each an
@@ -249,15 +245,15 @@ impl Store {
                 let p = members(raw, &["name", "address", "path"])?;
                 Op::AddLedger {
                     name: any(&p, "name"),
-                    address: present(&p, "address")?,
-                    path: present(&p, "path")?,
+                    address: any(&p, "address"),
+                    path: any(&p, "path"),
                 }
             }
             "accounts.add_remote" => {
                 let p = members(raw, &["name", "address"])?;
                 Op::AddRemote {
                     name: any(&p, "name"),
-                    address: present(&p, "address")?,
+                    address: any(&p, "address"),
                 }
             }
             "accounts.record_address_check" => {
@@ -284,10 +280,10 @@ impl Store {
                 )?;
                 Op::AddSafe {
                     name: any(&p, "name"),
-                    address: present(&p, "address")?,
-                    owners: present(&p, "owners")?,
-                    threshold: present(&p, "threshold")?,
-                    salt_nonce: present(&p, "salt_nonce")?,
+                    address: any(&p, "address"),
+                    owners: any(&p, "owners"),
+                    threshold: any(&p, "threshold"),
+                    salt_nonce: any(&p, "salt_nonce"),
                 }
             }
             "accounts.mark_safe_deployed" => {
@@ -592,10 +588,21 @@ mod tests {
         let mut expected = [0u8; 20];
         expected[19] = 0xab;
         let hex = "000000000000000000000000000000000000aB";
-        for text in [format!("0x00{hex}"), format!("0X00{hex}"), format!("00{hex}")] {
-            assert_eq!(address_bytes(&JsValue::string(text.as_str())), Some(expected));
+        for text in [
+            format!("0x00{hex}"),
+            format!("0X00{hex}"),
+            format!("00{hex}"),
+        ] {
+            assert_eq!(
+                address_bytes(&JsValue::string(text.as_str())),
+                Some(expected)
+            );
         }
-        for bad in ["0x12", "XE26QURMT0JTHRKRVCUYL99VJZODRSZWBMT", "0xzz00000000000000000000000000000000000000"] {
+        for bad in [
+            "0x12",
+            "XE26QURMT0JTHRKRVCUYL99VJZODRSZWBMT",
+            "0xzz00000000000000000000000000000000000000",
+        ] {
             assert_eq!(address_bytes(&JsValue::string(bad)), None, "{bad}");
         }
         assert_eq!(address_bytes(&JsValue::Number(1.0)), None);

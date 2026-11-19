@@ -1131,7 +1131,8 @@ mod tests {
         let mut safes = SafeApprovals::new();
         let mut rng = Counter(0);
         let send = |safe| Approved::send(&send_payload(safe)).unwrap();
-        let message = || Approved::message(&message_payload("personal_sign", json!(["hi"]))).unwrap();
+        let message =
+            || Approved::message(&message_payload("personal_sign", json!(["hi"]))).unwrap();
         safes.record(page(1), send(SAFE), &mut rng).unwrap();
         safes.record(Holder::Wallet, message(), &mut rng).unwrap();
         safes.record(page(2), message(), &mut rng).unwrap();
