@@ -128,6 +128,7 @@ function parseInputs(journal) {
     ['upper-case-digest', bytes(upper, c)],
     ['non-hex-digest', bytes(lineOf('{"a":1}', { digest: 'g'.repeat(64) }), c)],
     ['short-digest', bytes(Buffer.from(a.toString('latin1').replace(/sha256":"[0-9a-f]/, 'sha256":"'), 'latin1'), c)],
+    ['other-record-key', Buffer.from(lineOf('{"a":1}').toString('latin1').replace('","record":', '","recorX":'), 'latin1')],
     ['version-2', bytes(Buffer.from(a.toString('latin1').replace('{"v":1', '{"v":2'), 'latin1'), c)],
     ['crlf', bytes(cut(a, 1), '\r\n', c)],
     ['no-closing-brace', bytes(cut(a, 2), '\n', c)],
