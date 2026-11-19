@@ -4,7 +4,7 @@
 //! `removeEmptyRemade` and the Radicle staging siblings; design 0013,
 //! "Deletion").
 //!
-//! - **Through no symlink** ([`crate::anchor::Dir`], as the catalog's store
+//! - **Through no symlink** ([`fc_store::anchor::Dir`], as the catalog's store
 //!   reaches its files; review of #336): the profile's data and its Radicle
 //!   home are reached from the app root's handle (a dev build's homes from
 //!   the handle of the directory above it), each step opened without
@@ -33,7 +33,7 @@ use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use crate::anchor::{Dir, Kind};
+use fc_store::anchor::{Dir, Kind};
 
 /// A directory's identity: on Unix its device and inode; on Windows its
 /// volume's serial number and file ID.
@@ -244,7 +244,7 @@ fn identities_up(target: &Path) -> std::io::Result<Vec<Identity>> {
     let mut current = Some(target);
     while let Some(dir) = current {
         // One that isn't there, or isn't a directory, is skipped.
-        if let Ok(Some(opened)) = Dir::open_root(dir, crate::anchor::Resolve::Follow) {
+        if let Ok(Some(opened)) = Dir::open_root(dir, fc_store::anchor::Resolve::Follow) {
             ids.push(opened.identity()?);
         }
         current = dir.parent();
@@ -354,7 +354,7 @@ pub fn gated_place(
             if !metadata.is_dir() || metadata.file_type().is_symlink() {
                 continue;
             }
-            let Some(opened) = Dir::open_root(other, crate::anchor::Resolve::Follow)? else {
+            let Some(opened) = Dir::open_root(other, fc_store::anchor::Resolve::Follow)? else {
                 continue;
             };
             let other_id = opened.identity()?;
@@ -671,7 +671,7 @@ mod tests {
     #![allow(clippy::unwrap_used, clippy::panic)]
 
     use super::*;
-    use crate::anchor::Resolve;
+    use fc_store::anchor::Resolve;
 
     fn always() -> bool {
         true

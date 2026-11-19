@@ -3,7 +3,7 @@
 //!
 //! - **Below the app root,** every path is reached from the app root's
 //!   handle, opened once per run, through no symlink below it
-//!   ([`crate::anchor::Dir`]; review of #336): `Profiles`, a profile's
+//!   ([`fc_store::anchor::Dir`]; review of #336): `Profiles`, a profile's
 //!   directory and every directory on the way are opened without following
 //!   a symlink (or, on Windows, a junction), and on Unix each file's final
 //!   operation is relative to its directory's handle (`openat`,
@@ -32,9 +32,8 @@ use std::fs::File;
 use std::path::{Component, Path, PathBuf};
 
 use fc_profile::{Store, StoreError, Style};
-
-use crate::anchor::{Dir, Kind, Resolve};
-use crate::fsx::{self, Regular, WriteError};
+use fc_store::anchor::{Dir, Kind, Resolve};
+use fc_store::fsx::{self, Regular, WriteError};
 
 /// The largest catalog or `profile.json` read: far past any real one.
 pub const MAX_FILE: u64 = 4 << 20;
@@ -313,7 +312,15 @@ impl Store for DiskStore<'_> {
                     .ok_or_else(|| error(path, "no file name"))?
                     .to_owned();
                 let commit = self.commit;
-                fsx::replace_as(&target, &stem, text.as_bytes(), |_| Ok(()), commit).map(|_| ())
+                fsx::replace_as(
+                    &target,
+                    &stem,
+                    text.as_bytes(),
+                    |_| Ok(()),
+                    commit,
+                    &crate::testhooks::Swap,
+                )
+                .map(|_| ())
             }
             Place::Under(names) => {
                 let Some((name, parents)) = names.split_last() else {

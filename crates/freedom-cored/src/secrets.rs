@@ -58,8 +58,8 @@ use fc_keystore::{
     Backend, Binding, EntryName, ItemId, KeyStore, KeyStoreError, Label, MAX_FILE_BYTES,
     MAX_SECRET_BYTES, OpenError, Policy, Put, Reason, Refused, Secret, SecretsFile, WrapKey,
 };
+use fc_store::fsx::{self, Done};
 
-use crate::fsx::{self, Done};
 use crate::rng::OsRng;
 
 /// The secrets file inside the identity directory.
@@ -267,6 +267,7 @@ impl Secrets {
                 }
             },
             commit,
+            &crate::testhooks::Swap,
         );
         match written {
             Ok(done) => {

@@ -18,7 +18,6 @@
 //! (`fc_service::confine::clean_entry`), and no thread starts before its
 //! confinement, logging's writer included (its lines are written directly).
 
-mod anchor;
 mod approvals;
 mod chain;
 mod clock;
@@ -26,7 +25,6 @@ mod delete_journal;
 mod dweb;
 mod eip1193;
 mod exit;
-mod fsx;
 mod gate;
 mod grants;
 mod hardening;
@@ -96,6 +94,14 @@ fn parse_args() -> Option<Args> {
 
 fn main() -> ExitCode {
     let started = Instant::now();
+    // Every subcommand's durable writes report a failed flush after their
+    // commit to the log (fc-store writes none of its own).
+    fc_store::fsx::report_flush_failures(|kind| {
+        log::error(
+            "directory flush failed after commit",
+            serde_json::json!({ "kind": kind.to_string() }),
+        );
+    });
     let command = std::env::args_os()
         .nth(1)
         .and_then(|c| c.into_string().ok());

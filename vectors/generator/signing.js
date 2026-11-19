@@ -1,6 +1,7 @@
 'use strict';
 
 const assert = require('node:assert/strict');
+const { buildTransactionDecoding } = require('./tx-decode');
 
 // Signing vectors (design 0002): the reference's own ethers and bee-js produce
 // every expected output from keys the reference's derivation produces. Inputs
@@ -338,6 +339,11 @@ async function buildSigning(reference, mnemonicFor, meta) {
     }
   }
 
+  // Signed transactions read back as the intent store reads them
+  // (design 0013, PRF-5e-1), those above included.
+  const transactionDecoding = await buildTransactionDecoding(ethers, accounts[0].wallet,
+    transactions.filter(({ result }) => result.status === 'success').map(({ id, result }) => ({ id, raw: result.raw })));
+
   const messages = [];
   for (const { id, message } of MESSAGES) {
     for (const signer of accounts) {
@@ -452,9 +458,10 @@ async function buildSigning(reference, mnemonicFor, meta) {
       payload: "TypedDataEncoder.getPayload's output, for each typed-data case the core accepts: the core's view is it, with primaryType as primary_type (design 0002, #88)",
       reference: 'for a type or field named __proto__, which the core refuses (proto-name): ethers\' TypedDataEncoder.hash and getPayload of the input alone, beside the signing result',
       report: 'the view\'s named_type and chain for the primary_type and chain_id given, from the design text: ethers ignores both',
+      transactionDecoding: "signed bytes as the intent store checks them (verifySigned and signerOf, wallet/intent-store.js): ethers' Transaction.from, a signature, type 0 or 2, tx.serialized equal to raw. verdict is the first check that fails: undecodable (Transaction.from throws; message is ethers'), unsigned, unsupported_type (type), unserializable (tx.serialized throws; message is ethers'), not_canonical; or accepted, with the fields ethers decoded (decimal strings, lowercase addresses; v as a legacy transaction carries it; s as written), digest (tx.unsignedHash), hash (keccak256 of raw) and signer (tx.from, null where it throws). Entries marked deviation tx-other-types are types 1, 3 and 4 that ethers refuses before its type check; core is the core's answer",
     },
     keys: keys.map(({ id, mnemonicId, key, address }) => ({ id, mnemonicId, key, address })),
-    transactions, messages, typedData, typedDataText, typedDataReports, socs,
+    transactions, transactionDecoding, messages, typedData, typedDataText, typedDataReports, socs,
   };
 }
 

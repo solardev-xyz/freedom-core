@@ -47,12 +47,12 @@ use std::fs::File;
 use std::io::{Read, Write};
 use std::path::{Component, Path, PathBuf};
 
+use fc_service::gate::DirIdentity;
+use fc_store::anchor::{Dir, Resolve};
+use fc_store::fsx::{self, Done};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use zeroize::Zeroizing;
-
-use crate::anchor::{Dir, DirIdentity, Resolve};
-use crate::fsx::{self, Done};
 
 pub const JOURNAL: &str = "node-identity-journal.json";
 pub const DONE: &str = "node-identity-done.json";
@@ -462,7 +462,13 @@ pub fn write(
 
     // 2. Commit.
     let encoded = serde_json::to_vec(&journal).map_err(std::io::Error::other)?;
-    match fsx::replace(&identity_dir.join(JOURNAL), &encoded, |_| Ok(()), commit) {
+    match fsx::replace(
+        &identity_dir.join(JOURNAL),
+        &encoded,
+        |_| Ok(()),
+        commit,
+        &crate::testhooks::Swap,
+    ) {
         Ok(Done::Durable) => {}
         // Committed but not durable: install nothing; recovery finishes it
         // once the journal is known to persist.
@@ -583,9 +589,18 @@ pub fn recover(identity_dir: &Path, gates: &Gates) -> std::io::Result<Recovered>
 /// directory as main names it ([`Resolve`]).
 fn resolve(node: &str, identity: Option<DirIdentity>) -> Resolve {
     if node == "radicle" {
-        Resolve::Canonical(identity)
+        Resolve::Canonical(identity.map(anchored))
     } else {
         Resolve::Follow
+    }
+}
+
+/// A gate's directory identity as fc-store's [`Resolve::Canonical`] takes
+/// it: the same device and inode.
+pub(crate) fn anchored(identity: DirIdentity) -> fc_store::anchor::DirIdentity {
+    fc_store::anchor::DirIdentity {
+        dev: identity.dev,
+        ino: identity.ino,
     }
 }
 
@@ -951,7 +966,13 @@ fn finish(identity_dir: &Path, op_id: &str, status: OpStatus) -> std::io::Result
 /// Writes a bookkeeping record durably; a failed directory flush is an error.
 fn put_record<T: Serialize>(identity_dir: &Path, name: &str, record: &T) -> std::io::Result<()> {
     let encoded = serde_json::to_vec(record).map_err(std::io::Error::other)?;
-    match fsx::replace(&identity_dir.join(name), &encoded, |_| Ok(()), || true) {
+    match fsx::replace(
+        &identity_dir.join(name),
+        &encoded,
+        |_| Ok(()),
+        || true,
+        &crate::testhooks::Swap,
+    ) {
         Ok(Done::Durable) => Ok(()),
         Ok(Done::NotDurable) => Err(std::io::Error::other("record not flushed")),
         Err(fsx::WriteError::Io(e)) => Err(e),
