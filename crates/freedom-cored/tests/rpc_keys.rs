@@ -212,27 +212,51 @@ impl Main {
         panic!("no response to {method}");
     }
 
-    /// `method` from `caller`, its key-store requests held unanswered until
-    /// its response (a slow key store), then answered.
-    fn call_holding(&mut self, caller: &str, method: &str, params: Value) -> Value {
+    /// `method` from `caller`, its key-store requests held unanswered (a
+    /// slow key store) for `hold` after the first, or until its response,
+    /// then answered.
+    fn call_holding(
+        &mut self,
+        caller: &str,
+        method: &str,
+        params: Value,
+        hold: Option<Duration>,
+    ) -> Value {
         let id = self.next_id;
         self.next_id += 1;
         self.core().send(&json!({
             "type": "request", "id": id, "method": method, "params": params,
             "context": { "caller": caller },
         }));
-        let mut held = Vec::new();
+        let mut held: Vec<Value> = Vec::new();
+        let mut first: Option<Instant> = None;
+        let mut answered = false;
         let until = Instant::now() + Duration::from_secs(60);
         while Instant::now() < until {
+            if let (Some(hold), Some(first)) = (hold, first)
+                && first.elapsed() >= hold
+            {
+                answered = true;
+                for request in std::mem::take(&mut held) {
+                    let result = self.keychain.answer(&request["params"]).unwrap();
+                    let id = request["id"].as_u64().unwrap();
+                    self.core()
+                        .send(&json!({ "type": "response", "id": id, "result": result }));
+                }
+            }
             let message = self
                 .core()
                 .recv_or_closed(Duration::from_millis(200))
                 .expect("the core runs");
             let Some(message) = message else { continue };
             if message["type"] == "request" && message["method"] == "shell.keystore" {
+                first.get_or_insert_with(Instant::now);
                 held.push(message);
             } else if message["type"] == "response" && message["id"] == id {
-                assert!(!held.is_empty(), "nothing asked the key store: {message}");
+                assert!(
+                    answered || !held.is_empty(),
+                    "nothing asked the key store: {message}"
+                );
                 for request in held {
                     let result = self.keychain.answer(&request["params"]).unwrap();
                     let id = request["id"].as_u64().unwrap();
@@ -652,9 +676,20 @@ fn an_abandoned_set_writes_nothing() {
     let secrets = std::fs::read(main.data.join("secrets.json")).unwrap();
     let file = std::fs::read(main.file_path()).unwrap();
     let set = json!({ "id": "infura", "api_key": "k-i" });
-    let reply = main.call_holding("chrome", "secrets.set_rpc_api_key", set);
+    let reply = main.call_holding("chrome", "secrets.set_rpc_api_key", set.clone(), None);
     assert_eq!(code(&reply), "deadline", "{reply}");
     // Served after the abandoned job's end.
+    assert_eq!(main.status(), ["alchemy", "drpc"]);
+    assert_eq!(
+        std::fs::read(main.data.join("secrets.json")).unwrap(),
+        secrets
+    );
+    assert_eq!(std::fs::read(main.file_path()).unwrap(), file);
+    // Answered past the claim time (two thirds into the deadline), before
+    // the loop gives up: the claim itself refuses the write.
+    let hold = Some(Duration::from_millis(2500));
+    let reply = main.call_holding("chrome", "secrets.set_rpc_api_key", set, hold);
+    assert_eq!(code(&reply), "deadline", "{reply}");
     assert_eq!(main.status(), ["alchemy", "drpc"]);
     assert_eq!(
         std::fs::read(main.data.join("secrets.json")).unwrap(),
@@ -665,19 +700,32 @@ fn an_abandoned_set_writes_nothing() {
     assert_eq!(main.entries().len(), 2);
 }
 
-/// Without a key store the file's write is the commit: a job that reaches
-/// it past its claim time answers `deadline` and writes nothing.
+/// Where the file's write or removal is the first that changes an answer,
+/// it is the commit: a job that reaches it past its claim time answers
+/// `deadline` and writes nothing. Without a key store, a set; with one, the
+/// remove of the last key (outside the entry form) that empties the file.
 #[test]
-fn an_abandoned_set_without_a_key_store_writes_nothing() {
-    let mut main = Main::new(false);
-    main.start(&[
+fn a_job_past_its_claim_time_writes_nothing() {
+    let late = [
         ("FREEDOM_CORED_TEST_KDF_DEADLINE_MS", "1500"),
         ("FREEDOM_CORED_TEST_JOB_DELAY_MS", "1200"),
-    ]);
+    ];
+    let mut main = Main::new(false);
+    main.start(&late);
     let reply = main.set("alchemy", "k");
     assert_eq!(code(&reply), "deadline", "{reply}");
     std::thread::sleep(Duration::from_millis(500));
     assert!(!main.file_path().exists());
+
+    let mut main = Main::new(true);
+    std::fs::write(main.file_path(), reference_text(&[("Bad Id", "k-bad")])).unwrap();
+    main.start(&late);
+    // Nothing to move: no write, so no claim.
+    assert_eq!(main.keys()["Bad Id"], "k-bad");
+    let reply = main.remove("Bad Id");
+    assert_eq!(code(&reply), "deadline", "{reply}");
+    std::thread::sleep(Duration::from_millis(500));
+    assert!(main.file().unwrap().get("Bad Id").is_some());
 }
 
 /// The file keeps every key whose entry's write isn't durable (its
