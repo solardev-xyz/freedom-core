@@ -59,7 +59,7 @@ jobs:
           persist-credentials: false
       - run: rustup toolchain install
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
-      - run: cargo clippy --locked -p fc-sys -p fc-service --all-targets --all-features -- -D warnings
+      - run: cargo clippy --locked -p fc-sys -p fc-service -p fc-store --all-targets --all-features -- -D warnings
       # The key-store helper's Keychain backend (design 0013), as the
       # release builds it and with its tests' hooks.
       - run: cargo clippy --locked -p freedom-cored --bin freedom-cored -- -D warnings
@@ -112,7 +112,8 @@ jobs:
   clippy-windows:
     # Confinement's Windows code (design 0010): fc-sys's job object and
     # mitigation calls and fc-service's use of them, which Linux's Clippy
-    # doesn't compile.
+    # doesn't compile; and fc-store's handle-relative directory on Windows
+    # (design 0013, "Windows handle I/O (#963)").
     name: clippy (Windows confinement)
     runs-on: windows-latest
     steps:
@@ -121,7 +122,7 @@ jobs:
           persist-credentials: false
       - run: rustup toolchain install
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
-      - run: cargo clippy --locked -p fc-sys -p fc-service --all-targets --all-features -- -D warnings
+      - run: cargo clippy --locked -p fc-sys -p fc-service -p fc-store --all-targets --all-features -- -D warnings
 
   release-targets-linux:
     # The Release workflow builds freedom-cored for musl, where the `libc`
@@ -267,6 +268,17 @@ jobs:
           ref: 7f85551d82bddb1337df73b331785e969d62d1b9
           path: approvals-reference
           persist-credentials: false
+      # The set-A stores' own reference (generate.js,
+      # STORES_REFERENCE_COMMIT): integration/rust-core, whose
+      # identity-manager.js stores.js loads. Its generator reads no package
+      # of this checkout's (ethers and the fake timers are the reference's
+      # install), so nothing is installed there.
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          repository: solardev-xyz/freedom-browser
+          ref: 9d4ea62516034731dea082c6d81765e355f1182f
+          path: stores-reference
+          persist-credentials: false
       # The vectors' meta records the Node version; it is part of the check.
       - uses: actions/setup-node@2028fbc5c25fe9cf00d9f06a71cc4710d4507903 # v6.0.0
         with:
@@ -286,10 +298,12 @@ jobs:
           FREEDOM_BROWSER_CHECKOUT: ${{ github.workspace }}/reference
           FREEDOM_BROWSER_RADICLE_CHECKOUT: ${{ github.workspace }}/radicle-reference
           FREEDOM_BROWSER_APPROVALS_CHECKOUT: ${{ github.workspace }}/approvals-reference
+          FREEDOM_BROWSER_STORES_CHECKOUT: ${{ github.workspace }}/stores-reference
         run: |
           node vectors/generator/generate.js check --freedom-browser "$FREEDOM_BROWSER_CHECKOUT" \
             --radicle-browser "$FREEDOM_BROWSER_RADICLE_CHECKOUT" \
-            --approvals-browser "$FREEDOM_BROWSER_APPROVALS_CHECKOUT"
+            --approvals-browser "$FREEDOM_BROWSER_APPROVALS_CHECKOUT" \
+            --stores-browser "$FREEDOM_BROWSER_STORES_CHECKOUT"
           node --test vectors/generator/check.test.js
       # Design 0013's interop harness: the profiles reference's catalog code
       # and freedom-cored's subcommands on one app root, the catalog's write
