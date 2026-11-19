@@ -226,6 +226,7 @@ function malformedCases() {
     parsed('empty-object', '{}'),
     parsed('whitespace-around', `${ch(10, 9, 32)}{"alchemy": ${rec('"ka"')}}${ch(13, 10, 32)}`),
     parsed('empty-key', `{"alchemy": ${rec('""')}}`),
+    parsed('key-missing', `{"a": {"enabled": true}, "b": {"enabled": true, "addedAt": 1}, "c": ${rec('"kc"')}}`),
     parsed('enabled-values', '{"a": {"apiKey": "k1", "enabled": 0}, "b": {"apiKey": "k2", "enabled": "yes"}, "c": {"apiKey": "k3"}, "d": {"apiKey": "k4", "enabled": false}, "e": {"apiKey": "k5", "enabled": []}, "f": {"apiKey": "k6", "enabled": null}}'),
     parsed('key-values', `{"a": ${rec('7')}, "b": ${rec('true')}, "c": ${rec('{}')}, "d": ${rec('["x", 1]')}, "e": ${rec('null')}, "f": ${rec('0')}, "g": ${rec('false')}, "h": ${rec('1e400')}, "i": ${rec('-0')}}`),
     parsed('key-to-string-throws', `{"a": ${rec('{"toString": 1}')}, "b": ${rec('"kb"')}}`),
@@ -256,6 +257,14 @@ function malformedCases() {
   ];
 }
 
+// A long text's length, and for a file the core parses its SHA-256 too, so
+// the replay compares the whole text, not just its length.
+function sized(c, text) {
+  const out = { text_length: Buffer.byteLength(text) };
+  if (c.core === 'parsed') out.text_sha256 = require('crypto').createHash('sha256').update(text).digest('hex');
+  return out;
+}
+
 function malformedOf(checkout, c) {
   const contents = c.bytes ?? Buffer.from(c.fill ? filled(c.fill) : c.text);
   const files = new Map([[FILE, contents]]);
@@ -265,7 +274,7 @@ function malformedOf(checkout, c) {
       const value = store.readRpcApiKeys();
       // The text its next save writes, or a filled file's length of it.
       const text = JSON.stringify(value, null, 2);
-      return c.fill || c.large ? { text_length: Buffer.byteLength(text) } : { text };
+      return c.fill || c.large ? sized(c, text) : { text };
     } catch (error) {
       return { error: String(error.message) };
     }
@@ -283,14 +292,14 @@ function malformedOf(checkout, c) {
     ...source,
     read,
     keys,
-    set: { at: T, ...setOutcome, ...(c.fill || c.large ? { text_length: Buffer.byteLength(setText) } : { text: setText }) },
+    set: { at: T, ...setOutcome, ...(c.fill || c.large ? sized(c, setText) : { text: setText }) },
     core: c.core,
     ...(c.reason ? { reason: c.reason } : {}),
     ...(c.row ? { row: c.row } : {}),
   };
 }
 
-const RPC_KEYS_FORMAT = 'rpc-api-keys.json, from the stores reference\'s rpc-api-key-store.js through its rpc-manager.js, main\'s registry a fixed catalog of keyed providers (`catalog`). `runs`: from a `start` text (or none; `start_core`, the core\'s reading of it, with its `row`), each step rpc-manager\'s `setApiKey(id, key)` or `removeApiKey(id)` (`op`, `id`, `key`) at `at` (`Date.now()`, the record\'s `addedAt`), with its `result` (`success`, `error`), whether it wrote the file (`wrote`), the file\'s text after it (`text`, null while there is none), `hasApiKey(id)` after it (`has`), and the keys a fresh rpc-manager reads from that text (`keys`: each own property `hasApiKey` counts, in order, with `String(apiKey)` well-formed in `key`, `well_formed`, its UTF-8 `bytes`, whether `apiKey` was a `string`, or the `error` it threw). `core`: how the core\'s file codec takes the step with no key store: `set` (`keys[id] = { apiKey, enabled: true, addedAt }`), `remove` (`delete keys[id]` where the record is truthy), `main_refuses` (main\'s registry refuses the id first), or, where it deliberately differs (`row`), `refused` (an id outside the entry form) or `own_property` (`__proto__`, which the reference\'s assignment makes the object\'s prototype). `malformed`: a file\'s `text` (or its bytes in `hex`, which Node decodes as UTF-8 with U+FFFD for each invalid sequence, or a `fill`: `open`, `char` repeated, `close`, `bytes` long), what the key store\'s `readRpcApiKeys()` reads (`read`: the `JSON.stringify(value, null, 2)` text its next save writes, a filled or deeply nested file\'s `text_length`, or the `error`, which rpc-manager reads as `{}`), the keys a fresh rpc-manager counts (`keys`, as above, or an `error` where the value isn\'t an object), a `setApiKey(\'alchemy\', \'k-new\')` over it (`set`: at `at`, its result or error and the text after, or its `text_length`), and the core\'s reading (`core`: `unreadable`, renamed aside and reported, with its `reason` and `row`, or `parsed`; the 1 MiB bound is the design\'s).';
+const RPC_KEYS_FORMAT = 'rpc-api-keys.json, from the stores reference\'s rpc-api-key-store.js through its rpc-manager.js, main\'s registry a fixed catalog of keyed providers (`catalog`). `runs`: from a `start` text (or none; `start_core`, the core\'s reading of it, with its `row`), each step rpc-manager\'s `setApiKey(id, key)` or `removeApiKey(id)` (`op`, `id`, `key`) at `at` (`Date.now()`, the record\'s `addedAt`), with its `result` (`success`, `error`), whether it wrote the file (`wrote`), the file\'s text after it (`text`, null while there is none), `hasApiKey(id)` after it (`has`), and the keys a fresh rpc-manager reads from that text (`keys`: each own property `hasApiKey` counts, in order, with `String(apiKey)` well-formed in `key`, `well_formed`, its UTF-8 `bytes`, whether `apiKey` was a `string`, or the `error` it threw). `core`: how the core\'s file codec takes the step with no key store: `set` (`keys[id] = { apiKey, enabled: true, addedAt }`), `remove` (`delete keys[id]` where the record is truthy), `main_refuses` (main\'s registry refuses the id first), or, where it deliberately differs (`row`), `refused` (an id outside the entry form) or `own_property` (`__proto__`, which the reference\'s assignment makes the object\'s prototype). `malformed`: a file\'s `text` (or its bytes in `hex`, which Node decodes as UTF-8 with U+FFFD for each invalid sequence, or a `fill`: `open`, `char` repeated, `close`, `bytes` long), what the key store\'s `readRpcApiKeys()` reads (`read`: the `JSON.stringify(value, null, 2)` text its next save writes, a filled or deeply nested file\'s `text_length`, with `text_sha256` where the core parses it, or the `error`, which rpc-manager reads as `{}`), the keys a fresh rpc-manager counts (`keys`, as above, or an `error` where the value isn\'t an object), a `setApiKey(\'alchemy\', \'k-new\')` over it (`set`: at `at`, its result or error and the text after, or its `text_length`), and the core\'s reading (`core`: `unreadable`, renamed aside and reported, with its `reason` and `row`, or `parsed`; the 1 MiB bound is the design\'s).';
 
 function buildRpcKeys(checkout) {
   return {

@@ -86,10 +86,26 @@ fn counted_of(file: &KeysFile) -> Vec<(String, String)> {
         .collect()
 }
 
+/// A long text: its length and its SHA-256, the reference's.
+fn sized(file: &KeysFile, reference: &JsValue, case: &str) {
+    use sha2::{Digest, Sha256};
+    assert_eq!(
+        file.text_len(),
+        number(reference, "text_length") as usize,
+        "{case}"
+    );
+    let digest: String = Sha256::digest(file.text().as_bytes())
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect();
+    assert_eq!(digest, text(reference, "text_sha256"), "{case}");
+}
+
 /// The reference's counted keys (`hasApiKey`, `String(apiKey)`), as
 /// [`KeysFile::counted`] must give them, each checked against `holds`.
 /// A key whose `String(apiKey)` threw isn't counted: the core counts only
-/// what can be made a string (`counted_key`).
+/// what can be made a string (`counted_key`; deviation
+/// `rpc-keys-unstringifiable`).
 fn check_keys(file: &KeysFile, keys: &JsValue, case: &str) {
     let mut expected = Vec::new();
     for entry in items(keys) {
@@ -269,7 +285,7 @@ fn each_malformed_file_reads_as_the_core_documents() {
                 let file = KeysFile::parse(&bytes).unwrap_or_else(|| panic!("{id}"));
                 match field(read, "text").as_str() {
                     Some(reference) => assert_eq!(*file.text(), *reference, "{id}"),
-                    None => assert_eq!(file.text_len(), number(read, "text_length") as usize),
+                    None => sized(&file, read, id),
                 }
                 check_keys(&file, field(case, "keys"), id);
                 assert!(field(field(set, "result"), "success") == &JsValue::Bool(true));
@@ -277,7 +293,7 @@ fn each_malformed_file_reads_as_the_core_documents() {
                 file.set("alchemy", "k-new", number(set, "at") as u64);
                 match field(set, "text").as_str() {
                     Some(reference) => assert_eq!(*file.text(), *reference, "{id}: the set"),
-                    None => assert_eq!(file.text_len(), number(set, "text_length") as usize),
+                    None => sized(&file, set, id),
                 }
             }
             other => panic!("{id}: {other}"),

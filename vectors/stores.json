@@ -12,7 +12,7 @@
   "formats": {
     "vault_meta": "identity/vault-meta.json, from the stores reference's identity-manager.js. `runs`: from a `start` text (or none), each step one of its functions (`op`, its `args`; `$nextHardwareWalletIndex` is `nextHardwareWalletIndex(meta, getWalletList(meta))` over the file) at `at` (the wall clock in milliseconds; `createdAt` is `new Date().toISOString()` at it), after `world` changed the scripted world (`unlocked`: the vault's lock; `ledger`: the address the device answers at each path; `phone`: the phone's proof, `throw` for no answer; `references`: the Swarm feed references of each wallet index), with its `result` (or `error`: `message` and `code`), the `calls` it made (`vault.*` the identity core's, `ledger.*`, `phone.*`, `feeds.*`, `safe.*` and `dapp.*` main's modules', each with its `answer` or `error`), whether it wrote the file (`wrote`) and the file's text after it (`text`, null while there is none). `core`: what the core is asked for the step once main has done its part (`op`, `args`: `new_vault` [userKnowsPassword, at, addresses], `migrate_addresses` [addresses], `add_mnemonic` [unlocked, name] with the address from the step's `vault.addresses` call, `list` with the addresses from its `vault.addresses` call, `remove` [index, the feed references' origins], and the others the function's own arguments), or null where main refuses before asking it (the device or the phone doesn't answer for the address). `malformed`: a file's `text` (or its bytes in `hex`, which Node decodes as UTF-8 with U+FFFD for each invalid sequence, or a `fill`: `open`, `char` repeated, `close`, `bytes` long), what the reference loads from it (`loaded`: `getVaultMeta()` as its `JSON.stringify` text in `json`, or a filled file's keys and `pad` length), a locked `getDerivedWallets()` (`listed`: its `result` or `error`, and whether it wrote), `getActiveWalletIndex()` (`active`), and the core's reading (`core`: `unreadable`, renamed aside and reported, with its `reason`, or `parsed`; the design's, `source: design`, with the 1 MiB bound).",
     "intents": "wallet-intents.jsonl, from the stores reference's src/main/wallet/intent-store.js over its lib/durable-journal.js, `crypto.randomUUID` numbered (RUN_ID at each load of the module, then the intent and handoff ids) and the clock fixed. `runs`: one live store per run, with its `limits` overrides, each step an operation (`op`, `args`, at `at`; `restart` loads the module again, a new run of main; `void` without a `lock` is refused) with its `refusal` (`code`, `message`) or null, the file's `records` after it, and `load`: a fresh store loading those records, its `reason` for moving the file aside (null: loaded), the records it rewrote the file to (`compacted`, null when unchanged), `list()`, the ids of `held()`, `byKey` of each key, `heldNonces` of each account, `voidRefusal` of each listed intent, and `usage()`. `damaged`: records the reference loads, with its `reason` (null when it loads them).",
-    "rpc_api_keys": "rpc-api-keys.json, from the stores reference's rpc-api-key-store.js through its rpc-manager.js, main's registry a fixed catalog of keyed providers (`catalog`). `runs`: from a `start` text (or none; `start_core`, the core's reading of it, with its `row`), each step rpc-manager's `setApiKey(id, key)` or `removeApiKey(id)` (`op`, `id`, `key`) at `at` (`Date.now()`, the record's `addedAt`), with its `result` (`success`, `error`), whether it wrote the file (`wrote`), the file's text after it (`text`, null while there is none), `hasApiKey(id)` after it (`has`), and the keys a fresh rpc-manager reads from that text (`keys`: each own property `hasApiKey` counts, in order, with `String(apiKey)` well-formed in `key`, `well_formed`, its UTF-8 `bytes`, whether `apiKey` was a `string`, or the `error` it threw). `core`: how the core's file codec takes the step with no key store: `set` (`keys[id] = { apiKey, enabled: true, addedAt }`), `remove` (`delete keys[id]` where the record is truthy), `main_refuses` (main's registry refuses the id first), or, where it deliberately differs (`row`), `refused` (an id outside the entry form) or `own_property` (`__proto__`, which the reference's assignment makes the object's prototype). `malformed`: a file's `text` (or its bytes in `hex`, which Node decodes as UTF-8 with U+FFFD for each invalid sequence, or a `fill`: `open`, `char` repeated, `close`, `bytes` long), what the key store's `readRpcApiKeys()` reads (`read`: the `JSON.stringify(value, null, 2)` text its next save writes, a filled or deeply nested file's `text_length`, or the `error`, which rpc-manager reads as `{}`), the keys a fresh rpc-manager counts (`keys`, as above, or an `error` where the value isn't an object), a `setApiKey('alchemy', 'k-new')` over it (`set`: at `at`, its result or error and the text after, or its `text_length`), and the core's reading (`core`: `unreadable`, renamed aside and reported, with its `reason` and `row`, or `parsed`; the 1 MiB bound is the design's)."
+    "rpc_api_keys": "rpc-api-keys.json, from the stores reference's rpc-api-key-store.js through its rpc-manager.js, main's registry a fixed catalog of keyed providers (`catalog`). `runs`: from a `start` text (or none; `start_core`, the core's reading of it, with its `row`), each step rpc-manager's `setApiKey(id, key)` or `removeApiKey(id)` (`op`, `id`, `key`) at `at` (`Date.now()`, the record's `addedAt`), with its `result` (`success`, `error`), whether it wrote the file (`wrote`), the file's text after it (`text`, null while there is none), `hasApiKey(id)` after it (`has`), and the keys a fresh rpc-manager reads from that text (`keys`: each own property `hasApiKey` counts, in order, with `String(apiKey)` well-formed in `key`, `well_formed`, its UTF-8 `bytes`, whether `apiKey` was a `string`, or the `error` it threw). `core`: how the core's file codec takes the step with no key store: `set` (`keys[id] = { apiKey, enabled: true, addedAt }`), `remove` (`delete keys[id]` where the record is truthy), `main_refuses` (main's registry refuses the id first), or, where it deliberately differs (`row`), `refused` (an id outside the entry form) or `own_property` (`__proto__`, which the reference's assignment makes the object's prototype). `malformed`: a file's `text` (or its bytes in `hex`, which Node decodes as UTF-8 with U+FFFD for each invalid sequence, or a `fill`: `open`, `char` repeated, `close`, `bytes` long), what the key store's `readRpcApiKeys()` reads (`read`: the `JSON.stringify(value, null, 2)` text its next save writes, a filled or deeply nested file's `text_length`, with `text_sha256` where the core parses it, or the `error`, which rpc-manager reads as `{}`), the keys a fresh rpc-manager counts (`keys`, as above, or an `error` where the value isn't an object), a `setApiKey('alchemy', 'k-new')` over it (`set`: at `at`, its result or error and the text after, or its `text_length`), and the core's reading (`core`: `unreadable`, renamed aside and reported, with its `reason` and `row`, or `parsed`; the 1 MiB bound is the design's)."
   },
   "source": {
     "max_file_bytes": "design"
@@ -27877,6 +27877,30 @@
         "core": "parsed"
       },
       {
+        "id": "key-missing",
+        "text": "{\"a\": {\"enabled\": true}, \"b\": {\"enabled\": true, \"addedAt\": 1}, \"c\": {\"apiKey\": \"kc\", \"enabled\": true}}",
+        "read": {
+          "text": "{\n  \"a\": {\n    \"enabled\": true\n  },\n  \"b\": {\n    \"enabled\": true,\n    \"addedAt\": 1\n  },\n  \"c\": {\n    \"apiKey\": \"kc\",\n    \"enabled\": true\n  }\n}"
+        },
+        "keys": [
+          {
+            "id": "c",
+            "key": "kc",
+            "well_formed": true,
+            "bytes": 2,
+            "string": true
+          }
+        ],
+        "set": {
+          "at": 1764000000000,
+          "result": {
+            "success": true
+          },
+          "text": "{\n  \"a\": {\n    \"enabled\": true\n  },\n  \"b\": {\n    \"enabled\": true,\n    \"addedAt\": 1\n  },\n  \"c\": {\n    \"apiKey\": \"kc\",\n    \"enabled\": true\n  },\n  \"alchemy\": {\n    \"apiKey\": \"k-new\",\n    \"enabled\": true,\n    \"addedAt\": 1764000000000\n  }\n}"
+        },
+        "core": "parsed"
+      },
+      {
         "id": "enabled-values",
         "text": "{\"a\": {\"apiKey\": \"k1\", \"enabled\": 0}, \"b\": {\"apiKey\": \"k2\", \"enabled\": \"yes\"}, \"c\": {\"apiKey\": \"k3\"}, \"d\": {\"apiKey\": \"k4\", \"enabled\": false}, \"e\": {\"apiKey\": \"k5\", \"enabled\": []}, \"f\": {\"apiKey\": \"k6\", \"enabled\": null}}",
         "read": {
@@ -28389,7 +28413,8 @@
           "bytes": 1048576
         },
         "read": {
-          "text_length": 1048594
+          "text_length": 1048594,
+          "text_sha256": "768acf2b8f875f33210fea854808af6c01c03c1b8f95fb4b284a2d4145b769b6"
         },
         "keys": [
           {
@@ -28405,7 +28430,8 @@
           "result": {
             "success": true
           },
-          "text_length": 1048627
+          "text_length": 1048627,
+          "text_sha256": "db1924c9963f9fc88b32d134ebe04dcd8b808f492d7c047a7c3d44186da30031"
         },
         "core": "parsed"
       },
