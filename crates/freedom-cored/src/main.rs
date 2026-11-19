@@ -46,6 +46,10 @@ mod testhooks;
 // otherwise no test method is compiled at all.
 #[cfg(feature = "testhooks")]
 mod testmethods;
+// The `testhooks` feature only: fc-store's journal driven from stdin, for
+// the interop harness (design 0013, PRF-5d).
+#[cfg(feature = "testhooks")]
+mod testjournal;
 mod transport;
 mod vault;
 mod worker;
@@ -107,6 +111,10 @@ fn main() -> ExitCode {
     if command.as_deref() == Some("keystore") {
         // No logging thread, no gate: one OS call and one line.
         return ExitCode::from(keystore::helper::run(std::env::args_os().skip(2)).code());
+    }
+    #[cfg(feature = "testhooks")]
+    if command.as_deref() == Some("test-journal") && testhooks::test_methods() {
+        return ExitCode::from(testjournal::run(std::env::args_os().skip(2)));
     }
     if matches!(command.as_deref(), Some("profile" | "hold-profile")) {
         let entry = fc_service::confine::clean_entry();
