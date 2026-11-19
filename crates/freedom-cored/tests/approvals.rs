@@ -3,6 +3,12 @@
 //! Safe approvals for owners and the executor, and `sign.*` checking an
 //! authorization. That a page's and the chrome's signatures need one
 //! (APR-4a) is `tests/enforced.rs`'s.
+//!
+//! From APR-7 a page mints no token itself: the core mints the page kinds
+//! on an approve answer to its own prompt. These tests of what a page's
+//! token then binds mint it directly, through the test build's hook
+//! (`FREEDOM_CORED_TEST_MAINS_WORD`); without it, `approval.issue` under
+//! `page` is refused ([`a_page_mints_nothing_itself`]).
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
@@ -21,9 +27,14 @@ const OTHER_SAFE: &str = "0x2222222222222222222222222222222222222222";
 const TO: &str = "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913";
 const ZERO: &str = "0x0000000000000000000000000000000000000000";
 
+/// A core with the hook that admits a page's `approval.issue` again.
 fn unlocked() -> (tempfile::TempDir, Core) {
+    unlocked_with(&[MAINS_WORD])
+}
+
+fn unlocked_with(env: &[(&str, &str)]) -> (tempfile::TempDir, Core) {
     let (root, data, locks) = dirs();
-    let mut core = spawn("serve", &data, &locks, &[]);
+    let mut core = spawn_env("serve", &data, &locks, &[], env);
     core.hello();
     let imported = core.call(
         2,
@@ -177,6 +188,60 @@ fn issue(core: &mut Core, id: &mut u64, context: &Value, params: Value) -> Value
 
 fn token_of(reply: &Value) -> String {
     result(reply)["token"].as_str().unwrap().to_owned()
+}
+
+/// APR-7: under `page`, `approval.issue` is refused by the method table
+/// (`forbidden`) for every kind, page and wallet, whatever its params, so
+/// a malformed request too: nothing is read, and nothing minted. The
+/// chrome and main still reach it, each for its own kinds.
+#[test]
+fn a_page_mints_nothing_itself() {
+    let (_root, mut core) = unlocked_with(&[]);
+    let mut id = 10;
+    let kinds = [
+        "dapp-send",
+        "sign-message",
+        "sign-typed-data",
+        "safe-message",
+        "safe-send",
+        "wallet-send",
+        "intent-resend",
+        "intent-replace",
+        "intent-close",
+        "executor-send",
+        "x402-payment",
+    ];
+    let mut agent = site();
+    agent["page"]["agent"] = json!(true);
+    let site_contexts = [site(), agent, json!({ "caller": "page" })];
+    for context in &site_contexts {
+        for kind in kinds {
+            let well_formed = json!({ "kind": kind, "account": 0, "handle": HANDLE,
+                "payload": { "message": "0x01" } });
+            for params in [well_formed, json!({ "kind": kind }), json!({ "kind": 1 })] {
+                let reply = issue(&mut core, &mut id, context, params.clone());
+                refused(&reply, "forbidden", None);
+                assert_eq!(
+                    reply["error"]["message"], "not callable by this caller",
+                    "{context} {params}"
+                );
+            }
+        }
+    }
+    // The chrome and main are still checked by the method itself: a page
+    // kind refused for each (its kind, not the table), a wallet send minted
+    // under `shell`.
+    let message = json!({ "kind": "sign-message", "account": 0, "payload": { "message": "0x01" } });
+    for context in [chrome(), shell()] {
+        let reply = issue(&mut core, &mut id, &context, message.clone());
+        refused(&reply, "forbidden", None);
+        assert_ne!(reply["error"]["message"], "not callable by this caller");
+    }
+    let wallet = json!({ "kind": "wallet-send", "account": 0, "payload": { "tx": send_tx() } });
+    assert_eq!(
+        token_of(&issue(&mut core, &mut id, &shell(), wallet)).len(),
+        64
+    );
 }
 
 /// Page kinds only under `page`, wallet kinds only under `shell`, and

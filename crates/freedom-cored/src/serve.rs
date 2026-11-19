@@ -892,17 +892,23 @@ fn loggable(method: &str) -> &'static str {
 
 /// Whether `caller` may call `method` (#101): fc-protocol's method table,
 /// checked once for every request before anything is dispatched, and with
-/// the `testhooks` feature the test methods, when their hook enables them. `Err` is
-/// the refusal: a method the table doesn't list is unknown; one it lists,
-/// but not for this caller, is forbidden. The core speaks only protocol 2,
-/// at which the table serves every row.
+/// the `testhooks` feature the test methods, when their hook enables them,
+/// and a page's `approval.issue`, when its hook does (`testhooks::mains_word`).
+/// `Err` is the refusal: a method the table doesn't list is unknown; one it
+/// lists, but not for this caller, is forbidden. The core speaks only
+/// protocol 2, at which the table serves every row.
 fn admitted(method: &str, caller: CallerKind, test_methods: bool) -> Result<(), ErrorBody> {
     match methods::admit(method, caller, fc_protocol::PROTOCOL_VERSION_STREAMS) {
         Admission::Allowed(_) => Ok(()),
-        Admission::Forbidden => Err(ErrorBody::new(
-            ErrorCode::Forbidden,
-            "not callable by this caller",
-        )),
+        Admission::Forbidden => {
+            if method == "approval.issue" && caller == CallerKind::Page && testhooks::mains_word() {
+                return Ok(());
+            }
+            Err(ErrorBody::new(
+                ErrorCode::Forbidden,
+                "not callable by this caller",
+            ))
+        }
         Admission::Unknown => {
             #[cfg(feature = "testhooks")]
             if test_methods && testmethods::handles(method) && caller != CallerKind::Page {

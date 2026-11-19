@@ -731,20 +731,22 @@ impl Connects {
             // The grant, the account and the Safe's chain, read once the
             // name holds; then the site's rule, chosen before the quote with
             // the core's own grant, and the name once more.
-            Then::Send { send, .. } => match send.prepare(|key| vault.dapp_entry(key)) {
-                Err(answer) => vec![reply(id, &answer)],
-                Ok(prepare) => {
-                    let agent = held.context.agent;
-                    let chosen = prepare.rule_query(agent).is_some_and(|query| {
-                        vault.eip1193_send_rule(agent, &query) == send::RuleNow::Covered
-                    });
-                    let sending = match chosen.then(|| prepare.clone().ruled()).flatten() {
-                        Some(rule) => Sending::Rule(rule),
-                        None => Sending::Prompt(prepare),
-                    };
-                    self.go(id, held, Pending::Name(Then::Sending(sending)), vault)
+            Then::Send { send, .. } => {
+                match send.prepare(held.context.agent, |key| vault.dapp_entry(key)) {
+                    Err(answer) => vec![reply(id, &answer)],
+                    Ok(prepare) => {
+                        let agent = held.context.agent;
+                        let chosen = prepare.rule_query(agent).is_some_and(|query| {
+                            vault.eip1193_send_rule(agent, &query) == send::RuleNow::Covered
+                        });
+                        let sending = match chosen.then(|| prepare.clone().ruled()).flatten() {
+                            Some(rule) => Sending::Rule(rule),
+                            None => Sending::Prompt(prepare),
+                        };
+                        self.go(id, held, Pending::Name(Then::Sending(sending)), vault)
+                    }
                 }
-            },
+            }
             Then::Sending(sending) => self.sending(id, held, sending, vault),
             Then::Asked(ask) => self.prompt(id, held, Asking::Send(*ask), vault),
             Then::Confirmed(judge) => {

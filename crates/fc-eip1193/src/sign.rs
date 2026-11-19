@@ -28,6 +28,11 @@
 //!   ticked writes Q9's limited rule after the signature. A rejection or a
 //!   closed handle answers `4001`, a busy window `-32002`, and nothing is
 //!   signed.
+//! - **No "Always allow" in Agent custody** (APR-7): while
+//!   `PageContext.agent` isn't `false` (a missing one counting as custody),
+//!   the prompt offers it unticked only, whether the Agent's sheet or the
+//!   user answers, and an approve that ticks it is [`Crossed`]: a rule given
+//!   in custody would answer only once custody ends.
 //! - **A Ledger's, a phone's or a Safe's account** (until 0016; *inferred*
 //!   for the phone) is asked as any account is, with "Always allow"
 //!   unticked only, and no rule answers it (*inferred*): the device's
@@ -51,9 +56,10 @@ pub const UNLOCK_KIND: &str = "vault.unlock";
 /// ticked.
 const CHOICES: &str = r#"{"alwaysAllow":[false,true]}"#;
 
-/// What it offers a device's account until 0016 (*inferred*): unticked
-/// only, since the core can't see whether the device signed.
-const DEVICE_CHOICES: &str = r#"{"alwaysAllow":[false]}"#;
+/// What it offers a device's account until 0016 (*inferred*), since the
+/// core can't see whether the device signed, and any account in Agent
+/// custody (APR-7): unticked only.
+const UNTICKED_CHOICES: &str = r#"{"alwaysAllow":[false]}"#;
 
 /// The unlock's one form of approve: no picks.
 pub(crate) const UNLOCK_CHOICES: &str = "{}";
@@ -248,6 +254,9 @@ pub struct Ask {
     /// The prompt's `account`, which an unlock shows too.
     account_view: JsValue,
     device: Option<Device>,
+    /// Asked in Agent custody: `PageContext.agent` other than `false`
+    /// (APR-7).
+    custody: bool,
     /// A Safe's address, which its `safe-message` token binds.
     address: Option<JsValue>,
     params: Option<JsValue>,
@@ -758,6 +767,7 @@ impl Sign {
             expected_hash: prepared.expected_hash,
             account_view,
             device,
+            custody: agent != Some(false),
             address: account.get("address").cloned(),
             params: self.params.clone(),
             chain_id,
@@ -1083,13 +1093,19 @@ impl Ask {
     }
 
     /// The choices' JSON text: "Always allow" unticked or ticked, or
-    /// unticked only for a device's account.
+    /// unticked only for a device's account and in Agent custody.
     pub fn choices(&self) -> &'static str {
-        if self.device.is_some() {
-            DEVICE_CHOICES
-        } else {
+        if self.offers_always_allow() {
             CHOICES
+        } else {
+            UNTICKED_CHOICES
         }
+    }
+
+    /// Whether "Always allow" may be ticked: a vault account's, outside
+    /// Agent custody (APR-7).
+    fn offers_always_allow(&self) -> bool {
+        self.device.is_none() && !self.custody
     }
 
     /// The account's kind, for a device's.
@@ -1123,7 +1139,7 @@ impl Ask {
         for (name, value) in picks {
             match value {
                 JsValue::Bool(ticked) if name.as_str() == "alwaysAllow" => {
-                    if *ticked && self.device.is_some() {
+                    if *ticked && !self.offers_always_allow() {
                         return Err(Crossed);
                     }
                     always_allow = *ticked;
@@ -1401,6 +1417,78 @@ mod tests {
                 approval.answer(bad).unwrap_err(),
                 failure("", "Signing failed"),
                 "{bad}"
+            );
+        }
+    }
+
+    /// APR-7: while `agent` isn't `false` (true, or missing), "Always
+    /// allow" is offered unticked only, and an approve that ticks it is
+    /// crossed, nothing signed; unticked, it signs for the answer's handle.
+    /// With `agent: false` it is offered and carried to the signature. A
+    /// device's account offers it unticked only either way.
+    #[test]
+    fn no_always_allow_in_custody() {
+        let sign_for = |kind: &str| {
+            let text = format!(
+                r#"{{"method":"personal_sign","params":["0x68656c6c6f","0x4444444444444444444444444444444444444444"],"world":{{"enabled":true,"window_chain":1,"wallets":[{{"index":0,"address":"0x4444444444444444444444444444444444444444","type":"{kind}"}}],"networks":{{}}}}}}"#
+            );
+            let request = Request::parse(&text).unwrap();
+            let crate::Step::Sign(sign) = crate::start(&request, Some("k"), |_| None) else {
+                panic!("{kind}")
+            };
+            sign
+        };
+        let grant = |_: &str| fc_json::parse(r#"{"walletIndex":0}"#).ok();
+        let approve = |picks: &str| Decision::Approve {
+            choices: fc_json::parse(picks).unwrap(),
+            handle: "ab".repeat(32),
+            world: World::from_value(
+                fc_json::parse(r#"{"enabled":true,"wallets":[],"networks":{}}"#).unwrap(),
+            )
+            .unwrap(),
+        };
+        let ask = |sign: &Sign, agent: Option<bool>| {
+            sign.ask(
+                agent,
+                grant,
+                |_| RuleNow::NotCovered,
+                |_| Err(String::new()),
+            )
+            .unwrap()
+        };
+        let vault = sign_for("mnemonic");
+        for agent in [Some(true), None, Some(false)] {
+            let ask = ask(&vault, agent);
+            let offered = agent == Some(false);
+            let ticked = approve(r#"{"alwaysAllow":true}"#);
+            if offered {
+                assert_eq!(ask.choices(), CHOICES);
+                assert_eq!(ask.approves(&ticked), Ok(true));
+                let Ok(Decided::Sign(approved)) = ask.decide(ticked, grant) else {
+                    panic!("{agent:?}")
+                };
+                assert!(approved.always_allow());
+            } else {
+                assert_eq!(ask.choices(), UNTICKED_CHOICES, "{agent:?}");
+                assert_eq!(ask.approves(&ticked), Err(Crossed), "{agent:?}");
+                assert_eq!(ask.decide(ticked, grant), Err(Crossed), "{agent:?}");
+            }
+            let unticked = approve(r#"{"alwaysAllow":false}"#);
+            assert_eq!(ask.approves(&unticked), Ok(true), "{agent:?}");
+            let Ok(Decided::Sign(approved)) = ask.decide(unticked, grant) else {
+                panic!("{agent:?}")
+            };
+            assert!(!approved.always_allow(), "{agent:?}");
+            assert_eq!(approved.handle(), Some("ab".repeat(32).as_str()));
+            assert_eq!(approved.account(), 0);
+        }
+        let ledger = sign_for("ledger");
+        for agent in [Some(true), None, Some(false)] {
+            let ask = ask(&ledger, agent);
+            assert_eq!(ask.choices(), UNTICKED_CHOICES, "{agent:?}");
+            assert_eq!(
+                ask.decide(approve(r#"{"alwaysAllow":true}"#), grant),
+                Err(Crossed)
             );
         }
     }

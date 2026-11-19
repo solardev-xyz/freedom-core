@@ -110,6 +110,15 @@
 //! - `FREEDOM_CORED_TEST_METHODS` enables the `test.*` methods
 //!   (`testmethods`), which make responses of any size. Builds without the
 //!   feature don't compile them, nor this hook.
+//! - `FREEDOM_CORED_TEST_MAINS_WORD` set: a page's `approval.issue`, and
+//!   its `approval.grant` in the dApp store, are admitted again on main's
+//!   word, as before APR-7 (design 0012), so the tests of what a page's
+//!   token or grant then allows (`sign.*`, `approval.spend`, `phone.job`, a
+//!   Safe approval, the dApp file's writes) can make one directly. Without
+//!   it, as in every build without the feature, both are refused
+//!   (`forbidden`), and the core mints a page kind and writes a dApp grant
+//!   only on an approve answer to its own prompt, which `eip1193.request`'s
+//!   tests drive.
 //! - `FREEDOM_CORED_TEST_HOLD_REPLY` names a request ID: its reply, if it
 //!   is one valid only under the vault's epoch (`nodes.seal_radicle_key`),
 //!   waits in the loop's outbox as if the writer had no room, until the
@@ -497,6 +506,16 @@ pub fn approval_clock(now_ms: u64) -> u64 {
 #[cfg(not(feature = "testhooks"))]
 pub fn approval_clock(now_ms: u64) -> u64 {
     now_ms
+}
+
+#[cfg(feature = "testhooks")]
+pub fn mains_word() -> bool {
+    std::env::var_os("FREEDOM_CORED_TEST_MAINS_WORD").is_some()
+}
+
+#[cfg(not(feature = "testhooks"))]
+pub fn mains_word() -> bool {
+    false
 }
 
 #[cfg(feature = "testhooks")]

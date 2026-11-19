@@ -103,6 +103,36 @@ required-features = ["testhooks"]
 name = "vault"
 required-features = ["testhooks"]
 
+# A page's tokens and dApp grants on main's word, as before APR-7
+# (`FREEDOM_CORED_TEST_MAINS_WORD`), for the tests of what they then allow.
+[[test]]
+name = "approvals"
+required-features = ["testhooks"]
+
+[[test]]
+name = "enforced"
+required-features = ["testhooks"]
+
+[[test]]
+name = "enforced_safe"
+required-features = ["testhooks"]
+
+[[test]]
+name = "enforced_soc"
+required-features = ["testhooks"]
+
+[[test]]
+name = "grants"
+required-features = ["testhooks"]
+
+[[test]]
+name = "phone"
+required-features = ["testhooks"]
+
+[[test]]
+name = "signing"
+required-features = ["testhooks"]
+
 [dependencies]
 # Response bodies from main's shell.* executors travel as base64.
 base64 = "0.22.1"
