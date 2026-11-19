@@ -720,9 +720,9 @@ fn set_disposition(file: BorrowedHandle<'_>) -> io::Result<()> {
 /// (`DirectoryNotEmpty`); a reparse point opened itself is deleted itself.
 ///
 /// - **POSIX semantics** (`FileDispositionInfoEx`, Windows 10 1607 and
-///   NTFS): the name goes at once, though other handles stay open on the
-///   file, and the read-only attribute is ignored, as `unlink` ignores a
-///   file's mode.
+///   NTFS): the name goes when this handle closes, though other handles
+///   stay open on the file, and the read-only attribute is ignored, as
+///   `unlink` ignores a file's mode. Callers close the handle at once.
 /// - **Where those aren't served** ([`ex_unserved`]), the fallback is
 ///   `FileDispositionInfo`: still by this handle, but the name stays,
 ///   delete-pending, until the last handle on the file closes, and a
@@ -1548,9 +1548,10 @@ mod tests {
         rename_at(file.as_handle(), sub.as_handle(), OsStr::new("moved")).unwrap();
         assert!(dir.join("sub/moved").is_file());
         assert!(!dir.join("file").exists());
+        // The name goes once this handle closes, other handles or not.
         delete(file.as_handle()).unwrap();
-        assert!(!dir.join("sub/moved").exists());
         drop(file);
+        assert!(!dir.join("sub/moved").exists());
         // A non-empty directory isn't deleted.
         std::fs::write(dir.join("sub/inner"), b"x").unwrap();
         let full = at("sub", how(access::DELETE, Create::No, Expect::Directory)).unwrap();
