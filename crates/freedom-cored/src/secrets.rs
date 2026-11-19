@@ -881,6 +881,165 @@ impl Staged<'_> {
     }
 }
 
+/// A change to entries outside quick unlock's (design 0013, "RPC API
+/// keys"): what [`Secrets::change_entries`] puts, under the `Unattended`
+/// key, and takes off.
+#[derive(Default)]
+pub struct Change {
+    pub put: Vec<(EntryName, zeroize::Zeroizing<Vec<u8>>)>,
+    pub remove: Vec<EntryName>,
+}
+
+impl Change {
+    pub fn is_empty(&self) -> bool {
+        self.put.is_empty() && self.remove.is_empty()
+    }
+}
+
+impl Secrets {
+    /// The entries' names whose name starts with `prefix`, from the file as
+    /// it stands. No key is opened and the key store isn't asked.
+    pub fn entry_names(&self, prefix: &str) -> Result<Vec<EntryName>, Error> {
+        let file = {
+            let _held = self.lock()?;
+            self.load()?
+        };
+        Ok(file
+            .entry_names()
+            .filter(|name| name.as_str().starts_with(prefix))
+            .cloned()
+            .collect())
+    }
+
+    /// Each entry whose name starts with `prefix`, bound to `{}`, opened
+    /// under its key (no reason: these are `Unattended`).
+    pub fn open_entries(&self, prefix: &str) -> Result<Vec<(EntryName, Secret)>, Error> {
+        let file = {
+            let _held = self.lock()?;
+            self.load()?
+        };
+        let mut keys: Vec<(Policy, WrapKey)> = Vec::new();
+        let mut out = Vec::new();
+        for name in file
+            .entry_names()
+            .filter(|n| n.as_str().starts_with(prefix))
+        {
+            let policy = file.entry_key(name).ok_or(Error::Internal)?;
+            if !keys.iter().any(|(p, _)| *p == policy) {
+                let sealed = file.key(policy).ok_or(Error::Internal)?;
+                let key = self.store.open(&sealed, None).map_err(Error::KeyStore)?;
+                keys.push((policy, key));
+            }
+            let key = keys
+                .iter()
+                .find(|(p, _)| *p == policy)
+                .map(|(_, k)| k)
+                .ok_or(Error::Internal)?;
+            let secret = file
+                .open(name, &Binding::empty(), key)
+                .map_err(|_| Error::EntryRefused)?;
+            out.push((name.clone(), secret));
+        }
+        Ok(out)
+    }
+
+    /// One change to entries outside quick unlock's, planned by `plan` from
+    /// the file as it stands, under the file's lock: each put under the
+    /// `Unattended` key (bound to `{}`, replacing an entry of the name), each
+    /// removal after the puts. Under the committed key if there is one, in
+    /// one write named `step`; otherwise a new key (the `pending` write
+    /// `<step>-pending`, `create`, then the commit, which carries every put).
+    /// A plan with nothing to do writes nothing. The result is the plan's.
+    pub fn change_entries<T>(
+        &self,
+        step: &str,
+        plan: impl FnOnce(&SecretsFile) -> Result<(Change, T), Error>,
+    ) -> Result<T, Error> {
+        let policy = Policy::Unattended;
+        let caps = self.store.capabilities();
+        let _held = self.lock()?;
+        let file = self.load()?;
+        let (change, planned) = plan(&file)?;
+        if change.is_empty() {
+            return Ok(planned);
+        }
+        // An entry of a put's name under the other key leaves first: `put`
+        // can't replace it.
+        let mut base = file.clone();
+        for (name, _) in &change.put {
+            if base.entry_key(name).is_some_and(|key| key != policy) {
+                base = base.remove(name).map_err(refused)?;
+            }
+        }
+        let puts = |mut next: SecretsFile, key: &WrapKey, from: usize| {
+            for (name, secret) in &change.put[from..] {
+                let put = Put {
+                    name: name.clone(),
+                    binding: Binding::empty(),
+                    secret,
+                };
+                next = next.put(policy, key, put, &mut OsRng).map_err(refused)?;
+            }
+            Ok::<_, Error>(next)
+        };
+        let put = match base.key(policy) {
+            _ if change.put.is_empty() => base,
+            Some(sealed) => {
+                let key = self.store.open(&sealed, None).map_err(Error::KeyStore)?;
+                puts(base, &key, 0)?
+            }
+            None => {
+                if !caps.offers(policy) {
+                    return Err(Error::KeyStore(crate::keystore::unavailable("unsupported")));
+                }
+                let backend = caps.backend.ok_or(Error::Internal)?;
+                let item = ItemId::random(&mut OsRng).map_err(|_| Error::Internal)?;
+                let pending = match base.begin_create(policy, backend, item) {
+                    Ok(pending) => pending,
+                    Err(Refused::ForgetBacklog) => self
+                        .drain_held(base.clone())?
+                        .begin_create(policy, backend, item)
+                        .map_err(refused)?,
+                    Err(other) => return Err(refused(other)),
+                };
+                self.write(&pending, &format!("{step}-pending"), &|| true)?;
+                if !pending.forget_list().is_empty() {
+                    self.poke();
+                }
+                let (key, sealed) = self
+                    .store
+                    .create(policy, &Label::new(item))
+                    .map_err(Error::KeyStore)?;
+                if sealed.item() != item || sealed.policy() != policy || sealed.backend() != backend
+                {
+                    return Err(Error::Internal);
+                }
+                let (name, secret) = &change.put[0];
+                let first = Put {
+                    name: name.clone(),
+                    binding: Binding::empty(),
+                    secret,
+                };
+                let committed = pending
+                    .commit(&sealed, &key, None, Some(first), &mut OsRng)
+                    .map_err(refused)?;
+                puts(committed, &key, 1)?
+            }
+        };
+        let mut next = put;
+        for name in &change.remove {
+            if next.entry_key(name).is_some() {
+                next = next.remove(name).map_err(refused)?;
+            }
+        }
+        self.write(&next, step, &|| true)?;
+        if !next.forget_list().is_empty() {
+            self.poke();
+        }
+        Ok(planned)
+    }
+}
+
 /// `file` without quick unlock's entries, under either name, each key left
 /// with nothing under it moved into `forget`.
 fn without_quick_unlock(file: &SecretsFile) -> Result<SecretsFile, Error> {

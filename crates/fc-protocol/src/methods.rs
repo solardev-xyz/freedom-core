@@ -172,6 +172,12 @@ pub const METHODS: &[Method] = &[
     row("quick_unlock.export_private_key", CHROME, false, VAULT),
     row("quick_unlock.status", CHROME, false, NOW),
     row("quick_unlock.disable", CHROME, false, VAULT),
+    // Design 0013, "RPC API keys" (PRF-5h): the keys reach only main; the
+    // chrome sees presence, and sets or removes a key.
+    row("secrets.rpc_api_keys", SHELL, false, VAULT),
+    row("secrets.rpc_api_key_status", CS, false, VAULT),
+    row("secrets.set_rpc_api_key", CS, true, VAULT),
+    row("secrets.remove_rpc_api_key", CS, true, VAULT),
     row("nodes.write_identity", CS, true, VAULT),
     row("nodes.op_status", SHELL, false, VAULT),
     // Design 0008, "The sealed release": the Radicle node key, sealed to the
