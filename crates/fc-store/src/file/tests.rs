@@ -104,6 +104,41 @@ fn a_failure_before_the_rename_leaves_the_file_as_it_was() {
     }
 }
 
+/// The write hook fires before any byte reaches the temp file: a hook that
+/// looks in the directory at that point sees an empty temp file.
+#[test]
+fn the_write_hook_fires_before_the_bytes_are_written() {
+    struct Peeking {
+        dir: PathBuf,
+        sizes: RefCell<Vec<u64>>,
+    }
+    impl Hooks for Peeking {
+        fn fails(&self, step: Step) -> bool {
+            if step != Step::Write {
+                return false;
+            }
+            for entry in std::fs::read_dir(&self.dir).unwrap() {
+                let entry = entry.unwrap();
+                if entry.file_name() != "dapp-permissions.json" {
+                    self.sizes.borrow_mut().push(entry.metadata().unwrap().len());
+                }
+            }
+            true
+        }
+        fn checked(&self, _temp: &Path) {}
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let target = store(dir.path());
+    let hooks = Peeking {
+        dir: dir.path().to_owned(),
+        sizes: RefCell::new(Vec::new()),
+    };
+    assert!(write_file(&target, b"new", &hooks).is_err());
+    assert_eq!(*hooks.sizes.borrow(), vec![0], "one temp file, still empty");
+    assert_eq!(std::fs::read(&target).unwrap(), b"old");
+    assert!(others(dir.path(), &["dapp-permissions.json"]).is_empty());
+}
+
 /// A failed flush after the rename: the change is in place, not durable,
 /// and the failure reported.
 #[test]
