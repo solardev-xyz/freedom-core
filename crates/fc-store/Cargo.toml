@@ -12,6 +12,14 @@ repository.workspace = true
 [lints]
 workspace = true
 
+[dependencies]
+# The journal's records: V8's JSON.parse and JSON.stringify, as the
+# reference reads and writes them. A workspace logic crate.
+fc-json = { path = "../fc-json" }
+# The journal's line checksum. Already in the tree (fc-approval, fc-profile,
+# fc-service and others build it the same way).
+sha2 = { version = "0.11", default-features = false }
+
 [target.'cfg(unix)'.dependencies]
 # openat, renameat, unlinkat, fstatat and O_NOFOLLOW for the handle-relative
 # directory; a non-blocking open for the bounded read; getuid for its owner
