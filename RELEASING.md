@@ -317,7 +317,7 @@ repository code.
      code it bundles. One of them, LibXDiff, is LGPL-2.1-or-later and linked
      statically, so the entry also says where its source is, and where
      freedom-radicled's is, to rebuild it against a modified copy;
-   - **zlib 1.3.2** (`libz-sys`, built from its own copy on every target:
+   - **zlib 1.4** (`libz-sys`, built from its own copy on every target:
      `Cargo.toml` asks for `static`);
    - **SQLite 3.49.1** (`sqlite3-src`'s amalgamation), public domain, with
      the dedication its source carries.
