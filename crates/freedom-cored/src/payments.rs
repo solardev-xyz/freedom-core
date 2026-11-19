@@ -12,7 +12,10 @@
 //! import's files are PRF-5g-2's second part.
 #![cfg_attr(
     not(test),
-    expect(dead_code, reason = "payments.* (PRF-5g-2's second part) are its first callers")
+    expect(
+        dead_code,
+        reason = "payments.* (PRF-5g-2's second part) are its first callers"
+    )
 )]
 
 use std::fmt;
@@ -25,7 +28,10 @@ use rusqlite::{Connection, ToSql, Transaction, TransactionBehavior};
 use crate::sqlite::Schema;
 
 /// `payment-history.sqlite`'s schema, the reference's.
-pub const SCHEMA: Schema = Schema { version: codec::SCHEMA_VERSION, ddl: codec::DDL };
+pub const SCHEMA: Schema = Schema {
+    version: codec::SCHEMA_VERSION,
+    ddl: codec::DDL,
+};
 
 #[derive(Debug)]
 pub enum Error {
@@ -88,7 +94,9 @@ fn cell(value: ValueRef<'_>) -> Cell {
 fn rows(conn: &Connection, statement: &Statement) -> Result<Vec<Row>, Error> {
     let mut prepared = conn.prepare(&statement.sql)?;
     let columns = prepared.column_count();
-    let mut found = prepared.query(rusqlite::params_from_iter(statement.params.iter().map(Param)))?;
+    let mut found = prepared.query(rusqlite::params_from_iter(
+        statement.params.iter().map(Param),
+    ))?;
     let mut out = Vec::new();
     while let Some(row) = found.next()? {
         let mut cells = Vec::with_capacity(columns);
@@ -103,7 +111,9 @@ fn rows(conn: &Connection, statement: &Statement) -> Result<Vec<Row>, Error> {
 /// The rows a statement changed.
 fn run(conn: &Connection, statement: &Statement) -> Result<usize, Error> {
     let mut prepared = conn.prepare(&statement.sql)?;
-    Ok(prepared.execute(rusqlite::params_from_iter(statement.params.iter().map(Param)))?)
+    Ok(prepared.execute(rusqlite::params_from_iter(
+        statement.params.iter().map(Param),
+    ))?)
 }
 
 fn record(row: &Row) -> Result<JsValue, Error> {
@@ -125,7 +135,12 @@ fn row_by_id(conn: &Connection, id: &JsValue) -> Result<Option<Row>, Error> {
 
 /// `update(id, patch)`: `null` when no row changed, the row read back by
 /// `id` otherwise.
-fn update_in(tx: &Transaction<'_>, id: &JsValue, patch: &JsValue, now_ms: f64) -> Result<JsValue, Error> {
+fn update_in(
+    tx: &Transaction<'_>,
+    id: &JsValue,
+    patch: &JsValue,
+    now_ms: f64,
+) -> Result<JsValue, Error> {
     let statement = codec::update(id, patch, now_ms)?;
     if run(tx, &statement)? == 0 {
         return Ok(JsValue::Null);
@@ -143,8 +158,13 @@ impl Payments {
         Payments { conn }
     }
 
-    fn write<T>(&mut self, f: impl FnOnce(&Transaction<'_>) -> Result<T, Error>) -> Result<T, Error> {
-        let tx = self.conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    fn write<T>(
+        &mut self,
+        f: impl FnOnce(&Transaction<'_>) -> Result<T, Error>,
+    ) -> Result<T, Error> {
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
         let out = f(&tx)?;
         tx.commit()?;
         Ok(out)
@@ -155,7 +175,10 @@ impl Payments {
         let statement = codec::append(entry, now_ms)?;
         self.write(|tx| {
             run(tx, &statement)?;
-            #[expect(clippy::cast_precision_loss, reason = "better-sqlite3's lastInsertRowid, a JS number")]
+            #[expect(
+                clippy::cast_precision_loss,
+                reason = "better-sqlite3's lastInsertRowid, a JS number"
+            )]
             let rowid = JsValue::Number(tx.last_insert_rowid() as f64);
             by_id(tx, &rowid)
         })
@@ -168,13 +191,23 @@ impl Payments {
     }
 
     /// `markConfirmed(id, receipt)`.
-    pub fn mark_confirmed(&mut self, id: &JsValue, receipt: &JsValue, now_ms: f64) -> Result<JsValue, Error> {
+    pub fn mark_confirmed(
+        &mut self,
+        id: &JsValue,
+        receipt: &JsValue,
+        now_ms: f64,
+    ) -> Result<JsValue, Error> {
         let patch = codec::confirmed_patch(receipt)?;
         self.update(id, &patch, now_ms)
     }
 
     /// `markFailed(id, info)`.
-    pub fn mark_failed(&mut self, id: &JsValue, info: &JsValue, now_ms: f64) -> Result<JsValue, Error> {
+    pub fn mark_failed(
+        &mut self,
+        id: &JsValue,
+        info: &JsValue,
+        now_ms: f64,
+    ) -> Result<JsValue, Error> {
         let patch = codec::failed_patch(info)?;
         self.update(id, &patch, now_ms)
     }
@@ -185,7 +218,10 @@ impl Payments {
         codec::by_id(id)?;
         self.write(|tx| {
             let existing = row_by_id(tx, id)?;
-            if existing.as_ref().is_some_and(|row| codec::record(row).is_none()) {
+            if existing
+                .as_ref()
+                .is_some_and(|row| codec::record(row).is_none())
+            {
                 return Err(Error::Blob);
             }
             match codec::dropped_patch(existing.as_ref()) {
@@ -198,7 +234,12 @@ impl Payments {
     /// The repoll's write (`setDroppedSeenAt`): only a row still pending,
     /// read and written in one transaction. The record written, or `null`
     /// when nothing was.
-    pub fn set_dropped_seen(&mut self, id: &JsValue, seen_at: &JsValue, now_ms: f64) -> Result<JsValue, Error> {
+    pub fn set_dropped_seen(
+        &mut self,
+        id: &JsValue,
+        seen_at: &JsValue,
+        now_ms: f64,
+    ) -> Result<JsValue, Error> {
         codec::by_id(id)?;
         self.write(|tx| {
             let current = row_by_id(tx, id)?;
@@ -216,7 +257,10 @@ impl Payments {
 
     /// `getRecent(filters)`.
     pub fn get_recent(&mut self, filters: &JsValue) -> Result<Vec<JsValue>, Error> {
-        rows(&self.conn, &codec::get_recent(filters)?)?.iter().map(record).collect()
+        rows(&self.conn, &codec::get_recent(filters)?)?
+            .iter()
+            .map(record)
+            .collect()
     }
 
     /// `getById(id)`.
@@ -227,7 +271,10 @@ impl Payments {
     /// `getCount(filters)`.
     pub fn get_count(&mut self, filters: &JsValue) -> Result<JsValue, Error> {
         let found = rows(&self.conn, &codec::get_count(filters)?)?;
-        let count = found.first().and_then(|row| row.first()).and_then(Cell::to_js);
+        let count = found
+            .first()
+            .and_then(|row| row.first())
+            .and_then(Cell::to_js);
         Ok(count.unwrap_or(JsValue::Number(0.0)))
     }
 
@@ -248,7 +295,10 @@ impl Payments {
             let mut imported = 0;
             for entry in &entries {
                 let legacy = codec::legacy_row(entry, now_ms)?;
-                if rows(tx, &codec::legacy_rows())?.iter().any(|row| legacy.imported_as(row)) {
+                if rows(tx, &codec::legacy_rows())?
+                    .iter()
+                    .any(|row| legacy.imported_as(row))
+                {
                     continue;
                 }
                 run(tx, &legacy.insert())?;

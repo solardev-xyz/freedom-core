@@ -123,76 +123,6 @@ pub(crate) fn iso_string(ms: i64) -> Option<String> {
     ))
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn iso() {
-        assert_eq!(iso_string(0).unwrap(), "1970-01-01T00:00:00.000Z");
-        assert_eq!(
-            iso_string(1_762_000_000_123).unwrap(),
-            "2025-11-01T12:26:40.123Z"
-        );
-        assert_eq!(
-            iso_string(951_782_400_000).unwrap(),
-            "2000-02-29T00:00:00.000Z"
-        );
-        assert_eq!(iso_string(-1).unwrap(), "1969-12-31T23:59:59.999Z");
-        assert_eq!(
-            iso_string(253_402_300_800_000).unwrap(),
-            "+010000-01-01T00:00:00.000Z"
-        );
-        assert_eq!(
-            iso_string(-62_198_755_200_000).unwrap(),
-            "-000001-01-01T00:00:00.000Z"
-        );
-        assert_eq!(
-            iso_string(MAX_TIME_MS).unwrap(),
-            "+275760-09-13T00:00:00.000Z"
-        );
-        assert_eq!(
-            iso_string(-MAX_TIME_MS).unwrap(),
-            "-271821-04-20T00:00:00.000Z"
-        );
-        assert_eq!(iso_string(MAX_TIME_MS + 1), None);
-    }
-
-    #[test]
-    fn trims_as_javascript() {
-        let t = |s: &str| trim(&JsString::from(s)).as_str().to_owned();
-        assert_eq!(t(" \t\u{a0}\u{feff}a b\u{2028}\u{3000}"), "a b");
-        assert_eq!(t("\u{85}a\u{85}"), "\u{85}a\u{85}");
-        assert_eq!(t("   "), "");
-        assert_eq!(t(""), "");
-    }
-
-    #[test]
-    fn lowercases_as_javascript() {
-        let l = |s: &str| String::from_utf16(&lowercase(&JsString::from(s))).unwrap();
-        assert_eq!(l("0xABcd"), "0xabcd");
-        assert_eq!(l("ΑΣ"), "ας");
-        assert_eq!(l("\u{130}"), "i\u{307}");
-        let lone = JsString::from_units(&[0x41, 0xd800, 0x42]);
-        assert_eq!(lowercase(&lone), vec![0x61, 0xd800, 0x62]);
-    }
-
-    #[test]
-    fn same_value_zero_as_javascript() {
-        let n = JsValue::Number;
-        assert!(same_value_zero(&n(f64::NAN), &n(f64::NAN)));
-        assert!(same_value_zero(&n(0.0), &n(-0.0)));
-        assert!(!same_value_zero(&n(1.0), &JsValue::string("1")));
-        assert!(!same_value_zero(
-            &JsValue::Array(vec![]),
-            &JsValue::Array(vec![])
-        ));
-        assert!(same_value_zero(&JsValue::Null, &JsValue::Null));
-        assert!(!same_value_zero(&JsValue::Null, &JsValue::Undefined));
-    }
-}
-
-
 /// `ToNumber(value)`, through `ToPrimitive(value, number)` for an array or
 /// an object (its `toString`: no JSON value has a callable `valueOf`).
 pub(crate) fn to_number(value: &JsValue) -> Result<f64, ToPrimitiveError> {
@@ -325,4 +255,73 @@ fn radix_integer(digits: &str, bits: u32) -> f64 {
     // `kept` < 2^53 is exact, and so is a power of two up to 2^1023.
     let scale = f64::from_bits(((exponent + 1023) as u64) << 52);
     kept as f64 * scale
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn iso() {
+        assert_eq!(iso_string(0).unwrap(), "1970-01-01T00:00:00.000Z");
+        assert_eq!(
+            iso_string(1_762_000_000_123).unwrap(),
+            "2025-11-01T12:26:40.123Z"
+        );
+        assert_eq!(
+            iso_string(951_782_400_000).unwrap(),
+            "2000-02-29T00:00:00.000Z"
+        );
+        assert_eq!(iso_string(-1).unwrap(), "1969-12-31T23:59:59.999Z");
+        assert_eq!(
+            iso_string(253_402_300_800_000).unwrap(),
+            "+010000-01-01T00:00:00.000Z"
+        );
+        assert_eq!(
+            iso_string(-62_198_755_200_000).unwrap(),
+            "-000001-01-01T00:00:00.000Z"
+        );
+        assert_eq!(
+            iso_string(MAX_TIME_MS).unwrap(),
+            "+275760-09-13T00:00:00.000Z"
+        );
+        assert_eq!(
+            iso_string(-MAX_TIME_MS).unwrap(),
+            "-271821-04-20T00:00:00.000Z"
+        );
+        assert_eq!(iso_string(MAX_TIME_MS + 1), None);
+    }
+
+    #[test]
+    fn trims_as_javascript() {
+        let t = |s: &str| trim(&JsString::from(s)).as_str().to_owned();
+        assert_eq!(t(" \t\u{a0}\u{feff}a b\u{2028}\u{3000}"), "a b");
+        assert_eq!(t("\u{85}a\u{85}"), "\u{85}a\u{85}");
+        assert_eq!(t("   "), "");
+        assert_eq!(t(""), "");
+    }
+
+    #[test]
+    fn lowercases_as_javascript() {
+        let l = |s: &str| String::from_utf16(&lowercase(&JsString::from(s))).unwrap();
+        assert_eq!(l("0xABcd"), "0xabcd");
+        assert_eq!(l("ΑΣ"), "ας");
+        assert_eq!(l("\u{130}"), "i\u{307}");
+        let lone = JsString::from_units(&[0x41, 0xd800, 0x42]);
+        assert_eq!(lowercase(&lone), vec![0x61, 0xd800, 0x62]);
+    }
+
+    #[test]
+    fn same_value_zero_as_javascript() {
+        let n = JsValue::Number;
+        assert!(same_value_zero(&n(f64::NAN), &n(f64::NAN)));
+        assert!(same_value_zero(&n(0.0), &n(-0.0)));
+        assert!(!same_value_zero(&n(1.0), &JsValue::string("1")));
+        assert!(!same_value_zero(
+            &JsValue::Array(vec![]),
+            &JsValue::Array(vec![])
+        ));
+        assert!(same_value_zero(&JsValue::Null, &JsValue::Null));
+        assert!(!same_value_zero(&JsValue::Null, &JsValue::Undefined));
+    }
 }

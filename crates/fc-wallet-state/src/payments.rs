@@ -99,7 +99,13 @@ const METADATA: usize = 15;
 const STATUS: usize = 10;
 
 /// `KINDS`.
-pub const KINDS: [&str; 5] = ["x402", "wallet-send", "dapp-send", "safe-send", "safe-deploy"];
+pub const KINDS: [&str; 5] = [
+    "x402",
+    "wallet-send",
+    "dapp-send",
+    "safe-send",
+    "safe-deploy",
+];
 
 /// `FINAL_STATUSES`.
 pub const FINAL_STATUSES: [&str; 9] = [
@@ -147,7 +153,8 @@ pub const PENDING_SQL: &str = "
       SELECT * FROM payments WHERE status = 'pending' ORDER BY created_at ASC
     ";
 pub const CLEAR_SQL: &str = "DELETE FROM payments";
-const LEGACY_ROWS_SQL: &str = "SELECT * FROM payments WHERE kind = ? ORDER BY created_at DESC LIMIT ? OFFSET ?";
+const LEGACY_ROWS_SQL: &str =
+    "SELECT * FROM payments WHERE kind = ? ORDER BY created_at DESC LIMIT ? OFFSET ?";
 
 /// `getRecent`'s and `getCount`'s bounds.
 const MAX_LIMIT: i32 = 500;
@@ -181,7 +188,10 @@ impl Cell {
     pub fn to_js(&self) -> Option<JsValue> {
         Some(match self {
             Cell::Null => JsValue::Null,
-            #[expect(clippy::cast_precision_loss, reason = "better-sqlite3 reads an INTEGER as the nearest double")]
+            #[expect(
+                clippy::cast_precision_loss,
+                reason = "better-sqlite3 reads an INTEGER as the nearest double"
+            )]
             Cell::Integer(n) => JsValue::Number(*n as f64),
             Cell::Real(n) => JsValue::Number(*n),
             Cell::Text(text) => JsValue::string(text.as_str()),
@@ -224,15 +234,24 @@ pub struct Thrown {
 
 impl Thrown {
     fn error(message: impl Into<String>) -> Self {
-        Thrown { name: ErrorName::Error, message: message.into() }
+        Thrown {
+            name: ErrorName::Error,
+            message: message.into(),
+        }
     }
 
     fn type_error(message: impl Into<String>) -> Self {
-        Thrown { name: ErrorName::TypeError, message: message.into() }
+        Thrown {
+            name: ErrorName::TypeError,
+            message: message.into(),
+        }
     }
 
     fn range_error(message: &str) -> Self {
-        Thrown { name: ErrorName::RangeError, message: message.into() }
+        Thrown {
+            name: ErrorName::RangeError,
+            message: message.into(),
+        }
     }
 }
 
@@ -265,7 +284,11 @@ fn prop<'v>(value: &'v JsValue, key: &str) -> Result<&'v JsValue, Thrown> {
     match value {
         JsValue::Null | JsValue::Undefined => Err(Thrown::type_error(format!(
             "Cannot read properties of {} (reading '{key}')",
-            if matches!(value, JsValue::Null) { "null" } else { "undefined" }
+            if matches!(value, JsValue::Null) {
+                "null"
+            } else {
+                "undefined"
+            }
         ))),
         JsValue::Object(_) => Ok(value.get(key).unwrap_or(&UNDEFINED)),
         _ => Ok(&UNDEFINED),
@@ -274,7 +297,11 @@ fn prop<'v>(value: &'v JsValue, key: &str) -> Result<&'v JsValue, Thrown> {
 
 /// `value ?? null`.
 fn or_null(value: &JsValue) -> &JsValue {
-    if matches!(value, JsValue::Undefined) { &NULL } else { value }
+    if matches!(value, JsValue::Undefined) {
+        &NULL
+    } else {
+        value
+    }
 }
 
 fn finite(value: &JsValue) -> Option<f64> {
@@ -286,12 +313,18 @@ fn finite(value: &JsValue) -> Option<f64> {
 
 /// `isFinalStatus(status)`: a string in [`FINAL_STATUSES`].
 fn is_final(status: &JsValue) -> bool {
-    status.as_js_string().is_some_and(|s| FINAL_STATUSES.iter().any(|f| s == *f))
+    status
+        .as_js_string()
+        .is_some_and(|s| FINAL_STATUSES.iter().any(|f| s == *f))
 }
 
 /// `value ? JSON.stringify(value) : null`.
 fn stringified(value: &JsValue) -> JsValue {
-    if value.truthy() { JsValue::string(value.stringify()) } else { JsValue::Null }
+    if value.truthy() {
+        JsValue::string(value.stringify())
+    } else {
+        JsValue::Null
+    }
 }
 
 /// Binds the arguments of a `run`, `get` or `all` call on a statement with
@@ -312,7 +345,9 @@ pub fn bind(args: &[&JsValue], count: usize) -> Result<Vec<Bind>, Thrown> {
             }
             JsValue::Object(_) => {
                 if bound_object {
-                    return Err(Thrown::type_error("You cannot specify named parameters in two different objects"));
+                    return Err(Thrown::type_error(
+                        "You cannot specify named parameters in two different objects",
+                    ));
                 }
                 bound_object = true;
             }
@@ -320,7 +355,9 @@ pub fn bind(args: &[&JsValue], count: usize) -> Result<Vec<Bind>, Thrown> {
         }
     }
     if out.len() < count {
-        return Err(Thrown::range_error("Too few parameter values were provided"));
+        return Err(Thrown::range_error(
+            "Too few parameter values were provided",
+        ));
     }
     Ok(out)
 }
@@ -331,18 +368,25 @@ fn bind_one(value: &JsValue, count: usize, out: &mut Vec<Bind>) -> Result<(), Th
         JsValue::Number(n) => Bind::Real(*n),
         JsValue::String(s) => Bind::Text(s.as_str().to_owned()),
         JsValue::Bool(_) | JsValue::Array(_) | JsValue::Object(_) => {
-            return Err(Thrown::type_error("SQLite3 can only bind numbers, strings, bigints, buffers, and null"));
+            return Err(Thrown::type_error(
+                "SQLite3 can only bind numbers, strings, bigints, buffers, and null",
+            ));
         }
     };
     if out.len() >= count {
-        return Err(Thrown::range_error("Too many parameter values were provided"));
+        return Err(Thrown::range_error(
+            "Too many parameter values were provided",
+        ));
     }
     out.push(bound);
     Ok(())
 }
 
 fn statement(sql: &str, args: &[&JsValue], count: usize) -> Result<Statement, Thrown> {
-    Ok(Statement { sql: sql.to_owned(), params: bind(args, count)? })
+    Ok(Statement {
+        sql: sql.to_owned(),
+        params: bind(args, count)?,
+    })
 }
 
 /// `append(entry)` up to its insert: the kind, `chainId` and `amount`
@@ -352,21 +396,35 @@ fn statement(sql: &str, args: &[&JsValue], count: usize) -> Result<Statement, Th
 /// rowid.
 pub fn append(entry: &JsValue, now_ms: f64) -> Result<Statement, Thrown> {
     let empty = JsValue::Object(Vec::new());
-    let entry = if matches!(entry, JsValue::Undefined) { &empty } else { entry };
+    let entry = if matches!(entry, JsValue::Undefined) {
+        &empty
+    } else {
+        entry
+    };
     let kind = prop(entry, "kind")?;
-    if !kind.as_js_string().is_some_and(|k| KINDS.iter().any(|known| k == *known)) {
-        return Err(Thrown::error(format!("payment-history: unknown kind '{}'", kind.js_string()?)));
+    if !kind
+        .as_js_string()
+        .is_some_and(|k| KINDS.iter().any(|known| k == *known))
+    {
+        return Err(Thrown::error(format!(
+            "payment-history: unknown kind '{}'",
+            kind.js_string()?
+        )));
     }
     let chain_id = prop(entry, "chainId")?;
     if finite(chain_id).is_none() {
-        return Err(Thrown::error("payment-history: chainId must be a finite number"));
+        return Err(Thrown::error(
+            "payment-history: chainId must be a finite number",
+        ));
     }
     let amount = prop(entry, "amount")?;
     let digits = amount
         .as_js_string()
         .is_some_and(|a| !a.is_empty() && a.units().all(|u| (0x30..=0x39).contains(&u)));
     if !digits {
-        return Err(Thrown::error("payment-history: amount must be a digit string"));
+        return Err(Thrown::error(
+            "payment-history: amount must be a digit string",
+        ));
     }
     let created_at = JsValue::Number(finite(prop(entry, "createdAt")?).unwrap_or(now_ms));
     let status = prop(entry, "status")?;
@@ -377,9 +435,20 @@ pub fn append(entry: &JsValue, now_ms: f64) -> Result<Statement, Thrown> {
     } else {
         JsValue::string(PENDING)
     };
-    let confirmed_at = if is_final(&status) { created_at.clone() } else { JsValue::Null };
+    let confirmed_at = if is_final(&status) {
+        created_at.clone()
+    } else {
+        JsValue::Null
+    };
     let metadata = stringified(prop(entry, "metadata")?);
-    insert(entry, &[kind, chain_id], &status, &created_at, &confirmed_at, &metadata)
+    insert(
+        entry,
+        &[kind, chain_id],
+        &status,
+        &created_at,
+        &confirmed_at,
+        &metadata,
+    )
 }
 
 /// `insertRow(row)`: `row` holds the entry's other fields.
@@ -417,7 +486,11 @@ fn insert(
 /// changed no row, and otherwise the row read back by `id` ([`by_id`]).
 pub fn update(id: &JsValue, patch: &JsValue, now_ms: f64) -> Result<Statement, Thrown> {
     let empty = JsValue::Object(Vec::new());
-    let patch = if matches!(patch, JsValue::Undefined) { &empty } else { patch };
+    let patch = if matches!(patch, JsValue::Undefined) {
+        &empty
+    } else {
+        patch
+    };
     let status = prop(patch, "status")?;
     let to_final = status.truthy() && is_final(status);
     let given = prop(patch, "confirmedAt")?;
@@ -430,19 +503,36 @@ pub fn update(id: &JsValue, patch: &JsValue, now_ms: f64) -> Result<Statement, T
     let gas_used = or_null(prop(patch, "gasUsed")?);
     let gas_price = or_null(prop(patch, "gasPrice")?);
     let metadata = stringified(prop(patch, "metadata")?);
-    let args = [tx_hash, or_null(status), &confirmed_at, gas_used, gas_price, &metadata, or_null(id)];
+    let args = [
+        tx_hash,
+        or_null(status),
+        &confirmed_at,
+        gas_used,
+        gas_price,
+        &metadata,
+        or_null(id),
+    ];
     statement(UPDATE_SQL, &args, 7)
 }
 
 fn object(props: Vec<(&str, JsValue)>) -> JsValue {
-    JsValue::Object(props.into_iter().map(|(k, v)| (JsString::from(k), v)).collect())
+    JsValue::Object(
+        props
+            .into_iter()
+            .map(|(k, v)| (JsString::from(k), v))
+            .collect(),
+    )
 }
 
 /// `markConfirmed(id, receipt)`'s patch, for [`update`]. `receipt` is
 /// `undefined` when absent.
 pub fn confirmed_patch(receipt: &JsValue) -> Result<JsValue, Thrown> {
     let empty = JsValue::Object(Vec::new());
-    let receipt = if matches!(receipt, JsValue::Undefined) { &empty } else { receipt };
+    let receipt = if matches!(receipt, JsValue::Undefined) {
+        &empty
+    } else {
+        receipt
+    };
     let gas_used = prop(receipt, "gasUsed")?.clone();
     let gas_price = match prop(receipt, "gasPrice")? {
         JsValue::Undefined | JsValue::Null => prop(receipt, "effectiveGasPrice")?.clone(),
@@ -470,7 +560,11 @@ pub fn failed_patch(info: &JsValue) -> Result<JsValue, Thrown> {
     let reason = destructure("reason")?;
     let gas_used = destructure("gasUsed")?;
     let gas_price = destructure("gasPrice")?;
-    let metadata = if reason.truthy() { object(vec![("failureReason", reason)]) } else { JsValue::Undefined };
+    let metadata = if reason.truthy() {
+        object(vec![("failureReason", reason)])
+    } else {
+        JsValue::Undefined
+    };
     Ok(object(vec![
         ("status", JsValue::string("failed")),
         ("gasUsed", gas_used),
@@ -497,7 +591,10 @@ fn spread(value: &JsValue) -> JsValue {
         }
         JsValue::String(text) => {
             for (index, unit) in text.units().enumerate() {
-                out.set(index.to_string(), JsValue::String(JsString::from_units(&[unit])));
+                out.set(
+                    index.to_string(),
+                    JsValue::String(JsString::from_units(&[unit])),
+                );
             }
         }
         _ => {}
@@ -511,13 +608,19 @@ fn spread(value: &JsValue) -> JsValue {
 /// reason merged in.
 pub fn dropped_patch(existing: Option<&Row>) -> Option<JsValue> {
     let row = existing?;
-    if !row.get(STATUS).is_some_and(|status| status.is_text(PENDING)) {
+    if !row
+        .get(STATUS)
+        .is_some_and(|status| status.is_text(PENDING))
+    {
         return None;
     }
     let metadata = row_metadata(row);
     let mut merged = spread(if metadata.truthy() { &metadata } else { &NULL });
     merged.set("failureReason", JsValue::string(DROPPED_REASON));
-    Some(object(vec![("status", JsValue::string("dropped")), ("metadata", merged)]))
+    Some(object(vec![
+        ("status", JsValue::string("dropped")),
+        ("metadata", merged),
+    ]))
 }
 
 /// `setDroppedSeenAt(row, seenAt)`'s patch, the repoll's write, for
@@ -528,7 +631,10 @@ pub fn dropped_patch(existing: Option<&Row>) -> Option<JsValue> {
 /// key out of the text).
 pub fn dropped_seen_patch(current: Option<&Row>, seen_at: &JsValue) -> Option<JsValue> {
     let row = current?;
-    if !row.get(STATUS).is_some_and(|status| status.is_text(PENDING)) {
+    if !row
+        .get(STATUS)
+        .is_some_and(|status| status.is_text(PENDING))
+    {
         return None;
     }
     let metadata = row_metadata(row);
@@ -546,7 +652,9 @@ pub fn dropped_seen_patch(current: Option<&Row>, seen_at: &JsValue) -> Option<Js
 /// `rowMetadata(row)`, and `rowToEntry`'s metadata: `JSON.parse` of a
 /// truthy cell, `null` where it throws.
 fn row_metadata(row: &Row) -> JsValue {
-    let Some(cell) = row.get(METADATA) else { return JsValue::Null };
+    let Some(cell) = row.get(METADATA) else {
+        return JsValue::Null;
+    };
     let text = match cell {
         Cell::Text(text) if !text.is_empty() => text.clone(),
         Cell::Integer(_) | Cell::Real(_) => match cell.to_js() {
@@ -568,7 +676,11 @@ pub fn by_id(id: &JsValue) -> Result<Statement, Thrown> {
 pub fn record(row: &Row) -> Option<JsValue> {
     let mut props = Vec::with_capacity(KEYS.len());
     for (index, key) in KEYS.iter().enumerate() {
-        let value = if index == METADATA { row_metadata(row) } else { row.get(index)?.to_js()? };
+        let value = if index == METADATA {
+            row_metadata(row)
+        } else {
+            row.get(index)?.to_js()?
+        };
         props.push((JsString::from(*key), value));
     }
     Some(JsValue::Object(props))
@@ -577,12 +689,18 @@ pub fn record(row: &Row) -> Option<JsValue> {
 /// The repoll's read: every pending row, oldest first. The caller reads
 /// them as `SELECT *` answers.
 pub fn pending() -> Statement {
-    Statement { sql: PENDING_SQL.to_owned(), params: Vec::new() }
+    Statement {
+        sql: PENDING_SQL.to_owned(),
+        params: Vec::new(),
+    }
 }
 
 /// `clear()`'s statement; the answer is the rows it deleted.
 pub fn clear() -> Statement {
-    Statement { sql: CLEAR_SQL.to_owned(), params: Vec::new() }
+    Statement {
+        sql: CLEAR_SQL.to_owned(),
+        params: Vec::new(),
+    }
 }
 
 /// `sanitizeFilters(raw)` and `buildWhere`: the filter keys' values as
@@ -602,7 +720,10 @@ fn int32(value: &JsValue) -> Result<i32, Thrown> {
     if !n.is_finite() {
         return Ok(0);
     }
-    #[expect(clippy::cast_possible_truncation, reason = "ToInt32: the value modulo 2^32, below 2^32 here")]
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "ToInt32: the value modulo 2^32, below 2^32 here"
+    )]
     let low = n.trunc().rem_euclid(4_294_967_296.0) as u32;
     Ok(low.cast_signed())
 }
@@ -620,7 +741,14 @@ fn filters(raw: &JsValue) -> Result<Filters<'_>, Thrown> {
         JsValue::Undefined => None,
         given => Some(f64::from(int32(given)?.max(0))),
     };
-    Ok(Filters { kind, chain_id, origin, status, limit, offset })
+    Ok(Filters {
+        kind,
+        chain_id,
+        origin,
+        status,
+        limit,
+        offset,
+    })
 }
 
 fn where_clause<'v>(filters: &Filters<'v>) -> (String, Vec<&'v JsValue>) {
@@ -642,7 +770,11 @@ fn where_clause<'v>(filters: &Filters<'v>) -> (String, Vec<&'v JsValue>) {
         terms.push("status = ?");
         params.push(filters.status);
     }
-    let clause = if terms.is_empty() { String::new() } else { format!("WHERE {}", terms.join(" AND ")) };
+    let clause = if terms.is_empty() {
+        String::new()
+    } else {
+        format!("WHERE {}", terms.join(" AND "))
+    };
     (clause, params)
 }
 
@@ -650,7 +782,11 @@ fn where_clause<'v>(filters: &Filters<'v>) -> (String, Vec<&'v JsValue>) {
 /// (the default `{}`).
 pub fn get_recent(filters_given: &JsValue) -> Result<Statement, Thrown> {
     let empty = JsValue::Object(Vec::new());
-    let raw = if matches!(filters_given, JsValue::Undefined) { &empty } else { filters_given };
+    let raw = if matches!(filters_given, JsValue::Undefined) {
+        &empty
+    } else {
+        filters_given
+    };
     let safe = filters(raw)?;
     let (clause, mut params) = where_clause(&safe);
     let sql = format!("SELECT * FROM payments {clause} ORDER BY created_at DESC LIMIT ? OFFSET ?");
@@ -667,7 +803,11 @@ pub fn get_recent(filters_given: &JsValue) -> Result<Statement, Thrown> {
 /// answer.
 pub fn get_count(filters_given: &JsValue) -> Result<Statement, Thrown> {
     let empty = JsValue::Object(Vec::new());
-    let raw = if matches!(filters_given, JsValue::Undefined) { &empty } else { filters_given };
+    let raw = if matches!(filters_given, JsValue::Undefined) {
+        &empty
+    } else {
+        filters_given
+    };
     let safe = filters(raw)?;
     let (clause, params) = where_clause(&safe);
     let sql = format!("SELECT COUNT(*) AS n FROM payments {clause}");
@@ -683,7 +823,10 @@ pub fn legacy_entries(text: &str) -> Result<Vec<JsValue>, Thrown> {
             JsValue::Array(items) => std::mem::take(items),
             _ => Vec::new(),
         }),
-        Err(error) => Err(Thrown { name: ErrorName::SyntaxError, message: error.to_string() }),
+        Err(error) => Err(Thrown {
+            name: ErrorName::SyntaxError,
+            message: error.to_string(),
+        }),
     }
 }
 
@@ -692,7 +835,11 @@ pub fn legacy_entries(text: &str) -> Result<Vec<JsValue>, Thrown> {
 pub fn legacy_rows() -> Statement {
     Statement {
         sql: LEGACY_ROWS_SQL.to_owned(),
-        params: vec![Bind::Text(X402.to_owned()), Bind::Real(100_000.0), Bind::Real(0.0)],
+        params: vec![
+            Bind::Text(X402.to_owned()),
+            Bind::Real(100_000.0),
+            Bind::Real(0.0),
+        ],
     }
 }
 
@@ -735,7 +882,10 @@ fn join_units(value: &JsValue, out: &mut Vec<u16>) -> Result<(), Thrown> {
 pub fn legacy_row(entry: &JsValue, now_ms: f64) -> Result<LegacyRow, Thrown> {
     let settled_at = finite(prop(entry, "settledAt")?);
     let settled_ms = settled_at.map_or(now_ms, |s| s * 1000.0);
-    let status = prop(entry, "status")?.as_js_string().cloned().unwrap_or_else(|| JsString::from("no-receipt"));
+    let status = prop(entry, "status")?
+        .as_js_string()
+        .cloned()
+        .unwrap_or_else(|| JsString::from("no-receipt"));
     let id = prop(entry, "id")?;
     let legacy_id = match id.as_js_string() {
         Some(id) if !id.is_empty() => id.clone(),
@@ -777,7 +927,7 @@ pub fn legacy_row(entry: &JsValue, now_ms: f64) -> Result<LegacyRow, Thrown> {
 /// `cell === value` for a string `value`, by UTF-16 code unit, so a lone
 /// surrogate the entry held never equals the U+FFFD SQLite stored.
 fn text_is(cell: Option<&Cell>, value: &JsString) -> bool {
-    matches!(cell, Some(Cell::Text(text)) if JsString::from(text.as_str()) == *value)
+    matches!(cell, Some(Cell::Text(text)) if *value == *text.as_str())
 }
 
 /// `(cell ?? null) === value`.
@@ -795,7 +945,10 @@ fn number_is(cell: Option<&Cell>, value: f64) -> bool {
 impl LegacyRow {
     /// `row.metadata === metadata || legacyRowMatches(row, legacy)`.
     pub fn imported_as(&self, row: &Row) -> bool {
-        if row.get(METADATA).is_some_and(|cell| cell.is_text(&self.metadata)) {
+        if row
+            .get(METADATA)
+            .is_some_and(|cell| cell.is_text(&self.metadata))
+        {
             return true;
         }
         number_is(row.get(2), self.chain_id)
@@ -834,4 +987,3 @@ impl LegacyRow {
         }
     }
 }
-
