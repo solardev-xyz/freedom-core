@@ -27,10 +27,10 @@ use std::path::Path;
 use fc_json::JsValue;
 use fc_profile::forget::{Backend, FORGET_ASIDE, ForgetFile, Item, Record};
 use fc_profile::{Deletion, Store as _, Style};
+use fc_store::anchor::{Dir, Kind, Resolve};
 
 use super::store::DiskStore;
 use super::{Flags, confined_catalog_lock, failed, object, prepare_app_root, print, storage};
-use crate::anchor::{Dir, Kind, Resolve};
 use crate::exit::Exit;
 use crate::log;
 

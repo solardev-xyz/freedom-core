@@ -44,15 +44,16 @@ use fc_approval::standing::AccountKind;
 use fc_evm::{Transaction, to_hex};
 use fc_protocol::error::{ErrorBody, ErrorCode};
 use fc_protocol::message::Context;
+use fc_store::file::{self, Read as FileRead};
+use fc_store::fsx::{self, Done};
 use serde::Deserialize;
 use serde_json::value::RawValue;
 use serde_json::{Map, Value, json};
 use zeroize::Zeroizing;
 
 use crate::approvals::{After, Approvals, Clocks, Narrowed, Remember, Signed};
-use crate::fsx::{self, Done};
-use crate::grants::{self, Read as FileRead};
 use crate::rng::OsRng;
+use crate::testhooks::GrantWrite;
 use crate::vault::{Out, error_payload, event_payload};
 
 /// The methods this module serves.
@@ -328,7 +329,7 @@ impl Phone {
                 json!({ "kind": e.kind().to_string() }),
             );
         }
-        let records = match grants::read_file(&path, phone::MAX_FILE_BYTES) {
+        let records = match file::read_file(&path, phone::MAX_FILE_BYTES) {
             FileRead::Missing => Ok(Vec::new()),
             FileRead::Bytes(bytes) => phone::read_file(&bytes).map_err(|_| ()),
             FileRead::Unreadable => Err(()),
@@ -336,9 +337,7 @@ impl Phone {
         let records = match records {
             Ok(records) => records,
             Err(()) => {
-                let aside = root.join(format!("{FILE_NAME}.unreadable"));
-                let renamed = std::fs::rename(&path, &aside)
-                    .map(|()| fsx::flushed(fsx::sync_rename(&root, &aside)) == Done::Durable);
+                let renamed = file::set_aside(&root, FILE_NAME);
                 crate::log::warn(
                     "the phone payments' file can't be read: renamed aside, its payments unknown",
                     json!({ "renamed": renamed.is_ok() }),
@@ -368,7 +367,7 @@ impl Phone {
             return Saved::NotDurable;
         };
         let text = phone::file_text(self.jobs.records());
-        match grants::write_file(&path, STORE, &text) {
+        match file::write_file(&path, &text, &GrantWrite(STORE)) {
             Ok(Done::Durable) => Saved::Durable,
             Ok(Done::NotDurable) => {
                 crate::log::warn("the phone payments' file isn't flushed", json!({}));

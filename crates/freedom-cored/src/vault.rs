@@ -54,6 +54,7 @@ use fc_keys::{Mnemonic, WordCount, multiformats};
 use fc_protocol::error::{ErrorBody, ErrorCode};
 use fc_protocol::message::{self, Context};
 use fc_protocol::secret::{SecretBytes, SecretResponse};
+use fc_store::fsx::{self, Done};
 use fc_vault::format::{self, SealParams};
 use fc_vault::state::{LockReason, Locked, Prepared, Ticket, VaultState};
 use fc_vault::throttle::{Attempt, Outcome, Throttle};
@@ -63,7 +64,6 @@ use zeroize::{Zeroize, Zeroizing};
 
 use crate::approvals::{Approvals, Clocks};
 use crate::clock::Clock;
-use crate::fsx::{self, Done};
 use crate::journal;
 use crate::nodes::{self, Custody, NodeSpec};
 use crate::rng::OsRng;
@@ -3046,6 +3046,7 @@ fn install_vault(
             // As if the rename failed, after the claim.
             claimed.get() && !crate::testhooks::secrets_fails("vault-rename")
         },
+        &crate::testhooks::Swap,
     );
     match written {
         Ok(done) => {

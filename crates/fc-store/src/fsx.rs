@@ -21,7 +21,13 @@
 //! rename is an error and leaves the target untouched. Once the rename (or
 //! unlink) has happened the change is committed, so a failed directory flush
 //! after it is reported as [`Done::NotDurable`] rather than as an error:
-//! callers must never report a committed change as failed.
+//! callers must never report a committed change as failed. The failure
+//! itself goes to the function the process installs
+//! ([`report_flush_failures`]): the core's log.
+//!
+//! **Test hooks** come in with each write ([`Hooks`]): a step made to fail as
+//! if the OS had failed it, and a call once the temp file is checked. This
+//! crate reads no environment.
 //!
 //! **Guarantee:** the target survives a process crash on every OS, and power
 //! loss on local Unix filesystems. On Windows, durability under power loss
@@ -41,6 +47,9 @@
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
+
+use crate::{Hooks, Step};
 
 /// Why a write failed. In every case the target is untouched: `Check` means
 /// the staged file didn't verify, `Abandoned` that the commit gate refused.
@@ -69,18 +78,19 @@ impl From<std::io::Error> for WriteError {
 
 /// Atomically and durably replaces `target` with `contents`, after `check`
 /// accepts the staged file, read back through the handle that wrote it, and
-/// `commit` allows the rename.
+/// `commit` allows the rename. `hooks`: a test build's ([`Hooks`]).
 pub fn replace(
     target: &Path,
     contents: &[u8],
     check: impl FnOnce(&File) -> Result<(), String>,
     commit: impl FnOnce() -> bool,
+    hooks: &dyn Hooks,
 ) -> Result<Done, WriteError> {
     let name = target
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_default();
-    replace_as(target, &format!(".{name}"), contents, check, commit)
+    replace_as(target, &format!(".{name}"), contents, check, commit, hooks)
 }
 
 /// [`replace`], with temp files named `<stem>.<pid>.<n>.tmp`: the profile
@@ -92,23 +102,39 @@ pub fn replace_as(
     contents: &[u8],
     check: impl FnOnce(&File) -> Result<(), String>,
     commit: impl FnOnce() -> bool,
+    hooks: &dyn Hooks,
 ) -> Result<Done, WriteError> {
     use std::io::Seek;
+    let injected = |step: Step| {
+        WriteError::Io(std::io::Error::other(format!(
+            "test hook: {} fails",
+            step.name()
+        )))
+    };
     let dir = target
         .parent()
         .ok_or_else(|| std::io::Error::other("target has no parent directory"))?;
     let (temp_path, mut temp) = create_temp(dir, stem)?;
     let staged = (|| -> Result<(), WriteError> {
+        if hooks.fails(Step::Write) {
+            return Err(injected(Step::Write));
+        }
         temp.write_all(contents)?;
+        if hooks.fails(Step::Fsync) {
+            return Err(injected(Step::Fsync));
+        }
         temp.sync_all()?;
         temp.rewind()?;
         check(&temp).map_err(WriteError::Check)?;
         if !commit() {
             return Err(WriteError::Abandoned);
         }
+        if hooks.fails(Step::Rename) {
+            return Err(injected(Step::Rename));
+        }
         // The rename moves whatever the name holds: it must still be the file
         // written and checked (review of #114). Nothing has changed if not.
-        crate::testhooks::swap("checked", &temp_path);
+        hooks.checked(&temp_path);
         if !same_file(&temp, &temp_path)? {
             return Err(WriteError::Io(std::io::Error::other(
                 "the temp file was replaced before its rename",
@@ -121,6 +147,11 @@ pub fn replace_as(
     if let Err(error) = staged {
         let _ = std::fs::remove_file(&temp_path);
         return Err(error);
+    }
+    if hooks.fails(Step::Flush) {
+        return Ok(flushed(Err(std::io::Error::other(
+            "test hook: flush fails",
+        ))));
     }
     Ok(flushed(sync_rename(dir, target)))
 }
@@ -167,15 +198,26 @@ pub fn remove(target: &Path, commit: impl FnOnce() -> bool) -> std::io::Result<O
     }))
 }
 
-/// The outcome of the directory flush after a commit; a failure is logged.
-pub(crate) fn flushed(sync: std::io::Result<()>) -> Done {
+/// Where [`flushed`] reports a failure: set once by the process.
+static FLUSH_FAILURES: OnceLock<fn(std::io::ErrorKind)> = OnceLock::new();
+
+/// Installs where a failed directory flush after a commit is reported (the
+/// core's log), once per process, before anything writes: a later call
+/// changes nothing. Until then a failure is reported nowhere, and is still
+/// [`Done::NotDurable`]. Whether this call installed it.
+pub fn report_flush_failures(report: fn(std::io::ErrorKind)) -> bool {
+    FLUSH_FAILURES.set(report).is_ok()
+}
+
+/// The outcome of the directory flush after a commit; a failure is reported
+/// ([`report_flush_failures`]).
+pub fn flushed(sync: std::io::Result<()>) -> Done {
     match sync {
         Ok(()) => Done::Durable,
         Err(e) => {
-            crate::log::error(
-                "directory flush failed after commit",
-                serde_json::json!({ "kind": e.kind().to_string() }),
-            );
+            if let Some(report) = FLUSH_FAILURES.get() {
+                report(e.kind());
+            }
             Done::NotDurable
         }
     }
@@ -404,18 +446,19 @@ pub(crate) fn create_temp(dir: &Path, stem: &str) -> std::io::Result<(PathBuf, F
 /// (design 0001, "Writes and durability"). Windows: std can't open a directory to flush
 /// it, so nothing is done (best effort, as for [`sync_rename`]).
 #[cfg(unix)]
-pub(crate) fn sync_dir(dir: &Path) -> std::io::Result<()> {
+pub fn sync_dir(dir: &Path) -> std::io::Result<()> {
     File::open(dir)?.sync_all()
 }
 
 #[cfg(not(unix))]
-pub(crate) fn sync_dir(_dir: &Path) -> std::io::Result<()> {
+pub fn sync_dir(_dir: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::NoHooks;
 
     fn temp_files(dir: &Path) -> Vec<String> {
         std::fs::read_dir(dir)
@@ -438,6 +481,7 @@ mod tests {
                 Ok(())
             },
             || true,
+            &NoHooks,
         )
         .unwrap();
         assert_eq!(done, Done::Durable);
@@ -463,6 +507,7 @@ mod tests {
             b"broken",
             |_| Err("does not decrypt".into()),
             || true,
+            &NoHooks,
         );
         assert!(matches!(result, Err(WriteError::Check(_))));
         assert_eq!(std::fs::read(&target).unwrap(), b"old");
@@ -474,12 +519,44 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let target = dir.path().join("identity-vault.json");
         std::fs::write(&target, b"old").unwrap();
-        let result = replace(&target, b"new", |_| Ok(()), || false);
+        let result = replace(&target, b"new", |_| Ok(()), || false, &NoHooks);
         assert!(matches!(result, Err(WriteError::Abandoned)));
         assert_eq!(std::fs::read(&target).unwrap(), b"old");
         assert!(temp_files(dir.path()).is_empty());
         assert_eq!(remove(&target, || false).unwrap(), None);
         assert!(target.exists());
+    }
+
+    /// A step's failure hook fires where the OS would fail that step: the
+    /// rename's after the check and the commit gate, so a write the check
+    /// refuses, or the gate abandons, still says so.
+    #[test]
+    fn the_rename_hook_fires_after_the_check_and_the_gate() {
+        struct FailsRename;
+        impl Hooks for FailsRename {
+            fn fails(&self, step: Step) -> bool {
+                step == Step::Rename
+            }
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("identity-vault.json");
+        std::fs::write(&target, b"old").unwrap();
+        let refused = replace(
+            &target,
+            b"new",
+            |_| Err("does not decrypt".into()),
+            || true,
+            &FailsRename,
+        );
+        assert!(matches!(refused, Err(WriteError::Check(_))));
+        let abandoned = replace(&target, b"new", |_| Ok(()), || false, &FailsRename);
+        assert!(matches!(abandoned, Err(WriteError::Abandoned)));
+        let failed = replace(&target, b"new", |_| Ok(()), || true, &FailsRename);
+        assert!(
+            matches!(&failed, Err(WriteError::Io(e)) if e.to_string() == "test hook: rename fails")
+        );
+        assert_eq!(std::fs::read(&target).unwrap(), b"old");
+        assert!(temp_files(dir.path()).is_empty());
     }
 
     #[test]

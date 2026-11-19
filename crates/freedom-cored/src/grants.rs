@@ -28,15 +28,17 @@
 //! so two writes to one store never overlap.
 
 use std::borrow::Cow;
-use std::io::Write;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use fc_approval::stores::{
     Applied, CapStore, DappStore, Effect, MAX_FILE_BYTES, RadicleStore, Refused, StoreKind,
     SwarmStore, Unreadable,
 };
 
-use crate::fsx::{self, Done};
+use fc_store::file::{Read, read_file, set_aside, write_file};
+use fc_store::fsx::{self, Done};
+
+use crate::testhooks::GrantWrite;
 
 /// A store kept in one of the four files.
 pub trait StoreFile: Clone + Default {
@@ -110,54 +112,6 @@ impl StoreFile for CapStore {
     }
     fn slot_mut(grants: &mut Grants) -> &mut Self {
         &mut grants.x402
-    }
-}
-
-/// What reading a file found.
-pub(crate) enum Read {
-    Missing,
-    /// Not a regular file the user owns, past the bound, or an I/O error.
-    Unreadable,
-    Bytes(Vec<u8>),
-}
-
-/// Reads `path` under 0001's rules: a regular file, opened without
-/// following a symlink and judged on the open handle, owned by the user,
-/// and no more than `bound` bytes ([`MAX_FILE_BYTES`] for the four files).
-/// On Windows the owner is read from
-/// the handle too (freedom-core#360), so a file another account planted in
-/// a split root (`--profile-dir`) reads as empty, as does one whose owner
-/// can't be read; an elevated administrator's own files, which Windows may
-/// give to the Administrators group, count as the user's
-/// ([`fc_sys::windows::owned_by_current_user`]). A file the user owns that
-/// another account may still edit is 0001's owner-only DACL follow-up.
-pub(crate) fn read_file(path: &Path, bound: usize) -> Read {
-    let file = match fsx::open_regular(path, false) {
-        Ok(fsx::Regular::File(file)) => file,
-        Ok(fsx::Regular::Missing) => return Read::Missing,
-        Ok(fsx::Regular::Other) | Err(_) => return Read::Unreadable,
-    };
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::MetadataExt;
-        match file.metadata() {
-            Ok(metadata) if metadata.uid() == rustix::process::getuid().as_raw() => {}
-            _ => return Read::Unreadable,
-        }
-    }
-    #[cfg(windows)]
-    {
-        use std::os::windows::io::AsHandle;
-        if !matches!(
-            fc_sys::windows::owned_by_current_user(file.as_handle()),
-            Ok(true)
-        ) {
-            return Read::Unreadable;
-        }
-    }
-    match fsx::read_at_most(&file, bound as u64) {
-        Ok(Some(bytes)) => Read::Bytes(bytes),
-        Ok(None) | Err(_) => Read::Unreadable,
     }
 }
 
@@ -249,9 +203,7 @@ impl Grants {
             return store;
         }
         // Renamed aside once, and every site asks again (`file-unreadable`).
-        let aside = root.join(format!("{}.unreadable", S::KIND.file_name()));
-        let renamed = std::fs::rename(&path, &aside)
-            .map(|()| fsx::flushed(fsx::sync_rename(root, &aside)) == Done::Durable);
+        let renamed = set_aside(root, S::KIND.file_name());
         crate::log::warn(
             "a permission file can't be read: renamed aside, the store starts empty",
             serde_json::json!({ "store": S::KIND.name(), "renamed": renamed.is_ok() }),
@@ -299,7 +251,7 @@ impl Grants {
             });
         }
         let text = next.file_text().map_err(WriteFailure::Bounds)?;
-        match write_file(&path, S::KIND.name(), text.as_bytes()) {
+        match write_file(&path, text.as_bytes(), &GrantWrite(S::KIND.name())) {
             Ok(done) => {
                 *S::slot_mut(self) = next;
                 Ok(Written {
@@ -325,61 +277,4 @@ impl Grants {
             }
         }
     }
-}
-
-/// 0001's single-file write of `target`, with the test hooks' failures at
-/// each step (`write`, `fsync`, `rename`, `flush`). Before the rename an
-/// error leaves the target untouched and the temp file removed; after it,
-/// a failed flush is [`Done::NotDurable`].
-pub(crate) fn write_file(target: &Path, store: &str, contents: &[u8]) -> std::io::Result<Done> {
-    let fails = |step: &str| crate::testhooks::grant_write_fails(store, step);
-    let dir = target
-        .parent()
-        .ok_or_else(|| std::io::Error::other("target has no parent directory"))?;
-    let name = target
-        .file_name()
-        .map(|n| n.to_string_lossy().into_owned())
-        .unwrap_or_default();
-    let (temp_path, temp) = fsx::create_temp(dir, &format!(".{name}"))?;
-    if let Err(error) = stage(temp, &temp_path, target, contents, &fails) {
-        let _ = std::fs::remove_file(&temp_path);
-        return Err(error);
-    }
-    if fails("flush") {
-        return Ok(fsx::flushed(Err(std::io::Error::other(
-            "test hook: flush fails",
-        ))));
-    }
-    Ok(fsx::flushed(fsx::sync_rename(dir, target)))
-}
-
-/// Writes and flushes the temp file, then renames it over `target` if its
-/// name still names the file written. The handle is closed before the
-/// rename, which Windows needs.
-fn stage(
-    mut temp: std::fs::File,
-    temp_path: &Path,
-    target: &Path,
-    contents: &[u8],
-    fails: &dyn Fn(&str) -> bool,
-) -> std::io::Result<()> {
-    let injected = |step: &str| std::io::Error::other(format!("test hook: {step} fails"));
-    if fails("write") {
-        return Err(injected("write"));
-    }
-    temp.write_all(contents)?;
-    if fails("fsync") {
-        return Err(injected("fsync"));
-    }
-    temp.sync_all()?;
-    if fails("rename") {
-        return Err(injected("rename"));
-    }
-    if !fsx::same_file(&temp, temp_path)? {
-        return Err(std::io::Error::other(
-            "the temp file was replaced before its rename",
-        ));
-    }
-    drop(temp);
-    std::fs::rename(temp_path, target)
 }
