@@ -901,7 +901,10 @@ fn admitted(method: &str, caller: CallerKind, test_methods: bool) -> Result<(), 
     match methods::admit(method, caller, fc_protocol::PROTOCOL_VERSION_STREAMS) {
         Admission::Allowed(_) => Ok(()),
         Admission::Forbidden => {
-            if method == "approval.issue" && caller == CallerKind::Page && crate::testhooks::mains_word() {
+            if method == "approval.issue"
+                && caller == CallerKind::Page
+                && crate::testhooks::mains_word()
+            {
                 return Ok(());
             }
             Err(ErrorBody::new(
