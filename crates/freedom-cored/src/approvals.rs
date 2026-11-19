@@ -355,12 +355,13 @@ pub fn page_context(context: &Context) -> Result<Option<&PageContext>, ErrorBody
 
 /// A signature that comes without an `authorization` (design 0012, Q8;
 /// APR-4a requires one): main's own, under `shell`, signs on main's word,
-/// but for a Safe's (APR-4b); a page's needs a token or a rule the core
-/// checks, and the chrome's a wallet-kind token, so both are refused before
-/// a key is touched.
+/// but for a Safe's (APR-4b, APR-4d) and a 32-byte message (APR-4d); a
+/// page's needs a token or a rule the core checks, and the chrome's a
+/// wallet-kind token, so both are refused before a key is touched.
 pub fn without_authorization(context: &Context, signed: &Signed<'_>) -> Result<(), ErrorBody> {
     match context.caller {
         CallerKind::Shell if signed.is_safes() => Err(safe_needs_approval()),
+        CallerKind::Shell if signed.is_hash_sized() => Err(hash_needs_page()),
         CallerKind::Shell => Ok(()),
         CallerKind::Page => Err(not_authorized(
             "no_token",
@@ -385,6 +386,18 @@ fn safe_needs_approval() -> ErrorBody {
     not_authorized(
         "no_token",
         "a Safe's signature needs its Safe approval or a token that binds it",
+    )
+}
+
+/// A 32-byte message under `shell` (APR-4d): the form of a Safe owner's
+/// eth_sign approval of a SafeTx's or SafeMessage's hash. No authorization
+/// admits one there, as no token kind is spent on a message under `shell`
+/// and no Safe approval names a hash: it signs only for a page, under its
+/// `sign-message` token.
+fn hash_needs_page() -> ErrorBody {
+    not_authorized(
+        "no_token",
+        "a 32-byte message signs only for a page, under its sign-message token",
     )
 }
 
@@ -574,6 +587,18 @@ fn presented_receipt(params: &Value) -> Option<Zeroizing<String>> {
         .map(|receipt| Zeroizing::new(receipt.to_owned()))
 }
 
+/// Whether the core's view of typed data (fc-evm's `TypedDataView`, whose
+/// `types` are every type the request lists) declares a `SafeTx` or a
+/// `SafeMessage`, as [`fc_approval::safe::is_safe_typed_data`] reads the
+/// request's own. A view that doesn't parse is treated as one: no rule is
+/// chosen for it.
+fn declares_safe_types(view: &str) -> bool {
+    match serde_json::from_str::<Value>(view) {
+        Ok(view) => fc_approval::safe::is_safe_typed_data(&view),
+        Err(_) => true,
+    }
+}
+
 /// What `sign.*` signs, for its authorization: its public work done.
 pub enum Signed<'a> {
     Transaction {
@@ -586,6 +611,8 @@ pub enum Signed<'a> {
         account: u32,
         /// `sign.message`'s `message`, as sent.
         message: &'a Value,
+        /// Its bytes, as parsed: what is signed.
+        bytes: &'a [u8],
     },
     TypedData {
         account: u32,
@@ -601,18 +628,26 @@ pub enum Signed<'a> {
 impl Signed<'_> {
     /// Whether it is a Safe's signature (design 0012, "A page's Safe and
     /// Swarm signatures"): typed data declaring a `SafeTx` or a
-    /// `SafeMessage`, or a transaction calling `execTransaction`. Under any
-    /// caller, one signs only with a token that binds it or a Safe approval
-    /// of the caller's own kind: never on main's word, and never by a
-    /// standing rule (APR-4b).
+    /// `SafeMessage`, or a transaction calling `execTransaction` (APR-4b),
+    /// `approveHash` or a module's `execTransactionFromModule` (APR-4d).
+    /// Under any caller, one signs only with a token that binds it or a
+    /// Safe approval of the caller's own kind: never on main's word, and
+    /// never by a standing rule.
     pub fn is_safes(&self) -> bool {
         match self {
-            Signed::Transaction { tx, .. } => fc_approval::safe::calls_exec_transaction(tx.data()),
+            Signed::Transaction { tx, .. } => fc_approval::safe::is_safe_call(tx.data()),
             Signed::Message { .. } => false,
             Signed::TypedData { fields, .. } => {
                 fc_approval::safe::is_safe_typed_data(&fields["typed_data"])
             }
         }
+    }
+
+    /// Whether it is a message of exactly 32 bytes (APR-4d), which main's
+    /// word doesn't sign under `shell`. Under `page`, its `sign-message`
+    /// token signs it, and no standing rule answers it (#89).
+    pub fn is_hash_sized(&self) -> bool {
+        matches!(self, Signed::Message { bytes, .. } if fc_approval::safe::is_hash_sized(bytes))
     }
 }
 
@@ -1129,12 +1164,9 @@ impl Approvals {
                 "a standing rule answers only a page",
             ));
         };
-        let bytes;
         let (account, request) = match signed {
-            Signed::Message { account, message } => {
-                bytes = fc_evm::parse_bytes(message.as_str().unwrap_or(""), "message")
-                    .map_err(|e| invalid(e.to_string()))?;
-                (account, DappRequest::Signature(RuleSigned::Message(&bytes)))
+            Signed::Message { account, bytes, .. } => {
+                (account, DappRequest::Signature(RuleSigned::Message(bytes)))
             }
             Signed::TypedData { account, view, .. } => {
                 (account, DappRequest::Signature(RuleSigned::TypedData(view)))
@@ -1278,7 +1310,9 @@ impl Approvals {
                 };
                 Ok((after, spent.kind.name()))
             }
-            Signed::Message { account, message } => {
+            Signed::Message {
+                account, message, ..
+            } => {
                 let account = json!(account);
                 let payload = json!({ "message": message });
                 self.tokens
@@ -1573,7 +1607,8 @@ impl Approvals {
     /// custody, the grant exposing `account`, the rule (Q9's limited one
     /// once the dApp store has moved), what it never answers, and the rate,
     /// counting nothing. `sign.*` under `{ standing }` decides again, and
-    /// counts.
+    /// counts. A Safe's typed data is never a rule's (APR-4b), so the
+    /// rule isn't chosen for it: the page is asked (APR-4d).
     pub fn page_rule(
         &self,
         key: &str,
@@ -1585,6 +1620,9 @@ impl Approvals {
         let viewed;
         let signed = match query.signed {
             Page::Message(bytes) => RuleSigned::Message(bytes),
+            Page::TypedData { view, .. } if declares_safe_types(view) => {
+                return RuleNow::NotCovered;
+            }
             Page::TypedData { hash, view } => {
                 let Some(hash) = fc_evm::parse_bytes(hash, "hash")
                     .ok()
@@ -1627,6 +1665,8 @@ impl Approvals {
     /// check; once quoted, the prepared transaction's fee is judged on the
     /// chain's evidence too. Past its rate or its fee, `Asked`.
     /// `sign.transaction` under `{ standing }` decides again, and counts.
+    /// A Safe's call is never a rule's (APR-4b, APR-4d), so the rule isn't
+    /// chosen for it: the page is asked.
     pub fn page_send_rule(
         &self,
         agent: Option<bool>,
@@ -1645,7 +1685,10 @@ impl Approvals {
                 "gas_price": "1", "to": query.to, "value": query.value, "data": query.data,
             })),
         };
-        let Some(tx) = tx.and_then(|tx| send_tx(&json!({ "tx": tx }))) else {
+        let Some(tx) = tx
+            .and_then(|tx| send_tx(&json!({ "tx": tx })))
+            .filter(|tx| !fc_approval::safe::is_safe_call(tx.data()))
+        else {
             return RuleNow::NotCovered;
         };
         let evidence = self.fees.get(query.chain_id);
@@ -1913,7 +1956,7 @@ impl Approvals {
         let bytes;
         let view;
         let tx;
-        // A Safe's signature, which no rule answers (APR-4b).
+        // A Safe's signature, which no rule answers (APR-4b, APR-4d).
         let mut safes = false;
         let rule_request = match string(request, "kind")? {
             "message" => {
@@ -1956,7 +1999,7 @@ impl Approvals {
                     .chain_id()
                     .to_u64()
                     .and_then(|chain_id| self.fees.get(chain_id));
-                safes = fc_approval::safe::calls_exec_transaction(tx.data());
+                safes = fc_approval::safe::is_safe_call(tx.data());
                 DappRequest::Transaction(Send::of(&tx, kind, paused, evidence))
             }
             _ => return Err(invalid("kind: expected message, typed_data or transaction")),

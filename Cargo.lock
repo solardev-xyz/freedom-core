@@ -494,6 +494,7 @@ dependencies = [
 name = "fc-eip1193"
 version = "0.22.0"
 dependencies = [
+ "fc-approval",
  "fc-dweb",
  "fc-evm",
  "fc-json",

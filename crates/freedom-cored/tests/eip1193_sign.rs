@@ -1408,3 +1408,59 @@ fn a_rule_past_its_rate_at_the_effect_asks() {
         json!({ "result": HELLO_SIGNATURE })
     );
 }
+
+/// APR-4d: a site's signing rule isn't chosen for a SafeTx's or a
+/// SafeMessage's typed data, as `sign.typed_data` refuses `{ standing }`
+/// for it (APR-4b): the page is asked. Other typed data keeps the rule.
+#[test]
+fn a_safes_typed_data_is_asked_not_ruled() {
+    let (_root, mut core, _clock) =
+        core_at(&store(vec![ruled(SITE, 0, Some(NOW), false)]), NOW, false);
+    let body = |typed: Value| {
+        json!({ "method": "eth_signTypedData_v4", "world": world(),
+            "params": ["0x9858EfFD232B4033E47d90003D41EC34EcaEda94", typed.to_string()] })
+    };
+    let safe = "0x4444444444444444444444444444444444444444";
+    let field = |name: &str, kind: &str| json!({ "name": name, "type": kind });
+    let safe_tx = json!({
+        "domain": { "chainId": 100, "verifyingContract": safe },
+        "types": { "SafeTx": [
+            field("to", "address"), field("value", "uint256"), field("data", "bytes"),
+            field("operation", "uint8"), field("safeTxGas", "uint256"), field("baseGas", "uint256"),
+            field("gasPrice", "uint256"), field("gasToken", "address"),
+            field("refundReceiver", "address"), field("nonce", "uint256"),
+        ]},
+        "primaryType": "SafeTx",
+        "message": {
+            "to": safe, "value": "0", "data": "0x", "operation": 0, "safeTxGas": "0",
+            "baseGas": "0", "gasPrice": "0", "gasToken": "0x0000000000000000000000000000000000000000",
+            "refundReceiver": "0x0000000000000000000000000000000000000000", "nonce": "1",
+        },
+    });
+    let safe_message = json!({
+        "domain": { "chainId": 100, "verifyingContract": safe },
+        "types": { "SafeMessage": [field("message", "bytes")] },
+        "primaryType": "SafeMessage",
+        "message": { "message": format!("0x{}", "11".repeat(32)) },
+    });
+    for (id, typed) in [(10, safe_tx), (11, safe_message)] {
+        request(&mut core, id, Some(SITE), Some(false), &body(typed));
+        let asked = prompted(&mut core, id);
+        respond(
+            &mut core,
+            &asked,
+            json!({ "prompt": asked["params"]["prompt"], "closed": "closed" }),
+        );
+        assert_eq!(core.until_response(id)["result"]["error"]["code"], 4001);
+    }
+    let mail = json!({
+        "domain": { "name": "Ether Mail", "chainId": 100 },
+        "types": { "Mail": [field("contents", "string")] },
+        "primaryType": "Mail",
+        "message": { "contents": "Hello" },
+    });
+    request(&mut core, 12, Some(SITE), Some(false), &body(mail));
+    recheck(&mut core, 12, true, false);
+    let signed = core.until_response(12);
+    assert!(signed["result"]["result"].is_string(), "{signed}");
+}
