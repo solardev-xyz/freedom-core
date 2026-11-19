@@ -649,8 +649,10 @@ dependencies = [
 name = "fc-store"
 version = "0.22.0"
 dependencies = [
+ "fc-json",
  "fc-sys",
  "rustix",
+ "sha2",
  "tempfile",
  "zeroize",
 ]
@@ -692,6 +694,15 @@ dependencies = [
  "sha2",
  "thiserror",
  "zeroize",
+]
+
+[[package]]
+name = "fc-wallet-state"
+version = "0.22.0"
+dependencies = [
+ "fc-evm",
+ "fc-json",
+ "thiserror",
 ]
 
 [[package]]

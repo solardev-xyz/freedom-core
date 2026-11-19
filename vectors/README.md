@@ -42,6 +42,14 @@ They require one package, `proper-lockfile`, which is resolved from the main
 reference's install: the same version (4.1.2) and integrity in both lockfiles. Its
 `meta` names that package.
 
+`journal.json` (design 0013, PRF-5d) uses the approvals reference's checkout too
+(`JOURNAL_REFERENCE_COMMIT` in `generate.js`, the same commit): its
+`src/main/lib/durable-journal.js` is byte for byte `integration/rust-core`'s at `5e62992a`
+(the module last changed in `db09e7f7`), and the shared reference predates it. The module
+requires only Node's `fs`, `path` and `crypto`, so nothing is installed or stubbed. The other
+direction, the reference's `readJournal` reading files the core wrote, is
+`generator/interop.test.js`'s, against a testhooks build's `test-journal`.
+
 `eip1193.json` (design 0012, APR-5a) uses the approvals reference's checkout too
 (`EIP1193_REFERENCE_COMMIT` in `generate.js`, the same commit). Its `src/main/page/` is
 design 0011's Ethereum dispatcher whole (PRQ-3 to PRQ-6), from before APB-1 to APB-3 moved
@@ -49,6 +57,17 @@ its tokens, standing rules and grants into the core, so no answer it records is 
 core's own. The dispatcher's modules read one package, ethers. `signing-utils.js` and
 `transaction-service.js` read it too. It is resolved from the main reference's install:
 the same version (6.17.0) and integrity in both lockfiles. The file's `meta` names that package.
+
+`stores.json` (design 0013, PRF-5a) has a fourth reference: freedom-browser's
+`integration/rust-core` at commit `9d4ea62516034731dea082c6d81765e355f1182f`
+(`STORES_REFERENCE_COMMIT` in `generate.js`), whose `src/main/identity-manager.js`
+has the Safe owners' address checks (#1065, #1078), the verified deployed mark (#1066)
+and the identity core's vault backend. Its generator loads that file whole, unpatched,
+with its requires stubbed, and reads no package of the checkout's, so it needs no
+install: ethers (its `isAddress`) and `@sinonjs/fake-timers` (`createdAt`) come from the
+main reference's install, the same versions (6.17.0 and 15.4.0) and integrity in both
+lockfiles, and the file's `meta` names them. Like the Radicle reference, it moves on its
+own.
 
 | File | Contents |
 | --- | --- |
@@ -72,6 +91,8 @@ the same version (6.17.0) and integrity in both lockfiles. The file's `meta` nam
 | `approvals.json` | Design 0012's tokens (APR-1), from the approvals reference's own `signing-confirmation.js`. `bindings`: for each request, as the reference takes it (`kind`, `account`, `payload`, and the `page` main's page issuer binds: its handle and key), `bindingFor`'s facts or its error; `core`, the same request in fc-approval's form (the `sign.*` parameters but the key; a typed-data text as `payload_text`, which the core parses itself; the page as `PageContext`'s origin, frame and navigation with the handle), and `expect`, whether the core issues a token for it. `pairs`: two requests the reference binds, whether a token minted for either spends for the other (`alike`) or not (`apart`), asked of the reference both ways, with the facts that differ (`changed`) and the core's answer (`core`). Each fact of each kind's binding is changed by an apart pair. `runs`: issue, consume, discard and count in order under `_setNow`, with each outcome: the two-minute boundary (`expiresAt <= now`), the cap of 32, burning on a mismatch, an expiry, another kind and a malformed request, a page's token without its page, a Safe send's site and wallet tokens, and a wall clock set back. Where the core differs, the case, pair or step says so (`deviation`, from 0012's Deviations: `token-strict`, `token-clock`, `token-page`, `token-typed-parse` and `token-message-bytes`) and gives the core's answer. `kinds` records the reference's twelve kinds; the cap edit (#1023) is not one of 0012's eleven. `x402` (X402-1): the approvals reference's own `src/main/x402/` code over the main reference's installed `@x402/core` and `@x402/evm` 2.28.0, which `meta.packages` names (the approvals checkout installs nothing). It records the SDK's default assets, `originKeyForUrl`, `tupleFromAccept`, and `findCoveringPermission` with its charge. It also records each payload `sign-flow.js` signs for one entry under a fixed `Date.now`, `getRandomValues` and test key, or the error, after `@x402/core`'s own schema parse; `core` is the core's answer. `devices` (core #392) records the same payloads for a Ledger or phone account: the typed data the SDK hands the signer, its hash, the device's signature text in several forms, the header's JSON with that text in it, and what ethers' `recoverAddress` recovers from it, with the core's answer. The grant files' x402 runs carry the core's own answer to each operation (`core`), with `deviation` (`x402-asset-case`, `x402-clock-back`). `rules.decisions` (APR-2): the standing rules, from the reference's `page-signing.js` and `page-sends.js` driven with injected dependencies over its own `dapp-permissions.js` and `fee-check.js`: runs of requests and grant changes, what the reference did (its rule, its prompt or its error) and the core's answer, `covered` or 0012's reason, against the same grants in Q9's form (`deviation`: `rule-legacy`, `rule-expiry`, `rule-rate`, `rule-value`, `rule-inputs`). It has its own `meta`, which names no package. |
 | `profiles.json` | Design 0013's profile catalog (PRF-3), from the profiles reference's `profile-catalog.js` and `profile-resolver.js`. The pure functions: `sanitizeProfileId` with its refusals, `displayNameFromId`, `hashPath` and the checkout id, the dev ports' offset, `getManagedPorts`, `allocateSlot`, and `rebaseNodeConfig` and `fillMissingNodeConfig` (reached through `importProfile` and `ensureProfile`, which use them). `lockStaleness`: proper-lockfile's `checkSync` with `Date.now` held, one millisecond either side of each stale time. `scenarios`: the reference's operations (`resolveProfile`, `createProfile`, `renameProfile`, `importProfile`, `updateProfileNodeConfig`, `getReservedManagedPorts`, `listProfileSummaries`, and `validateProfileDeletion` as `delete-validate`, the delete's refusals, whose value is `valid` where it throws nothing) run in order on one app root under a fixed clock, each step's result or refusal and every file's text and directory after it. They ran in a temp directory, written `/vectors` throughout. A refusal keeps the reference's message; a file that isn't JSON is `unreadable`, a `TypeError` `malformed`. A step where the core answers otherwise has `deviation`, the row of 0013's Deviations table (`profile-delete-overlap`), and `core`, the core's answer, beside the reference's `result`. |
 | `eip1193.json` | Design 0012's Ethereum dispatcher (APR-5a), from the eip1193 reference's own `page-ethereum.js` with its `page-signing.js` and `page-sends.js` (`createEthereumDispatchers`), driven through the dependencies and the request context they take for their tests, as `page-requests.js` gives them. Grants come from the reference's `dapp-permissions.js` over an in-memory file (`approval-stores.js`'s harness, `Date.now` fixed at `now`). The send's gas limit and fees come from the reference's `transaction-service.js` (`estimateGas` with its 20% buffer, `getGasPrices`) over the reads it makes. Tokens come from `page-requests.js`'s `confirm` and `spend` over the reference's `signing-confirmation.js`, named in the order minted. Signatures come from the first three test wallets of `abandon … about`, standing for the vault, a Ledger and a phone. The chain reads, the name's resolution, the prompts' decisions, Agent custody, the fee check's verdicts, D12's pause and the broadcast's hash are scripted. `methods`: each Ethereum row of `page-methods.js` (class, deadline, refusal) and whether the dispatcher serves it. `scenarios` (96): `id`; `from`, the reference test each mirrors (`<file>:<line>`, checked to start a test) or the design; `step`, the APR-5 PR that replays it (reads APR-5b, connects, chain switches and prompts APR-5c, signatures APR-5d, the prepared send APR-5e, names over IPNS APR-5f); `world`; the grant file before and after; and `requests` in order on one world. Each request records every effect with its arguments and its answer or what it threw, the dispatcher's result, what main delivers (`answer`: a keyless answer once the name no longer holds, or `{ gone: true }`), and the events sent after it. `format` names each effect. It has its own `meta`, which names ethers. |
+| `journal.json` | Design 0013's JSON Lines journal (PRF-5d), from the journal reference's own `src/main/lib/durable-journal.js` (`generator/journal.js`). `constants`: the file name, the 64 MiB default bound, the intent store's 16 MiB read bound and 8 MiB file cap, and the mode. `encode`: `encodeLine` of records given as JSON text (`JSON.parse`d first: property order, numbers, escapes and lone surrogates as V8 has them), each line in hex, or the refusal's code for a record that isn't an object. `parse`: `parseJournal` of bytes in hex, its records each as their `JSON.stringify` text, the damaged lines (`line`, `offset`, `reason`), `completeLength`, `tornTail` and `unterminated`: whole last records without their newline, torn tails (zeros included), damaged lines (checksums, digests in upper case or not hex, another record key, a CRLF, records that aren't objects or JSON, a BOM, ill-formed UTF-8, which reads as U+FFFD), and a damaged unterminated tail, which is torn. `read`: `readJournal` of a file at, under and over each bound (small ones, the default and the intent store's, the large ones sparse zeros given by `size`), a missing file, a directory and a symlink. `journal`: runs of `createJournal`'s `open`, `append`, `compact` and `moveAside` on a temp directory, from the files given (mode 0644): each step's result or refusal code, `size`, every file in the directory in hex and the journal's mode after it: open's repairs, compaction and its leftover temp files, moving aside to the first free name, a file over the bound, and the refusals. A case where the core answers otherwise has `deviation` and `core`: `json-depth`, a record nested deeper than 512 levels, which the core counts a damaged line. It has its own `meta`; the module reads no package. |
+| `stores.json` | Design 0013's set-A stores (PRF-5a), from the stores reference's own `identity-manager.js` (`vault_meta`), run whole over an in-memory file system with a scripted identity core, Ledger, phone, Swarm feed store and Safe modules. `runs`: its operations from a start text, each with its arguments, the wall clock, its result or error (`message`, `code`), the calls it made with their answers, whether it wrote, and the file's exact text after it; each step's `core` is the codec's operation once main has done its part (the device's or the phone's check, the feed references), or null where main refuses first. `malformed`: texts, bytes and filled files, what the reference loads from each (`getVaultMeta`, a locked `getDerivedWallets`, `getActiveWalletIndex`), and the core's reading, `unreadable` with its reason or `parsed` (the design's, with its 1 MiB bound: `source`). Its `formats` member defines every field. |
 | `secrets.json` | Design 0013's secrets file (PRF-1a), with no reference: no build of the browser reads or writes it. Every case and outcome is the design's (`source`), written by hand in `generator/secrets.js` as plain states, which the generator lays out as `JSON.stringify(file, null, 2)` and whose entries it seals with Node's AES-256-GCM under fixed keys and nonces (public test values), with the associated data the design gives; nothing is computed by a model of the rules. `files`: files in form, each with the items it names (in fc-profile's reading order too: fc-keystore's tests check that fc-profile reads the same), each entry's key, nonce, binding, canonical JSON, associated data and secret, and opens with the caller's name, binding and key: the secret, or `no_entry`, `other_binding` or `refused` (an entry moved from another name, sealed under another binding, key or nonce, or with a changed tag). `malformed`: texts refused, one change each, with the first reason the core finds (form, bounds, duplicate ids and nonces, keys without entries, entries under no key, and every text but the one the core writes). `transitions`: one change each (`begin_create`, `commit` with its re-wrap, `put`, `remove`, `settle`, `forgotten`, `drop_foreign`) with the RNG's draws, and the exact text after it or the refusal: a pending item and a `forget` list at the four-item bound, the fifth refused (`forget_backlog`), DPAPI's blob and no record. Its `formats` member defines every field. It has the shared `meta`. |
 | `keystore.json` | Design 0013's key-store helper (PRF-1b), with no reference: no build of the browser runs it. Every case and outcome is the design's (`source`), written by hand in `generator/keystore.js` as plain states; the generator lays each answer out and seals each `key` with HPKE (`generator/hpke.js`: DHKEM(X25519, HKDF-SHA256), HKDF-SHA256, AES-256-GCM, `info` `freedom-keystore/1`) under a fixed request key and fixed ephemeral keying material (public test values), with the associated data the design gives (`freedom-keystore/1`, the op, the item, and a DPAPI blob's SHA-256); nothing is computed by a model of the rules. `helper`: requests (argv, stdin, what the OS offers), the one OS call each makes and the store's answer, the RNG's draws, and the exact line the helper writes: create, open and forget, the store's failures, an RNG that fails, every out-of-form request and stdin byte refused with no OS call, and `unsupported`. `answers`: answers main relays, with the core's reading under the request key: the wrapping key (a DPAPI create's blob too), done, or the error: a key sealed for another op, item, blob, recipient or `info`, a changed byte in `enc` or the ciphertext, cut short or a byte long, over 4096 bytes (and exactly 4096, which is in), unknown, duplicate and `null` members, the wrong kind for the op, and each failure answer as the core maps it. Its `formats` member defines every field. It has the shared `meta`. |
 | `identity-formats.json` | Deterministic IPFS private-key protobuf/base64 and PeerID; Radicle DID, node ID and public SSH file with default `FreedomBrowser` comment and custom `vector-alias`; `didFromPublicKey`; and `radiclePrivateFiles`, whole private key files with a fixed check integer for aliases around an aligned private section. Those marked `deviation: openssh-padding` carry the reference's full 8-byte padding, which the core omits. |
@@ -94,6 +115,7 @@ the same version (6.17.0) and integrity in both lockfiles. The file's `meta` nam
 | `generator/approval-decisions.js` | The standing rules' runs over the reference's dispatchers, and the core's answers, used by `approval-rules.js`. |
 | `generator/eip1193.js` | The Ethereum dispatcher's harness over the reference's modules, its scripted worlds and the scenarios, used by `generate.js`. |
 | `generator/profiles.js` | The profile modules' loader, the pure cases, the lock cases and the scenarios, used by `generate.js`. |
+| `generator/stores.js` | The set-A stores' harness over the stores reference's `identity-manager.js`, its scripted world, the runs and the malformed files, used by `generate.js`. |
 | `generator/secrets.js` | The secrets file's states, malformed texts and transitions, used by `generate.js`. |
 | `generator/keystore.js` | The key-store helper's requests, the answers main relays, and their outcomes, used by `generate.js`. |
 | `generator/hpke.js` | RFC 9180's HPKE base mode composed from `node:crypto`'s primitives, used by `keystore.js` and pinned to the RFC's vectors by `check.test.js`. |
@@ -104,7 +126,7 @@ the same version (6.17.0) and integrity in both lockfiles. The file's `meta` nam
 Every JSON file has a `meta` block with the full reference commit, actual installed
 package versions, Node version and generator path. The Radicle files' `meta` names the
 Radicle reference's commit, the Node version and the generator path: they read no
-package of the reference's. So does `approvals.json`'s, for the approvals reference; `profiles.json`'s names proper-lockfile, and `eip1193.json`'s ethers. The deterministic files use
+package of the reference's. So does `approvals.json`'s, for the approvals reference; `profiles.json`'s names proper-lockfile, `eip1193.json`'s ethers, and `stores.json`'s, for the stores reference, ethers and `@sinonjs/fake-timers`. The deterministic files use
 2-space indentation, LF and one trailing newline, with stable key order. The
 fixture containers have the same format. Their embedded `fileContents`,
 `keystore`, and SSH strings retain the bytes the reference wrote, including the
@@ -121,10 +143,10 @@ The checked-in run used Node `v24.15.0` and these installed versions:
 | `@metamask/browser-passworder` | `6.0.0` |
 | `@ethersphere/bee-js` | `13.1.0` (signing only) |
 | `@ethersphere/core-sdk` | `0.1.1` (signing only) |
-| `@sinonjs/fake-timers` | `15.4.0` (the replays only) |
+| `@sinonjs/fake-timers` | `15.4.0` (the replays and `stores.json` only) |
 
-From clean checkouts at the three commits, install the first two's lockfile
-dependencies (this changes no tracked files; the approvals reference needs none):
+From clean checkouts at the four commits, install the first two's lockfile
+dependencies (this changes no tracked files; the approvals and stores references need none):
 
 ```sh
 cd /root/herdr/freedom-browser
@@ -138,20 +160,24 @@ Then, from the freedom-core worktree:
 ```sh
 node vectors/generator/generate.js generate --freedom-browser /root/herdr/freedom-browser \
   --radicle-browser /root/herdr/freedom-browser-wt/radicle-reference \
-  --approvals-browser /root/herdr/freedom-browser-wt/approvals-reference
+  --approvals-browser /root/herdr/freedom-browser-wt/approvals-reference \
+  --stores-browser /root/herdr/freedom-browser-wt/stores-reference
 node vectors/generator/generate.js check --freedom-browser /root/herdr/freedom-browser \
   --radicle-browser /root/herdr/freedom-browser-wt/radicle-reference \
-  --approvals-browser /root/herdr/freedom-browser-wt/approvals-reference
+  --approvals-browser /root/herdr/freedom-browser-wt/approvals-reference \
+  --stores-browser /root/herdr/freedom-browser-wt/stores-reference
 node --test vectors/generator/check.test.js
 cargo build -p freedom-cored --features testhooks
 FREEDOM_CORED=target/debug/freedom-cored node --test vectors/generator/interop.test.js
 ```
 
 The integration tests use `/root/herdr/freedom-browser`,
-`/root/herdr/freedom-browser-wt/radicle-reference` and
-`/root/herdr/freedom-browser-wt/approvals-reference` by default; set
-`FREEDOM_BROWSER_CHECKOUT`, `FREEDOM_BROWSER_RADICLE_CHECKOUT` and
-`FREEDOM_BROWSER_APPROVALS_CHECKOUT` to use other clean checkouts. Run with the Node
+`/root/herdr/freedom-browser-wt/radicle-reference`,
+`/root/herdr/freedom-browser-wt/approvals-reference` and
+`/root/herdr/freedom-browser-wt/stores-reference` by default; set
+`FREEDOM_BROWSER_CHECKOUT`, `FREEDOM_BROWSER_RADICLE_CHECKOUT`,
+`FREEDOM_BROWSER_APPROVALS_CHECKOUT` and `FREEDOM_BROWSER_STORES_CHECKOUT` to use
+other clean checkouts. Run with the Node
 version in `meta`: the runtime version is part of the byte comparison. The
 generator refuses a different commit or a dirty checkout, for any reference.
 

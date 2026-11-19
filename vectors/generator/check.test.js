@@ -13,6 +13,8 @@ const REFERENCE = process.env.FREEDOM_BROWSER_CHECKOUT || '/root/herdr/freedom-b
 const RADICLE_REFERENCE = process.env.FREEDOM_BROWSER_RADICLE_CHECKOUT || '/root/herdr/freedom-browser-wt/radicle-reference';
 // The approvals vectors' reference (generate.js, APPROVALS_REFERENCE_COMMIT).
 const APPROVALS_REFERENCE = process.env.FREEDOM_BROWSER_APPROVALS_CHECKOUT || '/root/herdr/freedom-browser-wt/approvals-reference';
+// The set-A stores' reference (generate.js, STORES_REFERENCE_COMMIT).
+const STORES_REFERENCE = process.env.FREEDOM_BROWSER_STORES_CHECKOUT || '/root/herdr/freedom-browser-wt/stores-reference';
 const FILES = ['keys.json', 'mnemonic-validation.json', 'identity-formats.json', 'signing.json', 'naming.json', 'naming-replay.json',
   'chain.json', 'chain-replay.json', 'fixtures/vaults.json', 'fixtures/bee-keystores.json', 'fixtures/radicle-openssh.json',
   'generator/generate.js', 'generator/signing.js', 'generator/naming.js', 'generator/naming-replay.js', 'generator/chain.js',
@@ -31,7 +33,9 @@ FILES.push('secrets.json', 'generator/secrets.js');
 FILES.push('keystore.json', 'generator/keystore.js', 'generator/hpke.js');
 FILES.push('generator/approval-rules.js', 'generator/approval-decisions.js');
 FILES.push('eip1193.json', 'generator/eip1193.js');
+FILES.push('stores.json', 'generator/stores.js');
 FILES.push('generator/tx-decode.js');
+FILES.push('journal.json', 'generator/journal.js');
 
 function corruptedCheck(filename, corrupt) {
   const copy = fs.mkdtempSync(path.join(os.tmpdir(), 'freedom-core-vectors-'));
@@ -49,7 +53,7 @@ function corruptedCheck(filename, corrupt) {
     fs.writeFileSync(destination, JSON.stringify(contents, null, 2) + '\n');
     result = spawnSync(process.execPath, [path.join(copy, 'generator/generate.js'),
       'check', '--freedom-browser', REFERENCE, '--radicle-browser', RADICLE_REFERENCE,
-      '--approvals-browser', APPROVALS_REFERENCE], { encoding: 'utf8', timeout: 60000 });
+      '--approvals-browser', APPROVALS_REFERENCE, '--stores-browser', STORES_REFERENCE], { encoding: 'utf8', timeout: 60000 });
   } finally {
     fs.rmSync(copy, { recursive: true, force: true });
   }
@@ -867,7 +871,7 @@ test('check takes the Radicle vectors from their own reference, at its pinned co
   // The shared reference is at another commit: refused before anything is built.
   const result = spawnSync(process.execPath, [path.join(SOURCE, 'generator/generate.js'),
     'check', '--freedom-browser', REFERENCE, '--radicle-browser', REFERENCE,
-    '--approvals-browser', APPROVALS_REFERENCE], { encoding: 'utf8', timeout: 60000 });
+    '--approvals-browser', APPROVALS_REFERENCE, '--stores-browser', STORES_REFERENCE], { encoding: 'utf8', timeout: 60000 });
   assert.equal(result.status, 1, result.stdout + result.stderr);
   assert.match(result.stderr, /Use the pinned Radicle reference commit/);
   // And each Radicle file records it.
@@ -898,14 +902,49 @@ test('check rejects a changed Ethereum dispatcher answer', () => {
   assert.match(stderr, /Byte mismatch: eip1193.json/);
 });
 
+test('check rejects a changed journal parse', () => {
+  const stderr = corruptedCheck('journal.json', (contents) => {
+    contents.parse.find((item) => item.name === 'whole-last-record-without-newline').unterminated = false;
+  });
+  assert.match(stderr, /Byte mismatch: journal.json/);
+});
+
+test('check rejects a changed journal run', () => {
+  const stderr = corruptedCheck('journal.json', (contents) => {
+    contents.journal.find((item) => item.name === 'torn-tail').steps[0].size += 1;
+  });
+  assert.match(stderr, /Byte mismatch: journal.json/);
+});
+
 test('check takes the approvals vectors from their own reference, at its pinned commit', () => {
   // The shared reference is at another commit: refused before anything is built.
   const result = spawnSync(process.execPath, [path.join(SOURCE, 'generator/generate.js'),
     'check', '--freedom-browser', REFERENCE, '--radicle-browser', RADICLE_REFERENCE,
-    '--approvals-browser', REFERENCE], { encoding: 'utf8', timeout: 60000 });
+    '--approvals-browser', REFERENCE, '--stores-browser', STORES_REFERENCE], { encoding: 'utf8', timeout: 60000 });
   assert.equal(result.status, 1, result.stdout + result.stderr);
   assert.match(result.stderr, /Use the pinned approvals reference commit/);
   // And the file records it.
   const commit = spawnSync('git', ['rev-parse', 'HEAD'], { cwd: APPROVALS_REFERENCE, encoding: 'utf8' }).stdout.trim();
   assert.equal(JSON.parse(fs.readFileSync(path.join(SOURCE, 'approvals.json'), 'utf8')).meta.freedomBrowserCommit, commit);
+});
+
+test('check rejects a changed vault-meta text', () => {
+  const stderr = corruptedCheck('stores.json', (contents) => {
+    const run = contents.vault_meta.runs.find((item) => item.id === 'remove');
+    const step = run.steps.find((item) => item.op === 'deleteDerivedWallet' && item.args[0] === 2);
+    step.text = step.text.replace('"activeWalletIndex": 0', '"activeWalletIndex": 2');
+  });
+  assert.match(stderr, /Byte mismatch: stores.json/);
+});
+
+test('check takes the stores vectors from their own reference, at its pinned commit', () => {
+  // The shared reference is at another commit: refused before anything is built.
+  const result = spawnSync(process.execPath, [path.join(SOURCE, 'generator/generate.js'),
+    'check', '--freedom-browser', REFERENCE, '--radicle-browser', RADICLE_REFERENCE,
+    '--approvals-browser', APPROVALS_REFERENCE, '--stores-browser', REFERENCE], { encoding: 'utf8', timeout: 60000 });
+  assert.equal(result.status, 1, result.stdout + result.stderr);
+  assert.match(result.stderr, /Use the pinned stores reference commit/);
+  // And the file records it.
+  const commit = spawnSync('git', ['rev-parse', 'HEAD'], { cwd: STORES_REFERENCE, encoding: 'utf8' }).stdout.trim();
+  assert.equal(JSON.parse(fs.readFileSync(path.join(SOURCE, 'stores.json'), 'utf8')).meta.freedomBrowserCommit, commit);
 });

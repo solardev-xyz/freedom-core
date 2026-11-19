@@ -25,6 +25,8 @@ const { buildRadicleImport } = require('./radicle-import');
 const { buildApprovals } = require('./approvals');
 const { buildProfiles } = require('./profiles');
 const { buildEip1193 } = require('./eip1193');
+const { buildJournal } = require('./journal');
+const { buildStores } = require('./stores');
 
 const REFERENCE_COMMIT = 'fb540328162839e68150fe2c5e517edb86734d1c';
 // The Radicle vectors' own reference: freedom-browser's integration/rust-core,
@@ -51,6 +53,20 @@ const PROFILES_REFERENCE_COMMIT = APPROVALS_REFERENCE_COMMIT;
 // grants into the core. Its one package, ethers, comes from the main
 // reference's install, the same version (eip1193.js).
 const EIP1193_REFERENCE_COMMIT = APPROVALS_REFERENCE_COMMIT;
+// The JSON Lines journal's vectors' reference (design 0013, PRF-5d): the
+// approvals reference's checkout, whose src/main/lib/durable-journal.js is
+// byte for byte integration/rust-core's at 5e62992a (it last changed in
+// db09e7f7). The shared reference predates the module. It reads no package.
+const JOURNAL_REFERENCE_COMMIT = APPROVALS_REFERENCE_COMMIT;
+
+// The set-A stores' reference (design 0013, PRF-5a): freedom-browser's
+// integration/rust-core, whose identity-manager.js has the Safe owners'
+// address checks (#1065, #1078), the verified deployed mark (#1066) and the
+// core's vault backend. Its generator (stores.js) loads that file whole and
+// reads no package of the checkout's: ethers and @sinonjs/fake-timers come
+// from the main reference's install. Like the Radicle reference, it moves on
+// its own.
+const STORES_REFERENCE_COMMIT = '9d4ea62516034731dea082c6d81765e355f1182f';
 const OUTPUT = path.resolve(__dirname, '..');
 const INDICES = [0, 1, 2, 1000, 2147483647];
 const MNEMONICS = [
@@ -136,6 +152,13 @@ function loadRadicleReference(checkout) {
  * names (`packages`). */
 function loadApprovalsReference(checkout) {
   const commit = checkedCommit(checkout, APPROVALS_REFERENCE_COMMIT, 'approvals reference');
+  return { checkout, meta: { freedomBrowserCommit: commit, nodeVersion: process.version, generator: 'vectors/generator/generate.js' } };
+}
+
+/** The set-A stores' reference: stores.js loads its identity-manager.js.
+ * Its packages are the main reference's, which the file's meta names. */
+function loadStoresReference(checkout) {
+  const commit = checkedCommit(checkout, STORES_REFERENCE_COMMIT, 'stores reference');
   return { checkout, meta: { freedomBrowserCommit: commit, nodeVersion: process.version, generator: 'vectors/generator/generate.js' } };
 }
 
@@ -557,13 +580,14 @@ function buildRadicle({ meta, derivation: d, formats: f }, existing) {
 
 async function main() {
   const args = process.argv.slice(2);
-  assert.ok(args.length === 7 && ['generate', 'check'].includes(args[0]) && args[1] === '--freedom-browser'
-    && args[3] === '--radicle-browser' && args[5] === '--approvals-browser',
-    'Usage: node vectors/generator/generate.js <generate|check> --freedom-browser <checkout> --radicle-browser <checkout> --approvals-browser <checkout>');
-  const [mode, , checkout, , radicleCheckout, , approvalsCheckout] = args;
+  assert.ok(args.length === 9 && ['generate', 'check'].includes(args[0]) && args[1] === '--freedom-browser'
+    && args[3] === '--radicle-browser' && args[5] === '--approvals-browser' && args[7] === '--stores-browser',
+    'Usage: node vectors/generator/generate.js <generate|check> --freedom-browser <checkout> --radicle-browser <checkout> --approvals-browser <checkout> --stores-browser <checkout>');
+  const [mode, , checkout, , radicleCheckout, , approvalsCheckout, , storesCheckout] = args;
   const reference = loadReference(path.resolve(checkout));
   const radicle = loadRadicleReference(path.resolve(radicleCheckout));
   const approvals = loadApprovalsReference(path.resolve(approvalsCheckout));
+  const stores = loadStoresReference(path.resolve(storesCheckout));
   const deterministic = {
     'keys.json': buildKeys(reference),
     'mnemonic-validation.json': buildValidation(reference),
@@ -639,6 +663,20 @@ async function main() {
       packages: { ethers: packageVersion(createRequire(path.join(reference.checkout, 'package.json')), 'ethers') },
       nodeVersion: process.version,
       generator: 'vectors/generator/generate.js',
+    }),
+    // Design 0013's JSON Lines journal (PRF-5d), from main's
+    // durable-journal.js.
+    'journal.json': await buildJournal(approvals.checkout, {
+      freedomBrowserCommit: checkedCommit(approvals.checkout, JOURNAL_REFERENCE_COMMIT, 'journal reference'),
+      nodeVersion: process.version,
+      generator: 'vectors/generator/generate.js',
+    }),
+    // Design 0013's set-A stores (PRF-5a): vault-meta.json, from main's
+    // identity-manager.js, over the main reference's ethers and fake timers.
+    'stores.json': await buildStores(stores.checkout, reference.checkout, {
+      ...stores.meta,
+      packages: Object.fromEntries(['ethers', '@sinonjs/fake-timers']
+        .map((name) => [name, packageVersion(createRequire(path.join(reference.checkout, 'package.json')), name)])),
     }),
   };
   // Check every deterministic file before doing the more expensive fixture checks.

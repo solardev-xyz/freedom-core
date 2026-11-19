@@ -167,9 +167,8 @@ fn a_failed_flush_is_in_place_and_not_durable() {
 }
 
 /// The rename moves only the file written: one swapped in under the temp
-/// file's name (at `checked`) is never committed (review of #114). Windows
-/// exposes no file identity there (`fsx::same_file`).
-#[cfg(unix)]
+/// file's name (at `checked`) is never committed (review of #114). On
+/// Windows too, by file ID (`fsx::same_file`, design 0013, PRF-5i).
 #[test]
 fn a_temp_file_swapped_before_the_rename_is_refused() {
     struct Swap(PathBuf);
