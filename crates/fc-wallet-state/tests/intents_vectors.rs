@@ -211,8 +211,11 @@ fn every_step_of_every_run_loads_as_the_reference_loads_it() {
     let vectors = intents();
     let mut steps = 0;
     for run in items(field(&vectors, "runs")) {
-        let limits = limits_of(field(run, "limits"));
+        let mut limits = limits_of(field(run, "limits"));
         for (i, step) in items(field(run, "steps")).iter().enumerate() {
+            if let JsValue::Object(_) = field(field(step, "args"), "limits") {
+                limits = limits_of(field(field(step, "args"), "limits"));
+            }
             let name = format!(
                 "{} step {i} ({})",
                 field(run, "name").as_str().unwrap(),
@@ -287,7 +290,7 @@ fn live_step(
     store: &mut Intents,
     file: &mut Vec<JsValue>,
     step: &JsValue,
-    limits: Limits,
+    limits: &mut Limits,
 ) -> Result<(), Refusal> {
     let op = field(step, "op").as_str().unwrap();
     let run = field(step, "run").as_js_string().unwrap().clone();
@@ -302,7 +305,11 @@ fn live_step(
     let lock = matches!(field(call, "lock"), JsValue::Bool(true));
     let write = match op {
         "restart" => {
-            let loaded = Intents::load(file, limits).map_err(|d| panic!("restart: {d}"))?;
+            // Other limits for the rest of the run, if it brings them.
+            if let JsValue::Object(_) = field(field(step, "args"), "limits") {
+                *limits = limits_of(field(field(step, "args"), "limits"));
+            }
+            let loaded = Intents::load(file, *limits).map_err(|d| panic!("restart: {d}"))?;
             *store = loaded.intents;
             if loaded.compact {
                 *file = compact(store);
@@ -363,7 +370,7 @@ fn every_step_of_every_run_writes_as_the_reference_writes_it() {
     let vectors = intents();
     let mut refused = 0;
     for run in items(field(&vectors, "runs")) {
-        let limits = limits_of(field(run, "limits"));
+        let mut limits = limits_of(field(run, "limits"));
         let mut store = Intents::load(&[], limits).unwrap().intents;
         let mut file: Vec<JsValue> = Vec::new();
         for (i, step) in items(field(run, "steps")).iter().enumerate() {
@@ -372,7 +379,7 @@ fn every_step_of_every_run_writes_as_the_reference_writes_it() {
                 field(run, "name").as_str().unwrap(),
                 field(step, "op").as_str().unwrap()
             );
-            let result = live_step(&mut store, &mut file, step, limits);
+            let result = live_step(&mut store, &mut file, step, &mut limits);
             match (result, field(step, "refusal")) {
                 (Ok(()), JsValue::Null) => {}
                 (Err(ours), JsValue::Null) => panic!("{name}: refused {ours:?}"),
@@ -392,7 +399,11 @@ fn every_step_of_every_run_writes_as_the_reference_writes_it() {
                 texts(items(field(step, "records"))),
                 "{name}: the file"
             );
+            // None after a quiet step: nothing sizes the snapshots then.
             let live = field(step, "live");
+            if matches!(live, JsValue::Null) {
+                continue;
+            }
             let list = store.list();
             assert_eq!(
                 texts(&list),

@@ -170,6 +170,9 @@ function runsOf() {
       ['settle', { name: 'A', label: 'failed', hashOf: 0, block: 3 }],
       ['handoff', { name: 'A', handoff: 'h2' }],
       ['commit', { name: 'A', via: 'replacement', tx: { nonce: 0, fee: 9 } }],
+      ['retire', { name: 'A', block: 1, hashes: 'all', lock: null }],
+      ['retire', { name: 'A', block: 1, hashes: [] }],
+      ['withdrawOrigin', { name: 'A' }],
     ] },
     { name: 'live bounds', limits: { held: 2, hashesPerIntent: 2, openHandoffsPerIntent: 1, rawBytes: 312 }, steps: [
       ['commit', { name: 'A', tx: { nonce: 0 }, context: ctx({ key: 'a' }) }],
@@ -213,6 +216,23 @@ function runsOf() {
       ['handoff', { name: 'B', handoff: 'h7' }],
       ['track', { name: 'B', bracket: { number: 1, hash: '0x' + '01'.repeat(32) }, unreadSince: null }],
       ['void', { name: 'A' }],
+      ['restart', { limits: { journalBytes: 4500 } }],
+      ['commit', { name: 'B', via: 'replacement', tx: { nonce: 1, fee: 2 } }],
+      ['handoff', { name: 'B', handoff: 'h8' }],
+      ['restart', { limits: { journalBytes: 3000 } }],
+      ['track', { name: 'A', bracket: null, unreadSince: T }],
+    ] },
+    { name: 'an origin withdrawn before it is sized', steps: [
+      ['commit', { name: 'A', tx: { nonce: 0 }, context: ctx({ origin: 'https://shop.example/' + 'p'.repeat(1900) }), quiet: true }],
+      ['withdrawOrigin', { name: 'A' }],
+    ] },
+    { name: 'a commit that needs room', limits: { journalBytes: 7000 }, steps: [
+      ['commit', { name: 'A', tx: { nonce: 0 }, context: ctx() }],
+      ...[1, 2, 3, 4, 5, 6].flatMap((n) => [
+        ['handoff', { name: 'A', handoff: `h${n}` }],
+        ['outcome', { name: 'A', handoff: `h${n}`, outcome: 'not_sent', source: null, reasonClass: null }],
+      ]),
+      ['commit', { name: 'B', tx: { nonce: 1 }, context: ctx() }],
     ] },
   ];
 }
@@ -223,8 +243,10 @@ async function runOf(checkout, ethers, dir, encodeLine, s, run) {
   fs.mkdirSync(path.dirname(probeFile), { recursive: true });
   const counter = { n: 0 };
   let time = T;
+  // A restart may bring other limits for the rest of the run.
+  let limits = run.limits;
   let mod = loadModule(checkout, ethers, counter);
-  let store = mod.createIntentStore({ filePath: file, now: () => time, ...(run.limits ? { limits: run.limits } : {}) });
+  let store = mod.createIntentStore({ filePath: file, now: () => time, ...(limits ? { limits } : {}) });
   await store.load();
   const ids = {};
   const handoffs = {};
@@ -239,8 +261,9 @@ async function runOf(checkout, ethers, dir, encodeLine, s, run) {
     const before = counter.n;
     try {
       if (op === 'restart') {
+        if (args.limits) limits = args.limits;
         mod = loadModule(checkout, ethers, counter);
-        store = mod.createIntentStore({ filePath: file, now: () => time, ...(run.limits ? { limits: run.limits } : {}) });
+        store = mod.createIntentStore({ filePath: file, now: () => time, ...(limits ? { limits } : {}) });
         await store.load();
       } else if (op === 'commit') {
         const tx = s.sign(args.tx);
@@ -271,8 +294,8 @@ async function runOf(checkout, ethers, dir, encodeLine, s, run) {
         call = { intentId: ids[args.name], lock: args.lock !== null };
         await store.void(call.intentId, call.lock ? LOCK : null);
       } else if (op === 'retire') {
-        call = { intentId: ids[args.name], block: args.block, hashes: args.hashes === 'all' ? hashes[args.name] : args.hashes, lock: true };
-        await store.retire({ intentId: call.intentId, block: call.block, hashes: call.hashes }, LOCK);
+        call = { intentId: ids[args.name], block: args.block, hashes: args.hashes === 'all' ? hashes[args.name] : args.hashes, lock: args.lock !== null };
+        await store.retire({ intentId: call.intentId, block: call.block, hashes: call.hashes }, call.lock ? LOCK : null);
       } else if (op === 'track') {
         call = { intentId: ids[args.name], bracket: args.bracket, unreadSince: args.unreadSince };
         await store.track(call);
@@ -293,9 +316,10 @@ async function runOf(checkout, ethers, dir, encodeLine, s, run) {
     const records = readRecords(file);
     // The live store after the step. `usage()` sizes each held intent's
     // snapshot, which the store caches until the intent has a new hash.
+    // Not after a `quiet` step, so the next one meets snapshots unsized.
     const list = plain(store.list());
-    const live = { usage: plain(store.usage()), list, void_refusal: list.map((v) => store.voidRefusal(v.intentId)) };
-    steps.push({ op, args: plain(args), at: time, run: mod.__internals.RUN_ID, call: plain(call), uuids, refusal, records, live, load: await probe(checkout, ethers, records, probeFile, run.limits, encodeLine) });
+    const live = args.quiet ? null : { usage: plain(store.usage()), list, void_refusal: list.map((v) => store.voidRefusal(v.intentId)) };
+    steps.push({ op, args: plain(args), at: time, run: mod.__internals.RUN_ID, call: plain(call), uuids, refusal, records, live, load: await probe(checkout, ethers, records, probeFile, limits, encodeLine) });
   }
   return { name: run.name, limits: run.limits ?? null, steps };
 }
@@ -421,7 +445,7 @@ function snapshotCases(held, s) {
 }
 
 const INTENTS_FORMAT =
-  'wallet-intents.jsonl, from the stores reference\'s src/main/wallet/intent-store.js over its lib/durable-journal.js, `crypto.randomUUID` numbered (RUN_ID at each load of the module, then the intent and handoff ids) and the clock fixed. `runs`: one live store per run, with its `limits` overrides, each step an operation (`op`, `args`, at `at`; `restart` loads the module again, a new run of main; `void` without a `lock` is refused) with main\'s `run` (the live store\'s RUN_ID), the `call` the store method got (ids resolved; `lock` for void and retire; withdrawOrigin\'s `result`), the `uuids` `crypto.randomUUID` gave during it, its `refusal` (`code`, `message`) or null, the file\'s `records` after it, `live`: the live store\'s `usage()` (which sizes each held snapshot, cached until a new hash), `list()` and `voidRefusal` of each listed intent after it, and `load`: a fresh store loading those records, its `reason` for moving the file aside (null: loaded), the records it rewrote the file to (`compacted`, null when unchanged), `list()`, the ids of `held()`, `byKey` of each key, `heldNonces` of each account, `voidRefusal` of each listed intent, and `usage()`. `damaged`: records the reference loads, with its `reason` (null when it loads them).';
+  'wallet-intents.jsonl, from the stores reference\'s src/main/wallet/intent-store.js over its lib/durable-journal.js, `crypto.randomUUID` numbered (RUN_ID at each load of the module, then the intent and handoff ids) and the clock fixed. `runs`: one live store per run, with its `limits` overrides, each step an operation (`op`, `args`, at `at`; `restart` loads the module again, a new run of main, with its `limits` for the rest of the run if it has them; `void` without a `lock` is refused) with main\'s `run` (the live store\'s RUN_ID), the `call` the store method got (ids resolved; `lock` for void and retire; withdrawOrigin\'s `result`), the `uuids` `crypto.randomUUID` gave during it, its `refusal` (`code`, `message`) or null, the file\'s `records` after it, `live` (null after a `quiet` step): the live store\'s `usage()` (which sizes each held snapshot, cached until a new hash), `list()` and `voidRefusal` of each listed intent after it, and `load`: a fresh store loading those records, its `reason` for moving the file aside (null: loaded), the records it rewrote the file to (`compacted`, null when unchanged), `list()`, the ids of `held()`, `byKey` of each key, `heldNonces` of each account, `voidRefusal` of each listed intent, and `usage()`. `damaged`: records the reference loads, with its `reason` (null when it loads them).';
 
 async function buildIntents(checkout, ethers) {
   const { encodeLine } = require(path.join(checkout, 'src/main/lib/durable-journal.js'));
