@@ -36,6 +36,7 @@ FILES.push('eip1193.json', 'generator/eip1193.js');
 FILES.push('stores.json', 'generator/stores.js', 'generator/stores-intents.js');
 FILES.push('generator/tx-decode.js');
 FILES.push('journal.json', 'generator/journal.js');
+FILES.push('sqlite.json', 'generator/sqlite.js');
 
 function corruptedCheck(filename, corrupt) {
   const copy = fs.mkdtempSync(path.join(os.tmpdir(), 'freedom-core-vectors-'));
@@ -947,4 +948,12 @@ test('check takes the stores vectors from their own reference, at its pinned com
   // And the file records it.
   const commit = spawnSync('git', ['rev-parse', 'HEAD'], { cwd: STORES_REFERENCE, encoding: 'utf8' }).stdout.trim();
   assert.equal(JSON.parse(fs.readFileSync(path.join(SOURCE, 'stores.json'), 'utf8')).meta.freedomBrowserCommit, commit);
+});
+
+test('check rejects a changed SQLite schema row', () => {
+  const stderr = corruptedCheck('sqlite.json', (contents) => {
+    const row = contents.databases[0].sqlite_master.find((item) => item.name === 'idx_payments_kind');
+    row.rootpage += 1;
+  });
+  assert.match(stderr, /Byte mismatch: sqlite.json/);
 });

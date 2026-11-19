@@ -1,0 +1,5 @@
+#!/bin/sh
+# zig ar (llvm-ar) as the archiver of freedom-cored's *-linux-musl C
+# builds, beside scripts/zig-cc: the runner's own ar needn't read another
+# architecture's objects.
+exec zig ar "$@"

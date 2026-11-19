@@ -171,6 +171,14 @@ fc-swarm = { path = "../fc-swarm" }
 fc-vault = { path = "../fc-vault" }
 getrandom = "0.4"
 rand_core = "0.10"
+# SQLite, for the stores whose schema design 0013 keeps
+# (`payment-history.sqlite`, PRF-5g-2), in this binary only ("Where SQLite
+# lives"): a library crate under crates/ would put a C build in CI's
+# mobile check. `bundled` compiles libsqlite3-sys's amalgamation (SQLite
+# 3.54.1, the one freedom-ipfsd links) on every target, so each release
+# links the SQLite THIRD-PARTY-NOTICES names. No default features: neither
+# the statement cache nor the wasm FFI is used.
+rusqlite = { version = "0.41.1", default-features = false, features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }
 # preserve_order: Radicle's config.json keeps its key order when merged.
 serde_json = { version = "1", features = ["raw_value", "preserve_order"] }

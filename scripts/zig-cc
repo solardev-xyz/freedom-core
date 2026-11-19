@@ -1,0 +1,31 @@
+#!/bin/sh
+# Zig as the C compiler of freedom-cored's *-linux-musl builds (design 0013,
+# "Where SQLite lives"): the bundled SQLite is C, and the runners have no C
+# toolchain for musl. scripts/zig-install.sh points CC_<target> here.
+#
+# cc-rs passes clang's --target=<Rust triple>, which Zig can't parse
+# ("UnknownOperatingSystem"): it becomes Zig's -target for the same target,
+# and any other --target is refused. Without one, as in cc-rs's compiler
+# probes (-E, --version), zig cc runs as given, but a compile (-c) is
+# refused, so nothing is built for a target nobody named.
+set -eu
+target=
+for arg do
+  shift
+  case "$arg" in
+    --target=x86_64-unknown-linux-musl) target=x86_64-linux-musl ;;
+    --target=aarch64-unknown-linux-musl) target=aarch64-linux-musl ;;
+    --target=*) echo "zig-cc: no Zig target for $arg" >&2; exit 2 ;;
+    *) set -- "$@" "$arg" ;;
+  esac
+done
+if [ -n "$target" ]; then
+  exec zig cc -target "$target" "$@"
+fi
+for arg do
+  if [ "$arg" = -c ]; then
+    echo "zig-cc: a compile without --target" >&2
+    exit 2
+  fi
+done
+exec zig cc "$@"

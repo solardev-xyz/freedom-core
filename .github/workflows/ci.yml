@@ -20,6 +20,11 @@ env:
   CARGO_TERM_COLOR: always
   CARGO_DENY_VERSION: "0.20.2"
   CARGO_DENY_SHA256: "9f12ed4c49936e09b48bf862b595cde2fe64fcbd9d74dfacac6131ca824c8d5f"
+  # freedom-cored links the bundled SQLite whatever the runner has:
+  # libsqlite3-sys takes LIBSQLITE3_SYS_USE_PKG_CONFIG (anything but 0)
+  # before its `bundled` feature, and would link the system's (design 0013,
+  # "Where SQLite lives"; release-ipfsd.yml sets it too).
+  LIBSQLITE3_SYS_USE_PKG_CONFIG: "0"
 
 jobs:
   lint:
@@ -128,7 +133,9 @@ jobs:
     # The Release workflow builds freedom-cored for musl, where the `libc`
     # crate's tables differ from glibc's (0.9.0's tag failed on
     # aarch64-unknown-linux-musl: no `libc::SYS_kexec_file_load`). Check both
-    # musl targets here, so a tag never finds that first.
+    # musl targets here, so a tag never finds that first. Their C, the
+    # bundled SQLite, is Zig's, as the release builds it (design 0013,
+    # "Where SQLite lives"): the runner has no C toolchain for musl.
     name: check (Linux musl release targets)
     runs-on: ubuntu-latest
     steps:
@@ -137,9 +144,14 @@ jobs:
           persist-credentials: false
       - run: rustup toolchain install
       - run: rustup target add aarch64-unknown-linux-musl x86_64-unknown-linux-musl
+      - name: Zig, the musl targets' C compiler
+        run: scripts/zig-install.sh "$RUNNER_TEMP/zig" aarch64-unknown-linux-musl x86_64-unknown-linux-musl
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       - run: cargo check --locked -p freedom-cored --target aarch64-unknown-linux-musl
       - run: cargo check --locked -p freedom-cored --target x86_64-unknown-linux-musl
+      # SQLite as Zig builds it for musl, linked and run: the sqlite module's
+      # tests on the target this runner can run.
+      - run: cargo test --locked -p freedom-cored --bin freedom-cored --target x86_64-unknown-linux-musl sqlite::tests
 
   test:
     name: test (${{ matrix.os }})
@@ -192,6 +204,10 @@ jobs:
         run: |
           rustup toolchain install
           rustup target add ${{ matrix.target }}
+      # The bundled SQLite's C compiler for musl, as the release's.
+      - name: Zig, the musl target's C compiler
+        if: contains(matrix.target, 'musl')
+        run: scripts/zig-install.sh "$RUNNER_TEMP/zig" ${{ matrix.target }}
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       # This test alone, so nothing else runs beside the spawns it times. On
       # Linux and macOS with stdio alone, as main spawns the core: the runner
