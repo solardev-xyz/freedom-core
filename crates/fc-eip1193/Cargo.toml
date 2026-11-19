@@ -23,6 +23,11 @@ fc-dweb = { path = "../fc-dweb" }
 # A send's prompt shows `to` checksummed, as main's `getAddress` does
 # (APR-5e-1): a workspace logic crate, no new external dependency.
 fc-evm = { path = "../fc-evm" }
+# What is a Safe's call (`fc_approval::safe::is_safe_call`, design 0012,
+# APR-4d): a send's "Always allow" isn't offered for one, as no rule answers
+# it. The predicate the core's signature checks, read rather than copied; a
+# workspace logic crate, no new external dependency.
+fc-approval = { path = "../fc-approval" }
 
 [dev-dependencies]
 # The replays read vectors/eip1193.json; preserve_order keeps the

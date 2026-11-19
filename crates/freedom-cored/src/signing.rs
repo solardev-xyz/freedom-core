@@ -430,6 +430,7 @@ fn other(
                 Signed::Message {
                     account: account_index(key)?,
                     message: &fields["message"],
+                    bytes: &message,
                 },
             )?;
             let signature = sign_with(state, key, &fc_evm::eip191_digest(&message))?;
