@@ -17,28 +17,35 @@
 //!   gate was taken for, by the device and inode the gate recorded once its
 //!   lock was held (review of #177, round 3). So a home replaced since the
 //!   gate was taken, by a symlink or by another real directory, is refused,
-//!   and one moved after the open keeps receiving its operation. Windows
-//!   exposes no file identity: there the check is the path's alone. Bee's
+//!   and one moved after the open keeps receiving its operation. On
+//!   Windows the directory at the path must have the handle's file ID; the
+//!   gate's recorded identity, a Unix device and inode, isn't compared
+//!   there. Bee's
 //!   root is the data directory main names, which may itself be a symlink
 //!   ([`Resolve::Follow`]). A root that doesn't exist is no target
 //!   (`None`): nothing under it exists.
 //! - **Each directory below it** is opened through its parent, refusing a
-//!   symlink (`O_NOFOLLOW`, `O_DIRECTORY`), and created (`0700`) when a
-//!   write needs it.
+//!   symlink (`O_NOFOLLOW`, `O_DIRECTORY`; on Windows a reparse point, a
+//!   symlink or a junction, opened itself and refused), and created
+//!   (`0700`; on Windows inheriting its parent's ACL) when a write needs
+//!   it.
 //! - **On Unix** the final operation is relative to that directory's handle
 //!   (`openat`, `unlinkat`, `renameat`, `fstatat` without following), so a
 //!   directory swapped for a symlink after it was opened can't redirect it.
 //!   A tree's removal ([`Dir::remove_tree`]) walks it the same way, from
 //!   handle to handle, and unlinks each entry relative to its directory's,
 //!   holding a bounded number of handles however deep the tree is.
-//! - **On Windows** the root and each directory below it are checked to be
-//!   directories, not reparse points (a symlink or a junction), then used by
-//!   path: std exposes no handle-relative calls, so a same-user process
-//!   swapping a directory between that check and the operation is outside
-//!   what the core guarantees there, as design 0001 says of its other
-//!   identity checks. A tree is removed by std's `remove_dir_all`, which
-//!   removes a reparse point itself and walks the tree by handle, but
-//!   reaches its top by path, under the same limit.
+//! - **On Windows** the same holds through `fc-sys`'s handle-relative calls
+//!   (design 0013, "Windows handle I/O (#963)"): each file is opened or
+//!   made by `NtCreateFile` relative to its directory's handle, never
+//!   following a reparse point at its name (one is refused, or removed
+//!   itself), and renamed (`FileRenameInformationEx`, with
+//!   `RootDirectory`) and deleted (`FileDispositionInfoEx`) through its own
+//!   handle, POSIX semantics where the system serves them (Windows 10 1607
+//!   and NTFS) and the older classes, still by handle, where it doesn't. A
+//!   directory swapped for a junction after it was opened can't redirect
+//!   anything: the operation stays in the directory the handle holds. A
+//!   tree is walked by handle too. Only the root is opened by its path.
 
 use std::ffi::{OsStr, OsString};
 use std::fs::File;
@@ -87,6 +94,8 @@ pub struct Dir {
     path: PathBuf,
     #[cfg(unix)]
     fd: rustix::fd::OwnedFd,
+    #[cfg(windows)]
+    handle: std::os::windows::io::OwnedHandle,
 }
 
 impl Dir {
@@ -182,8 +191,8 @@ impl Dir {
 
     /// Removes `name` and everything under it, following no symlink (a
     /// symlink in its place is removed itself). Whether anything was there.
-    /// On Unix the tree is walked from this directory's handle, each entry
-    /// removed relative to its own directory's (review of #177, round 2).
+    /// The tree is walked from this directory's handle, each entry removed
+    /// relative to its own directory's (review of #177, round 2).
     pub fn remove_tree(&self, name: &OsStr) -> io::Result<bool> {
         imp::remove_tree(self, name)
     }
@@ -195,27 +204,29 @@ impl Dir {
     }
 
     /// Renames `from` in this directory to `to` in `target`, both reached
-    /// through their handles on Unix (`renameat`), replacing whatever `to`
-    /// is without following it. A profile's move recovery puts an entry
+    /// through their handles (`renameat`; Windows: `FileRenameInformationEx`
+    /// with `RootDirectory`), replacing whatever `to` is without following
+    /// it. A profile's move recovery puts an entry
     /// back from `freedom/` (design 0013).
     pub fn rename_into(&self, from: &OsStr, target: &Dir, to: &OsStr) -> io::Result<()> {
         imp::rename_into(self, from, target, to)
     }
 
     /// Whether `name` is the file `handle` holds (Unix: the same device and
-    /// inode); `false` if nothing is there. Elsewhere, `true`: no file
-    /// identity is exposed (design 0001).
+    /// inode; Windows: the same volume serial number and file ID); `false`
+    /// if nothing is there.
     pub fn same_file(&self, handle: &File, name: &OsStr) -> io::Result<bool> {
         imp::same_file(self, handle, name)
     }
 
-    /// Flushes this directory's entries (Unix).
+    /// Flushes this directory's entries (Unix; nothing on Windows, where
+    /// `fsx::sync_rename`'s flush of the renamed file serves).
     pub fn sync(&self) -> io::Result<()> {
         imp::sync(self)
     }
 
-    /// This directory again, as a handle of its own (Unix: the descriptor
-    /// duplicated).
+    /// This directory again, as a handle of its own (the descriptor or
+    /// handle duplicated).
     pub fn try_clone(&self) -> io::Result<Dir> {
         imp::try_clone(self)
     }
@@ -235,19 +246,18 @@ impl Dir {
     }
 
     /// The names of the directories in this one, not following a symlink
-    /// (one is no directory), read from its handle on Unix.
+    /// (one is no directory), read from its handle.
     pub fn subdirs(&self) -> io::Result<Vec<OsString>> {
         imp::subdirs(self)
     }
 
-    /// The names of everything in this one, read from its handle on Unix.
+    /// The names of everything in this one, read from its handle.
     pub fn names(&self) -> io::Result<Vec<OsString>> {
         imp::names(self)
     }
 
-    /// This directory's identity: on Unix its device and inode, from its
-    /// handle; on Windows its volume's serial number and file ID, from its
-    /// path (the module's Windows limit).
+    /// This directory's identity, from its handle: on Unix its device and
+    /// inode; on Windows its volume's serial number and file ID.
     pub fn identity(&self) -> io::Result<(u64, u128)> {
         imp::identity_of(self)
     }
@@ -602,235 +612,336 @@ mod imp {
     }
 }
 
-#[cfg(not(unix))]
+#[cfg(windows)]
 mod imp {
     use super::{Dir, Kind, Resolve};
-    use crate::fsx::Regular;
-    use std::ffi::OsStr;
+    use crate::fsx::{Regular, file_identity};
+    use fc_sys::windows::{self as win, Create, Expect, OpenAt, access};
+    use std::ffi::{OsStr, OsString};
     use std::fs::{File, OpenOptions};
     use std::io;
+    use std::os::windows::io::{AsHandle as _, OwnedHandle};
     use std::path::Path;
-
-    /// `FILE_ATTRIBUTE_REPARSE_POINT`: a symlink, a junction or another
-    /// reparse point.
-    #[cfg(windows)]
-    const REPARSE_POINT: u32 = 0x0400;
-
-    fn plain_dir(path: &Path) -> io::Result<Option<bool>> {
-        match std::fs::symlink_metadata(path) {
-            Ok(metadata) => {
-                #[cfg(windows)]
-                let reparse = {
-                    use std::os::windows::fs::MetadataExt;
-                    metadata.file_attributes() & REPARSE_POINT != 0
-                };
-                #[cfg(not(windows))]
-                let reparse = metadata.file_type().is_symlink();
-                Ok(Some(metadata.is_dir() && !reparse))
-            }
-            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
-            Err(e) => Err(e),
-        }
-    }
 
     fn refused() -> io::Error {
         io::Error::other("a symlink or a file where a node directory should be")
     }
 
-    pub fn open_root(root: &Path, resolve: Resolve) -> io::Result<Option<Dir>> {
-        let plain = match resolve {
-            Resolve::Follow => match std::fs::metadata(root) {
-                Ok(metadata) => Some(metadata.is_dir()),
-                Err(e) if e.kind() == io::ErrorKind::NotFound => None,
-                Err(e) => return Err(e),
-            },
-            // Not a reparse point, and still its own canonical path. No file
-            // identity is exposed here, so the gate's isn't compared.
-            Resolve::Canonical(_) => match plain_dir(root)? {
-                Some(true) => Some(std::fs::canonicalize(root)? == root),
-                other => other,
-            },
-        };
-        match plain {
-            Some(true) => Ok(Some(Dir {
-                path: root.to_owned(),
-            })),
-            Some(false) => Err(refused()),
-            None => Ok(None),
+    /// `name` in `dir`, opened relative to its handle as `how` says, a
+    /// reparse point never followed unless `how` says so: `None` if nothing
+    /// is there.
+    fn open(dir: &Dir, name: &OsStr, how: OpenAt) -> io::Result<Option<OwnedHandle>> {
+        match win::open_at(dir.handle.as_handle(), name, how) {
+            Ok(handle) => Ok(Some(handle)),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(e),
         }
+    }
+
+    fn how(access: u32, create: Create, expect: Expect) -> OpenAt {
+        OpenAt {
+            access,
+            create,
+            expect,
+            follow: false,
+        }
+    }
+
+    /// A directory, and not a reparse point: a junction or a directory
+    /// symlink opened itself is neither followed nor taken for one.
+    fn plain_dir(handle: &OwnedHandle) -> io::Result<bool> {
+        let attributes = win::attribute_tag(handle.as_handle())?;
+        Ok(attributes.directory() && !attributes.reparse_point())
+    }
+
+    /// The directory at `path`, by path: a reparse point there followed
+    /// or opened itself. `None` if nothing is there.
+    fn open_path(path: &Path, follow: bool) -> io::Result<Option<OwnedHandle>> {
+        use std::os::windows::fs::OpenOptionsExt as _;
+        let mut custom = win::flags::BACKUP_SEMANTICS;
+        if !follow {
+            custom |= win::flags::OPEN_REPARSE_POINT;
+        }
+        match OpenOptions::new()
+            .access_mode(access::LIST | access::ATTRIBUTES)
+            .custom_flags(custom)
+            .open(path)
+        {
+            Ok(file) => Ok(Some(file.into())),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// The root is opened by its path, once; everything below it is
+    /// reached from that handle. Canonical: not a reparse point, still its
+    /// own canonical path, and the directory at that path now has the
+    /// handle's file ID. The gate's identity is a Unix device and inode, so
+    /// it isn't compared here.
+    pub fn open_root(root: &Path, resolve: Resolve) -> io::Result<Option<Dir>> {
+        let follow = resolve == Resolve::Follow;
+        let Some(handle) = open_path(root, follow)? else {
+            return Ok(None);
+        };
+        let attributes = win::attribute_tag(handle.as_handle())?;
+        if !attributes.directory() || (!follow && attributes.reparse_point()) {
+            return Err(refused());
+        }
+        if let Resolve::Canonical(_) = resolve {
+            let resolved = std::fs::canonicalize(root)?;
+            let now =
+                open_path(root, false)?.ok_or_else(|| io::Error::from(io::ErrorKind::NotFound))?;
+            if resolved != root
+                || file_identity(handle.as_handle())? != file_identity(now.as_handle())?
+            {
+                return Err(io::Error::other(
+                    "a node's root that isn't the directory at its canonical path",
+                ));
+            }
+        }
+        Ok(Some(Dir {
+            path: root.to_owned(),
+            handle,
+        }))
     }
 
     pub fn try_clone(dir: &Dir) -> io::Result<Dir> {
         Ok(Dir {
             path: dir.path.clone(),
+            handle: dir.handle.try_clone()?,
         })
     }
 
+    /// Opened, or made (inheriting its parent's ACL), relative to `dir`'s
+    /// handle; a reparse point there is opened itself and refused, and
+    /// nothing is made through it.
     pub fn child(dir: &Dir, name: &OsStr, create: bool) -> io::Result<Option<Dir>> {
-        let path = dir.path.join(name);
-        match plain_dir(&path)? {
-            Some(true) => Ok(Some(Dir { path })),
-            Some(false) => Err(refused()),
-            None if create => {
-                match std::fs::create_dir(&path) {
-                    Ok(()) => {}
-                    Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {}
-                    Err(e) => return Err(e),
-                }
-                match plain_dir(&path)? {
-                    Some(true) => Ok(Some(Dir { path })),
-                    _ => Err(refused()),
-                }
-            }
-            None => Ok(None),
+        let create = if create {
+            Create::IfMissing
+        } else {
+            Create::No
+        };
+        let opened = match open(dir, name, how(access::LIST, create, Expect::Directory)) {
+            Ok(opened) => opened,
+            Err(e) if e.kind() == io::ErrorKind::NotADirectory => return Err(refused()),
+            Err(e) => return Err(e),
+        };
+        let Some(handle) = opened else {
+            return Ok(None);
+        };
+        if !plain_dir(&handle)? {
+            return Err(refused());
         }
+        Ok(Some(Dir {
+            path: dir.path.join(name),
+            handle,
+        }))
     }
 
     pub fn kind(dir: &Dir, name: &OsStr) -> io::Result<Kind> {
-        let path = dir.path.join(name);
-        match std::fs::symlink_metadata(&path) {
-            Ok(metadata) => {
-                #[cfg(windows)]
-                let reparse = {
-                    use std::os::windows::fs::MetadataExt;
-                    metadata.file_attributes() & REPARSE_POINT != 0
-                };
-                #[cfg(not(windows))]
-                let reparse = metadata.file_type().is_symlink();
-                Ok(if reparse {
-                    Kind::Other
-                } else if metadata.is_dir() {
-                    Kind::Dir
-                } else if metadata.is_file() {
-                    Kind::File
+        let Some(handle) = open(dir, name, how(access::ATTRIBUTES, Create::No, Expect::Any))?
+        else {
+            return Ok(Kind::Missing);
+        };
+        let attributes = win::attribute_tag(handle.as_handle())?;
+        Ok(if attributes.reparse_point() {
+            Kind::Other
+        } else if attributes.directory() {
+            Kind::Dir
+        } else {
+            Kind::File
+        })
+    }
+
+    /// Opened as a file relative to `dir`'s handle and judged on the
+    /// handle: a directory (a junction included) or a reparse point is
+    /// something other than a regular file, not read.
+    fn open_file(dir: &Dir, name: &OsStr, how: OpenAt) -> io::Result<Regular> {
+        match open(dir, name, how) {
+            Ok(Some(handle)) => {
+                let attributes = win::attribute_tag(handle.as_handle())?;
+                if attributes.directory() || attributes.reparse_point() {
+                    Ok(Regular::Other)
                 } else {
-                    Kind::Other
-                })
+                    Ok(Regular::File(File::from(handle)))
+                }
             }
-            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(Kind::Missing),
+            Ok(None) => Ok(Regular::Missing),
+            Err(e) if e.kind() == io::ErrorKind::IsADirectory => Ok(Regular::Other),
             Err(e) => Err(e),
         }
     }
 
     pub fn open_regular(dir: &Dir, name: &OsStr, write: bool) -> io::Result<Regular> {
-        let path = dir.path.join(name);
-        if write {
-            crate::fsx::open_regular_rw(&path)
+        let access = if write {
+            access::READ | access::WRITE
         } else {
-            crate::fsx::open_regular(&path, false)
-        }
+            access::READ
+        };
+        open_file(dir, name, how(access, Create::No, Expect::File))
     }
 
     pub fn open_following(dir: &Dir, name: &OsStr) -> io::Result<Regular> {
-        crate::fsx::open_regular(&dir.path.join(name), true)
+        let how = OpenAt {
+            follow: true,
+            ..how(access::READ, Create::No, Expect::File)
+        };
+        open_file(dir, name, how)
     }
 
     pub fn create_new(dir: &Dir, name: &OsStr) -> io::Result<File> {
-        OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(dir.path.join(name))
+        let handle = win::open_at(
+            dir.handle.as_handle(),
+            name,
+            how(access::WRITE, Create::New, Expect::File),
+        )?;
+        Ok(File::from(handle))
     }
 
+    /// By handle: the entry opened itself (a reparse point included), then
+    /// deleted through that handle. A directory there now is refused.
     pub fn unlink(dir: &Dir, name: &OsStr) -> io::Result<bool> {
-        match std::fs::remove_file(dir.path.join(name)) {
-            Ok(()) => Ok(true),
-            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(false),
+        let Some(handle) = open(dir, name, how(access::DELETE, Create::No, Expect::Any))? else {
+            return Ok(false);
+        };
+        if plain_dir(&handle)? {
+            return Err(io::Error::other(
+                "a directory where a node identity file was to be removed",
+            ));
+        }
+        win::delete(handle.as_handle())?;
+        Ok(true)
+    }
+
+    pub fn rename(dir: &Dir, from: &OsStr, to: &OsStr) -> io::Result<()> {
+        rename_into(dir, from, dir, to)
+    }
+
+    /// By handle: `from` opened itself relative to `dir`'s handle (a
+    /// reparse point is moved itself), then renamed relative to `target`'s.
+    pub fn rename_into(dir: &Dir, from: &OsStr, target: &Dir, to: &OsStr) -> io::Result<()> {
+        let handle = win::open_at(
+            dir.handle.as_handle(),
+            from,
+            how(access::DELETE, Create::No, Expect::Any),
+        )?;
+        win::rename_at(handle.as_handle(), target.handle.as_handle(), to)
+    }
+
+    /// `name` in the directory `parent` is open on, opened itself for its
+    /// removal: `None` if nothing is there.
+    fn open_entry(parent: &OwnedHandle, name: &OsStr) -> io::Result<Option<OwnedHandle>> {
+        match win::open_at(
+            parent.as_handle(),
+            name,
+            how(access::DELETE, Create::No, Expect::Any),
+        ) {
+            Ok(handle) => Ok(Some(handle)),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
             Err(e) => Err(e),
         }
     }
 
-    pub fn rename(dir: &Dir, from: &OsStr, to: &OsStr) -> io::Result<()> {
-        std::fs::rename(dir.path.join(from), dir.path.join(to))
+    fn names_in(handle: &OwnedHandle) -> io::Result<Vec<OsString>> {
+        Ok(win::list_dir(handle.as_handle())?
+            .into_iter()
+            .map(|(name, _)| name)
+            .collect())
     }
 
-    pub fn rename_into(dir: &Dir, from: &OsStr, target: &Dir, to: &OsStr) -> io::Result<()> {
-        std::fs::rename(dir.path.join(from), target.path.join(to))
-    }
-
-    /// std's `remove_dir_all`: a reparse point in the tree's place, or in
-    /// it, is removed itself, and the tree is walked by handle; its top is
-    /// reached by path (the module's Windows limit).
+    /// Depth first, from handle to handle: each entry is opened relative to
+    /// its directory's handle without following a reparse point, and
+    /// deleted through its own handle once empty. A reparse point (a
+    /// symlink or a junction) is deleted itself, never walked into. Each
+    /// level's handle is held until it is deleted, so nothing outside the
+    /// tree is reached, whatever is renamed or swapped above or inside it
+    /// meanwhile. Windows bounds a process's handles in the millions, not
+    /// the thousands: a handle per level is held, where Unix reopens them.
     pub fn remove_tree(dir: &Dir, name: &OsStr) -> io::Result<bool> {
-        match kind(dir, name)? {
-            Kind::Missing => Ok(false),
-            Kind::Dir => match std::fs::remove_dir_all(dir.path.join(name)) {
-                Ok(()) => Ok(true),
-                Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(false),
-                Err(e) => Err(e),
-            },
-            Kind::File | Kind::Other => unlink(dir, name),
+        let Some(top) = open_entry(&dir.handle, name)? else {
+            return Ok(false);
+        };
+        if !plain_dir(&top)? {
+            win::delete(top.as_handle())?;
+            return Ok(true);
+        }
+        let left = names_in(&top)?;
+        let mut levels = vec![(top, left)];
+        loop {
+            let Some((handle, left)) = levels.last_mut() else {
+                return Ok(true);
+            };
+            if let Some(entry) = left.pop() {
+                match open_entry(handle, &entry)? {
+                    None => {}
+                    Some(child) if plain_dir(&child)? => {
+                        let left = names_in(&child)?;
+                        levels.push((child, left));
+                    }
+                    Some(child) => win::delete(child.as_handle())?,
+                }
+                continue;
+            }
+            if let Some((done, _)) = levels.pop() {
+                win::delete(done.as_handle())?;
+            }
         }
     }
 
+    /// The file IDs of `handle` and of `name`, opened itself relative to
+    /// `dir`'s handle.
     pub fn same_file(dir: &Dir, handle: &File, name: &OsStr) -> io::Result<bool> {
-        crate::fsx::same_file(handle, &dir.path.join(name))
+        let Some(named) = open(dir, name, how(access::ATTRIBUTES, Create::No, Expect::Any))? else {
+            return Ok(false);
+        };
+        Ok(file_identity(handle.as_handle())? == file_identity(named.as_handle())?)
     }
 
+    /// Nothing: a directory handle can't be flushed without write access
+    /// to the directory, and Windows documents no durability for it. The
+    /// renamed file's flush commits NTFS's log through the rename
+    /// (`fsx::sync_rename`); power loss is best effort here (design 0001).
     pub fn sync(_dir: &Dir) -> io::Result<()> {
         Ok(())
     }
 
-    /// By path, each entry judged without following it: std's `is_dir` is
-    /// false for a symlink and a junction.
-    pub fn subdirs(dir: &Dir) -> io::Result<Vec<std::ffi::OsString>> {
-        let mut names = Vec::new();
-        for entry in std::fs::read_dir(&dir.path)? {
-            let entry = entry?;
-            if entry.file_type()?.is_dir() {
-                names.push(entry.file_name());
-            }
-        }
-        Ok(names)
+    /// From the handle's listing: a junction or a directory symlink is no
+    /// directory here, as `kind` says.
+    pub fn subdirs(dir: &Dir) -> io::Result<Vec<OsString>> {
+        Ok(win::list_dir(dir.handle.as_handle())?
+            .into_iter()
+            .filter(|(_, attributes)| attributes.directory() && !attributes.reparse_point())
+            .map(|(name, _)| name)
+            .collect())
     }
 
-    pub fn names(dir: &Dir) -> io::Result<Vec<std::ffi::OsString>> {
-        let mut names = Vec::new();
-        for entry in std::fs::read_dir(&dir.path)? {
-            names.push(entry?.file_name());
-        }
-        Ok(names)
+    pub fn names(dir: &Dir) -> io::Result<Vec<OsString>> {
+        names_in(&dir.handle)
     }
 
-    /// From a handle on the path that opens a reparse point itself
-    /// (`FILE_FLAG_OPEN_REPARSE_POINT`), with `FILE_FLAG_BACKUP_SEMANTICS`,
-    /// which a directory needs.
-    #[cfg(windows)]
     pub fn identity_of(dir: &Dir) -> io::Result<(u64, u128)> {
-        use std::os::windows::fs::OpenOptionsExt as _;
-        use std::os::windows::io::AsHandle as _;
-        // FILE_READ_ATTRIBUTES; FILE_FLAG_BACKUP_SEMANTICS |
-        // FILE_FLAG_OPEN_REPARSE_POINT.
-        let handle = OpenOptions::new()
-            .access_mode(0x0080)
-            .custom_flags(0x0200_0000 | 0x0020_0000)
-            .open(&dir.path)?;
-        fc_sys::windows::file_id(handle.as_handle())
-            .or_else(|_| fc_sys::windows::file_index(handle.as_handle()))
+        file_identity(dir.handle.as_handle())
     }
 
-    #[cfg(not(windows))]
-    pub fn identity_of(_dir: &Dir) -> io::Result<(u64, u128)> {
-        Err(io::Error::new(
-            io::ErrorKind::Unsupported,
-            "no file identity on this OS",
-        ))
-    }
-
+    /// By handle, as a directory and not a reparse point: anything else at
+    /// `name`, or a directory that isn't empty, is `false`.
     pub fn remove_empty(dir: &Dir, name: &OsStr) -> io::Result<bool> {
-        if kind(dir, name)? != Kind::Dir {
+        let handle = match open(
+            dir,
+            name,
+            how(access::DELETE, Create::No, Expect::Directory),
+        ) {
+            Ok(Some(handle)) => handle,
+            Ok(None) => return Ok(false),
+            Err(e) if e.kind() == io::ErrorKind::NotADirectory => return Ok(false),
+            Err(e) => return Err(e),
+        };
+        if !plain_dir(&handle)? {
             return Ok(false);
         }
-        match std::fs::remove_dir(dir.path.join(name)) {
+        match win::delete(handle.as_handle()) {
             Ok(()) => Ok(true),
-            Err(e)
-                if matches!(
-                    e.kind(),
-                    io::ErrorKind::NotFound | io::ErrorKind::DirectoryNotEmpty
-                ) =>
-            {
-                Ok(false)
-            }
+            Err(e) if e.kind() == io::ErrorKind::DirectoryNotEmpty => Ok(false),
             Err(e) => Err(e),
         }
     }

@@ -21,6 +21,12 @@
 //! - [`windows::open_dir_at`]: a directory opened or made relative to its
 //!   parent's handle, never through a reparse point, for `fc-service`'s
 //!   profile gate's lock directory (design 0013, "The lock");
+//! - [`windows::open_at`], [`windows::attribute_tag`],
+//!   [`windows::rename_at`], [`windows::delete`] and [`windows::list_dir`]:
+//!   `fc-store`'s directory handles on Windows, each file opened, made,
+//!   renamed, deleted or listed relative to its directory's handle, and a
+//!   reparse point opened itself and refused (design 0013, "Windows handle
+//!   I/O (#963)");
 //! - [`windows::Job`], [`windows::own_job_limits`] and
 //!   [`windows::Mitigation`]: its confinement on Windows (design 0010), a job
 //!   object of one process and the process mitigation policies, each read
