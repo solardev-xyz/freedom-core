@@ -3,7 +3,9 @@
 //! its key and transport key, each recorded `keyless` answer, the checks
 //! the reference makes before it first reads the key's grant, and for
 //! `eth_accounts` the answer and whether its last check follows, from
-//! the scripted `name.check` answers. The daemon replay
+//! the scripted `name.check` answers; for a send (APR-5f-2), its form
+//! before any check, its checks before the grant is read and before the
+//! quote, and its check after the approve and the check at it. The daemon replay
 //! (`freedom-cored/tests/eip1193_names.rs`) runs the whole flow, with the
 //! core's own naming.
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
@@ -115,8 +117,54 @@ fn every_apr5f_scenario_replays_at_the_logic_level() {
                 None if method == "wallet_switchEthereumChain" => {
                     assert_eq!(verdicts.len(), 1, "{what}");
                 }
-                // The send's checks are a later step's.
-                None if method == "eth_sendTransaction" => {}
+                // A send (APR-5f-2): its form first, with nothing resolved;
+                // then two checks before its grant is read, one more after
+                // the rule's choice, before its quote; and after the approve
+                // and the fee check at it, one before the grant is read again
+                // and the token minted (main's turn, D12, between them in the
+                // reference).
+                None if method == "eth_sendTransaction" => {
+                    let mut params = json!({ "method": method, "world": {
+                        "enabled": true, "wallets": file["wallets"], "networks": {},
+                        "chain": doc["chain"],
+                        "window_chain": scenario["world"]["windows"][doc["window"].to_string()],
+                    } });
+                    params["params"] = recorded["params"].clone();
+                    let request = Request::parse(&params.to_string()).unwrap();
+                    let grants = &scenario["grants"]["before"];
+                    let grant = |key: &str| {
+                        grants
+                            .get(key)
+                            .map(|g| fc_json::parse(&g.to_string()).unwrap())
+                    };
+                    let Step::Send(send) = start(&request, Some(key), grant) else {
+                        panic!("{what}");
+                    };
+                    assert!(send.form().is_ok(), "{what}");
+                    let prepare = send.prepare(grant).unwrap();
+                    let estimate = effects
+                        .iter()
+                        .find(|e| e["effect"] == "chain.request")
+                        .unwrap();
+                    let asked: Value = serde_json::from_str(&prepare.estimate_params()).unwrap();
+                    assert_eq!(asked, estimate["args"]["params"], "{what}");
+                    assert_eq!(
+                        leading,
+                        usize::from(names::SEND_FIRST) + 1,
+                        "{what}: the checks before the quote"
+                    );
+                    assert_eq!(effects[leading]["effect"], "chain.request", "{what}");
+                    let approval = effects
+                        .iter()
+                        .position(|e| e["effect"] == "fees.at_approval")
+                        .unwrap();
+                    let kinds: Vec<&str> = effects[approval + 1..]
+                        .iter()
+                        .map(|e| e["effect"].as_str().unwrap())
+                        .collect();
+                    assert_eq!(kinds, ["send.turn", "name.check"], "{what}");
+                    assert_eq!(verdicts.len(), leading + 1, "{what}");
+                }
                 // A permission-free read: no check.
                 None => assert!(verdicts.is_empty(), "{what}"),
             }

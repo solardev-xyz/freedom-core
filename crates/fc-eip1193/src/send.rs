@@ -304,6 +304,14 @@ impl Send {
         }
     }
 
+    /// The transaction's form alone (`txOf`): the reference checks it
+    /// before anything else, before its first name check (APR-5f-2).
+    pub fn form(&self) -> Result<(), Answer> {
+        tx_of(self.params.as_ref())
+            .map(|_| ())
+            .map_err(|message| Answer::error(INVALID_PARAMS, message))
+    }
+
     /// Runs the request up to its quote: the form, the grant `grant`
     /// gives, the account, and the Safe's chain.
     pub fn prepare(&self, grant: impl FnOnce(&str) -> Option<JsValue>) -> Result<Prepare, Answer> {
@@ -665,8 +673,8 @@ impl Judge {
     }
 
     /// The check at approval's verdict (`verdict`, JSON text with
-    /// `askAgain`): asked again when `ask_again`; otherwise the key's grant,
-    /// as `grant` gives it now, must still expose the account shown.
+    /// `askAgain`): asked again when `ask_again`; otherwise
+    /// [`Judge::confirmed`].
     pub fn judged(
         self,
         verdict: &str,
@@ -681,6 +689,15 @@ impl Judge {
                 view,
             }));
         }
+        self.confirmed(grant)
+    }
+
+    /// A send whose fee the check at approval let through: the key's grant,
+    /// as `grant` gives it now, must still expose the account shown; then
+    /// the token is minted. For a name-keyed document the daemon resolves
+    /// the name between the two (APR-5f-2), as the reference checks it just
+    /// before the grant in its send's guard.
+    pub fn confirmed(self, grant: impl FnOnce(&str) -> Option<JsValue>) -> Judged {
         let account = match exposed(&self.prepare, grant) {
             Ok(account) => account,
             Err(answer) => return Judged::Answer(answer),
@@ -831,10 +848,14 @@ pub enum Ruled {
 /// What main's recheck leaves of a rule's send.
 #[derive(Debug, Clone, PartialEq)]
 pub enum RuleRechecked {
-    /// Refused with nothing to sign, or `{ send }` under the rule.
+    /// Refused, with nothing to sign.
     Answer(Answer),
     /// Past its rate, or its fee needing the user, by now: asked.
     Ask(Box<Ask>),
+    /// The rule answers it: `{ send }` under the rule. For a name-keyed
+    /// document the daemon resolves the name first, and asks main's last
+    /// recheck after it (APR-5f-2).
+    Send(Answer),
 }
 
 impl Rule {
@@ -936,7 +957,7 @@ impl Rule {
             prop("tx", tx),
             prop("standing", JsValue::Bool(true)),
         ]);
-        RuleRechecked::Answer(Answer::raw(
+        RuleRechecked::Send(Answer::raw(
             JsValue::Object(vec![prop("send", send)]).stringify(),
         ))
     }

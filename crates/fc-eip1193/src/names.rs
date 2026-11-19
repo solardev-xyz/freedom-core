@@ -103,8 +103,8 @@ pub fn keyless(method: &str) -> Answer {
 /// The reference's checks before a method first reads the key's grant:
 /// one for `eth_accounts`; two for a connect and a signature, before and
 /// after the agent's route (main's, until APR-7). `None` for every other
-/// method: a chain switch checks once its params pass, and a
-/// permission-free method never.
+/// method: a chain switch checks once its params pass, a send once its
+/// form passes ([`SEND_FIRST`]), and a permission-free method never.
 pub fn checks_first(method: &str) -> Option<u8> {
     match method {
         "eth_accounts" => Some(1),
@@ -112,6 +112,15 @@ pub fn checks_first(method: &str) -> Option<u8> {
         _ => None,
     }
 }
+
+/// The reference's checks before a send (`eth_sendTransaction`) first
+/// reads the key's grant (APR-5f-2): two, before and after the agent's
+/// route, once its form (`txOf`) has passed, so that a malformed send is
+/// refused with nothing resolved. Its later checks: once more before its
+/// quote (after the rule's choice), before the prompt of a rule's send
+/// whose fee needs the user, after an approve before the grant is read
+/// again and the token minted, and after main's recheck of a rule's send.
+pub const SEND_FIRST: u8 = 2;
 
 /// Whether `eth_accounts`'s answer reveals an account, so that the
 /// reference checks the name once more before it goes.
@@ -279,7 +288,9 @@ mod tests {
             assert_eq!(checks_first(method), None, "{method}");
         }
         // Every name-revalidated row but the switch and the send checks
-        // first; no permission-free row does.
+        // first; no permission-free row does. The send checks first once
+        // its form has passed.
+        assert_eq!(SEND_FIRST, 2);
         for row in crate::METHODS {
             let first = checks_first(row.name).is_some();
             match row.class {

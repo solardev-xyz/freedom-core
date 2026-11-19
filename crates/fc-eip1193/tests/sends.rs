@@ -557,8 +557,11 @@ fn every_device_and_rule_send_replays() {
                             RuleNow::Covered,
                             &verdict,
                         );
-                        let RuleRechecked::Answer(answer) = rechecked else {
-                            panic!("{id}")
+                        // Custody refuses it; otherwise the rule answers.
+                        let answer = match rechecked {
+                            RuleRechecked::Answer(answer) if agent => answer,
+                            RuleRechecked::Send(answer) if !agent => answer,
+                            other => panic!("{id}: {other:?}"),
                         };
                         if agent {
                             answer.as_str().to_owned()
