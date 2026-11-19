@@ -25,7 +25,7 @@ Apache-2.0, BSD-3-Clause, ...) require their notices to ship with it:
    THIRD-PARTY-NOTICES-rust-std.html.
 3. C libraries a crate bundles and builds into the binary, whose notices
    aren't the crate's own: for freedom-radicled, libgit2 (with the code it
-   bundles), zlib and SQLite; for freedom-ipfsd, SQLite. Each is tied to
+   bundles), zlib and SQLite; for freedom-ipfsd and freedom-cored, SQLite. Each is tied to
    the exact crate version that bundles it, and its texts are read from
    that crate's source or kept in its workspace's notices/, so a new
    version fails until its entry is re-checked. For every binary (each is
@@ -158,6 +158,18 @@ NATIVE = {
             "Apache-2.0 WITH LLVM-exception",
             "notices/llvm-compiler-rt-LICENSE.TXT",
         ),
+        # libsqlite3-sys's amalgamation (sqlite3/sqlite3.c), with `bundled`,
+        # which freedom-cored's rusqlite asks for (design 0013, "Where SQLite
+        # lives"), on every target: Zig compiles it for musl, the runner's
+        # compiler elsewhere. SQLite is in the public domain: its notice is
+        # the dedication its source carries.
+        Native(
+            "SQLite 3.54.1 (C library), built from libsqlite3-sys 0.39.1's "
+            "amalgamation",
+            "blessing (public domain)",
+            "notices/sqlite-3.54.1-NOTICE",
+            "libsqlite3-sys 0.39.1",
+        ),
     ],
     "freedom-ipfsd": [
         *zig_glibc_runtime("notices/glibc-2.17-startup-NOTICE"),
@@ -224,8 +236,8 @@ NATIVE = {
 # For each binary, every shipped crate that declares `links` is accounted
 # for: it bundles a NATIVE entry's library (its `bundled_by`), or is listed
 # here with why its own license files cover what it links. freedom-cored
-# ships none. A binary missing here would go unchecked, so the tests require
-# every binary.
+# ships one, libsqlite3-sys, a NATIVE entry's. A binary missing here would go
+# unchecked, so the tests require every binary.
 RING = (
     "its C and assembly, its own and BoringSSL's, are covered by its LICENSE, "
     "LICENSE-BoringSSL and LICENSE-other-bits"

@@ -9,7 +9,11 @@ change that needs a newer core pins a freedom-core release (design 0001,
      and notices of every crate statically linked into `freedom-cored` on any
      release target, plus the toolchain's runtime: the standard library's
      out-of-tree crates and compiler-builtins, and, on Linux, musl and LLVM's
-     libunwind and crt objects (texts in `notices/`).
+     libunwind and crt objects (texts in `notices/`). It also names the one C
+     library a crate builds into the binary: **SQLite 3.54.1**
+     (`libsqlite3-sys`'s amalgamation, `bundled`), public domain. Its entry
+     (`NATIVE` in the script) is tied to that `libsqlite3-sys` version, so a
+     new one fails until it is re-checked.
    - `THIRD-PARTY-NOTICES-rust-std.html` is the Rust project's notice file for
      the standard library, which the release workflow copies from the
      toolchain.
@@ -58,6 +62,16 @@ change that needs a newer core pins a freedom-core release (design 0001,
    | `freedom-cored-vX.Y.Z-linux-amd64.tar.gz` | `x86_64-unknown-linux-musl` (static) |
    | `freedom-cored-vX.Y.Z-linux-arm64.tar.gz` | `aarch64-unknown-linux-musl` (static) |
    | `freedom-cored-vX.Y.Z-windows-amd64.zip` | `x86_64-pc-windows-msvc` (static CRT) |
+
+   The bundled SQLite is C (design 0013, "Where SQLite lives"). The musl
+   builds compile it with Zig 0.15.2, `release-ipfsd.yml`'s pin
+   (`scripts/zig-install.sh`, the PyPI wheel by sha256, with
+   `scripts/zig-cc` and `scripts/zig-ar` as the target's `CC` and `AR`); the
+   Rust link is unchanged. macOS and Windows use the runner's compiler.
+   Every job sets `LIBSQLITE3_SYS_USE_PKG_CONFIG=0`, so the bundled SQLite
+   is the one linked, and the build refuses `LIBSQLITE3_FLAGS` and
+   `SQLITE_*` variables, which would be compiled in. Each native build also
+   runs the `sqlite` module's tests, optimized, for its target.
 
 4. **Pin it in freedom-browser** (`scripts/fetch-freedom-cored.js`): the tag,
    plus the SHA-256 of the release's `SHA256SUMS`, which the publish job

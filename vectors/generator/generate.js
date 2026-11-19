@@ -27,6 +27,7 @@ const { buildProfiles } = require('./profiles');
 const { buildEip1193 } = require('./eip1193');
 const { buildJournal } = require('./journal');
 const { buildStores } = require('./stores');
+const { buildSqlite } = require('./sqlite');
 
 const REFERENCE_COMMIT = 'fb540328162839e68150fe2c5e517edb86734d1c';
 // The Radicle vectors' own reference: freedom-browser's integration/rust-core,
@@ -677,6 +678,13 @@ async function main() {
       ...stores.meta,
       packages: Object.fromEntries(['ethers', '@sinonjs/fake-timers']
         .map((name) => [name, packageVersion(createRequire(path.join(reference.checkout, 'package.json')), name)])),
+    }),
+    // Design 0013's SQLite stores (PRF-5g-1): each database's schema, from
+    // the stores reference's own modules over the main reference's
+    // better-sqlite3, which meta names with the SQLite it bundles.
+    'sqlite.json': buildSqlite(stores.checkout, reference.checkout, {
+      ...stores.meta,
+      packages: { 'better-sqlite3': packageVersion(createRequire(path.join(reference.checkout, 'package.json')), 'better-sqlite3') },
     }),
   };
   // Check every deterministic file before doing the more expensive fixture checks.
