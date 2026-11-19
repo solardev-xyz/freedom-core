@@ -31,6 +31,7 @@ FILES.push('secrets.json', 'generator/secrets.js');
 FILES.push('keystore.json', 'generator/keystore.js', 'generator/hpke.js');
 FILES.push('generator/approval-rules.js', 'generator/approval-decisions.js');
 FILES.push('eip1193.json', 'generator/eip1193.js');
+FILES.push('generator/tx-decode.js');
 
 function corruptedCheck(filename, corrupt) {
   const copy = fs.mkdtempSync(path.join(os.tmpdir(), 'freedom-core-vectors-'));
@@ -68,6 +69,22 @@ test('check rejects a changed signature', () => {
   const stderr = corruptedCheck('signing.json', (contents) => {
     const entry = contents.typedData.find((item) => item.result.status === 'success');
     entry.result.signature = entry.result.signature.slice(0, -2) + '1b';
+  });
+  assert.match(stderr, /Byte mismatch: signing.json/);
+});
+
+test('check rejects a changed transaction verdict', () => {
+  const stderr = corruptedCheck('signing.json', (contents) => {
+    const entry = contents.transactionDecoding.find((item) => item.result.verdict === 'not_canonical');
+    entry.result = { verdict: 'accepted' };
+  });
+  assert.match(stderr, /Byte mismatch: signing.json/);
+});
+
+test('check rejects a changed transaction signer', () => {
+  const stderr = corruptedCheck('signing.json', (contents) => {
+    const entry = contents.transactionDecoding.find((item) => item.result.signer === null);
+    entry.result.signer = '0x' + '00'.repeat(20);
   });
   assert.match(stderr, /Byte mismatch: signing.json/);
 });
