@@ -38,6 +38,7 @@ mod profile;
 mod requests;
 mod rng;
 mod rpc_keys;
+mod safe_pending;
 mod secrets;
 mod serve;
 mod signing;

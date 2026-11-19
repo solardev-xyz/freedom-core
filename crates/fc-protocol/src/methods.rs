@@ -236,6 +236,14 @@ pub const METHODS: &[Method] = &[
     // Core #392: a cap's narrowing, from the activity pane (or main); a
     // page names no cap of its own (Q11 keys a cap on the seller).
     row("x402.update", CS, false, NOW),
+    // Design 0013, "Pending Safe transactions" (PRF-5f): no channel
+    // returns or writes the file; the chrome gets main's projections.
+    // Reads from the start; writes once `safe_pending` is in
+    // `store_moved`, `not_moved` before.
+    row("safe_pending.get", SHELL, false, NOW),
+    row("safe_pending.set", SHELL, false, NOW),
+    row("safe_pending.clear", SHELL, false, NOW),
+    row("safe_pending.list", SHELL, false, NOW),
     // Design 0012, "fc-eip1193 and approval.request" (APR-5): a page's
     // EIP-1193 request, run by the core's dispatcher; no other caller
     // reaches it.
@@ -423,6 +431,27 @@ mod tests {
                 (CallerKind::Page, page),
                 (CallerKind::Chrome, chrome),
                 (CallerKind::Shell, shell),
+            ] {
+                assert_eq!(
+                    matches!(admit(name, caller, V2), Admission::Allowed(_)),
+                    allowed,
+                    "{name} {caller:?}"
+                );
+            }
+        }
+        // Design 0013, "Callers of the store methods": `safe_pending.*`
+        // is main's alone; no channel returns or writes the file.
+        for name in [
+            "safe_pending.get",
+            "safe_pending.set",
+            "safe_pending.clear",
+            "safe_pending.list",
+        ] {
+            assert_eq!(method(name).unwrap().callers, SHELL, "{name}");
+            for (caller, allowed) in [
+                (CallerKind::Page, false),
+                (CallerKind::Chrome, false),
+                (CallerKind::Shell, true),
             ] {
                 assert_eq!(
                     matches!(admit(name, caller, V2), Admission::Allowed(_)),

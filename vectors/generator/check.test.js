@@ -33,7 +33,7 @@ FILES.push('secrets.json', 'generator/secrets.js');
 FILES.push('keystore.json', 'generator/keystore.js', 'generator/hpke.js');
 FILES.push('generator/approval-rules.js', 'generator/approval-decisions.js');
 FILES.push('eip1193.json', 'generator/eip1193.js');
-FILES.push('stores.json', 'generator/stores.js', 'generator/stores-intents.js');
+FILES.push('stores.json', 'generator/stores.js', 'generator/stores-intents.js', 'generator/stores-safe-pending.js');
 FILES.push('generator/tx-decode.js');
 FILES.push('journal.json', 'generator/journal.js');
 
@@ -933,6 +933,15 @@ test('check rejects a changed vault-meta text', () => {
     const run = contents.vault_meta.runs.find((item) => item.id === 'remove');
     const step = run.steps.find((item) => item.op === 'deleteDerivedWallet' && item.args[0] === 2);
     step.text = step.text.replace('"activeWalletIndex": 0', '"activeWalletIndex": 2');
+  });
+  assert.match(stderr, /Byte mismatch: stores.json/);
+});
+
+test('check rejects a changed pending Safe transactions answer', () => {
+  const stderr = corruptedCheck('stores.json', (contents) => {
+    const run = contents.safe_pending.runs.find((item) => item.id === 'large-indices');
+    const step = run.steps.find((item) => item.op === 'list');
+    step.result = [...step.result].sort((a, b) => a - b);
   });
   assert.match(stderr, /Byte mismatch: stores.json/);
 });

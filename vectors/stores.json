@@ -11,7 +11,8 @@
   "description": "Design 0013 (PRF-5a): the set-A stores the core takes over, each from the stores reference's own module, run whole over an in-memory file system, with the core's operation for each step and its reading of each malformed file.",
   "formats": {
     "vault_meta": "identity/vault-meta.json, from the stores reference's identity-manager.js. `runs`: from a `start` text (or none), each step one of its functions (`op`, its `args`; `$nextHardwareWalletIndex` is `nextHardwareWalletIndex(meta, getWalletList(meta))` over the file) at `at` (the wall clock in milliseconds; `createdAt` is `new Date().toISOString()` at it), after `world` changed the scripted world (`unlocked`: the vault's lock; `ledger`: the address the device answers at each path; `phone`: the phone's proof, `throw` for no answer; `references`: the Swarm feed references of each wallet index), with its `result` (or `error`: `message` and `code`), the `calls` it made (`vault.*` the identity core's, `ledger.*`, `phone.*`, `feeds.*`, `safe.*` and `dapp.*` main's modules', each with its `answer` or `error`), whether it wrote the file (`wrote`) and the file's text after it (`text`, null while there is none). `core`: what the core is asked for the step once main has done its part (`op`, `args`: `new_vault` [userKnowsPassword, at, addresses], `migrate_addresses` [addresses], `add_mnemonic` [unlocked, name] with the address from the step's `vault.addresses` call, `list` with the addresses from its `vault.addresses` call, `remove` [index, the feed references' origins], and the others the function's own arguments), or null where main refuses before asking it (the device or the phone doesn't answer for the address). `malformed`: a file's `text` (or its bytes in `hex`, which Node decodes as UTF-8 with U+FFFD for each invalid sequence, or a `fill`: `open`, `char` repeated, `close`, `bytes` long), what the reference loads from it (`loaded`: `getVaultMeta()` as its `JSON.stringify` text in `json`, or a filled file's keys and `pad` length), a locked `getDerivedWallets()` (`listed`: its `result` or `error`, and whether it wrote), `getActiveWalletIndex()` (`active`), and the core's reading (`core`: `unreadable`, renamed aside and reported, with its `reason`, or `parsed`; the design's, `source: design`, with the 1 MiB bound).",
-    "intents": "wallet-intents.jsonl, from the stores reference's src/main/wallet/intent-store.js over its lib/durable-journal.js, `crypto.randomUUID` numbered (RUN_ID at each load of the module, then the intent and handoff ids) and the clock fixed. `runs`: one live store per run, with its `limits` overrides, each step an operation (`op`, `args`, at `at`; `restart` loads the module again, a new run of main; `void` without a `lock` is refused) with its `refusal` (`code`, `message`) or null, the file's `records` after it, and `load`: a fresh store loading those records, its `reason` for moving the file aside (null: loaded), the records it rewrote the file to (`compacted`, null when unchanged), `list()`, the ids of `held()`, `byKey` of each key, `heldNonces` of each account, `voidRefusal` of each listed intent, and `usage()`. `damaged`: records the reference loads, with its `reason` (null when it loads them)."
+    "intents": "wallet-intents.jsonl, from the stores reference's src/main/wallet/intent-store.js over its lib/durable-journal.js, `crypto.randomUUID` numbered (RUN_ID at each load of the module, then the intent and handoff ids) and the clock fixed. `runs`: one live store per run, with its `limits` overrides, each step an operation (`op`, `args`, at `at`; `restart` loads the module again, a new run of main; `void` without a `lock` is refused) with its `refusal` (`code`, `message`) or null, the file's `records` after it, and `load`: a fresh store loading those records, its `reason` for moving the file aside (null: loaded), the records it rewrote the file to (`compacted`, null when unchanged), `list()`, the ids of `held()`, `byKey` of each key, `heldNonces` of each account, `voidRefusal` of each listed intent, and `usage()`. `damaged`: records the reference loads, with its `reason` (null when it loads them).",
+    "safe_pending": "safe-pending.json at the Freedom root, from the stores reference's wallet/safe/pending-store.js. `runs`: from a `start` text (or none), each step one of its functions in one load of the module (`get` getPending, `set` setPending, `clear` clearPending, `list` listPendingIndexes, with its `args`: the wallet index, and for `set` the entry), its `result` (null for undefined), whether it wrote the file (`wrote`) and the file's text after it (`text`, null while there is none); the core is asked the same. `malformed`: a file's `text` (or its bytes in `hex`, which Node decodes as UTF-8 with U+FFFD for each invalid sequence, or a `fill`: `open`, `char` repeated, `close`, `bytes` long), what the reference loads from it (`loaded`: its `JSON.stringify` text in `json`, or a filled file's keys and the string's length), `listPendingIndexes()` (`listed`: its `result` or `error`), `getPending(index)` (`got`; a filled file's string entry by its `length`), the file after `setPending(7, { a: 1 })` (`set`: its `text`, or its length in `bytes` past 4,096, with the set's `error` if it threw, and for a file the core parses its own verdict, `core`: `written`, the same text, or `refused` past the bound), and the core's reading (`core`: `unreadable`, renamed aside and reported, with its `reason`, or `parsed`, where the core answers and sets as the reference does). `bound`: a set at `index` of a string entry (`char` repeated `length` times) over no file, the bytes the reference writes, and the core's verdict: `written`, or `refused` (the store unchanged) past the design's 1 MiB."
   },
   "source": {
     "max_file_bytes": "design"
@@ -25525,6 +25526,1756 @@
           }
         ],
         "reason": "Invalid wallet intent record: void of intent 00000000-0000-4000-8000-000000000002: an earlier handoff may have been sent"
+      }
+    ]
+  },
+  "safe_pending": {
+    "file": "safe-pending.json",
+    "max_file_bytes": 1048576,
+    "source": {
+      "max_file_bytes": "design"
+    },
+    "runs": [
+      {
+        "id": "from-none",
+        "start": null,
+        "steps": [
+          {
+            "op": "list",
+            "args": [],
+            "result": [],
+            "wrote": false,
+            "text": null
+          },
+          {
+            "op": "get",
+            "args": [
+              0
+            ],
+            "result": null,
+            "wrote": false,
+            "text": null
+          },
+          {
+            "op": "clear",
+            "args": [
+              0
+            ],
+            "result": null,
+            "wrote": false,
+            "text": null
+          },
+          {
+            "op": "set",
+            "args": [
+              3,
+              {
+                "chainId": 100,
+                "safeAddress": "0xc1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1",
+                "safeTxData": {
+                  "to": "0xabababababababababababababababababababab",
+                  "value": "1000000000000000",
+                  "data": "0x",
+                  "operation": 0,
+                  "safeTxGas": "0",
+                  "baseGas": "0",
+                  "gasPrice": "0",
+                  "gasToken": "0x0000000000000000000000000000000000000000",
+                  "refundReceiver": "0x0000000000000000000000000000000000000000",
+                  "nonce": "1"
+                },
+                "safeTxHash": "0x0101010101010101010101010101010101010101010101010101010101010101",
+                "typedData": {
+                  "domain": {
+                    "chainId": 100,
+                    "verifyingContract": "0xc1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1"
+                  },
+                  "primaryType": "SafeTx",
+                  "message": {
+                    "nonce": "1"
+                  }
+                },
+                "threshold": 2,
+                "signatures": [],
+                "createdAt": 1763000000001
+              }
+            ],
+            "result": null,
+            "wrote": true,
+            "text": "{\n  \"3\": {\n    \"chainId\": 100,\n    \"safeAddress\": \"0xc1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1\",\n    \"safeTxData\": {\n      \"to\": \"0xabababababababababababababababababababab\",\n      \"value\": \"1000000000000000\",\n      \"data\": \"0x\",\n      \"operation\": 0,\n      \"safeTxGas\": \"0\",\n      \"baseGas\": \"0\",\n      \"gasPrice\": \"0\",\n      \"gasToken\": \"0x0000000000000000000000000000000000000000\",\n      \"refundReceiver\": \"0x0000000000000000000000000000000000000000\",\n      \"nonce\": \"1\"\n    },\n    \"safeTxHash\": \"0x0101010101010101010101010101010101010101010101010101010101010101\",\n    \"typedData\": {\n      \"domain\": {\n        \"chainId\": 100,\n        \"verifyingContract\": \"0xc1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1\"\n      },\n      \"primaryType\": \"SafeTx\",\n      \"message\": {\n        \"nonce\": \"1\"\n      }\n    },\n    \"threshold\": 2,\n    \"signatures\": [],\n    \"createdAt\": 1763000000001\n  }\n}"
+          },
+          {
+            "op": "get",
+            "args": [
+              3
+            ],
+            "result": {
+              "chainId": 100,
+              "safeAddress": "0xc1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1",
+              "safeTxData": {
+                "to": "0xabababababababababababababababababababab",
+                "value": "1000000000000000",
+                "data": "0x",
+                "operation": 0,
+                "safeTxGas": "0",
+                "baseGas": "0",
+                "gasPrice": "0",
+                "gasToken": "0x0000000000000000000000000000000000000000",
+                "refundReceiver": "0x0000000000000000000000000000000000000000",
+                "nonce": "1"
+              },
+              "safeTxHash": "0x0101010101010101010101010101010101010101010101010101010101010101",
+              "typedData": {
+                "domain": {
+                  "chainId": 100,
+                  "verifyingContract": "0xc1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1"
+                },
+                "primaryType": "SafeTx",
+                "message": {
+                  "nonce": "1"
+                }
+              },
+              "threshold": 2,
+              "signatures": [],
+              "createdAt": 1763000000001
+            },
+            "wrote": false,
+            "text": "{\n  \"3\": {\n    \"chainId\": 100,\n    \"safeAddress\": \"0xc1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1\",\n    \"safeTxData\": {\n      \"to\": \"0xabababababababababababababababababababab\",\n      \"value\": \"1000000000000000\",\n      \"data\": \"0x\",\n      \"operation\": 0,\n      \"safeTxGas\": \"0\",\n      \"baseGas\": \"0\",\n      \"gasPrice\": \"0\",\n      \"gasToken\": \"0x0000000000000000000000000000000000000000\",\n      \"refundReceiver\": \"0x0000000000000000000000000000000000000000\",\n      \"nonce\": \"1\"\n    },\n    \"safeTxHash\": \"0x0101010101010101010101010101010101010101010101010101010101010101\",\n    \"typedData\": {\n      \"domain\": {\n        \"chainId\": 100,\n        \"verifyingContract\": \"0xc1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1\"\n      },\n      \"primaryType\": \"SafeTx\",\n      \"message\": {\n        \"nonce\": \"1\"\n      }\n    },\n    \"threshold\": 2,\n    \"signatures\": [],\n    \"createdAt\": 1763000000001\n  }\n}"
+          },
+          {
+            "op": "list",
+            "args": [],
+            "result": [
+              3
+            ],
+            "wrote": false,
+            "text": "{\n  \"3\": {\n    \"chainId\": 100,\n    \"safeAddress\": \"0xc1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1\",\n    \"safeTxData\": {\n      \"to\": \"0xabababababababababababababababababababab\",\n      \"value\": \"1000000000000000\",\n      \"data\": \"0x\",\n      \"operation\": 0,\n      \"safeTxGas\": \"0\",\n      \"baseGas\": \"0\",\n      \"gasPrice\": \"0\",\n      \"gasToken\": \"0x0000000000000000000000000000000000000000\",\n      \"refundReceiver\": \"0x0000000000000000000000000000000000000000\",\n      \"nonce\": \"1\"\n    },\n    \"safeTxHash\": \"0x0101010101010101010101010101010101010101010101010101010101010101\",\n    \"typedData\": {\n      \"domain\": {\n        \"chainId\": 100,\n        \"verifyingContract\": \"0xc1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1\"\n      },\n      \"primaryType\": \"SafeTx\",\n      \"message\": {\n        \"nonce\": \"1\"\n      }\n    },\n    \"threshold\": 2,\n    \"signatures\": [],\n    \"createdAt\": 1763000000001\n  }\n}"
+          },
+          {
+            "op": "set",
+            "args": [
+              1,
+              {
+                "chainId": 100,
+                "safeAddress": "0xc1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1",
+                "safeTxData": {
+                  "to": "0xabababababababababababababababababababab",
+                  "value": "1000000000000000",
+                  "data": "0x",
+                  "operation": 0,
+                  "safeTxGas": "0",
+                  "baseGas": "0",
+                  "gasPrice": "0",
+                  "gasToken": "0x0000000000000000000000000000000000000000",
+                  "refundReceiver": "0x0000000000000000000000000000000000000000",
+                  "nonce": "2"
+                },
+                "safeTxHash": "0x0202020202020202020202020202020202020202020202020202020202020202",
+                "typedData": {
+                  "domain": {
+                    "chainId": 100,
+                    "verifyingContract": "0xc1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1"
+                  },
+                  "primaryType": "SafeTx",
+                  "message": {
+                    "nonce": "2"
+                  }
+                },
+                "threshold": 2,
+                "signatures": [],
+                "createdAt": 1763000000002
+              }
+            ],
+            "result": null,
+            "wrote": true,
+            "text": "{\n  \"1\": {\n    \"chainId\": 100,\n    \"safeAddress\": \"0xc1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1\",\n    \"safeTxData\": {\n      \"to\": \"0xabababababababababababababababababababab\",\n      \"value\": \"1000000000000000\",\n      \"data\": \"0x\",\n      \"operation\": 0,\n      \"safeTxGas\": \"0\",\n      \"baseGas\": \"0\",\n      \"gasPrice\": \"0\",\n      \"gasToken\": \"0x0000000000000000000000000000000000000000\",\n      \"refundReceiver\": \"0x0000000000000000000000000000000000000000\",\n      \"nonce\": \"2\"\n    },\n    \"safeTxHash\": \"0x0202020202020202020202020202020202020202020202020202020202020202\",\n    \"typedData\": {\n      \"domain\": {\n        \"chainId\": 100,\n        \"verifyingContract\": \"0xc1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1\"\n      },\n      \"primaryType\": \"SafeTx\",\n      \"message\": {\n        \"nonce\": \"2\"\n      }\n    },\n    \"threshold\": 2,\n    \"signatures\": [],\n    \"createdAt\": 1763000000002\n  },\n  \"3\": {\n    \"chainId\": 100,\n    \"safeAddress\": \"0xc1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1\",\n    \"safeTxData\": {\n      \"to\": \"0xabababababababababababababababababababab\",\n      \"value\": \"1000000000000000\",\n      \"data\": \"0x\",\n      \"operation\": 0,\n      \"safeTxGas\": \"0\",\n      \"baseGas\": \"0\",\n      \"gasPrice\": \"0\",\n      \"gasToken\": \"0x0000000000000000000000000000000000000000\",\n      \"refundReceiver\": \"0x0000000000000000000000000000000000000000\",\n      \"nonce\": \"1\"\n    },\n    \"safeTxHash\": \"0x0101010101010101010101010101010101010101010101010101010101010101\",\n    \"typedData\": {\n      \"domain\": {\n        \"chainId\": 100,\n        \"verifyingContract\": \"0xc1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1\"\n      },\n      \"primaryType\": \"SafeTx\",\n      \"message\": {\n        \"nonce\": \"1\"\n      }\n    },\n    \"threshold\": 2,\n    \"signatures\": [],\n    \"createdAt\": 1763000000001\n  }\n}"
+          },
+          {
+            "op": "list",
+            "args": [],
+            "result": [
+              1,
+              3
+            ],
+            "wrote": false,
+            "text": "{\n  \"1\": {\n    \"chainId\": 100,\n    \"safeAddress\": \"0xc1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1\",\n    \"safeTxData\": {\n      \"to\": \"0xabababababababababababababababababababab\",\n      \"value\": \"1000000000000000\",\n      \"data\": \"0x\",\n      \"operation\": 0,\n      \"safeTxGas\": \"0\",\n      \"baseGas\": \"0\",\n      \"gasPrice\": \"0\",\n      \"gasToken\": \"0x0000000000000000000000000000000000000000\",\n      \"refundReceiver\": \"0x0000000000000000000000000000000000000000\",\n      \"nonce\": \"2\"\n    },\n    \"safeTxHash\": \"0x0202020202020202020202020202020202020202020202020202020202020202\",\n    \"typedData\": {\n      \"domain\": {\n        \"chainId\": 100,\n        \"verifyingContract\": \"0xc1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1\"\n      },\n      \"primaryType\": \"SafeTx\",\n      \"message\": {\n        \"nonce\": \"2\"\n      }\n    },\n    \"threshold\": 2,\n    \"signatures\": [],\n    \"createdAt\": 1763000000002\n  },\n  \"3\": {\n    \"chainId\": 100,\n    \"safeAddress\": \"0xc1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1\",\n    \"safeTxData\": {\n      \"to\": \"0xabababababababababababababababababababab\",\n      \"value\": \"1000000000000000\",\n      \"data\": \"0x\",\n      \"operation\": 0,\n      \"safeTxGas\": \"0\",\n      \"baseGas\": \"0\",\n      \"gasPrice\": \"0\",\n      \"gasToken\": \"0x0000000000000000000000000000000000000000\",\n      \"refundReceiver\": \"0x0000000000000000000000000000000000000000\",\n      \"nonce\": \"1\"\n    },\n    \"safeTxHash\": \"0x0101010101010101010101010101010101010101010101010101010101010101\",\n    \"typedData\": {\n      \"domain\": {\n        \"chainId\": 100,\n        \"verifyingContract\": \"0xc1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1\"\n      },\n      \"primaryType\": \"SafeTx\",\n      \"message\": {\n        \"nonce\": \"1\"\n      }\n    },\n    \"threshold\": 2,\n    \"signatures\": [],\n    \"createdAt\": 1763000000001\n  }\n}"
+          },
+          {
+            "op": "set",
+            "args": [
+              1000000,
+              {
+                "chainId": 100,
+                "safeAddress": "0xc1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1",
+                "safeTxData": {
+                  "to": "0xabababababababababababababababababababab",
+                  "value": "1000000000000000",
+                  "data": "0x",
+                  "operation": 0,
+                  "safeTxGas": "0",
+                  "baseGas": "0",
+                  "gasPrice": "0",
+                  "gasToken": "0x0000000000000000000000000000000000000000",
+                  "refundReceiver": "0x0000000000000000000000000000000000000000",
+                  "nonce": "5"
+                },
+                "safeTxHash": "0x0505050505050505050505050505050505050505050505050505050505050505",
+                "typedData": {
+                  "domain": {
+                    "chainId": 100,
+                    "verifyingContract": "0xc1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1"
+                  },
+                  "primaryType": "SafeTx",
+                  "message": {
+                    "nonce": "5"
+                  }
+                },
+                "threshold": 2,
+                "signatures": [
+                  {
+                    "signer": "0xa1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+                    "data": "0x1111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111"
+                  }
+                ],
+                "createdAt": 1763000000005,
+                "display": {
+                  "site": "https://app.example",
+                  "title": "Swap ✓ é 😀"
+                }
+              }
+            ],
+            "result": null,
+            "wrote": true,
+            "text": "{\n  \"1\": {\n    \"chainId\": 100,\n    \"safeAddress\": \"0xc1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1\",\n    \"safeTxData\": {\n      \"to\": \"0xabababababababababababababababababababab\",\n      \"value\": \"1000000000000000\",\n      \"data\": \"0x\",\n      \"operation\": 0,\n      \"safeTxGas\": \"0\",\n      \"baseGas\": \"0\",\n      \"gasPrice\": \"0\",\n      \"gasToken\": \"0x0000000000000000000000000000000000000000\",\n      \"refundReceiver\": \"0x0000000000000000000000000000000000000000\",\n      \"nonce\": \"2\"\n    },\n    \"safeTxHash\": \"0x0202020202020202020202020202020202020202020202020202020202020202\",\n    \"typedData\": {\n      \"domain\": {\n        \"chainId\": 100,\n        \"verifyingContract\": \"0xc1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1\"\n      },\n      \"primaryType\": \"SafeTx\",\n      \"message\": {\n        \"nonce\": \"2\"\n      }\n    },\n    \"threshold\": 2,\n    \"signatures\": [],\n    \"createdAt\": 1763000000002\n  },\n  \"3\": {\n    \"chainId\": 100,\n    \"safeAddress\": \"0xc1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1\",\n    \"safeTxData\": {\n      \"to\": \"0xabababababababababababababababababababab\",\n      \"value\": \"1000000000000000\",\n      \"data\": \"0x\",\n      \"operation\": 0,\n      \"safeTxGas\": \"0\",\n      \"baseGas\": \"0\",\n      \"gasPrice\": \"0\",\n      \"gasToken\": \"0x0000000000000000000000000000000000000000\",\n      \"refundReceiver\": \"0x0000000000000000000000000000000000000000\",\n      \"nonce\": \"1\"\n    },\n    \"safeTxHash\": \"0x0101010101010101010101010101010101010101010101010101010101010101\",\n    \"typedData\": {\n      \"domain\": {\n        \"chainId\": 100,\n        \"verifyingContract\": \"0xc1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1\"\n      },\n      \"primaryType\": \"SafeTx\",\n      \"message\": {\n        \"nonce\": \"1\"\n      }\n    },\n    \"threshold\": 2,\n    \"signatures\": [],\n    \"createdAt\": 1763000000001\n  },\n  \"1000000\": {\n    \"chainId\": 100,\n    \"safeAddress\": \"0xc1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1\",\n    \"safeTxData\": {\n      \"to\": \"0xabababababababababababababababababababab\",\n      \"value\": \"1000000000000000\",\n      \"data\": \"0x\",\n      \"operation\": 0,\n      \"safeTxGas\": \"0\",\n      \"baseGas\": \"0\",\n      \"gasPrice\": \"0\",\n      \"gasToken\": \"0x0000000000000000000000000000000000000000\",\n      \"refundReceiver\": \"0x0000000000000000000000000000000000000000\",\n      \"nonce\": \"5\"\n    },\n    \"safeTxHash\": \"0x0505050505050505050505050505050505050505050505050505050505050505\",\n    \"typedData\": {\n      \"domain\": {\n        \"chainId\": 100,\n        \"verifyingContract\": \"0xc1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1\"\n      },\n      \"primaryType\": \"SafeTx\",\n      \"message\": {\n        \"nonce\": \"5\"\n      }\n    },\n    \"threshold\": 2,\n    \"signatures\": [\n      {\n        \"signer\": \"0xa1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1\",\n        \"data\": \"0x1111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111\"\n      }\n    ],\n    \"createdAt\": 1763000000005,\n    \"display\": {\n      \"site\": \"https://app.example\",\n      \"title\": \"Swap ✓ é 😀\"\n    }\n  }\n}"
+          },
+          {
+            "op": "get",
+            "args": [
+              1000000
+            ],
+            "result": {
+              "chainId": 100,
+              "safeAddress": "0xc1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1",
+              "safeTxData": {
+                "to": "0xabababababababababababababababababababab",
+                "value": "1000000000000000",
+                "data": "0x",
+                "operation": 0,
+                "safeTxGas": "0",
+                "baseGas": "0",
+                "gasPrice": "0",
+                "gasToken": "0x0000000000000000000000000000000000000000",
+                "refundReceiver": "0x0000000000000000000000000000000000000000",
+                "nonce": "5"
+              },
+              "safeTxHash": "0x0505050505050505050505050505050505050505050505050505050505050505",
+              "typedData": {
+                "domain": {
+                  "chainId": 100,
+                  "verifyingContract": "0xc1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1"
+                },
+                "primaryType": "SafeTx",
+                "message": {
+                  "nonce": "5"
+                }
+              },
+              "threshold": 2,
+              "signatures": [
+                {
+                  "signer": "0xa1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+                  "data": "0x1111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111"
+                }
+              ],
+              "createdAt": 1763000000005,
+              "display": {
+                "site": "https://app.example",
+                "title": "Swap ✓ é 😀"
+              }
+            },
+            "wrote": false,
+            "text": "{\n  \"1\": {\n    \"chainId\": 100,\n    \"safeAddress\": \"0xc1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1\",\n    \"safeTxData\": {\n      \"to\": \"0xabababababababababababababababababababab\",\n      \"value\": \"1000000000000000\",\n      \"data\": \"0x\",\n      \"operation\": 0,\n      \"safeTxGas\": \"0\",\n      \"baseGas\": \"0\",\n      \"gasPrice\": \"0\",\n      \"gasToken\": \"0x0000000000000000000000000000000000000000\",\n      \"refundReceiver\": \"0x0000000000000000000000000000000000000000\",\n      \"nonce\": \"2\"\n    },\n    \"safeTxHash\": \"0x0202020202020202020202020202020202020202020202020202020202020202\",\n    \"typedData\": {\n      \"domain\": {\n        \"chainId\": 100,\n        \"verifyingContract\": \"0xc1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1\"\n      },\n      \"primaryType\": \"SafeTx\",\n      \"message\": {\n        \"nonce\": \"2\"\n      }\n    },\n    \"threshold\": 2,\n    \"signatures\": [],\n    \"createdAt\": 1763000000002\n  },\n  \"3\": {\n    \"chainId\": 100,\n    \"safeAddress\": \"0xc1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1\",\n    \"safeTxData\": {\n      \"to\": \"0xabababababababababababababababababababab\",\n      \"value\": \"1000000000000000\",\n      \"data\": \"0x\",\n      \"operation\": 0,\n      \"safeTxGas\": \"0\",\n      \"baseGas\": \"0\",\n      \"gasPrice\": \"0\",\n      \"gasToken\": \"0x0000000000000000000000000000000000000000\",\n      \"refundReceiver\": \"0x0000000000000000000000000000000000000000\",\n      \"nonce\": \"1\"\n    },\n    \"safeTxHash\": \"0x0101010101010101010101010101010101010101010101010101010101010101\",\n    \"typedData\": {\n      \"domain\": {\n        \"chainId\": 100,\n        \"verifyingContract\": \"0xc1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1\"\n      },\n      \"primaryType\": \"SafeTx\",\n      \"message\": {\n        \"nonce\": \"1\"\n      }\n    },\n    \"threshold\": 2,\n    \"signatures\": [],\n    \"createdAt\": 1763000000001\n  },\n  \"1000000\": {\n    \"chainId\": 100,\n    \"safeAddress\": \"0xc1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1\",\n    \"safeTxData\": {\n      \"to\": \"0xabababababababababababababababababababab\",\n      \"value\": \"1000000000000000\",\n      \"data\": \"0x\",\n      \"operation\": 0,\n      \"safeTxGas\": \"0\",\n      \"baseGas\": \"0\",\n      \"gasPrice\": \"0\",\n      \"gasToken\": \"0x0000000000000000000000000000000000000000\",\n      \"refundReceiver\": \"0x0000000000000000000000000000000000000000\",\n      \"nonce\": \"5\"\n    },\n    \"safeTxHash\": \"0x0505050505050505050505050505050505050505050505050505050505050505\",\n    \"typedData\": {\n      \"domain\": {\n        \"chainId\": 100,\n        \"verifyingContract\": \"0xc1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1\"\n      },\n      \"primaryType\": \"SafeTx\",\n      \"message\": {\n        \"nonce\": \"5\"\n      }\n    },\n    \"threshold\": 2,\n    \"signatures\": [\n      {\n        \"signer\": \"0xa1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1\",\n        \"data\": \"0x1111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111\"\n      }\n    ],\n    \"createdAt\": 1763000000005,\n    \"display\": {\n      \"site\": \"https://app.example\",\n      \"title\": \"Swap ✓ é 😀\"\n    }\n  }\n}"
+          },
+          {
+            "op": "set",
+            "args": [
+              3,
+              {
+                "chainId": 100,
+                "safeAddress": "0xc1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1",
+                "safeTxData": {
+                  "to": "0xabababababababababababababababababababab",
+                  "value": "1000000000000000",
+                  "data": "0x",
+                  "operation": 0,
+                  "safeTxGas": "0",
+                  "baseGas": "0",
+                  "gasPrice": "0",
+                  "gasToken": "0x0000000000000000000000000000000000000000",
+                  "refundReceiver": "0x0000000000000000000000000000000000000000",
+                  "nonce": "6"
+                },
+                "safeTxHash": "0x0606060606060606060606060606060606060606060606060606060606060606",
+                "typedData": {
+                  "domain": {
+                    "chainId": 100,
+                    "verifyingContract": "0xc1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1"
+                  },
+                  "primaryType": "SafeTx",
+                  "message": {
+                    "nonce": "6"
+                  }
+                },
+                "threshold": 2,
+                "signatures": [],
+                "createdAt": 1763000000006,
+                "executed": {
+                  "hash": "0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+                  "explorerUrl": "https://gnosisscan.io/tx/0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+                }
+              }
+            ],
+            "result": null,
+            "wrote": true,
+            "text": "{\n  \"1\": {\n    \"chainId\": 100,\n    \"safeAddress\": \"0xc1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1\",\n    \"safeTxData\": {\n      \"to\": \"0xabababababababababababababababababababab\",\n      \"value\": \"1000000000000000\",\n      \"data\": \"0x\",\n      \"operation\": 0,\n      \"safeTxGas\": \"0\",\n      \"baseGas\": \"0\",\n      \"gasPrice\": \"0\",\n      \"gasToken\": \"0x0000000000000000000000000000000000000000\",\n      \"refundReceiver\": \"0x0000000000000000000000000000000000000000\",\n      \"nonce\": \"2\"\n    },\n    \"safeTxHash\": \"0x0202020202020202020202020202020202020202020202020202020202020202\",\n    \"typedData\": {\n      \"domain\": {\n        \"chainId\": 100,\n        \"verifyingContract\": \"0xc1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1\"\n      },\n      \"primaryType\": \"SafeTx\",\n      \"message\": {\n        \"nonce\": \"2\"\n      }\n    },\n    \"threshold\": 2,\n    \"signatures\": [],\n    \"createdAt\": 1763000000002\n  },\n  \"3\": {\n    \"chainId\": 100,\n    \"safeAddress\": \"0xc1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1\",\n    \"safeTxData\": {\n      \"to\": \"0xabababababababababababababababababababab\",\n      \"value\": \"1000000000000000\",\n      \"data\": \"0x\",\n      \"operation\": 0,\n      \"safeTxGas\": \"0\",\n      \"baseGas\": \"0\",\n      \"gasPrice\": \"0\",\n      \"gasToken\": \"0x0000000000000000000000000000000000000000\",\n      \"refundReceiver\": \"0x0000000000000000000000000000000000000000\",\n      \"nonce\": \"6\"\n    },\n    \"safeTxHash\": \"0x0606060606060606060606060606060606060606060606060606060606060606\",\n    \"typedData\": {\n      \"domain\": {\n        \"chainId\": 100,\n        \"verifyingContract\": \"0xc1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1\"\n      },\n      \"primaryType\": \"SafeTx\",\n      \"message\": {\n        \"nonce\": \"6\"\n      }\n    },\n    \"threshold\": 2,\n    \"signatures\": [],\n    \"createdAt\": 1763000000006,\n    \"executed\": {\n      \"hash\": \"0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\",\n      \"explorerUrl\": \"https://gnosisscan.io/tx/0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\"\n    }\n  },\n  \"1000000\": {\n    \"chainId\": 100,\n    \"safeAddress\": \"0xc1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1\",\n    \"safeTxData\": {\n      \"to\": \"0xabababababababababababababababababababab\",\n      \"value\": \"1000000000000000\",\n      \"data\": \"0x\",\n      \"operation\": 0,\n      \"safeTxGas\": \"0\",\n      \"baseGas\": \"0\",\n      \"gasPrice\": \"0\",\n      \"gasToken\": \"0x0000000000000000000000000000000000000000\",\n      \"refundReceiver\": \"0x0000000000000000000000000000000000000000\",\n      \"nonce\": \"5\"\n    },\n    \"safeTxHash\": \"0x0505050505050505050505050505050505050505050505050505050505050505\",\n    \"typedData\": {\n      \"domain\": {\n        \"chainId\": 100,\n        \"verifyingContract\": \"0xc1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1\"\n      },\n      \"primaryType\": \"SafeTx\",\n      \"message\": {\n        \"nonce\": \"5\"\n      }\n    },\n    \"threshold\": 2,\n    \"signatures\": [\n      {\n        \"signer\": \"0xa1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1\",\n        \"data\": \"0x1111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111\"\n      }\n    ],\n    \"createdAt\": 1763000000005,\n    \"display\": {\n      \"site\": \"https://app.example\",\n      \"title\": \"Swap ✓ é 😀\"\n    }\n  }\n}"
+          },
+          {
+            "op": "get",
+            "args": [
+              3
+            ],
+            "result": {
+              "chainId": 100,
+              "safeAddress": "0xc1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1",
+              "safeTxData": {
+                "to": "0xabababababababababababababababababababab",
+                "value": "1000000000000000",
+                "data": "0x",
+                "operation": 0,
+                "safeTxGas": "0",
+                "baseGas": "0",
+                "gasPrice": "0",
+                "gasToken": "0x0000000000000000000000000000000000000000",
+                "refundReceiver": "0x0000000000000000000000000000000000000000",
+                "nonce": "6"
+              },
+              "safeTxHash": "0x0606060606060606060606060606060606060606060606060606060606060606",
+              "typedData": {
+                "domain": {
+                  "chainId": 100,
+                  "verifyingContract": "0xc1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1"
+                },
+                "primaryType": "SafeTx",
+                "message": {
+                  "nonce": "6"
+                }
+              },
+              "threshold": 2,
+              "signatures": [],
+              "createdAt": 1763000000006,
+              "executed": {
+                "hash": "0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+                "explorerUrl": "https://gnosisscan.io/tx/0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+              }
+            },
+            "wrote": false,
+            "text": "{\n  \"1\": {\n    \"chainId\": 100,\n    \"safeAddress\": \"0xc1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1\",\n    \"safeTxData\": {\n      \"to\": \"0xabababababababababababababababababababab\",\n      \"value\": \"1000000000000000\",\n      \"data\": \"0x\",\n      \"operation\": 0,\n      \"safeTxGas\": \"0\",\n      \"baseGas\": \"0\",\n      \"gasPrice\": \"0\",\n      \"gasToken\": \"0x0000000000000000000000000000000000000000\",\n      \"refundReceiver\": \"0x0000000000000000000000000000000000000000\",\n      \"nonce\": \"2\"\n    },\n    \"safeTxHash\": \"0x0202020202020202020202020202020202020202020202020202020202020202\",\n    \"typedData\": {\n      \"domain\": {\n        \"chainId\": 100,\n        \"verifyingContract\": \"0xc1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1\"\n      },\n      \"primaryType\": \"SafeTx\",\n      \"message\": {\n        \"nonce\": \"2\"\n      }\n    },\n    \"threshold\": 2,\n    \"signatures\": [],\n    \"createdAt\": 1763000000002\n  },\n  \"3\": {\n    \"chainId\": 100,\n    \"safeAddress\": \"0xc1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1\",\n    \"safeTxData\": {\n      \"to\": \"0xabababababababababababababababababababab\",\n      \"value\": \"1000000000000000\",\n      \"data\": \"0x\",\n      \"operation\": 0,\n      \"safeTxGas\": \"0\",\n      \"baseGas\": \"0\",\n      \"gasPrice\": \"0\",\n      \"gasToken\": \"0x0000000000000000000000000000000000000000\",\n      \"refundReceiver\": \"0x0000000000000000000000000000000000000000\",\n      \"nonce\": \"6\"\n    },\n    \"safeTxHash\": \"0x0606060606060606060606060606060606060606060606060606060606060606\",\n    \"typedData\": {\n      \"domain\": {\n        \"chainId\": 100,\n        \"verifyingContract\": \"0xc1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1\"\n      },\n      \"primaryType\": \"SafeTx\",\n      \"message\": {\n        \"nonce\": \"6\"\n      }\n    },\n    \"threshold\": 2,\n    \"signatures\": [],\n    \"createdAt\": 1763000000006,\n    \"executed\": {\n      \"hash\": \"0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\",\n      \"explorerUrl\": \"https://gnosisscan.io/tx/0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\"\n    }\n  },\n  \"1000000\": {\n    \"chainId\": 100,\n    \"safeAddress\": \"0xc1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1\",\n    \"safeTxData\": {\n      \"to\": \"0xabababababababababababababababababababab\",\n      \"value\": \"1000000000000000\",\n      \"data\": \"0x\",\n      \"operation\": 0,\n      \"safeTxGas\": \"0\",\n      \"baseGas\": \"0\",\n      \"gasPrice\": \"0\",\n      \"gasToken\": \"0x0000000000000000000000000000000000000000\",\n      \"refundReceiver\": \"0x0000000000000000000000000000000000000000\",\n      \"nonce\": \"5\"\n    },\n    \"safeTxHash\": \"0x0505050505050505050505050505050505050505050505050505050505050505\",\n    \"typedData\": {\n      \"domain\": {\n        \"chainId\": 100,\n        \"verifyingContract\": \"0xc1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1\"\n      },\n      \"primaryType\": \"SafeTx\",\n      \"message\": {\n        \"nonce\": \"5\"\n      }\n    },\n    \"threshold\": 2,\n    \"signatures\": [\n      {\n        \"signer\": \"0xa1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1\",\n        \"data\": \"0x1111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111\"\n      }\n    ],\n    \"createdAt\": 1763000000005,\n    \"display\": {\n      \"site\": \"https://app.example\",\n      \"title\": \"Swap ✓ é 😀\"\n    }\n  }\n}"
+          },
+          {
+            "op": "list",
+            "args": [],
+            "result": [
+              1,
+              3,
+              1000000
+            ],
+            "wrote": false,
+            "text": "{\n  \"1\": {\n    \"chainId\": 100,\n    \"safeAddress\": \"0xc1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1\",\n    \"safeTxData\": {\n      \"to\": \"0xabababababababababababababababababababab\",\n      \"value\": \"1000000000000000\",\n      \"data\": \"0x\",\n      \"operation\": 0,\n      \"safeTxGas\": \"0\",\n      \"baseGas\": \"0\",\n      \"gasPrice\": \"0\",\n      \"gasToken\": \"0x0000000000000000000000000000000000000000\",\n      \"refundReceiver\": \"0x0000000000000000000000000000000000000000\",\n      \"nonce\": \"2\"\n    },\n    \"safeTxHash\": \"0x0202020202020202020202020202020202020202020202020202020202020202\",\n    \"typedData\": {\n      \"domain\": {\n        \"chainId\": 100,\n        \"verifyingContract\": \"0xc1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1\"\n      },\n      \"primaryType\": \"SafeTx\",\n      \"message\": {\n        \"nonce\": \"2\"\n      }\n    },\n    \"threshold\": 2,\n    \"signatures\": [],\n    \"createdAt\": 1763000000002\n  },\n  \"3\": {\n    \"chainId\": 100,\n    \"safeAddress\": \"0xc1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1\",\n    \"safeTxData\": {\n      \"to\": \"0xabababababababababababababababababababab\",\n      \"value\": \"1000000000000000\",\n      \"data\": \"0x\",\n      \"operation\": 0,\n      \"safeTxGas\": \"0\",\n      \"baseGas\": \"0\",\n      \"gasPrice\": \"0\",\n      \"gasToken\": \"0x0000000000000000000000000000000000000000\",\n      \"refundReceiver\": \"0x0000000000000000000000000000000000000000\",\n      \"nonce\": \"6\"\n    },\n    \"safeTxHash\": \"0x0606060606060606060606060606060606060606060606060606060606060606\",\n    \"typedData\": {\n      \"domain\": {\n        \"chainId\": 100,\n        \"verifyingContract\": \"0xc1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1\"\n      },\n      \"primaryType\": \"SafeTx\",\n      \"message\": {\n        \"nonce\": \"6\"\n      }\n    },\n    \"threshold\": 2,\n    \"signatures\": [],\n    \"createdAt\": 1763000000006,\n    \"executed\": {\n      \"hash\": \"0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\",\n      \"explorerUrl\": \"https://gnosisscan.io/tx/0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\"\n    }\n  },\n  \"1000000\": {\n    \"chainId\": 100,\n    \"safeAddress\": \"0xc1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1\",\n    \"safeTxData\": {\n      \"to\": \"0xabababababababababababababababababababab\",\n      \"value\": \"1000000000000000\",\n      \"data\": \"0x\",\n      \"operation\": 0,\n      \"safeTxGas\": \"0\",\n      \"baseGas\": \"0\",\n      \"gasPrice\": \"0\",\n      \"gasToken\": \"0x0000000000000000000000000000000000000000\",\n      \"refundReceiver\": \"0x0000000000000000000000000000000000000000\",\n      \"nonce\": \"5\"\n    },\n    \"safeTxHash\": \"0x0505050505050505050505050505050505050505050505050505050505050505\",\n    \"typedData\": {\n      \"domain\": {\n        \"chainId\": 100,\n        \"verifyingContract\": \"0xc1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1\"\n      },\n      \"primaryType\": \"SafeTx\",\n      \"message\": {\n        \"nonce\": \"5\"\n      }\n    },\n    \"threshold\": 2,\n    \"signatures\": [\n      {\n        \"signer\": \"0xa1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1\",\n        \"data\": \"0x1111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111\"\n      }\n    ],\n    \"createdAt\": 1763000000005,\n    \"display\": {\n      \"site\": \"https://app.example\",\n      \"title\": \"Swap ✓ é 😀\"\n    }\n  }\n}"
+          },
+          {
+            "op": "clear",
+            "args": [
+              1
+            ],
+            "result": null,
+            "wrote": true,
+            "text": "{\n  \"3\": {\n    \"chainId\": 100,\n    \"safeAddress\": \"0xc1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1\",\n    \"safeTxData\": {\n      \"to\": \"0xabababababababababababababababababababab\",\n      \"value\": \"1000000000000000\",\n      \"data\": \"0x\",\n      \"operation\": 0,\n      \"safeTxGas\": \"0\",\n      \"baseGas\": \"0\",\n      \"gasPrice\": \"0\",\n      \"gasToken\": \"0x0000000000000000000000000000000000000000\",\n      \"refundReceiver\": \"0x0000000000000000000000000000000000000000\",\n      \"nonce\": \"6\"\n    },\n    \"safeTxHash\": \"0x0606060606060606060606060606060606060606060606060606060606060606\",\n    \"typedData\": {\n      \"domain\": {\n        \"chainId\": 100,\n        \"verifyingContract\": \"0xc1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1\"\n      },\n      \"primaryType\": \"SafeTx\",\n      \"message\": {\n        \"nonce\": \"6\"\n      }\n    },\n    \"threshold\": 2,\n    \"signatures\": [],\n    \"createdAt\": 1763000000006,\n    \"executed\": {\n      \"hash\": \"0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\",\n      \"explorerUrl\": \"https://gnosisscan.io/tx/0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\"\n    }\n  },\n  \"1000000\": {\n    \"chainId\": 100,\n    \"safeAddress\": \"0xc1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1\",\n    \"safeTxData\": {\n      \"to\": \"0xabababababababababababababababababababab\",\n      \"value\": \"1000000000000000\",\n      \"data\": \"0x\",\n      \"operation\": 0,\n      \"safeTxGas\": \"0\",\n      \"baseGas\": \"0\",\n      \"gasPrice\": \"0\",\n      \"gasToken\": \"0x0000000000000000000000000000000000000000\",\n      \"refundReceiver\": \"0x0000000000000000000000000000000000000000\",\n      \"nonce\": \"5\"\n    },\n    \"safeTxHash\": \"0x0505050505050505050505050505050505050505050505050505050505050505\",\n    \"typedData\": {\n      \"domain\": {\n        \"chainId\": 100,\n        \"verifyingContract\": \"0xc1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1\"\n      },\n      \"primaryType\": \"SafeTx\",\n      \"message\": {\n        \"nonce\": \"5\"\n      }\n    },\n    \"threshold\": 2,\n    \"signatures\": [\n      {\n        \"signer\": \"0xa1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1\",\n        \"data\": \"0x1111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111\"\n      }\n    ],\n    \"createdAt\": 1763000000005,\n    \"display\": {\n      \"site\": \"https://app.example\",\n      \"title\": \"Swap ✓ é 😀\"\n    }\n  }\n}"
+          },
+          {
+            "op": "clear",
+            "args": [
+              1
+            ],
+            "result": null,
+            "wrote": false,
+            "text": "{\n  \"3\": {\n    \"chainId\": 100,\n    \"safeAddress\": \"0xc1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1\",\n    \"safeTxData\": {\n      \"to\": \"0xabababababababababababababababababababab\",\n      \"value\": \"1000000000000000\",\n      \"data\": \"0x\",\n      \"operation\": 0,\n      \"safeTxGas\": \"0\",\n      \"baseGas\": \"0\",\n      \"gasPrice\": \"0\",\n      \"gasToken\": \"0x0000000000000000000000000000000000000000\",\n      \"refundReceiver\": \"0x0000000000000000000000000000000000000000\",\n      \"nonce\": \"6\"\n    },\n    \"safeTxHash\": \"0x0606060606060606060606060606060606060606060606060606060606060606\",\n    \"typedData\": {\n      \"domain\": {\n        \"chainId\": 100,\n        \"verifyingContract\": \"0xc1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1\"\n      },\n      \"primaryType\": \"SafeTx\",\n      \"message\": {\n        \"nonce\": \"6\"\n      }\n    },\n    \"threshold\": 2,\n    \"signatures\": [],\n    \"createdAt\": 1763000000006,\n    \"executed\": {\n      \"hash\": \"0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\",\n      \"explorerUrl\": \"https://gnosisscan.io/tx/0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\"\n    }\n  },\n  \"1000000\": {\n    \"chainId\": 100,\n    \"safeAddress\": \"0xc1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1\",\n    \"safeTxData\": {\n      \"to\": \"0xabababababababababababababababababababab\",\n      \"value\": \"1000000000000000\",\n      \"data\": \"0x\",\n      \"operation\": 0,\n      \"safeTxGas\": \"0\",\n      \"baseGas\": \"0\",\n      \"gasPrice\": \"0\",\n      \"gasToken\": \"0x0000000000000000000000000000000000000000\",\n      \"refundReceiver\": \"0x0000000000000000000000000000000000000000\",\n      \"nonce\": \"5\"\n    },\n    \"safeTxHash\": \"0x0505050505050505050505050505050505050505050505050505050505050505\",\n    \"typedData\": {\n      \"domain\": {\n        \"chainId\": 100,\n        \"verifyingContract\": \"0xc1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1\"\n      },\n      \"primaryType\": \"SafeTx\",\n      \"message\": {\n        \"nonce\": \"5\"\n      }\n    },\n    \"threshold\": 2,\n    \"signatures\": [\n      {\n        \"signer\": \"0xa1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1\",\n        \"data\": \"0x1111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111\"\n      }\n    ],\n    \"createdAt\": 1763000000005,\n    \"display\": {\n      \"site\": \"https://app.example\",\n      \"title\": \"Swap ✓ é 😀\"\n    }\n  }\n}"
+          },
+          {
+            "op": "get",
+            "args": [
+              1
+            ],
+            "result": null,
+            "wrote": false,
+            "text": "{\n  \"3\": {\n    \"chainId\": 100,\n    \"safeAddress\": \"0xc1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1\",\n    \"safeTxData\": {\n      \"to\": \"0xabababababababababababababababababababab\",\n      \"value\": \"1000000000000000\",\n      \"data\": \"0x\",\n      \"operation\": 0,\n      \"safeTxGas\": \"0\",\n      \"baseGas\": \"0\",\n      \"gasPrice\": \"0\",\n      \"gasToken\": \"0x0000000000000000000000000000000000000000\",\n      \"refundReceiver\": \"0x0000000000000000000000000000000000000000\",\n      \"nonce\": \"6\"\n    },\n    \"safeTxHash\": \"0x0606060606060606060606060606060606060606060606060606060606060606\",\n    \"typedData\": {\n      \"domain\": {\n        \"chainId\": 100,\n        \"verifyingContract\": \"0xc1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1\"\n      },\n      \"primaryType\": \"SafeTx\",\n      \"message\": {\n        \"nonce\": \"6\"\n      }\n    },\n    \"threshold\": 2,\n    \"signatures\": [],\n    \"createdAt\": 1763000000006,\n    \"executed\": {\n      \"hash\": \"0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\",\n      \"explorerUrl\": \"https://gnosisscan.io/tx/0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\"\n    }\n  },\n  \"1000000\": {\n    \"chainId\": 100,\n    \"safeAddress\": \"0xc1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1\",\n    \"safeTxData\": {\n      \"to\": \"0xabababababababababababababababababababab\",\n      \"value\": \"1000000000000000\",\n      \"data\": \"0x\",\n      \"operation\": 0,\n      \"safeTxGas\": \"0\",\n      \"baseGas\": \"0\",\n      \"gasPrice\": \"0\",\n      \"gasToken\": \"0x0000000000000000000000000000000000000000\",\n      \"refundReceiver\": \"0x0000000000000000000000000000000000000000\",\n      \"nonce\": \"5\"\n    },\n    \"safeTxHash\": \"0x0505050505050505050505050505050505050505050505050505050505050505\",\n    \"typedData\": {\n      \"domain\": {\n        \"chainId\": 100,\n        \"verifyingContract\": \"0xc1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1\"\n      },\n      \"primaryType\": \"SafeTx\",\n      \"message\": {\n        \"nonce\": \"5\"\n      }\n    },\n    \"threshold\": 2,\n    \"signatures\": [\n      {\n        \"signer\": \"0xa1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1\",\n        \"data\": \"0x1111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111\"\n      }\n    ],\n    \"createdAt\": 1763000000005,\n    \"display\": {\n      \"site\": \"https://app.example\",\n      \"title\": \"Swap ✓ é 😀\"\n    }\n  }\n}"
+          },
+          {
+            "op": "list",
+            "args": [],
+            "result": [
+              3,
+              1000000
+            ],
+            "wrote": false,
+            "text": "{\n  \"3\": {\n    \"chainId\": 100,\n    \"safeAddress\": \"0xc1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1\",\n    \"safeTxData\": {\n      \"to\": \"0xabababababababababababababababababababab\",\n      \"value\": \"1000000000000000\",\n      \"data\": \"0x\",\n      \"operation\": 0,\n      \"safeTxGas\": \"0\",\n      \"baseGas\": \"0\",\n      \"gasPrice\": \"0\",\n      \"gasToken\": \"0x0000000000000000000000000000000000000000\",\n      \"refundReceiver\": \"0x0000000000000000000000000000000000000000\",\n      \"nonce\": \"6\"\n    },\n    \"safeTxHash\": \"0x0606060606060606060606060606060606060606060606060606060606060606\",\n    \"typedData\": {\n      \"domain\": {\n        \"chainId\": 100,\n        \"verifyingContract\": \"0xc1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1\"\n      },\n      \"primaryType\": \"SafeTx\",\n      \"message\": {\n        \"nonce\": \"6\"\n      }\n    },\n    \"threshold\": 2,\n    \"signatures\": [],\n    \"createdAt\": 1763000000006,\n    \"executed\": {\n      \"hash\": \"0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\",\n      \"explorerUrl\": \"https://gnosisscan.io/tx/0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\"\n    }\n  },\n  \"1000000\": {\n    \"chainId\": 100,\n    \"safeAddress\": \"0xc1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1\",\n    \"safeTxData\": {\n      \"to\": \"0xabababababababababababababababababababab\",\n      \"value\": \"1000000000000000\",\n      \"data\": \"0x\",\n      \"operation\": 0,\n      \"safeTxGas\": \"0\",\n      \"baseGas\": \"0\",\n      \"gasPrice\": \"0\",\n      \"gasToken\": \"0x0000000000000000000000000000000000000000\",\n      \"refundReceiver\": \"0x0000000000000000000000000000000000000000\",\n      \"nonce\": \"5\"\n    },\n    \"safeTxHash\": \"0x0505050505050505050505050505050505050505050505050505050505050505\",\n    \"typedData\": {\n      \"domain\": {\n        \"chainId\": 100,\n        \"verifyingContract\": \"0xc1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1\"\n      },\n      \"primaryType\": \"SafeTx\",\n      \"message\": {\n        \"nonce\": \"5\"\n      }\n    },\n    \"threshold\": 2,\n    \"signatures\": [\n      {\n        \"signer\": \"0xa1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1\",\n        \"data\": \"0x1111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111\"\n      }\n    ],\n    \"createdAt\": 1763000000005,\n    \"display\": {\n      \"site\": \"https://app.example\",\n      \"title\": \"Swap ✓ é 😀\"\n    }\n  }\n}"
+          },
+          {
+            "op": "clear",
+            "args": [
+              3
+            ],
+            "result": null,
+            "wrote": true,
+            "text": "{\n  \"1000000\": {\n    \"chainId\": 100,\n    \"safeAddress\": \"0xc1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1\",\n    \"safeTxData\": {\n      \"to\": \"0xabababababababababababababababababababab\",\n      \"value\": \"1000000000000000\",\n      \"data\": \"0x\",\n      \"operation\": 0,\n      \"safeTxGas\": \"0\",\n      \"baseGas\": \"0\",\n      \"gasPrice\": \"0\",\n      \"gasToken\": \"0x0000000000000000000000000000000000000000\",\n      \"refundReceiver\": \"0x0000000000000000000000000000000000000000\",\n      \"nonce\": \"5\"\n    },\n    \"safeTxHash\": \"0x0505050505050505050505050505050505050505050505050505050505050505\",\n    \"typedData\": {\n      \"domain\": {\n        \"chainId\": 100,\n        \"verifyingContract\": \"0xc1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1\"\n      },\n      \"primaryType\": \"SafeTx\",\n      \"message\": {\n        \"nonce\": \"5\"\n      }\n    },\n    \"threshold\": 2,\n    \"signatures\": [\n      {\n        \"signer\": \"0xa1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1\",\n        \"data\": \"0x1111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111\"\n      }\n    ],\n    \"createdAt\": 1763000000005,\n    \"display\": {\n      \"site\": \"https://app.example\",\n      \"title\": \"Swap ✓ é 😀\"\n    }\n  }\n}"
+          },
+          {
+            "op": "clear",
+            "args": [
+              1000000
+            ],
+            "result": null,
+            "wrote": true,
+            "text": "{}"
+          },
+          {
+            "op": "list",
+            "args": [],
+            "result": [],
+            "wrote": false,
+            "text": "{}"
+          },
+          {
+            "op": "get",
+            "args": [
+              3
+            ],
+            "result": null,
+            "wrote": false,
+            "text": "{}"
+          }
+        ]
+      },
+      {
+        "id": "existing",
+        "start": "{\n  \"2\": {\n    \"chainId\": 100,\n    \"safeAddress\": \"0xc1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1\",\n    \"safeTxData\": {\n      \"to\": \"0xabababababababababababababababababababab\",\n      \"value\": \"1000000000000000\",\n      \"data\": \"0x\",\n      \"operation\": 0,\n      \"safeTxGas\": \"0\",\n      \"baseGas\": \"0\",\n      \"gasPrice\": \"0\",\n      \"gasToken\": \"0x0000000000000000000000000000000000000000\",\n      \"refundReceiver\": \"0x0000000000000000000000000000000000000000\",\n      \"nonce\": \"3\"\n    },\n    \"safeTxHash\": \"0x0303030303030303030303030303030303030303030303030303030303030303\",\n    \"typedData\": {\n      \"domain\": {\n        \"chainId\": 100,\n        \"verifyingContract\": \"0xc1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1\"\n      },\n      \"primaryType\": \"SafeTx\",\n      \"message\": {\n        \"nonce\": \"3\"\n      }\n    },\n    \"threshold\": 2,\n    \"signatures\": [],\n    \"createdAt\": 1763000000003\n  },\n  \"1000001\": {\n    \"chainId\": 100,\n    \"safeAddress\": \"0xc1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1\",\n    \"safeTxData\": {\n      \"to\": \"0xabababababababababababababababababababab\",\n      \"value\": \"1000000000000000\",\n      \"data\": \"0x\",\n      \"operation\": 0,\n      \"safeTxGas\": \"0\",\n      \"baseGas\": \"0\",\n      \"gasPrice\": \"0\",\n      \"gasToken\": \"0x0000000000000000000000000000000000000000\",\n      \"refundReceiver\": \"0x0000000000000000000000000000000000000000\",\n      \"nonce\": \"5\"\n    },\n    \"safeTxHash\": \"0x0505050505050505050505050505050505050505050505050505050505050505\",\n    \"typedData\": {\n      \"domain\": {\n        \"chainId\": 100,\n        \"verifyingContract\": \"0xc1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1\"\n      },\n      \"primaryType\": \"SafeTx\",\n      \"message\": {\n        \"nonce\": \"5\"\n      }\n    },\n    \"threshold\": 2,\n    \"signatures\": [\n      {\n        \"signer\": \"0xa1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1\",\n        \"data\": \"0x1111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111\"\n      }\n    ],\n    \"createdAt\": 1763000000005,\n    \"display\": {\n      \"site\": \"https://app.example\",\n      \"title\": \"Swap ✓ é 😀\"\n    }\n  }\n}",
+        "steps": [
+          {
+            "op": "list",
+            "args": [],
+            "result": [
+              2,
+              1000001
+            ],
+            "wrote": false,
+            "text": "{\n  \"2\": {\n    \"chainId\": 100,\n    \"safeAddress\": \"0xc1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1\",\n    \"safeTxData\": {\n      \"to\": \"0xabababababababababababababababababababab\",\n      \"value\": \"1000000000000000\",\n      \"data\": \"0x\",\n      \"operation\": 0,\n      \"safeTxGas\": \"0\",\n      \"baseGas\": \"0\",\n      \"gasPrice\": \"0\",\n      \"gasToken\": \"0x0000000000000000000000000000000000000000\",\n      \"refundReceiver\": \"0x0000000000000000000000000000000000000000\",\n      \"nonce\": \"3\"\n    },\n    \"safeTxHash\": \"0x0303030303030303030303030303030303030303030303030303030303030303\",\n    \"typedData\": {\n      \"domain\": {\n        \"chainId\": 100,\n        \"verifyingContract\": \"0xc1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1\"\n      },\n      \"primaryType\": \"SafeTx\",\n      \"message\": {\n        \"nonce\": \"3\"\n      }\n    },\n    \"threshold\": 2,\n    \"signatures\": [],\n    \"createdAt\": 1763000000003\n  },\n  \"1000001\": {\n    \"chainId\": 100,\n    \"safeAddress\": \"0xc1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1\",\n    \"safeTxData\": {\n      \"to\": \"0xabababababababababababababababababababab\",\n      \"value\": \"1000000000000000\",\n      \"data\": \"0x\",\n      \"operation\": 0,\n      \"safeTxGas\": \"0\",\n      \"baseGas\": \"0\",\n      \"gasPrice\": \"0\",\n      \"gasToken\": \"0x0000000000000000000000000000000000000000\",\n      \"refundReceiver\": \"0x0000000000000000000000000000000000000000\",\n      \"nonce\": \"5\"\n    },\n    \"safeTxHash\": \"0x0505050505050505050505050505050505050505050505050505050505050505\",\n    \"typedData\": {\n      \"domain\": {\n        \"chainId\": 100,\n        \"verifyingContract\": \"0xc1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1\"\n      },\n      \"primaryType\": \"SafeTx\",\n      \"message\": {\n        \"nonce\": \"5\"\n      }\n    },\n    \"threshold\": 2,\n    \"signatures\": [\n      {\n        \"signer\": \"0xa1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1\",\n        \"data\": \"0x1111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111\"\n      }\n    ],\n    \"createdAt\": 1763000000005,\n    \"display\": {\n      \"site\": \"https://app.example\",\n      \"title\": \"Swap ✓ é 😀\"\n    }\n  }\n}"
+          },
+          {
+            "op": "get",
+            "args": [
+              2
+            ],
+            "result": {
+              "chainId": 100,
+              "safeAddress": "0xc1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1",
+              "safeTxData": {
+                "to": "0xabababababababababababababababababababab",
+                "value": "1000000000000000",
+                "data": "0x",
+                "operation": 0,
+                "safeTxGas": "0",
+                "baseGas": "0",
+                "gasPrice": "0",
+                "gasToken": "0x0000000000000000000000000000000000000000",
+                "refundReceiver": "0x0000000000000000000000000000000000000000",
+                "nonce": "3"
+              },
+              "safeTxHash": "0x0303030303030303030303030303030303030303030303030303030303030303",
+              "typedData": {
+                "domain": {
+                  "chainId": 100,
+                  "verifyingContract": "0xc1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1"
+                },
+                "primaryType": "SafeTx",
+                "message": {
+                  "nonce": "3"
+                }
+              },
+              "threshold": 2,
+              "signatures": [],
+              "createdAt": 1763000000003
+            },
+            "wrote": false,
+            "text": "{\n  \"2\": {\n    \"chainId\": 100,\n    \"safeAddress\": \"0xc1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1\",\n    \"safeTxData\": {\n      \"to\": \"0xabababababababababababababababababababab\",\n      \"value\": \"1000000000000000\",\n      \"data\": \"0x\",\n      \"operation\": 0,\n      \"safeTxGas\": \"0\",\n      \"baseGas\": \"0\",\n      \"gasPrice\": \"0\",\n      \"gasToken\": \"0x0000000000000000000000000000000000000000\",\n      \"refundReceiver\": \"0x0000000000000000000000000000000000000000\",\n      \"nonce\": \"3\"\n    },\n    \"safeTxHash\": \"0x0303030303030303030303030303030303030303030303030303030303030303\",\n    \"typedData\": {\n      \"domain\": {\n        \"chainId\": 100,\n        \"verifyingContract\": \"0xc1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1\"\n      },\n      \"primaryType\": \"SafeTx\",\n      \"message\": {\n        \"nonce\": \"3\"\n      }\n    },\n    \"threshold\": 2,\n    \"signatures\": [],\n    \"createdAt\": 1763000000003\n  },\n  \"1000001\": {\n    \"chainId\": 100,\n    \"safeAddress\": \"0xc1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1\",\n    \"safeTxData\": {\n      \"to\": \"0xabababababababababababababababababababab\",\n      \"value\": \"1000000000000000\",\n      \"data\": \"0x\",\n      \"operation\": 0,\n      \"safeTxGas\": \"0\",\n      \"baseGas\": \"0\",\n      \"gasPrice\": \"0\",\n      \"gasToken\": \"0x0000000000000000000000000000000000000000\",\n      \"refundReceiver\": \"0x0000000000000000000000000000000000000000\",\n      \"nonce\": \"5\"\n    },\n    \"safeTxHash\": \"0x0505050505050505050505050505050505050505050505050505050505050505\",\n    \"typedData\": {\n      \"domain\": {\n        \"chainId\": 100,\n        \"verifyingContract\": \"0xc1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1\"\n      },\n      \"primaryType\": \"SafeTx\",\n      \"message\": {\n        \"nonce\": \"5\"\n      }\n    },\n    \"threshold\": 2,\n    \"signatures\": [\n      {\n        \"signer\": \"0xa1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1\",\n        \"data\": \"0x1111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111\"\n      }\n    ],\n    \"createdAt\": 1763000000005,\n    \"display\": {\n      \"site\": \"https://app.example\",\n      \"title\": \"Swap ✓ é 😀\"\n    }\n  }\n}"
+          },
+          {
+            "op": "get",
+            "args": [
+              1000001
+            ],
+            "result": {
+              "chainId": 100,
+              "safeAddress": "0xc1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1",
+              "safeTxData": {
+                "to": "0xabababababababababababababababababababab",
+                "value": "1000000000000000",
+                "data": "0x",
+                "operation": 0,
+                "safeTxGas": "0",
+                "baseGas": "0",
+                "gasPrice": "0",
+                "gasToken": "0x0000000000000000000000000000000000000000",
+                "refundReceiver": "0x0000000000000000000000000000000000000000",
+                "nonce": "5"
+              },
+              "safeTxHash": "0x0505050505050505050505050505050505050505050505050505050505050505",
+              "typedData": {
+                "domain": {
+                  "chainId": 100,
+                  "verifyingContract": "0xc1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1"
+                },
+                "primaryType": "SafeTx",
+                "message": {
+                  "nonce": "5"
+                }
+              },
+              "threshold": 2,
+              "signatures": [
+                {
+                  "signer": "0xa1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+                  "data": "0x1111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111"
+                }
+              ],
+              "createdAt": 1763000000005,
+              "display": {
+                "site": "https://app.example",
+                "title": "Swap ✓ é 😀"
+              }
+            },
+            "wrote": false,
+            "text": "{\n  \"2\": {\n    \"chainId\": 100,\n    \"safeAddress\": \"0xc1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1\",\n    \"safeTxData\": {\n      \"to\": \"0xabababababababababababababababababababab\",\n      \"value\": \"1000000000000000\",\n      \"data\": \"0x\",\n      \"operation\": 0,\n      \"safeTxGas\": \"0\",\n      \"baseGas\": \"0\",\n      \"gasPrice\": \"0\",\n      \"gasToken\": \"0x0000000000000000000000000000000000000000\",\n      \"refundReceiver\": \"0x0000000000000000000000000000000000000000\",\n      \"nonce\": \"3\"\n    },\n    \"safeTxHash\": \"0x0303030303030303030303030303030303030303030303030303030303030303\",\n    \"typedData\": {\n      \"domain\": {\n        \"chainId\": 100,\n        \"verifyingContract\": \"0xc1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1\"\n      },\n      \"primaryType\": \"SafeTx\",\n      \"message\": {\n        \"nonce\": \"3\"\n      }\n    },\n    \"threshold\": 2,\n    \"signatures\": [],\n    \"createdAt\": 1763000000003\n  },\n  \"1000001\": {\n    \"chainId\": 100,\n    \"safeAddress\": \"0xc1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1\",\n    \"safeTxData\": {\n      \"to\": \"0xabababababababababababababababababababab\",\n      \"value\": \"1000000000000000\",\n      \"data\": \"0x\",\n      \"operation\": 0,\n      \"safeTxGas\": \"0\",\n      \"baseGas\": \"0\",\n      \"gasPrice\": \"0\",\n      \"gasToken\": \"0x0000000000000000000000000000000000000000\",\n      \"refundReceiver\": \"0x0000000000000000000000000000000000000000\",\n      \"nonce\": \"5\"\n    },\n    \"safeTxHash\": \"0x0505050505050505050505050505050505050505050505050505050505050505\",\n    \"typedData\": {\n      \"domain\": {\n        \"chainId\": 100,\n        \"verifyingContract\": \"0xc1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1\"\n      },\n      \"primaryType\": \"SafeTx\",\n      \"message\": {\n        \"nonce\": \"5\"\n      }\n    },\n    \"threshold\": 2,\n    \"signatures\": [\n      {\n        \"signer\": \"0xa1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1\",\n        \"data\": \"0x1111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111\"\n      }\n    ],\n    \"createdAt\": 1763000000005,\n    \"display\": {\n      \"site\": \"https://app.example\",\n      \"title\": \"Swap ✓ é 😀\"\n    }\n  }\n}"
+          },
+          {
+            "op": "get",
+            "args": [
+              7
+            ],
+            "result": null,
+            "wrote": false,
+            "text": "{\n  \"2\": {\n    \"chainId\": 100,\n    \"safeAddress\": \"0xc1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1\",\n    \"safeTxData\": {\n      \"to\": \"0xabababababababababababababababababababab\",\n      \"value\": \"1000000000000000\",\n      \"data\": \"0x\",\n      \"operation\": 0,\n      \"safeTxGas\": \"0\",\n      \"baseGas\": \"0\",\n      \"gasPrice\": \"0\",\n      \"gasToken\": \"0x0000000000000000000000000000000000000000\",\n      \"refundReceiver\": \"0x0000000000000000000000000000000000000000\",\n      \"nonce\": \"3\"\n    },\n    \"safeTxHash\": \"0x0303030303030303030303030303030303030303030303030303030303030303\",\n    \"typedData\": {\n      \"domain\": {\n        \"chainId\": 100,\n        \"verifyingContract\": \"0xc1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1\"\n      },\n      \"primaryType\": \"SafeTx\",\n      \"message\": {\n        \"nonce\": \"3\"\n      }\n    },\n    \"threshold\": 2,\n    \"signatures\": [],\n    \"createdAt\": 1763000000003\n  },\n  \"1000001\": {\n    \"chainId\": 100,\n    \"safeAddress\": \"0xc1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1\",\n    \"safeTxData\": {\n      \"to\": \"0xabababababababababababababababababababab\",\n      \"value\": \"1000000000000000\",\n      \"data\": \"0x\",\n      \"operation\": 0,\n      \"safeTxGas\": \"0\",\n      \"baseGas\": \"0\",\n      \"gasPrice\": \"0\",\n      \"gasToken\": \"0x0000000000000000000000000000000000000000\",\n      \"refundReceiver\": \"0x0000000000000000000000000000000000000000\",\n      \"nonce\": \"5\"\n    },\n    \"safeTxHash\": \"0x0505050505050505050505050505050505050505050505050505050505050505\",\n    \"typedData\": {\n      \"domain\": {\n        \"chainId\": 100,\n        \"verifyingContract\": \"0xc1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1\"\n      },\n      \"primaryType\": \"SafeTx\",\n      \"message\": {\n        \"nonce\": \"5\"\n      }\n    },\n    \"threshold\": 2,\n    \"signatures\": [\n      {\n        \"signer\": \"0xa1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1\",\n        \"data\": \"0x1111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111\"\n      }\n    ],\n    \"createdAt\": 1763000000005,\n    \"display\": {\n      \"site\": \"https://app.example\",\n      \"title\": \"Swap ✓ é 😀\"\n    }\n  }\n}"
+          },
+          {
+            "op": "clear",
+            "args": [
+              7
+            ],
+            "result": null,
+            "wrote": false,
+            "text": "{\n  \"2\": {\n    \"chainId\": 100,\n    \"safeAddress\": \"0xc1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1\",\n    \"safeTxData\": {\n      \"to\": \"0xabababababababababababababababababababab\",\n      \"value\": \"1000000000000000\",\n      \"data\": \"0x\",\n      \"operation\": 0,\n      \"safeTxGas\": \"0\",\n      \"baseGas\": \"0\",\n      \"gasPrice\": \"0\",\n      \"gasToken\": \"0x0000000000000000000000000000000000000000\",\n      \"refundReceiver\": \"0x0000000000000000000000000000000000000000\",\n      \"nonce\": \"3\"\n    },\n    \"safeTxHash\": \"0x0303030303030303030303030303030303030303030303030303030303030303\",\n    \"typedData\": {\n      \"domain\": {\n        \"chainId\": 100,\n        \"verifyingContract\": \"0xc1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1\"\n      },\n      \"primaryType\": \"SafeTx\",\n      \"message\": {\n        \"nonce\": \"3\"\n      }\n    },\n    \"threshold\": 2,\n    \"signatures\": [],\n    \"createdAt\": 1763000000003\n  },\n  \"1000001\": {\n    \"chainId\": 100,\n    \"safeAddress\": \"0xc1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1\",\n    \"safeTxData\": {\n      \"to\": \"0xabababababababababababababababababababab\",\n      \"value\": \"1000000000000000\",\n      \"data\": \"0x\",\n      \"operation\": 0,\n      \"safeTxGas\": \"0\",\n      \"baseGas\": \"0\",\n      \"gasPrice\": \"0\",\n      \"gasToken\": \"0x0000000000000000000000000000000000000000\",\n      \"refundReceiver\": \"0x0000000000000000000000000000000000000000\",\n      \"nonce\": \"5\"\n    },\n    \"safeTxHash\": \"0x0505050505050505050505050505050505050505050505050505050505050505\",\n    \"typedData\": {\n      \"domain\": {\n        \"chainId\": 100,\n        \"verifyingContract\": \"0xc1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1\"\n      },\n      \"primaryType\": \"SafeTx\",\n      \"message\": {\n        \"nonce\": \"5\"\n      }\n    },\n    \"threshold\": 2,\n    \"signatures\": [\n      {\n        \"signer\": \"0xa1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1\",\n        \"data\": \"0x1111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111\"\n      }\n    ],\n    \"createdAt\": 1763000000005,\n    \"display\": {\n      \"site\": \"https://app.example\",\n      \"title\": \"Swap ✓ é 😀\"\n    }\n  }\n}"
+          },
+          {
+            "op": "set",
+            "args": [
+              0,
+              {
+                "chainId": 100,
+                "safeAddress": "0xc1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1",
+                "safeTxData": {
+                  "to": "0xabababababababababababababababababababab",
+                  "value": "1000000000000000",
+                  "data": "0x",
+                  "operation": 0,
+                  "safeTxGas": "0",
+                  "baseGas": "0",
+                  "gasPrice": "0",
+                  "gasToken": "0x0000000000000000000000000000000000000000",
+                  "refundReceiver": "0x0000000000000000000000000000000000000000",
+                  "nonce": "6"
+                },
+                "safeTxHash": "0x0606060606060606060606060606060606060606060606060606060606060606",
+                "typedData": {
+                  "domain": {
+                    "chainId": 100,
+                    "verifyingContract": "0xc1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1"
+                  },
+                  "primaryType": "SafeTx",
+                  "message": {
+                    "nonce": "6"
+                  }
+                },
+                "threshold": 2,
+                "signatures": [],
+                "createdAt": 1763000000006,
+                "executed": {
+                  "hash": "0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+                  "explorerUrl": "https://gnosisscan.io/tx/0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+                }
+              }
+            ],
+            "result": null,
+            "wrote": true,
+            "text": "{\n  \"0\": {\n    \"chainId\": 100,\n    \"safeAddress\": \"0xc1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1\",\n    \"safeTxData\": {\n      \"to\": \"0xabababababababababababababababababababab\",\n      \"value\": \"1000000000000000\",\n      \"data\": \"0x\",\n      \"operation\": 0,\n      \"safeTxGas\": \"0\",\n      \"baseGas\": \"0\",\n      \"gasPrice\": \"0\",\n      \"gasToken\": \"0x0000000000000000000000000000000000000000\",\n      \"refundReceiver\": \"0x0000000000000000000000000000000000000000\",\n      \"nonce\": \"6\"\n    },\n    \"safeTxHash\": \"0x0606060606060606060606060606060606060606060606060606060606060606\",\n    \"typedData\": {\n      \"domain\": {\n        \"chainId\": 100,\n        \"verifyingContract\": \"0xc1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1\"\n      },\n      \"primaryType\": \"SafeTx\",\n      \"message\": {\n        \"nonce\": \"6\"\n      }\n    },\n    \"threshold\": 2,\n    \"signatures\": [],\n    \"createdAt\": 1763000000006,\n    \"executed\": {\n      \"hash\": \"0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\",\n      \"explorerUrl\": \"https://gnosisscan.io/tx/0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\"\n    }\n  },\n  \"2\": {\n    \"chainId\": 100,\n    \"safeAddress\": \"0xc1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1\",\n    \"safeTxData\": {\n      \"to\": \"0xabababababababababababababababababababab\",\n      \"value\": \"1000000000000000\",\n      \"data\": \"0x\",\n      \"operation\": 0,\n      \"safeTxGas\": \"0\",\n      \"baseGas\": \"0\",\n      \"gasPrice\": \"0\",\n      \"gasToken\": \"0x0000000000000000000000000000000000000000\",\n      \"refundReceiver\": \"0x0000000000000000000000000000000000000000\",\n      \"nonce\": \"3\"\n    },\n    \"safeTxHash\": \"0x0303030303030303030303030303030303030303030303030303030303030303\",\n    \"typedData\": {\n      \"domain\": {\n        \"chainId\": 100,\n        \"verifyingContract\": \"0xc1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1\"\n      },\n      \"primaryType\": \"SafeTx\",\n      \"message\": {\n        \"nonce\": \"3\"\n      }\n    },\n    \"threshold\": 2,\n    \"signatures\": [],\n    \"createdAt\": 1763000000003\n  },\n  \"1000001\": {\n    \"chainId\": 100,\n    \"safeAddress\": \"0xc1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1\",\n    \"safeTxData\": {\n      \"to\": \"0xabababababababababababababababababababab\",\n      \"value\": \"1000000000000000\",\n      \"data\": \"0x\",\n      \"operation\": 0,\n      \"safeTxGas\": \"0\",\n      \"baseGas\": \"0\",\n      \"gasPrice\": \"0\",\n      \"gasToken\": \"0x0000000000000000000000000000000000000000\",\n      \"refundReceiver\": \"0x0000000000000000000000000000000000000000\",\n      \"nonce\": \"5\"\n    },\n    \"safeTxHash\": \"0x0505050505050505050505050505050505050505050505050505050505050505\",\n    \"typedData\": {\n      \"domain\": {\n        \"chainId\": 100,\n        \"verifyingContract\": \"0xc1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1\"\n      },\n      \"primaryType\": \"SafeTx\",\n      \"message\": {\n        \"nonce\": \"5\"\n      }\n    },\n    \"threshold\": 2,\n    \"signatures\": [\n      {\n        \"signer\": \"0xa1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1\",\n        \"data\": \"0x1111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111\"\n      }\n    ],\n    \"createdAt\": 1763000000005,\n    \"display\": {\n      \"site\": \"https://app.example\",\n      \"title\": \"Swap ✓ é 😀\"\n    }\n  }\n}"
+          },
+          {
+            "op": "list",
+            "args": [],
+            "result": [
+              0,
+              2,
+              1000001
+            ],
+            "wrote": false,
+            "text": "{\n  \"0\": {\n    \"chainId\": 100,\n    \"safeAddress\": \"0xc1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1\",\n    \"safeTxData\": {\n      \"to\": \"0xabababababababababababababababababababab\",\n      \"value\": \"1000000000000000\",\n      \"data\": \"0x\",\n      \"operation\": 0,\n      \"safeTxGas\": \"0\",\n      \"baseGas\": \"0\",\n      \"gasPrice\": \"0\",\n      \"gasToken\": \"0x0000000000000000000000000000000000000000\",\n      \"refundReceiver\": \"0x0000000000000000000000000000000000000000\",\n      \"nonce\": \"6\"\n    },\n    \"safeTxHash\": \"0x0606060606060606060606060606060606060606060606060606060606060606\",\n    \"typedData\": {\n      \"domain\": {\n        \"chainId\": 100,\n        \"verifyingContract\": \"0xc1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1\"\n      },\n      \"primaryType\": \"SafeTx\",\n      \"message\": {\n        \"nonce\": \"6\"\n      }\n    },\n    \"threshold\": 2,\n    \"signatures\": [],\n    \"createdAt\": 1763000000006,\n    \"executed\": {\n      \"hash\": \"0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\",\n      \"explorerUrl\": \"https://gnosisscan.io/tx/0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\"\n    }\n  },\n  \"2\": {\n    \"chainId\": 100,\n    \"safeAddress\": \"0xc1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1\",\n    \"safeTxData\": {\n      \"to\": \"0xabababababababababababababababababababab\",\n      \"value\": \"1000000000000000\",\n      \"data\": \"0x\",\n      \"operation\": 0,\n      \"safeTxGas\": \"0\",\n      \"baseGas\": \"0\",\n      \"gasPrice\": \"0\",\n      \"gasToken\": \"0x0000000000000000000000000000000000000000\",\n      \"refundReceiver\": \"0x0000000000000000000000000000000000000000\",\n      \"nonce\": \"3\"\n    },\n    \"safeTxHash\": \"0x0303030303030303030303030303030303030303030303030303030303030303\",\n    \"typedData\": {\n      \"domain\": {\n        \"chainId\": 100,\n        \"verifyingContract\": \"0xc1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1\"\n      },\n      \"primaryType\": \"SafeTx\",\n      \"message\": {\n        \"nonce\": \"3\"\n      }\n    },\n    \"threshold\": 2,\n    \"signatures\": [],\n    \"createdAt\": 1763000000003\n  },\n  \"1000001\": {\n    \"chainId\": 100,\n    \"safeAddress\": \"0xc1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1\",\n    \"safeTxData\": {\n      \"to\": \"0xabababababababababababababababababababab\",\n      \"value\": \"1000000000000000\",\n      \"data\": \"0x\",\n      \"operation\": 0,\n      \"safeTxGas\": \"0\",\n      \"baseGas\": \"0\",\n      \"gasPrice\": \"0\",\n      \"gasToken\": \"0x0000000000000000000000000000000000000000\",\n      \"refundReceiver\": \"0x0000000000000000000000000000000000000000\",\n      \"nonce\": \"5\"\n    },\n    \"safeTxHash\": \"0x0505050505050505050505050505050505050505050505050505050505050505\",\n    \"typedData\": {\n      \"domain\": {\n        \"chainId\": 100,\n        \"verifyingContract\": \"0xc1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1\"\n      },\n      \"primaryType\": \"SafeTx\",\n      \"message\": {\n        \"nonce\": \"5\"\n      }\n    },\n    \"threshold\": 2,\n    \"signatures\": [\n      {\n        \"signer\": \"0xa1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1\",\n        \"data\": \"0x1111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111\"\n      }\n    ],\n    \"createdAt\": 1763000000005,\n    \"display\": {\n      \"site\": \"https://app.example\",\n      \"title\": \"Swap ✓ é 😀\"\n    }\n  }\n}"
+          }
+        ]
+      },
+      {
+        "id": "compact-unordered",
+        "start": "{\"5\":{\"b\":1,\"a\":2},\"2\":{\"z\":[1,{\"2\":3,\"1\":4}]},\"10\":{}}\n",
+        "steps": [
+          {
+            "op": "list",
+            "args": [],
+            "result": [
+              2,
+              5,
+              10
+            ],
+            "wrote": false,
+            "text": "{\"5\":{\"b\":1,\"a\":2},\"2\":{\"z\":[1,{\"2\":3,\"1\":4}]},\"10\":{}}\n"
+          },
+          {
+            "op": "get",
+            "args": [
+              5
+            ],
+            "result": {
+              "b": 1,
+              "a": 2
+            },
+            "wrote": false,
+            "text": "{\"5\":{\"b\":1,\"a\":2},\"2\":{\"z\":[1,{\"2\":3,\"1\":4}]},\"10\":{}}\n"
+          },
+          {
+            "op": "get",
+            "args": [
+              2
+            ],
+            "result": {
+              "z": [
+                1,
+                {
+                  "1": 4,
+                  "2": 3
+                }
+              ]
+            },
+            "wrote": false,
+            "text": "{\"5\":{\"b\":1,\"a\":2},\"2\":{\"z\":[1,{\"2\":3,\"1\":4}]},\"10\":{}}\n"
+          },
+          {
+            "op": "get",
+            "args": [
+              10
+            ],
+            "result": {},
+            "wrote": false,
+            "text": "{\"5\":{\"b\":1,\"a\":2},\"2\":{\"z\":[1,{\"2\":3,\"1\":4}]},\"10\":{}}\n"
+          },
+          {
+            "op": "set",
+            "args": [
+              4,
+              {
+                "k": "v"
+              }
+            ],
+            "result": null,
+            "wrote": true,
+            "text": "{\n  \"2\": {\n    \"z\": [\n      1,\n      {\n        \"1\": 4,\n        \"2\": 3\n      }\n    ]\n  },\n  \"4\": {\n    \"k\": \"v\"\n  },\n  \"5\": {\n    \"b\": 1,\n    \"a\": 2\n  },\n  \"10\": {}\n}"
+          },
+          {
+            "op": "list",
+            "args": [],
+            "result": [
+              2,
+              4,
+              5,
+              10
+            ],
+            "wrote": false,
+            "text": "{\n  \"2\": {\n    \"z\": [\n      1,\n      {\n        \"1\": 4,\n        \"2\": 3\n      }\n    ]\n  },\n  \"4\": {\n    \"k\": \"v\"\n  },\n  \"5\": {\n    \"b\": 1,\n    \"a\": 2\n  },\n  \"10\": {}\n}"
+          }
+        ]
+      },
+      {
+        "id": "falsy-entries",
+        "start": "{\"1\":null,\"2\":0,\"3\":\"\",\"4\":false,\"5\":{},\"6\":[]}",
+        "steps": [
+          {
+            "op": "get",
+            "args": [
+              1
+            ],
+            "result": null,
+            "wrote": false,
+            "text": "{\"1\":null,\"2\":0,\"3\":\"\",\"4\":false,\"5\":{},\"6\":[]}"
+          },
+          {
+            "op": "get",
+            "args": [
+              2
+            ],
+            "result": null,
+            "wrote": false,
+            "text": "{\"1\":null,\"2\":0,\"3\":\"\",\"4\":false,\"5\":{},\"6\":[]}"
+          },
+          {
+            "op": "get",
+            "args": [
+              3
+            ],
+            "result": null,
+            "wrote": false,
+            "text": "{\"1\":null,\"2\":0,\"3\":\"\",\"4\":false,\"5\":{},\"6\":[]}"
+          },
+          {
+            "op": "get",
+            "args": [
+              4
+            ],
+            "result": null,
+            "wrote": false,
+            "text": "{\"1\":null,\"2\":0,\"3\":\"\",\"4\":false,\"5\":{},\"6\":[]}"
+          },
+          {
+            "op": "get",
+            "args": [
+              5
+            ],
+            "result": {},
+            "wrote": false,
+            "text": "{\"1\":null,\"2\":0,\"3\":\"\",\"4\":false,\"5\":{},\"6\":[]}"
+          },
+          {
+            "op": "get",
+            "args": [
+              6
+            ],
+            "result": [],
+            "wrote": false,
+            "text": "{\"1\":null,\"2\":0,\"3\":\"\",\"4\":false,\"5\":{},\"6\":[]}"
+          },
+          {
+            "op": "list",
+            "args": [],
+            "result": [
+              1,
+              2,
+              3,
+              4,
+              5,
+              6
+            ],
+            "wrote": false,
+            "text": "{\"1\":null,\"2\":0,\"3\":\"\",\"4\":false,\"5\":{},\"6\":[]}"
+          },
+          {
+            "op": "clear",
+            "args": [
+              2
+            ],
+            "result": null,
+            "wrote": true,
+            "text": "{\n  \"1\": null,\n  \"3\": \"\",\n  \"4\": false,\n  \"5\": {},\n  \"6\": []\n}"
+          },
+          {
+            "op": "list",
+            "args": [],
+            "result": [
+              1,
+              3,
+              4,
+              5,
+              6
+            ],
+            "wrote": false,
+            "text": "{\n  \"1\": null,\n  \"3\": \"\",\n  \"4\": false,\n  \"5\": {},\n  \"6\": []\n}"
+          },
+          {
+            "op": "set",
+            "args": [
+              7,
+              null
+            ],
+            "result": null,
+            "wrote": true,
+            "text": "{\n  \"1\": null,\n  \"3\": \"\",\n  \"4\": false,\n  \"5\": {},\n  \"6\": [],\n  \"7\": null\n}"
+          },
+          {
+            "op": "get",
+            "args": [
+              7
+            ],
+            "result": null,
+            "wrote": false,
+            "text": "{\n  \"1\": null,\n  \"3\": \"\",\n  \"4\": false,\n  \"5\": {},\n  \"6\": [],\n  \"7\": null\n}"
+          },
+          {
+            "op": "set",
+            "args": [
+              8,
+              0
+            ],
+            "result": null,
+            "wrote": true,
+            "text": "{\n  \"1\": null,\n  \"3\": \"\",\n  \"4\": false,\n  \"5\": {},\n  \"6\": [],\n  \"7\": null,\n  \"8\": 0\n}"
+          },
+          {
+            "op": "list",
+            "args": [],
+            "result": [
+              1,
+              3,
+              4,
+              5,
+              6,
+              7,
+              8
+            ],
+            "wrote": false,
+            "text": "{\n  \"1\": null,\n  \"3\": \"\",\n  \"4\": false,\n  \"5\": {},\n  \"6\": [],\n  \"7\": null,\n  \"8\": 0\n}"
+          },
+          {
+            "op": "clear",
+            "args": [
+              7
+            ],
+            "result": null,
+            "wrote": true,
+            "text": "{\n  \"1\": null,\n  \"3\": \"\",\n  \"4\": false,\n  \"5\": {},\n  \"6\": [],\n  \"8\": 0\n}"
+          }
+        ]
+      },
+      {
+        "id": "entry-values",
+        "start": null,
+        "steps": [
+          {
+            "op": "set",
+            "args": [
+              0,
+              {
+                "n": [
+                  1e+21,
+                  0,
+                  0.1,
+                  5e-324,
+                  1.7976931348623157e+308,
+                  123456789012345680000,
+                  0.30000000000000004,
+                  -1e-7,
+                  9007199254740994
+                ]
+              }
+            ],
+            "result": null,
+            "wrote": true,
+            "text": "{\n  \"0\": {\n    \"n\": [\n      1e+21,\n      0,\n      0.1,\n      5e-324,\n      1.7976931348623157e+308,\n      123456789012345680000,\n      0.30000000000000004,\n      -1e-7,\n      9007199254740994\n    ]\n  }\n}"
+          },
+          {
+            "op": "get",
+            "args": [
+              0
+            ],
+            "result": {
+              "n": [
+                1e+21,
+                0,
+                0.1,
+                5e-324,
+                1.7976931348623157e+308,
+                123456789012345680000,
+                0.30000000000000004,
+                -1e-7,
+                9007199254740994
+              ]
+            },
+            "wrote": false,
+            "text": "{\n  \"0\": {\n    \"n\": [\n      1e+21,\n      0,\n      0.1,\n      5e-324,\n      1.7976931348623157e+308,\n      123456789012345680000,\n      0.30000000000000004,\n      -1e-7,\n      9007199254740994\n    ]\n  }\n}"
+          },
+          {
+            "op": "set",
+            "args": [
+              1,
+              {
+                "2": 3,
+                "10": 2,
+                "b": 1,
+                "a": {
+                  "0": 5,
+                  "1": 4,
+                  "x": 6
+                },
+                "": 7,
+                "01": 8
+              }
+            ],
+            "result": null,
+            "wrote": true,
+            "text": "{\n  \"0\": {\n    \"n\": [\n      1e+21,\n      0,\n      0.1,\n      5e-324,\n      1.7976931348623157e+308,\n      123456789012345680000,\n      0.30000000000000004,\n      -1e-7,\n      9007199254740994\n    ]\n  },\n  \"1\": {\n    \"2\": 3,\n    \"10\": 2,\n    \"b\": 1,\n    \"a\": {\n      \"0\": 5,\n      \"1\": 4,\n      \"x\": 6\n    },\n    \"\": 7,\n    \"01\": 8\n  }\n}"
+          },
+          {
+            "op": "get",
+            "args": [
+              1
+            ],
+            "result": {
+              "2": 3,
+              "10": 2,
+              "b": 1,
+              "a": {
+                "0": 5,
+                "1": 4,
+                "x": 6
+              },
+              "": 7,
+              "01": 8
+            },
+            "wrote": false,
+            "text": "{\n  \"0\": {\n    \"n\": [\n      1e+21,\n      0,\n      0.1,\n      5e-324,\n      1.7976931348623157e+308,\n      123456789012345680000,\n      0.30000000000000004,\n      -1e-7,\n      9007199254740994\n    ]\n  },\n  \"1\": {\n    \"2\": 3,\n    \"10\": 2,\n    \"b\": 1,\n    \"a\": {\n      \"0\": 5,\n      \"1\": 4,\n      \"x\": 6\n    },\n    \"\": 7,\n    \"01\": 8\n  }\n}"
+          },
+          {
+            "op": "set",
+            "args": [
+              2,
+              {
+                "s": [
+                  "é ✓ 😀",
+                  "\u0000\u001f",
+                  "\"\\/",
+                  "  ",
+                  "\t\n\r\b\f",
+                  "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+                ]
+              }
+            ],
+            "result": null,
+            "wrote": true,
+            "text": "{\n  \"0\": {\n    \"n\": [\n      1e+21,\n      0,\n      0.1,\n      5e-324,\n      1.7976931348623157e+308,\n      123456789012345680000,\n      0.30000000000000004,\n      -1e-7,\n      9007199254740994\n    ]\n  },\n  \"1\": {\n    \"2\": 3,\n    \"10\": 2,\n    \"b\": 1,\n    \"a\": {\n      \"0\": 5,\n      \"1\": 4,\n      \"x\": 6\n    },\n    \"\": 7,\n    \"01\": 8\n  },\n  \"2\": {\n    \"s\": [\n      \"é ✓ 😀\",\n      \"\\u0000\\u001f\",\n      \"\\\"\\\\/\",\n      \"  \",\n      \"\\t\\n\\r\\b\\f\",\n      \"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\"\n    ]\n  }\n}"
+          },
+          {
+            "op": "get",
+            "args": [
+              2
+            ],
+            "result": {
+              "s": [
+                "é ✓ 😀",
+                "\u0000\u001f",
+                "\"\\/",
+                "  ",
+                "\t\n\r\b\f",
+                "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+              ]
+            },
+            "wrote": false,
+            "text": "{\n  \"0\": {\n    \"n\": [\n      1e+21,\n      0,\n      0.1,\n      5e-324,\n      1.7976931348623157e+308,\n      123456789012345680000,\n      0.30000000000000004,\n      -1e-7,\n      9007199254740994\n    ]\n  },\n  \"1\": {\n    \"2\": 3,\n    \"10\": 2,\n    \"b\": 1,\n    \"a\": {\n      \"0\": 5,\n      \"1\": 4,\n      \"x\": 6\n    },\n    \"\": 7,\n    \"01\": 8\n  },\n  \"2\": {\n    \"s\": [\n      \"é ✓ 😀\",\n      \"\\u0000\\u001f\",\n      \"\\\"\\\\/\",\n      \"  \",\n      \"\\t\\n\\r\\b\\f\",\n      \"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\"\n    ]\n  }\n}"
+          },
+          {
+            "op": "set",
+            "args": [
+              3,
+              [
+                [],
+                {},
+                [
+                  [
+                    {}
+                  ]
+                ],
+                true,
+                false,
+                null,
+                "str",
+                42
+              ]
+            ],
+            "result": null,
+            "wrote": true,
+            "text": "{\n  \"0\": {\n    \"n\": [\n      1e+21,\n      0,\n      0.1,\n      5e-324,\n      1.7976931348623157e+308,\n      123456789012345680000,\n      0.30000000000000004,\n      -1e-7,\n      9007199254740994\n    ]\n  },\n  \"1\": {\n    \"2\": 3,\n    \"10\": 2,\n    \"b\": 1,\n    \"a\": {\n      \"0\": 5,\n      \"1\": 4,\n      \"x\": 6\n    },\n    \"\": 7,\n    \"01\": 8\n  },\n  \"2\": {\n    \"s\": [\n      \"é ✓ 😀\",\n      \"\\u0000\\u001f\",\n      \"\\\"\\\\/\",\n      \"  \",\n      \"\\t\\n\\r\\b\\f\",\n      \"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\"\n    ]\n  },\n  \"3\": [\n    [],\n    {},\n    [\n      [\n        {}\n      ]\n    ],\n    true,\n    false,\n    null,\n    \"str\",\n    42\n  ]\n}"
+          },
+          {
+            "op": "get",
+            "args": [
+              3
+            ],
+            "result": [
+              [],
+              {},
+              [
+                [
+                  {}
+                ]
+              ],
+              true,
+              false,
+              null,
+              "str",
+              42
+            ],
+            "wrote": false,
+            "text": "{\n  \"0\": {\n    \"n\": [\n      1e+21,\n      0,\n      0.1,\n      5e-324,\n      1.7976931348623157e+308,\n      123456789012345680000,\n      0.30000000000000004,\n      -1e-7,\n      9007199254740994\n    ]\n  },\n  \"1\": {\n    \"2\": 3,\n    \"10\": 2,\n    \"b\": 1,\n    \"a\": {\n      \"0\": 5,\n      \"1\": 4,\n      \"x\": 6\n    },\n    \"\": 7,\n    \"01\": 8\n  },\n  \"2\": {\n    \"s\": [\n      \"é ✓ 😀\",\n      \"\\u0000\\u001f\",\n      \"\\\"\\\\/\",\n      \"  \",\n      \"\\t\\n\\r\\b\\f\",\n      \"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\"\n    ]\n  },\n  \"3\": [\n    [],\n    {},\n    [\n      [\n        {}\n      ]\n    ],\n    true,\n    false,\n    null,\n    \"str\",\n    42\n  ]\n}"
+          },
+          {
+            "op": "set",
+            "args": [
+              4,
+              "a string entry"
+            ],
+            "result": null,
+            "wrote": true,
+            "text": "{\n  \"0\": {\n    \"n\": [\n      1e+21,\n      0,\n      0.1,\n      5e-324,\n      1.7976931348623157e+308,\n      123456789012345680000,\n      0.30000000000000004,\n      -1e-7,\n      9007199254740994\n    ]\n  },\n  \"1\": {\n    \"2\": 3,\n    \"10\": 2,\n    \"b\": 1,\n    \"a\": {\n      \"0\": 5,\n      \"1\": 4,\n      \"x\": 6\n    },\n    \"\": 7,\n    \"01\": 8\n  },\n  \"2\": {\n    \"s\": [\n      \"é ✓ 😀\",\n      \"\\u0000\\u001f\",\n      \"\\\"\\\\/\",\n      \"  \",\n      \"\\t\\n\\r\\b\\f\",\n      \"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\"\n    ]\n  },\n  \"3\": [\n    [],\n    {},\n    [\n      [\n        {}\n      ]\n    ],\n    true,\n    false,\n    null,\n    \"str\",\n    42\n  ],\n  \"4\": \"a string entry\"\n}"
+          },
+          {
+            "op": "get",
+            "args": [
+              4
+            ],
+            "result": "a string entry",
+            "wrote": false,
+            "text": "{\n  \"0\": {\n    \"n\": [\n      1e+21,\n      0,\n      0.1,\n      5e-324,\n      1.7976931348623157e+308,\n      123456789012345680000,\n      0.30000000000000004,\n      -1e-7,\n      9007199254740994\n    ]\n  },\n  \"1\": {\n    \"2\": 3,\n    \"10\": 2,\n    \"b\": 1,\n    \"a\": {\n      \"0\": 5,\n      \"1\": 4,\n      \"x\": 6\n    },\n    \"\": 7,\n    \"01\": 8\n  },\n  \"2\": {\n    \"s\": [\n      \"é ✓ 😀\",\n      \"\\u0000\\u001f\",\n      \"\\\"\\\\/\",\n      \"  \",\n      \"\\t\\n\\r\\b\\f\",\n      \"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\"\n    ]\n  },\n  \"3\": [\n    [],\n    {},\n    [\n      [\n        {}\n      ]\n    ],\n    true,\n    false,\n    null,\n    \"str\",\n    42\n  ],\n  \"4\": \"a string entry\"\n}"
+          },
+          {
+            "op": "set",
+            "args": [
+              5,
+              0.5
+            ],
+            "result": null,
+            "wrote": true,
+            "text": "{\n  \"0\": {\n    \"n\": [\n      1e+21,\n      0,\n      0.1,\n      5e-324,\n      1.7976931348623157e+308,\n      123456789012345680000,\n      0.30000000000000004,\n      -1e-7,\n      9007199254740994\n    ]\n  },\n  \"1\": {\n    \"2\": 3,\n    \"10\": 2,\n    \"b\": 1,\n    \"a\": {\n      \"0\": 5,\n      \"1\": 4,\n      \"x\": 6\n    },\n    \"\": 7,\n    \"01\": 8\n  },\n  \"2\": {\n    \"s\": [\n      \"é ✓ 😀\",\n      \"\\u0000\\u001f\",\n      \"\\\"\\\\/\",\n      \"  \",\n      \"\\t\\n\\r\\b\\f\",\n      \"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\"\n    ]\n  },\n  \"3\": [\n    [],\n    {},\n    [\n      [\n        {}\n      ]\n    ],\n    true,\n    false,\n    null,\n    \"str\",\n    42\n  ],\n  \"4\": \"a string entry\",\n  \"5\": 0.5\n}"
+          },
+          {
+            "op": "list",
+            "args": [],
+            "result": [
+              0,
+              1,
+              2,
+              3,
+              4,
+              5
+            ],
+            "wrote": false,
+            "text": "{\n  \"0\": {\n    \"n\": [\n      1e+21,\n      0,\n      0.1,\n      5e-324,\n      1.7976931348623157e+308,\n      123456789012345680000,\n      0.30000000000000004,\n      -1e-7,\n      9007199254740994\n    ]\n  },\n  \"1\": {\n    \"2\": 3,\n    \"10\": 2,\n    \"b\": 1,\n    \"a\": {\n      \"0\": 5,\n      \"1\": 4,\n      \"x\": 6\n    },\n    \"\": 7,\n    \"01\": 8\n  },\n  \"2\": {\n    \"s\": [\n      \"é ✓ 😀\",\n      \"\\u0000\\u001f\",\n      \"\\\"\\\\/\",\n      \"  \",\n      \"\\t\\n\\r\\b\\f\",\n      \"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\"\n    ]\n  },\n  \"3\": [\n    [],\n    {},\n    [\n      [\n        {}\n      ]\n    ],\n    true,\n    false,\n    null,\n    \"str\",\n    42\n  ],\n  \"4\": \"a string entry\",\n  \"5\": 0.5\n}"
+          }
+        ]
+      },
+      {
+        "id": "large-indices",
+        "start": null,
+        "steps": [
+          {
+            "op": "set",
+            "args": [
+              4294967295,
+              {
+                "a": 1
+              }
+            ],
+            "result": null,
+            "wrote": true,
+            "text": "{\n  \"4294967295\": {\n    \"a\": 1\n  }\n}"
+          },
+          {
+            "op": "set",
+            "args": [
+              7,
+              {
+                "b": 2
+              }
+            ],
+            "result": null,
+            "wrote": true,
+            "text": "{\n  \"7\": {\n    \"b\": 2\n  },\n  \"4294967295\": {\n    \"a\": 1\n  }\n}"
+          },
+          {
+            "op": "set",
+            "args": [
+              9007199254740991,
+              {
+                "c": 3
+              }
+            ],
+            "result": null,
+            "wrote": true,
+            "text": "{\n  \"7\": {\n    \"b\": 2\n  },\n  \"4294967295\": {\n    \"a\": 1\n  },\n  \"9007199254740991\": {\n    \"c\": 3\n  }\n}"
+          },
+          {
+            "op": "set",
+            "args": [
+              0,
+              {
+                "d": 4
+              }
+            ],
+            "result": null,
+            "wrote": true,
+            "text": "{\n  \"0\": {\n    \"d\": 4\n  },\n  \"7\": {\n    \"b\": 2\n  },\n  \"4294967295\": {\n    \"a\": 1\n  },\n  \"9007199254740991\": {\n    \"c\": 3\n  }\n}"
+          },
+          {
+            "op": "set",
+            "args": [
+              4294967294,
+              {
+                "e": 5
+              }
+            ],
+            "result": null,
+            "wrote": true,
+            "text": "{\n  \"0\": {\n    \"d\": 4\n  },\n  \"7\": {\n    \"b\": 2\n  },\n  \"4294967294\": {\n    \"e\": 5\n  },\n  \"4294967295\": {\n    \"a\": 1\n  },\n  \"9007199254740991\": {\n    \"c\": 3\n  }\n}"
+          },
+          {
+            "op": "set",
+            "args": [
+              4294967296,
+              {
+                "f": 6
+              }
+            ],
+            "result": null,
+            "wrote": true,
+            "text": "{\n  \"0\": {\n    \"d\": 4\n  },\n  \"7\": {\n    \"b\": 2\n  },\n  \"4294967294\": {\n    \"e\": 5\n  },\n  \"4294967295\": {\n    \"a\": 1\n  },\n  \"9007199254740991\": {\n    \"c\": 3\n  },\n  \"4294967296\": {\n    \"f\": 6\n  }\n}"
+          },
+          {
+            "op": "list",
+            "args": [],
+            "result": [
+              0,
+              7,
+              4294967294,
+              4294967295,
+              9007199254740991,
+              4294967296
+            ],
+            "wrote": false,
+            "text": "{\n  \"0\": {\n    \"d\": 4\n  },\n  \"7\": {\n    \"b\": 2\n  },\n  \"4294967294\": {\n    \"e\": 5\n  },\n  \"4294967295\": {\n    \"a\": 1\n  },\n  \"9007199254740991\": {\n    \"c\": 3\n  },\n  \"4294967296\": {\n    \"f\": 6\n  }\n}"
+          },
+          {
+            "op": "get",
+            "args": [
+              4294967295
+            ],
+            "result": {
+              "a": 1
+            },
+            "wrote": false,
+            "text": "{\n  \"0\": {\n    \"d\": 4\n  },\n  \"7\": {\n    \"b\": 2\n  },\n  \"4294967294\": {\n    \"e\": 5\n  },\n  \"4294967295\": {\n    \"a\": 1\n  },\n  \"9007199254740991\": {\n    \"c\": 3\n  },\n  \"4294967296\": {\n    \"f\": 6\n  }\n}"
+          },
+          {
+            "op": "get",
+            "args": [
+              9007199254740991
+            ],
+            "result": {
+              "c": 3
+            },
+            "wrote": false,
+            "text": "{\n  \"0\": {\n    \"d\": 4\n  },\n  \"7\": {\n    \"b\": 2\n  },\n  \"4294967294\": {\n    \"e\": 5\n  },\n  \"4294967295\": {\n    \"a\": 1\n  },\n  \"9007199254740991\": {\n    \"c\": 3\n  },\n  \"4294967296\": {\n    \"f\": 6\n  }\n}"
+          },
+          {
+            "op": "set",
+            "args": [
+              4294967295,
+              {
+                "a": 7
+              }
+            ],
+            "result": null,
+            "wrote": true,
+            "text": "{\n  \"0\": {\n    \"d\": 4\n  },\n  \"7\": {\n    \"b\": 2\n  },\n  \"4294967294\": {\n    \"e\": 5\n  },\n  \"4294967295\": {\n    \"a\": 7\n  },\n  \"9007199254740991\": {\n    \"c\": 3\n  },\n  \"4294967296\": {\n    \"f\": 6\n  }\n}"
+          },
+          {
+            "op": "list",
+            "args": [],
+            "result": [
+              0,
+              7,
+              4294967294,
+              4294967295,
+              9007199254740991,
+              4294967296
+            ],
+            "wrote": false,
+            "text": "{\n  \"0\": {\n    \"d\": 4\n  },\n  \"7\": {\n    \"b\": 2\n  },\n  \"4294967294\": {\n    \"e\": 5\n  },\n  \"4294967295\": {\n    \"a\": 7\n  },\n  \"9007199254740991\": {\n    \"c\": 3\n  },\n  \"4294967296\": {\n    \"f\": 6\n  }\n}"
+          },
+          {
+            "op": "clear",
+            "args": [
+              4294967295
+            ],
+            "result": null,
+            "wrote": true,
+            "text": "{\n  \"0\": {\n    \"d\": 4\n  },\n  \"7\": {\n    \"b\": 2\n  },\n  \"4294967294\": {\n    \"e\": 5\n  },\n  \"9007199254740991\": {\n    \"c\": 3\n  },\n  \"4294967296\": {\n    \"f\": 6\n  }\n}"
+          },
+          {
+            "op": "set",
+            "args": [
+              4294967295,
+              {
+                "a": 8
+              }
+            ],
+            "result": null,
+            "wrote": true,
+            "text": "{\n  \"0\": {\n    \"d\": 4\n  },\n  \"7\": {\n    \"b\": 2\n  },\n  \"4294967294\": {\n    \"e\": 5\n  },\n  \"9007199254740991\": {\n    \"c\": 3\n  },\n  \"4294967296\": {\n    \"f\": 6\n  },\n  \"4294967295\": {\n    \"a\": 8\n  }\n}"
+          },
+          {
+            "op": "list",
+            "args": [],
+            "result": [
+              0,
+              7,
+              4294967294,
+              9007199254740991,
+              4294967296,
+              4294967295
+            ],
+            "wrote": false,
+            "text": "{\n  \"0\": {\n    \"d\": 4\n  },\n  \"7\": {\n    \"b\": 2\n  },\n  \"4294967294\": {\n    \"e\": 5\n  },\n  \"9007199254740991\": {\n    \"c\": 3\n  },\n  \"4294967296\": {\n    \"f\": 6\n  },\n  \"4294967295\": {\n    \"a\": 8\n  }\n}"
+          }
+        ]
+      }
+    ],
+    "malformed": [
+      {
+        "id": "not-json",
+        "text": "{\"1\": {",
+        "loaded": {
+          "json": "{}"
+        },
+        "index": 0,
+        "listed": {
+          "result": []
+        },
+        "got": {
+          "result": null
+        },
+        "set": {
+          "text": "{\n  \"7\": {\n    \"a\": 1\n  }\n}"
+        },
+        "core": "unreadable",
+        "reason": "not_json"
+      },
+      {
+        "id": "empty-file",
+        "text": "",
+        "loaded": {
+          "json": "{}"
+        },
+        "index": 0,
+        "listed": {
+          "result": []
+        },
+        "got": {
+          "result": null
+        },
+        "set": {
+          "text": "{\n  \"7\": {\n    \"a\": 1\n  }\n}"
+        },
+        "core": "unreadable",
+        "reason": "not_json"
+      },
+      {
+        "id": "byte-order-mark",
+        "hex": "efbbbf7b2231223a7b2261223a317d7d",
+        "loaded": {
+          "json": "{}"
+        },
+        "index": 0,
+        "listed": {
+          "result": []
+        },
+        "got": {
+          "result": null
+        },
+        "set": {
+          "text": "{\n  \"7\": {\n    \"a\": 1\n  }\n}"
+        },
+        "core": "unreadable",
+        "reason": "not_json"
+      },
+      {
+        "id": "too-deep",
+        "text": "{\"1\":{\"a\":1},\"2\":[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]}",
+        "loaded": {
+          "json": "{\"1\":{\"a\":1},\"2\":[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]}"
+        },
+        "index": 0,
+        "listed": {
+          "result": [
+            1,
+            2
+          ]
+        },
+        "got": {
+          "result": null
+        },
+        "set": {
+          "bytes": 526393
+        },
+        "core": "unreadable",
+        "reason": "not_json"
+      },
+      {
+        "id": "at-depth-limit",
+        "text": "{\"1\":{\"a\":1},\"2\":[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]}",
+        "loaded": {
+          "json": "{\"1\":{\"a\":1},\"2\":[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]}"
+        },
+        "index": 1,
+        "listed": {
+          "result": [
+            1,
+            2
+          ]
+        },
+        "got": {
+          "result": {
+            "a": 1
+          }
+        },
+        "set": {
+          "bytes": 524343,
+          "core": "written"
+        },
+        "core": "parsed"
+      },
+      {
+        "id": "null",
+        "text": "null",
+        "loaded": {
+          "json": "null"
+        },
+        "index": 0,
+        "listed": {
+          "error": "Cannot convert undefined or null to object"
+        },
+        "got": {
+          "error": "Cannot read properties of null (reading '0')"
+        },
+        "set": {
+          "error": "Cannot set properties of null (setting '7')",
+          "text": "null"
+        },
+        "core": "unreadable",
+        "reason": "not_object"
+      },
+      {
+        "id": "array",
+        "text": "[{\"a\":1},{\"b\":2}]",
+        "loaded": {
+          "json": "[{\"a\":1},{\"b\":2}]"
+        },
+        "index": 0,
+        "listed": {
+          "result": [
+            0,
+            1
+          ]
+        },
+        "got": {
+          "result": {
+            "a": 1
+          }
+        },
+        "set": {
+          "text": "[\n  {\n    \"a\": 1\n  },\n  {\n    \"b\": 2\n  },\n  null,\n  null,\n  null,\n  null,\n  null,\n  {\n    \"a\": 1\n  }\n]"
+        },
+        "core": "unreadable",
+        "reason": "not_object"
+      },
+      {
+        "id": "string",
+        "text": "\"ab\"",
+        "loaded": {
+          "json": "\"ab\""
+        },
+        "index": 0,
+        "listed": {
+          "result": [
+            0,
+            1
+          ]
+        },
+        "got": {
+          "result": "a"
+        },
+        "set": {
+          "text": "\"ab\""
+        },
+        "core": "unreadable",
+        "reason": "not_object"
+      },
+      {
+        "id": "number",
+        "text": "5",
+        "loaded": {
+          "json": "5"
+        },
+        "index": 0,
+        "listed": {
+          "result": []
+        },
+        "got": {
+          "result": null
+        },
+        "set": {
+          "text": "5"
+        },
+        "core": "unreadable",
+        "reason": "not_object"
+      },
+      {
+        "id": "boolean",
+        "text": "true",
+        "loaded": {
+          "json": "true"
+        },
+        "index": 0,
+        "listed": {
+          "result": []
+        },
+        "got": {
+          "result": null
+        },
+        "set": {
+          "text": "true"
+        },
+        "core": "unreadable",
+        "reason": "not_object"
+      },
+      {
+        "id": "key-leading-zero",
+        "text": "{\"01\":{\"a\":1}}",
+        "loaded": {
+          "json": "{\"01\":{\"a\":1}}"
+        },
+        "index": 1,
+        "listed": {
+          "result": [
+            1
+          ]
+        },
+        "got": {
+          "result": null
+        },
+        "set": {
+          "text": "{\n  \"7\": {\n    \"a\": 1\n  },\n  \"01\": {\n    \"a\": 1\n  }\n}"
+        },
+        "core": "unreadable",
+        "reason": "key_not_index"
+      },
+      {
+        "id": "key-negative",
+        "text": "{\"-1\":{\"a\":1}}",
+        "loaded": {
+          "json": "{\"-1\":{\"a\":1}}"
+        },
+        "index": -1,
+        "listed": {
+          "result": [
+            -1
+          ]
+        },
+        "got": {
+          "result": {
+            "a": 1
+          }
+        },
+        "set": {
+          "text": "{\n  \"7\": {\n    \"a\": 1\n  },\n  \"-1\": {\n    \"a\": 1\n  }\n}"
+        },
+        "core": "unreadable",
+        "reason": "key_not_index"
+      },
+      {
+        "id": "key-word",
+        "text": "{\"0\":{\"a\":1},\"abc\":{\"b\":2}}",
+        "loaded": {
+          "json": "{\"0\":{\"a\":1},\"abc\":{\"b\":2}}"
+        },
+        "index": 0,
+        "listed": {
+          "result": [
+            0,
+            null
+          ]
+        },
+        "got": {
+          "result": {
+            "a": 1
+          }
+        },
+        "set": {
+          "text": "{\n  \"0\": {\n    \"a\": 1\n  },\n  \"7\": {\n    \"a\": 1\n  },\n  \"abc\": {\n    \"b\": 2\n  }\n}"
+        },
+        "core": "unreadable",
+        "reason": "key_not_index"
+      },
+      {
+        "id": "key-fraction",
+        "text": "{\"1.5\":{\"a\":1}}",
+        "loaded": {
+          "json": "{\"1.5\":{\"a\":1}}"
+        },
+        "index": 1.5,
+        "listed": {
+          "result": [
+            1.5
+          ]
+        },
+        "got": {
+          "result": {
+            "a": 1
+          }
+        },
+        "set": {
+          "text": "{\n  \"7\": {\n    \"a\": 1\n  },\n  \"1.5\": {\n    \"a\": 1\n  }\n}"
+        },
+        "core": "unreadable",
+        "reason": "key_not_index"
+      },
+      {
+        "id": "key-empty",
+        "text": "{\"\":{\"a\":1}}",
+        "loaded": {
+          "json": "{\"\":{\"a\":1}}"
+        },
+        "index": 0,
+        "listed": {
+          "result": [
+            0
+          ]
+        },
+        "got": {
+          "result": null
+        },
+        "set": {
+          "text": "{\n  \"7\": {\n    \"a\": 1\n  },\n  \"\": {\n    \"a\": 1\n  }\n}"
+        },
+        "core": "unreadable",
+        "reason": "key_not_index"
+      },
+      {
+        "id": "key-past-safe",
+        "text": "{\"9007199254740992\":{\"a\":1}}",
+        "loaded": {
+          "json": "{\"9007199254740992\":{\"a\":1}}"
+        },
+        "index": 9007199254740992,
+        "listed": {
+          "result": [
+            9007199254740992
+          ]
+        },
+        "got": {
+          "result": {
+            "a": 1
+          }
+        },
+        "set": {
+          "text": "{\n  \"7\": {\n    \"a\": 1\n  },\n  \"9007199254740992\": {\n    \"a\": 1\n  }\n}"
+        },
+        "core": "unreadable",
+        "reason": "key_not_index"
+      },
+      {
+        "id": "key-max-safe",
+        "text": "{\"9007199254740991\":{\"a\":1}}",
+        "loaded": {
+          "json": "{\"9007199254740991\":{\"a\":1}}"
+        },
+        "index": 9007199254740991,
+        "listed": {
+          "result": [
+            9007199254740991
+          ]
+        },
+        "got": {
+          "result": {
+            "a": 1
+          }
+        },
+        "set": {
+          "text": "{\n  \"7\": {\n    \"a\": 1\n  },\n  \"9007199254740991\": {\n    \"a\": 1\n  }\n}",
+          "core": "written"
+        },
+        "core": "parsed"
+      },
+      {
+        "id": "duplicate-key",
+        "text": "{\"1\":{\"a\":1},\"2\":{},\"1\":{\"b\":2}}",
+        "loaded": {
+          "json": "{\"1\":{\"b\":2},\"2\":{}}"
+        },
+        "index": 1,
+        "listed": {
+          "result": [
+            1,
+            2
+          ]
+        },
+        "got": {
+          "result": {
+            "b": 2
+          }
+        },
+        "set": {
+          "text": "{\n  \"1\": {\n    \"b\": 2\n  },\n  \"2\": {},\n  \"7\": {\n    \"a\": 1\n  }\n}",
+          "core": "written"
+        },
+        "core": "parsed"
+      },
+      {
+        "id": "invalid-utf8",
+        "hex": "7b2231223a7b2273223a2261ffc362227d7d",
+        "loaded": {
+          "json": "{\"1\":{\"s\":\"a��b\"}}"
+        },
+        "index": 1,
+        "listed": {
+          "result": [
+            1
+          ]
+        },
+        "got": {
+          "result": {
+            "s": "a��b"
+          }
+        },
+        "set": {
+          "text": "{\n  \"1\": {\n    \"s\": \"a��b\"\n  },\n  \"7\": {\n    \"a\": 1\n  }\n}",
+          "core": "written"
+        },
+        "core": "parsed"
+      },
+      {
+        "id": "whitespace",
+        "text": "\n\t {\"2\" : {\"x\":1}} \r\n",
+        "loaded": {
+          "json": "{\"2\":{\"x\":1}}"
+        },
+        "index": 2,
+        "listed": {
+          "result": [
+            2
+          ]
+        },
+        "got": {
+          "result": {
+            "x": 1
+          }
+        },
+        "set": {
+          "text": "{\n  \"2\": {\n    \"x\": 1\n  },\n  \"7\": {\n    \"a\": 1\n  }\n}",
+          "core": "written"
+        },
+        "core": "parsed"
+      },
+      {
+        "id": "too-large",
+        "fill": {
+          "open": "{\"1\":\"",
+          "char": "x",
+          "close": "\"}",
+          "bytes": 1048577
+        },
+        "loaded": {
+          "keys": [
+            "1"
+          ],
+          "padLength": 1048569
+        },
+        "index": 1,
+        "listed": {
+          "result": [
+            1
+          ]
+        },
+        "got": {
+          "result": {
+            "length": 1048569
+          }
+        },
+        "set": {
+          "bytes": 1048607
+        },
+        "core": "unreadable",
+        "reason": "too_large"
+      },
+      {
+        "id": "at-bound",
+        "fill": {
+          "open": "{\"1\":\"",
+          "char": "x",
+          "close": "\"}",
+          "bytes": 1048576
+        },
+        "loaded": {
+          "keys": [
+            "1"
+          ],
+          "padLength": 1048568
+        },
+        "index": 1,
+        "listed": {
+          "result": [
+            1
+          ]
+        },
+        "got": {
+          "result": {
+            "length": 1048568
+          }
+        },
+        "set": {
+          "bytes": 1048606,
+          "core": "refused"
+        },
+        "core": "parsed"
+      }
+    ],
+    "bound": [
+      {
+        "id": "at-bound",
+        "index": 0,
+        "entry": {
+          "char": "x",
+          "length": 1048563
+        },
+        "bytes": 1048576,
+        "core": "written"
+      },
+      {
+        "id": "past-bound",
+        "index": 0,
+        "entry": {
+          "char": "x",
+          "length": 1048564
+        },
+        "bytes": 1048577,
+        "core": "refused",
+        "reason": "too_large"
       }
     ]
   }

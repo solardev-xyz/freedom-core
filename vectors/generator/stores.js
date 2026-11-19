@@ -36,6 +36,7 @@ const { createRequire } = require('node:module');
 const { loadWithInternals } = require('./naming');
 const { memoryFs } = require('./approval-stores');
 const { buildIntents, INTENTS_FORMAT } = require('./stores-intents');
+const { buildSafePending, SAFE_PENDING_FORMAT } = require('./stores-safe-pending');
 
 const IDENTITY = '/identity';
 const FILE = `${IDENTITY}/vault-meta.json`;
@@ -776,14 +777,16 @@ async function buildStores(checkout, mainCheckout, meta) {
   const malformed = [];
   for (const c of malformedCases(a)) malformed.push(await malformedOf(checkout, ethers, FakeTimers, a, c));
   const intents = await buildIntents(checkout, ethers);
+  const safePending = buildSafePending(checkout);
   return {
     meta,
     description: 'Design 0013 (PRF-5a): the set-A stores the core takes over, each from the stores reference\'s own module, run whole over an in-memory file system, with the core\'s operation for each step and its reading of each malformed file.',
-    formats: { vault_meta: VAULT_META_FORMAT, intents: INTENTS_FORMAT },
+    formats: { vault_meta: VAULT_META_FORMAT, intents: INTENTS_FORMAT, safe_pending: SAFE_PENDING_FORMAT },
     source: { max_file_bytes: 'design' },
     max_file_bytes: MAX_FILE_BYTES,
     vault_meta: { file: 'identity/vault-meta.json', runs, malformed },
     intents,
+    safe_pending: safePending,
   };
 }
 

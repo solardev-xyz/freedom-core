@@ -244,6 +244,11 @@ const CAPABILITIES: &[&str] = &[
     "x402.authorize",
     "x402.settle",
     "x402.update",
+    // Design 0013: the pending Safe transactions (PRF-5f).
+    "safe_pending.get",
+    "safe_pending.set",
+    "safe_pending.clear",
+    "safe_pending.list",
     // Design 0012: a page's EIP-1193 request, run by the core (APR-5).
     "eip1193.request",
     "dweb.open",
@@ -803,7 +808,7 @@ const STORES: &[&str] = &[
 ];
 
 /// The stores this core serves once named: the echo holds only these.
-const STORES_SERVED: &[&str] = &["rpc_api_keys"];
+const STORES_SERVED: &[&str] = &["safe_pending", "rpc_api_keys"];
 
 /// The hello's `store_moved`, each name once, in the hello's order. A name
 /// [`STORES`] doesn't list makes the hello malformed.
@@ -1648,11 +1653,14 @@ impl Core {
         }
         let root = grants.0.clone();
         self.vault.configure_grants(grants.0, grants.1);
+        self.vault
+            .configure_safe_pending(root.clone(), stores.contains(&"safe_pending"));
         self.stores_echo = stores
             .into_iter()
             .filter(|name| STORES_SERVED.contains(name))
             .filter(|name| match *name {
                 "rpc_api_keys" => self.vault.configure_rpc_keys(root.clone()),
+                "safe_pending" => true,
                 _ => false,
             })
             .collect();
