@@ -20,15 +20,22 @@
 //   where the lock was past 30 s before the attempt began; the exact
 //   29,999, 30,000 and 30,001 ms decisions are profiles.json's vectors,
 //   replayed on both sides.
+// - The JSON Lines journal (PRF-5d), both ways: the reference's
+//   durable-journal.js reads what freedom-cored's testhooks-only
+//   `test-journal` wrote, failed and crashed writes included, and the
+//   core reads the reference's; each removes the other's leftover
+//   compaction temp file.
 //
 // Needs FREEDOM_CORED, a freedom-cored built with the `testhooks` feature
-// (FREEDOM_CORED_TEST_PROFILE_HOLD), and the references:
+// (FREEDOM_CORED_TEST_PROFILE_HOLD, and `test-journal` under
+// FREEDOM_CORED_TEST_METHODS), and the references:
 // FREEDOM_BROWSER_APPROVALS_CHECKOUT (the profiles reference) and
 // FREEDOM_BROWSER_CHECKOUT (whose install has proper-lockfile), as
 // generate.js takes them. CI's vectors job runs it after building
 // freedom-cored.
 
 const assert = require('node:assert/strict');
+const crypto = require('node:crypto');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
@@ -392,6 +399,156 @@ test('a subcommand takes over a dead reference holder\'s lock past 30 s, not bef
       return true;
     });
     checkedCatalog(app);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// Design 0013's JSON Lines journal (PRF-5d), both ways: the reference's own
+// durable-journal.js (the profiles reference's, byte for byte
+// integration/rust-core's) reads the files a testhooks core's `test-journal`
+// wrote, failed and crashed writes included, and the core reads the
+// reference's. Each side removes the other's crashed compaction's temp file.
+const durableJournal = require(path.join(PROFILES_REFERENCE, 'src/main/lib/durable-journal.js'));
+const JOURNAL = 'wallet-intents.jsonl';
+const JOURNAL_RECORDS = [
+  '{"kind":"commit","run":"0b6f1c2e","key":"0x1:5","at":1763577600000}',
+  '{"b":1,"2":"two","a":[3,{"z":null}],"1":false,"__proto__":{"x":1}}',
+  '{"n":[1e21,1e-7,-0,0.1,5e-324],"s":"é€😀\\u0000\\u2028"}',
+  '{"lone":"\\ud800","trail":"\\udc00x","pair":"\\ud83d\\ude00"}',
+  '{"a":1,"b":2,"a":3}',
+  '{}',
+].map((text) => JSON.parse(text));
+
+/** Runs `test-journal` over `ops`: its exit and one answer per op it ran. */
+function coreJournal(dir, ops) {
+  return new Promise((resolve, reject) => {
+    const child = spawn(CORED, ['test-journal', '--dir', dir, '--name', JOURNAL], {
+      stdio: ['pipe', 'pipe', 'pipe'],
+      env: { ...process.env, FREEDOM_CORED_TEST_METHODS: '1' },
+    });
+    let stdout = '';
+    let stderr = '';
+    child.stdout.on('data', (chunk) => { stdout += chunk; });
+    child.stderr.on('data', (chunk) => { stderr += chunk; });
+    child.stdin.on('error', () => {}); // a crash closes it early
+    child.on('error', reject);
+    child.on('close', (code) => resolve({
+      code,
+      stderr,
+      answers: stdout.split('\n').filter(Boolean).map((line) => JSON.parse(line)),
+    }));
+    child.stdin.end(ops.map((op) => `${JSON.stringify(op)}\n`).join(''));
+  });
+}
+
+const texts = (records) => records.map((record) => JSON.stringify(record));
+const linesOf = (records) => Buffer.from(records.map(durableJournal.encodeLine).join(''), 'utf8');
+
+function journalDir() {
+  return fs.mkdtempSync(path.join(os.tmpdir(), 'freedom-core-journal-'));
+}
+
+test('the reference reads the journal a testhooks core wrote, and the core the reference\'s', async () => {
+  const dir = journalDir();
+  const file = path.join(dir, JOURNAL);
+  try {
+    const [r0, r1, r2, r3, r4, r5] = JOURNAL_RECORDS;
+    const out = await coreJournal(dir, [
+      { op: 'open' },
+      ...[r0, r1, r2, r3].map((record) => ({ op: 'append', record })),
+      { op: 'compact', records: [r0, r2, r3] },
+      { op: 'append', record: r4 },
+    ]);
+    assert.equal(out.code, 0, out.stderr);
+    assert.ok(out.answers.every((answer) => answer.ok), JSON.stringify(out.answers));
+    assert.equal(out.answers.length, 7);
+    const expected = [r0, r2, r3, r4];
+    assert.deepEqual(fs.readFileSync(file), linesOf(expected));
+    assert.equal(fs.statSync(file).mode & 0o777, durableJournal.FILE_MODE);
+    const read = await durableJournal.readJournal(file);
+    assert.deepEqual(texts(read.records), texts(expected));
+    assert.deepEqual(read.corrupt, []);
+    assert.equal(read.tornTail, 0);
+    assert.equal(read.unterminated, false);
+    assert.equal(read.completeLength, out.answers[6].size);
+    // The reference appends to the core's file, and the core reads it.
+    const journal = durableJournal.createJournal(file);
+    await journal.open();
+    await journal.append(r5);
+    const back = await coreJournal(dir, [{ op: 'open' }]);
+    assert.equal(back.code, 0, back.stderr);
+    assert.deepEqual(back.answers[0].records, texts([...expected, r5]));
+    assert.equal(back.answers[0].size, journal.size);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('a core append that failed or crashed is one the reference never reads', async () => {
+  const dir = journalDir();
+  const file = path.join(dir, JOURNAL);
+  try {
+    const [r0, r1, r2, r3] = JOURNAL_RECORDS;
+    // The write fails halfway, and so does its cut back: a torn tail.
+    const out = await coreJournal(dir, [
+      { op: 'open' },
+      { op: 'append', record: r0 },
+      { op: 'append', record: r1, fail: ['write', 'truncate'] },
+      { op: 'append', record: r2 },
+    ]);
+    assert.equal(out.code, 0, out.stderr);
+    assert.deepEqual(out.answers.map((a) => a.error ?? 'ok'), ['ok', 'ok', 'Other', 'JOURNAL_BROKEN']);
+    let read = await durableJournal.readJournal(file);
+    assert.deepEqual(texts(read.records), texts([r0]));
+    assert.ok(read.tornTail > 0);
+    assert.deepEqual(read.corrupt, []);
+    // The reference's open cuts it off; the core goes on from there.
+    await durableJournal.createJournal(file).open();
+    assert.deepEqual(fs.readFileSync(file), linesOf([r0]));
+    // A crash before the write leaves nothing; one before the fsync, the
+    // whole line (a power cut, not a crash, could lose it).
+    const crashed = await coreJournal(dir, [{ op: 'open' }, { op: 'append', record: r2, crash: 'write' }]);
+    assert.equal(crashed.code, 86, crashed.stderr);
+    assert.deepEqual(fs.readFileSync(file), linesOf([r0]));
+    const synced = await coreJournal(dir, [{ op: 'open' }, { op: 'append', record: r3, crash: 'fsync' }]);
+    assert.equal(synced.code, 86, synced.stderr);
+    read = await durableJournal.readJournal(file);
+    assert.deepEqual(texts(read.records), texts([r0, r3]));
+    assert.equal(read.tornTail, 0);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('each side removes the other\'s crashed compaction\'s temp file', async () => {
+  const dir = journalDir();
+  const file = path.join(dir, JOURNAL);
+  try {
+    const [r0, r1] = JOURNAL_RECORDS;
+    const out = await coreJournal(dir, [
+      { op: 'open' },
+      { op: 'append', record: r0 },
+      { op: 'append', record: r1 },
+      { op: 'compact', records: [r1], crash: 'rename' },
+    ]);
+    assert.equal(out.code, 86, out.stderr);
+    const temps = fs.readdirSync(dir).filter((name) => name !== JOURNAL);
+    assert.equal(temps.length, 1);
+    assert.ok(temps[0].startsWith(`${JOURNAL}.compact-`) && temps[0].endsWith('.tmp'), temps[0]);
+    assert.deepEqual(fs.readFileSync(path.join(dir, temps[0])), linesOf([r1]));
+    // The old journal stands, and the reference's open removes the temp.
+    const read = await durableJournal.createJournal(file).open();
+    assert.deepEqual(texts(read.records), texts([r0, r1]));
+    assert.deepEqual(fs.readdirSync(dir), [JOURNAL]);
+    // A temp file of the reference's, `<file>.compact-<uuid>.tmp`, goes at
+    // the core's open.
+    const theirs = `${JOURNAL}.compact-${crypto.randomUUID()}.tmp`;
+    fs.writeFileSync(path.join(dir, theirs), linesOf([r0]));
+    const opened = await coreJournal(dir, [{ op: 'open' }]);
+    assert.equal(opened.code, 0, opened.stderr);
+    assert.deepEqual(opened.answers[0].records, texts([r0, r1]));
+    assert.deepEqual(fs.readdirSync(dir), [JOURNAL]);
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }

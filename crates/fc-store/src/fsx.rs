@@ -12,8 +12,8 @@
 //!    abandoned (cancelled, revoked or out of time) before this point; the
 //!    temp file is then removed and the target is untouched.
 //! 5. Rename it over the target, if the temp name still names the file
-//!    checked ([`same_file`]; Unix): a file swapped in under that name is
-//!    never committed.
+//!    checked ([`same_file`]): a file swapped in under that name is never
+//!    committed.
 //! 6. Make the rename durable ([`sync_rename`]): on Unix, `fsync` the
 //!    directory; on Windows, flush the renamed file.
 //!
@@ -254,10 +254,10 @@ pub fn tighten(_path: &Path) -> std::io::Result<bool> {
 }
 
 /// Whether `path` (not followed) names the file `handle` has open: the same
-/// device and inode. A file renamed or swapped in under the name since the
-/// handle was opened is a different file. Windows: std exposes no file
-/// identity there, so this answers true (durability and these races are
-/// best effort on Windows).
+/// device and inode, or on Windows the same volume serial number and file
+/// ID ([`file_identity`]; a reparse point at `path` is opened itself). A
+/// file renamed or swapped in under the name since the handle was opened is
+/// a different file.
 pub fn same_file(handle: &File, path: &Path) -> std::io::Result<bool> {
     #[cfg(unix)]
     {
@@ -270,11 +270,39 @@ pub fn same_file(handle: &File, path: &Path) -> std::io::Result<bool> {
         };
         Ok(held.dev() == named.dev() && held.ino() == named.ino())
     }
-    #[cfg(not(unix))]
+    #[cfg(windows)]
+    {
+        use fc_sys::windows::{access, flags};
+        use std::os::windows::fs::OpenOptionsExt as _;
+        use std::os::windows::io::AsHandle as _;
+        let named = match OpenOptions::new()
+            .access_mode(access::ATTRIBUTES)
+            .custom_flags(flags::BACKUP_SEMANTICS | flags::OPEN_REPARSE_POINT)
+            .open(path)
+        {
+            Ok(named) => named,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+            Err(e) => return Err(e),
+        };
+        Ok(file_identity(handle.as_handle())? == file_identity(named.as_handle())?)
+    }
+    #[cfg(not(any(unix, windows)))]
     {
         let _ = (handle, path);
         Ok(true)
     }
+}
+
+/// The identity of the file `file` is open on, among every file of the
+/// machine's volumes: its volume's serial number and 128-bit file ID
+/// (`fc_sys::windows::file_id`), or where the file system gives none, the
+/// 32-bit serial number and 64-bit file index
+/// (`fc_sys::windows::file_index`).
+#[cfg(windows)]
+pub(crate) fn file_identity(
+    file: std::os::windows::io::BorrowedHandle<'_>,
+) -> std::io::Result<(u64, u128)> {
+    fc_sys::windows::file_id(file).or_else(|_| fc_sys::windows::file_index(file))
 }
 
 /// What [`open_regular`] found at a path.

@@ -59,7 +59,7 @@ jobs:
           persist-credentials: false
       - run: rustup toolchain install
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
-      - run: cargo clippy --locked -p fc-sys -p fc-service --all-targets --all-features -- -D warnings
+      - run: cargo clippy --locked -p fc-sys -p fc-service -p fc-store --all-targets --all-features -- -D warnings
       # The key-store helper's Keychain backend (design 0013), as the
       # release builds it and with its tests' hooks.
       - run: cargo clippy --locked -p freedom-cored --bin freedom-cored -- -D warnings
@@ -112,7 +112,8 @@ jobs:
   clippy-windows:
     # Confinement's Windows code (design 0010): fc-sys's job object and
     # mitigation calls and fc-service's use of them, which Linux's Clippy
-    # doesn't compile.
+    # doesn't compile; and fc-store's handle-relative directory on Windows
+    # (design 0013, "Windows handle I/O (#963)").
     name: clippy (Windows confinement)
     runs-on: windows-latest
     steps:
@@ -121,7 +122,7 @@ jobs:
           persist-credentials: false
       - run: rustup toolchain install
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
-      - run: cargo clippy --locked -p fc-sys -p fc-service --all-targets --all-features -- -D warnings
+      - run: cargo clippy --locked -p fc-sys -p fc-service -p fc-store --all-targets --all-features -- -D warnings
 
   release-targets-linux:
     # The Release workflow builds freedom-cored for musl, where the `libc`
@@ -306,12 +307,13 @@ jobs:
           node --test vectors/generator/check.test.js
       # Design 0013's interop harness: the profiles reference's catalog code
       # and freedom-cored's subcommands on one app root, the catalog's write
-      # lock held both ways (vectors/generator/interop.test.js). It needs a
-      # build with the test hooks.
+      # lock held both ways, and the JSON Lines journal read both ways
+      # (vectors/generator/interop.test.js). It needs a build with the test
+      # hooks.
       - run: rustup toolchain install
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       - run: cargo build --locked -p freedom-cored --features testhooks
-      - name: The profile catalog's interop harness
+      - name: The profile catalog's and the journal's interop harness
         env:
           FREEDOM_BROWSER_CHECKOUT: ${{ github.workspace }}/reference
           FREEDOM_BROWSER_APPROVALS_CHECKOUT: ${{ github.workspace }}/approvals-reference

@@ -35,6 +35,7 @@ FILES.push('generator/approval-rules.js', 'generator/approval-decisions.js');
 FILES.push('eip1193.json', 'generator/eip1193.js');
 FILES.push('stores.json', 'generator/stores.js', 'generator/stores-intents.js');
 FILES.push('generator/tx-decode.js');
+FILES.push('journal.json', 'generator/journal.js');
 
 function corruptedCheck(filename, corrupt) {
   const copy = fs.mkdtempSync(path.join(os.tmpdir(), 'freedom-core-vectors-'));
@@ -899,6 +900,20 @@ test('check rejects a changed Ethereum dispatcher answer', () => {
     scenario.requests[0].effects.find((item) => item.effect === 'send.sign').args.tx.gasLimit = '50000';
   });
   assert.match(stderr, /Byte mismatch: eip1193.json/);
+});
+
+test('check rejects a changed journal parse', () => {
+  const stderr = corruptedCheck('journal.json', (contents) => {
+    contents.parse.find((item) => item.name === 'whole-last-record-without-newline').unterminated = false;
+  });
+  assert.match(stderr, /Byte mismatch: journal.json/);
+});
+
+test('check rejects a changed journal run', () => {
+  const stderr = corruptedCheck('journal.json', (contents) => {
+    contents.journal.find((item) => item.name === 'torn-tail').steps[0].size += 1;
+  });
+  assert.match(stderr, /Byte mismatch: journal.json/);
 });
 
 test('check takes the approvals vectors from their own reference, at its pinned commit', () => {

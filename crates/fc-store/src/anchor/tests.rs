@@ -350,3 +350,245 @@ fn a_deep_tree_is_removed_within_a_small_descriptor_limit() {
     assert!(!root.join("tree").exists());
     assert_eq!(std::fs::read(outside.join("keep")).unwrap(), b"keep");
 }
+
+/// A junction at `link` to `target` (`mklink /J`), which an unprivileged
+/// process can make, unlike a symlink. Both paths are rebuilt from their
+/// components, so that a `/` joined in doesn't read to cmd as a switch.
+#[cfg(windows)]
+fn junction(link: &Path, target: &Path) {
+    let native = |path: &Path| path.components().collect::<PathBuf>();
+    let status = std::process::Command::new("cmd")
+        .arg("/C")
+        .arg("mklink")
+        .arg("/J")
+        .arg(native(link))
+        .arg(native(target))
+        .stdout(std::process::Stdio::null())
+        .status()
+        .unwrap();
+    assert!(status.success(), "mklink /J");
+}
+
+#[cfg(windows)]
+fn sorted(mut names: Vec<OsString>) -> Vec<OsString> {
+    names.sort();
+    names
+}
+
+/// Design 0013, PRF-5i (#963): a directory swapped for a junction between
+/// its open and the write redirects nothing. What is read, written, renamed,
+/// checked, listed and deleted through the handle stays in the directory
+/// opened, nothing lands in the junction's target, and the path walked again
+/// meets the junction and refuses it.
+#[cfg(windows)]
+#[test]
+fn a_directory_swapped_for_a_junction_after_its_open_redirects_nothing() {
+    use std::ffi::OsStr;
+    use std::io::{Read as _, Write as _};
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("root");
+    let outside = tmp.path().join("outside");
+    std::fs::create_dir_all(root.join("keys")).unwrap();
+    std::fs::create_dir_all(&outside).unwrap();
+    std::fs::write(root.join("keys/key"), b"original").unwrap();
+    std::fs::write(outside.join("key"), b"outside").unwrap();
+    let top = top(&root);
+    let (dir, name) = top.under(&root.join("keys/key"), true).unwrap().unwrap();
+    std::fs::rename(root.join("keys"), root.join("old-keys")).unwrap();
+    junction(&root.join("keys"), &outside);
+    let Regular::File(mut read) = dir.open_regular(&name, false).unwrap() else {
+        panic!("missing");
+    };
+    let mut text = String::new();
+    read.read_to_string(&mut text).unwrap();
+    assert_eq!(text, "original");
+    assert!(dir.same_file(&read, &name).unwrap());
+    let mut staged = dir.create_new(OsStr::new("staged")).unwrap();
+    staged.write_all(b"new").unwrap();
+    staged.sync_all().unwrap();
+    assert!(!dir.same_file(&read, OsStr::new("staged")).unwrap());
+    assert!(dir.same_file(&staged, OsStr::new("staged")).unwrap());
+    drop((read, staged));
+    assert_eq!(dir.kind(OsStr::new("staged")).unwrap(), Kind::File);
+    dir.rename(OsStr::new("staged"), &name).unwrap();
+    assert_eq!(std::fs::read(root.join("old-keys/key")).unwrap(), b"new");
+    assert_eq!(dir.names().unwrap(), std::slice::from_ref(&name));
+    // Nothing reached the junction's target, and nothing else is anywhere.
+    assert_eq!(std::fs::read(outside.join("key")).unwrap(), b"outside");
+    assert_eq!(std::fs::read_dir(&outside).unwrap().count(), 1);
+    assert_eq!(
+        sorted(top.names().unwrap()),
+        [OsString::from("keys"), OsString::from("old-keys")]
+    );
+    // The path walked again: the junction is refused, writing or not.
+    assert!(top.under(&root.join("keys/key"), false).is_err());
+    assert!(top.under(&root.join("keys/key"), true).is_err());
+    assert_eq!(top.kind(OsStr::new("keys")).unwrap(), Kind::Other);
+    assert_eq!(top.subdirs().unwrap(), [OsString::from("old-keys")]);
+    // Deleted through the handle, still in the directory opened.
+    assert!(dir.unlink(&name).unwrap());
+    assert!(!root.join("old-keys/key").exists());
+    assert_eq!(std::fs::read(outside.join("key")).unwrap(), b"outside");
+    // The directory's identity is its handle's, not the path's.
+    let moved = Dir::open_root(&root.join("old-keys"), Resolve::Follow)
+        .unwrap()
+        .unwrap();
+    assert_eq!(dir.identity().unwrap(), moved.identity().unwrap());
+}
+
+/// Design 0013, PRF-5i: a reparse point at a child's name is opened itself
+/// and refused, never followed, and nothing is made through it. Junctions,
+/// which any user can make; a file symlink too where the runner may make
+/// one (it needs a privilege or developer mode).
+#[cfg(windows)]
+#[test]
+fn a_reparse_point_at_a_childs_name_is_refused() {
+    use std::ffi::OsStr;
+    let tmp = tempfile::tempdir().unwrap();
+    let base = std::fs::canonicalize(tmp.path()).unwrap();
+    let root = base.join("root");
+    let outside = base.join("outside");
+    std::fs::create_dir_all(root.join("real")).unwrap();
+    std::fs::create_dir_all(&outside).unwrap();
+    std::fs::write(outside.join("keep"), b"keep").unwrap();
+    junction(&root.join("link"), &outside);
+    let top = top(&root);
+    let link = OsStr::new("link");
+    assert!(top.child(link, false).is_err());
+    assert!(top.child(link, true).is_err());
+    assert!(top.under(&root.join("link/keep"), false).is_err());
+    assert!(top.under(&root.join("link/new/file"), true).is_err());
+    assert_eq!(top.kind(link).unwrap(), Kind::Other);
+    assert!(matches!(
+        top.open_regular(link, false).unwrap(),
+        Regular::Other
+    ));
+    assert!(matches!(
+        top.open_regular(link, true).unwrap(),
+        Regular::Other
+    ));
+    assert!(top.create_new(link).is_err());
+    assert!(!top.remove_empty(link).unwrap());
+    assert_eq!(top.subdirs().unwrap(), [OsString::from("real")]);
+    assert_eq!(
+        sorted(top.names().unwrap()),
+        [OsString::from("link"), OsString::from("real")]
+    );
+    // Nothing was made through it.
+    assert_eq!(std::fs::read_dir(&outside).unwrap().count(), 1);
+    // A canonical root may not be one; a followed root may.
+    assert!(Dir::open_root(&root.join("link"), Resolve::Canonical(None)).is_err());
+    assert!(
+        Dir::open_root(&root.join("link"), Resolve::Follow)
+            .unwrap()
+            .is_some()
+    );
+    // A file symlink, where one can be made: opened itself and refused.
+    let file_link = OsStr::new("file-link");
+    if std::os::windows::fs::symlink_file(outside.join("keep"), root.join(file_link)).is_ok() {
+        assert_eq!(top.kind(file_link).unwrap(), Kind::Other);
+        assert!(matches!(
+            top.open_regular(file_link, false).unwrap(),
+            Regular::Other
+        ));
+        assert!(top.child(file_link, true).is_err());
+        assert!(top.unlink(file_link).unwrap());
+    }
+    // Removed, a junction goes itself; its target's files stay.
+    assert!(top.unlink(link).unwrap());
+    assert_eq!(top.kind(link).unwrap(), Kind::Missing);
+    assert_eq!(std::fs::read(outside.join("keep")).unwrap(), b"keep");
+}
+
+/// Design 0013, PRF-5i: renames and deletes go by handle, POSIX semantics
+/// included (Windows 10 1607 and NTFS, as the runner has): both
+/// directories moved after their open, each rename still lands in the one
+/// its handle holds, a file open elsewhere is replaced, and a deleted
+/// file's name goes at once though a handle is still open on it.
+#[cfg(windows)]
+#[test]
+fn renames_and_deletes_go_by_handle() {
+    use std::ffi::OsStr;
+    use std::io::Read as _;
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("root");
+    std::fs::create_dir_all(root.join("a")).unwrap();
+    std::fs::create_dir_all(root.join("b")).unwrap();
+    std::fs::write(root.join("a/one"), b"one").unwrap();
+    std::fs::write(root.join("a/two"), b"two").unwrap();
+    let top = top(&root);
+    let a = top.child(OsStr::new("a"), false).unwrap().unwrap();
+    let b = top.child(OsStr::new("b"), false).unwrap().unwrap();
+    std::fs::rename(root.join("a"), root.join("a2")).unwrap();
+    std::fs::rename(root.join("b"), root.join("b2")).unwrap();
+    let mut held = std::fs::File::open(root.join("a2/two")).unwrap();
+    a.rename(OsStr::new("one"), OsStr::new("two")).unwrap();
+    assert_eq!(std::fs::read(root.join("a2/two")).unwrap(), b"one");
+    let mut text = String::new();
+    held.read_to_string(&mut text).unwrap();
+    assert_eq!(text, "two");
+    drop(held);
+    a.rename_into(OsStr::new("two"), &b, OsStr::new("three"))
+        .unwrap();
+    assert!(!root.join("a2/two").exists());
+    assert_eq!(std::fs::read(root.join("b2/three")).unwrap(), b"one");
+    // A read-only file is deleted, as unlink ignores a file's mode.
+    let mut permissions = std::fs::metadata(root.join("b2/three"))
+        .unwrap()
+        .permissions();
+    permissions.set_readonly(true);
+    std::fs::set_permissions(root.join("b2/three"), permissions).unwrap();
+    let held = std::fs::File::open(root.join("b2/three")).unwrap();
+    assert!(b.unlink(OsStr::new("three")).unwrap());
+    assert!(!root.join("b2/three").exists());
+    assert_eq!(b.kind(OsStr::new("three")).unwrap(), Kind::Missing);
+    drop(held);
+    assert!(!b.unlink(OsStr::new("three")).unwrap());
+    // A missing source is an error; nothing is made.
+    assert!(a.rename(OsStr::new("gone"), OsStr::new("x")).is_err());
+    // A directory isn't replaced by a rename, nor unlinked.
+    std::fs::write(root.join("a2/file"), b"x").unwrap();
+    std::fs::create_dir(root.join("a2/sub")).unwrap();
+    assert!(a.rename(OsStr::new("file"), OsStr::new("sub")).is_err());
+    assert!(a.unlink(OsStr::new("sub")).is_err());
+    assert!(root.join("a2/sub").is_dir());
+    // An empty directory is removed by handle; a full one isn't.
+    std::fs::write(root.join("a2/sub/inner"), b"x").unwrap();
+    assert!(!a.remove_empty(OsStr::new("sub")).unwrap());
+    std::fs::remove_file(root.join("a2/sub/inner")).unwrap();
+    assert!(a.remove_empty(OsStr::new("sub")).unwrap());
+    assert!(!root.join("a2/sub").exists());
+    assert!(!a.remove_empty(OsStr::new("file")).unwrap());
+    assert!(!a.remove_empty(OsStr::new("sub")).unwrap());
+}
+
+/// Design 0013, PRF-5i: a tree is removed from handle to handle after its
+/// path moved, a junction in it removed itself and its target left whole;
+/// a junction in the tree's place is removed itself.
+#[cfg(windows)]
+#[test]
+fn a_tree_is_removed_by_handle_leaving_a_junctions_target() {
+    use std::ffi::OsStr;
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("root");
+    let outside = tmp.path().join("outside");
+    std::fs::create_dir_all(root.join("parent/tree/a/b")).unwrap();
+    std::fs::create_dir_all(outside.join("inner")).unwrap();
+    std::fs::write(outside.join("inner/keep"), b"keep").unwrap();
+    std::fs::write(root.join("parent/tree/a/b/file"), b"x").unwrap();
+    std::fs::write(root.join("parent/tree/top"), b"x").unwrap();
+    junction(&root.join("parent/tree/a/link"), &outside);
+    let parent = top(&root)
+        .child(OsStr::new("parent"), false)
+        .unwrap()
+        .unwrap();
+    std::fs::rename(root.join("parent"), root.join("moved")).unwrap();
+    assert!(parent.remove_tree(OsStr::new("tree")).unwrap());
+    assert!(!root.join("moved/tree").exists());
+    assert_eq!(std::fs::read(outside.join("inner/keep")).unwrap(), b"keep");
+    junction(&root.join("moved/tree"), &outside);
+    assert!(parent.remove_tree(OsStr::new("tree")).unwrap());
+    assert!(!root.join("moved/tree").exists());
+    assert_eq!(std::fs::read(outside.join("inner/keep")).unwrap(), b"keep");
+    assert!(!parent.remove_tree(OsStr::new("tree")).unwrap());
+}
