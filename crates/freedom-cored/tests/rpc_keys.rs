@@ -212,6 +212,39 @@ impl Main {
         panic!("no response to {method}");
     }
 
+    /// `method` from `caller`, its key-store requests held unanswered until
+    /// its response (a slow key store), then answered.
+    fn call_holding(&mut self, caller: &str, method: &str, params: Value) -> Value {
+        let id = self.next_id;
+        self.next_id += 1;
+        self.core().send(&json!({
+            "type": "request", "id": id, "method": method, "params": params,
+            "context": { "caller": caller },
+        }));
+        let mut held = Vec::new();
+        let until = Instant::now() + Duration::from_secs(60);
+        while Instant::now() < until {
+            let message = self
+                .core()
+                .recv_or_closed(Duration::from_millis(200))
+                .expect("the core runs");
+            let Some(message) = message else { continue };
+            if message["type"] == "request" && message["method"] == "shell.keystore" {
+                held.push(message);
+            } else if message["type"] == "response" && message["id"] == id {
+                assert!(!held.is_empty(), "nothing asked the key store: {message}");
+                for request in held {
+                    let result = self.keychain.answer(&request["params"]).unwrap();
+                    let id = request["id"].as_u64().unwrap();
+                    self.core()
+                        .send(&json!({ "type": "response", "id": id, "result": result }));
+                }
+                return message;
+            }
+        }
+        panic!("no response to {method}");
+    }
+
     fn call(&mut self, caller: &str, method: &str, params: Value) -> Value {
         self.try_call(caller, method, params)
             .unwrap_or_else(|| panic!("the core exited during {method}"))
@@ -598,4 +631,101 @@ fn a_replacing_set_over_the_file() {
     assert_eq!(main.entries(), BTreeSet::from(["alchemy".to_owned()]));
     main.start(&[]);
     assert_eq!(main.keys()["alchemy"], "k-old");
+}
+
+/// A job abandoned before its commit writes nothing (design 0001's commit
+/// claim): a set and the migration riding with it, the key store answering
+/// after the request's deadline, answer `deadline`, and neither the secrets
+/// file nor `rpc-api-keys.json` changes.
+#[test]
+fn an_abandoned_set_writes_nothing() {
+    let env = [
+        ("FREEDOM_CORED_TEST_KDF_DEADLINE_MS", "3000"),
+        ("FREEDOM_CORED_TEST_KEYSTORE_DEADLINE_MS", "30000"),
+    ];
+    let mut main = Main::new(true);
+    main.start(&env);
+    assert!(main.set("alchemy", "k-a")["result"].is_object());
+    // A new start, whose migration has yet to run.
+    main.start(&env);
+    std::fs::write(main.file_path(), reference_text(&[("drpc", "k-d")])).unwrap();
+    let secrets = std::fs::read(main.data.join("secrets.json")).unwrap();
+    let file = std::fs::read(main.file_path()).unwrap();
+    let set = json!({ "id": "infura", "api_key": "k-i" });
+    let reply = main.call_holding("chrome", "secrets.set_rpc_api_key", set);
+    assert_eq!(code(&reply), "deadline", "{reply}");
+    // Served after the abandoned job's end.
+    assert_eq!(main.status(), ["alchemy", "drpc"]);
+    assert_eq!(
+        std::fs::read(main.data.join("secrets.json")).unwrap(),
+        secrets
+    );
+    assert_eq!(std::fs::read(main.file_path()).unwrap(), file);
+    assert_eq!(main.keys()["drpc"], "k-d");
+    assert_eq!(main.entries().len(), 2);
+}
+
+/// Without a key store the file's write is the commit: a job that reaches
+/// it past its claim time answers `deadline` and writes nothing.
+#[test]
+fn an_abandoned_set_without_a_key_store_writes_nothing() {
+    let mut main = Main::new(false);
+    main.start(&[
+        ("FREEDOM_CORED_TEST_KDF_DEADLINE_MS", "1500"),
+        ("FREEDOM_CORED_TEST_JOB_DELAY_MS", "1200"),
+    ]);
+    let reply = main.set("alchemy", "k");
+    assert_eq!(code(&reply), "deadline", "{reply}");
+    std::thread::sleep(Duration::from_millis(500));
+    assert!(!main.file_path().exists());
+}
+
+/// The file keeps every key whose entry's write isn't durable (its
+/// directory flush failing after the rename).
+#[test]
+fn a_write_that_isnt_durable_keeps_the_file() {
+    // The migration: every key stays in the file too, and the next start
+    // moves them again.
+    let keys = [("alchemy", "k-a"), ("infura", "k-i")];
+    let mut main = Main::new(true);
+    std::fs::write(main.file_path(), reference_text(&keys)).unwrap();
+    main.start(&[("FREEDOM_CORED_TEST_SECRETS_FAIL", "rpc-migrate-flush")]);
+    assert_eq!(main.keys().len(), 2);
+    assert_eq!(main.entries().len(), 2);
+    assert_eq!(main.file().unwrap().as_object().unwrap().len(), 2);
+    main.start(&[]);
+    assert_eq!(main.keys()["infura"], "k-i");
+    assert!(!main.file_path().exists());
+
+    // A set over a key the file counts is refused, the file's key still
+    // answered; then taken.
+    let mut main = Main::new(true);
+    main.start(&[("FREEDOM_CORED_TEST_SECRETS_FAIL", "rpc-set-flush")]);
+    assert!(main.keys().is_empty());
+    std::fs::write(main.file_path(), reference_text(&[("alchemy", "k-old")])).unwrap();
+    let reply = main.set("alchemy", "k-new");
+    assert_eq!(code(&reply), "storage", "{reply}");
+    assert_eq!(reply["error"]["data"]["kind"], "not_durable");
+    assert_eq!(main.keys()["alchemy"], "k-old");
+    assert!(main.file().is_some());
+    let reply = main.set("alchemy", "k-new");
+    assert!(reply["result"].get("durable").is_none(), "{reply}");
+    assert_eq!(main.keys()["alchemy"], "k-new");
+    assert!(!main.file_path().exists());
+
+    // Over no key in the file: the result, with `durable: false`.
+    let mut main = Main::new(true);
+    main.start(&[("FREEDOM_CORED_TEST_SECRETS_FAIL", "rpc-set-flush")]);
+    let reply = main.set("infura", "k-i");
+    assert_eq!(reply["result"]["durable"], false, "{reply}");
+    assert_eq!(main.keys()["infura"], "k-i");
+
+    // Without a key store, the file's own write.
+    let mut main = Main::new(false);
+    main.start(&[("FREEDOM_CORED_TEST_SECRETS_FAIL", "rpc-file-flush")]);
+    let reply = main.set("infura", "k-i");
+    assert_eq!(reply["result"]["durable"], false, "{reply}");
+    assert_eq!(main.file().unwrap()["infura"]["apiKey"], "k-i");
+    let reply = main.set("drpc", "k-d");
+    assert!(reply["result"].get("durable").is_none(), "{reply}");
 }

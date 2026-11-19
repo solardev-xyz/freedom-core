@@ -12,6 +12,13 @@ repository.workspace = true
 [lints]
 workspace = true
 
+[dependencies]
+# A file of secrets read into one buffer that is wiped on drop
+# (`fsx::read_secret_at_most`, `file::read_secret_file`): the RPC API keys'
+# plaintext file. Already in the daemon and freedom-mobile-ffi (AGENTS.md
+# rule 7).
+zeroize = "1.8"
+
 [target.'cfg(unix)'.dependencies]
 # openat, renameat, unlinkat, fstatat and O_NOFOLLOW for the handle-relative
 # directory; a non-blocking open for the bounded read; getuid for its owner

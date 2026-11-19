@@ -395,8 +395,8 @@ enum RpcJob {
 /// What an RPC-key job found.
 pub enum RpcAnswer {
     /// The providers with a key; a set's or a remove's provider is listed
-    /// with its presence after it.
-    Providers(Vec<String>, Option<(String, bool)>),
+    /// with its presence after it, and whether its change is durable.
+    Providers(Vec<String>, Option<(String, bool)>, bool),
     /// `secrets.rpc_api_keys`: each provider's key.
     Keys(std::collections::BTreeMap<String, Zeroizing<String>>),
 }
@@ -636,10 +636,12 @@ pub struct Vault {
 }
 
 #[derive(Deserialize)]
-struct RpcKeyParams {
+struct RpcKeyParams<'a> {
     id: String,
-    #[serde(default)]
-    api_key: Option<Zeroizing<String>>,
+    /// Read by [`crate::rpc_keys::key_param`], never into `serde_json`'s
+    /// growing buffer.
+    #[serde(borrow, default)]
+    api_key: Option<&'a RawValue>,
 }
 
 #[derive(Deserialize)]
@@ -940,7 +942,10 @@ impl Vault {
             "secrets.rpc_api_key_status" => RpcJob::Status,
             "secrets.set_rpc_api_key" => {
                 let p = params::<RpcKeyParams>(raw)?;
-                let key = p.api_key.ok_or_else(invalid)?;
+                let key = p
+                    .api_key
+                    .and_then(|raw| crate::rpc_keys::key_param(raw.get()))
+                    .ok_or_else(invalid)?;
                 RpcJob::Change(crate::rpc_keys::Op::Set {
                     id: p.id,
                     key,
@@ -2986,7 +2991,7 @@ fn job_rpc_keys(
     job: RpcJob,
     control: &JobControl,
 ) -> Result<RpcAnswer, ErrorBody> {
-    use crate::rpc_keys::{Failure, Op};
+    use crate::rpc_keys::{Commit, Failure, Op};
     let rpc_keys = rpc_keys.ok_or_else(internal)?;
     if control.abandoned() {
         return Err(deadline_exceeded());
@@ -2994,31 +2999,61 @@ fn job_rpc_keys(
     let body = |failure: Failure| match failure {
         Failure::Invalid(rule) => ErrorBody::new(ErrorCode::InvalidArgument, "Invalid parameters")
             .with_data(serde_json::json!({ "rule": rule })),
+        // The loop has answered already.
+        Failure::Secrets(secrets::Error::Abandoned) => deadline_exceeded(),
         Failure::Secrets(error) => secrets_body(error),
         Failure::File(kind) => ErrorBody::new(ErrorCode::Storage, "Storage error")
             .with_data(serde_json::json!({ "kind": kind, "file": "rpc_api_keys" })),
+        Failure::NotDurable => ErrorBody::new(ErrorCode::Storage, "Storage error")
+            .with_data(serde_json::json!({ "kind": "not_durable", "file": "secrets" })),
     };
+    // Every write that changes an answer is claimed through the job's
+    // commit, at the first (design 0001; [`Commit`]).
+    let abandoned = || control.abandoned();
+    let claim = || claim(control);
+    let commit = Commit::new(&abandoned, &claim);
     match job {
-        RpcJob::Keys => rpc_keys.keys().map(RpcAnswer::Keys).map_err(body),
+        RpcJob::Keys => rpc_keys.keys(&commit).map(RpcAnswer::Keys).map_err(body),
         RpcJob::Status => rpc_keys
-            .status()
-            .map(|ids| RpcAnswer::Providers(ids, None))
+            .status(&commit)
+            .map(|ids| RpcAnswer::Providers(ids, None, true))
             .map_err(body),
         RpcJob::Change(op) => {
-            rpc_keys.change(&op).map_err(body)?;
+            let done = rpc_keys.change(&op, &commit).map_err(body)?;
             let touched = match &op {
                 Op::Set { id, .. } => (id.clone(), true),
                 Op::Remove { id } => (id.clone(), false),
             };
-            let ids = rpc_keys.status().map_err(body)?;
-            Ok(RpcAnswer::Providers(ids, Some(touched)))
+            let ids = rpc_keys.status(&commit).map_err(body)?;
+            Ok(RpcAnswer::Providers(
+                ids,
+                Some(touched),
+                done == fc_store::fsx::Done::Durable,
+            ))
         }
     }
 }
 
-/// An RPC-key job's answer: `{ providers: [{ id, present }] }`, never a key;
+/// Counts what a writer is given.
+struct Counted(usize);
+
+impl std::io::Write for Counted {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.0 = self.0.saturating_add(bytes.len());
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+/// An RPC-key job's answer: `{ providers: [{ id, present }] }`, never a key,
+/// with `durable: false` when a set's or a remove's change isn't durable;
 /// `secrets.rpc_api_keys`'s `{ keys: [{ id, api_key }] }`, written straight
-/// into the zeroized payload.
+/// into the zeroized payload. That payload's size is counted first, by the
+/// same writer, so its buffer is allocated once, exactly, and never grows
+/// (a grown buffer would leave the keys in the allocation it freed).
 fn rpc_reply(id: u64, answer: &RpcAnswer) -> Option<Zeroizing<Vec<u8>>> {
     #[derive(Serialize)]
     struct Provider<'a> {
@@ -3031,7 +3066,7 @@ fn rpc_reply(id: u64, answer: &RpcAnswer) -> Option<Zeroizing<Vec<u8>>> {
         api_key: &'a str,
     }
     match answer {
-        RpcAnswer::Providers(ids, touched) => {
+        RpcAnswer::Providers(ids, touched, durable) => {
             let mut providers: Vec<Provider<'_>> = ids
                 .iter()
                 .map(|id| Provider { id, present: true })
@@ -3044,7 +3079,11 @@ fn rpc_reply(id: u64, answer: &RpcAnswer) -> Option<Zeroizing<Vec<u8>>> {
                     present: false,
                 });
             }
-            json_result(id, &serde_json::json!({ "providers": providers }))
+            let mut result = serde_json::json!({ "providers": providers });
+            if !durable {
+                result["durable"] = serde_json::Value::Bool(false);
+            }
+            json_result(id, &result)
         }
         RpcAnswer::Keys(keys) => {
             let keys: Vec<Key<'_>> = keys
@@ -3054,16 +3093,15 @@ fn rpc_reply(id: u64, answer: &RpcAnswer) -> Option<Zeroizing<Vec<u8>>> {
                     api_key: key.as_str(),
                 })
                 .collect();
-            let size: usize = keys
-                .iter()
-                .map(|k| k.id.len() + k.api_key.len() * 2 + 32)
-                .sum();
-            let mut payload = Zeroizing::new(Vec::with_capacity(size + 128));
             #[derive(Serialize)]
             struct Keys<'a> {
                 keys: &'a [Key<'a>],
             }
-            message::write_result(&mut *payload, id, &Keys { keys: &keys }).ok()?;
+            let keys = Keys { keys: &keys };
+            let mut size = Counted(0);
+            message::write_result(&mut size, id, &keys).ok()?;
+            let mut payload = Zeroizing::new(Vec::with_capacity(size.0));
+            message::write_result(&mut *payload, id, &keys).ok()?;
             Some(payload)
         }
     }
@@ -3687,6 +3725,24 @@ fn written(result: Result<(NewVault, Commit), OpError>) -> JobOutput {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `secrets.rpc_api_keys`' payload is counted before it is written, so
+    /// its zeroizing buffer never grows: a control character, six bytes
+    /// escaped, in every byte of a 1,024-byte key, and an id that needs
+    /// escaping too.
+    #[test]
+    fn the_rpc_keys_reply_is_sized_exactly() {
+        let key = "\u{1}".repeat(1024);
+        let mut keys = std::collections::BTreeMap::new();
+        keys.insert("alchemy".to_owned(), Zeroizing::new(key.clone()));
+        keys.insert("a\u{1f}\"".to_owned(), Zeroizing::new("k\\".to_owned()));
+        let payload = rpc_reply(7, &RpcAnswer::Keys(keys)).unwrap();
+        assert!(payload.len() > 6 * 1024);
+        assert_eq!(payload.capacity(), payload.len());
+        let reply: serde_json::Value = serde_json::from_slice(&payload).unwrap();
+        assert_eq!(reply["result"]["keys"][1]["api_key"], key.as_str());
+        assert_eq!(reply["result"]["keys"][0]["id"], "a\u{1f}\"");
+    }
 
     /// #86: an error reply too large for a frame ended the core (exit 70)
     /// once framed. It is replaced by its code with a fixed message.

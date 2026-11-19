@@ -97,8 +97,10 @@
 //!   `commit`, `remove`, `stage-pending`, `stage`, `fold`, `rollback`, …:
 //!   before its rename), or a vault write's (`vault-claim`, its claim
 //!   refused as if past its time; `vault-rename`, its rename, after the
-//!   claim). The first attempt in the process of each listed write fails as
-//!   if the OS had failed it.
+//!   claim), or the directory flush after a secrets-file write's rename
+//!   (`<step>-flush`, `rpc-set-flush`, `rpc-file-flush`, …: the change in
+//!   place and reported not durable). The first attempt in the process of
+//!   each listed write fails as if the OS had failed it.
 //! - `FREEDOM_CORED_TEST_RECEIPT_TTL_MS` replaces a device send's receipt's
 //!   10-minute life (design 0012, "A device send's rule"), so a test sees
 //!   one expire over the wire, which has no clock to inject. Read once, as
@@ -465,6 +467,22 @@ pub fn grant_write_fails(_store: &str, _step: &str) -> bool {
 pub struct Swap;
 
 impl fc_store::Hooks for Swap {
+    fn checked(&self, temp: &std::path::Path) {
+        swap("checked", temp);
+    }
+}
+
+/// The hooks of a secrets-file write, and of `rpc-api-keys.json`'s, named
+/// by its step: [`Swap`]'s, and the directory flush after the rename fails
+/// when `FREEDOM_CORED_TEST_SECRETS_FAIL` lists `<step>-flush` (once per
+/// process), the change in place and reported not durable.
+pub struct SecretsWrite<'a>(pub &'a str);
+
+impl fc_store::Hooks for SecretsWrite<'_> {
+    fn fails(&self, step: fc_store::Step) -> bool {
+        step == fc_store::Step::Flush && secrets_fails(&format!("{}-flush", self.0))
+    }
+
     fn checked(&self, temp: &std::path::Path) {
         swap("checked", temp);
     }

@@ -247,6 +247,17 @@ impl Secrets {
         step: &str,
         commit: &dyn Fn() -> bool,
     ) -> Result<(), Error> {
+        self.write_done(next, step, commit).map(|_| ())
+    }
+
+    /// [`Secrets::write`], saying whether the change is durable: `NotDurable`
+    /// when the directory flush after its rename failed (in place, logged).
+    fn write_done(
+        &self,
+        next: &SecretsFile,
+        step: &str,
+        commit: &dyn Fn() -> bool,
+    ) -> Result<Done, Error> {
         crate::testhooks::secrets_step(&format!("before-{step}"));
         if crate::testhooks::secrets_fails(step) {
             // As if the OS had failed the write before its rename.
@@ -267,7 +278,7 @@ impl Secrets {
                 }
             },
             commit,
-            &crate::testhooks::Swap,
+            &crate::testhooks::SecretsWrite(step),
         );
         match written {
             Ok(done) => {
@@ -279,7 +290,7 @@ impl Secrets {
                 }
                 self.set_view(view_of(next));
                 crate::testhooks::secrets_step(&format!("after-{step}"));
-                Ok(())
+                Ok(done)
             }
             Err(fsx::WriteError::Abandoned) => Err(Error::Abandoned),
             Err(fsx::WriteError::Io(e)) => Err(Error::Write(io_kind(&e))),
@@ -950,19 +961,25 @@ impl Secrets {
     /// removal after the puts. Under the committed key if there is one, in
     /// one write named `step`; otherwise a new key (the `pending` write
     /// `<step>-pending`, `create`, then the commit, which carries every put).
-    /// A plan with nothing to do writes nothing. The result is the plan's.
+    /// A plan with nothing to do writes nothing.
+    ///
+    /// The write that carries the change is the commit, claimed through
+    /// `gate` (as enroll's); the `pending` write before a new key isn't, and
+    /// is refused once the job is abandoned. The result is the plan's, and
+    /// whether the change is durable (`Durable` when nothing was written).
     pub fn change_entries<T>(
         &self,
         step: &str,
+        gate: &Gate<'_>,
         plan: impl FnOnce(&SecretsFile) -> Result<(Change, T), Error>,
-    ) -> Result<T, Error> {
+    ) -> Result<(T, Done), Error> {
         let policy = Policy::Unattended;
         let caps = self.store.capabilities();
         let _held = self.lock()?;
         let file = self.load()?;
         let (change, planned) = plan(&file)?;
         if change.is_empty() {
-            return Ok(planned);
+            return Ok((planned, Done::Durable));
         }
         // An entry of a put's name under the other key leaves first: `put`
         // can't replace it.
@@ -1003,6 +1020,9 @@ impl Secrets {
                         .map_err(refused)?,
                     Err(other) => return Err(refused(other)),
                 };
+                if (gate.abandoned)() {
+                    return Err(Error::Abandoned);
+                }
                 self.write(&pending, &format!("{step}-pending"), &|| true)?;
                 if !pending.forget_list().is_empty() {
                     self.poke();
@@ -1033,11 +1053,14 @@ impl Secrets {
                 next = next.remove(name).map_err(refused)?;
             }
         }
-        self.write(&next, step, &|| true)?;
+        if (gate.abandoned)() {
+            return Err(Error::Abandoned);
+        }
+        let done = self.write_done(&next, step, gate.claim)?;
         if !next.forget_list().is_empty() {
             self.poke();
         }
-        Ok(planned)
+        Ok((planned, done))
     }
 }
 
