@@ -33,9 +33,10 @@ FILES.push('secrets.json', 'generator/secrets.js');
 FILES.push('keystore.json', 'generator/keystore.js', 'generator/hpke.js');
 FILES.push('generator/approval-rules.js', 'generator/approval-decisions.js');
 FILES.push('eip1193.json', 'generator/eip1193.js');
-FILES.push('stores.json', 'generator/stores.js');
+FILES.push('stores.json', 'generator/stores.js', 'generator/stores-intents.js', 'generator/stores-rpc-keys.js');
 FILES.push('generator/tx-decode.js');
-FILES.push('generator/stores-intents.js');
+FILES.push('journal.json', 'generator/journal.js');
+FILES.push('sqlite.json', 'generator/sqlite.js');
 
 function corruptedCheck(filename, corrupt) {
   const copy = fs.mkdtempSync(path.join(os.tmpdir(), 'freedom-core-vectors-'));
@@ -902,6 +903,20 @@ test('check rejects a changed Ethereum dispatcher answer', () => {
   assert.match(stderr, /Byte mismatch: eip1193.json/);
 });
 
+test('check rejects a changed journal parse', () => {
+  const stderr = corruptedCheck('journal.json', (contents) => {
+    contents.parse.find((item) => item.name === 'whole-last-record-without-newline').unterminated = false;
+  });
+  assert.match(stderr, /Byte mismatch: journal.json/);
+});
+
+test('check rejects a changed journal run', () => {
+  const stderr = corruptedCheck('journal.json', (contents) => {
+    contents.journal.find((item) => item.name === 'torn-tail').steps[0].size += 1;
+  });
+  assert.match(stderr, /Byte mismatch: journal.json/);
+});
+
 test('check takes the approvals vectors from their own reference, at its pinned commit', () => {
   // The shared reference is at another commit: refused before anything is built.
   const result = spawnSync(process.execPath, [path.join(SOURCE, 'generator/generate.js'),
@@ -933,4 +948,12 @@ test('check takes the stores vectors from their own reference, at its pinned com
   // And the file records it.
   const commit = spawnSync('git', ['rev-parse', 'HEAD'], { cwd: STORES_REFERENCE, encoding: 'utf8' }).stdout.trim();
   assert.equal(JSON.parse(fs.readFileSync(path.join(SOURCE, 'stores.json'), 'utf8')).meta.freedomBrowserCommit, commit);
+});
+
+test('check rejects a changed SQLite schema row', () => {
+  const stderr = corruptedCheck('sqlite.json', (contents) => {
+    const row = contents.databases[0].sqlite_master.find((item) => item.name === 'idx_payments_kind');
+    row.rootpage += 1;
+  });
+  assert.match(stderr, /Byte mismatch: sqlite.json/);
 });

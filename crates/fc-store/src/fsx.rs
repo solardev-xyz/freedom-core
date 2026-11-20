@@ -12,8 +12,8 @@
 //!    abandoned (cancelled, revoked or out of time) before this point; the
 //!    temp file is then removed and the target is untouched.
 //! 5. Rename it over the target, if the temp name still names the file
-//!    checked ([`same_file`]; Unix): a file swapped in under that name is
-//!    never committed.
+//!    checked ([`same_file`]): a file swapped in under that name is never
+//!    committed.
 //! 6. Make the rename durable ([`sync_rename`]): on Unix, `fsync` the
 //!    directory; on Windows, flush the renamed file.
 //!
@@ -46,8 +46,10 @@
 
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Write};
+
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
+use zeroize::Zeroizing;
 
 use crate::{Hooks, Step};
 
@@ -254,10 +256,10 @@ pub fn tighten(_path: &Path) -> std::io::Result<bool> {
 }
 
 /// Whether `path` (not followed) names the file `handle` has open: the same
-/// device and inode. A file renamed or swapped in under the name since the
-/// handle was opened is a different file. Windows: std exposes no file
-/// identity there, so this answers true (durability and these races are
-/// best effort on Windows).
+/// device and inode, or on Windows the same volume serial number and file
+/// ID ([`file_identity`]; a reparse point at `path` is opened itself). A
+/// file renamed or swapped in under the name since the handle was opened is
+/// a different file.
 pub fn same_file(handle: &File, path: &Path) -> std::io::Result<bool> {
     #[cfg(unix)]
     {
@@ -270,11 +272,39 @@ pub fn same_file(handle: &File, path: &Path) -> std::io::Result<bool> {
         };
         Ok(held.dev() == named.dev() && held.ino() == named.ino())
     }
-    #[cfg(not(unix))]
+    #[cfg(windows)]
+    {
+        use fc_sys::windows::{access, flags};
+        use std::os::windows::fs::OpenOptionsExt as _;
+        use std::os::windows::io::AsHandle as _;
+        let named = match OpenOptions::new()
+            .access_mode(access::ATTRIBUTES)
+            .custom_flags(flags::BACKUP_SEMANTICS | flags::OPEN_REPARSE_POINT)
+            .open(path)
+        {
+            Ok(named) => named,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+            Err(e) => return Err(e),
+        };
+        Ok(file_identity(handle.as_handle())? == file_identity(named.as_handle())?)
+    }
+    #[cfg(not(any(unix, windows)))]
     {
         let _ = (handle, path);
         Ok(true)
     }
+}
+
+/// The identity of the file `file` is open on, among every file of the
+/// machine's volumes: its volume's serial number and 128-bit file ID
+/// (`fc_sys::windows::file_id`), or where the file system gives none, the
+/// 32-bit serial number and 64-bit file index
+/// (`fc_sys::windows::file_index`).
+#[cfg(windows)]
+pub(crate) fn file_identity(
+    file: std::os::windows::io::BorrowedHandle<'_>,
+) -> std::io::Result<(u64, u128)> {
+    fc_sys::windows::file_id(file).or_else(|_| fc_sys::windows::file_index(file))
 }
 
 /// What [`open_regular`] found at a path.
@@ -371,6 +401,47 @@ pub fn read_at_most(file: &File, max: u64) -> std::io::Result<Option<Vec<u8>>> {
     let mut bytes = Vec::new();
     file.take(max.saturating_add(1)).read_to_end(&mut bytes)?;
     Ok((bytes.len() as u64 <= max).then_some(bytes))
+}
+
+/// [`read_at_most`] for a file that holds secrets: into one buffer, sized
+/// from the handle's length and wiped on drop, read straight into it (no
+/// buffer of std's in between). It grows only if the file grew since its
+/// length was read: each larger buffer is a copy, and the smaller one is
+/// wiped as it goes.
+pub fn read_secret_at_most(file: &File, max: u64) -> std::io::Result<Option<Zeroizing<Vec<u8>>>> {
+    let max = usize::try_from(max).unwrap_or(usize::MAX);
+    let hint = usize::try_from(file.metadata()?.len())
+        .unwrap_or(usize::MAX)
+        .min(max);
+    // One byte past the length: a read that fills it has found more.
+    let mut buf = Zeroizing::new(vec![0u8; hint.saturating_add(1)]);
+    let mut filled = 0usize;
+    let mut reader = file;
+    loop {
+        if filled == buf.len() {
+            if filled > max {
+                return Ok(None);
+            }
+            let size = filled
+                .saturating_mul(2)
+                .min(max.saturating_add(1))
+                .max(filled.saturating_add(1));
+            let mut bigger = Zeroizing::new(vec![0u8; size]);
+            bigger[..filled].copy_from_slice(&buf[..filled]);
+            buf = bigger;
+        }
+        match reader.read(&mut buf[filled..]) {
+            Ok(0) => break,
+            Ok(n) => filled += n,
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(e) => return Err(e),
+        }
+    }
+    if filled > max {
+        return Ok(None);
+    }
+    buf.truncate(filled);
+    Ok(Some(buf))
 }
 
 /// Removes the temp files [`replace`] left in `dir` for its target `name`
@@ -604,6 +675,23 @@ mod tests {
             remove_temps(&dir.path().join("missing"), "identity-vault.json").unwrap(),
             0
         );
+    }
+
+    #[test]
+    fn a_secret_read_fills_one_buffer_and_keeps_the_bound() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("f");
+        std::fs::write(&path, b"0123456789").unwrap();
+        let file = File::open(&path).unwrap();
+        let bytes = read_secret_at_most(&file, 10).unwrap().unwrap();
+        assert_eq!(&bytes[..], b"0123456789");
+        // Sized from the length, one byte over to see the end: never grown.
+        assert_eq!(bytes.capacity(), 11);
+        let file = File::open(&path).unwrap();
+        assert!(read_secret_at_most(&file, 9).unwrap().is_none());
+        std::fs::write(&path, b"").unwrap();
+        let file = File::open(&path).unwrap();
+        assert!(read_secret_at_most(&file, 0).unwrap().unwrap().is_empty());
     }
 
     #[test]

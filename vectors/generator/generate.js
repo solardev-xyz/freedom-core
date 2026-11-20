@@ -25,7 +25,9 @@ const { buildRadicleImport } = require('./radicle-import');
 const { buildApprovals } = require('./approvals');
 const { buildProfiles } = require('./profiles');
 const { buildEip1193 } = require('./eip1193');
+const { buildJournal } = require('./journal');
 const { buildStores } = require('./stores');
+const { buildSqlite } = require('./sqlite');
 
 const REFERENCE_COMMIT = 'fb540328162839e68150fe2c5e517edb86734d1c';
 // The Radicle vectors' own reference: freedom-browser's integration/rust-core,
@@ -52,6 +54,12 @@ const PROFILES_REFERENCE_COMMIT = APPROVALS_REFERENCE_COMMIT;
 // grants into the core. Its one package, ethers, comes from the main
 // reference's install, the same version (eip1193.js).
 const EIP1193_REFERENCE_COMMIT = APPROVALS_REFERENCE_COMMIT;
+// The JSON Lines journal's vectors' reference (design 0013, PRF-5d): the
+// approvals reference's checkout, whose src/main/lib/durable-journal.js is
+// byte for byte integration/rust-core's at 5e62992a (it last changed in
+// db09e7f7). The shared reference predates the module. It reads no package.
+const JOURNAL_REFERENCE_COMMIT = APPROVALS_REFERENCE_COMMIT;
+
 // The set-A stores' reference (design 0013, PRF-5a): freedom-browser's
 // integration/rust-core, whose identity-manager.js has the Safe owners'
 // address checks (#1065, #1078), the verified deployed mark (#1066) and the
@@ -657,12 +665,26 @@ async function main() {
       nodeVersion: process.version,
       generator: 'vectors/generator/generate.js',
     }),
+    // Design 0013's JSON Lines journal (PRF-5d), from main's
+    // durable-journal.js.
+    'journal.json': await buildJournal(approvals.checkout, {
+      freedomBrowserCommit: checkedCommit(approvals.checkout, JOURNAL_REFERENCE_COMMIT, 'journal reference'),
+      nodeVersion: process.version,
+      generator: 'vectors/generator/generate.js',
+    }),
     // Design 0013's set-A stores (PRF-5a): vault-meta.json, from main's
     // identity-manager.js, over the main reference's ethers and fake timers.
     'stores.json': await buildStores(stores.checkout, reference.checkout, {
       ...stores.meta,
       packages: Object.fromEntries(['ethers', '@sinonjs/fake-timers']
         .map((name) => [name, packageVersion(createRequire(path.join(reference.checkout, 'package.json')), name)])),
+    }),
+    // Design 0013's SQLite stores (PRF-5g-1): each database's schema, from
+    // the stores reference's own modules over the main reference's
+    // better-sqlite3, which meta names with the SQLite it bundles.
+    'sqlite.json': buildSqlite(stores.checkout, reference.checkout, {
+      ...stores.meta,
+      packages: { 'better-sqlite3': packageVersion(createRequire(path.join(reference.checkout, 'package.json')), 'better-sqlite3') },
     }),
   };
   // Check every deterministic file before doing the more expensive fixture checks.

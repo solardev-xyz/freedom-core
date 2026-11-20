@@ -167,9 +167,8 @@ fn a_failed_flush_is_in_place_and_not_durable() {
 }
 
 /// The rename moves only the file written: one swapped in under the temp
-/// file's name (at `checked`) is never committed (review of #114). Windows
-/// exposes no file identity there (`fsx::same_file`).
-#[cfg(unix)]
+/// file's name (at `checked`) is never committed (review of #114). On
+/// Windows too, by file ID (`fsx::same_file`, design 0013, PRF-5i).
 #[test]
 fn a_temp_file_swapped_before_the_rename_is_refused() {
     struct Swap(PathBuf);
@@ -235,6 +234,27 @@ fn a_bounded_read_takes_a_regular_file_up_to_its_bound() {
     assert_eq!(read_file(&path, 0), Read::Bytes(Vec::new()));
     // A directory is no file.
     assert_eq!(read_file(dir.path(), 5), Read::Unreadable);
+}
+
+/// The secret read keeps the plain read's rules.
+#[test]
+fn a_secret_read_keeps_the_rules() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("rpc-api-keys.json");
+    assert!(matches!(read_secret_file(&path, 5), SecretRead::Missing));
+    std::fs::write(&path, b"12345").unwrap();
+    assert!(matches!(read_secret_file(&path, 5), SecretRead::Bytes(b) if &b[..] == b"12345"));
+    assert!(matches!(read_secret_file(&path, 4), SecretRead::Unreadable));
+    assert!(matches!(
+        read_secret_file(dir.path(), 5),
+        SecretRead::Unreadable
+    ));
+    #[cfg(unix)]
+    {
+        let link = dir.path().join("link");
+        std::os::unix::fs::symlink(&path, &link).unwrap();
+        assert!(matches!(read_secret_file(&link, 5), SecretRead::Unreadable));
+    }
 }
 
 /// #83: a FIFO is refused at once (a blocking open of one with no writer

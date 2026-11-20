@@ -195,6 +195,11 @@ const CAPABILITIES: &[&str] = &[
     "quick_unlock.export_private_key",
     "quick_unlock.status",
     "quick_unlock.disable",
+    // Design 0013: RPC API keys in the core's secrets file (PRF-5h).
+    "secrets.rpc_api_keys",
+    "secrets.rpc_api_key_status",
+    "secrets.set_rpc_api_key",
+    "secrets.remove_rpc_api_key",
     "nodes.write_identity",
     "nodes.op_status",
     "nodes.seal_radicle_key",
@@ -397,6 +402,7 @@ pub fn run(options: &Options) -> Exit {
         snapshot_ready: false,
         node_recovery: None,
         pending_hello: None,
+        stores_echo: Vec::new(),
         outbox: Outbox::new(
             writer.queue,
             allowance,
@@ -710,6 +716,8 @@ struct Core {
     node_recovery: NodeRecovery,
     /// A valid core.hello received before the snapshot was ready.
     pending_hello: Option<u64>,
+    /// The hello's `store_moved` this core took, for its answer.
+    stores_echo: Vec<&'static str>,
     /// The loop's share of the writer, and its frames waiting past it.
     outbox: Outbox,
     /// Requests from main waiting, in order, for the loop's frames to go.
@@ -778,6 +786,39 @@ struct HelloParams {
     /// others.
     #[serde(default)]
     grant_moved: Vec<String>,
+    /// The set-A stores main has handed to the core (design 0013, "One
+    /// writer per store: `store_moved`"): [`STORES`]. Absent means none.
+    #[serde(default)]
+    store_moved: Vec<String>,
+}
+
+/// The names `store_moved` may give (design 0013): all known from the
+/// first core that reads the field, whatever it serves.
+const STORES: &[&str] = &[
+    "vault_meta",
+    "intents",
+    "payments",
+    "safe_pending",
+    "rpc_api_keys",
+];
+
+/// The stores this core serves once named: the echo holds only these.
+const STORES_SERVED: &[&str] = &["rpc_api_keys"];
+
+/// The hello's `store_moved`, each name once, in the hello's order. A name
+/// [`STORES`] doesn't list makes the hello malformed.
+fn stores_moved(params: &HelloParams) -> Result<Vec<&'static str>, &'static str> {
+    let mut moved = Vec::new();
+    for name in &params.store_moved {
+        let known = STORES
+            .iter()
+            .find(|known| **known == name)
+            .ok_or("core.hello's store_moved names an unknown store")?;
+        if !moved.contains(known) {
+            moved.push(*known);
+        }
+    }
+    Ok(moved)
 }
 
 /// The hello's grant files: `grant_root`, an absolute path, and the stores
@@ -870,6 +911,9 @@ struct HelloResult<'a> {
     /// (`pending_recovery`) or found broken (`corrupt`); `null` otherwise.
     /// Main keeps that node stopped.
     node_recovery: &'a NodeRecovery,
+    /// The names in the hello's `store_moved` whose store this core serves,
+    /// each once (design 0013, "One writer per store").
+    store_moved: &'a [&'static str],
 }
 
 /// Where `text`, borrowed from `payload`, lies in it.
@@ -1589,13 +1633,29 @@ impl Core {
                 return Flow::Exit(Exit::Protocol);
             }
         };
+        let stores = match stores_moved(&params) {
+            Ok(stores) => stores,
+            Err(message) => {
+                let _ = self.error(id, ErrorBody::new(ErrorCode::InvalidArgument, message));
+                return Flow::Exit(Exit::Protocol);
+            }
+        };
         if self.hello_done || self.pending_hello.is_some() {
             return self.error(
                 id,
                 ErrorBody::new(ErrorCode::InvalidArgument, "core.hello was already sent"),
             );
         }
+        let root = grants.0.clone();
         self.vault.configure_grants(grants.0, grants.1);
+        self.stores_echo = stores
+            .into_iter()
+            .filter(|name| STORES_SERVED.contains(name))
+            .filter(|name| match *name {
+                "rpc_api_keys" => self.vault.configure_rpc_keys(root.clone()),
+                _ => false,
+            })
+            .collect();
         // The dweb thread, and stream frames from now on: before the reply,
         // so nothing main sends after reading it is refused.
         let Some(start) = self.dweb_start.take() else {
@@ -1634,6 +1694,7 @@ impl Core {
                 core_version: env!("CARGO_PKG_VERSION"),
                 capabilities: CAPABILITIES.iter().chain(FEATURES).copied().collect(),
                 node_recovery: &self.node_recovery,
+                store_moved: &self.stores_echo,
             },
         );
         let flow = match written {

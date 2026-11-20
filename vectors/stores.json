@@ -11,7 +11,8 @@
   "description": "Design 0013 (PRF-5a): the set-A stores the core takes over, each from the stores reference's own module, run whole over an in-memory file system, with the core's operation for each step and its reading of each malformed file.",
   "formats": {
     "vault_meta": "identity/vault-meta.json, from the stores reference's identity-manager.js. `runs`: from a `start` text (or none), each step one of its functions (`op`, its `args`; `$nextHardwareWalletIndex` is `nextHardwareWalletIndex(meta, getWalletList(meta))` over the file) at `at` (the wall clock in milliseconds; `createdAt` is `new Date().toISOString()` at it), after `world` changed the scripted world (`unlocked`: the vault's lock; `ledger`: the address the device answers at each path; `phone`: the phone's proof, `throw` for no answer; `references`: the Swarm feed references of each wallet index), with its `result` (or `error`: `message` and `code`), the `calls` it made (`vault.*` the identity core's, `ledger.*`, `phone.*`, `feeds.*`, `safe.*` and `dapp.*` main's modules', each with its `answer` or `error`), whether it wrote the file (`wrote`) and the file's text after it (`text`, null while there is none). `core`: what the core is asked for the step once main has done its part (`op`, `args`: `new_vault` [userKnowsPassword, at, addresses], `migrate_addresses` [addresses], `add_mnemonic` [unlocked, name] with the address from the step's `vault.addresses` call, `list` with the addresses from its `vault.addresses` call, `remove` [index, the feed references' origins], and the others the function's own arguments), or null where main refuses before asking it (the device or the phone doesn't answer for the address). `malformed`: a file's `text` (or its bytes in `hex`, which Node decodes as UTF-8 with U+FFFD for each invalid sequence, or a `fill`: `open`, `char` repeated, `close`, `bytes` long), what the reference loads from it (`loaded`: `getVaultMeta()` as its `JSON.stringify` text in `json`, or a filled file's keys and `pad` length), a locked `getDerivedWallets()` (`listed`: its `result` or `error`, and whether it wrote), `getActiveWalletIndex()` (`active`), and the core's reading (`core`: `unreadable`, renamed aside and reported, with its `reason`, or `parsed`; the design's, `source: design`, with the 1 MiB bound).",
-    "intents": "wallet-intents.jsonl, from the stores reference's src/main/wallet/intent-store.js over its lib/durable-journal.js, `crypto.randomUUID` numbered (RUN_ID at each load of the module, then the intent and handoff ids) and the clock fixed. `runs`: one live store per run, with its `limits` overrides, each step an operation (`op`, `args`, at `at`; `restart` loads the module again, a new run of main, with its `limits` for the rest of the run if it has them; `void` without a `lock` is refused) with main's `run` (the live store's RUN_ID), the `call` the store method got (ids resolved; `lock` for void and retire; withdrawOrigin's `result`), the `uuids` `crypto.randomUUID` gave during it, its `refusal` (`code`, `message`) or null, the file's `records` after it, `live` (null after a `quiet` step): the live store's `usage()` (which sizes each held snapshot, cached until a new hash), `list()` and `voidRefusal` of each listed intent after it, and `load`: a fresh store loading those records, its `reason` for moving the file aside (null: loaded), the records it rewrote the file to (`compacted`, null when unchanged), `list()`, the ids of `held()`, `byKey` of each key, `heldNonces` of each account, `voidRefusal` of each listed intent, and `usage()`. `damaged`: records the reference loads, with its `reason` (null when it loads them)."
+    "intents": "wallet-intents.jsonl, from the stores reference's src/main/wallet/intent-store.js over its lib/durable-journal.js, `crypto.randomUUID` numbered (RUN_ID at each load of the module, then the intent and handoff ids) and the clock fixed. `runs`: one live store per run, with its `limits` overrides, each step an operation (`op`, `args`, at `at`; `restart` loads the module again, a new run of main, with its `limits` for the rest of the run if it has them; `void` without a `lock` is refused) with main's `run` (the live store's RUN_ID), the `call` the store method got (ids resolved; `lock` for void and retire; withdrawOrigin's `result`), the `uuids` `crypto.randomUUID` gave during it, its `refusal` (`code`, `message`) or null, the file's `records` after it, `live` (null after a `quiet` step): the live store's `usage()` (which sizes each held snapshot, cached until a new hash), `list()` and `voidRefusal` of each listed intent after it, and `load`: a fresh store loading those records, its `reason` for moving the file aside (null: loaded), the records it rewrote the file to (`compacted`, null when unchanged), `list()`, the ids of `held()`, `byKey` of each key, `heldNonces` of each account, `voidRefusal` of each listed intent, and `usage()`. `damaged`: records the reference loads, with its `reason` (null when it loads them).",
+    "rpc_api_keys": "rpc-api-keys.json, from the stores reference's rpc-api-key-store.js through its rpc-manager.js, main's registry a fixed catalog of keyed providers (`catalog`). `runs`: from a `start` text (or none; `start_core`, the core's reading of it, with its `row`), each step rpc-manager's `setApiKey(id, key)` or `removeApiKey(id)` (`op`, `id`, `key`) at `at` (`Date.now()`, the record's `addedAt`), with its `result` (`success`, `error`), whether it wrote the file (`wrote`), the file's text after it (`text`, null while there is none), `hasApiKey(id)` after it (`has`), and the keys a fresh rpc-manager reads from that text (`keys`: each own property `hasApiKey` counts, in order, with `String(apiKey)` well-formed in `key`, `well_formed`, its UTF-8 `bytes`, whether `apiKey` was a `string`, or the `error` it threw). `core`: how the core's file codec takes the step with no key store: `set` (`keys[id] = { apiKey, enabled: true, addedAt }`), `remove` (`delete keys[id]` where the record is truthy), `main_refuses` (main's registry refuses the id first), or, where it deliberately differs (`row`), `refused` (an id outside the entry form) or `own_property` (`__proto__`, which the reference's assignment makes the object's prototype). `malformed`: a file's `text` (or its bytes in `hex`, which Node decodes as UTF-8 with U+FFFD for each invalid sequence, or a `fill`: `open`, `char` repeated, `close`, `bytes` long), what the key store's `readRpcApiKeys()` reads (`read`: the `JSON.stringify(value, null, 2)` text its next save writes, a filled or deeply nested file's `text_length`, with `text_sha256` where the core parses it, or the `error`, which rpc-manager reads as `{}`), the keys a fresh rpc-manager counts (`keys`, as above, or an `error` where the value isn't an object), a `setApiKey('alchemy', 'k-new')` over it (`set`: at `at`, its result or error and the text after, or its `text_length`), and the core's reading (`core`: `unreadable`, renamed aside and reported, with its `reason` and `row`, or `parsed`; the 1 MiB bound is the design's)."
   },
   "source": {
     "max_file_bytes": "design"
@@ -55476,6 +55477,2945 @@
           }
         ],
         "reason": "Invalid wallet intent record: void of intent 00000000-0000-4000-8000-000000000002: an earlier handoff may have been sent"
+      }
+    ]
+  },
+  "rpc_api_keys": {
+    "file": "rpc-api-keys.json",
+    "catalog": [
+      "alchemy",
+      "infura",
+      "drpc",
+      "2",
+      "10",
+      "Alchemy",
+      "p01",
+      "p02",
+      "p03",
+      "p04",
+      "p05",
+      "p06",
+      "p07",
+      "p08",
+      "p09",
+      "p10",
+      "p11",
+      "p12",
+      "p13",
+      "p14",
+      "p15",
+      "p16",
+      "p17"
+    ],
+    "runs": [
+      {
+        "id": "set-replace-remove",
+        "start": null,
+        "steps": [
+          {
+            "op": "set",
+            "id": "nope",
+            "key": "k0",
+            "at": 1764000000000,
+            "result": {
+              "success": false,
+              "error": "Unknown provider: nope"
+            },
+            "wrote": false,
+            "text": null,
+            "has": false,
+            "keys": [],
+            "core": "main_refuses"
+          },
+          {
+            "op": "set",
+            "id": "alchemy",
+            "key": "k1",
+            "at": 1764000000000,
+            "result": {
+              "success": true
+            },
+            "wrote": true,
+            "text": "{\n  \"alchemy\": {\n    \"apiKey\": \"k1\",\n    \"enabled\": true,\n    \"addedAt\": 1764000000000\n  }\n}",
+            "has": true,
+            "keys": [
+              {
+                "id": "alchemy",
+                "key": "k1",
+                "well_formed": true,
+                "bytes": 2,
+                "string": true
+              }
+            ],
+            "core": "set"
+          },
+          {
+            "op": "set",
+            "id": "infura",
+            "key": "k2",
+            "at": 1764000000001,
+            "result": {
+              "success": true
+            },
+            "wrote": true,
+            "text": "{\n  \"alchemy\": {\n    \"apiKey\": \"k1\",\n    \"enabled\": true,\n    \"addedAt\": 1764000000000\n  },\n  \"infura\": {\n    \"apiKey\": \"k2\",\n    \"enabled\": true,\n    \"addedAt\": 1764000000001\n  }\n}",
+            "has": true,
+            "keys": [
+              {
+                "id": "alchemy",
+                "key": "k1",
+                "well_formed": true,
+                "bytes": 2,
+                "string": true
+              },
+              {
+                "id": "infura",
+                "key": "k2",
+                "well_formed": true,
+                "bytes": 2,
+                "string": true
+              }
+            ],
+            "core": "set"
+          },
+          {
+            "op": "set",
+            "id": "alchemy",
+            "key": "k3",
+            "at": 1764000000002,
+            "result": {
+              "success": true
+            },
+            "wrote": true,
+            "text": "{\n  \"alchemy\": {\n    \"apiKey\": \"k3\",\n    \"enabled\": true,\n    \"addedAt\": 1764000000002\n  },\n  \"infura\": {\n    \"apiKey\": \"k2\",\n    \"enabled\": true,\n    \"addedAt\": 1764000000001\n  }\n}",
+            "has": true,
+            "keys": [
+              {
+                "id": "alchemy",
+                "key": "k3",
+                "well_formed": true,
+                "bytes": 2,
+                "string": true
+              },
+              {
+                "id": "infura",
+                "key": "k2",
+                "well_formed": true,
+                "bytes": 2,
+                "string": true
+              }
+            ],
+            "core": "set"
+          },
+          {
+            "op": "remove",
+            "id": "infura",
+            "at": 1764000000003,
+            "result": {
+              "success": true
+            },
+            "wrote": true,
+            "text": "{\n  \"alchemy\": {\n    \"apiKey\": \"k3\",\n    \"enabled\": true,\n    \"addedAt\": 1764000000002\n  }\n}",
+            "has": false,
+            "keys": [
+              {
+                "id": "alchemy",
+                "key": "k3",
+                "well_formed": true,
+                "bytes": 2,
+                "string": true
+              }
+            ],
+            "core": "remove"
+          },
+          {
+            "op": "remove",
+            "id": "infura",
+            "at": 1764000000004,
+            "result": {
+              "success": false,
+              "error": "No API key found for provider: infura"
+            },
+            "wrote": false,
+            "text": "{\n  \"alchemy\": {\n    \"apiKey\": \"k3\",\n    \"enabled\": true,\n    \"addedAt\": 1764000000002\n  }\n}",
+            "has": false,
+            "keys": [
+              {
+                "id": "alchemy",
+                "key": "k3",
+                "well_formed": true,
+                "bytes": 2,
+                "string": true
+              }
+            ],
+            "core": "remove"
+          },
+          {
+            "op": "remove",
+            "id": "alchemy",
+            "at": 1764000000005,
+            "result": {
+              "success": true
+            },
+            "wrote": true,
+            "text": "{}",
+            "has": false,
+            "keys": [],
+            "core": "remove"
+          },
+          {
+            "op": "remove",
+            "id": "alchemy",
+            "at": 1764000000006,
+            "result": {
+              "success": false,
+              "error": "No API key found for provider: alchemy"
+            },
+            "wrote": false,
+            "text": "{}",
+            "has": false,
+            "keys": [],
+            "core": "remove"
+          }
+        ]
+      },
+      {
+        "id": "remove-without-a-file",
+        "start": null,
+        "steps": [
+          {
+            "op": "remove",
+            "id": "alchemy",
+            "at": 1764000000000,
+            "result": {
+              "success": false,
+              "error": "No API key found for provider: alchemy"
+            },
+            "wrote": false,
+            "text": null,
+            "has": false,
+            "keys": [],
+            "core": "remove"
+          }
+        ]
+      },
+      {
+        "id": "array-index-ids",
+        "start": null,
+        "steps": [
+          {
+            "op": "set",
+            "id": "drpc",
+            "key": "kd",
+            "at": 1764000000000,
+            "result": {
+              "success": true
+            },
+            "wrote": true,
+            "text": "{\n  \"drpc\": {\n    \"apiKey\": \"kd\",\n    \"enabled\": true,\n    \"addedAt\": 1764000000000\n  }\n}",
+            "has": true,
+            "keys": [
+              {
+                "id": "drpc",
+                "key": "kd",
+                "well_formed": true,
+                "bytes": 2,
+                "string": true
+              }
+            ],
+            "core": "set"
+          },
+          {
+            "op": "set",
+            "id": "10",
+            "key": "k10",
+            "at": 1764000000001,
+            "result": {
+              "success": true
+            },
+            "wrote": true,
+            "text": "{\n  \"10\": {\n    \"apiKey\": \"k10\",\n    \"enabled\": true,\n    \"addedAt\": 1764000000001\n  },\n  \"drpc\": {\n    \"apiKey\": \"kd\",\n    \"enabled\": true,\n    \"addedAt\": 1764000000000\n  }\n}",
+            "has": true,
+            "keys": [
+              {
+                "id": "10",
+                "key": "k10",
+                "well_formed": true,
+                "bytes": 3,
+                "string": true
+              },
+              {
+                "id": "drpc",
+                "key": "kd",
+                "well_formed": true,
+                "bytes": 2,
+                "string": true
+              }
+            ],
+            "core": "set"
+          },
+          {
+            "op": "set",
+            "id": "2",
+            "key": "k2",
+            "at": 1764000000002,
+            "result": {
+              "success": true
+            },
+            "wrote": true,
+            "text": "{\n  \"2\": {\n    \"apiKey\": \"k2\",\n    \"enabled\": true,\n    \"addedAt\": 1764000000002\n  },\n  \"10\": {\n    \"apiKey\": \"k10\",\n    \"enabled\": true,\n    \"addedAt\": 1764000000001\n  },\n  \"drpc\": {\n    \"apiKey\": \"kd\",\n    \"enabled\": true,\n    \"addedAt\": 1764000000000\n  }\n}",
+            "has": true,
+            "keys": [
+              {
+                "id": "2",
+                "key": "k2",
+                "well_formed": true,
+                "bytes": 2,
+                "string": true
+              },
+              {
+                "id": "10",
+                "key": "k10",
+                "well_formed": true,
+                "bytes": 3,
+                "string": true
+              },
+              {
+                "id": "drpc",
+                "key": "kd",
+                "well_formed": true,
+                "bytes": 2,
+                "string": true
+              }
+            ],
+            "core": "set"
+          },
+          {
+            "op": "set",
+            "id": "alchemy",
+            "key": "ka",
+            "at": 1764000000003,
+            "result": {
+              "success": true
+            },
+            "wrote": true,
+            "text": "{\n  \"2\": {\n    \"apiKey\": \"k2\",\n    \"enabled\": true,\n    \"addedAt\": 1764000000002\n  },\n  \"10\": {\n    \"apiKey\": \"k10\",\n    \"enabled\": true,\n    \"addedAt\": 1764000000001\n  },\n  \"drpc\": {\n    \"apiKey\": \"kd\",\n    \"enabled\": true,\n    \"addedAt\": 1764000000000\n  },\n  \"alchemy\": {\n    \"apiKey\": \"ka\",\n    \"enabled\": true,\n    \"addedAt\": 1764000000003\n  }\n}",
+            "has": true,
+            "keys": [
+              {
+                "id": "2",
+                "key": "k2",
+                "well_formed": true,
+                "bytes": 2,
+                "string": true
+              },
+              {
+                "id": "10",
+                "key": "k10",
+                "well_formed": true,
+                "bytes": 3,
+                "string": true
+              },
+              {
+                "id": "drpc",
+                "key": "kd",
+                "well_formed": true,
+                "bytes": 2,
+                "string": true
+              },
+              {
+                "id": "alchemy",
+                "key": "ka",
+                "well_formed": true,
+                "bytes": 2,
+                "string": true
+              }
+            ],
+            "core": "set"
+          }
+        ]
+      },
+      {
+        "id": "escapes",
+        "start": null,
+        "steps": [
+          {
+            "op": "set",
+            "id": "alchemy",
+            "key": "a\"b\\c\n\r\t\b\f\u0001\u001fé😀z",
+            "at": 1764000000000,
+            "result": {
+              "success": true
+            },
+            "wrote": true,
+            "text": "{\n  \"alchemy\": {\n    \"apiKey\": \"a\\\"b\\\\c\\n\\r\\t\\b\\f\\u0001\\u001fé😀z\",\n    \"enabled\": true,\n    \"addedAt\": 1764000000000\n  }\n}",
+            "has": true,
+            "keys": [
+              {
+                "id": "alchemy",
+                "key": "a\"b\\c\n\r\t\b\f\u0001\u001fé😀z",
+                "well_formed": true,
+                "bytes": 20,
+                "string": true
+              }
+            ],
+            "core": "set"
+          },
+          {
+            "op": "set",
+            "id": "infura",
+            "key": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+            "at": 1764000000001,
+            "result": {
+              "success": true
+            },
+            "wrote": true,
+            "text": "{\n  \"alchemy\": {\n    \"apiKey\": \"a\\\"b\\\\c\\n\\r\\t\\b\\f\\u0001\\u001fé😀z\",\n    \"enabled\": true,\n    \"addedAt\": 1764000000000\n  },\n  \"infura\": {\n    \"apiKey\": \"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\",\n    \"enabled\": true,\n    \"addedAt\": 1764000000001\n  }\n}",
+            "has": true,
+            "keys": [
+              {
+                "id": "alchemy",
+                "key": "a\"b\\c\n\r\t\b\f\u0001\u001fé😀z",
+                "well_formed": true,
+                "bytes": 20,
+                "string": true
+              },
+              {
+                "id": "infura",
+                "key": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+                "well_formed": true,
+                "bytes": 1024,
+                "string": true
+              }
+            ],
+            "core": "set"
+          }
+        ]
+      },
+      {
+        "id": "hand-edited",
+        "start": "{\"alchemy\":{\"apiKey\":\"ka\",\"enabled\":true,\"addedAt\":1,\"note\":\"x\"},\"Alchemy\":{\"apiKey\":\"kA\",\"enabled\":true,\"addedAt\":2},\"infura\":{\"apiKey\":\"ki\",\"enabled\":false},\"drpc\":0}",
+        "start_core": "parsed",
+        "steps": [
+          {
+            "op": "set",
+            "id": "drpc",
+            "key": "kd",
+            "at": 1764000000001,
+            "result": {
+              "success": true
+            },
+            "wrote": true,
+            "text": "{\n  \"alchemy\": {\n    \"apiKey\": \"ka\",\n    \"enabled\": true,\n    \"addedAt\": 1,\n    \"note\": \"x\"\n  },\n  \"Alchemy\": {\n    \"apiKey\": \"kA\",\n    \"enabled\": true,\n    \"addedAt\": 2\n  },\n  \"infura\": {\n    \"apiKey\": \"ki\",\n    \"enabled\": false\n  },\n  \"drpc\": {\n    \"apiKey\": \"kd\",\n    \"enabled\": true,\n    \"addedAt\": 1764000000001\n  }\n}",
+            "has": true,
+            "keys": [
+              {
+                "id": "alchemy",
+                "key": "ka",
+                "well_formed": true,
+                "bytes": 2,
+                "string": true
+              },
+              {
+                "id": "Alchemy",
+                "key": "kA",
+                "well_formed": true,
+                "bytes": 2,
+                "string": true
+              },
+              {
+                "id": "drpc",
+                "key": "kd",
+                "well_formed": true,
+                "bytes": 2,
+                "string": true
+              }
+            ],
+            "core": "set"
+          },
+          {
+            "op": "remove",
+            "id": "Alchemy",
+            "at": 1764000000002,
+            "result": {
+              "success": true
+            },
+            "wrote": true,
+            "text": "{\n  \"alchemy\": {\n    \"apiKey\": \"ka\",\n    \"enabled\": true,\n    \"addedAt\": 1,\n    \"note\": \"x\"\n  },\n  \"infura\": {\n    \"apiKey\": \"ki\",\n    \"enabled\": false\n  },\n  \"drpc\": {\n    \"apiKey\": \"kd\",\n    \"enabled\": true,\n    \"addedAt\": 1764000000001\n  }\n}",
+            "has": false,
+            "keys": [
+              {
+                "id": "alchemy",
+                "key": "ka",
+                "well_formed": true,
+                "bytes": 2,
+                "string": true
+              },
+              {
+                "id": "drpc",
+                "key": "kd",
+                "well_formed": true,
+                "bytes": 2,
+                "string": true
+              }
+            ],
+            "core": "remove"
+          },
+          {
+            "op": "remove",
+            "id": "infura",
+            "at": 1764000000003,
+            "result": {
+              "success": true
+            },
+            "wrote": true,
+            "text": "{\n  \"alchemy\": {\n    \"apiKey\": \"ka\",\n    \"enabled\": true,\n    \"addedAt\": 1,\n    \"note\": \"x\"\n  },\n  \"drpc\": {\n    \"apiKey\": \"kd\",\n    \"enabled\": true,\n    \"addedAt\": 1764000000001\n  }\n}",
+            "has": false,
+            "keys": [
+              {
+                "id": "alchemy",
+                "key": "ka",
+                "well_formed": true,
+                "bytes": 2,
+                "string": true
+              },
+              {
+                "id": "drpc",
+                "key": "kd",
+                "well_formed": true,
+                "bytes": 2,
+                "string": true
+              }
+            ],
+            "core": "remove"
+          },
+          {
+            "op": "set",
+            "id": "alchemy",
+            "key": "kb",
+            "at": 1764000000004,
+            "result": {
+              "success": true
+            },
+            "wrote": true,
+            "text": "{\n  \"alchemy\": {\n    \"apiKey\": \"kb\",\n    \"enabled\": true,\n    \"addedAt\": 1764000000004\n  },\n  \"drpc\": {\n    \"apiKey\": \"kd\",\n    \"enabled\": true,\n    \"addedAt\": 1764000000001\n  }\n}",
+            "has": true,
+            "keys": [
+              {
+                "id": "alchemy",
+                "key": "kb",
+                "well_formed": true,
+                "bytes": 2,
+                "string": true
+              },
+              {
+                "id": "drpc",
+                "key": "kd",
+                "well_formed": true,
+                "bytes": 2,
+                "string": true
+              }
+            ],
+            "core": "set"
+          }
+        ]
+      },
+      {
+        "id": "seventeen",
+        "start": null,
+        "steps": [
+          {
+            "op": "set",
+            "id": "p01",
+            "key": "key-p01",
+            "at": 1764000000000,
+            "result": {
+              "success": true
+            },
+            "wrote": true,
+            "text": "{\n  \"p01\": {\n    \"apiKey\": \"key-p01\",\n    \"enabled\": true,\n    \"addedAt\": 1764000000000\n  }\n}",
+            "has": true,
+            "keys": [
+              {
+                "id": "p01",
+                "key": "key-p01",
+                "well_formed": true,
+                "bytes": 7,
+                "string": true
+              }
+            ],
+            "core": "set"
+          },
+          {
+            "op": "set",
+            "id": "p02",
+            "key": "key-p02",
+            "at": 1764000000001,
+            "result": {
+              "success": true
+            },
+            "wrote": true,
+            "text": "{\n  \"p01\": {\n    \"apiKey\": \"key-p01\",\n    \"enabled\": true,\n    \"addedAt\": 1764000000000\n  },\n  \"p02\": {\n    \"apiKey\": \"key-p02\",\n    \"enabled\": true,\n    \"addedAt\": 1764000000001\n  }\n}",
+            "has": true,
+            "keys": [
+              {
+                "id": "p01",
+                "key": "key-p01",
+                "well_formed": true,
+                "bytes": 7,
+                "string": true
+              },
+              {
+                "id": "p02",
+                "key": "key-p02",
+                "well_formed": true,
+                "bytes": 7,
+                "string": true
+              }
+            ],
+            "core": "set"
+          },
+          {
+            "op": "set",
+            "id": "p03",
+            "key": "key-p03",
+            "at": 1764000000002,
+            "result": {
+              "success": true
+            },
+            "wrote": true,
+            "text": "{\n  \"p01\": {\n    \"apiKey\": \"key-p01\",\n    \"enabled\": true,\n    \"addedAt\": 1764000000000\n  },\n  \"p02\": {\n    \"apiKey\": \"key-p02\",\n    \"enabled\": true,\n    \"addedAt\": 1764000000001\n  },\n  \"p03\": {\n    \"apiKey\": \"key-p03\",\n    \"enabled\": true,\n    \"addedAt\": 1764000000002\n  }\n}",
+            "has": true,
+            "keys": [
+              {
+                "id": "p01",
+                "key": "key-p01",
+                "well_formed": true,
+                "bytes": 7,
+                "string": true
+              },
+              {
+                "id": "p02",
+                "key": "key-p02",
+                "well_formed": true,
+                "bytes": 7,
+                "string": true
+              },
+              {
+                "id": "p03",
+                "key": "key-p03",
+                "well_formed": true,
+                "bytes": 7,
+                "string": true
+              }
+            ],
+            "core": "set"
+          },
+          {
+            "op": "set",
+            "id": "p04",
+            "key": "key-p04",
+            "at": 1764000000003,
+            "result": {
+              "success": true
+            },
+            "wrote": true,
+            "text": "{\n  \"p01\": {\n    \"apiKey\": \"key-p01\",\n    \"enabled\": true,\n    \"addedAt\": 1764000000000\n  },\n  \"p02\": {\n    \"apiKey\": \"key-p02\",\n    \"enabled\": true,\n    \"addedAt\": 1764000000001\n  },\n  \"p03\": {\n    \"apiKey\": \"key-p03\",\n    \"enabled\": true,\n    \"addedAt\": 1764000000002\n  },\n  \"p04\": {\n    \"apiKey\": \"key-p04\",\n    \"enabled\": true,\n    \"addedAt\": 1764000000003\n  }\n}",
+            "has": true,
+            "keys": [
+              {
+                "id": "p01",
+                "key": "key-p01",
+                "well_formed": true,
+                "bytes": 7,
+                "string": true
+              },
+              {
+                "id": "p02",
+                "key": "key-p02",
+                "well_formed": true,
+                "bytes": 7,
+                "string": true
+              },
+              {
+                "id": "p03",
+                "key": "key-p03",
+                "well_formed": true,
+                "bytes": 7,
+                "string": true
+              },
+              {
+                "id": "p04",
+                "key": "key-p04",
+                "well_formed": true,
+                "bytes": 7,
+                "string": true
+              }
+            ],
+            "core": "set"
+          },
+          {
+            "op": "set",
+            "id": "p05",
+            "key": "key-p05",
+            "at": 1764000000004,
+            "result": {
+              "success": true
+            },
+            "wrote": true,
+            "text": "{\n  \"p01\": {\n    \"apiKey\": \"key-p01\",\n    \"enabled\": true,\n    \"addedAt\": 1764000000000\n  },\n  \"p02\": {\n    \"apiKey\": \"key-p02\",\n    \"enabled\": true,\n    \"addedAt\": 1764000000001\n  },\n  \"p03\": {\n    \"apiKey\": \"key-p03\",\n    \"enabled\": true,\n    \"addedAt\": 1764000000002\n  },\n  \"p04\": {\n    \"apiKey\": \"key-p04\",\n    \"enabled\": true,\n    \"addedAt\": 1764000000003\n  },\n  \"p05\": {\n    \"apiKey\": \"key-p05\",\n    \"enabled\": true,\n    \"addedAt\": 1764000000004\n  }\n}",
+            "has": true,
+            "keys": [
+              {
+                "id": "p01",
+                "key": "key-p01",
+                "well_formed": true,
+                "bytes": 7,
+                "string": true
+              },
+              {
+                "id": "p02",
+                "key": "key-p02",
+                "well_formed": true,
+                "bytes": 7,
+                "string": true
+              },
+              {
+                "id": "p03",
+                "key": "key-p03",
+                "well_formed": true,
+                "bytes": 7,
+                "string": true
+              },
+              {
+                "id": "p04",
+                "key": "key-p04",
+                "well_formed": true,
+                "bytes": 7,
+                "string": true
+              },
+              {
+                "id": "p05",
+                "key": "key-p05",
+                "well_formed": true,
+                "bytes": 7,
+                "string": true
+              }
+            ],
+            "core": "set"
+          },
+          {
+            "op": "set",
+            "id": "p06",
+            "key": "key-p06",
+            "at": 1764000000005,
+            "result": {
+              "success": true
+            },
+            "wrote": true,
+            "text": "{\n  \"p01\": {\n    \"apiKey\": \"key-p01\",\n    \"enabled\": true,\n    \"addedAt\": 1764000000000\n  },\n  \"p02\": {\n    \"apiKey\": \"key-p02\",\n    \"enabled\": true,\n    \"addedAt\": 1764000000001\n  },\n  \"p03\": {\n    \"apiKey\": \"key-p03\",\n    \"enabled\": true,\n    \"addedAt\": 1764000000002\n  },\n  \"p04\": {\n    \"apiKey\": \"key-p04\",\n    \"enabled\": true,\n    \"addedAt\": 1764000000003\n  },\n  \"p05\": {\n    \"apiKey\": \"key-p05\",\n    \"enabled\": true,\n    \"addedAt\": 1764000000004\n  },\n  \"p06\": {\n    \"apiKey\": \"key-p06\",\n    \"enabled\": true,\n    \"addedAt\": 1764000000005\n  }\n}",
+            "has": true,
+            "keys": [
+              {
+                "id": "p01",
+                "key": "key-p01",
+                "well_formed": true,
+                "bytes": 7,
+                "string": true
+              },
+              {
+                "id": "p02",
+                "key": "key-p02",
+                "well_formed": true,
+                "bytes": 7,
+                "string": true
+              },
+              {
+                "id": "p03",
+                "key": "key-p03",
+                "well_formed": true,
+                "bytes": 7,
+                "string": true
+              },
+              {
+                "id": "p04",
+                "key": "key-p04",
+                "well_formed": true,
+                "bytes": 7,
+                "string": true
+              },
+              {
+                "id": "p05",
+                "key": "key-p05",
+                "well_formed": true,
+                "bytes": 7,
+                "string": true
+              },
+              {
+                "id": "p06",
+                "key": "key-p06",
+                "well_formed": true,
+                "bytes": 7,
+                "string": true
+              }
+            ],
+            "core": "set"
+          },
+          {
+            "op": "set",
+            "id": "p07",
+            "key": "key-p07",
+            "at": 1764000000006,
+            "result": {
+              "success": true
+            },
+            "wrote": true,
+            "text": "{\n  \"p01\": {\n    \"apiKey\": \"key-p01\",\n    \"enabled\": true,\n    \"addedAt\": 1764000000000\n  },\n  \"p02\": {\n    \"apiKey\": \"key-p02\",\n    \"enabled\": true,\n    \"addedAt\": 1764000000001\n  },\n  \"p03\": {\n    \"apiKey\": \"key-p03\",\n    \"enabled\": true,\n    \"addedAt\": 1764000000002\n  },\n  \"p04\": {\n    \"apiKey\": \"key-p04\",\n    \"enabled\": true,\n    \"addedAt\": 1764000000003\n  },\n  \"p05\": {\n    \"apiKey\": \"key-p05\",\n    \"enabled\": true,\n    \"addedAt\": 1764000000004\n  },\n  \"p06\": {\n    \"apiKey\": \"key-p06\",\n    \"enabled\": true,\n    \"addedAt\": 1764000000005\n  },\n  \"p07\": {\n    \"apiKey\": \"key-p07\",\n    \"enabled\": true,\n    \"addedAt\": 1764000000006\n  }\n}",
+            "has": true,
+            "keys": [
+              {
+                "id": "p01",
+                "key": "key-p01",
+                "well_formed": true,
+                "bytes": 7,
+                "string": true
+              },
+              {
+                "id": "p02",
+                "key": "key-p02",
+                "well_formed": true,
+                "bytes": 7,
+                "string": true
+              },
+              {
+                "id": "p03",
+                "key": "key-p03",
+                "well_formed": true,
+                "bytes": 7,
+                "string": true
+              },
+              {
+                "id": "p04",
+                "key": "key-p04",
+                "well_formed": true,
+                "bytes": 7,
+                "string": true
+              },
+              {
+                "id": "p05",
+                "key": "key-p05",
+                "well_formed": true,
+                "bytes": 7,
+                "string": true
+              },
+              {
+                "id": "p06",
+                "key": "key-p06",
+                "well_formed": true,
+                "bytes": 7,
+                "string": true
+              },
+              {
+                "id": "p07",
+                "key": "key-p07",
+                "well_formed": true,
+                "bytes": 7,
+                "string": true
+              }
+            ],
+            "core": "set"
+          },
+          {
+            "op": "set",
+            "id": "p08",
+            "key": "key-p08",
+            "at": 1764000000007,
+            "result": {
+              "success": true
+            },
+            "wrote": true,
+            "text": "{\n  \"p01\": {\n    \"apiKey\": \"key-p01\",\n    \"enabled\": true,\n    \"addedAt\": 1764000000000\n  },\n  \"p02\": {\n    \"apiKey\": \"key-p02\",\n    \"enabled\": true,\n    \"addedAt\": 1764000000001\n  },\n  \"p03\": {\n    \"apiKey\": \"key-p03\",\n    \"enabled\": true,\n    \"addedAt\": 1764000000002\n  },\n  \"p04\": {\n    \"apiKey\": \"key-p04\",\n    \"enabled\": true,\n    \"addedAt\": 1764000000003\n  },\n  \"p05\": {\n    \"apiKey\": \"key-p05\",\n    \"enabled\": true,\n    \"addedAt\": 1764000000004\n  },\n  \"p06\": {\n    \"apiKey\": \"key-p06\",\n    \"enabled\": true,\n    \"addedAt\": 1764000000005\n  },\n  \"p07\": {\n    \"apiKey\": \"key-p07\",\n    \"enabled\": true,\n    \"addedAt\": 1764000000006\n  },\n  \"p08\": {\n    \"apiKey\": \"key-p08\",\n    \"enabled\": true,\n    \"addedAt\": 1764000000007\n  }\n}",
+            "has": true,
+            "keys": [
+              {
+                "id": "p01",
+                "key": "key-p01",
+                "well_formed": true,
+                "bytes": 7,
+                "string": true
+              },
+              {
+                "id": "p02",
+                "key": "key-p02",
+                "well_formed": true,
+                "bytes": 7,
+                "string": true
+              },
+              {
+                "id": "p03",
+                "key": "key-p03",
+                "well_formed": true,
+                "bytes": 7,
+                "string": true
+              },
+              {
+                "id": "p04",
+                "key": "key-p04",
+                "well_formed": true,
+                "bytes": 7,
+                "string": true
+              },
+              {
+                "id": "p05",
+                "key": "key-p05",
+                "well_formed": true,
+                "bytes": 7,
+                "string": true
+              },
+              {
+                "id": "p06",
+                "key": "key-p06",
+                "well_formed": true,
+                "bytes": 7,
+                "string": true
+              },
+              {
+                "id": "p07",
+                "key": "key-p07",
+                "well_formed": true,
+                "bytes": 7,
+                "string": true
+              },
+              {
+                "id": "p08",
+                "key": "key-p08",
+                "well_formed": true,
+                "bytes": 7,
+                "string": true
+              }
+            ],
+            "core": "set"
+          },
+          {
+            "op": "set",
+            "id": "p09",
+            "key": "key-p09",
+            "at": 1764000000008,
+            "result": {
+              "success": true
+            },
+            "wrote": true,
+            "text": "{\n  \"p01\": {\n    \"apiKey\": \"key-p01\",\n    \"enabled\": true,\n    \"addedAt\": 1764000000000\n  },\n  \"p02\": {\n    \"apiKey\": \"key-p02\",\n    \"enabled\": true,\n    \"addedAt\": 1764000000001\n  },\n  \"p03\": {\n    \"apiKey\": \"key-p03\",\n    \"enabled\": true,\n    \"addedAt\": 1764000000002\n  },\n  \"p04\": {\n    \"apiKey\": \"key-p04\",\n    \"enabled\": true,\n    \"addedAt\": 1764000000003\n  },\n  \"p05\": {\n    \"apiKey\": \"key-p05\",\n    \"enabled\": true,\n    \"addedAt\": 1764000000004\n  },\n  \"p06\": {\n    \"apiKey\": \"key-p06\",\n    \"enabled\": true,\n    \"addedAt\": 1764000000005\n  },\n  \"p07\": {\n    \"apiKey\": \"key-p07\",\n    \"enabled\": true,\n    \"addedAt\": 1764000000006\n  },\n  \"p08\": {\n    \"apiKey\": \"key-p08\",\n    \"enabled\": true,\n    \"addedAt\": 1764000000007\n  },\n  \"p09\": {\n    \"apiKey\": \"key-p09\",\n    \"enabled\": true,\n    \"addedAt\": 1764000000008\n  }\n}",
+            "has": true,
+            "keys": [
+              {
+                "id": "p01",
+                "key": "key-p01",
+                "well_formed": true,
+                "bytes": 7,
+                "string": true
+              },
+              {
+                "id": "p02",
+                "key": "key-p02",
+                "well_formed": true,
+                "bytes": 7,
+                "string": true
+              },
+              {
+                "id": "p03",
+                "key": "key-p03",
+                "well_formed": true,
+                "bytes": 7,
+                "string": true
+              },
+              {
+                "id": "p04",
+                "key": "key-p04",
+                "well_formed": true,
+                "bytes": 7,
+                "string": true
+              },
+              {
+                "id": "p05",
+                "key": "key-p05",
+                "well_formed": true,
+                "bytes": 7,
+                "string": true
+              },
+              {
+                "id": "p06",
+                "key": "key-p06",
+                "well_formed": true,
+                "bytes": 7,
+                "string": true
+              },
+              {
+                "id": "p07",
+                "key": "key-p07",
+                "well_formed": true,
+                "bytes": 7,
+                "string": true
+              },
+              {
+                "id": "p08",
+                "key": "key-p08",
+                "well_formed": true,
+                "bytes": 7,
+                "string": true
+              },
+              {
+                "id": "p09",
+                "key": "key-p09",
+                "well_formed": true,
+                "bytes": 7,
+                "string": true
+              }
+            ],
+            "core": "set"
+          },
+          {
+            "op": "set",
+            "id": "p10",
+            "key": "key-p10",
+            "at": 1764000000009,
+            "result": {
+              "success": true
+            },
+            "wrote": true,
+            "text": "{\n  \"p01\": {\n    \"apiKey\": \"key-p01\",\n    \"enabled\": true,\n    \"addedAt\": 1764000000000\n  },\n  \"p02\": {\n    \"apiKey\": \"key-p02\",\n    \"enabled\": true,\n    \"addedAt\": 1764000000001\n  },\n  \"p03\": {\n    \"apiKey\": \"key-p03\",\n    \"enabled\": true,\n    \"addedAt\": 1764000000002\n  },\n  \"p04\": {\n    \"apiKey\": \"key-p04\",\n    \"enabled\": true,\n    \"addedAt\": 1764000000003\n  },\n  \"p05\": {\n    \"apiKey\": \"key-p05\",\n    \"enabled\": true,\n    \"addedAt\": 1764000000004\n  },\n  \"p06\": {\n    \"apiKey\": \"key-p06\",\n    \"enabled\": true,\n    \"addedAt\": 1764000000005\n  },\n  \"p07\": {\n    \"apiKey\": \"key-p07\",\n    \"enabled\": true,\n    \"addedAt\": 1764000000006\n  },\n  \"p08\": {\n    \"apiKey\": \"key-p08\",\n    \"enabled\": true,\n    \"addedAt\": 1764000000007\n  },\n  \"p09\": {\n    \"apiKey\": \"key-p09\",\n    \"enabled\": true,\n    \"addedAt\": 1764000000008\n  },\n  \"p10\": {\n    \"apiKey\": \"key-p10\",\n    \"enabled\": true,\n    \"addedAt\": 1764000000009\n  }\n}",
+            "has": true,
+            "keys": [
+              {
+                "id": "p01",
+                "key": "key-p01",
+                "well_formed": true,
+                "bytes": 7,
+                "string": true
+              },
+              {
+                "id": "p02",
+                "key": "key-p02",
+                "well_formed": true,
+                "bytes": 7,
+                "string": true
+              },
+              {
+                "id": "p03",
+                "key": "key-p03",
+                "well_formed": true,
+                "bytes": 7,
+                "string": true
+              },
+              {
+                "id": "p04",
+                "key": "key-p04",
+                "well_formed": true,
+                "bytes": 7,
+                "string": true
+              },
+              {
+                "id": "p05",
+                "key": "key-p05",
+                "well_formed": true,
+                "bytes": 7,
+                "string": true
+              },
+              {
+                "id": "p06",
+                "key": "key-p06",
+                "well_formed": true,
+                "bytes": 7,
+                "string": true
+              },
+              {
+                "id": "p07",
+                "key": "key-p07",
+                "well_formed": true,
+                "bytes": 7,
+                "string": true
+              },
+              {
+                "id": "p08",
+                "key": "key-p08",
+                "well_formed": true,
+                "bytes": 7,
+                "string": true
+              },
+              {
+                "id": "p09",
+                "key": "key-p09",
+                "well_formed": true,
+                "bytes": 7,
+                "string": true
+              },
+              {
+                "id": "p10",
+                "key": "key-p10",
+                "well_formed": true,
+                "bytes": 7,
+                "string": true
+              }
+            ],
+            "core": "set"
+          },
+          {
+            "op": "set",
+            "id": "p11",
+            "key": "key-p11",
+            "at": 1764000000010,
+            "result": {
+              "success": true
+            },
+            "wrote": true,
+            "text": "{\n  \"p01\": {\n    \"apiKey\": \"key-p01\",\n    \"enabled\": true,\n    \"addedAt\": 1764000000000\n  },\n  \"p02\": {\n    \"apiKey\": \"key-p02\",\n    \"enabled\": true,\n    \"addedAt\": 1764000000001\n  },\n  \"p03\": {\n    \"apiKey\": \"key-p03\",\n    \"enabled\": true,\n    \"addedAt\": 1764000000002\n  },\n  \"p04\": {\n    \"apiKey\": \"key-p04\",\n    \"enabled\": true,\n    \"addedAt\": 1764000000003\n  },\n  \"p05\": {\n    \"apiKey\": \"key-p05\",\n    \"enabled\": true,\n    \"addedAt\": 1764000000004\n  },\n  \"p06\": {\n    \"apiKey\": \"key-p06\",\n    \"enabled\": true,\n    \"addedAt\": 1764000000005\n  },\n  \"p07\": {\n    \"apiKey\": \"key-p07\",\n    \"enabled\": true,\n    \"addedAt\": 1764000000006\n  },\n  \"p08\": {\n    \"apiKey\": \"key-p08\",\n    \"enabled\": true,\n    \"addedAt\": 1764000000007\n  },\n  \"p09\": {\n    \"apiKey\": \"key-p09\",\n    \"enabled\": true,\n    \"addedAt\": 1764000000008\n  },\n  \"p10\": {\n    \"apiKey\": \"key-p10\",\n    \"enabled\": true,\n    \"addedAt\": 1764000000009\n  },\n  \"p11\": {\n    \"apiKey\": \"key-p11\",\n    \"enabled\": true,\n    \"addedAt\": 1764000000010\n  }\n}",
+            "has": true,
+            "keys": [
+              {
+                "id": "p01",
+                "key": "key-p01",
+                "well_formed": true,
+                "bytes": 7,
+                "string": true
+              },
+              {
+                "id": "p02",
+                "key": "key-p02",
+                "well_formed": true,
+                "bytes": 7,
+                "string": true
+              },
+              {
+                "id": "p03",
+                "key": "key-p03",
+                "well_formed": true,
+                "bytes": 7,
+                "string": true
+              },
+              {
+                "id": "p04",
+                "key": "key-p04",
+                "well_formed": true,
+                "bytes": 7,
+                "string": true
+              },
+              {
+                "id": "p05",
+                "key": "key-p05",
+                "well_formed": true,
+                "bytes": 7,
+                "string": true
+              },
+              {
+                "id": "p06",
+                "key": "key-p06",
+                "well_formed": true,
+                "bytes": 7,
+                "string": true
+              },
+              {
+                "id": "p07",
+                "key": "key-p07",
+                "well_formed": true,
+                "bytes": 7,
+                "string": true
+              },
+              {
+                "id": "p08",
+                "key": "key-p08",
+                "well_formed": true,
+                "bytes": 7,
+                "string": true
+              },
+              {
+                "id": "p09",
+                "key": "key-p09",
+                "well_formed": true,
+                "bytes": 7,
+                "string": true
+              },
+              {
+                "id": "p10",
+                "key": "key-p10",
+                "well_formed": true,
+                "bytes": 7,
+                "string": true
+              },
+              {
+                "id": "p11",
+                "key": "key-p11",
+                "well_formed": true,
+                "bytes": 7,
+                "string": true
+              }
+            ],
+            "core": "set"
+          },
+          {
+            "op": "set",
+            "id": "p12",
+            "key": "key-p12",
+            "at": 1764000000011,
+            "result": {
+              "success": true
+            },
+            "wrote": true,
+            "text": "{\n  \"p01\": {\n    \"apiKey\": \"key-p01\",\n    \"enabled\": true,\n    \"addedAt\": 1764000000000\n  },\n  \"p02\": {\n    \"apiKey\": \"key-p02\",\n    \"enabled\": true,\n    \"addedAt\": 1764000000001\n  },\n  \"p03\": {\n    \"apiKey\": \"key-p03\",\n    \"enabled\": true,\n    \"addedAt\": 1764000000002\n  },\n  \"p04\": {\n    \"apiKey\": \"key-p04\",\n    \"enabled\": true,\n    \"addedAt\": 1764000000003\n  },\n  \"p05\": {\n    \"apiKey\": \"key-p05\",\n    \"enabled\": true,\n    \"addedAt\": 1764000000004\n  },\n  \"p06\": {\n    \"apiKey\": \"key-p06\",\n    \"enabled\": true,\n    \"addedAt\": 1764000000005\n  },\n  \"p07\": {\n    \"apiKey\": \"key-p07\",\n    \"enabled\": true,\n    \"addedAt\": 1764000000006\n  },\n  \"p08\": {\n    \"apiKey\": \"key-p08\",\n    \"enabled\": true,\n    \"addedAt\": 1764000000007\n  },\n  \"p09\": {\n    \"apiKey\": \"key-p09\",\n    \"enabled\": true,\n    \"addedAt\": 1764000000008\n  },\n  \"p10\": {\n    \"apiKey\": \"key-p10\",\n    \"enabled\": true,\n    \"addedAt\": 1764000000009\n  },\n  \"p11\": {\n    \"apiKey\": \"key-p11\",\n    \"enabled\": true,\n    \"addedAt\": 1764000000010\n  },\n  \"p12\": {\n    \"apiKey\": \"key-p12\",\n    \"enabled\": true,\n    \"addedAt\": 1764000000011\n  }\n}",
+            "has": true,
+            "keys": [
+              {
+                "id": "p01",
+                "key": "key-p01",
+                "well_formed": true,
+                "bytes": 7,
+                "string": true
+              },
+              {
+                "id": "p02",
+                "key": "key-p02",
+                "well_formed": true,
+                "bytes": 7,
+                "string": true
+              },
+              {
+                "id": "p03",
+                "key": "key-p03",
+                "well_formed": true,
+                "bytes": 7,
+                "string": true
+              },
+              {
+                "id": "p04",
+                "key": "key-p04",
+                "well_formed": true,
+                "bytes": 7,
+                "string": true
+              },
+              {
+                "id": "p05",
+                "key": "key-p05",
+                "well_formed": true,
+                "bytes": 7,
+                "string": true
+              },
+              {
+                "id": "p06",
+                "key": "key-p06",
+                "well_formed": true,
+                "bytes": 7,
+                "string": true
+              },
+              {
+                "id": "p07",
+                "key": "key-p07",
+                "well_formed": true,
+                "bytes": 7,
+                "string": true
+              },
+              {
+                "id": "p08",
+                "key": "key-p08",
+                "well_formed": true,
+                "bytes": 7,
+                "string": true
+              },
+              {
+                "id": "p09",
+                "key": "key-p09",
+                "well_formed": true,
+                "bytes": 7,
+                "string": true
+              },
+              {
+                "id": "p10",
+                "key": "key-p10",
+                "well_formed": true,
+                "bytes": 7,
+                "string": true
+              },
+              {
+                "id": "p11",
+                "key": "key-p11",
+                "well_formed": true,
+                "bytes": 7,
+                "string": true
+              },
+              {
+                "id": "p12",
+                "key": "key-p12",
+                "well_formed": true,
+                "bytes": 7,
+                "string": true
+              }
+            ],
+            "core": "set"
+          },
+          {
+            "op": "set",
+            "id": "p13",
+            "key": "key-p13",
+            "at": 1764000000012,
+            "result": {
+              "success": true
+            },
+            "wrote": true,
+            "text": "{\n  \"p01\": {\n    \"apiKey\": \"key-p01\",\n    \"enabled\": true,\n    \"addedAt\": 1764000000000\n  },\n  \"p02\": {\n    \"apiKey\": \"key-p02\",\n    \"enabled\": true,\n    \"addedAt\": 1764000000001\n  },\n  \"p03\": {\n    \"apiKey\": \"key-p03\",\n    \"enabled\": true,\n    \"addedAt\": 1764000000002\n  },\n  \"p04\": {\n    \"apiKey\": \"key-p04\",\n    \"enabled\": true,\n    \"addedAt\": 1764000000003\n  },\n  \"p05\": {\n    \"apiKey\": \"key-p05\",\n    \"enabled\": true,\n    \"addedAt\": 1764000000004\n  },\n  \"p06\": {\n    \"apiKey\": \"key-p06\",\n    \"enabled\": true,\n    \"addedAt\": 1764000000005\n  },\n  \"p07\": {\n    \"apiKey\": \"key-p07\",\n    \"enabled\": true,\n    \"addedAt\": 1764000000006\n  },\n  \"p08\": {\n    \"apiKey\": \"key-p08\",\n    \"enabled\": true,\n    \"addedAt\": 1764000000007\n  },\n  \"p09\": {\n    \"apiKey\": \"key-p09\",\n    \"enabled\": true,\n    \"addedAt\": 1764000000008\n  },\n  \"p10\": {\n    \"apiKey\": \"key-p10\",\n    \"enabled\": true,\n    \"addedAt\": 1764000000009\n  },\n  \"p11\": {\n    \"apiKey\": \"key-p11\",\n    \"enabled\": true,\n    \"addedAt\": 1764000000010\n  },\n  \"p12\": {\n    \"apiKey\": \"key-p12\",\n    \"enabled\": true,\n    \"addedAt\": 1764000000011\n  },\n  \"p13\": {\n    \"apiKey\": \"key-p13\",\n    \"enabled\": true,\n    \"addedAt\": 1764000000012\n  }\n}",
+            "has": true,
+            "keys": [
+              {
+                "id": "p01",
+                "key": "key-p01",
+                "well_formed": true,
+                "bytes": 7,
+                "string": true
+              },
+              {
+                "id": "p02",
+                "key": "key-p02",
+                "well_formed": true,
+                "bytes": 7,
+                "string": true
+              },
+              {
+                "id": "p03",
+                "key": "key-p03",
+                "well_formed": true,
+                "bytes": 7,
+                "string": true
+              },
+              {
+                "id": "p04",
+                "key": "key-p04",
+                "well_formed": true,
+                "bytes": 7,
+                "string": true
+              },
+              {
+                "id": "p05",
+                "key": "key-p05",
+                "well_formed": true,
+                "bytes": 7,
+                "string": true
+              },
+              {
+                "id": "p06",
+                "key": "key-p06",
+                "well_formed": true,
+                "bytes": 7,
+                "string": true
+              },
+              {
+                "id": "p07",
+                "key": "key-p07",
+                "well_formed": true,
+                "bytes": 7,
+                "string": true
+              },
+              {
+                "id": "p08",
+                "key": "key-p08",
+                "well_formed": true,
+                "bytes": 7,
+                "string": true
+              },
+              {
+                "id": "p09",
+                "key": "key-p09",
+                "well_formed": true,
+                "bytes": 7,
+                "string": true
+              },
+              {
+                "id": "p10",
+                "key": "key-p10",
+                "well_formed": true,
+                "bytes": 7,
+                "string": true
+              },
+              {
+                "id": "p11",
+                "key": "key-p11",
+                "well_formed": true,
+                "bytes": 7,
+                "string": true
+              },
+              {
+                "id": "p12",
+                "key": "key-p12",
+                "well_formed": true,
+                "bytes": 7,
+                "string": true
+              },
+              {
+                "id": "p13",
+                "key": "key-p13",
+                "well_formed": true,
+                "bytes": 7,
+                "string": true
+              }
+            ],
+            "core": "set"
+          },
+          {
+            "op": "set",
+            "id": "p14",
+            "key": "key-p14",
+            "at": 1764000000013,
+            "result": {
+              "success": true
+            },
+            "wrote": true,
+            "text": "{\n  \"p01\": {\n    \"apiKey\": \"key-p01\",\n    \"enabled\": true,\n    \"addedAt\": 1764000000000\n  },\n  \"p02\": {\n    \"apiKey\": \"key-p02\",\n    \"enabled\": true,\n    \"addedAt\": 1764000000001\n  },\n  \"p03\": {\n    \"apiKey\": \"key-p03\",\n    \"enabled\": true,\n    \"addedAt\": 1764000000002\n  },\n  \"p04\": {\n    \"apiKey\": \"key-p04\",\n    \"enabled\": true,\n    \"addedAt\": 1764000000003\n  },\n  \"p05\": {\n    \"apiKey\": \"key-p05\",\n    \"enabled\": true,\n    \"addedAt\": 1764000000004\n  },\n  \"p06\": {\n    \"apiKey\": \"key-p06\",\n    \"enabled\": true,\n    \"addedAt\": 1764000000005\n  },\n  \"p07\": {\n    \"apiKey\": \"key-p07\",\n    \"enabled\": true,\n    \"addedAt\": 1764000000006\n  },\n  \"p08\": {\n    \"apiKey\": \"key-p08\",\n    \"enabled\": true,\n    \"addedAt\": 1764000000007\n  },\n  \"p09\": {\n    \"apiKey\": \"key-p09\",\n    \"enabled\": true,\n    \"addedAt\": 1764000000008\n  },\n  \"p10\": {\n    \"apiKey\": \"key-p10\",\n    \"enabled\": true,\n    \"addedAt\": 1764000000009\n  },\n  \"p11\": {\n    \"apiKey\": \"key-p11\",\n    \"enabled\": true,\n    \"addedAt\": 1764000000010\n  },\n  \"p12\": {\n    \"apiKey\": \"key-p12\",\n    \"enabled\": true,\n    \"addedAt\": 1764000000011\n  },\n  \"p13\": {\n    \"apiKey\": \"key-p13\",\n    \"enabled\": true,\n    \"addedAt\": 1764000000012\n  },\n  \"p14\": {\n    \"apiKey\": \"key-p14\",\n    \"enabled\": true,\n    \"addedAt\": 1764000000013\n  }\n}",
+            "has": true,
+            "keys": [
+              {
+                "id": "p01",
+                "key": "key-p01",
+                "well_formed": true,
+                "bytes": 7,
+                "string": true
+              },
+              {
+                "id": "p02",
+                "key": "key-p02",
+                "well_formed": true,
+                "bytes": 7,
+                "string": true
+              },
+              {
+                "id": "p03",
+                "key": "key-p03",
+                "well_formed": true,
+                "bytes": 7,
+                "string": true
+              },
+              {
+                "id": "p04",
+                "key": "key-p04",
+                "well_formed": true,
+                "bytes": 7,
+                "string": true
+              },
+              {
+                "id": "p05",
+                "key": "key-p05",
+                "well_formed": true,
+                "bytes": 7,
+                "string": true
+              },
+              {
+                "id": "p06",
+                "key": "key-p06",
+                "well_formed": true,
+                "bytes": 7,
+                "string": true
+              },
+              {
+                "id": "p07",
+                "key": "key-p07",
+                "well_formed": true,
+                "bytes": 7,
+                "string": true
+              },
+              {
+                "id": "p08",
+                "key": "key-p08",
+                "well_formed": true,
+                "bytes": 7,
+                "string": true
+              },
+              {
+                "id": "p09",
+                "key": "key-p09",
+                "well_formed": true,
+                "bytes": 7,
+                "string": true
+              },
+              {
+                "id": "p10",
+                "key": "key-p10",
+                "well_formed": true,
+                "bytes": 7,
+                "string": true
+              },
+              {
+                "id": "p11",
+                "key": "key-p11",
+                "well_formed": true,
+                "bytes": 7,
+                "string": true
+              },
+              {
+                "id": "p12",
+                "key": "key-p12",
+                "well_formed": true,
+                "bytes": 7,
+                "string": true
+              },
+              {
+                "id": "p13",
+                "key": "key-p13",
+                "well_formed": true,
+                "bytes": 7,
+                "string": true
+              },
+              {
+                "id": "p14",
+                "key": "key-p14",
+                "well_formed": true,
+                "bytes": 7,
+                "string": true
+              }
+            ],
+            "core": "set"
+          },
+          {
+            "op": "set",
+            "id": "p15",
+            "key": "key-p15",
+            "at": 1764000000014,
+            "result": {
+              "success": true
+            },
+            "wrote": true,
+            "text": "{\n  \"p01\": {\n    \"apiKey\": \"key-p01\",\n    \"enabled\": true,\n    \"addedAt\": 1764000000000\n  },\n  \"p02\": {\n    \"apiKey\": \"key-p02\",\n    \"enabled\": true,\n    \"addedAt\": 1764000000001\n  },\n  \"p03\": {\n    \"apiKey\": \"key-p03\",\n    \"enabled\": true,\n    \"addedAt\": 1764000000002\n  },\n  \"p04\": {\n    \"apiKey\": \"key-p04\",\n    \"enabled\": true,\n    \"addedAt\": 1764000000003\n  },\n  \"p05\": {\n    \"apiKey\": \"key-p05\",\n    \"enabled\": true,\n    \"addedAt\": 1764000000004\n  },\n  \"p06\": {\n    \"apiKey\": \"key-p06\",\n    \"enabled\": true,\n    \"addedAt\": 1764000000005\n  },\n  \"p07\": {\n    \"apiKey\": \"key-p07\",\n    \"enabled\": true,\n    \"addedAt\": 1764000000006\n  },\n  \"p08\": {\n    \"apiKey\": \"key-p08\",\n    \"enabled\": true,\n    \"addedAt\": 1764000000007\n  },\n  \"p09\": {\n    \"apiKey\": \"key-p09\",\n    \"enabled\": true,\n    \"addedAt\": 1764000000008\n  },\n  \"p10\": {\n    \"apiKey\": \"key-p10\",\n    \"enabled\": true,\n    \"addedAt\": 1764000000009\n  },\n  \"p11\": {\n    \"apiKey\": \"key-p11\",\n    \"enabled\": true,\n    \"addedAt\": 1764000000010\n  },\n  \"p12\": {\n    \"apiKey\": \"key-p12\",\n    \"enabled\": true,\n    \"addedAt\": 1764000000011\n  },\n  \"p13\": {\n    \"apiKey\": \"key-p13\",\n    \"enabled\": true,\n    \"addedAt\": 1764000000012\n  },\n  \"p14\": {\n    \"apiKey\": \"key-p14\",\n    \"enabled\": true,\n    \"addedAt\": 1764000000013\n  },\n  \"p15\": {\n    \"apiKey\": \"key-p15\",\n    \"enabled\": true,\n    \"addedAt\": 1764000000014\n  }\n}",
+            "has": true,
+            "keys": [
+              {
+                "id": "p01",
+                "key": "key-p01",
+                "well_formed": true,
+                "bytes": 7,
+                "string": true
+              },
+              {
+                "id": "p02",
+                "key": "key-p02",
+                "well_formed": true,
+                "bytes": 7,
+                "string": true
+              },
+              {
+                "id": "p03",
+                "key": "key-p03",
+                "well_formed": true,
+                "bytes": 7,
+                "string": true
+              },
+              {
+                "id": "p04",
+                "key": "key-p04",
+                "well_formed": true,
+                "bytes": 7,
+                "string": true
+              },
+              {
+                "id": "p05",
+                "key": "key-p05",
+                "well_formed": true,
+                "bytes": 7,
+                "string": true
+              },
+              {
+                "id": "p06",
+                "key": "key-p06",
+                "well_formed": true,
+                "bytes": 7,
+                "string": true
+              },
+              {
+                "id": "p07",
+                "key": "key-p07",
+                "well_formed": true,
+                "bytes": 7,
+                "string": true
+              },
+              {
+                "id": "p08",
+                "key": "key-p08",
+                "well_formed": true,
+                "bytes": 7,
+                "string": true
+              },
+              {
+                "id": "p09",
+                "key": "key-p09",
+                "well_formed": true,
+                "bytes": 7,
+                "string": true
+              },
+              {
+                "id": "p10",
+                "key": "key-p10",
+                "well_formed": true,
+                "bytes": 7,
+                "string": true
+              },
+              {
+                "id": "p11",
+                "key": "key-p11",
+                "well_formed": true,
+                "bytes": 7,
+                "string": true
+              },
+              {
+                "id": "p12",
+                "key": "key-p12",
+                "well_formed": true,
+                "bytes": 7,
+                "string": true
+              },
+              {
+                "id": "p13",
+                "key": "key-p13",
+                "well_formed": true,
+                "bytes": 7,
+                "string": true
+              },
+              {
+                "id": "p14",
+                "key": "key-p14",
+                "well_formed": true,
+                "bytes": 7,
+                "string": true
+              },
+              {
+                "id": "p15",
+                "key": "key-p15",
+                "well_formed": true,
+                "bytes": 7,
+                "string": true
+              }
+            ],
+            "core": "set"
+          },
+          {
+            "op": "set",
+            "id": "p16",
+            "key": "key-p16",
+            "at": 1764000000015,
+            "result": {
+              "success": true
+            },
+            "wrote": true,
+            "text": "{\n  \"p01\": {\n    \"apiKey\": \"key-p01\",\n    \"enabled\": true,\n    \"addedAt\": 1764000000000\n  },\n  \"p02\": {\n    \"apiKey\": \"key-p02\",\n    \"enabled\": true,\n    \"addedAt\": 1764000000001\n  },\n  \"p03\": {\n    \"apiKey\": \"key-p03\",\n    \"enabled\": true,\n    \"addedAt\": 1764000000002\n  },\n  \"p04\": {\n    \"apiKey\": \"key-p04\",\n    \"enabled\": true,\n    \"addedAt\": 1764000000003\n  },\n  \"p05\": {\n    \"apiKey\": \"key-p05\",\n    \"enabled\": true,\n    \"addedAt\": 1764000000004\n  },\n  \"p06\": {\n    \"apiKey\": \"key-p06\",\n    \"enabled\": true,\n    \"addedAt\": 1764000000005\n  },\n  \"p07\": {\n    \"apiKey\": \"key-p07\",\n    \"enabled\": true,\n    \"addedAt\": 1764000000006\n  },\n  \"p08\": {\n    \"apiKey\": \"key-p08\",\n    \"enabled\": true,\n    \"addedAt\": 1764000000007\n  },\n  \"p09\": {\n    \"apiKey\": \"key-p09\",\n    \"enabled\": true,\n    \"addedAt\": 1764000000008\n  },\n  \"p10\": {\n    \"apiKey\": \"key-p10\",\n    \"enabled\": true,\n    \"addedAt\": 1764000000009\n  },\n  \"p11\": {\n    \"apiKey\": \"key-p11\",\n    \"enabled\": true,\n    \"addedAt\": 1764000000010\n  },\n  \"p12\": {\n    \"apiKey\": \"key-p12\",\n    \"enabled\": true,\n    \"addedAt\": 1764000000011\n  },\n  \"p13\": {\n    \"apiKey\": \"key-p13\",\n    \"enabled\": true,\n    \"addedAt\": 1764000000012\n  },\n  \"p14\": {\n    \"apiKey\": \"key-p14\",\n    \"enabled\": true,\n    \"addedAt\": 1764000000013\n  },\n  \"p15\": {\n    \"apiKey\": \"key-p15\",\n    \"enabled\": true,\n    \"addedAt\": 1764000000014\n  },\n  \"p16\": {\n    \"apiKey\": \"key-p16\",\n    \"enabled\": true,\n    \"addedAt\": 1764000000015\n  }\n}",
+            "has": true,
+            "keys": [
+              {
+                "id": "p01",
+                "key": "key-p01",
+                "well_formed": true,
+                "bytes": 7,
+                "string": true
+              },
+              {
+                "id": "p02",
+                "key": "key-p02",
+                "well_formed": true,
+                "bytes": 7,
+                "string": true
+              },
+              {
+                "id": "p03",
+                "key": "key-p03",
+                "well_formed": true,
+                "bytes": 7,
+                "string": true
+              },
+              {
+                "id": "p04",
+                "key": "key-p04",
+                "well_formed": true,
+                "bytes": 7,
+                "string": true
+              },
+              {
+                "id": "p05",
+                "key": "key-p05",
+                "well_formed": true,
+                "bytes": 7,
+                "string": true
+              },
+              {
+                "id": "p06",
+                "key": "key-p06",
+                "well_formed": true,
+                "bytes": 7,
+                "string": true
+              },
+              {
+                "id": "p07",
+                "key": "key-p07",
+                "well_formed": true,
+                "bytes": 7,
+                "string": true
+              },
+              {
+                "id": "p08",
+                "key": "key-p08",
+                "well_formed": true,
+                "bytes": 7,
+                "string": true
+              },
+              {
+                "id": "p09",
+                "key": "key-p09",
+                "well_formed": true,
+                "bytes": 7,
+                "string": true
+              },
+              {
+                "id": "p10",
+                "key": "key-p10",
+                "well_formed": true,
+                "bytes": 7,
+                "string": true
+              },
+              {
+                "id": "p11",
+                "key": "key-p11",
+                "well_formed": true,
+                "bytes": 7,
+                "string": true
+              },
+              {
+                "id": "p12",
+                "key": "key-p12",
+                "well_formed": true,
+                "bytes": 7,
+                "string": true
+              },
+              {
+                "id": "p13",
+                "key": "key-p13",
+                "well_formed": true,
+                "bytes": 7,
+                "string": true
+              },
+              {
+                "id": "p14",
+                "key": "key-p14",
+                "well_formed": true,
+                "bytes": 7,
+                "string": true
+              },
+              {
+                "id": "p15",
+                "key": "key-p15",
+                "well_formed": true,
+                "bytes": 7,
+                "string": true
+              },
+              {
+                "id": "p16",
+                "key": "key-p16",
+                "well_formed": true,
+                "bytes": 7,
+                "string": true
+              }
+            ],
+            "core": "set"
+          },
+          {
+            "op": "set",
+            "id": "p17",
+            "key": "key-p17",
+            "at": 1764000000016,
+            "result": {
+              "success": true
+            },
+            "wrote": true,
+            "text": "{\n  \"p01\": {\n    \"apiKey\": \"key-p01\",\n    \"enabled\": true,\n    \"addedAt\": 1764000000000\n  },\n  \"p02\": {\n    \"apiKey\": \"key-p02\",\n    \"enabled\": true,\n    \"addedAt\": 1764000000001\n  },\n  \"p03\": {\n    \"apiKey\": \"key-p03\",\n    \"enabled\": true,\n    \"addedAt\": 1764000000002\n  },\n  \"p04\": {\n    \"apiKey\": \"key-p04\",\n    \"enabled\": true,\n    \"addedAt\": 1764000000003\n  },\n  \"p05\": {\n    \"apiKey\": \"key-p05\",\n    \"enabled\": true,\n    \"addedAt\": 1764000000004\n  },\n  \"p06\": {\n    \"apiKey\": \"key-p06\",\n    \"enabled\": true,\n    \"addedAt\": 1764000000005\n  },\n  \"p07\": {\n    \"apiKey\": \"key-p07\",\n    \"enabled\": true,\n    \"addedAt\": 1764000000006\n  },\n  \"p08\": {\n    \"apiKey\": \"key-p08\",\n    \"enabled\": true,\n    \"addedAt\": 1764000000007\n  },\n  \"p09\": {\n    \"apiKey\": \"key-p09\",\n    \"enabled\": true,\n    \"addedAt\": 1764000000008\n  },\n  \"p10\": {\n    \"apiKey\": \"key-p10\",\n    \"enabled\": true,\n    \"addedAt\": 1764000000009\n  },\n  \"p11\": {\n    \"apiKey\": \"key-p11\",\n    \"enabled\": true,\n    \"addedAt\": 1764000000010\n  },\n  \"p12\": {\n    \"apiKey\": \"key-p12\",\n    \"enabled\": true,\n    \"addedAt\": 1764000000011\n  },\n  \"p13\": {\n    \"apiKey\": \"key-p13\",\n    \"enabled\": true,\n    \"addedAt\": 1764000000012\n  },\n  \"p14\": {\n    \"apiKey\": \"key-p14\",\n    \"enabled\": true,\n    \"addedAt\": 1764000000013\n  },\n  \"p15\": {\n    \"apiKey\": \"key-p15\",\n    \"enabled\": true,\n    \"addedAt\": 1764000000014\n  },\n  \"p16\": {\n    \"apiKey\": \"key-p16\",\n    \"enabled\": true,\n    \"addedAt\": 1764000000015\n  },\n  \"p17\": {\n    \"apiKey\": \"key-p17\",\n    \"enabled\": true,\n    \"addedAt\": 1764000000016\n  }\n}",
+            "has": true,
+            "keys": [
+              {
+                "id": "p01",
+                "key": "key-p01",
+                "well_formed": true,
+                "bytes": 7,
+                "string": true
+              },
+              {
+                "id": "p02",
+                "key": "key-p02",
+                "well_formed": true,
+                "bytes": 7,
+                "string": true
+              },
+              {
+                "id": "p03",
+                "key": "key-p03",
+                "well_formed": true,
+                "bytes": 7,
+                "string": true
+              },
+              {
+                "id": "p04",
+                "key": "key-p04",
+                "well_formed": true,
+                "bytes": 7,
+                "string": true
+              },
+              {
+                "id": "p05",
+                "key": "key-p05",
+                "well_formed": true,
+                "bytes": 7,
+                "string": true
+              },
+              {
+                "id": "p06",
+                "key": "key-p06",
+                "well_formed": true,
+                "bytes": 7,
+                "string": true
+              },
+              {
+                "id": "p07",
+                "key": "key-p07",
+                "well_formed": true,
+                "bytes": 7,
+                "string": true
+              },
+              {
+                "id": "p08",
+                "key": "key-p08",
+                "well_formed": true,
+                "bytes": 7,
+                "string": true
+              },
+              {
+                "id": "p09",
+                "key": "key-p09",
+                "well_formed": true,
+                "bytes": 7,
+                "string": true
+              },
+              {
+                "id": "p10",
+                "key": "key-p10",
+                "well_formed": true,
+                "bytes": 7,
+                "string": true
+              },
+              {
+                "id": "p11",
+                "key": "key-p11",
+                "well_formed": true,
+                "bytes": 7,
+                "string": true
+              },
+              {
+                "id": "p12",
+                "key": "key-p12",
+                "well_formed": true,
+                "bytes": 7,
+                "string": true
+              },
+              {
+                "id": "p13",
+                "key": "key-p13",
+                "well_formed": true,
+                "bytes": 7,
+                "string": true
+              },
+              {
+                "id": "p14",
+                "key": "key-p14",
+                "well_formed": true,
+                "bytes": 7,
+                "string": true
+              },
+              {
+                "id": "p15",
+                "key": "key-p15",
+                "well_formed": true,
+                "bytes": 7,
+                "string": true
+              },
+              {
+                "id": "p16",
+                "key": "key-p16",
+                "well_formed": true,
+                "bytes": 7,
+                "string": true
+              },
+              {
+                "id": "p17",
+                "key": "key-p17",
+                "well_formed": true,
+                "bytes": 7,
+                "string": true
+              }
+            ],
+            "core": "set"
+          }
+        ]
+      },
+      {
+        "id": "constructor",
+        "start": null,
+        "steps": [
+          {
+            "op": "set",
+            "id": "constructor",
+            "key": "kc",
+            "at": 1764000000000,
+            "result": {
+              "success": true
+            },
+            "wrote": true,
+            "text": "{\n  \"constructor\": {\n    \"apiKey\": \"kc\",\n    \"enabled\": true,\n    \"addedAt\": 1764000000000\n  }\n}",
+            "has": true,
+            "keys": [
+              {
+                "id": "constructor",
+                "key": "kc",
+                "well_formed": true,
+                "bytes": 2,
+                "string": true
+              }
+            ],
+            "core": "set"
+          },
+          {
+            "op": "remove",
+            "id": "constructor",
+            "at": 1764000000001,
+            "result": {
+              "success": true
+            },
+            "wrote": true,
+            "text": "{}",
+            "has": false,
+            "keys": [],
+            "core": "remove"
+          },
+          {
+            "op": "remove",
+            "id": "constructor",
+            "at": 1764000000002,
+            "result": {
+              "success": true
+            },
+            "wrote": true,
+            "text": "{}",
+            "has": false,
+            "keys": [],
+            "core": "remove"
+          }
+        ]
+      },
+      {
+        "id": "unreadable-start",
+        "start": "{\"alchemy\": {\"apiKey\": \"ka\", \"enabled\": true}",
+        "start_core": "unreadable",
+        "row": "rpc-keys-unreadable",
+        "steps": [
+          {
+            "op": "set",
+            "id": "infura",
+            "key": "ki",
+            "at": 1764000000000,
+            "result": {
+              "success": true
+            },
+            "wrote": true,
+            "text": "{\n  \"infura\": {\n    \"apiKey\": \"ki\",\n    \"enabled\": true,\n    \"addedAt\": 1764000000000\n  }\n}",
+            "has": true,
+            "keys": [
+              {
+                "id": "infura",
+                "key": "ki",
+                "well_formed": true,
+                "bytes": 2,
+                "string": true
+              }
+            ],
+            "core": "set"
+          },
+          {
+            "op": "remove",
+            "id": "alchemy",
+            "at": 1764000000001,
+            "result": {
+              "success": false,
+              "error": "No API key found for provider: alchemy"
+            },
+            "wrote": false,
+            "text": "{\n  \"infura\": {\n    \"apiKey\": \"ki\",\n    \"enabled\": true,\n    \"addedAt\": 1764000000000\n  }\n}",
+            "has": false,
+            "keys": [
+              {
+                "id": "infura",
+                "key": "ki",
+                "well_formed": true,
+                "bytes": 2,
+                "string": true
+              }
+            ],
+            "core": "remove"
+          }
+        ]
+      },
+      {
+        "id": "out-of-form-set",
+        "start": null,
+        "steps": [
+          {
+            "op": "set",
+            "id": "alchemy",
+            "key": "ka",
+            "at": 1764000000000,
+            "result": {
+              "success": true
+            },
+            "wrote": true,
+            "text": "{\n  \"alchemy\": {\n    \"apiKey\": \"ka\",\n    \"enabled\": true,\n    \"addedAt\": 1764000000000\n  }\n}",
+            "has": true,
+            "keys": [
+              {
+                "id": "alchemy",
+                "key": "ka",
+                "well_formed": true,
+                "bytes": 2,
+                "string": true
+              }
+            ],
+            "core": "set"
+          },
+          {
+            "op": "set",
+            "id": "Alchemy",
+            "key": "kA",
+            "at": 1764000000001,
+            "result": {
+              "success": true
+            },
+            "wrote": true,
+            "text": "{\n  \"alchemy\": {\n    \"apiKey\": \"ka\",\n    \"enabled\": true,\n    \"addedAt\": 1764000000000\n  },\n  \"Alchemy\": {\n    \"apiKey\": \"kA\",\n    \"enabled\": true,\n    \"addedAt\": 1764000000001\n  }\n}",
+            "has": true,
+            "keys": [
+              {
+                "id": "alchemy",
+                "key": "ka",
+                "well_formed": true,
+                "bytes": 2,
+                "string": true
+              },
+              {
+                "id": "Alchemy",
+                "key": "kA",
+                "well_formed": true,
+                "bytes": 2,
+                "string": true
+              }
+            ],
+            "core": "refused",
+            "row": "rpc-key-provider-id"
+          }
+        ]
+      },
+      {
+        "id": "proto-set",
+        "start": null,
+        "steps": [
+          {
+            "op": "set",
+            "id": "alchemy",
+            "key": "ka",
+            "at": 1764000000000,
+            "result": {
+              "success": true
+            },
+            "wrote": true,
+            "text": "{\n  \"alchemy\": {\n    \"apiKey\": \"ka\",\n    \"enabled\": true,\n    \"addedAt\": 1764000000000\n  }\n}",
+            "has": true,
+            "keys": [
+              {
+                "id": "alchemy",
+                "key": "ka",
+                "well_formed": true,
+                "bytes": 2,
+                "string": true
+              }
+            ],
+            "core": "set"
+          },
+          {
+            "op": "set",
+            "id": "__proto__",
+            "key": "kp",
+            "at": 1764000000001,
+            "result": {
+              "success": true
+            },
+            "wrote": true,
+            "text": "{\n  \"alchemy\": {\n    \"apiKey\": \"ka\",\n    \"enabled\": true,\n    \"addedAt\": 1764000000000\n  }\n}",
+            "has": true,
+            "keys": [
+              {
+                "id": "alchemy",
+                "key": "ka",
+                "well_formed": true,
+                "bytes": 2,
+                "string": true
+              }
+            ],
+            "core": "own_property",
+            "row": "rpc-key-provider-id"
+          }
+        ]
+      }
+    ],
+    "malformed": [
+      {
+        "id": "empty",
+        "text": "",
+        "read": {
+          "error": "Unexpected end of JSON input"
+        },
+        "keys": [],
+        "set": {
+          "at": 1764000000000,
+          "result": {
+            "success": true
+          },
+          "text": "{\n  \"alchemy\": {\n    \"apiKey\": \"k-new\",\n    \"enabled\": true,\n    \"addedAt\": 1764000000000\n  }\n}"
+        },
+        "core": "unreadable",
+        "reason": "not_json",
+        "row": "rpc-keys-unreadable"
+      },
+      {
+        "id": "truncated",
+        "text": "{\"alchemy\": {\"apiKey\": \"ka\"",
+        "read": {
+          "error": "Expected ',' or '}' after property value in JSON at position 27 (line 1 column 28)"
+        },
+        "keys": [],
+        "set": {
+          "at": 1764000000000,
+          "result": {
+            "success": true
+          },
+          "text": "{\n  \"alchemy\": {\n    \"apiKey\": \"k-new\",\n    \"enabled\": true,\n    \"addedAt\": 1764000000000\n  }\n}"
+        },
+        "core": "unreadable",
+        "reason": "not_json",
+        "row": "rpc-keys-unreadable"
+      },
+      {
+        "id": "bom",
+        "text": "﻿{}",
+        "read": {
+          "error": "Unexpected token '﻿', \"﻿{}\" is not valid JSON"
+        },
+        "keys": [],
+        "set": {
+          "at": 1764000000000,
+          "result": {
+            "success": true
+          },
+          "text": "{\n  \"alchemy\": {\n    \"apiKey\": \"k-new\",\n    \"enabled\": true,\n    \"addedAt\": 1764000000000\n  }\n}"
+        },
+        "core": "unreadable",
+        "reason": "not_json",
+        "row": "rpc-keys-unreadable"
+      },
+      {
+        "id": "trailing-comma",
+        "text": "{\"alchemy\": 1,}",
+        "read": {
+          "error": "Expected double-quoted property name in JSON at position 14 (line 1 column 15)"
+        },
+        "keys": [],
+        "set": {
+          "at": 1764000000000,
+          "result": {
+            "success": true
+          },
+          "text": "{\n  \"alchemy\": {\n    \"apiKey\": \"k-new\",\n    \"enabled\": true,\n    \"addedAt\": 1764000000000\n  }\n}"
+        },
+        "core": "unreadable",
+        "reason": "not_json",
+        "row": "rpc-keys-unreadable"
+      },
+      {
+        "id": "null",
+        "text": "null",
+        "read": {
+          "text": "null"
+        },
+        "keys": {
+          "error": "not an object: null"
+        },
+        "set": {
+          "at": 1764000000000,
+          "error": "Cannot set properties of null (setting 'alchemy')",
+          "text": "null"
+        },
+        "core": "unreadable",
+        "reason": "not_object",
+        "row": "rpc-keys-unreadable"
+      },
+      {
+        "id": "array",
+        "text": "[{\"apiKey\": \"ka\", \"enabled\": true}]",
+        "read": {
+          "text": "[\n  {\n    \"apiKey\": \"ka\",\n    \"enabled\": true\n  }\n]"
+        },
+        "keys": [
+          {
+            "id": "0",
+            "key": "ka",
+            "well_formed": true,
+            "bytes": 2,
+            "string": true
+          }
+        ],
+        "set": {
+          "at": 1764000000000,
+          "result": {
+            "success": true
+          },
+          "text": "[\n  {\n    \"apiKey\": \"ka\",\n    \"enabled\": true\n  }\n]"
+        },
+        "core": "unreadable",
+        "reason": "not_object",
+        "row": "rpc-keys-unreadable"
+      },
+      {
+        "id": "string",
+        "text": "\"ka\"",
+        "read": {
+          "text": "\"ka\""
+        },
+        "keys": {
+          "error": "not an object: \"ka\""
+        },
+        "set": {
+          "at": 1764000000000,
+          "result": {
+            "success": true
+          },
+          "text": "\"ka\""
+        },
+        "core": "unreadable",
+        "reason": "not_object",
+        "row": "rpc-keys-unreadable"
+      },
+      {
+        "id": "number",
+        "text": "42",
+        "read": {
+          "text": "42"
+        },
+        "keys": {
+          "error": "not an object: 42"
+        },
+        "set": {
+          "at": 1764000000000,
+          "result": {
+            "success": true
+          },
+          "text": "42"
+        },
+        "core": "unreadable",
+        "reason": "not_object",
+        "row": "rpc-keys-unreadable"
+      },
+      {
+        "id": "true",
+        "text": "true",
+        "read": {
+          "text": "true"
+        },
+        "keys": {
+          "error": "not an object: true"
+        },
+        "set": {
+          "at": 1764000000000,
+          "result": {
+            "success": true
+          },
+          "text": "true"
+        },
+        "core": "unreadable",
+        "reason": "not_object",
+        "row": "rpc-keys-unreadable"
+      },
+      {
+        "id": "deep-nesting",
+        "text": "{\"note\": [[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]], \"alchemy\": {\"apiKey\": \"ka\", \"enabled\": true}}",
+        "read": {
+          "text_length": 722470
+        },
+        "keys": [
+          {
+            "id": "alchemy",
+            "key": "ka",
+            "well_formed": true,
+            "bytes": 2,
+            "string": true
+          }
+        ],
+        "set": {
+          "at": 1764000000000,
+          "result": {
+            "success": true
+          },
+          "text_length": 722503
+        },
+        "core": "unreadable",
+        "reason": "not_json",
+        "row": "rpc-keys-unreadable"
+      },
+      {
+        "id": "empty-object",
+        "text": "{}",
+        "read": {
+          "text": "{}"
+        },
+        "keys": [],
+        "set": {
+          "at": 1764000000000,
+          "result": {
+            "success": true
+          },
+          "text": "{\n  \"alchemy\": {\n    \"apiKey\": \"k-new\",\n    \"enabled\": true,\n    \"addedAt\": 1764000000000\n  }\n}"
+        },
+        "core": "parsed"
+      },
+      {
+        "id": "whitespace-around",
+        "text": "\n\t {\"alchemy\": {\"apiKey\": \"ka\", \"enabled\": true}}\r\n ",
+        "read": {
+          "text": "{\n  \"alchemy\": {\n    \"apiKey\": \"ka\",\n    \"enabled\": true\n  }\n}"
+        },
+        "keys": [
+          {
+            "id": "alchemy",
+            "key": "ka",
+            "well_formed": true,
+            "bytes": 2,
+            "string": true
+          }
+        ],
+        "set": {
+          "at": 1764000000000,
+          "result": {
+            "success": true
+          },
+          "text": "{\n  \"alchemy\": {\n    \"apiKey\": \"k-new\",\n    \"enabled\": true,\n    \"addedAt\": 1764000000000\n  }\n}"
+        },
+        "core": "parsed"
+      },
+      {
+        "id": "empty-key",
+        "text": "{\"alchemy\": {\"apiKey\": \"\", \"enabled\": true}}",
+        "read": {
+          "text": "{\n  \"alchemy\": {\n    \"apiKey\": \"\",\n    \"enabled\": true\n  }\n}"
+        },
+        "keys": [],
+        "set": {
+          "at": 1764000000000,
+          "result": {
+            "success": true
+          },
+          "text": "{\n  \"alchemy\": {\n    \"apiKey\": \"k-new\",\n    \"enabled\": true,\n    \"addedAt\": 1764000000000\n  }\n}"
+        },
+        "core": "parsed"
+      },
+      {
+        "id": "key-missing",
+        "text": "{\"a\": {\"enabled\": true}, \"b\": {\"enabled\": true, \"addedAt\": 1}, \"c\": {\"apiKey\": \"kc\", \"enabled\": true}}",
+        "read": {
+          "text": "{\n  \"a\": {\n    \"enabled\": true\n  },\n  \"b\": {\n    \"enabled\": true,\n    \"addedAt\": 1\n  },\n  \"c\": {\n    \"apiKey\": \"kc\",\n    \"enabled\": true\n  }\n}"
+        },
+        "keys": [
+          {
+            "id": "c",
+            "key": "kc",
+            "well_formed": true,
+            "bytes": 2,
+            "string": true
+          }
+        ],
+        "set": {
+          "at": 1764000000000,
+          "result": {
+            "success": true
+          },
+          "text": "{\n  \"a\": {\n    \"enabled\": true\n  },\n  \"b\": {\n    \"enabled\": true,\n    \"addedAt\": 1\n  },\n  \"c\": {\n    \"apiKey\": \"kc\",\n    \"enabled\": true\n  },\n  \"alchemy\": {\n    \"apiKey\": \"k-new\",\n    \"enabled\": true,\n    \"addedAt\": 1764000000000\n  }\n}"
+        },
+        "core": "parsed"
+      },
+      {
+        "id": "enabled-values",
+        "text": "{\"a\": {\"apiKey\": \"k1\", \"enabled\": 0}, \"b\": {\"apiKey\": \"k2\", \"enabled\": \"yes\"}, \"c\": {\"apiKey\": \"k3\"}, \"d\": {\"apiKey\": \"k4\", \"enabled\": false}, \"e\": {\"apiKey\": \"k5\", \"enabled\": []}, \"f\": {\"apiKey\": \"k6\", \"enabled\": null}}",
+        "read": {
+          "text": "{\n  \"a\": {\n    \"apiKey\": \"k1\",\n    \"enabled\": 0\n  },\n  \"b\": {\n    \"apiKey\": \"k2\",\n    \"enabled\": \"yes\"\n  },\n  \"c\": {\n    \"apiKey\": \"k3\"\n  },\n  \"d\": {\n    \"apiKey\": \"k4\",\n    \"enabled\": false\n  },\n  \"e\": {\n    \"apiKey\": \"k5\",\n    \"enabled\": []\n  },\n  \"f\": {\n    \"apiKey\": \"k6\",\n    \"enabled\": null\n  }\n}"
+        },
+        "keys": [
+          {
+            "id": "b",
+            "key": "k2",
+            "well_formed": true,
+            "bytes": 2,
+            "string": true
+          },
+          {
+            "id": "e",
+            "key": "k5",
+            "well_formed": true,
+            "bytes": 2,
+            "string": true
+          }
+        ],
+        "set": {
+          "at": 1764000000000,
+          "result": {
+            "success": true
+          },
+          "text": "{\n  \"a\": {\n    \"apiKey\": \"k1\",\n    \"enabled\": 0\n  },\n  \"b\": {\n    \"apiKey\": \"k2\",\n    \"enabled\": \"yes\"\n  },\n  \"c\": {\n    \"apiKey\": \"k3\"\n  },\n  \"d\": {\n    \"apiKey\": \"k4\",\n    \"enabled\": false\n  },\n  \"e\": {\n    \"apiKey\": \"k5\",\n    \"enabled\": []\n  },\n  \"f\": {\n    \"apiKey\": \"k6\",\n    \"enabled\": null\n  },\n  \"alchemy\": {\n    \"apiKey\": \"k-new\",\n    \"enabled\": true,\n    \"addedAt\": 1764000000000\n  }\n}"
+        },
+        "core": "parsed"
+      },
+      {
+        "id": "key-values",
+        "text": "{\"a\": {\"apiKey\": 7, \"enabled\": true}, \"b\": {\"apiKey\": true, \"enabled\": true}, \"c\": {\"apiKey\": {}, \"enabled\": true}, \"d\": {\"apiKey\": [\"x\", 1], \"enabled\": true}, \"e\": {\"apiKey\": null, \"enabled\": true}, \"f\": {\"apiKey\": 0, \"enabled\": true}, \"g\": {\"apiKey\": false, \"enabled\": true}, \"h\": {\"apiKey\": 1e400, \"enabled\": true}, \"i\": {\"apiKey\": -0, \"enabled\": true}}",
+        "read": {
+          "text": "{\n  \"a\": {\n    \"apiKey\": 7,\n    \"enabled\": true\n  },\n  \"b\": {\n    \"apiKey\": true,\n    \"enabled\": true\n  },\n  \"c\": {\n    \"apiKey\": {},\n    \"enabled\": true\n  },\n  \"d\": {\n    \"apiKey\": [\n      \"x\",\n      1\n    ],\n    \"enabled\": true\n  },\n  \"e\": {\n    \"apiKey\": null,\n    \"enabled\": true\n  },\n  \"f\": {\n    \"apiKey\": 0,\n    \"enabled\": true\n  },\n  \"g\": {\n    \"apiKey\": false,\n    \"enabled\": true\n  },\n  \"h\": {\n    \"apiKey\": null,\n    \"enabled\": true\n  },\n  \"i\": {\n    \"apiKey\": 0,\n    \"enabled\": true\n  }\n}"
+        },
+        "keys": [
+          {
+            "id": "a",
+            "key": "7",
+            "well_formed": true,
+            "bytes": 1,
+            "string": false
+          },
+          {
+            "id": "b",
+            "key": "true",
+            "well_formed": true,
+            "bytes": 4,
+            "string": false
+          },
+          {
+            "id": "c",
+            "key": "[object Object]",
+            "well_formed": true,
+            "bytes": 15,
+            "string": false
+          },
+          {
+            "id": "d",
+            "key": "x,1",
+            "well_formed": true,
+            "bytes": 3,
+            "string": false
+          },
+          {
+            "id": "h",
+            "key": "Infinity",
+            "well_formed": true,
+            "bytes": 8,
+            "string": false
+          }
+        ],
+        "set": {
+          "at": 1764000000000,
+          "result": {
+            "success": true
+          },
+          "text": "{\n  \"a\": {\n    \"apiKey\": 7,\n    \"enabled\": true\n  },\n  \"b\": {\n    \"apiKey\": true,\n    \"enabled\": true\n  },\n  \"c\": {\n    \"apiKey\": {},\n    \"enabled\": true\n  },\n  \"d\": {\n    \"apiKey\": [\n      \"x\",\n      1\n    ],\n    \"enabled\": true\n  },\n  \"e\": {\n    \"apiKey\": null,\n    \"enabled\": true\n  },\n  \"f\": {\n    \"apiKey\": 0,\n    \"enabled\": true\n  },\n  \"g\": {\n    \"apiKey\": false,\n    \"enabled\": true\n  },\n  \"h\": {\n    \"apiKey\": null,\n    \"enabled\": true\n  },\n  \"i\": {\n    \"apiKey\": 0,\n    \"enabled\": true\n  },\n  \"alchemy\": {\n    \"apiKey\": \"k-new\",\n    \"enabled\": true,\n    \"addedAt\": 1764000000000\n  }\n}"
+        },
+        "core": "parsed"
+      },
+      {
+        "id": "key-to-string-throws",
+        "text": "{\"a\": {\"apiKey\": {\"toString\": 1}, \"enabled\": true}, \"b\": {\"apiKey\": \"kb\", \"enabled\": true}}",
+        "read": {
+          "text": "{\n  \"a\": {\n    \"apiKey\": {\n      \"toString\": 1\n    },\n    \"enabled\": true\n  },\n  \"b\": {\n    \"apiKey\": \"kb\",\n    \"enabled\": true\n  }\n}"
+        },
+        "keys": [
+          {
+            "id": "a",
+            "error": "Cannot convert object to primitive value"
+          },
+          {
+            "id": "b",
+            "key": "kb",
+            "well_formed": true,
+            "bytes": 2,
+            "string": true
+          }
+        ],
+        "set": {
+          "at": 1764000000000,
+          "result": {
+            "success": true
+          },
+          "text": "{\n  \"a\": {\n    \"apiKey\": {\n      \"toString\": 1\n    },\n    \"enabled\": true\n  },\n  \"b\": {\n    \"apiKey\": \"kb\",\n    \"enabled\": true\n  },\n  \"alchemy\": {\n    \"apiKey\": \"k-new\",\n    \"enabled\": true,\n    \"addedAt\": 1764000000000\n  }\n}"
+        },
+        "core": "parsed"
+      },
+      {
+        "id": "records-not-objects",
+        "text": "{\"a\": \"ka\", \"b\": 0, \"c\": [], \"d\": null, \"e\": true, \"f\": {\"apiKey\": \"kf\", \"enabled\": true}}",
+        "read": {
+          "text": "{\n  \"a\": \"ka\",\n  \"b\": 0,\n  \"c\": [],\n  \"d\": null,\n  \"e\": true,\n  \"f\": {\n    \"apiKey\": \"kf\",\n    \"enabled\": true\n  }\n}"
+        },
+        "keys": [
+          {
+            "id": "f",
+            "key": "kf",
+            "well_formed": true,
+            "bytes": 2,
+            "string": true
+          }
+        ],
+        "set": {
+          "at": 1764000000000,
+          "result": {
+            "success": true
+          },
+          "text": "{\n  \"a\": \"ka\",\n  \"b\": 0,\n  \"c\": [],\n  \"d\": null,\n  \"e\": true,\n  \"f\": {\n    \"apiKey\": \"kf\",\n    \"enabled\": true\n  },\n  \"alchemy\": {\n    \"apiKey\": \"k-new\",\n    \"enabled\": true,\n    \"addedAt\": 1764000000000\n  }\n}"
+        },
+        "core": "parsed"
+      },
+      {
+        "id": "lone-surrogate-key",
+        "text": "{\"alchemy\": {\"apiKey\": \"a\\ud800b\", \"enabled\": true}, \"infura\": {\"apiKey\": \"\\udc00\", \"enabled\": true}}",
+        "read": {
+          "text": "{\n  \"alchemy\": {\n    \"apiKey\": \"a\\ud800b\",\n    \"enabled\": true\n  },\n  \"infura\": {\n    \"apiKey\": \"\\udc00\",\n    \"enabled\": true\n  }\n}"
+        },
+        "keys": [
+          {
+            "id": "alchemy",
+            "key": "a�b",
+            "well_formed": false,
+            "bytes": 5,
+            "string": true
+          },
+          {
+            "id": "infura",
+            "key": "�",
+            "well_formed": false,
+            "bytes": 3,
+            "string": true
+          }
+        ],
+        "set": {
+          "at": 1764000000000,
+          "result": {
+            "success": true
+          },
+          "text": "{\n  \"alchemy\": {\n    \"apiKey\": \"k-new\",\n    \"enabled\": true,\n    \"addedAt\": 1764000000000\n  },\n  \"infura\": {\n    \"apiKey\": \"\\udc00\",\n    \"enabled\": true\n  }\n}"
+        },
+        "core": "parsed"
+      },
+      {
+        "id": "long-key",
+        "text": "{\"alchemy\": {\"apiKey\": \"kkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkk\", \"enabled\": true}, \"infura\": {\"apiKey\": \"kkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkk\", \"enabled\": true}}",
+        "read": {
+          "text": "{\n  \"alchemy\": {\n    \"apiKey\": \"kkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkk\",\n    \"enabled\": true\n  },\n  \"infura\": {\n    \"apiKey\": \"kkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkk\",\n    \"enabled\": true\n  }\n}"
+        },
+        "keys": [
+          {
+            "id": "alchemy",
+            "key": "kkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkk",
+            "well_formed": true,
+            "bytes": 1025,
+            "string": true
+          },
+          {
+            "id": "infura",
+            "key": "kkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkk",
+            "well_formed": true,
+            "bytes": 1024,
+            "string": true
+          }
+        ],
+        "set": {
+          "at": 1764000000000,
+          "result": {
+            "success": true
+          },
+          "text": "{\n  \"alchemy\": {\n    \"apiKey\": \"k-new\",\n    \"enabled\": true,\n    \"addedAt\": 1764000000000\n  },\n  \"infura\": {\n    \"apiKey\": \"kkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkk\",\n    \"enabled\": true\n  }\n}"
+        },
+        "core": "parsed"
+      },
+      {
+        "id": "duplicate-ids",
+        "text": "{\"alchemy\": {\"apiKey\": \"k1\", \"enabled\": true}, \"infura\": {\"apiKey\": \"ki\", \"enabled\": true}, \"alchemy\": {\"apiKey\": \"k2\", \"enabled\": true, \"addedAt\": 3}}",
+        "read": {
+          "text": "{\n  \"alchemy\": {\n    \"apiKey\": \"k2\",\n    \"enabled\": true,\n    \"addedAt\": 3\n  },\n  \"infura\": {\n    \"apiKey\": \"ki\",\n    \"enabled\": true\n  }\n}"
+        },
+        "keys": [
+          {
+            "id": "alchemy",
+            "key": "k2",
+            "well_formed": true,
+            "bytes": 2,
+            "string": true
+          },
+          {
+            "id": "infura",
+            "key": "ki",
+            "well_formed": true,
+            "bytes": 2,
+            "string": true
+          }
+        ],
+        "set": {
+          "at": 1764000000000,
+          "result": {
+            "success": true
+          },
+          "text": "{\n  \"alchemy\": {\n    \"apiKey\": \"k-new\",\n    \"enabled\": true,\n    \"addedAt\": 1764000000000\n  },\n  \"infura\": {\n    \"apiKey\": \"ki\",\n    \"enabled\": true\n  }\n}"
+        },
+        "core": "parsed"
+      },
+      {
+        "id": "duplicate-fields",
+        "text": "{\"alchemy\": {\"apiKey\": \"k1\", \"enabled\": false, \"apiKey\": \"k2\", \"enabled\": true}}",
+        "read": {
+          "text": "{\n  \"alchemy\": {\n    \"apiKey\": \"k2\",\n    \"enabled\": true\n  }\n}"
+        },
+        "keys": [
+          {
+            "id": "alchemy",
+            "key": "k2",
+            "well_formed": true,
+            "bytes": 2,
+            "string": true
+          }
+        ],
+        "set": {
+          "at": 1764000000000,
+          "result": {
+            "success": true
+          },
+          "text": "{\n  \"alchemy\": {\n    \"apiKey\": \"k-new\",\n    \"enabled\": true,\n    \"addedAt\": 1764000000000\n  }\n}"
+        },
+        "core": "parsed"
+      },
+      {
+        "id": "integer-ids",
+        "text": "{\"b\": {\"apiKey\": \"kb\", \"enabled\": true}, \"10\": {\"apiKey\": \"k10\", \"enabled\": true}, \"2\": {\"apiKey\": \"k2\", \"enabled\": true}, \"-1\": {\"apiKey\": \"km\", \"enabled\": true}, \"01\": {\"apiKey\": \"k01\", \"enabled\": true}, \"4294967295\": {\"apiKey\": \"kmax\", \"enabled\": true}}",
+        "read": {
+          "text": "{\n  \"2\": {\n    \"apiKey\": \"k2\",\n    \"enabled\": true\n  },\n  \"10\": {\n    \"apiKey\": \"k10\",\n    \"enabled\": true\n  },\n  \"b\": {\n    \"apiKey\": \"kb\",\n    \"enabled\": true\n  },\n  \"-1\": {\n    \"apiKey\": \"km\",\n    \"enabled\": true\n  },\n  \"01\": {\n    \"apiKey\": \"k01\",\n    \"enabled\": true\n  },\n  \"4294967295\": {\n    \"apiKey\": \"kmax\",\n    \"enabled\": true\n  }\n}"
+        },
+        "keys": [
+          {
+            "id": "2",
+            "key": "k2",
+            "well_formed": true,
+            "bytes": 2,
+            "string": true
+          },
+          {
+            "id": "10",
+            "key": "k10",
+            "well_formed": true,
+            "bytes": 3,
+            "string": true
+          },
+          {
+            "id": "b",
+            "key": "kb",
+            "well_formed": true,
+            "bytes": 2,
+            "string": true
+          },
+          {
+            "id": "-1",
+            "key": "km",
+            "well_formed": true,
+            "bytes": 2,
+            "string": true
+          },
+          {
+            "id": "01",
+            "key": "k01",
+            "well_formed": true,
+            "bytes": 3,
+            "string": true
+          },
+          {
+            "id": "4294967295",
+            "key": "kmax",
+            "well_formed": true,
+            "bytes": 4,
+            "string": true
+          }
+        ],
+        "set": {
+          "at": 1764000000000,
+          "result": {
+            "success": true
+          },
+          "text": "{\n  \"2\": {\n    \"apiKey\": \"k2\",\n    \"enabled\": true\n  },\n  \"10\": {\n    \"apiKey\": \"k10\",\n    \"enabled\": true\n  },\n  \"b\": {\n    \"apiKey\": \"kb\",\n    \"enabled\": true\n  },\n  \"-1\": {\n    \"apiKey\": \"km\",\n    \"enabled\": true\n  },\n  \"01\": {\n    \"apiKey\": \"k01\",\n    \"enabled\": true\n  },\n  \"4294967295\": {\n    \"apiKey\": \"kmax\",\n    \"enabled\": true\n  },\n  \"alchemy\": {\n    \"apiKey\": \"k-new\",\n    \"enabled\": true,\n    \"addedAt\": 1764000000000\n  }\n}"
+        },
+        "core": "parsed"
+      },
+      {
+        "id": "integer-fields",
+        "text": "{\"alchemy\": {\"enabled\": true, \"9\": 1, \"apiKey\": \"ka\", \"1\": 2}}",
+        "read": {
+          "text": "{\n  \"alchemy\": {\n    \"1\": 2,\n    \"9\": 1,\n    \"enabled\": true,\n    \"apiKey\": \"ka\"\n  }\n}"
+        },
+        "keys": [
+          {
+            "id": "alchemy",
+            "key": "ka",
+            "well_formed": true,
+            "bytes": 2,
+            "string": true
+          }
+        ],
+        "set": {
+          "at": 1764000000000,
+          "result": {
+            "success": true
+          },
+          "text": "{\n  \"alchemy\": {\n    \"apiKey\": \"k-new\",\n    \"enabled\": true,\n    \"addedAt\": 1764000000000\n  }\n}"
+        },
+        "core": "parsed"
+      },
+      {
+        "id": "proto-id",
+        "text": "{\"__proto__\": {\"apiKey\": \"kp\", \"enabled\": true}, \"constructor\": {\"apiKey\": \"kc\", \"enabled\": true}, \"alchemy\": {\"apiKey\": \"ka\", \"enabled\": true}}",
+        "read": {
+          "text": "{\n  \"__proto__\": {\n    \"apiKey\": \"kp\",\n    \"enabled\": true\n  },\n  \"constructor\": {\n    \"apiKey\": \"kc\",\n    \"enabled\": true\n  },\n  \"alchemy\": {\n    \"apiKey\": \"ka\",\n    \"enabled\": true\n  }\n}"
+        },
+        "keys": [
+          {
+            "id": "__proto__",
+            "key": "kp",
+            "well_formed": true,
+            "bytes": 2,
+            "string": true
+          },
+          {
+            "id": "constructor",
+            "key": "kc",
+            "well_formed": true,
+            "bytes": 2,
+            "string": true
+          },
+          {
+            "id": "alchemy",
+            "key": "ka",
+            "well_formed": true,
+            "bytes": 2,
+            "string": true
+          }
+        ],
+        "set": {
+          "at": 1764000000000,
+          "result": {
+            "success": true
+          },
+          "text": "{\n  \"__proto__\": {\n    \"apiKey\": \"kp\",\n    \"enabled\": true\n  },\n  \"constructor\": {\n    \"apiKey\": \"kc\",\n    \"enabled\": true\n  },\n  \"alchemy\": {\n    \"apiKey\": \"k-new\",\n    \"enabled\": true,\n    \"addedAt\": 1764000000000\n  }\n}"
+        },
+        "core": "parsed"
+      },
+      {
+        "id": "out-of-form-ids",
+        "text": "{\"Alchemy\": {\"apiKey\": \"k1\", \"enabled\": true}, \"a b\": {\"apiKey\": \"k2\", \"enabled\": true}, \"é\": {\"apiKey\": \"k3\", \"enabled\": true}, \"\": {\"apiKey\": \"k4\", \"enabled\": true}, \"ppppppppppppppppppppppppppppppppppppppppppppppppppppp\": {\"apiKey\": \"k5\", \"enabled\": true}}",
+        "read": {
+          "text": "{\n  \"Alchemy\": {\n    \"apiKey\": \"k1\",\n    \"enabled\": true\n  },\n  \"a b\": {\n    \"apiKey\": \"k2\",\n    \"enabled\": true\n  },\n  \"é\": {\n    \"apiKey\": \"k3\",\n    \"enabled\": true\n  },\n  \"\": {\n    \"apiKey\": \"k4\",\n    \"enabled\": true\n  },\n  \"ppppppppppppppppppppppppppppppppppppppppppppppppppppp\": {\n    \"apiKey\": \"k5\",\n    \"enabled\": true\n  }\n}"
+        },
+        "keys": [
+          {
+            "id": "Alchemy",
+            "key": "k1",
+            "well_formed": true,
+            "bytes": 2,
+            "string": true
+          },
+          {
+            "id": "a b",
+            "key": "k2",
+            "well_formed": true,
+            "bytes": 2,
+            "string": true
+          },
+          {
+            "id": "é",
+            "key": "k3",
+            "well_formed": true,
+            "bytes": 2,
+            "string": true
+          },
+          {
+            "id": "",
+            "key": "k4",
+            "well_formed": true,
+            "bytes": 2,
+            "string": true
+          },
+          {
+            "id": "ppppppppppppppppppppppppppppppppppppppppppppppppppppp",
+            "key": "k5",
+            "well_formed": true,
+            "bytes": 2,
+            "string": true
+          }
+        ],
+        "set": {
+          "at": 1764000000000,
+          "result": {
+            "success": true
+          },
+          "text": "{\n  \"Alchemy\": {\n    \"apiKey\": \"k1\",\n    \"enabled\": true\n  },\n  \"a b\": {\n    \"apiKey\": \"k2\",\n    \"enabled\": true\n  },\n  \"é\": {\n    \"apiKey\": \"k3\",\n    \"enabled\": true\n  },\n  \"\": {\n    \"apiKey\": \"k4\",\n    \"enabled\": true\n  },\n  \"ppppppppppppppppppppppppppppppppppppppppppppppppppppp\": {\n    \"apiKey\": \"k5\",\n    \"enabled\": true\n  },\n  \"alchemy\": {\n    \"apiKey\": \"k-new\",\n    \"enabled\": true,\n    \"addedAt\": 1764000000000\n  }\n}"
+        },
+        "core": "parsed"
+      },
+      {
+        "id": "nested-values",
+        "text": "{\"alchemy\": {\"apiKey\": \"ka\", \"enabled\": true, \"note\": {\"n\": [1, {\"m\": \"\\n\"}, []], \"o\": {}}}, \"x\": [1, [2, {}], {\"a\": []}]}",
+        "read": {
+          "text": "{\n  \"alchemy\": {\n    \"apiKey\": \"ka\",\n    \"enabled\": true,\n    \"note\": {\n      \"n\": [\n        1,\n        {\n          \"m\": \"\\n\"\n        },\n        []\n      ],\n      \"o\": {}\n    }\n  },\n  \"x\": [\n    1,\n    [\n      2,\n      {}\n    ],\n    {\n      \"a\": []\n    }\n  ]\n}"
+        },
+        "keys": [
+          {
+            "id": "alchemy",
+            "key": "ka",
+            "well_formed": true,
+            "bytes": 2,
+            "string": true
+          }
+        ],
+        "set": {
+          "at": 1764000000000,
+          "result": {
+            "success": true
+          },
+          "text": "{\n  \"alchemy\": {\n    \"apiKey\": \"k-new\",\n    \"enabled\": true,\n    \"addedAt\": 1764000000000\n  },\n  \"x\": [\n    1,\n    [\n      2,\n      {}\n    ],\n    {\n      \"a\": []\n    }\n  ]\n}"
+        },
+        "core": "parsed"
+      },
+      {
+        "id": "number-forms",
+        "text": "{\"alchemy\": {\"apiKey\": \"ka\", \"enabled\": 1, \"addedAt\": 1.7640000000000E12, \"f\": 0.1, \"big\": 1e21, \"small\": 1e-7, \"neg\": -5e-324}}",
+        "read": {
+          "text": "{\n  \"alchemy\": {\n    \"apiKey\": \"ka\",\n    \"enabled\": 1,\n    \"addedAt\": 1764000000000,\n    \"f\": 0.1,\n    \"big\": 1e+21,\n    \"small\": 1e-7,\n    \"neg\": -5e-324\n  }\n}"
+        },
+        "keys": [
+          {
+            "id": "alchemy",
+            "key": "ka",
+            "well_formed": true,
+            "bytes": 2,
+            "string": true
+          }
+        ],
+        "set": {
+          "at": 1764000000000,
+          "result": {
+            "success": true
+          },
+          "text": "{\n  \"alchemy\": {\n    \"apiKey\": \"k-new\",\n    \"enabled\": true,\n    \"addedAt\": 1764000000000\n  }\n}"
+        },
+        "core": "parsed"
+      },
+      {
+        "id": "invalid-utf8",
+        "hex": "7b22616c6368656d79223a207b226170694b6579223a20226bff61eda080c328f09f98222c2022656e61626c6564223a20747275657d2c202261c3223a207b226170694b6579223a20226b62222c2022656e61626c6564223a20747275657d7d",
+        "read": {
+          "text": "{\n  \"alchemy\": {\n    \"apiKey\": \"k�a����(�\",\n    \"enabled\": true\n  },\n  \"a�\": {\n    \"apiKey\": \"kb\",\n    \"enabled\": true\n  }\n}"
+        },
+        "keys": [
+          {
+            "id": "alchemy",
+            "key": "k�a����(�",
+            "well_formed": true,
+            "bytes": 21,
+            "string": true
+          },
+          {
+            "id": "a�",
+            "key": "kb",
+            "well_formed": true,
+            "bytes": 2,
+            "string": true
+          }
+        ],
+        "set": {
+          "at": 1764000000000,
+          "result": {
+            "success": true
+          },
+          "text": "{\n  \"alchemy\": {\n    \"apiKey\": \"k-new\",\n    \"enabled\": true,\n    \"addedAt\": 1764000000000\n  },\n  \"a�\": {\n    \"apiKey\": \"kb\",\n    \"enabled\": true\n  }\n}"
+        },
+        "core": "parsed"
+      },
+      {
+        "id": "at-the-bound",
+        "fill": {
+          "open": "{\"alchemy\": {\"apiKey\": \"ka\", \"enabled\": true}, \"pad\": \"",
+          "char": "x",
+          "close": "\"}",
+          "bytes": 1048576
+        },
+        "read": {
+          "text_length": 1048594,
+          "text_sha256": "768acf2b8f875f33210fea854808af6c01c03c1b8f95fb4b284a2d4145b769b6"
+        },
+        "keys": [
+          {
+            "id": "alchemy",
+            "key": "ka",
+            "well_formed": true,
+            "bytes": 2,
+            "string": true
+          }
+        ],
+        "set": {
+          "at": 1764000000000,
+          "result": {
+            "success": true
+          },
+          "text_length": 1048627,
+          "text_sha256": "db1924c9963f9fc88b32d134ebe04dcd8b808f492d7c047a7c3d44186da30031"
+        },
+        "core": "parsed"
+      },
+      {
+        "id": "over-the-bound",
+        "fill": {
+          "open": "{\"alchemy\": {\"apiKey\": \"ka\", \"enabled\": true}, \"pad\": \"",
+          "char": "x",
+          "close": "\"}",
+          "bytes": 1048577
+        },
+        "read": {
+          "text_length": 1048595
+        },
+        "keys": [
+          {
+            "id": "alchemy",
+            "key": "ka",
+            "well_formed": true,
+            "bytes": 2,
+            "string": true
+          }
+        ],
+        "set": {
+          "at": 1764000000000,
+          "result": {
+            "success": true
+          },
+          "text_length": 1048628
+        },
+        "core": "unreadable",
+        "reason": "too_large",
+        "row": "rpc-keys-unreadable"
       }
     ]
   }
