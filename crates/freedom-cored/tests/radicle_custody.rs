@@ -230,7 +230,9 @@ fn a_held_gate_refuses_the_write_and_touches_nothing() {
     let mut core = unlocked(&data, &locks);
     legacy_write(&mut core, 3, &home);
     let before = walk_contents(&home);
-    let gate = fc_service::gate::acquire(&home, &locks, "radicle", Duration::ZERO).unwrap();
+    let gate =
+        fc_service::gate::acquire(&home, &locks, "radicle", fc_service::gate::CONTENTION_RETRY)
+            .unwrap();
     let started = Instant::now();
     for (id, params) in [
         (4, sealed("held", &home, None)),
@@ -339,7 +341,9 @@ fn recovery_waits_for_the_homes_gate() {
     writer.close_stdin();
     assert_eq!(writer.exit_code(Duration::from_secs(5)), 0);
     interrupted_switch(&data, &home, "waiting", 0);
-    let gate = fc_service::gate::acquire(&home, &locks, "radicle", Duration::ZERO).unwrap();
+    let gate =
+        fc_service::gate::acquire(&home, &locks, "radicle", fc_service::gate::CONTENTION_RETRY)
+            .unwrap();
 
     let started = Instant::now();
     let mut core = spawn("serve", &data, &locks, &[]);
@@ -529,7 +533,13 @@ fn a_home_replaced_during_its_write_is_written_where_it_was_staged() {
     legacy_write(&mut core, 4, &other);
     core.close_stdin();
     assert_eq!(core.exit_code(Duration::from_secs(5)), 0);
-    let _other_gate = fc_service::gate::acquire(&other, &locks, "radicle", Duration::ZERO).unwrap();
+    let _other_gate = fc_service::gate::acquire(
+        &other,
+        &locks,
+        "radicle",
+        fc_service::gate::CONTENTION_RETRY,
+    )
+    .unwrap();
     let before = walk_contents(&other);
 
     let (claimed, release) = (root.path().join("claimed"), root.path().join("release"));

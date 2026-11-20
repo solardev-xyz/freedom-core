@@ -380,12 +380,18 @@ fn a_stale_lease_with_any_gate_held_refuses_the_delete() {
                     &work.join("ipfs-data").join("freedom-ipfs"),
                     &d.locks,
                     "ipfs",
-                    Duration::ZERO,
+                    fc_service::gate::CONTENTION_RETRY,
                 )
                 .unwrap(),
             ),
             _ => Hold::Gate(
-                fc_service::gate::acquire(&home, &d.locks, "radicle", Duration::ZERO).unwrap(),
+                fc_service::gate::acquire(
+                    &home,
+                    &d.locks,
+                    "radicle",
+                    fc_service::gate::CONTENTION_RETRY,
+                )
+                .unwrap(),
             ),
         };
         let out = delete(&d, "work", "Work", &[]);
@@ -595,7 +601,7 @@ fn in_the_moved_layout_both_layouts_paths_are_gated() {
                     &freedom.join("ipfs-data").join("freedom-ipfs"),
                     &d.locks,
                     "ipfs",
-                    Duration::ZERO,
+                    fc_service::gate::CONTENTION_RETRY,
                 )
                 .unwrap(),
             ),
@@ -620,7 +626,13 @@ fn in_the_moved_layout_both_layouts_paths_are_gated() {
         (
             "ipfs",
             Hold::Gate(
-                fc_service::gate::acquire(&root_ipfs, &d.locks, "ipfs", Duration::ZERO).unwrap(),
+                fc_service::gate::acquire(
+                    &root_ipfs,
+                    &d.locks,
+                    "ipfs",
+                    fc_service::gate::CONTENTION_RETRY,
+                )
+                .unwrap(),
             ),
         )
     });
