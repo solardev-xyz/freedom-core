@@ -2178,6 +2178,16 @@ fn the_vault_and_its_metadata_killed_at_each_step() {
                 "{label}"
             );
             main.core = None;
+            if step == "after-meta-install-vault" {
+                // The vault is installed first: an older build sees the new
+                // vault with the old metadata, as today's flow can leave.
+                assert_ne!(main.read("identity-vault.json"), old.0, "{label}");
+                assert_eq!(
+                    main.read(META),
+                    old.1,
+                    "{label}: the metadata after the vault"
+                );
+            }
             main.start(&[]);
             main.journal_gone(&label);
             assert!(!main.data.join(CORRUPT).exists(), "{label}");
