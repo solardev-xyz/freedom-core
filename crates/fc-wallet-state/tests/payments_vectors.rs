@@ -117,14 +117,27 @@ fn the_binder() {
     );
 }
 
-/// `getRecent`'s `limit` is clamped to 500 (the vectors' table is smaller,
-/// so their pages can't show it).
+/// `getRecent`'s page: 50 rows without a `limit`, and a `limit` clamped to
+/// 500 (freedom-cored's `the_reference_pages` runs the reference's pages on
+/// 501 rows).
 #[test]
-fn the_page_is_at_most_500() {
-    let filters = fc_json::parse(r#"{"limit":1e10,"offset":-3}"#).expect("json");
-    let statement = payments::get_recent(&filters).expect("a statement");
+fn the_page_is_50_and_at_most_500() {
+    let page = |filters: &str| {
+        let filters = fc_json::parse(filters).expect("json");
+        payments::get_recent(&filters).expect("a statement").params
+    };
+    let real = payments::Bind::Real;
+    assert_eq!(page("{}"), [real(50.0), real(0.0)]);
     assert_eq!(
-        statement.params,
-        [payments::Bind::Real(500.0), payments::Bind::Real(0.0)]
+        payments::get_recent(&JsValue::Undefined)
+            .expect("a statement")
+            .params,
+        [real(50.0), real(0.0)]
+    );
+    assert_eq!(page(r#"{"limit":500}"#), [real(500.0), real(0.0)]);
+    assert_eq!(page(r#"{"limit":501}"#), [real(500.0), real(0.0)]);
+    assert_eq!(
+        page(r#"{"limit":1e10,"offset":-3}"#),
+        [real(500.0), real(0.0)]
     );
 }
