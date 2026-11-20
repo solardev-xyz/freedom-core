@@ -1,6 +1,8 @@
-//! The wallet's stores in the core (design 0013, set A). This step, PRF-5a:
+//! The wallet's stores in the core (design 0013, set A): PRF-5a,
 //! `identity/vault-meta.json`, the wallet list and the vault's public
-//! metadata ([`vault_meta`]).
+//! metadata ([`vault_meta`]); PRF-5e, the intent journal ([`intents`]);
+//! PRF-5f, `safe-pending.json`, the pending Safe transactions
+//! ([`safe_pending`], from `wallet/safe/pending-store.js`).
 //!
 //! The reference is freedom-browser's `src/main/identity-manager.js`;
 //! `vectors/stores.json`, produced from it, is the contract (AGENTS rule 5).
@@ -21,6 +23,7 @@ mod address;
 pub mod intents;
 mod js;
 pub mod payments;
+pub mod safe_pending;
 pub mod vault_meta;
 
 pub use address::is_address;

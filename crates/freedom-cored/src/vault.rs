@@ -638,6 +638,10 @@ pub struct Vault {
     /// `store_moved` (design 0013, "RPC API keys"): `None` before, and every
     /// `secrets.*` RPC-key method answers `not_moved`.
     rpc_keys: Option<Arc<crate::rpc_keys::RpcKeys>>,
+    /// `safe-pending.json` (design 0013, "Pending Safe transactions"):
+    /// configured at the hello; its writes `not_moved` until `store_moved`
+    /// names `safe_pending`. Shared, for `accounts.remove`'s clear.
+    safe_pending: Arc<crate::safe_pending::SafePending>,
     /// `vault-meta.json` (design 0013): read until `core.hello` names
     /// `vault_meta` in `store_moved`, written once it does.
     accounts: crate::accounts::Store,
@@ -867,6 +871,7 @@ impl Vault {
             kdf_deadline: crate::testhooks::kdf_deadline(KDF_DEADLINE),
             secrets: None,
             rpc_keys: None,
+            safe_pending: Arc::new(crate::safe_pending::SafePending::new()),
         }
     }
 
@@ -932,6 +937,13 @@ impl Vault {
             }
             None => false,
         }
+    }
+
+    /// The hello's `grant_root`, where `safe-pending.json` is, and whether
+    /// `store_moved` names `safe_pending` (design 0013, "Pending Safe
+    /// transactions").
+    pub fn configure_safe_pending(&mut self, root: PathBuf, moved: bool) {
+        self.safe_pending.configure(root, moved);
     }
 
     /// The hello's `store_moved` named `vault_meta`: the core writes
@@ -1262,6 +1274,7 @@ impl Vault {
             || Approvals::handles(method)
             || crate::phone::Phone::handles(method)
             || crate::approvals::x402::METHODS.contains(&method)
+            || crate::safe_pending::METHODS.contains(&method)
     }
 
     /// Handles a request. Inline methods reply at once; KDF methods are
@@ -1342,6 +1355,12 @@ impl Vault {
                     })
                     .map(Some)
             }
+            // Design 0013, "Pending Safe transactions" (PRF-5f): main's
+            // own, answered at once from the file.
+            _ if crate::safe_pending::METHODS.contains(&method) => self
+                .safe_pending
+                .request(method, raw)
+                .map(|result| json_result(id, &result)),
             _ if Approvals::handles(method) => {
                 let clocks = self.clocks();
                 fc_evm::parse_json(raw.unwrap_or("{}"))
@@ -1939,7 +1958,7 @@ impl Vault {
     fn run_accounts(&mut self, out: &mut Vec<Out>, id: u64, op: crate::accounts::Op) {
         let answer = self
             .accounts
-            .run(op, &self.state, &mut self.approvals)
+            .run(op, &self.state, &mut self.approvals, &self.safe_pending)
             .and_then(|answer| {
                 let raw = serde_json::value::RawValue::from_string(answer.stringify())
                     .map_err(|_| internal())?;
