@@ -52,7 +52,11 @@
 //!   `flush`), each write of that store's permission
 //!   file fails at that step as if the OS had failed it (design 0012, "The
 //!   files": a failed write). Read at each write, so a test turns it on
-//!   and off while the core runs. `vault_meta_journal:<step>` fails a step
+//!   and off while the core runs. `intents` fails `wallet-intents.jsonl`'s
+//!   journal steps: an append's `write` (half the line written), `fsync`,
+//!   `truncate` (its cut back) and `flush`, a compaction's `write`,
+//!   `fsync`, `rename` and `flush`, and the open's `flush`.
+//!   `vault_meta_journal:<step>` fails a step
 //!   after the commit of the vault and metadata journal (design 0013, "The
 //!   vault and its metadata, one write"), in the write and in recovery
 //!   alike: `vault-rename`, `vault-flush`, `meta-rename`, `meta-flush`,
@@ -69,6 +73,16 @@
 //!   journal in the process that reads the line, before it renames
 //!   anything (the journal kept), and none after it: a transient failure,
 //!   which a test arms once the core is serving.
+//! - `FREEDOM_CORED_TEST_INTENT_IDS` names a file: while it holds lines,
+//!   each id the intent store names (an original's, a handoff's; the
+//!   reference's `crypto.randomUUID()`) is its first line, which is
+//!   removed, so a test replays the vectors' ids.
+//! - `FREEDOM_CORED_TEST_INTENT_LIMITS` names a file holding a JSON object
+//!   of the intent store's `LIMITS` in the reference's names
+//!   (`heldPerAccount`, `held`, `hashesPerIntent`, `openHandoffsPerIntent`,
+//!   `tombstones`, `rawBytes`, `journalBytes`, `readBytes`): those replace
+//!   the store's at each load, as the reference's `createIntentStore({
+//!   limits })` does.
 //! - `FREEDOM_CORED_TEST_X402_SIGN_MARKER` names a file `x402.authorize`
 //!   appends a line to (`sign`) each time it is about to sign a payment's
 //!   digest, so a test counts the signatures: none for a cap's charge the
@@ -550,7 +564,8 @@ impl fc_store::Hooks for SecretsWrite<'_> {
 /// The hooks of a store file's write (`fc_store::file::write_file`): the
 /// steps `FREEDOM_CORED_TEST_GRANT_WRITE_FAIL` names for this store
 /// (`dapp`, `swarm`, `radicle`, `x402`, `phone`, `vault_meta`,
-/// `safe_pending`), read at each write.
+/// `safe_pending`), and of `wallet-intents.jsonl`'s journal (`intents`),
+/// read at each write.
 pub struct GrantWrite<'a>(pub &'a str);
 
 impl fc_store::Hooks for GrantWrite<'_> {
@@ -583,6 +598,74 @@ pub fn wall_clock(now_ms: u64) -> u64 {
 #[cfg(not(feature = "testhooks"))]
 pub fn wall_clock(now_ms: u64) -> u64 {
     now_ms
+}
+
+#[cfg(feature = "testhooks")]
+pub fn intent_id() -> Option<String> {
+    let path = std::env::var_os("FREEDOM_CORED_TEST_INTENT_IDS")?;
+    let text = std::fs::read_to_string(&path).ok()?;
+    let mut lines = text.lines().filter(|l| !l.trim().is_empty());
+    let first = lines.next()?.trim().to_owned();
+    let rest: Vec<&str> = lines.collect();
+    std::fs::write(&path, rest.join("\n")).ok()?;
+    Some(first)
+}
+
+#[cfg(not(feature = "testhooks"))]
+pub fn intent_id() -> Option<String> {
+    None
+}
+
+#[cfg(feature = "testhooks")]
+pub fn intent_limits(
+    default: fc_wallet_state::intents::Limits,
+) -> fc_wallet_state::intents::Limits {
+    let Some(text) = std::env::var_os("FREEDOM_CORED_TEST_INTENT_LIMITS")
+        .and_then(|path| std::fs::read_to_string(path).ok())
+    else {
+        return default;
+    };
+    let Ok(over) = fc_json::parse(&text) else {
+        return default;
+    };
+    let n = |key: &str| match over.get(key) {
+        Some(fc_json::JsValue::Number(n)) if *n >= 0.0 => Some(*n as u64),
+        _ => None,
+    };
+    let mut limits = default;
+    let size = |v: u64| usize::try_from(v).unwrap_or(usize::MAX);
+    if let Some(v) = n("heldPerAccount") {
+        limits.held_per_account = size(v);
+    }
+    if let Some(v) = n("held") {
+        limits.held = size(v);
+    }
+    if let Some(v) = n("hashesPerIntent") {
+        limits.hashes_per_intent = size(v);
+    }
+    if let Some(v) = n("openHandoffsPerIntent") {
+        limits.open_handoffs_per_intent = size(v);
+    }
+    if let Some(v) = n("tombstones") {
+        limits.tombstones = size(v);
+    }
+    if let Some(v) = n("rawBytes") {
+        limits.raw_bytes = size(v);
+    }
+    if let Some(v) = n("journalBytes") {
+        limits.journal_bytes = v;
+    }
+    if let Some(v) = n("readBytes") {
+        limits.read_bytes = v;
+    }
+    limits
+}
+
+#[cfg(not(feature = "testhooks"))]
+pub fn intent_limits(
+    default: fc_wallet_state::intents::Limits,
+) -> fc_wallet_state::intents::Limits {
+    default
 }
 
 #[cfg(feature = "testhooks")]

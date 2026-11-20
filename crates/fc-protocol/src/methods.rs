@@ -275,6 +275,25 @@ pub const METHODS: &[Method] = &[
     row("payments.get_by_id", CS, false, NOW),
     row("payments.get_count", CS, false, NOW),
     row("payments.clear", CS, false, NOW),
+    // Design 0013, "The intent journal" (PRF-5e-3): main's send paths
+    // only; no channel reaches the records. Reads from the start; writes
+    // once `intents` is in `store_moved`, `not_moved` before.
+    row("intents.commit", SHELL, false, NOW),
+    row("intents.handoff", SHELL, false, NOW),
+    row("intents.outcome", SHELL, false, NOW),
+    row("intents.settle", SHELL, false, NOW),
+    row("intents.void", SHELL, false, NOW),
+    row("intents.retire", SHELL, false, NOW),
+    row("intents.track", SHELL, false, NOW),
+    row("intents.withdraw_origin", SHELL, false, NOW),
+    row("intents.compact", SHELL, false, NOW),
+    row("intents.get", SHELL, false, NOW),
+    row("intents.by_key", SHELL, false, NOW),
+    row("intents.held", SHELL, false, NOW),
+    row("intents.list", SHELL, false, NOW),
+    row("intents.held_nonces", SHELL, false, NOW),
+    row("intents.usage", SHELL, false, NOW),
+    row("intents.void_refusal", SHELL, false, NOW),
     // Design 0012, "fc-eip1193 and approval.request" (APR-5): a page's
     // EIP-1193 request, run by the core's dispatcher; no other caller
     // reaches it.
@@ -533,6 +552,28 @@ mod tests {
             "safe_pending.clear",
             "safe_pending.list",
         ] {
+            assert_eq!(method(name).unwrap().callers, SHELL, "{name}");
+            for (caller, allowed) in [
+                (CallerKind::Page, false),
+                (CallerKind::Chrome, false),
+                (CallerKind::Shell, true),
+            ] {
+                assert_eq!(
+                    matches!(admit(name, caller, V2), Admission::Allowed(_)),
+                    allowed,
+                    "{name} {caller:?}"
+                );
+            }
+        }
+        // Design 0013, "Callers of the store methods": `intents.*` is
+        // main's alone (its send paths), every write and read.
+        let intents: Vec<&str> = METHODS
+            .iter()
+            .map(|m| m.name)
+            .filter(|name| name.starts_with("intents."))
+            .collect();
+        assert_eq!(intents.len(), 16, "{intents:?}");
+        for name in intents {
             assert_eq!(method(name).unwrap().callers, SHELL, "{name}");
             for (caller, allowed) in [
                 (CallerKind::Page, false),

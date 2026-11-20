@@ -695,6 +695,10 @@ pub struct Vault {
     /// configured at the hello; its writes `not_moved` until `store_moved`
     /// names `safe_pending`. Shared, for `accounts.remove`'s clear.
     safe_pending: Arc<crate::safe_pending::SafePending>,
+    /// `wallet-intents.jsonl` (design 0013, "The intent journal"):
+    /// configured at the hello; its writes `not_moved` until `store_moved`
+    /// names `intents`.
+    intents: crate::intents::IntentStore,
     /// `vault-meta.json` (design 0013): read until `core.hello` names
     /// `vault_meta` in `store_moved`, written once it does.
     accounts: crate::accounts::Store,
@@ -933,6 +937,7 @@ impl Vault {
             secrets: None,
             rpc_keys: None,
             safe_pending: Arc::new(crate::safe_pending::SafePending::new()),
+            intents: crate::intents::IntentStore::new(),
             payments: crate::payments_store::Store::new(),
         }
     }
@@ -1006,6 +1011,13 @@ impl Vault {
     /// transactions").
     pub fn configure_safe_pending(&mut self, root: PathBuf, moved: bool) {
         self.safe_pending.configure(root, moved);
+    }
+
+    /// The hello's `grant_root`, where `wallet-intents.jsonl` is, and
+    /// whether `store_moved` names `intents` (design 0013, "The intent
+    /// journal").
+    pub fn configure_intents(&mut self, root: PathBuf, moved: bool) {
+        self.intents.configure(root, moved);
     }
 
     /// The hello's `store_moved` named `payments`: the core serves the
@@ -1344,6 +1356,7 @@ impl Vault {
             || crate::phone::Phone::handles(method)
             || crate::approvals::x402::METHODS.contains(&method)
             || crate::safe_pending::METHODS.contains(&method)
+            || crate::intents::METHODS.contains(&method)
             || crate::payments_store::METHODS.contains(&method)
     }
 
@@ -1439,6 +1452,14 @@ impl Vault {
                 .safe_pending
                 .request(method, raw)
                 .map(|result| json_result(id, &result)),
+            // Design 0013, "The intent journal" (PRF-5e-3): main's own,
+            // answered at once; a line's time is the wall clock's.
+            _ if crate::intents::METHODS.contains(&method) => {
+                let wall_ms = self.clocks().wall_ms;
+                self.intents
+                    .request(method, raw, wall_ms)
+                    .map(|result| json_result(id, &result))
+            }
             _ if Approvals::handles(method) => {
                 let clocks = self.clocks();
                 fc_evm::parse_json(raw.unwrap_or("{}"))

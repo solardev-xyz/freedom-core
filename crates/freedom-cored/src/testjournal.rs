@@ -5,7 +5,8 @@
 //! Only builds with the `testhooks` feature compile it (build.rs refuses
 //! them outside debug and test builds), and it runs only with
 //! `FREEDOM_CORED_TEST_METHODS` set; otherwise `test-journal` is an unknown
-//! subcommand. No store uses it: the intent methods come with PRF-5e-3.
+//! subcommand. The intent store (`intents.*`, PRF-5e-3) writes the same
+//! journal.
 //!
 //! Each stdin line is one operation, as JSON; each gets one line on stdout,
 //! `{"ok":true,"size":<bytes>,…}` or `{"ok":false,"error":<code>}`:

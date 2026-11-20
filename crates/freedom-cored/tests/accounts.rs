@@ -437,9 +437,9 @@ fn every_vault_meta_vector_through_the_daemon() {
     }
 }
 
-/// The hello echoes `vault_meta` (and `safe_pending`, PRF-5f) once named,
-/// in the hello's order, and no name whose methods this build lacks; an
-/// unknown name is refused, and the core exits.
+/// The hello echoes `vault_meta` (and `safe_pending`, PRF-5f, `payments`,
+/// PRF-5g-2, and `intents`, PRF-5e-3) once named, each once, in the
+/// hello's order; an unknown name is refused, and the core exits.
 #[test]
 fn the_hello_echoes_vault_meta() {
     let root = tempfile::tempdir().unwrap();
@@ -457,7 +457,7 @@ fn the_hello_echoes_vault_meta() {
     );
     assert_eq!(
         hello["result"]["store_moved"],
-        json!(["vault_meta", "payments", "safe_pending"]),
+        json!(["intents", "vault_meta", "payments", "safe_pending"]),
         "{hello}"
     );
     drop(core);
@@ -999,8 +999,7 @@ fn safes_core(root: &Path, stores: &[&'static str], env: &[(&str, &str)]) -> (Co
     std::fs::write(grant_root.join("safe-pending.json"), PENDING).unwrap();
     let (mut core, hello) = start(root, stores, &["dapp"], env);
     assert_eq!(core.grant_root, grant_root);
-    let echo: Vec<&str> = stores.iter().copied().filter(|s| *s != "intents").collect();
-    assert_eq!(hello["result"]["store_moved"], json!(echo), "{hello}");
+    assert_eq!(hello["result"]["store_moved"], json!(stores), "{hello}");
     let mut id = 1;
     import(root, &mut core, &mut id);
     let mut wallets = vec![

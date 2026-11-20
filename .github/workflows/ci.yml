@@ -336,6 +336,35 @@ jobs:
           FREEDOM_BROWSER_STORES_CHECKOUT: ${{ github.workspace }}/stores-reference
           FREEDOM_CORED: ${{ github.workspace }}/target/debug/freedom-cored
         run: node --test vectors/generator/interop.test.js
+      # Design 0013's downgrade runs (PRF-5c-2): the previous core release
+      # starts on what this core's metadata journal left at each point after
+      # its commit, and the stores reference's identity-manager.js reads the
+      # files through it (freedom-cored's tests/quick_unlock.rs, with
+      # vectors/generator/downgrade-actor.js). The release's SHA256SUMS is
+      # pinned by its digest, and the binary is checked against it.
+      - name: Download the previous core release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: cored-v0.22.0
+          ASSET: freedom-cored-v0.22.0-linux-amd64.tar.gz
+          SUMS_SHA256: 82cb1566adf8b681e7f4009e9a0ebbaf0ff1202f714ca6e99e71f0ece4a807ef
+        run: |
+          dir="$RUNNER_TEMP/previous-core"
+          mkdir -p "$dir"
+          cd "$dir"
+          gh release download "$TAG" --repo solardev-xyz/freedom-core --pattern SHA256SUMS --pattern "$ASSET"
+          echo "$SUMS_SHA256  SHA256SUMS" | sha256sum --check --strict -
+          awk -v asset="$ASSET" '$2 == asset' SHA256SUMS > asset.sha256
+          test "$(wc -l < asset.sha256)" -eq 1
+          sha256sum --check --strict asset.sha256
+          tar -xzf "$ASSET" freedom-cored
+          echo "FREEDOM_CORED_PREVIOUS=$dir/freedom-cored" >> "$GITHUB_ENV"
+      - name: The metadata journal's downgrade runs
+        env:
+          FREEDOM_BROWSER_STORES_CHECKOUT: ${{ github.workspace }}/stores-reference
+        run: >-
+          cargo test --locked -p freedom-cored --features testhooks --test quick_unlock --
+          --exact the_downgrade_after_the_commit a_target_the_older_build_changed_sets_the_record_aside
 
   fuzz:
     # cargo-fuzz targets for the parsers that take untrusted bytes (design
