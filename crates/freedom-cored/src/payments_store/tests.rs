@@ -3,6 +3,7 @@
 //! each of the reference's operations are `payments::tests`'.
 
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use fc_json::JsValue;
 use fc_protocol::error::{ErrorBody, ErrorCode};
@@ -322,6 +323,26 @@ fn the_wire() {
         let answer = call(&mut store, method, params).unwrap();
         assert_eq!(answer.get("payment"), Some(&JsValue::Null), "{method}");
     }
+    // An update of the row: its patch's fields written, the rest kept.
+    let updated = call(
+        &mut store,
+        "payments.update",
+        r#"{"id":1,"patch":{"txHash":"0xbb","gasPrice":"7"}}"#,
+    )
+    .unwrap();
+    let updated = updated.get("payment").unwrap();
+    for (field, value) in [
+        ("txHash", "0xbb"),
+        ("gasPrice", "7"),
+        ("gasUsed", "21000"),
+        ("status", "confirmed"),
+    ] {
+        assert_eq!(
+            updated.get(field).and_then(JsValue::as_str),
+            Some(value),
+            "{field}"
+        );
+    }
     let count = call(
         &mut store,
         "payments.get_count",
@@ -365,11 +386,14 @@ fn not_named_opens_nothing() {
 }
 
 /// Another connection holding the write lock: a write answers `storage`
-/// (`busy`) after the busy timeout, with nothing written, while reads still
+/// (`busy`) after the busy timeout, 500 ms (deviation
+/// `sqlite-busy-timeout`, pinned apart from the constant: waited, and well
+/// short of better-sqlite3's 5 s), with nothing written, while reads still
 /// serve; once released, the write goes through. A write SQLite refuses
 /// answers `storage` (`io`), with nothing written.
 #[test]
 fn busy_and_failed_writes() {
+    assert_eq!(sqlite::BUSY_TIMEOUT, Duration::from_millis(500));
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path();
     let mut store = named(root);
@@ -380,7 +404,9 @@ fn busy_and_failed_writes() {
     let started = std::time::Instant::now();
     let busy = call(&mut store, "payments.append", append).unwrap_err();
     assert_eq!(storage_kind(&busy), "busy");
-    assert!(started.elapsed() >= sqlite::BUSY_TIMEOUT);
+    let waited = started.elapsed();
+    assert!(waited >= Duration::from_millis(500), "{waited:?}");
+    assert!(waited < Duration::from_secs(2), "{waited:?}");
     let busy = call(&mut store, "payments.clear", "{}").unwrap_err();
     assert_eq!(storage_kind(&busy), "busy");
     let count = call(&mut store, "payments.get_count", "{}").unwrap();
@@ -421,4 +447,212 @@ fn a_failed_open_is_tried_again() {
     let recent = call(&mut store, "payments.get_recent", "{}").unwrap();
     assert_eq!(recent.get("payments"), Some(&JsValue::Array(Vec::new())));
     assert_eq!(files(root), [MIGRATED_FILE]);
+}
+
+/// Every name under `root`, the database's own files among them.
+fn all_files(root: &Path) -> Vec<String> {
+    let mut names: Vec<String> = std::fs::read_dir(root)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    names.sort();
+    names
+}
+
+const RECEIPTS: &str =
+    r#"[{"id":"r1","settledAt":1699000000,"status":"settled","chainId":8453,"amount":"500"}]"#;
+
+/// A request the reference function refuses before its first `getDb()`, as
+/// the first request: no database created, `x402-receipts.json` in place
+/// and not renamed, nothing opened. The next request opens and imports. A
+/// value only the binder refuses comes after the open (and the import), as
+/// in the reference, which prepares its statement before it binds.
+#[test]
+fn a_refusal_before_the_first_open_opens_nothing() {
+    let fresh = || {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join(LEGACY_FILE), RECEIPTS).unwrap();
+        let store = named(dir.path());
+        (dir, store)
+    };
+    let imported = |store: &mut Store, root: &Path, context: &str| {
+        let count = call(store, "payments.get_count", "{}").unwrap();
+        assert_eq!(count.get("count"), Some(&JsValue::Number(1.0)), "{context}");
+        assert_eq!(files(root), [MIGRATED_FILE], "{context}");
+    };
+    for (method, params, name) in [
+        ("payments.append", "{}", "Error"),
+        ("payments.append", r#"{"entry":null}"#, "TypeError"),
+        ("payments.append", r#"{"entry":{"kind":"nope"}}"#, "Error"),
+        (
+            "payments.append",
+            r#"{"entry":{"kind":"x402","chainId":"1","amount":"1"}}"#,
+            "Error",
+        ),
+        (
+            "payments.append",
+            r#"{"entry":{"kind":"x402","chainId":1,"amount":"0x1"}}"#,
+            "Error",
+        ),
+        ("payments.update", r#"{"id":1,"patch":null}"#, "TypeError"),
+        (
+            "payments.mark_confirmed",
+            r#"{"id":1,"receipt":null}"#,
+            "TypeError",
+        ),
+        (
+            "payments.mark_failed",
+            r#"{"id":1,"info":null}"#,
+            "TypeError",
+        ),
+        ("payments.get_recent", r#"{"filters":null}"#, "TypeError"),
+        ("payments.get_count", r#"{"filters":null}"#, "TypeError"),
+    ] {
+        let context = format!("{method} {params}");
+        let (dir, mut store) = fresh();
+        let root = dir.path();
+        let refused = call(&mut store, method, params).unwrap_err();
+        assert_eq!(refused.code, ErrorCode::InvalidArgument, "{context}");
+        assert_eq!(
+            refused.data,
+            Some(serde_json::json!({ "name": name })),
+            "{context}"
+        );
+        assert!(store.open.is_none(), "{context}");
+        assert_eq!(all_files(root), [LEGACY_FILE], "{context}");
+        imported(&mut store, root, &context);
+    }
+    for (method, params) in [
+        (
+            "payments.append",
+            r#"{"entry":{"kind":"x402","chainId":1,"amount":"1","txHash":true}}"#,
+        ),
+        ("payments.update", r#"{"id":true,"patch":{}}"#),
+        (
+            "payments.mark_confirmed",
+            r#"{"id":1,"receipt":{"gasUsed":true}}"#,
+        ),
+        ("payments.mark_dropped", r#"{"id":true}"#),
+        ("payments.get_by_id", r#"{"id":true}"#),
+        ("payments.get_count", r#"{"filters":{"kind":true}}"#),
+    ] {
+        let context = format!("{method} {params}");
+        let (dir, mut store) = fresh();
+        let root = dir.path();
+        let refused = call(&mut store, method, params).unwrap_err();
+        assert_eq!(refused.code, ErrorCode::InvalidArgument, "{context}");
+        assert_eq!(
+            refused.message, "SQLite3 can only bind numbers, strings, bigints, buffers, and null",
+            "{context}"
+        );
+        assert!(store.open.is_some(), "{context}");
+        assert_eq!(files(root), [MIGRATED_FILE], "{context}");
+        imported(&mut store, root, &context);
+    }
+}
+
+/// The import's two existence checks as `fs.existsSync` makes them, a link
+/// followed: a dangling `.migrated` isn't one, so the file is imported, the
+/// rename replacing the link; a `.migrated` linked to a file is one, so the
+/// file is a stray; a dangling `x402-receipts.json` isn't there, beside a
+/// `.migrated` or not, and is left.
+#[cfg(unix)]
+#[test]
+fn the_import_finds_its_files_as_exists_sync_does() {
+    use std::os::unix::fs::symlink;
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    std::fs::write(root.join(LEGACY_FILE), RECEIPTS).unwrap();
+    symlink("gone", root.join(MIGRATED_FILE)).unwrap();
+    let mut payments = open(root);
+    assert_eq!(
+        Store::import(root, &mut payments, || 1.0),
+        Legacy::Imported(1, true)
+    );
+    assert_eq!(files(root), [MIGRATED_FILE]);
+    assert!(!root.join(MIGRATED_FILE).is_symlink());
+    assert_eq!(
+        std::fs::read_to_string(root.join(MIGRATED_FILE)).unwrap(),
+        RECEIPTS
+    );
+
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    std::fs::write(root.join(LEGACY_FILE), RECEIPTS).unwrap();
+    std::fs::write(root.join("marker"), "").unwrap();
+    symlink("marker", root.join(MIGRATED_FILE)).unwrap();
+    let mut payments = open(root);
+    assert_eq!(
+        Store::import(root, &mut payments, || 1.0),
+        Legacy::Stray(true)
+    );
+    assert_eq!(files(root), ["marker", MIGRATED_FILE]);
+    assert_eq!(table_at(root), JsValue::Array(Vec::new()));
+
+    std::fs::remove_file(root.join(MIGRATED_FILE)).unwrap();
+    symlink("gone", root.join(LEGACY_FILE)).unwrap();
+    assert_eq!(Store::import(root, &mut payments, || 1.0), Legacy::Absent);
+    std::fs::write(root.join(MIGRATED_FILE), "").unwrap();
+    assert_eq!(Store::import(root, &mut payments, || 1.0), Legacy::Absent);
+    assert!(root.join(LEGACY_FILE).is_symlink());
+    assert_eq!(files(root), ["marker", LEGACY_FILE, MIGRATED_FILE]);
+}
+
+/// A pending row the reference wrote with a BLOB cell (its caller handed it
+/// a `Buffer`; `sqlite.json`'s `blob`), read through `payments.pending`:
+/// listed, the cell answered as `null` (0013's `payments-json-values`).
+#[test]
+fn a_reference_blob_answers_null_in_pending() {
+    let vectors = vectors();
+    let blob = vectors.get("blob").unwrap();
+    let setup = blob.get("setup").and_then(JsValue::as_array).unwrap();
+    let rows = setup.last().unwrap().get("rows").unwrap();
+    let step = blob
+        .get("steps")
+        .and_then(JsValue::as_array)
+        .unwrap()
+        .iter()
+        .find(|step| step.get("op").and_then(JsValue::as_str) == Some("pending"))
+        .unwrap();
+    let expected = crate::payments::tests::nulled(step.get("result").unwrap().get("ok").unwrap());
+    assert!(expected.stringify().contains(r#""tx_hash":null"#));
+    let dir = tempfile::tempdir().unwrap();
+    let mut store = named(dir.path());
+    call(&mut store, "payments.get_count", "{}").unwrap();
+    crate::payments::tests::insert_cells(store.open.as_ref().unwrap(), rows);
+    let pending = call(&mut store, "payments.pending", "{}").unwrap();
+    assert_eq!(pending.get("payments"), Some(&expected));
+}
+
+/// A damaged database answers `storage` (`unreadable`), not `io`: a file
+/// that isn't a database (SQLite's `NotADatabase`, at the open), and one
+/// whose pages past the first are damaged (`DatabaseCorrupt`, at the first
+/// read).
+#[test]
+fn a_damaged_database_is_unreadable() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    std::fs::write(root.join(DB_FILE), vec![0x5a; 8192]).unwrap();
+    let mut store = named(root);
+    let refused = call(&mut store, "payments.get_count", "{}").unwrap_err();
+    assert_eq!(storage_kind(&refused), "unreadable");
+    std::fs::remove_file(root.join(DB_FILE)).unwrap();
+    call(
+        &mut store,
+        "payments.append",
+        r#"{"entry":{"kind":"x402","chainId":1,"amount":"1","createdAt":5}}"#,
+    )
+    .unwrap();
+    // Closed, so its pages are in the file.
+    drop(store);
+    for suffix in ["-wal", "-shm"] {
+        let _ = std::fs::remove_file(root.join(format!("{DB_FILE}{suffix}")));
+    }
+    let mut bytes = std::fs::read(root.join(DB_FILE)).unwrap();
+    assert!(bytes.len() > 4096);
+    bytes[4096..].fill(0xff);
+    std::fs::write(root.join(DB_FILE), bytes).unwrap();
+    let mut store = named(root);
+    let refused = call(&mut store, "payments.get_count", "{}").unwrap_err();
+    assert_eq!(storage_kind(&refused), "unreadable");
 }

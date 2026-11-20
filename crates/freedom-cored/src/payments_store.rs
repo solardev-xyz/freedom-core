@@ -5,7 +5,9 @@
 //! `store_moved`, and opens `payment-history.sqlite` only after that, at
 //! the first request (0013, "One writer per store"), as the reference's
 //! `getDb` opens it at its first use. That first open runs the one-shot
-//! import of `x402-receipts.json` ([`Store::import`]).
+//! import of `x402-receipts.json` ([`Store::import`]). A request the
+//! reference function refuses before its first `getDb` comes before it
+//! ([`Store::checked`]), so it opens nothing and imports nothing.
 
 use std::path::{Path, PathBuf};
 
@@ -13,7 +15,7 @@ use fc_json::JsValue;
 use fc_protocol::error::{ErrorBody, ErrorCode};
 use fc_store::file::{Read, read_file};
 use fc_store::fsx;
-use fc_wallet_state::payments::COLUMNS;
+use fc_wallet_state::payments::{self as codec, COLUMNS};
 use serde_json::value::RawValue;
 
 use crate::payments::{Error, Payments, SCHEMA};
@@ -118,6 +120,7 @@ impl Store {
             reason = "Date.now(), a JS number of milliseconds"
         )]
         let now = now_ms as f64;
+        Store::checked(method, arg)?;
         let payments = Store::opened(root, &mut self.open, || now)?;
         let answer = |key: &str, value: &JsValue| format!("{{\"{key}\":{}}}", value.stringify());
         let text = match method {
@@ -167,6 +170,32 @@ impl Store {
         RawValue::from_string(text).map_err(|_| crate::vault::internal())
     }
 
+    /// The checks `method`'s reference function makes before its first
+    /// `getDb()`, in its order: `append`'s three (`insertRow` opens the
+    /// database after them), and reading a `null` patch, receipt, info or
+    /// filters (`update`, `markConfirmed`, `markFailed`, `sanitizeFilters`).
+    /// A refusal here comes before the database's first open, so it creates
+    /// nothing and imports nothing. The binder's refusals (a value SQLite
+    /// can't bind) come after the open, as the reference prepares its
+    /// statement, opening the database, before it binds.
+    fn checked<'a>(method: &str, arg: impl Fn(&str) -> &'a JsValue) -> Result<(), Error> {
+        match method {
+            "payments.append" => codec::append_checks(arg("entry"))?,
+            "payments.update" => codec::update_checks(arg("patch"))?,
+            "payments.mark_confirmed" => {
+                codec::confirmed_patch(arg("receipt"))?;
+            }
+            "payments.mark_failed" => {
+                codec::failed_patch(arg("info"))?;
+            }
+            "payments.get_recent" | "payments.get_count" => {
+                codec::filters_checks(arg("filters"))?;
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
     /// The database, opened at the first request after the name, with
     /// `x402-receipts.json` imported then; `clock` answers `Date.now()` for
     /// each entry the import reads it for. A failed open is tried again at
@@ -189,17 +218,19 @@ impl Store {
 
     /// `migrateFromJson`, at the database's first open in this core:
     /// `root`'s `x402-receipts.json` dropped if a `.migrated` is there
-    /// already, otherwise read (at most [`MAX_LEGACY_BYTES`]), its rows
+    /// already (each as `fs.existsSync` finds it: a link followed, so a
+    /// dangling one isn't there, and any error reads as absent), otherwise
+    /// read (at most [`MAX_LEGACY_BYTES`]), its rows
     /// imported in one transaction, and the file renamed `.migrated` once
     /// they are committed. A failure leaves the file and is logged, as the
     /// reference logs it; the database serves either way.
     pub fn import(root: &Path, payments: &mut Payments, clock: impl FnMut() -> f64) -> Legacy {
         let file = root.join(LEGACY_FILE);
         let migrated = root.join(MIGRATED_FILE);
-        if std::fs::symlink_metadata(&file).is_err() {
+        if std::fs::metadata(&file).is_err() {
             return Legacy::Absent;
         }
-        if std::fs::symlink_metadata(&migrated).is_ok() {
+        if std::fs::metadata(&migrated).is_ok() {
             let removed = matches!(fsx::remove(&file, || true), Ok(Some(_)));
             if removed {
                 crate::log::info(
