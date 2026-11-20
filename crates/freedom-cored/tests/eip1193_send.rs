@@ -19,6 +19,7 @@
 mod common;
 
 use std::path::PathBuf;
+use std::time::{Duration, Instant};
 
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD;
@@ -30,6 +31,7 @@ const ABANDON: &str =
     "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about";
 const NOW: u64 = 1_763_000_000_000;
 const GWEI: u64 = 1_000_000_000;
+const DEADLINE: &str = r#"{"error":{"code":-32603,"message":"The request's deadline passed"}}"#;
 
 #[path = "../../fc-eip1193/tests/sends.rs"]
 #[allow(dead_code)]
@@ -52,14 +54,25 @@ fn core(grants: &Value) -> (tempfile::TempDir, Core, PathBuf) {
 /// evidence that isn't one endpoint's word, which a rule needs) and the
 /// vault locked if `locked`.
 fn core_for(grants: &Value, endpoints: usize, locked: bool) -> (tempfile::TempDir, Core, PathBuf) {
+    core_env(grants, endpoints, locked, &[])
+}
+
+/// [`core_for`], with the test hooks `hooks` set too.
+fn core_env(
+    grants: &Value,
+    endpoints: usize,
+    locked: bool,
+    hooks: &[(&str, &str)],
+) -> (tempfile::TempDir, Core, PathBuf) {
     let (root, data, locks) = dirs();
     let (wall, clock) = (root.path().join("wall"), root.path().join("approval"));
     std::fs::write(&wall, NOW.to_string()).unwrap();
     std::fs::write(&clock, "1000000").unwrap();
-    let env = [
+    let mut env = vec![
         ("FREEDOM_CORED_TEST_WALL_CLOCK", wall.to_str().unwrap()),
         ("FREEDOM_CORED_TEST_APPROVAL_CLOCK", clock.to_str().unwrap()),
     ];
+    env.extend_from_slice(hooks);
     let mut core = spawn_env("serve", &data, &locks, &[], &env);
     std::fs::create_dir_all(&core.grant_root).unwrap();
     if !grants.is_null() {
@@ -701,6 +714,100 @@ fn stale_evidence_is_asked_for_again_at_approval() {
         response["result"]["send"]["token"].is_string(),
         "{response}"
     );
+}
+
+/// Plays main and the node until request `id`'s response, the node never
+/// answering a request for one of the `held` methods: a held request's
+/// cancel is expected, a prompt isn't.
+fn holding(core: &mut Core, id: u64, node: &mut Node, held: &[&str]) -> Value {
+    let mut kept = Vec::new();
+    loop {
+        let message = core.recv();
+        match (message["type"].as_str(), message["method"].as_str()) {
+            (Some("event"), _) => {}
+            (Some("request"), Some("shell.rpc")) => {
+                let body: Value =
+                    serde_json::from_str(message["params"]["body"].as_str().unwrap()).unwrap();
+                if held.contains(&body["method"].as_str().unwrap()) {
+                    kept.push(message["id"].clone());
+                } else {
+                    let answer = node.answer(&message);
+                    respond(core, &message, answer);
+                }
+            }
+            (Some("cancel"), _) => assert!(kept.contains(&message["id"]), "{message}"),
+            (Some("response"), _) if message["id"] == id => {
+                assert!(!kept.is_empty(), "nothing held");
+                return message;
+            }
+            _ => panic!("unexpected {message}"),
+        }
+    }
+}
+
+/// The hooks for a request with 60 s whose estimate and quote, which have
+/// all its time, time out 57 s early.
+const EARLY: [(&str, &str); 2] = [
+    ("FREEDOM_CORED_TEST_EIP1193_OVERALL_MS", "60000"),
+    ("FREEDOM_CORED_TEST_EIP1193_READ_EARLY_MS", "57000"),
+];
+
+/// A send's estimate has all the request's time left, so its timeout is
+/// the request's deadline: one that times out while the event loop's clock
+/// still shows time left (the chain thread's clock and the event loop's
+/// each count milliseconds from their own start, so either can read the
+/// deadline first) answers the deadline. It opens no prompt with no fee,
+/// which would stop the request's clock. The hook makes the estimate's
+/// timeout come first every time.
+#[test]
+fn an_estimate_timing_out_first_is_the_deadline() {
+    let (_root, mut core, _clock) = core_env(&connected(), 1, false, &EARLY);
+    let mut node = Node::new(estimate());
+    request(&mut core, 100, Some(SITE), &send_body());
+    let started = Instant::now();
+    let reply = holding(&mut core, 100, &mut node, &["eth_estimateGas"]);
+    assert_eq!(reply["result"].to_string(), DEADLINE);
+    // The estimate's timeout answered it, long before the request's own.
+    assert!(started.elapsed() < Duration::from_secs(30));
+}
+
+/// The same for the fee quote, while the fee evidence, with its own 15 s,
+/// still waits.
+#[test]
+fn a_quote_timing_out_first_is_the_deadline() {
+    let (_root, mut core, _clock) = core_env(&connected(), 1, false, &EARLY);
+    let mut node = Node::new(estimate());
+    request(&mut core, 100, Some(SITE), &send_body());
+    let started = Instant::now();
+    let held = ["eth_gasPrice", "eth_maxPriorityFeePerGas"];
+    let reply = holding(&mut core, 100, &mut node, &held);
+    assert_eq!(reply["result"].to_string(), DEADLINE);
+    assert!(started.elapsed() < Duration::from_secs(14));
+    assert!(node.seen.contains(&"eth_estimateGas".to_owned()));
+}
+
+/// Fee evidence with all the request's time left (under its own 15 s), at
+/// an approve: its timeout first is the request's deadline too, with no
+/// second prompt and no token.
+#[test]
+fn evidence_timing_out_first_at_approval_is_the_deadline() {
+    let hooks = [
+        ("FREEDOM_CORED_TEST_EIP1193_OVERALL_MS", "10000"),
+        ("FREEDOM_CORED_TEST_EIP1193_READ_EARLY_MS", "7000"),
+    ];
+    let (_root, mut core, clock) = core_env(&connected(), 1, false, &hooks);
+    let mut node = Node::new(estimate());
+    request(&mut core, 100, Some(SITE), &send_body());
+    let Next::Prompt(asked) = next(&mut core, 100, &mut node) else {
+        panic!("no prompt")
+    };
+    std::fs::write(&clock, (1_000_000 + 60_001).to_string()).unwrap();
+    let answer = json!({ "prompt": asked["params"]["prompt"], "handle": "22".repeat(32),
+        "approve": true, "choices": {}, "world": world() });
+    respond(&mut core, &asked, json!({ "result": answer }));
+    let held = ["eth_gasPrice", "eth_maxPriorityFeePerGas"];
+    let reply = holding(&mut core, 100, &mut node, &held);
+    assert_eq!(reply["result"].to_string(), DEADLINE);
 }
 
 /// The reference's transaction rules in Q9's form (`rule-legacy`): the

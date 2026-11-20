@@ -118,6 +118,11 @@
 //!   request's own clock still shows time left, as the naming thread's
 //!   clock and the event loop's, each counting milliseconds from its own
 //!   start, can order them by a millisecond.
+//! - `FREEDOM_CORED_TEST_EIP1193_READ_EARLY_MS` does the same for a page
+//!   send's chain reads that have all the request's time left (APR-5e-1:
+//!   its estimate and its quote, and fee evidence when less than its own
+//!   15 s is left), as the chain thread's clock can read the request's
+//!   deadline first.
 //! - `FREEDOM_CORED_TEST_METHODS` enables the `test.*` methods
 //!   (`testmethods`), which make responses of any size. Builds without the
 //!   feature don't compile them, nor this hook.
@@ -252,6 +257,14 @@ pub fn eip1193_overall(overall: u64) -> u64 {
 #[cfg(feature = "testhooks")]
 pub fn eip1193_check_ms(left: u64) -> u64 {
     millis("FREEDOM_CORED_TEST_EIP1193_CHECK_EARLY_MS")
+        .map_or(left, |early| left.saturating_sub(early).max(1))
+}
+
+/// A page send's chain read's deadline, all the request's time `left`:
+/// less the hook's milliseconds (never under one).
+#[cfg(feature = "testhooks")]
+pub fn eip1193_read_ms(left: u64) -> u64 {
+    millis("FREEDOM_CORED_TEST_EIP1193_READ_EARLY_MS")
         .map_or(left, |early| left.saturating_sub(early).max(1))
 }
 
@@ -760,6 +773,11 @@ pub fn eip1193_overall(overall: u64) -> u64 {
 
 #[cfg(not(feature = "testhooks"))]
 pub fn eip1193_check_ms(left: u64) -> u64 {
+    left
+}
+
+#[cfg(not(feature = "testhooks"))]
+pub fn eip1193_read_ms(left: u64) -> u64 {
     left
 }
 

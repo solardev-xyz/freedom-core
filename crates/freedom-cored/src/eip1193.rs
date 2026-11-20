@@ -176,8 +176,10 @@ pub struct Connects {
     prompting: usize,
     /// The documents whose name binding has ended (APR-5f).
     ended: Ended,
-    /// A send's chain reads, by tag: its page request, and which read.
-    reads: BTreeMap<u64, (u64, Part)>,
+    /// A send's chain reads, by tag: its page request, which read, and
+    /// whether its deadline is all the request's time left, so that its
+    /// timeout is the request's deadline.
+    reads: BTreeMap<u64, (u64, Part, bool)>,
     /// The next chain read's tag, below [`SEND_TAG`].
     next_tag: u64,
 }
@@ -913,11 +915,9 @@ impl Connects {
         else {
             return Vec::new();
         };
-        let budget = &held.budget;
         let prepare = quoting.send.prepare();
         let (chain_id, params) = (prepare.chain_id(), prepare.estimate_params());
-        let left = budget.left(now);
-        let evidence = budget.step(now, EVIDENCE_DEADLINE_MS);
+        let left = held.budget.left(now);
         // A phone's fee isn't checked, so it needs no evidence.
         let stale = prepare.checks_fee() && !vault.eip1193_fee_fresh(chain_id);
         quoting.reference = stale;
@@ -940,12 +940,16 @@ impl Connects {
             ),
         ];
         if stale {
-            outs.push(self.evidence_read(id, chain_id, evidence, vault));
+            outs.push(self.evidence_read(id, chain_id, left, vault));
         }
         outs
     }
 
-    /// One of a send's chain reads, for the chain thread.
+    /// One of a send's chain reads, for the chain thread, with `left` of
+    /// its request's time. The estimate and the quote have all of it, and
+    /// fee evidence its own deadline within it. A read with all of it times
+    /// out at the request's deadline, which the chain thread's clock tells
+    /// ([`Connects::chain_read_done`]).
     fn chain_read(
         &mut self,
         id: u64,
@@ -953,11 +957,21 @@ impl Connects {
         chain_id: u64,
         method: &'static str,
         params: String,
-        deadline_ms: u64,
+        left: u64,
     ) -> Out {
         let tag = SEND_TAG | self.next_tag;
         self.next_tag = (self.next_tag + 1) & !SEND_TAG;
-        self.reads.insert(tag, (id, part));
+        let deadline_ms = match part {
+            Part::Reference => EVIDENCE_DEADLINE_MS.min(left),
+            Part::Estimate | Part::Quote => left,
+        };
+        let whole = deadline_ms == left;
+        self.reads.insert(tag, (id, part, whole));
+        let deadline_ms = if whole {
+            crate::testhooks::eip1193_read_ms(left)
+        } else {
+            deadline_ms
+        };
         Out::ChainRead(crate::phone::ChainRead {
             tag,
             chain_id,
@@ -967,22 +981,17 @@ impl Connects {
         })
     }
 
-    /// New fee evidence for `chain_id`: its reply becomes the approvals'
-    /// evidence, as a `chain.fee_reference` main asked for does.
-    fn evidence_read(
-        &mut self,
-        id: u64,
-        chain_id: u64,
-        deadline_ms: u64,
-        vault: &mut Vault,
-    ) -> Out {
+    /// New fee evidence for `chain_id`, with `left` of the request's time:
+    /// its reply becomes the approvals' evidence, as a `chain.fee_reference`
+    /// main asked for does.
+    fn evidence_read(&mut self, id: u64, chain_id: u64, left: u64, vault: &mut Vault) -> Out {
         let read = self.chain_read(
             id,
             Part::Reference,
             chain_id,
             crate::chain::INTERNAL_FEE_REFERENCE,
             String::new(),
-            deadline_ms,
+            left,
         );
         if let Out::ChainRead(read) = &read {
             vault.fee_asked(read.tag, Some(&format!(r#"{{"chain_id":{chain_id}}}"#)));
@@ -991,10 +1000,23 @@ impl Connects {
     }
 
     /// The chain thread answered one of a send's reads (`payload`, its
-    /// whole response). Fee evidence is the approvals' whatever became of
-    /// its request.
-    pub fn chain_read_done(&mut self, tag: u64, payload: &[u8], vault: &mut Vault) -> Vec<Out> {
-        let Some((id, part)) = self.reads.remove(&tag) else {
+    /// whole response; `past_due`, whether it failed at or after its
+    /// deadline by the chain thread's clock). Fee evidence is the
+    /// approvals' whatever became of its request.
+    ///
+    /// A read with all the request's time left that failed past due is the
+    /// request's deadline, whatever this clock shows: the request answers
+    /// the deadline, with no prompt. This clock counts milliseconds from
+    /// another instant than the chain thread's, so it can still show a
+    /// millisecond left when the read's deadline has passed.
+    pub fn chain_read_done(
+        &mut self,
+        tag: u64,
+        payload: &[u8],
+        past_due: bool,
+        vault: &mut Vault,
+    ) -> Vec<Out> {
+        let Some((id, part, whole)) = self.reads.remove(&tag) else {
             return Vec::new();
         };
         if part == Part::Reference {
@@ -1003,6 +1025,16 @@ impl Connects {
         let Some(open) = self.open.get_mut(&id) else {
             return Vec::new();
         };
+        let waits = matches!(
+            (&open.step, part),
+            (Pending::Quote(_), _) | (Pending::Judge(_), Part::Reference)
+        );
+        if waits && whole && past_due {
+            self.open.remove(&id);
+            let mut outs = vec![raw_reply(id, DEADLINE)];
+            outs.extend(self.pump());
+            return outs;
+        }
         match (&mut open.step, part) {
             (Pending::Quote(quoting), _) => {
                 match part {
@@ -1483,8 +1515,7 @@ impl Connects {
                         Ok(send::Decided::Judge(judge)) => {
                             let chain_id = judge.chain_id();
                             let checks = judge.checks_fee();
-                            let now = self.now_ms();
-                            let evidence = held.budget.step(now, EVIDENCE_DEADLINE_MS);
+                            let left = held.budget.left(self.now_ms());
                             self.open.insert(
                                 id,
                                 Open {
@@ -1496,7 +1527,7 @@ impl Connects {
                             if !checks || vault.eip1193_fee_fresh(chain_id) {
                                 self.judge_for(id, vault)
                             } else {
-                                vec![self.evidence_read(id, chain_id, evidence, vault)]
+                                vec![self.evidence_read(id, chain_id, left, vault)]
                             }
                         }
                         Err(Crossed) => vec![error(id, crossed())],
