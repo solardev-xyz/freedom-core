@@ -610,9 +610,12 @@ impl RunningKind {
     /// The job's answer when recovery first fails
     /// ([`recover_first`]): `storage`, for every job that reads the vault or
     /// the secrets file. `None`: the job runs anyway. Reconcile decides from
-    /// the journaled vault while a journal remains (design 0013,
-    /// "`vault.reconcile`"); a node write, an op status and an RPC-key job
-    /// touch neither file.
+    /// the journaled vault while a metadata journal alone remains (design
+    /// 0013, "`vault.reconcile`"); a node write and an op status touch
+    /// neither file. An RPC-key job reads `rpc-api-keys.json`, or, backed by
+    /// the key store, the secrets file through `Secrets`, which takes the
+    /// secrets lock and settles the journals itself (`Secrets::load`): it
+    /// never reads either file outside that lock.
     fn unrecovered(&self) -> Option<fn(OpError) -> JobOutput> {
         let answer: fn(OpError) -> JobOutput = match self {
             RunningKind::Unlock
@@ -3848,7 +3851,8 @@ fn job_reconcile(
     }
     // Recovery ran first, in the job's wrapper. While a metadata journal
     // remains, the read refuses and the decision is the journaled vault's:
-    // installed, or still staged (design 0013, "`vault.reconcile`").
+    // installed, or still staged (design 0013, "`vault.reconcile`"). Not
+    // while a delete journal remains too: that answers the read's `storage`.
     let (contents, pending) = match read_vault(dir) {
         Ok(contents) => (contents, false),
         Err(error) => match crate::vault_meta_journal::journaled_vault(dir) {
