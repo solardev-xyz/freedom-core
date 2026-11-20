@@ -1153,3 +1153,61 @@ fn a_safe_removal_combines_the_clears_durability() {
     assert_eq!(read_pending(&grant_root), json!({ "1": { "nonce": 1 } }));
     assert!(!dapp_sites(&grant_root).contains(&site_of(1_000_001)));
 }
+
+/// A Safe at an index no key of `safe-pending.json` can name (negative or
+/// past 2^53 − 1; `vault-meta.json` holds only integer indices) has no
+/// entry to clear: its removal goes without writing the file. The entry a
+/// cast of `-1` would land on, `0`, stays, and a failing write refuses
+/// nothing, since none is attempted.
+#[test]
+fn a_safe_index_no_pending_key_names_clears_nothing() {
+    let root = tempfile::tempdir().unwrap();
+    let hook = root.path().join("hook");
+    std::fs::write(&hook, "safe_pending:write\n").unwrap();
+    let hook_env = hook.to_str().unwrap().to_owned();
+    let grant_root = root.path().join("userData");
+    std::fs::create_dir_all(&grant_root).unwrap();
+    write_dapp(&grant_root, &[(site_of(1).as_str(), 1)]);
+    let pending = "{\n  \"0\": {\n    \"nonce\": 3\n  },\n  \"1\": {\n    \"nonce\": 1\n  }\n}";
+    std::fs::write(grant_root.join("safe-pending.json"), pending).unwrap();
+    let (mut core, _) = start(
+        root.path(),
+        &["vault_meta", "safe_pending"],
+        &["dapp"],
+        &[(HOOK, &hook_env)],
+    );
+    let mut id = 1;
+    import(&mut core, &mut id);
+    let odd = [json!(-1), json!(9_007_199_254_740_992_u64)];
+    let mut wallets = vec![json!({ "index": 0, "name": "Main Wallet" })];
+    for (index, (_, address)) in odd.iter().zip(SAFES) {
+        wallets.push(
+            json!({ "index": index, "name": format!("Team {index}"), "address": address,
+            "type": "safe", "owners": [0], "threshold": 1, "saltNonce": "0", "deployed": {} }),
+        );
+    }
+    let meta = json!({
+        "userKnowsPassword": true,
+        "derivedWallets": wallets,
+        "activeWalletIndex": 0,
+        "nextHardwareWalletIndex": 1_000_003,
+    });
+    write_meta(root.path(), &serde_json::to_string_pretty(&meta).unwrap());
+    for (left, index) in odd.iter().enumerate().rev() {
+        let reply = call_as(
+            &mut core,
+            &mut id,
+            &chrome(),
+            "accounts.remove",
+            json!({ "index": index, "swarm_references": [] }),
+        );
+        assert_eq!(*result(&reply), json!({}), "{index}");
+        assert_eq!(pending_bytes(&grant_root), pending.as_bytes(), "{index}");
+        let meta: Value = serde_json::from_str(&read_meta(root.path()).unwrap()).unwrap();
+        assert_eq!(
+            meta["derivedWallets"].as_array().unwrap().len(),
+            left + 1,
+            "{index}"
+        );
+    }
+}
