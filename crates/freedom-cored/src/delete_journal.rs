@@ -63,12 +63,13 @@ const OP: &str = "vault.delete";
 /// The journal is two names and two digests.
 const MAX_JOURNAL: u64 = 4096;
 
-/// Serializes [`delete`] and [`settle`]: the vault worker and the secrets
-/// drain may both settle. Taken after the secrets file's lock where both
+/// Serializes [`delete`] and [`settle`], and the vault and metadata
+/// journal's write and recovery ([`crate::vault_meta_journal`]): the vault
+/// worker and the secrets drain may both settle. Taken after the secrets file's lock where both
 /// are held, never the other way round.
 static LOCK: Mutex<()> = Mutex::new(());
 
-fn lock() -> std::io::Result<MutexGuard<'static, ()>> {
+pub(crate) fn lock() -> std::io::Result<MutexGuard<'static, ()>> {
     LOCK.lock()
         .map_err(|_| std::io::Error::other("the delete journal's lock is poisoned"))
 }
@@ -169,7 +170,7 @@ fn is_digest(value: &str) -> bool {
             .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
 }
 
-fn sha256_hex(bytes: &[u8]) -> String {
+pub(crate) fn sha256_hex(bytes: &[u8]) -> String {
     Sha256::digest(bytes)
         .iter()
         .map(|b| format!("{b:02x}"))

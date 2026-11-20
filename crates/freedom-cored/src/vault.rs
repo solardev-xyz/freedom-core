@@ -288,6 +288,9 @@ pub struct Reconciled {
     phrase: Option<Mnemonic>,
     /// The secrets to install, only when `install` was asked for.
     prepared: Option<Prepared>,
+    /// With `vault_meta` moved: `written` once the metadata journal is
+    /// gone, `pending` while it remains (design 0013).
+    meta: Option<&'static str>,
 }
 
 /// The mutation `vault.reconcile` checks (design 0001, "Reconciliation").
@@ -345,12 +348,16 @@ enum Kind {
         words: WordCount,
         /// `quick_unlock: true`: the credential before the vault commits.
         quick: bool,
+        /// With `vault_meta` moved, `user_knows_password`: the vault and
+        /// its metadata are written as one (design 0013).
+        meta: Option<bool>,
     },
     Import {
         password: SecretBytes,
         mnemonic: Mnemonic,
         overwrite: bool,
         quick: bool,
+        meta: Option<bool>,
     },
     Reconcile {
         op: ReconcileOp,
@@ -360,6 +367,9 @@ enum Kind {
         /// import: the requested mnemonic.
         mnemonic: Option<Mnemonic>,
         install: bool,
+        /// `vault_meta` is moved: a committed create or import says whether
+        /// its metadata is written.
+        meta: bool,
     },
     NodeWrite {
         op_id: String,
@@ -683,9 +693,10 @@ struct CreateParams<'a> {
     #[serde(borrow)]
     password_b64: &'a RawValue,
     words: u8,
-    #[allow(dead_code)]
+    /// Required once `vault_meta` is moved, ignored before (design 0013,
+    /// "`user_knows_password`").
     #[serde(default)]
-    user_knows_password: bool,
+    user_knows_password: Option<bool>,
     /// Writes quick unlock's credential before the vault commits (design
     /// 0013, "The re-wrap").
     #[serde(default)]
@@ -703,6 +714,9 @@ struct ImportParams<'a> {
     /// As create's.
     #[serde(default)]
     quick_unlock: bool,
+    /// As create's.
+    #[serde(default)]
+    user_knows_password: Option<bool>,
 }
 
 #[derive(Deserialize)]
@@ -1712,6 +1726,7 @@ impl Vault {
                     password,
                     words,
                     quick: p.quick_unlock,
+                    meta: self.knows_password(p.user_knows_password)?,
                 }
             }
             "vault.import" => {
@@ -1738,6 +1753,7 @@ impl Vault {
                     mnemonic,
                     overwrite: p.overwrite,
                     quick: p.quick_unlock,
+                    meta: self.knows_password(p.user_knows_password)?,
                 }
             }
             "vault.reconcile" => {
@@ -1767,6 +1783,7 @@ impl Vault {
                     password,
                     mnemonic,
                     install: p.install,
+                    meta: self.accounts.moved(),
                 }
             }
             "nodes.write_identity" => {
@@ -1828,6 +1845,20 @@ impl Vault {
     /// `quick_unlock: true` on create or import, at admission: refused
     /// before any work where the key store offers no policy to write the
     /// credential under (design 0013, "The re-wrap"). The job checks again.
+    /// `user_knows_password` once `vault_meta` is moved: required, since
+    /// the core writes it (design 0013). Before, ignored: `None`.
+    fn knows_password(&self, given: Option<bool>) -> Result<Option<bool>, ErrorBody> {
+        if !self.accounts.moved() {
+            return Ok(None);
+        }
+        given.map(Some).ok_or_else(|| {
+            ErrorBody::new(
+                ErrorCode::InvalidArgument,
+                "user_knows_password is required once vault_meta is moved",
+            )
+        })
+    }
+
     fn quick_offered(&self) -> Result<(), ErrorBody> {
         let secrets = self.secrets.as_ref().ok_or_else(internal)?;
         let caps = secrets.capabilities();
@@ -1937,9 +1968,11 @@ impl Vault {
     /// An `accounts.*` request at the queue's head: run, answered, and its
     /// grant events and narrowings passed on, as an approval method's are.
     fn run_accounts(&mut self, out: &mut Vec<Out>, id: u64, op: crate::accounts::Op) {
-        let answer = self
-            .accounts
-            .run(op, &self.state, &mut self.approvals)
+        // A vault write's metadata journal is finished first: while it
+        // can't be, the call fails `storage` (design 0013, "Recovery").
+        let answer = crate::vault_meta_journal::recover(&self.dir, self.secrets.as_deref())
+            .map_err(|e| crate::accounts::storage(crate::secrets::io_kind(&e)))
+            .and_then(|()| self.accounts.run(op, &self.state, &mut self.approvals))
             .and_then(|answer| {
                 let raw = serde_json::value::RawValue::from_string(answer.stringify())
                     .map_err(|_| internal())?;
@@ -2014,6 +2047,7 @@ impl Vault {
                 password,
                 words,
                 quick,
+                meta,
             } => {
                 let secrets = self.secrets.clone();
                 let quick = quick.then_some(secrets);
@@ -2021,7 +2055,12 @@ impl Vault {
                     RunningKind::Create,
                     Box::new(move |dir, control| {
                         let quick = quick.as_ref().map(Option::as_deref);
-                        job_create(dir, &password, words, quick, control)
+                        let new = NewPair {
+                            password: &password,
+                            quick,
+                            meta,
+                        };
+                        job_create(dir, words, &new, control)
                     }),
                 )
             }
@@ -2030,6 +2069,7 @@ impl Vault {
                 mnemonic,
                 overwrite,
                 quick,
+                meta,
             } => {
                 let secrets = self.secrets.clone();
                 let quick = quick.then_some(secrets);
@@ -2037,7 +2077,12 @@ impl Vault {
                     RunningKind::Import,
                     Box::new(move |dir, control| {
                         let quick = quick.as_ref().map(Option::as_deref);
-                        job_import(dir, &password, mnemonic, overwrite, quick, control)
+                        let new = NewPair {
+                            password: &password,
+                            quick,
+                            meta,
+                        };
+                        job_import(dir, mnemonic, overwrite, &new, control)
                     }),
                 )
             }
@@ -2047,6 +2092,7 @@ impl Vault {
                 password,
                 mnemonic,
                 install,
+                meta,
             } => (
                 RunningKind::Reconcile { install },
                 Box::new(move |dir, control| {
@@ -2056,7 +2102,7 @@ impl Vault {
                         before.as_deref(),
                         &password,
                         mnemonic.as_ref(),
-                        install,
+                        (install, meta),
                         control,
                     );
                     JobOutput::Reconciled { result, tried }
@@ -2144,7 +2190,15 @@ impl Vault {
             ),
         };
         let dir = self.dir.clone();
-        let job: Job = Box::new(move || Finished(run(&dir, &control)));
+        let secrets = self.secrets.clone();
+        let job: Job = Box::new(move || {
+            // A vault write's metadata journal is finished first, under the
+            // secrets file's lock (design 0013, "Recovery"). A failure is
+            // the job's own: its read of the vault tries again and answers
+            // `storage`.
+            let _ = crate::vault_meta_journal::recover(&dir, secrets.as_deref());
+            Finished(run(&dir, &control))
+        });
         (kind, job)
     }
 
@@ -2207,6 +2261,8 @@ impl Vault {
                                     "vault.unlocked",
                                     &serde_json::json!({ "epoch": epoch.get() }),
                                 )));
+                                // `afterUnlock`'s migration (design 0013).
+                                self.accounts.migrate_unlock(&addresses);
                                 Ok(json_result(
                                     request,
                                     &serde_json::json!({ "addresses": addresses }),
@@ -2263,10 +2319,15 @@ impl Vault {
                                                 key.to_secret_bytes().as_slice(),
                                             )
                                         }),
-                                    _ => Ok(json_result(
-                                        request,
-                                        &serde_json::json!({ "addresses": addresses }),
-                                    )),
+                                    _ => {
+                                        // `afterUnlock`'s migration; the
+                                        // exports migrate nothing.
+                                        self.accounts.migrate_unlock(&addresses);
+                                        Ok(json_result(
+                                            request,
+                                            &serde_json::json!({ "addresses": addresses }),
+                                        ))
+                                    }
                                 }
                             }
                             Err(_) => Err(locked()),
@@ -2377,11 +2438,11 @@ impl Vault {
                         request,
                         &serde_json::json!({ "status": "not_committed" }),
                     )),
-                    Ok(Some(found)) => {
+                    Ok(Some(mut found)) => {
                         // Installs only if main asked (no lock since the
                         // mutation started) and no lock happened here since.
                         if *install
-                            && let Some(prepared) = found.prepared
+                            && let Some(prepared) = found.prepared.take()
                             && let Ok(epoch) =
                                 self.state
                                     .install(running.ticket, prepared, self.auto_lock_ms, now)
@@ -2391,7 +2452,7 @@ impl Vault {
                                 &serde_json::json!({ "epoch": epoch.get() }),
                             )));
                         }
-                        reconcile_reply(request, found.addresses.as_ref(), found.phrase.as_ref())
+                        reconcile_reply(request, &found)
                     }
                 };
                 (tried, reply)
@@ -2463,18 +2524,20 @@ impl Vault {
 /// onboarding phrase (create).
 fn reconcile_reply(
     request: u64,
-    addresses: Option<&Addresses>,
-    phrase: Option<&Mnemonic>,
+    found: &Reconciled,
 ) -> Result<Option<Zeroizing<Vec<u8>>>, ErrorBody> {
     let mut response = SecretResponse::new(request)
         .public("status", &"committed")
         .map_err(|_| internal())?;
-    if let Some(addresses) = addresses {
+    if let Some(addresses) = &found.addresses {
         response = response
             .public("addresses", addresses)
             .map_err(|_| internal())?;
     }
-    if let Some(phrase) = phrase {
+    if let Some(meta) = found.meta {
+        response = response.public("meta", &meta).map_err(|_| internal())?;
+    }
+    if let Some(phrase) = &found.phrase {
         response = response.secret("mnemonic_b64", phrase.phrase().as_bytes());
     }
     response.finish().map(Some).map_err(|_| internal())
@@ -2758,6 +2821,19 @@ pub fn startup_snapshot(dir: &Path, lock_dir: &Path) -> (FileSnapshot, NodeRecov
             serde_json::json!({ "error": e.kind().to_string() }),
         ),
     }
+    // Then a vault write's metadata journal, before the snapshot reads the
+    // vault and before the re-wrap's start rule (design 0013, "Recovery").
+    match crate::vault_meta_journal::startup(dir) {
+        Ok(crate::vault_meta_journal::Settled::Nothing) => {}
+        Ok(settled) => crate::log::info(
+            "a vault write's metadata journal at start",
+            serde_json::json!({ "outcome": format!("{settled:?}") }),
+        ),
+        Err(e) => crate::log::error(
+            "could not finish a vault write's metadata journal",
+            serde_json::json!({ "error": e.kind().to_string() }),
+        ),
+    }
     match fsx::tighten(&dir.join(VAULT_FILE)) {
         Ok(true) => crate::log::info("tightened the vault file to 0600", serde_json::json!({})),
         Ok(false) => {}
@@ -2775,13 +2851,14 @@ pub fn startup_snapshot(dir: &Path, lock_dir: &Path) -> (FileSnapshot, NodeRecov
 /// copy of the mnemonic; the journal's records hold no secret, but are
 /// litter all the same, and so is a vault delete's journal (design 0013)
 /// killed before its rename.
-const REPLACED: [&str; 6] = [
+const REPLACED: [&str; 7] = [
     VAULT_FILE,
     journal::JOURNAL,
     journal::DONE,
     journal::STAGING,
     journal::UNRESOLVED,
     crate::delete_journal::JOURNAL,
+    crate::vault_meta_journal::JOURNAL,
 ];
 
 /// Removes the temp files writes killed before their rename left (#81).
@@ -2898,8 +2975,12 @@ fn snapshot(dir: &Path) -> FileSnapshot {
 /// A vault delete whose journal committed is finished first (design 0013;
 /// [`crate::delete_journal`]): while it can't be, the vault isn't read, so
 /// no job sees the vault the delete removed.
+///
+/// So is a vault write whose metadata journal committed
+/// ([`crate::vault_meta_journal`]): while it can't be, the vault isn't read.
 fn read_vault(dir: &Path) -> Result<Option<String>, OpError> {
     crate::delete_journal::settle(dir).map_err(|e| storage(&e))?;
+    crate::vault_meta_journal::settle(dir).map_err(|e| storage(&e))?;
     read_bounded(&dir.join(VAULT_FILE))
 }
 
@@ -2908,6 +2989,7 @@ fn read_vault(dir: &Path) -> Result<Option<String>, OpError> {
 /// it is bound to.
 fn vault_digest(dir: &Path) -> Result<Option<String>, OpError> {
     crate::delete_journal::settle(dir).map_err(|e| storage(&e))?;
+    crate::vault_meta_journal::settle(dir).map_err(|e| storage(&e))?;
     let file = match fsx::open_regular(&dir.join(VAULT_FILE), false) {
         Ok(fsx::Regular::Missing) => return Ok(None),
         Ok(fsx::Regular::Other) => return Err(OpError::Storage("not_regular")),
@@ -3432,15 +3514,162 @@ fn job_change(
     }
 }
 
-/// `vault.create`. `quick`: `quick_unlock: true`, with the job's secrets
-/// file, whose credential is written before the vault commits.
-fn job_create(
+/// What `vault.create` and `vault.import` write: under `password`; with
+/// `quick` (`quick_unlock: true`, with the job's secrets file) the
+/// credential written before the vault commits; with `meta` (`vault_meta`
+/// moved, `user_knows_password`) the vault and its metadata as one write
+/// ([`crate::vault_meta_journal`]).
+struct NewPair<'a> {
+    password: &'a SecretBytes,
+    quick: Option<Option<&'a Secrets>>,
+    meta: Option<bool>,
+}
+
+impl NewPair<'_> {
+    /// Writes the vault sealing `mnemonic` (its addresses `addresses`),
+    /// which replaces the vault with digest `before`.
+    fn write(
+        &self,
+        dir: &Path,
+        op: crate::vault_meta_journal::Op,
+        mnemonic: &Mnemonic,
+        addresses: &Addresses,
+        control: &JobControl,
+    ) -> Result<Commit, OpError> {
+        let contents = seal_vault(mnemonic, self.password.as_bytes())?;
+        let staged = match self.quick {
+            Some(secrets) => {
+                let before = match op {
+                    crate::vault_meta_journal::Op::Create => None,
+                    crate::vault_meta_journal::Op::Import => vault_digest(dir)?,
+                };
+                stage(
+                    secrets,
+                    self.password,
+                    before.as_deref(),
+                    &contents,
+                    true,
+                    control,
+                )?
+            }
+            None => None,
+        };
+        let password = self.password.as_bytes();
+        match self.meta {
+            Some(knows) => {
+                let meta = new_meta(knows, addresses)?;
+                write_pair(
+                    dir, op, &contents, mnemonic, password, &meta, staged, control,
+                )
+            }
+            None => write_vault(dir, &contents, mnemonic, password, staged, control),
+        }
+    }
+}
+
+/// `saveNewVaultMeta`'s file: `userKnowsPassword`, `createdAt` (the
+/// core's clock) and the new vault's addresses.
+fn new_meta(user_knows_password: bool, addresses: &Addresses) -> Result<String, OpError> {
+    let now_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |since| {
+            u64::try_from(since.as_millis()).unwrap_or(u64::MAX)
+        });
+    let now_ms =
+        i64::try_from(crate::testhooks::wall_clock(now_ms)).map_err(|_| OpError::Internal)?;
+    let mut meta = fc_wallet_state::vault_meta::VaultMeta::none();
+    meta.new_vault(
+        user_knows_password,
+        now_ms,
+        &addresses.user_wallet,
+        &addresses.bee_wallet,
+    )
+    .map_err(|_| OpError::Internal)?;
+    meta.text().ok_or(OpError::Internal)
+}
+
+/// The vault and its metadata through one journal (design 0013, "The vault
+/// and its metadata, one write"). The journal's write is the commit point,
+/// the job's claim right before it. A re-wrap's credential `staged` is
+/// folded in once the journal is gone, and taken back on a failure before
+/// the commit. After the commit, an install or a finish that fails answers
+/// the committed result, not durable: the journal stays for recovery, and
+/// so does the credential as staged, which recovery keeps for the vault it
+/// installs.
+#[allow(clippy::too_many_arguments)]
+fn write_pair(
     dir: &Path,
-    password: &SecretBytes,
-    words: WordCount,
-    quick: Option<Option<&Secrets>>,
+    op: crate::vault_meta_journal::Op,
+    contents: &str,
+    mnemonic: &Mnemonic,
+    password: &[u8],
+    meta: &str,
+    staged: Option<secrets::Staged<'_>>,
     control: &JobControl,
-) -> JobOutput {
+) -> Result<Commit, OpError> {
+    use crate::vault_meta_journal::{self as mj, Written};
+    let written = std::fs::create_dir_all(dir)
+        .map_err(mj::Error::Io)
+        .and_then(|()| {
+            let expected = Zeroizing::new(mnemonic.phrase().to_owned());
+            let check = |bytes: &[u8]| {
+                std::str::from_utf8(bytes)
+                    .ok()
+                    .and_then(|text| format::open(text, password).ok())
+                    .is_some_and(|opened| opened.mnemonic.phrase() == expected.as_str())
+            };
+            let pair = mj::Pair {
+                op,
+                quick_unlock: staged.is_some(),
+                vault: contents.as_bytes(),
+                check: &check,
+                meta: meta.as_bytes(),
+            };
+            mj::write(dir, &pair, &|| {
+                if crate::testhooks::secrets_fails("vault-claim") {
+                    control.abandon();
+                    return false;
+                }
+                claim(control)
+            })
+        });
+    let file = Some(sha256_hex(contents.as_bytes()));
+    match written {
+        Ok(Written::Finished(done)) => {
+            if let Some(staged) = staged {
+                staged.committed(password);
+            }
+            Ok(Commit { done, file })
+        }
+        Ok(Written::Pending) => {
+            drop(staged);
+            Ok(Commit {
+                done: Done::NotDurable,
+                file,
+            })
+        }
+        Err(error) => {
+            if let Some(staged) = staged {
+                staged.rolled_back();
+            }
+            Err(match error {
+                mj::Error::Abandoned => OpError::Abandoned,
+                mj::Error::NotWritten => OpError::Storage("other"),
+                mj::Error::Io(e) => storage(&e),
+                mj::Error::Check => {
+                    crate::log::error(
+                        "a staged vault file failed its check",
+                        serde_json::json!({}),
+                    );
+                    OpError::Internal
+                }
+            })
+        }
+    }
+}
+
+/// `vault.create`.
+fn job_create(dir: &Path, words: WordCount, new: &NewPair<'_>, control: &JobControl) -> JobOutput {
     written((|| {
         if control.abandoned() {
             return Err(OpError::Abandoned);
@@ -3453,31 +3682,24 @@ fn job_create(
         let mnemonic = Mnemonic::generate(&mut OsRng, words).map_err(|_| OpError::Internal)?;
         let phrase = Mnemonic::parse(mnemonic.phrase()).map_err(|_| OpError::Internal)?;
         let addresses = addresses_of(&mnemonic)?;
-        let contents = seal_vault(&mnemonic, password.as_bytes())?;
-        let staged = match quick {
-            Some(secrets) => stage(secrets, password, None, &contents, true, control)?,
-            None => None,
-        };
-        let done = write_vault(
+        let done = new.write(
             dir,
-            &contents,
+            crate::vault_meta_journal::Op::Create,
             &mnemonic,
-            password.as_bytes(),
-            staged,
+            &addresses,
             control,
         )?;
         Ok(((Prepared::new(mnemonic), addresses, Some(phrase)), done))
     })())
 }
 
-/// `vault.import`; `quick` as create's. Over a vault with quick unlock,
-/// that vault keeps its credential until the new one commits.
+/// `vault.import`. Over a vault with quick unlock, that vault keeps its
+/// credential until the new one commits.
 fn job_import(
     dir: &Path,
-    password: &SecretBytes,
     mnemonic: Mnemonic,
     overwrite: bool,
-    quick: Option<Option<&Secrets>>,
+    new: &NewPair<'_>,
     control: &JobControl,
 ) -> JobOutput {
     written((|| {
@@ -3488,27 +3710,11 @@ fn job_import(
             return Err(OpError::Exists { import: true });
         }
         let addresses = addresses_of(&mnemonic)?;
-        let contents = seal_vault(&mnemonic, password.as_bytes())?;
-        let staged = match quick {
-            Some(secrets) => {
-                let before = vault_digest(dir)?;
-                stage(
-                    secrets,
-                    password,
-                    before.as_deref(),
-                    &contents,
-                    true,
-                    control,
-                )?
-            }
-            None => None,
-        };
-        let done = write_vault(
+        let done = new.write(
             dir,
-            &contents,
+            crate::vault_meta_journal::Op::Import,
             &mnemonic,
-            password.as_bytes(),
-            staged,
+            &addresses,
             control,
         )?;
         Ok(((Prepared::new(mnemonic), addresses, None), done))
@@ -3540,17 +3746,24 @@ fn job_reconcile(
     before: Option<&str>,
     password: &SecretBytes,
     requested: Option<&Mnemonic>,
-    install: bool,
+    (install, meta): (bool, bool),
     control: &JobControl,
 ) -> (Result<Option<Reconciled>, OpError>, Outcome) {
     let untried = |result| (result, Outcome::NotTried);
     if control.abandoned() {
         return untried(Err(OpError::Abandoned));
     }
-    let contents = match read_vault(dir) {
-        Ok(contents) => contents,
-        Err(error) => return untried(Err(error)),
+    // Recovery first (in the read). While a metadata journal remains, the
+    // decision is the journaled vault's: installed, or still staged
+    // (design 0013, "`vault.reconcile`").
+    let (contents, pending) = match read_vault(dir) {
+        Ok(contents) => (contents, false),
+        Err(error) => match crate::vault_meta_journal::journaled_vault(dir) {
+            Ok(Some(contents)) => (Some(contents), true),
+            _ => return untried(Err(error)),
+        },
     };
+    let meta = meta.then_some(if pending { "pending" } else { "written" });
     let now = contents.as_deref().map(|c| sha256_hex(c.as_bytes()));
     let changed = now.as_deref() != before;
     let Some(contents) = contents else {
@@ -3590,6 +3803,7 @@ fn job_reconcile(
                 addresses: Some(addresses),
                 phrase,
                 prepared: install.then(|| Prepared::new(opened.mnemonic)),
+                meta,
             }))
         })(),
     };

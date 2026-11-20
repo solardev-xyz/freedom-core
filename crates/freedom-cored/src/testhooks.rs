@@ -51,7 +51,12 @@
 //!   `fsync`, `rename`, `flush`), each write of that store's permission
 //!   file fails at that step as if the OS had failed it (design 0012, "The
 //!   files": a failed write). Read at each write, so a test turns it on
-//!   and off while the core runs.
+//!   and off while the core runs. `vault_meta_journal:<step>` fails a step
+//!   after the commit of the vault and metadata journal (design 0013, "The
+//!   vault and its metadata, one write"), in the write and in recovery
+//!   alike: `vault-rename`, `vault-flush`, `meta-rename`, `meta-flush`,
+//!   `unlink` (each a returned failure, the journal kept), and
+//!   `finish-flush` (after the real unlink: not durable).
 //! - `FREEDOM_CORED_TEST_X402_SIGN_MARKER` names a file `x402.authorize`
 //!   appends a line to (`sign`) each time it is about to sign a payment's
 //!   digest, so a test counts the signatures: none for a cap's charge the
@@ -87,7 +92,13 @@
 //!   credential; `before-vault-rename` (the vault's temp file written and
 //!   checked, the claim taken), `after-vault-rename`; `before-fold`,
 //!   `after-fold` after the commit; `before-rollback`, `after-rollback`
-//!   after a failure): there the core exits at once with 99, as if killed,
+//!   after a failure), or of the vault and metadata journal
+//!   (`before-meta-stage`, `before-meta-journal`,
+//!   `before-meta-journal-rename` (its temp file written, the claim taken),
+//!   `after-meta-journal`, `after-meta-install-vault`,
+//!   `after-meta-install-meta`, `after-meta-done`, and `before-journal-finish`,
+//!   `after-journal-finish` for recovery's secrets-file write): there the
+//!   core exits at once with 99, as if killed,
 //!   the files as that step left them (design 0013, PRF-1: "a crash hook
 //!   before and after each write"). The vault's two steps are those of
 //!   every vault write.
@@ -99,7 +110,9 @@
 //!   `commit`, `remove`, `stage-pending`, `stage`, `fold`, `rollback`, …:
 //!   before its rename), or a vault write's (`vault-claim`, its claim
 //!   refused as if past its time; `vault-rename`, its rename, after the
-//!   claim), or the directory flush after a secrets-file write's rename
+//!   claim), the vault and metadata journal's (`meta-stage`, a staged
+//!   file's write; `meta-journal`, the journal's rename, after the claim),
+//!   or the directory flush after a secrets-file write's rename
 //!   (`<step>-flush`, `rpc-set-flush`, `rpc-file-flush`, …: the change in
 //!   place and reported not durable). The first attempt in the process of
 //!   each listed write fails as if the OS had failed it.

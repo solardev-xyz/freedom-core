@@ -226,17 +226,83 @@ impl Secrets {
     /// The file as it stands: empty if there is none. A vault delete whose
     /// journal committed is finished first ([`crate::delete_journal`]):
     /// while it can't be, the file is neither read nor written.
+    ///
+    /// So is a vault write whose metadata journal committed
+    /// ([`crate::vault_meta_journal`]): when it finishes one made with
+    /// `quick_unlock`, the start rule runs for the vault it installed, so
+    /// only that vault's credential stays (design 0013, "The vault and its
+    /// metadata, one write", step 6). A finish here has neither the password
+    /// nor the key, so a credential staged as `quick-unlock.next` stays
+    /// under that name.
     fn load(&self) -> Result<SecretsFile, Error> {
         let loaded = crate::delete_journal::settle(&self.dir)
+            .and_then(|_| crate::vault_meta_journal::settle(&self.dir))
             .map_err(|e| Error::Unreadable(io_kind(&e)))
-            .and_then(|_| read(&self.path()));
-        if loaded.is_err() {
-            self.set_view(View {
+            .and_then(|settled| {
+                let file = read(&self.path())?;
+                Ok(match settled {
+                    crate::vault_meta_journal::Settled::Finished {
+                        quick_unlock: true,
+                        vault,
+                    } => self.keep_only(file, &vault),
+                    _ => file,
+                })
+            });
+        match &loaded {
+            // A read that failed while a journal was pending says so until
+            // the next read: the view follows the file as last read.
+            Ok(file) => self.set_view(view_of(file)),
+            Err(_) => self.set_view(View {
                 unreadable: true,
                 ..View::default()
-            });
+            }),
         }
         loaded
+    }
+
+    /// The start rule for one vault: each quick-unlock entry bound to
+    /// another digest leaves, in one write. A failed write is logged, and
+    /// the file as it was is kept: the next start removes them.
+    fn keep_only(&self, file: SecretsFile, vault: &str) -> SecretsFile {
+        let Ok(names) = names() else {
+            return file;
+        };
+        let mut next = file.clone();
+        for name in names {
+            if next
+                .binding(&name)
+                .is_some_and(|binding| binding.get(FINGERPRINT) != Some(vault))
+                && let Ok(without) = next.remove(&name)
+            {
+                next = without;
+            }
+        }
+        if next == file {
+            return file;
+        }
+        match self.write(&next, "journal-finish", &|| true) {
+            Ok(()) => {
+                if !next.forget_list().is_empty() {
+                    self.poke();
+                }
+                next
+            }
+            Err(error) => {
+                crate::log::warn(
+                    "could not remove the replaced vault's quick-unlock entry; the next start does",
+                    serde_json::json!({ "error": format!("{error:?}") }),
+                );
+                file
+            }
+        }
+    }
+
+    /// Recovery under the file's lock ([`crate::vault_meta_journal::recover`]):
+    /// a vault write's journal finished, and the replaced vault's entry
+    /// removed.
+    pub fn recover(&self) -> Result<(), Error> {
+        let _held = self.lock()?;
+        self.load().map(|_| ())
     }
 
     /// Writes `next` durably, if `commit` allows its rename, and keeps the
@@ -308,6 +374,10 @@ impl Secrets {
     /// (see the module documentation). `vault` is the vault file's digest as
     /// the startup snapshot read it: the entry naming no vault is removed
     /// only on a definite answer.
+    ///
+    /// While a metadata journal's recovery can't finish, the snapshot can't
+    /// read the vault, so `vault` is no answer and the entry bound to the
+    /// journal's vault stays (design 0013, "Recovery").
     pub fn startup(&self, vault: Result<Option<&str>, ()>) {
         let Ok(_held) = self.lock() else {
             return;
@@ -1077,6 +1147,17 @@ fn without_quick_unlock(file: &SecretsFile) -> Result<SecretsFile, Error> {
 }
 
 /// Reads the file at `path`: empty if there is none.
+/// Whether the secrets file in `dir` holds quick unlock's entry, under
+/// either name, bound to the vault with digest `vault`: what a metadata
+/// journal with `quick_unlock` needs before it installs that vault. Read
+/// without the file's lock (a reader sees one whole file or the other); a
+/// file that doesn't read is an error, never "no entry".
+pub fn has_credential(dir: &Path, vault: &str) -> std::io::Result<bool> {
+    let file = read(&dir.join(SECRETS_FILE))
+        .map_err(|e| std::io::Error::other(format!("the secrets file: {e:?}")))?;
+    Ok(credential(&file, vault).is_some())
+}
+
 fn read(path: &Path) -> Result<SecretsFile, Error> {
     let file = match fsx::open_regular(path, false) {
         Ok(fsx::Regular::Missing) => return Ok(SecretsFile::new()),
