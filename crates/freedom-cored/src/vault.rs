@@ -1958,7 +1958,7 @@ impl Vault {
     fn run_accounts(&mut self, out: &mut Vec<Out>, id: u64, op: crate::accounts::Op) {
         let answer = self
             .accounts
-            .run(op, &self.state, &mut self.approvals)
+            .run(op, &self.state, &mut self.approvals, &self.safe_pending)
             .and_then(|answer| {
                 let raw = serde_json::value::RawValue::from_string(answer.stringify())
                     .map_err(|_| internal())?;

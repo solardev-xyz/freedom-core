@@ -964,3 +964,192 @@ fn a_forget_then_a_failed_metadata_write_and_durability() {
         dapp_before
     );
 }
+
+/// Three Safes owned by the main account, at 1000000 to 1000002.
+const SAFES: [(u64, &str); 3] = [
+    (1_000_000, SAFE),
+    (1_000_001, OTHER_SAFE),
+    (1_000_002, "0x3333333333333333333333333333333333333333"),
+];
+
+/// `safe-pending.json` as the reference writes it: entries for account 1
+/// and the first two Safes; the third has none.
+const PENDING: &str = "{\n  \"1\": {\n    \"nonce\": 1\n  },\n  \"1000000\": {\n    \"nonce\": 7\n  },\n  \"1000001\": {\n    \"nonce\": 8\n  }\n}";
+
+/// The site of the dApp grant for `account`.
+fn site_of(account: u64) -> String {
+    format!("https://{account}.example")
+}
+
+/// A core over `root` with `stores` moved and the dApp file: account 1
+/// and [`SAFES`] in `vault-meta.json`, a dApp grant for each (written
+/// before the start, so the core holds them), and [`PENDING`].
+fn safes_core(root: &Path, stores: &[&'static str], env: &[(&str, &str)]) -> (Core, PathBuf, u64) {
+    let grant_root = root.join("userData");
+    std::fs::create_dir_all(&grant_root).unwrap();
+    let sites: Vec<(String, u32)> = [1, 1_000_000, 1_000_001, 1_000_002]
+        .into_iter()
+        .map(|account| (site_of(account), account as u32))
+        .collect();
+    let sites: Vec<(&str, u32)> = sites.iter().map(|(s, a)| (s.as_str(), *a)).collect();
+    write_dapp(&grant_root, &sites);
+    std::fs::write(grant_root.join("safe-pending.json"), PENDING).unwrap();
+    let (mut core, hello) = start(root, stores, &["dapp"], env);
+    assert_eq!(core.grant_root, grant_root);
+    let echo: Vec<&str> = stores.iter().copied().filter(|s| *s != "intents").collect();
+    assert_eq!(hello["result"]["store_moved"], json!(echo), "{hello}");
+    let mut id = 1;
+    import(&mut core, &mut id);
+    let mut wallets = vec![
+        json!({ "index": 0, "name": "Main Wallet" }),
+        json!({ "index": 1, "name": "Second" }),
+    ];
+    for (index, address) in SAFES {
+        wallets.push(
+            json!({ "index": index, "name": format!("Team {index}"), "address": address,
+            "type": "safe", "owners": [0], "threshold": 1, "saltNonce": "0", "deployed": {} }),
+        );
+    }
+    let meta = json!({
+        "userKnowsPassword": true,
+        "derivedWallets": wallets,
+        "activeWalletIndex": 0,
+        "nextHardwareWalletIndex": 1_000_003,
+    });
+    write_meta(root, &serde_json::to_string_pretty(&meta).unwrap());
+    (core, grant_root, id)
+}
+
+fn read_pending(grant_root: &Path) -> Value {
+    serde_json::from_str(&std::fs::read_to_string(grant_root.join("safe-pending.json")).unwrap())
+        .unwrap()
+}
+
+fn pending_bytes(grant_root: &Path) -> Vec<u8> {
+    std::fs::read(grant_root.join("safe-pending.json")).unwrap()
+}
+
+/// Design 0013, "`accounts.remove`": once `safe_pending` is moved, a
+/// Safe's removal clears its `safe-pending.json` entry, and its grant and
+/// record go too. Another account's removal leaves the entry at its
+/// index: the reference clears only a Safe's.
+#[test]
+fn removing_a_safe_clears_its_pending_entry_once_moved() {
+    let root = tempfile::tempdir().unwrap();
+    let (mut core, grant_root, mut id) =
+        safes_core(root.path(), &["vault_meta", "safe_pending"], &[]);
+    assert_eq!(*result(&remove(&mut core, &mut id, 1_000_000)), json!({}));
+    assert_eq!(listed_indices(root.path()), [0, 1, 1_000_001, 1_000_002]);
+    assert_eq!(
+        read_pending(&grant_root),
+        json!({ "1": { "nonce": 1 }, "1000001": { "nonce": 8 } })
+    );
+    assert!(!dapp_sites(&grant_root).contains(&site_of(1_000_000)));
+    assert_eq!(*result(&remove(&mut core, &mut id, 1)), json!({}));
+    assert_eq!(listed_indices(root.path()), [0, 1_000_001, 1_000_002]);
+    assert!(!dapp_sites(&grant_root).contains(&site_of(1)));
+    assert_eq!(
+        read_pending(&grant_root),
+        json!({ "1": { "nonce": 1 }, "1000001": { "nonce": 8 } })
+    );
+}
+
+/// Before `safe_pending` is moved, main writes the file: the Safe's
+/// removal goes, grant and record, and its entry is left for main to
+/// clear after the answer, the file untouched.
+#[test]
+fn removing_a_safe_leaves_its_pending_entry_before_the_move() {
+    let root = tempfile::tempdir().unwrap();
+    let (mut core, grant_root, mut id) = safes_core(root.path(), &["vault_meta"], &[]);
+    assert_eq!(*result(&remove(&mut core, &mut id, 1_000_000)), json!({}));
+    assert_eq!(listed_indices(root.path()), [0, 1, 1_000_001, 1_000_002]);
+    assert!(!dapp_sites(&grant_root).contains(&site_of(1_000_000)));
+    assert_eq!(pending_bytes(&grant_root), PENDING.as_bytes());
+}
+
+/// A clear whose write fails once `safe_pending` is moved refuses the
+/// removal (`storage`, `data.store: "safe_pending"`), as a failed forget
+/// does: the record, the entry and the Safe's grant all stay, since the
+/// grants are forgotten only after the clear. Once the write goes
+/// through, so does the removal. A Safe with no entry writes nothing to
+/// clear, so a failing write doesn't refuse its removal.
+#[test]
+fn a_failed_pending_clear_refuses_the_removal() {
+    let root = tempfile::tempdir().unwrap();
+    let hook = root.path().join("hook");
+    std::fs::write(&hook, "").unwrap();
+    let hook_env = hook.to_str().unwrap().to_owned();
+    let (mut core, grant_root, mut id) = safes_core(
+        root.path(),
+        &["vault_meta", "safe_pending"],
+        &[(HOOK, &hook_env)],
+    );
+    let meta_before = read_meta(root.path());
+    let dapp_before = std::fs::read(grant_root.join("dapp-permissions.json")).unwrap();
+    for step in ["write", "fsync", "rename"] {
+        std::fs::write(&hook, format!("safe_pending:{step}\n")).unwrap();
+        // A retry fails as the first attempt did.
+        for attempt in 0..2 {
+            let reply = remove(&mut core, &mut id, 1_000_000);
+            assert_eq!(code(&reply), "storage", "{step} {attempt}: {reply}");
+            assert_eq!(reply["error"]["data"]["store"], "safe_pending", "{reply}");
+            assert_eq!(read_meta(root.path()), meta_before, "{step} {attempt}");
+            assert_eq!(pending_bytes(&grant_root), PENDING.as_bytes(), "{step}");
+            assert_eq!(
+                std::fs::read(grant_root.join("dapp-permissions.json")).unwrap(),
+                dapp_before,
+                "{step} {attempt}: the Safe's grant stays"
+            );
+        }
+    }
+    std::fs::write(&hook, "").unwrap();
+    assert_eq!(*result(&remove(&mut core, &mut id, 1_000_000)), json!({}));
+    assert_eq!(listed_indices(root.path()), [0, 1, 1_000_001, 1_000_002]);
+    assert_eq!(
+        read_pending(&grant_root),
+        json!({ "1": { "nonce": 1 }, "1000001": { "nonce": 8 } })
+    );
+    assert!(!dapp_sites(&grant_root).contains(&site_of(1_000_000)));
+    // The third Safe has no entry: nothing to write, nothing to fail.
+    std::fs::write(&hook, "safe_pending:write\n").unwrap();
+    let pending = pending_bytes(&grant_root);
+    assert_eq!(*result(&remove(&mut core, &mut id, 1_000_002)), json!({}));
+    assert_eq!(listed_indices(root.path()), [0, 1, 1_000_001]);
+    assert_eq!(pending_bytes(&grant_root), pending);
+}
+
+/// The removal's durability combines the clear's with the forget's and
+/// the metadata's: a failed flush of `safe-pending.json` alone answers
+/// `durable: false`, the change made; so does the dApp file's after a
+/// durable clear.
+#[test]
+fn a_safe_removal_combines_the_clears_durability() {
+    let root = tempfile::tempdir().unwrap();
+    let hook = root.path().join("hook");
+    std::fs::write(&hook, "").unwrap();
+    let hook_env = hook.to_str().unwrap().to_owned();
+    let (mut core, grant_root, mut id) = safes_core(
+        root.path(),
+        &["vault_meta", "safe_pending"],
+        &[(HOOK, &hook_env)],
+    );
+    std::fs::write(&hook, "safe_pending:flush\n").unwrap();
+    assert_eq!(
+        *result(&remove(&mut core, &mut id, 1_000_000)),
+        json!({ "durable": false })
+    );
+    assert_eq!(listed_indices(root.path()), [0, 1, 1_000_001, 1_000_002]);
+    assert_eq!(
+        read_pending(&grant_root),
+        json!({ "1": { "nonce": 1 }, "1000001": { "nonce": 8 } })
+    );
+    assert!(!dapp_sites(&grant_root).contains(&site_of(1_000_000)));
+    std::fs::write(&hook, "dapp:flush\n").unwrap();
+    assert_eq!(
+        *result(&remove(&mut core, &mut id, 1_000_001)),
+        json!({ "durable": false })
+    );
+    assert_eq!(listed_indices(root.path()), [0, 1, 1_000_002]);
+    assert_eq!(read_pending(&grant_root), json!({ "1": { "nonce": 1 } }));
+    assert!(!dapp_sites(&grant_root).contains(&site_of(1_000_001)));
+}
