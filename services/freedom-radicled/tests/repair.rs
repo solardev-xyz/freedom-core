@@ -90,10 +90,11 @@ fn shut_down(radicled: &mut Radicled, home: &Path) -> (String, bool) {
     exited(radicled, home)
 }
 
-/// As [`shut_down`], once `rad.shutdown` was sent.
+/// As [`shut_down`], once `rad.shutdown` was sent. A 70 names its reason
+/// in the log, which a failure shows.
 fn exited(radicled: &mut Radicled, home: &Path) -> (String, bool) {
-    assert_eq!(radicled.exit_code(EXIT_TIMEOUT), Some(0));
-    let log = radicled.stderr();
+    let (exit, log) = radicled.exit_and_stderr(EXIT_TIMEOUT);
+    assert_eq!(exit, Some(0), "{log}");
     let cleared = log.contains("the dirty marker is cleared");
     assert_eq!(cleared, fixture::marked(home).is_none(), "{log}");
     (log, cleared)
@@ -452,8 +453,8 @@ fn an_online_repair_unit_that_hangs_ends_the_process_and_the_next_start_repairs(
     );
     let reply = radicled.call("rad.write", uncertain(rid));
     assert_eq!(code(&reply), "outcome_unknown", "{reply}");
-    assert_eq!(radicled.exit_code(OVERRUN_EXIT_TIMEOUT), Some(70));
-    let log = radicled.stderr();
+    let (exit, log) = radicled.exit_and_stderr(OVERRUN_EXIT_TIMEOUT);
+    assert_eq!(exit, Some(70), "{log}");
     assert_eq!(overrun(&log)["bound_ms"], 1000, "{log}");
     assert!(!log.contains(DONE), "{log}");
     assert_eq!(fixture::marked(&dirs.home), Some(vec![NID.to_owned()]));
