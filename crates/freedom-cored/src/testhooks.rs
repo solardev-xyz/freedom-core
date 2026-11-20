@@ -112,6 +112,12 @@
 //!   as it takes a page's EIP-1193 read, as if the read waited behind other
 //!   chain mail; `FREEDOM_CORED_TEST_EIP1193_OVERALL_MS` replaces the
 //!   read's 120 s in all.
+//! - `FREEDOM_CORED_TEST_EIP1193_CHECK_EARLY_MS` takes that many
+//!   milliseconds off a page request's name check's lookup deadline (APR-5f),
+//!   so that the lookup's timeout reaches the event loop while the
+//!   request's own clock still shows time left, as the naming thread's
+//!   clock and the event loop's, each counting milliseconds from its own
+//!   start, can order them by a millisecond.
 //! - `FREEDOM_CORED_TEST_METHODS` enables the `test.*` methods
 //!   (`testmethods`), which make responses of any size. Builds without the
 //!   feature don't compile them, nor this hook.
@@ -239,6 +245,14 @@ pub fn eip1193_names_uncached() -> bool {
 #[cfg(feature = "testhooks")]
 pub fn eip1193_overall(overall: u64) -> u64 {
     millis("FREEDOM_CORED_TEST_EIP1193_OVERALL_MS").unwrap_or(overall)
+}
+
+/// A name check's lookup deadline: the request's time `left`, less the
+/// hook's milliseconds (never under one).
+#[cfg(feature = "testhooks")]
+pub fn eip1193_check_ms(left: u64) -> u64 {
+    millis("FREEDOM_CORED_TEST_EIP1193_CHECK_EARLY_MS")
+        .map_or(left, |early| left.saturating_sub(early).max(1))
 }
 
 #[cfg(feature = "testhooks")]
@@ -742,6 +756,11 @@ pub fn eip1193_dequeue_delay() {}
 #[cfg(not(feature = "testhooks"))]
 pub fn eip1193_overall(overall: u64) -> u64 {
     overall
+}
+
+#[cfg(not(feature = "testhooks"))]
+pub fn eip1193_check_ms(left: u64) -> u64 {
+    left
 }
 
 #[cfg(not(feature = "testhooks"))]

@@ -144,6 +144,20 @@ pub struct NameCheck {
     pub deadline_ms: u64,
 }
 
+/// The naming thread's verdict on a [`NameCheck`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Verdict {
+    /// The name serves the document's IPNS key.
+    Holds,
+    /// It serves other content, or the resolution failed before the
+    /// lookup's deadline.
+    Fails,
+    /// The lookup's deadline, the request's time left, passed first: by
+    /// naming's clock, a thread's own, which can read it up to a
+    /// millisecond before this one does.
+    Deadline,
+}
+
 /// See the module documentation.
 pub struct Connects {
     prompts: Prompts,
@@ -603,7 +617,7 @@ impl Connects {
         vec![Out::NameCheck(NameCheck {
             tag: id,
             binding,
-            deadline_ms: left,
+            deadline_ms: crate::testhooks::eip1193_check_ms(left),
         })]
     }
 
@@ -613,7 +627,7 @@ impl Connects {
     /// the request answers as a keyless document's would, and so does each
     /// later name-revalidated request of the document. A verdict for a
     /// request that ended is dropped.
-    pub fn name_checked(&mut self, tag: u64, holds: bool, vault: &mut Vault) -> Vec<Out> {
+    pub fn name_checked(&mut self, tag: u64, verdict: Verdict, vault: &mut Vault) -> Vec<Out> {
         if !matches!(
             self.open.get(&tag),
             Some(Open {
@@ -632,13 +646,17 @@ impl Connects {
             return Vec::new();
         };
         // A verdict at the request's deadline, the lookup's own timeout
-        // included, is the deadline's: it ends no binding.
-        if held.budget.left(self.now_ms()) == 0 {
+        // included, is the deadline's: it ends no binding. The lookup's
+        // timeout is naming's to tell: its clock and this one count
+        // milliseconds from different instants, so this one can still show
+        // a millisecond left when the lookup's deadline has passed.
+        if verdict == Verdict::Deadline || held.budget.left(self.now_ms()) == 0 {
             let mut outs = vec![raw_reply(tag, DEADLINE)];
             outs.extend(self.pump());
             return outs;
         }
         let document = held.document();
+        let holds = verdict == Verdict::Holds;
         if !holds {
             self.ended.end(&document);
         }

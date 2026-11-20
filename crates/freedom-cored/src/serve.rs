@@ -156,10 +156,11 @@ pub enum Event {
         payload: Box<[u8]>,
     },
     /// The naming thread checked a page request's name (design 0012,
-    /// APR-5f): whether it still serves the document's IPNS key.
+    /// APR-5f): whether it still serves the document's IPNS key, or the
+    /// lookup's deadline passed first.
     NameChecked {
         tag: u64,
-        holds: bool,
+        verdict: crate::eip1193::Verdict,
     },
 }
 
@@ -622,8 +623,8 @@ pub fn run(options: &Options) -> Exit {
                     break exit;
                 }
             }
-            Ok(Event::NameChecked { tag, holds }) => {
-                let outs = core.connects.name_checked(tag, holds, &mut core.vault);
+            Ok(Event::NameChecked { tag, verdict }) => {
+                let outs = core.connects.name_checked(tag, verdict, &mut core.vault);
                 if let Flow::Exit(exit) = core.dispatch(outs) {
                     break exit;
                 }
