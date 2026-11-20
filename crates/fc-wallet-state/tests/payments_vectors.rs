@@ -116,3 +116,15 @@ fn the_binder() {
         Ok(vec![payments::Bind::Null; 2])
     );
 }
+
+/// `getRecent`'s `limit` is clamped to 500 (the vectors' table is smaller,
+/// so their pages can't show it).
+#[test]
+fn the_page_is_at_most_500() {
+    let filters = fc_json::parse(r#"{"limit":1e10,"offset":-3}"#).expect("json");
+    let statement = payments::get_recent(&filters).expect("a statement");
+    assert_eq!(
+        statement.params,
+        [payments::Bind::Real(500.0), payments::Bind::Real(0.0)]
+    );
+}
