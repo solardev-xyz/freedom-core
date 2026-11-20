@@ -641,6 +641,7 @@ fn members_are_checked_first() {
             ),
         ),
         ("intents.get", r#"{"intent_id":2}"#.to_owned()),
+        ("intents.get", r#"{"intent_id":{"a":1}}"#.to_owned()),
         ("intents.held_nonces", r#"{"chain_id":1}"#.to_owned()),
         ("intents.void_refusal", format!(r#"{{"intent_id":{id}}}"#)),
         ("intents.list", r#"{"all":true}"#.to_owned()),
@@ -714,4 +715,32 @@ fn a_damaged_file_is_set_aside() {
         }
     }
     assert!(set_aside >= 60, "{set_aside}");
+
+    // A line whose checksum doesn't match, after one the reference loads:
+    // the file is set aside, as `doLoad` does for any damaged line.
+    let case = items(field(&vectors, "damaged"))
+        .iter()
+        .find(|c| matches!(field(c, "reason"), JsValue::Null))
+        .unwrap();
+    let good = lines(items(field(case, "records")));
+    let mut bad = good.clone();
+    let at = b"{\"v\":1,\"sha256\":\"".len();
+    bad[at] = if bad[at] == b'0' { b'1' } else { b'0' };
+    let text = [good, bad].concat();
+    let mut main = Main::new(&["intents"]);
+    std::fs::write(main.path(FILE), &text).unwrap();
+    main.set("clock", "1763000009999");
+    main.start();
+    assert_eq!(main.result("intents.list", "{}")["intents"], json!([]));
+    assert!(!main.path(FILE).exists());
+    let aside = main.path(&format!("{FILE}.corrupt-1763000009999"));
+    assert_eq!(std::fs::read(aside).unwrap(), text);
+    let core = main.core.as_mut().unwrap();
+    core.close_stdin();
+    core.exit_code(std::time::Duration::from_secs(10));
+    let log = core.stderr();
+    assert!(
+        log.contains("1 damaged line(s), the first at line 2"),
+        "{log}"
+    );
 }
