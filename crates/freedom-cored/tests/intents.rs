@@ -419,7 +419,9 @@ fn failed_write(response: &Value) {
 /// A failed append (its write, its fsync) answers `INTENT_WRITE_FAILED`,
 /// the file and the records as they were, and the next write goes
 /// through. A cut back that fails too leaves the journal broken: every
-/// write fails until the core opens it again.
+/// write fails until the core opens it again, and the line whose fsync
+/// failed, whole, stays: the reopened journal accepts it, as the
+/// reference's does, and the load folds that handoff into `possiblySent`.
 #[test]
 fn a_failed_append_changes_nothing() {
     let (mut main, steps) = replay("lifecycle", 2);
@@ -440,12 +442,63 @@ fn a_failed_append_changes_nothing() {
     main.set("fail", "");
     failed_write(&main.call("intents.handoff", &params));
     assert_eq!(main.result("intents.list", "{}"), list);
-    // Opened again by a new core: the half-written line is cut off.
+    // Opened again by a new core. The fsync failed after the whole line
+    // was written, and the cut back failed too, so the line stays: the
+    // reopened journal accepts it, as the reference's does, and the load
+    // folds that handoff, never answered, into `possiblySent`.
     main.start();
+    let records = std::fs::read_to_string(main.path(FILE)).unwrap();
+    assert_eq!(
+        records.matches(r#""type":"handoff""#).count(),
+        1,
+        "the failed handoff's line kept: {records}"
+    );
+    let id: Value = serde_json::from_str(&params).unwrap();
+    let get = main.result(
+        "intents.get",
+        &json!({ "intent_id": id["intent_id"] }).to_string(),
+    );
+    let intent = &get["intent"];
+    assert_eq!(intent["recovered"], true, "{get}");
+    assert_eq!(intent["handoffs"], json!([]), "{get}");
+    assert_eq!(intent["handoffCount"], 1, "{get}");
+    assert_eq!(intent["possiblySent"], true, "{get}");
     main.set("ids", "00000000-0000-4000-8000-0000000000ab");
     main.result("intents.handoff", &params);
     let records = std::fs::read_to_string(main.path(FILE)).unwrap();
     assert!(records.ends_with("\n") && records.contains("0000000000ab"));
+}
+
+/// A commit whose fsync and cut back both failed: its whole line stays,
+/// so the reopened journal holds the intent, recovered, and a retry under
+/// another id for the same nonce is refused: no two intents claim it.
+#[test]
+fn a_failed_commit_kept_on_reopen_holds_its_nonce() {
+    let (mut main, steps) = replay("lifecycle", 0);
+    let commit = &steps[0];
+    assert_eq!(field(commit, "op").as_str(), Some("commit"));
+    let params = members(field(commit, "call"), field(commit, "run").as_str());
+    main.set("clock", &field(commit, "at").stringify());
+    main.set("fail", "intents:fsync\nintents:truncate");
+    main.set("ids", "00000000-0000-4000-8000-0000000000c1");
+    failed_write(&main.call("intents.commit", &params));
+    main.set("fail", "");
+    main.start();
+    main.set("clock", &field(commit, "at").stringify());
+    let list = main.result("intents.list", "{}");
+    assert_eq!(list["intents"].as_array().map(Vec::len), Some(1), "{list}");
+    assert_eq!(list["intents"][0]["recovered"], true, "{list}");
+    main.set("ids", "00000000-0000-4000-8000-0000000000c2");
+    let retry = main.call("intents.commit", &params);
+    assert_eq!(code(&retry), "invalid_argument", "{retry}");
+    assert!(
+        retry["error"]["data"]["code"]
+            .as_str()
+            .is_some_and(|c| c.starts_with("INTENT_")),
+        "{retry}"
+    );
+    let list = main.result("intents.list", "{}");
+    assert_eq!(list["intents"].as_array().map(Vec::len), Some(1), "{list}");
 }
 
 /// A commit that needs the file compacted first: a failed compaction
