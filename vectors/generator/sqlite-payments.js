@@ -367,4 +367,4 @@ function buildPayments(checkout, Database) {
   };
 }
 
-module.exports = { buildPayments };
+module.exports = { buildPayments, load };

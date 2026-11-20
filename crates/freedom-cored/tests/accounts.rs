@@ -454,7 +454,7 @@ fn the_hello_echoes_vault_meta() {
     );
     assert_eq!(
         hello["result"]["store_moved"],
-        json!(["vault_meta", "safe_pending"]),
+        json!(["vault_meta", "payments", "safe_pending"]),
         "{hello}"
     );
     drop(core);
