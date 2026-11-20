@@ -9,38 +9,11 @@ use serde_json::{Value, json};
 use super::{Error, Schema, open};
 
 // The DDL each reference module runs, byte for byte: the template literal
-// of `migrateDatabase` in freedom-browser's src/main/payment-history.js and
-// src/main/swarm/publish-history.js (sqlite.json's pin). SQLite keeps each
-// statement's text in `sqlite_master`, so the vectors compare it too.
-const PAYMENTS: Schema = Schema {
-    version: 1,
-    ddl: r#"
-      CREATE TABLE IF NOT EXISTS payments (
-        id            INTEGER PRIMARY KEY AUTOINCREMENT,
-        kind          TEXT    NOT NULL,
-        chain_id      INTEGER NOT NULL,
-        tx_hash       TEXT,
-        from_address  TEXT,
-        to_address    TEXT,
-        asset         TEXT,
-        amount        TEXT    NOT NULL,
-        origin        TEXT,
-        url           TEXT,
-        status        TEXT    NOT NULL,
-        created_at    INTEGER NOT NULL,
-        confirmed_at  INTEGER,
-        gas_used      TEXT,
-        gas_price     TEXT,
-        metadata      TEXT
-      );
-      CREATE INDEX IF NOT EXISTS idx_payments_created ON payments(created_at DESC);
-      CREATE INDEX IF NOT EXISTS idx_payments_kind    ON payments(kind);
-      CREATE INDEX IF NOT EXISTS idx_payments_chain   ON payments(chain_id);
-      CREATE INDEX IF NOT EXISTS idx_payments_origin  ON payments(origin);
-      CREATE INDEX IF NOT EXISTS idx_payments_tx_hash ON payments(tx_hash);
-      CREATE INDEX IF NOT EXISTS idx_payments_status  ON payments(status);
-    "#,
-};
+// of `migrateDatabase` in freedom-browser's src/main/payment-history.js
+// (fc-wallet-state's `payments::DDL`) and src/main/swarm/publish-history.js
+// (sqlite.json's pin). SQLite keeps each statement's text in
+// `sqlite_master`, so the vectors compare it too.
+const PAYMENTS: Schema = crate::payments::SCHEMA;
 
 const PUBLISHES: Schema = Schema {
     version: 1,
@@ -68,9 +41,14 @@ const PUBLISHES: Schema = Schema {
     "#,
 };
 
+/// `databases`, through `fc_json`: `payments`' records hold escaped lone
+/// surrogates (a string's code units spread into metadata), which
+/// `serde_json` refuses.
 fn vectors() -> Value {
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../vectors/sqlite.json");
-    serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap()
+    let all = fc_json::parse(&std::fs::read_to_string(path).unwrap()).unwrap();
+    let databases = all.get("databases").unwrap().stringify();
+    serde_json::json!({ "databases": serde_json::from_str::<Value>(&databases).unwrap() })
 }
 
 /// `sqlite_master`'s rows in the order SQLite wrote them, as the generator
