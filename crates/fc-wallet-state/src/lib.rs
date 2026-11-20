@@ -20,6 +20,7 @@
 mod address;
 pub mod intents;
 mod js;
+pub mod payments;
 pub mod vault_meta;
 
 pub use address::is_address;
