@@ -126,6 +126,10 @@ name = "grants"
 required-features = ["testhooks"]
 
 [[test]]
+name = "safe_pending"
+required-features = ["testhooks"]
+
+[[test]]
 name = "phone"
 required-features = ["testhooks"]
 
@@ -167,10 +171,13 @@ fc-service = { path = "../fc-service" }
 # directory, and a store file's bounded read, hooked write and set-aside
 # (design 0013, "How the core writes them").
 fc-store = { path = "../fc-store" }
-# vault-meta.json's codec and changes (design 0013, PRF-5a): `accounts.*`.
-fc-wallet-state = { path = "../fc-wallet-state" }
 fc-swarm = { path = "../fc-swarm" }
 fc-vault = { path = "../fc-vault" }
+# The set-A stores' codecs (design 0013): `vault-meta.json`'s and its
+# changes (PRF-5a, `accounts.*`), `safe-pending.json`'s (PRF-5f), and
+# payment-history.sqlite's ("Where SQLite lives"): the rows, checks and
+# statements, pure; SQLite stays in this binary.
+fc-wallet-state = { path = "../fc-wallet-state" }
 getrandom = "0.4"
 rand_core = "0.10"
 # SQLite, for the stores whose schema design 0013 keeps

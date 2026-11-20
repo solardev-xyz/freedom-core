@@ -28,9 +28,11 @@
 //! in `forget`.
 //!
 //! **While a journal is pending** (an install that failed after the commit
-//! keeps it), [`settle`] runs first in every read of the vault and every
-//! secrets operation, and they fail with a storage error while it can't
-//! finish. So nothing reads the vault the delete committed to remove, and
+//! keeps it), [`settle`] runs under the secrets file's lock first in every
+//! vault job, every `accounts.*` call and every secrets operation, and they
+//! fail with a storage error while it can't finish. A read of the vault
+//! that still finds the journal refuses (`storage`) and never settles it
+//! itself. So nothing reads the vault the delete committed to remove, and
 //! nothing writes the secrets file over the staged one.
 //!
 //! **Recovery trusts nothing it reads:** a journal is acted on only if it is
@@ -417,8 +419,9 @@ pub enum Settled {
     SetAside,
 }
 
-/// Finishes a committed delete whose journal is still there: at start,
-/// and first in every read of the vault and every secrets operation. `Err`:
+/// Finishes a committed delete whose journal is still there: at start, and
+/// under the secrets file's lock first in every vault job, `accounts.*` call
+/// and secrets operation ([`crate::vault_meta_journal::recover`]). `Err`:
 /// the journal stays, and the caller must not act on the vault or the
 /// secrets file.
 pub fn settle(dir: &Path) -> std::io::Result<Settled> {

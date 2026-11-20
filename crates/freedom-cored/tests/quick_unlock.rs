@@ -2465,6 +2465,157 @@ fn a_vault_delete_journal_finishes_before_a_metadata_record() {
 
 /// `meta` is a committed create's or import's: a password change and a
 /// delete answer none, `vault_meta` moved.
+/// An import with quick unlock over an enrolled vault, its vault's rename
+/// failing after the commit (`vault-rename`, still held): the core serving,
+/// the journal pending. The hook file, the vault's digest before, the old
+/// pair, the journaled vault's digest, and the entries the write left (the
+/// old vault's `quick-unlock` and the new one's `quick-unlock.next`).
+struct PendingImport {
+    main: Main,
+    hook: PathBuf,
+    before: Option<String>,
+    old: (Option<Vec<u8>>, Option<Vec<u8>>),
+    new: String,
+    entries: BTreeMap<String, String>,
+}
+
+fn pending_import_quick() -> PendingImport {
+    let op = MetaOp::ImportQuick;
+    let mut main = op.before();
+    let before = main.vault_digest();
+    let old = (main.read("identity-vault.json"), main.read(META));
+    let hook = hook_file(&main, &["vault-rename"]);
+    main.start(&[(WRITE_FAIL, hook.to_str().unwrap())]);
+    let answer = op.run(&mut main).unwrap();
+    assert_eq!(answer["result"]["durable"], false, "{answer}");
+    let journal: Value = serde_json::from_slice(&main.read(JOURNAL).unwrap()).unwrap();
+    let new = journal["files"][0]["sha256"].as_str().unwrap().to_owned();
+    let entries = main.entries();
+    let expected: BTreeMap<String, String> = [
+        ("quick-unlock".to_owned(), before.clone().unwrap()),
+        ("quick-unlock.next".to_owned(), new.clone()),
+    ]
+    .into();
+    assert_eq!(entries, expected);
+    PendingImport {
+        main,
+        hook,
+        before,
+        old,
+        new,
+        entries,
+    }
+}
+
+impl PendingImport {
+    /// Nothing installed, and the secrets file as the write left it.
+    fn untouched(&self, label: &str) {
+        nothing_renamed(&self.main, &self.old, label);
+        assert!(
+            self.main.data.join(JOURNAL).exists(),
+            "{label}: the journal"
+        );
+        assert_eq!(self.main.entries(), self.entries, "{label}: the entries");
+    }
+
+    /// Finished by recovery under the secrets file's lock: the new pair, and
+    /// the journal-finish write left only the new vault's credential.
+    fn finished(&self, label: &str) {
+        self.main.journal_gone(label);
+        assert_eq!(
+            self.main.vault_digest().as_deref(),
+            Some(self.new.as_str()),
+            "{label}: the new vault"
+        );
+        let expected: BTreeMap<String, String> =
+            [("quick-unlock.next".to_owned(), self.new.clone())].into();
+        assert_eq!(self.main.entries(), expected, "{label}: the entries");
+    }
+}
+
+/// Recovery under the secrets file's lock failing once (`settle-once`, a
+/// transient failure): the request answers `storage`, or for reconcile the
+/// journaled vault's `pending`, and nothing is installed, although a retry
+/// outside the lock would now succeed. No read settles the journal itself.
+/// The next request's recovery finishes it, under the lock, with the
+/// journal-finish write: the replaced vault's `quick-unlock` leaves.
+/// `quick_unlock.disable` doesn't run either, so its own load can't finish
+/// it in the same request.
+#[test]
+fn a_failed_locked_recovery_answers_storage() {
+    for first in [
+        "vault.verify_password",
+        "vault.reconcile",
+        "quick_unlock.disable",
+    ] {
+        let label = first;
+        let mut pending = pending_import_quick();
+        std::fs::write(&pending.hook, "vault_meta_journal:settle-once").unwrap();
+        let main = &mut pending.main;
+        match first {
+            "vault.verify_password" => {
+                let verified = main.call(first, json!({ "password_b64": b64(NEW_PASSWORD) }));
+                assert_eq!(error_code(&verified), "storage", "{label}: {verified}");
+            }
+            "vault.reconcile" => {
+                let before = pending.before.clone();
+                let reconciled = MetaOp::ImportQuick.reconcile(main, before.as_deref());
+                assert_eq!(
+                    reconciled["result"]["status"], "committed",
+                    "{label}: {reconciled}"
+                );
+                assert_eq!(
+                    reconciled["result"]["meta"], "pending",
+                    "{label}: {reconciled}"
+                );
+            }
+            _ => {
+                let disabled = disable_op(main).unwrap();
+                assert_eq!(error_code(&disabled), "storage", "{label}: {disabled}");
+            }
+        }
+        pending.untouched(label);
+        let main = &mut pending.main;
+        let verified = main.call(
+            "vault.verify_password",
+            json!({ "password_b64": b64(NEW_PASSWORD) }),
+        );
+        assert_eq!(verified["result"], json!({}), "{label}: {verified}");
+        pending.finished(label);
+    }
+}
+
+/// A password check the throttle refused (#82) runs recovery first too,
+/// under the secrets file's lock: failing once, it answers `storage` with
+/// nothing installed; the next one's recovery finishes the journal, with
+/// the journal-finish write, and the answer is `throttled`.
+#[test]
+fn a_throttled_check_recovers_first() {
+    let mut pending = pending_import_quick();
+    let label = "precheck";
+    // Five wrong passwords through reconcile, which decides from the
+    // journaled vault while recovery fails (`vault-rename` held): the
+    // throttle is on for the next second.
+    for _ in 0..5 {
+        let params = json!({
+            "op": "import",
+            "fingerprint_before": pending.before,
+            "password_b64": b64("wrongpass"),
+            "mnemonic_b64": b64(LEGAL),
+        });
+        let wrong = pending.main.shell("vault.reconcile", params);
+        assert_eq!(wrong["result"]["status"], "not_committed", "{wrong}");
+    }
+    std::fs::write(&pending.hook, "vault_meta_journal:settle-once").unwrap();
+    let verify = json!({ "password_b64": b64(NEW_PASSWORD) });
+    let refused = pending.main.call("vault.verify_password", verify.clone());
+    assert_eq!(error_code(&refused), "storage", "{label}: {refused}");
+    pending.untouched(label);
+    let throttled = pending.main.call("vault.verify_password", verify);
+    assert_eq!(error_code(&throttled), "throttled", "{label}: {throttled}");
+    pending.finished(label);
+}
+
 #[test]
 fn reconcile_answers_meta_only_for_create_and_import() {
     let mut main = MetaOp::Import.before();

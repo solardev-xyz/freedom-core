@@ -47,8 +47,9 @@
 //!   staged vault or metadata file, is renamed. It stands for a same-user process winning a race.
 //! - `FREEDOM_CORED_TEST_GRANT_WRITE_FAIL` names a file: while it holds
 //!   `<store>:<step>` lines (`dapp`, `swarm`, `radicle`, `x402`, `phone`
-//!   for `phone-payments.json`, and `vault_meta` for `vault-meta.json`; `write`,
-//!   `fsync`, `rename`, `flush`), each write of that store's permission
+//!   for `phone-payments.json`, `vault_meta` for `vault-meta.json`, and
+//!   `safe_pending` for `safe-pending.json`; `write`, `fsync`, `rename`,
+//!   `flush`), each write of that store's permission
 //!   file fails at that step as if the OS had failed it (design 0012, "The
 //!   files": a failed write). Read at each write, so a test turns it on
 //!   and off while the core runs. `vault_meta_journal:<step>` fails a step
@@ -61,6 +62,10 @@
 //!   recovery's flush before it installs (nothing installed, the journal
 //!   kept). `delete_journal:install` fails a vault delete's install, in the
 //!   delete and in its recovery alike, as `delete-install` below does once.
+//!   `vault_meta_journal:settle-once` fails the first recovery of the
+//!   journal in the process that reads the line, before it renames
+//!   anything (the journal kept), and none after it: a transient failure,
+//!   which a test arms once the core is serving.
 //! - `FREEDOM_CORED_TEST_X402_SIGN_MARKER` names a file `x402.authorize`
 //!   appends a line to (`sign`) each time it is about to sign a payment's
 //!   digest, so a test counts the signatures: none for a cap's charge the
@@ -487,6 +492,30 @@ pub fn grant_write_fails(_store: &str, _step: &str) -> bool {
     false
 }
 
+/// [`grant_write_fails`], but true only the first time in the process that
+/// the file lists the step.
+#[cfg(feature = "testhooks")]
+pub fn grant_write_fails_once(store: &str, step: &str) -> bool {
+    static FAILED: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+    if !grant_write_fails(store, step) {
+        return false;
+    }
+    let Ok(mut failed) = FAILED.lock() else {
+        return false;
+    };
+    let key = format!("{store}:{step}");
+    if failed.contains(&key) {
+        return false;
+    }
+    failed.push(key);
+    true
+}
+
+#[cfg(not(feature = "testhooks"))]
+pub fn grant_write_fails_once(_store: &str, _step: &str) -> bool {
+    false
+}
+
 /// The hooks of every durable write but a store file's
 /// (`fc_store::fsx::replace`): `FREEDOM_CORED_TEST_SWAP`'s `checked` stage.
 /// No step fails.
@@ -516,8 +545,8 @@ impl fc_store::Hooks for SecretsWrite<'_> {
 
 /// The hooks of a store file's write (`fc_store::file::write_file`): the
 /// steps `FREEDOM_CORED_TEST_GRANT_WRITE_FAIL` names for this store
-/// (`dapp`, `swarm`, `radicle`, `x402`, `phone`, `vault_meta`), read at
-/// each write.
+/// (`dapp`, `swarm`, `radicle`, `x402`, `phone`, `vault_meta`,
+/// `safe_pending`), read at each write.
 pub struct GrantWrite<'a>(pub &'a str);
 
 impl fc_store::Hooks for GrantWrite<'_> {
