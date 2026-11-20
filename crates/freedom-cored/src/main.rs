@@ -36,6 +36,7 @@ mod log;
 mod naming;
 mod nodes;
 mod payments;
+mod payments_store;
 mod phone;
 mod profile;
 mod requests;
@@ -56,8 +57,13 @@ mod testmethods;
 // the interop harness (design 0013, PRF-5d).
 #[cfg(feature = "testhooks")]
 mod testjournal;
+// The `testhooks` feature only: the payments methods driven from stdin, for
+// the interop harness (design 0013, PRF-5g-2).
+#[cfg(feature = "testhooks")]
+mod testpayments;
 mod transport;
 mod vault;
+mod vault_meta_journal;
 mod worker;
 
 use std::io::{Read, Write};
@@ -121,6 +127,10 @@ fn main() -> ExitCode {
     #[cfg(feature = "testhooks")]
     if command.as_deref() == Some("test-journal") && testhooks::test_methods() {
         return ExitCode::from(testjournal::run(std::env::args_os().skip(2)));
+    }
+    #[cfg(feature = "testhooks")]
+    if command.as_deref() == Some("test-payments") && testhooks::test_methods() {
+        return ExitCode::from(testpayments::run(std::env::args_os().skip(2)));
     }
     if matches!(command.as_deref(), Some("profile" | "hold-profile")) {
         let entry = fc_service::confine::clean_entry();
@@ -204,6 +214,15 @@ fn recover(data_dir: &std::path::Path, lock_dir: &std::path::Path) -> Exit {
     if let Err(e) = delete_journal::startup(data_dir) {
         log::error(
             "vault delete recovery failed",
+            serde_json::json!({ "error": e.kind().to_string() }),
+        );
+        return Exit::Storage;
+    }
+    // Then a vault write's metadata journal (design 0013, "The vault and
+    // its metadata, one write"), as at the core's own start.
+    if let Err(e) = vault_meta_journal::startup(data_dir) {
+        log::error(
+            "vault write recovery failed",
             serde_json::json!({ "error": e.kind().to_string() }),
         );
         return Exit::Storage;

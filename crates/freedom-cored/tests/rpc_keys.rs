@@ -363,8 +363,8 @@ fn reference_text(keys: &[(&str, &str)]) -> String {
 }
 
 /// The hello's `store_moved`: unknown names refused (and the core exits),
-/// a name given twice echoed once, a known name this core doesn't serve
-/// not echoed, absent meaning none.
+/// a name given twice echoed once, absent meaning none. Every known name
+/// is served now (`payments`, PRF-5g-2; `intents`, PRF-5e-3).
 #[test]
 fn the_hello_names_the_stores() {
     let mut main = Main::new(false);
@@ -379,7 +379,13 @@ fn the_hello_names_the_stores() {
     let hello = main.start(&[]);
     assert_eq!(
         hello["result"]["store_moved"],
-        json!(["vault_meta", "intents", "safe_pending", "rpc_api_keys"]),
+        json!([
+            "vault_meta",
+            "intents",
+            "payments",
+            "safe_pending",
+            "rpc_api_keys"
+        ]),
         "{hello}"
     );
     main.moved = vec![];

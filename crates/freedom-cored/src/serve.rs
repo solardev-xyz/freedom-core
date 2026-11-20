@@ -263,6 +263,18 @@ const CAPABILITIES: &[&str] = &[
     "safe_pending.set",
     "safe_pending.clear",
     "safe_pending.list",
+    // Design 0013: the payment history (PRF-5g-2).
+    "payments.append",
+    "payments.update",
+    "payments.mark_confirmed",
+    "payments.mark_failed",
+    "payments.mark_dropped",
+    "payments.set_dropped_seen",
+    "payments.pending",
+    "payments.get_recent",
+    "payments.get_by_id",
+    "payments.get_count",
+    "payments.clear",
     // Design 0013: the wallet's intent records (PRF-5e-3).
     "intents.commit",
     "intents.handoff",
@@ -839,7 +851,13 @@ const STORES: &[&str] = &[
 ];
 
 /// The stores this core serves once named: the echo holds only these.
-const STORES_SERVED: &[&str] = &["vault_meta", "intents", "safe_pending", "rpc_api_keys"];
+const STORES_SERVED: &[&str] = &[
+    "vault_meta",
+    "intents",
+    "safe_pending",
+    "payments",
+    "rpc_api_keys",
+];
 
 /// The hello's `store_moved`, each name once, in the hello's order. A name
 /// [`STORES`] doesn't list makes the hello malformed.
@@ -1695,6 +1713,11 @@ impl Core {
                 "vault_meta" => self.vault.configure_vault_meta(),
                 "rpc_api_keys" => self.vault.configure_rpc_keys(root.clone()),
                 "safe_pending" | "intents" => true,
+                // Opened at its first request, never before the name.
+                "payments" => {
+                    self.vault.configure_payments(root.clone());
+                    true
+                }
                 _ => false,
             })
             .collect();

@@ -190,6 +190,8 @@ struct Main {
     next_id: u64,
     /// Events the calls set aside.
     events: Vec<Value>,
+    /// The hello names `vault_meta` in `store_moved` (PRF-5c-2).
+    moved: bool,
 }
 
 impl Main {
@@ -203,6 +205,7 @@ impl Main {
             core: None,
             next_id: 10,
             events: Vec::new(),
+            moved: false,
         }
     }
 
@@ -217,6 +220,9 @@ impl Main {
     fn start_with(&mut self, env: &[(&str, &str)]) {
         self.stop();
         let mut core = common::spawn_env("serve", &self.data, &self.locks, &[], env);
+        if self.moved {
+            core.store_moved = vec!["vault_meta"];
+        }
         core.hello();
         self.core = Some(core);
     }
@@ -1974,4 +1980,841 @@ fn a_rewrap_refused_with_nothing_changed() {
     main.drained();
     main.only_the_key_in_use();
     assert_eq!(main.status()["enabled"], true);
+}
+
+// ---- PRF-5c-2: the vault and its metadata, one write (design 0013) ----
+
+const META: &str = "vault-meta.json";
+const JOURNAL: &str = "vault-meta-journal.json";
+const CORRUPT: &str = "vault-meta-journal.json.corrupt";
+const STAGED: [&str; 2] = [
+    "identity-vault.json.freedom-new",
+    "vault-meta.json.freedom-new",
+];
+const WRITE_FAIL: &str = "FREEDOM_CORED_TEST_GRANT_WRITE_FAIL";
+/// Metadata main wrote for the vault before (with `addresses`, so an
+/// unlock leaves it).
+const OLD_META: &str = "{\n  \"userKnowsPassword\": true,\n  \"createdAt\": \"2026-01-01T00:00:00.000Z\",\n  \"addresses\": {\n    \"userWallet\": \"0x01\",\n    \"beeWallet\": \"0x02\"\n  }\n}";
+/// Metadata from before `afterUnlock`'s migration: no `addresses`.
+const BARE_META: &str =
+    "{\n  \"userKnowsPassword\": true,\n  \"createdAt\": \"2026-01-01T00:00:00.000Z\"\n}";
+
+/// The journaled operations: create (with and without quick unlock, no
+/// vault before) and import over a vault with metadata (with quick unlock
+/// over an enrolled vault, and without).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum MetaOp {
+    Create,
+    CreateQuick,
+    Import,
+    ImportQuick,
+}
+
+impl MetaOp {
+    const ALL: [MetaOp; 4] = [
+        MetaOp::Create,
+        MetaOp::CreateQuick,
+        MetaOp::Import,
+        MetaOp::ImportQuick,
+    ];
+
+    fn quick(self) -> bool {
+        matches!(self, MetaOp::CreateQuick | MetaOp::ImportQuick)
+    }
+
+    fn import(self) -> bool {
+        matches!(self, MetaOp::Import | MetaOp::ImportQuick)
+    }
+
+    /// A stopped `main` with the op's state before: no vault for a create;
+    /// the `abandon` vault with main's metadata for an import, enrolled for
+    /// quick unlock's.
+    fn before(self) -> Main {
+        let mut main = if self == MetaOp::ImportQuick {
+            enrolled_stopped()
+        } else {
+            Main::new()
+        };
+        if self == MetaOp::Import {
+            main.start(&[]);
+            main.import();
+            main.stop();
+        }
+        if self.import() {
+            std::fs::write(main.data.join(META), OLD_META).unwrap();
+        }
+        main.moved = true;
+        main
+    }
+
+    fn params(self, knows: Option<bool>) -> Value {
+        let mut params = if self.import() {
+            json!({ "password_b64": b64(NEW_PASSWORD), "mnemonic_b64": b64(LEGAL), "overwrite": true })
+        } else {
+            json!({ "password_b64": b64(NEW_PASSWORD), "words": 12 })
+        };
+        if self.quick() {
+            params["quick_unlock"] = json!(true);
+        }
+        if let Some(knows) = knows {
+            params["user_knows_password"] = json!(knows);
+        }
+        params
+    }
+
+    fn method(self) -> &'static str {
+        if self.import() {
+            "vault.import"
+        } else {
+            "vault.create"
+        }
+    }
+
+    fn run(self, main: &mut Main) -> Option<Value> {
+        main.try_call("chrome", self.method(), self.params(Some(false)))
+    }
+
+    /// `vault.reconcile` for the op, `before` the vault's digest before it.
+    fn reconcile(self, main: &mut Main, before: Option<&str>) -> Value {
+        let mut params = json!({
+            "op": if self.import() { "import" } else { "create" },
+            "fingerprint_before": before,
+            "password_b64": b64(NEW_PASSWORD),
+        });
+        if self.import() {
+            params["mnemonic_b64"] = json!(b64(LEGAL));
+        }
+        main.shell("vault.reconcile", params)
+    }
+}
+
+impl Main {
+    fn read(&self, name: &str) -> Option<Vec<u8>> {
+        std::fs::read(self.data.join(name)).ok()
+    }
+
+    /// No journal, no staged file.
+    fn journal_gone(&self, label: &str) {
+        for name in [JOURNAL].iter().chain(STAGED.iter()) {
+            assert!(!self.data.join(name).exists(), "{label}: {name} is left");
+        }
+    }
+
+    /// The pair after a crash or a failure: the old vault with its old
+    /// metadata, or the new vault with its metadata (whose addresses are
+    /// the new vault's, `userKnowsPassword` false). With quick unlock, the
+    /// vault on disk has exactly its own credential, and quick unlock opens
+    /// it.
+    fn meta_pair_holds(
+        &mut self,
+        old: &(Option<Vec<u8>>, Option<Vec<u8>>),
+        new: bool,
+        quick: bool,
+        label: &str,
+    ) {
+        let vault = self.read("identity-vault.json");
+        let meta = self.read(META);
+        if !new {
+            assert_eq!(vault, old.0, "{label}: the old vault");
+            assert_eq!(meta, old.1, "{label}: the old metadata");
+        } else {
+            assert!(vault.is_some() && vault != old.0, "{label}: the new vault");
+            let meta: Value = serde_json::from_slice(&meta.expect("metadata")).unwrap();
+            assert_eq!(meta["userKnowsPassword"], false, "{label}: {meta}");
+            let unlocked = self.call("vault.unlock", json!({ "password_b64": b64(NEW_PASSWORD) }));
+            let user = unlocked["result"]["addresses"]["user_wallet"].clone();
+            assert!(user.is_string(), "{label}: {unlocked}");
+            assert_eq!(meta["addresses"]["userWallet"], user, "{label}: {meta}");
+            self.call("vault.lock", json!({}));
+        }
+        let digest = vault.as_deref().map(sha256_hex);
+        let entries = self.entries();
+        let bound = entries
+            .values()
+            .filter(|d| Some(d.as_str()) == digest.as_deref())
+            .count();
+        // The old vault keeps its own credential (an enrolled import's).
+        let credential = if new { quick } else { !entries.is_empty() };
+        assert_eq!(bound, usize::from(credential), "{label}: {entries:?}");
+        assert_eq!(entries.len(), bound, "{label}: {entries:?}");
+        if credential {
+            let unlock = self.call("quick_unlock.unlock", json!({}));
+            assert!(unlock["result"].is_object(), "{label}: {unlock}");
+            self.call("vault.lock", json!({}));
+        }
+    }
+}
+
+/// The journal's own flush failing: nothing is renamed until the journal's
+/// name is durable, in the write or in recovery. The old pair stays, and
+/// both staged files are there for the journal.
+fn nothing_renamed(main: &Main, old: &(Option<Vec<u8>>, Option<Vec<u8>>), label: &str) {
+    assert_eq!(
+        main.read("identity-vault.json"),
+        old.0,
+        "{label}: the vault"
+    );
+    assert_eq!(main.read(META), old.1, "{label}: the metadata");
+    for name in STAGED {
+        assert!(main.data.join(name).exists(), "{label}: {name}");
+    }
+}
+
+fn hook_file(main: &Main, steps: &[&str]) -> PathBuf {
+    let path = main.data.parent().unwrap().join("write-fail");
+    let text: Vec<String> = steps
+        .iter()
+        .map(|s| format!("vault_meta_journal:{s}"))
+        .collect();
+    std::fs::write(&path, text.join("\n")).unwrap();
+    path
+}
+
+#[test]
+fn the_vault_and_its_metadata_killed_at_each_step() {
+    for op in MetaOp::ALL {
+        for (step, new) in [
+            ("before-meta-stage", false),
+            ("before-meta-journal", false),
+            ("before-meta-journal-rename", false),
+            ("after-meta-journal", true),
+            ("after-meta-install-vault", true),
+            ("after-meta-install-meta", true),
+            ("after-meta-done", true),
+        ] {
+            let label = format!("{op:?} {step}");
+            let mut main = op.before();
+            let old = (main.read("identity-vault.json"), main.read(META));
+            main.start(&[("FREEDOM_CORED_TEST_SECRETS_CRASH", step)]);
+            assert!(op.run(&mut main).is_none(), "{label}: answered");
+            assert_eq!(
+                main.core().exit_code(Duration::from_secs(10)),
+                99,
+                "{label}"
+            );
+            main.core = None;
+            if step == "after-meta-install-vault" {
+                // The vault is installed first: an older build sees the new
+                // vault with the old metadata, as today's flow can leave.
+                assert_ne!(main.read("identity-vault.json"), old.0, "{label}");
+                assert_eq!(
+                    main.read(META),
+                    old.1,
+                    "{label}: the metadata after the vault"
+                );
+            }
+            main.start(&[]);
+            main.journal_gone(&label);
+            assert!(!main.data.join(CORRUPT).exists(), "{label}");
+            main.drained();
+            main.meta_pair_holds(&old, new, op.quick(), &label);
+        }
+    }
+}
+
+#[test]
+fn a_failure_before_the_commit_changes_nothing() {
+    for op in [MetaOp::CreateQuick, MetaOp::ImportQuick, MetaOp::Import] {
+        for (steps, code) in [
+            ("meta-stage", "storage"),
+            ("vault-claim", "deadline"),
+            ("meta-journal", "storage"),
+        ] {
+            let label = format!("{op:?} {steps}");
+            let mut main = op.before();
+            let old = (main.read("identity-vault.json"), main.read(META));
+            main.start(&[("FREEDOM_CORED_TEST_SECRETS_FAIL", steps)]);
+            let answer = op.run(&mut main).unwrap();
+            assert_eq!(error_code(&answer), code, "{label}: {answer}");
+            main.journal_gone(&label);
+            main.meta_pair_holds(&old, false, op.quick(), &label);
+            main.start(&[]);
+            main.drained();
+            main.meta_pair_holds(&old, false, op.quick(), &label);
+        }
+    }
+}
+
+#[test]
+fn a_returned_failure_after_the_commit_answers_the_committed_result() {
+    for op in MetaOp::ALL {
+        for step in [
+            "journal-flush",
+            "vault-rename",
+            "vault-flush",
+            "meta-rename",
+            "meta-flush",
+            "unlink",
+        ] {
+            let label = format!("{op:?} {step}");
+            let mut main = op.before();
+            let before = main.vault_digest();
+            let old = (main.read("identity-vault.json"), main.read(META));
+            let unflushed = step == "journal-flush";
+            let hook = hook_file(&main, &[step]);
+            let env = [(WRITE_FAIL, hook.to_str().unwrap())];
+            main.start(&env);
+            let answer = op.run(&mut main).unwrap();
+            assert_eq!(answer["result"]["durable"], false, "{label}: {answer}");
+            assert!(
+                answer["result"]["addresses"].is_object(),
+                "{label}: {answer}"
+            );
+            assert_eq!(
+                answer["result"]["mnemonic_b64"].is_string(),
+                !op.import(),
+                "{label}"
+            );
+            assert!(
+                main.data.join(JOURNAL).exists(),
+                "{label}: the journal stays"
+            );
+            if unflushed {
+                nothing_renamed(&main, &old, &label);
+            }
+            // While the hook holds: storage, and reconcile's `pending`.
+            let listed = main.call("accounts.list", json!({}));
+            assert_eq!(error_code(&listed), "storage", "{label}: {listed}");
+            let verified = main.call(
+                "vault.verify_password",
+                json!({ "password_b64": b64(NEW_PASSWORD) }),
+            );
+            assert_eq!(error_code(&verified), "storage", "{label}: {verified}");
+            let reconciled = op.reconcile(&mut main, before.as_deref());
+            assert_eq!(
+                reconciled["result"]["status"], "committed",
+                "{label}: {reconciled}"
+            );
+            assert_eq!(
+                reconciled["result"]["meta"], "pending",
+                "{label}: {reconciled}"
+            );
+            if unflushed {
+                nothing_renamed(&main, &old, &label);
+            }
+            // A restart keeps the journal and the staged credential.
+            main.start(&env);
+            assert!(main.data.join(JOURNAL).exists(), "{label}: after a restart");
+            if unflushed {
+                nothing_renamed(&main, &old, &label);
+            }
+            if op.quick() {
+                let journal: Value = serde_json::from_slice(&main.read(JOURNAL).unwrap()).unwrap();
+                let new = journal["files"][0]["sha256"].as_str().unwrap().to_owned();
+                assert!(
+                    main.entries().values().any(|d| *d == new),
+                    "{label}: {:?}",
+                    main.entries()
+                );
+            }
+            // Cleared: the next read finishes the install.
+            std::fs::write(&hook, "").unwrap();
+            let listed = main.call("accounts.list", json!({}));
+            assert!(listed["result"]["wallets"].is_array(), "{label}: {listed}");
+            main.journal_gone(&label);
+            let reconciled = op.reconcile(&mut main, before.as_deref());
+            assert_eq!(
+                reconciled["result"]["meta"], "written",
+                "{label}: {reconciled}"
+            );
+            let entries = main.entries();
+            let digest = main.vault_digest().unwrap();
+            let expected: BTreeMap<String, String> = match op {
+                MetaOp::CreateQuick => [("quick-unlock".to_owned(), digest)].into(),
+                MetaOp::ImportQuick => [("quick-unlock.next".to_owned(), digest)].into(),
+                _ => BTreeMap::new(),
+            };
+            assert_eq!(entries, expected, "{label}");
+            // The snapshot taken while the journal was pending is the
+            // start's: a fresh start reads the pair.
+            main.start(&[]);
+            main.meta_pair_holds(&(None, None), true, op.quick(), &label);
+        }
+    }
+}
+
+#[test]
+fn the_journals_own_flush() {
+    // Failing once: tried again, and the write finishes durable.
+    for op in [MetaOp::CreateQuick, MetaOp::Import] {
+        let label = format!("{op:?} once");
+        let mut main = op.before();
+        let old = (main.read("identity-vault.json"), main.read(META));
+        main.start(&[("FREEDOM_CORED_TEST_SECRETS_FAIL", "meta-journal-flush")]);
+        let answer = op.run(&mut main).unwrap();
+        assert!(answer["result"].is_object(), "{label}: {answer}");
+        assert!(
+            answer["result"].get("durable").is_none(),
+            "{label}: {answer}"
+        );
+        main.journal_gone(&label);
+        main.meta_pair_holds(&old, true, op.quick(), &label);
+    }
+    // Held, with a crash hook past the vault's install: it never fires, as
+    // nothing is renamed before the journal's name is durable. With that
+    // name lost, as power loss could lose it, the old pair stays.
+    for op in [MetaOp::CreateQuick, MetaOp::ImportQuick] {
+        let label = format!("{op:?} held");
+        let mut main = op.before();
+        let old = (main.read("identity-vault.json"), main.read(META));
+        let hook = hook_file(&main, &["journal-flush"]);
+        main.start(&[
+            (WRITE_FAIL, hook.to_str().unwrap()),
+            (
+                "FREEDOM_CORED_TEST_SECRETS_CRASH",
+                "after-meta-install-vault",
+            ),
+        ]);
+        let answer = op.run(&mut main).expect("answered, not killed");
+        assert_eq!(answer["result"]["durable"], false, "{label}: {answer}");
+        nothing_renamed(&main, &old, &label);
+        main.stop();
+        std::fs::remove_file(main.data.join(JOURNAL)).unwrap();
+        main.start(&[]);
+        main.journal_gone(&label);
+        assert!(!main.data.join(CORRUPT).exists(), "{label}");
+        main.drained();
+        main.meta_pair_holds(&old, false, op.quick(), &label);
+    }
+}
+
+/// Design 0013, "The delete's journal stays separate": an older core, which
+/// doesn't read a metadata record, committed a delete of the vault it still
+/// showed. The delete finishes first: while it can't, the record isn't
+/// touched; then the record, whose vault is no longer its `before`, is set
+/// aside, and the deleted vault stays deleted.
+#[test]
+fn a_vault_delete_journal_finishes_before_a_metadata_record() {
+    let mut main = enrolled_stopped();
+    std::fs::write(main.data.join(META), OLD_META).unwrap();
+    main.moved = true;
+    let old_vault = main.read("identity-vault.json").unwrap();
+    // An import over the enrolled vault, killed after its commit.
+    main.start(&[("FREEDOM_CORED_TEST_SECRETS_CRASH", "after-meta-journal")]);
+    assert!(MetaOp::Import.run(&mut main).is_none());
+    assert_eq!(main.core().exit_code(Duration::from_secs(10)), 99);
+    main.core = None;
+    // The older core's delete, committed and killed before its install.
+    let staged = main
+        .file()
+        .remove(&fc_keystore::EntryName::new("quick-unlock").unwrap())
+        .unwrap()
+        .text();
+    std::fs::write(main.data.join("secrets.json.freedom-new"), &staged).unwrap();
+    let record = json!({ "op": "vault.delete", "files": [
+        { "target": "secrets.json", "staged": "secrets.json.freedom-new",
+          "sha256": sha256_hex(staged.as_bytes()) },
+        { "target": "identity-vault.json", "sha256": sha256_hex(&old_vault), "remove": true },
+    ]});
+    std::fs::write(
+        main.data.join("vault-delete-journal.json"),
+        record.to_string(),
+    )
+    .unwrap();
+    // The delete's install held failing.
+    let hook = main.data.parent().unwrap().join("write-fail");
+    std::fs::write(&hook, "delete_journal:install").unwrap();
+    main.start(&[(WRITE_FAIL, hook.to_str().unwrap())]);
+    let old = (Some(old_vault.clone()), Some(OLD_META.as_bytes().to_vec()));
+    let held = |main: &Main, label: &str| {
+        nothing_renamed(main, &old, label);
+        assert!(main.data.join(JOURNAL).exists(), "{label}");
+        assert!(
+            main.data.join("vault-delete-journal.json").exists(),
+            "{label}"
+        );
+    };
+    held(&main, "at start");
+    let listed = main.call("accounts.list", json!({}));
+    assert_eq!(error_code(&listed), "storage", "{listed}");
+    let verified = main.call(
+        "vault.verify_password",
+        json!({ "password_b64": b64(NEW_PASSWORD) }),
+    );
+    assert_eq!(error_code(&verified), "storage", "{verified}");
+    // Nor does reconcile answer from the staged vault: once the delete
+    // finishes, the record is set aside and that vault never installed.
+    let before = sha256_hex(&old_vault);
+    let reconciled = MetaOp::Import.reconcile(&mut main, Some(&before));
+    assert_eq!(error_code(&reconciled), "storage", "{reconciled}");
+    held(&main, "while the delete can't finish");
+    // Cleared: the delete finishes, then the record is set aside (a vault
+    // job's recovery; `accounts.*` would normalize the metadata).
+    std::fs::write(&hook, "").unwrap();
+    let verified = main.call(
+        "vault.verify_password",
+        json!({ "password_b64": b64(NEW_PASSWORD) }),
+    );
+    assert_ne!(error_code(&verified), "storage", "{verified}");
+    main.no_delete_left();
+    main.journal_gone("after the delete");
+    assert!(main.data.join(CORRUPT).exists());
+    assert!(
+        main.read("identity-vault.json").is_none(),
+        "the vault deleted"
+    );
+    assert_eq!(main.read(META).unwrap(), OLD_META.as_bytes());
+    assert!(main.entries().is_empty(), "{:?}", main.entries());
+    let reconciled = MetaOp::Import.reconcile(&mut main, Some(&before));
+    assert_eq!(
+        reconciled["result"]["status"], "not_committed",
+        "{reconciled}"
+    );
+    main.start(&[]);
+    assert!(
+        main.read("identity-vault.json").is_none(),
+        "after a restart"
+    );
+}
+
+/// `meta` is a committed create's or import's: a password change and a
+/// delete answer none, `vault_meta` moved.
+/// An import with quick unlock over an enrolled vault, its vault's rename
+/// failing after the commit (`vault-rename`, still held): the core serving,
+/// the journal pending. The hook file, the vault's digest before, the old
+/// pair, the journaled vault's digest, and the entries the write left (the
+/// old vault's `quick-unlock` and the new one's `quick-unlock.next`).
+struct PendingImport {
+    main: Main,
+    hook: PathBuf,
+    before: Option<String>,
+    old: (Option<Vec<u8>>, Option<Vec<u8>>),
+    new: String,
+    entries: BTreeMap<String, String>,
+}
+
+fn pending_import_quick() -> PendingImport {
+    let op = MetaOp::ImportQuick;
+    let mut main = op.before();
+    let before = main.vault_digest();
+    let old = (main.read("identity-vault.json"), main.read(META));
+    let hook = hook_file(&main, &["vault-rename"]);
+    main.start(&[(WRITE_FAIL, hook.to_str().unwrap())]);
+    let answer = op.run(&mut main).unwrap();
+    assert_eq!(answer["result"]["durable"], false, "{answer}");
+    let journal: Value = serde_json::from_slice(&main.read(JOURNAL).unwrap()).unwrap();
+    let new = journal["files"][0]["sha256"].as_str().unwrap().to_owned();
+    let entries = main.entries();
+    let expected: BTreeMap<String, String> = [
+        ("quick-unlock".to_owned(), before.clone().unwrap()),
+        ("quick-unlock.next".to_owned(), new.clone()),
+    ]
+    .into();
+    assert_eq!(entries, expected);
+    PendingImport {
+        main,
+        hook,
+        before,
+        old,
+        new,
+        entries,
+    }
+}
+
+impl PendingImport {
+    /// Nothing installed, and the secrets file as the write left it.
+    fn untouched(&self, label: &str) {
+        nothing_renamed(&self.main, &self.old, label);
+        assert!(
+            self.main.data.join(JOURNAL).exists(),
+            "{label}: the journal"
+        );
+        assert_eq!(self.main.entries(), self.entries, "{label}: the entries");
+    }
+
+    /// Finished by recovery under the secrets file's lock: the new pair, and
+    /// the journal-finish write left only the new vault's credential.
+    fn finished(&self, label: &str) {
+        self.main.journal_gone(label);
+        assert_eq!(
+            self.main.vault_digest().as_deref(),
+            Some(self.new.as_str()),
+            "{label}: the new vault"
+        );
+        let expected: BTreeMap<String, String> =
+            [("quick-unlock.next".to_owned(), self.new.clone())].into();
+        assert_eq!(self.main.entries(), expected, "{label}: the entries");
+    }
+}
+
+/// Recovery under the secrets file's lock failing once (`settle-once`, a
+/// transient failure): the request answers `storage`, or for reconcile the
+/// journaled vault's `pending`, and nothing is installed, although a retry
+/// outside the lock would now succeed. No read settles the journal itself.
+/// The next request's recovery finishes it, under the lock, with the
+/// journal-finish write: the replaced vault's `quick-unlock` leaves.
+/// `quick_unlock.disable` doesn't run either, so its own load can't finish
+/// it in the same request.
+#[test]
+fn a_failed_locked_recovery_answers_storage() {
+    for first in [
+        "vault.verify_password",
+        "vault.reconcile",
+        "quick_unlock.disable",
+    ] {
+        let label = first;
+        let mut pending = pending_import_quick();
+        std::fs::write(&pending.hook, "vault_meta_journal:settle-once").unwrap();
+        let main = &mut pending.main;
+        match first {
+            "vault.verify_password" => {
+                let verified = main.call(first, json!({ "password_b64": b64(NEW_PASSWORD) }));
+                assert_eq!(error_code(&verified), "storage", "{label}: {verified}");
+            }
+            "vault.reconcile" => {
+                let before = pending.before.clone();
+                let reconciled = MetaOp::ImportQuick.reconcile(main, before.as_deref());
+                assert_eq!(
+                    reconciled["result"]["status"], "committed",
+                    "{label}: {reconciled}"
+                );
+                assert_eq!(
+                    reconciled["result"]["meta"], "pending",
+                    "{label}: {reconciled}"
+                );
+            }
+            _ => {
+                let disabled = disable_op(main).unwrap();
+                assert_eq!(error_code(&disabled), "storage", "{label}: {disabled}");
+            }
+        }
+        pending.untouched(label);
+        let main = &mut pending.main;
+        let verified = main.call(
+            "vault.verify_password",
+            json!({ "password_b64": b64(NEW_PASSWORD) }),
+        );
+        assert_eq!(verified["result"], json!({}), "{label}: {verified}");
+        pending.finished(label);
+    }
+}
+
+/// A password check the throttle refused (#82) runs recovery first too,
+/// under the secrets file's lock: failing once, it answers `storage` with
+/// nothing installed; the next one's recovery finishes the journal, with
+/// the journal-finish write, and the answer is `throttled`.
+#[test]
+fn a_throttled_check_recovers_first() {
+    let mut pending = pending_import_quick();
+    let label = "precheck";
+    // Five wrong passwords through reconcile, which decides from the
+    // journaled vault while recovery fails (`vault-rename` held): the
+    // throttle is on for the next second.
+    for _ in 0..5 {
+        let params = json!({
+            "op": "import",
+            "fingerprint_before": pending.before,
+            "password_b64": b64("wrongpass"),
+            "mnemonic_b64": b64(LEGAL),
+        });
+        let wrong = pending.main.shell("vault.reconcile", params);
+        assert_eq!(wrong["result"]["status"], "not_committed", "{wrong}");
+    }
+    std::fs::write(&pending.hook, "vault_meta_journal:settle-once").unwrap();
+    let verify = json!({ "password_b64": b64(NEW_PASSWORD) });
+    let refused = pending.main.call("vault.verify_password", verify.clone());
+    assert_eq!(error_code(&refused), "storage", "{label}: {refused}");
+    pending.untouched(label);
+    let throttled = pending.main.call("vault.verify_password", verify);
+    assert_eq!(error_code(&throttled), "throttled", "{label}: {throttled}");
+    pending.finished(label);
+}
+
+#[test]
+fn reconcile_answers_meta_only_for_create_and_import() {
+    let mut main = MetaOp::Import.before();
+    main.start(&[]);
+    let before = main.vault_digest();
+    let changed = main.change(PASSWORD, NEW_PASSWORD);
+    assert!(changed["result"].is_object(), "{changed}");
+    let reconciled = main.shell(
+        "vault.reconcile",
+        json!({ "op": "change_password", "fingerprint_before": before,
+                "password_b64": b64(NEW_PASSWORD) }),
+    );
+    assert_eq!(reconciled["result"]["status"], "committed", "{reconciled}");
+    assert!(reconciled["result"].get("meta").is_none(), "{reconciled}");
+    let before = main.vault_digest();
+    let deleted = main.call("vault.delete", json!({ "password_b64": b64(NEW_PASSWORD) }));
+    assert!(deleted["result"].is_object(), "{deleted}");
+    let reconciled = main.shell(
+        "vault.reconcile",
+        json!({ "op": "delete", "fingerprint_before": before,
+                "password_b64": b64(NEW_PASSWORD) }),
+    );
+    assert_eq!(reconciled["result"]["status"], "committed", "{reconciled}");
+    assert!(reconciled["result"].get("meta").is_none(), "{reconciled}");
+}
+
+/// A staged file swapped before its rename is never installed (the
+/// install's identity check): the write is pending, and recovery, finding
+/// a staged file without its digest, sets the record aside.
+#[test]
+fn a_staged_file_swapped_before_its_rename_is_never_installed() {
+    let mut main = MetaOp::Import.before();
+    let old = (main.read("identity-vault.json"), main.read(META));
+    let foreign = main.data.parent().unwrap().join("foreign");
+    std::fs::write(&foreign, b"{\"not\":\"the vault\"}").unwrap();
+    let swap = format!("renaming={}", foreign.display());
+    main.start(&[("FREEDOM_CORED_TEST_SWAP", swap.as_str())]);
+    let answer = MetaOp::Import.run(&mut main).unwrap();
+    assert_eq!(answer["result"]["durable"], false, "{answer}");
+    assert_eq!(main.read("identity-vault.json"), old.0, "not installed");
+    main.start(&[]);
+    assert!(main.data.join(CORRUPT).exists(), "set aside");
+    main.journal_gone("swapped");
+    main.meta_pair_holds(&old, false, false, "swapped");
+}
+
+#[test]
+fn the_finish_flush_failing_after_the_unlink() {
+    let mut main = MetaOp::Create.before();
+    let hook = hook_file(&main, &["finish-flush"]);
+    main.start(&[(WRITE_FAIL, hook.to_str().unwrap())]);
+    let answer = MetaOp::Create.run(&mut main).unwrap();
+    assert_eq!(answer["result"]["durable"], false, "{answer}");
+    main.journal_gone("finish-flush");
+    let reconciled = MetaOp::Create.reconcile(&mut main, None);
+    assert_eq!(reconciled["result"]["meta"], "written", "{reconciled}");
+    main.stop();
+    // The journal back, as a crash before a later flush would leave it.
+    let vault = main.read("identity-vault.json").unwrap();
+    let meta = main.read(META).unwrap();
+    let record = json!({ "op": "vault.create", "quick_unlock": false, "files": [
+        { "target": "identity-vault.json", "staged": STAGED[0], "before": null, "sha256": sha256_hex(&vault) },
+        { "target": META, "staged": STAGED[1], "before": null, "sha256": sha256_hex(&meta) },
+    ]});
+    std::fs::write(main.data.join(JOURNAL), record.to_string()).unwrap();
+    main.start(&[]);
+    main.journal_gone("put back");
+    assert_eq!(main.read("identity-vault.json").unwrap(), vault);
+    assert_eq!(main.read(META).unwrap(), meta);
+}
+
+#[test]
+fn a_record_recovery_cant_act_on_is_set_aside() {
+    // No writer's record: set aside, nothing else changed.
+    let mut main = MetaOp::Import.before();
+    let old = (main.read("identity-vault.json"), main.read(META));
+    std::fs::write(main.data.join(JOURNAL), b"{\"op\":\"vault.create\"}").unwrap();
+    std::fs::write(main.data.join(STAGED[0]), b"x").unwrap();
+    main.start(&[]);
+    assert!(main.data.join(CORRUPT).exists());
+    main.journal_gone("no writer's");
+    main.meta_pair_holds(&old, false, false, "no writer's");
+    // A Quick Setup vault whose credential an older core removed (killed
+    // after the commit, before the install): never installed.
+    let mut main = MetaOp::CreateQuick.before();
+    main.start(&[("FREEDOM_CORED_TEST_SECRETS_CRASH", "after-meta-journal")]);
+    assert!(MetaOp::CreateQuick.run(&mut main).is_none());
+    assert_eq!(main.core().exit_code(Duration::from_secs(10)), 99);
+    main.core = None;
+    let file = main.file();
+    let without = file
+        .remove(&fc_keystore::EntryName::new("quick-unlock").unwrap())
+        .unwrap();
+    std::fs::write(main.secrets_path(), without.text()).unwrap();
+    main.start(&[]);
+    assert!(main.data.join(CORRUPT).exists(), "set aside");
+    main.journal_gone("no credential");
+    assert!(main.read("identity-vault.json").is_none() && main.read(META).is_none());
+    // A target an older build changed after the vault's install: the
+    // record set aside, its metadata stays.
+    let mut main = MetaOp::Import.before();
+    main.start(&[(
+        "FREEDOM_CORED_TEST_SECRETS_CRASH",
+        "after-meta-install-vault",
+    )]);
+    assert!(MetaOp::Import.run(&mut main).is_none());
+    assert_eq!(main.core().exit_code(Duration::from_secs(10)), 99);
+    main.core = None;
+    let changed = OLD_META.replace("2026", "2025");
+    std::fs::write(main.data.join(META), &changed).unwrap();
+    let vault = main.read("identity-vault.json");
+    main.start(&[]);
+    assert!(main.data.join(CORRUPT).exists(), "set aside");
+    main.journal_gone("changed metadata");
+    assert_eq!(main.read(META).unwrap(), changed.as_bytes());
+    assert_eq!(main.read("identity-vault.json"), vault);
+}
+
+#[test]
+fn user_knows_password_is_required_once_moved_and_written() {
+    for op in [MetaOp::Create, MetaOp::Import] {
+        let mut main = op.before();
+        main.start(&[]);
+        let refused = main.call(op.method(), op.params(None));
+        assert_eq!(
+            error_code(&refused),
+            "invalid_argument",
+            "{op:?}: {refused}"
+        );
+        let wrote = main.call(op.method(), op.params(Some(true)));
+        assert!(wrote["result"].is_object(), "{wrote}");
+        assert!(wrote["result"].get("durable").is_none(), "{wrote}");
+        let meta: Value = serde_json::from_slice(&main.read(META).unwrap()).unwrap();
+        assert_eq!(meta["userKnowsPassword"], true, "{meta}");
+        // Both installed from files staged with mode 0600.
+        #[cfg(unix)]
+        for name in ["identity-vault.json", META] {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(main.data.join(name))
+                .unwrap()
+                .permissions()
+                .mode();
+            assert_eq!(mode & 0o777, 0o600, "{op:?}: {name}");
+        }
+        // vault.delete leaves the metadata.
+        let deleted = main.call("vault.delete", json!({ "password_b64": b64(NEW_PASSWORD) }));
+        assert!(deleted["result"].is_object(), "{deleted}");
+        assert!(
+            main.read(META).is_some(),
+            "{op:?}: vault.delete leaves vault-meta.json"
+        );
+    }
+    // Before the move: ignored, and the core writes no metadata.
+    let mut main = Main::new();
+    main.start(&[]);
+    let created = main.call("vault.create", MetaOp::Create.params(None));
+    assert!(created["result"].is_object(), "{created}");
+    assert!(main.read(META).is_none());
+    let reconciled = MetaOp::Create.reconcile(&mut main, None);
+    assert!(reconciled["result"].get("meta").is_none(), "{reconciled}");
+}
+
+#[test]
+fn the_unlock_migrates_missing_addresses_once_moved() {
+    let mut main = enrolled_stopped();
+    std::fs::write(main.data.join(META), BARE_META).unwrap();
+    // Not moved: nothing written.
+    main.start(&[]);
+    main.call("vault.unlock", json!({ "password_b64": b64(PASSWORD) }));
+    assert_eq!(main.read(META).unwrap(), BARE_META.as_bytes());
+    // Moved, the write failing: the unlock still answers; the next one
+    // migrates.
+    main.moved = true;
+    let hook = main.data.parent().unwrap().join("meta-fail");
+    std::fs::write(&hook, "vault_meta:rename").unwrap();
+    main.start(&[(WRITE_FAIL, hook.to_str().unwrap())]);
+    let unlocked = main.call("vault.unlock", json!({ "password_b64": b64(PASSWORD) }));
+    assert!(unlocked["result"].is_object(), "{unlocked}");
+    assert_eq!(main.read(META).unwrap(), BARE_META.as_bytes());
+    std::fs::write(&hook, "").unwrap();
+    main.call("vault.lock", json!({}));
+    let unlocked = main.call("quick_unlock.unlock", json!({}));
+    assert!(unlocked["result"].is_object(), "{unlocked}");
+    let meta: Value = serde_json::from_slice(&main.read(META).unwrap()).unwrap();
+    assert_eq!(
+        meta["addresses"]["userWallet"], unlocked["result"]["addresses"]["user_wallet"],
+        "{meta}"
+    );
+    // The exports migrate nothing.
+    std::fs::write(main.data.join(META), BARE_META).unwrap();
+    main.call("vault.lock", json!({}));
+    let exported = main.shell("quick_unlock.export_mnemonic", json!({}));
+    assert!(
+        exported["result"].is_object() || exported["error"].is_object(),
+        "{exported}"
+    );
+    assert_eq!(main.read(META).unwrap(), BARE_META.as_bytes());
 }

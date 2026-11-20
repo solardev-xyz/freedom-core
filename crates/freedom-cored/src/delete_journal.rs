@@ -28,9 +28,11 @@
 //! in `forget`.
 //!
 //! **While a journal is pending** (an install that failed after the commit
-//! keeps it), [`settle`] runs first in every read of the vault and every
-//! secrets operation, and they fail with a storage error while it can't
-//! finish. So nothing reads the vault the delete committed to remove, and
+//! keeps it), [`settle`] runs under the secrets file's lock first in every
+//! vault job, every `accounts.*` call and every secrets operation, and they
+//! fail with a storage error while it can't finish. A read of the vault
+//! that still finds the journal refuses (`storage`) and never settles it
+//! itself. So nothing reads the vault the delete committed to remove, and
 //! nothing writes the secrets file over the staged one.
 //!
 //! **Recovery trusts nothing it reads:** a journal is acted on only if it is
@@ -63,12 +65,13 @@ const OP: &str = "vault.delete";
 /// The journal is two names and two digests.
 const MAX_JOURNAL: u64 = 4096;
 
-/// Serializes [`delete`] and [`settle`]: the vault worker and the secrets
-/// drain may both settle. Taken after the secrets file's lock where both
+/// Serializes [`delete`] and [`settle`], and the vault and metadata
+/// journal's write and recovery ([`crate::vault_meta_journal`]): the vault
+/// worker and the secrets drain may both settle. Taken after the secrets file's lock where both
 /// are held, never the other way round.
 static LOCK: Mutex<()> = Mutex::new(());
 
-fn lock() -> std::io::Result<MutexGuard<'static, ()>> {
+pub(crate) fn lock() -> std::io::Result<MutexGuard<'static, ()>> {
     LOCK.lock()
         .map_err(|_| std::io::Error::other("the delete journal's lock is poisoned"))
 }
@@ -169,7 +172,7 @@ fn is_digest(value: &str) -> bool {
             .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
 }
 
-fn sha256_hex(bytes: &[u8]) -> String {
+pub(crate) fn sha256_hex(bytes: &[u8]) -> String {
     Sha256::digest(bytes)
         .iter()
         .map(|b| format!("{b:02x}"))
@@ -335,7 +338,9 @@ fn install(dir: &Path, plan: &Plan) -> std::io::Result<Installed> {
         if digest != plan.secrets {
             return Ok(Installed::Corrupt);
         }
-        if crate::testhooks::secrets_fails("delete-install") {
+        if crate::testhooks::secrets_fails("delete-install")
+            || crate::testhooks::grant_write_fails("delete_journal", "install")
+        {
             return Err(std::io::Error::other(
                 "the staged secrets file's rename failed (test hook)",
             ));
@@ -414,8 +419,9 @@ pub enum Settled {
     SetAside,
 }
 
-/// Finishes a committed delete whose journal is still there: at start,
-/// and first in every read of the vault and every secrets operation. `Err`:
+/// Finishes a committed delete whose journal is still there: at start, and
+/// under the secrets file's lock first in every vault job, `accounts.*` call
+/// and secrets operation ([`crate::vault_meta_journal::recover`]). `Err`:
 /// the journal stays, and the caller must not act on the vault or the
 /// secrets file.
 pub fn settle(dir: &Path) -> std::io::Result<Settled> {
