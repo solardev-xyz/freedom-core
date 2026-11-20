@@ -69,7 +69,7 @@ const T: u64 = 1_700_000_000_000;
 
 fn named(root: &Path) -> Store {
     let mut store = Store::new();
-    store.configure(root.to_path_buf());
+    store.configure(root.to_path_buf(), root.to_path_buf());
     store
 }
 
@@ -142,7 +142,7 @@ fn the_reference_imports_with_their_files() {
         };
         let mut store = named(root);
         // What the first request runs, with the replayed clock.
-        Store::opened(root, &mut store.open, clock).unwrap();
+        Store::opened(store.roots.as_ref().unwrap(), &mut store.open, clock).unwrap();
         assert_eq!(asked, ticks.len(), "{name}: the clock's reads");
         assert_eq!(&table_at(root), case.get("rows").unwrap(), "{name}: rows");
         let expected: Vec<&str> = case
@@ -188,6 +188,42 @@ fn an_import_cut_before_its_rename_is_finished_once() {
     );
     assert_eq!(files(root), [MIGRATED_FILE]);
     assert_eq!(table_at(root), rows);
+}
+
+/// The database under one root and `x402-receipts.json` under another
+/// (the hello's `grant_root` and `user_data_dir`, PRF-8-lite): the first
+/// open imports the receipts from the import root and renames them there,
+/// and leaves a file at the database's root unread and in place.
+#[test]
+fn the_import_reads_its_own_root() {
+    let db_dir = tempfile::tempdir().unwrap();
+    let import_dir = tempfile::tempdir().unwrap();
+    let (db_root, import_root) = (db_dir.path(), import_dir.path());
+    let receipt = |id: &str| {
+        format!(
+            r#"[{{"id":"{id}","settledAt":1699000000,"status":"settled","chainId":8453,"amount":"500","origin":"https://x.example","url":"https://x.example/a"}}]"#
+        )
+    };
+    std::fs::write(import_root.join(LEGACY_FILE), receipt("there")).unwrap();
+    std::fs::write(db_root.join(LEGACY_FILE), receipt("beside")).unwrap();
+    let mut store = Store::new();
+    store.configure(db_root.to_path_buf(), import_root.to_path_buf());
+    let recent = call(&mut store, "payments.get_recent", "{}").unwrap();
+    let recent = recent.get("payments").and_then(JsValue::as_array).unwrap();
+    assert_eq!(recent.len(), 1);
+    let legacy_id = recent[0]
+        .get("metadata")
+        .and_then(|metadata| metadata.get("legacyId"))
+        .and_then(JsValue::as_str);
+    assert_eq!(legacy_id, Some("there"));
+    assert!(db_root.join(DB_FILE).exists());
+    assert!(!import_root.join(DB_FILE).exists());
+    assert_eq!(files(import_root), [MIGRATED_FILE]);
+    assert_eq!(files(db_root), [LEGACY_FILE]);
+    assert_eq!(
+        std::fs::read_to_string(db_root.join(LEGACY_FILE)).unwrap(),
+        receipt("beside")
+    );
 }
 
 /// A file past the bound, or not a regular file, is left in place unread,

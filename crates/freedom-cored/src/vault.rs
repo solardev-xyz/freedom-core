@@ -1022,9 +1022,10 @@ impl Vault {
 
     /// The hello's `store_moved` named `payments`: the core serves the
     /// `payments.*` methods over `payment-history.sqlite` under `root`,
-    /// opened at the first of them (design 0013, "Payment history").
-    pub fn configure_payments(&mut self, root: PathBuf) {
-        self.payments.configure(root);
+    /// opened at the first of them, which imports `x402-receipts.json`
+    /// from `import_root` (design 0013, "Payment history").
+    pub fn configure_payments(&mut self, root: PathBuf, import_root: PathBuf) {
+        self.payments.configure(root, import_root);
     }
 
     /// The hello's `store_moved` named `vault_meta`: the core writes

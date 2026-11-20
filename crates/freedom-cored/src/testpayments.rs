@@ -38,7 +38,7 @@ pub fn run(mut args: impl Iterator<Item = std::ffi::OsString>) -> u8 {
         return 64;
     };
     let mut store = Store::new();
-    store.configure(dir);
+    store.configure(dir.clone(), dir);
     let stdin = std::io::stdin();
     let mut stdout = std::io::stdout().lock();
     for line in stdin.lock().lines() {
