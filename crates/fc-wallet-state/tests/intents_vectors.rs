@@ -342,9 +342,24 @@ fn live_step(
                 .as_str()
                 .unwrap()
                 .to_owned();
+            let handoff_id = write.record().get("handoff_id").cloned().unwrap();
             let id = field(call, "intentId").as_str().unwrap().to_owned();
             append(store, file, write)?;
-            assert!(store.signed(&id, &hash).is_some(), "a handoff's bytes");
+            // The reference's answer: the handoff, its hash and exactly the
+            // bytes kept for that hash (not the latest, for an original
+            // handed off after a replacement).
+            let result = field(call, "result");
+            assert_eq!(&handoff_id, field(result, "handoffId"), "a handoff's id");
+            assert_eq!(
+                hash,
+                field(result, "hash").as_str().unwrap(),
+                "a handoff's hash"
+            );
+            assert_eq!(
+                store.signed(&id, &hash),
+                Some(field(result, "raw").as_str().unwrap()),
+                "a handoff's bytes"
+            );
             return Ok(());
         }
         "outcome" => match store.outcome(&run, at, call)? {
@@ -369,6 +384,8 @@ fn live_step(
 fn every_step_of_every_run_writes_as_the_reference_writes_it() {
     let vectors = intents();
     let mut refused = 0;
+    let mut type_errors = 0;
+    let mut not_latest = 0;
     for run in items(field(&vectors, "runs")) {
         let mut limits = limits_of(field(run, "limits"));
         let mut store = Intents::load(&[], limits).unwrap().intents;
@@ -386,6 +403,8 @@ fn every_step_of_every_run_writes_as_the_reference_writes_it() {
                 (Ok(()), theirs) => panic!("{name}: written, refused as {theirs:?}"),
                 (Err(ours), theirs) => {
                     assert_eq!(ours.code, field(theirs, "code").as_str().unwrap(), "{name}");
+                    // JavaScript's own TypeError: no code, V8's message.
+                    type_errors += usize::from(ours.code.is_empty());
                     assert_eq!(
                         ours.message,
                         field(theirs, "message").as_str().unwrap(),
@@ -410,6 +429,18 @@ fn every_step_of_every_run_writes_as_the_reference_writes_it() {
                 texts(items(field(live, "list"))),
                 "{name}: list()"
             );
+            // An original handed off after its replacement: its bytes are
+            // not the latest, which `signed` must not answer instead.
+            if field(step, "op").as_str() == Some("handoff")
+                && matches!(field(step, "refusal"), JsValue::Null)
+            {
+                let call = field(step, "call");
+                let latest = items(field(live, "list"))
+                    .iter()
+                    .find(|v| field(v, "intentId") == field(call, "intentId"))
+                    .map(|v| field(v, "raw"));
+                not_latest += usize::from(latest != Some(field(field(call, "result"), "raw")));
+            }
             let usage = field(live, "usage");
             assert_eq!(number(field(usage, "file")), size(&file) as f64, "{name}");
             assert_eq!(
@@ -435,4 +466,68 @@ fn every_step_of_every_run_writes_as_the_reference_writes_it() {
         }
     }
     assert!(refused >= 25, "{refused} refusals");
+    // settle's truthy `hashes` that isn't an array, retire's hash and
+    // handoff's intent id whose `${}` throws.
+    assert_eq!(type_errors, 3, "JavaScript's own TypeErrors");
+    // The lifecycle's original, handed off after its replacement.
+    assert!(not_latest >= 1, "no handoff of bytes not the latest");
+}
+
+/// `withdrawOrigin`'s rollback when the compaction that records it fails
+/// (`restore_origin`): the intent is as it was, its view, the file a
+/// compaction writes and its snapshot's size, whether that size was cached
+/// before the withdrawal or is first taken after it.
+#[test]
+fn a_restored_origin_leaves_the_intent_as_it_was() {
+    let vectors = intents();
+    let run = items(field(&vectors, "runs"))
+        .iter()
+        .find(|run| field(run, "name").as_str() == Some("the file's budget"))
+        .unwrap();
+    let limits = limits_of(field(run, "limits"));
+    // A committed with its long origin.
+    let step = &items(field(run, "steps"))[0];
+    let records = items(field(step, "records"));
+    let id = field(&records[0], "intent_id").as_str().unwrap();
+    let fresh = || Intents::load(records, limits).unwrap().intents;
+
+    // Sized first: the size stays cached through the withdrawal.
+    let mut store = fresh();
+    let view = store.get(id).unwrap();
+    assert!(field(field(&view, "context"), "origin").as_str().is_some());
+    let budget = store.budget();
+    assert_eq!(
+        budget as f64,
+        number(field(field(field(step, "load"), "usage"), "budget")),
+        "the reference's budget for the file"
+    );
+    let file = texts(&store.compaction());
+    let withdrawn = store.withdraw_origin(id).expect("an origin to withdraw");
+    assert!(matches!(
+        field(field(&store.get(id).unwrap(), "context"), "origin"),
+        JsValue::Null
+    ));
+    assert_ne!(texts(&store.compaction()), file);
+    assert_eq!(store.budget(), budget, "the old size, cached");
+    store.restore_origin(withdrawn.clone());
+    assert_eq!(store.get(id), Some(view.clone()), "its view");
+    assert_eq!(
+        texts(&store.compaction()),
+        file,
+        "the file compaction writes"
+    );
+    assert_eq!(store.budget(), budget);
+    assert_eq!(
+        store.withdraw_origin(id),
+        Some(withdrawn),
+        "the same origin"
+    );
+
+    // Withdrawn before it is sized and put back: sized with its origin.
+    let mut store = fresh();
+    let withdrawn = store.withdraw_origin(id).unwrap();
+    store.restore_origin(withdrawn);
+    assert_eq!(store.budget(), budget, "sized with its origin");
+    assert_eq!(store.get(id), Some(view));
+    assert_eq!(texts(&store.compaction()), file);
 }

@@ -173,6 +173,12 @@ function runsOf() {
       ['retire', { name: 'A', block: 1, hashes: 'all', lock: null }],
       ['retire', { name: 'A', block: 1, hashes: [] }],
       ['withdrawOrigin', { name: 'A' }],
+      // JavaScript's own TypeErrors, before any intent check: a truthy
+      // hashes that isn't an array, a hash and an intent id whose
+      // conversion to a string throws (an own `toString`).
+      ['settle', { name: 'A', label: 'taken', hash: null, block: 4, hashes: 'abc', typeError: true }],
+      ['retire', { name: 'A', block: 4, hashes: [{ toString: 1 }], typeError: true }],
+      ['handoff', { name: 'A', id: { toString: 1 }, handoff: 'hy', typeError: true }],
     ] },
     { name: 'live bounds', limits: { held: 2, hashesPerIntent: 2, openHandoffsPerIntent: 1, rawBytes: 312 }, steps: [
       ['commit', { name: 'A', tx: { nonce: 0 }, context: ctx({ key: 'a' }) }],
@@ -281,7 +287,10 @@ async function runOf(checkout, ethers, dir, encodeLine, s, run) {
       } else if (op === 'handoff') {
         const hash = args.hashOf === undefined ? undefined : hashes[args.name][args.hashOf];
         call = { intentId: args.id ?? ids[args.name], hash };
-        handoffs[args.handoff] = (await store.handoff(call.intentId, hash)).handoffId;
+        // The answer: the handoff's id, its hash and the bytes kept for it.
+        const result = await store.handoff(call.intentId, hash);
+        handoffs[args.handoff] = result.handoffId;
+        call.result = { handoffId: result.handoffId, hash: result.hash, raw: result.raw };
       } else if (op === 'outcome') {
         call = { intentId: ids[args.name], handoffId: handoffs[args.handoff], outcome: args.outcome, source: args.source, reasonClass: args.reasonClass };
         await store.outcome(call);
@@ -307,9 +316,13 @@ async function runOf(checkout, ethers, dir, encodeLine, s, run) {
       } else {
         throw new Error(`unknown op ${op}`);
       }
+      if (args.typeError) throw new Error(`${run.name}: ${op} gave no TypeError`);
     } catch (error) {
-      if (!error.code) throw error;
-      refusal = { code: error.code, message: error.message };
+      // JavaScript's own TypeError has no code: '' then, only where a step
+      // expects one (`typeError`).
+      if (args.typeError && error.name === 'TypeError' && error.code === undefined) refusal = { code: '', message: error.message };
+      else if (!error.code || args.typeError) throw error;
+      else refusal = { code: error.code, message: error.message };
     }
     const uuids = [];
     for (let n = before + 1; n <= counter.n; n += 1) uuids.push(uuid(n));
@@ -445,7 +458,7 @@ function snapshotCases(held, s) {
 }
 
 const INTENTS_FORMAT =
-  'wallet-intents.jsonl, from the stores reference\'s src/main/wallet/intent-store.js over its lib/durable-journal.js, `crypto.randomUUID` numbered (RUN_ID at each load of the module, then the intent and handoff ids) and the clock fixed. `runs`: one live store per run, with its `limits` overrides, each step an operation (`op`, `args`, at `at`; `restart` loads the module again, a new run of main, with its `limits` for the rest of the run if it has them; `void` without a `lock` is refused) with main\'s `run` (the live store\'s RUN_ID), the `call` the store method got (ids resolved; `lock` for void and retire; withdrawOrigin\'s `result`), the `uuids` `crypto.randomUUID` gave during it, its `refusal` (`code`, `message`) or null, the file\'s `records` after it, `live` (null after a `quiet` step): the live store\'s `usage()` (which sizes each held snapshot, cached until a new hash), `list()` and `voidRefusal` of each listed intent after it, and `load`: a fresh store loading those records, its `reason` for moving the file aside (null: loaded), the records it rewrote the file to (`compacted`, null when unchanged), `list()`, the ids of `held()`, `byKey` of each key, `heldNonces` of each account, `voidRefusal` of each listed intent, and `usage()`. `damaged`: records the reference loads, with its `reason` (null when it loads them).';
+  'wallet-intents.jsonl, from the stores reference\'s src/main/wallet/intent-store.js over its lib/durable-journal.js, `crypto.randomUUID` numbered (RUN_ID at each load of the module, then the intent and handoff ids) and the clock fixed. `runs`: one live store per run, with its `limits` overrides, each step an operation (`op`, `args`, at `at`; `restart` loads the module again, a new run of main, with its `limits` for the rest of the run if it has them; `void` without a `lock` is refused) with main\'s `run` (the live store\'s RUN_ID), the `call` the store method got (ids resolved; `lock` for void and retire; withdrawOrigin\'s `result`; handoff\'s `result`: its `handoffId`, `hash` and the `raw` bytes it answers), the `uuids` `crypto.randomUUID` gave during it, its `refusal` (`code`, `message`; `code` is \'\' for one of JavaScript\'s own TypeErrors, which carry none, in a step with `typeError`) or null, the file\'s `records` after it, `live` (null after a `quiet` step): the live store\'s `usage()` (which sizes each held snapshot, cached until a new hash), `list()` and `voidRefusal` of each listed intent after it, and `load`: a fresh store loading those records, its `reason` for moving the file aside (null: loaded), the records it rewrote the file to (`compacted`, null when unchanged), `list()`, the ids of `held()`, `byKey` of each key, `heldNonces` of each account, `voidRefusal` of each listed intent, and `usage()`. `damaged`: records the reference loads, with its `reason` (null when it loads them).';
 
 async function buildIntents(checkout, ethers) {
   const { encodeLine } = require(path.join(checkout, 'src/main/lib/durable-journal.js'));
