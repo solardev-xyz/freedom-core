@@ -62,6 +62,9 @@
 //!   recovery's flush before it installs (nothing installed, the journal
 //!   kept). `delete_journal:install` fails a vault delete's install, in the
 //!   delete and in its recovery alike, as `delete-install` below does once.
+//!   `delete_journal:journal-flush` fails the directory flush after a vault
+//!   delete's journal rename, its retry, and recovery's flush before it
+//!   installs (nothing installed, the journal kept).
 //!   `vault_meta_journal:settle-once` fails the first recovery of the
 //!   journal in the process that reads the line, before it renames
 //!   anything (the journal kept), and none after it: a transient failure,
@@ -114,8 +117,9 @@
 //! - `FREEDOM_CORED_TEST_SECRETS_FAIL` lists, comma-separated, writes that
 //!   fail: a journaled vault delete's (`delete-stage`, the staged secrets
 //!   file; `delete-journal`, the journal's rename, after the commit claim;
-//!   `delete-install`, the staged file's rename over the secrets file,
-//!   after the commit), any secrets-file write by its step (`pending`,
+//!   `delete-journal-flush`, the directory flush after that rename, which
+//!   is then tried once more; `delete-install`, the staged file's rename
+//!   over the secrets file, after the commit), any secrets-file write by its step (`pending`,
 //!   `commit`, `remove`, `stage-pending`, `stage`, `fold`, `rollback`, …:
 //!   before its rename), or a vault write's (`vault-claim`, its claim
 //!   refused as if past its time; `vault-rename`, its rename, after the

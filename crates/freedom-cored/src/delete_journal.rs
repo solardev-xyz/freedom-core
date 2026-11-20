@@ -13,7 +13,11 @@
 //!    password opened. It is written durably (0001's single-file write),
 //!    and the vault's commit claim comes right before its rename: that claim
 //!    is the delete's commit point (0001, "Deadlines, cancellation and
-//!    commit": "before the journal write of a multi-file operation").
+//!    commit": "before the journal write of a multi-file operation"). No
+//!    target changes until the journal's name is durable: a failed directory
+//!    flush after its rename is tried once more, and if that fails too,
+//!    nothing is installed and the delete is pending (below). Recovery
+//!    flushes the directory before it changes anything.
 //! 3. **Install.** The secrets file is done if it already has the journaled
 //!    digest; otherwise the staged file, with that digest, is renamed over
 //!    it. Then the vault: done if it is gone, removed if it has the
@@ -27,10 +31,10 @@
 //! start, before `core.hello` is answered: no vault, no entry, and the key
 //! in `forget`.
 //!
-//! **While a journal is pending** (an install that failed after the commit
-//! keeps it), [`settle`] runs under the secrets file's lock first in every
-//! vault job, every `accounts.*` call and every secrets operation, and they
-//! fail with a storage error while it can't finish. A read of the vault
+//! **While a journal is pending** (its flush, or an install, that failed
+//! after the commit keeps it), [`settle`] runs under the secrets file's
+//! lock first in every vault job, every `accounts.*` call and every secrets
+//! operation, and they fail with a storage error while it can't finish. A read of the vault
 //! that still finds the journal refuses (`storage`) and never settles it
 //! itself. So nothing reads the vault the delete committed to remove, and
 //! nothing writes the secrets file over the staged one.
@@ -195,16 +199,52 @@ impl From<std::io::Error> for Error {
     }
 }
 
+/// A test build's held failure of the journal's flush
+/// (`delete_journal:journal-flush` in `FREEDOM_CORED_TEST_GRANT_WRITE_FAIL`,
+/// read at each flush, so a test turns it on and off while the core runs).
+fn flush_held() -> bool {
+    crate::testhooks::grant_write_fails("delete_journal", "journal-flush")
+}
+
+/// The journal's own write: [`crate::testhooks::Swap`]'s swap, and the
+/// directory flush after its rename failing while `journal-flush` holds
+/// (or once, for `delete-journal-flush` in `FREEDOM_CORED_TEST_SECRETS_FAIL`).
+struct JournalHooks;
+
+impl fc_store::Hooks for JournalHooks {
+    fn fails(&self, step: fc_store::Step) -> bool {
+        step == fc_store::Step::Flush
+            && (crate::testhooks::secrets_fails("delete-journal-flush") || flush_held())
+    }
+
+    fn checked(&self, temp: &Path) {
+        crate::testhooks::swap("checked", temp);
+    }
+}
+
+/// Makes the journal's name durable: no target changes before it is, or a
+/// crash could keep the secrets file's rename and lose the record that
+/// finishes the delete.
+fn journal_durable(dir: &Path) -> std::io::Result<()> {
+    if flush_held() {
+        return Err(std::io::Error::other(
+            "the journal's flush failed (test hook)",
+        ));
+    }
+    fsx::sync_rename(dir, &dir.join(JOURNAL))
+}
+
 /// The journaled delete (see the module documentation). `secrets` is the
 /// secrets file as the delete leaves it, which `check` must accept when
 /// read back; `vault` is the digest of the vault file the password opened;
 /// `claim` is the vault's commit claim. The caller holds the secrets file's
 /// lock, and has settled any earlier journal (reading the file does).
 ///
-/// `Ok`: committed, and the reply is success. An install that fails after
-/// the commit is logged and answered as not durable: the journal stays, and
-/// [`settle`] finishes it before anything reads the vault or the secrets
-/// file again.
+/// `Ok`: committed, and the reply is success. A journal whose name can't be
+/// made durable (its flush failed twice), or an install that fails after
+/// the commit, is logged and answered as not durable: the journal stays,
+/// and [`settle`] finishes it before anything reads the vault or the
+/// secrets file again.
 pub fn delete(
     dir: &Path,
     secrets: &[u8],
@@ -246,7 +286,7 @@ pub fn delete(
             // As if the journal's rename failed, after the claim.
             claimed.get() && !crate::testhooks::secrets_fails("delete-journal")
         },
-        &crate::testhooks::Swap,
+        &JournalHooks,
     );
     let journaled = match written {
         Ok(done) => done,
@@ -263,7 +303,20 @@ pub fn delete(
         }
     };
     crate::testhooks::secrets_step("after-delete-journal");
-    // Committed: what follows is the install, which [`settle`] repeats.
+    // Committed. The journal's name must be durable before any target
+    // changes: its flush failed, so it is tried once more, and if that fails
+    // too nothing is installed. The delete is pending, and recovery flushes
+    // again before it installs.
+    if journaled == Done::NotDurable
+        && let Err(e) = journal_durable(dir)
+    {
+        crate::log::error(
+            "a committed vault delete's journal isn't durable; nothing installed, the journal stays",
+            serde_json::json!({ "error": e.kind().to_string() }),
+        );
+        return Ok(Done::NotDurable);
+    }
+    // What follows is the install, which [`settle`] repeats.
     let finished = match install(dir, &plan) {
         Ok(Installed::Done) => finish(dir),
         Ok(Installed::Corrupt) => Err(std::io::Error::other(
@@ -272,8 +325,7 @@ pub fn delete(
         Err(e) => Err(e),
     };
     match finished {
-        Ok(done) if journaled == Done::Durable => Ok(done),
-        Ok(_) => Ok(Done::NotDurable),
+        Ok(done) => Ok(done),
         Err(e) => {
             crate::log::error(
                 "a committed vault delete's install failed; its journal stays",
@@ -438,6 +490,9 @@ pub fn settle(dir: &Path) -> std::io::Result<Settled> {
         set_aside(dir)?;
         return Ok(Settled::SetAside);
     };
+    // The journal's name is durable before anything changes (a delete whose
+    // flush failed left it pending).
+    journal_durable(dir)?;
     match install(dir, &plan)? {
         Installed::Done => {
             let _ = finish(dir)?;

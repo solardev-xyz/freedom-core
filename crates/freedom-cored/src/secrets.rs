@@ -242,7 +242,12 @@ impl Secrets {
     /// metadata journal isn't touched (design 0013, "The delete's journal
     /// stays separate").
     fn settle_journals(&self) -> std::io::Result<crate::vault_meta_journal::Settled> {
-        crate::delete_journal::settle(&self.dir)?;
+        if crate::delete_journal::settle(&self.dir)? == crate::delete_journal::Settled::Finished {
+            // The delete moved its key into `forget`: the drain forgets it
+            // now, not at the next start (its wake may have found the
+            // journal pending).
+            self.poke();
+        }
         crate::vault_meta_journal::settle(&self.dir)
     }
 
