@@ -516,12 +516,14 @@ fn a_restored_origin_leaves_the_intent_as_it_was() {
         file,
         "the file compaction writes"
     );
-    assert_eq!(store.budget(), budget);
+    // The budget is read only after a second withdrawal: a restore that
+    // dropped the cached size would size the intent without its origin.
     assert_eq!(
         store.withdraw_origin(id),
         Some(withdrawn),
         "the same origin"
     );
+    assert_eq!(store.budget(), budget, "still the size cached at first");
 
     // Withdrawn before it is sized and put back: sized with its origin.
     let mut store = fresh();
