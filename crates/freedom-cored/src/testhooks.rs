@@ -43,8 +43,8 @@
 //!   `<path>` over the file the core is about to use at `<stage>`, once (the
 //!   rename consumes it): `journal` right after recovery read the journal,
 //!   `checked` right after a staged or temp file was checked and before its
-//!   identity is compared, `renaming` right before a staged node file is
-//!   renamed. It stands for a same-user process winning a race.
+//!   identity is compared, `renaming` right before a staged node file, or a
+//!   staged vault or metadata file, is renamed. It stands for a same-user process winning a race.
 //! - `FREEDOM_CORED_TEST_GRANT_WRITE_FAIL` names a file: while it holds
 //!   `<store>:<step>` lines (`dapp`, `swarm`, `radicle`, `x402`, `phone`
 //!   for `phone-payments.json`, `vault_meta` for `vault-meta.json`, and
@@ -52,7 +52,37 @@
 //!   `flush`), each write of that store's permission
 //!   file fails at that step as if the OS had failed it (design 0012, "The
 //!   files": a failed write). Read at each write, so a test turns it on
-//!   and off while the core runs.
+//!   and off while the core runs. `intents` fails `wallet-intents.jsonl`'s
+//!   journal steps: an append's `write` (half the line written), `fsync`,
+//!   `truncate` (its cut back) and `flush`, a compaction's `write`,
+//!   `fsync`, `rename` and `flush`, and the open's `flush`.
+//!   `vault_meta_journal:<step>` fails a step
+//!   after the commit of the vault and metadata journal (design 0013, "The
+//!   vault and its metadata, one write"), in the write and in recovery
+//!   alike: `vault-rename`, `vault-flush`, `meta-rename`, `meta-flush`,
+//!   `unlink` (each a returned failure, the journal kept), `finish-flush`
+//!   (after the real unlink: not durable), and `journal-flush`: the
+//!   directory flush after the journal's own rename, and its retry, and
+//!   recovery's flush before it installs (nothing installed, the journal
+//!   kept). `delete_journal:install` fails a vault delete's install, in the
+//!   delete and in its recovery alike, as `delete-install` below does once.
+//!   `delete_journal:journal-flush` fails the directory flush after a vault
+//!   delete's journal rename, its retry, and recovery's flush before it
+//!   installs (nothing installed, the journal kept).
+//!   `vault_meta_journal:settle-once` fails the first recovery of the
+//!   journal in the process that reads the line, before it renames
+//!   anything (the journal kept), and none after it: a transient failure,
+//!   which a test arms once the core is serving.
+//! - `FREEDOM_CORED_TEST_INTENT_IDS` names a file: while it holds lines,
+//!   each id the intent store names (an original's, a handoff's; the
+//!   reference's `crypto.randomUUID()`) is its first line, which is
+//!   removed, so a test replays the vectors' ids.
+//! - `FREEDOM_CORED_TEST_INTENT_LIMITS` names a file holding a JSON object
+//!   of the intent store's `LIMITS` in the reference's names
+//!   (`heldPerAccount`, `held`, `hashesPerIntent`, `openHandoffsPerIntent`,
+//!   `tombstones`, `rawBytes`, `journalBytes`, `readBytes`): those replace
+//!   the store's at each load, as the reference's `createIntentStore({
+//!   limits })` does.
 //! - `FREEDOM_CORED_TEST_X402_SIGN_MARKER` names a file `x402.authorize`
 //!   appends a line to (`sign`) each time it is about to sign a payment's
 //!   digest, so a test counts the signatures: none for a cap's charge the
@@ -88,19 +118,30 @@
 //!   credential; `before-vault-rename` (the vault's temp file written and
 //!   checked, the claim taken), `after-vault-rename`; `before-fold`,
 //!   `after-fold` after the commit; `before-rollback`, `after-rollback`
-//!   after a failure): there the core exits at once with 99, as if killed,
+//!   after a failure), or of the vault and metadata journal
+//!   (`before-meta-stage`, `before-meta-journal`,
+//!   `before-meta-journal-rename` (its temp file written, the claim taken),
+//!   `after-meta-journal`, `after-meta-install-vault`,
+//!   `after-meta-install-meta`, `after-meta-done`, and `before-journal-finish`,
+//!   `after-journal-finish` for recovery's secrets-file write): there the
+//!   core exits at once with 99, as if killed,
 //!   the files as that step left them (design 0013, PRF-1: "a crash hook
 //!   before and after each write"). The vault's two steps are those of
 //!   every vault write.
 //! - `FREEDOM_CORED_TEST_SECRETS_FAIL` lists, comma-separated, writes that
 //!   fail: a journaled vault delete's (`delete-stage`, the staged secrets
 //!   file; `delete-journal`, the journal's rename, after the commit claim;
-//!   `delete-install`, the staged file's rename over the secrets file,
-//!   after the commit), any secrets-file write by its step (`pending`,
+//!   `delete-journal-flush`, the directory flush after that rename, which
+//!   is then tried once more; `delete-install`, the staged file's rename
+//!   over the secrets file, after the commit), any secrets-file write by its step (`pending`,
 //!   `commit`, `remove`, `stage-pending`, `stage`, `fold`, `rollback`, …:
 //!   before its rename), or a vault write's (`vault-claim`, its claim
 //!   refused as if past its time; `vault-rename`, its rename, after the
-//!   claim), or the directory flush after a secrets-file write's rename
+//!   claim), the vault and metadata journal's (`meta-stage`, a staged
+//!   file's write; `meta-journal`, the journal's rename, after the claim;
+//!   `meta-journal-flush`, the directory flush after that rename, which is
+//!   then tried once more),
+//!   or the directory flush after a secrets-file write's rename
 //!   (`<step>-flush`, `rpc-set-flush`, `rpc-file-flush`, …: the change in
 //!   place and reported not durable). The first attempt in the process of
 //!   each listed write fails as if the OS had failed it.
@@ -496,6 +537,30 @@ pub fn grant_write_fails(_store: &str, _step: &str) -> bool {
     false
 }
 
+/// [`grant_write_fails`], but true only the first time in the process that
+/// the file lists the step.
+#[cfg(feature = "testhooks")]
+pub fn grant_write_fails_once(store: &str, step: &str) -> bool {
+    static FAILED: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+    if !grant_write_fails(store, step) {
+        return false;
+    }
+    let Ok(mut failed) = FAILED.lock() else {
+        return false;
+    };
+    let key = format!("{store}:{step}");
+    if failed.contains(&key) {
+        return false;
+    }
+    failed.push(key);
+    true
+}
+
+#[cfg(not(feature = "testhooks"))]
+pub fn grant_write_fails_once(_store: &str, _step: &str) -> bool {
+    false
+}
+
 /// The hooks of every durable write but a store file's
 /// (`fc_store::fsx::replace`): `FREEDOM_CORED_TEST_SWAP`'s `checked` stage.
 /// No step fails.
@@ -526,7 +591,8 @@ impl fc_store::Hooks for SecretsWrite<'_> {
 /// The hooks of a store file's write (`fc_store::file::write_file`): the
 /// steps `FREEDOM_CORED_TEST_GRANT_WRITE_FAIL` names for this store
 /// (`dapp`, `swarm`, `radicle`, `x402`, `phone`, `vault_meta`,
-/// `safe_pending`), read at each write.
+/// `safe_pending`), and of `wallet-intents.jsonl`'s journal (`intents`),
+/// read at each write.
 pub struct GrantWrite<'a>(pub &'a str);
 
 impl fc_store::Hooks for GrantWrite<'_> {
@@ -559,6 +625,74 @@ pub fn wall_clock(now_ms: u64) -> u64 {
 #[cfg(not(feature = "testhooks"))]
 pub fn wall_clock(now_ms: u64) -> u64 {
     now_ms
+}
+
+#[cfg(feature = "testhooks")]
+pub fn intent_id() -> Option<String> {
+    let path = std::env::var_os("FREEDOM_CORED_TEST_INTENT_IDS")?;
+    let text = std::fs::read_to_string(&path).ok()?;
+    let mut lines = text.lines().filter(|l| !l.trim().is_empty());
+    let first = lines.next()?.trim().to_owned();
+    let rest: Vec<&str> = lines.collect();
+    std::fs::write(&path, rest.join("\n")).ok()?;
+    Some(first)
+}
+
+#[cfg(not(feature = "testhooks"))]
+pub fn intent_id() -> Option<String> {
+    None
+}
+
+#[cfg(feature = "testhooks")]
+pub fn intent_limits(
+    default: fc_wallet_state::intents::Limits,
+) -> fc_wallet_state::intents::Limits {
+    let Some(text) = std::env::var_os("FREEDOM_CORED_TEST_INTENT_LIMITS")
+        .and_then(|path| std::fs::read_to_string(path).ok())
+    else {
+        return default;
+    };
+    let Ok(over) = fc_json::parse(&text) else {
+        return default;
+    };
+    let n = |key: &str| match over.get(key) {
+        Some(fc_json::JsValue::Number(n)) if *n >= 0.0 => Some(*n as u64),
+        _ => None,
+    };
+    let mut limits = default;
+    let size = |v: u64| usize::try_from(v).unwrap_or(usize::MAX);
+    if let Some(v) = n("heldPerAccount") {
+        limits.held_per_account = size(v);
+    }
+    if let Some(v) = n("held") {
+        limits.held = size(v);
+    }
+    if let Some(v) = n("hashesPerIntent") {
+        limits.hashes_per_intent = size(v);
+    }
+    if let Some(v) = n("openHandoffsPerIntent") {
+        limits.open_handoffs_per_intent = size(v);
+    }
+    if let Some(v) = n("tombstones") {
+        limits.tombstones = size(v);
+    }
+    if let Some(v) = n("rawBytes") {
+        limits.raw_bytes = size(v);
+    }
+    if let Some(v) = n("journalBytes") {
+        limits.journal_bytes = v;
+    }
+    if let Some(v) = n("readBytes") {
+        limits.read_bytes = v;
+    }
+    limits
+}
+
+#[cfg(not(feature = "testhooks"))]
+pub fn intent_limits(
+    default: fc_wallet_state::intents::Limits,
+) -> fc_wallet_state::intents::Limits {
+    default
 }
 
 #[cfg(feature = "testhooks")]

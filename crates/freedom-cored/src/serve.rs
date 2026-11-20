@@ -279,6 +279,23 @@ const CAPABILITIES: &[&str] = &[
     "payments.get_by_id",
     "payments.get_count",
     "payments.clear",
+    // Design 0013: the wallet's intent records (PRF-5e-3).
+    "intents.commit",
+    "intents.handoff",
+    "intents.outcome",
+    "intents.settle",
+    "intents.void",
+    "intents.retire",
+    "intents.track",
+    "intents.withdraw_origin",
+    "intents.compact",
+    "intents.get",
+    "intents.by_key",
+    "intents.held",
+    "intents.list",
+    "intents.held_nonces",
+    "intents.usage",
+    "intents.void_refusal",
     // Design 0012: a page's EIP-1193 request, run by the core (APR-5).
     "eip1193.request",
     "dweb.open",
@@ -843,7 +860,13 @@ const STORES: &[&str] = &[
 ];
 
 /// The stores this core serves once named: the echo holds only these.
-const STORES_SERVED: &[&str] = &["vault_meta", "safe_pending", "payments", "rpc_api_keys"];
+const STORES_SERVED: &[&str] = &[
+    "vault_meta",
+    "intents",
+    "safe_pending",
+    "payments",
+    "rpc_api_keys",
+];
 
 /// The hello's `store_moved`, each name once, in the hello's order. A name
 /// [`STORES`] doesn't list makes the hello malformed.
@@ -1690,13 +1713,15 @@ impl Core {
         self.vault.configure_grants(grants.0, grants.1);
         self.vault
             .configure_safe_pending(root.clone(), stores.contains(&"safe_pending"));
+        self.vault
+            .configure_intents(root.clone(), stores.contains(&"intents"));
         self.stores_echo = stores
             .into_iter()
             .filter(|name| STORES_SERVED.contains(name))
             .filter(|name| match *name {
                 "vault_meta" => self.vault.configure_vault_meta(),
                 "rpc_api_keys" => self.vault.configure_rpc_keys(root.clone()),
-                "safe_pending" => true,
+                "safe_pending" | "intents" => true,
                 // Opened at its first request, never before the name.
                 "payments" => {
                     self.vault.configure_payments(root.clone());

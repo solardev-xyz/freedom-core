@@ -29,6 +29,7 @@ mod exit;
 mod gate;
 mod grants;
 mod hardening;
+mod intents;
 mod journal;
 mod keystore;
 mod log;
@@ -62,6 +63,7 @@ mod testjournal;
 mod testpayments;
 mod transport;
 mod vault;
+mod vault_meta_journal;
 mod worker;
 
 use std::io::{Read, Write};
@@ -212,6 +214,15 @@ fn recover(data_dir: &std::path::Path, lock_dir: &std::path::Path) -> Exit {
     if let Err(e) = delete_journal::startup(data_dir) {
         log::error(
             "vault delete recovery failed",
+            serde_json::json!({ "error": e.kind().to_string() }),
+        );
+        return Exit::Storage;
+    }
+    // Then a vault write's metadata journal (design 0013, "The vault and
+    // its metadata, one write"), as at the core's own start.
+    if let Err(e) = vault_meta_journal::startup(data_dir) {
+        log::error(
+            "vault write recovery failed",
             serde_json::json!({ "error": e.kind().to_string() }),
         );
         return Exit::Storage;
