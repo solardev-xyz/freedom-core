@@ -29,6 +29,7 @@ mod exit;
 mod gate;
 mod grants;
 mod hardening;
+mod intents;
 mod journal;
 mod keystore;
 mod log;
