@@ -950,6 +950,9 @@ fn new_entry(secrets: &SecretsFile, name: &EntryName) -> bool {
 }
 
 #[cfg(test)]
+mod vectors;
+
+#[cfg(test)]
 mod tests {
     use super::*;
 

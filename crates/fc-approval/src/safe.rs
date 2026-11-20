@@ -255,6 +255,13 @@ impl Approved {
         })
     }
 
+    /// The Safe it approved for, whichever kind.
+    fn safe(&self) -> &[u8; 20] {
+        match self {
+            Approved::Send { safe, .. } | Approved::Message { safe, .. } => safe,
+        }
+    }
+
     /// A `safe-send`'s Safe: a Safe has one pending SafeTx.
     fn sent_safe(&self) -> Option<&[u8; 20]> {
         match self {
@@ -529,6 +536,15 @@ impl SafeApprovals {
             }
             None => false,
         }
+    }
+
+    /// Ends every open approval for `safe`, a send's and each message's,
+    /// whoever holds them: the Safe's account is being removed (design
+    /// 0013, `accounts.remove`). How many it ended.
+    pub fn end_safe(&mut self, safe: &[u8; 20]) -> usize {
+        let before = self.entries.len();
+        self.entries.retain(|entry| entry.approved.safe() != safe);
+        before - self.entries.len()
     }
 
     /// Whether an owner's `sign.typed_data` request is one the approval
@@ -1106,6 +1122,31 @@ mod tests {
                     .is_ok()
             );
         }
+    }
+
+    /// Ending a Safe's approvals ends its send's and each of its messages',
+    /// for every holder, and no other Safe's.
+    #[test]
+    fn ending_a_safes_approvals_ends_only_that_safes() {
+        let mut safes = SafeApprovals::new();
+        let mut rng = Counter(0);
+        let send = |safe| Approved::send(&send_payload(safe)).unwrap();
+        let message =
+            || Approved::message(&message_payload("personal_sign", json!(["hi"]))).unwrap();
+        safes.record(page(1), send(SAFE), &mut rng).unwrap();
+        safes.record(Holder::Wallet, message(), &mut rng).unwrap();
+        safes.record(page(2), message(), &mut rng).unwrap();
+        let other = safes
+            .record(page(3), send(OTHER_SAFE), &mut rng)
+            .unwrap()
+            .to_text();
+        let mut safe = [0u8; 20];
+        safe.copy_from_slice(&[0x11; 20]);
+        assert_eq!(safes.end_safe(&safe), 3);
+        assert_eq!(safes.len(), 1);
+        assert_eq!(safes.end_safe(&safe), 0);
+        assert!(safes.end(&other));
+        assert!(safes.is_empty());
     }
 
     /// A Safe message is the approved Safe's, on its chain: Safe B's

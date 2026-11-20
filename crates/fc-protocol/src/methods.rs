@@ -178,6 +178,22 @@ pub const METHODS: &[Method] = &[
     row("secrets.rpc_api_key_status", CS, false, VAULT),
     row("secrets.set_rpc_api_key", CS, true, VAULT),
     row("secrets.remove_rpc_api_key", CS, true, VAULT),
+    // Design 0013, "Callers of the store methods" (PRF-5c-1): a write the
+    // chrome causes today with no check in main between is the chrome's
+    // too; one that follows main's own check (a device read, the phone's
+    // proof, a Safe's predicted address, a verified deployment) is main's.
+    row("accounts.list", CS, false, VAULT),
+    row("accounts.meta", CS, false, VAULT),
+    row("accounts.active", CS, false, VAULT),
+    row("accounts.add_mnemonic", CS, true, VAULT),
+    row("accounts.add_ledger", SHELL, true, VAULT),
+    row("accounts.add_remote", SHELL, true, VAULT),
+    row("accounts.record_address_check", SHELL, true, VAULT),
+    row("accounts.add_safe", SHELL, true, VAULT),
+    row("accounts.mark_safe_deployed", SHELL, true, VAULT),
+    row("accounts.set_active", CS, true, VAULT),
+    row("accounts.rename", CS, true, VAULT),
+    row("accounts.remove", CS, true, VAULT),
     row("nodes.write_identity", CS, true, VAULT),
     row("nodes.op_status", SHELL, false, VAULT),
     // Design 0008, "The sealed release": the Radicle node key, sealed to the
@@ -431,6 +447,34 @@ mod tests {
                 (CallerKind::Page, page),
                 (CallerKind::Chrome, chrome),
                 (CallerKind::Shell, shell),
+            ] {
+                assert_eq!(
+                    matches!(admit(name, caller, V2), Admission::Allowed(_)),
+                    allowed,
+                    "{name} {caller:?}"
+                );
+            }
+        }
+        // Design 0013, "Callers of the store methods": who reaches each
+        // `accounts.*` method. A page reaches none.
+        for (name, chrome) in [
+            ("accounts.list", true),
+            ("accounts.meta", true),
+            ("accounts.active", true),
+            ("accounts.add_mnemonic", true),
+            ("accounts.add_ledger", false),
+            ("accounts.add_remote", false),
+            ("accounts.record_address_check", false),
+            ("accounts.add_safe", false),
+            ("accounts.mark_safe_deployed", false),
+            ("accounts.set_active", true),
+            ("accounts.rename", true),
+            ("accounts.remove", true),
+        ] {
+            for (caller, allowed) in [
+                (CallerKind::Page, false),
+                (CallerKind::Chrome, chrome),
+                (CallerKind::Shell, true),
             ] {
                 assert_eq!(
                     matches!(admit(name, caller, V2), Admission::Allowed(_)),
