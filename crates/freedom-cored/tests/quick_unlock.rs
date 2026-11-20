@@ -1017,6 +1017,94 @@ fn a_vault_delete_whose_install_fails_after_its_commit() {
     main.only_the_key_in_use();
 }
 
+/// The delete's journal's own flush (the directory flush after its rename):
+/// no target changes until the journal's name is durable (design 0013, "The
+/// vault delete's journal", step 2).
+#[test]
+fn a_vault_delete_journals_own_flush() {
+    let password = json!({ "password_b64": b64(PASSWORD) });
+    // Failing once: tried again, and the delete finishes durable.
+    let mut main = enrolled_stopped();
+    main.start(&[("FREEDOM_CORED_TEST_SECRETS_FAIL", "delete-journal-flush")]);
+    let deleted = delete_op(&mut main).unwrap();
+    assert_eq!(deleted["result"], json!({}), "{deleted}");
+    main.drained();
+    assert!(!main.vault_path().exists());
+    assert!(!main.enrolled());
+    assert!(main.keychain.items.is_empty());
+    main.no_delete_left();
+    // Held, with a crash hook past the secrets file's install: it never
+    // fires, as nothing is installed before the journal's name is durable.
+    // The delete answers committed, not durable, and the journal stays.
+    for lose_journal in [true, false] {
+        let mut main = enrolled_stopped();
+        let vault = std::fs::read(main.vault_path()).unwrap();
+        let secrets = std::fs::read(main.secrets_path()).unwrap();
+        let hook = main.data.parent().unwrap().join("write-fail");
+        std::fs::write(&hook, "delete_journal:journal-flush").unwrap();
+        main.start(&[
+            (WRITE_FAIL, hook.to_str().unwrap()),
+            ("FREEDOM_CORED_TEST_SECRETS_CRASH", "after-delete-secrets"),
+        ]);
+        let deleted = delete_op(&mut main).expect("answered, not killed");
+        assert_eq!(deleted["result"], json!({ "durable": false }), "{deleted}");
+        let untouched = |main: &Main, label: &str| {
+            assert_eq!(std::fs::read(main.vault_path()).unwrap(), vault, "{label}");
+            assert_eq!(
+                std::fs::read(main.secrets_path()).unwrap(),
+                secrets,
+                "{label}"
+            );
+            for name in ["vault-delete-journal.json", "secrets.json.freedom-new"] {
+                assert!(main.data.join(name).exists(), "{label}: {name}");
+            }
+            assert!(
+                !main.keychain.calls.iter().any(|c| c == "forget"),
+                "{label}"
+            );
+            assert_eq!(main.keychain.items.len(), 1, "{label}");
+        };
+        untouched(&main, "answered");
+        // Nothing reads the vault the delete committed to remove.
+        let unlock = main.call("vault.unlock", password.clone());
+        assert_eq!(error_code(&unlock), "storage", "{unlock}");
+        untouched(&main, "after a read");
+        main.stop();
+        untouched(&main, "stopped");
+        if lose_journal {
+            // The journal's name lost, as power loss could lose it: the old
+            // state stays, the vault with its entry and key.
+            std::fs::remove_file(main.data.join("vault-delete-journal.json")).unwrap();
+            main.start(&[]);
+            main.no_delete_left();
+            assert!(!main.data.join("vault-delete-journal.json.corrupt").exists());
+            assert_eq!(std::fs::read(main.vault_path()).unwrap(), vault);
+            assert_eq!(std::fs::read(main.secrets_path()).unwrap(), secrets);
+            let unlock = main.call("quick_unlock.unlock", json!({}));
+            assert!(unlock["result"].is_object(), "{unlock}");
+            let unlock = main.call("vault.unlock", password.clone());
+            assert!(unlock["result"].is_object(), "{unlock}");
+            assert!(!main.keychain.calls.iter().any(|c| c == "forget"));
+            assert_eq!(main.keychain.items.len(), 1);
+        } else {
+            // A start with the flush still failing keeps the journal and
+            // changes nothing; cleared, the next request's recovery
+            // finishes the delete.
+            main.start(&[(WRITE_FAIL, hook.to_str().unwrap())]);
+            untouched(&main, "restarted, held");
+            std::fs::write(&hook, "").unwrap();
+            let unlock = main.call("vault.unlock", password.clone());
+            assert_eq!(error_code(&unlock), "no_vault", "{unlock}");
+            main.drained();
+            assert!(!main.vault_path().exists());
+            assert!(!main.enrolled());
+            assert!(main.keychain.items.is_empty());
+            main.no_delete_left();
+            main.only_the_key_in_use();
+        }
+    }
+}
+
 // ----- The rest of the row
 
 #[test]
