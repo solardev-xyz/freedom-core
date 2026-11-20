@@ -20,7 +20,7 @@ use std::path::PathBuf;
 
 use fc_json::JsValue;
 
-use crate::payments::Store;
+use crate::payments_store::Store;
 
 /// Runs the subcommand; its exit code.
 pub fn run(mut args: impl Iterator<Item = std::ffi::OsString>) -> u8 {

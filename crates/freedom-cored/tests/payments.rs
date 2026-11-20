@@ -139,16 +139,22 @@ fn callers_and_answers() {
     assert_eq!(payment["id"], 1, "{reply}");
     assert_eq!(payment["status"], "pending");
     assert_eq!(payment["chainId"], 1);
+    // The repoll's rows as it reads them: snake_case, metadata as text.
     let reply = call(&mut core, "shell", "payments.pending", json!({}));
-    assert_eq!(reply["result"]["payments"][0]["txHash"], "0xab", "{reply}");
+    let row = &reply["result"]["payments"][0];
+    assert_eq!(row["tx_hash"], "0xab", "{reply}");
+    assert_eq!(row["chain_id"], 1, "{reply}");
+    assert_eq!(row["metadata"], r#"{"txNonce":4}"#, "{reply}");
     let reply = call(
         &mut core,
         "shell",
         "payments.set_dropped_seen",
         json!({ "id": 1, "seen_at": 5 }),
     );
+    assert_eq!(reply["result"], json!({}), "{reply}");
+    let reply = call(&mut core, "shell", "payments.pending", json!({}));
     assert_eq!(
-        reply["result"]["payment"]["metadata"]["txDroppedSeenAt"], 5,
+        reply["result"]["payments"][0]["metadata"], r#"{"txNonce":4,"txDroppedSeenAt":5}"#,
         "{reply}"
     );
     let reply = call(
@@ -164,7 +170,7 @@ fn callers_and_answers() {
         "payments.set_dropped_seen",
         json!({ "id": 1, "seen_at": null }),
     );
-    assert_eq!(reply["result"], json!({ "payment": null }), "{reply}");
+    assert_eq!(reply["result"], json!({}), "{reply}");
     let reply = call(
         &mut core,
         "shell",

@@ -34,6 +34,7 @@ mod log;
 mod naming;
 mod nodes;
 mod payments;
+mod payments_store;
 mod phone;
 mod profile;
 mod requests;

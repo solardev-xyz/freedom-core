@@ -623,6 +623,7 @@ test('the reference reads the payment history a testhooks core wrote', async () 
     assert.equal(out.code, 0, out.stderr);
     assert.ok(out.answers.every((answer) => answer.ok), JSON.stringify(out.answers));
     assert.equal(out.answers.length, 11);
+    assert.deepEqual(out.answers[4].ok, {});
     const [recent, count, pending] = out.answers.slice(8).map((answer) => answer.ok);
     assert.equal(count.count, 5);
     assert.deepEqual(fs.readdirSync(dir).filter((f) => !f.startsWith('payment-history.sqlite')), ['x402-receipts.json.migrated']);
@@ -631,9 +632,7 @@ test('the reference reads the payment history a testhooks core wrote', async () 
       assert.deepEqual(reference.getRecent({ limit: 50 }), recent.payments);
       assert.equal(reference.getCount(), count.count);
       for (const record of recent.payments) assert.deepEqual(reference.getById(record.id), record);
-      const raw = reference.__internals.getStatements().getPending.all();
-      assert.deepEqual(raw.map((row) => [row.id, row.tx_hash, row.chain_id]),
-        pending.payments.map((record) => [record.id, record.txHash, record.chainId]));
+      assert.deepEqual(reference.__internals.getStatements().getPending.all(), pending.payments);
       assert.equal(reference.getDb().pragma('user_version', { simple: true }), 1);
       assert.equal(reference.getDb().pragma('journal_mode', { simple: true }), 'wal');
     } finally {
@@ -660,7 +659,7 @@ test('the core reads the payment history the reference wrote', async () => {
         page: reference.getRecent({ kind: 'wallet-send', limit: 1, offset: 1 }),
         count: reference.getCount({ chainId: 1 }),
         byId: reference.getById(2),
-        pending: reference.__internals.getStatements().getPending.all().map((row) => [row.id, row.tx_hash, row.chain_id]),
+        pending: reference.__internals.getStatements().getPending.all(),
       };
     } finally {
       reference.closeDb();
@@ -681,7 +680,7 @@ test('the core reads the payment history the reference wrote', async () => {
     assert.deepEqual(page.payments, expected.page);
     assert.equal(count.count, expected.count);
     assert.deepEqual(byId.payment, expected.byId);
-    assert.deepEqual(pending.payments.map((record) => [record.id, record.txHash, record.chainId]), expected.pending);
+    assert.deepEqual(pending.payments, expected.pending);
     // The reference imported the legacy file already: the core finds it gone.
     assert.deepEqual(fs.readdirSync(dir).filter((f) => !f.startsWith('payment-history.sqlite')), ['x402-receipts.json.migrated']);
     const again = payments.load(STORES_REFERENCE, Database, dir);
