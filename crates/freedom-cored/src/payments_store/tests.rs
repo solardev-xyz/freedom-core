@@ -148,7 +148,7 @@ fn an_import_cut_before_its_rename_is_finished_once() {
     let text = r#"[{"id":"r1","settledAt":1699000000,"status":"settled","chainId":8453,"amount":"500","origin":"https://x.example","url":"https://x.example/a"}]"#;
     std::fs::write(root.join(LEGACY_FILE), text).unwrap();
     let mut payments = open(root);
-    assert_eq!(payments.import_legacy(text, 1.0).unwrap(), 1);
+    assert_eq!(payments.import_legacy(text, || 1.0).unwrap(), 1);
     let rows = table_at(root);
     assert_eq!(
         Store::import(root, &mut payments, 2.0),

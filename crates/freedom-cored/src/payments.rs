@@ -8,6 +8,11 @@
 //! runs, as in the reference, whose checks and binder throw before its
 //! driver steps.
 //!
+//! Every value comes as JSON, so nothing here binds a BigInt or a Buffer as
+//! the reference's driver can. A BLOB cell the reference wrote (a caller
+//! handed it a `Buffer`) answers its field as `null` in a record, the row
+//! still listed, and is logged (design 0013's `payments-json-values`).
+//!
 //! The methods that call these, their callers, `store_moved` and the
 //! import's files are `payments_store`'s.
 
@@ -30,9 +35,6 @@ pub const SCHEMA: Schema = Schema {
 pub enum Error {
     /// The reference throws this, before anything is written.
     Thrown(Thrown),
-    /// A row holds a BLOB, which no statement here writes and no JSON
-    /// answer holds.
-    Blob,
     Sqlite(rusqlite::Error),
 }
 
@@ -40,7 +42,6 @@ impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Error::Thrown(thrown) => write!(f, "{thrown}"),
-            Error::Blob => f.write_str("a payment row holds a blob"),
             Error::Sqlite(e) => write!(f, "{e}"),
         }
     }
@@ -98,6 +99,8 @@ fn rows(conn: &Connection, statement: &Statement) -> Result<Vec<Row>, Error> {
         }
         out.push(cells);
     }
+    #[cfg(test)]
+    tests::after_read_hook(&statement.sql);
     Ok(out)
 }
 
@@ -109,16 +112,28 @@ fn run(conn: &Connection, statement: &Statement) -> Result<usize, Error> {
     ))?)
 }
 
-fn record(row: &Row) -> Result<JsValue, Error> {
-    codec::record(row).ok_or(Error::Blob)
+/// `rowToEntry(row)`, a BLOB cell answering `null`, and logged.
+fn record(row: &Row) -> JsValue {
+    let blobs: Vec<&str> = codec::COLUMNS
+        .iter()
+        .zip(row)
+        .filter(|(_, cell)| matches!(cell, Cell::Blob(_)))
+        .map(|(column, _)| *column)
+        .collect();
+    if !blobs.is_empty() {
+        crate::log::warn(
+            "a payment row holds a blob: answered as null",
+            serde_json::json!({ "columns": blobs }),
+        );
+    }
+    codec::record(row)
 }
 
 /// `rowToEntry(getById.get(id))`: the record, or `null`.
 fn by_id(conn: &Connection, id: &JsValue) -> Result<JsValue, Error> {
-    match rows(conn, &codec::by_id(id)?)?.first() {
-        Some(row) => record(row),
-        None => Ok(JsValue::Null),
-    }
+    Ok(rows(conn, &codec::by_id(id)?)?
+        .first()
+        .map_or(JsValue::Null, record))
 }
 
 /// The row by `id`, as SQLite holds it.
@@ -211,12 +226,6 @@ impl Payments {
         codec::by_id(id)?;
         self.write(|tx| {
             let existing = row_by_id(tx, id)?;
-            if existing
-                .as_ref()
-                .is_some_and(|row| codec::record(row).is_none())
-            {
-                return Err(Error::Blob);
-            }
             match codec::dropped_patch(existing.as_ref()) {
                 Some(patch) => update_in(tx, id, &patch, now_ms),
                 None => Ok(JsValue::Null),
@@ -250,10 +259,10 @@ impl Payments {
 
     /// `getRecent(filters)`.
     pub fn get_recent(&mut self, filters: &JsValue) -> Result<Vec<JsValue>, Error> {
-        rows(&self.conn, &codec::get_recent(filters)?)?
+        Ok(rows(&self.conn, &codec::get_recent(filters)?)?
             .iter()
             .map(record)
-            .collect()
+            .collect())
     }
 
     /// `getById(id)`.
@@ -279,7 +288,14 @@ impl Payments {
     /// The import's rows (`migrateFromJson`, inside its file checks): each
     /// entry of `text` not imported already, in one transaction. A refusal
     /// imports nothing, and the caller then leaves the file in place.
-    pub fn import_legacy(&mut self, text: &str, now_ms: f64) -> Result<usize, Error> {
+    /// `clock` is called once for each entry without a finite `settledAt`,
+    /// as the reference calls `Date.now()`, so each such row has its own
+    /// time.
+    pub fn import_legacy(
+        &mut self,
+        text: &str,
+        mut clock: impl FnMut() -> f64,
+    ) -> Result<usize, Error> {
         let entries = codec::legacy_entries(text)?;
         if entries.is_empty() {
             return Ok(0);
@@ -287,7 +303,7 @@ impl Payments {
         self.write(|tx| {
             let mut imported = 0;
             for entry in &entries {
-                let legacy = codec::legacy_row(entry, now_ms)?;
+                let legacy = codec::legacy_row(entry, &mut clock)?;
                 if rows(tx, &codec::legacy_rows())?
                     .iter()
                     .any(|row| legacy.imported_as(row))

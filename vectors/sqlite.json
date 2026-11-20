@@ -23744,9 +23744,12 @@
         "text": "[{\"id\":\"r1\",\"settledAt\":1699000000,\"status\":\"settled\",\"chainId\":8453,\"txHash\":\"0x0000000000000000000000000000000000000000000000000000000000000021\",\"asset\":\"0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913\",\"amount\":\"500\",\"origin\":\"https://x.example\",\"url\":\"https://x.example/a\"},{\"id\":\"r1\",\"settledAt\":1699000000,\"status\":\"settled\",\"chainId\":8453,\"txHash\":\"0x0000000000000000000000000000000000000000000000000000000000000021\",\"asset\":\"0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913\",\"amount\":\"500\",\"origin\":\"https://x.example\",\"url\":\"https://x.example/a\"},{\"id\":\"r2\",\"settledAt\":1699000000,\"status\":\"settled\",\"chainId\":8453,\"txHash\":\"0x0000000000000000000000000000000000000000000000000000000000000021\",\"asset\":\"0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913\",\"amount\":\"500\",\"origin\":\"https://x.example\",\"url\":\"https://x.example/a\"},{\"settledAt\":1699000001.5,\"chainId\":1,\"amount\":\"7\"},{\"status\":\"pending\",\"chainId\":\"1\",\"amount\":7,\"txHash\":5,\"url\":\"https://x.example/b\"},{\"status\":\"pending\",\"chainId\":\"1\",\"amount\":7,\"txHash\":5,\"url\":\"https://x.example/b\"},{\"id\":\"\",\"settledAt\":1,\"status\":\"failed\",\"chainId\":1.5,\"txHash\":\"0x0000000000000000000000000000000000000000000000000000000000000022\",\"amount\":\"1\"},{\"id\":7,\"settledAt\":2,\"chainId\":[1,2],\"url\":{\"a\":1},\"amount\":\"2\"},\"string entry\",42,{\"id\":\"e\\ud800\",\"amount\":\"3\",\"settledAt\":3}]",
         "migrated": false,
         "before": [],
-        "result": {
-          "ok": null
-        },
+        "ticks": [
+          1700000000000,
+          1700000000001,
+          1700000000002,
+          1700000000003
+        ],
         "rows": [
           {
             "id": [
@@ -24125,11 +24128,11 @@
             ],
             "created_at": [
               "integer",
-              "1700000000000"
+              "1700000000002"
             ],
             "confirmed_at": [
               "integer",
-              "1700000000000"
+              "1700000000002"
             ],
             "gas_used": [
               "null",
@@ -24221,9 +24224,7 @@
         "text": "{\"entries\":[{\"id\":\"r1\",\"settledAt\":1699000000,\"status\":\"settled\",\"chainId\":8453,\"txHash\":\"0x0000000000000000000000000000000000000000000000000000000000000021\",\"asset\":\"0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913\",\"amount\":\"500\",\"origin\":\"https://x.example\",\"url\":\"https://x.example/a\"}]}",
         "migrated": false,
         "before": [],
-        "result": {
-          "ok": null
-        },
+        "ticks": [],
         "rows": [],
         "files": [
           "x402-receipts.json.migrated"
@@ -24235,9 +24236,7 @@
         "text": "[]",
         "migrated": false,
         "before": [],
-        "result": {
-          "ok": null
-        },
+        "ticks": [],
         "rows": [],
         "files": [
           "x402-receipts.json.migrated"
@@ -24249,9 +24248,7 @@
         "text": "[{\"id\": \"r1\",",
         "migrated": false,
         "before": [],
-        "result": {
-          "ok": null
-        },
+        "ticks": [],
         "rows": [],
         "files": [
           "x402-receipts.json"
@@ -24263,9 +24260,7 @@
         "text": "﻿[{\"id\":\"r1\",\"settledAt\":1699000000,\"status\":\"settled\",\"chainId\":8453,\"txHash\":\"0x0000000000000000000000000000000000000000000000000000000000000021\",\"asset\":\"0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913\",\"amount\":\"500\",\"origin\":\"https://x.example\",\"url\":\"https://x.example/a\"}]",
         "migrated": false,
         "before": [],
-        "result": {
-          "ok": null
-        },
+        "ticks": [],
         "rows": [],
         "files": [
           "x402-receipts.json"
@@ -24277,9 +24272,7 @@
         "text": "[{\"id\":\"r1\",\"settledAt\":1699000000,\"status\":\"settled\",\"chainId\":8453,\"txHash\":\"0x0000000000000000000000000000000000000000000000000000000000000021\",\"asset\":\"0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913\",\"amount\":\"500\",\"origin\":\"https://x.example\",\"url\":\"https://x.example/a\"},null]",
         "migrated": false,
         "before": [],
-        "result": {
-          "ok": null
-        },
+        "ticks": [],
         "rows": [],
         "files": [
           "x402-receipts.json"
@@ -24291,9 +24284,9 @@
         "text": "[{\"id\":\"r1\",\"settledAt\":1699000000,\"status\":\"settled\",\"chainId\":8453,\"txHash\":\"0x0000000000000000000000000000000000000000000000000000000000000021\",\"asset\":\"0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913\",\"amount\":\"500\",\"origin\":\"https://x.example\",\"url\":\"https://x.example/a\"},{\"chainId\":{\"toString\":1},\"amount\":\"1\"}]",
         "migrated": false,
         "before": [],
-        "result": {
-          "ok": null
-        },
+        "ticks": [
+          1700000000000
+        ],
         "rows": [],
         "files": [
           "x402-receipts.json"
@@ -24305,9 +24298,7 @@
         "text": "[{\"id\":\"r1\",\"settledAt\":1699000000,\"status\":\"settled\",\"chainId\":8453,\"txHash\":\"0x0000000000000000000000000000000000000000000000000000000000000021\",\"asset\":\"0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913\",\"amount\":\"500\",\"origin\":\"https://x.example\",\"url\":\"https://x.example/a\"}]",
         "migrated": true,
         "before": [],
-        "result": {
-          "ok": null
-        },
+        "ticks": [],
         "rows": [],
         "files": [
           "x402-receipts.json.migrated"
@@ -24339,9 +24330,7 @@
             }
           }
         ],
-        "result": {
-          "ok": null
-        },
+        "ticks": [],
         "rows": [
           {
             "id": [
@@ -24612,6 +24601,1652 @@
           "x402-receipts.json.migrated"
         ]
       }
-    ]
+    ],
+    "blob": {
+      "setup": [
+        {
+          "op": "append",
+          "args": [
+            {
+              "kind": "wallet-send",
+              "chainId": 1,
+              "amount": "1",
+              "txHash": {
+                "blob": "010203"
+              },
+              "metadata": {
+                "txFrom": "0x00000000000000000000000000000000000000aa"
+              }
+            }
+          ],
+          "now": 1700000000000,
+          "result": {
+            "ok": {
+              "id": 1,
+              "kind": "wallet-send",
+              "chainId": 1,
+              "txHash": {
+                "blob": "010203"
+              },
+              "fromAddress": null,
+              "toAddress": null,
+              "asset": null,
+              "amount": "1",
+              "origin": null,
+              "url": null,
+              "status": "pending",
+              "createdAt": 1700000000000,
+              "confirmedAt": null,
+              "gasUsed": null,
+              "gasPrice": null,
+              "metadata": {
+                "txFrom": "0x00000000000000000000000000000000000000aa"
+              }
+            }
+          },
+          "rows": [
+            {
+              "id": [
+                "integer",
+                "1"
+              ],
+              "kind": [
+                "text",
+                "wallet-send"
+              ],
+              "chain_id": [
+                "integer",
+                "1"
+              ],
+              "tx_hash": [
+                "blob",
+                "010203"
+              ],
+              "from_address": [
+                "null",
+                null
+              ],
+              "to_address": [
+                "null",
+                null
+              ],
+              "asset": [
+                "null",
+                null
+              ],
+              "amount": [
+                "text",
+                "1"
+              ],
+              "origin": [
+                "null",
+                null
+              ],
+              "url": [
+                "null",
+                null
+              ],
+              "status": [
+                "text",
+                "pending"
+              ],
+              "created_at": [
+                "integer",
+                "1700000000000"
+              ],
+              "confirmed_at": [
+                "null",
+                null
+              ],
+              "gas_used": [
+                "null",
+                null
+              ],
+              "gas_price": [
+                "null",
+                null
+              ],
+              "metadata": [
+                "text",
+                "{\"txFrom\":\"0x00000000000000000000000000000000000000aa\"}"
+              ]
+            }
+          ]
+        },
+        {
+          "op": "append",
+          "args": [
+            {
+              "kind": "x402",
+              "chainId": 1,
+              "amount": "2",
+              "txHash": "0x0000000000000000000000000000000000000000000000000000000000000001"
+            }
+          ],
+          "now": 1700000000010,
+          "result": {
+            "ok": {
+              "id": 2,
+              "kind": "x402",
+              "chainId": 1,
+              "txHash": "0x0000000000000000000000000000000000000000000000000000000000000001",
+              "fromAddress": null,
+              "toAddress": null,
+              "asset": null,
+              "amount": "2",
+              "origin": null,
+              "url": null,
+              "status": "settled",
+              "createdAt": 1700000000010,
+              "confirmedAt": 1700000000010,
+              "gasUsed": null,
+              "gasPrice": null,
+              "metadata": null
+            }
+          },
+          "rows": [
+            {
+              "id": [
+                "integer",
+                "1"
+              ],
+              "kind": [
+                "text",
+                "wallet-send"
+              ],
+              "chain_id": [
+                "integer",
+                "1"
+              ],
+              "tx_hash": [
+                "blob",
+                "010203"
+              ],
+              "from_address": [
+                "null",
+                null
+              ],
+              "to_address": [
+                "null",
+                null
+              ],
+              "asset": [
+                "null",
+                null
+              ],
+              "amount": [
+                "text",
+                "1"
+              ],
+              "origin": [
+                "null",
+                null
+              ],
+              "url": [
+                "null",
+                null
+              ],
+              "status": [
+                "text",
+                "pending"
+              ],
+              "created_at": [
+                "integer",
+                "1700000000000"
+              ],
+              "confirmed_at": [
+                "null",
+                null
+              ],
+              "gas_used": [
+                "null",
+                null
+              ],
+              "gas_price": [
+                "null",
+                null
+              ],
+              "metadata": [
+                "text",
+                "{\"txFrom\":\"0x00000000000000000000000000000000000000aa\"}"
+              ]
+            },
+            {
+              "id": [
+                "integer",
+                "2"
+              ],
+              "kind": [
+                "text",
+                "x402"
+              ],
+              "chain_id": [
+                "integer",
+                "1"
+              ],
+              "tx_hash": [
+                "text",
+                "0x0000000000000000000000000000000000000000000000000000000000000001"
+              ],
+              "from_address": [
+                "null",
+                null
+              ],
+              "to_address": [
+                "null",
+                null
+              ],
+              "asset": [
+                "null",
+                null
+              ],
+              "amount": [
+                "text",
+                "2"
+              ],
+              "origin": [
+                "null",
+                null
+              ],
+              "url": [
+                "null",
+                null
+              ],
+              "status": [
+                "text",
+                "settled"
+              ],
+              "created_at": [
+                "integer",
+                "1700000000010"
+              ],
+              "confirmed_at": [
+                "integer",
+                "1700000000010"
+              ],
+              "gas_used": [
+                "null",
+                null
+              ],
+              "gas_price": [
+                "null",
+                null
+              ],
+              "metadata": [
+                "null",
+                null
+              ]
+            }
+          ]
+        },
+        {
+          "op": "update",
+          "args": [
+            2,
+            {
+              "gasUsed": {
+                "blob": "FF00"
+              }
+            }
+          ],
+          "now": 1700000000020,
+          "result": {
+            "ok": {
+              "id": 2,
+              "kind": "x402",
+              "chainId": 1,
+              "txHash": "0x0000000000000000000000000000000000000000000000000000000000000001",
+              "fromAddress": null,
+              "toAddress": null,
+              "asset": null,
+              "amount": "2",
+              "origin": null,
+              "url": null,
+              "status": "settled",
+              "createdAt": 1700000000010,
+              "confirmedAt": 1700000000010,
+              "gasUsed": {
+                "blob": "FF00"
+              },
+              "gasPrice": null,
+              "metadata": null
+            }
+          },
+          "rows": [
+            {
+              "id": [
+                "integer",
+                "1"
+              ],
+              "kind": [
+                "text",
+                "wallet-send"
+              ],
+              "chain_id": [
+                "integer",
+                "1"
+              ],
+              "tx_hash": [
+                "blob",
+                "010203"
+              ],
+              "from_address": [
+                "null",
+                null
+              ],
+              "to_address": [
+                "null",
+                null
+              ],
+              "asset": [
+                "null",
+                null
+              ],
+              "amount": [
+                "text",
+                "1"
+              ],
+              "origin": [
+                "null",
+                null
+              ],
+              "url": [
+                "null",
+                null
+              ],
+              "status": [
+                "text",
+                "pending"
+              ],
+              "created_at": [
+                "integer",
+                "1700000000000"
+              ],
+              "confirmed_at": [
+                "null",
+                null
+              ],
+              "gas_used": [
+                "null",
+                null
+              ],
+              "gas_price": [
+                "null",
+                null
+              ],
+              "metadata": [
+                "text",
+                "{\"txFrom\":\"0x00000000000000000000000000000000000000aa\"}"
+              ]
+            },
+            {
+              "id": [
+                "integer",
+                "2"
+              ],
+              "kind": [
+                "text",
+                "x402"
+              ],
+              "chain_id": [
+                "integer",
+                "1"
+              ],
+              "tx_hash": [
+                "text",
+                "0x0000000000000000000000000000000000000000000000000000000000000001"
+              ],
+              "from_address": [
+                "null",
+                null
+              ],
+              "to_address": [
+                "null",
+                null
+              ],
+              "asset": [
+                "null",
+                null
+              ],
+              "amount": [
+                "text",
+                "2"
+              ],
+              "origin": [
+                "null",
+                null
+              ],
+              "url": [
+                "null",
+                null
+              ],
+              "status": [
+                "text",
+                "settled"
+              ],
+              "created_at": [
+                "integer",
+                "1700000000010"
+              ],
+              "confirmed_at": [
+                "integer",
+                "1700000000010"
+              ],
+              "gas_used": [
+                "blob",
+                "FF00"
+              ],
+              "gas_price": [
+                "null",
+                null
+              ],
+              "metadata": [
+                "null",
+                null
+              ]
+            }
+          ]
+        }
+      ],
+      "steps": [
+        {
+          "op": "getRecent",
+          "args": [],
+          "now": 1700000000030,
+          "result": {
+            "ok": [
+              {
+                "id": 2,
+                "kind": "x402",
+                "chainId": 1,
+                "txHash": "0x0000000000000000000000000000000000000000000000000000000000000001",
+                "fromAddress": null,
+                "toAddress": null,
+                "asset": null,
+                "amount": "2",
+                "origin": null,
+                "url": null,
+                "status": "settled",
+                "createdAt": 1700000000010,
+                "confirmedAt": 1700000000010,
+                "gasUsed": {
+                  "blob": "FF00"
+                },
+                "gasPrice": null,
+                "metadata": null
+              },
+              {
+                "id": 1,
+                "kind": "wallet-send",
+                "chainId": 1,
+                "txHash": {
+                  "blob": "010203"
+                },
+                "fromAddress": null,
+                "toAddress": null,
+                "asset": null,
+                "amount": "1",
+                "origin": null,
+                "url": null,
+                "status": "pending",
+                "createdAt": 1700000000000,
+                "confirmedAt": null,
+                "gasUsed": null,
+                "gasPrice": null,
+                "metadata": {
+                  "txFrom": "0x00000000000000000000000000000000000000aa"
+                }
+              }
+            ]
+          },
+          "rows": [
+            {
+              "id": [
+                "integer",
+                "1"
+              ],
+              "kind": [
+                "text",
+                "wallet-send"
+              ],
+              "chain_id": [
+                "integer",
+                "1"
+              ],
+              "tx_hash": [
+                "blob",
+                "010203"
+              ],
+              "from_address": [
+                "null",
+                null
+              ],
+              "to_address": [
+                "null",
+                null
+              ],
+              "asset": [
+                "null",
+                null
+              ],
+              "amount": [
+                "text",
+                "1"
+              ],
+              "origin": [
+                "null",
+                null
+              ],
+              "url": [
+                "null",
+                null
+              ],
+              "status": [
+                "text",
+                "pending"
+              ],
+              "created_at": [
+                "integer",
+                "1700000000000"
+              ],
+              "confirmed_at": [
+                "null",
+                null
+              ],
+              "gas_used": [
+                "null",
+                null
+              ],
+              "gas_price": [
+                "null",
+                null
+              ],
+              "metadata": [
+                "text",
+                "{\"txFrom\":\"0x00000000000000000000000000000000000000aa\"}"
+              ]
+            },
+            {
+              "id": [
+                "integer",
+                "2"
+              ],
+              "kind": [
+                "text",
+                "x402"
+              ],
+              "chain_id": [
+                "integer",
+                "1"
+              ],
+              "tx_hash": [
+                "text",
+                "0x0000000000000000000000000000000000000000000000000000000000000001"
+              ],
+              "from_address": [
+                "null",
+                null
+              ],
+              "to_address": [
+                "null",
+                null
+              ],
+              "asset": [
+                "null",
+                null
+              ],
+              "amount": [
+                "text",
+                "2"
+              ],
+              "origin": [
+                "null",
+                null
+              ],
+              "url": [
+                "null",
+                null
+              ],
+              "status": [
+                "text",
+                "settled"
+              ],
+              "created_at": [
+                "integer",
+                "1700000000010"
+              ],
+              "confirmed_at": [
+                "integer",
+                "1700000000010"
+              ],
+              "gas_used": [
+                "blob",
+                "FF00"
+              ],
+              "gas_price": [
+                "null",
+                null
+              ],
+              "metadata": [
+                "null",
+                null
+              ]
+            }
+          ]
+        },
+        {
+          "op": "getById",
+          "args": [
+            1
+          ],
+          "now": 1700000000030,
+          "result": {
+            "ok": {
+              "id": 1,
+              "kind": "wallet-send",
+              "chainId": 1,
+              "txHash": {
+                "blob": "010203"
+              },
+              "fromAddress": null,
+              "toAddress": null,
+              "asset": null,
+              "amount": "1",
+              "origin": null,
+              "url": null,
+              "status": "pending",
+              "createdAt": 1700000000000,
+              "confirmedAt": null,
+              "gasUsed": null,
+              "gasPrice": null,
+              "metadata": {
+                "txFrom": "0x00000000000000000000000000000000000000aa"
+              }
+            }
+          },
+          "rows": [
+            {
+              "id": [
+                "integer",
+                "1"
+              ],
+              "kind": [
+                "text",
+                "wallet-send"
+              ],
+              "chain_id": [
+                "integer",
+                "1"
+              ],
+              "tx_hash": [
+                "blob",
+                "010203"
+              ],
+              "from_address": [
+                "null",
+                null
+              ],
+              "to_address": [
+                "null",
+                null
+              ],
+              "asset": [
+                "null",
+                null
+              ],
+              "amount": [
+                "text",
+                "1"
+              ],
+              "origin": [
+                "null",
+                null
+              ],
+              "url": [
+                "null",
+                null
+              ],
+              "status": [
+                "text",
+                "pending"
+              ],
+              "created_at": [
+                "integer",
+                "1700000000000"
+              ],
+              "confirmed_at": [
+                "null",
+                null
+              ],
+              "gas_used": [
+                "null",
+                null
+              ],
+              "gas_price": [
+                "null",
+                null
+              ],
+              "metadata": [
+                "text",
+                "{\"txFrom\":\"0x00000000000000000000000000000000000000aa\"}"
+              ]
+            },
+            {
+              "id": [
+                "integer",
+                "2"
+              ],
+              "kind": [
+                "text",
+                "x402"
+              ],
+              "chain_id": [
+                "integer",
+                "1"
+              ],
+              "tx_hash": [
+                "text",
+                "0x0000000000000000000000000000000000000000000000000000000000000001"
+              ],
+              "from_address": [
+                "null",
+                null
+              ],
+              "to_address": [
+                "null",
+                null
+              ],
+              "asset": [
+                "null",
+                null
+              ],
+              "amount": [
+                "text",
+                "2"
+              ],
+              "origin": [
+                "null",
+                null
+              ],
+              "url": [
+                "null",
+                null
+              ],
+              "status": [
+                "text",
+                "settled"
+              ],
+              "created_at": [
+                "integer",
+                "1700000000010"
+              ],
+              "confirmed_at": [
+                "integer",
+                "1700000000010"
+              ],
+              "gas_used": [
+                "blob",
+                "FF00"
+              ],
+              "gas_price": [
+                "null",
+                null
+              ],
+              "metadata": [
+                "null",
+                null
+              ]
+            }
+          ]
+        },
+        {
+          "op": "getCount",
+          "args": [
+            {
+              "status": "pending"
+            }
+          ],
+          "now": 1700000000030,
+          "result": {
+            "ok": 1
+          },
+          "rows": [
+            {
+              "id": [
+                "integer",
+                "1"
+              ],
+              "kind": [
+                "text",
+                "wallet-send"
+              ],
+              "chain_id": [
+                "integer",
+                "1"
+              ],
+              "tx_hash": [
+                "blob",
+                "010203"
+              ],
+              "from_address": [
+                "null",
+                null
+              ],
+              "to_address": [
+                "null",
+                null
+              ],
+              "asset": [
+                "null",
+                null
+              ],
+              "amount": [
+                "text",
+                "1"
+              ],
+              "origin": [
+                "null",
+                null
+              ],
+              "url": [
+                "null",
+                null
+              ],
+              "status": [
+                "text",
+                "pending"
+              ],
+              "created_at": [
+                "integer",
+                "1700000000000"
+              ],
+              "confirmed_at": [
+                "null",
+                null
+              ],
+              "gas_used": [
+                "null",
+                null
+              ],
+              "gas_price": [
+                "null",
+                null
+              ],
+              "metadata": [
+                "text",
+                "{\"txFrom\":\"0x00000000000000000000000000000000000000aa\"}"
+              ]
+            },
+            {
+              "id": [
+                "integer",
+                "2"
+              ],
+              "kind": [
+                "text",
+                "x402"
+              ],
+              "chain_id": [
+                "integer",
+                "1"
+              ],
+              "tx_hash": [
+                "text",
+                "0x0000000000000000000000000000000000000000000000000000000000000001"
+              ],
+              "from_address": [
+                "null",
+                null
+              ],
+              "to_address": [
+                "null",
+                null
+              ],
+              "asset": [
+                "null",
+                null
+              ],
+              "amount": [
+                "text",
+                "2"
+              ],
+              "origin": [
+                "null",
+                null
+              ],
+              "url": [
+                "null",
+                null
+              ],
+              "status": [
+                "text",
+                "settled"
+              ],
+              "created_at": [
+                "integer",
+                "1700000000010"
+              ],
+              "confirmed_at": [
+                "integer",
+                "1700000000010"
+              ],
+              "gas_used": [
+                "blob",
+                "FF00"
+              ],
+              "gas_price": [
+                "null",
+                null
+              ],
+              "metadata": [
+                "null",
+                null
+              ]
+            }
+          ]
+        },
+        {
+          "op": "pending",
+          "args": [],
+          "now": 1700000000030,
+          "result": {
+            "ok": [
+              {
+                "id": 1,
+                "kind": "wallet-send",
+                "chain_id": 1,
+                "tx_hash": {
+                  "blob": "010203"
+                },
+                "from_address": null,
+                "to_address": null,
+                "asset": null,
+                "amount": "1",
+                "origin": null,
+                "url": null,
+                "status": "pending",
+                "created_at": 1700000000000,
+                "confirmed_at": null,
+                "gas_used": null,
+                "gas_price": null,
+                "metadata": "{\"txFrom\":\"0x00000000000000000000000000000000000000aa\"}"
+              }
+            ]
+          },
+          "rows": [
+            {
+              "id": [
+                "integer",
+                "1"
+              ],
+              "kind": [
+                "text",
+                "wallet-send"
+              ],
+              "chain_id": [
+                "integer",
+                "1"
+              ],
+              "tx_hash": [
+                "blob",
+                "010203"
+              ],
+              "from_address": [
+                "null",
+                null
+              ],
+              "to_address": [
+                "null",
+                null
+              ],
+              "asset": [
+                "null",
+                null
+              ],
+              "amount": [
+                "text",
+                "1"
+              ],
+              "origin": [
+                "null",
+                null
+              ],
+              "url": [
+                "null",
+                null
+              ],
+              "status": [
+                "text",
+                "pending"
+              ],
+              "created_at": [
+                "integer",
+                "1700000000000"
+              ],
+              "confirmed_at": [
+                "null",
+                null
+              ],
+              "gas_used": [
+                "null",
+                null
+              ],
+              "gas_price": [
+                "null",
+                null
+              ],
+              "metadata": [
+                "text",
+                "{\"txFrom\":\"0x00000000000000000000000000000000000000aa\"}"
+              ]
+            },
+            {
+              "id": [
+                "integer",
+                "2"
+              ],
+              "kind": [
+                "text",
+                "x402"
+              ],
+              "chain_id": [
+                "integer",
+                "1"
+              ],
+              "tx_hash": [
+                "text",
+                "0x0000000000000000000000000000000000000000000000000000000000000001"
+              ],
+              "from_address": [
+                "null",
+                null
+              ],
+              "to_address": [
+                "null",
+                null
+              ],
+              "asset": [
+                "null",
+                null
+              ],
+              "amount": [
+                "text",
+                "2"
+              ],
+              "origin": [
+                "null",
+                null
+              ],
+              "url": [
+                "null",
+                null
+              ],
+              "status": [
+                "text",
+                "settled"
+              ],
+              "created_at": [
+                "integer",
+                "1700000000010"
+              ],
+              "confirmed_at": [
+                "integer",
+                "1700000000010"
+              ],
+              "gas_used": [
+                "blob",
+                "FF00"
+              ],
+              "gas_price": [
+                "null",
+                null
+              ],
+              "metadata": [
+                "null",
+                null
+              ]
+            }
+          ]
+        },
+        {
+          "op": "setDroppedSeen",
+          "args": [
+            1,
+            1700000000040
+          ],
+          "now": 1700000000040,
+          "result": {
+            "ok": null
+          },
+          "rows": [
+            {
+              "id": [
+                "integer",
+                "1"
+              ],
+              "kind": [
+                "text",
+                "wallet-send"
+              ],
+              "chain_id": [
+                "integer",
+                "1"
+              ],
+              "tx_hash": [
+                "blob",
+                "010203"
+              ],
+              "from_address": [
+                "null",
+                null
+              ],
+              "to_address": [
+                "null",
+                null
+              ],
+              "asset": [
+                "null",
+                null
+              ],
+              "amount": [
+                "text",
+                "1"
+              ],
+              "origin": [
+                "null",
+                null
+              ],
+              "url": [
+                "null",
+                null
+              ],
+              "status": [
+                "text",
+                "pending"
+              ],
+              "created_at": [
+                "integer",
+                "1700000000000"
+              ],
+              "confirmed_at": [
+                "null",
+                null
+              ],
+              "gas_used": [
+                "null",
+                null
+              ],
+              "gas_price": [
+                "null",
+                null
+              ],
+              "metadata": [
+                "text",
+                "{\"txFrom\":\"0x00000000000000000000000000000000000000aa\",\"txDroppedSeenAt\":1700000000040}"
+              ]
+            },
+            {
+              "id": [
+                "integer",
+                "2"
+              ],
+              "kind": [
+                "text",
+                "x402"
+              ],
+              "chain_id": [
+                "integer",
+                "1"
+              ],
+              "tx_hash": [
+                "text",
+                "0x0000000000000000000000000000000000000000000000000000000000000001"
+              ],
+              "from_address": [
+                "null",
+                null
+              ],
+              "to_address": [
+                "null",
+                null
+              ],
+              "asset": [
+                "null",
+                null
+              ],
+              "amount": [
+                "text",
+                "2"
+              ],
+              "origin": [
+                "null",
+                null
+              ],
+              "url": [
+                "null",
+                null
+              ],
+              "status": [
+                "text",
+                "settled"
+              ],
+              "created_at": [
+                "integer",
+                "1700000000010"
+              ],
+              "confirmed_at": [
+                "integer",
+                "1700000000010"
+              ],
+              "gas_used": [
+                "blob",
+                "FF00"
+              ],
+              "gas_price": [
+                "null",
+                null
+              ],
+              "metadata": [
+                "null",
+                null
+              ]
+            }
+          ]
+        },
+        {
+          "op": "markDropped",
+          "args": [
+            1
+          ],
+          "now": 1700000000050,
+          "result": {
+            "ok": {
+              "id": 1,
+              "kind": "wallet-send",
+              "chainId": 1,
+              "txHash": {
+                "blob": "010203"
+              },
+              "fromAddress": null,
+              "toAddress": null,
+              "asset": null,
+              "amount": "1",
+              "origin": null,
+              "url": null,
+              "status": "dropped",
+              "createdAt": 1700000000000,
+              "confirmedAt": 1700000000050,
+              "gasUsed": null,
+              "gasPrice": null,
+              "metadata": {
+                "txFrom": "0x00000000000000000000000000000000000000aa",
+                "txDroppedSeenAt": 1700000000040,
+                "failureReason": "nonce used by another transaction"
+              }
+            }
+          },
+          "rows": [
+            {
+              "id": [
+                "integer",
+                "1"
+              ],
+              "kind": [
+                "text",
+                "wallet-send"
+              ],
+              "chain_id": [
+                "integer",
+                "1"
+              ],
+              "tx_hash": [
+                "blob",
+                "010203"
+              ],
+              "from_address": [
+                "null",
+                null
+              ],
+              "to_address": [
+                "null",
+                null
+              ],
+              "asset": [
+                "null",
+                null
+              ],
+              "amount": [
+                "text",
+                "1"
+              ],
+              "origin": [
+                "null",
+                null
+              ],
+              "url": [
+                "null",
+                null
+              ],
+              "status": [
+                "text",
+                "dropped"
+              ],
+              "created_at": [
+                "integer",
+                "1700000000000"
+              ],
+              "confirmed_at": [
+                "integer",
+                "1700000000050"
+              ],
+              "gas_used": [
+                "null",
+                null
+              ],
+              "gas_price": [
+                "null",
+                null
+              ],
+              "metadata": [
+                "text",
+                "{\"txFrom\":\"0x00000000000000000000000000000000000000aa\",\"txDroppedSeenAt\":1700000000040,\"failureReason\":\"nonce used by another transaction\"}"
+              ]
+            },
+            {
+              "id": [
+                "integer",
+                "2"
+              ],
+              "kind": [
+                "text",
+                "x402"
+              ],
+              "chain_id": [
+                "integer",
+                "1"
+              ],
+              "tx_hash": [
+                "text",
+                "0x0000000000000000000000000000000000000000000000000000000000000001"
+              ],
+              "from_address": [
+                "null",
+                null
+              ],
+              "to_address": [
+                "null",
+                null
+              ],
+              "asset": [
+                "null",
+                null
+              ],
+              "amount": [
+                "text",
+                "2"
+              ],
+              "origin": [
+                "null",
+                null
+              ],
+              "url": [
+                "null",
+                null
+              ],
+              "status": [
+                "text",
+                "settled"
+              ],
+              "created_at": [
+                "integer",
+                "1700000000010"
+              ],
+              "confirmed_at": [
+                "integer",
+                "1700000000010"
+              ],
+              "gas_used": [
+                "blob",
+                "FF00"
+              ],
+              "gas_price": [
+                "null",
+                null
+              ],
+              "metadata": [
+                "null",
+                null
+              ]
+            }
+          ]
+        },
+        {
+          "op": "update",
+          "args": [
+            2,
+            {
+              "gasPrice": "7"
+            }
+          ],
+          "now": 1700000000060,
+          "result": {
+            "ok": {
+              "id": 2,
+              "kind": "x402",
+              "chainId": 1,
+              "txHash": "0x0000000000000000000000000000000000000000000000000000000000000001",
+              "fromAddress": null,
+              "toAddress": null,
+              "asset": null,
+              "amount": "2",
+              "origin": null,
+              "url": null,
+              "status": "settled",
+              "createdAt": 1700000000010,
+              "confirmedAt": 1700000000010,
+              "gasUsed": {
+                "blob": "FF00"
+              },
+              "gasPrice": "7",
+              "metadata": null
+            }
+          },
+          "rows": [
+            {
+              "id": [
+                "integer",
+                "1"
+              ],
+              "kind": [
+                "text",
+                "wallet-send"
+              ],
+              "chain_id": [
+                "integer",
+                "1"
+              ],
+              "tx_hash": [
+                "blob",
+                "010203"
+              ],
+              "from_address": [
+                "null",
+                null
+              ],
+              "to_address": [
+                "null",
+                null
+              ],
+              "asset": [
+                "null",
+                null
+              ],
+              "amount": [
+                "text",
+                "1"
+              ],
+              "origin": [
+                "null",
+                null
+              ],
+              "url": [
+                "null",
+                null
+              ],
+              "status": [
+                "text",
+                "dropped"
+              ],
+              "created_at": [
+                "integer",
+                "1700000000000"
+              ],
+              "confirmed_at": [
+                "integer",
+                "1700000000050"
+              ],
+              "gas_used": [
+                "null",
+                null
+              ],
+              "gas_price": [
+                "null",
+                null
+              ],
+              "metadata": [
+                "text",
+                "{\"txFrom\":\"0x00000000000000000000000000000000000000aa\",\"txDroppedSeenAt\":1700000000040,\"failureReason\":\"nonce used by another transaction\"}"
+              ]
+            },
+            {
+              "id": [
+                "integer",
+                "2"
+              ],
+              "kind": [
+                "text",
+                "x402"
+              ],
+              "chain_id": [
+                "integer",
+                "1"
+              ],
+              "tx_hash": [
+                "text",
+                "0x0000000000000000000000000000000000000000000000000000000000000001"
+              ],
+              "from_address": [
+                "null",
+                null
+              ],
+              "to_address": [
+                "null",
+                null
+              ],
+              "asset": [
+                "null",
+                null
+              ],
+              "amount": [
+                "text",
+                "2"
+              ],
+              "origin": [
+                "null",
+                null
+              ],
+              "url": [
+                "null",
+                null
+              ],
+              "status": [
+                "text",
+                "settled"
+              ],
+              "created_at": [
+                "integer",
+                "1700000000010"
+              ],
+              "confirmed_at": [
+                "integer",
+                "1700000000010"
+              ],
+              "gas_used": [
+                "blob",
+                "FF00"
+              ],
+              "gas_price": [
+                "text",
+                "7"
+              ],
+              "metadata": [
+                "null",
+                null
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    "pages": {
+      "entry": {
+        "kind": "x402",
+        "chainId": 1,
+        "amount": "1"
+      },
+      "count": 501,
+      "createdAt": 1700000000000,
+      "pages": [
+        {
+          "filters": null,
+          "length": 50,
+          "first": 501,
+          "last": 452
+        },
+        {
+          "filters": {
+            "limit": 500
+          },
+          "length": 500,
+          "first": 501,
+          "last": 2
+        },
+        {
+          "filters": {
+            "limit": 501
+          },
+          "length": 500,
+          "first": 501,
+          "last": 2
+        },
+        {
+          "filters": {
+            "limit": 501,
+            "offset": 1
+          },
+          "length": 500,
+          "first": 500,
+          "last": 1
+        },
+        {
+          "filters": {
+            "offset": 500
+          },
+          "length": 1,
+          "first": 1,
+          "last": 1
+        },
+        {
+          "filters": {
+            "limit": 50,
+            "offset": 451
+          },
+          "length": 50,
+          "first": 50,
+          "last": 1
+        }
+      ],
+      "total": 501
+    }
   }
 }

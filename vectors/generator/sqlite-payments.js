@@ -9,10 +9,11 @@
 // double better-sqlite3 reads, TEXT as is), so the vectors show how the
 // reference's driver binds each JS value (a number binds as a double: a
 // whole one lands as INTEGER in an INTEGER column and as `21000.0` text in a
-// TEXT one; a non-integer `chainId` stays REAL). `Date.now` is the step's
-// `now`. A step's result is the function's answer, or the error it threw
-// (its class and message); its `rows` are there only when the step changed
-// the table.
+// TEXT one; a non-integer `chainId` stays REAL; a BLOB as its hex). `Date.now`
+// is the step's `now`. A step's result is the function's answer, or the error
+// it threw (its class and message); its `rows` are there only when the step
+// changed the table. An answer holding a `Buffer` (a BLOB cell read back)
+// shows it as `{ blob: hex }`.
 
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
@@ -41,16 +42,25 @@ function load(checkout, Database, directory) {
 
 /** Every row, in id order, each column `[typeof, value]`. */
 function rowsOf(db) {
-  const select = COLUMNS.map((c) => `typeof(${c}) AS "t_${c}", CASE typeof(${c}) WHEN 'integer' THEN CAST(${c} AS TEXT) ELSE ${c} END AS "v_${c}"`);
+  const select = COLUMNS.map((c) => `typeof(${c}) AS "t_${c}", CASE typeof(${c}) WHEN 'integer' THEN CAST(${c} AS TEXT) `
+    + `WHEN 'blob' THEN hex(${c}) ELSE ${c} END AS "v_${c}"`);
   return db.prepare(`SELECT ${select.join(', ')} FROM payments ORDER BY id`).all()
     .map((row) => Object.fromEntries(COLUMNS.map((c) => [c, [row[`t_${c}`], row[`v_${c}`]]])));
+}
+
+/** A value as JSON shows it, each `Buffer` as `{ blob: hex }`. */
+function plain(value) {
+  if (Buffer.isBuffer(value)) return { blob: value.toString('hex').toUpperCase() };
+  if (Array.isArray(value)) return value.map(plain);
+  if (value && typeof value === 'object') return Object.fromEntries(Object.entries(value).map(([k, v]) => [k, plain(v)]));
+  return value;
 }
 
 function withClock(now, fn) {
   const real = Date.now;
   Date.now = () => now;
   try {
-    return { ok: fn() ?? null };
+    return { ok: plain(fn() ?? null) };
   } catch (err) {
     return { error: { name: err.constructor.name, message: err.message } };
   } finally {
@@ -223,8 +233,11 @@ function operations(checkout, Database) {
 
 // x402-receipts.json at the profile's userData root, imported by the
 // reference's first getDb(). `before` appends rows first (on a database
-// opened and closed before the file is written); `migrated` puts a
-// `.migrated` file beside it. Each case records the rows and the files after.
+// opened and closed before the file is written, `Date.now` the case's
+// `now`); `migrated` puts a `.migrated` file beside it. During the import
+// `Date.now` ticks: its nth call answers `now + n` (from 0), and `ticks` are
+// the values it answered, in order (one for each entry read without a
+// finite `settledAt`). Each case records the rows and the files after.
 const RECEIPT = { id: 'r1', settledAt: 1_699_000_000, status: 'settled', chainId: 8453, txHash: HASH(21), asset: USDC,
   amount: '500', origin: 'https://x.example', url: 'https://x.example/a' };
 const IMPORTS = [
@@ -267,12 +280,77 @@ function runImport(checkout, Database, { name, now, text, migrated, before }) {
     if (migrated) fs.writeFileSync(path.join(directory, LEGACY + '.migrated'), '[]');
     const reference = load(checkout, Database, directory);
     try {
-      const result = withClock(now, () => { reference.getDb(); });
+      const real = Date.now;
+      const ticks = [];
+      Date.now = () => { ticks.push(now + ticks.length); return ticks.at(-1); };
+      try {
+        reference.getDb();
+      } finally {
+        Date.now = real;
+      }
       return {
-        name, now, text, migrated: Boolean(migrated), before: before ?? [], result,
+        name, now, text, migrated: Boolean(migrated), before: before ?? [], ticks,
         rows: rowsOf(reference.getDb()),
         files: fs.readdirSync(directory).filter((file) => !file.startsWith('payment-history.sqlite')).sort(),
       };
+    } finally {
+      reference.closeDb();
+    }
+  });
+}
+
+// A database holding BLOB cells, which the reference writes when a caller
+// hands it a `Buffer`: `setup` runs first (its steps' `rows` are the cells
+// the core's test inserts as they are), then `steps`, JSON-only calls the
+// core runs too. Design 0013's `payments-json-values`: the core's methods
+// take JSON, and a BLOB cell answers its field as `null`.
+const BLOB_SETUP = [
+  ['append', [{ kind: 'wallet-send', chainId: 1, amount: '1', txHash: Buffer.from([1, 2, 3]), metadata: { txFrom: WALLET } }], T],
+  ['append', [{ kind: 'x402', chainId: 1, amount: '2', txHash: HASH(1) }], T + 10],
+  ['update', [2, { gasUsed: Buffer.from('ff00', 'hex') }], T + 20],
+];
+const BLOB_STEPS = [
+  ['getRecent', [], T + 30],
+  ['getById', [1], T + 30],
+  ['getCount', [{ status: 'pending' }], T + 30],
+  ['pending', [], T + 30],
+  ['setDroppedSeen', [1, T + 40], T + 40],
+  ['markDropped', [1], T + 50],
+  ['update', [2, { gasPrice: '7' }], T + 60],
+];
+
+function blob(checkout, Database) {
+  return inDirectory((directory) => {
+    const reference = load(checkout, Database, directory);
+    try {
+      const db = reference.getDb();
+      const record = (step) => ({ op: step[0], args: plain(step[1]), now: step[2], result: runOperation(reference, step), rows: rowsOf(db) });
+      return { setup: BLOB_SETUP.map(record), steps: BLOB_STEPS.map(record) };
+    } finally {
+      reference.closeDb();
+    }
+  });
+}
+
+// getRecent's page: `count` appends of `entry`, the nth (from 1) with
+// `createdAt` `createdAt + n`, so row n is the nth newest from the end; then
+// each `filters`' page, as `{ length, first, last }` of its ids (asserted
+// consecutive, newest first), and the count.
+const PAGE_ENTRY = { kind: 'x402', chainId: 1, amount: '1' };
+const PAGE_COUNT = 501;
+const PAGE_FILTERS = [undefined, { limit: 500 }, { limit: 501 }, { limit: 501, offset: 1 }, { offset: 500 }, { limit: 50, offset: 451 }];
+
+function pages(checkout, Database) {
+  return inDirectory((directory) => {
+    const reference = load(checkout, Database, directory);
+    try {
+      for (let n = 1; n <= PAGE_COUNT; n++) reference.append({ ...PAGE_ENTRY, createdAt: T + n });
+      const page = (filters) => {
+        const ids = (filters === undefined ? reference.getRecent() : reference.getRecent(filters)).map((entry) => entry.id);
+        ids.forEach((id, i) => assert.equal(id, ids[0] - i, 'consecutive ids, newest first'));
+        return { filters: filters ?? null, length: ids.length, first: ids[0] ?? null, last: ids.at(-1) ?? null };
+      };
+      return { entry: PAGE_ENTRY, count: PAGE_COUNT, createdAt: T, pages: PAGE_FILTERS.map(page), total: reference.getCount() };
     } finally {
       reference.closeDb();
     }
@@ -284,6 +362,8 @@ function buildPayments(checkout, Database) {
     columns: COLUMNS,
     operations: operations(checkout, Database),
     imports: IMPORTS.map((item) => runImport(checkout, Database, item)),
+    blob: blob(checkout, Database),
+    pages: pages(checkout, Database),
   };
 }
 

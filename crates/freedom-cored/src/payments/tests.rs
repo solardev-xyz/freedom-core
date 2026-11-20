@@ -3,15 +3,53 @@
 //! [`Payments`] on a database [`crate::sqlite::open`] created. After every
 //! step the table must hold what the reference's left, cell for cell, with
 //! SQLite's type for each, and the step must answer what the reference
-//! answered or throw what it threw.
+//! answered or throw what it threw. Then the transactions: a writer on a
+//! second connection, let in right after a read, must find each write and
+//! its read-back, and each check and its write, one transaction.
 
-use std::path::PathBuf;
+use std::cell::RefCell;
+use std::path::{Path, PathBuf};
+use std::rc::Rc;
+use std::time::Duration;
 
 use fc_json::JsValue;
 use fc_wallet_state::payments::{COLUMNS, Cell, Row};
+use rusqlite::types::Value;
+use rusqlite::{Connection, ErrorCode};
 
 use super::{Error, Payments, SCHEMA};
 use crate::sqlite;
+
+type Hook = Box<dyn FnMut(&str)>;
+
+thread_local! {
+    static AFTER_READ: RefCell<Option<Hook>> = RefCell::new(None);
+}
+
+/// Called by [`super::rows`] once a statement's rows are read, inside its
+/// transaction if it has one.
+pub(super) fn after_read_hook(sql: &str) {
+    let hook = AFTER_READ.with(|hook| hook.borrow_mut().take());
+    if let Some(mut hook) = hook {
+        hook(sql);
+        AFTER_READ.with(|slot| *slot.borrow_mut() = Some(hook));
+    }
+}
+
+fn after_read(hook: impl FnMut(&str) + 'static) {
+    AFTER_READ.with(|slot| *slot.borrow_mut() = Some(Box::new(hook)));
+}
+
+fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02X}")).collect()
+}
+
+fn unhex(text: &str) -> Vec<u8> {
+    (0..text.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(&text[i..i + 2], 16).unwrap())
+        .collect()
+}
 
 fn vectors() -> JsValue {
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../vectors/sqlite.json");
@@ -54,7 +92,7 @@ fn table(store: &Payments) -> JsValue {
                                 Cell::Integer(n) => ("integer", JsValue::string(n.to_string())),
                                 Cell::Real(n) => ("real", JsValue::Number(*n)),
                                 Cell::Text(text) => ("text", JsValue::string(text.as_str())),
-                                Cell::Blob(_) => panic!("a blob"),
+                                Cell::Blob(bytes) => ("blob", JsValue::string(hex(bytes))),
                             };
                             (*column, JsValue::Array(vec![JsValue::string(kind), value]))
                         })
@@ -72,13 +110,20 @@ fn statement(sql: &str) -> fc_wallet_state::payments::Statement {
     }
 }
 
-/// A row as better-sqlite3's `all()` answers it: `{ column: value }`.
+/// A row as better-sqlite3's `all()` answers it: `{ column: value }`, a
+/// BLOB's `Buffer` as the generator shows it, `{ blob: hex }`.
 fn raw(row: &Row) -> JsValue {
     object(
         COLUMNS
             .iter()
             .zip(row)
-            .map(|(column, cell)| (*column, cell.to_js().unwrap()))
+            .map(|(column, cell)| {
+                let value = match cell {
+                    Cell::Blob(bytes) => object(vec![("blob", JsValue::string(hex(bytes)))]),
+                    cell => cell.to_js().unwrap(),
+                };
+                (*column, value)
+            })
             .collect(),
     )
 }
@@ -196,7 +241,27 @@ fn the_reference_imports() {
             "{name}: {files:?}"
         );
         let text = case.get("text").and_then(JsValue::as_str).unwrap();
-        match store.import_legacy(text, now(case)) {
+        // The reference's `Date.now()` answers, in the order it asked.
+        let ticks: Vec<f64> = case
+            .get("ticks")
+            .and_then(JsValue::as_array)
+            .unwrap()
+            .iter()
+            .map(|tick| match tick {
+                JsValue::Number(n) => *n,
+                other => panic!("{name}: tick {other:?}"),
+            })
+            .collect();
+        let mut asked = 0;
+        let clock = || {
+            asked += 1;
+            *ticks
+                .get(asked - 1)
+                .unwrap_or_else(|| panic!("{name}: the clock read more often than the reference's"))
+        };
+        let outcome = store.import_legacy(text, clock);
+        assert_eq!(asked, ticks.len(), "{name}: the clock's reads");
+        match outcome {
             Ok(_) => assert!(
                 imported,
                 "{name}: imported where the reference kept the file"
@@ -232,8 +297,246 @@ fn an_import_is_one_transaction() {
     let (_dir, mut store) = fresh();
     let text = r#"[{"id":"a","amount":"1"},{"id":"b","amount":"2"},null]"#;
     assert!(matches!(
-        store.import_legacy(text, 5.0),
+        store.import_legacy(text, || 5.0),
         Err(Error::Thrown(_))
     ));
     assert_eq!(table(&store), JsValue::Array(Vec::new()));
+}
+
+/// `{ blob: hex }`, the generator's `Buffer`, as a record answers it: `null`
+/// (design 0013's `payments-json-values`).
+fn nulled(value: &JsValue) -> JsValue {
+    match value {
+        JsValue::Object(props) if props.len() == 1 && props[0].0 == *"blob" => JsValue::Null,
+        JsValue::Object(props) => {
+            JsValue::Object(props.iter().map(|(k, v)| (k.clone(), nulled(v))).collect())
+        }
+        JsValue::Array(items) => JsValue::Array(items.iter().map(nulled).collect()),
+        other => other.clone(),
+    }
+}
+
+/// Puts `rows` (the generator's `[typeof, value]` cells) in the table as
+/// they are, BLOBs included.
+fn insert_cells(store: &Payments, rows: &JsValue) {
+    let sql = format!(
+        "INSERT INTO payments ({}) VALUES ({})",
+        COLUMNS.join(", "),
+        vec!["?"; COLUMNS.len()].join(", ")
+    );
+    for row in rows.as_array().unwrap() {
+        let values: Vec<Value> = COLUMNS
+            .iter()
+            .map(|column| {
+                let cell = row.get(column).and_then(JsValue::as_array).unwrap();
+                let value = &cell[1];
+                match cell[0].as_str().unwrap() {
+                    "null" => Value::Null,
+                    "integer" => Value::Integer(value.as_str().unwrap().parse().unwrap()),
+                    "real" => match value {
+                        JsValue::Number(n) => Value::Real(*n),
+                        other => panic!("real {other:?}"),
+                    },
+                    "text" => Value::Text(value.as_str().unwrap().to_owned()),
+                    "blob" => Value::Blob(unhex(value.as_str().unwrap())),
+                    other => panic!("typeof {other}"),
+                }
+            })
+            .collect();
+        store
+            .conn
+            .execute(&sql, rusqlite::params_from_iter(values))
+            .unwrap();
+    }
+}
+
+/// A database the reference wrote with BLOB cells (a `Buffer` handed to
+/// `append` and to `update`), read and written through the core: each
+/// record answers `null` for a BLOB and the row is still listed; the
+/// repoll's raw rows carry the bytes; the marks change only what the
+/// reference changed, and leave the BLOBs as they were.
+#[test]
+fn a_reference_database_with_blobs() {
+    let vectors = vectors();
+    let blob = vectors.get("blob").unwrap();
+    let setup = blob.get("setup").and_then(JsValue::as_array).unwrap();
+    let (_dir, mut store) = fresh();
+    let mut rows = setup.last().unwrap().get("rows").unwrap().clone();
+    insert_cells(&store, &rows);
+    assert_eq!(table(&store), rows);
+    assert!(rows.stringify().contains(r#"["blob","#));
+    for (index, step) in blob
+        .get("steps")
+        .and_then(JsValue::as_array)
+        .unwrap()
+        .iter()
+        .enumerate()
+    {
+        let op = step.get("op").and_then(JsValue::as_str).unwrap();
+        let args = step.get("args").and_then(JsValue::as_array).unwrap();
+        let context = format!("blob step {index} ({op})");
+        let got = run(&mut store, op, args, now(step));
+        let result = step.get("result").unwrap();
+        // The repoll's raw rows are the second part's to map.
+        let expected = if op == "pending" {
+            result.clone()
+        } else {
+            nulled(result)
+        };
+        check_result(&context, got, &expected);
+        rows = step.get("rows").unwrap().clone();
+        assert_eq!(table(&store), rows, "{context}: rows");
+    }
+}
+
+/// `getRecent`'s page on a table of 501 rows the reference appended: 50
+/// without a limit, at most 500 with one.
+#[test]
+fn the_reference_pages() {
+    let vectors = vectors();
+    let pages = vectors.get("pages").unwrap();
+    let (_dir, mut store) = fresh();
+    let JsValue::Number(count) = pages.get("count").unwrap() else {
+        panic!("count")
+    };
+    let JsValue::Number(created_at) = pages.get("createdAt").unwrap() else {
+        panic!("createdAt")
+    };
+    for n in 1..=u32::try_from(*count as i64).unwrap() {
+        let mut entry = pages.get("entry").unwrap().clone();
+        entry.set("createdAt", JsValue::Number(created_at + f64::from(n)));
+        store.append(&entry, 0.0).unwrap();
+    }
+    for page in pages.get("pages").and_then(JsValue::as_array).unwrap() {
+        let filters = page.get("filters").unwrap();
+        let filters = if filters == &JsValue::Null {
+            JsValue::Undefined
+        } else {
+            filters.clone()
+        };
+        let found = store.get_recent(&filters).unwrap();
+        let ids: Vec<&JsValue> = found.iter().map(|entry| entry.get("id").unwrap()).collect();
+        let context = filters.stringify();
+        assert_eq!(&number(ids.len()), page.get("length").unwrap(), "{context}");
+        for (index, id) in ids.iter().enumerate() {
+            let JsValue::Number(first) = page.get("first").unwrap() else {
+                panic!("first")
+            };
+            assert_eq!(
+                **id,
+                JsValue::Number(first - f64::from(u32::try_from(index).unwrap())),
+                "{context}"
+            );
+        }
+        assert_eq!(
+            ids.last().copied().unwrap_or(&JsValue::Null),
+            page.get("last").unwrap(),
+            "{context}"
+        );
+    }
+    assert_eq!(
+        &store.get_count(&JsValue::Undefined).unwrap(),
+        pages.get("total").unwrap()
+    );
+}
+
+fn second(dir: &Path) -> Connection {
+    let conn = Connection::open(dir.join("payment-history.sqlite")).unwrap();
+    conn.busy_timeout(Duration::ZERO).unwrap();
+    conn
+}
+
+fn busy(outcome: &rusqlite::Result<usize>) -> bool {
+    matches!(outcome, Err(rusqlite::Error::SqliteFailure(e, _)) if e.code == ErrorCode::DatabaseBusy)
+}
+
+/// After each read of `sql` (the first `times`), a writer on a second
+/// connection runs `write`; the outcomes, in order.
+fn writer_after(
+    dir: &Path,
+    sql: &'static str,
+    write: &'static str,
+) -> Rc<RefCell<Vec<rusqlite::Result<usize>>>> {
+    let other = second(dir);
+    let outcomes = Rc::new(RefCell::new(Vec::new()));
+    let seen = Rc::clone(&outcomes);
+    after_read(move |read| {
+        if read == sql {
+            seen.borrow_mut().push(other.execute(write, []));
+        }
+    });
+    outcomes
+}
+
+fn status(store: &Payments, id: i64) -> String {
+    store
+        .conn
+        .query_row("SELECT status FROM payments WHERE id = ?", [id], |row| {
+            row.get(0)
+        })
+        .unwrap()
+}
+
+const FINALIZE: &str = "UPDATE payments SET status = 'confirmed' WHERE id = 1";
+
+/// A write and its read-back are one transaction: a writer let in after
+/// the read-back's read can't commit until the write has, so the answer is
+/// the row the write left (append's and update's).
+#[test]
+fn a_write_and_its_read_back_are_one_transaction() {
+    let (dir, mut store) = fresh();
+    let outcomes = writer_after(dir.path(), fc_wallet_state::payments::BY_ID_SQL, FINALIZE);
+    let entry = fc_json::parse(r#"{"kind":"wallet-send","chainId":1,"amount":"1"}"#).unwrap();
+    let appended = store.append(&entry, 1.0).unwrap();
+    assert_eq!(appended.get("status"), Some(&JsValue::string("pending")));
+    let patch = fc_json::parse(r#"{"gasPrice":"5"}"#).unwrap();
+    let updated = store.update(&JsValue::Number(1.0), &patch, 2.0).unwrap();
+    assert_eq!(updated.get("status"), Some(&JsValue::string("pending")));
+    assert_eq!(updated.get("gasPrice"), Some(&JsValue::string("5")));
+    let outcomes = outcomes.borrow();
+    assert_eq!(outcomes.len(), 2);
+    assert!(outcomes.iter().all(busy), "{outcomes:?}");
+    // Once committed, the other writer gets in.
+    assert_eq!(second(dir.path()).execute(FINALIZE, []).unwrap(), 1);
+    assert_eq!(status(&store, 1), "confirmed");
+}
+
+/// A finalizer can't commit between `mark_dropped`'s (and the repoll's
+/// write's) check that the row is pending and its write, so a row it
+/// finalized is never overwritten as dropped: the transaction is
+/// immediate, holding the write lock from its start. (A deferred one lets
+/// the finalizer commit after the check's read, and its own write then
+/// fails `SQLITE_BUSY_SNAPSHOT`.)
+#[test]
+fn a_finalizer_cannot_commit_inside_a_check_and_its_write() {
+    let entry = fc_json::parse(r#"{"kind":"wallet-send","chainId":1,"amount":"1"}"#).unwrap();
+    for mark in ["markDropped", "setDroppedSeen"] {
+        let (dir, mut store) = fresh();
+        store.append(&entry, 1.0).unwrap();
+        let outcomes = writer_after(dir.path(), fc_wallet_state::payments::BY_ID_SQL, FINALIZE);
+        let id = JsValue::Number(1.0);
+        let marked = match mark {
+            "markDropped" => store.mark_dropped(&id, 2.0),
+            _ => store.set_dropped_seen(&id, &JsValue::Number(2.0), 2.0),
+        }
+        .unwrap();
+        let expected = if mark == "markDropped" {
+            "dropped"
+        } else {
+            "pending"
+        };
+        assert_eq!(
+            marked.get("status"),
+            Some(&JsValue::string(expected)),
+            "{mark}"
+        );
+        let held_off = outcomes.borrow().iter().all(busy);
+        assert!(held_off, "{mark}: {:?}", outcomes.borrow());
+        // The finalizer, retried once the mark committed, lands; had it
+        // landed inside, the mark would have overwritten it.
+        if held_off {
+            assert_eq!(second(dir.path()).execute(FINALIZE, []).unwrap(), 1);
+        }
+        assert_eq!(status(&store, 1), "confirmed", "{mark}");
+    }
 }

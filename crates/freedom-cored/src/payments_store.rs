@@ -217,7 +217,7 @@ impl Store {
         // `readFileSync(path, 'utf-8')`: invalid UTF-8 as U+FFFD, a
         // byte-order mark kept (and refused by `JSON.parse`).
         let text = String::from_utf8_lossy(&bytes);
-        let imported = match payments.import_legacy(&text, now_ms) {
+        let imported = match payments.import_legacy(&text, || now_ms) {
             Ok(imported) => imported,
             Err(Error::Thrown(_)) => return kept("refused"),
             Err(_) => return kept("write"),
@@ -239,14 +239,28 @@ impl Store {
     }
 }
 
-/// A row as better-sqlite3's `.all()` reads it: an object of its columns.
+/// A row as better-sqlite3's `.all()` reads it: an object of its columns,
+/// a BLOB cell answering `null`, and logged (0013's `payments-json-values`).
 fn raw_row(row: &fc_wallet_state::payments::Row) -> Result<JsValue, Error> {
-    COLUMNS
+    let mut blobs = Vec::new();
+    let props = COLUMNS
         .iter()
         .zip(row)
-        .map(|(column, cell)| Ok(((*column).into(), cell.to_js().ok_or(Error::Blob)?)))
-        .collect::<Result<_, _>>()
-        .map(JsValue::Object)
+        .map(|(column, cell)| {
+            let value = cell.to_js().unwrap_or_else(|| {
+                blobs.push(*column);
+                JsValue::Null
+            });
+            ((*column).into(), value)
+        })
+        .collect();
+    if !blobs.is_empty() {
+        crate::log::warn(
+            "a payment row holds a blob: answered as null",
+            serde_json::json!({ "columns": blobs }),
+        );
+    }
+    Ok(JsValue::Object(props))
 }
 
 fn invalid() -> ErrorBody {
@@ -255,8 +269,7 @@ fn invalid() -> ErrorBody {
 
 /// `storage`, with the store and what failed: `busy` (another connection
 /// holds the database past [`sqlite::BUSY_TIMEOUT`]), `unreadable` (not a
-/// regular file the user owns, another schema, not WAL, damaged, or a row
-/// no answer holds) or `io` (any other failure, a failed write among them).
+/// regular file the user owns, another schema, not WAL, or damaged) or `io` (any other failure, a failed write among them).
 /// Nothing was written.
 fn storage(kind: &str) -> ErrorBody {
     ErrorBody::new(
@@ -296,7 +309,6 @@ impl From<Error> for ErrorBody {
         match e {
             Error::Thrown(thrown) => ErrorBody::new(ErrorCode::InvalidArgument, thrown.message)
                 .with_data(serde_json::json!({ "name": thrown.name.as_str() })),
-            Error::Blob => storage("unreadable"),
             Error::Sqlite(e) => storage(sqlite_kind(&e)),
         }
     }

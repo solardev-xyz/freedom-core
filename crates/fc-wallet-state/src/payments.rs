@@ -184,7 +184,9 @@ pub enum Cell {
 impl Cell {
     /// The value better-sqlite3 reads: an INTEGER as the nearest double, as
     /// without `safeIntegers`. `None` for a BLOB, which the reference reads
-    /// as a `Buffer` and no JSON holds; no statement here writes one.
+    /// as a `Buffer` and no JSON holds. No statement here writes one, but the
+    /// reference does when a caller hands it a `Buffer` (design 0013's
+    /// `payments-json-values`).
     pub fn to_js(&self) -> Option<JsValue> {
         Some(match self {
             Cell::Null => JsValue::Null,
@@ -671,19 +673,22 @@ pub fn by_id(id: &JsValue) -> Result<Statement, Thrown> {
     statement(BY_ID_SQL, &[or_null(id)], 1)
 }
 
-/// `rowToEntry(row)`: the record, camelCase, with `metadata` parsed.
-/// `None` for a row holding a BLOB.
-pub fn record(row: &Row) -> Option<JsValue> {
+/// `rowToEntry(row)`: the record, camelCase, with `metadata` parsed. A
+/// BLOB cell, which the reference answers as a `Buffer`, answers `null`
+/// (design 0013's `payments-json-values`), and the row is still a record.
+pub fn record(row: &Row) -> JsValue {
     let mut props = Vec::with_capacity(KEYS.len());
     for (index, key) in KEYS.iter().enumerate() {
         let value = if index == METADATA {
             row_metadata(row)
         } else {
-            row.get(index)?.to_js()?
+            row.get(index)
+                .and_then(Cell::to_js)
+                .unwrap_or(JsValue::Null)
         };
         props.push((JsString::from(*key), value));
     }
-    Some(JsValue::Object(props))
+    JsValue::Object(props)
 }
 
 /// The repoll's read: every pending row, oldest first. The caller reads
@@ -876,12 +881,13 @@ fn join_units(value: &JsValue, out: &mut Vec<u16>) -> Result<(), Thrown> {
     Ok(())
 }
 
-/// `insertOne(e)`'s mapping of one entry, with the caller's clock for an
-/// entry without a finite `settledAt` (seconds; the row holds
-/// milliseconds).
-pub fn legacy_row(entry: &JsValue, now_ms: f64) -> Result<LegacyRow, Thrown> {
+/// `insertOne(e)`'s mapping of one entry. `now_ms` is the caller's clock,
+/// read once, as the reference's `Date.now()`, only for an entry without a
+/// finite `settledAt` (seconds; the row holds milliseconds), and before
+/// anything else of the entry is read.
+pub fn legacy_row(entry: &JsValue, now_ms: impl FnOnce() -> f64) -> Result<LegacyRow, Thrown> {
     let settled_at = finite(prop(entry, "settledAt")?);
-    let settled_ms = settled_at.map_or(now_ms, |s| s * 1000.0);
+    let settled_ms = settled_at.map_or_else(now_ms, |s| s * 1000.0);
     let status = prop(entry, "status")?
         .as_js_string()
         .cloned()
