@@ -43,8 +43,8 @@
 //!   `<path>` over the file the core is about to use at `<stage>`, once (the
 //!   rename consumes it): `journal` right after recovery read the journal,
 //!   `checked` right after a staged or temp file was checked and before its
-//!   identity is compared, `renaming` right before a staged node file is
-//!   renamed. It stands for a same-user process winning a race.
+//!   identity is compared, `renaming` right before a staged node file, or a
+//!   staged vault or metadata file, is renamed. It stands for a same-user process winning a race.
 //! - `FREEDOM_CORED_TEST_GRANT_WRITE_FAIL` names a file: while it holds
 //!   `<store>:<step>` lines (`dapp`, `swarm`, `radicle`, `x402`, `phone`
 //!   for `phone-payments.json`, `vault_meta` for `vault-meta.json`, and
@@ -52,7 +52,20 @@
 //!   `flush`), each write of that store's permission
 //!   file fails at that step as if the OS had failed it (design 0012, "The
 //!   files": a failed write). Read at each write, so a test turns it on
-//!   and off while the core runs.
+//!   and off while the core runs. `vault_meta_journal:<step>` fails a step
+//!   after the commit of the vault and metadata journal (design 0013, "The
+//!   vault and its metadata, one write"), in the write and in recovery
+//!   alike: `vault-rename`, `vault-flush`, `meta-rename`, `meta-flush`,
+//!   `unlink` (each a returned failure, the journal kept), `finish-flush`
+//!   (after the real unlink: not durable), and `journal-flush`: the
+//!   directory flush after the journal's own rename, and its retry, and
+//!   recovery's flush before it installs (nothing installed, the journal
+//!   kept). `delete_journal:install` fails a vault delete's install, in the
+//!   delete and in its recovery alike, as `delete-install` below does once.
+//!   `vault_meta_journal:settle-once` fails the first recovery of the
+//!   journal in the process that reads the line, before it renames
+//!   anything (the journal kept), and none after it: a transient failure,
+//!   which a test arms once the core is serving.
 //! - `FREEDOM_CORED_TEST_X402_SIGN_MARKER` names a file `x402.authorize`
 //!   appends a line to (`sign`) each time it is about to sign a payment's
 //!   digest, so a test counts the signatures: none for a cap's charge the
@@ -88,7 +101,13 @@
 //!   credential; `before-vault-rename` (the vault's temp file written and
 //!   checked, the claim taken), `after-vault-rename`; `before-fold`,
 //!   `after-fold` after the commit; `before-rollback`, `after-rollback`
-//!   after a failure): there the core exits at once with 99, as if killed,
+//!   after a failure), or of the vault and metadata journal
+//!   (`before-meta-stage`, `before-meta-journal`,
+//!   `before-meta-journal-rename` (its temp file written, the claim taken),
+//!   `after-meta-journal`, `after-meta-install-vault`,
+//!   `after-meta-install-meta`, `after-meta-done`, and `before-journal-finish`,
+//!   `after-journal-finish` for recovery's secrets-file write): there the
+//!   core exits at once with 99, as if killed,
 //!   the files as that step left them (design 0013, PRF-1: "a crash hook
 //!   before and after each write"). The vault's two steps are those of
 //!   every vault write.
@@ -100,7 +119,11 @@
 //!   `commit`, `remove`, `stage-pending`, `stage`, `fold`, `rollback`, …:
 //!   before its rename), or a vault write's (`vault-claim`, its claim
 //!   refused as if past its time; `vault-rename`, its rename, after the
-//!   claim), or the directory flush after a secrets-file write's rename
+//!   claim), the vault and metadata journal's (`meta-stage`, a staged
+//!   file's write; `meta-journal`, the journal's rename, after the claim;
+//!   `meta-journal-flush`, the directory flush after that rename, which is
+//!   then tried once more),
+//!   or the directory flush after a secrets-file write's rename
 //!   (`<step>-flush`, `rpc-set-flush`, `rpc-file-flush`, …: the change in
 //!   place and reported not durable). The first attempt in the process of
 //!   each listed write fails as if the OS had failed it.
@@ -466,6 +489,30 @@ pub fn grant_write_fails(store: &str, step: &str) -> bool {
 
 #[cfg(not(feature = "testhooks"))]
 pub fn grant_write_fails(_store: &str, _step: &str) -> bool {
+    false
+}
+
+/// [`grant_write_fails`], but true only the first time in the process that
+/// the file lists the step.
+#[cfg(feature = "testhooks")]
+pub fn grant_write_fails_once(store: &str, step: &str) -> bool {
+    static FAILED: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+    if !grant_write_fails(store, step) {
+        return false;
+    }
+    let Ok(mut failed) = FAILED.lock() else {
+        return false;
+    };
+    let key = format!("{store}:{step}");
+    if failed.contains(&key) {
+        return false;
+    }
+    failed.push(key);
+    true
+}
+
+#[cfg(not(feature = "testhooks"))]
+pub fn grant_write_fails_once(_store: &str, _step: &str) -> bool {
     false
 }
 

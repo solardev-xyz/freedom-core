@@ -152,7 +152,7 @@ fn not_moved() -> ErrorBody {
     .with_data(json!({ "store": STORE }))
 }
 
-fn storage(kind: &str) -> ErrorBody {
+pub(crate) fn storage(kind: &str) -> ErrorBody {
     ErrorBody::new(ErrorCode::Storage, "Storage error")
         .with_data(json!({ "kind": kind, "file": STORE }))
 }
@@ -224,6 +224,35 @@ impl Store {
             crate::log::warn(
                 "cannot remove vault-meta.json's temp files",
                 json!({ "kind": crate::secrets::io_kind(&e) }),
+            );
+        }
+    }
+
+    /// Whether the hello named `vault_meta`.
+    pub fn moved(&self) -> bool {
+        self.moved
+    }
+
+    /// `afterUnlock`'s migration, once moved: a file without `addresses`
+    /// gains the unlock's (design 0013, "The unlock's migration"). A failed
+    /// write doesn't fail the unlock: it is logged, and the next unlock
+    /// tries again (`vault-meta-unlock-migration`).
+    pub fn migrate_unlock(&self, addresses: &crate::vault::Addresses) {
+        if !self.moved {
+            return;
+        }
+        let migrated = self.load().and_then(|mut meta| {
+            let changed = meta.migrate_addresses(&addresses.user_wallet, &addresses.bee_wallet);
+            if changed.wrote {
+                self.save(&meta).map(|_| ())
+            } else {
+                Ok(())
+            }
+        });
+        if let Err(error) = migrated {
+            crate::log::warn(
+                "the unlock's vault-meta.json migration failed; the next unlock tries again",
+                json!({ "error": error.message }),
             );
         }
     }

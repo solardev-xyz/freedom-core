@@ -138,16 +138,19 @@ fn start(
     (core, hello)
 }
 
-/// The `abandon` vault, imported (and so unlocked).
-fn import(core: &mut Core, id: &mut u64) {
+/// The `abandon` vault, imported (and so unlocked). With `vault_meta`
+/// moved the import writes its metadata too (PRF-5c-2); it is removed
+/// again, so each test starts from the file it puts in place, as before.
+fn import(root: &Path, core: &mut Core, id: &mut u64) {
     let reply = call_as(
         core,
         id,
         &shell(),
         "vault.import",
-        json!({ "password_b64": STANDARD.encode(PASSWORD), "mnemonic_b64": STANDARD.encode(ABANDON), "overwrite": true }),
+        json!({ "password_b64": STANDARD.encode(PASSWORD), "mnemonic_b64": STANDARD.encode(ABANDON), "overwrite": true, "user_knows_password": true }),
     );
     assert!(reply["result"].is_object(), "{reply}");
+    let _ = std::fs::remove_file(meta_path(root));
 }
 
 fn meta_path(root: &Path) -> PathBuf {
@@ -366,7 +369,7 @@ fn every_vault_meta_vector_through_the_daemon() {
         let (mut core, hello) = start(root.path(), &["vault_meta"], &["dapp"], &[]);
         assert_eq!(hello["result"]["store_moved"], json!(["vault_meta"]));
         let mut id = 1;
-        import(&mut core, &mut id);
+        import(root.path(), &mut core, &mut id);
         let names = real_addresses(&mut core, &mut id, &derived_accounts(run));
         if let Some(start) = run["start"].as_str() {
             write_meta(root.path(), &renamed(start, &names));
@@ -474,7 +477,7 @@ fn callers_and_not_moved() {
     let (mut core, hello) = start(root.path(), &[], &[], &[]);
     assert_eq!(hello["result"]["store_moved"], json!([]), "{hello}");
     let mut id = 1;
-    import(&mut core, &mut id);
+    import(root.path(), &mut core, &mut id);
     let main = real_addresses(&mut core, &mut id, &[0]).remove(0).1;
     let text = format!(
         "{{\n  \"userKnowsPassword\": true,\n  \"addresses\": {{\n    \"userWallet\": \"{main}\"\n  }}\n}}"
@@ -556,7 +559,7 @@ fn a_failed_write_at_each_step() {
     let hook_env = hook.to_str().unwrap().to_owned();
     let (mut core, _) = start(root.path(), &["vault_meta"], &[], &[(HOOK, &hook_env)]);
     let mut id = 1;
-    import(&mut core, &mut id);
+    import(root.path(), &mut core, &mut id);
     let text = "{\n  \"userKnowsPassword\": true\n}";
     write_meta(root.path(), text);
     for step in ["write", "fsync", "rename"] {
@@ -678,10 +681,10 @@ fn removing_a_safe_ends_its_approvals_and_forgets_its_grants() {
         "activeWalletIndex": 1_000_000,
         "nextHardwareWalletIndex": 1_000_002,
     });
-    write_meta(root.path(), &serde_json::to_string_pretty(&meta).unwrap());
     let (mut core, _) = start(root.path(), &["vault_meta"], &["dapp"], &[MAINS_WORD]);
     let mut id = 1;
-    import(&mut core, &mut id);
+    import(root.path(), &mut core, &mut id);
+    write_meta(root.path(), &serde_json::to_string_pretty(&meta).unwrap());
     let approval = send_approval(&mut core, &mut id, SAFE);
     let other = send_approval(&mut core, &mut id, OTHER_SAFE);
     let before = snapshot(root.path());
@@ -846,7 +849,7 @@ fn a_failed_forget_refuses_the_removal() {
     let env = [(HOOK, hook_env.as_str())];
     let (mut core, _) = start(root.path(), &["vault_meta"], &["dapp"], &env);
     let mut id = 1;
-    import(&mut core, &mut id);
+    import(root.path(), &mut core, &mut id);
     write_meta(root.path(), "{\n  \"userKnowsPassword\": true\n}");
     assert_eq!(add_mnemonic(&mut core, &mut id, "Second"), 1);
     let meta_before = read_meta(root.path());
@@ -915,7 +918,7 @@ fn a_forget_then_a_failed_metadata_write_and_durability() {
         &[(HOOK, &hook_env)],
     );
     let mut id = 1;
-    import(&mut core, &mut id);
+    import(root.path(), &mut core, &mut id);
     write_meta(root.path(), "{\n  \"userKnowsPassword\": true\n}");
     assert_eq!(add_mnemonic(&mut core, &mut id, "Second"), 1);
     assert_eq!(add_mnemonic(&mut core, &mut id, "Third"), 2);
@@ -950,7 +953,7 @@ fn a_forget_then_a_failed_metadata_write_and_durability() {
     write_dapp(&grant_root, &[(SITE, 1)]);
     let (mut core, _) = start(root.path(), &["vault_meta"], &[], &[]);
     let mut id = 1;
-    import(&mut core, &mut id);
+    import(root.path(), &mut core, &mut id);
     write_meta(root.path(), "{\n  \"userKnowsPassword\": true\n}");
     assert_eq!(add_mnemonic(&mut core, &mut id, "Second"), 1);
     let meta_before = read_meta(root.path());
@@ -999,7 +1002,7 @@ fn safes_core(root: &Path, stores: &[&'static str], env: &[(&str, &str)]) -> (Co
     let echo: Vec<&str> = stores.iter().copied().filter(|s| *s != "intents").collect();
     assert_eq!(hello["result"]["store_moved"], json!(echo), "{hello}");
     let mut id = 1;
-    import(&mut core, &mut id);
+    import(root, &mut core, &mut id);
     let mut wallets = vec![
         json!({ "index": 0, "name": "Main Wallet" }),
         json!({ "index": 1, "name": "Second" }),
@@ -1177,7 +1180,7 @@ fn a_safe_index_no_pending_key_names_clears_nothing() {
         &[(HOOK, &hook_env)],
     );
     let mut id = 1;
-    import(&mut core, &mut id);
+    import(root.path(), &mut core, &mut id);
     let odd = [json!(-1), json!(9_007_199_254_740_992_u64)];
     let mut wallets = vec![json!({ "index": 0, "name": "Main Wallet" })];
     for (index, (_, address)) in odd.iter().zip(SAFES) {
