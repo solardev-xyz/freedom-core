@@ -27,9 +27,11 @@
 //! files are removed (after a crash, at the next start). **After it**, a
 //! failure the install or the finish returns answers the committed result
 //! with `durable: false`, and the journal stays: [`settle`] finishes it at
-//! start, before `core.hello` is answered, in `freedom-cored recover`, and
-//! first in every read of the vault, every `accounts.*` call and every
-//! secrets-file operation, which fail with `storage` while it can't.
+//! start, before `core.hello` is answered, in `freedom-cored recover`, and,
+//! under the secrets file's lock, first in every vault job, every
+//! `accounts.*` call and every secrets-file operation, which fail with
+//! `storage` while it can't. A read of the vault that still finds the
+//! journal answers `storage` and never settles it itself ([`remaining`]).
 //!
 //! **A record with `quick_unlock`** whose vault isn't installed yet installs
 //! it only while the secrets file has an entry bound to the staged vault's
@@ -572,6 +574,21 @@ pub fn exists(dir: &Path) -> bool {
     std::fs::symlink_metadata(dir.join(JOURNAL)).is_ok()
 }
 
+/// Whether a vault journal, the delete's or this one, is still there. A
+/// read of the vault that finds one doesn't settle it: only [`recover`]
+/// under the secrets file's lock does, and at start [`startup`] (design
+/// 0013, "Recovery"). `Err`: the directory can't say, which counts as one.
+pub fn remaining(dir: &Path) -> std::io::Result<bool> {
+    for name in [crate::delete_journal::JOURNAL, JOURNAL] {
+        match std::fs::symlink_metadata(dir.join(name)) {
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Ok(_) => return Ok(true),
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(false)
+}
+
 /// Finishes a committed write whose journal is still there. `Err`: the
 /// journal stays, and the caller must not act on the vault, the metadata
 /// or the secrets file.
@@ -606,6 +623,9 @@ pub fn settle(dir: &Path) -> std::io::Result<Settled> {
         set_aside(dir, "not a writer's record")?;
         return Ok(Settled::SetAside);
     };
+    if crate::testhooks::grant_write_fails_once("vault_meta_journal", "settle-once") {
+        return Err(hook_error("recovery, once"));
+    }
     // The journal's name is durable before anything is renamed (a write
     // whose flush failed left it pending).
     journal_durable(dir)?;
@@ -638,9 +658,10 @@ fn set_aside(dir: &Path, why: &str) -> std::io::Result<()> {
 /// Recovery first, for a job or an `accounts.*` call: a vault delete's
 /// journal, then this one. With `secrets`, both run under its lock and
 /// nowhere else, so a finished quick-unlock record leaves only the new
-/// vault's credential ([`Secrets::recover`]). `Err`: a journal stays.
+/// vault's credential ([`Secrets::recover`]). `Err`: a journal stays, and
+/// the caller answers `storage`: no read of the vault settles it later.
 pub fn recover(dir: &Path, secrets: Option<&Secrets>) -> std::io::Result<()> {
-    if !exists(dir) {
+    if matches!(remaining(dir), Ok(false)) {
         return Ok(());
     }
     match secrets {

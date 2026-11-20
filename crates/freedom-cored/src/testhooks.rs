@@ -61,6 +61,10 @@
 //!   recovery's flush before it installs (nothing installed, the journal
 //!   kept). `delete_journal:install` fails a vault delete's install, in the
 //!   delete and in its recovery alike, as `delete-install` below does once.
+//!   `vault_meta_journal:settle-once` fails the first recovery of the
+//!   journal in the process that reads the line, before it renames
+//!   anything (the journal kept), and none after it: a transient failure,
+//!   which a test arms once the core is serving.
 //! - `FREEDOM_CORED_TEST_X402_SIGN_MARKER` names a file `x402.authorize`
 //!   appends a line to (`sign`) each time it is about to sign a payment's
 //!   digest, so a test counts the signatures: none for a cap's charge the
@@ -484,6 +488,30 @@ pub fn grant_write_fails(store: &str, step: &str) -> bool {
 
 #[cfg(not(feature = "testhooks"))]
 pub fn grant_write_fails(_store: &str, _step: &str) -> bool {
+    false
+}
+
+/// [`grant_write_fails`], but true only the first time in the process that
+/// the file lists the step.
+#[cfg(feature = "testhooks")]
+pub fn grant_write_fails_once(store: &str, step: &str) -> bool {
+    static FAILED: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+    if !grant_write_fails(store, step) {
+        return false;
+    }
+    let Ok(mut failed) = FAILED.lock() else {
+        return false;
+    };
+    let key = format!("{store}:{step}");
+    if failed.contains(&key) {
+        return false;
+    }
+    failed.push(key);
+    true
+}
+
+#[cfg(not(feature = "testhooks"))]
+pub fn grant_write_fails_once(_store: &str, _step: &str) -> bool {
     false
 }
 

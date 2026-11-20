@@ -606,6 +606,46 @@ enum RunningKind {
     },
 }
 
+impl RunningKind {
+    /// The job's answer when recovery first fails
+    /// ([`recover_first`]): `storage`, for every job that reads the vault or
+    /// the secrets file. `None`: the job runs anyway. Reconcile decides from
+    /// the journaled vault while a journal remains (design 0013,
+    /// "`vault.reconcile`"); a node write, an op status and an RPC-key job
+    /// touch neither file.
+    fn unrecovered(&self) -> Option<fn(OpError) -> JobOutput> {
+        let answer: fn(OpError) -> JobOutput = match self {
+            RunningKind::Unlock
+            | RunningKind::QuickUnlock
+            | RunningKind::QuickExportMnemonic
+            | RunningKind::QuickExportPrivateKey(_) => |error| JobOutput::Unlocked(Err(error)),
+            RunningKind::Verify
+            | RunningKind::ExportMnemonic
+            | RunningKind::ExportPrivateKey(_)
+            | RunningKind::Delete
+            | RunningKind::QuickEnroll
+            | RunningKind::QuickDisable => |error| JobOutput::Checked {
+                result: Err(error),
+                commit: None,
+            },
+            RunningKind::ChangePassword => |error| JobOutput::Changed {
+                result: Err(error),
+                commit: None,
+            },
+            RunningKind::Create | RunningKind::Import => |error| JobOutput::Written {
+                result: Err(error),
+                commit: None,
+            },
+            RunningKind::Precheck { .. } => |error| JobOutput::Prechecked(Err(error)),
+            RunningKind::Reconcile { .. }
+            | RunningKind::NodeWrite
+            | RunningKind::OpStatus
+            | RunningKind::RpcKeys => return None,
+        };
+        Some(answer)
+    }
+}
+
 struct Running {
     job: u64,
     request: u64,
@@ -1991,10 +2031,16 @@ impl Vault {
     }
 
     /// The job of a password check the throttle refused: it reads the file,
-    /// and holds no password.
+    /// and holds no password. Recovery first, as in every job that reads
+    /// the vault ([`Vault::job_for`]).
     fn precheck_job(&self, version: bool, control: Arc<JobControl>) -> Job {
         let dir = self.dir.clone();
-        Box::new(move || Finished(JobOutput::Prechecked(job_precheck(&dir, version, &control))))
+        let secrets = self.secrets.clone();
+        Box::new(move || {
+            let result = recover_first(&dir, secrets.as_deref())
+                .and_then(|()| job_precheck(&dir, version, &control));
+            Finished(JobOutput::Prechecked(result))
+        })
     }
 
     fn job_for(&self, kind: Kind, control: Arc<JobControl>) -> (RunningKind, Job) {
@@ -2193,13 +2239,16 @@ impl Vault {
         };
         let dir = self.dir.clone();
         let secrets = self.secrets.clone();
+        let unrecovered = kind.unrecovered();
         let job: Job = Box::new(move || {
-            // A vault write's metadata journal is finished first, under the
-            // secrets file's lock (design 0013, "Recovery"). A failure is
-            // the job's own: its read of the vault tries again and answers
-            // `storage`.
-            let _ = crate::vault_meta_journal::recover(&dir, secrets.as_deref());
-            Finished(run(&dir, &control))
+            // The vault journals are finished first, under the secrets
+            // file's lock (design 0013, "Recovery"). While one can't be, a
+            // job that reads the vault or the secrets file answers that
+            // `storage` without running: no read settles a journal itself.
+            match (recover_first(&dir, secrets.as_deref()), unrecovered) {
+                (Err(error), Some(unrecovered)) => Finished(unrecovered(error)),
+                _ => Finished(run(&dir, &control)),
+            }
         });
         (kind, job)
     }
@@ -2811,7 +2860,8 @@ pub fn startup_snapshot(dir: &Path, lock_dir: &Path) -> (FileSnapshot, NodeRecov
     let recovery = startup_recovery(dir, lock_dir);
     // Then a vault delete's journal (design 0013, "Forgetting an item"):
     // committed, it is finished; never committed, its staged secrets file
-    // goes. Left pending, every read of the vault tries it again first.
+    // goes. Left pending, the vault isn't read: recovery, first in every
+    // job under the secrets file's lock, tries it again.
     match crate::delete_journal::startup(dir) {
         Ok(crate::delete_journal::Settled::Nothing) => {}
         Ok(settled) => crate::log::info(
@@ -2975,24 +3025,42 @@ fn snapshot(dir: &Path) -> FileSnapshot {
 /// check and the read (a FIFO, a symlink, a growing file) can stall the
 /// worker or be read whole.
 ///
-/// A vault delete whose journal committed is finished first (design 0013;
-/// [`crate::delete_journal`]): while it can't be, the vault isn't read, so
-/// no job sees the vault the delete removed.
-///
-/// So is a vault write whose metadata journal committed
-/// ([`crate::vault_meta_journal`]): while it can't be, the vault isn't read.
+/// While a vault delete's journal ([`crate::delete_journal`]) or a vault
+/// write's ([`crate::vault_meta_journal`]) is still there, the vault isn't
+/// read ([`no_journal`]), so no job sees the vault the delete removed or the
+/// one the write replaced.
 fn read_vault(dir: &Path) -> Result<Option<String>, OpError> {
-    crate::delete_journal::settle(dir).map_err(|e| storage(&e))?;
-    crate::vault_meta_journal::settle(dir).map_err(|e| storage(&e))?;
+    no_journal(dir)?;
     read_bounded(&dir.join(VAULT_FILE))
+}
+
+/// `storage` while a vault journal, the delete's or the metadata's, is still
+/// there. A read never settles one itself: only recovery under the secrets
+/// file's lock does, first in every job ([`recover_first`]) and every
+/// `accounts.*` call, and at start before any job (design 0013,
+/// "Recovery"). So no install, delete or credential check runs outside that
+/// lock, racing a secrets-file operation or skipping the replaced vault's
+/// entry's removal.
+fn no_journal(dir: &Path) -> Result<(), OpError> {
+    match crate::vault_meta_journal::remaining(dir) {
+        Ok(false) => Ok(()),
+        Ok(true) => Err(OpError::Storage("other")),
+        Err(e) => Err(storage(&e)),
+    }
+}
+
+/// Recovery first, for a job: a vault delete's journal, then a vault
+/// write's, under the secrets file's lock
+/// ([`crate::vault_meta_journal::recover`]). `Err`: one stays.
+fn recover_first(dir: &Path, secrets: Option<&Secrets>) -> Result<(), OpError> {
+    crate::vault_meta_journal::recover(dir, secrets).map_err(|e| storage(&e))
 }
 
 /// The vault file's SHA-256, over its bytes as they are (`None` if
 /// missing), read as [`read_vault`] reads it: what quick unlock's entry for
 /// it is bound to.
 fn vault_digest(dir: &Path) -> Result<Option<String>, OpError> {
-    crate::delete_journal::settle(dir).map_err(|e| storage(&e))?;
-    crate::vault_meta_journal::settle(dir).map_err(|e| storage(&e))?;
+    no_journal(dir)?;
     let file = match fsx::open_regular(&dir.join(VAULT_FILE), false) {
         Ok(fsx::Regular::Missing) => return Ok(None),
         Ok(fsx::Regular::Other) => return Err(OpError::Storage("not_regular")),
@@ -3756,9 +3824,9 @@ fn job_reconcile(
     if control.abandoned() {
         return untried(Err(OpError::Abandoned));
     }
-    // Recovery first (in the read). While a metadata journal remains, the
-    // decision is the journaled vault's: installed, or still staged
-    // (design 0013, "`vault.reconcile`").
+    // Recovery ran first, in the job's wrapper. While a metadata journal
+    // remains, the read refuses and the decision is the journaled vault's:
+    // installed, or still staged (design 0013, "`vault.reconcile`").
     let (contents, pending) = match read_vault(dir) {
         Ok(contents) => (contents, false),
         Err(error) => match crate::vault_meta_journal::journaled_vault(dir) {
@@ -4046,7 +4114,10 @@ mod tests {
 
     /// Design 0013, "Forgetting an item": a vault delete whose journal
     /// committed is finished before the vault is read, so no job sees the
-    /// vault it removes (an install that failed after the commit).
+    /// vault it removes (an install that failed after the commit). The read
+    /// itself refuses while the journal is there and changes nothing: only
+    /// recovery finishes it (under the secrets file's lock, when there is
+    /// one).
     #[test]
     fn a_committed_delete_is_finished_before_the_vault_is_read() {
         let dir = tempfile::tempdir().unwrap();
@@ -4063,6 +4134,15 @@ mod tests {
             journal.to_string(),
         )
         .unwrap();
+        assert!(matches!(read_vault(dir.path()), Err(OpError::Storage(_))));
+        assert!(matches!(vault_digest(dir.path()), Err(OpError::Storage(_))));
+        assert!(dir.path().join(VAULT_FILE).exists());
+        assert!(dir.path().join(crate::delete_journal::JOURNAL).exists());
+        assert_eq!(
+            std::fs::read(dir.path().join(secrets::SECRETS_FILE)).unwrap(),
+            b"before"
+        );
+        assert!(recover_first(dir.path(), None).is_ok());
         assert!(matches!(read_vault(dir.path()), Ok(None)));
         assert!(!dir.path().join(VAULT_FILE).exists());
         assert!(!dir.path().join(crate::delete_journal::JOURNAL).exists());
