@@ -174,7 +174,9 @@ fc-store = { path = "../fc-store" }
 fc-swarm = { path = "../fc-swarm" }
 fc-vault = { path = "../fc-vault" }
 # The set-A stores' codecs (design 0013): `vault-meta.json`'s and its
-# changes (PRF-5a, `accounts.*`), and `safe-pending.json`'s (PRF-5f).
+# changes (PRF-5a, `accounts.*`), `safe-pending.json`'s (PRF-5f), and
+# payment-history.sqlite's ("Where SQLite lives"): the rows, checks and
+# statements, pure; SQLite stays in this binary.
 fc-wallet-state = { path = "../fc-wallet-state" }
 getrandom = "0.4"
 rand_core = "0.10"

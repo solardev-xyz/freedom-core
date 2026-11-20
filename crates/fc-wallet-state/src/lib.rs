@@ -22,6 +22,7 @@
 mod address;
 pub mod intents;
 mod js;
+pub mod payments;
 pub mod safe_pending;
 pub mod vault_meta;
 
