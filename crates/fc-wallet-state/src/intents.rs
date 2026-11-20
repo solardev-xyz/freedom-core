@@ -3,22 +3,29 @@
 //! records of `wallet-intents.jsonl`. The line format, its checksum and the
 //! file are `fc-store`'s journal; this module takes the records it reads.
 //!
-//! This is the replay half (PRF-5e-2a): every record kind as a load checks
-//! it, the signers the load owes, the fold after it, compaction to `held`
-//! and `tombstone` lines, `LIMITS`, the budget the store admits new intents
-//! against, and the views. A live write's rules (its bounds, its admission
-//! and its refusals) come with PRF-5e-2b.
+//! The replay (PRF-5e-2a): every record kind as a load checks it, the
+//! signers the load owes, the fold after it, compaction to `held` and
+//! `tombstone` lines, `LIMITS`, the budget the store admits new intents
+//! against, and the views. The live writes (PRF-5e-2b, [`write`]): each
+//! write method's line, its checks and refusals, its admission against the
+//! budget, and what applying it changes, as pure functions over the state,
+//! so the daemon only adds the file.
 //!
 //! Numbers are JavaScript's doubles, as the reference keeps them, so a time
 //! or a nonce goes back into a line as the file had it. A load that breaks a
 //! rule gives the reference's reason, word for word: the store moves the
 //! file aside with it.
 
+use std::cell::Cell;
 use std::collections::BTreeMap;
 use std::fmt::Display;
 
 use fc_evm::{DecodeError, SignedTx, U256, decode_signed, keccak256, to_hex};
 use fc_json::{JsString, JsValue};
+
+pub mod write;
+
+pub use write::{Room, Withdrawn, Write};
 
 /// The store's bounds (`LIMITS`). Only `tombstones` changes what a load
 /// keeps; the others bound live writes and the budget's limit.
@@ -61,8 +68,41 @@ const LINE_OVERHEAD: usize = 17 + 64 + 11 + 2;
 #[error("{0}")]
 pub struct Damaged(pub String);
 
-fn invalid(detail: impl Display) -> Damaged {
-    Damaged(format!("Invalid wallet intent record: {detail}"))
+/// Why the store refuses a write, or why a record breaks a rule: the
+/// reference's `code` and message. A load reports the message alone
+/// ([`Damaged`]).
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error("{message}")]
+pub struct Refusal {
+    /// `INTENT_*`, or empty where the reference throws one of JavaScript's
+    /// own `TypeError`s, which have none: an argument of the wrong type,
+    /// never a line it writes.
+    pub code: &'static str,
+    pub message: String,
+}
+
+impl From<Refusal> for Damaged {
+    fn from(refusal: Refusal) -> Self {
+        Damaged(refusal.message)
+    }
+}
+
+fn refusal(code: &'static str, message: impl Into<String>) -> Refusal {
+    Refusal {
+        code,
+        message: message.into(),
+    }
+}
+
+fn invalid(detail: impl Display) -> Refusal {
+    refusal(
+        "INTENT_INVALID",
+        format!("Invalid wallet intent record: {detail}"),
+    )
+}
+
+fn unknown(id: impl Display) -> Refusal {
+    refusal("INTENT_UNKNOWN", format!("Unknown wallet intent {id}"))
 }
 
 /// The bytes of a record's journal line, its newline included.
@@ -246,6 +286,10 @@ struct Intent {
     closed_at: Option<f64>,
     created_at: f64,
     updated_at: f64,
+    /// `intent.sized`: its widest snapshot's size, and how many hashes it
+    /// had. The reference sizes it again only with a new hash, so a
+    /// withdrawn origin keeps counting until then.
+    sized: Cell<Option<(usize, usize)>>,
 }
 
 impl Intent {
@@ -305,6 +349,114 @@ impl Intent {
     }
 }
 
+/// A new held intent, not yet in the store (its `sequence` is the store's).
+fn fresh(
+    id: JsString,
+    chain_id: f64,
+    sender: String,
+    nonce: f64,
+    context: Option<Context>,
+    run: Option<JsString>,
+    at: f64,
+) -> Intent {
+    Intent {
+        id,
+        chain_id,
+        sender,
+        nonce,
+        context,
+        run,
+        recovered: true,
+        sequence: 0,
+        state: State::Held,
+        hashes: Vec::new(),
+        handoffs: Vec::new(),
+        summary: (0.0, false),
+        bracket: None,
+        unread_since: None,
+        settlement: None,
+        voided_at: None,
+        retirement: None,
+        closed_at: None,
+        created_at: at,
+        updated_at: at,
+        sized: Cell::new(None),
+    }
+}
+
+/// Why a closed intent takes nothing more, for the user (`closedText`).
+fn closed_text(state: State) -> &'static str {
+    match state {
+        State::Voided => "This payment was voided.",
+        State::Retired => "This payment was closed.",
+        _ => "This payment is already settled.",
+    }
+}
+
+/// `requireHeld`: a load names the state, a live write tells the user.
+fn require_held(intent: &Intent, mode: Mode) -> Result<(), Refusal> {
+    match intent.state {
+        State::Held => Ok(()),
+        state if !mode.live => Err(invalid(format_args!(
+            "intent {} is {}",
+            intent.id,
+            state.name()
+        ))),
+        state => Err(refusal("INTENT_NOT_HELD", closed_text(state))),
+    }
+}
+
+/// How a record is checked: as a load replays it, or as a live write,
+/// with main's word on the account's reservation lock (design 0013: the
+/// lock stays main's until APR-6).
+#[derive(Debug, Clone, Copy)]
+struct Mode {
+    live: bool,
+    lock: bool,
+}
+
+const LOADING: Mode = Mode {
+    live: false,
+    lock: false,
+};
+
+/// What applying a checked record does: the function a reference
+/// `prepare*` returns. A load applies it at once; a write once its line is
+/// on disk.
+#[derive(Debug, Clone)]
+enum Apply {
+    Original(Box<Intent>),
+    Replacement {
+        id: JsString,
+        entry: Entry,
+        at: f64,
+    },
+    Handoff {
+        id: JsString,
+        handoff: Handoff,
+        at: f64,
+    },
+    Outcome {
+        id: JsString,
+        handoff: JsString,
+        outcome: Outcome,
+        at: f64,
+    },
+    /// A settle (with its settlement), a void, or a retire (with its block).
+    Close {
+        id: JsString,
+        state: State,
+        settlement: Option<Settlement>,
+        block: Option<f64>,
+        at: f64,
+    },
+    Track {
+        id: JsString,
+        bracket: Option<(f64, String)>,
+        unread_since: Option<f64>,
+    },
+}
+
 // --- Reading a record's fields, as the reference checks them -------------
 
 fn safe_integer(value: Option<&JsValue>) -> Option<f64> {
@@ -314,13 +466,13 @@ fn safe_integer(value: Option<&JsValue>) -> Option<f64> {
     }
 }
 
-fn require_count(value: Option<&JsValue>, what: &str) -> Result<f64, Damaged> {
+fn require_count(value: Option<&JsValue>, what: &str) -> Result<f64, Refusal> {
     safe_integer(value)
         .filter(|n| *n >= 0.0)
         .ok_or_else(|| invalid(format_args!("bad {what}")))
 }
 
-fn require_chain_id(value: Option<&JsValue>) -> Result<f64, Damaged> {
+fn require_chain_id(value: Option<&JsValue>) -> Result<f64, Refusal> {
     safe_integer(value)
         .filter(|n| *n > 0.0)
         .ok_or_else(|| invalid("bad chain id"))
@@ -333,7 +485,7 @@ fn is_id(value: &JsString) -> bool {
         })
 }
 
-fn require_id(value: Option<&JsValue>, what: &str) -> Result<JsString, Damaged> {
+fn require_id(value: Option<&JsValue>, what: &str) -> Result<JsString, Refusal> {
     match value.and_then(JsValue::as_js_string) {
         Some(id) if is_id(id) => Ok(id.clone()),
         _ => Err(invalid(format_args!("bad {what}"))),
@@ -349,7 +501,7 @@ enum Hex {
 
 /// `requireHex`: the text lowercased, as the pattern takes it. No
 /// character outside ASCII lowercases into the patterns' alphabet.
-fn require_hex(value: Option<&JsValue>, pattern: Hex, what: &str) -> Result<String, Damaged> {
+fn require_hex(value: Option<&JsValue>, pattern: Hex, what: &str) -> Result<String, Refusal> {
     let bad = || invalid(format_args!("bad {what}"));
     let s = value.and_then(JsValue::as_js_string).ok_or_else(bad)?;
     if !s.is_ascii() {
@@ -373,7 +525,7 @@ fn optional_text(
     value: Option<&JsValue>,
     name: &str,
     limit: usize,
-) -> Result<Option<JsString>, Damaged> {
+) -> Result<Option<JsString>, Refusal> {
     match value {
         None | Some(JsValue::Null) => Ok(None),
         Some(JsValue::String(s)) if s.utf16_len() > 0 && s.utf16_len() <= limit => {
@@ -404,7 +556,7 @@ fn one_of(value: Option<&JsValue>, names: &[&'static str]) -> Option<&'static st
 const OUTCOMES: [&str; 4] = ["sent", "uncertain", "rejected", "not_sent"];
 const LABELS: [&str; 3] = ["paid", "failed", "taken"];
 
-fn normalize_context(value: Option<&JsValue>) -> Result<Context, Damaged> {
+fn normalize_context(value: Option<&JsValue>) -> Result<Context, Refusal> {
     let Some(context @ JsValue::Object(_)) = value else {
         return Err(invalid("an original commit needs its context"));
     };
@@ -435,7 +587,7 @@ fn normalize_context(value: Option<&JsValue>) -> Result<Context, Damaged> {
 /// A bracket (`number`, `hash`) and `unread_since`.
 type Tracked = (Option<(f64, String)>, Option<f64>);
 
-fn track_of(record: &JsValue) -> Result<Tracked, Damaged> {
+fn track_of(record: &JsValue) -> Result<Tracked, Refusal> {
     let bracket = match record.get("bracket") {
         None | Some(JsValue::Null) => None,
         Some(b @ JsValue::Object(_)) => Some((
@@ -480,7 +632,7 @@ fn bytes_of(raw: &str) -> Vec<u8> {
 /// `verifySigned`: `raw` (lowercase hex) decodes to a signed, canonical
 /// transaction of type 0 or 2 at the intent's nonce and chain, hashing to
 /// its hash. Its fields, as stored.
-fn verify_signed(raw: &str, chain_id: f64, nonce: f64, hash: &str) -> Result<JsValue, Damaged> {
+fn verify_signed(raw: &str, chain_id: f64, nonce: f64, hash: &str) -> Result<JsValue, Refusal> {
     let bytes = bytes_of(raw);
     // ethers' own error escapes `tx.serialized` for an unserializable
     // transaction; the core reports its own text (deviation
@@ -604,33 +756,17 @@ impl Intents {
         closed
     }
 
-    fn require_intent(&self, record: &JsValue) -> Result<JsString, Damaged> {
+    fn require_intent(&self, record: &JsValue) -> Result<JsString, Refusal> {
         let id = require_id(record.get("intent_id"), "intent id")?;
         if self.by_id.contains_key(&id) {
             Ok(id)
         } else {
-            Err(Damaged(format!("Unknown wallet intent {id}")))
+            Err(unknown(&id))
         }
     }
 
-    fn intent(&self, id: &JsString) -> Result<&Intent, Damaged> {
-        self.by_id
-            .get(id)
-            .ok_or_else(|| Damaged(format!("Unknown wallet intent {id}")))
-    }
-
-    fn intent_mut(&mut self, id: &JsString) -> Result<&mut Intent, Damaged> {
-        self.by_id
-            .get_mut(id)
-            .ok_or_else(|| Damaged(format!("Unknown wallet intent {id}")))
-    }
-
-    fn require_held(&self, id: &JsString) -> Result<(), Damaged> {
-        let intent = self.intent(id)?;
-        match intent.state {
-            State::Held => Ok(()),
-            state => Err(invalid(format_args!("intent {id} is {}", state.name()))),
-        }
+    fn intent(&self, id: &JsString) -> Result<&Intent, Refusal> {
+        self.by_id.get(id).ok_or_else(|| unknown(id))
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -645,41 +781,42 @@ impl Intents {
         at: f64,
     ) -> &mut Intent {
         self.sequence += 1;
-        let intent = Intent {
-            id: id.clone(),
-            chain_id,
-            sender,
-            nonce,
-            context,
-            run,
-            recovered: true,
-            sequence: self.sequence,
-            state: State::Held,
-            hashes: Vec::new(),
-            handoffs: Vec::new(),
-            summary: (0.0, false),
-            bracket: None,
-            unread_since: None,
-            settlement: None,
-            voided_at: None,
-            retirement: None,
-            closed_at: None,
-            created_at: at,
-            updated_at: at,
-        };
+        let mut intent = fresh(id.clone(), chain_id, sender, nonce, context, run, at);
+        intent.sequence = self.sequence;
         // A new id: every caller checked it isn't known.
         self.by_id.entry(id).or_insert(intent)
     }
 
-    /// `checkNewIntent` as a load checks it: above the account's held
-    /// nonces, with a key no held intent has.
+    /// `checkNewIntent`: above the account's held nonces, with a key no
+    /// held intent has. Live also checks the count bounds.
     fn check_new_intent(
         &self,
         chain_id: f64,
         sender: &str,
         nonce: f64,
         context: &Context,
-    ) -> Result<(), Damaged> {
+        mode: Mode,
+    ) -> Result<(), Refusal> {
+        let held = self.held_of(chain_id, sender).count();
+        if mode.live && held >= self.limits.held_per_account {
+            return Err(refusal(
+                "INTENT_ACCOUNT_LIMIT",
+                format!(
+                    "This account already has {held} payments waiting to confirm. \
+                     Wait for some of them before sending another."
+                ),
+            ));
+        }
+        if mode.live && self.held_intents().count() >= self.limits.held {
+            return Err(refusal(
+                "INTENT_STORE_LIMIT",
+                format!(
+                    "The wallet already has {} payments waiting to confirm. \
+                     Wait for some of them before sending another.",
+                    self.limits.held
+                ),
+            ));
+        }
         let highest = self
             .held_of(chain_id, sender)
             .fold(-1.0_f64, |max, i| max.max(i.nonce));
@@ -707,13 +844,13 @@ impl Intents {
         &mut self,
         record: &JsValue,
         unrecovered: &mut Vec<(JsString, usize)>,
-    ) -> Result<(), Damaged> {
+    ) -> Result<(), Refusal> {
         // `Object.hasOwn(PREPARE, record.type)` takes the type as a key.
         let kind = record
             .get("type")
             .unwrap_or(&JsValue::Undefined)
             .js_string()
-            .map_err(|_| Damaged("Cannot convert object to primitive value".into()))?;
+            .map_err(|_| refusal("", "Cannot convert object to primitive value"))?;
         let known = [
             "commit",
             "held",
@@ -729,25 +866,38 @@ impl Intents {
             return Err(invalid("unknown record type"));
         }
         let at = require_count(record.get("at"), "time")?;
-        match kind.as_str() {
-            "commit" => self.commit(record, at, unrecovered),
-            "held" => self.held_snapshot(record, at, unrecovered),
-            "tombstone" => self.tombstone(record, at),
-            "handoff" => self.handoff(record, at),
-            "outcome" => self.outcome(record, at),
-            "settle" => self.settle(record, at),
-            "void" => self.void(record, at),
-            "retire" => self.retire(record, at),
-            _ => self.track(record),
+        let apply = match kind.as_str() {
+            "held" => return self.held_snapshot(record, at, unrecovered),
+            "tombstone" => return self.tombstone(record, at),
+            "outcome" => match self.prepare_outcome(record, at, LOADING)? {
+                Some(apply) => apply,
+                None => return Ok(()),
+            },
+            _ => self.prepare(kind.as_str(), record, at, LOADING)?,
+        };
+        let id = self.apply_one(apply);
+        if kind.as_str() == "commit"
+            && let Some(intent) = self.by_id.get(&id)
+        {
+            unrecovered.push((id, intent.hashes.len() - 1));
+        }
+        Ok(())
+    }
+
+    /// `prepare` for the record kinds a live write can have, outcomes aside.
+    fn prepare(&self, kind: &str, record: &JsValue, at: f64, mode: Mode) -> Result<Apply, Refusal> {
+        match kind {
+            "commit" => self.prepare_commit(record, at, mode),
+            "handoff" => self.prepare_handoff(record, at, mode),
+            "settle" => self.prepare_settle(record, at, mode),
+            "void" => self.prepare_void(record, at, mode),
+            "retire" => self.prepare_retire(record, at, mode),
+            "track" => self.prepare_track(record, mode),
+            _ => Err(invalid("unknown record type")),
         }
     }
 
-    fn commit(
-        &mut self,
-        record: &JsValue,
-        at: f64,
-        unrecovered: &mut Vec<(JsString, usize)>,
-    ) -> Result<(), Damaged> {
+    fn prepare_commit(&self, record: &JsValue, at: f64, mode: Mode) -> Result<Apply, Refusal> {
         let id = require_id(record.get("intent_id"), "intent id")?;
         let run = require_id(record.get("run"), "run")?;
         let chain_id = require_chain_id(record.get("chain_id"))?;
@@ -755,8 +905,19 @@ impl Intents {
         let nonce = require_count(record.get("nonce"), "nonce")?;
         let hash = require_hex(record.get("hash"), Hex::Hash, "hash")?;
         let raw = require_hex(record.get("raw"), Hex::Bytes, "signed transaction")?;
+        if mode.live && (raw.len() - 2) / 2 > self.limits.raw_bytes {
+            return Err(refusal(
+                "INTENT_TOO_LARGE",
+                "This transaction is too large to send.",
+            ));
+        }
         let fields = verify_signed(&raw, chain_id, nonce, &hash)?;
-        if record.get("fields").map(JsValue::stringify) != Some(fields.stringify()) {
+        if mode.live && signer_of(&raw).as_deref() != Some(sender.as_str()) {
+            return Err(invalid(
+                "the transaction is not signed by the intent's sender",
+            ));
+        }
+        if !mode.live && record.get("fields").map(JsValue::stringify) != Some(fields.stringify()) {
             return Err(invalid(format_args!(
                 "the fields of {hash} do not match its transaction"
             )));
@@ -776,20 +937,12 @@ impl Intents {
                 return Err(invalid(format_args!("intent {id} is already committed")));
             }
             let context = normalize_context(record.get("context"))?;
-            self.check_new_intent(chain_id, &sender, nonce, &context)?;
-            let entry = entry(true);
-            let intent = self.insert(
-                id.clone(),
-                chain_id,
-                sender,
-                nonce,
-                Some(context),
-                Some(run),
-                at,
-            );
-            intent.hashes.push(entry);
-            unrecovered.push((id, 0));
-            return Ok(());
+            self.check_new_intent(chain_id, &sender, nonce, &context, mode)?;
+            let first = entry(true);
+            let mut intent = fresh(id, chain_id, sender, nonce, Some(context), Some(run), at);
+            intent.recovered = !mode.live;
+            intent.hashes.push(first);
+            return Ok(Apply::Original(Box::new(intent)));
         }
         if via != Some("replacement") {
             return Err(invalid("bad via"));
@@ -799,7 +952,7 @@ impl Intents {
                 "a replacement for unknown intent {id}"
             )));
         };
-        self.require_held(&id)?;
+        require_held(existing, mode)?;
         if existing.chain_id != chain_id || existing.sender != sender || existing.nonce != nonce {
             return Err(invalid(format_args!(
                 "a replacement of intent {id} must keep its chain, sender and nonce"
@@ -810,6 +963,12 @@ impl Intents {
                 "{hash} is already committed to intent {id}"
             )));
         }
+        if mode.live && existing.hashes.len() >= self.limits.hashes_per_intent {
+            return Err(refusal(
+                "INTENT_REPLACEMENT_LIMIT",
+                "This payment has been replaced too many times. Send it again as it is.",
+            ));
+        }
         let paying = existing.hashes.last().and_then(|e| e.fields.as_ref());
         let pays = |key| fields.get(key) == paying.and_then(|p| p.get(key));
         if !(pays("to") && pays("value") && pays("data")) {
@@ -817,12 +976,11 @@ impl Intents {
                 "a replacement of intent {id} must pay what the original pays"
             )));
         }
-        let entry = entry(false);
-        let intent = self.intent_mut(&id)?;
-        intent.hashes.push(entry);
-        intent.updated_at = at;
-        unrecovered.push((id, intent.hashes.len() - 1));
-        Ok(())
+        Ok(Apply::Replacement {
+            id,
+            entry: entry(false),
+            at,
+        })
     }
 
     /// A held intent in one line, as compaction writes it: replayed like an
@@ -832,7 +990,7 @@ impl Intents {
         record: &JsValue,
         at: f64,
         unrecovered: &mut Vec<(JsString, usize)>,
-    ) -> Result<(), Damaged> {
+    ) -> Result<(), Refusal> {
         let id = require_id(record.get("intent_id"), "intent id")?;
         let run = require_id(record.get("run"), "run")?;
         let chain_id = require_chain_id(record.get("chain_id"))?;
@@ -905,7 +1063,7 @@ impl Intents {
             return Err(invalid(format_args!("intent {id} is already committed")));
         }
         let context = normalize_context(record.get("context"))?;
-        self.check_new_intent(chain_id, &sender, nonce, &context)?;
+        self.check_new_intent(chain_id, &sender, nonce, &context, LOADING)?;
         let latest = hashes.len() - 1;
         let intent = self.insert(
             id.clone(),
@@ -925,7 +1083,7 @@ impl Intents {
     }
 
     /// A closed intent, as compaction keeps it: final, without its bytes.
-    fn tombstone(&mut self, record: &JsValue, at: f64) -> Result<(), Damaged> {
+    fn tombstone(&mut self, record: &JsValue, at: f64) -> Result<(), Refusal> {
         let id = require_id(record.get("intent_id"), "intent id")?;
         let chain_id = require_chain_id(record.get("chain_id"))?;
         let sender = require_hex(record.get("sender"), Hex::Address, "sender")?;
@@ -997,16 +1155,21 @@ impl Intents {
         Ok(())
     }
 
-    fn handoff(&mut self, record: &JsValue, at: f64) -> Result<(), Damaged> {
+    fn prepare_handoff(&self, record: &JsValue, at: f64, mode: Mode) -> Result<Apply, Refusal> {
         let id = self.require_intent(record)?;
-        self.require_held(&id)?;
+        let intent = self.intent(&id)?;
+        require_held(intent, mode)?;
         let run = require_id(record.get("run"), "run")?;
         let handoff_id = require_id(record.get("handoff_id"), "handoff id")?;
         let hash = require_hex(record.get("hash"), Hex::Hash, "hash")?;
-        let intent = self.intent_mut(&id)?;
-        if !intent.hashes.iter().any(|known| known.hash == hash) {
+        let Some(entry) = intent.hashes.iter().find(|known| known.hash == hash) else {
             return Err(invalid(format_args!(
                 "{hash} is not committed to intent {id}"
+            )));
+        };
+        if mode.live && entry.raw.is_none() {
+            return Err(invalid(format_args!(
+                "the bytes of {hash} are no longer kept; send the latest"
             )));
         }
         if intent.handoff(&handoff_id).is_some() {
@@ -1014,39 +1177,73 @@ impl Intents {
                 "handoff {handoff_id} is already recorded"
             )));
         }
-        intent.handoffs.push(Handoff {
-            id: handoff_id,
-            hash,
+        if mode.live && intent.open().count() >= self.limits.open_handoffs_per_intent {
+            return Err(refusal(
+                "INTENT_HANDOFF_LIMIT",
+                "This payment is already being sent. Wait for that to finish.",
+            ));
+        }
+        Ok(Apply::Handoff {
+            id,
+            handoff: Handoff {
+                id: handoff_id,
+                hash,
+                at,
+                run,
+                outcome: None,
+                record: record.clone(),
+            },
             at,
-            run,
-            outcome: None,
-            record: record.clone(),
-        });
-        intent.updated_at = at;
-        Ok(())
+        })
     }
 
-    fn outcome(&mut self, record: &JsValue, at: f64) -> Result<(), Damaged> {
+    /// Live, an outcome the store no longer owes is ignored (none): one
+    /// for an unknown or closed intent, for a handoff already folded into
+    /// the summary, or a second one for the same handoff.
+    fn prepare_outcome(
+        &self,
+        record: &JsValue,
+        at: f64,
+        mode: Mode,
+    ) -> Result<Option<Apply>, Refusal> {
         let id = require_id(record.get("intent_id"), "intent id")?;
         let run = require_id(record.get("run"), "run")?;
-        let Some(intent) = self.by_id.get_mut(&id) else {
+        let intent = self.by_id.get(&id);
+        // `intent?.handoffs.get(requireId(…))`: the id is checked only for a
+        // known intent.
+        let handoff_id = match intent {
+            Some(_) => Some(require_id(record.get("handoff_id"), "handoff id")?),
+            None => None,
+        };
+        let handoff = intent
+            .zip(handoff_id.as_ref())
+            .and_then(|(i, h)| i.handoff(h));
+        let (Some(intent), Some(handoff_id)) = (intent, &handoff_id) else {
+            if mode.live {
+                return Ok(None);
+            }
             return Err(invalid(format_args!("an outcome for unknown intent {id}")));
         };
-        let handoff_id = require_id(record.get("handoff_id"), "handoff id")?;
-        if intent.state != State::Held {
-            return Err(invalid(format_args!(
-                "an outcome for {} intent {id}",
-                intent.state.name()
-            )));
-        }
-        let Some(handoff) = intent.handoffs.iter_mut().find(|h| h.id == handoff_id) else {
-            return Err(invalid(format_args!("unknown handoff {handoff_id}")));
-        };
-        if handoff.outcome.is_some() {
+        if intent.state != State::Held || handoff.is_none_or(|h| h.outcome.is_some()) {
+            if mode.live {
+                return Ok(None);
+            }
+            if intent.state != State::Held {
+                return Err(invalid(format_args!(
+                    "an outcome for {} intent {id}",
+                    intent.state.name()
+                )));
+            }
+            if handoff.is_none() {
+                return Err(invalid(format_args!("unknown handoff {handoff_id}")));
+            }
             return Err(invalid(format_args!(
                 "handoff {handoff_id} already has its outcome"
             )));
         }
+        let Some(handoff) = handoff else {
+            return Ok(None);
+        };
         if handoff.hash != require_hex(record.get("hash"), Hex::Hash, "hash")? {
             return Err(invalid(format_args!(
                 "handoff {handoff_id} was of another hash"
@@ -1074,21 +1271,25 @@ impl Intents {
             }
         }
         let [source, reason_class] = texts;
-        handoff.outcome = Some(Outcome {
-            outcome,
-            source,
-            reason_class,
+        Ok(Some(Apply::Outcome {
+            id,
+            handoff: handoff_id.clone(),
+            outcome: Outcome {
+                outcome,
+                source,
+                reason_class,
+                at,
+                run,
+            },
             at,
-            run,
-        });
-        intent.updated_at = at;
-        Ok(())
+        }))
     }
 
-    fn settle(&mut self, record: &JsValue, at: f64) -> Result<(), Damaged> {
+    fn prepare_settle(&self, record: &JsValue, at: f64, mode: Mode) -> Result<Apply, Refusal> {
         let id = self.require_intent(record)?;
         require_id(record.get("run"), "run")?;
-        self.require_held(&id)?;
+        let intent = self.intent(&id)?;
+        require_held(intent, mode)?;
         let label = one_of(record.get("label"), &LABELS).ok_or_else(|| invalid("bad label"))?;
         let mut hash = None;
         if label == "taken" {
@@ -1097,22 +1298,24 @@ impl Intents {
             }
         } else {
             let h = require_hex(record.get("hash"), Hex::Hash, "hash")?;
-            if !self.intent(&id)?.hashes.iter().any(|entry| entry.hash == h) {
+            if !intent.hashes.iter().any(|entry| entry.hash == h) {
                 return Err(invalid(format_args!("{h} is not committed to intent {id}")));
             }
             hash = Some(h);
         }
         let block = require_count(record.get("block"), "block")?;
-        let intent = self.intent_mut(&id)?;
-        intent.state = State::Settled;
-        intent.settlement = Some(Settlement {
-            label,
-            hash,
-            block: Some(block),
+        Ok(Apply::Close {
+            id,
+            state: State::Settled,
+            settlement: Some(Settlement {
+                label,
+                hash,
+                block: Some(block),
+                at,
+            }),
+            block: None,
             at,
-        });
-        intent.close(at);
-        Ok(())
+        })
     }
 
     /// `voidRefusal`: why a void of `run` can't void the intent, or none.
@@ -1160,47 +1363,145 @@ impl Intents {
             .map(|above| format!("held intent {} has a higher nonce", above.id))
     }
 
-    fn void(&mut self, record: &JsValue, at: f64) -> Result<(), Damaged> {
+    fn prepare_void(&self, record: &JsValue, at: f64, mode: Mode) -> Result<Apply, Refusal> {
         let id = self.require_intent(record)?;
         let run = require_id(record.get("run"), "run")?;
-        self.require_held(&id)?;
-        if let Some(refusal) = self.refusal(self.intent(&id)?, &run, false) {
-            return Err(invalid(format_args!("void of intent {id}: {refusal}")));
+        if mode.live && !mode.lock {
+            return Err(refusal(
+                "INTENT_LOCK_REQUIRED",
+                "Voiding a payment needs its account's reservation lock.",
+            ));
         }
-        let intent = self.intent_mut(&id)?;
-        intent.state = State::Voided;
-        intent.voided_at = Some(at);
-        intent.close(at);
-        Ok(())
+        let intent = self.intent(&id)?;
+        require_held(intent, mode)?;
+        if let Some(why) = self.refusal(intent, &run, mode.live) {
+            if !mode.live {
+                return Err(invalid(format_args!("void of intent {id}: {why}")));
+            }
+            return Err(refusal(
+                "INTENT_VOID_REFUSED",
+                format!("This payment can't be voided: {why}."),
+            ));
+        }
+        Ok(Apply::Close {
+            id,
+            state: State::Voided,
+            settlement: None,
+            block: None,
+            at,
+        })
     }
 
-    fn retire(&mut self, record: &JsValue, at: f64) -> Result<(), Damaged> {
+    fn prepare_retire(&self, record: &JsValue, at: f64, mode: Mode) -> Result<Apply, Refusal> {
         let id = self.require_intent(record)?;
         require_id(record.get("run"), "run")?;
-        self.require_held(&id)?;
+        if mode.live && !mode.lock {
+            return Err(refusal(
+                "INTENT_LOCK_REQUIRED",
+                "Closing a payment needs its account's reservation lock.",
+            ));
+        }
+        require_held(self.intent(&id)?, mode)?;
         let block = require_count(record.get("block"), "block")?;
-        let intent = self.intent_mut(&id)?;
-        intent.state = State::Retired;
-        intent.retirement = Some((Some(block), at));
-        intent.close(at);
-        Ok(())
+        Ok(Apply::Close {
+            id,
+            state: State::Retired,
+            settlement: None,
+            block: Some(block),
+            at,
+        })
     }
 
     /// The tracker's state; nothing else changes, `updatedAt` included.
-    fn track(&mut self, record: &JsValue) -> Result<(), Damaged> {
+    fn prepare_track(&self, record: &JsValue, mode: Mode) -> Result<Apply, Refusal> {
         let id = self.require_intent(record)?;
         require_id(record.get("run"), "run")?;
-        self.require_held(&id)?;
+        require_held(self.intent(&id)?, mode)?;
         let (bracket, unread_since) = track_of(record)?;
-        let intent = self.intent_mut(&id)?;
-        intent.bracket = bracket;
-        intent.unread_since = unread_since;
-        Ok(())
+        Ok(Apply::Track {
+            id,
+            bracket,
+            unread_since,
+        })
+    }
+
+    /// Applies a checked record (what the reference's `prepare*` returns),
+    /// to the intent it names.
+    fn apply_one(&mut self, apply: Apply) -> JsString {
+        let (id, close) = match apply {
+            Apply::Original(intent) => {
+                let mut intent = *intent;
+                self.sequence += 1;
+                intent.sequence = self.sequence;
+                // Sized afresh: the reference admits a copy of it.
+                intent.sized.set(None);
+                let id = intent.id.clone();
+                self.by_id.insert(id.clone(), intent);
+                return id;
+            }
+            Apply::Replacement { id, entry, at } => {
+                if let Some(intent) = self.by_id.get_mut(&id) {
+                    intent.hashes.push(entry);
+                    intent.updated_at = at;
+                }
+                return id;
+            }
+            Apply::Handoff { id, handoff, at } => {
+                if let Some(intent) = self.by_id.get_mut(&id) {
+                    intent.handoffs.push(handoff);
+                    intent.updated_at = at;
+                }
+                return id;
+            }
+            Apply::Outcome {
+                id,
+                handoff,
+                outcome,
+                at,
+            } => {
+                if let Some(intent) = self.by_id.get_mut(&id) {
+                    if let Some(h) = intent.handoffs.iter_mut().find(|h| h.id == handoff) {
+                        h.outcome = Some(outcome);
+                    }
+                    intent.updated_at = at;
+                }
+                return id;
+            }
+            Apply::Track {
+                id,
+                bracket,
+                unread_since,
+            } => {
+                if let Some(intent) = self.by_id.get_mut(&id) {
+                    intent.bracket = bracket;
+                    intent.unread_since = unread_since;
+                }
+                return id;
+            }
+            Apply::Close {
+                id,
+                state,
+                settlement,
+                block,
+                at,
+            } => (id, (state, settlement, block, at)),
+        };
+        let (state, settlement, block, at) = close;
+        if let Some(intent) = self.by_id.get_mut(&id) {
+            intent.state = state;
+            match state {
+                State::Settled => intent.settlement = settlement,
+                State::Voided => intent.voided_at = Some(at),
+                _ => intent.retirement = Some((block, at)),
+            }
+            intent.close(at);
+        }
+        id
     }
 
     /// `recoverSigners`: the bytes a held intent keeps are signed by its
     /// sender, checked in the order the load met them.
-    fn recover_signers(&self, unrecovered: &[(JsString, usize)]) -> Result<(), Damaged> {
+    fn recover_signers(&self, unrecovered: &[(JsString, usize)]) -> Result<(), Refusal> {
         for (id, index) in unrecovered {
             let intent = self.intent(id)?;
             let Some(raw) = intent.hashes.get(*index).and_then(|e| e.raw.as_deref()) else {
@@ -1234,7 +1535,14 @@ impl Intents {
     // --- Compaction --------------------------------------------------------
 
     fn snapshot_record(intent: &Intent, sizing: bool) -> JsValue {
-        let latest = intent.hashes.last();
+        Self::snapshot_with(intent, sizing, None)
+    }
+
+    /// `snapshotRecord(intent, { sizing, extra })`: with `extra`, as if it
+    /// were its latest hash.
+    fn snapshot_with(intent: &Intent, sizing: bool, extra: Option<&Entry>) -> JsValue {
+        let hashes: Vec<&Entry> = intent.hashes.iter().chain(extra).collect();
+        let latest = hashes.last().copied();
         let (count, possibly_sent) = if sizing {
             (MAX_SAFE_INTEGER, false)
         } else {
@@ -1255,8 +1563,7 @@ impl Intents {
             (
                 "hashes",
                 JsValue::Array(
-                    intent
-                        .hashes
+                    hashes
                         .iter()
                         .map(|e| {
                             object(vec![
@@ -1356,12 +1663,38 @@ impl Intents {
 
     // --- Budget ------------------------------------------------------------
 
+    /// `snapshotBytes`: a held intent's snapshot at its widest, cached
+    /// until it has another hash; with `extra`, as if it had that one too.
+    fn snapshot_bytes(intent: &Intent, extra: Option<&Entry>) -> usize {
+        if extra.is_some() {
+            return line_bytes(&Self::snapshot_with(intent, true, extra));
+        }
+        match intent.sized.get() {
+            Some((hashes, bytes)) if hashes == intent.hashes.len() => bytes,
+            _ => {
+                let bytes = line_bytes(&Self::snapshot_record(intent, true));
+                intent.sized.set(Some((intent.hashes.len(), bytes)));
+                bytes
+            }
+        }
+    }
+
     /// `intentBudget`: the held intent's widest snapshot, its terminal line,
-    /// and its open handoffs with their outcomes, or one such pair.
-    fn intent_budget(intent: &Intent) -> usize {
+    /// and its open handoffs with their outcomes, or one such pair. `extra`
+    /// and `extra_open` count a hash and an open handoff (its line's bytes)
+    /// it doesn't have yet.
+    fn intent_budget(intent: &Intent, extra: Option<&Entry>, extra_open: usize) -> usize {
         let outcome = outcome_line_max();
-        let open: usize = intent.open().map(|h| line_bytes(&h.record) + outcome).sum();
-        line_bytes(&Self::snapshot_record(intent, true))
+        let open: usize = intent
+            .open()
+            .map(|h| line_bytes(&h.record) + outcome)
+            .sum::<usize>()
+            + if extra_open > 0 {
+                extra_open + outcome
+            } else {
+                0
+            };
+        Self::snapshot_bytes(intent, extra)
             + terminal_line_max()
             + (handoff_line_max() + outcome).max(open)
     }
@@ -1369,7 +1702,10 @@ impl Intents {
     /// `budget()`: what compaction would write at its widest, plus what is
     /// owed and each held intent's headroom.
     pub fn budget(&self) -> usize {
-        let held: usize = self.held_intents().map(Self::intent_budget).sum();
+        let held: usize = self
+            .held_intents()
+            .map(|i| Self::intent_budget(i, None, 0))
+            .sum();
         let tombstones: usize = self
             .kept_closed()
             .into_iter()
