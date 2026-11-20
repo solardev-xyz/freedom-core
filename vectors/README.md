@@ -134,7 +134,7 @@ no rebuild.
 | `generator/keystore.js` | The key-store helper's requests, the answers main relays, and their outcomes, used by `generate.js`. |
 | `generator/hpke.js` | RFC 9180's HPKE base mode composed from `node:crypto`'s primitives, used by `keystore.js` and pinned to the RFC's vectors by `check.test.js`. |
 | `generator/check.test.js` | Integration tests that damage copies of the oracle outputs and require `check` to fail. |
-| `generator/interop.test.js` | Design 0013's interop harness: the profiles reference's `createProfile` and `renameProfile` against `freedom-cored`'s catalog subcommands on one app root, and the catalog's write lock held both ways. Needs `FREEDOM_CORED`, a `testhooks` build. |
+| `generator/interop.test.js` | Design 0013's interop harness: the profiles reference's `createProfile` and `renameProfile` against `freedom-cored`'s catalog subcommands on one app root, and the catalog's write lock held both ways; the JSON Lines journal read both ways (`test-journal`); and `payment-history.sqlite` read both ways, the stores reference's `payment-history.js` against `test-payments`, which runs the `payments.*` methods and the `x402-receipts.json` import. Needs `FREEDOM_CORED`, a `testhooks` build. |
 | `generator/interop-actor.js` | The harness's reference processes: a writer loop, and a holder of the write lock. |
 | `generator/downgrade-actor.js` | Design 0013's downgrade runs (PRF-5c-2): the stores reference's `identity-manager.js`, over its own core client and vault backend, reading a profile through the previous core release. `freedom-cored`'s `tests/quick_unlock.rs` runs it when `FREEDOM_CORED_PREVIOUS` (that release's binary) and `FREEDOM_BROWSER_STORES_CHECKOUT` are set. |
 
@@ -184,7 +184,9 @@ node vectors/generator/generate.js check --freedom-browser /root/herdr/freedom-b
   --stores-browser /root/herdr/freedom-browser-wt/stores-reference
 node --test vectors/generator/check.test.js
 cargo build -p freedom-cored --features testhooks
-FREEDOM_CORED=target/debug/freedom-cored node --test vectors/generator/interop.test.js
+FREEDOM_CORED=target/debug/freedom-cored \
+  FREEDOM_BROWSER_STORES_CHECKOUT=/root/herdr/freedom-browser-wt/stores-reference \
+  node --test vectors/generator/interop.test.js
 # The downgrade runs: cored-v0.22.0's linux-amd64 binary from its release,
 # checked against the release's SHA256SUMS (CI pins that file's digest).
 FREEDOM_CORED_PREVIOUS=/path/to/v0.22.0/freedom-cored \

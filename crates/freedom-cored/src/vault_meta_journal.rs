@@ -676,7 +676,18 @@ pub fn recover(dir: &Path, secrets: Option<&Secrets>) -> std::io::Result<()> {
 /// The journaled vault of a writer's record still there, read as the vault
 /// is read: the target once installed, else its staged file. For
 /// `vault.reconcile` while the install can't finish.
+///
+/// None while a vault delete's journal is still there: recovery finishes
+/// the delete first, and then sets this record aside, its `before` vault
+/// gone (design 0013, "The delete's journal stays separate"). So the staged
+/// vault is no committed result to report, and reconcile answers the read's
+/// `storage` until recovery has run.
 pub fn journaled_vault(dir: &Path) -> std::io::Result<Option<String>> {
+    match std::fs::symlink_metadata(dir.join(crate::delete_journal::JOURNAL)) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Ok(_) => return Ok(None),
+        Err(e) => return Err(e),
+    }
     let Some(plan) = plan_in(dir)? else {
         return Ok(None);
     };

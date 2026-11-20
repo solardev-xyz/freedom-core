@@ -403,6 +403,50 @@ pub fn append(entry: &JsValue, now_ms: f64) -> Result<Statement, Thrown> {
     } else {
         entry
     };
+    let (kind, chain_id) = checked_entry(entry)?;
+    let created_at = JsValue::Number(finite(prop(entry, "createdAt")?).unwrap_or(now_ms));
+    let status = prop(entry, "status")?;
+    let status = if status.truthy() {
+        status.clone()
+    } else if kind.as_str() == Some(X402) {
+        JsValue::string("settled")
+    } else {
+        JsValue::string(PENDING)
+    };
+    let confirmed_at = if is_final(&status) {
+        created_at.clone()
+    } else {
+        JsValue::Null
+    };
+    let metadata = stringified(prop(entry, "metadata")?);
+    insert(
+        entry,
+        &[kind, chain_id],
+        &status,
+        &created_at,
+        &confirmed_at,
+        &metadata,
+    )
+}
+
+/// `append(entry)`'s checks, which come before its insert, and so before
+/// the reference's first `getDb()` (the database's first open, and its
+/// import): a refusal here opens nothing. `entry` is `undefined` when
+/// absent (the default `{}`).
+pub fn append_checks(entry: &JsValue) -> Result<(), Thrown> {
+    let empty = JsValue::Object(Vec::new());
+    let entry = if matches!(entry, JsValue::Undefined) {
+        &empty
+    } else {
+        entry
+    };
+    checked_entry(entry).map(drop)
+}
+
+/// `append`'s three checks on `entry` (its default applied): a known kind,
+/// a finite `chainId`, a digit-string `amount`. The kind and `chainId`,
+/// for the insert.
+fn checked_entry(entry: &JsValue) -> Result<(&JsValue, &JsValue), Thrown> {
     let kind = prop(entry, "kind")?;
     if !kind
         .as_js_string()
@@ -428,29 +472,7 @@ pub fn append(entry: &JsValue, now_ms: f64) -> Result<Statement, Thrown> {
             "payment-history: amount must be a digit string",
         ));
     }
-    let created_at = JsValue::Number(finite(prop(entry, "createdAt")?).unwrap_or(now_ms));
-    let status = prop(entry, "status")?;
-    let status = if status.truthy() {
-        status.clone()
-    } else if kind.as_str() == Some(X402) {
-        JsValue::string("settled")
-    } else {
-        JsValue::string(PENDING)
-    };
-    let confirmed_at = if is_final(&status) {
-        created_at.clone()
-    } else {
-        JsValue::Null
-    };
-    let metadata = stringified(prop(entry, "metadata")?);
-    insert(
-        entry,
-        &[kind, chain_id],
-        &status,
-        &created_at,
-        &confirmed_at,
-        &metadata,
-    )
+    Ok((kind, chain_id))
 }
 
 /// `insertRow(row)`: `row` holds the entry's other fields.
@@ -481,6 +503,19 @@ fn insert(
         or_null(metadata),
     ];
     statement(INSERT_SQL, &args, 15)
+}
+
+/// `update(id, patch)`'s check before its statement's `getDb()`: reading
+/// `patch.status`, which throws on a `null` patch, so that refusal opens
+/// nothing. `patch` is `undefined` when absent (the default `{}`).
+pub fn update_checks(patch: &JsValue) -> Result<(), Thrown> {
+    let empty = JsValue::Object(Vec::new());
+    let patch = if matches!(patch, JsValue::Undefined) {
+        &empty
+    } else {
+        patch
+    };
+    prop(patch, "status").map(drop)
 }
 
 /// `update(id, patch)`'s statement. `patch` is `undefined` when absent (the
@@ -527,7 +562,8 @@ fn object(props: Vec<(&str, JsValue)>) -> JsValue {
 }
 
 /// `markConfirmed(id, receipt)`'s patch, for [`update`]. `receipt` is
-/// `undefined` when absent.
+/// `undefined` when absent. Its refusal (a `null` receipt) comes before the
+/// reference's first `getDb()`.
 pub fn confirmed_patch(receipt: &JsValue) -> Result<JsValue, Thrown> {
     let empty = JsValue::Object(Vec::new());
     let receipt = if matches!(receipt, JsValue::Undefined) {
@@ -551,6 +587,8 @@ pub fn confirmed_patch(receipt: &JsValue) -> Result<JsValue, Thrown> {
 
 /// `markFailed(id, { reason, gasUsed, gasPrice })`'s patch, for [`update`]:
 /// a reason replaces the row's metadata. `info` is `undefined` when absent.
+/// Its refusal (a `null` info) comes before the reference's first
+/// `getDb()`.
 pub fn failed_patch(info: &JsValue) -> Result<JsValue, Thrown> {
     let destructure = |key: &str| match info {
         JsValue::Null => Err(Thrown::type_error(format!(
@@ -781,6 +819,19 @@ fn where_clause<'v>(filters: &Filters<'v>) -> (String, Vec<&'v JsValue>) {
         format!("WHERE {}", terms.join(" AND "))
     };
     (clause, params)
+}
+
+/// `sanitizeFilters(filters)`, which `getRecent` and `getCount` run before
+/// their `getDb()`: it throws on `null` filters, so that refusal opens
+/// nothing. `filters` is `undefined` when absent (the default `{}`).
+pub fn filters_checks(filters_given: &JsValue) -> Result<(), Thrown> {
+    let empty = JsValue::Object(Vec::new());
+    let raw = if matches!(filters_given, JsValue::Undefined) {
+        &empty
+    } else {
+        filters_given
+    };
+    filters(raw).map(drop)
 }
 
 /// `getRecent(filters)`'s statement: `filters` is `undefined` when absent

@@ -305,7 +305,7 @@ fn an_import_is_one_transaction() {
 
 /// `{ blob: hex }`, the generator's `Buffer`, as a record answers it: `null`
 /// (design 0013's `payments-json-values`).
-fn nulled(value: &JsValue) -> JsValue {
+pub(crate) fn nulled(value: &JsValue) -> JsValue {
     match value {
         JsValue::Object(props) if props.len() == 1 && props[0].0 == *"blob" => JsValue::Null,
         JsValue::Object(props) => {
@@ -318,7 +318,7 @@ fn nulled(value: &JsValue) -> JsValue {
 
 /// Puts `rows` (the generator's `[typeof, value]` cells) in the table as
 /// they are, BLOBs included.
-fn insert_cells(store: &Payments, rows: &JsValue) {
+pub(crate) fn insert_cells(store: &Payments, rows: &JsValue) {
     let sql = format!(
         "INSERT INTO payments ({}) VALUES ({})",
         COLUMNS.join(", "),

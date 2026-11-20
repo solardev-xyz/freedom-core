@@ -2438,6 +2438,11 @@ fn a_vault_delete_journal_finishes_before_a_metadata_record() {
         json!({ "password_b64": b64(NEW_PASSWORD) }),
     );
     assert_eq!(error_code(&verified), "storage", "{verified}");
+    // Nor does reconcile answer from the staged vault: once the delete
+    // finishes, the record is set aside and that vault never installed.
+    let before = sha256_hex(&old_vault);
+    let reconciled = MetaOp::Import.reconcile(&mut main, Some(&before));
+    assert_eq!(error_code(&reconciled), "storage", "{reconciled}");
     held(&main, "while the delete can't finish");
     // Cleared: the delete finishes, then the record is set aside (a vault
     // job's recovery; `accounts.*` would normalize the metadata).
@@ -2456,6 +2461,11 @@ fn a_vault_delete_journal_finishes_before_a_metadata_record() {
     );
     assert_eq!(main.read(META).unwrap(), OLD_META.as_bytes());
     assert!(main.entries().is_empty(), "{:?}", main.entries());
+    let reconciled = MetaOp::Import.reconcile(&mut main, Some(&before));
+    assert_eq!(
+        reconciled["result"]["status"], "not_committed",
+        "{reconciled}"
+    );
     main.start(&[]);
     assert!(
         main.read("identity-vault.json").is_none(),
