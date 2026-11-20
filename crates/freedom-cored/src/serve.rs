@@ -834,10 +834,20 @@ struct HelloParams {
     /// #85). Optional.
     #[serde(default)]
     node_roots: Option<NodeRoots>,
-    /// The profile's `userData`, as an absolute path, where the four
-    /// permission files live (design 0012, "The files"). Required.
+    /// The Freedom root, as an absolute path: where the four permission
+    /// files (design 0012, "The files") and the set-A stores live. It
+    /// equals the profile's `userData` until 0013's move (PRF-9), and is
+    /// `<userData>/freedom/` after it. Required.
     #[serde(default)]
     grant_root: Option<String>,
+    /// The profile's `userData`, as an absolute path: where the reference
+    /// keeps `x402-receipts.json` (`app.getPath('userData')`), which the
+    /// payment history imports once (design 0013, "Payment history"). It
+    /// stays at the profile's root after the move. Optional: absent means
+    /// `grant_root`, which equals it before PRF-9. A core before PRF-8-lite
+    /// ignores it, as it ignores every hello member it doesn't know.
+    #[serde(default)]
+    user_data_dir: Option<String>,
     /// The permission files main has handed to the core (`dapp`, `swarm`,
     /// `radicle`, `x402`): the core writes these, and only reads the
     /// others.
@@ -903,6 +913,21 @@ fn grant_files(params: &HelloParams) -> Result<(PathBuf, Vec<StoreKind>), &'stat
         }
     }
     Ok((root, moved))
+}
+
+/// The hello's `user_data_dir`, an absolute, normalized path, or `None`
+/// when absent. A relative one, or one with `..` in it, makes the hello
+/// malformed, as for `grant_root` (design 0013, PRF-8-lite).
+fn user_data_dir(params: &HelloParams) -> Result<Option<PathBuf>, &'static str> {
+    params
+        .user_data_dir
+        .as_deref()
+        .map(|dir| {
+            Some(PathBuf::from(dir))
+                .filter(|dir| crate::journal::normalized_absolute(dir))
+                .ok_or("core.hello's user_data_dir must be an absolute path")
+        })
+        .transpose()
 }
 
 #[derive(Deserialize)]
@@ -1703,6 +1728,13 @@ impl Core {
                 return Flow::Exit(Exit::Protocol);
             }
         };
+        let user_data_dir = match user_data_dir(&params) {
+            Ok(dir) => dir,
+            Err(message) => {
+                let _ = self.error(id, ErrorBody::new(ErrorCode::InvalidArgument, message));
+                return Flow::Exit(Exit::Protocol);
+            }
+        };
         if self.hello_done || self.pending_hello.is_some() {
             return self.error(
                 id,
@@ -1722,9 +1754,12 @@ impl Core {
                 "vault_meta" => self.vault.configure_vault_meta(),
                 "rpc_api_keys" => self.vault.configure_rpc_keys(root.clone()),
                 "safe_pending" | "intents" => true,
-                // Opened at its first request, never before the name.
+                // Opened at its first request, never before the name. The
+                // database under the Freedom root; `x402-receipts.json`
+                // under `userData`.
                 "payments" => {
-                    self.vault.configure_payments(root.clone());
+                    let import_root = user_data_dir.clone().unwrap_or_else(|| root.clone());
+                    self.vault.configure_payments(root.clone(), import_root);
                     true
                 }
                 _ => false,

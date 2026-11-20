@@ -111,6 +111,90 @@ fn the_handover() {
     assert!(grant_root.join("x402-receipts.json.migrated").exists());
 }
 
+/// The hello's `user_data_dir` (design 0013, PRF-8-lite): the receipts
+/// there are imported and renamed there, the database stays under
+/// `grant_root`, and a file at `grant_root` is left unread. Without it, the
+/// import reads `grant_root`, as [`the_handover`] shows.
+#[test]
+fn the_import_reads_user_data_dir() {
+    let (_root, data, locks) = common::dirs();
+    let mut core = common::spawn("serve", &data, &locks, &[]);
+    let grant_root = core.grant_root.join("freedom");
+    let user_data = core.grant_root.clone();
+    std::fs::create_dir_all(&grant_root).unwrap();
+    let receipt = |id: &str| {
+        format!(
+            r#"[{{"id":"{id}","settledAt":1699000000,"status":"settled","chainId":8453,"amount":"500","origin":"https://x.example","url":"https://x.example/a"}}]"#
+        )
+    };
+    std::fs::write(user_data.join("x402-receipts.json"), receipt("profile")).unwrap();
+    std::fs::write(grant_root.join("x402-receipts.json"), receipt("freedom")).unwrap();
+    let hello = core.call_shell(
+        1,
+        "core.hello",
+        json!({
+            "protocol": 2, "shell_version": "test", "auto_lock_ms": 900_000,
+            "frames": ["stream"], "grant_root": grant_root,
+            "user_data_dir": user_data, "store_moved": ["payments"],
+        }),
+    );
+    assert_eq!(
+        hello["result"]["store_moved"],
+        json!(["payments"]),
+        "{hello}"
+    );
+    let reply = call(&mut core, "chrome", "payments.get_recent", json!({}));
+    let payments = reply["result"]["payments"].as_array().unwrap();
+    assert_eq!(payments.len(), 1, "{reply}");
+    assert_eq!(payments[0]["metadata"]["legacyId"], "profile");
+    assert!(grant_root.join("payment-history.sqlite").exists());
+    assert!(!user_data.join("payment-history.sqlite").exists());
+    assert!(!user_data.join("x402-receipts.json").exists());
+    assert!(user_data.join("x402-receipts.json.migrated").exists());
+    assert_eq!(
+        std::fs::read_to_string(grant_root.join("x402-receipts.json")).unwrap(),
+        receipt("freedom")
+    );
+    assert!(!grant_root.join("x402-receipts.json.migrated").exists());
+}
+
+/// A `user_data_dir` that isn't an absolute path free of `..`, or isn't a
+/// string, makes the hello malformed: `invalid_argument`, and the core
+/// exits 76, whether or not `payments` is named.
+#[test]
+fn a_relative_user_data_dir_refuses_the_hello() {
+    let (_root, data, locks) = common::dirs();
+    let grant_root = data.parent().unwrap().join("userData");
+    for (dir, stores) in [
+        (json!("relative/userData"), json!(["payments"])),
+        (json!("relative/userData"), json!([])),
+        (
+            json!(format!("{}/../userData", grant_root.display())),
+            json!(["payments"]),
+        ),
+        (json!(""), json!([])),
+        (json!(7), json!(["payments"])),
+    ] {
+        let mut core = common::spawn("serve", &data, &locks, &[]);
+        let hello = core.call_shell(
+            1,
+            "core.hello",
+            json!({
+                "protocol": 2, "shell_version": "test", "auto_lock_ms": 900_000,
+                "frames": ["stream"], "grant_root": grant_root,
+                "user_data_dir": dir, "store_moved": stores,
+            }),
+        );
+        assert_eq!(code(&hello), "invalid_argument", "{dir}: {hello}");
+        assert_eq!(
+            core.exit_code(std::time::Duration::from_secs(5)),
+            76,
+            "{dir}"
+        );
+    }
+    assert!(!grant_root.join("payment-history.sqlite").exists());
+}
+
 /// Each method's callers: the chrome reads and clears, main writes, a page
 /// reaches none; and the answers' shapes on the wire.
 #[test]

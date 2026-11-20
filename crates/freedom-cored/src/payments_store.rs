@@ -5,7 +5,8 @@
 //! `store_moved`, and opens `payment-history.sqlite` only after that, at
 //! the first request (0013, "One writer per store"), as the reference's
 //! `getDb` opens it at its first use. That first open runs the one-shot
-//! import of `x402-receipts.json` ([`Store::import`]). A request the
+//! import of `x402-receipts.json` ([`Store::import`]), from the hello's
+//! `user_data_dir`, or `grant_root` without it. A request the
 //! reference function refuses before its first `getDb` comes before it
 //! ([`Store::checked`]), so it opens nothing and imports nothing.
 
@@ -40,7 +41,8 @@ pub const METHODS: &[&str] = &[
 /// The database, at the Freedom root (`getFreedomDataPath`).
 pub const DB_FILE: &str = "payment-history.sqlite";
 /// The legacy receipts, at the profile's `userData` root
-/// (`app.getPath('userData')`): before PRF-9, the hello's `grant_root`.
+/// (`app.getPath('userData')`): the hello's `user_data_dir`, or its
+/// `grant_root` without one, which equals `userData` before PRF-9.
 pub const LEGACY_FILE: &str = "x402-receipts.json";
 /// The legacy file's name once imported.
 pub const MIGRATED_FILE: &str = "x402-receipts.json.migrated";
@@ -72,10 +74,19 @@ pub enum Legacy {
 /// its one connection once opened.
 #[derive(Default)]
 pub struct Store {
-    /// Set by `core.hello` naming `payments`: the root of the database and
-    /// of `x402-receipts.json`. `None`: every method answers `not_moved`.
-    root: Option<PathBuf>,
+    /// Set by `core.hello` naming `payments`: where the database and
+    /// `x402-receipts.json` are. `None`: every method answers `not_moved`.
+    roots: Option<Roots>,
     open: Option<Payments>,
+}
+
+/// Where [`Store`]'s files are.
+struct Roots {
+    /// The database's: the Freedom root, the hello's `grant_root`.
+    db: PathBuf,
+    /// `x402-receipts.json`'s and its `.migrated`'s: the profile's
+    /// `userData`, the hello's `user_data_dir`, or `grant_root` without it.
+    import: PathBuf,
 }
 
 impl Store {
@@ -84,9 +95,13 @@ impl Store {
     }
 
     /// The hello named `payments`: the core serves the methods, with the
-    /// database under `root`. Nothing is opened yet.
-    pub fn configure(&mut self, root: PathBuf) {
-        self.root = Some(root);
+    /// database under `root` and `x402-receipts.json` read under
+    /// `import_root`. Nothing is opened yet.
+    pub fn configure(&mut self, root: PathBuf, import_root: PathBuf) {
+        self.roots = Some(Roots {
+            db: root,
+            import: import_root,
+        });
     }
 
     /// A `payments.*` request: its result, as JSON text.
@@ -99,7 +114,7 @@ impl Store {
         if !METHODS.contains(&method) {
             return Err(ErrorBody::new(ErrorCode::UnknownMethod, "Unknown method"));
         }
-        let Some(root) = &self.root else {
+        let Some(roots) = &self.roots else {
             return Err(ErrorBody::new(
                 ErrorCode::NotMoved,
                 "main still writes the payment history (payments isn't in store_moved)",
@@ -121,7 +136,7 @@ impl Store {
         )]
         let now = now_ms as f64;
         Store::checked(method, arg)?;
-        let payments = Store::opened(root, &mut self.open, || now)?;
+        let payments = Store::opened(roots, &mut self.open, || now)?;
         let answer = |key: &str, value: &JsValue| format!("{{\"{key}\":{}}}", value.stringify());
         let text = match method {
             "payments.append" => answer("payment", &payments.append(arg("entry"), now)?),
@@ -201,16 +216,17 @@ impl Store {
     /// each entry the import reads it for. A failed open is tried again at
     /// the next request.
     fn opened<'a>(
-        root: &Path,
+        roots: &Roots,
         open: &'a mut Option<Payments>,
         clock: impl FnMut() -> f64,
     ) -> Result<&'a mut Payments, ErrorBody> {
         match open {
             Some(payments) => Ok(payments),
             None => {
-                let mut payments =
-                    Payments::new(sqlite::open(&root.join(DB_FILE), &SCHEMA).map_err(open_failed)?);
-                Store::import(root, &mut payments, clock);
+                let mut payments = Payments::new(
+                    sqlite::open(&roots.db.join(DB_FILE), &SCHEMA).map_err(open_failed)?,
+                );
+                Store::import(&roots.import, &mut payments, clock);
                 Ok(open.insert(payments))
             }
         }
