@@ -200,6 +200,20 @@ const CAPABILITIES: &[&str] = &[
     "secrets.rpc_api_key_status",
     "secrets.set_rpc_api_key",
     "secrets.remove_rpc_api_key",
+    // Design 0013, "`vault-meta.json`" (PRF-5c-1): the wallet list. Reads
+    // before `vault_meta` is in `store_moved`; writes from then on.
+    "accounts.list",
+    "accounts.meta",
+    "accounts.active",
+    "accounts.add_mnemonic",
+    "accounts.add_ledger",
+    "accounts.add_remote",
+    "accounts.record_address_check",
+    "accounts.add_safe",
+    "accounts.mark_safe_deployed",
+    "accounts.set_active",
+    "accounts.rename",
+    "accounts.remove",
     "nodes.write_identity",
     "nodes.op_status",
     "nodes.seal_radicle_key",
@@ -815,7 +829,7 @@ const STORES: &[&str] = &[
 ];
 
 /// The stores this core serves once named: the echo holds only these.
-const STORES_SERVED: &[&str] = &["payments", "rpc_api_keys"];
+const STORES_SERVED: &[&str] = &["vault_meta", "payments", "rpc_api_keys"];
 
 /// The hello's `store_moved`, each name once, in the hello's order. A name
 /// [`STORES`] doesn't list makes the hello malformed.
@@ -1664,6 +1678,7 @@ impl Core {
             .into_iter()
             .filter(|name| STORES_SERVED.contains(name))
             .filter(|name| match *name {
+                "vault_meta" => self.vault.configure_vault_meta(),
                 "rpc_api_keys" => self.vault.configure_rpc_keys(root.clone()),
                 // Opened at its first request, never before the name.
                 "payments" => {

@@ -2503,6 +2503,36 @@ impl Approvals {
     fn forget_account(&mut self, id: u64, params: &Value) -> Result<Zeroizing<Vec<u8>>, ErrorBody> {
         let fields = object(params, &["wallet_index"], &[])?;
         let account = account(fields.get("wallet_index"), "wallet_index")?;
+        let (keys, durable) = self.forget(account)?;
+        let mut reply = json!({ "keys": keys });
+        if !durable {
+            reply["durable"] = json!(false);
+        }
+        json_reply(id, &reply)
+    }
+
+    /// `accounts.remove`'s step before its record goes (design 0013,
+    /// "`vault-meta.json`", `accounts-remove-forget-first`): the account's
+    /// dApp grants forgotten, as `approval.forget_account` forgets them.
+    /// Whether the write is durable; an error means the file may still
+    /// name the account, and the removal is refused. Its events go after
+    /// the removal's reply ([`Approvals::take_events`]).
+    pub fn forget_removed_account(&mut self, account: u32) -> Result<bool, ErrorBody> {
+        self.forget(account).map(|(_, durable)| durable)
+    }
+
+    /// Ends every open Safe approval for `safe`: its account is being
+    /// removed (design 0013, `accounts.remove`). How many it ended.
+    pub fn end_safe_approvals(&mut self, safe: &[u8; 20]) -> usize {
+        self.safes.end_safe(safe)
+    }
+
+    /// The account's dApp grants revoked: the keys revoked, and whether the
+    /// write is durable. A file a failed narrowing left behind memory is
+    /// written even when memory names none of the account's grants
+    /// ([`Grants::write_through`]), so a retry after a failed write reaches
+    /// the disk.
+    fn forget(&mut self, account: u32) -> Result<(Vec<String>, bool), ErrorBody> {
         // A phone payment's waiting rule for the account goes, and one for
         // each key that exposed it, whatever the write does.
         self.narrowed.push(Narrowed::Account(account));
@@ -2523,7 +2553,7 @@ impl Approvals {
             .extend(exposing.iter().cloned().map(Narrowed::Key));
         let result = self
             .grants
-            .write::<DappStore, _>(|store| store.forget_account(account));
+            .write_through::<DappStore, _>(|store| store.forget_account(account));
         let (keys, durable, error) = match result {
             Ok(written) => (written.value, written.durable, None),
             Err(failure @ WriteFailure::Io { applied: true }) => {
@@ -2542,11 +2572,7 @@ impl Approvals {
         if let Some(error) = error {
             return Err(error);
         }
-        let mut reply = json!({ "keys": keys });
-        if !durable {
-            reply["durable"] = json!(false);
-        }
-        json_reply(id, &reply)
+        Ok((keys, durable))
     }
 
     /// `approval.remember { receipt }` (#373): a device send's "Always

@@ -71,7 +71,11 @@ fn the_handover() {
     std::fs::write(grant_root.join("x402-receipts.json"), legacy).unwrap();
     core.store_moved = vec!["vault_meta"];
     let hello = core.hello();
-    assert_eq!(hello["result"]["store_moved"], json!([]), "{hello}");
+    assert_eq!(
+        hello["result"]["store_moved"],
+        json!(["vault_meta"]),
+        "{hello}"
+    );
     for method in METHODS {
         for caller in ["chrome", "shell"] {
             let reply = call(&mut core, caller, method, json!({}));
@@ -92,7 +96,7 @@ fn the_handover() {
     let hello = core.hello();
     assert_eq!(
         hello["result"]["store_moved"],
-        json!(["payments"]),
+        json!(["payments", "vault_meta"]),
         "{hello}"
     );
     // Named, but nothing opened before the first request.

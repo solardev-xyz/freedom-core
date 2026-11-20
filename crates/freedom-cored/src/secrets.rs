@@ -168,7 +168,7 @@ struct Writing<'a> {
     steps: [&'static str; 2],
 }
 
-fn io_kind(error: &std::io::Error) -> &'static str {
+pub(crate) fn io_kind(error: &std::io::Error) -> &'static str {
     match error.kind() {
         std::io::ErrorKind::PermissionDenied => "permission",
         std::io::ErrorKind::StorageFull => "no_space",
