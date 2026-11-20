@@ -43,8 +43,8 @@
 //!   `<path>` over the file the core is about to use at `<stage>`, once (the
 //!   rename consumes it): `journal` right after recovery read the journal,
 //!   `checked` right after a staged or temp file was checked and before its
-//!   identity is compared, `renaming` right before a staged node file is
-//!   renamed. It stands for a same-user process winning a race.
+//!   identity is compared, `renaming` right before a staged node file, or a
+//!   staged vault or metadata file, is renamed. It stands for a same-user process winning a race.
 //! - `FREEDOM_CORED_TEST_GRANT_WRITE_FAIL` names a file: while it holds
 //!   `<store>:<step>` lines (`dapp`, `swarm`, `radicle`, `x402`, `phone`
 //!   for `phone-payments.json`, and `vault_meta` for `vault-meta.json`; `write`,
@@ -55,8 +55,12 @@
 //!   after the commit of the vault and metadata journal (design 0013, "The
 //!   vault and its metadata, one write"), in the write and in recovery
 //!   alike: `vault-rename`, `vault-flush`, `meta-rename`, `meta-flush`,
-//!   `unlink` (each a returned failure, the journal kept), and
-//!   `finish-flush` (after the real unlink: not durable).
+//!   `unlink` (each a returned failure, the journal kept), `finish-flush`
+//!   (after the real unlink: not durable), and `journal-flush`: the
+//!   directory flush after the journal's own rename, and its retry, and
+//!   recovery's flush before it installs (nothing installed, the journal
+//!   kept). `delete_journal:install` fails a vault delete's install, in the
+//!   delete and in its recovery alike, as `delete-install` below does once.
 //! - `FREEDOM_CORED_TEST_X402_SIGN_MARKER` names a file `x402.authorize`
 //!   appends a line to (`sign`) each time it is about to sign a payment's
 //!   digest, so a test counts the signatures: none for a cap's charge the
@@ -111,7 +115,9 @@
 //!   before its rename), or a vault write's (`vault-claim`, its claim
 //!   refused as if past its time; `vault-rename`, its rename, after the
 //!   claim), the vault and metadata journal's (`meta-stage`, a staged
-//!   file's write; `meta-journal`, the journal's rename, after the claim),
+//!   file's write; `meta-journal`, the journal's rename, after the claim;
+//!   `meta-journal-flush`, the directory flush after that rename, which is
+//!   then tried once more),
 //!   or the directory flush after a secrets-file write's rename
 //!   (`<step>-flush`, `rpc-set-flush`, `rpc-file-flush`, …: the change in
 //!   place and reported not durable). The first attempt in the process of

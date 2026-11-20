@@ -367,8 +367,8 @@ enum Kind {
         /// import: the requested mnemonic.
         mnemonic: Option<Mnemonic>,
         install: bool,
-        /// `vault_meta` is moved: a committed create or import says whether
-        /// its metadata is written.
+        /// A create or an import with `vault_meta` moved: committed, it says
+        /// whether its metadata is written. False for every other kind.
         meta: bool,
     },
     NodeWrite {
@@ -1783,7 +1783,9 @@ impl Vault {
                     password,
                     mnemonic,
                     install: p.install,
-                    meta: self.accounts.moved(),
+                    // Only a create or an import writes the metadata.
+                    meta: self.accounts.moved()
+                        && matches!(p.op, ReconcileOp::Create | ReconcileOp::Import),
                 }
             }
             "nodes.write_identity" => {
@@ -2823,6 +2825,7 @@ pub fn startup_snapshot(dir: &Path, lock_dir: &Path) -> (FileSnapshot, NodeRecov
     }
     // Then a vault write's metadata journal, before the snapshot reads the
     // vault and before the re-wrap's start rule (design 0013, "Recovery").
+    // While the delete's journal above is still there, it isn't touched.
     match crate::vault_meta_journal::startup(dir) {
         Ok(crate::vault_meta_journal::Settled::Nothing) => {}
         Ok(settled) => crate::log::info(
