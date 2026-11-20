@@ -3109,6 +3109,20 @@ fn the_downgrade_after_the_commit() {
                         BTreeSet::from(["addresses", "createdAt", "userKnowsPassword"])
                     );
                     assert_eq!(meta["userKnowsPassword"], false, "{label}");
+                    // Every member as the file holds it: `createdAt` too, an
+                    // ISO date as `new Date().toISOString()` writes it.
+                    let on_disk: Value = serde_json::from_slice(
+                        run.crashed.meta.as_deref().expect("the new metadata"),
+                    )
+                    .unwrap();
+                    assert_eq!(meta, on_disk, "{label}: the file's metadata");
+                    let created = meta["createdAt"].as_str().unwrap_or_default();
+                    assert!(
+                        created.len() == 24
+                            && created.ends_with('Z')
+                            && created.as_bytes()[10] == b'T',
+                        "{label}: createdAt {created:?}"
+                    );
                     assert_eq!(
                         meta["addresses"],
                         json!({
