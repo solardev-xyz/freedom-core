@@ -379,7 +379,7 @@ fn the_hello_names_the_stores() {
     let hello = main.start(&[]);
     assert_eq!(
         hello["result"]["store_moved"],
-        json!(["rpc_api_keys"]),
+        json!(["payments", "rpc_api_keys"]),
         "{hello}"
     );
     main.moved = vec![];

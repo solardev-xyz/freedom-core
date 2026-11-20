@@ -633,6 +633,10 @@ pub struct Vault {
     /// `store_moved` (design 0013, "RPC API keys"): `None` before, and every
     /// `secrets.*` RPC-key method answers `not_moved`.
     rpc_keys: Option<Arc<crate::rpc_keys::RpcKeys>>,
+    /// `payment-history.sqlite` (design 0013, "Payment history"): every
+    /// `payments.*` method answers `not_moved`, and the database stays
+    /// unopened, until `store_moved` names `payments`.
+    payments: crate::payments::Store,
 }
 
 #[derive(Deserialize)]
@@ -858,6 +862,7 @@ impl Vault {
             kdf_deadline: crate::testhooks::kdf_deadline(KDF_DEADLINE),
             secrets: None,
             rpc_keys: None,
+            payments: crate::payments::Store::new(),
         }
     }
 
@@ -923,6 +928,13 @@ impl Vault {
             }
             None => false,
         }
+    }
+
+    /// The hello's `store_moved` named `payments`: the core serves the
+    /// `payments.*` methods over `payment-history.sqlite` under `root`,
+    /// opened at the first of them (design 0013, "Payment history").
+    pub fn configure_payments(&mut self, root: PathBuf) {
+        self.payments.configure(root);
     }
 
     /// An RPC-key request's job, at admission: `not_moved` until the store
@@ -1244,6 +1256,7 @@ impl Vault {
             || Approvals::handles(method)
             || crate::phone::Phone::handles(method)
             || crate::approvals::x402::METHODS.contains(&method)
+            || crate::payments::METHODS.contains(&method)
     }
 
     /// Handles a request. Inline methods reply at once; KDF methods are
@@ -1311,6 +1324,14 @@ impl Vault {
                 out.extend(self.approvals.take_events().into_iter().map(Out::Send));
                 out.extend(self.phone.take_events().into_iter().map(Out::Send));
                 return out;
+            }
+            // Design 0013, "Payment history" (PRF-5g-2): answered at once
+            // from the database, opened at the first after the name.
+            _ if crate::payments::METHODS.contains(&method) => {
+                let wall_ms = self.clocks().wall_ms;
+                self.payments
+                    .request(method, raw, wall_ms)
+                    .map(|result| json_result(id, &result))
             }
             // x402's payments (X402-1): the caps, the token and the
             // authorization the core signs itself.

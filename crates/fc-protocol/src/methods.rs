@@ -236,6 +236,21 @@ pub const METHODS: &[Method] = &[
     // Core #392: a cap's narrowing, from the activity pane (or main); a
     // page names no cap of its own (Q11 keys a cap on the seller).
     row("x402.update", CS, false, NOW),
+    // Design 0013, "Payment history" (PRF-5g-2): the chrome reads and
+    // clears (`payments:get-recent`, `:get-count`, `:get-by-id`,
+    // `:clear`, `x402:get-receipts`); the writes and the repoll's are
+    // main's own. `not_moved` until `payments` is in `store_moved`.
+    row("payments.append", SHELL, false, NOW),
+    row("payments.update", SHELL, false, NOW),
+    row("payments.mark_confirmed", SHELL, false, NOW),
+    row("payments.mark_failed", SHELL, false, NOW),
+    row("payments.mark_dropped", SHELL, false, NOW),
+    row("payments.set_dropped_seen", SHELL, false, NOW),
+    row("payments.pending", SHELL, false, NOW),
+    row("payments.get_recent", CS, false, NOW),
+    row("payments.get_by_id", CS, false, NOW),
+    row("payments.get_count", CS, false, NOW),
+    row("payments.clear", CS, false, NOW),
     // Design 0012, "fc-eip1193 and approval.request" (APR-5): a page's
     // EIP-1193 request, run by the core's dispatcher; no other caller
     // reaches it.
@@ -423,6 +438,33 @@ mod tests {
                 (CallerKind::Page, page),
                 (CallerKind::Chrome, chrome),
                 (CallerKind::Shell, shell),
+            ] {
+                assert_eq!(
+                    matches!(admit(name, caller, V2), Admission::Allowed(_)),
+                    allowed,
+                    "{name} {caller:?}"
+                );
+            }
+        }
+        // Design 0013, "Callers of the store methods": the chrome reads and
+        // clears the payment history; its writes are main's alone.
+        for (name, chrome) in [
+            ("payments.append", false),
+            ("payments.update", false),
+            ("payments.mark_confirmed", false),
+            ("payments.mark_failed", false),
+            ("payments.mark_dropped", false),
+            ("payments.set_dropped_seen", false),
+            ("payments.pending", false),
+            ("payments.get_recent", true),
+            ("payments.get_by_id", true),
+            ("payments.get_count", true),
+            ("payments.clear", true),
+        ] {
+            for (caller, allowed) in [
+                (CallerKind::Page, false),
+                (CallerKind::Chrome, chrome),
+                (CallerKind::Shell, true),
             ] {
                 assert_eq!(
                     matches!(admit(name, caller, V2), Admission::Allowed(_)),

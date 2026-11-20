@@ -25,12 +25,18 @@
 //   `test-journal` wrote, failed and crashed writes included, and the
 //   core reads the reference's; each removes the other's leftover
 //   compaction temp file.
+// - payment-history.sqlite (PRF-5g-2), both ways: the stores reference's
+//   payment-history.js reads the database freedom-cored's testhooks-only
+//   `test-payments` wrote through the payments.* methods (with its
+//   x402-receipts.json import), and the core reads the reference's.
 //
 // Needs FREEDOM_CORED, a freedom-cored built with the `testhooks` feature
-// (FREEDOM_CORED_TEST_PROFILE_HOLD, and `test-journal` under
-// FREEDOM_CORED_TEST_METHODS), and the references:
-// FREEDOM_BROWSER_APPROVALS_CHECKOUT (the profiles reference) and
-// FREEDOM_BROWSER_CHECKOUT (whose install has proper-lockfile), as
+// (FREEDOM_CORED_TEST_PROFILE_HOLD, and `test-journal` and `test-payments`
+// under FREEDOM_CORED_TEST_METHODS), and the references:
+// FREEDOM_BROWSER_APPROVALS_CHECKOUT (the profiles reference),
+// FREEDOM_BROWSER_STORES_CHECKOUT (the stores reference) and
+// FREEDOM_BROWSER_CHECKOUT (whose install has proper-lockfile and
+// better-sqlite3), as
 // generate.js takes them. CI's vectors job runs it after building
 // freedom-cored.
 
@@ -46,6 +52,8 @@ const Module = require('node:module');
 const REFERENCE = process.env.FREEDOM_BROWSER_CHECKOUT || '/root/herdr/freedom-browser';
 const PROFILES_REFERENCE = process.env.FREEDOM_BROWSER_APPROVALS_CHECKOUT
   || '/root/herdr/freedom-browser-wt/approvals-reference';
+const STORES_REFERENCE = process.env.FREEDOM_BROWSER_STORES_CHECKOUT
+  || '/root/herdr/freedom-browser-wt/stores-reference';
 const CORED = process.env.FREEDOM_CORED;
 const ACTOR = path.join(__dirname, 'interop-actor.js');
 const STALE_MS = 30000;
@@ -549,6 +557,140 @@ test('each side removes the other\'s crashed compaction\'s temp file', async () 
     assert.equal(opened.code, 0, opened.stderr);
     assert.deepEqual(opened.answers[0].records, texts([r0, r1]));
     assert.deepEqual(fs.readdirSync(dir), [JOURNAL]);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// Design 0013's payment history (PRF-5g-2), both ways: the stores
+// reference's own payment-history.js, over the main reference's
+// better-sqlite3, reads the database a testhooks core's `test-payments`
+// wrote through the payments.* methods, and the core reads the reference's.
+const payments = require('./sqlite-payments');
+const Database = Module.createRequire(path.join(REFERENCE, 'package.json'))('better-sqlite3');
+const PAY_T = 1_700_000_000_000;
+const LEGACY = '[{"id":"r1","settledAt":1699000000,"status":"settled","chainId":8453,'
+  + '"txHash":"0x0000000000000000000000000000000000000000000000000000000000000021","amount":"500",'
+  + '"origin":"https://x.example","url":"https://x.example/a"}]';
+const PAY_ENTRIES = [
+  { kind: 'wallet-send', chainId: 1, amount: '7', txHash: '0xab', fromAddress: '0x01', createdAt: PAY_T + 1,
+    metadata: { txNonce: 4, txFrom: '0x01', note: 'é€😀\u2028', lone: '\ud800', n: [1e21, 1e-7, -0, 0.1] } },
+  { kind: 'dapp-send', chainId: 1.5, amount: '8', txHash: '0xcd', origin: 'https://d.example', createdAt: PAY_T + 2 },
+  { kind: 'x402', chainId: 8453, amount: '9', status: 'settled', createdAt: PAY_T + 3, metadata: { b: 1, a: [2, { z: null }] } },
+  { kind: 'wallet-send', chainId: 100, amount: '10', txHash: '0xef', createdAt: PAY_T + 4 },
+];
+
+/** Runs `test-payments` over `requests`: its exit and one answer each. */
+function corePayments(dir, requests) {
+  return new Promise((resolve, reject) => {
+    const child = spawn(CORED, ['test-payments', '--dir', dir], {
+      stdio: ['pipe', 'pipe', 'pipe'],
+      env: { ...process.env, FREEDOM_CORED_TEST_METHODS: '1' },
+    });
+    let stdout = '';
+    let stderr = '';
+    child.stdout.on('data', (chunk) => { stdout += chunk; });
+    child.stderr.on('data', (chunk) => { stderr += chunk; });
+    child.on('error', reject);
+    child.on('close', (code) => resolve({
+      code,
+      stderr,
+      answers: stdout.split('\n').filter((line) => line.startsWith('{"ok"') || line.startsWith('{"error"'))
+        .map((line) => JSON.parse(line)),
+    }));
+    child.stdin.end(requests.map(([method, params, now = PAY_T]) => `${JSON.stringify({ method, params, now })}\n`).join(''));
+  });
+}
+
+function paymentsDir() {
+  return fs.mkdtempSync(path.join(os.tmpdir(), 'freedom-core-payments-'));
+}
+
+test('the reference reads the payment history a testhooks core wrote', async () => {
+  const dir = paymentsDir();
+  try {
+    fs.writeFileSync(path.join(dir, 'x402-receipts.json'), LEGACY);
+    const out = await corePayments(dir, [
+      ...PAY_ENTRIES.map((entry) => ['payments.append', { entry }]),
+      ['payments.set_dropped_seen', { id: 2, seen_at: PAY_T + 50 }],
+      ['payments.mark_failed', { id: 3, info: { reason: 'reverted', gasUsed: 21000 } }],
+      ['payments.mark_confirmed', { id: 4, receipt: { gasUsed: '21000', effectiveGasPrice: '7' } }, PAY_T + 60],
+      ['payments.mark_dropped', { id: 5 }, PAY_T + 70],
+      ['payments.get_recent', { filters: { limit: 50 } }],
+      ['payments.get_count', {}],
+      ['payments.pending', {}],
+    ]);
+    assert.equal(out.code, 0, out.stderr);
+    assert.ok(out.answers.every((answer) => answer.ok), JSON.stringify(out.answers));
+    assert.equal(out.answers.length, 11);
+    const [recent, count, pending] = out.answers.slice(8).map((answer) => answer.ok);
+    assert.equal(count.count, 5);
+    assert.deepEqual(fs.readdirSync(dir).filter((f) => !f.startsWith('payment-history.sqlite')), ['x402-receipts.json.migrated']);
+    const reference = payments.load(STORES_REFERENCE, Database, dir);
+    try {
+      assert.deepEqual(reference.getRecent({ limit: 50 }), recent.payments);
+      assert.equal(reference.getCount(), count.count);
+      for (const record of recent.payments) assert.deepEqual(reference.getById(record.id), record);
+      const raw = reference.__internals.getStatements().getPending.all();
+      assert.deepEqual(raw.map((row) => [row.id, row.tx_hash, row.chain_id]),
+        pending.payments.map((record) => [record.id, record.txHash, record.chainId]));
+      assert.equal(reference.getDb().pragma('user_version', { simple: true }), 1);
+      assert.equal(reference.getDb().pragma('journal_mode', { simple: true }), 'wal');
+    } finally {
+      reference.closeDb();
+    }
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('the core reads the payment history the reference wrote', async () => {
+  const dir = paymentsDir();
+  try {
+    fs.writeFileSync(path.join(dir, 'x402-receipts.json'), LEGACY);
+    const reference = payments.load(STORES_REFERENCE, Database, dir);
+    let expected;
+    try {
+      for (const entry of PAY_ENTRIES) reference.append(entry);
+      reference.__internals.setDroppedSeenAt({ id: 2 }, PAY_T + 50);
+      reference.markFailed(3, { reason: 'reverted', gasUsed: 21000 });
+      reference.markConfirmed(4, { gasUsed: '21000', effectiveGasPrice: '7', confirmedAt: PAY_T + 60 });
+      expected = {
+        recent: reference.getRecent({ limit: 50 }),
+        page: reference.getRecent({ kind: 'wallet-send', limit: 1, offset: 1 }),
+        count: reference.getCount({ chainId: 1 }),
+        byId: reference.getById(2),
+        pending: reference.__internals.getStatements().getPending.all().map((row) => [row.id, row.tx_hash, row.chain_id]),
+      };
+    } finally {
+      reference.closeDb();
+    }
+    const out = await corePayments(dir, [
+      ['payments.get_recent', { filters: { limit: 50 } }],
+      ['payments.get_recent', { filters: { kind: 'wallet-send', limit: 1, offset: 1 } }],
+      ['payments.get_count', { filters: { chainId: 1 } }],
+      ['payments.get_by_id', { id: 2 }],
+      ['payments.pending', {}],
+      // The core writes on, and the reference reads that too.
+      ['payments.mark_dropped', { id: 2 }, PAY_T + 80],
+    ]);
+    assert.equal(out.code, 0, out.stderr);
+    assert.ok(out.answers.every((answer) => answer.ok), JSON.stringify(out.answers));
+    const [recent, page, count, byId, pending, dropped] = out.answers.map((answer) => answer.ok);
+    assert.deepEqual(recent.payments, expected.recent);
+    assert.deepEqual(page.payments, expected.page);
+    assert.equal(count.count, expected.count);
+    assert.deepEqual(byId.payment, expected.byId);
+    assert.deepEqual(pending.payments.map((record) => [record.id, record.txHash, record.chainId]), expected.pending);
+    // The reference imported the legacy file already: the core finds it gone.
+    assert.deepEqual(fs.readdirSync(dir).filter((f) => !f.startsWith('payment-history.sqlite')), ['x402-receipts.json.migrated']);
+    const again = payments.load(STORES_REFERENCE, Database, dir);
+    try {
+      assert.deepEqual(again.getById(2), dropped.payment);
+      assert.equal(again.getById(2).status, 'dropped');
+    } finally {
+      again.closeDb();
+    }
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }

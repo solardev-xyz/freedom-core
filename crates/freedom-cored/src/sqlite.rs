@@ -26,20 +26,26 @@
 //!   schema's version is opened as it is; any other is refused, with
 //!   nothing written.
 //!
+//! A statement waits at most [`BUSY_TIMEOUT`] for another connection's lock.
+//!
 //! One writer: the caller holds the one connection, and opens a database
 //! only once it is named in `store_moved` (design 0013, "Payment history").
-#![cfg_attr(
-    not(test),
-    expect(dead_code, reason = "PRF-5g-2's payments.* are its first callers")
-)]
 
 use std::fmt;
 use std::fs::File;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use fc_store::fsx;
 use rusqlite::{Connection, OpenFlags, TransactionBehavior};
+
+/// How long a statement waits for another connection's lock before it
+/// fails `SQLITE_BUSY` (`source: design`, deviation `sqlite-busy-timeout`):
+/// better-sqlite3 waits 5 s, which here would hold the vault's thread. The
+/// core is the database's one writer once it is named, so only another
+/// process (a tool, a build that broke the profile lock) ever holds it.
+pub const BUSY_TIMEOUT: Duration = Duration::from_millis(500);
 
 /// A database's schema: the DDL that creates it, and its `user_version`.
 pub struct Schema {
@@ -96,6 +102,7 @@ pub fn open(path: &Path, schema: &Schema) -> Result<Connection, Error> {
             | OpenFlags::SQLITE_OPEN_NO_MUTEX
             | OpenFlags::SQLITE_OPEN_EXRESCODE,
     )?;
+    conn.busy_timeout(BUSY_TIMEOUT)?;
     if !fsx::same_file(&judged, path)? {
         return Err(Error::Refused);
     }

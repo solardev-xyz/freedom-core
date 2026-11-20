@@ -244,6 +244,18 @@ const CAPABILITIES: &[&str] = &[
     "x402.authorize",
     "x402.settle",
     "x402.update",
+    // Design 0013: the payment history (PRF-5g-2).
+    "payments.append",
+    "payments.update",
+    "payments.mark_confirmed",
+    "payments.mark_failed",
+    "payments.mark_dropped",
+    "payments.set_dropped_seen",
+    "payments.pending",
+    "payments.get_recent",
+    "payments.get_by_id",
+    "payments.get_count",
+    "payments.clear",
     // Design 0012: a page's EIP-1193 request, run by the core (APR-5).
     "eip1193.request",
     "dweb.open",
@@ -803,7 +815,7 @@ const STORES: &[&str] = &[
 ];
 
 /// The stores this core serves once named: the echo holds only these.
-const STORES_SERVED: &[&str] = &["rpc_api_keys"];
+const STORES_SERVED: &[&str] = &["payments", "rpc_api_keys"];
 
 /// The hello's `store_moved`, each name once, in the hello's order. A name
 /// [`STORES`] doesn't list makes the hello malformed.
@@ -1653,6 +1665,11 @@ impl Core {
             .filter(|name| STORES_SERVED.contains(name))
             .filter(|name| match *name {
                 "rpc_api_keys" => self.vault.configure_rpc_keys(root.clone()),
+                // Opened at its first request, never before the name.
+                "payments" => {
+                    self.vault.configure_payments(root.clone());
+                    true
+                }
                 _ => false,
             })
             .collect();
