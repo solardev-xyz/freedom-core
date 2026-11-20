@@ -1,7 +1,7 @@
-//! The few JavaScript operations identity-manager.js applies to the file's
-//! values, as V8 applies them.
+//! The few JavaScript operations identity-manager.js and payment-history.js
+//! apply to their values, as V8 applies them.
 
-use fc_json::{JsString, JsValue};
+use fc_json::{JsString, JsValue, ToPrimitiveError};
 
 /// `Number.isInteger(value)`.
 pub(crate) fn is_integer(value: Option<&JsValue>) -> bool {
@@ -121,6 +121,140 @@ pub(crate) fn iso_string(ms: i64) -> Option<String> {
         in_day / 1000 % 60,
         in_day % 1000
     ))
+}
+
+/// `ToNumber(value)`, through `ToPrimitive(value, number)` for an array or
+/// an object (its `toString`: no JSON value has a callable `valueOf`).
+pub(crate) fn to_number(value: &JsValue) -> Result<f64, ToPrimitiveError> {
+    Ok(match value {
+        JsValue::Undefined => f64::NAN,
+        JsValue::Null => 0.0,
+        JsValue::Bool(flag) => f64::from(u8::from(*flag)),
+        JsValue::Number(number) => *number,
+        // A lone surrogate reads as U+FFFD, which no number holds either.
+        JsValue::String(text) => string_to_number(text.as_str()),
+        JsValue::Array(_) | JsValue::Object(_) => string_to_number(&value.js_string()?),
+    })
+}
+
+/// ECMAScript's WhiteSpace and LineTerminator, which `StringToNumber`
+/// trims (U+FEFF is one, U+0085 isn't).
+fn is_js_space(c: char) -> bool {
+    matches!(
+        c,
+        '\u{9}' | '\u{a}' | '\u{b}' | '\u{c}' | '\u{d}' | ' ' | '\u{a0}' | '\u{1680}' | '\u{2000}'
+            ..='\u{200a}'
+                | '\u{2028}'
+                | '\u{2029}'
+                | '\u{202f}'
+                | '\u{205f}'
+                | '\u{3000}'
+                | '\u{feff}'
+    )
+}
+
+/// `Number(text)`: ECMAScript's `StringToNumber`. Decimals are rounded to
+/// the nearest double (ties to even), as `str::parse` rounds them; `0x`,
+/// `0o` and `0b` integers too, as V8 rounds them.
+pub(crate) fn string_to_number(text: &str) -> f64 {
+    let text = text.trim_matches(is_js_space);
+    if text.is_empty() {
+        return 0.0;
+    }
+    for (prefix, bits) in [
+        ("0x", 4),
+        ("0X", 4),
+        ("0o", 3),
+        ("0O", 3),
+        ("0b", 1),
+        ("0B", 1),
+    ] {
+        if let Some(digits) = text.strip_prefix(prefix) {
+            return radix_integer(digits, bits);
+        }
+    }
+    let (negative, body) = match text.as_bytes().first() {
+        Some(b'-') => (true, &text[1..]),
+        Some(b'+') => (false, &text[1..]),
+        _ => (false, text),
+    };
+    let magnitude = if body == "Infinity" {
+        f64::INFINITY
+    } else if decimal_literal(body) {
+        body.parse::<f64>().unwrap_or(f64::NAN)
+    } else {
+        return f64::NAN;
+    };
+    if negative { -magnitude } else { magnitude }
+}
+
+/// StrUnsignedDecimalLiteral, but `Infinity`: digits with an optional point
+/// (a digit on at least one side of it) and an optional exponent.
+fn decimal_literal(text: &str) -> bool {
+    let (mantissa, exponent) = match text.find(['e', 'E']) {
+        Some(at) => (&text[..at], Some(&text[at + 1..])),
+        None => (text, None),
+    };
+    let (whole, fraction) = mantissa.split_once('.').unwrap_or((mantissa, ""));
+    let digits = |s: &str| s.bytes().all(|b| b.is_ascii_digit());
+    if (whole.is_empty() && fraction.is_empty()) || !digits(whole) || !digits(fraction) {
+        return false;
+    }
+    match exponent {
+        None => true,
+        Some(e) => {
+            let e = e.strip_prefix(['+', '-']).unwrap_or(e);
+            !e.is_empty() && digits(e)
+        }
+    }
+}
+
+/// A `0x`/`0o`/`0b` integer's digits (`bits` a digit) as the nearest
+/// double, ties to even; `NaN` if there are none or one isn't a digit.
+fn radix_integer(digits: &str, bits: u32) -> f64 {
+    let radix = 1u32 << bits;
+    if digits.is_empty() || !digits.chars().all(|c| c.is_digit(radix)) {
+        return f64::NAN;
+    }
+    // The first 60 or more significant bits, exactly; past them, how many
+    // bits were left off and whether any of them was set.
+    let mut mantissa: u64 = 0;
+    let mut dropped: i64 = 0;
+    let mut sticky = false;
+    for c in digits.chars() {
+        let digit = u64::from(c.to_digit(radix).unwrap_or(0));
+        if mantissa < 1 << 60 {
+            mantissa = (mantissa << bits) | digit;
+        } else {
+            dropped += i64::from(bits);
+            sticky |= digit != 0;
+        }
+    }
+    if mantissa == 0 {
+        return 0.0;
+    }
+    // Round to 53 bits.
+    let length = 64 - i64::from(mantissa.leading_zeros());
+    let mut shift = (length - 53).max(0);
+    let mut kept = mantissa >> shift;
+    if shift > 0 {
+        let rest = mantissa & ((1u64 << shift) - 1);
+        let half = 1u64 << (shift - 1);
+        if rest > half || (rest == half && (sticky || kept & 1 == 1)) {
+            kept += 1;
+            if kept == 1 << 53 {
+                kept >>= 1;
+                shift += 1;
+            }
+        }
+    }
+    let exponent = shift + dropped;
+    if exponent > 1023 {
+        return f64::INFINITY;
+    }
+    // `kept` < 2^53 is exact, and so is a power of two up to 2^1023.
+    let scale = f64::from_bits(((exponent + 1023) as u64) << 52);
+    kept as f64 * scale
 }
 
 #[cfg(test)]

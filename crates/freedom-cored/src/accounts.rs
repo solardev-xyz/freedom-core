@@ -31,15 +31,17 @@
 //!   `durable: false`.
 //! - **`accounts.remove`:** the refusals, a Swarm feed's among them from
 //!   main's `swarm_references`; for a Safe, every open Safe approval for
-//!   its address ended (its `safe-pending.json` entry is main's until
-//!   `safe_pending` moves, PRF-5f); the account's dApp grants forgotten, as
+//!   its address ended, then its `safe-pending.json` entry cleared once
+//!   `safe_pending` is moved (main's until then, which clears it after the
+//!   answer); the account's dApp grants forgotten, as
 //!   `approval.forget_account` forgets them; then the record removed. The
 //!   forget comes before the record, where the reference forgets after and
 //!   logs a failure (0013's `accounts-remove-forget-first`): a removed index
 //!   is handed out again, so a grant left in the file would be the next
 //!   account's after a restart. A forget that fails, `not_moved` for the
-//!   dApp file included, refuses the removal with the account still there.
-//!   The answer is `durable: false` if either write wasn't.
+//!   dApp file included, refuses the removal with the account still there,
+//!   and so does a clear that fails once `safe_pending` is moved. The
+//!   answer is `durable: false` if any of the writes wasn't.
 
 use std::path::PathBuf;
 
@@ -52,6 +54,7 @@ use fc_wallet_state::vault_meta::{self, Device, Failed, Refusal, SafeParams, Vau
 use serde_json::json;
 
 use crate::approvals::Approvals;
+use crate::safe_pending::{self, SafePending};
 use crate::testhooks::GrantWrite;
 
 /// The store's name in `store_moved`, `not_moved`'s `data.store`, a
@@ -405,12 +408,14 @@ impl Store {
 
     /// Runs `op` on the event loop: its answer, an object. `state` is the
     /// vault's lock state; `approvals` holds the Safe approvals and the
-    /// dApp grants `accounts.remove` ends.
+    /// dApp grants `accounts.remove` ends, and `pending` the Safe entries
+    /// it clears.
     pub fn run(
         &self,
         op: Op,
         state: &VaultState,
         approvals: &mut Approvals,
+        pending: &SafePending,
     ) -> Result<JsValue, ErrorBody> {
         if op.writes() && !self.moved {
             return Err(not_moved());
@@ -495,7 +500,7 @@ impl Store {
             Op::Remove {
                 index,
                 swarm_origins,
-            } => return self.remove(meta, index, &swarm_origins, approvals),
+            } => return self.remove(meta, index, &swarm_origins, approvals, pending),
         };
         if wrote && !self.save(&meta)? {
             answer.set("durable", JsValue::Bool(false));
@@ -503,18 +508,21 @@ impl Store {
         Ok(answer)
     }
 
-    /// `accounts.remove`: the refusals; a Safe's approvals ended before
-    /// its record goes ("cleanup precedes the meta write"); the account's
-    /// dApp grants forgotten, a failure refusing the removal; the record
-    /// removed. `durable: false` if either write wasn't.
+    /// `accounts.remove`: the refusals; a Safe's approvals ended and its
+    /// pending entry cleared before its record goes ("cleanup precedes the
+    /// meta write"); the account's dApp grants forgotten; the record
+    /// removed. A failed clear or forget refuses the removal.
+    /// `durable: false` if any write wasn't.
     fn remove(
         &self,
         mut meta: VaultMeta,
         index: f64,
         swarm_origins: &[String],
         approvals: &mut Approvals,
+        pending: &SafePending,
     ) -> Result<JsValue, ErrorBody> {
         let removal = meta.check_remove(index, swarm_origins).map_err(refused)?;
+        let mut durable = true;
         if removal.safe {
             let address = meta
                 .record(index)
@@ -528,6 +536,7 @@ impl Store {
                     json!({}),
                 ),
             }
+            durable &= clear_pending(pending, index)?;
         }
         // The grants before the record (`accounts-remove-forget-first`): a
         // forget that didn't reach the file refuses the removal, so no
@@ -535,7 +544,7 @@ impl Store {
         // later failed write leaves the account there, disconnected. An
         // index past `u32` is none a grant can name (`approval.connect`'s
         // account), and has nothing to forget.
-        let mut durable = match account_index(index) {
+        durable &= match account_index(index) {
             Some(account) => approvals.forget_removed_account(account)?,
             None => true,
         };
@@ -548,6 +557,25 @@ impl Store {
             answer.set("durable", JsValue::Bool(false));
         }
         Ok(answer)
+    }
+}
+
+/// A removed Safe's `safe-pending.json` entry, cleared once `safe_pending`
+/// is moved (0013, "`accounts.remove`"): whether the clear was durable.
+/// Before the move main writes the file and clears the entry after the
+/// answer. A clear that fails refuses the removal, the record still there,
+/// as a failed forget does (`accounts-remove-forget-first`): a later
+/// account given the index must not inherit the entry. An index no key
+/// of the file can name (not an integer from 0 to 2^53 − 1) has none.
+fn clear_pending(pending: &SafePending, index: f64) -> Result<bool, ErrorBody> {
+    let max = fc_wallet_state::safe_pending::MAX_INDEX as f64;
+    if index.fract() != 0.0 || !(0.0..=max).contains(&index) {
+        return Ok(true);
+    }
+    match pending.clear(index as u64) {
+        Ok(cleared) => Ok(cleared.durable),
+        Err(safe_pending::Failure::NotMoved) => Ok(true),
+        Err(failure) => Err(failure.error()),
     }
 }
 

@@ -47,8 +47,9 @@
 //!   staged vault or metadata file, is renamed. It stands for a same-user process winning a race.
 //! - `FREEDOM_CORED_TEST_GRANT_WRITE_FAIL` names a file: while it holds
 //!   `<store>:<step>` lines (`dapp`, `swarm`, `radicle`, `x402`, `phone`
-//!   for `phone-payments.json`, and `vault_meta` for `vault-meta.json`; `write`,
-//!   `fsync`, `rename`, `flush`), each write of that store's permission
+//!   for `phone-payments.json`, `vault_meta` for `vault-meta.json`, and
+//!   `safe_pending` for `safe-pending.json`; `write`, `fsync`, `rename`,
+//!   `flush`), each write of that store's permission
 //!   file fails at that step as if the OS had failed it (design 0012, "The
 //!   files": a failed write). Read at each write, so a test turns it on
 //!   and off while the core runs. `vault_meta_journal:<step>` fails a step
@@ -544,8 +545,8 @@ impl fc_store::Hooks for SecretsWrite<'_> {
 
 /// The hooks of a store file's write (`fc_store::file::write_file`): the
 /// steps `FREEDOM_CORED_TEST_GRANT_WRITE_FAIL` names for this store
-/// (`dapp`, `swarm`, `radicle`, `x402`, `phone`, `vault_meta`), read at
-/// each write.
+/// (`dapp`, `swarm`, `radicle`, `x402`, `phone`, `vault_meta`,
+/// `safe_pending`), read at each write.
 pub struct GrantWrite<'a>(pub &'a str);
 
 impl fc_store::Hooks for GrantWrite<'_> {

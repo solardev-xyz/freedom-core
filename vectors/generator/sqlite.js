@@ -20,6 +20,7 @@ const os = require('node:os');
 const path = require('node:path');
 const { createRequire } = require('node:module');
 const { loadWithInternals } = require('./naming');
+const { buildPayments } = require('./sqlite-payments');
 
 const DATABASES = [
   { file: 'payment-history.sqlite', module: 'src/main/payment-history.js', prefix: '.' },
@@ -77,8 +78,11 @@ function buildSqlite(checkout, driverCheckout, meta) {
     description: 'Design 0013\'s SQLite stores (PRF-5g-1): each database as the stores reference\'s own module creates it '
       + 'through better-sqlite3 (getDb on a new file, then closeDb), read back: sqlite_master\'s rows in rowid order '
       + '(type, name, tbl_name, rootpage, sql), user_version and journal_mode. The core creates each with the same DDL '
-      + 'and must read back the same rows.',
+      + 'and must read back the same rows. `payments` (PRF-5g-2, sqlite-payments.js): payment-history.js\'s operations on one '
+      + 'database and its legacy x402-receipts.json imports, each step\'s result (its answer, or the error it threw) and the '
+      + 'table after it where it changed (each column as [typeof, value], an INTEGER as its decimal text).',
     databases: DATABASES.map((database) => schemaOf(checkout, Database, database)),
+    payments: buildPayments(checkout, Database),
   };
 }
 
