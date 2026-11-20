@@ -32,6 +32,14 @@ pub mod js;
 pub const BIN: &str = env!("CARGO_BIN_EXE_freedom-radicled");
 /// A hang guard, never a timing assertion.
 pub const READ_TIMEOUT: Duration = Duration::from_secs(60);
+/// How long `rad.reconcile`'s reply may take: main's watchdog for it, at
+/// 315 s, past the service's own 300 s from admission (0008, "The
+/// deadline"). A hang guard, never a timing assertion. [`READ_TIMEOUT`]
+/// would be shorter than the service's own bound: on Windows CI, with each
+/// test binary's processes writing at once, a stalled runner has kept the
+/// first start's reconciliation of two repositories past 60 s, a slow
+/// reconciliation main waits for.
+pub const RECONCILE_TIMEOUT: Duration = Duration::from_secs(315);
 /// How long a process gets to exit when it should.
 pub const EXIT_TIMEOUT: Duration = Duration::from_secs(15);
 /// How long a process whose repair unit hangs gets to end: the steps and
@@ -127,6 +135,9 @@ pub struct Radicled {
     /// with their lengths alone ([`stream_frame`]).
     bodies: Bodies,
     next_id: u64,
+    /// The IDs of the `rad.reconcile` requests sent: their replies get
+    /// [`RECONCILE_TIMEOUT`].
+    reconciles: std::collections::HashSet<u64>,
     /// While set, stdout isn't read: the service's writer fills the pipe,
     /// then waits, as when main doesn't read ([`Radicled::pause`]).
     paused: std::sync::Arc<std::sync::atomic::AtomicBool>,
@@ -258,6 +269,7 @@ impl Radicled {
             log,
             bodies,
             next_id: 1,
+            reconciles: Default::default(),
             paused,
         }
     }
@@ -337,6 +349,9 @@ impl Radicled {
     pub fn request(&mut self, method: &str, params: Value) -> u64 {
         let id = self.next_id;
         self.next_id += 1;
+        if method == "rad.reconcile" {
+            self.reconciles.insert(id);
+        }
         self.send(&json!({ "type": "request", "id": id, "method": method, "params": params }));
         id
     }
@@ -346,10 +361,18 @@ impl Radicled {
         if let Some(at) = self.pending.iter().position(|m| m["id"] == id) {
             return self.pending.remove(at).unwrap();
         }
+        let within = if self.reconciles.contains(&id) {
+            RECONCILE_TIMEOUT
+        } else {
+            READ_TIMEOUT
+        };
         loop {
-            let message = match self.frames.recv_timeout(READ_TIMEOUT) {
+            let message = match self.frames.recv_timeout(within) {
                 Ok(message) => message,
-                Err(e) => panic!("no reply to {id} from freedom-radicled: {e}"),
+                Err(e) => panic!(
+                    "no reply to {id} from freedom-radicled: {e}; its stderr so far:\n{}",
+                    self.log.lock().unwrap()
+                ),
             };
             if message["id"] == id {
                 return message;
@@ -556,6 +579,19 @@ impl Radicled {
     /// stderr, once the process has exited.
     pub fn stderr(&mut self) -> String {
         self.stderr.take().unwrap().join().unwrap()
+    }
+
+    /// The exit code, as [`Radicled::exit_code`], with stderr: all of it
+    /// once the process has exited, else as much as was read.
+    pub fn exit_and_stderr(&mut self, timeout: Duration) -> (Option<i32>, String) {
+        let code = self.exit_code(timeout);
+        let exited = self.child.try_wait().unwrap().is_some();
+        let log = if exited {
+            self.stderr()
+        } else {
+            self.log.lock().unwrap().clone()
+        };
+        (code, log)
     }
 
     /// Waits up to `within` for a stderr line containing `needle`, while
