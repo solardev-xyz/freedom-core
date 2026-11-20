@@ -99,7 +99,8 @@ fn storage_kind(error: &ErrorBody) -> &str {
 
 /// Every import vector through the methods' first open: the rows, and the
 /// files left (the stray file dropped beside a `.migrated`, the file renamed
-/// after a whole import, kept after a refusal), as the reference left them.
+/// after a whole import, kept after a refusal), as the reference left them,
+/// with its `Date.now()` answers replayed per entry.
 #[test]
 fn the_reference_imports_with_their_files() {
     let vectors = vectors();
@@ -120,8 +121,28 @@ fn the_reference_imports_with_their_files() {
         if case.get("migrated") == Some(&JsValue::Bool(true)) {
             std::fs::write(root.join(MIGRATED_FILE), "[]").unwrap();
         }
+        // The reference's `Date.now()` answers, in the order it asked.
+        let ticks: Vec<f64> = case
+            .get("ticks")
+            .and_then(JsValue::as_array)
+            .unwrap()
+            .iter()
+            .map(|tick| match tick {
+                JsValue::Number(n) => *n,
+                other => panic!("{name}: tick {other:?}"),
+            })
+            .collect();
+        let mut asked = 0;
+        let clock = || {
+            asked += 1;
+            *ticks
+                .get(asked - 1)
+                .unwrap_or_else(|| panic!("{name}: the clock read more often than the reference's"))
+        };
         let mut store = named(root);
-        call(&mut store, "payments.get_count", "{}").unwrap();
+        // What the first request runs, with the replayed clock.
+        Store::opened(root, &mut store.open, clock).unwrap();
+        assert_eq!(asked, ticks.len(), "{name}: the clock's reads");
         assert_eq!(&table_at(root), case.get("rows").unwrap(), "{name}: rows");
         let expected: Vec<&str> = case
             .get("files")
@@ -151,16 +172,19 @@ fn an_import_cut_before_its_rename_is_finished_once() {
     assert_eq!(payments.import_legacy(text, || 1.0).unwrap(), 1);
     let rows = table_at(root);
     assert_eq!(
-        Store::import(root, &mut payments, 2.0),
+        Store::import(root, &mut payments, || 2.0),
         Legacy::Imported(0, true)
     );
     assert_eq!(table_at(root), rows);
     assert_eq!(files(root), [MIGRATED_FILE]);
     // Then the file is gone: nothing more to do.
-    assert_eq!(Store::import(root, &mut payments, 3.0), Legacy::Absent);
+    assert_eq!(Store::import(root, &mut payments, || 3.0), Legacy::Absent);
     // A stray file beside the `.migrated` is dropped, unread.
     std::fs::write(root.join(LEGACY_FILE), "not json").unwrap();
-    assert_eq!(Store::import(root, &mut payments, 4.0), Legacy::Stray(true));
+    assert_eq!(
+        Store::import(root, &mut payments, || 4.0),
+        Legacy::Stray(true)
+    );
     assert_eq!(files(root), [MIGRATED_FILE]);
     assert_eq!(table_at(root), rows);
 }
@@ -177,12 +201,12 @@ fn an_unreadable_legacy_file_is_left() {
     assert_eq!(text.len(), MAX_LEGACY_BYTES);
     std::fs::write(root.join(LEGACY_FILE), format!("{text} ")).unwrap();
     let mut payments = open(root);
-    assert_eq!(Store::import(root, &mut payments, 1.0), Legacy::Kept);
+    assert_eq!(Store::import(root, &mut payments, || 1.0), Legacy::Kept);
     assert_eq!(files(root), [LEGACY_FILE]);
     // At the bound, it is read (and, an empty array, renamed).
     std::fs::write(root.join(LEGACY_FILE), &text).unwrap();
     assert_eq!(
-        Store::import(root, &mut payments, 1.0),
+        Store::import(root, &mut payments, || 1.0),
         Legacy::Imported(0, true)
     );
     assert_eq!(files(root), [MIGRATED_FILE]);
@@ -191,7 +215,7 @@ fn an_unreadable_legacy_file_is_left() {
         std::fs::remove_file(root.join(MIGRATED_FILE)).unwrap();
         std::fs::write(root.join("elsewhere.json"), "[]").unwrap();
         std::os::unix::fs::symlink("elsewhere.json", root.join(LEGACY_FILE)).unwrap();
-        assert_eq!(Store::import(root, &mut payments, 1.0), Legacy::Kept);
+        assert_eq!(Store::import(root, &mut payments, || 1.0), Legacy::Kept);
         assert!(root.join(LEGACY_FILE).is_symlink());
         assert!(!root.join(MIGRATED_FILE).exists());
     }

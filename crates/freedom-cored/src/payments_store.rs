@@ -118,15 +118,7 @@ impl Store {
             reason = "Date.now(), a JS number of milliseconds"
         )]
         let now = now_ms as f64;
-        let payments = match &mut self.open {
-            Some(payments) => payments,
-            None => {
-                let mut payments =
-                    Payments::new(sqlite::open(&root.join(DB_FILE), &SCHEMA).map_err(open_failed)?);
-                Store::import(root, &mut payments, now);
-                self.open.insert(payments)
-            }
-        };
+        let payments = Store::opened(root, &mut self.open, || now)?;
         let answer = |key: &str, value: &JsValue| format!("{{\"{key}\":{}}}", value.stringify());
         let text = match method {
             "payments.append" => answer("payment", &payments.append(arg("entry"), now)?),
@@ -175,13 +167,33 @@ impl Store {
         RawValue::from_string(text).map_err(|_| crate::vault::internal())
     }
 
+    /// The database, opened at the first request after the name, with
+    /// `x402-receipts.json` imported then; `clock` answers `Date.now()` for
+    /// each entry the import reads it for. A failed open is tried again at
+    /// the next request.
+    fn opened<'a>(
+        root: &Path,
+        open: &'a mut Option<Payments>,
+        clock: impl FnMut() -> f64,
+    ) -> Result<&'a mut Payments, ErrorBody> {
+        match open {
+            Some(payments) => Ok(payments),
+            None => {
+                let mut payments =
+                    Payments::new(sqlite::open(&root.join(DB_FILE), &SCHEMA).map_err(open_failed)?);
+                Store::import(root, &mut payments, clock);
+                Ok(open.insert(payments))
+            }
+        }
+    }
+
     /// `migrateFromJson`, at the database's first open in this core:
     /// `root`'s `x402-receipts.json` dropped if a `.migrated` is there
     /// already, otherwise read (at most [`MAX_LEGACY_BYTES`]), its rows
     /// imported in one transaction, and the file renamed `.migrated` once
     /// they are committed. A failure leaves the file and is logged, as the
     /// reference logs it; the database serves either way.
-    pub fn import(root: &Path, payments: &mut Payments, now_ms: f64) -> Legacy {
+    pub fn import(root: &Path, payments: &mut Payments, clock: impl FnMut() -> f64) -> Legacy {
         let file = root.join(LEGACY_FILE);
         let migrated = root.join(MIGRATED_FILE);
         if std::fs::symlink_metadata(&file).is_err() {
@@ -217,7 +229,7 @@ impl Store {
         // `readFileSync(path, 'utf-8')`: invalid UTF-8 as U+FFFD, a
         // byte-order mark kept (and refused by `JSON.parse`).
         let text = String::from_utf8_lossy(&bytes);
-        let imported = match payments.import_legacy(&text, || now_ms) {
+        let imported = match payments.import_legacy(&text, clock) {
             Ok(imported) => imported,
             Err(Error::Thrown(_)) => return kept("refused"),
             Err(_) => return kept("write"),
