@@ -645,6 +645,10 @@ pub struct Vault {
     /// `vault-meta.json` (design 0013): read until `core.hello` names
     /// `vault_meta` in `store_moved`, written once it does.
     accounts: crate::accounts::Store,
+    /// `payment-history.sqlite` (design 0013, "Payment history"): every
+    /// `payments.*` method answers `not_moved`, and the database stays
+    /// unopened, until `store_moved` names `payments`.
+    payments: crate::payments_store::Store,
 }
 
 #[derive(Deserialize)]
@@ -872,6 +876,7 @@ impl Vault {
             secrets: None,
             rpc_keys: None,
             safe_pending: Arc::new(crate::safe_pending::SafePending::new()),
+            payments: crate::payments_store::Store::new(),
         }
     }
 
@@ -944,6 +949,13 @@ impl Vault {
     /// transactions").
     pub fn configure_safe_pending(&mut self, root: PathBuf, moved: bool) {
         self.safe_pending.configure(root, moved);
+    }
+
+    /// The hello's `store_moved` named `payments`: the core serves the
+    /// `payments.*` methods over `payment-history.sqlite` under `root`,
+    /// opened at the first of them (design 0013, "Payment history").
+    pub fn configure_payments(&mut self, root: PathBuf) {
+        self.payments.configure(root);
     }
 
     /// The hello's `store_moved` named `vault_meta`: the core writes
@@ -1275,6 +1287,7 @@ impl Vault {
             || crate::phone::Phone::handles(method)
             || crate::approvals::x402::METHODS.contains(&method)
             || crate::safe_pending::METHODS.contains(&method)
+            || crate::payments_store::METHODS.contains(&method)
     }
 
     /// Handles a request. Inline methods reply at once; KDF methods are
@@ -1342,6 +1355,14 @@ impl Vault {
                 out.extend(self.approvals.take_events().into_iter().map(Out::Send));
                 out.extend(self.phone.take_events().into_iter().map(Out::Send));
                 return out;
+            }
+            // Design 0013, "Payment history" (PRF-5g-2): answered at once
+            // from the database, opened at the first after the name.
+            _ if crate::payments_store::METHODS.contains(&method) => {
+                let wall_ms = self.clocks().wall_ms;
+                self.payments
+                    .request(method, raw, wall_ms)
+                    .map(|result| json_result(id, &result))
             }
             // x402's payments (X402-1): the caps, the token and the
             // authorization the core signs itself.

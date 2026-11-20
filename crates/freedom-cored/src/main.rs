@@ -35,6 +35,7 @@ mod log;
 mod naming;
 mod nodes;
 mod payments;
+mod payments_store;
 mod phone;
 mod profile;
 mod requests;
@@ -55,6 +56,10 @@ mod testmethods;
 // the interop harness (design 0013, PRF-5d).
 #[cfg(feature = "testhooks")]
 mod testjournal;
+// The `testhooks` feature only: the payments methods driven from stdin, for
+// the interop harness (design 0013, PRF-5g-2).
+#[cfg(feature = "testhooks")]
+mod testpayments;
 mod transport;
 mod vault;
 mod worker;
@@ -120,6 +125,10 @@ fn main() -> ExitCode {
     #[cfg(feature = "testhooks")]
     if command.as_deref() == Some("test-journal") && testhooks::test_methods() {
         return ExitCode::from(testjournal::run(std::env::args_os().skip(2)));
+    }
+    #[cfg(feature = "testhooks")]
+    if command.as_deref() == Some("test-payments") && testhooks::test_methods() {
+        return ExitCode::from(testpayments::run(std::env::args_os().skip(2)));
     }
     if matches!(command.as_deref(), Some("profile" | "hold-profile")) {
         let entry = fc_service::confine::clean_entry();

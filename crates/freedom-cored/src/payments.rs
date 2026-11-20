@@ -14,14 +14,7 @@
 //! still listed, and is logged (design 0013's `payments-json-values`).
 //!
 //! The methods that call these, their callers, `store_moved` and the
-//! import's files are PRF-5g-2's second part.
-#![cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "payments.* (PRF-5g-2's second part) are its first callers"
-    )
-)]
+//! import's files are `payments_store`'s.
 
 use std::fmt;
 
@@ -326,4 +319,4 @@ impl Payments {
 }
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;
