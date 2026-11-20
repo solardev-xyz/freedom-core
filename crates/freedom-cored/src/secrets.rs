@@ -235,19 +235,33 @@ impl Secrets {
     /// nor the key, so a credential staged as `quick-unlock.next` stays
     /// under that name.
     fn load(&self) -> Result<SecretsFile, Error> {
-        let loaded = crate::delete_journal::settle(&self.dir)
-            .and_then(|_| crate::vault_meta_journal::settle(&self.dir))
-            .map_err(|e| Error::Unreadable(io_kind(&e)))
-            .and_then(|settled| {
-                let file = read(&self.path())?;
-                Ok(match settled {
-                    crate::vault_meta_journal::Settled::Finished {
-                        quick_unlock: true,
-                        vault,
-                    } => self.keep_only(file, &vault),
-                    _ => file,
-                })
-            });
+        self.read_settled(self.settle_journals().map_err(|e| io_kind(&e)))
+    }
+
+    /// Both vault journals, the delete's first: while it can't finish, the
+    /// metadata journal isn't touched (design 0013, "The delete's journal
+    /// stays separate").
+    fn settle_journals(&self) -> std::io::Result<crate::vault_meta_journal::Settled> {
+        crate::delete_journal::settle(&self.dir)?;
+        crate::vault_meta_journal::settle(&self.dir)
+    }
+
+    /// [`Secrets::load`] after the journals settled (`Err`: one stays, with
+    /// its storage error's kind).
+    fn read_settled(
+        &self,
+        settled: Result<crate::vault_meta_journal::Settled, &'static str>,
+    ) -> Result<SecretsFile, Error> {
+        let loaded = settled.map_err(Error::Unreadable).and_then(|settled| {
+            let file = read(&self.path())?;
+            Ok(match settled {
+                crate::vault_meta_journal::Settled::Finished {
+                    quick_unlock: true,
+                    vault,
+                } => self.keep_only(file, &vault),
+                _ => file,
+            })
+        });
         match &loaded {
             // A read that failed while a journal was pending says so until
             // the next read: the view follows the file as last read.
@@ -298,11 +312,24 @@ impl Secrets {
     }
 
     /// Recovery under the file's lock ([`crate::vault_meta_journal::recover`]):
-    /// a vault write's journal finished, and the replaced vault's entry
-    /// removed.
-    pub fn recover(&self) -> Result<(), Error> {
-        let _held = self.lock()?;
-        self.load().map(|_| ())
+    /// a vault delete's journal, then a vault write's, finished, and the
+    /// replaced vault's entry removed. `Err`: a journal stays. A secrets file
+    /// that doesn't read once both are done isn't this call's failure: the
+    /// file's own operations answer it.
+    pub fn recover(&self) -> std::io::Result<()> {
+        let _held = self
+            .lock()
+            .map_err(|_| std::io::Error::other("the secrets file's lock"))?;
+        match self.settle_journals() {
+            Ok(settled) => {
+                let _ = self.read_settled(Ok(settled));
+                Ok(())
+            }
+            Err(e) => {
+                let _ = self.read_settled(Err(io_kind(&e)));
+                Err(e)
+            }
+        }
     }
 
     /// Writes `next` durably, if `commit` allows its rename, and keeps the
@@ -1146,7 +1173,6 @@ fn without_quick_unlock(file: &SecretsFile) -> Result<SecretsFile, Error> {
     Ok(out)
 }
 
-/// Reads the file at `path`: empty if there is none.
 /// Whether the secrets file in `dir` holds quick unlock's entry, under
 /// either name, bound to the vault with digest `vault`: what a metadata
 /// journal with `quick_unlock` needs before it installs that vault. Read
@@ -1158,6 +1184,7 @@ pub fn has_credential(dir: &Path, vault: &str) -> std::io::Result<bool> {
     Ok(credential(&file, vault).is_some())
 }
 
+/// Reads the file at `path`: empty if there is none.
 fn read(path: &Path) -> Result<SecretsFile, Error> {
     let file = match fsx::open_regular(path, false) {
         Ok(fsx::Regular::Missing) => return Ok(SecretsFile::new()),

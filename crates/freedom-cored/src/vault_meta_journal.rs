@@ -11,7 +11,10 @@
 //! 2. **Commit.** `vault-meta-journal.json`, by 0001's single-file write.
 //!    The vault's commit claim comes right before its rename (0001: "before
 //!    the journal write of a multi-file operation"): the journal's write is
-//!    the commit point.
+//!    the commit point. No target is renamed until the journal's name is
+//!    durable: a failed directory flush after its rename is tried once more,
+//!    and if that fails too, nothing is installed and the write is pending
+//!    (below). Recovery flushes the directory before it installs anything.
 //! 3. **Install.** Every file is checked before either is renamed: a file
 //!    is done if it has the journaled digest; otherwise it can be installed
 //!    if its staged file has that digest and the target is still `before`.
@@ -39,6 +42,11 @@
 //! renamed to `vault-meta-journal.json.corrupt`, its staged files removed,
 //! and nothing else changed. One lock, the delete journal's, serializes the
 //! write, both journals' recovery and the delete.
+//!
+//! **A vault delete's journal comes first:** while one is there, recovery
+//! doesn't touch this record ([`settle`] fails), so a delete an older core
+//! committed over a record it doesn't read finishes before the record is
+//! looked at, and the two operations finish in the order they committed.
 
 use std::cell::Cell;
 use std::fs::OpenOptions;
@@ -186,6 +194,32 @@ fn hook_error(step: &str) -> std::io::Error {
     std::io::Error::other(format!("{step} failed (test hook)"))
 }
 
+/// The journal's own write: [`crate::testhooks::Swap`]'s swap, and the
+/// directory flush after its rename failing while `journal-flush` holds
+/// (or once, for `meta-journal-flush` in `FREEDOM_CORED_TEST_SECRETS_FAIL`).
+struct JournalHooks;
+
+impl fc_store::Hooks for JournalHooks {
+    fn fails(&self, step: fc_store::Step) -> bool {
+        step == fc_store::Step::Flush
+            && (crate::testhooks::secrets_fails("meta-journal-flush") || fails("journal-flush"))
+    }
+
+    fn checked(&self, temp: &Path) {
+        crate::testhooks::swap("checked", temp);
+    }
+}
+
+/// Makes the journal's name durable: no target is renamed before it is, or
+/// a crash could keep a renamed target and lose the record that finishes
+/// the pair.
+fn journal_durable(dir: &Path) -> std::io::Result<()> {
+    if fails("journal-flush") {
+        return Err(hook_error("the journal's flush"));
+    }
+    fsx::sync_rename(dir, &dir.join(JOURNAL))
+}
+
 /// Why [`write`] didn't commit. Nothing changed in every case.
 #[derive(Debug)]
 pub enum Error {
@@ -209,7 +243,8 @@ impl From<std::io::Error> for Error {
 pub enum Written {
     /// Both files installed and the journal gone.
     Finished(Done),
-    /// An install or the finish failed: the journal stays for [`settle`].
+    /// The journal's flush, an install or the finish failed: the journal
+    /// stays for [`settle`].
     Pending,
 }
 
@@ -276,7 +311,7 @@ pub fn write(dir: &Path, pair: &Pair<'_>, claim: &dyn Fn() -> bool) -> Result<Wr
             }
             claimed.get() && !crate::testhooks::secrets_fails("meta-journal")
         },
-        &crate::testhooks::Swap,
+        &JournalHooks,
     );
     let journaled = match written {
         Ok(done) => done,
@@ -291,7 +326,20 @@ pub fn write(dir: &Path, pair: &Pair<'_>, claim: &dyn Fn() -> bool) -> Result<Wr
         }
     };
     crate::testhooks::secrets_step("after-meta-journal");
-    // Committed: what follows is the install, which [`settle`] repeats.
+    // Committed. The journal's name must be durable before any target is
+    // renamed: its flush failed, so it is tried once more, and if that fails
+    // too nothing is installed. The write is pending, and recovery flushes
+    // again before it installs.
+    if journaled == Done::NotDurable
+        && let Err(e) = journal_durable(dir)
+    {
+        crate::log::error(
+            "a committed vault write's journal isn't durable; nothing installed, the journal stays",
+            serde_json::json!({ "error": e.to_string() }),
+        );
+        return Ok(Written::Pending);
+    }
+    // What follows is the install, which [`settle`] repeats.
     let finished = match install(dir, &plan) {
         Ok(Installed::Done) => finish(dir),
         Ok(other) => Err(std::io::Error::other(format!(
@@ -300,8 +348,7 @@ pub fn write(dir: &Path, pair: &Pair<'_>, claim: &dyn Fn() -> bool) -> Result<Wr
         Err(e) => Err(e),
     };
     match finished {
-        Ok(done) if journaled == Done::Durable => Ok(Written::Finished(done)),
-        Ok(_) => Ok(Written::Finished(Done::NotDurable)),
+        Ok(done) => Ok(Written::Finished(done)),
         Err(e) => {
             crate::log::error(
                 "a committed vault write's install failed; its journal stays",
@@ -477,6 +524,7 @@ fn rename(dir: &Path, look: Look, (name, staged): (&str, &str), step: &str) -> s
     }
     // The rename moves whatever the name holds: it must still be the file
     // hashed (as 0001's install checks).
+    crate::testhooks::swap("renaming", &staged);
     if !fsx::same_file(&file, &staged)? {
         return Err(std::io::Error::other(
             "a staged file was replaced before its rename",
@@ -527,11 +575,26 @@ pub fn exists(dir: &Path) -> bool {
 /// Finishes a committed write whose journal is still there. `Err`: the
 /// journal stays, and the caller must not act on the vault, the metadata
 /// or the secrets file.
+///
+/// The caller settles a vault delete's journal first: while one is still
+/// there (its recovery failed), this record isn't touched, so the delete,
+/// committed after it by an older core that doesn't read it, can't be
+/// undone by an install of the vault it replaced (design 0013, "The
+/// delete's journal stays separate").
 pub fn settle(dir: &Path) -> std::io::Result<Settled> {
     if !exists(dir) {
         return Ok(Settled::Nothing);
     }
     let _held = lock()?;
+    match std::fs::symlink_metadata(dir.join(crate::delete_journal::JOURNAL)) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Ok(_) => {
+            return Err(std::io::Error::other(
+                "a vault delete's journal is still there: it finishes first",
+            ));
+        }
+        Err(e) => return Err(e),
+    }
     let plan = match fsx::open_regular(&dir.join(JOURNAL), false)? {
         fsx::Regular::Missing => return Ok(Settled::Nothing),
         fsx::Regular::Other => None,
@@ -543,6 +606,9 @@ pub fn settle(dir: &Path) -> std::io::Result<Settled> {
         set_aside(dir, "not a writer's record")?;
         return Ok(Settled::SetAside);
     };
+    // The journal's name is durable before anything is renamed (a write
+    // whose flush failed left it pending).
+    journal_durable(dir)?;
     match install(dir, &plan)? {
         Installed::Done => {
             // Past the unlink, a failed flush leaves nothing to redo.
@@ -569,17 +635,21 @@ fn set_aside(dir: &Path, why: &str) -> std::io::Result<()> {
     fsx::sync_dir(dir)
 }
 
-/// Recovery first, for a job or an `accounts.*` call: with `secrets`, under
-/// its lock, so a finished quick-unlock record leaves only the new vault's
-/// credential ([`Secrets::recover`]). `Err`: the journal stays.
+/// Recovery first, for a job or an `accounts.*` call: a vault delete's
+/// journal, then this one. With `secrets`, both run under its lock and
+/// nowhere else, so a finished quick-unlock record leaves only the new
+/// vault's credential ([`Secrets::recover`]). `Err`: a journal stays.
 pub fn recover(dir: &Path, secrets: Option<&Secrets>) -> std::io::Result<()> {
     if !exists(dir) {
         return Ok(());
     }
-    if let Some(secrets) = secrets {
-        let _ = secrets.recover();
+    match secrets {
+        Some(secrets) => secrets.recover(),
+        None => {
+            crate::delete_journal::settle(dir)?;
+            settle(dir).map(|_| ())
+        }
     }
-    settle(dir).map(|_| ())
 }
 
 /// The journaled vault of a writer's record still there, read as the vault
@@ -747,6 +817,38 @@ mod tests {
         write_plan(p, &plan);
         assert!(matches!(settle(p).unwrap(), Settled::Finished { .. }));
         assert!(!p.join(JOURNAL).exists());
+        assert_eq!(std::fs::read(p.join(VAULT_FILE)).unwrap(), b"new vault");
+    }
+
+    #[test]
+    fn a_vault_delete_journal_still_there_fences_the_record() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path();
+        std::fs::write(p.join(VAULT_FILE), b"old vault").unwrap();
+        std::fs::write(p.join(VAULT_STAGED), b"new vault").unwrap();
+        std::fs::write(p.join(META_STAGED), b"new meta").unwrap();
+        let plan = Plan {
+            op: Op::Import,
+            quick_unlock: false,
+            vault: Target {
+                before: Some(sha256_hex(b"old vault")),
+                sha256: sha256_hex(b"new vault"),
+            },
+            meta: Target {
+                before: None,
+                sha256: sha256_hex(b"new meta"),
+            },
+        };
+        write_plan(p, &plan);
+        std::fs::write(p.join(crate::delete_journal::JOURNAL), b"pending").unwrap();
+        assert!(settle(p).is_err());
+        assert!(startup(p).is_err());
+        assert_eq!(std::fs::read(p.join(VAULT_FILE)).unwrap(), b"old vault");
+        assert!(!p.join(vault_meta::FILE_NAME).exists());
+        assert!(p.join(JOURNAL).exists() && p.join(VAULT_STAGED).exists());
+        // The delete's journal gone: the record installs.
+        std::fs::remove_file(p.join(crate::delete_journal::JOURNAL)).unwrap();
+        assert!(matches!(settle(p).unwrap(), Settled::Finished { .. }));
         assert_eq!(std::fs::read(p.join(VAULT_FILE)).unwrap(), b"new vault");
     }
 

@@ -336,7 +336,9 @@ fn install(dir: &Path, plan: &Plan) -> std::io::Result<Installed> {
         if digest != plan.secrets {
             return Ok(Installed::Corrupt);
         }
-        if crate::testhooks::secrets_fails("delete-install") {
+        if crate::testhooks::secrets_fails("delete-install")
+            || crate::testhooks::grant_write_fails("delete_journal", "install")
+        {
             return Err(std::io::Error::other(
                 "the staged secrets file's rename failed (test hook)",
             ));
