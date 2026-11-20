@@ -788,6 +788,7 @@ dependencies = [
  "fc-swarm",
  "fc-sys",
  "fc-vault",
+ "fc-wallet-state",
  "getrandom",
  "rand_core 0.10.1",
  "rusqlite",

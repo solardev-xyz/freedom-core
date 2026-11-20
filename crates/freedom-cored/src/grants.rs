@@ -144,6 +144,9 @@ pub struct Written<T> {
 pub struct Grants {
     root: Option<PathBuf>,
     moved: Vec<StoreKind>,
+    /// The stores whose file is behind memory: a narrowing applied in
+    /// memory whose write failed, and no write of that store since.
+    behind: Vec<StoreKind>,
     dapp: DappStore,
     swarm: SwarmStore,
     radicle: RadicleStore,
@@ -235,6 +238,27 @@ impl Grants {
         &mut self,
         change: impl FnOnce(&mut S) -> Applied<T>,
     ) -> Result<Written<T>, WriteFailure> {
+        self.write_change(change, false)
+    }
+
+    /// As [`Grants::write`], except that a change that leaves the store as
+    /// it is still writes the file when a narrowing's failed write left the
+    /// file behind memory. `accounts.remove` needs the file itself not to
+    /// name the account (design 0013, `accounts-remove-forget-first`): a
+    /// removed index is handed out again, and the file is what a restart
+    /// loads.
+    pub fn write_through<S: StoreFile, T>(
+        &mut self,
+        change: impl FnOnce(&mut S) -> Applied<T>,
+    ) -> Result<Written<T>, WriteFailure> {
+        self.write_change(change, true)
+    }
+
+    fn write_change<S: StoreFile, T>(
+        &mut self,
+        change: impl FnOnce(&mut S) -> Applied<T>,
+        through: bool,
+    ) -> Result<Written<T>, WriteFailure> {
         if !self.moved(S::KIND) {
             return Err(WriteFailure::NotMoved);
         }
@@ -243,7 +267,8 @@ impl Grants {
         };
         let mut next = S::slot(self).clone();
         let applied = change(&mut next);
-        if applied.effect == Effect::Unchanged {
+        let behind = through && self.behind.contains(&S::KIND);
+        if applied.effect == Effect::Unchanged && !behind {
             return Ok(Written {
                 value: applied.value,
                 effect: applied.effect,
@@ -254,6 +279,7 @@ impl Grants {
         match write_file(&path, text.as_bytes(), &GrantWrite(S::KIND.name())) {
             Ok(done) => {
                 *S::slot_mut(self) = next;
+                self.behind.retain(|kind| *kind != S::KIND);
                 Ok(Written {
                     value: applied.value,
                     effect: applied.effect,
@@ -272,6 +298,9 @@ impl Grants {
                 );
                 if applied {
                     *S::slot_mut(self) = next;
+                    if !self.behind.contains(&S::KIND) {
+                        self.behind.push(S::KIND);
+                    }
                 }
                 Err(WriteFailure::Io { applied })
             }
