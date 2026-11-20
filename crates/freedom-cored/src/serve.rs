@@ -258,6 +258,11 @@ const CAPABILITIES: &[&str] = &[
     "x402.authorize",
     "x402.settle",
     "x402.update",
+    // Design 0013: the pending Safe transactions (PRF-5f).
+    "safe_pending.get",
+    "safe_pending.set",
+    "safe_pending.clear",
+    "safe_pending.list",
     // Design 0013: the payment history (PRF-5g-2).
     "payments.append",
     "payments.update",
@@ -829,7 +834,7 @@ const STORES: &[&str] = &[
 ];
 
 /// The stores this core serves once named: the echo holds only these.
-const STORES_SERVED: &[&str] = &["vault_meta", "payments", "rpc_api_keys"];
+const STORES_SERVED: &[&str] = &["vault_meta", "safe_pending", "payments", "rpc_api_keys"];
 
 /// The hello's `store_moved`, each name once, in the hello's order. A name
 /// [`STORES`] doesn't list makes the hello malformed.
@@ -1674,12 +1679,15 @@ impl Core {
         }
         let root = grants.0.clone();
         self.vault.configure_grants(grants.0, grants.1);
+        self.vault
+            .configure_safe_pending(root.clone(), stores.contains(&"safe_pending"));
         self.stores_echo = stores
             .into_iter()
             .filter(|name| STORES_SERVED.contains(name))
             .filter(|name| match *name {
                 "vault_meta" => self.vault.configure_vault_meta(),
                 "rpc_api_keys" => self.vault.configure_rpc_keys(root.clone()),
+                "safe_pending" => true,
                 // Opened at its first request, never before the name.
                 "payments" => {
                     self.vault.configure_payments(root.clone());
