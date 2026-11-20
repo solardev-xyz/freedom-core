@@ -134,6 +134,7 @@ no rebuild.
 | `generator/check.test.js` | Integration tests that damage copies of the oracle outputs and require `check` to fail. |
 | `generator/interop.test.js` | Design 0013's interop harness: the profiles reference's `createProfile` and `renameProfile` against `freedom-cored`'s catalog subcommands on one app root, and the catalog's write lock held both ways. Needs `FREEDOM_CORED`, a `testhooks` build. |
 | `generator/interop-actor.js` | The harness's reference processes: a writer loop, and a holder of the write lock. |
+| `generator/downgrade-actor.js` | Design 0013's downgrade runs (PRF-5c-2): the stores reference's `identity-manager.js`, over its own core client and vault backend, reading a profile through the previous core release. `freedom-cored`'s `tests/quick_unlock.rs` runs it when `FREEDOM_CORED_PREVIOUS` (that release's binary) and `FREEDOM_BROWSER_STORES_CHECKOUT` are set. |
 
 Every JSON file has a `meta` block with the full reference commit, actual installed
 package versions, Node version and generator path. The Radicle files' `meta` names the
@@ -182,6 +183,12 @@ node vectors/generator/generate.js check --freedom-browser /root/herdr/freedom-b
 node --test vectors/generator/check.test.js
 cargo build -p freedom-cored --features testhooks
 FREEDOM_CORED=target/debug/freedom-cored node --test vectors/generator/interop.test.js
+# The downgrade runs: cored-v0.22.0's linux-amd64 binary from its release,
+# checked against the release's SHA256SUMS (CI pins that file's digest).
+FREEDOM_CORED_PREVIOUS=/path/to/v0.22.0/freedom-cored \
+  FREEDOM_BROWSER_STORES_CHECKOUT=/root/herdr/freedom-browser-wt/stores-reference \
+  cargo test -p freedom-cored --features testhooks --test quick_unlock -- \
+  --exact the_downgrade_after_the_commit a_target_the_older_build_changed_sets_the_record_aside
 ```
 
 The integration tests use `/root/herdr/freedom-browser`,

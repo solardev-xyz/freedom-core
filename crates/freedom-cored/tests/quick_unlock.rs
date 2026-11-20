@@ -41,6 +41,12 @@
 //!   unlock opens it. An old entry never opens the new vault; unlock works
 //!   locked and unlocked after a re-wrap; the credential under its second
 //!   name, `quick-unlock.next`, kept at start and folded by the next write.
+//! - **The vault and its metadata, one write** (PRF-5c-2), and its
+//!   **downgrade runs**: at each point after the journal's commit, the
+//!   previous core release starts on the files and the stores reference's
+//!   `identity-manager.js` reads them through it, then this core starts
+//!   again (skipped without `FREEDOM_CORED_PREVIOUS` and
+//!   `FREEDOM_BROWSER_STORES_CHECKOUT`; CI's vectors job runs them).
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
@@ -2447,4 +2453,592 @@ fn the_unlock_migrates_missing_addresses_once_moved() {
         "{exported}"
     );
     assert_eq!(main.read(META).unwrap(), BARE_META.as_bytes());
+}
+
+// ---- PRF-5c-2b: the downgrade after the commit (design 0013) ----
+//
+// The row's downgrade runs: this core is stopped by a crash hook at each
+// point after the commit, the previous core release starts on the files,
+// and the stores reference's `identity-manager.js` reads them through it
+// (vectors/generator/downgrade-actor.js, the reference's own core client
+// and vault backend). Then this core starts again. They need
+// `FREEDOM_CORED_PREVIOUS` (the previous release's binary) and
+// `FREEDOM_BROWSER_STORES_CHECKOUT` (the reference at
+// `STORES_REFERENCE_COMMIT`), and Node; without them they are skipped.
+// CI's vectors job runs them.
+
+/// The release the runs downgrade to.
+const PREVIOUS_VERSION: &str = "0.22.0";
+
+/// Where the journal stopped.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Point {
+    /// The journal written, nothing installed.
+    Journal,
+    /// The vault installed, not its metadata.
+    Vault,
+    /// Both installed, the journal left.
+    Both,
+}
+
+impl Point {
+    const ALL: [Point; 3] = [Point::Journal, Point::Vault, Point::Both];
+
+    fn hook(self) -> &'static str {
+        match self {
+            Point::Journal => "after-meta-journal",
+            Point::Vault => "after-meta-install-vault",
+            Point::Both => "after-meta-install-meta",
+        }
+    }
+}
+
+/// The previous core and the stores reference, or `None` with the reason
+/// the runs are skipped.
+#[allow(clippy::print_stderr)] // The skip's reason, in the test's output.
+fn downgrade_env() -> Option<(PathBuf, PathBuf)> {
+    let previous = std::env::var_os("FREEDOM_CORED_PREVIOUS").map(PathBuf::from);
+    let stores = std::env::var_os("FREEDOM_BROWSER_STORES_CHECKOUT").map(PathBuf::from);
+    match (previous, stores) {
+        (Some(previous), Some(stores)) => {
+            assert!(previous.is_file(), "FREEDOM_CORED_PREVIOUS: {previous:?}");
+            assert!(
+                stores.join("src/main/identity-manager.js").is_file(),
+                "FREEDOM_BROWSER_STORES_CHECKOUT: {stores:?}"
+            );
+            Some((previous, stores))
+        }
+        _ => {
+            eprintln!(
+                "skipped: the downgrade runs need FREEDOM_CORED_PREVIOUS (cored-v{PREVIOUS_VERSION}'s \
+                 binary) and FREEDOM_BROWSER_STORES_CHECKOUT (the stores reference)"
+            );
+            None
+        }
+    }
+}
+
+/// The profile's files that the journal and the older build touch.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct Files {
+    vault: Option<Vec<u8>>,
+    meta: Option<Vec<u8>>,
+    journal: Option<Vec<u8>>,
+    staged: [Option<Vec<u8>>; 2],
+    entries: BTreeMap<String, String>,
+}
+
+impl Main {
+    fn files(&self) -> Files {
+        Files {
+            vault: self.read("identity-vault.json"),
+            meta: self.read(META),
+            journal: self.read(JOURNAL),
+            staged: [self.read(STAGED[0]), self.read(STAGED[1])],
+            entries: if self.secrets_path().exists() {
+                self.entries()
+            } else {
+                BTreeMap::new()
+            },
+        }
+    }
+
+    /// The vault and the metadata, read back as `files` left them.
+    fn targets_are(&self, files: &Files, label: &str) {
+        assert_eq!(
+            self.read("identity-vault.json"),
+            files.vault,
+            "{label}: the vault"
+        );
+        assert_eq!(self.read(META), files.meta, "{label}: the metadata");
+    }
+
+    /// Account and Bee addresses of the unlocked vault.
+    fn addresses(&mut self, accounts: &[u32]) -> Value {
+        let derived = self.call(
+            "keys.addresses",
+            json!({ "accounts": accounts, "publishers": [] }),
+        );
+        assert!(derived["result"].is_object(), "{derived}");
+        derived["result"].clone()
+    }
+}
+
+/// The reference's `identity-manager.js` over the previous core on `main`'s
+/// profile: each step's result (`result`, or `error`).
+fn reference_reads(main: &Main, env: &(PathBuf, PathBuf), steps: Value) -> Vec<Value> {
+    let actor = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../vectors/generator/downgrade-actor.js");
+    let input = json!({
+        "stores": env.1, "cored": env.0, "data": main.data, "locks": main.locks,
+        "grantRoot": main.data.parent().unwrap().join("userData"), "steps": steps,
+    });
+    let out = std::process::Command::new("node")
+        .arg(actor)
+        .arg(input.to_string())
+        .output()
+        .expect("node");
+    assert!(
+        out.status.success(),
+        "the actor: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let read: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(read["core_version"], PREVIOUS_VERSION, "{read}");
+    read["steps"].as_array().unwrap().clone()
+}
+
+/// One step's result, which must not be an error.
+fn ok(steps: &[Value], i: usize, op: &str) -> Value {
+    assert_eq!(steps[i]["op"], op, "{steps:?}");
+    assert!(steps[i].get("error").is_none(), "step {i}: {steps:?}");
+    steps[i]["result"].clone()
+}
+
+/// The account list's `[index, name, address]`s.
+fn listed(wallets: &Value) -> Vec<(u64, String, String)> {
+    wallets
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|w| {
+            assert_eq!(w["type"], "mnemonic", "{w}");
+            (
+                w["index"].as_u64().unwrap(),
+                w["name"].as_str().unwrap().to_owned(),
+                w["address"].as_str().unwrap_or("").to_owned(),
+            )
+        })
+        .collect()
+}
+
+/// A downgrade: the op stopped at `point`, then the reference's `steps`
+/// over the previous core.
+struct Downgrade {
+    main: Main,
+    /// The vault and the metadata before the op.
+    old: (Option<Vec<u8>>, Option<Vec<u8>>),
+    /// The files the crash left.
+    crashed: Files,
+    /// The reference's results.
+    steps: Vec<Value>,
+    /// The files the older build left.
+    after: Files,
+}
+
+fn downgrade(
+    env: &(PathBuf, PathBuf),
+    op: MetaOp,
+    point: Point,
+    meta: Option<&str>,
+    steps: Value,
+) -> Downgrade {
+    let label = format!("{op:?} {point:?}");
+    let mut main = op.before();
+    match meta {
+        Some(text) => {
+            if !main.data.exists() {
+                // The core makes the profile's directory.
+                main.start(&[]);
+                main.stop();
+            }
+            std::fs::write(main.data.join(META), text).unwrap();
+        }
+        None => assert!(!op.import(), "{label}: an import's metadata"),
+    }
+    let old = (main.read("identity-vault.json"), main.read(META));
+    main.start(&[("FREEDOM_CORED_TEST_SECRETS_CRASH", point.hook())]);
+    assert!(op.run(&mut main).is_none(), "{label}: answered");
+    assert_eq!(
+        main.core().exit_code(Duration::from_secs(10)),
+        99,
+        "{label}"
+    );
+    main.core = None;
+    let crashed = main.files();
+    assert!(crashed.journal.is_some(), "{label}: the journal");
+    let steps = reference_reads(&main, env, steps);
+    let after = main.files();
+    // The older build reads none of the journal's names.
+    assert_eq!(after.journal, crashed.journal, "{label}: the journal");
+    assert_eq!(after.staged, crashed.staged, "{label}: the staged files");
+    assert!(!main.data.join(CORRUPT).exists(), "{label}");
+    Downgrade {
+        main,
+        old,
+        crashed,
+        steps,
+        after,
+    }
+}
+
+impl Downgrade {
+    /// The new vault's digest, from the journal.
+    fn new_digest(&self) -> String {
+        let record: Value = serde_json::from_slice(self.crashed.journal.as_ref().unwrap()).unwrap();
+        record["files"][0]["sha256"].as_str().unwrap().to_owned()
+    }
+
+    /// The older build left the credential as the start rule leaves it:
+    /// at the first point it removed the staged entry, which names no
+    /// vault; after the vault's install it kept the entry bound to it.
+    fn credential_as_the_older_core_left_it(&self, op: MetaOp, point: Point, label: &str) {
+        let new = self.new_digest();
+        let bound_to_new =
+            |entries: &BTreeMap<String, String>| entries.values().filter(|d| **d == new).count();
+        if !op.quick() {
+            assert_eq!(self.after.entries, self.crashed.entries, "{label}");
+            return;
+        }
+        assert_eq!(bound_to_new(&self.crashed.entries), 1, "{label}: staged");
+        let on_disk = self.after.vault.as_deref().map(sha256_hex);
+        if point == Point::Journal {
+            assert_eq!(
+                bound_to_new(&self.after.entries),
+                0,
+                "{label}: {:?}",
+                self.after.entries
+            );
+            // The replaced vault keeps its own (an enrolled import's).
+            let kept: BTreeMap<String, String> = self
+                .crashed
+                .entries
+                .clone()
+                .into_iter()
+                .filter(|(_, d)| *d != new)
+                .collect();
+            assert_eq!(self.after.entries, kept, "{label}");
+        } else {
+            assert_eq!(on_disk.as_deref(), Some(new.as_str()), "{label}");
+            assert_eq!(bound_to_new(&self.after.entries), 1, "{label}");
+            assert_eq!(
+                self.after.entries.len(),
+                1,
+                "{label}: {:?}",
+                self.after.entries
+            );
+        }
+    }
+
+    /// This core again: the journal finished, the new pair.
+    fn finished(&mut self, quick: bool, label: &str) {
+        self.main.start(&[]);
+        self.main.journal_gone(label);
+        assert!(!self.main.data.join(CORRUPT).exists(), "{label}");
+        self.main.drained();
+        let old = self.old.clone();
+        self.main.meta_pair_holds(&old, true, quick, label);
+    }
+
+    /// This core again: the record set aside, the files the older build
+    /// left, nothing else changed.
+    fn set_aside(&mut self, label: &str) {
+        self.main.start(&[]);
+        self.main.journal_gone(label);
+        assert!(self.main.data.join(CORRUPT).exists(), "{label}: set aside");
+        let after = self.after.clone();
+        self.main.targets_are(&after, label);
+        self.main.drained();
+        assert_eq!(self.main.files().entries, self.after.entries, "{label}");
+    }
+}
+
+/// Metadata of the `abandon` vault as an older build leaves it once the
+/// account list was read (`derivedWallets`), with `accounts` of it listed;
+/// or, `lazy`, as `saveNewVaultMeta` wrote it, before any read of the list.
+fn abandon_meta(abandon: &Value, lazy: bool) -> String {
+    let user = |i: usize| abandon["user_wallets"][i]["address"].clone();
+    let mut meta = json!({
+        "userKnowsPassword": true,
+        "createdAt": "2026-01-01T00:00:00.000Z",
+        "addresses": { "userWallet": user(0), "beeWallet": abandon["bee_wallet"] },
+    });
+    if !lazy {
+        meta["derivedWallets"] = json!([
+            { "index": 0, "name": "Main Wallet", "address": user(0) },
+            { "index": 1, "name": "Savings", "address": user(1) },
+        ]);
+        meta["activeWalletIndex"] = json!(0);
+    }
+    serde_json::to_string_pretty(&meta).unwrap()
+}
+
+/// The addresses of accounts 0 and 1 of `mnemonic`, from this core.
+fn derived_from(mnemonic: &str) -> Value {
+    let mut main = Main::new();
+    main.start(&[]);
+    let imported = main.call(
+        "vault.import",
+        json!({ "password_b64": b64(PASSWORD), "mnemonic_b64": b64(mnemonic), "overwrite": true }),
+    );
+    assert!(imported["result"].is_object(), "{imported}");
+    main.addresses(&[0, 1])
+}
+
+fn addresses_of(derived: &Value) -> Vec<String> {
+    derived["user_wallets"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|w| w["address"].as_str().unwrap().to_owned())
+        .collect()
+}
+
+#[test]
+fn the_downgrade_after_the_commit() {
+    let Some(env) = downgrade_env() else {
+        return;
+    };
+    let abandon = derived_from(ABANDON);
+    let legal = addresses_of(&derived_from(LEGAL));
+    let used = abandon_meta(&abandon, false);
+    let used_listed = vec![
+        (
+            0,
+            "Main Wallet".to_owned(),
+            addresses_of(&abandon)[0].clone(),
+        ),
+        (1, "Savings".to_owned(), addresses_of(&abandon)[1].clone()),
+    ];
+    let with = |addresses: &[String]| -> Vec<(u64, String, String)> {
+        used_listed
+            .iter()
+            .zip(addresses)
+            .map(|((i, name, _), a)| (*i, name.clone(), a.clone()))
+            .collect()
+    };
+    for op in MetaOp::ALL {
+        for point in Point::ALL {
+            let label = format!("{op:?} {point:?}");
+            let meta = op.import().then_some(used.as_str());
+            let steps = match (point, op.import()) {
+                // The old pair: no vault, or the replaced vault with its
+                // metadata.
+                (Point::Journal, false) => json!([
+                    { "op": "hasVault" }, { "op": "meta" }, { "op": "wallets" },
+                ]),
+                (Point::Journal, true) => json!([
+                    { "op": "hasVault" }, { "op": "meta" }, { "op": "wallets" },
+                    { "op": "unlock", "password": PASSWORD }, { "op": "wallets" },
+                    { "op": "lock" },
+                ]),
+                // The new vault with the old metadata: none after a first
+                // setup, the replaced vault's after an overwrite.
+                (Point::Vault, false) => json!([
+                    { "op": "hasVault" }, { "op": "meta" }, { "op": "wallets" },
+                    { "op": "unlock", "password": NEW_PASSWORD }, { "op": "meta" },
+                    { "op": "createAccount", "name": "Second" }, { "op": "lock" },
+                ]),
+                (Point::Vault, true) => json!([
+                    { "op": "hasVault" }, { "op": "meta" }, { "op": "wallets" },
+                    { "op": "unlock", "password": NEW_PASSWORD }, { "op": "wallets" },
+                    { "op": "meta" }, { "op": "lock" },
+                ]),
+                // The new pair.
+                (Point::Both, _) => json!([
+                    { "op": "hasVault" }, { "op": "meta" },
+                    { "op": "unlock", "password": NEW_PASSWORD },
+                    { "op": "addresses", "accounts": [0] }, { "op": "meta" }, { "op": "lock" },
+                ]),
+            };
+            let mut run = downgrade(&env, op, point, meta, steps);
+            let s = run.steps.clone();
+            match (point, op.import()) {
+                (Point::Journal, false) => {
+                    assert_eq!(ok(&s, 0, "hasVault"), false, "{label}: onboarding");
+                    assert_eq!(ok(&s, 1, "meta"), Value::Null, "{label}");
+                    assert_eq!(ok(&s, 2, "wallets"), json!([]), "{label}");
+                }
+                (Point::Journal, true) => {
+                    assert_eq!(ok(&s, 0, "hasVault"), true, "{label}");
+                    assert_eq!(
+                        ok(&s, 1, "meta"),
+                        serde_json::from_str::<Value>(&used).unwrap()
+                    );
+                    assert_eq!(listed(&ok(&s, 2, "wallets")), used_listed, "{label}");
+                    ok(&s, 3, "unlock");
+                    // The old vault derives them.
+                    assert_eq!(listed(&ok(&s, 4, "wallets")), used_listed, "{label}");
+                    ok(&s, 5, "lock");
+                }
+                (Point::Vault, false) => {
+                    assert_eq!(ok(&s, 0, "hasVault"), true, "{label}");
+                    assert_eq!(ok(&s, 1, "meta"), Value::Null, "{label}");
+                    assert_eq!(ok(&s, 2, "wallets"), json!([]), "{label}: no accounts");
+                    ok(&s, 3, "unlock");
+                    assert_eq!(ok(&s, 4, "meta"), Value::Null, "{label}: nothing migrated");
+                    assert_eq!(s[5]["op"], "createAccount");
+                    assert_eq!(s[5]["error"]["message"], "No vault found", "{label}: {s:?}");
+                    ok(&s, 6, "lock");
+                }
+                (Point::Vault, true) => {
+                    let used_value: Value = serde_json::from_str(&used).unwrap();
+                    assert_eq!(ok(&s, 0, "hasVault"), true, "{label}");
+                    assert_eq!(ok(&s, 1, "meta"), used_value, "{label}");
+                    // Locked: their stored addresses.
+                    assert_eq!(listed(&ok(&s, 2, "wallets")), used_listed, "{label}");
+                    ok(&s, 3, "unlock");
+                    // Unlocked: derived from the new vault.
+                    assert_eq!(listed(&ok(&s, 4, "wallets")), with(&legal), "{label}");
+                    assert_eq!(ok(&s, 5, "meta"), used_value, "{label}: nothing migrated");
+                    ok(&s, 6, "lock");
+                }
+                (Point::Both, import) => {
+                    assert_eq!(ok(&s, 0, "hasVault"), true, "{label}");
+                    let meta = ok(&s, 1, "meta");
+                    ok(&s, 2, "unlock");
+                    let derived = ok(&s, 3, "addresses");
+                    // As `saveNewVaultMeta` writes it after a create.
+                    let keys: BTreeSet<&str> = meta
+                        .as_object()
+                        .unwrap()
+                        .keys()
+                        .map(String::as_str)
+                        .collect();
+                    assert_eq!(
+                        keys,
+                        BTreeSet::from(["addresses", "createdAt", "userKnowsPassword"])
+                    );
+                    assert_eq!(meta["userKnowsPassword"], false, "{label}");
+                    assert_eq!(
+                        meta["addresses"],
+                        json!({
+                            "userWallet": derived["user_wallets"][0]["address"],
+                            "beeWallet": derived["bee_wallet"],
+                        }),
+                        "{label}"
+                    );
+                    if import {
+                        assert_eq!(
+                            meta["addresses"]["userWallet"],
+                            legal[0].as_str(),
+                            "{label}"
+                        );
+                    }
+                    assert_eq!(ok(&s, 4, "meta"), meta, "{label}: nothing migrated");
+                    ok(&s, 5, "lock");
+                }
+            }
+            run.main.targets_are(&run.crashed, &label);
+            run.credential_as_the_older_core_left_it(op, point, &label);
+            if point == Point::Journal && op.quick() {
+                // The older core removed the entry: never installed.
+                run.set_aside(&label);
+                let old = run.old.clone();
+                run.main.meta_pair_holds(&old, false, true, &label);
+            } else {
+                run.finished(op.quick(), &label);
+            }
+        }
+    }
+
+    // A create that followed a delete (which leaves `vault-meta.json`),
+    // stopped after the vault's install: the deleted vault's records,
+    // derived from the new vault while it is unlocked.
+    let label = "a create after a delete, Vault";
+    let mut run = downgrade(
+        &env,
+        MetaOp::Create,
+        Point::Vault,
+        Some(&used),
+        json!([
+            { "op": "wallets" }, { "op": "unlock", "password": NEW_PASSWORD },
+            { "op": "addresses", "accounts": [0, 1] }, { "op": "wallets" }, { "op": "lock" },
+        ]),
+    );
+    let s = run.steps.clone();
+    assert_eq!(listed(&ok(&s, 0, "wallets")), used_listed, "{label}");
+    let derived = addresses_of(&ok(&s, 2, "addresses"));
+    assert_ne!(derived, addresses_of(&abandon), "{label}");
+    assert_eq!(listed(&ok(&s, 3, "wallets")), with(&derived), "{label}");
+    run.main.targets_are(&run.crashed, label);
+    run.finished(false, label);
+}
+
+#[test]
+fn a_target_the_older_build_changed_sets_the_record_aside() {
+    let Some(env) = downgrade_env() else {
+        return;
+    };
+    let abandon = derived_from(ABANDON);
+    let used = abandon_meta(&abandon, false);
+    let lazy = abandon_meta(&abandon, true);
+
+    // The journal written after a first setup: the older build shows
+    // onboarding, and the user sets the vault up again there.
+    let label = "Create Journal, set up again";
+    let mut run = downgrade(
+        &env,
+        MetaOp::Create,
+        Point::Journal,
+        None,
+        json!([{ "op": "createVault", "password": PASSWORD }, { "op": "hasVault" }]),
+    );
+    assert!(ok(&run.steps, 0, "createVault").is_string(), "{label}");
+    assert_eq!(ok(&run.steps, 1, "hasVault"), true, "{label}");
+    assert!(
+        run.after.vault.is_some() && run.after.meta.is_some(),
+        "{label}"
+    );
+    run.set_aside(label);
+
+    // The journal written over a vault: the older build renames one of its
+    // accounts.
+    let label = "Import Journal, an account renamed";
+    let mut run = downgrade(
+        &env,
+        MetaOp::Import,
+        Point::Journal,
+        Some(&used),
+        json!([
+            { "op": "unlock", "password": PASSWORD },
+            { "op": "rename", "index": 1, "name": "Renamed" }, { "op": "lock" },
+        ]),
+    );
+    ok(&run.steps, 1, "rename");
+    assert_ne!(run.after.meta, run.crashed.meta, "{label}");
+    assert_eq!(run.after.vault, run.old.0, "{label}");
+    run.set_aside(label);
+
+    // The vault installed over metadata no read of the account list has
+    // touched yet: the older build's first read writes it.
+    for op in [MetaOp::Import, MetaOp::ImportQuick] {
+        let label = format!("{op:?} Vault, the list's first read");
+        let mut run = downgrade(
+            &env,
+            op,
+            Point::Vault,
+            Some(&lazy),
+            json!([{ "op": "wallets" }]),
+        );
+        let wallets = ok(&run.steps, 0, "wallets");
+        assert_eq!(
+            wallets[0]["address"], abandon["user_wallets"][0]["address"],
+            "{label}"
+        );
+        assert_ne!(run.after.meta, run.crashed.meta, "{label}: the lazy write");
+        run.credential_as_the_older_core_left_it(op, Point::Vault, &label);
+        run.set_aside(&label);
+        // The new vault stays, with its own credential.
+        if op.quick() {
+            let unlock = run.main.call("quick_unlock.unlock", json!({}));
+            assert!(unlock["result"].is_object(), "{label}: {unlock}");
+        }
+    }
+
+    // Both installed: the older build adds an account.
+    let label = "Create Both, an account added";
+    let mut run = downgrade(
+        &env,
+        MetaOp::Create,
+        Point::Both,
+        None,
+        json!([
+            { "op": "unlock", "password": NEW_PASSWORD },
+            { "op": "createAccount", "name": "Second" }, { "op": "lock" },
+        ]),
+    );
+    ok(&run.steps, 1, "createAccount");
+    assert_ne!(run.after.meta, run.crashed.meta, "{label}");
+    run.set_aside(label);
 }
