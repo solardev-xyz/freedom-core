@@ -383,6 +383,9 @@ enum Kind {
     QuickDisable,
     /// A `secrets.*` RPC-key method (design 0013, "RPC API keys").
     RpcKeys(RpcJob),
+    /// An `accounts.*` method (design 0013, "`vault-meta.json`"): run on
+    /// the event loop when it reaches the queue's head ([`Vault::start_next`]).
+    Accounts(crate::accounts::Op),
 }
 
 /// What an RPC-key job does.
@@ -433,7 +436,8 @@ impl Kind {
             | Kind::QuickExportMnemonic
             | Kind::QuickExportPrivateKey { .. }
             | Kind::QuickDisable
-            | Kind::RpcKeys(_) => None,
+            | Kind::RpcKeys(_)
+            | Kind::Accounts(_) => None,
         }
     }
 
@@ -481,7 +485,8 @@ impl Kind {
             | Kind::QuickExportMnemonic
             | Kind::QuickExportPrivateKey { .. }
             | Kind::QuickDisable
-            | Kind::RpcKeys(_) => false,
+            | Kind::RpcKeys(_)
+            | Kind::Accounts(_) => false,
         }
     }
 }
@@ -633,6 +638,9 @@ pub struct Vault {
     /// `store_moved` (design 0013, "RPC API keys"): `None` before, and every
     /// `secrets.*` RPC-key method answers `not_moved`.
     rpc_keys: Option<Arc<crate::rpc_keys::RpcKeys>>,
+    /// `vault-meta.json` (design 0013): read until `core.hello` names
+    /// `vault_meta` in `store_moved`, written once it does.
+    accounts: crate::accounts::Store,
 }
 
 #[derive(Deserialize)]
@@ -844,6 +852,7 @@ impl Vault {
             // Replaced by the startup snapshot before core.hello is answered,
             // and no vault request is accepted before that.
             file: Err(OpError::Storage("not_ready")),
+            accounts: crate::accounts::Store::new(dir.clone()),
             dir,
             lock_dir,
             state: VaultState::new(),
@@ -923,6 +932,14 @@ impl Vault {
             }
             None => false,
         }
+    }
+
+    /// The hello's `store_moved` named `vault_meta`: the core writes
+    /// `vault-meta.json` from now on (design 0013, "One writer per store").
+    /// Whether it took the store.
+    pub fn configure_vault_meta(&mut self) -> bool {
+        self.accounts.configure_moved();
+        true
     }
 
     /// An RPC-key request's job, at admission: `not_moved` until the store
@@ -1240,6 +1257,7 @@ impl Vault {
                 | "keys.addresses"
                 | "keys.radicle_did"
         ) || RPC_KEY_METHODS.contains(&method)
+            || crate::accounts::METHODS.contains(&method)
             || crate::signing::METHODS.contains(&method)
             || Approvals::handles(method)
             || crate::phone::Phone::handles(method)
@@ -1781,6 +1799,9 @@ impl Vault {
             },
             "quick_unlock.disable" => Kind::QuickDisable,
             _ if RPC_KEY_METHODS.contains(&method) => Kind::RpcKeys(self.rpc_job(method, raw)?),
+            _ if crate::accounts::METHODS.contains(&method) => {
+                Kind::Accounts(self.accounts.op(method, raw)?)
+            }
             "nodes.op_status" => {
                 let p = params::<OpStatusParams>(raw)?;
                 if !journal::valid_op_id(&p.op_id) {
@@ -1835,11 +1856,20 @@ impl Vault {
             let Some(pending) = self.queue.pop_front() else {
                 return;
             };
-            let mut pending = pending;
             if Instant::now() >= pending.deadline {
                 self.reply_error(out, pending.id, deadline_exceeded());
                 continue;
             }
+            // `accounts.*` runs here, on the loop, behind the jobs queued
+            // before it (design 0013, "`vault-meta.json`").
+            let pending = match pending.kind {
+                Kind::Accounts(op) => {
+                    self.run_accounts(out, pending.id, op);
+                    continue;
+                }
+                kind => Pending { kind, ..pending },
+            };
+            let mut pending = pending;
             if let Kind::NodeWrite { keys, spec, .. } = &mut pending.kind
                 && needs_keys(spec)
             {
@@ -1901,6 +1931,27 @@ impl Vault {
                 answered: false,
             });
             out.push(Out::Job(job_id, job));
+        }
+    }
+
+    /// An `accounts.*` request at the queue's head: run, answered, and its
+    /// grant events and narrowings passed on, as an approval method's are.
+    fn run_accounts(&mut self, out: &mut Vec<Out>, id: u64, op: crate::accounts::Op) {
+        let answer = self
+            .accounts
+            .run(op, &self.state, &mut self.approvals)
+            .and_then(|answer| {
+                let raw = serde_json::value::RawValue::from_string(answer.stringify())
+                    .map_err(|_| internal())?;
+                json_result(id, &raw).ok_or_else(internal)
+            });
+        match answer {
+            Ok(payload) => out.push(Out::Send(payload)),
+            Err(error) => self.reply_error(out, id, error),
+        }
+        out.extend(self.approvals.take_events().into_iter().map(Out::Send));
+        for narrowed in self.approvals.take_narrowed() {
+            self.phone.narrowed(&narrowed);
         }
     }
 
@@ -2057,6 +2108,11 @@ impl Vault {
                     }),
                 )
             }
+            // Run on the loop before it would get here.
+            Kind::Accounts(_) => (
+                RunningKind::RpcKeys,
+                Box::new(|_dir, _control| JobOutput::RpcKeys(Err(internal()))),
+            ),
             Kind::RpcKeys(job) => {
                 let rpc_keys = self.rpc_keys.clone();
                 (

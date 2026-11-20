@@ -18,6 +18,7 @@
 //! (`fc_service::confine::clean_entry`), and no thread starts before its
 //! confinement, logging's writer included (its lines are written directly).
 
+mod accounts;
 mod approvals;
 mod chain;
 mod clock;
