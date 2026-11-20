@@ -205,10 +205,11 @@ pub fn spawn(
             );
             // The core's own reads go back to the event loop.
             let read_events = events.clone();
-            chain.internal_served = Some(Box::new(move |tag, payload| {
+            chain.internal_served = Some(Box::new(move |tag, payload, past_due| {
                 let _ = read_events.send(Event::ChainRead {
                     tag,
                     payload: payload.into(),
+                    past_due,
                 });
             }));
             // Each fee reference served is the approvals' fee evidence.
@@ -370,9 +371,10 @@ fn earliest(a: Option<Ms>, b: Option<Ms>) -> Option<Ms> {
 struct Caller {
     /// Main's request ID, or for one of the core's own reads its tag.
     id: u64,
-    /// One of the core's own reads ([`In::Internal`]): its reply goes to
-    /// the event loop, and main's IDs never name it.
-    internal: bool,
+    /// One of the core's own reads ([`In::Internal`]): when, by this
+    /// thread's clock, the deadline its asker gave passes. Its reply goes
+    /// to the event loop, and main's IDs never name it.
+    internal: Option<Ms>,
     /// For the outcome's log line: never an origin, address or message.
     chain_id: u64,
     method: &'static str,
@@ -423,6 +425,10 @@ impl Clock {
 /// Told of each `chain.fee_reference` reply served.
 type FeeServed = Box<dyn Fn(u64, &[u8]) + Send>;
 
+/// Where one of the core's own reads goes: its tag, its reply's payload,
+/// and whether it failed at or after its asker's deadline.
+type InternalServed = Box<dyn Fn(u64, &[u8], bool) + Send>;
+
 struct Chain {
     /// Read whenever the machine is brought to now, and again as each
     /// request takes its slot at main, so nothing is dispatched against a
@@ -460,8 +466,8 @@ struct Chain {
     /// evidence (design 0012, "The fee check").
     fee_served: Option<FeeServed>,
     /// Told of each of the core's own reads' replies (its tag, the reply's
-    /// payload).
-    internal_served: Option<FeeServed>,
+    /// payload, and whether it failed past its asker's deadline).
+    internal_served: Option<InternalServed>,
     /// Runs as each reply is queued: a test's way to act while this thread
     /// serializes one (PR #57 review, round 4).
     #[cfg(test)]
@@ -629,6 +635,11 @@ impl Chain {
                 let backlog = self.backlog();
                 self.machine.set_output_backlog(backlog);
                 let bounds = self.machine.bounds();
+                // The asker's deadline, by this clock: the event loop's
+                // counts from another instant, so this one tells whether the
+                // read failed at it. One the bounds cut short passes later
+                // than the machine's own.
+                let due = self.machine.now().saturating_add(deadline_ms);
                 let deadline_ms = deadline_ms.min(bounds.deadline_ms);
                 let deadline = self.machine.now().saturating_add(deadline_ms);
                 // A send's quote and its fee evidence (design 0012,
@@ -646,7 +657,7 @@ impl Chain {
                 };
                 let caller = Caller {
                     id: tag,
-                    internal: true,
+                    internal: Some(due),
                     chain_id,
                     method: label(&call),
                     deadline,
@@ -704,7 +715,7 @@ impl Chain {
         };
         let caller = Caller {
             id,
-            internal: false,
+            internal: None,
             chain_id: read.chain_id,
             method: label(&call),
             deadline: now.saturating_add(deadline_ms),
@@ -770,7 +781,7 @@ impl Chain {
                     .then(|| deadline.saturating_sub(bounds.reconcile_ms));
                 let caller = Caller {
                     id,
-                    internal: false,
+                    internal: None,
                     chain_id: call_chain(&call),
                     method: label(&call),
                     deadline,
@@ -1091,12 +1102,14 @@ impl Chain {
                 continue;
             };
             log_outcome(&caller, &done);
-            if caller.internal {
+            if let Some(due) = caller.internal {
                 // The core's own read: back to the event loop, whatever it
-                // says; main never sees it.
+                // says, with whether it failed at or after its asker's
+                // deadline; main never sees it.
+                let past_due = done.result.is_err() && done.settled >= due;
                 let payload = reply_message(caller.id, &done).write();
                 if let Some(served) = &self.internal_served {
-                    served(caller.id, &payload);
+                    served(caller.id, &payload, past_due);
                 }
                 continue;
             }

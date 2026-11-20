@@ -41,6 +41,7 @@ use serde::Deserialize;
 use serde_json::value::RawValue;
 use zeroize::Zeroizing;
 
+use crate::eip1193::Verdict;
 use crate::requests::{self, Dispatch, Owner, Requests, Start};
 use crate::serve::Event;
 use crate::transport;
@@ -322,8 +323,9 @@ struct Naming {
     /// Message IDs by the machine's request id.
     by_io: BTreeMap<u64, u64>,
     /// Page requests' name checks (APR-5f), by the machine's caller for
-    /// the lookup: the page request's id and the binding judged.
-    checks: BTreeMap<u64, (u64, fc_eip1193::names::Binding)>,
+    /// the lookup: the page request's id, the binding judged, and when, by
+    /// this thread's clock, the lookup's deadline passes.
+    checks: BTreeMap<u64, (u64, fc_eip1193::names::Binding, u64)>,
     /// The event loop, which takes the checks' verdicts.
     events: Sender<Event>,
 }
@@ -370,12 +372,16 @@ impl Naming {
                 if crate::testhooks::eip1193_names_uncached() {
                     self.machine.invalidate_content(binding.name());
                 }
+                let deadline_ms = deadline_ms.min(Bounds::default().deadline_ms);
                 let options = CallOptions {
                     attempts_used: 0,
-                    deadline_ms: Some(deadline_ms.min(Bounds::default().deadline_ms)),
+                    deadline_ms: Some(deadline_ms),
                 };
+                // The caller's deadline counts from the machine's clock
+                // now, at the lookup's first poll below.
+                let due = self.machine.now().saturating_add(deadline_ms);
                 let caller = self.machine.resolve_content_with(binding.name(), options);
-                self.checks.insert(caller, (tag, binding));
+                self.checks.insert(caller, (tag, binding, due));
                 self.poll();
                 Ok(())
             }
@@ -383,7 +389,7 @@ impl Naming {
                 let caller = self
                     .checks
                     .iter()
-                    .find(|(_, (t, _))| *t == tag)
+                    .find(|(_, (t, _, _))| *t == tag)
                     .map(|(caller, _)| *caller);
                 if let Some(caller) = caller {
                     self.checks.remove(&caller);
@@ -601,10 +607,19 @@ impl Naming {
             for reply in self.machine.take_replies() {
                 // A page request's name check: its verdict goes to the
                 // event loop, `resolveEnsContent`'s throw counting as a
-                // name that doesn't serve the key.
-                if let Some((tag, binding)) = self.checks.remove(&reply.caller) {
-                    let holds = binding.served_by(reply.outcome.as_ref().ok());
-                    let _ = self.events.send(Event::NameChecked { tag, holds });
+                // name that doesn't serve the key. One settled at the
+                // lookup's deadline (its own timeout, or its session's at
+                // the same time) is the request's deadline, which ends no
+                // binding: this clock decides it, not the event loop's.
+                if let Some((tag, binding, due)) = self.checks.remove(&reply.caller) {
+                    let verdict = if binding.served_by(reply.outcome.as_ref().ok()) {
+                        Verdict::Holds
+                    } else if reply.settled >= due {
+                        Verdict::Deadline
+                    } else {
+                        Verdict::Fails
+                    };
+                    let _ = self.events.send(Event::NameChecked { tag, verdict });
                     continue;
                 }
                 let pending = self.plans.remove(&reply.caller);

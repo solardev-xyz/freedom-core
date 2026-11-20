@@ -150,16 +150,20 @@ pub enum Event {
     /// APR-5c).
     Eip1193Room,
     /// The chain thread answered one of the core's own reads (design
-    /// 0012, "Phone jobs"): its tag, and the reply's payload.
+    /// 0012, "Phone jobs"): its tag, the reply's payload, and whether it
+    /// failed at or after the deadline it was given, by the chain thread's
+    /// clock.
     ChainRead {
         tag: u64,
         payload: Box<[u8]>,
+        past_due: bool,
     },
     /// The naming thread checked a page request's name (design 0012,
-    /// APR-5f): whether it still serves the document's IPNS key.
+    /// APR-5f): whether it still serves the document's IPNS key, or the
+    /// lookup's deadline passed first.
     NameChecked {
         tag: u64,
-        holds: bool,
+        verdict: crate::eip1193::Verdict,
     },
 }
 
@@ -627,11 +631,16 @@ pub fn run(options: &Options) -> Exit {
                     break exit;
                 }
             }
-            Ok(Event::ChainRead { tag, payload }) => {
-                // A page send's reads (APR-5e-1), or a phone payment's.
+            Ok(Event::ChainRead {
+                tag,
+                payload,
+                past_due,
+            }) => {
+                // A page send's reads (APR-5e-1), or a phone payment's,
+                // whose fixed deadline is no request's.
                 let outs = if tag & crate::eip1193::SEND_TAG != 0 {
                     core.connects
-                        .chain_read_done(tag, &payload, &mut core.vault)
+                        .chain_read_done(tag, &payload, past_due, &mut core.vault)
                 } else {
                     core.vault.chain_read(tag, &payload)
                 };
@@ -639,8 +648,8 @@ pub fn run(options: &Options) -> Exit {
                     break exit;
                 }
             }
-            Ok(Event::NameChecked { tag, holds }) => {
-                let outs = core.connects.name_checked(tag, holds, &mut core.vault);
+            Ok(Event::NameChecked { tag, verdict }) => {
+                let outs = core.connects.name_checked(tag, verdict, &mut core.vault);
                 if let Flow::Exit(exit) = core.dispatch(outs) {
                     break exit;
                 }

@@ -17,7 +17,8 @@
 //! minted; a binding ended by another request is read at main's recheck; a
 //! name the core can't resolve fails closed; the binding ends for the
 //! document, not for a new one; a page without a binding resolves nothing;
-//! and a check has the request's deadline and cancel.
+//! and a check has the request's deadline and cancel, its lookup's timeout
+//! included.
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
@@ -1237,6 +1238,61 @@ fn a_check_has_the_requests_deadline_and_cancel() {
     main.request(11, &named(1), "eth_accounts", json!([]), &world);
     assert_eq!(main.answer(11), format!(r#"{{"result":["{ACCOUNT}"]}}"#));
     main.all_checked("after the deadline");
+}
+
+/// The lookup's own deadline is the request's: a lookup that times out
+/// while the event loop's clock still shows time left (the naming thread's
+/// clock and the event loop's each count milliseconds from their own start,
+/// so either can read the deadline first) answers the deadline, not a name
+/// that doesn't serve, and ends no binding. The hook takes 57 s off the
+/// lookup's deadline, so the lookup's timeout comes first every time.
+#[test]
+fn a_checks_lookup_timing_out_first_is_the_deadline() {
+    let (_root, mut main) = Main::with_timeout(
+        &grants(),
+        &[
+            ("FREEDOM_CORED_TEST_EIP1193_OVERALL_MS", "60000"),
+            ("FREEDOM_CORED_TEST_EIP1193_CHECK_EARLY_MS", "57000"),
+        ],
+        90_000,
+    );
+    let world = plain_world();
+    main.request(10, &named(1), "eth_accounts", json!([]), &world);
+    let held = loop {
+        let message = main.core.recv();
+        assert_ne!(message["type"], "response", "{message}");
+        if message["method"] == "shell.rpc" {
+            let body: Value =
+                serde_json::from_str(message["params"]["body"].as_str().unwrap()).unwrap();
+            if body["method"] == "eth_call" {
+                break message;
+            }
+            let method = body["method"].as_str().unwrap().to_owned();
+            let text = main.recorded[&method].clone();
+            main.node(&message, &text);
+        }
+    };
+    let started = std::time::Instant::now();
+    let reply = loop {
+        let message = main.core.recv();
+        match message["type"].as_str() {
+            Some("cancel") => assert_eq!(message["id"], held["id"]),
+            Some("response") => break message,
+            _ => {}
+        }
+    };
+    assert_eq!(reply["id"], 10);
+    assert_eq!(
+        reply["result"].to_string(),
+        r#"{"error":{"code":-32603,"message":"The request's deadline passed"}}"#
+    );
+    // The lookup's timeout answered it, long before the request's own.
+    assert!(started.elapsed() < Duration::from_secs(30));
+    main.node(&held, &resolve_body(OTHER_CONTENTHASH));
+    main.script(&[Name::Serves, Name::Serves]);
+    main.request(11, &named(1), "eth_accounts", json!([]), &world);
+    assert_eq!(main.answer(11), format!(r#"{{"result":["{ACCOUNT}"]}}"#));
+    main.all_checked("after the lookup's deadline");
 }
 
 /// A device's signature (a Ledger) whose name moved after the approve:
