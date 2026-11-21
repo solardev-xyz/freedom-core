@@ -26,5 +26,8 @@ pub mod payments;
 pub mod safe_pending;
 pub mod vault_meta;
 
-pub use address::{address_bytes, is_address, value_address_bytes};
+pub use address::{
+    address_bytes, is_address, normalize_address, normalized_bytes, value_address_bytes,
+    value_normalize_address,
+};
 pub use fc_json::{JsString, JsValue};

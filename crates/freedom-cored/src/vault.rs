@@ -950,6 +950,11 @@ impl Vault {
     /// Installs the startup snapshot.
     pub fn set_snapshot(&mut self, file: FileSnapshot) {
         self.file = file;
+        // Startup recovery has settled the vault and metadata journal: the
+        // records as it left it (G20), taken before a pending hello is
+        // answered. A hello before it took them `Pending` while the journal
+        // was there; one after takes them again.
+        self.refresh_records();
     }
 
     /// The vault's epoch: `None` while locked.
@@ -1039,9 +1044,9 @@ impl Vault {
     }
 
     /// The account records' snapshot the core's own checks read (G20),
-    /// taken where no vault job is running: at the hello, at the end of
-    /// every vault job, after the state it installs, and after every
-    /// `accounts.*` request. So a check sees the records of the vault state
+    /// taken where no vault job is running: at the hello, when startup
+    /// recovery has settled, at the end of every vault job, after the state
+    /// it installs, and after every `accounts.*` request. So a check sees the records of the vault state
     /// it runs against, the old pair while a create or import runs and the
     /// new one once the loop has installed its result
     /// ([`crate::accounts::Records`]).

@@ -558,8 +558,11 @@ impl Store {
                 Some(safe) => {
                     approvals.end_safe_approvals(&safe);
                 }
+                // No Safe approval names an address of more than 20 bytes
+                // (an ICAP past 2^160): there is none to end, as the
+                // reference's lookup by address finds none.
                 None => crate::log::warn(
-                    "a removed Safe's address isn't hex: no approval ended",
+                    "a removed Safe's address isn't one of 20 bytes: no approval ended",
                     json!({}),
                 ),
             }
@@ -590,28 +593,30 @@ impl Store {
 /// What the core's own record says account `index` is (G20), for the
 /// checks that took main's word on it while main owned `vault-meta.json`:
 /// the reference's `getSigner` and `paymentDevice` read the same record.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// The kind is the record's `type` alone, as theirs is.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Account {
     /// A mnemonic record, or no record below the hardware range: the
     /// vault's key at the index, as `getSigner` falls through to it.
     Vault,
-    /// A Ledger's record, and its address.
-    Ledger([u8; 20]),
-    /// A phone's (`remote`) record, and its address.
-    Phone([u8; 20]),
+    /// A Ledger's record, and its address as ethers' `getAddress` gives it
+    /// ([`fc_wallet_state::normalize_address`]); none if it isn't one, and
+    /// then no claimed address agrees with it.
+    Ledger(Option<String>),
+    /// A phone's (`remote`) record, and its address, as a Ledger's.
+    Phone(Option<String>),
     /// A Safe's record: it has no key of its own.
     Safe,
     /// None the core can name: no record at a hardware index (a deleted
-    /// device's, where the vault would derive a key the user never saw), a
-    /// type the core doesn't know, or a device record whose address isn't
-    /// one. Every check refuses it.
+    /// device's, where the vault would derive a key the user never saw), or
+    /// a type the core doesn't know. Every check refuses it.
     Unknown,
 }
 
 impl Account {
     /// `approval.check`'s `account_kind` for it (main's `ACCOUNT_KINDS`),
     /// or none.
-    pub fn kind(self) -> Option<AccountKind> {
+    pub fn kind(&self) -> Option<AccountKind> {
         match self {
             Account::Vault => Some(AccountKind::Vault),
             Account::Ledger(_) => Some(AccountKind::Ledger),
@@ -633,13 +638,17 @@ pub fn account_of(meta: &VaultMeta, index: u32) -> Account {
             Account::Vault
         };
     };
-    // Any form `isAddress` took when the record was added (ethers'
-    // `getAddress`: with or without `0x`, any valid case, ICAP).
-    let address = || record.get("address").and_then(value_address_bytes);
+    // Any form `isAddress` took when the record was added, as `getAddress`
+    // reads it.
+    let address = || {
+        record
+            .get("address")
+            .and_then(fc_wallet_state::value_normalize_address)
+    };
     match record.get("type").and_then(JsValue::as_str) {
         Some("mnemonic") => Account::Vault,
-        Some("ledger") => address().map_or(Account::Unknown, Account::Ledger),
-        Some("remote") => address().map_or(Account::Unknown, Account::Phone),
+        Some("ledger") => Account::Ledger(address()),
+        Some("remote") => Account::Phone(address()),
         Some("safe") => Account::Safe,
         _ => Account::Unknown,
     }
@@ -652,7 +661,8 @@ pub fn account_of(meta: &VaultMeta, index: u32) -> Account {
 /// metadata, on the worker, and the loop installs its new state only at the
 /// job's end: a check must see the records of the vault it signs with, the
 /// old pair until then and the new pair after, never one of each. So the
-/// loop takes it when the hello names the store, at the end of every vault
+/// loop takes it when the hello names the store, when startup recovery has
+/// settled (before a pending hello is answered), at the end of every vault
 /// job (after the state it installs), and after every `accounts.*` request,
 /// each at a point where no vault job is running.
 #[derive(Debug, Clone)]
@@ -767,19 +777,18 @@ mod tests {
         })
         .to_string();
         let meta = VaultMeta::load(text.as_bytes()).unwrap();
-        let bytes = |text: &str| fc_wallet_state::address_bytes(text).unwrap();
+        let norm = |text: &str| fc_wallet_state::normalize_address(text);
         // A mnemonic record is the vault's, whatever address it stores.
         assert_eq!(account_of(&meta, 0), Account::Vault);
         assert_eq!(account_of(&meta, 1), Account::Vault);
         assert_eq!(account_of(&meta, 1_000_005), Account::Vault);
-        assert_eq!(
-            account_of(&meta, 1_000_000),
-            Account::Ledger(bytes(&ledger))
-        );
-        assert_eq!(account_of(&meta, 1_000_001), Account::Phone(bytes(&phone)));
+        assert_eq!(account_of(&meta, 1_000_000), Account::Ledger(norm(&ledger)));
+        assert_eq!(account_of(&meta, 1_000_001), Account::Phone(norm(&phone)));
         assert_eq!(account_of(&meta, 1_000_002), Account::Safe);
         assert_eq!(account_of(&meta, 1_000_003), Account::Unknown);
-        assert_eq!(account_of(&meta, 1_000_004), Account::Unknown);
+        // The kind is the type's alone: an address that isn't one leaves a
+        // phone a phone, with no address any claim agrees with.
+        assert_eq!(account_of(&meta, 1_000_004), Account::Phone(None));
         // No record: the vault's below the hardware range, none above.
         assert_eq!(account_of(&meta, 2), Account::Vault);
         assert_eq!(account_of(&meta, 999_999), Account::Vault);
@@ -787,21 +796,24 @@ mod tests {
         assert_eq!(account_of(&VaultMeta::none(), 0), Account::Vault);
         assert_eq!(account_of(&VaultMeta::none(), 1_000_000), Account::Unknown);
         assert_eq!(
-            Account::Phone(bytes(&phone)).kind(),
+            Account::Phone(norm(&phone)).kind(),
             Some(AccountKind::Phone)
         );
         assert_eq!(Account::Unknown.kind(), None);
     }
 
     /// A device record in any form `isAddress` took (`stores.json`'s
-    /// `vault_meta` forms among them) is its device at its address; one
-    /// with a bad checksum, or an ICAP past 20 bytes, is none.
+    /// `vault_meta` forms among them) is its device at the address
+    /// `getAddress` gives, an ICAP past 20 bytes included (41 digits); one
+    /// that isn't an address is its device with none.
     #[test]
     fn a_device_record_in_any_accepted_form() {
         let checksummed = "0xA1A1a1a1A1A1A1A1A1a1a1a1a1a1A1A1a1A1a1a1";
-        let expected = fc_evm::parse_address(checksummed).unwrap();
+        let expected = Some(checksummed.to_lowercase());
         let icap = "XE26QURMT0JTHRKRVCUYL99VJZODRSZWBMT";
-        let icap_bytes = fc_wallet_state::address_bytes(icap).unwrap();
+        let icap_form = fc_wallet_state::normalize_address(icap);
+        let overflow = "XE54ZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZ";
+        let overflow_form = Some("0x1343093195196b9fcca7c68ce3fffffffffffffff".to_owned());
         let record = |address: &str| {
             let text = json!({ "derivedWallets": [
                 { "index": 0, "name": "Main" },
@@ -822,20 +834,38 @@ mod tests {
         ] {
             assert_eq!(
                 record(&form),
-                (Account::Phone(expected), Account::Ledger(expected)),
+                (
+                    Account::Phone(expected.clone()),
+                    Account::Ledger(expected.clone())
+                ),
                 "{form}"
             );
         }
+        assert!(icap_form.is_some());
         assert_eq!(
             record(icap),
-            (Account::Phone(icap_bytes), Account::Ledger(icap_bytes))
+            (
+                Account::Phone(icap_form.clone()),
+                Account::Ledger(icap_form)
+            )
+        );
+        assert_eq!(
+            record(overflow),
+            (
+                Account::Phone(overflow_form.clone()),
+                Account::Ledger(overflow_form)
+            )
         );
         for bad in [
             "0xa1A1a1a1A1A1A1A1A1a1a1a1a1a1A1A1a1A1a1a1",
             "0Xa1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
             "XE27QURMT0JTHRKRVCUYL99VJZODRSZWBMT",
         ] {
-            assert_eq!(record(bad), (Account::Unknown, Account::Unknown), "{bad}");
+            assert_eq!(
+                record(bad),
+                (Account::Phone(None), Account::Ledger(None)),
+                "{bad}"
+            );
         }
     }
 }

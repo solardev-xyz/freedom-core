@@ -23,10 +23,12 @@
 //!   `vault_meta` is moved (G20) the account's record names the device, as
 //!   the reference's `paymentDevice` reads it: a vault account pays with no
 //!   `device`, a Ledger's or a phone's with its kind and its record's
-//!   address (each in any form ethers' `isAddress` takes, compared as
-//!   bytes), and a Safe, or an account the core can't name, pays nothing.
-//!   A request that disagrees is refused (`invalid_argument`) before any
-//!   token is spent or cap charged. The token is checked, or the cap
+//!   address (each in any form ethers' `isAddress` takes, agreeing when
+//!   `getAddress` gives both the same), and a Safe, or an account the core
+//!   can't name, pays nothing. A request that disagrees is refused
+//!   (`invalid_argument`) before any token is spent or cap charged, and so
+//!   is an address past 20 bytes (an ICAP past 2^160), which no
+//!   authorization can name. The token is checked, or the cap
 //!   charged, as for the vault, and no key is used: the reply is `{
 //!   device: { typed_data, hash }, reservation, accept_index, charged }`,
 //!   the typed data the client would hand its signer, and its EIP-712
@@ -222,28 +224,29 @@ enum DeviceKind {
 }
 
 /// `device: { kind, address }`: a Ledger or phone account's kind and
-/// address.
-fn device_of(value: &Value) -> Result<(DeviceKind, [u8; 20]), ErrorBody> {
+/// address, as ethers' `getAddress` gives it (any form `isAddress` takes,
+/// as a record stores it and the reference's `paymentDevice` hands it
+/// back).
+fn device_of(value: &Value) -> Result<(DeviceKind, String), ErrorBody> {
     let device = object(value, &["kind", "address"], &[])?;
     let kind = match string(device, "kind")? {
         "ledger" => DeviceKind::Ledger,
         "phone" => DeviceKind::Phone,
         _ => return Err(invalid("device.kind: expected ledger or phone")),
     };
-    // Any form ethers' `isAddress` takes, as a record stores it and the
-    // reference's `paymentDevice` hands it back.
-    let address = fc_wallet_state::address_bytes(string(device, "address")?)
+    let address = fc_wallet_state::normalize_address(string(device, "address")?)
         .ok_or_else(|| invalid("device.address: expected an address"))?;
     Ok((kind, address))
 }
 
 /// Once `vault_meta` is moved (G20): the paying device as the account's
 /// record names it (the reference's `paymentDevice`), which the request's
-/// must be. A Safe has no key, and an account the core can't name (no
-/// record at a hardware index, a type it doesn't know) pays nothing.
+/// must be, its address the same as `getAddress` gives both. A Safe has no
+/// key, and an account the core can't name (no record at a hardware index,
+/// a type it doesn't know) pays nothing.
 fn recorded_device(
-    recorded: Account,
-    claimed: Option<(DeviceKind, [u8; 20])>,
+    recorded: &Account,
+    claimed: Option<&(DeviceKind, String)>,
 ) -> Result<(), ErrorBody> {
     let expected = match recorded {
         Account::Vault => None,
@@ -260,7 +263,15 @@ fn recorded_device(
             ));
         }
     };
-    if claimed == expected {
+    let agrees = match (expected, claimed) {
+        (None, None) => true,
+        // A record whose address isn't one agrees with no claim.
+        (Some((kind, Some(recorded))), Some((claimed_kind, claimed))) => {
+            kind == *claimed_kind && recorded == claimed
+        }
+        _ => false,
+    };
+    if agrees {
         Ok(())
     } else {
         Err(invalid("device: not the account's (vault-meta.json)"))
@@ -322,9 +333,16 @@ impl Approvals {
         // The account's own record, once `vault_meta` is moved (G20):
         // checked before anything is spent or charged.
         if let Some(recorded) = self.recorded(account)? {
-            recorded_device(recorded, device)?;
+            recorded_device(&recorded, device.as_ref())?;
         }
-        let device = device.map(|(_, address)| address);
+        // The authorization names 20 bytes: an address past them (an ICAP
+        // past 2^160) can't pay, as the reference's signer would fail.
+        let device = device
+            .map(|(_, address)| {
+                fc_wallet_state::normalized_bytes(&address)
+                    .ok_or_else(|| invalid("device.address: not an address of 20 bytes"))
+            })
+            .transpose()?;
         let detection = object(&fields["detection"], &["tab", "id", "url"], &[])?;
         let origin = x402::cap_key(string(detection, "url")?)
             .ok_or_else(|| invalid("detection.url: x402 pays an http or https resource"))?;

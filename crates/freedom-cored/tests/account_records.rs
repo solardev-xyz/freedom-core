@@ -844,3 +844,146 @@ fn a_check_sees_one_vault_s_records_through_an_import() {
     result(&call(&mut core, &mut id, "accounts.list", json!({})));
     assert!(!sees_old_pair(&mut core, &mut id, new, phone));
 }
+
+/// Two ICAPs of 31 digits past 2^160, which `isAddress` takes (and the
+/// core's `accounts.add_*` with it) and `getAddress` reads as 41 hex digits.
+const PHONE_ICAP: &str = "XE54ZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZ";
+const LEDGER_ICAP: &str = "XE62YZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZ";
+
+/// Refused where 20 bytes are needed.
+fn not_twenty_bytes(reply: &Value, field: &str) {
+    assert_eq!(reply["error"]["code"], "invalid_argument", "{reply}");
+    assert_eq!(
+        reply["error"]["message"],
+        format!("{field}: not an address of 20 bytes"),
+        "{reply}"
+    );
+}
+
+/// A device record whose address is an ICAP past 20 bytes is still its
+/// device (the kind is its `type`'s, as `getSigner`'s is), and a claim
+/// that `getAddress` reads the same agrees with it; where 20 bytes are
+/// needed (a phone job's request, x402's authorization) it is refused
+/// there, nothing spent or charged.
+#[test]
+fn an_icap_past_twenty_bytes_is_still_its_device() {
+    let root = tempfile::tempdir().unwrap();
+    cap_file(root.path());
+    let mut core = start(root.path(), true, &["x402"], &[]);
+    let mut id = 10;
+    import(&mut core, &mut id, ABANDON);
+    let phone = add(
+        &mut core,
+        &mut id,
+        "accounts.add_remote",
+        json!({ "address": PHONE_ICAP }),
+    );
+    let ledger = add(
+        &mut core,
+        &mut id,
+        "accounts.add_ledger",
+        json!({ "address": LEDGER_ICAP, "path": "44'/60'/0'/0/0" }),
+    );
+    // The kind.
+    assert!(!fee_checked(&issue(&mut core, &mut id, phone, Some(true))));
+    disagrees(&issue(&mut core, &mut id, phone, None));
+    assert!(fee_checked(&issue(&mut core, &mut id, ledger, None)));
+    checked(&check(&mut core, &mut id, phone, "phone"));
+    checked(&check(&mut core, &mut id, ledger, "ledger"));
+    disagrees(&check(&mut core, &mut id, phone, "vault"));
+    disagrees(&check(&mut core, &mut id, ledger, "phone"));
+    // The address: the same `getAddress`, in either case of its body,
+    // agrees, and then a job needs 20 bytes.
+    let lower = format!("XE{}", PHONE_ICAP[2..].to_lowercase());
+    for claim in [PHONE_ICAP, lower.as_str()] {
+        not_twenty_bytes(&job(&mut core, &mut id, phone, claim), "address");
+    }
+    disagrees(&job(&mut core, &mut id, phone, LEDGER_ICAP));
+    disagrees(&job(&mut core, &mut id, phone, &phone_address()));
+    // x402: the same, before anything is charged.
+    not_twenty_bytes(
+        &pay(&mut core, &mut id, ledger, device("ledger", LEDGER_ICAP)),
+        "device.address",
+    );
+    not_twenty_bytes(
+        &pay(&mut core, &mut id, phone, device("phone", &lower)),
+        "device.address",
+    );
+    disagrees(&pay(
+        &mut core,
+        &mut id,
+        ledger,
+        device("ledger", PHONE_ICAP),
+    ));
+    disagrees(&pay(&mut core, &mut id, ledger, None));
+    disagrees(&pay(
+        &mut core,
+        &mut id,
+        phone,
+        device("ledger", PHONE_ICAP),
+    ));
+    assert_eq!(spent(root.path()), "0");
+}
+
+/// An import killed after its journal's commit: the next start's recovery
+/// installs its vault and metadata. With that recovery held past the
+/// hello, the hello's own snapshot found the journal; the records the
+/// checks read right after the hello's reply are the recovered ones, not
+/// `storage`.
+#[test]
+fn startup_recovery_s_records_answer_right_after_the_hello() {
+    let root = tempfile::tempdir().unwrap();
+    let mut core = start(root.path(), true, &[], &[]);
+    let mut id = 10;
+    import(&mut core, &mut id, ABANDON);
+    let phone = add(
+        &mut core,
+        &mut id,
+        "accounts.add_remote",
+        json!({ "address": phone_address() }),
+    );
+    opened(&job(&mut core, &mut id, phone, &phone_address()));
+    drop(core);
+    // The other vault's import, killed after its commit.
+    let mut core = start(
+        root.path(),
+        true,
+        &[],
+        &[("FREEDOM_CORED_TEST_SECRETS_CRASH", "after-meta-journal")],
+    );
+    send_as(
+        &mut core,
+        &mut id,
+        &shell(),
+        "vault.import",
+        import_params(LEGAL),
+    );
+    assert_eq!(core.exit_code(Duration::from_secs(10)), 99);
+    drop(core);
+    let journal = root.path().join("identity").join("vault-meta-journal.json");
+    assert!(journal.exists());
+    assert!(
+        std::fs::read_to_string(meta_path(root.path()))
+            .unwrap()
+            .contains(&phone_address())
+    );
+    // The next start, its recovery held until after the hello came.
+    let mut core = start(
+        root.path(),
+        true,
+        &[],
+        &[("FREEDOM_CORED_TEST_SNAPSHOT_DELAY_MS", "1500")],
+    );
+    assert!(!journal.exists());
+    assert!(
+        !std::fs::read_to_string(meta_path(root.path()))
+            .unwrap()
+            .contains(&phone_address())
+    );
+    // The recovered records: the new vault's main account, and no phone.
+    checked(&check(&mut core, &mut id, 0, "vault"));
+    disagrees(&check(&mut core, &mut id, phone, "phone"));
+    disagrees(&job(&mut core, &mut id, phone, &phone_address()));
+    disagrees(&issue(&mut core, &mut id, phone, Some(true)));
+    assert!(fee_checked(&issue(&mut core, &mut id, phone, None)));
+}
