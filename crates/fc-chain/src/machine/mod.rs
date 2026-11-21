@@ -18,8 +18,8 @@
 //! `order-validation`, `endpoint-dedup`, `singleton-quorum`,
 //! `quorum-clamps`, `config-change`, `memory-budgets`,
 //! `monotonic-time`, `state-retention`, `rpc-id`, `adapter-error-text`,
-//! `cancel-promptly`, `paired-endpoint-text`, `broadcast-outcome` and
-//! `fee-combination`. It
+//! `cancel-promptly`, `paired-endpoint-text`, `broadcast-outcome`,
+//! `fee-combination` and `endpoint-slots`. It
 //! keeps no wall clock: every instant is the executor's monotonic
 //! milliseconds.
 

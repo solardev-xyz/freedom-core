@@ -15,7 +15,7 @@ use fc_naming::session::exec::{Either, race};
 
 use super::budget::Charge;
 use super::config::ms;
-use super::ctx::{Over, Req, reserve, started, within};
+use super::ctx::{EndpointSlot, Over, Req, reserve, started, within};
 use super::error::{ErrorClass, Thrown};
 use super::io::{Answer, Delivered, Request, Transport, rpc_body, rpc_body_len};
 use super::text::Retained;
@@ -60,7 +60,13 @@ pub(crate) fn rpc_request(
     Ok(request)
 }
 
-/// `requestRpcUrl(url, method, params, timeoutMs)`.
+/// `requestRpcUrl(url, method, params, timeoutMs)`, once the endpoint has
+/// a slot for it (design 0005, Transport: per endpoint). `timeout` is the
+/// exchange's own bound: it counts from when the exchange takes its slot,
+/// so a wait behind the endpoint's other exchanges never uses it up. What
+/// bounds the wait is the caller's: its source's budget, where it has one,
+/// and its chain request's deadline, which drop the exchange's future and
+/// so take it out of the queue.
 pub(crate) async fn exchange(
     req: &Req,
     endpoint: &str,
@@ -68,10 +74,58 @@ pub(crate) async fn exchange(
     params: &str,
     timeout: f64,
 ) -> Result<ResultText, Thrown> {
-    let timer = started(req.ctx.rt.sleep(ms(timeout)));
-    let request = within!(rpc_request(req, endpoint, method, params, timeout));
+    let mut slot = req.ctx.claim_endpoint(endpoint);
+    slot.granted().await;
+    exchange_in(req, slot, method, params, timeout, timeout).await
+}
+
+/// An exchange whose `timeout` is what is left of its caller's budget
+/// (Blockscout's pair): unlike [`exchange`]'s, it counts from the call,
+/// its wait for a slot included. One that gets no slot within it fails as
+/// a timeout, never sent.
+pub(crate) async fn exchange_within(
+    req: &Req,
+    endpoint: &str,
+    method: &str,
+    params: &str,
+    timeout: f64,
+) -> Result<ResultText, Thrown> {
+    let mut slot = req.ctx.claim_endpoint(endpoint);
+    let mut left = timeout;
+    if slot.waiting() {
+        let called = req.now();
+        let timer = started(req.ctx.rt.sleep(ms(timeout)));
+        if let Either::Right(()) = race(slot.granted(), timer).await {
+            return Err(Thrown::rpc_timeout(timeout));
+        }
+        #[allow(clippy::cast_precision_loss)]
+        let waited = req.now().saturating_sub(called) as f64;
+        left = timeout - waited;
+        if left <= 0.0 {
+            return Err(Thrown::rpc_timeout(timeout));
+        }
+    }
+    exchange_in(req, slot, method, params, timeout, left).await
+}
+
+/// The exchange, holding its endpoint's slot: its own timer first, then
+/// `shell.rpc`, both for `left`. The slot passes on as main's reply comes
+/// or the timer ends the exchange, before the answer is read.
+async fn exchange_in(
+    req: &Req,
+    slot: EndpointSlot<'_>,
+    method: &str,
+    params: &str,
+    timeout: f64,
+    left: f64,
+) -> Result<ResultText, Thrown> {
+    let endpoint = slot.endpoint();
+    let timer = started(req.ctx.rt.sleep(ms(left)));
+    let request = within!(rpc_request(req, endpoint, method, params, left));
     let io = req.ctx.rt.request(request);
-    match race(io, timer).await {
+    let raced = race(io, timer).await;
+    drop(slot);
+    match raced {
         Either::Left(delivered) => read(req, delivered, timeout).await,
         Either::Right(()) => Err(Thrown::rpc_timeout(timeout)),
     }
