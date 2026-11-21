@@ -78,6 +78,7 @@ impl Grant {
             descriptors,
             interface_index: direct,
             times: false,
+            symlinks: false,
         }
     }
 }
@@ -131,6 +132,7 @@ impl Grant {
             descriptors,
             interface_index: false,
             times: false,
+            symlinks: false,
         }
     }
 }

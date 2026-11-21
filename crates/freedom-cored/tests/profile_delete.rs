@@ -848,6 +848,118 @@ fn the_default_profiles_delete_keeps_the_shared_entries() {
     }
 }
 
+/// The packaged default profile (the app root) moved by a starting
+/// `profile migrate` (PRF-9b): its entries go into `freedom/`, and the
+/// shared ones stay at the root (`Profiles/`, `R/`, `locks/`, the catalog
+/// and its lock target, `logs/`), as do the shell's files. Its delete
+/// afterwards removes `freedom/` with the rest of its own entries.
+#[test]
+fn the_default_profile_moved_keeps_the_shared_entries_and_deletes_whole() {
+    let d = dirs();
+    let locks = d.app.join("locks");
+    let run_in = |args: &[&str]| {
+        let mut all = args.to_vec();
+        all.extend_from_slice(&["--lock-dir", s(&locks)]);
+        run(&all)
+    };
+    assert_eq!(
+        code(&run_in(&["profile", "open", "--app-root", s(&d.app)])),
+        0
+    );
+    assert_eq!(
+        code(&run_in(&[
+            "profile",
+            "open",
+            "--app-root",
+            s(&d.app),
+            "--profile",
+            "work"
+        ])),
+        0
+    );
+    let ids = [hex('c')];
+    std::fs::create_dir_all(d.app.join("identity")).unwrap();
+    std::fs::write(d.app.join("identity").join("secrets.json"), secrets(&ids)).unwrap();
+    std::fs::create_dir_all(d.app.join("ipfs-data").join("freedom-ipfs")).unwrap();
+    std::fs::write(d.app.join("settings.json"), "{}").unwrap();
+    std::fs::write(d.app.join("Cookies"), "c").unwrap();
+    std::fs::create_dir_all(d.app.join("logs")).unwrap();
+    std::fs::write(d.app.join("logs").join("main.log"), "l").unwrap();
+    std::fs::create_dir_all(d.app.join("R").join("0")).unwrap();
+    std::fs::create_dir_all(&locks).unwrap();
+
+    let out = run_in(&["profile", "migrate", "--profile-dir", s(&d.app)]);
+    assert_eq!(code(&out), 0, "{out:?}");
+    assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "migrated");
+    let mut names: Vec<String> = std::fs::read_dir(&d.app)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().into_string().unwrap())
+        .collect();
+    names.sort();
+    assert_eq!(
+        names,
+        [
+            "Cookies",
+            "Profiles",
+            "R",
+            "freedom",
+            "identity",
+            "locks",
+            "logs",
+            "profile-open",
+            "profile-registry.json",
+            "profile-registry.write-lock-target",
+            "profile.json",
+        ]
+    );
+    assert!(d.app.join("identity").is_file(), "the placeholder");
+    let freedom = d.app.join("freedom");
+    assert!(freedom.join("identity").join("secrets.json").is_file());
+    assert!(freedom.join("ipfs-data").join("freedom-ipfs").is_dir());
+    assert!(freedom.join("settings.json").is_file());
+    assert!(freedom.join("layout.json").is_file());
+    assert!(
+        d.app
+            .join("Profiles")
+            .join("work")
+            .join("profile.json")
+            .is_file()
+    );
+
+    let out = run_in(&[
+        "profile",
+        "delete",
+        "--app-root",
+        s(&d.app),
+        "--id",
+        "default",
+        "--confirm-display-name",
+        "My Profile",
+    ]);
+    assert_eq!(code(&out), 0, "{out:?}");
+    assert_eq!(json_of(&out)["forget"], listed(&ids));
+    let mut names: Vec<String> = std::fs::read_dir(&d.app)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().into_string().unwrap())
+        .collect();
+    names.sort();
+    let mut kept = vec![
+        "Profiles",
+        "R",
+        "locks",
+        "logs",
+        "profile-registry.json",
+        "profile-registry.json.forget",
+        "profile-registry.write-lock-target",
+    ];
+    if !backend().1 {
+        kept.retain(|name| *name != "profile-registry.json.forget");
+    }
+    assert_eq!(names, kept);
+    assert!(!d.app.join("R").join("0").exists());
+    assert_eq!(catalog_ids(&d), ["work"]);
+}
+
 /// **The forget file, killed at each step of a delete** (0013, PRF-3):
 /// before the catalog changes, the next `forget-list` drops the record and
 /// the profile's own secrets file still names its items, and the profile is

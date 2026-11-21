@@ -291,6 +291,20 @@ fn eof_exits_cleanly() {
     assert_eq!(core.exit_code(Duration::from_secs(5)), 0);
 }
 
+/// A file at the data directory (an older build's view of a moved
+/// profile: the placeholder at `identity`) is refused: the core starts no
+/// identity there, and the file stays as it was (0013, MD9 and MD10).
+#[test]
+fn a_file_as_the_data_dir_is_refused() {
+    let (_root, data, locks) = dirs();
+    let text = "This profile's Freedom data is in freedom/.\n";
+    std::fs::write(&data, text).unwrap();
+    let mut core = spawn("serve", &data, &locks, &[]);
+    let code = core.exit_code(Duration::from_secs(10));
+    assert_ne!(code, 0);
+    assert_eq!(std::fs::read_to_string(&data).unwrap(), text);
+}
+
 #[test]
 fn one_core_per_identity_dir() {
     let (_root, data, locks) = dirs();

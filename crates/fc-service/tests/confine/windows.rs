@@ -115,6 +115,7 @@ fn child(case: &str) {
         descriptors: Vec::new(),
         interface_index: false,
         times: false,
+        symlinks: false,
     };
     match case {
         "control" => {

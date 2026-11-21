@@ -489,6 +489,7 @@ mod tests {
             descriptors: Vec::new(),
             interface_index: false,
             times: false,
+            symlinks: false,
         };
         let grants = grants(&policy).unwrap();
         // macOS's temporary directories live under /private.
@@ -515,6 +516,7 @@ mod tests {
             descriptors: Vec::new(),
             interface_index: false,
             times: false,
+            symlinks: false,
         };
         let grants = grants(&policy).unwrap();
         for file in ["/etc/resolv.conf", "/etc/hosts"] {

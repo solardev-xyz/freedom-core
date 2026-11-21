@@ -19,7 +19,7 @@
 //!     --confirm-display-name <name> [--dev [--checkout-hash <hex8>]]
 //! freedom-cored profile forget-list --app-root <dir>
 //! freedom-cored profile forget-done --app-root <dir> --item <32 hex>...
-//! freedom-cored profile migrate --profile-dir <dir> --lock-dir <dir> [--dev] --finish-only
+//! freedom-cored profile migrate --profile-dir <dir> --lock-dir <dir> [--dev] [--finish-only]
 //! freedom-cored hold-profile --user-data-dir <dir> --lock-dir <dir> [--app-root <dir> --id <id>]
 //! ```
 //!
@@ -54,6 +54,7 @@ mod delete;
 mod forget;
 mod lock;
 mod migrate;
+mod preconditions;
 mod remove;
 mod store;
 

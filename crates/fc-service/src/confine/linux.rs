@@ -282,14 +282,18 @@ enum Refused {
 
 /// The rights a read-write directory gets: everything `abi` handles but
 /// execute, special files (devices, FIFOs, sockets, symlinks), device
-/// `ioctl`s and connecting to pathname sockets, and `refer` only if asked.
-fn read_write_rights(abi: ABI, refer: bool) -> BitFlags<AccessFs> {
+/// `ioctl`s and connecting to pathname sockets; `refer` and symlinks only
+/// if asked.
+fn read_write_rights(abi: ABI, refer: bool, symlinks: bool) -> BitFlags<AccessFs> {
     let mut rights = AccessFs::from_all(abi)
         & !make_bitflags!(AccessFs::{
             Execute | MakeChar | MakeBlock | MakeFifo | MakeSock | MakeSym | IoctlDev | ResolveUnix
         });
     if !refer {
         rights &= !BitFlags::from(AccessFs::Refer);
+    }
+    if symlinks {
+        rights |= AccessFs::MakeSym;
     }
     rights
 }
@@ -326,7 +330,7 @@ fn restrict(policy: &Policy, abi: ABI) -> Result<(), Refused> {
     let mut created = ruleset
         .create()
         .map_err(|e| outside_or_rules(e, "creating the ruleset"))?;
-    let read_write = read_write_rights(abi, policy.refer);
+    let read_write = read_write_rights(abi, policy.refer, policy.symlinks);
     for dir in &policy.read_write {
         let fd = PathFd::new(dir)
             .map_err(|e| Refused::Rules(format!("Landlock can't open a grant: {e}")))?;
@@ -551,6 +555,7 @@ mod tests {
             descriptors: Vec::new(),
             interface_index: false,
             times: false,
+            symlinks: false,
         }
     }
 
@@ -685,13 +690,15 @@ mod tests {
 
     #[test]
     fn rights_handle_what_the_abi_knows() {
-        let v1 = read_write_rights(ABI::V1, true);
+        let v1 = read_write_rights(ABI::V1, true, false);
         assert!(!v1.contains(AccessFs::Execute) && !v1.contains(AccessFs::MakeSock));
         assert!(v1.contains(AccessFs::WriteFile) && v1.contains(AccessFs::RemoveFile));
-        let v2 = read_write_rights(ABI::V2, true);
+        let v2 = read_write_rights(ABI::V2, true, false);
         assert!(v2.contains(AccessFs::Refer));
-        assert!(!read_write_rights(ABI::V2, false).contains(AccessFs::Refer));
-        let v5 = read_write_rights(ABI::V5, false);
+        assert!(!read_write_rights(ABI::V2, false, false).contains(AccessFs::Refer));
+        assert!(!read_write_rights(ABI::V2, false, false).contains(AccessFs::MakeSym));
+        assert!(read_write_rights(ABI::V1, false, true).contains(AccessFs::MakeSym));
+        let v5 = read_write_rights(ABI::V5, false, false);
         assert!(v5.contains(AccessFs::Truncate) && !v5.contains(AccessFs::IoctlDev));
     }
 }

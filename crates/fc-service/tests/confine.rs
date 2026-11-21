@@ -436,6 +436,7 @@ mod linux {
             descriptors,
             interface_index: false,
             times: false,
+            symlinks: false,
         }
     }
 

@@ -119,6 +119,13 @@ pub struct Policy {
     /// naming `times`. No mode, owner, flag or xattr change is allowed
     /// either way.
     pub times: bool,
+    /// Whether a symlink may be made in, or renamed into, the read-write
+    /// directories (Landlock's `make_sym`, which a rename of a symlink
+    /// needs at its new place): `freedom-cored profile migrate` moves an
+    /// entry that is a symlink as the link (design 0013, "The move"), and
+    /// renames it back in a rollback. No other special file is allowed
+    /// either way. Seatbelt's grants already let a rename through.
+    pub symlinks: bool,
 }
 
 /// The network policy, fixed for the process's life (0007's `--network`).

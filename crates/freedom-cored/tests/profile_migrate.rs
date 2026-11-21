@@ -6,7 +6,13 @@
 //! `corrupt` with nothing changed; any of the move's exclusion held by
 //! another is `busy`; a lock taken over mid-run is `lock_lost`; a kill at
 //! each step is finished by the next run; and the profile's directory must
-//! overlap no other profile and no shared root. A test binary of its own.
+//! overlap no other profile and no shared root. Without `--finish-only`
+//! (PRF-9b) a run starts the move: every entry present renamed into
+//! `freedom/` under a journal, then the marker, the placeholder and the
+//! journal removed; a new profile's empty move; each precondition a
+//! `deferred` with nothing changed; a kill at each step settled by
+//! `--finish-only`; the held phases seen by a probe, a second run and a
+//! delete; a frozen run's lock taken over. A test binary of its own.
 
 #![allow(
     clippy::unwrap_used,
@@ -72,6 +78,30 @@ fn migrate_env(profile: &Path, locks: &Path, extra: &[&str], env: &[(&str, &str)
 
 fn migrate(d: &Dirs) -> Output {
     migrate_env(&d.profile, &d.locks, &[], &[])
+}
+
+/// A starting run: `profile migrate` without `--finish-only`.
+fn start_env(profile: &Path, locks: &Path, extra: &[&str], env: &[(&str, &str)]) -> Output {
+    let mut command = Command::new(BIN);
+    command
+        .args([
+            "profile",
+            "migrate",
+            "--profile-dir",
+            s(profile),
+            "--lock-dir",
+            s(locks),
+        ])
+        .args(extra)
+        .stdin(Stdio::null());
+    for (key, value) in env {
+        command.env(key, value);
+    }
+    command.output().unwrap()
+}
+
+fn start(d: &Dirs) -> Output {
+    start_env(&d.profile, &d.locks, &[], &[])
 }
 
 fn code(output: &Output) -> i32 {
@@ -280,32 +310,22 @@ fn wait_for(path: &Path) {
 }
 
 #[test]
-fn finish_only_is_required_and_nothing_is_nothing() {
+fn finish_only_settles_and_nothing_is_nothing() {
     let d = dirs();
-    let out = Command::new(BIN)
-        .args([
-            "profile",
-            "migrate",
-            "--profile-dir",
-            s(&d.profile),
-            "--lock-dir",
-            s(&d.locks),
-        ])
-        .stdin(Stdio::null())
-        .output()
-        .unwrap();
-    assert_eq!(code(&out), 64, "a move is PRF-9's");
-
     // No journal: nothing, and the run's lock let go. Its target is left,
     // as main's own lock leaves it.
     let out = migrate(&d);
     assert_eq!((code(&out), said(&out)), (0, "nothing".into()), "{out:?}");
     assert!(!d.profile.join("profile-open.lock").exists());
     assert!(d.profile.join("profile-open").is_file());
-    // A marker alone: the move is done.
+    // A marker alone: the move is done, and the placeholder written where
+    // nothing is (MD9), once.
     marker(&d.profile);
     let out = migrate(&d);
     assert_eq!(said(&out), "nothing");
+    assert!(placeholder_text(&d.profile).contains("freedom/"));
+    let out = start(&d);
+    assert_eq!(said(&out), "nothing", "{out:?}");
     // No profile directory at all.
     let out = migrate_env(&d.base.join("missing"), &d.locks, &[], &[]);
     assert_eq!((code(&out), said(&out)), (0, "nothing".into()));
@@ -967,4 +987,715 @@ fn the_placeholder_is_written_only_where_nothing_is() {
             .collect();
         assert_eq!(after, before);
     }
+}
+
+// The starting move (PRF-9b): `profile migrate` without `--finish-only`.
+
+/// A used profile in the root layout: entries of each kind, among them
+/// arti's state lock and Myotis's lease (not held), and the shell's own
+/// files, which never move.
+fn seeded(profile: &Path) {
+    write(&profile.join("identity").join("vault.json"), "vault");
+    write(
+        &profile.join("ipfs-data").join("freedom-ipfs").join("b"),
+        "block",
+    );
+    write(&profile.join("ant-data").join("config.yaml"), "ant");
+    write(&profile.join("settings.json"), "{}");
+    write(
+        &profile
+            .join("tor-data")
+            .join("state")
+            .join("state")
+            .join("state.lock"),
+        "",
+    );
+    write(&profile.join("myotis").join(".freedom-myotis-lifetime"), "");
+    write(
+        &profile
+            .join("myotis")
+            .join("gnosis")
+            .join(".freedom-myotis-lifetime"),
+        "",
+    );
+    write(&profile.join("Cookies"), "cookies");
+    if !profile.join("profile.json").exists() {
+        write(&profile.join("profile.json"), "{}");
+    }
+}
+
+/// The entries `seeded` makes, in the list's order.
+const SEEDED: &[&str] = &[
+    "identity",
+    "settings.json",
+    "ant-data",
+    "ipfs-data",
+    "tor-data",
+    "myotis",
+];
+
+fn read(path: &Path) -> String {
+    std::fs::read_to_string(path).unwrap_or_else(|e| panic!("{}: {e}", path.display()))
+}
+
+fn there(path: &Path) -> bool {
+    std::fs::symlink_metadata(path).is_ok()
+}
+
+/// The seeded profile once moved: each entry in `freedom/`, none at the
+/// root but the placeholder, the marker there and the journal gone, the
+/// shell's files where they were.
+fn assert_new_layout(profile: &Path) {
+    let freedom = profile.join("freedom");
+    assert_eq!(read(&freedom.join("identity").join("vault.json")), "vault");
+    assert_eq!(
+        read(&freedom.join("ipfs-data").join("freedom-ipfs").join("b")),
+        "block"
+    );
+    assert_eq!(read(&freedom.join("ant-data").join("config.yaml")), "ant");
+    assert_eq!(read(&freedom.join("settings.json")), "{}");
+    assert!(
+        freedom
+            .join("tor-data")
+            .join("state")
+            .join("state")
+            .join("state.lock")
+            .is_file()
+    );
+    assert!(freedom.join("myotis").join("gnosis").is_dir());
+    for name in &SEEDED[1..] {
+        assert!(!there(&profile.join(name)), "{name} left at the root");
+    }
+    assert!(placeholder_text(profile).contains("freedom/"));
+    assert!(freedom.join("layout.json").is_file());
+    assert!(!there(&freedom.join(".move.json")), "the journal removed");
+    assert!(!there(&freedom.join(".move.json.freedom-new")));
+    assert_eq!(read(&profile.join("Cookies")), "cookies");
+    assert!(profile.join("profile.json").is_file());
+}
+
+/// The seeded profile as it was, whatever is in `freedom/`.
+fn assert_entries_at_the_root(profile: &Path) {
+    assert_eq!(read(&profile.join("identity").join("vault.json")), "vault");
+    assert_eq!(read(&profile.join("settings.json")), "{}");
+    assert_eq!(read(&profile.join("ant-data").join("config.yaml")), "ant");
+    assert_eq!(
+        read(&profile.join("ipfs-data").join("freedom-ipfs").join("b")),
+        "block"
+    );
+    assert!(profile.join("tor-data").is_dir() && profile.join("myotis").is_dir());
+    assert!(!there(&profile.join("freedom").join("layout.json")));
+    assert!(!there(&profile.join("freedom").join(".move.json")));
+}
+
+fn names(dir: &Path) -> Vec<String> {
+    let mut names: Vec<String> = std::fs::read_dir(dir)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().into_string().unwrap())
+        .collect();
+    names.sort();
+    names
+}
+
+#[test]
+fn a_starting_move_moves_every_entry_present_then_writes_the_marker() {
+    let d = dirs();
+    seeded(&d.profile);
+    let out = start(&d);
+    assert_eq!((code(&out), said(&out)), (0, "migrated".into()), "{out:?}");
+    assert_new_layout(&d.profile);
+    assert!(
+        !d.profile.join("profile-open.lock").exists(),
+        "its lock let go"
+    );
+    let marker: serde_json::Value =
+        serde_json::from_str(&read(&d.profile.join("freedom").join("layout.json"))).unwrap();
+    assert_eq!(marker["version"], 1);
+    assert!(marker["moved_at"].as_str().unwrap().ends_with('Z'));
+    assert!(marker["by"].as_str().unwrap().starts_with("freedom-cored "));
+    // Done: either kind of run finds nothing to do.
+    assert_eq!(said(&start(&d)), "nothing");
+    assert_eq!(said(&migrate(&d)), "nothing");
+    assert_new_layout(&d.profile);
+}
+
+/// MD5: a profile with none of the entries starts in the new layout:
+/// `freedom/` with the marker alone, the placeholder, no journal.
+#[test]
+fn a_new_profile_takes_the_empty_move() {
+    let d = dirs();
+    write(&d.profile.join("Cookies"), "cookies");
+    let out = start(&d);
+    assert_eq!((code(&out), said(&out)), (0, "migrated".into()), "{out:?}");
+    assert_eq!(names(&d.profile.join("freedom")), ["layout.json"]);
+    assert!(placeholder_text(&d.profile).contains("freedom/"));
+    assert_eq!(read(&d.profile.join("Cookies")), "cookies");
+    assert_eq!(said(&start(&d)), "nothing");
+}
+
+#[test]
+fn a_kill_at_each_step_of_a_starting_move_is_settled_by_finish_only() {
+    for (step, journaled, marked) in [
+        ("after-exclusion", false, false),
+        ("after-freedom-dir", false, false),
+        ("after-journal", true, false),
+        ("mid-move", true, false),
+        ("after-renames", true, false),
+        ("after-marker", true, true),
+        ("after-placeholder", true, true),
+        ("before-journal-removed", true, true),
+    ] {
+        let d = dirs();
+        seeded(&d.profile);
+        let out = start_env(
+            &d.profile,
+            &d.locks,
+            &[],
+            &[("FREEDOM_CORED_TEST_PROFILE_MIGRATE_CRASH", step)],
+        );
+        assert_eq!(code(&out), 99, "{step}: {out:?}");
+        assert_eq!(
+            there(&d.profile.join("freedom").join(".move.json")),
+            journaled,
+            "{step}"
+        );
+        // Its lock left fresh, as a killed process leaves it.
+        backdate(
+            &d.profile.join("profile-open.lock"),
+            Duration::from_secs(31),
+        );
+        let out = migrate(&d);
+        if marked {
+            assert_eq!(said(&out), "migrated", "{step}: {out:?}");
+            assert_new_layout(&d.profile);
+            continue;
+        }
+        let expected = if journaled { "rolled_back" } else { "nothing" };
+        assert_eq!(said(&out), expected, "{step}: {out:?}");
+        assert_entries_at_the_root(&d.profile);
+        assert!(
+            !there(&d.profile.join("freedom").join("identity")),
+            "{step}"
+        );
+        // The next start moves it.
+        let out = start(&d);
+        assert_eq!(said(&out), "migrated", "{step}: {out:?}");
+        assert_new_layout(&d.profile);
+    }
+
+    // The empty move, killed between its marker and its placeholder: the
+    // next run, either kind, writes the placeholder.
+    let d = dirs();
+    let out = start_env(
+        &d.profile,
+        &d.locks,
+        &[],
+        &[("FREEDOM_CORED_TEST_PROFILE_MIGRATE_CRASH", "after-marker")],
+    );
+    assert_eq!(code(&out), 99, "{out:?}");
+    assert!(!there(&d.profile.join("identity")));
+    backdate(
+        &d.profile.join("profile-open.lock"),
+        Duration::from_secs(31),
+    );
+    assert_eq!(said(&migrate(&d)), "nothing");
+    assert!(placeholder_text(&d.profile).contains("freedom/"));
+}
+
+/// The preconditions (0013, "The move", 2): each ends the run with
+/// `deferred`, exit 0, nothing changed and its lock let go; the move
+/// starts once it is gone.
+#[test]
+fn each_precondition_defers_with_nothing_changed() {
+    fn deferred(d: &Dirs, what: &str) {
+        let before = snapshot(&d.profile);
+        let out = start(d);
+        assert_eq!(
+            (code(&out), said(&out)),
+            (0, "deferred".into()),
+            "{what}: {out:?}"
+        );
+        assert_eq!(snapshot(&d.profile), before, "{what}: nothing changed");
+        assert!(
+            !d.profile.join("profile-open.lock").exists(),
+            "{what}: its lock let go"
+        );
+    }
+
+    // A node identity journal or its staging file (MG3).
+    for name in ["node-identity-journal.json", "node-identity-staging.json"] {
+        let d = dirs();
+        seeded(&d.profile);
+        write(&d.profile.join("identity").join(name), "{}");
+        deferred(&d, name);
+        std::fs::remove_file(d.profile.join("identity").join(name)).unwrap();
+        assert_eq!(said(&start(&d)), "migrated", "{name}");
+    }
+
+    // A `freedom/` the move didn't make: a file, a symlink to a directory,
+    // or a directory holding a name the move writes (folded).
+    let d = dirs();
+    seeded(&d.profile);
+    write(&d.profile.join("freedom"), "a file");
+    deferred(&d, "freedom/ a file");
+    #[cfg(unix)]
+    {
+        let d = dirs();
+        seeded(&d.profile);
+        std::fs::create_dir(d.base.join("elsewhere")).unwrap();
+        std::os::unix::fs::symlink(d.base.join("elsewhere"), d.profile.join("freedom")).unwrap();
+        deferred(&d, "freedom/ a symlink");
+    }
+    for name in ["Settings.JSON", "ant-data.moving", "layout.json "] {
+        if cfg!(windows) && name.ends_with(' ') {
+            continue;
+        }
+        let d = dirs();
+        seeded(&d.profile);
+        write(&d.profile.join("freedom").join(name), "x");
+        deferred(&d, name);
+    }
+    // Other names in it stay, and the move goes on.
+    let d = dirs();
+    seeded(&d.profile);
+    write(&d.profile.join("freedom").join("notes.txt"), "mine");
+    assert_eq!(said(&start(&d)), "migrated");
+    assert_eq!(read(&d.profile.join("freedom").join("notes.txt")), "mine");
+    assert_new_layout(&d.profile);
+
+    // arti running: its state lock held (flock; LockFileEx on Windows).
+    let d = dirs();
+    seeded(&d.profile);
+    let state_lock = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(
+            d.profile
+                .join("tor-data")
+                .join("state")
+                .join("state")
+                .join("state.lock"),
+        )
+        .unwrap();
+    state_lock.lock().unwrap();
+    deferred(&d, "arti's state lock");
+    state_lock.unlock().unwrap();
+    drop(state_lock);
+    assert_eq!(said(&start(&d)), "migrated");
+
+    // Myotis running (an orphaned execution child holds its lifetime
+    // lease too), for each network.
+    for network in [None, Some("gnosis")] {
+        let d = dirs();
+        seeded(&d.profile);
+        let mut lease = d.profile.join("myotis");
+        lease.extend(network);
+        lease.push(".freedom-myotis-lifetime");
+        let held = hold_lease(&lease);
+        deferred(&d, &format!("Myotis's lease {network:?}"));
+        drop(held);
+        assert_eq!(said(&start(&d)), "migrated", "{network:?}");
+    }
+}
+
+/// Myotis's lease as its supervisor holds it: `flock` on Unix; on Windows a
+/// handle that shares reading only.
+fn hold_lease(path: &Path) -> std::fs::File {
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        std::fs::OpenOptions::new()
+            .read(true)
+            .share_mode(0x1)
+            .open(path)
+            .unwrap()
+    }
+    #[cfg(not(windows))]
+    {
+        let file = std::fs::File::open(path).unwrap();
+        file.lock().unwrap();
+        file
+    }
+}
+
+/// A symlink is moved as the link, its target untouched: here one on
+/// another device where the test has one (`/dev/shm`), as a user's
+/// `ant-data` on another disk would be.
+#[cfg(unix)]
+#[test]
+fn a_symlinked_entry_moves_as_the_link() {
+    use std::os::unix::fs::MetadataExt;
+    let d = dirs();
+    seeded(&d.profile);
+    let device = |path: &Path| std::fs::metadata(path).unwrap().dev();
+    let other = tempfile::tempdir_in("/dev/shm")
+        .ok()
+        .filter(|t| device(t.path()) != device(&d.base))
+        .unwrap_or_else(|| tempfile::tempdir().unwrap());
+    let target = other.path().join("ant");
+    write(&target.join("config.yaml"), "ant");
+    std::fs::remove_dir_all(d.profile.join("ant-data")).unwrap();
+    std::os::unix::fs::symlink(&target, d.profile.join("ant-data")).unwrap();
+    let out = start(&d);
+    assert_eq!(said(&out), "migrated", "{out:?}");
+    let moved = d.profile.join("freedom").join("ant-data");
+    assert!(std::fs::symlink_metadata(&moved).unwrap().is_symlink());
+    assert_eq!(std::fs::read_link(&moved).unwrap(), target);
+    assert_eq!(read(&target.join("config.yaml")), "ant");
+    assert_new_layout(&d.profile);
+}
+
+/// MD8: no checkpoint. A database left as a crash leaves it, its committed
+/// rows (the table too) in its `-wal` alone, moves with its `-wal` and
+/// `-shm`, and every row reads back from `freedom/`.
+#[test]
+fn committed_rows_only_in_a_wal_read_back_after_the_move() {
+    fn copy(from: &Path, to: &Path) {
+        // Read through std's sharing open: SQLite's handles stay open.
+        let mut source = std::fs::File::open(from).unwrap();
+        let mut target = std::fs::File::create(to).unwrap();
+        std::io::copy(&mut source, &mut target).unwrap();
+    }
+    let d = dirs();
+    let scratch = d.base.join("scratch");
+    std::fs::create_dir(&scratch).unwrap();
+    let db = scratch.join("p.sqlite");
+    let conn = rusqlite::Connection::open(&db).unwrap();
+    let mode: String = conn
+        .query_row("PRAGMA journal_mode=WAL", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(mode, "wal");
+    conn.execute_batch("PRAGMA wal_autocheckpoint=0; CREATE TABLE t (n INTEGER);")
+        .unwrap();
+    for n in 0..100 {
+        conn.execute("INSERT INTO t VALUES (?1)", [n]).unwrap();
+    }
+    let name = "payment-history.sqlite";
+    for suffix in ["", "-wal", "-shm"] {
+        copy(
+            &scratch.join(format!("p.sqlite{suffix}")),
+            &d.profile.join(format!("{name}{suffix}")),
+        );
+    }
+    drop(conn);
+    assert!(
+        std::fs::metadata(d.profile.join(format!("{name}-wal")))
+            .unwrap()
+            .len()
+            > 0
+    );
+    // The database alone holds none of it.
+    let alone = d.base.join("alone.sqlite");
+    copy(&d.profile.join(name), &alone);
+    let conn = rusqlite::Connection::open(&alone).unwrap();
+    assert!(
+        conn.query_row("SELECT count(*) FROM t", [], |row| row.get::<_, i64>(0))
+            .is_err()
+    );
+    drop(conn);
+
+    let out = start(&d);
+    assert_eq!(said(&out), "migrated", "{out:?}");
+    let freedom = d.profile.join("freedom");
+    for suffix in ["", "-wal", "-shm"] {
+        assert!(
+            freedom.join(format!("{name}{suffix}")).is_file(),
+            "{suffix}"
+        );
+        assert!(
+            !there(&d.profile.join(format!("{name}{suffix}"))),
+            "{suffix}"
+        );
+    }
+    let conn = rusqlite::Connection::open(freedom.join(name)).unwrap();
+    let (count, sum): (i64, i64) = conn
+        .query_row("SELECT count(*), sum(n) FROM t", [], |row| {
+            Ok((row.get(0)?, row.get(1)?))
+        })
+        .unwrap();
+    assert_eq!((count, sum), (100, 4950));
+}
+
+/// MD3, on Windows: an entry another handle holds (here opened sharing
+/// nothing, as an indexer might) is tried again, 30 times 100 ms apart. Let
+/// go within them, the move goes on; held past them, the move is rolled
+/// back and the old layout is as it was.
+#[cfg(windows)]
+#[test]
+fn a_held_entry_on_windows_is_tried_again_then_rolled_back() {
+    use std::os::windows::fs::OpenOptionsExt;
+    let hold = |path: &Path| {
+        std::fs::OpenOptions::new()
+            .read(true)
+            .share_mode(0)
+            .open(path)
+            .unwrap()
+    };
+    let d = dirs();
+    seeded(&d.profile);
+    let held = hold(&d.profile.join("settings.json"));
+    let child = Command::new(BIN)
+        .args([
+            "profile",
+            "migrate",
+            "--profile-dir",
+            s(&d.profile),
+            "--lock-dir",
+            s(&d.locks),
+        ])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    std::thread::sleep(Duration::from_millis(1_000));
+    drop(held);
+    let out = child.wait_with_output().unwrap();
+    assert_eq!(said(&out), "migrated", "{out:?}");
+    assert_new_layout(&d.profile);
+
+    let d = dirs();
+    seeded(&d.profile);
+    let held = hold(&d.profile.join("settings.json"));
+    let out = start(&d);
+    assert_eq!(
+        (code(&out), said(&out)),
+        (0, "rolled_back".into()),
+        "{out:?}"
+    );
+    drop(held);
+    assert_old_layout(&d.profile);
+}
+
+/// MD3, on Windows: under a long user name, the deepest paths the nodes
+/// write under `ant-data\` and `ipfs-data\` still open under `freedom\`,
+/// one of them past `MAX_PATH`.
+#[cfg(windows)]
+#[test]
+fn the_nodes_deepest_paths_still_open_after_the_move_under_a_long_user_name() {
+    let root = tempfile::tempdir().unwrap();
+    let profile = root
+        .path()
+        .join("Users")
+        .join("u".repeat(64))
+        .join("AppData")
+        .join("Roaming")
+        .join("Freedom")
+        .join("Profiles")
+        .join("0123456789abcdef0123456789abcdef");
+    let locks = root.path().join("locks");
+    let deep: Vec<Vec<String>> = vec![
+        vec!["ant-data", "localstore", "indexstore", "MANIFEST-000001"],
+        vec!["ant-data", "localstore", "sharky", "free_000"],
+        vec!["ant-data", "statestore", "000001.ldb"],
+        vec!["ant-data", "keys", "swarm.key"],
+        vec!["ipfs-data", "freedom-ipfs", "blocks.sqlite-wal"],
+    ]
+    .into_iter()
+    .map(|parts| parts.into_iter().map(str::to_owned).collect())
+    .chain([vec![
+        "ipfs-data".to_owned(),
+        "freedom-ipfs".to_owned(),
+        "d".repeat(100),
+        "e".repeat(40),
+    ]])
+    .collect();
+    for parts in &deep {
+        let mut path = profile.clone();
+        path.extend(parts);
+        write(&path, &parts.join("/"));
+    }
+    let out = start_env(&profile, &locks, &[], &[]);
+    assert_eq!(said(&out), "migrated", "{out:?}");
+    let mut longest = 0;
+    for parts in &deep {
+        let mut path = profile.join("freedom");
+        path.extend(parts);
+        longest = longest.max(path.as_os_str().len());
+        assert_eq!(read(&path), parts.join("/"));
+    }
+    assert!(longest > 260, "{longest}");
+}
+
+/// Each held phase, on a dev build's timings: a probe reads the profile
+/// open, its lock's mtime advances, a second run is `busy`, and a delete
+/// is refused (the profile is open) with nothing removed; released, the
+/// move ends `migrated`.
+#[test]
+fn each_held_phase_reads_open_and_refuses_a_second_run_and_a_delete() {
+    for step in [
+        "after-exclusion",
+        "after-freedom-dir",
+        "after-journal",
+        "mid-move",
+        "after-renames",
+        "after-marker",
+        "after-placeholder",
+        "before-journal-removed",
+    ] {
+        let d = dirs();
+        let app = d.base.join("app");
+        let run = |args: &[&str]| {
+            Command::new(BIN)
+                .args(args)
+                .stdin(Stdio::null())
+                .output()
+                .unwrap()
+        };
+        for extra in [&[][..], &["--profile", "work"][..]] {
+            let mut args = vec![
+                "profile",
+                "open",
+                "--app-root",
+                s(&app),
+                "--lock-dir",
+                s(&d.locks),
+            ];
+            args.extend_from_slice(extra);
+            assert_eq!(code(&run(&args)), 0);
+        }
+        let work = app.join("Profiles").join("work");
+        seeded(&work);
+        let paused = d.base.join("paused");
+        let release = d.base.join("release");
+        let child = Command::new(BIN)
+            .args([
+                "profile",
+                "migrate",
+                "--profile-dir",
+                s(&work),
+                "--lock-dir",
+                s(&d.locks),
+                "--dev",
+            ])
+            .env(
+                "FREEDOM_CORED_TEST_PROFILE_MIGRATE_PAUSE",
+                format!("{step}={}={}", paused.display(), release.display()),
+            )
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        wait_for(&paused);
+
+        let out = run(&[
+            "profile",
+            "status",
+            "--lock-dir",
+            s(&d.locks),
+            "--dev",
+            "--user-data-dir",
+            s(&work),
+        ]);
+        let status: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+        assert_eq!(status[0]["open"], true, "{step}: {status}");
+        assert_eq!(status[0]["gate_held"], true, "{step}: {status}");
+
+        let lock = work.join("profile-open.lock");
+        let first = std::fs::metadata(&lock).unwrap().modified().unwrap();
+        std::thread::sleep(Duration::from_millis(2_500));
+        let later = std::fs::metadata(&lock).unwrap().modified().unwrap();
+        assert_ne!(first, later, "{step}: refreshed past the update period");
+
+        let out = start_env(&work, &d.locks, &["--dev"], &[]);
+        assert_eq!((code(&out), said(&out)), (75, "busy".into()), "{step}");
+
+        let out = run(&[
+            "profile",
+            "delete",
+            "--app-root",
+            s(&app),
+            "--lock-dir",
+            s(&d.locks),
+            "--id",
+            "work",
+            "--confirm-display-name",
+            "Work",
+        ]);
+        // The move's lock is fresh: the reference's refusal, before any gate
+        // is tried (a stale lease with the gate held would be `lock_held`).
+        assert_eq!(code(&out), 65, "{step}: {out:?}");
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&out.stdout).unwrap()["message"],
+            "Profile is currently open: Work",
+            "{step}"
+        );
+        assert!(work.join("profile.json").is_file(), "{step}: not deleted");
+
+        std::fs::write(&release, "").unwrap();
+        let out = child.wait_with_output().unwrap();
+        assert_eq!(said(&out), "migrated", "{step}: {out:?}");
+        assert_new_layout(&work);
+    }
+}
+
+/// A run frozen (SIGSTOP) past the stale time while a proper-lockfile
+/// client takes its stale lock over: once thawed it changes nothing more
+/// and ends with `lock_lost`, the journal kept and the other's lock left;
+/// the next start settles the move.
+#[cfg(unix)]
+#[test]
+fn a_frozen_run_whose_lock_is_taken_over_changes_nothing_more() {
+    let signal = |name: &str, pid: u32| {
+        let status = Command::new("kill")
+            .args([name, &pid.to_string()])
+            .status()
+            .unwrap();
+        assert!(status.success());
+    };
+    let d = dirs();
+    seeded(&d.profile);
+    let paused = d.base.join("paused");
+    let release = d.base.join("release");
+    let child = Command::new(BIN)
+        .args([
+            "profile",
+            "migrate",
+            "--profile-dir",
+            s(&d.profile),
+            "--lock-dir",
+            s(&d.locks),
+            "--dev",
+        ])
+        .env(
+            "FREEDOM_CORED_TEST_PROFILE_MIGRATE_PAUSE",
+            format!("mid-move={}={}", paused.display(), release.display()),
+        )
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    wait_for(&paused);
+    let before = snapshot(&d.profile);
+    assert!(d.profile.join("freedom").join("identity").is_dir());
+    signal("-STOP", child.id());
+    // Past a dev build's 5 s stale time.
+    std::thread::sleep(Duration::from_millis(6_500));
+    let lock = d.profile.join("profile-open.lock");
+    let age = SystemTime::now()
+        .duration_since(std::fs::metadata(&lock).unwrap().modified().unwrap())
+        .unwrap();
+    assert!(age > Duration::from_secs(5), "{age:?}");
+    // proper-lockfile's stale takeover: removed, then made again.
+    std::fs::remove_dir(&lock).unwrap();
+    std::fs::create_dir(&lock).unwrap();
+    signal("-CONT", child.id());
+    // Its refresher finds the mtime isn't its own before the run goes on.
+    std::thread::sleep(Duration::from_millis(2_000));
+    std::fs::write(&release, "").unwrap();
+    let out = child.wait_with_output().unwrap();
+    assert_eq!(
+        (code(&out), said(&out)),
+        (74, "lock_lost".into()),
+        "{out:?}"
+    );
+    assert_eq!(snapshot(&d.profile), before, "nothing more changed");
+    assert!(lock.is_dir(), "the other's lock stays");
+
+    backdate(&lock, Duration::from_secs(60));
+    let out = migrate_env(&d.profile, &d.locks, &["--dev"], &[]);
+    assert_eq!(said(&out), "rolled_back", "{out:?}");
+    assert_old_layout(&d.profile);
 }
