@@ -1033,7 +1033,20 @@ impl Vault {
     /// Whether it took the store.
     pub fn configure_vault_meta(&mut self) -> bool {
         self.accounts.configure_moved();
+        // The core's own checks read the account records from now on (G20).
+        self.refresh_records();
         true
+    }
+
+    /// The account records' snapshot the core's own checks read (G20),
+    /// taken where no vault job is running: at the hello, at the end of
+    /// every vault job, after the state it installs, and after every
+    /// `accounts.*` request. So a check sees the records of the vault state
+    /// it runs against, the old pair while a create or import runs and the
+    /// new one once the loop has installed its result
+    /// ([`crate::accounts::Records`]).
+    fn refresh_records(&mut self) {
+        self.approvals.set_records(self.accounts.snapshot());
     }
 
     /// An RPC-key request's job, at admission: `not_moved` until the store
@@ -2092,6 +2105,8 @@ impl Vault {
             Ok(payload) => out.push(Out::Send(payload)),
             Err(error) => self.reply_error(out, id, error),
         }
+        // Whatever the request wrote, or the recovery it ran (G20).
+        self.refresh_records();
         out.extend(self.approvals.take_events().into_iter().map(Out::Send));
         for narrowed in self.approvals.take_narrowed() {
             self.phone.narrowed(&narrowed);
@@ -2323,6 +2338,15 @@ impl Vault {
 
     /// A worker job finished.
     pub fn job_done(&mut self, job: u64, finished: Finished) -> Vec<Out> {
+        let out = self.job_finished(job, finished);
+        // The job's files and the state the loop installed for it, one pair
+        // (G20). The next job, if one started, hasn't run yet: its
+        // `Out::Job` is in `out`.
+        self.refresh_records();
+        out
+    }
+
+    fn job_finished(&mut self, job: u64, finished: Finished) -> Vec<Out> {
         let mut out = Vec::new();
         let output = finished.0;
         // The snapshot follows our own commits.

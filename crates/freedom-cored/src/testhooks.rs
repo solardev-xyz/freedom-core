@@ -128,6 +128,13 @@
 //!   the files as that step left them (design 0013, PRF-1: "a crash hook
 //!   before and after each write"). The vault's two steps are those of
 //!   every vault write.
+//! - `FREEDOM_CORED_TEST_STEP_HOLD` names a file: at a step of
+//!   `FREEDOM_CORED_TEST_SECRETS_CRASH`'s list whose name the file holds,
+//!   the job writes `<file>.held` and waits until `<file>.release` exists
+//!   or the core begins to exit (at most 120 s), the files as that step
+//!   left them. Read at each step, so a test moves it while the core runs,
+//!   and holds a vault and metadata install at each of its steps while it
+//!   sends the loop other requests (G20).
 //! - `FREEDOM_CORED_TEST_SECRETS_FAIL` lists, comma-separated, writes that
 //!   fail: a journaled vault delete's (`delete-stage`, the staged secrets
 //!   file; `delete-journal`, the journal's rename, after the commit claim;
@@ -382,6 +389,18 @@ pub fn keystore_capabilities(native: fc_keystore::Capabilities) -> fc_keystore::
 pub fn secrets_step(step: &str) {
     if std::env::var("FREEDOM_CORED_TEST_SECRETS_CRASH").is_ok_and(|s| s == step) {
         std::process::exit(99);
+    }
+    if let Some(file) = std::env::var_os("FREEDOM_CORED_TEST_STEP_HOLD")
+        && std::fs::read_to_string(&file).is_ok_and(|held| held.trim() == step)
+    {
+        let mut held = file.clone();
+        held.push(".held");
+        let _ = std::fs::write(&held, step);
+        let mut release = file;
+        release.push(".release");
+        hold(&release, || {
+            EXITING.load(std::sync::atomic::Ordering::SeqCst)
+        });
     }
 }
 
