@@ -31,6 +31,7 @@ FILES.push('approvals.json', 'generator/approvals.js', 'generator/approval-store
 FILES.push('profiles.json', 'generator/profiles.js');
 FILES.push('secrets.json', 'generator/secrets.js');
 FILES.push('keystore.json', 'generator/keystore.js', 'generator/hpke.js');
+FILES.push('layout.json', 'generator/layout.js');
 FILES.push('generator/approval-rules.js', 'generator/approval-decisions.js');
 FILES.push('eip1193.json', 'generator/eip1193.js');
 FILES.push('stores.json', 'generator/stores.js', 'generator/stores-intents.js', 'generator/stores-safe-pending.js', 'generator/stores-rpc-keys.js');
@@ -734,6 +735,14 @@ test('check rejects a changed key-store seal', () => {
     entry.line = entry.line.replace('"key":"', '"key":"A');
   });
   assert.match(stderr, /Byte mismatch: keystore.json/);
+});
+
+test('check rejects a changed move outcome', () => {
+  const stderr = corruptedCheck('layout.json', (contents) => {
+    const entry = contents.rollback.find((item) => item.id === 'ant-data-copied-dir-dir-missing');
+    entry.steps = ['rename_back'];
+  });
+  assert.match(stderr, /Byte mismatch: layout.json/);
 });
 
 // RFC 9180's own test vectors, as data: hpke.js's composition of

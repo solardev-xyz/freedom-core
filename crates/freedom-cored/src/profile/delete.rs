@@ -198,10 +198,11 @@ fn gated_dirs(layout: Layout) -> Vec<GatedDir> {
                 which,
                 names: root.iter().chain(names).copied().collect(),
                 what,
-                // The move's step 4 leaves a file at the root's
-                // `identity`, before the marker, and nothing removes it
-                // after: once a move has begun, a regular file there is the
-                // placeholder.
+                // The move leaves a file at the root's `identity` (after
+                // its marker, from 0013's amendment of 2026-11-21; before
+                // it, in a version 1 journal's order), and nothing removes
+                // it after: once a move has begun, a regular file there is
+                // the placeholder.
                 placeholder: layout != Layout::Root && root.is_empty() && names == [PLACEHOLDER],
             });
         }

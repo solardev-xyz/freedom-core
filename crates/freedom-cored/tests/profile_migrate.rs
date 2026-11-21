@@ -1,6 +1,8 @@
 //! `profile migrate --finish-only` (design 0013, 5.4b; PRF-3): the move's
 //! recovery, which starts no move, run as main runs it. Before the marker it
-//! rolls back, after it rolls forward; an unreadable or ambiguous journal is
+//! rolls back, after it rolls forward, a copied entry (journal version 2)
+//! settled by its copy or its source and the placeholder written after the
+//! marker where nothing is; an unreadable or ambiguous journal is
 //! `corrupt` with nothing changed; any of the move's exclusion held by
 //! another is `busy`; a lock taken over mid-run is `lock_lost`; a kill at
 //! each step is finished by the next run; and the profile's directory must
@@ -144,6 +146,25 @@ fn journal(profile: &Path, entries: &[&str]) {
     write(
         &profile.join("freedom").join(".move.json"),
         &format!(r#"{{"version":1,"entries":[{}]}}"#, names.join(",")),
+    );
+}
+
+/// A version 2 journal: `copied` names entries copied across devices.
+fn journal_v2(profile: &Path, entries: &[&str], copied: &[&str]) {
+    let list = |names: &[&str]| {
+        names
+            .iter()
+            .map(|e| format!("{e:?}"))
+            .collect::<Vec<_>>()
+            .join(",")
+    };
+    write(
+        &profile.join("freedom").join(".move.json"),
+        &format!(
+            r#"{{"version":2,"entries":[{}],"copied":[{}]}}"#,
+            list(entries),
+            list(copied)
+        ),
     );
 }
 
@@ -790,4 +811,160 @@ fn a_symlink_at_the_catalogs_name_is_unreadable() {
     assert_catalog_unreadable(|catalog, elsewhere| {
         std::os::unix::fs::symlink(elsewhere, catalog).unwrap();
     });
+}
+
+fn placeholder_text(profile: &Path) -> String {
+    let placeholder = profile.join("identity");
+    assert!(
+        std::fs::symlink_metadata(&placeholder)
+            .unwrap()
+            .file_type()
+            .is_file(),
+        "the placeholder is a regular file"
+    );
+    std::fs::read_to_string(placeholder).unwrap()
+}
+
+/// Before the marker, a copied entry's finished copy goes while its source
+/// is at the root (MG1): the crash came after the copy's rename. A renamed
+/// entry beside it goes back.
+#[test]
+fn a_copied_entry_before_the_marker_keeps_its_source_and_loses_its_copy() {
+    let d = dirs();
+    let freedom = d.profile.join("freedom");
+    write(&d.profile.join("ant-data").join("config.yaml"), "ant");
+    write(&freedom.join("ant-data").join("config.yaml"), "ant");
+    write(&freedom.join("tor-data.moving").join("state"), "to");
+    write(&d.profile.join("tor-data").join("state"), "tor");
+    write(&freedom.join("settings.json"), "{}");
+    journal_v2(
+        &d.profile,
+        &["settings.json", "ant-data", "tor-data"],
+        &["ant-data", "tor-data"],
+    );
+    let out = migrate(&d);
+    assert_eq!(
+        (code(&out), said(&out)),
+        (0, "rolled_back".into()),
+        "{out:?}"
+    );
+    // Every source kept, every copy gone, `freedom/` removed empty, and no
+    // placeholder.
+    let entry = |name: &str, text: &str| (name.to_owned(), text.to_owned());
+    assert_eq!(
+        snapshot(&d.profile),
+        [
+            entry("ant-data/", ""),
+            entry("ant-data/config.yaml", "ant"),
+            entry("settings.json", "{}"),
+            entry("tor-data/", ""),
+            entry("tor-data/state", "tor"),
+        ]
+    );
+    assert_eq!(said(&migrate(&d)), "nothing");
+}
+
+/// Before the marker, a copied entry whose source is gone, or replaced by
+/// another kind of entry, is `corrupt` with nothing changed: nothing shows
+/// the copy is whole.
+#[test]
+fn a_copied_entry_whose_source_is_gone_is_corrupt_before_the_marker() {
+    for replaced in [false, true] {
+        let d = dirs();
+        write(
+            &d.profile
+                .join("freedom")
+                .join("ant-data")
+                .join("config.yaml"),
+            "ant",
+        );
+        if replaced {
+            write(&d.profile.join("ant-data"), "a file");
+        }
+        journal_v2(&d.profile, &["ant-data"], &["ant-data"]);
+        let before = snapshot(&d.profile);
+        let out = migrate(&d);
+        assert_eq!(
+            (code(&out), said(&out)),
+            (74, "corrupt".into()),
+            "{replaced}: {out:?}"
+        );
+        assert_eq!(snapshot(&d.profile), before, "{replaced}");
+    }
+}
+
+/// After the marker, a copied entry's source, half removed when the
+/// cleanup was cut short, goes; a renamed entry's residue stays; and the
+/// placeholder is written where nothing is (MG2, MD9).
+#[test]
+fn after_the_marker_a_copied_source_goes_and_the_placeholder_is_written() {
+    let d = dirs();
+    let freedom = d.profile.join("freedom");
+    write(&freedom.join("identity").join("vault.json"), "vault");
+    write(&freedom.join("ant-data").join("a"), "a");
+    write(&freedom.join("ant-data").join("b"), "b");
+    // Half removed.
+    write(&d.profile.join("ant-data").join("b"), "b");
+    write(&freedom.join("settings.json"), "{}");
+    write(&d.profile.join("settings.json"), "made since");
+    journal_v2(
+        &d.profile,
+        &["identity", "settings.json", "ant-data"],
+        &["ant-data"],
+    );
+    marker(&d.profile);
+    let out = migrate(&d);
+    assert_eq!((code(&out), said(&out)), (0, "migrated".into()), "{out:?}");
+    assert!(!d.profile.join("ant-data").exists(), "the source removed");
+    assert_eq!(
+        std::fs::read_to_string(freedom.join("ant-data").join("a")).unwrap(),
+        "a"
+    );
+    assert_eq!(
+        std::fs::read_to_string(d.profile.join("settings.json")).unwrap(),
+        "made since"
+    );
+    assert_eq!(
+        placeholder_text(&d.profile),
+        fc_profile::layout::PLACEHOLDER_TEXT
+    );
+    assert!(!freedom.join(".move.json").exists());
+    assert_eq!(said(&migrate(&d)), "nothing");
+}
+
+/// A profile that never had an `identity/` gets the placeholder after the
+/// marker too, and one already there, or anything else at that name, stays
+/// as it is.
+#[test]
+fn the_placeholder_is_written_only_where_nothing_is() {
+    let d = dirs();
+    write(&d.profile.join("freedom").join("settings.json"), "{}");
+    journal_v2(&d.profile, &["settings.json"], &[]);
+    marker(&d.profile);
+    assert_eq!(said(&migrate(&d)), "migrated");
+    assert_eq!(
+        placeholder_text(&d.profile),
+        fc_profile::layout::PLACEHOLDER_TEXT
+    );
+
+    for kept in [
+        |p: &Path| write(&p.join("identity"), "an older placeholder"),
+        |p: &Path| write(&p.join("identity").join("vault.json"), "made since"),
+    ] {
+        let d = dirs();
+        kept(&d.profile);
+        write(&d.profile.join("freedom").join("settings.json"), "{}");
+        journal(&d.profile, &["settings.json"]);
+        marker(&d.profile);
+        let before: Vec<_> = snapshot(&d.profile)
+            .into_iter()
+            .filter(|(name, _)| name.starts_with("identity"))
+            .collect();
+        assert_eq!(said(&migrate(&d)), "migrated");
+        let after: Vec<_> = snapshot(&d.profile)
+            .into_iter()
+            .filter(|(name, _)| name.starts_with("identity"))
+            .collect();
+        assert_eq!(after, before);
+    }
 }
