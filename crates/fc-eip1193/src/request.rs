@@ -25,6 +25,12 @@
 //!   request's key (`transactionAutoApprovePaused`), a boolean. A send's
 //!   rule is chosen only when it is `false`: a missing one reads as paused
 //!   (0012's `rule-inputs`).
+//!
+//! Once the core owns `vault-meta.json` (G20b), the daemon puts its own
+//! `wallets` and `active` in place of main's ([`World::replace_wallets`])
+//! wherever a request reads them: at [`crate::start`] for the methods
+//! [`crate::reads_wallets`] names, at a send's
+//! [`crate::send::Send::prepare`], and in each approve's `world`.
 
 use fc_json::{JsString, JsValue, ToPrimitiveError};
 
@@ -167,9 +173,19 @@ impl World {
             .unwrap_or(FALLBACK_CHAIN_ID)
     }
 
-    /// Main's wallet list, its items as main sent them.
+    /// The wallet list: main's items as main sent them, or the core's own
+    /// once [`World::replace_wallets`] has put them in.
     pub fn wallets(&self) -> &[JsValue] {
         &self.wallets
+    }
+
+    /// Puts the core's own wallet list and active index in place of main's
+    /// (G20b): once the core owns `vault-meta.json` its list is the one a
+    /// request reads, and main's isn't compared with it. `active` is none
+    /// where the core has no index to give, as main leaves it out.
+    pub fn replace_wallets(&mut self, wallets: Vec<JsValue>, active: Option<JsValue>) {
+        self.wallets = wallets;
+        self.active = active;
     }
 
     pub(crate) fn network(&self, chain_id: u64) -> Option<&JsValue> {

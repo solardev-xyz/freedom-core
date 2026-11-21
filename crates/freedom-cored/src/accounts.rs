@@ -684,6 +684,72 @@ impl Records {
             Records::Read(meta) => Ok(account_of(meta, index)),
         }
     }
+
+    /// The wallet list and active index a page request's world reads once
+    /// `vault_meta` is moved (G20b), as main would send them:
+    /// `getDerivedWallets()`, which is `accounts.list` read only (the
+    /// first list's default answered, not written), its mnemonic accounts'
+    /// addresses derived against `state`, the vault state this snapshot
+    /// belongs to (the stored ones while locked); and `getActiveWalletIndex()`
+    /// (`meta?.activeWalletIndex ?? 0`). A list that fails, or one a vault
+    /// journal holds back ([`Records::Pending`]), is empty with no active
+    /// index, as main's `walletList` reads a list that throws.
+    pub fn wallets(&self, state: &VaultState) -> (Vec<JsValue>, Option<JsValue>) {
+        let Records::Read(meta) = self else {
+            return (Vec::new(), None);
+        };
+        let listed = meta
+            .listed(|indices| derive_all(state, indices))
+            .unwrap_or_default();
+        // The codec loads no file whose `activeWalletIndex` isn't an
+        // integer, so `?? 0` is `active_index`'s number.
+        (listed, Some(JsValue::Number(meta.active_index())))
+    }
+
+    /// Whether the vault signs for account `index` ([`vault_signs`]): the
+    /// reference's refusal, `invalid_argument` with its message, if not.
+    pub fn vault_signs(&self, index: u32) -> Result<(), ErrorBody> {
+        match self {
+            Records::Pending => Err(storage("other")),
+            Records::Read(meta) => vault_signs(meta, index)
+                .map_err(|message| ErrorBody::new(ErrorCode::InvalidArgument, message)),
+        }
+    }
+}
+
+/// `getSigner`'s refusal of no record at a hardware index: a deleted
+/// device's (a phone's too).
+pub const DEVICE_GONE: &str = "Device account no longer exists; reconnect the device";
+/// `getSigner`'s refusal of a Safe: it has no key of its own.
+pub const SAFE_SIGNS: &str = "Safe accounts cannot sign directly — execute through the Safe flow";
+/// `withVaultAccount`'s refusal of a device's index, or any hardware index.
+pub const ON_DEVICE: &str =
+    "This account keeps its key on another device; sign via its device signer";
+
+/// Whether the vault signs for account `index` as `meta` records it (G20b),
+/// as the reference decides before its vault backend touches the key:
+/// `getSigner` refuses no record at a hardware index ([`DEVICE_GONE`]) and
+/// a Safe ([`SAFE_SIGNS`]), sends a Ledger or a phone to its device, and
+/// `withVaultAccount` refuses any other hardware index or a `type` other
+/// than `mnemonic` ([`ON_DEVICE`]). So the vault signs for an index below
+/// the hardware range with a mnemonic record or none; the core refuses a
+/// device's index with `withVaultAccount`'s text, the vault's refusal of it.
+pub fn vault_signs(meta: &VaultMeta, index: u32) -> Result<(), &'static str> {
+    let at = f64::from(index);
+    let hardware = at >= vault_meta::HARDWARE_INDEX_BASE;
+    let record = meta.record(at);
+    // The type normalized (`record.type || 'mnemonic'`), compared with
+    // `===`: a type that isn't a string is none of the named ones.
+    let kind = record
+        .as_ref()
+        .map(|record| record.get("type").and_then(JsValue::as_str));
+    match kind {
+        None if hardware => Err(DEVICE_GONE),
+        Some(Some("safe")) => Err(SAFE_SIGNS),
+        _ if hardware => Err(ON_DEVICE),
+        None | Some(Some("mnemonic")) => Ok(()),
+        Some(_) => Err(ON_DEVICE),
+    }
 }
 
 /// A removed Safe's `safe-pending.json` entry, cleared once `safe_pending`
@@ -800,6 +866,79 @@ mod tests {
             Some(AccountKind::Phone)
         );
         assert_eq!(Account::Unknown.kind(), None);
+    }
+
+    /// A page request's wallets: `accounts.list`'s, the stored addresses
+    /// while locked, the default list unwritten; the active index, 0 when
+    /// none is stored; none while a journal remains.
+    #[test]
+    fn a_request_s_wallets_are_the_records_list() {
+        let stored = format!("0x{}", "d4".repeat(20));
+        let locked = VaultState::new();
+        let records = |text: serde_json::Value| {
+            Records::Read(VaultMeta::load(text.to_string().as_bytes()).unwrap())
+        };
+        let (wallets, active) = records(json!({
+            "addresses": { "userWallet": stored },
+            "derivedWallets": [{ "index": 0, "name": "Main" }, { "index": 1, "address": stored }],
+            "activeWalletIndex": 1,
+        }))
+        .wallets(&locked);
+        let addresses: Vec<_> = wallets.iter().map(|w| w.get("address")).collect();
+        assert_eq!(addresses, [Some(&JsValue::string(&stored)); 2]);
+        assert_eq!(active, Some(JsValue::Number(1.0)));
+        let (wallets, active) = records(json!({ "addresses": {} })).wallets(&locked);
+        assert_eq!(wallets.len(), 1, "the default list");
+        assert_eq!(active, Some(JsValue::Number(0.0)));
+        assert_eq!(
+            Records::Read(VaultMeta::none()).wallets(&locked),
+            (Vec::new(), Some(JsValue::Number(0.0)))
+        );
+        assert_eq!(Records::Pending.wallets(&locked), (Vec::new(), None));
+    }
+
+    /// The vault signs for an index below the hardware range with a
+    /// mnemonic record or none, and for nothing else.
+    #[test]
+    fn the_vault_signs_for_its_own_records_alone() {
+        let device = format!("0x{}", "a1".repeat(20));
+        let text = json!({
+            "derivedWallets": [
+                { "index": 0, "name": "Main" },
+                { "index": 1, "name": "Typed", "type": "mnemonic" },
+                { "index": 2, "name": "Empty type", "type": "" },
+                { "index": 3, "name": "Odd", "type": "other" },
+                { "index": 4, "name": "Numbered", "type": 7 },
+                { "index": 5, "name": "Low Safe", "address": device, "type": "safe" },
+                { "index": 1_000_000, "name": "Ledger", "address": device, "type": "ledger" },
+                { "index": 1_000_001, "name": "Phone", "address": device, "type": "remote" },
+                { "index": 1_000_002, "name": "Safe", "address": device, "type": "safe" },
+                { "index": 1_000_003, "name": "High", "type": "mnemonic" },
+                { "index": 1_000_004, "name": "High odd", "type": "other" },
+            ],
+        })
+        .to_string();
+        let meta = VaultMeta::load(text.as_bytes()).unwrap();
+        for index in [0, 1, 2, 6, 999_999] {
+            assert_eq!(vault_signs(&meta, index), Ok(()), "{index}");
+        }
+        for (index, refusal) in [
+            (3, ON_DEVICE),
+            (4, ON_DEVICE),
+            (5, SAFE_SIGNS),
+            (1_000_000, ON_DEVICE),
+            (1_000_001, ON_DEVICE),
+            (1_000_002, SAFE_SIGNS),
+            (1_000_003, ON_DEVICE),
+            (1_000_004, ON_DEVICE),
+            (1_000_005, DEVICE_GONE),
+            (u32::MAX, DEVICE_GONE),
+        ] {
+            assert_eq!(vault_signs(&meta, index), Err(refusal), "{index}");
+        }
+        // No file: the vault's below the hardware range, gone above.
+        assert_eq!(vault_signs(&VaultMeta::none(), 7), Ok(()));
+        assert_eq!(vault_signs(&VaultMeta::none(), 1_000_000), Err(DEVICE_GONE));
     }
 
     /// A device record in any form `isAddress` took (`stores.json`'s

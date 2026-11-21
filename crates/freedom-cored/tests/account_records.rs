@@ -9,13 +9,17 @@
 //! The records are the loop's snapshot, bound to the vault state the
 //! checks run against: a create or import held at each step of its install
 //! shows the old pair, and its result the new one, never one of each.
+//!
+//! `sign.*` reads them too (G20b): once moved, the vault signs only for an
+//! index below the hardware range with a mnemonic record or none, and
+//! refuses any other with the reference's text before the key is derived.
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
 mod common;
 
 use std::path::{Path, PathBuf};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD;
@@ -739,7 +743,11 @@ fn sees_old_pair(core: &mut Core, id: &mut u64, vault: &str, phone: u32) -> bool
     let checked = check(core, id, phone, "phone");
     let job = job(core, id, phone, &phone_address());
     let paid = pay(core, id, 0, None);
+    // The phone's index: a device's to the old vault, gone from the new.
+    let signed = sign_as(core, id, "sign.message", phone);
     let old = issued["result"]["token"].is_string();
+    let expected = if old { ON_DEVICE } else { DEVICE_GONE };
+    refused_as(&signed, expected);
     for reply in [&checked, &job] {
         assert_eq!(reply["result"].is_object(), old, "{reply}");
         if !old {
@@ -836,6 +844,7 @@ fn a_check_sees_one_vault_s_records_through_an_import() {
     pending(&issue(&mut core, &mut id, phone, Some(true)));
     pending(&check(&mut core, &mut id, phone, "phone"));
     pending(&job(&mut core, &mut id, phone, &phone_address()));
+    pending(&sign_as(&mut core, &mut id, "sign.message", 0));
     let before = spent(root.path());
     pending(&pay(&mut core, &mut id, 0, None));
     assert_eq!(spent(root.path()), before);
@@ -843,6 +852,306 @@ fn a_check_sees_one_vault_s_records_through_an_import() {
     std::fs::write(&fail, "").unwrap();
     result(&call(&mut core, &mut id, "accounts.list", json!({})));
     assert!(!sees_old_pair(&mut core, &mut id, new, phone));
+}
+
+/// `getSigner`'s and `withVaultAccount`'s refusals (G20b).
+const DEVICE_GONE: &str = "Device account no longer exists; reconnect the device";
+const SAFE_SIGNS: &str =
+    "Safe accounts cannot sign directly \u{2014} execute through the Safe flow";
+const ON_DEVICE: &str = "This account keeps its key on another device; sign via its device signer";
+
+/// Typed data of one empty struct.
+fn typed() -> Value {
+    json!({ "domain": {}, "types": { "M": [] }, "message": {} })
+}
+
+/// `method` for account `index`, under `shell`.
+fn sign_as(core: &mut Core, id: &mut u64, method: &str, index: u32) -> Value {
+    let key = json!({ "kind": "account", "index": index });
+    let params = match method {
+        "sign.message" => json!({ "key": key, "message": "0x68656c6c6f" }),
+        "sign.transaction" => json!({ "key": key, "tx": {
+            "type": 2, "chain_id": "1", "nonce": "0", "gas_limit": "21000", "to": TO,
+            "value": "1", "data": "0x", "max_fee_per_gas": "2", "max_priority_fee_per_gas": "1",
+        } }),
+        _ => {
+            let hashed = call(
+                core,
+                id,
+                "typed_data.hash",
+                json!({ "typed_data": typed() }),
+            );
+            let hash = result(&hashed)["hash"].clone();
+            json!({ "key": key, "typed_data": typed(), "expected_hash": hash })
+        }
+    };
+    call(core, id, method, params)
+}
+
+/// Signed by account `index` of `mnemonic`: a message's signature recovers
+/// to it; a transaction and typed data are signed.
+fn signed_as(reply: &Value, method: &str, mnemonic: &str, index: u32) {
+    match method {
+        "sign.message" => {
+            let text = result(reply)["signature"].as_str().unwrap();
+            let signature: [u8; 65] = fc_evm::parse_bytes(text, "signature")
+                .unwrap()
+                .try_into()
+                .unwrap();
+            let digest = fc_evm::eip191_digest(b"hello");
+            assert_eq!(
+                fc_evm::recover_address(&digest, &signature).unwrap(),
+                bytes_of(mnemonic, index),
+                "{index}: {reply}"
+            );
+        }
+        "sign.transaction" => assert!(result(reply)["raw"].is_string(), "{reply}"),
+        _ => assert!(result(reply)["signature"].is_string(), "{reply}"),
+    }
+}
+
+/// Refused `invalid_argument` with the reference's text.
+fn refused_as(reply: &Value, message: &str) {
+    assert_eq!(reply["error"]["code"], "invalid_argument", "{reply}");
+    assert_eq!(reply["error"]["message"], message, "{reply}");
+}
+
+const SIGNS: [&str; 3] = ["sign.message", "sign.transaction", "sign.typed_data"];
+
+/// Records `accounts.add_*` can't make, added to the file as it stands:
+/// a type the reference doesn't know, below the hardware range and in it,
+/// and a mnemonic record in it.
+fn add_odd_records(root: &Path) {
+    let text = std::fs::read_to_string(meta_path(root)).unwrap();
+    let mut meta: Value = serde_json::from_str(&text).unwrap();
+    let wallets = meta["derivedWallets"].as_array_mut().unwrap();
+    wallets.push(json!({ "index": 3, "name": "Odd", "address": address(3), "type": "other" }));
+    wallets.push(json!({ "index": 1_000_003, "name": "High", "type": "mnemonic" }));
+    wallets.push(json!({ "index": 1_000_004, "name": "High odd", "type": "other" }));
+    std::fs::write(
+        meta_path(root),
+        serde_json::to_string_pretty(&meta).unwrap(),
+    )
+    .unwrap();
+}
+
+/// Each index that isn't the vault's, and the reference's refusal of it.
+const NOT_THE_VAULT_S: [(u32, &str); 7] = [
+    (LEDGER, ON_DEVICE),
+    (PHONE, ON_DEVICE),
+    (SAFE_INDEX, SAFE_SIGNS),
+    (GONE, DEVICE_GONE),
+    (3, ON_DEVICE),
+    (1_000_003, ON_DEVICE),
+    (1_000_004, ON_DEVICE),
+];
+
+/// `sign.*` once moved: the vault signs for its main account and for an
+/// index below the hardware range with no record, and refuses a Ledger's,
+/// a phone's, a Safe's, a deleted device's, another type's and a mnemonic
+/// record's in the hardware range, each with the reference's text, before
+/// any key is derived: a locked vault refuses them the same, and its own
+/// index `vault_locked`. Without `vault_meta`, against the same file, the
+/// vault signs for every index, as before.
+#[test]
+fn the_vault_signs_only_for_its_own_records() {
+    let root = tempfile::tempdir().unwrap();
+    let (mut core, mut id) = moved_core(root.path(), &[], &[]);
+    add_odd_records(root.path());
+    // The next `accounts.*` request takes the records again.
+    result(&call(&mut core, &mut id, "accounts.list", json!({})));
+    for method in SIGNS {
+        for index in [0, 5] {
+            signed_as(
+                &sign_as(&mut core, &mut id, method, index),
+                method,
+                ABANDON,
+                index,
+            );
+        }
+        for (index, refusal) in NOT_THE_VAULT_S {
+            refused_as(&sign_as(&mut core, &mut id, method, index), refusal);
+        }
+    }
+    result(&call(&mut core, &mut id, "vault.lock", json!({})));
+    for method in SIGNS {
+        for (index, refusal) in NOT_THE_VAULT_S {
+            refused_as(&sign_as(&mut core, &mut id, method, index), refusal);
+        }
+        let locked = sign_as(&mut core, &mut id, method, 0);
+        assert_eq!(locked["error"]["code"], "vault_locked", "{locked}");
+    }
+    drop(core);
+
+    // Main's file: the same records, and main's word on what to sign.
+    let mut core = start(root.path(), false, &[], &[]);
+    let mut id = 10;
+    let unlocked = call(
+        &mut core,
+        &mut id,
+        "vault.unlock",
+        json!({ "password_b64": STANDARD.encode("testpass1") }),
+    );
+    result(&unlocked);
+    for method in SIGNS {
+        for (index, _) in NOT_THE_VAULT_S {
+            signed_as(
+                &sign_as(&mut core, &mut id, method, index),
+                method,
+                ABANDON,
+                index,
+            );
+        }
+    }
+}
+
+/// `x402.authorize`'s params for a payment from `account` under a token.
+fn token_pay_params(tag: u64, account: u32, token: &str) -> Value {
+    let mut params = pay_params(tag, account, None);
+    params["authorization"] = json!({ "token": token });
+    params["accept_index"] = json!(0);
+    params
+}
+
+/// An `x402-payment` token binding `params`' account, detection and entry.
+fn x402_token(core: &mut Core, id: &mut u64, params: &Value) -> String {
+    let payload = json!({ "detection": params["detection"], "accept_index": 0,
+        "accept": params["requirements"]["accepts"][0] });
+    let issued = call(
+        core,
+        id,
+        "approval.issue",
+        json!({ "kind": "x402-payment", "account": params["account"], "payload": payload }),
+    );
+    result(&issued)["token"].as_str().unwrap().to_owned()
+}
+
+fn unknown_token(reply: &Value) {
+    assert_eq!(reply["error"]["code"], "not_authorized", "{reply}");
+    assert_eq!(reply["error"]["data"]["reason"], "unknown_token", "{reply}");
+}
+
+/// `x402.authorize` once moved (G20b): the vault pays only for its own
+/// accounts, so a mnemonic record in the hardware range is refused with
+/// `withVaultAccount`'s text, under the cap or a token, before the token is
+/// judged or the cap charged; the token is burnt all the same. The vault's
+/// own account still pays.
+#[test]
+fn a_payment_from_a_hardware_index_never_takes_the_vault_key() {
+    let root = tempfile::tempdir().unwrap();
+    cap_file(root.path());
+    let (mut core, mut id) = moved_core(root.path(), &["x402"], &[]);
+    add_odd_records(root.path());
+    result(&call(&mut core, &mut id, "accounts.list", json!({})));
+    refused_as(&pay(&mut core, &mut id, 1_000_003, None), ON_DEVICE);
+    assert_eq!(spent(root.path()), "0");
+    let params = token_pay_params(90, 1_000_003, "");
+    let token = x402_token(&mut core, &mut id, &params);
+    let paid = call(
+        &mut core,
+        &mut id,
+        "x402.authorize",
+        token_pay_params(90, 1_000_003, &token),
+    );
+    refused_as(&paid, ON_DEVICE);
+    // Burnt: the vault account's otherwise matching request finds no token,
+    // where a live one would be another account's (`mismatch`).
+    unknown_token(&call(
+        &mut core,
+        &mut id,
+        "x402.authorize",
+        token_pay_params(90, 0, &token),
+    ));
+    assert_eq!(spent(root.path()), "0");
+    signed_by(&pay(&mut core, &mut id, 0, None), &bytes_of(ABANDON, 0));
+    assert_eq!(spent(root.path()), "1000");
+}
+
+const HANDLE: &str = "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1";
+
+/// `sign.message` of "hello" for account 3 under `page`, by `authorization`.
+fn page_sign(core: &mut Core, id: &mut u64, authorization: Value) -> Value {
+    let params = json!({ "key": { "kind": "account", "index": 3 }, "message": "0x68656c6c6f",
+            "authorization": authorization });
+    call_as(core, id, &page(), "sign.message", params)
+}
+
+/// Account 3's record given `type`, taken in by the next `accounts.*`.
+fn retype(core: &mut Core, id: &mut u64, root: &Path, kind: &str) {
+    let mut meta: Value =
+        serde_json::from_str(&std::fs::read_to_string(meta_path(root)).unwrap()).unwrap();
+    for wallet in meta["derivedWallets"].as_array_mut().unwrap() {
+        if wallet["index"] == 3 {
+            wallet["type"] = json!(kind);
+        }
+    }
+    std::fs::write(meta_path(root), serde_json::to_string(&meta).unwrap()).unwrap();
+    result(&call(core, id, "accounts.list", json!({})));
+}
+
+/// `sign.*`'s record refusal comes before the authorization: a request for
+/// an account the vault doesn't sign for counts none of a limited rule's
+/// five uses, and a page token it presents is burnt without being judged
+/// (one presented under another handle is refused for the record, not as a
+/// mismatch). Once the record is the vault's, neither token signs the
+/// matching request, a fresh one does, and the rule answers five times.
+#[test]
+fn a_refused_signature_spends_no_rule_use_and_burns_its_token() {
+    let root = tempfile::tempdir().unwrap();
+    let granted = SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as u64
+        - 600_000;
+    let dapp = json!({ SITE: {
+        "origin": SITE, "connectedAt": 1_762_000_000_000_u64, "lastUsed": 1_762_000_000_000_u64,
+        "walletIndex": 3, "chainId": 100,
+        "autoApprove": { "signing": false, "transactions": [],
+            "limited": { "signing": { "grantedAt": granted }, "transactions": [] } },
+    } });
+    std::fs::create_dir_all(root.path().join("userData")).unwrap();
+    std::fs::write(
+        root.path().join("userData").join("dapp-permissions.json"),
+        dapp.to_string(),
+    )
+    .unwrap();
+    let (mut core, mut id) = moved_core(root.path(), &["dapp"], &[MAINS_WORD]);
+    add_odd_records(root.path());
+    result(&call(&mut core, &mut id, "accounts.list", json!({})));
+    let mint = |core: &mut Core, id: &mut u64| {
+        let params = json!({ "kind": "sign-message", "account": 3,
+            "payload": { "message": "0x68656c6c6f" }, "handle": HANDLE });
+        let issued = call_as(core, id, &page(), "approval.issue", params);
+        result(&issued)["token"].as_str().unwrap().to_owned()
+    };
+    let (first, second) = (mint(&mut core, &mut id), mint(&mut core, &mut id));
+    // Account 3 is `other`: refused for its record, whatever authorizes it.
+    let standing = json!({ "standing": {} });
+    refused_as(&page_sign(&mut core, &mut id, standing.clone()), ON_DEVICE);
+    let presented = json!({ "token": first, "handle": HANDLE });
+    refused_as(&page_sign(&mut core, &mut id, presented), ON_DEVICE);
+    let elsewhere = json!({ "token": second, "handle": "b2".repeat(32) });
+    refused_as(&page_sign(&mut core, &mut id, elsewhere), ON_DEVICE);
+    // The vault's account now: the burnt tokens bind nothing.
+    retype(&mut core, &mut id, root.path(), "mnemonic");
+    for token in [&first, &second] {
+        let presented = json!({ "token": token, "handle": HANDLE });
+        unknown_token(&page_sign(&mut core, &mut id, presented));
+    }
+    let fresh = json!({ "token": mint(&mut core, &mut id), "handle": HANDLE });
+    signed_as(
+        &page_sign(&mut core, &mut id, fresh),
+        "sign.message",
+        ABANDON,
+        3,
+    );
+    // All five of the rule's uses, then its rate.
+    for _ in 0..5 {
+        let signed = page_sign(&mut core, &mut id, standing.clone());
+        signed_as(&signed, "sign.message", ABANDON, 3);
+    }
+    let sixth = page_sign(&mut core, &mut id, standing);
+    assert_eq!(sixth["error"]["data"]["reason"], "rate_limited", "{sixth}");
 }
 
 /// Two ICAPs of 31 digits past 2^160, which `isAddress` takes (and the

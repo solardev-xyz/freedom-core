@@ -331,9 +331,14 @@ impl Approvals {
         let account = super::account(fields.get("account"), "account")?;
         let device = fields.get("device").map(device_of).transpose()?;
         // The account's own record, once `vault_meta` is moved (G20):
-        // checked before anything is spent or charged.
+        // checked before anything is spent or charged. The vault pays only
+        // for its own accounts (G20b): a mnemonic record in the hardware
+        // range is refused as `withVaultAccount` refuses it, before any key.
         if let Some(recorded) = self.recorded(account)? {
             recorded_device(&recorded, device.as_ref())?;
+            if recorded == Account::Vault {
+                self.vault_signs(account)?;
+            }
         }
         // The authorization names 20 bytes: an address past them (an ICAP
         // past 2^160) can't pay, as the reference's signer would fail.

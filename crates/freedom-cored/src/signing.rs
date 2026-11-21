@@ -24,6 +24,16 @@
 //! before, and the chrome's is refused. A `page` caller sends its
 //! `PageContext`.
 //!
+//! Once `core.hello` names `vault_meta` in `store_moved` (G20b), an account
+//! key signs only for an index the core's own records give the vault: below
+//! the hardware range, with a mnemonic record or none. A Ledger's, a
+//! phone's, a Safe's, another type's or any hardware index is refused
+//! `invalid_argument` with the reference's text (`getSigner`,
+//! `withVaultAccount`), after the public work and before the authorization
+//! or the key ([`crate::accounts::vault_signs`]); while a vault journal
+//! remains the records answer `storage`. Before the move main routes a
+//! device's account to its device, and its word stands.
+//!
 //! Typed data comes with the view of exactly what is signed (#88), which
 //! fc-evm writes as JSON text in the pass that hashes; the reply carries it
 //! as written. `sign.typed_data` signs only the digest the caller confirmed
@@ -275,12 +285,17 @@ const AUTHORIZED: [&str; 4] = [
     "swarm.sign_soc",
 ];
 
-/// An account key's index.
-fn account_index(key: KeyRef) -> Result<u32, ErrorBody> {
-    match key {
-        KeyRef::Account(index) => Ok(index),
-        _ => Err(crate::vault::internal()),
-    }
+/// An account key's index, once the core's own records say the vault signs
+/// for it (G20b): with `vault_meta` moved, a Ledger's, a phone's, a Safe's,
+/// any other type's, or any hardware index is refused here, after the
+/// public work and before the authorization is checked or any key derived
+/// ([`crate::accounts::vault_signs`]). Before the move main's word stands.
+fn vault_account(checks: &Checks<'_>, key: KeyRef) -> Result<u32, ErrorBody> {
+    let KeyRef::Account(index) = key else {
+        return Err(crate::vault::internal());
+    };
+    checks.approvals.vault_signs(index)?;
+    Ok(index)
 }
 
 /// Checks the request's `authorization` for what it signs (design 0012,
@@ -356,11 +371,12 @@ fn handle_parsed(
                     "typed data hash is not the confirmed one (expected_hash)",
                 ));
             }
+            let account = vault_account(checks, key)?;
             let after = authorize(
                 checks,
                 fields,
                 Signed::TypedData {
-                    account: account_index(key)?,
+                    account,
                     fields,
                     hash: &hashed.hash,
                     view: &hashed,
@@ -400,11 +416,12 @@ fn other(
             let key = key_ref(&fields["key"], Allowed::AccountsOnly)?;
             let tx = Transaction::from_json(&fields["tx"]).map_err(evm_error)?;
             let prepared = tx.prepare().map_err(evm_error)?;
+            let account = vault_account(checks, key)?;
             let after = authorize(
                 checks,
                 fields,
                 Signed::Transaction {
-                    account: account_index(key)?,
+                    account,
                     tx_json: &fields["tx"],
                     tx: &tx,
                 },
@@ -424,11 +441,12 @@ fn other(
             let fields = object(params, &["key", "message"], &["authorization"])?;
             let key = key_ref(&fields["key"], Allowed::AccountsOnly)?;
             let message = parse_bytes(string(fields, "message")?, "message").map_err(evm_error)?;
+            let account = vault_account(checks, key)?;
             let after = authorize(
                 checks,
                 fields,
                 Signed::Message {
-                    account: account_index(key)?,
+                    account,
                     message: &fields["message"],
                     bytes: &message,
                 },

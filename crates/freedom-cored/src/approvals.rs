@@ -1877,6 +1877,22 @@ impl Approvals {
             .transpose()
     }
 
+    /// Whether the vault signs for account `index` (G20b): once
+    /// `vault_meta` is moved, only for one the core's own records give it
+    /// ([`crate::accounts::vault_signs`]); before, whatever main asks, as
+    /// main routes a device's account to its device.
+    pub(crate) fn vault_signs(&self, index: u32) -> Result<(), ErrorBody> {
+        match &self.records {
+            Some(records) => records.vault_signs(index),
+            None => Ok(()),
+        }
+    }
+
+    /// The core's own records once `vault_meta` is moved; none before.
+    pub(crate) fn account_records(&self) -> Option<&crate::accounts::Records> {
+        self.records.as_ref()
+    }
+
     /// The `approval.changed` events the last request made, to send after
     /// its reply.
     pub fn take_events(&mut self) -> Vec<Zeroizing<Vec<u8>>> {

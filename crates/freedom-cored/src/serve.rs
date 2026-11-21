@@ -1597,7 +1597,7 @@ impl Core {
         let Some(page) = context.page.as_ref() else {
             return self.error(id, invalid());
         };
-        let Ok(request) = fc_eip1193::Request::parse(params.unwrap_or("{}")) else {
+        let Ok(mut request) = fc_eip1193::Request::parse(params.unwrap_or("{}")) else {
             return self.error(id, invalid());
         };
         let key = (!page.origin.is_empty()).then_some(page.origin.as_str());
@@ -1620,6 +1620,13 @@ impl Core {
                 self.connects
                     .named(id, request, &page, binding, left, received, &mut self.vault);
             return self.dispatch(outs);
+        }
+        // Once `vault_meta` is moved the wallet list is the core's own, read
+        // where the dispatcher reads it (G20b): here for the methods whose
+        // start reads it, at a name-keyed document's start after its checks,
+        // and at a send's prepare.
+        if fc_eip1193::reads_wallets(&request.method) {
+            crate::eip1193::own_wallets(&mut request.world, &self.vault);
         }
         let vault = &self.vault;
         match fc_eip1193::start(&request, key, |key| vault.dapp_entry(key)) {

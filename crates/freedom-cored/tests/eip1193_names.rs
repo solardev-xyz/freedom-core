@@ -132,7 +132,12 @@ impl Main {
         env: &[(&str, &str)],
         timeout_ms: u64,
     ) -> (tempfile::TempDir, Main) {
-        Main::build(grants, env, timeout_ms, true)
+        Main::build(grants, env, timeout_ms, true, Vec::new())
+    }
+
+    /// As [`Main::new`], with `vault_meta` in `store_moved` (G20b).
+    fn moved(grants: &Value) -> (tempfile::TempDir, Main) {
+        Main::build(grants, &[], 5000, true, vec!["vault_meta"])
     }
 
     /// As [`Main::with_timeout`]; with `uncached` false, naming's cache
@@ -142,6 +147,7 @@ impl Main {
         env: &[(&str, &str)],
         timeout_ms: u64,
         uncached: bool,
+        store_moved: Vec<&'static str>,
     ) -> (tempfile::TempDir, Main) {
         let (root, data, locks) = dirs();
         let mut all = Vec::new();
@@ -156,12 +162,14 @@ impl Main {
             std::fs::write(core.grant_root.join("dapp-permissions.json"), text).unwrap();
         }
         core.grant_moved = vec!["dapp"];
+        let moved = !store_moved.is_empty();
+        core.store_moved = store_moved;
         assert_eq!(core.hello_fragments()["result"]["protocol"], 2);
-        let imported = core.call(
-            2,
-            "vault.import",
-            json!({ "password_b64": STANDARD.encode("testpass1"), "mnemonic_b64": STANDARD.encode(ABANDON) }),
-        );
+        let mut import = json!({ "password_b64": STANDARD.encode("testpass1"), "mnemonic_b64": STANDARD.encode(ABANDON) });
+        if moved {
+            import["user_knows_password"] = json!(true);
+        }
+        let imported = core.call(2, "vault.import", import);
         assert!(imported["result"].is_object(), "{imported}");
         assert_eq!(core.event()["event"], "vault.unlocked");
         let configured = core.call(
@@ -846,6 +854,42 @@ fn a_signature_moved_at_any_check_signs_nothing() {
     assert!(main.file()[NAME]["autoApprove"]["limited"].is_object());
 }
 
+/// A name-keyed document's signature reads the core's wallet list once
+/// `vault_meta` is moved (G20b), at its start after the name checks before
+/// it: main calling the vault's account a Ledger still has it asked as the
+/// vault's. Without the name, main's word sends it down the device path.
+#[test]
+fn a_name_keyed_start_reads_the_core_s_list() {
+    let mut world = plain_world();
+    world["wallets"][0]["type"] = json!("ledger");
+    for moved in [true, false] {
+        let (_root, mut main) = if moved {
+            Main::moved(&grants())
+        } else {
+            Main::new(&grants(), &[])
+        };
+        main.script(&[Name::Serves; 3]);
+        main.request(
+            10,
+            &named(1),
+            "personal_sign",
+            json!(["0x68656c6c6f"]),
+            &world,
+        );
+        let asked = main.asked("approval.request");
+        let account = &asked["params"]["view"]["account"];
+        let (kind, choices) = if moved {
+            ("mnemonic", json!({ "alwaysAllow": [false, true] }))
+        } else {
+            ("ledger", json!({ "alwaysAllow": [false] }))
+        };
+        assert_eq!(account["type"], kind, "{asked}");
+        assert_eq!(account["address"], ACCOUNT, "{asked}");
+        assert_eq!(asked["params"]["choices"], choices, "{asked}");
+        main.all_checked("before the prompt");
+    }
+}
+
 /// The site's rule for signatures, in Q9's form.
 fn ruled() -> Value {
     let now = load()["now"].as_u64().unwrap();
@@ -1350,7 +1394,7 @@ fn a_cancel_ends_the_name_check() {
 /// rather than failing busy and ending the binding.
 #[test]
 fn cancelled_checks_free_their_places_in_naming() {
-    let (_root, mut main) = Main::build(&grants(), &[], 90_000, false);
+    let (_root, mut main) = Main::build(&grants(), &[], 90_000, false, Vec::new());
     let world = plain_world();
     for n in 0..64 {
         main.request(100 + n, &named(1), "eth_accounts", json!([]), &world);

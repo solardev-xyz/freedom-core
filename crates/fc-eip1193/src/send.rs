@@ -319,6 +319,12 @@ impl Send {
         }
     }
 
+    /// Puts the core's own wallet list and active index in place of main's,
+    /// for [`Send::prepare`] to read (G20b; [`World::replace_wallets`]).
+    pub fn replace_wallets(&mut self, wallets: Vec<JsValue>, active: Option<JsValue>) {
+        self.world.replace_wallets(wallets, active);
+    }
+
     /// The transaction's form alone (`txOf`): the reference checks it
     /// before anything else, before its first name check (APR-5f-2).
     pub fn form(&self) -> Result<(), Answer> {

@@ -167,6 +167,14 @@ pub fn start(
     }
 }
 
+/// Whether [`start`] may read `world`'s wallet list or active index for
+/// `method` (G20b): `eth_accounts`, `eth_requestAccounts` and the two
+/// signatures. A send reads them later, at [`send::Send::prepare`]; no
+/// other method reads them.
+pub fn reads_wallets(method: &str) -> bool {
+    matches!(method, "eth_accounts" | "eth_requestAccounts") || sign::Method::of(method).is_some()
+}
+
 /// `eth_accounts`: the account the key's grant exposes, as main's wallet
 /// list gives its address, or `[]`.
 fn accounts(
@@ -219,6 +227,113 @@ pub(crate) fn strictly_equal(a: &JsValue, b: &JsValue) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `method` with main's world: accounts 0 and 1, 1 active.
+    fn request(method: &str, enabled: bool) -> Request {
+        let wallets = r#"[{"index":0,"address":"0x000000000000000000000000000000000000000a","type":"mnemonic"},{"index":1,"address":"0x000000000000000000000000000000000000000b","type":"mnemonic"}]"#;
+        Request::parse(&format!(
+            r#"{{"method":"{method}","params":["0x68656c6c6f","0x0000000000000000000000000000000000000001"],"world":{{"enabled":{enabled},"window_chain":100,"wallets":{wallets},"active":1,"networks":{{"100":{{"name":"Gnosis","available":true}}}}}}}}"#
+        ))
+        .unwrap()
+    }
+
+    fn core_list() -> Vec<JsValue> {
+        fc_json::parse(
+            r#"[{"index":0,"address":"0x000000000000000000000000000000000000000c","type":"ledger"},{"index":2,"address":"0x000000000000000000000000000000000000000d","type":"mnemonic"}]"#,
+        )
+        .unwrap()
+        .as_array()
+        .unwrap()
+        .to_vec()
+    }
+
+    /// No method but those [`reads_wallets`] names reads the wallet list or
+    /// the active index at [`start`]: two worlds that differ only in them
+    /// start alike, whatever the key, the switch and the grant. A send's
+    /// are read by its `prepare`, after the start.
+    #[test]
+    fn only_the_named_methods_read_the_wallets() {
+        let grant = || {
+            fc_json::parse(r#"{"walletIndex":0,"chainId":100,"autoApprove":{"signing":true}}"#)
+                .unwrap()
+        };
+        let mut methods: Vec<&str> = METHODS.iter().map(|m| m.name).collect();
+        methods.push("eth_unknownMethod");
+        for method in methods {
+            for enabled in [true, false] {
+                for key in [None, Some("https://app.example")] {
+                    for granted in [false, true] {
+                        let main = request(method, enabled);
+                        let mut core = main.clone();
+                        core.world
+                            .replace_wallets(core_list(), Some(JsValue::Number(2.0)));
+                        let step = |request: &Request| start(request, key, |_| granted.then(grant));
+                        let (a, b) = (step(&main), step(&core));
+                        let what = format!("{method} {enabled} {key:?} {granted}");
+                        match (&a, &b) {
+                            (Step::Send(_), Step::Send(_)) => {
+                                assert_eq!(method, "eth_sendTransaction", "{what}");
+                            }
+                            _ if reads_wallets(method) => {}
+                            _ => assert_eq!(a, b, "{what}"),
+                        }
+                    }
+                }
+            }
+        }
+        // Each named method does read them, once connected.
+        let key = Some("https://app.example");
+        for method in ["eth_accounts", "personal_sign", "eth_requestAccounts"] {
+            let main = request(method, true);
+            let mut core = main.clone();
+            core.world
+                .replace_wallets(core_list(), Some(JsValue::Number(2.0)));
+            let a = start(&main, key, |_| Some(grant()));
+            let b = start(&core, key, |_| Some(grant()));
+            assert_ne!(a, b, "{method}");
+        }
+    }
+
+    /// The core's list replaces main's outright: `eth_accounts` answers its
+    /// address for the grant's index, and the connect prompt offers its
+    /// accounts, its active index the default.
+    #[test]
+    fn the_replaced_list_is_the_one_read() {
+        let key = Some("https://app.example");
+        let mut accounts = request("eth_accounts", true);
+        accounts.world.replace_wallets(core_list(), None);
+        let grant = |index: u32| {
+            move |_: &str| {
+                fc_json::parse(&format!(r#"{{"walletIndex":{index},"chainId":100}}"#)).ok()
+            }
+        };
+        let answered = |step: Step| match step {
+            Step::Answer(answer) => answer.into_string(),
+            other => panic!("{other:?}"),
+        };
+        assert_eq!(
+            answered(start(&accounts, key, grant(0))),
+            r#"{"result":["0x000000000000000000000000000000000000000c"]}"#
+        );
+        // Main's index 1 isn't the core's.
+        assert_eq!(
+            answered(start(&accounts, key, grant(1))),
+            r#"{"result":[]}"#
+        );
+        let mut connect = request("eth_requestAccounts", true);
+        connect
+            .world
+            .replace_wallets(core_list(), Some(JsValue::Number(2.0)));
+        let Step::Connect(Connect::Ask(ask)) = start(&connect, key, |_| None) else {
+            panic!("a prompt")
+        };
+        let view = fc_json::parse(ask.view()).unwrap();
+        let offered = view.get("accounts").and_then(JsValue::as_array).unwrap();
+        let indexes: Vec<&JsValue> = offered.iter().filter_map(|a| a.get("index")).collect();
+        assert_eq!(indexes, [&JsValue::Number(0.0), &JsValue::Number(2.0)]);
+        assert_eq!(view.get("defaultIndex"), Some(&JsValue::Number(2.0)));
+        assert_eq!(ask.choices(), r#"{"walletIndex":[0,2]}"#);
+    }
 
     #[test]
     fn strict_equality_is_javascripts() {

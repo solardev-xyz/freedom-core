@@ -1098,6 +1098,17 @@ impl Vault {
         self.approvals.dapp_entry(key, self.clocks().wall_ms)
     }
 
+    /// The core's own wallet list and active index for a page request's
+    /// world once `vault_meta` is moved (G20b), from the records' snapshot
+    /// and the vault state it belongs to
+    /// ([`crate::accounts::Records::wallets`]); none before, when main's
+    /// stand.
+    pub fn own_wallets(&self) -> Option<(Vec<fc_json::JsValue>, Option<fc_json::JsValue>)> {
+        self.approvals
+            .account_records()
+            .map(|records| records.wallets(&self.state))
+    }
+
     /// Whether the dApp store has moved (design 0012, APR-5c).
     pub fn dapp_moved(&self) -> bool {
         self.approvals.dapp_moved()
