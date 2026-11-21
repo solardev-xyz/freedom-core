@@ -12,7 +12,8 @@
 //!   a standing rule judges a send as a phone's. `address` is the phone
 //!   account's: main's word while main owns `vault-meta.json`; once
 //!   `vault_meta` is moved (G20), `account` must be a phone's record
-//!   (`remote`) and `address` its address, or the job is refused
+//!   (`remote`) and `address` its address, each in any form ethers'
+//!   `isAddress` takes, or the job is refused
 //!   (`invalid_argument`) before anything is spent. A
 //!   payment's slot, and its site's bound, are checked before the
 //!   authorization is spent. The reply is `{ job, expires_in_ms, request: {
@@ -449,8 +450,10 @@ impl Phone {
             .and_then(|n| u32::try_from(n).ok())
             .filter(|n| *n <= fc_approval::MAX_ACCOUNT)
             .ok_or_else(|| invalid("account: index out of range"))?;
-        let address = fc_evm::parse_address(string(fields, "address")?)
-            .map_err(|e| invalid(e.to_string()))?;
+        // Any form ethers' `isAddress` takes, as the phone's record stores
+        // it and main's phone backend hands it back.
+        let address = fc_wallet_state::address_bytes(string(fields, "address")?)
+            .ok_or_else(|| invalid("address: expected an address"))?;
         // The phone account's own record, once `vault_meta` is moved (G20);
         // main's word before.
         match approvals.recorded(account)? {

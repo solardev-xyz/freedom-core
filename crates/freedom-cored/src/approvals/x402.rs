@@ -23,7 +23,8 @@
 //!   `vault_meta` is moved (G20) the account's record names the device, as
 //!   the reference's `paymentDevice` reads it: a vault account pays with no
 //!   `device`, a Ledger's or a phone's with its kind and its record's
-//!   address, and a Safe, or an account the core can't name, pays nothing.
+//!   address (each in any form ethers' `isAddress` takes, compared as
+//!   bytes), and a Safe, or an account the core can't name, pays nothing.
 //!   A request that disagrees is refused (`invalid_argument`) before any
 //!   token is spent or cap charged. The token is checked, or the cap
 //!   charged, as for the vault, and no key is used: the reply is `{
@@ -229,8 +230,10 @@ fn device_of(value: &Value) -> Result<(DeviceKind, [u8; 20]), ErrorBody> {
         "phone" => DeviceKind::Phone,
         _ => return Err(invalid("device.kind: expected ledger or phone")),
     };
-    let address = fc_evm::parse_address(string(device, "address")?)
-        .map_err(|_| invalid("device.address: expected an address"))?;
+    // Any form ethers' `isAddress` takes, as a record stores it and the
+    // reference's `paymentDevice` hands it back.
+    let address = fc_wallet_state::address_bytes(string(device, "address")?)
+        .ok_or_else(|| invalid("device.address: expected an address"))?;
     Ok((kind, address))
 }
 

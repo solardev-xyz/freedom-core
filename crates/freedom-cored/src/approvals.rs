@@ -165,9 +165,9 @@ pub struct Approvals {
     narrowed: Vec<Narrowed>,
     /// x402's cap generations and reservations (X402-1).
     x402: x402::X402State,
-    /// `vault-meta.json`'s records once `vault_meta` is moved (G20): the
-    /// checks read an account's kind and address there. None before, when
-    /// main owns the file and its word on them stands.
+    /// The loop's snapshot of `vault-meta.json`'s records once `vault_meta`
+    /// is moved (G20): the checks read an account's kind and address there.
+    /// None before, when main owns the file and its word on them stands.
     records: Option<crate::accounts::Records>,
 }
 
@@ -1861,10 +1861,11 @@ impl Approvals {
         }
     }
 
-    /// The hello's `store_moved` named `vault_meta` (G20): the account
-    /// checks read the core's own records from now on.
-    pub fn configure_records(&mut self, records: crate::accounts::Records) {
-        self.records = Some(records);
+    /// The loop's snapshot of the account records (G20): taken where the
+    /// files and the vault state the checks run against change together
+    /// ([`crate::accounts::Records`]); none until `vault_meta` is moved.
+    pub fn set_records(&mut self, records: Option<crate::accounts::Records>) {
+        self.records = records;
     }
 
     /// Account `index` as the core's own records give it once `vault_meta`

@@ -43,8 +43,9 @@
 //!   and so does a clear that fails once `safe_pending` is moved. The
 //!   answer is `durable: false` if any of the writes wasn't.
 //! - **The core's own checks** (G20; 0013's "the core's own checks (0012)
-//!   need to know an account's type"): once moved, [`Records`] reads an
-//!   account's kind and address for `approval.issue`'s `phone`,
+//!   need to know an account's type"): once moved, [`Records`], the
+//!   loop's snapshot of the file, gives an account's kind and address for
+//!   `approval.issue`'s `phone`,
 //!   `approval.check`'s `account_kind`, `x402.authorize`'s `device` and
 //!   `phone.job`'s `address`, which refuse a claim that disagrees. Before
 //!   the move main owns the file, and its word stands there, as before.
@@ -57,6 +58,7 @@ use fc_protocol::error::{ErrorBody, ErrorCode};
 use fc_store::file::{Read, read_file, set_aside, write_file};
 use fc_store::fsx::{self, Done};
 use fc_vault::state::VaultState;
+use fc_wallet_state::value_address_bytes;
 use fc_wallet_state::vault_meta::{self, Device, Failed, Refusal, SafeParams, VaultMeta};
 use serde_json::json;
 
@@ -240,11 +242,22 @@ impl Store {
         self.moved
     }
 
-    /// The records' reader for the core's own checks (G20), once moved.
-    pub fn records(&self) -> Option<Records> {
-        self.moved.then(|| Records {
-            dir: self.dir.clone(),
-        })
+    /// The records' snapshot for the core's own checks (G20), once moved:
+    /// the file as it stands, read and never written. The loop takes it
+    /// where no vault job is running ([`Records`]).
+    pub fn snapshot(&self) -> Option<Records> {
+        if !self.moved {
+            return None;
+        }
+        // While a vault journal remains the file may be a replaced vault's.
+        if !matches!(crate::vault_meta_journal::remaining(&self.dir), Ok(false)) {
+            return Some(Records::Pending);
+        }
+        let meta = match read_file(&self.path(), vault_meta::MAX_FILE_BYTES) {
+            Read::Bytes(bytes) => VaultMeta::load(&bytes).unwrap_or_else(|_| VaultMeta::none()),
+            Read::Missing | Read::Unreadable => VaultMeta::none(),
+        };
+        Some(Records::Read(meta))
     }
 
     /// `afterUnlock`'s migration, once moved: a file without `addresses`
@@ -540,7 +553,7 @@ impl Store {
         if removal.safe {
             let address = meta
                 .record(index)
-                .and_then(|record| record.get("address").and_then(address_bytes));
+                .and_then(|record| record.get("address").and_then(value_address_bytes));
             match address {
                 Some(safe) => {
                     approvals.end_safe_approvals(&safe);
@@ -620,7 +633,9 @@ pub fn account_of(meta: &VaultMeta, index: u32) -> Account {
             Account::Vault
         };
     };
-    let address = || record.get("address").and_then(address_bytes);
+    // Any form `isAddress` took when the record was added (ethers'
+    // `getAddress`: with or without `0x`, any valid case, ICAP).
+    let address = || record.get("address").and_then(value_address_bytes);
     match record.get("type").and_then(JsValue::as_str) {
         Some("mnemonic") => Account::Vault,
         Some("ledger") => address().map_or(Account::Unknown, Account::Ledger),
@@ -631,31 +646,33 @@ pub fn account_of(meta: &VaultMeta, index: u32) -> Account {
 }
 
 /// `vault-meta.json`'s records for the core's own checks (G20), once
-/// `vault_meta` is moved: read at each check, as the store reads its file
-/// at each request. Inline, so read only: an unreadable file reads as no
-/// file and stays where it is (the store's next request sets it aside,
-/// queued behind the vault's jobs), and nothing is written.
+/// `vault_meta` is moved: a snapshot the event loop takes where the files
+/// and the vault state the checks run against change together, never read
+/// at check time. A vault create or import installs the vault, then the
+/// metadata, on the worker, and the loop installs its new state only at the
+/// job's end: a check must see the records of the vault it signs with, the
+/// old pair until then and the new pair after, never one of each. So the
+/// loop takes it when the hello names the store, at the end of every vault
+/// job (after the state it installs), and after every `accounts.*` request,
+/// each at a point where no vault job is running.
 #[derive(Debug, Clone)]
-pub struct Records {
-    dir: PathBuf,
+pub enum Records {
+    /// A vault journal remained when it was taken: the files may be a
+    /// replaced vault's. Every check answers `storage`, as the vault's
+    /// reads do, until recovery finishes it and the next snapshot is taken.
+    Pending,
+    /// The file as it stood. An unreadable one reads as no file and stays
+    /// where it is: the store's next request sets it aside.
+    Read(VaultMeta),
 }
 
 impl Records {
-    /// Account `index` as the file records it. While a vault journal
-    /// remains, the file may be a replaced vault's: `storage`, as the
-    /// vault's reads answer then, until recovery finishes it.
+    /// Account `index` as the snapshot records it.
     pub fn account(&self, index: u32) -> Result<Account, ErrorBody> {
-        match crate::vault_meta_journal::remaining(&self.dir) {
-            Ok(false) => {}
-            Ok(true) => return Err(storage("other")),
-            Err(e) => return Err(storage(crate::secrets::io_kind(&e))),
+        match self {
+            Records::Pending => Err(storage("other")),
+            Records::Read(meta) => Ok(account_of(meta, index)),
         }
-        let path = self.dir.join(vault_meta::FILE_NAME);
-        let meta = match read_file(&path, vault_meta::MAX_FILE_BYTES) {
-            Read::Bytes(bytes) => VaultMeta::load(&bytes).unwrap_or_else(|_| VaultMeta::none()),
-            Read::Missing | Read::Unreadable => VaultMeta::none(),
-        };
-        Ok(account_of(&meta, index))
     }
 }
 
@@ -681,25 +698,6 @@ fn clear_pending(pending: &SafePending, index: f64) -> Result<bool, ErrorBody> {
 /// An index as an account number: a non-negative integer that fits.
 fn account_index(index: f64) -> Option<u32> {
     (index.fract() == 0.0 && (0.0..=f64::from(u32::MAX)).contains(&index)).then_some(index as u32)
-}
-
-/// A record's address as 20 bytes: `0x` and 40 hex digits, or the 40
-/// digits alone (an address `isAddress` took without its prefix).
-fn address_bytes(address: &JsValue) -> Option<[u8; 20]> {
-    let text = address.as_str()?;
-    let digits = text
-        .strip_prefix("0x")
-        .or_else(|| text.strip_prefix("0X"))
-        .unwrap_or(text);
-    if digits.len() != 40 {
-        return None;
-    }
-    let mut bytes = [0u8; 20];
-    for (byte, pair) in bytes.iter_mut().zip(digits.as_bytes().chunks(2)) {
-        let pair = std::str::from_utf8(pair).ok()?;
-        *byte = u8::from_str_radix(pair, 16).ok()?;
-    }
-    Some(bytes)
 }
 
 /// User wallet `index`'s address, as `keys.addresses` answers it.
@@ -769,7 +767,7 @@ mod tests {
         })
         .to_string();
         let meta = VaultMeta::load(text.as_bytes()).unwrap();
-        let bytes = |text: &str| address_bytes(&JsValue::string(text)).unwrap();
+        let bytes = |text: &str| fc_wallet_state::address_bytes(text).unwrap();
         // A mnemonic record is the vault's, whatever address it stores.
         assert_eq!(account_of(&meta, 0), Account::Vault);
         assert_eq!(account_of(&meta, 1), Account::Vault);
@@ -795,28 +793,49 @@ mod tests {
         assert_eq!(Account::Unknown.kind(), None);
     }
 
+    /// A device record in any form `isAddress` took (`stores.json`'s
+    /// `vault_meta` forms among them) is its device at its address; one
+    /// with a bad checksum, or an ICAP past 20 bytes, is none.
     #[test]
-    fn a_records_address_as_bytes() {
-        let mut expected = [0u8; 20];
-        expected[19] = 0xab;
-        let hex = "000000000000000000000000000000000000aB";
-        for text in [
-            format!("0x00{hex}"),
-            format!("0X00{hex}"),
-            format!("00{hex}"),
+    fn a_device_record_in_any_accepted_form() {
+        let checksummed = "0xA1A1a1a1A1A1A1A1A1a1a1a1a1a1A1A1a1A1a1a1";
+        let expected = fc_evm::parse_address(checksummed).unwrap();
+        let icap = "XE26QURMT0JTHRKRVCUYL99VJZODRSZWBMT";
+        let icap_bytes = fc_wallet_state::address_bytes(icap).unwrap();
+        let record = |address: &str| {
+            let text = json!({ "derivedWallets": [
+                { "index": 0, "name": "Main" },
+                { "index": 1_000_000, "name": "Phone", "address": address, "type": "remote" },
+                { "index": 1_000_001, "name": "Ledger", "address": address, "type": "ledger" },
+            ] })
+            .to_string();
+            let meta = VaultMeta::load(text.as_bytes()).unwrap();
+            (account_of(&meta, 1_000_000), account_of(&meta, 1_000_001))
+        };
+        for form in [
+            checksummed.to_owned(),
+            checksummed[2..].to_owned(),
+            checksummed.to_lowercase(),
+            checksummed[2..].to_lowercase(),
+            format!("0x{}", checksummed[2..].to_uppercase()),
+            checksummed[2..].to_uppercase(),
         ] {
             assert_eq!(
-                address_bytes(&JsValue::string(text.as_str())),
-                Some(expected)
+                record(&form),
+                (Account::Phone(expected), Account::Ledger(expected)),
+                "{form}"
             );
         }
+        assert_eq!(
+            record(icap),
+            (Account::Phone(icap_bytes), Account::Ledger(icap_bytes))
+        );
         for bad in [
-            "0x12",
-            "XE26QURMT0JTHRKRVCUYL99VJZODRSZWBMT",
-            "0xzz00000000000000000000000000000000000000",
+            "0xa1A1a1a1A1A1A1A1A1a1a1a1a1a1A1A1a1A1a1a1",
+            "0Xa1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+            "XE27QURMT0JTHRKRVCUYL99VJZODRSZWBMT",
         ] {
-            assert_eq!(address_bytes(&JsValue::string(bad)), None, "{bad}");
+            assert_eq!(record(bad), (Account::Unknown, Account::Unknown), "{bad}");
         }
-        assert_eq!(address_bytes(&JsValue::Number(1.0)), None);
     }
 }
