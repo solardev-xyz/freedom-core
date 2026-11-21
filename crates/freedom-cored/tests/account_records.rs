@@ -19,7 +19,7 @@
 mod common;
 
 use std::path::{Path, PathBuf};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD;
@@ -1003,6 +1003,155 @@ fn the_vault_signs_only_for_its_own_records() {
             );
         }
     }
+}
+
+/// `x402.authorize`'s params for a payment from `account` under a token.
+fn token_pay_params(tag: u64, account: u32, token: &str) -> Value {
+    let mut params = pay_params(tag, account, None);
+    params["authorization"] = json!({ "token": token });
+    params["accept_index"] = json!(0);
+    params
+}
+
+/// An `x402-payment` token binding `params`' account, detection and entry.
+fn x402_token(core: &mut Core, id: &mut u64, params: &Value) -> String {
+    let payload = json!({ "detection": params["detection"], "accept_index": 0,
+        "accept": params["requirements"]["accepts"][0] });
+    let issued = call(
+        core,
+        id,
+        "approval.issue",
+        json!({ "kind": "x402-payment", "account": params["account"], "payload": payload }),
+    );
+    result(&issued)["token"].as_str().unwrap().to_owned()
+}
+
+fn unknown_token(reply: &Value) {
+    assert_eq!(reply["error"]["code"], "not_authorized", "{reply}");
+    assert_eq!(reply["error"]["data"]["reason"], "unknown_token", "{reply}");
+}
+
+/// `x402.authorize` once moved (G20b): the vault pays only for its own
+/// accounts, so a mnemonic record in the hardware range is refused with
+/// `withVaultAccount`'s text, under the cap or a token, before the token is
+/// judged or the cap charged; the token is burnt all the same. The vault's
+/// own account still pays.
+#[test]
+fn a_payment_from_a_hardware_index_never_takes_the_vault_key() {
+    let root = tempfile::tempdir().unwrap();
+    cap_file(root.path());
+    let (mut core, mut id) = moved_core(root.path(), &["x402"], &[]);
+    add_odd_records(root.path());
+    result(&call(&mut core, &mut id, "accounts.list", json!({})));
+    refused_as(&pay(&mut core, &mut id, 1_000_003, None), ON_DEVICE);
+    assert_eq!(spent(root.path()), "0");
+    let params = token_pay_params(90, 1_000_003, "");
+    let token = x402_token(&mut core, &mut id, &params);
+    let paid = call(
+        &mut core,
+        &mut id,
+        "x402.authorize",
+        token_pay_params(90, 1_000_003, &token),
+    );
+    refused_as(&paid, ON_DEVICE);
+    // Burnt: the vault account's otherwise matching request finds no token,
+    // where a live one would be another account's (`mismatch`).
+    unknown_token(&call(
+        &mut core,
+        &mut id,
+        "x402.authorize",
+        token_pay_params(90, 0, &token),
+    ));
+    assert_eq!(spent(root.path()), "0");
+    signed_by(&pay(&mut core, &mut id, 0, None), &bytes_of(ABANDON, 0));
+    assert_eq!(spent(root.path()), "1000");
+}
+
+const HANDLE: &str = "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1";
+
+/// `sign.message` of "hello" for account 3 under `page`, by `authorization`.
+fn page_sign(core: &mut Core, id: &mut u64, authorization: Value) -> Value {
+    let params = json!({ "key": { "kind": "account", "index": 3 }, "message": "0x68656c6c6f",
+            "authorization": authorization });
+    call_as(core, id, &page(), "sign.message", params)
+}
+
+/// Account 3's record given `type`, taken in by the next `accounts.*`.
+fn retype(core: &mut Core, id: &mut u64, root: &Path, kind: &str) {
+    let mut meta: Value =
+        serde_json::from_str(&std::fs::read_to_string(meta_path(root)).unwrap()).unwrap();
+    for wallet in meta["derivedWallets"].as_array_mut().unwrap() {
+        if wallet["index"] == 3 {
+            wallet["type"] = json!(kind);
+        }
+    }
+    std::fs::write(meta_path(root), serde_json::to_string(&meta).unwrap()).unwrap();
+    result(&call(core, id, "accounts.list", json!({})));
+}
+
+/// `sign.*`'s record refusal comes before the authorization: a request for
+/// an account the vault doesn't sign for counts none of a limited rule's
+/// five uses, and a page token it presents is burnt without being judged
+/// (one presented under another handle is refused for the record, not as a
+/// mismatch). Once the record is the vault's, neither token signs the
+/// matching request, a fresh one does, and the rule answers five times.
+#[test]
+fn a_refused_signature_spends_no_rule_use_and_burns_its_token() {
+    let root = tempfile::tempdir().unwrap();
+    let granted = SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as u64
+        - 600_000;
+    let dapp = json!({ SITE: {
+        "origin": SITE, "connectedAt": 1_762_000_000_000_u64, "lastUsed": 1_762_000_000_000_u64,
+        "walletIndex": 3, "chainId": 100,
+        "autoApprove": { "signing": false, "transactions": [],
+            "limited": { "signing": { "grantedAt": granted }, "transactions": [] } },
+    } });
+    std::fs::create_dir_all(root.path().join("userData")).unwrap();
+    std::fs::write(
+        root.path().join("userData").join("dapp-permissions.json"),
+        dapp.to_string(),
+    )
+    .unwrap();
+    let (mut core, mut id) = moved_core(root.path(), &["dapp"], &[MAINS_WORD]);
+    add_odd_records(root.path());
+    result(&call(&mut core, &mut id, "accounts.list", json!({})));
+    let mint = |core: &mut Core, id: &mut u64| {
+        let params = json!({ "kind": "sign-message", "account": 3,
+            "payload": { "message": "0x68656c6c6f" }, "handle": HANDLE });
+        let issued = call_as(core, id, &page(), "approval.issue", params);
+        result(&issued)["token"].as_str().unwrap().to_owned()
+    };
+    let (first, second) = (mint(&mut core, &mut id), mint(&mut core, &mut id));
+    // Account 3 is `other`: refused for its record, whatever authorizes it.
+    let standing = json!({ "standing": {} });
+    refused_as(&page_sign(&mut core, &mut id, standing.clone()), ON_DEVICE);
+    let presented = json!({ "token": first, "handle": HANDLE });
+    refused_as(&page_sign(&mut core, &mut id, presented), ON_DEVICE);
+    let elsewhere = json!({ "token": second, "handle": "b2".repeat(32) });
+    refused_as(&page_sign(&mut core, &mut id, elsewhere), ON_DEVICE);
+    // The vault's account now: the burnt tokens bind nothing.
+    retype(&mut core, &mut id, root.path(), "mnemonic");
+    for token in [&first, &second] {
+        let presented = json!({ "token": token, "handle": HANDLE });
+        unknown_token(&page_sign(&mut core, &mut id, presented));
+    }
+    let fresh = json!({ "token": mint(&mut core, &mut id), "handle": HANDLE });
+    signed_as(
+        &page_sign(&mut core, &mut id, fresh),
+        "sign.message",
+        ABANDON,
+        3,
+    );
+    // All five of the rule's uses, then its rate.
+    for _ in 0..5 {
+        let signed = page_sign(&mut core, &mut id, standing.clone());
+        signed_as(&signed, "sign.message", ABANDON, 3);
+    }
+    let sixth = page_sign(&mut core, &mut id, standing);
+    assert_eq!(sixth["error"]["data"]["reason"], "rate_limited", "{sixth}");
 }
 
 /// Two ICAPs of 31 digits past 2^160, which `isAddress` takes (and the
