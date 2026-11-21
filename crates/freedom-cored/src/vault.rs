@@ -1033,6 +1033,10 @@ impl Vault {
     /// Whether it took the store.
     pub fn configure_vault_meta(&mut self) -> bool {
         self.accounts.configure_moved();
+        // The core's own checks read the account records from now on (G20).
+        if let Some(records) = self.accounts.records() {
+            self.approvals.configure_records(records);
+        }
         true
     }
 

@@ -18,13 +18,18 @@
 //!   The reply is `{ payload, reservation, accept_index, charged, grant? }`:
 //!   `payload` the JSON main base64-encodes into the header.
 //! - **A device account** (core #392): `device: { kind, address }`, `kind`
-//!   `ledger` or `phone`, `address` the account's, main's word as
-//!   `phone.job`'s is (`vault-meta.json` is main's until PRF-6a). The token
-//!   is checked, or the cap charged, as for the vault, and no key is used:
-//!   the reply is `{ device: { typed_data, hash }, reservation,
-//!   accept_index, charged }`, the typed data the client would hand its
-//!   signer, and its EIP-712 hash. A token's grant and charge wait for the
-//!   device's signature.
+//!   `ledger` or `phone`, `address` the account's. While main owns
+//!   `vault-meta.json` that is main's word, as `phone.job`'s is. Once
+//!   `vault_meta` is moved (G20) the account's record names the device, as
+//!   the reference's `paymentDevice` reads it: a vault account pays with no
+//!   `device`, a Ledger's or a phone's with its kind and its record's
+//!   address, and a Safe, or an account the core can't name, pays nothing.
+//!   A request that disagrees is refused (`invalid_argument`) before any
+//!   token is spent or cap charged. The token is checked, or the cap
+//!   charged, as for the vault, and no key is used: the reply is `{
+//!   device: { typed_data, hash }, reservation, accept_index, charged }`,
+//!   the typed data the client would hand its signer, and its EIP-712
+//!   hash. A token's grant and charge wait for the device's signature.
 //! - `x402.settle { reservation, outcome }` (`shell`): `withheld` gives the
 //!   charge back to the cap it was taken from, if that cap still stands
 //!   (not revoked, not granted again: its generation); `sent` keeps it.
@@ -59,8 +64,8 @@ use serde_json::{Value, json};
 use zeroize::Zeroizing;
 
 use super::{
-    Approvals, Clocks, ErrorBody, Kind, Minter, Request, cap_asset_key, forbidden, invalid,
-    js_json, json_reply, not_authorized, not_moved, object, refusal, secret_reply, string,
+    Account, Approvals, Clocks, ErrorBody, Kind, Minter, Request, cap_asset_key, forbidden,
+    invalid, js_json, json_reply, not_authorized, not_moved, object, refusal, secret_reply, string,
 };
 use crate::rng::OsRng;
 
@@ -208,14 +213,55 @@ enum Authority {
     Cap,
 }
 
-/// `device: { kind, address }`: a Ledger or phone account's address.
-fn device_address(value: &Value) -> Result<[u8; 20], ErrorBody> {
+/// A paying device's kind.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DeviceKind {
+    Ledger,
+    Phone,
+}
+
+/// `device: { kind, address }`: a Ledger or phone account's kind and
+/// address.
+fn device_of(value: &Value) -> Result<(DeviceKind, [u8; 20]), ErrorBody> {
     let device = object(value, &["kind", "address"], &[])?;
-    if !matches!(string(device, "kind")?, "ledger" | "phone") {
-        return Err(invalid("device.kind: expected ledger or phone"));
+    let kind = match string(device, "kind")? {
+        "ledger" => DeviceKind::Ledger,
+        "phone" => DeviceKind::Phone,
+        _ => return Err(invalid("device.kind: expected ledger or phone")),
+    };
+    let address = fc_evm::parse_address(string(device, "address")?)
+        .map_err(|_| invalid("device.address: expected an address"))?;
+    Ok((kind, address))
+}
+
+/// Once `vault_meta` is moved (G20): the paying device as the account's
+/// record names it (the reference's `paymentDevice`), which the request's
+/// must be. A Safe has no key, and an account the core can't name (no
+/// record at a hardware index, a type it doesn't know) pays nothing.
+fn recorded_device(
+    recorded: Account,
+    claimed: Option<(DeviceKind, [u8; 20])>,
+) -> Result<(), ErrorBody> {
+    let expected = match recorded {
+        Account::Vault => None,
+        Account::Ledger(address) => Some((DeviceKind::Ledger, address)),
+        Account::Phone(address) => Some((DeviceKind::Phone, address)),
+        Account::Safe => {
+            return Err(invalid(
+                "account: a Safe can't pay an x402 payment (vault-meta.json)",
+            ));
+        }
+        Account::Unknown => {
+            return Err(invalid(
+                "account: no account that can pay (vault-meta.json)",
+            ));
+        }
+    };
+    if claimed == expected {
+        Ok(())
+    } else {
+        Err(invalid("device: not the account's (vault-meta.json)"))
     }
-    fc_evm::parse_address(string(device, "address")?)
-        .map_err(|_| invalid("device.address: expected an address"))
 }
 
 /// A reply's JSON text, as it is.
@@ -269,7 +315,13 @@ impl Approvals {
             return Err(not_moved(StoreKind::X402));
         }
         let account = super::account(fields.get("account"), "account")?;
-        let device = fields.get("device").map(device_address).transpose()?;
+        let device = fields.get("device").map(device_of).transpose()?;
+        // The account's own record, once `vault_meta` is moved (G20):
+        // checked before anything is spent or charged.
+        if let Some(recorded) = self.recorded(account)? {
+            recorded_device(recorded, device)?;
+        }
+        let device = device.map(|(_, address)| address);
         let detection = object(&fields["detection"], &["tab", "id", "url"], &[])?;
         let origin = x402::cap_key(string(detection, "url")?)
             .ok_or_else(|| invalid("detection.url: x402 pays an http or https resource"))?;
@@ -355,7 +407,8 @@ impl Approvals {
                 .map_err(refusal)?;
         }
         // The vault's key, for the address the authorization names; wiped
-        // on drop. A device's address is main's word, and no key is used.
+        // on drop. A device's address is its record's once `vault_meta` is
+        // moved, main's word before, and no key is used.
         let (key, from) = match device {
             Some(address) => (None, address),
             None => {

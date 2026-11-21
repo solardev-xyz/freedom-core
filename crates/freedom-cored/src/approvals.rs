@@ -13,7 +13,8 @@
 //!   none (APS-3, APS-5). A send is judged by the fee check first
 //!   (`wallet-send`, `dapp-send`, `intent-replace`, `executor-send`), but a
 //!   phone account's (`phone: true` on a `wallet-send` or `dapp-send`),
-//!   which picks its own fees.
+//!   which picks its own fees. Once `vault_meta` is moved, `phone` must
+//!   agree with the account's record in `vault-meta.json` (G20).
 //! - `approval.discard { token }` burns one: a presented token is burnt
 //!   whatever the outcome, a malformed request's included.
 //! - `approval.spend { token, kind, account, payload, handle? }` spends one
@@ -61,7 +62,8 @@
 //!
 //! - The grant stores (APR-3b; [`crate::grants`] holds the files):
 //!   `approval.check { request, chain_id?, paused? }` asks a site's
-//!   standing rule for advice; `{ standing }` on `sign.*`, and on
+//!   standing rule for advice (its `account_kind` the account's record's
+//!   once `vault_meta` is moved, G20); `{ standing }` on `sign.*`, and on
 //!   `approval.spend` for a Safe message, decides with it
 //!   (`fc_approval::standing`). Today's rules answer until `dapp` is in
 //!   `grant_moved`, Q9's limited ones from then. `approval.grants` reads a
@@ -105,6 +107,7 @@ use serde::Serialize;
 use serde_json::{Map, Value, json};
 use zeroize::Zeroizing;
 
+use crate::accounts::Account;
 use crate::grants::{Grants, StoreFile, WriteFailure, Written};
 use crate::rng::OsRng;
 
@@ -162,6 +165,10 @@ pub struct Approvals {
     narrowed: Vec<Narrowed>,
     /// x402's cap generations and reservations (X402-1).
     x402: x402::X402State,
+    /// `vault-meta.json`'s records once `vault_meta` is moved (G20): the
+    /// checks read an account's kind and address there. None before, when
+    /// main owns the file and its word on them stands.
+    records: Option<crate::accounts::Records>,
 }
 
 impl std::fmt::Debug for Approvals {
@@ -717,6 +724,7 @@ impl Approvals {
             events: Vec::new(),
             narrowed: Vec::new(),
             x402: x402::X402State::default(),
+            records: None,
         }
     }
 
@@ -839,10 +847,8 @@ impl Approvals {
             Some(Value::Bool(ack)) => *ack,
             Some(_) => return Err(invalid("fee_ack: expected a boolean")),
         };
-        // A phone account's send: main knows the account's kind (it owns
-        // `vault-meta.json` until PRF-6a).
-        // The field is a send's only: present on another kind, whatever its
-        // value, it is refused.
+        // A phone account's send. The field is a send's only: present on
+        // another kind, whatever its value, it is refused.
         let phone = match fields.get("phone") {
             None => false,
             Some(_) if !matches!(kind, Kind::WalletSend | Kind::DappSend) => {
@@ -851,6 +857,22 @@ impl Approvals {
             Some(Value::Bool(phone)) => *phone,
             Some(_) => return Err(invalid("phone: expected a boolean")),
         };
+        // Whose kind it is (G20): main's word while main owns
+        // `vault-meta.json`; once `vault_meta` is moved, the core's own
+        // record, and a `phone` that disagrees with it either way is
+        // refused before the fee check. An account that isn't an index is
+        // the binding's refusal, below.
+        if matches!(kind, Kind::WalletSend | Kind::DappSend)
+            && let Ok(index) = account(fields.get("account"), "account")
+            && let Some(recorded) = self.recorded(index)?
+            && phone != matches!(recorded, Account::Phone(_))
+        {
+            return Err(invalid(if phone {
+                "phone: the account isn't a phone's (vault-meta.json)"
+            } else {
+                "phone: the account is a phone's (vault-meta.json)"
+            }));
+        }
         let payload = &fields["payload"];
         // The fee check at minting (design 0012, "The fee check"), as
         // `wallet:confirm-signing` runs it: never for a phone account,
@@ -1839,6 +1861,21 @@ impl Approvals {
         }
     }
 
+    /// The hello's `store_moved` named `vault_meta` (G20): the account
+    /// checks read the core's own records from now on.
+    pub fn configure_records(&mut self, records: crate::accounts::Records) {
+        self.records = Some(records);
+    }
+
+    /// Account `index` as the core's own records give it once `vault_meta`
+    /// is moved; none before, when main's word on it stands (G20).
+    pub(crate) fn recorded(&self, index: u32) -> Result<Option<Account>, ErrorBody> {
+        self.records
+            .as_ref()
+            .map(|records| records.account(index))
+            .transpose()
+    }
+
     /// The `approval.changed` events the last request made, to send after
     /// its reply.
     pub fn take_events(&mut self) -> Vec<Zeroizing<Vec<u8>>> {
@@ -1953,6 +1990,15 @@ impl Approvals {
                 ));
             }
         };
+        // Main's word while main owns `vault-meta.json`; once `vault_meta`
+        // is moved, the core's own record must give the same kind (G20).
+        if let Some(recorded) = self.recorded(account)?
+            && recorded.kind() != Some(kind)
+        {
+            return Err(invalid(
+                "account_kind: not the account's kind (vault-meta.json)",
+            ));
+        }
         let bytes;
         let view;
         let tx;

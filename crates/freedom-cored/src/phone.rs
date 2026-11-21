@@ -10,7 +10,10 @@
 //!   optional, as the phone picks its own). The authorization is checked as
 //!   `sign.*` checks it, a presented token burnt however the request ends;
 //!   a standing rule judges a send as a phone's. `address` is the phone
-//!   account's, main's word (`vault-meta.json` is main's until PRF-6a). A
+//!   account's: main's word while main owns `vault-meta.json`; once
+//!   `vault_meta` is moved (G20), `account` must be a phone's record
+//!   (`remote`) and `address` its address, or the job is refused
+//!   (`invalid_argument`) before anything is spent. A
 //!   payment's slot, and its site's bound, are checked before the
 //!   authorization is spent. The reply is `{ job, expires_in_ms, request: {
 //!   method, params } }`, the JSON-RPC request to relay.
@@ -51,6 +54,7 @@ use serde_json::value::RawValue;
 use serde_json::{Map, Value, json};
 use zeroize::Zeroizing;
 
+use crate::accounts::Account;
 use crate::approvals::{After, Approvals, Clocks, Narrowed, Remember, Signed};
 use crate::rng::OsRng;
 use crate::testhooks::GrantWrite;
@@ -447,6 +451,18 @@ impl Phone {
             .ok_or_else(|| invalid("account: index out of range"))?;
         let address = fc_evm::parse_address(string(fields, "address")?)
             .map_err(|e| invalid(e.to_string()))?;
+        // The phone account's own record, once `vault_meta` is moved (G20);
+        // main's word before.
+        match approvals.recorded(account)? {
+            None => {}
+            Some(Account::Phone(recorded)) if recorded == address => {}
+            Some(Account::Phone(_)) => {
+                return Err(invalid(
+                    "address: not the phone account's (vault-meta.json)",
+                ));
+            }
+            Some(_) => return Err(invalid("account: not a phone account (vault-meta.json)")),
+        }
         let target = web_contents(fields, "target")?;
         let payload = &fields["payload"];
         let site = page.map(|page| page.origin.clone());
