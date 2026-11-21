@@ -677,8 +677,12 @@ fn an_abandoned_set_writes_nothing() {
         ("FREEDOM_CORED_TEST_KEYSTORE_DEADLINE_MS", "30000"),
     ];
     let mut main = Main::new(true);
-    main.start(&env);
-    assert!(main.set("alchemy", "k-a")["result"].is_object());
+    // The first key is set under the default deadlines: only the abandoned
+    // sets below need the short one, which a slow runner's first write
+    // (the secrets file's creation, with the key store's) can outlast.
+    main.start(&[]);
+    let first = main.set("alchemy", "k-a");
+    assert!(first["result"].is_object(), "{first}");
     // A new start, whose migration has yet to run.
     main.start(&env);
     std::fs::write(main.file_path(), reference_text(&[("drpc", "k-d")])).unwrap();
