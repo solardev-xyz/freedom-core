@@ -672,15 +672,19 @@ fn a_replacing_set_over_the_file() {
 /// file nor `rpc-api-keys.json` changes.
 #[test]
 fn an_abandoned_set_writes_nothing() {
+    // A 6 s deadline, whose claim time is two thirds into it (4 s), and a
+    // key store that waits as long as the test holds it.
+    let long_key_store = ("FREEDOM_CORED_TEST_KEYSTORE_DEADLINE_MS", "30000");
     let env = [
-        ("FREEDOM_CORED_TEST_KDF_DEADLINE_MS", "3000"),
-        ("FREEDOM_CORED_TEST_KEYSTORE_DEADLINE_MS", "30000"),
+        ("FREEDOM_CORED_TEST_KDF_DEADLINE_MS", "6000"),
+        long_key_store,
     ];
     let mut main = Main::new(true);
-    // The first key is set under the default deadlines: only the abandoned
-    // sets below need the short one, which a slow runner's first write
-    // (the secrets file's creation, with the key store's) can outlast.
-    main.start(&[]);
+    // The first key is set under the default 30 s deadline, and the same
+    // long key store wait: only the abandoned sets below need the short
+    // deadline, which a slow runner's first write (the secrets file's
+    // creation, with the key store's) can outlast.
+    main.start(&[long_key_store]);
     let first = main.set("alchemy", "k-a");
     assert!(first["result"].is_object(), "{first}");
     // A new start, whose migration has yet to run.
@@ -698,9 +702,13 @@ fn an_abandoned_set_writes_nothing() {
         secrets
     );
     assert_eq!(std::fs::read(main.file_path()).unwrap(), file);
-    // Answered past the claim time (two thirds into the deadline), before
-    // the loop gives up: the claim itself refuses the write.
-    let hold = Some(Duration::from_millis(2500));
+    // Answered past the claim time (4 s), before the loop gives up (6 s):
+    // the claim itself refuses the write. The hold counts from the key
+    // store's request, which comes after the job's start, so the answer is
+    // always past the claim time; the 1.7 s before the deadline is for the
+    // job's work before that request, the hold's 200 ms polling, and the
+    // pipe, on a slow runner.
+    let hold = Some(Duration::from_millis(4300));
     let reply = main.call_holding("chrome", "secrets.set_rpc_api_key", set, hold);
     assert_eq!(code(&reply), "deadline", "{reply}");
     assert_eq!(main.status(), ["alchemy", "drpc"]);
