@@ -371,10 +371,16 @@ fn deployed_mark_replaces_a_legacy_one() {
 #[test]
 fn list_writes_only_its_lazy_init() {
     let mut m = meta(r#"{"activeWalletIndex": 4}"#);
+    // Read only, the default list is answered and the file left as it is.
+    let read = m
+        .listed(|_| -> Result<_, ()> { panic!("no derivation for the default list") })
+        .unwrap();
+    assert_eq!(m.active_index(), 4.0);
     let first = m
         .list(|_| -> Result<_, ()> { panic!("no derivation for the default list") })
         .unwrap();
     assert!(first.wrote);
+    assert_eq!(first.value, read);
     assert_eq!(m.active_index(), 0.0);
     let second = m
         .list(|indices| Ok::<_, ()>(Some(vec![(indices[0], A.to_owned())])))

@@ -511,24 +511,34 @@ impl VaultMeta {
         &mut self,
         derive: impl FnOnce(&[f64]) -> Result<Option<Vec<(f64, String)>>, E>,
     ) -> Result<Changed<Vec<JsValue>>, E> {
+        let value = self.listed(derive)?;
+        let wrote = match &self.meta {
+            Some(meta) if !truthy(meta.get("derivedWallets")) => {
+                let mut next = meta.clone();
+                next.set("derivedWallets", JsValue::Array(vec![default_wallet(meta)]));
+                next.set("activeWalletIndex", JsValue::Number(0.0));
+                self.save(next);
+                true
+            }
+            _ => false,
+        };
+        Ok(Changed { value, wrote })
+    }
+
+    /// [`VaultMeta::list`]'s answer, read only: a file without a wallet
+    /// list answers the default one, unwritten, as the reference's reads do
+    /// before the core writes the file.
+    pub fn listed<E>(
+        &self,
+        derive: impl FnOnce(&[f64]) -> Result<Option<Vec<(f64, String)>>, E>,
+    ) -> Result<Vec<JsValue>, E> {
         let Some(meta) = &self.meta else {
-            return Ok(Changed {
-                value: Vec::new(),
-                wrote: false,
-            });
+            return Ok(Vec::new());
         };
         if !truthy(meta.get("derivedWallets")) {
-            let main = default_wallet(meta);
-            let mut next = meta.clone();
-            next.set("derivedWallets", JsValue::Array(vec![main.clone()]));
-            next.set("activeWalletIndex", JsValue::Number(0.0));
-            self.save(next);
-            let mut listed = main;
+            let mut listed = default_wallet(meta);
             listed.set("type", string(MNEMONIC));
-            return Ok(Changed {
-                value: vec![listed],
-                wrote: true,
-            });
+            return Ok(vec![listed]);
         }
         let wallets = wallet_list(meta);
         let indices: Vec<f64> = wallets
@@ -541,7 +551,7 @@ impl VaultMeta {
             .collect();
         let derived = derive(&indices)?;
         let user_wallet = meta.get("addresses").and_then(|a| a.get("userWallet"));
-        let listed = wallets
+        Ok(wallets
             .iter()
             .map(|wallet| {
                 let index = wallet.get("index");
@@ -573,11 +583,7 @@ impl VaultMeta {
                 extra_record_fields(wallet, &mut out);
                 out
             })
-            .collect();
-        Ok(Changed {
-            value: listed,
-            wrote: false,
-        })
+            .collect())
     }
 
     /// `createDerivedWallet(name)`: a mnemonic account at the next index

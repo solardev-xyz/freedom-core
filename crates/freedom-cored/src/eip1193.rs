@@ -683,7 +683,10 @@ impl Connects {
                 };
                 self.go(id, held, Pending::Name(then), vault)
             }
-            Then::Start { request, .. } => {
+            Then::Start { mut request, .. } => {
+                if fc_eip1193::reads_wallets(&request.method) {
+                    own_wallets(&mut request.world, vault);
+                }
                 let step =
                     fc_eip1193::start(&request, Some(&held.key), |key| vault.dapp_entry(key));
                 self.step(id, held, step, vault)
@@ -751,7 +754,11 @@ impl Connects {
             // The grant, the account and the Safe's chain, read once the
             // name holds; then the site's rule, chosen before the quote with
             // the core's own grant, and the name once more.
-            Then::Send { send, .. } => {
+            Then::Send { mut send, .. } => {
+                // The core's own wallet list, read now (G20b).
+                if let Some((wallets, active)) = vault.own_wallets() {
+                    send.replace_wallets(wallets, active);
+                }
                 match send.prepare(held.context.agent, |key| vault.dapp_entry(key)) {
                     Err(answer) => vec![reply(id, &answer)],
                     Ok(prepare) => {
@@ -1458,13 +1465,18 @@ impl Connects {
                 self.prompting = self.prompting.saturating_sub(1);
                 held.budget.prompt_closed(self.now_ms());
                 // Main's error is terminal too: the prompt is retired.
-                let decided = match text {
+                let mut decided = match text {
                     Some(text) => self.prompts.accept(&prompt, text),
                     None => {
                         self.prompts.forget(&prompt);
                         Err(Crossed)
                     }
                 };
+                // An approve's world as the core holds it (G20b): its own
+                // wallet list, read now, in place of main's.
+                if let Ok(Decision::Approve { world, .. }) = &mut decided {
+                    own_wallets(world, vault);
+                }
                 match ask {
                     // A connect approved: the name again, then the grant.
                     Asking::Connect(ask) => match decided.and_then(|decision| ask.decide(decision))
@@ -1706,6 +1718,16 @@ fn send_rechecked(rule: send::Rule, recheck: &Recheck, vault: &Vault) -> send::R
         .map(|tx| vault.eip1193_fee_check(&tx, None).0)
         .unwrap_or_default();
     rule.rechecked(recheck, now, &verdict)
+}
+
+/// Once `vault_meta` is moved, `world`'s wallet list and active index are
+/// the core's own, read now from the records' snapshot and the vault state
+/// it belongs to, in place of main's (G20b; [`Vault::own_wallets`]).
+/// Before the move main's stand.
+pub fn own_wallets(world: &mut fc_eip1193::World, vault: &Vault) {
+    if let Some((wallets, active)) = vault.own_wallets() {
+        world.replace_wallets(wallets, active);
+    }
 }
 
 /// `not_moved` for a page request that would write the dApp store before

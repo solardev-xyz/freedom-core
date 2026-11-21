@@ -9,6 +9,10 @@
 //! The records are the loop's snapshot, bound to the vault state the
 //! checks run against: a create or import held at each step of its install
 //! shows the old pair, and its result the new one, never one of each.
+//!
+//! `sign.*` reads them too (G20b): once moved, the vault signs only for an
+//! index below the hardware range with a mnemonic record or none, and
+//! refuses any other with the reference's text before the key is derived.
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
@@ -739,7 +743,11 @@ fn sees_old_pair(core: &mut Core, id: &mut u64, vault: &str, phone: u32) -> bool
     let checked = check(core, id, phone, "phone");
     let job = job(core, id, phone, &phone_address());
     let paid = pay(core, id, 0, None);
+    // The phone's index: a device's to the old vault, gone from the new.
+    let signed = sign_as(core, id, "sign.message", phone);
     let old = issued["result"]["token"].is_string();
+    let expected = if old { ON_DEVICE } else { DEVICE_GONE };
+    refused_as(&signed, expected);
     for reply in [&checked, &job] {
         assert_eq!(reply["result"].is_object(), old, "{reply}");
         if !old {
@@ -836,6 +844,7 @@ fn a_check_sees_one_vault_s_records_through_an_import() {
     pending(&issue(&mut core, &mut id, phone, Some(true)));
     pending(&check(&mut core, &mut id, phone, "phone"));
     pending(&job(&mut core, &mut id, phone, &phone_address()));
+    pending(&sign_as(&mut core, &mut id, "sign.message", 0));
     let before = spent(root.path());
     pending(&pay(&mut core, &mut id, 0, None));
     assert_eq!(spent(root.path()), before);
@@ -843,6 +852,157 @@ fn a_check_sees_one_vault_s_records_through_an_import() {
     std::fs::write(&fail, "").unwrap();
     result(&call(&mut core, &mut id, "accounts.list", json!({})));
     assert!(!sees_old_pair(&mut core, &mut id, new, phone));
+}
+
+/// `getSigner`'s and `withVaultAccount`'s refusals (G20b).
+const DEVICE_GONE: &str = "Device account no longer exists; reconnect the device";
+const SAFE_SIGNS: &str =
+    "Safe accounts cannot sign directly \u{2014} execute through the Safe flow";
+const ON_DEVICE: &str = "This account keeps its key on another device; sign via its device signer";
+
+/// Typed data of one empty struct.
+fn typed() -> Value {
+    json!({ "domain": {}, "types": { "M": [] }, "message": {} })
+}
+
+/// `method` for account `index`, under `shell`.
+fn sign_as(core: &mut Core, id: &mut u64, method: &str, index: u32) -> Value {
+    let key = json!({ "kind": "account", "index": index });
+    let params = match method {
+        "sign.message" => json!({ "key": key, "message": "0x68656c6c6f" }),
+        "sign.transaction" => json!({ "key": key, "tx": {
+            "type": 2, "chain_id": "1", "nonce": "0", "gas_limit": "21000", "to": TO,
+            "value": "1", "data": "0x", "max_fee_per_gas": "2", "max_priority_fee_per_gas": "1",
+        } }),
+        _ => {
+            let hashed = call(
+                core,
+                id,
+                "typed_data.hash",
+                json!({ "typed_data": typed() }),
+            );
+            let hash = result(&hashed)["hash"].clone();
+            json!({ "key": key, "typed_data": typed(), "expected_hash": hash })
+        }
+    };
+    call(core, id, method, params)
+}
+
+/// Signed by account `index` of `mnemonic`: a message's signature recovers
+/// to it; a transaction and typed data are signed.
+fn signed_as(reply: &Value, method: &str, mnemonic: &str, index: u32) {
+    match method {
+        "sign.message" => {
+            let text = result(reply)["signature"].as_str().unwrap();
+            let signature: [u8; 65] = fc_evm::parse_bytes(text, "signature")
+                .unwrap()
+                .try_into()
+                .unwrap();
+            let digest = fc_evm::eip191_digest(b"hello");
+            assert_eq!(
+                fc_evm::recover_address(&digest, &signature).unwrap(),
+                bytes_of(mnemonic, index),
+                "{index}: {reply}"
+            );
+        }
+        "sign.transaction" => assert!(result(reply)["raw"].is_string(), "{reply}"),
+        _ => assert!(result(reply)["signature"].is_string(), "{reply}"),
+    }
+}
+
+/// Refused `invalid_argument` with the reference's text.
+fn refused_as(reply: &Value, message: &str) {
+    assert_eq!(reply["error"]["code"], "invalid_argument", "{reply}");
+    assert_eq!(reply["error"]["message"], message, "{reply}");
+}
+
+const SIGNS: [&str; 3] = ["sign.message", "sign.transaction", "sign.typed_data"];
+
+/// Records `accounts.add_*` can't make, added to the file as it stands:
+/// a type the reference doesn't know, below the hardware range and in it,
+/// and a mnemonic record in it.
+fn add_odd_records(root: &Path) {
+    let text = std::fs::read_to_string(meta_path(root)).unwrap();
+    let mut meta: Value = serde_json::from_str(&text).unwrap();
+    let wallets = meta["derivedWallets"].as_array_mut().unwrap();
+    wallets.push(json!({ "index": 3, "name": "Odd", "address": address(3), "type": "other" }));
+    wallets.push(json!({ "index": 1_000_003, "name": "High", "type": "mnemonic" }));
+    wallets.push(json!({ "index": 1_000_004, "name": "High odd", "type": "other" }));
+    std::fs::write(
+        meta_path(root),
+        serde_json::to_string_pretty(&meta).unwrap(),
+    )
+    .unwrap();
+}
+
+/// Each index that isn't the vault's, and the reference's refusal of it.
+const NOT_THE_VAULT_S: [(u32, &str); 7] = [
+    (LEDGER, ON_DEVICE),
+    (PHONE, ON_DEVICE),
+    (SAFE_INDEX, SAFE_SIGNS),
+    (GONE, DEVICE_GONE),
+    (3, ON_DEVICE),
+    (1_000_003, ON_DEVICE),
+    (1_000_004, ON_DEVICE),
+];
+
+/// `sign.*` once moved: the vault signs for its main account and for an
+/// index below the hardware range with no record, and refuses a Ledger's,
+/// a phone's, a Safe's, a deleted device's, another type's and a mnemonic
+/// record's in the hardware range, each with the reference's text, before
+/// any key is derived: a locked vault refuses them the same, and its own
+/// index `vault_locked`. Without `vault_meta`, against the same file, the
+/// vault signs for every index, as before.
+#[test]
+fn the_vault_signs_only_for_its_own_records() {
+    let root = tempfile::tempdir().unwrap();
+    let (mut core, mut id) = moved_core(root.path(), &[], &[]);
+    add_odd_records(root.path());
+    // The next `accounts.*` request takes the records again.
+    result(&call(&mut core, &mut id, "accounts.list", json!({})));
+    for method in SIGNS {
+        for index in [0, 5] {
+            signed_as(
+                &sign_as(&mut core, &mut id, method, index),
+                method,
+                ABANDON,
+                index,
+            );
+        }
+        for (index, refusal) in NOT_THE_VAULT_S {
+            refused_as(&sign_as(&mut core, &mut id, method, index), refusal);
+        }
+    }
+    result(&call(&mut core, &mut id, "vault.lock", json!({})));
+    for method in SIGNS {
+        for (index, refusal) in NOT_THE_VAULT_S {
+            refused_as(&sign_as(&mut core, &mut id, method, index), refusal);
+        }
+        let locked = sign_as(&mut core, &mut id, method, 0);
+        assert_eq!(locked["error"]["code"], "vault_locked", "{locked}");
+    }
+    drop(core);
+
+    // Main's file: the same records, and main's word on what to sign.
+    let mut core = start(root.path(), false, &[], &[]);
+    let mut id = 10;
+    let unlocked = call(
+        &mut core,
+        &mut id,
+        "vault.unlock",
+        json!({ "password_b64": STANDARD.encode("testpass1") }),
+    );
+    result(&unlocked);
+    for method in SIGNS {
+        for (index, _) in NOT_THE_VAULT_S {
+            signed_as(
+                &sign_as(&mut core, &mut id, method, index),
+                method,
+                ABANDON,
+                index,
+            );
+        }
+    }
 }
 
 /// Two ICAPs of 31 digits past 2^160, which `isAddress` takes (and the

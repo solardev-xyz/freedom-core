@@ -149,6 +149,7 @@ fn run(meta: &mut VaultMeta, step: &JsValue, core: &JsValue) -> Answer {
             )
         }
         "list" => {
+            let before = meta.clone();
             let mut asked = false;
             let listed = meta
                 .list(|accounts| {
@@ -156,6 +157,11 @@ fn run(meta: &mut VaultMeta, step: &JsValue, core: &JsValue) -> Answer {
                     Ok::<_, ()>(derived(step, accounts))
                 })
                 .expect("no derive error");
+            // The read-only list answers the same, from the file as it was.
+            let read = before
+                .listed(|accounts| Ok::<_, ()>(derived(step, accounts)))
+                .expect("no derive error");
+            assert_eq!(read, listed.value, "the read-only list");
             assert_eq!(
                 asked,
                 call(step, "vault.addresses").is_some(),
