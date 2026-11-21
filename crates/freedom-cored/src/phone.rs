@@ -10,7 +10,12 @@
 //!   optional, as the phone picks its own). The authorization is checked as
 //!   `sign.*` checks it, a presented token burnt however the request ends;
 //!   a standing rule judges a send as a phone's. `address` is the phone
-//!   account's, main's word (`vault-meta.json` is main's until PRF-6a). A
+//!   account's: main's word while main owns `vault-meta.json`; once
+//!   `vault_meta` is moved (G20), `account` must be a phone's record
+//!   (`remote`) and `address` its address, agreeing when ethers'
+//!   `getAddress` gives both the same, or the job is refused
+//!   (`invalid_argument`) before anything is spent; so is an address past
+//!   20 bytes, which no phone signs for. A
 //!   payment's slot, and its site's bound, are checked before the
 //!   authorization is spent. The reply is `{ job, expires_in_ms, request: {
 //!   method, params } }`, the JSON-RPC request to relay.
@@ -51,6 +56,7 @@ use serde_json::value::RawValue;
 use serde_json::{Map, Value, json};
 use zeroize::Zeroizing;
 
+use crate::accounts::Account;
 use crate::approvals::{After, Approvals, Clocks, Narrowed, Remember, Signed};
 use crate::rng::OsRng;
 use crate::testhooks::GrantWrite;
@@ -445,8 +451,27 @@ impl Phone {
             .and_then(|n| u32::try_from(n).ok())
             .filter(|n| *n <= fc_approval::MAX_ACCOUNT)
             .ok_or_else(|| invalid("account: index out of range"))?;
-        let address = fc_evm::parse_address(string(fields, "address")?)
-            .map_err(|e| invalid(e.to_string()))?;
+        // Any form ethers' `isAddress` takes, as the phone's record stores
+        // it and main's phone backend hands it back, read as `getAddress`
+        // gives it.
+        let address = fc_wallet_state::normalize_address(string(fields, "address")?)
+            .ok_or_else(|| invalid("address: expected an address"))?;
+        // The phone account's own record, once `vault_meta` is moved (G20);
+        // main's word before.
+        match approvals.recorded(account)? {
+            None => {}
+            Some(Account::Phone(Some(recorded))) if recorded == address => {}
+            Some(Account::Phone(_)) => {
+                return Err(invalid(
+                    "address: not the phone account's (vault-meta.json)",
+                ));
+            }
+            Some(_) => return Err(invalid("account: not a phone account (vault-meta.json)")),
+        }
+        // The job's request names 20 bytes: an address past them (an ICAP
+        // past 2^160) has no phone to sign, as the reference's would fail.
+        let address = fc_wallet_state::normalized_bytes(&address)
+            .ok_or_else(|| invalid("address: not an address of 20 bytes"))?;
         let target = web_contents(fields, "target")?;
         let payload = &fields["payload"];
         let site = page.map(|page| page.origin.clone());
