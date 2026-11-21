@@ -17,6 +17,7 @@ const { buildDweb, buildVerifyPlans } = require('./dweb');
 const { buildStreams } = require('./streams');
 const { buildSecrets } = require('./secrets');
 const { buildKeystore } = require('./keystore');
+const { buildLayout } = require('./layout');
 const { buildRadicleReads } = require('./radicle-reads');
 const { buildRadicleBlob } = require('./radicle-blob');
 const { buildRadicleNetwork } = require('./radicle-network');
@@ -626,6 +627,10 @@ async function main() {
     // Design 0013's key-store helper's answers (PRF-1b): the design's, with
     // no reference; its meta is the shared one.
     'keystore.json': buildKeystore(reference.meta),
+    // Design 0013's Freedom directory move (PRF-9a): the list, the journal
+    // and its recovery, and the start's preconditions; the design's, with
+    // no reference; its meta is the shared one.
+    'layout.json': buildLayout(reference.meta),
     // Design 0008's composed reads, from main's radapi handlers over a
     // scripted add-on.
     'radicle-reads.json': await buildRadicleReads(radicle.checkout, radicle.meta),

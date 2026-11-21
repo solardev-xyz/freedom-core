@@ -46,16 +46,21 @@
 //! 5. **Every entry's state first,** then the changes, so an entry that
 //!    can't be settled without a guess changes nothing (`corrupt`):
 //!    - **before the marker** (`freedom/layout.json`), each entry is put
-//!      back, in reverse order: a cross-device copy cut short is removed
-//!      while its source is at the root; the placeholder file at `identity`
-//!      is removed and the directory renamed back; a moved entry renamed
-//!      back (on Windows, a rename refused while another handle holds the
-//!      entry is tried again, 10 times, 100 ms apart). Then the directories
-//!      are flushed, the journal removed, and `freedom/` too if it is
-//!      empty: `rolled_back`;
-//!    - **after the marker,** every entry must be in `freedom/`; nothing at
-//!      the root is removed (see `fc_profile::layout::roll_forward`), and
-//!      the journal is removed: `migrated`;
+//!      back, in reverse order (`fc_profile::layout::rollback`): a
+//!      cross-device copy cut short is removed while its source is at the
+//!      root; a copied entry's finished copy (the journal's `copied`) is
+//!      removed while its source is at the root; the placeholder file at
+//!      `identity` is removed and the directory renamed back; a moved entry
+//!      renamed back (on Windows, a rename refused while another handle
+//!      holds the entry is tried again, 10 times, 100 ms apart). Then the
+//!      directories are flushed, the journal removed, and `freedom/` too if
+//!      it is empty: `rolled_back`;
+//!    - **after the marker,** every entry must be in `freedom/`
+//!      (`fc_profile::layout::roll_forward`): a copied entry's source still
+//!      at the root, of its copy's kind, is removed, and nothing else at
+//!      the root is. Then the placeholder is written at the root's
+//!      `identity` if nothing is there (`needs_placeholder`), the root
+//!      flushed, and the journal removed: `migrated`;
 //!    - **either way,** an entry the journal names but found in no place
 //!      (not at the root, in `freedom/` or as its `.moving` copy) is
 //!      `corrupt`, with the journal kept: the journal lists the entries
@@ -77,7 +82,7 @@ use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use fc_profile::layout::{self, EntryState, Found, Unsettled};
+use fc_profile::layout::{self, EntryState, Found, Journal, Unsettled};
 use fc_service::gate::{Gate, GateError, PROFILE_NAMESPACE};
 use fc_store::anchor::{Dir, Kind, Resolve};
 use fc_store::fsx::Regular;
@@ -471,10 +476,10 @@ fn recover(
     let Some(freedom) = root.child(OsStr::new(layout::FREEDOM_DIR), false)? else {
         return Ok(Outcome::Nothing);
     };
-    let entries = match read_journal(&freedom)? {
+    let journal: Journal = match read_journal(&freedom)? {
         None => return Ok(Outcome::Nothing),
         Some(text) => match text.as_deref().and_then(layout::parse_journal) {
-            Some(entries) => entries,
+            Some(journal) => journal,
             None => {
                 log::error(
                     "the move's journal can't be read: the profile stays closed",
@@ -495,8 +500,9 @@ fn recover(
             return Ok(Outcome::Corrupt);
         }
     };
+    let entries = journal.entries();
     let mut states = Vec::with_capacity(entries.len());
-    for name in &entries {
+    for name in entries {
         let moving = format!("{name}{}", layout::MOVING_SUFFIX);
         states.push(EntryState {
             at_root: found(&root, name)?,
@@ -504,32 +510,50 @@ fn recover(
             moving: found(&freedom, &moving)?,
         });
     }
-    let journal = OsStr::new(layout::MOVE_JOURNAL);
+    let journal_name = OsStr::new(layout::MOVE_JOURNAL);
 
     if marked {
+        let mut sources = Vec::new();
         for (name, state) in entries.iter().zip(&states) {
-            if let Err(why) = layout::roll_forward(*state) {
-                return Ok(unsettled(name, why));
+            match layout::roll_forward(journal.is_copied(name), *state) {
+                Ok(forward) if forward.remove_source => sources.push(*name),
+                Ok(_) => {}
+                Err(why) => return Ok(unsettled(name, why)),
             }
         }
+        for name in sources {
+            if !held() {
+                return Ok(lost());
+            }
+            root.remove_tree(OsStr::new(name))?;
+            step("mid-recovery");
+        }
+        if layout::needs_placeholder(found(&root, layout::PLACEHOLDER)?) {
+            if !held() {
+                return Ok(lost());
+            }
+            write_placeholder(&root)?;
+            step("mid-recovery");
+        }
+        root.sync()?;
         step("before-journal-removed");
         if !held() {
             return Ok(lost());
         }
-        freedom.unlink(journal)?;
+        freedom.unlink(journal_name)?;
         freedom.sync()?;
         return Ok(Outcome::Migrated);
     }
 
     let mut plans = Vec::with_capacity(entries.len());
     for (name, state) in entries.iter().zip(&states) {
-        match layout::rollback(name, *state) {
+        match layout::rollback(name, journal.is_copied(name), *state) {
             Ok(steps) => plans.push((name, steps)),
             Err(why) => return Ok(unsettled(name, why)),
         }
     }
     for (name, steps) in plans.iter().rev() {
-        let name = OsStr::new(name.as_str());
+        let name = OsStr::new(name);
         if steps.remove_moving {
             if !held() {
                 return Ok(lost());
@@ -537,6 +561,13 @@ fn recover(
             let mut moving = name.to_owned();
             moving.push(layout::MOVING_SUFFIX);
             freedom.remove_tree(&moving)?;
+            step("mid-recovery");
+        }
+        if steps.remove_moved {
+            if !held() {
+                return Ok(lost());
+            }
+            freedom.remove_tree(name)?;
             step("mid-recovery");
         }
         if steps.remove_placeholder {
@@ -560,13 +591,21 @@ fn recover(
     if !held() {
         return Ok(lost());
     }
-    freedom.unlink(journal)?;
+    freedom.unlink(journal_name)?;
     freedom.sync()?;
     drop(freedom);
     if held() && root.remove_empty(OsStr::new(layout::FREEDOM_DIR))? {
         root.sync()?;
     }
     Ok(Outcome::RolledBack)
+}
+
+/// The placeholder at the root's `identity`, made new (never over anything
+/// there) and synced, its directory flushed by the caller.
+fn write_placeholder(root: &Dir) -> std::io::Result<()> {
+    let mut file = root.create_new(OsStr::new(layout::PLACEHOLDER))?;
+    file.write_all(layout::PLACEHOLDER_TEXT.as_bytes())?;
+    file.sync_all()
 }
 
 /// `freedom/<name>` back to the root. On Windows, a rename refused while an

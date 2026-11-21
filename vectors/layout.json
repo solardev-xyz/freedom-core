@@ -1,0 +1,1232 @@
+{
+  "meta": {
+    "freedomBrowserCommit": "fb540328162839e68150fe2c5e517edb86734d1c",
+    "packages": {
+      "ethers": "6.17.0",
+      "@scure/bip39": "2.4.0",
+      "@scure/base": "1.2.6",
+      "micro-key-producer": "0.10.2",
+      "@metamask/browser-passworder": "6.0.0"
+    },
+    "nodeVersion": "v24.15.0",
+    "generator": "vectors/generator/generate.js"
+  },
+  "source": "design 0013 (5.4b: What moves, The move; the amendment of 2026-11-21): every case and outcome is the design's, written by hand in vectors/generator/layout.js; no reference implementation exists.",
+  "formats": {
+    "constants": "The names under a profile's directory: `freedom_dir` (the Freedom directory), and in it `move_journal`, `layout_marker` and `<name><moving_suffix>` (a cross-device copy before its rename); `placeholder`, the root's entry a regular file takes after the marker; `max_journal_bytes`, the largest journal read.",
+    "moved_entries": "What moves into `freedom/`, in the order a move takes them. A name not listed stays at the root.",
+    "journals": "Journal texts as recovery reads them: `text`, then either `entries` and `copied` (in form; a version 1 journal has `copied` empty) or `malformed: true` (the profile stays closed). Keys are exact and each appears once; names are in `moved_entries` and appear once in each list; `copied` is within `entries`.",
+    "written": "The text a move writes for `entries` and `copied`: always version 2, `JSON.stringify({ version: 2, entries, copied })` (no white space, no newline). It is written again, with a name added to `copied`, before that entry's copy begins.",
+    "state": "An entry's state: [at_root, in_freedom, moving], what is at `<name>`, `freedom/<name>` and `freedom/<name>.moving`, each missing, file, dir or other (looked at as lstat does: a symlink is other).",
+    "rollback": "Before the marker: { id, name, copied, state, then `steps` or `unsettled` }. `steps`, in the order they run, are those of remove_moving (freedom/<name>.moving), remove_moved (freedom/<name>, a copied entry's copy), remove_placeholder (the file at the root's identity) and rename_back (freedom/<name> to the root) that apply; an empty list is nothing to do. Entries are rolled back in the journal's reverse order. `unsettled`: moving_without_source, source_gone, at_both, not_moved or nowhere: the run changes nothing and the profile stays closed (corrupt).",
+    "roll_forward": "After the marker: { id, copied, state, then `remove_source` (whether what is at the root goes: a copied entry's source, perhaps half removed) or `unsettled` }.",
+    "placeholder": "After the roll-forward's removals: { identity_at_root, needed }: the placeholder is written only where nothing is.",
+    "plan_start": "Whether a starting move starts: { id, root: { <name>: { found, mount_point } } (what is at each name of moved_entries at the root; a name left out is missing, one not in the list ignored), freedom: null (missing), \"other\" (not a directory) or the names in it, node_identity_journal (one pending in identity/), then `moves` (the entries the journal names, in the list's order; empty for an empty move) or `deferred`: { reason, name? } }. The first reason found, in this order: node_identity_journal; freedom_not_dir; freedom_holds (a name in freedom/ the move writes, compared case-folded and without trailing dots and spaces: its name as found); mount_point (the first in the list's order)."
+  },
+  "constants": {
+    "freedom_dir": "freedom",
+    "move_journal": ".move.json",
+    "layout_marker": "layout.json",
+    "moving_suffix": ".moving",
+    "placeholder": "identity",
+    "max_journal_bytes": 16384
+  },
+  "moved_entries": [
+    "identity",
+    "wallet-intents.jsonl",
+    "safe-pending.json",
+    "dapp-permissions.json",
+    "swarm-permissions.json",
+    "radicle-permissions.json",
+    "x402-permissions.json",
+    "phone-payments.json",
+    "swarm-feeds.json",
+    "swarm-manifest-grants.json",
+    "rpc-api-keys.json",
+    "payment-history.sqlite",
+    "payment-history.sqlite-wal",
+    "payment-history.sqlite-shm",
+    "publish-history.sqlite",
+    "publish-history.sqlite-wal",
+    "publish-history.sqlite-shm",
+    "settings.json",
+    "network-config.json",
+    "custom-chains.json",
+    "custom-tokens.json",
+    "permissions.json",
+    "adblock-allowlist.json",
+    "external-node-decisions.json",
+    "balance-cache.json",
+    "chain-catalog.json",
+    "swarm-browsing-credit.json",
+    "ant-data",
+    "ipfs-data",
+    "tor-data",
+    "myotis",
+    "bee-data",
+    "run"
+  ],
+  "journals": [
+    {
+      "text": "{\"version\":1,\"entries\":[\"identity\",\"ipfs-data\"]}",
+      "entries": [
+        "identity",
+        "ipfs-data"
+      ],
+      "copied": []
+    },
+    {
+      "text": "{ \"entries\": [], \"version\": 1 }",
+      "entries": [],
+      "copied": []
+    },
+    {
+      "text": "{\"version\":2,\"entries\":[\"identity\",\"ant-data\",\"run\"],\"copied\":[\"run\",\"ant-data\"]}",
+      "entries": [
+        "identity",
+        "ant-data",
+        "run"
+      ],
+      "copied": [
+        "run",
+        "ant-data"
+      ]
+    },
+    {
+      "text": "{\"copied\":[],\"entries\":[\"run\"],\"version\":2}",
+      "entries": [
+        "run"
+      ],
+      "copied": []
+    },
+    {
+      "text": "{\"version\":2,\"entries\":[],\"copied\":[]}",
+      "entries": [],
+      "copied": []
+    },
+    {
+      "text": "{\"version\":2.0,\"entries\":[\"payment-history.sqlite\",\"payment-history.sqlite-wal\"],\"copied\":[]}",
+      "entries": [
+        "payment-history.sqlite",
+        "payment-history.sqlite-wal"
+      ],
+      "copied": []
+    },
+    {
+      "text": "{\"version\":2,\"entries\":[\"\\u0069dentity\"],\"copied\":[\"identity\"]}",
+      "entries": [
+        "identity"
+      ],
+      "copied": [
+        "identity"
+      ]
+    },
+    {
+      "text": "",
+      "malformed": true
+    },
+    {
+      "text": "not json",
+      "malformed": true
+    },
+    {
+      "text": "[]",
+      "malformed": true
+    },
+    {
+      "text": "{\"version\":1}",
+      "malformed": true
+    },
+    {
+      "text": "{\"entries\":[]}",
+      "malformed": true
+    },
+    {
+      "text": "{\"version\":3,\"entries\":[],\"copied\":[]}",
+      "malformed": true
+    },
+    {
+      "text": "{\"version\":\"2\",\"entries\":[],\"copied\":[]}",
+      "malformed": true
+    },
+    {
+      "text": "{\"version\":1,\"entries\":[],\"copied\":[]}",
+      "malformed": true
+    },
+    {
+      "text": "{\"version\":2,\"entries\":[\"run\"]}",
+      "malformed": true
+    },
+    {
+      "text": "{\"version\":2,\"entries\":[],\"copied\":[],\"extra\":true}",
+      "malformed": true
+    },
+    {
+      "text": "{\"version\":2,\"entries\":[\"run\"],\"copied\":\"run\"}",
+      "malformed": true
+    },
+    {
+      "text": "{\"version\":2,\"entries\":[\"Profiles\"],\"copied\":[]}",
+      "malformed": true
+    },
+    {
+      "text": "{\"version\":2,\"entries\":[\"run\"],\"copied\":[\"Profiles\"]}",
+      "malformed": true
+    },
+    {
+      "text": "{\"version\":2,\"entries\":[\"run\",\"run\"],\"copied\":[]}",
+      "malformed": true
+    },
+    {
+      "text": "{\"version\":2,\"entries\":[\"run\"],\"copied\":[\"run\",\"run\"]}",
+      "malformed": true
+    },
+    {
+      "text": "{\"version\":2,\"entries\":[\"run\"],\"copied\":[\"ant-data\"]}",
+      "malformed": true
+    },
+    {
+      "text": "{\"version\":2,\"entries\":[\"run\"],\"copied\":[\"run.moving\"]}",
+      "malformed": true
+    },
+    {
+      "text": "{\"version\":1,\"entries\":[\"identity\"],\"entries\":[]}",
+      "malformed": true
+    },
+    {
+      "text": "{\"version\":2,\"entries\":[\"run\"],\"copied\":[],\"copied\":[\"run\"]}",
+      "malformed": true
+    },
+    {
+      "text": "{\"version\":2,\"entries\":[\"run\"],\"copied\":[],\"c\\u006fpied\":[\"run\"]}",
+      "malformed": true
+    },
+    {
+      "text": "{\"version\":1,\"entries\":[\"../identity\"]}",
+      "malformed": true
+    },
+    {
+      "text": "{\"version\":1,\"entries\":[\"freedom\"]}",
+      "malformed": true
+    },
+    {
+      "text": "{\"version\":1,\"entries\":[\"Identity\"]}",
+      "malformed": true
+    }
+  ],
+  "written": [
+    {
+      "entries": [],
+      "copied": [],
+      "text": "{\"version\":2,\"entries\":[],\"copied\":[]}"
+    },
+    {
+      "entries": [
+        "identity",
+        "settings.json",
+        "ant-data"
+      ],
+      "copied": [],
+      "text": "{\"version\":2,\"entries\":[\"identity\",\"settings.json\",\"ant-data\"],\"copied\":[]}"
+    },
+    {
+      "entries": [
+        "identity",
+        "settings.json",
+        "ant-data"
+      ],
+      "copied": [
+        "ant-data"
+      ],
+      "text": "{\"version\":2,\"entries\":[\"identity\",\"settings.json\",\"ant-data\"],\"copied\":[\"ant-data\"]}"
+    },
+    {
+      "entries": [
+        "identity",
+        "wallet-intents.jsonl",
+        "safe-pending.json",
+        "dapp-permissions.json",
+        "swarm-permissions.json",
+        "radicle-permissions.json",
+        "x402-permissions.json",
+        "phone-payments.json",
+        "swarm-feeds.json",
+        "swarm-manifest-grants.json",
+        "rpc-api-keys.json",
+        "payment-history.sqlite",
+        "payment-history.sqlite-wal",
+        "payment-history.sqlite-shm",
+        "publish-history.sqlite",
+        "publish-history.sqlite-wal",
+        "publish-history.sqlite-shm",
+        "settings.json",
+        "network-config.json",
+        "custom-chains.json",
+        "custom-tokens.json",
+        "permissions.json",
+        "adblock-allowlist.json",
+        "external-node-decisions.json",
+        "balance-cache.json",
+        "chain-catalog.json",
+        "swarm-browsing-credit.json",
+        "ant-data",
+        "ipfs-data",
+        "tor-data",
+        "myotis",
+        "bee-data",
+        "run"
+      ],
+      "copied": [],
+      "text": "{\"version\":2,\"entries\":[\"identity\",\"wallet-intents.jsonl\",\"safe-pending.json\",\"dapp-permissions.json\",\"swarm-permissions.json\",\"radicle-permissions.json\",\"x402-permissions.json\",\"phone-payments.json\",\"swarm-feeds.json\",\"swarm-manifest-grants.json\",\"rpc-api-keys.json\",\"payment-history.sqlite\",\"payment-history.sqlite-wal\",\"payment-history.sqlite-shm\",\"publish-history.sqlite\",\"publish-history.sqlite-wal\",\"publish-history.sqlite-shm\",\"settings.json\",\"network-config.json\",\"custom-chains.json\",\"custom-tokens.json\",\"permissions.json\",\"adblock-allowlist.json\",\"external-node-decisions.json\",\"balance-cache.json\",\"chain-catalog.json\",\"swarm-browsing-credit.json\",\"ant-data\",\"ipfs-data\",\"tor-data\",\"myotis\",\"bee-data\",\"run\"],\"copied\":[]}"
+    }
+  ],
+  "rollback": [
+    {
+      "id": "ant-data-renamed-missing-missing-missing",
+      "name": "ant-data",
+      "copied": false,
+      "state": [
+        "missing",
+        "missing",
+        "missing"
+      ],
+      "unsettled": "nowhere"
+    },
+    {
+      "id": "ant-data-copied-missing-missing-missing",
+      "name": "ant-data",
+      "copied": true,
+      "state": [
+        "missing",
+        "missing",
+        "missing"
+      ],
+      "unsettled": "nowhere"
+    },
+    {
+      "id": "ant-data-renamed-dir-missing-missing",
+      "name": "ant-data",
+      "copied": false,
+      "state": [
+        "dir",
+        "missing",
+        "missing"
+      ],
+      "steps": []
+    },
+    {
+      "id": "ant-data-copied-dir-missing-missing",
+      "name": "ant-data",
+      "copied": true,
+      "state": [
+        "dir",
+        "missing",
+        "missing"
+      ],
+      "steps": []
+    },
+    {
+      "id": "ant-data-renamed-missing-dir-missing",
+      "name": "ant-data",
+      "copied": false,
+      "state": [
+        "missing",
+        "dir",
+        "missing"
+      ],
+      "steps": [
+        "rename_back"
+      ]
+    },
+    {
+      "id": "ant-data-copied-missing-dir-missing",
+      "name": "ant-data",
+      "copied": true,
+      "state": [
+        "missing",
+        "dir",
+        "missing"
+      ],
+      "unsettled": "source_gone"
+    },
+    {
+      "id": "ant-data-renamed-dir-dir-missing",
+      "name": "ant-data",
+      "copied": false,
+      "state": [
+        "dir",
+        "dir",
+        "missing"
+      ],
+      "unsettled": "at_both"
+    },
+    {
+      "id": "ant-data-copied-dir-dir-missing",
+      "name": "ant-data",
+      "copied": true,
+      "state": [
+        "dir",
+        "dir",
+        "missing"
+      ],
+      "steps": [
+        "remove_moved"
+      ]
+    },
+    {
+      "id": "ant-data-renamed-missing-missing-dir",
+      "name": "ant-data",
+      "copied": false,
+      "state": [
+        "missing",
+        "missing",
+        "dir"
+      ],
+      "unsettled": "moving_without_source"
+    },
+    {
+      "id": "ant-data-copied-missing-missing-dir",
+      "name": "ant-data",
+      "copied": true,
+      "state": [
+        "missing",
+        "missing",
+        "dir"
+      ],
+      "unsettled": "moving_without_source"
+    },
+    {
+      "id": "ant-data-renamed-dir-missing-dir",
+      "name": "ant-data",
+      "copied": false,
+      "state": [
+        "dir",
+        "missing",
+        "dir"
+      ],
+      "steps": [
+        "remove_moving"
+      ]
+    },
+    {
+      "id": "ant-data-copied-dir-missing-dir",
+      "name": "ant-data",
+      "copied": true,
+      "state": [
+        "dir",
+        "missing",
+        "dir"
+      ],
+      "steps": [
+        "remove_moving"
+      ]
+    },
+    {
+      "id": "ant-data-renamed-missing-dir-dir",
+      "name": "ant-data",
+      "copied": false,
+      "state": [
+        "missing",
+        "dir",
+        "dir"
+      ],
+      "unsettled": "moving_without_source"
+    },
+    {
+      "id": "ant-data-copied-missing-dir-dir",
+      "name": "ant-data",
+      "copied": true,
+      "state": [
+        "missing",
+        "dir",
+        "dir"
+      ],
+      "unsettled": "moving_without_source"
+    },
+    {
+      "id": "ant-data-renamed-dir-dir-dir",
+      "name": "ant-data",
+      "copied": false,
+      "state": [
+        "dir",
+        "dir",
+        "dir"
+      ],
+      "unsettled": "at_both"
+    },
+    {
+      "id": "ant-data-copied-dir-dir-dir",
+      "name": "ant-data",
+      "copied": true,
+      "state": [
+        "dir",
+        "dir",
+        "dir"
+      ],
+      "steps": [
+        "remove_moving",
+        "remove_moved"
+      ]
+    },
+    {
+      "id": "identity-renamed-file-dir-missing",
+      "name": "identity",
+      "copied": false,
+      "state": [
+        "file",
+        "dir",
+        "missing"
+      ],
+      "steps": [
+        "remove_placeholder",
+        "rename_back"
+      ]
+    },
+    {
+      "id": "identity-renamed-file-dir-dir",
+      "name": "identity",
+      "copied": false,
+      "state": [
+        "file",
+        "dir",
+        "dir"
+      ],
+      "steps": [
+        "remove_moving",
+        "remove_placeholder",
+        "rename_back"
+      ]
+    },
+    {
+      "id": "identity-copied-file-dir-missing",
+      "name": "identity",
+      "copied": true,
+      "state": [
+        "file",
+        "dir",
+        "missing"
+      ],
+      "unsettled": "source_gone"
+    },
+    {
+      "id": "identity-renamed-file-file-missing",
+      "name": "identity",
+      "copied": false,
+      "state": [
+        "file",
+        "file",
+        "missing"
+      ],
+      "unsettled": "at_both"
+    },
+    {
+      "id": "identity-renamed-dir-dir-missing",
+      "name": "identity",
+      "copied": false,
+      "state": [
+        "dir",
+        "dir",
+        "missing"
+      ],
+      "unsettled": "at_both"
+    },
+    {
+      "id": "identity-renamed-other-dir-missing",
+      "name": "identity",
+      "copied": false,
+      "state": [
+        "other",
+        "dir",
+        "missing"
+      ],
+      "unsettled": "at_both"
+    },
+    {
+      "id": "settings.json-renamed-file-dir-missing",
+      "name": "settings.json",
+      "copied": false,
+      "state": [
+        "file",
+        "dir",
+        "missing"
+      ],
+      "unsettled": "at_both"
+    },
+    {
+      "id": "settings.json-renamed-file-file-missing",
+      "name": "settings.json",
+      "copied": false,
+      "state": [
+        "file",
+        "file",
+        "missing"
+      ],
+      "unsettled": "at_both"
+    },
+    {
+      "id": "settings.json-renamed-file-missing-missing",
+      "name": "settings.json",
+      "copied": false,
+      "state": [
+        "file",
+        "missing",
+        "missing"
+      ],
+      "steps": []
+    },
+    {
+      "id": "tor-data-renamed-missing-other-missing",
+      "name": "tor-data",
+      "copied": false,
+      "state": [
+        "missing",
+        "other",
+        "missing"
+      ],
+      "steps": [
+        "rename_back"
+      ]
+    },
+    {
+      "id": "tor-data-copied-other-other-missing",
+      "name": "tor-data",
+      "copied": true,
+      "state": [
+        "other",
+        "other",
+        "missing"
+      ],
+      "steps": [
+        "remove_moved"
+      ]
+    },
+    {
+      "id": "settings.json-copied-file-file-file",
+      "name": "settings.json",
+      "copied": true,
+      "state": [
+        "file",
+        "file",
+        "file"
+      ],
+      "steps": [
+        "remove_moving",
+        "remove_moved"
+      ]
+    },
+    {
+      "id": "ant-data-copied-file-dir-missing",
+      "name": "ant-data",
+      "copied": true,
+      "state": [
+        "file",
+        "dir",
+        "missing"
+      ],
+      "unsettled": "source_gone"
+    },
+    {
+      "id": "ant-data-copied-other-dir-missing",
+      "name": "ant-data",
+      "copied": true,
+      "state": [
+        "other",
+        "dir",
+        "missing"
+      ],
+      "unsettled": "source_gone"
+    },
+    {
+      "id": "ant-data-copied-dir-other-missing",
+      "name": "ant-data",
+      "copied": true,
+      "state": [
+        "dir",
+        "other",
+        "missing"
+      ],
+      "unsettled": "source_gone"
+    },
+    {
+      "id": "ant-data-copied-file-missing-dir",
+      "name": "ant-data",
+      "copied": true,
+      "state": [
+        "file",
+        "missing",
+        "dir"
+      ],
+      "unsettled": "source_gone"
+    },
+    {
+      "id": "ant-data-copied-dir-dir-file",
+      "name": "ant-data",
+      "copied": true,
+      "state": [
+        "dir",
+        "dir",
+        "file"
+      ],
+      "unsettled": "source_gone"
+    },
+    {
+      "id": "payment-history.sqlite-wal-renamed-missing-file-missing",
+      "name": "payment-history.sqlite-wal",
+      "copied": false,
+      "state": [
+        "missing",
+        "file",
+        "missing"
+      ],
+      "steps": [
+        "rename_back"
+      ]
+    }
+  ],
+  "roll_forward": [
+    {
+      "id": "renamed-missing-missing-missing",
+      "copied": false,
+      "state": [
+        "missing",
+        "missing",
+        "missing"
+      ],
+      "unsettled": "nowhere"
+    },
+    {
+      "id": "copied-missing-missing-missing",
+      "copied": true,
+      "state": [
+        "missing",
+        "missing",
+        "missing"
+      ],
+      "unsettled": "nowhere"
+    },
+    {
+      "id": "renamed-dir-missing-missing",
+      "copied": false,
+      "state": [
+        "dir",
+        "missing",
+        "missing"
+      ],
+      "unsettled": "not_moved"
+    },
+    {
+      "id": "copied-dir-missing-missing",
+      "copied": true,
+      "state": [
+        "dir",
+        "missing",
+        "missing"
+      ],
+      "unsettled": "not_moved"
+    },
+    {
+      "id": "renamed-missing-dir-missing",
+      "copied": false,
+      "state": [
+        "missing",
+        "dir",
+        "missing"
+      ],
+      "remove_source": false
+    },
+    {
+      "id": "copied-missing-dir-missing",
+      "copied": true,
+      "state": [
+        "missing",
+        "dir",
+        "missing"
+      ],
+      "remove_source": false
+    },
+    {
+      "id": "renamed-dir-dir-missing",
+      "copied": false,
+      "state": [
+        "dir",
+        "dir",
+        "missing"
+      ],
+      "remove_source": false
+    },
+    {
+      "id": "copied-dir-dir-missing",
+      "copied": true,
+      "state": [
+        "dir",
+        "dir",
+        "missing"
+      ],
+      "remove_source": true
+    },
+    {
+      "id": "renamed-missing-missing-dir",
+      "copied": false,
+      "state": [
+        "missing",
+        "missing",
+        "dir"
+      ],
+      "unsettled": "not_moved"
+    },
+    {
+      "id": "copied-missing-missing-dir",
+      "copied": true,
+      "state": [
+        "missing",
+        "missing",
+        "dir"
+      ],
+      "unsettled": "not_moved"
+    },
+    {
+      "id": "renamed-dir-missing-dir",
+      "copied": false,
+      "state": [
+        "dir",
+        "missing",
+        "dir"
+      ],
+      "unsettled": "not_moved"
+    },
+    {
+      "id": "copied-dir-missing-dir",
+      "copied": true,
+      "state": [
+        "dir",
+        "missing",
+        "dir"
+      ],
+      "unsettled": "not_moved"
+    },
+    {
+      "id": "renamed-missing-dir-dir",
+      "copied": false,
+      "state": [
+        "missing",
+        "dir",
+        "dir"
+      ],
+      "unsettled": "not_moved"
+    },
+    {
+      "id": "copied-missing-dir-dir",
+      "copied": true,
+      "state": [
+        "missing",
+        "dir",
+        "dir"
+      ],
+      "unsettled": "not_moved"
+    },
+    {
+      "id": "renamed-dir-dir-dir",
+      "copied": false,
+      "state": [
+        "dir",
+        "dir",
+        "dir"
+      ],
+      "unsettled": "not_moved"
+    },
+    {
+      "id": "copied-dir-dir-dir",
+      "copied": true,
+      "state": [
+        "dir",
+        "dir",
+        "dir"
+      ],
+      "unsettled": "not_moved"
+    },
+    {
+      "id": "renamed-file-dir-missing",
+      "copied": false,
+      "state": [
+        "file",
+        "dir",
+        "missing"
+      ],
+      "remove_source": false
+    },
+    {
+      "id": "copied-file-dir-missing",
+      "copied": true,
+      "state": [
+        "file",
+        "dir",
+        "missing"
+      ],
+      "remove_source": false
+    },
+    {
+      "id": "copied-file-file-missing",
+      "copied": true,
+      "state": [
+        "file",
+        "file",
+        "missing"
+      ],
+      "remove_source": true
+    },
+    {
+      "id": "copied-other-other-missing",
+      "copied": true,
+      "state": [
+        "other",
+        "other",
+        "missing"
+      ],
+      "remove_source": true
+    },
+    {
+      "id": "copied-other-dir-missing",
+      "copied": true,
+      "state": [
+        "other",
+        "dir",
+        "missing"
+      ],
+      "remove_source": false
+    },
+    {
+      "id": "copied-dir-other-missing",
+      "copied": true,
+      "state": [
+        "dir",
+        "other",
+        "missing"
+      ],
+      "remove_source": false
+    },
+    {
+      "id": "renamed-file-file-missing",
+      "copied": false,
+      "state": [
+        "file",
+        "file",
+        "missing"
+      ],
+      "remove_source": false
+    },
+    {
+      "id": "renamed-other-dir-missing",
+      "copied": false,
+      "state": [
+        "other",
+        "dir",
+        "missing"
+      ],
+      "remove_source": false
+    },
+    {
+      "id": "renamed-dir-dir-file",
+      "copied": false,
+      "state": [
+        "dir",
+        "dir",
+        "file"
+      ],
+      "unsettled": "not_moved"
+    },
+    {
+      "id": "copied-file-file-file",
+      "copied": true,
+      "state": [
+        "file",
+        "file",
+        "file"
+      ],
+      "unsettled": "not_moved"
+    }
+  ],
+  "placeholder": [
+    {
+      "identity_at_root": "missing",
+      "needed": true
+    },
+    {
+      "identity_at_root": "file",
+      "needed": false
+    },
+    {
+      "identity_at_root": "dir",
+      "needed": false
+    },
+    {
+      "identity_at_root": "other",
+      "needed": false
+    }
+  ],
+  "plan_start": [
+    {
+      "id": "new-profile",
+      "root": {},
+      "freedom": null,
+      "node_identity_journal": false,
+      "moves": []
+    },
+    {
+      "id": "present-in-the-lists-order",
+      "root": {
+        "run": {
+          "found": "dir",
+          "mount_point": false
+        },
+        "settings.json": {
+          "found": "file",
+          "mount_point": false
+        },
+        "identity": {
+          "found": "dir",
+          "mount_point": false
+        },
+        "tor-data": {
+          "found": "other",
+          "mount_point": false
+        },
+        "ipfs-data": {
+          "found": "missing",
+          "mount_point": false
+        },
+        "payment-history.sqlite-wal": {
+          "found": "file",
+          "mount_point": false
+        },
+        "payment-history.sqlite": {
+          "found": "file",
+          "mount_point": false
+        },
+        "Cookies": {
+          "found": "file",
+          "mount_point": false
+        },
+        "radicle-data": {
+          "found": "dir",
+          "mount_point": false
+        }
+      },
+      "freedom": null,
+      "node_identity_journal": false,
+      "moves": [
+        "identity",
+        "payment-history.sqlite",
+        "payment-history.sqlite-wal",
+        "settings.json",
+        "tor-data",
+        "run"
+      ]
+    },
+    {
+      "id": "freedom-holding-other-names",
+      "root": {
+        "identity": {
+          "found": "dir",
+          "mount_point": false
+        }
+      },
+      "freedom": [
+        "notes.txt",
+        ".move.json.tmp",
+        "identity-old"
+      ],
+      "node_identity_journal": false,
+      "moves": [
+        "identity"
+      ]
+    },
+    {
+      "id": "freedom-empty",
+      "root": {
+        "identity": {
+          "found": "dir",
+          "mount_point": false
+        }
+      },
+      "freedom": [],
+      "node_identity_journal": false,
+      "moves": [
+        "identity"
+      ]
+    },
+    {
+      "id": "mount-point-missing",
+      "root": {
+        "ant-data": {
+          "found": "missing",
+          "mount_point": true
+        }
+      },
+      "freedom": null,
+      "node_identity_journal": false,
+      "moves": []
+    },
+    {
+      "id": "node-identity-journal",
+      "root": {
+        "identity": {
+          "found": "dir",
+          "mount_point": false
+        },
+        "ant-data": {
+          "found": "dir",
+          "mount_point": true
+        }
+      },
+      "freedom": "other",
+      "node_identity_journal": true,
+      "deferred": {
+        "reason": "node_identity_journal"
+      }
+    },
+    {
+      "id": "freedom-not-a-directory",
+      "root": {
+        "identity": {
+          "found": "dir",
+          "mount_point": false
+        },
+        "ant-data": {
+          "found": "dir",
+          "mount_point": true
+        }
+      },
+      "freedom": "other",
+      "node_identity_journal": false,
+      "deferred": {
+        "reason": "freedom_not_dir"
+      }
+    },
+    {
+      "id": "freedom-holds-an-entry",
+      "root": {
+        "identity": {
+          "found": "dir",
+          "mount_point": false
+        }
+      },
+      "freedom": [
+        "notes.txt",
+        "IDENTITY"
+      ],
+      "node_identity_journal": false,
+      "deferred": {
+        "reason": "freedom_holds",
+        "name": "IDENTITY"
+      }
+    },
+    {
+      "id": "freedom-holds-a-folded-entry",
+      "root": {
+        "identity": {
+          "found": "dir",
+          "mount_point": false
+        }
+      },
+      "freedom": [
+        "ſettings.json"
+      ],
+      "node_identity_journal": false,
+      "deferred": {
+        "reason": "freedom_holds",
+        "name": "ſettings.json"
+      }
+    },
+    {
+      "id": "freedom-holds-a-moving-copy",
+      "root": {
+        "identity": {
+          "found": "dir",
+          "mount_point": false
+        }
+      },
+      "freedom": [
+        "ant-data.moving"
+      ],
+      "node_identity_journal": false,
+      "deferred": {
+        "reason": "freedom_holds",
+        "name": "ant-data.moving"
+      }
+    },
+    {
+      "id": "freedom-holds-the-journal",
+      "root": {
+        "identity": {
+          "found": "dir",
+          "mount_point": false
+        }
+      },
+      "freedom": [
+        ".move.json"
+      ],
+      "node_identity_journal": false,
+      "deferred": {
+        "reason": "freedom_holds",
+        "name": ".move.json"
+      }
+    },
+    {
+      "id": "freedom-holds-the-marker",
+      "root": {
+        "identity": {
+          "found": "dir",
+          "mount_point": false
+        }
+      },
+      "freedom": [
+        "Layout.JSON"
+      ],
+      "node_identity_journal": false,
+      "deferred": {
+        "reason": "freedom_holds",
+        "name": "Layout.JSON"
+      }
+    },
+    {
+      "id": "freedom-holds-trailing-dots",
+      "root": {
+        "identity": {
+          "found": "dir",
+          "mount_point": false
+        }
+      },
+      "freedom": [
+        "run. ."
+      ],
+      "node_identity_journal": false,
+      "deferred": {
+        "reason": "freedom_holds",
+        "name": "run. ."
+      }
+    },
+    {
+      "id": "mount-points",
+      "root": {
+        "identity": {
+          "found": "dir",
+          "mount_point": false
+        },
+        "ipfs-data": {
+          "found": "dir",
+          "mount_point": true
+        },
+        "ant-data": {
+          "found": "dir",
+          "mount_point": true
+        }
+      },
+      "freedom": null,
+      "node_identity_journal": false,
+      "deferred": {
+        "reason": "mount_point",
+        "name": "ant-data"
+      }
+    }
+  ]
+}
