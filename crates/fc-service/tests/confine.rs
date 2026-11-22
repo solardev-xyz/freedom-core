@@ -39,6 +39,10 @@ mod macos;
 #[path = "confine/windows.rs"]
 mod windows;
 
+#[cfg(any(target_os = "linux", target_os = "macos", windows))]
+#[path = "confine/gate_file.rs"]
+mod gate_file;
+
 #[cfg(target_os = "linux")]
 #[allow(
     clippy::print_stdout,
@@ -262,6 +266,21 @@ mod linux {
                 "the directory held isn't written",
                 std::fs::write(moved.join("written"), b"x").is_err(),
             );
+            return;
+        }
+        if case == "gate-file" {
+            // Design 0017, C3: a gate file opened before `confine`, its lock
+            // directory outside every grant, locked through its descriptor
+            // once confined.
+            let (home, locks) = (p.data.join("gate-home"), p.outside.join("gate-locks"));
+            let (first, second) = crate::gate_file::open(&home, &locks);
+            let (mut registered, _held) = registered(&p);
+            registered.extend(first.descriptors());
+            registered.extend(second.descriptors());
+            let report = confine::confine(&policy(&p, network, min_abi, registered)).unwrap();
+            println!("REPORT {}", report.to_json());
+            crate::gate_file::exercise(&first, &second);
+            crate::gate_file::lock_dir_refused(&home, &locks, first.lock_path());
             return;
         }
         // The lock and a directory, opened before `confine` and registered,
@@ -1012,6 +1031,29 @@ mod linux {
             format!("modes run: {r:?}"),
         );
         failures.extend(passed("modes", &moded));
+        // Design 0017, C3: a gate file kept across `confine` locks and
+        // contends there, and its lock directory stays out of reach: it
+        // holds the lock file alone, as it was.
+        let gated = run(&world, "gate-file");
+        let r = report(&gated);
+        expect(
+            &mut failures,
+            r.files == Status::Enforced && r.exec == Status::Enforced,
+            format!("gate-file run: {r:?}"),
+        );
+        failures.extend(passed("gate-file", &gated));
+        let gate_locks: Vec<_> = std::fs::read_dir(world.outside.join("gate-locks"))
+            .map(|dir| dir.filter_map(Result::ok).map(|e| e.file_name()).collect())
+            .unwrap_or_default();
+        let gate_home = std::fs::canonicalize(world.data.join("gate-home")).unwrap_or_default();
+        expect(
+            &mut failures,
+            gate_locks
+                == [std::ffi::OsString::from(fc_service::gate::lock_file_name(
+                    "radicle", &gate_home,
+                ))],
+            format!("the gate's lock directory changed: {gate_locks:?}"),
+        );
         let moded_file = world.data.join("moded");
         expect(
             &mut failures,

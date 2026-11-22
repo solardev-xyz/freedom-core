@@ -152,6 +152,28 @@ fn child(case: &str) {
         ..policy(p, network, descriptors)
     };
     match case {
+        "gate-file" => {
+            // Design 0017, C3: a gate file opened before `confine`, its lock
+            // directory outside every grant, locked through its descriptor
+            // once confined.
+            let (home, locks) = (p.data.join("gate-home"), p.outside.join("gate-locks"));
+            let (first, second) = crate::gate_file::open(&home, &locks);
+            let mut registered = registered;
+            registered.extend(first.descriptors());
+            registered.extend(second.descriptors());
+            let report = match confine::confine(&policy(&p, network, registered)) {
+                Ok(report) => report,
+                Err(invalid) => {
+                    println!("INVALID {invalid}");
+                    return;
+                }
+            };
+            println!("REPORT {}", report.to_json());
+            crate::gate_file::exercise(&first, &second);
+            crate::gate_file::lock_dir_refused(&home, &locks, first.lock_path());
+            drop(held);
+            return;
+        }
         "inject-pipe" => {
             let pipe = std::io::pipe().unwrap();
             refused(confine::confine(&policy(&p, network, registered)));
@@ -851,6 +873,7 @@ fn parent() {
         "refer",
         "times",
         "modes",
+        "gate-file",
         "sysctl",
         "exec-direct",
         "resolv-conf",
@@ -939,6 +962,19 @@ fn parent() {
             .nlink()
             == 1,
         "the read-only grant's file gained a hard link".into(),
+    );
+    // Design 0017, C3: the gate's lock directory holds its lock file alone.
+    let gate_locks: Vec<_> = std::fs::read_dir(world.outside.join("gate-locks"))
+        .map(|dir| dir.filter_map(Result::ok).map(|e| e.file_name()).collect())
+        .unwrap_or_default();
+    let gate_home = std::fs::canonicalize(world.data.join("gate-home")).unwrap_or_default();
+    expect(
+        &mut failures,
+        gate_locks
+            == [std::ffi::OsString::from(fc_service::gate::lock_file_name(
+                "radicle", &gate_home,
+            ))],
+        format!("the gate's lock directory changed: {gate_locks:?}"),
     );
 
     let ephemeral = run(&world, "ephemeral");
