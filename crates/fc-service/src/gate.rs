@@ -1696,10 +1696,16 @@ mod tests {
             #[cfg(unix)]
             {
                 assert_eq!(file.descriptors(), [descriptor]);
-                assert_eq!(
+                let (open, named) = (
                     open_descriptor_identity(descriptor),
-                    file_identity(file.lock_path())
+                    file_identity(file.lock_path()),
                 );
+                // macOS's fdesc reports its own device for a `/dev/fd`
+                // entry, with the file's inode; Linux's names the file's.
+                #[cfg(target_os = "macos")]
+                assert_eq!(open.1, named.1);
+                #[cfg(not(target_os = "macos"))]
+                assert_eq!(open, named);
             }
         }
         // A gate `acquire` holds is waited on, as `acquire` waits.
