@@ -883,9 +883,11 @@ struct HelloParams {
     /// The profile's `userData`, as an absolute path: where the reference
     /// keeps `x402-receipts.json` (`app.getPath('userData')`), which the
     /// payment history imports once (design 0013, "Payment history"). It
-    /// stays at the profile's root after the move. Optional: absent means
-    /// `grant_root`, which equals it before PRF-9. A core before PRF-8-lite
-    /// ignores it, as it ignores every hello member it doesn't know.
+    /// stays at the profile's root after the move, where the core copies it
+    /// into `grant_root` to import it (design 0017, C5). Optional: absent
+    /// means `grant_root`, which equals it before PRF-9. A core before
+    /// PRF-8-lite ignores it, as it ignores every hello member it doesn't
+    /// know.
     #[serde(default)]
     user_data_dir: Option<String>,
     /// The permission files main has handed to the core (`dapp`, `swarm`,
@@ -1833,11 +1835,19 @@ impl Core {
                 "rpc_api_keys" => self.vault.configure_rpc_keys(root.clone()),
                 "safe_pending" | "intents" => true,
                 // Opened at its first request, never before the name. The
-                // database under the Freedom root; `x402-receipts.json`
-                // under `userData`.
+                // database under the Freedom root. A moved profile's
+                // `x402-receipts.json` is copied there from `userData` and
+                // imported from the copy (design 0017, C5); the old layout
+                // imports at its root, and a hello without `user_data_dir`
+                // at the Freedom root, as before.
                 "payments" => {
-                    let import_root = user_data_dir.clone().unwrap_or_else(|| root.clone());
-                    self.vault.configure_payments(root.clone(), import_root);
+                    let import = match user_data_dir.as_deref() {
+                        Some(dir) => {
+                            crate::payments_store::hand_over_legacy(dir, &root).import(dir, &root)
+                        }
+                        None => crate::payments_store::Import::at(root.clone()),
+                    };
+                    self.vault.configure_payments(root.clone(), import);
                     true
                 }
                 _ => false,

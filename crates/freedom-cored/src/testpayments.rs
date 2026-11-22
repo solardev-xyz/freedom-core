@@ -20,7 +20,7 @@ use std::path::PathBuf;
 
 use fc_json::JsValue;
 
-use crate::payments_store::Store;
+use crate::payments_store::{Import, Store};
 
 /// Runs the subcommand; its exit code.
 pub fn run(mut args: impl Iterator<Item = std::ffi::OsString>) -> u8 {
@@ -38,7 +38,7 @@ pub fn run(mut args: impl Iterator<Item = std::ffi::OsString>) -> u8 {
         return 64;
     };
     let mut store = Store::new();
-    store.configure(dir.clone(), dir);
+    store.configure(dir.clone(), Import::at(dir));
     let stdin = std::io::stdin();
     let mut stdout = std::io::stdout().lock();
     for line in stdin.lock().lines() {
