@@ -301,7 +301,7 @@ fn prepare_app_root(app_root: &Path) -> Result<(), Exit> {
 /// killed writer left.
 fn catalog_lock(app_root: &Path) -> Result<Lock, Exit> {
     let lock = take_catalog_lock(app_root)?;
-    keep(&lock)?;
+    keep(&lock, app_root)?;
     Ok(lock)
 }
 
@@ -314,19 +314,23 @@ fn take_catalog_lock(app_root: &Path) -> Result<Lock, Exit> {
         Err(lock::LockError::Io(e)) => return Err(storage("io", &e.to_string())),
         Err(lock::LockError::Lost) => return Err(lock_lost()),
     };
-    if let Err(e) = store::remove_catalog_temps(app_root) {
-        log::warn(
-            "cannot remove the catalog's leftover temp files",
-            serde_json::json!({ "error": e.kind().to_string() }),
-        );
-    }
     Ok(lock)
 }
 
-/// Starts the lock's refresher, after confinement.
-fn keep(lock: &Lock) -> Result<(), Exit> {
+/// Starts the lock's refresher, after confinement, once its own refresh
+/// found the lock still this run's; only then are the catalog's leftover
+/// temp files removed. Nothing is written under the lock before that: a
+/// successor that took it over meanwhile may have a temp file of its own
+/// in flight.
+fn keep(lock: &Lock, app_root: &Path) -> Result<(), Exit> {
     match lock.keep() {
         Ok(()) => {
+            if let Err(e) = store::remove_catalog_temps(app_root) {
+                log::warn(
+                    "cannot remove the catalog's leftover temp files",
+                    serde_json::json!({ "error": e.kind().to_string() }),
+                );
+            }
             crate::testhooks::profile_hold();
             Ok(())
         }

@@ -215,7 +215,8 @@ impl Dir {
         imp::child(self, name, create)
     }
 
-    /// What is at `name`, not following a symlink.
+    /// What is at `name`, not following a symlink (nor, on Linux,
+    /// triggering an automount there).
     pub fn kind(&self, name: &OsStr) -> io::Result<Kind> {
         imp::kind(self, name)
     }
@@ -473,7 +474,13 @@ mod imp {
     }
 
     pub fn kind(dir: &Dir, name: &OsStr) -> io::Result<Kind> {
-        match rustix::fs::statat(&dir.fd, name, AtFlags::SYMLINK_NOFOLLOW) {
+        // No automount is triggered at the name, on Linux: what is there is
+        // classified, not entered.
+        #[cfg(target_os = "linux")]
+        let flags = AtFlags::SYMLINK_NOFOLLOW | AtFlags::NO_AUTOMOUNT;
+        #[cfg(not(target_os = "linux"))]
+        let flags = AtFlags::SYMLINK_NOFOLLOW;
+        match rustix::fs::statat(&dir.fd, name, flags) {
             Ok(stat) => Ok(match FileType::from_raw_mode(stat.st_mode) {
                 FileType::RegularFile => Kind::File,
                 FileType::Directory => Kind::Dir,

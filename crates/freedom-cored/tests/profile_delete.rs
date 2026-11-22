@@ -851,7 +851,7 @@ fn the_default_profiles_delete_keeps_the_shared_entries() {
 /// The catalog's write lock taken over between its taking and its keeping
 /// (a delete stalled past the stale time before it got there): `keep`'s own
 /// refresh finds it, and the delete ends `lock_lost` with nothing changed,
-/// the successor's lock left.
+/// the successor's lock and its catalog temp file in flight left.
 #[test]
 fn a_catalog_lock_taken_over_before_it_is_kept_deletes_nothing() {
     let d = dirs();
@@ -863,6 +863,10 @@ fn a_catalog_lock_taken_over_before_it_is_kept_deletes_nothing() {
         all.retain(|name, _| !name.contains("profile-registry.write."));
         all
     };
+    // The successor's catalog write in flight: its temp file, which only
+    // the lock's holder may clean up, and only once its lock is kept.
+    let temp = d.app.join("profile-registry.json.424242.tmp");
+    std::fs::write(&temp, "the successor's catalog").unwrap();
     let before = without_lock(&d);
     // The hook's files beside the gates, outside the snapshot.
     let paused = d.locks.join("paused");
@@ -901,6 +905,11 @@ fn a_catalog_lock_taken_over_before_it_is_kept_deletes_nothing() {
     assert_eq!(code(&out), 74, "{out:?}");
     assert_eq!(json_of(&out), json!({ "error": "lock_lost" }));
     assert_eq!(without_lock(&d), before, "nothing changed");
+    assert_eq!(
+        std::fs::read_to_string(&temp).unwrap(),
+        "the successor's catalog",
+        "the successor's temp file untouched"
+    );
     assert!(work.join("identity").join("vault.json").is_file());
     assert!(lock.is_dir(), "the successor's lock stays");
 }

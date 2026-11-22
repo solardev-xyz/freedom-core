@@ -168,16 +168,19 @@ jobs:
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       - run: cargo test --locked --workspace --all-features
         if: runner.os == 'Windows'
-      # A tmpfs mounted at a test profile's tor-data/state (design 0013,
-      # PRF-9b): the move's node-lock probe refuses a mount on the way, its
-      # fallback walk before it enters one.
-      - name: A nested mount for the move's node-lock probe
+      # Tmpfs mounts in a test profile (design 0013, PRF-9b): at
+      # tor-data/state (on the way to arti's lock), at Myotis's lease name,
+      # and at identity. The move's preconditions refuse each before they
+      # enter it.
+      - name: Mounts in a test profile for the move's preconditions
         if: runner.os == 'Linux'
         run: |
-          mount="$RUNNER_TEMP/nested-mount/profile/tor-data/state"
-          mkdir -p "$mount"
-          sudo mount -t tmpfs -o "size=4m,mode=0700,uid=$(id -u),gid=$(id -g)" tmpfs "$mount"
-          echo "FREEDOM_TEST_TMPFS=$mount" >> "$GITHUB_ENV"
+          profile="$RUNNER_TEMP/nested-mount/profile"
+          for dir in tor-data/state myotis/.freedom-myotis-lifetime identity; do
+            mkdir -p "$profile/$dir"
+            sudo mount -t tmpfs -o "size=4m,mode=0700,uid=$(id -u),gid=$(id -g)" tmpfs "$profile/$dir"
+          done
+          echo "FREEDOM_TEST_TMPFS=$profile" >> "$GITHUB_ENV"
       # On Linux and macOS with stdio alone, as main spawns a service: the
       # runner leaks a pipe into each step, which confinement's tests would
       # inherit and refuse (design 0010).
