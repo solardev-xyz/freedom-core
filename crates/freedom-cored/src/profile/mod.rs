@@ -318,9 +318,12 @@ fn take_catalog_lock(app_root: &Path) -> Result<Lock, Exit> {
 
 /// Starts the lock's refresher, after confinement, once its own refresh
 /// found the lock still this run's; only then are the catalog's leftover
-/// temp files removed. Nothing is written under the lock before that: a
-/// successor that took it over meanwhile may have a temp file of its own
-/// in flight.
+/// temp files removed. No file or catalog content is written under the
+/// lock before that: a successor that took it over meanwhile may have a
+/// temp file of its own in flight. The one change before it is the gates'
+/// `make_private` on Unix, which only clears group and other bits on the
+/// user's own data directories: the state every gate holder sets, and one
+/// that can't lose data or narrow the user's own access.
 fn keep(lock: &Lock, app_root: &Path) -> Result<(), Exit> {
     match lock.keep() {
         Ok(()) => {
