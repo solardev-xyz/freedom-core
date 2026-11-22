@@ -1342,6 +1342,243 @@ fn each_precondition_defers_with_nothing_changed() {
     }
 }
 
+/// Myotis's leases, which its supervisor takes in the generation directory
+/// it runs a network in.
+const LEASES: [&str; 2] = [".freedom-myotis-lifetime", ".freedom-myotis-owner"];
+
+/// Generations' names: UUIDs, as the browser makes them, in their order.
+const GENERATIONS: [&str; 3] = [
+    "0b3c1f2e-8d4a-4c1b-9e2f-000000000001",
+    "5d0e2a7c-1f3b-4e8d-a6c9-000000000002",
+    "c4a9e6b1-7d2f-4a3e-8b5c-000000000003",
+];
+
+/// `lease` in `network`'s generation `generation` (mainnet's for `None`)
+/// under `dir`'s `myotis/`: `dir` the profile's root, or its `freedom/`.
+fn generation_lease(dir: &Path, network: Option<&str>, generation: &str, lease: &str) -> PathBuf {
+    let mut path = dir.join("myotis");
+    path.extend(network);
+    path.extend(["verified-sync", generation, lease]);
+    path
+}
+
+/// The same lease's path below the root or `freedom/`, as the log names it.
+fn generation_named(network: Option<&str>, generation: &str, lease: &str) -> String {
+    let mut parts = vec!["myotis"];
+    parts.extend(network);
+    parts.extend(["verified-sync", generation, lease]);
+    parts.join("/")
+}
+
+/// Myotis's current layout in a seeded profile (freedom-browser's
+/// `checkpoint-store.js`): each network's supervisor runs in a generation
+/// directory, `<base>/verified-sync/<generation>/` (the base `myotis/` for
+/// mainnet, `myotis/gnosis/`), holding its two leases there (not held
+/// here); several generations, as the browser keeps old ones; and the
+/// older layout's owner file, retired, in each base.
+fn with_generations(profile: &Path) {
+    for network in [None, Some("gnosis")] {
+        let mut base = profile.join("myotis");
+        base.extend(network);
+        write(
+            &base.join(".freedom-myotis-owner"),
+            "v1 retired 0b3c1f2e-8d4a-4c1b-9e2f-000000000001\n",
+        );
+        for generation in GENERATIONS {
+            for lease in LEASES {
+                write(&generation_lease(profile, network, generation, lease), "");
+            }
+        }
+    }
+}
+
+/// Myotis running in its current layout: either lease held in a generation
+/// directory of either network, one among free generations, defers
+/// (`node_running`, the lease named) with nothing changed and the lock let
+/// go. Let go, the move goes on, each generation moved whole with
+/// `myotis/`.
+#[test]
+fn a_lease_held_in_a_myotis_generation_defers() {
+    for network in [None, Some("gnosis")] {
+        for lease in LEASES {
+            let what = format!("{network:?} {lease}");
+            let d = dirs();
+            seeded(&d.profile);
+            with_generations(&d.profile);
+            let held = hold_lease(&generation_lease(
+                &d.profile,
+                network,
+                GENERATIONS[1],
+                lease,
+            ));
+            let before = snapshot(&d.profile);
+            let out = start(&d);
+            assert_eq!(
+                (code(&out), said(&out)),
+                (0, "deferred".into()),
+                "{what}: {out:?}"
+            );
+            let log = stderr(&out);
+            assert!(log.contains("node_running"), "{what}: {log}");
+            assert!(
+                log.contains(&generation_named(network, GENERATIONS[1], lease)),
+                "{what}: {log}"
+            );
+            assert_eq!(snapshot(&d.profile), before, "{what}: nothing changed");
+            assert!(
+                !d.profile.join("profile-open.lock").exists(),
+                "{what}: its lock let go"
+            );
+            drop(held);
+            assert_eq!(said(&start(&d)), "migrated", "{what}");
+            assert_new_layout(&d.profile);
+            let freedom = d.profile.join("freedom");
+            for network in [None, Some("gnosis")] {
+                for generation in GENERATIONS {
+                    for lease in LEASES {
+                        let moved = generation_lease(&freedom, network, generation, lease);
+                        assert!(moved.is_file(), "{what}: {}", moved.display());
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// A start that must defer with nothing changed, its log naming `why` and
+/// `named`.
+fn deferred_naming(d: &Dirs, env: &[(&str, &str)], what: &str, why: &str, named: &str) {
+    let before = snapshot(&d.profile);
+    let out = start_env(&d.profile, &d.locks, &[], env);
+    assert_eq!(
+        (code(&out), said(&out)),
+        (0, "deferred".into()),
+        "{what}: {out:?}"
+    );
+    let log = stderr(&out);
+    assert!(log.contains(why), "{what}: {log}");
+    assert!(log.contains(named), "{what}: {log}");
+    assert_eq!(snapshot(&d.profile), before, "{what}: nothing changed");
+}
+
+/// A Myotis generation that is a link (a symlink, or on Windows a
+/// junction) to a directory outside defers (`node_lock_unknown`) with
+/// nothing changed: it isn't followed (a supervisor could run there).
+#[test]
+fn a_myotis_generation_that_cant_be_tried_defers() {
+    let d = dirs();
+    seeded(&d.profile);
+    with_generations(&d.profile);
+    let outside = d.base.join("outside-generation");
+    for lease in LEASES {
+        write(&outside.join(lease), "");
+    }
+    let linked = "7e1d4b2a-9c3f-4d5e-8a6b-000000000004";
+    link_dir(
+        &outside,
+        &d.profile
+            .join("myotis")
+            .join("gnosis")
+            .join("verified-sync")
+            .join(linked),
+    );
+    deferred_naming(
+        &d,
+        &[],
+        "a generation that is a link",
+        "node_lock_unknown",
+        &format!("myotis/gnosis/verified-sync/{linked}"),
+    );
+}
+
+/// `n` generations of mainnet's Myotis, each with both leases (not held),
+/// in their names' order.
+fn many_generations(profile: &Path, n: usize) -> Vec<String> {
+    let names: Vec<String> = (0..n)
+        .map(|i| format!("{i:08x}-0000-4000-8000-000000000000"))
+        .collect();
+    for name in &names {
+        for lease in LEASES {
+            write(&generation_lease(profile, None, name, lease), "");
+        }
+    }
+    names
+}
+
+/// Every generation is tried, however many the browser has kept (it never
+/// removes one): 1025 free generations move, while a lease held in one
+/// near the end of them, or a link among them, still defers.
+#[test]
+fn every_myotis_generation_is_tried_however_many() {
+    let d = dirs();
+    seeded(&d.profile);
+    let made = many_generations(&d.profile, 1025);
+    let late = &made[1000];
+    let held = hold_lease(&generation_lease(&d.profile, None, late, LEASES[1]));
+    deferred_naming(
+        &d,
+        &[],
+        "one held among 1025",
+        "node_running",
+        &generation_named(None, late, LEASES[1]),
+    );
+    drop(held);
+    assert_eq!(said(&start(&d)), "migrated");
+    assert_new_layout(&d.profile);
+    let moved = d
+        .profile
+        .join("freedom")
+        .join("myotis")
+        .join("verified-sync");
+    assert_eq!(names(&moved).len(), 1025);
+
+    let d = dirs();
+    seeded(&d.profile);
+    many_generations(&d.profile, 1025);
+    let outside = d.base.join("outside-generation");
+    write(&outside.join(LEASES[0]), "");
+    let linked = "ffffffff-0000-4000-8000-000000000000";
+    link_dir(
+        &outside,
+        &d.profile.join("myotis").join("verified-sync").join(linked),
+    );
+    deferred_naming(
+        &d,
+        &[],
+        "a link among 1025",
+        "node_lock_unknown",
+        &format!("myotis/verified-sync/{linked}"),
+    );
+}
+
+/// The lookups' test hook (Linux): `walk` takes the walk, as where
+/// `openat2` is missing or refused; `walk-no-mount-id` also hides mount
+/// IDs, as before Linux 5.8.
+#[cfg(target_os = "linux")]
+const LOOKUP: &str = "FREEDOM_CORED_TEST_PROFILE_MIGRATE_LOOKUP";
+
+/// Where neither a mount ID nor `openat2` can prove a generation on the
+/// profile's mount (the walk alone, mount IDs hidden), it isn't walked
+/// into: the move defers (`node_lock_unknown`), failing closed. With mount
+/// IDs the walk alone proves it, and the move goes on.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_myotis_generation_unprovable_on_the_profiles_mount_defers() {
+    let d = dirs();
+    seeded(&d.profile);
+    with_generations(&d.profile);
+    deferred_naming(
+        &d,
+        &[(LOOKUP, "walk-no-mount-id")],
+        "unprovable",
+        "neither a mount ID nor openat2",
+        &format!("myotis/verified-sync/{}", GENERATIONS[0]),
+    );
+    let out = start_env(&d.profile, &d.locks, &[], &[(LOOKUP, "walk")]);
+    assert_eq!(said(&out), "migrated", "{out:?}");
+    assert_new_layout(&d.profile);
+}
+
 /// A link to the directory `target` at `link`: a symlink on Unix, a
 /// junction on Windows (which needs no privilege).
 fn link_dir(target: &Path, link: &Path) {
@@ -2257,6 +2494,82 @@ fn a_node_taking_its_lock_on_a_copied_source_rolls_the_move_back() {
     assert_new_layout(&d.profile);
 }
 
+/// Myotis started while the move ran, in its current layout: a lease taken
+/// in a generation at its new place (`freedom/myotis/gnosis/verified-sync/
+/// <generation>/`, the last of several) before the marker rolls the move
+/// back, as antd's lock does. Unix only, for the reason that test gives.
+#[cfg(unix)]
+#[test]
+fn a_myotis_lease_taken_in_a_generation_during_the_move_rolls_it_back() {
+    let d = dirs();
+    seeded(&d.profile);
+    with_generations(&d.profile);
+    let (paused, release) = (d.base.join("paused"), d.base.join("release"));
+    let child = start_paused(
+        &d.profile,
+        &d.locks,
+        "after-renames",
+        &paused,
+        &release,
+        &[],
+    );
+    wait_for(&paused);
+    let (network, generation, lease) = (Some("gnosis"), GENERATIONS[2], LEASES[1]);
+    let freedom = d.profile.join("freedom");
+    let held = hold_lease(&generation_lease(&freedom, network, generation, lease));
+    std::fs::write(&release, "").unwrap();
+    let out = child.wait_with_output().unwrap();
+    assert_eq!(said(&out), "rolled_back", "{out:?}");
+    let log = stderr(&out);
+    assert!(log.contains("a node took its lock"), "{log}");
+    let named = generation_named(network, generation, lease);
+    assert!(log.contains(&format!("freedom/{named} held")), "{log}");
+    assert_old_layout(&d.profile);
+    assert!(generation_lease(&d.profile, network, generation, lease).is_file());
+    drop(held);
+    assert_eq!(said(&start(&d)), "migrated");
+    assert_new_layout(&d.profile);
+}
+
+/// The same on a copied `myotis/`: a lease taken in a generation of its
+/// source, which stays at the root until the cleanup after the marker (its
+/// copy's lease is another file), rolls the move back before the marker,
+/// the source intact and no copy left.
+#[test]
+fn a_myotis_lease_taken_in_a_generation_of_a_copied_source_rolls_the_move_back() {
+    let d = dirs();
+    seeded(&d.profile);
+    with_generations(&d.profile);
+    let (paused, release) = (d.base.join("paused"), d.base.join("release"));
+    let child = start_paused(
+        &d.profile,
+        &d.locks,
+        "after-renames",
+        &paused,
+        &release,
+        &[(EXDEV, "myotis")],
+    );
+    wait_for(&paused);
+    let (network, generation, lease) = (None, GENERATIONS[0], LEASES[0]);
+    let freedom = d.profile.join("freedom");
+    assert!(there(&generation_lease(
+        &freedom, network, generation, lease
+    )));
+    let held = hold_lease(&generation_lease(&d.profile, network, generation, lease));
+    std::fs::write(&release, "").unwrap();
+    let out = child.wait_with_output().unwrap();
+    assert_eq!(said(&out), "rolled_back", "{out:?}");
+    let log = stderr(&out);
+    assert!(log.contains("a node took its lock"), "{log}");
+    let named = generation_named(network, generation, lease);
+    assert!(log.contains(&format!("\"{named} held\"")), "{log}");
+    assert_old_layout(&d.profile);
+    assert!(!there(&freedom.join("myotis")));
+    drop(held);
+    assert_eq!(said(&start(&d)), "migrated");
+    assert_new_layout(&d.profile);
+}
+
 /// A starting run in the background, paused at `step` until `release`.
 fn start_paused(
     profile: &Path,
@@ -2831,6 +3144,139 @@ fn mounted_tmpfs_nested_in_an_entry_is_never_crossed() {
     assert_new_layout(&d.profile);
     assert_eq!(read(&moved.join("kept")), "kept");
     assert_ne!(device(&moved), device(&d.profile), "still the mount");
+}
+
+/// Mounts among Myotis's generations, each refused before it is entered to
+/// look for a lease (`node_lock_unknown`, nothing changed): a tmpfs at a
+/// generation's own name (after free ones), and a same-file-system bind
+/// mount at a base's `verified-sync/` with nothing in it (its own mount,
+/// though its device is the profile's). Moved anyway (a regression), the
+/// mount is unmounted at its new place.
+#[cfg(target_os = "linux")]
+#[test]
+fn mounted_myotis_generations_defer() {
+    fn deferred(d: &Dirs, mounted: &mut Mounted, named: &str) {
+        mounted_deferred(d, mounted, &[], ON_THE_WAY, named);
+    }
+
+    let d = dirs();
+    seeded(&d.profile);
+    with_generations(&d.profile);
+    let name = "ffffffff-0000-4000-8000-000000000000";
+    let generation = d.profile.join("myotis").join("verified-sync").join(name);
+    std::fs::create_dir(&generation).unwrap();
+    let Some(mut mounted) = Mounted::tmpfs(&generation, "1m") else {
+        return;
+    };
+    assert_ne!(device(&generation), device(&d.profile));
+    deferred(&d, &mut mounted, &format!("myotis/verified-sync/{name}"));
+
+    let d = dirs();
+    seeded(&d.profile);
+    let empty = d.base.join("empty");
+    std::fs::create_dir(&empty).unwrap();
+    let generations = d
+        .profile
+        .join("myotis")
+        .join("gnosis")
+        .join("verified-sync");
+    std::fs::create_dir_all(&generations).unwrap();
+    let Some(mut bound) = Mounted::bind(&empty, &generations) else {
+        return;
+    };
+    assert_eq!(device(&generations), device(&d.profile));
+    deferred(&d, &mut bound, "myotis/gnosis/verified-sync");
+}
+
+/// Why a lock's lookup refused a link or a mount on its way.
+#[cfg(target_os = "linux")]
+const ON_THE_WAY: &str = "a link or a mount on the way to the lock";
+
+/// A start with a test mount in the profile, which must defer
+/// (`node_lock_unknown`) with nothing changed, its log naming `why` and
+/// `named`, and no lease or lock tried through the mount (none is found
+/// held). Moved anyway (a regression), the mount is unmounted at its new
+/// place.
+#[cfg(target_os = "linux")]
+fn mounted_deferred(d: &Dirs, mounted: &mut Mounted, env: &[(&str, &str)], why: &str, named: &str) {
+    let before = snapshot(&d.profile);
+    let out = start_env(&d.profile, &d.locks, &[], env);
+    if said(&out) == "migrated" {
+        let below = mounted.0.strip_prefix(&d.profile).unwrap().to_owned();
+        mounted.0 = d.profile.join("freedom").join(below);
+    }
+    assert_eq!(
+        (code(&out), said(&out)),
+        (0, "deferred".into()),
+        "{env:?}: {out:?}"
+    );
+    let log = stderr(&out);
+    assert!(log.contains("node_lock_unknown"), "{env:?}: {log}");
+    assert!(!log.contains("node_running"), "{env:?}: {log}");
+    assert!(log.contains(why), "{env:?}: {log}");
+    assert!(log.contains(named), "{env:?}: {log}");
+    assert_eq!(snapshot(&d.profile), before, "{env:?}");
+}
+
+/// A same-file-system bind mount (the profile's device, a mount of its
+/// own) is never entered, `openat2` or not: at a Myotis generation itself,
+/// whose bound directory holds a lease held (a supervisor running there),
+/// it defers (`node_lock_unknown`, the lease never tried, so never found
+/// held), after free generations by `openat2` and by the walk alone (the
+/// generation's mount ID, and the walk's own check), and alone with mount
+/// IDs hidden too (failing closed);
+/// and on the way to arti's lock, the walk alone refuses it by its mount.
+#[cfg(target_os = "linux")]
+#[test]
+fn mounted_bind_mounts_are_never_entered_by_the_walk() {
+    let unproven = "neither a mount ID nor openat2";
+    // With mount IDs hidden every generation fails closed, the first one
+    // named, so there the bound one is the only one.
+    for (env, why, others) in [
+        (&[][..], ON_THE_WAY, true),
+        (&[(LOOKUP, "walk")][..], ON_THE_WAY, true),
+        (&[(LOOKUP, "walk-no-mount-id")][..], unproven, false),
+    ] {
+        let d = dirs();
+        seeded(&d.profile);
+        if others {
+            with_generations(&d.profile);
+        }
+        let source = d.base.join("bound-generation");
+        for lease in LEASES {
+            write(&source.join(lease), "");
+        }
+        let held = hold_lease(&source.join(LEASES[0]));
+        let name = "ffffffff-0000-4000-8000-000000000000";
+        let generation = d.profile.join("myotis").join("verified-sync").join(name);
+        std::fs::create_dir_all(&generation).unwrap();
+        let Some(mut bound) = Mounted::bind(&source, &generation) else {
+            return;
+        };
+        assert_eq!(device(&generation), device(&d.profile));
+        let named = format!("myotis/verified-sync/{name}");
+        mounted_deferred(&d, &mut bound, env, why, &named);
+        drop(bound);
+        drop(held);
+    }
+
+    let d = dirs();
+    seeded(&d.profile);
+    let source = d.base.join("bound-state");
+    write(&source.join("state").join("state.lock"), "");
+    let state = d.profile.join("tor-data").join("state");
+    std::fs::remove_dir_all(&state).unwrap();
+    std::fs::create_dir(&state).unwrap();
+    let Some(mut bound) = Mounted::bind(&source, &state) else {
+        return;
+    };
+    mounted_deferred(
+        &d,
+        &mut bound,
+        &[(LOOKUP, "walk")],
+        ON_THE_WAY,
+        "tor-data/state/state/state.lock",
+    );
 }
 
 /// After the marker, the cleanup removes a copied entry's source only while
