@@ -75,6 +75,8 @@ Stage 1 trusts Electron main: it holds the pipe, fills in the caller context, an
 
 ```
 Electron main (profile P) ──spawn──▶ freedom-cored serve --data-dir <identityDir> --lock-dir <locksDir> --parent-pid <main's pid>
+                                                          --grant-root <freedomDir> [--user-data-dir <userData>]
+                                                          [--node-root bee=<dir>] [--node-root radicle=<dir>]
      stdin  ──frames──▶
      stdout ◀──frames──
      stderr ◀──JSON log lines── (forwarded to main's log)
@@ -85,7 +87,8 @@ Electron main (profile P) ──spawn──▶ freedom-cored serve --data-dir <i
   - The binary comes from the app's resources. `FREEDOM_CORED_PATH` is honored only when `!app.isPackaged`.
   - The environment is cleared except for `PATH`, `HOME`/`USERPROFILE`, `LANG` and `RUST_LOG`.
   - stdin and stdout are pipes; stderr is a pipe read line by line.
-  - **The grant's arguments** ([0017](0017-core-confinement.md) C1): `--grant-root <dir>`, `--user-data-dir <dir>`, and `--node-root bee=<dir>` / `--node-root radicle=<dir>`, each absolute and normalized, each node kind at most once. The hello must then name the same `grant_root` and `user_data_dir`, and `nodes.write_identity` the same node directory. They are optional until main passes them (0017's steps).
+  - **The grant's arguments** ([0017](0017-core-confinement.md) C1): `--grant-root <dir>` (required: without it `serve` exits 64), and optionally `--user-data-dir <dir>` and `--node-root bee=<dir>` / `--node-root radicle=<dir>`, each absolute and normalized, each node kind at most once. The hello must then name the same `grant_root`, and the same `user_data_dir` (both absent, or both equal), and `nodes.write_identity` the same node directory.
+  - **The core confines itself** ([0017](0017-core-confinement.md)) before it reads a byte from the pipe: it drops inherited descriptors (one re-exec on Linux and macOS), takes its gate, makes a missing Freedom root or `--node-root`, plans a pending node record's roots, hands the profile's legacy receipts over, and confines itself to the identity directory, the Freedom root and the node roots, offline, with no process of its own; only then does its logging thread start. `core.hello`'s answer carries the report under `confinement`, and main logs it. `hold-lock` and `recover` confine themselves the same way.
   - Main spawns the core at startup and serves no `identity:*` request until the handshake has succeeded.
 - **Handshake:** `core.hello` must complete within 10 s of spawn. Both sides enforce this. Main kills the core and treats it as a startup failure. The core exits by itself if no `core.hello` has arrived 10 s after start.
 - **Startup recovery:** before answering `core.hello`, the core finishes any interrupted node-identity journal (see [Multi-file writes](#multi-file-writes)). Main starts no node before the handshake has succeeded.
@@ -115,8 +118,8 @@ Electron main (profile P) ──spawn──▶ freedom-cored serve --data-dir <i
 
   A known network type means exit 74 with `storage { kind: "network_filesystem" }`. The guarantee is exclusion between cores on local storage.
 - **One gate for every core-format writer.** The same `freedom-cored` binary provides two more subcommands, both of which take the gate under the same rules:
-  - **`hold-lock --data-dir … --lock-dir …`** prints `locked`, then holds the gate until its stdin closes. Profile delete (`profile-catalog.js`) and data migrations hold it for the whole destructive operation. freedom-browser has no profile reset; one added later holds it too. The gate lives outside the directory being removed, so no core can start until the operation releases it.
-  - **`recover --data-dir … --lock-dir …`** takes the gate, rolls forward any node-identity journal (see [Multi-file writes](#multi-file-writes)), prints `recovered` (or `corrupt` with details), then exits.
+  - **`hold-lock --data-dir … --lock-dir …`** prints `locked`, then holds the gate until its stdin closes, confined to the identity directory and its gate ([0017](0017-core-confinement.md)). Profile delete (`profile-catalog.js`) and data migrations hold it for the whole destructive operation. freedom-browser has no profile reset; one added later holds it too. The gate lives outside the directory being removed, so no core can start until the operation releases it.
+  - **`recover --data-dir … --lock-dir …`** takes the gate, rolls forward any node-identity journal (see [Multi-file writes](#multi-file-writes)), prints `recovered` (or `corrupt` with details), then exits. It is confined to the identity directory, its gate, and the roots a pending record names ([0017](0017-core-confinement.md) C6).
 - **The JS vault writer** (a step-1 dev build without the `FREEDOM_CORE=1` opt-in, or a hotfix that reverts to the JS vault) can't hold an OS lock itself, because Node has no `flock`. So:
   - **It runs `recover` at startup,** before it starts any node or writes any identity file. A journal that a core left behind is therefore always completed first. Such builds keep shipping the binary for this purpose.
   - **Running the JS writer and a core on the same identity directory at the same time is an unsupported configuration,** not something the design can rule out. Packaged builds have no backend switch, and one profile process runs one backend. But alternate roots (`--profile-dir`, `FREEDOM_IDENTITY_DATA`) and different release versions can still bring the two together. Release notes and the profile docs state the limitation.

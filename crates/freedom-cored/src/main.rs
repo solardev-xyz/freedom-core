@@ -2,7 +2,7 @@
 //!
 //! ```text
 //! freedom-cored serve     --data-dir <identity dir> --lock-dir <lock dir> [--parent-pid <pid>]
-//!                         [--grant-root <dir>] [--user-data-dir <dir>]
+//!                         --grant-root <dir> [--user-data-dir <dir>]
 //!                         [--node-root bee=<dir>] [--node-root radicle=<dir>]
 //! freedom-cored hold-lock --data-dir <identity dir> --lock-dir <lock dir>
 //! freedom-cored recover   --data-dir <identity dir> --lock-dir <lock dir>
@@ -13,16 +13,18 @@
 //!
 //! `serve`'s `--grant-root`, `--user-data-dir` and `--node-root` are the
 //! directories of its grant (design 0017, C1): each absolute and
-//! normalized, each node kind at most once. The hello must name the same
+//! normalized, each node kind at most once. `--grant-root` is required; a
+//! `serve` without it is a usage error (64). The hello must name the same
 //! `grant_root` and `user_data_dir`, and `nodes.write_identity` the same
-//! node directory. They are optional until main passes them.
+//! node directory.
 //!
 //! `keystore` is the one-shot key-store helper ([`keystore::helper`],
 //! design 0013): one call to the OS's key store, one line on stdout.
 //!
-//! The profile subcommands are [`profile`]'s. Each confines itself (design
-//! 0013, 0010), so it starts as a service does: before anything opens a
-//! descriptor, inherited ones are dropped by one re-exec
+//! Every other subcommand confines itself: the profile subcommands
+//! ([`profile`], design 0013), and `serve`, `hold-lock` and `recover`
+//! (design 0017, [`confine`]). Each starts as a service does (0010): before
+//! anything opens a descriptor, inherited ones are dropped by one re-exec
 //! (`fc_service::confine::clean_entry`), and no thread starts before its
 //! confinement, logging's writer included (its lines are written directly).
 
@@ -30,6 +32,7 @@ mod accounts;
 mod approvals;
 mod chain;
 mod clock;
+mod confine;
 mod delete_journal;
 mod dweb;
 mod eip1193;
@@ -82,7 +85,7 @@ use std::time::{Duration, Instant};
 use exit::Exit;
 
 const USAGE: &str = "usage: freedom-cored <serve|hold-lock|recover> --data-dir <dir> --lock-dir <dir> [--parent-pid <pid>]; \
-     serve also: [--grant-root <dir>] [--user-data-dir <dir>] [--node-root bee=<dir>] [--node-root radicle=<dir>]";
+     serve also: --grant-root <dir> [--user-data-dir <dir>] [--node-root bee=<dir>] [--node-root radicle=<dir>]";
 
 struct Args {
     command: String,
@@ -194,18 +197,24 @@ fn main() -> ExitCode {
         let entry = fc_service::confine::clean_entry();
         return ExitCode::from(profile::run(std::env::args_os().skip(1), &entry).code());
     }
-    log::init();
-    let exit = run(started);
+    // `serve`, `hold-lock` and `recover` (design 0017, "The order in
+    // serve", step 1): inherited descriptors dropped, and no logging thread
+    // until each has confined itself.
+    let entry = fc_service::confine::clean_entry();
+    let exit = run(started, &entry);
     log::finish(Duration::from_millis(500));
     ExitCode::from(exit.code())
 }
 
-fn run(started: Instant) -> Exit {
+fn run(started: Instant, entry: &fc_service::confine::Entry) -> Exit {
+    confine::log_entry(entry);
+    // Step 2: the arguments (design 0017, C1).
     let Some(args) = parse_args() else {
         log::error(USAGE, serde_json::json!({}));
         return Exit::Usage;
     };
-    // The grant's arguments are `serve`'s alone (design 0017, C1).
+    // The grant's arguments are `serve`'s alone, and `serve` needs its
+    // Freedom root.
     if args.command != "serve" && args.names_a_grant() {
         log::error(USAGE, serde_json::json!({}));
         return Exit::Usage;
@@ -215,16 +224,22 @@ fn run(started: Instant) -> Exit {
         return Exit::Usage;
     };
     match args.command.as_str() {
-        "serve" => serve::run(&serve::Options {
-            data_dir,
-            lock_dir,
-            parent_pid: args.parent_pid,
-            hello_timeout: Duration::from_millis(args.hello_timeout_ms),
-            started,
-            grant_root: args.grant_root,
-            user_data_dir: args.user_data_dir,
-            node_roots: args.node_roots,
-        }),
+        "serve" => {
+            let Some(grant_root) = args.grant_root else {
+                log::error(USAGE, serde_json::json!({}));
+                return Exit::Usage;
+            };
+            serve::run(&serve::Options {
+                data_dir,
+                lock_dir,
+                parent_pid: args.parent_pid,
+                hello_timeout: Duration::from_millis(args.hello_timeout_ms),
+                started,
+                grant_root,
+                user_data_dir: args.user_data_dir,
+                node_roots: args.node_roots,
+            })
+        }
         "hold-lock" => hold_lock(&data_dir, &lock_dir),
         "recover" => recover(&data_dir, &lock_dir),
         _ => {
@@ -235,9 +250,10 @@ fn run(started: Instant) -> Exit {
 }
 
 /// Takes the gate, says `locked`, and holds it until stdin closes. Profile
-/// delete, reset and migration run under it.
+/// delete, reset and migration run under it. Confined to the identity
+/// directory and its gate (design 0017, "Steps", D7-2).
 fn hold_lock(data_dir: &std::path::Path, lock_dir: &std::path::Path) -> Exit {
-    let _gate = match gate::acquire(data_dir, lock_dir) {
+    let gate = match gate::acquire(data_dir, lock_dir) {
         Ok(gate) => gate,
         Err(e) => {
             log::error(
@@ -247,6 +263,11 @@ fn hold_lock(data_dir: &std::path::Path, lock_dir: &std::path::Path) -> Exit {
             return Exit::from(&e);
         }
     };
+    let policy = confine::policy(vec![gate.identity_dir.clone()], gate.descriptors());
+    if let Err(exit) = confine::apply(&policy, "hold-lock confined") {
+        return exit;
+    }
+    log::init();
     let mut stdout = std::io::stdout().lock();
     if stdout
         .write_all(b"locked\n")
@@ -262,10 +283,13 @@ fn hold_lock(data_dir: &std::path::Path, lock_dir: &std::path::Path) -> Exit {
 }
 
 /// Takes the gate and completes interrupted node-identity journals, for
-/// JS-backend builds before they start nodes. Node writes arrive in a later
-/// PR, so there is nothing to recover yet.
+/// JS-backend builds before they start nodes, and the vault's delete and
+/// metadata journals. Confined (design 0017, "Steps", D7-2) to the identity
+/// directory, its gate, and what C6's plan names: the roots of a pending
+/// record that exist (a committed Radicle journal's home made), with each
+/// planned Radicle home's gate file, opened before (C3).
 fn recover(data_dir: &std::path::Path, lock_dir: &std::path::Path) -> Exit {
-    let _gate = match gate::acquire(data_dir, lock_dir) {
+    let gate = match gate::acquire(data_dir, lock_dir) {
         Ok(gate) => gate,
         Err(e) => {
             log::error(
@@ -275,6 +299,27 @@ fn recover(data_dir: &std::path::Path, lock_dir: &std::path::Path) -> Exit {
             return Exit::from(&e);
         }
     };
+    // The identity directory's entry in its parent, flushed as at `serve`'s
+    // start: recovery writes the vault's records in it.
+    if let Err(e) = journal::sync_parent(&gate.identity_dir) {
+        log::error(
+            "cannot flush the identity directory in its parent",
+            serde_json::json!({ "error": e.kind().to_string() }),
+        );
+        return Exit::Storage;
+    }
+    let prepared = journal::prepare(&gate.identity_dir, lock_dir, None);
+    let mut read_write = vec![gate.identity_dir.clone()];
+    read_write.extend(prepared.grant.iter().cloned());
+    let mut descriptors = gate.descriptors();
+    descriptors.extend(prepared.gates.descriptors());
+    if let Err(exit) = confine::apply(
+        &confine::policy(read_write, descriptors),
+        "recover confined",
+    ) {
+        return exit;
+    }
+    log::init();
     // A vault delete's journal a core left is finished first, as at the
     // core's own start (design 0013, "Forgetting an item").
     if let Err(e) = delete_journal::startup(data_dir) {
@@ -302,7 +347,7 @@ fn recover(data_dir: &std::path::Path, lock_dir: &std::path::Path) -> Exit {
         retry: fc_service::gate::CONTENTION_RETRY,
         held: None,
         held_identity: None,
-        files: journal::RadicleGates::default(),
+        files: prepared.gates,
     };
     let line = match journal::recover(data_dir, &gates) {
         Ok(journal::Recovered::Waiting { node, .. }) => {

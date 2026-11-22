@@ -83,8 +83,9 @@ impl NodeSpec {
 
 /// The node directories `serve`'s command line names (design 0017, C1:
 /// `--node-root bee=<dir>`, `--node-root radicle=<dir>`), each absolute and
-/// normalized ([`journal::normalized_absolute`]). Optional until main
-/// passes them.
+/// normalized ([`journal::normalized_absolute`]), each optional. Each given
+/// is made if missing and granted before `confine` (C2); a node directory
+/// not given isn't granted, so a confined core can't write it.
 #[derive(Debug, Default, Clone)]
 pub struct NodeRootArgs {
     pub bee: Option<PathBuf>,

@@ -269,6 +269,28 @@
 //!   stderr, `test: confined`, with its confinement report and, for each
 //!   path, whether the read worked. So a test sees what the confined
 //!   process can and can't read.
+//! - `FREEDOM_CORED_TEST_DIR_RACE` (`<step>=<path>`): when the directory
+//!   maker of `serve`'s Freedom root and node roots (`journal::make_dirs`)
+//!   is at `<path>`: at `mkdir`, right before its `mkdir`, the hook makes
+//!   the directory first, as another creator winning the race; at
+//!   `filled`, right after its `mkdir`, it writes a file `filled` into it,
+//!   as a writer filling it before the flush.
+//! - `FREEDOM_CORED_TEST_DIR_SYNC_FAIL` names a directory: the node
+//!   journal's directory flush (`journal::sync_dir`, which that maker and
+//!   the identity directory's flush at start use) fails for it, as if the
+//!   OS had failed it.
+//! - `FREEDOM_CORED_TEST_CORE_CONFINED` does the same for `serve`,
+//!   `hold-lock` and `recover` (design 0017), right after each confines
+//!   itself, before its logging thread starts.
+//! - **The hooks' files, confined** (design 0017): `serve`, `hold-lock` and
+//!   `recover` add to their read-write grant the directory of each file a
+//!   hook above names (`COMMIT_MARKER`, `COMMIT_HOLD`, `REFUSED_CLAIM_HOLD`,
+//!   `STEP_HOLD`, `DWEB_WRITER_MARKER`, `NAMING_MARKER`, `X402_SIGN_MARKER`,
+//!   `EIP1193_RETAINED_MARKER`, `GRANT_WRITE_FAIL`, `INTENT_IDS`,
+//!   `INTENT_LIMITS`, `APPROVAL_CLOCK`, `WALL_CLOCK`, and `SWAP`'s
+//!   replacement), and with `SWAP` renames across directories (`refer`),
+//!   since its replacement is renamed in from elsewhere. So every hook
+//!   works confined; without these variables, nothing is added.
 
 use std::time::Duration;
 
@@ -902,7 +924,14 @@ pub fn profile_hook_dirs() -> Vec<std::path::PathBuf> {
 
 #[cfg(feature = "testhooks")]
 pub fn profile_confined(report: &fc_service::confine::Report) {
-    let Some(list) = std::env::var_os("FREEDOM_CORED_TEST_PROFILE_CONFINED") else {
+    confined_reads("FREEDOM_CORED_TEST_PROFILE_CONFINED", report);
+}
+
+/// Reads each path `variable` lists, and logs `test: confined` with the
+/// report and whether each read worked.
+#[cfg(feature = "testhooks")]
+fn confined_reads(variable: &str, report: &fc_service::confine::Report) {
+    let Some(list) = std::env::var_os(variable) else {
         return;
     };
     let reads: Vec<serde_json::Value> = std::env::split_paths(&list)
@@ -922,6 +951,103 @@ pub fn profile_confined(report: &fc_service::confine::Report) {
         "test: confined",
         serde_json::json!({ "confinement": report.to_json(), "reads": reads }),
     );
+}
+
+/// The hooks whose variable names a file `serve`, `hold-lock` or
+/// `recover` reads or writes.
+#[cfg(feature = "testhooks")]
+const CORE_HOOK_FILES: &[&str] = &[
+    "FREEDOM_CORED_TEST_COMMIT_MARKER",
+    "FREEDOM_CORED_TEST_COMMIT_HOLD",
+    "FREEDOM_CORED_TEST_REFUSED_CLAIM_HOLD",
+    "FREEDOM_CORED_TEST_STEP_HOLD",
+    "FREEDOM_CORED_TEST_DWEB_WRITER_MARKER",
+    "FREEDOM_CORED_TEST_NAMING_MARKER",
+    "FREEDOM_CORED_TEST_X402_SIGN_MARKER",
+    "FREEDOM_CORED_TEST_EIP1193_RETAINED_MARKER",
+    "FREEDOM_CORED_TEST_GRANT_WRITE_FAIL",
+    "FREEDOM_CORED_TEST_INTENT_IDS",
+    "FREEDOM_CORED_TEST_INTENT_LIMITS",
+    "FREEDOM_CORED_TEST_APPROVAL_CLOCK",
+    "FREEDOM_CORED_TEST_WALL_CLOCK",
+];
+
+/// What a confined `serve`, `hold-lock` or `recover` adds to its grant so
+/// the hooks still work (design 0017): the directory of each hook file
+/// named, that is a directory now, and whether `FREEDOM_CORED_TEST_SWAP`
+/// is set, whose replacement is renamed in from another directory
+/// (`refer`).
+#[cfg(feature = "testhooks")]
+pub fn core_hook_grant() -> (Vec<std::path::PathBuf>, bool) {
+    let mut files: Vec<std::path::PathBuf> = CORE_HOOK_FILES
+        .iter()
+        .filter_map(std::env::var_os)
+        .map(std::path::PathBuf::from)
+        .collect();
+    let swap = std::env::var("FREEDOM_CORED_TEST_SWAP").ok();
+    if let Some((_, replacement)) = swap.as_deref().and_then(|spec| spec.split_once('=')) {
+        files.push(replacement.into());
+    }
+    let mut dirs: Vec<std::path::PathBuf> = Vec::new();
+    for dir in files
+        .iter()
+        .filter_map(|file| file.parent())
+        .filter(|dir| dir.is_dir())
+    {
+        if !dirs.iter().any(|known| known == dir) {
+            dirs.push(dir.to_path_buf());
+        }
+    }
+    (dirs, swap.is_some())
+}
+
+#[cfg(not(feature = "testhooks"))]
+pub fn core_hook_grant() -> (Vec<std::path::PathBuf>, bool) {
+    (Vec::new(), false)
+}
+
+#[cfg(feature = "testhooks")]
+pub fn core_confined(report: &fc_service::confine::Report) {
+    confined_reads("FREEDOM_CORED_TEST_CORE_CONFINED", report);
+}
+
+#[cfg(not(feature = "testhooks"))]
+pub fn core_confined(_report: &fc_service::confine::Report) {}
+
+#[cfg(feature = "testhooks")]
+pub fn make_dir_race(step: &str, path: &std::path::Path) {
+    let Ok(spec) = std::env::var("FREEDOM_CORED_TEST_DIR_RACE") else {
+        return;
+    };
+    let Some((wanted, at)) = spec.split_once('=') else {
+        return;
+    };
+    if wanted != step || std::path::Path::new(at) != path {
+        return;
+    }
+    match step {
+        "mkdir" => {
+            let _ = std::fs::create_dir(path);
+        }
+        "filled" => {
+            let _ = std::fs::write(path.join("filled"), b"a writer's");
+        }
+        _ => {}
+    }
+}
+
+#[cfg(not(feature = "testhooks"))]
+pub fn make_dir_race(_step: &str, _path: &std::path::Path) {}
+
+#[cfg(feature = "testhooks")]
+pub fn dir_sync_fails(dir: &std::path::Path) -> bool {
+    std::env::var_os("FREEDOM_CORED_TEST_DIR_SYNC_FAIL")
+        .is_some_and(|failing| std::path::Path::new(&failing) == dir)
+}
+
+#[cfg(not(feature = "testhooks"))]
+pub fn dir_sync_fails(_dir: &std::path::Path) -> bool {
+    false
 }
 
 #[cfg(not(feature = "testhooks"))]

@@ -29,7 +29,13 @@ fn b64(s: &str) -> String {
 
 /// A core with the abandon...about wallet imported (unlocked); next ID 3.
 fn unlocked(data: &Path, locks: &Path, env: &[(&str, &str)]) -> Core {
-    let mut core = spawn_env("serve", data, locks, &[], env);
+    unlocked_with(data, locks, &[], env)
+}
+
+/// [`unlocked`], with `extra` arguments: [`node_roots`].
+fn unlocked_with(data: &Path, locks: &Path, extra: &[String], env: &[(&str, &str)]) -> Core {
+    let extra: Vec<&str> = extra.iter().map(String::as_str).collect();
+    let mut core = spawn_env("serve", data, locks, &extra, env);
     core.hello();
     let imported = core.call(
         2,
@@ -38,6 +44,19 @@ fn unlocked(data: &Path, locks: &Path, env: &[(&str, &str)]) -> Core {
     );
     assert!(imported["result"].is_object(), "{imported}");
     core
+}
+
+/// `serve`'s `--node-root` arguments (design 0017, C1), as main passes
+/// them: the directories a confined core writes.
+fn node_roots(bee: Option<&Path>, radicle: Option<&Path>) -> Vec<String> {
+    let mut args = Vec::new();
+    for (node, root) in [("bee", bee), ("radicle", radicle)] {
+        if let Some(root) = root {
+            args.push("--node-root".to_owned());
+            args.push(format!("{node}={}", root.display()));
+        }
+    }
+    args
 }
 
 fn mode(path: &Path) -> u32 {
@@ -79,7 +98,7 @@ fn walk(dir: &Path) -> Vec<std::path::PathBuf> {
 fn bee_identity_matches_the_js_files() {
     let (root, data, locks) = dirs();
     let bee = root.path().join("bee-data");
-    let mut core = unlocked(&data, &locks, &[]);
+    let mut core = unlocked_with(&data, &locks, &node_roots(Some(&bee), None), &[]);
     let written = core.call(
         3,
         "nodes.write_identity",
@@ -164,7 +183,7 @@ fn radicle_identity_matches_the_js_files_and_keeps_the_config() {
         r#"{"preferredSeeds":["z6Mk@seed.example:8776"],"node":{"alias":"old","listen":[]},"web":{"pinned":{}}}"#,
     )
     .unwrap();
-    let mut core = unlocked(&data, &locks, &[]);
+    let mut core = unlocked_with(&data, &locks, &node_roots(None, Some(&home)), &[]);
     let written = core.call(
         3,
         "nodes.write_identity",
@@ -236,7 +255,8 @@ fn writes_need_an_unlocked_vault_and_valid_parameters() {
 /// the directory of its node kind exactly, or is `invalid_argument` before
 /// anything: no file in the directory it named, no journal, and no Radicle
 /// gate file in the lock directory but the argument's own, which `serve`
-/// opened at its start (C3). The named directories are written.
+/// opened at its start (C3). The named directories are written; the Bee
+/// root, missing, was made empty before `confine` (C2).
 #[test]
 fn writes_need_the_node_root_arguments() {
     let (root, data, locks) = dirs();
@@ -302,7 +322,7 @@ fn writes_need_the_node_root_arguments() {
     }
     assert!(walk(&other).is_empty(), "{:?}", walk(&other));
     assert!(walk(&home).is_empty(), "{:?}", walk(&home));
-    assert!(!bee.exists());
+    assert!(bee.is_dir() && walk(&bee).is_empty(), "{:?}", walk(&bee));
     assert_eq!(radicle_gates(), 1);
     assert!(!data.join("node-identity-journal.json").exists());
     assert!(!data.join("node-identity-staging.json").exists());
@@ -475,8 +495,9 @@ fn journals_a_writer_never_produces_are_set_aside_untouched() {
 #[test]
 fn op_ids_are_single_use_and_oversized_configs_are_refused() {
     let (root, data, locks) = dirs();
-    let mut core = unlocked(&data, &locks, &[]);
     let bee = root.path().join("bee");
+    let home = root.path().join("radicle");
+    let mut core = unlocked_with(&data, &locks, &node_roots(Some(&bee), Some(&home)), &[]);
     let params =
         json!({ "op_id": "op-1", "node": "bee", "data_dir": bee, "api_port": 1, "p2p_port": 2 });
     assert_eq!(
@@ -488,7 +509,6 @@ fn op_ids_are_single_use_and_oversized_configs_are_refused() {
     assert_eq!(again["error"]["message"], "op_id already used");
 
     // A Radicle config larger than any node file: refused before staging.
-    let home = root.path().join("radicle");
     std::fs::create_dir_all(&home).unwrap();
     let big = format!("{{\"pad\":\"{}\"}}", "x".repeat(1 << 20));
     std::fs::write(home.join("config.json"), &big).unwrap();
@@ -614,7 +634,9 @@ fn existing_node_files_are_tightened_at_adoption() {
     std::fs::write(&other, b"x").unwrap();
     set(&other, 0o644);
 
-    let mut core = spawn("serve", &data, &locks, &[]);
+    let args = node_roots(Some(&bee), Some(&radicle));
+    let args: Vec<&str> = args.iter().map(String::as_str).collect();
+    let mut core = spawn("serve", &data, &locks, &args);
     let hello = core.call_shell(
         1,
         "core.hello",

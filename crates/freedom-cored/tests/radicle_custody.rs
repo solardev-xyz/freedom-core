@@ -9,6 +9,7 @@
 mod common;
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use base64::Engine;
@@ -26,17 +27,49 @@ fn b64(s: &str) -> String {
     STANDARD.encode(s)
 }
 
-/// A core with the abandon...about wallet imported (unlocked); next ID 3.
-fn unlocked(data: &Path, locks: &Path) -> Core {
-    let mut core = spawn("serve", data, locks, &[]);
+/// `serve`'s `--node-root radicle=` argument (design 0017, C1): the one
+/// home a confined core writes, through the gate file it opens at its start
+/// (C3).
+fn radicle_root(home: &Path) -> Vec<String> {
+    vec!["--node-root".into(), format!("radicle={}", home.display())]
+}
+
+/// A core for `home` ([`radicle_root`]).
+fn spawn_for(data: &Path, locks: &Path, home: &Path, env: &[(&str, &str)]) -> Core {
+    let args = radicle_root(home);
+    let args: Vec<&str> = args.iter().map(String::as_str).collect();
+    spawn_env("serve", data, locks, &args, env)
+}
+
+/// A core for `home` with the abandon...about wallet imported, or unlocked
+/// when an earlier core of the test imported it; next ID 3.
+fn unlocked(data: &Path, locks: &Path, home: &Path) -> Core {
+    let mut core = spawn_for(data, locks, home, &[]);
     core.hello();
-    let imported = core.call(
-        2,
-        "vault.import",
-        json!({ "password_b64": b64("testpass1"), "mnemonic_b64": b64(ABANDON) }),
-    );
-    assert!(imported["result"].is_object(), "{imported}");
+    let reply = if data.join("identity-vault.json").exists() {
+        core.call(
+            2,
+            "vault.unlock",
+            json!({ "password_b64": b64("testpass1") }),
+        )
+    } else {
+        core.call(
+            2,
+            "vault.import",
+            json!({ "password_b64": b64("testpass1"), "mnemonic_b64": b64(ABANDON) }),
+        )
+    };
+    assert!(reply["result"].is_object(), "{reply}");
     core
+}
+
+/// Today's key files for the abandon wallet in `home`, written by a core
+/// of its own, which then exits: a confined core writes only its own home.
+fn legacy_home(data: &Path, locks: &Path, home: &Path) {
+    let mut core = unlocked(data, locks, home);
+    legacy_write(&mut core, 3, home);
+    core.close_stdin();
+    assert_eq!(core.exit_code(Duration::from_secs(5)), 0);
 }
 
 fn sealed(op_id: &str, home: &Path, wipe: Option<bool>) -> Value {
@@ -71,13 +104,17 @@ fn keys_gone(home: &Path) {
     }
 }
 
+/// Each legacy write's op ID is its own, across a test's cores: one
+/// identity directory's done list holds them all.
+static LEGACY: AtomicU64 = AtomicU64::new(0);
+
 /// Writes today's key files for the abandon wallet into `home`, through the
 /// core's own today's form.
 fn legacy_write(core: &mut Core, id: u64, home: &Path) {
     let reply = core.call(
         id,
         "nodes.write_identity",
-        json!({ "op_id": format!("legacy-{id}"), "node": "radicle", "home": home, "alias": "old" }),
+        json!({ "op_id": format!("legacy-{id}-{}", LEGACY.fetch_add(1, Ordering::Relaxed)), "node": "radicle", "home": home, "alias": "old" }),
     );
     assert_eq!(reply["result"]["status"], "installed", "{reply}");
     assert!(home.join("keys/radicle").exists());
@@ -88,7 +125,7 @@ fn the_sealed_form_needs_no_vault_and_writes_no_key() {
     let (root, data, locks) = dirs();
     let home = root.path().join("radicle");
     // No vault at all.
-    let mut core = spawn("serve", &data, &locks, &[]);
+    let mut core = spawn_for(&data, &locks, &home, &[]);
     core.hello();
     let reply = core.call(2, "nodes.write_identity", sealed("op-1", &home, None));
     assert_eq!(reply["result"], json!({ "status": "installed" }), "{reply}");
@@ -98,7 +135,7 @@ fn the_sealed_form_needs_no_vault_and_writes_no_key() {
     core.close_stdin();
     assert_eq!(core.exit_code(Duration::from_secs(5)), 0);
     // Locked: still no vault needed.
-    let mut core = unlocked(&data, &locks);
+    let mut core = unlocked(&data, &locks, &home);
     assert_eq!(core.call(3, "vault.lock", json!({}))["result"], json!({}));
     let reply = core.call(4, "nodes.write_identity", sealed("op-2", &home, None));
     assert_eq!(reply["result"]["status"], "installed", "{reply}");
@@ -112,7 +149,7 @@ fn the_sealed_form_needs_no_vault_and_writes_no_key() {
 fn the_switch_removes_the_key_file_and_names_its_identity() {
     let (root, data, locks) = dirs();
     let home = root.path().join("radicle");
-    let mut core = unlocked(&data, &locks);
+    let mut core = unlocked(&data, &locks, &home);
     legacy_write(&mut core, 3, &home);
     assert_eq!(core.call(4, "vault.lock", json!({}))["result"], json!({}));
     let reply = core.call(5, "nodes.write_identity", sealed("switch", &home, None));
@@ -132,10 +169,10 @@ fn the_switch_removes_the_key_file_and_names_its_identity() {
 #[test]
 fn the_switch_reads_either_file_and_keeps_the_markers_names() {
     let (root, data, locks) = dirs();
-    let mut core = unlocked(&data, &locks);
 
     // A private key file that names no key; the .pub file names it.
     let home = root.path().join("pub-only");
+    let mut core = unlocked(&data, &locks, &home);
     legacy_write(&mut core, 3, &home);
     std::fs::write(home.join("keys/radicle"), b"not a key file").unwrap();
     std::fs::create_dir_all(home.join("node")).unwrap();
@@ -149,8 +186,11 @@ fn the_switch_reads_either_file_and_keeps_the_markers_names() {
         Some(json!({ "node_ids": ["z6MkEarlier", RADICLE_NID] }))
     );
 
+    drop(core);
+
     // Neither file names a key: refused, nothing touched.
     let home = root.path().join("unreadable");
+    let mut core = unlocked(&data, &locks, &home);
     legacy_write(&mut core, 5, &home);
     std::fs::write(home.join("keys/radicle"), b"not a key file").unwrap();
     std::fs::write(home.join("keys/radicle.pub"), b"not a key line").unwrap();
@@ -161,8 +201,11 @@ fn the_switch_reads_either_file_and_keeps_the_markers_names() {
     let status = core.call_shell(7, "nodes.op_status", json!({ "op_id": "bad" }));
     assert_eq!(status["result"]["status"], "not_committed");
 
+    drop(core);
+
     // A marker the core can't read: refused, nothing touched.
     let home = root.path().join("bad-marker");
+    let mut core = unlocked(&data, &locks, &home);
     legacy_write(&mut core, 8, &home);
     std::fs::create_dir_all(home.join("node")).unwrap();
     std::fs::write(home.join("node/dirty"), b"{not json").unwrap();
@@ -178,7 +221,7 @@ fn the_switch_reads_either_file_and_keeps_the_markers_names() {
 fn wipe_removes_the_state_and_follows_no_symlink() {
     let (root, data, locks) = dirs();
     let home = root.path().join("radicle");
-    let mut core = unlocked(&data, &locks);
+    let mut core = unlocked(&data, &locks, &home);
     legacy_write(&mut core, 3, &home);
     let outside = root.path().join("outside");
     std::fs::create_dir_all(&outside).unwrap();
@@ -206,7 +249,7 @@ fn wipe_removes_the_state_and_follows_no_symlink() {
 fn the_selector_is_checked() {
     let (root, data, locks) = dirs();
     let home = root.path().join("radicle");
-    let mut core = unlocked(&data, &locks);
+    let mut core = unlocked(&data, &locks, &home);
     for (i, params) in [
         json!({ "op_id": "a", "node": "radicle", "home": home, "alias": "x", "custody": "file" }),
         json!({ "op_id": "b", "node": "radicle", "home": home, "alias": "x", "wipe": true }),
@@ -227,7 +270,7 @@ fn the_selector_is_checked() {
 fn a_held_gate_refuses_the_write_and_touches_nothing() {
     let (root, data, locks) = dirs();
     let home = root.path().join("radicle");
-    let mut core = unlocked(&data, &locks);
+    let mut core = unlocked(&data, &locks, &home);
     legacy_write(&mut core, 3, &home);
     let before = walk_contents(&home);
     let gate =
@@ -296,15 +339,12 @@ fn interrupted_switch(identity: &Path, home: &Path, op_id: &str, stage: u8) {
 #[test]
 fn recovery_finishes_an_interrupted_switch_at_every_step() {
     let (root, data, locks) = dirs();
-    let mut writer = unlocked(&data, &locks);
     let homes: Vec<PathBuf> = (0..3)
         .map(|stage| root.path().join(format!("radicle-{stage}")))
         .collect();
-    for (stage, home) in homes.iter().enumerate() {
-        legacy_write(&mut writer, 10 + stage as u64, home);
+    for home in &homes {
+        legacy_home(&data, &locks, home);
     }
-    writer.close_stdin();
-    assert_eq!(writer.exit_code(Duration::from_secs(5)), 0);
     for (stage, home) in homes.iter().enumerate() {
         let op_id = format!("cut-{stage}");
         interrupted_switch(&data, home, &op_id, stage as u8);
@@ -336,10 +376,7 @@ fn recovery_finishes_an_interrupted_switch_at_every_step() {
 fn recovery_waits_for_the_homes_gate() {
     let (root, data, locks) = dirs();
     let home = root.path().join("radicle");
-    let mut writer = unlocked(&data, &locks);
-    legacy_write(&mut writer, 3, &home);
-    writer.close_stdin();
-    assert_eq!(writer.exit_code(Duration::from_secs(5)), 0);
+    legacy_home(&data, &locks, &home);
     interrupted_switch(&data, &home, "waiting", 0);
     let gate =
         fc_service::gate::acquire(&home, &locks, "radicle", fc_service::gate::CONTENTION_RETRY)
@@ -436,12 +473,12 @@ fn removals_and_wipes_a_writer_never_produces_are_set_aside() {
 #[test]
 fn a_symlinked_keys_directory_cannot_reach_outside_the_home() {
     let (root, data, locks) = dirs();
-    let mut core = unlocked(&data, &locks);
     let other = root.path().join("other-home");
-    legacy_write(&mut core, 3, &other);
+    legacy_home(&data, &locks, &other);
     let home = root.path().join("radicle");
     std::fs::create_dir_all(&home).unwrap();
     std::os::unix::fs::symlink(other.join("keys"), home.join("keys")).unwrap();
+    let mut core = unlocked(&data, &locks, &home);
     let before = (walk_contents(&other), walk_contents(&home));
     let reply = core.call(4, "nodes.write_identity", sealed("keys-link", &home, None));
     assert!(reply["error"].is_object(), "{reply}");
@@ -456,8 +493,8 @@ fn a_symlinked_keys_directory_cannot_reach_outside_the_home() {
 #[test]
 fn a_symlinked_node_directory_cannot_write_outside_the_home() {
     let (root, data, locks) = dirs();
-    let mut core = unlocked(&data, &locks);
     let home = root.path().join("radicle");
+    let mut core = unlocked(&data, &locks, &home);
     legacy_write(&mut core, 3, &home);
     let outside = root.path().join("outside");
     std::fs::create_dir_all(&outside).unwrap();
@@ -483,11 +520,11 @@ fn a_symlinked_node_directory_cannot_write_outside_the_home() {
 #[test]
 fn the_home_is_its_canonical_path_and_a_retargeted_root_is_refused() {
     let (root, data, locks) = dirs();
-    let mut core = unlocked(&data, &locks);
     let real = root.path().join("real-home");
-    legacy_write(&mut core, 3, &real);
+    legacy_home(&data, &locks, &real);
     let alias = root.path().join("alias");
     std::os::unix::fs::symlink(&real, &alias).unwrap();
+    let mut core = unlocked(&data, &locks, &alias);
     let reply = core.call(4, "nodes.write_identity", sealed("via-alias", &alias, None));
     assert_eq!(reply["result"]["status"], "installed", "{reply}");
     keys_gone(&real);
@@ -497,10 +534,10 @@ fn the_home_is_its_canonical_path_and_a_retargeted_root_is_refused() {
     // symlink to another home: recovery leaves both alone.
     let home = root.path().join("radicle");
     let victim = root.path().join("victim");
-    legacy_write(&mut core, 10, &home);
-    legacy_write(&mut core, 11, &victim);
     core.close_stdin();
     assert_eq!(core.exit_code(Duration::from_secs(5)), 0);
+    legacy_home(&data, &locks, &home);
+    legacy_home(&data, &locks, &victim);
     interrupted_switch(&data, &home, "retargeted", 0);
     std::fs::rename(&home, root.path().join("moved-away")).unwrap();
     std::os::unix::fs::symlink(&victim, &home).unwrap();
@@ -528,11 +565,8 @@ fn a_home_replaced_during_its_write_is_written_where_it_was_staged() {
     let home = root.path().join("home");
     let moved = root.path().join("moved");
     let other = root.path().join("other");
-    let mut core = unlocked(&data, &locks);
-    legacy_write(&mut core, 3, &home);
-    legacy_write(&mut core, 4, &other);
-    core.close_stdin();
-    assert_eq!(core.exit_code(Duration::from_secs(5)), 0);
+    legacy_home(&data, &locks, &home);
+    legacy_home(&data, &locks, &other);
     let _other_gate = fc_service::gate::acquire(
         &other,
         &locks,
@@ -543,11 +577,10 @@ fn a_home_replaced_during_its_write_is_written_where_it_was_staged() {
     let before = walk_contents(&other);
 
     let (claimed, release) = (root.path().join("claimed"), root.path().join("release"));
-    let mut core = spawn_env(
-        "serve",
+    let mut core = spawn_for(
         &data,
         &locks,
-        &[],
+        &home,
         &[
             (
                 "FREEDOM_CORED_TEST_COMMIT_MARKER",
@@ -591,14 +624,13 @@ fn a_cores_recovery_never_removes_another_cores_staged_files() {
     let home = root.path().join("home");
     std::fs::create_dir_all(&home).unwrap();
     std::fs::write(home.join("config.json"), b"{\"old\":true}").unwrap();
-    let mut a = spawn("serve", &data_a, &locks, &[]);
+    let mut a = spawn_for(&data_a, &locks, &home, &[]);
     a.hello();
     let (claimed, release) = (root.path().join("claimed"), root.path().join("release"));
-    let mut b = spawn_env(
-        "serve",
+    let mut b = spawn_for(
         &data_b,
         &locks,
-        &[],
+        &home,
         &[
             (
                 "FREEDOM_CORED_TEST_COMMIT_MARKER",
@@ -643,8 +675,8 @@ fn a_cores_recovery_never_removes_another_cores_staged_files() {
 #[test]
 fn the_switch_needs_only_the_private_files_public_prefix() {
     let (root, data, locks) = dirs();
-    let mut core = unlocked(&data, &locks);
     let home = root.path().join("radicle");
+    let mut core = unlocked(&data, &locks, &home);
     legacy_write(&mut core, 3, &home);
     std::fs::remove_file(home.join("keys/radicle.pub")).unwrap();
     let key = std::fs::read_to_string(home.join("keys/radicle")).unwrap();
@@ -663,15 +695,12 @@ fn the_switch_needs_only_the_private_files_public_prefix() {
 #[test]
 fn a_journal_with_unknown_members_is_not_a_writer_shape() {
     let (root, data, locks) = dirs();
-    let mut writer = unlocked(&data, &locks);
     let homes: Vec<PathBuf> = (0..2)
         .map(|i| root.path().join(format!("radicle-{i}")))
         .collect();
-    for (i, home) in homes.iter().enumerate() {
-        legacy_write(&mut writer, 10 + i as u64, home);
+    for home in &homes {
+        legacy_home(&data, &locks, home);
     }
-    writer.close_stdin();
-    assert_eq!(writer.exit_code(Duration::from_secs(5)), 0);
     for (i, home) in homes.iter().enumerate() {
         interrupted_switch(&data, home, &format!("extra-{i}"), 0);
         let path = data.join("node-identity-journal.json");
@@ -745,69 +774,56 @@ fn radicle_gate_files(locks: &Path) -> usize {
 
 /// Design 0017, C3: with `--node-root radicle=`, `serve` makes the home
 /// and opens its gate file at its start, before any write, and every write
-/// locks that file. Its replies equal today's, by path, in each state: a
-/// write while free is installed; one while another process (the Radicle
-/// service) holds the home's gate gives up after 0001's 5 s with
-/// `lock_held` and touches nothing; released, the next is installed. With
-/// the gate file, all of it holds with the lock directory gone from its
-/// path after the start, which no gate by path survives.
+/// locks that file: a write while free is installed; one while another
+/// process (the Radicle service) holds the home's gate gives up after
+/// 0001's 5 s with `lock_held` and touches nothing; released, the next is
+/// installed. All of it holds with the lock directory gone from its path
+/// after the start, which no gate by path survives. Without the argument,
+/// where confinement holds files (Linux, macOS), the home isn't granted
+/// and the lock directory can't be reached: the write fails as storage,
+/// and nothing is made.
 #[cfg(unix)]
 #[test]
 fn a_node_roots_writes_lock_its_gate_file_opened_at_start() {
-    let mut replies = Vec::new();
-    for ahead in [false, true] {
-        let (root, data, locks) = dirs();
-        let home = root.path().join("profile").join("radicle");
-        let argument = format!("radicle={}", home.display());
-        let extra: &[&str] = if ahead {
-            &["--node-root", &argument]
-        } else {
-            &[]
-        };
-        // The sealed form needs no vault.
-        let mut core = spawn("serve", &data, &locks, extra);
-        core.hello();
-        // Today the home and its gate file wait for the first write.
-        assert_eq!(home.is_dir(), ahead, "ahead: {ahead}");
-        assert_eq!(radicle_gate_files(&locks), usize::from(ahead));
-        let away = root.path().join("locks-away");
-        let gates = if ahead {
-            assert_eq!(std::fs::read_dir(&home).unwrap().count(), 0);
-            replace_lock_dir(&locks, &away);
-            away.clone()
-        } else {
-            locks.clone()
-        };
+    let (root, data, locks) = dirs();
+    let home = root.path().join("profile").join("radicle");
+    // The sealed form needs no vault.
+    let mut core = spawn_for(&data, &locks, &home, &[]);
+    core.hello();
+    assert!(home.is_dir());
+    assert_eq!(std::fs::read_dir(&home).unwrap().count(), 0);
+    assert_eq!(radicle_gate_files(&locks), 1);
+    let away = root.path().join("locks-away");
+    replace_lock_dir(&locks, &away);
 
-        let mut seen = Vec::new();
-        let reply = core.call(3, "nodes.write_identity", sealed("free", &home, None));
-        seen.push(reply["result"]["status"].clone());
-        let before = walk_contents(&home);
-        let service =
-            fc_service::gate::acquire(&home, &gates, "radicle", fc_service::gate::CONTENTION_RETRY)
-                .unwrap();
-        let started = Instant::now();
-        let reply = core.call(4, "nodes.write_identity", sealed("held", &home, None));
-        seen.push(reply["error"]["code"].clone());
-        assert!(
-            started.elapsed() >= Duration::from_secs(5),
-            "ahead: {ahead}"
-        );
-        assert_eq!(walk_contents(&home), before, "ahead: {ahead}");
-        drop(service);
-        let reply = core.call(5, "nodes.write_identity", sealed("released", &home, None));
-        seen.push(reply["result"]["status"].clone());
-        keys_gone(&home);
-        assert_eq!(alias(&home), "FreedomBrowser");
-        core.close_stdin();
-        assert_eq!(core.exit_code(Duration::from_secs(5)), 0);
-        replies.push(seen);
-    }
-    assert_eq!(
-        replies[0],
-        [json!("installed"), json!("lock_held"), json!("installed")]
-    );
-    assert_eq!(replies[1], replies[0]);
+    let reply = core.call(3, "nodes.write_identity", sealed("free", &home, None));
+    assert_eq!(reply["result"]["status"], "installed", "{reply}");
+    let before = walk_contents(&home);
+    let service =
+        fc_service::gate::acquire(&home, &away, "radicle", fc_service::gate::CONTENTION_RETRY)
+            .unwrap();
+    let started = Instant::now();
+    let reply = core.call(4, "nodes.write_identity", sealed("held", &home, None));
+    assert_eq!(reply["error"]["code"], "lock_held", "{reply}");
+    assert!(started.elapsed() >= Duration::from_secs(5));
+    assert_eq!(walk_contents(&home), before);
+    drop(service);
+    let reply = core.call(5, "nodes.write_identity", sealed("released", &home, None));
+    assert_eq!(reply["result"]["status"], "installed", "{reply}");
+    keys_gone(&home);
+    assert_eq!(alias(&home), "FreedomBrowser");
+    core.close_stdin();
+    assert_eq!(core.exit_code(Duration::from_secs(5)), 0);
+
+    // No argument: nothing granted for the home, and no gate by its path.
+    let (root, data, locks) = dirs();
+    let home = root.path().join("profile").join("radicle");
+    let mut core = spawn("serve", &data, &locks, &[]);
+    core.hello();
+    let reply = core.call(3, "nodes.write_identity", sealed("ungranted", &home, None));
+    assert_eq!(reply["error"]["code"], "storage", "{reply}");
+    assert!(!home.exists());
+    assert_eq!(radicle_gate_files(&locks), 0);
 }
 
 /// Design 0017, C6 and C3: a committed Radicle journal left by an earlier
@@ -822,10 +838,7 @@ fn startup_recovery_takes_the_homes_gate_through_its_file() {
     let home = root.path().join("radicle");
     // The earlier run, with a lock directory of its own: this start's
     // gate files are all made by `serve` itself.
-    let mut writer = unlocked(&data, &root.path().join("earlier-locks"));
-    legacy_write(&mut writer, 3, &home);
-    writer.close_stdin();
-    assert_eq!(writer.exit_code(Duration::from_secs(5)), 0);
+    legacy_home(&data, &root.path().join("earlier-locks"), &home);
     interrupted_switch(&data, &home, "planned", 0);
 
     let mut core = spawn_env(

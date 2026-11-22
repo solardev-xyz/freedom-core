@@ -252,6 +252,14 @@ fn grants(policy: &Policy) -> Result<Grants, Invalid> {
             ))
         })?;
         grants.read_write.push(real);
+        // Seatbelt asks for metadata on each link the service resolves
+        // when it opens the path it was given, a read-write one included
+        // (a Radicle home named through a symlink, say).
+        for link in crossed_links(dir) {
+            if !grants.links.contains(&link) {
+                grants.links.push(link);
+            }
+        }
     }
     let system = super::system_read_only(policy.resolver);
     for path in policy.read_only.iter().chain(&system) {
@@ -492,8 +500,13 @@ mod tests {
     #[test]
     fn grants_resolve_to_where_seatbelt_matches() {
         let dir = tempfile::tempdir().unwrap();
+        // A read-write grant named through a symlink, as a Radicle home can be.
+        let real = dir.path().join("real");
+        std::fs::create_dir(&real).unwrap();
+        let alias = dir.path().join("alias");
+        std::os::unix::fs::symlink(&real, &alias).unwrap();
         let policy = Policy {
-            read_write: vec![dir.path().to_path_buf()],
+            read_write: vec![alias.clone()],
             read_only: vec![PathBuf::from("/etc/hosts"), PathBuf::from("/nonexistent")],
             read_only_dirs: Vec::new(),
             refer: false,
@@ -507,15 +520,35 @@ mod tests {
             modes: false,
         };
         let grants = grants(&policy).unwrap();
-        // macOS's temporary directories live under /private.
+        // The read-write grant is the link's canonical target; macOS's
+        // temporary directories live under /private.
+        assert_eq!(grants.read_write, [std::fs::canonicalize(&real).unwrap()]);
         assert!(grants.read_write[0].starts_with("/private"));
         assert_eq!(
             grants.read_only_files,
             [PathBuf::from("/private/etc/hosts")]
         );
         assert!(grants.read_only_dirs.is_empty());
-        // /etc is a link: the path the service opens crosses it.
-        assert_eq!(grants.links, [PathBuf::from("/etc")]);
+        // Every link the read-write path crosses (the alias itself, and /var
+        // on the way to a temporary directory) has its metadata granted, and
+        // so has /etc, which the read-only path crosses.
+        let crossed = crossed_links(&alias);
+        assert!(
+            crossed.iter().any(|link| link.ends_with("alias")),
+            "{crossed:?}"
+        );
+        for link in &crossed {
+            assert!(
+                grants.links.contains(link),
+                "{link:?} in {:?}",
+                grants.links
+            );
+        }
+        assert!(
+            grants.links.contains(&PathBuf::from("/etc")),
+            "{:?}",
+            grants.links
+        );
     }
 
     #[test]

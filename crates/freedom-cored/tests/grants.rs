@@ -175,8 +175,8 @@ fn not_covered(reason: &str) -> Value {
     json!({ "covered": false, "reason": reason })
 }
 
-fn hello_reply(root: &Path, params: Value) -> (Value, i32) {
-    let mut core = spawn("serve", &root.join("identity"), &root.join("locks"), &[]);
+fn hello_reply(root: &Path, extra: &[&str], params: Value) -> (Value, i32) {
+    let mut core = spawn("serve", &root.join("identity"), &root.join("locks"), extra);
     let reply = core.call_shell(1, "core.hello", params);
     let code = if reply["error"].is_object() {
         core.exit_code(Duration::from_secs(5))
@@ -188,7 +188,8 @@ fn hello_reply(root: &Path, params: Value) -> (Value, i32) {
 
 /// The hello needs `grant_root`, an absolute path, and names only known
 /// stores in `grant_moved`; otherwise `invalid_argument`, and the core exits.
-/// A root that doesn't exist yet is fine: its files are missing.
+/// A root that doesn't exist yet is fine: `serve` makes it, empty, before it
+/// confines itself (design 0017, C2), and its files are missing.
 #[test]
 fn the_hello_names_the_grant_root() {
     let root = tempfile::tempdir().unwrap();
@@ -209,7 +210,7 @@ fn the_hello_names_the_grant_root() {
         with(json!({ "grant_root": 7 })),
         with(json!({ "grant_root": absent, "grant_moved": ["dapp", "cookies"] })),
     ] {
-        let (reply, code) = hello_reply(root.path(), params.clone());
+        let (reply, code) = hello_reply(root.path(), &[], params.clone());
         assert_eq!(
             reply["error"]["code"], "invalid_argument",
             "{params}: {reply}"
@@ -218,10 +219,11 @@ fn the_hello_names_the_grant_root() {
     }
     let (reply, _) = hello_reply(
         root.path(),
+        &["--grant-root", absent.to_str().unwrap()],
         with(json!({ "grant_root": absent, "grant_moved": ["dapp", "swarm", "radicle", "x402"] })),
     );
     assert_eq!(reply["result"]["protocol"], 2, "{reply}");
-    assert!(!absent.exists());
+    assert_eq!(std::fs::read_dir(&absent).unwrap().count(), 0);
 }
 
 /// Before a file moves, every write method answers `not_moved` with its
