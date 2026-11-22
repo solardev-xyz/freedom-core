@@ -2176,6 +2176,43 @@ fn copied_names(profile: &Path) -> Vec<String> {
         .collect()
 }
 
+/// A node that takes its lock while the move runs (an antd paused between
+/// its spawn and taking its lock, so the preconditions found it free):
+/// found at its new place before the marker, the move rolls back, which
+/// puts `ant-data/` back where that antd opened it.
+#[test]
+fn a_node_taking_its_lock_during_the_move_rolls_it_back() {
+    let d = dirs();
+    seeded(&d.profile);
+    let (paused, release) = (d.base.join("paused"), d.base.join("release"));
+    let child = start_paused(
+        &d.profile,
+        &d.locks,
+        "after-renames",
+        &paused,
+        &release,
+        &[],
+    );
+    wait_for(&paused);
+    let moved = d.profile.join("freedom").join("ant-data").join("antd.lock");
+    let antd = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&moved)
+        .unwrap();
+    antd.lock().unwrap();
+    std::fs::write(&release, "").unwrap();
+    let out = child.wait_with_output().unwrap();
+    assert_eq!(said(&out), "rolled_back", "{out:?}");
+    assert!(stderr(&out).contains("a node took its lock"), "{out:?}");
+    assert_old_layout(&d.profile);
+    assert!(d.profile.join("ant-data").join("antd.lock").is_file());
+    antd.unlock().unwrap();
+    drop(antd);
+    assert_eq!(said(&start(&d)), "migrated");
+    assert_new_layout(&d.profile);
+}
+
 /// A starting run in the background, paused at `step` until `release`.
 fn start_paused(
     profile: &Path,

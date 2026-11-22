@@ -574,6 +574,37 @@ const NODE_LOCKS: &[NodeLock] = &[
     },
 ];
 
+/// After the renames and before the marker: a node lock under a moved
+/// entry, at its new place in `freedom/`, that is now held or can't be
+/// tried. A node that started while the move ran (an antd paused between
+/// its spawn and taking its lock, which the precondition's try found free)
+/// holds its lock in the directory that moved, so the move rolls back
+/// before its marker, which puts the entry back where that node opened it.
+/// The same lookup as the preconditions': beneath the root, following no
+/// link and crossing no mount. An entry that the preconditions left to main
+/// (`linked_left_to_main`, not a real directory) is left again.
+pub fn node_started(root: &Dir, canonical: &Path, moved: &[&str]) -> io::Result<Option<String>> {
+    let Some(freedom) = root.child(OsStr::new(FREEDOM_DIR), false)? else {
+        return Ok(None);
+    };
+    for lock in NODE_LOCKS {
+        if !moved.contains(&lock.entry) {
+            continue;
+        }
+        if lock.linked_left_to_main && freedom.kind(OsStr::new(lock.entry))? != Kind::Dir {
+            continue;
+        }
+        let mut parts = vec![FREEDOM_DIR, lock.entry];
+        parts.extend(lock.path);
+        match try_lock(root, canonical, &parts, lock.probe) {
+            Tried::Free => {}
+            Tried::Held => return Ok(Some(format!("{} held", relative(lock)))),
+            Tried::Unknown(why) => return Ok(Some(format!("{}: {why}", relative(lock)))),
+        }
+    }
+    Ok(None)
+}
+
 /// A lock's path under the root, for the log.
 fn relative(lock: &NodeLock) -> String {
     let mut parts = vec![lock.entry];
