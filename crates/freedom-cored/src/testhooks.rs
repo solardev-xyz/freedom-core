@@ -211,8 +211,9 @@
 //!   read-write grant (`profile/confine.rs`), so the hook works confined;
 //!   nothing else is.
 //! - `FREEDOM_CORED_TEST_PROFILE_DELETE_CRASH` names a step of `profile
-//!   delete` (`before-record`, `after-record`, `after-catalog`,
-//!   `mid-removal`, `before-result`): there the process exits at once with
+//!   delete` (`before-keep`, confined, before its lock is kept;
+//!   `before-record`, `after-record`, `after-catalog`, `mid-removal`,
+//!   `before-result`): there the process exits at once with
 //!   99, as if killed, its locks and files left as they are.
 //! - `FREEDOM_CORED_TEST_PROFILE_DELETE_PAUSE` (`<step>=<marker>=<release>`):
 //!   at that step `profile delete` creates the file `<marker>`, then waits,
@@ -221,8 +222,20 @@
 //!   `FREEDOM_CORED_TEST_PROFILE_HOLD`'s, its files' directories are in the
 //!   delete's grant.
 //! - `FREEDOM_CORED_TEST_PROFILE_MIGRATE_CRASH` names a step of `profile
-//!   migrate --finish-only` (`after-exclusion`, `mid-recovery`,
-//!   `before-journal-removed`): there the process exits at once with 99.
+//!   migrate`: `before-keep` (confined, before its lock is kept), its
+//!   recovery's (`after-exclusion`, `mid-recovery`,
+//!   `before-journal-removed`), and a starting move's (`after-exclusion`,
+//!   `after-freedom-dir`, `after-journal`, `mid-move` after each entry's
+//!   rename, `after-renames`, `after-marker`, `after-placeholder`,
+//!   `before-journal-removed`), and on Windows after a refused try of a
+//!   rename (`rename-retry`) or a rollback's rename back
+//!   (`rename-back-retry`): there the process exits at once with 99.
+//! - `FREEDOM_CORED_TEST_PROFILE_MIGRATE_PAUSE` (`<step>=<marker>=<release>`):
+//!   at that step (one of the crash hook's) `profile migrate` creates the
+//!   file `<marker>`, then waits, its locks and gates held and its lock
+//!   refreshed, until the file `<release>` exists (at most 120 s). Like
+//!   `FREEDOM_CORED_TEST_PROFILE_HOLD`'s, its files' directories are in the
+//!   run's grant.
 //! - `FREEDOM_CORED_TEST_PROFILE_CONFINED` lists paths (the OS's path-list
 //!   separator): right after a profile subcommand confines itself, it reads
 //!   each (a file's bytes, a directory's entries) and logs one line on
@@ -783,10 +796,19 @@ pub fn profile_migrate_step(step: &str) {
     if std::env::var("FREEDOM_CORED_TEST_PROFILE_MIGRATE_CRASH").is_ok_and(|s| s == step) {
         std::process::exit(99);
     }
+    if let Ok(spec) = std::env::var("FREEDOM_CORED_TEST_PROFILE_MIGRATE_PAUSE")
+        && let Some((at, files)) = spec.split_once('=')
+        && at == step
+        && let Some((marker, release)) = files.split_once('=')
+    {
+        let _ = std::fs::write(marker, b"paused");
+        hold(std::ffi::OsStr::new(release), || false);
+    }
 }
 
-/// The directories `FREEDOM_CORED_TEST_PROFILE_HOLD`'s and
-/// `FREEDOM_CORED_TEST_PROFILE_DELETE_PAUSE`'s files live in, which a
+/// The directories `FREEDOM_CORED_TEST_PROFILE_HOLD`'s,
+/// `FREEDOM_CORED_TEST_PROFILE_DELETE_PAUSE`'s and
+/// `FREEDOM_CORED_TEST_PROFILE_MIGRATE_PAUSE`'s files live in, which a
 /// confined subcommand's grant takes so the hooks still work.
 #[cfg(feature = "testhooks")]
 pub fn profile_hook_dirs() -> Vec<std::path::PathBuf> {
@@ -796,11 +818,16 @@ pub fn profile_hook_dirs() -> Vec<std::path::PathBuf> {
     {
         files.extend([marker.to_owned(), release.to_owned()]);
     }
-    if let Ok(spec) = std::env::var("FREEDOM_CORED_TEST_PROFILE_DELETE_PAUSE")
-        && let Some((_, rest)) = spec.split_once('=')
-        && let Some((marker, release)) = rest.split_once('=')
-    {
-        files.extend([marker.to_owned(), release.to_owned()]);
+    for pause in [
+        "FREEDOM_CORED_TEST_PROFILE_DELETE_PAUSE",
+        "FREEDOM_CORED_TEST_PROFILE_MIGRATE_PAUSE",
+    ] {
+        if let Ok(spec) = std::env::var(pause)
+            && let Some((_, rest)) = spec.split_once('=')
+            && let Some((marker, release)) = rest.split_once('=')
+        {
+            files.extend([marker.to_owned(), release.to_owned()]);
+        }
     }
     files
         .iter()

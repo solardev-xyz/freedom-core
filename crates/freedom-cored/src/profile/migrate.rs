@@ -1,14 +1,13 @@
-//! `profile migrate --finish-only` (design 0013, 5.4b, "The move" and
-//! "Readers, and the downgrade"; step PRF-3): the move's recovery, which
-//! starts no move. Main runs it when `profile open` reports `layout:
-//! "pending"`, before `hold-profile` and before it takes its own lock.
+//! `profile migrate` (design 0013, 5.4b, "The move" and "Readers, and the
+//! downgrade"; steps PRF-3 and PRF-9b): the move of a profile's Freedom
+//! data into `<profile>/freedom/`, and its recovery. Main runs it before
+//! `hold-profile` and before it takes its own lock: with `--finish-only`
+//! when `profile open` reports `layout: "pending"`, and without it when
+//! `profile open` reports `"root"` and the profile is idle.
 //!
 //! ```text
-//! freedom-cored profile migrate --profile-dir <dir> --lock-dir <dir> [--dev] --finish-only
+//! freedom-cored profile migrate --profile-dir <dir> --lock-dir <dir> [--dev] [--finish-only]
 //! ```
-//!
-//! Starting a move is PRF-9's: without `--finish-only` the arguments are
-//! refused (64).
 //!
 //! 1. **Where it may act:** by a delete's rules (`fc_profile::delete`'s
 //!    `overlaps`, `fold` and `home_slot`, against every catalog at or above
@@ -18,9 +17,8 @@
 //!    directory; the packaged default profile's, the app root itself, holds
 //!    no other record among its entries but the shared ones; and its record
 //!    shares its Radicle slot with no other. Refused with `overlap` (74)
-//!    before anything is taken. Below it, it acts on the
-//!    journal's names alone, each one of `fc_profile::layout`'s list, which
-//!    holds no shared entry of the app root.
+//!    before anything is taken. Below it, it acts on `fc_profile::layout`'s
+//!    list alone, which holds no shared entry of the app root.
 //! 2. **The move's own exclusion,** for the whole run, each held by another
 //!    process ending it with `busy` (75) and nothing changed:
 //!    - the profile gate first, so a new build sees the profile open;
@@ -37,13 +35,50 @@
 //!
 //!    Each gate's lock is tried for a second: a probe (`profile status`)
 //!    holds one for a moment, and can't make the run busy.
-//! 3. **Confinement** (`confine.rs`): read-write on the profile's
+//! 3. **A starting run's preconditions** (without `--finish-only`;
+//!    `preconditions.rs`), before confinement: a journal or the marker in
+//!    `freedom/` is settled below as `--finish-only` settles it (the
+//!    marker alone: `nothing`). Otherwise `fc_profile::layout::plan_start`
+//!    decides from what the core observed (a node identity journal in
+//!    `identity/`, a `freedom/` the move didn't make, a mount point among
+//!    the entries), then a link among the entries whose target is
+//!    relative or inside the profile, and then the nodes' OS locks are
+//!    tried (arti's, Myotis's). Any of them ends the run with `deferred`
+//!    (0), nothing changed. A `freedom` that is anything but a real
+//!    directory defers before the new paths' gates are named. Then the
+//!    lock is refreshed once from this thread (`Lock::touch`), so the
+//!    refresher's first period starts fresh however long the checks took;
+//!    taken over meanwhile, `lock_lost` with nothing changed.
+//! 4. **Confinement** (`confine.rs`): read-write on the profile's
 //!    directory, renames across directories, the gates' descriptors; no
 //!    network, no process. Then the lock's refresher starts.
-//! 4. **The journal,** `freedom/.move.json` (`fc_profile::layout`): none is
-//!    `nothing`. One that can't be read or is out of form is `corrupt`
-//!    (74): the core doesn't guess which entries moved.
-//! 5. **Every entry's state first,** then the changes, so an entry that
+//! 5. **A starting move,** on the entries present, in the list's order:
+//!    - `freedom/` made; the journal (`freedom/.move.json`, version 2,
+//!      `fc_profile::layout::Journal`) written to a temporary name, synced
+//!      and renamed into place, the directory flushed;
+//!    - each entry renamed into `freedom/` (a symlink as the link). On
+//!      Windows a rename refused while another handle holds the entry is
+//!      tried again, 30 times, 100 ms apart (MD3);
+//!    - both directories flushed, then the marker (`freedom/layout.json`)
+//!      written and flushed;
+//!    - cleanup: no entry is copied across devices in this build (PRF-9c
+//!      copies). An entry on another device than `freedom/` (`EXDEV`) is
+//!      rolled back as any failure is, with its own log line;
+//!    - the placeholder at the root's `identity`, where nothing is
+//!      (`needs_placeholder`), and the root flushed;
+//!    - the journal removed and `freedom/` flushed: `migrated`.
+//!
+//!    A new profile, with none of the entries, takes the empty move (MD5):
+//!    `freedom/`, the marker and the placeholder, and no journal. A failure
+//!    is settled at once as the next run would settle it: before the
+//!    marker, rolled back (`rolled_back`); after it, rolled forward
+//!    (`migrated`).
+//! 6. **Recovery** (`--finish-only`, and a starting run that finds a
+//!    journal): the journal (`fc_profile::layout`) is read. None is
+//!    `nothing` (with the marker, the placeholder written where nothing is,
+//!    MD9). One that can't be read or is out of form is `corrupt` (74):
+//!    the core doesn't guess which entries moved.
+//! 7. **Every entry's state first,** then the changes, so an entry that
 //!    can't be settled without a guess changes nothing (`corrupt`):
 //!    - **before the marker** (`freedom/layout.json`), each entry is put
 //!      back, in reverse order (`fc_profile::layout::rollback`): a
@@ -66,14 +101,13 @@
 //!      `corrupt`, with the journal kept: the journal lists the entries
 //!      present, and no step of the move removes every copy of one.
 //!
-//!    Before each change the profile lock must still be this run's: lost
-//!    (the run was frozen past the stale time and another build took it
-//!    over), it changes nothing more, keeps the journal, and ends with
-//!    `lock_lost` (74).
+//! Before each change the profile lock must still be this run's: lost (the
+//! run was frozen past the stale time and another build took it over), it
+//! changes nothing more, keeps the journal, and ends with `lock_lost` (74).
 //!
-//! **stdout:** one word, `migrated`, `nothing`, `rolled_back`, `busy`,
-//! `lock_lost` or `corrupt`. Any other failure is a storage one, as the
-//! other subcommands': `{ "error": <kind> }`, exit 74 (an unqualified
+//! **stdout:** one word, `migrated`, `nothing`, `rolled_back`, `deferred`,
+//! `busy`, `lock_lost` or `corrupt`. Any other failure is a storage one, as
+//! the other subcommands': `{ "error": <kind> }`, exit 74 (an unqualified
 //! filesystem, a directory that isn't the user's, `overlap`, an I/O error
 //! with the journal kept).
 
@@ -89,6 +123,7 @@ use fc_store::fsx::Regular;
 
 use super::confine::{self, Grant};
 use super::lock::{Lock, LockError, Timing};
+use super::preconditions::{self, Check};
 use super::{Flags, storage};
 use crate::exit::Exit;
 use crate::log;
@@ -102,12 +137,21 @@ pub fn run(args: impl Iterator<Item = std::ffi::OsString>) -> Result<Exit, ()> {
         args,
         &["--profile-dir", "--lock-dir", "--dev", "--finish-only"],
     )?;
-    if !flags.has("--finish-only") {
-        return Err(());
-    }
     let profile_dir = PathBuf::from(flags.path("--profile-dir")?);
     let lock_dir = PathBuf::from(flags.path("--lock-dir")?);
-    Ok(migrate(&profile_dir, &lock_dir, flags.has("--dev")))
+    let mode = if flags.has("--finish-only") {
+        Mode::FinishOnly
+    } else {
+        Mode::Start
+    };
+    Ok(migrate(&profile_dir, &lock_dir, flags.has("--dev"), mode))
+}
+
+/// Whether a run may start the move, or only settles one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Mode {
+    FinishOnly,
+    Start,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -115,6 +159,7 @@ enum Outcome {
     Migrated,
     Nothing,
     RolledBack,
+    Deferred,
     Busy,
     LockLost,
     Corrupt,
@@ -126,6 +171,7 @@ impl Outcome {
             Outcome::Migrated => "migrated",
             Outcome::Nothing => "nothing",
             Outcome::RolledBack => "rolled_back",
+            Outcome::Deferred => "deferred",
             Outcome::Busy => "busy",
             Outcome::LockLost => "lock_lost",
             Outcome::Corrupt => "corrupt",
@@ -134,7 +180,9 @@ impl Outcome {
 
     fn exit(self) -> Exit {
         match self {
-            Outcome::Migrated | Outcome::Nothing | Outcome::RolledBack => Exit::Ok,
+            Outcome::Migrated | Outcome::Nothing | Outcome::RolledBack | Outcome::Deferred => {
+                Exit::Ok
+            }
             Outcome::Busy => Exit::LockHeld,
             Outcome::LockLost | Outcome::Corrupt => Exit::Storage,
         }
@@ -229,6 +277,7 @@ fn take_profile_lock(canonical: &Path, dev: bool) -> Result<Lock, Exit> {
             Err(say(Outcome::Busy))
         }
         Err(LockError::Io(e)) => Err(storage("io", &e.to_string())),
+        Err(LockError::Lost) => Err(say(lost())),
     }
 }
 
@@ -347,10 +396,11 @@ fn read_records(catalog: &Path) -> Option<Vec<fc_json::JsValue>> {
     Some(parsed.get("profiles")?.as_array()?.to_vec())
 }
 
-fn migrate(profile_dir: &Path, lock_dir: &Path, dev: bool) -> Exit {
+fn migrate(profile_dir: &Path, lock_dir: &Path, dev: bool, mode: Mode) -> Exit {
     let canonical = match std::fs::canonicalize(profile_dir) {
         Ok(path) => path,
-        // No profile directory holds no journal.
+        // No profile directory holds no journal, and nothing to move: its
+        // first open makes it, and moves it at the next start.
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return say(Outcome::Nothing),
         Err(e) => return storage("io", &e.kind().to_string()),
     };
@@ -372,6 +422,22 @@ fn migrate(profile_dir: &Path, lock_dir: &Path, dev: bool) -> Exit {
         Err(exit) => return exit,
     };
     let freedom = canonical.join(layout::FREEDOM_DIR);
+    // A starting run with anything but a real directory at `freedom` (a
+    // file, a symlink or a junction, looked at itself): the move doesn't
+    // start (`plan_start`'s `FreedomNotDir`), so it is deferred here, under
+    // the profile gate and lock, before a gate is named below it: none is
+    // taken, and no directory a link names is touched.
+    if mode == Mode::Start
+        && std::fs::symlink_metadata(&freedom)
+            .is_ok_and(|meta| !meta.is_dir() || preconditions::is_link(&meta))
+    {
+        return defer(
+            lock,
+            gates,
+            fc_profile::layout::Deferral::FreedomNotDir.word(),
+            "",
+        );
+    }
     for (which, dir) in [
         (Which::Core, canonical.join("identity")),
         (Which::Core, freedom.join("identity")),
@@ -386,23 +452,56 @@ fn migrate(profile_dir: &Path, lock_dir: &Path, dev: bool) -> Exit {
             Err(exit) => return exit,
         }
     }
+    let identity = gates.first().and_then(|gate| gate.identity);
+    // A starting run's preconditions, observed before confinement.
+    let start = match mode {
+        Mode::FinishOnly => None,
+        Mode::Start => match open_root(&canonical, identity)
+            .and_then(|root| preconditions::check(&root, &canonical))
+        {
+            Ok(Check::Settle) => None,
+            Ok(Check::Start(entries)) => Some(entries),
+            Ok(Check::Defer { why, detail }) => return defer(lock, gates, why, &detail),
+            Err(e) => return storage("io", &e.kind().to_string()),
+        },
+    };
+    // The lock refreshed once here, after the preconditions and before
+    // confinement: the refresher can't start before confinement (it is a
+    // thread), so its first period then starts from a fresh mtime, however
+    // long the preconditions took. The refresh is bound to the directory
+    // this run made (`Lock::touch`): taken over meanwhile (an older build,
+    // past the stale time), it is found before anything changes, and the
+    // run ends `lock_lost` with nothing changed.
+    if mode == Mode::Start && !lock.touch() {
+        lock.release();
+        drop(gates);
+        return say(lost());
+    }
     let grant = Grant::locking()
         .refer()
+        .symlinks()
         .read_write(&canonical)
-        .descriptors(gates.iter().flat_map(Gate::descriptors));
+        .descriptors(gates.iter().flat_map(Gate::descriptors))
+        .descriptors(lock.descriptor());
     if let Err(exit) = confine::confine(grant) {
         return exit;
     }
+    step("before-keep");
     if let Err(e) = lock.keep() {
         return match e {
             LockError::Held => say(Outcome::Busy),
             LockError::Io(e) => storage("io", &e.kind().to_string()),
+            // Taken over since it was taken: nothing was changed.
+            LockError::Lost => say(lost()),
         };
     }
     crate::testhooks::profile_hold();
     step("after-exclusion");
-    let identity = gates.first().and_then(|gate| gate.identity);
-    let result = recover(&canonical, identity, &|| lock.held());
+    let held = || lock.held();
+    let result = match start {
+        None => recover(&canonical, identity, &held),
+        Some(entries) => start_move(&canonical, identity, &entries, &held),
+    };
     let released = lock.release();
     drop(gates);
     match result {
@@ -417,6 +516,18 @@ fn migrate(profile_dir: &Path, lock_dir: &Path, dev: bool) -> Exit {
         }
         Err(e) => storage("io", &e.kind().to_string()),
     }
+}
+
+/// A starting run that doesn't start: logged, its exclusion let go,
+/// `deferred`.
+fn defer(lock: Lock, gates: Vec<Gate>, why: &str, detail: &str) -> Exit {
+    log::warn(
+        "the move is deferred to the next start; nothing was changed",
+        serde_json::json!({ "why": why, "detail": detail }),
+    );
+    lock.release();
+    drop(gates);
+    say(Outcome::Deferred)
 }
 
 /// What is at `name` in `dir`.
@@ -468,16 +579,12 @@ fn recover(
     identity: Option<fc_service::gate::DirIdentity>,
     held: &dyn Fn() -> bool,
 ) -> std::io::Result<Outcome> {
-    let root = Dir::open_root(
-        canonical,
-        Resolve::Canonical(identity.map(crate::journal::anchored)),
-    )?
-    .ok_or_else(|| std::io::Error::from(std::io::ErrorKind::NotFound))?;
+    let root = open_root(canonical, identity)?;
     let Some(freedom) = root.child(OsStr::new(layout::FREEDOM_DIR), false)? else {
         return Ok(Outcome::Nothing);
     };
     let journal: Journal = match read_journal(&freedom)? {
-        None => return Ok(Outcome::Nothing),
+        None => return settled(&root, &freedom, held),
         Some(text) => match text.as_deref().and_then(layout::parse_journal) {
             Some(journal) => journal,
             None => {
@@ -578,10 +685,11 @@ fn recover(
             step("mid-recovery");
         }
         if steps.rename_back {
-            if !held() {
-                return Ok(lost());
+            match rename_back(&freedom, name, &root, held) {
+                Ok(()) => {}
+                Err(Halt::Lost) => return Ok(lost()),
+                Err(Halt::Io(e)) => return Err(e),
             }
-            rename_back(&freedom, name, &root)?;
             step("mid-recovery");
         }
     }
@@ -600,6 +708,223 @@ fn recover(
     Ok(Outcome::RolledBack)
 }
 
+/// The profile's directory, opened from its gate's canonical path: the
+/// very directory the gate was taken for (on Unix, by its device and
+/// inode).
+fn open_root(
+    canonical: &Path,
+    identity: Option<fc_service::gate::DirIdentity>,
+) -> std::io::Result<Dir> {
+    Dir::open_root(
+        canonical,
+        Resolve::Canonical(identity.map(crate::journal::anchored)),
+    )?
+    .ok_or_else(|| std::io::Error::from(std::io::ErrorKind::NotFound))
+}
+
+/// No journal: with the marker, the move is done, and the placeholder is
+/// written if nothing is at the root's `identity` (MD9; a new profile's
+/// empty move cut short between its marker and its placeholder leaves
+/// none). Either way, `nothing`.
+fn settled(root: &Dir, freedom: &Dir, held: &dyn Fn() -> bool) -> std::io::Result<Outcome> {
+    if found(freedom, layout::LAYOUT_MARKER)? == Found::File
+        && layout::needs_placeholder(found(root, layout::PLACEHOLDER)?)
+    {
+        if !held() {
+            return Ok(lost());
+        }
+        write_placeholder(root)?;
+        root.sync()?;
+    }
+    Ok(Outcome::Nothing)
+}
+
+/// How many times a starting move tries an entry's rename on Windows while
+/// another handle holds it, 100 ms apart (MD3).
+const START_RENAME_TRIES: u32 = 30;
+
+/// The journal's temporary name: it is renamed into place whole, so a
+/// crash never leaves a journal cut short (one that doesn't parse keeps the
+/// profile closed).
+const JOURNAL_TEMP: &str = ".move.json.freedom-new";
+
+/// Why a starting move stops before its end.
+enum Halt {
+    /// The lock was taken over: nothing more may change.
+    Lost,
+    Io(std::io::Error),
+}
+
+impl From<std::io::Error> for Halt {
+    fn from(error: std::io::Error) -> Halt {
+        Halt::Io(error)
+    }
+}
+
+/// The starting move (0013, "The move", 3–8) on `entries`, the ones
+/// present, in the list's order, as the preconditions found them. A
+/// failure is settled at once by [`recover`], as the next run would settle
+/// it: rolled back before the marker, rolled forward after it.
+fn start_move(
+    canonical: &Path,
+    identity: Option<fc_service::gate::DirIdentity>,
+    entries: &[&'static str],
+    held: &dyn Fn() -> bool,
+) -> std::io::Result<Outcome> {
+    match moving(canonical, identity, entries, held) {
+        Ok(outcome) => Ok(outcome),
+        Err(Halt::Lost) => Ok(lost()),
+        Err(Halt::Io(e)) => {
+            let other_device = e.kind() == std::io::ErrorKind::CrossesDevices;
+            log::error(
+                if other_device {
+                    "an entry is on another device than freedom/, and this build doesn't copy (PRF-9c); the move is settled"
+                } else {
+                    "the move failed; it is settled as the next start would settle it"
+                },
+                serde_json::json!({ "error": e.kind().to_string() }),
+            );
+            match recover(canonical, identity, held)? {
+                // No journal: before it was in place, or an empty move.
+                // With the marker the empty move is done (its placeholder
+                // written by the recovery); without it, at most an empty
+                // `freedom/` was made.
+                Outcome::Nothing => {
+                    let root = open_root(canonical, identity)?;
+                    let marked = match root.child(OsStr::new(layout::FREEDOM_DIR), false)? {
+                        Some(freedom) => found(&freedom, layout::LAYOUT_MARKER)? != Found::Missing,
+                        None => false,
+                    };
+                    if marked {
+                        return Ok(Outcome::Migrated);
+                    }
+                    if held() && root.remove_empty(OsStr::new(layout::FREEDOM_DIR))? {
+                        root.sync()?;
+                    }
+                    Ok(Outcome::RolledBack)
+                }
+                outcome => Ok(outcome),
+            }
+        }
+    }
+}
+
+fn moving(
+    canonical: &Path,
+    identity: Option<fc_service::gate::DirIdentity>,
+    entries: &[&'static str],
+    held: &dyn Fn() -> bool,
+) -> Result<Outcome, Halt> {
+    let root = open_root(canonical, identity)?;
+    if !held() {
+        return Err(Halt::Lost);
+    }
+    // Made `0700` (on Windows, inheriting the profile's ACL), the root
+    // flushed.
+    let freedom = root
+        .child(OsStr::new(layout::FREEDOM_DIR), true)?
+        .ok_or_else(|| std::io::Error::from(std::io::ErrorKind::NotFound))?;
+    step("after-freedom-dir");
+    if !entries.is_empty() {
+        let journal = Journal::new(entries)
+            .ok_or_else(|| std::io::Error::other("an entry the move's list doesn't hold"))?;
+        if !held() {
+            return Err(Halt::Lost);
+        }
+        write_journal(&freedom, &journal)?;
+        step("after-journal");
+        for name in entries {
+            rename_out(&root, OsStr::new(name), &freedom, held)?;
+            step("mid-move");
+        }
+        root.sync()?;
+        freedom.sync()?;
+        step("after-renames");
+    }
+    if !held() {
+        return Err(Halt::Lost);
+    }
+    write_marker(&freedom)?;
+    step("after-marker");
+    // Cleanup: no entry is copied in this build, so no source is left.
+    if layout::needs_placeholder(found(&root, layout::PLACEHOLDER)?) {
+        if !held() {
+            return Err(Halt::Lost);
+        }
+        write_placeholder(&root)?;
+        root.sync()?;
+    }
+    step("after-placeholder");
+    if !entries.is_empty() {
+        step("before-journal-removed");
+        if !held() {
+            return Err(Halt::Lost);
+        }
+        freedom.unlink(OsStr::new(layout::MOVE_JOURNAL))?;
+        freedom.sync()?;
+    }
+    Ok(Outcome::Migrated)
+}
+
+/// The journal, written whole: to its temporary name (one a crash left
+/// is replaced), synced, renamed into place, the directory flushed.
+fn write_journal(freedom: &Dir, journal: &Journal) -> std::io::Result<()> {
+    let temp = OsStr::new(JOURNAL_TEMP);
+    freedom.unlink(temp)?;
+    let written = freedom.create_new(temp).and_then(|mut file| {
+        file.write_all(journal.text().as_bytes())?;
+        file.sync_all()
+    });
+    if let Err(e) = written {
+        let _ = freedom.unlink(temp);
+        return Err(e);
+    }
+    freedom.rename(temp, OsStr::new(layout::MOVE_JOURNAL))?;
+    freedom.sync()
+}
+
+/// The marker, `{ version: 1, moved_at, by }`, made new, synced and its
+/// directory flushed. Its presence is what counts: one cut short by a
+/// crash is still the marker, and every entry is in `freedom/` by then.
+fn write_marker(freedom: &Dir) -> std::io::Result<()> {
+    let text = format!(
+        "{{\"version\":1,\"moved_at\":\"{}\",\"by\":\"freedom-cored {}\"}}\n",
+        super::now_iso(),
+        env!("CARGO_PKG_VERSION")
+    );
+    let mut file = freedom.create_new(OsStr::new(layout::LAYOUT_MARKER))?;
+    file.write_all(text.as_bytes())?;
+    file.sync_all()?;
+    freedom.sync()
+}
+
+/// The root's `name` into `freedom/`, a symlink as the link. On Windows, a
+/// rename refused while an indexer or another handle holds the entry is
+/// tried again, [`START_RENAME_TRIES`] times, 100 ms apart, the lock
+/// checked before each try.
+fn rename_out(
+    root: &Dir,
+    name: &OsStr,
+    freedom: &Dir,
+    held: &dyn Fn() -> bool,
+) -> Result<(), Halt> {
+    let mut tries = 0;
+    loop {
+        if !held() {
+            return Err(Halt::Lost);
+        }
+        match root.rename_into(name, freedom, name) {
+            Ok(()) => return Ok(()),
+            Err(e) if cfg!(windows) && tries < START_RENAME_TRIES && held_by_another(&e) => {
+                tries += 1;
+                step("rename-retry");
+                std::thread::sleep(Duration::from_millis(100));
+            }
+            Err(e) => return Err(Halt::Io(e)),
+        }
+    }
+}
+
 /// The placeholder at the root's `identity`, made new (never over anything
 /// there) and synced, its directory flushed by the caller.
 fn write_placeholder(root: &Dir) -> std::io::Result<()> {
@@ -610,17 +935,27 @@ fn write_placeholder(root: &Dir) -> std::io::Result<()> {
 
 /// `freedom/<name>` back to the root. On Windows, a rename refused while an
 /// indexer or another handle holds the entry is tried again, as
-/// `profile-catalog.js` tries its fence: 10 times, 100 ms apart.
-fn rename_back(freedom: &Dir, name: &OsStr, root: &Dir) -> std::io::Result<()> {
+/// `profile-catalog.js` tries its fence: 10 times, 100 ms apart, the lock
+/// checked before each try.
+fn rename_back(
+    freedom: &Dir,
+    name: &OsStr,
+    root: &Dir,
+    held: &dyn Fn() -> bool,
+) -> Result<(), Halt> {
     let mut tries = 0;
     loop {
+        if !held() {
+            return Err(Halt::Lost);
+        }
         match freedom.rename_into(name, root, name) {
             Ok(()) => return Ok(()),
             Err(e) if cfg!(windows) && tries < 10 && held_by_another(&e) => {
                 tries += 1;
+                step("rename-back-retry");
                 std::thread::sleep(Duration::from_millis(100));
             }
-            Err(e) => return Err(e),
+            Err(e) => return Err(Halt::Io(e)),
         }
     }
 }

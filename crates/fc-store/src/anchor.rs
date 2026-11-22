@@ -152,7 +152,8 @@ impl Dir {
         imp::child(self, name, create)
     }
 
-    /// What is at `name`, not following a symlink.
+    /// What is at `name`, not following a symlink (nor, on Linux,
+    /// triggering an automount there).
     pub fn kind(&self, name: &OsStr) -> io::Result<Kind> {
         imp::kind(self, name)
     }
@@ -243,6 +244,15 @@ impl Dir {
         {
             None
         }
+    }
+
+    /// The handle, borrowed (Unix): for a lookup the type has no method for
+    /// that must still start from this directory, such as `openat2` with
+    /// `RESOLVE_BENEATH` (a profile move's node-lock probe, design 0013).
+    #[cfg(unix)]
+    pub fn as_fd(&self) -> std::os::fd::BorrowedFd<'_> {
+        use std::os::fd::AsFd;
+        self.fd.as_fd()
     }
 
     /// The names of the directories in this one, not following a symlink
@@ -370,7 +380,13 @@ mod imp {
     }
 
     pub fn kind(dir: &Dir, name: &OsStr) -> io::Result<Kind> {
-        match rustix::fs::statat(&dir.fd, name, AtFlags::SYMLINK_NOFOLLOW) {
+        // No automount is triggered at the name, on Linux: what is there is
+        // classified, not entered.
+        #[cfg(target_os = "linux")]
+        let flags = AtFlags::SYMLINK_NOFOLLOW | AtFlags::NO_AUTOMOUNT;
+        #[cfg(not(target_os = "linux"))]
+        let flags = AtFlags::SYMLINK_NOFOLLOW;
+        match rustix::fs::statat(&dir.fd, name, flags) {
             Ok(stat) => Ok(match FileType::from_raw_mode(stat.st_mode) {
                 FileType::RegularFile => Kind::File,
                 FileType::Directory => Kind::Dir,

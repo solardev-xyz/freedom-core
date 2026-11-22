@@ -19,7 +19,7 @@
 //!     --confirm-display-name <name> [--dev [--checkout-hash <hex8>]]
 //! freedom-cored profile forget-list --app-root <dir>
 //! freedom-cored profile forget-done --app-root <dir> --item <32 hex>...
-//! freedom-cored profile migrate --profile-dir <dir> --lock-dir <dir> [--dev] --finish-only
+//! freedom-cored profile migrate --profile-dir <dir> --lock-dir <dir> [--dev] [--finish-only]
 //! freedom-cored hold-profile --user-data-dir <dir> --lock-dir <dir> [--app-root <dir> --id <id>]
 //! ```
 //!
@@ -54,6 +54,7 @@ mod delete;
 mod forget;
 mod lock;
 mod migrate;
+mod preconditions;
 mod remove;
 mod store;
 
@@ -239,6 +240,12 @@ fn storage(kind: &str, detail: &str) -> Exit {
     Exit::Storage
 }
 
+/// The catalog's write lock taken over since it was taken (exit 74):
+/// nothing was written.
+fn lock_lost() -> Exit {
+    storage("lock_lost", "the catalog's write lock was taken over")
+}
+
 /// The catalog's write lock still held by another (exit 75).
 fn busy() -> Exit {
     log::error(
@@ -293,7 +300,7 @@ fn prepare_app_root(app_root: &Path) -> Result<(), Exit> {
 /// killed writer left.
 fn catalog_lock(app_root: &Path) -> Result<Lock, Exit> {
     let lock = take_catalog_lock(app_root)?;
-    keep(&lock)?;
+    keep(&lock, app_root)?;
     Ok(lock)
 }
 
@@ -304,25 +311,34 @@ fn take_catalog_lock(app_root: &Path) -> Result<Lock, Exit> {
         Ok(lock) => lock,
         Err(lock::LockError::Held) => return Err(busy()),
         Err(lock::LockError::Io(e)) => return Err(storage("io", &e.to_string())),
+        Err(lock::LockError::Lost) => return Err(lock_lost()),
     };
-    if let Err(e) = store::remove_catalog_temps(app_root) {
-        log::warn(
-            "cannot remove the catalog's leftover temp files",
-            serde_json::json!({ "error": e.kind().to_string() }),
-        );
-    }
     Ok(lock)
 }
 
-/// Starts the lock's refresher, after confinement.
-fn keep(lock: &Lock) -> Result<(), Exit> {
+/// Starts the lock's refresher, after confinement, once its own refresh
+/// found the lock still this run's; only then are the catalog's leftover
+/// temp files removed. No file or catalog content is written under the
+/// lock before that: a successor that took it over meanwhile may have a
+/// temp file of its own in flight. The one change before it is the gates'
+/// `make_private` on Unix, which only clears group and other bits on the
+/// user's own data directories: the state every gate holder sets, and one
+/// that can't lose data or narrow the user's own access.
+fn keep(lock: &Lock, app_root: &Path) -> Result<(), Exit> {
     match lock.keep() {
         Ok(()) => {
+            if let Err(e) = store::remove_catalog_temps(app_root) {
+                log::warn(
+                    "cannot remove the catalog's leftover temp files",
+                    serde_json::json!({ "error": e.kind().to_string() }),
+                );
+            }
             crate::testhooks::profile_hold();
             Ok(())
         }
         Err(lock::LockError::Held) => Err(busy()),
         Err(lock::LockError::Io(e)) => Err(storage("io", &e.kind().to_string())),
+        Err(lock::LockError::Lost) => Err(lock_lost()),
     }
 }
 

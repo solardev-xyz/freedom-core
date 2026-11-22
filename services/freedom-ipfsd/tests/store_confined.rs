@@ -50,6 +50,7 @@ fn child(case: &str) {
         descriptors: Vec::new(),
         interface_index: false,
         times: false,
+        symlinks: false,
     })
     .unwrap();
     println!("FILES {}", report.files == Status::Enforced);

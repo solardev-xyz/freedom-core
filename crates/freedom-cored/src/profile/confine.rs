@@ -22,7 +22,9 @@
 //!   `futimens` on a descriptor alone, and on macOS file times in the
 //!   read-write grants alone.
 //! - **Renames across directories** (Landlock's `refer`, ABI 2) for the
-//!   runs that move things: a delete's fence and `migrate`'s rollback.
+//!   runs that move things: a delete's fence and `migrate`'s move and
+//!   rollback; for `migrate`, a symlink's too (`make_sym`), since an entry
+//!   that is one moves as the link.
 //! - **D2:** a mechanism the OS lacks, or that something outside refuses,
 //!   is reported and the run goes on; the report is logged. A refusal of
 //!   the confinement itself (a second thread, a descriptor it can't
@@ -46,6 +48,7 @@ pub struct Grant {
     descriptors: Vec<i32>,
     refer: bool,
     times: bool,
+    symlinks: bool,
 }
 
 impl Grant {
@@ -90,6 +93,13 @@ impl Grant {
         self
     }
 
+    /// A symlink renamed within the read-write directories: `migrate`
+    /// moves an entry that is one as the link.
+    pub fn symlinks(mut self) -> Grant {
+        self.symlinks = true;
+        self
+    }
+
     fn policy(self) -> Policy {
         let mut read_write = self.read_write;
         read_write.extend(crate::testhooks::profile_hook_dirs());
@@ -106,6 +116,7 @@ impl Grant {
             descriptors: self.descriptors,
             interface_index: false,
             times: self.times,
+            symlinks: self.symlinks,
         }
     }
 }

@@ -293,6 +293,7 @@ fn policy(p: &Paths, network: Network, descriptors: Vec<i32>) -> Policy {
         descriptors,
         interface_index: false,
         times: false,
+        symlinks: false,
     }
 }
 

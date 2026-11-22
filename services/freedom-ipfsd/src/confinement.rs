@@ -39,6 +39,7 @@ pub fn policy(
         descriptors,
         interface_index: matches!(network, NetworkPolicy::Direct),
         times: false,
+        symlinks: false,
     }
 }
 
