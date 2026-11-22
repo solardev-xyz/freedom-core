@@ -17,9 +17,13 @@
 //!   outside moves as the link.
 //! - **Then the nodes' own OS locks** (MD7), each tried and let go at
 //!   once, as the PRF-9b spike found them in freedom-browser's
-//!   integration branch. The lock's own name is opened without following
-//!   a link and without waiting (a FIFO's open would wait for a writer),
-//!   and the handle checked to be a regular file:
+//!   integration branch. Each is looked up from the profile's root handle
+//!   without following any link or crossing a mount, the entry itself
+//!   included (`openat2` with `RESOLVE_BENEATH | RESOLVE_NO_SYMLINKS |
+//!   RESOLVE_NO_XDEV` on Linux; elsewhere, or without it, a walk from
+//!   handle to handle), its last component opened without waiting (a
+//!   FIFO's open would wait for a writer), and the handle checked to be a
+//!   regular file:
 //!   - **arti** (pinned 2.7.0) holds `tor-data/state/state/state.lock`
 //!     (tor-persist's `FsStateMgr` under the `state_dir` main writes into
 //!     `arti.toml`) and `tor-data/cache/dir.lock` (tor-dirmgr's store
@@ -34,8 +38,10 @@
 //!     `flock` on Unix, and on Windows opens each for `DELETE` while
 //!     sharing everything, which only a handle sharing less refuses.
 //!
-//!   A lock held, or one that can't be tried (an error other than a
-//!   missing file), defers. antd holds no OS lock the core can try: main
+//!   A lock held, a link or a mount on the way (so a `tor-data/` or
+//!   `myotis/` that is a link, which then doesn't move), anything at the
+//!   lock's name but a regular file or a directory, or an error other than
+//!   a missing file, defers. antd holds no OS lock the core can try: main
 //!   checks `ant-process.json`'s pid (B3).
 //! - **Then the copies** (PRF-9c, `copy.rs`): when `freedom/` is already
 //!   on another mount than the profile's directory (a volume mounted there:
@@ -63,6 +69,7 @@ use fc_profile::layout::{
     StartState,
 };
 use fc_store::anchor::{Dir, Kind};
+use fc_store::fsx::Regular;
 
 use super::copy::{self, Unfit};
 
@@ -147,9 +154,9 @@ pub fn check(root: &Dir, canonical: &Path) -> io::Result<Check> {
         if !entries.contains(&lock.entry) {
             continue;
         }
-        let mut path = canonical.join(lock.entry);
-        path.extend(lock.path);
-        match try_lock(&path, lock.probe) {
+        let mut parts = vec![lock.entry];
+        parts.extend(lock.path);
+        match try_lock(root, canonical, &parts, lock.probe) {
             Tried::Free => {}
             Tried::Held => {
                 return Ok(Check::Defer {
@@ -208,8 +215,8 @@ fn copies(
 /// Why the root's `name`, a link (a symlink, or on Windows a junction),
 /// can't move as the link: its target is relative, so it would name
 /// another place one directory deeper; or it is absolute and inside the
-/// profile's directory, by name or once resolved, so it may name another
-/// entry, which the move takes elsewhere. `None` for anything else: a link to an absolute
+/// profile's directory ([`inside`]), so it may name another entry, which
+/// the move takes elsewhere. `None` for anything else: a link to an absolute
 /// path outside the profile moves as itself. The move doesn't rewrite a
 /// link: a new link isn't one rename, and its rollback would have to undo
 /// it.
@@ -229,12 +236,113 @@ fn link_inside(canonical: &Path, name: &str) -> io::Result<Option<&'static str>>
     if !target.is_absolute() {
         return Ok(Some("a relative link"));
     }
-    // By name, and resolved where it resolves (a short 8.3 name or a link on
-    // its way naming the profile too): either inside defers.
-    let inside = lexically_inside(&target, canonical)
-        || std::fs::canonicalize(&path)
-            .is_ok_and(|resolved| lexically_inside(&resolved, canonical));
-    Ok(inside.then_some("a link into the profile"))
+    Ok(inside(&target, canonical).then_some("a link into the profile"))
+}
+
+/// Whether the absolute `target` names `root` or a path below it, by the
+/// volume's own relation for names, following nothing:
+/// - **Linux:** exact names.
+/// - **macOS:** folded where the profile's volume ignores case
+///   ([`case_insensitive`]), exact where it doesn't.
+/// - **Windows:** folded, and for a target on a local drive letter (never a
+///   share, so no lookup reaches the network) also once resolved, which
+///   finds a short 8.3 alias of the profile's path.
+#[cfg(target_os = "linux")]
+fn inside(target: &Path, root: &Path) -> bool {
+    named_inside(target, root, false)
+}
+
+#[cfg(target_os = "macos")]
+fn inside(target: &Path, root: &Path) -> bool {
+    named_inside(target, root, case_insensitive(root))
+}
+
+#[cfg(windows)]
+fn inside(target: &Path, root: &Path) -> bool {
+    use std::path::{Component, Prefix};
+    let local = matches!(
+        target.components().next(),
+        Some(Component::Prefix(prefix))
+            if matches!(prefix.kind(), Prefix::Disk(_) | Prefix::VerbatimDisk(_))
+    );
+    named_inside(target, root, true)
+        || (local
+            && std::fs::canonicalize(target)
+                .is_ok_and(|resolved| named_inside(&resolved, root, true)))
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
+fn inside(target: &Path, root: &Path) -> bool {
+    named_inside(target, root, true)
+}
+
+/// Whether the volume holding `root` ignores case: the last of its names
+/// with a cased letter, its case flipped, names the same directory (device
+/// and inode). In doubt (no such name, or a lookup failing), it is taken to
+/// ignore case, macOS's default: a wider fold only defers more.
+#[cfg(target_os = "macos")]
+fn case_insensitive(root: &Path) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    let same =
+        |a: &Path, b: &Path| match (std::fs::symlink_metadata(a), std::fs::symlink_metadata(b)) {
+            (Ok(a), Ok(b)) => Some(a.dev() == b.dev() && a.ino() == b.ino()),
+            (Ok(_), Err(e)) if e.kind() == io::ErrorKind::NotFound => Some(false),
+            _ => None,
+        };
+    for dir in root.ancestors() {
+        let (Some(name), Some(parent)) = (dir.file_name(), dir.parent()) else {
+            continue;
+        };
+        let name = name.to_string_lossy();
+        let flipped: String = name
+            .chars()
+            .flat_map(|c| -> Vec<char> {
+                if c.is_lowercase() {
+                    c.to_uppercase().collect()
+                } else {
+                    c.to_lowercase().collect()
+                }
+            })
+            .collect();
+        if flipped == name {
+            continue;
+        }
+        return same(dir, &parent.join(flipped)).unwrap_or(true);
+    }
+    true
+}
+
+/// Whether the absolute `target`, its `.` and `..` resolved by name alone
+/// (no link followed), is `root` or below it, its names compared exactly or
+/// folded (`fc_profile::delete::fold`); a Windows prefix compares without
+/// its verbatim form, the drive letter ignoring case.
+fn named_inside(target: &Path, root: &Path, fold: bool) -> bool {
+    use std::path::Component;
+    let parts = |path: &Path| -> Vec<String> {
+        let mut out: Vec<String> = Vec::new();
+        for component in path.components() {
+            match component {
+                Component::Prefix(prefix) => out.push(prefix_key(prefix.kind())),
+                Component::RootDir | Component::CurDir => {}
+                Component::ParentDir => {
+                    if out.len() > 1 || (out.len() == 1 && !cfg!(windows)) {
+                        out.pop();
+                    }
+                }
+                Component::Normal(name) => {
+                    let name = name.to_string_lossy();
+                    out.push(if fold {
+                        fc_profile::delete::fold(&name)
+                    } else {
+                        name.into_owned()
+                    });
+                }
+            }
+        }
+        out
+    };
+    let (target, root) = (parts(target), parts(root));
+    target.len() >= root.len() && target[..root.len()] == root[..]
 }
 
 /// A symlink, or on Windows any reparse point (a junction too).
@@ -249,34 +357,6 @@ pub fn is_link(meta: &std::fs::Metadata) -> bool {
     {
         meta.file_type().is_symlink()
     }
-}
-
-/// Whether the absolute `target`, its `.` and `..` resolved by name alone
-/// (no link followed), is `root` or below it. Compared folded
-/// (`fc_profile::delete::fold`, without Windows's verbatim prefix) on every
-/// OS: a fold wider than a volume's only defers more.
-fn lexically_inside(target: &Path, root: &Path) -> bool {
-    use std::path::Component;
-    let parts = |path: &Path| -> Vec<String> {
-        let mut out: Vec<String> = Vec::new();
-        for component in path.components() {
-            match component {
-                Component::Prefix(prefix) => out.push(prefix_key(prefix.kind())),
-                Component::RootDir | Component::CurDir => {}
-                Component::ParentDir => {
-                    if out.len() > 1 || (out.len() == 1 && !cfg!(windows)) {
-                        out.pop();
-                    }
-                }
-                Component::Normal(name) => {
-                    out.push(fc_profile::delete::fold(&name.to_string_lossy()));
-                }
-            }
-        }
-        out
-    };
-    let (target, root) = (parts(target), parts(root));
-    target.len() >= root.len() && target[..root.len()] == root[..]
 }
 
 /// A Windows path prefix as one key: `C:` and `\\?\C:` alike, a share by
@@ -443,26 +523,33 @@ enum Tried {
     Unknown(String),
 }
 
-/// Tries `path`'s lock and lets it go at once. The last component is
-/// opened without following a link and without waiting (a FIFO's open
-/// doesn't wait for a writer), and the handle checked: a link there is
-/// `Unknown` (the core doesn't follow it, and a node that did would lock
-/// what it names), anything but a regular file is free (no node's lock is
-/// one), and so is nothing there. A link above it (a symlinked `tor-data/`)
-/// is followed, as the node follows it.
-fn try_lock(path: &Path, probe: Probe) -> Tried {
-    let file = match open_lock(path, probe) {
+/// Tries the lock at `parts` below the profile's root and lets it go at
+/// once. The whole path is looked up from the root's handle without
+/// following any link and without crossing a mount, the entry itself
+/// included, and the last component opened without waiting (a FIFO's open
+/// would wait for a writer):
+/// - **a link or a mount on the way,** or anything but a directory or a
+///   regular file at the lock's name, is `Unknown`: the core doesn't follow
+///   it to storage it hasn't qualified, and can't tell whether a node holds
+///   what it names. So a profile whose `tor-data/` or `myotis/` is a link
+///   doesn't move: its old layout keeps working;
+/// - **nothing there** (or a file on the way, with nothing below it), or a
+///   directory at the lock's name, is free: no node's lock is one;
+/// - **a regular file:** its lock tried.
+fn try_lock(root: &Dir, canonical: &Path, parts: &[&str], probe: Probe) -> Tried {
+    let file = match open_beneath(root, parts) {
         Opened::File(file) => file,
-        #[cfg(windows)]
-        Opened::Held => return Tried::Held,
         Opened::Free => return Tried::Free,
-        Opened::Unknown(kind) => return Tried::Unknown(kind),
+        Opened::Unknown(why) => return Tried::Unknown(why),
     };
     #[cfg(windows)]
     if probe == Probe::Lease {
-        // The open was the try.
-        return Tried::Free;
+        drop(file);
+        let mut path = canonical.to_path_buf();
+        path.extend(parts);
+        return share_probe(&path);
     }
+    let _ = (canonical, probe);
     match file.try_lock() {
         Ok(()) => {
             let _ = file.unlock();
@@ -473,97 +560,154 @@ fn try_lock(path: &Path, probe: Probe) -> Tried {
     }
 }
 
-/// What opening a lock's path found.
+/// What looking a lock up found.
 enum Opened {
-    /// A regular file, open: its lock is tried next.
+    /// A regular file, open for reading: its lock is tried next.
     File(std::fs::File),
-    /// Windows, Myotis's lease: another handle shares less than the open.
-    #[cfg(windows)]
-    Held,
     Free,
     Unknown(String),
 }
 
-/// Missing, or a parent on the way that isn't a directory.
-fn gone(error: &io::Error) -> bool {
-    matches!(
-        error.kind(),
-        io::ErrorKind::NotFound | io::ErrorKind::NotADirectory
-    )
-}
+const ON_THE_WAY: &str = "a link or a mount on the way to the lock";
 
-/// `open(O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC)`, then `fstat`.
-#[cfg(unix)]
-fn open_lock(path: &Path, _probe: Probe) -> Opened {
-    use rustix::fs::{Mode, OFlags};
+/// Linux: `openat2` from the root's handle with `RESOLVE_BENEATH`,
+/// `RESOLVE_NO_SYMLINKS`, `RESOLVE_NO_XDEV` and `RESOLVE_NO_MAGICLINKS`,
+/// and `O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC`: one lookup that refuses a
+/// link, a mount (a bind mount of the same file system too) and a way out.
+/// A kernel without it (before 5.6, or a filter refusing it) takes the
+/// walk.
+#[cfg(target_os = "linux")]
+fn open_beneath(root: &Dir, parts: &[&str]) -> Opened {
+    use rustix::fs::{Mode, OFlags, ResolveFlags};
+    use rustix::io::Errno;
     let flags = OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC;
-    let file = match rustix::fs::open(path, flags, Mode::empty()) {
-        Ok(fd) => std::fs::File::from(fd),
-        // A symlink at the name (`ELOOP`; `EMLINK` on some BSDs).
-        Err(e) if e == rustix::io::Errno::LOOP || e == rustix::io::Errno::MLINK => {
-            return Opened::Unknown("a link at the lock's name".to_owned());
-        }
-        Err(e) => {
-            let e = io::Error::from(e);
-            return if gone(&e) {
-                Opened::Free
-            } else {
-                Opened::Unknown(e.kind().to_string())
-            };
-        }
-    };
-    match file.metadata() {
-        Ok(meta) if meta.is_file() => Opened::File(file),
-        Ok(_) => Opened::Free,
-        Err(e) => Opened::Unknown(e.kind().to_string()),
+    let resolve = ResolveFlags::BENEATH
+        | ResolveFlags::NO_SYMLINKS
+        | ResolveFlags::NO_XDEV
+        | ResolveFlags::NO_MAGICLINKS;
+    match rustix::fs::openat2(root.as_fd(), parts.join("/"), flags, Mode::empty(), resolve) {
+        Ok(fd) => classify(std::fs::File::from(fd), None),
+        Err(Errno::NOSYS | Errno::PERM) => walk(root, parts),
+        Err(Errno::LOOP | Errno::XDEV) => Opened::Unknown(ON_THE_WAY.to_owned()),
+        Err(Errno::NOENT | Errno::NOTDIR) => Opened::Free,
+        Err(e) => Opened::Unknown(io::Error::from(e).kind().to_string()),
     }
 }
 
-/// Opened itself if it is a reparse point (`FILE_FLAG_OPEN_REPARSE_POINT`),
-/// a directory too (`FILE_FLAG_BACKUP_SEMANTICS`), then its attributes read
-/// from the handle. For Myotis's lease, the open is the try: for `DELETE`,
-/// sharing reading, writing and deleting, which only another handle sharing
-/// less (Myotis's share reading only) refuses, with a sharing violation.
+#[cfg(not(target_os = "linux"))]
+fn open_beneath(root: &Dir, parts: &[&str]) -> Opened {
+    walk(root, parts)
+}
+
+/// Component by component from the root's handle (`fc_store`'s `Dir`): each
+/// directory opened through its parent refusing a link (a Windows reparse
+/// point too), on the root's device, and the lock's name opened without
+/// following or waiting.
+fn walk(root: &Dir, parts: &[&str]) -> Opened {
+    let unknown = |e: io::Error| Opened::Unknown(e.kind().to_string());
+    let Some((last, parents)) = parts.split_last() else {
+        return Opened::Free;
+    };
+    let device = match root.identity() {
+        Ok((device, _)) => device,
+        Err(e) => return unknown(e),
+    };
+    let mut dir = match root.try_clone() {
+        Ok(dir) => dir,
+        Err(e) => return unknown(e),
+    };
+    for part in parents {
+        match dir.kind(OsStr::new(part)) {
+            Ok(Kind::Missing | Kind::File) => return Opened::Free,
+            Ok(Kind::Other) => return Opened::Unknown(ON_THE_WAY.to_owned()),
+            Ok(Kind::Dir) => {}
+            Err(e) => return unknown(e),
+        }
+        dir = match dir.child(OsStr::new(part), false) {
+            Ok(Some(child)) => child,
+            Ok(None) => return Opened::Free,
+            // Swapped for a link since: refused.
+            Err(_) => return Opened::Unknown(ON_THE_WAY.to_owned()),
+        };
+        match dir.identity() {
+            Ok((here, _)) if here == device => {}
+            Ok(_) => return Opened::Unknown(ON_THE_WAY.to_owned()),
+            Err(e) => return unknown(e),
+        }
+    }
+    match dir.kind(OsStr::new(last)) {
+        Ok(Kind::Missing | Kind::Dir) => return Opened::Free,
+        Ok(Kind::Other) => return Opened::Unknown(OTHER.to_owned()),
+        Ok(Kind::File) => {}
+        Err(e) => return unknown(e),
+    }
+    match dir.open_regular(OsStr::new(last), false) {
+        Ok(Regular::File(file)) => classify(file, Some(device)),
+        Ok(Regular::Missing) => Opened::Free,
+        Ok(Regular::Other) => Opened::Unknown(OTHER.to_owned()),
+        Err(e) => unknown(e),
+    }
+}
+
+const OTHER: &str = "a link or a special file at the lock's name";
+
+/// The opened lock's handle: a regular file (on the root's device, where
+/// the walk checks it), a directory, or anything else.
+fn classify(file: std::fs::File, device: Option<u64>) -> Opened {
+    let meta = match file.metadata() {
+        Ok(meta) => meta,
+        Err(e) => return Opened::Unknown(e.kind().to_string()),
+    };
+    if meta.is_dir() {
+        return Opened::Free;
+    }
+    if !meta.is_file() {
+        return Opened::Unknown(OTHER.to_owned());
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        if device.is_some_and(|device| meta.dev() != device) {
+            return Opened::Unknown(ON_THE_WAY.to_owned());
+        }
+    }
+    let _ = device;
+    Opened::File(file)
+}
+
+/// Windows, Myotis's lease, once the walk found a regular file there: opens
+/// it for `DELETE` (and its attributes), sharing reading, writing and
+/// deleting, not following a reparse point, and lets it go. Refused with a
+/// sharing violation only while another handle shares less (Myotis's share
+/// reading only). Its parents were checked from the root's handle just
+/// before; this open goes by path, so a parent swapped for a junction in
+/// between (by the same user) isn't seen here.
 #[cfg(windows)]
-fn open_lock(path: &Path, probe: Probe) -> Opened {
+fn share_probe(path: &Path) -> Tried {
     use std::os::windows::fs::{MetadataExt, OpenOptionsExt};
     const DELETE: u32 = 0x0001_0000;
     const FILE_READ_ATTRIBUTES: u32 = 0x80;
     const FILE_SHARE_ALL: u32 = 0x1 | 0x2 | 0x4;
     const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
-    const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
-    const FILE_ATTRIBUTE_DIRECTORY: u32 = 0x10;
     const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
     const ERROR_SHARING_VIOLATION: i32 = 32;
-    let mut options = std::fs::OpenOptions::new();
-    options
+    match std::fs::OpenOptions::new()
+        .access_mode(DELETE | FILE_READ_ATTRIBUTES)
         .share_mode(FILE_SHARE_ALL)
-        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS);
-    match probe {
-        Probe::FileLock => options.read(true),
-        Probe::Lease => options.access_mode(DELETE | FILE_READ_ATTRIBUTES),
-    };
-    let file = match options.open(path) {
-        Ok(file) => file,
-        Err(e) if probe == Probe::Lease && e.raw_os_error() == Some(ERROR_SHARING_VIOLATION) => {
-            return Opened::Held;
-        }
-        Err(e) if gone(&e) => return Opened::Free,
-        Err(e) => return Opened::Unknown(e.kind().to_string()),
-    };
-    match file.metadata() {
-        Ok(meta) if meta.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 => {
-            Opened::Unknown("a link at the lock's name".to_owned())
-        }
-        Ok(meta) if meta.file_attributes() & FILE_ATTRIBUTE_DIRECTORY != 0 => Opened::Free,
-        Ok(_) => Opened::File(file),
-        Err(e) => Opened::Unknown(e.kind().to_string()),
+        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
+        .open(path)
+    {
+        Ok(file) => match file.metadata() {
+            Ok(meta) if meta.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 => {
+                Tried::Unknown(OTHER.to_owned())
+            }
+            Ok(_) => Tried::Free,
+            Err(e) => Tried::Unknown(e.kind().to_string()),
+        },
+        Err(e) if e.raw_os_error() == Some(ERROR_SHARING_VIOLATION) => Tried::Held,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Tried::Free,
+        Err(e) => Tried::Unknown(e.kind().to_string()),
     }
-}
-
-#[cfg(not(any(unix, windows)))]
-fn open_lock(_path: &Path, _probe: Probe) -> Opened {
-    Opened::Free
 }
 
 #[cfg(test)]
@@ -603,13 +747,48 @@ mod tests {
         assert!(!mount_point(&base, "ipfs-data").unwrap());
     }
 
+    /// A profile root as the move opens it, and a probe of `parts` below it
+    /// by both lookups (the Linux one and the walk).
+    struct Root {
+        _dir: tempfile::TempDir,
+        path: std::path::PathBuf,
+    }
+
+    fn root() -> Root {
+        let dir = tempfile::tempdir().unwrap();
+        let path = std::fs::canonicalize(dir.path()).unwrap();
+        Root { _dir: dir, path }
+    }
+
+    fn probe(root: &Root, parts: &[&str], probe: Probe) -> Tried {
+        let dir = Dir::open_root(&root.path, fc_store::anchor::Resolve::Follow)
+            .unwrap()
+            .unwrap();
+        let tried = try_lock(&dir, &root.path, parts, probe);
+        // The walk alone (the fallback where `openat2` is missing) agrees.
+        let walked = match walk(&dir, parts) {
+            Opened::File(_) => None,
+            Opened::Free => Some(Tried::Free),
+            Opened::Unknown(why) => Some(Tried::Unknown(why)),
+        };
+        match (&tried, walked) {
+            (Tried::Free, Some(Tried::Free)) | (Tried::Held, None) => {}
+            (Tried::Free, None) => {}
+            (Tried::Unknown(_), Some(Tried::Unknown(_))) => {}
+            (tried, walked) => panic!("{parts:?}: {tried:?} but the walk found {walked:?}"),
+        }
+        tried
+    }
+
     #[test]
     fn a_lock_held_is_found_and_let_go_otherwise() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("state.lock");
-        assert_eq!(try_lock(&path, Probe::FileLock), Tried::Free, "missing");
+        let r = root();
+        let lock = ["tor-data", "state", "state", "state.lock"];
+        assert_eq!(probe(&r, &lock, Probe::FileLock), Tried::Free, "missing");
+        let path = r.path.join("tor-data/state/state/state.lock");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(&path, "").unwrap();
-        assert_eq!(try_lock(&path, Probe::FileLock), Tried::Free);
+        assert_eq!(probe(&r, &lock, Probe::FileLock), Tried::Free);
         // Let go: another takes it after the try.
         let other = std::fs::OpenOptions::new()
             .read(true)
@@ -619,63 +798,82 @@ mod tests {
         other.try_lock().unwrap();
         // flock and LockFileEx exclude another open of the same file, even
         // in this process.
-        assert_eq!(try_lock(&path, Probe::FileLock), Tried::Held);
+        assert_eq!(probe(&r, &lock, Probe::FileLock), Tried::Held);
         other.unlock().unwrap();
-        assert_eq!(try_lock(&path, Probe::FileLock), Tried::Free);
+        assert_eq!(probe(&r, &lock, Probe::FileLock), Tried::Free);
         // A directory at the name holds no lock.
-        let sub = dir.path().join("dir.lock");
-        std::fs::create_dir(&sub).unwrap();
-        assert_eq!(try_lock(&sub, Probe::FileLock), Tried::Free);
+        std::fs::create_dir_all(r.path.join("tor-data/cache/dir.lock")).unwrap();
+        assert_eq!(
+            probe(&r, &["tor-data", "cache", "dir.lock"], Probe::FileLock),
+            Tried::Free
+        );
         // A file on the way: nothing below it.
-        assert_eq!(try_lock(&path.join("below"), Probe::FileLock), Tried::Free);
+        std::fs::create_dir_all(r.path.join("myotis")).unwrap();
+        std::fs::write(r.path.join("myotis/gnosis"), "").unwrap();
+        assert_eq!(
+            probe(
+                &r,
+                &["myotis", "gnosis", ".freedom-myotis-lifetime"],
+                Probe::Lease
+            ),
+            Tried::Free
+        );
     }
 
-    /// The lock's own name is never followed: a symlink there, even to a
-    /// regular file held, is `Unknown`, and the file it names is neither
-    /// opened nor locked. A FIFO there (or a link to one) doesn't wait for
-    /// a writer, and no node's lock is a FIFO. A symlinked parent is
-    /// followed, as the node follows it.
+    /// Nothing on the way to a lock is followed, the entry itself included,
+    /// nor the lock's own name: a symlink anywhere is `Unknown`, and what it
+    /// names (here a regular file held) is neither opened nor locked. A FIFO
+    /// at the name doesn't wait for a writer, and is `Unknown` too: no
+    /// node's lock is one.
     #[cfg(unix)]
     #[test]
-    fn a_lock_name_is_opened_without_following_or_waiting() {
-        let dir = tempfile::tempdir().unwrap();
-        let outside = dir.path().join("outside");
-        std::fs::write(&outside, "").unwrap();
-        let held = std::fs::File::open(&outside).unwrap();
+    fn a_lock_is_looked_up_without_following_or_waiting() {
+        use std::os::unix::fs::symlink;
+        let r = root();
+        let outside = root();
+        let held_path = outside.path.join("state/state/state.lock");
+        std::fs::create_dir_all(held_path.parent().unwrap()).unwrap();
+        std::fs::write(&held_path, "").unwrap();
+        let held = std::fs::File::open(&held_path).unwrap();
         held.lock().unwrap();
-        let link = dir.path().join("state.lock");
-        std::os::unix::fs::symlink(&outside, &link).unwrap();
+        let lock = ["tor-data", "state", "state", "state.lock"];
+        // The entry a link to another place (another disk, say).
+        symlink(&outside.path, r.path.join("tor-data")).unwrap();
         assert!(matches!(
-            try_lock(&link, Probe::FileLock),
+            probe(&r, &lock, Probe::FileLock),
             Tried::Unknown(_)
         ));
-        assert!(matches!(try_lock(&link, Probe::Lease), Tried::Unknown(_)));
-        // Through a symlinked parent: followed, and the lock found held.
-        let parent = dir.path().join("tor-data");
-        std::fs::create_dir(&parent).unwrap();
-        std::fs::rename(&outside, parent.join("dir.lock")).unwrap();
-        let alias = dir.path().join("alias");
-        std::os::unix::fs::symlink(&parent, &alias).unwrap();
-        assert_eq!(
-            try_lock(&alias.join("dir.lock"), Probe::FileLock),
-            Tried::Held
-        );
+        // A link in the middle.
+        std::fs::remove_file(r.path.join("tor-data")).unwrap();
+        std::fs::create_dir(r.path.join("tor-data")).unwrap();
+        symlink(outside.path.join("state"), r.path.join("tor-data/state")).unwrap();
+        assert!(matches!(
+            probe(&r, &lock, Probe::FileLock),
+            Tried::Unknown(_)
+        ));
+        // At the lock's name.
+        std::fs::remove_file(r.path.join("tor-data/state")).unwrap();
+        std::fs::create_dir_all(r.path.join("tor-data/state/state")).unwrap();
+        symlink(&held_path, r.path.join("tor-data/state/state/state.lock")).unwrap();
+        assert!(matches!(
+            probe(&r, &lock, Probe::FileLock),
+            Tried::Unknown(_)
+        ));
+        assert!(matches!(probe(&r, &lock, Probe::Lease), Tried::Unknown(_)));
         drop(held);
 
-        let fifo = dir.path().join("fifo.lock");
+        let fifo = r.path.join("myotis");
+        std::fs::create_dir(&fifo).unwrap();
         let made = std::process::Command::new("mkfifo")
-            .arg(&fifo)
+            .arg(fifo.join(".freedom-myotis-lifetime"))
             .status()
             .unwrap();
         assert!(made.success());
         let started = std::time::Instant::now();
-        assert_eq!(try_lock(&fifo, Probe::FileLock), Tried::Free);
-        assert_eq!(try_lock(&fifo, Probe::Lease), Tried::Free);
-        // A FIFO swapped in behind a link at the name: still not followed.
-        let swapped = dir.path().join("swapped.lock");
-        std::os::unix::fs::symlink(&fifo, &swapped).unwrap();
+        let lease = ["myotis", ".freedom-myotis-lifetime"];
+        assert!(matches!(probe(&r, &lease, Probe::Lease), Tried::Unknown(_)));
         assert!(matches!(
-            try_lock(&swapped, Probe::FileLock),
+            probe(&r, &lease, Probe::FileLock),
             Tried::Unknown(_)
         ));
         assert!(started.elapsed() < std::time::Duration::from_secs(5));
@@ -686,47 +884,38 @@ mod tests {
         #[cfg(unix)]
         {
             let root = Path::new("/home/u/.config/Freedom/Profiles/work");
-            assert!(lexically_inside(root, root));
-            assert!(lexically_inside(&root.join("wallet"), root));
-            assert!(lexically_inside(
-                Path::new("/home/u/.config/Freedom/Profiles/work/x/../ipfs-data"),
-                root
+            let inside = |target: &str| named_inside(Path::new(target), root, false);
+            assert!(named_inside(root, root, false));
+            assert!(inside("/home/u/.config/Freedom/Profiles/work/wallet"));
+            assert!(inside(
+                "/home/u/.config/Freedom/Profiles/work/x/../ipfs-data"
             ));
-            assert!(lexically_inside(
-                Path::new("/home/u/.config/Freedom/Profiles/other/../work/ant-data"),
-                root
+            assert!(inside(
+                "/home/u/.config/Freedom/Profiles/other/../work/ant-data"
             ));
-            assert!(lexically_inside(
-                Path::new("/home/u/.config/Freedom/Profiles/WORK/identity"),
-                root
-            ));
-            assert!(!lexically_inside(
-                Path::new("/home/u/.config/Freedom/Profiles/work/../other"),
-                root
-            ));
-            assert!(!lexically_inside(
-                Path::new("/home/u/.config/Freedom/Profiles/workshop"),
-                root
-            ));
-            assert!(!lexically_inside(Path::new("/mnt/big/ant-data"), root));
-            assert!(!lexically_inside(Path::new("/../.."), root));
+            assert!(!inside("/home/u/.config/Freedom/Profiles/work/../other"));
+            assert!(!inside("/home/u/.config/Freedom/Profiles/workshop"));
+            assert!(!inside("/mnt/big/ant-data"));
+            assert!(!inside("/../.."));
+            // Case: exact unless folded.
+            let shouted = Path::new("/home/u/.config/Freedom/Profiles/WORK/identity");
+            assert!(!named_inside(shouted, root, false));
+            assert!(named_inside(shouted, root, true));
+            #[cfg(target_os = "linux")]
+            assert!(!super::inside(shouted, root), "Linux names are exact");
         }
         #[cfg(windows)]
         {
             let root = Path::new(r"\\?\C:\Users\u\AppData\Roaming\Freedom");
-            assert!(lexically_inside(
-                Path::new(r"C:\Users\U\AppData\Roaming\Freedom\ipfs-data"),
-                root
+            let inside = |target: &str| named_inside(Path::new(target), root, true);
+            assert!(inside(r"C:\Users\U\AppData\Roaming\Freedom\ipfs-data"));
+            assert!(inside(
+                r"\\?\c:\users\u\appdata\roaming\freedom\x\..\identity"
             ));
-            assert!(lexically_inside(
-                Path::new(r"\\?\c:\users\u\appdata\roaming\freedom\x\..\identity"),
-                root
-            ));
-            assert!(!lexically_inside(Path::new(r"D:\Freedom"), root));
-            assert!(!lexically_inside(
-                Path::new(r"C:\Users\u\AppData\Roaming\Freedom\..\Other"),
-                root
-            ));
+            assert!(!inside(r"D:\Freedom"));
+            assert!(!inside(r"C:\Users\u\AppData\Roaming\Freedom\..\Other"));
+            // A share is compared by name and never resolved.
+            assert!(!super::inside(Path::new(r"\\server\share\Freedom"), root));
         }
     }
 

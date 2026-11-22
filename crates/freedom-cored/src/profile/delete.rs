@@ -310,7 +310,7 @@ fn delete_locked(
     // Held to the end of the run; dropped after the result is made.
     let (gates, gated) = gates(&plan, lock_dir)?;
     let base = open_home_base(&plan).map_err(ended)?;
-    confine::confine(grant(&plan, app_root, &gates, base.as_ref()))?;
+    confine::confine(grant(&plan, app_root, &gates, base.as_ref()).descriptors(lock.descriptor()))?;
     keep(lock)?;
     let mut store = open_store(app_root, held)?;
     let store = &mut store;

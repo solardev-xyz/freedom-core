@@ -482,26 +482,21 @@ fn migrate(profile_dir: &Path, lock_dir: &Path, dev: bool, mode: Mode) -> Exit {
     // The lock refreshed once here, after the preconditions and before
     // confinement: the refresher can't start before confinement (it is a
     // thread), so its first period then starts from a fresh mtime, however
-    // long the preconditions took (each check is a metadata call or an open
-    // that doesn't wait). Taken over meanwhile (an older build, past the
-    // stale time), nothing has changed: `lock_lost`.
-    if mode == Mode::Start {
-        match lock.touch() {
-            Ok(true) => {}
-            Ok(false) => {
-                lock.release();
-                drop(gates);
-                return say(lost());
-            }
-            Err(LockError::Held) => return say(Outcome::Busy),
-            Err(LockError::Io(e)) => return storage("io", &e.kind().to_string()),
-        }
+    // long the preconditions took. The refresh is bound to the directory
+    // this run made (`Lock::touch`): taken over meanwhile (an older build,
+    // past the stale time), it is found before anything changes, and the
+    // run ends `lock_lost` with nothing changed.
+    if mode == Mode::Start && !lock.touch() {
+        lock.release();
+        drop(gates);
+        return say(lost());
     }
     let grant = Grant::locking()
         .refer()
         .symlinks()
         .read_write(&canonical)
-        .descriptors(gates.iter().flat_map(Gate::descriptors));
+        .descriptors(gates.iter().flat_map(Gate::descriptors))
+        .descriptors(lock.descriptor());
     if let Err(exit) = confine::confine(grant) {
         return exit;
     }
