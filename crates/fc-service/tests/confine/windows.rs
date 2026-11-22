@@ -116,6 +116,7 @@ fn child(case: &str) {
         interface_index: false,
         times: false,
         symlinks: false,
+        modes: false,
     };
     match case {
         "control" => {
@@ -198,6 +199,32 @@ fn child(case: &str) {
             // it end.
             println!("WAITING");
             read_line();
+        }
+        "gate-file" => {
+            // Design 0017, C3: a gate file opened before `confine` and
+            // locked through its handle once the job and the mitigations
+            // are in place. Files aren't confined on Windows yet, so
+            // nothing is claimed about the lock directory.
+            let root = tempfile::tempdir().unwrap();
+            let (home, locks) = (
+                root.path().join("gate-home"),
+                root.path().join("gate-locks"),
+            );
+            let (first, second) = crate::gate_file::open(&home, &locks);
+            let mut gated = policy.clone();
+            gated.descriptors.extend(first.descriptors());
+            gated.descriptors.extend(second.descriptors());
+            let report = confine::confine(&gated).unwrap();
+            println!("REPORT {}", report.to_json());
+            check(
+                "the job and every mitigation are in place",
+                report.mechanism == "job"
+                    && MITIGATIONS
+                        .iter()
+                        .all(|(name, _, _)| report.mitigations.get(name) == Some(&Mitigation::Set)),
+            );
+            crate::gate_file::exercise(&first, &second);
+            drop((first, second));
         }
         "forced" => {
             // D2: something outside refuses the job, and the OS every
@@ -290,6 +317,7 @@ fn parent() {
         ("control", Some(&outer)),
         ("confined", Some(&outer)),
         ("confined-alone", None),
+        ("gate-file", Some(&outer)),
         ("forced", Some(&outer)),
     ];
     let mut failed = Vec::new();

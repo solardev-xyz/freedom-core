@@ -79,6 +79,7 @@ impl Grant {
             interface_index: direct,
             times: false,
             symlinks: false,
+            modes: false,
         }
     }
 }
@@ -133,6 +134,7 @@ impl Grant {
             interface_index: false,
             times: false,
             symlinks: false,
+            modes: false,
         }
     }
 }
