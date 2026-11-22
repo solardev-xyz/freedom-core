@@ -624,6 +624,16 @@ mod tests {
         update_ms: 1_000,
     };
 
+    /// For a test that holds a lock across refreshes and then lets it go:
+    /// a release removes only a lock younger than the stale time less one
+    /// update period, which `SHORT` leaves no room for (a healthy lock is
+    /// up to one period old, more on a loaded runner). The real timings
+    /// keep 20 s against 10 s, and 4 s against 1 s.
+    const HELD: Timing = Timing {
+        stale_ms: 4_000,
+        update_ms: 1_000,
+    };
+
     fn retries_none(_: u32) -> u64 {
         0
     }
@@ -785,7 +795,7 @@ mod tests {
     fn taken_then_kept() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("x.lock");
-        let lock = Lock::take(&path, SHORT, 0, retries_none).unwrap();
+        let lock = Lock::take(&path, HELD, 0, retries_none).unwrap();
         assert!(lock.held());
         let taken = mtime_ms(&path).unwrap();
         std::thread::sleep(Duration::from_millis(1_300));
@@ -818,6 +828,9 @@ mod tests {
             Err(LockError::Held)
         ));
         drop(lock);
+        // Another holder's stale lock, whether or not the release above
+        // removed this one (it may not, at `SHORT`'s timing: see `HELD`).
+        let _ = std::fs::remove_dir(&path);
         std::fs::create_dir(&path).unwrap();
         set_mtime(&path, now_ms() - 2_001).unwrap();
         let taken = Lock::acquire(&path, SHORT, 0, retries_none).unwrap();
