@@ -194,9 +194,9 @@ pub fn profile(
     text.push_str(SYSCTLS);
     text.push_str(SYSTEM_READ);
 
-    // Metadata on each grant's ancestors, and on each link a read-only
-    // grant's path crosses and its ancestors, so its path resolves; none on
-    // anything else.
+    // Metadata on each grant's ancestors, and on each link a grant's path
+    // crosses (read-only or read-write) and its ancestors, so its path
+    // resolves; none on anything else.
     let mut ancestors: Vec<PathBuf> = ROOT_LINKS.iter().map(PathBuf::from).collect();
     let known = |path: &Path, ancestors: &mut Vec<PathBuf>| {
         if !ancestors.iter().any(|known| known == path) {
