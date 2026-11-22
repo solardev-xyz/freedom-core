@@ -670,6 +670,10 @@ pub struct Vault {
     /// The node directories `serve`'s arguments name (design 0017, C1):
     /// `nodes.write_identity` writes only those, when given.
     node_roots: nodes::NodeRootArgs,
+    /// The Radicle homes' gate files `serve` opened ahead (design 0017,
+    /// C3): a node write's gate is taken through them when they have its
+    /// home.
+    radicle_gates: journal::RadicleGates,
     file: FileSnapshot,
     state: VaultState,
     throttle: Throttle,
@@ -928,6 +932,7 @@ impl Vault {
             dir,
             lock_dir,
             node_roots: nodes::NodeRootArgs::default(),
+            radicle_gates: journal::RadicleGates::default(),
             state: VaultState::new(),
             throttle: Throttle::new(),
             auto_lock_ms,
@@ -954,6 +959,11 @@ impl Vault {
     /// The node directories `serve`'s arguments name (design 0017, C1).
     pub fn set_node_roots(&mut self, roots: nodes::NodeRootArgs) {
         self.node_roots = roots;
+    }
+
+    /// The Radicle gate files `serve` opened ahead (design 0017, C3).
+    pub fn set_radicle_gates(&mut self, gates: journal::RadicleGates) {
+        self.radicle_gates = gates;
     }
 
     /// Installs the startup snapshot.
@@ -2275,11 +2285,17 @@ impl Vault {
             ),
             Kind::NodeWrite { op_id, spec, keys } => {
                 let lock_dir = self.lock_dir.clone();
+                let gates = self.radicle_gates.clone();
                 (
                     RunningKind::NodeWrite,
                     Box::new(move |dir, control| {
                         JobOutput::NodeWritten(job_node_write(
-                            dir, &lock_dir, &op_id, &spec, keys, control,
+                            dir,
+                            (&lock_dir, &gates),
+                            &op_id,
+                            &spec,
+                            keys,
+                            control,
                         ))
                     }),
                 )
@@ -2980,10 +2996,16 @@ fn hex(bytes: &[u8]) -> String {
 /// tightens an existing vault file to 0600 in place (metadata only; quick
 /// unlock's content fingerprint is unaffected), temp files a killed write
 /// left are removed, then the file is snapshot.
-pub fn startup_snapshot(dir: &Path, lock_dir: &Path) -> (FileSnapshot, NodeRecovery) {
+/// A Radicle journal's gate is taken through `gates`, the gate files
+/// `serve` opened ahead (design 0017, C3), when they have its home.
+pub fn startup_snapshot(
+    dir: &Path,
+    lock_dir: &Path,
+    gates: &journal::RadicleGates,
+) -> (FileSnapshot, NodeRecovery) {
     // Finish an interrupted node identity write before anything else
     // (design 0001: before core.hello is answered and before any node write).
-    let recovery = startup_recovery(dir, lock_dir);
+    let recovery = startup_recovery(dir, lock_dir, gates);
     // Then a vault delete's journal (design 0013, "Forgetting an item"):
     // committed, it is finished; never committed, its staged secrets file
     // goes. Left pending, the vault isn't read: recovery, first in every
@@ -3064,7 +3086,7 @@ fn remove_leftover_temps(dir: &Path) {
 /// that node stopped (design 0001: main starts a node only on `installed`).
 pub type NodeRecovery = Option<serde_json::Value>;
 
-fn startup_recovery(dir: &Path, lock_dir: &Path) -> NodeRecovery {
+fn startup_recovery(dir: &Path, lock_dir: &Path, files: &journal::RadicleGates) -> NodeRecovery {
     // Every affected node, and whether any is pending (rather than corrupt).
     let mut affected: Vec<String> = Vec::new();
     let mut pending = None;
@@ -3075,6 +3097,7 @@ fn startup_recovery(dir: &Path, lock_dir: &Path) -> NodeRecovery {
         retry: Duration::ZERO,
         held: None,
         held_identity: None,
+        files: files.clone(),
     };
     match journal::recover(dir, &gates) {
         Ok(journal::Recovered::Waiting { op_id, node }) => {
@@ -4011,9 +4034,11 @@ fn job_reconcile(
 /// `nodes.write_identity`: builds the node's files from keys taken at job
 /// start, then commits them through the journal. The commit point is the
 /// journal write; after it, the reply is `installed` or `pending_recovery`.
+/// Radicle homes' gates are taken in `lock_dir`, or through the gate files
+/// `serve` opened ahead (`files`, design 0017, C3) when they have the home.
 fn job_node_write(
     identity_dir: &Path,
-    lock_dir: &Path,
+    (lock_dir, files): (&Path, &journal::RadicleGates),
     op_id: &str,
     spec: &NodeSpec,
     keys: Option<Box<FreedomKeys>>,
@@ -4034,6 +4059,7 @@ fn job_node_write(
         retry: fc_service::gate::CONTENTION_RETRY,
         held: None,
         held_identity: None,
+        files: files.clone(),
     };
     match journal::recover(identity_dir, &recovering) {
         Ok(journal::Recovered::Waiting { .. }) => return Err(OpError::LockHeld),
@@ -4043,16 +4069,12 @@ fn job_node_write(
     // A Radicle write holds the home's gate for its whole length, from
     // before it reads anything of the home (design 0008, "Identity changes"):
     // a running Radicle service holds it, so the write answers `lock_held`
-    // after 5 s and touches nothing.
+    // after 5 s and touches nothing. Through the home's gate file when
+    // `serve` opened one (design 0017, C3), with the same retry; otherwise
+    // by its path, made if missing, as before.
     let home_gate = match spec {
         NodeSpec::Radicle { home, .. } => Some(
-            fc_service::gate::acquire(
-                home,
-                lock_dir,
-                journal::RADICLE_GATE,
-                fc_service::gate::CONTENTION_RETRY,
-            )
-            .map_err(|e| match e {
+            journal::home_gate(home, &recovering, true).map_err(|e| match e {
                 fc_service::gate::GateError::Held => OpError::LockHeld,
                 fc_service::gate::GateError::Storage(e) => storage(&e),
                 _ => OpError::Storage("gate"),

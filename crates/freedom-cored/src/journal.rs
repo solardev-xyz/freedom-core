@@ -42,6 +42,16 @@
 //! the Radicle service holds for its whole life ([`Gates`]). A recovery that
 //! finds it held leaves the journal in place ([`Recovered::Waiting`]): the
 //! node stays `pending_recovery` until the service has stopped.
+//!
+//! **Before confinement** (design 0017, C3 and C6): [`prepare`] reads the
+//! records as recovery does, names the roots their recovery will need, and
+//! opens the Radicle homes' gate files ahead ([`RadicleGates`]), which
+//! recovery and the writer then lock ([`home_gate`]) instead of opening a
+//! path in the lock directory.
+
+mod records;
+
+pub use records::{RadicleGates, prepare};
 
 use std::fs::File;
 use std::io::{Read, Write};
@@ -302,12 +312,15 @@ impl<'a> Plan<'a> {
 /// retrying for `retry`. `held` is the canonical home whose gate the caller
 /// already holds, and `held_identity` the directory identity that gate
 /// recorded: a write recovers a journal of its own home under its own gate.
+/// `files` are the gate files `serve` opened ahead (design 0017, C3): a
+/// home among them is gated through its open file ([`home_gate`]).
 #[derive(Debug, Clone)]
 pub struct Gates {
     pub lock_dir: PathBuf,
     pub retry: std::time::Duration,
     pub held: Option<PathBuf>,
     pub held_identity: Option<DirIdentity>,
+    pub files: RadicleGates,
 }
 
 /// The Radicle home gate's namespace: the Radicle service's own.
@@ -642,12 +655,7 @@ fn radicle_gate(root: &Path, gates: &Gates, create: bool) -> std::io::Result<Hom
     if gates.held.as_deref() == Some(root) {
         return Ok(HomeGate::Taken(None));
     }
-    let acquired = if create {
-        fc_service::gate::acquire(root, &gates.lock_dir, RADICLE_GATE, gates.retry)
-    } else {
-        fc_service::gate::acquire_existing(root, &gates.lock_dir, RADICLE_GATE, gates.retry)
-    };
-    match acquired {
+    match home_gate(root, gates, create) {
         Ok(gate) if gate.data_dir == root => Ok(HomeGate::Taken(Some(gate))),
         Ok(_) => Err(std::io::Error::other(
             "a Radicle home that isn't its journal's canonical root",
@@ -655,6 +663,30 @@ fn radicle_gate(root: &Path, gates: &Gates, create: bool) -> std::io::Result<Hom
         Err(fc_service::gate::GateError::Held) => Ok(HomeGate::Held),
         Err(fc_service::gate::GateError::Storage(e)) => Err(e),
         Err(other) => Err(std::io::Error::other(other.to_string())),
+    }
+}
+
+/// Takes the Radicle home `home`'s gate, retrying contention for
+/// `gates.retry` either way:
+/// - **through its gate file,** when `serve` opened one ahead for it
+///   (design 0017, C3): the file's lock, with nothing made and nothing
+///   opened in the lock directory;
+/// - **otherwise by its path,** in `gates.lock_dir`, as before 0017: a
+///   missing home made (`create`), or required ([`fc_service::gate::
+///   acquire_existing`]). D7-2d makes the gate files the only way.
+pub fn home_gate(
+    home: &Path,
+    gates: &Gates,
+    create: bool,
+) -> Result<fc_service::gate::Gate, fc_service::gate::GateError> {
+    match gates.files.get(home) {
+        Some(file) => file.lock(gates.retry),
+        None if create => {
+            fc_service::gate::acquire(home, &gates.lock_dir, RADICLE_GATE, gates.retry)
+        }
+        None => {
+            fc_service::gate::acquire_existing(home, &gates.lock_dir, RADICLE_GATE, gates.retry)
+        }
     }
 }
 
@@ -758,6 +790,16 @@ fn valid_journal(journal: &Journal, identity_dir: &Path) -> bool {
                     })
             }
         })
+}
+
+/// An intent recovery acts on: a valid op ID, a supported node, and a
+/// normalized absolute root that isn't the identity directory. Any other
+/// is removed with nothing looked at under its root.
+fn valid_intent(intent: &Intent, identity_dir: &Path) -> bool {
+    valid_op_id(&intent.op_id)
+        && normalized_absolute(&intent.root)
+        && intent.root != identity_dir
+        && NODES.contains(&intent.node.as_str())
 }
 
 /// Absolute, with no `.` or `..` components.
@@ -1008,10 +1050,7 @@ fn discard_intent(identity_dir: &Path, gates: &Gates) -> std::io::Result<Recover
         return Ok(Recovered::Nothing);
     };
     if let Ok(intent) = serde_json::from_slice::<Intent>(&bytes)
-        && valid_op_id(&intent.op_id)
-        && normalized_absolute(&intent.root)
-        && intent.root != identity_dir
-        && NODES.contains(&intent.node.as_str())
+        && valid_intent(&intent, identity_dir)
     {
         // The core's own staged names, through no symlink below the root, as
         // every node file is. A Radicle home's are fixed names that another
@@ -1205,6 +1244,7 @@ mod tests {
             retry: std::time::Duration::ZERO,
             held: None,
             held_identity: None,
+            files: RadicleGates::default(),
         }
     }
 
@@ -1672,6 +1712,7 @@ mod tests {
             retry: zero,
             held: Some(home.clone()),
             held_identity: gate.identity,
+            files: RadicleGates::default(),
         };
         let plan = Plan {
             entries: vec![
@@ -1782,12 +1823,14 @@ mod tests {
             retry: zero,
             held: Some(home.clone()),
             held_identity: gate.identity,
+            files: RadicleGates::default(),
         };
         let recovering = Gates {
             lock_dir: locks,
             retry: zero,
             held: None,
             held_identity: None,
+            files: RadicleGates::default(),
         };
         let plan = Plan {
             entries: vec![
@@ -1875,6 +1918,7 @@ mod tests {
                 retry: std::time::Duration::ZERO,
                 held: None,
                 held_identity: None,
+                files: RadicleGates::default(),
             };
             let recovered = super::recover(&identity, &gates);
             INTENT_SEEN.with(|hook| *hook.borrow_mut() = None);
@@ -1920,6 +1964,7 @@ mod tests {
             retry: std::time::Duration::ZERO,
             held: None,
             held_identity: None,
+            files: RadicleGates::default(),
         };
         let recovered = super::recover(&identity, &gates);
         INTENT_SEEN.with(|hook| *hook.borrow_mut() = None);

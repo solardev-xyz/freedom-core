@@ -302,6 +302,7 @@ fn recover(data_dir: &std::path::Path, lock_dir: &std::path::Path) -> Exit {
         retry: fc_service::gate::CONTENTION_RETRY,
         held: None,
         held_identity: None,
+        files: journal::RadicleGates::default(),
     };
     let line = match journal::recover(data_dir, &gates) {
         Ok(journal::Recovered::Waiting { node, .. }) => {

@@ -71,7 +71,7 @@ use crate::secrets::Secrets;
 use crate::transport::{self, Allowance, Credits, Link, Pending};
 use crate::vault::{FileSnapshot, Finished, NodeRecovery, Out, Vault};
 use crate::worker::Worker;
-use crate::{chain, gate, hardening, log, naming};
+use crate::{chain, gate, hardening, journal, log, naming};
 #[cfg(feature = "testhooks")]
 use crate::{testhooks, testmethods};
 
@@ -358,6 +358,26 @@ pub fn run(options: &Options) -> Exit {
             return Exit::from(&e);
         }
     };
+    // Design 0017, C3 and C6: a pending node record's roots planned, and
+    // the Radicle homes' gate files opened, before any of `serve`'s threads
+    // starts (logging's runs already, from `main`). Recovery and
+    // `nodes.write_identity` then lock those files. Nothing is confined
+    // yet: D7-2d moves this before the logging thread, and passes the grant
+    // and the files' descriptors to `confine`.
+    let prepared = journal::prepare(
+        &gate.identity_dir,
+        &options.lock_dir,
+        options.node_roots.radicle.as_deref(),
+    );
+    if !prepared.grant.is_empty() || prepared.gates.count() > 0 {
+        log::info(
+            "node records planned",
+            serde_json::json!({
+                "roots": prepared.grant.len(),
+                "gate_files": prepared.gates.count(),
+            }),
+        );
+    }
 
     let (events_tx, events) = mpsc::channel();
     let credits = Arc::new(Credits::default());
@@ -438,6 +458,7 @@ pub fn run(options: &Options) -> Exit {
         || !spawn_snapshot(
             gate.identity_dir.clone(),
             options.lock_dir.clone(),
+            prepared.gates.clone(),
             Arc::clone(&secrets),
             events_tx.clone(),
         )
@@ -484,6 +505,7 @@ pub fn run(options: &Options) -> Exit {
             );
             vault.set_secrets(Arc::clone(&secrets));
             vault.set_node_roots(options.node_roots.clone());
+            vault.set_radicle_gates(prepared.gates.clone());
             vault
         },
         grant_root_arg: options.grant_root.clone(),
@@ -736,6 +758,7 @@ pub fn run(options: &Options) -> Exit {
 fn spawn_snapshot(
     identity_dir: PathBuf,
     lock_dir: PathBuf,
+    radicle_gates: journal::RadicleGates,
     secrets: Arc<Secrets>,
     events: Sender<Event>,
 ) -> bool {
@@ -743,7 +766,8 @@ fn spawn_snapshot(
         .name("snapshot".into())
         .spawn(move || {
             crate::testhooks::snapshot_delay();
-            let (snapshot, recovery) = crate::vault::startup_snapshot(&identity_dir, &lock_dir);
+            let (snapshot, recovery) =
+                crate::vault::startup_snapshot(&identity_dir, &lock_dir, &radicle_gates);
             // The secrets file settles against the vault as it stands, before
             // the hello is answered and any job runs (design 0013).
             secrets.startup(
