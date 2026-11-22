@@ -46,6 +46,13 @@
 //!   directory swapped for a junction after it was opened can't redirect
 //!   anything: the operation stays in the directory the handle holds. A
 //!   tree is walked by handle too. Only the root is opened by its path.
+//! - **A tree within one mount** (design 0013, "The move": PRF-9c's
+//!   cross-device copy): [`Dir::walk`], [`Dir::copy_tree`] and
+//!   [`Dir::remove_tree_within`] never enter a directory on another mount
+//!   than the directory they start from ([`Mount`]): a walk reports it, a
+//!   copy or a removal stops with an error. Removing through a mount point
+//!   would empty the mounted volume, and copying through it would pull the
+//!   whole volume across.
 
 use std::ffi::{OsStr, OsString};
 use std::fs::File;
@@ -53,6 +60,10 @@ use std::io;
 use std::path::{Component, Path, PathBuf};
 
 use crate::fsx::Regular;
+
+mod tree;
+
+pub use tree::MAX_DEPTH;
 
 /// A directory's identity: its device and inode (Unix), as a gate records
 /// it once its lock is held ([`Resolve::Canonical`]). The caller builds it
@@ -74,6 +85,58 @@ pub enum Kind {
     /// A symlink, a reparse point, or anything else that isn't a regular
     /// file or a directory.
     Other,
+}
+
+/// The mount a directory is on: its device and, on Linux 5.8 and later,
+/// its mount's ID (`STATX_MNT_ID`), which tells a bind mount of the same
+/// file system from its parent; on Windows, its volume's serial number.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Mount {
+    device: u64,
+    id: Option<u64>,
+}
+
+impl Mount {
+    /// Whether both are the same mount: the same device, and the same mount
+    /// ID where both are known.
+    pub fn same(self, other: Mount) -> bool {
+        self.device == other.device
+            && match (self.id, other.id) {
+                (Some(one), Some(two)) => one == two,
+                _ => true,
+            }
+    }
+}
+
+/// A volume's free space ([`Dir::space`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Space {
+    /// The bytes this process's user may still write (`f_bavail`; on
+    /// Windows the caller's available allocation units, under any quota).
+    pub available: u64,
+    /// The volume's allocation unit, in bytes, at least 1: a file takes a
+    /// whole number of them.
+    pub block: u64,
+}
+
+/// What a walk ([`Dir::walk`]) meets, not following a symlink.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Node {
+    /// A regular file, its length, and whether this process may read it.
+    File { len: u64, readable: bool },
+    /// A directory on the walk's mount, and whether this process may list
+    /// it and add and remove entries in it (read, write and search). One it
+    /// may not use isn't entered.
+    Dir { usable: bool },
+    /// A symlink (on Windows any reparse point: a symlink or a junction),
+    /// never followed.
+    Link,
+    /// A FIFO, a socket or a device: never opened.
+    Special,
+    /// A directory on another mount than the walk's: not entered.
+    Mount,
+    /// A directory [`MAX_DEPTH`] levels below the walk's top: not entered.
+    Deep,
 }
 
 /// How a node's root is opened ([`Dir::open_root`]).
@@ -195,7 +258,38 @@ impl Dir {
     /// The tree is walked from this directory's handle, each entry removed
     /// relative to its own directory's (review of #177, round 2).
     pub fn remove_tree(&self, name: &OsStr) -> io::Result<bool> {
-        imp::remove_tree(self, name)
+        imp::remove_tree(self, name, None, &mut || Ok(()))
+    }
+
+    /// As [`Dir::remove_tree`], but never past this directory's mount:
+    /// `name`, if it is a directory, and every directory under it must be
+    /// on the mount this directory is on ([`Mount::same`]), or the removal
+    /// stops with an error at the first that isn't, the rest left as it
+    /// is. A symlink or anything else that isn't a directory is unlinked
+    /// itself, as `remove_tree` does. `each` runs after each entry is
+    /// removed, and an error from it stops the removal. Whether anything
+    /// was there.
+    pub fn remove_tree_within(
+        &self,
+        name: &OsStr,
+        each: &mut dyn FnMut() -> io::Result<()>,
+    ) -> io::Result<bool> {
+        let bound = self.mount()?;
+        imp::remove_tree(self, name, Some(bound), each)
+    }
+
+    /// The mount this directory is on.
+    pub fn mount(&self) -> io::Result<Mount> {
+        imp::mount_of(self)
+    }
+
+    /// Whether this process may add and remove entries here: on Unix, write
+    /// and search permission on the directory (`faccessat` on its handle),
+    /// which removing an entry of it takes. On Windows a removal takes each
+    /// entry's own `DELETE` right, which [`Dir::walk`] probes, so this is
+    /// always true there.
+    pub fn may_change(&self) -> bool {
+        imp::may_change(self)
     }
 
     /// Renames `from` over `to`, both in this directory, replacing whatever
@@ -281,9 +375,9 @@ impl Dir {
 
 #[cfg(unix)]
 mod imp {
-    use super::{Dir, DirIdentity, Kind, Resolve};
+    use super::{Dir, DirIdentity, Kind, Mount, Resolve};
     use crate::fsx::Regular;
-    use rustix::fd::OwnedFd;
+    use rustix::fd::{AsFd, BorrowedFd, OwnedFd};
     use rustix::fs::{AtFlags, FileType, Mode, OFlags};
     use rustix::io::Errno;
     use std::ffi::OsStr;
@@ -291,15 +385,15 @@ mod imp {
     use std::io;
     use std::path::Path;
 
-    const DIR_FLAGS: OFlags = OFlags::RDONLY
+    pub(super) const DIR_FLAGS: OFlags = OFlags::RDONLY
         .union(OFlags::DIRECTORY)
         .union(OFlags::NOFOLLOW)
         .union(OFlags::CLOEXEC);
     /// A directory of a tree being removed: never through a symlink, and
     /// never waiting on whatever else is there.
-    const TREE_FLAGS: OFlags = DIR_FLAGS.union(OFlags::NONBLOCK);
+    pub(super) const TREE_FLAGS: OFlags = DIR_FLAGS.union(OFlags::NONBLOCK);
 
-    fn refused(errno: Errno) -> io::Error {
+    pub(super) fn refused(errno: Errno) -> io::Error {
         if errno == Errno::LOOP || errno == Errno::NOTDIR {
             io::Error::other("a symlink or a file where a node directory should be")
         } else {
@@ -479,7 +573,7 @@ mod imp {
 
     /// The names in the directory `fd`, but `.` and `..`, read whole before
     /// any is removed.
-    fn entries(fd: &OwnedFd) -> io::Result<Vec<std::ffi::OsString>> {
+    pub(super) fn entries(fd: &OwnedFd) -> io::Result<Vec<std::ffi::OsString>> {
         use std::os::unix::ffi::OsStrExt;
         let mut names = Vec::new();
         for entry in rustix::fs::Dir::read_from(fd)? {
@@ -504,9 +598,7 @@ mod imp {
             let next = rustix::fs::openat(parent, &level.name, TREE_FLAGS, Mode::empty())
                 .map_err(refused)?;
             if identity(&next)? != level.identity {
-                return Err(io::Error::other(
-                    "a directory of a tree changed during its removal",
-                ));
+                return Err(changed());
             }
             fd = Some(next);
         }
@@ -522,14 +614,33 @@ mod imp {
     /// parent is reopened from the held directory, level by level, and must
     /// be the directory it was ([`reopen`]). So nothing outside the tree is
     /// reached, whatever is renamed or swapped above or inside it meanwhile.
-    pub fn remove_tree(dir: &Dir, name: &OsStr) -> io::Result<bool> {
+    ///
+    /// With `bound`, each directory opened (the top's included) must be on
+    /// that mount, or the removal stops there with an error ([`within`]).
+    /// `each` runs after each entry is removed.
+    pub fn remove_tree(
+        dir: &Dir,
+        name: &OsStr,
+        bound: Option<Mount>,
+        each: &mut dyn FnMut() -> io::Result<()>,
+    ) -> io::Result<bool> {
+        let looked = before_open(bound, dir.fd.as_fd(), name)?;
         let first = match rustix::fs::openat(&dir.fd, name, TREE_FLAGS, Mode::empty()) {
             Ok(fd) => fd,
             Err(Errno::NOENT) => return Ok(false),
             // Not a directory, or a symlink: removed itself.
-            Err(Errno::LOOP | Errno::NOTDIR) => return unlink(dir, name),
+            Err(Errno::LOOP | Errno::NOTDIR) => {
+                let removed = unlink(dir, name)?;
+                if removed {
+                    each()?;
+                }
+                return Ok(removed);
+            }
             Err(e) => return Err(e.into()),
         };
+        opened_as(&first, looked)?;
+        within(bound, first.as_fd())?;
+        super::tree::pause::at("opened", name);
         let mut levels = vec![Level {
             name: name.to_owned(),
             identity: identity(&first)?,
@@ -542,8 +653,12 @@ mod imp {
                 return Ok(true);
             };
             if let Some(entry) = level.left.pop() {
+                let looked = before_open(bound, current.as_fd(), &entry)?;
                 match rustix::fs::openat(&current, &entry, TREE_FLAGS, Mode::empty()) {
                     Ok(child) => {
+                        opened_as(&child, looked)?;
+                        within(bound, child.as_fd())?;
+                        super::tree::pause::at("opened", &entry);
                         levels.push(Level {
                             name: entry,
                             identity: identity(&child)?,
@@ -556,7 +671,8 @@ mod imp {
                     Err(Errno::NOENT) => {}
                     Err(Errno::LOOP | Errno::NOTDIR) => {
                         match rustix::fs::unlinkat(&current, &entry, AtFlags::empty()) {
-                            Ok(()) | Err(Errno::NOENT) => {}
+                            Ok(()) => each()?,
+                            Err(Errno::NOENT) => {}
                             Err(e) => return Err(e.into()),
                         }
                     }
@@ -571,16 +687,140 @@ mod imp {
             drop(current);
             if levels.is_empty() {
                 return match rustix::fs::unlinkat(&dir.fd, &done.name, AtFlags::REMOVEDIR) {
-                    Ok(()) | Err(Errno::NOENT) => Ok(true),
+                    Ok(()) => each().map(|()| true),
+                    Err(Errno::NOENT) => Ok(true),
                     Err(e) => Err(e.into()),
                 };
             }
             current = reopen(&dir.fd, &levels)?;
             match rustix::fs::unlinkat(&current, &done.name, AtFlags::REMOVEDIR) {
-                Ok(()) | Err(Errno::NOENT) => {}
+                Ok(()) => each()?,
+                Err(Errno::NOENT) => {}
                 Err(e) => return Err(e.into()),
             }
         }
+    }
+
+    /// With a bound, the directory `fd` must be on that mount: a mount
+    /// point inside a tree stops its removal or its copy.
+    pub(super) fn within(bound: Option<Mount>, fd: BorrowedFd<'_>) -> io::Result<()> {
+        match bound {
+            Some(bound) if !mount_of_fd(fd)?.same(bound) => Err(super::tree::crossing()),
+            _ => Ok(()),
+        }
+    }
+
+    pub fn mount_of(dir: &Dir) -> io::Result<Mount> {
+        mount_of_fd(dir.fd.as_fd())
+    }
+
+    /// The mount `fd` is on: its device, and on Linux its mount's ID where
+    /// the kernel gives one (`STATX_MNT_ID`, Linux 5.8).
+    pub(super) fn mount_of_fd(fd: BorrowedFd<'_>) -> io::Result<Mount> {
+        let stat = rustix::fs::fstat(fd)?;
+        // st_dev is u64 on Linux, but not on every Unix.
+        #[allow(clippy::unnecessary_cast)]
+        let device = stat.st_dev as u64;
+        #[cfg(target_os = "linux")]
+        let id = mount_id(fd, c"", AtFlags::EMPTY_PATH);
+        #[cfg(not(target_os = "linux"))]
+        let id = None;
+        Ok(Mount { device, id })
+    }
+
+    /// The mount `name` in `parent` is on, not following a symlink at it,
+    /// from its `lstat` (`stat`, read by the caller).
+    pub(super) fn mount_at(parent: BorrowedFd<'_>, name: &OsStr, stat: &rustix::fs::Stat) -> Mount {
+        // st_dev is u64 on Linux, but not on every Unix.
+        #[allow(clippy::unnecessary_cast)]
+        let device = stat.st_dev as u64;
+        #[cfg(target_os = "linux")]
+        let id = mount_id(parent, name, LOOK);
+        #[cfg(not(target_os = "linux"))]
+        let id = {
+            let _ = (parent, name);
+            None
+        };
+        Mount { device, id }
+    }
+
+    /// How a name is looked at before it is opened: never following a
+    /// symlink, and on Linux never triggering an automount at it.
+    #[cfg(target_os = "linux")]
+    const LOOK: AtFlags = AtFlags::SYMLINK_NOFOLLOW.union(AtFlags::NO_AUTOMOUNT);
+    #[cfg(not(target_os = "linux"))]
+    const LOOK: AtFlags = AtFlags::SYMLINK_NOFOLLOW;
+
+    /// `name` in `parent`, looked at as [`LOOK`] says (`fstatat`).
+    pub(super) fn stat_at(parent: BorrowedFd<'_>, name: &OsStr) -> Result<rustix::fs::Stat, Errno> {
+        rustix::fs::statat(parent, name, LOOK)
+    }
+
+    /// A stat's device and inode, as [`identity`] reads them from a handle.
+    pub(super) fn stat_identity(stat: &rustix::fs::Stat) -> (u64, u64) {
+        // st_dev and st_ino are u64 on Linux, but not on every Unix.
+        #[allow(clippy::unnecessary_cast)]
+        (stat.st_dev as u64, stat.st_ino as u64)
+    }
+
+    /// With a bound, `name` in `parent` looked at before it is opened: a
+    /// directory there must be on the bound's mount, or the removal stops
+    /// before the open (which could trigger an automount, or wait on a
+    /// mounted volume). Its identity, which the open must then find.
+    fn before_open(
+        bound: Option<Mount>,
+        parent: BorrowedFd<'_>,
+        name: &OsStr,
+    ) -> io::Result<Option<(u64, u64)>> {
+        let Some(bound) = bound else {
+            return Ok(None);
+        };
+        let stat = match stat_at(parent, name) {
+            Ok(stat) => stat,
+            Err(Errno::NOENT) => return Ok(None),
+            Err(e) => return Err(e.into()),
+        };
+        if FileType::from_raw_mode(stat.st_mode) != FileType::Directory {
+            return Ok(None);
+        }
+        if !mount_at(parent, name, &stat).same(bound) {
+            return Err(super::tree::crossing());
+        }
+        super::tree::pause::at("classified", name);
+        Ok(Some(stat_identity(&stat)))
+    }
+
+    /// The directory opened must be the one looked at before.
+    fn opened_as(fd: &OwnedFd, looked: Option<(u64, u64)>) -> io::Result<()> {
+        match looked {
+            Some(looked) if identity(fd)? != looked => Err(changed()),
+            _ => Ok(()),
+        }
+    }
+
+    fn changed() -> io::Error {
+        io::Error::other("a directory of a tree changed during its removal")
+    }
+
+    pub fn may_change(dir: &Dir) -> bool {
+        use rustix::fs::Access;
+        rustix::fs::accessat(
+            &dir.fd,
+            c".",
+            Access::WRITE_OK | Access::EXEC_OK,
+            AtFlags::empty(),
+        )
+        .is_ok()
+    }
+
+    /// `STATX_MNT_ID`, or `None` where the kernel doesn't give it.
+    #[cfg(target_os = "linux")]
+    fn mount_id<P: rustix::path::Arg>(fd: BorrowedFd<'_>, path: P, flags: AtFlags) -> Option<u64> {
+        use rustix::fs::StatxFlags;
+        let stat = rustix::fs::statx(fd, path, flags, StatxFlags::MNT_ID).ok()?;
+        StatxFlags::from_bits_retain(stat.stx_mask)
+            .contains(StatxFlags::MNT_ID)
+            .then_some(stat.stx_mnt_id)
     }
 
     pub fn same_file(dir: &Dir, handle: &File, name: &OsStr) -> io::Result<bool> {
@@ -630,13 +870,13 @@ mod imp {
 
 #[cfg(windows)]
 mod imp {
-    use super::{Dir, Kind, Resolve};
+    use super::{Dir, Kind, Mount, Resolve};
     use crate::fsx::{Regular, file_identity};
     use fc_sys::windows::{self as win, Create, Expect, OpenAt, access};
     use std::ffi::{OsStr, OsString};
     use std::fs::{File, OpenOptions};
     use std::io;
-    use std::os::windows::io::{AsHandle as _, OwnedHandle};
+    use std::os::windows::io::{AsHandle as _, BorrowedHandle, OwnedHandle};
     use std::path::Path;
 
     fn refused() -> io::Error {
@@ -654,7 +894,7 @@ mod imp {
         }
     }
 
-    fn how(access: u32, create: Create, expect: Expect) -> OpenAt {
+    pub(super) fn how(access: u32, create: Create, expect: Expect) -> OpenAt {
         OpenAt {
             access,
             create,
@@ -665,7 +905,7 @@ mod imp {
 
     /// A directory, and not a reparse point: a junction or a directory
     /// symlink opened itself is neither followed nor taken for one.
-    fn plain_dir(handle: &OwnedHandle) -> io::Result<bool> {
+    pub(super) fn plain_dir(handle: &OwnedHandle) -> io::Result<bool> {
         let attributes = win::attribute_tag(handle.as_handle())?;
         Ok(attributes.directory() && !attributes.reparse_point())
     }
@@ -873,14 +1113,29 @@ mod imp {
     /// tree is reached, whatever is renamed or swapped above or inside it
     /// meanwhile. Windows bounds a process's handles in the millions, not
     /// the thousands: a handle per level is held, where Unix reopens them.
-    pub fn remove_tree(dir: &Dir, name: &OsStr) -> io::Result<bool> {
+    ///
+    /// With `bound`, each directory opened (the top's included) must be on
+    /// that volume, or the removal stops there with an error. A volume
+    /// mounted in a folder is a reparse point, deleted itself and never
+    /// walked, so a removal never reaches into one. `each` runs after each
+    /// entry is deleted (its handle closed).
+    pub fn remove_tree(
+        dir: &Dir,
+        name: &OsStr,
+        bound: Option<Mount>,
+        each: &mut dyn FnMut() -> io::Result<()>,
+    ) -> io::Result<bool> {
         let Some(top) = open_entry(&dir.handle, name)? else {
             return Ok(false);
         };
         if !plain_dir(&top)? {
             win::delete(top.as_handle())?;
+            drop(top);
+            each()?;
             return Ok(true);
         }
+        within(bound, top.as_handle())?;
+        super::tree::pause::at("opened", name);
         let left = names_in(&top)?;
         let mut levels = vec![(top, left)];
         loop {
@@ -891,17 +1146,50 @@ mod imp {
                 match open_entry(handle, &entry)? {
                     None => {}
                     Some(child) if plain_dir(&child)? => {
+                        within(bound, child.as_handle())?;
+                        super::tree::pause::at("opened", &entry);
                         let left = names_in(&child)?;
                         levels.push((child, left));
                     }
-                    Some(child) => win::delete(child.as_handle())?,
+                    Some(child) => {
+                        win::delete(child.as_handle())?;
+                        drop(child);
+                        each()?;
+                    }
                 }
                 continue;
             }
             if let Some((done, _)) = levels.pop() {
                 win::delete(done.as_handle())?;
+                drop(done);
+                each()?;
             }
         }
+    }
+
+    /// With a bound, the directory `handle` is open on must be on that
+    /// volume.
+    pub(super) fn within(bound: Option<Mount>, handle: BorrowedHandle<'_>) -> io::Result<()> {
+        match bound {
+            Some(bound) if !mount_of_handle(handle)?.same(bound) => Err(super::tree::crossing()),
+            _ => Ok(()),
+        }
+    }
+
+    pub fn mount_of(dir: &Dir) -> io::Result<Mount> {
+        mount_of_handle(dir.handle.as_handle())
+    }
+
+    pub fn may_change(_dir: &Dir) -> bool {
+        true
+    }
+
+    /// The volume `handle` is open on, by its serial number.
+    pub(super) fn mount_of_handle(handle: BorrowedHandle<'_>) -> io::Result<Mount> {
+        Ok(Mount {
+            device: file_identity(handle)?.0,
+            id: None,
+        })
     }
 
     /// The file IDs of `handle` and of `name`, opened itself relative to

@@ -59,11 +59,15 @@ libc = "0.2"
 # (design 0010, "Windows"): JobObjects and Threading for the calls,
 # Security for CreateJobObjectW's attributes, Foundation for HANDLE, and
 # SystemServices for the policies' structures, whose size the calls are
-# checked against.
+# checked against; a volume's free space from a handle
+# (NtQueryVolumeInformationFile, in Wdk_Storage_FileSystem, filling
+# FILE_FS_FULL_SIZE_INFORMATION, in Wdk_System_SystemServices) for a
+# profile's cross-device copy (design 0013, PRF-9c).
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = [
     "Wdk_Foundation",
     "Wdk_Storage_FileSystem",
+    "Wdk_System_SystemServices",
     "Win32_Foundation",
     "Win32_Security",
     "Win32_Security_Authorization",

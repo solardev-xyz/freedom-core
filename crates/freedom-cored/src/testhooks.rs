@@ -226,16 +226,34 @@
 //!   recovery's (`after-exclusion`, `mid-recovery`,
 //!   `before-journal-removed`), and a starting move's (`after-exclusion`,
 //!   `after-freedom-dir`, `after-journal`, `mid-move` after each entry's
-//!   rename, `after-renames`, `after-marker`, `after-placeholder`,
-//!   `before-journal-removed`), and on Windows after a refused try of a
-//!   rename (`rename-retry`) or a rollback's rename back
-//!   (`rename-back-retry`): there the process exits at once with 99.
+//!   rename or copy, `after-renames`, `after-marker`, `after-placeholder`,
+//!   `before-journal-removed`), with a copied entry's (PRF-9c):
+//!   `before-copy` once the journal names it in `copied`, `mid-copy` after
+//!   each entry its copy makes in `<name>.moving`, `after-copy` once that
+//!   is renamed to its name, and after the marker `mid-cleanup` after each
+//!   entry of its source removed and `after-cleanup`; and on Windows after
+//!   a refused try of a rename (`rename-retry`) or a rollback's rename back
+//!   (`rename-back-retry`). There the process exits at once with 99.
 //! - `FREEDOM_CORED_TEST_PROFILE_MIGRATE_PAUSE` (`<step>=<marker>=<release>`):
 //!   at that step (one of the crash hook's) `profile migrate` creates the
 //!   file `<marker>`, then waits, its locks and gates held and its lock
 //!   refreshed, until the file `<release>` exists (at most 120 s). Like
 //!   `FREEDOM_CORED_TEST_PROFILE_HOLD`'s, its files' directories are in the
 //!   run's grant.
+//! - `FREEDOM_CORED_TEST_PROFILE_MIGRATE_EXDEV` lists entries of the move,
+//!   comma-separated (`*` for all): a starting move treats each as on
+//!   another device than `freedom/`, as when `freedom/` is a volume of its
+//!   own. Its preconditions survey it for a copy, and its rename fails with
+//!   `CrossesDevices` without being tried, so it is copied (PRF-9c) on one
+//!   file system.
+//! - `FREEDOM_CORED_TEST_PROFILE_MIGRATE_FREE` names a file: while it holds
+//!   a number, that many bytes are what the move reads as free on
+//!   `freedom/`'s volume, in the preconditions and at each copy. Read at
+//!   each check, so a test changes it while a run is paused; its directory
+//!   is in the run's grant.
+//! - `FREEDOM_CORED_TEST_PROFILE_MIGRATE_ENOSPC` (a number `n`): a copy
+//!   fails as on a full volume (`StorageFull`) once it has made `n`
+//!   entries in `<name>.moving`.
 //! - `FREEDOM_CORED_TEST_PROFILE_CONFINED` lists paths (the OS's path-list
 //!   separator): right after a profile subcommand confines itself, it reads
 //!   each (a file's bytes, a directory's entries) and logs one line on
@@ -806,13 +824,36 @@ pub fn profile_migrate_step(step: &str) {
     }
 }
 
+#[cfg(feature = "testhooks")]
+pub fn profile_migrate_exdev(name: &str) -> bool {
+    std::env::var("FREEDOM_CORED_TEST_PROFILE_MIGRATE_EXDEV").is_ok_and(|list| {
+        list.split(',')
+            .any(|listed| listed == "*" || listed == name)
+    })
+}
+
+#[cfg(feature = "testhooks")]
+pub fn profile_migrate_free() -> Option<u64> {
+    let file = std::env::var_os("FREEDOM_CORED_TEST_PROFILE_MIGRATE_FREE")?;
+    std::fs::read_to_string(file).ok()?.trim().parse().ok()
+}
+
+#[cfg(feature = "testhooks")]
+pub fn profile_migrate_full(made: u64) -> bool {
+    millis("FREEDOM_CORED_TEST_PROFILE_MIGRATE_ENOSPC").is_some_and(|n| made > n)
+}
+
 /// The directories `FREEDOM_CORED_TEST_PROFILE_HOLD`'s,
-/// `FREEDOM_CORED_TEST_PROFILE_DELETE_PAUSE`'s and
-/// `FREEDOM_CORED_TEST_PROFILE_MIGRATE_PAUSE`'s files live in, which a
+/// `FREEDOM_CORED_TEST_PROFILE_DELETE_PAUSE`'s,
+/// `FREEDOM_CORED_TEST_PROFILE_MIGRATE_PAUSE`'s and
+/// `FREEDOM_CORED_TEST_PROFILE_MIGRATE_FREE`'s files live in, which a
 /// confined subcommand's grant takes so the hooks still work.
 #[cfg(feature = "testhooks")]
 pub fn profile_hook_dirs() -> Vec<std::path::PathBuf> {
     let mut files = Vec::new();
+    if let Ok(free) = std::env::var("FREEDOM_CORED_TEST_PROFILE_MIGRATE_FREE") {
+        files.push(free);
+    }
     if let Ok(spec) = std::env::var("FREEDOM_CORED_TEST_PROFILE_HOLD")
         && let Some((marker, release)) = spec.split_once('=')
     {
@@ -863,6 +904,21 @@ pub fn profile_confined(report: &fc_service::confine::Report) {
 
 #[cfg(not(feature = "testhooks"))]
 pub fn profile_migrate_step(_step: &str) {}
+
+#[cfg(not(feature = "testhooks"))]
+pub fn profile_migrate_exdev(_name: &str) -> bool {
+    false
+}
+
+#[cfg(not(feature = "testhooks"))]
+pub fn profile_migrate_free() -> Option<u64> {
+    None
+}
+
+#[cfg(not(feature = "testhooks"))]
+pub fn profile_migrate_full(_made: u64) -> bool {
+    false
+}
 
 #[cfg(not(feature = "testhooks"))]
 pub fn profile_hook_dirs() -> Vec<std::path::PathBuf> {

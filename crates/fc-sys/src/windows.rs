@@ -1,7 +1,8 @@
 //! Windows calls: storage qualification, error reporting, a file's
 //! identity and whether this process's user owns it, files and directories
 //! opened, made, renamed, deleted and listed relative to a directory's
-//! handle (design 0013, "Windows handle I/O (#963)"), and confinement's job
+//! handle (design 0013, "Windows handle I/O (#963)"), a volume's free space
+//! from a handle (0013, "The move": PRF-9c's copy), and confinement's job
 //! object and process mitigation policies (design 0010, "Windows").
 //!
 //! None of these calls closes a handle but its own: [`Job`]'s, and the
@@ -16,9 +17,11 @@ use windows_sys::Wdk::Foundation::OBJECT_ATTRIBUTES;
 use windows_sys::Wdk::Storage::FileSystem::{
     FILE_CREATE, FILE_DIRECTORY_FILE, FILE_INFORMATION_CLASS, FILE_NON_DIRECTORY_FILE, FILE_OPEN,
     FILE_OPEN_IF, FILE_OPEN_REPARSE_POINT, FILE_RENAME_INFORMATION, FILE_RENAME_POSIX_SEMANTICS,
-    FILE_RENAME_REPLACE_IF_EXISTS, FILE_SYNCHRONOUS_IO_NONALERT, FileRenameInformation,
-    FileRenameInformationEx, NtCreateFile, NtSetInformationFile,
+    FILE_RENAME_REPLACE_IF_EXISTS, FILE_SYNCHRONOUS_IO_NONALERT, FileFsFullSizeInformation,
+    FileRenameInformation, FileRenameInformationEx, NtCreateFile, NtQueryVolumeInformationFile,
+    NtSetInformationFile,
 };
+use windows_sys::Wdk::System::SystemServices::FILE_FS_FULL_SIZE_INFORMATION;
 use windows_sys::Win32::Foundation::{
     ERROR_DIRECTORY_NOT_SUPPORTED, ERROR_INVALID_FUNCTION, ERROR_INVALID_PARAMETER,
     ERROR_NO_MORE_FILES, ERROR_NOT_SUPPORTED, HANDLE, LocalFree, NTSTATUS, OBJ_CASE_INSENSITIVE,
@@ -398,6 +401,10 @@ pub mod access {
     /// Reading the data, the attributes and the security descriptor (an
     /// owner check), as `GENERIC_READ` maps for a file.
     pub const READ: u32 = fs::FILE_GENERIC_READ;
+    /// Reading a file's data alone (`FILE_READ_DATA`), without the extended
+    /// attributes or the security descriptor `READ` adds: what a byte copy
+    /// takes.
+    pub const READ_DATA: u32 = fs::FILE_READ_DATA;
     /// Writing the data and the attributes, as `GENERIC_WRITE` maps: a
     /// flush needs it.
     pub const WRITE: u32 = fs::FILE_GENERIC_WRITE;
@@ -871,6 +878,41 @@ pub fn rename_at(
     }
 }
 
+/// The size of `FILE_FS_FULL_SIZE_INFORMATION`.
+const FS_FULL_SIZE_INFO_SIZE: u32 = size_of::<FILE_FS_FULL_SIZE_INFORMATION>() as u32;
+const _: () = assert!(size_of::<FILE_FS_FULL_SIZE_INFORMATION>() <= u32::MAX as usize);
+
+/// The bytes this process's user may still write on the volume `file` is
+/// open on, and the volume's allocation unit in bytes
+/// (`NtQueryVolumeInformationFile`, `FileFsFullSizeInformation`: the
+/// caller's available allocation units, which a disk quota limits, as
+/// `GetDiskFreeSpaceExW`'s first count). From the handle, never a path; it
+/// needs no access of its own.
+#[allow(unsafe_code)]
+pub fn volume_space(file: BorrowedHandle<'_>) -> io::Result<(u64, u64)> {
+    let mut info = FILE_FS_FULL_SIZE_INFORMATION::default();
+    let mut status_block = IO_STATUS_BLOCK::default();
+    // SAFETY: `info` is a whole FILE_FS_FULL_SIZE_INFORMATION of
+    // FS_FULL_SIZE_INFO_SIZE bytes and `status_block` an IO_STATUS_BLOCK,
+    // both borrowed mutably for the call, which writes at most those; the
+    // handle is open for its borrow.
+    let status = unsafe {
+        NtQueryVolumeInformationFile(
+            file.as_raw_handle(),
+            &raw mut status_block,
+            (&raw mut info).cast(),
+            FS_FULL_SIZE_INFO_SIZE,
+            FileFsFullSizeInformation,
+        )
+    };
+    if status < 0 {
+        return Err(nt_error(status));
+    }
+    let unit = u64::from(info.SectorsPerAllocationUnit) * u64::from(info.BytesPerSector);
+    let units = u64::try_from(info.CallerAvailableAllocationUnits).unwrap_or(0);
+    Ok((units.saturating_mul(unit), unit))
+}
+
 /// The size of [`DirBuffer`]: a listing's entries are read this many bytes
 /// at a time.
 const DIR_BUFFER_SIZE: usize = 64 * 1024;
@@ -1269,6 +1311,30 @@ impl Mitigation {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A rename across volumes fails with `STATUS_NOT_SAME_DEVICE`, which
+    /// reads as Win32's `ERROR_NOT_SAME_DEVICE` (17) and std's
+    /// `CrossesDevices`: the error a profile's move copies on (PRF-9c).
+    #[test]
+    fn a_rename_across_volumes_reads_as_crossing_devices() {
+        use windows_sys::Win32::Foundation::{ERROR_NOT_SAME_DEVICE, STATUS_NOT_SAME_DEVICE};
+        let error = nt_error(STATUS_NOT_SAME_DEVICE);
+        assert_eq!(error.raw_os_error(), Some(ERROR_NOT_SAME_DEVICE as i32));
+        assert_eq!(error.kind(), io::ErrorKind::CrossesDevices);
+    }
+
+    #[test]
+    fn a_volume_s_space_is_read_from_a_handle() {
+        use std::os::windows::fs::OpenOptionsExt;
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(flags::BACKUP_SEMANTICS)
+            .open(std::env::temp_dir())
+            .unwrap();
+        let (available, unit) = volume_space(file.as_handle()).unwrap();
+        assert!(unit >= 512 && unit.is_power_of_two(), "{unit}");
+        assert!(available > 0);
+    }
 
     #[test]
     fn the_system_drive_is_local_and_bad_input_unknown() {

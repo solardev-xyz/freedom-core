@@ -43,6 +43,18 @@
 //!   lock's name but a regular file or a directory, or an error other than
 //!   a missing file, defers. antd holds no OS lock the core can try: main
 //!   checks `ant-process.json`'s pid (B3).
+//! - **Then the copies** (PRF-9c, `copy.rs`): when `freedom/` is already
+//!   on another mount than the profile's directory (a volume mounted there:
+//!   its device differs, or on Linux its mount ID), every entry's rename
+//!   into it would fail with `EXDEV`, so every entry will be copied. Each
+//!   is surveyed (a mount point inside it, a special file, a file or
+//!   directory this process can't use, a tree too deep, on Windows a
+//!   reparse point), their total size must be within the 2 GiB a move
+//!   copies (`copy_too_large`), and with the margin it must fit in the
+//!   space free on `freedom/`'s volume. A `freedom/` on the profile's own mount (or none yet, which
+//!   the move makes there) needs no copy, so nothing is walked: a renamed
+//!   entry carries whatever is mounted inside it along, removes nothing,
+//!   and a rollback renames it back.
 //!
 //! Any of them ends the run with `deferred` (exit 0) and nothing changed:
 //! the profile opens in the old layout, and the move is tried at the next
@@ -58,6 +70,8 @@ use fc_profile::layout::{
 };
 use fc_store::anchor::{Dir, Kind};
 use fc_store::fsx::Regular;
+
+use super::copy::{self, Unfit};
 
 /// What a starting run does.
 #[derive(Debug, PartialEq, Eq)]
@@ -76,6 +90,7 @@ pub enum Check {
 /// canonical path (`root`, at `canonical`).
 pub fn check(root: &Dir, canonical: &Path) -> io::Result<Check> {
     let freedom_names;
+    let mut freedom_dir = None;
     let freedom = match root.kind(OsStr::new(FREEDOM_DIR))? {
         Kind::Missing => FreedomDir::Missing,
         Kind::Dir => {
@@ -92,6 +107,7 @@ pub fn check(root: &Dir, canonical: &Path) -> io::Result<Check> {
                 .into_iter()
                 .map(|name| name.to_string_lossy().into_owned())
                 .collect::<Vec<_>>();
+            freedom_dir = Some(dir);
             FreedomDir::Dir(&freedom_names)
         }
         Kind::File | Kind::Other => FreedomDir::Other,
@@ -158,7 +174,47 @@ pub fn check(root: &Dir, canonical: &Path) -> io::Result<Check> {
             }
         }
     }
+    if let Some(Unfit { why, detail }) = copies(root, freedom_dir.as_ref(), &entries)? {
+        return Ok(Check::Defer { why, detail });
+    }
     Ok(Check::Start(entries))
+}
+
+/// The entries a copy will move (all of them, when `freedom/` is on
+/// another mount than the profile's directory; those
+/// `FREEDOM_CORED_TEST_PROFILE_MIGRATE_EXDEV` lists), each surveyed, and
+/// their total size checked against the space free on `freedom/`'s volume
+/// (the profile's, where the move will make `freedom/`): the first reason
+/// one can't be copied, or none.
+fn copies(
+    root: &Dir,
+    freedom: Option<&Dir>,
+    entries: &[&'static str],
+) -> io::Result<Option<Unfit>> {
+    let elsewhere = match freedom {
+        Some(dir) => !dir.mount()?.same(root.mount()?),
+        None => false,
+    };
+    let copied: Vec<&str> = entries
+        .iter()
+        .copied()
+        .filter(|name| elsewhere || crate::testhooks::profile_migrate_exdev(name))
+        .collect();
+    if copied.is_empty() {
+        return Ok(None);
+    }
+    let space = copy::space(freedom.unwrap_or(root))?;
+    let mut size = 0u64;
+    for name in copied {
+        match copy::survey(root, name, space.block)? {
+            Ok(bytes) => size = size.saturating_add(bytes),
+            Err(unfit) => return Ok(Some(unfit)),
+        }
+    }
+    if let Err(unfit) = copy::within_cap(size) {
+        return Ok(Some(unfit));
+    }
+    Ok(copy::room(space, size).err())
 }
 
 /// Why the root's `name`, a link (a symlink, or on Windows a junction),

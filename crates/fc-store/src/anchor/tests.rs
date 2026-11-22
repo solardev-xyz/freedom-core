@@ -592,3 +592,875 @@ fn a_tree_is_removed_by_handle_leaving_a_junctions_target() {
     assert_eq!(std::fs::read(outside.join("inner/keep")).unwrap(), b"keep");
     assert!(!parent.remove_tree(OsStr::new("tree")).unwrap());
 }
+
+// PRF-9c: a tree walked, copied and removed within one mount (tree.rs).
+
+fn nodes(dir: &Dir, name: &str) -> Vec<(String, Node)> {
+    let mut seen = Vec::new();
+    dir.walk(OsStr::new(name), &mut |path, node| {
+        seen.push((path.to_string_lossy().replace('\\', "/"), node));
+        std::ops::ControlFlow::Continue(())
+    })
+    .unwrap();
+    seen.sort_by(|one, two| one.0.cmp(&two.0));
+    seen
+}
+
+fn nothing() -> io::Result<()> {
+    Ok(())
+}
+
+#[test]
+fn a_walk_visits_each_node_and_follows_no_link() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("root");
+    std::fs::create_dir_all(root.join("tree/sub")).unwrap();
+    std::fs::write(root.join("tree/a"), b"abc").unwrap();
+    std::fs::write(root.join("tree/sub/b"), b"").unwrap();
+    let dir = top(&root);
+    let usable = Node::Dir { usable: true };
+    let file = |len| Node::File {
+        len,
+        readable: true,
+    };
+    assert_eq!(
+        nodes(&dir, "tree"),
+        [
+            ("tree".to_owned(), usable),
+            ("tree/a".to_owned(), file(3)),
+            ("tree/sub".to_owned(), usable),
+            ("tree/sub/b".to_owned(), file(0)),
+        ]
+    );
+    assert!(nodes(&dir, "missing").is_empty());
+    // A break stops it.
+    let mut count = 0;
+    dir.walk(OsStr::new("tree"), &mut |_, _| {
+        count += 1;
+        std::ops::ControlFlow::Break(())
+    })
+    .unwrap();
+    assert_eq!(count, 1);
+    // A link is visited, never followed; a socket is never opened.
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::symlink(tmp.path(), root.join("tree/link")).unwrap();
+        let _socket = std::os::unix::net::UnixListener::bind(root.join("tree/sock")).unwrap();
+        let seen = nodes(&dir, "tree");
+        assert!(seen.contains(&("tree/link".to_owned(), Node::Link)));
+        assert!(seen.contains(&("tree/sock".to_owned(), Node::Special)));
+        assert_eq!(seen.len(), 6, "{seen:?}");
+    }
+    #[cfg(windows)]
+    {
+        junction(&root.join("tree/link"), tmp.path());
+        let seen = nodes(&dir, "tree");
+        assert!(seen.contains(&("tree/link".to_owned(), Node::Link)));
+        assert_eq!(seen.len(), 5, "{seen:?}");
+    }
+}
+
+/// A directory this process can't use is reported and not entered; a file
+/// it can't read is reported. Root may use anything, so this checks only
+/// where the modes bind.
+#[cfg(unix)]
+#[test]
+fn a_walk_says_what_this_process_cant_use() {
+    use std::os::unix::fs::PermissionsExt;
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("root");
+    std::fs::create_dir_all(root.join("tree/shut")).unwrap();
+    std::fs::write(root.join("tree/shut/inside"), b"x").unwrap();
+    std::fs::write(root.join("tree/secret"), b"x").unwrap();
+    let mode = |path: &str, mode| {
+        std::fs::set_permissions(root.join(path), std::fs::Permissions::from_mode(mode)).unwrap();
+    };
+    mode("tree/secret", 0o000);
+    mode("tree/shut", 0o500);
+    if std::fs::read(root.join("tree/secret")).is_ok() {
+        mode("tree/shut", 0o700);
+        return;
+    }
+    let seen = nodes(&top(&root), "tree");
+    assert!(seen.contains(&(
+        "tree/secret".to_owned(),
+        Node::File {
+            len: 1,
+            readable: false
+        }
+    )));
+    assert!(seen.contains(&("tree/shut".to_owned(), Node::Dir { usable: false })));
+    assert!(!seen.iter().any(|(path, _)| path == "tree/shut/inside"));
+    mode("tree/shut", 0o700);
+}
+
+#[test]
+fn a_copy_makes_the_tree_again_and_stops_where_told() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("root");
+    let into = tmp.path().join("into");
+    std::fs::create_dir_all(root.join("tree/sub/deeper")).unwrap();
+    std::fs::create_dir_all(&into).unwrap();
+    std::fs::write(root.join("tree/a"), b"abc").unwrap();
+    std::fs::write(root.join("tree/sub/b"), vec![7u8; 200_000]).unwrap();
+    std::fs::write(root.join("file"), b"one").unwrap();
+    let (dir, target) = (top(&root), top(&into));
+    let mut made = 0;
+    dir.copy_tree(
+        OsStr::new("tree"),
+        &target,
+        OsStr::new("tree.moving"),
+        u64::MAX,
+        &mut || {
+            made += 1;
+            Ok(())
+        },
+    )
+    .unwrap();
+    let copy = into.join("tree.moving");
+    assert_eq!(std::fs::read(copy.join("a")).unwrap(), b"abc");
+    assert_eq!(
+        std::fs::read(copy.join("sub/b")).unwrap(),
+        vec![7u8; 200_000]
+    );
+    assert!(copy.join("sub/deeper").is_dir());
+    assert_eq!(made, 5, "each entry made");
+    assert_eq!(std::fs::read(root.join("tree/a")).unwrap(), b"abc");
+    // A file alone; never over what is there.
+    dir.copy_tree(
+        OsStr::new("file"),
+        &target,
+        OsStr::new("file.moving"),
+        u64::MAX,
+        &mut nothing,
+    )
+    .unwrap();
+    assert_eq!(std::fs::read(into.join("file.moving")).unwrap(), b"one");
+    let error = dir
+        .copy_tree(
+            OsStr::new("file"),
+            &target,
+            OsStr::new("file.moving"),
+            u64::MAX,
+            &mut nothing,
+        )
+        .unwrap_err();
+    assert_eq!(error.kind(), io::ErrorKind::AlreadyExists);
+    // An error from `each` stops it, and what was made stays.
+    let mut calls = 0;
+    let error = dir
+        .copy_tree(
+            OsStr::new("tree"),
+            &target,
+            OsStr::new("again"),
+            u64::MAX,
+            &mut || {
+                calls += 1;
+                if calls == 2 {
+                    Err(io::Error::from(io::ErrorKind::StorageFull))
+                } else {
+                    Ok(())
+                }
+            },
+        )
+        .unwrap_err();
+    assert_eq!(error.kind(), io::ErrorKind::StorageFull);
+    assert!(into.join("again").is_dir());
+    // A link is refused on Windows, before anything is made at its name.
+    #[cfg(windows)]
+    {
+        junction(&root.join("tree/link"), tmp.path());
+        assert!(
+            dir.copy_tree(
+                OsStr::new("tree"),
+                &target,
+                OsStr::new("linked"),
+                u64::MAX,
+                &mut nothing
+            )
+            .is_err()
+        );
+        assert!(!into.join("linked/link").exists());
+    }
+}
+
+/// On Unix a copy keeps permission bits (the umask applied) and makes a
+/// symlink as the link, whatever it points at; a socket stops it.
+#[cfg(unix)]
+#[test]
+fn a_copy_keeps_modes_and_links_and_refuses_a_special_file() {
+    use std::os::unix::fs::PermissionsExt;
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("root");
+    let into = tmp.path().join("into");
+    std::fs::create_dir_all(root.join("tree/sub")).unwrap();
+    std::fs::create_dir_all(&into).unwrap();
+    std::fs::write(root.join("tree/vault"), b"v").unwrap();
+    std::fs::write(root.join("tree/sub/shared"), b"s").unwrap();
+    let mode = |path: &Path, mode| {
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).unwrap();
+    };
+    mode(&root.join("tree/vault"), 0o600);
+    mode(&root.join("tree/sub/shared"), 0o640);
+    mode(&root.join("tree/sub"), 0o750);
+    std::os::unix::fs::symlink("sub/shared", root.join("tree/relative")).unwrap();
+    std::os::unix::fs::symlink(tmp.path(), root.join("tree/absolute")).unwrap();
+    std::os::unix::fs::symlink("nowhere", root.join("tree/dangling")).unwrap();
+    std::os::unix::fs::symlink(root.join("tree/sub"), root.join("link")).unwrap();
+    let (dir, target) = (top(&root), top(&into));
+    dir.copy_tree(
+        OsStr::new("tree"),
+        &target,
+        OsStr::new("copy"),
+        u64::MAX,
+        &mut nothing,
+    )
+    .unwrap();
+    let copy = into.join("copy");
+    let bits = |path: &Path| {
+        std::fs::symlink_metadata(path)
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777
+    };
+    assert_eq!(bits(&copy.join("vault")), 0o600);
+    assert_eq!(bits(&copy.join("sub/shared")), 0o640);
+    assert_eq!(bits(&copy.join("sub")), 0o750);
+    for (name, to) in [
+        ("relative", PathBuf::from("sub/shared")),
+        ("absolute", tmp.path().to_owned()),
+        ("dangling", PathBuf::from("nowhere")),
+    ] {
+        let link = copy.join(name);
+        assert!(
+            std::fs::symlink_metadata(&link).unwrap().is_symlink(),
+            "{name}"
+        );
+        assert_eq!(std::fs::read_link(&link).unwrap(), to, "{name}");
+    }
+    // A symlink at the top is made as the link.
+    dir.copy_tree(
+        OsStr::new("link"),
+        &target,
+        OsStr::new("link"),
+        u64::MAX,
+        &mut nothing,
+    )
+    .unwrap();
+    assert_eq!(
+        std::fs::read_link(into.join("link")).unwrap(),
+        root.join("tree/sub")
+    );
+    // A socket inside stops the copy, never opened.
+    let _socket = std::os::unix::net::UnixListener::bind(root.join("tree/sub/sock")).unwrap();
+    let error = dir
+        .copy_tree(
+            OsStr::new("tree"),
+            &target,
+            OsStr::new("again"),
+            u64::MAX,
+            &mut nothing,
+        )
+        .unwrap_err();
+    assert_eq!(error.kind(), io::ErrorKind::Other, "{error}");
+    assert!(!into.join("again/sub/sock").exists());
+}
+
+#[test]
+fn a_removal_within_its_mount_calls_back_for_each_entry() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("root");
+    std::fs::create_dir_all(root.join("tree/sub")).unwrap();
+    std::fs::write(root.join("tree/a"), b"a").unwrap();
+    std::fs::write(root.join("tree/sub/b"), b"b").unwrap();
+    std::fs::write(root.join("file"), b"f").unwrap();
+    let dir = top(&root);
+    let mut removed = 0;
+    let mut count = || {
+        removed += 1;
+        Ok(())
+    };
+    assert!(
+        dir.remove_tree_within(OsStr::new("tree"), &mut count)
+            .unwrap()
+    );
+    assert!(
+        dir.remove_tree_within(OsStr::new("file"), &mut count)
+            .unwrap()
+    );
+    assert!(
+        !dir.remove_tree_within(OsStr::new("tree"), &mut count)
+            .unwrap()
+    );
+    assert_eq!(removed, 5);
+    assert!(!root.join("tree").exists() && !root.join("file").exists());
+    // An error from `each` stops it.
+    std::fs::create_dir_all(root.join("tree/sub")).unwrap();
+    std::fs::write(root.join("tree/sub/b"), b"b").unwrap();
+    let error = dir
+        .remove_tree_within(OsStr::new("tree"), &mut || Err(io::Error::other("stop")))
+        .unwrap_err();
+    assert_eq!(error.to_string(), "stop");
+    assert!(root.join("tree/sub").is_dir());
+}
+
+#[test]
+fn a_directory_s_volume_and_mount_are_read_from_its_handle() {
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(tmp.path().join("sub")).unwrap();
+    let dir = top(tmp.path());
+    let space = dir.space().unwrap();
+    assert!(space.block >= 512, "{space:?}");
+    assert!(space.available > 0, "{space:?}");
+    let sub = dir.child(OsStr::new("sub"), false).unwrap().unwrap();
+    assert!(dir.mount().unwrap().same(sub.mount().unwrap()));
+}
+
+/// A mount made with `sudo -n` while `FREEDOM_TEST_MOUNTS` is set (CI's
+/// Linux step, design 0013's PRF-9c), and unmounted when dropped: a tmpfs
+/// owned by this process's user, or a bind mount. `None` without the
+/// variable: the test that asks for one then checks nothing.
+#[cfg(target_os = "linux")]
+struct Mounted(PathBuf);
+
+#[cfg(target_os = "linux")]
+impl Mounted {
+    fn tmpfs(at: &Path, size: &str) -> Option<Mounted> {
+        use std::os::unix::fs::MetadataExt;
+        let owner = std::fs::metadata(at).unwrap();
+        let options = format!(
+            "size={size},mode=0700,uid={},gid={}",
+            owner.uid(),
+            owner.gid()
+        );
+        Mounted::run(at, &["-t", "tmpfs", "-o", &options, "tmpfs"])
+    }
+
+    /// `from` mounted again at `at` (`mount --bind`): the same file system,
+    /// so the same device, on another mount.
+    fn bind(from: &Path, at: &Path) -> Option<Mounted> {
+        Mounted::run(at, &["--bind", from.to_str().unwrap()])
+    }
+
+    fn run(at: &Path, args: &[&str]) -> Option<Mounted> {
+        std::env::var_os("FREEDOM_TEST_MOUNTS")?;
+        let status = std::process::Command::new("sudo")
+            .args(["-n", "mount"])
+            .args(args)
+            .arg(at)
+            .status()
+            .unwrap();
+        assert!(status.success(), "sudo -n mount {args:?}: {status}");
+        Some(Mounted(at.to_owned()))
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl Drop for Mounted {
+    fn drop(&mut self) {
+        let _ = std::process::Command::new("sudo")
+            .args(["-n", "umount", "-l"])
+            .arg(&self.0)
+            .status();
+    }
+}
+
+/// A mount point inside a tree: the walk reports it and doesn't enter it,
+/// a copy stops there with nothing of the mounted volume copied, and a
+/// removal stops there with the volume's file kept; a mount point at the
+/// name itself is refused too.
+#[cfg(target_os = "linux")]
+#[test]
+fn mounted_tmpfs_inside_a_tree_is_never_crossed() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("root");
+    let into = tmp.path().join("into");
+    std::fs::create_dir_all(root.join("tree/mnt")).unwrap();
+    std::fs::create_dir_all(&into).unwrap();
+    std::fs::write(root.join("tree/file"), b"x").unwrap();
+    let Some(_mounted) = Mounted::tmpfs(&root.join("tree/mnt"), "1m") else {
+        return;
+    };
+    std::fs::write(root.join("tree/mnt/kept"), b"kept").unwrap();
+    let (dir, target) = (top(&root), top(&into));
+    let seen = nodes(&dir, "tree");
+    assert!(
+        seen.contains(&("tree/mnt".to_owned(), Node::Mount)),
+        "{seen:?}"
+    );
+    assert!(!seen.iter().any(|(path, _)| path.starts_with("tree/mnt/")));
+    assert!(
+        dir.copy_tree(
+            OsStr::new("tree"),
+            &target,
+            OsStr::new("copy"),
+            u64::MAX,
+            &mut nothing
+        )
+        .is_err()
+    );
+    assert!(!into.join("copy/mnt").exists());
+    assert!(
+        dir.remove_tree_within(OsStr::new("tree"), &mut nothing)
+            .is_err()
+    );
+    assert_eq!(std::fs::read(root.join("tree/mnt/kept")).unwrap(), b"kept");
+    let parent = dir.child(OsStr::new("tree"), false).unwrap().unwrap();
+    assert!(
+        parent
+            .remove_tree_within(OsStr::new("mnt"), &mut nothing)
+            .is_err()
+    );
+    assert_eq!(std::fs::read(root.join("tree/mnt/kept")).unwrap(), b"kept");
+    let mounted = parent.child(OsStr::new("mnt"), false).unwrap().unwrap();
+    assert!(!mounted.mount().unwrap().same(parent.mount().unwrap()));
+}
+
+/// The case `STATX_MNT_ID` is for: a bind mount of the same file system,
+/// whose device is its parent's. The walk still reports it as a mount, a
+/// copy and a removal refuse it, and the file reached through it survives.
+#[cfg(target_os = "linux")]
+#[test]
+fn mounted_bind_inside_a_tree_is_never_crossed() {
+    use std::os::unix::fs::MetadataExt;
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("root");
+    let into = tmp.path().join("into");
+    let outside = tmp.path().join("outside");
+    std::fs::create_dir_all(root.join("tree/bound")).unwrap();
+    std::fs::create_dir_all(&into).unwrap();
+    std::fs::create_dir_all(&outside).unwrap();
+    std::fs::write(outside.join("kept"), b"kept").unwrap();
+    std::fs::write(root.join("tree/file"), b"x").unwrap();
+    let Some(_mounted) = Mounted::bind(&outside, &root.join("tree/bound")) else {
+        return;
+    };
+    let device = |path: &Path| std::fs::metadata(path).unwrap().dev();
+    assert_eq!(device(&root.join("tree/bound")), device(&root.join("tree")));
+    let (dir, target) = (top(&root), top(&into));
+    let seen = nodes(&dir, "tree");
+    assert!(
+        seen.contains(&("tree/bound".to_owned(), Node::Mount)),
+        "{seen:?}"
+    );
+    assert!(!seen.iter().any(|(path, _)| path.starts_with("tree/bound/")));
+    assert!(
+        dir.copy_tree(
+            OsStr::new("tree"),
+            &target,
+            OsStr::new("copy"),
+            u64::MAX,
+            &mut nothing
+        )
+        .is_err()
+    );
+    assert!(!into.join("copy/bound/kept").exists());
+    assert!(
+        dir.remove_tree_within(OsStr::new("tree"), &mut nothing)
+            .is_err()
+    );
+    let parent = dir.child(OsStr::new("tree"), false).unwrap().unwrap();
+    assert!(
+        parent
+            .remove_tree_within(OsStr::new("bound"), &mut nothing)
+            .is_err()
+    );
+    assert_eq!(std::fs::read(outside.join("kept")).unwrap(), b"kept");
+}
+
+/// A directory this process can't change (write and search) can't lose an
+/// entry: `may_change` says so. Root may change anything, so this checks
+/// only where the modes bind.
+#[cfg(unix)]
+#[test]
+fn a_directory_s_rights_to_change_are_read_from_its_handle() {
+    use std::os::unix::fs::PermissionsExt;
+    let tmp = tempfile::tempdir().unwrap();
+    let shut = tmp.path().join("shut");
+    std::fs::create_dir(&shut).unwrap();
+    let dir = top(&shut);
+    assert!(dir.may_change());
+    std::fs::set_permissions(&shut, std::fs::Permissions::from_mode(0o500)).unwrap();
+    let bound = std::fs::write(shut.join("probe"), b"x").is_err();
+    if bound {
+        assert!(!dir.may_change());
+    }
+    std::fs::set_permissions(&shut, std::fs::Permissions::from_mode(0o700)).unwrap();
+}
+
+// Races (review of #451): a directory swapped for a link or for another
+// directory between its look and its open, and one renamed out of its path
+// once opened. The walk, the copy and a bounded removal go from handle to
+// handle, so none reaches what the swap put at the name. A path-based
+// recursion would.
+
+/// `root/tree/sub/inner` inside, `outside/secret` beyond it, `stash` and
+/// `into` beside them.
+struct Race {
+    _tmp: tempfile::TempDir,
+    root: PathBuf,
+    outside: PathBuf,
+    stash: PathBuf,
+    into: PathBuf,
+}
+
+fn race() -> Race {
+    let tmp = tempfile::tempdir().unwrap();
+    let base = tmp.path().to_owned();
+    let root = base.join("root");
+    std::fs::create_dir_all(root.join("tree/sub")).unwrap();
+    std::fs::write(root.join("tree/sub/inner"), b"inner").unwrap();
+    std::fs::write(root.join("tree/file"), b"file").unwrap();
+    std::fs::create_dir_all(base.join("outside")).unwrap();
+    std::fs::write(base.join("outside/secret"), b"secret").unwrap();
+    std::fs::create_dir_all(base.join("stash")).unwrap();
+    std::fs::create_dir_all(base.join("into")).unwrap();
+    Race {
+        root,
+        outside: base.join("outside"),
+        stash: base.join("stash"),
+        into: base.join("into"),
+        _tmp: tmp,
+    }
+}
+
+/// What a swap puts at `tree/sub` once the original is moved out: a link
+/// to `outside` (on Windows a junction), or `outside` itself.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Swap {
+    Link,
+    Dir,
+}
+
+/// At `point` for `sub`, once: `tree/sub` moved to `stash/sub`, and `swap`
+/// put in its place.
+fn swap_at(race: &Race, point: &'static str, swap: Swap) {
+    let (sub, stash, outside) = (
+        race.root.join("tree/sub"),
+        race.stash.join("sub"),
+        race.outside.clone(),
+    );
+    let mut done = false;
+    super::tree::pause::set(Some(Box::new(move |at, name| {
+        if done || at != point || name != "sub" {
+            return;
+        }
+        done = true;
+        std::fs::rename(&sub, &stash).unwrap();
+        match swap {
+            #[cfg(unix)]
+            Swap::Link => std::os::unix::fs::symlink(&outside, &sub).unwrap(),
+            #[cfg(windows)]
+            Swap::Link => junction(&sub, &outside),
+            Swap::Dir => std::fs::rename(&outside, &sub).unwrap(),
+        }
+    })));
+}
+
+fn walked(race: &Race) -> (io::Result<()>, Vec<String>) {
+    let mut seen = Vec::new();
+    let result = top(&race.root).walk(OsStr::new("tree"), &mut |path, _| {
+        seen.push(path.to_string_lossy().replace('\\', "/"));
+        std::ops::ControlFlow::Continue(())
+    });
+    super::tree::pause::set(None);
+    (result, seen)
+}
+
+/// Where `secret` is after the swap: still outside for a link, inside the
+/// tree's `sub` for a directory moved in.
+#[cfg(unix)]
+fn secret(race: &Race, swap: Swap) -> PathBuf {
+    match swap {
+        Swap::Link => race.outside.join("secret"),
+        Swap::Dir => race.root.join("tree/sub/secret"),
+    }
+}
+
+#[test]
+fn a_directory_swapped_between_its_look_and_its_open_is_never_entered() {
+    for swap in [Swap::Link, Swap::Dir] {
+        let r = race();
+        swap_at(&r, "classified", swap);
+        let (result, seen) = walked(&r);
+        assert!(result.is_err(), "{swap:?}: {seen:?}");
+        assert!(
+            !seen.iter().any(|path| path.ends_with("secret")),
+            "{swap:?}"
+        );
+
+        let r = race();
+        swap_at(&r, "classified", swap);
+        let result = top(&r.root).copy_tree(
+            OsStr::new("tree"),
+            &top(&r.into),
+            OsStr::new("copy"),
+            u64::MAX,
+            &mut nothing,
+        );
+        super::tree::pause::set(None);
+        assert!(result.is_err(), "{swap:?}");
+        assert!(!r.into.join("copy/sub/secret").exists(), "{swap:?}");
+
+        // A bounded removal looks before it opens on Unix (Windows opens
+        // each entry once, by handle, and judges that handle).
+        #[cfg(unix)]
+        {
+            let r = race();
+            swap_at(&r, "classified", swap);
+            let result = top(&r.root).remove_tree_within(OsStr::new("tree"), &mut nothing);
+            super::tree::pause::set(None);
+            assert_eq!(
+                std::fs::read(secret(&r, swap)).unwrap(),
+                b"secret",
+                "{swap:?}"
+            );
+            assert_eq!(std::fs::read(r.stash.join("sub/inner")).unwrap(), b"inner");
+            if swap == Swap::Dir {
+                assert!(result.is_err(), "{swap:?}");
+            }
+        }
+    }
+}
+
+#[test]
+fn a_directory_renamed_out_once_opened_is_still_the_one_read() {
+    let r = race();
+    swap_at(&r, "opened", Swap::Link);
+    let (result, seen) = walked(&r);
+    result.unwrap();
+    assert!(seen.contains(&"tree/sub/inner".to_owned()), "{seen:?}");
+    assert!(
+        !seen.iter().any(|path| path.ends_with("secret")),
+        "{seen:?}"
+    );
+
+    let r = race();
+    swap_at(&r, "opened", Swap::Link);
+    let result = top(&r.root).copy_tree(
+        OsStr::new("tree"),
+        &top(&r.into),
+        OsStr::new("copy"),
+        u64::MAX,
+        &mut nothing,
+    );
+    super::tree::pause::set(None);
+    result.unwrap();
+    assert_eq!(
+        std::fs::read(r.into.join("copy/sub/inner")).unwrap(),
+        b"inner"
+    );
+    assert!(!r.into.join("copy/sub/secret").exists());
+
+    // The removal empties the directory it opened, wherever it now is, and
+    // stops at the link in its old place.
+    let r = race();
+    swap_at(&r, "opened", Swap::Link);
+    let result = top(&r.root).remove_tree_within(OsStr::new("tree"), &mut nothing);
+    super::tree::pause::set(None);
+    assert!(result.is_err());
+    assert_eq!(std::fs::read(r.outside.join("secret")).unwrap(), b"secret");
+    assert!(
+        !r.stash.join("sub/inner").exists(),
+        "the opened directory emptied"
+    );
+}
+
+/// Windows has no modes: the walk probes the rights a copy and its
+/// source's removal take by opening with them. A file whose data can't be
+/// read, and a directory that can't be deleted (no `DELETE` on it, and no
+/// `FILE_DELETE_CHILD` on its parent), are reported unusable; once the
+/// denials go, both are usable.
+#[cfg(windows)]
+#[test]
+fn a_walk_probes_the_rights_a_copy_and_its_removal_take() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("root");
+    std::fs::create_dir_all(root.join("tree/kept")).unwrap();
+    std::fs::write(root.join("tree/kept/inner"), b"x").unwrap();
+    std::fs::write(root.join("tree/secret"), b"abc").unwrap();
+    let (tree, kept, secret) = (
+        root.join("tree"),
+        root.join("tree/kept"),
+        root.join("tree/secret"),
+    );
+    icacls(&secret, &["/deny", "*S-1-1-0:(RD)"]);
+    icacls(&kept, &["/deny", "*S-1-1-0:(DE)"]);
+    icacls(&tree, &["/deny", "*S-1-1-0:(DC)"]);
+    let seen = nodes(&top(&root), "tree");
+    for path in [&secret, &kept, &tree] {
+        icacls(path, &["/remove:d", "*S-1-1-0"]);
+    }
+    assert!(
+        seen.contains(&(
+            "tree/secret".to_owned(),
+            Node::File {
+                len: 3,
+                readable: false
+            }
+        )),
+        "{seen:?}"
+    );
+    assert!(seen.contains(&("tree/kept".to_owned(), Node::Dir { usable: false })));
+    assert!(!seen.iter().any(|(path, _)| path == "tree/kept/inner"));
+    let seen = nodes(&top(&root), "tree");
+    assert!(seen.contains(&(
+        "tree/secret".to_owned(),
+        Node::File {
+            len: 3,
+            readable: true
+        }
+    )));
+    assert!(seen.contains(&("tree/kept".to_owned(), Node::Dir { usable: true })));
+}
+
+/// A copy's budget (review of #451, round 2): it copies at most `budget`
+/// bytes of files' data. A file longer than what is left is refused before
+/// its copy is made; a file that grows once opened (here at the
+/// `file-opened` pause, past the budget) is read for at most what is left
+/// and one byte more, then refused.
+#[test]
+fn a_copy_stops_at_its_budget() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("root");
+    let into = tmp.path().join("into");
+    std::fs::create_dir_all(root.join("tree/sub")).unwrap();
+    std::fs::create_dir_all(&into).unwrap();
+    std::fs::write(root.join("tree/a"), [1u8; 100]).unwrap();
+    std::fs::write(root.join("tree/sub/b"), [2u8; 100]).unwrap();
+    let (dir, target) = (top(&root), top(&into));
+    let copied = dir
+        .copy_tree(
+            OsStr::new("tree"),
+            &target,
+            OsStr::new("whole"),
+            200,
+            &mut nothing,
+        )
+        .unwrap();
+    assert_eq!(copied, 200);
+    let error = dir
+        .copy_tree(
+            OsStr::new("tree"),
+            &target,
+            OsStr::new("short"),
+            150,
+            &mut nothing,
+        )
+        .unwrap_err();
+    assert_eq!(error.kind(), io::ErrorKind::FileTooLarge, "{error}");
+    let made: u64 = ["short/a", "short/sub/b"]
+        .iter()
+        .filter_map(|path| std::fs::metadata(into.join(path)).ok())
+        .map(|meta| meta.len())
+        .sum();
+    assert_eq!(made, 100, "the file past the budget isn't made");
+
+    std::fs::write(root.join("grows"), [3u8; 10]).unwrap();
+    let grows = root.join("grows");
+    super::tree::pause::set(Some(Box::new(move |at, name| {
+        if at == "file-opened" && name == "grows" {
+            let mut file = std::fs::OpenOptions::new()
+                .append(true)
+                .open(&grows)
+                .unwrap();
+            std::io::Write::write_all(&mut file, &[4u8; 1000]).unwrap();
+        }
+    })));
+    let error = dir.copy_tree(
+        OsStr::new("grows"),
+        &target,
+        OsStr::new("grown"),
+        50,
+        &mut nothing,
+    );
+    super::tree::pause::set(None);
+    assert_eq!(error.unwrap_err().kind(), io::ErrorKind::FileTooLarge);
+    assert_eq!(std::fs::metadata(into.join("grown")).unwrap().len(), 51);
+}
+
+/// Windows: a file's copy and its probe ask for its data alone
+/// (`FILE_READ_DATA`), so a file whose extended attributes and security
+/// descriptor can't be read (`REA`, `RC` denied) while its data and its
+/// deletion can is readable, copies, and is removed.
+#[cfg(windows)]
+#[test]
+fn a_file_whose_data_can_be_read_copies_whatever_else_is_denied() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("root");
+    let into = tmp.path().join("into");
+    std::fs::create_dir_all(root.join("tree")).unwrap();
+    std::fs::create_dir_all(&into).unwrap();
+    let file = root.join("tree/data");
+    std::fs::write(&file, b"abc").unwrap();
+    icacls(&file, &["/deny", "*S-1-1-0:(REA,RC)"]);
+    let (dir, target) = (top(&root), top(&into));
+    let seen = nodes(&dir, "tree");
+    let copied = dir.copy_tree(
+        OsStr::new("tree"),
+        &target,
+        OsStr::new("copy"),
+        u64::MAX,
+        &mut nothing,
+    );
+    let removed = dir.remove_tree_within(OsStr::new("tree"), &mut nothing);
+    if file.exists() {
+        icacls(&file, &["/remove:d", "*S-1-1-0"]);
+    }
+    assert!(
+        seen.contains(&(
+            "tree/data".to_owned(),
+            Node::File {
+                len: 3,
+                readable: true
+            }
+        )),
+        "{seen:?}"
+    );
+    assert_eq!(copied.unwrap(), 3);
+    assert_eq!(std::fs::read(into.join("copy/data")).unwrap(), b"abc");
+    assert!(removed.unwrap());
+    assert!(!root.join("tree").exists());
+}
+
+/// Windows: a directory the walk may delete but not list (`RD`, which on a
+/// directory is `FILE_LIST_DIRECTORY`, denied) is unusable, and usable
+/// again once listing is restored. With the `DELETE` case of
+/// `a_walk_probes_the_rights_a_copy_and_its_removal_take`, dropping either
+/// right from the probe fails a test.
+#[cfg(windows)]
+#[test]
+fn a_directory_that_cant_be_listed_is_unusable() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("root");
+    let shut = root.join("tree/shut");
+    std::fs::create_dir_all(&shut).unwrap();
+    std::fs::write(shut.join("inner"), b"x").unwrap();
+    icacls(&shut, &["/deny", "*S-1-1-0:(RD)"]);
+    let seen = nodes(&top(&root), "tree");
+    icacls(&shut, &["/remove:d", "*S-1-1-0"]);
+    assert!(
+        seen.contains(&("tree/shut".to_owned(), Node::Dir { usable: false })),
+        "{seen:?}"
+    );
+    assert!(!seen.iter().any(|(path, _)| path == "tree/shut/inner"));
+    let seen = nodes(&top(&root), "tree");
+    assert!(seen.contains(&("tree/shut".to_owned(), Node::Dir { usable: true })));
+    assert!(seen.iter().any(|(path, _)| path == "tree/shut/inner"));
+}
+
+/// `icacls <path> <args>`, which must succeed.
+#[cfg(windows)]
+fn icacls(path: &Path, args: &[&str]) {
+    let output = std::process::Command::new("icacls")
+        .arg(path)
+        .args(args)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "icacls {args:?}: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+}
