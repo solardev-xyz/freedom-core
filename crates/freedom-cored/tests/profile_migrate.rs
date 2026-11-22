@@ -1446,6 +1446,54 @@ fn a_link_among_the_entries_into_the_profile_defers() {
     assert_new_layout(&d.profile);
 }
 
+/// On Linux names are exact: a link into a sibling whose name differs from
+/// the profile's only by case (`WORK` beside `work`) points outside the
+/// profile, and moves as the link.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_link_into_a_case_distinct_sibling_moves_on_linux() {
+    let d = dirs();
+    let work = d.base.join("work");
+    seeded(&work);
+    let target = d.base.join("WORK").join("ant");
+    write(&target.join("config.yaml"), "ant");
+    std::fs::remove_dir_all(work.join("ant-data")).unwrap();
+    std::os::unix::fs::symlink(&target, work.join("ant-data")).unwrap();
+    let out = start_env(&work, &d.locks, &[], &[]);
+    assert_eq!(said(&out), "migrated", "{out:?}");
+    assert_eq!(
+        std::fs::read_link(work.join("freedom").join("ant-data")).unwrap(),
+        target
+    );
+    assert_new_layout(&work);
+}
+
+/// A node's directory (`tor-data/`, `myotis/`) that is a link (a symlink,
+/// or on Windows a junction), even to an absolute path outside, defers
+/// (`node_lock_unknown`): its lock can't be looked up without following
+/// the link to storage the core hasn't qualified, and whether the node
+/// still runs there isn't guessed. The profile keeps its old layout.
+#[test]
+fn a_node_directory_that_is_a_link_defers() {
+    for entry in ["tor-data", "myotis"] {
+        let d = dirs();
+        seeded(&d.profile);
+        let outside = d.base.join(format!("outside-{entry}"));
+        std::fs::rename(d.profile.join(entry), &outside).unwrap();
+        link_dir(&outside, &d.profile.join(entry));
+        let before = snapshot(&d.profile);
+        let out = start(&d);
+        assert_eq!(
+            (code(&out), said(&out)),
+            (0, "deferred".into()),
+            "{entry}: {out:?}"
+        );
+        let log = String::from_utf8_lossy(&out.stderr);
+        assert!(log.contains("node_lock_unknown"), "{entry}: {log}");
+        assert_eq!(snapshot(&d.profile), before, "{entry}");
+    }
+}
+
 /// Myotis's lease as its supervisor holds it: `flock` on Unix; on Windows a
 /// handle that shares reading only.
 fn hold_lease(path: &Path) -> std::fs::File {

@@ -245,6 +245,15 @@ impl Dir {
         }
     }
 
+    /// The handle, borrowed (Unix): for a lookup the type has no method for
+    /// that must still start from this directory, such as `openat2` with
+    /// `RESOLVE_BENEATH` (a profile move's node-lock probe, design 0013).
+    #[cfg(unix)]
+    pub fn as_fd(&self) -> std::os::fd::BorrowedFd<'_> {
+        use std::os::fd::AsFd;
+        self.fd.as_fd()
+    }
+
     /// The names of the directories in this one, not following a symlink
     /// (one is no directory), read from its handle.
     pub fn subdirs(&self) -> io::Result<Vec<OsString>> {
