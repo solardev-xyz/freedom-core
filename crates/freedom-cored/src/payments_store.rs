@@ -102,9 +102,13 @@ pub struct Import {
     /// the old layout, or the Freedom root once the hand-over ran
     /// ([`Handover::import`]).
     pub root: PathBuf,
-    /// Skipped for this run: the hand-over proved no copy there and made
-    /// none (design 0017, C5). The database opens and serves, with no row
-    /// imported and no legacy file renamed or removed.
+    /// Skipped for this run: the hand-over selected no copy for this run's
+    /// import, neither one it proved holds the root file's bytes nor one it
+    /// made (design 0017, C5). A file may still be at the name, untrusted
+    /// (a conflict, or one that didn't come from the root's) or imported
+    /// already (beside its `.migrated`); it is left as it is. The database
+    /// opens and serves, with no row imported and no legacy file renamed or
+    /// removed.
     pub skip: bool,
 }
 
