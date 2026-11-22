@@ -1238,13 +1238,34 @@ fn each_precondition_defers_with_nothing_changed() {
     seeded(&d.profile);
     write(&d.profile.join("freedom"), "a file");
     deferred(&d, "freedom/ a file");
-    #[cfg(unix)]
+    // A symlink (or on Windows a junction) at `freedom` to a directory
+    // holding the new paths' gated directories: deferred before any gate is
+    // named through it, so nothing there changes, its modes included.
     {
         let d = dirs();
         seeded(&d.profile);
-        std::fs::create_dir(d.base.join("elsewhere")).unwrap();
-        std::os::unix::fs::symlink(d.base.join("elsewhere"), d.profile.join("freedom")).unwrap();
-        deferred(&d, "freedom/ a symlink");
+        let elsewhere = d.base.join("elsewhere");
+        write(&elsewhere.join("identity").join("vault.json"), "theirs");
+        write(
+            &elsewhere.join("ipfs-data").join("freedom-ipfs").join("b"),
+            "theirs",
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            for dir in [
+                elsewhere.join("identity"),
+                elsewhere.join("ipfs-data").join("freedom-ipfs"),
+            ] {
+                std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+            }
+        }
+        link_dir(&elsewhere, &d.profile.join("freedom"));
+        let theirs = snapshot(&elsewhere);
+        let their_modes = modes(&elsewhere);
+        deferred(&d, "freedom/ a link");
+        assert_eq!(snapshot(&elsewhere), theirs, "the link's target");
+        assert_eq!(modes(&elsewhere), their_modes, "the target's modes");
     }
     for name in ["Settings.JSON", "ant-data.moving", "layout.json "] {
         if cfg!(windows) && name.ends_with(' ') {
@@ -1296,6 +1317,133 @@ fn each_precondition_defers_with_nothing_changed() {
         drop(held);
         assert_eq!(said(&start(&d)), "migrated", "{network:?}");
     }
+}
+
+/// A link to the directory `target` at `link`: a symlink on Unix, a
+/// junction on Windows (which needs no privilege).
+fn link_dir(target: &Path, link: &Path) {
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(target, link).unwrap();
+    #[cfg(windows)]
+    {
+        let status = Command::new("cmd")
+            .arg("/C")
+            .arg("mklink")
+            .arg("/J")
+            .arg(link)
+            .arg(target)
+            .stdout(Stdio::null())
+            .status()
+            .unwrap();
+        assert!(status.success(), "mklink /J");
+    }
+}
+
+/// A symlink at `path`, or on Windows any reparse point (a junction).
+fn is_link_at(path: &Path) -> bool {
+    let meta = std::fs::symlink_metadata(path).unwrap();
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        meta.file_attributes() & 0x400 != 0
+    }
+    #[cfg(not(windows))]
+    {
+        meta.file_type().is_symlink()
+    }
+}
+
+/// Each directory's mode under `dir` (Unix; nothing elsewhere).
+fn modes(dir: &Path) -> Vec<(PathBuf, u32)> {
+    let mut out = Vec::new();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut stack = vec![dir.to_path_buf()];
+        while let Some(next) = stack.pop() {
+            let meta = std::fs::symlink_metadata(&next).unwrap();
+            out.push((next.clone(), meta.permissions().mode()));
+            if meta.is_dir() {
+                for entry in std::fs::read_dir(&next).unwrap() {
+                    stack.push(entry.unwrap().path());
+                }
+            }
+        }
+        out.sort();
+    }
+    let _ = dir;
+    out
+}
+
+/// A link among the entries whose target is relative, or absolute inside
+/// the profile, defers (`link_inside_profile`): moved one directory deeper,
+/// a relative link names another place, and one into the profile may name
+/// an entry the move takes elsewhere. A link to an absolute path outside
+/// the profile moves as the link.
+#[test]
+fn a_link_among_the_entries_into_the_profile_defers() {
+    let assert_deferred = |d: &Dirs, what: &str| {
+        let before = snapshot(&d.profile);
+        let out = start(d);
+        assert_eq!(
+            (code(&out), said(&out)),
+            (0, "deferred".into()),
+            "{what}: {out:?}"
+        );
+        assert!(
+            String::from_utf8_lossy(&out.stderr).contains("link_inside_profile"),
+            "{what}: {out:?}"
+        );
+        assert_eq!(snapshot(&d.profile), before, "{what}");
+    };
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::symlink;
+        // `identity`, relative: `../wallet` names a sibling of the profile
+        // now, and `<profile>/wallet` once moved.
+        let d = dirs();
+        seeded(&d.profile);
+        std::fs::remove_dir_all(d.profile.join("identity")).unwrap();
+        write(&d.base.join("wallet").join("vault.json"), "vault");
+        symlink("../wallet", d.profile.join("identity")).unwrap();
+        assert_deferred(&d, "identity, relative");
+        // A node's directory, relative and inside.
+        let d = dirs();
+        seeded(&d.profile);
+        std::fs::rename(d.profile.join("ant-data"), d.profile.join("ant-real")).unwrap();
+        symlink("ant-real", d.profile.join("ant-data")).unwrap();
+        assert_deferred(&d, "ant-data, relative");
+        // Absolute, inside the profile: `identity` naming another entry,
+        // and a node's directory naming another node's.
+        let d = dirs();
+        seeded(&d.profile);
+        std::fs::rename(d.profile.join("identity"), d.profile.join("wallet")).unwrap();
+        symlink(d.profile.join("wallet"), d.profile.join("identity")).unwrap();
+        assert_deferred(&d, "identity, absolute inside");
+        let d = dirs();
+        seeded(&d.profile);
+        std::fs::remove_dir_all(d.profile.join("ipfs-data")).unwrap();
+        symlink(d.profile.join("ant-data"), d.profile.join("ipfs-data")).unwrap();
+        assert_deferred(&d, "ipfs-data, absolute inside");
+    }
+    // A junction (Windows) or symlink to a directory inside the profile.
+    let d = dirs();
+    seeded(&d.profile);
+    std::fs::rename(d.profile.join("ant-data"), d.profile.join("ant-real")).unwrap();
+    link_dir(&d.profile.join("ant-real"), &d.profile.join("ant-data"));
+    assert_deferred(&d, "ant-data, a link to a directory inside");
+    // To an absolute path outside the profile: moved as the link.
+    let d = dirs();
+    seeded(&d.profile);
+    let outside = d.base.join("outside-ant");
+    std::fs::rename(d.profile.join("ant-data"), &outside).unwrap();
+    link_dir(&outside, &d.profile.join("ant-data"));
+    let out = start(&d);
+    assert_eq!(said(&out), "migrated", "{out:?}");
+    let moved = d.profile.join("freedom").join("ant-data");
+    assert!(is_link_at(&moved));
+    assert_eq!(read(&moved.join("config.yaml")), "ant");
+    assert_new_layout(&d.profile);
 }
 
 /// Myotis's lease as its supervisor holds it: `flock` on Unix; on Windows a
@@ -1467,6 +1615,111 @@ fn a_held_entry_on_windows_is_tried_again_then_rolled_back() {
     assert_old_layout(&d.profile);
 }
 
+/// On Windows, the lock is checked before every retry of a held rename: a
+/// run whose lock is taken over while it waits out a held entry changes
+/// nothing more (`lock_lost`), even once the entry is let go. Both the
+/// starting move's renames and a rollback's renames back.
+#[cfg(windows)]
+#[test]
+fn a_lock_taken_over_between_windows_retries_stops_the_run() {
+    use std::os::windows::fs::OpenOptionsExt;
+    let hold = |path: &Path| {
+        std::fs::OpenOptions::new()
+            .read(true)
+            .share_mode(0)
+            .open(path)
+            .unwrap()
+    };
+    // Pauses at `step` (after a refused try), takes the lock over, lets the
+    // entry go and the run on: `lock_lost`, nothing more changed.
+    let lose_at = |d: &Dirs, step: &str, held: std::fs::File, extra: &[&str]| {
+        let paused = d.base.join("paused");
+        let release = d.base.join("release");
+        let child = Command::new(BIN)
+            .args([
+                "profile",
+                "migrate",
+                "--profile-dir",
+                s(&d.profile),
+                "--lock-dir",
+                s(&d.locks),
+                "--dev",
+            ])
+            .args(extra)
+            .env(
+                "FREEDOM_CORED_TEST_PROFILE_MIGRATE_PAUSE",
+                format!("{step}={}={}", paused.display(), release.display()),
+            )
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        wait_for(&paused);
+        // Another build's takeover: the mtime isn't the run's any more, and
+        // its refresher (every second in a dev build) finds it.
+        backdate(
+            &d.profile.join("profile-open.lock"),
+            Duration::from_secs(60),
+        );
+        std::thread::sleep(Duration::from_millis(2_500));
+        // The entry let go: a try now would succeed.
+        drop(held);
+        let before = snapshot(&d.profile);
+        std::fs::write(&release, "").unwrap();
+        let out = child.wait_with_output().unwrap();
+        assert_eq!(
+            (code(&out), said(&out)),
+            (74, "lock_lost".into()),
+            "{step}: {out:?}"
+        );
+        assert_eq!(snapshot(&d.profile), before, "{step}: nothing more changed");
+    };
+
+    // The starting move: `settings.json` held; the entries before it moved.
+    let d = dirs();
+    seeded(&d.profile);
+    let held = hold(&d.profile.join("settings.json"));
+    lose_at(&d, "rename-retry", held, &[]);
+    assert!(
+        d.profile.join("settings.json").is_file(),
+        "not moved after the loss"
+    );
+    assert!(
+        d.profile.join("freedom").join(".move.json").is_file(),
+        "journal kept"
+    );
+    backdate(
+        &d.profile.join("profile-open.lock"),
+        Duration::from_secs(60),
+    );
+    let out = migrate_env(&d.profile, &d.locks, &["--dev"], &[]);
+    assert_eq!(said(&out), "rolled_back", "{out:?}");
+    assert_old_layout(&d.profile);
+
+    // A rollback: `settings.json`, moved before the marker, held in
+    // `freedom/`.
+    let d = dirs();
+    write(&d.profile.join("freedom").join("settings.json"), "{}");
+    write(&d.profile.join("Cookies"), "cookies");
+    journal(&d.profile, &["settings.json"]);
+    let held = hold(&d.profile.join("freedom").join("settings.json"));
+    lose_at(&d, "rename-back-retry", held, &["--finish-only"]);
+    assert!(
+        d.profile.join("freedom").join("settings.json").is_file(),
+        "not renamed back after the loss"
+    );
+    assert!(!d.profile.join("settings.json").exists());
+    backdate(
+        &d.profile.join("profile-open.lock"),
+        Duration::from_secs(60),
+    );
+    let out = migrate_env(&d.profile, &d.locks, &["--dev"], &[]);
+    assert_eq!(said(&out), "rolled_back", "{out:?}");
+    assert_eq!(read(&d.profile.join("settings.json")), "{}");
+    assert!(!d.profile.join("freedom").exists());
+}
+
 /// MD3, on Windows: under a long user name, the deepest paths the nodes
 /// write under `ant-data\` and `ipfs-data\` still open under `freedom\`,
 /// one of them past `MAX_PATH`.
@@ -1508,13 +1761,57 @@ fn the_nodes_deepest_paths_still_open_after_the_move_under_a_long_user_name() {
     let out = start_env(&profile, &locks, &[], &[]);
     assert_eq!(said(&out), "migrated", "{out:?}");
     let mut longest = 0;
+    let mut paths = Vec::new();
     for parts in &deep {
         let mut path = profile.join("freedom");
         path.extend(parts);
         longest = longest.max(path.as_os_str().len());
-        assert_eq!(read(&path), parts.join("/"));
+        assert_eq!(read(&path), parts.join("/"), "Rust");
+        paths.push(path.display().to_string());
     }
     assert!(longest > 260, "{longest}");
+    let expected: Vec<String> = deep.iter().map(|parts| parts.join("/")).collect();
+    let expected = expected.join("\n");
+    let list = paths.join("\n");
+
+    // Node's fs (main's) and Go's os (antd's): each prints every file's text.
+    let node = Command::new("node")
+        .args([
+            "-e",
+            "const fs = require('fs'); process.stdout.write(process.env.FREEDOM_TEST_PATHS.split('\\n').map((p) => fs.readFileSync(p, 'utf8')).join('\\n'));",
+        ])
+        .env("FREEDOM_TEST_PATHS", &list)
+        .output();
+    check_runtime("node", node, &expected);
+
+    let go_dir = tempfile::tempdir().unwrap();
+    let program = go_dir.path().join("main.go");
+    std::fs::write(
+        &program,
+        "package main\n\nimport (\n\t\"os\"\n\t\"strings\"\n)\n\nfunc main() {\n\tvar texts []string\n\tfor _, p := range strings.Split(os.Getenv(\"FREEDOM_TEST_PATHS\"), \"\\n\") {\n\t\tb, err := os.ReadFile(p)\n\t\tif err != nil {\n\t\t\tos.Stderr.WriteString(err.Error())\n\t\t\tos.Exit(1)\n\t\t}\n\t\ttexts = append(texts, string(b))\n\t}\n\tos.Stdout.WriteString(strings.Join(texts, \"\\n\"))\n}\n",
+    )
+    .unwrap();
+    let go = Command::new("go")
+        .arg("run")
+        .arg(&program)
+        .env("FREEDOM_TEST_PATHS", &list)
+        .output();
+    check_runtime("go", go, &expected);
+}
+
+/// A runtime's reading of the deepest paths. A runtime that isn't installed
+/// fails the test under CI (`CI`, which GitHub Actions sets), where
+/// windows-latest has Node and Go, and is skipped elsewhere.
+#[cfg(windows)]
+fn check_runtime(name: &str, output: std::io::Result<Output>, expected: &str) {
+    match output {
+        Ok(out) => {
+            assert!(out.status.success(), "{name}: {out:?}");
+            assert_eq!(String::from_utf8_lossy(&out.stdout), expected, "{name}");
+        }
+        Err(e) if std::env::var_os("CI").is_some() => panic!("{name} under CI: {e}"),
+        Err(e) => eprintln!("{name} not run: {e}"),
+    }
 }
 
 /// Each held phase, on a dev build's timings: a probe reads the profile

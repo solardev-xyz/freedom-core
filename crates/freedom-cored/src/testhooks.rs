@@ -225,7 +225,9 @@
 //!   `before-journal-removed`), and a starting move's (`after-exclusion`,
 //!   `after-freedom-dir`, `after-journal`, `mid-move` after each entry's
 //!   rename, `after-renames`, `after-marker`, `after-placeholder`,
-//!   `before-journal-removed`): there the process exits at once with 99.
+//!   `before-journal-removed`), and on Windows after a refused try of a
+//!   rename (`rename-retry`) or a rollback's rename back
+//!   (`rename-back-retry`): there the process exits at once with 99.
 //! - `FREEDOM_CORED_TEST_PROFILE_MIGRATE_PAUSE` (`<step>=<marker>=<release>`):
 //!   at that step (one of the crash hook's) `profile migrate` creates the
 //!   file `<marker>`, then waits, its locks and gates held and its lock
