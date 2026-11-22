@@ -774,10 +774,11 @@ struct Setup {
 ///   the spawn; `confine` grants only what exists). One that can't be made
 ///   is exit 74.
 /// - **Each missing `--node-root`** made with its ancestors (C2): Bee's
-///   private, Radicle's home by its gate file's creating open below, as
-///   fc-service's gate makes it. A node root that can't be made, or isn't
-///   a directory, is logged and left out of the grant: `nodes.write_identity`
-///   then fails on it, as the node's other storage errors do.
+///   private, as the Freedom root is, and one that can't be made (a
+///   regular file there, an ancestor that can't hold it, a parent whose
+///   sync fails) is exit 74; Radicle's home by its gate file's creating
+///   open below, as fc-service's gate makes it, where a failure is logged
+///   and the home, if it isn't a directory then, left out of the grant.
 /// - **The records planned** and the Radicle gate files opened (C6, C3).
 /// - **The legacy receipts handed over** (C5) when `--user-data-dir` is
 ///   given, whatever the hello's `store_moved` will say: the profile's
@@ -803,6 +804,7 @@ fn setup(options: &Options, gate: &gate::Gate) -> Result<Setup, Exit> {
             "cannot make a node root",
             serde_json::json!({ "node": "bee", "error": e.kind().to_string() }),
         );
+        return Err(Exit::Storage);
     }
     let prepared = journal::prepare(
         &gate.identity_dir,

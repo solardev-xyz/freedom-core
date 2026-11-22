@@ -202,6 +202,46 @@ fn the_hello_reports_the_confinement() {
     assert!(core.stderr().contains("serve confined"));
 }
 
+/// A `--node-root bee=` that can't be made fails the start with exit 74,
+/// before `confine` and before any hello (design 0017, C2): a regular file
+/// at the root, a regular file as one of its ancestors, and (Unix, as
+/// another user than root, whom modes don't stop) a parent without write
+/// permission.
+#[test]
+fn a_bee_root_that_cant_be_made_fails_the_start() {
+    let w = world();
+    let file = w.base.join("not-a-dir");
+    std::fs::write(&file, "x").unwrap();
+    let mut roots = vec![file.clone(), file.join("bee")];
+    #[cfg(unix)]
+    let locked = {
+        use std::os::unix::fs::PermissionsExt;
+        let locked = w.base.join("locked");
+        std::fs::create_dir(&locked).unwrap();
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o500)).unwrap();
+        if !rustix::process::geteuid().is_root() {
+            roots.push(locked.join("bee"));
+        }
+        locked
+    };
+    for root in roots {
+        let bee = format!("bee={}", s(&root));
+        let args = ["--grant-root", s(&w.freedom), "--node-root", &bee];
+        let mut core = spawn_env("serve", &w.identity, &w.locks, &args, &[]);
+        assert_eq!(core.exit_code(Duration::from_secs(10)), 74, "{root:?}");
+        let stderr = core.stderr();
+        assert!(stderr.contains("cannot make a node root"), "{stderr}");
+        assert!(!stderr.contains("serve confined"), "{stderr}");
+    }
+    assert_eq!(std::fs::read_to_string(&file).unwrap(), "x");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        assert!(!locked.join("bee").exists());
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o700)).unwrap();
+    }
+}
+
 /// A probe's answer: whether it worked, and the OS's error number.
 fn probe(core: &mut Core, id: u64, params: Value) -> (bool, Option<i64>) {
     let reply = core.call(id, "test.probe", params.clone());
