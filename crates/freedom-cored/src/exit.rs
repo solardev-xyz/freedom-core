@@ -23,8 +23,8 @@ pub enum Exit {
     /// Confinement refused the process (design 0010's `Invalid`), in a
     /// profile subcommand (0013) or in `serve`, `hold-lock` or `recover`
     /// (0017): a thread or a descriptor it can't confine, or rules the OS
-    /// refused halfway. Main reports the core unavailable, and restarts it
-    /// under its usual rules.
+    /// refused halfway. Main reports the core unavailable and doesn't
+    /// restart it (0010's restart table: never).
     Confinement,
 }
 

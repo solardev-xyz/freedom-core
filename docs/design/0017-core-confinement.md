@@ -207,7 +207,7 @@ A profile whose move deferred (0013's `deferred` outcomes) keeps its Freedom dat
 3. **Hardening** (0001), then the parent's death signal and its check.
 4. **The gate,** taken and held; the Radicle gate files opened (C3).
 5. **Setup on the only thread:** each missing node root created (C2); the records planned (C6); the receipts copied (C5); the vault's and the journal's files tightened, as the vault's start does today.
-6. **`confine`,** with C2's policy. An `Invalid` is exit 77 (`confinement`), as for the services: main reports the core unavailable and restarts it under its usual rules. A mechanism the OS lacks is reported, not fatal (0010 D2).
+6. **`confine`,** with C2's policy. An `Invalid` is exit 77 (`confinement`), as for the services: main reports the core unavailable and doesn't restart it (0010's restart table: never). A mechanism the OS lacks is reported, not fatal (0010 D2).
 7. **The logging thread,** then `serve::run` as today. The hello's answer carries the `Report` under `confinement`, and main logs it with the core's version.
 
 ### Per OS
@@ -244,7 +244,7 @@ In freedom-browser's CI: every core integration suite and e2e job runs against t
 
 1. **D7-1 (fc-service):** the `modes` field (seccomp's per-bit `MaskedEq` rules, Seatbelt's `file-write-mode`) and the gate over an open file (C3). Tests on each OS.
 2. **D7-2 (freedom-cored):** C1's arguments and checks, the hello and `nodes.write_identity` matches, C5's copy, C6's plan, C7's pragma, the order above with `clean_entry`, and the report in the hello's answer. `serve` confines itself; `hold-lock` takes the same order with only the identity directory and its gate, and `recover` with the identity directory, its gate and C6's plan. Tests above. **Done** in four parts: D7-2a (the arguments and their checks), D7-2b (C5's hand-over), D7-2c (C6's plan and the Radicle gate files), and D7-2d (the order, `confine`, the report). What D7-2d settled against the code:
-   - **`--grant-root` is required,** and the hello's `user_data_dir` must equal `--user-data-dir` both ways: a confined `serve` reaches the profile's root only through the hand-over before `confine`. A missing Freedom root is made (private) before `confine`, as a missing `--node-root bee=` is; one that can't be made is exit 74.
+   - **`--grant-root` is required,** and the hello's `user_data_dir` must equal `--user-data-dir` both ways: a confined `serve` reaches the profile's root only through the hand-over before `confine`. A missing Freedom root is made (private) before `confine`, as a missing `--node-root bee=` is; either one that can't be made (a parent directory's sync failing included) is exit 74.
    - **The hand-over runs at every start with `--user-data-dir`,** before the hello, whatever its `store_moved`; the hello then only chooses the payments import's root from it.
    - **The vault's tightening at start stays on the snapshot thread,** after the node, delete and metadata journals' recovery that may replace the vault file: C4's `modes` lets it through confined, as it does the intent journal's and the node layout's.
    - **A symlink or a FIFO at a store file's name** can't be set aside on Linux: Landlock counts a special file renamed as one made at its new name, and C2 makes none (`symlinks` false; `fc_service` never grants FIFOs). The store logs the failed set-aside and starts empty, as it does whenever one fails, and its next write replaces the special file, never following a link. Seatbelt lets the rename through.
