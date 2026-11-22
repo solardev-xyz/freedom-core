@@ -99,6 +99,12 @@ required-features = ["testhooks"]
 name = "serve"
 required-features = ["testhooks"]
 
+# `serve`, `hold-lock` and `recover` confined (design 0017): `test.probe`
+# and the confined-read hook.
+[[test]]
+name = "serve_confined"
+required-features = ["testhooks"]
+
 [[test]]
 name = "vault"
 required-features = ["testhooks"]

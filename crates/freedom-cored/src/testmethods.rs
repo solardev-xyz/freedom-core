@@ -29,6 +29,15 @@
 //! wrapping key in hex so a test can compare `create`'s with `open`'s and
 //! look for it in what main saw, or `{ ok: false, error, reason? }`. A test
 //! build's method only: no release build compiles it.
+//!
+//! `test.probe { op, path?, addr?, mode? }` tries one thing from inside the
+//! core, on this thread, so a test sees what a confined `serve` can and
+//! can't do (design 0017, "Tests"): `read` (a file's bytes, or a
+//! directory's entries), `create` (a new file), `remove` (a file), `chmod`
+//! (`mode` set through an open descriptor, `fchmod`), `tcp` (a connect to
+//! `addr`), `unix` (a connect to the socket at `path`) and `exec` (`path`
+//! run with no argument). It answers `{ ok: true }`, or `{ ok: false, errno,
+//! kind }` with the OS's error.
 
 use std::collections::VecDeque;
 use std::sync::mpsc::{self, Receiver, Sender};
@@ -45,7 +54,7 @@ use crate::serve::Event;
 use crate::transport::{self, Allowance, Credit, Link, Out, Reply};
 
 /// The methods this thread answers.
-pub const METHODS: &[&str] = &["test.large", "test.keystore"];
+pub const METHODS: &[&str] = &["test.large", "test.keystore", "test.probe"];
 
 /// The largest `bytes` asked for: past the cap, to see `too_large`.
 const MAX_TEST_BYTES: usize = 2 * fc_protocol::frame::MAX_MESSAGE;
@@ -128,6 +137,12 @@ fn run(rx: &Receiver<Mail>, producer: &mut Producer) -> Result<(), Gone> {
         match message {
             In::Request { id, method, params } if method == "test.keystore" => {
                 producer.keystore_call(id, params.as_deref());
+            }
+            In::Request { id, method, params } if method == "test.probe" => {
+                producer
+                    .outbox
+                    .push_back(probe_reply(id, params.as_deref()));
+                producer.pump()?;
             }
             In::Request { id, params, .. } => {
                 let reply = producer.answer(id, params.as_deref());
@@ -327,6 +342,90 @@ fn keystore_call(keystore: &DesktopKeyStore, params: Option<&str>) -> String {
         },
         _ => bad(),
     }
+}
+
+/// One `test.probe`: its reply.
+fn probe_reply(id: u64, params: Option<&RawValue>) -> Reply {
+    #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Params {
+        op: String,
+        #[serde(default)]
+        path: Option<std::path::PathBuf>,
+        #[serde(default)]
+        addr: Option<String>,
+        #[serde(default)]
+        mode: Option<u32>,
+    }
+    let Some(p) = params.and_then(|p| serde_json::from_str::<Params>(p.get()).ok()) else {
+        return error(id, ErrorCode::InvalidArgument, "Invalid parameters");
+    };
+    let Some(outcome) = probe(&p.op, p.path.as_deref(), p.addr.as_deref(), p.mode) else {
+        return error(id, ErrorCode::InvalidArgument, "Invalid parameters");
+    };
+    let result = match outcome {
+        Ok(()) => serde_json::json!({ "ok": true }),
+        Err(e) => serde_json::json!({
+            "ok": false,
+            "errno": e.raw_os_error(),
+            "kind": e.kind().to_string(),
+        }),
+    };
+    let mut payload = Zeroizing::new(Vec::with_capacity(128));
+    match message::write_result(&mut *payload, id, &result) {
+        Ok(()) => Reply::Whole(transport::frame(&payload).unwrap_or_default()),
+        Err(_) => error(id, ErrorCode::Internal, "Internal error"),
+    }
+}
+
+/// `test.probe`'s `op`, tried: `None` for parameters it lacks or an `op`
+/// this OS doesn't have.
+fn probe(
+    op: &str,
+    path: Option<&std::path::Path>,
+    addr: Option<&str>,
+    mode: Option<u32>,
+) -> Option<std::io::Result<()>> {
+    Some(match op {
+        "read" => {
+            let path = path?;
+            if path.is_dir() {
+                std::fs::read_dir(path).map(|_| ())
+            } else {
+                std::fs::read(path).map(|_| ())
+            }
+        }
+        "create" => std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(path?)
+            .map(|_| ()),
+        "remove" => std::fs::remove_file(path?),
+        #[cfg(unix)]
+        "chmod" => {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = mode?;
+            std::fs::File::open(path?)
+                .and_then(|file| file.set_permissions(std::fs::Permissions::from_mode(mode)))
+        }
+        "tcp" => {
+            let addr: std::net::SocketAddr = addr?.parse().ok()?;
+            std::net::TcpStream::connect_timeout(&addr, std::time::Duration::from_secs(5))
+                .map(|_| ())
+        }
+        #[cfg(unix)]
+        "unix" => std::os::unix::net::UnixStream::connect(path?).map(|_| ()),
+        "exec" => std::process::Command::new(path?)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .map(|_| ()),
+        _ => {
+            let _ = mode;
+            return None;
+        }
+    })
 }
 
 /// A small error reply: always one frame.
