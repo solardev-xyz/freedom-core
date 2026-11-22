@@ -2,7 +2,7 @@
 
 **Status:** proposed. It is [0010](0010-service-confinement.md)'s D7 ("`freedom-cored` is confined too, in a later design", decided by the user 2026-10-23), on what [0013](0013-profiles.md) left for it ("Effects on 0010 and D7"). PRF-9's move is released (`cored-v0.26.0`), so this design starts at 0013's D7b, the `freedom/` grant, and keeps D7a's wider grant only for a profile whose move hasn't happened yet. Every choice below is a technical one, made by the coordinator, which the user may veto; none is a product question.
 
-**Amended** after review round 1: the claims and tests are scoped per OS by what each mechanism reports (Windows enforces only part of `exec` before 0010's restricted token); C5 hands over only a receipts file today's import would read, with a cross-directory durable rename; C6 follows recovery's own rules for each record kind; C8 gives up Seatbelt carve-outs; the inventory lists `fc_service`'s system grants and the stores' generic temp and set-aside names.
+**Amended** after review round 1: the claims and tests are scoped per OS by what each mechanism reports (Windows enforces only part of `exec` before 0010's restricted token); C5 hands over only a receipts file today's import would read, with a cross-directory durable rename; C6 follows recovery's own rules for each record kind; C8 gives up Seatbelt carve-outs; the inventory lists `fc_service`'s system grants and the stores' generic temp and set-aside names. After round 2: C5 copies instead of moving, so the profile's root keeps its file until the import has committed; C6 leaves a missing committed Bee root missing, as recovery does; the Windows and macOS grants are stated as `fc_service` sets them.
 
 **The references:**
 - **freedom-core** at `c54cafdb` (`main`, `cored-v0.26.0`):
@@ -20,8 +20,8 @@
 - **The order (C1):** main passes every directory `serve` needs on its command line. `serve` drops inherited descriptors (one re-exec on Linux and macOS, as the subcommands do), takes its gate, opens what it holds, does its setup, and confines itself while it is the process's only thread, before the logging thread and before it reads a byte from the pipe. The hello then has to name the same directories, or it is refused.
 - **What changes in `serve` to fit:**
   - **Modes (C4):** mode changes stay refused except a narrowing to owner-only (`fchmod` with no group, other or special bits), which is all `serve`'s tightening does.
-  - **The legacy receipts (C5):** `x402-receipts.json` is imported from the profile's root today. Before confining itself, `serve` hands a file that today's import would read over to the Freedom root, with a durable rename, and imports from there. Electron's own data leaves the grant.
-  - **A pending node journal (C6):** before confinement, `serve` plans what recovery will need by record kind, granting the roots a committed journal or a live intent names, and creating only what recovery would have created.
+  - **The legacy receipts (C5):** `x402-receipts.json` is imported from the profile's root today. Before confining itself, `serve` copies a file that today's import would read into the Freedom root, with fc-store's durable write, and imports the copy; the original at the profile's root is dropped at a later start, once the copy's `.migrated` shows the import committed. Electron's own data leaves the grant.
+  - **A pending node journal (C6):** before confinement, `serve` plans what recovery will need by record kind and node, granting the roots a committed journal or a live intent names that exist, and creating only what recovery would have created (a Radicle home, through its gate).
   - **SQLite's temp files (C7):** in memory, so nothing is written outside the grant.
 - **Per OS,** with what 0010 already ships: Landlock and the seccomp denylist on Linux, and a Seatbelt profile on macOS, enforce the grant. Windows gets the job object and the mitigation policies: `exec` is `partial` and files, IPC and network are `unavailable` until 0010's restricted token (D4). A mechanism the OS lacks is reported and `serve` runs (0010 D2); the report goes back in `core.hello`'s answer, and main logs it.
 - **Before the move (C8):** a profile in the old layout gets D7a's grant, its whole `userData`. For a named profile that still keeps other profiles and the catalog out; for the packaged default profile, whose `userData` is the app root, it doesn't. The move retries at every start, so that state is short.
@@ -67,7 +67,7 @@ Taken at `c54cafdb`. All renames today stay inside one directory, no link of eit
 
 - **Today:** everything the user can: every profile, the catalog, the browser's cookies and saved data, the user's documents and keys, any program, the network, the session bus and the Keychain's items that don't name a code signature.
 - **After, on Linux and macOS:** its own profile's Freedom data and node keys, which it holds anyway, and the system reads every confined process gets ([C2](#c2-the-grant)). Through main it can still ask for what main's executors give any core: page-originated chain reads, naming lookups and key-store calls on its own profile's items (0013, "Not covered").
-- **After, on Windows:** no child process of its own, and no dynamic code, unsigned image or extension point. Files, IPC and the network stay as today, and a process created with another of the user's processes as its parent escapes the job (0010's `parent_process` gap), until the restricted token.
+- **After, on Windows:** no child process of its own; no dynamic code; no image loaded from a remote device or a low-integrity location, with System32 searched first; no extension point. Files, IPC and the network stay as today, and a process created with another of the user's processes as its parent escapes the job (0010's `parent_process` gap), until the restricted token.
 
 ## The recommendation
 
@@ -102,7 +102,7 @@ The policy `serve` passes to `fc_service::confine`:
 | `read_write` | the identity directory (canonical), `--grant-root`, each `--node-root`, and the roots C6 plans. After PRF-9 the identity directory is `freedom/identity` unless overridden, so it is usually inside the Freedom root already. |
 | `read_only` | none |
 | `read_only_dirs` | none |
-| `refer` | false: every rename but C5's stays in its directory, and C5's runs before `confine` |
+| `refer` | false: every rename stays in its directory |
 | `symlinks`, `times` | false |
 | `network` | `Offline` |
 | `resolver` | `None` |
@@ -110,9 +110,9 @@ The policy `serve` passes to `fc_service::confine`:
 | `descriptors` | the gate's lock, each Radicle gate file (C3), and anything else opened before `confine` |
 | `modes` (new, C4) | true |
 
-**What `confine` adds on its own,** for every confined process, and so the effective read grant:
+**What `confine` adds on its own,** for every confined process, so the effective grant beyond the table:
 - **Linux** (`resolver.rs`, with `Resolver::None`): `/proc/self` (its `mountinfo` included), `/sys/fs/cgroup`, `/dev/random` and `/dev/urandom`, read-only.
-- **macOS** (`seatbelt.rs`): the system's libraries and frameworks, the random devices and `/dev/null`.
+- **macOS** (`seatbelt.rs`): read and executable mapping of the system's libraries and frameworks; the random devices; `/dev/null`, read and written; and `/usr/bin/true`, read and mapped executable, the target of the profile's exec self-test (it can't run: `process-exec` is denied).
 - **Windows:** nothing; no file rule applies yet.
 
 **Directories that don't exist yet:** Landlock and Seatbelt grant existing paths. Before confining, `serve` creates each `--node-root` that is missing, with its ancestors, mode 0700, as `nodes.write_identity` would have; the Radicle home as fc-service's gate creates it today. The Freedom root and the identity directory exist by the time main spawns `serve`.
@@ -142,30 +142,41 @@ No other path in the lock directory is used after the hello. The alternative, gr
 `payments_store::Store::import` reads `x402-receipts.json` from `user_data_dir`, at the database's first open, and renames it `.migrated` there. Under the `freedom/` grant the profile's root is out of reach, and its `metadata` would fail as if the file were absent: the import would be skipped without a word.
 
 **Options:**
-- **(a) `serve` hands the file over to the Freedom root before confining itself,** only when today's import would read it, and imports from there.
+- **(a) `serve` copies the file into the Freedom root before confining itself,** only when today's import would read it, and imports the copy.
 - **(b) Main hands it over:** a `shell.*` request for its bytes, and another to rename it after the commit. Two new methods for a one-time import.
 - **(c) Grant the profile's root.** That brings Electron's data back into the grant.
 
-**Recommended: (a),** as a step that runs at every start of a moved profile (its `--user-data-dir` differs from `--grant-root`), on the only thread, before `confine`. It applies `Store::import`'s own rules at the root, in its order:
+**Recommended: (a), as a copy.** The original stays at the profile's root until the import has committed, so the root's file is authoritative until then, as it is today. A step at every start of a moved profile (its `--user-data-dir` differs from `--grant-root`), on the only thread, before `confine`, in this order:
 1. **No file:** `x402-receipts.json` absent at the root, as `metadata` finds it today (a link followed, any error as absent): nothing.
-2. **A stray:** a `.migrated` at the root too: the root's `x402-receipts.json` is removed there, through the same `fsx::remove` as today's stray branch, and nothing moves. A `.migrated` alone never moves: its only meaning is "drop a stray", and there is no stray.
-3. **Not readable as today's import reads it:** the file is opened as `read_file` opens it (no link followed, a regular file, the current user's, at most `MAX_LEGACY_BYTES`). Anything refused (a directory, a link, a special file, another user's file, an oversized one) stays at the root, logged as today's `Kept` (`unreadable`).
-4. **A conflict:** a `x402-receipts.json` or `.migrated` already in the Freedom root: the root's file stays, logged. Downgrades are out of scope (the user, 2026-11-21), so this arises only by hand.
-5. **The handover:** the root's file is renamed to `x402-receipts.json` in the Freedom root, the profile and its `freedom/` being one filesystem (the move defers on a mounted `freedom/`; an `EXDEV` leaves the file, logged). The moved entry is then checked against the handle opened in step 3 (device and inode on Unix, volume and file id on Windows); another entry is renamed back and left, logged. Then the rename is made durable across both directories: the Freedom root is synced, then the profile's root (`fsync` on each directory on Unix; on Windows the rename is `MoveFileExW` with `MOVEFILE_WRITE_THROUGH`). A new `fsx::sync_rename_across(from_dir, to_dir)` does this.
+2. **A stray:** a `.migrated` at the root, as today, or in the Freedom root, which only C5's own copy can have put there: the root's `x402-receipts.json` was imported already, and is removed there through the same `fsx::remove` as today's stray branch, the directory synced. Nothing is copied. A `.migrated` at the root never moves: its only meaning is "drop a stray".
+3. **Already copied:** a `x402-receipts.json` in the Freedom root: an earlier start copied it and its import hasn't committed (refused, or a write failed). Nothing is copied again; the import retries on that copy, as today's retries on the root's file.
+4. **Not readable as today's import reads it:** the root's file is read as `read_file` reads it (no link followed, a regular file, the current user's, at most `MAX_LEGACY_BYTES`). Anything refused (a directory, a link, a special file, another user's file, an oversized one) stays at the root, logged as today's `Kept` (`unreadable`), and nothing is copied.
+5. **The copy:** the bytes `read_file` returned, from the handle it checked, are written to `x402-receipts.json` in the Freedom root by fc-store's atomic write (temp file, `fsync`, rename, directory sync; on Windows its `FlushFileBuffers` primitive), mode 0600. Nothing at the root changes.
 
-**Crash safety:** a rename is atomic in the filesystem's namespace, so after a crash at any point the file is in exactly one of the two places. Left at the root, the next start hands it over again. In the Freedom root, the import finds it there. Once imported, the import's own `.migrated` rename happens in the Freedom root, as it does at the root today. A file that arrived in the Freedom root but whose root entry survives too can't happen: one rename moves one entry.
+The import then runs unchanged with the Freedom root as its root: it reads the copy, commits its rows, and renames the copy `.migrated` there (`fsx::sync_rename`), exactly as it does at the root today. At the next start, step 2 drops the root's original.
 
-The import then runs unchanged with the Freedom root as its root. A profile in the old layout has the same directory for both, and nothing moves.
+**Crash safety,** at each point:
+- **Before the copy's rename:** no copy, or only fc-store's temp, which its own sweep removes. The root's file is untouched; the next start copies again.
+- **Copy in place, import not committed:** step 3 at the next start; the import retries on the copy. The original stays at the root.
+- **Import committed, the copy's rename to `.migrated` not durable:** today's state at the root, now in the Freedom root: the next import finds the copy and no `.migrated`, and imports again. Today's import has the same window, and `import_legacy` is what keeps it harmless, unchanged: it skips every entry imported already (`payments.rs`).
+- **`.migrated` in the Freedom root, the original still at the root:** step 2 removes the original at that start or the next. The original is never removed before the import's `.migrated` is durable, so no point loses the only copy, and no point imports twice beyond today's window.
+
+Two copies at once (the root's original and the Freedom root's copy or `.migrated`) are a state C5 makes on purpose and settles by rule, never by comparing contents. A root file edited by hand after its copy isn't read again; downgrades are out of scope (the user, 2026-11-21), so nothing else writes it.
+
+**Parity with today's import:** a file the import would refuse (bad JSON, refused rows) or fail to write is `Kept` and retried at every start, as today; the copy is what is retried, and the original stays at the root until a retry commits. The log lines are the import's own, plus one for the copy and one for the dropped original.
+
+A profile in the old layout has the same directory for both, and the step does nothing: the import runs at the root as today.
 
 ### C6. A pending node journal's roots
 
 Startup recovery, before the hello, finishes or discards what an earlier run left in the identity directory: a committed journal (`node-identity-journal.json`) is replayed, an intent with no journal (`node-identity-staging.json`) is discarded. If main's node directory changed since (an override moved), the record's root isn't among the arguments. And every `read_write` path must exist (`confine`'s rule), while recovery deliberately neither creates nor looks under a missing intent root.
 
-**Recommended:** before confining itself, `serve` reads both records (as recovery parses them, with the same bounds and validity checks) and plans by record kind, mirroring recovery:
+**Recommended:** before confining itself, `serve` reads both records (as recovery parses them, with the same bounds and validity checks) and plans by record kind and node, mirroring recovery:
 - **No record, an invalid one, or a journal the done list already records:** nothing is granted. Recovery sets the invalid one aside, or removes the finished journal, with the identity directory alone, as today.
-- **A committed journal not yet done:** replay will write the root, creating it if it is gone. So the plan does now what replay would do first: for Bee, a missing root is created with its ancestors, 0700, as replay creates it; for Radicle, the home is created by the gate's own path, as `radicle_gate(…, true)` does, and its gate file is opened (C3). The root is granted. A held Radicle gate still makes recovery wait (`Waiting`), as today.
+- **A committed Radicle journal not yet done:** recovery takes the home's gate through the creating path (`radicle_gate(…, true)`), which makes a missing home. The plan does that part now: the home is made as the gate makes it, its gate file is opened (C3), and the home is granted. A held gate still makes recovery wait (`Waiting`), as today.
+- **A committed Bee journal not yet done:** recovery opens the recorded root once (`Resolve::Follow`) and, if it is gone, concludes with no root: every install is marked corrupt, the status is `Corrupt`, and the journal goes, with nothing created. So the plan grants the root only if it exists; a missing one is neither created nor granted, and recovery concludes it as today, with the identity directory alone.
 - **An intent, no journal:** a root that exists and is a directory is granted, with its Radicle gate file (C3); recovery gates it and removes the staged names, as today. A missing root is neither created nor granted: recovery removes the intent without the gate and without looking under the root, as today, with the identity directory alone. A root that isn't a directory isn't granted; recovery fails on it as it does today (`pending_recovery`).
-- **A race:** a root that appears or changes between the plan and recovery is outside the grant, so recovery's access fails and the record stays, reported as `pending_recovery`, as today's identity checks report a changed root. Nothing is created outside the plan.
+- **A race:** a root that appears or changes between the plan and recovery is outside the grant. Opening it fails with a permission error rather than "not found", which recovery doesn't take as gone, so it returns the error and the record stays, reported as `pending_recovery`, for the next start's plan. For a Radicle home this matches today's identity check; for Bee, which today follows whatever directory the path names, it is new, and errs toward keeping the record. Nothing is created outside the plan.
 
 The granted roots are the user's own node directories from an earlier run, so the grant stays within what the profile used.
 
@@ -187,7 +198,7 @@ A profile whose move deferred (0013's `deferred` outcomes) keeps its Freedom dat
 2. **Arguments,** checked as in C1.
 3. **Hardening** (0001), then the parent's death signal and its check.
 4. **The gate,** taken and held; the Radicle gate files opened (C3).
-5. **Setup on the only thread:** each missing node root created (C2); the records planned (C6); the receipts handed over (C5); the vault's and the journal's files tightened, as the vault's start does today.
+5. **Setup on the only thread:** each missing node root created (C2); the records planned (C6); the receipts copied (C5); the vault's and the journal's files tightened, as the vault's start does today.
 6. **`confine`,** with C2's policy. An `Invalid` is exit 77 (`confinement`), as for the services: main reports the core unavailable and restarts it under its usual rules. A mechanism the OS lacks is reported, not fatal (0010 D2).
 7. **The logging thread,** then `serve::run` as today. The hello's answer carries the `Report` under `confinement`, and main logs it with the core's version.
 
@@ -205,8 +216,8 @@ In freedom-core's CI, against a `serve` started with C1's arguments.
 - **The report:** the hello's `confinement` says `enforced` for every property (Linux, at a kernel with the ABI), `partial` for `files` naming `modes` and `enforced` otherwise (macOS), or `exec` `partial` naming `parent_process`, `files`, `ipc` and `network` `unavailable`, and each mitigation `set` (Windows).
 - **Everything `serve` does still works, confined:** the existing integration suites (vault, secrets, stores, intents, payments, approvals, dweb, naming, chain) run against the confined binary; `nodes.write_identity` for Bee and Radicle, and a wipe; the key-store calls through main's helper (0013's D7 tests: create, open, replace and forget on every OS that offers them).
 - **Refusals:** a hello whose `grant_root` or `user_data_dir` differs from the arguments; a `nodes.write_identity` for another directory; a `serve` missing the new arguments.
-- **The receipts (C5):** a moved profile with `x402-receipts.json` at its root imports it once, from the Freedom root, and the root keeps no copy; with a `.migrated` at the root too, the stray is dropped at the root and nothing moves; a directory, a link, a FIFO, another user's file (Unix) and an oversized file named `x402-receipts.json` each stay at the root, unread; a name in the Freedom root already blocks the handover; the entry swapped between the check and the rename (a test hook) is renamed back; a crash (a test hook) before and after the rename, and before and after each directory sync, leaves the file in one place, and the next start imports it once; a profile in the old layout behaves as today.
-- **The records (C6),** for Bee and Radicle each: a committed journal with its root present, missing (created, then replayed), changed since the arguments, and held (Radicle: `Waiting`); an intent with its root present, missing (the core starts, the intent goes, and the root isn't created), and not a directory; an invalid record; a journal already done.
+- **The receipts (C5):** a moved profile with `x402-receipts.json` at its root imports it once, from its copy in the Freedom root, and the original goes at the next start; with a `.migrated` at the root too, the stray is dropped at the root and nothing is copied; a directory, a link, a FIFO, another user's file (Unix) and an oversized file named `x402-receipts.json` each stay at the root, unread and uncopied; bad JSON and refused rows leave the copy and the original, and the import retries at the next start; a database write failure (a test hook) does the same; the deliberate two-copy states (original and copy; original and the copy's `.migrated`) each converge at the next start with every row imported once; a crash (a test hook) before and after the copy's rename, before and after the import's commit, and before and after the original's removal, never loses the receipts; a profile in the old layout behaves as today.
+- **The records (C6),** for Bee and Radicle each: a committed journal with its root present, changed since the arguments, and missing (Radicle: the home made and the journal replayed; Bee: `Corrupt`, and the root and its missing ancestors still absent); a held Radicle gate (`Waiting`); an intent with its root present, missing (the core starts, the intent goes, and the root isn't created), and not a directory; a root that appears between the plan and recovery (the record stays, `pending_recovery`); an invalid record; a journal already done.
 - **SQLite (C7):** a new database's first open and its switch to WAL, confined.
 
 **On Linux and macOS:**
@@ -223,8 +234,8 @@ In freedom-browser's CI: every core integration suite and e2e job runs against t
 
 ## Steps
 
-1. **D7-1 (fc-service, fc-store):** the `modes` field (seccomp's per-bit `MaskedEq` rules, Seatbelt's `file-write-mode`), the gate over an open file (C3), and `fsx::sync_rename_across` (C5). Tests on each OS.
-2. **D7-2 (freedom-cored):** C1's arguments and checks, the hello and `nodes.write_identity` matches, C5's handover, C6's plan, C7's pragma, the order above with `clean_entry`, and the report in the hello's answer. `serve` confines itself; `hold-lock` takes the same order with only the identity directory and its gate, and `recover` with the identity directory, its gate and C6's plan. Tests above.
+1. **D7-1 (fc-service):** the `modes` field (seccomp's per-bit `MaskedEq` rules, Seatbelt's `file-write-mode`) and the gate over an open file (C3). Tests on each OS.
+2. **D7-2 (freedom-cored):** C1's arguments and checks, the hello and `nodes.write_identity` matches, C5's copy, C6's plan, C7's pragma, the order above with `clean_entry`, and the report in the hello's answer. `serve` confines itself; `hold-lock` takes the same order with only the identity directory and its gate, and `recover` with the identity directory, its gate and C6's plan. Tests above.
 3. **Release,** then **B-D7 (freedom-browser):** pass C1's arguments from `core-process.js`, log the report, pin the release; the browser tests above.
 
 ## Decisions
@@ -234,7 +245,7 @@ All the coordinator's, open to the user's veto:
 - **C2:** read-write on the identity directory, the Freedom root and the node roots, with `confine`'s own system reads; offline.
 - **C3:** the lock directory through descriptors opened before `confine`, not granted.
 - **C4:** mode changes allowed only to owner-only modes (Linux), in the read-write grants (macOS).
-- **C5:** a legacy receipts file today's import would read handed over to the Freedom root before `confine`, with a durable cross-directory rename.
-- **C6:** a pending record's roots planned by its kind, as recovery treats it.
+- **C5:** a legacy receipts file today's import would read copied into the Freedom root before `confine`, the original dropped once the copy's import has committed.
+- **C6:** a pending record's roots planned by its kind and node, as recovery treats it.
 - **C7:** SQLite's temp store in memory.
 - **C8:** D7a's grant for a profile in the old layout, with no Seatbelt carve-outs.
