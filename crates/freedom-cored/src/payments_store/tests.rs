@@ -1014,11 +1014,12 @@ fn the_crash_states_converge_with_every_row_once() {
 }
 
 /// Step 6: a file in the Freedom root under either name that isn't the
-/// copy (other bytes, a directory, a link to the same bytes, or a
-/// `.migrated` of other bytes beside a true copy): a conflict. Nothing is
-/// copied, removed or renamed, no legacy row comes from either file, and
-/// the database serves. Each start checks again; removing one by hand
-/// settles it.
+/// copy (other bytes, a directory, a link to the same bytes), even beside
+/// one that is (a `.migrated` of other bytes beside a true copy, a true
+/// `.migrated` beside a copy of other bytes, a directory or a link): a
+/// conflict. Nothing is copied, removed or renamed, the original stays at
+/// the profile's root, no legacy row comes from any file, and the database
+/// serves. Each start checks again; removing one by hand settles it.
 #[test]
 fn a_file_in_the_freedom_root_that_isnt_the_copy_is_a_conflict() {
     let other = RECEIPTS.replace("r1", "r9");
@@ -1047,11 +1048,35 @@ fn a_file_in_the_freedom_root_that_isnt_the_copy_is_a_conflict() {
                 std::fs::write(freedom.join(MIGRATED_FILE), RECEIPTS.replace("r1", "r9")).unwrap();
             }),
         ),
+        (
+            "true migrated, beside a copy of other bytes",
+            Box::new(|freedom: &Path| {
+                std::fs::write(freedom.join(MIGRATED_FILE), RECEIPTS).unwrap();
+                std::fs::write(freedom.join(LEGACY_FILE), RECEIPTS.replace("r1", "r9")).unwrap();
+            }),
+        ),
+        (
+            "true migrated, beside a directory",
+            Box::new(|freedom: &Path| {
+                std::fs::write(freedom.join(MIGRATED_FILE), RECEIPTS).unwrap();
+                std::fs::create_dir(freedom.join(LEGACY_FILE)).unwrap();
+            }),
+        ),
     ];
     #[cfg(unix)]
     cases.push((
         "copy, a link to the same bytes",
         Box::new(|freedom: &Path| {
+            let target = freedom.join("same.json");
+            std::fs::write(&target, RECEIPTS).unwrap();
+            std::os::unix::fs::symlink(&target, freedom.join(LEGACY_FILE)).unwrap();
+        }),
+    ));
+    #[cfg(unix)]
+    cases.push((
+        "true migrated, beside a link to the same bytes",
+        Box::new(|freedom: &Path| {
+            std::fs::write(freedom.join(MIGRATED_FILE), RECEIPTS).unwrap();
             let target = freedom.join("same.json");
             std::fs::write(&target, RECEIPTS).unwrap();
             std::os::unix::fs::symlink(&target, freedom.join(LEGACY_FILE)).unwrap();
@@ -1194,4 +1219,120 @@ fn the_old_layout_imports_at_its_root_as_before() {
         assert_eq!(handover.import(&link, &root), Import::at(link.clone()));
         assert_eq!(files(&root), [LEGACY_FILE]);
     }
+}
+
+/// A valid receipts file that isn't the profile's root's.
+const UNRELATED: &str =
+    r#"[{"id":"r7","settledAt":1699000200,"status":"settled","chainId":8453,"amount":"900"}]"#;
+
+/// Hooks that put [`UNRELATED`] in the Freedom root as the hand-over
+/// reaches `at` (a copy's write step, or step 4's sync as `Flush`), and
+/// fail that step if `fail`: a file that turns up there during the start.
+struct Plant {
+    at: Step,
+    fail: bool,
+    path: PathBuf,
+}
+
+impl Hooks for Plant {
+    fn fails(&self, step: Step) -> bool {
+        if step != self.at {
+            return false;
+        }
+        std::fs::write(&self.path, UNRELATED).unwrap();
+        self.fail
+    }
+}
+
+/// Only a copy proved (step 5) or made (step 7) is imported: after every
+/// other outcome a valid, unrelated `x402-receipts.json` in the Freedom
+/// root is neither imported, renamed nor removed, and no legacy row
+/// appears, the database serving. Steps 1, 2 and 3 find it there before
+/// the start; a failed copy and step 4 (either way) find it turning up
+/// during the start, since one there before, beside a copy or `.migrated`,
+/// is step 6's conflict. After step 4 a copy of the same bytes as the
+/// `.migrated` stays too.
+#[test]
+fn an_unproven_file_in_the_freedom_root_is_never_imported() {
+    let unrelated_first = |make_root: &dyn Fn(&Moved)| {
+        let m = moved();
+        make_root(&m);
+        std::fs::write(m.freedom.join(LEGACY_FILE), UNRELATED).unwrap();
+        m
+    };
+    let unchanged = |m: &Moved, context: &str| {
+        assert_eq!(
+            std::fs::read_to_string(m.freedom.join(LEGACY_FILE)).unwrap(),
+            UNRELATED,
+            "{context}"
+        );
+    };
+
+    let m = unrelated_first(&|_| {});
+    assert_eq!(m.start(), (Handover::Absent, 0.0));
+    assert_eq!(m.freedom_files(), [LEGACY_FILE]);
+    unchanged(&m, "absent");
+
+    let m = unrelated_first(&|m| {
+        std::fs::write(m.original(), RECEIPTS).unwrap();
+        std::fs::write(m.profile.join(MIGRATED_FILE), "[]").unwrap();
+    });
+    assert_eq!(m.start(), (Handover::Stray(true), 0.0));
+    assert_eq!(m.profile_files(), [MIGRATED_FILE]);
+    assert_eq!(m.freedom_files(), [LEGACY_FILE]);
+    unchanged(&m, "stray");
+
+    let m = unrelated_first(&|m| std::fs::create_dir(m.original()).unwrap());
+    assert_eq!(m.start(), (Handover::Kept, 0.0));
+    assert_eq!(m.freedom_files(), [LEGACY_FILE]);
+    unchanged(&m, "kept");
+
+    let m = moved();
+    std::fs::write(m.original(), RECEIPTS).unwrap();
+    let plant = Plant {
+        at: Step::Rename,
+        fail: true,
+        path: m.freedom.join(LEGACY_FILE),
+    };
+    assert_eq!(m.start_with(&plant), (Handover::CopyFailed, 0.0));
+    assert_eq!(m.profile_files(), [LEGACY_FILE]);
+    assert_eq!(m.freedom_files(), [LEGACY_FILE]);
+    unchanged(&m, "copy failed");
+
+    for (fail, dropped) in [(false, true), (true, false)] {
+        let m = moved();
+        std::fs::write(m.original(), RECEIPTS).unwrap();
+        std::fs::write(m.freedom.join(MIGRATED_FILE), RECEIPTS).unwrap();
+        let plant = Plant {
+            at: Step::Flush,
+            fail,
+            path: m.freedom.join(LEGACY_FILE),
+        };
+        assert_eq!(m.start_with(&plant), (Handover::Dropped(dropped), 0.0));
+        assert_eq!(m.freedom_files(), [LEGACY_FILE, MIGRATED_FILE]);
+        unchanged(&m, "dropped");
+        assert_eq!(
+            std::fs::read_to_string(m.freedom.join(MIGRATED_FILE)).unwrap(),
+            RECEIPTS
+        );
+        assert_eq!(m.original().exists(), !dropped);
+    }
+
+    // Step 4 beside a copy of the same bytes: the original goes, the copy
+    // stays, and nothing is imported.
+    let m = moved();
+    std::fs::write(m.original(), RECEIPTS).unwrap();
+    std::fs::write(m.freedom.join(MIGRATED_FILE), RECEIPTS).unwrap();
+    std::fs::write(m.freedom.join(LEGACY_FILE), RECEIPTS).unwrap();
+    let (handover, mut store) = m.start_store(&NoHooks);
+    assert_eq!(handover, Handover::Dropped(true));
+    assert_eq!(count(&mut store), 0.0);
+    assert_eq!(m.profile_files(), NONE);
+    assert_eq!(m.freedom_files(), [LEGACY_FILE, MIGRATED_FILE]);
+    call(
+        &mut store,
+        "payments.append",
+        r#"{"entry":{"kind":"x402","chainId":1,"amount":"1","createdAt":5}}"#,
+    )
+    .unwrap();
 }

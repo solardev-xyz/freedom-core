@@ -102,8 +102,9 @@ pub struct Import {
     /// the old layout, or the Freedom root once the hand-over ran
     /// ([`Handover::import`]).
     pub root: PathBuf,
-    /// Skipped for this run: the hand-over found a conflict (design 0017,
-    /// C5, step 6). The database opens and serves, with no row imported.
+    /// Skipped for this run: the hand-over proved no copy there and made
+    /// none (design 0017, C5). The database opens and serves, with no row
+    /// imported and no legacy file renamed or removed.
     pub skip: bool,
 }
 
@@ -340,6 +341,8 @@ fn not_imported(why: &str) {
 pub enum Handover {
     /// The profile's root and the Freedom root are one directory (the old
     /// layout): nothing done, and the import reads that root, as before.
+    /// With [`Handover::Waiting`] and [`Handover::Copied`], the only
+    /// outcomes the legacy import runs after ([`Handover::import`]).
     Same,
     /// Step 1: no `x402-receipts.json` at the profile's root, as the
     /// import's `metadata` finds it (a link followed, any error as absent).
@@ -361,8 +364,8 @@ pub enum Handover {
     /// copied again, and the import retries on the copy.
     Waiting,
     /// Step 6: a file in the Freedom root, under either name, that isn't
-    /// this one's copy (other bytes, or one [`read_file`] refuses): both
-    /// left as they are, and the legacy import skipped for this run.
+    /// this one's copy (other bytes, or one [`read_file`] refuses), even
+    /// beside a copy or `.migrated` that is: every file left as it is.
     Conflict,
     /// Step 7: copied into the Freedom root with fc-store's atomic write,
     /// durably or not. The original stays at the profile's root.
@@ -374,16 +377,27 @@ pub enum Handover {
 
 impl Handover {
     /// This start's import after the hand-over: at the profile's root when
-    /// it is the Freedom root (the old layout, as before); otherwise at the
-    /// Freedom root, skipped for this run after a conflict.
+    /// it is the Freedom root (the old layout, as before); at the Freedom
+    /// root after a copy proved to hold the root file's bytes (step 5) or
+    /// just made (step 7); and skipped for this run after every other step,
+    /// so a file there that today's import wouldn't read is never imported,
+    /// renamed or removed. After step 4 the Freedom root holds the
+    /// `.migrated`, and at most a copy of the same bytes (anything else is
+    /// step 6's), whose rows are imported already: nothing is left for the
+    /// import there, and such a copy stays where it is.
     pub fn import(self, user_data_dir: &Path, grant_root: &Path) -> Import {
         match self {
             Handover::Same => Import::at(user_data_dir.to_path_buf()),
-            Handover::Conflict => Import {
+            Handover::Waiting | Handover::Copied(_) => Import::at(grant_root.to_path_buf()),
+            Handover::Absent
+            | Handover::Stray(_)
+            | Handover::Kept
+            | Handover::Dropped(_)
+            | Handover::Conflict
+            | Handover::CopyFailed => Import {
                 root: grant_root.to_path_buf(),
                 skip: true,
             },
-            _ => Import::at(grant_root.to_path_buf()),
         }
     }
 }
@@ -451,6 +465,19 @@ fn hand_over(user_data_dir: &Path, grant_root: &Path, hooks: &dyn Hooks) -> Hand
         Read::Bytes(_) | Read::Unreadable => Found::Other,
     };
     let (marker_found, copy_found) = (found(&marker), found(&copy));
+    // 6, before 4 and 5: either name holding something that isn't this
+    //    file's copy is a conflict, even beside a copy or `.migrated` that
+    //    is. Acting on the matching one would drop the original (step 4)
+    //    or import beside a foreign `.migrated`, whose stray branch drops
+    //    the copy unimported (step 5); the other file would be left for an
+    //    import that reads what today's never would.
+    if marker_found == Found::Other || copy_found == Found::Other {
+        crate::log::error(
+            "payments: x402-receipts.json conflicts with the Freedom root's; legacy import skipped",
+            serde_json::json!({}),
+        );
+        return Handover::Conflict;
+    }
     // 4. An earlier copy imported: the original goes once the marker is
     //    durable, and stays for the next start if the sync fails.
     if marker_found == Found::Same {
@@ -479,18 +506,6 @@ fn hand_over(user_data_dir: &Path, grant_root: &Path, hooks: &dyn Hooks) -> Hand
             );
         }
         return Handover::Dropped(removed);
-    }
-    // 6. Either name holding something that isn't this file's copy: the
-    //    profile's root's file stays the one to import, and isn't. Checked
-    //    before step 5, so a `.migrated` of other bytes beside a true copy
-    //    is a conflict too, rather than the import's stray, which would
-    //    drop the copy unimported.
-    if marker_found == Found::Other || copy_found == Found::Other {
-        crate::log::error(
-            "payments: x402-receipts.json conflicts with the Freedom root's; legacy import skipped",
-            serde_json::json!({}),
-        );
-        return Handover::Conflict;
     }
     // 5. Copied already, not imported yet: the import retries on the copy.
     if copy_found == Found::Same {
