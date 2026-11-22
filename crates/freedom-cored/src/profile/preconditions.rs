@@ -40,9 +40,11 @@
 //!     browser keeps every generation, an orphan's included, so every one
 //!     is tried, listed from its `verified-sync/` reached by the same
 //!     lookup ([`generations`]): an entry that is a directory has both
-//!     tried, a regular file holds none, and a link, a mount or a special
-//!     file defers, as one on the way to a lock does; more than
-//!     [`MAX_GENERATIONS`] entries defers too, so the plan stays bounded.
+//!     tried once it is proven on the profile's mount, a regular file holds
+//!     none, and a link, a mount (a bind mount of the same file system
+//!     too) or a special file defers, as one on the way to a lock does; on
+//!     Linux, a generation that neither its mount ID nor `openat2` can
+//!     prove on the profile's mount defers too ([`on_parents_mount`]).
 //!     The pair is tried in each base itself as well, where the older
 //!     layout held them (a base can still hold that layout's owner file).
 //!     `flock` on Unix; on Windows a handle that shares reading only. The
@@ -620,21 +622,14 @@ const GENERATIONS: &str = "verified-sync";
 /// in: the lifetime lease (its execution child's too) and the owner file.
 const MYOTIS_LEASES: &[&str] = &[".freedom-myotis-lifetime", ".freedom-myotis-owner"];
 
-/// The most entries a base's `verified-sync/` may hold for its generations
-/// to be tried; more defers (`node_lock_unknown`), so the plan's cost stays
-/// bounded: at most this many lookups to classify and twice as many tries,
-/// for each base. The browser never removes a generation, and makes a new
-/// one after each exit of the supervisor it can't prove clean (a reboot
-/// with the browser open among them) and at each repair, so a profile can
-/// gather dozens; one past the bound would defer at every start, its count
-/// never falling. Hence a generous bound: even at it, a base's tries take
-/// milliseconds on Linux, far inside main's ten minutes for a starting
-/// move.
-const MAX_GENERATIONS: usize = 1024;
-
 /// Why a generation can't be tried: its name isn't Unicode (the browser
 /// names each by a UUID), so it isn't looked up.
 const NOT_UNICODE: &str = "a generation's name that isn't Unicode";
+
+/// Why a generation can't be tried on Linux: neither its mount ID nor
+/// `openat2` can tell whether it is a mount ([`on_parents_mount`]).
+#[cfg(target_os = "linux")]
+const UNPROVEN: &str = "neither a mount ID nor openat2 tells whether a mount is on the way";
 
 /// Both of Myotis's leases ([`MYOTIS_LEASES`]) in each generation directory
 /// below `parent`'s `myotis/`, for each base ([`MYOTIS_BASES`]), each tried
@@ -643,24 +638,27 @@ const NOT_UNICODE: &str = "a generation's name that isn't Unicode";
 /// with its path below `parent`; `None` when every one is free.
 ///
 /// A base's `verified-sync/` is reached by the walk's lookup ([`descend`]),
-/// following no link, and must be on `parent`'s device and on `parent`'s
-/// mount (so a bind mount of the same file system on the way, which
-/// `openat2` refuses on the way to a lock, is refused here too); it is then
+/// following no link and crossing no mount it can find (a bind mount of
+/// the same file system included, where the kernel gives mount IDs), and
 /// listed from its handle:
 /// - **nothing there** (a network never run in this layout), or a file on
 ///   the way: nothing to try, as for a lock;
-/// - **more than [`MAX_GENERATIONS`] entries:** `Unknown`, none tried;
-/// - **each entry** is classified first, by the one lookup the walk makes
-///   for a directory on the way to a lock ([`classify_at`]), since a
-///   generation is one, and treated as the walk treats such a directory:
-///   - a directory has both leases tried, the whole path looked up again
-///     from `parent`, so one swapped for a link since is refused there;
+/// - **each entry,** however many (the browser never removes one, and its
+///   names are read already), is classified first, by the one lookup the
+///   walk makes for a directory on the way to a lock ([`classify_at`]),
+///   since a generation is one, and treated as the walk treats such a
+///   directory:
+///   - a directory, once proven on `parent`'s mount ([`on_parents_mount`]),
+///     has both leases tried, the whole path looked up again from `parent`,
+///     so one swapped for a link since is refused there; one not proven is
+///     `Unknown`, and nothing in it is opened;
 ///   - a regular file holds none, and one gone since is nothing;
 ///   - a link (on Windows any reparse point, a junction too), a mount point
-///     or a special file is `Unknown`. A supervisor could run in what a
-///     link or a mount names, and the core neither follows it to storage it
-///     hasn't qualified nor guesses, so such a generation defers, as a
-///     `myotis/` that is a link does, rather than being skipped;
+///     on another device or a special file is `Unknown`. A supervisor could
+///     run in what a link or a mount names, and the core neither follows it
+///     to storage it hasn't qualified nor guesses, so such a generation
+///     defers, as a `myotis/` that is a link does, rather than being
+///     skipped;
 ///   - a name that isn't Unicode is `Unknown` too.
 ///
 /// The entries are tried in their names' order, so a log names the same
@@ -671,7 +669,7 @@ fn generations(parent: &Dir, base: &Path) -> Option<(String, Tried)> {
         dir_parts.extend_from_slice(network);
         dir_parts.push(GENERATIONS);
         let at = dir_parts.join("/");
-        let (dir, device) = match generations_dir(parent, &dir_parts) {
+        let (dir, device) = match descend(parent, &dir_parts) {
             Ok(Some(found)) => found,
             Ok(None) => continue,
             Err(why) => return Some((at, Tried::Unknown(why))),
@@ -680,10 +678,6 @@ fn generations(parent: &Dir, base: &Path) -> Option<(String, Tried)> {
             Ok(names) => names,
             Err(e) => return Some((at, Tried::Unknown(e.kind().to_string()))),
         };
-        if names.len() > MAX_GENERATIONS {
-            let why = format!("more than {MAX_GENERATIONS} generations");
-            return Some((at, Tried::Unknown(why)));
-        }
         names.sort();
         for name in &names {
             let Some(name) = name.to_str() else {
@@ -699,6 +693,9 @@ fn generations(parent: &Dir, base: &Path) -> Option<(String, Tried)> {
                 }
                 Err(e) => return Some((generation, Tried::Unknown(e.kind().to_string()))),
             }
+            if let Err(why) = on_parents_mount(parent, &dir, &dir_parts, name) {
+                return Some((generation, Tried::Unknown(why)));
+            }
             for &lease in MYOTIS_LEASES {
                 let mut parts = dir_parts.clone();
                 parts.extend([name, lease]);
@@ -712,20 +709,61 @@ fn generations(parent: &Dir, base: &Path) -> Option<(String, Tried)> {
     None
 }
 
-/// A base's `verified-sync/` at `parts` below `parent`, for its listing,
-/// and `parent`'s device: reached by [`descend`], and on `parent`'s own
-/// mount. `Ok(None)` when nothing is there to list; `Err` why it can't be.
-fn generations_dir(parent: &Dir, parts: &[&str]) -> Result<Option<(Dir, u64)>, String> {
-    let Some((dir, device)) = descend(parent, parts)? else {
-        return Ok(None);
+/// Linux: whether the generation `name`, a directory in the listed
+/// `verified-sync/` (`dir`, at `dir_parts` below `parent`), is on
+/// `parent`'s mount, proven before anything in it is opened. A bind mount
+/// of the same file system has `parent`'s device, so `classify_at` takes it
+/// for a directory, and the walk (where `openat2` is missing or refused)
+/// would enter it. So:
+/// - **its mount ID** (`STATX_MNT_ID`, Linux 5.8) proves it: the same as
+///   `parent`'s, or `Err`;
+/// - **without one,** `openat2` reaching it with `RESOLVE_NO_XDEV` proves
+///   it (its leases are then looked up the same way);
+/// - **with neither** (a kernel before 5.6, or `openat2` refused), nothing
+///   can, and it fails closed: `Err`, and the move defers rather than
+///   walking into it.
+///
+/// One gone, or no longer a directory, since is left to its leases'
+/// lookups, which then find nothing there or refuse what they find.
+#[cfg(target_os = "linux")]
+fn on_parents_mount(parent: &Dir, dir: &Dir, dir_parts: &[&str], name: &str) -> Result<(), String> {
+    use rustix::fs::{Mode, OFlags};
+    use rustix::io::Errno;
+    let ids = if crate::testhooks::profile_migrate_no_mount_id() {
+        (None, None)
+    } else {
+        (mount_id(dir, name), mount_id(parent, ""))
     };
-    // The walk compares devices alone; a bind mount of the same file
-    // system on the way has a mount of its own (Linux 5.8 and later).
-    match (dir.mount(), parent.mount()) {
-        (Ok(here), Ok(top)) if here.same(top) => Ok(Some((dir, device))),
-        (Ok(_), Ok(_)) => Err(ON_THE_WAY.to_owned()),
-        (Err(e), _) | (_, Err(e)) => Err(e.kind().to_string()),
+    match ids {
+        (Some(here), Some(top)) if here == top => return Ok(()),
+        (Some(_), Some(_)) => return Err(ON_THE_WAY.to_owned()),
+        _ => {}
     }
+    if crate::testhooks::profile_migrate_walk() {
+        return Err(UNPROVEN.to_owned());
+    }
+    let path = format!("{}/{name}", dir_parts.join("/"));
+    let flags = OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
+    match rustix::fs::openat2(parent.as_fd(), path, flags, Mode::empty(), BENEATH) {
+        Ok(_) => Ok(()),
+        Err(Errno::LOOP | Errno::XDEV) => Err(ON_THE_WAY.to_owned()),
+        Err(Errno::NOENT | Errno::NOTDIR) => Ok(()),
+        Err(Errno::NOSYS | Errno::PERM) => Err(UNPROVEN.to_owned()),
+        Err(e) => Err(io::Error::from(e).kind().to_string()),
+    }
+}
+
+/// Elsewhere the walk's own checks prove it: on macOS each mount has a
+/// device of its own, and on Windows a volume is reached only through a
+/// reparse point, which `classify_at` reports as `Other`.
+#[cfg(not(target_os = "linux"))]
+fn on_parents_mount(
+    _parent: &Dir,
+    _dir: &Dir,
+    _dir_parts: &[&str],
+    _name: &str,
+) -> Result<(), String> {
+    Ok(())
 }
 
 /// After the renames and before the marker: a node lock under a moved
@@ -864,22 +902,29 @@ enum Opened {
 
 const ON_THE_WAY: &str = "a link or a mount on the way to the lock";
 
+/// `openat2`'s resolution for a node's lock or a Myotis generation: beneath
+/// the handle, through no link and across no mount.
+#[cfg(target_os = "linux")]
+const BENEATH: rustix::fs::ResolveFlags = rustix::fs::ResolveFlags::BENEATH
+    .union(rustix::fs::ResolveFlags::NO_SYMLINKS)
+    .union(rustix::fs::ResolveFlags::NO_XDEV)
+    .union(rustix::fs::ResolveFlags::NO_MAGICLINKS);
+
 /// Linux: `openat2` from the root's handle with `RESOLVE_BENEATH`,
 /// `RESOLVE_NO_SYMLINKS`, `RESOLVE_NO_XDEV` and `RESOLVE_NO_MAGICLINKS`,
 /// and `O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC`: one lookup that refuses a
 /// link, a mount (a bind mount of the same file system too) and a way out.
 /// A kernel without it (before 5.6, or a filter refusing it) takes the
-/// walk.
+/// walk, as a test does with `FREEDOM_CORED_TEST_PROFILE_MIGRATE_LOOKUP`.
 #[cfg(target_os = "linux")]
 fn open_beneath(root: &Dir, parts: &[&str]) -> Opened {
-    use rustix::fs::{Mode, OFlags, ResolveFlags};
+    use rustix::fs::{Mode, OFlags};
     use rustix::io::Errno;
+    if crate::testhooks::profile_migrate_walk() {
+        return walk(root, parts);
+    }
     let flags = OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC;
-    let resolve = ResolveFlags::BENEATH
-        | ResolveFlags::NO_SYMLINKS
-        | ResolveFlags::NO_XDEV
-        | ResolveFlags::NO_MAGICLINKS;
-    match rustix::fs::openat2(root.as_fd(), parts.join("/"), flags, Mode::empty(), resolve) {
+    match rustix::fs::openat2(root.as_fd(), parts.join("/"), flags, Mode::empty(), BENEATH) {
         Ok(fd) => classify(std::fs::File::from(fd), None),
         Err(Errno::NOSYS | Errno::PERM) => walk(root, parts),
         Err(Errno::LOOP | Errno::XDEV) => Opened::Unknown(ON_THE_WAY.to_owned()),
@@ -899,7 +944,10 @@ fn open_beneath(root: &Dir, parts: &[&str]) -> Opened {
 /// or answer; each directory then opened through its parent refusing a
 /// link (a Windows reparse point too); and the lock's name opened without
 /// following or waiting. A name on another device than the root's, the
-/// lock's own included (a directory mounted at it), is a mount.
+/// lock's own included (a directory mounted at it), is a mount; so is a
+/// directory on the way on another mount than the root's, a bind mount of
+/// the same file system included, where the kernel gives mount IDs
+/// ([`descend`]).
 fn walk(root: &Dir, parts: &[&str]) -> Opened {
     let unknown = |e: io::Error| Opened::Unknown(e.kind().to_string());
     let Some((last, parents)) = parts.split_last() else {
@@ -927,13 +975,19 @@ fn walk(root: &Dir, parts: &[&str]) -> Opened {
 
 /// The walk's way down ([`walk`]): the directory at `parts` below `root`,
 /// each name classified before it is opened, each directory opened through
-/// its parent refusing a link and on the root's device, and that device.
-/// `Ok(None)` when nothing is there (a name missing, or a file on the way:
-/// nothing below it); `Err` why it can't be reached: a link, a special
-/// file or a mount on the way, or an error.
+/// its parent refusing a link and on the root's device and mount, and that
+/// device. `Ok(None)` when nothing is there (a name missing, or a file on
+/// the way: nothing below it); `Err` why it can't be reached: a link, a
+/// special file or a mount on the way, or an error.
+///
+/// The mount ([`fc_store::anchor::Mount`]) tells a bind mount of the same
+/// file system, which has the root's device, by its mount ID (Linux 5.8
+/// and later), as `openat2`'s `RESOLVE_NO_XDEV` does; where the kernel
+/// gives none (or elsewhere), the device alone is compared, as before.
 fn descend(root: &Dir, parts: &[&str]) -> Result<Option<(Dir, u64)>, String> {
     let unknown = |e: io::Error| e.kind().to_string();
     let (device, _) = root.identity().map_err(unknown)?;
+    let top = root.mount().map_err(unknown)?;
     let mut dir = root.try_clone().map_err(unknown)?;
     for part in parts {
         match classify_at(&dir, part, device) {
@@ -950,6 +1004,13 @@ fn descend(root: &Dir, parts: &[&str]) -> Result<Option<(Dir, u64)>, String> {
         };
         match dir.identity() {
             Ok((here, _)) if here == device => {}
+            Ok(_) => return Err(ON_THE_WAY.to_owned()),
+            Err(e) => return Err(unknown(e)),
+        }
+        // The test hook that hides mount IDs leaves the device check above
+        // alone, as a kernel without them does.
+        match dir.mount() {
+            Ok(here) if here.same(top) || crate::testhooks::profile_migrate_no_mount_id() => {}
             Ok(_) => return Err(ON_THE_WAY.to_owned()),
             Err(e) => return Err(unknown(e)),
         }
@@ -1547,27 +1608,45 @@ mod tests {
         }
     }
 
-    /// At most [`MAX_GENERATIONS`] entries are tried; one more, whatever it
-    /// is, and none is: `Unknown`, so the plan stays bounded.
+    /// Every generation is tried, however many the browser has kept: 1025
+    /// free ones are nothing, and a lease held in one near the end of them,
+    /// or (Unix) a link among them, is still found.
     #[test]
-    fn more_generations_than_the_bound_are_unknown() {
+    fn every_generation_is_tried_however_many() {
         let r = root();
-        let generations_dir = r.path.join("myotis").join(GENERATIONS);
-        std::fs::create_dir_all(&generations_dir).unwrap();
-        for i in 0..MAX_GENERATIONS {
-            std::fs::create_dir(
-                generations_dir.join(format!("{i:08x}-0000-4000-8000-000000000000")),
-            )
-            .unwrap();
+        let names: Vec<String> = (0..1025)
+            .map(|i| format!("{i:08x}-0000-4000-8000-000000000000"))
+            .collect();
+        for name in &names {
+            generation(&r, &[], name);
         }
-        assert_eq!(tried_generations(&r), None, "at the bound");
-        std::fs::write(generations_dir.join("one-more"), "").unwrap();
+        assert_eq!(tried_generations(&r), None, "all free");
+        let late = &names[1000];
+        let held = hold_lease(&generation(&r, &[], late).join(".freedom-myotis-owner"));
         assert_eq!(
             tried_generations(&r),
             Some((
-                "myotis/verified-sync".to_owned(),
-                Tried::Unknown(format!("more than {MAX_GENERATIONS} generations"))
+                format!("myotis/verified-sync/{late}/.freedom-myotis-owner"),
+                Tried::Held
             ))
         );
+        drop(held);
+        #[cfg(unix)]
+        {
+            let outside = root();
+            let linked = r
+                .path
+                .join("myotis")
+                .join(GENERATIONS)
+                .join("ffffffff-0000-4000-8000-000000000000");
+            std::os::unix::fs::symlink(&outside.path, &linked).unwrap();
+            assert_eq!(
+                tried_generations(&r),
+                Some((
+                    "myotis/verified-sync/ffffffff-0000-4000-8000-000000000000".to_owned(),
+                    Tried::Unknown(ON_THE_WAY.to_owned())
+                ))
+            );
+        }
     }
 }
