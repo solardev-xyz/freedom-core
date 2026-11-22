@@ -229,8 +229,9 @@
 //!   `before-copy` once the journal names it in `copied`, `mid-copy` after
 //!   each entry its copy makes in `<name>.moving`, `after-copy` once that
 //!   is renamed to its name, and after the marker `mid-cleanup` after each
-//!   entry of its source removed and `after-cleanup`. There the process
-//!   exits at once with 99.
+//!   entry of its source removed and `after-cleanup`; and on Windows after
+//!   a refused try of a rename (`rename-retry`) or a rollback's rename back
+//!   (`rename-back-retry`). There the process exits at once with 99.
 //! - `FREEDOM_CORED_TEST_PROFILE_MIGRATE_PAUSE` (`<step>=<marker>=<release>`):
 //!   at that step (one of the crash hook's) `profile migrate` creates the
 //!   file `<marker>`, then waits, its locks and gates held and its lock

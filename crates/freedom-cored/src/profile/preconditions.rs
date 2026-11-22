@@ -9,9 +9,17 @@
 //!   finds it) and whether it is a mount point (MD6), what `freedom/` is
 //!   and holds, and whether a node identity journal or staging file is in
 //!   `identity/` (MG3).
+//! - **Then each entry that is a link** (a symlink, or on Windows a
+//!   junction): one whose target is relative, or absolute and inside the
+//!   profile by name, defers (`link_inside_profile`). Moved one directory
+//!   deeper, a relative link names another place, and one into the profile
+//!   may name an entry the move takes elsewhere. A link to an absolute path
+//!   outside moves as the link.
 //! - **Then the nodes' own OS locks** (MD7), each tried and let go at
 //!   once, as the PRF-9b spike found them in freedom-browser's
-//!   integration branch:
+//!   integration branch. The lock's own name is opened without following
+//!   a link and without waiting (a FIFO's open would wait for a writer),
+//!   and the handle checked to be a regular file:
 //!   - **arti** (pinned 2.7.0) holds `tor-data/state/state/state.lock`
 //!     (tor-persist's `FsStateMgr` under the `state_dir` main writes into
 //!     `arti.toml`) and `tor-data/cache/dir.lock` (tor-dirmgr's store
@@ -126,6 +134,14 @@ pub fn check(root: &Dir, canonical: &Path) -> io::Result<Check> {
             });
         }
     };
+    for name in &entries {
+        if let Some(why) = link_inside(canonical, name)? {
+            return Ok(Check::Defer {
+                why: "link_inside_profile",
+                detail: format!("{name}: {why}"),
+            });
+        }
+    }
     for lock in NODE_LOCKS {
         if !entries.contains(&lock.entry) {
             continue;
@@ -140,10 +156,10 @@ pub fn check(root: &Dir, canonical: &Path) -> io::Result<Check> {
                     detail: relative(lock),
                 });
             }
-            Tried::Unknown(kind) => {
+            Tried::Unknown(why) => {
                 return Ok(Check::Defer {
                     why: "node_lock_unknown",
-                    detail: format!("{}: {kind}", relative(lock)),
+                    detail: format!("{}: {why}", relative(lock)),
                 });
             }
         }
@@ -186,6 +202,96 @@ fn copies(
         }
     }
     Ok(copy::room(space, size).err())
+}
+
+/// Why the root's `name`, a link (a symlink, or on Windows a junction),
+/// can't move as the link: its target is relative, so it would name
+/// another place one directory deeper; or it is absolute and inside the
+/// profile's directory, by name or once resolved, so it may name another
+/// entry, which the move takes elsewhere. `None` for anything else: a link to an absolute
+/// path outside the profile moves as itself. The move doesn't rewrite a
+/// link: a new link isn't one rename, and its rollback would have to undo
+/// it.
+fn link_inside(canonical: &Path, name: &str) -> io::Result<Option<&'static str>> {
+    let path = canonical.join(name);
+    let meta = std::fs::symlink_metadata(&path)?;
+    if !is_link(&meta) {
+        return Ok(None);
+    }
+    let target = match std::fs::read_link(&path) {
+        Ok(target) => target,
+        // A reparse point std can't read is no link it would follow either
+        // (a volume mount point is deferred before this, as one).
+        Err(_) if cfg!(windows) => return Ok(None),
+        Err(e) => return Err(e),
+    };
+    if !target.is_absolute() {
+        return Ok(Some("a relative link"));
+    }
+    // By name, and resolved where it resolves (a short 8.3 name or a link on
+    // its way naming the profile too): either inside defers.
+    let inside = lexically_inside(&target, canonical)
+        || std::fs::canonicalize(&path)
+            .is_ok_and(|resolved| lexically_inside(&resolved, canonical));
+    Ok(inside.then_some("a link into the profile"))
+}
+
+/// A symlink, or on Windows any reparse point (a junction too).
+pub fn is_link(meta: &std::fs::Metadata) -> bool {
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
+        meta.file_type().is_symlink() || meta.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
+    }
+    #[cfg(not(windows))]
+    {
+        meta.file_type().is_symlink()
+    }
+}
+
+/// Whether the absolute `target`, its `.` and `..` resolved by name alone
+/// (no link followed), is `root` or below it. Compared folded
+/// (`fc_profile::delete::fold`, without Windows's verbatim prefix) on every
+/// OS: a fold wider than a volume's only defers more.
+fn lexically_inside(target: &Path, root: &Path) -> bool {
+    use std::path::Component;
+    let parts = |path: &Path| -> Vec<String> {
+        let mut out: Vec<String> = Vec::new();
+        for component in path.components() {
+            match component {
+                Component::Prefix(prefix) => out.push(prefix_key(prefix.kind())),
+                Component::RootDir | Component::CurDir => {}
+                Component::ParentDir => {
+                    if out.len() > 1 || (out.len() == 1 && !cfg!(windows)) {
+                        out.pop();
+                    }
+                }
+                Component::Normal(name) => {
+                    out.push(fc_profile::delete::fold(&name.to_string_lossy()));
+                }
+            }
+        }
+        out
+    };
+    let (target, root) = (parts(target), parts(root));
+    target.len() >= root.len() && target[..root.len()] == root[..]
+}
+
+/// A Windows path prefix as one key: `C:` and `\\?\C:` alike, a share by
+/// its server and name.
+fn prefix_key(prefix: std::path::Prefix<'_>) -> String {
+    use std::path::Prefix;
+    let fold = |text: &OsStr| fc_profile::delete::fold(&text.to_string_lossy());
+    match prefix {
+        Prefix::Disk(letter) | Prefix::VerbatimDisk(letter) => {
+            format!("{}:", char::from(letter).to_ascii_lowercase())
+        }
+        Prefix::UNC(server, share) | Prefix::VerbatimUNC(server, share) => {
+            format!("//{}/{}", fold(server), fold(share))
+        }
+        Prefix::Verbatim(name) | Prefix::DeviceNS(name) => format!("//?/{}", fold(name)),
+    }
 }
 
 /// A node identity journal or its staging file in the root's `identity/`,
@@ -332,37 +438,49 @@ fn relative(lock: &NodeLock) -> String {
 enum Tried {
     Free,
     Held,
-    Unknown(io::ErrorKind),
+    /// Why it couldn't be tried.
+    Unknown(String),
 }
 
-/// Tries `path`'s lock and lets it go at once. Nothing there, or no
-/// regular file (so no lock a node takes), is free. Only a regular file is
-/// opened: a FIFO's open would wait for a writer.
+/// Tries `path`'s lock and lets it go at once. The last component is
+/// opened without following a link and without waiting (a FIFO's open
+/// doesn't wait for a writer), and the handle checked: a link there is
+/// `Unknown` (the core doesn't follow it, and a node that did would lock
+/// what it names), anything but a regular file is free (no node's lock is
+/// one), and so is nothing there. A link above it (a symlinked `tor-data/`)
+/// is followed, as the node follows it.
 fn try_lock(path: &Path, probe: Probe) -> Tried {
-    match std::fs::metadata(path) {
-        Ok(meta) if meta.is_file() => {}
-        Ok(_) => return Tried::Free,
-        Err(e) if gone(&e) => return Tried::Free,
-        Err(e) => return Tried::Unknown(e.kind()),
-    }
+    let file = match open_lock(path, probe) {
+        Opened::File(file) => file,
+        #[cfg(windows)]
+        Opened::Held => return Tried::Held,
+        Opened::Free => return Tried::Free,
+        Opened::Unknown(kind) => return Tried::Unknown(kind),
+    };
     #[cfg(windows)]
     if probe == Probe::Lease {
-        return share_probe(path);
+        // The open was the try.
+        return Tried::Free;
     }
-    let _ = probe;
-    let file = match std::fs::File::open(path) {
-        Ok(file) => file,
-        Err(e) if gone(&e) => return Tried::Free,
-        Err(e) => return Tried::Unknown(e.kind()),
-    };
     match file.try_lock() {
         Ok(()) => {
             let _ = file.unlock();
             Tried::Free
         }
         Err(std::fs::TryLockError::WouldBlock) => Tried::Held,
-        Err(std::fs::TryLockError::Error(e)) => Tried::Unknown(e.kind()),
+        Err(std::fs::TryLockError::Error(e)) => Tried::Unknown(e.kind().to_string()),
     }
+}
+
+/// What opening a lock's path found.
+enum Opened {
+    /// A regular file, open: its lock is tried next.
+    File(std::fs::File),
+    /// Windows, Myotis's lease: another handle shares less than the open.
+    #[cfg(windows)]
+    Held,
+    Free,
+    Unknown(String),
 }
 
 /// Missing, or a parent on the way that isn't a directory.
@@ -373,27 +491,78 @@ fn gone(error: &io::Error) -> bool {
     )
 }
 
-/// Opens `path` for `DELETE`, sharing reading, writing and deleting, and
-/// lets it go: refused with a sharing violation only while another handle
-/// shares less (Myotis's share reading only).
+/// `open(O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC)`, then `fstat`.
+#[cfg(unix)]
+fn open_lock(path: &Path, _probe: Probe) -> Opened {
+    use rustix::fs::{Mode, OFlags};
+    let flags = OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC;
+    let file = match rustix::fs::open(path, flags, Mode::empty()) {
+        Ok(fd) => std::fs::File::from(fd),
+        // A symlink at the name (`ELOOP`; `EMLINK` on some BSDs).
+        Err(e) if e == rustix::io::Errno::LOOP || e == rustix::io::Errno::MLINK => {
+            return Opened::Unknown("a link at the lock's name".to_owned());
+        }
+        Err(e) => {
+            let e = io::Error::from(e);
+            return if gone(&e) {
+                Opened::Free
+            } else {
+                Opened::Unknown(e.kind().to_string())
+            };
+        }
+    };
+    match file.metadata() {
+        Ok(meta) if meta.is_file() => Opened::File(file),
+        Ok(_) => Opened::Free,
+        Err(e) => Opened::Unknown(e.kind().to_string()),
+    }
+}
+
+/// Opened itself if it is a reparse point (`FILE_FLAG_OPEN_REPARSE_POINT`),
+/// a directory too (`FILE_FLAG_BACKUP_SEMANTICS`), then its attributes read
+/// from the handle. For Myotis's lease, the open is the try: for `DELETE`,
+/// sharing reading, writing and deleting, which only another handle sharing
+/// less (Myotis's share reading only) refuses, with a sharing violation.
 #[cfg(windows)]
-fn share_probe(path: &Path) -> Tried {
-    use std::os::windows::fs::OpenOptionsExt;
+fn open_lock(path: &Path, probe: Probe) -> Opened {
+    use std::os::windows::fs::{MetadataExt, OpenOptionsExt};
     const DELETE: u32 = 0x0001_0000;
+    const FILE_READ_ATTRIBUTES: u32 = 0x80;
     const FILE_SHARE_ALL: u32 = 0x1 | 0x2 | 0x4;
     const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+    const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
+    const FILE_ATTRIBUTE_DIRECTORY: u32 = 0x10;
+    const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
     const ERROR_SHARING_VIOLATION: i32 = 32;
-    match std::fs::OpenOptions::new()
-        .access_mode(DELETE)
+    let mut options = std::fs::OpenOptions::new();
+    options
         .share_mode(FILE_SHARE_ALL)
-        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
-        .open(path)
-    {
-        Ok(_) => Tried::Free,
-        Err(e) if e.raw_os_error() == Some(ERROR_SHARING_VIOLATION) => Tried::Held,
-        Err(e) if gone(&e) => Tried::Free,
-        Err(e) => Tried::Unknown(e.kind()),
+        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS);
+    match probe {
+        Probe::FileLock => options.read(true),
+        Probe::Lease => options.access_mode(DELETE | FILE_READ_ATTRIBUTES),
+    };
+    let file = match options.open(path) {
+        Ok(file) => file,
+        Err(e) if probe == Probe::Lease && e.raw_os_error() == Some(ERROR_SHARING_VIOLATION) => {
+            return Opened::Held;
+        }
+        Err(e) if gone(&e) => return Opened::Free,
+        Err(e) => return Opened::Unknown(e.kind().to_string()),
+    };
+    match file.metadata() {
+        Ok(meta) if meta.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 => {
+            Opened::Unknown("a link at the lock's name".to_owned())
+        }
+        Ok(meta) if meta.file_attributes() & FILE_ATTRIBUTE_DIRECTORY != 0 => Opened::Free,
+        Ok(_) => Opened::File(file),
+        Err(e) => Opened::Unknown(e.kind().to_string()),
     }
+}
+
+#[cfg(not(any(unix, windows)))]
+fn open_lock(_path: &Path, _probe: Probe) -> Opened {
+    Opened::Free
 }
 
 #[cfg(test)]
@@ -458,5 +627,139 @@ mod tests {
         assert_eq!(try_lock(&sub, Probe::FileLock), Tried::Free);
         // A file on the way: nothing below it.
         assert_eq!(try_lock(&path.join("below"), Probe::FileLock), Tried::Free);
+    }
+
+    /// The lock's own name is never followed: a symlink there, even to a
+    /// regular file held, is `Unknown`, and the file it names is neither
+    /// opened nor locked. A FIFO there (or a link to one) doesn't wait for
+    /// a writer, and no node's lock is a FIFO. A symlinked parent is
+    /// followed, as the node follows it.
+    #[cfg(unix)]
+    #[test]
+    fn a_lock_name_is_opened_without_following_or_waiting() {
+        let dir = tempfile::tempdir().unwrap();
+        let outside = dir.path().join("outside");
+        std::fs::write(&outside, "").unwrap();
+        let held = std::fs::File::open(&outside).unwrap();
+        held.lock().unwrap();
+        let link = dir.path().join("state.lock");
+        std::os::unix::fs::symlink(&outside, &link).unwrap();
+        assert!(matches!(
+            try_lock(&link, Probe::FileLock),
+            Tried::Unknown(_)
+        ));
+        assert!(matches!(try_lock(&link, Probe::Lease), Tried::Unknown(_)));
+        // Through a symlinked parent: followed, and the lock found held.
+        let parent = dir.path().join("tor-data");
+        std::fs::create_dir(&parent).unwrap();
+        std::fs::rename(&outside, parent.join("dir.lock")).unwrap();
+        let alias = dir.path().join("alias");
+        std::os::unix::fs::symlink(&parent, &alias).unwrap();
+        assert_eq!(
+            try_lock(&alias.join("dir.lock"), Probe::FileLock),
+            Tried::Held
+        );
+        drop(held);
+
+        let fifo = dir.path().join("fifo.lock");
+        let made = std::process::Command::new("mkfifo")
+            .arg(&fifo)
+            .status()
+            .unwrap();
+        assert!(made.success());
+        let started = std::time::Instant::now();
+        assert_eq!(try_lock(&fifo, Probe::FileLock), Tried::Free);
+        assert_eq!(try_lock(&fifo, Probe::Lease), Tried::Free);
+        // A FIFO swapped in behind a link at the name: still not followed.
+        let swapped = dir.path().join("swapped.lock");
+        std::os::unix::fs::symlink(&fifo, &swapped).unwrap();
+        assert!(matches!(
+            try_lock(&swapped, Probe::FileLock),
+            Tried::Unknown(_)
+        ));
+        assert!(started.elapsed() < std::time::Duration::from_secs(5));
+    }
+
+    #[test]
+    fn a_target_inside_the_profile_is_found_by_name_alone() {
+        #[cfg(unix)]
+        {
+            let root = Path::new("/home/u/.config/Freedom/Profiles/work");
+            assert!(lexically_inside(root, root));
+            assert!(lexically_inside(&root.join("wallet"), root));
+            assert!(lexically_inside(
+                Path::new("/home/u/.config/Freedom/Profiles/work/x/../ipfs-data"),
+                root
+            ));
+            assert!(lexically_inside(
+                Path::new("/home/u/.config/Freedom/Profiles/other/../work/ant-data"),
+                root
+            ));
+            assert!(lexically_inside(
+                Path::new("/home/u/.config/Freedom/Profiles/WORK/identity"),
+                root
+            ));
+            assert!(!lexically_inside(
+                Path::new("/home/u/.config/Freedom/Profiles/work/../other"),
+                root
+            ));
+            assert!(!lexically_inside(
+                Path::new("/home/u/.config/Freedom/Profiles/workshop"),
+                root
+            ));
+            assert!(!lexically_inside(Path::new("/mnt/big/ant-data"), root));
+            assert!(!lexically_inside(Path::new("/../.."), root));
+        }
+        #[cfg(windows)]
+        {
+            let root = Path::new(r"\\?\C:\Users\u\AppData\Roaming\Freedom");
+            assert!(lexically_inside(
+                Path::new(r"C:\Users\U\AppData\Roaming\Freedom\ipfs-data"),
+                root
+            ));
+            assert!(lexically_inside(
+                Path::new(r"\\?\c:\users\u\appdata\roaming\freedom\x\..\identity"),
+                root
+            ));
+            assert!(!lexically_inside(Path::new(r"D:\Freedom"), root));
+            assert!(!lexically_inside(
+                Path::new(r"C:\Users\u\AppData\Roaming\Freedom\..\Other"),
+                root
+            ));
+        }
+    }
+
+    /// Relative links, and absolute ones into the profile, are found; one
+    /// to an absolute path outside isn't.
+    #[cfg(unix)]
+    #[test]
+    fn a_link_inside_the_profile_is_found() {
+        let dir = tempfile::tempdir().unwrap();
+        let base = std::fs::canonicalize(dir.path()).unwrap();
+        let profile = base.join("profile");
+        std::fs::create_dir_all(profile.join("wallet")).unwrap();
+        std::fs::create_dir_all(base.join("outside")).unwrap();
+        let link = |name: &str, target: &Path| {
+            std::os::unix::fs::symlink(target, profile.join(name)).unwrap();
+        };
+        link("identity", Path::new("../wallet"));
+        link("ant-data", &profile.join("wallet"));
+        link("ipfs-data", &base.join("outside"));
+        link("tor-data", Path::new("wallet"));
+        std::fs::create_dir(profile.join("myotis")).unwrap();
+        assert_eq!(
+            link_inside(&profile, "identity").unwrap(),
+            Some("a relative link")
+        );
+        assert_eq!(
+            link_inside(&profile, "tor-data").unwrap(),
+            Some("a relative link")
+        );
+        assert_eq!(
+            link_inside(&profile, "ant-data").unwrap(),
+            Some("a link into the profile")
+        );
+        assert_eq!(link_inside(&profile, "ipfs-data").unwrap(), None);
+        assert_eq!(link_inside(&profile, "myotis").unwrap(), None);
     }
 }

@@ -41,10 +41,16 @@
 //!    marker alone: `nothing`). Otherwise `fc_profile::layout::plan_start`
 //!    decides from what the core observed (a node identity journal in
 //!    `identity/`, a `freedom/` the move didn't make, a mount point among
-//!    the entries), and then the nodes' OS locks are tried (arti's,
-//!    Myotis's). With `freedom/` already on another mount, every entry is
-//!    surveyed for its copy and the room for them checked (`copy.rs`). Any
-//!    of them ends the run with `deferred` (0), nothing changed.
+//!    the entries), then a link among the entries whose target is
+//!    relative or inside the profile, and then the nodes' OS locks are
+//!    tried (arti's, Myotis's). With `freedom/` already on another mount,
+//!    every entry is surveyed for its copy and the room for them checked
+//!    (`copy.rs`). Any of them ends the run with `deferred` (0), nothing
+//!    changed. A `freedom` that is anything but a real directory defers
+//!    before the new paths' gates are named. Then the lock is refreshed
+//!    once from this thread (`Lock::touch`), so the refresher's first
+//!    period starts fresh however long the checks took; taken over
+//!    meanwhile, `lock_lost` with nothing changed.
 //! 4. **Confinement** (`confine.rs`): read-write on the profile's
 //!    directory, renames across directories, the gates' descriptors; no
 //!    network, no process. Then the lock's refresher starts.
@@ -430,13 +436,14 @@ fn migrate(profile_dir: &Path, lock_dir: &Path, dev: bool, mode: Mode) -> Exit {
         Err(exit) => return exit,
     };
     let freedom = canonical.join(layout::FREEDOM_DIR);
-    // A starting run with something at `freedom` that doesn't resolve to a
-    // directory (a file, a dangling link): no gate can be named below it,
-    // and the move doesn't start (`plan_start`'s `FreedomNotDir`), so it is
-    // deferred here, under the profile gate and lock, with nothing changed.
+    // A starting run with anything but a real directory at `freedom` (a
+    // file, a symlink or a junction, looked at itself): the move doesn't
+    // start (`plan_start`'s `FreedomNotDir`), so it is deferred here, under
+    // the profile gate and lock, before a gate is named below it: none is
+    // taken, and no directory a link names is touched.
     if mode == Mode::Start
-        && std::fs::symlink_metadata(&freedom).is_ok()
-        && !std::fs::metadata(&freedom).is_ok_and(|meta| meta.is_dir())
+        && std::fs::symlink_metadata(&freedom)
+            .is_ok_and(|meta| !meta.is_dir() || preconditions::is_link(&meta))
     {
         return defer(
             lock,
@@ -472,6 +479,24 @@ fn migrate(profile_dir: &Path, lock_dir: &Path, dev: bool, mode: Mode) -> Exit {
             Err(e) => return storage("io", &e.kind().to_string()),
         },
     };
+    // The lock refreshed once here, after the preconditions and before
+    // confinement: the refresher can't start before confinement (it is a
+    // thread), so its first period then starts from a fresh mtime, however
+    // long the preconditions took (each check is a metadata call or an open
+    // that doesn't wait). Taken over meanwhile (an older build, past the
+    // stale time), nothing has changed: `lock_lost`.
+    if mode == Mode::Start {
+        match lock.touch() {
+            Ok(true) => {}
+            Ok(false) => {
+                lock.release();
+                drop(gates);
+                return say(lost());
+            }
+            Err(LockError::Held) => return say(Outcome::Busy),
+            Err(LockError::Io(e)) => return storage("io", &e.kind().to_string()),
+        }
+    }
     let grant = Grant::locking()
         .refer()
         .symlinks()
@@ -688,10 +713,11 @@ fn recover(
             step("mid-recovery");
         }
         if steps.rename_back {
-            if !held() {
-                return Ok(lost());
+            match rename_back(&freedom, name, &root, held) {
+                Ok(()) => {}
+                Err(Halt::Lost) => return Ok(lost()),
+                Err(Halt::Io(e)) => return Err(e),
             }
-            rename_back(&freedom, name, &root)?;
             step("mid-recovery");
         }
     }
@@ -1071,6 +1097,7 @@ fn rename_retried(
             Ok(()) => return Ok(()),
             Err(e) if cfg!(windows) && tries < START_RENAME_TRIES && held_by_another(&e) => {
                 tries += 1;
+                step("rename-retry");
                 std::thread::sleep(Duration::from_millis(100));
             }
             Err(e) => return Err(Halt::Io(e)),
@@ -1088,17 +1115,27 @@ fn write_placeholder(root: &Dir) -> std::io::Result<()> {
 
 /// `freedom/<name>` back to the root. On Windows, a rename refused while an
 /// indexer or another handle holds the entry is tried again, as
-/// `profile-catalog.js` tries its fence: 10 times, 100 ms apart.
-fn rename_back(freedom: &Dir, name: &OsStr, root: &Dir) -> std::io::Result<()> {
+/// `profile-catalog.js` tries its fence: 10 times, 100 ms apart, the lock
+/// checked before each try.
+fn rename_back(
+    freedom: &Dir,
+    name: &OsStr,
+    root: &Dir,
+    held: &dyn Fn() -> bool,
+) -> Result<(), Halt> {
     let mut tries = 0;
     loop {
+        if !held() {
+            return Err(Halt::Lost);
+        }
         match freedom.rename_into(name, root, name) {
             Ok(()) => return Ok(()),
             Err(e) if cfg!(windows) && tries < 10 && held_by_another(&e) => {
                 tries += 1;
+                step("rename-back-retry");
                 std::thread::sleep(Duration::from_millis(100));
             }
-            Err(e) => return Err(e),
+            Err(e) => return Err(Halt::Io(e)),
         }
     }
 }

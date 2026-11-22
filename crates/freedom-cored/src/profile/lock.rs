@@ -247,6 +247,39 @@ impl Lock {
         Ok(())
     }
 
+    /// One refresh now, from the caller's thread, before [`Lock::keep`]
+    /// starts the refresher: the mtime checked to be this holder's, then
+    /// set again, so the refresher's first period starts from a fresh
+    /// mtime whatever the run did before it (a starting move's
+    /// preconditions). `Ok(false)`, the lock compromised, when another
+    /// process took it over meanwhile, as the refresher would find.
+    pub fn touch(&self) -> Result<bool, LockError> {
+        let mut state =
+            self.shared.state.lock().map_err(|_| {
+                LockError::Io(std::io::Error::other("the lock's state is poisoned"))
+            })?;
+        if state.released || state.compromised {
+            return Ok(false);
+        }
+        match mtime_ms(&self.lock_dir) {
+            Ok(mtime) if mtime == state.mtime_ms => {}
+            Ok(_) => {
+                state.compromised = true;
+                return Ok(false);
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                state.compromised = true;
+                return Ok(false);
+            }
+            Err(e) => return Err(LockError::Io(e)),
+        }
+        let next = rules::refresh_mtime_ms(now_ms(), state.seconds_only);
+        set_mtime(&self.lock_dir, next).map_err(LockError::Io)?;
+        state.mtime_ms = next;
+        state.last_update_ms = now_ms();
+        Ok(true)
+    }
+
     /// The catalog's write lock at `app_root`, taken but not yet kept
     /// ([`Lock::take`]): its target file made if missing, as the reference
     /// does, and five retries 50 to 250 ms apart.
@@ -436,6 +469,28 @@ mod tests {
 
     fn retries_none(_: u32) -> u64 {
         0
+    }
+
+    /// A touch before the refresher sets the mtime again while the lock is
+    /// this holder's, and finds it lost once another took it over.
+    #[test]
+    fn a_touch_refreshes_or_finds_the_lock_taken_over() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("x.lock");
+        let lock = Lock::take(&path, SHORT, 0, retries_none).unwrap();
+        let before = mtime_ms(&path).unwrap();
+        std::thread::sleep(Duration::from_millis(1_100));
+        assert!(lock.touch().unwrap());
+        assert_ne!(mtime_ms(&path).unwrap(), before);
+        assert!(lock.held());
+        // Taken over: removed and made again.
+        std::fs::remove_dir(&path).unwrap();
+        std::fs::create_dir(&path).unwrap();
+        set_mtime(&path, before - 10_000).unwrap();
+        assert!(!lock.touch().unwrap());
+        assert!(!lock.held());
+        assert!(!lock.release(), "compromised: the other's lock stays");
+        assert!(path.is_dir());
     }
 
     /// Taken by `mkdir`, refused while fresh, let go by removing it.
