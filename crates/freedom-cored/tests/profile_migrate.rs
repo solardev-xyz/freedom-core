@@ -2213,6 +2213,46 @@ fn a_node_taking_its_lock_during_the_move_rolls_it_back() {
     assert_new_layout(&d.profile);
 }
 
+/// The same for a copied entry: a node that takes its lock on the source,
+/// which stays at the root until the cleanup after the marker (its copy's
+/// lock is another file), rolls the move back before the marker, with the
+/// source intact and no copy left.
+#[test]
+fn a_node_taking_its_lock_on_a_copied_source_rolls_the_move_back() {
+    let d = dirs();
+    seeded(&d.profile);
+    let (paused, release) = (d.base.join("paused"), d.base.join("release"));
+    let child = start_paused(
+        &d.profile,
+        &d.locks,
+        "after-renames",
+        &paused,
+        &release,
+        &[(EXDEV, "ant-data")],
+    );
+    wait_for(&paused);
+    assert!(there(
+        &d.profile.join("freedom").join("ant-data").join("antd.lock")
+    ));
+    let source = d.profile.join("ant-data").join("antd.lock");
+    let antd = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&source)
+        .unwrap();
+    antd.lock().unwrap();
+    std::fs::write(&release, "").unwrap();
+    let out = child.wait_with_output().unwrap();
+    assert_eq!(said(&out), "rolled_back", "{out:?}");
+    assert!(stderr(&out).contains("a node took its lock"), "{out:?}");
+    assert_old_layout(&d.profile);
+    assert!(!there(&d.profile.join("freedom").join("ant-data")));
+    antd.unlock().unwrap();
+    drop(antd);
+    assert_eq!(said(&start(&d)), "migrated");
+    assert_new_layout(&d.profile);
+}
+
 /// A starting run in the background, paused at `step` until `release`.
 fn start_paused(
     profile: &Path,

@@ -580,9 +580,13 @@ const NODE_LOCKS: &[NodeLock] = &[
 /// its spawn and taking its lock, which the precondition's try found free)
 /// holds its lock in the directory that moved, so the move rolls back
 /// before its marker, which puts the entry back where that node opened it.
-/// The same lookup as the preconditions': beneath the root, following no
-/// link and crossing no mount. An entry that the preconditions left to main
-/// (`linked_left_to_main`, not a real directory) is left again.
+/// A copied entry's source stays at the root until the cleanup after the
+/// marker, and its copy's lock is another file, so each lock is tried at
+/// the root too, where a copied entry's source still is (a renamed entry
+/// left nothing there). The same lookup as the preconditions': beneath the
+/// root, following no link and crossing no mount. An entry that the
+/// preconditions left to main (`linked_left_to_main`, not a real directory)
+/// is left again, at either place.
 pub fn node_started(root: &Dir, canonical: &Path, moved: &[&str]) -> io::Result<Option<String>> {
     let Some(freedom) = root.child(OsStr::new(FREEDOM_DIR), false)? else {
         return Ok(None);
@@ -591,15 +595,27 @@ pub fn node_started(root: &Dir, canonical: &Path, moved: &[&str]) -> io::Result<
         if !moved.contains(&lock.entry) {
             continue;
         }
-        if lock.linked_left_to_main && freedom.kind(OsStr::new(lock.entry))? != Kind::Dir {
-            continue;
-        }
-        let mut parts = vec![FREEDOM_DIR, lock.entry];
-        parts.extend(lock.path);
-        match try_lock(root, canonical, &parts, lock.probe) {
-            Tried::Free => {}
-            Tried::Held => return Ok(Some(format!("{} held", relative(lock)))),
-            Tried::Unknown(why) => return Ok(Some(format!("{}: {why}", relative(lock)))),
+        for (place, under) in [(FREEDOM_DIR, Some(&freedom)), ("", None)] {
+            let parent = under.unwrap_or(root);
+            match parent.kind(OsStr::new(lock.entry))? {
+                // A renamed entry's old place is empty.
+                Kind::Missing => continue,
+                Kind::Dir => {}
+                _ if lock.linked_left_to_main => continue,
+                _ => {}
+            }
+            let mut parts = Vec::new();
+            if !place.is_empty() {
+                parts.push(place);
+            }
+            parts.push(lock.entry);
+            parts.extend(lock.path);
+            let at = parts.join("/");
+            match try_lock(root, canonical, &parts, lock.probe) {
+                Tried::Free => {}
+                Tried::Held => return Ok(Some(format!("{at} held"))),
+                Tried::Unknown(why) => return Ok(Some(format!("{at}: {why}"))),
+            }
         }
     }
     Ok(None)
