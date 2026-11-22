@@ -100,6 +100,7 @@ freedom-core #279 (merged) and #286 (in review) carry the core's side of these r
 ### Facts found while checking the code
 
 1. **F-1: unproven answers labelled verified.** The C core treats `eth_gasPrice` and `eth_feeHistory` as unproofable, and also any proofable method asked at a `pending` or `earliest` block (`eth_verify.c:141–154`, `:209–249`). For those it sends the JSON-RPC call to the `eth_rpc` servers and returns the answer as a success (`rpc_handle_unproofable`, `colibri_common.c:522–579`). `Strategy.VerifiedOnly` doesn't stop it (`OnlyProofStrategy`, `cjs/strategy.js:74`). The router asks Colibri for both methods and any block tag (`fc-chain/src/methods.rs:54` mirrors it), and labels Colibri's answers `verified: true`. So such a read is one public RPC's word, from a host the user never configured, shown as verified. Found by reading the code; COL-1's vectors show it running.
+   - **Sent unproved isn't always answered** (COL-1's recording, [What the recording found](#what-the-recording-found)): `eth_gasPrice`, `eth_feeHistory` and a `pending` read come back as successes. An `earliest` read goes to the same host unproved, but that host answers with its own error, which the adapter returns: `historical state <root> is not available` on chain 1, `No state available for block 0 (<hash>)` on chain 100.
    - **Fixed in the core, being fixed on `main`:** freedom-browser #1046's fix, with F-11's and F-12's, is PR #1048 into `main` (open) and #1049 into `integration/rust-core` (merged); it puts the rule into main's router. freedom-core #276's fix, PR #279 (merged at `372d2d8c`), ports it into `fc-chain` as a reference patch on its replay vectors.
    - Under those rules, Colibri isn't asked for `eth_gasPrice`, `eth_feeHistory`, `eth_call` or `eth_estimateGas`, or for a read at a block it doesn't bind to the request (F-12), `pending` and `earliest` among them. The next source answers, under its own label.
    - Since #279, the core's router never sends these reads to the adapter. The service's own refusal ([What the service serves](#what-the-service-serves)) stays as a second guard, and COL-1's vectors pin what the adapter itself does.
@@ -139,7 +140,7 @@ freedom-core #279 (merged) and #286 (in review) carry the core's side of these r
     - The service serves no call ([Calls and ENS](#calls-and-ens)).
 12. **F-12: reads not bound to the requested block** (freedom-browser #1060). Found in #279's first round and confirmed by the Codex review of #1048, rounds 2 to 4. Colibri 3.0.3 proves some answers from an authenticated block without checking that it is the block the request names. A prover that lies, which is what the proofs exist to catch, could answer from another block:
     - **account reads** (`eth_getBalance`, `eth_getCode`, `eth_getTransactionCount`, `eth_getStorageAt`) at a number or a hash: `verify_account_proof.c:91–112` compares no requested block with the proven header;
-    - **`safe`, `finalized` and `justified`:** only `latest` has a freshness gate (`eth_check_latest_freshness`; `eth_verify.h`);
+    - **`safe`, `finalized` and `justified`:** only `latest` has a freshness gate (`eth_check_latest_freshness`; `eth_verify.h`). For account reads all three pass unchecked. For `eth_getBlockByNumber`, 3.0.3's validator refuses `justified` before any proof (`params[0]Expected hex prefixed (0x) string`), so only `safe` and `finalized` are proven from another block (COL-1's recording);
     - **an account read without its block:** the verifier reads its last argument, the address or the slot, as the block (`account_block_tag`, `verify_account_proof.c:53–55`), so no gate applies;
     - **`eth_getBlockByNumber` at any string but `latest`, a number or a hash:**
       - `c4_eth_matches_blocknumber` (`verify_block.c:76–101`) compares only a string that starts with `0x`, and matches any other its validator lets through with any proven block;
@@ -427,6 +428,8 @@ On fc-service's connection, at the version services speak, with fc-protocol's tw
 | `eth_blockNumber`, `eth_maxPriorityFeePerGas` | as sent: they take no block | the latest header, held to the gate |
 | `eth_getTransactionByHash`, `eth_getTransactionReceipt` | as sent; the fetch contract binds `[h]` | the transaction's inclusion proof; #752's rules decide which lookups the router sends |
 
+**A slot shorter than 32 bytes** (`eth_getStorageAt` with `0x0`) is served: the PAP rewrite passes it to the prover as given, and the prover refuses it (HTTP 500, `Expected hex string with fixed size (32) but got 0 bytes`), so the read ends as a failed remote proof with #1081's text (COL-1's recording).
+
 **The block forms, as #279 has them:**
 - **Account reads at `latest` only,** explicit or appended.
   - **The position:** the block parameter is `params[1]` for the three, `params[2]` for `eth_getStorageAt` (upstream's `eth_block_tag_index`). It must be last, because the account verifier reads its last param as the block, and gates it only when that is the string `latest` (F-12).
@@ -647,6 +650,7 @@ Anything those settings would add is refused: the `include_code`, `logs_complete
 | (`eth_getTransactionByHash`) | the block: `eth_getBlockByNumber ["0x<n>", true]` (`verify_pap_tx.c:294`; that method in remote mode, `:119–121`), as the cached GET; *free:* `n` |
 | `colibri.checkpoint` | `checkpoint_proof` once: main's own fetch from the prover, as `checkpoint-verifier-worker.js` makes it today, 4 MiB at most, with nothing taken from the service; then `checkpoint_root`: the one path today's interception admits, answered from main's quorum (origin, `GET`, the path, at most 8) |
 
+- **What the transaction variants met in COL-1's recording:** the prover's index (`tx_cache?max_blocks=256`) holds transactions days old, so the fallback is reached only for a hash it lacks, and there the prover gave no proof: an HTTP 500 on chain 1 for a 2024 transaction, and on both chains 19 bytes that trap the WASM verifier (an unknown hash, #750, and Gnosis' 2024 transaction). A ZK-off client couldn't read a days-old receipt: `the last sync state is higher than the required period, but we cannot sync backwards`.
 - **Comparisons:** `a`, `s`, `B` and `h` are compared as parsed JSON, with addresses and hex compared without regard to case. Main computes each rewrite from `P` the way the C core does, and admits that and nothing else. So an operation never admits another method, other params, or a variant of another operation.
 - **A form the service doesn't serve admits nothing,** the sync variants included. Main derives the variants from the same rule ([What the service serves](#what-the-service-serves)), and the router sends no such form. Before this amendment, account reads with other params had an original-payload variant, `{M, P}` as received. Those forms are refused now, so that variant is gone.
 - **Not admitted, for any operation:**
@@ -678,6 +682,7 @@ Anything those settings would add is refused: the `include_code`, `logs_complete
 - **`eth_rpc`:** none. No variant uses it, so main's table has no RPC hosts;
 - **for a checkpoint process,** `beacon_api` has no server, as today;
 - **`exclude_mask`** only skips servers. Its bits must be within the list's length.
+  - In COL-1's recording it is `0` in every request. `fetch_from_servers` fails over within one fetch, which shows only as the answer's `node` (a beacon API failing and the next one answering gives `node: 1`), and no rejected answer made the C core ask again with a server excluded.
 
 **Redirects:**
 - **A GET** follows at most 3 redirects (301, 302, 303, 307, 308). Each `Location` must resolve to the same server's origin and to the same variant with the same bound fields, and each hop passes the endpoint policy and the onion gate.
@@ -734,8 +739,8 @@ Anything those settings would add is refused: the `include_code`, `logs_complete
 
 - **The order:** servers in turn, skipping those `exclude_mask` names; the first success wins, and its index is `node`.
 - **Through the session:** the proxy and Tor apply, with the endpoint policy and the onion gate on every hop, as for `shell.rpc` (0005). The request's deadline bounds every attempt.
-- **Error texts** are written as `fetch_from_servers` writes them (`HTTP error! Status: <n>, Details: <body>`, `Request to <url> failed: <reason>`, `All nodes failed`).
-  - URLs are replaced by `<url>`, as `colibri-resolver.js` already does for its logs, and texts are cut to 2,000 units (deviation `fetch-error-text`).
+- **Error texts** are written as `fetch_from_servers` writes them (`HTTP error! Status: <n>, Details: <body>`, `Request to <url> with payload <JSON payload> failed: <reason>`, the ` with payload …` part only for a request with a payload, and `All nodes failed`).
+  - URLs are replaced by `<url>`, as `colibri-resolver.js` already does for its logs, and texts are cut to 2,000 units (deviation `fetch-error-text`). The payload stays: it is the request's own (COL-1's `fetch-error-text` cases record this form).
   - A transport failure's reason is Node's `fetch failed`, whatever the session's stack said, so `createError` and `retryableColibriError` see today's text.
 
 ## Budgets
@@ -784,12 +789,12 @@ A private process has the persistent process's budgets. Its store is in memory, 
 - **Scripted worlds:** `globalThis.fetch` stubbed, answering from recorded server responses in `vectors/fixtures/colibri/`, captured once from the live provers as the browser's `capture.cjs` captures checkpoints, with each request recorded (URL, method, headers, body, and any redirect a live server gave). The client is configured with the servers main's table gives each type, under the [default-host](#open-questions) answer, so that answer comes before COL-1. The clock is fixed, so the freshness bound is too. Stores start empty or seeded.
 - **Cases,** for chains 1 and 100:
   - every method the service serves, in the forms it serves: account and storage reads and code at `latest`, blocks at `latest`, a number, a hash and with no block, with and without transactions, blocks by hash, mined transactions and receipts, `eth_blockNumber`, `eth_maxPriorityFeePerGas`;
-  - failures: a flipped byte in each proof, a stale proof, a server failing before another answers (`exclude_mask`, `node`), every server failing, an HTTP error with a body, the ZK fallback;
-  - store: a cold start's bootstrap and a warm start;
+  - failures: a flipped byte in each proof, a stale proof, a server failing before another answers (`node`; `exclude_mask` stays `0`, [What the recording found](#what-the-recording-found)), every server failing, an HTTP error with a body, the ZK fallback;
+  - store: a cold start's bootstrap and a warm start. A ZK client's cold start asks for a checkpoint root only (`block_root`); a ZK-off client's asks for the finality checkpoint and a bootstrap. Light-client updates come only from a store a sync period behind, and no capture can wait for a period to roll over, so COL-1 reaches `lc_updates` through a scripted checkpoint server that reports a real finalized root of the previous period; the bootstrap and updates are the live servers' answers;
   - the checkpoint: both captures in `docs/audits/evidence/colibri-v3-2026-09/captures`, a flipped proof, a v2 proof;
   - F-1: `eth_gasPrice`, `eth_feeHistory`, and reads at `pending` and at `earliest`, each marked `deviation: colibri-unproofable`;
   - F-11: an `eth_call` and an `eth_estimateGas` whose code reads no storage, with code from a scripted `eth_rpc` host that isn't the account's, and a Universal Resolver `resolve` call as ENS made it. Each is marked `deviation: colibri-no-calls`. The reference accepts them without a proof; the service refuses them before any context;
-  - F-12: account reads at a number, a hash, `safe`, `finalized` and `justified`, and without their block; blocks at `safe`, `finalized`, `justified`, `0X10` and `1x10`; and a read at each EIP-1898 object. Each is marked `deviation: colibri-unbound`, with a scripted prover that answers from another block, which the reference accepts;
+  - F-12: account reads at a number, a hash, `safe`, `finalized` and `justified`, and without their block; blocks at `safe`, `finalized`, `justified`, `0X10` and `1x10`; and a read at each EIP-1898 object. Each is marked `deviation: colibri-unbound`, with a scripted prover that answers from another block, which the reference accepts, except a block at `justified`, which 3.0.3's validator refuses before any proof;
   - the F-1, F-11 and F-12 cases pin the adapter itself. The routers stop sending them with #1048, #1082 and freedom-core #279 and #286, whose own vectors cover the routing;
   - #750: an unknown-hash receipt, which traps in WASM. The service must end it in an error or a crash, never a result.
 - **The fetch contract:** the table in [The fetch contract](#the-fetch-contract) is the grammar, and the recording checks it rather than defines it. The generator fails on a recorded request that matches no variant its case's operation allows, and on a variant no case reaches. It records each variant's largest body.
@@ -801,20 +806,31 @@ A private process has the persistent process's budgets. Its store is in memory, 
 - **What the native build must match:** each step's status text byte for byte (the request pointer replaced by its index), the data requests in their rounds, the store's writes, and the version number. Through main's client: each adapter outcome (result, or error with name, code, message and data).
 - **Where the deviations show:** cases marked with their deviation id record the reference's outcome and the design's.
 
+### What the recording found
+
+COL-1's recording (`vectors/colibri.json`, captured 2026-11-22) differs from this design's reading of the code in these places, each folded into the section it concerns:
+- **Light-client updates** are reached only through a scripted checkpoint server a sync period behind ([Vectors](#vectors), store).
+- **`exclude_mask`** stays `0`; failover within one fetch shows only as `node` ([The fetch contract](#the-fetch-contract), servers).
+- **F-12's `justified`:** the validator refuses a block at `justified`; account reads at `justified` pass unchecked ([Facts](#facts-found-while-checking-the-code), F-12; deviation `colibri-unbound`).
+- **The transaction fallback** gets no proof from the prover, only an HTTP error or 19 bytes that trap, and a ZK-off client can't read a days-old receipt ([The fetch contract](#the-fetch-contract)).
+- **A short storage slot** (`0x0`) is refused by the prover, and the read ends as a failed remote proof ([What the service serves](#what-the-service-serves)).
+- **The fetch error text** keeps its payload ([The rest](#the-rest); deviation `fetch-error-text`).
+- **F-1's `earliest`** is sent unproved but ends in the RPC host's error rather than an answer ([Facts](#facts-found-while-checking-the-code), F-1; deviation `colibri-unproofable`).
+
 ## Deviations
 
 | Id | Today | With the service |
 |---|---|---|
-| `colibri-unproofable` | the adapter answers `eth_gasPrice`, `eth_feeHistory` and `pending`/`earliest` reads from a public RPC without proof; the router labelled them verified (F-1; it stops asking with #1048, #1049 and #279) | refused before any context: `Method <m> is not supported` for the two methods, `Colibri cannot prove <method> at block "<tag>"` for the tags |
+| `colibri-unproofable` | the adapter sends `eth_gasPrice`, `eth_feeHistory` and `pending`/`earliest` reads to a public RPC without proof and returns its answer: a success for the two methods and `pending` (COL-1), the host's own error for `earliest` (COL-1, [What the recording found](#what-the-recording-found)); the router labelled successes verified (F-1; it stops asking with #1048, #1049 and #279) | refused before any context: `Method <m> is not supported` for the two methods, `Colibri cannot prove <method> at block "<tag>"` for the tags |
 | `colibri-no-calls` | `eth_call` and `eth_estimateGas` run on code from a public RPC host, never compared with the proven code hash, and a call that reads no storage is accepted with no proof. ENS, reverse and NameNFT lookups ran on them, and all were labelled verified (F-11; the routers stop asking with #1048, #1049 and #279, and #1082, #1083 and #286) | refused before any context: `Method <m> is not supported`. The fetch contract has no call variant and no `eth_rpc` fetch |
-| `colibri-unbound` | account reads at a number, a hash, `safe`, `finalized` or `justified`, or without their block, blocks at a string Colibri doesn't compare (`safe`, `finalized`, `0X10`, `1x10`), and reads at a block that isn't a string are proven from whichever block the proof names (F-12; the router stops asking with #1048, #1049 and #279) | refused before any context with #279's text, `Colibri cannot prove <method> <why>` |
+| `colibri-unbound` | account reads at a number, a hash, `safe`, `finalized` or `justified`, or without their block, blocks at a string Colibri doesn't compare (`safe`, `finalized`, `0X10`, `1x10`), and reads at a block that isn't a string are proven from whichever block the proof names; a block at `justified` is refused by 3.0.3's validator before any proof (COL-1) (F-12; the router stops asking with #1048, #1049 and #279) | refused before any context with #279's text, `Colibri cannot prove <method> <why>` |
 | `colibri-deadline` | a request waiting on the network keeps its slot up to 60 s past its deadline, then fails as a fault and takes its worker's other requests with it | cancelled at its deadline; not a fault; nothing else ends |
 | `colibri-culprit` | a trap names its call's request; a stuck worker's culprit is guessed from methods, and several suspects of mixed methods name nobody | the step marker names the request whose call was running, best-effort; a death outside any step names nobody |
 | `colibri-session-fetch` | Node's fetch: no proxy, Tor, endpoint policy, timeout or body cap | main's session fetch with them; each body within its variant's maximum, reserved from main's Colibri fetch pool before it is sent, and `Colibri fetch pool full` when the pool can't |
 | `fetch-contract` | any request the instance returns is fetched: any verb, path and payload on the type's hosts, redirects followed anywhere | only the variants the open operation allows, with every derivable field bound; GET redirects within the server's origin and the variant, at most 3; POST none; anything else `Colibri fetch refused` |
 | `no-local-proving` | at this design's reading, a failed remote proof is proven locally in main's worker, from the `eth_rpc` and `beacon_api` hosts (F-9, #1059). #1080 and #1081 (open) end it instead, with `remote proof failed (no local proving): <the prover's error>` | no local proving, in normal and private processes alike: the build has no prover, and the request ends with #1080's text, byte for byte ([A failed remote proof](#a-failed-remote-proof)). The read falls to its next source. Against a reference with #1081 this row is parity |
 | `colibri-processes` | a worker per chain, with no bound on their number | at most 3 persistent and 2 checkpoint processes, idle ones retired, `Colibri service busy` at the limit |
-| `fetch-error-text` | a fetch error names the URL and payload, and carries the whole error body | URLs as `<url>`, at most 2,000 units. The cut is of the fetch text, before the C core's and `createError`'s prefixes, so it never shows in the adapter message, which is cut to 2,000 units after them |
+| `fetch-error-text` | a fetch error names the URL and payload, and carries the whole error body | URLs as `<url>`, the payload kept as `fetch_from_servers` writes it ([The rest](#the-rest)), at most 2,000 units. The cut is of the fetch text, before the C core's and `createError`'s prefixes, so it never shows in the adapter message, which is cut to 2,000 units after them |
 | `no-initial-chain-id` | a local `eth_chainId` context on each client's first request | none |
 | `storage-per-chain` | one flat directory for every chain; unchecked keys; no size bound | a directory per chain, checked keys, bounds; at most 6 directories. A private session's store is in memory, as #1071 has it |
 

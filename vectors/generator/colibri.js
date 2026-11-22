@@ -596,6 +596,15 @@ async function build(checkout, meta, { partial = false }) {
         row.largest_body = Math.max(row.largest_body, run.state.bodies.get(entry.index) ?? 0);
       }
     }
+    if (kase.kind === 'checkpoint') {
+      // The checkpoint row: main's one proof fetch, then at most 8 roots.
+      const events = run.recorder.events;
+      const proofs = events.filter((event) => event.variant === 'checkpoint_proof');
+      assert.equal(proofs.length, 1, `${kase.id}: one checkpoint_proof`);
+      assert.ok(events.indexOf(proofs[0]) < events.findIndex((event) => event.op === 'verify' || event.op === 'step' || event.op === 'decode'),
+        `${kase.id}: checkpoint_proof comes first`);
+      assert.ok(contractRows.filter((row) => row.variant === 'checkpoint_root').length <= 8, `${kase.id}: at most 8 checkpoint_root`);
+    }
     for (const event of run.recorder.events) {
       if (event.variant === 'checkpoint_proof') {
         const row = reached.get('checkpoint_proof');

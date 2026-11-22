@@ -105,6 +105,11 @@ What the recording found, against design 0014's text:
   and a 2024 transaction, which the mainnet prover refuses with an HTTP error and the Gnosis
   prover answers with 19 bytes that trap. A ZK-off client can't read a days-old receipt (`the
   last sync state is higher than the requested ...`).
+- **F-1's `earliest`** is sent unproved to the package's first RPC host, like `pending`,
+  `eth_gasPrice` and `eth_feeHistory`, but that host answers with its own error, which the
+  adapter returns: `historical state <root> is not available` on chain 1, `No state available
+  for block 0 (<hash>)` on chain 100 (`*-balance-earliest`). Sent unproved isn't always
+  answered.
 - **A short storage slot** (`0x0`) goes to the prover as given, which refuses it, so the
   read ends as a failed remote proof (`*-storage-short-slot`).
 - **`fetch-error-text`:** the design's fetch text keeps `fetch_from_servers`' form, payload
@@ -174,6 +179,7 @@ What the recording found, against design 0014's text:
 | `generator/colibri.js` | The Colibri harness: the reference loaded fresh per case, the recording layer, the worlds, and the builder, used by `generate.js`. |
 | `generator/colibri-cases.js` | The Colibri cases: their sessions, stores, requests, clocks, the rules that script their worlds, and the design's refusals. |
 | `generator/colibri-contract.js` | Design 0014's fetch contract, the grammar `colibri.json`'s requests are checked against. |
+| `generator/colibri-contract.test.js` | Direct cases for the fetch contract: each variant admitted in its exact form, and refused one step past every bound the table names (the checkpoint row's cross-variants, the 65,536- and 65,537-byte payloads, decimal widths, hex forms, lengths, verbs, ages, `exclude_mask`). |
 | `generator/colibri-capture.js` | Captures `fixtures/colibri/` from the live servers through the same harness; run only to replace the fixtures (it needs the network; `generate` and `check` never do). |
 | `generator/check.test.js` | Integration tests that damage copies of the oracle outputs and require `check` to fail. |
 | `generator/interop.test.js` | Design 0013's interop harness: the profiles reference's `createProfile` and `renameProfile` against `freedom-cored`'s catalog subcommands on one app root, and the catalog's write lock held both ways; the JSON Lines journal read both ways (`test-journal`); and `payment-history.sqlite` read both ways, the stores reference's `payment-history.js` against `test-payments`, which runs the `payments.*` methods and the `x402-receipts.json` import. Needs `FREEDOM_CORED`, a `testhooks` build. |
@@ -231,6 +237,7 @@ node vectors/generator/generate.js check --freedom-browser /root/herdr/freedom-b
   --stores-browser /root/herdr/freedom-browser-wt/stores-reference \
   --colibri-browser /root/herdr/freedom-browser-wt/colibri-reference
 node --test vectors/generator/check.test.js
+node --test vectors/generator/colibri-contract.test.js
 cargo build -p freedom-cored --features testhooks
 FREEDOM_CORED=target/debug/freedom-cored \
   FREEDOM_BROWSER_STORES_CHECKOUT=/root/herdr/freedom-browser-wt/stores-reference \
