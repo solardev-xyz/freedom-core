@@ -1272,7 +1272,11 @@ fn payments_share_256_slots() {
 /// The file's bounds when read at a start: a file of exactly 1 MiB and a
 /// record of exactly 4,000 bytes read; a byte more of either, a 257th
 /// record, a symlink, a FIFO, a file that doesn't parse, or one another
-/// user owns, is renamed aside and `phone.lost` sent.
+/// user owns, is renamed aside and `phone.lost` sent. On Linux a symlink
+/// or a FIFO stays where it is, `phone.lost` sent all the same: the
+/// confined core may make neither (design 0017, C2), and Landlock counts a
+/// special file renamed as one made at its new name. The next write
+/// replaces it, and never follows a link to its target.
 #[test]
 fn the_file_s_bounds_and_its_unreadable_forms() {
     let record = records(1, WALL);
@@ -1338,15 +1342,24 @@ fn the_file_s_bounds_and_its_unreadable_forms() {
         }
         let mut world = World::start(root.path());
         world.event("phone.lost");
-        assert!(!file.exists(), "{case}");
         let aside = dir.join(format!("{FILE}.unreadable"));
-        assert!(aside.symlink_metadata().is_ok(), "{case}");
+        if matches!(case, "symlink" | "fifo") && cfg!(target_os = "linux") {
+            assert!(!file.symlink_metadata().unwrap().is_file(), "{case}");
+            assert!(aside.symlink_metadata().is_err(), "{case}");
+        } else {
+            assert!(!file.exists(), "{case}");
+            assert!(aside.symlink_metadata().is_ok(), "{case}");
+        }
         world.idle(Duration::from_millis(200));
         assert_eq!(world.read_count(&hash), 0, "{case}");
         // The core starts with no records, and writes a good file.
         let job = world.shell_payment(tx());
         world.result(&job, TARGET, hash.clone().into());
         assert_eq!(world.recorded(), vec![job], "{case}");
+        assert!(file.symlink_metadata().unwrap().is_file(), "{case}");
+        if case == "symlink" {
+            assert_eq!(std::fs::read_to_string(dir.join("good")).unwrap(), one);
+        }
     }
     // A file another user owns: refused before a byte is read. Only root
     // can give a file away.

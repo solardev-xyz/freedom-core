@@ -146,25 +146,5 @@ pub fn confine(grant: Grant) -> Result<(), Exit> {
     }
 }
 
-/// How the entry went (fc-service's `clean_entry`), logged as the services
-/// log it. Whatever is left, `confine` refuses.
-pub fn log_entry(entry: &confine::Entry) {
-    match entry {
-        confine::Entry::Clean => {}
-        confine::Entry::Reexeced => log::info(
-            "re-executed once at entry: descriptors were inherited",
-            serde_json::json!({}),
-        ),
-        confine::Entry::Replaced => log::error(
-            "re-executed at entry, but not from the file that ran: confinement refuses it",
-            serde_json::json!({}),
-        ),
-        confine::Entry::Left { reexeced, error } => log::error(
-            "descriptors inherited at entry are left",
-            serde_json::json!({
-                "reexeced": reexeced,
-                "error": error.as_ref().map(|e| e.kind().to_string()),
-            }),
-        ),
-    }
-}
+/// How the entry went, logged as `serve`'s is (the crate's [`crate::confine`]).
+pub use crate::confine::log_entry;

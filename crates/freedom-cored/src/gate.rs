@@ -69,10 +69,27 @@ impl std::fmt::Display for GateError {
 /// A held gate. Dropping it (or exiting) releases the OS lock.
 #[derive(Debug)]
 pub struct Gate {
-    _file: File,
+    file: File,
     pub lock_path: PathBuf,
     /// The canonical identity directory. Every operation uses this path.
     pub identity_dir: PathBuf,
+}
+
+impl Gate {
+    /// The lock file's descriptor, which crosses `confine` (design 0017,
+    /// C2's `descriptors`): one on Unix, none elsewhere.
+    pub fn descriptors(&self) -> Vec<i32> {
+        #[cfg(unix)]
+        {
+            use std::os::fd::AsRawFd;
+            vec![self.file.as_raw_fd()]
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = &self.file;
+            Vec::new()
+        }
+    }
 }
 
 /// Qualifies storage, then takes the gate for `identity_dir`, retrying on
@@ -122,7 +139,7 @@ pub fn acquire(identity_dir: &Path, lock_dir: &Path) -> Result<Gate, GateError> 
         return Err(GateError::Moved);
     }
     Ok(Gate {
-        _file: file,
+        file,
         lock_path,
         identity_dir: canonical_identity,
     })

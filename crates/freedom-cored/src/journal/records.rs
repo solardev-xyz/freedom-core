@@ -12,7 +12,7 @@
 //!   lock directory, which a confined `serve` can't reach.
 //! - **The grant:** the roots the plan names that exist, and each planned
 //!   Radicle home once its gate file is open at it ([`Prepared::grant`]).
-//!   D7-2d adds them to `confine`'s `read_write` (C2).
+//!   `serve` and `recover` add them to `confine`'s `read_write` (C2).
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -171,8 +171,7 @@ impl RadicleGates {
     }
 
     /// The open files' descriptors, which cross `confine` (C2's
-    /// `descriptors`): one each on Unix, none elsewhere. D7-2d passes them.
-    #[cfg_attr(not(test), allow(dead_code))]
+    /// `descriptors`): one each on Unix, none elsewhere.
     pub fn descriptors(&self) -> Vec<i32> {
         self.files
             .values()
@@ -195,7 +194,7 @@ pub struct Prepared {
     /// The roots C6 adds to `confine`'s `read_write` (C2): each Bee root
     /// the plan names, a directory when planned, and each planned Radicle
     /// home whose gate file is open at it (a committed journal's made by
-    /// that open). Unused until D7-2d confines `serve`.
+    /// that open).
     pub grant: Vec<PathBuf>,
     /// The gate files opened: the `--node-root radicle=` home's, made if
     /// missing as fc-service's gate makes it, and each planned home's.
@@ -752,7 +751,7 @@ mod tests {
 
     /// C6's argument-root exception: a record whose missing root is the
     /// current `--node-root`, which C2 creates before the plan (simulated
-    /// here; D7-2d does it). The plan finds it present and empty and grants
+    /// here; `serve`'s setup does it). The plan finds it present and empty and grants
     /// it; recovery ends as it would with no root (`Corrupt` for a
     /// committed Bee journal, the intent removed), and the empty root stays.
     /// A Radicle journal's home is the argument's: one gate file serves

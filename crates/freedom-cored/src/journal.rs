@@ -51,7 +51,7 @@
 
 mod records;
 
-pub use records::{RadicleGates, prepare};
+pub use records::{Prepared, RadicleGates, prepare};
 
 use std::fs::File;
 use std::io::{Read, Write};
@@ -673,7 +673,11 @@ fn radicle_gate(root: &Path, gates: &Gates, create: bool) -> std::io::Result<Hom
 ///   opened in the lock directory;
 /// - **otherwise by its path,** in `gates.lock_dir`, as before 0017: a
 ///   missing home made (`create`), or required ([`fc_service::gate::
-///   acquire_existing`]). D7-2d makes the gate files the only way.
+///   acquire_existing`]). A confined process can't reach the lock
+///   directory (C3), so where confinement holds files (Linux, macOS) this
+///   fails as storage: `serve` writes a Radicle home only through
+///   `--node-root radicle=`'s file, and recovers one only through the
+///   file its plan opened.
 pub fn home_gate(
     home: &Path,
     gates: &Gates,
@@ -1191,6 +1195,18 @@ fn digest_and_handle_at(
 /// Creates `dir` and any missing ancestors, then persists each new entry in
 /// its parent, so a crash can't lose a directory that staged files are in.
 fn ensure_dir(dir: &Path) -> std::io::Result<()> {
+    make_dirs(dir, false)
+}
+
+/// [`ensure_dir`], with each directory made private to the user on Unix
+/// (`0700`, less the umask): a directory `serve` grants before `confine`
+/// (design 0017, C2), which Landlock and Seatbelt grant only once it
+/// exists: a missing `--node-root bee=` and the Freedom root.
+pub fn create_private_dirs(dir: &Path) -> std::io::Result<()> {
+    make_dirs(dir, true)
+}
+
+fn make_dirs(dir: &Path, private: bool) -> std::io::Result<()> {
     let mut missing = Vec::new();
     let mut current = Some(dir);
     while let Some(path) = current {
@@ -1200,7 +1216,16 @@ fn ensure_dir(dir: &Path) -> std::io::Result<()> {
         missing.push(path);
         current = path.parent();
     }
-    std::fs::create_dir_all(dir)?;
+    let mut builder = std::fs::DirBuilder::new();
+    builder.recursive(true);
+    #[cfg(unix)]
+    if private {
+        use std::os::unix::fs::DirBuilderExt;
+        builder.mode(0o700);
+    }
+    #[cfg(not(unix))]
+    let _ = private;
+    builder.create(dir)?;
     for created in missing.iter().rev() {
         if let Some(parent) = created.parent() {
             sync_dir(parent)?;

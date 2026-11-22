@@ -112,8 +112,9 @@ pub struct Core {
     paused: Arc<(Mutex<bool>, Condvar)>,
     /// Set: pause right after the next begin frame.
     pause_on_begin: Arc<AtomicBool>,
-    /// The `grant_root` the handshake names: `userData` beside the data
-    /// directory (design 0012, "The files"), not created.
+    /// The `grant_root` the handshake names, and `serve`'s `--grant-root`:
+    /// `userData` beside the data directory (design 0012, "The files")
+    /// unless the test names another. `serve` makes it if missing.
     pub grant_root: PathBuf,
     /// The `grant_moved` the handshake names.
     pub grant_moved: Vec<&'static str>,
@@ -137,6 +138,9 @@ pub fn spawn(command: &str, data: &Path, locks: &Path, extra: &[&str]) -> Core {
     spawn_env(command, data, locks, extra, &[])
 }
 
+/// Spawns `command`. `serve` gets `--grant-root` as main passes it
+/// (design 0017, C1): the `grant_root` its handshake names, `userData`
+/// beside the data directory unless `extra` names another.
 pub fn spawn_env(
     command: &str,
     data: &Path,
@@ -144,6 +148,12 @@ pub fn spawn_env(
     extra: &[&str],
     env: &[(&str, &str)],
 ) -> Core {
+    let named = extra
+        .iter()
+        .position(|arg| *arg == "--grant-root")
+        .and_then(|at| extra.get(at + 1))
+        .map(PathBuf::from);
+    let grant_root = named.clone().unwrap_or_else(|| default_grant_root(data));
     let mut spawned = Command::new(BIN);
     spawned
         .envs(env.iter().copied())
@@ -151,7 +161,11 @@ pub fn spawn_env(
         .arg("--data-dir")
         .arg(data)
         .arg("--lock-dir")
-        .arg(locks)
+        .arg(locks);
+    if command == "serve" && named.is_none() {
+        spawned.arg("--grant-root").arg(&grant_root);
+    }
+    spawned
         .args(extra)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -261,12 +275,17 @@ pub fn spawn_env(
         arrived: Instant::now(),
         paused,
         pause_on_begin,
-        grant_root: data
-            .parent()
-            .map_or_else(|| data.join("userData"), |root| root.join("userData")),
+        grant_root,
         grant_moved: Vec::new(),
         store_moved: Vec::new(),
     }
+}
+
+/// The `grant_root` a test's handshake names by default: `userData` beside
+/// the data directory (design 0012, "The files").
+pub fn default_grant_root(data: &Path) -> PathBuf {
+    data.parent()
+        .map_or_else(|| data.join("userData"), |root| root.join("userData"))
 }
 
 pub fn frame(message: &Value) -> Vec<u8> {
