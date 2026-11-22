@@ -2179,7 +2179,11 @@ fn copied_names(profile: &Path) -> Vec<String> {
 /// A node that takes its lock while the move runs (an antd paused between
 /// its spawn and taking its lock, so the preconditions found it free):
 /// found at its new place before the marker, the move rolls back, which
-/// puts `ant-data/` back where that antd opened it.
+/// puts `ant-data/` back where that antd opened it. Unix only: on Windows a
+/// file held open inside `ant-data/` before the rename refuses the rename
+/// itself (retried, then rolled back: the held-entry test), so no node can
+/// hold a lock there that the rename carried along.
+#[cfg(unix)]
 #[test]
 fn a_node_taking_its_lock_during_the_move_rolls_it_back() {
     let d = dirs();
