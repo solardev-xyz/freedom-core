@@ -117,6 +117,9 @@ impl Grant {
             interface_index: false,
             times: self.times,
             symlinks: self.symlinks,
+            // No mode is set once confined: the gates are taken, and
+            // tightened, before.
+            modes: false,
         }
     }
 }

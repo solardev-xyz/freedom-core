@@ -40,6 +40,7 @@ pub fn policy(
         interface_index: matches!(network, NetworkPolicy::Direct),
         times: false,
         symlinks: false,
+        modes: false,
     }
 }
 

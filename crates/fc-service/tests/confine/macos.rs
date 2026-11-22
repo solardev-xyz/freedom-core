@@ -144,9 +144,11 @@ fn child(case: &str) {
     let (registered, held) = registered(&p);
     let refer = case == "refer";
     let times = case == "times";
+    let modes = case == "modes";
     let policy = |p: &Paths, network: Network, descriptors: Vec<i32>| Policy {
         refer,
         times,
+        modes,
         ..policy(p, network, descriptors)
     };
     match case {
@@ -245,6 +247,7 @@ fn child(case: &str) {
         "files" | "reexec" | "ports" => files(&p),
         "refer" => refer_links(&p),
         "times" => set_times(&p),
+        "modes" => set_modes(&p),
         "sysctl" => sysctls(&p),
         "exec-direct" => exec_direct(),
         "processes" => processes(),
@@ -294,6 +297,7 @@ fn policy(p: &Paths, network: Network, descriptors: Vec<i32>) -> Policy {
         interface_index: false,
         times: false,
         symlinks: false,
+        modes: false,
     }
 }
 
@@ -445,6 +449,57 @@ fn set_times(p: &Paths) {
     check(
         "times on the read-only grant refused",
         std::fs::File::open(p.read_only.join("file"))
+            .and_then(|f| fc_sys::macos::set_times(f.as_fd(), 1, 0))
+            .is_err(),
+    );
+}
+
+/// With `modes` (design 0017, C4), a file's and a directory's modes set
+/// inside the grant, as `freedom-cored serve` tightens them; still none on
+/// the read-only grant or outside, and no times inside.
+fn set_modes(p: &Paths) {
+    let mode_of = |path: &std::path::Path| {
+        std::fs::metadata(path)
+            .map(|m| m.permissions().mode() & 0o7777)
+            .unwrap_or(u32::MAX)
+    };
+    let file = p.data.join(format!("moded-{}", std::process::id()));
+    check("a file inside", std::fs::write(&file, b"x").is_ok());
+    for mode in [0o600, 0o700] {
+        check(
+            &format!("fchmod {mode:o} on a file inside"),
+            std::fs::File::open(&file)
+                .and_then(|f| f.set_permissions(std::fs::Permissions::from_mode(mode)))
+                .is_ok()
+                && mode_of(&file) == mode,
+        );
+    }
+    let dir = p.data.join(format!("moded-dir-{}", std::process::id()));
+    check("a directory inside", std::fs::create_dir(&dir).is_ok());
+    check(
+        "fchmod 700 on a directory inside",
+        std::fs::File::open(&dir)
+            .and_then(|f| f.set_permissions(std::fs::Permissions::from_mode(0o700)))
+            .is_ok()
+            && mode_of(&dir) == 0o700,
+    );
+    check(
+        "chmod on the read-only grant refused",
+        std::fs::File::open(p.read_only.join("file"))
+            .and_then(|f| f.set_permissions(std::fs::Permissions::from_mode(0o600)))
+            .is_err(),
+    );
+    check(
+        "chmod outside refused",
+        std::fs::set_permissions(
+            p.outside.join("canary"),
+            std::fs::Permissions::from_mode(0o600),
+        )
+        .is_err(),
+    );
+    check(
+        "futimes inside refused",
+        std::fs::File::open(&file)
             .and_then(|f| fc_sys::macos::set_times(f.as_fd(), 1, 0))
             .is_err(),
     );
@@ -795,6 +850,7 @@ fn parent() {
         "offline",
         "refer",
         "times",
+        "modes",
         "sysctl",
         "exec-direct",
         "resolv-conf",
@@ -817,7 +873,8 @@ fn parent() {
         for property in ["files", "exec"] {
             expect(
                 &mut failures,
-                report[property] == "enforced" || (case == "times" && property == "files"),
+                report[property] == "enforced"
+                    || (matches!(case, "times" | "modes") && property == "files"),
                 format!("{case}: {property} {report}"),
             );
         }
@@ -829,6 +886,17 @@ fn parent() {
                     && report["gaps"]
                         .as_array()
                         .is_some_and(|gaps| gaps.iter().any(|g| g == "times")),
+                format!("{case}: files {report}"),
+            );
+        }
+        // With modes, files are partial, naming them, and nothing of times.
+        if case == "modes" {
+            expect(
+                &mut failures,
+                report["files"] == "partial"
+                    && report["gaps"].as_array().is_some_and(|gaps| {
+                        gaps.iter().any(|g| g == "modes") && !gaps.iter().any(|g| g == "times")
+                    }),
                 format!("{case}: files {report}"),
             );
         }

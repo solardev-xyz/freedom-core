@@ -49,9 +49,14 @@ pub(super) fn confine(policy: &Policy, options: &Options) -> Result<Report, Inva
     let seccomp = match seccomp::target() {
         None => Installed::Unavailable("no seccomp filter for this architecture".into()),
         Some(arch) => {
-            let mut programs =
-                seccomp::programs(policy.network, arch, policy.interface_index, policy.times)
-                    .map_err(Invalid::Rules)?;
+            let mut programs = seccomp::programs(
+                policy.network,
+                arch,
+                policy.interface_index,
+                policy.times,
+                policy.modes,
+            )
+            .map_err(Invalid::Rules)?;
             if options.seccomp_invalid {
                 programs.insert(0, seccomp::invalid_program());
             }
@@ -438,6 +443,9 @@ fn derive(policy: &Policy, landlock: &Landlock, seccomp: &Installed) -> Report {
             .unwrap_or((Status::Unavailable, "not confined".into()))
     };
 
+    // An owner-only `fchmod` with `modes` (design 0017, C4) leaves `files`
+    // as it is: no mode wider than the owner's is set, and only on what
+    // Landlock let the process open.
     let files = match (abi, filters) {
         // `futimens` on what Landlock let the process open.
         (Some(_), true) if policy.times => {
@@ -556,6 +564,7 @@ mod tests {
             interface_index: false,
             times: false,
             symlinks: false,
+            modes: false,
         }
     }
 
@@ -626,6 +635,35 @@ mod tests {
         );
         assert_eq!(report.gaps, ["times"]);
         assert!(report.reasons.is_empty());
+    }
+
+    /// `modes` leaves `files` enforced (design 0017, C4), alone or with
+    /// `times`, whose gap stays the only one.
+    #[test]
+    fn modes_leave_files_enforced() {
+        let mut moded = policy(Network::Offline);
+        moded.modes = true;
+        let report = derive(&moded, &Landlock::Applied(6), &Installed::All);
+        assert_eq!(
+            (report.files, report.exec, report.ipc, report.network),
+            (
+                Status::Enforced,
+                Status::Enforced,
+                Status::Enforced,
+                Status::Enforced
+            )
+        );
+        assert!(report.gaps.is_empty() && report.reasons.is_empty());
+        moded.times = true;
+        let report = derive(&moded, &Landlock::Applied(6), &Installed::All);
+        assert_eq!(report.files, Status::Partial);
+        assert_eq!(report.gaps, ["times"]);
+        // Without seccomp, the metadata gap as before.
+        moded.times = false;
+        let none = Installed::Unavailable("no seccomp filter for this architecture".into());
+        let report = derive(&moded, &Landlock::Applied(9), &none);
+        assert_eq!(report.files, Status::Partial);
+        assert_eq!(report.gaps, ["metadata", "processes"]);
     }
 
     #[test]

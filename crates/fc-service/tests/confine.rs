@@ -275,11 +275,14 @@ mod linux {
             let _ = handle.join();
             return;
         }
-        let report =
-            confine::confine_with(&policy(&p, network, min_abi, registered), &options).unwrap();
+        let mut policy = policy(&p, network, min_abi, registered);
+        // Design 0017, C4: an owner-only `fchmod` alone.
+        policy.modes = case == "modes";
+        let report = confine::confine_with(&policy, &options).unwrap();
         println!("REPORT {}", report.to_json());
         match case {
             "files" | "abi1" | "abi2" | "abi3" | "fallback" | "argv" | "argv-fallback" => files(&p),
+            "modes" => modes(&p),
             // Only the report: the rules weren't all applied.
             "below-minimum" | "unavailable" | "blocked" => {}
             "processes" => processes(),
@@ -437,6 +440,7 @@ mod linux {
             interface_index: false,
             times: false,
             symlinks: false,
+            modes: false,
         }
     }
 
@@ -525,6 +529,16 @@ mod linux {
             "fchmod on a read-only descriptor refused",
             rustix::fs::fchmod(&file, rustix::fs::Mode::from_raw_mode(0o777)).is_err(),
         );
+        // Without `modes`, even an owner-only mode inside the grant.
+        let owned = std::fs::OpenOptions::new()
+            .write(true)
+            .open(&inside)
+            .unwrap();
+        check(
+            "fchmod 600 inside refused with EPERM",
+            rustix::fs::fchmod(&owned, rustix::fs::Mode::from_raw_mode(0o600))
+                == Err(rustix::io::Errno::PERM),
+        );
         check(
             "fsetxattr on a read-only descriptor refused",
             rustix::fs::fsetxattr(&file, "user.fc", b"1", rustix::fs::XattrFlags::empty()).is_err(),
@@ -540,6 +554,86 @@ mod linux {
         check(
             "FIONREAD allowed",
             rustix::io::ioctl_fionread(&file).is_ok(),
+        );
+    }
+
+    /// With `modes` (design 0017, C4): `fchmod` to an owner-only mode
+    /// inside the grant, a file's and a directory's; any other mode refused
+    /// with `EPERM`, and the mode left as it was; the path forms refused
+    /// whatever the mode.
+    fn modes(p: &Paths) {
+        use rustix::fs::Mode;
+        use rustix::io::Errno;
+        let mode_of = |path: &std::path::Path| {
+            std::fs::metadata(path)
+                .map(|m| m.permissions().mode() & 0o7777)
+                .unwrap_or(u32::MAX)
+        };
+        let path = p.data.join("moded");
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(true)
+            .write(true)
+            .open(&path)
+            .unwrap();
+        for mode in [0o600, 0o700] {
+            check(
+                &format!("fchmod {mode:o} allowed"),
+                rustix::fs::fchmod(&file, Mode::from_raw_mode(mode)).is_ok()
+                    && mode_of(&path) == mode,
+            );
+        }
+        for mode in [0o644, 0o755, 0o4700, 0o2700, 0o1700, 0o640, 0o604] {
+            check(
+                &format!("fchmod {mode:o} refused with EPERM"),
+                rustix::fs::fchmod(&file, Mode::from_raw_mode(mode)) == Err(Errno::PERM)
+                    && mode_of(&path) == 0o700,
+            );
+        }
+        let dir = p.data.join("moded-dir");
+        std::fs::create_dir(&dir).unwrap();
+        let handle = std::fs::File::open(&dir).unwrap();
+        check(
+            "fchmod 700 on a directory allowed",
+            rustix::fs::fchmod(&handle, Mode::from_raw_mode(0o700)).is_ok()
+                && mode_of(&dir) == 0o700,
+        );
+        check(
+            "fchmod 755 on a directory refused with EPERM",
+            rustix::fs::fchmod(&handle, Mode::from_raw_mode(0o755)) == Err(Errno::PERM),
+        );
+        check(
+            "fchmodat 600 refused with EPERM",
+            rustix::fs::chmod(&path, Mode::from_raw_mode(0o600)) == Err(Errno::PERM),
+        );
+        check(
+            "fchmodat 700 through a directory refused with EPERM",
+            rustix::fs::chmodat(
+                &handle,
+                ".",
+                Mode::from_raw_mode(0o700),
+                rustix::fs::AtFlags::empty(),
+            ) == Err(Errno::PERM),
+        );
+        check(
+            "chmod by path refused",
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).is_err(),
+        );
+        check("its mode is the last one allowed", mode_of(&path) == 0o700);
+        // Nothing else of the metadata calls opens up.
+        check(
+            "fchown refused",
+            rustix::fs::fchown(&file, None, None) == Err(Errno::PERM),
+        );
+        check(
+            "fsetxattr refused",
+            rustix::fs::fsetxattr(&file, "user.fc", b"1", rustix::fs::XattrFlags::empty())
+                == Err(Errno::PERM),
+        );
+        let canary = p.outside.join("canary");
+        check(
+            "chmod outside refused",
+            rustix::fs::chmod(&canary, Mode::from_raw_mode(0o600)).is_err(),
         );
     }
 
@@ -904,6 +998,26 @@ mod linux {
         );
         failures.extend(passed("files", &files));
         failures.extend(passed("held-dir", &run(&world, "held-dir")));
+
+        // Design 0017, C4: an owner-only `fchmod` alone, and `files` still
+        // enforced, with no gap.
+        let moded = run(&world, "modes");
+        let r = report(&moded);
+        expect(
+            &mut failures,
+            r.mechanism == format!("landlock-{abi}+seccomp")
+                && r.files == Status::Enforced
+                && r.exec == Status::Enforced
+                && !r.gaps.contains(&"modes"),
+            format!("modes run: {r:?}"),
+        );
+        failures.extend(passed("modes", &moded));
+        let moded_file = world.data.join("moded");
+        expect(
+            &mut failures,
+            std::fs::metadata(&moded_file).is_ok_and(|m| m.mode() & 0o7777 == 0o700),
+            "the moded file isn't 0700".into(),
+        );
 
         // Nothing outside changed: mode, owner, times, xattrs.
         let after = std::fs::metadata(&canary).unwrap();

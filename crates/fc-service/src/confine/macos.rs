@@ -203,8 +203,14 @@ pub(super) fn confine(policy: &Policy, options: &Options) -> Result<Report, Inva
         return Ok(blocked("the process is in a sandbox already"));
     }
     let grants = grants(policy)?;
-    let profile = seatbelt::profile(policy.network, policy.refer, policy.times, &grants)
-        .map_err(Invalid::Rules)?;
+    let profile = seatbelt::profile(
+        policy.network,
+        policy.refer,
+        policy.times,
+        policy.modes,
+        &grants,
+    )
+    .map_err(Invalid::Rules)?;
     let mut text = profile.text;
     if let Some(extra) = &options.seatbelt_extra {
         text.push_str(extra);
@@ -390,16 +396,22 @@ fn derive(policy: &Policy, grants: &Grants) -> Report {
         sys::check(c"file-read-data", Filter::Path(OUTSIDE_READ)),
         sys::check(c"file-write-data", Filter::Path(OUTSIDE_WRITE)),
     ];
-    // Metadata stays unchangeable inside the read-write grant too.
-    let dirs: Vec<CString> = grants
-        .read_write
-        .iter()
-        .filter_map(|dir| {
-            CString::new(std::os::unix::ffi::OsStrExt::as_bytes(dir.as_os_str())).ok()
-        })
-        .collect();
-    for dir in &dirs {
-        file_checks.push(sys::check(c"file-write-mode", Filter::Path(dir)));
+    if policy.modes {
+        // Modes change in the read-write grants (design 0017, C4), and
+        // nowhere else: the `modes` gap below.
+        file_checks.push(sys::check(c"file-write-mode", Filter::Path(OUTSIDE_WRITE)));
+    } else {
+        // Metadata stays unchangeable inside the read-write grant too.
+        let dirs: Vec<CString> = grants
+            .read_write
+            .iter()
+            .filter_map(|dir| {
+                CString::new(std::os::unix::ffi::OsStrExt::as_bytes(dir.as_os_str())).ok()
+            })
+            .collect();
+        for dir in &dirs {
+            file_checks.push(sys::check(c"file-write-mode", Filter::Path(dir)));
+        }
     }
     let mut files = status("files", &file_checks);
     // A new process (fork, `posix_spawn`) and an exec in place are two
@@ -427,9 +439,11 @@ fn derive(policy: &Policy, grants: &Grants) -> Report {
         ipc = Status::Partial;
     }
     gaps.push("process_args");
-    // The profile allows times in the read-write grants: a lock's mtime.
-    if policy.times && files == Status::Enforced {
-        gaps.push("times");
+    // The profile allows times in the read-write grants (a lock's mtime),
+    // and modes there (design 0017, C4).
+    let allowed = seatbelt::write_gaps(policy.times, policy.modes);
+    if !allowed.is_empty() && files == Status::Enforced {
+        gaps.extend(allowed);
         files = Status::Partial;
     }
     // The network rule names the proxy's port (and loopback host) alone:
@@ -490,6 +504,7 @@ mod tests {
             interface_index: false,
             times: false,
             symlinks: false,
+            modes: false,
         };
         let grants = grants(&policy).unwrap();
         // macOS's temporary directories live under /private.
@@ -517,6 +532,7 @@ mod tests {
             interface_index: false,
             times: false,
             symlinks: false,
+            modes: false,
         };
         let grants = grants(&policy).unwrap();
         for file in ["/etc/resolv.conf", "/etc/hosts"] {
