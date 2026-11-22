@@ -1362,7 +1362,7 @@ fn generation_lease(dir: &Path, network: Option<&str>, generation: &str, lease: 
     path
 }
 
-/// The same lease's path below `dir`, as the log names it.
+/// The same lease's path below the root or `freedom/`, as the log names it.
 fn generation_named(network: Option<&str>, generation: &str, lease: &str) -> String {
     let mut parts = vec!["myotis"];
     parts.extend(network);
@@ -3069,13 +3069,18 @@ fn mounted_tmpfs_nested_in_an_entry_is_never_crossed() {
 /// look for a lease (`node_lock_unknown`, nothing changed): a tmpfs at a
 /// generation's own name (after free ones), and a same-file-system bind
 /// mount at a base's `verified-sync/` with nothing in it (its own mount,
-/// though its device is the profile's).
+/// though its device is the profile's). Moved anyway (a regression), the
+/// mount is unmounted at its new place.
 #[cfg(target_os = "linux")]
 #[test]
 fn mounted_myotis_generations_defer() {
-    fn deferred(d: &Dirs, named: &str) {
+    fn deferred(d: &Dirs, mounted: &mut Mounted, named: &str) {
         let before = snapshot(&d.profile);
         let out = start(d);
+        if said(&out) == "migrated" {
+            let below = mounted.0.strip_prefix(&d.profile).unwrap().to_owned();
+            mounted.0 = d.profile.join("freedom").join(below);
+        }
         assert_eq!((code(&out), said(&out)), (0, "deferred".into()), "{out:?}");
         let log = stderr(&out);
         assert!(log.contains("node_lock_unknown"), "{log}");
@@ -3086,14 +3091,14 @@ fn mounted_myotis_generations_defer() {
     let d = dirs();
     seeded(&d.profile);
     with_generations(&d.profile);
-    let mounted = "ffffffff-0000-4000-8000-000000000000";
-    let generation = d.profile.join("myotis").join("verified-sync").join(mounted);
+    let name = "ffffffff-0000-4000-8000-000000000000";
+    let generation = d.profile.join("myotis").join("verified-sync").join(name);
     std::fs::create_dir(&generation).unwrap();
-    let Some(_mounted) = Mounted::tmpfs(&generation, "1m") else {
+    let Some(mut mounted) = Mounted::tmpfs(&generation, "1m") else {
         return;
     };
     assert_ne!(device(&generation), device(&d.profile));
-    deferred(&d, &format!("myotis/verified-sync/{mounted}"));
+    deferred(&d, &mut mounted, &format!("myotis/verified-sync/{name}"));
 
     let d = dirs();
     seeded(&d.profile);
@@ -3105,11 +3110,11 @@ fn mounted_myotis_generations_defer() {
         .join("gnosis")
         .join("verified-sync");
     std::fs::create_dir_all(&generations).unwrap();
-    let Some(_bound) = Mounted::bind(&empty, &generations) else {
+    let Some(mut bound) = Mounted::bind(&empty, &generations) else {
         return;
     };
     assert_eq!(device(&generations), device(&d.profile));
-    deferred(&d, "myotis/gnosis/verified-sync");
+    deferred(&d, &mut bound, "myotis/gnosis/verified-sync");
 }
 
 /// After the marker, the cleanup removes a copied entry's source only while
