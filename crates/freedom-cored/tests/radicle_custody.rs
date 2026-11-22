@@ -717,3 +717,138 @@ fn walk_contents(dir: &Path) -> Vec<(PathBuf, Vec<u8>)> {
     out.sort();
     out
 }
+
+/// The lock directory replaced by a regular file, its old one moved to
+/// `away`: a gate taken by its path fails from now on, and only a gate file
+/// opened before can still be locked (design 0017, C3).
+#[cfg(unix)]
+fn replace_lock_dir(locks: &Path, away: &Path) {
+    std::fs::rename(locks, away).unwrap();
+    std::fs::write(locks, b"not a lock directory").unwrap();
+}
+
+/// The Radicle gate files in `locks`.
+#[cfg(unix)]
+fn radicle_gate_files(locks: &Path) -> usize {
+    std::fs::read_dir(locks)
+        .unwrap()
+        .filter(|entry| {
+            entry
+                .as_ref()
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .starts_with("radicle-")
+        })
+        .count()
+}
+
+/// Design 0017, C3: with `--node-root radicle=`, `serve` makes the home
+/// and opens its gate file at its start, before any write, and every write
+/// locks that file. Its replies equal today's, by path, in each state: a
+/// write while free is installed; one while another process (the Radicle
+/// service) holds the home's gate gives up after 0001's 5 s with
+/// `lock_held` and touches nothing; released, the next is installed. With
+/// the gate file, all of it holds with the lock directory gone from its
+/// path after the start, which no gate by path survives.
+#[cfg(unix)]
+#[test]
+fn a_node_roots_writes_lock_its_gate_file_opened_at_start() {
+    let mut replies = Vec::new();
+    for ahead in [false, true] {
+        let (root, data, locks) = dirs();
+        let home = root.path().join("profile").join("radicle");
+        let argument = format!("radicle={}", home.display());
+        let extra: &[&str] = if ahead {
+            &["--node-root", &argument]
+        } else {
+            &[]
+        };
+        // The sealed form needs no vault.
+        let mut core = spawn("serve", &data, &locks, extra);
+        core.hello();
+        // Today the home and its gate file wait for the first write.
+        assert_eq!(home.is_dir(), ahead, "ahead: {ahead}");
+        assert_eq!(radicle_gate_files(&locks), usize::from(ahead));
+        let away = root.path().join("locks-away");
+        let gates = if ahead {
+            assert_eq!(std::fs::read_dir(&home).unwrap().count(), 0);
+            replace_lock_dir(&locks, &away);
+            away.clone()
+        } else {
+            locks.clone()
+        };
+
+        let mut seen = Vec::new();
+        let reply = core.call(3, "nodes.write_identity", sealed("free", &home, None));
+        seen.push(reply["result"]["status"].clone());
+        let before = walk_contents(&home);
+        let service =
+            fc_service::gate::acquire(&home, &gates, "radicle", fc_service::gate::CONTENTION_RETRY)
+                .unwrap();
+        let started = Instant::now();
+        let reply = core.call(4, "nodes.write_identity", sealed("held", &home, None));
+        seen.push(reply["error"]["code"].clone());
+        assert!(
+            started.elapsed() >= Duration::from_secs(5),
+            "ahead: {ahead}"
+        );
+        assert_eq!(walk_contents(&home), before, "ahead: {ahead}");
+        drop(service);
+        let reply = core.call(5, "nodes.write_identity", sealed("released", &home, None));
+        seen.push(reply["result"]["status"].clone());
+        keys_gone(&home);
+        assert_eq!(alias(&home), "FreedomBrowser");
+        core.close_stdin();
+        assert_eq!(core.exit_code(Duration::from_secs(5)), 0);
+        replies.push(seen);
+    }
+    assert_eq!(
+        replies[0],
+        [json!("installed"), json!("lock_held"), json!("installed")]
+    );
+    assert_eq!(replies[1], replies[0]);
+}
+
+/// Design 0017, C6 and C3: a committed Radicle journal left by an earlier
+/// run is planned at `serve`'s start, and its home's gate file opened then;
+/// startup recovery takes the gate through that file. The lock directory
+/// gone from its path between the two (the snapshot thread's delay), the
+/// switch is still finished, where a gate by path would leave it pending.
+#[cfg(unix)]
+#[test]
+fn startup_recovery_takes_the_homes_gate_through_its_file() {
+    let (root, data, locks) = dirs();
+    let home = root.path().join("radicle");
+    // The earlier run, with a lock directory of its own: this start's
+    // gate files are all made by `serve` itself.
+    let mut writer = unlocked(&data, &root.path().join("earlier-locks"));
+    legacy_write(&mut writer, 3, &home);
+    writer.close_stdin();
+    assert_eq!(writer.exit_code(Duration::from_secs(5)), 0);
+    interrupted_switch(&data, &home, "planned", 0);
+
+    let mut core = spawn_env(
+        "serve",
+        &data,
+        &locks,
+        &[],
+        &[("FREEDOM_CORED_TEST_SNAPSHOT_DELAY_MS", "3000")],
+    );
+    let until = Instant::now() + Duration::from_secs(30);
+    while !(locks.is_dir() && radicle_gate_files(&locks) == 1) && Instant::now() < until {
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert_eq!(
+        radicle_gate_files(&locks),
+        1,
+        "the home's gate file wasn't opened"
+    );
+    replace_lock_dir(&locks, &root.path().join("locks-away"));
+    let hello = core.hello();
+    assert_eq!(hello["result"]["node_recovery"], Value::Null, "{hello}");
+    let status = core.call_shell(2, "nodes.op_status", json!({ "op_id": "planned" }));
+    assert_eq!(status["result"]["status"], "installed");
+    keys_gone(&home);
+    assert_eq!(marker(&home), Some(json!({ "node_ids": [RADICLE_NID] })));
+}

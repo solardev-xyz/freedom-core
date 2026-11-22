@@ -235,7 +235,8 @@ fn writes_need_an_unlocked_vault_and_valid_parameters() {
 /// With `serve`'s `--node-root` arguments (design 0017, C1), a write names
 /// the directory of its node kind exactly, or is `invalid_argument` before
 /// anything: no file in the directory it named, no journal, and no Radicle
-/// gate file in the lock directory. The named directories are written.
+/// gate file in the lock directory but the argument's own, which `serve`
+/// opened at its start (C3). The named directories are written.
 #[test]
 fn writes_need_the_node_root_arguments() {
     let (root, data, locks) = dirs();
@@ -286,6 +287,8 @@ fn writes_need_the_node_root_arguments() {
             })
             .count()
     };
+    // The argument's gate file, opened at the start (C3), and only it.
+    assert_eq!(radicle_gates(), 1);
     for (offset, params) in refused.into_iter().enumerate() {
         let id = 3 + 2 * offset as u64;
         let reply = core.call(id, "nodes.write_identity", params.clone());
@@ -300,7 +303,7 @@ fn writes_need_the_node_root_arguments() {
     assert!(walk(&other).is_empty(), "{:?}", walk(&other));
     assert!(walk(&home).is_empty(), "{:?}", walk(&home));
     assert!(!bee.exists());
-    assert_eq!(radicle_gates(), 0);
+    assert_eq!(radicle_gates(), 1);
     assert!(!data.join("node-identity-journal.json").exists());
     assert!(!data.join("node-identity-staging.json").exists());
 
