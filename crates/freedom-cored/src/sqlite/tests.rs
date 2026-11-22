@@ -168,6 +168,21 @@ fn every_connection_syncs_each_commit() {
     assert_eq!(pragma(&conn, "journal_mode"), json!("wal"));
 }
 
+/// Every connection keeps its temp files in memory (`temp_store` MEMORY,
+/// 2), on a new database and on reopening it (design 0017, C7): the
+/// setting is the connection's, never stored in the file.
+#[test]
+fn every_connection_keeps_temp_files_in_memory() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("payment-history.sqlite");
+    let conn = open(&path, &PAYMENTS).unwrap();
+    assert_eq!(pragma(&conn, "temp_store"), json!(2));
+    drop(conn);
+    assert_eq!(pragma(&read_only(&path), "temp_store"), json!(0));
+    let conn = open(&path, &PAYMENTS).unwrap();
+    assert_eq!(pragma(&conn, "temp_store"), json!(2));
+}
+
 /// Neither a link (to a valid database) nor a directory is opened.
 #[test]
 fn a_link_or_a_directory_is_refused() {
