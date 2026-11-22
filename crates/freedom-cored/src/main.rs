@@ -299,6 +299,15 @@ fn recover(data_dir: &std::path::Path, lock_dir: &std::path::Path) -> Exit {
             return Exit::from(&e);
         }
     };
+    // The identity directory's entry in its parent, flushed as at `serve`'s
+    // start: recovery writes the vault's records in it.
+    if let Err(e) = journal::sync_parent(&gate.identity_dir) {
+        log::error(
+            "cannot flush the identity directory in its parent",
+            serde_json::json!({ "error": e.kind().to_string() }),
+        );
+        return Exit::Storage;
+    }
     let prepared = journal::prepare(&gate.identity_dir, lock_dir, None);
     let mut read_write = vec![gate.identity_dir.clone()];
     read_write.extend(prepared.grant.iter().cloned());

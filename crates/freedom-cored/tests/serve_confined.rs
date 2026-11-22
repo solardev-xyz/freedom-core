@@ -245,15 +245,13 @@ fn a_bee_root_that_cant_be_made_fails_the_start() {
 }
 
 /// A start's exit and its log, when it ends before any hello.
-#[cfg(unix)]
-fn start_ending(data: &Path, w: &World, args: &[&str]) -> (i32, String) {
-    let mut core = spawn_env("serve", data, &w.locks, args, &[]);
+fn start_ending(data: &Path, w: &World, args: &[&str], env: &[(&str, &str)]) -> (i32, String) {
+    let mut core = spawn_env("serve", data, &w.locks, args, env);
     let code = core.exit_code(Duration::from_secs(10));
     (code, core.stderr())
 }
 
 /// A start that serves: the hello answered, then a clean exit.
-#[cfg(unix)]
 fn start_serving(data: &Path, w: &World, args: &[&str]) {
     let mut core = spawn_env("serve", data, &w.locks, args, &[]);
     assert_eq!(core.hello()["result"]["protocol"], 2);
@@ -298,7 +296,7 @@ fn a_bee_root_whose_entry_cant_be_flushed_is_retried_at_each_start() {
     let bee = format!("bee={}", s(&root));
     let args = ["--grant-root", s(&w.freedom), "--node-root", &bee];
     for start in 0..3 {
-        let (code, stderr) = start_ending(&w.identity, &w, &args);
+        let (code, stderr) = start_ending(&w.identity, &w, &args, &[]);
         assert_eq!(code, 74, "start {start}: {stderr}");
         assert!(stderr.contains("cannot make a node root"), "{stderr}");
         assert!(!stderr.contains("serve confined"), "{stderr}");
@@ -325,7 +323,7 @@ fn a_freedom_root_whose_entry_cant_be_flushed_fails_before_the_gate() {
     let args = ["--grant-root", s(&grant)];
     let locks_before = std::fs::read_dir(&w.locks).unwrap().count();
     for start in 0..3 {
-        let (code, stderr) = start_ending(&data, &w, &args);
+        let (code, stderr) = start_ending(&data, &w, &args, &[]);
         assert_eq!(code, 74, "start {start}: {stderr}");
         assert!(stderr.contains("cannot make the Freedom root"), "{stderr}");
         assert!(!stderr.contains("gate taken"), "{stderr}");
@@ -336,6 +334,105 @@ fn a_freedom_root_whose_entry_cant_be_flushed_fails_before_the_gate() {
     make_readable(&parent);
     start_serving(&data, &w, &args);
     assert!(data.is_dir());
+}
+
+const SYNC_FAIL: &str = "FREEDOM_CORED_TEST_DIR_SYNC_FAIL";
+const RACE: &str = "FREEDOM_CORED_TEST_DIR_RACE";
+
+/// A missing Freedom root that another creator makes first, between the
+/// scan and `mkdir` (the race hook), isn't this start's: when the flush in
+/// its parent then fails (the flush hook), the start is exit 74 and the
+/// other creator's directory stays. The next start flushes it and serves.
+#[test]
+fn another_creators_directory_is_never_removed() {
+    let w = world();
+    let grant = w.base.join("fresh");
+    let data = grant.join("identity");
+    let args = ["--grant-root", s(&grant)];
+    let race = format!("mkdir={}", s(&grant));
+    let env = [(RACE, race.as_str()), (SYNC_FAIL, s(&w.base))];
+    let (code, stderr) = start_ending(&data, &w, &args, &env);
+    assert_eq!(code, 74, "{stderr}");
+    assert!(stderr.contains("cannot make the Freedom root"), "{stderr}");
+    assert!(grant.is_dir(), "another creator's directory was removed");
+    start_serving(&data, &w, &args);
+}
+
+/// A Freedom root this start made, filled before its flush (the race
+/// hook), can't be removed when the flush fails: the start is exit 74, and
+/// every later start flushes its parent again, exit 74 while that fails,
+/// serving once it doesn't.
+#[test]
+fn a_made_directory_filled_before_its_flush_is_flushed_again() {
+    let w = world();
+    let grant = w.base.join("fresh");
+    let data = grant.join("identity");
+    let args = ["--grant-root", s(&grant)];
+    let race = format!("filled={}", s(&grant));
+    let failing = [(SYNC_FAIL, s(&w.base))];
+    let env = [(RACE, race.as_str()), failing[0]];
+    let (code, stderr) = start_ending(&data, &w, &args, &env);
+    assert_eq!(code, 74, "{stderr}");
+    assert!(grant.join("filled").is_file());
+    for start in 0..2 {
+        let (code, stderr) = start_ending(&data, &w, &args, &failing);
+        assert_eq!(code, 74, "start {start}: {stderr}");
+        assert!(stderr.contains("cannot make the Freedom root"), "{stderr}");
+        assert!(!stderr.contains("serve confined"), "{stderr}");
+    }
+    start_serving(&data, &w, &args);
+}
+
+/// The identity directory's entry in its parent is flushed at every start
+/// of `serve` and `recover`, after the gate (which makes a missing one):
+/// while the flush fails (the hook), each is exit 74 and `serve` confines
+/// nothing; then `serve` serves.
+#[test]
+fn the_identity_directory_is_flushed_in_its_parent_at_every_start() {
+    let w = world();
+    let args = ["--grant-root", s(&w.freedom)];
+    let parent = std::fs::canonicalize(&w.freedom).unwrap();
+    let env = [(SYNC_FAIL, s(&parent))];
+    for start in 0..2 {
+        let (code, stderr) = start_ending(&w.identity, &w, &args, &env);
+        assert_eq!(code, 74, "start {start}: {stderr}");
+        assert!(stderr.contains("gate taken"), "{stderr}");
+        assert!(
+            stderr.contains("cannot flush the identity directory in its parent"),
+            "{stderr}"
+        );
+        assert!(!stderr.contains("serve confined"), "{stderr}");
+        assert!(w.identity.is_dir());
+    }
+    let mut recover = spawn_env("recover", &w.identity, &w.locks, &[], &env);
+    assert_eq!(recover.exit_code(Duration::from_secs(10)), 74);
+    start_serving(&w.identity, &w, &args);
+}
+
+/// A missing identity directory under a parent that can be written but
+/// not read (`0300`, another user than root): the gate makes it, the flush
+/// in its parent fails, exit 74 at every start; once the parent can be
+/// read, the start serves.
+#[cfg(unix)]
+#[test]
+fn a_missing_identity_directory_whose_entry_cant_be_flushed() {
+    let w = world();
+    let Some(parent) = unreadable_parent(&w, "write-only") else {
+        return;
+    };
+    let data = parent.join("identity");
+    let args = ["--grant-root", s(&w.freedom)];
+    for start in 0..2 {
+        let (code, stderr) = start_ending(&data, &w, &args, &[]);
+        assert_eq!(code, 74, "start {start}: {stderr}");
+        assert!(
+            stderr.contains("cannot flush the identity directory in its parent"),
+            "{stderr}"
+        );
+        assert!(!stderr.contains("serve confined"), "{stderr}");
+    }
+    make_readable(&parent);
+    start_serving(&data, &w, &args);
 }
 
 /// A probe's answer: whether it worked, and the OS's error number.

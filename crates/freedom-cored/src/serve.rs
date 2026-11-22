@@ -375,6 +375,17 @@ pub fn run(options: &Options) -> Exit {
             return Exit::from(&e);
         }
     };
+    // The identity directory's entry in its parent (the Freedom root, by
+    // default), flushed at every start: the gate makes a missing one and
+    // flushes nothing, and the vault's commits flush only the directory
+    // itself. One that can't be flushed is exit 74, tried again next start.
+    if let Err(e) = journal::sync_parent(&gate.identity_dir) {
+        log::error(
+            "cannot flush the identity directory in its parent",
+            serde_json::json!({ "error": e.kind().to_string() }),
+        );
+        return Exit::Storage;
+    }
     // 5. The setup that confinement would refuse, or that needs what it
     //    doesn't grant.
     let setup = match setup(options, &gate) {

@@ -269,6 +269,16 @@
 //!   stderr, `test: confined`, with its confinement report and, for each
 //!   path, whether the read worked. So a test sees what the confined
 //!   process can and can't read.
+//! - `FREEDOM_CORED_TEST_DIR_RACE` (`<step>=<path>`): when the directory
+//!   maker of `serve`'s Freedom root and node roots (`journal::make_dirs`)
+//!   is at `<path>`: at `mkdir`, right before its `mkdir`, the hook makes
+//!   the directory first, as another creator winning the race; at
+//!   `filled`, right after its `mkdir`, it writes a file `filled` into it,
+//!   as a writer filling it before the flush.
+//! - `FREEDOM_CORED_TEST_DIR_SYNC_FAIL` names a directory: the node
+//!   journal's directory flush (`journal::sync_dir`, which that maker and
+//!   the identity directory's flush at start use) fails for it, as if the
+//!   OS had failed it.
 //! - `FREEDOM_CORED_TEST_CORE_CONFINED` does the same for `serve`,
 //!   `hold-lock` and `recover` (design 0017), right after each confines
 //!   itself, before its logging thread starts.
@@ -1003,6 +1013,42 @@ pub fn core_confined(report: &fc_service::confine::Report) {
 
 #[cfg(not(feature = "testhooks"))]
 pub fn core_confined(_report: &fc_service::confine::Report) {}
+
+#[cfg(feature = "testhooks")]
+pub fn make_dir_race(step: &str, path: &std::path::Path) {
+    let Ok(spec) = std::env::var("FREEDOM_CORED_TEST_DIR_RACE") else {
+        return;
+    };
+    let Some((wanted, at)) = spec.split_once('=') else {
+        return;
+    };
+    if wanted != step || std::path::Path::new(at) != path {
+        return;
+    }
+    match step {
+        "mkdir" => {
+            let _ = std::fs::create_dir(path);
+        }
+        "filled" => {
+            let _ = std::fs::write(path.join("filled"), b"a writer's");
+        }
+        _ => {}
+    }
+}
+
+#[cfg(not(feature = "testhooks"))]
+pub fn make_dir_race(_step: &str, _path: &std::path::Path) {}
+
+#[cfg(feature = "testhooks")]
+pub fn dir_sync_fails(dir: &std::path::Path) -> bool {
+    std::env::var_os("FREEDOM_CORED_TEST_DIR_SYNC_FAIL")
+        .is_some_and(|failing| std::path::Path::new(&failing) == dir)
+}
+
+#[cfg(not(feature = "testhooks"))]
+pub fn dir_sync_fails(_dir: &std::path::Path) -> bool {
+    false
+}
 
 #[cfg(not(feature = "testhooks"))]
 pub fn profile_migrate_step(_step: &str) {}
