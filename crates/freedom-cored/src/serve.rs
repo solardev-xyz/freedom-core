@@ -347,6 +347,17 @@ pub fn run(options: &Options) -> Exit {
         log::error("parent is already gone", serde_json::json!({}));
         return Exit::Ok;
     }
+    // The Freedom root, made durably if missing, before the gate: main's
+    // identity directory is inside it, and the gate makes a missing one
+    // with its ancestors, flushing none of them. One that can't be made
+    // durably is exit 74, before anything else.
+    if let Err(e) = journal::create_private_dirs(&options.grant_root) {
+        log::error(
+            "cannot make the Freedom root",
+            serde_json::json!({ "error": e.kind().to_string() }),
+        );
+        return Exit::Storage;
+    }
     // 4. The gate, taken and held.
     let gate = match gate::acquire(&options.data_dir, &options.lock_dir) {
         Ok(gate) => {
@@ -769,10 +780,7 @@ struct Setup {
     read_write: Vec<PathBuf>,
 }
 
-/// Step 5, in order:
-/// - **The Freedom root,** made if missing, private (main makes it before
-///   the spawn; `confine` grants only what exists). One that can't be made
-///   is exit 74.
+/// Step 5, in order (the Freedom root was made before the gate: [`run`]):
 /// - **Each missing `--node-root`** made with its ancestors (C2): Bee's
 ///   private, as the Freedom root is, and one that can't be made (a
 ///   regular file there, an ancestor that can't hold it, a parent whose
@@ -790,13 +798,6 @@ struct Setup {
 /// file, as the intent journal's and the node layout's stay after the
 /// hello: C4's `modes` lets each narrowing to owner-only through.
 fn setup(options: &Options, gate: &gate::Gate) -> Result<Setup, Exit> {
-    if let Err(e) = journal::create_private_dirs(&options.grant_root) {
-        log::error(
-            "cannot make the Freedom root",
-            serde_json::json!({ "error": e.kind().to_string() }),
-        );
-        return Err(Exit::Storage);
-    }
     if let Some(bee) = &options.node_roots.bee
         && let Err(e) = journal::create_private_dirs(bee)
     {

@@ -212,6 +212,8 @@ fn a_bee_root_that_cant_be_made_fails_the_start() {
     let w = world();
     let file = w.base.join("not-a-dir");
     std::fs::write(&file, "x").unwrap();
+    // Unix adds a case below.
+    #[cfg_attr(not(unix), allow(unused_mut))]
     let mut roots = vec![file.clone(), file.join("bee")];
     #[cfg(unix)]
     let locked = {
@@ -219,7 +221,7 @@ fn a_bee_root_that_cant_be_made_fails_the_start() {
         let locked = w.base.join("locked");
         std::fs::create_dir(&locked).unwrap();
         std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o500)).unwrap();
-        if !rustix::process::geteuid().is_root() {
+        if !rustix::process::getuid().is_root() {
             roots.push(locked.join("bee"));
         }
         locked
@@ -240,6 +242,100 @@ fn a_bee_root_that_cant_be_made_fails_the_start() {
         assert!(!locked.join("bee").exists());
         std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o700)).unwrap();
     }
+}
+
+/// A start's exit and its log, when it ends before any hello.
+#[cfg(unix)]
+fn start_ending(data: &Path, w: &World, args: &[&str]) -> (i32, String) {
+    let mut core = spawn_env("serve", data, &w.locks, args, &[]);
+    let code = core.exit_code(Duration::from_secs(10));
+    (code, core.stderr())
+}
+
+/// A start that serves: the hello answered, then a clean exit.
+#[cfg(unix)]
+fn start_serving(data: &Path, w: &World, args: &[&str]) {
+    let mut core = spawn_env("serve", data, &w.locks, args, &[]);
+    assert_eq!(core.hello()["result"]["protocol"], 2);
+    core.close_stdin();
+    assert_eq!(core.exit_code(Duration::from_secs(5)), 0);
+}
+
+/// A directory `mode` makes `0300`: written and searched, not read, so a
+/// directory is made in it but it can't be opened to flush the new entry.
+/// Root reads it anyway (modes don't stop root), so these cases need
+/// another user, as CI's runners are.
+#[cfg(unix)]
+fn unreadable_parent(w: &World, name: &str) -> Option<PathBuf> {
+    use std::os::unix::fs::PermissionsExt;
+    if rustix::process::getuid().is_root() {
+        return None;
+    }
+    let parent = w.base.join(name);
+    std::fs::create_dir(&parent).unwrap();
+    std::fs::set_permissions(&parent, std::fs::Permissions::from_mode(0o300)).unwrap();
+    Some(parent)
+}
+
+#[cfg(unix)]
+fn make_readable(dir: &Path) {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+}
+
+/// A `--node-root bee=` whose parent can't be flushed once it is made
+/// (design 0017, C2): every start is exit 74, the root removed again so
+/// the next makes and flushes it anew, and none confines; once the parent
+/// can be read, the start serves.
+#[cfg(unix)]
+#[test]
+fn a_bee_root_whose_entry_cant_be_flushed_is_retried_at_each_start() {
+    let w = world();
+    let Some(parent) = unreadable_parent(&w, "write-only") else {
+        return;
+    };
+    let root = parent.join("bee");
+    let bee = format!("bee={}", s(&root));
+    let args = ["--grant-root", s(&w.freedom), "--node-root", &bee];
+    for start in 0..3 {
+        let (code, stderr) = start_ending(&w.identity, &w, &args);
+        assert_eq!(code, 74, "start {start}: {stderr}");
+        assert!(stderr.contains("cannot make a node root"), "{stderr}");
+        assert!(!stderr.contains("serve confined"), "{stderr}");
+        assert!(!root.exists(), "start {start}: the root stayed");
+    }
+    make_readable(&parent);
+    start_serving(&w.identity, &w, &args);
+    assert!(root.is_dir());
+}
+
+/// A missing Freedom root whose parent can't be flushed once it is made:
+/// every start is exit 74 before the gate (nothing made in the lock
+/// directory, the identity directory not made, nothing confined), the root
+/// removed again; once the parent can be read, the start serves.
+#[cfg(unix)]
+#[test]
+fn a_freedom_root_whose_entry_cant_be_flushed_fails_before_the_gate() {
+    let w = world();
+    let Some(parent) = unreadable_parent(&w, "write-only") else {
+        return;
+    };
+    let grant = parent.join("freedom");
+    let data = grant.join("identity");
+    let args = ["--grant-root", s(&grant)];
+    let locks_before = std::fs::read_dir(&w.locks).unwrap().count();
+    for start in 0..3 {
+        let (code, stderr) = start_ending(&data, &w, &args);
+        assert_eq!(code, 74, "start {start}: {stderr}");
+        assert!(stderr.contains("cannot make the Freedom root"), "{stderr}");
+        assert!(!stderr.contains("gate taken"), "{stderr}");
+        assert!(!stderr.contains("serve confined"), "{stderr}");
+        assert!(!grant.exists(), "start {start}: the root stayed");
+        assert_eq!(std::fs::read_dir(&w.locks).unwrap().count(), locks_before);
+    }
+    make_readable(&parent);
+    start_serving(&data, &w, &args);
+    assert!(data.is_dir());
 }
 
 /// A probe's answer: whether it worked, and the OS's error number.

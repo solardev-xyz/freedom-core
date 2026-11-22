@@ -1194,6 +1194,10 @@ fn digest_and_handle_at(
 
 /// Creates `dir` and any missing ancestors, then persists each new entry in
 /// its parent, so a crash can't lose a directory that staged files are in.
+/// A flush that fails removes the directories this call made, deepest
+/// first and only while empty, before the error is returned: the next call
+/// finds them missing, and makes and flushes them again, instead of taking
+/// a directory whose entry may not survive a crash as made.
 fn ensure_dir(dir: &Path) -> std::io::Result<()> {
     make_dirs(dir, false)
 }
@@ -1201,7 +1205,8 @@ fn ensure_dir(dir: &Path) -> std::io::Result<()> {
 /// [`ensure_dir`], with each directory made private to the user on Unix
 /// (`0700`, less the umask): a directory `serve` grants before `confine`
 /// (design 0017, C2), which Landlock and Seatbelt grant only once it
-/// exists: a missing `--node-root bee=` and the Freedom root.
+/// exists: a missing `--node-root bee=` and the Freedom root. A failed
+/// flush is retried by the next call, as [`ensure_dir`]'s is.
 pub fn create_private_dirs(dir: &Path) -> std::io::Result<()> {
     make_dirs(dir, true)
 }
@@ -1227,8 +1232,16 @@ fn make_dirs(dir: &Path, private: bool) -> std::io::Result<()> {
     let _ = private;
     builder.create(dir)?;
     for created in missing.iter().rev() {
-        if let Some(parent) = created.parent() {
-            sync_dir(parent)?;
+        if let Some(parent) = created.parent()
+            && let Err(e) = sync_dir(parent)
+        {
+            // `missing` runs from `dir` up: deepest first. `remove_dir`
+            // removes only an empty directory, so nothing put in one
+            // meanwhile is lost; one it can't remove stays, as made.
+            for made in &missing {
+                let _ = std::fs::remove_dir(made);
+            }
+            return Err(e);
         }
     }
     Ok(())
@@ -1251,6 +1264,32 @@ fn sync_dir(_dir: &Path) -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A flush that fails after the directories were made removes the ones
+    /// this call made, so the next call makes and flushes them again
+    /// (design 0017, C2): here the new top's parent can be written and
+    /// searched but not read (`0300`), so it can't be opened to flush.
+    /// Root reads it anyway: the case needs another user.
+    #[cfg(unix)]
+    #[test]
+    fn a_failed_flush_removes_what_it_made() {
+        use std::os::unix::fs::PermissionsExt;
+        if rustix::process::getuid().is_root() {
+            return;
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        let parent = tmp.path().join("write-only");
+        std::fs::create_dir(&parent).unwrap();
+        std::fs::set_permissions(&parent, std::fs::Permissions::from_mode(0o300)).unwrap();
+        let dir = parent.join("a").join("b");
+        for _ in 0..2 {
+            assert!(create_private_dirs(&dir).is_err());
+            assert!(!parent.join("a").exists());
+        }
+        std::fs::set_permissions(&parent, std::fs::Permissions::from_mode(0o700)).unwrap();
+        create_private_dirs(&dir).unwrap();
+        assert!(dir.is_dir());
+    }
 
     /// What runs between the intent cleanup's look at its home and the gate.
     type Seen = Option<Box<dyn FnMut(&Path, bool)>>;
