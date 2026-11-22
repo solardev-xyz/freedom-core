@@ -5,8 +5,11 @@
 //! `store_moved`, and opens `payment-history.sqlite` only after that, at
 //! the first request (0013, "One writer per store"), as the reference's
 //! `getDb` opens it at its first use. That first open runs the one-shot
-//! import of `x402-receipts.json` ([`Store::import`]), from the hello's
-//! `user_data_dir`, or `grant_root` without it. A request the
+//! import of `x402-receipts.json` ([`Store::import`]) from its [`Import`]'s
+//! root: the hello's `grant_root` without `user_data_dir`, or the same
+//! directory as both (the old layout, at the profile's root as before);
+//! for a moved profile, the Freedom root, once [`hand_over_legacy`] has
+//! copied the profile's root's file there (design 0017, C5). A request the
 //! reference function refuses before its first `getDb` comes before it
 //! ([`Store::checked`]), so it opens nothing and imports nothing.
 
@@ -14,8 +17,9 @@ use std::path::{Path, PathBuf};
 
 use fc_json::JsValue;
 use fc_protocol::error::{ErrorBody, ErrorCode};
-use fc_store::file::{Read, read_file};
-use fc_store::fsx;
+use fc_store::file::{Read, read_file, write_file};
+use fc_store::fsx::{self, Done};
+use fc_store::{Hooks, Step};
 use fc_wallet_state::payments::{self as codec, COLUMNS};
 use serde_json::value::RawValue;
 
@@ -42,7 +46,9 @@ pub const METHODS: &[&str] = &[
 pub const DB_FILE: &str = "payment-history.sqlite";
 /// The legacy receipts, at the profile's `userData` root
 /// (`app.getPath('userData')`): the hello's `user_data_dir`, or its
-/// `grant_root` without one, which equals `userData` before PRF-9.
+/// `grant_root` without one, which equals `userData` before PRF-9. A moved
+/// profile's are imported from their copy in the Freedom root (design 0017,
+/// C5).
 pub const LEGACY_FILE: &str = "x402-receipts.json";
 /// The legacy file's name once imported.
 pub const MIGRATED_FILE: &str = "x402-receipts.json.migrated";
@@ -84,9 +90,33 @@ pub struct Store {
 struct Roots {
     /// The database's: the Freedom root, the hello's `grant_root`.
     db: PathBuf,
-    /// `x402-receipts.json`'s and its `.migrated`'s: the profile's
-    /// `userData`, the hello's `user_data_dir`, or `grant_root` without it.
-    import: PathBuf,
+    /// The legacy import at the first open.
+    import: Import,
+}
+
+/// The legacy import at the database's first open, as the hello set it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Import {
+    /// Where `x402-receipts.json` and its `.migrated` are: the hello's
+    /// `grant_root` without `user_data_dir`; with it, the profile's root in
+    /// the old layout, or the Freedom root once the hand-over ran
+    /// ([`Handover::import`]).
+    pub root: PathBuf,
+    /// Skipped for this run: the hand-over selected no copy for this run's
+    /// import, neither one it proved holds the root file's bytes nor one it
+    /// made (design 0017, C5). A file may still be at the name, untrusted
+    /// (a conflict, or one that didn't come from the root's) or imported
+    /// already (beside its `.migrated`); it is left as it is. The database
+    /// opens and serves, with no row imported and no legacy file renamed or
+    /// removed.
+    pub skip: bool,
+}
+
+impl Import {
+    /// The import at `root`, run at the first open.
+    pub fn at(root: PathBuf) -> Self {
+        Import { root, skip: false }
+    }
 }
 
 impl Store {
@@ -95,13 +125,10 @@ impl Store {
     }
 
     /// The hello named `payments`: the core serves the methods, with the
-    /// database under `root` and `x402-receipts.json` read under
-    /// `import_root`. Nothing is opened yet.
-    pub fn configure(&mut self, root: PathBuf, import_root: PathBuf) {
-        self.roots = Some(Roots {
-            db: root,
-            import: import_root,
-        });
+    /// database under `root` and the legacy import as `import` says.
+    /// Nothing is opened yet.
+    pub fn configure(&mut self, root: PathBuf, import: Import) {
+        self.roots = Some(Roots { db: root, import });
     }
 
     /// A `payments.*` request: its result, as JSON text.
@@ -212,9 +239,10 @@ impl Store {
     }
 
     /// The database, opened at the first request after the name, with
-    /// `x402-receipts.json` imported then; `clock` answers `Date.now()` for
-    /// each entry the import reads it for. A failed open is tried again at
-    /// the next request.
+    /// `x402-receipts.json` imported then, unless the hand-over's conflict
+    /// skips it ([`Import::skip`]); `clock` answers `Date.now()` for each
+    /// entry the import reads it for. A failed open is tried again at the
+    /// next request.
     fn opened<'a>(
         roots: &Roots,
         open: &'a mut Option<Payments>,
@@ -226,7 +254,9 @@ impl Store {
                 let mut payments = Payments::new(
                     sqlite::open(&roots.db.join(DB_FILE), &SCHEMA).map_err(open_failed)?,
                 );
-                Store::import(&roots.import, &mut payments, clock);
+                if !roots.import.skip {
+                    Store::import(&roots.import.root, &mut payments, clock);
+                }
                 Ok(open.insert(payments))
             }
         }
@@ -247,25 +277,10 @@ impl Store {
             return Legacy::Absent;
         }
         if std::fs::metadata(&migrated).is_ok() {
-            let removed = matches!(fsx::remove(&file, || true), Ok(Some(_)));
-            if removed {
-                crate::log::info(
-                    "payments: dropped a stray x402-receipts.json (already migrated)",
-                    serde_json::json!({}),
-                );
-            } else {
-                crate::log::error(
-                    "payments: cannot remove a stray x402-receipts.json",
-                    serde_json::json!({}),
-                );
-            }
-            return Legacy::Stray(removed);
+            return Legacy::Stray(drop_stray(&file));
         }
         let kept = |why: &str| {
-            crate::log::error(
-                "payments: x402-receipts.json not imported",
-                serde_json::json!({ "reason": why }),
-            );
+            not_imported(why);
             Legacy::Kept
         };
         let bytes = match read_file(&file, MAX_LEGACY_BYTES) {
@@ -296,6 +311,270 @@ impl Store {
         }
         Legacy::Imported(imported, renamed)
     }
+}
+
+/// Today's stray branch: `file` removed beside a `.migrated`
+/// ([`fsx::remove`]), logged as the reference logs it. Whether it went.
+fn drop_stray(file: &Path) -> bool {
+    let removed = matches!(fsx::remove(file, || true), Ok(Some(_)));
+    if removed {
+        crate::log::info(
+            "payments: dropped a stray x402-receipts.json (already migrated)",
+            serde_json::json!({}),
+        );
+    } else {
+        crate::log::error(
+            "payments: cannot remove a stray x402-receipts.json",
+            serde_json::json!({}),
+        );
+    }
+    removed
+}
+
+/// The import's line for a file left in place, nothing imported.
+fn not_imported(why: &str) {
+    crate::log::error(
+        "payments: x402-receipts.json not imported",
+        serde_json::json!({ "reason": why }),
+    );
+}
+
+/// What [`hand_over_legacy`] did with a moved profile's
+/// `x402-receipts.json` (design 0017, C5), by the step that decided it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Handover {
+    /// The profile's root and the Freedom root are one directory (the old
+    /// layout): nothing done, and the import reads that root, as before.
+    /// With [`Handover::Waiting`] and [`Handover::Copied`], the only
+    /// outcomes the legacy import runs after ([`Handover::import`]).
+    Same,
+    /// Step 1: no `x402-receipts.json` at the profile's root, as the
+    /// import's `metadata` finds it (a link followed, any error as absent).
+    Absent,
+    /// Step 2: a `.migrated` at the profile's root too: the stray removed
+    /// there, or the removal failed (`false`), as the import's stray branch
+    /// does. Nothing copied.
+    Stray(bool),
+    /// Step 3: not readable as the import reads it ([`read_file`]: a link,
+    /// a directory, a special file, another user's, past
+    /// [`MAX_LEGACY_BYTES`]): left at the root, unread and uncopied.
+    Kept,
+    /// Step 4: the Freedom root's `.migrated` holds exactly its bytes, so an
+    /// earlier start's copy was imported: the original removed once the
+    /// Freedom root's directory and that file were synced, or left
+    /// (`false`) because the sync or the removal failed.
+    Dropped(bool),
+    /// Step 5: the Freedom root holds its copy, not imported yet: nothing
+    /// copied again, and the import retries on the copy.
+    Waiting,
+    /// Step 6: a file in the Freedom root, under either name, that isn't
+    /// this one's copy (other bytes, or one [`read_file`] refuses), even
+    /// beside a copy or `.migrated` that is: every file left as it is.
+    Conflict,
+    /// Step 7: copied into the Freedom root with fc-store's atomic write,
+    /// durably or not. The original stays at the profile's root.
+    Copied(Done),
+    /// Step 7's write failed: no copy, the profile's root untouched; the
+    /// next start copies again.
+    CopyFailed,
+}
+
+impl Handover {
+    /// This start's import after the hand-over: at the profile's root when
+    /// it is the Freedom root (the old layout, as before); at the Freedom
+    /// root after a copy proved to hold the root file's bytes (step 5) or
+    /// just made (step 7); and skipped for this run after every other step,
+    /// so a file there that today's import wouldn't read is never imported,
+    /// renamed or removed. After step 4 the Freedom root holds the
+    /// `.migrated`, and at most a copy of the same bytes (anything else is
+    /// step 6's), whose rows are imported already: nothing is left for the
+    /// import there, and such a copy stays where it is.
+    pub fn import(self, user_data_dir: &Path, grant_root: &Path) -> Import {
+        match self {
+            Handover::Same => Import::at(user_data_dir.to_path_buf()),
+            Handover::Waiting | Handover::Copied(_) => Import::at(grant_root.to_path_buf()),
+            Handover::Absent
+            | Handover::Stray(_)
+            | Handover::Kept
+            | Handover::Dropped(_)
+            | Handover::Conflict
+            | Handover::CopyFailed => Import {
+                root: grant_root.to_path_buf(),
+                skip: true,
+            },
+        }
+    }
+}
+
+/// The test hooks' store name for the hand-over's writes and syncs
+/// (`FREEDOM_CORED_TEST_GRANT_WRITE_FAIL`'s `receipts`).
+const HANDOVER_HOOKS: &str = "receipts";
+
+/// Design 0017, C5: a moved profile's legacy receipts handed over from its
+/// root (`user_data_dir`) to the Freedom root (`grant_root`), as a copy
+/// the import then reads there, the original dropped only at a later start,
+/// once the copy's `.migrated` shows the import committed. Run once per
+/// start, while nothing else touches these names, before the payments
+/// store is configured; [`Handover::import`] says where the import reads.
+/// Nothing is done when both are one directory.
+pub fn hand_over_legacy(user_data_dir: &Path, grant_root: &Path) -> Handover {
+    hand_over(
+        user_data_dir,
+        grant_root,
+        &crate::testhooks::GrantWrite(HANDOVER_HOOKS),
+    )
+}
+
+/// What a file of that name in the Freedom root is, beside the profile's
+/// root's bytes.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Found {
+    Missing,
+    /// Exactly the profile's root's bytes.
+    Same,
+    /// Other bytes, or refused by [`read_file`].
+    Other,
+}
+
+/// [`hand_over_legacy`], with `hooks` failing the copy's write steps, and
+/// step 4's sync as its `flush`.
+fn hand_over(user_data_dir: &Path, grant_root: &Path, hooks: &dyn Hooks) -> Handover {
+    if same_dir(user_data_dir, grant_root) {
+        return Handover::Same;
+    }
+    let original = user_data_dir.join(LEGACY_FILE);
+    // 1. As the import's existence check finds it.
+    if std::fs::metadata(&original).is_err() {
+        return Handover::Absent;
+    }
+    // 2. A stray beside the profile's root's own `.migrated`: dropped there,
+    //    as the import drops it. That `.migrated` never moves.
+    if std::fs::metadata(user_data_dir.join(MIGRATED_FILE)).is_ok() {
+        return Handover::Stray(drop_stray(&original));
+    }
+    // 3. Read as the import reads it: anything refused stays.
+    let bytes = match read_file(&original, MAX_LEGACY_BYTES) {
+        Read::Bytes(bytes) => bytes,
+        Read::Missing => return Handover::Absent,
+        Read::Unreadable => {
+            not_imported("unreadable");
+            return Handover::Kept;
+        }
+    };
+    let copy = grant_root.join(LEGACY_FILE);
+    let marker = grant_root.join(MIGRATED_FILE);
+    let found = |path: &Path| match read_file(path, MAX_LEGACY_BYTES) {
+        Read::Missing => Found::Missing,
+        Read::Bytes(theirs) if theirs == bytes => Found::Same,
+        Read::Bytes(_) | Read::Unreadable => Found::Other,
+    };
+    let (marker_found, copy_found) = (found(&marker), found(&copy));
+    // 6, before 4 and 5: either name holding something that isn't this
+    //    file's copy is a conflict, even beside a copy or `.migrated` that
+    //    is. Acting on the matching one would drop the original (step 4)
+    //    or import beside a foreign `.migrated`, whose stray branch drops
+    //    the copy unimported (step 5); the other file would be left for an
+    //    import that reads what today's never would.
+    if marker_found == Found::Other || copy_found == Found::Other {
+        crate::log::error(
+            "payments: x402-receipts.json conflicts with the Freedom root's; legacy import skipped",
+            serde_json::json!({}),
+        );
+        return Handover::Conflict;
+    }
+    // 4. An earlier copy imported: the original goes once the marker is
+    //    durable, and stays for the next start if the sync fails.
+    if marker_found == Found::Same {
+        let synced = if hooks.fails(Step::Flush) {
+            Err(std::io::Error::other("test hook: flush fails"))
+        } else {
+            sync_marker(grant_root, &marker)
+        };
+        if let Err(e) = synced {
+            crate::log::error(
+                "payments: cannot sync x402-receipts.json.migrated in the Freedom root; the original stays",
+                serde_json::json!({ "error": e.kind().to_string() }),
+            );
+            return Handover::Dropped(false);
+        }
+        let removed = matches!(fsx::remove(&original, || true), Ok(Some(_)));
+        if removed {
+            crate::log::info(
+                "payments: dropped x402-receipts.json at the profile's root (imported from its copy)",
+                serde_json::json!({}),
+            );
+        } else {
+            crate::log::error(
+                "payments: cannot remove x402-receipts.json at the profile's root",
+                serde_json::json!({}),
+            );
+        }
+        return Handover::Dropped(removed);
+    }
+    // 5. Copied already, not imported yet: the import retries on the copy.
+    if copy_found == Found::Same {
+        crate::log::info(
+            "payments: x402-receipts.json's copy in the Freedom root awaits its import",
+            serde_json::json!({}),
+        );
+        return Handover::Waiting;
+    }
+    // 7. The copy: a crashed copy's temps first (nothing else calls this
+    //    for the name), then the bytes read, by fc-store's atomic write.
+    if let Err(e) = fsx::remove_temps(grant_root, LEGACY_FILE) {
+        crate::log::warn(
+            "payments: cannot remove x402-receipts.json's temp files in the Freedom root",
+            serde_json::json!({ "error": e.kind().to_string() }),
+        );
+    }
+    match write_file(&copy, &bytes, hooks) {
+        Ok(done) => {
+            crate::log::info(
+                "payments: copied x402-receipts.json into the Freedom root",
+                serde_json::json!({ "durable": done == Done::Durable }),
+            );
+            Handover::Copied(done)
+        }
+        Err(e) => {
+            crate::log::error(
+                "payments: cannot copy x402-receipts.json into the Freedom root",
+                serde_json::json!({ "error": e.kind().to_string() }),
+            );
+            Handover::CopyFailed
+        }
+    }
+}
+
+/// Whether `a` and `b` are one directory: the same path, or the same
+/// once canonicalized.
+fn same_dir(a: &Path, b: &Path) -> bool {
+    a == b
+        || matches!(
+            (std::fs::canonicalize(a), std::fs::canonicalize(b)),
+            (Ok(a), Ok(b)) if a == b
+        )
+}
+
+/// Step 4's sync, so the Freedom root's `.migrated` survives power loss
+/// before the original goes: on Unix, `fsync` on that file, opened through
+/// no link, then on its directory; on Windows, fc-store's flush of the
+/// renamed file ([`fsx::sync_rename`], `FlushFileBuffers`), best effort as
+/// fc-store documents it, where the directory's flush does nothing.
+fn sync_marker(dir: &Path, marker: &Path) -> std::io::Result<()> {
+    #[cfg(windows)]
+    {
+        fsx::sync_rename(dir, marker)?;
+    }
+    #[cfg(not(windows))]
+    {
+        match fsx::open_regular(marker, false)? {
+            fsx::Regular::File(file) => file.sync_all()?,
+            fsx::Regular::Missing | fsx::Regular::Other => {
+                return Err(std::io::Error::other("not a regular file"));
+            }
+        }
+    }
+    fsx::sync_dir(dir)
 }
 
 /// A row as better-sqlite3's `.all()` reads it: an object of its columns,
