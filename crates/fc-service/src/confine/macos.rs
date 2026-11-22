@@ -252,6 +252,14 @@ fn grants(policy: &Policy) -> Result<Grants, Invalid> {
             ))
         })?;
         grants.read_write.push(real);
+        // Seatbelt asks for metadata on each link the service resolves
+        // when it opens the path it was given, a read-write one included
+        // (a Radicle home named through a symlink, say).
+        for link in crossed_links(dir) {
+            if !grants.links.contains(&link) {
+                grants.links.push(link);
+            }
+        }
     }
     let system = super::system_read_only(policy.resolver);
     for path in policy.read_only.iter().chain(&system) {

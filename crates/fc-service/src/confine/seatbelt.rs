@@ -64,7 +64,7 @@ pub struct Grants {
     pub read_only_dirs: Vec<PathBuf>,
     /// Files only read.
     pub read_only_files: Vec<PathBuf>,
-    /// The symlinks a read-only grant's path crosses, each where it really
+    /// The symlinks a grant's path crosses (read-only or read-write), each where it really
     /// lives (`/private/etc/resolv.conf`, for `/etc/resolv.conf`): metadata
     /// alone, which Seatbelt asks for each link it resolves, so a service
     /// can open the path it was given.
