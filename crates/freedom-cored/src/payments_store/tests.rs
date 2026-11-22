@@ -9,7 +9,13 @@ use fc_json::JsValue;
 use fc_protocol::error::{ErrorBody, ErrorCode};
 use rusqlite::types::ValueRef;
 
-use super::{DB_FILE, LEGACY_FILE, Legacy, MAX_LEGACY_BYTES, MIGRATED_FILE, Store};
+use fc_store::fsx::Done;
+use fc_store::{Hooks, NoHooks, Step};
+
+use super::{
+    DB_FILE, Handover, Import, LEGACY_FILE, Legacy, MAX_LEGACY_BYTES, MIGRATED_FILE, Store,
+    hand_over,
+};
 use crate::payments::{Payments, SCHEMA};
 use crate::sqlite;
 
@@ -69,7 +75,7 @@ const T: u64 = 1_700_000_000_000;
 
 fn named(root: &Path) -> Store {
     let mut store = Store::new();
-    store.configure(root.to_path_buf(), root.to_path_buf());
+    store.configure(root.to_path_buf(), Import::at(root.to_path_buf()));
     store
 }
 
@@ -207,7 +213,7 @@ fn the_import_reads_its_own_root() {
     std::fs::write(import_root.join(LEGACY_FILE), receipt("there")).unwrap();
     std::fs::write(db_root.join(LEGACY_FILE), receipt("beside")).unwrap();
     let mut store = Store::new();
-    store.configure(db_root.to_path_buf(), import_root.to_path_buf());
+    store.configure(db_root.to_path_buf(), Import::at(import_root.to_path_buf()));
     let recent = call(&mut store, "payments.get_recent", "{}").unwrap();
     let recent = recent.get("payments").and_then(JsValue::as_array).unwrap();
     assert_eq!(recent.len(), 1);
@@ -691,4 +697,501 @@ fn a_damaged_database_is_unreadable() {
     let mut store = named(root);
     let refused = call(&mut store, "payments.get_count", "{}").unwrap_err();
     assert_eq!(storage_kind(&refused), "unreadable");
+}
+
+// Design 0017, C5: a moved profile's receipts, handed over from its root to
+// the Freedom root as a copy, and imported there.
+
+/// Two receipts, so "each row once" counts more than one.
+const TWO_RECEIPTS: &str = r#"[{"id":"r1","settledAt":1699000000,"status":"settled","chainId":8453,"amount":"500"},{"id":"r2","settledAt":1699000100,"status":"settled","chainId":8453,"amount":"700"}]"#;
+
+/// A moved profile: its root (`user_data_dir`) and its Freedom root
+/// (`grant_root`) under it, as main lays them out after PRF-9.
+struct Moved {
+    _dir: tempfile::TempDir,
+    profile: PathBuf,
+    freedom: PathBuf,
+}
+
+/// The steps a write or the hand-over's sync fail at.
+struct Failing(&'static [Step]);
+
+impl Hooks for Failing {
+    fn fails(&self, step: Step) -> bool {
+        self.0.contains(&step)
+    }
+}
+
+fn moved() -> Moved {
+    let dir = tempfile::tempdir().unwrap();
+    let profile = dir.path().to_path_buf();
+    let freedom = profile.join("freedom");
+    std::fs::create_dir(&freedom).unwrap();
+    Moved {
+        _dir: dir,
+        profile,
+        freedom,
+    }
+}
+
+fn count(store: &mut Store) -> f64 {
+    match call(store, "payments.get_count", "{}")
+        .unwrap()
+        .get("count")
+    {
+        Some(JsValue::Number(n)) => *n,
+        other => panic!("count: {other:?}"),
+    }
+}
+
+impl Moved {
+    /// One start as `serve` makes it: the hand-over (`hooks` failing its
+    /// steps), the store configured as the hello configures it, and its
+    /// first request, which opens the database and runs the import. The
+    /// hand-over's outcome and the store.
+    fn start_store(&self, hooks: &dyn Hooks) -> (Handover, Store) {
+        let handover = hand_over(&self.profile, &self.freedom, hooks);
+        let mut store = Store::new();
+        store.configure(
+            self.freedom.clone(),
+            handover.import(&self.profile, &self.freedom),
+        );
+        (handover, store)
+    }
+
+    /// [`Moved::start_store`]: the outcome and the rows counted by its
+    /// first request.
+    fn start_with(&self, hooks: &dyn Hooks) -> (Handover, f64) {
+        let (handover, mut store) = self.start_store(hooks);
+        (handover, count(&mut store))
+    }
+
+    fn start(&self) -> (Handover, f64) {
+        self.start_with(&NoHooks)
+    }
+
+    /// The names at the profile's root, the Freedom root's own left out.
+    fn profile_files(&self) -> Vec<String> {
+        files(&self.profile)
+            .into_iter()
+            .filter(|name| name != "freedom")
+            .collect()
+    }
+
+    /// The names in the Freedom root but the database's, temps included.
+    fn freedom_files(&self) -> Vec<String> {
+        files(&self.freedom)
+    }
+
+    fn original(&self) -> PathBuf {
+        self.profile.join(LEGACY_FILE)
+    }
+}
+
+const NONE: [&str; 0] = [];
+
+/// What a case makes at a path, or in a directory.
+type Make = Box<dyn Fn(&Path)>;
+
+/// Steps 7, 4 and 1 in turn: the first start copies the root's file into
+/// the Freedom root (mode 0600 on Unix), imports the copy and renames it
+/// `.migrated` there, leaving the original; the next drops the original;
+/// the one after finds nothing. Each row once.
+#[test]
+fn a_moved_profile_imports_its_copy_and_drops_the_original_next() {
+    let m = moved();
+    std::fs::write(m.original(), TWO_RECEIPTS).unwrap();
+    assert_eq!(m.start(), (Handover::Copied(Done::Durable), 2.0));
+    assert_eq!(m.profile_files(), [LEGACY_FILE]);
+    assert_eq!(m.freedom_files(), [MIGRATED_FILE]);
+    let marker = m.freedom.join(MIGRATED_FILE);
+    assert_eq!(std::fs::read_to_string(&marker).unwrap(), TWO_RECEIPTS);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(&marker).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600);
+    }
+    assert_eq!(std::fs::read_to_string(m.original()).unwrap(), TWO_RECEIPTS);
+    assert_eq!(m.start(), (Handover::Dropped(true), 2.0));
+    assert_eq!(m.profile_files(), NONE);
+    assert_eq!(m.freedom_files(), [MIGRATED_FILE]);
+    assert_eq!(m.start(), (Handover::Absent, 2.0));
+    assert_eq!(m.freedom_files(), [MIGRATED_FILE]);
+}
+
+/// Step 2: a `.migrated` at the profile's root too: the root's file is
+/// dropped there, unread, as the import drops a stray; that `.migrated`
+/// stays, and nothing is copied or imported.
+#[test]
+fn a_stray_at_the_profiles_root_is_dropped_there_and_not_copied() {
+    let m = moved();
+    std::fs::write(m.original(), RECEIPTS).unwrap();
+    std::fs::write(m.profile.join(MIGRATED_FILE), "[]").unwrap();
+    assert_eq!(m.start(), (Handover::Stray(true), 0.0));
+    assert_eq!(m.profile_files(), [MIGRATED_FILE]);
+    assert_eq!(m.freedom_files(), NONE);
+}
+
+/// Step 3: what the import can't read (a directory, past the bound, and on
+/// Unix a link and a FIFO) stays at the profile's root, unread and
+/// uncopied, at every start, and nothing is imported. A dangling link is
+/// absent (step 1), as the import's check finds it.
+#[test]
+fn what_the_import_cannot_read_stays_at_the_profiles_root() {
+    #[cfg_attr(not(unix), allow(unused_mut))]
+    let mut cases: Vec<(&str, Make)> = vec![
+        (
+            "directory",
+            Box::new(|path: &Path| std::fs::create_dir(path).unwrap()),
+        ),
+        (
+            "oversized",
+            Box::new(|path: &Path| {
+                let mut text = String::from("[");
+                text.push_str(&" ".repeat(MAX_LEGACY_BYTES - 1));
+                text.push(']');
+                std::fs::write(path, text).unwrap();
+            }),
+        ),
+    ];
+    #[cfg(unix)]
+    {
+        cases.push((
+            "link",
+            Box::new(|path: &Path| {
+                let target = path.with_file_name("elsewhere.json");
+                std::fs::write(&target, RECEIPTS).unwrap();
+                std::os::unix::fs::symlink(&target, path).unwrap();
+            }),
+        ));
+        cases.push((
+            "fifo",
+            Box::new(|path: &Path| {
+                let made = std::process::Command::new("mkfifo")
+                    .arg(path)
+                    .status()
+                    .unwrap();
+                assert!(made.success());
+            }),
+        ));
+    }
+    for (name, make) in &cases {
+        let m = moved();
+        make(&m.original());
+        let kind = std::fs::symlink_metadata(m.original()).unwrap().file_type();
+        let len = std::fs::symlink_metadata(m.original()).unwrap().len();
+        for _ in 0..2 {
+            assert_eq!(m.start(), (Handover::Kept, 0.0), "{name}");
+            let after = std::fs::symlink_metadata(m.original()).unwrap();
+            assert_eq!(after.file_type(), kind, "{name}");
+            assert_eq!(after.len(), len, "{name}");
+            assert_eq!(m.freedom_files(), NONE, "{name}");
+        }
+    }
+    #[cfg(unix)]
+    {
+        let m = moved();
+        std::os::unix::fs::symlink("gone", m.original()).unwrap();
+        assert_eq!(m.start(), (Handover::Absent, 0.0));
+        assert!(m.original().is_symlink());
+        assert_eq!(m.freedom_files(), NONE);
+    }
+}
+
+/// Bad JSON and refused rows: copied, the copy refused by the import and
+/// left unrenamed beside the original; each later start finds the copy
+/// (step 5), and the import retries on it, refusing it again, the
+/// original still at the root.
+#[test]
+fn refused_receipts_keep_the_copy_and_the_original_and_retry() {
+    for text in [
+        r#"[{"id": "r1","#.to_owned(),
+        format!("[{}, null]", &RECEIPTS[1..RECEIPTS.len() - 1]),
+    ] {
+        let m = moved();
+        std::fs::write(m.original(), &text).unwrap();
+        assert_eq!(m.start(), (Handover::Copied(Done::Durable), 0.0), "{text}");
+        assert_eq!(m.profile_files(), [LEGACY_FILE], "{text}");
+        assert_eq!(m.freedom_files(), [LEGACY_FILE], "{text}");
+        for _ in 0..2 {
+            assert_eq!(m.start(), (Handover::Waiting, 0.0), "{text}");
+            assert_eq!(m.profile_files(), [LEGACY_FILE], "{text}");
+            assert_eq!(m.freedom_files(), [LEGACY_FILE], "{text}");
+        }
+        // What the first open ran: the import, refusing the copy.
+        let mut payments = open(&m.freedom);
+        assert_eq!(
+            Store::import(&m.freedom, &mut payments, || 1.0),
+            Legacy::Kept,
+            "{text}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(m.freedom.join(LEGACY_FILE)).unwrap(),
+            text
+        );
+        assert_eq!(std::fs::read_to_string(m.original()).unwrap(), text);
+    }
+}
+
+/// The import's database write failing (its connection read-only, as
+/// `busy_and_failed_writes` refuses a write): the copy and the original
+/// both stay, and the next start's import commits from the copy, the one
+/// after dropping the original.
+#[test]
+fn a_failed_database_write_keeps_both_and_the_next_start_imports() {
+    let m = moved();
+    std::fs::write(m.original(), TWO_RECEIPTS).unwrap();
+    let handover = hand_over(&m.profile, &m.freedom, &NoHooks);
+    assert_eq!(handover, Handover::Copied(Done::Durable));
+    let import = handover.import(&m.profile, &m.freedom);
+    assert_eq!(import, Import::at(m.freedom.clone()));
+    let conn = sqlite::open(&m.freedom.join(DB_FILE), &SCHEMA).unwrap();
+    conn.pragma_update(None, "query_only", true).unwrap();
+    let mut payments = Payments::new(conn);
+    assert_eq!(
+        Store::import(&import.root, &mut payments, || 1.0),
+        Legacy::Kept
+    );
+    drop(payments);
+    assert_eq!(m.profile_files(), [LEGACY_FILE]);
+    assert_eq!(m.freedom_files(), [LEGACY_FILE]);
+    assert_eq!(m.start(), (Handover::Waiting, 2.0));
+    assert_eq!(m.freedom_files(), [MIGRATED_FILE]);
+    assert_eq!(m.profile_files(), [LEGACY_FILE]);
+    assert_eq!(m.start(), (Handover::Dropped(true), 2.0));
+    assert_eq!(m.profile_files(), NONE);
+}
+
+/// The states a crash leaves after the copy, each built on disk, and the
+/// two-copy states among them: the original with its copy, before the
+/// import's commit and after it (its rename to `.migrated` lost); the
+/// original with the copy's `.migrated`; the `.migrated` alone, the
+/// original removed. Each converges at the next starts with every row
+/// imported once (`import_legacy` skipping what it imported already).
+#[test]
+fn the_crash_states_converge_with_every_row_once() {
+    // Copy visible, import not committed.
+    let m = moved();
+    std::fs::write(m.original(), TWO_RECEIPTS).unwrap();
+    std::fs::write(m.freedom.join(LEGACY_FILE), TWO_RECEIPTS).unwrap();
+    assert_eq!(m.start(), (Handover::Waiting, 2.0));
+    assert_eq!(m.freedom_files(), [MIGRATED_FILE]);
+    assert_eq!(m.start(), (Handover::Dropped(true), 2.0));
+    assert_eq!(m.start(), (Handover::Absent, 2.0));
+
+    // Import committed, its rename lost: the copy back without `.migrated`.
+    let m = moved();
+    std::fs::write(m.original(), TWO_RECEIPTS).unwrap();
+    std::fs::write(m.freedom.join(LEGACY_FILE), TWO_RECEIPTS).unwrap();
+    assert_eq!(
+        open(&m.freedom)
+            .import_legacy(TWO_RECEIPTS, || 1.0)
+            .unwrap(),
+        2
+    );
+    let rows = table_at(&m.freedom);
+    assert_eq!(m.start(), (Handover::Waiting, 2.0));
+    assert_eq!(table_at(&m.freedom), rows);
+    assert_eq!(m.freedom_files(), [MIGRATED_FILE]);
+    assert_eq!(m.start(), (Handover::Dropped(true), 2.0));
+    assert_eq!(table_at(&m.freedom), rows);
+
+    // The `.migrated` visible, the original still at the root.
+    let m = moved();
+    std::fs::write(m.original(), TWO_RECEIPTS).unwrap();
+    std::fs::write(m.freedom.join(MIGRATED_FILE), TWO_RECEIPTS).unwrap();
+    open(&m.freedom)
+        .import_legacy(TWO_RECEIPTS, || 1.0)
+        .unwrap();
+    assert_eq!(m.start(), (Handover::Dropped(true), 2.0));
+    assert_eq!(m.profile_files(), NONE);
+    assert_eq!(m.freedom_files(), [MIGRATED_FILE]);
+
+    // The original removed: nothing left to do.
+    assert_eq!(m.start(), (Handover::Absent, 2.0));
+    assert_eq!(m.freedom_files(), [MIGRATED_FILE]);
+}
+
+/// Step 6: a file in the Freedom root under either name that isn't the
+/// copy (other bytes, a directory, a link to the same bytes, or a
+/// `.migrated` of other bytes beside a true copy): a conflict. Nothing is
+/// copied, removed or renamed, no legacy row comes from either file, and
+/// the database serves. Each start checks again; removing one by hand
+/// settles it.
+#[test]
+fn a_file_in_the_freedom_root_that_isnt_the_copy_is_a_conflict() {
+    let other = RECEIPTS.replace("r1", "r9");
+    #[cfg_attr(not(unix), allow(unused_mut))]
+    let mut cases: Vec<(&str, Make)> = vec![
+        (
+            "copy, other bytes",
+            Box::new(|freedom: &Path| {
+                std::fs::write(freedom.join(LEGACY_FILE), RECEIPTS.replace("r1", "r9")).unwrap();
+            }),
+        ),
+        (
+            "migrated, other bytes",
+            Box::new(|freedom: &Path| {
+                std::fs::write(freedom.join(MIGRATED_FILE), RECEIPTS.replace("r1", "r9")).unwrap();
+            }),
+        ),
+        (
+            "copy, a directory",
+            Box::new(|freedom: &Path| std::fs::create_dir(freedom.join(LEGACY_FILE)).unwrap()),
+        ),
+        (
+            "migrated other, beside a true copy",
+            Box::new(|freedom: &Path| {
+                std::fs::write(freedom.join(LEGACY_FILE), RECEIPTS).unwrap();
+                std::fs::write(freedom.join(MIGRATED_FILE), RECEIPTS.replace("r1", "r9")).unwrap();
+            }),
+        ),
+    ];
+    #[cfg(unix)]
+    cases.push((
+        "copy, a link to the same bytes",
+        Box::new(|freedom: &Path| {
+            let target = freedom.join("same.json");
+            std::fs::write(&target, RECEIPTS).unwrap();
+            std::os::unix::fs::symlink(&target, freedom.join(LEGACY_FILE)).unwrap();
+        }),
+    ));
+    let snapshot = |dir: &Path| -> Vec<(String, Option<Vec<u8>>)> {
+        files(dir)
+            .into_iter()
+            .filter(|name| name != "freedom")
+            .map(|name| {
+                let bytes = std::fs::read(dir.join(&name)).ok();
+                (name, bytes)
+            })
+            .collect()
+    };
+    for (name, make) in &cases {
+        let m = moved();
+        std::fs::write(m.original(), RECEIPTS).unwrap();
+        make(&m.freedom);
+        let (profile, freedom) = (snapshot(&m.profile), snapshot(&m.freedom));
+        for _ in 0..2 {
+            let (handover, mut store) = m.start_store(&NoHooks);
+            assert_eq!(handover, Handover::Conflict, "{name}");
+            assert_eq!(count(&mut store), 0.0, "{name}");
+            assert_eq!(snapshot(&m.profile), profile, "{name}");
+            assert_eq!(snapshot(&m.freedom), freedom, "{name}");
+            // Payments still served.
+            call(
+                &mut store,
+                "payments.append",
+                r#"{"entry":{"kind":"x402","chainId":1,"amount":"1","createdAt":5}}"#,
+            )
+            .unwrap();
+            call(&mut store, "payments.clear", "{}").unwrap();
+        }
+    }
+    // Settled by hand: the other file removed, the next start copies and
+    // imports the profile's root's.
+    let m = moved();
+    std::fs::write(m.original(), RECEIPTS).unwrap();
+    std::fs::write(m.freedom.join(LEGACY_FILE), &other).unwrap();
+    assert_eq!(m.start(), (Handover::Conflict, 0.0));
+    std::fs::remove_file(m.freedom.join(LEGACY_FILE)).unwrap();
+    assert_eq!(m.start(), (Handover::Copied(Done::Durable), 1.0));
+    assert_eq!(m.freedom_files(), [MIGRATED_FILE]);
+}
+
+/// A crashed copy's temp (fc-store's name for this file) is removed by the
+/// next start before it copies; a copy whose write fails before its rename
+/// leaves no copy and no temp, the root untouched and nothing imported, and
+/// the next start copies again.
+#[test]
+fn a_crashed_or_failed_copy_is_made_again() {
+    let m = moved();
+    std::fs::write(m.original(), RECEIPTS).unwrap();
+    let temp = format!(".{LEGACY_FILE}.4242.0.tmp");
+    std::fs::write(m.freedom.join(&temp), &RECEIPTS[..10]).unwrap();
+    // Another file's temp isn't this one's.
+    std::fs::write(m.freedom.join(".phone-payments.json.4242.0.tmp"), "").unwrap();
+    assert_eq!(m.start(), (Handover::Copied(Done::Durable), 1.0));
+    assert_eq!(
+        m.freedom_files(),
+        [".phone-payments.json.4242.0.tmp", MIGRATED_FILE]
+    );
+
+    for failing in [
+        Failing(&[Step::Write]),
+        Failing(&[Step::Fsync]),
+        Failing(&[Step::Rename]),
+    ] {
+        let step = failing.0;
+        let m = moved();
+        std::fs::write(m.original(), RECEIPTS).unwrap();
+        assert_eq!(
+            m.start_with(&failing),
+            (Handover::CopyFailed, 0.0),
+            "{step:?}"
+        );
+        assert_eq!(m.freedom_files(), NONE, "{step:?}");
+        assert_eq!(m.profile_files(), [LEGACY_FILE], "{step:?}");
+        assert_eq!(std::fs::read_to_string(m.original()).unwrap(), RECEIPTS);
+        assert_eq!(
+            m.start(),
+            (Handover::Copied(Done::Durable), 1.0),
+            "{step:?}"
+        );
+        assert_eq!(m.freedom_files(), [MIGRATED_FILE], "{step:?}");
+    }
+}
+
+/// A forced flush failure: of the copy (in place, not durable, imported
+/// all the same), and of the Freedom root's sync before the original's
+/// removal, which leaves the original for the next start.
+#[test]
+fn a_failed_flush_leaves_the_original() {
+    let m = moved();
+    std::fs::write(m.original(), RECEIPTS).unwrap();
+    let flush = Failing(&[Step::Flush]);
+    assert_eq!(
+        m.start_with(&flush),
+        (Handover::Copied(Done::NotDurable), 1.0)
+    );
+    assert_eq!(m.freedom_files(), [MIGRATED_FILE]);
+    assert_eq!(m.profile_files(), [LEGACY_FILE]);
+    assert_eq!(m.start_with(&flush), (Handover::Dropped(false), 1.0));
+    assert_eq!(m.profile_files(), [LEGACY_FILE]);
+    assert_eq!(m.freedom_files(), [MIGRATED_FILE]);
+    assert_eq!(m.start(), (Handover::Dropped(true), 1.0));
+    assert_eq!(m.profile_files(), NONE);
+}
+
+/// The old layout: the profile's root is the Freedom root, by its path or
+/// (Unix) through a link. The hand-over does nothing and the import reads
+/// the profile's root, renaming the file there, as before; a hello without
+/// `user_data_dir` imports at the Freedom root ([`Import::at`]), as
+/// [`named`] does.
+#[test]
+fn the_old_layout_imports_at_its_root_as_before() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    std::fs::write(root.join(LEGACY_FILE), RECEIPTS).unwrap();
+    let handover = hand_over(root, root, &Failing(&[Step::Write, Step::Flush]));
+    assert_eq!(handover, Handover::Same);
+    let import = handover.import(root, root);
+    assert_eq!(import, Import::at(root.to_path_buf()));
+    let mut store = Store::new();
+    store.configure(root.to_path_buf(), import);
+    assert_eq!(count(&mut store), 1.0);
+    assert_eq!(files(root), [MIGRATED_FILE]);
+    #[cfg(unix)]
+    {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("userData");
+        std::fs::create_dir(&root).unwrap();
+        let link = dir.path().join("link");
+        std::os::unix::fs::symlink(&root, &link).unwrap();
+        std::fs::write(root.join(LEGACY_FILE), RECEIPTS).unwrap();
+        let handover = hand_over(&link, &root, &NoHooks);
+        assert_eq!(handover, Handover::Same);
+        assert_eq!(handover.import(&link, &root), Import::at(link.clone()));
+        assert_eq!(files(&root), [LEGACY_FILE]);
+    }
 }

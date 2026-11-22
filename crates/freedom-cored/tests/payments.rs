@@ -111,24 +111,18 @@ fn the_handover() {
     assert!(grant_root.join("x402-receipts.json.migrated").exists());
 }
 
-/// The hello's `user_data_dir` (design 0013, PRF-8-lite): the receipts
-/// there are imported and renamed there, the database stays under
-/// `grant_root`, and a file at `grant_root` is left unread. Without it, the
-/// import reads `grant_root`, as [`the_handover`] shows.
-#[test]
-fn the_import_reads_user_data_dir() {
-    let (_root, data, locks) = common::dirs();
-    let mut core = common::spawn("serve", &data, &locks, &[]);
-    let grant_root = core.grant_root.join("freedom");
-    let user_data = core.grant_root.clone();
-    std::fs::create_dir_all(&grant_root).unwrap();
-    let receipt = |id: &str| {
-        format!(
-            r#"[{{"id":"{id}","settledAt":1699000000,"status":"settled","chainId":8453,"amount":"500","origin":"https://x.example","url":"https://x.example/a"}}]"#
-        )
-    };
-    std::fs::write(user_data.join("x402-receipts.json"), receipt("profile")).unwrap();
-    std::fs::write(grant_root.join("x402-receipts.json"), receipt("freedom")).unwrap();
+fn receipt(id: &str) -> String {
+    format!(
+        r#"[{{"id":"{id}","settledAt":1699000000,"status":"settled","chainId":8453,"amount":"500","origin":"https://x.example","url":"https://x.example/a"}}]"#
+    )
+}
+
+/// The handshake naming `payments`, with `user_data_dir`.
+fn hello_with_user_data(
+    core: &mut common::Core,
+    grant_root: &std::path::Path,
+    user_data: &std::path::Path,
+) -> Value {
     let hello = core.call_shell(
         1,
         "core.hello",
@@ -143,19 +137,105 @@ fn the_import_reads_user_data_dir() {
         json!(["payments"]),
         "{hello}"
     );
-    let reply = call(&mut core, "chrome", "payments.get_recent", json!({}));
-    let payments = reply["result"]["payments"].as_array().unwrap();
-    assert_eq!(payments.len(), 1, "{reply}");
-    assert_eq!(payments[0]["metadata"]["legacyId"], "profile");
+    hello
+}
+
+fn legacy_ids(core: &mut common::Core) -> Vec<String> {
+    let reply = call(core, "chrome", "payments.get_recent", json!({}));
+    reply["result"]["payments"]
+        .as_array()
+        .unwrap_or_else(|| panic!("{reply}"))
+        .iter()
+        .filter_map(|payment| payment["metadata"]["legacyId"].as_str())
+        .map(str::to_owned)
+        .collect()
+}
+
+/// A moved profile (design 0017, C5): the hello's `user_data_dir` isn't its
+/// `grant_root`. The receipts at the profile's root are copied into the
+/// Freedom root and imported from the copy, which is renamed `.migrated`
+/// there; the original stays at the profile's root until the next start,
+/// which drops it, importing nothing twice. The database stays under
+/// `grant_root`.
+#[test]
+fn a_moved_profile_imports_its_receipts_from_a_copy() {
+    let (_root, data, locks) = common::dirs();
+    let mut core = common::spawn("serve", &data, &locks, &[]);
+    let grant_root = core.grant_root.join("freedom");
+    let user_data = core.grant_root.clone();
+    std::fs::create_dir_all(&grant_root).unwrap();
+    std::fs::write(user_data.join("x402-receipts.json"), receipt("profile")).unwrap();
+    hello_with_user_data(&mut core, &grant_root, &user_data);
+    assert_eq!(legacy_ids(&mut core), ["profile"]);
     assert!(grant_root.join("payment-history.sqlite").exists());
     assert!(!user_data.join("payment-history.sqlite").exists());
-    assert!(!user_data.join("x402-receipts.json").exists());
-    assert!(user_data.join("x402-receipts.json.migrated").exists());
     assert_eq!(
-        std::fs::read_to_string(grant_root.join("x402-receipts.json")).unwrap(),
-        receipt("freedom")
+        std::fs::read_to_string(user_data.join("x402-receipts.json")).unwrap(),
+        receipt("profile")
     );
-    assert!(!grant_root.join("x402-receipts.json.migrated").exists());
+    assert!(!user_data.join("x402-receipts.json.migrated").exists());
+    assert!(!grant_root.join("x402-receipts.json").exists());
+    assert_eq!(
+        std::fs::read_to_string(grant_root.join("x402-receipts.json.migrated")).unwrap(),
+        receipt("profile")
+    );
+    drop(core);
+
+    let mut core = common::spawn("serve", &data, &locks, &[]);
+    hello_with_user_data(&mut core, &grant_root, &user_data);
+    assert_eq!(legacy_ids(&mut core), ["profile"]);
+    assert!(!user_data.join("x402-receipts.json").exists());
+    assert!(grant_root.join("x402-receipts.json.migrated").exists());
+}
+
+/// A file in the Freedom root that isn't the copy of the profile's root's
+/// (design 0017, C5, a conflict): neither is imported or renamed, the
+/// conflict is logged, and the payment history serves. The old layout,
+/// `user_data_dir` naming `grant_root` itself, imports and renames at that
+/// root, as before.
+#[test]
+fn a_conflicting_copy_skips_the_import() {
+    let (_root, data, locks) = common::dirs();
+    let mut core = common::spawn("serve", &data, &locks, &[]);
+    let grant_root = core.grant_root.join("freedom");
+    let user_data = core.grant_root.clone();
+    std::fs::create_dir_all(&grant_root).unwrap();
+    std::fs::write(user_data.join("x402-receipts.json"), receipt("profile")).unwrap();
+    std::fs::write(grant_root.join("x402-receipts.json"), receipt("freedom")).unwrap();
+    hello_with_user_data(&mut core, &grant_root, &user_data);
+    assert_eq!(legacy_ids(&mut core), Vec::<String>::new());
+    let appended = call(
+        &mut core,
+        "shell",
+        "payments.append",
+        json!({ "entry": { "kind": "x402", "chainId": 1, "amount": "1", "createdAt": 5 } }),
+    );
+    assert_eq!(appended["result"]["payment"]["id"], 1, "{appended}");
+    for (dir, id) in [(&user_data, "profile"), (&grant_root, "freedom")] {
+        assert_eq!(
+            std::fs::read_to_string(dir.join("x402-receipts.json")).unwrap(),
+            receipt(id)
+        );
+        assert!(!dir.join("x402-receipts.json.migrated").exists());
+    }
+    core.close_stdin();
+    core.exit_code(std::time::Duration::from_secs(10));
+    let log = core.stderr();
+    assert!(
+        log.contains("conflicts with the Freedom root's; legacy import skipped"),
+        "{log}"
+    );
+
+    // The old layout: the Freedom root's file is the one imported.
+    let mut core = common::spawn("serve", &data, &locks, &[]);
+    hello_with_user_data(&mut core, &grant_root, &grant_root);
+    assert_eq!(legacy_ids(&mut core), ["freedom"]);
+    assert!(!grant_root.join("x402-receipts.json").exists());
+    assert!(grant_root.join("x402-receipts.json.migrated").exists());
+    assert_eq!(
+        std::fs::read_to_string(user_data.join("x402-receipts.json")).unwrap(),
+        receipt("profile")
+    );
 }
 
 /// A `user_data_dir` that isn't an absolute path free of `..`, or isn't a
