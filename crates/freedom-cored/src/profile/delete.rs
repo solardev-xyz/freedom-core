@@ -312,7 +312,7 @@ fn delete_locked(
     let base = open_home_base(&plan).map_err(ended)?;
     confine::confine(grant(&plan, app_root, &gates, base.as_ref()).descriptors(lock.descriptor()))?;
     step("before-keep");
-    keep(lock)?;
+    keep(lock, Path::new(app_root))?;
     let mut store = open_store(app_root, held)?;
     let store = &mut store;
     let place = check_layout(&plan, base, &gated).map_err(ended)?;

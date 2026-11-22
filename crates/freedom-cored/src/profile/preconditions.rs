@@ -104,13 +104,15 @@ pub fn check(root: &Dir, canonical: &Path) -> io::Result<Check> {
             Kind::Dir => layout::Found::Dir,
             Kind::Other => layout::Found::Other,
         };
-        let mount_point = mount_point(canonical, name)?;
+        let mount_point = mount_point(root, canonical, name)?;
         at_root.push((*name, AtRoot { found, mount_point }));
     }
     let state = StartState {
         root: &at_root,
         freedom,
-        node_identity_journal: node_identity_journal(root)?,
+        // Not looked for in an `identity` that is a mount: plan_start
+        // defers on the mount, and nothing is read inside it.
+        node_identity_journal: !identity_is_a_mount(&at_root) && node_identity_journal(root)?,
     };
     let entries = match layout::plan_start(&state) {
         Ok(entries) => entries,
@@ -322,6 +324,13 @@ fn prefix_key(prefix: std::path::Prefix<'_>) -> String {
     }
 }
 
+/// Whether the root's `identity`, as observed, is a mount point.
+fn identity_is_a_mount(at_root: &[(&str, AtRoot)]) -> bool {
+    at_root
+        .iter()
+        .any(|(name, seen)| *name == "identity" && seen.mount_point)
+}
+
 /// A node identity journal or its staging file in the root's `identity/`,
 /// read through the root's handle, following nothing: its recovery would
 /// write at the absolute root it records. An `identity` that is a link
@@ -346,31 +355,52 @@ fn node_identity_journal(root: &Dir) -> io::Result<bool> {
 /// it (a symlink is moved as the link): on another device than the root,
 /// or, on Linux, on another mount (a bind mount of the same file system).
 #[cfg(unix)]
-fn mount_point(canonical: &Path, name: &str) -> io::Result<bool> {
-    use std::os::unix::fs::MetadataExt;
-    let path = canonical.join(name);
-    let entry = std::fs::symlink_metadata(&path)?;
-    if entry.file_type().is_symlink() {
+fn mount_point(root: &Dir, _canonical: &Path, name: &str) -> io::Result<bool> {
+    use rustix::fs::FileType;
+    let stat = rustix::fs::statat(root.as_fd(), name, no_follow())?;
+    if FileType::from_raw_mode(stat.st_mode) == FileType::Symlink {
         return Ok(false);
     }
-    if entry.dev() != std::fs::symlink_metadata(canonical)?.dev() {
+    #[allow(clippy::unnecessary_cast)]
+    let here = stat.st_dev as u64;
+    if here != root.identity()?.0 {
         return Ok(true);
     }
     #[cfg(target_os = "linux")]
     {
         // `STATX_MNT_ID` (Linux 5.8): an older kernel that doesn't give it
         // leaves the device check alone.
-        if let (Some(entry), Some(root)) = (mount_id(&path), mount_id(canonical)) {
+        if let (Some(entry), Some(root)) = (mount_id(root, name), mount_id(root, "")) {
             return Ok(entry != root);
         }
     }
     Ok(false)
 }
 
+/// A lookup's flags: no link followed, and on Linux no automount
+/// triggered: what is at a name is classified, never entered.
+#[cfg(unix)]
+fn no_follow() -> rustix::fs::AtFlags {
+    #[cfg(target_os = "linux")]
+    {
+        rustix::fs::AtFlags::SYMLINK_NOFOLLOW | rustix::fs::AtFlags::NO_AUTOMOUNT
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        rustix::fs::AtFlags::SYMLINK_NOFOLLOW
+    }
+}
+
+/// The mount ID of `name` in `root` (of `root` itself for an empty name).
 #[cfg(target_os = "linux")]
-fn mount_id(path: &Path) -> Option<u64> {
-    use rustix::fs::{AtFlags, CWD, StatxFlags, statx};
-    let stat = statx(CWD, path, AtFlags::SYMLINK_NOFOLLOW, StatxFlags::MNT_ID).ok()?;
+fn mount_id(root: &Dir, name: &str) -> Option<u64> {
+    use rustix::fs::{AtFlags, StatxFlags, statx};
+    let flags = if name.is_empty() {
+        AtFlags::EMPTY_PATH
+    } else {
+        no_follow()
+    };
+    let stat = statx(root.as_fd(), name, flags, StatxFlags::MNT_ID).ok()?;
     (StatxFlags::from_bits_retain(stat.stx_mask).contains(StatxFlags::MNT_ID))
         .then_some(stat.stx_mnt_id)
 }
@@ -380,7 +410,7 @@ fn mount_id(path: &Path) -> Option<u64> {
 /// point is on its parent's volume; a junction or a symlink to a path is a
 /// link, moved as itself.
 #[cfg(windows)]
-fn mount_point(canonical: &Path, name: &str) -> io::Result<bool> {
+fn mount_point(_root: &Dir, canonical: &Path, name: &str) -> io::Result<bool> {
     use std::os::windows::fs::MetadataExt;
     const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
     let path = canonical.join(name);
@@ -401,7 +431,7 @@ fn volume_target(target: &Path) -> bool {
 }
 
 #[cfg(not(any(unix, windows)))]
-fn mount_point(_canonical: &Path, _name: &str) -> io::Result<bool> {
+fn mount_point(_root: &Dir, _canonical: &Path, _name: &str) -> io::Result<bool> {
     Ok(false)
 }
 
@@ -548,10 +578,13 @@ fn open_beneath(root: &Dir, parts: &[&str]) -> Opened {
     walk(root, parts)
 }
 
-/// Component by component from the root's handle (`fc_store`'s `Dir`): each
-/// directory opened through its parent refusing a link (a Windows reparse
-/// point too), on the root's device, and the lock's name opened without
-/// following or waiting.
+/// Component by component from the root's handle (`fc_store`'s `Dir`):
+/// each name classified first by one lookup that follows nothing and
+/// enters nothing ([`classify_at`]: its kind and device), before any open
+/// or answer; each directory then opened through its parent refusing a
+/// link (a Windows reparse point too); and the lock's name opened without
+/// following or waiting. A name on another device than the root's, the
+/// lock's own included (a directory mounted at it), is a mount.
 fn walk(root: &Dir, parts: &[&str]) -> Opened {
     let unknown = |e: io::Error| Opened::Unknown(e.kind().to_string());
     let Some((last, parents)) = parts.split_last() else {
@@ -566,15 +599,10 @@ fn walk(root: &Dir, parts: &[&str]) -> Opened {
         Err(e) => return unknown(e),
     };
     for part in parents {
-        match dir.kind(OsStr::new(part)) {
-            Ok(Kind::Missing | Kind::File) => return Opened::Free,
-            Ok(Kind::Other) => return Opened::Unknown(ON_THE_WAY.to_owned()),
-            Ok(Kind::Dir) => {}
-            Err(e) => return unknown(e),
-        }
-        match on_device(&dir, part, device) {
-            Ok(true) => {}
-            Ok(false) => return Opened::Unknown(ON_THE_WAY.to_owned()),
+        match classify_at(&dir, part, device) {
+            Ok(Seen::Missing | Seen::File) => return Opened::Free,
+            Ok(Seen::Other | Seen::Mount) => return Opened::Unknown(ON_THE_WAY.to_owned()),
+            Ok(Seen::Dir) => {}
             Err(e) => return unknown(e),
         }
         dir = match dir.child(OsStr::new(part), false) {
@@ -589,15 +617,11 @@ fn walk(root: &Dir, parts: &[&str]) -> Opened {
             Err(e) => return unknown(e),
         }
     }
-    match dir.kind(OsStr::new(last)) {
-        Ok(Kind::Missing | Kind::Dir) => return Opened::Free,
-        Ok(Kind::Other) => return Opened::Unknown(OTHER.to_owned()),
-        Ok(Kind::File) => {}
-        Err(e) => return unknown(e),
-    }
-    match on_device(&dir, last, device) {
-        Ok(true) => {}
-        Ok(false) => return Opened::Unknown(ON_THE_WAY.to_owned()),
+    match classify_at(&dir, last, device) {
+        Ok(Seen::Missing | Seen::Dir) => return Opened::Free,
+        Ok(Seen::Mount) => return Opened::Unknown(ON_THE_WAY.to_owned()),
+        Ok(Seen::Other) => return Opened::Unknown(OTHER.to_owned()),
+        Ok(Seen::File) => {}
         Err(e) => return unknown(e),
     }
     match dir.open_regular(OsStr::new(last), false) {
@@ -608,30 +632,54 @@ fn walk(root: &Dir, parts: &[&str]) -> Opened {
     }
 }
 
-const OTHER: &str = "a link or a special file at the lock's name";
+/// What one anchored lookup found at a name.
+#[derive(Debug, PartialEq, Eq)]
+enum Seen {
+    Missing,
+    File,
+    Dir,
+    /// A link, a reparse point, or a special file.
+    Other,
+    /// On another device than the root's: a mount point.
+    Mount,
+}
 
-/// Whether `name` in `dir` is on the root's `device`, looked at before it
-/// is opened, so a mount is refused before it is entered: `fstatat` from
-/// the handle, following no link and (Linux) triggering no automount. On
-/// Windows a volume is reached only through a reparse point, which the
-/// walk refuses as a link.
+/// `name` in `dir`, by one `fstatat` from the handle that follows no link
+/// and (Linux) triggers no automount: its kind and its device together,
+/// before anything opens it.
 #[cfg(unix)]
-fn on_device(dir: &Dir, name: &str, device: u64) -> io::Result<bool> {
-    use rustix::fs::AtFlags;
-    #[cfg(target_os = "linux")]
-    let flags = AtFlags::SYMLINK_NOFOLLOW | AtFlags::NO_AUTOMOUNT;
-    #[cfg(not(target_os = "linux"))]
-    let flags = AtFlags::SYMLINK_NOFOLLOW;
-    let stat = rustix::fs::statat(dir.as_fd(), name, flags)?;
+fn classify_at(dir: &Dir, name: &str, device: u64) -> io::Result<Seen> {
+    use rustix::fs::FileType;
+    let stat = match rustix::fs::statat(dir.as_fd(), name, no_follow()) {
+        Ok(stat) => stat,
+        Err(rustix::io::Errno::NOENT) => return Ok(Seen::Missing),
+        Err(e) => return Err(e.into()),
+    };
+    let kind = FileType::from_raw_mode(stat.st_mode);
     #[allow(clippy::unnecessary_cast)]
     let here = stat.st_dev as u64;
-    Ok(here == device)
+    Ok(match kind {
+        FileType::Symlink => Seen::Other,
+        _ if here != device => Seen::Mount,
+        FileType::RegularFile => Seen::File,
+        FileType::Directory => Seen::Dir,
+        _ => Seen::Other,
+    })
 }
 
+/// On Windows a volume is reached only through a reparse point, which
+/// `Dir::kind` reports as `Other`.
 #[cfg(not(unix))]
-fn on_device(_dir: &Dir, _name: &str, _device: u64) -> io::Result<bool> {
-    Ok(true)
+fn classify_at(dir: &Dir, name: &str, _device: u64) -> io::Result<Seen> {
+    Ok(match dir.kind(OsStr::new(name))? {
+        Kind::Missing => Seen::Missing,
+        Kind::File => Seen::File,
+        Kind::Dir => Seen::Dir,
+        Kind::Other => Seen::Other,
+    })
 }
+
+const OTHER: &str = "a link or a special file at the lock's name";
 
 /// The opened lock's handle: a regular file (on the root's device, where
 /// the walk checks it), a directory, or anything else.
@@ -714,19 +762,26 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn a_mount_point_is_found_and_a_plain_directory_or_link_isnt() {
-        let root = Path::new("/");
+        let open = |path: &Path| {
+            Dir::open_root(path, fc_store::anchor::Resolve::Follow)
+                .unwrap()
+                .unwrap()
+        };
+        let slash = open(Path::new("/"));
         #[cfg(target_os = "linux")]
         if Path::new("/proc/self").exists() {
-            assert!(mount_point(root, "proc").unwrap());
+            assert!(mount_point(&slash, Path::new("/"), "proc").unwrap());
         }
         #[cfg(target_os = "macos")]
-        assert!(mount_point(root, "dev").unwrap());
+        assert!(mount_point(&slash, Path::new("/"), "dev").unwrap());
+        let _ = &slash;
         let dir = tempfile::tempdir().unwrap();
         let base = std::fs::canonicalize(dir.path()).unwrap();
         std::fs::create_dir(base.join("ant-data")).unwrap();
         std::os::unix::fs::symlink("/", base.join("ipfs-data")).unwrap();
-        assert!(!mount_point(&base, "ant-data").unwrap());
-        assert!(!mount_point(&base, "ipfs-data").unwrap());
+        let root = open(&base);
+        assert!(!mount_point(&root, &base, "ant-data").unwrap());
+        assert!(!mount_point(&root, &base, "ipfs-data").unwrap());
     }
 
     /// A profile root as the move opens it, and a probe of `parts` below it
@@ -861,37 +916,65 @@ mod tests {
         assert!(started.elapsed() < std::time::Duration::from_secs(5));
     }
 
-    /// A mount on the way to a lock (CI's tmpfs, mounted at
-    /// `FREEDOM_TEST_TMPFS`, a test profile's `tor-data/state`) is refused:
-    /// by `openat2`'s `RESOLVE_NO_XDEV`, and by the fallback walk before it
-    /// opens the mount. Skipped where the variable isn't set, but not under
-    /// CI, whose Linux test job mounts it.
+    /// Mounts in a test profile (CI's tmpfs: `FREEDOM_TEST_TMPFS` names a
+    /// profile with one mounted at `tor-data/state`, one at
+    /// `myotis/.freedom-myotis-lifetime` and one at `identity`), each
+    /// refused before it is entered:
+    /// - on the way to a lock, by `openat2`'s `RESOLVE_NO_XDEV` and by the
+    ///   fallback walk's lookup before it opens anything;
+    /// - a directory mounted at a lock's own name, the same, not free;
+    /// - an `identity` that is a mount, holding a node identity journal:
+    ///   deferred as a mount, the journal never looked for.
+    ///
+    /// Skipped where the variable isn't set, but not under CI, whose Linux
+    /// test job mounts them.
     #[cfg(target_os = "linux")]
     #[test]
-    fn a_mount_on_the_way_is_refused_before_it_is_entered() {
-        let Some(mount) = std::env::var_os("FREEDOM_TEST_TMPFS") else {
+    fn mounts_in_the_profile_are_refused_before_they_are_entered() {
+        let Some(profile) = std::env::var_os("FREEDOM_TEST_TMPFS") else {
             assert!(
                 std::env::var_os("CI").is_none(),
                 "CI's Linux test job mounts FREEDOM_TEST_TMPFS"
             );
             return;
         };
-        let mount = std::path::PathBuf::from(mount);
-        let profile = mount.parent().unwrap().parent().unwrap();
-        std::fs::create_dir_all(mount.join("state")).unwrap();
-        std::fs::write(mount.join("state").join("state.lock"), "").unwrap();
-        let root = Dir::open_root(profile, fc_store::anchor::Resolve::Follow)
+        let profile = std::path::PathBuf::from(profile);
+        let state = profile.join("tor-data").join("state");
+        std::fs::create_dir_all(state.join("state")).unwrap();
+        std::fs::write(state.join("state").join("state.lock"), "").unwrap();
+        let root = Dir::open_root(&profile, fc_store::anchor::Resolve::Follow)
             .unwrap()
             .unwrap();
         let (device, _) = root.identity().unwrap();
         let tor = root.child(OsStr::new("tor-data"), false).unwrap().unwrap();
-        assert!(!on_device(&tor, "state", device).unwrap(), "a mount there");
-        let parts = ["tor-data", "state", "state", "state.lock"];
-        assert!(matches!(walk(&root, &parts), Opened::Unknown(_)));
-        assert!(matches!(
-            try_lock(&root, profile, &parts, Probe::FileLock),
-            Tried::Unknown(_)
-        ));
+        assert_eq!(classify_at(&tor, "state", device).unwrap(), Seen::Mount);
+        for parts in [
+            &["tor-data", "state", "state", "state.lock"][..],
+            &["myotis", ".freedom-myotis-lifetime"][..],
+        ] {
+            assert!(
+                matches!(walk(&root, parts), Opened::Unknown(_)),
+                "{parts:?}: the walk"
+            );
+            assert!(
+                matches!(
+                    try_lock(&root, &profile, parts, Probe::Lease),
+                    Tried::Unknown(_)
+                ),
+                "{parts:?}"
+            );
+        }
+        std::fs::write(
+            profile.join("identity").join("node-identity-journal.json"),
+            "{}",
+        )
+        .unwrap();
+        match check(&root, &profile).unwrap() {
+            Check::Defer { why, detail } => {
+                assert_eq!((why, detail.as_str()), ("mount_point", "identity"));
+            }
+            other => panic!("{other:?}"),
+        }
     }
 
     #[test]
