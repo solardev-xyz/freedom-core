@@ -14,7 +14,11 @@
 //!   copy can be filled); a directory's entries, the copy flushed once they
 //!   are made; a symlink as the link. A directory on another mount, a FIFO,
 //!   a socket or a device (on Windows any reparse point) stops it with an
-//!   error before anything is opened at that name. Timestamps, owners and
+//!   error before anything is opened at that name. It copies at most a
+//!   budget of file bytes, files found after any survey included: a file
+//!   longer than what is left is refused before its copy is made, and at
+//!   most what is left and one byte more is read from each, so a file that
+//!   grows during its read can't run it past the budget either. Timestamps, owners and
 //!   extended attributes aren't copied: confinement forbids changing them
 //!   (design 0010), and nothing a profile's nodes keep reads them.
 //! - **[`Dir::space`]**: the bytes free to this process's user on a
@@ -65,11 +69,40 @@ fn changed() -> io::Error {
     io::Error::other("an entry of the tree changed during its walk or copy")
 }
 
+fn over_budget() -> io::Error {
+    io::Error::new(io::ErrorKind::FileTooLarge, "the copy is past its budget")
+}
+
+/// `from`'s bytes into `into`, charged to `left`, the copy's budget: at most
+/// `left` and one byte more are read, so a file growing during its read
+/// stops the copy just past the budget rather than anywhere. Then the
+/// bytes copied must be `len`, the length its open handle gave.
+fn charge(
+    from: &mut std::fs::File,
+    into: &mut std::fs::File,
+    len: u64,
+    left: &mut u64,
+    name: &OsStr,
+) -> io::Result<()> {
+    pause::at("file-opened", name);
+    let mut bounded = std::io::Read::take(&mut *from, left.saturating_add(1));
+    let copied = std::io::copy(&mut bounded, into)?;
+    if copied > *left {
+        return Err(over_budget());
+    }
+    if copied != len {
+        return Err(changed());
+    }
+    *left -= copied;
+    Ok(())
+}
+
 /// Test-only pause points (fc-store's own unit tests): `classified`, once a
-/// name is looked at and before it is opened, and `opened`, once a
-/// directory is opened and before its entries are read, so a test can swap
-/// or rename what the walk, the copy or a bounded removal is about to
-/// reach. Outside this crate's tests each is a no-op that compiles away.
+/// name is looked at and before it is opened; `opened`, once a directory is
+/// opened and before its entries are read; and `file-opened`, once a file
+/// a copy reads is opened and before its bytes are read. So a test can
+/// swap, rename or grow what the walk, the copy or a bounded removal is
+/// about to reach. Outside this crate's tests each is a no-op that compiles away.
 pub(super) mod pause {
     #[cfg(test)]
     type Hook = Box<dyn FnMut(&'static str, &std::ffi::OsStr)>;
@@ -124,24 +157,29 @@ impl Dir {
     }
 
     /// Copies `name` in this directory to `to` in `target`, which must not
-    /// exist, never past this directory's mount (the module's comment).
-    /// `each` runs after each entry is made (a directory once it is, a file
-    /// once it is synced), and an error from it stops the copy. A copy
-    /// stopped leaves what it made for the caller to remove.
+    /// exist, never past this directory's mount (the module's comment), and
+    /// at most `budget` bytes of files' data: past it the copy stops with
+    /// `FileTooLarge`. `each` runs after each entry is made (a directory
+    /// once it is, a file once it is synced), and an error from it stops
+    /// the copy. A copy stopped leaves what it made for the caller to
+    /// remove. The bytes of files' data it copied.
     pub fn copy_tree(
         &self,
         name: &OsStr,
         target: &Dir,
         to: &OsStr,
+        budget: u64,
         each: &mut Each<'_>,
-    ) -> io::Result<()> {
-        imp::copy_tree(self, name, target, to, each)
+    ) -> io::Result<u64> {
+        let mut left = budget;
+        imp::copy_tree(self, name, target, to, &mut left, each)?;
+        Ok(budget - left)
     }
 }
 
 #[cfg(unix)]
 mod imp {
-    use super::{Each, MAX_DEPTH, Visit, changed, pause, special, too_deep};
+    use super::{Each, MAX_DEPTH, Visit, changed, charge, over_budget, pause, special, too_deep};
     use crate::anchor::imp::{
         DIR_FLAGS, TREE_FLAGS, entries, mount_at, mount_of_fd, refused, stat_at, stat_identity,
         within,
@@ -264,12 +302,15 @@ mod imp {
         name: &OsStr,
         target: &Dir,
         to: &OsStr,
+        left: &mut u64,
         each: &mut Each<'_>,
     ) -> io::Result<()> {
         let bound = mount_of_fd(dir.fd.as_fd())?;
-        copy_at(dir.fd.as_fd(), name, target.fd.as_fd(), to, bound, 0, each)
+        let into = target.fd.as_fd();
+        copy_at(dir.fd.as_fd(), name, into, to, bound, 0, left, each)
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn copy_at(
         from_dir: BorrowedFd<'_>,
         name: &OsStr,
@@ -277,12 +318,13 @@ mod imp {
         to: &OsStr,
         bound: Mount,
         depth: usize,
+        left: &mut u64,
         each: &mut Each<'_>,
     ) -> io::Result<()> {
         let stat = stat_at(from_dir, name)?;
         let mode = Mode::from_raw_mode(stat.st_mode) & (Mode::RWXU | Mode::RWXG | Mode::RWXO);
         match FileType::from_raw_mode(stat.st_mode) {
-            FileType::RegularFile => copy_file(from_dir, name, &stat, into_dir, to, mode)?,
+            FileType::RegularFile => copy_file(from_dir, name, &stat, into_dir, to, mode, left)?,
             FileType::Symlink => {
                 let target = rustix::fs::readlinkat(from_dir, name, Vec::new())?;
                 rustix::fs::symlinkat(target.as_c_str(), into_dir, to)?;
@@ -309,6 +351,7 @@ mod imp {
                         &entry,
                         bound,
                         depth + 1,
+                        left,
                         each,
                     )?;
                 }
@@ -324,7 +367,8 @@ mod imp {
     /// without following a symlink and without waiting, then judged on the
     /// handle: it must be the regular file looked at (`stat`), so a name
     /// swapped for a FIFO or another file since is refused, never waited
-    /// on. The bytes copied must be its length.
+    /// on. Longer than what is `left` of the budget, it is refused before
+    /// its copy is made; its read is bounded by it too ([`charge`]).
     fn copy_file(
         from_dir: BorrowedFd<'_>,
         name: &OsStr,
@@ -332,6 +376,7 @@ mod imp {
         into_dir: BorrowedFd<'_>,
         to: &OsStr,
         mode: Mode,
+        left: &mut u64,
     ) -> io::Result<()> {
         let flags = OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC;
         let from = rustix::fs::openat(from_dir, name, flags, Mode::empty())?;
@@ -343,19 +388,20 @@ mod imp {
         }
         let mut from = File::from(from);
         let len = u64::try_from(held.st_size).unwrap_or(0);
+        if len > *left {
+            return Err(over_budget());
+        }
         let flags =
             OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW | OFlags::CLOEXEC;
         let mut into = File::from(rustix::fs::openat(into_dir, to, flags, mode)?);
-        if std::io::copy(&mut from, &mut into)? != len {
-            return Err(changed());
-        }
+        charge(&mut from, &mut into, len, left, name)?;
         into.sync_all()
     }
 }
 
 #[cfg(windows)]
 mod imp {
-    use super::{Each, MAX_DEPTH, Visit, changed, pause, special, too_deep};
+    use super::{Each, MAX_DEPTH, Visit, changed, charge, over_budget, pause, special, too_deep};
     use crate::anchor::imp::{how, mount_of_handle, plain_dir, within};
     use crate::anchor::{Dir, Mount, Node, Space};
     use crate::fsx::file_identity;
@@ -414,8 +460,8 @@ mod imp {
     }
 
     /// The rights a copy and its source's removal take, probed by opening
-    /// with them: a file's reading and `DELETE`; a directory's listing and
-    /// `DELETE`. (Deleting an entry takes its own `DELETE`, or the parent's
+    /// with them: a file's data (`FILE_READ_DATA`, as the copy opens it) and
+    /// `DELETE`; a directory's listing and `DELETE`. (Deleting an entry takes its own `DELETE`, or the parent's
     /// `FILE_DELETE_CHILD`, which the system grants `DELETE` on.) A refusal
     /// is a node this process can't use.
     fn walk_at(
@@ -434,8 +480,12 @@ mod imp {
             Node::Link
         } else if !attributes.directory() {
             let len = File::from(handle.try_clone()?).metadata()?.len();
-            let readable = match open_at(parent, name, access::READ | access::DELETE, Expect::File)
-            {
+            let readable = match open_at(
+                parent,
+                name,
+                access::READ_DATA | access::DELETE,
+                Expect::File,
+            ) {
                 Ok(Some(probe)) => same(&probe, &handle)?,
                 Ok(None) => return Ok(ControlFlow::Continue(())),
                 Err(e) if refused_access(&e) => false,
@@ -488,23 +538,18 @@ mod imp {
         name: &OsStr,
         target: &Dir,
         to: &OsStr,
+        left: &mut u64,
         each: &mut Each<'_>,
     ) -> io::Result<()> {
         let bound = mount_of_handle(dir.handle.as_handle())?;
-        copy_at(
-            dir.handle.as_handle(),
-            name,
-            target.handle.as_handle(),
-            to,
-            bound,
-            0,
-            each,
-        )
+        let into = target.handle.as_handle();
+        copy_at(dir.handle.as_handle(), name, into, to, bound, 0, left, each)
     }
 
     /// A reparse point (a symlink or a junction) isn't copied: making one
     /// takes `FSCTL_SET_REPARSE_POINT`, and a symlink a privilege a user
     /// lacks. A walk finds it first ([`Node::Link`]).
+    #[allow(clippy::too_many_arguments)]
     fn copy_at(
         from_dir: BorrowedHandle<'_>,
         name: &OsStr,
@@ -512,6 +557,7 @@ mod imp {
         to: &OsStr,
         bound: Mount,
         depth: usize,
+        left: &mut u64,
         each: &mut Each<'_>,
     ) -> io::Result<()> {
         let handle = win::open_at(
@@ -524,7 +570,7 @@ mod imp {
             return Err(special());
         }
         if !attributes.directory() {
-            copy_file(from_dir, name, &handle, into_dir, to)?;
+            copy_file(from_dir, name, &handle, into_dir, to, left)?;
             return each();
         }
         if !mount_of_handle(handle.as_handle())?.same(bound) {
@@ -559,37 +605,47 @@ mod imp {
                 &entry,
                 bound,
                 depth + 1,
+                left,
                 each,
             )?;
         }
         Ok(())
     }
 
-    /// The file's bytes into a new file, flushed. Judged on the handle: it
-    /// must be the file looked at (`looked`), not a directory or a reparse
-    /// point. The bytes copied must be its length.
+    /// The file's bytes into a new file, flushed. Opened for its data alone
+    /// (`FILE_READ_DATA`, and the attributes every open adds), as the walk
+    /// probes it, and judged on the handle: it must be the file looked at
+    /// (`looked`), not a directory or a reparse point. Longer than what is
+    /// `left` of the budget, it is refused before its copy is made; its
+    /// read is bounded by it too ([`charge`]).
     fn copy_file(
         from_dir: BorrowedHandle<'_>,
         name: &OsStr,
         looked: &OwnedHandle,
         into_dir: BorrowedHandle<'_>,
         to: &OsStr,
+        left: &mut u64,
     ) -> io::Result<()> {
-        let from = win::open_at(from_dir, name, how(access::READ, Create::No, Expect::File))?;
+        let from = win::open_at(
+            from_dir,
+            name,
+            how(access::READ_DATA, Create::No, Expect::File),
+        )?;
         let attributes = win::attribute_tag(from.as_handle())?;
         if attributes.reparse_point() || attributes.directory() || !same(&from, looked)? {
             return Err(changed());
         }
         let mut from = File::from(from);
         let len = from.metadata()?.len();
+        if len > *left {
+            return Err(over_budget());
+        }
         let mut into = File::from(win::open_at(
             into_dir,
             to,
             how(access::WRITE, Create::New, Expect::File),
         )?);
-        if std::io::copy(&mut from, &mut into)? != len {
-            return Err(changed());
-        }
+        charge(&mut from, &mut into, len, left, name)?;
         into.sync_all()
     }
 }

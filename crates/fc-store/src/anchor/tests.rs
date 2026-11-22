@@ -710,6 +710,7 @@ fn a_copy_makes_the_tree_again_and_stops_where_told() {
         OsStr::new("tree"),
         &target,
         OsStr::new("tree.moving"),
+        u64::MAX,
         &mut || {
             made += 1;
             Ok(())
@@ -730,6 +731,7 @@ fn a_copy_makes_the_tree_again_and_stops_where_told() {
         OsStr::new("file"),
         &target,
         OsStr::new("file.moving"),
+        u64::MAX,
         &mut nothing,
     )
     .unwrap();
@@ -739,6 +741,7 @@ fn a_copy_makes_the_tree_again_and_stops_where_told() {
             OsStr::new("file"),
             &target,
             OsStr::new("file.moving"),
+            u64::MAX,
             &mut nothing,
         )
         .unwrap_err();
@@ -750,6 +753,7 @@ fn a_copy_makes_the_tree_again_and_stops_where_told() {
             OsStr::new("tree"),
             &target,
             OsStr::new("again"),
+            u64::MAX,
             &mut || {
                 calls += 1;
                 if calls == 2 {
@@ -771,6 +775,7 @@ fn a_copy_makes_the_tree_again_and_stops_where_told() {
                 OsStr::new("tree"),
                 &target,
                 OsStr::new("linked"),
+                u64::MAX,
                 &mut nothing
             )
             .is_err()
@@ -807,6 +812,7 @@ fn a_copy_keeps_modes_and_links_and_refuses_a_special_file() {
         OsStr::new("tree"),
         &target,
         OsStr::new("copy"),
+        u64::MAX,
         &mut nothing,
     )
     .unwrap();
@@ -838,6 +844,7 @@ fn a_copy_keeps_modes_and_links_and_refuses_a_special_file() {
         OsStr::new("link"),
         &target,
         OsStr::new("link"),
+        u64::MAX,
         &mut nothing,
     )
     .unwrap();
@@ -852,6 +859,7 @@ fn a_copy_keeps_modes_and_links_and_refuses_a_special_file() {
             OsStr::new("tree"),
             &target,
             OsStr::new("again"),
+            u64::MAX,
             &mut nothing,
         )
         .unwrap_err();
@@ -987,6 +995,7 @@ fn mounted_tmpfs_inside_a_tree_is_never_crossed() {
             OsStr::new("tree"),
             &target,
             OsStr::new("copy"),
+            u64::MAX,
             &mut nothing
         )
         .is_err()
@@ -1041,6 +1050,7 @@ fn mounted_bind_inside_a_tree_is_never_crossed() {
             OsStr::new("tree"),
             &target,
             OsStr::new("copy"),
+            u64::MAX,
             &mut nothing
         )
         .is_err()
@@ -1186,6 +1196,7 @@ fn a_directory_swapped_between_its_look_and_its_open_is_never_entered() {
             OsStr::new("tree"),
             &top(&r.into),
             OsStr::new("copy"),
+            u64::MAX,
             &mut nothing,
         );
         super::tree::pause::set(None);
@@ -1231,6 +1242,7 @@ fn a_directory_renamed_out_once_opened_is_still_the_one_read() {
         OsStr::new("tree"),
         &top(&r.into),
         OsStr::new("copy"),
+        u64::MAX,
         &mut nothing,
     );
     super::tree::pause::set(None);
@@ -1263,18 +1275,6 @@ fn a_directory_renamed_out_once_opened_is_still_the_one_read() {
 #[cfg(windows)]
 #[test]
 fn a_walk_probes_the_rights_a_copy_and_its_removal_take() {
-    let icacls = |path: &Path, args: &[&str]| {
-        let output = std::process::Command::new("icacls")
-            .arg(path)
-            .args(args)
-            .output()
-            .unwrap();
-        assert!(
-            output.status.success(),
-            "icacls {args:?}: {}",
-            String::from_utf8_lossy(&output.stdout)
-        );
-    };
     let tmp = tempfile::tempdir().unwrap();
     let root = tmp.path().join("root");
     std::fs::create_dir_all(root.join("tree/kept")).unwrap();
@@ -1313,4 +1313,154 @@ fn a_walk_probes_the_rights_a_copy_and_its_removal_take() {
         }
     )));
     assert!(seen.contains(&("tree/kept".to_owned(), Node::Dir { usable: true })));
+}
+
+/// A copy's budget (review of #451, round 2): it copies at most `budget`
+/// bytes of files' data. A file longer than what is left is refused before
+/// its copy is made; a file that grows once opened (here at the
+/// `file-opened` pause, past the budget) is read for at most what is left
+/// and one byte more, then refused.
+#[test]
+fn a_copy_stops_at_its_budget() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("root");
+    let into = tmp.path().join("into");
+    std::fs::create_dir_all(root.join("tree/sub")).unwrap();
+    std::fs::create_dir_all(&into).unwrap();
+    std::fs::write(root.join("tree/a"), [1u8; 100]).unwrap();
+    std::fs::write(root.join("tree/sub/b"), [2u8; 100]).unwrap();
+    let (dir, target) = (top(&root), top(&into));
+    let copied = dir
+        .copy_tree(
+            OsStr::new("tree"),
+            &target,
+            OsStr::new("whole"),
+            200,
+            &mut nothing,
+        )
+        .unwrap();
+    assert_eq!(copied, 200);
+    let error = dir
+        .copy_tree(
+            OsStr::new("tree"),
+            &target,
+            OsStr::new("short"),
+            150,
+            &mut nothing,
+        )
+        .unwrap_err();
+    assert_eq!(error.kind(), io::ErrorKind::FileTooLarge, "{error}");
+    let made: u64 = ["short/a", "short/sub/b"]
+        .iter()
+        .filter_map(|path| std::fs::metadata(into.join(path)).ok())
+        .map(|meta| meta.len())
+        .sum();
+    assert_eq!(made, 100, "the file past the budget isn't made");
+
+    std::fs::write(root.join("grows"), [3u8; 10]).unwrap();
+    let grows = root.join("grows");
+    super::tree::pause::set(Some(Box::new(move |at, name| {
+        if at == "file-opened" && name == "grows" {
+            let mut file = std::fs::OpenOptions::new()
+                .append(true)
+                .open(&grows)
+                .unwrap();
+            std::io::Write::write_all(&mut file, &[4u8; 1000]).unwrap();
+        }
+    })));
+    let error = dir.copy_tree(
+        OsStr::new("grows"),
+        &target,
+        OsStr::new("grown"),
+        50,
+        &mut nothing,
+    );
+    super::tree::pause::set(None);
+    assert_eq!(error.unwrap_err().kind(), io::ErrorKind::FileTooLarge);
+    assert_eq!(std::fs::metadata(into.join("grown")).unwrap().len(), 51);
+}
+
+/// Windows: a file's copy and its probe ask for its data alone
+/// (`FILE_READ_DATA`), so a file whose extended attributes and security
+/// descriptor can't be read (`REA`, `RC` denied) while its data and its
+/// deletion can is readable, copies, and is removed.
+#[cfg(windows)]
+#[test]
+fn a_file_whose_data_can_be_read_copies_whatever_else_is_denied() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("root");
+    let into = tmp.path().join("into");
+    std::fs::create_dir_all(root.join("tree")).unwrap();
+    std::fs::create_dir_all(&into).unwrap();
+    let file = root.join("tree/data");
+    std::fs::write(&file, b"abc").unwrap();
+    icacls(&file, &["/deny", "*S-1-1-0:(REA,RC)"]);
+    let (dir, target) = (top(&root), top(&into));
+    let seen = nodes(&dir, "tree");
+    let copied = dir.copy_tree(
+        OsStr::new("tree"),
+        &target,
+        OsStr::new("copy"),
+        u64::MAX,
+        &mut nothing,
+    );
+    let removed = dir.remove_tree_within(OsStr::new("tree"), &mut nothing);
+    if file.exists() {
+        icacls(&file, &["/remove:d", "*S-1-1-0"]);
+    }
+    assert!(
+        seen.contains(&(
+            "tree/data".to_owned(),
+            Node::File {
+                len: 3,
+                readable: true
+            }
+        )),
+        "{seen:?}"
+    );
+    assert_eq!(copied.unwrap(), 3);
+    assert_eq!(std::fs::read(into.join("copy/data")).unwrap(), b"abc");
+    assert!(removed.unwrap());
+    assert!(!root.join("tree").exists());
+}
+
+/// Windows: a directory the walk may delete but not list (`RD`, which on a
+/// directory is `FILE_LIST_DIRECTORY`, denied) is unusable, and usable
+/// again once listing is restored. With the `DELETE` case of
+/// `a_walk_probes_the_rights_a_copy_and_its_removal_take`, dropping either
+/// right from the probe fails a test.
+#[cfg(windows)]
+#[test]
+fn a_directory_that_cant_be_listed_is_unusable() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("root");
+    let shut = root.join("tree/shut");
+    std::fs::create_dir_all(&shut).unwrap();
+    std::fs::write(shut.join("inner"), b"x").unwrap();
+    icacls(&shut, &["/deny", "*S-1-1-0:(RD)"]);
+    let seen = nodes(&top(&root), "tree");
+    icacls(&shut, &["/remove:d", "*S-1-1-0"]);
+    assert!(
+        seen.contains(&("tree/shut".to_owned(), Node::Dir { usable: false })),
+        "{seen:?}"
+    );
+    assert!(!seen.iter().any(|(path, _)| path == "tree/shut/inner"));
+    let seen = nodes(&top(&root), "tree");
+    assert!(seen.contains(&("tree/shut".to_owned(), Node::Dir { usable: true })));
+    assert!(seen.iter().any(|(path, _)| path == "tree/shut/inner"));
+}
+
+/// `icacls <path> <args>`, which must succeed.
+#[cfg(windows)]
+fn icacls(path: &Path, args: &[&str]) {
+    let output = std::process::Command::new("icacls")
+        .arg(path)
+        .args(args)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "icacls {args:?}: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
 }

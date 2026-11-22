@@ -401,6 +401,10 @@ pub mod access {
     /// Reading the data, the attributes and the security descriptor (an
     /// owner check), as `GENERIC_READ` maps for a file.
     pub const READ: u32 = fs::FILE_GENERIC_READ;
+    /// Reading a file's data alone (`FILE_READ_DATA`), without the extended
+    /// attributes or the security descriptor `READ` adds: what a byte copy
+    /// takes.
+    pub const READ_DATA: u32 = fs::FILE_READ_DATA;
     /// Writing the data and the attributes, as `GENERIC_WRITE` maps: a
     /// flush needs it.
     pub const WRITE: u32 = fs::FILE_GENERIC_WRITE;

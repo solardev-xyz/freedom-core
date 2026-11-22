@@ -1056,7 +1056,9 @@ fn rename_out(
 /// 2. named in the journal's `copied`, the journal written again whole and
 ///    durably before the copy begins (MG1);
 /// 3. copied to `freedom/<name>.moving` (fc-store's `copy_tree`), the lock
-///    checked after each entry made;
+///    checked after each entry made, and the cap enforced on the bytes it
+///    reads: what the copies so far left of it is the copy's budget, so a
+///    file grown or added since the survey can't take it past;
 /// 4. renamed to its name ([`rename_retried`]), and `freedom/` flushed.
 ///
 /// Its source stays at the root until the cleanup after the marker.
@@ -1093,18 +1095,27 @@ fn copy_entry(
     let moving = format!("{name}{}", layout::MOVING_SUFFIX);
     let mut lost = false;
     let mut made = 0u64;
-    let copied = root.copy_tree(OsStr::new(name), freedom, OsStr::new(&moving), &mut || {
-        if !held() {
-            lost = true;
-            return Err(std::io::Error::other("the profile's lock was taken over"));
-        }
-        made += 1;
-        if crate::testhooks::profile_migrate_full(made) {
-            return Err(std::io::Error::from(std::io::ErrorKind::StorageFull));
-        }
-        step("mid-copy");
-        Ok(())
-    });
+    // The copy enforces the cap on what it reads, files grown or added since
+    // the survey included.
+    let budget = copy::COPY_CAP.saturating_sub(*copied_size);
+    let copied = root.copy_tree(
+        OsStr::new(name),
+        freedom,
+        OsStr::new(&moving),
+        budget,
+        &mut || {
+            if !held() {
+                lost = true;
+                return Err(std::io::Error::other("the profile's lock was taken over"));
+            }
+            made += 1;
+            if crate::testhooks::profile_migrate_full(made) {
+                return Err(std::io::Error::from(std::io::ErrorKind::StorageFull));
+            }
+            step("mid-copy");
+            Ok(())
+        },
+    );
     if lost {
         return Err(Halt::Lost);
     }

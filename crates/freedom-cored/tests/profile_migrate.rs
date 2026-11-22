@@ -2828,8 +2828,11 @@ fn mounted_bind_in_an_entry_to_copy_defers_the_move() {
 
 /// The cap: a move copies at most 2 GiB in all. Past it in the
 /// preconditions, the move is deferred with nothing changed; past it at a
-/// copy (an entry grown since, while the run was paused), it rolls back.
-/// The files are sparse: their length counts, not their blocks.
+/// copy's survey (an entry grown since, while the run was paused), it rolls
+/// back; and a file added after that survey too (at `before-copy`) is
+/// refused by the copy's own budget, before any of it is copied: rolled
+/// back, the source intact, no `.moving` left. The files are sparse: their
+/// length counts, not their blocks.
 #[cfg(unix)]
 #[test]
 fn a_copy_past_the_cap_defers_or_rolls_back() {
@@ -2882,6 +2885,37 @@ fn a_copy_past_the_cap_defers_or_rolls_back() {
     assert!(stderr(&out).contains("copy_too_large"), "{out:?}");
     assert_entries_at_the_root(&d.profile);
     assert!(!there(&d.profile.join("freedom")));
+
+    let d = dirs();
+    seeded(&d.profile);
+    let free = room(&d);
+    let (paused, release) = (d.base.join("paused"), d.base.join("release"));
+    let child = start_paused(
+        &d.profile,
+        &d.locks,
+        "before-copy",
+        &paused,
+        &release,
+        &[(EXDEV, "ant-data"), (FREE, s(&free))],
+    );
+    wait_for(&paused);
+    assert_eq!(copied_names(&d.profile), ["ant-data"]);
+    big(&d.profile);
+    let started = Instant::now();
+    std::fs::write(&release, "").unwrap();
+    let out = child.wait_with_output().unwrap();
+    assert_eq!(
+        (code(&out), said(&out)),
+        (0, "rolled_back".into()),
+        "{out:?}"
+    );
+    assert!(stderr(&out).contains("past its budget"), "{out:?}");
+    assert!(
+        started.elapsed() < Duration::from_secs(30),
+        "nothing copied past the budget"
+    );
+    assert_entries_at_the_root(&d.profile);
+    assert!(!there(&d.profile.join("freedom")), "no .moving left");
 }
 
 /// Windows: the survey probes the rights a copy and its source's removal

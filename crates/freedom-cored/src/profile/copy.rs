@@ -24,7 +24,10 @@
 //!     (`too_deep`); on Windows, a reparse point (`reparse_point`: making
 //!     one takes a privilege a user lacks).
 //! - **The cap** ([`within_cap`]): a starting move copies at most 2 GiB in
-//!   all (`copy_too_large` past it), so it ends well inside main's
+//!   all (`copy_too_large` past it, by the survey's size; and fc-store's
+//!   `copy_tree` enforces what is left of it as a budget on the bytes it
+//!   reads, files grown or added since the survey included), so it ends
+//!   well inside main's
 //!   ten-minute bound even on slow media. A copy killed at the bound rolls
 //!   back and starts over at the next start, so a larger one would never
 //!   finish; past the cap the move defers, and the old layout keeps
