@@ -240,6 +240,12 @@ fn storage(kind: &str, detail: &str) -> Exit {
     Exit::Storage
 }
 
+/// The catalog's write lock taken over since it was taken (exit 74):
+/// nothing was written.
+fn lock_lost() -> Exit {
+    storage("lock_lost", "the catalog's write lock was taken over")
+}
+
 /// The catalog's write lock still held by another (exit 75).
 fn busy() -> Exit {
     log::error(
@@ -305,6 +311,7 @@ fn take_catalog_lock(app_root: &Path) -> Result<Lock, Exit> {
         Ok(lock) => lock,
         Err(lock::LockError::Held) => return Err(busy()),
         Err(lock::LockError::Io(e)) => return Err(storage("io", &e.to_string())),
+        Err(lock::LockError::Lost) => return Err(lock_lost()),
     };
     if let Err(e) = store::remove_catalog_temps(app_root) {
         log::warn(
@@ -324,6 +331,7 @@ fn keep(lock: &Lock) -> Result<(), Exit> {
         }
         Err(lock::LockError::Held) => Err(busy()),
         Err(lock::LockError::Io(e)) => Err(storage("io", &e.kind().to_string())),
+        Err(lock::LockError::Lost) => Err(lock_lost()),
     }
 }
 

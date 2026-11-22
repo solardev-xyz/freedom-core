@@ -848,6 +848,68 @@ fn the_default_profiles_delete_keeps_the_shared_entries() {
     }
 }
 
+/// The catalog's write lock taken over between its taking and its keeping
+/// (a delete stalled past the stale time before it got there): `keep`'s own
+/// refresh finds it, and the delete ends `lock_lost` with nothing changed,
+/// the successor's lock left.
+#[test]
+fn a_catalog_lock_taken_over_before_it_is_kept_deletes_nothing() {
+    let d = dirs();
+    let ids = [hex('a')];
+    let (work, _) = setup(&d, &ids);
+    let lock = d.app.join(fc_profile_lock_dir());
+    let without_lock = |d: &Dirs| {
+        let mut all = snapshot(d);
+        all.retain(|name, _| !name.contains("profile-registry.write."));
+        all
+    };
+    let before = without_lock(&d);
+    // The hook's files beside the gates, outside the snapshot.
+    let paused = d.locks.join("paused");
+    let release = d.locks.join("release");
+    let child = Command::new(BIN)
+        .args([
+            "profile",
+            "delete",
+            "--app-root",
+            s(&d.app),
+            "--lock-dir",
+            s(&d.locks),
+            "--id",
+            "work",
+            "--confirm-display-name",
+            "Work",
+        ])
+        .env(
+            "FREEDOM_CORED_TEST_PROFILE_DELETE_PAUSE",
+            format!("before-keep={}={}", paused.display(), release.display()),
+        )
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let until = std::time::Instant::now() + Duration::from_secs(20);
+    while !paused.exists() {
+        assert!(std::time::Instant::now() < until, "never paused");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    std::fs::rename(&lock, lock.with_extension("old")).unwrap();
+    std::fs::create_dir(&lock).unwrap();
+    std::fs::write(&release, "").unwrap();
+    let out = child.wait_with_output().unwrap();
+    assert_eq!(code(&out), 74, "{out:?}");
+    assert_eq!(json_of(&out), json!({ "error": "lock_lost" }));
+    assert_eq!(without_lock(&d), before, "nothing changed");
+    assert!(work.join("identity").join("vault.json").is_file());
+    assert!(lock.is_dir(), "the successor's lock stays");
+}
+
+/// The catalog's write lock directory's name.
+fn fc_profile_lock_dir() -> &'static str {
+    "profile-registry.write.lock"
+}
+
 /// The packaged default profile (the app root) moved by a starting
 /// `profile migrate` (PRF-9b): its entries go into `freedom/`, and the
 /// shared ones stay at the root (`Profiles/`, `R/`, `locks/`, the catalog

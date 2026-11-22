@@ -277,6 +277,7 @@ fn take_profile_lock(canonical: &Path, dev: bool) -> Result<Lock, Exit> {
             Err(say(Outcome::Busy))
         }
         Err(LockError::Io(e)) => Err(storage("io", &e.to_string())),
+        Err(LockError::Lost) => Err(say(lost())),
     }
 }
 
@@ -485,10 +486,13 @@ fn migrate(profile_dir: &Path, lock_dir: &Path, dev: bool, mode: Mode) -> Exit {
     if let Err(exit) = confine::confine(grant) {
         return exit;
     }
+    step("before-keep");
     if let Err(e) = lock.keep() {
         return match e {
             LockError::Held => say(Outcome::Busy),
             LockError::Io(e) => storage("io", &e.kind().to_string()),
+            // Taken over since it was taken: nothing was changed.
+            LockError::Lost => say(lost()),
         };
     }
     crate::testhooks::profile_hold();

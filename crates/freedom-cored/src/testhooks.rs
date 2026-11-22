@@ -211,8 +211,9 @@
 //!   read-write grant (`profile/confine.rs`), so the hook works confined;
 //!   nothing else is.
 //! - `FREEDOM_CORED_TEST_PROFILE_DELETE_CRASH` names a step of `profile
-//!   delete` (`before-record`, `after-record`, `after-catalog`,
-//!   `mid-removal`, `before-result`): there the process exits at once with
+//!   delete` (`before-keep`, confined, before its lock is kept;
+//!   `before-record`, `after-record`, `after-catalog`, `mid-removal`,
+//!   `before-result`): there the process exits at once with
 //!   99, as if killed, its locks and files left as they are.
 //! - `FREEDOM_CORED_TEST_PROFILE_DELETE_PAUSE` (`<step>=<marker>=<release>`):
 //!   at that step `profile delete` creates the file `<marker>`, then waits,
@@ -221,7 +222,8 @@
 //!   `FREEDOM_CORED_TEST_PROFILE_HOLD`'s, its files' directories are in the
 //!   delete's grant.
 //! - `FREEDOM_CORED_TEST_PROFILE_MIGRATE_CRASH` names a step of `profile
-//!   migrate`: its recovery's (`after-exclusion`, `mid-recovery`,
+//!   migrate`: `before-keep` (confined, before its lock is kept), its
+//!   recovery's (`after-exclusion`, `mid-recovery`,
 //!   `before-journal-removed`), and a starting move's (`after-exclusion`,
 //!   `after-freedom-dir`, `after-journal`, `mid-move` after each entry's
 //!   rename, `after-renames`, `after-marker`, `after-placeholder`,

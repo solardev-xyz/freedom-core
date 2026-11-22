@@ -185,6 +185,10 @@ pub enum LockError {
     Held,
     /// The lock directory couldn't be made, read or set (exit 74).
     Io(std::io::Error),
+    /// [`Lock::keep`]'s refresh found the lock isn't this holder's any more
+    /// (taken over since it was taken), or couldn't refresh it: nothing may
+    /// be written under it (`lock_lost`, exit 74).
+    Lost,
 }
 
 /// The timings a lock runs on.
@@ -234,6 +238,9 @@ enum Stage {
     Validated,
     /// The handle's times set.
     Refreshed,
+    /// A release: the lock found fresh and its path naming the handle's
+    /// directory, just before the removal.
+    Identified,
 }
 
 struct Shared {
@@ -306,7 +313,9 @@ impl Lock {
         })
     }
 
-    /// Starts keeping the lock from a thread of its own, once.
+    /// Starts keeping the lock from a thread of its own, once, after one
+    /// refresh on the caller's thread ([`Lock::touch`]) that must find the
+    /// lock still this holder's ([`LockError::Lost`] otherwise).
     pub fn keep(&self) -> Result<(), LockError> {
         let mut refresher = self
             .refresher
@@ -314,6 +323,13 @@ impl Lock {
             .map_err(|_| LockError::Io(std::io::Error::other("the lock's state is poisoned")))?;
         if refresher.is_some() {
             return Ok(());
+        }
+        // One refresh now, before the caller writes anything: a lock taken
+        // over since it was taken (the process stalled past the stale time
+        // before it got here) is found here, not at the refresher's first
+        // tick an update period later.
+        if !self.touch() {
+            return Err(LockError::Lost);
         }
         let shared = Arc::clone(&self.shared);
         let lock_dir = self.lock_dir.clone();
@@ -395,25 +411,40 @@ impl Lock {
 
     /// Lets go: the directory is removed unless the lock was compromised.
     pub fn release(mut self) -> bool {
-        self.let_go()
+        self.let_go(&|_| {})
+    }
+
+    #[cfg(test)]
+    fn release_with(mut self, hook: &dyn Fn(Stage)) -> bool {
+        self.let_go(hook)
     }
 
     /// Lets go: the refresher stopped, then the directory removed only if
-    /// the lock is still this holder's and its path still names the
-    /// directory it made. Between that check and the removal a successor
-    /// could replace it, but only after this lock went stale, which a
-    /// holder that is letting go (and refreshed within the update period)
-    /// hasn't: proper-lockfile's own release has the same window.
-    fn let_go(&mut self) -> bool {
-        let (compromised, dir) = match self.shared.state.lock() {
+    /// the lock is still this holder's, fresh, and its path names the
+    /// directory it made.
+    /// - **Fresh:** the handle's mtime is the one this holder set, and
+    ///   younger than the stale time less one update period. A lock older
+    ///   than that may be a taker's to clean up (proper-lockfile takes one
+    ///   past the stale time), so it is left in place.
+    /// - **Its path names the handle's directory:** otherwise it is
+    ///   another's.
+    ///
+    /// Between that check and the removal, a successor could replace the
+    /// directory only once the lock is past its stale time: a freeze longer
+    /// than the whole margin inside those few instructions, as in
+    /// proper-lockfile's own release. Renaming the directory away first
+    /// (and back if it weren't this holder's) would open a new window
+    /// while the path is empty, so it isn't done.
+    fn let_go(&mut self, hook: &dyn Fn(Stage)) -> bool {
+        let (compromised, dir, mtime) = match self.shared.state.lock() {
             Ok(mut state) => {
                 if state.released {
                     return !state.compromised;
                 }
                 state.released = true;
-                (state.compromised, state.dir.take())
+                (state.compromised, state.dir.take(), state.mtime_ms)
             }
-            Err(_) => (true, None),
+            Err(_) => (true, None, 0),
         };
         self.shared.wake.notify_all();
         let refresher = match self.refresher.get_mut() {
@@ -426,9 +457,18 @@ impl Lock {
         let Some(dir) = dir else {
             return false;
         };
-        if compromised || !names(&self.lock_dir, &dir).unwrap_or(false) {
+        let stale = i64::try_from(rules::effective_stale_ms(self.timing.stale_ms)).unwrap_or(0);
+        let update = i64::try_from(rules::effective_update_ms(
+            self.timing.stale_ms,
+            Some(self.timing.update_ms),
+        ))
+        .unwrap_or(i64::MAX);
+        let fresh = handle_mtime_ms(&dir)
+            .is_ok_and(|seen| seen == mtime && now_ms().saturating_sub(seen) < stale - update);
+        if compromised || !fresh || !names(&self.lock_dir, &dir).unwrap_or(false) {
             return false;
         }
+        hook(Stage::Identified);
         // Closed first: on Windows a directory open elsewhere stays behind
         // as a pending delete.
         drop(dir);
@@ -441,7 +481,7 @@ impl Lock {
 
 impl Drop for Lock {
     fn drop(&mut self) {
-        self.let_go();
+        self.let_go(&|_| {});
     }
 }
 
@@ -647,6 +687,63 @@ mod tests {
         assert!(path.is_dir());
     }
 
+    /// `keep` refreshes once on the caller's thread before the refresher
+    /// starts: a lock taken over between its taking and `keep` is `Lost`
+    /// there, before the caller writes anything, and the successor's lock
+    /// is left as it is.
+    #[test]
+    fn keep_finds_a_takeover_since_the_lock_was_taken() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("x.lock");
+        let lock = Lock::take(&path, SHORT, 0, retries_none).unwrap();
+        let theirs = now_ms() - 60_000;
+        take_over(&path, theirs);
+        assert!(matches!(lock.keep(), Err(LockError::Lost)));
+        assert!(!lock.held());
+        assert_eq!(mtime_ms(&path).unwrap(), theirs);
+        assert!(!lock.release());
+        assert!(path.is_dir());
+        // Untouched, `keep` refreshes and starts the refresher.
+        let other = dir.path().join("y.lock");
+        let lock = Lock::take(&other, SHORT, 0, retries_none).unwrap();
+        assert!(lock.keep().is_ok());
+        assert!(lock.held());
+        assert!(lock.release());
+        assert!(!other.exists());
+    }
+
+    /// A release leaves a lock past the stale time less one update period
+    /// in place, for a taker to clean up: it doesn't reach its identity
+    /// check, so a successor replacing the directory there (staged by the
+    /// hook) loses nothing. A fresh lock is removed as before.
+    #[test]
+    fn a_release_leaves_a_stale_lock_to_its_taker() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("x.lock");
+        let lock = Lock::take(&path, SHORT, 0, retries_none).unwrap();
+        // SHORT: stale 2 s, update 1 s, so stale for a release past 1 s
+        // (the probe's mtime may be up to a second ahead).
+        std::thread::sleep(Duration::from_millis(2_300));
+        let reached = std::cell::Cell::new(false);
+        let theirs = now_ms();
+        let released = lock.release_with(&|at| {
+            if at == Stage::Identified {
+                reached.set(true);
+                take_over(&path, theirs);
+            }
+        });
+        assert!(!released);
+        assert!(!reached.get(), "a stale lock never reaches its removal");
+        assert!(path.is_dir(), "left for its taker");
+
+        let fresh = dir.path().join("y.lock");
+        let lock = Lock::take(&fresh, SHORT, 0, retries_none).unwrap();
+        let reached = std::cell::Cell::new(false);
+        assert!(lock.release_with(&|at| reached.set(at == Stage::Identified)));
+        assert!(reached.get());
+        assert!(!fresh.exists());
+    }
+
     /// A release whose path names another directory (replaced while the
     /// lock still read as held) removes nothing.
     #[test]
@@ -665,7 +762,7 @@ mod tests {
     fn taken_refused_and_let_go() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("x.lock");
-        let lock = Lock::acquire(&path, SHORT, 0, retries_none).unwrap();
+        let lock = Lock::take(&path, SHORT, 0, retries_none).unwrap();
         assert!(path.is_dir() && lock.held());
         // The probe's mtime: on a second, plus 5 ms (or a whole second
         // where the filesystem keeps no more).
@@ -674,6 +771,7 @@ mod tests {
             mtime.rem_euclid(1000) == 5 || mtime.rem_euclid(1000) == 0,
             "{mtime}"
         );
+        lock.keep().unwrap();
         assert!(matches!(
             Lock::acquire(&path, SHORT, 2, |_| 10),
             Err(LockError::Held)
