@@ -1,6 +1,6 @@
 # 0014: The Colibri verifier process
 
-**Status:** proposed. Roadmap item 3.3: Colibri leaves Electron main's WASM workers for its C core in a confined process of its own. Builds on [0001](0001-freedom-cored.md) (frames, deadlines, hardening), [0005](0005-chain-data.md) (the `shell.verified` Colibri operation, the fault, capacity and #752 rules, and the block rules of freedom-core #279), [0004](0004-naming-sessions.md) (which has no Colibri operation left once freedom-core #286 lands), [0007](0007-ipfs-service.md) and [0008](0008-radicle-service.md) (the service pattern), [0009](0009-dweb-verification.md) (streams in both directions) and [0010](0010-service-confinement.md) (confinement). Nothing here is built yet. The user decides the [open questions](#open-questions).
+**Status:** decided (the user, 2026-11-22): every open question as proposed: the package's built-in beacon and checkpoint hosts, reached through the session (1); native only (Q19); public upstream PRs (Q20); public upstream issues for F-1, F-6, F-11 and F-12 (4). [Open questions](#open-questions) records each. Roadmap item 3.3: Colibri leaves Electron main's WASM workers for its C core in a confined process of its own. Builds on [0001](0001-freedom-cored.md) (frames, deadlines, hardening), [0005](0005-chain-data.md) (the `shell.verified` Colibri operation, the fault, capacity and #752 rules, and the block rules of freedom-core #279), [0004](0004-naming-sessions.md) (which has no Colibri operation left once freedom-core #286 lands), [0007](0007-ipfs-service.md) and [0008](0008-radicle-service.md) (the service pattern), [0009](0009-dweb-verification.md) (streams in both directions) and [0010](0010-service-confinement.md) (confinement). Nothing here is built yet. The user decides the [open questions](#open-questions).
 
 **Amended** after #274 merged, for what has been found since:
 - the service serves no `eth_call` or `eth_estimateGas`, and so no ENS forward, reverse or NameNFT lookup, because Colibri doesn't prove them in PAP mode (F-11: freedom-browser #1060, #1076; [Calls and ENS](#calls-and-ens));
@@ -870,15 +870,18 @@ Once decided:
    - **Only the configured prover:** the sync requests go to the prover. The package's own order already ends with it (`cjs/http.js:151–168`). A cold start then depends on the prover serving light-client updates, bootstraps and checkpoint roots, and may be slower or fail where it doesn't.
    - **The residual either way:** a taken-over process can put what it holds (its open operations' params, its cache) into those free sync fields, and aim them at one host of the type with `exclude_mask` ([What a taken-over verifier keeps](#what-a-taken-over-verifier-keeps)). With the built-in hosts, that reaches third parties the user didn't configure. With the prover alone, it reaches only the prover, which already sees the reads.
    - *Proposed: keep the built-in hosts for this design. From an honest service they learn only when a client syncs, never what it reads; the residual above is the taken-over case. Moving to the prover alone, which closes it, can be its own later change, with its own fixtures and vectors.*
+   - **Decided (the user, 2026-11-22): keep the built-in hosts, reached through the session.**
 2. **Q19: ship only the native service, or keep WASM for one release?**
    - **Native only:** COL-6 switches to the service and removes the WASM path in one release.
    - **Keep WASM for one release:** COL-6 switches, with a setting that brings the WASM workers back, and the removal follows in the next release. That costs two backends tested in every PR of that release, and the package kept.
    - *Proposed: native only, once COL-5's contract suite and its live chain-read run pass on the service on three OSes. The WASM path's main risk, a crash of main, is the one this design removes.*
+   - **Decided (the user, 2026-11-22): native only.**
 3. **Q20: work through public upstream PRs, or keep a vendored copy?**
    - **Public upstream PRs:** four small PRs on Colibri upstream (an `http` feature, an offline pinned build, a safe answer API, and a [verifier-only build](#the-verifier-only-build)), with a pinned fork commit until they are released ([Option A](#option-a-public-upstream-prs)).
    - **A vendored copy:** the C sources copied into this repository with the verifier-only change as our own patch, our own `unsafe` bindings, and every upstream release re-checked by hand ([Option B](#option-b-a-vendored-copy)).
    - Either way, COL-2 waits for the verifier-only change, since without it the license gate can't pass.
    - *Proposed: public upstream PRs.*
+   - **Decided (the user, 2026-11-22): public upstream PRs.**
 4. **May we file public issues upstream, for F-1, F-6, F-11 and F-12?** This is separate from Q20: either build path can file them, or none.
    - **F-1:** `VerifiedOnly` answers unproofable methods and `pending`/`earliest` reads without a proof.
    - **F-6:** the out-of-bounds access on a transaction hash the prover hasn't seen (#750).
@@ -887,3 +890,4 @@ Once decided:
    - Upstream has open outside PRs whose titles describe verifier binding checks (#396–#405, [Threat model](#threat-model)). They are read first, and an issue cites any that covers it.
    - Our own fixes don't depend on the answer. The core's chain-data fix is merged (#279); the naming fix (#286) and main's (#1048, #1082) are in review; and the service refuses what they refuse.
    - *Proposed: yes, all four, in plain factual text.*
+   - **Decided (the user, 2026-11-22): yes, all four.**
