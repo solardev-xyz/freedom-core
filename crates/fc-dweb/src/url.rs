@@ -146,4 +146,26 @@ mod tests {
         );
         assert_eq!(normalize_target("/ipfs/c/#f").as_deref(), Some("/ipfs/c/"));
     }
+
+    /// RUSTSEC-2026-0592: `url` before 2.5.9 recursed once per `blob:`
+    /// prefix in `Url::origin()` and overflowed the stack. The URL Standard
+    /// (and Node's `URL`) takes a `blob:` URL's inner origin only for
+    /// `http`, `https` and `file`; anything else is opaque.
+    #[test]
+    fn origin_of_nested_blob_urls() {
+        let nested = format!("{}https://example.com/", "blob:".repeat(10_000));
+        assert_eq!(origin(&Url::parse(&nested).unwrap()), "null");
+        assert_eq!(
+            origin(&Url::parse("blob:https://example.com/x").unwrap()),
+            "https://example.com"
+        );
+        assert_eq!(
+            origin(&Url::parse("blob:blob:https://example.com/").unwrap()),
+            "null"
+        );
+        assert_eq!(
+            origin(&Url::parse("blob:ws://example.com/").unwrap()),
+            "null"
+        );
+    }
 }
