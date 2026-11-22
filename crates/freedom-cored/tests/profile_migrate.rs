@@ -2950,3 +2950,60 @@ fn a_file_the_core_cant_read_defers_the_copy_on_windows() {
     assert_eq!(said(&out), "migrated", "{out:?}");
     assert_new_layout(&d.profile);
 }
+
+/// The cap across copies (review of #451, round 3): each finished copy is
+/// charged at least the bytes it wrote. `ant-data` surveys small and
+/// `ipfs-data` at 1.2 GiB, within the cap together. At `ant-data`'s
+/// `before-copy` pause a 1.2 GiB file is added to it: its copy, within its
+/// own budget, goes through, and then `ipfs-data` would take the move past
+/// 2 GiB, so it is refused and the move rolls back, both sources intact and
+/// no `.moving` left. The files are sparse.
+#[cfg(unix)]
+#[test]
+fn a_copy_grown_since_its_survey_counts_against_the_next() {
+    const PART: u64 = 1200 * 1024 * 1024;
+    let sparse = |path: &Path| {
+        std::fs::File::create(path).unwrap().set_len(PART).unwrap();
+    };
+    let d = dirs();
+    seeded(&d.profile);
+    write(&d.profile.join("ipfs-data").join("big"), "");
+    sparse(&d.profile.join("ipfs-data").join("big"));
+    let free = d.base.join("free");
+    write(&free, "100000000000000");
+    let (paused, release) = (d.base.join("paused"), d.base.join("release"));
+    let child = start_paused(
+        &d.profile,
+        &d.locks,
+        "before-copy",
+        &paused,
+        &release,
+        &[(EXDEV, "ant-data,ipfs-data"), (FREE, s(&free))],
+    );
+    wait_for(&paused);
+    assert_eq!(copied_names(&d.profile), ["ant-data"]);
+    sparse(&d.profile.join("ant-data").join("grown"));
+    std::fs::write(&release, "").unwrap();
+    let out = child.wait_with_output().unwrap();
+    assert_eq!(
+        (code(&out), said(&out)),
+        (0, "rolled_back".into()),
+        "{out:?}"
+    );
+    let log = stderr(&out);
+    assert!(
+        log.contains("copy_too_large") || log.contains("past its budget"),
+        "{out:?}"
+    );
+    assert_entries_at_the_root(&d.profile);
+    for path in [
+        d.profile.join("ant-data").join("grown"),
+        d.profile.join("ipfs-data").join("big"),
+    ] {
+        assert_eq!(std::fs::metadata(&path).unwrap().len(), PART, "{path:?}");
+    }
+    assert!(
+        !there(&d.profile.join("freedom")),
+        "no copy or .moving left"
+    );
+}

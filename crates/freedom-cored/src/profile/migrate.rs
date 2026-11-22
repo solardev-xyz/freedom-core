@@ -929,8 +929,8 @@ fn moving(
         .ok_or_else(|| std::io::Error::from(std::io::ErrorKind::NotFound))?;
     step("after-freedom-dir");
     let mut journal = None;
-    // What the copies so far took, by their surveys: all of them stay
-    // within the cap.
+    // What the copies so far are charged against the cap: each finished
+    // copy at least its survey's size and at least the bytes it wrote.
     let mut copied_size = 0u64;
     if !entries.is_empty() {
         let mut written = Journal::new(entries)
@@ -1075,8 +1075,8 @@ fn copy_entry(
         Ok(size) => size,
         Err(unfit) => return Err(Halt::Io(unfit.error())),
     };
-    let total = copied_size.saturating_add(size);
-    if let Err(unfit) = copy::within_cap(total).and_then(|()| copy::room(space, size)) {
+    let ahead = copied_size.saturating_add(size);
+    if let Err(unfit) = copy::within_cap(ahead).and_then(|()| copy::room(space, size)) {
         return Err(Halt::Io(unfit.error()));
     }
     log::info(
@@ -1119,7 +1119,7 @@ fn copy_entry(
     if lost {
         return Err(Halt::Lost);
     }
-    copied?;
+    let bytes = copied?;
     rename_retried(
         freedom,
         OsStr::new(&moving),
@@ -1128,7 +1128,9 @@ fn copy_entry(
         held,
     )?;
     freedom.sync()?;
-    *copied_size = total;
+    // Charged at least what it wrote (a file grown or added since its
+    // survey), before the next entry's budget is reckoned.
+    *copied_size = copied_size.saturating_add(size.max(bytes));
     step("after-copy");
     Ok(())
 }
