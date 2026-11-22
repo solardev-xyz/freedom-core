@@ -355,7 +355,7 @@ Four public issues are filed upstream, in plain factual text, after the open out
 
 Until they are released, `freedom-colibrid` depends on a fork under `solardev-xyz` at a pinned commit, as `freedom-radicled` depends on libradicle.
 - **Cost:** upstream review time, and a fork to keep until then. Upstream fixed an outside license report and the feature it asked for within a day (issue #401, opened 18 October; PR #403, merged 19 October), and has open outside PRs.
-- **Our code:** with PR 3, no `unsafe` in this repository. Without it, one small module with `#[allow(unsafe_code)]` for the two answer calls, which AGENTS rule 6 must name, like `freedom-radicled`'s one call.
+- **Our code:** no `unsafe` in this repository. PR 3's safe answer API is in the pinned fork commit whether or not upstream has released it yet, so the service answers requests through it. A local `unsafe` answer module would need a new design decision.
 - **CI:** CMake and a C++17 compiler on the three OSes' runners, the fork's sources fetched by Cargo, and `FetchContent`'s sources pinned.
 
 ### Option B: a vendored copy
@@ -847,7 +847,7 @@ With this design decided, each lands with the step that needs it:
 - **0009:** *Streams in the core*'s rule that service connections keep one role each gains `freedom-colibrid`'s exception: main sends it fetched bodies, and it sends main none.
 - **0010:** *What each service needs* gains `freedom-colibrid`: its chain's directory read-write, nothing read-only beyond the system's, no network; the checkpoint and private processes nothing. Its tests cover it as they cover the others.
 - **0013:** *What moves* gains `colibri/`, a cache that may be dropped instead of moved.
-- **AGENTS.md:** nothing while upstream takes Option A's PR 3 (the safe answer API). Only if it doesn't, and the service needs an `unsafe` binding of its own, does rule 6 name the service's answer module.
+- **AGENTS.md:** nothing. The pinned fork carries PR 3 (the safe answer API), so the service needs no `unsafe` of its own and rule 6 is unchanged.
 
 ## Options weighed
 
