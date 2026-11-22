@@ -49,9 +49,9 @@
 //!   into it would fail with `EXDEV`, so every entry will be copied. Each
 //!   is surveyed (a mount point inside it, a special file, a file or
 //!   directory this process can't use, a tree too deep, on Windows a
-//!   reparse point), and their total
-//!   size, with the margin, must fit in the space free on `freedom/`'s
-//!   volume. A `freedom/` on the profile's own mount (or none yet, which
+//!   reparse point), their total size must be within the 2 GiB a move
+//!   copies (`copy_too_large`), and with the margin it must fit in the
+//!   space free on `freedom/`'s volume. A `freedom/` on the profile's own mount (or none yet, which
 //!   the move makes there) needs no copy, so nothing is walked: a renamed
 //!   entry carries whatever is mounted inside it along, removes nothing,
 //!   and a rollback renames it back.
@@ -208,6 +208,9 @@ fn copies(
             Ok(bytes) => size = size.saturating_add(bytes),
             Err(unfit) => return Ok(Some(unfit)),
         }
+    }
+    if let Err(unfit) = copy::within_cap(size) {
+        return Ok(Some(unfit));
     }
     Ok(copy::room(space, size).err())
 }

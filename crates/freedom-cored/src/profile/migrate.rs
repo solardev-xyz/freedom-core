@@ -63,7 +63,8 @@
 //!      tried again, 30 times, 100 ms apart (MD3);
 //!    - **an entry on another device** than `freedom/` (the rename's
 //!      `EXDEV`, Windows's `ERROR_NOT_SAME_DEVICE`; PRF-9c) is copied
-//!      instead: surveyed and the room for it checked (`copy.rs`), named in
+//!      instead: surveyed, the copies' total checked against the 2 GiB cap
+//!      and the room for it checked (`copy.rs`), named in
 //!      the journal's `copied` (written again, whole and durably), copied
 //!      to `freedom/<name>.moving` (fc-store's `copy_tree`: files synced,
 //!      directories flushed, symlinks as links, never past the profile's
@@ -74,7 +75,10 @@
 //!    - cleanup: each copied entry's source removed from the root, never
 //!      past the profile's mount (a mount point found inside it stops the
 //!      removal, which would empty the mounted volume), the lock checked
-//!      after each entry removed;
+//!      after each entry removed. Each goes only while
+//!      `fc_profile::layout::roll_forward` calls for it, from the entry's
+//!      state read right before: something of another kind at its name
+//!      isn't its source, and stays;
 //!    - the placeholder at the root's `identity`, where nothing is
 //!      (`needs_placeholder`), and the root flushed;
 //!    - the journal removed and `freedom/` flushed: `migrated`.
@@ -621,12 +625,7 @@ fn recover(
     let entries = journal.entries();
     let mut states = Vec::with_capacity(entries.len());
     for name in entries {
-        let moving = format!("{name}{}", layout::MOVING_SUFFIX);
-        states.push(EntryState {
-            at_root: found(&root, name)?,
-            moved: found(&freedom, name)?,
-            moving: found(&freedom, &moving)?,
-        });
+        states.push(entry_state(&root, &freedom, name)?);
     }
     let journal_name = OsStr::new(layout::MOVE_JOURNAL);
 
@@ -643,7 +642,7 @@ fn recover(
             if !held() {
                 return Ok(lost());
             }
-            match remove_within(&root, OsStr::new(name), held, None) {
+            match remove_source(&root, &freedom, name, held, None) {
                 Ok(()) => {}
                 Err(Halt::Lost) => return Ok(lost()),
                 Err(Halt::Io(e)) => return Err(e),
@@ -729,6 +728,46 @@ fn recover(
         root.sync()?;
     }
     Ok(Outcome::RolledBack)
+}
+
+/// One entry's state: at the root, in `freedom/`, and as its `.moving`
+/// copy.
+fn entry_state(root: &Dir, freedom: &Dir, name: &str) -> std::io::Result<EntryState> {
+    let moving = format!("{name}{}", layout::MOVING_SUFFIX);
+    Ok(EntryState {
+        at_root: found(root, name)?,
+        moved: found(freedom, name)?,
+        moving: found(freedom, &moving)?,
+    })
+}
+
+/// A copied entry's source removed from the root after the marker, only
+/// while `fc_profile::layout::roll_forward` calls for it, from the entry's
+/// state read right before the removal: what is at the root must be of its
+/// copy's kind. Anything else there (a file where a copied directory was,
+/// a directory where a copied file was) isn't its source, and stays. An
+/// entry `roll_forward` can't settle is an error, which a starting run
+/// settles by recovery (`corrupt`, the journal kept).
+fn remove_source(
+    root: &Dir,
+    freedom: &Dir,
+    name: &'static str,
+    held: &dyn Fn() -> bool,
+    at: Option<&str>,
+) -> Result<(), Halt> {
+    match layout::roll_forward(true, entry_state(root, freedom, name)?) {
+        Ok(forward) if forward.remove_source => remove_within(root, OsStr::new(name), held, at),
+        Ok(_) => {
+            log::warn(
+                "a copied entry's name at the root holds another kind of entry: it isn't the source, and stays",
+                serde_json::json!({ "entry": name }),
+            );
+            Ok(())
+        }
+        Err(why) => Err(Halt::Io(std::io::Error::other(format!(
+            "a copied entry can't be settled after the marker: {why:?}"
+        )))),
+    }
 }
 
 /// `freedom/` removed if it is empty and on the profile's own mount. One
@@ -886,6 +925,9 @@ fn moving(
         .ok_or_else(|| std::io::Error::from(std::io::ErrorKind::NotFound))?;
     step("after-freedom-dir");
     let mut journal = None;
+    // What the copies so far took, by their surveys: all of them stay
+    // within the cap.
+    let mut copied_size = 0u64;
     if !entries.is_empty() {
         let mut written = Journal::new(entries)
             .ok_or_else(|| std::io::Error::other("an entry the move's list doesn't hold"))?;
@@ -899,7 +941,7 @@ fn moving(
                 Ok(()) => {}
                 // `freedom/` on another volume: the entry is copied.
                 Err(Halt::Io(e)) if copy::crosses_devices(&e) => {
-                    copy_entry(&root, &freedom, name, &mut written, held)?;
+                    copy_entry(&root, &freedom, name, &mut written, &mut copied_size, held)?;
                 }
                 Err(halt) => return Err(halt),
             }
@@ -915,13 +957,14 @@ fn moving(
     }
     write_marker(&freedom)?;
     step("after-marker");
-    // Cleanup: each copied entry's source removed from the root.
+    // Cleanup: each copied entry's source removed from the root, while it
+    // is still of its copy's kind.
     let copied = journal.as_ref().map_or(&[][..], Journal::copied);
     for name in copied {
         if !held() {
             return Err(Halt::Lost);
         }
-        remove_within(&root, OsStr::new(name), held, Some("mid-cleanup"))?;
+        remove_source(&root, &freedom, name, held, Some("mid-cleanup"))?;
     }
     if !copied.is_empty() {
         root.sync()?;
@@ -1003,9 +1046,9 @@ fn rename_out(
 
 /// An entry on another device than `freedom/` (0013, "The move", 4;
 /// PRF-9c), copied in place of its rename:
-/// 1. surveyed, and the room for it checked on `freedom/`'s volume
-///    (`copy.rs`): either failing is a failure of the move, which rolls it
-///    back;
+/// 1. surveyed, the copies' total with it checked against the cap, and the
+///    room for it checked on `freedom/`'s volume (`copy.rs`): any of them
+///    failing is a failure of the move, which rolls it back;
 /// 2. named in the journal's `copied`, the journal written again whole and
 ///    durably before the copy begins (MG1);
 /// 3. copied to `freedom/<name>.moving` (fc-store's `copy_tree`), the lock
@@ -1018,6 +1061,7 @@ fn copy_entry(
     freedom: &Dir,
     name: &'static str,
     journal: &mut Journal,
+    copied_size: &mut u64,
     held: &dyn Fn() -> bool,
 ) -> Result<(), Halt> {
     let space = copy::space(freedom)?;
@@ -1025,7 +1069,8 @@ fn copy_entry(
         Ok(size) => size,
         Err(unfit) => return Err(Halt::Io(unfit.error())),
     };
-    if let Err(unfit) = copy::room(space, size) {
+    let total = copied_size.saturating_add(size);
+    if let Err(unfit) = copy::within_cap(total).and_then(|()| copy::room(space, size)) {
         return Err(Halt::Io(unfit.error()));
     }
     log::info(
@@ -1068,6 +1113,7 @@ fn copy_entry(
         held,
     )?;
     freedom.sync()?;
+    *copied_size = total;
     step("after-copy");
     Ok(())
 }

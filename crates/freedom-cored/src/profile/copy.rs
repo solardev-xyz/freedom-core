@@ -16,10 +16,19 @@
 //!     across, and the source's removal would empty it); a FIFO, a socket
 //!     or a device (`special_file`: never opened, so never waited on; the
 //!     copy doesn't make one); a file this process can't read, or a
-//!     directory it can't list, write and search (`no_access`: the copy or
-//!     the removal would fail halfway); a directory deeper than fc-store's
-//!     `MAX_DEPTH` (`too_deep`); on Windows, a reparse point
-//!     (`reparse_point`: making one takes a privilege a user lacks).
+//!     directory it can't list, write and search, or a profile directory
+//!     it can't remove the entry from (`no_access`: the copy or the
+//!     removal would fail halfway; on Windows each file's reading and
+//!     `DELETE`, and each directory's listing and `DELETE`, probed by
+//!     opening with them); a directory deeper than fc-store's `MAX_DEPTH`
+//!     (`too_deep`); on Windows, a reparse point (`reparse_point`: making
+//!     one takes a privilege a user lacks).
+//! - **The cap** ([`within_cap`]): a starting move copies at most 2 GiB in
+//!   all (`copy_too_large` past it), so it ends well inside main's
+//!   ten-minute bound even on slow media. A copy killed at the bound rolls
+//!   back and starts over at the next start, so a larger one would never
+//!   finish; past the cap the move defers, and the old layout keeps
+//!   working.
 //! - **The room** ([`room`]): the survey's size plus a margin, 5% of it and
 //!   at least 64 MiB, must fit in the space free to this process's user on
 //!   `freedom/`'s volume, so a copy never leaves it nearly full for the
@@ -38,6 +47,21 @@ use fc_store::anchor::{Dir, Node, Space};
 
 /// The least room a copy leaves on `freedom/`'s volume beyond its own size.
 const MARGIN_MIN: u64 = 64 * 1024 * 1024;
+
+/// The most a starting move copies across devices, in all, by the survey's
+/// size (the coordinator's call of 2026-11-22; the module's comment).
+pub const COPY_CAP: u64 = 2 * 1024 * 1024 * 1024;
+
+/// Whether copying `total` in all stays within [`COPY_CAP`].
+pub fn within_cap(total: u64) -> Result<(), Unfit> {
+    if total <= COPY_CAP {
+        return Ok(());
+    }
+    Err(Unfit {
+        why: "copy_too_large",
+        detail: format!("{total} bytes to copy, past the {COPY_CAP} a move copies"),
+    })
+}
 
 /// The bytes a copy of `size` needs free: its size, and the margin.
 pub fn needed(size: u64) -> u64 {
@@ -84,6 +108,14 @@ pub fn space(dir: &Dir) -> io::Result<Space> {
 /// What copying the root's `name` to a volume whose allocation unit is
 /// `block` takes, or why it can't be copied (the module's comment).
 pub fn survey(root: &Dir, name: &str, block: u64) -> io::Result<Result<u64, Unfit>> {
+    // The source's removal takes the right to change the profile's
+    // directory itself (on Unix its write and search permission).
+    if !root.may_change() {
+        return Ok(Err(Unfit {
+            why: "no_access",
+            detail: "the profile's directory".to_owned(),
+        }));
+    }
     let block = block.max(1);
     let mut size = 0u64;
     let mut unfit = None;
@@ -143,6 +175,35 @@ pub fn room(space: Space, size: u64) -> Result<(), Unfit> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_move_copies_at_most_2_gib() {
+        assert_eq!(within_cap(0), Ok(()));
+        assert_eq!(within_cap(COPY_CAP), Ok(()));
+        let over = within_cap(COPY_CAP + 1).unwrap_err();
+        assert_eq!(over.why, "copy_too_large");
+        assert_eq!(over.error().kind(), io::ErrorKind::Other);
+    }
+
+    /// A profile directory this process can't change: no source could be
+    /// removed from it. Root may change anything, so this checks only where
+    /// the modes bind.
+    #[cfg(unix)]
+    #[test]
+    fn a_survey_needs_the_right_to_remove_from_the_profile_directory() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let base = tmp.path().join("profile");
+        std::fs::create_dir_all(base.join("run")).unwrap();
+        let dir = root(&base);
+        assert_eq!(survey(&dir, "run", 512).unwrap(), Ok(512));
+        std::fs::set_permissions(&base, std::fs::Permissions::from_mode(0o500)).unwrap();
+        if std::fs::write(base.join("probe"), b"x").is_err() {
+            let unfit = survey(&dir, "run", 512).unwrap().unwrap_err();
+            assert_eq!(unfit.why, "no_access");
+        }
+        std::fs::set_permissions(&base, std::fs::Permissions::from_mode(0o700)).unwrap();
+    }
 
     #[test]
     fn the_margin_is_five_percent_and_at_least_64_mib() {

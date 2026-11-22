@@ -714,9 +714,10 @@ pub enum KeyStoreError { NotFound, Cancelled, Unavailable, Invalidated, Denied, 
    - **An entry a copy couldn't move** (PRF-9c), checked only when `freedom/` is already on another mount than the profile's directory (its device differs, or on Linux its mount ID), where every entry will be copied. Each is walked without following a symlink or opening anything but a directory. The move defers on any of these:
      - a mount point inside the entry: the copy would pull the mounted volume across, and the source's removal would empty it;
      - a FIFO, a socket or a device;
-     - a file the core can't read, or a directory it can't list, write and search;
+     - a file the core can't read, a directory it can't list, write and search, or a profile directory it can't remove the entry from. On Windows each file's reading and `DELETE`, and each directory's listing and `DELETE`, are probed by opening with them;
      - a tree deeper than 64 levels;
      - on Windows, a reparse point;
+     - more than 2 GiB to copy in all (`copy_too_large`). A copy killed at main's ten-minute bound (MD4) rolls back and starts over at the next start, so a larger one might never finish on slow media. The old layout keeps working;
      - too little space on `freedom/`'s volume for the entries, each file rounded up to the volume's allocation unit, plus a margin of 5% and at least 64 MiB.
 
      A renamed entry isn't walked: its rename carries whatever is mounted inside it along, and nothing removes it.
@@ -725,13 +726,13 @@ pub enum KeyStoreError { NotFound, Cancelled, Unavailable, Invalidated, Denied, 
    - **Version 1,** `{ "version": 1, "entries": […] }`, which PRF-3's recovery reads, still parses, with nothing copied. A version-1 journal left before its marker may have PRF-3's placeholder file at the root's `identity` beside the moved `freedom/identity/`: recovery removes that placeholder and renames the directory back, as PRF-3's recovery does. Every journal a move writes from PRF-9 on is version 2 (MD9); a new profile's empty move writes none (MD5).
 4. **Each entry is one rename** into `freedom/`, with a check between renames that the lock is still the run's. On Windows, a rename refused while an indexer holds the entry (`EPERM`, `EACCES`, `EBUSY`) is retried 30 times, 100 ms apart (MD3). A rollback's renames back keep the 10 times with which `profile-catalog.js:1053–1086` retries its fence. Two Windows checks come before B3 enables moves (MD3), in PRF-9b: the deepest `ant-data/` and `ipfs-data/` paths under `freedom\` still open in Node, Go and Rust under a long user name, and no Myotis socket or other special file lives under an entry that moves. Either failing is fixed, or made a deferral, before B3.
    - **An entry on another device** (`EXDEV`, `ERROR_NOT_SAME_DEVICE`) is named in `copied` first, after a check for free space. It is then copied to `freedom/<name>.moving`, synced, its directories flushed, and renamed to its name. That is the roadmap's copy-then-rename. Its source is removed only after the marker.
-     - **The check** walks the entry as the preconditions do, and a failure rolls the move back.
+     - **The check** walks the entry as the preconditions do, and checks the copies' total against the 2 GiB. A failure rolls the move back.
      - **The copy** keeps permission bits (within the umask) and makes symlinks as links. It keeps no timestamps or owners, which confinement can't change.
      - **The copy, and every removal of a copy or a source,** stop at a mount point with an error rather than cross it.
    - **A symlink** (or a junction) is moved as the link, not its target, when it names an absolute path outside the profile. One whose target is relative, or absolute and inside the profile's directory by name, defers the move (`link_inside_profile`): one directory deeper, a relative link names another place, and one into the profile may name an entry the move takes elsewhere. The move doesn't rewrite a link, since a new link isn't one rename and its rollback would have to undo it.
    - **A SQLite database isn't checkpointed** (MD8). Nothing has it open under the exclusion, and its `-wal` and `-shm` are journal entries of their own beside it, renamed or copied with it, and rolled back as a set. Their committed rows move with them. A checkpoint would mean opening the database in the move, and a `-wal` it couldn't empty would stop the move for nothing.
 5. **The marker:** `freedom/layout.json`, `{ version: 1, moved_at, by }`, is written durably.
-6. **Cleanup:** the copied entries' sources are removed from the root.
+6. **Cleanup:** the copied entries' sources are removed from the root. Each goes only while what is at its name is of its copy's kind, judged right before its removal, as the roll-forward judges it. A file where a copied directory was, or a directory where a copied file was, isn't the source, and stays.
 7. **The placeholder,** after the marker (MD9): a regular file named `identity` at the root, saying where the data went, written durably when nothing is at that name. Both the starting run and `--finish-only` write it when it's missing, and neither replaces anything there. Written before the marker, as this design first had it, a crash in between left a file at `identity` in the old layout, and a profile with no `identity/` yet then couldn't start its core (MG2).
 8. **The journal is removed,** last, and both directories flushed.
 

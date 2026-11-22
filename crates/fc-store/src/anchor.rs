@@ -282,6 +282,15 @@ impl Dir {
         imp::mount_of(self)
     }
 
+    /// Whether this process may add and remove entries here: on Unix, write
+    /// and search permission on the directory (`faccessat` on its handle),
+    /// which removing an entry of it takes. On Windows a removal takes each
+    /// entry's own `DELETE` right, which [`Dir::walk`] probes, so this is
+    /// always true there.
+    pub fn may_change(&self) -> bool {
+        imp::may_change(self)
+    }
+
     /// Renames `from` over `to`, both in this directory, replacing whatever
     /// `to` is without following it.
     pub fn rename(&self, from: &OsStr, to: &OsStr) -> io::Result<()> {
@@ -582,9 +591,7 @@ mod imp {
             let next = rustix::fs::openat(parent, &level.name, TREE_FLAGS, Mode::empty())
                 .map_err(refused)?;
             if identity(&next)? != level.identity {
-                return Err(io::Error::other(
-                    "a directory of a tree changed during its removal",
-                ));
+                return Err(changed());
             }
             fd = Some(next);
         }
@@ -610,6 +617,7 @@ mod imp {
         bound: Option<Mount>,
         each: &mut dyn FnMut() -> io::Result<()>,
     ) -> io::Result<bool> {
+        let looked = before_open(bound, dir.fd.as_fd(), name)?;
         let first = match rustix::fs::openat(&dir.fd, name, TREE_FLAGS, Mode::empty()) {
             Ok(fd) => fd,
             Err(Errno::NOENT) => return Ok(false),
@@ -623,7 +631,9 @@ mod imp {
             }
             Err(e) => return Err(e.into()),
         };
+        opened_as(&first, looked)?;
         within(bound, first.as_fd())?;
+        super::tree::pause::at("opened", name);
         let mut levels = vec![Level {
             name: name.to_owned(),
             identity: identity(&first)?,
@@ -636,9 +646,12 @@ mod imp {
                 return Ok(true);
             };
             if let Some(entry) = level.left.pop() {
+                let looked = before_open(bound, current.as_fd(), &entry)?;
                 match rustix::fs::openat(&current, &entry, TREE_FLAGS, Mode::empty()) {
                     Ok(child) => {
+                        opened_as(&child, looked)?;
                         within(bound, child.as_fd())?;
+                        super::tree::pause::at("opened", &entry);
                         levels.push(Level {
                             name: entry,
                             identity: identity(&child)?,
@@ -715,13 +728,82 @@ mod imp {
         #[allow(clippy::unnecessary_cast)]
         let device = stat.st_dev as u64;
         #[cfg(target_os = "linux")]
-        let id = mount_id(parent, name, AtFlags::SYMLINK_NOFOLLOW);
+        let id = mount_id(parent, name, LOOK);
         #[cfg(not(target_os = "linux"))]
         let id = {
             let _ = (parent, name);
             None
         };
         Mount { device, id }
+    }
+
+    /// How a name is looked at before it is opened: never following a
+    /// symlink, and on Linux never triggering an automount at it.
+    #[cfg(target_os = "linux")]
+    const LOOK: AtFlags = AtFlags::SYMLINK_NOFOLLOW.union(AtFlags::NO_AUTOMOUNT);
+    #[cfg(not(target_os = "linux"))]
+    const LOOK: AtFlags = AtFlags::SYMLINK_NOFOLLOW;
+
+    /// `name` in `parent`, looked at as [`LOOK`] says (`fstatat`).
+    pub(super) fn stat_at(parent: BorrowedFd<'_>, name: &OsStr) -> Result<rustix::fs::Stat, Errno> {
+        rustix::fs::statat(parent, name, LOOK)
+    }
+
+    /// A stat's device and inode, as [`identity`] reads them from a handle.
+    pub(super) fn stat_identity(stat: &rustix::fs::Stat) -> (u64, u64) {
+        // st_dev and st_ino are u64 on Linux, but not on every Unix.
+        #[allow(clippy::unnecessary_cast)]
+        (stat.st_dev as u64, stat.st_ino as u64)
+    }
+
+    /// With a bound, `name` in `parent` looked at before it is opened: a
+    /// directory there must be on the bound's mount, or the removal stops
+    /// before the open (which could trigger an automount, or wait on a
+    /// mounted volume). Its identity, which the open must then find.
+    fn before_open(
+        bound: Option<Mount>,
+        parent: BorrowedFd<'_>,
+        name: &OsStr,
+    ) -> io::Result<Option<(u64, u64)>> {
+        let Some(bound) = bound else {
+            return Ok(None);
+        };
+        let stat = match stat_at(parent, name) {
+            Ok(stat) => stat,
+            Err(Errno::NOENT) => return Ok(None),
+            Err(e) => return Err(e.into()),
+        };
+        if FileType::from_raw_mode(stat.st_mode) != FileType::Directory {
+            return Ok(None);
+        }
+        if !mount_at(parent, name, &stat).same(bound) {
+            return Err(super::tree::crossing());
+        }
+        super::tree::pause::at("classified", name);
+        Ok(Some(stat_identity(&stat)))
+    }
+
+    /// The directory opened must be the one looked at before.
+    fn opened_as(fd: &OwnedFd, looked: Option<(u64, u64)>) -> io::Result<()> {
+        match looked {
+            Some(looked) if identity(fd)? != looked => Err(changed()),
+            _ => Ok(()),
+        }
+    }
+
+    fn changed() -> io::Error {
+        io::Error::other("a directory of a tree changed during its removal")
+    }
+
+    pub fn may_change(dir: &Dir) -> bool {
+        use rustix::fs::Access;
+        rustix::fs::accessat(
+            &dir.fd,
+            c".",
+            Access::WRITE_OK | Access::EXEC_OK,
+            AtFlags::empty(),
+        )
+        .is_ok()
     }
 
     /// `STATX_MNT_ID`, or `None` where the kernel doesn't give it.
@@ -1046,6 +1128,7 @@ mod imp {
             return Ok(true);
         }
         within(bound, top.as_handle())?;
+        super::tree::pause::at("opened", name);
         let left = names_in(&top)?;
         let mut levels = vec![(top, left)];
         loop {
@@ -1057,6 +1140,7 @@ mod imp {
                     None => {}
                     Some(child) if plain_dir(&child)? => {
                         within(bound, child.as_handle())?;
+                        super::tree::pause::at("opened", &entry);
                         let left = names_in(&child)?;
                         levels.push((child, left));
                     }
@@ -1087,6 +1171,10 @@ mod imp {
 
     pub fn mount_of(dir: &Dir) -> io::Result<Mount> {
         mount_of_handle(dir.handle.as_handle())
+    }
+
+    pub fn may_change(_dir: &Dir) -> bool {
+        true
     }
 
     /// The volume `handle` is open on, by its serial number.

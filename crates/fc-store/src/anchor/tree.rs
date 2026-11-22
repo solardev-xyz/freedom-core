@@ -20,7 +20,15 @@
 //! - **[`Dir::space`]**: the bytes free to this process's user on a
 //!   directory's volume, and its allocation unit.
 //!
-//! Both hold a handle per level they are in (a copy, two), so neither goes
+//! Both go from handle to handle, as `remove_tree` does: each name is
+//! looked at first (`lstat`, never triggering an automount on Linux), a
+//! directory on another mount refused before it is opened, then opened
+//! through its parent's handle without following a symlink and checked to
+//! be the very directory looked at (its device and inode; on Windows its
+//! volume and file ID) and on the walk's mount. So a directory swapped for a
+//! link or for another directory between the look and the open is refused,
+//! and one renamed out of its path once opened is still the one read. Both
+//! hold a handle per level they are in (a copy, two), so neither goes
 //! deeper than [`MAX_DEPTH`]: the nodes' data is a few levels deep.
 
 use std::ffi::OsStr;
@@ -54,7 +62,46 @@ fn special() -> io::Error {
 }
 
 fn changed() -> io::Error {
-    io::Error::other("a file changed during its copy")
+    io::Error::other("an entry of the tree changed during its walk or copy")
+}
+
+/// Test-only pause points (fc-store's own unit tests): `classified`, once a
+/// name is looked at and before it is opened, and `opened`, once a
+/// directory is opened and before its entries are read, so a test can swap
+/// or rename what the walk, the copy or a bounded removal is about to
+/// reach. Outside this crate's tests each is a no-op that compiles away.
+pub(super) mod pause {
+    #[cfg(test)]
+    type Hook = Box<dyn FnMut(&'static str, &std::ffi::OsStr)>;
+
+    #[cfg(test)]
+    std::thread_local! {
+        static HOOK: std::cell::RefCell<Option<Hook>> = const { std::cell::RefCell::new(None) };
+    }
+
+    /// Sets this thread's hook, or clears it with `None`.
+    #[cfg(test)]
+    pub fn set(hook: Option<Hook>) {
+        HOOK.with(|slot| *slot.borrow_mut() = hook);
+    }
+
+    #[cfg(test)]
+    pub fn at(point: &'static str, name: &std::ffi::OsStr) {
+        let hook = HOOK.with(|slot| slot.borrow_mut().take());
+        if let Some(mut hook) = hook {
+            hook(point, name);
+            HOOK.with(|slot| {
+                let mut slot = slot.borrow_mut();
+                if slot.is_none() {
+                    *slot = Some(hook);
+                }
+            });
+        }
+    }
+
+    #[cfg(not(test))]
+    #[inline(always)]
+    pub fn at(_point: &'static str, _name: &std::ffi::OsStr) {}
 }
 
 impl Dir {
@@ -94,12 +141,13 @@ impl Dir {
 
 #[cfg(unix)]
 mod imp {
-    use super::{Each, MAX_DEPTH, Visit, changed, special, too_deep};
+    use super::{Each, MAX_DEPTH, Visit, changed, pause, special, too_deep};
     use crate::anchor::imp::{
-        DIR_FLAGS, TREE_FLAGS, entries, mount_at, mount_of_fd, refused, within,
+        DIR_FLAGS, TREE_FLAGS, entries, mount_at, mount_of_fd, refused, stat_at, stat_identity,
+        within,
     };
     use crate::anchor::{Dir, Mount, Node, Space};
-    use rustix::fd::{AsFd, BorrowedFd};
+    use rustix::fd::{AsFd, BorrowedFd, OwnedFd};
     use rustix::fs::{Access, AtFlags, FileType, Mode, OFlags};
     use rustix::io::Errno;
     use std::ffi::OsStr;
@@ -137,6 +185,28 @@ mod imp {
         rustix::fs::accessat(parent, name, access, AtFlags::empty()).is_ok()
     }
 
+    /// The directory `name` in `parent`, looked at as `stat`, opened through
+    /// `parent`'s handle without following a symlink: it must be the one
+    /// looked at, on the walk's mount. `None` if it is gone.
+    fn open_dir(
+        parent: BorrowedFd<'_>,
+        name: &OsStr,
+        stat: &rustix::fs::Stat,
+        bound: Mount,
+    ) -> io::Result<Option<OwnedFd>> {
+        let fd = match rustix::fs::openat(parent, name, TREE_FLAGS, Mode::empty()) {
+            Ok(fd) => fd,
+            Err(Errno::NOENT) => return Ok(None),
+            Err(e) => return Err(refused(e)),
+        };
+        if stat_identity(&rustix::fs::fstat(&fd)?) != stat_identity(stat) {
+            return Err(changed());
+        }
+        within(Some(bound), fd.as_fd())?;
+        pause::at("opened", name);
+        Ok(Some(fd))
+    }
+
     fn walk_at(
         parent: BorrowedFd<'_>,
         name: &OsStr,
@@ -145,7 +215,7 @@ mod imp {
         depth: usize,
         visit: &mut Visit<'_>,
     ) -> io::Result<ControlFlow<()>> {
-        let stat = match rustix::fs::statat(parent, name, AtFlags::SYMLINK_NOFOLLOW) {
+        let stat = match stat_at(parent, name) {
             Ok(stat) => stat,
             Err(Errno::NOENT) => return Ok(ControlFlow::Continue(())),
             Err(e) => return Err(e.into()),
@@ -170,14 +240,10 @@ mod imp {
                 if !usable {
                     return Ok(ControlFlow::Continue(()));
                 }
-                let fd = match rustix::fs::openat(parent, name, TREE_FLAGS, Mode::empty()) {
-                    Ok(fd) => fd,
-                    Err(Errno::NOENT) => return Ok(ControlFlow::Continue(())),
-                    Err(e) => return Err(refused(e)),
+                pause::at("classified", name);
+                let Some(fd) = open_dir(parent, name, &stat, bound)? else {
+                    return Ok(ControlFlow::Continue(()));
                 };
-                // What was opened, judged again on its handle: a mount made
-                // at the name since its `lstat` isn't entered either.
-                within(Some(bound), fd.as_fd())?;
                 for entry in entries(&fd)? {
                     path.push(&entry);
                     let flow = walk_at(fd.as_fd(), &entry, path, bound, depth + 1, visit)?;
@@ -213,21 +279,24 @@ mod imp {
         depth: usize,
         each: &mut Each<'_>,
     ) -> io::Result<()> {
-        let stat = rustix::fs::statat(from_dir, name, AtFlags::SYMLINK_NOFOLLOW)?;
+        let stat = stat_at(from_dir, name)?;
         let mode = Mode::from_raw_mode(stat.st_mode) & (Mode::RWXU | Mode::RWXG | Mode::RWXO);
         match FileType::from_raw_mode(stat.st_mode) {
-            FileType::RegularFile => copy_file(from_dir, name, into_dir, to, mode)?,
+            FileType::RegularFile => copy_file(from_dir, name, &stat, into_dir, to, mode)?,
             FileType::Symlink => {
                 let target = rustix::fs::readlinkat(from_dir, name, Vec::new())?;
                 rustix::fs::symlinkat(target.as_c_str(), into_dir, to)?;
             }
             FileType::Directory => {
-                let from = rustix::fs::openat(from_dir, name, TREE_FLAGS, Mode::empty())
-                    .map_err(refused)?;
-                within(Some(bound), from.as_fd())?;
+                if !mount_at(from_dir, name, &stat).same(bound) {
+                    return Err(super::crossing());
+                }
                 if depth >= MAX_DEPTH {
                     return Err(too_deep());
                 }
+                pause::at("classified", name);
+                let from = open_dir(from_dir, name, &stat, bound)?
+                    .ok_or_else(|| io::Error::from(io::ErrorKind::NotFound))?;
                 rustix::fs::mkdirat(into_dir, to, mode | Mode::RWXU)?;
                 let into =
                     rustix::fs::openat(into_dir, to, DIR_FLAGS, Mode::empty()).map_err(refused)?;
@@ -253,25 +322,31 @@ mod imp {
 
     /// The file's bytes into a new file made with `mode`, synced. Opened
     /// without following a symlink and without waiting, then judged on the
-    /// handle, so a name swapped for a FIFO since its `lstat` is refused,
-    /// never waited on. The bytes copied must be its length.
+    /// handle: it must be the regular file looked at (`stat`), so a name
+    /// swapped for a FIFO or another file since is refused, never waited
+    /// on. The bytes copied must be its length.
     fn copy_file(
         from_dir: BorrowedFd<'_>,
         name: &OsStr,
+        stat: &rustix::fs::Stat,
         into_dir: BorrowedFd<'_>,
         to: &OsStr,
         mode: Mode,
     ) -> io::Result<()> {
         let flags = OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC;
-        let mut from = File::from(rustix::fs::openat(from_dir, name, flags, Mode::empty())?);
-        let meta = from.metadata()?;
-        if !meta.is_file() {
+        let from = rustix::fs::openat(from_dir, name, flags, Mode::empty())?;
+        let held = rustix::fs::fstat(&from)?;
+        if FileType::from_raw_mode(held.st_mode) != FileType::RegularFile
+            || stat_identity(&held) != stat_identity(stat)
+        {
             return Err(changed());
         }
+        let mut from = File::from(from);
+        let len = u64::try_from(held.st_size).unwrap_or(0);
         let flags =
             OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW | OFlags::CLOEXEC;
         let mut into = File::from(rustix::fs::openat(into_dir, to, flags, mode)?);
-        if std::io::copy(&mut from, &mut into)? != meta.len() {
+        if std::io::copy(&mut from, &mut into)? != len {
             return Err(changed());
         }
         into.sync_all()
@@ -280,9 +355,10 @@ mod imp {
 
 #[cfg(windows)]
 mod imp {
-    use super::{Each, MAX_DEPTH, Visit, changed, special, too_deep};
+    use super::{Each, MAX_DEPTH, Visit, changed, pause, special, too_deep};
     use crate::anchor::imp::{how, mount_of_handle, plain_dir, within};
     use crate::anchor::{Dir, Mount, Node, Space};
+    use crate::fsx::file_identity;
     use fc_sys::windows::{self as win, Create, Expect, access};
     use std::ffi::OsStr;
     use std::fs::File;
@@ -300,7 +376,8 @@ mod imp {
     }
 
     /// `name` in the directory `parent` is open on, opened itself (a
-    /// reparse point never followed): `None` if nothing is there.
+    /// reparse point never followed) with `access`: `None` if nothing is
+    /// there.
     fn open_at(
         parent: BorrowedHandle<'_>,
         name: &OsStr,
@@ -314,6 +391,18 @@ mod imp {
         }
     }
 
+    /// Refused for want of a right, or by another handle that shares less
+    /// (a sharing or lock violation).
+    fn refused_access(error: &io::Error) -> bool {
+        error.kind() == io::ErrorKind::PermissionDenied
+            || matches!(error.raw_os_error(), Some(32 | 33))
+    }
+
+    /// The same file or directory: its volume and file ID.
+    fn same(one: &OwnedHandle, two: &OwnedHandle) -> io::Result<bool> {
+        Ok(file_identity(one.as_handle())? == file_identity(two.as_handle())?)
+    }
+
     pub fn walk(
         dir: &Dir,
         name: &OsStr,
@@ -324,8 +413,11 @@ mod imp {
         walk_at(dir.handle.as_handle(), name, path, bound, 0, visit)
     }
 
-    /// Windows checks no permission here: a file or directory this process
-    /// may not use fails the copy, which rolls back.
+    /// The rights a copy and its source's removal take, probed by opening
+    /// with them: a file's reading and `DELETE`; a directory's listing and
+    /// `DELETE`. (Deleting an entry takes its own `DELETE`, or the parent's
+    /// `FILE_DELETE_CHILD`, which the system grants `DELETE` on.) A refusal
+    /// is a node this process can't use.
     fn walk_at(
         parent: BorrowedHandle<'_>,
         name: &OsStr,
@@ -341,26 +433,43 @@ mod imp {
         let node = if attributes.reparse_point() {
             Node::Link
         } else if !attributes.directory() {
-            Node::File {
-                len: File::from(handle).metadata()?.len(),
-                readable: true,
-            }
+            let len = File::from(handle.try_clone()?).metadata()?.len();
+            let readable = match open_at(parent, name, access::READ | access::DELETE, Expect::File)
+            {
+                Ok(Some(probe)) => same(&probe, &handle)?,
+                Ok(None) => return Ok(ControlFlow::Continue(())),
+                Err(e) if refused_access(&e) => false,
+                Err(e) => return Err(e),
+            };
+            Node::File { len, readable }
         } else if !mount_of_handle(handle.as_handle())?.same(bound) {
             Node::Mount
         } else if depth >= MAX_DEPTH {
             Node::Deep
         } else {
+            pause::at("classified", name);
+            let dir = match open_at(
+                parent,
+                name,
+                access::LIST | access::DELETE,
+                Expect::Directory,
+            ) {
+                Ok(Some(dir)) => dir,
+                Ok(None) => return Ok(ControlFlow::Continue(())),
+                Err(e) if refused_access(&e) => {
+                    return Ok(visit(path, Node::Dir { usable: false }));
+                }
+                Err(e) => return Err(e),
+            };
+            if !plain_dir(&dir)? || !same(&dir, &handle)? {
+                return Err(changed());
+            }
             drop(handle);
+            within(Some(bound), dir.as_handle())?;
             if visit(path, Node::Dir { usable: true }).is_break() {
                 return Ok(ControlFlow::Break(()));
             }
-            let Some(dir) = open_at(parent, name, access::LIST, Expect::Directory)? else {
-                return Ok(ControlFlow::Continue(()));
-            };
-            if !plain_dir(&dir)? {
-                return Err(changed());
-            }
-            within(Some(bound), dir.as_handle())?;
+            pause::at("opened", name);
             for (entry, _) in win::list_dir(dir.as_handle())? {
                 path.push(&entry);
                 let flow = walk_at(dir.as_handle(), &entry, path, bound, depth + 1, visit)?;
@@ -414,23 +523,28 @@ mod imp {
         if attributes.reparse_point() {
             return Err(special());
         }
-        drop(handle);
         if !attributes.directory() {
-            copy_file(from_dir, name, into_dir, to)?;
+            copy_file(from_dir, name, &handle, into_dir, to)?;
             return each();
         }
+        if !mount_of_handle(handle.as_handle())?.same(bound) {
+            return Err(super::crossing());
+        }
+        if depth >= MAX_DEPTH {
+            return Err(too_deep());
+        }
+        pause::at("classified", name);
         let from = win::open_at(
             from_dir,
             name,
             how(access::LIST, Create::No, Expect::Directory),
         )?;
-        if !plain_dir(&from)? {
+        if !plain_dir(&from)? || !same(&from, &handle)? {
             return Err(changed());
         }
+        drop(handle);
         within(Some(bound), from.as_handle())?;
-        if depth >= MAX_DEPTH {
-            return Err(too_deep());
-        }
+        pause::at("opened", name);
         let into = win::open_at(
             into_dir,
             to,
@@ -451,18 +565,19 @@ mod imp {
         Ok(())
     }
 
-    /// The file's bytes into a new file, flushed. Judged on the handle: a
-    /// directory or a reparse point there now is refused. The bytes copied
-    /// must be its length.
+    /// The file's bytes into a new file, flushed. Judged on the handle: it
+    /// must be the file looked at (`looked`), not a directory or a reparse
+    /// point. The bytes copied must be its length.
     fn copy_file(
         from_dir: BorrowedHandle<'_>,
         name: &OsStr,
+        looked: &OwnedHandle,
         into_dir: BorrowedHandle<'_>,
         to: &OsStr,
     ) -> io::Result<()> {
         let from = win::open_at(from_dir, name, how(access::READ, Create::No, Expect::File))?;
         let attributes = win::attribute_tag(from.as_handle())?;
-        if attributes.reparse_point() || attributes.directory() {
+        if attributes.reparse_point() || attributes.directory() || !same(&from, looked)? {
             return Err(changed());
         }
         let mut from = File::from(from);
