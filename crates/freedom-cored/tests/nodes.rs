@@ -232,6 +232,106 @@ fn writes_need_an_unlocked_vault_and_valid_parameters() {
     assert!(!bee.exists());
 }
 
+/// With `serve`'s `--node-root` arguments (design 0017, C1), a write names
+/// the directory of its node kind exactly, or is `invalid_argument` before
+/// anything: no file in the directory it named, no journal, and no Radicle
+/// gate file in the lock directory. The named directories are written.
+#[test]
+fn writes_need_the_node_root_arguments() {
+    let (root, data, locks) = dirs();
+    let bee = root.path().join("bee");
+    let home = root.path().join("radicle");
+    let other = root.path().join("other");
+    for dir in [&home, &other] {
+        std::fs::create_dir_all(dir).unwrap();
+    }
+    let args = [
+        format!("bee={}", bee.display()),
+        format!("radicle={}", home.display()),
+    ];
+    let mut core = spawn_env(
+        "serve",
+        &data,
+        &locks,
+        &["--node-root", &args[0], "--node-root", &args[1]],
+        &[],
+    );
+    core.hello();
+    let imported = core.call(
+        2,
+        "vault.import",
+        json!({ "password_b64": b64("testpass1"), "mnemonic_b64": b64(ABANDON) }),
+    );
+    assert!(imported["result"].is_object(), "{imported}");
+
+    let dotted = format!("{}/x/../bee", root.path().display());
+    let refused = [
+        json!({ "op_id": "op-1", "node": "bee", "data_dir": other, "api_port": 1, "p2p_port": 2 }),
+        json!({ "op_id": "op-2", "node": "bee", "data_dir": home, "api_port": 1, "p2p_port": 2 }),
+        json!({ "op_id": "op-3", "node": "bee", "data_dir": dotted, "api_port": 1, "p2p_port": 2 }),
+        json!({ "op_id": "op-4", "node": "radicle", "home": other, "alias": "FreedomBrowser" }),
+        json!({ "op_id": "op-5", "node": "radicle", "home": bee, "alias": "FreedomBrowser" }),
+        json!({ "op_id": "op-6", "node": "radicle", "home": other, "alias": "FreedomBrowser", "custody": "sealed", "wipe": true }),
+    ];
+    let radicle_gates = || {
+        std::fs::read_dir(&locks)
+            .unwrap()
+            .filter(|entry| {
+                entry
+                    .as_ref()
+                    .unwrap()
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with("radicle-")
+            })
+            .count()
+    };
+    for (offset, params) in refused.into_iter().enumerate() {
+        let id = 3 + 2 * offset as u64;
+        let reply = core.call(id, "nodes.write_identity", params.clone());
+        assert_eq!(
+            reply["error"]["code"], "invalid_argument",
+            "{params}: {reply}"
+        );
+        let op_id = params["op_id"].clone();
+        let status = core.call_shell(id + 1, "nodes.op_status", json!({ "op_id": op_id }));
+        assert_eq!(status["result"]["status"], "not_committed", "{params}");
+    }
+    assert!(walk(&other).is_empty(), "{:?}", walk(&other));
+    assert!(walk(&home).is_empty(), "{:?}", walk(&home));
+    assert!(!bee.exists());
+    assert_eq!(radicle_gates(), 0);
+    assert!(!data.join("node-identity-journal.json").exists());
+    assert!(!data.join("node-identity-staging.json").exists());
+
+    // The arguments' own directories.
+    let written = core.call(
+        20,
+        "nodes.write_identity",
+        json!({ "op_id": "op-bee", "node": "bee", "data_dir": bee, "api_port": 1733, "p2p_port": 1734 }),
+    );
+    assert_eq!(
+        written["result"],
+        json!({ "address": BEE_ADDRESS, "status": "installed" }),
+        "{written}"
+    );
+    assert!(bee.join("keys/swarm.key").is_file());
+    let written = core.call(
+        21,
+        "nodes.write_identity",
+        json!({ "op_id": "op-rad", "node": "radicle", "home": home, "alias": "FreedomBrowser" }),
+    );
+    assert_eq!(written["result"]["status"], "installed", "{written}");
+    assert_eq!(written["result"]["did"], RADICLE_DID);
+    assert_eq!(
+        std::fs::read_to_string(home.join("keys/radicle.pub")).unwrap(),
+        RADICLE_PUB
+    );
+    assert_eq!(radicle_gates(), 1);
+    assert!(walk(&other).is_empty(), "{:?}", walk(&other));
+    no_leftovers(root.path());
+}
+
 #[test]
 fn a_lock_before_the_commit_writes_nothing() {
     let (root, data, locks) = dirs();

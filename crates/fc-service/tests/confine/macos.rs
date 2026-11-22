@@ -144,12 +144,36 @@ fn child(case: &str) {
     let (registered, held) = registered(&p);
     let refer = case == "refer";
     let times = case == "times";
+    let modes = case == "modes";
     let policy = |p: &Paths, network: Network, descriptors: Vec<i32>| Policy {
         refer,
         times,
+        modes,
         ..policy(p, network, descriptors)
     };
     match case {
+        "gate-file" => {
+            // Design 0017, C3: a gate file opened before `confine`, its lock
+            // directory outside every grant, locked through its descriptor
+            // once confined.
+            let (home, locks) = (p.data.join("gate-home"), p.outside.join("gate-locks"));
+            let (first, second) = crate::gate_file::open(&home, &locks);
+            let mut registered = registered;
+            registered.extend(first.descriptors());
+            registered.extend(second.descriptors());
+            let report = match confine::confine(&policy(&p, network, registered)) {
+                Ok(report) => report,
+                Err(invalid) => {
+                    println!("INVALID {invalid}");
+                    return;
+                }
+            };
+            println!("REPORT {}", report.to_json());
+            crate::gate_file::exercise(&first, &second);
+            crate::gate_file::lock_dir_refused(&home, &locks, first.lock_path());
+            drop(held);
+            return;
+        }
         "inject-pipe" => {
             let pipe = std::io::pipe().unwrap();
             refused(confine::confine(&policy(&p, network, registered)));
@@ -245,6 +269,7 @@ fn child(case: &str) {
         "files" | "reexec" | "ports" => files(&p),
         "refer" => refer_links(&p),
         "times" => set_times(&p),
+        "modes" => set_modes(&p),
         "sysctl" => sysctls(&p),
         "exec-direct" => exec_direct(),
         "processes" => processes(),
@@ -294,6 +319,7 @@ fn policy(p: &Paths, network: Network, descriptors: Vec<i32>) -> Policy {
         interface_index: false,
         times: false,
         symlinks: false,
+        modes: false,
     }
 }
 
@@ -445,6 +471,57 @@ fn set_times(p: &Paths) {
     check(
         "times on the read-only grant refused",
         std::fs::File::open(p.read_only.join("file"))
+            .and_then(|f| fc_sys::macos::set_times(f.as_fd(), 1, 0))
+            .is_err(),
+    );
+}
+
+/// With `modes` (design 0017, C4), a file's and a directory's modes set
+/// inside the grant, as `freedom-cored serve` tightens them; still none on
+/// the read-only grant or outside, and no times inside.
+fn set_modes(p: &Paths) {
+    let mode_of = |path: &std::path::Path| {
+        std::fs::metadata(path)
+            .map(|m| m.permissions().mode() & 0o7777)
+            .unwrap_or(u32::MAX)
+    };
+    let file = p.data.join(format!("moded-{}", std::process::id()));
+    check("a file inside", std::fs::write(&file, b"x").is_ok());
+    for mode in [0o600, 0o700] {
+        check(
+            &format!("fchmod {mode:o} on a file inside"),
+            std::fs::File::open(&file)
+                .and_then(|f| f.set_permissions(std::fs::Permissions::from_mode(mode)))
+                .is_ok()
+                && mode_of(&file) == mode,
+        );
+    }
+    let dir = p.data.join(format!("moded-dir-{}", std::process::id()));
+    check("a directory inside", std::fs::create_dir(&dir).is_ok());
+    check(
+        "fchmod 700 on a directory inside",
+        std::fs::File::open(&dir)
+            .and_then(|f| f.set_permissions(std::fs::Permissions::from_mode(0o700)))
+            .is_ok()
+            && mode_of(&dir) == 0o700,
+    );
+    check(
+        "chmod on the read-only grant refused",
+        std::fs::File::open(p.read_only.join("file"))
+            .and_then(|f| f.set_permissions(std::fs::Permissions::from_mode(0o600)))
+            .is_err(),
+    );
+    check(
+        "chmod outside refused",
+        std::fs::set_permissions(
+            p.outside.join("canary"),
+            std::fs::Permissions::from_mode(0o600),
+        )
+        .is_err(),
+    );
+    check(
+        "futimes inside refused",
+        std::fs::File::open(&file)
             .and_then(|f| fc_sys::macos::set_times(f.as_fd(), 1, 0))
             .is_err(),
     );
@@ -795,6 +872,8 @@ fn parent() {
         "offline",
         "refer",
         "times",
+        "modes",
+        "gate-file",
         "sysctl",
         "exec-direct",
         "resolv-conf",
@@ -817,7 +896,8 @@ fn parent() {
         for property in ["files", "exec"] {
             expect(
                 &mut failures,
-                report[property] == "enforced" || (case == "times" && property == "files"),
+                report[property] == "enforced"
+                    || (matches!(case, "times" | "modes") && property == "files"),
                 format!("{case}: {property} {report}"),
             );
         }
@@ -829,6 +909,17 @@ fn parent() {
                     && report["gaps"]
                         .as_array()
                         .is_some_and(|gaps| gaps.iter().any(|g| g == "times")),
+                format!("{case}: files {report}"),
+            );
+        }
+        // With modes, files are partial, naming them, and nothing of times.
+        if case == "modes" {
+            expect(
+                &mut failures,
+                report["files"] == "partial"
+                    && report["gaps"].as_array().is_some_and(|gaps| {
+                        gaps.iter().any(|g| g == "modes") && !gaps.iter().any(|g| g == "times")
+                    }),
                 format!("{case}: files {report}"),
             );
         }
@@ -871,6 +962,19 @@ fn parent() {
             .nlink()
             == 1,
         "the read-only grant's file gained a hard link".into(),
+    );
+    // Design 0017, C3: the gate's lock directory holds its lock file alone.
+    let gate_locks: Vec<_> = std::fs::read_dir(world.outside.join("gate-locks"))
+        .map(|dir| dir.filter_map(Result::ok).map(|e| e.file_name()).collect())
+        .unwrap_or_default();
+    let gate_home = std::fs::canonicalize(world.data.join("gate-home")).unwrap_or_default();
+    expect(
+        &mut failures,
+        gate_locks
+            == [std::ffi::OsString::from(fc_service::gate::lock_file_name(
+                "radicle", &gate_home,
+            ))],
+        format!("the gate's lock directory changed: {gate_locks:?}"),
     );
 
     let ephemeral = run(&world, "ephemeral");

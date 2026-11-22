@@ -26,7 +26,7 @@ use seccompiler::{
     SeccompRule, TargetArch, sock_filter,
 };
 
-use super::Network;
+use super::{MODES_REFUSED, Network};
 
 /// Syscalls newer than the `libc` crate's tables, with their numbers, the
 /// same on x86-64 and AArch64 (Linux's unified table from 424 up).
@@ -160,10 +160,25 @@ fn rule(conditions: Vec<SeccompCondition>) -> Result<SeccompRule, String> {
 }
 
 /// Program 1: `EPERM`. With `times`, `utimensat` only with a path or
-/// flags ([`super::Policy::times`]).
-fn eperm(network: Network, arch: TargetArch, times: bool) -> Result<BpfProgram, String> {
+/// flags ([`super::Policy::times`]); with `modes`, `fchmod` only with a
+/// bit of [`MODES_REFUSED`] ([`super::Policy::modes`]).
+fn eperm(
+    network: Network,
+    arch: TargetArch,
+    times: bool,
+    modes: bool,
+) -> Result<BpfProgram, String> {
     let mut rules: BTreeMap<i64, Vec<SeccompRule>> =
         denied().into_iter().map(|nr| (nr, Vec::new())).collect();
+    if modes {
+        // `fchmod(fd, mode)` refused whenever `mode` (the second argument)
+        // has any bit of `MODES_REFUSED`: one rule per bit, since a rule
+        // matches when all its conditions do and the call is refused when
+        // any rule matches. The kernel reads the mode's low 16 bits
+        // (`umode_t`) and keeps the low 12, so the low 32 compared here
+        // hold every bit it could apply.
+        rules.insert(libc::SYS_fchmod, fchmod_rules()?);
+    }
     if times {
         // `futimens(fd, times)` is `utimensat(fd, NULL, times, 0)`: refused
         // whenever the path (a pointer, the second argument) isn't null or
@@ -223,6 +238,23 @@ fn eperm(network: Network, arch: TargetArch, times: bool) -> Result<BpfProgram, 
     }
     rules.insert(libc::SYS_socketpair, pair);
     compile(rules, SeccompAction::Errno(libc::EPERM as u32), arch)
+}
+
+/// `fchmod`'s rules with `modes`: one for each bit of [`MODES_REFUSED`],
+/// matching when that bit is set.
+fn fchmod_rules() -> Result<Vec<SeccompRule>, String> {
+    (0..u32::BITS)
+        .map(|shift| 1u32 << shift)
+        .filter(|bit| MODES_REFUSED & bit != 0)
+        .map(|bit| {
+            rule(vec![condition(
+                1,
+                SeccompCmpArgLen::Dword,
+                SeccompCmpOp::MaskedEq(u64::from(bit)),
+                u64::from(bit),
+            )?])
+        })
+        .collect()
 }
 
 /// Program 2: `ENOSYS` for `clone3`.
@@ -289,16 +321,17 @@ fn x32_guard() -> BpfProgram {
 }
 
 /// The programs for `network`, in the order they are installed, with
-/// `SIOCGIFINDEX` allowed when `interface_index` is set, and `futimens` when
-/// `times` is.
+/// `SIOCGIFINDEX` allowed when `interface_index` is set, `futimens` when
+/// `times` is, and an owner-only `fchmod` when `modes` is.
 pub fn programs(
     network: Network,
     arch: TargetArch,
     interface_index: bool,
     times: bool,
+    modes: bool,
 ) -> Result<Vec<BpfProgram>, String> {
     let mut programs = vec![
-        eperm(network, arch, times)?,
+        eperm(network, arch, times, modes)?,
         enosys(arch)?,
         enotty(arch, interface_index)?,
     ];
@@ -525,7 +558,7 @@ mod tests {
     #[test]
     fn every_denied_call_answers_eperm_and_common_ones_pass() {
         let (arch, _, _) = native();
-        let programs = programs(Network::Direct, arch, false, false).unwrap();
+        let programs = programs(Network::Direct, arch, false, false, false).unwrap();
         for nr in denied() {
             assert_eq!(
                 errno(verdict(&programs, &call(nr, [0; 6]))),
@@ -671,7 +704,7 @@ mod tests {
     fn the_required_calls_answer_eperm_and_nothing_else_is_denied() {
         let (arch, _, _) = native();
         for network in [Network::Direct, Network::Offline] {
-            let programs = programs(network, arch, false, false).unwrap();
+            let programs = programs(network, arch, false, false, false).unwrap();
             for (name, nr) in REQUIRED {
                 assert_eq!(
                     errno(verdict(&programs, &call(*nr, [0; 6]))),
@@ -711,7 +744,7 @@ mod tests {
     #[test]
     fn threads_are_created_and_processes_are_not() {
         let (arch, _, _) = native();
-        let programs = programs(Network::Direct, arch, false, false).unwrap();
+        let programs = programs(Network::Direct, arch, false, false, false).unwrap();
         let thread = (libc::CLONE_VM | libc::CLONE_THREAD | libc::CLONE_SIGHAND) as u64;
         assert_eq!(
             verdict(&programs, &call(libc::SYS_clone, [thread, 0, 0, 0, 0, 0])),
@@ -746,6 +779,7 @@ mod tests {
             arch,
             false,
             false,
+            false,
         )
         .unwrap();
         let socket = |programs: &[BpfProgram], family: i32| {
@@ -771,7 +805,7 @@ mod tests {
                 "family {family}"
             );
         }
-        let offline = programs(Network::Offline, arch, false, false).unwrap();
+        let offline = programs(Network::Offline, arch, false, false, false).unwrap();
         assert_eq!(errno(socket(&offline, libc::AF_INET)), Some(libc::EPERM));
         let pair = |kind: i32| {
             verdict(
@@ -798,7 +832,7 @@ mod tests {
     #[test]
     fn ioctl_answers_enotty_outside_the_allowlist_on_the_low_32_bits() {
         let (arch, _, _) = native();
-        let programs = programs(Network::Direct, arch, false, false).unwrap();
+        let programs = programs(Network::Direct, arch, false, false, false).unwrap();
         let ioctl = |cmd: u64| verdict(&programs, &call(libc::SYS_ioctl, [3, cmd, 0, 0, 0, 0]));
         for cmd in IOCTL_ALLOWED {
             assert_eq!(ioctl(cmd), libc::SECCOMP_RET_ALLOW, "cmd {cmd:#x}");
@@ -827,9 +861,9 @@ mod tests {
         let ioctl = |programs: &[BpfProgram], cmd: u64| {
             verdict(programs, &call(libc::SYS_ioctl, [3, cmd, 0, 0, 0, 0]))
         };
-        let without = programs(Network::Direct, arch, false, false).unwrap();
+        let without = programs(Network::Direct, arch, false, false, false).unwrap();
         assert_eq!(errno(ioctl(&without, SIOCGIFINDEX)), Some(libc::ENOTTY));
-        let with = programs(Network::Direct, arch, true, false).unwrap();
+        let with = programs(Network::Direct, arch, true, false, false).unwrap();
         assert_eq!(ioctl(&with, SIOCGIFINDEX), libc::SECCOMP_RET_ALLOW);
         assert_eq!(
             ioctl(&with, SIOCGIFINDEX | 0xffff_ffff_0000_0000),
@@ -854,7 +888,7 @@ mod tests {
                 &call(libc::SYS_utimensat, [3, path, 0x7fff_0000, flags, 0, 0]),
             )
         };
-        let with = programs(Network::Offline, arch, false, true).unwrap();
+        let with = programs(Network::Offline, arch, false, true, false).unwrap();
         assert_eq!(utimensat(&with, 0, 0), libc::SECCOMP_RET_ALLOW);
         // A path, high bits alone included; flags (AT_SYMLINK_NOFOLLOW, and
         // AT_EMPTY_PATH).
@@ -881,16 +915,76 @@ mod tests {
                 );
             }
         }
-        let without = programs(Network::Offline, arch, false, false).unwrap();
+        let without = programs(Network::Offline, arch, false, false, false).unwrap();
         for (path, flags) in [(0, 0), (0x7ffd_1234, 0)] {
             assert_eq!(errno(utimensat(&without, path, flags)), Some(libc::EPERM));
+        }
+    }
+
+    /// With `modes`, `fchmod` to an owner-only mode alone: refused exactly
+    /// when the mode has a bit of `MODES_REFUSED`, over every mode the
+    /// kernel could apply, and with high bits it ignores. Everything else
+    /// denied stays denied, the path forms included. Without it, every
+    /// `fchmod` is refused.
+    #[test]
+    fn modes_allow_an_owner_only_fchmod_alone() {
+        let (arch, _, _) = native();
+        let fchmod = |programs: &[BpfProgram], mode: u64| {
+            verdict(programs, &call(libc::SYS_fchmod, [3, mode, 0, 0, 0, 0]))
+        };
+        let with = programs(Network::Offline, arch, false, false, true).unwrap();
+        for mode in 0..=0o7777u64 {
+            let refused = mode & u64::from(MODES_REFUSED) != 0;
+            for high in [0, 0o1_0000, 0xffff_0000, 0xffff_ffff_0000_0000] {
+                let ret = fchmod(&with, mode | high);
+                if refused {
+                    assert_eq!(errno(ret), Some(libc::EPERM), "mode {mode:o}, {high:#x}");
+                } else {
+                    assert_eq!(ret, libc::SECCOMP_RET_ALLOW, "mode {mode:o}, {high:#x}");
+                }
+            }
+        }
+        for mode in [0o600, 0o700, 0o400, 0o200, 0o100, 0] {
+            assert_eq!(fchmod(&with, mode), libc::SECCOMP_RET_ALLOW, "{mode:o}");
+        }
+        for mode in [0o644, 0o755, 0o4700, 0o2700, 0o1700, 0o610, 0o601, 0o7777] {
+            assert_eq!(errno(fchmod(&with, mode)), Some(libc::EPERM), "{mode:o}");
+        }
+        assert_eq!(MODES_REFUSED, 0o7077);
+        for nr in denied() {
+            if nr != libc::SYS_fchmod {
+                for mode in [0, 0o600] {
+                    assert_eq!(
+                        errno(verdict(&with, &call(nr, [3, mode, mode, 0, 0, 0]))),
+                        Some(libc::EPERM),
+                        "nr {nr}, mode {mode:o}"
+                    );
+                }
+            }
+        }
+        // `fchmodat` and `fchmodat2`, named here and not taken from the
+        // list: dropping either fails this test.
+        for nr in [libc::SYS_fchmodat, SYS_FCHMODAT2] {
+            assert_eq!(
+                errno(verdict(&with, &call(nr, [3, 0x7ffd_1234, 0o600, 0, 0, 0]))),
+                Some(libc::EPERM),
+                "nr {nr}"
+            );
+        }
+        // Both together: `times` changes nothing of this.
+        let both = programs(Network::Offline, arch, false, true, true).unwrap();
+        assert_eq!(fchmod(&both, 0o600), libc::SECCOMP_RET_ALLOW);
+        assert_eq!(errno(fchmod(&both, 0o644)), Some(libc::EPERM));
+        let without = programs(Network::Offline, arch, false, false, false).unwrap();
+        for mode in [0, 0o600, 0o700, 0o644] {
+            assert_eq!(errno(fchmod(&without, mode)), Some(libc::EPERM), "{mode:o}");
         }
     }
 
     #[test]
     fn other_abis_are_killed() {
         let (arch, _, compat) = native();
-        let programs = programs(Network::Direct, arch, false, false).unwrap();
+        let programs = programs(Network::Direct, arch, false, false, false).unwrap();
         let compat_call = Data {
             nr: 20,
             arch: compat,

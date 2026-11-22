@@ -2,12 +2,20 @@
 //!
 //! ```text
 //! freedom-cored serve     --data-dir <identity dir> --lock-dir <lock dir> [--parent-pid <pid>]
+//!                         [--grant-root <dir>] [--user-data-dir <dir>]
+//!                         [--node-root bee=<dir>] [--node-root radicle=<dir>]
 //! freedom-cored hold-lock --data-dir <identity dir> --lock-dir <lock dir>
 //! freedom-cored recover   --data-dir <identity dir> --lock-dir <lock dir>
 //! freedom-cored profile <open|list|create|rename|import|update-nodes|reserved-ports|status|delete|forget-list|forget-done|migrate> …
 //! freedom-cored hold-profile --user-data-dir <dir> --lock-dir <dir> [--app-root <dir> --id <id>]
 //! freedom-cored keystore --op <op> --policy <policy> --item <id> [--reply-key <base64>] [--reason <kind>]
 //! ```
+//!
+//! `serve`'s `--grant-root`, `--user-data-dir` and `--node-root` are the
+//! directories of its grant (design 0017, C1): each absolute and
+//! normalized, each node kind at most once. The hello must name the same
+//! `grant_root` and `user_data_dir`, and `nodes.write_identity` the same
+//! node directory. They are optional until main passes them.
 //!
 //! `keystore` is the one-shot key-store helper ([`keystore::helper`],
 //! design 0013): one call to the OS's key store, one line on stdout.
@@ -73,7 +81,8 @@ use std::time::{Duration, Instant};
 
 use exit::Exit;
 
-const USAGE: &str = "usage: freedom-cored <serve|hold-lock|recover> --data-dir <dir> --lock-dir <dir> [--parent-pid <pid>]";
+const USAGE: &str = "usage: freedom-cored <serve|hold-lock|recover> --data-dir <dir> --lock-dir <dir> [--parent-pid <pid>]; \
+     serve also: [--grant-root <dir>] [--user-data-dir <dir>] [--node-root bee=<dir>] [--node-root radicle=<dir>]";
 
 struct Args {
     command: String,
@@ -81,6 +90,20 @@ struct Args {
     lock_dir: Option<PathBuf>,
     parent_pid: Option<u32>,
     hello_timeout_ms: u64,
+    /// `serve`'s grant (design 0017, C1).
+    grant_root: Option<PathBuf>,
+    user_data_dir: Option<PathBuf>,
+    node_roots: nodes::NodeRootArgs,
+}
+
+impl Args {
+    /// Whether any of `serve`'s grant arguments was given.
+    fn names_a_grant(&self) -> bool {
+        self.grant_root.is_some()
+            || self.user_data_dir.is_some()
+            || self.node_roots.bee.is_some()
+            || self.node_roots.radicle.is_some()
+    }
 }
 
 fn parse_args() -> Option<Args> {
@@ -92,6 +115,9 @@ fn parse_args() -> Option<Args> {
         lock_dir: None,
         parent_pid: None,
         hello_timeout_ms: 10_000,
+        grant_root: None,
+        user_data_dir: None,
+        node_roots: nodes::NodeRootArgs::default(),
     };
     while let Some(flag) = args.next() {
         let value = args.next()?;
@@ -101,10 +127,42 @@ fn parse_args() -> Option<Args> {
             "--parent-pid" => parsed.parent_pid = Some(value.to_str()?.parse().ok()?),
             // For tests; main never passes it.
             "--hello-timeout-ms" => parsed.hello_timeout_ms = value.to_str()?.parse().ok()?,
+            "--grant-root" => {
+                set_once(&mut parsed.grant_root, grant_dir(value.to_str()?)?)?;
+            }
+            "--user-data-dir" => {
+                set_once(&mut parsed.user_data_dir, grant_dir(value.to_str()?)?)?;
+            }
+            "--node-root" => {
+                let (kind, dir) = value.to_str()?.split_once('=')?;
+                let slot = match kind {
+                    "bee" => &mut parsed.node_roots.bee,
+                    "radicle" => &mut parsed.node_roots.radicle,
+                    _ => return None,
+                };
+                set_once(slot, grant_dir(dir)?)?;
+            }
             _ => return None,
         }
     }
     Some(parsed)
+}
+
+/// A directory of `serve`'s grant (design 0017, C1): absolute and
+/// normalized, by the rule the hello's `grant_root` is checked with. UTF-8,
+/// since each must equal a string main sends (the hello's, or
+/// `nodes.write_identity`'s).
+fn grant_dir(value: &str) -> Option<PathBuf> {
+    Some(PathBuf::from(value)).filter(|dir| journal::normalized_absolute(dir))
+}
+
+/// Sets a grant argument: given twice, it is a usage error.
+fn set_once(slot: &mut Option<PathBuf>, dir: PathBuf) -> Option<()> {
+    if slot.is_some() {
+        return None;
+    }
+    *slot = Some(dir);
+    Some(())
 }
 
 fn main() -> ExitCode {
@@ -147,6 +205,11 @@ fn run(started: Instant) -> Exit {
         log::error(USAGE, serde_json::json!({}));
         return Exit::Usage;
     };
+    // The grant's arguments are `serve`'s alone (design 0017, C1).
+    if args.command != "serve" && args.names_a_grant() {
+        log::error(USAGE, serde_json::json!({}));
+        return Exit::Usage;
+    }
     let (Some(data_dir), Some(lock_dir)) = (args.data_dir, args.lock_dir) else {
         log::error(USAGE, serde_json::json!({}));
         return Exit::Usage;
@@ -158,6 +221,9 @@ fn run(started: Instant) -> Exit {
             parent_pid: args.parent_pid,
             hello_timeout: Duration::from_millis(args.hello_timeout_ms),
             started,
+            grant_root: args.grant_root,
+            user_data_dir: args.user_data_dir,
+            node_roots: args.node_roots,
         }),
         "hold-lock" => hold_lock(&data_dir, &lock_dir),
         "recover" => recover(&data_dir, &lock_dir),

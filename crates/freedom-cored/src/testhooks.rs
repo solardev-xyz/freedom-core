@@ -257,6 +257,12 @@
 //! - `FREEDOM_CORED_TEST_PROFILE_MIGRATE_ENOSPC` (a number `n`): a copy
 //!   fails as on a full volume (`StorageFull`) once it has made `n`
 //!   entries in `<name>.moving`.
+//! - `FREEDOM_CORED_TEST_PROFILE_MIGRATE_LOOKUP` (Linux): `walk` makes a
+//!   starting move's node-lock lookups take the walk, as where `openat2` is
+//!   missing (before 5.6) or refused, and a Myotis generation's mount
+//!   unprovable by `openat2`; `walk-no-mount-id` also hides the mount IDs
+//!   the walk and a generation's check read (`STATX_MNT_ID`), as before
+//!   Linux 5.8, so only devices are compared.
 //! - `FREEDOM_CORED_TEST_PROFILE_CONFINED` lists paths (the OS's path-list
 //!   separator): right after a profile subcommand confines itself, it reads
 //!   each (a file's bytes, a directory's entries) and logs one line on
@@ -846,6 +852,19 @@ pub fn profile_migrate_full(made: u64) -> bool {
     millis("FREEDOM_CORED_TEST_PROFILE_MIGRATE_ENOSPC").is_some_and(|n| made > n)
 }
 
+#[cfg(feature = "testhooks")]
+#[cfg(target_os = "linux")]
+pub fn profile_migrate_walk() -> bool {
+    std::env::var("FREEDOM_CORED_TEST_PROFILE_MIGRATE_LOOKUP")
+        .is_ok_and(|lookup| lookup == "walk" || lookup == "walk-no-mount-id")
+}
+
+#[cfg(feature = "testhooks")]
+pub fn profile_migrate_no_mount_id() -> bool {
+    std::env::var("FREEDOM_CORED_TEST_PROFILE_MIGRATE_LOOKUP")
+        .is_ok_and(|lookup| lookup == "walk-no-mount-id")
+}
+
 /// The directories `FREEDOM_CORED_TEST_PROFILE_HOLD`'s,
 /// `FREEDOM_CORED_TEST_PROFILE_DELETE_PAUSE`'s,
 /// `FREEDOM_CORED_TEST_PROFILE_MIGRATE_PAUSE`'s and
@@ -920,6 +939,17 @@ pub fn profile_migrate_free() -> Option<u64> {
 
 #[cfg(not(feature = "testhooks"))]
 pub fn profile_migrate_full(_made: u64) -> bool {
+    false
+}
+
+#[cfg(not(feature = "testhooks"))]
+#[cfg(target_os = "linux")]
+pub fn profile_migrate_walk() -> bool {
+    false
+}
+
+#[cfg(not(feature = "testhooks"))]
+pub fn profile_migrate_no_mount_id() -> bool {
     false
 }
 

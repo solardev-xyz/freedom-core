@@ -25,6 +25,8 @@
 //!   given the schema's DDL and version in that one transaction; the
 //!   schema's version is opened as it is; any other is refused, with
 //!   nothing written.
+//! - **Temp files** in memory (`temp_store = MEMORY`), on every connection
+//!   (design 0017, C7).
 //!
 //! A statement waits at most [`BUSY_TIMEOUT`] for another connection's lock.
 //!
@@ -121,6 +123,9 @@ pub fn open(path: &Path, schema: &Schema) -> Result<Connection, Error> {
     // each commit of a money record is synced (deviation
     // `sqlite-synchronous`; better-sqlite3 reopens a WAL database at NORMAL).
     conn.pragma_update(None, "synchronous", "FULL")?;
+    // A statement that spills keeps its temp files in memory, never in
+    // `$TMPDIR` or another directory outside the grant (design 0017, C7).
+    conn.pragma_update(None, "temp_store", "MEMORY")?;
     // Rolled back when dropped uncommitted: nothing written but the DDL's
     // one commit. The version is read again inside it, against a writer
     // between the first read and here.

@@ -85,6 +85,7 @@ Electron main (profile P) ──spawn──▶ freedom-cored serve --data-dir <i
   - The binary comes from the app's resources. `FREEDOM_CORED_PATH` is honored only when `!app.isPackaged`.
   - The environment is cleared except for `PATH`, `HOME`/`USERPROFILE`, `LANG` and `RUST_LOG`.
   - stdin and stdout are pipes; stderr is a pipe read line by line.
+  - **The grant's arguments** ([0017](0017-core-confinement.md) C1): `--grant-root <dir>`, `--user-data-dir <dir>`, and `--node-root bee=<dir>` / `--node-root radicle=<dir>`, each absolute and normalized, each node kind at most once. The hello must then name the same `grant_root` and `user_data_dir`, and `nodes.write_identity` the same node directory. They are optional until main passes them (0017's steps).
   - Main spawns the core at startup and serves no `identity:*` request until the handshake has succeeded.
 - **Handshake:** `core.hello` must complete within 10 s of spawn. Both sides enforce this. Main kills the core and treats it as a startup failure. The core exits by itself if no `core.hello` has arrived 10 s after start.
 - **Startup recovery:** before answering `core.hello`, the core finishes any interrupted node-identity journal (see [Multi-file writes](#multi-file-writes)). Main starts no node before the handshake has succeeded.
