@@ -77,6 +77,40 @@ package ships Node-API prebuilds for every platform inside its tarball, which `n
 --ignore-scripts` unpacks and whose loader picks the running Node's, so CI's Node 24 needs
 no rebuild.
 
+`colibri.json` (design 0014, COL-1) has a fifth reference: freedom-browser's
+`integration/rust-core` at commit `7cf6a0c299b50b64944d5d246a911bdb25dc5c82`
+(`COLIBRI_REFERENCE_COMMIT` in `generate.js`), which has #1081 (a failed remote proof is
+no longer proven locally), #1071 (the private store) and #1083 (no ENS through Colibri).
+Its generator (`generator/colibri.js`) loads that checkout's `src/main/ens/colibri-runtime.js`
+and `colibri-worker.js` (the chain-data worker's `createColibriService`, driven in the
+generator's thread as the worker's message loop drives it) and
+`src/main/myotis/checkpoint-verifier-worker.js` (`verifyCheckpoint`), fresh for every case,
+over the checkout's installed `@corpus-core/colibri-stateless` 3.0.3, whose `c4w.wasm` it
+checks by digest. ethers (6.17.0) only rebuilds ENS's Universal Resolver call. Both come
+from the Radicle reference's install: the same versions and integrity in both lockfiles,
+so CI links `colibri-reference/node_modules` to it. Like the Radicle reference, it moves on
+its own. Its worlds come from `fixtures/colibri/` (below), so `check` needs no network.
+What the recording found, against design 0014's text:
+- **Light-client updates** are reached through a scripted checkpoint server a sync period
+  behind (`*-std-lagging-checkpoint`: a real finalized root of the previous period), as no
+  capture can wait for a period to roll over; the bootstrap and updates are live answers.
+- **`exclude_mask`** is `0` in every request: `fetch_from_servers` fails over within one
+  fetch (the answer's `node` shows it, `*-std-failover`), and no flipped answer made the C
+  core ask again with a server excluded.
+- **F-12's `justified` for blocks:** 3.0.3's validator refuses `eth_getBlockByNumber` at
+  `justified` (`params[0]Expected hex prefixed (0x) string`); `safe`, `finalized`, `0X10`
+  and `1x10` are proven from another block, as the design says.
+- **The transaction index** (`tx_cache?max_blocks=256`) holds transactions days old, so the
+  prover fallback is reached only for hashes it lacks: an unknown hash, which traps (#750),
+  and a 2024 transaction, which the mainnet prover refuses with an HTTP error and the Gnosis
+  prover answers with 19 bytes that trap. A ZK-off client can't read a days-old receipt (`the
+  last sync state is higher than the requested ...`).
+- **A short storage slot** (`0x0`) goes to the prover as given, which refuses it, so the
+  read ends as a failed remote proof (`*-storage-short-slot`).
+- **`fetch-error-text`:** the design's fetch text keeps `fetch_from_servers`' form, payload
+  included (` with payload <json>`), with URLs as `<url>`; its "The rest" section shows the
+  form without the payload.
+
 | File | Contents |
 | --- | --- |
 | `keys.json` | Six mnemonic seeds; user and publisher keys at indices 0, 1, 2, 1000 and 2147483647; Bee, Radicle and IPFS keys; exact index errors and special JS inputs for every mnemonic. |
@@ -106,6 +140,8 @@ no rebuild.
 | `keystore.json` | Design 0013's key-store helper (PRF-1b), with no reference: no build of the browser runs it. Every case and outcome is the design's (`source`), written by hand in `generator/keystore.js` as plain states; the generator lays each answer out and seals each `key` with HPKE (`generator/hpke.js`: DHKEM(X25519, HKDF-SHA256), HKDF-SHA256, AES-256-GCM, `info` `freedom-keystore/1`) under a fixed request key and fixed ephemeral keying material (public test values), with the associated data the design gives (`freedom-keystore/1`, the op, the item, and a DPAPI blob's SHA-256); nothing is computed by a model of the rules. `helper`: requests (argv, stdin, what the OS offers), the one OS call each makes and the store's answer, the RNG's draws, and the exact line the helper writes: create, open and forget, the store's failures, an RNG that fails, every out-of-form request and stdin byte refused with no OS call, and `unsupported`. `answers`: answers main relays, with the core's reading under the request key: the wrapping key (a DPAPI create's blob too), done, or the error: a key sealed for another op, item, blob, recipient or `info`, a changed byte in `enc` or the ciphertext, cut short or a byte long, over 4096 bytes (and exactly 4096, which is in), unknown, duplicate and `null` members, the wrong kind for the op, and each failure answer as the core maps it. Its `formats` member defines every field. It has the shared `meta`. |
 | `layout.json` | Design 0013's Freedom directory move (PRF-9a), with no reference: no build of the browser writes the move's journal, and the browser's copy of the list is checked against this file (B3). Every case and outcome is the design's (`source`), written by hand in `generator/layout.js` as plain rows, which the generator names and checks for shape; each journal a move writes is laid out as `JSON.stringify({ version: 2, entries, copied })`, and nothing is computed by a model of the rules. `constants`: the names under a profile's directory. `moved_entries`: what moves into `freedom/`, in order. `journals`: texts recovery reads, in form (versions 1 and 2, with their entries and copied ones) or malformed. `written`: the journal a move writes. `rollback` and `roll_forward`: an entry's state (what is at the root, in `freedom/` and as its `.moving` copy), renamed or copied, with its steps or why it can't be settled: every cell of presence, then the placeholder and the kinds. `placeholder`: whether it is written after the roll-forward. `plan_start`: what a starting move found, and the entries it moves or why it defers. Its `formats` member defines every field. It has the shared `meta`. |
 | `identity-formats.json` | Deterministic IPFS private-key protobuf/base64 and PeerID; Radicle DID, node ID and public SSH file with default `FreedomBrowser` comment and custom `vector-alias`; `didFromPublicKey`; and `radiclePrivateFiles`, whole private key files with a fixed check integer for aliases around an aligned private section. Those marked `deviation: openssh-padding` carry the reference's full 8-byte padding, which the core omits. |
+| `colibri.json` | Design 0014's Colibri adapter (COL-1), from the colibri reference's worker service and checkpoint check, run whole over the real `c4w.wasm` in worlds scripted from `fixtures/colibri/`, with the clock fixed at each case's captured instant. A recording layer wraps the WASM module's exports and its store, so `trace` holds, in order, every call into the C core: method support, context creation and the freshness bound, each step's status text verbatim (each `req_ptr` replaced by the request's index in the case), every answer (`response`: node, length, SHA-256 of the bytes) and error (`error`, the text set), frees, decodes and verifications, the store's gets, sets and deletes (key, length, SHA-256), and each fetch the package made (`fetch`: the request it served, the server type and its index in main's table, URL, verb, headers, body, and the answer: status, length, SHA-256, and `derived` for a flipped or scripted body). `outcomes`: what the worker posted for each request (main's adapter outcome: the result, or the error's name, code, message cut to 2,000 units, and data; a result over 4 KiB as its digest, the status text carrying it whole), and any trap. `store` and `store_after`: the store's entries before and after, a warm start's from the named case's final store. `servers`: main's table under the default-host answer (the registry's prover, the package's beacon and checkpoint lists for chains 1 and 100, and, for the reference's F-1 and F-11 cases only, its RPC hosts). `contract`: each data request's variant of the design's fetch contract (`generator/colibri-contract.js`); the generator fails on a request in a served form that matches no variant its operation allows, and on a variant no case reaches, and `variants` lists each variant's cases, chains and largest body. Cases marked `deviation` record the reference's outcome and, under `design`, the service's: for `colibri-unproofable`, `colibri-no-calls` and `colibri-unbound`, the refusal before any context and main's adapter error built from it (the reference's own `createError` and `serializeError`); for `fetch-error-text`, main's fetch text (URLs as `<url>`, cut to 2,000 units) and the adapter error built from it. |
+| `fixtures/colibri/` | `colibri.json`'s worlds, captured once from the live servers by `generator/colibri-capture.js` on 2026-11-22: `sessions.json` (each session's chain, capture time, the parameters it found, such as the block and transaction it read, every case's clock, and each exchange: URL, verb, headers, body, any redirect, and the answer's status, content type, length and SHA-256) and `bodies/` (each answer's bytes, named by their SHA-256: 84 files, 5.0 MB in all; the largest is mainnet's 1.8 MB transaction index). `bodies/` also holds copies of freedom-browser's checkpoint captures' proofs (`checkpoint_proofs`, 0.5 MB of the 5.0), which the generator checks against the reference's own files, so a replay outside the browser has them. `check` fails on a body whose digest differs and on an exchange no case reads. |
 | `fixtures/vaults.json` | Exact vault file contents from real `importVault`, including timestamps and the embedded encrypted JSON string. Five password/mnemonic cases, parsed payloads, successful unlocks, exact failing files/passwords/outcomes, plus one explicitly synthetic positive legacy vault. |
 | `fixtures/bee-keystores.json` | Two actual `createBeeKeystore` outputs, passwords, expected keys/addresses, parsed JSON, KDF parameters and the Unicode password normalization check. |
 | `fixtures/radicle-openssh.json` | Twelve actual `createRadicleIdentity` results (six mnemonics, two comments), extracted check integers and padding; checked by parsing and replaying the same check integer through the reference JS. |
@@ -135,6 +171,10 @@ no rebuild.
 | `generator/keystore.js` | The key-store helper's requests, the answers main relays, and their outcomes, used by `generate.js`. |
 | `generator/layout.js` | The move's list, journals, recovery cells and start cases, used by `generate.js`. |
 | `generator/hpke.js` | RFC 9180's HPKE base mode composed from `node:crypto`'s primitives, used by `keystore.js` and pinned to the RFC's vectors by `check.test.js`. |
+| `generator/colibri.js` | The Colibri harness: the reference loaded fresh per case, the recording layer, the worlds, and the builder, used by `generate.js`. |
+| `generator/colibri-cases.js` | The Colibri cases: their sessions, stores, requests, clocks, the rules that script their worlds, and the design's refusals. |
+| `generator/colibri-contract.js` | Design 0014's fetch contract, the grammar `colibri.json`'s requests are checked against. |
+| `generator/colibri-capture.js` | Captures `fixtures/colibri/` from the live servers through the same harness; run only to replace the fixtures (it needs the network; `generate` and `check` never do). |
 | `generator/check.test.js` | Integration tests that damage copies of the oracle outputs and require `check` to fail. |
 | `generator/interop.test.js` | Design 0013's interop harness: the profiles reference's `createProfile` and `renameProfile` against `freedom-cored`'s catalog subcommands on one app root, and the catalog's write lock held both ways; the JSON Lines journal read both ways (`test-journal`); and `payment-history.sqlite` read both ways, the stores reference's `payment-history.js` against `test-payments`, which runs the `payments.*` methods and the `x402-receipts.json` import. Needs `FREEDOM_CORED`, a `testhooks` build. |
 | `generator/interop-actor.js` | The harness's reference processes: a writer loop, and a holder of the write lock. |
@@ -143,7 +183,7 @@ no rebuild.
 Every JSON file has a `meta` block with the full reference commit, actual installed
 package versions, Node version and generator path. The Radicle files' `meta` names the
 Radicle reference's commit, the Node version and the generator path: they read no
-package of the reference's. So does `approvals.json`'s, for the approvals reference; `profiles.json`'s names proper-lockfile, `eip1193.json`'s ethers, `stores.json`'s, for the stores reference, ethers and `@sinonjs/fake-timers`, and `sqlite.json`'s, for the stores reference, better-sqlite3 and its SQLite version. The deterministic files use
+package of the reference's. So does `approvals.json`'s, for the approvals reference; `profiles.json`'s names proper-lockfile, `eip1193.json`'s ethers, `stores.json`'s, for the stores reference, ethers and `@sinonjs/fake-timers`, and `sqlite.json`'s, for the stores reference, better-sqlite3 and its SQLite version, and `colibri.json`'s, for the colibri reference, `@corpus-core/colibri-stateless` and ethers. The deterministic files use
 2-space indentation, LF and one trailing newline, with stable key order. The
 fixture containers have the same format. Their embedded `fileContents`,
 `keystore`, and SSH strings retain the bytes the reference wrote, including the
@@ -162,15 +202,19 @@ The checked-in run used Node `v24.15.0` and these installed versions:
 | `@ethersphere/core-sdk` | `0.1.1` (signing only) |
 | `@sinonjs/fake-timers` | `15.4.0` (the replays and `stores.json` only) |
 | `better-sqlite3` | `13.0.3`, with SQLite `3.53.4` (`sqlite.json` only) |
+| `@corpus-core/colibri-stateless` | `3.0.3`, `c4w.wasm` `3244888b…` (`colibri.json` only) |
 
-From clean checkouts at the four commits, install the first two's lockfile
-dependencies (this changes no tracked files; the approvals and stores references need none):
+From clean checkouts at the five commits, install the first two's lockfile
+dependencies (this changes no tracked files; the approvals and stores references need none,
+and the colibri reference links the Radicle reference's install):
 
 ```sh
 cd /root/herdr/freedom-browser
 ELECTRON_SKIP_BINARY_DOWNLOAD=1 npm ci --ignore-scripts
 cd /root/herdr/freedom-browser-wt/radicle-reference
 ELECTRON_SKIP_BINARY_DOWNLOAD=1 npm ci --ignore-scripts
+ln -s /root/herdr/freedom-browser-wt/radicle-reference/node_modules \
+  /root/herdr/freedom-browser-wt/colibri-reference/node_modules
 ```
 
 Then, from the freedom-core worktree:
@@ -179,11 +223,13 @@ Then, from the freedom-core worktree:
 node vectors/generator/generate.js generate --freedom-browser /root/herdr/freedom-browser \
   --radicle-browser /root/herdr/freedom-browser-wt/radicle-reference \
   --approvals-browser /root/herdr/freedom-browser-wt/approvals-reference \
-  --stores-browser /root/herdr/freedom-browser-wt/stores-reference
+  --stores-browser /root/herdr/freedom-browser-wt/stores-reference \
+  --colibri-browser /root/herdr/freedom-browser-wt/colibri-reference
 node vectors/generator/generate.js check --freedom-browser /root/herdr/freedom-browser \
   --radicle-browser /root/herdr/freedom-browser-wt/radicle-reference \
   --approvals-browser /root/herdr/freedom-browser-wt/approvals-reference \
-  --stores-browser /root/herdr/freedom-browser-wt/stores-reference
+  --stores-browser /root/herdr/freedom-browser-wt/stores-reference \
+  --colibri-browser /root/herdr/freedom-browser-wt/colibri-reference
 node --test vectors/generator/check.test.js
 cargo build -p freedom-cored --features testhooks
 FREEDOM_CORED=target/debug/freedom-cored \
@@ -199,11 +245,12 @@ FREEDOM_CORED_PREVIOUS=/path/to/v0.22.0/freedom-cored \
 
 The integration tests use `/root/herdr/freedom-browser`,
 `/root/herdr/freedom-browser-wt/radicle-reference`,
-`/root/herdr/freedom-browser-wt/approvals-reference` and
-`/root/herdr/freedom-browser-wt/stores-reference` by default; set
+`/root/herdr/freedom-browser-wt/approvals-reference`,
+`/root/herdr/freedom-browser-wt/stores-reference` and
+`/root/herdr/freedom-browser-wt/colibri-reference` by default; set
 `FREEDOM_BROWSER_CHECKOUT`, `FREEDOM_BROWSER_RADICLE_CHECKOUT`,
-`FREEDOM_BROWSER_APPROVALS_CHECKOUT` and `FREEDOM_BROWSER_STORES_CHECKOUT` to use
-other clean checkouts. Run with the Node
+`FREEDOM_BROWSER_APPROVALS_CHECKOUT`, `FREEDOM_BROWSER_STORES_CHECKOUT` and
+`FREEDOM_BROWSER_COLIBRI_CHECKOUT` to use other clean checkouts. Run with the Node
 version in `meta`: the runtime version is part of the byte comparison. The
 generator refuses a different commit or a dirty checkout, for any reference.
 

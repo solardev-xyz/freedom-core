@@ -321,6 +321,17 @@ jobs:
           ref: 9d4ea62516034731dea082c6d81765e355f1182f
           path: stores-reference
           persist-credentials: false
+      # The Colibri vectors' own reference (generate.js,
+      # COLIBRI_REFERENCE_COMMIT): integration/rust-core with #1081. Its
+      # generator reads @corpus-core/colibri-stateless 3.0.3 and ethers
+      # 6.17.0, which the Radicle reference's lockfile pins at the same
+      # versions and integrity, so it links that install (below).
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          repository: solardev-xyz/freedom-browser
+          ref: 7cf6a0c299b50b64944d5d246a911bdb25dc5c82
+          path: colibri-reference
+          persist-credentials: false
       # The vectors' meta records the Node version; it is part of the check.
       - uses: actions/setup-node@2028fbc5c25fe9cf00d9f06a71cc4710d4507903 # v6.0.0
         with:
@@ -335,17 +346,21 @@ jobs:
         env:
           ELECTRON_SKIP_BINARY_DOWNLOAD: "1"
         run: npm ci --ignore-scripts --no-audit --no-fund
+      - name: Link the Colibri reference to the Radicle reference's install
+        run: ln -s "$GITHUB_WORKSPACE/radicle-reference/node_modules" colibri-reference/node_modules
       - name: Check every vector against the reference
         env:
           FREEDOM_BROWSER_CHECKOUT: ${{ github.workspace }}/reference
           FREEDOM_BROWSER_RADICLE_CHECKOUT: ${{ github.workspace }}/radicle-reference
           FREEDOM_BROWSER_APPROVALS_CHECKOUT: ${{ github.workspace }}/approvals-reference
           FREEDOM_BROWSER_STORES_CHECKOUT: ${{ github.workspace }}/stores-reference
+          FREEDOM_BROWSER_COLIBRI_CHECKOUT: ${{ github.workspace }}/colibri-reference
         run: |
           node vectors/generator/generate.js check --freedom-browser "$FREEDOM_BROWSER_CHECKOUT" \
             --radicle-browser "$FREEDOM_BROWSER_RADICLE_CHECKOUT" \
             --approvals-browser "$FREEDOM_BROWSER_APPROVALS_CHECKOUT" \
-            --stores-browser "$FREEDOM_BROWSER_STORES_CHECKOUT"
+            --stores-browser "$FREEDOM_BROWSER_STORES_CHECKOUT" \
+            --colibri-browser "$FREEDOM_BROWSER_COLIBRI_CHECKOUT"
           node --test vectors/generator/check.test.js
       # Design 0013's interop harness: the profiles reference's catalog code
       # and freedom-cored's subcommands on one app root, the catalog's write
