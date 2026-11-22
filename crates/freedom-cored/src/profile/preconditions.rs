@@ -37,12 +37,21 @@
 //!     Unix; on Windows a handle that shares reading only. The core tries
 //!     `flock` on Unix, and on Windows opens each for `DELETE` while
 //!     sharing everything, which only a handle sharing less refuses.
+//!   - **antd** (pinned v0.5.77) holds `ant-data/antd.lock` for its whole
+//!     life, taken before it opens its data (`acquire_instance_lock`),
+//!     through fs4's `try_lock`: `flock` on Unix, `LockFileEx` on Windows,
+//!     as arti's. An orphaned antd keeps it, so this covers the gap before
+//!     main writes `ant-process.json`, and a marker lost in a crash. An
+//!     `ant-data/` that is itself a link (a user's data on another disk)
+//!     isn't followed to try it: that case is left to main's
+//!     `ant-process.json` check, and the link moves.
 //!
 //!   A lock held, a link or a mount on the way (so a `tor-data/` or
-//!   `myotis/` that is a link, which then doesn't move), anything at the
+//!   `myotis/` that is a link, which then doesn't move; `ant-data/` aside,
+//!   as above), anything at the
 //!   lock's name but a regular file or a directory, or an error other than
-//!   a missing file, defers. antd holds no OS lock the core can try: main
-//!   checks `ant-process.json`'s pid (B3).
+//!   a missing file, defers. Main also checks `ant-process.json`'s pid
+//!   (B3), a second layer.
 //! - **Then the copies** (PRF-9c, `copy.rs`): when `freedom/` is already
 //!   on another mount than the profile's directory (a volume mounted there:
 //!   its device differs, or on Linux its mount ID), every entry's rename
@@ -154,6 +163,9 @@ pub fn check(root: &Dir, canonical: &Path) -> io::Result<Check> {
     }
     for lock in NODE_LOCKS {
         if !entries.contains(&lock.entry) {
+            continue;
+        }
+        if lock.linked_left_to_main && root.kind(OsStr::new(lock.entry))? != Kind::Dir {
             continue;
         }
         let mut parts = vec![lock.entry];
@@ -507,6 +519,13 @@ struct NodeLock {
     entry: &'static str,
     path: &'static [&'static str],
     probe: Probe,
+    /// When the entry itself is a link (or anything but a directory), the
+    /// core doesn't follow it to try the lock, and leaves that case to
+    /// main's own check instead of deferring: antd's `ant-process.json`
+    /// (B3). An `ant-data/` linked to another disk is a user's ordinary
+    /// choice, and moves as the link. arti and Myotis have no such check,
+    /// so theirs defers.
+    linked_left_to_main: bool,
 }
 
 /// The locks the spike found (the module's comment).
@@ -515,31 +534,43 @@ const NODE_LOCKS: &[NodeLock] = &[
         entry: "tor-data",
         path: &["state", "state", "state.lock"],
         probe: Probe::FileLock,
+        linked_left_to_main: false,
     },
     NodeLock {
         entry: "tor-data",
         path: &["cache", "dir.lock"],
         probe: Probe::FileLock,
+        linked_left_to_main: false,
+    },
+    NodeLock {
+        entry: "ant-data",
+        path: &["antd.lock"],
+        probe: Probe::FileLock,
+        linked_left_to_main: true,
     },
     NodeLock {
         entry: "myotis",
         path: &[".freedom-myotis-lifetime"],
         probe: Probe::Lease,
+        linked_left_to_main: false,
     },
     NodeLock {
         entry: "myotis",
         path: &[".freedom-myotis-owner"],
         probe: Probe::Lease,
+        linked_left_to_main: false,
     },
     NodeLock {
         entry: "myotis",
         path: &["gnosis", ".freedom-myotis-lifetime"],
         probe: Probe::Lease,
+        linked_left_to_main: false,
     },
     NodeLock {
         entry: "myotis",
         path: &["gnosis", ".freedom-myotis-owner"],
         probe: Probe::Lease,
+        linked_left_to_main: false,
     },
 ];
 

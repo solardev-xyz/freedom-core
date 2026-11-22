@@ -998,8 +998,8 @@ fn the_placeholder_is_written_only_where_nothing_is() {
 // The starting move (PRF-9b): `profile migrate` without `--finish-only`.
 
 /// A used profile in the root layout: entries of each kind, among them
-/// arti's state lock and Myotis's lease (not held), and the shell's own
-/// files, which never move.
+/// arti's state lock, antd's instance lock and Myotis's lease (not held),
+/// and the shell's own files, which never move.
 fn seeded(profile: &Path) {
     write(&profile.join("identity").join("vault.json"), "vault");
     write(
@@ -1007,6 +1007,7 @@ fn seeded(profile: &Path) {
         "block",
     );
     write(&profile.join("ant-data").join("config.yaml"), "ant");
+    write(&profile.join("ant-data").join("antd.lock"), "4242\n");
     write(&profile.join("settings.json"), "{}");
     write(
         &profile
@@ -1308,6 +1309,22 @@ fn each_precondition_defers_with_nothing_changed() {
     deferred(&d, "arti's state lock");
     state_lock.unlock().unwrap();
     drop(state_lock);
+    assert_eq!(said(&start(&d)), "migrated");
+
+    // antd running, an orphan included: its instance lock held (fs4's
+    // try_lock, flock; LockFileEx on Windows), whatever ant-process.json
+    // says or whether it exists.
+    let d = dirs();
+    seeded(&d.profile);
+    let antd_lock = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(d.profile.join("ant-data").join("antd.lock"))
+        .unwrap();
+    antd_lock.lock().unwrap();
+    deferred(&d, "antd's instance lock");
+    antd_lock.unlock().unwrap();
+    drop(antd_lock);
     assert_eq!(said(&start(&d)), "migrated");
 
     // Myotis running (an orphaned execution child holds its lifetime
