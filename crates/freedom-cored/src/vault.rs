@@ -667,6 +667,9 @@ pub struct Vault {
     /// The lock directory main and the service processes share: Radicle
     /// homes' gates are there (design 0008).
     lock_dir: PathBuf,
+    /// The node directories `serve`'s arguments name (design 0017, C1):
+    /// `nodes.write_identity` writes only those, when given.
+    node_roots: nodes::NodeRootArgs,
     file: FileSnapshot,
     state: VaultState,
     throttle: Throttle,
@@ -924,6 +927,7 @@ impl Vault {
             accounts: crate::accounts::Store::new(dir.clone()),
             dir,
             lock_dir,
+            node_roots: nodes::NodeRootArgs::default(),
             state: VaultState::new(),
             throttle: Throttle::new(),
             auto_lock_ms,
@@ -945,6 +949,11 @@ impl Vault {
     /// The secrets file and key store quick unlock uses.
     pub fn set_secrets(&mut self, secrets: Arc<Secrets>) {
         self.secrets = Some(secrets);
+    }
+
+    /// The node directories `serve`'s arguments name (design 0017, C1).
+    pub fn set_node_roots(&mut self, roots: nodes::NodeRootArgs) {
+        self.node_roots = roots;
     }
 
     /// Installs the startup snapshot.
@@ -1930,6 +1939,15 @@ impl Vault {
                 }
                 let op_id = p.op_id.clone();
                 let spec = node_spec(p).ok_or_else(invalid)?;
+                // Only the directory `serve`'s `--node-root` names for the
+                // node, when given (design 0017, C1): refused before any
+                // write or gate.
+                if !self.node_roots.admit(&spec) {
+                    return Err(ErrorBody::new(
+                        ErrorCode::InvalidArgument,
+                        "nodes.write_identity's directory isn't serve's --node-root",
+                    ));
+                }
                 // Admitted against the current epoch (design 0001). The
                 // sealed Radicle form writes no key, so needs no vault
                 // (0008, "Identity changes").

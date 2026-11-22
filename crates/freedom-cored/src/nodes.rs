@@ -81,6 +81,31 @@ impl NodeSpec {
     }
 }
 
+/// The node directories `serve`'s command line names (design 0017, C1:
+/// `--node-root bee=<dir>`, `--node-root radicle=<dir>`), each absolute and
+/// normalized ([`journal::normalized_absolute`]). Optional until main
+/// passes them.
+#[derive(Debug, Default, Clone)]
+pub struct NodeRootArgs {
+    pub bee: Option<PathBuf>,
+    pub radicle: Option<PathBuf>,
+}
+
+impl NodeRootArgs {
+    /// Whether `nodes.write_identity` may write `spec`'s directory: exactly
+    /// the argument of its node kind, compared by components as [`Path`]
+    /// compares them (a repeated or trailing separator, or a `.`, doesn't
+    /// count; a `..` never equals a normalized path). Any absolute one when
+    /// that argument wasn't given, as before 0017.
+    pub fn admit(&self, spec: &NodeSpec) -> bool {
+        let given = match spec {
+            NodeSpec::Bee { .. } => &self.bee,
+            NodeSpec::Radicle { .. } => &self.radicle,
+        };
+        given.as_deref().is_none_or(|root| spec.root() == root)
+    }
+}
+
 /// One file: where it goes, and its contents (wiped on drop).
 pub type NodeFile = (PathBuf, Zeroizing<Vec<u8>>);
 

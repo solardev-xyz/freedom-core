@@ -512,6 +512,208 @@ fn usage_errors() {
     assert_eq!(status.code(), Some(64));
 }
 
+/// `serve`'s grant arguments (design 0017, C1): each absolute and
+/// normalized, `--node-root` only as `bee=` or `radicle=`, each at most
+/// once, and `serve`'s alone. Anything else is a usage error (64), before
+/// the gate. (A valid set that slipped through would serve, then exit 0 at
+/// stdin's EOF, so a regression fails here instead of hanging.)
+#[test]
+fn the_grant_arguments_are_checked() {
+    let (root, data, locks) = dirs();
+    let dir = |name: &str| root.path().join(name).display().to_string();
+    let (grant, user_data, bee, radicle) = (dir("freedom"), dir("profile"), dir("bee"), dir("rad"));
+    let dotted = format!("{}/x/../freedom", root.path().display());
+    let refused: Vec<(&str, Vec<String>)> = vec![
+        (
+            "serve",
+            vec!["--grant-root".into(), "relative/freedom".into()],
+        ),
+        ("serve", vec!["--grant-root".into(), String::new()]),
+        ("serve", vec!["--grant-root".into(), dotted.clone()]),
+        ("serve", vec!["--grant-root".into()]),
+        (
+            "serve",
+            vec!["--user-data-dir".into(), "relative/profile".into()],
+        ),
+        ("serve", vec!["--user-data-dir".into(), dotted.clone()]),
+        ("serve", vec!["--node-root".into(), bee.clone()]),
+        ("serve", vec!["--node-root".into(), format!("ipfs={bee}")]),
+        ("serve", vec!["--node-root".into(), format!("Bee={bee}")]),
+        ("serve", vec!["--node-root".into(), format!("={bee}")]),
+        ("serve", vec!["--node-root".into(), "bee=".into()]),
+        (
+            "serve",
+            vec!["--node-root".into(), "bee=relative/bee".into()],
+        ),
+        (
+            "serve",
+            vec!["--node-root".into(), format!("radicle={dotted}")],
+        ),
+        (
+            "serve",
+            vec![
+                "--grant-root".into(),
+                grant.clone(),
+                "--grant-root".into(),
+                grant.clone(),
+            ],
+        ),
+        (
+            "serve",
+            vec![
+                "--user-data-dir".into(),
+                user_data.clone(),
+                "--user-data-dir".into(),
+                user_data.clone(),
+            ],
+        ),
+        (
+            "serve",
+            vec![
+                "--node-root".into(),
+                format!("bee={bee}"),
+                "--node-root".into(),
+                format!("bee={radicle}"),
+            ],
+        ),
+        (
+            "serve",
+            vec![
+                "--node-root".into(),
+                format!("radicle={radicle}"),
+                "--node-root".into(),
+                format!("radicle={radicle}"),
+            ],
+        ),
+        ("hold-lock", vec!["--grant-root".into(), grant.clone()]),
+        ("recover", vec!["--node-root".into(), format!("bee={bee}")]),
+    ];
+    for (command, extra) in refused {
+        let status = Command::new(BIN)
+            .arg(command)
+            .arg("--data-dir")
+            .arg(&data)
+            .arg("--lock-dir")
+            .arg(&locks)
+            .args(&extra)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .unwrap();
+        assert_eq!(status.code(), Some(64), "{command} {extra:?}");
+    }
+    // Refused before the gate: nothing was made.
+    assert!(!locks.exists());
+    assert!(!data.exists());
+}
+
+/// The hello names the directories `serve`'s arguments gave (design 0017,
+/// C1): `grant_root` and `user_data_dir` equal, compared by components (a
+/// trailing separator doesn't count). A `--user-data-dir` not given admits
+/// any hello's `user_data_dir`, as before 0017.
+#[test]
+fn a_hello_naming_the_arguments_is_answered() {
+    let (root, data, locks) = dirs();
+    let grant = root.path().join("profile/freedom");
+    let user_data = root.path().join("profile");
+    let with_slash = format!("{}/", grant.display());
+    let node_roots = [
+        format!("bee={}", root.path().join("bee").display()),
+        format!("radicle={}", root.path().join("rad").display()),
+    ];
+    let all = [
+        "--grant-root",
+        &with_slash,
+        "--user-data-dir",
+        user_data.to_str().unwrap(),
+        "--node-root",
+        &node_roots[0],
+        "--node-root",
+        &node_roots[1],
+    ];
+    let mut core = spawn("serve", &data, &locks, &all);
+    let hello = core.call_shell(
+        1,
+        "core.hello",
+        json!({
+            "protocol": 2, "shell_version": "t", "auto_lock_ms": 900_000, "frames": ["stream"],
+            "grant_root": grant, "user_data_dir": user_data,
+        }),
+    );
+    assert_eq!(hello["result"]["protocol"], 2, "{hello}");
+    let status = core.call(2, "vault.status", json!({}));
+    assert_eq!(status["result"]["exists"], false, "{status}");
+    core.close_stdin();
+    assert_eq!(core.exit_code(Duration::from_secs(5)), 0);
+
+    // Only --grant-root: a hello with or without user_data_dir.
+    for user_data_dir in [json!(null), json!(user_data)] {
+        let mut core = spawn(
+            "serve",
+            &data,
+            &locks,
+            &["--grant-root", grant.to_str().unwrap()],
+        );
+        let mut params = json!({
+            "protocol": 2, "shell_version": "t", "auto_lock_ms": 900_000, "frames": ["stream"],
+            "grant_root": with_slash,
+        });
+        if !user_data_dir.is_null() {
+            params["user_data_dir"] = user_data_dir.clone();
+        }
+        let hello = core.call_shell(1, "core.hello", params);
+        assert_eq!(hello["result"]["protocol"], 2, "{user_data_dir}: {hello}");
+        core.close_stdin();
+        assert_eq!(core.exit_code(Duration::from_secs(5)), 0);
+    }
+}
+
+/// A hello whose `grant_root` isn't `--grant-root`, or whose
+/// `user_data_dir` isn't `--user-data-dir` or is missing while it was
+/// given, is answered as a malformed `grant_root` is: `invalid_argument`,
+/// then exit 76 (design 0017, C1).
+#[test]
+fn a_hello_differing_from_the_arguments_is_refused() {
+    let (root, data, locks) = dirs();
+    let grant = root.path().join("profile/freedom");
+    let user_data = root.path().join("profile");
+    let other = root.path().join("other");
+    let args = [
+        "--grant-root",
+        grant.to_str().unwrap(),
+        "--user-data-dir",
+        user_data.to_str().unwrap(),
+    ];
+    let hello = |grant_root: &std::path::Path, user_data_dir: Option<&std::path::Path>| {
+        let mut params = json!({
+            "protocol": 2, "shell_version": "t", "auto_lock_ms": 900_000, "frames": ["stream"],
+            "grant_root": grant_root,
+        });
+        if let Some(dir) = user_data_dir {
+            params["user_data_dir"] = json!(dir);
+        }
+        params
+    };
+    for params in [
+        hello(&other, Some(&user_data)),
+        hello(&user_data, Some(&user_data)),
+        hello(&grant.join("freedom"), Some(&user_data)),
+        hello(&grant, Some(&other)),
+        hello(&grant, Some(&grant)),
+        hello(&grant, None),
+    ] {
+        let mut core = spawn("serve", &data, &locks, &args);
+        let reply = core.call_shell(1, "core.hello", params.clone());
+        assert_eq!(
+            reply["error"]["code"], "invalid_argument",
+            "{params}: {reply}"
+        );
+        assert_eq!(core.rest(), Vec::<serde_json::Value>::new(), "{params}");
+        assert_eq!(core.exit_code(Duration::from_secs(5)), 76, "{params}");
+    }
+}
+
 const SLOW_SNAPSHOT: (&str, &str) = ("FREEDOM_CORED_TEST_SNAPSHOT_DELAY_MS", "30000");
 
 #[test]

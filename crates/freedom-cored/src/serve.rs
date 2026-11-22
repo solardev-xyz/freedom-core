@@ -48,7 +48,7 @@
 
 use std::collections::VecDeque;
 use std::ops::Range;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::mpsc::{self, RecvTimeoutError, Sender, TryRecvError};
 use std::time::{Duration, Instant};
@@ -104,6 +104,15 @@ pub struct Options {
     /// When the process started: the hello deadline counts from here, not
     /// from after the gate is taken.
     pub started: Instant,
+    /// `--grant-root` (design 0017, C1): the hello's `grant_root` must equal
+    /// it. Optional until main passes it.
+    pub grant_root: Option<PathBuf>,
+    /// `--user-data-dir` (C1): the hello's `user_data_dir` must be present
+    /// and equal it. Optional until main passes it.
+    pub user_data_dir: Option<PathBuf>,
+    /// `--node-root bee=` and `radicle=` (C1): `nodes.write_identity` must
+    /// name these, exactly.
+    pub node_roots: crate::nodes::NodeRootArgs,
 }
 
 /// What the loop reacts to.
@@ -474,8 +483,11 @@ pub fn run(options: &Options) -> Exit {
                 fc_vault::state::DEFAULT_AUTO_LOCK_MS,
             );
             vault.set_secrets(Arc::clone(&secrets));
+            vault.set_node_roots(options.node_roots.clone());
             vault
         },
+        grant_root_arg: options.grant_root.clone(),
+        user_data_dir_arg: options.user_data_dir.clone(),
         secrets,
         worker,
         requests,
@@ -788,6 +800,10 @@ struct Core {
     hello_done: bool,
     last_request_id: u64,
     vault: Vault,
+    /// `serve`'s `--grant-root` and `--user-data-dir`, which the hello must
+    /// match (design 0017, C1).
+    grant_root_arg: Option<PathBuf>,
+    user_data_dir_arg: Option<PathBuf>,
     worker: Worker,
     /// The core's requests to main: where main's responses go back to.
     requests: Arc<Requests>,
@@ -928,6 +944,26 @@ fn user_data_dir(params: &HelloParams) -> Result<Option<PathBuf>, &'static str> 
                 .ok_or("core.hello's user_data_dir must be an absolute path")
         })
         .transpose()
+}
+
+/// Whether the hello names the directories `serve`'s arguments gave (design
+/// 0017, C1), compared by components as [`Path`] compares them, after both
+/// passed the same check ([`crate::journal::normalized_absolute`]). An
+/// argument not given admits any (optional until main passes them); a
+/// `--user-data-dir` needs the hello's `user_data_dir`, present and equal.
+fn hello_matches_args(
+    grant_root: &Path,
+    user_data_dir: Option<&Path>,
+    grant_root_arg: Option<&Path>,
+    user_data_dir_arg: Option<&Path>,
+) -> Result<(), &'static str> {
+    if grant_root_arg.is_some_and(|arg| arg != grant_root) {
+        return Err("core.hello's grant_root isn't serve's --grant-root");
+    }
+    if user_data_dir_arg.is_some_and(|arg| user_data_dir != Some(arg)) {
+        return Err("core.hello's user_data_dir isn't serve's --user-data-dir");
+    }
+    Ok(())
 }
 
 #[derive(Deserialize)]
@@ -1742,6 +1778,17 @@ impl Core {
                 return Flow::Exit(Exit::Protocol);
             }
         };
+        // The same directories as `serve`'s arguments (design 0017, C1): a
+        // mismatch is answered as a malformed `grant_root` is.
+        if let Err(message) = hello_matches_args(
+            &grants.0,
+            user_data_dir.as_deref(),
+            self.grant_root_arg.as_deref(),
+            self.user_data_dir_arg.as_deref(),
+        ) {
+            let _ = self.error(id, ErrorBody::new(ErrorCode::InvalidArgument, message));
+            return Flow::Exit(Exit::Protocol);
+        }
         if self.hello_done || self.pending_hello.is_some() {
             return self.error(
                 id,
