@@ -126,7 +126,7 @@ pub fn check(root: &Dir, canonical: &Path) -> io::Result<Check> {
     let state = StartState {
         root: &at_root,
         freedom,
-        node_identity_journal: node_identity_journal(canonical)?,
+        node_identity_journal: node_identity_journal(root)?,
     };
     let entries = match layout::plan_start(&state) {
         Ok(entries) => entries,
@@ -379,18 +379,20 @@ fn prefix_key(prefix: std::path::Prefix<'_>) -> String {
 }
 
 /// A node identity journal or its staging file in the root's `identity/`,
-/// through a symlink there too: its recovery would write at the absolute
-/// root it records.
-fn node_identity_journal(canonical: &Path) -> io::Result<bool> {
-    let identity = canonical.join("identity");
+/// read through the root's handle, following nothing: its recovery would
+/// write at the absolute root it records. An `identity` that is a link
+/// (or anything but a directory) holds no journal of this profile's: it
+/// moves as the link, or defers as one into the profile.
+fn node_identity_journal(root: &Dir) -> io::Result<bool> {
+    if root.kind(OsStr::new("identity"))? != Kind::Dir {
+        return Ok(false);
+    }
+    let Some(identity) = root.child(OsStr::new("identity"), false)? else {
+        return Ok(false);
+    };
     for name in [crate::journal::JOURNAL, crate::journal::STAGING] {
-        match std::fs::symlink_metadata(identity.join(name)) {
-            Ok(_) => return Ok(true),
-            // Missing, or `identity` isn't a directory (a file there).
-            Err(e)
-                if e.kind() == io::ErrorKind::NotFound
-                    || e.kind() == io::ErrorKind::NotADirectory => {}
-            Err(e) => return Err(e),
+        if identity.kind(OsStr::new(name))? != Kind::Missing {
+            return Ok(true);
         }
     }
     Ok(false)
@@ -626,6 +628,11 @@ fn walk(root: &Dir, parts: &[&str]) -> Opened {
             Ok(Kind::Dir) => {}
             Err(e) => return unknown(e),
         }
+        match on_device(&dir, part, device) {
+            Ok(true) => {}
+            Ok(false) => return Opened::Unknown(ON_THE_WAY.to_owned()),
+            Err(e) => return unknown(e),
+        }
         dir = match dir.child(OsStr::new(part), false) {
             Ok(Some(child)) => child,
             Ok(None) => return Opened::Free,
@@ -644,6 +651,11 @@ fn walk(root: &Dir, parts: &[&str]) -> Opened {
         Ok(Kind::File) => {}
         Err(e) => return unknown(e),
     }
+    match on_device(&dir, last, device) {
+        Ok(true) => {}
+        Ok(false) => return Opened::Unknown(ON_THE_WAY.to_owned()),
+        Err(e) => return unknown(e),
+    }
     match dir.open_regular(OsStr::new(last), false) {
         Ok(Regular::File(file)) => classify(file, Some(device)),
         Ok(Regular::Missing) => Opened::Free,
@@ -653,6 +665,29 @@ fn walk(root: &Dir, parts: &[&str]) -> Opened {
 }
 
 const OTHER: &str = "a link or a special file at the lock's name";
+
+/// Whether `name` in `dir` is on the root's `device`, looked at before it
+/// is opened, so a mount is refused before it is entered: `fstatat` from
+/// the handle, following no link and (Linux) triggering no automount. On
+/// Windows a volume is reached only through a reparse point, which the
+/// walk refuses as a link.
+#[cfg(unix)]
+fn on_device(dir: &Dir, name: &str, device: u64) -> io::Result<bool> {
+    use rustix::fs::AtFlags;
+    #[cfg(target_os = "linux")]
+    let flags = AtFlags::SYMLINK_NOFOLLOW | AtFlags::NO_AUTOMOUNT;
+    #[cfg(not(target_os = "linux"))]
+    let flags = AtFlags::SYMLINK_NOFOLLOW;
+    let stat = rustix::fs::statat(dir.as_fd(), name, flags)?;
+    #[allow(clippy::unnecessary_cast)]
+    let here = stat.st_dev as u64;
+    Ok(here == device)
+}
+
+#[cfg(not(unix))]
+fn on_device(_dir: &Dir, _name: &str, _device: u64) -> io::Result<bool> {
+    Ok(true)
+}
 
 /// The opened lock's handle: a regular file (on the root's device, where
 /// the walk checks it), a directory, or anything else.
@@ -880,6 +915,39 @@ mod tests {
             Tried::Unknown(_)
         ));
         assert!(started.elapsed() < std::time::Duration::from_secs(5));
+    }
+
+    /// A mount on the way to a lock (CI's tmpfs, mounted at
+    /// `FREEDOM_TEST_TMPFS`, a test profile's `tor-data/state`) is refused:
+    /// by `openat2`'s `RESOLVE_NO_XDEV`, and by the fallback walk before it
+    /// opens the mount. Skipped where the variable isn't set, but not under
+    /// CI, whose Linux test job mounts it.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_mount_on_the_way_is_refused_before_it_is_entered() {
+        let Some(mount) = std::env::var_os("FREEDOM_TEST_TMPFS") else {
+            assert!(
+                std::env::var_os("CI").is_none(),
+                "CI's Linux test job mounts FREEDOM_TEST_TMPFS"
+            );
+            return;
+        };
+        let mount = std::path::PathBuf::from(mount);
+        let profile = mount.parent().unwrap().parent().unwrap();
+        std::fs::create_dir_all(mount.join("state")).unwrap();
+        std::fs::write(mount.join("state").join("state.lock"), "").unwrap();
+        let root = Dir::open_root(profile, fc_store::anchor::Resolve::Follow)
+            .unwrap()
+            .unwrap();
+        let (device, _) = root.identity().unwrap();
+        let tor = root.child(OsStr::new("tor-data"), false).unwrap().unwrap();
+        assert!(!on_device(&tor, "state", device).unwrap(), "a mount there");
+        let parts = ["tor-data", "state", "state", "state.lock"];
+        assert!(matches!(walk(&root, &parts), Opened::Unknown(_)));
+        assert!(matches!(
+            try_lock(&root, profile, &parts, Probe::FileLock),
+            Tried::Unknown(_)
+        ));
     }
 
     #[test]

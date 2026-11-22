@@ -17,7 +17,7 @@
 //! the marker; a kill at each of its steps settled by `--finish-only`; a
 //! full volume and the free-space check; symlinks copied as links; what a
 //! copy can't move deferring the move; and on real tmpfs mounts (CI's
-//! Linux step, `FREEDOM_TEST_TMPFS`) a genuine `EXDEV`, a full volume, and
+//! Linux step, `FREEDOM_TEST_MOUNTS`) a genuine `EXDEV`, a full volume, and
 //! nested mount points. A test binary of its own.
 
 #![allow(
@@ -1500,6 +1500,86 @@ fn a_node_directory_that_is_a_link_defers() {
     }
 }
 
+/// proper-lockfile's takeover of a stale lock, as another build makes it:
+/// the old directory gone from its name (moved aside here, so a Windows
+/// handle on it doesn't leave a pending delete) and a new one made.
+fn take_over_lock(lock: &Path) {
+    std::fs::rename(lock, lock.with_extension("old")).unwrap();
+    std::fs::create_dir(lock).unwrap();
+}
+
+/// Taken over between its taking and its keeping (a run stalled past the
+/// stale time before it got there): `keep`'s own refresh finds it before
+/// anything is written, and the run ends `lock_lost` with nothing changed,
+/// the successor's lock left. A finish-only recovery, and a starting move
+/// (after its refresh before confinement).
+#[test]
+fn a_lock_taken_over_before_it_is_kept_changes_nothing() {
+    for finish_only in [true, false] {
+        let d = dirs();
+        if finish_only {
+            cut_short(&d.profile);
+        } else {
+            seeded(&d.profile);
+        }
+        let before = snapshot(&d.profile);
+        let paused = d.base.join("paused");
+        let release = d.base.join("release");
+        let mut command = Command::new(BIN);
+        command
+            .args([
+                "profile",
+                "migrate",
+                "--profile-dir",
+                s(&d.profile),
+                "--lock-dir",
+                s(&d.locks),
+            ])
+            .env(
+                "FREEDOM_CORED_TEST_PROFILE_MIGRATE_PAUSE",
+                format!("before-keep={}={}", paused.display(), release.display()),
+            )
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        if finish_only {
+            command.arg("--finish-only");
+        }
+        let child = command.spawn().unwrap();
+        wait_for(&paused);
+        let lock = d.profile.join("profile-open.lock");
+        take_over_lock(&lock);
+        std::fs::write(&release, "").unwrap();
+        let out = child.wait_with_output().unwrap();
+        assert_eq!(
+            (code(&out), said(&out)),
+            (74, "lock_lost".into()),
+            "finish-only {finish_only}: {out:?}"
+        );
+        assert_eq!(snapshot(&d.profile), before, "finish-only {finish_only}");
+        assert!(lock.is_dir(), "the successor's lock stays");
+    }
+}
+
+/// An `identity` that is a link to an absolute path outside holds no
+/// journal of this profile's: a node identity journal behind it doesn't
+/// defer, and is never read; the link moves as itself.
+#[cfg(unix)]
+#[test]
+fn an_identity_link_is_not_followed_for_a_node_journal() {
+    let d = dirs();
+    seeded(&d.profile);
+    let outside = d.base.join("outside-identity");
+    std::fs::rename(d.profile.join("identity"), &outside).unwrap();
+    write(&outside.join("node-identity-journal.json"), "{}");
+    std::os::unix::fs::symlink(&outside, d.profile.join("identity")).unwrap();
+    let out = start(&d);
+    assert_eq!(said(&out), "migrated", "{out:?}");
+    let moved = d.profile.join("freedom").join("identity");
+    assert_eq!(std::fs::read_link(&moved).unwrap(), outside);
+    assert!(outside.join("node-identity-journal.json").is_file());
+}
+
 /// Myotis's lease as its supervisor holds it: `flock` on Unix; on Windows a
 /// handle that shares reading only.
 fn hold_lease(path: &Path) -> std::fs::File {
@@ -2441,7 +2521,7 @@ fn a_reparse_point_in_an_entry_to_copy_defers_the_move() {
     assert_eq!(said(&start(&d)), "migrated", "renamed instead");
 }
 
-/// A mount made with `sudo -n` while `FREEDOM_TEST_TMPFS` is set (CI's
+/// A mount made with `sudo -n` while `FREEDOM_TEST_MOUNTS` is set (CI's
 /// Linux step), unmounted when dropped (at the path it was moved to, if it
 /// was): a tmpfs owned by this process's user, or a bind mount. `None`
 /// without the variable: the test then checks nothing.
@@ -2468,7 +2548,7 @@ impl Mounted {
     }
 
     fn run(at: &Path, args: &[&str]) -> Option<Mounted> {
-        std::env::var_os("FREEDOM_TEST_TMPFS")?;
+        std::env::var_os("FREEDOM_TEST_MOUNTS")?;
         let status = Command::new("sudo")
             .args(["-n", "mount"])
             .args(args)

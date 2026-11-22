@@ -909,7 +909,7 @@ fn a_directory_s_volume_and_mount_are_read_from_its_handle() {
     assert!(dir.mount().unwrap().same(sub.mount().unwrap()));
 }
 
-/// A mount made with `sudo -n` while `FREEDOM_TEST_TMPFS` is set (CI's
+/// A mount made with `sudo -n` while `FREEDOM_TEST_MOUNTS` is set (CI's
 /// Linux step, design 0013's PRF-9c), and unmounted when dropped: a tmpfs
 /// owned by this process's user, or a bind mount. `None` without the
 /// variable: the test that asks for one then checks nothing.
@@ -936,7 +936,7 @@ impl Mounted {
     }
 
     fn run(at: &Path, args: &[&str]) -> Option<Mounted> {
-        std::env::var_os("FREEDOM_TEST_TMPFS")?;
+        std::env::var_os("FREEDOM_TEST_MOUNTS")?;
         let status = std::process::Command::new("sudo")
             .args(["-n", "mount"])
             .args(args)
