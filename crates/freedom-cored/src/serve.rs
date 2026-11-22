@@ -104,11 +104,12 @@ pub struct Options {
     /// When the process started: the hello deadline counts from here, not
     /// from after the gate is taken.
     pub started: Instant,
-    /// `--grant-root` (design 0017, C1): the hello's `grant_root` must equal
-    /// it. Optional until main passes it.
-    pub grant_root: Option<PathBuf>,
-    /// `--user-data-dir` (C1): the hello's `user_data_dir` must be present
-    /// and equal it. Optional until main passes it.
+    /// `--grant-root` (design 0017, C1): the Freedom root, granted (C2).
+    /// The hello's `grant_root` must equal it.
+    pub grant_root: PathBuf,
+    /// `--user-data-dir` (C1): the profile's root, whose legacy receipts
+    /// are handed over before `confine` (C5), and which isn't granted. The
+    /// hello's `user_data_dir` must equal it, both absent or both given.
     pub user_data_dir: Option<PathBuf>,
     /// `--node-root bee=` and `radicle=` (C1): `nodes.write_identity` must
     /// name these, exactly.
@@ -336,12 +337,28 @@ const FEATURES: &[&str] = &[
     "streams",
 ];
 
+/// `serve`, in 0017's order ("The order in serve"), from step 3: the
+/// entry's `clean_entry` and the arguments are `main`'s. Until `confine`
+/// the process is one thread, and its log lines are written directly.
 pub fn run(options: &Options) -> Exit {
+    // 3. Hardening (0001), then the parent's death signal and its check.
     hardening::harden();
     if !hardening::request_parent_death_signal(options.parent_pid) {
         log::error("parent is already gone", serde_json::json!({}));
         return Exit::Ok;
     }
+    // The Freedom root, made durably if missing, before the gate: main's
+    // identity directory is inside it, and the gate makes a missing one
+    // with its ancestors, flushing none of them. One that can't be made
+    // durably is exit 74, before anything else.
+    if let Err(e) = journal::create_private_dirs(&options.grant_root) {
+        log::error(
+            "cannot make the Freedom root",
+            serde_json::json!({ "error": e.kind().to_string() }),
+        );
+        return Exit::Storage;
+    }
+    // 4. The gate, taken and held.
     let gate = match gate::acquire(&options.data_dir, &options.lock_dir) {
         Ok(gate) => {
             log::info(
@@ -358,26 +375,34 @@ pub fn run(options: &Options) -> Exit {
             return Exit::from(&e);
         }
     };
-    // Design 0017, C3 and C6: a pending node record's roots planned, and
-    // the Radicle homes' gate files opened, before any of `serve`'s threads
-    // starts (logging's runs already, from `main`). Recovery and
-    // `nodes.write_identity` then lock those files. Nothing is confined
-    // yet: D7-2d moves this before the logging thread, and passes the grant
-    // and the files' descriptors to `confine`.
-    let prepared = journal::prepare(
-        &gate.identity_dir,
-        &options.lock_dir,
-        options.node_roots.radicle.as_deref(),
-    );
-    if !prepared.grant.is_empty() || prepared.gates.count() > 0 {
-        log::info(
-            "node records planned",
-            serde_json::json!({
-                "roots": prepared.grant.len(),
-                "gate_files": prepared.gates.count(),
-            }),
+    // The identity directory's entry in its parent (the Freedom root, by
+    // default), flushed at every start: the gate makes a missing one and
+    // flushes nothing, and the vault's commits flush only the directory
+    // itself. One that can't be flushed is exit 74, tried again next start.
+    if let Err(e) = journal::sync_parent(&gate.identity_dir) {
+        log::error(
+            "cannot flush the identity directory in its parent",
+            serde_json::json!({ "error": e.kind().to_string() }),
         );
+        return Exit::Storage;
     }
+    // 5. The setup that confinement would refuse, or that needs what it
+    //    doesn't grant.
+    let setup = match setup(options, &gate) {
+        Ok(setup) => setup,
+        Err(exit) => return exit,
+    };
+    // 6. Confined, while this is the only thread (C2).
+    let mut descriptors = gate.descriptors();
+    descriptors.extend(setup.prepared.gates.descriptors());
+    let policy = crate::confine::policy(setup.read_write, descriptors);
+    let report = match crate::confine::apply(&policy, "serve confined") {
+        Ok(report) => report,
+        Err(exit) => return exit,
+    };
+    // 7. The logging thread, then everything else.
+    log::init();
+    let prepared = setup.prepared;
 
     let (events_tx, events) = mpsc::channel();
     let credits = Arc::new(Credits::default());
@@ -510,6 +535,8 @@ pub fn run(options: &Options) -> Exit {
         },
         grant_root_arg: options.grant_root.clone(),
         user_data_dir_arg: options.user_data_dir.clone(),
+        handover: setup.handover,
+        confinement: report.to_json(),
         secrets,
         worker,
         requests,
@@ -753,6 +780,84 @@ pub fn run(options: &Options) -> Exit {
     exit
 }
 
+/// What `serve` sets up on its only thread before `confine` (design 0017,
+/// "The order in serve", step 5).
+struct Setup {
+    /// The records' plan and the Radicle gate files (C3, C6).
+    prepared: journal::Prepared,
+    /// The legacy receipts' hand-over, with `--user-data-dir` (C5).
+    handover: Option<crate::payments_store::Handover>,
+    /// C2's `read_write`.
+    read_write: Vec<PathBuf>,
+}
+
+/// Step 5, in order (the Freedom root was made before the gate: [`run`]):
+/// - **Each missing `--node-root`** made with its ancestors (C2): Bee's
+///   private, as the Freedom root is, and one that can't be made (a
+///   regular file there, an ancestor that can't hold it, a parent whose
+///   sync fails) is exit 74; Radicle's home by its gate file's creating
+///   open below, as fc-service's gate makes it, where a failure is logged
+///   and the home, if it isn't a directory then, left out of the grant.
+/// - **The records planned** and the Radicle gate files opened (C6, C3).
+/// - **The legacy receipts handed over** (C5) when `--user-data-dir` is
+///   given, whatever the hello's `store_moved` will say: the profile's
+///   root is out of reach once confined. Nothing is done when it is the
+///   Freedom root (the old layout).
+///
+/// The vault's tightening at start stays on the snapshot thread, after the
+/// node, delete and metadata journals' recovery that may replace the vault
+/// file, as the intent journal's and the node layout's stay after the
+/// hello: C4's `modes` lets each narrowing to owner-only through.
+fn setup(options: &Options, gate: &gate::Gate) -> Result<Setup, Exit> {
+    if let Some(bee) = &options.node_roots.bee
+        && let Err(e) = journal::create_private_dirs(bee)
+    {
+        log::error(
+            "cannot make a node root",
+            serde_json::json!({ "node": "bee", "error": e.kind().to_string() }),
+        );
+        return Err(Exit::Storage);
+    }
+    let prepared = journal::prepare(
+        &gate.identity_dir,
+        &options.lock_dir,
+        options.node_roots.radicle.as_deref(),
+    );
+    if !prepared.grant.is_empty() || prepared.gates.count() > 0 {
+        log::info(
+            "node records planned",
+            serde_json::json!({
+                "roots": prepared.grant.len(),
+                "gate_files": prepared.gates.count(),
+            }),
+        );
+    }
+    let handover = options
+        .user_data_dir
+        .as_deref()
+        .map(|dir| crate::payments_store::hand_over_legacy(dir, &options.grant_root));
+    let mut read_write = vec![gate.identity_dir.clone(), options.grant_root.clone()];
+    for (node, root) in [
+        ("bee", &options.node_roots.bee),
+        ("radicle", &options.node_roots.radicle),
+    ] {
+        match root {
+            Some(root) if root.is_dir() => read_write.push(root.clone()),
+            Some(_) => log::error(
+                "a node root isn't a directory: not granted",
+                serde_json::json!({ "node": node }),
+            ),
+            None => {}
+        }
+    }
+    read_write.extend(prepared.grant.iter().cloned());
+    Ok(Setup {
+        prepared,
+        handover,
+        read_write,
+    })
+}
+
 /// Reads the status snapshot on its own thread. False if the thread can't be
 /// created. If the read never finishes, the hello deadline ends the process.
 fn spawn_snapshot(
@@ -826,8 +931,13 @@ struct Core {
     vault: Vault,
     /// `serve`'s `--grant-root` and `--user-data-dir`, which the hello must
     /// match (design 0017, C1).
-    grant_root_arg: Option<PathBuf>,
+    grant_root_arg: PathBuf,
     user_data_dir_arg: Option<PathBuf>,
+    /// The legacy receipts' hand-over before `confine` (design 0017, C5),
+    /// with `--user-data-dir`: where the payments import reads.
+    handover: Option<crate::payments_store::Handover>,
+    /// What `confine` reported (design 0017): the hello's `confinement`.
+    confinement: serde_json::Value,
     worker: Worker,
     /// The core's requests to main: where main's responses go back to.
     requests: Arc<Requests>,
@@ -974,19 +1084,21 @@ fn user_data_dir(params: &HelloParams) -> Result<Option<PathBuf>, &'static str> 
 
 /// Whether the hello names the directories `serve`'s arguments gave (design
 /// 0017, C1), compared by components as [`Path`] compares them, after both
-/// passed the same check ([`crate::journal::normalized_absolute`]). An
-/// argument not given admits any (optional until main passes them); a
-/// `--user-data-dir` needs the hello's `user_data_dir`, present and equal.
+/// passed the same check ([`crate::journal::normalized_absolute`]):
+/// `grant_root` equal to `--grant-root`, and `user_data_dir` equal to
+/// `--user-data-dir`, both given or both absent. Confined, `serve` reaches
+/// the profile's root only through the hand-over before `confine` (C5),
+/// so a hello can't name one its arguments didn't.
 fn hello_matches_args(
     grant_root: &Path,
     user_data_dir: Option<&Path>,
-    grant_root_arg: Option<&Path>,
+    grant_root_arg: &Path,
     user_data_dir_arg: Option<&Path>,
 ) -> Result<(), &'static str> {
-    if grant_root_arg.is_some_and(|arg| arg != grant_root) {
+    if grant_root_arg != grant_root {
         return Err("core.hello's grant_root isn't serve's --grant-root");
     }
-    if user_data_dir_arg.is_some_and(|arg| user_data_dir != Some(arg)) {
+    if user_data_dir_arg != user_data_dir {
         return Err("core.hello's user_data_dir isn't serve's --user-data-dir");
     }
     Ok(())
@@ -1064,6 +1176,9 @@ struct HelloResult<'a> {
     /// The names in the hello's `store_moved` whose store this core serves,
     /// each once (design 0013, "One writer per store").
     store_moved: &'a [&'static str],
+    /// The confinement `serve` got (design 0017): `fc_service`'s report,
+    /// as the services' ready lines carry it. Main logs it.
+    confinement: &'a serde_json::Value,
 }
 
 /// Where `text`, borrowed from `payload`, lies in it.
@@ -1809,7 +1924,7 @@ impl Core {
         if let Err(message) = hello_matches_args(
             &grants.0,
             user_data_dir.as_deref(),
-            self.grant_root_arg.as_deref(),
+            &self.grant_root_arg,
             self.user_data_dir_arg.as_deref(),
         ) {
             let _ = self.error(id, ErrorBody::new(ErrorCode::InvalidArgument, message));
@@ -1836,16 +1951,15 @@ impl Core {
                 "safe_pending" | "intents" => true,
                 // Opened at its first request, never before the name. The
                 // database under the Freedom root. A moved profile's
-                // `x402-receipts.json` is copied there from `userData` and
-                // imported from the copy (design 0017, C5); the old layout
-                // imports at its root, and a hello without `user_data_dir`
-                // at the Freedom root, as before.
+                // `x402-receipts.json` was copied there from `userData`
+                // before `confine`, and is imported from the copy (design
+                // 0017, C5); the old layout imports at its root, and a
+                // `serve` without `--user-data-dir` at the Freedom root, as
+                // before.
                 "payments" => {
-                    let import = match user_data_dir.as_deref() {
-                        Some(dir) => {
-                            crate::payments_store::hand_over_legacy(dir, &root).import(dir, &root)
-                        }
-                        None => crate::payments_store::Import::at(root.clone()),
+                    let import = match (self.handover, user_data_dir.as_deref()) {
+                        (Some(handover), Some(dir)) => handover.import(dir, &root),
+                        _ => crate::payments_store::Import::at(root.clone()),
                     };
                     self.vault.configure_payments(root.clone(), import);
                     true
@@ -1892,6 +2006,7 @@ impl Core {
                 capabilities: CAPABILITIES.iter().chain(FEATURES).copied().collect(),
                 node_recovery: &self.node_recovery,
                 store_moved: &self.stores_echo,
+                confinement: &self.confinement,
             },
         );
         let flow = match written {

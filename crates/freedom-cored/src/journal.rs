@@ -51,7 +51,7 @@
 
 mod records;
 
-pub use records::{RadicleGates, prepare};
+pub use records::{Prepared, RadicleGates, prepare};
 
 use std::fs::File;
 use std::io::{Read, Write};
@@ -673,7 +673,11 @@ fn radicle_gate(root: &Path, gates: &Gates, create: bool) -> std::io::Result<Hom
 ///   opened in the lock directory;
 /// - **otherwise by its path,** in `gates.lock_dir`, as before 0017: a
 ///   missing home made (`create`), or required ([`fc_service::gate::
-///   acquire_existing`]). D7-2d makes the gate files the only way.
+///   acquire_existing`]). A confined process can't reach the lock
+///   directory (C3), so where confinement holds files (Linux, macOS) this
+///   fails as storage: `serve` writes a Radicle home only through
+///   `--node-root radicle=`'s file, and recovers one only through the
+///   file its plan opened.
 pub fn home_gate(
     home: &Path,
     gates: &Gates,
@@ -1189,24 +1193,127 @@ fn digest_and_handle_at(
 }
 
 /// Creates `dir` and any missing ancestors, then persists each new entry in
-/// its parent, so a crash can't lose a directory that staged files are in.
+/// its parent, so a crash can't lose a directory that staged files are in
+/// ([`make_dirs`]). Confined (`nodes.write_identity`'s Bee root), it flushes
+/// only the parents of what it makes: an existing root's parent may be
+/// outside the grant.
 fn ensure_dir(dir: &Path) -> std::io::Result<()> {
-    let mut missing = Vec::new();
+    make_dirs(dir, false, false)
+}
+
+/// [`ensure_dir`], with each directory made private to the user on Unix
+/// (`0700`, less the umask): a directory `serve` grants before `confine`
+/// (design 0017, C2), which Landlock and Seatbelt grant only once it
+/// exists: a missing `--node-root bee=` and the Freedom root. Run before
+/// `confine`, it also flushes `dir`'s parent at every call when this call
+/// didn't make `dir`, so a directory an earlier call made, whose flush
+/// failed and which it couldn't remove (filled meanwhile, or made by
+/// another creator), is flushed in its parent at the next start.
+pub fn create_private_dirs(dir: &Path) -> std::io::Result<()> {
+    make_dirs(dir, true, true)
+}
+
+/// Flushes `dir`'s entry in its parent: the identity directory's at every
+/// start (design 0017), since the gate makes a missing one and flushes
+/// nothing.
+pub fn sync_parent(dir: &Path) -> std::io::Result<()> {
+    match dir.parent() {
+        Some(parent) => sync_dir(parent),
+        None => Ok(()),
+    }
+}
+
+/// Makes `dir`'s missing components one at a time, top down, and flushes
+/// each new entry in its parent:
+/// - **only what this call makes is its own:** a component whose `mkdir`
+///   finds it there already (another creator won) isn't recorded; each one
+///   made is, with its identity (device and inode, Unix);
+/// - **a flush that fails** removes the recorded components, deepest first,
+///   each only while it is still empty and still the directory made, then
+///   returns the error, so the next call makes and flushes them again;
+/// - **with `parent_always`,** `dir`'s parent is flushed too when this call
+///   didn't make `dir` ([`create_private_dirs`]).
+///
+/// **Residual:** a component above `dir` made by an earlier call whose
+/// flush failed, and filled meanwhile so it couldn't be removed, isn't
+/// flushed in its parent again: only `dir`'s parent is, at each call.
+fn make_dirs(dir: &Path, private: bool, parent_always: bool) -> std::io::Result<()> {
+    let mut chain = Vec::new();
     let mut current = Some(dir);
     while let Some(path) = current {
         if path.exists() {
             break;
         }
-        missing.push(path);
+        chain.push(path);
         current = path.parent();
     }
-    std::fs::create_dir_all(dir)?;
-    for created in missing.iter().rev() {
-        if let Some(parent) = created.parent() {
-            sync_dir(parent)?;
+    let builder = {
+        #[cfg_attr(not(unix), allow(unused_mut))]
+        let mut builder = std::fs::DirBuilder::new();
+        #[cfg(unix)]
+        if private {
+            use std::os::unix::fs::DirBuilderExt;
+            builder.mode(0o700);
+        }
+        #[cfg(not(unix))]
+        let _ = private;
+        builder
+    };
+    let mut made: Vec<(&Path, Option<(u64, u64)>)> = Vec::new();
+    for path in chain.into_iter().rev() {
+        crate::testhooks::make_dir_race("mkdir", path);
+        match builder.create(path) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists && path.is_dir() => continue,
+            Err(e) => return Err(e),
+        }
+        made.push((path, dir_identity(path)));
+        crate::testhooks::make_dir_race("filled", path);
+        if let Some(parent) = path.parent()
+            && let Err(e) = sync_dir(parent)
+        {
+            unmake(&made);
+            return Err(e);
         }
     }
+    // Something there that isn't a directory, found or left by a racer.
+    if !dir.is_dir() {
+        return Err(std::io::Error::from(std::io::ErrorKind::NotADirectory));
+    }
+    if parent_always && !made.iter().any(|(path, _)| *path == dir) {
+        sync_parent(dir)?;
+    }
     Ok(())
+}
+
+/// Removes the directories [`make_dirs`] made, deepest first, each only if
+/// it is still the directory made (its identity) and empty (`remove_dir`
+/// refuses anything else). One it can't remove stays, as made.
+fn unmake(made: &[(&Path, Option<(u64, u64)>)]) {
+    for (path, identity) in made.iter().rev() {
+        if identity.is_some() && dir_identity(path) == *identity {
+            let _ = std::fs::remove_dir(path);
+        }
+    }
+}
+
+/// A directory's device and inode, not following a link (Unix); `None`
+/// elsewhere, where nothing made is ever removed (a flush there can't
+/// fail but by a test hook).
+fn dir_identity(path: &Path) -> Option<(u64, u64)> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        std::fs::symlink_metadata(path)
+            .ok()
+            .filter(std::fs::Metadata::is_dir)
+            .map(|found| (found.dev(), found.ino()))
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+        None
+    }
 }
 
 fn hex(bytes: &[u8]) -> String {
@@ -1215,17 +1322,53 @@ fn hex(bytes: &[u8]) -> String {
 
 #[cfg(unix)]
 fn sync_dir(dir: &Path) -> std::io::Result<()> {
+    if crate::testhooks::dir_sync_fails(dir) {
+        return Err(std::io::Error::other(
+            "test hook: the directory flush failed",
+        ));
+    }
     std::fs::File::open(dir)?.sync_all()
 }
 
 #[cfg(not(unix))]
-fn sync_dir(_dir: &Path) -> std::io::Result<()> {
+fn sync_dir(dir: &Path) -> std::io::Result<()> {
+    if crate::testhooks::dir_sync_fails(dir) {
+        return Err(std::io::Error::other(
+            "test hook: the directory flush failed",
+        ));
+    }
     Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A flush that fails after the directories were made removes the ones
+    /// this call made, so the next call makes and flushes them again
+    /// (design 0017, C2): here the new top's parent can be written and
+    /// searched but not read (`0300`), so it can't be opened to flush.
+    /// Root reads it anyway: the case needs another user.
+    #[cfg(unix)]
+    #[test]
+    fn a_failed_flush_removes_what_it_made() {
+        use std::os::unix::fs::PermissionsExt;
+        if rustix::process::getuid().is_root() {
+            return;
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        let parent = tmp.path().join("write-only");
+        std::fs::create_dir(&parent).unwrap();
+        std::fs::set_permissions(&parent, std::fs::Permissions::from_mode(0o300)).unwrap();
+        let dir = parent.join("a").join("b");
+        for _ in 0..2 {
+            assert!(create_private_dirs(&dir).is_err());
+            assert!(!parent.join("a").exists());
+        }
+        std::fs::set_permissions(&parent, std::fs::Permissions::from_mode(0o700)).unwrap();
+        create_private_dirs(&dir).unwrap();
+        assert!(dir.is_dir());
+    }
 
     /// What runs between the intent cleanup's look at its home and the gate.
     type Seen = Option<Box<dyn FnMut(&Path, bool)>>;

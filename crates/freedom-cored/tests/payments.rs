@@ -140,6 +140,28 @@ fn hello_with_user_data(
     hello
 }
 
+/// A moved profile's `serve`, as main spawns it (design 0017, C1): its
+/// Freedom root, and the profile's root, whose receipts it hands over
+/// before it confines itself (C5).
+fn spawn_moved(
+    data: &std::path::Path,
+    locks: &std::path::Path,
+    grant_root: &std::path::Path,
+    user_data: &std::path::Path,
+) -> common::Core {
+    common::spawn(
+        "serve",
+        data,
+        locks,
+        &[
+            "--grant-root",
+            grant_root.to_str().unwrap(),
+            "--user-data-dir",
+            user_data.to_str().unwrap(),
+        ],
+    )
+}
+
 fn legacy_ids(core: &mut common::Core) -> Vec<String> {
     let reply = call(core, "chrome", "payments.get_recent", json!({}));
     reply["result"]["payments"]
@@ -151,20 +173,20 @@ fn legacy_ids(core: &mut common::Core) -> Vec<String> {
         .collect()
 }
 
-/// A moved profile (design 0017, C5): the hello's `user_data_dir` isn't its
-/// `grant_root`. The receipts at the profile's root are copied into the
-/// Freedom root and imported from the copy, which is renamed `.migrated`
-/// there; the original stays at the profile's root until the next start,
-/// which drops it, importing nothing twice. The database stays under
-/// `grant_root`.
+/// A moved profile (design 0017, C5): `--user-data-dir` isn't its
+/// `--grant-root`. The receipts at the profile's root are copied into the
+/// Freedom root at the start, before `confine`, and imported from the copy,
+/// which is renamed `.migrated` there; the original stays at the profile's
+/// root until the next start, which drops it, importing nothing twice. The
+/// database stays under `grant_root`.
 #[test]
 fn a_moved_profile_imports_its_receipts_from_a_copy() {
     let (_root, data, locks) = common::dirs();
-    let mut core = common::spawn("serve", &data, &locks, &[]);
-    let grant_root = core.grant_root.join("freedom");
-    let user_data = core.grant_root.clone();
+    let user_data = common::default_grant_root(&data);
+    let grant_root = user_data.join("freedom");
     std::fs::create_dir_all(&grant_root).unwrap();
     std::fs::write(user_data.join("x402-receipts.json"), receipt("profile")).unwrap();
+    let mut core = spawn_moved(&data, &locks, &grant_root, &user_data);
     hello_with_user_data(&mut core, &grant_root, &user_data);
     assert_eq!(legacy_ids(&mut core), ["profile"]);
     assert!(grant_root.join("payment-history.sqlite").exists());
@@ -181,7 +203,7 @@ fn a_moved_profile_imports_its_receipts_from_a_copy() {
     );
     drop(core);
 
-    let mut core = common::spawn("serve", &data, &locks, &[]);
+    let mut core = spawn_moved(&data, &locks, &grant_root, &user_data);
     hello_with_user_data(&mut core, &grant_root, &user_data);
     assert_eq!(legacy_ids(&mut core), ["profile"]);
     assert!(!user_data.join("x402-receipts.json").exists());
@@ -196,12 +218,12 @@ fn a_moved_profile_imports_its_receipts_from_a_copy() {
 #[test]
 fn a_conflicting_copy_skips_the_import() {
     let (_root, data, locks) = common::dirs();
-    let mut core = common::spawn("serve", &data, &locks, &[]);
-    let grant_root = core.grant_root.join("freedom");
-    let user_data = core.grant_root.clone();
+    let user_data = common::default_grant_root(&data);
+    let grant_root = user_data.join("freedom");
     std::fs::create_dir_all(&grant_root).unwrap();
     std::fs::write(user_data.join("x402-receipts.json"), receipt("profile")).unwrap();
     std::fs::write(grant_root.join("x402-receipts.json"), receipt("freedom")).unwrap();
+    let mut core = spawn_moved(&data, &locks, &grant_root, &user_data);
     hello_with_user_data(&mut core, &grant_root, &user_data);
     assert_eq!(legacy_ids(&mut core), Vec::<String>::new());
     let appended = call(
@@ -227,7 +249,7 @@ fn a_conflicting_copy_skips_the_import() {
     );
 
     // The old layout: the Freedom root's file is the one imported.
-    let mut core = common::spawn("serve", &data, &locks, &[]);
+    let mut core = spawn_moved(&data, &locks, &grant_root, &grant_root);
     hello_with_user_data(&mut core, &grant_root, &grant_root);
     assert_eq!(legacy_ids(&mut core), ["freedom"]);
     assert!(!grant_root.join("x402-receipts.json").exists());
