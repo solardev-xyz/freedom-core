@@ -352,8 +352,14 @@ mod tests {
                         walk(base, &path, out);
                     } else {
                         let bytes = std::fs::read(&path).unwrap();
+                        // The base as written raw, and as a JSON string
+                        // writes it (Windows' backslashes doubled).
+                        let raw = base.to_str().unwrap();
+                        let quoted = serde_json::to_string(raw).unwrap();
+                        let escaped = &quoted[1..quoted.len() - 1];
                         let text = String::from_utf8_lossy(&bytes)
-                            .replace(base.to_str().unwrap(), "<base>");
+                            .replace(escaped, "<base>")
+                            .replace(raw, "<base>");
                         out.push((relative, text));
                     }
                 }
