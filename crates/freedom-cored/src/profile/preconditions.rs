@@ -595,8 +595,14 @@ pub fn node_started(root: &Dir, canonical: &Path, moved: &[&str]) -> io::Result<
         if !moved.contains(&lock.entry) {
             continue;
         }
-        for (place, under) in [(FREEDOM_DIR, Some(&freedom)), ("", None)] {
-            let parent = under.unwrap_or(root);
+        // Under `freedom/` the lookup starts from its own handle: it may be
+        // a volume of its own (the copy path), which a lookup from the root
+        // would refuse to cross into.
+        let in_freedom = canonical.join(FREEDOM_DIR);
+        for (place, parent, base) in [
+            (FREEDOM_DIR, &freedom, in_freedom.as_path()),
+            ("", root, canonical),
+        ] {
             match parent.kind(OsStr::new(lock.entry))? {
                 // A renamed entry's old place is empty.
                 Kind::Missing => continue,
@@ -604,14 +610,14 @@ pub fn node_started(root: &Dir, canonical: &Path, moved: &[&str]) -> io::Result<
                 _ if lock.linked_left_to_main => continue,
                 _ => {}
             }
-            let mut parts = Vec::new();
-            if !place.is_empty() {
-                parts.push(place);
-            }
-            parts.push(lock.entry);
+            let mut parts = vec![lock.entry];
             parts.extend(lock.path);
-            let at = parts.join("/");
-            match try_lock(root, canonical, &parts, lock.probe) {
+            let at = if place.is_empty() {
+                parts.join("/")
+            } else {
+                format!("{place}/{}", parts.join("/"))
+            };
+            match try_lock(parent, base, &parts, lock.probe) {
                 Tried::Free => {}
                 Tried::Held => return Ok(Some(format!("{at} held"))),
                 Tried::Unknown(why) => return Ok(Some(format!("{at}: {why}"))),
