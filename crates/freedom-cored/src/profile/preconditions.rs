@@ -42,7 +42,8 @@
 //!   its device differs, or on Linux its mount ID), every entry's rename
 //!   into it would fail with `EXDEV`, so every entry will be copied. Each
 //!   is surveyed (a mount point inside it, a special file, a file or
-//!   directory this process can't use, a tree too deep), and their total
+//!   directory this process can't use, a tree too deep, on Windows a
+//!   reparse point), and their total
 //!   size, with the margin, must fit in the space free on `freedom/`'s
 //!   volume. A `freedom/` on the profile's own mount (or none yet, which
 //!   the move makes there) needs no copy, so nothing is walked: a renamed
