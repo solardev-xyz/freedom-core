@@ -21,11 +21,29 @@
 //!   group and other bits; the lock file is created `0600` (never through a
 //!   symlink), and an existing one is tightened to it. A directory or lock
 //!   file that isn't the user's own is refused (exit 74).
+//! - **Over an open file (design 0017, C3):** a confined process can't
+//!   reach the lock directory, which holds every profile's gates, so it
+//!   opens a gate's file before confining itself and locks it later.
+//!   [`GateFile::open`] and [`GateFile::open_existing`] do what [`acquire`]
+//!   and [`acquire_existing`] do before locking (the directories made, or
+//!   required; both resolved; the lock directory outside the data
+//!   directory; storage qualified; both the user's own; the lock file
+//!   opened, created `0600` or tightened, at `lock_file_name`'s path), and
+//!   lock nothing. [`GateFile::lock`] then takes that file's lock with the
+//!   same retry and contention, and resolves the data directory again
+//!   under it, with nothing opened in the lock directory. The [`Gate`] it
+//!   returns unlocks the file when dropped and leaves it open, for the next
+//!   lock. The file's descriptor crosses `confine`
+//!   ([`GateFile::descriptors`]). Within one process, gates over one file
+//!   contend as two processes' do: `flock` alone would let a second lock
+//!   through one open file, so the file also records that it is locked.
 
 use std::ffi::OsStr;
 use std::fs::{File, TryLockError};
 use std::io::{Read, Write};
 use std::path::{Component, Path, PathBuf};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use sha2::{Digest, Sha256};
@@ -75,7 +93,7 @@ impl std::fmt::Display for GateError {
 /// A held gate. Dropping it (or exiting) releases the OS lock.
 #[derive(Debug)]
 pub struct Gate {
-    _file: File,
+    holder: Holder,
     pub lock_path: PathBuf,
     /// The canonical data directory. Every operation uses this path.
     pub data_dir: PathBuf,
@@ -91,15 +109,173 @@ impl Gate {
     /// ([`crate::confine::Policy::descriptors`]): the lock's, on Unix.
     /// Empty elsewhere.
     pub fn descriptors(&self) -> Vec<i32> {
-        #[cfg(unix)]
-        {
-            use std::os::fd::AsRawFd;
-            vec![self._file.as_raw_fd()]
+        descriptors(self.holder.file())
+    }
+}
+
+/// What holds a gate's lock.
+#[derive(Debug)]
+enum Holder {
+    /// The gate's own file: closing it releases the lock.
+    Own(File),
+    /// A [`GateFile`]'s file, locked for this gate.
+    Shared(SharedLock),
+}
+
+impl Holder {
+    fn file(&self) -> &File {
+        match self {
+            Holder::Own(file) => file,
+            Holder::Shared(lock) => &lock.0.file,
         }
-        #[cfg(not(unix))]
-        {
-            Vec::new()
-        }
+    }
+}
+
+/// A [`GateFile`]'s lock, taken: dropping it unlocks the file and keeps it
+/// open.
+#[derive(Debug)]
+struct SharedLock(Arc<Opened>);
+
+impl Drop for SharedLock {
+    fn drop(&mut self) {
+        // The OS lock first, then the record: a gate of this process that
+        // took the record in between would lock the file again through the
+        // same open file, and this unlock would release its lock.
+        let _ = self.0.file.unlock();
+        self.0.locked.store(false, Ordering::Release);
+    }
+}
+
+/// `file`'s descriptor, which crosses `confine`, on Unix; none elsewhere.
+fn descriptors(file: &File) -> Vec<i32> {
+    #[cfg(unix)]
+    {
+        use std::os::fd::AsRawFd;
+        vec![file.as_raw_fd()]
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = file;
+        Vec::new()
+    }
+}
+
+/// A gate's lock file, opened and checked, not locked (design 0017, C3):
+/// opened before confinement, while the lock directory can be reached, and
+/// locked later through the open file alone ([`GateFile::lock`]).
+///
+/// Clones share the one open file, and so its lock: the file closes when
+/// the last clone and the last [`Gate`] taken through it are dropped.
+#[derive(Debug, Clone)]
+pub struct GateFile {
+    opened: Arc<Opened>,
+}
+
+/// An open lock file, and the paths it was opened for.
+#[derive(Debug)]
+struct Opened {
+    file: File,
+    /// The data directory as the caller named it, resolved again under each
+    /// lock.
+    named: PathBuf,
+    lock_path: PathBuf,
+    /// The canonical data directory.
+    data_dir: PathBuf,
+    /// Whether a gate of this process holds the file's lock.
+    locked: AtomicBool,
+}
+
+impl GateFile {
+    /// [`acquire`] up to its lock: storage qualified, `data_dir` and the
+    /// lock directory made if missing and private, and `namespace`'s lock
+    /// file for `data_dir` opened (created `0600`, or tightened to it). No
+    /// lock is taken.
+    pub fn open(data_dir: &Path, lock_dir: &Path, namespace: &str) -> Result<GateFile, GateError> {
+        GateFile::opened(data_dir, lock_dir, namespace, Make::Both)
+    }
+
+    /// [`acquire_existing`] up to its lock: for a `data_dir` and a
+    /// `lock_dir` that must already exist, creating nothing but the lock
+    /// file. No lock is taken.
+    pub fn open_existing(
+        data_dir: &Path,
+        lock_dir: &Path,
+        namespace: &str,
+    ) -> Result<GateFile, GateError> {
+        GateFile::opened(data_dir, lock_dir, namespace, Make::Nothing)
+    }
+
+    fn opened(
+        data_dir: &Path,
+        lock_dir: &Path,
+        namespace: &str,
+        make: Make,
+    ) -> Result<GateFile, GateError> {
+        let (file, lock_path, canonical_data) =
+            open_with(data_dir, lock_dir, namespace, make, false)?;
+        Ok(GateFile {
+            opened: Arc::new(Opened {
+                file,
+                named: data_dir.to_path_buf(),
+                lock_path,
+                data_dir: canonical_data,
+                locked: AtomicBool::new(false),
+            }),
+        })
+    }
+
+    /// Takes the gate through the open file, retrying contention for up to
+    /// `retry` as [`acquire`] does (then [`GateError::Held`]). Another
+    /// process's lock is contention, and so is a gate this process holds
+    /// through this file or a clone of it. Under the lock, the data
+    /// directory, as named at the open, is resolved again: one that resolves
+    /// elsewhere now is [`GateError::Moved`], and one gone is
+    /// [`GateError::Storage`] (`NotFound`); either releases the lock. Nothing
+    /// is made, and nothing is opened in the lock directory.
+    ///
+    /// The returned gate unlocks the file when dropped, and leaves it open.
+    pub fn lock(&self, retry: Duration) -> Result<Gate, GateError> {
+        let opened = &self.opened;
+        retry_contention(retry, || {
+            if opened
+                .locked
+                .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
+                .is_err()
+            {
+                return Err(TryLockError::WouldBlock);
+            }
+            opened
+                .file
+                .try_lock()
+                .inspect_err(|_| opened.locked.store(false, Ordering::Release))
+        })?;
+        // Released by its drop, on an error below too.
+        let lock = SharedLock(Arc::clone(opened));
+        let identity = resolved_under_lock(&opened.named, &opened.data_dir)?;
+        Ok(Gate {
+            holder: Holder::Shared(lock),
+            lock_path: opened.lock_path.clone(),
+            data_dir: opened.data_dir.clone(),
+            identity,
+        })
+    }
+
+    /// The lock file's path: `lock_file_name`'s, in the canonical lock
+    /// directory.
+    pub fn lock_path(&self) -> &Path {
+        &self.opened.lock_path
+    }
+
+    /// The canonical data directory, as resolved at the open.
+    pub fn data_dir(&self) -> &Path {
+        &self.opened.data_dir
+    }
+
+    /// The descriptor of the open file, which crosses `confine`
+    /// ([`crate::confine::Policy::descriptors`]), on Unix: the same one
+    /// every gate taken through it holds. Empty elsewhere.
+    pub fn descriptors(&self) -> Vec<i32> {
+        descriptors(&self.opened.file)
     }
 }
 
@@ -264,6 +440,28 @@ fn acquire_with(
     make: Make,
     lock_inside_data: bool,
 ) -> Result<Gate, GateError> {
+    let (file, lock_path, canonical_data) =
+        open_with(data_dir, lock_dir, namespace, make, lock_inside_data)?;
+    lock_within(&file, retry)?;
+    let identity = resolved_under_lock(data_dir, &canonical_data)?;
+    Ok(Gate {
+        holder: Holder::Own(file),
+        lock_path,
+        data_dir: canonical_data,
+        identity,
+    })
+}
+
+/// Everything taking a gate does before its lock: the directories made as
+/// `make` says, both resolved and checked, and the lock file opened. The
+/// open file, its path, and the canonical data directory.
+fn open_with(
+    data_dir: &Path,
+    lock_dir: &Path,
+    namespace: &str,
+    make: Make,
+    lock_inside_data: bool,
+) -> Result<(File, PathBuf, PathBuf), GateError> {
     // Without `Make::Both`, the data directory must already exist: it is never
     // made, so it can't be made again in place of one renamed away.
     if make == Make::Both {
@@ -302,30 +500,43 @@ fn acquire_with(
 
     let lock_path = canonical_locks.join(lock_file_name(namespace, &canonical_data));
     let file = open_lock_file(&lock_path)?;
-    lock_within(&file, retry)?;
-    // Resolve again under the lock: if the path now points elsewhere, this
-    // gate doesn't protect the directory we would be using.
+    Ok((file, lock_path, canonical_data))
+}
+
+/// Under a gate's lock: `data_dir`, as the caller named it, resolved again,
+/// and the identity of what is at `canonical_data` now.
+fn resolved_under_lock(
+    data_dir: &Path,
+    canonical_data: &Path,
+) -> Result<Option<DirIdentity>, GateError> {
+    // If the path now points elsewhere, this gate doesn't protect the
+    // directory we would be using.
     if std::fs::canonicalize(data_dir).map_err(GateError::Storage)? != canonical_data {
         return Err(GateError::Moved);
     }
     // What is at the canonical path now, under the lock: the directory this
     // gate protects (a symlink there resolved differently just above).
-    let identity =
-        DirIdentity::of(&std::fs::symlink_metadata(&canonical_data).map_err(GateError::Storage)?);
-    Ok(Gate {
-        _file: file,
-        lock_path,
-        data_dir: canonical_data,
-        identity,
-    })
+    Ok(DirIdentity::of(
+        &std::fs::symlink_metadata(canonical_data).map_err(GateError::Storage)?,
+    ))
 }
 
 /// Takes `file`'s lock, retrying contention for up to `retry` (none at
 /// zero).
 fn lock_within(file: &File, retry: Duration) -> Result<(), GateError> {
+    retry_contention(retry, || file.try_lock())
+}
+
+/// Runs `try_lock` until it takes the lock, retrying contention
+/// (`WouldBlock`) for up to `retry` (none at zero), then
+/// [`GateError::Held`].
+fn retry_contention(
+    retry: Duration,
+    mut try_lock: impl FnMut() -> Result<(), TryLockError>,
+) -> Result<(), GateError> {
     let started = Instant::now();
     loop {
-        match file.try_lock() {
+        match try_lock() {
             Ok(()) => return Ok(()),
             Err(TryLockError::WouldBlock) if started.elapsed() < retry => {
                 std::thread::sleep(Duration::from_millis(100));
@@ -401,7 +612,7 @@ pub fn acquire_for_delete(
         .ok()
         .and_then(|metadata| DirIdentity::of(&metadata));
     Ok(Gate {
-        _file: file,
+        holder: Holder::Own(file),
         lock_path,
         data_dir: canonical_data,
         identity,
@@ -1430,5 +1641,244 @@ mod tests {
         // Free after the probe: taken within the retry (a child spawned by
         // another test may hold a copy of the descriptor until it execs).
         assert!(acquire_profile(&data, &locks, CONTENTION_RETRY).is_ok());
+    }
+
+    /// Design 0017, C3: a gate file is opened once, at `acquire`'s path and
+    /// with its checks, without locking it; then locked and unlocked through
+    /// that one open file, as often as needed, each lock a gate `acquire`
+    /// contends with, and each unlock leaving the file open.
+    #[test]
+    fn a_gate_file_opens_once_and_locks_repeatedly() {
+        let (_root, data, locks) = dirs();
+        let file = GateFile::open(&data, &locks, "radicle").unwrap();
+        // Made as `acquire` makes them, at its path, and nothing locked.
+        assert!(data.is_dir() && locks.is_dir());
+        let canonical_data = std::fs::canonicalize(&data).unwrap();
+        let canonical_locks = std::fs::canonicalize(&locks).unwrap();
+        assert_eq!(file.data_dir(), canonical_data);
+        assert_eq!(
+            file.lock_path(),
+            canonical_locks.join(lock_file_name("radicle", &canonical_data))
+        );
+        assert_eq!(
+            file.lock_path().file_name().unwrap().to_str().unwrap(),
+            lock_file_name("radicle", &canonical_data)
+        );
+        let taken = acquire(&data, &locks, "radicle", Duration::ZERO).unwrap();
+        assert_eq!(taken.lock_path, file.lock_path());
+        assert!(matches!(file.lock(Duration::ZERO), Err(GateError::Held)));
+        drop(taken);
+        #[cfg(unix)]
+        let descriptor = {
+            assert_eq!(file.descriptors().len(), 1);
+            file.descriptors()[0]
+        };
+        for _ in 0..5 {
+            // Within the retry: a child another test forks may hold a copy
+            // of a released descriptor until it execs.
+            let gate = file.lock(CONTENTION_RETRY).unwrap();
+            assert_eq!(gate.data_dir, canonical_data);
+            assert_eq!(gate.lock_path, file.lock_path());
+            assert_eq!(gate.descriptors(), file.descriptors());
+            #[cfg(unix)]
+            assert_eq!(
+                gate.identity,
+                DirIdentity::of(&std::fs::metadata(&data).unwrap())
+            );
+            assert!(matches!(
+                acquire(&data, &locks, "radicle", Duration::ZERO),
+                Err(GateError::Held)
+            ));
+            assert!(probe(&data, &locks, "radicle").unwrap());
+            drop(gate);
+            // Unlocked, and the file still open on the same descriptor.
+            assert!(!probe(&data, &locks, "radicle").unwrap());
+            #[cfg(unix)]
+            {
+                assert_eq!(file.descriptors(), [descriptor]);
+                assert_eq!(
+                    open_descriptor_identity(descriptor),
+                    file_identity(file.lock_path())
+                );
+            }
+        }
+        // A gate `acquire` holds is waited on, as `acquire` waits.
+        let taken = acquire(&data, &locks, "radicle", CONTENTION_RETRY).unwrap();
+        let started = Instant::now();
+        assert!(matches!(
+            file.lock(Duration::from_millis(300)),
+            Err(GateError::Held)
+        ));
+        assert!(started.elapsed() >= Duration::from_millis(300));
+        drop(taken);
+        assert!(file.lock(CONTENTION_RETRY).is_ok());
+    }
+
+    /// The file's identity, as `open_descriptor_identity` gives it.
+    #[cfg(unix)]
+    fn file_identity(path: &Path) -> (u64, u64) {
+        use std::os::unix::fs::MetadataExt;
+        let metadata = std::fs::metadata(path).unwrap();
+        (metadata.dev(), metadata.ino())
+    }
+
+    /// What the open descriptor `fd` names, through `/dev/fd`: it fails if
+    /// the descriptor is closed.
+    #[cfg(unix)]
+    fn open_descriptor_identity(fd: i32) -> (u64, u64) {
+        file_identity(Path::new(&format!("/dev/fd/{fd}")))
+    }
+
+    /// Two gate files opened on one lock file contend as two processes'
+    /// gates do: the second waits for the retry, then is `Held`, and takes
+    /// the gate once the first lets go within it. Gates through one file, or
+    /// through its clones, contend too.
+    #[test]
+    fn gate_files_on_one_lock_file_contend() {
+        let (_root, data, locks) = dirs();
+        let first = GateFile::open(&data, &locks, "radicle").unwrap();
+        let second = GateFile::open_existing(&data, &locks, "radicle").unwrap();
+        assert_eq!(first.lock_path(), second.lock_path());
+        #[cfg(unix)]
+        assert_ne!(first.descriptors(), second.descriptors());
+        let held = first.lock(CONTENTION_RETRY).unwrap();
+        let started = Instant::now();
+        assert!(matches!(
+            second.lock(Duration::from_millis(300)),
+            Err(GateError::Held)
+        ));
+        assert!(started.elapsed() >= Duration::from_millis(300));
+        // Through the same file and a clone of it: held in this process.
+        assert!(matches!(first.lock(Duration::ZERO), Err(GateError::Held)));
+        let clone = first.clone();
+        assert!(matches!(clone.lock(Duration::ZERO), Err(GateError::Held)));
+        // Let go within the second's retry: it takes the gate.
+        let waiter = std::thread::spawn(move || second.lock(CONTENTION_RETRY).map(|_| ()));
+        std::thread::sleep(Duration::from_millis(300));
+        drop(held);
+        assert!(waiter.join().unwrap().is_ok());
+        // A clone locks the shared file, and the original then waits on it;
+        // the clone's gate keeps the file open once every handle is gone.
+        let gate = clone.lock(CONTENTION_RETRY).unwrap();
+        assert!(matches!(first.lock(Duration::ZERO), Err(GateError::Held)));
+        drop((first, clone));
+        assert!(probe(&data, &locks, "radicle").unwrap());
+        drop(gate);
+        assert!(acquire(&data, &locks, "radicle", CONTENTION_RETRY).is_ok());
+    }
+
+    /// Threads racing through one gate file: one gate at a time.
+    #[test]
+    fn one_gate_at_a_time_through_one_gate_file() {
+        let (_root, data, locks) = dirs();
+        let file = GateFile::open(&data, &locks, "radicle").unwrap();
+        let inside = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let threads: Vec<_> = (0..4)
+            .map(|_| {
+                let (file, inside) = (file.clone(), Arc::clone(&inside));
+                std::thread::spawn(move || {
+                    for _ in 0..5 {
+                        let gate = file.lock(Duration::from_secs(30)).unwrap();
+                        assert_eq!(inside.fetch_add(1, Ordering::SeqCst), 0);
+                        std::thread::sleep(Duration::from_millis(5));
+                        assert_eq!(inside.fetch_sub(1, Ordering::SeqCst), 1);
+                        drop(gate);
+                    }
+                })
+            })
+            .collect();
+        for thread in threads {
+            thread.join().unwrap();
+        }
+    }
+
+    /// The open is `acquire`'s and `acquire_existing`'s, up to the lock:
+    /// `open_existing` makes no directory, both refuse a lock directory in
+    /// the data directory, and the lock file is private (Unix).
+    #[test]
+    fn a_gate_file_opens_as_its_gate_does() {
+        let (_root, data, locks) = dirs();
+        match GateFile::open_existing(&data, &locks, "radicle") {
+            Err(GateError::Storage(e)) => assert_eq!(e.kind(), std::io::ErrorKind::NotFound),
+            other => panic!("{other:?}"),
+        }
+        assert!(!data.exists() && !locks.exists());
+        std::fs::create_dir(&data).unwrap();
+        assert!(matches!(
+            GateFile::open_existing(&data, &locks, "radicle"),
+            Err(GateError::Storage(ref e)) if e.kind() == std::io::ErrorKind::NotFound
+        ));
+        assert!(!locks.exists());
+        assert!(matches!(
+            GateFile::open(&data, &data.join("locks"), "radicle"),
+            Err(GateError::LockInsideData)
+        ));
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = |path: &Path| std::fs::metadata(path).unwrap().permissions().mode() & 0o7777;
+            std::fs::create_dir(&locks).unwrap();
+            let lock_path = locks.join(lock_file_name(
+                "radicle",
+                &std::fs::canonicalize(&data).unwrap(),
+            ));
+            std::fs::write(&lock_path, b"").unwrap();
+            for (path, wide) in [(&data, 0o755), (&locks, 0o777), (&lock_path, 0o644)] {
+                std::fs::set_permissions(path, std::fs::Permissions::from_mode(wide)).unwrap();
+            }
+            let file = GateFile::open_existing(&data, &locks, "radicle").unwrap();
+            assert_eq!(mode(&data), 0o700);
+            assert_eq!(mode(&locks), 0o700);
+            assert_eq!(mode(file.lock_path()), 0o600);
+        }
+    }
+
+    /// Under each lock, the data directory is resolved again: a link
+    /// retargeted since the open is `Moved`, a directory gone is
+    /// `NotFound`, and either lets the lock go.
+    #[test]
+    fn a_gate_file_resolves_its_directory_again_under_each_lock() {
+        let root = tempfile::tempdir().unwrap();
+        let (data, other, link) = (
+            root.path().join("data"),
+            root.path().join("other"),
+            root.path().join("link"),
+        );
+        let locks = root.path().join("locks");
+        std::fs::create_dir(&data).unwrap();
+        std::fs::create_dir(&other).unwrap();
+        dir_link(&data, &link);
+        let file = GateFile::open(&link, &locks, "radicle").unwrap();
+        assert_eq!(file.data_dir(), std::fs::canonicalize(&data).unwrap());
+        drop(file.lock(CONTENTION_RETRY).unwrap());
+        remove_dir_link(&link);
+        dir_link(&other, &link);
+        assert!(matches!(file.lock(Duration::ZERO), Err(GateError::Moved)));
+        // Let go: neither this process nor another finds it held.
+        assert!(!probe(&data, &locks, "radicle").unwrap());
+        remove_dir_link(&link);
+        dir_link(&data, &link);
+        let gate = file.lock(Duration::ZERO).unwrap();
+        assert_eq!(gate.data_dir, std::fs::canonicalize(&data).unwrap());
+        drop(gate);
+        // A directory gone since the open isn't made again.
+        remove_dir_link(&link);
+        std::fs::remove_dir(&data).unwrap();
+        assert!(matches!(
+            file.lock(Duration::ZERO),
+            Err(GateError::Storage(ref e)) if e.kind() == std::io::ErrorKind::NotFound
+        ));
+        assert!(!data.exists() && !link.exists());
+        std::fs::create_dir(&data).unwrap();
+        dir_link(&data, &link);
+        assert!(file.lock(Duration::ZERO).is_ok());
+    }
+
+    /// Removes a link `dir_link` made.
+    fn remove_dir_link(link: &Path) {
+        #[cfg(unix)]
+        std::fs::remove_file(link).unwrap();
+        #[cfg(windows)]
+        std::fs::remove_dir(link).unwrap();
     }
 }
