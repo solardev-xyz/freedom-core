@@ -3,8 +3,9 @@
 //! `freedom-radicled` share, on 0001's conventions.
 //!
 //! - [`gate`]: the lifetime lock, `<lock-dir>/<namespace>-<sha256(canonical
-//!   data dir)>.lock`, under 0001's rules, and [`gate::hold_lock`] for the
-//!   `hold-lock` subcommand.
+//!   data dir)>.lock`, under 0001's rules, [`gate::hold_lock`] for the
+//!   `hold-lock` subcommand, and [`gate::GateFile`], a gate's file opened
+//!   before confinement and locked after it (design 0017, C3).
 //! - [`hardening`]: not dumpable on Linux, no core files on macOS, no error
 //!   reporting dialog or dumps on Windows where the API allows it, and the
 //!   parent checks (`--parent-pid`, `PR_SET_PDEATHSIG`).

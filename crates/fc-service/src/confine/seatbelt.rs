@@ -15,7 +15,10 @@
 //!   writing (truncating included), unlinking and `ioctl`, plus hard links
 //!   with `refer`. No mode, owner, flags, times or xattr change is allowed
 //!   anywhere (`file-write-mode` and the rest stay denied), but times in
-//!   the read-write grants with `times` (a lock's mtime). Seatbelt checks
+//!   the read-write grants with `times` (a lock's mtime), and modes there
+//!   with `modes` (design 0017, C4: Seatbelt can't compare a mode, so any
+//!   mode can then be set in those grants, and the report names the gap).
+//!   Seatbelt checks
 //!   `utimes` and `futimes` as `file-write-times`, but not `setattrlist`,
 //!   through which libSystem's `futimens` and `utimensat` and std's
 //!   `set_times` set times: a profile allows that only with every
@@ -146,11 +149,22 @@ const DIRECT_IPC: &str = r#"(allow mach-lookup
     (remote unix-socket (path-literal "/private/var/run/mDNSResponder")))
 "#;
 
-/// The profile for `network`, `refer`, `times` and `grants`.
+/// The metadata changes the profile allows in the read-write grants, as
+/// the report's gaps name them: `times` with `times`, `modes` with `modes`.
+/// The report's `files` is `partial` with any of them.
+pub fn write_gaps(times: bool, modes: bool) -> Vec<&'static str> {
+    [(times, "times"), (modes, "modes")]
+        .into_iter()
+        .filter_map(|(allowed, gap)| allowed.then_some(gap))
+        .collect()
+}
+
+/// The profile for `network`, `refer`, `times`, `modes` and `grants`.
 pub fn profile(
     network: Network,
     refer: bool,
     times: bool,
+    modes: bool,
     grants: &Grants,
 ) -> Result<Profile, String> {
     let mut params = Vec::new();
@@ -235,6 +249,11 @@ pub fn profile(
                 "(allow file-write-times (subpath (param \"{name}\")))\n"
             ));
         }
+        if modes {
+            text.push_str(&format!(
+                "(allow file-write-mode (subpath (param \"{name}\")))\n"
+            ));
+        }
     }
 
     match network {
@@ -313,7 +332,7 @@ SYSCTLS(allow file-read*
 
     #[test]
     fn the_persistent_process_in_direct_mode() {
-        let profile = profile(Network::Direct, false, false, &grants()).unwrap();
+        let profile = profile(Network::Direct, false, false, false, &grants()).unwrap();
         assert_eq!(profile.text, PERSISTENT_DIRECT.replace("SYSCTLS", SYSCTLS));
         let value = |name: &str| {
             profile
@@ -357,7 +376,7 @@ SYSCTLS(allow file-read*
     fn a_link_a_read_only_path_crosses_gets_metadata_alone() {
         let mut linked = grants();
         linked.links.push("/private/etc/resolv.conf".into());
-        let profile = profile(Network::Direct, false, false, &linked).unwrap();
+        let profile = profile(Network::Direct, false, false, false, &linked).unwrap();
         let name_of = |path: &str| {
             profile
                 .params
@@ -377,7 +396,7 @@ SYSCTLS(allow file-read*
                 .text
                 .contains(&format!("(allow file-read* (literal (param \"{link}\")))"))
         );
-        let unlinked = super::profile(Network::Direct, false, false, &grants()).unwrap();
+        let unlinked = super::profile(Network::Direct, false, false, false, &grants()).unwrap();
         assert_eq!(
             profile.text.matches("(allow file-read* ").count(),
             unlinked.text.matches("(allow file-read* ").count()
@@ -393,6 +412,7 @@ SYSCTLS(allow file-read*
             },
             false,
             false,
+            false,
             &Grants::default(),
         )
         .unwrap();
@@ -406,6 +426,7 @@ SYSCTLS(allow file-read*
                 port: 9150,
                 loopback: false,
             },
+            false,
             false,
             false,
             &Grants::default(),
@@ -426,7 +447,7 @@ SYSCTLS(allow file-read*
 
     #[test]
     fn offline_and_ephemeral_profiles_write_nothing_and_reach_nothing() {
-        let offline = profile(Network::Offline, false, false, &Grants::default()).unwrap();
+        let offline = profile(Network::Offline, false, false, false, &Grants::default()).unwrap();
         assert!(!offline.text.contains("network-"));
         assert!(!offline.text.contains("mach-lookup"));
         // The one write: /dev/null.
@@ -442,12 +463,14 @@ SYSCTLS(allow file-read*
     fn refer_adds_hard_links_in_each_read_write_grant_only() {
         let mut both = grants();
         both.read_write.push("/Users/u/.radicle-home".into());
-        let text = profile(Network::Direct, true, false, &both).unwrap().text;
+        let text = profile(Network::Direct, true, false, false, &both)
+            .unwrap()
+            .text;
         assert!(text.contains("(allow file-link (subpath (param \"RW_0\")))"));
         assert!(text.contains("(allow file-link (subpath (param \"RW_1\")))"));
         assert_eq!(text.matches("file-link").count(), 2);
         assert!(
-            !profile(Network::Direct, false, false, &both)
+            !profile(Network::Direct, false, false, false, &both)
                 .unwrap()
                 .text
                 .contains("file-link")
@@ -459,7 +482,9 @@ SYSCTLS(allow file-read*
         let mut both = grants();
         both.read_write
             .push("/Users/u/Library/Freedom/locks".into());
-        let text = profile(Network::Offline, false, true, &both).unwrap().text;
+        let text = profile(Network::Offline, false, true, false, &both)
+            .unwrap()
+            .text;
         assert!(text.contains("(allow file-write-times (subpath (param \"RW_0\")))"));
         assert!(text.contains("(allow file-write-times (subpath (param \"RW_1\")))"));
         assert_eq!(text.matches("file-write-times").count(), 2);
@@ -477,16 +502,77 @@ SYSCTLS(allow file-read*
             ..Grants::default()
         };
         assert!(
-            !profile(Network::Offline, false, true, &read_only)
+            !profile(Network::Offline, false, true, false, &read_only)
                 .unwrap()
                 .text
                 .contains("file-write-times")
         );
     }
 
+    /// With `modes`, mode changes in each read-write grant alone, and no
+    /// other metadata change (design 0017, C4); none on a read-only grant.
+    #[test]
+    fn modes_add_file_mode_in_each_read_write_grant_only() {
+        let mut both = grants();
+        both.read_write
+            .push("/Users/u/Library/Freedom/identity".into());
+        let text = profile(Network::Offline, false, false, true, &both)
+            .unwrap()
+            .text;
+        assert!(text.contains("(allow file-write-mode (subpath (param \"RW_0\")))"));
+        assert!(text.contains("(allow file-write-mode (subpath (param \"RW_1\")))"));
+        assert_eq!(text.matches("file-write-mode").count(), 2);
+        for operation in [
+            "file-write-owner",
+            "file-write-flags",
+            "file-write-times",
+            "file-write-xattr",
+            "file-write*",
+        ] {
+            assert!(!text.contains(operation), "{operation}");
+        }
+        // Exactly the profile without it, plus one rule per grant.
+        let without = profile(Network::Offline, false, false, false, &both)
+            .unwrap()
+            .text;
+        assert_eq!(
+            text.replace("(allow file-write-mode (subpath (param \"RW_0\")))\n", "")
+                .replace("(allow file-write-mode (subpath (param \"RW_1\")))\n", ""),
+            without
+        );
+        assert!(!without.contains("file-write-mode"));
+        let read_only = Grants {
+            read_only_dirs: vec!["/Users/u/Library/Freedom".into()],
+            ..Grants::default()
+        };
+        assert!(
+            !profile(Network::Offline, false, false, true, &read_only)
+                .unwrap()
+                .text
+                .contains("file-write-mode")
+        );
+        // With `times` too, each grant gets both, and nothing else.
+        let text = profile(Network::Offline, false, true, true, &both)
+            .unwrap()
+            .text;
+        assert_eq!(text.matches("file-write-mode").count(), 2);
+        assert_eq!(text.matches("file-write-times").count(), 2);
+        assert!(!text.contains("file-write-owner") && !text.contains("file-write*"));
+    }
+
+    /// The report's gaps for what the profile allows in the read-write
+    /// grants, in a fixed order.
+    #[test]
+    fn write_gaps_name_times_and_modes() {
+        assert!(write_gaps(false, false).is_empty());
+        assert_eq!(write_gaps(true, false), ["times"]);
+        assert_eq!(write_gaps(false, true), ["modes"]);
+        assert_eq!(write_gaps(true, true), ["times", "modes"]);
+    }
+
     #[test]
     fn no_metadata_change_is_allowed_anywhere() {
-        let text = profile(Network::Direct, true, false, &grants())
+        let text = profile(Network::Direct, true, false, false, &grants())
             .unwrap()
             .text;
         for operation in [
@@ -514,7 +600,9 @@ SYSCTLS(allow file-read*
             },
             Network::Offline,
         ] {
-            let text = profile(network, false, false, &grants()).unwrap().text;
+            let text = profile(network, false, false, false, &grants())
+                .unwrap()
+                .text;
             // Never unrestricted, never another process's.
             assert!(!text.contains("(allow sysctl-read)"), "{text}");
             assert!(!text.contains("kern.proc"), "{text}");
@@ -535,7 +623,7 @@ SYSCTLS(allow file-read*
             read_write: vec![PathBuf::from("/Users/u/\"quoted\" (dir)")],
             ..Grants::default()
         };
-        let profile = profile(Network::Offline, false, false, &odd).unwrap();
+        let profile = profile(Network::Offline, false, false, false, &odd).unwrap();
         assert!(!profile.text.contains("quoted"));
         assert!(
             profile
@@ -546,6 +634,6 @@ SYSCTLS(allow file-read*
             read_write: vec![PathBuf::from("relative/dir")],
             ..Grants::default()
         };
-        assert!(super::profile(Network::Offline, false, false, &relative).is_err());
+        assert!(super::profile(Network::Offline, false, false, false, &relative).is_err());
     }
 }

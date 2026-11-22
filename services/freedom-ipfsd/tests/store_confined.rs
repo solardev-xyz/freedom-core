@@ -51,6 +51,7 @@ fn child(case: &str) {
         interface_index: false,
         times: false,
         symlinks: false,
+        modes: false,
     })
     .unwrap();
     println!("FILES {}", report.files == Status::Enforced);

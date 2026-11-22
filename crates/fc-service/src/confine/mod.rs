@@ -116,9 +116,22 @@ pub struct Policy {
     /// process open; the legacy calls (`utime`, `utimes`, `futimesat`) stay
     /// refused. On macOS, the profile allows `file-write-times` in the
     /// read-write grants alone. The report's `files` is then `partial`,
-    /// naming `times`. No mode, owner, flag or xattr change is allowed
-    /// either way.
+    /// naming `times`. No owner, flag or xattr change is allowed either
+    /// way, and no mode change but [`Policy::modes`]'s.
     pub times: bool,
+    /// Whether the process narrows modes on descriptors it holds open:
+    /// `freedom-cored serve` tightens its gate, its vault's files, a node's
+    /// layout and its intent journal to owner-only (design 0017, C4). On
+    /// Linux, seccomp then lets `fchmod(fd, mode)` through when `mode` has
+    /// none of the bits in [`MODES_REFUSED`] (group, other, setuid, setgid,
+    /// sticky), so only an owner-only mode is set, and only on a file
+    /// Landlock let the process open; `fchmodat`, `fchmodat2` and the legacy
+    /// `chmod` stay refused, with every owner, xattr and times call. The
+    /// report's `files` stays `enforced`. On macOS, Seatbelt can't compare a
+    /// mode, so the profile allows `file-write-mode` in the read-write
+    /// grants alone, and `files` is `partial`, naming `modes`. Nothing
+    /// changes on Windows.
+    pub modes: bool,
     /// Whether a symlink may be made in, or renamed into, the read-write
     /// directories (Landlock's `make_sym`, which a rename of a symlink
     /// needs at its new place): `freedom-cored profile migrate` moves an
@@ -127,6 +140,11 @@ pub struct Policy {
     /// either way. Seatbelt's grants already let a rename through.
     pub symlinks: bool,
 }
+
+/// The mode bits a [`Policy::modes`] change may not set: group and other
+/// permissions, setuid, setgid and sticky (design 0017, C4). A mode without
+/// any of them is owner-only, such as `0600` or `0700`.
+pub const MODES_REFUSED: u32 = 0o7077;
 
 /// The network policy, fixed for the process's life (0007's `--network`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -213,7 +231,8 @@ pub struct Report {
     pub mechanism: String,
     /// Outside the grant, no file is read or written; outside the
     /// read-write grant, none is truncated; and no file's mode, owner,
-    /// xattrs, flags or times change.
+    /// xattrs, flags or times change, but for an owner-only mode set on a
+    /// descriptor with [`Policy::modes`] on Linux (design 0017, C4).
     pub files: Status,
     /// No program runs, and no process is created.
     pub exec: Status,
