@@ -50,6 +50,7 @@
 //! `list` and `reserved-ports`, take none, as the reference's don't.
 
 mod confine;
+mod copy;
 mod delete;
 mod forget;
 mod lock;

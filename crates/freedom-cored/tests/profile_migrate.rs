@@ -12,7 +12,13 @@
 //! journal removed; a new profile's empty move; each precondition a
 //! `deferred` with nothing changed; a kill at each step settled by
 //! `--finish-only`; the held phases seen by a probe, a second run and a
-//! delete; a frozen run's lock taken over. A test binary of its own.
+//! delete; a frozen run's lock taken over. The cross-device copy (PRF-9c):
+//! an entry on another device than `freedom/` copied, its source kept until
+//! the marker; a kill at each of its steps settled by `--finish-only`; a
+//! full volume and the free-space check; symlinks copied as links; what a
+//! copy can't move deferring the move; and on real tmpfs mounts (CI's
+//! Linux step, `FREEDOM_TEST_TMPFS`) a genuine `EXDEV`, a full volume, and
+//! nested mount points. A test binary of its own.
 
 #![allow(
     clippy::unwrap_used,
@@ -1698,4 +1704,581 @@ fn a_frozen_run_whose_lock_is_taken_over_changes_nothing_more() {
     let out = migrate_env(&d.profile, &d.locks, &["--dev"], &[]);
     assert_eq!(said(&out), "rolled_back", "{out:?}");
     assert_old_layout(&d.profile);
+}
+
+// The cross-device copy (PRF-9c): an entry on another device than
+// `freedom/` copied in place of its rename.
+// `FREEDOM_CORED_TEST_PROFILE_MIGRATE_EXDEV` stands for a `freedom/` on
+// another volume, on one file system; the `tmpfs_` tests mount real ones.
+
+const EXDEV: &str = "FREEDOM_CORED_TEST_PROFILE_MIGRATE_EXDEV";
+const CRASH: &str = "FREEDOM_CORED_TEST_PROFILE_MIGRATE_CRASH";
+const PAUSE: &str = "FREEDOM_CORED_TEST_PROFILE_MIGRATE_PAUSE";
+const FREE: &str = "FREEDOM_CORED_TEST_PROFILE_MIGRATE_FREE";
+const ENOSPC: &str = "FREEDOM_CORED_TEST_PROFILE_MIGRATE_ENOSPC";
+
+/// The seeded entries the hook copies: a directory, a file and a node's
+/// tree, beside the others, renamed as before.
+const COPIED: &str = "identity,settings.json,tor-data";
+
+/// The journal's `copied`, as written.
+fn copied_names(profile: &Path) -> Vec<String> {
+    let journal: serde_json::Value =
+        serde_json::from_str(&read(&profile.join("freedom").join(".move.json"))).unwrap();
+    journal["copied"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|name| name.as_str().unwrap().to_owned())
+        .collect()
+}
+
+/// A starting run in the background, paused at `step` until `release`.
+fn start_paused(
+    profile: &Path,
+    locks: &Path,
+    step: &str,
+    paused: &Path,
+    release: &Path,
+    env: &[(&str, &str)],
+) -> Child {
+    let mut command = Command::new(BIN);
+    command
+        .args([
+            "profile",
+            "migrate",
+            "--profile-dir",
+            s(profile),
+            "--lock-dir",
+            s(locks),
+        ])
+        .env(
+            PAUSE,
+            format!("{step}={}={}", paused.display(), release.display()),
+        )
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    for (key, value) in env {
+        command.env(key, value);
+    }
+    command.spawn().unwrap()
+}
+
+fn stderr(output: &Output) -> String {
+    String::from_utf8_lossy(&output.stderr).into_owned()
+}
+
+/// Before the marker every copied entry is at both places, named in the
+/// journal's `copied`, with no `.moving` left; the renamed ones are in
+/// `freedom/` alone. After it, the sources are gone and the profile is in
+/// the new layout, a copied file keeping its permission bits.
+#[test]
+fn an_entry_on_another_device_is_copied_and_its_source_kept_until_the_marker() {
+    let d = dirs();
+    seeded(&d.profile);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let vault = d.profile.join("identity").join("vault.json");
+        std::fs::set_permissions(&vault, std::fs::Permissions::from_mode(0o600)).unwrap();
+    }
+    let (paused, release) = (d.base.join("paused"), d.base.join("release"));
+    let child = start_paused(
+        &d.profile,
+        &d.locks,
+        "after-renames",
+        &paused,
+        &release,
+        &[(EXDEV, COPIED)],
+    );
+    wait_for(&paused);
+    let freedom = d.profile.join("freedom");
+    assert_eq!(
+        copied_names(&d.profile),
+        ["identity", "settings.json", "tor-data"]
+    );
+    for path in [
+        Path::new("identity").join("vault.json"),
+        PathBuf::from("settings.json"),
+        Path::new("tor-data")
+            .join("state")
+            .join("state")
+            .join("state.lock"),
+    ] {
+        assert!(d.profile.join(&path).is_file(), "{path:?}: its source kept");
+        assert!(freedom.join(&path).is_file(), "{path:?}: its copy");
+    }
+    for name in ["identity", "settings.json", "tor-data"] {
+        assert!(!there(&freedom.join(format!("{name}.moving"))), "{name}");
+    }
+    for name in ["ant-data", "ipfs-data", "myotis"] {
+        assert!(!there(&d.profile.join(name)) && there(&freedom.join(name)));
+    }
+    assert!(!there(&freedom.join("layout.json")));
+    std::fs::write(&release, "").unwrap();
+    let out = child.wait_with_output().unwrap();
+    assert_eq!((code(&out), said(&out)), (0, "migrated".into()), "{out:?}");
+    assert!(stderr(&out).contains("it is copied"), "{out:?}");
+    assert_new_layout(&d.profile);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let vault = freedom.join("identity").join("vault.json");
+        let mode = std::fs::metadata(vault).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600);
+    }
+    assert_eq!(said(&start(&d)), "nothing");
+}
+
+/// A kill at each step of a copy, then `--finish-only`: before the marker
+/// the old layout opens, with no copy or `.moving` left (a kill after the
+/// copy's rename, with the entry at both places, is MG1's case); after it
+/// the new one, the sources removed by the roll-forward, a half-removed
+/// one too.
+#[test]
+fn a_kill_at_each_step_of_a_copy_is_settled_by_finish_only() {
+    for (step, marked) in [
+        ("before-copy", false),
+        ("mid-copy", false),
+        ("after-copy", false),
+        ("after-renames", false),
+        ("after-marker", true),
+        ("mid-cleanup", true),
+        ("after-cleanup", true),
+    ] {
+        let d = dirs();
+        seeded(&d.profile);
+        let out = start_env(&d.profile, &d.locks, &[], &[(EXDEV, COPIED), (CRASH, step)]);
+        assert_eq!(code(&out), 99, "{step}: {out:?}");
+        let freedom = d.profile.join("freedom");
+        let vault = Path::new("identity").join("vault.json");
+        match step {
+            "before-copy" => {
+                assert_eq!(copied_names(&d.profile), ["identity"], "{step}");
+                assert!(!there(&freedom.join("identity.moving")));
+            }
+            "mid-copy" => {
+                assert!(freedom.join("identity.moving").is_dir(), "{step}");
+                assert!(!there(&freedom.join("identity")));
+            }
+            "after-copy" => {
+                assert!(freedom.join(&vault).is_file(), "{step}");
+                assert!(d.profile.join(&vault).is_file(), "{step}");
+                assert!(!there(&freedom.join("identity.moving")));
+            }
+            "mid-cleanup" => {
+                assert!(d.profile.join("identity").is_dir(), "{step}");
+                assert!(!there(&d.profile.join(&vault)), "{step}: half removed");
+            }
+            _ => {}
+        }
+        backdate(
+            &d.profile.join("profile-open.lock"),
+            Duration::from_secs(31),
+        );
+        let out = migrate(&d);
+        if marked {
+            assert_eq!(said(&out), "migrated", "{step}: {out:?}");
+            assert_new_layout(&d.profile);
+            continue;
+        }
+        assert_eq!(said(&out), "rolled_back", "{step}: {out:?}");
+        assert_entries_at_the_root(&d.profile);
+        assert!(!there(&freedom), "{step}: no copy left, freedom/ removed");
+        let out = start_env(&d.profile, &d.locks, &[], &[(EXDEV, COPIED)]);
+        assert_eq!(said(&out), "migrated", "{step}: {out:?}");
+        assert_new_layout(&d.profile);
+    }
+}
+
+/// A volume that fills mid-copy (`StorageFull` after the copy has made two
+/// entries): rolled back, an entry copied whole and one cut short both
+/// gone, the old layout as it was. The next start moves it.
+#[test]
+fn a_full_volume_mid_copy_rolls_back() {
+    let d = dirs();
+    seeded(&d.profile);
+    let out = start_env(
+        &d.profile,
+        &d.locks,
+        &[],
+        &[(EXDEV, "ant-data,tor-data"), (ENOSPC, "2")],
+    );
+    assert_eq!(
+        (code(&out), said(&out)),
+        (0, "rolled_back".into()),
+        "{out:?}"
+    );
+    assert!(stderr(&out).contains("no storage space"), "{out:?}");
+    assert_entries_at_the_root(&d.profile);
+    assert!(!there(&d.profile.join("freedom")));
+    assert_eq!(said(&start(&d)), "migrated");
+    assert_new_layout(&d.profile);
+}
+
+/// The free-space check: too little before anything changes defers the
+/// move with nothing changed; room then, but too little at the copy (the
+/// volume filled meanwhile), rolls it back; room throughout moves it.
+#[test]
+fn the_free_space_check_defers_or_rolls_back() {
+    let d = dirs();
+    seeded(&d.profile);
+    let free = d.base.join("free");
+    write(&free, "1000");
+    let before = snapshot(&d.profile);
+    let out = start_env(&d.profile, &d.locks, &[], &[(EXDEV, "*"), (FREE, s(&free))]);
+    assert_eq!((code(&out), said(&out)), (0, "deferred".into()), "{out:?}");
+    assert!(stderr(&out).contains("no_space"), "{out:?}");
+    assert_eq!(snapshot(&d.profile), before, "nothing changed");
+
+    write(&free, "1000000000000");
+    let (paused, release) = (d.base.join("paused"), d.base.join("release"));
+    let child = start_paused(
+        &d.profile,
+        &d.locks,
+        "after-exclusion",
+        &paused,
+        &release,
+        &[(EXDEV, "*"), (FREE, s(&free))],
+    );
+    wait_for(&paused);
+    write(&free, "1000");
+    std::fs::write(&release, "").unwrap();
+    let out = child.wait_with_output().unwrap();
+    assert_eq!(said(&out), "rolled_back", "{out:?}");
+    assert!(stderr(&out).contains("no_space"), "{out:?}");
+    assert_entries_at_the_root(&d.profile);
+    assert!(!there(&d.profile.join("freedom")));
+
+    write(&free, "1000000000000");
+    let out = start_env(&d.profile, &d.locks, &[], &[(EXDEV, "*"), (FREE, s(&free))]);
+    assert_eq!(said(&out), "migrated", "{out:?}");
+    assert_new_layout(&d.profile);
+}
+
+/// Symlinks inside a copied entry are copied as links, whatever they point
+/// at; an entry that is a symlink is copied as the link, its target left
+/// where it is.
+#[cfg(unix)]
+#[test]
+fn symlinks_in_a_copied_entry_are_copied_as_links() {
+    use std::os::unix::fs::symlink;
+    let d = dirs();
+    seeded(&d.profile);
+    let ant = d.profile.join("ant-data");
+    let elsewhere = d.base.join("elsewhere");
+    write(&elsewhere.join("freedom-ipfs").join("b"), "block");
+    symlink("config.yaml", ant.join("relative")).unwrap();
+    symlink(&elsewhere, ant.join("absolute")).unwrap();
+    symlink("nowhere", ant.join("dangling")).unwrap();
+    std::fs::remove_dir_all(d.profile.join("ipfs-data")).unwrap();
+    symlink(&elsewhere, d.profile.join("ipfs-data")).unwrap();
+    let out = start_env(&d.profile, &d.locks, &[], &[(EXDEV, "ant-data,ipfs-data")]);
+    assert_eq!(said(&out), "migrated", "{out:?}");
+    let freedom = d.profile.join("freedom");
+    for (name, target) in [
+        ("relative", PathBuf::from("config.yaml")),
+        ("absolute", elsewhere.clone()),
+        ("dangling", PathBuf::from("nowhere")),
+    ] {
+        let link = freedom.join("ant-data").join(name);
+        assert!(std::fs::symlink_metadata(&link).unwrap().is_symlink());
+        assert_eq!(std::fs::read_link(&link).unwrap(), target, "{name}");
+    }
+    let moved = freedom.join("ipfs-data");
+    assert!(std::fs::symlink_metadata(&moved).unwrap().is_symlink());
+    assert_eq!(std::fs::read_link(&moved).unwrap(), elsewhere);
+    assert_eq!(read(&elsewhere.join("freedom-ipfs").join("b")), "block");
+    assert_new_layout(&d.profile);
+}
+
+/// What a copy can't move defers the move before anything changes: a
+/// socket or a FIFO inside a copied entry (never opened, so never waited
+/// on), a file this process can't read, a tree deeper than a copy goes.
+/// Renamed instead, the same entry moves.
+#[cfg(unix)]
+#[test]
+fn what_a_copy_cant_move_defers_the_move_with_nothing_changed() {
+    use std::os::unix::fs::PermissionsExt;
+    let deferred = |d: &Dirs, why: &str| {
+        let out = start_env(&d.profile, &d.locks, &[], &[(EXDEV, "*")]);
+        assert_eq!(
+            (code(&out), said(&out)),
+            (0, "deferred".into()),
+            "{why}: {out:?}"
+        );
+        assert!(stderr(&out).contains(why), "{why}: {out:?}");
+        assert_entries_at_the_root(&d.profile);
+        assert!(!there(&d.profile.join("freedom")), "{why}");
+        assert!(!d.profile.join("profile-open.lock").exists(), "{why}");
+        assert_eq!(said(&start(d)), "migrated", "{why}: renamed instead");
+        assert_new_layout(&d.profile);
+    };
+
+    let d = dirs();
+    seeded(&d.profile);
+    let _socket =
+        std::os::unix::net::UnixListener::bind(d.profile.join("ant-data").join("s")).unwrap();
+    deferred(&d, "special_file");
+
+    let d = dirs();
+    seeded(&d.profile);
+    let fifo = d.profile.join("tor-data").join("fifo");
+    let made = Command::new("mkfifo").arg(&fifo).status().unwrap();
+    assert!(made.success());
+    deferred(&d, "special_file");
+
+    let d = dirs();
+    seeded(&d.profile);
+    let mut deep = d.profile.join("ipfs-data");
+    for _ in 0..=fc_store::anchor::MAX_DEPTH {
+        deep.push("d");
+    }
+    std::fs::create_dir_all(&deep).unwrap();
+    deferred(&d, "too_deep");
+
+    // Root reads anything: the mode binds only another user.
+    let d = dirs();
+    seeded(&d.profile);
+    let secret = d.profile.join("ant-data").join("config.yaml");
+    std::fs::set_permissions(&secret, std::fs::Permissions::from_mode(0o000)).unwrap();
+    if std::fs::read(&secret).is_err() {
+        let out = start_env(&d.profile, &d.locks, &[], &[(EXDEV, "*")]);
+        assert_eq!(said(&out), "deferred", "{out:?}");
+        assert!(stderr(&out).contains("no_access"), "{out:?}");
+        assert!(!there(&d.profile.join("freedom")));
+    }
+    std::fs::set_permissions(&secret, std::fs::Permissions::from_mode(0o600)).unwrap();
+}
+
+/// On Windows a reparse point (here a junction) inside a copied entry
+/// defers the move: making one again takes a privilege a user lacks.
+#[cfg(windows)]
+#[test]
+fn a_reparse_point_in_an_entry_to_copy_defers_the_move() {
+    let d = dirs();
+    seeded(&d.profile);
+    let target = d.base.join("elsewhere");
+    std::fs::create_dir_all(&target).unwrap();
+    let native = |path: &Path| path.components().collect::<PathBuf>();
+    let status = Command::new("cmd")
+        .arg("/C")
+        .arg("mklink")
+        .arg("/J")
+        .arg(native(&d.profile.join("ant-data").join("link")))
+        .arg(native(&target))
+        .stdout(Stdio::null())
+        .status()
+        .unwrap();
+    assert!(status.success(), "mklink /J");
+    let before = snapshot(&d.profile);
+    let out = start_env(&d.profile, &d.locks, &[], &[(EXDEV, "*")]);
+    assert_eq!((code(&out), said(&out)), (0, "deferred".into()), "{out:?}");
+    assert!(stderr(&out).contains("reparse_point"), "{out:?}");
+    assert_eq!(snapshot(&d.profile), before);
+    assert_eq!(said(&start(&d)), "migrated", "renamed instead");
+}
+
+/// A tmpfs mounted with `sudo -n` while `FREEDOM_TEST_TMPFS` is set (CI's
+/// Linux step), owned by this process's user, unmounted when dropped (at
+/// the path it was moved to, if it was). `None` without the variable: the
+/// test then checks nothing.
+#[cfg(target_os = "linux")]
+struct Tmpfs(PathBuf);
+
+#[cfg(target_os = "linux")]
+impl Tmpfs {
+    fn mount(at: &Path, size: &str) -> Option<Tmpfs> {
+        use std::os::unix::fs::MetadataExt;
+        std::env::var_os("FREEDOM_TEST_TMPFS")?;
+        let owner = std::fs::metadata(at).unwrap();
+        let options = format!(
+            "size={size},mode=0700,uid={},gid={}",
+            owner.uid(),
+            owner.gid()
+        );
+        let status = Command::new("sudo")
+            .args(["-n", "mount", "-t", "tmpfs", "-o", &options, "tmpfs"])
+            .arg(at)
+            .status()
+            .unwrap();
+        assert!(status.success(), "sudo -n mount: {status}");
+        Some(Tmpfs(at.to_owned()))
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl Drop for Tmpfs {
+    fn drop(&mut self) {
+        let _ = Command::new("sudo")
+            .args(["-n", "umount", "-l"])
+            .arg(&self.0)
+            .status();
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn device(path: &Path) -> u64 {
+    use std::os::unix::fs::MetadataExt;
+    std::fs::metadata(path).unwrap().dev()
+}
+
+/// A genuine `EXDEV`: `freedom/` is a tmpfs mounted before the move, so
+/// every entry (a symlinked one included) is copied, each source kept until
+/// the marker and removed after it. `freedom/` stays the mount.
+#[cfg(target_os = "linux")]
+#[test]
+fn tmpfs_a_freedom_dir_on_another_volume_takes_the_copy() {
+    let d = dirs();
+    seeded(&d.profile);
+    let elsewhere = d.base.join("elsewhere");
+    write(&elsewhere.join("config.yaml"), "ant");
+    std::fs::remove_dir_all(d.profile.join("ant-data")).unwrap();
+    std::os::unix::fs::symlink(&elsewhere, d.profile.join("ant-data")).unwrap();
+    let freedom = d.profile.join("freedom");
+    std::fs::create_dir(&freedom).unwrap();
+    let Some(_mounted) = Tmpfs::mount(&freedom, "256m") else {
+        return;
+    };
+    assert_ne!(device(&freedom), device(&d.profile));
+    let (paused, release) = (d.base.join("paused"), d.base.join("release"));
+    let child = start_paused(
+        &d.profile,
+        &d.locks,
+        "after-renames",
+        &paused,
+        &release,
+        &[],
+    );
+    wait_for(&paused);
+    assert_eq!(copied_names(&d.profile), SEEDED);
+    for name in SEEDED {
+        assert!(there(&d.profile.join(name)), "{name}: its source kept");
+        assert!(there(&freedom.join(name)), "{name}: its copy");
+    }
+    std::fs::write(&release, "").unwrap();
+    let out = child.wait_with_output().unwrap();
+    assert_eq!((code(&out), said(&out)), (0, "migrated".into()), "{out:?}");
+    assert_new_layout(&d.profile);
+    let link = freedom.join("ant-data");
+    assert_eq!(std::fs::read_link(&link).unwrap(), elsewhere);
+    assert_eq!(read(&elsewhere.join("config.yaml")), "ant");
+    assert_ne!(device(&freedom), device(&d.profile), "still the mount");
+    assert_eq!(said(&start(&d)), "nothing");
+}
+
+/// A `freedom/` volume too small for the copy's margin defers the move
+/// before anything changes.
+#[cfg(target_os = "linux")]
+#[test]
+fn tmpfs_a_volume_too_small_for_the_copy_defers_it() {
+    let d = dirs();
+    seeded(&d.profile);
+    let freedom = d.profile.join("freedom");
+    std::fs::create_dir(&freedom).unwrap();
+    let Some(_mounted) = Tmpfs::mount(&freedom, "16m") else {
+        return;
+    };
+    let before = snapshot(&d.profile);
+    let out = start(&d);
+    assert_eq!((code(&out), said(&out)), (0, "deferred".into()), "{out:?}");
+    assert!(stderr(&out).contains("no_space"), "{out:?}");
+    assert_eq!(snapshot(&d.profile), before);
+}
+
+/// A genuine `ENOSPC`: the volume fills after the free-space check, while
+/// the run is paused before its first copy. The copy fails and the move
+/// rolls back: no `.moving` left, the journal gone, the sources intact, the
+/// filler and the mount where they were. With room again, it moves.
+#[cfg(target_os = "linux")]
+#[test]
+fn tmpfs_a_volume_that_fills_mid_move_rolls_back() {
+    use std::io::Write as _;
+    let d = dirs();
+    seeded(&d.profile);
+    write(
+        &d.profile.join("ant-data").join("bulk"),
+        &"x".repeat(1 << 20),
+    );
+    let freedom = d.profile.join("freedom");
+    std::fs::create_dir(&freedom).unwrap();
+    let Some(_mounted) = Tmpfs::mount(&freedom, "80m") else {
+        return;
+    };
+    let (paused, release) = (d.base.join("paused"), d.base.join("release"));
+    let child = start_paused(&d.profile, &d.locks, "before-copy", &paused, &release, &[]);
+    wait_for(&paused);
+    let mut filler = std::fs::File::create(freedom.join("filler")).unwrap();
+    let chunk = vec![0u8; 1 << 20];
+    let full = loop {
+        if let Err(e) = filler.write_all(&chunk).and_then(|()| filler.sync_all()) {
+            break e;
+        }
+    };
+    assert_eq!(full.kind(), std::io::ErrorKind::StorageFull);
+    drop(filler);
+    std::fs::write(&release, "").unwrap();
+    let out = child.wait_with_output().unwrap();
+    assert_eq!(
+        (code(&out), said(&out)),
+        (0, "rolled_back".into()),
+        "{out:?}"
+    );
+    assert_entries_at_the_root(&d.profile);
+    assert_eq!(
+        names(&freedom),
+        ["filler"],
+        "no copy, no .moving, no journal"
+    );
+    std::fs::remove_file(freedom.join("filler")).unwrap();
+    assert_eq!(said(&start(&d)), "migrated");
+    assert_new_layout(&d.profile);
+}
+
+/// A mount point inside an entry: with `freedom/` on another volume, the
+/// move is deferred before anything changes, the mounted volume untouched
+/// (a copy would pull it across, and the source's removal would empty it).
+/// With `freedom/` on the profile's own volume the entry is renamed, and
+/// the mount goes along with it, whole.
+#[cfg(target_os = "linux")]
+#[test]
+fn tmpfs_a_nested_mount_point_is_never_crossed() {
+    let d = dirs();
+    seeded(&d.profile);
+    let inner = d.profile.join("ant-data").join("mnt");
+    std::fs::create_dir(&inner).unwrap();
+    let freedom = d.profile.join("freedom");
+    std::fs::create_dir(&freedom).unwrap();
+    let Some(_freedom) = Tmpfs::mount(&freedom, "256m") else {
+        return;
+    };
+    let Some(_inner) = Tmpfs::mount(&inner, "1m") else {
+        return;
+    };
+    write(&inner.join("kept"), "kept");
+    let before = snapshot(&d.profile);
+    let out = start(&d);
+    assert_eq!((code(&out), said(&out)), (0, "deferred".into()), "{out:?}");
+    assert!(stderr(&out).contains("nested_mount"), "{out:?}");
+    assert!(stderr(&out).contains("ant-data/mnt"), "{out:?}");
+    assert_eq!(snapshot(&d.profile), before);
+
+    let d = dirs();
+    seeded(&d.profile);
+    let inner = d.profile.join("ant-data").join("mnt");
+    std::fs::create_dir(&inner).unwrap();
+    let Some(mut mounted) = Tmpfs::mount(&inner, "1m") else {
+        return;
+    };
+    write(&inner.join("kept"), "kept");
+    let out = start(&d);
+    let moved = d.profile.join("freedom").join("ant-data").join("mnt");
+    if said(&out) == "migrated" {
+        mounted.0 = moved.clone();
+    }
+    assert_eq!(said(&out), "migrated", "{out:?}");
+    assert_new_layout(&d.profile);
+    assert_eq!(read(&moved.join("kept")), "kept");
+    assert_ne!(device(&moved), device(&d.profile), "still the mount");
 }

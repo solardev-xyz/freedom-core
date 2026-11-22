@@ -173,6 +173,17 @@ jobs:
       # inherit and refuse (design 0010).
       - run: python3 scripts/stdio-only.py cargo test --locked --workspace --all-features
         if: runner.os != 'Windows'
+      # A profile move's cross-device copy on real mounts (design 0013,
+      # "The move"; PRF-9c): a tmpfs at a profile's `freedom/` (a genuine
+      # EXDEV), one too small for the copy's margin, one filled mid-move
+      # (ENOSPC), and mount points inside an entry. The `tmpfs_` tests mount
+      # with `sudo -n` only while FREEDOM_TEST_TMPFS is set; the runner's
+      # sudo asks no password. The step above built them.
+      - name: profile migrate on tmpfs mounts
+        if: runner.os == 'Linux'
+        env:
+          FREEDOM_TEST_TMPFS: "1"
+        run: python3 scripts/stdio-only.py cargo test --locked --workspace --all-features --tests tmpfs
 
   profile-gate:
     # Design 0013's latency gate (PRF-3): `profile open` under 100 ms at the

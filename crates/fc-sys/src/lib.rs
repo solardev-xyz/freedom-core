@@ -27,6 +27,9 @@
 //!   renamed, deleted or listed relative to its directory's handle, and a
 //!   reparse point opened itself and refused (design 0013, "Windows handle
 //!   I/O (#963)");
+//! - [`windows::volume_space`]: the free space on a directory's volume,
+//!   from its handle, for a profile's cross-device copy (design 0013, "The
+//!   move", PRF-9c);
 //! - [`windows::Job`], [`windows::own_job_limits`] and
 //!   [`windows::Mitigation`]: its confinement on Windows (design 0010), a job
 //!   object of one process and the process mitigation policies, each read

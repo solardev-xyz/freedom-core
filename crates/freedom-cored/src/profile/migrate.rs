@@ -42,8 +42,9 @@
 //!    decides from what the core observed (a node identity journal in
 //!    `identity/`, a `freedom/` the move didn't make, a mount point among
 //!    the entries), and then the nodes' OS locks are tried (arti's,
-//!    Myotis's). Any of them ends the run with `deferred` (0), nothing
-//!    changed.
+//!    Myotis's). With `freedom/` already on another mount, every entry is
+//!    surveyed for its copy and the room for them checked (`copy.rs`). Any
+//!    of them ends the run with `deferred` (0), nothing changed.
 //! 4. **Confinement** (`confine.rs`): read-write on the profile's
 //!    directory, renames across directories, the gates' descriptors; no
 //!    network, no process. Then the lock's refresher starts.
@@ -54,11 +55,20 @@
 //!    - each entry renamed into `freedom/` (a symlink as the link). On
 //!      Windows a rename refused while another handle holds the entry is
 //!      tried again, 30 times, 100 ms apart (MD3);
+//!    - **an entry on another device** than `freedom/` (the rename's
+//!      `EXDEV`, Windows's `ERROR_NOT_SAME_DEVICE`; PRF-9c) is copied
+//!      instead: surveyed and the room for it checked (`copy.rs`), named in
+//!      the journal's `copied` (written again, whole and durably), copied
+//!      to `freedom/<name>.moving` (fc-store's `copy_tree`: files synced,
+//!      directories flushed, symlinks as links, never past the profile's
+//!      mount, the lock checked after each entry made), and that renamed to
+//!      its name. Its source stays at the root;
 //!    - both directories flushed, then the marker (`freedom/layout.json`)
 //!      written and flushed;
-//!    - cleanup: no entry is copied across devices in this build (PRF-9c
-//!      copies). An entry on another device than `freedom/` (`EXDEV`) is
-//!      rolled back as any failure is, with its own log line;
+//!    - cleanup: each copied entry's source removed from the root, never
+//!      past the profile's mount (a mount point found inside it stops the
+//!      removal, which would empty the mounted volume), the lock checked
+//!      after each entry removed;
 //!    - the placeholder at the root's `identity`, where nothing is
 //!      (`needs_placeholder`), and the root flushed;
 //!    - the journal removed and `freedom/` flushed: `migrated`.
@@ -84,7 +94,8 @@
 //!      renamed back (on Windows, a rename refused while another handle
 //!      holds the entry is tried again, 10 times, 100 ms apart). Then the
 //!      directories are flushed, the journal removed, and `freedom/` too if
-//!      it is empty: `rolled_back`;
+//!      it is empty and on the profile's own mount (a volume mounted there
+//!      before the move stays): `rolled_back`;
 //!    - **after the marker,** every entry must be in `freedom/`
 //!      (`fc_profile::layout::roll_forward`): a copied entry's source still
 //!      at the root, of its copy's kind, is removed, and nothing else at
@@ -94,7 +105,9 @@
 //!    - **either way,** an entry the journal names but found in no place
 //!      (not at the root, in `freedom/` or as its `.moving` copy) is
 //!      `corrupt`, with the journal kept: the journal lists the entries
-//!      present, and no step of the move removes every copy of one.
+//!      present, and no step of the move removes every copy of one. A
+//!      removal, of a copy or of a source, never goes past the mount of the
+//!      directory it is in.
 //!
 //! Before each change the profile lock must still be this run's: lost (the
 //! run was frozen past the stale time and another build took it over), it
@@ -117,6 +130,7 @@ use fc_store::anchor::{Dir, Kind, Resolve};
 use fc_store::fsx::Regular;
 
 use super::confine::{self, Grant};
+use super::copy;
 use super::lock::{Lock, LockError, Timing};
 use super::preconditions::{self, Check};
 use super::{Flags, storage};
@@ -609,7 +623,11 @@ fn recover(
             if !held() {
                 return Ok(lost());
             }
-            root.remove_tree(OsStr::new(name))?;
+            match remove_within(&root, OsStr::new(name), held, None) {
+                Ok(()) => {}
+                Err(Halt::Lost) => return Ok(lost()),
+                Err(Halt::Io(e)) => return Err(e),
+            }
             step("mid-recovery");
         }
         if layout::needs_placeholder(found(&root, layout::PLACEHOLDER)?) {
@@ -644,14 +662,22 @@ fn recover(
             }
             let mut moving = name.to_owned();
             moving.push(layout::MOVING_SUFFIX);
-            freedom.remove_tree(&moving)?;
+            match remove_within(&freedom, &moving, held, None) {
+                Ok(()) => {}
+                Err(Halt::Lost) => return Ok(lost()),
+                Err(Halt::Io(e)) => return Err(e),
+            }
             step("mid-recovery");
         }
         if steps.remove_moved {
             if !held() {
                 return Ok(lost());
             }
-            freedom.remove_tree(name)?;
+            match remove_within(&freedom, name, held, None) {
+                Ok(()) => {}
+                Err(Halt::Lost) => return Ok(lost()),
+                Err(Halt::Io(e)) => return Err(e),
+            }
             step("mid-recovery");
         }
         if steps.remove_placeholder {
@@ -678,10 +704,52 @@ fn recover(
     freedom.unlink(journal_name)?;
     freedom.sync()?;
     drop(freedom);
-    if held() && root.remove_empty(OsStr::new(layout::FREEDOM_DIR))? {
+    if held() && remove_freedom_if_empty(&root)? {
         root.sync()?;
     }
     Ok(Outcome::RolledBack)
+}
+
+/// `freedom/` removed if it is empty and on the profile's own mount. One
+/// on another mount is a volume mounted there before the move, where the
+/// move found it: it stays (and can't be removed anyway).
+fn remove_freedom_if_empty(root: &Dir) -> std::io::Result<bool> {
+    let name = OsStr::new(layout::FREEDOM_DIR);
+    match root.child(name, false)? {
+        Some(freedom) if freedom.mount()?.same(root.mount()?) => {
+            drop(freedom);
+            root.remove_empty(name)
+        }
+        _ => Ok(false),
+    }
+}
+
+/// `name` in `dir` and everything under it removed, never past `dir`'s
+/// mount (fc-store's `remove_tree_within`): a mount point at `name` or
+/// inside it stops the removal with an error, since removing through it
+/// would empty the mounted volume. The lock is checked after each entry
+/// removed, and the step `at`, if any, fired.
+fn remove_within(
+    dir: &Dir,
+    name: &OsStr,
+    held: &dyn Fn() -> bool,
+    at: Option<&str>,
+) -> Result<(), Halt> {
+    let mut lost = false;
+    let removed = dir.remove_tree_within(name, &mut || {
+        if !held() {
+            lost = true;
+            return Err(std::io::Error::other("the profile's lock was taken over"));
+        }
+        if let Some(at) = at {
+            step(at);
+        }
+        Ok(())
+    });
+    if lost {
+        return Err(Halt::Lost);
+    }
+    removed.map(|_| ()).map_err(Halt::Io)
 }
 
 /// The profile's directory, opened from its gate's canonical path: the
@@ -751,14 +819,9 @@ fn start_move(
         Ok(outcome) => Ok(outcome),
         Err(Halt::Lost) => Ok(lost()),
         Err(Halt::Io(e)) => {
-            let other_device = e.kind() == std::io::ErrorKind::CrossesDevices;
             log::error(
-                if other_device {
-                    "an entry is on another device than freedom/, and this build doesn't copy (PRF-9c); the move is settled"
-                } else {
-                    "the move failed; it is settled as the next start would settle it"
-                },
-                serde_json::json!({ "error": e.kind().to_string() }),
+                "the move failed; it is settled as the next start would settle it",
+                serde_json::json!({ "error": e.kind().to_string(), "detail": e.to_string() }),
             );
             match recover(canonical, identity, held)? {
                 // No journal: before it was in place, or an empty move.
@@ -774,7 +837,7 @@ fn start_move(
                     if marked {
                         return Ok(Outcome::Migrated);
                     }
-                    if held() && root.remove_empty(OsStr::new(layout::FREEDOM_DIR))? {
+                    if held() && remove_freedom_if_empty(&root)? {
                         root.sync()?;
                     }
                     Ok(Outcome::RolledBack)
@@ -801,28 +864,48 @@ fn moving(
         .child(OsStr::new(layout::FREEDOM_DIR), true)?
         .ok_or_else(|| std::io::Error::from(std::io::ErrorKind::NotFound))?;
     step("after-freedom-dir");
+    let mut journal = None;
     if !entries.is_empty() {
-        let journal = Journal::new(entries)
+        let mut written = Journal::new(entries)
             .ok_or_else(|| std::io::Error::other("an entry the move's list doesn't hold"))?;
         if !held() {
             return Err(Halt::Lost);
         }
-        write_journal(&freedom, &journal)?;
+        write_journal(&freedom, &written)?;
         step("after-journal");
         for name in entries {
-            rename_out(&root, OsStr::new(name), &freedom, held)?;
+            match rename_out(&root, OsStr::new(name), &freedom, held) {
+                Ok(()) => {}
+                // `freedom/` on another volume: the entry is copied.
+                Err(Halt::Io(e)) if copy::crosses_devices(&e) => {
+                    copy_entry(&root, &freedom, name, &mut written, held)?;
+                }
+                Err(halt) => return Err(halt),
+            }
             step("mid-move");
         }
         root.sync()?;
         freedom.sync()?;
         step("after-renames");
+        journal = Some(written);
     }
     if !held() {
         return Err(Halt::Lost);
     }
     write_marker(&freedom)?;
     step("after-marker");
-    // Cleanup: no entry is copied in this build, so no source is left.
+    // Cleanup: each copied entry's source removed from the root.
+    let copied = journal.as_ref().map_or(&[][..], Journal::copied);
+    for name in copied {
+        if !held() {
+            return Err(Halt::Lost);
+        }
+        remove_within(&root, OsStr::new(name), held, Some("mid-cleanup"))?;
+    }
+    if !copied.is_empty() {
+        root.sync()?;
+        step("after-cleanup");
+    }
     if layout::needs_placeholder(found(&root, layout::PLACEHOLDER)?) {
         if !held() {
             return Err(Halt::Lost);
@@ -874,14 +957,109 @@ fn write_marker(freedom: &Dir) -> std::io::Result<()> {
     freedom.sync()
 }
 
-/// The root's `name` into `freedom/`, a symlink as the link. On Windows, a
-/// rename refused while an indexer or another handle holds the entry is
-/// tried again, [`START_RENAME_TRIES`] times, 100 ms apart, the lock
-/// checked before each try.
+/// The root's `name` into `freedom/`, a symlink as the link
+/// ([`rename_retried`]). One `FREEDOM_CORED_TEST_PROFILE_MIGRATE_EXDEV`
+/// lists fails as on another device, untried.
 fn rename_out(
     root: &Dir,
     name: &OsStr,
     freedom: &Dir,
+    held: &dyn Fn() -> bool,
+) -> Result<(), Halt> {
+    if name
+        .to_str()
+        .is_some_and(crate::testhooks::profile_migrate_exdev)
+    {
+        if !held() {
+            return Err(Halt::Lost);
+        }
+        return Err(Halt::Io(std::io::Error::from(
+            std::io::ErrorKind::CrossesDevices,
+        )));
+    }
+    rename_retried(root, name, freedom, name, held)
+}
+
+/// An entry on another device than `freedom/` (0013, "The move", 4;
+/// PRF-9c), copied in place of its rename:
+/// 1. surveyed, and the room for it checked on `freedom/`'s volume
+///    (`copy.rs`): either failing is a failure of the move, which rolls it
+///    back;
+/// 2. named in the journal's `copied`, the journal written again whole and
+///    durably before the copy begins (MG1);
+/// 3. copied to `freedom/<name>.moving` (fc-store's `copy_tree`), the lock
+///    checked after each entry made;
+/// 4. renamed to its name ([`rename_retried`]), and `freedom/` flushed.
+///
+/// Its source stays at the root until the cleanup after the marker.
+fn copy_entry(
+    root: &Dir,
+    freedom: &Dir,
+    name: &'static str,
+    journal: &mut Journal,
+    held: &dyn Fn() -> bool,
+) -> Result<(), Halt> {
+    let space = copy::space(freedom)?;
+    let size = match copy::survey(root, name, space.block)? {
+        Ok(size) => size,
+        Err(unfit) => return Err(Halt::Io(unfit.error())),
+    };
+    if let Err(unfit) = copy::room(space, size) {
+        return Err(Halt::Io(unfit.error()));
+    }
+    log::info(
+        "an entry is on another device than freedom/: it is copied",
+        serde_json::json!({ "entry": name, "bytes": size }),
+    );
+    let next = journal
+        .with_copied(name)
+        .ok_or_else(|| std::io::Error::other("an entry copied twice"))?;
+    if !held() {
+        return Err(Halt::Lost);
+    }
+    write_journal(freedom, &next)?;
+    *journal = next;
+    step("before-copy");
+    let moving = format!("{name}{}", layout::MOVING_SUFFIX);
+    let mut lost = false;
+    let mut made = 0u64;
+    let copied = root.copy_tree(OsStr::new(name), freedom, OsStr::new(&moving), &mut || {
+        if !held() {
+            lost = true;
+            return Err(std::io::Error::other("the profile's lock was taken over"));
+        }
+        made += 1;
+        if crate::testhooks::profile_migrate_full(made) {
+            return Err(std::io::Error::from(std::io::ErrorKind::StorageFull));
+        }
+        step("mid-copy");
+        Ok(())
+    });
+    if lost {
+        return Err(Halt::Lost);
+    }
+    copied?;
+    rename_retried(
+        freedom,
+        OsStr::new(&moving),
+        freedom,
+        OsStr::new(name),
+        held,
+    )?;
+    freedom.sync()?;
+    step("after-copy");
+    Ok(())
+}
+
+/// `from` in `dir` renamed to `to` in `target`. On Windows, a rename
+/// refused while an indexer or another handle holds the entry is tried
+/// again, [`START_RENAME_TRIES`] times, 100 ms apart, the lock checked
+/// before each try.
+fn rename_retried(
+    dir: &Dir,
+    from: &OsStr,
+    target: &Dir,
+    to: &OsStr,
     held: &dyn Fn() -> bool,
 ) -> Result<(), Halt> {
     let mut tries = 0;
@@ -889,7 +1067,7 @@ fn rename_out(
         if !held() {
             return Err(Halt::Lost);
         }
-        match root.rename_into(name, freedom, name) {
+        match dir.rename_into(from, target, to) {
             Ok(()) => return Ok(()),
             Err(e) if cfg!(windows) && tries < START_RENAME_TRIES && held_by_another(&e) => {
                 tries += 1;
