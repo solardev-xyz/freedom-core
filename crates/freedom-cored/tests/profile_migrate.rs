@@ -998,8 +998,8 @@ fn the_placeholder_is_written_only_where_nothing_is() {
 // The starting move (PRF-9b): `profile migrate` without `--finish-only`.
 
 /// A used profile in the root layout: entries of each kind, among them
-/// arti's state lock and Myotis's lease (not held), and the shell's own
-/// files, which never move.
+/// arti's state lock, antd's instance lock and Myotis's lease (not held),
+/// and the shell's own files, which never move.
 fn seeded(profile: &Path) {
     write(&profile.join("identity").join("vault.json"), "vault");
     write(
@@ -1007,6 +1007,7 @@ fn seeded(profile: &Path) {
         "block",
     );
     write(&profile.join("ant-data").join("config.yaml"), "ant");
+    write(&profile.join("ant-data").join("antd.lock"), "4242\n");
     write(&profile.join("settings.json"), "{}");
     write(
         &profile
@@ -1308,6 +1309,22 @@ fn each_precondition_defers_with_nothing_changed() {
     deferred(&d, "arti's state lock");
     state_lock.unlock().unwrap();
     drop(state_lock);
+    assert_eq!(said(&start(&d)), "migrated");
+
+    // antd running, an orphan included: its instance lock held (fs4's
+    // try_lock, flock; LockFileEx on Windows), whatever ant-process.json
+    // says or whether it exists.
+    let d = dirs();
+    seeded(&d.profile);
+    let antd_lock = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(d.profile.join("ant-data").join("antd.lock"))
+        .unwrap();
+    antd_lock.lock().unwrap();
+    deferred(&d, "antd's instance lock");
+    antd_lock.unlock().unwrap();
+    drop(antd_lock);
     assert_eq!(said(&start(&d)), "migrated");
 
     // Myotis running (an orphaned execution child holds its lifetime
@@ -2157,6 +2174,87 @@ fn copied_names(profile: &Path) -> Vec<String> {
         .iter()
         .map(|name| name.as_str().unwrap().to_owned())
         .collect()
+}
+
+/// A node that takes its lock while the move runs (an antd paused between
+/// its spawn and taking its lock, so the preconditions found it free):
+/// found at its new place before the marker, the move rolls back, which
+/// puts `ant-data/` back where that antd opened it. Unix only: on Windows a
+/// file held open inside `ant-data/` before the rename refuses the rename
+/// itself (retried, then rolled back: the held-entry test), so no node can
+/// hold a lock there that the rename carried along.
+#[cfg(unix)]
+#[test]
+fn a_node_taking_its_lock_during_the_move_rolls_it_back() {
+    let d = dirs();
+    seeded(&d.profile);
+    let (paused, release) = (d.base.join("paused"), d.base.join("release"));
+    let child = start_paused(
+        &d.profile,
+        &d.locks,
+        "after-renames",
+        &paused,
+        &release,
+        &[],
+    );
+    wait_for(&paused);
+    let moved = d.profile.join("freedom").join("ant-data").join("antd.lock");
+    let antd = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&moved)
+        .unwrap();
+    antd.lock().unwrap();
+    std::fs::write(&release, "").unwrap();
+    let out = child.wait_with_output().unwrap();
+    assert_eq!(said(&out), "rolled_back", "{out:?}");
+    assert!(stderr(&out).contains("a node took its lock"), "{out:?}");
+    assert_old_layout(&d.profile);
+    assert!(d.profile.join("ant-data").join("antd.lock").is_file());
+    antd.unlock().unwrap();
+    drop(antd);
+    assert_eq!(said(&start(&d)), "migrated");
+    assert_new_layout(&d.profile);
+}
+
+/// The same for a copied entry: a node that takes its lock on the source,
+/// which stays at the root until the cleanup after the marker (its copy's
+/// lock is another file), rolls the move back before the marker, with the
+/// source intact and no copy left.
+#[test]
+fn a_node_taking_its_lock_on_a_copied_source_rolls_the_move_back() {
+    let d = dirs();
+    seeded(&d.profile);
+    let (paused, release) = (d.base.join("paused"), d.base.join("release"));
+    let child = start_paused(
+        &d.profile,
+        &d.locks,
+        "after-renames",
+        &paused,
+        &release,
+        &[(EXDEV, "ant-data")],
+    );
+    wait_for(&paused);
+    assert!(there(
+        &d.profile.join("freedom").join("ant-data").join("antd.lock")
+    ));
+    let source = d.profile.join("ant-data").join("antd.lock");
+    let antd = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&source)
+        .unwrap();
+    antd.lock().unwrap();
+    std::fs::write(&release, "").unwrap();
+    let out = child.wait_with_output().unwrap();
+    assert_eq!(said(&out), "rolled_back", "{out:?}");
+    assert!(stderr(&out).contains("a node took its lock"), "{out:?}");
+    assert_old_layout(&d.profile);
+    assert!(!there(&d.profile.join("freedom").join("ant-data")));
+    antd.unlock().unwrap();
+    drop(antd);
+    assert_eq!(said(&start(&d)), "migrated");
+    assert_new_layout(&d.profile);
 }
 
 /// A starting run in the background, paused at `step` until `release`.

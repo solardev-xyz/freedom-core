@@ -954,6 +954,17 @@ fn moving(
         root.sync()?;
         freedom.sync()?;
         step("after-renames");
+        // A node that started during the move (its lock taken after the
+        // preconditions tried it) rolls the move back before its marker.
+        if let Some(why) = preconditions::node_started(&root, canonical, entries)? {
+            log::warn(
+                "a node took its lock while the move ran: it is rolled back",
+                serde_json::json!({ "lock": why }),
+            );
+            return Err(Halt::Io(std::io::Error::other(
+                "a node took its lock while the move ran",
+            )));
+        }
         journal = Some(written);
     }
     if !held() {
