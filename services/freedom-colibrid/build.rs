@@ -1,5 +1,6 @@
-//! Refuses the `testhooks` feature (src/request.rs's replay clock) outside the debug and
-//! test builds the tests use: Cargo's `PROFILE` must be `debug` (a profile
+//! Refuses the `testhooks` feature (src/request.rs's replay clock) outside
+//! the debug and test builds the tests use: Cargo's `PROFILE` must be
+//! `debug` (a profile
 //! that inherits `dev`, as `test` does), and this package unoptimized. A
 //! release-profile build is refused whatever its settings, debug assertions
 //! included, which a `cfg(debug_assertions)` check would let through
