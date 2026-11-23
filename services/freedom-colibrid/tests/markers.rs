@@ -7,9 +7,11 @@
 //!   marker, its clearing event, then `busy`, never a step left open;
 //! - every call into the C core has a marker of its own: held at the n-th
 //!   marker of a request, the service has made exactly n − 1 calls, for
-//!   every n the request reaches (its classification, the context's
-//!   creation and freshness bound, each step and each answer, and the
-//!   free).
+//!   every n the request reaches (its classification, the replay clock's
+//!   setting, the context's creation and freshness bound, each step and
+//!   each answer, and the free). The service's own count of calls can't
+//!   show two calls under one marker, so the request is also run without
+//!   the replay clock: one marker fewer.
 //!
 //! The in-process services share one C core, so the tests take turns.
 
@@ -243,6 +245,39 @@ fn block_number() -> Value {
     })
 }
 
+/// [`block_number`] at a fixed clock (the replay's `test_clock_ms`): one
+/// call more, the clock's setting. The clock is now's, as the in-process
+/// services share it.
+fn block_number_at_a_fixed_clock() -> Value {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap();
+    let mut params = block_number();
+    params["test_clock_ms"] = json!(u64::try_from(now.as_millis()).unwrap());
+    params
+}
+
+/// The calls `params` makes, unheld, each fetch failing, as their markers
+/// name them: checked to be one marker and its clearing event each, and as
+/// many as the service counts.
+fn calls_unheld(params: &Value) -> Vec<String> {
+    let mut main = InProcess::start_at("\"colibri.step\"", usize::MAX);
+    main.release();
+    let id = main.request("colibri.request", params.clone());
+    let seen = main.until_reply(id);
+    let markers = order(&seen, id);
+    for pair in markers[..markers.len() - 1].chunks(2) {
+        assert_eq!(pair, ["colibri.step", "colibri.stepped"], "{markers:?}");
+    }
+    let calls: Vec<String> = seen
+        .iter()
+        .filter(|m| m["type"] == "event" && m["event"] == "colibri.step")
+        .map(|m| m["data"]["call"].as_str().unwrap().to_owned())
+        .collect();
+    assert_eq!(main.calls(), calls.len() as u64);
+    calls
+}
+
 #[test]
 fn a_marker_still_queued_is_taken_back_and_the_request_is_busy() {
     let _turn = TURN
@@ -311,23 +346,26 @@ fn every_call_into_the_c_core_has_a_marker_of_its_own() {
     let _turn = TURN
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    // Unheld: how many calls the request makes, each fetch failing.
-    let mut main = InProcess::start_at("\"colibri.step\"", usize::MAX);
-    main.release();
-    let id = main.request("colibri.request", block_number());
-    let seen = main.until_reply(id);
-    let markers = order(&seen, id);
-    let calls = markers.iter().filter(|m| *m == "colibri.step").count();
-    assert!(calls >= 5, "{markers:?}");
-    for pair in markers[..markers.len() - 1].chunks(2) {
-        assert_eq!(pair, ["colibri.step", "colibri.stepped"], "{markers:?}");
-    }
-    assert_eq!(main.calls(), calls as u64);
+    // Unheld: how many calls the request makes. The clock's setting is a
+    // call of its own, with a marker of its own: the count the service
+    // keeps can't show that, so the request is run both ways.
+    let params = block_number_at_a_fixed_clock();
+    let calls = calls_unheld(&params);
+    assert_eq!(
+        calls[..5],
+        ["classify", "clock", "create", "freshness", "execute"],
+        "{calls:?}"
+    );
+    assert_eq!(calls.last().unwrap(), "free", "{calls:?}");
+    let mut without_clock = calls.clone();
+    without_clock.remove(1);
+    assert_eq!(calls_unheld(&block_number()), without_clock);
+    let calls = calls.len();
     // Held at each marker in turn: the calls before it ran, it didn't.
     for nth in 1..=calls {
         let mut main = InProcess::start_at("\"colibri.step\"", nth);
         let before = main.calls();
-        let id = main.request("colibri.request", block_number());
+        let id = main.request("colibri.request", params.clone());
         assert!(
             main.until_held(Duration::from_secs(30)),
             "marker {nth} never written"

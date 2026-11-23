@@ -41,6 +41,9 @@ colibri-stateless = { git = "https://github.com/solardev-xyz/colibri-stateless",
 # services by path (0007, 0014).
 fc-protocol = { path = "../../crates/fc-protocol" }
 fc-service = { path = "../../crates/fc-service" }
+# The resident memory the budget reads, on macOS and Windows (0014,
+# Budgets): fc-service links it already.
+fc-sys = { path = "../../crates/fc-sys" }
 # What Colibri serves: #279's rule, the router's own (0014, "One rule, two
 # places").
 fc-colibri = { path = "../../crates/fc-colibri" }
@@ -81,6 +84,11 @@ required-features = ["testhooks"]
 # A step held by a test hook.
 [[test]]
 name = "service"
+required-features = ["testhooks"]
+
+# The replay clock's setting, a call of its own.
+[[test]]
+name = "markers"
 required-features = ["testhooks"]
 
 # The core's workspace lints, copied: workspace lints don't cross workspaces.

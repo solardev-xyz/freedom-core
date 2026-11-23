@@ -327,6 +327,47 @@ fn a_cancel_during_a_step_wins_when_the_step_returns() {
 }
 
 #[test]
+fn a_cancel_during_the_classification_wins_when_it_returns() {
+    let mut command = std::process::Command::new(common::BIN);
+    command
+        .args(["serve", "--chain", "1"])
+        .env("FREEDOM_COLIBRID_TEST_CLASSIFY", "sleep:1500");
+    let mut colibrid = Colibrid::spawn(command);
+    colibrid.hello();
+    let id = colibrid.request("colibri.request", request_params("eth_blockNumber", "[]"));
+    // The first call is the classification: cancel while it sleeps, past
+    // the commit point (its marker).
+    let mut marked = false;
+    let deadline = Instant::now() + WAIT;
+    while !marked && Instant::now() < deadline {
+        if let Some(Frame::Json(m, _)) = colibrid.recv(Duration::from_millis(100)) {
+            marked = m["type"] == "event" && m["event"] == "colibri.step";
+        }
+    }
+    assert!(marked);
+    colibrid.cancel(id);
+    let mut markers = 1;
+    let mut reply = None;
+    let deadline = Instant::now() + WAIT;
+    while reply.is_none() && Instant::now() < deadline {
+        if let Some(Frame::Json(m, _)) = colibrid.recv(Duration::from_millis(100)) {
+            markers += usize::from(m["type"] == "event" && m["event"] == "colibri.step");
+            if m["type"] == "response" && m["id"] == id {
+                reply = Some(m);
+            }
+        }
+    }
+    let reply = reply.expect("no reply");
+    assert_eq!(reply["error"]["code"], "cancelled", "{reply}");
+    // The classification alone: no context was made, so none is freed.
+    assert_eq!(markers, 1);
+    let stats = colibrid.request("colibri.stats", json!({}));
+    let (stats, _) = until_reply(&mut colibrid, stats, |_, _, _| {});
+    assert_eq!(stats["result"]["calls"], 1, "{stats}");
+    assert_eq!(colibrid.shutdown(), Some(0));
+}
+
+#[test]
 fn a_deadline_past_the_clock_panics_nothing() {
     let mut colibrid = Colibrid::serve(1, None);
     colibrid.hello();

@@ -77,8 +77,9 @@ pub fn run(shared: Arc<Shared>, queue: Arc<Queue<Job>>, ready: SyncSender<Result
     });
     let mut states: HashMap<u64, Rc<TaskState>> = HashMap::new();
     loop {
-        // The jobs first: a cancel that came with a task's wake is seen
-        // before the task runs on.
+        // The jobs first, each round: a cancel queued while a task's call
+        // into the C core ran is seen before that task, or any other, runs
+        // on.
         let jobs: Vec<Job> = if carried.is_empty() {
             exec.wait()
         } else {
@@ -114,7 +115,7 @@ pub fn run(shared: Arc<Shared>, queue: Arc<Queue<Job>>, ready: SyncSender<Result
                 }
             }
         }
-        exec.run_woken();
+        exec.run_one();
         states.retain(|id, _| exec.contains(*id));
     }
 }

@@ -152,17 +152,27 @@ impl Stop {
 }
 
 impl Env {
-    /// The marker before a call into the C core for request `id`.
-    fn mark(&self, id: u64, state: &TaskState) -> Marked {
+    /// The marker before call `what` into the C core for request `id`.
+    /// With the `testhooks` feature it names the call, so a test can tell
+    /// which one a death was in; the design's marker carries the request
+    /// alone.
+    fn mark(&self, id: u64, state: &TaskState, what: &'static str) -> Marked {
         if !state.committed.get() {
             if !self.conn.commit(id) {
                 return Marked::Gone;
             }
             state.committed.set(true);
         }
+        #[cfg(feature = "testhooks")]
+        let marker = json!({ "request": id, "call": what });
+        #[cfg(not(feature = "testhooks"))]
+        let marker = {
+            let _ = what;
+            json!({ "request": id })
+        };
         match self
             .conn
-            .event_written("colibri.step", &json!({ "request": id }), MARKER_WAIT)
+            .event_written("colibri.step", &marker, MARKER_WAIT)
         {
             Ok(()) => Marked::Go,
             // Never reached main: nothing to clear.
@@ -199,8 +209,14 @@ impl Env {
     /// clearing event as it returns, then a yield, so a cancel queued
     /// meanwhile is seen before anything else is done for the request. No
     /// marker, no call: `f` is then dropped uncalled.
-    async fn call<T>(&self, id: u64, state: &TaskState, f: impl FnOnce() -> T) -> Result<T, Stop> {
-        match self.mark(id, state) {
+    async fn call<T>(
+        &self,
+        id: u64,
+        state: &TaskState,
+        what: &'static str,
+        f: impl FnOnce() -> T,
+    ) -> Result<T, Stop> {
+        match self.mark(id, state, what) {
             Marked::Go => {}
             Marked::Busy => return Err(Stop::Busy),
             Marked::Gone => return Err(Stop::Gone),
@@ -228,7 +244,7 @@ impl Env {
     ) -> Result<(), Stop> {
         let mut contexts = contexts.into_iter();
         while let Some(ctx) = contexts.next() {
-            let stop = match self.mark(id, state) {
+            let stop = match self.mark(id, state, "free") {
                 Marked::Go => {
                     debug_assert_eq!(std::thread::current().name(), Some("verifier"));
                     self.shared.call_done();
@@ -385,6 +401,10 @@ impl Params {
 }
 
 async fn serve(env: &Rc<Env>, id: u64, p: &Params, state: &Rc<TaskState>) -> Reply {
+    // A cancel that came with the request.
+    if state.cancelled.get() {
+        return cancelled(state);
+    }
     if let Err(served::Refusal(text)) = served::check(&p.method, &p.params) {
         return Reply::Raw(format!(r#"{{"status":"error","error":{text}}}"#));
     }
@@ -397,7 +417,8 @@ async fn serve(env: &Rc<Env>, id: u64, p: &Params, state: &Rc<TaskState>) -> Rep
     };
     let chain = env.shared.chain_id;
     let support = match env
-        .call(id, state, || {
+        .call(id, state, "classify", || {
+            crate::testhooks::in_classify();
             colibri_stateless::get_method_support(chain, &p.method, Some(&params), VERIFY_FLAGS)
         })
         .await
@@ -491,12 +512,22 @@ impl Attempt<'_> {
     async fn run(&self, budget: &mut FetchBudget, done: &mut Vec<RpcCtx>) -> Outcome {
         let (env, id, state) = (self.env, self.id, &**self.state);
         let prover_flags = if self.zk { ZK_FLAG } else { 0 };
-        let created = env
-            .call(id, state, || {
-                #[cfg(feature = "testhooks")]
-                if let Some(ms) = self.p.test_clock_ms {
+        #[cfg(feature = "testhooks")]
+        if let Some(ms) = self.p.test_clock_ms {
+            if let Err(stop) = env
+                .call(id, state, "clock", || {
                     colibri_stateless::set_fixed_time(Some(ms / 1000));
-                }
+                })
+                .await
+            {
+                return Outcome::Done(env.stop(None, done, stop));
+            }
+            if state.cancelled.get() {
+                return Outcome::Done(env.end(id, state, None, done, cancelled(state)).await);
+            }
+        }
+        let created = env
+            .call(id, state, "create", || {
                 RpcCtx::new(
                     &self.p.method,
                     self.params,
@@ -523,7 +554,7 @@ impl Attempt<'_> {
         }
         let min = self.p.min_latest_block_ts;
         if let Err(stop) = env
-            .call(id, state, || ctx.set_min_latest_block_ts(min))
+            .call(id, state, "freshness", || ctx.set_min_latest_block_ts(min))
             .await
         {
             return Outcome::Done(env.stop(Some(ctx), done, stop));
@@ -534,7 +565,7 @@ impl Attempt<'_> {
         let mut first = true;
         loop {
             let outcome = env
-                .call(id, state, || {
+                .call(id, state, "execute", || {
                     crate::testhooks::in_step();
                     ctx.execute_with_status()
                 })
@@ -618,7 +649,10 @@ impl Attempt<'_> {
                 let text = text.clone();
                 if let Some(request) = requests.into_iter().next()
                     && let Err(stop) = env
-                        .call(id, state, move || request.set_error(&text, 0))
+                        .call(id, state, "answer", move || {
+                            crate::testhooks::in_answer();
+                            request.set_error(&text, 0)
+                        })
                         .await
                 {
                     return Outcome::Done(env.stop(Some(ctx), done, stop));
@@ -642,14 +676,20 @@ impl Attempt<'_> {
                 let given = match answer {
                     Ok((body, node, hold)) => {
                         let given = env
-                            .call(id, state, move || request.set_response(&body, node))
+                            .call(id, state, "answer", move || {
+                                crate::testhooks::in_answer();
+                                request.set_response(&body, node)
+                            })
                             .await;
                         drop(hold);
                         given
                     }
                     Err(text) => {
-                        env.call(id, state, move || request.set_error(&text, 0))
-                            .await
+                        env.call(id, state, "answer", move || {
+                            crate::testhooks::in_answer();
+                            request.set_error(&text, 0)
+                        })
+                        .await
                     }
                 };
                 if let Err(stop) = given {

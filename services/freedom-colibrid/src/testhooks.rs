@@ -13,6 +13,11 @@
 //! - `FREEDOM_COLIBRID_TEST_STEP=crash`: inside a request's step, behind
 //!   its marker, the process aborts; `=spin`: the step never returns;
 //!   `=sleep:<ms>`: the step takes that long first.
+//! - `FREEDOM_COLIBRID_TEST_CLASSIFY`: the same inside a request's
+//!   classification, its first call into the C core.
+//! - `FREEDOM_COLIBRID_TEST_ANSWER=crash:<n>`: the process aborts inside
+//!   the n-th answer it gives the C core.
+//! - Each step marker names its call (`"call": "execute"`, and so on).
 //! - `FREEDOM_COLIBRID_TEST_MEMORY_BUDGET=<bytes>` replaces the resident
 //!   memory budget, so a test can make the process recycle.
 //!
@@ -44,9 +49,36 @@ pub fn probe(_thread: &str) {}
 
 /// Inside a request's step, behind its marker: a crash or a spin when the
 /// environment asks for one.
-#[cfg(feature = "testhooks")]
 pub fn in_step() {
-    match std::env::var("FREEDOM_COLIBRID_TEST_STEP").as_deref() {
+    fault("FREEDOM_COLIBRID_TEST_STEP");
+}
+
+/// Inside a request's classification, behind its marker: the same, asked
+/// for by `FREEDOM_COLIBRID_TEST_CLASSIFY`.
+pub fn in_classify() {
+    fault("FREEDOM_COLIBRID_TEST_CLASSIFY");
+}
+
+/// Inside an answer given to the C core, behind its marker:
+/// `FREEDOM_COLIBRID_TEST_ANSWER=crash:<n>` aborts in the process's n-th.
+pub fn in_answer() {
+    #[cfg(feature = "testhooks")]
+    {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static ANSWERS: AtomicU64 = AtomicU64::new(0);
+        let nth = ANSWERS.fetch_add(1, Ordering::Relaxed) + 1;
+        let crash_at = std::env::var("FREEDOM_COLIBRID_TEST_ANSWER")
+            .ok()
+            .and_then(|value| value.strip_prefix("crash:")?.parse::<u64>().ok());
+        if crash_at == Some(nth) {
+            std::process::abort();
+        }
+    }
+}
+
+#[cfg(feature = "testhooks")]
+fn fault(var: &str) {
+    match std::env::var(var).as_deref() {
         Ok("crash") => std::process::abort(),
         Ok("spin") => loop {
             std::thread::sleep(std::time::Duration::from_secs(3600));
@@ -61,7 +93,7 @@ pub fn in_step() {
 }
 
 #[cfg(not(feature = "testhooks"))]
-pub fn in_step() {}
+fn fault(_var: &str) {}
 
 /// The resident memory budget a test sets, if any.
 #[cfg(feature = "testhooks")]

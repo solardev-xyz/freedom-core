@@ -212,8 +212,42 @@ enum Ended {
     DiedInStep,
 }
 
+/// Where request `index` of `case` trapped in the recording (#750), as the
+/// ordinal of the step among those of the request's own contexts: the
+/// first step with no status. The JavaScript client's chain-id check comes
+/// first in the trace, in a context of its own, which the service doesn't
+/// make.
+fn trap_step(case: &Value, index: usize) -> Option<usize> {
+    let request = &case["requests"][index];
+    let method = request["method"].as_str()?;
+    let mut ops = case["trace"]
+        .as_array()?
+        .iter()
+        .skip_while(|op| !(op["op"] == "request" && op["index"] == index))
+        .skip(1)
+        .take_while(|op| op["op"] != "request");
+    let mut contexts = Vec::new();
+    let mut steps = 0;
+    ops.find_map(|op| match op["op"].as_str() {
+        Some("create") if op["method"] == method => {
+            contexts.push(op["ctx"].clone());
+            None
+        }
+        Some("step") if contexts.contains(&op["ctx"]) => {
+            steps += 1;
+            op.get("status").is_none().then_some(steps)
+        }
+        _ => None,
+    })
+}
+
 #[allow(clippy::too_many_lines)]
-fn run_case(case: &Value, warm: &Path, warm_root: &Path) -> Result<(), String> {
+fn run_case(
+    case: &Value,
+    warm: &Path,
+    warm_root: &Path,
+    env: &[(&str, &str)],
+) -> Result<(), String> {
     let id = case["id"].as_str().unwrap();
     let chain = case["chain"].as_u64().unwrap();
     let dirs = Dirs::new(&id.replace(|c: char| !c.is_ascii_alphanumeric(), "_"));
@@ -240,7 +274,7 @@ fn run_case(case: &Value, warm: &Path, warm_root: &Path) -> Result<(), String> {
     // A private session's process has no directory (0014, "Private
     // sessions"): its store is in memory, and nothing reaches the disk.
     let private = id.contains("private");
-    let mut colibrid = Colibrid::serve(chain, (!private).then_some(&dirs));
+    let mut colibrid = Colibrid::serve_with(chain, (!private).then_some(&dirs), env);
     colibrid.hello();
     let mut asks = 0u64;
     let mut died = false;
@@ -260,6 +294,9 @@ fn run_case(case: &Value, warm: &Path, warm_root: &Path) -> Result<(), String> {
             }),
         );
         let mut open_step = false;
+        // The call the open marker is for, and the steps marked so far.
+        let mut open_call = String::new();
+        let mut executes = 0usize;
         let deadline = Instant::now() + REQUEST_WAIT;
         let ended = loop {
             if Instant::now() > deadline {
@@ -291,7 +328,14 @@ fn run_case(case: &Value, warm: &Path, warm_root: &Path) -> Result<(), String> {
                         return Err(format!("{id}: a marker for another request: {message}"));
                     }
                     match (event, open_step) {
-                        ("colibri.step", false) => open_step = true,
+                        ("colibri.step", false) => {
+                            open_step = true;
+                            open_call = message["data"]["call"]
+                                .as_str()
+                                .unwrap_or_default()
+                                .to_owned();
+                            executes += usize::from(open_call == "execute");
+                        }
                         ("colibri.stepped", true) => open_step = false,
                         _ => return Err(format!("{id}: marker out of order: {message}")),
                     }
@@ -347,16 +391,16 @@ fn run_case(case: &Value, warm: &Path, warm_root: &Path) -> Result<(), String> {
         let reply = match ended {
             Ended::DiedInStep => {
                 // #750: a crash is an allowed end, never a result, and only
-                // where the recording trapped: a step with no status, after
-                // every fetch the recording made before it.
-                let trapped = case["trace"]
-                    .as_array()
-                    .unwrap()
-                    .iter()
-                    .any(|op| op["op"] == "step" && op.get("status").is_none());
-                if !trapped || asks as usize != recorded.requests.len() {
+                // where the recording trapped: in the step with no status,
+                // the same step of the request's contexts, after every
+                // fetch the recording made before it.
+                let trap = trap_step(case, index);
+                if open_call != "execute"
+                    || trap != Some(executes)
+                    || asks as usize != recorded.requests.len()
+                {
                     return Err(format!(
-                        "{id}: died in a step (recorded trap: {trapped}, fetches {asks} of {}); stderr: {}",
+                        "{id}: died in a step ({open_call} {executes}; recorded trap: step {trap:?}; fetches {asks} of {}); stderr: {}",
                         recorded.requests.len(),
                         colibrid.stderr()
                     ));
@@ -507,11 +551,36 @@ fn every_request_case_through_the_binary() {
             }
         }
         ran += 1;
-        match run_case(case, &warm.root, &warm.root) {
+        match run_case(case, &warm.root, &warm.root, &[]) {
             Ok(()) => eprintln!("ok {id}"),
             Err(e) => {
                 eprintln!("FAILED {e}");
                 failures.push(id.to_owned());
+            }
+        }
+    }
+    // The trap cases again, each dying while it applies its final answer,
+    // just before the step that trapped: a death there is refused.
+    for case in &cases {
+        let id = case["id"].as_str().unwrap();
+        let trapped = (0..case["requests"].as_array().unwrap().len())
+            .any(|index| trap_step(case, index).is_some());
+        if !trapped || (!filter.is_empty() && !filter.iter().any(|f| f == id)) {
+            continue;
+        }
+        let last = Recorded::of(case).requests.len().to_string();
+        let crash = format!("crash:{last}");
+        ran += 1;
+        match run_case(
+            case,
+            &warm.root,
+            &warm.root,
+            &[("FREEDOM_COLIBRID_TEST_ANSWER", &crash)],
+        ) {
+            Err(e) if e.contains("died in a step (answer") => eprintln!("ok {id}, refused: {e}"),
+            other => {
+                eprintln!("FAILED {id}: a death in its final answer gave {other:?}");
+                failures.push(format!("{id} (final answer)"));
             }
         }
     }
