@@ -1,0 +1,16 @@
+{
+  "about": "The C and C++ sources of freedom-colibrid's native Colibri build, by tree, with their licenses (design 0014, Licenses). scripts/colibri-license-gate.py fails on a tree in the build that isn't listed here, on a compiled source or listed header whose SPDX identifier isn't in its tree's `spdx`, on a third party's tree whose license file isn't its `license`, and on PolyForm anywhere except `polyform_mentions`.",
+  "components": [
+    { "tree": "colibri", "name": "Colibri Stateless", "version": "3.0.3 (solardev-xyz/colibri-stateless, freedom/pinned-3.0.3)", "spdx": ["MIT"], "note": "src/server/ is PolyForm Noncommercial 1.0.0 or commercial; the build compiles and includes none of it, nor src/chains/eth/server/ or the prover" },
+    { "tree": "generated", "name": "Colibri's CMake-generated headers (verifiers.h, the trusted setup)", "version": "from Colibri's tree", "spdx": ["MIT"] },
+    { "tree": "libs/crypto", "name": "libs/crypto (trezor-crypto, with mbed TLS's RIPEMD-160)", "version": "in Colibri's tree", "spdx": ["MIT", "Apache-2.0"], "note": "MIT, except ripemd160.c, Apache-2.0 (Copyright ARM Limited)" },
+    { "tree": "libs/evmone", "name": "Colibri's evmone wrapper", "version": "in Colibri's tree", "spdx": ["MIT"] },
+    { "tree": "libs/intx", "name": "Colibri's intx wrapper", "version": "in Colibri's tree", "spdx": ["MIT"] },
+    { "tree": "_deps/blst-src", "name": "blst", "version": "v0.3.13 (52cc60d7)", "spdx": ["Apache-2.0"], "license": "Apache-2.0", "note": "compiled by its own build script, outside CMake's compile commands: the gate checks its tree's LICENSE" },
+    { "tree": "_deps/evmone_external-src", "name": "evmone", "version": "v0.23.0 (2184b244)", "spdx": ["Apache-2.0"], "license": "Apache-2.0", "note": "linked because 3.0.3 doesn't build without the call verifier (COL-2); no served operation reaches it" },
+    { "tree": "_deps/intx-src", "name": "intx", "version": "v0.15.0 (0306b495)", "spdx": ["Apache-2.0"], "license": "Apache-2.0", "note": "evmone's" }
+  ],
+  "polyform_mentions": [
+    { "path": "src/util/version.c", "why": "MIT; c4_print_version prints the server's license text, and only the server and the CLIs call it (0014, Licenses)" }
+  ]
+}

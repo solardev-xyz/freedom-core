@@ -270,7 +270,7 @@ The service keeps the error contract of freedom-browser #1080 and #1081 (#1059, 
 
 - **One directory per chain,** `<userData>/colibri/<id>/`, a normal persistent process's only grant. Today's flat files in `<userData>/colibri/` are left alone; they are a cache, and each chain bootstraps once (deviation `storage-per-chain`). This also keeps the native build from reading the WASM build's files, whose BLS keys are stored in blst's in-memory form (`BLS_DESERIALIZE`, `sync_committee_state.c:632–646`).
 - **Writes** are a temporary file, fsync and rename, with stale temporary files swept at start. Today's `createDiskStorage` writes a temporary file and renames it, and sweeps at start, but doesn't fsync (`colibri-worker.js:84–109`). The fsync is new.
-- **Bounds:** a key is `[A-Za-z0-9_]{1,100}`; a value at most 1 MiB (a sync committee is 49,152 bytes); a directory at most 64 MiB. A write past a bound fails, and the C core sees a failed write.
+- **Bounds:** a key is `[A-Za-z0-9_]{1,100}`; a value at most 4 MiB (a sync committee is 49,152 bytes; the PAP transaction cache, `tx_cache_<chain>`, reached 1,857,584 in the vectors); a directory at most 64 MiB. A write past a bound fails, and the C core sees a failed write.
 - **The lock:** fc-service's gate, keyed by the chain's directory, so a replacement never writes while its predecessor still can. Today a draining worker and its replacement share the store.
 - **What it holds:** sync state (`states_<chain>`, `sync_<chain>_<period>`), verified headers and the transaction index.
   - The C core would also write contract code by hash and each called contract's proven storage (F-10). Only a call writes those, and the service serves none (F-11).
@@ -284,7 +284,7 @@ The service keeps the error contract of freedom-browser #1080 and #1081 (#1059, 
 Private windows get an in-memory store per private session, as freedom-browser #1070 (on `main`) and #1071 (merged into `integration/rust-core`) give them for the WASM workers (#1058, F-10).
 - **The session** runs from the first private window opening to the last one closing (`private-log-context.js`, `private-windows.js`).
 - **A private process per chain:** a read for a private session goes to that chain's private process ([Spawn](#spawn)). The session's private windows share it, as they share #1070's private worker.
-- **Its store is in memory.** It has the directory store's bounds (the key pattern, 1 MiB a value, 64 MiB in all), counted in the process's resident memory. Nothing it holds reaches the disk, and a recycle or a crash starts its successor cold.
+- **Its store is in memory.** It has the directory store's bounds (the key pattern, 4 MiB a value, 64 MiB in all), counted in the process's resident memory. Nothing it holds reaches the disk, and a recycle or a crash starts its successor cold.
 - **Fail closed:** the service keeps its store in memory unless `--data-dir` names a directory, as #1070's worker gets memory for anything but a non-empty path. Confinement grants it no file ([Confinement](#confinement)).
 - **Which reads are private** is main's answer, as #1071 gives it on `integration/rust-core`:
   - `service-client.js` marks each of main's requests to the core whose async context is private, with its private session. Each `shell.verified` names the requests it serves (`serves`, freedom-core #285, [0004](0004-naming-sessions.md#verified-operations)), and the executor runs the Colibri read in their private session. #1071 inferred it instead from every private request still waiting for the core (`forPrivate`), which could refuse a normal window's read while a private one waited;
@@ -341,6 +341,7 @@ The service serves no call ([Calls and ENS](#calls-and-ens)), so no operation it
 - **The option:** upstream's `ETH_CALL` (`src/chains/eth/CMakeLists.txt:27`, `:144–156`) leaves out `verify_call.c`, `call_ctx.c`, `eth_call_account.c`, the simulation sources and the precompiles. evmone's wrapper goes with them, since only `ETH_CALL` links it.
 - **Untested:** 3.0.3 isn't known to build that way. `eth_account.c`, which the account reads use, includes `call_ctx.h` and `eth_call_account.h`.
 - **COL-2 tries `ETH_CALL=OFF`.** If it builds and every trace still matches, the build takes it, and evmone leaves the build. If not, the call code stays in the build, unreached by any served operation.
+- **Tried (COL-2): it doesn't build.** `eth_account.c` includes `call_ctx.h`, which includes evmone's `evmone_c_wrapper.h`, so 3.0.3 doesn't compile without the call verifier. The call code and evmone stay in the build.
 
 Neither build option depends on it.
 
@@ -380,11 +381,21 @@ Both options build with `HTTP_SERVER` off and, through the [verifier-only build]
 
 `src/util/version.c`, which is MIT, prints `License: PolyForm Noncommercial 1.0.0` from `c4_print_version`, which only the server and the CLIs call. The service never calls it.
 
-The notices file gains blst, and evmone and intx while the build still links them ([The call verifier](#the-call-verifier)), all Apache-2.0, with `libs/crypto` (MIT) and Colibri (MIT). `CHAIN_OP` is off: Freedom verifies no OP chain, and zstd stays out.
+The notices file gains blst, and evmone and intx while the build still links them ([The call verifier](#the-call-verifier)), all Apache-2.0, with `libs/crypto` (MIT, but for mbed TLS's RIPEMD-160, `ripemd160.c`, Apache-2.0), Colibri's evmone and intx wrappers (MIT) and Colibri (MIT). The notices list each tree with the licenses its files may carry (`services/freedom-colibrid/notices/c-sources.json`), and the gate checks each file against its tree's entry. `CHAIN_OP` is off: Freedom verifies no OP chain, and zstd stays out.
 
 ### Decided
 
 **Option A** (Q20, the user, 2026-11-22). `freedom-colibrid` is its own Cargo workspace (`services/freedom-colibrid`), as `freedom-ipfsd` is: its own lockfile, `cargo deny` policy and notices, sharing `fc-protocol` and `fc-service` by path. Its release follows freedom-ipfsd's in `RELEASING.md`.
+
+### The pinned commit (COL-2)
+
+- **3.0.3, not `dev`.** The four upstream PRs (corpus-core/colibri-stateless #439–#442) are against `dev` (3.2.1), which differs from 3.0.3 in 291 files. This design, COL-1's traces and the browser's package are 3.0.3's (version 196611), and a 3.2.1 build can't match those traces. So `freedom-colibrid` pins the fork's `freedom/pinned-3.0.3`: tag `v3.0.3` with the four PRs backported. `colibri_common.c`'s `#ifdef PROVER` guards are written against 3.0.3's code there, since `dev` reworked the local prover after 3.0.3. Moving to a later release is a step of its own: the browser's package and COL-1's reference move to it, the traces are recorded again, and the pin follows.
+- **Four more changes in the pin,** each also proposed upstream:
+  - **A fixed clock** (`c4_set_fixed_time`): the PAP transaction cache reads `time(NULL)` for its age and stores it with each pending hash (the freshness bound comes from main), so a replay at a later instant gets other requests and other stored bytes. The replay fixes it at each request's recorded instant, as the reference's harness fixed `Date.now`; the service leaves the system clock.
+  - **A step's status text with the step** (`execute_with_status`, on #441): the replay compares the C core's own text and still answers requests without `unsafe`.
+  - **A proof decoder in the C API** (`c4_decode_proof`): the checkpoint path decodes the proof it verifies, which only the WASM binding could. It checks the bytes as an SSZ object of the proof's type before encoding them, as the verifier checks a proof before reading it; the WASM binding's `c4w_decode_proof` encodes without that check.
+  - **The results of nested calls released** (#444): a call made inside a call verified by `eth_call` left its result off the list the top-level call frees, a leak the sanitizer replay found. The pin adopts the child's list, and carries the upstream regression test (a call within a call within a call).
+- **The replay** (`services/freedom-colibrid/tests/replay.rs`): each COL-1 case in a process of its own, as the reference loaded a fresh WASM instance for each (the C core keeps caches and its clock in process globals); the same calls with the same inputs; each status text compared byte for byte once its request pointers are numbered as the recorder numbered them (the native API writes them as strings, the WASM build as numbers); each method type and decode; the store operations each call makes, in order; and the final store. A warm case starts from the bytes its source case's replay left. Bodies come from the fixtures, a flipped one rebuilt from its offset, a scripted one from its text, which COL-1's generator now records.
 
 ## The protocol
 
@@ -504,7 +515,7 @@ The service doesn't serve `eth_call` or `eth_estimateGas`, at any block. So it s
 
 **What main concludes:**
 - **A death inside a step**, after a `colibri.step` and before its `colibri.stepped`, names that request as the culprit. Main reads the pipe to its end first. Every other open request is a bystander.
-- **A kill** 1 s past a request's deadline names that step's request, the same way.
+- **A kill** 2 s past a request's deadline names that step's request, the same way.
 - **A death outside any step** names nobody. That covers a crash between calls, in the service's own code, after a step's clearing event, or in a process-wide call.
   - Every open request is a bystander, sent once more to the next process.
   - No outcome carries `fault`.
@@ -531,7 +542,7 @@ The service doesn't serve `eth_call` or `eth_estimateGas`, at any block. So it s
 
 - **A cancel** of a request that waits on fetches cancels them, frees its context and replies `cancelled`. A request inside a step is cancelled when the step returns.
 - **A request past its deadline** that waits on fetches is cancelled by main. Today it waits up to 60 s more (deviation `colibri-deadline`).
-- **A step still running 1 s past its request's deadline:** main kills the process. That request is the culprit. 1 s is today's `STUCK_PROBE_MS`.
+- **A step still running 2 s past its request's deadline:** main kills the process. That request is the culprit. Today's `STUCK_PROBE_MS` is 1 s; a native step took up to 875 ms over the vectors, and the allowance is twice that, rounded up ([Measured](#measured-col-2)).
 - **A request with no caller deadline** gets today's 60 s (`DEFAULT_DEADLINE_MS`). Today that is ENS through ethers, which #1082 and #1083 remove.
 - **Physical completion** (0005): main's promise settles on the service's reply or the process's death, never earlier, so the core's slots are held as today.
 
@@ -745,7 +756,7 @@ Anything those settings would add is refused: the `include_code`, `logs_complete
 
 ## Budgets
 
-The numbers below hold until COL-2 measures the native build. It replaces each with twice the peak it sees over the vectors, or keeps it, whichever is larger. (The ENS e2e suite no longer reaches Colibri after #1082.)
+COL-2 measured the native build over the vectors and replaced each number below with twice the peak it saw, or kept it, whichever was larger ([Measured](#measured-col-2)). Two changed: a stored value may be 4 MiB, not 1 MiB, and a step may run 2 s past its request's deadline, not 1 s. (The ENS e2e suite no longer reaches Colibri after #1082.)
 
 | What | Persistent process | Checkpoint process |
 |---|---|---|
@@ -753,9 +764,9 @@ The numbers below hold until COL-2 measures the native build. It replaces each w
 | fetches open | 64 per process; 1,024 per request in all | the same |
 | a fetched body | the variant's maximum ([The fetch contract](#the-fetch-contract)), 16 MiB at most | 4 MiB (the proof), 64 KiB otherwise |
 | bodies in flight | 32 MiB: the head's exact `bytes` reserved before credit | 8 MiB, the same way |
-| store | 1 MiB a value, 64 MiB a directory | memory, counted in resident memory |
+| store | 4 MiB a value, 64 MiB a directory | memory, counted in resident memory |
 | resident memory | 256 MiB, then a [recycle](#crashes-overruns-and-restarts) | 128 MiB, then the check fails |
-| time | a step 1 s past its request's deadline | 90 s in all (today's) |
+| time | a step 2 s past its request's deadline | 90 s in all (today's) |
 
 A private process has the persistent process's budgets. Its store is in memory, with the same bounds, and counts in its resident memory ([Private sessions](#private-sessions)).
 
@@ -771,6 +782,26 @@ A private process has the persistent process's budgets. Its store is in memory, 
 
 - **Resident memory** is read by the service after each step (`/proc/self/statm`, `task_info` on macOS). It can't bound the C core's allocations as they happen. A hard limit by the OS (`RLIMIT_AS`, or a Windows job memory limit) is [0007's open question 9](0007-ipfs-service.md#open-questions), "An OS memory limit", and its answer applies to this service too.
 - **A reply over 0001's message cap** is `too_large`, as 0005 says.
+
+### Measured (COL-2)
+
+The replay (`services/freedom-colibrid/tests/replay.rs`) reports each passing case's peaks; the three #750 cases that die at their trap step report none. Resident memory is the replay child's peak (`VmHWM`, the C core with the Rust harness around it), read on Linux only. Times vary from run to run; the table has the highest that #467's CI runs saw on GitHub's hosted runners. The fetch figures are the recorded traces'.
+
+| What | Peak over the vectors | Twice | Budget |
+|---|---|---|---|
+| a step's time | 875 ms (`1-block-latest-full`, Windows; macOS 537 ms, Linux 188 ms) | 1.75 s | **2 s** past the request's deadline, was 1 s |
+| resident memory, persistent | 30.3 MiB (`1-receipt`) | 60.7 MiB | 256 MiB, kept |
+| resident memory, checkpoint | 17.8 MiB (`checkpoint-mainnet`) | 35.5 MiB | 128 MiB, kept |
+| a checkpoint step | 799 ms (`checkpoint-mainnet-stale`, Windows; macOS 43 ms, Linux 22 ms) | 1.6 s | 90 s for the whole check, kept |
+| a stored value | 1,857,584 bytes (`tx_cache_1`, `1-tx-incremental`) | 3.5 MiB | **4 MiB**, was 1 MiB |
+| a directory | 1,906,741 bytes (`1-tx-incremental`) | 3.6 MiB | 64 MiB, kept |
+| a fetched body | 1,842,112 bytes (`1-tx`) | 3.5 MiB | the variant's maximum, kept |
+| bodies in flight | 1,842,112 bytes, one step's | 3.5 MiB | 32 MiB, kept |
+| the checkpoint proof | 237,178 bytes (`checkpoint-mainnet-v2`) | 463 KiB | 4 MiB, kept |
+| fetches, one request | 34 (`1-ur-resolve`) | 68 | 1,024, kept |
+| fetches, one step | 3 (`1-ur-resolve`) | 6 | 64, kept |
+
+Open requests aren't measured: each trace runs one request at a time, and the bound is main's (0004's 8 per verifier).
 
 ## Crashes, overruns and restarts
 
@@ -832,6 +863,7 @@ COL-1's recording (`vectors/colibri.json`, captured 2026-11-22) differs from thi
 | `colibri-processes` | a worker per chain, with no bound on their number | at most 3 persistent and 2 checkpoint processes, idle ones retired, `Colibri service busy` at the limit |
 | `fetch-error-text` | a fetch error names the URL and payload, and carries the whole error body | URLs as `<url>`, the payload kept as `fetch_from_servers` writes it ([The rest](#the-rest)), at most 2,000 units. The cut is of the fetch text, before the C core's and `createError`'s prefixes, so it never shows in the adapter message, which is cut to 2,000 units after them |
 | `no-initial-chain-id` | a local `eth_chainId` context on each client's first request | none |
+| `checked-decode` | the checkpoint check decodes the proof with `c4w_decode_proof`, which walks the bytes unchecked (corpus-core/colibri-stateless#443): a legacy-format proof decodes into a partial object, which the check then refuses (`CHECKPOINT_UNAVAILABLE`) | `c4_decode_proof` checks the proof as an object of its type first and decodes nothing; the same `CHECKPOINT_UNAVAILABLE` (COL-2) |
 | `storage-per-chain` | one flat directory for every chain; unchecked keys; no size bound | a directory per chain, checked keys, bounds; at most 6 directories. A private session's store is in memory, as #1071 has it |
 
 ## Migration (Q19)
