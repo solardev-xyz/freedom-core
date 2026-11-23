@@ -35,7 +35,7 @@ resolver = "3"
 # traces were recorded with. No default features: no HTTP client (tokio,
 # reqwest), no download of a prebuilt archive, no prover (PROVER=OFF), no
 # OP-Stack.
-colibri-stateless = { git = "https://github.com/solardev-xyz/colibri-stateless", rev = "587a4a5cd8525297b5870a8f7a9b90a212a80906", default-features = false }
+colibri-stateless = { git = "https://github.com/solardev-xyz/colibri-stateless", rev = "c0c13c469949dd4915f52cfebc2ce7288cd58f9b", default-features = false }
 
 [dev-dependencies]
 # tests/replay.rs reads vectors/colibri.json and the fixture index.
