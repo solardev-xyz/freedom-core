@@ -74,6 +74,7 @@ debug = false
 # multi-config generator (Visual Studio) builds that one: Debug in a dev
 # build, whose objects want the debug C runtime (/MDd) that Rust never links.
 # Optimised and without debug info, the inferred configuration is Release on
-# every platform, the one the build script configures.
+# every platform, the one the build script configures
+# (corpus-core/colibri-stateless#445).
 [profile.dev.package.colibri-stateless]
 opt-level = 3
