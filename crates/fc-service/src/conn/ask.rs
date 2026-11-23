@@ -23,8 +23,10 @@
 //!   `body_stream_error`; any other is the protocol error `abort_code`.
 //! - **Room reserved at the head** ([`Connection::ask_reserving`], 0014's
 //!   bodies budget): the service's hook sees main's head before any byte
-//!   of its body is read, since the reader handles frames in order, and
-//!   reserves room for the body's exact length or refuses it. A refused
+//!   of its body is read, since the reader decodes one frame at a time and
+//!   handles each before it decodes the next
+//!   ([`fc_protocol::frame::Decoder::push_one`]), and reserves room for
+//!   the body's exact length or refuses it. A refused
 //!   head is cancelled at once, so none of its body is held or credited
 //!   ([`AskFailed::Refused`]). A reserved body is held to its length
 //!   ([`fc_protocol::stream::Duplex::answered_sized`]): one that breaks it,
@@ -761,8 +763,9 @@ impl Reader<'_> {
     /// Request `id`'s hook, on main's head that opens its body
     /// ([`Connection::ask_reserving`]): run outside the lock, as a service
     /// callback, unless the service has let go of the request, its deadline
-    /// has passed, or the connection has ended. The reader reads nothing
-    /// meanwhile, so nothing of the body is read before it returns.
+    /// has passed, or the connection has ended. The reader decodes one
+    /// frame at a time and nothing meanwhile, so nothing of the body has
+    /// been decoded, or allocated, before it returns.
     fn reserve(&self, id: u64, result: &RawValue) -> Option<Result<Reserved, ErrorBody>> {
         let hook = {
             let mut state = self.link.lock();
@@ -1160,6 +1163,57 @@ mod tests {
         assert_eq!(room.load(Ordering::SeqCst), 0);
         drop((body, asked));
         assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    /// Review of #466, round 1: main's head and its body's first frame in
+    /// one read from stdin. The reader decodes one frame at a time, so the
+    /// hook runs when the decoder has taken the head and nothing past it:
+    /// none of the body's payload is read or allocated unreserved. A
+    /// refused head's body is then dropped as it is decoded.
+    #[test]
+    fn the_hook_runs_before_any_of_the_same_read_is_decoded() {
+        let (options, link, conn) = linked();
+        let service = Idle;
+        let mut reader = Reader::new(&link, &conn, &service, &options);
+        reader.hello_seen = true;
+        let mut input = Vec::new();
+        frame::encode_json(head(1, 1 << 20).payload.as_slice(), &mut input).unwrap();
+        let at_head = input.len();
+        StreamFrame::Data {
+            id: 1,
+            bytes: &[7; 64 << 10],
+        }
+        .encode(&mut input)
+        .unwrap();
+        let decoded = Arc::new(AtomicUsize::new(usize::MAX));
+        let (seen, probe) = (link.clone(), decoded.clone());
+        let mut asked = conn
+            .ask_reserving("shell.t", &json!({}), None, move |_: &RawValue| {
+                probe.store(seen.decoded.load(Ordering::SeqCst), Ordering::SeqCst);
+                Err(ErrorBody::new(ErrorCode::Busy, "Colibri fetch busy"))
+            })
+            .unwrap();
+        {
+            let mut state = link.lock();
+            state.input_bytes += input.len();
+            state.input.push_back(input.clone());
+            state.input_end = true;
+        }
+        assert_eq!(reader.read(), Err(End::Eof));
+        assert_eq!(decoded.load(Ordering::SeqCst), at_head);
+        assert_eq!(link.decoded.load(Ordering::SeqCst), input.len());
+        assert!(matches!(
+            poll(&mut asked),
+            Poll::Ready(Err(AskFailed::Refused(_)))
+        ));
+        // The body's frame was dropped as it was decoded: its stream
+        // retires until main's terminal, and nothing is owed for it.
+        let state = link.lock();
+        assert_eq!(
+            state.streams.inbound().info(1).map(|info| info.state),
+            Some(InboundState::Retiring)
+        );
+        assert_eq!(state.streams.owed(), 0);
     }
 
     /// A head the hook refuses (0014: `busy`) is cancelled as it is read,
