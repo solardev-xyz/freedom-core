@@ -9,6 +9,7 @@
 use std::collections::VecDeque;
 use std::future::Future;
 use std::io::{Read, Write};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver as Channel};
 use std::sync::{Arc, Condvar, Mutex};
 use std::task::{Context, Poll, Wake};
@@ -19,7 +20,8 @@ use fc_protocol::frame::{Decoder, Frame, KIND_JSON, Kinds};
 use fc_protocol::stream::{Abort, AbortCode, Side, StreamFrame, WINDOW};
 use fc_service::Exit;
 use fc_service::conn::{
-    self, AskFailed, Asked, Body, BodyError, Connection, End, Hello, Options, Request, Service,
+    self, AskFailed, Asked, Body, BodyError, Connection, End, Hello, Hold, Options, Request,
+    Reserved, Service,
 };
 use serde_json::{Value, json};
 
@@ -50,6 +52,7 @@ fn pattern(from: usize, len: usize) -> Vec<u8> {
 fn failed(failed: &AskFailed) -> Value {
     match failed {
         AskFailed::Error(error) => json!({ "error": error.code }),
+        AskFailed::Refused(error) => json!({ "refused": error.code }),
         AskFailed::Deadline => json!("deadline"),
         AskFailed::Closed => json!("closed"),
     }
@@ -67,6 +70,9 @@ fn read_all(body: &mut Body) -> Value {
             }
             Ok(None) => break json!("end"),
             Err(BodyError::Aborted(abort)) => break json!({ "aborted": abort.code.as_str() }),
+            Err(BodyError::Mismatch { declared, received }) => {
+                break json!({ "mismatch": [declared, received] });
+            }
             Err(BodyError::Closed) => break json!("closed"),
         }
     };
@@ -75,8 +81,20 @@ fn read_all(body: &mut Body) -> Value {
     json!({ "len": got.len(), "pattern": got == pattern(0, got.len()), "ended": ended })
 }
 
+/// Room reserved from the toy's budget, given back when dropped.
+struct Room(Arc<AtomicU64>, u64);
+
+impl Drop for Room {
+    fn drop(&mut self) {
+        self.0.fetch_sub(self.1, Ordering::SeqCst);
+    }
+}
+
 #[derive(Default)]
 struct Toy {
+    /// The bodies' room reserved and not given back (0014's bodies
+    /// budget).
+    room: Arc<AtomicU64>,
     /// Requests and bodies held unpolled.
     asked: Mutex<Vec<Asked>>,
     bodies: Arc<Mutex<Vec<Body>>>,
@@ -104,13 +122,41 @@ impl Service for Toy {
             // with main's reply, reading a body to its end; "hold" keeps a
             // body unread; "first" reads its first chunk and drops it;
             // "drop" drops the request at once; "unpolled" keeps it
-            // without polling it.
+            // without polling it. `reserve`: "bytes" reserves the head's
+            // `bytes` from the toy's room before any of the body is read,
+            // and holds the body to it; "refuse" refuses the head `busy`.
             "t.ask" => {
                 let deadline = params["deadline_ms"]
                     .as_u64()
                     .map(|ms| Instant::now() + Duration::from_millis(ms));
                 let method = params["method"].as_str().unwrap_or("shell.t");
-                let asked = match conn.ask(method, &params["params"], deadline) {
+                let room = self.room.clone();
+                let asked = match params["reserve"].as_str() {
+                    Some("bytes") => conn.ask_reserving(
+                        method,
+                        &params["params"],
+                        deadline,
+                        move |result: &serde_json::value::RawValue| {
+                            let head: Value = serde_json::from_str(result.get()).unwrap();
+                            let len = head["bytes"].as_u64().unwrap();
+                            room.fetch_add(len, Ordering::SeqCst);
+                            Ok(Reserved {
+                                len,
+                                hold: Hold::new(Room(room, len)),
+                            })
+                        },
+                    ),
+                    Some("refuse") => conn.ask_reserving(
+                        method,
+                        &params["params"],
+                        deadline,
+                        |_: &serde_json::value::RawValue| {
+                            Err(ErrorBody::new(ErrorCode::Busy, "Colibri fetch busy"))
+                        },
+                    ),
+                    _ => conn.ask(method, &params["params"], deadline),
+                };
+                let asked = match asked {
                     Ok(asked) => asked,
                     Err(error) => {
                         conn.reply(id, &json!({ "refused": format!("{error:?}") }))
@@ -148,6 +194,11 @@ impl Service for Toy {
                     };
                     let result: Value = serde_json::from_str(answer.result.get()).unwrap();
                     let mut outcome = json!({ "asked": asked_id, "result": result });
+                    // The room reserved for the body, kept while it is read.
+                    let hold = answer.hold;
+                    if hold.is_some() {
+                        outcome["reserved"] = json!(true);
+                    }
                     if let Some(mut body) = answer.body {
                         assert_eq!(body.id(), asked_id);
                         match mode.as_str() {
@@ -163,12 +214,19 @@ impl Service for Toy {
                             _ => outcome["body"] = read_all(&mut body),
                         }
                     }
+                    drop(hold);
                     outcomes.lock().unwrap().push(outcome.clone());
                     let _ = conn.reply(id, &outcome);
                 });
             }
-            // How many of its requests the connection holds.
-            "t.asks" => conn.reply(id, &json!({ "asks": conn.asks() })).unwrap(),
+            // How many of its requests the connection holds, and the room
+            // still reserved for bodies.
+            "t.asks" => conn
+                .reply(
+                    id,
+                    &json!({ "asks": conn.asks(), "room": self.room.load(Ordering::SeqCst) }),
+                )
+                .unwrap(),
             // An event waited for until written, within `wait_ms`: this
             // request's reply says how that went. A marker that may still
             // arrive is cleared first, ahead of the reply, as 0014's step
@@ -456,6 +514,14 @@ impl Main {
         let reply = self.message();
         assert_eq!(reply["id"], id, "{reply}");
         reply["result"]["asks"].clone()
+    }
+
+    /// The room the toy still has reserved for bodies.
+    fn room(&mut self, id: u64) -> Value {
+        self.request(id, "t.asks", Value::Null);
+        let reply = self.message();
+        assert_eq!(reply["id"], id, "{reply}");
+        reply["result"]["room"].clone()
     }
 }
 
@@ -820,6 +886,9 @@ fn the_connection_holds_at_most_its_requests() {
     assert_eq!(main.exit(), Exit::Ok);
 }
 
+/// freedom-ipfsd's and freedom-radicled's connections (two-way off): the
+/// service asks nothing, and main's data, end and abort are refused at
+/// their header, a response as unsolicited, as 0007 has them.
 #[test]
 fn a_one_way_connection_takes_none_of_it() {
     let mut options = options();
@@ -827,10 +896,181 @@ fn a_one_way_connection_takes_none_of_it() {
     let mut main = start(options);
     main.request(2, "t.ask", json!({ "params": {} }));
     assert_eq!(main.message()["result"], json!({ "refused": "OneWay" }));
+    main.request(
+        3,
+        "t.ask",
+        json!({ "params": {}, "reserve": "bytes", "mode": "unpolled" }),
+    );
+    assert_eq!(main.message()["result"], json!({ "refused": "OneWay" }));
     // Main's data is refused at its header, as 0007 has it.
     main.data(1, 0, 1);
     assert_eq!(main.exit(), Exit::Protocol);
     assert_eq!(main.ends(), [End::Protocol("stream_direction")]);
+    for (category, script) in [
+        (
+            "stream_direction",
+            Box::new(|main: &mut Main| main.stream(StreamFrame::End { id: 1 }))
+                as Box<dyn Fn(&mut Main)>,
+        ),
+        (
+            "stream_direction",
+            Box::new(|main: &mut Main| {
+                main.stream(StreamFrame::Abort {
+                    id: 1,
+                    abort: Abort::cancelled(),
+                });
+            }),
+        ),
+        (
+            "unsolicited_response",
+            Box::new(|main: &mut Main| main.respond(1, json!({ "body": true }))),
+        ),
+    ] {
+        let mut options = self::options();
+        options.two_way = false;
+        let mut main = start(options);
+        script(&mut main);
+        assert_eq!(main.exit(), Exit::Protocol, "{category}");
+        assert_eq!(main.ends(), [End::Protocol(category)]);
+    }
+}
+
+/// Design 0014, "Requests the service makes": the service reserves the
+/// head's `bytes` before any of the body is read, and the body comes under
+/// credit, held to that length; the room goes back once the body is done.
+#[test]
+fn a_body_is_reserved_at_its_head_and_held_to_its_length() {
+    let mut main = start(options());
+    let len = 300_000;
+    main.request(2, "t.ask", json!({ "params": {}, "reserve": "bytes" }));
+    assert_eq!(main.message()["id"], 1);
+    main.respond(1, json!({ "node": 0, "bytes": len, "body": true }));
+    let mut sent = 0;
+    while sent < len {
+        let credited = main.credit.get(&1).copied().unwrap_or(0) as usize;
+        let room = (credited + WINDOW).saturating_sub(sent).min(len - sent);
+        if room == 0 {
+            match StreamFrame::from_frame(&main.frame().expect("credit")).unwrap() {
+                StreamFrame::Credit { id: 1, bytes } => {
+                    *main.credit.entry(1).or_default() += u64::from(bytes);
+                }
+                other => panic!("{other:?}"),
+            }
+            continue;
+        }
+        main.data(1, sent, room);
+        sent += room;
+    }
+    main.stream(StreamFrame::End { id: 1 });
+    let reply = main.message();
+    assert_eq!(
+        reply["result"],
+        json!({ "asked": 1, "result": { "node": 0, "bytes": len, "body": true }, "reserved": true,
+            "body": { "len": len, "pattern": true, "ended": "end" } }),
+        "{reply}"
+    );
+    assert_eq!((main.asks(3), main.room(4)), (json!(0), json!(0)));
+    main.close();
+    assert_eq!(main.exit(), Exit::Ok);
+}
+
+/// A head the service can't reserve (0014: `busy`) is cancelled as it is
+/// read: none of its body is held or credited, and the connection goes on.
+#[test]
+fn a_head_the_service_cannot_reserve_is_cancelled_at_once() {
+    let mut main = start(options());
+    main.request(2, "t.ask", json!({ "params": {}, "reserve": "refuse" }));
+    assert_eq!(main.message()["id"], 1);
+    main.respond(1, json!({ "node": 0, "bytes": 1 << 20, "body": true }));
+    // What main sent before it read the cancel is dropped.
+    main.data(1, 0, WINDOW);
+    let mut seen = vec![main.message(), main.message()];
+    seen.sort_by_key(|m| m["type"] == "response");
+    assert_eq!(seen[0], json!({ "type": "cancel", "id": 1 }), "{seen:?}");
+    assert_eq!(
+        seen[1]["result"],
+        json!({ "asked": 1, "failed": { "refused": "busy" } })
+    );
+    main.stream(StreamFrame::Abort {
+        id: 1,
+        abort: Abort::cancelled(),
+    });
+    assert_eq!(main.asks(3), 0);
+    assert_eq!(main.credit.get(&1), None);
+    main.request(4, "t.echo", json!(4));
+    assert_eq!(main.message()["result"]["echo"], 4);
+    main.close();
+    assert_eq!(main.exit(), Exit::Ok);
+}
+
+/// A body longer than its head's `bytes` fails alone (0014: `Colibri body
+/// length mismatch`): main gets `cancel`, and another body, credit and
+/// control frames go on.
+#[test]
+fn a_body_longer_than_its_head_fails_alone() {
+    let mut main = start(options());
+    main.request(2, "t.ask", json!({ "params": {}, "reserve": "bytes" }));
+    assert_eq!(main.message()["id"], 1);
+    main.request(3, "t.ask", json!({ "params": {}, "reserve": "bytes" }));
+    assert_eq!(main.message()["id"], 2);
+    main.respond(1, json!({ "node": 0, "bytes": 100, "body": true }));
+    main.respond(2, json!({ "node": 1, "bytes": 1000, "body": true }));
+    main.data(1, 0, 60);
+    main.data(2, 0, 500);
+    main.data(1, 60, 41);
+    let mut seen = vec![main.message(), main.message()];
+    seen.sort_by_key(|m| m["type"] == "response");
+    assert_eq!(seen[0], json!({ "type": "cancel", "id": 1 }), "{seen:?}");
+    let body = &seen[1]["result"]["body"];
+    assert_eq!(body["ended"], json!({ "mismatch": [100, 101] }), "{seen:?}");
+    // Its consumer may have taken the first 60 before the rest came.
+    assert!(body["len"] == 0 || body["len"] == 60, "{seen:?}");
+    // Main's frames for it, sent before it read the cancel, are dropped;
+    // its abort ends the record.
+    main.data(1, 101, 10);
+    main.stream(StreamFrame::Abort {
+        id: 1,
+        abort: Abort::cancelled(),
+    });
+    main.request(4, "t.echo", json!(4));
+    assert_eq!(main.message()["result"]["echo"], 4);
+    main.data(2, 500, 500);
+    main.stream(StreamFrame::End { id: 2 });
+    let reply = main.message();
+    assert_eq!(
+        reply["result"]["body"],
+        json!({ "len": 1000, "pattern": true, "ended": "end" }),
+        "{reply}"
+    );
+    assert_eq!((main.asks(5), main.room(6)), (json!(0), json!(0)));
+    main.close();
+    assert_eq!(main.exit(), Exit::Ok);
+}
+
+/// A body shorter than its head's `bytes` at its end fails alone: nothing
+/// is sent for it, and the connection goes on.
+#[test]
+fn a_body_shorter_than_its_head_fails_at_its_end() {
+    let mut main = start(options());
+    main.request(2, "t.ask", json!({ "params": {}, "reserve": "bytes" }));
+    assert_eq!(main.message()["id"], 1);
+    main.respond(1, json!({ "node": 0, "bytes": 100, "body": true }));
+    main.data(1, 0, 99);
+    main.stream(StreamFrame::End { id: 1 });
+    let reply = main.message();
+    assert_eq!(reply["id"], 2, "{reply}");
+    let body = &reply["result"]["body"];
+    assert_eq!(body["ended"], json!({ "mismatch": [100, 99] }), "{reply}");
+    assert!(body["len"] == 0 || body["len"] == 99, "{reply}");
+    // No cancel: the next message is the echo's reply.
+    main.request(3, "t.echo", json!(3));
+    assert_eq!(
+        main.message(),
+        json!({ "type": "response", "id": 3, "result": { "echo": 3 } })
+    );
+    assert_eq!((main.asks(4), main.room(5)), (json!(0), json!(0)));
+    main.close();
+    assert_eq!(main.exit(), Exit::Ok);
 }
 
 #[test]

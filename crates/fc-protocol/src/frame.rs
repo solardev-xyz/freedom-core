@@ -282,12 +282,30 @@ impl Decoder {
     /// the rest. After the first error the decoder stays failed, and frames it
     /// still held are dropped (and wiped): the stream can't be trusted.
     pub fn push(&mut self, input: &[u8]) -> Result<usize, FrameError> {
+        self.decode(input, false)
+    }
+
+    /// As [`Decoder::push`], but takes nothing past the next frame it
+    /// completes: once a frame is ready it stops, before the next frame's
+    /// header, so that frame's payload is neither read nor allocated until
+    /// the caller has handled the one before it and pushes the rest. A
+    /// service's reader decodes this way, so a head's hook runs before any
+    /// of its body is decoded (design 0014, "Requests the service makes").
+    pub fn push_one(&mut self, input: &[u8]) -> Result<usize, FrameError> {
+        self.decode(input, true)
+    }
+
+    fn decode(&mut self, input: &[u8], one: bool) -> Result<usize, FrameError> {
         if let Some(error) = self.failed {
             return Err(error);
         }
+        let ready = self.ready.len();
         let mut consumed = 0;
         while consumed < input.len() {
             if self.ready.len() >= MAX_READY_FRAMES || self.ready_bytes >= MAX_READY_BYTES {
+                break;
+            }
+            if one && self.ready.len() > ready {
                 break;
             }
             let rest = &input[consumed..];
@@ -399,6 +417,37 @@ mod tests {
         for chunk in [1, 2, 5, 7, 4096, stream.len()] {
             assert_eq!(frames(&stream, chunk), messages, "chunk {chunk}");
         }
+    }
+
+    /// `push_one` stops at the end of each frame it completes: the next
+    /// frame's header isn't read, so its payload isn't allocated, until the
+    /// caller pushes again.
+    #[test]
+    fn push_one_takes_one_frame_at_a_time() {
+        let mut stream = Vec::new();
+        let messages: Vec<Vec<u8>> = vec![b"{}".to_vec(), Vec::new(), vec![b'x'; 70_000]];
+        for m in &messages {
+            encode_json(m, &mut stream).unwrap();
+        }
+        let ends = [7, 7 + 5, stream.len()];
+        let mut d = Decoder::new();
+        let mut at = 0;
+        for (end, message) in ends.into_iter().zip(&messages) {
+            assert_eq!(d.push_one(&stream[at..]).unwrap(), end - at);
+            at = end;
+            assert!(d.is_at_boundary());
+            assert_eq!(d.pop().unwrap().payload.to_vec(), *message);
+            assert!(d.pop().is_none());
+        }
+        // Split mid-frame, it takes what it has of that frame alone.
+        let mut d = Decoder::new();
+        assert_eq!(d.push_one(&stream[..3]).unwrap(), 3);
+        assert_eq!(d.push_one(&stream[3..]).unwrap(), 4);
+        assert_eq!(d.pop().unwrap().payload.to_vec(), b"{}");
+        // Frames left unpopped don't stop it taking the next one.
+        assert_eq!(d.push_one(&stream[7..]).unwrap(), 5);
+        assert_eq!(d.push_one(&stream[12..]).unwrap(), stream.len() - 12);
+        assert_eq!(std::iter::from_fn(|| d.pop()).count(), 2);
     }
 
     #[test]

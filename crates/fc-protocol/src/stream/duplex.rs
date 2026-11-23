@@ -18,10 +18,11 @@
 //!
 //! **The writer.** Credit the core owes main for what its consumers let go
 //! of is control, written ahead of the sender's frames, merged per stream
-//! while unwritten, and dropped when the core cancels the request or the
-//! stream's terminal arrives: its amount and its place in the writer's
-//! order together, in one step. So what waits to be written of it, every
-//! record included, is bounded by the open streams.
+//! while unwritten, and dropped when the core cancels the request, the
+//! stream's terminal arrives or the stream breaks the length its head gave
+//! it ([`Duplex::answered_sized`]): its amount and its place in the
+//! writer's order together, in one step. So what waits to be written of
+//! it, every record included, is bounded by the open streams.
 
 use std::collections::BTreeMap;
 
@@ -155,6 +156,14 @@ impl Duplex {
         result.map_err(|error| self.fail(error))
     }
 
+    /// Main's reply to the core's request `id` arrived: a head that opens a
+    /// body of exactly `len` bytes ([`Inbound::reply_sized`], design 0014).
+    pub fn answered_sized(&mut self, id: u64, len: u64) -> Result<Replied, StreamError> {
+        self.alive()?;
+        let result = self.inbound.reply_sized(id, len);
+        result.map_err(|error| self.fail(error))
+    }
+
     /// A stream frame from main, by its kind: credit to the sender; data,
     /// end and abort to the inbound streams.
     pub fn receive(&mut self, frame: StreamFrame<'_>) -> Result<Received, StreamError> {
@@ -163,9 +172,13 @@ impl Duplex {
             StreamFrame::Credit { .. } => self.sender.receive(frame).map(Received::Credited),
             _ => self.inbound.receive(&frame).map(Received::Arrived),
         };
-        // Credit owed for a stream whose terminal came would cross it: it
-        // goes, so what is owed is bounded by the open streams.
-        if let Ok(Received::Arrived(Arrived::End { id } | Arrived::Abort { id, .. })) = &result {
+        // Credit owed for a stream whose terminal came would cross it, and a
+        // stream that broke its length takes no more: it goes, so what is
+        // owed is bounded by the open streams.
+        if let Ok(Received::Arrived(
+            Arrived::End { id } | Arrived::Abort { id, .. } | Arrived::Mismatch { id, .. },
+        )) = &result
+        {
             self.drop_owed(*id);
         }
         result.map_err(|error| self.fail(error))
@@ -292,7 +305,7 @@ impl Duplex {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::stream::{Abort, AbortCode};
+    use crate::stream::{Abort, AbortCode, InboundState};
 
     /// Both records of owed credit move together.
     fn check(d: &Duplex) {
@@ -340,6 +353,90 @@ mod tests {
         assert_eq!(d.inbound.outstanding(), 0);
         let mut out = Vec::new();
         assert_eq!(d.next_frame(&mut out), None);
+    }
+
+    /// Design 0014: a body held to its head's length fails alone when it
+    /// breaks it. Past the length it retires, with what was owed for it
+    /// dropped; short at its end its record goes. A body as long as its
+    /// head ends as any other, and the other streams go on.
+    #[test]
+    fn a_body_that_breaks_its_length_fails_alone() {
+        let mut d = Duplex::service(1 << 20);
+        for id in 1..=4u64 {
+            d.ask(id).unwrap();
+        }
+        assert_eq!(d.answered_sized(1, 3), Ok(Replied::Deliver));
+        assert_eq!(d.answered_sized(2, 3), Ok(Replied::Deliver));
+        assert_eq!(d.answered_sized(3, 3), Ok(Replied::Deliver));
+        assert_eq!(d.answered(4, true), Ok(Replied::Deliver));
+        for id in 1..=4u64 {
+            d.receive(StreamFrame::Data { id, bytes: &[7, 7] }).unwrap();
+            d.release(id, 1).unwrap();
+        }
+        assert_eq!(d.owed(), 4);
+        // 1: one byte past its length.
+        assert_eq!(
+            d.receive(StreamFrame::Data {
+                id: 1,
+                bytes: &[7, 7]
+            }),
+            Ok(Received::Arrived(Arrived::Mismatch {
+                id: 1,
+                declared: 3,
+                received: 4,
+                retire: Retire::SendCancel,
+            }))
+        );
+        check(&d);
+        assert_eq!(d.owed(), 3);
+        assert_eq!(
+            d.inbound().info(1).map(|info| info.state),
+            Some(InboundState::Retiring)
+        );
+        assert_eq!(d.release(1, 1), Ok(()));
+        assert_eq!(d.withdraw(1), Retire::Nothing);
+        assert_eq!(
+            d.receive(StreamFrame::Data { id: 1, bytes: &[7] }),
+            Ok(Received::Arrived(Arrived::Dropped { id: 1 }))
+        );
+        assert_eq!(
+            d.receive(StreamFrame::Abort {
+                id: 1,
+                abort: Abort::cancelled(),
+            }),
+            Ok(Received::Arrived(Arrived::Dropped { id: 1 }))
+        );
+        assert_eq!(d.inbound().info(1), None);
+        // 2: one byte short at its end.
+        assert_eq!(
+            d.receive(StreamFrame::End { id: 2 }),
+            Ok(Received::Arrived(Arrived::Mismatch {
+                id: 2,
+                declared: 3,
+                received: 2,
+                retire: Retire::Nothing,
+            }))
+        );
+        check(&d);
+        assert_eq!((d.owed(), d.inbound().info(2)), (2, None));
+        // 3: exactly its length; 4: no length at all.
+        d.receive(StreamFrame::Data { id: 3, bytes: &[7] }).unwrap();
+        assert_eq!(
+            d.receive(StreamFrame::End { id: 3 }),
+            Ok(Received::Arrived(Arrived::End { id: 3 }))
+        );
+        d.receive(StreamFrame::Data {
+            id: 4,
+            bytes: &[7; 100],
+        })
+        .unwrap();
+        assert_eq!(
+            d.receive(StreamFrame::End { id: 4 }),
+            Ok(Received::Arrived(Arrived::End { id: 4 }))
+        );
+        check(&d);
+        assert_eq!((d.owed(), d.inbound().outstanding()), (0, 0));
+        assert_eq!(d.failed(), None);
     }
 
     /// The connection's end (0014, COL-3): every request of the core's

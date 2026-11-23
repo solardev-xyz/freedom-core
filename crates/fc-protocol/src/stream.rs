@@ -36,7 +36,9 @@
 //!   consumer, which holds it in room it reserved, and its credit is sent,
 //!   ahead of the sender's frames, once the consumer lets the bytes go. A
 //!   service that takes main's bodies (design 0014, COL-3) holds the same,
-//!   with a service's codes ([`Duplex::service`]).
+//!   with a service's codes ([`Duplex::service`]), and may hold a body to
+//!   the exact length its head gave it ([`Duplex::answered_sized`]): a body
+//!   that breaks it fails alone ([`Arrived::Mismatch`]).
 //! - **The abort codes** ([`AbortCode`], [`Codes`]): every code decodes,
 //!   and which a stream may end with depends on who sends it. A service's
 //!   bodies keep 0007's five; the core's verified bodies end only with

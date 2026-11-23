@@ -3,8 +3,8 @@
 //!
 //! - **The stdin pump** reads stdin into a bounded queue (256 KiB) and sees
 //!   its EOF.
-//! - **The reader** decodes main's frames and handles each in order, at
-//!   once: the handshake, `cancel`, stream credit and `<service>.shutdown`
+//! - **The reader** decodes main's frames one at a time and handles each
+//!   in order, at once, before it decodes anything past it: the handshake, `cancel`, stream credit and `<service>.shutdown`
 //!   change state and need no writer room, so **the reader never waits on
 //!   the writer** for them. It is also the one thread that calls the
 //!   [`Service`]: callbacks run one at a time, in the order of main's
@@ -50,9 +50,12 @@
 //!   dropped unanswered or its deadline passes, and a result that says
 //!   `body: true` opens a stream from main to the service: 0009's frames in
 //!   both directions on one connection, through `fc-protocol`'s
-//!   [`Duplex`]. A service that doesn't turn them on reads main's data, end
-//!   and abort frames as protocol errors (`stream_direction`) and any
-//!   response as `unsolicited_response`, as 0007 has it ([`ask`]).
+//!   [`Duplex`]. [`Connection::ask_reserving`] adds a hook that sees main's
+//!   head before any of its body is read, reserves room for the body's
+//!   exact length or refuses it, and the body is then held to that length.
+//!   A service that doesn't turn them on reads main's data, end and abort
+//!   frames as protocol errors (`stream_direction`) and any response as
+//!   `unsolicited_response`, as 0007 has it ([`ask`]).
 //! - **The lifecycle thread** enforces the handshake's deadline, polls the
 //!   parent every 2 s, watches for the writer stall, and ends the service's
 //!   requests whose deadline passes.
@@ -109,7 +112,7 @@ use crate::watchdog::Watchdog;
 
 mod ask;
 
-pub use ask::{Answer, AskError, AskFailed, Asked, Body, BodyError, Chunk};
+pub use ask::{Answer, AskError, AskFailed, Asked, Body, BodyError, Chunk, Hold, Reserved};
 use ask::{Ask, Outgoing};
 
 /// The handshake's deadline after spawn (0001: 10 s).
@@ -369,6 +372,9 @@ struct Link {
     /// A failed writer has freed what was queued.
     #[cfg(test)]
     abandoned_freed: AtomicBool,
+    /// The input bytes the reader's decoder has taken.
+    #[cfg(test)]
+    decoded: std::sync::atomic::AtomicUsize,
 }
 
 /// A queued event; `ticket` when its sender waits to see it written
@@ -496,6 +502,8 @@ impl Link {
             max_asks: options.max_asks,
             #[cfg(test)]
             abandoned_freed: AtomicBool::new(false),
+            #[cfg(test)]
+            decoded: std::sync::atomic::AtomicUsize::new(0),
         }
     }
 
@@ -1468,10 +1476,15 @@ impl<'a> Reader<'a> {
         while let Some(chunk) = self.next_input()? {
             let mut rest = chunk.as_slice();
             while !rest.is_empty() {
+                // One frame at a time: each is handled before anything past
+                // it is decoded, so a head's hook runs before any byte of
+                // its body is read or allocated (0014, COL-3).
                 let consumed = self
                     .decoder
-                    .push(rest)
+                    .push_one(rest)
                     .map_err(|e| End::Protocol(e.category()))?;
+                #[cfg(test)]
+                self.link.decoded.fetch_add(consumed, Ordering::SeqCst);
                 rest = rest.get(consumed..).unwrap_or_default();
                 while let Some(frame) = self.decoder.pop() {
                     self.handle(frame)?;
