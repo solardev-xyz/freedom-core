@@ -83,9 +83,9 @@ pub use logs::{
 };
 pub use methods::{
     BLOCKSCOUT, COLIBRI_BLOCK_PARAM, COLIBRI_LATEST_ONLY, COLIBRI_NOT_A_STRING,
-    COLIBRI_UNPROVEN_METHODS, ColibriParams, LATEST_APPENDED, READ_METHODS, SINGLE_NODE_METHODS,
-    SourceOrder, colibri_latest_appended, colibri_request_params, is_read_method, source_order,
-    source_serves_method,
+    COLIBRI_SERVED_METHODS, COLIBRI_UNPROVEN_METHODS, ColibriParams, LATEST_APPENDED, READ_METHODS,
+    SINGLE_NODE_METHODS, SourceOrder, colibri_latest_appended, colibri_request_params,
+    is_read_method, source_order, source_serves_method,
 };
 pub use myotis::{
     MAX_MYOTIS_REFUSAL_MESSAGE, MYOTIS_BLOB_FIELDS, MYOTIS_NOT_READY, MYOTIS_PROOF, MyotisFailure,

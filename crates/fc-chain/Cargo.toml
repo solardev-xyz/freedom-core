@@ -14,6 +14,8 @@ workspace = true
 # `chain.html`'s codec and class (design 0006): the web3: handler's html()
 # checks, which the machine runs under the request's budget.
 fc-dweb = { path = "../fc-dweb" }
+# What Colibri proves (#279's rule), shared with the Colibri service.
+fc-colibri = { path = "../fc-colibri" }
 fc-json = { path = "../fc-json" }
 # The sans-I/O executor the machine runs on (design 0005: "on fc-naming's
 # executor").
