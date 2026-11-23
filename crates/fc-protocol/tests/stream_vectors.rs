@@ -379,6 +379,26 @@ fn reply_json(id: u64) -> Vec<u8> {
         .into_bytes()
 }
 
+/// A body that broke its head's length, as the cases state it.
+fn mismatch_json(id: u64, arrived: &Arrived) -> Json {
+    let Arrived::Mismatch {
+        id: got,
+        declared,
+        received,
+        retire,
+    } = arrived
+    else {
+        panic!("{arrived:?}");
+    };
+    assert_eq!(*got, id);
+    let retire = match retire {
+        Retire::SendCancel => "send_cancel",
+        Retire::Freed => "freed",
+        Retire::Nothing => "nothing",
+    };
+    json!({ "mismatch": { "declared": declared, "received": received, "retire": retire } })
+}
+
 fn refusal(result: Result<(), fc_protocol::stream::SendError>) -> Json {
     match result {
         Ok(()) => json!("ok"),
@@ -457,6 +477,16 @@ impl Service {
                     Replied::Retired => json!("retired"),
                 },
             ),
+            // A head that gives its body a length (design 0014).
+            "sized" => {
+                protocol(
+                    self.d.core().answered_sized(id, u(&action[2])),
+                    |replied| match replied {
+                        Replied::Deliver => json!("deliver"),
+                        Replied::Retired => json!("retired"),
+                    },
+                )
+            }
             "data" => {
                 let len = n(&action[2]);
                 let at = self.inbound.get(&id).copied().unwrap_or(0);
@@ -475,6 +505,9 @@ impl Service {
                         json!("data")
                     }
                     Received::Arrived(Arrived::Dropped { .. }) => json!("dropped"),
+                    Received::Arrived(mismatch @ Arrived::Mismatch { .. }) => {
+                        mismatch_json(id, &mismatch)
+                    }
                     other => panic!("{other:?}"),
                 })
             }
@@ -499,6 +532,9 @@ impl Service {
                         json!("abort")
                     }
                     Received::Arrived(Arrived::Dropped { .. }) => json!("dropped"),
+                    Received::Arrived(mismatch @ Arrived::Mismatch { .. }) => {
+                        mismatch_json(id, &mismatch)
+                    }
                     other => panic!("{other:?}"),
                 })
             }

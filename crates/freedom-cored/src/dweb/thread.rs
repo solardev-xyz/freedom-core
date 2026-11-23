@@ -441,6 +441,10 @@ impl Thread {
                     Ok(())
                 }
             }
+            // Only a body whose head was given a length breaks one
+            // (`Duplex::answered_sized`, a service's in design 0014): the
+            // core gives its pieces none.
+            Received::Arrived(Arrived::Mismatch { .. }) => Ok(()),
         }
     }
 

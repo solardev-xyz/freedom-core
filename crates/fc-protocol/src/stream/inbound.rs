@@ -24,6 +24,14 @@
 //! **Credit from the consumer** is the core's own accounting: crediting
 //! more than the stream holds is refused ([`Overcredit`]) without failing
 //! the connection.
+//!
+//! **A length** (design 0014, "Requests the service makes"): a head may
+//! give its body an exact length ([`Inbound::reply_sized`]), as a service's
+//! `shell.colibri_fetch` head gives `bytes`. A body that breaks it, more
+//! bytes than the length or fewer at its end, fails alone
+//! ([`Arrived::Mismatch`]): it isn't a protocol error, and the connection
+//! and its other streams go on. The window is checked first, so data past
+//! the window is still main's protocol error, whatever the length.
 
 use std::collections::BTreeMap;
 
@@ -44,6 +52,19 @@ pub enum Arrived {
     Abort { id: u64, abort: Abort },
     /// The stream is retiring: the frame was dropped.
     Dropped { id: u64 },
+    /// Stream `id` broke the length its head gave it
+    /// ([`Inbound::reply_sized`]): `received` bytes, past `declared`, or
+    /// short of it at its end. The stream fails alone. Past the length it
+    /// retires, as on a local cancel: `retire` is [`Retire::SendCancel`],
+    /// the caller sends main `cancel`, and the stream's frames are dropped
+    /// until its terminal. At its end its record is gone, and `retire` is
+    /// [`Retire::Nothing`].
+    Mismatch {
+        id: u64,
+        declared: u64,
+        received: u64,
+        retire: Retire,
+    },
 }
 
 /// A consumer credited more than its stream holds: the core's own bug, and
@@ -83,7 +104,12 @@ pub struct InboundInfo {
 enum Entry {
     Pending,
     RetiredPending,
-    Open { received: u64, returned: u64 },
+    /// `declared`: the length its head gave it, if any.
+    Open {
+        received: u64,
+        returned: u64,
+        declared: Option<u64>,
+    },
     Retiring,
 }
 
@@ -126,6 +152,7 @@ impl Inbound {
                     *entry = Entry::Open {
                         received: 0,
                         returned: 0,
+                        declared: None,
                     };
                     return Ok(Replied::Deliver);
                 }
@@ -141,6 +168,19 @@ impl Inbound {
             _ => return Err(self.fail(StreamError::UnsolicitedResponse(id))),
         };
         self.entries.remove(&id);
+        Ok(replied)
+    }
+
+    /// The reply to request `id` arrived: a head that opens a body of
+    /// exactly `len` bytes (design 0014: a `shell.colibri_fetch` head's
+    /// `bytes`). As [`Inbound::reply`] with `opens`, and the stream is held
+    /// to the length as its frames come ([`Arrived::Mismatch`]). A request
+    /// the core has cancelled opens a retiring stream, as without a length.
+    pub fn reply_sized(&mut self, id: u64, len: u64) -> Result<Replied, StreamError> {
+        let replied = self.reply(id, true)?;
+        if let Some(Entry::Open { declared, .. }) = self.entries.get_mut(&id) {
+            *declared = Some(len);
+        }
         Ok(replied)
     }
 
@@ -167,8 +207,12 @@ impl Inbound {
         if id > self.highest {
             return Err(self.fail(StreamError::Unknown(id)));
         }
-        let (received, returned) = match self.entries.get_mut(&id) {
-            Some(Entry::Open { received, returned }) => (received, *returned),
+        let (received, returned, declared) = match self.entries.get_mut(&id) {
+            Some(Entry::Open {
+                received,
+                returned,
+                declared,
+            }) => (received, *returned, *declared),
             Some(Entry::Retiring) => {
                 if !matches!(frame, StreamFrame::Data { .. }) {
                     self.entries.remove(&id);
@@ -188,10 +232,35 @@ impl Inbound {
                     return Err(self.fail(StreamError::Overrun(id)));
                 };
                 *received = next;
+                if let Some(declared) = declared
+                    && next > declared
+                {
+                    // Past its length: it fails alone, retiring as on a
+                    // local cancel.
+                    self.entries.insert(id, Entry::Retiring);
+                    return Ok(Arrived::Mismatch {
+                        id,
+                        declared,
+                        received: next,
+                        retire: Retire::SendCancel,
+                    });
+                }
                 Ok(Arrived::Data { id, len })
             }
             StreamFrame::End { .. } => {
+                let received = *received;
                 self.entries.remove(&id);
+                // Never past its length: data past it retired the stream.
+                if let Some(declared) = declared
+                    && received != declared
+                {
+                    return Ok(Arrived::Mismatch {
+                        id,
+                        declared,
+                        received,
+                        retire: Retire::Nothing,
+                    });
+                }
                 Ok(Arrived::End { id })
             }
             StreamFrame::Abort { abort, .. } => {
@@ -212,7 +281,10 @@ impl Inbound {
         if self.failed.is_some() {
             return Ok(None);
         }
-        let Some(Entry::Open { received, returned }) = self.entries.get_mut(&id) else {
+        let Some(Entry::Open {
+            received, returned, ..
+        }) = self.entries.get_mut(&id)
+        else {
             return Ok(None);
         };
         let held = *received - *returned;
@@ -261,7 +333,9 @@ impl Inbound {
             Entry::Pending => info(InboundState::Pending),
             Entry::RetiredPending => info(InboundState::RetiredPending),
             Entry::Retiring => info(InboundState::Retiring),
-            Entry::Open { received, returned } => InboundInfo {
+            Entry::Open {
+                received, returned, ..
+            } => InboundInfo {
                 state: InboundState::Open,
                 received: *received,
                 returned: *returned,
