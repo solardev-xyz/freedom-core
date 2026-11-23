@@ -29,6 +29,7 @@ const { buildEip1193 } = require('./eip1193');
 const { buildJournal } = require('./journal');
 const { buildStores } = require('./stores');
 const { buildSqlite } = require('./sqlite');
+const { buildColibri } = require('./colibri');
 
 const REFERENCE_COMMIT = 'fb540328162839e68150fe2c5e517edb86734d1c';
 // The Radicle vectors' own reference: freedom-browser's integration/rust-core,
@@ -69,6 +70,14 @@ const JOURNAL_REFERENCE_COMMIT = APPROVALS_REFERENCE_COMMIT;
 // from the main reference's install. Like the Radicle reference, it moves on
 // its own.
 const STORES_REFERENCE_COMMIT = '9d4ea62516034731dea082c6d81765e355f1182f';
+// The Colibri vectors' reference (design 0014, COL-1): freedom-browser's
+// integration/rust-core, with #1081 (no local proving), #1071 (the private
+// store) and #1083 (no ENS through Colibri). Its generator (colibri.js) loads
+// colibri-runtime.js, colibri-worker.js and checkpoint-verifier-worker.js
+// whole, over the checkout's installed @corpus-core/colibri-stateless 3.0.3
+// (c4w.wasm checked by digest) and its ethers. Like the Radicle reference, it
+// moves on its own.
+const COLIBRI_REFERENCE_COMMIT = '7cf6a0c299b50b64944d5d246a911bdb25dc5c82';
 const OUTPUT = path.resolve(__dirname, '..');
 const INDICES = [0, 1, 2, 1000, 2147483647];
 const MNEMONICS = [
@@ -162,6 +171,16 @@ function loadApprovalsReference(checkout) {
 function loadStoresReference(checkout) {
   const commit = checkedCommit(checkout, STORES_REFERENCE_COMMIT, 'stores reference');
   return { checkout, meta: { freedomBrowserCommit: commit, nodeVersion: process.version, generator: 'vectors/generator/generate.js' } };
+}
+
+/** The Colibri vectors' reference: colibri.js loads its main-process
+ * modules over the package it installs, which meta names with ethers. */
+function loadColibriCheckout(checkout) {
+  const commit = checkedCommit(checkout, COLIBRI_REFERENCE_COMMIT, 'colibri reference');
+  const referenceRequire = createRequire(path.join(checkout, 'package.json'));
+  const packages = Object.fromEntries(['@corpus-core/colibri-stateless', 'ethers']
+    .map((name) => [name, packageVersion(referenceRequire, name)]));
+  return { checkout, meta: { freedomBrowserCommit: commit, packages, nodeVersion: process.version, generator: 'vectors/generator/generate.js' } };
 }
 
 function loadReference(checkout) {
@@ -582,14 +601,16 @@ function buildRadicle({ meta, derivation: d, formats: f }, existing) {
 
 async function main() {
   const args = process.argv.slice(2);
-  assert.ok(args.length === 9 && ['generate', 'check'].includes(args[0]) && args[1] === '--freedom-browser'
-    && args[3] === '--radicle-browser' && args[5] === '--approvals-browser' && args[7] === '--stores-browser',
-    'Usage: node vectors/generator/generate.js <generate|check> --freedom-browser <checkout> --radicle-browser <checkout> --approvals-browser <checkout> --stores-browser <checkout>');
-  const [mode, , checkout, , radicleCheckout, , approvalsCheckout, , storesCheckout] = args;
+  assert.ok(args.length === 11 && ['generate', 'check'].includes(args[0]) && args[1] === '--freedom-browser'
+    && args[3] === '--radicle-browser' && args[5] === '--approvals-browser' && args[7] === '--stores-browser'
+    && args[9] === '--colibri-browser',
+    'Usage: node vectors/generator/generate.js <generate|check> --freedom-browser <checkout> --radicle-browser <checkout> --approvals-browser <checkout> --stores-browser <checkout> --colibri-browser <checkout>');
+  const [mode, , checkout, , radicleCheckout, , approvalsCheckout, , storesCheckout, , colibriCheckout] = args;
   const reference = loadReference(path.resolve(checkout));
   const radicle = loadRadicleReference(path.resolve(radicleCheckout));
   const approvals = loadApprovalsReference(path.resolve(approvalsCheckout));
   const stores = loadStoresReference(path.resolve(storesCheckout));
+  const colibri = loadColibriCheckout(path.resolve(colibriCheckout));
   const deterministic = {
     'keys.json': buildKeys(reference),
     'mnemonic-validation.json': buildValidation(reference),
@@ -691,6 +712,10 @@ async function main() {
       ...stores.meta,
       packages: { 'better-sqlite3': packageVersion(createRequire(path.join(reference.checkout, 'package.json')), 'better-sqlite3') },
     }),
+    // Design 0014's Colibri adapter (COL-1): the colibri reference's worker
+    // service and checkpoint check over the real c4w.wasm, every call into
+    // it recorded, in worlds scripted from vectors/fixtures/colibri/.
+    'colibri.json': await buildColibri(colibri.checkout, colibri.meta),
   };
   // Check every deterministic file before doing the more expensive fixture checks.
   for (const [filename, contents] of Object.entries(deterministic)) {
