@@ -417,7 +417,7 @@ On fc-service's connection, at the version services speak, with fc-protocol's tw
 
 ### What the service serves
 
-`colibri.request` serves these methods, each only in the forms Colibri 3.0.3 proves for the request. The forms are freedom-core #279's rules (`colibri_request_params` in `fc-chain`'s `methods.rs`, and design 0005's *Colibri* section, merged at `372d2d8c`), which are freedom-browser #1048's. The service applies them to what main sends it.
+`colibri.request` serves these methods, each only in the forms Colibri 3.0.3 proves for the request. The forms are freedom-core #279's rules (`colibri_request_params`, merged at `372d2d8c` in `fc-chain`'s `methods.rs` and now in `fc-colibri`, which `fc-chain` re-exports; and design 0005's *Colibri* section), which are freedom-browser #1048's. The service applies them to what main sends it.
 
 | Method | Served when `P` is | What binds it |
 |---|---|---|
@@ -450,7 +450,7 @@ On fc-service's connection, at the version services speak, with fc-protocol's tw
 - `eth_call` and `eth_estimateGas`, at any block or none (F-11, [below](#calls-and-ens));
 - every other method, `eth_getLogs` and the writes among them.
 
-**One rule, two places:** the router applies it before Colibri is asked, and the service applies it again. COL-4 runs #279's unit cases (`methods.rs`, `colibri_unproven`) against the service's check, with the appended form counted as a refusal.
+**One rule, two places:** the router applies it before Colibri is asked, and the service applies it again, both through `fc-colibri`, so the two can't drift. #279's unit cases are `fc-colibri`'s (`block_forms`); COL-4 tests the service's own part, the appended form counted as a refusal (`with params of length <n>`) and the refusal texts.
 
 ### Calls and ENS
 
