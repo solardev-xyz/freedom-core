@@ -532,7 +532,7 @@ fn run_checkpoint_case(case: &Value) -> Result<(), String> {
         .iter()
         .filter(|op| op["op"] == "verify")
         .filter_map(|op| op["status"].as_str())
-        .last()
+        .next_back()
         .map(|status| serde_json::from_str(status).unwrap());
     let mut colibrid = Colibrid::checkpoint(chain);
     colibrid.hello();
@@ -623,7 +623,7 @@ fn run_checkpoint_case(case: &Value) -> Result<(), String> {
                 .iter()
                 .filter(|op| op["op"] == "verify")
                 .filter_map(|op| op["status"].as_str())
-                .last()
+                .next_back()
                 .unwrap();
             let recorded_result: RawReply<'_> = serde_json::from_str(recorded_status).unwrap();
             if checked.result.get() != recorded_result.result.get() {
