@@ -80,11 +80,10 @@ pub fn executable_path() -> io::Result<PathBuf> {
     Ok(PathBuf::from(OsString::from_vec(buf)))
 }
 
-/// How many threads this process has (`proc_pidinfo`'s
-/// `PROC_PIDTASKINFO`, `pti_threadnum`): `confine` refuses more than one
-/// (design 0010, step 1).
+/// This process's `proc_taskinfo` (`proc_pidinfo`'s `PROC_PIDTASKINFO`),
+/// as the bytes the call wrote.
 #[allow(unsafe_code)]
-pub fn thread_count() -> io::Result<usize> {
+fn task_info() -> io::Result<Vec<u8>> {
     let size = std::mem::size_of::<libc::proc_taskinfo>();
     let mut buf = vec![0u8; size];
     let capacity = c_int::try_from(size).unwrap_or(0);
@@ -103,15 +102,33 @@ pub fn thread_count() -> io::Result<usize> {
     if written != capacity {
         return Err(io::Error::last_os_error());
     }
-    // The field, read out of the bytes the call wrote: no unaligned or
-    // uninitialized read.
-    let offset = std::mem::offset_of!(libc::proc_taskinfo, pti_threadnum);
-    let field: [u8; 4] = buf
-        .get(offset..offset + 4)
+    Ok(buf)
+}
+
+/// `N` bytes of `info` at `offset`: a field read out of the bytes the call
+/// wrote, so no unaligned or uninitialized read.
+fn field<const N: usize>(info: &[u8], offset: usize) -> io::Result<[u8; N]> {
+    info.get(offset..offset + N)
         .and_then(|bytes| bytes.try_into().ok())
-        .ok_or_else(|| io::Error::other("proc_taskinfo too short"))?;
-    usize::try_from(i32::from_ne_bytes(field))
+        .ok_or_else(|| io::Error::other("proc_taskinfo too short"))
+}
+
+/// How many threads this process has (`proc_taskinfo`'s `pti_threadnum`):
+/// `confine` refuses more than one (design 0010, step 1).
+pub fn thread_count() -> io::Result<usize> {
+    let info = task_info()?;
+    let offset = std::mem::offset_of!(libc::proc_taskinfo, pti_threadnum);
+    usize::try_from(i32::from_ne_bytes(field(&info, offset)?))
         .map_err(|_| io::Error::other("negative thread count"))
+}
+
+/// This process's resident memory in bytes (`proc_taskinfo`'s
+/// `pti_resident_size`): the Colibri service reads it after each step
+/// against its budget (design 0014, Budgets).
+pub fn resident_bytes() -> io::Result<u64> {
+    let info = task_info()?;
+    let offset = std::mem::offset_of!(libc::proc_taskinfo, pti_resident_size);
+    Ok(u64::from_ne_bytes(field(&info, offset)?))
 }
 
 /// Applies the Seatbelt `profile` (SBPL text) to this process, with
@@ -515,6 +532,17 @@ mod tests {
             std::fs::canonicalize(&path).unwrap(),
             std::fs::canonicalize(std::env::current_exe().unwrap()).unwrap()
         );
+    }
+
+    #[test]
+    fn resident_memory_is_read() {
+        let before = resident_bytes().unwrap();
+        assert!(before > 1 << 20 && before < 1 << 40, "{before}");
+        // 64 MiB touched page by page is resident while held.
+        let held = vec![1u8; 64 << 20];
+        let during = resident_bytes().unwrap();
+        assert!(during >= before + (32 << 20), "{before} -> {during}");
+        drop(held);
     }
 
     #[test]
