@@ -1,0 +1,1 @@
+{"error":"Invalid arguments for eth_getProof:  at elemtent (idx: 1 ) :  at elemtent (idx: 0 ) : Expected hex string with fixed size (32) but got 0 bytes"}

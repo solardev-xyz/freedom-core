@@ -1,0 +1,2019 @@
+{
+  "meta": {
+    "colibriBrowserCommit": "7cf6a0c299b50b64944d5d246a911bdb25dc5c82",
+    "colibriVersion": "3.0.3",
+    "nodeVersion": "v24.15.0",
+    "capture": "vectors/generator/colibri-capture.js"
+  },
+  "sessions": {
+    "1-zk": {
+      "chain": 1,
+      "captured_at": "2026-11-22T22:40:27.036Z",
+      "params": {
+        "number": "0x193f4e6",
+        "hash": "0x894663c507b8442ba56c559c28845c77141736bb91bc031e382d37d467f7f3d4",
+        "tx": "0x0c13128da2c6f7cb51c325950d65aabd14dd6b556746a9cdf3be566566bf7699",
+        "newTx": "0x4a5c00fbc589522cfc493a36cf74b4528d46fb99d68e0c48c6587af5b4204f11"
+      },
+      "clocks": {
+        "1-zk-cold": [
+          1795387178413
+        ],
+        "1-balance": [
+          1795387179232
+        ],
+        "1-nonce": [
+          1795387179310
+        ],
+        "1-storage": [
+          1795387179370
+        ],
+        "1-storage-short-slot": [
+          1795387179482
+        ],
+        "1-code": [
+          1795387179519
+        ],
+        "1-block-latest": [
+          1795387179624
+        ],
+        "1-block-latest-full": [
+          1795387179755
+        ],
+        "1-block-number": [
+          1795387180784
+        ],
+        "1-block-hash": [
+          1795387180927
+        ],
+        "1-block-empty": [
+          1795387181040
+        ],
+        "1-block-null": [
+          1795387181122
+        ],
+        "1-block-by-hash": [
+          1795387181179
+        ],
+        "1-block-number-warm": [
+          1795387181330
+        ],
+        "1-priority-fee": [
+          1795387181390
+        ],
+        "1-tx": [
+          1795387181449
+        ],
+        "1-receipt": [
+          1795387181449
+        ],
+        "1-tx-incremental": [
+          1795387181449,
+          1795387215160
+        ],
+        "1-tx-old": [
+          1795387181449
+        ],
+        "1-tx-unindexed": [
+          1795387181449
+        ],
+        "1-receipt-unknown": [
+          1795387181449
+        ],
+        "1-flip-cold-proof": [
+          1795387178413
+        ],
+        "1-flip-account": [
+          1795387179232
+        ],
+        "1-flip-storage": [
+          1795387179370
+        ],
+        "1-flip-code": [
+          1795387179519
+        ],
+        "1-flip-block": [
+          1795387179624
+        ],
+        "1-flip-tx-cache": [
+          1795387181449
+        ],
+        "1-flip-receipts": [
+          1795387181449
+        ],
+        "1-flip-tx-block": [
+          1795387181449
+        ],
+        "1-stale-account": [
+          1795387299232
+        ],
+        "1-stale-block": [
+          1795387301330
+        ],
+        "1-f9-http-balance": [
+          1795387223286
+        ],
+        "1-f9-transport-balance": [
+          1795387223303
+        ],
+        "1-f9-http-nonce": [
+          1795387223319
+        ],
+        "1-f9-transport-nonce": [
+          1795387223331
+        ],
+        "1-f9-http-storage": [
+          1795387223347
+        ],
+        "1-f9-transport-storage": [
+          1795387223363
+        ],
+        "1-f9-http-code": [
+          1795387223374
+        ],
+        "1-f9-transport-code": [
+          1795387223382
+        ],
+        "1-f9-http-block-number": [
+          1795387223394
+        ],
+        "1-f9-transport-block-number": [
+          1795387223404
+        ],
+        "1-f9-http-block-hash": [
+          1795387223413
+        ],
+        "1-f9-transport-block-hash": [
+          1795387223421
+        ],
+        "1-f9-http-block-number-now": [
+          1795387223431
+        ],
+        "1-f9-transport-block-number-now": [
+          1795387223440
+        ],
+        "1-f9-http-priority-fee": [
+          1795387223448
+        ],
+        "1-f9-transport-priority-fee": [
+          1795387223456
+        ],
+        "1-zk-fallback": [
+          1795387223466,
+          1795387223528
+        ],
+        "1-gas-price": [
+          1795387223632
+        ],
+        "1-fee-history": [
+          1795387223743
+        ],
+        "1-balance-pending": [
+          1795387223818
+        ],
+        "1-balance-earliest": [
+          1795387224165
+        ],
+        "1-call-scripted-code": [
+          1795387224246
+        ],
+        "1-estimate-scripted-code": [
+          1795387224264
+        ],
+        "1-ur-resolve": [
+          1795387224279
+        ],
+        "1-unbound-balance-number": [
+          1795387179232
+        ],
+        "1-unbound-balance-hash": [
+          1795387179232
+        ],
+        "1-unbound-balance-safe": [
+          1795387179232
+        ],
+        "1-unbound-balance-finalized": [
+          1795387179232
+        ],
+        "1-unbound-balance-justified": [
+          1795387179232
+        ],
+        "1-unbound-balance-no-block": [
+          1795387179232
+        ],
+        "1-unbound-balance-1898-hash": [
+          1795387179232
+        ],
+        "1-unbound-balance-1898-canonical": [
+          1795387179232
+        ],
+        "1-unbound-balance-1898-number": [
+          1795387179232
+        ],
+        "1-unbound-block-safe": [
+          1795387179624
+        ],
+        "1-unbound-block-finalized": [
+          1795387179624
+        ],
+        "1-unbound-block-justified": [
+          1795387179624
+        ],
+        "1-unbound-block-0X10": [
+          1795387179624
+        ],
+        "1-unbound-block-1x10": [
+          1795387179624
+        ],
+        "1-f9-cut-message": [
+          1795387226400
+        ],
+        "1-f9-cut-body": [
+          1795387226416
+        ],
+        "1-f9-cut-params": [
+          1795387226422
+        ],
+        "1-private-cold": [
+          1795387178413
+        ]
+      },
+      "exchanges": [
+        {
+          "url": "https://mainnet1.colibri-proof.tech",
+          "method": "POST",
+          "headers": {
+            "Accept": "application/octet-stream",
+            "Content-Type": "application/json"
+          },
+          "body": "{\"method\":\"eth_blockNumber\",\"params\":[],\"version\":196611,\"zk_proof\":true}",
+          "response": {
+            "status": 200,
+            "content_type": "application/octet-stream",
+            "bytes": 26703,
+            "sha256": "7a05777e3f696e31915df70ee192713e9456bec4badc3c1d2ef8d79096751f4f"
+          }
+        },
+        {
+          "url": "https://sync-mainnet.beaconcha.in/eth/v1/beacon/blocks/15713472/root",
+          "method": "GET",
+          "headers": {
+            "Accept": "application/json"
+          },
+          "body": null,
+          "response": {
+            "status": 200,
+            "content_type": "application/json",
+            "bytes": 84,
+            "sha256": "dc8bbc9fbe81e627dfd4b26f049c960e850486afafba61a9b2409aed0f97f651"
+          }
+        },
+        {
+          "url": "https://mainnet1.colibri-proof.tech",
+          "method": "POST",
+          "headers": {
+            "Accept": "application/octet-stream",
+            "Content-Type": "application/json"
+          },
+          "body": "{\"method\":\"eth_getProof\",\"params\":[\"0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045\",[],\"latest\"],\"version\":196611,\"c4\":\"0x017e070000\",\"zk_proof\":true}",
+          "response": {
+            "status": 200,
+            "content_type": "application/octet-stream",
+            "bytes": 5082,
+            "sha256": "5674d8093f9b15e89a647d7b44cc0273ae1e47186613147d9ed6c96369729a61"
+          }
+        },
+        {
+          "url": "https://mainnet1.colibri-proof.tech",
+          "method": "POST",
+          "headers": {
+            "Accept": "application/octet-stream",
+            "Content-Type": "application/json"
+          },
+          "body": "{\"method\":\"eth_getProof\",\"params\":[\"0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2\",[\"0x0000000000000000000000000000000000000000000000000000000000000000\"],\"latest\"],\"version\":196611,\"c4\":\"0x017e070000\",\"zk_proof\":true}",
+          "response": {
+            "status": 200,
+            "content_type": "application/octet-stream",
+            "bytes": 8121,
+            "sha256": "c1f70980e3c7cdac2b718c1e3bb309a9f81ff4e814c94a5e080d7aab6ddbfc0f"
+          }
+        },
+        {
+          "url": "https://mainnet1.colibri-proof.tech",
+          "method": "POST",
+          "headers": {
+            "Accept": "application/octet-stream",
+            "Content-Type": "application/json"
+          },
+          "body": "{\"method\":\"eth_getProof\",\"params\":[\"0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2\",[\"0x0\"],\"latest\"],\"version\":196611,\"c4\":\"0x017e070000\",\"zk_proof\":true}",
+          "response": {
+            "status": 500,
+            "content_type": "application/json",
+            "bytes": 154,
+            "sha256": "ca38d4a273e39ed28f9437ce8e9ac6e9da64eae8ab097bf9e3241e67d18bac68"
+          }
+        },
+        {
+          "url": "https://mainnet1.colibri-proof.tech",
+          "method": "POST",
+          "headers": {
+            "Accept": "application/octet-stream",
+            "Content-Type": "application/json"
+          },
+          "body": "{\"method\":\"eth_getCode\",\"params\":[\"0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2\",\"latest\"],\"version\":196611,\"c4\":\"0x017e070000\",\"zk_proof\":true}",
+          "response": {
+            "status": 200,
+            "content_type": "application/octet-stream",
+            "bytes": 8239,
+            "sha256": "3821d091c2543f7cd70993d8d7794cefd32b8d119668f8cd083f6e05ccec9a0b"
+          }
+        },
+        {
+          "url": "https://mainnet1.colibri-proof.tech",
+          "method": "POST",
+          "headers": {
+            "Accept": "application/octet-stream",
+            "Content-Type": "application/json"
+          },
+          "body": "{\"method\":\"eth_getBlockByNumber\",\"params\":[\"latest\",false],\"version\":196611,\"c4\":\"0x017e070000\",\"zk_proof\":true}",
+          "response": {
+            "status": 200,
+            "content_type": "application/octet-stream",
+            "bytes": 142870,
+            "sha256": "d8b3d592ada0d779b8ff4bbd60e19f701ee7053c17010d378fa77213d33222c3"
+          }
+        },
+        {
+          "url": "https://mainnet1.colibri-proof.tech",
+          "method": "POST",
+          "headers": {
+            "Accept": "application/octet-stream",
+            "Content-Type": "application/json"
+          },
+          "body": "{\"method\":\"eth_getBlockByNumber\",\"params\":[\"latest\",true],\"version\":196611,\"c4\":\"0x017e070000\",\"zk_proof\":true}",
+          "response": {
+            "status": 200,
+            "content_type": "application/octet-stream",
+            "bytes": 142870,
+            "sha256": "d8b3d592ada0d779b8ff4bbd60e19f701ee7053c17010d378fa77213d33222c3"
+          }
+        },
+        {
+          "url": "https://mainnet1.colibri-proof.tech",
+          "method": "POST",
+          "headers": {
+            "Accept": "application/octet-stream",
+            "Content-Type": "application/json"
+          },
+          "body": "{\"method\":\"eth_getBlockByNumber\",\"params\":[\"0x193f4e6\",false],\"version\":196611,\"c4\":\"0x017e070000\",\"zk_proof\":true}",
+          "response": {
+            "status": 200,
+            "content_type": "application/octet-stream",
+            "bytes": 142870,
+            "sha256": "d8b3d592ada0d779b8ff4bbd60e19f701ee7053c17010d378fa77213d33222c3"
+          }
+        },
+        {
+          "url": "https://mainnet1.colibri-proof.tech",
+          "method": "POST",
+          "headers": {
+            "Accept": "application/octet-stream",
+            "Content-Type": "application/json"
+          },
+          "body": "{\"method\":\"eth_getBlockByNumber\",\"params\":[\"0x894663c507b8442ba56c559c28845c77141736bb91bc031e382d37d467f7f3d4\",false],\"version\":196611,\"c4\":\"0x017e070000\",\"zk_proof\":true}",
+          "response": {
+            "status": 200,
+            "content_type": "application/octet-stream",
+            "bytes": 142870,
+            "sha256": "d8b3d592ada0d779b8ff4bbd60e19f701ee7053c17010d378fa77213d33222c3"
+          }
+        },
+        {
+          "url": "https://mainnet1.colibri-proof.tech",
+          "method": "POST",
+          "headers": {
+            "Accept": "application/octet-stream",
+            "Content-Type": "application/json"
+          },
+          "body": "{\"method\":\"eth_getBlockByNumber\",\"params\":[],\"version\":196611,\"c4\":\"0x017e070000\",\"zk_proof\":true}",
+          "response": {
+            "status": 200,
+            "content_type": "application/octet-stream",
+            "bytes": 142870,
+            "sha256": "d8b3d592ada0d779b8ff4bbd60e19f701ee7053c17010d378fa77213d33222c3"
+          }
+        },
+        {
+          "url": "https://mainnet1.colibri-proof.tech",
+          "method": "POST",
+          "headers": {
+            "Accept": "application/octet-stream",
+            "Content-Type": "application/json"
+          },
+          "body": "{\"method\":\"eth_getBlockByHash\",\"params\":[\"0x894663c507b8442ba56c559c28845c77141736bb91bc031e382d37d467f7f3d4\",false],\"version\":196611,\"c4\":\"0x017e070000\",\"zk_proof\":true}",
+          "response": {
+            "status": 200,
+            "content_type": "application/octet-stream",
+            "bytes": 142870,
+            "sha256": "d8b3d592ada0d779b8ff4bbd60e19f701ee7053c17010d378fa77213d33222c3"
+          }
+        },
+        {
+          "url": "https://mainnet1.colibri-proof.tech",
+          "method": "POST",
+          "headers": {
+            "Accept": "application/octet-stream",
+            "Content-Type": "application/json"
+          },
+          "body": "{\"method\":\"eth_blockNumber\",\"params\":[],\"version\":196611,\"c4\":\"0x017e070000\",\"zk_proof\":true}",
+          "response": {
+            "status": 200,
+            "content_type": "application/octet-stream",
+            "bytes": 1262,
+            "sha256": "e15f33700596e7ab19e87db5f9e8aaa63027b99a10b4ab4baa1e397d7aa9e3ee"
+          }
+        },
+        {
+          "url": "https://mainnet1.colibri-proof.tech",
+          "method": "POST",
+          "headers": {
+            "Accept": "application/octet-stream",
+            "Content-Type": "application/json"
+          },
+          "body": "{\"method\":\"eth_maxPriorityFeePerGas\",\"params\":[],\"version\":196611,\"c4\":\"0x017e070000\",\"zk_proof\":true}",
+          "response": {
+            "status": 200,
+            "content_type": "application/octet-stream",
+            "bytes": 1262,
+            "sha256": "e15f33700596e7ab19e87db5f9e8aaa63027b99a10b4ab4baa1e397d7aa9e3ee"
+          }
+        },
+        {
+          "url": "https://mainnet1.colibri-proof.tech/tx_cache?max_blocks=256",
+          "method": "GET",
+          "headers": {
+            "Accept": "application/octet-stream",
+            "Cache-Control": "max-age=6"
+          },
+          "body": null,
+          "response": {
+            "status": 200,
+            "content_type": "application/octet-stream",
+            "bytes": 1842112,
+            "sha256": "69919d0a9385935f8a86efa8c4ed1bd983ed2274591d5252d2d151f2b90c808f"
+          }
+        },
+        {
+          "url": "https://mainnet1.colibri-proof.tech/proof/eth_getBlockByNumber/0x193f4e6/196611/zk/0x",
+          "method": "GET",
+          "headers": {
+            "Accept": "application/octet-stream"
+          },
+          "body": null,
+          "response": {
+            "status": 200,
+            "content_type": "application/octet-stream",
+            "bytes": 168311,
+            "sha256": "f12dd7a632f2836f1ba73b86b83d9d856a0a34804310870229db528c75c4b172"
+          }
+        },
+        {
+          "url": "https://mainnet1.colibri-proof.tech/proof/eth_getBlockReceipts/0x193f4e6/196611/zk/0x",
+          "method": "GET",
+          "headers": {
+            "Accept": "application/octet-stream"
+          },
+          "body": null,
+          "response": {
+            "status": 200,
+            "content_type": "application/octet-stream",
+            "bytes": 541150,
+            "sha256": "1e878a5f53db0acca855923e17ab665e7e249a3c8374ce0b3b9b85a808aef805"
+          }
+        },
+        {
+          "url": "https://mainnet1.colibri-proof.tech/tx_cache?from_block=26473703&max_blocks=256",
+          "method": "GET",
+          "headers": {
+            "Accept": "application/octet-stream",
+            "Cache-Control": "max-age=6"
+          },
+          "body": null,
+          "response": {
+            "status": 200,
+            "content_type": "application/octet-stream",
+            "bytes": 15472,
+            "sha256": "b25702ca892e950a12e081fd476d9a716c99b97cddbacfe9f42b215cc0362d1c"
+          }
+        },
+        {
+          "url": "https://mainnet1.colibri-proof.tech/proof/eth_getBlockByNumber/0x193f4e9/196611/zk/0x",
+          "method": "GET",
+          "headers": {
+            "Accept": "application/octet-stream"
+          },
+          "body": null,
+          "response": {
+            "status": 200,
+            "content_type": "application/octet-stream",
+            "bytes": 144989,
+            "sha256": "e75aeb5a7d3684cbcb0c6142cdaf9b282d6326115a716c3fa8ad0ece856f2bef"
+          }
+        },
+        {
+          "url": "https://mainnet1.colibri-proof.tech/proof/eth_getBlockByNumber/0x1937f9a/196611/zk/0x",
+          "method": "GET",
+          "headers": {
+            "Accept": "application/octet-stream"
+          },
+          "body": null,
+          "response": {
+            "status": 200,
+            "content_type": "application/octet-stream",
+            "bytes": 206894,
+            "sha256": "03477c0d5a8379fdeabdd43813766a44ae92bc7ff6593fb6710c9787cf3b677d"
+          }
+        },
+        {
+          "url": "https://mainnet1.colibri-proof.tech",
+          "method": "POST",
+          "headers": {
+            "Accept": "application/octet-stream",
+            "Content-Type": "application/json"
+          },
+          "body": "{\"method\":\"eth_getTransactionByHash\",\"params\":[\"0xbb4b3fc2b746877dce70862850602f1d19bd890ab4db47e6b7ee1da1fe578a0d\"],\"version\":196611,\"c4\":\"0x017e070000\",\"zk_proof\":true}",
+          "response": {
+            "status": 500,
+            "content_type": "application/json",
+            "bytes": 46,
+            "sha256": "27166ba8a97f78654716c3f774481bde1a1bf7b91b6bbe351751f1be4d5bd4e0"
+          }
+        },
+        {
+          "url": "https://mainnet1.colibri-proof.tech",
+          "method": "POST",
+          "headers": {
+            "Accept": "application/octet-stream",
+            "Content-Type": "application/json"
+          },
+          "body": "{\"method\":\"eth_getTransactionReceipt\",\"params\":[\"0xc0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c001\"],\"version\":196611,\"c4\":\"0x017e070000\",\"zk_proof\":true}",
+          "response": {
+            "status": 200,
+            "content_type": "application/octet-stream",
+            "bytes": 19,
+            "sha256": "d7ed382a543ed6e4faa565638b09af7a2524b08ae2c34cfe2cbd6808525154da"
+          }
+        },
+        {
+          "url": "https://mainnet1.colibri-proof.tech",
+          "method": "POST",
+          "headers": {
+            "Accept": "application/octet-stream",
+            "Content-Type": "application/json"
+          },
+          "body": "{\"method\":\"eth_blockNumber\",\"params\":[],\"version\":196611,\"c4\":\"0x017e070000\"}",
+          "response": {
+            "status": 200,
+            "content_type": "application/octet-stream",
+            "bytes": 1261,
+            "sha256": "cab442d8ac4e38fc56dddb9152a2d83795fe5602a9c48d54f7ef49be90bbb112"
+          }
+        },
+        {
+          "url": "https://mainnet1.colibri-proof.tech",
+          "method": "POST",
+          "headers": {
+            "Accept": "application/octet-stream",
+            "Content-Type": "application/json"
+          },
+          "body": "{\"method\":\"eth_blockNumber\",\"params\":[],\"version\":196611,\"c4\":\"0x017e070000\",\"last_block_hash\":\"0x93ae1f3f82109a754fb3e35b16e3194174b6d17d8027045b88c93d662034d67d\"}",
+          "response": {
+            "status": 200,
+            "content_type": "application/octet-stream",
+            "bytes": 61,
+            "sha256": "0a6b700bff0f2fe8018f4073439dbcc46170424ab40d5ec87ee529ed3418635d"
+          }
+        },
+        {
+          "url": "https://mainnet.colibri-proof.tech/execution",
+          "method": "POST",
+          "headers": {
+            "Accept": "application/json",
+            "Content-Type": "application/json"
+          },
+          "body": "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"eth_gasPrice\",\"params\":[]}",
+          "response": {
+            "status": 200,
+            "content_type": "application/json",
+            "bytes": 45,
+            "sha256": "4ab8fec9dfc8eaee3fb73a2ee488cac1e9030913a4ea0d3bf44c5c2f42157dd5"
+          }
+        },
+        {
+          "url": "https://mainnet.colibri-proof.tech/execution",
+          "method": "POST",
+          "headers": {
+            "Accept": "application/json",
+            "Content-Type": "application/json"
+          },
+          "body": "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"eth_feeHistory\",\"params\":[\"0x4\",\"latest\",[25,75]]}",
+          "response": {
+            "status": 200,
+            "content_type": "application/json",
+            "bytes": 466,
+            "sha256": "0cbe22c170135606c043c1b90677b803736ae652c3692f13682077e56acf6a7b"
+          }
+        },
+        {
+          "url": "https://mainnet.colibri-proof.tech/execution",
+          "method": "POST",
+          "headers": {
+            "Accept": "application/json",
+            "Content-Type": "application/json"
+          },
+          "body": "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"eth_getBalance\",\"params\":[\"0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045\",\"pending\"]}",
+          "response": {
+            "status": 200,
+            "content_type": "application/json",
+            "bytes": 54,
+            "sha256": "ce47957c984c9a17d7458b349737aea7a763e4d5833b0279793d8660e134a47c"
+          }
+        },
+        {
+          "url": "https://mainnet.colibri-proof.tech/execution",
+          "method": "POST",
+          "headers": {
+            "Accept": "application/json",
+            "Content-Type": "application/json"
+          },
+          "body": "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"eth_getBalance\",\"params\":[\"0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045\",\"earliest\"]}",
+          "response": {
+            "status": 200,
+            "content_type": "application/json",
+            "bytes": 159,
+            "sha256": "46d2b8ca1f72a95eab47bcffde8d777956ef0869438680894a2fdd61beb78a57"
+          }
+        },
+        {
+          "url": "https://mainnet.colibri-proof.tech/execution",
+          "method": "POST",
+          "headers": {
+            "Accept": "application/json",
+            "Content-Type": "application/json"
+          },
+          "body": "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"eth_getCode\",\"params\":[\"0xeeeeeeee14d718c2b47d9923deab1335e144eeee\",\"latest\"]}",
+          "response": {
+            "status": 200,
+            "content_type": "application/json",
+            "bytes": 5020,
+            "sha256": "707556475750cb6489583d335d701e000cd92cd0be58d2b4c34dceb98d2922aa"
+          }
+        },
+        {
+          "url": "https://mainnet.colibri-proof.tech/execution",
+          "method": "POST",
+          "headers": {
+            "Accept": "application/json",
+            "Content-Type": "application/json"
+          },
+          "body": "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"eth_getStorageAt\",\"params\":[\"0xeeeeeeee14d718c2b47d9923deab1335e144eeee\",\"0x360894a13ba1a3210667c828492db98dca3e2076cc3735a920a3ca505d382bbc\",\"latest\"]}",
+          "response": {
+            "status": 200,
+            "content_type": "application/json",
+            "bytes": 102,
+            "sha256": "eff05c3c876f1987464218ad80e7c0bd5ea4565fd27608a1ac05689764d122d3"
+          }
+        },
+        {
+          "url": "https://mainnet.colibri-proof.tech/execution",
+          "method": "POST",
+          "headers": {
+            "Accept": "application/json",
+            "Content-Type": "application/json"
+          },
+          "body": "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"eth_getCode\",\"params\":[\"0xcffd2ae680cd110d28739a70922636b5937b022b\",\"latest\"]}",
+          "response": {
+            "status": 200,
+            "content_type": "application/json",
+            "bytes": 5184,
+            "sha256": "03118005dcb4cc7a9750ed2ad01f88ccb59d44bab91a6203084bb81be81aff28"
+          }
+        },
+        {
+          "url": "https://mainnet.colibri-proof.tech/execution",
+          "method": "POST",
+          "headers": {
+            "Accept": "application/json",
+            "Content-Type": "application/json"
+          },
+          "body": "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"eth_getStorageAt\",\"params\":[\"0xcffd2ae680cd110d28739a70922636b5937b022b\",\"0x360894a13ba1a3210667c828492db98dca3e2076cc3735a920a3ca505d382bbc\",\"latest\"]}",
+          "response": {
+            "status": 200,
+            "content_type": "application/json",
+            "bytes": 102,
+            "sha256": "6e93156b1c38820039c691770ddaba24331c3263a181fb0282b9691af90cb5ba"
+          }
+        },
+        {
+          "url": "https://mainnet.colibri-proof.tech/execution",
+          "method": "POST",
+          "headers": {
+            "Accept": "application/json",
+            "Content-Type": "application/json"
+          },
+          "body": "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"eth_getCode\",\"params\":[\"0x06fdd07f007adac667177b46ab2eb9a75132cfd5\",\"latest\"]}",
+          "response": {
+            "status": 200,
+            "content_type": "application/json",
+            "bytes": 37926,
+            "sha256": "8ba0d8a5d921e28f8b5b7de9c408f1a862fce8ce06ad710de292dd10a9d67354"
+          }
+        },
+        {
+          "url": "https://mainnet.colibri-proof.tech/execution",
+          "method": "POST",
+          "headers": {
+            "Accept": "application/json",
+            "Content-Type": "application/json"
+          },
+          "body": "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"eth_getCode\",\"params\":[\"0xd1e3fac3837b85437530b8b5244e4def43219c04\",\"latest\"]}",
+          "response": {
+            "status": 200,
+            "content_type": "application/json",
+            "bytes": 4486,
+            "sha256": "baf4bf2467d9796f2f46c95d193cd61a4803a03ea67ca6a4a4921e0f1e892111"
+          }
+        },
+        {
+          "url": "https://mainnet.colibri-proof.tech/execution",
+          "method": "POST",
+          "headers": {
+            "Accept": "application/json",
+            "Content-Type": "application/json"
+          },
+          "body": "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"eth_getStorageAt\",\"params\":[\"0xd1e3fac3837b85437530b8b5244e4def43219c04\",\"0x0000000000000000000000000000000000000000000000000000000000000001\",\"latest\"]}",
+          "response": {
+            "status": 200,
+            "content_type": "application/json",
+            "bytes": 102,
+            "sha256": "105778432e4296d6208564b1c41a68f349e70a5e0acf0f2d61c10ff69cd4d2f7"
+          }
+        },
+        {
+          "url": "https://mainnet.colibri-proof.tech/execution",
+          "method": "POST",
+          "headers": {
+            "Accept": "application/json",
+            "Content-Type": "application/json"
+          },
+          "body": "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"eth_getStorageAt\",\"params\":[\"0xd1e3fac3837b85437530b8b5244e4def43219c04\",\"0xb10e2d527612073b26eecdfd717e6a320cf44b4afac2b0732d9fcbe2b7fa0cf6\",\"latest\"]}",
+          "response": {
+            "status": 200,
+            "content_type": "application/json",
+            "bytes": 102,
+            "sha256": "fe31991d71e81c9987c761fa6ce37bd099a896550b777877215357635fd9ed6f"
+          }
+        },
+        {
+          "url": "https://mainnet.colibri-proof.tech/execution",
+          "method": "POST",
+          "headers": {
+            "Accept": "application/json",
+            "Content-Type": "application/json"
+          },
+          "body": "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"eth_getStorageAt\",\"params\":[\"0xd1e3fac3837b85437530b8b5244e4def43219c04\",\"0xb10e2d527612073b26eecdfd717e6a320cf44b4afac2b0732d9fcbe2b7fa0cf7\",\"latest\"]}",
+          "response": {
+            "status": 200,
+            "content_type": "application/json",
+            "bytes": 102,
+            "sha256": "741c5956524f9743637f8a4f3d25de2b9c015bbb8d57939ea84d3ed41ef55e50"
+          }
+        },
+        {
+          "url": "https://mainnet.colibri-proof.tech/execution",
+          "method": "POST",
+          "headers": {
+            "Accept": "application/json",
+            "Content-Type": "application/json"
+          },
+          "body": "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"eth_getCode\",\"params\":[\"0x2553c09be6447beffdb86fa622ad41fb8f77a91e\",\"latest\"]}",
+          "response": {
+            "status": 200,
+            "content_type": "application/json",
+            "bytes": 32038,
+            "sha256": "dfff9fccb70f4b7080bcab6ca5e6b2952b7219e2c2a371d582818433cfd5c34e"
+          }
+        },
+        {
+          "url": "https://mainnet.colibri-proof.tech/execution",
+          "method": "POST",
+          "headers": {
+            "Accept": "application/json",
+            "Content-Type": "application/json"
+          },
+          "body": "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"eth_getStorageAt\",\"params\":[\"0x2553c09be6447beffdb86fa622ad41fb8f77a91e\",\"0x5a9b8ad69e6e25c5c98b652237895edd07d3e0ce28e306084d856fa4dfc97899\",\"latest\"]}",
+          "response": {
+            "status": 200,
+            "content_type": "application/json",
+            "bytes": 102,
+            "sha256": "317e3d619ffdddf05c954053d1eecac2ecee4347231bc392ec83e9f574e39c76"
+          }
+        },
+        {
+          "url": "https://mainnet1.colibri-proof.tech/proof/eth_getBlockHeader/latest/196611/zk/0x",
+          "method": "GET",
+          "headers": {
+            "Accept": "application/octet-stream",
+            "Cache-Control": "max-age=6"
+          },
+          "body": null,
+          "response": {
+            "status": 200,
+            "content_type": "application/octet-stream",
+            "bytes": 26702,
+            "sha256": "4ae465d21b7b5355704d531ac8adeb21a6b881560e3c92937cee75e92c493be2"
+          }
+        },
+        {
+          "url": "https://mainnet.colibri-proof.tech/execution",
+          "method": "POST",
+          "headers": {
+            "Accept": "application/json",
+            "Content-Type": "application/json"
+          },
+          "body": "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"eth_getStorageAt\",\"params\":[\"0x2553c09be6447beffdb86fa622ad41fb8f77a91e\",\"0x5a9b8ad69e6e25c5c98b652237895edd07d3e0ce28e306084d856fa4dfc97898\",\"latest\"]}",
+          "response": {
+            "status": 200,
+            "content_type": "application/json",
+            "bytes": 102,
+            "sha256": "a68f39e0c644d644e917fed629e581198550795b4cee55278ad9c78f6d073134"
+          }
+        },
+        {
+          "url": "https://mainnet.colibri-proof.tech/execution",
+          "method": "POST",
+          "headers": {
+            "Accept": "application/json",
+            "Content-Type": "application/json"
+          },
+          "body": "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"eth_getCode\",\"params\":[\"0xf60aba43e1f7f3dab1186ff03b561401c9df85e2\",\"latest\"]}",
+          "response": {
+            "status": 200,
+            "content_type": "application/json",
+            "bytes": 32038,
+            "sha256": "dfff9fccb70f4b7080bcab6ca5e6b2952b7219e2c2a371d582818433cfd5c34e"
+          }
+        },
+        {
+          "url": "https://mainnet.colibri-proof.tech/execution",
+          "method": "POST",
+          "headers": {
+            "Accept": "application/json",
+            "Content-Type": "application/json"
+          },
+          "body": "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"eth_getStorageAt\",\"params\":[\"0xf60aba43e1f7f3dab1186ff03b561401c9df85e2\",\"0xf0a80c0711c0a6ffd03ea5c1a42e33502f746d8a47f8cf7638fcb3408b428932\",\"latest\"]}",
+          "response": {
+            "status": 200,
+            "content_type": "application/json",
+            "bytes": 102,
+            "sha256": "d36bed0ce580d6042f725a7085df64a7552eba94f1916fba41a96df131949bea"
+          }
+        },
+        {
+          "url": "https://mainnet.colibri-proof.tech/execution",
+          "method": "POST",
+          "headers": {
+            "Accept": "application/json",
+            "Content-Type": "application/json"
+          },
+          "body": "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"eth_getStorageAt\",\"params\":[\"0xf60aba43e1f7f3dab1186ff03b561401c9df85e2\",\"0xf0a80c0711c0a6ffd03ea5c1a42e33502f746d8a47f8cf7638fcb3408b428931\",\"latest\"]}",
+          "response": {
+            "status": 200,
+            "content_type": "application/json",
+            "bytes": 102,
+            "sha256": "d6270a96c74e698681cb7c0012a25d17a018228bca3a631fd19a384e561ca22a"
+          }
+        },
+        {
+          "url": "https://mainnet.colibri-proof.tech/execution",
+          "method": "POST",
+          "headers": {
+            "Accept": "application/json",
+            "Content-Type": "application/json"
+          },
+          "body": "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"eth_getCode\",\"params\":[\"0x394d8eb4a4fdf599384deab25f31d111d755c398\",\"latest\"]}",
+          "response": {
+            "status": 200,
+            "content_type": "application/json",
+            "bytes": 22242,
+            "sha256": "30ea6f76552acb2e72c1718862bd78a0943d98bbcdc665be50363330c0929b3a"
+          }
+        },
+        {
+          "url": "https://mainnet.colibri-proof.tech/execution",
+          "method": "POST",
+          "headers": {
+            "Accept": "application/json",
+            "Content-Type": "application/json"
+          },
+          "body": "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"eth_getCode\",\"params\":[\"0x00000000000c2e074ec69a0dfb2997ba6c7d2e1e\",\"latest\"]}",
+          "response": {
+            "status": 200,
+            "content_type": "application/json",
+            "bytes": 10730,
+            "sha256": "b19bf110c600e6083eaf43e411acf86c229e25cc98932e019e507634f2785569"
+          }
+        },
+        {
+          "url": "https://mainnet.colibri-proof.tech/execution",
+          "method": "POST",
+          "headers": {
+            "Accept": "application/json",
+            "Content-Type": "application/json"
+          },
+          "body": "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"eth_getStorageAt\",\"params\":[\"0x00000000000c2e074ec69a0dfb2997ba6c7d2e1e\",\"0x859ecef2e168dc10231b000bd53493b42bc9d944cac29d94582c1e1d43592131\",\"latest\"]}",
+          "response": {
+            "status": 200,
+            "content_type": "application/json",
+            "bytes": 102,
+            "sha256": "e15334c4ccc4014ff12fb3032836f64c555f8cb84b21968269d93203a9f5bdf5"
+          }
+        },
+        {
+          "url": "https://mainnet.colibri-proof.tech/execution",
+          "method": "POST",
+          "headers": {
+            "Accept": "application/json",
+            "Content-Type": "application/json"
+          },
+          "body": "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"eth_getStorageAt\",\"params\":[\"0x00000000000c2e074ec69a0dfb2997ba6c7d2e1e\",\"0x859ecef2e168dc10231b000bd53493b42bc9d944cac29d94582c1e1d43592132\",\"latest\"]}",
+          "response": {
+            "status": 200,
+            "content_type": "application/json",
+            "bytes": 102,
+            "sha256": "87675cf823becf2f3f79832fd1e40d339842fd299fe68d68fa5fe85941b35068"
+          }
+        },
+        {
+          "url": "https://mainnet.colibri-proof.tech/execution",
+          "method": "POST",
+          "headers": {
+            "Accept": "application/json",
+            "Content-Type": "application/json"
+          },
+          "body": "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"eth_getStorageAt\",\"params\":[\"0x00000000000c2e074ec69a0dfb2997ba6c7d2e1e\",\"0x9f63b6aa7c9ae6a87aed6d2a486460bc7fabde733278ff83dea2b3db500c17c9\",\"latest\"]}",
+          "response": {
+            "status": 200,
+            "content_type": "application/json",
+            "bytes": 102,
+            "sha256": "6454708ae550d2f1e175f78af798859bb7a39bc21ad0650002a71fa70eedf7a6"
+          }
+        },
+        {
+          "url": "https://mainnet.colibri-proof.tech/execution",
+          "method": "POST",
+          "headers": {
+            "Accept": "application/json",
+            "Content-Type": "application/json"
+          },
+          "body": "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"eth_getStorageAt\",\"params\":[\"0x00000000000c2e074ec69a0dfb2997ba6c7d2e1e\",\"0x9f63b6aa7c9ae6a87aed6d2a486460bc7fabde733278ff83dea2b3db500c17ca\",\"latest\"]}",
+          "response": {
+            "status": 200,
+            "content_type": "application/json",
+            "bytes": 102,
+            "sha256": "c5bb4e8256a44ecafdc123a9f56f6a087a3d93eaac37c6ad54ca2259271f4a57"
+          }
+        },
+        {
+          "url": "https://mainnet.colibri-proof.tech/execution",
+          "method": "POST",
+          "headers": {
+            "Accept": "application/json",
+            "Content-Type": "application/json"
+          },
+          "body": "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"eth_getCode\",\"params\":[\"0x231b0ee14048e9dccd1d247744d114a4eb5e8e63\",\"latest\"]}",
+          "response": {
+            "status": 200,
+            "content_type": "application/json",
+            "bytes": 24710,
+            "sha256": "f9dce73b7c4ebb4d112cde352f4984d697b9f773145f429c301573f55446d8a2"
+          }
+        },
+        {
+          "url": "https://mainnet.colibri-proof.tech/execution",
+          "method": "POST",
+          "headers": {
+            "Accept": "application/json",
+            "Content-Type": "application/json"
+          },
+          "body": "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"eth_getStorageAt\",\"params\":[\"0x231b0ee14048e9dccd1d247744d114a4eb5e8e63\",\"0x9f63b6aa7c9ae6a87aed6d2a486460bc7fabde733278ff83dea2b3db500c17c9\",\"latest\"]}",
+          "response": {
+            "status": 200,
+            "content_type": "application/json",
+            "bytes": 102,
+            "sha256": "d6270a96c74e698681cb7c0012a25d17a018228bca3a631fd19a384e561ca22a"
+          }
+        },
+        {
+          "url": "https://mainnet.colibri-proof.tech/execution",
+          "method": "POST",
+          "headers": {
+            "Accept": "application/json",
+            "Content-Type": "application/json"
+          },
+          "body": "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"eth_getStorageAt\",\"params\":[\"0x231b0ee14048e9dccd1d247744d114a4eb5e8e63\",\"0x26e0ea9fc0925670b0083d032668f9464e8c6c6ed0383ee709f7e8758777fbeb\",\"latest\"]}",
+          "response": {
+            "status": 200,
+            "content_type": "application/json",
+            "bytes": 102,
+            "sha256": "aa1bd30417b0fc4c00d182e38ca5108f15c228ed2a8dc19f5121bdfbd7837deb"
+          }
+        },
+        {
+          "url": "https://mainnet1.colibri-proof.tech",
+          "method": "POST",
+          "headers": {
+            "Accept": "application/octet-stream",
+            "Content-Type": "application/json"
+          },
+          "body": "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"colibri_proofCall\",\"params\":[{\"accessList\":[{\"address\":\"0x231b0ee14048e9dccd1d247744d114a4eb5e8e63\",\"storageKeys\":[\"0x26e0ea9fc0925670b0083d032668f9464e8c6c6ed0383ee709f7e8758777fbeb\",\"0x9f63b6aa7c9ae6a87aed6d2a486460bc7fabde733278ff83dea2b3db500c17c9\"]},{\"address\":\"0x00000000000c2e074ec69a0dfb2997ba6c7d2e1e\",\"storageKeys\":[\"0x9f63b6aa7c9ae6a87aed6d2a486460bc7fabde733278ff83dea2b3db500c17ca\",\"0x9f63b6aa7c9ae6a87aed6d2a486460bc7fabde733278ff83dea2b3db500c17c9\",\"0x859ecef2e168dc10231b000bd53493b42bc9d944cac29d94582c1e1d43592132\",\"0x859ecef2e168dc10231b000bd53493b42bc9d944cac29d94582c1e1d43592131\"]},{\"address\":\"0xf60aba43e1f7f3dab1186ff03b561401c9df85e2\",\"storageKeys\":[\"0xf0a80c0711c0a6ffd03ea5c1a42e33502f746d8a47f8cf7638fcb3408b428931\",\"0xf0a80c0711c0a6ffd03ea5c1a42e33502f746d8a47f8cf7638fcb3408b428932\"]},{\"address\":\"0x2553c09be6447beffdb86fa622ad41fb8f77a91e\",\"storageKeys\":[\"0x5a9b8ad69e6e25c5c98b652237895edd07d3e0ce28e306084d856fa4dfc97898\",\"0x5a9b8ad69e6e25c5c98b652237895edd07d3e0ce28e306084d856fa4dfc97899\"]},{\"address\":\"0xd1e3fac3837b85437530b8b5244e4def43219c04\",\"storageKeys\":[\"0xb10e2d527612073b26eecdfd717e6a320cf44b4afac2b0732d9fcbe2b7fa0cf7\",\"0xb10e2d527612073b26eecdfd717e6a320cf44b4afac2b0732d9fcbe2b7fa0cf6\",\"0x0000000000000000000000000000000000000000000000000000000000000001\"]},{\"address\":\"0xcffd2ae680cd110d28739a70922636b5937b022b\",\"storageKeys\":[\"0x360894a13ba1a3210667c828492db98dca3e2076cc3735a920a3ca505d382bbc\"]},{\"address\":\"0xeeeeeeee14d718c2b47d9923deab1335e144eeee\",\"storageKeys\":[\"0x360894a13ba1a3210667c828492db98dca3e2076cc3735a920a3ca505d382bbc\"]}]},\"latest\"],\"version\":196611,\"c4\":\"0x017e070000\",\"zk_proof\":true,\"last_block_hash\":\"0x93ae1f3f82109a754fb3e35b16e3194174b6d17d8027045b88c93d662034d67d\"}",
+          "response": {
+            "status": 200,
+            "content_type": "application/octet-stream",
+            "bytes": 54963,
+            "sha256": "f17f7fa8e216389ea16eb23a9ef8a6c1eb25fa950d3d6d370e718c3bd1c15952"
+          }
+        }
+      ]
+    },
+    "1-std": {
+      "chain": 1,
+      "captured_at": "2026-11-22T22:40:29.116Z",
+      "params": {},
+      "clocks": {
+        "1-std-cold": [
+          1795387227042
+        ],
+        "1-std-balance": [
+          1795387227360
+        ],
+        "1-std-storage": [
+          1795387227467
+        ],
+        "1-std-lagging-checkpoint": [
+          1795387227042
+        ],
+        "1-std-failover": [
+          1795387227042
+        ],
+        "1-std-sync-all-fail": [
+          1795387227042
+        ],
+        "1-flip-bootstrap": [
+          1795387227042
+        ],
+        "1-flip-updates": [
+          1795387227042
+        ]
+      },
+      "exchanges": [
+        {
+          "url": "https://mainnet1.colibri-proof.tech",
+          "method": "POST",
+          "headers": {
+            "Accept": "application/octet-stream",
+            "Content-Type": "application/json"
+          },
+          "body": "{\"method\":\"eth_blockNumber\",\"params\":[],\"version\":196611}",
+          "response": {
+            "status": 200,
+            "content_type": "application/octet-stream",
+            "bytes": 1259,
+            "sha256": "e7e380186ef59543db5846ee4d8b9d9e0624f6415283bf9dcf37bf788aaec9c7"
+          }
+        },
+        {
+          "url": "https://sync-mainnet.beaconcha.in/eth/v1/beacon/states/head/finality_checkpoints",
+          "method": "GET",
+          "headers": {
+            "Accept": "application/json"
+          },
+          "body": null,
+          "response": {
+            "status": 200,
+            "content_type": "application/json",
+            "bytes": 348,
+            "sha256": "f84d780279cbbcf19b2a6f06f3da7d6c50c6153690f8707ec0b6fbcd72615d8c"
+          }
+        },
+        {
+          "url": "https://mainnet.colibri-proof.tech/consensus/eth/v1/beacon/light_client/bootstrap/0x29a83bd86e77b1cae82c5928dd781ae3a387166d6c574999679ed1aedafe27b2",
+          "method": "GET",
+          "headers": {
+            "Accept": "application/octet-stream"
+          },
+          "body": null,
+          "response": {
+            "status": 200,
+            "content_type": "application/octet-stream",
+            "bytes": 25675,
+            "sha256": "138614aec83d80d790e713696c25270db2b4f39064b658537275d85b76f81fdf"
+          }
+        },
+        {
+          "url": "https://mainnet1.colibri-proof.tech",
+          "method": "POST",
+          "headers": {
+            "Accept": "application/octet-stream",
+            "Content-Type": "application/json"
+          },
+          "body": "{\"method\":\"eth_getProof\",\"params\":[\"0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045\",[],\"latest\"],\"version\":196611,\"c4\":\"0x017e070000\"}",
+          "response": {
+            "status": 200,
+            "content_type": "application/octet-stream",
+            "bytes": 5079,
+            "sha256": "b9c89f57abf03ea981552ba14a8b5fbc026acfa53d64cea853720c97fc86c333"
+          }
+        },
+        {
+          "url": "https://mainnet1.colibri-proof.tech",
+          "method": "POST",
+          "headers": {
+            "Accept": "application/octet-stream",
+            "Content-Type": "application/json"
+          },
+          "body": "{\"method\":\"eth_getProof\",\"params\":[\"0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2\",[\"0x0000000000000000000000000000000000000000000000000000000000000000\"],\"latest\"],\"version\":196611,\"c4\":\"0x017e070000\"}",
+          "response": {
+            "status": 200,
+            "content_type": "application/octet-stream",
+            "bytes": 8118,
+            "sha256": "f4bf21ee31fb92823d895dbe81ab64b768ca7e8bd0df75ac95a51952ea1f5000"
+          }
+        },
+        {
+          "url": "https://mainnet.colibri-proof.tech/consensus/eth/v1/beacon/light_client/bootstrap/0xa404598b23ba05e6b384e252841f5a0bca578db3a6d821d8107d1b5ac4cccfb0",
+          "method": "GET",
+          "headers": {
+            "Accept": "application/octet-stream"
+          },
+          "body": null,
+          "response": {
+            "status": 200,
+            "content_type": "application/octet-stream",
+            "bytes": 25666,
+            "sha256": "6e5b4ff27618d3e3ab9839b71f670cb31750c84ab2498e6d9801919603cb9e52"
+          }
+        },
+        {
+          "url": "https://mainnet.colibri-proof.tech/consensus/eth/v1/beacon/light_client/updates?start_period=1917&count=1",
+          "method": "GET",
+          "headers": {
+            "Accept": "application/octet-stream"
+          },
+          "body": null,
+          "response": {
+            "status": 200,
+            "content_type": "application/octet-stream",
+            "bytes": 26911,
+            "sha256": "cd42bbc5563b7fe50996e2d29c057d05815d663aed89e98f563dcb64c44a0dd0"
+          }
+        },
+        {
+          "url": "https://gateway.tenderly.co/public/mainnet/eth/v1/beacon/light_client/bootstrap/0x29a83bd86e77b1cae82c5928dd781ae3a387166d6c574999679ed1aedafe27b2",
+          "method": "GET",
+          "headers": {
+            "Accept": "application/octet-stream"
+          },
+          "body": null,
+          "response": {
+            "status": 200,
+            "content_type": "application/octet-stream",
+            "bytes": 25675,
+            "sha256": "138614aec83d80d790e713696c25270db2b4f39064b658537275d85b76f81fdf"
+          }
+        }
+      ]
+    },
+    "100-zk": {
+      "chain": 100,
+      "captured_at": "2026-11-22T22:40:52.366Z",
+      "params": {
+        "number": "0x2f20eb2",
+        "hash": "0x6c6fe9f8b2d5fb2eeac277ba742f6d51704266ac33979644e2a6707f5629fe5e",
+        "tx": "0xcfe7d3512f8e73998f38fc4aca153e13c54197749aa5557971dfd948210e36a1",
+        "newTx": "0x0a8fc3cf2fca997e162ba3dab0167134b233b2bf18825c910eb5954c66247074"
+      },
+      "clocks": {
+        "100-zk-cold": [
+          1795387229124
+        ],
+        "100-balance": [
+          1795387230012
+        ],
+        "100-nonce": [
+          1795387230138
+        ],
+        "100-storage": [
+          1795387230185
+        ],
+        "100-storage-short-slot": [
+          1795387230283
+        ],
+        "100-code": [
+          1795387230343
+        ],
+        "100-block-latest": [
+          1795387230570
+        ],
+        "100-block-latest-full": [
+          1795387230685
+        ],
+        "100-block-number": [
+          1795387230912
+        ],
+        "100-block-hash": [
+          1795387231087
+        ],
+        "100-block-empty": [
+          1795387231210
+        ],
+        "100-block-null": [
+          1795387231308
+        ],
+        "100-block-by-hash": [
+          1795387231351
+        ],
+        "100-block-number-warm": [
+          1795387231436
+        ],
+        "100-priority-fee": [
+          1795387231509
+        ],
+        "100-tx": [
+          1795387231628
+        ],
+        "100-receipt": [
+          1795387231628
+        ],
+        "100-tx-incremental": [
+          1795387231628,
+          1795387248454
+        ],
+        "100-tx-old": [
+          1795387231628
+        ],
+        "100-tx-unindexed": [
+          1795387231628
+        ],
+        "100-receipt-unknown": [
+          1795387231628
+        ],
+        "100-flip-cold-proof": [
+          1795387229124
+        ],
+        "100-flip-account": [
+          1795387230012
+        ],
+        "100-flip-storage": [
+          1795387230185
+        ],
+        "100-flip-code": [
+          1795387230343
+        ],
+        "100-flip-block": [
+          1795387230570
+        ],
+        "100-flip-tx-cache": [
+          1795387231628
+        ],
+        "100-flip-receipts": [
+          1795387231628
+        ],
+        "100-flip-tx-block": [
+          1795387231628
+        ],
+        "100-stale-account": [
+          1795387350012
+        ],
+        "100-stale-block": [
+          1795387351436
+        ],
+        "100-f9-http-balance": [
+          1795387251196
+        ],
+        "100-f9-transport-balance": [
+          1795387251218
+        ],
+        "100-f9-http-nonce": [
+          1795387251225
+        ],
+        "100-f9-transport-nonce": [
+          1795387251241
+        ],
+        "100-f9-http-storage": [
+          1795387251258
+        ],
+        "100-f9-transport-storage": [
+          1795387251273
+        ],
+        "100-f9-http-code": [
+          1795387251284
+        ],
+        "100-f9-transport-code": [
+          1795387251290
+        ],
+        "100-f9-http-block-number": [
+          1795387251305
+        ],
+        "100-f9-transport-block-number": [
+          1795387251321
+        ],
+        "100-f9-http-block-hash": [
+          1795387251333
+        ],
+        "100-f9-transport-block-hash": [
+          1795387251349
+        ],
+        "100-f9-http-block-number-now": [
+          1795387251355
+        ],
+        "100-f9-transport-block-number-now": [
+          1795387251369
+        ],
+        "100-f9-http-priority-fee": [
+          1795387251378
+        ],
+        "100-f9-transport-priority-fee": [
+          1795387251385
+        ],
+        "100-zk-fallback": [
+          1795387251399,
+          1795387251483
+        ],
+        "100-gas-price": [
+          1795387251558
+        ],
+        "100-fee-history": [
+          1795387251594
+        ],
+        "100-balance-pending": [
+          1795387251637
+        ],
+        "100-balance-earliest": [
+          1795387251701
+        ],
+        "100-call-scripted-code": [
+          1795387251742
+        ],
+        "100-estimate-scripted-code": [
+          1795387251765
+        ],
+        "100-unbound-balance-number": [
+          1795387230012
+        ],
+        "100-unbound-balance-hash": [
+          1795387230012
+        ],
+        "100-unbound-balance-safe": [
+          1795387230012
+        ],
+        "100-unbound-balance-finalized": [
+          1795387230012
+        ],
+        "100-unbound-balance-justified": [
+          1795387230012
+        ],
+        "100-unbound-balance-no-block": [
+          1795387230012
+        ],
+        "100-unbound-balance-1898-hash": [
+          1795387230012
+        ],
+        "100-unbound-balance-1898-canonical": [
+          1795387230012
+        ],
+        "100-unbound-balance-1898-number": [
+          1795387230012
+        ],
+        "100-unbound-block-safe": [
+          1795387230570
+        ],
+        "100-unbound-block-finalized": [
+          1795387230570
+        ],
+        "100-unbound-block-justified": [
+          1795387230570
+        ],
+        "100-unbound-block-0X10": [
+          1795387230570
+        ],
+        "100-unbound-block-1x10": [
+          1795387230570
+        ]
+      },
+      "exchanges": [
+        {
+          "url": "https://gnosis.colibri-proof.tech",
+          "method": "POST",
+          "headers": {
+            "Accept": "application/octet-stream",
+            "Content-Type": "application/json"
+          },
+          "body": "{\"method\":\"eth_blockNumber\",\"params\":[],\"version\":196611,\"zk_proof\":true}",
+          "response": {
+            "status": 200,
+            "content_type": "application/octet-stream",
+            "bytes": 26682,
+            "sha256": "9c6ccb06fbeca3a1f37c2da616ef9e88502d97e9aafdffde72a7b1230fe6162c"
+          }
+        },
+        {
+          "url": "https://checkpoint.gnosischain.com/eth/v1/beacon/blocks/31278720/root",
+          "method": "GET",
+          "headers": {
+            "Accept": "application/json"
+          },
+          "body": null,
+          "response": {
+            "status": 200,
+            "content_type": "application/json",
+            "bytes": 84,
+            "sha256": "75cd36158b53e9c7f04e0e36c29fc6e907ef0c7ca38a21f8ad9d8ca5af0ff56a"
+          }
+        },
+        {
+          "url": "https://gnosis.colibri-proof.tech",
+          "method": "POST",
+          "headers": {
+            "Accept": "application/octet-stream",
+            "Content-Type": "application/json"
+          },
+          "body": "{\"method\":\"eth_getProof\",\"params\":[\"0xe91D153E0b41518A2Ce8Dd3D7944Fa863463a97d\",[],\"latest\"],\"version\":196611,\"c4\":\"0x01ea0e0000\",\"zk_proof\":true}",
+          "response": {
+            "status": 200,
+            "content_type": "application/octet-stream",
+            "bytes": 4408,
+            "sha256": "84b5e9eeeb4a34de2244f66cbf59a531238868781f16659f49e1a75fe1b97bc4"
+          }
+        },
+        {
+          "url": "https://gnosis.colibri-proof.tech",
+          "method": "POST",
+          "headers": {
+            "Accept": "application/octet-stream",
+            "Content-Type": "application/json"
+          },
+          "body": "{\"method\":\"eth_getProof\",\"params\":[\"0xe91D153E0b41518A2Ce8Dd3D7944Fa863463a97d\",[\"0x0000000000000000000000000000000000000000000000000000000000000000\"],\"latest\"],\"version\":196611,\"c4\":\"0x01ea0e0000\",\"zk_proof\":true}",
+          "response": {
+            "status": 200,
+            "content_type": "application/octet-stream",
+            "bytes": 7094,
+            "sha256": "e9c44671457856c910ebd30cd6293e5dc68a85674e08db398e65aa6239b3c045"
+          }
+        },
+        {
+          "url": "https://gnosis.colibri-proof.tech",
+          "method": "POST",
+          "headers": {
+            "Accept": "application/octet-stream",
+            "Content-Type": "application/json"
+          },
+          "body": "{\"method\":\"eth_getProof\",\"params\":[\"0xe91D153E0b41518A2Ce8Dd3D7944Fa863463a97d\",[\"0x0\"],\"latest\"],\"version\":196611,\"c4\":\"0x01ea0e0000\",\"zk_proof\":true}",
+          "response": {
+            "status": 500,
+            "content_type": "application/json",
+            "bytes": 154,
+            "sha256": "ca38d4a273e39ed28f9437ce8e9ac6e9da64eae8ab097bf9e3241e67d18bac68"
+          }
+        },
+        {
+          "url": "https://gnosis.colibri-proof.tech",
+          "method": "POST",
+          "headers": {
+            "Accept": "application/octet-stream",
+            "Content-Type": "application/json"
+          },
+          "body": "{\"method\":\"eth_getCode\",\"params\":[\"0xe91D153E0b41518A2Ce8Dd3D7944Fa863463a97d\",\"latest\"],\"version\":196611,\"c4\":\"0x01ea0e0000\",\"zk_proof\":true}",
+          "response": {
+            "status": 200,
+            "content_type": "application/octet-stream",
+            "bytes": 7612,
+            "sha256": "9cbeb43c10ea0de7d8738a445581139897847eda81a311b0c094db368daa84f2"
+          }
+        },
+        {
+          "url": "https://gnosis.colibri-proof.tech",
+          "method": "POST",
+          "headers": {
+            "Accept": "application/octet-stream",
+            "Content-Type": "application/json"
+          },
+          "body": "{\"method\":\"eth_getBlockByNumber\",\"params\":[\"latest\",false],\"version\":196611,\"c4\":\"0x01ea0e0000\",\"zk_proof\":true}",
+          "response": {
+            "status": 200,
+            "content_type": "application/octet-stream",
+            "bytes": 31857,
+            "sha256": "2bffd0abc93c4372158cc90ecd2e08e2a9b69baee87e63aec764223ee9165321"
+          }
+        },
+        {
+          "url": "https://gnosis.colibri-proof.tech",
+          "method": "POST",
+          "headers": {
+            "Accept": "application/octet-stream",
+            "Content-Type": "application/json"
+          },
+          "body": "{\"method\":\"eth_getBlockByNumber\",\"params\":[\"latest\",true],\"version\":196611,\"c4\":\"0x01ea0e0000\",\"zk_proof\":true}",
+          "response": {
+            "status": 200,
+            "content_type": "application/octet-stream",
+            "bytes": 31857,
+            "sha256": "2bffd0abc93c4372158cc90ecd2e08e2a9b69baee87e63aec764223ee9165321"
+          }
+        },
+        {
+          "url": "https://gnosis.colibri-proof.tech",
+          "method": "POST",
+          "headers": {
+            "Accept": "application/octet-stream",
+            "Content-Type": "application/json"
+          },
+          "body": "{\"method\":\"eth_getBlockByNumber\",\"params\":[\"0x2f20eb2\",false],\"version\":196611,\"c4\":\"0x01ea0e0000\",\"zk_proof\":true}",
+          "response": {
+            "status": 200,
+            "content_type": "application/octet-stream",
+            "bytes": 31857,
+            "sha256": "2bffd0abc93c4372158cc90ecd2e08e2a9b69baee87e63aec764223ee9165321"
+          }
+        },
+        {
+          "url": "https://gnosis.colibri-proof.tech",
+          "method": "POST",
+          "headers": {
+            "Accept": "application/octet-stream",
+            "Content-Type": "application/json"
+          },
+          "body": "{\"method\":\"eth_getBlockByNumber\",\"params\":[\"0x6c6fe9f8b2d5fb2eeac277ba742f6d51704266ac33979644e2a6707f5629fe5e\",false],\"version\":196611,\"c4\":\"0x01ea0e0000\",\"zk_proof\":true}",
+          "response": {
+            "status": 200,
+            "content_type": "application/octet-stream",
+            "bytes": 31857,
+            "sha256": "2bffd0abc93c4372158cc90ecd2e08e2a9b69baee87e63aec764223ee9165321"
+          }
+        },
+        {
+          "url": "https://gnosis.colibri-proof.tech",
+          "method": "POST",
+          "headers": {
+            "Accept": "application/octet-stream",
+            "Content-Type": "application/json"
+          },
+          "body": "{\"method\":\"eth_getBlockByNumber\",\"params\":[],\"version\":196611,\"c4\":\"0x01ea0e0000\",\"zk_proof\":true}",
+          "response": {
+            "status": 200,
+            "content_type": "application/octet-stream",
+            "bytes": 31857,
+            "sha256": "2bffd0abc93c4372158cc90ecd2e08e2a9b69baee87e63aec764223ee9165321"
+          }
+        },
+        {
+          "url": "https://gnosis.colibri-proof.tech",
+          "method": "POST",
+          "headers": {
+            "Accept": "application/octet-stream",
+            "Content-Type": "application/json"
+          },
+          "body": "{\"method\":\"eth_getBlockByHash\",\"params\":[\"0x6c6fe9f8b2d5fb2eeac277ba742f6d51704266ac33979644e2a6707f5629fe5e\",false],\"version\":196611,\"c4\":\"0x01ea0e0000\",\"zk_proof\":true}",
+          "response": {
+            "status": 200,
+            "content_type": "application/octet-stream",
+            "bytes": 31857,
+            "sha256": "2bffd0abc93c4372158cc90ecd2e08e2a9b69baee87e63aec764223ee9165321"
+          }
+        },
+        {
+          "url": "https://gnosis.colibri-proof.tech",
+          "method": "POST",
+          "headers": {
+            "Accept": "application/octet-stream",
+            "Content-Type": "application/json"
+          },
+          "body": "{\"method\":\"eth_blockNumber\",\"params\":[],\"version\":196611,\"c4\":\"0x01ea0e0000\",\"zk_proof\":true}",
+          "response": {
+            "status": 200,
+            "content_type": "application/octet-stream",
+            "bytes": 1241,
+            "sha256": "c8bed2c0c0a54cae16313f2ab17150aa1c3468a7b2db5f6635dbad265ad48584"
+          }
+        },
+        {
+          "url": "https://gnosis.colibri-proof.tech",
+          "method": "POST",
+          "headers": {
+            "Accept": "application/octet-stream",
+            "Content-Type": "application/json"
+          },
+          "body": "{\"method\":\"eth_maxPriorityFeePerGas\",\"params\":[],\"version\":196611,\"c4\":\"0x01ea0e0000\",\"zk_proof\":true}",
+          "response": {
+            "status": 200,
+            "content_type": "application/octet-stream",
+            "bytes": 1241,
+            "sha256": "c8bed2c0c0a54cae16313f2ab17150aa1c3468a7b2db5f6635dbad265ad48584"
+          }
+        },
+        {
+          "url": "https://gnosis.colibri-proof.tech/tx_cache?max_blocks=256",
+          "method": "GET",
+          "headers": {
+            "Accept": "application/octet-stream",
+            "Cache-Control": "max-age=2"
+          },
+          "body": null,
+          "response": {
+            "status": 200,
+            "content_type": "application/octet-stream",
+            "bytes": 194688,
+            "sha256": "f3a5a271035199a96b27fe7fd36c64f86aef984dec750b04ed08808d3c461380"
+          }
+        },
+        {
+          "url": "https://gnosis.colibri-proof.tech/proof/eth_getBlockByNumber/0x2f20eb2/196611/zk/0x",
+          "method": "GET",
+          "headers": {
+            "Accept": "application/octet-stream"
+          },
+          "body": null,
+          "response": {
+            "status": 200,
+            "content_type": "application/octet-stream",
+            "bytes": 57298,
+            "sha256": "21e3aa6c6ec5c77aaa9aa44281eaa907fbc88c855b5f2b0dd87183d519807cde"
+          }
+        },
+        {
+          "url": "https://gnosis.colibri-proof.tech/proof/eth_getBlockReceipts/0x2f20eb2/196611/zk/0x",
+          "method": "GET",
+          "headers": {
+            "Accept": "application/octet-stream"
+          },
+          "body": null,
+          "response": {
+            "status": 200,
+            "content_type": "application/octet-stream",
+            "bytes": 95904,
+            "sha256": "ead8b92547f7880c537cb78dc68271ebf890444e9fbca877574ddbe0fe36248f"
+          }
+        },
+        {
+          "url": "https://gnosis.colibri-proof.tech/tx_cache?from_block=49417907&max_blocks=256",
+          "method": "GET",
+          "headers": {
+            "Accept": "application/octet-stream",
+            "Cache-Control": "max-age=2"
+          },
+          "body": null,
+          "response": {
+            "status": 200,
+            "content_type": "application/octet-stream",
+            "bytes": 2992,
+            "sha256": "8720da8dd22d338ee52e32b27d4ba80f6533c317773330cdced67945391178e7"
+          }
+        },
+        {
+          "url": "https://gnosis.colibri-proof.tech/proof/eth_getBlockByNumber/0x2f20eb5/196611/zk/0x",
+          "method": "GET",
+          "headers": {
+            "Accept": "application/octet-stream"
+          },
+          "body": null,
+          "response": {
+            "status": 200,
+            "content_type": "application/octet-stream",
+            "bytes": 41920,
+            "sha256": "f2532f4c077bd60d83c6ac1a6635757260b7d1a67e36881e8e2204be3a31e216"
+          }
+        },
+        {
+          "url": "https://gnosis.colibri-proof.tech/proof/eth_getBlockByNumber/0x2f087c6/196611/zk/0x",
+          "method": "GET",
+          "headers": {
+            "Accept": "application/octet-stream"
+          },
+          "body": null,
+          "response": {
+            "status": 200,
+            "content_type": "application/octet-stream",
+            "bytes": 49180,
+            "sha256": "e2e7e53b0cb80c829afb67e37102787f15ebac4916ebc619a621e071cbce83e0"
+          }
+        },
+        {
+          "url": "https://gnosis.colibri-proof.tech",
+          "method": "POST",
+          "headers": {
+            "Accept": "application/octet-stream",
+            "Content-Type": "application/json"
+          },
+          "body": "{\"method\":\"eth_getTransactionByHash\",\"params\":[\"0xcedbf7f06f9ea9d0f5bfa326c075f95385d16726e173784ae699c8f1c00fbe1d\"],\"version\":196611,\"c4\":\"0x01ea0e0000\",\"zk_proof\":true}",
+          "response": {
+            "status": 200,
+            "content_type": "application/octet-stream",
+            "bytes": 19,
+            "sha256": "d7ed382a543ed6e4faa565638b09af7a2524b08ae2c34cfe2cbd6808525154da"
+          }
+        },
+        {
+          "url": "https://gnosis.colibri-proof.tech",
+          "method": "POST",
+          "headers": {
+            "Accept": "application/octet-stream",
+            "Content-Type": "application/json"
+          },
+          "body": "{\"method\":\"eth_getTransactionReceipt\",\"params\":[\"0xc0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c001\"],\"version\":196611,\"c4\":\"0x01ea0e0000\",\"zk_proof\":true}",
+          "response": {
+            "status": 200,
+            "content_type": "application/octet-stream",
+            "bytes": 19,
+            "sha256": "d7ed382a543ed6e4faa565638b09af7a2524b08ae2c34cfe2cbd6808525154da"
+          }
+        },
+        {
+          "url": "https://gnosis.colibri-proof.tech",
+          "method": "POST",
+          "headers": {
+            "Accept": "application/octet-stream",
+            "Content-Type": "application/json"
+          },
+          "body": "{\"method\":\"eth_blockNumber\",\"params\":[],\"version\":196611,\"c4\":\"0x01ea0e0000\"}",
+          "response": {
+            "status": 200,
+            "content_type": "application/octet-stream",
+            "bytes": 1241,
+            "sha256": "15f9cd3c8d89380e63a3c090aaf0be0887fc9b02d916191216749816d8e3118f"
+          }
+        },
+        {
+          "url": "https://gnosis.colibri-proof.tech",
+          "method": "POST",
+          "headers": {
+            "Accept": "application/octet-stream",
+            "Content-Type": "application/json"
+          },
+          "body": "{\"method\":\"eth_blockNumber\",\"params\":[],\"version\":196611,\"c4\":\"0x01ea0e0000\",\"last_block_hash\":\"0xc467dfa89b87344b777018a1cdabf22d26c04dfcd31a40d0b6a5a1a53b9a6542\"}",
+          "response": {
+            "status": 200,
+            "content_type": "application/octet-stream",
+            "bytes": 61,
+            "sha256": "ed7ad7c21d432dd3e156bf0bcf694c2f0491bab0df4e97fe41c82a982884fd22"
+          }
+        },
+        {
+          "url": "https://gnosis.colibri-proof.tech/execution",
+          "method": "POST",
+          "headers": {
+            "Accept": "application/json",
+            "Content-Type": "application/json"
+          },
+          "body": "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"eth_gasPrice\",\"params\":[]}",
+          "response": {
+            "status": 200,
+            "content_type": "application/json",
+            "bytes": 39,
+            "sha256": "0a55f8f42a3d75010da0cf1977fe3bafd83a043479ffff9a92685402c3a1d317"
+          }
+        },
+        {
+          "url": "https://gnosis.colibri-proof.tech/execution",
+          "method": "POST",
+          "headers": {
+            "Accept": "application/json",
+            "Content-Type": "application/json"
+          },
+          "body": "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"eth_feeHistory\",\"params\":[\"0x4\",\"latest\",[25,75]]}",
+          "response": {
+            "status": 200,
+            "content_type": "application/json",
+            "bytes": 424,
+            "sha256": "3294edc1c6530cee23b59e4b97ef534d1843456f06b5ea2de2d29717b808ad79"
+          }
+        },
+        {
+          "url": "https://gnosis.colibri-proof.tech/execution",
+          "method": "POST",
+          "headers": {
+            "Accept": "application/json",
+            "Content-Type": "application/json"
+          },
+          "body": "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"eth_getBalance\",\"params\":[\"0xe91D153E0b41518A2Ce8Dd3D7944Fa863463a97d\",\"pending\"]}",
+          "response": {
+            "status": 200,
+            "content_type": "application/json",
+            "bytes": 60,
+            "sha256": "2fa1237e637009d04356552701573a69873f888ee30491fc90e0bb03acc0616b"
+          }
+        },
+        {
+          "url": "https://gnosis.colibri-proof.tech/execution",
+          "method": "POST",
+          "headers": {
+            "Accept": "application/json",
+            "Content-Type": "application/json"
+          },
+          "body": "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"eth_getBalance\",\"params\":[\"0xe91D153E0b41518A2Ce8Dd3D7944Fa863463a97d\",\"earliest\"]}",
+          "response": {
+            "status": 200,
+            "content_type": "application/json",
+            "bytes": 160,
+            "sha256": "6c0803df366e3d9c0176fb66c4fac07b96282592adff1879565e7d7f0432d381"
+          }
+        }
+      ]
+    },
+    "100-std": {
+      "chain": 100,
+      "captured_at": "2026-11-22T22:40:54.123Z",
+      "params": {},
+      "clocks": {
+        "100-std-cold": [
+          1795387252377
+        ],
+        "100-std-balance": [
+          1795387252829
+        ],
+        "100-std-storage": [
+          1795387252905
+        ],
+        "100-std-receipt": [
+          1795387252997
+        ],
+        "100-std-lagging-checkpoint": [
+          1795387252377
+        ],
+        "100-std-failover": [
+          1795387252377
+        ],
+        "100-std-sync-all-fail": [
+          1795387252377
+        ],
+        "100-flip-bootstrap": [
+          1795387252377
+        ],
+        "100-flip-updates": [
+          1795387252377
+        ]
+      },
+      "exchanges": [
+        {
+          "url": "https://gnosis.colibri-proof.tech",
+          "method": "POST",
+          "headers": {
+            "Accept": "application/octet-stream",
+            "Content-Type": "application/json"
+          },
+          "body": "{\"method\":\"eth_blockNumber\",\"params\":[],\"version\":196611}",
+          "response": {
+            "status": 200,
+            "content_type": "application/octet-stream",
+            "bytes": 1241,
+            "sha256": "15f9cd3c8d89380e63a3c090aaf0be0887fc9b02d916191216749816d8e3118f"
+          }
+        },
+        {
+          "url": "https://checkpoint.gnosischain.com/eth/v1/beacon/states/head/finality_checkpoints",
+          "method": "GET",
+          "headers": {
+            "Accept": "application/json"
+          },
+          "body": null,
+          "response": {
+            "status": 200,
+            "content_type": "application/json",
+            "bytes": 351,
+            "sha256": "eb2d4fcaf86095c4035e95dd744a81225ea5a1a7912c1ef735eadccc554f874a"
+          }
+        },
+        {
+          "url": "https://gnosis.colibri-proof.tech/consensus/eth/v1/beacon/light_client/bootstrap/0x87924c26a2e0a91e5011a7d95a9a6b94b250fb511c98125af1440424cad0e305",
+          "method": "GET",
+          "headers": {
+            "Accept": "application/octet-stream"
+          },
+          "body": null,
+          "response": {
+            "status": 200,
+            "content_type": "application/octet-stream",
+            "bytes": 25666,
+            "sha256": "04cbea938fe6edb5b6f3889afb36e39d95fda577f0d2291a5afd67e6f0f8a23d"
+          }
+        },
+        {
+          "url": "https://gnosis.colibri-proof.tech",
+          "method": "POST",
+          "headers": {
+            "Accept": "application/octet-stream",
+            "Content-Type": "application/json"
+          },
+          "body": "{\"method\":\"eth_getProof\",\"params\":[\"0xe91D153E0b41518A2Ce8Dd3D7944Fa863463a97d\",[],\"latest\"],\"version\":196611,\"c4\":\"0x01ea0e0000\"}",
+          "response": {
+            "status": 200,
+            "content_type": "application/octet-stream",
+            "bytes": 4408,
+            "sha256": "54bf868c74a0c3b422d1a6b3797d07cf73a7306fe2a0ee384a6ff0dd9719da06"
+          }
+        },
+        {
+          "url": "https://gnosis.colibri-proof.tech",
+          "method": "POST",
+          "headers": {
+            "Accept": "application/octet-stream",
+            "Content-Type": "application/json"
+          },
+          "body": "{\"method\":\"eth_getProof\",\"params\":[\"0xe91D153E0b41518A2Ce8Dd3D7944Fa863463a97d\",[\"0x0000000000000000000000000000000000000000000000000000000000000000\"],\"latest\"],\"version\":196611,\"c4\":\"0x01ea0e0000\"}",
+          "response": {
+            "status": 200,
+            "content_type": "application/octet-stream",
+            "bytes": 7094,
+            "sha256": "3a0c0a5bc6fa2c84cdb8cb360b3faa3278ae8691c62db4b3bf38d15c4586ffdc"
+          }
+        },
+        {
+          "url": "https://gnosis.colibri-proof.tech/tx_cache?max_blocks=256",
+          "method": "GET",
+          "headers": {
+            "Accept": "application/octet-stream",
+            "Cache-Control": "max-age=2"
+          },
+          "body": null,
+          "response": {
+            "status": 200,
+            "content_type": "application/octet-stream",
+            "bytes": 399808,
+            "sha256": "af54b5309e7a35dc35fd1a0c0736ef055fa30aaa426a27a231781cc8f8a8d9ec"
+          }
+        },
+        {
+          "url": "https://gnosis.colibri-proof.tech/proof/eth_getBlockReceipts/0x2f087c6/196611/std/0x",
+          "method": "GET",
+          "headers": {
+            "Accept": "application/octet-stream"
+          },
+          "body": null,
+          "response": {
+            "status": 200,
+            "content_type": "application/octet-stream",
+            "bytes": 58328,
+            "sha256": "0f1c2c20095d0410912f6bd5996a55f793fe8f2d8e86f27fed59ae2addff5381"
+          }
+        },
+        {
+          "url": "https://gnosis.colibri-proof.tech/consensus/eth/v1/beacon/light_client/bootstrap/0x4e18a33128b2907cac682f15c995cff97201721f19204b73dfb090a94863c277",
+          "method": "GET",
+          "headers": {
+            "Accept": "application/octet-stream"
+          },
+          "body": null,
+          "response": {
+            "status": 200,
+            "content_type": "application/octet-stream",
+            "bytes": 25665,
+            "sha256": "aa12871bbb52941e8b07e98b1cae3c9d6120425bd7cdd7fdf2f2974feb3676ee"
+          }
+        },
+        {
+          "url": "https://gnosis.colibri-proof.tech/consensus/eth/v1/beacon/light_client/updates?start_period=3817&count=1",
+          "method": "GET",
+          "headers": {
+            "Accept": "application/octet-stream"
+          },
+          "body": null,
+          "response": {
+            "status": 200,
+            "content_type": "application/octet-stream",
+            "bytes": 26920,
+            "sha256": "3f32b13f443e9638734e712670d44e6f66370ceec30f47e9996886dbf83b4f15"
+          }
+        },
+        {
+          "url": "https://rpc-gbc.gnosischain.com/eth/v1/beacon/light_client/bootstrap/0x87924c26a2e0a91e5011a7d95a9a6b94b250fb511c98125af1440424cad0e305",
+          "method": "GET",
+          "headers": {
+            "Accept": "application/octet-stream"
+          },
+          "body": null,
+          "response": {
+            "status": 200,
+            "content_type": "application/octet-stream",
+            "bytes": 25666,
+            "sha256": "04cbea938fe6edb5b6f3889afb36e39d95fda577f0d2291a5afd67e6f0f8a23d"
+          }
+        }
+      ]
+    }
+  },
+  "checkpoint_proofs": [
+    "72808e037ad60896e88cc15943b62d0b693d1b3d3cad5bc85422ef5b1ded7481",
+    "b4179a4c7316bdda5531a6aeab09bbf505ea28c93a90724844361fd8ad1ee443",
+    "be345a4716e892f5a3e9370c87c5a0ce45ef097c02cec11d44e846722799ef5a",
+    "d522993401e852dc0b0a73971ca818a5b44a6da8f996b36d1037f7ef00d54431"
+  ]
+}

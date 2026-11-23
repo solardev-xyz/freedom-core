@@ -15,6 +15,10 @@ const RADICLE_REFERENCE = process.env.FREEDOM_BROWSER_RADICLE_CHECKOUT || '/root
 const APPROVALS_REFERENCE = process.env.FREEDOM_BROWSER_APPROVALS_CHECKOUT || '/root/herdr/freedom-browser-wt/approvals-reference';
 // The set-A stores' reference (generate.js, STORES_REFERENCE_COMMIT).
 const STORES_REFERENCE = process.env.FREEDOM_BROWSER_STORES_CHECKOUT || '/root/herdr/freedom-browser-wt/stores-reference';
+// The Colibri vectors' reference (generate.js, COLIBRI_REFERENCE_COMMIT).
+const COLIBRI_REFERENCE = process.env.FREEDOM_BROWSER_COLIBRI_CHECKOUT || '/root/herdr/freedom-browser-wt/colibri-reference';
+// A whole check, colibri.json's 160-odd runs of the WASM verifier included.
+const CHECK_TIMEOUT = 180000;
 const FILES = ['keys.json', 'mnemonic-validation.json', 'identity-formats.json', 'signing.json', 'naming.json', 'naming-replay.json',
   'chain.json', 'chain-replay.json', 'fixtures/vaults.json', 'fixtures/bee-keystores.json', 'fixtures/radicle-openssh.json',
   'generator/generate.js', 'generator/signing.js', 'generator/naming.js', 'generator/naming-replay.js', 'generator/chain.js',
@@ -38,6 +42,36 @@ FILES.push('stores.json', 'generator/stores.js', 'generator/stores-intents.js', 
 FILES.push('generator/tx-decode.js');
 FILES.push('journal.json', 'generator/journal.js');
 FILES.push('sqlite.json', 'generator/sqlite.js', 'generator/sqlite-payments.js');
+FILES.push('colibri.json', 'generator/colibri.js', 'generator/colibri-cases.js', 'generator/colibri-contract.js',
+  'generator/colibri-capture.js', 'fixtures/colibri/sessions.json',
+  ...fs.readdirSync(path.join(SOURCE, 'fixtures/colibri/bodies')).map((name) => `fixtures/colibri/bodies/${name}`));
+
+function checkArgs(generator, overrides = {}) {
+  const refs = { freedom: REFERENCE, radicle: RADICLE_REFERENCE, approvals: APPROVALS_REFERENCE, stores: STORES_REFERENCE,
+    colibri: COLIBRI_REFERENCE, ...overrides };
+  return [generator, 'check', '--freedom-browser', refs.freedom, '--radicle-browser', refs.radicle,
+    '--approvals-browser', refs.approvals, '--stores-browser', refs.stores, '--colibri-browser', refs.colibri];
+}
+
+/** A check over a copy of every file, `damage` applied to the copy's directory first. */
+function damagedCheck(damage) {
+  const copy = fs.mkdtempSync(path.join(os.tmpdir(), 'freedom-core-vectors-'));
+  let result;
+  try {
+    for (const file of FILES) {
+      const destination = path.join(copy, file);
+      fs.mkdirSync(path.dirname(destination), { recursive: true });
+      fs.copyFileSync(path.join(SOURCE, file), destination);
+    }
+    damage(copy);
+    result = spawnSync(process.execPath, checkArgs(path.join(copy, 'generator/generate.js')), { encoding: 'utf8', timeout: CHECK_TIMEOUT });
+  } finally {
+    fs.rmSync(copy, { recursive: true, force: true });
+  }
+  assert.equal(result.error, undefined, result.error?.message);
+  assert.equal(result.status, 1, result.stdout + result.stderr);
+  return result.stderr;
+}
 
 function corruptedCheck(filename, corrupt) {
   const copy = fs.mkdtempSync(path.join(os.tmpdir(), 'freedom-core-vectors-'));
@@ -53,9 +87,7 @@ function corruptedCheck(filename, corrupt) {
     const contents = JSON.parse(fs.readFileSync(destination, 'utf8'));
     corrupt(contents);
     fs.writeFileSync(destination, JSON.stringify(contents, null, 2) + '\n');
-    result = spawnSync(process.execPath, [path.join(copy, 'generator/generate.js'),
-      'check', '--freedom-browser', REFERENCE, '--radicle-browser', RADICLE_REFERENCE,
-      '--approvals-browser', APPROVALS_REFERENCE, '--stores-browser', STORES_REFERENCE], { encoding: 'utf8', timeout: 60000 });
+    result = spawnSync(process.execPath, checkArgs(path.join(copy, 'generator/generate.js')), { encoding: 'utf8', timeout: CHECK_TIMEOUT });
   } finally {
     fs.rmSync(copy, { recursive: true, force: true });
   }
@@ -879,9 +911,8 @@ test('check rejects a changed import answer', () => {
 
 test('check takes the Radicle vectors from their own reference, at its pinned commit', () => {
   // The shared reference is at another commit: refused before anything is built.
-  const result = spawnSync(process.execPath, [path.join(SOURCE, 'generator/generate.js'),
-    'check', '--freedom-browser', REFERENCE, '--radicle-browser', REFERENCE,
-    '--approvals-browser', APPROVALS_REFERENCE, '--stores-browser', STORES_REFERENCE], { encoding: 'utf8', timeout: 60000 });
+  const result = spawnSync(process.execPath, checkArgs(path.join(SOURCE, 'generator/generate.js'), { radicle: REFERENCE }),
+    { encoding: 'utf8', timeout: CHECK_TIMEOUT });
   assert.equal(result.status, 1, result.stdout + result.stderr);
   assert.match(result.stderr, /Use the pinned Radicle reference commit/);
   // And each Radicle file records it.
@@ -928,9 +959,8 @@ test('check rejects a changed journal run', () => {
 
 test('check takes the approvals vectors from their own reference, at its pinned commit', () => {
   // The shared reference is at another commit: refused before anything is built.
-  const result = spawnSync(process.execPath, [path.join(SOURCE, 'generator/generate.js'),
-    'check', '--freedom-browser', REFERENCE, '--radicle-browser', RADICLE_REFERENCE,
-    '--approvals-browser', REFERENCE, '--stores-browser', STORES_REFERENCE], { encoding: 'utf8', timeout: 60000 });
+  const result = spawnSync(process.execPath, checkArgs(path.join(SOURCE, 'generator/generate.js'), { approvals: REFERENCE }),
+    { encoding: 'utf8', timeout: CHECK_TIMEOUT });
   assert.equal(result.status, 1, result.stdout + result.stderr);
   assert.match(result.stderr, /Use the pinned approvals reference commit/);
   // And the file records it.
@@ -958,9 +988,8 @@ test('check rejects a changed pending Safe transactions answer', () => {
 
 test('check takes the stores vectors from their own reference, at its pinned commit', () => {
   // The shared reference is at another commit: refused before anything is built.
-  const result = spawnSync(process.execPath, [path.join(SOURCE, 'generator/generate.js'),
-    'check', '--freedom-browser', REFERENCE, '--radicle-browser', RADICLE_REFERENCE,
-    '--approvals-browser', APPROVALS_REFERENCE, '--stores-browser', REFERENCE], { encoding: 'utf8', timeout: 60000 });
+  const result = spawnSync(process.execPath, checkArgs(path.join(SOURCE, 'generator/generate.js'), { stores: REFERENCE }),
+    { encoding: 'utf8', timeout: CHECK_TIMEOUT });
   assert.equal(result.status, 1, result.stdout + result.stderr);
   assert.match(result.stderr, /Use the pinned stores reference commit/);
   // And the file records it.
@@ -974,4 +1003,63 @@ test('check rejects a changed SQLite schema row', () => {
     row.rootpage += 1;
   });
   assert.match(stderr, /Byte mismatch: sqlite.json/);
+});
+
+test('check rejects a changed Colibri step text', () => {
+  const stderr = corruptedCheck('colibri.json', (contents) => {
+    const step = contents.cases.find((item) => item.id === '1-balance').trace.findLast((event) => event.op === 'step');
+    step.status = step.status.replace('"result": "0x', '"result": "0x0');
+  });
+  assert.match(stderr, /Byte mismatch: colibri.json/);
+});
+
+test('check rejects a changed Colibri adapter outcome and a changed design refusal', () => {
+  for (const corrupt of [
+    (contents) => { contents.cases.find((item) => item.id === '1-f9-cut-message').outcomes[0].error.code = 4900 + 1; },
+    (contents) => { contents.cases.find((item) => item.id === '1-unbound-balance-safe').design.refused = 'Colibri cannot prove eth_getBalance at block "latest"'; },
+  ]) {
+    assert.match(corruptedCheck('colibri.json', corrupt), /Byte mismatch: colibri.json/);
+  }
+});
+
+test('check rejects a damaged Colibri capture body', () => {
+  const stderr = damagedCheck((copy) => {
+    const sessions = JSON.parse(fs.readFileSync(path.join(copy, 'fixtures/colibri/sessions.json'), 'utf8'));
+    const sha = sessions.sessions['1-zk'].exchanges[0].response.sha256;
+    const file = path.join(copy, 'fixtures/colibri/bodies', `${sha}.bin`);
+    const bytes = fs.readFileSync(file);
+    bytes[bytes.length - 1] ^= 1;
+    fs.writeFileSync(file, bytes);
+  });
+  assert.match(stderr, /Fixture body [0-9a-f]{64} is damaged/);
+});
+
+test('check rejects a Colibri capture no case reads', () => {
+  const stderr = corruptedCheck('fixtures/colibri/sessions.json', (contents) => {
+    const [first] = contents.sessions['100-std'].exchanges;
+    contents.sessions['100-std'].exchanges.push({ ...first, url: `${first.url}/unread` });
+  });
+  assert.match(stderr, /Session 100-std holds a capture no case reads/);
+});
+
+test('check rejects a Colibri request outside the fetch contract, and a variant no case reaches', () => {
+  const contract = (edit) => damagedCheck((copy) => {
+    const file = path.join(copy, 'generator/colibri-contract.js');
+    fs.writeFileSync(file, edit(fs.readFileSync(file, 'utf8')));
+  });
+  assert.match(contract((source) => source.replace("'tx_cache?max_blocks=256'", "'tx_cache?max_blocks=255'")),
+    /matches no variant its operation allows/);
+  assert.match(contract((source) => source.replace("'checkpoint_proof', 'checkpoint_root',", "'checkpoint_proof', 'checkpoint_root', 'tx_pending',")),
+    /No case reaches the fetch-contract variant tx_pending/);
+});
+
+test('check takes the Colibri vectors from their own reference, at its pinned commit', () => {
+  // The shared reference is at another commit: refused before anything is built.
+  const result = spawnSync(process.execPath, checkArgs(path.join(SOURCE, 'generator/generate.js'), { colibri: REFERENCE }),
+    { encoding: 'utf8', timeout: CHECK_TIMEOUT });
+  assert.equal(result.status, 1, result.stdout + result.stderr);
+  assert.match(result.stderr, /Use the pinned colibri reference commit/);
+  // And the file records it.
+  const commit = spawnSync('git', ['rev-parse', 'HEAD'], { cwd: COLIBRI_REFERENCE, encoding: 'utf8' }).stdout.trim();
+  assert.equal(JSON.parse(fs.readFileSync(path.join(SOURCE, 'colibri.json'), 'utf8')).meta.freedomBrowserCommit, commit);
 });
