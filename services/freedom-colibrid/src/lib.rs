@@ -6,14 +6,17 @@
 //! - COL-4: the service (`src/main.rs`): the connection's side
 //!   ([`service`]), the verifier thread ([`verifier`], [`exec`]) and each
 //!   request on it ([`request`]), what it serves ([`served`]), its store
-//!   ([`store`]) and its budgets ([`shared`]).
+//!   ([`store`]) and its budgets ([`shared`]); the one-shot checkpoint
+//!   process's check ([`checkpoint`]).
 
+pub mod checkpoint;
 pub mod exec;
 pub mod request;
 pub mod served;
 pub mod service;
 pub mod shared;
 pub mod store;
+pub mod testhooks;
 pub mod verifier;
 
 /// The Colibri release the C core is built from.

@@ -13,9 +13,25 @@ pub const MAX_OPEN_REQUESTS: usize = 16;
 pub const MAX_BODIES: u64 = 32 << 20;
 /// Resident memory above which a persistent or private process recycles.
 pub const MAX_RESIDENT: u64 = 256 << 20;
+/// A checkpoint process's: one check, 8 MiB of bodies, and 128 MiB, past
+/// which the check fails.
+pub const CHECKPOINT_BODIES: u64 = 8 << 20;
+pub const CHECKPOINT_RESIDENT: u64 = 128 << 20;
+
+/// Which process this is (0014, "Spawn").
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Mode {
+    /// A chain's persistent process, or a private session's.
+    Serve,
+    /// The one-shot checkpoint process: one `colibri.checkpoint`.
+    Checkpoint,
+}
 
 pub struct Shared {
     pub chain_id: u64,
+    pub mode: Mode,
+    max_open: usize,
+    max_resident: u64,
     pub store: Arc<Store>,
     /// Requests accepted and not yet answered.
     open: AtomicUsize,
@@ -42,16 +58,23 @@ pub enum NotTaken {
 }
 
 impl Shared {
-    pub fn new(chain_id: u64, store: Arc<Store>) -> Shared {
+    pub fn new(chain_id: u64, store: Arc<Store>, mode: Mode) -> Shared {
+        let (max_open, bodies_limit, max_resident) = match mode {
+            Mode::Serve => (MAX_OPEN_REQUESTS, MAX_BODIES, MAX_RESIDENT),
+            Mode::Checkpoint => (1, CHECKPOINT_BODIES, CHECKPOINT_RESIDENT),
+        };
         Shared {
             chain_id,
+            mode,
+            max_open,
+            max_resident,
             store,
             open: AtomicUsize::new(0),
             steps: AtomicU64::new(0),
             resident: AtomicU64::new(0),
             recycling: AtomicBool::new(false),
             bodies: Arc::new(AtomicU64::new(0)),
-            bodies_limit: MAX_BODIES,
+            bodies_limit,
         }
     }
 
@@ -62,7 +85,7 @@ impl Shared {
         }
         self.open
             .try_update(Ordering::AcqRel, Ordering::Acquire, |open| {
-                (open < MAX_OPEN_REQUESTS).then_some(open + 1)
+                (open < self.max_open).then_some(open + 1)
             })
             .map(|_| ())
             .map_err(|_| NotTaken::Full)
@@ -80,10 +103,16 @@ impl Shared {
         self.steps.fetch_add(1, Ordering::Relaxed);
         if let Some(bytes) = resident_bytes() {
             self.resident.store(bytes, Ordering::Relaxed);
-            if bytes > MAX_RESIDENT {
+            if bytes > self.max_resident && self.mode == Mode::Serve {
                 self.recycling.store(true, Ordering::Release);
             }
         }
+    }
+
+    /// Whether resident memory, as read after the last step, is past the
+    /// process's budget: a checkpoint check then fails.
+    pub fn over_resident(&self) -> bool {
+        self.resident.load(Ordering::Relaxed) > self.max_resident
     }
 
     pub fn recycling(&self) -> bool {
@@ -131,7 +160,7 @@ mod tests {
 
     #[test]
     fn requests_are_bounded() {
-        let shared = Shared::new(1, Arc::new(Store::memory()));
+        let shared = Shared::new(1, Arc::new(Store::memory()), Mode::Serve);
         for _ in 0..MAX_OPEN_REQUESTS {
             assert_eq!(shared.take_request(), Ok(()));
         }
@@ -145,6 +174,14 @@ mod tests {
         }
         // The last one out ends a recycling process.
         assert!(shared.request_done());
+    }
+
+    #[test]
+    fn a_checkpoint_process_takes_one_check() {
+        let shared = Shared::new(1, Arc::new(Store::memory()), Mode::Checkpoint);
+        assert_eq!(shared.take_request(), Ok(()));
+        assert_eq!(shared.take_request(), Err(NotTaken::Full));
+        assert_eq!(shared.bodies_limit, CHECKPOINT_BODIES);
     }
 
     #[cfg(target_os = "linux")]

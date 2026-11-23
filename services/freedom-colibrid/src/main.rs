@@ -28,7 +28,7 @@ use std::time::{Duration, Instant};
 use fc_service::conn::{self, Options};
 use fc_service::{Exit, confine, gate, log};
 use freedom_colibrid::service::ColibriService;
-use freedom_colibrid::shared::Shared;
+use freedom_colibrid::shared::{Mode as Process, Shared};
 use freedom_colibrid::store::{Store, StoreHandle};
 use serde_json::json;
 
@@ -78,6 +78,29 @@ fn run(started: Instant, entry: &confine::Entry) -> Exit {
         ),
     }
     let (chain, mode, parent_pid) = match command {
+        Command::Checkpoint { chain, parent_pid } => {
+            if freedom_colibrid::client_version() != freedom_colibrid::CLIENT_VERSION {
+                log::error(
+                    "the linked C core isn't the pinned version",
+                    json!({ "version": freedom_colibrid::client_version() }),
+                );
+                return Exit::Internal;
+            }
+            // No lock, no directory, nothing writable: its store is in
+            // memory (0014, "Spawn").
+            let report = match confined(Vec::new(), Vec::new()) {
+                Ok(report) => report,
+                Err(exit) => return exit,
+            };
+            return serve(
+                chain,
+                Process::Checkpoint,
+                Store::memory(),
+                report,
+                parent_pid,
+                started,
+            );
+        }
         Command::HoldLock { data_dir, lock_dir } => {
             return gate::hold_lock(
                 &data_dir,
@@ -126,7 +149,7 @@ fn run(started: Instant, entry: &confine::Entry) -> Exit {
                     return Exit::Storage;
                 }
             };
-            let exit = serve(chain, store, report, parent_pid, started);
+            let exit = serve(chain, Process::Serve, store, report, parent_pid, started);
             drop(gate);
             exit
         }
@@ -136,7 +159,14 @@ fn run(started: Instant, entry: &confine::Entry) -> Exit {
                 Ok(report) => report,
                 Err(exit) => return exit,
             };
-            serve(chain, Store::memory(), report, parent_pid, started)
+            serve(
+                chain,
+                Process::Serve,
+                Store::memory(),
+                report,
+                parent_pid,
+                started,
+            )
         }
     }
 }
@@ -174,17 +204,19 @@ fn confined(
 
 fn serve(
     chain: u64,
+    mode: Process,
     store: Store,
     confinement: serde_json::Value,
     parent_pid: Option<u32>,
     started: Instant,
 ) -> Exit {
+    freedom_colibrid::testhooks::probe("main");
     let store = Arc::new(store);
     // The C core's store, before `hello` (0014): its own file store is off.
     colibri_stateless::register_storage(StoreHandle(Arc::clone(&store)));
     // Logging's writer is a thread: after confinement.
     log::init();
-    let shared = Arc::new(Shared::new(chain, store));
+    let shared = Arc::new(Shared::new(chain, store, mode));
     let service = Arc::new(ColibriService::new(shared, confinement));
     let mut options = Options::new(SERVICE, PROTOCOL, started);
     options.parent_pid = parent_pid;

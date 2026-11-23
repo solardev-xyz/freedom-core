@@ -3,19 +3,22 @@
 //! ```text
 //! freedom-colibrid serve --chain <id> --data-dir <dir> --lock-dir <dir> [--parent-pid <pid>]
 //! freedom-colibrid serve --chain <id> [--parent-pid <pid>]
+//! freedom-colibrid checkpoint --chain <id> [--parent-pid <pid>]
 //! freedom-colibrid hold-lock --data-dir <dir> --lock-dir <dir>
 //! ```
 //!
 //! `serve` with both directories is a chain's persistent process; with
 //! neither, a private session's, whose store is in memory (fail closed: one
 //! directory without the other is a usage error, never a disk store).
+//! `checkpoint` is the one-shot process of a checkpoint check: no
+//! directory, no lock, one `colibri.checkpoint`.
 //! `hold-lock` holds a chain directory's gate until stdin closes, as 0007's
 //! services do.
 
 use std::ffi::OsString;
 use std::path::PathBuf;
 
-pub const USAGE: &str = "usage: freedom-colibrid serve --chain <id> [--data-dir <dir> --lock-dir <dir>] [--parent-pid <pid>] | freedom-colibrid hold-lock --data-dir <dir> --lock-dir <dir>";
+pub const USAGE: &str = "usage: freedom-colibrid serve --chain <id> [--data-dir <dir> --lock-dir <dir>] [--parent-pid <pid>] | freedom-colibrid checkpoint --chain <id> [--parent-pid <pid>] | freedom-colibrid hold-lock --data-dir <dir> --lock-dir <dir>";
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum Mode {
@@ -33,6 +36,10 @@ pub enum Command {
     Serve {
         chain: u64,
         mode: Mode,
+        parent_pid: Option<u32>,
+    },
+    Checkpoint {
+        chain: u64,
         parent_pid: Option<u32>,
     },
     HoldLock {
@@ -81,6 +88,10 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> Option<Command> {
                 parent_pid,
             })
         }
+        "checkpoint" if data_dir.is_none() && lock_dir.is_none() => Some(Command::Checkpoint {
+            chain: chain?,
+            parent_pid,
+        }),
         "hold-lock" if chain.is_none() && parent_pid.is_none() => Some(Command::HoldLock {
             data_dir: data_dir?,
             lock_dir: lock_dir?,
@@ -129,6 +140,13 @@ mod tests {
             })
         );
         assert_eq!(
+            parse_str(&["checkpoint", "--chain", "1", "--parent-pid", "3"]),
+            Some(Command::Checkpoint {
+                chain: 1,
+                parent_pid: Some(3),
+            })
+        );
+        assert_eq!(
             parse_str(&["hold-lock", "--data-dir", "/d", "--lock-dir", "/l"]),
             Some(Command::HoldLock {
                 data_dir: "/d".into(),
@@ -160,7 +178,16 @@ mod tests {
                 "--chain",
                 "1",
             ],
-            &["checkpoint", "--chain", "1"],
+            &["checkpoint"],
+            &[
+                "checkpoint",
+                "--chain",
+                "1",
+                "--data-dir",
+                "/d",
+                "--lock-dir",
+                "/l",
+            ],
             &["nope"],
         ] {
             assert_eq!(parse_str(args), None, "{args:?}");

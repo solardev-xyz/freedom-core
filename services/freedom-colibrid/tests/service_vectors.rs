@@ -278,7 +278,7 @@ fn run_case(case: &Value, warm: &Path, warm_root: &Path) -> Result<(), String> {
                 }
                 continue;
             };
-            let Frame::Json(message) = frame else {
+            let Frame::Json(message, _) = frame else {
                 continue;
             };
             match message["type"].as_str() {
@@ -486,5 +486,196 @@ fn every_request_case_through_the_binary() {
         }
     }
     eprintln!("{ran} cases, {} failed", failures.len());
+    assert!(failures.is_empty(), "failed: {failures:?}");
+}
+
+/// The raw parts of a reply, as the service wrote them.
+#[derive(serde::Deserialize)]
+struct RawReply<'a> {
+    #[serde(borrow)]
+    result: &'a serde_json::value::RawValue,
+}
+
+#[derive(serde::Deserialize)]
+struct RawChecked<'a> {
+    #[serde(borrow)]
+    decoded: &'a serde_json::value::RawValue,
+    #[serde(borrow)]
+    result: &'a serde_json::value::RawValue,
+}
+
+fn run_checkpoint_case(case: &Value) -> Result<(), String> {
+    let id = case["id"].as_str().unwrap();
+    let chain = case["chain"].as_u64().unwrap();
+    let ops = case["trace"].as_array().unwrap();
+    let bodies = Bodies::for_case(case);
+    let recorded = Recorded::of(case);
+    let proof = ops
+        .iter()
+        .find(|op| op["op"] == "main_fetch" && op["variant"] == "checkpoint_proof")
+        .ok_or_else(|| format!("{id}: no proof fetch"))?;
+    let min_ts = ops
+        .iter()
+        .find(|op| op["op"] == "verify_create")
+        .and_then(|op| op["min_latest_block_ts"].as_str()?.parse::<u64>().ok())
+        .unwrap_or(1);
+    // What the recording's C core decoded, and how its verification ended.
+    let decode = ops.iter().find(|op| op["op"] == "decode");
+    let decoded_digest = if case["deviation"] == "checked-decode" {
+        None
+    } else {
+        decode
+            .and_then(|op| op.get("result"))
+            .filter(|r| !r.is_null())
+    };
+    let last_verify: Option<Value> = ops
+        .iter()
+        .filter(|op| op["op"] == "verify")
+        .filter_map(|op| op["status"].as_str())
+        .last()
+        .map(|status| serde_json::from_str(status).unwrap());
+    let mut colibrid = Colibrid::checkpoint(chain);
+    colibrid.hello();
+    let rid = colibrid.request(
+        "colibri.checkpoint",
+        json!({ "min_latest_block_ts": min_ts, "deadline_ms": DEADLINE_MS }),
+    );
+    let mut asked_proof = false;
+    let mut asks = 0u64;
+    let deadline = Instant::now() + REQUEST_WAIT;
+    let raw = loop {
+        if Instant::now() > deadline {
+            return Err(format!("{id}: no reply; stderr: {}", colibrid.stderr()));
+        }
+        let Some(Frame::Json(message, raw)) = colibrid.recv(Duration::from_millis(500)) else {
+            continue;
+        };
+        match message["type"].as_str() {
+            Some("request") => {
+                let ask = message["id"].as_u64().unwrap();
+                let p = &message["params"];
+                if p["type"] == "checkpoint_proof" {
+                    if std::mem::replace(&mut asked_proof, true) {
+                        return Err(format!("{id}: a second proof fetch"));
+                    }
+                    let reply = &proof["reply"];
+                    if reply["status"] == 200 {
+                        let len = reply["bytes"].as_u64().unwrap() as usize;
+                        let body = bodies.get(reply["sha256"].as_str().unwrap(), len);
+                        colibrid.answer_body(ask, 0, body, len);
+                    } else {
+                        colibrid.respond(
+                            ask,
+                            json!({ "error": format!("HTTP error! Status: {}", reply["status"]) }),
+                        );
+                    }
+                    continue;
+                }
+                let Some(want) = recorded.requests.get(asks as usize) else {
+                    return Err(format!("{id}: an unrecorded fetch: {p}"));
+                };
+                if p["type"] != want["type"]
+                    || p["path"] != want["url"]
+                    || p["method"] != want["method"]
+                {
+                    return Err(format!(
+                        "{id}: fetch {asks} differs:\n  service:  {p}\n  recorded: {want}"
+                    ));
+                }
+                let answer = recorded
+                    .answers
+                    .get(&asks)
+                    .ok_or_else(|| format!("{id}: no recorded answer for fetch {asks}"))?;
+                if answer["op"] == "response" {
+                    let len = answer["bytes"].as_u64().unwrap() as usize;
+                    let body = match answer["body"].as_str() {
+                        Some(text) => text.as_bytes().to_vec(),
+                        None => bodies.get(answer["sha256"].as_str().unwrap(), len),
+                    };
+                    colibrid.answer_body(ask, 0, body, len);
+                } else {
+                    colibrid.respond(ask, json!({ "error": answer["error"] }));
+                }
+                asks += 1;
+            }
+            Some("response") if message["id"] == rid => break raw,
+            _ => {}
+        }
+    };
+    let reply: RawReply<'_> = serde_json::from_str(&raw).map_err(|e| format!("{id}: {e}"))?;
+    let result: Value = serde_json::from_str(reply.result.get()).unwrap();
+    match (decoded_digest, &last_verify) {
+        (None, _) => {
+            if result["status"] != "error" || result["stage"] != "decode" {
+                return Err(format!("{id}: expected a decode failure: {result}"));
+            }
+        }
+        (Some(digest), Some(status)) if status["status"] == "success" => {
+            let checked: RawChecked<'_> = serde_json::from_str(reply.result.get())
+                .map_err(|e| format!("{id}: not a check's result: {e}: {result}"))?;
+            let decoded = checked.decoded.get();
+            if decoded.encode_utf16().count() as u64 != digest["chars"].as_u64().unwrap_or(0)
+                || sha256_hex(decoded.as_bytes()) != digest["sha256"].as_str().unwrap_or_default()
+            {
+                return Err(format!("{id}: the decoded proof differs"));
+            }
+            let recorded_status = ops
+                .iter()
+                .filter(|op| op["op"] == "verify")
+                .filter_map(|op| op["status"].as_str())
+                .last()
+                .unwrap();
+            let recorded_result: RawReply<'_> = serde_json::from_str(recorded_status).unwrap();
+            if checked.result.get() != recorded_result.result.get() {
+                return Err(format!("{id}: the verified result differs"));
+            }
+        }
+        (Some(_), Some(status)) => {
+            if result["status"] != "error"
+                || result["stage"] != "verify"
+                || result["error"] != status["error"]
+            {
+                return Err(format!(
+                    "{id}: expected the verify error {}: {result}",
+                    status["error"]
+                ));
+            }
+        }
+        (Some(_), None) => return Err(format!("{id}: the recording never verified")),
+    }
+    // One check, then the process exits 0.
+    if colibrid.exit_code(Duration::from_secs(20)) != Some(0) {
+        return Err(format!(
+            "{id}: didn't exit 0 after its check; stderr: {}",
+            colibrid.stderr()
+        ));
+    }
+    Ok(())
+}
+
+#[test]
+fn every_checkpoint_case_through_the_binary() {
+    let vectors: Value = serde_json::from_str(
+        &std::fs::read_to_string(repo_root().join("vectors/colibri.json")).unwrap(),
+    )
+    .unwrap();
+    let mut failures = Vec::new();
+    let mut ran = 0;
+    for case in vectors["cases"].as_array().unwrap() {
+        if case["kind"] != "checkpoint" {
+            continue;
+        }
+        ran += 1;
+        let id = case["id"].as_str().unwrap();
+        match run_checkpoint_case(case) {
+            Ok(()) => eprintln!("ok {id}"),
+            Err(e) => {
+                eprintln!("FAILED {e}");
+                failures.push(id.to_owned());
+            }
+        }
+    }
+    eprintln!("{ran} checkpoint cases, {} failed", failures.len());
+    assert!(ran > 0);
     assert!(failures.is_empty(), "failed: {failures:?}");
 }

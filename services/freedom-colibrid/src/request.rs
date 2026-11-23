@@ -108,13 +108,13 @@ pub struct Env {
     pub zk_off: RefCell<HashMap<String, bool>>,
     /// Contexts whose free couldn't be marked: freed at exit (0014: "its
     /// context is freed later, under its own marker, or at exit").
-    pub graveyard: RefCell<Vec<RpcCtx>>,
+    pub graveyard: RefCell<Vec<Box<dyn std::any::Any>>>,
     /// Fetches open, process-wide.
     pub fetches: Cell<u64>,
 }
 
 /// Whether a marker was written.
-enum Marked {
+pub(crate) enum Marked {
     /// Written: the C core may be entered.
     Go,
     /// Not written: the request ends with `busy`.
@@ -125,7 +125,7 @@ enum Marked {
 }
 
 /// How a request ends.
-enum Reply {
+pub(crate) enum Reply {
     /// A reply's JSON text.
     Raw(String),
     /// A refusal.
@@ -136,7 +136,7 @@ enum Reply {
 
 impl Env {
     /// The marker before a call into the C core for request `id`.
-    fn mark(&self, id: u64, state: &TaskState) -> Marked {
+    pub(crate) fn mark(&self, id: u64, state: &TaskState) -> Marked {
         if !state.committed.get() {
             if !self.conn.commit(id) {
                 return Marked::Gone;
@@ -165,7 +165,7 @@ impl Env {
     /// The clearing event after a call: queued before any frame the step
     /// caused. If it can't be queued the process ends (0014: a full queue
     /// fails with 70; a closed connection is ending anyway).
-    fn stepped(&self, id: u64) {
+    pub(crate) fn stepped(&self, id: u64) {
         match self
             .conn
             .event_for(id, "colibri.stepped", &json!({ "request": id }))
@@ -178,7 +178,7 @@ impl Env {
     }
 
     /// Frees `contexts` behind a marker, or leaves them for exit.
-    fn free(&self, id: u64, state: &TaskState, contexts: Vec<RpcCtx>) {
+    pub(crate) fn free<T: 'static>(&self, id: u64, state: &TaskState, contexts: Vec<T>) {
         if contexts.is_empty() {
             return;
         }
@@ -187,7 +187,15 @@ impl Env {
                 drop(contexts);
                 self.stepped(id);
             }
-            Marked::Busy | Marked::Gone => self.graveyard.borrow_mut().extend(contexts),
+            Marked::Busy | Marked::Gone => self.bury(contexts),
+        }
+    }
+
+    /// Keeps `contexts` until exit.
+    pub(crate) fn bury<T: 'static>(&self, contexts: Vec<T>) {
+        let mut graveyard = self.graveyard.borrow_mut();
+        for context in contexts {
+            graveyard.push(Box::new(context));
         }
     }
 }
@@ -195,6 +203,16 @@ impl Env {
 /// Runs request `id` to its reply.
 pub async fn run(env: Rc<Env>, id: u64, params: Params, state: Rc<TaskState>) {
     let reply = serve(&env, id, &params, &state).await;
+    send_reply(&env, id, reply);
+    if env.shared.request_done() {
+        // Recycled: the open requests are answered (0014, Crashes, overruns
+        // and restarts). Exit 0, no fault.
+        env.conn.fail(Exit::Ok);
+    }
+}
+
+/// Sends request `id`'s reply.
+pub(crate) fn send_reply(env: &Env, id: u64, reply: Reply) {
     let sent = match reply {
         Reply::Raw(text) => match RawValue::from_string(text) {
             Ok(raw) => env.conn.reply(id, &raw),
@@ -212,21 +230,16 @@ pub async fn run(env: Rc<Env>, id: u64, params: Params, state: Rc<TaskState>) {
             &ErrorBody::new(ErrorCode::TooLarge, "the reply is over the message cap"),
         );
     }
-    if env.shared.request_done() {
-        // Recycled: the open requests are answered (0014, Crashes, overruns
-        // and restarts). Exit 0, no fault.
-        env.conn.fail(Exit::Ok);
-    }
 }
 
-fn busy() -> Reply {
+pub(crate) fn busy() -> Reply {
     Reply::Error(ErrorBody::new(
         ErrorCode::Busy,
         "the step marker wasn't written",
     ))
 }
 
-fn cancelled(state: &TaskState) -> Reply {
+pub(crate) fn cancelled(state: &TaskState) -> Reply {
     // Before the commit point main queued `cancelled` itself.
     if state.committed.get() {
         Reply::Error(ErrorBody::new(ErrorCode::Cancelled, "cancelled"))
@@ -237,7 +250,7 @@ fn cancelled(state: &TaskState) -> Reply {
 
 /// `{"status":"error","error":<text>}`, the text cut at
 /// [`MAX_ERROR_UNITS`].
-fn error_reply(text: &str) -> Reply {
+pub(crate) fn error_reply(text: &str) -> Reply {
     let mut units = 0;
     let mut end = text.len();
     for (at, c) in text.char_indices() {
@@ -307,13 +320,13 @@ enum Attempt {
 /// The raw fields of a pending step's requests, from the C core's status
 /// text: the payload goes to main as the C core wrote it.
 #[derive(Deserialize)]
-struct PendingStatus<'a> {
+pub(crate) struct PendingStatus<'a> {
     #[serde(borrow)]
-    requests: Vec<RawRequest<'a>>,
+    pub(crate) requests: Vec<RawRequest<'a>>,
 }
 
 #[derive(Deserialize)]
-struct RawRequest<'a> {
+pub(crate) struct RawRequest<'a> {
     #[serde(rename = "type")]
     kind: String,
     #[serde(default)]
@@ -326,15 +339,28 @@ struct RawRequest<'a> {
     encoding: String,
 }
 
+impl RawRequest<'static> {
+    /// A fetch the service makes itself, not the C core.
+    pub(crate) fn own(kind: &str, method: &str, encoding: &str) -> RawRequest<'static> {
+        RawRequest {
+            kind: kind.to_owned(),
+            method: method.to_owned(),
+            url: String::new(),
+            payload: None,
+            encoding: encoding.to_owned(),
+        }
+    }
+}
+
 /// A success's result, as the C core wrote it.
 #[derive(Deserialize)]
-struct SuccessStatus<'a> {
+pub(crate) struct SuccessStatus<'a> {
     #[serde(borrow, default)]
-    result: Option<&'a RawValue>,
+    pub(crate) result: Option<&'a RawValue>,
 }
 
 /// One answer for the C core: the body and its node, or the error text.
-type Fetched = Result<(Vec<u8>, u16, Option<Hold>), String>;
+pub(crate) type Fetched = Result<(Vec<u8>, u16, Option<Hold>), String>;
 
 #[allow(clippy::too_many_arguments)]
 async fn attempt(
@@ -461,6 +487,7 @@ async fn attempt(
                         request.exclude_mask,
                         deadline,
                         over,
+                        MAX_BODY,
                     )));
                 }
                 let answers = match all_unless_cancelled(fetches, state).await {
@@ -476,14 +503,14 @@ async fn attempt(
                     Marked::Go => {}
                     Marked::Busy => {
                         drop(requests);
-                        env.graveyard.borrow_mut().push(ctx);
-                        env.graveyard.borrow_mut().append(done);
+                        env.bury(vec![ctx]);
+                        env.bury(std::mem::take(done));
                         return Attempt::Done(busy());
                     }
                     Marked::Gone => {
                         drop(requests);
-                        env.graveyard.borrow_mut().push(ctx);
-                        env.graveyard.borrow_mut().append(done);
+                        env.bury(vec![ctx]);
+                        env.bury(std::mem::take(done));
                         return Attempt::Done(Reply::None);
                     }
                 }
@@ -525,7 +552,7 @@ async fn attempt(
 
 /// Waits for every fetch, or for the request's cancel: `None` then, and the
 /// fetches still open are dropped, which cancels them with main.
-async fn all_unless_cancelled<'a, T>(
+pub(crate) async fn all_unless_cancelled<'a, T>(
     mut futures: Vec<Pin<Box<dyn Future<Output = T> + 'a>>>,
     state: &TaskState,
 ) -> Option<Vec<T>> {
@@ -631,7 +658,7 @@ fn reserve(budget: &Arc<AtomicU64>, limit: u64, bytes: u64) -> Option<Hold> {
 
 /// One data request to main, `shell.colibri_fetch`, and its body.
 #[allow(clippy::too_many_arguments)]
-async fn fetch(
+pub(crate) async fn fetch(
     env: &Rc<Env>,
     id: u64,
     fields: &RawRequest<'_>,
@@ -640,6 +667,7 @@ async fn fetch(
     exclude_mask: u32,
     deadline: Instant,
     over: bool,
+    max_body: u64,
 ) -> Fetched {
     if delay_ms > 0 {
         sleep(
@@ -672,7 +700,7 @@ async fn fetch(
             let bytes = serde_json::from_str::<HeadBytes>(head.get())
                 .map_err(|_| ErrorBody::new(ErrorCode::InvalidArgument, "a head without bytes"))?
                 .bytes;
-            if bytes > MAX_BODY {
+            if bytes > max_body {
                 return Err(refused());
             }
             let hold = reserve(&budget, limit, bytes).ok_or_else(refused)?;

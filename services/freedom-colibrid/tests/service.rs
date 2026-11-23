@@ -38,7 +38,7 @@ fn until_reply(
         let Some(frame) = colibrid.recv(Duration::from_secs(1)) else {
             continue;
         };
-        let Frame::Json(message) = frame else {
+        let Frame::Json(message, _) = frame else {
             continue;
         };
         match message["type"].as_str() {
@@ -191,7 +191,7 @@ fn open_requests_are_bounded_and_cancels_are_answered() {
     let mut asking = std::collections::HashSet::new();
     let deadline = Instant::now() + WAIT;
     while asking.len() < 16 && Instant::now() < deadline {
-        if let Some(Frame::Json(message)) = colibrid.recv(Duration::from_secs(1))
+        if let Some(Frame::Json(message, _)) = colibrid.recv(Duration::from_secs(1))
             && message["method"] == "shell.colibri_fetch"
         {
             asking.insert(message["params"]["request"].as_u64().unwrap());
@@ -208,7 +208,7 @@ fn open_requests_are_bounded_and_cancels_are_answered() {
     let mut cancelled = std::collections::HashSet::new();
     let deadline = Instant::now() + WAIT;
     while cancelled.len() < 16 && Instant::now() < deadline {
-        if let Some(Frame::Json(message)) = colibrid.recv(Duration::from_secs(1))
+        if let Some(Frame::Json(message, _)) = colibrid.recv(Duration::from_secs(1))
             && message["type"] == "response"
             && message["error"]["code"] == "cancelled"
         {

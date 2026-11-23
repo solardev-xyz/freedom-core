@@ -9,6 +9,7 @@ use std::sync::Arc;
 
 use fc_service::conn::Connection;
 
+use crate::checkpoint;
 use crate::exec::{Executor, Queue};
 use crate::request::{self, Env, Params, TaskState};
 use crate::shared::Shared;
@@ -17,6 +18,8 @@ use crate::shared::Shared;
 pub enum Job {
     /// A `colibri.request` the budget took.
     Request { id: u64, params: Params },
+    /// The checkpoint process's one `colibri.checkpoint`.
+    Checkpoint { id: u64, params: checkpoint::Params },
     /// Main cancelled request `id`.
     Cancel { id: u64 },
     /// `colibri.forget`: the client's ZK is back to what main sends.
@@ -27,6 +30,7 @@ pub enum Job {
 
 /// Runs until [`Job::End`].
 pub fn run(conn: Connection, shared: Arc<Shared>, queue: Arc<Queue<Job>>) {
+    crate::testhooks::probe("verifier");
     let mut exec = Executor::new(queue);
     let env = Rc::new(Env {
         conn,
@@ -46,6 +50,14 @@ pub fn run(conn: Connection, shared: Arc<Shared>, queue: Arc<Queue<Job>>) {
                     exec.spawn(
                         id,
                         Box::pin(request::run(Rc::clone(&env), id, params, state)),
+                    );
+                }
+                Job::Checkpoint { id, params } => {
+                    let state = Rc::new(TaskState::default());
+                    states.insert(id, Rc::clone(&state));
+                    exec.spawn(
+                        id,
+                        Box::pin(checkpoint::run(Rc::clone(&env), id, params, state)),
                     );
                 }
                 Job::Cancel { id } => {

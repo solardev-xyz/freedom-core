@@ -26,11 +26,22 @@ const DATA_FRAME: usize = 64 << 10;
 /// A frame from the service.
 #[derive(Debug)]
 pub enum Frame {
-    Json(Value),
-    Data { id: u64, len: usize },
-    End { id: u64 },
-    Abort { id: u64 },
-    Credit { id: u64, bytes: u32 },
+    /// A JSON message, parsed and as written.
+    Json(Value, String),
+    Data {
+        id: u64,
+        len: usize,
+    },
+    End {
+        id: u64,
+    },
+    Abort {
+        id: u64,
+    },
+    Credit {
+        id: u64,
+        bytes: u32,
+    },
 }
 
 /// One body main is sending, held to the service's credit.
@@ -98,6 +109,13 @@ impl Colibrid {
         Colibrid::spawn(command)
     }
 
+    /// The one-shot checkpoint process for `chain`.
+    pub fn checkpoint(chain: u64) -> Colibrid {
+        let mut command = Command::new(BIN);
+        command.args(["checkpoint", "--chain", &chain.to_string()]);
+        Colibrid::spawn(command)
+    }
+
     pub fn spawn(mut command: Command) -> Colibrid {
         command
             .stdin(Stdio::piped())
@@ -117,7 +135,10 @@ impl Colibrid {
                 }
                 let (kind, payload) = (frame[0], &frame[1..]);
                 let decoded = if kind == KIND_JSON {
-                    Frame::Json(serde_json::from_slice(payload).unwrap())
+                    Frame::Json(
+                        serde_json::from_slice(payload).unwrap(),
+                        String::from_utf8(payload.to_vec()).unwrap(),
+                    )
                 } else {
                     match StreamFrame::decode(kind, payload).unwrap() {
                         StreamFrame::Data { id, bytes } => Frame::Data {
@@ -278,7 +299,7 @@ impl Colibrid {
         );
         let deadline = Instant::now() + Duration::from_secs(30);
         while Instant::now() < deadline {
-            if let Some(Frame::Json(message)) = self.recv(Duration::from_secs(30))
+            if let Some(Frame::Json(message, _)) = self.recv(Duration::from_secs(30))
                 && message["type"] == "response"
                 && message["id"] == id
             {
