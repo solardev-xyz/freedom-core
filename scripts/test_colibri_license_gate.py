@@ -1,7 +1,9 @@
 """colibri-license-gate.py over synthetic builds: a verifier-only build
 passes; server code, a prover, an unlisted SPDX identifier, PolyForm outside
 the notices' exception, a third party's tree the notices don't list or whose
-license differs, and a build without a manifest fail."""
+license differs, and a build without a manifest fail. The gate reads only
+the build it is given (its build script's OUT_DIR), never a stale one beside
+it, and refuses an OUT_DIR that holds two."""
 
 import importlib.util
 import json
@@ -24,7 +26,8 @@ class Gate(unittest.TestCase):
         base = pathlib.Path(self.tmp.name)
         self.target = base / "target"
         self.root = base / "checkout"
-        self.build = self.target / "release/build/colibri-stateless-0123/out/cmake/no-op/no-prover"
+        self.out = self.target / "release/build/colibri-stateless-0123/out"
+        self.build = self.out / "cmake/no-op/no-prover"
         self.build.mkdir(parents=True)
         self.notices = base / "notices.json"
         self.notices.write_text(json.dumps({
@@ -63,8 +66,8 @@ class Gate(unittest.TestCase):
     def depfile(self, name, prerequisites):
         (self.build / f"{name}.o.d").write_text(f"{name}.o: " + " \\\n  ".join(prerequisites) + "\n")
 
-    def errors(self):
-        return gate.check(str(self.target), str(self.notices))[0]
+    def errors(self, out=None):
+        return gate.check(str(out or self.out), str(self.notices))[0]
 
     def test_a_verifier_only_build_passes(self):
         self.assertEqual(self.errors(), [])
@@ -123,6 +126,25 @@ class Gate(unittest.TestCase):
     def test_no_manifest_fails(self):
         (self.build / "compile_commands.json").unlink()
         self.assertIn("no compile_commands.json", "\n".join(self.errors()))
+
+    def stale_build(self, out):
+        """A build an earlier pin left, as a restored cache brings it back:
+        its sources are gone, and one of them was server code."""
+        build = out / "cmake/no-op/no-prover"
+        build.mkdir(parents=True)
+        gone = self.root.parent / "old-checkout/src/server/server.c"
+        (build / "compile_commands.json").write_text(json.dumps(
+            [{"directory": str(build), "file": str(gone), "command": "cc -c"}]))
+
+    def test_only_the_given_build_is_read(self):
+        stale = self.target / "release/build/colibri-stateless-4567/out"
+        self.stale_build(stale)
+        self.assertEqual(self.errors(), [])
+        self.assertNotEqual(self.errors(stale), [])
+
+    def test_two_builds_in_one_out_dir_fail(self):
+        self.stale_build(self.out / "older")
+        self.assertIn("more than one build", "\n".join(self.errors()))
 
 
 if __name__ == "__main__":

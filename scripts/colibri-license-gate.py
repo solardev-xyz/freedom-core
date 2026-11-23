@@ -20,9 +20,13 @@ its compile_commands.json, and every header the compiler's dependency files
   by its own build script, outside CMake's compile commands, so its tree's
   license is what the gate checks for it.
 
-Usage: colibri-license-gate.py <cargo target dir> [--manifest <out.json>]
+Usage: colibri-license-gate.py <out dir> [--manifest <out.json>]
 
-The build must have run with CMAKE_EXPORT_COMPILE_COMMANDS=ON in its
+<out dir> is the OUT_DIR of colibri-stateless's build script for the build
+the tests ran, as Cargo reports it (the build-script-executed message of
+--message-format=json), not the target directory: a restored cache can hold
+the build directories of earlier pins too, and the gate reads exactly one
+build. The build must have run with CMAKE_EXPORT_COMPILE_COMMANDS=ON in its
 environment (CMake reads it from there), so that CMake wrote
 compile_commands.json beside its cache.
 """
@@ -70,18 +74,20 @@ def depfile_paths(path):
     return out
 
 
-def check(target_dir, notices_path=NOTICES):
-    """The gate: (errors, manifest, report lines) for the builds under target_dir."""
+def check(out_dir, notices_path=NOTICES):
+    """The gate: (errors, manifest, report lines) for the one build under out_dir."""
     with open(notices_path, encoding="utf-8") as f:
         notices = json.load(f)
     allowed = {c["tree"]: set(c["spdx"]) for c in notices["components"]}
     polyform_ok = {e["path"] for e in notices.get("polyform_mentions", [])}
     third_parties = {c["tree"]: c["license"] for c in notices["components"] if c["tree"].startswith("_deps/")}
-    target_dir = os.path.realpath(target_dir)
+    out_dir = os.path.realpath(out_dir)
 
-    dbs = glob.glob(os.path.join(target_dir, "**", "colibri-stateless-*", "out", "**", "compile_commands.json"), recursive=True)
+    dbs = glob.glob(os.path.join(out_dir, "**", "compile_commands.json"), recursive=True)
     if not dbs:
-        return [f"no compile_commands.json for colibri-stateless under {target_dir} (build with CMAKE_EXPORT_COMPILE_COMMANDS=ON)"], {}, []
+        return [f"no compile_commands.json under {out_dir} (build with CMAKE_EXPORT_COMPILE_COMMANDS=ON)"], {}, []
+    if len(dbs) > 1:
+        return [f"more than one build under {out_dir}: {sorted(os.path.relpath(d, out_dir) for d in dbs)}"], {}, []
     errors = []
     lines = []
     manifest = {"builds": []}
@@ -175,13 +181,13 @@ def check(target_dir, notices_path=NOTICES):
             if not markers or not all(m in text for m in markers):
                 errors.append(f"{tree}: {os.path.basename(license_files[0])} isn't {third_parties[tree]}")
         manifest["builds"].append({
-            "build": os.path.relpath(build_dir, target_dir),
+            "build": os.path.relpath(build_dir, out_dir),
             "compiled": len(compiled),
             "headers": len(included - compiled),
             "system_headers": system,
             "trees": trees,
         })
-        lines.append(f"{os.path.relpath(build_dir, target_dir)}: {len(compiled)} compiled, {len(included - compiled)} headers ({system} the system's)")
+        lines.append(f"{os.path.relpath(build_dir, out_dir)}: {len(compiled)} compiled, {len(included - compiled)} headers ({system} the system's)")
         for tree, t in sorted(trees.items()):
             spdx = ", ".join(f"{k} {v}" for k, v in sorted(t["spdx"].items()))
             lines.append(f"  {tree:<24} {t['files']:>5} files ({t['compiled']} compiled)  SPDX: {spdx}")
