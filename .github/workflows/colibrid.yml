@@ -18,6 +18,8 @@ on:
       - "vectors/fixtures/colibri/**"
       - "scripts/colibri-license-gate.py"
       - "scripts/test_colibri_license_gate.py"
+      - "scripts/third-party-notices.py"
+      - "notices/**"
       - "rust-toolchain.toml"
       # Root tool configuration that applies under services/: Clippy and
       # rustfmt look for theirs up the directory tree.
@@ -33,6 +35,8 @@ on:
       - "vectors/fixtures/colibri/**"
       - "scripts/colibri-license-gate.py"
       - "scripts/test_colibri_license_gate.py"
+      - "scripts/third-party-notices.py"
+      - "notices/**"
       - "rust-toolchain.toml"
       - "clippy.toml"
       - ".clippy.toml"
@@ -245,3 +249,10 @@ jobs:
           mkdir -p "$HOME/.cargo/bin"
           tar -xzf "$tarball" --strip-components=1 -C "$HOME/.cargo/bin" "cargo-deny-${CARGO_DENY_VERSION}-x86_64-unknown-linux-musl/cargo-deny"
       - run: cargo deny --locked check
+      # The release archives' notices (scripts/third-party-notices.py), which
+      # read the crates' sources and the toolchain's rust-src.
+      - run: rustup toolchain install
+      - name: services/freedom-colibrid/THIRD-PARTY-NOTICES is current
+        run: |
+          cargo fetch --locked
+          python3 ../../scripts/third-party-notices.py --binary freedom-colibrid --check

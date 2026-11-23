@@ -61,6 +61,7 @@ WORKSPACES = {
     BINARY: ROOT,
     "freedom-ipfsd": ROOT / "services" / "freedom-ipfsd",
     "freedom-radicled": ROOT / "services" / "freedom-radicled",
+    "freedom-colibrid": ROOT / "services" / "freedom-colibrid",
 }
 # Every target each binary's release workflow builds: release.yml for the
 # core, release-ipfsd.yml and release-radicled.yml for the services, whose
@@ -87,14 +88,22 @@ TARGETS = {
         "aarch64-unknown-linux-gnu",
         "x86_64-pc-windows-msvc",
     ],
+    "freedom-colibrid": [
+        "aarch64-apple-darwin",
+        "x86_64-apple-darwin",
+        "x86_64-unknown-linux-gnu",
+        "aarch64-unknown-linux-gnu",
+        "x86_64-pc-windows-msvc",
+    ],
 }
 LICENSE_PREFIXES = ("license", "licence", "copying", "notice", "unlicense", "copyright")
 
 # The toolchain the runtime notices below were reviewed for. When
 # rust-toolchain.toml moves, re-check them: the musl version Rust bundles,
-# the LLVM commit, and the standard library's crates. When release-ipfsd.yml
-# or release-radicled.yml moves to another Zig, re-check what it links
-# (zig_glibc_runtime and each binary's startup notice).
+# the LLVM commit, and the standard library's crates. When release-ipfsd.yml,
+# release-radicled.yml or release-colibrid.yml moves to another Zig, re-check
+# what it links (zig_glibc_runtime, each binary's startup notice, and
+# freedom-colibrid's libc++ and libc++abi).
 TOOLCHAIN = "1.99"
 # Out-of-tree crates the standard library links on the release targets
 # (rust-src library/vendor).
@@ -232,6 +241,62 @@ NATIVE = {
             "sqlite3-src 0.7.0",
         ),
     ],
+    "freedom-colibrid": [
+        *zig_glibc_runtime("notices/glibc-2.17-startup-freedom-colibrid-NOTICE"),
+        # evmone and intx are C++: Zig links its own libc++ and libc++abi
+        # statically into the glibc 2.17 builds (no libstdc++ is needed:
+        # found in the symbols of unstripped x86_64 and aarch64 builds).
+        (
+            "LLVM libc++, Zig 0.15.2's copy (C++ standard library; Linux)",
+            "Apache-2.0 WITH LLVM-exception",
+            "notices/llvm-libcxx-zig-0.15.2-LICENSE.TXT",
+        ),
+        (
+            "LLVM libc++abi, Zig 0.15.2's copy (C++ ABI library; Linux)",
+            "Apache-2.0 WITH LLVM-exception",
+            "notices/llvm-libcxxabi-zig-0.15.2-LICENSE.TXT",
+        ),
+        # colibri-stateless builds Colibri's C core with CMake on every
+        # target (design 0014, "The verifier-only build"): its own sources,
+        # libs/crypto, and what its CMake fetches at pinned commits, blst,
+        # evmone (with EVMC) and intx. Its license gate checks each tree's
+        # SPDX identifiers against notices/c-sources.json.
+        Native(
+            "Colibri 3.0.3's C core (C library), built from colibri-stateless "
+            "3.0.3's source",
+            "MIT",
+            "services/freedom-colibrid/notices/colibri-3.0.3-LICENSE",
+            "colibri-stateless 3.0.3",
+        ),
+        Native(
+            "trezor-crypto and Mbed TLS's RIPEMD-160 (C library), Colibri "
+            "3.0.3's libs/crypto",
+            "MIT AND Apache-2.0",
+            "services/freedom-colibrid/notices/colibri-libs-crypto-NOTICE",
+            "colibri-stateless 3.0.3",
+        ),
+        Native(
+            "blst 0.3.13 (C library), as colibri-stateless 3.0.3's CMake "
+            "fetches it",
+            "Apache-2.0",
+            "services/freedom-colibrid/notices/blst-0.3.13-LICENSE",
+            "colibri-stateless 3.0.3",
+        ),
+        Native(
+            "evmone 0.23.0 with EVMC (C++ library), as colibri-stateless "
+            "3.0.3's CMake fetches it",
+            "Apache-2.0",
+            "services/freedom-colibrid/notices/evmone-0.23.0-LICENSE",
+            "colibri-stateless 3.0.3",
+        ),
+        Native(
+            "intx 0.15.0 (C++ library), as colibri-stateless 3.0.3's CMake "
+            "fetches it",
+            "Apache-2.0",
+            "services/freedom-colibrid/notices/intx-0.15.0-LICENSE",
+            "colibri-stateless 3.0.3",
+        ),
+    ],
 }
 # For each binary, every shipped crate that declares `links` is accounted
 # for: it bundles a NATIVE entry's library (its `bundled_by`), or is listed
@@ -251,6 +316,7 @@ LINKS_CHECKED = {
         "ring": RING,
         "defmt": "no native code: `links` only keeps one copy in a graph",
     },
+    "freedom-colibrid": {},
 }
 
 
