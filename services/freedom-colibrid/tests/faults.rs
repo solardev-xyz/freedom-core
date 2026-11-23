@@ -106,6 +106,10 @@ fn a_spin_in_a_step_keeps_its_marker_open() {
     assert_eq!(seen, STEP_LEFT_OPEN, "the step is left open");
 }
 
+/// Where the service reads its resident memory, so the budget applies:
+/// Linux, macOS and Windows.
+const RESIDENT_READ: bool = cfg!(any(target_os = "linux", target_os = "macos", windows));
+
 #[test]
 fn a_recycle_finishes_its_requests_and_exits_0() {
     // A budget every process is over after its first step.
@@ -121,8 +125,7 @@ fn a_recycle_finishes_its_requests_and_exits_0() {
         }
     }
     let ask = asked.expect("no fetch");
-    if cfg!(target_os = "linux") {
-        // Read only on Linux so far: the budget applies there.
+    if RESIDENT_READ {
         let second = block_number(&mut colibrid);
         let mut refused: Option<Value> = None;
         let deadline = Instant::now() + Duration::from_secs(30);
@@ -149,7 +152,7 @@ fn a_recycle_finishes_its_requests_and_exits_0() {
         }
     }
     assert!(replied, "the open request wasn't finished");
-    if cfg!(target_os = "linux") {
+    if RESIDENT_READ {
         assert_eq!(colibrid.exit_code(Duration::from_secs(20)), Some(0));
     }
 }

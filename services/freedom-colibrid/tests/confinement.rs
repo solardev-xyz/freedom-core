@@ -78,6 +78,24 @@ fn check(hello: &Value, probes: &[(String, String, bool)], write_allowed: bool) 
     if cfg!(any(target_os = "linux", target_os = "macos")) {
         assert_eq!(confinement["network"], "enforced", "{confinement}");
     }
+    // Files are enforced on macOS, and on Linux wherever the kernel has
+    // Landlock (the CI runners' have): then the file probes above ran.
+    if files_enforceable() {
+        assert_eq!(confinement["files"], "enforced", "{confinement}");
+    }
+}
+
+/// Whether this host can enforce file confinement: macOS always, Linux with
+/// Landlock among its security modules.
+fn files_enforceable() -> bool {
+    if cfg!(target_os = "macos") {
+        return true;
+    }
+    if cfg!(target_os = "linux") {
+        return std::fs::read_to_string("/sys/kernel/security/lsm")
+            .is_ok_and(|lsm| lsm.split(',').any(|m| m.trim() == "landlock"));
+    }
+    false
 }
 
 #[test]

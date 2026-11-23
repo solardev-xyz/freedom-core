@@ -14,7 +14,9 @@
 //!   its marker, the process aborts; `=spin`: the step never returns;
 //!   `=sleep:<ms>`: the step takes that long first.
 //! - `FREEDOM_COLIBRID_TEST_CLASSIFY`: the same inside a request's
-//!   classification, its first call into the C core.
+//!   classification, its first call into the C core;
+//!   `FREEDOM_COLIBRID_TEST_CREATE`: inside a context's or a checkpoint
+//!   verifier's creation.
 //! - `FREEDOM_COLIBRID_TEST_ANSWER=crash:<n>`: the process aborts inside
 //!   the n-th answer it gives the C core.
 //! - Each step marker names its call (`"call": "execute"`, and so on).
@@ -57,6 +59,12 @@ pub fn in_step() {
 /// for by `FREEDOM_COLIBRID_TEST_CLASSIFY`.
 pub fn in_classify() {
     fault("FREEDOM_COLIBRID_TEST_CLASSIFY");
+}
+
+/// Inside a context's or a verifier's creation, behind its marker: the
+/// same, asked for by `FREEDOM_COLIBRID_TEST_CREATE`.
+pub fn in_create() {
+    fault("FREEDOM_COLIBRID_TEST_CREATE");
 }
 
 /// Inside an answer given to the C core, behind its marker:
