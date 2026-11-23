@@ -39,7 +39,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use serde_json::value::RawValue;
 
-use crate::exec::{Timers, sleep};
+use crate::exec::{Timers, sleep, yield_now};
 use crate::served;
 use crate::shared::Shared;
 
@@ -114,7 +114,7 @@ pub struct Env {
 }
 
 /// Whether a marker was written.
-pub(crate) enum Marked {
+enum Marked {
     /// Written: the C core may be entered.
     Go,
     /// Not written: the request ends with `busy`.
@@ -134,18 +134,45 @@ pub(crate) enum Reply {
     None,
 }
 
+/// Why a request stops before its reply: its marker wasn't written
+/// (`busy`), or the request is answered or gone, or the connection is
+/// ending.
+pub(crate) enum Stop {
+    Busy,
+    Gone,
+}
+
+impl Stop {
+    pub(crate) fn reply(self) -> Reply {
+        match self {
+            Stop::Busy => busy(),
+            Stop::Gone => Reply::None,
+        }
+    }
+}
+
 impl Env {
-    /// The marker before a call into the C core for request `id`.
-    pub(crate) fn mark(&self, id: u64, state: &TaskState) -> Marked {
+    /// The marker before call `what` into the C core for request `id`.
+    /// With the `testhooks` feature it names the call, so a test can tell
+    /// which one a death was in; the design's marker carries the request
+    /// alone.
+    fn mark(&self, id: u64, state: &TaskState, what: &'static str) -> Marked {
         if !state.committed.get() {
             if !self.conn.commit(id) {
                 return Marked::Gone;
             }
             state.committed.set(true);
         }
+        #[cfg(feature = "testhooks")]
+        let marker = json!({ "request": id, "call": what });
+        #[cfg(not(feature = "testhooks"))]
+        let marker = {
+            let _ = what;
+            json!({ "request": id })
+        };
         match self
             .conn
-            .event_written("colibri.step", &json!({ "request": id }), MARKER_WAIT)
+            .event_written("colibri.step", &marker, MARKER_WAIT)
         {
             Ok(()) => Marked::Go,
             // Never reached main: nothing to clear.
@@ -162,10 +189,10 @@ impl Env {
         }
     }
 
-    /// The clearing event after a call: queued before any frame the step
-    /// caused. If it can't be queued the process ends (0014: a full queue
-    /// fails with 70; a closed connection is ending anyway).
-    pub(crate) fn stepped(&self, id: u64) {
+    /// The clearing event after a call: queued as it returns, before any
+    /// frame it caused. If it can't be queued the process ends (0014: a
+    /// full queue fails with 70; a closed connection is ending anyway).
+    fn stepped(&self, id: u64) {
         match self
             .conn
             .event_for(id, "colibri.stepped", &json!({ "request": id }))
@@ -177,26 +204,104 @@ impl Env {
         }
     }
 
-    /// Frees `contexts` behind a marker, or leaves them for exit.
-    pub(crate) fn free<T: 'static>(&self, id: u64, state: &TaskState, contexts: Vec<T>) {
-        if contexts.is_empty() {
-            return;
+    /// One call into the C core for request `id` (0014, "The step marker"):
+    /// its own marker, written within its second, then the call, then its
+    /// clearing event as it returns, then a yield, so a cancel queued
+    /// meanwhile is seen before anything else is done for the request. No
+    /// marker, no call: `f` is then dropped uncalled.
+    pub(crate) async fn call<T>(
+        &self,
+        id: u64,
+        state: &TaskState,
+        what: &'static str,
+        f: impl FnOnce() -> T,
+    ) -> Result<T, Stop> {
+        match self.mark(id, state, what) {
+            Marked::Go => {}
+            Marked::Busy => return Err(Stop::Busy),
+            Marked::Gone => return Err(Stop::Gone),
         }
-        match self.mark(id, state) {
-            Marked::Go => {
-                drop(contexts);
-                self.stepped(id);
-            }
-            Marked::Busy | Marked::Gone => self.bury(contexts),
-        }
+        debug_assert_eq!(
+            std::thread::current().name(),
+            Some("verifier"),
+            "a call into the C core off the verifier thread"
+        );
+        self.shared.call_done();
+        let value = f();
+        self.stepped(id);
+        yield_now().await;
+        Ok(value)
     }
 
-    /// Keeps `contexts` until exit.
-    pub(crate) fn bury<T: 'static>(&self, contexts: Vec<T>) {
+    /// Frees `contexts` in order, each behind its own marker; from the
+    /// first whose marker isn't written, they are kept until exit, and the
+    /// request ends as that marker says.
+    pub(crate) async fn free_all<T: 'static>(
+        &self,
+        id: u64,
+        state: &TaskState,
+        contexts: Vec<T>,
+    ) -> Result<(), Stop> {
+        let mut contexts = contexts.into_iter();
+        while let Some(ctx) = contexts.next() {
+            let stop = match self.mark(id, state, "free") {
+                Marked::Go => {
+                    debug_assert_eq!(std::thread::current().name(), Some("verifier"));
+                    self.shared.call_done();
+                    drop(ctx);
+                    self.stepped(id);
+                    yield_now().await;
+                    continue;
+                }
+                Marked::Busy => Stop::Busy,
+                Marked::Gone => Stop::Gone,
+            };
+            self.bury(std::iter::once(ctx).chain(contexts));
+            return Err(stop);
+        }
+        Ok(())
+    }
+
+    /// Keeps `contexts` until exit (0014: "its context is freed later,
+    /// under its own marker, or at exit").
+    pub(crate) fn bury<T: 'static>(&self, contexts: impl IntoIterator<Item = T>) {
         let mut graveyard = self.graveyard.borrow_mut();
         for context in contexts {
             graveyard.push(Box::new(context));
         }
+    }
+
+    /// Ends a request with `reply`: `ctx` freed, then the contexts a ZK
+    /// fallback left (the inner call's context before its caller's, as the
+    /// client's `finally` frees them). A cancel seen meanwhile wins.
+    async fn end(
+        &self,
+        id: u64,
+        state: &TaskState,
+        ctx: Option<RpcCtx>,
+        done: &mut Vec<RpcCtx>,
+        reply: Reply,
+    ) -> Reply {
+        let mut all: Vec<RpcCtx> = ctx.into_iter().collect();
+        all.extend(done.drain(..).rev());
+        // A free that couldn't be marked ends the request with `busy`: no
+        // marker, no call (0014).
+        if let Err(stop) = self.free_all(id, state, all).await {
+            return stop.reply();
+        }
+        if state.cancelled.get() {
+            cancelled(state)
+        } else {
+            reply
+        }
+    }
+
+    /// Stops a request whose marker wasn't written: `ctx` and the older
+    /// contexts are kept until exit, never freed unmarked.
+    fn stop(&self, ctx: Option<RpcCtx>, done: &mut Vec<RpcCtx>, stop: Stop) -> Reply {
+        self.bury(ctx);
+        self.bury(done.drain(..));
+        stop.reply()
     }
 }
 
@@ -281,27 +386,75 @@ fn client_params(params: &str) -> String {
     }
 }
 
+/// The fetches one request may make in all, across a ZK fallback's two
+/// contexts (0014, Budgets: 1,024 per request).
+#[derive(Debug, Default)]
+pub(crate) struct FetchBudget {
+    taken: u32,
+}
+
+impl FetchBudget {
+    /// Takes one fetch: false past the bound.
+    pub(crate) fn take(&mut self) -> bool {
+        self.taken = self.taken.saturating_add(1);
+        self.taken <= MAX_FETCHES_PER_REQUEST
+    }
+}
+
+impl Params {
+    /// The request's deadline, if the clock can hold it.
+    pub fn deadline(&self) -> Option<Instant> {
+        Instant::now().checked_add(Duration::from_millis(self.deadline_ms))
+    }
+}
+
 async fn serve(env: &Rc<Env>, id: u64, p: &Params, state: &Rc<TaskState>) -> Reply {
+    // A cancel that came with the request.
+    if state.cancelled.get() {
+        return cancelled(state);
+    }
     if let Err(served::Refusal(text)) = served::check(&p.method, &p.params) {
         return Reply::Raw(format!(r#"{{"status":"error","error":{text}}}"#));
     }
     let params = client_params(&p.params);
+    let Some(deadline) = p.deadline() else {
+        return Reply::Error(ErrorBody::new(
+            ErrorCode::InvalidArgument,
+            "deadline_ms is past what the clock holds",
+        ));
+    };
     let chain = env.shared.chain_id;
-    let proofable = matches!(
-        colibri_stateless::get_method_support(chain, &p.method, Some(&params), VERIFY_FLAGS),
-        Ok(MethodType::Proofable)
-    );
-    let deadline = Instant::now() + Duration::from_millis(p.deadline_ms);
+    let support = match env
+        .call(id, state, "classify", || {
+            crate::testhooks::in_classify();
+            colibri_stateless::get_method_support(chain, &p.method, Some(&params), VERIFY_FLAGS)
+        })
+        .await
+    {
+        Ok(support) => support,
+        Err(stop) => return stop.reply(),
+    };
+    if state.cancelled.get() {
+        return cancelled(state);
+    }
+    let proofable = matches!(support, Ok(MethodType::Proofable));
+    let mut budget = FetchBudget::default();
     let mut done = Vec::new();
     let mut zk = p.zk && !env.zk_off.borrow().get(&p.client).copied().unwrap_or(false);
     loop {
-        match attempt(
-            env, id, p, &params, state, zk, proofable, deadline, &mut done,
-        )
-        .await
-        {
-            Attempt::Done(reply) => return reply,
-            Attempt::WithoutZk(ctx) => {
+        let attempt = Attempt {
+            env,
+            id,
+            p,
+            params: &params,
+            state,
+            zk,
+            proofable,
+            deadline,
+        };
+        match attempt.run(&mut budget, &mut done).await {
+            Outcome::Done(reply) => return reply,
+            Outcome::WithoutZk(ctx) => {
                 env.zk_off.borrow_mut().insert(p.client.clone(), true);
                 zk = false;
                 done.push(ctx);
@@ -310,11 +463,24 @@ async fn serve(env: &Rc<Env>, id: u64, p: &Params, state: &Rc<TaskState>) -> Rep
     }
 }
 
-enum Attempt {
+/// How one context's run ends.
+enum Outcome {
     Done(Reply),
-    /// The context ended in a ZK sync proof's error: run again without ZK,
-    /// and free this one after.
+    /// It ended in a ZK sync proof's error: run again without ZK, and free
+    /// this one after.
     WithoutZk(RpcCtx),
+}
+
+/// One context's run within a request.
+struct Attempt<'a> {
+    env: &'a Rc<Env>,
+    id: u64,
+    p: &'a Params,
+    params: &'a str,
+    state: &'a Rc<TaskState>,
+    zk: bool,
+    proofable: bool,
+    deadline: Instant,
 }
 
 /// The raw fields of a pending step's requests, from the C core's status
@@ -362,190 +528,210 @@ pub(crate) struct SuccessStatus<'a> {
 /// One answer for the C core: the body and its node, or the error text.
 pub(crate) type Fetched = Result<(Vec<u8>, u16, Option<Hold>), String>;
 
-#[allow(clippy::too_many_arguments)]
-async fn attempt(
-    env: &Rc<Env>,
-    id: u64,
-    p: &Params,
-    params: &str,
-    state: &Rc<TaskState>,
-    zk: bool,
-    proofable: bool,
-    deadline: Instant,
-    done: &mut Vec<RpcCtx>,
-) -> Attempt {
-    // This context first, then those a ZK fallback left: the client's
-    // `finally` frees the inner call's context before its caller's.
-    let free_all = |ctx: RpcCtx, done: &mut Vec<RpcCtx>| {
-        drop(ctx);
-        while let Some(older) = done.pop() {
-            drop(older);
+impl Attempt<'_> {
+    #[allow(clippy::too_many_lines)]
+    async fn run(&self, budget: &mut FetchBudget, done: &mut Vec<RpcCtx>) -> Outcome {
+        let (env, id, state) = (self.env, self.id, &**self.state);
+        let prover_flags = if self.zk { ZK_FLAG } else { 0 };
+        #[cfg(feature = "testhooks")]
+        if let Some(ms) = self.p.test_clock_ms {
+            if let Err(stop) = env
+                .call(id, state, "clock", || {
+                    colibri_stateless::set_fixed_time(Some(ms / 1000));
+                })
+                .await
+            {
+                return Outcome::Done(env.stop(None, done, stop));
+            }
+            if state.cancelled.get() {
+                return Outcome::Done(env.end(id, state, None, done, cancelled(state)).await);
+            }
         }
-    };
-    match env.mark(id, state) {
-        Marked::Go => {}
-        Marked::Busy => return Attempt::Done(busy()),
-        Marked::Gone => return Attempt::Done(Reply::None),
-    }
-    #[cfg(feature = "testhooks")]
-    if let Some(ms) = p.test_clock_ms {
-        colibri_stateless::set_fixed_time(Some(ms / 1000));
-    }
-    let prover_flags = if zk { ZK_FLAG } else { 0 };
-    let mut ctx = match RpcCtx::new(
-        &p.method,
-        params,
-        env.shared.chain_id,
-        prover_flags,
-        VERIFY_FLAGS,
-        ProverMode::Remote,
-    ) {
-        Ok(ctx) => ctx,
-        Err(e) => {
-            drop(std::mem::take(done));
-            env.stepped(id);
-            return Attempt::Done(error_reply(&e.to_string()));
-        }
-    };
-    ctx.set_min_latest_block_ts(p.min_latest_block_ts);
-    let mut first = true;
-    let mut fetched_so_far: u32 = 0;
-    loop {
-        // Behind a marker taken before the loop or at the end of the last
-        // round.
-        crate::testhooks::in_step();
-        let outcome = ctx.execute_with_status();
-        env.shared.step_done();
-        let (step, status) = match outcome {
-            Ok(step) => step,
+        let created = env
+            .call(id, state, "create", || {
+                RpcCtx::new(
+                    &self.p.method,
+                    self.params,
+                    env.shared.chain_id,
+                    prover_flags,
+                    VERIFY_FLAGS,
+                    ProverMode::Remote,
+                )
+            })
+            .await;
+        let created = match created {
+            Ok(created) => created,
+            Err(stop) => return Outcome::Done(env.stop(None, done, stop)),
+        };
+        let mut ctx = match created {
+            Ok(ctx) => ctx,
             Err(e) => {
-                let text = e.to_string();
-                free_all(ctx, done);
-                env.stepped(id);
-                return Attempt::Done(error_reply(&text));
+                let reply = error_reply(&e.to_string());
+                return Outcome::Done(env.end(id, state, None, done, reply).await);
             }
         };
-        match step {
-            Step::Success { .. } => {
-                let reply = match serde_json::from_str::<SuccessStatus<'_>>(&status) {
-                    Ok(SuccessStatus {
-                        result: Some(result),
-                    }) => format!(r#"{{"status":"success","result":{}}}"#, result.get()),
-                    _ => r#"{"status":"success"}"#.to_owned(),
-                };
-                free_all(ctx, done);
-                env.stepped(id);
-                return Attempt::Done(Reply::Raw(reply));
-            }
-            Step::Revert { data } => {
-                let reply = json!({ "status": "revert", "data": data }).to_string();
-                free_all(ctx, done);
-                env.stepped(id);
-                return Attempt::Done(Reply::Raw(reply));
-            }
-            Step::Error { message } => {
-                if zk && message.contains(ZK_SYNC_PROOF) {
-                    env.stepped(id);
-                    return Attempt::WithoutZk(ctx);
+        if state.cancelled.get() {
+            return Outcome::Done(env.end(id, state, Some(ctx), done, cancelled(state)).await);
+        }
+        let min = self.p.min_latest_block_ts;
+        if let Err(stop) = env
+            .call(id, state, "freshness", || ctx.set_min_latest_block_ts(min))
+            .await
+        {
+            return Outcome::Done(env.stop(Some(ctx), done, stop));
+        }
+        if state.cancelled.get() {
+            return Outcome::Done(env.end(id, state, Some(ctx), done, cancelled(state)).await);
+        }
+        let mut first = true;
+        loop {
+            let outcome = env
+                .call(id, state, "execute", || {
+                    crate::testhooks::in_step();
+                    ctx.execute_with_status()
+                })
+                .await;
+            let outcome = match outcome {
+                Ok(outcome) => outcome,
+                Err(stop) => return Outcome::Done(env.stop(Some(ctx), done, stop)),
+            };
+            env.shared.step_done();
+            let (step, status) = match outcome {
+                Ok(step) => step,
+                Err(e) => {
+                    let reply = error_reply(&e.to_string());
+                    return Outcome::Done(env.end(id, state, Some(ctx), done, reply).await);
                 }
-                free_all(ctx, done);
-                env.stepped(id);
-                return Attempt::Done(error_reply(&message));
+            };
+            if state.cancelled.get() {
+                drop(step);
+                return Outcome::Done(env.end(id, state, Some(ctx), done, cancelled(state)).await);
             }
-            Step::Pending { requests } => {
-                env.stepped(id);
-                let raw = match serde_json::from_str::<PendingStatus<'_>>(&status) {
-                    Ok(raw) if raw.requests.len() == requests.len() => raw.requests,
-                    _ => {
-                        drop(requests);
-                        env.free(id, state, vec![ctx]);
-                        env.free(id, state, std::mem::take(done));
-                        return Attempt::Done(error_reply(
-                            "the C core's pending requests don't parse",
-                        ));
+            let requests = match step {
+                Step::Success { .. } => {
+                    let reply = match serde_json::from_str::<SuccessStatus<'_>>(&status) {
+                        Ok(SuccessStatus {
+                            result: Some(result),
+                        }) => format!(r#"{{"status":"success","result":{}}}"#, result.get()),
+                        _ => r#"{"status":"success"}"#.to_owned(),
+                    };
+                    let reply = Reply::Raw(reply);
+                    return Outcome::Done(env.end(id, state, Some(ctx), done, reply).await);
+                }
+                Step::Revert { data } => {
+                    let reply = Reply::Raw(json!({ "status": "revert", "data": data }).to_string());
+                    return Outcome::Done(env.end(id, state, Some(ctx), done, reply).await);
+                }
+                Step::Error { message } => {
+                    if self.zk && message.contains(ZK_SYNC_PROOF) {
+                        return Outcome::WithoutZk(ctx);
                     }
-                };
-                // #1080: the first step of a proofable context, asking for
-                // exactly one prover fetch, the remote proof.
-                let remote_proof = first && proofable && raw.len() == 1 && raw[0].kind == "prover";
-                first = false;
-                if state.cancelled.get() {
+                    let reply = error_reply(&message);
+                    return Outcome::Done(env.end(id, state, Some(ctx), done, reply).await);
+                }
+                Step::Pending { requests } => requests,
+            };
+            let raw = match serde_json::from_str::<PendingStatus<'_>>(&status) {
+                Ok(raw) if raw.requests.len() == requests.len() => raw.requests,
+                _ => {
                     drop(requests);
-                    env.free(id, state, vec![ctx]);
-                    env.free(id, state, std::mem::take(done));
-                    return Attempt::Done(cancelled(state));
+                    let reply = error_reply("the C core's pending requests don't parse");
+                    return Outcome::Done(env.end(id, state, Some(ctx), done, reply).await);
                 }
-                let mut fetches: Vec<Pin<Box<dyn Future<Output = Fetched> + '_>>> = Vec::new();
-                for (request, fields) in requests.iter().zip(&raw) {
-                    fetched_so_far = fetched_so_far.saturating_add(1);
-                    let over = fetched_so_far > MAX_FETCHES_PER_REQUEST;
-                    fetches.push(Box::pin(fetch(
-                        env,
-                        id,
-                        fields,
-                        u64::from(request.delay),
-                        u64::from(request.ttl),
-                        request.exclude_mask,
-                        deadline,
-                        over,
-                        MAX_BODY,
-                    )));
+            };
+            // #1080: the first step of a proofable context, asking for
+            // exactly one prover fetch, the remote proof.
+            let remote_proof = first && self.proofable && raw.len() == 1 && raw[0].kind == "prover";
+            first = false;
+            let mut fetches: Vec<Pin<Box<dyn Future<Output = Fetched> + '_>>> = Vec::new();
+            for (request, fields) in requests.iter().zip(&raw) {
+                let over = !budget.take();
+                fetches.push(Box::pin(fetch(
+                    env,
+                    id,
+                    fields,
+                    u64::from(request.delay),
+                    u64::from(request.ttl),
+                    request.exclude_mask,
+                    self.deadline,
+                    over,
+                    MAX_BODY,
+                )));
+            }
+            let Some(answers) = all_unless_cancelled(fetches, state).await else {
+                drop(requests);
+                return Outcome::Done(env.end(id, state, Some(ctx), done, cancelled(state)).await);
+            };
+            if remote_proof && let Some(Err(text)) = answers.first() {
+                // The remote proof failed: the C core gets the text, and the
+                // step where 3.0.3 would prove locally never runs. The
+                // client's ZK fallback still reads the error: a prover with
+                // no ZK sync proof yet says so in its text.
+                let error = format!("{NO_LOCAL_PROVING}: {text}");
+                let text = text.clone();
+                if let Some(request) = requests.into_iter().next()
+                    && let Err(stop) = env
+                        .call(id, state, "answer", move || {
+                            crate::testhooks::in_answer();
+                            request.set_error(&text, 0)
+                        })
+                        .await
+                {
+                    return Outcome::Done(env.stop(Some(ctx), done, stop));
                 }
-                let answers = match all_unless_cancelled(fetches, state).await {
-                    Some(answers) => answers,
-                    None => {
-                        drop(requests);
-                        env.free(id, state, vec![ctx]);
-                        env.free(id, state, std::mem::take(done));
-                        return Attempt::Done(cancelled(state));
+                if state.cancelled.get() {
+                    return Outcome::Done(
+                        env.end(id, state, Some(ctx), done, cancelled(state)).await,
+                    );
+                }
+                if self.zk && error.contains(ZK_SYNC_PROOF) {
+                    return Outcome::WithoutZk(ctx);
+                }
+                let reply = error_reply(&error);
+                return Outcome::Done(env.end(id, state, Some(ctx), done, reply).await);
+            }
+            // Each answer is a call of its own; the bodies are the C core's
+            // once given (it copies them).
+            let mut pairs = requests.into_iter().zip(answers);
+            let mut stopped = None;
+            for (request, answer) in pairs.by_ref() {
+                let given = match answer {
+                    Ok((body, node, hold)) => {
+                        let given = env
+                            .call(id, state, "answer", move || {
+                                crate::testhooks::in_answer();
+                                request.set_response(&body, node)
+                            })
+                            .await;
+                        drop(hold);
+                        given
+                    }
+                    Err(text) => {
+                        env.call(id, state, "answer", move || {
+                            crate::testhooks::in_answer();
+                            request.set_error(&text, 0)
+                        })
+                        .await
                     }
                 };
-                match env.mark(id, state) {
-                    Marked::Go => {}
-                    Marked::Busy => {
-                        drop(requests);
-                        env.bury(vec![ctx]);
-                        env.bury(std::mem::take(done));
-                        return Attempt::Done(busy());
-                    }
-                    Marked::Gone => {
-                        drop(requests);
-                        env.bury(vec![ctx]);
-                        env.bury(std::mem::take(done));
-                        return Attempt::Done(Reply::None);
-                    }
+                if let Err(stop) = given {
+                    stopped = Some(Some(stop));
+                    break;
                 }
-                if remote_proof && let Some(Err(text)) = answers.first() {
-                    // The remote proof failed: the C core gets the text,
-                    // and the step where 3.0.3 would prove locally never
-                    // runs. The client's ZK fallback still reads the
-                    // error: a prover with no ZK sync proof yet says so in
-                    // its text.
-                    let error = format!("{NO_LOCAL_PROVING}: {text}");
-                    let text = text.clone();
-                    for request in requests {
-                        request.set_error(&text, 0);
-                    }
-                    if zk && error.contains(ZK_SYNC_PROOF) {
-                        env.stepped(id);
-                        return Attempt::WithoutZk(ctx);
-                    }
-                    free_all(ctx, done);
-                    env.stepped(id);
-                    return Attempt::Done(error_reply(&error));
+                if state.cancelled.get() {
+                    stopped = Some(None);
+                    break;
                 }
-                let mut holds = Vec::new();
-                for (request, answer) in requests.into_iter().zip(answers) {
-                    match answer {
-                        Ok((body, node, hold)) => {
-                            request.set_response(&body, node);
-                            holds.push(hold);
-                        }
-                        Err(text) => request.set_error(&text, 0),
-                    }
+            }
+            drop(pairs);
+            match stopped {
+                Some(Some(stop)) => return Outcome::Done(env.stop(Some(ctx), done, stop)),
+                Some(None) => {
+                    return Outcome::Done(
+                        env.end(id, state, Some(ctx), done, cancelled(state)).await,
+                    );
                 }
-                // The bodies are the C core's now (it copies them).
-                drop(holds);
+                None => {}
             }
         }
     }
@@ -783,6 +969,48 @@ mod tests {
         assert_eq!(
             value["error"].as_str().unwrap().encode_utf16().count(),
             MAX_ERROR_UNITS
+        );
+    }
+
+    #[test]
+    fn one_request_makes_1024_fetches_in_all() {
+        // One budget per request, which its ZK fallback's second context
+        // shares (`serve` holds it).
+        let mut budget = FetchBudget::default();
+        for _ in 0..MAX_FETCHES_PER_REQUEST {
+            assert!(budget.take());
+        }
+        assert!(!budget.take(), "the 1,025th fetch");
+        assert!(!budget.take());
+    }
+
+    #[test]
+    fn fetch_params_carry_the_c_cores_fields() {
+        let payload: Box<RawValue> =
+            serde_json::from_str(r#"{"method": "eth_getProof","params":[1]}"#).unwrap();
+        let params = FetchParams {
+            request: 7,
+            kind: "beacon_api",
+            method: "get",
+            path: "eth/v1/x",
+            payload: Some(&payload),
+            accept: "ssz",
+            exclude_mask: 5,
+            max_age: Some(6),
+        };
+        assert_eq!(
+            serde_json::to_string(&params).unwrap(),
+            r#"{"request":7,"type":"beacon_api","method":"get","path":"eth/v1/x","payload":{"method": "eth_getProof","params":[1]},"accept":"ssz","exclude_mask":5,"max_age":6}"#
+        );
+        let none = FetchParams {
+            payload: None,
+            max_age: None,
+            exclude_mask: 0,
+            ..params
+        };
+        assert_eq!(
+            serde_json::to_string(&none).unwrap(),
+            r#"{"request":7,"type":"beacon_api","method":"get","path":"eth/v1/x","accept":"ssz","exclude_mask":0}"#
         );
     }
 

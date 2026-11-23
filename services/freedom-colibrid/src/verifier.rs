@@ -1,11 +1,14 @@
 //! The verifier thread (design 0014, "Inside the process"): the one thread
-//! that calls into the C core. It runs each request as a task on
-//! [`crate::exec`]'s executor, and takes the connection's jobs in order.
+//! that calls into the C core. It starts right after confinement, gives the
+//! C core its store and checks its version before anything else reaches the
+//! C core, then runs each request as a task on [`crate::exec`]'s executor,
+//! taking the connection's jobs first in every round.
 
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::Arc;
+use std::sync::mpsc::SyncSender;
 
 use fc_service::conn::Connection;
 
@@ -13,9 +16,12 @@ use crate::checkpoint;
 use crate::exec::{Executor, Queue};
 use crate::request::{self, Env, Params, TaskState};
 use crate::shared::Shared;
+use crate::store::StoreHandle;
 
 /// What the reader thread hands the verifier thread.
 pub enum Job {
+    /// The connection, with the first request.
+    Connect(Connection),
     /// A `colibri.request` the budget took.
     Request { id: u64, params: Params },
     /// The checkpoint process's one `colibri.checkpoint`.
@@ -28,10 +34,42 @@ pub enum Job {
     End,
 }
 
-/// Runs until [`Job::End`].
-pub fn run(conn: Connection, shared: Arc<Shared>, queue: Arc<Queue<Job>>) {
+/// Runs until [`Job::End`]. `ready` gets the outcome of the C core's setup:
+/// its store given, and its version the pinned one.
+pub fn run(shared: Arc<Shared>, queue: Arc<Queue<Job>>, ready: SyncSender<Result<(), String>>) {
     crate::testhooks::probe("verifier");
+    // The C core's store, before `hello` (0014): its own file store is off.
+    colibri_stateless::register_storage(StoreHandle(Arc::clone(&shared.store)));
+    let version = crate::client_version();
+    if version != crate::CLIENT_VERSION {
+        let _ = ready.send(Err(format!(
+            "the linked C core reports {version}, not the pinned {}",
+            crate::CLIENT_VERSION
+        )));
+        return;
+    }
+    if ready.send(Ok(())).is_err() {
+        return;
+    }
     let mut exec = Executor::new(queue);
+    // Nothing reaches the C core before the connection: the first request
+    // brings it, and the jobs behind it in the same round are kept for the
+    // loop below.
+    let mut carried = Vec::new();
+    let conn = loop {
+        let mut connected = None;
+        for job in exec.wait() {
+            match (job, &connected) {
+                (Job::Connect(conn), None) => connected = Some(conn),
+                (Job::End, None) => return,
+                (job, Some(_)) => carried.push(job),
+                (_, None) => {}
+            }
+        }
+        if let Some(conn) = connected {
+            break conn;
+        }
+    };
     let env = Rc::new(Env {
         conn,
         shared,
@@ -42,8 +80,17 @@ pub fn run(conn: Connection, shared: Arc<Shared>, queue: Arc<Queue<Job>>) {
     });
     let mut states: HashMap<u64, Rc<TaskState>> = HashMap::new();
     loop {
-        for job in exec.turn() {
+        // The jobs first, each round: a cancel queued while a task's call
+        // into the C core ran is seen before that task, or any other, runs
+        // on.
+        let jobs: Vec<Job> = if carried.is_empty() {
+            exec.wait()
+        } else {
+            std::mem::take(&mut carried)
+        };
+        for job in jobs {
             match job {
+                Job::Connect(_) => {}
                 Job::Request { id, params } => {
                     let state = Rc::new(TaskState::default());
                     states.insert(id, Rc::clone(&state));
@@ -79,6 +126,7 @@ pub fn run(conn: Connection, shared: Arc<Shared>, queue: Arc<Queue<Job>>) {
                 }
             }
         }
+        exec.run_one();
         states.retain(|id, _| exec.contains(*id));
     }
 }
