@@ -56,6 +56,7 @@ use windows_sys::Win32::System::JobObjects::{
     JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JobObjectExtendedLimitInformation,
     QueryInformationJobObject, SetInformationJobObject,
 };
+use windows_sys::Win32::System::ProcessStatus::{K32GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS};
 use windows_sys::Win32::System::SystemServices::{
     PROCESS_MITIGATION_DYNAMIC_CODE_POLICY, PROCESS_MITIGATION_EXTENSION_POINT_DISABLE_POLICY,
     PROCESS_MITIGATION_IMAGE_LOAD_POLICY,
@@ -72,6 +73,25 @@ pub const DRIVE_UNKNOWN: u32 = 0;
 pub const DRIVE_NO_ROOT_DIR: u32 = 1;
 /// `GetDriveTypeW`'s `DRIVE_REMOTE`: a mapped network drive.
 pub const DRIVE_REMOTE: u32 = 4;
+
+/// This process's working set in bytes (`K32GetProcessMemoryInfo`'s
+/// `WorkingSetSize`, kernel32's copy, so no psapi.dll): the Colibri
+/// service's resident memory after each step (design 0014, Budgets).
+#[allow(unsafe_code)]
+pub fn resident_bytes() -> io::Result<u64> {
+    let mut counters = PROCESS_MEMORY_COUNTERS::default();
+    let size = u32::try_from(std::mem::size_of::<PROCESS_MEMORY_COUNTERS>()).unwrap_or(0);
+    // SAFETY: GetCurrentProcess takes nothing and returns a pseudo-handle,
+    // which needs no closing.
+    let process = unsafe { GetCurrentProcess() };
+    // SAFETY: with that handle, the call writes at most `size` bytes into
+    // `counters`, which is exactly that large, and reads nothing of ours.
+    let ok = unsafe { K32GetProcessMemoryInfo(process, &raw mut counters, size) };
+    if ok == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    u64::try_from(counters.WorkingSetSize).map_err(|_| io::Error::other("working set past u64"))
+}
 
 /// `GetDriveTypeW` on a NUL-terminated UTF-16 root path, such as `C:\`.
 /// [`DRIVE_UNKNOWN`] if `root` isn't NUL-terminated.
@@ -1311,6 +1331,16 @@ impl Mitigation {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn resident_memory_is_read() {
+        let before = resident_bytes().unwrap();
+        assert!(before > 1 << 20 && before < 1 << 40, "{before}");
+        let held = vec![1u8; 64 << 20];
+        let during = resident_bytes().unwrap();
+        assert!(during >= before + (32 << 20), "{before} -> {during}");
+        drop(held);
+    }
 
     /// A rename across volumes fails with `STATUS_NOT_SAME_DEVICE`, which
     /// reads as Win32's `ERROR_NOT_SAME_DEVICE` (17) and std's
