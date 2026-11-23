@@ -78,6 +78,11 @@ harness = false
 name = "service_vectors"
 required-features = ["testhooks"]
 
+# A step held by a test hook.
+[[test]]
+name = "service"
+required-features = ["testhooks"]
+
 # The core's workspace lints, copied: workspace lints don't cross workspaces.
 [lints.rust]
 unsafe_code = "forbid"

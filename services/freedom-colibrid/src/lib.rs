@@ -14,6 +14,7 @@ pub mod served;
 pub mod service;
 pub mod shared;
 pub mod store;
+pub mod testhooks;
 pub mod verifier;
 
 /// The Colibri release the C core is built from.

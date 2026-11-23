@@ -263,7 +263,10 @@ fn run_case(case: &Value, warm: &Path, warm_root: &Path) -> Result<(), String> {
         let deadline = Instant::now() + REQUEST_WAIT;
         let ended = loop {
             if Instant::now() > deadline {
-                return Err(format!("{id}: no reply; stderr: {}", colibrid.stderr()));
+                return Err(format!(
+                    "{id}: no reply after {asks} fetches; stderr: {}",
+                    colibrid.stderr()
+                ));
             }
             let Some(frame) = colibrid.recv(Duration::from_millis(500)) else {
                 if colibrid.exited() {
@@ -278,7 +281,7 @@ fn run_case(case: &Value, warm: &Path, warm_root: &Path) -> Result<(), String> {
                 }
                 continue;
             };
-            let Frame::Json(message) = frame else {
+            let Frame::Json(message, _) = frame else {
                 continue;
             };
             match message["type"].as_str() {
@@ -299,12 +302,24 @@ fn run_case(case: &Value, warm: &Path, warm_root: &Path) -> Result<(), String> {
                     let Some(want) = recorded.requests.get(asks as usize) else {
                         return Err(format!("{id}: an unrecorded fetch: {p}"));
                     };
+                    // The C core writes exclude_mask as a string and ttl as
+                    // a number; the fetch carries both as numbers, ttl as
+                    // max_age when it is set.
+                    let number = |value: &Value| {
+                        value
+                            .as_u64()
+                            .or_else(|| value.as_str().and_then(|s| s.parse().ok()))
+                            .unwrap_or(0)
+                    };
+                    let ttl = number(&want["ttl"]);
                     let same = p["request"] == rid
                         && p["type"] == want["type"]
                         && p["method"] == want["method"]
                         && p["path"] == want["url"]
                         && p["accept"] == want["encoding"]
-                        && p.get("payload") == want.get("payload");
+                        && p.get("payload") == want.get("payload")
+                        && p["exclude_mask"].as_u64() == Some(number(&want["exclude_mask"]))
+                        && p.get("max_age").and_then(Value::as_u64) == (ttl > 0).then_some(ttl);
                     if !same {
                         return Err(format!(
                             "{id}: fetch {asks} differs:\n  service:   {p}\n  recorded:  {want}"
@@ -331,10 +346,18 @@ fn run_case(case: &Value, warm: &Path, warm_root: &Path) -> Result<(), String> {
         };
         let reply = match ended {
             Ended::DiedInStep => {
-                // #750: a crash is an allowed end, never a result.
-                if !id.contains("unknown") && !id.contains("unindexed") {
+                // #750: a crash is an allowed end, never a result, and only
+                // where the recording trapped: a step with no status, after
+                // every fetch the recording made before it.
+                let trapped = case["trace"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|op| op["op"] == "step" && op.get("status").is_none());
+                if !trapped || asks as usize != recorded.requests.len() {
                     return Err(format!(
-                        "{id}: died in a step; stderr: {}",
+                        "{id}: died in a step (recorded trap: {trapped}, fetches {asks} of {}); stderr: {}",
+                        recorded.requests.len(),
                         colibrid.stderr()
                     ));
                 }
@@ -400,6 +423,13 @@ fn run_case(case: &Value, warm: &Path, warm_root: &Path) -> Result<(), String> {
                 ));
             }
         }
+    }
+    // Every fetch the recording's C core made, the service made.
+    if refused.is_none() && asks as usize != recorded.requests.len() {
+        return Err(format!(
+            "{id}: {asks} fetches, the recording made {}",
+            recorded.requests.len()
+        ));
     }
     if !died && colibrid.shutdown() != Some(0) {
         return Err(format!(

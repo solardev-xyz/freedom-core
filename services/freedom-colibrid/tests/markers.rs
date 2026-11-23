@@ -4,7 +4,14 @@
 //!   written: the request ends `busy`, and the C core isn't entered;
 //! - a marker still being written then may reach main late: the service
 //!   clears it (`colibri.stepped`) before its `busy`, so main reads the
-//!   marker, its clearing event, then `busy`, never a step left open.
+//!   marker, its clearing event, then `busy`, never a step left open;
+//! - every call into the C core has a marker of its own: held at the n-th
+//!   marker of a request, the service has made exactly n − 1 calls, for
+//!   every n the request reaches (its classification, the context's
+//!   creation and freshness bound, each step and each answer, and the
+//!   free).
+//!
+//! The in-process services share one C core, so the tests take turns.
 
 // Test code: a failed setup ends the test.
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
@@ -26,20 +33,38 @@ use serde_json::{Value, json};
 struct Gated {
     inner: PipeWriter,
     needle: Vec<u8>,
+    /// Holds at this occurrence of the needle (1 for the first).
+    nth: usize,
+    seen: usize,
     armed: bool,
-    gate: Arc<(Mutex<bool>, Condvar)>,
+    gate: Arc<Gate>,
 }
+
+/// Whether the writer is to be held, and whether it is.
+struct Gate {
+    state: Mutex<(bool, bool)>,
+    signal: Condvar,
+}
+
+/// The in-process tests share one C core: one at a time.
+static TURN: Mutex<()> = Mutex::new(());
 
 impl Write for Gated {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        if self.armed && buf.windows(self.needle.len()).any(|w| w == self.needle) {
+        let found = buf
+            .windows(self.needle.len())
+            .filter(|w| *w == self.needle)
+            .count();
+        if self.armed && found > 0 && self.seen + found >= self.nth {
             self.armed = false;
-            let (held, signal) = &*self.gate;
-            let mut held = held.lock().unwrap();
-            while *held {
-                held = signal.wait(held).unwrap();
+            let mut state = self.gate.state.lock().unwrap();
+            state.1 = true;
+            self.gate.signal.notify_all();
+            while state.0 {
+                state = self.gate.signal.wait(state).unwrap();
             }
         }
+        self.seen += found;
         self.inner.write(buf)
     }
 
@@ -51,23 +76,34 @@ impl Write for Gated {
 struct InProcess {
     input: PipeWriter,
     messages: Receiver<Value>,
-    gate: Arc<(Mutex<bool>, Condvar)>,
+    gate: Arc<Gate>,
     next_id: u64,
+    /// Messages read while waiting for the writer to be held.
+    backlog: Vec<Value>,
 }
 
 impl InProcess {
     fn start(needle: &str) -> InProcess {
+        InProcess::start_at(needle, 1)
+    }
+
+    fn start_at(needle: &str, nth: usize) -> InProcess {
         let (main_reads, service_writes) = io::pipe().unwrap();
         let (service_reads, main_writes) = io::pipe().unwrap();
-        let gate = Arc::new((Mutex::new(true), Condvar::new()));
+        let gate = Arc::new(Gate {
+            state: Mutex::new((true, false)),
+            signal: Condvar::new(),
+        });
         let output = Gated {
             inner: service_writes,
             needle: needle.as_bytes().to_vec(),
+            nth,
+            seen: 0,
             armed: true,
             gate: Arc::clone(&gate),
         };
         let shared = Arc::new(Shared::new(1, Arc::new(Store::memory())));
-        let service = Arc::new(ColibriService::new(shared, json!({})));
+        let service = Arc::new(ColibriService::start(shared, json!({})).unwrap());
         let mut options = Options::new("colibri", 1, Instant::now());
         options.exit_watchdog = None;
         options.two_way = true;
@@ -95,6 +131,7 @@ impl InProcess {
             messages,
             gate,
             next_id: 1,
+            backlog: Vec::new(),
         };
         main.request(
             "colibri.hello",
@@ -116,9 +153,38 @@ impl InProcess {
     }
 
     fn release(&self) {
-        let (held, signal) = &*self.gate;
-        *held.lock().unwrap() = false;
-        signal.notify_all();
+        self.gate.state.lock().unwrap().0 = false;
+        self.gate.signal.notify_all();
+    }
+
+    /// Whether the writer is held now.
+    fn holding(&self) -> bool {
+        self.gate.state.lock().unwrap().1
+    }
+
+    /// Answers fetches until the writer is held, for at most `wait`.
+    fn until_held(&mut self, wait: Duration) -> bool {
+        let deadline = Instant::now() + wait;
+        while Instant::now() < deadline {
+            if self.holding() {
+                return true;
+            }
+            if let Ok(message) = self.messages.recv_timeout(Duration::from_millis(50)) {
+                if message["type"] == "request" && message["method"] == "shell.colibri_fetch" {
+                    self.fail_fetch(message["id"].as_u64().unwrap());
+                }
+                self.backlog.push(message);
+            }
+        }
+        self.holding()
+    }
+
+    /// The calls the service has made into the C core (`colibri.stats`).
+    fn calls(&mut self) -> u64 {
+        let id = self.request("colibri.stats", json!({}));
+        self.until_reply(id).last().unwrap()["result"]["calls"]
+            .as_u64()
+            .unwrap()
     }
 
     /// The steps the service has run (`colibri.stats`).
@@ -129,12 +195,32 @@ impl InProcess {
             .unwrap()
     }
 
-    /// Every message until request `id`'s reply.
-    fn until_reply(&self, id: u64) -> Vec<Value> {
-        let mut seen = Vec::new();
+    /// Answers fetch `ask` with an error, as main does for a failed fetch.
+    fn fail_fetch(&mut self, ask: u64) {
+        let payload = json!({ "type": "response", "id": ask, "result": { "error": "HTTP error! Status: 500" } })
+            .to_string();
+        let mut frame = ((payload.len() + 1) as u32).to_be_bytes().to_vec();
+        frame.push(KIND_JSON);
+        frame.extend_from_slice(payload.as_bytes());
+        self.input.write_all(&frame).unwrap();
+    }
+
+    /// Every message until request `id`'s reply, each fetch answered with an
+    /// error on the way.
+    fn until_reply(&mut self, id: u64) -> Vec<Value> {
+        let mut seen = std::mem::take(&mut self.backlog);
+        if seen
+            .iter()
+            .any(|m| m["type"] == "response" && m["id"] == id)
+        {
+            return seen;
+        }
         let deadline = Instant::now() + Duration::from_secs(30);
         while Instant::now() < deadline {
             if let Ok(message) = self.messages.recv_timeout(Duration::from_millis(200)) {
+                if message["type"] == "request" && message["method"] == "shell.colibri_fetch" {
+                    self.fail_fetch(message["id"].as_u64().unwrap());
+                }
                 let done = message["type"] == "response" && message["id"] == id;
                 seen.push(message);
                 if done {
@@ -159,6 +245,9 @@ fn block_number() -> Value {
 
 #[test]
 fn a_marker_still_queued_is_taken_back_and_the_request_is_busy() {
+    let _turn = TURN
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     // The writer is held inside `colibri.stats`' reply, so the marker
     // queued behind it can't be written within its second.
     let mut main = InProcess::start("open_requests");
@@ -178,6 +267,9 @@ fn a_marker_still_queued_is_taken_back_and_the_request_is_busy() {
 
 #[test]
 fn a_marker_still_being_written_is_cleared_before_busy() {
+    let _turn = TURN
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     // The writer is held inside the marker itself.
     let mut main = InProcess::start("colibri.step");
     let id = main.request("colibri.request", block_number());
@@ -201,4 +293,69 @@ fn a_marker_still_being_written_is_cleared_before_busy() {
         ]
     );
     assert_eq!(main.steps(), 0, "the C core was entered");
+}
+
+/// The markers and the reply of request `id` in `seen`, in order.
+fn order(seen: &[Value], id: u64) -> Vec<String> {
+    seen.iter()
+        .filter(|m| m["type"] == "event" || m["id"] == id)
+        .map(|m| match m["type"].as_str() {
+            Some("event") => m["event"].as_str().unwrap().to_owned(),
+            _ => format!("reply:{}", m["error"]["code"].as_str().unwrap_or("result")),
+        })
+        .collect()
+}
+
+#[test]
+fn every_call_into_the_c_core_has_a_marker_of_its_own() {
+    let _turn = TURN
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    // Unheld: how many calls the request makes, each fetch failing.
+    let mut main = InProcess::start_at("\"colibri.step\"", usize::MAX);
+    main.release();
+    let id = main.request("colibri.request", block_number());
+    let seen = main.until_reply(id);
+    let markers = order(&seen, id);
+    let calls = markers.iter().filter(|m| *m == "colibri.step").count();
+    assert!(calls >= 5, "{markers:?}");
+    for pair in markers[..markers.len() - 1].chunks(2) {
+        assert_eq!(pair, ["colibri.step", "colibri.stepped"], "{markers:?}");
+    }
+    assert_eq!(main.calls(), calls as u64);
+    // Held at each marker in turn: the calls before it ran, it didn't.
+    for nth in 1..=calls {
+        let mut main = InProcess::start_at("\"colibri.step\"", nth);
+        let before = main.calls();
+        let id = main.request("colibri.request", block_number());
+        assert!(
+            main.until_held(Duration::from_secs(30)),
+            "marker {nth} never written"
+        );
+        // Past the marker's second.
+        std::thread::sleep(Duration::from_millis(1300));
+        main.release();
+        let seen = main.until_reply(id);
+        let markers = order(&seen, id);
+        assert_eq!(
+            markers.last().unwrap(),
+            "reply:busy",
+            "marker {nth}: {markers:?}"
+        );
+        assert_eq!(
+            markers.iter().filter(|m| *m == "colibri.step").count(),
+            nth,
+            "marker {nth}: {markers:?}"
+        );
+        assert_eq!(
+            markers.iter().filter(|m| *m == "colibri.stepped").count(),
+            nth,
+            "every marker cleared, marker {nth}: {markers:?}"
+        );
+        assert_eq!(
+            main.calls() - before,
+            (nth - 1) as u64,
+            "marker {nth}: a call ran unmarked"
+        );
+    }
 }

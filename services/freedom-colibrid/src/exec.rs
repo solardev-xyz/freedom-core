@@ -108,7 +108,7 @@ impl<J: Send + 'static> Wake for TaskWaker<J> {
     }
 }
 
-/// The timers, by when they are due: a [`sleep`] registers its waker here.
+/// The timers, by when they are due: a [`Sleep`] keeps its waker here.
 #[derive(Default)]
 pub struct Timers {
     due: RefCell<BTreeMap<(Instant, u64), Waker>>,
@@ -135,22 +135,76 @@ impl Timers {
     }
 }
 
-/// A future that is ready once `until` has passed.
-pub fn sleep(timers: Rc<Timers>, until: Instant) -> impl Future<Output = ()> {
-    std::future::poll_fn(move |cx| {
-        if Instant::now() >= until {
+/// A future that is ready once `until` has passed. It keeps one entry in
+/// the timers, updated when polled again and removed when it is dropped, so
+/// a cancelled wait leaves nothing behind.
+pub struct Sleep {
+    timers: Rc<Timers>,
+    until: Instant,
+    key: Option<(Instant, u64)>,
+}
+
+impl Sleep {
+    fn remove(&mut self) {
+        if let Some(key) = self.key.take() {
+            self.timers.due.borrow_mut().remove(&key);
+        }
+    }
+}
+
+impl Future for Sleep {
+    type Output = ();
+
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<()> {
+        if Instant::now() >= self.until {
+            self.remove();
             return Poll::Ready(());
         }
-        let id = {
-            let mut next = timers.next.borrow_mut();
-            *next += 1;
-            *next
+        let key = match self.key {
+            Some(key) => key,
+            None => {
+                let id = {
+                    let mut next = self.timers.next.borrow_mut();
+                    *next += 1;
+                    *next
+                };
+                let key = (self.until, id);
+                self.key = Some(key);
+                key
+            }
         };
-        timers
-            .due
-            .borrow_mut()
-            .insert((until, id), cx.waker().clone());
+        self.timers.due.borrow_mut().insert(key, cx.waker().clone());
         Poll::Pending
+    }
+}
+
+impl Drop for Sleep {
+    fn drop(&mut self) {
+        self.remove();
+    }
+}
+
+/// [`Sleep`] until `until`.
+pub fn sleep(timers: Rc<Timers>, until: Instant) -> Sleep {
+    Sleep {
+        timers,
+        until,
+        key: None,
+    }
+}
+
+/// Ready on its second poll: the task goes back to the queue once, so the
+/// jobs queued meanwhile (a cancel) are handled before it runs on.
+pub fn yield_now() -> impl Future<Output = ()> {
+    let mut yielded = false;
+    std::future::poll_fn(move |cx| {
+        if yielded {
+            Poll::Ready(())
+        } else {
+            yielded = true;
+            cx.waker().wake_by_ref();
+            Poll::Pending
+        }
     })
 }
 
@@ -159,6 +213,9 @@ pub struct Executor<J> {
     queue: Arc<Queue<J>>,
     tasks: HashMap<u64, Task>,
     pub timers: Rc<Timers>,
+    /// The tasks woken by the last [`Executor::wait`], polled by the next
+    /// [`Executor::run_woken`].
+    woken: Vec<u64>,
 }
 
 impl<J: Send + 'static> Executor<J> {
@@ -167,6 +224,7 @@ impl<J: Send + 'static> Executor<J> {
             queue,
             tasks: HashMap::new(),
             timers: Rc::new(Timers::default()),
+            woken: Vec::new(),
         }
     }
 
@@ -214,26 +272,23 @@ impl<J: Send + 'static> Executor<J> {
         }
     }
 
-    /// Waits for work, then polls every task woken and returns the jobs
-    /// that came, for the caller to handle before the next round.
-    pub fn turn(&mut self) -> Vec<J> {
+    /// Waits for work and returns the jobs that came. The tasks woken are
+    /// polled by [`Executor::run_woken`], after the caller has handled the
+    /// jobs: a cancel queued with a fetch's answer is seen first.
+    pub fn wait(&mut self) -> Vec<J> {
         let (jobs, ready) = self.queue.wait(self.timers.next_due());
         self.timers.fire();
-        let mut seen = HashSet::new();
-        for id in ready {
-            if seen.insert(id) {
-                self.poll(id);
-            }
-        }
+        self.woken.extend(ready);
         jobs
     }
 
-    /// Polls the tasks woken since the last round, without waiting. For a
-    /// caller that has just changed what a task waits on.
-    pub fn run_ready(&mut self) {
-        let ready: Vec<u64> = self.queue.lock().ready.drain(..).collect();
+    /// Polls the tasks woken by the last [`Executor::wait`], and those woken
+    /// since, each once.
+    pub fn run_woken(&mut self) {
+        let mut woken = std::mem::take(&mut self.woken);
+        woken.extend(self.queue.lock().ready.drain(..));
         let mut seen = HashSet::new();
-        for id in ready {
+        for id in woken {
             if seen.insert(id) {
                 self.poll(id);
             }
@@ -272,12 +327,61 @@ mod tests {
         let thread = std::thread::spawn(move || pusher.push(7));
         let mut jobs = Vec::new();
         while !exec.is_empty() || jobs.is_empty() {
-            jobs.extend(exec.turn());
+            jobs.extend(exec.wait());
+            exec.run_woken();
             assert!(started.elapsed() < Duration::from_secs(5));
         }
         thread.join().unwrap();
         assert_eq!(jobs, [7]);
         assert_eq!(done.get(), 1);
         assert!(started.elapsed() >= Duration::from_millis(20));
+    }
+
+    #[test]
+    fn jobs_come_before_the_tasks_woken_with_them() {
+        let queue: Arc<Queue<u32>> = Queue::new();
+        let mut exec = Executor::new(Arc::clone(&queue));
+        let polled = Rc::new(Cell::new(0));
+        let p = Rc::clone(&polled);
+        exec.spawn(
+            1,
+            Box::pin(async move {
+                loop {
+                    p.set(p.get() + 1);
+                    yield_now().await;
+                }
+            }),
+        );
+        assert_eq!(polled.get(), 1);
+        // The task is woken (its yield) and a job arrives: the job is
+        // handed over before the task runs again.
+        queue.push(9);
+        let jobs = exec.wait();
+        assert_eq!(jobs, [9]);
+        assert_eq!(polled.get(), 1, "the task ran before its job was seen");
+        exec.run_woken();
+        assert_eq!(polled.get(), 2);
+    }
+
+    #[test]
+    fn a_dropped_sleep_leaves_no_timer() {
+        let queue: Arc<Queue<u32>> = Queue::new();
+        let mut exec = Executor::new(Arc::clone(&queue));
+        let timers = Rc::clone(&exec.timers);
+        let t = Rc::clone(&timers);
+        exec.spawn(
+            1,
+            Box::pin(async move {
+                sleep(t, Instant::now() + Duration::from_secs(3600)).await;
+            }),
+        );
+        assert_eq!(timers.due.borrow().len(), 1);
+        // Polled again (a spurious wake): still one entry.
+        exec.wake(1);
+        exec.run_woken();
+        assert_eq!(timers.due.borrow().len(), 1);
+        // Dropped with its task: none.
+        exec.clear();
+        assert_eq!(timers.due.borrow().len(), 0);
     }
 }

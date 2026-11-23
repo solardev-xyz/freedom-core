@@ -21,6 +21,8 @@ pub struct Shared {
     open: AtomicUsize,
     /// Steps run.
     steps: AtomicU64,
+    /// Calls into the C core for requests, each behind its marker.
+    calls: AtomicU64,
     /// Resident memory after the last step, in bytes (0 where it isn't
     /// read).
     resident: AtomicU64,
@@ -48,6 +50,7 @@ impl Shared {
             store,
             open: AtomicUsize::new(0),
             steps: AtomicU64::new(0),
+            calls: AtomicU64::new(0),
             resident: AtomicU64::new(0),
             recycling: AtomicBool::new(false),
             bodies: Arc::new(AtomicU64::new(0)),
@@ -55,7 +58,10 @@ impl Shared {
         }
     }
 
-    /// Takes a request, within the budget.
+    /// Takes a request, within the budget. The recycle flag is read again
+    /// once the slot is taken, and the slot given back if it is set, so no
+    /// request is admitted after the recycle point (the flag is set before
+    /// the count is read by the last request out).
     pub fn take_request(&self) -> Result<(), NotTaken> {
         if self.recycling.load(Ordering::Acquire) {
             return Err(NotTaken::Recycling);
@@ -64,8 +70,12 @@ impl Shared {
             .try_update(Ordering::AcqRel, Ordering::Acquire, |open| {
                 (open < MAX_OPEN_REQUESTS).then_some(open + 1)
             })
-            .map(|_| ())
-            .map_err(|_| NotTaken::Full)
+            .map_err(|_| NotTaken::Full)?;
+        if self.recycling.load(Ordering::Acquire) {
+            self.open.fetch_sub(1, Ordering::AcqRel);
+            return Err(NotTaken::Recycling);
+        }
+        Ok(())
     }
 
     /// A request is answered. True when the process should now end: it is
@@ -75,12 +85,18 @@ impl Shared {
         before == 1 && self.recycling.load(Ordering::Acquire)
     }
 
+    /// A call into the C core for a request is made.
+    pub fn call_done(&self) {
+        self.calls.fetch_add(1, Ordering::Relaxed);
+    }
+
     /// A step ran: counted, and resident memory read against the budget.
     pub fn step_done(&self) {
         self.steps.fetch_add(1, Ordering::Relaxed);
         if let Some(bytes) = resident_bytes() {
             self.resident.store(bytes, Ordering::Relaxed);
-            if bytes > MAX_RESIDENT {
+            let budget = crate::testhooks::memory_budget().unwrap_or(MAX_RESIDENT);
+            if bytes > budget {
                 self.recycling.store(true, Ordering::Release);
             }
         }
@@ -95,6 +111,7 @@ impl Shared {
         serde_json::json!({
             "open_requests": self.open.load(Ordering::Acquire),
             "steps": self.steps.load(Ordering::Relaxed),
+            "calls": self.calls.load(Ordering::Relaxed),
             "resident_bytes": self.resident.load(Ordering::Relaxed),
             "store_bytes": self.store.total(),
             "store_keys": self.store.keys(),

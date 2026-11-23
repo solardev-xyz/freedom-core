@@ -4,15 +4,15 @@
 //! **`serve`, in order** (design 0010, "The recommendation", step 1):
 //! 1. the panic hook, before any other work, and the entry's one re-exec if
 //!    a descriptor is inherited ([`confine::clean_entry`]);
-//! 2. hardening, the arguments, the C core's version, and for a persistent
-//!    process the gate, which creates the chain's directory;
+//! 2. hardening, the arguments, and for a persistent process the gate,
+//!    which creates the chain's directory;
 //! 3. **confinement** ([`confine::confine`]), while the process has one
 //!    thread: no network, the chain's directory read-write (nothing for a
 //!    private process), and the lock as the one descriptor it keeps;
-//! 4. the store, given to the C core before `hello`; logging's writer; and
-//!    the connection to main on stdin and stdout. The verifier thread, the
-//!    only one that calls into the C core, starts with main's first
-//!    request.
+//! 4. logging's writer; the verifier thread, the only one that calls into
+//!    the C core, which gives it its store and checks its version before
+//!    `hello` can be answered; and the connection to main on stdin and
+//!    stdout.
 //!
 //! **Exit codes** (0001's and 0007's): 0 after `colibri.shutdown`, stdin
 //! EOF, the parent gone, or a recycle; 64 for usage; 70 for a panic or an
@@ -29,7 +29,7 @@ use fc_service::conn::{self, Options};
 use fc_service::{Exit, confine, gate, log};
 use freedom_colibrid::service::ColibriService;
 use freedom_colibrid::shared::Shared;
-use freedom_colibrid::store::{Store, StoreHandle};
+use freedom_colibrid::store::Store;
 use serde_json::json;
 
 use crate::args::{Command, Mode};
@@ -93,14 +93,6 @@ fn run(started: Instant, entry: &confine::Entry) -> Exit {
             parent_pid,
         } => (chain, mode, parent_pid),
     };
-    // Main refuses another version than its pin's; so does the service.
-    if freedom_colibrid::client_version() != freedom_colibrid::CLIENT_VERSION {
-        log::error(
-            "the linked C core isn't the pinned version",
-            json!({ "version": freedom_colibrid::client_version() }),
-        );
-        return Exit::Internal;
-    }
     match mode {
         Mode::Persistent { data_dir, lock_dir } => {
             // Held until the process exits.
@@ -179,13 +171,20 @@ fn serve(
     parent_pid: Option<u32>,
     started: Instant,
 ) -> Exit {
-    let store = Arc::new(store);
-    // The C core's store, before `hello` (0014): its own file store is off.
-    colibri_stateless::register_storage(StoreHandle(Arc::clone(&store)));
+    freedom_colibrid::testhooks::probe("main");
     // Logging's writer is a thread: after confinement.
     log::init();
-    let shared = Arc::new(Shared::new(chain, store));
-    let service = Arc::new(ColibriService::new(shared, confinement));
+    let shared = Arc::new(Shared::new(chain, Arc::new(store)));
+    // The verifier thread gives the C core its store and checks its version
+    // (main refuses another than its pin's; so does the service) before
+    // anything else reaches the C core, and before `hello`.
+    let service = match ColibriService::start(shared, confinement) {
+        Ok(service) => Arc::new(service),
+        Err(e) => {
+            log::error("the C core's setup failed", json!({ "error": e }));
+            return Exit::Internal;
+        }
+    };
     let mut options = Options::new(SERVICE, PROTOCOL, started);
     options.parent_pid = parent_pid;
     // Main's bodies come back as streams (COL-3).

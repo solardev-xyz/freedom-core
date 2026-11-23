@@ -38,7 +38,7 @@ fn until_reply(
         let Some(frame) = colibrid.recv(Duration::from_secs(1)) else {
             continue;
         };
-        let Frame::Json(message) = frame else {
+        let Frame::Json(message, _) = frame else {
             continue;
         };
         match message["type"].as_str() {
@@ -191,7 +191,7 @@ fn open_requests_are_bounded_and_cancels_are_answered() {
     let mut asking = std::collections::HashSet::new();
     let deadline = Instant::now() + WAIT;
     while asking.len() < 16 && Instant::now() < deadline {
-        if let Some(Frame::Json(message)) = colibrid.recv(Duration::from_secs(1))
+        if let Some(Frame::Json(message, _)) = colibrid.recv(Duration::from_secs(1))
             && message["method"] == "shell.colibri_fetch"
         {
             asking.insert(message["params"]["request"].as_u64().unwrap());
@@ -208,7 +208,7 @@ fn open_requests_are_bounded_and_cancels_are_answered() {
     let mut cancelled = std::collections::HashSet::new();
     let deadline = Instant::now() + WAIT;
     while cancelled.len() < 16 && Instant::now() < deadline {
-        if let Some(Frame::Json(message)) = colibrid.recv(Duration::from_secs(1))
+        if let Some(Frame::Json(message, _)) = colibrid.recv(Duration::from_secs(1))
             && message["type"] == "response"
             && message["error"]["code"] == "cancelled"
         {
@@ -279,5 +279,76 @@ fn a_body_past_its_bound_is_refused_at_its_head() {
         .unwrap_or_default()
         .to_owned();
     assert!(error.contains("Colibri fetch busy"), "{reply}");
+    assert_eq!(colibrid.shutdown(), Some(0));
+}
+
+#[test]
+fn a_cancel_during_a_step_wins_when_the_step_returns() {
+    let mut command = std::process::Command::new(common::BIN);
+    command
+        .args(["serve", "--chain", "1"])
+        .env("FREEDOM_COLIBRID_TEST_STEP", "sleep:1500");
+    let mut colibrid = Colibrid::spawn(command);
+    colibrid.hello();
+    let id = colibrid.request("colibri.request", request_params("eth_blockNumber", "[]"));
+    // The fourth call is the step (after the classification, the context
+    // and its freshness bound): cancel while it sleeps.
+    let mut steps = 0;
+    let deadline = Instant::now() + WAIT;
+    while steps < 4 && Instant::now() < deadline {
+        if let Some(Frame::Json(m, _)) = colibrid.recv(Duration::from_millis(100))
+            && m["type"] == "event"
+            && m["event"] == "colibri.step"
+        {
+            steps += 1;
+        }
+    }
+    assert_eq!(steps, 4);
+    colibrid.cancel(id);
+    let mut fetched = false;
+    let mut reply = None;
+    let deadline = Instant::now() + WAIT;
+    while reply.is_none() && Instant::now() < deadline {
+        if let Some(Frame::Json(m, _)) = colibrid.recv(Duration::from_millis(100)) {
+            fetched |= m["method"] == "shell.colibri_fetch";
+            if m["type"] == "response" && m["id"] == id {
+                reply = Some(m);
+            }
+        }
+    }
+    let reply = reply.expect("no reply");
+    assert_eq!(reply["error"]["code"], "cancelled", "{reply}");
+    assert!(!fetched, "the cancelled step's requests were fetched");
+    // The step, then the context's free, and nothing more.
+    let stats = colibrid.request("colibri.stats", json!({}));
+    let (stats, _) = until_reply(&mut colibrid, stats, |_, _, _| {});
+    assert_eq!(stats["result"]["calls"], 5, "{stats}");
+    assert_eq!(colibrid.shutdown(), Some(0));
+}
+
+#[test]
+fn a_deadline_past_the_clock_panics_nothing() {
+    let mut colibrid = Colibrid::serve(1, None);
+    colibrid.hello();
+    let mut params = request_params("eth_blockNumber", "[]");
+    params["deadline_ms"] = json!(u64::MAX);
+    let id = colibrid.request("colibri.request", params);
+    // Where the clock can't hold it (macOS counts nanoseconds in 64 bits),
+    // the request is refused; where it can (Linux), it runs to its fetches.
+    // Either way, nothing panics.
+    let deadline = Instant::now() + WAIT;
+    let mut outcome = None;
+    while outcome.is_none() && Instant::now() < deadline {
+        if let Some(Frame::Json(m, _)) = colibrid.recv(Duration::from_millis(100)) {
+            if m["type"] == "response" && m["id"] == id {
+                assert_eq!(m["error"]["code"], "invalid_argument", "{m}");
+                outcome = Some("refused");
+            } else if m["method"] == "shell.colibri_fetch" {
+                outcome = Some("fetching");
+            }
+        }
+    }
+    assert!(outcome.is_some(), "neither: stderr {}", colibrid.stderr());
+    assert!(!colibrid.exited(), "the process died");
     assert_eq!(colibrid.shutdown(), Some(0));
 }
