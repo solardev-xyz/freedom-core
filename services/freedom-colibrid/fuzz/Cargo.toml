@@ -23,7 +23,7 @@ cargo-fuzz = true
 
 [dependencies]
 # The service's pin, exactly.
-colibri-stateless = { git = "https://github.com/solardev-xyz/colibri-stateless", rev = "41391900919b67351508b70108bbd8c791b5eeda", default-features = false }
+colibri-stateless = { git = "https://github.com/solardev-xyz/colibri-stateless", rev = "6feb0287c05bda29c2093038c701317de7d4b9f5", default-features = false }
 libfuzzer-sys = "0.4.13"
 # A decoded proof must be JSON.
 serde_json = "1"
