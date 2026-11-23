@@ -29,11 +29,13 @@ resolver = "3"
 # upstream PRs (corpus-core/colibri-stateless #439 http feature, #440
 # offline pinned build, #441 safe answers, #442 verifier-only build)
 # backported, plus a fixed clock for replays, a step's status text with
-# the step, and a proof decoder through the C API. The crate version is
-# 3.0.3, so the C core reports 196611, the version the COL-1 traces were
-# recorded with. No default features: no HTTP client (tokio, reqwest), no
-# download of a prebuilt archive, no prover (PROVER=OFF), no OP-Stack.
-colibri-stateless = { git = "https://github.com/solardev-xyz/colibri-stateless", rev = "60e62a3a96da3531309ccb3c8de42a5385b4a307", default-features = false }
+# the step, a proof decoder through the C API, and the fix for the leaked
+# results of nested calls (#444) with its regression test. The crate
+# version is 3.0.3, so the C core reports 196611, the version the COL-1
+# traces were recorded with. No default features: no HTTP client (tokio,
+# reqwest), no download of a prebuilt archive, no prover (PROVER=OFF), no
+# OP-Stack.
+colibri-stateless = { git = "https://github.com/solardev-xyz/colibri-stateless", rev = "587a4a5cd8525297b5870a8f7a9b90a212a80906", default-features = false }
 
 [dev-dependencies]
 # tests/replay.rs reads vectors/colibri.json and the fixture index.
@@ -66,3 +68,12 @@ print_stderr = "warn"
 
 [profile.dev.package."*"]
 debug = false
+
+# Colibri's build script sets CMAKE_BUILD_TYPE=Release, but the cmake crate
+# still builds the configuration it infers from the Rust profile, and a
+# multi-config generator (Visual Studio) builds that one: Debug in a dev
+# build, whose objects want the debug C runtime (/MDd) that Rust never links.
+# Optimised and without debug info, the inferred configuration is Release on
+# every platform, the one the build script configures.
+[profile.dev.package.colibri-stateless]
+opt-level = 3
