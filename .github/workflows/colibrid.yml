@@ -1,0 +1,201 @@
+name: Colibri service
+
+# freedom-colibrid (design 0014) is a workspace of its own under services/,
+# with its own lockfile and `cargo deny` policy, as the other services are.
+# COL-2: the native, verifier-only C core, built from the pinned fork commit,
+# replays every COL-1 trace (vectors/colibri.json) on Linux, macOS and
+# Windows; an ASan and UBSan build replays them all again; the license gate
+# reads the build's compiled-source manifest; and a build without the call
+# verifier (ETH_CALL=OFF) is tried. It runs only when the service, its
+# vectors or this workflow change, plus daily, so none of it fails a
+# core-only change.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "services/freedom-colibrid/**"
+      - "vectors/colibri.json"
+      - "vectors/fixtures/colibri/**"
+      - "scripts/colibri-license-gate.py"
+      - "scripts/test_colibri_license_gate.py"
+      - "rust-toolchain.toml"
+      # Root tool configuration that applies under services/: Clippy and
+      # rustfmt look for theirs up the directory tree.
+      - "clippy.toml"
+      - ".clippy.toml"
+      - "rustfmt.toml"
+      - ".rustfmt.toml"
+      - ".github/workflows/colibrid.yml"
+  pull_request:
+    paths:
+      - "services/freedom-colibrid/**"
+      - "vectors/colibri.json"
+      - "vectors/fixtures/colibri/**"
+      - "scripts/colibri-license-gate.py"
+      - "scripts/test_colibri_license_gate.py"
+      - "rust-toolchain.toml"
+      - "clippy.toml"
+      - ".clippy.toml"
+      - "rustfmt.toml"
+      - ".rustfmt.toml"
+      - ".github/workflows/colibrid.yml"
+  schedule:
+    # Daily, so new advisories against unchanged dependencies still surface.
+    - cron: "17 6 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: colibrid-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_DENY_VERSION: "0.20.2"
+  CARGO_DENY_SHA256: "9f12ed4c49936e09b48bf862b595cde2fe64fcbd9d74dfacac6131ca824c8d5f"
+
+jobs:
+  lint:
+    name: freedom-colibrid fmt + clippy
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: services/freedom-colibrid
+    env:
+      # Type-checking needs no C core: the crate's build script skips the
+      # native build under DOCS_RS.
+      DOCS_RS: "1"
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - run: rustup toolchain install
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          workspaces: services/freedom-colibrid -> target
+          key: lint
+      - run: cargo fmt --all --check
+      - run: cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
+
+  replay:
+    name: freedom-colibrid replay (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        working-directory: services/freedom-colibrid
+        shell: bash
+    env:
+      # CMake reads it from the environment: the license gate below reads the
+      # compile commands it writes.
+      CMAKE_EXPORT_COMPILE_COMMANDS: "ON"
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - run: rustup toolchain install
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          workspaces: services/freedom-colibrid -> target
+      - run: cmake --version
+      - run: cargo test --locked
+      # Design 0014's license gate, over the compiled-source manifest of the
+      # build the replay just ran.
+      - name: License gate
+        if: runner.os == 'Linux'
+        run: |
+          python3 -m unittest discover -s ../../scripts -p 'test_colibri_license_gate.py'
+          python3 ../../scripts/colibri-license-gate.py target --manifest compiled-sources.json
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: runner.os == 'Linux' && always()
+        with:
+          name: colibrid-compiled-sources
+          path: services/freedom-colibrid/compiled-sources.json
+          if-no-files-found: ignore
+
+  sanitize:
+    name: freedom-colibrid replay under ASan and UBSan
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: services/freedom-colibrid
+    env:
+      # The C and C++ sources instrumented (the cmake crate passes these on to
+      # CMake), the test binary linked with the runtimes. Only the target's
+      # artifacts: with --target, build scripts get neither.
+      CFLAGS: "-fsanitize=address,undefined -fno-omit-frame-pointer -fno-sanitize-recover=undefined"
+      CXXFLAGS: "-fsanitize=address,undefined -fno-omit-frame-pointer -fno-sanitize-recover=undefined"
+      CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS: "-Clink-arg=-fsanitize=address,undefined"
+      ASAN_OPTIONS: "abort_on_error=1:detect_stack_use_after_return=1:strict_string_checks=1"
+      UBSAN_OPTIONS: "print_stacktrace=1:halt_on_error=1"
+      CMAKE_EXPORT_COMPILE_COMMANDS: "ON"
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - run: rustup toolchain install
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          workspaces: services/freedom-colibrid -> target
+          key: sanitize
+      - run: cargo test --locked --target x86_64-unknown-linux-gnu
+      - name: The C core was instrumented
+        run: |
+          db=$(find target/x86_64-unknown-linux-gnu -path '*colibri-stateless-*/out/*' -name compile_commands.json | head -n 1)
+          test -n "$db"
+          grep -q -- '-fsanitize=address,undefined' "$db"
+
+  eth-call-off:
+    name: freedom-colibrid replay with ETH_CALL=OFF (trial)
+    runs-on: ubuntu-latest
+    # A trial (design 0014, "The call verifier"): its result decides whether
+    # the build takes ETH_CALL=OFF; it doesn't gate the PR.
+    continue-on-error: true
+    defaults:
+      run:
+        working-directory: services/freedom-colibrid
+    env:
+      CMAKE_TOOLCHAIN_FILE: ${{ github.workspace }}/services/freedom-colibrid/ci/eth-call-off.cmake
+      CMAKE_EXPORT_COMPILE_COMMANDS: "ON"
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - run: rustup toolchain install
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          workspaces: services/freedom-colibrid -> target
+          key: eth-call-off
+      - run: cargo test --locked
+      - name: The call verifier and evmone are out of the build
+        run: |
+          python3 ../../scripts/colibri-license-gate.py target --manifest compiled-sources.json
+          if grep -E 'src/chains/eth/verifier/(verify_call|call_ctx|eth_call_account)\.c|_deps/evmone' compiled-sources.json; then
+            echo "the call verifier or evmone is still in the build" >&2
+            exit 1
+          fi
+
+  deny:
+    name: freedom-colibrid cargo deny
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: services/freedom-colibrid
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - name: Install cargo-deny
+        run: |
+          tarball="cargo-deny-${CARGO_DENY_VERSION}-x86_64-unknown-linux-musl.tar.gz"
+          curl -fsSL -o "$tarball" "https://github.com/EmbarkStudios/cargo-deny/releases/download/${CARGO_DENY_VERSION}/${tarball}"
+          echo "${CARGO_DENY_SHA256}  ${tarball}" | sha256sum --check
+          mkdir -p "$HOME/.cargo/bin"
+          tar -xzf "$tarball" --strip-components=1 -C "$HOME/.cargo/bin" "cargo-deny-${CARGO_DENY_VERSION}-x86_64-unknown-linux-musl/cargo-deny"
+      - run: cargo deny --locked check

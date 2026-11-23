@@ -311,7 +311,9 @@ function answer(spec) {
     derived = { flip: offset, of: spec.base.response.sha256 };
   } else if (spec.body !== undefined) {
     bytes = Buffer.from(spec.body);
-    derived = { scripted: true };
+    // The text itself, so a replay outside this harness (COL-2's native
+    // one) can give the C core the same bytes.
+    derived = { scripted: true, body: bytes.toString('utf8') };
   } else if (spec.from) {
     bytes = spec.from.bytes;
     if (spec.from.response.error) return { throw: new TypeError(spec.from.response.error), record: { transport: spec.from.response.error } };

@@ -386,6 +386,15 @@ The notices file gains blst, and evmone and intx while the build still links the
 
 **Option A** (Q20, the user, 2026-11-22). `freedom-colibrid` is its own Cargo workspace (`services/freedom-colibrid`), as `freedom-ipfsd` is: its own lockfile, `cargo deny` policy and notices, sharing `fc-protocol` and `fc-service` by path. Its release follows freedom-ipfsd's in `RELEASING.md`.
 
+### The pinned commit (COL-2)
+
+- **3.0.3, not `dev`.** The four upstream PRs (corpus-core/colibri-stateless #439–#442) are against `dev` (3.2.1), which differs from 3.0.3 in 291 files. This design, COL-1's traces and the browser's package are 3.0.3's (version 196611), and a 3.2.1 build can't match those traces. So `freedom-colibrid` pins the fork's `freedom/pinned-3.0.3`: tag `v3.0.3` with the four PRs backported. `colibri_common.c`'s `#ifdef PROVER` guards are written against 3.0.3's code there, since `dev` reworked the local prover after 3.0.3. Moving to a later release is a step of its own: the browser's package and COL-1's reference move to it, the traces are recorded again, and the pin follows.
+- **Three more changes in the pin,** each also proposed upstream:
+  - **A fixed clock** (`c4_set_fixed_time`): the PAP transaction cache reads `time(NULL)` for its age and stores it with each pending hash (the freshness bound comes from main), so a replay at a later instant gets other requests and other stored bytes. The replay fixes it at each request's recorded instant, as the reference's harness fixed `Date.now`; the service leaves the system clock.
+  - **A step's status text with the step** (`execute_with_status`, on #441): the replay compares the C core's own text and still answers requests without `unsafe`.
+  - **A proof decoder in the C API** (`c4_decode_proof`): the checkpoint path decodes the proof it verifies, which only the WASM binding could. It checks the bytes as an SSZ object of the proof's type before encoding them, as the verifier checks a proof before reading it; the WASM binding's `c4w_decode_proof` encodes without that check.
+- **The replay** (`services/freedom-colibrid/tests/replay.rs`): each COL-1 case in a process of its own, as the reference loaded a fresh WASM instance for each (the C core keeps caches and its clock in process globals); the same calls with the same inputs; each status text compared byte for byte once its request pointers are numbered as the recorder numbered them (the native API writes them as strings, the WASM build as numbers); each method type and decode; the store operations each call makes, in order; and the final store. A warm case starts from the bytes its source case's replay left. Bodies come from the fixtures, a flipped one rebuilt from its offset, a scripted one from its text, which COL-1's generator now records.
+
 ## The protocol
 
 On fc-service's connection, at the version services speak, with fc-protocol's two-way streams (0009) turned on for this service only. 0009's rule that a service connection keeps one role changes for it ([Amendments](#amendments)).

@@ -1,0 +1,43 @@
+# cargo-deny policy for freedom-colibrid: the core's (../../deny.toml), with
+# the one git source Colibri's pin needs. CI runs `cargo deny check` here on
+# every PR that touches the service and daily, apart from the core's, so an
+# advisory in this graph never blocks a core change (design 0014, "Decided").
+
+[graph]
+all-features = true
+
+[advisories]
+# Vulnerabilities and unsound crates fail the check; nothing is ignored.
+yanked = "deny"
+ignore = []
+
+[licenses]
+confidence-threshold = 0.9
+unused-allowed-license = "allow"
+allow = [
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "CC0-1.0",
+    "ISC",
+    "MIT",
+    "Unicode-3.0",
+    "Zlib",
+]
+
+[licenses.private]
+ignore = true
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+allow-wildcard-paths = true
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+# Colibri's fork, pinned by commit in Cargo.toml until upstream releases the
+# changes 0014 needs (Option A).
+allow-git = ["https://github.com/solardev-xyz/colibri-stateless"]

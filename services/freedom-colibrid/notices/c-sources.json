@@ -1,0 +1,11 @@
+{
+  "about": "The C and C++ sources of freedom-colibrid's native Colibri build, with their licenses (design 0014, Licenses). scripts/colibri-license-gate.py fails on a compiled source or listed header whose SPDX identifier isn't in spdx, and on any that names PolyForm.",
+  "spdx": ["MIT", "Apache-2.0"],
+  "components": [
+    { "name": "Colibri Stateless", "version": "3.0.3 (solardev-xyz/colibri-stateless, freedom/pinned-3.0.3)", "license": "MIT", "tree": "colibri", "note": "src/server/ is PolyForm Noncommercial 1.0.0 or commercial; the build compiles and includes none of it, nor src/chains/eth/server/ or the prover" },
+    { "name": "libs/crypto (trezor-crypto)", "version": "in Colibri's tree", "license": "MIT", "tree": "libs/crypto" },
+    { "name": "blst", "version": "v0.3.13 (52cc60d7)", "license": "Apache-2.0", "tree": "_deps/blst-src" },
+    { "name": "evmone", "version": "v0.23.0 (2184b244)", "license": "Apache-2.0", "tree": "_deps/evmone-src", "note": "linked while the build keeps the call verifier (0014, The call verifier)" },
+    { "name": "intx", "version": "v0.15.0 (0306b495)", "license": "Apache-2.0", "tree": "_deps/intx-src", "note": "evmone's" }
+  ]
+}
