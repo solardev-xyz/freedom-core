@@ -40,6 +40,8 @@
 //! - [`macos::executable_path`], [`macos::thread_count`],
 //!   [`macos::apply_profile`], [`macos::sandboxed`], [`macos::check`] and [`macos::exec_allowed`]:
 //!   its confinement on macOS, through Seatbelt's private calls;
+//! - [`macos::resident_bytes`]: the Colibri service's resident memory
+//!   after each step (design 0014, Budgets);
 //! - [`macos::set_times`]: the profile lock's mtime in `freedom-cored`,
 //!   through the one call a confined process's `file-write-times` covers
 //!   (design 0013, "The lock").
