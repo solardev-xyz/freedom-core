@@ -28,11 +28,11 @@ class Gate(unittest.TestCase):
         self.build.mkdir(parents=True)
         self.notices = base / "notices.json"
         self.notices.write_text(json.dumps({
-            "spdx": ["MIT", "Apache-2.0"],
             "polyform_mentions": [{"path": "src/util/version.c", "why": "prints the server's license"}],
             "components": [
-                {"name": "Colibri", "license": "MIT", "tree": "colibri"},
-                {"name": "blst", "license": "Apache-2.0", "tree": "_deps/blst-src"},
+                {"tree": "colibri", "spdx": ["MIT"]},
+                {"tree": "libs/crypto", "spdx": ["MIT", "Apache-2.0"]},
+                {"tree": "_deps/blst-src", "spdx": ["Apache-2.0"], "license": "Apache-2.0"},
             ],
         }))
         self.compiled = []
@@ -86,7 +86,18 @@ class Gate(unittest.TestCase):
 
     def test_an_unlisted_spdx_identifier_fails(self):
         self.source("src/util/x.c", [], "// SPDX-License-Identifier: GPL-2.0-only\n")
-        self.assertIn("GPL-2.0-only isn't in the notices", "\n".join(self.errors()))
+        self.assertIn("GPL-2.0-only isn't one the notices give colibri", "\n".join(self.errors()))
+
+    def test_a_license_is_checked_against_its_own_tree(self):
+        # Apache-2.0 is listed for libs/crypto (its RIPEMD-160), not for Colibri's own tree.
+        self.source("libs/crypto/ripemd160.c", [], "/* SPDX-License-Identifier: Apache-2.0 */\n")
+        self.assertEqual(self.errors(), [])
+        self.source("src/util/z.c", [], "/* SPDX-License-Identifier: Apache-2.0 */\n")
+        self.assertIn("src/util/z.c: SPDX-License-Identifier Apache-2.0 isn't one the notices give colibri", "\n".join(self.errors()))
+
+    def test_a_tree_the_notices_dont_list_fails(self):
+        self.source("libs/evmone/wrapper.cpp", [])
+        self.assertIn("libs/evmone/wrapper.cpp: its tree isn't in the notices", "\n".join(self.errors()))
 
     def test_polyform_anywhere_fails(self):
         self.write("src/util/y.h", "/* Licensed under the PolyForm Noncommercial License 1.0.0 */\n")

@@ -209,6 +209,7 @@ fn run_all() -> Result<()> {
     // The largest of each measure, by kind of case (request or checkpoint),
     // with the case that reached it.
     let mut peaks: BTreeMap<(String, String), (u64, String)> = BTreeMap::new();
+    let mut crashed: Vec<String> = Vec::new();
     for case in &order {
         let id = text(case, "id")?;
         let from = case
@@ -235,10 +236,20 @@ fn run_all() -> Result<()> {
             // never a result"; the C core recursed past the stack at the step
             // where the reference trapped.
             let first = stderr.lines().find(|l| !l.trim().is_empty()).unwrap_or("");
-            println!(
-                "ok {id}: the native step at trace[{step}] ran out of stack where the reference trapped ({}; {first})",
-                output.status
-            );
+            match check_crashed_trap(case, &stores, id, step) {
+                Ok(()) => {
+                    println!(
+                        "ok {id}: the native step at trace[{step}] ran out of stack where the reference trapped ({}; {first}); no metrics",
+                        output.status
+                    );
+                    crashed.push(id.to_string());
+                }
+                Err(e) => {
+                    println!("FAILED {id}: died at its trap step, but {e}");
+                    failed.push(format!("{id}: {e}"));
+                    failed_ids.insert(id.to_string());
+                }
+            }
             continue;
         }
         if output.status.success() {
@@ -248,19 +259,38 @@ fn run_all() -> Result<()> {
             for line in stdout.lines().filter(|l| l.starts_with(&format!("{id}: "))) {
                 println!("  {line}");
             }
-            for line in stdout.lines().filter_map(|l| l.strip_prefix(METRICS)) {
-                let metrics: Map<String, Value> =
-                    serde_json::from_str(line).map_err(|e| format!("{id}: metrics: {e}"))?;
-                for (name, value) in metrics {
-                    let Some(value) = value.as_u64() else {
+            // Exactly one record with every measure: none may go missing.
+            let records: Vec<&str> = stdout
+                .lines()
+                .filter_map(|l| l.strip_prefix(METRICS))
+                .collect();
+            let [line] = records.as_slice() else {
+                return Err(format!("{id}: {} metrics records, not one", records.len()));
+            };
+            let metrics: Map<String, Value> =
+                serde_json::from_str(line).map_err(|e| format!("{id}: metrics: {e}"))?;
+            let mut names: Vec<&str> = metrics.keys().map(String::as_str).collect();
+            names.sort_unstable();
+            if names != METRIC_NAMES {
+                return Err(format!("{id}: metrics {names:?}, not {METRIC_NAMES:?}"));
+            }
+            for (name, value) in metrics {
+                let value = match value.as_u64() {
+                    Some(value) => value,
+                    // Only Linux reports peak memory to the process itself.
+                    None if name == "peak_rss_kib"
+                        && value.is_null()
+                        && !cfg!(target_os = "linux") =>
+                    {
                         continue;
-                    };
-                    let peak = peaks
-                        .entry((kind.clone(), name))
-                        .or_insert((0, String::new()));
-                    if value > peak.0 {
-                        *peak = (value, id.to_string());
                     }
+                    None => return Err(format!("{id}: metric {name} is {value}")),
+                };
+                let peak = peaks
+                    .entry((kind.clone(), name))
+                    .or_insert((0, String::new()));
+                if value > peak.0 {
+                    *peak = (value, id.to_string());
                 }
             }
         } else {
@@ -278,7 +308,11 @@ fn run_all() -> Result<()> {
         }
     }
     let _ = std::fs::remove_dir_all(&stores);
-    println!("\npeaks over the passing cases (0014, Budgets):");
+    println!(
+        "\npeaks over the passing cases (0014, Budgets); none from the {} that died at their trap step ({}):",
+        crashed.len(),
+        crashed.join(", ")
+    );
     for ((kind, name), (value, id)) in &peaks {
         println!("  {kind:<10} {name:<16} {value:>10}  ({id})");
     }
@@ -312,6 +346,44 @@ enum StoreOp {
 struct StoreState {
     entries: BTreeMap<String, Vec<u8>>,
     log: Vec<StoreOp>,
+    /// While set, each operation is also appended here as it happens, in
+    /// the vector's form: a step that may kill the process (#750's) leaves
+    /// its operations for the parent to check.
+    journal: Option<std::fs::File>,
+    journal_error: Option<String>,
+}
+
+impl StoreState {
+    fn record(&mut self, op: StoreOp) {
+        if let Some(file) = self.journal.as_mut() {
+            let mut line = store_op_json(&op).to_string();
+            line.push('\n');
+            if let Err(e) = std::io::Write::write_all(file, line.as_bytes()) {
+                self.journal_error.get_or_insert(e.to_string());
+            }
+        }
+        self.log.push(op);
+    }
+}
+
+/// A store operation in the vector's form (`store_get`, `store_set`,
+/// `store_del`), which `recorded_store_op` reads back.
+fn store_op_json(op: &StoreOp) -> Value {
+    match op {
+        StoreOp::Get { key, value: None } => {
+            serde_json::json!({ "op": "store_get", "key": key, "found": false })
+        }
+        StoreOp::Get {
+            key,
+            value: Some((len, sha)),
+        } => {
+            serde_json::json!({ "op": "store_get", "key": key, "bytes": len, "sha256": sha })
+        }
+        StoreOp::Set { key, len, sha256 } => {
+            serde_json::json!({ "op": "store_set", "key": key, "bytes": len, "sha256": sha256 })
+        }
+        StoreOp::Del { key } => serde_json::json!({ "op": "store_del", "key": key }),
+    }
 }
 
 /// The C core's store for one case: a map, and every operation on it.
@@ -329,7 +401,7 @@ impl Storage for ReplayStore {
         let mut state = self.lock();
         let value = state.entries.get(key).cloned();
         let summary = value.as_ref().map(|v| (v.len(), sha256_hex(v)));
-        state.log.push(StoreOp::Get {
+        state.record(StoreOp::Get {
             key: key.to_string(),
             value: summary,
         });
@@ -338,7 +410,7 @@ impl Storage for ReplayStore {
 
     fn set(&self, key: &str, value: &[u8]) {
         let mut state = self.lock();
-        state.log.push(StoreOp::Set {
+        state.record(StoreOp::Set {
             key: key.to_string(),
             len: value.len(),
             sha256: sha256_hex(value),
@@ -348,7 +420,7 @@ impl Storage for ReplayStore {
 
     fn delete(&self, key: &str) {
         let mut state = self.lock();
-        state.log.push(StoreOp::Del {
+        state.record(StoreOp::Del {
             key: key.to_string(),
         });
         state.entries.remove(key);
@@ -734,10 +806,37 @@ fn run_case(id: &str) -> Result<()> {
                     // a hash in no block, F-6). 0014: "The service must end it
                     // in an error or a crash, never a result". The parent
                     // accepts a crash only after this marker, and only of
-                    // stack exhaustion; here an error status passes.
+                    // stack exhaustion; here an error status passes. Either
+                    // way the step's store operations and the final store
+                    // are checked (`check_trap_store`): the parent reads them
+                    // from the journal if the process dies.
+                    let before: BTreeMap<String, String> = store
+                        .lock()
+                        .entries
+                        .iter()
+                        .map(|(k, v)| (k.clone(), to_hex(v)))
+                        .collect();
+                    let saved = serde_json::json!({ "step": pos, "before": before });
+                    std::fs::write(trap_path(&stores, id), saved.to_string())
+                        .map_err(|e| at(e.to_string()))?;
+                    let journal = std::fs::File::create(journal_path(&stores, id))
+                        .map_err(|e| at(e.to_string()))?;
+                    store.lock().journal = Some(journal);
                     println!("{TRAP_STEP}{pos}");
                     std::io::Write::flush(&mut std::io::stdout()).map_err(|e| at(e.to_string()))?;
+                    let started = Instant::now();
                     let (_, status) = ctx.execute().map_err(at)?;
+                    max_step = max_step.max(started.elapsed());
+                    let native = {
+                        let mut state = store.lock();
+                        state.journal = None;
+                        if let Some(e) = state.journal_error.take() {
+                            return Err(at(format!("the trap step's journal: {e}")));
+                        }
+                        std::mem::take(&mut state.log)
+                    };
+                    let recorded = std::mem::take(&mut expected_store);
+                    check_trap_store(&native, &recorded).map_err(at)?;
                     let parsed: Value =
                         serde_json::from_str(&status).map_err(|e| at(e.to_string()))?;
                     if parsed.get("status").and_then(Value::as_str) != Some("error") {
@@ -748,7 +847,8 @@ fn run_case(id: &str) -> Result<()> {
                     println!(
                         "{id}: the reference trapped ({trap}); the native step ended in an error: {status}"
                     );
-                    return Ok(());
+                    i += 1;
+                    continue;
                 }
                 let started = Instant::now();
                 let (step, status) = ctx.execute().map_err(at)?;
@@ -865,6 +965,13 @@ fn run_case(id: &str) -> Result<()> {
 }
 
 const METRICS: &str = "METRICS ";
+/// The measures each case reports, sorted.
+const METRIC_NAMES: [&str; 4] = [
+    "max_step_ms",
+    "max_store_value",
+    "peak_rss_kib",
+    "store_total",
+];
 const TRAP_STEP: &str = "TRAP-STEP ";
 
 /// Whether a child died of stack exhaustion: Rust's guard-page handler and
@@ -889,6 +996,120 @@ fn peak_rss_kib() -> Option<u64> {
     let status = std::fs::read_to_string("/proc/self/status").ok()?;
     let line = status.lines().find(|l| l.starts_with("VmHWM:"))?;
     line.split_whitespace().nth(1)?.parse().ok()
+}
+
+fn trap_path(dir: &Path, id: &str) -> PathBuf {
+    dir.join(format!("{id}.trap.json"))
+}
+
+fn journal_path(dir: &Path, id: &str) -> PathBuf {
+    dir.join(format!("{id}.trap-ops.jsonl"))
+}
+
+/// The store operations of a step where the reference trapped (#750). The
+/// recursion that ran out of WASM's stack runs to another depth natively, so
+/// its reads repeat another number of times: the reads, as a set, must be the
+/// reference's, and the writes and deletes exactly the reference's, in order.
+fn check_trap_store(native: &[StoreOp], recorded: &[StoreOp]) -> Result<()> {
+    let writes = |ops: &[StoreOp]| -> Vec<StoreOp> {
+        ops.iter()
+            .filter(|op| !matches!(op, StoreOp::Get { .. }))
+            .cloned()
+            .collect()
+    };
+    let reads = |ops: &[StoreOp]| -> Vec<StoreOp> {
+        let mut out: Vec<StoreOp> = ops
+            .iter()
+            .filter(|op| matches!(op, StoreOp::Get { .. }))
+            .cloned()
+            .collect();
+        out.sort_by_key(|op| format!("{op:?}"));
+        out.dedup();
+        out
+    };
+    if writes(native) != writes(recorded) {
+        return Err(format!(
+            "the trap step's writes differ:\n  native:    {:?}\n  reference: {:?}",
+            writes(native),
+            writes(recorded)
+        ));
+    }
+    if reads(native) != reads(recorded) {
+        return Err(format!(
+            "the trap step's reads differ:\n  native:    {:?}\n  reference: {:?}",
+            reads(native),
+            reads(recorded)
+        ));
+    }
+    Ok(())
+}
+
+/// A case whose child died of stack exhaustion at its trap step: the step's
+/// store operations from the journal, checked as `check_trap_store` checks
+/// them, and the store they leave against the recorded final store, which
+/// is saved for any case that starts from it.
+fn check_crashed_trap(case: &Value, stores: &Path, id: &str, step: &str) -> Result<()> {
+    let step: usize = step
+        .trim()
+        .parse()
+        .map_err(|e| format!("trap step {step}: {e}"))?;
+    let trace = field(case, "trace")?
+        .as_array()
+        .ok_or("`trace` is not a list")?;
+    if trace.get(step).and_then(|op| op.get("trap")).is_none() {
+        return Err(format!("trace[{step}] is not a trap"));
+    }
+    let mut first = step;
+    while first > 0 && text(&trace[first - 1], "op")?.starts_with("store_") {
+        first -= 1;
+    }
+    let recorded = trace[first..step]
+        .iter()
+        .map(recorded_store_op)
+        .collect::<Result<Vec<_>>>()?;
+    let saved: Value = serde_json::from_str(
+        &std::fs::read_to_string(trap_path(stores, id))
+            .map_err(|e| format!("the trap snapshot: {e}"))?,
+    )
+    .map_err(|e| e.to_string())?;
+    if number(&saved, "step")? != step as u64 {
+        return Err("the trap snapshot is of another step".into());
+    }
+    let mut entries = field(&saved, "before")?
+        .as_object()
+        .ok_or("the trap snapshot's store is not an object")?
+        .iter()
+        .map(|(k, v)| Ok((k.clone(), from_hex(v.as_str().ok_or("not hex")?)?)))
+        .collect::<Result<BTreeMap<_, _>>>()?;
+    let journal = std::fs::read_to_string(journal_path(stores, id))
+        .map_err(|e| format!("the trap journal: {e}"))?;
+    let mut native = Vec::new();
+    for line in journal.lines() {
+        // The process may die inside the store callback, mid-line: only an
+        // unterminated last line may be cut off.
+        match serde_json::from_str::<Value>(line) {
+            Ok(op) => native.push(recorded_store_op(&op)?),
+            Err(_) if !journal.ends_with('\n') && journal.lines().last() == Some(line) => {}
+            Err(e) => return Err(format!("the trap journal: {e}")),
+        }
+    }
+    check_trap_store(&native, &recorded)?;
+    // Writes are the reference's (above); the journal can't carry their bytes,
+    // so a write the reference made isn't replayed into the final store.
+    if native.iter().any(|op| !matches!(op, StoreOp::Get { .. })) {
+        return Err("a trap step that writes can't be checked from its journal".into());
+    }
+    if let Some(after) = case.get("store_after").filter(|v| !v.is_null()) {
+        check_entries(&entries, after, "the final store")?;
+    }
+    let saved: BTreeMap<&String, String> = entries.iter().map(|(k, v)| (k, to_hex(v))).collect();
+    std::fs::write(
+        store_path(stores, id),
+        serde_json::to_vec(&saved).map_err(|e| e.to_string())?,
+    )
+    .map_err(|e| e.to_string())?;
+    entries.clear();
+    Ok(())
 }
 
 /// The store operations the native C core made since the last check must

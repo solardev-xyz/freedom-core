@@ -341,6 +341,7 @@ The service serves no call ([Calls and ENS](#calls-and-ens)), so no operation it
 - **The option:** upstream's `ETH_CALL` (`src/chains/eth/CMakeLists.txt:27`, `:144–156`) leaves out `verify_call.c`, `call_ctx.c`, `eth_call_account.c`, the simulation sources and the precompiles. evmone's wrapper goes with them, since only `ETH_CALL` links it.
 - **Untested:** 3.0.3 isn't known to build that way. `eth_account.c`, which the account reads use, includes `call_ctx.h` and `eth_call_account.h`.
 - **COL-2 tries `ETH_CALL=OFF`.** If it builds and every trace still matches, the build takes it, and evmone leaves the build. If not, the call code stays in the build, unreached by any served operation.
+- **Tried (COL-2): it doesn't build.** `eth_account.c` includes `call_ctx.h`, which includes evmone's `evmone_c_wrapper.h`, so 3.0.3 doesn't compile without the call verifier. The call code and evmone stay in the build.
 
 Neither build option depends on it.
 
@@ -380,7 +381,7 @@ Both options build with `HTTP_SERVER` off and, through the [verifier-only build]
 
 `src/util/version.c`, which is MIT, prints `License: PolyForm Noncommercial 1.0.0` from `c4_print_version`, which only the server and the CLIs call. The service never calls it.
 
-The notices file gains blst, and evmone and intx while the build still links them ([The call verifier](#the-call-verifier)), all Apache-2.0, with `libs/crypto` (MIT) and Colibri (MIT). `CHAIN_OP` is off: Freedom verifies no OP chain, and zstd stays out.
+The notices file gains blst, and evmone and intx while the build still links them ([The call verifier](#the-call-verifier)), all Apache-2.0, with `libs/crypto` (MIT, but for mbed TLS's RIPEMD-160, `ripemd160.c`, Apache-2.0), Colibri's evmone and intx wrappers (MIT) and Colibri (MIT). The notices list each tree with the licenses its files may carry (`services/freedom-colibrid/notices/c-sources.json`), and the gate checks each file against its tree's entry. `CHAIN_OP` is off: Freedom verifies no OP chain, and zstd stays out.
 
 ### Decided
 

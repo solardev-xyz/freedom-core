@@ -9,13 +9,14 @@ its compile_commands.json, and every header the compiler's dependency files
 - anything under src/chains/eth/server/ is compiled or included;
 - any prover source is (src/prover/, src/chains/*/prover/): the build is
   verifier-only;
+- a tree in the build (Colibri's own, its generated headers, each libs/* and
+  _deps/*-src) isn't in the notices
+  (services/freedom-colibrid/notices/c-sources.json);
 - a compiled source or listed header carries an SPDX identifier that isn't
-  one the notices list (services/freedom-colibrid/notices/c-sources.json), or
-  names PolyForm anywhere, except the files the notices name with the reason
-  (src/util/version.c prints the server's license; 0014, Licenses), which
-  must stay MIT;
-- a third party's tree in the build (_deps/*-src) isn't in the notices, or
-  its LICENSE file isn't the license the notices give it. blst is compiled
+  one its tree's entry lists, or names PolyForm anywhere, except the files
+  the notices name with the reason (src/util/version.c prints the server's
+  license; 0014, Licenses), which must stay MIT;
+- a third party's tree's LICENSE file isn't the license the notices give it. blst is compiled
   by its own build script, outside CMake's compile commands, so its tree's
   license is what the gate checks for it.
 
@@ -73,7 +74,7 @@ def check(target_dir, notices_path=NOTICES):
     """The gate: (errors, manifest, report lines) for the builds under target_dir."""
     with open(notices_path, encoding="utf-8") as f:
         notices = json.load(f)
-    allowed = set(notices["spdx"])
+    allowed = {c["tree"]: set(c["spdx"]) for c in notices["components"]}
     polyform_ok = {e["path"] for e in notices.get("polyform_mentions", [])}
     third_parties = {c["tree"]: c["license"] for c in notices["components"] if c["tree"].startswith("_deps/")}
     target_dir = os.path.realpath(target_dir)
@@ -147,9 +148,11 @@ def check(target_dir, notices_path=NOTICES):
                     pass  # named with its reason in the notices
                 else:
                     errors.append(f"{tree}/{rel}: names PolyForm")
+            if tree not in allowed:
+                errors.append(f"{tree}/{rel}: its tree isn't in the notices")
             for spdx in ids:
-                if spdx not in allowed:
-                    errors.append(f"{tree}/{rel}: SPDX-License-Identifier {spdx} isn't in the notices")
+                if tree in allowed and spdx not in allowed[tree]:
+                    errors.append(f"{tree}/{rel}: SPDX-License-Identifier {spdx} isn't one the notices give {tree}")
             t = trees.setdefault(tree, {"files": 0, "compiled": 0, "spdx": {}, "paths": []})
             t["files"] += 1
             t["compiled"] += path in compiled

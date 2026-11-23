@@ -102,16 +102,34 @@ jobs:
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           workspaces: services/freedom-colibrid -> target
-      - run: cmake --version
-      - run: cargo test --locked
-        if: runner.os != 'Windows'
-      - run: cargo test --locked
+      - name: Shorten PATH (Windows)
+        # blst's build command on Windows carries PATH, and the runner's is
+        # longer than cmd.exe's line ("The input line is too long"); upstream's
+        # own CI shortens it the same way (.github/workflows/bindings-rust.yml).
         if: runner.os == 'Windows'
-        env:
-          # The CMake tree under Cargo's git checkout makes blst's build
-          # command longer than cmd.exe takes ("The input line is too
-          # long"); the crate's build script takes a shorter one.
-          COLIBRI_CMAKE_BUILD_DIR: ${{ runner.temp }}\cb
+        shell: pwsh
+        run: |
+          $keep = @(
+            "$env:USERPROFILE\.cargo\bin",
+            "$env:SystemRoot\system32",
+            "$env:SystemRoot",
+            "$env:SystemRoot\System32\WindowsPowerShell\v1.0",
+            "$env:ProgramFiles\PowerShell\7",
+            "$env:ProgramFiles\CMake\bin",
+            "$env:ProgramFiles\Git\cmd",
+            "$env:ProgramFiles\Git\usr\bin"
+          )
+          $dynamic = ($env:PATH -split ';') | Where-Object { $_ -match 'MSBuild|Visual Studio|Python' }
+          $newPath = (($keep + $dynamic) | Where-Object { $_ -and (Test-Path $_) } | Select-Object -Unique) -join ';'
+          Write-Host "PATH length: $($env:PATH.Length) -> $($newPath.Length)"
+          "PATH=$newPath" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+      - run: cmake --version
+      - name: The runner's CPU
+        if: runner.os == 'Linux'
+        run: |
+          grep -m1 "model name" /proc/cpuinfo
+          grep -o -w -E "avx512f|avx2|bmi2|adx|sha_ni" /proc/cpuinfo | sort -u | tr '\n' ' '
+      - run: cargo test --locked
       # Design 0014's license gate, over the compiled-source manifest of the
       # build the replay just ran.
       - name: License gate
@@ -149,6 +167,10 @@ jobs:
         with:
           workspaces: services/freedom-colibrid -> target
           key: sanitize
+      - name: The runner's CPU
+        run: |
+          grep -m1 "model name" /proc/cpuinfo
+          grep -o -w -E "avx512f|avx2|bmi2|adx|sha_ni" /proc/cpuinfo | sort -u | tr '\n' ' '
       - name: Build the tests
         run: |
           cargo test --locked --target x86_64-unknown-linux-gnu --no-run --message-format=json \
