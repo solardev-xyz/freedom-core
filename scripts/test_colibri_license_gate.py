@@ -1,0 +1,151 @@
+"""colibri-license-gate.py over synthetic builds: a verifier-only build
+passes; server code, a prover, an unlisted SPDX identifier, PolyForm outside
+the notices' exception, a third party's tree the notices don't list or whose
+license differs, and a build without a manifest fail. The gate reads only
+the build it is given (its build script's OUT_DIR), never a stale one beside
+it, and refuses an OUT_DIR that holds two."""
+
+import importlib.util
+import json
+import pathlib
+import tempfile
+import unittest
+
+SPEC = importlib.util.spec_from_file_location(
+    "gate", pathlib.Path(__file__).with_name("colibri-license-gate.py")
+)
+gate = importlib.util.module_from_spec(SPEC)
+SPEC.loader.exec_module(gate)
+
+MIT = "/* SPDX-License-Identifier: MIT */\n"
+
+
+class Gate(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        base = pathlib.Path(self.tmp.name)
+        self.target = base / "target"
+        self.root = base / "checkout"
+        self.out = self.target / "release/build/colibri-stateless-0123/out"
+        self.build = self.out / "cmake/no-op/no-prover"
+        self.build.mkdir(parents=True)
+        self.notices = base / "notices.json"
+        self.notices.write_text(json.dumps({
+            "polyform_mentions": [{"path": "src/util/version.c", "why": "prints the server's license"}],
+            "components": [
+                {"tree": "colibri", "spdx": ["MIT"]},
+                {"tree": "libs/crypto", "spdx": ["MIT", "Apache-2.0"]},
+                {"tree": "_deps/blst-src", "spdx": ["Apache-2.0"], "license": "Apache-2.0"},
+            ],
+        }))
+        self.compiled = []
+        self.write("src/api/colibri.h", MIT)
+        self.source("src/api/colibri.c", ["src/api/colibri.h"])
+        self.source("src/chains/eth/verifier/eth_verify.c", ["src/api/colibri.h"])
+        dep = self.build / "_deps/blst-src/bindings/blst.h"
+        dep.parent.mkdir(parents=True)
+        dep.write_text("// SPDX-License-Identifier: Apache-2.0\n")
+        (self.build / "_deps/blst-src/LICENSE").write_text("Apache License\nVersion 2.0, January 2004\n")
+        self.depfile("blst", [str(dep), "/usr/include/stdio.h"])
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def write(self, rel, content):
+        path = self.root / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(content)
+        return path
+
+    def source(self, rel, headers, content=MIT):
+        path = self.write(rel, content)
+        self.compiled.append({"directory": str(self.build), "file": str(path), "command": "cc -c"})
+        (self.build / "compile_commands.json").write_text(json.dumps(self.compiled))
+        self.depfile(rel.replace("/", "_"), [str(path)] + [str(self.root / h) for h in headers])
+
+    def depfile(self, name, prerequisites):
+        (self.build / f"{name}.o.d").write_text(f"{name}.o: " + " \\\n  ".join(prerequisites) + "\n")
+
+    def errors(self, out=None):
+        return gate.check(str(out or self.out), str(self.notices))[0]
+
+    def test_a_verifier_only_build_passes(self):
+        self.assertEqual(self.errors(), [])
+
+    def test_server_code_fails_compiled_or_included(self):
+        self.source("src/server/server.c", [])
+        self.write("src/chains/eth/server/period_store_files.h", MIT)
+        self.source("src/chains/eth/verifier/x.c", ["src/chains/eth/server/period_store_files.h"])
+        errors = "\n".join(self.errors())
+        self.assertIn("src/server/server.c", errors)
+        self.assertIn("src/chains/eth/server/period_store_files.h", errors)
+
+    def test_a_prover_fails(self):
+        self.source("src/prover/prover.c", [])
+        self.source("src/chains/eth/prover/eth_prover.c", [])
+        errors = "\n".join(self.errors())
+        self.assertIn("src/prover/prover.c", errors)
+        self.assertIn("src/chains/eth/prover/eth_prover.c", errors)
+
+    def test_an_unlisted_spdx_identifier_fails(self):
+        self.source("src/util/x.c", [], "// SPDX-License-Identifier: GPL-2.0-only\n")
+        self.assertIn("GPL-2.0-only isn't one the notices give colibri", "\n".join(self.errors()))
+
+    def test_a_license_is_checked_against_its_own_tree(self):
+        # Apache-2.0 is listed for libs/crypto (its RIPEMD-160), not for Colibri's own tree.
+        self.source("libs/crypto/ripemd160.c", [], "/* SPDX-License-Identifier: Apache-2.0 */\n")
+        self.assertEqual(self.errors(), [])
+        self.source("src/util/z.c", [], "/* SPDX-License-Identifier: Apache-2.0 */\n")
+        self.assertIn("src/util/z.c: SPDX-License-Identifier Apache-2.0 isn't one the notices give colibri", "\n".join(self.errors()))
+
+    def test_a_tree_the_notices_dont_list_fails(self):
+        self.source("libs/evmone/wrapper.cpp", [])
+        self.assertIn("libs/evmone/wrapper.cpp: its tree isn't in the notices", "\n".join(self.errors()))
+
+    def test_polyform_anywhere_fails(self):
+        self.write("src/util/y.h", "/* Licensed under the PolyForm Noncommercial License 1.0.0 */\n")
+        self.source("src/util/y.c", ["src/util/y.h"])
+        self.assertIn("names PolyForm", "\n".join(self.errors()))
+
+    def test_version_c_may_name_polyform_while_it_stays_mit(self):
+        self.source("src/util/version.c", [], MIT + 'puts("License: PolyForm Noncommercial 1.0.0");\n')
+        self.assertEqual(self.errors(), [])
+        self.source("src/util/version.c", [], 'puts("License: PolyForm Noncommercial 1.0.0");\n')
+        self.assertIn("src/util/version.c: names PolyForm", "\n".join(self.errors()))
+
+    def test_an_unlisted_third_party_fails(self):
+        zstd = self.build / "_deps/zstd-src"
+        zstd.mkdir(parents=True)
+        (zstd / "LICENSE").write_text("BSD License\n")
+        self.assertIn("_deps/zstd-src: a third party's tree in the build that the notices don't list", "\n".join(self.errors()))
+
+    def test_a_third_party_under_another_license_fails(self):
+        (self.build / "_deps/blst-src/LICENSE").write_text("Permission is hereby granted\n")
+        self.assertIn("_deps/blst-src: LICENSE isn't Apache-2.0", "\n".join(self.errors()))
+
+    def test_no_manifest_fails(self):
+        (self.build / "compile_commands.json").unlink()
+        self.assertIn("no compile_commands.json", "\n".join(self.errors()))
+
+    def stale_build(self, out):
+        """A build an earlier pin left, as a restored cache brings it back:
+        its sources are gone, and one of them was server code."""
+        build = out / "cmake/no-op/no-prover"
+        build.mkdir(parents=True)
+        gone = self.root.parent / "old-checkout/src/server/server.c"
+        (build / "compile_commands.json").write_text(json.dumps(
+            [{"directory": str(build), "file": str(gone), "command": "cc -c"}]))
+
+    def test_only_the_given_build_is_read(self):
+        stale = self.target / "release/build/colibri-stateless-4567/out"
+        self.stale_build(stale)
+        self.assertEqual(self.errors(), [])
+        self.assertNotEqual(self.errors(stale), [])
+
+    def test_two_builds_in_one_out_dir_fail(self):
+        self.stale_build(self.out / "older")
+        self.assertIn("more than one build", "\n".join(self.errors()))
+
+
+if __name__ == "__main__":
+    unittest.main()

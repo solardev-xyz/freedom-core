@@ -1,0 +1,239 @@
+name: Colibri service
+
+# freedom-colibrid (design 0014) is a workspace of its own under services/,
+# with its own lockfile and `cargo deny` policy, as the other services are.
+# COL-2: the native, verifier-only C core, built from the pinned fork commit,
+# replays every COL-1 trace (vectors/colibri.json) on Linux, macOS and
+# Windows; an ASan and UBSan build replays them all again; and the license
+# gate reads the build's compiled-source manifest. It runs only when the service, its
+# vectors or this workflow change, plus daily, so none of it fails a
+# core-only change.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "services/freedom-colibrid/**"
+      - "vectors/colibri.json"
+      - "vectors/fixtures/colibri/**"
+      - "scripts/colibri-license-gate.py"
+      - "scripts/test_colibri_license_gate.py"
+      - "rust-toolchain.toml"
+      # Root tool configuration that applies under services/: Clippy and
+      # rustfmt look for theirs up the directory tree.
+      - "clippy.toml"
+      - ".clippy.toml"
+      - "rustfmt.toml"
+      - ".rustfmt.toml"
+      - ".github/workflows/colibrid.yml"
+  pull_request:
+    paths:
+      - "services/freedom-colibrid/**"
+      - "vectors/colibri.json"
+      - "vectors/fixtures/colibri/**"
+      - "scripts/colibri-license-gate.py"
+      - "scripts/test_colibri_license_gate.py"
+      - "rust-toolchain.toml"
+      - "clippy.toml"
+      - ".clippy.toml"
+      - "rustfmt.toml"
+      - ".rustfmt.toml"
+      - ".github/workflows/colibrid.yml"
+  schedule:
+    # Daily, so new advisories against unchanged dependencies still surface.
+    - cron: "17 6 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: colibrid-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_DENY_VERSION: "0.20.2"
+  CARGO_DENY_SHA256: "9f12ed4c49936e09b48bf862b595cde2fe64fcbd9d74dfacac6131ca824c8d5f"
+
+jobs:
+  lint:
+    name: freedom-colibrid fmt + clippy
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: services/freedom-colibrid
+    env:
+      # Type-checking needs no C core: the crate's build script skips the
+      # native build under DOCS_RS.
+      DOCS_RS: "1"
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - run: rustup toolchain install
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          workspaces: services/freedom-colibrid -> target
+          key: lint
+      - run: cargo fmt --all --check
+      - run: cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
+
+  replay:
+    name: freedom-colibrid replay (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        working-directory: services/freedom-colibrid
+        shell: bash
+    env:
+      # CMake reads it from the environment: the license gate below reads the
+      # compile commands it writes.
+      CMAKE_EXPORT_COMPILE_COMMANDS: "ON"
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - run: rustup toolchain install
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          workspaces: services/freedom-colibrid -> target
+      - name: Shorten PATH (Windows)
+        # blst's build command on Windows carries PATH, and the runner's is
+        # longer than cmd.exe's line ("The input line is too long"); upstream's
+        # own CI shortens it the same way (.github/workflows/bindings-rust.yml).
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $keep = @(
+            "$env:USERPROFILE\.cargo\bin",
+            "$env:SystemRoot\system32",
+            "$env:SystemRoot",
+            "$env:SystemRoot\System32\WindowsPowerShell\v1.0",
+            "$env:ProgramFiles\PowerShell\7",
+            "$env:ProgramFiles\CMake\bin",
+            "$env:ProgramFiles\Git\cmd",
+            "$env:ProgramFiles\Git\usr\bin"
+          )
+          $dynamic = ($env:PATH -split ';') | Where-Object { $_ -match 'MSBuild|Visual Studio|Python' }
+          $newPath = (($keep + $dynamic) | Where-Object { $_ -and (Test-Path $_) } | Select-Object -Unique) -join ';'
+          Write-Host "PATH length: $($env:PATH.Length) -> $($newPath.Length)"
+          "PATH=$newPath" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+      - run: cmake --version
+      # The C core's build directory, as Cargo reports it, for the license
+      # gate: the restored cache can hold earlier pins' builds beside it.
+      - name: The build the replay runs
+        if: runner.os == 'Linux'
+        run: |
+          cargo test --locked --no-run --message-format=json > build.json
+          jq -r 'select(.reason == "build-script-executed" and (.package_id | test("colibri-stateless"))) | .out_dir' build.json \
+            | sort -u > out-dir.txt
+          cat out-dir.txt
+          test "$(wc -l < out-dir.txt)" -eq 1
+      - run: cargo test --locked
+      # Design 0014's license gate, over the compiled-source manifest of the
+      # build the replay just ran.
+      - name: License gate
+        if: runner.os == 'Linux'
+        run: |
+          python3 -m unittest discover -s ../../scripts -p 'test_colibri_license_gate.py'
+          python3 ../../scripts/colibri-license-gate.py "$(cat out-dir.txt)" --manifest compiled-sources.json
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: runner.os == 'Linux' && always()
+        with:
+          name: colibrid-compiled-sources
+          path: services/freedom-colibrid/compiled-sources.json
+          if-no-files-found: ignore
+
+  sanitize:
+    name: freedom-colibrid replay under ASan and UBSan
+    # GCC 13, not the newer default of ubuntu-latest: from 14.1 to 16.1, GCC's
+    # dead-store elimination drops a memcpy into a fresh allocation that is
+    # returned, whenever null-pointer checks may not be deleted, which
+    # -fsanitize=null and nonnull-attribute force. evmc's make_result is such a
+    # copy, and the replay then reads an eth_call result nothing wrote. It is
+    # a regression from the fix for GCC PR tree-optimization/112653, with the
+    # testcase g++.dg/opt/20260703-1.C; 16.2 has the fix. Move to a GCC with
+    # it when the runner image does.
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        working-directory: services/freedom-colibrid
+    env:
+      CC: gcc-13
+      CXX: g++-13
+      # The C and C++ sources instrumented (the cmake crate passes these on to
+      # CMake). rustc links with -nodefaultlibs, so the runtimes are named;
+      # with --target, build scripts get neither.
+      CFLAGS: "-fsanitize=address,undefined -fno-omit-frame-pointer -fno-sanitize-recover=undefined"
+      CXXFLAGS: "-fsanitize=address,undefined -fno-omit-frame-pointer -fno-sanitize-recover=undefined"
+      CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS: "-Clink-arg=-lasan -Clink-arg=-lubsan"
+      CMAKE_EXPORT_COMPILE_COMMANDS: "ON"
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - run: rustup toolchain install
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          workspaces: services/freedom-colibrid -> target
+          key: sanitize
+      - name: Build the tests
+        run: |
+          cargo test --locked --target x86_64-unknown-linux-gnu --no-run --message-format=json > build.json
+          jq -r 'select(.reason == "compiler-artifact" and .profile.test and .executable) | .executable' build.json > tests.txt
+          test -s tests.txt
+          cat tests.txt
+          # The C core's build directory for these tests, not an earlier pin's
+          # that the restored cache holds beside it.
+          jq -r 'select(.reason == "build-script-executed" and (.package_id | test("colibri-stateless"))) | .out_dir' build.json \
+            | sort -u > out-dir.txt
+          cat out-dir.txt
+          test "$(wc -l < out-dir.txt)" -eq 1
+      - name: The C core was instrumented
+        run: |
+          find "$(cat out-dir.txt)" -name compile_commands.json > dbs.txt
+          test "$(wc -l < dbs.txt)" -eq 1
+          db=$(cat dbs.txt)
+          grep -q -- '-fsanitize=address,undefined' "$db"
+          # ...by the GCC chosen above, whatever the image's default.
+          jq -e --arg cc "/usr/bin/$CC " --arg cxx "/usr/bin/$CXX " '
+            def by($ext; $tool): [.[] | select(.file | endswith($ext))]
+              | length > 0 and all(.command | startswith($tool));
+            by(".c"; $cc) and by(".cpp"; $cxx)' "$db" > /dev/null
+      - name: Run them, LeakSanitizer included
+        # ASan's runtime must come before libc's allocator, which the link
+        # order can't give: it is preloaded into the test binaries alone (the
+        # replay's children inherit it), not into the shell or cargo.
+        env:
+          ASAN_OPTIONS: "abort_on_error=1:detect_stack_use_after_return=1:strict_string_checks=1"
+          UBSAN_OPTIONS: "print_stacktrace=1:halt_on_error=1"
+        run: |
+          preload="$($CC -print-file-name=libasan.so) $($CC -print-file-name=libubsan.so)"
+          while read -r bin; do
+            echo "== $bin"
+            env LD_PRELOAD="$preload" "$bin"
+          done < tests.txt
+
+  deny:
+    name: freedom-colibrid cargo deny
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: services/freedom-colibrid
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - name: Install cargo-deny
+        run: |
+          tarball="cargo-deny-${CARGO_DENY_VERSION}-x86_64-unknown-linux-musl.tar.gz"
+          curl -fsSL -o "$tarball" "https://github.com/EmbarkStudios/cargo-deny/releases/download/${CARGO_DENY_VERSION}/${tarball}"
+          echo "${CARGO_DENY_SHA256}  ${tarball}" | sha256sum --check
+          mkdir -p "$HOME/.cargo/bin"
+          tar -xzf "$tarball" --strip-components=1 -C "$HOME/.cargo/bin" "cargo-deny-${CARGO_DENY_VERSION}-x86_64-unknown-linux-musl/cargo-deny"
+      - run: cargo deny --locked check

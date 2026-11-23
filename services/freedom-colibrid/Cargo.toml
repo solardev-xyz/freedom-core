@@ -1,0 +1,80 @@
+# freedom-colibrid: the Colibri service process (design 0014).
+#
+# Its own Cargo workspace, excluded from the core's, as freedom-ipfsd is: its
+# own lockfile, `cargo deny` policy and notices, so Colibri's C core and its
+# third-party sources never enter the core's graph (0014, "Decided"). It will
+# share `fc-protocol` and `fc-service` with the core, by path, when the
+# service arrives (COL-4).
+#
+# COL-2 (this crate as it is now): the native, verifier-only C core, built
+# from the pinned fork commit, and a replay of every COL-1 trace through it
+# (tests/replay.rs). No service yet.
+
+[package]
+name = "freedom-colibrid"
+description = "The Colibri service process: Colibri's verifier as a native, confined process (design 0014)"
+version = "0.0.0"
+edition = "2024"
+rust-version = "1.99"
+publish = false
+repository = "https://github.com/solardev-xyz/freedom-core"
+
+[workspace]
+resolver = "3"
+
+[dependencies]
+# Colibri's C core and its safe Rust API, pinned to a commit of the
+# solardev-xyz fork until upstream releases the changes 0014 needs
+# (Option A): branch freedom/pinned-3.0.3, tag v3.0.3 with the four
+# upstream PRs (corpus-core/colibri-stateless #439 http feature, #440
+# offline pinned build, #441 safe answers, #442 verifier-only build)
+# backported, plus a fixed clock for replays, a step's status text with
+# the step, a proof decoder through the C API, and the fix for the leaked
+# results of nested calls (#444) with its regression test. The crate
+# version is 3.0.3, so the C core reports 196611, the version the COL-1
+# traces were recorded with. No default features: no HTTP client (tokio,
+# reqwest), no download of a prebuilt archive, no prover (PROVER=OFF), no
+# OP-Stack.
+colibri-stateless = { git = "https://github.com/solardev-xyz/colibri-stateless", rev = "c0c13c469949dd4915f52cfebc2ce7288cd58f9b", default-features = false }
+
+[dev-dependencies]
+# tests/replay.rs reads vectors/colibri.json and the fixture index.
+serde_json = "1"
+# tests/replay.rs checks every body and store value by its SHA-256, as the
+# vectors record them; the core already links sha2.
+sha2 = "0.10"
+
+# Every COL-1 case runs in a child process of its own, as the reference
+# loaded a fresh WASM instance for each: the C core keeps caches and its
+# clock in process globals.
+[[test]]
+name = "replay"
+harness = false
+
+# The core's workspace lints, copied: workspace lints don't cross workspaces.
+[lints.rust]
+unsafe_code = "forbid"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }
+unwrap_used = "warn"
+expect_used = "warn"
+panic = "warn"
+todo = "warn"
+unimplemented = "warn"
+dbg_macro = "warn"
+print_stdout = "warn"
+print_stderr = "warn"
+
+[profile.dev.package."*"]
+debug = false
+
+# Colibri's build script sets CMAKE_BUILD_TYPE=Release, but the cmake crate
+# still builds the configuration it infers from the Rust profile, and a
+# multi-config generator (Visual Studio) builds that one: Debug in a dev
+# build, whose objects want the debug C runtime (/MDd) that Rust never links.
+# Optimised and without debug info, the inferred configuration is Release on
+# every platform, the one the build script configures
+# (corpus-core/colibri-stateless#445).
+[profile.dev.package.colibri-stateless]
+opt-level = 3
