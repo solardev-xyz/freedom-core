@@ -124,11 +124,6 @@ jobs:
           Write-Host "PATH length: $($env:PATH.Length) -> $($newPath.Length)"
           "PATH=$newPath" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
       - run: cmake --version
-      - name: The runner's CPU
-        if: runner.os == 'Linux'
-        run: |
-          grep -m1 "model name" /proc/cpuinfo
-          grep -o -w -E "avx512f|avx2|bmi2|adx|sha_ni" /proc/cpuinfo | sort -u | tr '\n' ' '
       - run: cargo test --locked
       # Design 0014's license gate, over the compiled-source manifest of the
       # build the replay just ran.
@@ -146,11 +141,21 @@ jobs:
 
   sanitize:
     name: freedom-colibrid replay under ASan and UBSan
-    runs-on: ubuntu-latest
+    # GCC 13, not the newer default of ubuntu-latest: from 14.1 to 16.1, GCC's
+    # dead-store elimination drops a memcpy into a fresh allocation that is
+    # returned, whenever null-pointer checks may not be deleted, which
+    # -fsanitize=null and nonnull-attribute force. evmc's make_result is such a
+    # copy, and the replay then reads an eth_call result nothing wrote. It is
+    # a regression from the fix for GCC PR tree-optimization/112653, with the
+    # testcase g++.dg/opt/20260703-1.C; 16.2 has the fix. Move to a GCC with
+    # it when the runner image does.
+    runs-on: ubuntu-24.04
     defaults:
       run:
         working-directory: services/freedom-colibrid
     env:
+      CC: gcc-13
+      CXX: g++-13
       # The C and C++ sources instrumented (the cmake crate passes these on to
       # CMake). rustc links with -nodefaultlibs, so the runtimes are named;
       # with --target, build scripts get neither.
@@ -167,10 +172,6 @@ jobs:
         with:
           workspaces: services/freedom-colibrid -> target
           key: sanitize
-      - name: The runner's CPU
-        run: |
-          grep -m1 "model name" /proc/cpuinfo
-          grep -o -w -E "avx512f|avx2|bmi2|adx|sha_ni" /proc/cpuinfo | sort -u | tr '\n' ' '
       - name: Build the tests
         run: |
           cargo test --locked --target x86_64-unknown-linux-gnu --no-run --message-format=json \
@@ -182,6 +183,11 @@ jobs:
           db=$(find target/x86_64-unknown-linux-gnu -path '*colibri-stateless-*/out/*' -name compile_commands.json | head -n 1)
           test -n "$db"
           grep -q -- '-fsanitize=address,undefined' "$db"
+          # ...by the GCC chosen above, whatever the image's default.
+          jq -e --arg cc "/usr/bin/$CC " --arg cxx "/usr/bin/$CXX " '
+            def by($ext; $tool): [.[] | select(.file | endswith($ext))]
+              | length > 0 and all(.command | startswith($tool));
+            by(".c"; $cc) and by(".cpp"; $cxx)' "$db" > /dev/null
       - name: Run them, LeakSanitizer included
         # ASan's runtime must come before libc's allocator, which the link
         # order can't give: it is preloaded into the test binaries alone (the
@@ -190,7 +196,7 @@ jobs:
           ASAN_OPTIONS: "abort_on_error=1:detect_stack_use_after_return=1:strict_string_checks=1"
           UBSAN_OPTIONS: "print_stacktrace=1:halt_on_error=1"
         run: |
-          preload="$(gcc -print-file-name=libasan.so) $(gcc -print-file-name=libubsan.so)"
+          preload="$($CC -print-file-name=libasan.so) $($CC -print-file-name=libubsan.so)"
           while read -r bin; do
             echo "== $bin"
             env LD_PRELOAD="$preload" "$bin"
