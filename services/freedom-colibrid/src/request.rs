@@ -448,9 +448,9 @@ async fn attempt(
                     env.free(id, state, std::mem::take(done));
                     return Attempt::Done(cancelled(state));
                 }
-                fetched_so_far = fetched_so_far.saturating_add(raw.len() as u32);
                 let mut fetches: Vec<Pin<Box<dyn Future<Output = Fetched> + '_>>> = Vec::new();
                 for (request, fields) in requests.iter().zip(&raw) {
+                    fetched_so_far = fetched_so_far.saturating_add(1);
                     let over = fetched_so_far > MAX_FETCHES_PER_REQUEST;
                     fetches.push(Box::pin(fetch(
                         env,
@@ -584,6 +584,22 @@ struct HeadBytes {
     bytes: u64,
 }
 
+/// A fetch in the process-wide count of open fetches.
+struct OpenFetch<'a>(&'a Cell<u64>);
+
+impl<'a> OpenFetch<'a> {
+    fn new(count: &'a Cell<u64>) -> OpenFetch<'a> {
+        count.set(count.get() + 1);
+        OpenFetch(count)
+    }
+}
+
+impl Drop for OpenFetch<'_> {
+    fn drop(&mut self) {
+        self.0.set(self.0.get().saturating_sub(1));
+    }
+}
+
 /// Gives a body's reservation back to the bodies budget.
 struct Release {
     budget: Arc<AtomicU64>,
@@ -671,10 +687,10 @@ async fn fetch(
             return Err("Colibri fetch couldn't be sent".to_owned());
         }
     };
-    env.fetches.set(env.fetches.get() + 1);
-    let answer = asked.await;
-    env.fetches.set(env.fetches.get().saturating_sub(1));
-    let answer = match answer {
+    // Counted until the fetch ends, its body read, or until it is dropped
+    // with its request.
+    let _open = OpenFetch::new(&env.fetches);
+    let answer = match asked.await {
         Ok(answer) => answer,
         Err(AskFailed::Error(error)) => return Err(error.message),
         Err(AskFailed::Refused(_)) => return Err(FETCH_BUSY.to_owned()),
@@ -739,6 +755,17 @@ mod tests {
             value["error"].as_str().unwrap().encode_utf16().count(),
             MAX_ERROR_UNITS
         );
+    }
+
+    #[test]
+    fn an_open_fetch_is_counted_until_dropped() {
+        let count = Cell::new(0);
+        let a = OpenFetch::new(&count);
+        let b = OpenFetch::new(&count);
+        assert_eq!(count.get(), 2);
+        drop(a);
+        drop(b);
+        assert_eq!(count.get(), 0);
     }
 
     #[test]

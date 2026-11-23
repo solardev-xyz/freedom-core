@@ -254,6 +254,7 @@ mod tests {
 
     #[test]
     fn tasks_jobs_and_timers() {
+        let started = Instant::now();
         let queue: Arc<Queue<u32>> = Queue::new();
         let mut exec = Executor::new(Arc::clone(&queue));
         let done = Rc::new(Cell::new(0));
@@ -270,7 +271,6 @@ mod tests {
         let pusher = Arc::clone(&queue);
         let thread = std::thread::spawn(move || pusher.push(7));
         let mut jobs = Vec::new();
-        let started = Instant::now();
         while !exec.is_empty() || jobs.is_empty() {
             jobs.extend(exec.turn());
             assert!(started.elapsed() < Duration::from_secs(5));
