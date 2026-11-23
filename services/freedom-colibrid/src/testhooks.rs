@@ -21,7 +21,8 @@
 //!   the n-th answer it gives the C core.
 //! - Each step marker names its call (`"call": "execute"`, and so on).
 //! - `FREEDOM_COLIBRID_TEST_MEMORY_BUDGET=<bytes>` replaces the resident
-//!   memory budget, so a test can make the process recycle.
+//!   memory budget, so a test can make the process recycle;
+//!   `FREEDOM_COLIBRID_TEST_FETCH_BUDGET=<n>` the per-request fetch budget.
 //!
 //! The confinement tests (`tests/confinement.rs`) read the log lines; the
 //! fault tests (`tests/faults.rs`) watch the markers and the exit.
@@ -102,6 +103,21 @@ fn fault(var: &str) {
 
 #[cfg(not(feature = "testhooks"))]
 fn fault(_var: &str) {}
+
+/// The per-request fetch budget a test sets, if any
+/// (`FREEDOM_COLIBRID_TEST_FETCH_BUDGET=<n>`).
+#[cfg(feature = "testhooks")]
+pub fn fetch_budget() -> Option<u32> {
+    std::env::var("FREEDOM_COLIBRID_TEST_FETCH_BUDGET")
+        .ok()?
+        .parse()
+        .ok()
+}
+
+#[cfg(not(feature = "testhooks"))]
+pub fn fetch_budget() -> Option<u32> {
+    None
+}
 
 /// The resident memory budget a test sets, if any.
 #[cfg(feature = "testhooks")]

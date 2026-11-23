@@ -6,8 +6,12 @@
 //!   process exits 0;
 //! - a cancel during a verifier's creation that fails wins over the
 //!   failure, and no free follows (there is nothing to free);
+//! - a cancel during a creation that succeeds frees the verifier before
+//!   `cancelled`, with no freshness bound set;
 //! - past its resident-memory budget after the decoding, the check fails
-//!   before any other call into the C core.
+//!   before any other call into the C core;
+//! - the proof takes from the check's fetch budget: with a budget of one,
+//!   the verifier's fetch is refused without asking main.
 
 // Test code: a failed setup ends the test.
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
@@ -48,7 +52,11 @@ fn check(colibrid: &mut Colibrid) -> u64 {
 
 /// The next frame matching `want`, within [`WAIT`]; the markers' calls on
 /// the way are added to `calls`.
-fn until(colibrid: &mut Colibrid, calls: &mut Vec<String>, want: impl Fn(&Value) -> bool) -> Value {
+fn until(
+    colibrid: &mut Colibrid,
+    calls: &mut Vec<String>,
+    mut want: impl FnMut(&Value) -> bool,
+) -> Value {
     let deadline = Instant::now() + WAIT;
     let mut seen = Vec::new();
     while Instant::now() < deadline {
@@ -168,5 +176,60 @@ fn past_its_memory_budget_after_the_decoding_the_check_fails() {
     );
     // No call after the decoding.
     assert_eq!(calls, ["decode"]);
+    assert_eq!(colibrid.exit_code(WAIT), Some(0));
+}
+
+#[test]
+fn a_cancel_during_a_successful_creation_frees_the_verifier() {
+    // Chain 1: the creation succeeds, slowly; the cancel queued meanwhile
+    // wins before the freshness bound, and the verifier is freed.
+    let mut colibrid = spawned(1, &[("FREEDOM_COLIBRID_TEST_CREATE", "sleep:1500")]);
+    let id = check(&mut colibrid);
+    let mut calls = Vec::new();
+    answer_the_proof(&mut colibrid, &mut calls, mainnet_proof());
+    until(&mut colibrid, &mut calls, |m| {
+        m["type"] == "event" && m["event"] == "colibri.step" && m["data"]["call"] == "create"
+    });
+    colibrid.cancel(id);
+    let reply = until(&mut colibrid, &mut calls, |m| {
+        m["type"] == "response" && m["id"] == id
+    });
+    assert_eq!(reply["error"]["code"], "cancelled", "{reply}");
+    assert_eq!(calls, ["decode", "create", "free"]);
+    assert_eq!(colibrid.exit_code(WAIT), Some(0));
+}
+
+#[test]
+fn the_proof_takes_from_the_checks_fetch_budget() {
+    // A budget of one fetch: the proof's. The verifier's checkpointz fetch
+    // is then refused without asking main, and the check fails at verify.
+    let mut colibrid = spawned(1, &[("FREEDOM_COLIBRID_TEST_FETCH_BUDGET", "1")]);
+    let id = check(&mut colibrid);
+    let mut calls = Vec::new();
+    answer_the_proof(&mut colibrid, &mut calls, mainnet_proof());
+    let mut asked = Vec::new();
+    let reply = until(&mut colibrid, &mut calls, |m| {
+        if m["type"] == "request" {
+            asked.push(m.clone());
+        }
+        m["type"] == "response" && m["id"] == id
+    });
+    assert!(asked.is_empty(), "{asked:?}");
+    assert_eq!(reply["result"]["stage"], "verify", "{reply}");
+    let error = reply["result"]["error"].as_str().unwrap_or_default();
+    assert!(error.starts_with("Colibri fetch busy"), "{reply}");
+    // The refused fetch is answered to the C core with the refusal.
+    assert_eq!(
+        calls,
+        [
+            "decode",
+            "create",
+            "freshness",
+            "execute",
+            "answer",
+            "execute",
+            "free"
+        ]
+    );
     assert_eq!(colibrid.exit_code(WAIT), Some(0));
 }

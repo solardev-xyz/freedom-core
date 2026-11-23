@@ -392,16 +392,27 @@ fn client_params(params: &str) -> String {
 
 /// The fetches one request may make in all, across a ZK fallback's two
 /// contexts (0014, Budgets: 1,024 per request).
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub(crate) struct FetchBudget {
     taken: u32,
+    limit: u32,
+}
+
+impl Default for FetchBudget {
+    /// 1,024 fetches, or the test hook's bound.
+    fn default() -> FetchBudget {
+        FetchBudget {
+            taken: 0,
+            limit: crate::testhooks::fetch_budget().unwrap_or(MAX_FETCHES_PER_REQUEST),
+        }
+    }
 }
 
 impl FetchBudget {
     /// Takes one fetch: false past the bound.
     pub(crate) fn take(&mut self) -> bool {
         self.taken = self.taken.saturating_add(1);
-        self.taken <= MAX_FETCHES_PER_REQUEST
+        self.taken <= self.limit
     }
 }
 
