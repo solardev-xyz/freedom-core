@@ -21,6 +21,18 @@
 //!   holds. Owed credit is written ahead of the service's own frames.
 //!   Main's abort codes are a piece's: `cancelled`, `stalled` and
 //!   `body_stream_error`; any other is the protocol error `abort_code`.
+//! - **Room reserved at the head** ([`Connection::ask_reserving`], 0014's
+//!   bodies budget): the service's hook sees main's head before any byte
+//!   of its body is read, since the reader handles frames in order, and
+//!   reserves room for the body's exact length or refuses it. A refused
+//!   head is cancelled at once, so none of its body is held or credited
+//!   ([`AskFailed::Refused`]). A reserved body is held to its length
+//!   ([`fc_protocol::stream::Duplex::answered_sized`]): one that breaks it,
+//!   more bytes or fewer at its end, fails alone with
+//!   [`BodyError::Mismatch`], past the length with `cancel` to main, while
+//!   the connection, its other streams and its control frames go on. The
+//!   reservation ([`Hold`]) is the service's with the answer, or goes with
+//!   the request if the service never takes the answer.
 //! - **Cancel:** dropping the [`Asked`] before it resolves, or the [`Body`]
 //!   before its end, sends main `cancel` for the request, unless main's
 //!   answer is complete already. Main still sends its reply, or the
@@ -80,6 +92,10 @@ pub enum AskError {
 pub enum AskFailed {
     /// Main's error reply.
     Error(ErrorBody),
+    /// The service's own hook refused main's head, with this refusal
+    /// ([`Connection::ask_reserving`]): `cancel` went to main before any of
+    /// the body was read, and nothing of it was taken.
+    Refused(ErrorBody),
     /// Its deadline passed before main's reply: `cancel` went to main.
     Deadline,
     /// The connection ended before main's reply.
@@ -93,6 +109,10 @@ pub struct Answer {
     pub result: Box<RawValue>,
     /// The body main sends behind it, when the result says `body: true`.
     pub body: Option<Body>,
+    /// The room the service's hook reserved for the body
+    /// ([`Connection::ask_reserving`]): the service's now, to keep while it
+    /// holds the body's bytes.
+    pub hold: Option<Hold>,
 }
 
 /// Why a [`Body`] ended before its end.
@@ -100,9 +120,56 @@ pub struct Answer {
 pub enum BodyError {
     /// Main aborted it.
     Aborted(Abort),
+    /// It broke the length its head was reserved for ([`Reserved::len`]):
+    /// `received` bytes, past `declared`, or short of it at its end (design
+    /// 0014: `Colibri body length mismatch`). It failed alone, past the
+    /// length with `cancel` to main; what it had queued was dropped.
+    Mismatch { declared: u64, received: u64 },
     /// The connection ended first.
     Closed,
 }
+
+/// What the service's hook reserved for main's body at its head
+/// ([`Connection::ask_reserving`]).
+#[derive(Debug)]
+pub struct Reserved {
+    /// The body's exact length in bytes: the connection holds the body to
+    /// it ([`BodyError::Mismatch`]).
+    pub len: u64,
+    /// The room reserved for it.
+    pub hold: Hold,
+}
+
+/// Room a service reserved for one of main's bodies, as its hook made it
+/// ([`Reserved`]): dropping it gives the room back. It goes to the service
+/// with main's answer ([`Answer::hold`]), or, if the service never takes the
+/// answer (it lets go of the request, its deadline passes, or the
+/// connection ends), it is dropped with the request. The connection may
+/// drop it on any of its threads, under its lock, so its drop must neither
+/// block nor call into the connection; giving back an atomic count does
+/// neither.
+pub struct Hold {
+    /// Kept only to be dropped.
+    _room: Box<dyn Send>,
+}
+
+impl Hold {
+    /// Wraps whatever gives the room back when dropped.
+    pub fn new(room: impl Send + 'static) -> Hold {
+        Hold {
+            _room: Box::new(room),
+        }
+    }
+}
+
+impl std::fmt::Debug for Hold {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Hold")
+    }
+}
+
+/// A request's hook for main's head ([`Connection::ask_reserving`]).
+type Reserve = Box<dyn FnOnce(&RawValue) -> Result<Reserved, ErrorBody> + Send>;
 
 /// A request of the service's, from [`Connection::ask`] until both sides
 /// are done with it: the service's [`Asked`] has resolved without a body,
@@ -122,6 +189,10 @@ pub(super) struct Ask {
     body: Option<Inflow>,
     /// The service holds it: its [`Asked`], then its [`Body`].
     held: bool,
+    /// Its hook for main's head, until the head calls it.
+    reserve: Option<Reserve>,
+    /// What the hook reserved, until the [`Asked`] hands it over.
+    hold: Option<Hold>,
 }
 
 /// A body from main, as the connection holds it for its consumer.
@@ -130,8 +201,8 @@ struct Inflow {
     /// Data frames' bytes, as they came. At most the window: credit goes
     /// back only for bytes the consumer has taken.
     chunks: VecDeque<Vec<u8>>,
-    /// Its end, or main's abort.
-    terminal: Option<Result<(), Abort>>,
+    /// Its end, main's abort, or the length it broke.
+    terminal: Option<Result<(), BodyError>>,
 }
 
 /// A request or a cancel of the service's, for the writer: one JSON
@@ -195,6 +266,51 @@ impl Connection {
         params: &P,
         deadline: Option<Instant>,
     ) -> Result<Asked, AskError> {
+        self.ask_with(method, params, deadline, None)
+    }
+
+    /// As [`Connection::ask`], for a body the service reserves room for
+    /// before it takes any of it (design 0014, "Requests the service makes":
+    /// the bodies budget's reservation before credit).
+    ///
+    /// When main's reply is a head that opens a body, `reserve` runs with
+    /// its result on the reader thread, before any of the body is read, and
+    /// either reserves room for the body and gives its exact length, or
+    /// refuses it:
+    /// - **Reserved:** the body is held to its length ([`BodyError::Mismatch`])
+    ///   and the reservation goes to the service with the answer
+    ///   ([`Answer::hold`]), or with the request if the answer is never
+    ///   taken.
+    /// - **Refused:** the request is cancelled at once, so none of the body
+    ///   is held or credited, and the [`Asked`] resolves
+    ///   [`AskFailed::Refused`] with the refusal.
+    ///
+    /// It isn't called for a reply that opens no body, for a request the
+    /// service has let go of or whose deadline has passed, or once the
+    /// connection has ended; it is then dropped uncalled, possibly under the
+    /// connection's lock. Like a [`Service`](super::Service) callback it
+    /// must not block, and the connection's teardown waits for it.
+    pub fn ask_reserving<P, R>(
+        &self,
+        method: &str,
+        params: &P,
+        deadline: Option<Instant>,
+        reserve: R,
+    ) -> Result<Asked, AskError>
+    where
+        P: Serialize + ?Sized,
+        R: FnOnce(&RawValue) -> Result<Reserved, ErrorBody> + Send + 'static,
+    {
+        self.ask_with(method, params, deadline, Some(Box::new(reserve)))
+    }
+
+    fn ask_with<P: Serialize + ?Sized>(
+        &self,
+        method: &str,
+        params: &P,
+        deadline: Option<Instant>,
+        reserve: Option<Reserve>,
+    ) -> Result<Asked, AskError> {
         if !self.link.two_way {
             return Err(AskError::OneWay);
         }
@@ -221,6 +337,8 @@ impl Connection {
                     reply: None,
                     body: None,
                     held: true,
+                    reserve,
+                    hold: None,
                 },
             );
             if let Some(at) = deadline {
@@ -249,20 +367,26 @@ impl Connection {
     /// `cancel` unless its answer is complete, and what it held goes.
     fn let_go(&self, id: u64) {
         let mut state = self.link.lock();
+        // What it held, freed outside the lock: a reservation among it.
+        let mut held = None;
         if let Some(ask) = state.asks.get_mut(&id) {
             ask.held = false;
             ask.waker = None;
-            let reply = ask.reply.take();
-            let body = ask.body.take();
+            held = Some((
+                ask.reply.take(),
+                ask.body.take(),
+                ask.hold.take(),
+                ask.reserve.take(),
+            ));
             let deadline = ask.deadline.take();
             if let Some(at) = deadline {
                 state.deadlines.remove(&(at, id));
             }
-            drop((reply, body));
         }
         withdraw(&mut state, id);
         prune(&mut state, id);
         drop(state);
+        drop(held);
         self.link.writer.notify_one();
     }
 }
@@ -394,6 +518,7 @@ impl Future for Asked {
                         id,
                         ended: None,
                     }),
+                    hold: ask.hold.take(),
                 })
             }
             Some(Err(failed)) => {
@@ -449,7 +574,9 @@ impl Body {
 
     /// The future of the body's next bytes, as one data frame brought them
     /// (1 to 64 KiB): `None` at its end. Taking them owes main their
-    /// credit, so the bytes taken are the consumer's to hold.
+    /// credit, so the bytes taken are the consumer's to hold. A body that
+    /// broke its reserved length gives no more bytes:
+    /// [`BodyError::Mismatch`] is next.
     pub fn chunk(&mut self) -> Chunk<'_> {
         Chunk { body: self }
     }
@@ -503,7 +630,7 @@ impl Future for Chunk<'_> {
                 return Poll::Ready(Ok(Some(chunk)));
             }
             Err(Some(Ok(()))) => Ok(()),
-            Err(Some(Err(abort))) => Err(BodyError::Aborted(abort)),
+            Err(Some(Err(error))) => Err(error),
             Err(None) if ended || !state.asks.contains_key(&id) => Err(BodyError::Closed),
             Err(None) => {
                 if let Some(ask) = state.asks.get_mut(&id) {
@@ -559,45 +686,100 @@ impl Reader<'_> {
                 (Err(AskFailed::Error(error)), false)
             }
         };
-        let waker = {
+        // A head that opens a body, for a request that reserves room for
+        // it: its hook runs first, before any of the body is read.
+        let reserved = match &reply {
+            Ok(result) if opens => self.reserve(id, result),
+            _ => None,
+        };
+        let (waker, unused) = {
             let mut state = self.link.lock();
             if state.end.is_some() {
+                drop(state);
                 return Ok(());
             }
-            let replied = state
-                .streams
-                .answered(id, opens)
-                .map_err(|e| End::Protocol(e.category()))?;
+            let replied = match &reserved {
+                Some(Ok(reserved)) => state.streams.answered_sized(id, reserved.len),
+                _ => state.streams.answered(id, opens),
+            }
+            .map_err(|e| End::Protocol(e.category()))?;
             match replied {
                 Replied::Deliver => match state.asks.get_mut(&id) {
                     Some(ask) => {
-                        ask.reply = Some(reply);
-                        if opens {
-                            ask.body = Some(Inflow::default());
-                        }
                         let waker = ask.waker.take();
-                        if let Some(at) = ask.deadline.take() {
+                        let deadline = ask.deadline.take();
+                        let refused = match reserved {
+                            Some(Err(refusal)) => {
+                                ask.reply = Some(Err(AskFailed::Refused(refusal)));
+                                true
+                            }
+                            Some(Ok(Reserved { hold, .. })) => {
+                                ask.reply = Some(reply);
+                                ask.body = Some(Inflow::default());
+                                ask.hold = Some(hold);
+                                false
+                            }
+                            None => {
+                                ask.reply = Some(reply);
+                                if opens {
+                                    ask.body = Some(Inflow::default());
+                                }
+                                false
+                            }
+                        };
+                        if let Some(at) = deadline {
                             state.deadlines.remove(&(at, id));
                         }
-                        waker
+                        // Refused: its body is cancelled before any of it
+                        // is read.
+                        if refused {
+                            withdraw(&mut state, id);
+                        }
+                        (waker, None)
                     }
                     // Not held: a pending request always is. Its body goes.
                     None => {
                         withdraw(&mut state, id);
-                        None
+                        (None, reserved)
                     }
                 },
-                // Cancelled before it: dropped, and a body it opened is
-                // dropped as it comes.
+                // Cancelled before it, or while its hook ran: dropped, and
+                // a body it opened is dropped as it comes.
                 Replied::Retired => {
                     prune(&mut state, id);
-                    None
+                    (None, reserved)
                 }
             }
         };
+        // A reservation nobody takes goes outside the lock.
+        drop(unused);
         self.link.writer.notify_one();
         wake(waker.into_iter().collect());
         Ok(())
+    }
+
+    /// Request `id`'s hook, on main's head that opens its body
+    /// ([`Connection::ask_reserving`]): run outside the lock, as a service
+    /// callback, unless the service has let go of the request, its deadline
+    /// has passed, or the connection has ended. The reader reads nothing
+    /// meanwhile, so nothing of the body is read before it returns.
+    fn reserve(&self, id: u64, result: &RawValue) -> Option<Result<Reserved, ErrorBody>> {
+        let hook = {
+            let mut state = self.link.lock();
+            if state.end.is_some() {
+                return None;
+            }
+            let ask = state.asks.get_mut(&id)?;
+            if !ask.held || ask.reply.is_some() {
+                return None;
+            }
+            let hook = ask.reserve.take()?;
+            state.dispatching = true;
+            hook
+        };
+        let reserved = hook(result);
+        self.leave();
+        Some(reserved)
     }
 
     /// Data, end or abort of a body main sends in answer to one of the
@@ -626,7 +808,8 @@ impl Reader<'_> {
                 Arrived::Data { id, .. }
                 | Arrived::End { id }
                 | Arrived::Abort { id, .. }
-                | Arrived::Dropped { id } => *id,
+                | Arrived::Dropped { id }
+                | Arrived::Mismatch { id, .. } => *id,
             };
             let inflow = state.asks.get_mut(&id).and_then(|ask| {
                 let inflow = ask.body.as_mut()?;
@@ -644,7 +827,34 @@ impl Reader<'_> {
                     waker
                 }
                 (Arrived::Abort { abort, .. }, Some((inflow, waker))) => {
-                    inflow.terminal = Some(Err(abort));
+                    inflow.terminal = Some(Err(BodyError::Aborted(abort)));
+                    waker
+                }
+                // It broke its reserved length: it fails alone, what it
+                // queued goes, and past the length main gets `cancel` (the
+                // stream retires, its frames dropped until its terminal).
+                (
+                    Arrived::Mismatch {
+                        declared,
+                        received,
+                        retire,
+                        ..
+                    },
+                    inflow,
+                ) => {
+                    let waker = match inflow {
+                        Some((inflow, waker)) => {
+                            inflow.chunks.clear();
+                            inflow.terminal = Some(Err(BodyError::Mismatch { declared, received }));
+                            waker
+                        }
+                        // Never: a reserved body is held until it ends.
+                        None => None,
+                    };
+                    if retire == Retire::SendCancel {
+                        state.outbound.push_back(Outgoing::cancel(id));
+                    }
+                    prune(&mut state, id);
                     waker
                 }
                 // A body the service let go of: its frames go, and its
@@ -675,8 +885,11 @@ mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
     use std::time::Duration;
 
+    use fc_protocol::error::ErrorCode;
+    use fc_protocol::stream::InboundState;
     use serde_json::json;
 
     use super::super::tests::written;
@@ -818,6 +1031,387 @@ mod tests {
             [
                 json!({ "type": "response", "id": 1, "result": "hello" }),
                 json!({ "type": "response", "id": 2, "result": "bye" }),
+            ]
+        );
+    }
+
+    /// A two-way link whose handshake is answered, its reply queued.
+    fn linked() -> (Options, Arc<Link>, Connection) {
+        let mut options = Options::new("t", 1, Instant::now());
+        options.exit_watchdog = None;
+        options.two_way = true;
+        let link = Arc::new(Link::new(&options));
+        let conn = Connection { link: link.clone() };
+        {
+            let mut state = link.lock();
+            state.streams.request(1).unwrap();
+            state.hello_id = Some(1);
+            state.hello_done = true;
+        }
+        conn.reply(1, &"hello").unwrap();
+        (options, link, conn)
+    }
+
+    fn head(id: u64, bytes: u64) -> Frame {
+        json_frame(&json!({ "type": "response", "id": id,
+            "result": { "node": 0, "bytes": bytes, "body": true } }))
+    }
+
+    /// Room reserved from a count, given back when dropped.
+    struct Room(Arc<AtomicU64>, u64);
+
+    impl Drop for Room {
+        fn drop(&mut self) {
+            self.0.fetch_sub(self.1, Ordering::SeqCst);
+        }
+    }
+
+    /// Sets its flag when dropped: a hook dropped uncalled.
+    struct Dropped(Arc<AtomicBool>);
+
+    impl Drop for Dropped {
+        fn drop(&mut self) {
+            self.0.store(true, Ordering::SeqCst);
+        }
+    }
+
+    /// A hook that reserves the head's `bytes` from `room`, counting its
+    /// calls.
+    fn reserving(
+        room: &Arc<AtomicU64>,
+        calls: &Arc<AtomicUsize>,
+    ) -> impl FnOnce(&RawValue) -> Result<Reserved, ErrorBody> + Send + 'static {
+        let (room, calls) = (room.clone(), calls.clone());
+        move |result| {
+            calls.fetch_add(1, Ordering::SeqCst);
+            let head: serde_json::Value = serde_json::from_str(result.get()).unwrap();
+            let len = head["bytes"].as_u64().unwrap();
+            room.fetch_add(len, Ordering::SeqCst);
+            Ok(Reserved {
+                len,
+                hold: Hold::new(Room(room, len)),
+            })
+        }
+    }
+
+    /// Design 0014, "Requests the service makes": the hook sees main's
+    /// head before any byte of its body is read, as a service callback,
+    /// and the room it reserved goes to the service with the answer.
+    #[test]
+    fn a_head_is_reserved_before_any_of_its_body_is_read() {
+        let (options, link, conn) = linked();
+        let service = Idle;
+        let mut reader = Reader::new(&link, &conn, &service, &options);
+        let room = Arc::new(AtomicU64::new(0));
+        let calls = Arc::new(AtomicUsize::new(0));
+        let seen = link.clone();
+        let reserve = reserving(&room, &calls);
+        let mut asked = conn
+            .ask_reserving("shell.t", &json!({}), None, move |result: &RawValue| {
+                {
+                    let state = seen.lock();
+                    // Its stream isn't open yet, and the teardown waits.
+                    assert_eq!(
+                        state.streams.inbound().info(1).map(|info| info.state),
+                        Some(InboundState::Pending)
+                    );
+                    assert!(state.dispatching);
+                }
+                reserve(result)
+            })
+            .unwrap();
+        reader.response(&head(1, 5)).unwrap();
+        assert_eq!(
+            (calls.load(Ordering::SeqCst), room.load(Ordering::SeqCst)),
+            (1, 5)
+        );
+        assert!(!link.lock().dispatching);
+        reader
+            .inbound(StreamFrame::Data {
+                id: 1,
+                bytes: &[1, 2, 3],
+            })
+            .unwrap();
+        reader
+            .inbound(StreamFrame::Data {
+                id: 1,
+                bytes: &[4, 5],
+            })
+            .unwrap();
+        reader.inbound(StreamFrame::End { id: 1 }).unwrap();
+        let Poll::Ready(Ok(Answer {
+            body: Some(mut body),
+            hold: Some(hold),
+            ..
+        })) = poll(&mut asked)
+        else {
+            panic!("the answer, its body and its hold");
+        };
+        assert_eq!(
+            poll(&mut body.chunk()),
+            Poll::Ready(Ok(Some(vec![1, 2, 3])))
+        );
+        assert_eq!(poll(&mut body.chunk()), Poll::Ready(Ok(Some(vec![4, 5]))));
+        assert_eq!(poll(&mut body.chunk()), Poll::Ready(Ok(None)));
+        assert_eq!(conn.asks(), 0);
+        // The room is the service's until it drops the hold.
+        assert_eq!(room.load(Ordering::SeqCst), 5);
+        drop(hold);
+        assert_eq!(room.load(Ordering::SeqCst), 0);
+        drop((body, asked));
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    /// A head the hook refuses (0014: `busy`) is cancelled as it is read,
+    /// so none of its body is held or credited, and the request fails with
+    /// the refusal; the connection goes on.
+    #[test]
+    fn a_head_the_hook_refuses_is_cancelled_before_its_body() {
+        let (options, link, conn) = linked();
+        let service = Idle;
+        let mut reader = Reader::new(&link, &conn, &service, &options);
+        let busy = ErrorBody::new(ErrorCode::Busy, "Colibri fetch busy");
+        let refusal = busy.clone();
+        let mut asked = conn
+            .ask_reserving("shell.t", &json!({}), None, move |_: &RawValue| {
+                Err(refusal)
+            })
+            .unwrap();
+        reader.response(&head(1, 1 << 20)).unwrap();
+        assert_eq!(
+            link.lock().streams.inbound().info(1).map(|info| info.state),
+            Some(InboundState::Retiring)
+        );
+        assert!(matches!(
+            poll(&mut asked),
+            Poll::Ready(Err(AskFailed::Refused(error))) if error == busy
+        ));
+        // Main's body, sent before it read the cancel, is dropped as read.
+        for _ in 0..2 {
+            reader
+                .inbound(StreamFrame::Data {
+                    id: 1,
+                    bytes: &[7; 64 << 10],
+                })
+                .unwrap();
+        }
+        assert_eq!(link.lock().streams.owed(), 0);
+        assert_eq!(conn.asks(), 1);
+        reader
+            .inbound(StreamFrame::Abort {
+                id: 1,
+                abort: Abort::cancelled(),
+            })
+            .unwrap();
+        assert_eq!(conn.asks(), 0);
+        drop(asked);
+        assert_eq!(
+            written(&link),
+            [
+                json!({ "type": "response", "id": 1, "result": "hello" }),
+                json!({ "type": "request", "id": 1, "method": "shell.t", "params": {} }),
+                json!({ "type": "cancel", "id": 1 }),
+            ]
+        );
+    }
+
+    /// The hook runs only for a head that opens a body the service can
+    /// still take: not for a reply without one, a request let go of or
+    /// past its deadline, or after the end. Each is dropped uncalled.
+    #[test]
+    fn the_hook_runs_only_for_a_body_the_service_can_take() {
+        let (options, link, conn) = linked();
+        let service = Idle;
+        let mut reader = Reader::new(&link, &conn, &service, &options);
+        let calls = Arc::new(AtomicUsize::new(0));
+        let hook = |dropped: &Arc<AtomicBool>| {
+            let (calls, dropped) = (calls.clone(), Dropped(dropped.clone()));
+            move |_: &RawValue| {
+                let _dropped = dropped;
+                calls.fetch_add(1, Ordering::SeqCst);
+                Err(ErrorBody::new(ErrorCode::Busy, "busy"))
+            }
+        };
+        let flags: Vec<Arc<AtomicBool>> = (0..4).map(|_| Arc::default()).collect();
+        // 1: a reply that opens no body.
+        let mut plain = conn
+            .ask_reserving("shell.t", &1, None, hook(&flags[0]))
+            .unwrap();
+        let reply = json!({ "type": "response", "id": 1, "result": { "error": "e" } });
+        reader.response(&json_frame(&reply)).unwrap();
+        let Poll::Ready(Ok(Answer {
+            body: None,
+            hold: None,
+            ..
+        })) = poll(&mut plain)
+        else {
+            panic!("a plain answer");
+        };
+        assert!(flags[0].load(Ordering::SeqCst));
+        // 2: let go of before main's head, which then opens a retiring
+        // stream.
+        drop(
+            conn.ask_reserving("shell.t", &2, None, hook(&flags[1]))
+                .unwrap(),
+        );
+        assert!(flags[1].load(Ordering::SeqCst));
+        reader.response(&head(2, 10)).unwrap();
+        reader
+            .inbound(StreamFrame::Data { id: 2, bytes: &[1] })
+            .unwrap();
+        reader.inbound(StreamFrame::End { id: 2 }).unwrap();
+        // 3: past its deadline.
+        let mut late = conn
+            .ask_reserving("shell.t", &3, Some(Instant::now()), hook(&flags[2]))
+            .unwrap();
+        assert!(matches!(
+            poll(&mut late),
+            Poll::Ready(Err(AskFailed::Deadline))
+        ));
+        reader.response(&head(3, 10)).unwrap();
+        reader.inbound(StreamFrame::End { id: 3 }).unwrap();
+        drop(late);
+        assert!(flags[2].load(Ordering::SeqCst));
+        assert_eq!(conn.asks(), 0);
+        // 4: after the end.
+        let mut ended = conn
+            .ask_reserving("shell.t", &4, None, hook(&flags[3]))
+            .unwrap();
+        link.end(End::Eof);
+        reader.response(&head(4, 10)).unwrap();
+        assert!(matches!(
+            poll(&mut ended),
+            Poll::Ready(Err(AskFailed::Closed))
+        ));
+        assert!(flags[3].load(Ordering::SeqCst));
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        assert_eq!(conn.asks(), 0);
+    }
+
+    /// Room reserved for an answer the service never takes goes with the
+    /// request: one it lets go of, and one the connection's end closes.
+    #[test]
+    fn a_reservation_never_taken_goes_with_its_request() {
+        let (options, link, conn) = linked();
+        let service = Idle;
+        let mut reader = Reader::new(&link, &conn, &service, &options);
+        let room = Arc::new(AtomicU64::new(0));
+        let calls = Arc::new(AtomicUsize::new(0));
+        let dropped = conn
+            .ask_reserving("shell.t", &1, None, reserving(&room, &calls))
+            .unwrap();
+        let mut closed = conn
+            .ask_reserving("shell.t", &2, None, reserving(&room, &calls))
+            .unwrap();
+        reader.response(&head(1, 100)).unwrap();
+        reader.response(&head(2, 20)).unwrap();
+        assert_eq!(room.load(Ordering::SeqCst), 120);
+        // Let go of unpolled: its body is cancelled, its room given back.
+        drop(dropped);
+        assert_eq!(room.load(Ordering::SeqCst), 20);
+        // The end: the answer is still the service's to take, with its
+        // room, and dropping it gives the room back.
+        link.end(End::Eof);
+        let Poll::Ready(Ok(Answer {
+            body: Some(mut body),
+            hold: Some(hold),
+            ..
+        })) = poll(&mut closed)
+        else {
+            panic!("the answer");
+        };
+        assert_eq!(poll(&mut body.chunk()), Poll::Ready(Err(BodyError::Closed)));
+        drop((hold, body, closed));
+        assert_eq!(room.load(Ordering::SeqCst), 0);
+        assert_eq!(conn.asks(), 0);
+    }
+
+    /// Design 0014: a body that breaks its reserved length fails alone.
+    /// Past it, what it queued goes and main gets `cancel`; short of it at
+    /// its end, its record goes. Another body and the connection go on.
+    #[test]
+    fn a_body_that_breaks_its_length_fails_alone() {
+        let (options, link, conn) = linked();
+        let service = Idle;
+        let mut reader = Reader::new(&link, &conn, &service, &options);
+        let room = Arc::new(AtomicU64::new(0));
+        let calls = Arc::new(AtomicUsize::new(0));
+        let mut long = conn
+            .ask_reserving("shell.t", &1, None, reserving(&room, &calls))
+            .unwrap();
+        let mut plain = conn.ask("shell.t", &2, None).unwrap();
+        let mut short = conn
+            .ask_reserving("shell.t", &3, None, reserving(&room, &calls))
+            .unwrap();
+        reader.response(&head(1, 4)).unwrap();
+        reader.response(&head(2, 0)).unwrap();
+        reader.response(&head(3, 10)).unwrap();
+        let mut bodies = [&mut long, &mut plain, &mut short].map(|asked| match poll(asked) {
+            Poll::Ready(Ok(Answer {
+                body: Some(body), ..
+            })) => body,
+            other => panic!("{other:?}"),
+        });
+        let data = |reader: &mut Reader<'_>, id: u64, bytes: &[u8]| {
+            reader.inbound(StreamFrame::Data { id, bytes }).unwrap();
+        };
+        // Body 1: 3 bytes queued, then 2 more, one past its 4.
+        data(&mut reader, 1, &[1, 2, 3]);
+        data(&mut reader, 2, &[9]);
+        data(&mut reader, 3, &[1, 2, 3, 4]);
+        data(&mut reader, 1, &[4, 5]);
+        assert_eq!(
+            poll(&mut bodies[0].chunk()),
+            Poll::Ready(Err(BodyError::Mismatch {
+                declared: 4,
+                received: 5
+            }))
+        );
+        // Main's frames for it, sent before it read the cancel, go.
+        data(&mut reader, 1, &[6]);
+        assert_eq!(conn.asks(), 3);
+        reader
+            .inbound(StreamFrame::Abort {
+                id: 1,
+                abort: Abort::cancelled(),
+            })
+            .unwrap();
+        assert_eq!(conn.asks(), 2);
+        // Body 3: 4 of its 10 bytes, then its end.
+        reader.inbound(StreamFrame::End { id: 3 }).unwrap();
+        assert_eq!(
+            poll(&mut bodies[2].chunk()),
+            Poll::Ready(Err(BodyError::Mismatch {
+                declared: 10,
+                received: 4
+            }))
+        );
+        // Its error stays its error.
+        assert_eq!(
+            poll(&mut bodies[2].chunk()),
+            Poll::Ready(Err(BodyError::Mismatch {
+                declared: 10,
+                received: 4
+            }))
+        );
+        // Body 2, without a length, takes what comes.
+        assert_eq!(poll(&mut bodies[1].chunk()), Poll::Ready(Ok(Some(vec![9]))));
+        reader.inbound(StreamFrame::End { id: 2 }).unwrap();
+        assert_eq!(poll(&mut bodies[1].chunk()), Poll::Ready(Ok(None)));
+        assert_eq!((conn.asks(), link.lock().streams.owed()), (0, 0));
+        drop(bodies);
+        drop((long, plain, short));
+        assert_eq!(room.load(Ordering::SeqCst), 0);
+        // One cancel, for body 1; credit for body 2's byte went with its
+        // end.
+        assert_eq!(
+            written(&link),
+            [
+                json!({ "type": "response", "id": 1, "result": "hello" }),
+                json!({ "type": "request", "id": 1, "method": "shell.t", "params": 1 }),
+                json!({ "type": "request", "id": 2, "method": "shell.t", "params": 2 }),
+                json!({ "type": "request", "id": 3, "method": "shell.t", "params": 3 }),
+                json!({ "type": "cancel", "id": 1 }),
             ]
         );
     }

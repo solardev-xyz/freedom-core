@@ -50,9 +50,12 @@
 //!   dropped unanswered or its deadline passes, and a result that says
 //!   `body: true` opens a stream from main to the service: 0009's frames in
 //!   both directions on one connection, through `fc-protocol`'s
-//!   [`Duplex`]. A service that doesn't turn them on reads main's data, end
-//!   and abort frames as protocol errors (`stream_direction`) and any
-//!   response as `unsolicited_response`, as 0007 has it ([`ask`]).
+//!   [`Duplex`]. [`Connection::ask_reserving`] adds a hook that sees main's
+//!   head before any of its body is read, reserves room for the body's
+//!   exact length or refuses it, and the body is then held to that length.
+//!   A service that doesn't turn them on reads main's data, end and abort
+//!   frames as protocol errors (`stream_direction`) and any response as
+//!   `unsolicited_response`, as 0007 has it ([`ask`]).
 //! - **The lifecycle thread** enforces the handshake's deadline, polls the
 //!   parent every 2 s, watches for the writer stall, and ends the service's
 //!   requests whose deadline passes.
@@ -109,7 +112,7 @@ use crate::watchdog::Watchdog;
 
 mod ask;
 
-pub use ask::{Answer, AskError, AskFailed, Asked, Body, BodyError, Chunk};
+pub use ask::{Answer, AskError, AskFailed, Asked, Body, BodyError, Chunk, Hold, Reserved};
 use ask::{Ask, Outgoing};
 
 /// The handshake's deadline after spawn (0001: 10 s).
