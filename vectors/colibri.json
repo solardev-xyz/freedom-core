@@ -56708,7 +56708,8 @@
           "req": 0,
           "node": 0,
           "bytes": 86,
-          "sha256": "8f8174d4c7eb78d7a5a90040f6842b87b8ca46305a4dcca09615a7d65a06725a"
+          "sha256": "8f8174d4c7eb78d7a5a90040f6842b87b8ca46305a4dcca09615a7d65a06725a",
+          "body": "{\"data\":{\"root\":\"0xdd239c62e2cf5c5621ab42ae898ea483a6662c29594edacdcfc7ef4843919e80\"}}"
         },
         {
           "op": "store_get",
@@ -56939,7 +56940,8 @@
           "req": 0,
           "node": 0,
           "bytes": 86,
-          "sha256": "d6f973fea46c2d34c67507e0d40ec5976fd3e273831bc3c934b0234472e98d8f"
+          "sha256": "d6f973fea46c2d34c67507e0d40ec5976fd3e273831bc3c934b0234472e98d8f",
+          "body": "{\"data\":{\"root\":\"0xf9da4bb61af5f13e7a7e14e5417d2dd6fa65d959bf9a2a16d1f659fd00306348\"}}"
         },
         {
           "op": "store_get",
@@ -57048,7 +57050,11 @@
           "reply": {
             "status": 200,
             "bytes": 187228,
-            "sha256": "ec261c3ab1d15b7f7b70fad95e253cdd2935b1d1e39c447c0a02d8970bfbba8a"
+            "sha256": "ec261c3ab1d15b7f7b70fad95e253cdd2935b1d1e39c447c0a02d8970bfbba8a",
+            "derived": {
+              "flip": 187227,
+              "of": "d522993401e852dc0b0a73971ca818a5b44a6da8f996b36d1037f7ef00d54431"
+            }
           }
         },
         {
@@ -57128,7 +57134,11 @@
           "reply": {
             "status": 200,
             "bytes": 33923,
-            "sha256": "adf750e4738b12e99d54f856754e8b44b9d1988a015ef1dc0ffa19fe8af6c0aa"
+            "sha256": "adf750e4738b12e99d54f856754e8b44b9d1988a015ef1dc0ffa19fe8af6c0aa",
+            "derived": {
+              "flip": 33922,
+              "of": "72808e037ad60896e88cc15943b62d0b693d1b3d3cad5bc85422ef5b1ded7481"
+            }
           }
         },
         {
@@ -57189,6 +57199,7 @@
         "docs/audits/evidence/colibri-v3-2026-09/captures/mainnet/{proof.ssz,responses.json,verified-checkpoint.json}",
         "docs/audits/evidence/myotis-recovery-spike-2026-09/captures/mainnet-finalized/proof.ssz"
       ],
+      "deviation": "checked-decode",
       "requests": [
         {
           "checkpoint": 1,
@@ -57228,7 +57239,16 @@
           "ok": false,
           "code": "CHECKPOINT_UNAVAILABLE"
         }
-      ]
+      ],
+      "design": {
+        "decode": null,
+        "outcomes": [
+          {
+            "ok": false,
+            "code": "CHECKPOINT_UNAVAILABLE"
+          }
+        ]
+      }
     },
     {
       "id": "checkpoint-gnosis-v2",
@@ -57238,6 +57258,7 @@
         "docs/audits/evidence/colibri-v3-2026-09/captures/gnosis/{proof.ssz,responses.json,verified-checkpoint.json}",
         "docs/audits/evidence/myotis-recovery-spike-2026-09/captures/gnosis-finalized/proof.ssz"
       ],
+      "deviation": "checked-decode",
       "requests": [
         {
           "checkpoint": 100,
@@ -57277,7 +57298,16 @@
           "ok": false,
           "code": "CHECKPOINT_UNAVAILABLE"
         }
-      ]
+      ],
+      "design": {
+        "decode": null,
+        "outcomes": [
+          {
+            "ok": false,
+            "code": "CHECKPOINT_UNAVAILABLE"
+          }
+        ]
+      }
     },
     {
       "id": "checkpoint-mainnet-stale",
@@ -57441,7 +57471,8 @@
           "req": 0,
           "node": 0,
           "bytes": 86,
-          "sha256": "8f8174d4c7eb78d7a5a90040f6842b87b8ca46305a4dcca09615a7d65a06725a"
+          "sha256": "8f8174d4c7eb78d7a5a90040f6842b87b8ca46305a4dcca09615a7d65a06725a",
+          "body": "{\"data\":{\"root\":\"0xdd239c62e2cf5c5621ab42ae898ea483a6662c29594edacdcfc7ef4843919e80\"}}"
         },
         {
           "op": "store_get",

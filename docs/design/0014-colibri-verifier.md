@@ -841,6 +841,7 @@ COL-1's recording (`vectors/colibri.json`, captured 2026-11-22) differs from thi
 | `colibri-processes` | a worker per chain, with no bound on their number | at most 3 persistent and 2 checkpoint processes, idle ones retired, `Colibri service busy` at the limit |
 | `fetch-error-text` | a fetch error names the URL and payload, and carries the whole error body | URLs as `<url>`, the payload kept as `fetch_from_servers` writes it ([The rest](#the-rest)), at most 2,000 units. The cut is of the fetch text, before the C core's and `createError`'s prefixes, so it never shows in the adapter message, which is cut to 2,000 units after them |
 | `no-initial-chain-id` | a local `eth_chainId` context on each client's first request | none |
+| `checked-decode` | the checkpoint check decodes the proof with `c4w_decode_proof`, which walks the bytes unchecked (corpus-core/colibri-stateless#443): a legacy-format proof decodes into a partial object, which the check then refuses (`CHECKPOINT_UNAVAILABLE`) | `c4_decode_proof` checks the proof as an object of its type first and decodes nothing; the same `CHECKPOINT_UNAVAILABLE` (COL-2) |
 | `storage-per-chain` | one flat directory for every chain; unchecked keys; no size bound | a directory per chain, checked keys, bounds; at most 6 directories. A private session's store is in memory, as #1071 has it |
 
 ## Migration (Q19)

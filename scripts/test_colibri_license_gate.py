@@ -1,6 +1,7 @@
 """colibri-license-gate.py over synthetic builds: a verifier-only build
-passes; server code, a prover, an unlisted SPDX identifier, PolyForm and a
-build without a manifest fail."""
+passes; server code, a prover, an unlisted SPDX identifier, PolyForm outside
+the notices' exception, a third party's tree the notices don't list or whose
+license differs, and a build without a manifest fail."""
 
 import importlib.util
 import json
@@ -26,7 +27,14 @@ class Gate(unittest.TestCase):
         self.build = self.target / "release/build/colibri-stateless-0123/out/cmake/no-op/no-prover"
         self.build.mkdir(parents=True)
         self.notices = base / "notices.json"
-        self.notices.write_text(json.dumps({"spdx": ["MIT", "Apache-2.0"]}))
+        self.notices.write_text(json.dumps({
+            "spdx": ["MIT", "Apache-2.0"],
+            "polyform_mentions": [{"path": "src/util/version.c", "why": "prints the server's license"}],
+            "components": [
+                {"name": "Colibri", "license": "MIT", "tree": "colibri"},
+                {"name": "blst", "license": "Apache-2.0", "tree": "_deps/blst-src"},
+            ],
+        }))
         self.compiled = []
         self.write("src/api/colibri.h", MIT)
         self.source("src/api/colibri.c", ["src/api/colibri.h"])
@@ -34,6 +42,7 @@ class Gate(unittest.TestCase):
         dep = self.build / "_deps/blst-src/bindings/blst.h"
         dep.parent.mkdir(parents=True)
         dep.write_text("// SPDX-License-Identifier: Apache-2.0\n")
+        (self.build / "_deps/blst-src/LICENSE").write_text("Apache License\nVersion 2.0, January 2004\n")
         self.depfile("blst", [str(dep), "/usr/include/stdio.h"])
 
     def tearDown(self):
@@ -83,6 +92,22 @@ class Gate(unittest.TestCase):
         self.write("src/util/y.h", "/* Licensed under the PolyForm Noncommercial License 1.0.0 */\n")
         self.source("src/util/y.c", ["src/util/y.h"])
         self.assertIn("names PolyForm", "\n".join(self.errors()))
+
+    def test_version_c_may_name_polyform_while_it_stays_mit(self):
+        self.source("src/util/version.c", [], MIT + 'puts("License: PolyForm Noncommercial 1.0.0");\n')
+        self.assertEqual(self.errors(), [])
+        self.source("src/util/version.c", [], 'puts("License: PolyForm Noncommercial 1.0.0");\n')
+        self.assertIn("src/util/version.c: names PolyForm", "\n".join(self.errors()))
+
+    def test_an_unlisted_third_party_fails(self):
+        zstd = self.build / "_deps/zstd-src"
+        zstd.mkdir(parents=True)
+        (zstd / "LICENSE").write_text("BSD License\n")
+        self.assertIn("_deps/zstd-src: a third party's tree in the build that the notices don't list", "\n".join(self.errors()))
+
+    def test_a_third_party_under_another_license_fails(self):
+        (self.build / "_deps/blst-src/LICENSE").write_text("Permission is hereby granted\n")
+        self.assertIn("_deps/blst-src: LICENSE isn't Apache-2.0", "\n".join(self.errors()))
 
     def test_no_manifest_fails(self):
         (self.build / "compile_commands.json").unlink()

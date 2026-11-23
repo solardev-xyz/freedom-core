@@ -183,7 +183,17 @@ function instrumentModule(c4w, recorder, state) {
   });
   wrap('_c4w_req_set_response', (fn, request, data, length, node) => {
     const index = recorder.reqIndex(request);
-    record({ op: 'response', req: index, node, bytes: length, sha256: sha256(bytesAt(data, length)) });
+    const bytes = bytesAt(data, length);
+    const event = { op: 'response', req: index, node, bytes: length, sha256: sha256(bytes) };
+    // An answer no recorded fetch served (the checkpoint check builds its
+    // own from main's fetches): its bytes, so a replay outside this harness
+    // (COL-2's native one) can give the C core the same answer.
+    if (!state.served.has(event.sha256)) {
+      const text = bytes.toString('utf8');
+      if (Buffer.from(text, 'utf8').equals(bytes)) event.body = text;
+      else event.body_hex = bytes.toString('hex');
+    }
+    record(event);
     recorder.answered.add(index);
     state.bodies.set(index, length);
     return fn(request, data, length, node);
@@ -405,7 +415,7 @@ async function runCase(reference, kase, { session, stores, live = null, dir = FI
   const pool = live ? live.pool : sessionPool(session, dir);
   const params = live ? live.params : session?.params ?? {};
   const recorder = new Recorder();
-  const state = { operation: null, requestIndex: null, fatal: null, bodies: new Map(), used: new Set() };
+  const state = { operation: null, requestIndex: null, fatal: null, bodies: new Map(), used: new Set(), served: new Set() };
   const use = (entry) => state.used.add(keyOf(entry.url, entry.method, entry.body ?? null));
   const clock = { now: 0 };
   const clocks = [];
@@ -456,6 +466,7 @@ async function runCase(reference, kase, { session, stores, live = null, dir = FI
       throw new TypeError('unscripted');
     }
     event.reply = reply.record;
+    if (reply.record.sha256) state.served.add(reply.record.sha256);
     if (reply.throw) throw reply.throw;
     return reply.response();
   };
@@ -524,6 +535,15 @@ async function runCheckpoint(reference, kase, recorder, state, clock) {
     if (reply.proof) {
       event.variant = 'checkpoint_proof';
       event.reply = { status: 200, bytes: reply.proof.length, sha256: sha256(reply.proof) };
+      // A proof the case changed (a flipped bit): how, as a fetch's flipped
+      // body is recorded, so a replay outside this harness can rebuild it.
+      const original = capture.proofs.find((proof) => proof.length === reply.proof.length);
+      if (original && !original.equals(reply.proof)) {
+        const offsets = [...reply.proof.keys()].filter((i) => reply.proof[i] !== original[i]);
+        assert.ok(offsets.length === 1 && (reply.proof[offsets[0]] ^ original[offsets[0]]) === 1,
+          `${kase.id}: a changed proof differs from its capture in one flipped bit`);
+        event.reply.derived = { flip: offsets[0], of: sha256(original) };
+      }
       return new Response(reply.proof);
     }
     if (reply.missing) {
@@ -585,13 +605,15 @@ async function build(checkout, meta, { partial = false }) {
     }
     // The fetch contract, from the request side.
     const contractRows = [];
+    // Deviations that change no request keep the contract's checks.
+    const contractApplies = !kase.deviation || ['fetch-error-text', 'checked-decode'].includes(kase.deviation);
     for (const entry of run.recorder.requests) {
       const variant = contract.classify(entry.request, entry.operation, reference.servers[kase.chain]);
       contractRows.push({ req: entry.index, variant });
-      if (!kase.deviation || kase.deviation === 'fetch-error-text') {
+      if (contractApplies) {
         assert.ok(variant, `${kase.id}: request ${entry.index} matches no variant its operation allows: ${JSON.stringify(entry.request).slice(0, 400)}`);
       }
-      if (variant && (!kase.deviation || kase.deviation === 'fetch-error-text')) {
+      if (variant && contractApplies) {
         const row = reached.get(variant);
         if (!row.cases.includes(kase.id)) row.cases.push(kase.id);
         row.chains.add(kase.chain);
@@ -629,7 +651,10 @@ async function build(checkout, meta, { partial = false }) {
       outcomes: run.outcome.outcomes,
       ...(kase.kind === 'checkpoint' ? {} : { store_after: digests(run.outcome.store) }),
     };
-    if (kase.design) {
+    if (kase.deviation === 'checked-decode') {
+      // The decode refuses the proof (null); the check's outcome is the same.
+      record.design = { decode: null, outcomes: run.outcome.outcomes };
+    } else if (kase.design) {
       // Refused before any context: no step, no fetch, and main's adapter error.
       const [{ method, params }] = run.outcome.requests;
       const text = typeof kase.design === 'function' ? kase.design(session.params) : kase.design;

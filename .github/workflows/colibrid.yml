@@ -4,9 +4,8 @@ name: Colibri service
 # with its own lockfile and `cargo deny` policy, as the other services are.
 # COL-2: the native, verifier-only C core, built from the pinned fork commit,
 # replays every COL-1 trace (vectors/colibri.json) on Linux, macOS and
-# Windows; an ASan and UBSan build replays them all again; the license gate
-# reads the build's compiled-source manifest; and a build without the call
-# verifier (ETH_CALL=OFF) is tried. It runs only when the service, its
+# Windows; an ASan and UBSan build replays them all again; and the license
+# gate reads the build's compiled-source manifest. It runs only when the service, its
 # vectors or this workflow change, plus daily, so none of it fails a
 # core-only change.
 
@@ -105,6 +104,14 @@ jobs:
           workspaces: services/freedom-colibrid -> target
       - run: cmake --version
       - run: cargo test --locked
+        if: runner.os != 'Windows'
+      - run: cargo test --locked
+        if: runner.os == 'Windows'
+        env:
+          # The CMake tree under Cargo's git checkout makes blst's build
+          # command longer than cmd.exe takes ("The input line is too
+          # long"); the crate's build script takes a shorter one.
+          COLIBRI_CMAKE_BUILD_DIR: ${{ runner.temp }}\cb
       # Design 0014's license gate, over the compiled-source manifest of the
       # build the replay just ran.
       - name: License gate
@@ -127,13 +134,11 @@ jobs:
         working-directory: services/freedom-colibrid
     env:
       # The C and C++ sources instrumented (the cmake crate passes these on to
-      # CMake), the test binary linked with the runtimes. Only the target's
-      # artifacts: with --target, build scripts get neither.
+      # CMake). rustc links with -nodefaultlibs, so the runtimes are named;
+      # with --target, build scripts get neither.
       CFLAGS: "-fsanitize=address,undefined -fno-omit-frame-pointer -fno-sanitize-recover=undefined"
       CXXFLAGS: "-fsanitize=address,undefined -fno-omit-frame-pointer -fno-sanitize-recover=undefined"
-      CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS: "-Clink-arg=-fsanitize=address,undefined"
-      ASAN_OPTIONS: "abort_on_error=1:detect_stack_use_after_return=1:strict_string_checks=1"
-      UBSAN_OPTIONS: "print_stacktrace=1:halt_on_error=1"
+      CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS: "-Clink-arg=-lasan -Clink-arg=-lubsan"
       CMAKE_EXPORT_COMPILE_COMMANDS: "ON"
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
@@ -144,42 +149,30 @@ jobs:
         with:
           workspaces: services/freedom-colibrid -> target
           key: sanitize
-      - run: cargo test --locked --target x86_64-unknown-linux-gnu
+      - name: Build the tests
+        run: |
+          cargo test --locked --target x86_64-unknown-linux-gnu --no-run --message-format=json \
+            | jq -r 'select(.reason == "compiler-artifact" and .profile.test and .executable) | .executable' > tests.txt
+          test -s tests.txt
+          cat tests.txt
       - name: The C core was instrumented
         run: |
           db=$(find target/x86_64-unknown-linux-gnu -path '*colibri-stateless-*/out/*' -name compile_commands.json | head -n 1)
           test -n "$db"
           grep -q -- '-fsanitize=address,undefined' "$db"
-
-  eth-call-off:
-    name: freedom-colibrid replay with ETH_CALL=OFF (trial)
-    runs-on: ubuntu-latest
-    # A trial (design 0014, "The call verifier"): its result decides whether
-    # the build takes ETH_CALL=OFF; it doesn't gate the PR.
-    continue-on-error: true
-    defaults:
-      run:
-        working-directory: services/freedom-colibrid
-    env:
-      CMAKE_TOOLCHAIN_FILE: ${{ github.workspace }}/services/freedom-colibrid/ci/eth-call-off.cmake
-      CMAKE_EXPORT_COMPILE_COMMANDS: "ON"
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
-        with:
-          persist-credentials: false
-      - run: rustup toolchain install
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
-        with:
-          workspaces: services/freedom-colibrid -> target
-          key: eth-call-off
-      - run: cargo test --locked
-      - name: The call verifier and evmone are out of the build
+      - name: Run them, LeakSanitizer included
+        # ASan's runtime must come before libc's allocator, which the link
+        # order can't give: it is preloaded into the test binaries alone (the
+        # replay's children inherit it), not into the shell or cargo.
+        env:
+          ASAN_OPTIONS: "abort_on_error=1:detect_stack_use_after_return=1:strict_string_checks=1"
+          UBSAN_OPTIONS: "print_stacktrace=1:halt_on_error=1"
         run: |
-          python3 ../../scripts/colibri-license-gate.py target --manifest compiled-sources.json
-          if grep -E 'src/chains/eth/verifier/(verify_call|call_ctx|eth_call_account)\.c|_deps/evmone' compiled-sources.json; then
-            echo "the call verifier or evmone is still in the build" >&2
-            exit 1
-          fi
+          preload="$(gcc -print-file-name=libasan.so) $(gcc -print-file-name=libubsan.so)"
+          while read -r bin; do
+            echo "== $bin"
+            env LD_PRELOAD="$preload" "$bin"
+          done < tests.txt
 
   deny:
     name: freedom-colibrid cargo deny

@@ -226,10 +226,28 @@ fn run_all() -> Result<()> {
             .env(STORES_ENV, &stores)
             .output()
             .map_err(|e| format!("{id}: spawn: {e}"))?;
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let trapped_at = stdout.lines().find_map(|l| l.strip_prefix(TRAP_STEP));
+        if let Some(step) = trapped_at.filter(|_| died_of_stack_exhaustion(&output.status, &stderr))
+        {
+            // 0014: the service ends #750's case "in an error or a crash,
+            // never a result"; the C core recursed past the stack at the step
+            // where the reference trapped.
+            let first = stderr.lines().find(|l| !l.trim().is_empty()).unwrap_or("");
+            println!(
+                "ok {id}: the native step at trace[{step}] ran out of stack where the reference trapped ({}; {first})",
+                output.status
+            );
+            continue;
+        }
         if output.status.success() {
             println!("ok {id}");
             let kind = text(case, "kind")?.to_string();
-            let stdout = String::from_utf8_lossy(&output.stdout);
+            // A case's own notes (a trap that ended in an error).
+            for line in stdout.lines().filter(|l| l.starts_with(&format!("{id}: "))) {
+                println!("  {line}");
+            }
             for line in stdout.lines().filter_map(|l| l.strip_prefix(METRICS)) {
                 let metrics: Map<String, Value> =
                     serde_json::from_str(line).map_err(|e| format!("{id}: metrics: {e}"))?;
@@ -246,7 +264,6 @@ fn run_all() -> Result<()> {
                 }
             }
         } else {
-            let stderr = String::from_utf8_lossy(&output.stderr);
             let tail: String = stderr
                 .chars()
                 .rev()
@@ -690,7 +707,14 @@ fn run_case(id: &str) -> Result<()> {
                 let native = decode_proof(&proof)
                     .map(|s| serde_json::json!({ "chars": s.encode_utf16().count(), "sha256": sha256_hex(s.as_bytes()) }))
                     .unwrap_or(Value::Null);
-                let recorded = field(op, "result").map_err(at)?;
+                // Deviation `checked-decode`: the service's decode checks the
+                // proof first, so the design's result, not the reference's.
+                let recorded =
+                    if case.get("deviation").and_then(Value::as_str) == Some("checked-decode") {
+                        field(field(case, "design").map_err(at)?, "decode").map_err(at)?
+                    } else {
+                        field(op, "result").map_err(at)?
+                    };
                 if &native != recorded {
                     return Err(at(format!("decoded {native}, the reference {recorded}")));
                 }
@@ -706,16 +730,25 @@ fn run_case(id: &str) -> Result<()> {
                     .get_mut(&n)
                     .ok_or_else(|| at("no such context".into()))?;
                 if let Some(trap) = op.get("trap") {
-                    // The reference's WASM build trapped in this step. A
-                    // native build can't trap; whatever it does instead is
-                    // a difference, reported with what it did.
-                    let outcome = ctx.execute().map(|(_, status)| status);
-                    let native_store = std::mem::take(&mut store.lock().log);
-                    return Err(at(format!(
-                        "the reference trapped ({trap}); the native step returned {outcome:?} after {} store operations (the reference made {})",
-                        native_store.len(),
-                        expected_store.len()
-                    )));
+                    // The reference's WASM build trapped in this step (#750:
+                    // a hash in no block, F-6). 0014: "The service must end it
+                    // in an error or a crash, never a result". The parent
+                    // accepts a crash only after this marker, and only of
+                    // stack exhaustion; here an error status passes.
+                    println!("{TRAP_STEP}{pos}");
+                    std::io::Write::flush(&mut std::io::stdout()).map_err(|e| at(e.to_string()))?;
+                    let (_, status) = ctx.execute().map_err(at)?;
+                    let parsed: Value =
+                        serde_json::from_str(&status).map_err(|e| at(e.to_string()))?;
+                    if parsed.get("status").and_then(Value::as_str) != Some("error") {
+                        return Err(at(format!(
+                            "the reference trapped ({trap}); the native step returned {status}"
+                        )));
+                    }
+                    println!(
+                        "{id}: the reference trapped ({trap}); the native step ended in an error: {status}"
+                    );
+                    return Ok(());
                 }
                 let started = Instant::now();
                 let (step, status) = ctx.execute().map_err(at)?;
@@ -757,9 +790,27 @@ fn run_case(id: &str) -> Result<()> {
                             if next_name == "response" {
                                 let len = usize::try_from(number(next, "bytes").map_err(at_next)?)
                                     .map_err(|e| at_next(e.to_string()))?;
-                                let body = bodies
-                                    .get(text(next, "sha256").map_err(at_next)?, len)
-                                    .map_err(at_next)?;
+                                let sha = text(next, "sha256").map_err(at_next)?;
+                                // An answer no fetch served (the checkpoint
+                                // check builds its own) carries its bytes.
+                                let body = if let Some(inline) =
+                                    next.get("body").and_then(Value::as_str)
+                                {
+                                    inline.as_bytes().to_vec()
+                                } else if let Some(hex) =
+                                    next.get("body_hex").and_then(Value::as_str)
+                                {
+                                    from_hex(hex).map_err(at_next)?
+                                } else {
+                                    bodies.get(sha, len).map_err(at_next)?
+                                };
+                                if body.len() != len || sha256_hex(&body) != sha {
+                                    return Err(at_next(format!(
+                                        "answer body: {} bytes, digest {}",
+                                        body.len(),
+                                        sha256_hex(&body)
+                                    )));
+                                }
                                 request.set_response(&body, node);
                             } else {
                                 request.set_error(text(next, "error").map_err(at_next)?, node);
@@ -789,7 +840,8 @@ fn run_case(id: &str) -> Result<()> {
     drop(ctxs);
 
     let entries = std::mem::take(&mut store.lock().entries);
-    if let Some(after) = case.get("store_after") {
+    // A private case's store is in memory (no `store_after`).
+    if let Some(after) = case.get("store_after").filter(|v| !v.is_null()) {
         check_entries(&entries, after, "the final store").map_err(|e| format!("{id}: {e}"))?;
     }
     let saved: BTreeMap<&String, String> = entries.iter().map(|(k, v)| (k, to_hex(v))).collect();
@@ -813,6 +865,23 @@ fn run_case(id: &str) -> Result<()> {
 }
 
 const METRICS: &str = "METRICS ";
+const TRAP_STEP: &str = "TRAP-STEP ";
+
+/// Whether a child died of stack exhaustion: Rust's guard-page handler and
+/// ASan both say so on stderr; Windows ends the process with
+/// STATUS_STACK_OVERFLOW.
+fn died_of_stack_exhaustion(status: &std::process::ExitStatus, stderr: &str) -> bool {
+    const STATUS_STACK_OVERFLOW: u32 = 0xC000_00FD;
+    let windows = status
+        .code()
+        .is_some_and(|c| c as u32 == STATUS_STACK_OVERFLOW);
+    let reported = !status.success()
+        && status.code() != Some(1)
+        && (stderr.contains("has overflowed its stack")
+            || stderr.contains("fatal runtime error: stack overflow")
+            || stderr.contains("AddressSanitizer: stack-overflow"));
+    windows || reported
+}
 
 /// The process's peak resident memory, where the OS reports it to the
 /// process itself without a system call std lacks (Linux: `VmHWM`).

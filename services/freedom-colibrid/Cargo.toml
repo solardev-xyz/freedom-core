@@ -33,7 +33,7 @@ resolver = "3"
 # 3.0.3, so the C core reports 196611, the version the COL-1 traces were
 # recorded with. No default features: no HTTP client (tokio, reqwest), no
 # download of a prebuilt archive, no prover (PROVER=OFF), no OP-Stack.
-colibri-stateless = { git = "https://github.com/solardev-xyz/colibri-stateless", rev = "8911c8c2152b9a41f8872cc14ba71ceb03da5792", default-features = false }
+colibri-stateless = { git = "https://github.com/solardev-xyz/colibri-stateless", rev = "60e62a3a96da3531309ccb3c8de42a5385b4a307", default-features = false }
 
 [dev-dependencies]
 # tests/replay.rs reads vectors/colibri.json and the fixture index.

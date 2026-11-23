@@ -11,7 +11,13 @@ its compile_commands.json, and every header the compiler's dependency files
   verifier-only;
 - a compiled source or listed header carries an SPDX identifier that isn't
   one the notices list (services/freedom-colibrid/notices/c-sources.json), or
-  names PolyForm anywhere.
+  names PolyForm anywhere, except the files the notices name with the reason
+  (src/util/version.c prints the server's license; 0014, Licenses), which
+  must stay MIT;
+- a third party's tree in the build (_deps/*-src) isn't in the notices, or
+  its LICENSE file isn't the license the notices give it. blst is compiled
+  by its own build script, outside CMake's compile commands, so its tree's
+  license is what the gate checks for it.
 
 Usage: colibri-license-gate.py <cargo target dir> [--manifest <out.json>]
 
@@ -35,6 +41,12 @@ FORBIDDEN = [
     ("src/prover/", "the prover (the build is verifier-only)"),
 ]
 PROVER_CHAIN = re.compile(r"^src/chains/[^/]+/prover/")
+# What a whole-tree license file must say, by SPDX identifier.
+LICENSE_MARKERS = {
+    "Apache-2.0": ["Apache License", "Version 2.0"],
+    "MIT": ["Permission is hereby granted"],
+}
+LICENSE_FILES = ("LICENSE", "LICENSE.txt", "LICENSE.md", "COPYING")
 SPDX = re.compile(r"SPDX-License-Identifier:\s*([A-Za-z0-9.+\-() ]+?)\s*(?:\*/|-->|$)", re.M)
 
 
@@ -62,6 +74,8 @@ def check(target_dir, notices_path=NOTICES):
     with open(notices_path, encoding="utf-8") as f:
         notices = json.load(f)
     allowed = set(notices["spdx"])
+    polyform_ok = {e["path"] for e in notices.get("polyform_mentions", [])}
+    third_parties = {c["tree"]: c["license"] for c in notices["components"] if c["tree"].startswith("_deps/")}
     target_dir = os.path.realpath(target_dir)
 
     dbs = glob.glob(os.path.join(target_dir, "**", "colibri-stateless-*", "out", "**", "compile_commands.json"), recursive=True)
@@ -108,6 +122,7 @@ def check(target_dir, notices_path=NOTICES):
             elif path.startswith(deps + "/"):
                 rel = path[len(deps) + 1:]
                 tree = "_deps/" + rel.split("/")[0]
+                rel = "/".join(rel.split("/")[1:])
             elif path.startswith(build_dir + "/"):
                 rel = path[len(build_dir) + 1:]
                 tree = "generated"
@@ -126,9 +141,12 @@ def check(target_dir, notices_path=NOTICES):
             except OSError as e:
                 errors.append(f"{path}: {e}")
                 continue
-            if "polyform" in content.lower():
-                errors.append(f"{tree}/{rel}: names PolyForm")
             ids = sorted(set(m.strip() for m in SPDX.findall(content)))
+            if "polyform" in content.lower():
+                if tree == "colibri" and rel in polyform_ok and ids == ["MIT"]:
+                    pass  # named with its reason in the notices
+                else:
+                    errors.append(f"{tree}/{rel}: names PolyForm")
             for spdx in ids:
                 if spdx not in allowed:
                     errors.append(f"{tree}/{rel}: SPDX-License-Identifier {spdx} isn't in the notices")
@@ -138,6 +156,21 @@ def check(target_dir, notices_path=NOTICES):
             t["paths"].append(f"{tree}/{rel}" + (" (compiled)" if path in compiled else ""))
             for spdx in ids or ["(none)"]:
                 t["spdx"][spdx] = t["spdx"].get(spdx, 0) + 1
+        # Third parties' trees: listed, and under the license the notices give.
+        for src in sorted(glob.glob(os.path.join(deps, "*-src"))):
+            tree = "_deps/" + os.path.basename(src)
+            if tree not in third_parties:
+                errors.append(f"{tree}: a third party's tree in the build that the notices don't list")
+                continue
+            license_files = [os.path.join(src, f) for f in LICENSE_FILES if os.path.isfile(os.path.join(src, f))]
+            if not license_files:
+                errors.append(f"{tree}: no license file")
+                continue
+            with open(license_files[0], encoding="utf-8", errors="replace") as f:
+                text = f.read()
+            markers = LICENSE_MARKERS.get(third_parties[tree], [])
+            if not markers or not all(m in text for m in markers):
+                errors.append(f"{tree}: {os.path.basename(license_files[0])} isn't {third_parties[tree]}")
         manifest["builds"].append({
             "build": os.path.relpath(build_dir, target_dir),
             "compiled": len(compiled),

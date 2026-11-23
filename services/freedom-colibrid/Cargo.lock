@@ -39,7 +39,7 @@ dependencies = [
 [[package]]
 name = "colibri-stateless"
 version = "3.0.3"
-source = "git+https://github.com/solardev-xyz/colibri-stateless?rev=8911c8c2152b9a41f8872cc14ba71ceb03da5792#8911c8c2152b9a41f8872cc14ba71ceb03da5792"
+source = "git+https://github.com/solardev-xyz/colibri-stateless?rev=60e62a3a96da3531309ccb3c8de42a5385b4a307#60e62a3a96da3531309ccb3c8de42a5385b4a307"
 dependencies = [
  "cmake",
  "libc",

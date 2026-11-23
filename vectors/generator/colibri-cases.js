@@ -305,6 +305,10 @@ function checkpointCases() {
   };
   const make = (id, network, chain, { transform = (proof) => proof, legacy = false, clockOffset = 0 } = {}) => ({
     id, kind: 'checkpoint', chain,
+    // The legacy proof isn't a valid object of its type: the service's
+    // decode (c4_decode_proof) refuses it, where the reference walks the
+    // unchecked bytes into a partial object (#443) and refuses that.
+    ...(legacy ? { deviation: 'checked-decode' } : {}),
     files: [`docs/audits/evidence/colibri-v3-2026-09/captures/${network}/{proof.ssz,responses.json,verified-checkpoint.json}`,
       ...(legacy ? [`docs/audits/evidence/myotis-recovery-spike-2026-09/captures/${network}-finalized/proof.ssz`] : [])],
     capture: (reference) => {
