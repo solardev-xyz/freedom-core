@@ -100,8 +100,14 @@ impl Drop for Dirs {
 impl Colibrid {
     /// `serve` for `chain`, persistent on `dirs` or private without.
     pub fn serve(chain: u64, dirs: Option<&Dirs>) -> Colibrid {
+        Colibrid::serve_with(chain, dirs, &[])
+    }
+
+    /// [`Colibrid::serve`] with test hooks set in its environment.
+    pub fn serve_with(chain: u64, dirs: Option<&Dirs>, env: &[(&str, &str)]) -> Colibrid {
         let mut command = Command::new(BIN);
         command.args(["serve", "--chain", &chain.to_string()]);
+        command.envs(env.iter().copied());
         if let Some(dirs) = dirs {
             command.arg("--data-dir").arg(dirs.data());
             command.arg("--lock-dir").arg(dirs.lock());

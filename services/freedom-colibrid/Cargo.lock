@@ -231,6 +231,7 @@ dependencies = [
  "fc-json",
  "fc-protocol",
  "fc-service",
+ "fc-sys",
  "serde",
  "serde_json",
  "sha2 0.10.9",

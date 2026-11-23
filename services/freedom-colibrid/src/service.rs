@@ -1,8 +1,8 @@
 //! The connection's side (design 0014, "Methods main calls"): what the
 //! reader thread does with main's frames. It never blocks and never calls
-//! into the C core: requests go to the verifier thread, which starts with
-//! `colibri.hello`.
+//! into the C core: requests go to the verifier thread.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::thread::JoinHandle;
 
@@ -23,6 +23,8 @@ pub struct ColibriService {
     shared: Arc<Shared>,
     queue: Arc<Queue<Job>>,
     verifier: Mutex<Option<JoinHandle<()>>>,
+    /// Whether the verifier thread has the connection.
+    connected: AtomicBool,
     /// Confinement's report, for `hello`.
     confinement: Value,
 }
@@ -34,47 +36,46 @@ struct Forget {
 }
 
 impl ColibriService {
-    pub fn new(shared: Arc<Shared>, confinement: Value) -> ColibriService {
-        ColibriService {
-            shared,
-            queue: Queue::new(),
-            verifier: Mutex::new(None),
-            confinement,
-        }
-    }
-
-    /// Starts the verifier thread with the first request, which hands the
-    /// service the connection (`hello` doesn't, and no thread may start
-    /// before confinement). False if it can't start.
-    fn start_verifier(&self, conn: &Connection) -> bool {
-        let mut verifier = self.verifier.lock().unwrap_or_else(PoisonError::into_inner);
-        if verifier.is_some() {
-            return true;
-        }
-        let (conn, shared, queue) = (
-            conn.clone(),
-            Arc::clone(&self.shared),
-            Arc::clone(&self.queue),
-        );
-        let spawned = std::thread::Builder::new()
+    /// Starts the verifier thread, which gives the C core its store and
+    /// checks its version before anything else calls into it; returns once
+    /// it has, or why it couldn't. Call it after confinement: it is the
+    /// process's first thread but the main one.
+    pub fn start(shared: Arc<Shared>, confinement: Value) -> Result<ColibriService, String> {
+        let queue = Queue::new();
+        let (ready, outcome) = std::sync::mpsc::sync_channel(1);
+        let (thread_shared, thread_queue) = (Arc::clone(&shared), Arc::clone(&queue));
+        let handle = std::thread::Builder::new()
             .name("verifier".into())
             .spawn(move || {
                 with_kind(TaskKind::named("verifier"), || {
-                    verifier::run(conn, shared, queue)
+                    verifier::run(thread_shared, thread_queue, ready)
                 })
-            });
-        match spawned {
-            Ok(handle) => {
-                *verifier = Some(handle);
-                true
+            })
+            .map_err(|e| format!("the verifier thread didn't start: {}", e.kind()))?;
+        match outcome.recv() {
+            Ok(Ok(())) => Ok(ColibriService {
+                shared,
+                queue,
+                verifier: Mutex::new(Some(handle)),
+                connected: AtomicBool::new(false),
+                confinement,
+            }),
+            Ok(Err(e)) => {
+                let _ = handle.join();
+                Err(e)
             }
-            Err(e) => {
-                log::error(
-                    "the verifier thread didn't start",
-                    json!({ "error": e.kind().to_string() }),
-                );
-                false
+            Err(_) => {
+                let _ = handle.join();
+                Err("the verifier thread ended before its setup".to_owned())
             }
+        }
+    }
+
+    /// Hands the verifier thread the connection, once, with the first
+    /// request (the trait gives `hello` none).
+    fn connect(&self, conn: &Connection) {
+        if !self.connected.swap(true, Ordering::AcqRel) {
+            self.queue.push(Job::Connect(conn.clone()));
         }
     }
 
@@ -100,14 +101,7 @@ impl Service for ColibriService {
     }
 
     fn request(&self, conn: &Connection, request: Request<'_>) {
-        if !self.start_verifier(conn) {
-            return Self::refuse(
-                conn,
-                request.id,
-                ErrorCode::Internal,
-                "the verifier thread didn't start",
-            );
-        }
+        self.connect(conn);
         let params = request.params.map_or("null", |p| p.get());
         match request.method {
             "colibri.request" if self.shared.mode == Mode::Checkpoint => Self::refuse(
@@ -128,6 +122,14 @@ impl Service for ColibriService {
                         );
                     }
                 };
+                if params.deadline().is_none() {
+                    return Self::refuse(
+                        conn,
+                        request.id,
+                        ErrorCode::InvalidArgument,
+                        "deadline_ms is past what the clock holds",
+                    );
+                }
                 match self.shared.take_request() {
                     Ok(()) => self.queue.push(Job::Checkpoint {
                         id: request.id,
@@ -153,6 +155,14 @@ impl Service for ColibriService {
                         );
                     }
                 };
+                if params.deadline().is_none() {
+                    return Self::refuse(
+                        conn,
+                        request.id,
+                        ErrorCode::InvalidArgument,
+                        "deadline_ms is past what the clock holds",
+                    );
+                }
                 match self.shared.take_request() {
                     Ok(()) => self.queue.push(Job::Request {
                         id: request.id,

@@ -1,6 +1,6 @@
 //! Faults through the binary (design 0014, COL-4's test hooks): a crash in
 //! a step leaves that request's marker open as the process dies, so main
-//! names it; a spin leaves it open while the process lives, for main's kill
+//! names it (the calls before it, each with its own marker, are cleared); a spin leaves it open while the process lives, for main's kill
 //! to name; a recycle refuses new requests, finishes the open ones and
 //! exits 0, no fault.
 
@@ -40,7 +40,9 @@ fn block_number(colibrid: &mut Colibrid) -> u64 {
     )
 }
 
-/// The markers for `id` within `wait`, and whether the process ended.
+/// The markers for `id` within `wait`, each with the call it names
+/// (`colibri.step:execute`, `colibri.stepped`), and whether the process
+/// ended.
 fn markers(colibrid: &mut Colibrid, id: u64, wait: Duration) -> (Vec<String>, bool) {
     let mut seen = Vec::new();
     let deadline = Instant::now() + wait;
@@ -52,7 +54,7 @@ fn markers(colibrid: &mut Colibrid, id: u64, wait: Duration) -> (Vec<String>, bo
                     && m["type"] == "event"
                     && m["data"]["request"] == id
                 {
-                    seen.push(m["event"].as_str().unwrap().to_owned());
+                    seen.push(marker(&m));
                 }
             }
             return (seen, true);
@@ -61,11 +63,30 @@ fn markers(colibrid: &mut Colibrid, id: u64, wait: Duration) -> (Vec<String>, bo
             && m["type"] == "event"
             && m["data"]["request"] == id
         {
-            seen.push(m["event"].as_str().unwrap().to_owned());
+            seen.push(marker(&m));
         }
     }
     (seen, false)
 }
+
+fn marker(m: &Value) -> String {
+    match m["data"]["call"].as_str() {
+        Some(call) => format!("{}:{call}", m["event"].as_str().unwrap()),
+        None => m["event"].as_str().unwrap().to_owned(),
+    }
+}
+
+/// The calls before the first step, each cleared, then the step's marker
+/// left open.
+const STEP_LEFT_OPEN: [&str; 7] = [
+    "colibri.step:classify",
+    "colibri.stepped",
+    "colibri.step:create",
+    "colibri.stepped",
+    "colibri.step:freshness",
+    "colibri.stepped",
+    "colibri.step:execute",
+];
 
 #[test]
 fn a_crash_in_a_step_dies_with_its_marker_open() {
@@ -73,7 +94,7 @@ fn a_crash_in_a_step_dies_with_its_marker_open() {
     let id = block_number(&mut colibrid);
     let (seen, ended) = markers(&mut colibrid, id, Duration::from_secs(20));
     assert!(ended, "the process didn't die");
-    assert_eq!(seen, ["colibri.step"], "the step is left open");
+    assert_eq!(seen, STEP_LEFT_OPEN, "the step is left open");
 }
 
 #[test]
@@ -82,7 +103,7 @@ fn a_spin_in_a_step_keeps_its_marker_open() {
     let id = block_number(&mut colibrid);
     let (seen, ended) = markers(&mut colibrid, id, Duration::from_secs(3));
     assert!(!ended, "the process died");
-    assert_eq!(seen, ["colibri.step"], "the step is left open");
+    assert_eq!(seen, STEP_LEFT_OPEN, "the step is left open");
 }
 
 #[test]

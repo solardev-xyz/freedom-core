@@ -14,6 +14,12 @@ on:
     branches: [main]
     paths:
       - "services/freedom-colibrid/**"
+      # The in-repository crates the service uses by path.
+      - "crates/fc-colibri/**"
+      - "crates/fc-json/**"
+      - "crates/fc-protocol/**"
+      - "crates/fc-service/**"
+      - "crates/fc-sys/**"
       - "vectors/colibri.json"
       - "vectors/fixtures/colibri/**"
       - "scripts/colibri-license-gate.py"
@@ -31,6 +37,12 @@ on:
   pull_request:
     paths:
       - "services/freedom-colibrid/**"
+      # The in-repository crates the service uses by path.
+      - "crates/fc-colibri/**"
+      - "crates/fc-json/**"
+      - "crates/fc-protocol/**"
+      - "crates/fc-service/**"
+      - "crates/fc-sys/**"
       - "vectors/colibri.json"
       - "vectors/fixtures/colibri/**"
       - "scripts/colibri-license-gate.py"

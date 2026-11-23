@@ -131,8 +131,10 @@ impl Store {
         }
     }
 
-    /// The store on `dir`, which exists: stale temporary files are removed,
-    /// and every key's file is counted. A file that isn't a key's is left
+    /// The store on `dir`, which exists. It is a cache, so it opens within
+    /// its bounds or not at all: stale temporary files are removed, a key's
+    /// file past [`MAX_VALUE`] is removed, and if the rest is past
+    /// [`MAX_TOTAL`] every key's file is. A file that isn't a key's is left
     /// alone and not counted; the C core never reads it.
     pub fn open(dir: &Path) -> io::Result<Store> {
         let mut sizes = Sizes::default();
@@ -147,8 +149,26 @@ impl Store {
             if name.ends_with(TEMP_SUFFIX) {
                 fs::remove_file(entry.path())?;
             } else if valid_key(name) {
-                sizes.set(name, meta.len());
+                if meta.len() > MAX_VALUE as u64 {
+                    log::warn(
+                        "a stored value past its bound is removed",
+                        json!({ "bytes": meta.len() }),
+                    );
+                    fs::remove_file(entry.path())?;
+                } else {
+                    sizes.set(name, meta.len());
+                }
             }
+        }
+        if sizes.total > MAX_TOTAL {
+            log::warn(
+                "the store past its bound is emptied",
+                json!({ "bytes": sizes.total }),
+            );
+            for key in sizes.sizes.keys() {
+                fs::remove_file(dir.join(key))?;
+            }
+            sizes = Sizes::default();
         }
         Ok(Store {
             inner: Mutex::new(Inner {
@@ -319,6 +339,28 @@ mod tests {
         assert_eq!(store.read("k0"), None);
         assert_eq!(store.keys(), 15);
         assert_eq!(store.total(), MAX_TOTAL - MAX_VALUE as u64);
+    }
+
+    #[test]
+    fn a_reopened_store_is_held_to_its_bounds() {
+        let dir = temp_dir();
+        // A value past its bound, written outside the store: removed.
+        fs::write(dir.join("states_1"), vec![0u8; MAX_VALUE + 1]).unwrap();
+        fs::write(dir.join("small"), b"kept").unwrap();
+        let store = Store::open(&dir).unwrap();
+        assert!(!dir.join("states_1").exists());
+        assert_eq!(store.read("states_1"), None);
+        assert_eq!(store.read("small").as_deref(), Some(&b"kept"[..]));
+        drop(store);
+        // Sixteen values at the bound and one byte more: all emptied.
+        for i in 0..16 {
+            fs::write(dir.join(format!("k{i}")), vec![1u8; MAX_VALUE]).unwrap();
+        }
+        let store = Store::open(&dir).unwrap();
+        assert_eq!(store.keys(), 0);
+        assert_eq!(store.total(), 0);
+        assert!(!dir.join("k0").exists() && !dir.join("small").exists());
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
