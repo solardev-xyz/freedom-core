@@ -58,6 +58,9 @@ serde_json = { version = "1", features = ["raw_value"] }
 testhooks = []
 
 [dev-dependencies]
+# The tests compare the service's results as JSON.stringify writes them, in
+# the order the service sent their properties.
+serde_json = { version = "1", features = ["raw_value", "preserve_order"] }
 # tests/replay.rs checks every body and store value by its SHA-256, as the
 # vectors record them; the core already links sha2.
 sha2 = "0.10"
@@ -68,6 +71,12 @@ sha2 = "0.10"
 [[test]]
 name = "replay"
 harness = false
+
+# The recorded requests through the binary, each at its recorded instant:
+# the `testhooks` feature's replay clock.
+[[test]]
+name = "service_vectors"
+required-features = ["testhooks"]
 
 # The core's workspace lints, copied: workspace lints don't cross workspaces.
 [lints.rust]

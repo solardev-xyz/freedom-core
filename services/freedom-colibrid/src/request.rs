@@ -49,6 +49,8 @@ const ZK_FLAG: u32 = 1 << 7;
 pub const VERIFY_FLAGS: u32 = 2;
 /// How long a marker may take to be written (0014, "The step marker").
 const MARKER_WAIT: Duration = Duration::from_secs(1);
+/// What the client's ZK fallback looks for in an error (`index.js:261`).
+const ZK_SYNC_PROOF: &str = "zk sync proof";
 /// #1080's prefix, byte for byte.
 const NO_LOCAL_PROVING: &str = "remote proof failed (no local proving)";
 /// The longest error text a reply carries, in UTF-16 units: a bound on the
@@ -248,20 +250,43 @@ fn error_reply(text: &str) -> Reply {
     Reply::Raw(json!({ "status": "error", "error": &text[..end] }).to_string())
 }
 
+/// The params the client hands the C core: `request()`'s
+/// `Array.isArray(params) ? params : (params ? [params] : [])`, then
+/// `rpc()`'s `JSON.stringify` (`cjs/index.js`). So `null` params, which
+/// `eth_getBlockByNumber` is served with, reach the C core as `[]`. Params
+/// that don't parse go as sent, and the C core answers them.
+fn client_params(params: &str) -> String {
+    let Ok(value) = fc_json::parse(params) else {
+        return params.to_owned();
+    };
+    if value.as_array().is_some() {
+        value.stringify()
+    } else if value.truthy() {
+        format!("[{}]", value.stringify())
+    } else {
+        "[]".to_owned()
+    }
+}
+
 async fn serve(env: &Rc<Env>, id: u64, p: &Params, state: &Rc<TaskState>) -> Reply {
     if let Err(served::Refusal(text)) = served::check(&p.method, &p.params) {
         return Reply::Raw(format!(r#"{{"status":"error","error":{text}}}"#));
     }
+    let params = client_params(&p.params);
     let chain = env.shared.chain_id;
     let proofable = matches!(
-        colibri_stateless::get_method_support(chain, &p.method, Some(&p.params), VERIFY_FLAGS),
+        colibri_stateless::get_method_support(chain, &p.method, Some(&params), VERIFY_FLAGS),
         Ok(MethodType::Proofable)
     );
     let deadline = Instant::now() + Duration::from_millis(p.deadline_ms);
     let mut done = Vec::new();
     let mut zk = p.zk && !env.zk_off.borrow().get(&p.client).copied().unwrap_or(false);
     loop {
-        match attempt(env, id, p, state, zk, proofable, deadline, &mut done).await {
+        match attempt(
+            env, id, p, &params, state, zk, proofable, deadline, &mut done,
+        )
+        .await
+        {
             Attempt::Done(reply) => return reply,
             Attempt::WithoutZk(ctx) => {
                 env.zk_off.borrow_mut().insert(p.client.clone(), true);
@@ -316,16 +341,20 @@ async fn attempt(
     env: &Rc<Env>,
     id: u64,
     p: &Params,
+    params: &str,
     state: &Rc<TaskState>,
     zk: bool,
     proofable: bool,
     deadline: Instant,
     done: &mut Vec<RpcCtx>,
 ) -> Attempt {
+    // This context first, then those a ZK fallback left: the client's
+    // `finally` frees the inner call's context before its caller's.
     let free_all = |ctx: RpcCtx, done: &mut Vec<RpcCtx>| {
-        let mut all = std::mem::take(done);
-        all.push(ctx);
-        drop(all);
+        drop(ctx);
+        while let Some(older) = done.pop() {
+            drop(older);
+        }
     };
     match env.mark(id, state) {
         Marked::Go => {}
@@ -339,7 +368,7 @@ async fn attempt(
     let prover_flags = if zk { ZK_FLAG } else { 0 };
     let mut ctx = match RpcCtx::new(
         &p.method,
-        &p.params,
+        params,
         env.shared.chain_id,
         prover_flags,
         VERIFY_FLAGS,
@@ -388,7 +417,7 @@ async fn attempt(
                 return Attempt::Done(Reply::Raw(reply));
             }
             Step::Error { message } => {
-                if zk && message.contains("zk sync proof") {
+                if zk && message.contains(ZK_SYNC_PROOF) {
                     env.stepped(id);
                     return Attempt::WithoutZk(ctx);
                 }
@@ -461,14 +490,21 @@ async fn attempt(
                 if remote_proof && let Some(Err(text)) = answers.first() {
                     // The remote proof failed: the C core gets the text,
                     // and the step where 3.0.3 would prove locally never
-                    // runs.
+                    // runs. The client's ZK fallback still reads the
+                    // error: a prover with no ZK sync proof yet says so in
+                    // its text.
+                    let error = format!("{NO_LOCAL_PROVING}: {text}");
                     let text = text.clone();
                     for request in requests {
                         request.set_error(&text, 0);
                     }
+                    if zk && error.contains(ZK_SYNC_PROOF) {
+                        env.stepped(id);
+                        return Attempt::WithoutZk(ctx);
+                    }
                     free_all(ctx, done);
                     env.stepped(id);
-                    return Attempt::Done(error_reply(&format!("{NO_LOCAL_PROVING}: {text}")));
+                    return Attempt::Done(error_reply(&error));
                 }
                 let mut holds = Vec::new();
                 for (request, answer) in requests.into_iter().zip(answers) {
@@ -669,6 +705,20 @@ async fn fetch(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn params_as_the_client_sends_them() {
+        assert_eq!(
+            client_params(r#"["0xabc", "latest"]"#),
+            r#"["0xabc","latest"]"#
+        );
+        for falsy in ["null", "false", "0", r#""""#] {
+            assert_eq!(client_params(falsy), "[]", "{falsy}");
+        }
+        assert_eq!(client_params(r#""0x1""#), r#"["0x1"]"#);
+        assert_eq!(client_params(r#"{"b":1,"a":2}"#), r#"[{"b":1,"a":2}]"#);
+        assert_eq!(client_params("not json"), "not json");
+    }
 
     #[test]
     fn error_text_is_cut_at_its_bound() {

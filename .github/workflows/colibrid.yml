@@ -129,12 +129,15 @@ jobs:
       - name: The build the replay runs
         if: runner.os == 'Linux'
         run: |
-          cargo test --locked --no-run --message-format=json > build.json
+          cargo test --locked --features testhooks --no-run --message-format=json > build.json
           jq -r 'select(.reason == "build-script-executed" and (.package_id | test("colibri-stateless"))) | .out_dir' build.json \
             | sort -u > out-dir.txt
           cat out-dir.txt
           test "$(wc -l < out-dir.txt)" -eq 1
-      - run: cargo test --locked
+      # The replay of every C-core call, and the service itself against a
+      # scripted main: its behaviour, and every request case through the
+      # binary at its recorded instant (the `testhooks` feature's clock).
+      - run: cargo test --locked --features testhooks
       # Design 0014's license gate, over the compiled-source manifest of the
       # build the replay just ran.
       - name: License gate
@@ -185,8 +188,13 @@ jobs:
       - name: Build the tests
         run: |
           cargo test --locked --target x86_64-unknown-linux-gnu --no-run --message-format=json > build.json
-          jq -r 'select(.reason == "compiler-artifact" and .profile.test and .executable) | .executable' build.json > tests.txt
-          test -s tests.txt
+          # The library's and the binary's unit tests (both named
+          # freedom_colibrid-*), and the replay of every C-core call.
+          # The service's own tests spawn the confined binary, whose seccomp
+          # rules leave LeakSanitizer no way to stop its threads at exit.
+          jq -r 'select(.reason == "compiler-artifact" and .profile.test and .executable) | .executable' build.json \
+            | grep -E '/(replay|freedom_colibrid)-[0-9a-f]+$' > tests.txt
+          test "$(wc -l < tests.txt)" -eq 3
           cat tests.txt
           # The C core's build directory for these tests, not an earlier pin's
           # that the restored cache holds beside it.

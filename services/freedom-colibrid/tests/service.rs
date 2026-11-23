@@ -3,6 +3,8 @@
 //! a body that breaks its head, and its gate. The vectors through the
 //! binary are in `tests/service_vectors.rs`.
 
+// Test code: a failed setup ends the test.
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod common;
 
 use std::time::{Duration, Instant};
@@ -36,7 +38,9 @@ fn until_reply(
         let Some(frame) = colibrid.recv(Duration::from_secs(1)) else {
             continue;
         };
-        let Frame::Json(message) = frame else { continue };
+        let Frame::Json(message) = frame else {
+            continue;
+        };
         match message["type"].as_str() {
             Some("event") => markers.push(format!(
                 "{}:{}",
@@ -82,7 +86,11 @@ fn refusals_come_before_any_context() {
     let mut colibrid = Colibrid::serve(1, None);
     colibrid.hello();
     for (method, params, text) in [
-        ("eth_call", r#"[{"to":"0x01"},"latest"]"#, "Method eth_call is not supported"),
+        (
+            "eth_call",
+            r#"[{"to":"0x01"},"latest"]"#,
+            "Method eth_call is not supported",
+        ),
         ("eth_gasPrice", "[]", "Method eth_gasPrice is not supported"),
         (
             "eth_getBalance",
@@ -104,7 +112,11 @@ fn refusals_come_before_any_context() {
         let (reply, markers) = until_reply(&mut colibrid, id, |_, _, _| {
             panic!("a refused request fetched")
         });
-        assert_eq!(reply["result"], json!({ "status": "error", "error": text }), "{method}");
+        assert_eq!(
+            reply["result"],
+            json!({ "status": "error", "error": text }),
+            "{method}"
+        );
         // No context, so no marker.
         assert!(markers.is_empty(), "{method}: {markers:?}");
     }
@@ -144,12 +156,21 @@ fn a_body_that_breaks_its_head_fails_its_fetch_alone() {
                 c.respond(ask, json!({ "error": "HTTP error! Status: 500" }));
             }
         });
-        let error = reply["result"]["error"].as_str().unwrap_or_default().to_owned();
+        let error = reply["result"]["error"]
+            .as_str()
+            .unwrap_or_default()
+            .to_owned();
         assert_eq!(reply["result"]["status"], "error", "{reply}");
         assert!(error.contains("Colibri body length mismatch"), "{error}");
         // Every marker is cleared, in order.
         for pair in markers.chunks(2) {
-            assert_eq!(pair, [format!("colibri.step:{id}"), format!("colibri.stepped:{id}")]);
+            assert_eq!(
+                pair,
+                [
+                    format!("colibri.step:{id}"),
+                    format!("colibri.stepped:{id}")
+                ]
+            );
         }
         assert_eq!(colibrid.shutdown(), Some(0));
     }
@@ -170,10 +191,10 @@ fn open_requests_are_bounded_and_cancels_are_answered() {
     let mut asking = std::collections::HashSet::new();
     let deadline = Instant::now() + WAIT;
     while asking.len() < 16 && Instant::now() < deadline {
-        if let Some(Frame::Json(message)) = colibrid.recv(Duration::from_secs(1)) {
-            if message["method"] == "shell.colibri_fetch" {
-                asking.insert(message["params"]["request"].as_u64().unwrap());
-            }
+        if let Some(Frame::Json(message)) = colibrid.recv(Duration::from_secs(1))
+            && message["method"] == "shell.colibri_fetch"
+        {
+            asking.insert(message["params"]["request"].as_u64().unwrap());
         }
     }
     assert_eq!(asking.len(), 16);
@@ -187,10 +208,11 @@ fn open_requests_are_bounded_and_cancels_are_answered() {
     let mut cancelled = std::collections::HashSet::new();
     let deadline = Instant::now() + WAIT;
     while cancelled.len() < 16 && Instant::now() < deadline {
-        if let Some(Frame::Json(message)) = colibrid.recv(Duration::from_secs(1)) {
-            if message["type"] == "response" && message["error"]["code"] == "cancelled" {
-                cancelled.insert(message["id"].as_u64().unwrap());
-            }
+        if let Some(Frame::Json(message)) = colibrid.recv(Duration::from_secs(1))
+            && message["type"] == "response"
+            && message["error"]["code"] == "cancelled"
+        {
+            cancelled.insert(message["id"].as_u64().unwrap());
         }
     }
     assert_eq!(cancelled.len(), 16, "stderr: {}", colibrid.stderr());
@@ -212,7 +234,11 @@ fn the_gate_is_held_for_the_process_life() {
 
 #[test]
 fn usage_errors_exit_64() {
-    for args in [&["serve"][..], &["serve", "--chain", "1", "--data-dir", "/tmp"], &["checkpoint"]] {
+    for args in [
+        &["serve"][..],
+        &["serve", "--chain", "1", "--data-dir", "/tmp"],
+        &["checkpoint"],
+    ] {
         let status = std::process::Command::new(common::BIN)
             .args(args)
             .stdin(std::process::Stdio::null())
@@ -222,4 +248,36 @@ fn usage_errors_exit_64() {
             .unwrap();
         assert_eq!(status.code(), Some(64), "{args:?}");
     }
+}
+
+#[test]
+fn a_body_past_its_bound_is_refused_at_its_head() {
+    let mut colibrid = Colibrid::serve(1, None);
+    colibrid.hello();
+    let id = colibrid.request(
+        "colibri.request",
+        request_params(
+            "eth_getBalance",
+            r#"["0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045","latest"]"#,
+        ),
+    );
+    let mut first = true;
+    let (reply, _) = until_reply(&mut colibrid, id, |c, ask, _| {
+        if std::mem::take(&mut first) {
+            // Over 16 MiB: refused before any of it is read, so main is told
+            // to stop and the C core sees a busy fetch.
+            c.respond(
+                ask,
+                json!({ "node": 0, "bytes": (16u64 << 20) + 1, "body": true }),
+            );
+        } else {
+            c.respond(ask, json!({ "error": "HTTP error! Status: 500" }));
+        }
+    });
+    let error = reply["result"]["error"]
+        .as_str()
+        .unwrap_or_default()
+        .to_owned();
+    assert!(error.contains("Colibri fetch busy"), "{reply}");
+    assert_eq!(colibrid.shutdown(), Some(0));
 }

@@ -4,6 +4,8 @@
 //! the kind, the payload).
 
 #![allow(dead_code)]
+// Test support: a failed setup or a broken frame ends the test.
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
@@ -100,9 +102,7 @@ impl Colibrid {
         command
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .env_clear()
-            .env("PATH", std::env::var_os("PATH").unwrap_or_default());
+            .stderr(Stdio::piped());
         let mut child = command.spawn().unwrap();
         let mut stdout = child.stdout.take().unwrap();
         let mut stderr_pipe = child.stderr.take().unwrap();
@@ -188,7 +188,9 @@ impl Colibrid {
     }
 
     pub fn respond_error(&mut self, id: u64, code: &str, message: &str) {
-        self.send(&json!({ "type": "response", "id": id, "error": { "code": code, "message": message } }));
+        self.send(
+            &json!({ "type": "response", "id": id, "error": { "code": code, "message": message } }),
+        );
     }
 
     /// Answers fetch `id` with `body` from node `node`: the head, then the
@@ -231,7 +233,9 @@ impl Colibrid {
             }
             if out.sent >= out.send {
                 let mut payload = Vec::new();
-                StreamFrame::End { id: out.id }.encode(&mut payload).unwrap();
+                StreamFrame::End { id: out.id }
+                    .encode(&mut payload)
+                    .unwrap();
                 frames.push((KIND_END, payload));
                 false
             } else {
@@ -274,10 +278,11 @@ impl Colibrid {
         );
         let deadline = Instant::now() + Duration::from_secs(30);
         while Instant::now() < deadline {
-            if let Some(Frame::Json(message)) = self.recv(Duration::from_secs(30)) {
-                if message["type"] == "response" && message["id"] == id {
-                    return message["result"].clone();
-                }
+            if let Some(Frame::Json(message)) = self.recv(Duration::from_secs(30))
+                && message["type"] == "response"
+                && message["id"] == id
+            {
+                return message["result"].clone();
             }
         }
         panic!("no hello reply; stderr: {}", self.stderr());
@@ -293,16 +298,25 @@ impl Colibrid {
         self.stdin = None;
     }
 
+    /// The exit code, within `wait`; `None` if the process is still
+    /// running, or died of a signal.
     pub fn exit_code(&mut self, wait: Duration) -> Option<i32> {
         let deadline = Instant::now() + wait;
-        while Instant::now() < deadline {
+        loop {
             if let Some(status) = self.child.try_wait().unwrap() {
                 return status.code();
+            }
+            if Instant::now() >= deadline {
+                return None;
             }
             // Keep reading, so the service's writer never stalls.
             let _ = self.recv(Duration::from_millis(20));
         }
-        None
+    }
+
+    /// Whether the process has ended, by exit or signal.
+    pub fn exited(&mut self) -> bool {
+        self.child.try_wait().unwrap().is_some()
     }
 }
 
