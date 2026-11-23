@@ -63,6 +63,7 @@ impl Shared {
             Mode::Serve => (MAX_OPEN_REQUESTS, MAX_BODIES, MAX_RESIDENT),
             Mode::Checkpoint => (1, CHECKPOINT_BODIES, CHECKPOINT_RESIDENT),
         };
+        let max_resident = crate::testhooks::memory_budget().unwrap_or(max_resident);
         Shared {
             chain_id,
             mode,

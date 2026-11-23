@@ -413,6 +413,7 @@ async fn attempt(
     loop {
         // Behind a marker taken before the loop or at the end of the last
         // round.
+        crate::testhooks::in_step();
         let outcome = ctx.execute_with_status();
         env.shared.step_done();
         let (step, status) = match outcome {

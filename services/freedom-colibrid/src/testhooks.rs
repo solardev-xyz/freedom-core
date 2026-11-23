@@ -10,8 +10,13 @@
 //!   (`test write`).
 //! - `FREEDOM_COLIBRID_TEST_SOCKET=1`: the same with a UDP socket bound to
 //!   loopback (`test socket`).
+//! - `FREEDOM_COLIBRID_TEST_STEP=crash`: inside a request's step, behind
+//!   its marker, the process aborts; `=spin`: the step never returns.
+//! - `FREEDOM_COLIBRID_TEST_MEMORY_BUDGET=<bytes>` replaces the resident
+//!   memory budget, so a test can make the process recycle.
 //!
-//! The confinement tests (`tests/confinement.rs`) read the log lines.
+//! The confinement tests (`tests/confinement.rs`) read the log lines; the
+//! fault tests (`tests/faults.rs`) watch the markers and the exit.
 
 /// Runs the probes the environment asks for, on `thread`.
 #[cfg(feature = "testhooks")]
@@ -35,3 +40,33 @@ pub fn probe(thread: &str) {
 
 #[cfg(not(feature = "testhooks"))]
 pub fn probe(_thread: &str) {}
+
+/// Inside a request's step, behind its marker: a crash or a spin when the
+/// environment asks for one.
+#[cfg(feature = "testhooks")]
+pub fn in_step() {
+    match std::env::var("FREEDOM_COLIBRID_TEST_STEP").as_deref() {
+        Ok("crash") => std::process::abort(),
+        Ok("spin") => loop {
+            std::thread::sleep(std::time::Duration::from_secs(3600));
+        },
+        _ => {}
+    }
+}
+
+#[cfg(not(feature = "testhooks"))]
+pub fn in_step() {}
+
+/// The resident memory budget a test sets, if any.
+#[cfg(feature = "testhooks")]
+pub fn memory_budget() -> Option<u64> {
+    std::env::var("FREEDOM_COLIBRID_TEST_MEMORY_BUDGET")
+        .ok()?
+        .parse()
+        .ok()
+}
+
+#[cfg(not(feature = "testhooks"))]
+pub fn memory_budget() -> Option<u64> {
+    None
+}
