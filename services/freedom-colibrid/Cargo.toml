@@ -37,9 +37,33 @@ resolver = "3"
 # OP-Stack.
 colibri-stateless = { git = "https://github.com/solardev-xyz/colibri-stateless", rev = "c0c13c469949dd4915f52cfebc2ce7288cd58f9b", default-features = false }
 
+# The service's skeleton and protocol, shared with the core and the other
+# services by path (0007, 0014).
+fc-protocol = { path = "../../crates/fc-protocol" }
+fc-service = { path = "../../crates/fc-service" }
+# The resident memory the budget reads, on macOS and Windows (0014,
+# Budgets): fc-service links it already.
+fc-sys = { path = "../../crates/fc-sys" }
+# What Colibri serves: #279's rule, the router's own (0014, "One rule, two
+# places").
+fc-colibri = { path = "../../crates/fc-colibri" }
+# A refusal's text keeps a block string's lone surrogate, as JSON.stringify
+# writes it.
+fc-json = { path = "../../crates/fc-json" }
+# The protocol's params and replies; raw values carry the C core's result
+# and payload texts as it wrote them.
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["raw_value"] }
+
+[features]
+# FREEDOM_COLIBRID test hooks (src/request.rs: a replay's clock). Without
+# the feature none exist; build.rs refuses it outside debug and test builds.
+testhooks = []
+
 [dev-dependencies]
-# tests/replay.rs reads vectors/colibri.json and the fixture index.
-serde_json = "1"
+# The tests compare the service's results as JSON.stringify writes them, in
+# the order the service sent their properties.
+serde_json = { version = "1", features = ["raw_value", "preserve_order"] }
 # tests/replay.rs checks every body and store value by its SHA-256, as the
 # vectors record them; the core already links sha2.
 sha2 = "0.10"
@@ -50,6 +74,22 @@ sha2 = "0.10"
 [[test]]
 name = "replay"
 harness = false
+
+# The recorded requests through the binary, each at its recorded instant:
+# the `testhooks` feature's replay clock.
+[[test]]
+name = "service_vectors"
+required-features = ["testhooks"]
+
+# A step held by a test hook.
+[[test]]
+name = "service"
+required-features = ["testhooks"]
+
+# The replay clock's setting, a call of its own.
+[[test]]
+name = "markers"
+required-features = ["testhooks"]
 
 # The core's workspace lints, copied: workspace lints don't cross workspaces.
 [lints.rust]

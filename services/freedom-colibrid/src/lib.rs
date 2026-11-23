@@ -1,8 +1,21 @@
 //! freedom-colibrid: Colibri's verifier as a native process (design 0014).
 //!
-//! COL-2: the native, verifier-only C core, built from the pinned fork
-//! commit (see `Cargo.toml`), and a replay of every COL-1 trace through it
-//! (`tests/replay.rs`). The service itself arrives with COL-4.
+//! - COL-2: the native, verifier-only C core, built from the pinned fork
+//!   commit (see `Cargo.toml`), and a replay of every COL-1 trace through
+//!   it (`tests/replay.rs`).
+//! - COL-4: the service (`src/main.rs`): the connection's side
+//!   ([`service`]), the verifier thread ([`verifier`], [`exec`]) and each
+//!   request on it ([`request`]), what it serves ([`served`]), its store
+//!   ([`store`]) and its budgets ([`shared`]).
+
+pub mod exec;
+pub mod request;
+pub mod served;
+pub mod service;
+pub mod shared;
+pub mod store;
+pub mod testhooks;
+pub mod verifier;
 
 /// The Colibri release the C core is built from.
 pub const COLIBRI_VERSION: &str = "3.0.3";

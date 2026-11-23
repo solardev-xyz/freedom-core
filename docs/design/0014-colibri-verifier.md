@@ -261,6 +261,7 @@ The service keeps the error contract of freedom-browser #1080 and #1081 (#1059, 
   - It frees the context and replies `{ status: "error", error: "remote proof failed (no local proving): <text>" }`, whole. The 2,000-unit cut is main's, on the completed adapter message, as on #1080's path ([What main builds](#what-main-builds-from-an-answer)).
   - The prefix is #1080's `NO_LOCAL_PROVING_ERROR` and its `: ` separator, byte for byte. `<text>` is the fetch's error exactly as main wrote it ([The rest](#the-rest)), which is what the WASM host would have set, apart from deviation `fetch-error-text`. Its URLs-as-`<url>` rule shows in a transport error's text. Its 2,000-unit cut of the fetch text never shows: it falls past the first 2,000 units of the completed message. So for an HTTP error, which names no URL, the two backends' adapter messages are equal byte for byte, at any length.
 - **An answer on it:** the record is dropped, and the proof is the verifier's from then on.
+- **The client's ZK fallback still reads that text.** A prover with no ZK sync proof yet says so in its error (`No zk sync proof has been generated for this period yet`). The completed text then contains `zk sync proof`, so with ZK on the request runs again without ZK on a new context, as the client's `rpc()` does, and the client's ZK stays off (F-4). The failed context is freed after the new one (COL-1's `1-zk-fallback`).
 - **Everything else passes through:** the verifier's own prover requests (a transaction lookup's cache and fallback) and their failures, which the verifier handles itself, and every later step.
 - **Main builds the outcome** from that text as from any error, so the adapter's message is `Error in rpc call <method><params> : remote proof failed (no local proving): <text>`. Its code is 4900 when `<text>` is an HTTP error (`HTTP error!`) and -32603 for a transport error, as on #1080's WASM path.
 - **A backstop, not the contract:** the verifier-only build ends a failed remote proof with an error of its own ([The verifier-only build](#the-verifier-only-build)). The service never steps a context into that path, so its text never reaches main.
@@ -413,7 +414,7 @@ On fc-service's connection, at the version services speak, with fc-protocol's tw
 | `colibri.shutdown` | fc-service's | |
 
 - **`client`** is main's id for one client (a chain, a prover and its ZK setting). The service keeps per client only F-4's sticky ZK-off flag. The prover's URL stays in main.
-- **`params`** is the caller's JSON text, as 0005 passes it.
+- **`params`** is the caller's JSON text, as 0005 passes it. The served list's block forms are checked on it as sent. The C core then gets what the client gave it: `request()`'s `Array.isArray(params) ? params : (params ? [params] : [])`, then `rpc()`'s `JSON.stringify`. So `null` params, which `eth_getBlockByNumber` is served with, reach it as `[]` (COL-4: `1-block-null`).
 - **`result`** is the C core's result text, embedded raw, as 0005's replies do. It is absent when the status has none, which main reads as `undefined`.
 - **`error`** is the C core's error text, whole.
   - **No cut here:** the service doesn't cut it to 2,000 units. Today's cut (`serializeError`, `colibri-worker.js:116`) falls on the completed adapter message, after `createError` has put `Error in rpc call <method><params> : ` before the text, and main makes it there ([What main builds](#what-main-builds-from-an-answer)).
@@ -497,7 +498,8 @@ The service doesn't serve `eth_call` or `eth_estimateGas`, at any block. So it s
 - **`type`:** `prover`, `beacon_api` or `checkpointz`; on a checkpoint process, `checkpointz`, `beacon_api` or `checkpoint_proof`. The C core also names `eth_rpc`, but no variant admits it ([The fetch contract](#the-fetch-contract)), so main refuses every such fetch.
 - **`method`** is the C core's verb, `get` or `post`. Main sends the verb the matching variant has; anything else is refused.
 - **`delay`** stays in the service: it waits before sending the fetch, as `handle_request` waits.
-- **The head's `bytes`** is the body's exact length: main has read it whole before the head goes ([Bodies](#bodies)).
+- **The head's `bytes`** is the body's exact length: main has read it whole before the head goes ([Bodies](#bodies)). The head also says `body: true`, fc-service's mark of a response a stream follows. Without it no body opens, and the fetch fails (`Colibri fetch has no body`).
+- **An error** comes as the result `{ error }`, or as a protocol error response, whose message is the text. The C core gets the text either way.
 - **The body** comes as 0009's stream, from main to the service, with a 128 KiB window. The service reserves exactly `bytes` from its own bodies budget before granting credit. A head it can't reserve is answered with `busy`, which the C core sees as a failed fetch (`Colibri fetch busy`).
 - **A body that doesn't match its head**, more bytes than `bytes` or fewer at its `end`, fails that fetch with `Colibri body length mismatch`. The connection, its other streams and its control frames go on.
 - **`error`** is the text the C core gets (`c4_req_set_error`).
