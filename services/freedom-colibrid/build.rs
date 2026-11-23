@@ -1,10 +1,9 @@
 //! Refuses the `testhooks` feature (src/request.rs's replay clock) outside
 //! the debug and test builds the tests use: Cargo's `PROFILE` must be
-//! `debug` (a profile
-//! that inherits `dev`, as `test` does), and this package unoptimized. A
-//! release-profile build is refused whatever its settings, debug assertions
-//! included, which a `cfg(debug_assertions)` check would let through
-//! (`--config profile.release.debug-assertions=true`). CI checks both.
+//! `debug` (a profile that inherits `dev`, as `test` does), and this
+//! package unoptimized. A release-profile build is refused whatever its
+//! settings, debug assertions included, which a `cfg(debug_assertions)`
+//! check would let through (`--config profile.release.debug-assertions=true`).
 
 // A build script speaks to Cargo on stdout.
 #![allow(clippy::print_stdout)]
