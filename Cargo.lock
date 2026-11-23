@@ -480,6 +480,7 @@ dependencies = [
 name = "fc-chain"
 version = "0.28.0"
 dependencies = [
+ "fc-colibri",
  "fc-dweb",
  "fc-json",
  "fc-naming",
@@ -490,6 +491,13 @@ dependencies = [
  "sha3",
  "thiserror",
  "url",
+]
+
+[[package]]
+name = "fc-colibri"
+version = "0.28.0"
+dependencies = [
+ "fc-json",
 ]
 
 [[package]]
