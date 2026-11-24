@@ -442,7 +442,10 @@ function buildGsoc(env) {
   const lanes = [cases.slice(0, -2), [cases.at(-2)], [cases.at(-1)]];
   const run = (list) => new Promise((resolve, reject) => {
     const worker = new Worker(path.join(__dirname, 'swarm-gsoc-worker.js'), { workerData: { checkout: env.checkout, cases: list } });
-    worker.once('message', resolve);
+    worker.once('message', ({ records, loaded }) => {
+      env.loadedElsewhere.push(...loaded);
+      resolve(records);
+    });
     worker.once('error', reject);
   });
   return Promise.all(lanes.map(run)).then((parts) => parts.flat());
@@ -594,7 +597,7 @@ async function buildErrors(env, methods) {
         });
         const entry = { id: `${site}/${bodyId}/${status}${statusText ? '' : '-no-reason'}`, kind: 'http_error', site, status, status_text: statusText,
           body: bodyOf(reply), ...record };
-        if (bodyId.startsWith('past-8kib') && site !== 'soc-upload') {
+        if (bodyId.startsWith('past-8kib')) {
           // The core reads 8 KiB of an error body (error-body-bound): its text
           // is the same reader's over the first 8,192 bytes.
           const cut = bodyBytes(reply).subarray(0, 8192);

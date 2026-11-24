@@ -112,14 +112,14 @@ const ROWS = {
   updateFeed: { ready: 'publish', calls: [
     { forms: ['stamps'], count: [1, 1], binds: '' },
     { forms: ['feed_head'], count: [1, 1], binds: '<t> as for createFeed; one <o> throughout, fixed by feed_head' },
-    { forms: ['chunk'], count: [0, 82], when: 'after feed_head\'s 404 or 500', binds: 'with feed: each at the SOC address of the index the head probe asks next' },
+    { forms: ['chunk'], count: [0, 81], when: 'after feed_head\'s 404 or 500', binds: 'with feed: each at the SOC address of the index the head probe asks next' },
     { forms: ['soc_up'], count: [1, 1], binds: '<id> = keccak256(<t> ‖ the next index as 8 bytes BE); the body = span ‖ an 8-byte timestamp ‖ params.reference (48 or 80 bytes)' },
   ] },
   writeFeedEntry: { ready: 'publish', calls: [
     { forms: ['stamps'], count: [1, 1], binds: '' },
     { forms: ['chunk'], count: [1, 1], when: 'with index', binds: 'with feed: the SOC address of params.index' },
     { forms: ['feed_head'], count: [1, 1], when: 'without index', binds: 'one <o> throughout, fixed by the first call that names it' },
-    { forms: ['chunk'], count: [0, 82], when: 'without index, after feed_head\'s 404 or 500', binds: 'with feed: the probe\'s next index' },
+    { forms: ['chunk'], count: [0, 81], when: 'without index, after feed_head\'s 404 or 500', binds: 'with feed: the probe\'s next index' },
     { forms: ['bytes_up'], count: [0, 1], when: 'data over 4,096 bytes', binds: 'the body exactly the data\'s length' },
     { forms: ['soc_up'], count: [1, 1], binds: '<id> = keccak256(<t> ‖ the write\'s index as 8 bytes BE); the body = span ‖ the data (4,096 bytes or less), '
       + 'else a root chunk whose address is bytes_up\'s reference' },
@@ -140,7 +140,7 @@ const ROWS = {
     binds: 'swarm-index-document = index_document, else index.html when a top-level part has that name; swarm-encrypt only when encrypt; the body at most T(parts)' }] },
   'swarm.feed:create': { ready: null, calls: [{ forms: ['stamps'], count: [0, 1], when: 'no batch given', binds: '' }, { forms: ['feed_manifest'], count: [1, 1], binds: '<t> = topic' }] },
   'swarm.feed:update': { ready: null, calls: [{ forms: ['stamps'], count: [0, 1], when: 'no batch given', binds: '' }, { forms: ['feed_head'], count: [1, 1], binds: '<t> = topic' },
-    { forms: ['chunk'], count: [0, 82], when: 'after feed_head\'s 404 or 500', binds: 'the probe\'s next index' },
+    { forms: ['chunk'], count: [0, 81], when: 'after feed_head\'s 404 or 500', binds: 'the probe\'s next index' },
     { forms: ['soc_up'], count: [1, 1], binds: 'the next index at least min_index; the body ending in reference' }] },
   'swarm.stamps': { ready: null, calls: [{ forms: ['stamps', 'stamp'], count: [1, 1], binds: '<b> = id' }] },
   'swarm.upload_status': { ready: null, calls: [{ forms: ['tag'], count: [1, 1], binds: '<uid> = tag_uid' }] },
@@ -152,7 +152,6 @@ const DEVIATION_REQUESTS = {
   'index-probe': 'the whole GET /feeds/<o>/<t> download of an index lookup (the core asks feed_head, swarm-only-root-chunk: true)',
   'feed-wrap-root': 'GET /chunks/<root> after a feed entry\'s POST /bytes (the core wraps its own root)',
   'read-data-verified': 'readData\'s whole, unranged GET /bytes/<reference> (the core walks the tree and streams the leaves ranged)',
-  'pss-recipient': 'sendPss\'s 128-hex recipient (F-9); not made at this reference, which has #1062: it sends the compressed key',
 };
 
 // ---------------------------------------------------------------------------
@@ -508,6 +507,9 @@ function checkStep(ctx, requests) {
   return out;
 }
 
+// The head probe's cap (design 0015, Values main derives).
+const MAX_PROBE_READS = 81;
+
 /** The head probe, as main replays it over its own answers (probeFeedHead). */
 function probeRun(ctx, requests, at, take, env, topic, owner) {
   const MAX = 2 ** 40;
@@ -520,10 +522,12 @@ function probeRun(ctx, requests, at, take, env, topic, owner) {
     if (r.status >= 200 && r.status < 300) return true;
     return null;
   };
+  // The reference's longest run is 81 reads (42 to grow to 2^40, then 39
+  // halvings); an 82nd is past the row.
   let reads = 0;
   const exists = (index) => {
     reads += 1;
-    if (reads > 82) fail(ctx, requests[at()], 'an 83rd probe');
+    if (reads > MAX_PROBE_READS) fail(ctx, requests[at()], 'an 82nd probe');
     return ask(index);
   };
   const first = exists(0);
@@ -599,4 +603,4 @@ function dataBytes(value) {
   return Buffer.alloc(0);
 }
 
-module.exports = { FORMS, ROWS, VALUES, DEVIATION_REQUESTS, MAIN_HEADERS, checkStep, formOf, feedAddress, feedIdentifierHex, keccakUtf8, GrammarError, NODE_URL };
+module.exports = { FORMS, ROWS, VALUES, DEVIATION_REQUESTS, MAIN_HEADERS, MAX_PROBE_READS, checkStep, formOf, feedAddress, feedIdentifierHex, keccakUtf8, GrammarError, NODE_URL };

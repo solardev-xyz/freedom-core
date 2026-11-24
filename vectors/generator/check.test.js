@@ -1071,32 +1071,44 @@ test('check takes the Colibri vectors from their own reference, at its pinned co
   assert.equal(JSON.parse(fs.readFileSync(path.join(SOURCE, 'colibri.json'), 'utf8')).meta.freedomBrowserCommit, commit);
 });
 
-test('check rejects a changed window.swarm outcome and a changed request', () => {
-  const stderr = corruptedCheck('swarm.json', (contents) => {
-    const entry = contents.methods.find((item) => item.id === 'publish-data-string');
-    entry.steps[0].result.reference = 'ab'.repeat(32);
-    const read = contents.methods.find((item) => item.id === 'read-chunk-found');
-    read.steps[0].requests[1].path = `/chunks/${'cd'.repeat(32)}`;
-  });
-  assert.match(stderr, /Byte mismatch: swarm.json/);
-});
-
-test('check rejects a changed window.swarm store, tree and deviation mark', () => {
-  const stderr = corruptedCheck('swarm.json', (contents) => {
+// Each damaged copy changes one thing, so each check the swarm vectors
+// advertise fails on its own.
+const SWARM_DAMAGES = [
+  ['swarm.json', 'a changed window.swarm outcome', (contents) => {
+    contents.methods.find((item) => item.id === 'publish-data-string').steps[0].result.reference = 'ab'.repeat(32);
+  }],
+  ['swarm.json', 'a changed window.swarm request', (contents) => {
+    contents.methods.find((item) => item.id === 'read-chunk-found').steps[0].requests[1].path = `/chunks/${'cd'.repeat(32)}`;
+  }],
+  ['swarm.json', 'a changed window.swarm approval path', (contents) => {
+    const step = contents.methods.find((item) => item.id === 'publish-data-rule-custody-before-upload').steps[0];
+    step.events.find((event) => event.effect).effect.custody = [false];
+  }],
+  ['swarm.json', 'a changed window.swarm store', (contents) => {
     contents.stores.find((item) => item.kind === 'feeds').files['swarm-feeds.json'] += ' ';
+  }],
+  ['swarm.json', 'a changed window.swarm tree', (contents) => {
     contents.trees[0].root = '00'.repeat(32);
+  }],
+  ['swarm.json', 'a changed window.swarm deviation mark', (contents) => {
     delete contents.methods.find((item) => item.deviation === 'feed-entry-bound').deviation;
-  });
-  assert.match(stderr, /Byte mismatch: swarm.json/);
-});
-
-test('check rejects a changed grammar row and a changed forbidden alternative', () => {
-  const stderr = corruptedCheck('swarm-grammar.json', (contents) => {
+  }],
+  ['swarm.json', 'a changed window.swarm package digest', (contents) => {
+    contents.meta.files['@ethersphere/bee-js@13.2.0/dist/cjs/api/pss.js'] = '00'.repeat(32);
+  }],
+  ['swarm-grammar.json', 'a changed swarm grammar row', (contents) => {
     contents.rows.readChunk.calls[0].count = [1, 2];
+  }],
+  ['swarm-grammar.json', 'a changed swarm forbidden alternative', (contents) => {
     contents.forbidden[0].rule = 'order';
+  }],
+];
+for (const [file, what, corrupt] of SWARM_DAMAGES) {
+  test(`check rejects ${what}`, () => {
+    const stderr = corruptedCheck(file, corrupt);
+    assert.match(stderr, new RegExp(`Byte mismatch: ${file.replace('.', '\\.')}`));
   });
-  assert.match(stderr, /Byte mismatch: swarm-grammar.json/);
-});
+}
 
 test('check refuses a recorded request outside its grammar row', () => {
   // The grammar narrowed in the copy: readChunk's chunk must be upper case,
@@ -1125,6 +1137,49 @@ test('check takes the window.swarm vectors from their own reference, at its pinn
     assert.equal(meta.packages['@ethersphere/bee-js'], '13.2.0');
     assert.equal(meta.packages['@ethersphere/core-sdk'], '0.2.2');
   }
+});
+
+test('check rejects a changed bee-js file the swarm vectors load, at the same version', () => {
+  // The swarm reference cloned at its commit, its install the shared one but
+  // for bee-js, copied, with one file the run loads changed and the version
+  // left at 13.2.0: dist/cjs/api/pss.js, which the hand-picked digest list
+  // left out. The change keeps the behaviour, so only the digest sees it.
+  const commit = spawnSync('git', ['rev-parse', 'HEAD'], { cwd: SWARM_REFERENCE, encoding: 'utf8' }).stdout.trim();
+  const { meta } = JSON.parse(fs.readFileSync(path.join(SOURCE, 'swarm.json'), 'utf8'));
+  assert.ok(meta.files['@ethersphere/bee-js@13.2.0/dist/cjs/api/pss.js'], 'pss.js is among the files the vectors load');
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'freedom-core-swarm-install-'));
+  let result;
+  try {
+    const checkout = path.join(root, 'swarm-reference');
+    const git = (args, cwd) => {
+      const out = spawnSync('git', args, { cwd, encoding: 'utf8' });
+      assert.equal(out.status, 0, out.stderr);
+    };
+    git(['clone', '--quiet', '--shared', '--no-checkout', SWARM_REFERENCE, checkout], root);
+    git(['-c', 'advice.detachedHead=false', 'checkout', '--quiet', '--detach', commit], checkout);
+    const installed = fs.realpathSync(path.join(SWARM_REFERENCE, 'node_modules'));
+    const modules = path.join(checkout, 'node_modules');
+    fs.mkdirSync(path.join(modules, '@ethersphere'), { recursive: true });
+    for (const name of fs.readdirSync(installed)) {
+      if (name !== '@ethersphere') fs.symlinkSync(path.join(installed, name), path.join(modules, name));
+    }
+    for (const name of fs.readdirSync(path.join(installed, '@ethersphere'))) {
+      const from = path.join(installed, '@ethersphere', name);
+      const to = path.join(modules, '@ethersphere', name);
+      if (name === 'bee-js') fs.cpSync(from, to, { recursive: true, dereference: true });
+      else fs.symlinkSync(from, to);
+    }
+    const beeJs = path.join(modules, '@ethersphere', 'bee-js');
+    assert.equal(JSON.parse(fs.readFileSync(path.join(beeJs, 'package.json'), 'utf8')).version, '13.2.0');
+    fs.appendFileSync(path.join(beeJs, 'dist', 'cjs', 'api', 'pss.js'), '\n// The same code, one comment longer.\n');
+    result = spawnSync(process.execPath, checkArgs(path.join(SOURCE, 'generator/generate.js'), { swarm: checkout }),
+      { encoding: 'utf8', timeout: CHECK_TIMEOUT });
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+  assert.equal(result.error, undefined, result.error?.message);
+  assert.equal(result.status, 1, result.stdout + result.stderr);
+  assert.match(result.stderr, /Byte mismatch: swarm\.json/);
 });
 
 test('the swarm vectors refuse any bee-js or core-sdk but 13.2.0 and 0.2.2', () => {

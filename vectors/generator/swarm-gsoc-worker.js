@@ -13,7 +13,7 @@ const beeJs = ref('@ethersphere/bee-js');
 const core = ref('@ethersphere/core-sdk');
 const bee = new beeJs.Bee('http://127.0.0.1:1633');
 
-parentPort.postMessage(workerData.cases.map((c) => {
+const records = workerData.cases.map((c) => {
   const record = { ...c };
   try {
     const signer = bee.messaging.gsocMine(c.target, c.identifier, c.proximity);
@@ -28,4 +28,6 @@ parentPort.postMessage(workerData.cases.map((c) => {
     record.error = String(err.message);
   }
   return record;
-}));
+});
+// The package files this thread loaded, for swarm.json's meta.files.
+parentPort.postMessage({ records, loaded: Object.keys(require.cache) });

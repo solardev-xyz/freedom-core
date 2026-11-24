@@ -4,9 +4,11 @@
 // window.swarm's backend as the swarm reference runs it, at bee-js 13.2.0
 // and core-sdk 0.2.2 exactly. The browser's own main-process modules run
 // whole over a recording fake node (swarm-node.js), loaded fresh for each
-// run with Electron and the identity core stubbed (swarm-world.js); bee-js
-// and core-sdk compute every chunk, tree, SOC, tar and GSOC signer. No
-// reference code is copied, and nothing the vectors pin is computed here.
+// run with Electron and the identity core stubbed (swarm-world.js), each
+// method through main's page dispatcher (page/page-swarm.js) with only its
+// UI and core boundaries scripted (swarm-run.js); bee-js and core-sdk
+// compute every chunk, tree, SOC, tar and GSOC signer. No reference code is
+// copied, and nothing the vectors pin is computed here.
 
 const assert = require('node:assert/strict');
 const crypto = require('node:crypto');
@@ -24,21 +26,6 @@ const { buildGrammar } = require('./swarm-grammar-file');
 const BEE_JS = '13.2.0';
 const CORE_SDK = '0.2.2';
 
-// The reference files the vectors rest on, recorded by digest, so that a
-// changed install fails `check` even at the same version.
-const DIGESTED = {
-  '@ethersphere/bee-js': [
-    'package.json', 'dist/cjs/index.js', 'dist/cjs/bee.js', 'dist/cjs/utils/http.js', 'dist/cjs/utils/headers.js',
-    'dist/cjs/utils/error.js', 'dist/cjs/utils/tar.js', 'dist/cjs/utils/tar-writer.js', 'dist/cjs/utils/tar-uploader.js',
-    'dist/cjs/utils/stamps.js', 'dist/cjs/utils/workaround.js', 'dist/cjs/api/bzz.js', 'dist/cjs/api/bytes.js',
-    'dist/cjs/api/chunk.js', 'dist/cjs/api/soc.js', 'dist/cjs/api/feed.js', 'dist/cjs/api/tag.js', 'dist/cjs/api/stamp.js',
-    'dist/cjs/chunk/soc.js', 'dist/cjs/feed/index.js', 'dist/cjs/feed/identifier.js', 'dist/cjs/modules/messaging.js',
-    'dist/cjs/types/schema/stamps.js',
-  ],
-  '@ethersphere/core-sdk': ['package.json', 'dist/index.cjs'],
-  'cafe-utility': ['package.json', 'index.js'],
-};
-
 const sha256 = (bytes) => crypto.createHash('sha256').update(bytes).digest('hex');
 
 function packageDir(name, from) {
@@ -54,7 +41,7 @@ function packageDir(name, from) {
 
 /**
  * The checkout's bee-js and core-sdk, refused unless exactly 13.2.0 and
- * 0.2.2, and the digests of the files the vectors rest on.
+ * 0.2.2, and the versions of the other packages the vectors name.
  */
 function loadPackages(checkout) {
   const beeDir = packageDir('@ethersphere/bee-js', checkout);
@@ -71,19 +58,46 @@ function loadPackages(checkout) {
   for (const name of ['ethers', 'better-sqlite3']) {
     packages[name] = version(packageDir(name, checkout));
   }
-  const files = {};
-  for (const [name, list] of Object.entries(DIGESTED)) {
-    for (const file of list) files[`${name}/${file}`] = sha256(fs.readFileSync(path.join(dirs[name], file)));
-  }
   const beeJs = ref('@ethersphere/bee-js');
   const core = ref('@ethersphere/core-sdk');
   assert.equal(beeJs.ChunkSplitter, core.ChunkSplitter, 'bee-js and the generator must load one core-sdk');
-  return { beeJs, core, packages, files };
+  return { beeJs, core, packages };
+}
+
+/**
+ * Every installed package file the run loaded, by SHA-256: each JavaScript
+ * or JSON file under a node_modules directory in Node's require cache, this
+ * thread's and the GSOC workers' (`also`), and each such package's
+ * package.json. Keyed `<name>@<version>/<path in the package>`, so the key
+ * is the same in any install of that version, wherever it lives (CI links
+ * the Radicle reference's). A native addon (better-sqlite3's prebuild) is a
+ * platform's build, so it is left out; the JavaScript that loads it is in.
+ * A changed file fails `check` even at the same version, and so does a file
+ * the run starts or stops loading.
+ */
+function loadedPackageFiles(also = []) {
+  const out = new Map();
+  const add = (key, digest) => {
+    assert.ok(!out.has(key) || out.get(key) === digest, `two installs of ${key} differ`);
+    out.set(key, digest);
+  };
+  for (const file of new Set([...Object.keys(require.cache), ...also])) {
+    if (!/\.(c|m)?js$|\.json$/.test(file)) continue;
+    const parts = file.split(path.sep);
+    const at = parts.lastIndexOf('node_modules');
+    if (at < 0) continue;
+    const root = parts.slice(0, at + (parts[at + 1]?.startsWith('@') ? 3 : 2)).join(path.sep);
+    const manifest = JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8'));
+    const key = `${manifest.name}@${manifest.version}`;
+    add(`${key}/package.json`, sha256(fs.readFileSync(path.join(root, 'package.json'))));
+    add(`${key}/${path.relative(root, file).split(path.sep).join('/')}`, sha256(fs.readFileSync(file)));
+  }
+  return Object.fromEntries([...out].sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)));
 }
 
 /** The environment every section shares. */
 async function environment(checkout, keysJson) {
-  const { beeJs, core, packages, files } = loadPackages(checkout);
+  const { beeJs, core, packages } = loadPackages(checkout);
   const keys = testKeys(keysJson);
   const keyOf = (name) => {
     if (name === 'bee') return keys.bee;
@@ -100,7 +114,7 @@ async function environment(checkout, keysJson) {
   };
   const roots = new Map();
   const env = {
-    checkout, beeJs, core, packages, files, keys, keyOf, seeds, seeded, trees: new Map(),
+    checkout, beeJs, core, packages, keys, keyOf, seeds, seeded, trees: new Map(), loadedElsewhere: [],
     T0: cases.T0,
     ORIGIN: cases.ORIGIN,
     connected: (origin) => cases.connected(origin),
@@ -181,6 +195,7 @@ async function buildMethods(env) {
     const record = await runMethodCase(env, spec);
     if (process.env.SWARM_VECTORS_TIMING) console.error(`${Date.now() - started} ms ${spec.id}`);
     const input = inputOf(spec, env);
+    if (record.session) input.session = record.session;
     const entry = { id: spec.id, ...(spec.deviation ? { deviation: spec.deviation.id } : {}), ...input, steps: record.steps };
     if (spec.deviation) {
       entry.core = spec.deviation.core;
@@ -202,8 +217,14 @@ function inputOf(spec, env) {
   input.feeds = spec.feeds === undefined || spec.feeds === null ? null
     : (typeof spec.feeds === 'string' ? spec.feeds : JSON.stringify(spec.feeds, null, 2));
   input.vault = spec.vault ?? 'unlocked';
+  if (spec.at_execute) input.at_execute = spec.at_execute;
   input.readiness = spec.readiness ?? { ok: true };
-  input.approval = spec.approval ?? 'user';
+  input.custody = spec.custody === true;
+  if (spec.prompts) input.prompts = spec.prompts;
+  if (spec.keyless) input.keyless = true;
+  if (spec.identity_wallet === false) input.identity_wallet = false;
+  if (spec.grants_unavailable) input.grants_unavailable = true;
+  if (spec.manifest !== undefined) input.manifest = spec.manifest;
   if (spec.nodeStopped) input.node_stopped = true;
   input.node = spec.node ?? {};
   input.clock = spec.clock ?? env.T0;
@@ -236,7 +257,7 @@ async function buildSwarm(checkout, meta, keysJson, dwebVerify) {
   const gsoc = sections.buildGsoc(env);
   const methods = await timed('methods', () => buildMethods(env));
   const swarm = {
-    meta: { ...meta, packages: env.packages, files: env.files, design: '0015, SWM-1' },
+    meta: { ...meta, packages: env.packages, files: null, design: '0015, SWM-1' },
     methods,
     bodies: await timed('bodies', () => sections.buildBodies(env)),
     trees: await timed('trees', () => sections.buildTrees(env)),
@@ -263,6 +284,8 @@ async function buildSwarm(checkout, meta, keysJson, dwebVerify) {
   for (const key of ['methods', 'bodies', 'trees', 'stamps', 'feeds', 'gsoc', 'errors', 'stores']) ordered[key] = swarm[key];
   const grammarFile = await timed('grammar', () => buildGrammar(env, methods, env.nodeBodies, dwebVerify,
     { ...meta, packages: env.packages, design: '0015, SWM-1' }));
+  // Every package file the run loaded, now that it has loaded them all.
+  ordered.meta.files = loadedPackageFiles(env.loadedElsewhere);
   return { swarm: ordered, grammar: grammarFile };
 }
 
@@ -271,9 +294,8 @@ const NO_CASE = {
   busy: 'no case: the reference has no queue, memory budget, Swarm I/O pool or mining queue to fill; SWM-4\'s and SWM-5\'s tests make it',
   'session-transport': 'no case: which network stack carries a call doesn\'t change what a page sees from a loopback node; SWM-5 checks the proxy and Tor',
   'store-writes': 'no case: the files\' bytes are the same; the durable write (0001, 0013) is the core\'s',
-  'pss-recipient': 'gone at this reference: it has #1062 and sends the compressed key itself (the send-pss cases record 66 hex), so the recipient is parity',
 };
-const DEVIATION_IDS = ['feed-entry-bound', 'tar-paths', 'feed-wrap-root', 'reference-check', 'read-data-verified', 'pss-recipient', 'read-pieces',
+const DEVIATION_IDS = ['feed-entry-bound', 'tar-paths', 'feed-wrap-root', 'reference-check', 'read-data-verified', 'read-pieces',
   'index-probe', 'index-allocation', 'stamps-one-read', 'deadlines', 'busy', 'reply-bounds', 'error-body-bound', 'session-transport',
   'transport-error-text', 'subscribe-proxy', 'history-bound', 'store-writes'];
 
@@ -291,34 +313,65 @@ function deviationsOf(swarm) {
 }
 
 const SWARM_FORMATS = {
-  reference: 'freedom-browser at meta.freedomBrowserCommit (integration/rust-core, with #1057 and #1062), its main-process modules loaded whole, over '
-    + 'meta.packages: bee-js 13.2.0 and core-sdk 0.2.2 exactly, each file in meta.files checked by SHA-256. Electron, the identity core, the grant '
-    + 'mirror, the service registry, the publish setup service and the vault timer are the world each case scripts (generator/swarm-world.js).',
+  reference: 'freedom-browser at meta.freedomBrowserCommit (integration/rust-core, with #1057 and #1062), its main-process modules loaded whole, '
+    + 'over meta.packages: bee-js 13.2.0 and core-sdk 0.2.2 exactly. meta.files is every installed package file the run loaded (Node\'s require '
+    + 'cache, the GSOC workers\' included: bee-js, core-sdk, cafe-utility, ethers, better-sqlite3\'s JavaScript, isomorphic-ws and the rest) and each '
+    + 'such package\'s package.json, keyed <name>@<version>/<path>, by SHA-256; a native addon (better-sqlite3\'s prebuild) is a platform\'s build '
+    + 'and is left out. Electron, the identity core (core/vault-backend.js), identity-manager.js\'s own lower modules (profile paths, the node '
+    + 'identity guard, the Radicle gate, private files), the grant mirror, the service registry, the publish setup service and the vault timer are '
+    + 'the world each case scripts (generator/swarm-world.js); identity-manager.js itself is the reference\'s, so its texts (a locked vault\'s, a '
+    + 'bad publisher index\'s) are its own.',
   content: 'content(seed, n): SHA-256(seed ‖ u64_be(i)) for i = 0, 1, …, concatenated and cut to n bytes. A data spec is { utf8 }, { hex }, { base64 } '
     + 'or { seed, length }.',
   keys: 'every signature is core-sdk\'s, under keys.json\'s abandon-12 Bee wallet and publisher keys (public test keys: never fund them).',
   clock: 'Date.now() is the case\'s clock (ms) for the whole run, a step\'s own clock from that step on.',
-  node_url: 'the node is a recording fake on loopback; every text names it http://127.0.0.1:1633.',
+  node_url: 'the node is a recording fake on loopback; every text names it http://127.0.0.1:1633, or a session\'s node_url.',
   typed: 'params and non-JSON answers: { string }, { string_json } (a string with a lone surrogate, as its JSON text), { string_repeat, count }, { number: String(n) } ("-0", "NaN", '
     + '"Infinity"), { bigint }, { boolean }, { null }, { undefined }, { array } ({ hole } for a hole), { object: [[key, value], …] } in key order; '
     + 'where a method reads data, { bytes, kind, base64 } or { string_bytes, base64 } (a string\'s UTF-8), past 64 KiB { …, part: i } with parts[i] '
     + '= { seed | repeat+count, length, sha256 }; { bytes_elsewhere, kind, base64 } for bytes where no method reads them; in answers, '
     + '{ string_digest: units, sha256 } for a string past 8,192 units. An answer is `result` or `error` when JSON keeps it exactly, else '
     + '`result_typed` or `error_typed`; a JSON result past 16 KiB is `result_digest` { json_length, sha256 }.',
-  methods: 'a case: its world (origin, the attested key; grants, the Swarm grants by key; feeds, swarm-feeds.json\'s text before or null; vault; '
-    + 'readiness, getPublishReadiness()\'s answer or "throws"; approval, how main approved (user or auto, meta.page.soc.approval); node, the fake '
-    + 'node\'s declarative state; clock) and its steps, each executeSwarmMethod(method, params, origin, meta.page as main\'s dispatcher builds it): '
-    + 'the answer, every node request (via fetch or http; method, path, query pairs, the headers the caller set, the body as { bytes, base64 } up '
-    + 'to 8 KiB else { bytes, sha256 }, the status, feed { owner, index } for a feed update\'s address, and the grammar\'s verdict: form, ready or '
-    + 'deviation), and the events (sign_soc: the identity core\'s request; readiness, after_requests node requests in; vault_timer_reset; delivered). '
-    + '`after`: swarm-feeds.json\'s text, its backups, and the publish history (getEntries()). A case marked deviation records the reference\'s '
-    + 'outcome, and `core` the design\'s.',
+  methods: 'a case: its world (origin, the page key; grants, the Swarm grants by key, their autoApprove the site\'s rules; feeds, '
+    + 'swarm-feeds.json\'s text before or null; vault, the identity core\'s, which an approved vault.unlock prompt opens; at_execute, the world\'s '
+    + 'changes as the dispatcher hands the request to the service, after its checks (vault: locked, the auto-lock firing; custody; rule_off; '
+    + 'name: moved; messaging, connection or feed_access: revoked, the user\'s Settings meanwhile); readiness, getPublishReadiness()\'s answer or '
+    + '"throws"; custody, whether the agent holds the tab (Agent custody, read live); prompts, the scripted answers in order ({ kind, approve, '
+    + 'choices } or { kind, closed }), a prompt with none approved with its default choices (a feed prompt\'s active identity, or its new one '
+    + 'where the prompt doesn\'t offer the active one; "always allow" off); keyless, a document with no key; identity_wallet: false, the '
+    + 'Identity & Wallet switch off (settings.json); grants_unavailable, the grant mirror unloaded; manifest, a bzz: document\'s '
+    + 'freedom-manifest.json, which main\'s manifest check fetches through the bzz: handler (an https: or ens: document\'s check answers legacy, '
+    + 'with no fetch); session, a subscribe-proxy case\'s; node, the '
+    + 'fake node\'s declarative state; clock) and its steps. A step goes through main\'s page dispatcher (src/main/page/page-swarm.js, '
+    + 'createSwarmDispatchers, loaded whole) with page-requests.js\'s context scripted: the requester attested (one guest, window, frame and '
+    + 'navigation, so a case\'s steps are one document\'s), its PageContext, the prompts, the name holding unless the world moves it. Only the '
+    + 'dispatcher\'s UI and core boundaries are injected: the guest\'s webContents (live, on the default session), Agent custody (the world\'s) '
+    + 'and the setup screen; its hand-off to executeSwarmMethod is observed, never changed. Everything else (the grants through swarm-permissions.js, '
+    + 'the manifest check, the feed store, the origin lock, the vault\'s state through identity-manager.js, settings) is main\'s own. A step with '
+    + 'page: false calls executeSwarmMethod(method, params, origin) directly, with no meta: a method page-requests.js has no row for (it answers '
+    + 'those itself, design 0011) and the service\'s own no-page guards. Each step records the answer, every node request (via fetch or http; '
+    + 'method, path, query pairs, the headers the caller set, the body as { bytes, base64 } up to 8 KiB else { bytes, sha256 }, the status, feed { '
+    + 'owner, index } for a feed update\'s address, and the grammar\'s verdict: form, ready or deviation), and its events in order: the approval '
+    + 'path (custody, each read of Agent custody when a rule could answer; prompt { kind, view, answer }; service { key, page, approval }, what the '
+    + 'dispatcher handed executeSwarmMethod: the key, a page\'s meta, how main approved a SOC, auto for the site\'s rule or user for its prompt; '
+    + 'effect { custody, outcome: ran | refused }, the guard just before the effect, with its custody reads when a rule answered; world, a change '
+    + 'the case scripts), the identity core\'s calls (grant, revoke, touch: the grant mirror\'s writes; sign_soc: the request, its PageContext '
+    + 'and authorization), readiness (after_requests node requests in), vault_timer_reset, route_to_setup, page_event (connect) and delivered (a '
+    + 'subscription\'s message), manifest_fetch. `after`: swarm-feeds.json\'s text, its backups, the publish history (getEntries()), and for a '
+    + 'manifest case swarm-manifest-grants.json\'s text. A case marked deviation '
+    + 'records the reference\'s outcome, and `core` the design\'s.',
+  session: 'subscribe-proxy\'s world (design 0015, question 4): proxy and tor (on or off), node_kind, node_url (the node main\'s service '
+    + 'registry names; a remote one\'s calls reach the fake node), node_loopback (main\'s own isLoopbackGatewayUrl over it, as bzz:\'s transport '
+    + 'classifies the Ant node) and subscribe_check, main\'s answer to the core\'s subscribe check (shell.swarm_ready), the core\'s input: '
+    + '{ ok: false, reason: proxy-or-tor } while a proxy or Tor is on and the node isn\'t on loopback, else { ok: true }. The reference reads '
+    + 'none of it and opens the socket either way (`websockets`), which is the deviation; where the check answers ok it is parity.',
   node: 'stamps, addresses, tags, node: JSON answers (stamps_label_bytes: the usable batch with a label of that many bytes of l); data: blobs stored as their whole ChunkSplitter tree and joined from /bytes; chunks: raw bytes '
     + 'at an address; entries: feed updates, SOCs signed under the named test key ({ key, topic (the topic string), index, data, wrap }); latest: '
     + 'GET /feeds/<o>/<t>\'s reply; probes: the feeds whose updates 0 to head exist (a hit answers 105 zero bytes); probeFail: one index\'s status; '
     + 'rules: replies tried first, { match: { method, path | prefix }, reply: { status, statusText, headers, json | body_utf8 | body_hex | '
     + 'body_base64 | body_data, chunked + pieces_data, cutAfterPieces, declare (a Content-Length longer than the body, then the connection cut), '
-    + 'hangUp, delayMs, abortPage (the page gives up as this request arrives: meta.page.signal aborts) } }. Unmatched, the node answers from what it stores: 404 { code, message } for what it lacks, /bzz with SHA-256 of the '
+    + 'hangUp, delayMs, abortPage (the page gives up as this request arrives: the request\'s signal aborts) }, world (a change to the case\'s world '
+    + 'as the request arrives: custody, rule_off, name) }. Unmatched, the node answers from what it stores: 404 { code, message } for what it lacks, /bzz with SHA-256 of the '
     + 'body as its reference.',
   bodies: 'write-side.json\'s shapes: tar (page-upload.js\'s, for window.swarm, each equal to bee-js\'s collection upload of the same entries; '
     + 'tar-paths cases are bee-js\'s publishCollection, as freedom://publish uses it), file (publishData\'s request; the body is the data), '

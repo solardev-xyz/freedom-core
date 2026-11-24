@@ -12,7 +12,8 @@
 // records the URL it was opened for.
 //
 // What the node answers is the case's script: a list of rules tried in
-// order (`{ match, reply, times }`), then the node's own behaviour over the
+// order (`{ match, reply, times, world }`; `world` changes the case's world
+// as its request arrives), then the node's own behaviour over the
 // chunks, blobs and feeds the case gave it, computed with the reference's
 // own core-sdk (content addresses, SOC addresses, chunk trees). Nothing the
 // reference is tested on is computed here: the node only stores and serves.
@@ -126,7 +127,10 @@ class FakeNode {
     const realRequest = http.request;
     const realWebSocket = globalThis.WebSocket;
     globalThis.fetch = function fetch(input, init = {}) {
-      const url = typeof input === 'string' || input instanceof URL ? String(input) : input.url;
+      let url = typeof input === 'string' || input instanceof URL ? String(input) : input.url;
+      // A node the world places elsewhere than loopback: its calls reach
+      // this one, never the network.
+      if (node.alias && url.startsWith(`${node.alias.from}/`)) url = node.alias.to + url.slice(node.alias.from.length);
       const method = (init.method || 'GET').toUpperCase();
       const seq = node.noteClient('fetch', method, url, init.headers);
       const headers = [...headerPairs(init.headers), [SEQ_HEADER, String(seq)]];
@@ -239,6 +243,7 @@ class FakeNode {
     for (const rule of this.rules) {
       if (rule.left <= 0 || !matches(rule.match, request)) continue;
       rule.left -= 1;
+      if (rule.world) this.onWorld?.(rule.world);
       return typeof rule.reply === 'function' ? rule.reply(request, this) : rule.reply;
     }
     return this.own(request);

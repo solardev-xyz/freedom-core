@@ -16,7 +16,7 @@
 
 const fs = require('node:fs');
 const path = require('node:path');
-const { FORMS, ROWS, VALUES, DEVIATION_REQUESTS, MAIN_HEADERS, formOf, feedAddress, feedIdentifierHex } = require('./swarm-grammar');
+const { FORMS, ROWS, VALUES, DEVIATION_REQUESTS, MAIN_HEADERS, MAX_PROBE_READS, formOf, feedAddress, feedIdentifierHex } = require('./swarm-grammar');
 const { withReference, content, dataOf, requestRecord } = require('./swarm-run');
 const { splitTree, sha256 } = require('./swarm-node');
 const C = require('./swarm-cases');
@@ -100,7 +100,9 @@ function honestFromMethods(env, methods, nodeBodies) {
         from: `methods/${c.id}`,
         key: c.origin,
         params: step.params,
-        ...(ready ? { ready: { check: ready, ok: true } } : {}),
+        // A subscribe-proxy case's ready check answers as main answers the
+        // core's (session.subscribe_check): refused, the parent makes no call.
+        ...(ready ? { ready: { check: ready, ...(ready === 'subscribe' && c.session ? c.session.subscribe_check : { ok: true }) } } : {}),
         ...(rowOf(step) && ROWS[rowOf(step)]?.ready === 'publish' ? { ready: { check: 'publish', ok: true } } : {}),
         calls,
       });
@@ -297,6 +299,238 @@ function leafWithLargeSpan(env) {
   };
 }
 
+/**
+ * The deep trees and an over-full intermediate (design 0015, the honest
+ * calls and forbidden alternatives): no honest splitter writes them inside
+ * readData's 5 MiB, but a node can serve them. Every chunk is core-sdk's
+ * (makeContentAddressedChunk over the payload and span given), so each
+ * address is the reference's own.
+ * - A lone-reference wrapper (one reference, its child's span, as Ant writes
+ *   one) gives its child its whole length, one level deeper, so a chain of
+ *   them reaches any depth within the file's length.
+ * - Tree A: a root of 1 MiB over [W5, W6], where W1 = wrap(Y), W(k+1) =
+ *   wrap(Wk), Y = wrap(Z) and Z an intermediate of 128 leaves: Y sits at
+ *   depths 6 and 7 (each wrapper at two depths too), the depth-6 copy's
+ *   intermediate child Z at depth 7, and the depth-7 copy's at depth 8,
+ *   where the walk ends unverifiable instead of fetching it.
+ * - Tree B: seven wrappers from the root down, then X, an intermediate of
+ *   128 leaves, at depth 7: its leaves sit at depth 8, and one is fetched
+ *   again after the stream.
+ * - Tree E: eight wrappers, so X is an intermediate at depth 8.
+ * - Tree D: 8,192 bytes under a root of four references: the last two get
+ *   no length (zero-length children).
+ */
+function deepTrees(env) {
+  const { core } = env;
+  const chunkOf = (payload, span) => {
+    const address = core.makeContentAddressedChunk(payload, BigInt(span)).address.toHex();
+    return { address, span, wire: Buffer.concat([u64le(span), payload]) };
+  };
+  const leavesOf = (seed, n) => {
+    const data = content(seed, n);
+    const out = [];
+    for (let at = 0; at < n; at += 4096) out.push(chunkOf(data.subarray(at, Math.min(n, at + 4096)), Math.min(4096, n - at)));
+    return out;
+  };
+  const over = (children, span) => chunkOf(Buffer.concat(children.map((c) => Buffer.from(c.address, 'hex'))), span);
+  const wrap = (child) => over([child], child.span);
+  const get = (c, length, depth) => call('chunk', 'GET', `/chunks/${c.address}`, { headers: mainHeaders(), ...(depth === 0 ? {} : { tree: { length, depth } }),
+    reply: { status: 200, body: { base64: b64(c.wire) } } });
+  const ask = (c, length, depth) => call('chunk', 'GET', `/chunks/${c.address}`, { headers: mainHeaders(), tree: { length, depth } });
+  const stream = (root, n) => call('bytes', 'GET', `/bytes/${root.address}`, { headers: mainHeaders([['range', `bytes=0-${n - 1}`]]), maxBytes: n,
+    reply: { status: 206 } });
+  const scenario = (id, root, n, note) => ({ id, row: 'readData', from: 'design 0015, the honest calls and forbidden alternatives (deep trees)',
+    key: C.ORIGIN, params: { object: [['reference', { string: root.address }]] }, ready: { check: 'reachable', ok: true }, note });
+  const L = 524288;
+
+  // Tree A.
+  const z = over(leavesOf('swarm-grammar/deep-a', L), L);
+  const y = wrap(z);
+  const w = [y];
+  for (let k = 1; k <= 6; k++) w.push(wrap(w[k - 1]));
+  const rootA = over([w[5], w[6]], 2 * L);
+  // Breadth first: depth d holds W(6 − d) under W5 and W(7 − d) under W6.
+  const callsA = [get(rootA, 2 * L, 0)];
+  for (let d = 1; d <= 5; d++) callsA.push(get(w[6 - d], L, d), get(w[7 - d], L, d));
+  callsA.push(get(y, L, 6), get(w[1], L, 6), get(z, L, 7), get(y, L, 7));
+  // Tree B.
+  const x = over(leavesOf('swarm-grammar/deep-b', L), L);
+  const chainB = [x];
+  for (let k = 1; k <= 7; k++) chainB.push(wrap(chainB[k - 1]));
+  const rootB = chainB[7];
+  const callsB = [get(rootB, L, 0)];
+  for (let d = 1; d <= 6; d++) callsB.push(get(chainB[7 - d], L, d));
+  callsB.push(get(x, L, 7), stream(rootB, L));
+  const leafB = leavesOf('swarm-grammar/deep-b', L)[0];
+  // Tree E: one more wrapper.
+  const rootE = wrap(rootB);
+  const callsE = [get(rootE, L, 0)];
+  for (let d = 1; d <= 7; d++) callsE.push(get(chainB[8 - d], L, d));
+  // Tree D.
+  const [d0, d1] = leavesOf('swarm-grammar/over-full', 8192);
+  const [e0, e1] = leavesOf('swarm-grammar/over-full-extra', 8192);
+  const rootD = over([d0, d1, e0, e1], 8192);
+  const callsD = [get(rootD, 8192, 0), stream(rootD, 8192)];
+  return {
+    honest: [
+      { ...scenario('readData-one-chunk-at-depths-6-and-7', rootA, 2 * L, 'Y fetched at depths 6 and 7, Z (the depth-6 copy\'s intermediate child) at 7; '
+        + 'the walk ends unverifiable at Z\'s depth-8 occurrence'), calls: callsA },
+      { ...scenario('readData-leaf-at-depth-8-fetched-again', rootB, L, 'seven wrappers, X at depth 7, its first leaf fetched again at depth 8'),
+        calls: [...callsB, get(leafB, 4096, 8)] },
+      { ...scenario('readData-over-full-intermediate', rootD, 8192, 'a root of four references over 8,192 bytes: two leaves, then two zero-length children'),
+        calls: [...callsD, get(d1, 4096, 1)] },
+    ],
+    forbidden: [
+      { ...scenario('readData-depth-7-copy-child-at-depth-8', rootA, 2 * L, 'the depth-7 copy\'s intermediate child, at depth 8'), rule: 'value',
+        calls: [...callsA, ask(z, L, 8)] },
+      { ...scenario('readData-intermediate-at-depth-8', rootE, L, 'an intermediate at depth 8 (eight wrappers above it)'), rule: 'value',
+        calls: [...callsE, ask(x, L, 8)] },
+      { ...scenario('readData-zero-length-child', rootD, 8192, 'a zero-length child: an intermediate with more references than its length needs'),
+        rule: 'value', calls: [callsD[0], ask(e0, 0, 1)] },
+    ],
+  };
+}
+
+// 0009's geometry, as the design's rules read an intermediate main returned
+// (fc_swarm::tree): the data references before the trailing zeros, the
+// first children a full branch each, the last the rest.
+const CHUNK = 4096;
+const MAX_REFS = 128;
+const MAX_DEPTH = 8;
+
+function branchSize(refs, span) {
+  let branch = BigInt(CHUNK);
+  for (;;) {
+    const before = branch * BigInt(refs - 1);
+    if (span <= before || span - before <= branch) return branch;
+    branch *= BigInt(MAX_REFS);
+  }
+}
+
+/** The data children of `wire` read as an intermediate of `length` bytes, or null where the core refuses it; `level` > 0 throws (not modelled). */
+function dataChildren(wire, length) {
+  const level = wire[7] > 128 ? wire[7] & 0x7f : 0;
+  if (level > 0) throw Object.assign(new Error('a redundancy level'), { level });
+  const payload = wire.subarray(8);
+  if (payload.length % 32 !== 0) return null;
+  let refs = payload.length / 32;
+  while (refs > 0 && payload.subarray((refs - 1) * 32, refs * 32).every((b) => b === 0)) refs -= 1;
+  if (refs === 0 || refs > MAX_REFS) return null;
+  const span = BigInt(length);
+  const branch = branchSize(refs, span);
+  const out = [];
+  for (let i = 0; i < refs; i++) {
+    const before = branch * BigInt(i);
+    const rest = span > before ? span - before : 0n;
+    out.push({ address: payload.subarray(i * 32, i * 32 + 32).toString('hex'), length: Number(i + 1 === refs ? rest : (rest < branch ? rest : branch)) });
+  }
+  return out;
+}
+
+/**
+ * Plays a readData scenario against the design's admission rules (Values
+ * main derives, the file tree's data children), over the replies the
+ * scenario gives main: the root at params.reference; one bytes, ranged
+ * 0 to n − 1 with max_bytes n, only when n is over 4,096 bytes; and each
+ * later chunk an unfetched slot of an occurrence (address, logical length,
+ * depth) that an intermediate main returned names, a child that isn't a leaf
+ * named only above depth 8. Returns the first call refused and its rule, or
+ * null when every call is admitted; `skip` for a tree with a redundancy
+ * level, whose parities this check doesn't model.
+ */
+function admitReadData(scenario, bodyOf) {
+  const reference = Object.fromEntries(scenario.params.object)['reference'].string.toLowerCase();
+  const slots = new Map();
+  const named = new Set();
+  const key = (address, length, depth) => `${address}/${length}/${depth}`;
+  const allowedHeaders = (call, extra) => call.headers.every(([n, v]) => MAIN_HEADERS[n] === v || extra.includes(n));
+  let n = null;
+  let streamed = false;
+  const parse = (wire, length, depth) => {
+    if (length <= CHUNK) return;
+    for (const child of dataChildren(wire, length) || []) {
+      if (child.length === 0) continue;
+      if (child.length > CHUNK && depth + 1 >= MAX_DEPTH) continue;
+      const k = key(child.address, child.length, depth + 1);
+      named.add(k);
+      slots.set(k, (slots.get(k) || 0) + 1);
+    }
+  };
+  try {
+    for (const [i, c] of scenario.calls.entries()) {
+      const refuse = (rule) => ({ at: i, rule });
+      if (i === 0) {
+        if (c.form !== 'chunk') return refuse('form');
+        if (c.path !== `/chunks/${reference}` || c.tree) return refuse('value');
+        if (!allowedHeaders(c, [])) return refuse('header');
+        const wire = bodyOf(c);
+        if (!wire) continue;
+        const span = Buffer.from(wire.subarray(0, 8));
+        if (span[7] > 128) throw Object.assign(new Error('a redundancy level'), { level: span[7] & 0x7f });
+        n = Number(span.readBigUInt64LE(0));
+        parse(wire, n, 0);
+        continue;
+      }
+      if (c.form === 'bytes') {
+        if (streamed) return refuse('count');
+        if (!(n > CHUNK)) return refuse('order');
+        if (c.path !== `/bytes/${reference}`) return refuse('value');
+        if (!allowedHeaders(c, ['range'])) return refuse('header');
+        if (!c.headers.some(([h, v]) => h === 'range' && v === `bytes=0-${n - 1}`)) return refuse('header');
+        if (c.max_bytes !== n) return refuse('value');
+        streamed = true;
+        continue;
+      }
+      if (c.form !== 'chunk') return refuse('form');
+      if (!allowedHeaders(c, [])) return refuse('header');
+      if (!c.tree) return refuse('value');
+      const address = c.path.slice('/chunks/'.length);
+      const k = key(address, c.tree.length, c.tree.depth);
+      if (!named.has(k)) return refuse('value');
+      if (!(slots.get(k) > 0)) return refuse('count');
+      slots.set(k, slots.get(k) - 1);
+      const wire = bodyOf(c);
+      if (wire) parse(wire, c.tree.length, c.tree.depth);
+    }
+  } catch (err) {
+    if (err.level) return { skip: true };
+    throw err;
+  }
+  return null;
+}
+
+/** Every readData scenario played against the admission rules: honest ones admitted whole, forbidden ones refused at their last call by their rule. */
+function checkReadDataScenarios(honest, forbidden, dwebVerify) {
+  const bodyOf = (c) => {
+    if (c.reply?.body?.base64) return Buffer.from(c.reply.body.base64, 'base64');
+    if (c.reply?.body_ref) return Buffer.from(dwebVerify.swarm.chunks[c.path.slice('/chunks/'.length)], 'base64');
+    return null;
+  };
+  const out = { honest: 0, forbidden: 0, skipped: [] };
+  for (const s of honest.filter((h) => h.row === 'readData')) {
+    const verdict = admitReadData(s, bodyOf);
+    if (verdict?.skip) {
+      out.skipped.push(s.id);
+      continue;
+    }
+    if (verdict) throw new Error(`honest ${s.id}: call ${verdict.at} refused (${verdict.rule})`);
+    out.honest += 1;
+  }
+  for (const s of forbidden.filter((f) => f.row === 'readData')) {
+    const verdict = admitReadData(s, bodyOf);
+    if (verdict?.skip) {
+      out.skipped.push(s.id);
+      continue;
+    }
+    if (!verdict || verdict.at !== s.calls.length - 1 || verdict.rule !== s.rule) {
+      throw new Error(`forbidden ${s.id}: ${verdict ? `call ${verdict.at} refused (${verdict.rule})` : 'every call admitted'}, `
+        + `the scenario refuses call ${s.calls.length - 1} (${s.rule})`);
+    }
+    out.forbidden += 1;
+  }
+  return out;
+}
+
 /** main's own rows (`swarm.publish`, `swarm.feed`, `swarm.stamps`, `swarm.upload_status`), from publish-service.js and feed-service.js. */
 async function mainRows(env) {
   const out = [];
@@ -389,7 +623,7 @@ function forbiddenFrom(honest, env) {
   add('readData-unnamed-address', 'read-data-524289', 'value', 'a chunk at an address no returned chunk names', (calls) => [calls[0],
     call('chunk', 'GET', `/chunks/${'ab'.repeat(32)}`, { headers: mainHeaders(), tree: { length: 524288, depth: 1 } })]);
   add('readData-more-than-named', 'read-data-524289', 'count', 'a chunk more times than the tree names it', (calls) => [...calls.slice(0, -1),
-    structuredClone(calls[1]), structuredClone(calls[1])]);
+    structuredClone(calls[1])]);
   const coded = honest.find((s) => s.id === 'readData-walk-file-524289-rs2');
   if (coded) {
     const parity = env.parityOf('file-524289-rs2');
@@ -484,12 +718,13 @@ function forbiddenFrom(honest, env) {
     third.path = `/chunks/${env.feedAddressFor(third.feed)}`;
     return calls.slice(0, calls.indexOf(third) + 1);
   });
-  add('updateFeed-83rd-probe', 'update-feed-head-81-reads', 'count', 'an 83rd probe chunk', (calls) => {
+  // The longest honest run is 81 reads; an 82nd is past the cap.
+  add('updateFeed-82nd-probe', 'update-feed-head-81-reads', 'count', 'an 82nd head-probe read', (calls) => {
     const probes = calls.filter((c) => c.feed);
-    const extra = Array.from({ length: 83 - probes.length }, () => structuredClone(probes.at(-1)));
-    return [...calls.slice(0, calls.indexOf(probes.at(-1)) + 1), ...extra];
+    if (probes.length !== MAX_PROBE_READS) throw new Error(`update-feed-head-81-reads probes ${probes.length} times`);
+    return [...calls.slice(0, calls.indexOf(probes.at(-1)) + 1), structuredClone(probes.at(-1))];
   });
-  add('sendPss-128-hex-recipient', 'send-pss-sent', 'query', 'the 128-hex PSS recipient (F-9)', (calls) => {
+  add('sendPss-128-hex-recipient', 'send-pss-sent', 'query', 'the 128-hex PSS recipient, bee-js\'s form before #1062', (calls) => {
     last(calls).query = [['recipient', 'ab'.repeat(64)]];
   });
   add('sendPss-upper-case-targets', 'send-pss-sent', 'value', 'upper-case <x>', (calls) => { last(calls).path = last(calls).path.replace(/\/[0-9a-f]+$/, (m) => m.toUpperCase()); });
@@ -518,9 +753,11 @@ async function buildGrammar(env, methods, nodeBodies, dwebVerify, meta) {
   const walks = dwebWalks(env, dwebVerify);
   const two = twoPositions(env);
   const leaf = leafWithLargeSpan(env);
+  const deep = deepTrees(env);
   const main = await mainRows(env);
-  const honest = [...fromMethods, ...walks, ...two.honest, ...leaf.honest, ...main];
-  const forbidden = [...forbiddenFrom(honest, env), ...two.forbidden, ...leaf.forbidden];
+  const honest = [...fromMethods, ...walks, ...two.honest, ...leaf.honest, ...deep.honest, ...main];
+  const forbidden = [...forbiddenFrom(honest, env), ...two.forbidden, ...leaf.forbidden, ...deep.forbidden];
+  const readDataChecked = checkReadDataScenarios(honest, forbidden, dwebVerify);
   // What the check found: every recorded request, by row and by form or deviation.
   const checked = {};
   for (const c of methods) {
@@ -547,6 +784,7 @@ async function buildGrammar(env, methods, nodeBodies, dwebVerify, meta) {
     rows: ROWS,
     deviation_requests: DEVIATION_REQUESTS,
     checked,
+    scenarios_checked: { readData: readDataChecked },
     honest,
     forbidden,
   };
@@ -565,8 +803,14 @@ const GRAMMAR_FORMATS = {
     + 'max_bytes, feed { owner, index }, tree { length, depth }, and reply (status, headers, body { base64 } or body_ref naming the chunk store it comes from, '
     + 'such as dweb-verify.json swarm.chunks). Every call of an honest scenario is admitted in order; a forbidden scenario\'s calls before its last are '
     + 'admitted and its last is refused before any dial with `rule`.',
-  gaps: 'the design\'s honest and forbidden tree cases at depths 6 to 8 (and a zero-length child) can\'t occur under readData: with n at most B = 5 MiB, '
-    + '0009\'s geometry puts every leaf at depth 2 or less, so they are left out here (see the PR\'s questions).',
+  scenarios_checked: 'the readData scenarios played against the design\'s admission rules (Values main derives: the root at params.reference, one '
+    + 'ranged bytes, and each later chunk an unfetched slot of an occurrence, address, logical length and depth, that an intermediate main returned names, '
+    + 'by 0009\'s geometry): honest ones admitted whole, forbidden ones refused at their last call by their rule. A tree whose chunks carry a '
+    + 'redundancy level is skipped (its parities aren\'t modelled here): `skipped` names those scenarios.',
+  deep_trees: 'readData-one-chunk-at-depths-6-and-7, readData-leaf-at-depth-8-fetched-again, readData-over-full-intermediate and their forbidden '
+    + 'alternatives: chains of lone-reference wrappers (one reference, the child\'s span, as Ant writes one), each giving its child its whole length one '
+    + 'level deeper, and a root with more references than its length needs, every chunk core-sdk\'s makeContentAddressedChunk. No honest splitter writes '
+    + 'them inside readData\'s 5 MiB; a node can serve them.',
 };
 
 module.exports = { buildGrammar };

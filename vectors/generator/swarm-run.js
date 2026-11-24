@@ -204,41 +204,165 @@ function counterCrypto() {
   };
 }
 
-/** The page's `meta.page`, as main's dispatcher builds it (page/page-swarm.js). */
-function pageMeta(approval, events, node) {
-  const controller = new AbortController();
-  // A reply marked abortPage makes the page give up as its request arrives.
-  if (node) node.abortPage = () => controller.abort();
-  return {
-    page: {
-      document: 'document-1',
-      deliverTo: async (message) => {
-        events.push({ delivered: message });
-        return { ok: true };
-      },
-      effect: async (run) => ({ value: await run() }),
-      afterEffect: async (write) => {
-        write();
-        return true;
-      },
-      copied: () => {},
-      signal: controller.signal,
-      soc: { pageContext: () => ({ page: 'the request\'s PageContext' }), approval },
-    },
-  };
+// What the page's document is, as page-requests.js attests it: one guest,
+// window, frame and navigation for every case, so a case's steps are one
+// document's requests.
+const GUEST = 1;
+const WINDOW = 1;
+const FRAME = 1;
+const NAVIGATION = 1;
+
+/** The URL a page key's document has (the manifest check reads it). */
+function urlOf(key) {
+  if (!key) return 'about:blank';
+  return /^[a-z][a-z0-9+.-]*:\/\//.test(key) ? `${key}/` : `ens://${key}/`;
 }
 
 /**
- * Runs `spec` and returns its record. `spec.steps` (or one step at the top
- * level): `{ method, params, origin? }`, `params` a function giving the live
- * value. The world: `origin`, `grants`, `feeds` (the store's object or text),
- * `manifests` (text), `vault`, `readiness`, `approval`, `node`, `clock`.
+ * A prompt's answer: the case's next scripted one, else its default. The
+ * dispatcher's own `choices` check reads the raw choices, as page-prompts.js
+ * does when the chrome decides; a scripted answer it refuses is a bug in the
+ * case. An approved vault.unlock opens the identity core's vault, as main's
+ * unlock does before it answers the dispatcher.
  */
+function answerPrompt(world, events, spec) {
+  const { kind, view = {}, choices } = spec;
+  const scripted = world.prompts.length ? world.prompts.shift() : null;
+  let answer;
+  if (scripted) {
+    assert.ok(!scripted.kind || scripted.kind === kind, `a scripted ${scripted.kind} answer met a ${kind} prompt`);
+    answer = scripted.closed ? { closed: scripted.closed } : { approve: scripted.approve === true, choices: scripted.choices ?? {} };
+  } else {
+    answer = { approve: true, choices: defaultChoices(kind, view, choices) };
+  }
+  events.push({ prompt: { kind, view: plainView(view), answer } });
+  if (answer.closed) return Promise.resolve({ closed: answer.closed });
+  if (!answer.approve) return Promise.resolve({ approve: false, choices: {} });
+  const checked = typeof choices === 'function' ? choices(answer.choices) : {};
+  assert.ok(checked, `the ${kind} prompt refuses the answer ${JSON.stringify(answer.choices)}`);
+  if (kind === 'vault.unlock') world.unlocked = true;
+  return Promise.resolve({ approve: true, choices: checked });
+}
+
+/**
+ * A prompt's default choices: the view's active identity on a feed prompt
+ * (its new one where the prompt doesn't offer the active one), "allow" on a
+ * manifest consent, and nothing else chosen ("always allow" off).
+ */
+function defaultChoices(kind, view, choices) {
+  if (kind === 'swarm.feed') {
+    const active = { identity: view.activeIdentityId };
+    return typeof choices === 'function' && choices(active) ? active : { identity: view.newIdentity.id };
+  }
+  if (kind === 'swarm.manifest') return { outcome: 'allow' };
+  return {};
+}
+
+const plainView = (view) => JSON.parse(JSON.stringify(view));
+
+/**
+ * The context page-requests.js hands a dispatcher, for one step: the
+ * attested requester, the prompt (scripted), the PageContext (custody read
+ * now), the name and the document's key (holding unless the world says the
+ * name moved), events to the document (noted), and the request's signal,
+ * which a reply marked abortPage aborts.
+ */
+function pageContext(world, events, { method, params, key, id }) {
+  const controller = new AbortController();
+  world.abortPage = () => controller.abort();
+  const requester = Object.freeze({ guest: GUEST, window: WINDOW, frame: FRAME, navigation: NAVIGATION, url: urlOf(key), key, topKey: key });
+  const state = { after: null };
+  const context = Object.freeze({
+    id,
+    requester,
+    provider: 'swarm',
+    method,
+    params,
+    isCurrent: () => true,
+    nameHolds: async () => world.nameHolds,
+    keylessOnceUnheld: () => {},
+    holdsKey: () => world.nameHolds,
+    prompt: (spec) => answerPrompt(world, events, spec),
+    pageContext: () => ({ origin: key, top_origin: key, frame: FRAME, navigation: NAVIGATION, agent: world.custody }),
+    get signal() {
+      return controller.signal;
+    },
+    afterAnswer: (fn) => {
+      if (typeof fn === 'function') state.after = fn;
+    },
+    liveDocuments: () => [requester],
+    sendEvent: async (target, event, data) => {
+      events.push(event === 'message' ? { delivered: data } : { page_event: { event, data } });
+      return { ok: true };
+    },
+    onDocumentEnded: () => () => {},
+    copied: () => {},
+  });
+  return { context, after: () => state.after };
+}
+
+/**
+ * Main's page dispatcher (page/page-swarm.js), loaded whole, with only its
+ * UI and core boundaries scripted: the guest's webContents (a live guest on
+ * the default session), Agent custody (the world's, each read noted) and the
+ * setup screen (noted). Its hand-off to the service is observed, not
+ * changed: what it hands executeSwarmMethod (the key, a page's meta and how
+ * main approved a SOC), the world's changes as the request reaches the
+ * service (`at_execute`), and the effect guard's checks and outcome.
+ * Everything else is main's own: the grants, the manifest check, the feed
+ * store, the origin lock, the vault's state (identity-manager.js), settings.
+ */
+function dispatchersFor(ref, world, events) {
+  const guest = { id: GUEST, isDestroyed: () => false };
+  return ref.pageSwarm.createSwarmDispatchers({
+    guestContents: (id) => (id === GUEST ? guest : null),
+    inCustody: (id) => {
+      assert.equal(id, GUEST, 'custody is read for the requesting guest');
+      (world.guard ? world.guard.custody : events).push(world.guard ? world.custody : { custody: world.custody });
+      return world.custody;
+    },
+    routeToSetup: (requester, reason) => events.push({ route_to_setup: reason }),
+    execute: (method, params, key, meta) => {
+      const handed = { key };
+      if (meta?.page) {
+        handed.page = true;
+        if (meta.page.soc) handed.approval = meta.page.soc.approval;
+      }
+      events.push({ service: handed });
+      if (world.atExecute) world.change(world.atExecute);
+      if (typeof meta?.page?.effect === 'function') {
+        const effect = meta.page.effect;
+        meta = { ...meta, page: { ...meta.page, effect: async (run) => {
+          const mark = { custody: [] };
+          events.push({ effect: mark });
+          world.guard = mark;
+          let out;
+          try {
+            out = await effect(() => {
+              world.guard = null;
+              mark.outcome = 'ran';
+              return run();
+            });
+          } finally {
+            world.guard = null;
+          }
+          if (out?.refused) mark.refused = out.refused;
+          if (!mark.custody.length) delete mark.custody;
+          return out;
+        } } };
+      }
+      return ref.provider.executeSwarmMethod(method, params, key, meta);
+    },
+  });
+}
+
 /**
  * Runs `fn(ref, node, world)` with the reference loaded fresh over the fake
  * node and the world `spec` scripts (`node`, `feeds`, `manifests`, `grants`,
- * `vault`, `readiness`, `clock`, `nodeStopped`, `origin`), then tears it all
- * down. The Freedom data directory is read back through `fn`'s `world.dir`.
+ * `vault`, `readiness`, `clock`, `nodeStopped`, `origin`, and for the
+ * dispatcher `custody`, `prompts`, `at_execute`, `identity_wallet`,
+ * `grants_unavailable`, `session`), then tears it all down. The Freedom data
+ * directory is read back through `fn`'s `world.dir`.
  */
 // The reference's own console lines (swarm-permissions.js and
 // permission-manifests.js log there) stay out of the generator's output.
@@ -256,8 +380,23 @@ async function withReference(env, spec, fn) {
   if (feedsBefore !== null) fs.writeFileSync(path.join(dir, 'swarm-feeds.json'), feedsBefore);
   if (spec.manifests !== undefined && spec.manifests !== null) fs.writeFileSync(path.join(dir, 'swarm-manifest-grants.json'), spec.manifests);
   for (const [name, text] of Object.entries(spec.files || {})) fs.writeFileSync(path.join(dir, name), text);
+  // Settings: the Identity & Wallet switch, which every window.swarm method
+  // reads first (settings-store.js, main's own).
+  if (!Object.hasOwn(spec.files || {}, 'settings.json')) {
+    fs.writeFileSync(path.join(dir, 'settings.json'), JSON.stringify({ enableIdentityWallet: spec.identity_wallet !== false }));
+  }
+  // A node elsewhere than loopback (subscribe-proxy): main's service
+  // registry names it, and the harness carries its calls to the fake node.
+  if (spec.session?.node_url) node.alias = { from: new URL(spec.session.node_url).origin, to: nodeUrl };
   const world = {
-    nodeUrl: spec.nodeStopped ? null : nodeUrl,
+    nodeUrl: spec.nodeStopped ? null : (spec.session?.node_url ?? nodeUrl),
+    custody: spec.custody === true,
+    prompts: [...(spec.prompts || [])],
+    atExecute: spec.at_execute,
+    grantsLoaded: spec.grants_unavailable !== true,
+    nameHolds: true,
+    guard: null,
+    manifest: spec.manifest,
     readiness: spec.readiness ?? { ok: true },
     unlocked: spec.vault !== 'locked',
     grants: structuredClone(spec.grants ?? env.connected(spec.origin ?? env.ORIGIN)),
@@ -269,6 +408,29 @@ async function withReference(env, spec, fn) {
     crypto: counterCrypto(),
   };
   world.requestCount = () => node.requests.length;
+  // A reply marked abortPage aborts the page's request (pageContext). The
+  // world changes (Agent custody taken; the site's rule, its messaging grant,
+  // its connection or its feed access gone; the name moved; the vault
+  // locked) as a node rule's request arrives (its `world`), or as the
+  // dispatcher hands the request to the service (`at_execute`).
+  node.abortPage = () => world.abortPage?.();
+  world.change = (change) => {
+    const key = spec.origin ?? env.ORIGIN;
+    for (const [what, value] of Object.entries(change)) {
+      if (what === 'custody') world.custody = value === true;
+      else if (what === 'vault') world.unlocked = value !== 'locked';
+      else if (what === 'name') world.nameHolds = value !== 'moved';
+      else if (what === 'rule_off') {
+        world.grants[key] = { ...world.grants[key], autoApprove: { ...world.grants[key].autoApprove, [value]: false } };
+      } else if (what === 'messaging' && value === 'revoked') world.grants[key] = { ...world.grants[key], messaging: false };
+      else if (what === 'connection' && value === 'revoked') delete world.grants[key];
+      // Main's own feed store, as Settings revokes a site's feed access.
+      else if (what === 'feed_access' && value === 'revoked') world.ref.feedStore.revokeFeedAccess(key, { source: 'user' });
+      else throw new Error(`no world change ${what}`);
+      world.events.push({ world: { [what]: value } });
+    }
+  };
+  node.onWorld = world.change;
   const { RealDate, FixedDate } = fixedDate(clock);
   const undo = node.install();
   globalThis.Date = FixedDate;
@@ -276,6 +438,7 @@ async function withReference(env, spec, fn) {
   let ref;
   try {
     ref = loadReference(env.checkout, world);
+    world.ref = ref;
     return await fn(ref, node, world);
   } finally {
     try {
@@ -295,16 +458,17 @@ async function withReference(env, spec, fn) {
 
 /**
  * Runs `spec` and returns its record. `spec.steps` (or one step at the top
- * level): `{ method, params, origin? }`, `params` a function giving the live
- * value. The world: `origin`, `grants`, `feeds` (the store's object or text),
- * `manifests` (text), `vault`, `readiness`, `approval`, `node`, `clock`.
+ * level): `{ method, params, origin?, page?, clock? }`, `params` a function
+ * giving the live value. The world is withReference's.
  */
 async function runMethodCase(env, spec) {
   const steps = spec.steps || [{ method: spec.method, params: spec.params, origin: spec.origin }];
   return withReference(env, spec, async (ref, node, world) => {
     const { events, clock, dir } = world;
     ref.provider.registerSwarmProviderIpc();
+    const dispatchers = dispatchersFor(ref, world, events);
     const record = { id: spec.id };
+    if (spec.session) record.session = sessionOf(ref, node, world, spec.session);
     const out = [];
     for (const [k, step] of steps.entries()) {
       const params = typeof step.params === 'function' ? step.params() : step.params;
@@ -322,12 +486,24 @@ async function runMethodCase(env, spec) {
       const before = node.requests.length;
       const eventsBefore = events.length;
       if (step.clock !== undefined) clock.now = step.clock;
-      const meta = step.page === false ? undefined : pageMeta(step.approval ?? spec.approval ?? 'user', events, node);
-      const value = await ref.provider.executeSwarmMethod(step.method, params, step.origin ?? spec.origin ?? env.ORIGIN, meta);
+      // A page's request goes through main's dispatcher; a method it has no
+      // dispatcher for (page-requests.js refuses those first) and a step
+      // marked `page: false` call executeSwarmMethod directly, with no meta.
+      const dispatch = typeof step.method === 'string' && step.page !== false ? dispatchers[`swarm:${step.method}`] : undefined;
+      let value;
+      if (dispatch) {
+        const key = spec.keyless ? null : origin;
+        const { context, after } = pageContext(world, events, { method: step.method, params, key, id: k + 1 });
+        value = await dispatch(context);
+        // What the dispatcher queued for once the answer is out (connect).
+        if (after()) await after()();
+      } else {
+        value = await ref.provider.executeSwarmMethod(step.method, params, origin);
+      }
+      if (world.fatal) throw world.fatal;
       const entry = typeof step.method === 'string' ? { method: step.method } : { method_typed: encode(step.method) };
       if (step.origin && step.origin !== (spec.origin ?? env.ORIGIN)) entry.origin = step.origin;
-      if (step.approval) entry.approval = step.approval;
-      if (step.page === false) entry.page = false;
+      if (!dispatch) entry.page = false;
       if (step.clock !== undefined) entry.clock = step.clock;
       entry.params = typed;
       if (parts.length) entry.parts = parts;
@@ -357,8 +533,31 @@ async function runMethodCase(env, spec) {
     };
     const backups = fs.readdirSync(dir).filter((name) => name.startsWith('swarm-feeds.') && name !== 'swarm-feeds.json');
     if (backups.length) record.after.feeds_backups = backups.sort();
+    // A manifest the check found: the manifest store main wrote.
+    const manifestsPath = path.join(dir, 'swarm-manifest-grants.json');
+    if (spec.manifest !== undefined && fs.existsSync(manifestsPath)) record.after.manifests = fs.readFileSync(manifestsPath, 'utf8');
     return record;
   });
+}
+
+/**
+ * The session a subscribe-proxy case states (design 0015, question 4): a
+ * proxy or Tor on, the node's kind and URL, the URL classified by main's
+ * own test (isLoopbackGatewayUrl), and main's answer to the core's
+ * subscribe check by question 4's rule: refused while a proxy or Tor is on
+ * and the node isn't on loopback. The reference reads none of it.
+ */
+function sessionOf(ref, node, world, session) {
+  const loopback = ref.load('../ipfs/gateway-transport.js').isLoopbackGatewayUrl(world.nodeUrl);
+  const refused = (session.proxy === true || session.tor === true) && !loopback;
+  return {
+    proxy: session.proxy === true,
+    tor: session.tor === true,
+    node_kind: session.node_kind,
+    node_url: node.normalize(world.nodeUrl),
+    node_loopback: loopback,
+    subscribe_check: refused ? { ok: false, reason: 'proxy-or-tor' } : { ok: true },
+  };
 }
 
 /** Which params positions a method reads as data (design 0015, Main's encoding). */
@@ -421,4 +620,4 @@ function eventRecord(e) {
   return e;
 }
 
-module.exports = { runMethodCase, withReference, requestRecord, eventRecord, outcomeOf, content, dataOf, bodyRecord, nodeWorld, replyOf, feedIdentifier, candidateIndexes, pageMeta };
+module.exports = { runMethodCase, withReference, requestRecord, eventRecord, outcomeOf, content, dataOf, bodyRecord, nodeWorld, replyOf, feedIdentifier, candidateIndexes, urlOf };

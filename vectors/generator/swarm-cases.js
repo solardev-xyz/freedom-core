@@ -4,8 +4,10 @@
 // method's honest paths, its tables of bad params (one failing check per
 // row, every later check failing too where it can, so the first failure
 // pins the order), the state checks after them (grants, identities, SW-1,
-// readiness, the vault), the node's answers, and the design's deviations.
-// The worlds are scripted here; every outcome is the reference's.
+// readiness, the vault), the node's answers, the dispatcher's approval path
+// (prompts, rules, Agent custody, the rechecks before an effect), and the
+// design's deviations. The worlds are scripted here; every outcome is the
+// reference's.
 
 const MiB = 1024 * 1024;
 const T0 = 1767225600123; // 2026-01-01T00:00:00.123Z
@@ -96,6 +98,13 @@ function methodCases(env) {
   const u8 = (text) => new Uint8Array(Buffer.from(text, 'utf8'));
   const cases = [];
   const add = (c) => cases.push(c);
+  // The vault's auto-lock fires after the dispatcher's checks, as main hands
+  // the request to the service: the service meets a locked vault, which no
+  // page reaches otherwise (the dispatcher unlocks first).
+  const LOCKS = { at_execute: { vault: 'locked' } };
+  // A connected site with standing rules (its "always allow").
+  const rule = (flags, origin = ORIGIN, over = {}) => connected(origin, {
+    autoApprove: { publish: false, feeds: false, signing: false, messaging: false, ...flags }, ...over });
 
   // Stores the feed cases share.
   const bee = identity('bee-wallet');
@@ -109,7 +118,9 @@ function methodCases(env) {
   const blogApp = { blog: feedRecord(ORIGIN, 'blog', 'app-scoped:0', 'publisher:0') };
 
   // -------------------------------------------------------------------------
-  // The dispatcher's own checks.
+  // executeSwarmMethod's own checks of the method: no page reaches them
+  // (page-requests.js answers a method it has no row for), so they run with
+  // no meta (page: false).
   add({ id: 'method-missing', method: undefined, params: () => ({}) });
   add({ id: 'method-not-a-string', method: 42, params: () => ({}) });
   add({ id: 'method-unknown', method: 'swarm_mint', params: () => ({}) });
@@ -122,6 +133,24 @@ function methodCases(env) {
   add({ id: 'request-access-not-connected', method: 'swarm_requestAccess', params: () => undefined, grants: {} });
   add({ id: 'request-access-ens-key', method: 'swarm_requestAccess', origin: ENS, grants: connected(ENS), params: () => ({}) });
   add({ id: 'request-access-other-site', method: 'swarm_requestAccess', params: () => ({}), grants: connected(OTHER) });
+  add({ id: 'request-access-rejected', method: 'swarm_requestAccess', params: () => undefined, grants: {},
+    prompts: [{ kind: 'swarm.connect', approve: false }] });
+  // A bzz: site's permission manifest (main's own check, eager for
+  // requestAccess): its consent is main's prompt (swarm.manifest), decided
+  // on the user's answer: managed by the manifest, one by one, or denied.
+  const BZZ = `bzz://${'5a'.repeat(32)}`;
+  const manifest = { schema: 'freedom-manifest/1', name: 'Notes', description: 'A notes app',
+    capabilities: { swarm: { publish: { why: 'Saves your notes' }, messaging: { why: 'Syncs between devices' } } } };
+  const ma = (id, over) => add({ id: `request-access-manifest-${id}`, method: 'swarm_requestAccess', params: () => undefined, origin: BZZ, grants: {},
+    manifest, ...over });
+  ma('allow', {});
+  ma('individual', { prompts: [{ kind: 'swarm.manifest', approve: true, choices: { outcome: 'individual' } }] });
+  ma('denied', { prompts: [{ kind: 'swarm.manifest', approve: false }] });
+  ma('absent', { manifest: undefined });
+  add({ id: 'request-access-keyless', method: 'swarm_requestAccess', params: () => undefined, keyless: true });
+  add({ id: 'request-access-identity-wallet-off', method: 'swarm_requestAccess', params: () => undefined, identity_wallet: false });
+  add({ id: 'capabilities-keyless', method: 'swarm_getCapabilities', params: () => undefined, keyless: true });
+  add({ id: 'capabilities-grants-unavailable', method: 'swarm_getCapabilities', params: () => undefined, grants_unavailable: true });
   add({ id: 'capabilities-connected-ready', method: 'swarm_getCapabilities', params: () => undefined });
   add({ id: 'capabilities-not-connected', method: 'swarm_getCapabilities', params: () => undefined, grants: {} });
   for (const reason of NOT_READY) {
@@ -228,6 +257,29 @@ function methodCases(env) {
   // A /stamps answer past its form's 1 MiB cap: bee-js reads it whole.
   pd('stamps-reply-past-cap', () => ({ data: 'x', contentType: 'text/plain' }), { node: { stamps_label_bytes: 1048576 },
     deviation: { id: 'reply-bounds', core: { error: { code: -32603, message: 'Swarm node reply too large' } } } });
+  // The dispatcher's approval path (page/page-swarm.js): the publish prompt,
+  // or the site's publish rule, which never answers for a tab in Agent
+  // custody, read when the rule is chosen and again just before the upload
+  // (after its last wait: the /stamps read), with the name and the key.
+  const x = () => ({ data: 'x', contentType: 'text/plain' });
+  const atStamps = (world) => ({ stamps: STAMPS.usable, rules: [
+    { match: { method: 'GET', path: '/stamps' }, world, reply: { status: 200, json: STAMPS.usable } }] });
+  pd('prompt-rejected', x, { prompts: [{ kind: 'swarm.publish', approve: false }] });
+  pd('prompt-closed', x, { prompts: [{ kind: 'swarm.publish', closed: 'navigated' }] });
+  pd('rule', x, { grants: rule({ publish: true }) });
+  pd('rule-in-custody', x, { grants: rule({ publish: true }), custody: true });
+  pd('rule-custody-before-upload', x, { grants: rule({ publish: true }), node: atStamps({ custody: true }) });
+  pd('rule-off-before-upload', x, { grants: rule({ publish: true }), node: atStamps({ rule_off: 'publish' }) });
+  pd('prompt-custody-before-upload', x, { node: atStamps({ custody: true }) });
+  pd('name-moved-before-upload', x, { origin: ENS, grants: connected(ENS), node: atStamps({ name: 'moved' }) });
+  add({ id: 'publish-data-always-allow', node: { stamps: STAMPS.usable },
+    prompts: [{ kind: 'swarm.publish', approve: true, choices: { alwaysAllow: true } }], steps: [
+      { method: 'swarm_publishData', params: x }, { method: 'swarm_publishData', params: () => ({ data: 'y', contentType: 'text/plain' }) },
+    ] });
+  pd('disconnected-at-service', x, { at_execute: { connection: 'revoked' } });
+  pd('keyless', x, { keyless: true });
+  pd('identity-wallet-off', x, { identity_wallet: false });
+  pd('grants-unavailable', x, { grants_unavailable: true });
 
   // -------------------------------------------------------------------------
   // publishFiles.
@@ -297,6 +349,8 @@ function methodCases(env) {
   pf('node-bad-tag', () => ({ files: [file('a.txt', u8('a'))] }), { node: { stamps: STAMPS.usable, rules: [
     { match: { method: 'POST', path: '/bzz' }, reply: { status: 201, headers: { 'swarm-tag': '-3' }, json: { reference: 'ab'.repeat(32) } } },
   ] } });
+  pf('rule', () => ({ files: [file('a.txt', u8('a'))] }), { grants: rule({ publish: true }) });
+  pf('prompt-rejected', () => ({ files: [file('a.txt', u8('a'))] }), { prompts: [{ kind: 'swarm.publish', approve: false }] });
 
   // -------------------------------------------------------------------------
   // getUploadStatus: a tag is the site's only after its own publishFiles.
@@ -353,6 +407,7 @@ function methodCases(env) {
   pc('node-500', () => ({ data: 'x' }), { node: { stamps: STAMPS.usable, rules: [
     { match: { method: 'POST', path: '/chunks' }, reply: { status: 500, json: { code: 500, message: 'chunk write failed' } } },
   ] } });
+  pc('rule', () => ({ data: 'x' }), { grants: rule({ publish: true }) });
   pc('node-other-reference', () => ({ data: 'x' }), { node: { stamps: STAMPS.usable, rules: [
     { match: { method: 'POST', path: '/chunks' }, reply: { status: 201, json: { reference: 'ab'.repeat(32) } } },
   ] }, deviation: { id: 'reference-check', core: { error: { code: -32603, message: 'The Swarm node returned another reference' } } } });
@@ -373,6 +428,11 @@ function methodCases(env) {
   rc('reference-128', () => ({ reference: helloAddress.repeat(2) }));
   rc('found', () => ({ reference: helloAddress }));
   rc('found-anonymous', () => ({ reference: helloAddress }), { grants: {} });
+  // A keyless document reads on the anonymous budget's one bucket; the
+  // switch off refuses even a read.
+  rc('found-keyless', () => ({ reference: helloAddress }), { keyless: true });
+  rc('identity-wallet-off', () => ({ reference: helloAddress }), { identity_wallet: false });
+  rc('grants-unavailable', () => ({ reference: helloAddress }), { grants_unavailable: true });
   rc('upper-case', () => ({ reference: helloAddress.toUpperCase() }));
   rc('4096', () => ({ reference: env.cacAddress(env.seeded('read-chunk/4096', 4096)) }));
   rc('not-found', () => ({ reference: 'ab'.repeat(32) }));
@@ -486,33 +546,61 @@ function methodCases(env) {
   ws('span-negative', () => ({ identifier: sid, data: 'x', span: -1 }), { feeds: storeBee({}, false) });
   ws('no-feed-grant', () => ({ identifier: sid, data: 'x' }), { feeds: feedStore({ [ORIGIN]: originEntry(eth, { feedGranted: false }) }) });
   ws('no-store', () => ({ identifier: sid, data: 'x' }), { feeds: null });
-  ws('ethereum-wallet-first', () => ({ identifier: sid, data: 'x' }), { feeds: feedStore({ [ORIGIN]: originEntry(eth) }), vault: 'locked',
+  // SW-1: the site's signing rule answers (no prompt picks an identity), so
+  // the service's own checks meet the stored identity, before the vault
+  // (locked at the service) and readiness.
+  const sw1 = rule({ signing: true });
+  ws('ethereum-wallet-first', () => ({ identifier: sid, data: 'x' }), { feeds: feedStore({ [ORIGIN]: originEntry(eth) }), grants: sw1, ...LOCKS,
     readiness: { ok: false, reason: 'node-stopped' } });
-  ws('bee-wallet-shared', () => ({ identifier: sid, data: 'x' }), { feeds: storeBee(), vault: 'locked', readiness: { ok: false, reason: 'node-stopped' } });
-  ws('app-scoped-shared-index', () => ({ identifier: sid, data: 'x' }), { feeds: shared, vault: 'locked', readiness: { ok: false, reason: 'node-stopped' } });
+  ws('bee-wallet-shared', () => ({ identifier: sid, data: 'x' }), { feeds: storeBee(), grants: sw1, ...LOCKS, readiness: { ok: false, reason: 'node-stopped' } });
+  ws('app-scoped-shared-index', () => ({ identifier: sid, data: 'x' }), { feeds: shared, grants: sw1, ...LOCKS, readiness: { ok: false, reason: 'node-stopped' } });
   ws('app-scoped-index-missing', () => ({ identifier: sid, data: 'x' }), {
-    feeds: feedStore({ [ORIGIN]: originEntry({ ...app0, publisherKeyIndex: null }) }, 1), vault: 'locked',
+    feeds: feedStore({ [ORIGIN]: originEntry({ ...app0, publisherKeyIndex: null }) }, 1), grants: sw1, ...LOCKS,
   });
   ws('app-scoped-index-string', () => ({ identifier: sid, data: 'x' }), {
-    feeds: feedStore({ [ORIGIN]: originEntry({ ...app0, publisherKeyIndex: '0' }) }, 1), vault: 'locked',
+    feeds: feedStore({ [ORIGIN]: originEntry({ ...app0, publisherKeyIndex: '0' }) }, 1), grants: sw1, ...LOCKS,
   });
   ws('app-scoped-other-site-other-index', () => ({ identifier: sid, data: 'x' }), {
-    feeds: feedStore({ [ORIGIN]: originEntry(app0), [OTHER]: originEntry(app1) }, 2),
+    feeds: feedStore({ [ORIGIN]: originEntry(app0), [OTHER]: originEntry(app1) }, 2), grants: sw1,
   });
   ws('app-scoped-held-inactive-elsewhere', () => ({ identifier: sid, data: 'x' }), {
     feeds: feedStore({ [ORIGIN]: originEntry(app0), [OTHER]: originEntry(bee, { identities: [bee, identity('app-scoped', 0)] }) }, 1),
-    vault: 'locked',
+    grants: sw1, ...LOCKS,
   });
-  ws('app-scoped-counter-behind', () => ({ identifier: sid, data: 'x' }), { feeds: storeApp({}, 0) });
-  ws('locked', () => ({ identifier: sid, data: 'x' }), { vault: 'locked', readiness: { ok: false, reason: 'node-stopped' } });
+  ws('app-scoped-counter-behind', () => ({ identifier: sid, data: 'x' }), { feeds: storeApp({}, 0), grants: sw1 });
+  // On the prompt path a shared identity is no choice for a raw chunk: the
+  // user's pick (here the default, the new app-scoped identity) is made and
+  // signs.
+  ws('bee-wallet-shared-prompt', () => ({ identifier: sid, data: 'x' }), { feeds: storeBee() });
+  ws('locked', () => ({ identifier: sid, data: 'x' }), { ...LOCKS, readiness: { ok: false, reason: 'node-stopped' } });
+  // A locked vault through the dispatcher: main's unlock prompt first.
+  ws('unlock-prompt', () => ({ identifier: sid, data: 'x' }), { vault: 'locked' });
+  ws('unlock-cancelled', () => ({ identifier: sid, data: 'x' }), { vault: 'locked', prompts: [{ kind: 'vault.unlock', approve: false }] });
+  ws('feed-prompt-rejected', () => ({ identifier: sid, data: 'x' }), { prompts: [{ kind: 'swarm.feed', approve: false }] });
+  // The signing rule and Agent custody: a tab in custody gets the prompt,
+  // and custody taken (or the rule turned off) before the write refuses it.
+  ws('rule', () => ({ identifier: sid, data: 'x' }), { grants: sw1 });
+  ws('rule-in-custody', () => ({ identifier: sid, data: 'x' }), { grants: sw1, custody: true });
+  ws('rule-custody-before-write', () => ({ identifier: sid, data: 'x' }), { grants: sw1, node: { stamps: STAMPS.usable, rules: [
+    { match: { method: 'GET', path: '/stamps' }, world: { custody: true }, reply: { status: 200, json: STAMPS.usable } }] } });
+  ws('rule-off-before-write', () => ({ identifier: sid, data: 'x' }), { grants: sw1, node: { stamps: STAMPS.usable, rules: [
+    { match: { method: 'GET', path: '/stamps' }, world: { rule_off: 'signing' }, reply: { status: 200, json: STAMPS.usable } }] } });
+  // A grant gone between the dispatcher's checks and the service: the
+  // service's own refusals.
+  ws('feed-access-revoked-at-service', () => ({ identifier: sid, data: 'x' }), { at_execute: { feed_access: 'revoked' } });
+  ws('disconnected-at-service', () => ({ identifier: sid, data: 'x' }), { at_execute: { connection: 'revoked' } });
+  ws('always-allow', () => null, { prompts: [{ kind: 'swarm.feed', approve: true, choices: { identity: 'app-scoped:0', alwaysAllow: true } }], steps: [
+    { method: 'swarm_writeSingleOwnerChunk', params: () => ({ identifier: sid, data: 'one' }) },
+    { method: 'swarm_writeSingleOwnerChunk', params: () => ({ identifier: '43'.repeat(32), data: 'two' }) },
+  ] });
   for (const reason of NOT_READY) ws(`not-ready-${reason}`, () => ({ identifier: sid, data: 'x' }), { readiness: { ok: false, reason } });
   ws('one-byte', () => ({ identifier: sid, data: 'x' }));
   ws('upper-case-identifier', () => ({ identifier: sid.toUpperCase().replace(/4/g, 'A'), data: u8('upper') }));
   ws('4096', () => ({ identifier: '00'.repeat(32), data: bytes('write-soc/4096', 4096) }));
   ws('span', () => ({ identifier: 'ff'.repeat(32), data: bytes('write-soc/root', 64), span: 4097 }));
   ws('span-bigint', () => ({ identifier: 'ff'.repeat(32), data: bytes('write-soc/root', 64), span: 1n << 40n }));
-  ws('auto-approval', () => ({ identifier: sid, data: 'x' }), { approval: 'auto' });
-  ws('publisher-2', () => ({ identifier: sid, data: 'x' }), { feeds: feedStore({ [ORIGIN]: originEntry(app2) }, 3) });
+  ws('auto-approval', () => ({ identifier: sid, data: 'x' }), { grants: sw1 });
+  ws('publisher-2', () => ({ identifier: sid, data: 'x' }), { feeds: feedStore({ [ORIGIN]: originEntry(app2) }, 3), grants: sw1 });
   ws('no-stamps', () => ({ identifier: sid, data: 'x' }), { node: { stamps: STAMPS.none } });
   ws('node-500', () => ({ identifier: sid, data: 'x' }), { node: { stamps: STAMPS.usable, rules: [
     { match: { prefix: '/soc/' }, reply: { status: 500, json: { code: 500, message: 'invalid soc' } } },
@@ -578,9 +666,12 @@ function methodCases(env) {
   gs('app-scoped', { feeds: storeApp() });
   gs('no-feed-grant', { feeds: storeBee({}, false) });
   gs('no-store', { feeds: null });
-  gs('locked', { vault: 'locked' });
-  gs('locked-app-scoped', { vault: 'locked', feeds: storeApp() });
-  gs('ethereum-wallet', { feeds: feedStore({ [ORIGIN]: originEntry(eth) }) });
+  gs('locked', { ...LOCKS });
+  gs('locked-app-scoped', { ...LOCKS, feeds: storeApp() });
+  gs('rule', { grants: rule({ signing: true }) });
+  gs('feed-access-revoked-at-service', { at_execute: { feed_access: 'revoked' } });
+  gs('prompt-rejected', { prompts: [{ kind: 'swarm.feed', approve: false }] });
+  gs('ethereum-wallet', { feeds: feedStore({ [ORIGIN]: originEntry(eth) }), grants: rule({ signing: true }) });
   gs('no-active-identity', { feeds: feedStore({ [ORIGIN]: { ...originEntry(bee), activeIdentityId: 'app-scoped:9' } }) });
 
   // -------------------------------------------------------------------------
@@ -600,13 +691,26 @@ function methodCases(env) {
   cf('bee-wallet', () => ({ name: 'blog' }));
   cf('app-scoped', () => ({ name: 'blog' }), { feeds: storeApp() });
   cf('ens-key', () => ({ name: 'blog' }), { origin: ENS, grants: connected(ENS), feeds: feedStore({ [ENS]: originEntry(bee) }) });
-  cf('existing', () => ({ name: 'blog' }), { feeds: storeBee(blogBee), readiness: { ok: false, reason: 'node-stopped' }, vault: 'locked' });
+  cf('existing', () => ({ name: 'blog' }), { feeds: storeBee(blogBee), readiness: { ok: false, reason: 'node-stopped' }, ...LOCKS });
   cf('existing-other-identity', () => ({ name: 'blog' }), {
     feeds: feedStore({ [ORIGIN]: originEntry(app0, { identities: [bee, app0], feeds: blogBee }) }, 1),
   });
-  cf('ethereum-wallet', () => ({ name: 'blog' }), { feeds: feedStore({ [ORIGIN]: originEntry(eth) }), readiness: { ok: false, reason: 'node-stopped' } });
-  for (const reason of NOT_READY) cf(`not-ready-${reason}`, () => ({ name: 'blog' }), { readiness: { ok: false, reason }, vault: 'locked' });
-  cf('locked', () => ({ name: 'blog' }), { vault: 'locked' });
+  cf('ethereum-wallet', () => ({ name: 'blog' }), { feeds: feedStore({ [ORIGIN]: originEntry(eth) }), grants: rule({ feeds: true }),
+    readiness: { ok: false, reason: 'node-stopped' } });
+  for (const reason of NOT_READY) cf(`not-ready-${reason}`, () => ({ name: 'blog' }), { readiness: { ok: false, reason }, ...LOCKS });
+  cf('locked', () => ({ name: 'blog' }), { ...LOCKS });
+  cf('unlock-prompt', () => ({ name: 'blog' }), { vault: 'locked' });
+  cf('prompt-rejected', () => ({ name: 'blog' }), { prompts: [{ kind: 'swarm.feed', approve: false }] });
+  cf('prompt-closed', () => ({ name: 'blog' }), { prompts: [{ kind: 'swarm.feed', closed: 'navigated' }] });
+  // The user picks the prompt's new app-scoped identity: main makes it the
+  // site's, on the key the prompt showed, and grants feed access.
+  cf('prompt-new-identity', () => ({ name: 'blog' }), { feeds: storeBee({}, false),
+    prompts: [{ kind: 'swarm.feed', approve: true, choices: { identity: 'app-scoped:0' } }] });
+  cf('prompt-ant-wallet', () => ({ name: 'blog' }), { feeds: storeApp(),
+    prompts: [{ kind: 'swarm.feed', approve: true, choices: { identity: 'bee-wallet' } }] });
+  cf('rule', () => ({ name: 'blog' }), { grants: rule({ feeds: true }) });
+  cf('feed-access-revoked-at-service', () => ({ name: 'blog' }), { at_execute: { feed_access: 'revoked' } });
+  cf('rule-without-feed-grant', () => ({ name: 'blog' }), { grants: rule({ feeds: true }), feeds: storeBee({}, false) });
   cf('no-stamps', () => ({ name: 'blog' }), { node: { stamps: STAMPS.none } });
   cf('stamps-pending', () => ({ name: 'blog' }), { node: { stamps: STAMPS.pending },
     deviation: { id: 'stamps-one-read', core: 'one GET /stamps; the same error' } });
@@ -636,8 +740,8 @@ function methodCases(env) {
     feeds: feedStore({ [ORIGIN]: originEntry(bee, { identities: [bee, eth], feeds: { blog: feedRecord(ORIGIN, 'blog', eth.id, 'bee') } }) }),
     readiness: { ok: false, reason: 'node-stopped' },
   });
-  for (const reason of NOT_READY) uf(`not-ready-${reason}`, () => ({ feedId: 'blog', reference: REF }), { readiness: { ok: false, reason }, vault: 'locked' });
-  uf('locked', () => ({ feedId: 'blog', reference: REF }), { vault: 'locked' });
+  for (const reason of NOT_READY) uf(`not-ready-${reason}`, () => ({ feedId: 'blog', reference: REF }), { readiness: { ok: false, reason }, ...LOCKS });
+  uf('locked', () => ({ feedId: 'blog', reference: REF }), { ...LOCKS });
   const head = (h, extra = {}) => ({ stamps: STAMPS.usable,
     latest: [{ key: 'bee', topic: blogTopicStr, reply: { status: 404, json: { code: 404, message: 'Not Found' } } }],
     probes: [{ key: 'bee', topic: blogTopicStr, targets: h === null ? [] : [h], head: h }], ...extra });
@@ -665,7 +769,7 @@ function methodCases(env) {
     latest: [{ key: 'publisher:0', topic: blogTopicStr, reply: { status: 404, json: { code: 404, message: 'Not Found' } } }],
     probes: [{ key: 'publisher:0', topic: blogTopicStr, targets: [0], head: 0 }] }, deviation: indexDeviation });
   uf('upper-case-reference', () => ({ feedId: 'blog', reference: REF.toUpperCase() }), { node: head(null), deviation: indexDeviation });
-  uf('auto-approval', () => ({ feedId: 'blog', reference: REF }), { approval: 'auto', node: head(null), deviation: indexDeviation });
+  uf('auto-approval', () => ({ feedId: 'blog', reference: REF }), { grants: rule({ feeds: true }), node: head(null), deviation: indexDeviation });
   uf('no-stamps', () => ({ feedId: 'blog', reference: REF }), { node: { ...head(null), stamps: STAMPS.none } });
   uf('node-500', () => ({ feedId: 'blog', reference: REF }), { node: head(null, { rules: [
     { match: { prefix: '/soc/' }, reply: { status: 500, json: { code: 500, message: 'invalid soc' } } },
@@ -689,8 +793,23 @@ function methodCases(env) {
     feeds: feedStore({ [ORIGIN]: originEntry(bee, { identities: [bee, eth], feeds: { blog: feedRecord(ORIGIN, 'blog', eth.id, 'bee') } }) }),
     readiness: { ok: false, reason: 'node-stopped' }, deviation: undefined,
   });
-  for (const reason of NOT_READY) wf(`not-ready-${reason}`, () => ({ name: 'blog', data: 'x' }), { readiness: { ok: false, reason }, vault: 'locked', deviation: undefined });
-  wf('locked', () => ({ name: 'blog', data: 'x' }), { vault: 'locked', deviation: undefined });
+  for (const reason of NOT_READY) wf(`not-ready-${reason}`, () => ({ name: 'blog', data: 'x' }), { readiness: { ok: false, reason }, ...LOCKS, deviation: undefined });
+  wf('locked', () => ({ name: 'blog', data: 'x' }), { ...LOCKS, deviation: undefined });
+  // The feeds rule and Agent custody, read when the rule is chosen and again
+  // just before the write.
+  wf('rule', () => ({ name: 'blog', data: 'x' }), { grants: rule({ feeds: true }) });
+  wf('rule-in-custody', () => ({ name: 'blog', data: 'x' }), { grants: rule({ feeds: true }), custody: true });
+  wf('rule-custody-before-write', () => ({ name: 'blog', data: 'x' }), { grants: rule({ feeds: true }), node: head(null, { rules: [
+    { match: { method: 'GET', path: '/stamps' }, world: { custody: true }, reply: { status: 200, json: STAMPS.usable } }] }) });
+  wf('rule-off-before-write', () => ({ name: 'blog', data: 'x' }), { grants: rule({ feeds: true }), node: head(null, { rules: [
+    { match: { method: 'GET', path: '/stamps' }, world: { rule_off: 'feeds' }, reply: { status: 200, json: STAMPS.usable } }] }) });
+  wf('prompt-rejected', () => ({ name: 'blog', data: 'x' }), { prompts: [{ kind: 'swarm.feed', approve: false }], deviation: undefined });
+  wf('feed-access-revoked-at-service', () => ({ name: 'blog', data: 'x' }), { at_execute: { feed_access: 'revoked' }, deviation: undefined });
+  wf('always-allow', () => null, { prompts: [{ kind: 'swarm.feed', approve: true, choices: { identity: 'bee-wallet', alwaysAllow: true } }],
+    steps: [
+      { method: 'swarm_writeFeedEntry', params: () => ({ name: 'blog', data: 'one', index: 0 }) },
+      { method: 'swarm_writeFeedEntry', params: () => ({ name: 'blog', data: 'two', index: 1 }) },
+    ], node: { stamps: STAMPS.usable }, deviation: undefined });
   wf('string', () => ({ name: 'blog', data: 'hello feed' }));
   wf('bytes', () => ({ name: 'blog', data: u8('bytes entry') }));
   wf('4096', () => ({ name: 'blog', data: bytes('write-feed/4096', 4096) }));
@@ -891,6 +1010,8 @@ function methodCases(env) {
   gm('uncompressed-key', { node: { addresses: { ...addresses, pssPublicKey: `04${'ab'.repeat(64)}` } } });
   gm('node-500', { node: { rules: [{ match: { path: '/addresses' }, reply: { status: 500, json: { code: 500, message: 'no' } } }] } });
   gm('malformed', { node: { addresses: { overlay: 5 } } });
+  gm('grant-prompt-rejected', { grants: connected(ORIGIN), prompts: [{ kind: 'swarm.messaging', approve: false }] });
+  gm('messaging-revoked-at-service', { at_execute: { messaging: 'revoked' } });
 
   const recipient = keyOf('publisher:2').publicKey.slice(2);
   const sp = (id, params, over = {}) => add({ id: `send-pss-${id}`, method: 'swarm_sendPss', params, grants: messagingGrant(),
@@ -927,6 +1048,23 @@ function methodCases(env) {
   sp('node-hangs-up', () => ({ topic: 'chat', recipient, targets: 'abcd', data: 'hi' }), { node: { stamps: STAMPS.usable, rules: [
     { match: { prefix: '/pss/send/' }, reply: { hangUp: true } }] },
   deviation: { id: 'transport-error-text', core: 'one text for the failure class (error)' } });
+  // The send prompt, the messaging rule and Agent custody, read when the
+  // rule is chosen and again just before the send: the send's effect covers
+  // its /stamps read, so the world changes as the request reaches the
+  // service.
+  const hi = () => ({ topic: 'chat', recipient, targets: 'abcd', data: 'hi' });
+  const messagingRule = rule({ messaging: true }, ORIGIN, { messaging: true });
+  sp('prompt-rejected', hi, { prompts: [{ kind: 'swarm.messaging', approve: false }] });
+  sp('grant-prompt-rejected', hi, { grants: connected(ORIGIN), prompts: [{ kind: 'swarm.messaging', approve: false }] });
+  sp('rule', hi, { grants: messagingRule });
+  sp('rule-in-custody', hi, { grants: messagingRule, custody: true });
+  sp('rule-off-before-send', hi, { grants: messagingRule, at_execute: { rule_off: 'messaging' } });
+  sp('rule-custody-before-send', hi, { grants: messagingRule, at_execute: { custody: true } });
+  sp('messaging-revoked-at-service', hi, { at_execute: { messaging: 'revoked' } });
+  add({ id: 'send-pss-always-allow', grants: messagingGrant(), node: { stamps: STAMPS.usable },
+    prompts: [{ kind: 'swarm.messaging', approve: true, choices: { alwaysAllow: true } }], steps: [
+      { method: 'swarm_sendPss', params: hi }, { method: 'swarm_sendPss', params: () => ({ topic: 'chat', recipient, targets: 'abcd', data: 'again' }) },
+    ] });
 
   const sg = (id, params, over = {}) => add({ id: `send-gsoc-${id}`, method: 'swarm_sendGsoc', params, grants: messagingGrant(),
     node: { stamps: STAMPS.usable }, ...over });
@@ -952,6 +1090,11 @@ function methodCases(env) {
   sg('full-mutable-batch', () => ({ topic: 'chat', data: 'hi' }), { node: { stamps: STAMPS.fullMutable } });
   sg('node-500', () => ({ topic: 'chat', data: 'hi' }), { node: { stamps: STAMPS.usable, rules: [
     { match: { prefix: '/soc/' }, reply: { status: 500, json: { code: 500, message: 'gsoc refused' } } }] } });
+  sg('rule', () => ({ topic: 'chat', data: 'hi' }), { grants: rule({ messaging: true }, ORIGIN, { messaging: true }) });
+  sg('rule-custody-before-send', () => ({ topic: 'chat', data: 'hi' }), { grants: rule({ messaging: true }, ORIGIN, { messaging: true }),
+    at_execute: { custody: true } });
+  sg('messaging-revoked-at-service', () => ({ topic: 'chat', data: 'hi' }), { at_execute: { messaging: 'revoked' } });
+  sg('name-moved-before-send', () => ({ topic: 'chat', data: 'hi' }), { origin: ENS, grants: messagingGrant(ENS), at_execute: { name: 'moved' } });
 
   const su = (id, params, over = {}) => add({ id: `subscribe-${id}`, method: 'swarm_subscribe', params, grants: messagingGrant(), ...over });
   su('params-null', () => null);
@@ -971,26 +1114,30 @@ function methodCases(env) {
   su('pss-topic', () => ({ kind: 'pss', topic: 'chat' }));
   su('gsoc-address', () => ({ kind: 'gsoc', address: 'AB'.repeat(32) }));
   su('gsoc-topic', () => ({ kind: 'gsoc', topic: 'chat' }));
-  // subscribe-proxy (question 4, decided 2026-11-24): the reference opens the
-  // socket to any node; the core, while a proxy or Tor is on and the node
-  // isn't on loopback, gets main's proxy-or-tor answer to its subscribe check
-  // (main checks again before it opens the socket) and opens nothing. Ending
-  // open subscriptions when a proxy or Tor comes on, and telling the user,
-  // are main's (SWM-7).
-  const proxyOrTor = (condition) => ({
-    id: 'subscribe-proxy',
-    core: {
-      condition,
-      error: { code: 4900, message: 'Node not available: proxy-or-tor', data: { reason: 'proxy-or-tor' } },
-      websockets: [],
-    },
-  });
+  su('grant-prompt-rejected', () => ({ kind: 'pss', topic: 'chat' }), { grants: connected(ORIGIN),
+    prompts: [{ kind: 'swarm.messaging', approve: false }] });
+  su('messaging-revoked-at-service', () => ({ kind: 'pss', topic: 'chat' }), { at_execute: { messaging: 'revoked' } });
+  // subscribe-proxy (question 4, decided 2026-11-24). The world's session:
+  // a proxy or Tor on or off, and the node, its URL classified by main's own
+  // test (ipfs/gateway-transport.js's isLoopbackGatewayUrl, which bzz:'s
+  // transport uses for the Ant node). The reference ignores the session and
+  // opens the socket; the core's subscribe check gets main's answer
+  // (session.subscribe_check, the core's input): refused while a proxy or
+  // Tor is on and the node isn't on loopback. Ending open subscriptions
+  // when a proxy or Tor comes on, and telling the user, are main's (SWM-7).
+  const REMOTE_NODE = 'http://192.0.2.7:1633';
+  const proxyOrTor = { id: 'subscribe-proxy', core: {
+    error: { code: 4900, message: 'Node not available: proxy-or-tor', data: { reason: 'proxy-or-tor' } }, websockets: [] } };
   su('pss-topic-remote-node-proxy', () => ({ kind: 'pss', topic: 'chat' }), {
-    deviation: proxyOrTor('a proxy on and the node not on loopback: main answers the subscribe check { ok: false, reason: "proxy-or-tor" }'),
-  });
+    session: { proxy: true, tor: false, node_kind: 'external', node_url: REMOTE_NODE }, deviation: proxyOrTor });
   su('gsoc-topic-remote-node-tor', () => ({ kind: 'gsoc', topic: 'chat' }), {
-    deviation: proxyOrTor('Tor on and the node not on loopback: main answers the subscribe check { ok: false, reason: "proxy-or-tor" }'),
-  });
+    session: { proxy: false, tor: true, node_kind: 'external', node_url: REMOTE_NODE }, deviation: proxyOrTor });
+  // Parity: an external node on loopback subscribes with a proxy on, and a
+  // remote one with neither on.
+  su('pss-topic-loopback-node-proxy', () => ({ kind: 'pss', topic: 'chat' }), { session: { proxy: true, tor: false, node_kind: 'external' } });
+  su('gsoc-topic-loopback-node-tor', () => ({ kind: 'gsoc', topic: 'chat' }), { session: { proxy: false, tor: true, node_kind: 'external' } });
+  su('pss-topic-remote-node-direct', () => ({ kind: 'pss', topic: 'chat' }), {
+    session: { proxy: false, tor: false, node_kind: 'external', node_url: REMOTE_NODE } });
   su('then-unsubscribe', () => null, { steps: [
     { method: 'swarm_subscribe', params: () => ({ kind: 'pss', topic: 'chat' }) },
     { method: 'swarm_unsubscribe', params: () => ({ subscriptionId: env.firstSubscriptionId }) },

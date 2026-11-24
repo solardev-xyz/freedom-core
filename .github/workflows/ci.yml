@@ -347,7 +347,7 @@ jobs:
       # The window.swarm vectors' own reference (generate.js,
       # SWARM_REFERENCE_COMMIT): integration/rust-core with #1057 and #1062.
       # Its generator reads @ethersphere/bee-js 13.2.0, @ethersphere/core-sdk
-      # 0.2.2 (refusing any other version, every file it rests on checked by
+      # 0.2.2 (refusing any other version, every package file it loads checked by
       # digest), ethers and better-sqlite3. Its lockfile pins every package at
       # the Radicle reference's version and integrity (it drops only
       # @corpus-core/colibri-stateless), so it links that install (below)

@@ -83,7 +83,7 @@ const COLIBRI_REFERENCE_COMMIT = '7cf6a0c299b50b64944d5d246a911bdb25dc5c82';
 // publishFiles through publishCollection) and #1062 (the PSS recipient as the
 // compressed key). Its generator (swarm.js) loads src/main/swarm/ whole over
 // the checkout's installed @ethersphere/bee-js 13.2.0 and core-sdk 0.2.2,
-// refusing any other version, with each file the vectors rest on checked by
+// refusing any other version, with every package file the run loads checked by
 // digest. Like the Radicle reference, it moves on its own.
 const SWARM_REFERENCE_COMMIT = 'dea09d2f58c18c5ffe5baef464fdf70af1ef40ef';
 const OUTPUT = path.resolve(__dirname, '..');
