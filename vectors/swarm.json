@@ -218,7 +218,10 @@
       ]
     },
     "subscribe-proxy": {
-      "note": "left out: question 4 is still open, and gates SWM-7 only"
+      "cases": [
+        "methods/subscribe-pss-topic-remote-node-proxy",
+        "methods/subscribe-gsoc-topic-remote-node-tor"
+      ]
     },
     "history-bound": {
       "cases": [
@@ -75279,6 +75282,166 @@
           ]
         }
       ],
+      "websockets": [
+        "ws://127.0.0.1:1633/gsoc/subscribe/afa2b50effd3d1c01bd48e2dcc1fcc44fa704bf271ac8f9e02dd5f28705e3d0e"
+      ],
+      "after": {
+        "feeds": null,
+        "history": []
+      }
+    },
+    {
+      "id": "subscribe-pss-topic-remote-node-proxy",
+      "deviation": "subscribe-proxy",
+      "origin": "https://app.example",
+      "grants": {
+        "https://app.example": {
+          "origin": "https://app.example",
+          "connectedAt": 1767225540123,
+          "lastUsed": 1767225540123,
+          "autoApprove": {
+            "publish": false,
+            "feeds": false,
+            "signing": false,
+            "messaging": false
+          },
+          "messaging": true
+        }
+      },
+      "feeds": null,
+      "vault": "unlocked",
+      "readiness": {
+        "ok": true
+      },
+      "approval": "user",
+      "node": {},
+      "clock": 1767225600123,
+      "steps": [
+        {
+          "method": "swarm_subscribe",
+          "params": {
+            "object": [
+              [
+                "kind",
+                {
+                  "string": "pss"
+                }
+              ],
+              [
+                "topic",
+                {
+                  "string": "chat"
+                }
+              ]
+            ]
+          },
+          "result": {
+            "subscriptionId": "59820d1a24fddf7bceaad40b518018f0",
+            "kind": "pss",
+            "key": "7d37ee8427bc4ef7fa6c30bba155020c46b01043618747ed07cb611ab74a11ee"
+          },
+          "requests": [
+            {
+              "via": "fetch",
+              "method": "GET",
+              "path": "/node",
+              "status": 200,
+              "ready": "subscribe"
+            }
+          ]
+        }
+      ],
+      "core": {
+        "condition": "a proxy on and the node not on loopback: main answers the subscribe check { ok: false, reason: \"proxy-or-tor\" }",
+        "error": {
+          "code": 4900,
+          "message": "Node not available: proxy-or-tor",
+          "data": {
+            "reason": "proxy-or-tor"
+          }
+        },
+        "websockets": []
+      },
+      "websockets": [
+        "ws://127.0.0.1:1633/pss/subscribe/7d37ee8427bc4ef7fa6c30bba155020c46b01043618747ed07cb611ab74a11ee"
+      ],
+      "after": {
+        "feeds": null,
+        "history": []
+      }
+    },
+    {
+      "id": "subscribe-gsoc-topic-remote-node-tor",
+      "deviation": "subscribe-proxy",
+      "origin": "https://app.example",
+      "grants": {
+        "https://app.example": {
+          "origin": "https://app.example",
+          "connectedAt": 1767225540123,
+          "lastUsed": 1767225540123,
+          "autoApprove": {
+            "publish": false,
+            "feeds": false,
+            "signing": false,
+            "messaging": false
+          },
+          "messaging": true
+        }
+      },
+      "feeds": null,
+      "vault": "unlocked",
+      "readiness": {
+        "ok": true
+      },
+      "approval": "user",
+      "node": {},
+      "clock": 1767225600123,
+      "steps": [
+        {
+          "method": "swarm_subscribe",
+          "params": {
+            "object": [
+              [
+                "kind",
+                {
+                  "string": "gsoc"
+                }
+              ],
+              [
+                "topic",
+                {
+                  "string": "chat"
+                }
+              ]
+            ]
+          },
+          "result": {
+            "subscriptionId": "59820d1a24fddf7bceaad40b518018f0",
+            "kind": "gsoc",
+            "key": "afa2b50effd3d1c01bd48e2dcc1fcc44fa704bf271ac8f9e02dd5f28705e3d0e"
+          },
+          "requests": [
+            {
+              "via": "fetch",
+              "method": "GET",
+              "path": "/node",
+              "status": 200,
+              "ready": "subscribe"
+            }
+          ]
+        }
+      ],
+      "core": {
+        "condition": "Tor on and the node not on loopback: main answers the subscribe check { ok: false, reason: \"proxy-or-tor\" }",
+        "error": {
+          "code": 4900,
+          "message": "Node not available: proxy-or-tor",
+          "data": {
+            "reason": "proxy-or-tor"
+          }
+        },
+        "websockets": []
+      },
       "websockets": [
         "ws://127.0.0.1:1633/gsoc/subscribe/afa2b50effd3d1c01bd48e2dcc1fcc44fa704bf271ac8f9e02dd5f28705e3d0e"
       ],

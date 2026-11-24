@@ -271,7 +271,6 @@ const NO_CASE = {
   busy: 'no case: the reference has no queue, memory budget, Swarm I/O pool or mining queue to fill; SWM-4\'s and SWM-5\'s tests make it',
   'session-transport': 'no case: which network stack carries a call doesn\'t change what a page sees from a loopback node; SWM-5 checks the proxy and Tor',
   'store-writes': 'no case: the files\' bytes are the same; the durable write (0001, 0013) is the core\'s',
-  'subscribe-proxy': 'left out: question 4 is still open, and gates SWM-7 only',
   'pss-recipient': 'gone at this reference: it has #1062 and sends the compressed key itself (the send-pss cases record 66 hex), so the recipient is parity',
 };
 const DEVIATION_IDS = ['feed-entry-bound', 'tar-paths', 'feed-wrap-root', 'reference-check', 'read-data-verified', 'pss-recipient', 'read-pieces',

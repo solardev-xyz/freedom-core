@@ -1070,7 +1070,7 @@
       "form soc_up": 23
     },
     "subscribe": {
-      "ready subscribe": 5
+      "ready subscribe": 7
     }
   },
   "honest": [
@@ -30432,6 +30432,60 @@
       "id": "subscribe-gsoc-topic",
       "row": "subscribe",
       "from": "methods/subscribe-gsoc-topic",
+      "key": "https://app.example",
+      "params": {
+        "object": [
+          [
+            "kind",
+            {
+              "string": "gsoc"
+            }
+          ],
+          [
+            "topic",
+            {
+              "string": "chat"
+            }
+          ]
+        ]
+      },
+      "ready": {
+        "check": "subscribe",
+        "ok": true
+      },
+      "calls": []
+    },
+    {
+      "id": "subscribe-pss-topic-remote-node-proxy",
+      "row": "subscribe",
+      "from": "methods/subscribe-pss-topic-remote-node-proxy",
+      "key": "https://app.example",
+      "params": {
+        "object": [
+          [
+            "kind",
+            {
+              "string": "pss"
+            }
+          ],
+          [
+            "topic",
+            {
+              "string": "chat"
+            }
+          ]
+        ]
+      },
+      "ready": {
+        "check": "subscribe",
+        "ok": true
+      },
+      "calls": []
+    },
+    {
+      "id": "subscribe-gsoc-topic-remote-node-tor",
+      "row": "subscribe",
+      "from": "methods/subscribe-gsoc-topic-remote-node-tor",
       "key": "https://app.example",
       "params": {
         "object": [

@@ -971,6 +971,26 @@ function methodCases(env) {
   su('pss-topic', () => ({ kind: 'pss', topic: 'chat' }));
   su('gsoc-address', () => ({ kind: 'gsoc', address: 'AB'.repeat(32) }));
   su('gsoc-topic', () => ({ kind: 'gsoc', topic: 'chat' }));
+  // subscribe-proxy (question 4, decided 2026-11-24): the reference opens the
+  // socket to any node; the core, while a proxy or Tor is on and the node
+  // isn't on loopback, gets main's proxy-or-tor answer to its subscribe check
+  // (main checks again before it opens the socket) and opens nothing. Ending
+  // open subscriptions when a proxy or Tor comes on, and telling the user,
+  // are main's (SWM-7).
+  const proxyOrTor = (condition) => ({
+    id: 'subscribe-proxy',
+    core: {
+      condition,
+      error: { code: 4900, message: 'Node not available: proxy-or-tor', data: { reason: 'proxy-or-tor' } },
+      websockets: [],
+    },
+  });
+  su('pss-topic-remote-node-proxy', () => ({ kind: 'pss', topic: 'chat' }), {
+    deviation: proxyOrTor('a proxy on and the node not on loopback: main answers the subscribe check { ok: false, reason: "proxy-or-tor" }'),
+  });
+  su('gsoc-topic-remote-node-tor', () => ({ kind: 'gsoc', topic: 'chat' }), {
+    deviation: proxyOrTor('Tor on and the node not on loopback: main answers the subscribe check { ok: false, reason: "proxy-or-tor" }'),
+  });
   su('then-unsubscribe', () => null, { steps: [
     { method: 'swarm_subscribe', params: () => ({ kind: 'pss', topic: 'chat' }) },
     { method: 'swarm_unsubscribe', params: () => ({ subscriptionId: env.firstSubscriptionId }) },
