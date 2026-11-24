@@ -316,8 +316,10 @@ function dispatchersFor(ref, world, events) {
   const guest = { id: GUEST, isDestroyed: () => false };
   return ref.pageSwarm.createSwarmDispatchers({
     guestContents: (id) => (id === GUEST ? guest : null),
+    // The dispatcher reads a custody that throws as custody, so a wrong
+    // guest fails the run after its step (world.fatal) instead.
     inCustody: (id) => {
-      assert.equal(id, GUEST, 'custody is read for the requesting guest');
+      if (id !== GUEST) world.fatal ??= new Error(`custody read for guest ${id}, not the requester's`);
       (world.guard ? world.guard.custody : events).push(world.guard ? world.custody : { custody: world.custody });
       return world.custody;
     },
