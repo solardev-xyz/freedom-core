@@ -7,8 +7,20 @@
 //! get genuine SOC digests signed, never an arbitrary 32-byte value.
 //!
 //! [`verify`] checks what an external node serves (design 0009).
+//!
+//! The write side (design 0015, SWM-2) builds what the core sends a node,
+//! as bee-js 13.2.0 and its `@ethersphere/core-sdk` 0.2.2 build it:
+//! [`chunker`] the chunk tree, [`tar`] a collection's body, [`feed`] feed
+//! topics, identifiers and updates, [`soc`] single-owner chunk bodies, and
+//! [`gsoc`] GSOC signer mining. `tests/data/write-side.json` is their
+//! contract.
 
+pub mod chunker;
+pub mod feed;
+pub mod gsoc;
 pub mod manifest;
+pub mod soc;
+pub mod tar;
 pub mod tree;
 pub mod verify;
 
@@ -25,6 +37,8 @@ pub enum Error {
     PayloadSize(usize),
     #[error("signing failed")]
     Signing,
+    #[error("the payload or identifier isn't the signed chunk's")]
+    Mismatch,
 }
 
 /// The root of Swarm's binary Merkle tree over the payload, zero-padded to

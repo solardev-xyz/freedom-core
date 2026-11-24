@@ -47,3 +47,8 @@ opt-level = 3
 # only for optimized code.
 [profile.dev.package.fc-evm]
 opt-level = 3
+
+# GSOC mining's batch and its cap are measured in the test build (design
+# 0015, SWM-2), and the chunk-tree tests hash tens of MiB.
+[profile.dev.package.fc-swarm]
+opt-level = 3

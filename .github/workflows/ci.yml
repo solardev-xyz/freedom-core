@@ -199,6 +199,18 @@ jobs:
         env:
           FREEDOM_TEST_MOUNTS: "1"
         run: python3 scripts/stdio-only.py cargo test --locked --workspace --all-features --tests mounted_
+      # Design 0015, SWM-2: GSOC mining's batch of 256 and its search to the
+      # cap, measured on each OS's runner, into the job summary. A number
+      # past the design's estimate (10 ms a batch, 2 s the cap) is flagged,
+      # not failed.
+      - name: GSOC mining timing
+        shell: bash
+        run: |
+          cargo test --locked -p fc-swarm --test gsoc_timing -- --nocapture 2>&1 | tee gsoc-timing.txt
+          grep '^gsoc timing' gsoc-timing.txt | sed 's/$/  /' >> "$GITHUB_STEP_SUMMARY"
+          if grep -q 'PAST THE ESTIMATE' gsoc-timing.txt; then
+            echo "::warning title=GSOC mining past the estimate::$(grep 'PAST THE ESTIMATE' gsoc-timing.txt | tr '\n' ' ')"
+          fi
 
   profile-gate:
     # Design 0013's latency gate (PRF-3): `profile open` under 100 ms at the
@@ -363,6 +375,11 @@ jobs:
             --colibri-browser "$FREEDOM_BROWSER_COLIBRI_CHECKOUT"
           node --test vectors/generator/check.test.js
           node --test vectors/generator/colibri-contract.test.js
+      # fc-swarm's write-side answers (design 0015, SWM-2) from bee-js 13.2.0
+      # and core-sdk 0.2.2, the versions and integrity the Radicle
+      # reference's lockfile pins; the generator refuses any other version.
+      - name: fc-swarm's write-side answers against bee-js 13.2.0
+        run: node crates/fc-swarm/tests/gen/generate.js check --node-modules "$GITHUB_WORKSPACE/radicle-reference/node_modules"
       # Design 0013's interop harness: the profiles reference's catalog code
       # and freedom-cored's subcommands on one app root, the catalog's write
       # lock held both ways, and the JSON Lines journal and the payment
