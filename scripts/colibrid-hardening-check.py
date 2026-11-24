@@ -16,7 +16,8 @@ _FORTIFY_SOURCE=3 and control-flow protection where the target has it
 
   colibrid-hardening-check.py vcxproj <build dir>
       on Windows, every Visual Studio project CMake generated that compiles
-      C or C++ does so in its Release configuration with Control Flow Guard
+      C or C++ (outside CMakeFiles/, CMake's compiler identification and
+      try-compiles) does so in its Release configuration with Control Flow Guard
       (ControlFlowGuard: Guard) and without turning /GS off
       (BufferSecurityCheck: false);
 
@@ -38,6 +39,7 @@ hardened; compile-commands, blst and vcxproj check each compile's flags.
 import glob
 import json
 import os
+import pathlib
 import re
 import struct
 import sys
@@ -85,7 +87,12 @@ MSBUILD = "{http://schemas.microsoft.com/developer/msbuild/2003}"
 def vcxproj(build_dir):
     """Errors: Visual Studio projects compiling without Control Flow Guard,
     or with /GS off, in their Release configuration."""
-    projects = glob.glob(os.path.join(build_dir, "**", "*.vcxproj"), recursive=True)
+    # CMake's own projects under CMakeFiles/ (compiler identification,
+    # try-compiles) build nothing that ships, and define Debug alone.
+    projects = [
+        path for path in glob.glob(os.path.join(build_dir, "**", "*.vcxproj"), recursive=True)
+        if "CMakeFiles" not in pathlib.PurePath(os.path.relpath(path, build_dir)).parts
+    ]
     errors = []
     compiling = 0
     for path in sorted(projects):

@@ -135,6 +135,25 @@ class Vcxproj(unittest.TestCase):
         self.write("ALL_BUILD.vcxproj", project("", compiles=False))
         self.assertEqual(hardening.vcxproj(str(self.dir)), [])
 
+    def test_cmakes_own_projects_are_skipped(self):
+        self.write("util.vcxproj", project("<ControlFlowGuard>Guard</ControlFlowGuard>"))
+        # CMake's compiler identification: compiles, Debug alone.
+        ident = self.dir / "CMakeFiles/3.31.6/CompilerIdC"
+        ident.mkdir(parents=True)
+        (ident / "CompilerIdC.vcxproj").write_text(
+            '<?xml version="1.0" encoding="utf-8"?>'
+            '<Project xmlns="http://schemas.microsoft.com/developer/msbuild/2003">'
+            "<ItemDefinitionGroup Condition=\"'$(Configuration)|$(Platform)'=='Debug|x64'\">"
+            "<ClCompile /></ItemDefinitionGroup>"
+            '<ItemGroup><ClCompile Include="CMakeCCompilerId.c" /></ItemGroup></Project>'
+        )
+        self.assertEqual(hardening.vcxproj(str(self.dir)), [])
+
+    def test_a_product_project_without_release_settings_fails(self):
+        self.write("util.vcxproj", project("").replace("'Release|x64'", "'Debug|Win32'"))
+        self.assertEqual(hardening.vcxproj(str(self.dir)),
+                         ["src/util.vcxproj: no Release compile settings"])
+
     def test_an_unguarded_project_or_gs_off_fails(self):
         self.write("util.vcxproj", project(""))
         self.write("api.vcxproj", project(
