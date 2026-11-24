@@ -13,7 +13,7 @@
 [package]
 name = "freedom-colibrid"
 description = "The Colibri service process: Colibri's verifier as a native, confined process (design 0014)"
-version = "0.0.0"
+version = "0.1.0"
 edition = "2024"
 rust-version = "1.99"
 publish = false
