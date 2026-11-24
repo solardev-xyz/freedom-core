@@ -2,18 +2,20 @@
 #
 # Its own Cargo workspace, excluded from the core's, as freedom-ipfsd is: its
 # own lockfile, `cargo deny` policy and notices, so Colibri's C core and its
-# third-party sources never enter the core's graph (0014, "Decided"). It will
-# share `fc-protocol` and `fc-service` with the core, by path, when the
-# service arrives (COL-4).
+# third-party sources never enter the core's graph (0014, "Decided"). It
+# shares `fc-protocol`, `fc-service`, `fc-colibri`, `fc-json` and `fc-sys`
+# with the core, by path.
 #
-# COL-2 (this crate as it is now): the native, verifier-only C core, built
-# from the pinned fork commit, and a replay of every COL-1 trace through it
-# (tests/replay.rs). No service yet.
+# COL-4: the service. `serve` runs a chain's persistent process or a private
+# session's, `checkpoint` the one-shot checkpoint check, each confined, with
+# one verifier thread calling into the C core (src/main.rs). COL-2, beneath
+# it: the native, verifier-only C core, built from the pinned fork commit,
+# and a replay of every COL-1 trace through it (tests/replay.rs).
 
 [package]
 name = "freedom-colibrid"
 description = "The Colibri service process: Colibri's verifier as a native, confined process (design 0014)"
-version = "0.0.0"
+version = "0.1.0"
 edition = "2024"
 rust-version = "1.99"
 publish = false
