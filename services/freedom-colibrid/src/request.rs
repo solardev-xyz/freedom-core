@@ -533,11 +533,21 @@ impl RawRequest<'static> {
     }
 }
 
-/// A success's result, as the C core wrote it.
+/// A success's result, as the C core wrote it: absent, or its JSON text,
+/// `null` included (the client's caller gets `null` then, not `undefined`).
 #[derive(Deserialize)]
 pub(crate) struct SuccessStatus<'a> {
-    #[serde(borrow, default)]
+    #[serde(borrow, default, deserialize_with = "present")]
     pub(crate) result: Option<&'a RawValue>,
+}
+
+/// A field that is there, `null` or not: serde reads a `null` `Option` as
+/// absent.
+fn present<'de, D>(deserializer: D) -> Result<Option<&'de RawValue>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    <&RawValue>::deserialize(deserializer).map(Some)
 }
 
 /// One answer for the C core: the body and its node, or the error text.
@@ -952,6 +962,18 @@ pub(crate) async fn fetch(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_null_result_is_kept_and_an_absent_one_is_absent() {
+        let null: SuccessStatus<'_> =
+            serde_json::from_str(r#"{"status":"success","result":null}"#).unwrap();
+        assert_eq!(null.result.map(RawValue::get), Some("null"));
+        let value: SuccessStatus<'_> =
+            serde_json::from_str(r#"{"status":"success","result":{"a":1}}"#).unwrap();
+        assert_eq!(value.result.map(RawValue::get), Some(r#"{"a":1}"#));
+        let absent: SuccessStatus<'_> = serde_json::from_str(r#"{"status":"success"}"#).unwrap();
+        assert!(absent.result.is_none());
+    }
 
     #[test]
     fn params_as_the_client_sends_them() {

@@ -406,7 +406,7 @@ On fc-service's connection, at the version services speak, with fc-protocol's tw
 
 | Method | Params | Result |
 |---|---|---|
-| `colibri.hello` | fc-service's | fc-service's, plus `colibri_version` (`3.0.3`), `client_version` (196611), `chain_id`, `build` (`op`, `zk`, flags) and `confinement` |
+| `colibri.hello` | fc-service's | fc-service's, plus `service_version` (the service's release, which main pins), `colibri_version` (`3.0.3`), `client_version` (196611), `chain_id`, `build` (`op`, `zk`, flags) and `confinement` |
 | `colibri.request` | `{ client, zk, method, params, min_latest_block_ts, deadline_ms }` | `{ status: "success", result? }`, `{ status: "revert", data }` or `{ status: "error", error }` |
 | `colibri.forget` | `{ client }` | `{}` |
 | `colibri.checkpoint` | `{ min_latest_block_ts, deadline_ms }` (one-shot process only) | `{ decoded, result }` or `{ status: "error", stage, error }` |
@@ -551,7 +551,7 @@ The service doesn't serve `eth_call` or `eth_estimateGas`, at any block. So it s
 ### What main builds from an answer
 
 Main rebuilds what the package's client returns or throws today, so everything downstream is unchanged:
-- **success:** the result, or `undefined`;
+- **success:** the result, or `undefined` when the C core wrote none (a `null` result is `null`);
 - **revert:** `ProviderRpcError(3, 'execution reverted', data)`, as `throwRevert`. Only calls revert, and the service serves none, but main keeps the mapping: the core still handles the shape (0005);
 - **error:** `ProviderRpcError.createError` of the whole text (`cjs/types.js:38–58`), whose message is `Error in rpc call <method><JSON.stringify(params)> : <text>`. The code comes from three rules, applied in order to the whole text:
   - **4200** when the text starts with `Method ` and ends with ` is not supported` (`:47`);
@@ -812,7 +812,7 @@ Open requests aren't measured: each trace runs one request at a time, and the bo
 - **Crashes a request caused don't stop restarts.** The core's backoff already throttles each method on each chain: two faults within 60 s start a cooldown of 60 s, then 5 min, then 15 min.
 - **Three exits within 60 s that name no culprit** stop restarts for that chain until a configuration change or the next launch. A death outside any step and a kill for a protocol error (a forged marker included) name no culprit.
 - **Three abnormal exits in a row with no answer between them** clear the chain's directory before the next spawn: it is a cache, and a damaged entry would crash every process that loads it. A private process has no directory to clear; its successor starts cold anyway.
-- **A recycle:** above its memory budget a process refuses new requests (`busy`, which main sends to the successor), finishes its open ones, and exits 0. Main spawns the successor at once when the browser-wide limit has room ([How many](#how-many)). A recycle is no fault.
+- **A recycle:** above its memory budget a process refuses new requests (`busy` with `data: {"recycling": true}`, which main sends to the successor), finishes its open ones, and exits 0. Main spawns the successor at once when the browser-wide limit has room ([How many](#how-many)). A recycle is no fault.
 - **Logs:** main logs each crash, kill, recycle, retirement, refused fetch and stop at `warn` with the chain and the reason, never a request's params.
 
 ## Vectors
