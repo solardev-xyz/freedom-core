@@ -205,6 +205,52 @@ fn copy_dir(from: &Path, to: &Path) {
     }
 }
 
+/// Whether the service's `shell.colibri_fetch` params `p` for request `rid`
+/// carry the recorded C core's data request `want` whole. The C core writes
+/// exclude_mask as a string and ttl as a number; the fetch carries both as
+/// numbers, ttl as max_age when it is set.
+fn same_fetch(p: &Value, want: &Value, rid: u64) -> bool {
+    let number = |value: &Value| {
+        value
+            .as_u64()
+            .or_else(|| value.as_str().and_then(|s| s.parse().ok()))
+            .unwrap_or(0)
+    };
+    let ttl = number(&want["ttl"]);
+    p["request"] == rid
+        && p["type"] == want["type"]
+        && p["method"] == want["method"]
+        && p["path"] == want["url"]
+        && p["accept"] == want["encoding"]
+        && p.get("payload") == want.get("payload")
+        && p["exclude_mask"].as_u64() == Some(number(&want["exclude_mask"]))
+        && p.get("max_age").and_then(Value::as_u64) == (ttl > 0).then_some(ttl)
+}
+
+/// The calls a checkpoint check makes into the C core, as its markers name
+/// them, from the recording's trace: the decoding; the verifier's creation
+/// and, once made, its freshness bound; each step and each answer; the
+/// free.
+fn checkpoint_calls(ops: &[Value]) -> Vec<&'static str> {
+    let mut calls = Vec::new();
+    for op in ops {
+        match op["op"].as_str().unwrap_or_default() {
+            "decode" => calls.push("decode"),
+            "verify_create" => calls.push("create"),
+            "verify" => {
+                if calls.last() == Some(&"create") {
+                    calls.push("freshness");
+                }
+                calls.push("execute");
+            }
+            "response" | "error" => calls.push("answer"),
+            "verify_free" => calls.push("free"),
+            _ => {}
+        }
+    }
+    calls
+}
+
 /// How one request ended.
 enum Ended {
     Reply(Value),
@@ -346,25 +392,7 @@ fn run_case(
                     let Some(want) = recorded.requests.get(asks as usize) else {
                         return Err(format!("{id}: an unrecorded fetch: {p}"));
                     };
-                    // The C core writes exclude_mask as a string and ttl as
-                    // a number; the fetch carries both as numbers, ttl as
-                    // max_age when it is set.
-                    let number = |value: &Value| {
-                        value
-                            .as_u64()
-                            .or_else(|| value.as_str().and_then(|s| s.parse().ok()))
-                            .unwrap_or(0)
-                    };
-                    let ttl = number(&want["ttl"]);
-                    let same = p["request"] == rid
-                        && p["type"] == want["type"]
-                        && p["method"] == want["method"]
-                        && p["path"] == want["url"]
-                        && p["accept"] == want["encoding"]
-                        && p.get("payload") == want.get("payload")
-                        && p["exclude_mask"].as_u64() == Some(number(&want["exclude_mask"]))
-                        && p.get("max_age").and_then(Value::as_u64) == (ttl > 0).then_some(ttl);
-                    if !same {
+                    if !same_fetch(p, want, rid) {
                         return Err(format!(
                             "{id}: fetch {asks} differs:\n  service:   {p}\n  recorded:  {want}"
                         ));
@@ -661,6 +689,19 @@ fn run_checkpoint_case(case: &Value) -> Result<(), String> {
                     if std::mem::replace(&mut asked_proof, true) {
                         return Err(format!("{id}: a second proof fetch"));
                     }
+                    // The fetch contract's proof: main makes it itself, so
+                    // the service names nothing else.
+                    let proof_shape = json!({
+                        "request": rid,
+                        "type": "checkpoint_proof",
+                        "method": "post",
+                        "path": "",
+                        "accept": "ssz",
+                        "exclude_mask": 0,
+                    });
+                    if p != &proof_shape {
+                        return Err(format!("{id}: the proof fetch differs: {p}"));
+                    }
                     let reply = &proof["reply"];
                     if reply["status"] == 200 {
                         let len = reply["bytes"].as_u64().unwrap() as usize;
@@ -677,10 +718,7 @@ fn run_checkpoint_case(case: &Value) -> Result<(), String> {
                 let Some(want) = recorded.requests.get(asks as usize) else {
                     return Err(format!("{id}: an unrecorded fetch: {p}"));
                 };
-                if p["type"] != want["type"]
-                    || p["path"] != want["url"]
-                    || p["method"] != want["method"]
-                {
+                if !same_fetch(p, want, rid) {
                     return Err(format!(
                         "{id}: fetch {asks} differs:\n  service:  {p}\n  recorded: {want}"
                     ));
@@ -718,20 +756,23 @@ fn run_checkpoint_case(case: &Value) -> Result<(), String> {
             _ => {}
         }
     };
-    // Every call had its marker, cleared before the reply: the decoding
-    // first, and once a verifier was made, its free last.
+    // Every call had its marker, cleared before the reply: exactly the
+    // calls the recording's C core was given, and every fetch its verifier
+    // made.
     if open_step {
         return Err(format!("{id}: replied with its step open"));
     }
-    if asked_proof && calls.first().map(String::as_str) != Some("decode") {
+    let expected = checkpoint_calls(ops);
+    if calls != expected {
         return Err(format!(
-            "{id}: the decoding wasn't the first call: {calls:?}"
+            "{id}: the calls differ:\n  service:   {calls:?}\n  recording: {expected:?}"
         ));
     }
-    if calls.iter().any(|call| call == "freshness")
-        && calls.last().map(String::as_str) != Some("free")
-    {
-        return Err(format!("{id}: the verifier wasn't freed last: {calls:?}"));
+    if asks as usize != recorded.requests.len() {
+        return Err(format!(
+            "{id}: {asks} fetches, the recording's verifier made {}",
+            recorded.requests.len()
+        ));
     }
     let reply: RawReply<'_> = serde_json::from_str(&raw).map_err(|e| format!("{id}: {e}"))?;
     let result: Value = serde_json::from_str(reply.result.get()).unwrap();

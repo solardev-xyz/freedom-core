@@ -107,6 +107,12 @@ required-features = ["testhooks"]
 name = "faults"
 required-features = ["testhooks"]
 
+# The checkpoint process's cancels and memory budget: the `testhooks`
+# feature's.
+[[test]]
+name = "checkpoint"
+required-features = ["testhooks"]
+
 # The core's workspace lints, copied: workspace lints don't cross workspaces.
 [lints.rust]
 unsafe_code = "forbid"

@@ -31,7 +31,7 @@ use serde_json::value::RawValue;
 
 use crate::request::{
     Env, FetchBudget, Fetched, PendingStatus, RawRequest, Reply, Stop, SuccessStatus, TaskState,
-    VERIFY_FLAGS, all_unless_cancelled, cancelled, fetch, send_reply,
+    VERIFY_FLAGS, all_unless_cancelled, cancelled, cut_error, fetch, send_reply,
 };
 
 /// The proof: the fetch contract's `checkpoint_proof`, 4 MiB at most.
@@ -59,9 +59,15 @@ impl Params {
     }
 }
 
+/// `{status:"error",stage,error}`, the error cut as a request's is
+/// (64 Ki UTF-16 units).
 fn failed(stage: &str, error: &str) -> Reply {
-    Reply::Raw(json!({ "status": "error", "stage": stage, "error": error }).to_string())
+    Reply::Raw(json!({ "status": "error", "stage": stage, "error": cut_error(error) }).to_string())
 }
+
+/// Past the checkpoint process's resident memory: the check fails (it
+/// doesn't recycle).
+const OVER_RESIDENT: &str = "resident memory past the checkpoint process's budget";
 
 /// Runs check `id` to its reply, then ends the process.
 pub async fn run(env: Rc<Env>, id: u64, params: Params, state: Rc<TaskState>) {
@@ -104,10 +110,31 @@ async fn check(env: &Rc<Env>, id: u64, p: &Params, state: &Rc<TaskState>) -> Rep
             "deadline_ms is past what the clock holds",
         ));
     };
+    // The check's fetches, the proof's included, share one budget (0014,
+    // Budgets: 1,024 per request in all).
+    let mut budget = FetchBudget::default();
     let proof_request = RawRequest::own("checkpoint_proof", "post", "ssz");
-    let proof = match fetch(env, id, &proof_request, 0, 0, 0, deadline, false, MAX_PROOF).await {
-        Ok((bytes, _, _hold)) => bytes,
-        Err(text) => return failed("decode", &text),
+    let over = !budget.take();
+    let proof_fetch: Vec<std::pin::Pin<Box<dyn std::future::Future<Output = Fetched> + '_>>> =
+        vec![Box::pin(fetch(
+            env,
+            id,
+            &proof_request,
+            0,
+            0,
+            0,
+            deadline,
+            over,
+            MAX_PROOF,
+        ))];
+    // A cancel ends the wait, and drops the ask with main.
+    let Some(mut proof) = all_unless_cancelled(proof_fetch, state).await else {
+        return cancelled(state);
+    };
+    let proof = match proof.pop() {
+        Some(Ok((bytes, _, _hold))) => bytes,
+        Some(Err(text)) => return failed("decode", &text),
+        None => return failed("decode", "no proof"),
     };
     if state.cancelled.get() {
         return cancelled(state);
@@ -125,6 +152,9 @@ async fn check(env: &Rc<Env>, id: u64, p: &Params, state: &Rc<TaskState>) -> Rep
     if state.cancelled.get() {
         return cancelled(state);
     }
+    if env.shared.over_resident() {
+        return failed("decode", OVER_RESIDENT);
+    }
     let Some(decoded) = decoded else {
         return failed("decode", UNKNOWN_PROOF);
     };
@@ -134,6 +164,7 @@ async fn check(env: &Rc<Env>, id: u64, p: &Params, state: &Rc<TaskState>) -> Rep
     let chain = env.shared.chain_id;
     let created = match env
         .call(id, state, "create", || {
+            crate::testhooks::in_create();
             Verifier::new(&proof, METHOD, ARGS, chain, None, VERIFY_FLAGS)
         })
         .await
@@ -141,13 +172,15 @@ async fn check(env: &Rc<Env>, id: u64, p: &Params, state: &Rc<TaskState>) -> Rep
         Ok(created) => created,
         Err(stop) => return stop.reply(),
     };
+    // A cancel queued during the creation wins over its outcome.
     let mut verifier = match created {
+        Ok(verifier) if state.cancelled.get() => {
+            return end(env, id, state, verifier, cancelled(state)).await;
+        }
         Ok(verifier) => verifier,
+        Err(_) if state.cancelled.get() => return cancelled(state),
         Err(e) => return failed("verify", &e.to_string()),
     };
-    if state.cancelled.get() {
-        return end(env, id, state, verifier, cancelled(state)).await;
-    }
     let min = p.min_latest_block_ts;
     if let Err(e) = env
         .call(id, state, "freshness", || {
@@ -160,7 +193,6 @@ async fn check(env: &Rc<Env>, id: u64, p: &Params, state: &Rc<TaskState>) -> Rep
     if state.cancelled.get() {
         return end(env, id, state, verifier, cancelled(state)).await;
     }
-    let mut budget = FetchBudget::default();
     loop {
         let outcome = match env
             .call(id, state, "execute", || {
@@ -186,10 +218,7 @@ async fn check(env: &Rc<Env>, id: u64, p: &Params, state: &Rc<TaskState>) -> Rep
         }
         if env.shared.over_resident() {
             drop(step);
-            let reply = failed(
-                "verify",
-                "resident memory past the checkpoint process's budget",
-            );
+            let reply = failed("verify", OVER_RESIDENT);
             return end(env, id, state, verifier, reply).await;
         }
         let requests = match step {
@@ -280,5 +309,30 @@ async fn check(env: &Rc<Env>, id: u64, p: &Params, state: &Rc<TaskState>) -> Rep
             Some(None) => return end(env, id, state, verifier, cancelled(state)).await,
             None => {}
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn error_of(reply: Reply) -> String {
+        let Reply::Raw(text) = reply else {
+            panic!("not a raw reply");
+        };
+        let value: serde_json::Value = serde_json::from_str(&text).unwrap_or_default();
+        value["error"].as_str().unwrap_or_default().to_owned()
+    }
+
+    #[test]
+    fn a_failures_error_is_cut_as_a_requests_is() {
+        // 64 Ki UTF-16 units: a BMP character is one, an astral one two,
+        // and none is split.
+        let cut = error_of(failed("decode", &"é".repeat(65_536 + 5)));
+        assert_eq!(cut.encode_utf16().count(), 65_536);
+        let cut = error_of(failed("verify", &format!("a{}", "😀".repeat(32_768))));
+        assert_eq!(cut.encode_utf16().count(), 65_535);
+        assert!(cut.ends_with('😀'));
+        assert_eq!(error_of(failed("verify", "short")), "short");
     }
 }

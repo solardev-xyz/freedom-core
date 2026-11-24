@@ -356,16 +356,20 @@ pub(crate) fn cancelled(state: &TaskState) -> Reply {
 /// `{"status":"error","error":<text>}`, the text cut at
 /// [`MAX_ERROR_UNITS`].
 pub(crate) fn error_reply(text: &str) -> Reply {
+    Reply::Raw(json!({ "status": "error", "error": cut_error(text) }).to_string())
+}
+
+/// `text`'s first [`MAX_ERROR_UNITS`] UTF-16 units, never splitting a
+/// character: an error a reply carries (0014, Budgets).
+pub(crate) fn cut_error(text: &str) -> &str {
     let mut units = 0;
-    let mut end = text.len();
     for (at, c) in text.char_indices() {
         units += c.len_utf16();
         if units > MAX_ERROR_UNITS {
-            end = at;
-            break;
+            return &text[..at];
         }
     }
-    Reply::Raw(json!({ "status": "error", "error": &text[..end] }).to_string())
+    text
 }
 
 /// The params the client hands the C core: `request()`'s
@@ -388,16 +392,27 @@ fn client_params(params: &str) -> String {
 
 /// The fetches one request may make in all, across a ZK fallback's two
 /// contexts (0014, Budgets: 1,024 per request).
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub(crate) struct FetchBudget {
     taken: u32,
+    limit: u32,
+}
+
+impl Default for FetchBudget {
+    /// 1,024 fetches, or the test hook's bound.
+    fn default() -> FetchBudget {
+        FetchBudget {
+            taken: 0,
+            limit: crate::testhooks::fetch_budget().unwrap_or(MAX_FETCHES_PER_REQUEST),
+        }
+    }
 }
 
 impl FetchBudget {
     /// Takes one fetch: false past the bound.
     pub(crate) fn take(&mut self) -> bool {
         self.taken = self.taken.saturating_add(1);
-        self.taken <= MAX_FETCHES_PER_REQUEST
+        self.taken <= self.limit
     }
 }
 
@@ -549,6 +564,7 @@ impl Attempt<'_> {
         }
         let created = env
             .call(id, state, "create", || {
+                crate::testhooks::in_create();
                 RpcCtx::new(
                     &self.p.method,
                     self.params,

@@ -14,12 +14,15 @@
 //!   its marker, the process aborts; `=spin`: the step never returns;
 //!   `=sleep:<ms>`: the step takes that long first.
 //! - `FREEDOM_COLIBRID_TEST_CLASSIFY`: the same inside a request's
-//!   classification, its first call into the C core.
+//!   classification, its first call into the C core;
+//!   `FREEDOM_COLIBRID_TEST_CREATE`: inside a context's or a checkpoint
+//!   verifier's creation.
 //! - `FREEDOM_COLIBRID_TEST_ANSWER=crash:<n>`: the process aborts inside
 //!   the n-th answer it gives the C core.
 //! - Each step marker names its call (`"call": "execute"`, and so on).
 //! - `FREEDOM_COLIBRID_TEST_MEMORY_BUDGET=<bytes>` replaces the resident
-//!   memory budget, so a test can make the process recycle.
+//!   memory budget, so a test can make the process recycle;
+//!   `FREEDOM_COLIBRID_TEST_FETCH_BUDGET=<n>` the per-request fetch budget.
 //!
 //! The confinement tests (`tests/confinement.rs`) read the log lines; the
 //! fault tests (`tests/faults.rs`) watch the markers and the exit.
@@ -59,6 +62,12 @@ pub fn in_classify() {
     fault("FREEDOM_COLIBRID_TEST_CLASSIFY");
 }
 
+/// Inside a context's or a verifier's creation, behind its marker: the
+/// same, asked for by `FREEDOM_COLIBRID_TEST_CREATE`.
+pub fn in_create() {
+    fault("FREEDOM_COLIBRID_TEST_CREATE");
+}
+
 /// Inside an answer given to the C core, behind its marker:
 /// `FREEDOM_COLIBRID_TEST_ANSWER=crash:<n>` aborts in the process's n-th.
 pub fn in_answer() {
@@ -94,6 +103,21 @@ fn fault(var: &str) {
 
 #[cfg(not(feature = "testhooks"))]
 fn fault(_var: &str) {}
+
+/// The per-request fetch budget a test sets, if any
+/// (`FREEDOM_COLIBRID_TEST_FETCH_BUDGET=<n>`).
+#[cfg(feature = "testhooks")]
+pub fn fetch_budget() -> Option<u32> {
+    std::env::var("FREEDOM_COLIBRID_TEST_FETCH_BUDGET")
+        .ok()?
+        .parse()
+        .ok()
+}
+
+#[cfg(not(feature = "testhooks"))]
+pub fn fetch_budget() -> Option<u32> {
+    None
+}
 
 /// The resident memory budget a test sets, if any.
 #[cfg(feature = "testhooks")]
