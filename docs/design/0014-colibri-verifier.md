@@ -9,6 +9,11 @@
 
 freedom-core #279 (merged) and #286 (in review) carry the core's side of these rules.
 
+**Amended** after COL-5's contract suite ran both backends over the real binary (freedom-browser, COL-5 PR 8):
+- a request that fails at or after its deadline has the deadline's outcome, whichever side's bound fired first ([Cancel and deadlines](#cancel-and-deadlines));
+- the methods outside the service's list that the reference still answers have a deviation of their own, `colibri-unserved` ([Deviations](#deviations));
+- a chain directory that can't be granted or made stops that chain's lane (`storage-per-chain`).
+
 **The references:**
 - **freedom-browser** at `e670715d` (`integration/rust-core`; the files below are unchanged since `f47ac5c1`, the first reading), in `src/main/`:
   - `ens/colibri-runtime.js` (224 lines), `ens/colibri-worker.js` (204), `ens/colibri-worker-host.js` (403) and `ens/colibri-resolver.js` (271): about 1.1k lines;
@@ -421,7 +426,7 @@ On fc-service's connection, at the version services speak, with fc-protocol's tw
   - **It is still bounded:** the fetch errors main gives the C core are at most 2,000 units (deviation `fetch-error-text`). The service cuts any error text at 64 Ki units, only as a bound on its reply.
 - **Refusals:** `busy` (budgets, or a step marker that couldn't be written: [The step marker](#the-step-marker)), `too_large`, `cancelled`, `invalid_argument`.
 - **What it serves is a closed list,** checked before any context exists ([What the service serves](#what-the-service-serves)). The rest is refused there:
-  - a method outside the list, with the C core's own text, `Method <m> is not supported` (deviations `colibri-unproofable` and `colibri-no-calls`);
+  - a method outside the list, with the C core's own text, `Method <m> is not supported` (deviations `colibri-unproofable`, `colibri-no-calls` and `colibri-unserved`);
   - a block form outside #279's, with #279's text, `Colibri cannot prove <method> <why>` (deviations `colibri-unproofable` for `pending` and `earliest`, and `colibri-unbound`).
 
   The core's router sends neither since #279. The refusal guards any other caller.
@@ -544,6 +549,7 @@ The service doesn't serve `eth_call` or `eth_estimateGas`, at any block. So it s
 
 - **A cancel** of a request that waits on fetches cancels them, frees its context and replies `cancelled`. A request inside a step is cancelled when the step returns.
 - **A request past its deadline** that waits on fetches is cancelled by main. Today it waits up to 60 s more (deviation `colibri-deadline`).
+- **One outcome at the deadline, whichever bound fires first.** The service bounds each fetch by the request's `deadline_ms` too, counted from when it read the request. When that bound passes, the C core gets `Colibri fetch deadline passed` as the fetch's error and the request can fail with it before main's cancel arrives. That bound never passes before main's deadline, so main decides: any reply other than a result, read at or after the request's deadline, is the deadline's outcome, cancelled at its deadline and not a fault, as `colibri-deadline` gives it. A result read then is kept. COL-5's contract suite found the two racing, each winning about half the time.
 - **A step still running 2 s past its request's deadline:** main kills the process. That request is the culprit. Today's `STUCK_PROBE_MS` is 1 s; a native step took up to 875 ms over the vectors, and the allowance is twice that, rounded up ([Measured](#measured-col-2)).
 - **A request with no caller deadline** gets today's 60 s (`DEFAULT_DEADLINE_MS`). Today that is ENS through ethers, which #1082 and #1083 remove.
 - **Physical completion** (0005): main's promise settles on the service's reply or the process's death, never earlier, so the core's slots are held as today.
@@ -864,9 +870,10 @@ COL-1's recording (`vectors/colibri.json`, captured 2026-11-22) differs from thi
 | `no-local-proving` | at this design's reading, a failed remote proof is proven locally in main's worker, from the `eth_rpc` and `beacon_api` hosts (F-9, #1059). #1080 and #1081 (open) end it instead, with `remote proof failed (no local proving): <the prover's error>` | no local proving, in normal and private processes alike: the build has no prover, and the request ends with #1080's text, byte for byte ([A failed remote proof](#a-failed-remote-proof)). The read falls to its next source. Against a reference with #1081 this row is parity |
 | `colibri-processes` | a worker per chain, with no bound on their number | at most 3 persistent and 2 checkpoint processes, idle ones retired, `Colibri service busy` at the limit |
 | `fetch-error-text` | a fetch error names the URL and payload, and carries the whole error body | URLs as `<url>`, the payload kept as `fetch_from_servers` writes it ([The rest](#the-rest)), at most 2,000 units. The cut is of the fetch text, before the C core's and `createError`'s prefixes, so it never shows in the adapter message, which is cut to 2,000 units after them |
+| `colibri-unserved` | the adapter sends every other method to the prover as it does any read (`eth_getLogs` among them), and answers `eth_chainId` from its own configuration (`0x1` on mainnet) | refused before any context: `Method <m> is not supported`. No router asks for them: the core's sends Colibri only `fc-colibri`'s `COLIBRI_SERVED_METHODS` |
 | `no-initial-chain-id` | a local `eth_chainId` context on each client's first request | none |
 | `checked-decode` | the checkpoint check decodes the proof with `c4w_decode_proof`, which walks the bytes unchecked (corpus-core/colibri-stateless#443): a legacy-format proof decodes into a partial object, which the check then refuses (`CHECKPOINT_UNAVAILABLE`) | `c4_decode_proof` checks the proof as an object of its type first and decodes nothing; the same `CHECKPOINT_UNAVAILABLE` (COL-2) |
-| `storage-per-chain` | one flat directory for every chain; unchecked keys; no size bound | a directory per chain, checked keys, bounds; at most 6 directories. A private session's store is in memory, as #1071 has it |
+| `storage-per-chain` | one flat directory for every chain; unchecked keys; no size bound | a directory per chain, checked keys, bounds; at most 6 directories. A private session's store is in memory, as #1071 has it. A chain directory the grant refuses, or that can't be made, spawns nothing and stops that chain's lane (`Colibri service unavailable`, no fault) until a client of another configuration or the next launch; today each read starts a worker that fails the same way |
 
 ## Migration (Q19)
 
