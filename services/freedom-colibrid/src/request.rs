@@ -108,7 +108,7 @@ pub struct Env {
     pub zk_off: RefCell<HashMap<String, bool>>,
     /// Contexts whose free couldn't be marked: freed at exit (0014: "its
     /// context is freed later, under its own marker, or at exit").
-    pub graveyard: RefCell<Vec<RpcCtx>>,
+    pub graveyard: RefCell<Vec<Box<dyn std::any::Any>>>,
     /// Fetches open, process-wide.
     pub fetches: Cell<u64>,
 }
@@ -125,7 +125,7 @@ enum Marked {
 }
 
 /// How a request ends.
-enum Reply {
+pub(crate) enum Reply {
     /// A reply's JSON text.
     Raw(String),
     /// A refusal.
@@ -137,13 +137,13 @@ enum Reply {
 /// Why a request stops before its reply: its marker wasn't written
 /// (`busy`), or the request is answered or gone, or the connection is
 /// ending.
-enum Stop {
+pub(crate) enum Stop {
     Busy,
     Gone,
 }
 
 impl Stop {
-    fn reply(self) -> Reply {
+    pub(crate) fn reply(self) -> Reply {
         match self {
             Stop::Busy => busy(),
             Stop::Gone => Reply::None,
@@ -209,7 +209,7 @@ impl Env {
     /// clearing event as it returns, then a yield, so a cancel queued
     /// meanwhile is seen before anything else is done for the request. No
     /// marker, no call: `f` is then dropped uncalled.
-    async fn call<T>(
+    pub(crate) async fn call<T>(
         &self,
         id: u64,
         state: &TaskState,
@@ -236,11 +236,11 @@ impl Env {
     /// Frees `contexts` in order, each behind its own marker; from the
     /// first whose marker isn't written, they are kept until exit, and the
     /// request ends as that marker says.
-    async fn free_all(
+    pub(crate) async fn free_all<T: 'static>(
         &self,
         id: u64,
         state: &TaskState,
-        contexts: Vec<RpcCtx>,
+        contexts: Vec<T>,
     ) -> Result<(), Stop> {
         let mut contexts = contexts.into_iter();
         while let Some(ctx) = contexts.next() {
@@ -264,8 +264,11 @@ impl Env {
 
     /// Keeps `contexts` until exit (0014: "its context is freed later,
     /// under its own marker, or at exit").
-    fn bury(&self, contexts: impl IntoIterator<Item = RpcCtx>) {
-        self.graveyard.borrow_mut().extend(contexts);
+    pub(crate) fn bury<T: 'static>(&self, contexts: impl IntoIterator<Item = T>) {
+        let mut graveyard = self.graveyard.borrow_mut();
+        for context in contexts {
+            graveyard.push(Box::new(context));
+        }
     }
 
     /// Ends a request with `reply`: `ctx` freed, then the contexts a ZK
@@ -305,6 +308,16 @@ impl Env {
 /// Runs request `id` to its reply.
 pub async fn run(env: Rc<Env>, id: u64, params: Params, state: Rc<TaskState>) {
     let reply = serve(&env, id, &params, &state).await;
+    send_reply(&env, id, reply);
+    if env.shared.request_done() {
+        // Recycled: the open requests are answered (0014, Crashes, overruns
+        // and restarts). Exit 0, no fault.
+        env.conn.fail(Exit::Ok);
+    }
+}
+
+/// Sends request `id`'s reply.
+pub(crate) fn send_reply(env: &Env, id: u64, reply: Reply) {
     let sent = match reply {
         Reply::Raw(text) => match RawValue::from_string(text) {
             Ok(raw) => env.conn.reply(id, &raw),
@@ -322,21 +335,16 @@ pub async fn run(env: Rc<Env>, id: u64, params: Params, state: Rc<TaskState>) {
             &ErrorBody::new(ErrorCode::TooLarge, "the reply is over the message cap"),
         );
     }
-    if env.shared.request_done() {
-        // Recycled: the open requests are answered (0014, Crashes, overruns
-        // and restarts). Exit 0, no fault.
-        env.conn.fail(Exit::Ok);
-    }
 }
 
-fn busy() -> Reply {
+pub(crate) fn busy() -> Reply {
     Reply::Error(ErrorBody::new(
         ErrorCode::Busy,
         "the step marker wasn't written",
     ))
 }
 
-fn cancelled(state: &TaskState) -> Reply {
+pub(crate) fn cancelled(state: &TaskState) -> Reply {
     // Before the commit point main queued `cancelled` itself.
     if state.committed.get() {
         Reply::Error(ErrorBody::new(ErrorCode::Cancelled, "cancelled"))
@@ -347,17 +355,21 @@ fn cancelled(state: &TaskState) -> Reply {
 
 /// `{"status":"error","error":<text>}`, the text cut at
 /// [`MAX_ERROR_UNITS`].
-fn error_reply(text: &str) -> Reply {
+pub(crate) fn error_reply(text: &str) -> Reply {
+    Reply::Raw(json!({ "status": "error", "error": cut_error(text) }).to_string())
+}
+
+/// `text`'s first [`MAX_ERROR_UNITS`] UTF-16 units, never splitting a
+/// character: an error a reply carries (0014, Budgets).
+pub(crate) fn cut_error(text: &str) -> &str {
     let mut units = 0;
-    let mut end = text.len();
     for (at, c) in text.char_indices() {
         units += c.len_utf16();
         if units > MAX_ERROR_UNITS {
-            end = at;
-            break;
+            return &text[..at];
         }
     }
-    Reply::Raw(json!({ "status": "error", "error": &text[..end] }).to_string())
+    text
 }
 
 /// The params the client hands the C core: `request()`'s
@@ -380,16 +392,27 @@ fn client_params(params: &str) -> String {
 
 /// The fetches one request may make in all, across a ZK fallback's two
 /// contexts (0014, Budgets: 1,024 per request).
-#[derive(Debug, Default)]
-struct FetchBudget {
+#[derive(Debug)]
+pub(crate) struct FetchBudget {
     taken: u32,
+    limit: u32,
+}
+
+impl Default for FetchBudget {
+    /// 1,024 fetches, or the test hook's bound.
+    fn default() -> FetchBudget {
+        FetchBudget {
+            taken: 0,
+            limit: crate::testhooks::fetch_budget().unwrap_or(MAX_FETCHES_PER_REQUEST),
+        }
+    }
 }
 
 impl FetchBudget {
     /// Takes one fetch: false past the bound.
-    fn take(&mut self) -> bool {
+    pub(crate) fn take(&mut self) -> bool {
         self.taken = self.taken.saturating_add(1);
-        self.taken <= MAX_FETCHES_PER_REQUEST
+        self.taken <= self.limit
     }
 }
 
@@ -478,13 +501,13 @@ struct Attempt<'a> {
 /// The raw fields of a pending step's requests, from the C core's status
 /// text: the payload goes to main as the C core wrote it.
 #[derive(Deserialize)]
-struct PendingStatus<'a> {
+pub(crate) struct PendingStatus<'a> {
     #[serde(borrow)]
-    requests: Vec<RawRequest<'a>>,
+    pub(crate) requests: Vec<RawRequest<'a>>,
 }
 
 #[derive(Deserialize)]
-struct RawRequest<'a> {
+pub(crate) struct RawRequest<'a> {
     #[serde(rename = "type")]
     kind: String,
     #[serde(default)]
@@ -497,15 +520,28 @@ struct RawRequest<'a> {
     encoding: String,
 }
 
+impl RawRequest<'static> {
+    /// A fetch the service makes itself, not the C core.
+    pub(crate) fn own(kind: &str, method: &str, encoding: &str) -> RawRequest<'static> {
+        RawRequest {
+            kind: kind.to_owned(),
+            method: method.to_owned(),
+            url: String::new(),
+            payload: None,
+            encoding: encoding.to_owned(),
+        }
+    }
+}
+
 /// A success's result, as the C core wrote it.
 #[derive(Deserialize)]
-struct SuccessStatus<'a> {
+pub(crate) struct SuccessStatus<'a> {
     #[serde(borrow, default)]
-    result: Option<&'a RawValue>,
+    pub(crate) result: Option<&'a RawValue>,
 }
 
 /// One answer for the C core: the body and its node, or the error text.
-type Fetched = Result<(Vec<u8>, u16, Option<Hold>), String>;
+pub(crate) type Fetched = Result<(Vec<u8>, u16, Option<Hold>), String>;
 
 impl Attempt<'_> {
     #[allow(clippy::too_many_lines)]
@@ -528,6 +564,7 @@ impl Attempt<'_> {
         }
         let created = env
             .call(id, state, "create", || {
+                crate::testhooks::in_create();
                 RpcCtx::new(
                     &self.p.method,
                     self.params,
@@ -634,6 +671,7 @@ impl Attempt<'_> {
                     request.exclude_mask,
                     self.deadline,
                     over,
+                    MAX_BODY,
                 )));
             }
             let Some(answers) = all_unless_cancelled(fetches, state).await else {
@@ -717,7 +755,7 @@ impl Attempt<'_> {
 
 /// Waits for every fetch, or for the request's cancel: `None` then, and the
 /// fetches still open are dropped, which cancels them with main.
-async fn all_unless_cancelled<'a, T>(
+pub(crate) async fn all_unless_cancelled<'a, T>(
     mut futures: Vec<Pin<Box<dyn Future<Output = T> + 'a>>>,
     state: &TaskState,
 ) -> Option<Vec<T>> {
@@ -823,7 +861,7 @@ fn reserve(budget: &Arc<AtomicU64>, limit: u64, bytes: u64) -> Option<Hold> {
 
 /// One data request to main, `shell.colibri_fetch`, and its body.
 #[allow(clippy::too_many_arguments)]
-async fn fetch(
+pub(crate) async fn fetch(
     env: &Rc<Env>,
     id: u64,
     fields: &RawRequest<'_>,
@@ -832,6 +870,7 @@ async fn fetch(
     exclude_mask: u32,
     deadline: Instant,
     over: bool,
+    max_body: u64,
 ) -> Fetched {
     if delay_ms > 0 {
         sleep(
@@ -864,7 +903,7 @@ async fn fetch(
             let bytes = serde_json::from_str::<HeadBytes>(head.get())
                 .map_err(|_| ErrorBody::new(ErrorCode::InvalidArgument, "a head without bytes"))?
                 .bytes;
-            if bytes > MAX_BODY {
+            if bytes > max_body {
                 return Err(refused());
             }
             let hold = reserve(&budget, limit, bytes).ok_or_else(refused)?;

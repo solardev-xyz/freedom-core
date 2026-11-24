@@ -91,6 +91,22 @@ required-features = ["testhooks"]
 name = "markers"
 required-features = ["testhooks"]
 
+# The probes once confined: the `testhooks` feature's.
+[[test]]
+name = "confinement"
+required-features = ["testhooks"]
+
+# A crash, a spin and a recycle: the `testhooks` feature's.
+[[test]]
+name = "faults"
+required-features = ["testhooks"]
+
+# The checkpoint process's cancels and memory budget: the `testhooks`
+# feature's.
+[[test]]
+name = "checkpoint"
+required-features = ["testhooks"]
+
 # The core's workspace lints, copied: workspace lints don't cross workspaces.
 [lints.rust]
 unsafe_code = "forbid"

@@ -205,6 +205,52 @@ fn copy_dir(from: &Path, to: &Path) {
     }
 }
 
+/// Whether the service's `shell.colibri_fetch` params `p` for request `rid`
+/// carry the recorded C core's data request `want` whole. The C core writes
+/// exclude_mask as a string and ttl as a number; the fetch carries both as
+/// numbers, ttl as max_age when it is set.
+fn same_fetch(p: &Value, want: &Value, rid: u64) -> bool {
+    let number = |value: &Value| {
+        value
+            .as_u64()
+            .or_else(|| value.as_str().and_then(|s| s.parse().ok()))
+            .unwrap_or(0)
+    };
+    let ttl = number(&want["ttl"]);
+    p["request"] == rid
+        && p["type"] == want["type"]
+        && p["method"] == want["method"]
+        && p["path"] == want["url"]
+        && p["accept"] == want["encoding"]
+        && p.get("payload") == want.get("payload")
+        && p["exclude_mask"].as_u64() == Some(number(&want["exclude_mask"]))
+        && p.get("max_age").and_then(Value::as_u64) == (ttl > 0).then_some(ttl)
+}
+
+/// The calls a checkpoint check makes into the C core, as its markers name
+/// them, from the recording's trace: the decoding; the verifier's creation
+/// and, once made, its freshness bound; each step and each answer; the
+/// free.
+fn checkpoint_calls(ops: &[Value]) -> Vec<&'static str> {
+    let mut calls = Vec::new();
+    for op in ops {
+        match op["op"].as_str().unwrap_or_default() {
+            "decode" => calls.push("decode"),
+            "verify_create" => calls.push("create"),
+            "verify" => {
+                if calls.last() == Some(&"create") {
+                    calls.push("freshness");
+                }
+                calls.push("execute");
+            }
+            "response" | "error" => calls.push("answer"),
+            "verify_free" => calls.push("free"),
+            _ => {}
+        }
+    }
+    calls
+}
+
 /// How one request ended.
 enum Ended {
     Reply(Value),
@@ -346,25 +392,7 @@ fn run_case(
                     let Some(want) = recorded.requests.get(asks as usize) else {
                         return Err(format!("{id}: an unrecorded fetch: {p}"));
                     };
-                    // The C core writes exclude_mask as a string and ttl as
-                    // a number; the fetch carries both as numbers, ttl as
-                    // max_age when it is set.
-                    let number = |value: &Value| {
-                        value
-                            .as_u64()
-                            .or_else(|| value.as_str().and_then(|s| s.parse().ok()))
-                            .unwrap_or(0)
-                    };
-                    let ttl = number(&want["ttl"]);
-                    let same = p["request"] == rid
-                        && p["type"] == want["type"]
-                        && p["method"] == want["method"]
-                        && p["path"] == want["url"]
-                        && p["accept"] == want["encoding"]
-                        && p.get("payload") == want.get("payload")
-                        && p["exclude_mask"].as_u64() == Some(number(&want["exclude_mask"]))
-                        && p.get("max_age").and_then(Value::as_u64) == (ttl > 0).then_some(ttl);
-                    if !same {
+                    if !same_fetch(p, want, rid) {
                         return Err(format!(
                             "{id}: fetch {asks} differs:\n  service:   {p}\n  recorded:  {want}"
                         ));
@@ -585,5 +613,241 @@ fn every_request_case_through_the_binary() {
         }
     }
     eprintln!("{ran} cases, {} failed", failures.len());
+    assert!(failures.is_empty(), "failed: {failures:?}");
+}
+
+/// The raw parts of a reply, as the service wrote them.
+#[derive(serde::Deserialize)]
+struct RawReply<'a> {
+    #[serde(borrow)]
+    result: &'a serde_json::value::RawValue,
+}
+
+#[derive(serde::Deserialize)]
+struct RawChecked<'a> {
+    #[serde(borrow)]
+    decoded: &'a serde_json::value::RawValue,
+    #[serde(borrow)]
+    result: &'a serde_json::value::RawValue,
+}
+
+fn run_checkpoint_case(case: &Value) -> Result<(), String> {
+    let id = case["id"].as_str().unwrap();
+    let chain = case["chain"].as_u64().unwrap();
+    let ops = case["trace"].as_array().unwrap();
+    let bodies = Bodies::for_case(case);
+    let recorded = Recorded::of(case);
+    let proof = ops
+        .iter()
+        .find(|op| op["op"] == "main_fetch" && op["variant"] == "checkpoint_proof")
+        .ok_or_else(|| format!("{id}: no proof fetch"))?;
+    let min_ts = ops
+        .iter()
+        .find(|op| op["op"] == "verify_create")
+        .and_then(|op| op["min_latest_block_ts"].as_str()?.parse::<u64>().ok())
+        .unwrap_or(1);
+    // What the recording's C core decoded, and how its verification ended.
+    let decode = ops.iter().find(|op| op["op"] == "decode");
+    let decoded_digest = if case["deviation"] == "checked-decode" {
+        None
+    } else {
+        decode
+            .and_then(|op| op.get("result"))
+            .filter(|r| !r.is_null())
+    };
+    let last_verify: Option<Value> = ops
+        .iter()
+        .filter(|op| op["op"] == "verify")
+        .filter_map(|op| op["status"].as_str())
+        .next_back()
+        .map(|status| serde_json::from_str(status).unwrap());
+    let mut colibrid = Colibrid::checkpoint(chain);
+    colibrid.hello();
+    let rid = colibrid.request(
+        "colibri.checkpoint",
+        json!({ "min_latest_block_ts": min_ts, "deadline_ms": DEADLINE_MS }),
+    );
+    let mut asked_proof = false;
+    let mut asks = 0u64;
+    // The calls into the C core, as their markers name them, and whether
+    // one is open.
+    let mut calls: Vec<String> = Vec::new();
+    let mut open_step = false;
+    let deadline = Instant::now() + REQUEST_WAIT;
+    let raw = loop {
+        if Instant::now() > deadline {
+            return Err(format!("{id}: no reply; stderr: {}", colibrid.stderr()));
+        }
+        let Some(Frame::Json(message, raw)) = colibrid.recv(Duration::from_millis(500)) else {
+            continue;
+        };
+        match message["type"].as_str() {
+            Some("request") => {
+                let ask = message["id"].as_u64().unwrap();
+                let p = &message["params"];
+                if p["type"] == "checkpoint_proof" {
+                    if std::mem::replace(&mut asked_proof, true) {
+                        return Err(format!("{id}: a second proof fetch"));
+                    }
+                    // The fetch contract's proof: main makes it itself, so
+                    // the service names nothing else.
+                    let proof_shape = json!({
+                        "request": rid,
+                        "type": "checkpoint_proof",
+                        "method": "post",
+                        "path": "",
+                        "accept": "ssz",
+                        "exclude_mask": 0,
+                    });
+                    if p != &proof_shape {
+                        return Err(format!("{id}: the proof fetch differs: {p}"));
+                    }
+                    let reply = &proof["reply"];
+                    if reply["status"] == 200 {
+                        let len = reply["bytes"].as_u64().unwrap() as usize;
+                        let body = bodies.get(reply["sha256"].as_str().unwrap(), len);
+                        colibrid.answer_body(ask, 0, body, len);
+                    } else {
+                        colibrid.respond(
+                            ask,
+                            json!({ "error": format!("HTTP error! Status: {}", reply["status"]) }),
+                        );
+                    }
+                    continue;
+                }
+                let Some(want) = recorded.requests.get(asks as usize) else {
+                    return Err(format!("{id}: an unrecorded fetch: {p}"));
+                };
+                if !same_fetch(p, want, rid) {
+                    return Err(format!(
+                        "{id}: fetch {asks} differs:\n  service:  {p}\n  recorded: {want}"
+                    ));
+                }
+                let answer = recorded
+                    .answers
+                    .get(&asks)
+                    .ok_or_else(|| format!("{id}: no recorded answer for fetch {asks}"))?;
+                if answer["op"] == "response" {
+                    let len = answer["bytes"].as_u64().unwrap() as usize;
+                    let body = match answer["body"].as_str() {
+                        Some(text) => text.as_bytes().to_vec(),
+                        None => bodies.get(answer["sha256"].as_str().unwrap(), len),
+                    };
+                    colibrid.answer_body(ask, 0, body, len);
+                } else {
+                    colibrid.respond(ask, json!({ "error": answer["error"] }));
+                }
+                asks += 1;
+            }
+            Some("event") => {
+                if message["data"]["request"] != rid {
+                    return Err(format!("{id}: a marker for another request: {message}"));
+                }
+                match (message["event"].as_str(), open_step) {
+                    (Some("colibri.step"), false) => {
+                        open_step = true;
+                        calls.push(message["data"]["call"].as_str().unwrap_or("").to_owned());
+                    }
+                    (Some("colibri.stepped"), true) => open_step = false,
+                    _ => return Err(format!("{id}: marker out of order: {message}")),
+                }
+            }
+            Some("response") if message["id"] == rid => break raw,
+            _ => {}
+        }
+    };
+    // Every call had its marker, cleared before the reply: exactly the
+    // calls the recording's C core was given, and every fetch its verifier
+    // made.
+    if open_step {
+        return Err(format!("{id}: replied with its step open"));
+    }
+    let expected = checkpoint_calls(ops);
+    if calls != expected {
+        return Err(format!(
+            "{id}: the calls differ:\n  service:   {calls:?}\n  recording: {expected:?}"
+        ));
+    }
+    if asks as usize != recorded.requests.len() {
+        return Err(format!(
+            "{id}: {asks} fetches, the recording's verifier made {}",
+            recorded.requests.len()
+        ));
+    }
+    let reply: RawReply<'_> = serde_json::from_str(&raw).map_err(|e| format!("{id}: {e}"))?;
+    let result: Value = serde_json::from_str(reply.result.get()).unwrap();
+    match (decoded_digest, &last_verify) {
+        (None, _) => {
+            if result["status"] != "error" || result["stage"] != "decode" {
+                return Err(format!("{id}: expected a decode failure: {result}"));
+            }
+        }
+        (Some(digest), Some(status)) if status["status"] == "success" => {
+            let checked: RawChecked<'_> = serde_json::from_str(reply.result.get())
+                .map_err(|e| format!("{id}: not a check's result: {e}: {result}"))?;
+            let decoded = checked.decoded.get();
+            if decoded.encode_utf16().count() as u64 != digest["chars"].as_u64().unwrap_or(0)
+                || sha256_hex(decoded.as_bytes()) != digest["sha256"].as_str().unwrap_or_default()
+            {
+                return Err(format!("{id}: the decoded proof differs"));
+            }
+            let recorded_status = ops
+                .iter()
+                .filter(|op| op["op"] == "verify")
+                .filter_map(|op| op["status"].as_str())
+                .next_back()
+                .unwrap();
+            let recorded_result: RawReply<'_> = serde_json::from_str(recorded_status).unwrap();
+            if checked.result.get() != recorded_result.result.get() {
+                return Err(format!("{id}: the verified result differs"));
+            }
+        }
+        (Some(_), Some(status)) => {
+            if result["status"] != "error"
+                || result["stage"] != "verify"
+                || result["error"] != status["error"]
+            {
+                return Err(format!(
+                    "{id}: expected the verify error {}: {result}",
+                    status["error"]
+                ));
+            }
+        }
+        (Some(_), None) => return Err(format!("{id}: the recording never verified")),
+    }
+    // One check, then the process exits 0.
+    if colibrid.exit_code(Duration::from_secs(20)) != Some(0) {
+        return Err(format!(
+            "{id}: didn't exit 0 after its check; stderr: {}",
+            colibrid.stderr()
+        ));
+    }
+    Ok(())
+}
+
+#[test]
+fn every_checkpoint_case_through_the_binary() {
+    let vectors: Value = serde_json::from_str(
+        &std::fs::read_to_string(repo_root().join("vectors/colibri.json")).unwrap(),
+    )
+    .unwrap();
+    let mut failures = Vec::new();
+    let mut ran = 0;
+    for case in vectors["cases"].as_array().unwrap() {
+        if case["kind"] != "checkpoint" {
+            continue;
+        }
+        ran += 1;
+        let id = case["id"].as_str().unwrap();
+        match run_checkpoint_case(case) {
+            Ok(()) => eprintln!("ok {id}"),
+            Err(e) => {
+                eprintln!("FAILED {e}");
+                failures.push(id.to_owned());
+            }
+        }
+    }
+    eprintln!("{ran} checkpoint cases, {} failed", failures.len());
+    assert!(ran > 0);
     assert!(failures.is_empty(), "failed: {failures:?}");
 }

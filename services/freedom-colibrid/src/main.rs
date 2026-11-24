@@ -14,6 +14,9 @@
 //!    `hello` can be answered; and the connection to main on stdin and
 //!    stdout.
 //!
+//! **`checkpoint`** runs the same way with no gate and no directory, its
+//! store in memory, and ends after its one `colibri.checkpoint`.
+//!
 //! **Exit codes** (0001's and 0007's): 0 after `colibri.shutdown`, stdin
 //! EOF, the parent gone, or a recycle; 64 for usage; 70 for a panic or an
 //! internal failure; 74 for storage; 75 when the gate is held; 76 for a
@@ -28,7 +31,7 @@ use std::time::{Duration, Instant};
 use fc_service::conn::{self, Options};
 use fc_service::{Exit, confine, gate, log};
 use freedom_colibrid::service::ColibriService;
-use freedom_colibrid::shared::Shared;
+use freedom_colibrid::shared::{Mode as Process, Shared};
 use freedom_colibrid::store::Store;
 use serde_json::json;
 
@@ -78,6 +81,22 @@ fn run(started: Instant, entry: &confine::Entry) -> Exit {
         ),
     }
     let (chain, mode, parent_pid) = match command {
+        Command::Checkpoint { chain, parent_pid } => {
+            // No lock, no directory, nothing writable: its store is in
+            // memory (0014, "Spawn").
+            let report = match confined(Vec::new(), Vec::new()) {
+                Ok(report) => report,
+                Err(exit) => return exit,
+            };
+            return serve(
+                chain,
+                Process::Checkpoint,
+                Store::memory(),
+                report,
+                parent_pid,
+                started,
+            );
+        }
         Command::HoldLock { data_dir, lock_dir } => {
             return gate::hold_lock(
                 &data_dir,
@@ -118,7 +137,7 @@ fn run(started: Instant, entry: &confine::Entry) -> Exit {
                     return Exit::Storage;
                 }
             };
-            let exit = serve(chain, store, report, parent_pid, started);
+            let exit = serve(chain, Process::Serve, store, report, parent_pid, started);
             drop(gate);
             exit
         }
@@ -128,7 +147,14 @@ fn run(started: Instant, entry: &confine::Entry) -> Exit {
                 Ok(report) => report,
                 Err(exit) => return exit,
             };
-            serve(chain, Store::memory(), report, parent_pid, started)
+            serve(
+                chain,
+                Process::Serve,
+                Store::memory(),
+                report,
+                parent_pid,
+                started,
+            )
         }
     }
 }
@@ -166,6 +192,7 @@ fn confined(
 
 fn serve(
     chain: u64,
+    process: Process,
     store: Store,
     confinement: serde_json::Value,
     parent_pid: Option<u32>,
@@ -174,7 +201,7 @@ fn serve(
     freedom_colibrid::testhooks::probe("main");
     // Logging's writer is a thread: after confinement.
     log::init();
-    let shared = Arc::new(Shared::new(chain, Arc::new(store)));
+    let shared = Arc::new(Shared::new(chain, Arc::new(store), process));
     // The verifier thread gives the C core its store and checks its version
     // (main refuses another than its pin's; so does the service) before
     // anything else reaches the C core, and before `hello`.

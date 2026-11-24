@@ -26,7 +26,7 @@ use std::time::{Duration, Instant};
 use fc_protocol::frame::KIND_JSON;
 use fc_service::conn::{self, Options};
 use freedom_colibrid::service::ColibriService;
-use freedom_colibrid::shared::Shared;
+use freedom_colibrid::shared::{Mode, Shared};
 use freedom_colibrid::store::Store;
 use serde_json::{Value, json};
 
@@ -104,7 +104,7 @@ impl InProcess {
             armed: true,
             gate: Arc::clone(&gate),
         };
-        let shared = Arc::new(Shared::new(1, Arc::new(Store::memory())));
+        let shared = Arc::new(Shared::new(1, Arc::new(Store::memory()), Mode::Serve));
         let service = Arc::new(ColibriService::start(shared, json!({})).unwrap());
         let mut options = Options::new("colibri", 1, Instant::now());
         options.exit_watchdog = None;

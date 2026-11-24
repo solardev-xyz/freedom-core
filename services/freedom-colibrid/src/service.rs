@@ -15,7 +15,7 @@ use serde_json::{Map, Value, json};
 
 use crate::exec::Queue;
 use crate::request::Params;
-use crate::shared::{NotTaken, Shared};
+use crate::shared::{Mode, NotTaken, Shared};
 use crate::verifier::{self, Job};
 use crate::{CLIENT_VERSION, COLIBRI_VERSION};
 
@@ -104,6 +104,45 @@ impl Service for ColibriService {
         self.connect(conn);
         let params = request.params.map_or("null", |p| p.get());
         match request.method {
+            "colibri.request" if self.shared.mode == Mode::Checkpoint => Self::refuse(
+                conn,
+                request.id,
+                ErrorCode::InvalidArgument,
+                "the checkpoint process serves colibri.checkpoint alone",
+            ),
+            "colibri.checkpoint" if self.shared.mode == Mode::Checkpoint => {
+                let params: crate::checkpoint::Params = match serde_json::from_str(params) {
+                    Ok(params) => params,
+                    Err(_) => {
+                        return Self::refuse(
+                            conn,
+                            request.id,
+                            ErrorCode::InvalidArgument,
+                            "colibri.checkpoint's params don't parse",
+                        );
+                    }
+                };
+                if params.deadline().is_none() {
+                    return Self::refuse(
+                        conn,
+                        request.id,
+                        ErrorCode::InvalidArgument,
+                        "deadline_ms is past what the clock holds",
+                    );
+                }
+                match self.shared.take_request() {
+                    Ok(()) => self.queue.push(Job::Checkpoint {
+                        id: request.id,
+                        params,
+                    }),
+                    Err(_) => Self::refuse(
+                        conn,
+                        request.id,
+                        ErrorCode::Busy,
+                        "the checkpoint process takes one check",
+                    ),
+                }
+            }
             "colibri.request" => {
                 let params: Params = match serde_json::from_str(params) {
                     Ok(params) => params,

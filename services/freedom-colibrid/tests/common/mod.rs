@@ -115,6 +115,13 @@ impl Colibrid {
         Colibrid::spawn(command)
     }
 
+    /// The one-shot checkpoint process for `chain`.
+    pub fn checkpoint(chain: u64) -> Colibrid {
+        let mut command = Command::new(BIN);
+        command.args(["checkpoint", "--chain", &chain.to_string()]);
+        Colibrid::spawn(command)
+    }
+
     pub fn spawn(mut command: Command) -> Colibrid {
         command
             .stdin(Stdio::piped())

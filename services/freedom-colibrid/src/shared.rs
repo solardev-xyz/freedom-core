@@ -14,11 +14,28 @@ pub const MAX_BODIES: u64 = 32 << 20;
 /// Resident memory above which a persistent or private process recycles.
 pub const MAX_RESIDENT: u64 = 256 << 20;
 
+/// A checkpoint process's: one check, 8 MiB of bodies, and 128 MiB, past
+/// which the check fails.
+pub const CHECKPOINT_BODIES: u64 = 8 << 20;
+pub const CHECKPOINT_RESIDENT: u64 = 128 << 20;
+
+/// Which process this is (0014, "Spawn").
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Mode {
+    /// A chain's persistent process, or a private session's.
+    Serve,
+    /// The one-shot checkpoint process: one `colibri.checkpoint`.
+    Checkpoint,
+}
+
 /// The recycle flag in [`Shared`]'s count of open requests.
 const RECYCLING: u64 = 1 << 63;
 
 pub struct Shared {
     pub chain_id: u64,
+    pub mode: Mode,
+    max_open: u64,
+    max_resident: u64,
     pub store: Arc<Store>,
     /// Requests accepted and not yet answered, with [`RECYCLING`] in the
     /// top bit: once above its memory budget, new requests are refused
@@ -49,16 +66,23 @@ pub enum NotTaken {
 }
 
 impl Shared {
-    pub fn new(chain_id: u64, store: Arc<Store>) -> Shared {
+    pub fn new(chain_id: u64, store: Arc<Store>, mode: Mode) -> Shared {
+        let (max_open, bodies_limit, max_resident) = match mode {
+            Mode::Serve => (MAX_OPEN_REQUESTS as u64, MAX_BODIES, MAX_RESIDENT),
+            Mode::Checkpoint => (1, CHECKPOINT_BODIES, CHECKPOINT_RESIDENT),
+        };
         Shared {
             chain_id,
+            mode,
+            max_open,
+            max_resident: crate::testhooks::memory_budget().unwrap_or(max_resident),
             store,
             open: AtomicU64::new(0),
             steps: AtomicU64::new(0),
             calls: AtomicU64::new(0),
             resident: AtomicU64::new(0),
             bodies: Arc::new(AtomicU64::new(0)),
-            bodies_limit: MAX_BODIES,
+            bodies_limit,
         }
     }
 
@@ -66,7 +90,7 @@ impl Shared {
     pub fn take_request(&self) -> Result<(), NotTaken> {
         self.open
             .try_update(Ordering::AcqRel, Ordering::Acquire, |open| {
-                (open & RECYCLING == 0 && open < MAX_OPEN_REQUESTS as u64).then_some(open + 1)
+                (open & RECYCLING == 0 && open < self.max_open).then_some(open + 1)
             })
             .map(|_| ())
             .map_err(|open| {
@@ -95,11 +119,18 @@ impl Shared {
         self.steps.fetch_add(1, Ordering::Relaxed);
         if let Some(bytes) = resident_bytes() {
             self.resident.store(bytes, Ordering::Relaxed);
-            let budget = crate::testhooks::memory_budget().unwrap_or(MAX_RESIDENT);
-            if bytes > budget {
+            // A checkpoint process doesn't recycle: its check fails
+            // ([`Shared::over_resident`]).
+            if bytes > self.max_resident && self.mode == Mode::Serve {
                 self.recycle();
             }
         }
+    }
+
+    /// Whether resident memory, as read after the last step, is past the
+    /// process's budget: a checkpoint check then fails.
+    pub fn over_resident(&self) -> bool {
+        self.resident.load(Ordering::Relaxed) > self.max_resident
     }
 
     /// Starts the recycle. Only a step does, so a request is open: the
@@ -164,7 +195,7 @@ mod tests {
 
     #[test]
     fn requests_are_bounded() {
-        let shared = Shared::new(1, Arc::new(Store::memory()));
+        let shared = Shared::new(1, Arc::new(Store::memory()), Mode::Serve);
         for _ in 0..MAX_OPEN_REQUESTS {
             assert_eq!(shared.take_request(), Ok(()));
         }
@@ -181,11 +212,19 @@ mod tests {
     }
 
     #[test]
+    fn a_checkpoint_process_takes_one_check() {
+        let shared = Shared::new(1, Arc::new(Store::memory()), Mode::Checkpoint);
+        assert_eq!(shared.take_request(), Ok(()));
+        assert_eq!(shared.take_request(), Err(NotTaken::Full));
+        assert_eq!(shared.bodies_limit, CHECKPOINT_BODIES);
+    }
+
+    #[test]
     fn a_request_taken_as_the_recycle_starts_is_not_lost() {
         // Admitted just before the flag: open 1 -> 2, the flag, then the
         // first request's end (2 -> 1) doesn't end the process, the
         // second's does.
-        let shared = Shared::new(1, Arc::new(Store::memory()));
+        let shared = Shared::new(1, Arc::new(Store::memory()), Mode::Serve);
         assert_eq!(shared.take_request(), Ok(()));
         assert_eq!(shared.take_request(), Ok(()));
         shared.recycle();
@@ -198,7 +237,7 @@ mod tests {
     #[test]
     fn admissions_racing_the_recycle_end_the_process_once() {
         for _ in 0..500 {
-            let shared = Arc::new(Shared::new(1, Arc::new(Store::memory())));
+            let shared = Arc::new(Shared::new(1, Arc::new(Store::memory()), Mode::Serve));
             // The request whose step starts the recycle, then ends.
             assert_eq!(shared.take_request(), Ok(()));
             let ends = Arc::new(AtomicU64::new(0));
