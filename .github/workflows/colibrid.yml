@@ -119,6 +119,12 @@ jobs:
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           workspaces: services/freedom-colibrid -> target
+      - name: Long paths for git (Windows)
+        # CMake's FetchContent clones evmone with its submodules under the
+        # Cargo git checkout of colibri-stateless, where one pack file's
+        # path passes Windows' 260 characters ("cannot write keep file").
+        if: runner.os == 'Windows'
+        run: git config --global core.longpaths true
       - name: Shorten PATH (Windows)
         # blst's build command on Windows carries PATH, and the runner's is
         # longer than cmd.exe's line ("The input line is too long"); upstream's

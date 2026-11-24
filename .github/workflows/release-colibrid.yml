@@ -146,6 +146,12 @@ jobs:
           echo "$tools/cargo-zigbuild/cargo_zigbuild-0.23.4.data/scripts" >> "$GITHUB_PATH"
           "$tools/zig/ziglang/zig" version
           "$tools/cargo-zigbuild/cargo_zigbuild-0.23.4.data/scripts/cargo-zigbuild" --version
+      - name: Long paths for git (Windows)
+        # CMake's FetchContent clones evmone with its submodules under the
+        # Cargo git checkout of colibri-stateless, where one pack file's
+        # path passes Windows' 260 characters ("cannot write keep file").
+        if: runner.os == 'Windows'
+        run: git config --global core.longpaths true
       - name: Shorten PATH (Windows)
         # blst's build command on Windows carries PATH, and the runner's is
         # longer than cmd.exe's line ("The input line is too long"), as in
