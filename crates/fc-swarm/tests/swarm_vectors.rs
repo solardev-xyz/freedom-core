@@ -312,13 +312,24 @@ fn soc_chunk_file_and_pss_bodies() {
             "{id}"
         );
     }
-    // publishData: one POST /bzz whose body is the data, its name in the query.
+    // publishData: one POST /bzz whose body is the data, its name in the
+    // query. The body the core sends is held to the recorded request's own:
+    // its bytes up to 8 KiB, else its length and SHA-256 (no body for none).
     let files = section(&all, "bodies", "file");
     assert!(files.len() >= 4);
     for case in files {
         let id = case["id"].as_str().unwrap();
-        let input = data(&case["data"]);
-        assert_eq!(sha(&input), case["body"]["sha256"], "{id}");
+        let body = data(&case["data"]);
+        match case["request"].get("body") {
+            None => assert!(body.is_empty(), "{id}: the request has no body"),
+            Some(recorded) => {
+                assert_eq!(recorded["bytes"], body.len() as u64, "{id}");
+                match recorded.get("base64") {
+                    Some(b) => assert_eq!(b64(b.as_str().unwrap()), body, "{id}"),
+                    None => assert_eq!(recorded["sha256"], sha(&body), "{id}"),
+                }
+            }
+        }
         assert_eq!(case["request"]["path"], "/bzz", "{id}");
         let name = case["name"].as_str().unwrap_or("data");
         assert_eq!(
