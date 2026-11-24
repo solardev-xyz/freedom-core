@@ -17,6 +17,8 @@ const APPROVALS_REFERENCE = process.env.FREEDOM_BROWSER_APPROVALS_CHECKOUT || '/
 const STORES_REFERENCE = process.env.FREEDOM_BROWSER_STORES_CHECKOUT || '/root/herdr/freedom-browser-wt/stores-reference';
 // The Colibri vectors' reference (generate.js, COLIBRI_REFERENCE_COMMIT).
 const COLIBRI_REFERENCE = process.env.FREEDOM_BROWSER_COLIBRI_CHECKOUT || '/root/herdr/freedom-browser-wt/colibri-reference';
+// The window.swarm vectors' reference (generate.js, SWARM_REFERENCE_COMMIT).
+const SWARM_REFERENCE = process.env.FREEDOM_BROWSER_SWARM_CHECKOUT || '/root/herdr/freedom-browser-wt/swarm-reference';
 // A whole check, colibri.json's 160-odd runs of the WASM verifier included.
 const CHECK_TIMEOUT = 180000;
 const FILES = ['keys.json', 'mnemonic-validation.json', 'identity-formats.json', 'signing.json', 'naming.json', 'naming-replay.json',
@@ -46,11 +48,16 @@ FILES.push('colibri.json', 'generator/colibri.js', 'generator/colibri-cases.js',
   'generator/colibri-capture.js', 'fixtures/colibri/sessions.json',
   ...fs.readdirSync(path.join(SOURCE, 'fixtures/colibri/bodies')).map((name) => `fixtures/colibri/bodies/${name}`));
 
+FILES.push('swarm.json', 'swarm-grammar.json', 'dweb-verify.json', 'generator/swarm.js', 'generator/swarm-cases.js', 'generator/swarm-run.js',
+  'generator/swarm-node.js', 'generator/swarm-world.js', 'generator/swarm-typed.js', 'generator/swarm-sections.js', 'generator/swarm-grammar.js',
+  'generator/swarm-grammar-file.js', 'generator/swarm-worker.js', 'generator/swarm-gsoc-worker.js');
+
 function checkArgs(generator, overrides = {}) {
   const refs = { freedom: REFERENCE, radicle: RADICLE_REFERENCE, approvals: APPROVALS_REFERENCE, stores: STORES_REFERENCE,
-    colibri: COLIBRI_REFERENCE, ...overrides };
+    colibri: COLIBRI_REFERENCE, swarm: SWARM_REFERENCE, ...overrides };
   return [generator, 'check', '--freedom-browser', refs.freedom, '--radicle-browser', refs.radicle,
-    '--approvals-browser', refs.approvals, '--stores-browser', refs.stores, '--colibri-browser', refs.colibri];
+    '--approvals-browser', refs.approvals, '--stores-browser', refs.stores, '--colibri-browser', refs.colibri,
+    '--swarm-browser', refs.swarm];
 }
 
 /** A check over a copy of every file, `damage` applied to the copy's directory first. */
@@ -1062,4 +1069,83 @@ test('check takes the Colibri vectors from their own reference, at its pinned co
   // And the file records it.
   const commit = spawnSync('git', ['rev-parse', 'HEAD'], { cwd: COLIBRI_REFERENCE, encoding: 'utf8' }).stdout.trim();
   assert.equal(JSON.parse(fs.readFileSync(path.join(SOURCE, 'colibri.json'), 'utf8')).meta.freedomBrowserCommit, commit);
+});
+
+test('check rejects a changed window.swarm outcome and a changed request', () => {
+  const stderr = corruptedCheck('swarm.json', (contents) => {
+    const entry = contents.methods.find((item) => item.id === 'publish-data-string');
+    entry.steps[0].result.reference = 'ab'.repeat(32);
+    const read = contents.methods.find((item) => item.id === 'read-chunk-found');
+    read.steps[0].requests[1].path = `/chunks/${'cd'.repeat(32)}`;
+  });
+  assert.match(stderr, /Byte mismatch: swarm.json/);
+});
+
+test('check rejects a changed window.swarm store, tree and deviation mark', () => {
+  const stderr = corruptedCheck('swarm.json', (contents) => {
+    contents.stores.find((item) => item.kind === 'feeds').files['swarm-feeds.json'] += ' ';
+    contents.trees[0].root = '00'.repeat(32);
+    delete contents.methods.find((item) => item.deviation === 'feed-entry-bound').deviation;
+  });
+  assert.match(stderr, /Byte mismatch: swarm.json/);
+});
+
+test('check rejects a changed grammar row and a changed forbidden alternative', () => {
+  const stderr = corruptedCheck('swarm-grammar.json', (contents) => {
+    contents.rows.readChunk.calls[0].count = [1, 2];
+    contents.forbidden[0].rule = 'order';
+  });
+  assert.match(stderr, /Byte mismatch: swarm-grammar.json/);
+});
+
+test('check refuses a recorded request outside its grammar row', () => {
+  // The grammar narrowed in the copy: readChunk's chunk must be upper case,
+  // which no request the reference makes is.
+  const stderr = damagedCheck((copy) => {
+    const file = path.join(copy, 'generator/swarm-grammar.js');
+    const source = fs.readFileSync(file, 'utf8');
+    const narrowed = source.replace("chunkAt(ctx, r, lower(params.reference));", "chunkAt(ctx, r, String(params.reference).toUpperCase());");
+    assert.notEqual(narrowed, source, 'the readChunk binding moved');
+    fs.writeFileSync(file, narrowed);
+  });
+  assert.match(stderr, /GrammarError: read-chunk-found step 0 \(readChunk\): GET \/chunks\/[0-9a-f]{64}: another address than the row binds/);
+});
+
+test('check takes the window.swarm vectors from their own reference, at its pinned commit', () => {
+  // The shared reference is at another commit: refused before anything is built.
+  const result = spawnSync(process.execPath, checkArgs(path.join(SOURCE, 'generator/generate.js'), { swarm: REFERENCE }),
+    { encoding: 'utf8', timeout: CHECK_TIMEOUT });
+  assert.equal(result.status, 1, result.stdout + result.stderr);
+  assert.match(result.stderr, /Use the pinned swarm reference commit/);
+  // And the files record it, with the packages the vectors rest on.
+  const commit = spawnSync('git', ['rev-parse', 'HEAD'], { cwd: SWARM_REFERENCE, encoding: 'utf8' }).stdout.trim();
+  for (const file of ['swarm.json', 'swarm-grammar.json']) {
+    const { meta } = JSON.parse(fs.readFileSync(path.join(SOURCE, file), 'utf8'));
+    assert.equal(meta.freedomBrowserCommit, commit);
+    assert.equal(meta.packages['@ethersphere/bee-js'], '13.2.0');
+    assert.equal(meta.packages['@ethersphere/core-sdk'], '0.2.2');
+  }
+});
+
+test('the swarm vectors refuse any bee-js or core-sdk but 13.2.0 and 0.2.2', () => {
+  const { loadPackages } = require('./swarm');
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'freedom-core-swarm-versions-'));
+  try {
+    const install = (name, version, deps = {}) => {
+      const dir = path.join(root, 'node_modules', ...name.split('/'));
+      fs.mkdirSync(dir, { recursive: true });
+      fs.writeFileSync(path.join(dir, 'package.json'), JSON.stringify({ name, version, main: 'index.js', dependencies: deps }));
+      fs.writeFileSync(path.join(dir, 'index.js'), 'module.exports = {};\n');
+    };
+    fs.writeFileSync(path.join(root, 'package.json'), '{"name":"versions"}');
+    install('cafe-utility', '34.0.0');
+    install('@ethersphere/core-sdk', '0.2.2');
+    install('@ethersphere/bee-js', '13.1.0');
+    assert.throws(() => loadPackages(root), /bee-js 13.2.0 and core-sdk 0.2.2's; .* has bee-js 13.1.0 and core-sdk 0.2.2/);
+    install('@ethersphere/bee-js', '13.2.0');
+    install('@ethersphere/core-sdk', '0.2.3');
+    assert.throws(() => loadPackages(root), /has bee-js 13.2.0 and core-sdk 0.2.3/);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
 });

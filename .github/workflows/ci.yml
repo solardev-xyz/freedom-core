@@ -344,6 +344,20 @@ jobs:
           ref: 7cf6a0c299b50b64944d5d246a911bdb25dc5c82
           path: colibri-reference
           persist-credentials: false
+      # The window.swarm vectors' own reference (generate.js,
+      # SWARM_REFERENCE_COMMIT): integration/rust-core with #1057 and #1062.
+      # Its generator reads @ethersphere/bee-js 13.2.0, @ethersphere/core-sdk
+      # 0.2.2 (refusing any other version, every file it rests on checked by
+      # digest), ethers and better-sqlite3. Its lockfile pins every package at
+      # the Radicle reference's version and integrity (it drops only
+      # @corpus-core/colibri-stateless), so it links that install (below)
+      # instead of installing its own.
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          repository: solardev-xyz/freedom-browser
+          ref: dea09d2f58c18c5ffe5baef464fdf70af1ef40ef
+          path: swarm-reference
+          persist-credentials: false
       # The vectors' meta records the Node version; it is part of the check.
       - uses: actions/setup-node@2028fbc5c25fe9cf00d9f06a71cc4710d4507903 # v6.0.0
         with:
@@ -360,6 +374,8 @@ jobs:
         run: npm ci --ignore-scripts --no-audit --no-fund
       - name: Link the Colibri reference to the Radicle reference's install
         run: ln -s "$GITHUB_WORKSPACE/radicle-reference/node_modules" colibri-reference/node_modules
+      - name: Link the swarm reference to the Radicle reference's install
+        run: ln -s "$GITHUB_WORKSPACE/radicle-reference/node_modules" swarm-reference/node_modules
       - name: Check every vector against the reference
         env:
           FREEDOM_BROWSER_CHECKOUT: ${{ github.workspace }}/reference
@@ -367,12 +383,14 @@ jobs:
           FREEDOM_BROWSER_APPROVALS_CHECKOUT: ${{ github.workspace }}/approvals-reference
           FREEDOM_BROWSER_STORES_CHECKOUT: ${{ github.workspace }}/stores-reference
           FREEDOM_BROWSER_COLIBRI_CHECKOUT: ${{ github.workspace }}/colibri-reference
+          FREEDOM_BROWSER_SWARM_CHECKOUT: ${{ github.workspace }}/swarm-reference
         run: |
           node vectors/generator/generate.js check --freedom-browser "$FREEDOM_BROWSER_CHECKOUT" \
             --radicle-browser "$FREEDOM_BROWSER_RADICLE_CHECKOUT" \
             --approvals-browser "$FREEDOM_BROWSER_APPROVALS_CHECKOUT" \
             --stores-browser "$FREEDOM_BROWSER_STORES_CHECKOUT" \
-            --colibri-browser "$FREEDOM_BROWSER_COLIBRI_CHECKOUT"
+            --colibri-browser "$FREEDOM_BROWSER_COLIBRI_CHECKOUT" \
+            --swarm-browser "$FREEDOM_BROWSER_SWARM_CHECKOUT"
           node --test vectors/generator/check.test.js
           node --test vectors/generator/colibri-contract.test.js
       # fc-swarm's write-side answers (design 0015, SWM-2) from bee-js 13.2.0

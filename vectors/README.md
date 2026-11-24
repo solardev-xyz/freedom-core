@@ -116,6 +116,39 @@ What the recording found, against design 0014's text:
   included (` with payload <json>`), with URLs as `<url>`; its "The rest" section shows the
   form without the payload.
 
+`swarm.json` and `swarm-grammar.json` (design 0015, SWM-1) have a sixth reference:
+freedom-browser's `integration/rust-core` at commit `dea09d2f58c18c5ffe5baef464fdf70af1ef40ef`
+(`SWARM_REFERENCE_COMMIT` in `generate.js`), which has #1057 (the metered feed reads,
+`feedEntryExists`, `publishFiles` through `publishCollection`) and #1062 (the PSS recipient
+sent as the compressed key). Its generator (`generator/swarm.js`) loads that checkout's
+`src/main/swarm/` whole, fresh for every case, with Electron, the identity core, the core's
+grant mirror, the service registry, the publish setup service and the vault timer stubbed as
+each case's world (`generator/swarm-world.js`), over a recording fake Swarm node on loopback
+(`generator/swarm-node.js`) that bee-js's global `fetch` and `page-upload.js`'s `http` both
+reach. The packages are the checkout's install: `@ethersphere/bee-js` 13.2.0 and
+`@ethersphere/core-sdk` 0.2.2 exactly (any other version is refused before anything is built,
+and every file the vectors rest on is checked by digest, `meta.files`), with its ethers and
+better-sqlite3. The reference's lockfile pins every package at the Radicle reference's version
+and integrity (it only drops `@corpus-core/colibri-stateless`), so CI links
+`swarm-reference/node_modules` to the Radicle reference's install, as for the colibri
+reference. The vectors run in a worker thread of `generate.js`, beside the other files. Like
+the Radicle reference, it moves on its own.
+What the recording found, against design 0015's text (which pins `b39bf724`):
+- **#1062 is in:** the reference sends `window.swarm.sendPss`'s recipient as the page's
+  compressed key (66 hex), so `pss-recipient` is no longer a deviation, and the grammar's named
+  128-hex request isn't made.
+- **`publishData` and `publishFiles` upload through `page-upload.js`** (PRQ-7c), Node's `http`
+  rather than bee-js: its own ustar writer, which `bodies` holds equal to bee-js's
+  `collection.upload` for every path a page may publish, and the same `POST /bzz` headers.
+- **The head probe reads at most 81 chunks** (42 growing to 2^40, 39 halving), where the design
+  says 82; `update-feed-head-81-reads` is the longest run, and one more head index throws
+  `Feed head probe exceeded the maximum feed index`.
+- **A feed write refuses an empty payload after its index lookup** (`write-feed-empty-*`), and
+  before anything is signed.
+- **Agent custody and the auto-approve rule are main's dispatcher's** (`page/page-swarm.js`):
+  the cases drive `executeSwarmMethod` with `meta.page` as that dispatcher builds it, and the
+  approval only reaches the identity core's `sign_soc` (`authorization`).
+
 | File | Contents |
 | --- | --- |
 | `keys.json` | Six mnemonic seeds; user and publisher keys at indices 0, 1, 2, 1000 and 2147483647; Bee, Radicle and IPFS keys; exact index errors and special JS inputs for every mnemonic. |
@@ -146,6 +179,8 @@ What the recording found, against design 0014's text:
 | `layout.json` | Design 0013's Freedom directory move (PRF-9a), with no reference: no build of the browser writes the move's journal, and the browser's copy of the list is checked against this file (B3). Every case and outcome is the design's (`source`), written by hand in `generator/layout.js` as plain rows, which the generator names and checks for shape; each journal a move writes is laid out as `JSON.stringify({ version: 2, entries, copied })`, and nothing is computed by a model of the rules. `constants`: the names under a profile's directory. `moved_entries`: what moves into `freedom/`, in order. `journals`: texts recovery reads, in form (versions 1 and 2, with their entries and copied ones) or malformed. `written`: the journal a move writes. `rollback` and `roll_forward`: an entry's state (what is at the root, in `freedom/` and as its `.moving` copy), renamed or copied, with its steps or why it can't be settled: every cell of presence, then the placeholder and the kinds. `placeholder`: whether it is written after the roll-forward. `plan_start`: what a starting move found, and the entries it moves or why it defers. Its `formats` member defines every field. It has the shared `meta`. |
 | `identity-formats.json` | Deterministic IPFS private-key protobuf/base64 and PeerID; Radicle DID, node ID and public SSH file with default `FreedomBrowser` comment and custom `vector-alias`; `didFromPublicKey`; and `radiclePrivateFiles`, whole private key files with a fixed check integer for aliases around an aligned private section. Those marked `deviation: openssh-padding` carry the reference's full 8-byte padding, which the core omits. |
 | `colibri.json` | Design 0014's Colibri adapter (COL-1), from the colibri reference's worker service and checkpoint check, run whole over the real `c4w.wasm` in worlds scripted from `fixtures/colibri/`, with the clock fixed at each case's captured instant. A recording layer wraps the WASM module's exports and its store, so `trace` holds, in order, every call into the C core: method support, context creation and the freshness bound, each step's status text verbatim (each `req_ptr` replaced by the request's index in the case), every answer (`response`: node, length, SHA-256 of the bytes) and error (`error`, the text set), frees, decodes and verifications, the store's gets, sets and deletes (key, length, SHA-256), and each fetch the package made (`fetch`: the request it served, the server type and its index in main's table, URL, verb, headers, body, and the answer: status, length, SHA-256, and `derived` for a flipped body (the flipped offset and the captured body's digest; the byte is XORed with 1) or a scripted one (its text, `body`)). `outcomes`: what the worker posted for each request (main's adapter outcome: the result, or the error's name, code, message cut to 2,000 units, and data; a result over 4 KiB as its digest, the status text carrying it whole), and any trap. `store` and `store_after`: the store's entries before and after, a warm start's from the named case's final store. `servers`: main's table under the default-host answer (the registry's prover, the package's beacon and checkpoint lists for chains 1 and 100, and, for the reference's F-1 and F-11 cases only, its RPC hosts). `contract`: each data request's variant of the design's fetch contract (`generator/colibri-contract.js`); the generator fails on a request in a served form that matches no variant its operation allows, and on a variant no case reaches, and `variants` lists each variant's cases, chains and largest body. Cases marked `deviation` record the reference's outcome and, under `design`, the service's: for `colibri-unproofable`, `colibri-no-calls` and `colibri-unbound`, the refusal before any context and main's adapter error built from it (the reference's own `createError` and `serializeError`); for `fetch-error-text`, main's fetch text (URLs as `<url>`, cut to 2,000 units) and the adapter error built from it; for `checked-decode` (the legacy-format checkpoint proofs), a decode of `null`, as the service's decode checks the proof first, and the same outcome. An answer to the C core that no recorded fetch served (the checkpoint check builds its own) carries its text (`body`, or `body_hex`), and a checkpoint proof the case changed records how (`derived`), so a replay outside the harness can give the C core the same bytes. |
+| `swarm.json` | Design 0015's window.swarm backend (SWM-1), from the swarm reference's `src/main/swarm/` at bee-js 13.2.0 and core-sdk 0.2.2. `methods`: every method's honest paths and tables of bad params (one failing check per row, the checks after it failing too where they can, so the first failure pins the order), the grants, identities, SW-1, readiness, vault and node answers after them, each case's world (the attested key, the Swarm grants, `swarm-feeds.json`'s text, the vault, the publish readiness, the approval, the fake node's state, the clock) and steps: the answer, every node request (method, path, query, the headers the caller set, the body or its length and SHA-256, the status, the feed update it names) with the grammar's verdict, the identity core's `sign_soc` requests, and the files and publish history after. Params and answers are in the design's typed form (`formats.typed`); data past 64 KiB is a part given by its seed or repeat, its length and SHA-256 (the 10 MiB data, the 50 MiB and 100-file publish). `bodies`, `trees`, `feeds` and `gsoc` keep `crates/fc-swarm/tests/data/write-side.json`'s shapes, which `crates/fc-swarm/tests/swarm_vectors.rs` replays byte for byte: page-upload's tars (each equal to bee-js's), single files, SOC, chunk and PSS bodies; ChunkSplitter over 0, 1, 4,095, 4,096, 4,097, 524,288, 524,289 bytes and 10 MiB; topics, identifiers, feed-service.js's updates, the index runs, `feedEntryExists`' answers and #1057's metered reads over a recording meter; and gsocMine's signers, the cap and the failure among them. `stamps`: bee-js's mapping of raw batches and `selectBestBatch` with each option. `errors`: bee-js's, `fetchNode`'s, the SOC upload's and page-upload's error texts over JSON, text, empty, BOM, bad UTF-8 and past-8-KiB bodies. `stores`: `swarm-feeds.json`, `swarm-manifest-grants.json` and `publish-history.sqlite` through their modules. `deviations` lists each of the design's deviations with the cases that mark it, or why none can; a marked case records the reference's outcome and the core's (`core`). |
+| `swarm-grammar.json` | Design 0015's operation grammar: the `shell.swarm_api` forms, each parent's row, the reference's requests the core drops (by deviation), `checked` (every request `swarm.json` records, by row and verdict: the generator fails on any that matches no row and isn't a named deviation's), and each row's `honest` scenarios (the reference's requests as the core keeps them, readData's verified walks over `dweb-verify.json`'s trees at every redundancy level, one chunk at two positions, a logical leaf with a large span, and main's own `swarm.publish`, `swarm.feed`, `swarm.stamps` and `swarm.upload_status` from publish-service.js and feed-service.js) and `forbidden` alternatives (the nearest wrong call, with the rule that refuses it). |
 | `fixtures/colibri/` | `colibri.json`'s worlds, captured once from the live servers by `generator/colibri-capture.js` on 2026-11-22: `sessions.json` (each session's chain, capture time, the parameters it found, such as the block and transaction it read, every case's clock, and each exchange: URL, verb, headers, body, any redirect, and the answer's status, content type, length and SHA-256) and `bodies/` (each answer's bytes, named by their SHA-256: 84 files, 5.0 MB in all; the largest is mainnet's 1.8 MB transaction index). `bodies/` also holds copies of freedom-browser's checkpoint captures' proofs (`checkpoint_proofs`, 0.5 MB of the 5.0), which the generator checks against the reference's own files, so a replay outside the browser has them. `check` fails on a body whose digest differs and on an exchange no case reads. |
 | `fixtures/vaults.json` | Exact vault file contents from real `importVault`, including timestamps and the embedded encrypted JSON string. Five password/mnemonic cases, parsed payloads, successful unlocks, exact failing files/passwords/outcomes, plus one explicitly synthetic positive legacy vault. |
 | `fixtures/bee-keystores.json` | Two actual `createBeeKeystore` outputs, passwords, expected keys/addresses, parsed JSON, KDF parameters and the Unicode password normalization check. |
@@ -181,6 +216,17 @@ What the recording found, against design 0014's text:
 | `generator/colibri-contract.js` | Design 0014's fetch contract, the grammar `colibri.json`'s requests are checked against. |
 | `generator/colibri-contract.test.js` | Direct cases for the fetch contract: each variant admitted in its exact form, and refused one step past every bound the table names (the checkpoint row's cross-variants, the 65,536- and 65,537-byte payloads, decimal widths, hex forms, lengths, verbs, ages, `exclude_mask`). |
 | `generator/colibri-capture.js` | Captures `fixtures/colibri/` from the live servers through the same harness; run only to replace the fixtures (it needs the network; `generate` and `check` never do). |
+| `generator/swarm.js` | The window.swarm vectors' builder: the packages' version refusal and digests, the shared environment, the `methods` section and the deviations list, used by `swarm-worker.js`. |
+| `generator/swarm-worker.js` | Runs `swarm.js` in a worker thread of `generate.js`. |
+| `generator/swarm-cases.js` | The `methods` cases: their worlds, params, node answers and deviations. |
+| `generator/swarm-run.js` | Runs a case: the reference fresh over the fake node and its world, each step recorded and checked against the grammar. |
+| `generator/swarm-world.js` | Loads the swarm reference's modules with their stubs, the identity core's signer over keys.json's test keys among them. |
+| `generator/swarm-node.js` | The recording fake Swarm node: a loopback server, with wrappers on global `fetch`, `http.request` and `WebSocket`. |
+| `generator/swarm-typed.js` | The design's typed form of params and answers. |
+| `generator/swarm-sections.js` | `bodies`, `trees`, `feeds`, `gsoc`, `stamps`, `errors` and `stores`. |
+| `generator/swarm-gsoc-worker.js` | gsocMine in worker threads, so the searches to the cap run beside the rest. |
+| `generator/swarm-grammar.js` | Design 0015's forms and rows as data, and the checker every recorded request passes. |
+| `generator/swarm-grammar-file.js` | `swarm-grammar.json`: the honest and forbidden scenarios. |
 | `generator/check.test.js` | Integration tests that damage copies of the oracle outputs and require `check` to fail. |
 | `generator/interop.test.js` | Design 0013's interop harness: the profiles reference's `createProfile` and `renameProfile` against `freedom-cored`'s catalog subcommands on one app root, and the catalog's write lock held both ways; the JSON Lines journal read both ways (`test-journal`); and `payment-history.sqlite` read both ways, the stores reference's `payment-history.js` against `test-payments`, which runs the `payments.*` methods and the `x402-receipts.json` import. Needs `FREEDOM_CORED`, a `testhooks` build. |
 | `generator/interop-actor.js` | The harness's reference processes: a writer loop, and a holder of the write lock. |
@@ -189,7 +235,7 @@ What the recording found, against design 0014's text:
 Every JSON file has a `meta` block with the full reference commit, actual installed
 package versions, Node version and generator path. The Radicle files' `meta` names the
 Radicle reference's commit, the Node version and the generator path: they read no
-package of the reference's. So does `approvals.json`'s, for the approvals reference; `profiles.json`'s names proper-lockfile, `eip1193.json`'s ethers, `stores.json`'s, for the stores reference, ethers and `@sinonjs/fake-timers`, and `sqlite.json`'s, for the stores reference, better-sqlite3 and its SQLite version, and `colibri.json`'s, for the colibri reference, `@corpus-core/colibri-stateless` and ethers. The deterministic files use
+package of the reference's. So does `approvals.json`'s, for the approvals reference; `profiles.json`'s names proper-lockfile, `eip1193.json`'s ethers, `stores.json`'s, for the stores reference, ethers and `@sinonjs/fake-timers`, and `sqlite.json`'s, for the stores reference, better-sqlite3 and its SQLite version, `colibri.json`'s, for the colibri reference, `@corpus-core/colibri-stateless` and ethers, and `swarm.json`'s and `swarm-grammar.json`'s, for the swarm reference, bee-js, core-sdk, cafe-utility, ethers and better-sqlite3 (`swarm.json`'s also the digests of the files it rests on). The deterministic files use
 2-space indentation, LF and one trailing newline, with stable key order. The
 fixture containers have the same format. Their embedded `fileContents`,
 `keystore`, and SSH strings retain the bytes the reference wrote, including the
@@ -209,10 +255,11 @@ The checked-in run used Node `v24.15.0` and these installed versions:
 | `@sinonjs/fake-timers` | `15.4.0` (the replays and `stores.json` only) |
 | `better-sqlite3` | `13.0.3`, with SQLite `3.53.4` (`sqlite.json` only) |
 | `@corpus-core/colibri-stateless` | `3.0.3`, `c4w.wasm` `3244888b…` (`colibri.json` only) |
+| `@ethersphere/bee-js`, `@ethersphere/core-sdk` | `13.2.0` and `0.2.2` (`swarm.json` and `swarm-grammar.json`, the swarm reference's install) |
 
-From clean checkouts at the five commits, install the first two's lockfile
+From clean checkouts at the six commits, install the first two's lockfile
 dependencies (this changes no tracked files; the approvals and stores references need none,
-and the colibri reference links the Radicle reference's install):
+and the colibri and swarm references link the Radicle reference's install):
 
 ```sh
 cd /root/herdr/freedom-browser
@@ -221,6 +268,8 @@ cd /root/herdr/freedom-browser-wt/radicle-reference
 ELECTRON_SKIP_BINARY_DOWNLOAD=1 npm ci --ignore-scripts
 ln -s /root/herdr/freedom-browser-wt/radicle-reference/node_modules \
   /root/herdr/freedom-browser-wt/colibri-reference/node_modules
+ln -s /root/herdr/freedom-browser-wt/radicle-reference/node_modules \
+  /root/herdr/freedom-browser-wt/swarm-reference/node_modules
 ```
 
 Then, from the freedom-core worktree:
@@ -230,12 +279,14 @@ node vectors/generator/generate.js generate --freedom-browser /root/herdr/freedo
   --radicle-browser /root/herdr/freedom-browser-wt/radicle-reference \
   --approvals-browser /root/herdr/freedom-browser-wt/approvals-reference \
   --stores-browser /root/herdr/freedom-browser-wt/stores-reference \
-  --colibri-browser /root/herdr/freedom-browser-wt/colibri-reference
+  --colibri-browser /root/herdr/freedom-browser-wt/colibri-reference \
+  --swarm-browser /root/herdr/freedom-browser-wt/swarm-reference
 node vectors/generator/generate.js check --freedom-browser /root/herdr/freedom-browser \
   --radicle-browser /root/herdr/freedom-browser-wt/radicle-reference \
   --approvals-browser /root/herdr/freedom-browser-wt/approvals-reference \
   --stores-browser /root/herdr/freedom-browser-wt/stores-reference \
-  --colibri-browser /root/herdr/freedom-browser-wt/colibri-reference
+  --colibri-browser /root/herdr/freedom-browser-wt/colibri-reference \
+  --swarm-browser /root/herdr/freedom-browser-wt/swarm-reference
 node --test vectors/generator/check.test.js
 node --test vectors/generator/colibri-contract.test.js
 cargo build -p freedom-cored --features testhooks
@@ -253,11 +304,13 @@ FREEDOM_CORED_PREVIOUS=/path/to/v0.22.0/freedom-cored \
 The integration tests use `/root/herdr/freedom-browser`,
 `/root/herdr/freedom-browser-wt/radicle-reference`,
 `/root/herdr/freedom-browser-wt/approvals-reference`,
-`/root/herdr/freedom-browser-wt/stores-reference` and
-`/root/herdr/freedom-browser-wt/colibri-reference` by default; set
+`/root/herdr/freedom-browser-wt/stores-reference`,
+`/root/herdr/freedom-browser-wt/colibri-reference` and
+`/root/herdr/freedom-browser-wt/swarm-reference` by default; set
 `FREEDOM_BROWSER_CHECKOUT`, `FREEDOM_BROWSER_RADICLE_CHECKOUT`,
-`FREEDOM_BROWSER_APPROVALS_CHECKOUT`, `FREEDOM_BROWSER_STORES_CHECKOUT` and
-`FREEDOM_BROWSER_COLIBRI_CHECKOUT` to use other clean checkouts. Run with the Node
+`FREEDOM_BROWSER_APPROVALS_CHECKOUT`, `FREEDOM_BROWSER_STORES_CHECKOUT`,
+`FREEDOM_BROWSER_COLIBRI_CHECKOUT` and `FREEDOM_BROWSER_SWARM_CHECKOUT` to use other
+clean checkouts. Run with the Node
 version in `meta`: the runtime version is part of the byte comparison. The
 generator refuses a different commit or a dirty checkout, for any reference.
 

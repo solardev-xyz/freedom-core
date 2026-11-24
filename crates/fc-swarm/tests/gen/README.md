@@ -34,4 +34,4 @@ node crates/fc-swarm/tests/gen/generate.js generate --node-modules /tmp/swm2-ref
 
 CI's vectors job runs `check` against the Radicle reference's install (`npm ci --ignore-scripts` of freedom-browser at `RADICLE_REFERENCE_COMMIT`), whose lockfile pins bee-js 13.2.0 and core-sdk 0.2.2 at the integrity above. Both modes refuse any other version of either, and `meta.files` records the digests of the reference files the answers rest on, so `check` also fails on a changed install. `check` regenerates everything (about a minute: the GSOC searches to the cap take most of it) and fails unless the result equals the committed file byte for byte.
 
-SWM-1's `vectors/swarm.json` takes over the `trees`, `bodies`, `feeds` and `gsoc` cases once it exists.
+SWM-1's `vectors/swarm.json` holds window.swarm's own `trees`, `bodies`, `feeds` and `gsoc` cases, from the swarm reference's modules, in the same shapes; `../swarm_vectors.rs` replays them, beside this file's.
