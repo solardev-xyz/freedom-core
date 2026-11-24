@@ -434,7 +434,7 @@ node ◀──POST (transport)─────┤◀───────swarm.bo
 
 - **Sizes** stay today's: 10 MiB of data, 50 MiB and 100 files, paths of 100 bytes ([Q22](#open-questions)). Feed entries get the 10 MiB if question 3 is yes (F-4).
 - **At most four uploads stream at once** in the core; the rest wait their turn. 0011 already lets main take only two page uploads at once across the browser.
-- **Per upload:** one incoming and one outgoing window of 128 KiB, the chunker's leaf buffer and up to 128 references per level (at most seven levels below 2^64 bytes, so under 33 KiB), and one tar header: about 300 KiB.
+- **Per upload:** one incoming and one outgoing window of 128 KiB, the chunker's leaf buffer and up to 128 references per level (at most eight levels below 2^64 bytes, so about 36 KiB; three at 50 MiB), and one tar header: about 300 KiB.
 - **Credit goes in only when it can go out:** the core grants credit on a part only while its `swarm.body` window has room. A node that stops reading holds one window in each direction, and the idle bound ends the upload after 60 s.
 - **Main** holds the page's IPC value until the request ends (0011's charge) and one ring per stream, each charged to the [Swarm I/O pool](#mains-swarm-io-pool). `normalizeBytes`'s copy of a `Uint8Array` goes, so a 50 MiB upload costs main one copy fewer; the temp directory already went with #1057.
 
