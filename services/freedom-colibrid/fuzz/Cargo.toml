@@ -1,0 +1,52 @@
+# cargo-fuzz targets for what freedom-colibrid hands Colibri's C core from
+# outside (design 0014, "Threat model": a fuzz target for the proof decoder
+# and verifier, COL-4): a proof to decode, and a proof to verify with the
+# data its requests get. Its own workspace, so libFuzzer and nightly-only
+# flags stay out of the service's lockfile.
+#
+# CI (colibrid.yml's fuzz job) builds the C core's C sources with clang's
+# libFuzzer coverage and AddressSanitizer (CFLAGS), so the fuzzer explores
+# the C parsers too. Locally, from services/freedom-colibrid, with
+# nightly-2026-10-01 (and CC=clang CFLAGS="-fsanitize=address,fuzzer-no-link"
+# for the C side's coverage):
+#
+#   cargo +nightly-2026-10-01 fuzz run decode_proof fuzz/corpus/decode_proof fuzz/seeds/decode_proof
+
+[package]
+name = "freedom-colibrid-fuzz"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+# The service's pin, exactly.
+colibri-stateless = { git = "https://github.com/solardev-xyz/colibri-stateless", rev = "24d095198005e74bf3ed0a97d12d8fc7645aa93a", default-features = false }
+libfuzzer-sys = "0.4.13"
+# A decoded proof must be JSON.
+serde_json = "1"
+
+[workspace]
+members = ["."]
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[profile.release]
+debug = 1
+
+[[bin]]
+name = "decode_proof"
+path = "fuzz_targets/decode_proof.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "verify_proof"
+path = "fuzz_targets/verify_proof.rs"
+test = false
+doc = false
+bench = false

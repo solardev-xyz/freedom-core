@@ -18,6 +18,7 @@ gate = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(gate)
 
 MIT = "/* SPDX-License-Identifier: MIT */\n"
+REVISION = "0123456789abcdef0123456789abcdef01234567"
 
 
 class Gate(unittest.TestCase):
@@ -25,7 +26,8 @@ class Gate(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         base = pathlib.Path(self.tmp.name)
         self.target = base / "target"
-        self.root = base / "checkout"
+        # A Cargo git checkout: named by its revision's first seven digits.
+        self.root = base / "checkouts" / "colibri-stateless-0123" / REVISION[:7]
         self.out = self.target / "release/build/colibri-stateless-0123/out"
         self.build = self.out / "cmake/no-op/no-prover"
         self.build.mkdir(parents=True)
@@ -33,7 +35,7 @@ class Gate(unittest.TestCase):
         self.notices.write_text(json.dumps({
             "polyform_mentions": [{"path": "src/util/version.c", "why": "prints the server's license"}],
             "components": [
-                {"tree": "colibri", "spdx": ["MIT"]},
+                {"tree": "colibri", "spdx": ["MIT"], "revision": REVISION},
                 {"tree": "libs/crypto", "spdx": ["MIT", "Apache-2.0"]},
                 {"tree": "_deps/blst-src", "spdx": ["Apache-2.0"], "license": "Apache-2.0"},
             ],
@@ -68,6 +70,15 @@ class Gate(unittest.TestCase):
 
     def errors(self, out=None):
         return gate.check(str(out or self.out), str(self.notices))[0]
+
+    def test_another_revision_of_colibri_fails(self):
+        notices = json.loads(self.notices.read_text())
+        notices["components"][0]["revision"] = "f" * 40
+        self.notices.write_text(json.dumps(notices))
+        self.assertTrue(any("isn't the reviewed revision fffffff" in e for e in self.errors()))
+        del notices["components"][0]["revision"]
+        self.notices.write_text(json.dumps(notices))
+        self.assertTrue(any("names no reviewed revision" in e for e in self.errors()))
 
     def test_a_verifier_only_build_passes(self):
         self.assertEqual(self.errors(), [])

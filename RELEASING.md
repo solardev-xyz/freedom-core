@@ -424,3 +424,82 @@ gh attestation verify freedom-radicled-vX.Y.Z-linux-amd64.tar.gz \
   --source-ref refs/tags/radicled-vX.Y.Z \
   --deny-self-hosted-runners
 ```
+
+# Releasing freedom-colibrid
+
+`services/freedom-colibrid` (design 0014) is released on its own tags,
+`colibrid-vX.Y.Z`, by `.github/workflows/release-colibrid.yml`. It has
+freedom-ipfsd's shape and targets: build jobs with a read-only token, and one
+publish job that runs no repository code.
+
+0. **Notices.** `services/freedom-colibrid/THIRD-PARTY-NOTICES` is generated
+   and committed:
+   `(cd services/freedom-colibrid && cargo fetch --locked) && python3 scripts/third-party-notices.py --binary freedom-colibrid`.
+   CI (`colibrid.yml`'s deny job) and the release workflow's first job fail
+   when it is stale. Besides the crates and the runtime, it lists the C code
+   `colibri-stateless` 3.0.3 builds in, each entry tied to that version and
+   to the reviewed commit (`COLIBRI_PIN` in the script), so a new pin, even
+   of the same version, fails until its entries (`NATIVE`) are re-checked.
+   The license gate holds `notices/c-sources.json` to the same commit (its
+   `colibri` entry's `revision`):
+   - **Colibri's C core** (MIT), and its `libs/crypto`: trezor-crypto (MIT)
+     and Mbed TLS's `ripemd160.c` (Apache-2.0);
+   - **blst 0.3.13**, **evmone 0.23.0** (with EVMC) and **intx 0.15.0**, all
+     Apache-2.0, which its CMake fetches at pinned commits; their texts are
+     vendored in `services/freedom-colibrid/notices/` (its README names the
+     commits). None carries a `NOTICE` file.
+
+   On Linux, Zig links its own **libc++ and libc++abi** (Apache-2.0 WITH
+   LLVM-exception) for evmone's C++, besides glibc's startup objects and
+   libunwind; their texts are in `notices/`. The license gate
+   (`scripts/colibri-license-gate.py`) checks, in CI, what each tree
+   compiled into the build may carry. The archives also ship
+   `THIRD-PARTY-NOTICES-rust-std.html`.
+1. **Bump the version** in a PR: `version` in
+   `services/freedom-colibrid/Cargo.toml`, and its own `Cargo.lock`. The
+   C core's version (196611, `colibri.hello`'s `client_version`) is the
+   pin's, independent of the service's.
+2. **Tag the merged commit on `main`** once its CI is green:
+   `git tag colibrid-vX.Y.Z <commit> && git push origin colibrid-vX.Y.Z`.
+   Only a tag equal to `colibrid-v` + that version publishes.
+3. **The workflow.** The first job checks the tag and the notices. Then each
+   target's job:
+   - builds with `--locked --release`, the C core through
+     `colibri-stateless`'s CMake build (the runners have CMake; Windows gets
+     a short `PATH` for blst's build command), Linux with `cargo-zigbuild`
+     against glibc 2.17 as freedom-ipfsd's does (Zig 0.15.2 and
+     cargo-zigbuild 0.23.4, pinned by sha256);
+   - on Linux, checks that the binary needs glibc 2.17 at most, the
+     standard loader, and no library but glibc's (libc++ is linked in);
+   - builds Colibri's C core hardened (design 0014): a stack protector,
+     `_FORTIFY_SOURCE=3`, and control-flow protection where the target has
+     it: CET on x86_64 Linux, BTI and pointer authentication on arm64
+     Linux, Control Flow Guard on Windows (Rust's side too). macOS's arm64
+     ABI leaves pointer authentication to arm64e, and it has no CET;
+     Windows' `/GS` is MSVC's default, and it has no `_FORTIFY_SOURCE`.
+     blst, which its own build script compiles, gets them through
+     `COLIBRI_BLST_CFLAGS`. `scripts/colibrid-hardening-check.py` then
+     checks each compile: every source CMake compiled (Linux, macOS: its
+     compile commands; Windows: its Visual Studio projects, Control Flow
+     Guard on and `/GS` not off) and blst (the flags its build recorded);
+     and the binary: the stack protector's and `_FORTIFY_SOURCE`'s calls
+     (Linux, macOS), or the PE image's Control Flow Guard (Windows);
+   - checks that the binary names no `FREEDOM_COLIBRID_TEST_*` variable, and
+     that the release build's own command refuses the `testhooks` feature,
+     with and without release debug assertions;
+   - smoke-tests the four native builds (usage exits 64) and packages the
+     binary with both notice files.
+
+   Then the publish job assembles `SHA256SUMS`, attests every archive and
+   `SHA256SUMS`, and publishes, as freedom-ipfsd's does.
+
+   | Asset | Target |
+   |---|---|
+   | `freedom-colibrid-vX.Y.Z-darwin-arm64.tar.gz` | `aarch64-apple-darwin` |
+   | `freedom-colibrid-vX.Y.Z-darwin-amd64.tar.gz` | `x86_64-apple-darwin` |
+   | `freedom-colibrid-vX.Y.Z-linux-amd64.tar.gz` | `x86_64-unknown-linux-gnu` (glibc ≥ 2.17) |
+   | `freedom-colibrid-vX.Y.Z-linux-arm64.tar.gz` | `aarch64-unknown-linux-gnu` (glibc ≥ 2.17) |
+   | `freedom-colibrid-vX.Y.Z-windows-amd64.zip` | `x86_64-pc-windows-msvc` (static CRT) |
+
+4. **Pin it in freedom-browser** (COL-5): the tag, plus the SHA-256 of the
+   release's `SHA256SUMS`, as for the other services.

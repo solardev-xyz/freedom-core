@@ -132,8 +132,10 @@ class Binaries(unittest.TestCase):
                     if entry.text.startswith("crate:"):
                         self.assertTrue(entry.bundled_by)
                     if entry.bundled_by:
-                        name, _, version = entry.bundled_by.partition(" ")
-                        self.assertTrue(name and version and " " not in version)
+                        name, version, *pinned = entry.bundled_by.split(" ")
+                        self.assertTrue(name and version)
+                        for pin in pinned:
+                            self.assertRegex(pin, r"^git:[0-9a-f]{40}$")
 
     def test_radicled_lists_libgit2_zlib_and_sqlite_with_libgit2s_source(self):
         bundled = {notices.Native(*e).bundled_by: notices.Native(*e)
@@ -185,6 +187,44 @@ class Bundled(unittest.TestCase):
         gone = self.zlib._replace(bundled_by="libgit2-sys 0.18.7")
         with self.assertRaisesRegex(notices.NoticeError, "doesn't ship libgit2-sys, not 0.18.7"):
             notices.native_text(gone, self.crates, self.dir)
+
+    def test_a_git_pin_is_held_to_its_reviewed_revision(self):
+        reviewed = "a" * 40
+        self.crates[("libz-sys", "1.1.31")]["source"] = (
+            f"git+https://example.org/libz-sys?rev={reviewed}#{reviewed}"
+        )
+        pinned = self.zlib._replace(bundled_by=f"libz-sys 1.1.31 git:{reviewed}")
+        self.assertEqual(notices.bundling_crate(pinned, self.crates)["links"], "z")
+        # The same version from another commit fails until re-checked.
+        moved = pinned._replace(bundled_by=f"libz-sys 1.1.31 git:{'b' * 40}")
+        with self.assertRaisesRegex(notices.NoticeError, "not the reviewed revision bbbb"):
+            notices.bundling_crate(moved, self.crates)
+        # So does the same version from the registry.
+        del self.crates[("libz-sys", "1.1.31")]["source"]
+        with self.assertRaisesRegex(notices.NoticeError, "no git source"):
+            notices.bundling_crate(pinned, self.crates)
+
+    def test_a_vendored_text_is_held_to_its_bundler_too(self):
+        reviewed = "a" * 40
+        self.crates[("libz-sys", "1.1.31")]["source"] = (
+            f"git+https://example.org/libz-sys?rev={reviewed}#{reviewed}"
+        )
+        vendored = self.zlib._replace(text="notices/zlib-LICENSE",
+                                      bundled_by=f"libz-sys 1.1.31 git:{reviewed}")
+        notices.check_bundlers([vendored], self.crates)
+        moved = vendored._replace(bundled_by=f"libz-sys 1.1.31 git:{'c' * 40}")
+        with self.assertRaisesRegex(notices.NoticeError, "not the reviewed revision cccc"):
+            notices.check_bundlers([moved], self.crates)
+        with self.assertRaisesRegex(notices.NoticeError, "not 1.1.30"):
+            notices.check_bundlers([vendored._replace(bundled_by="libz-sys 1.1.30")], self.crates)
+
+    def test_colibris_entries_name_its_pin(self):
+        colibri = [notices.Native(*e) for e in notices.NATIVE["freedom-colibrid"]
+                   if len(e) > 3 and e[3]]
+        self.assertEqual(len(colibri), 5)
+        for entry in colibri:
+            self.assertEqual(entry.bundled_by,
+                             f"colibri-stateless 3.0.3 git:{notices.COLIBRI_PIN}")
 
     def test_a_missing_text_or_bundler_fails(self):
         with self.assertRaisesRegex(notices.NoticeError, "is missing"):
