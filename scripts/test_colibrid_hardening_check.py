@@ -1,5 +1,6 @@
 """colibrid-hardening-check.py: a build whose sources all carry the flags
-passes, one without them fails; a binary that calls the stack protector's
+passes, one without them fails; so does blst's recorded build, and a
+Visual Studio project without Control Flow Guard or with /GS off; a binary that calls the stack protector's
 and _FORTIFY_SOURCE's checks passes (Linux's and macOS's listings), one that
 doesn't fails; a PE image with Control Flow Guard passes, one without its
 header flag or its instrumentation fails."""
@@ -79,6 +80,75 @@ class CompileCommands(unittest.TestCase):
         (self.dir / "other").mkdir()
         (self.dir / "other/compile_commands.json").write_text("[]")
         self.assertIn("found 2", hardening.compile_commands(str(self.dir), FLAGS)[0])
+
+
+class Blst(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.dir = pathlib.Path(self.tmp.name)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_blst_with_every_flag_passes_and_without_one_fails(self):
+        (self.dir / "build").mkdir()
+        flags = self.dir / "build/blst-build-flags.txt"
+        flags.write_text("-fPIC -ffunction-sections " + " ".join(FLAGS) + "\n")
+        self.assertEqual(hardening.blst(str(self.dir), FLAGS), [])
+        flags.write_text("-fPIC -fstack-protector-strong -D_FORTIFY_SOURCE=3\n")
+        self.assertEqual(hardening.blst(str(self.dir), FLAGS),
+                         ["blst: built without -fcf-protection=full"])
+
+    def test_no_record_fails(self):
+        self.assertIn("found 0", hardening.blst(str(self.dir), FLAGS)[0])
+
+
+def project(release, compiles=True):
+    """A Visual Studio project with Debug and Release compile settings."""
+    sources = '<ItemGroup><ClCompile Include="a.c" /></ItemGroup>' if compiles else ""
+    return (
+        '<?xml version="1.0" encoding="utf-8"?>'
+        '<Project xmlns="http://schemas.microsoft.com/developer/msbuild/2003">'
+        "<ItemDefinitionGroup Condition=\"'$(Configuration)|$(Platform)'=='Debug|x64'\">"
+        "<ClCompile><BufferSecurityCheck>false</BufferSecurityCheck></ClCompile>"
+        "</ItemDefinitionGroup>"
+        "<ItemDefinitionGroup Condition=\"'$(Configuration)|$(Platform)'=='Release|x64'\">"
+        f"<ClCompile>{release}</ClCompile></ItemDefinitionGroup>{sources}</Project>"
+    )
+
+
+class Vcxproj(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.dir = pathlib.Path(self.tmp.name)
+        (self.dir / "src").mkdir()
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def write(self, name, text):
+        (self.dir / "src" / name).write_text(text)
+
+    def test_guarded_projects_pass(self):
+        self.write("util.vcxproj", project("<ControlFlowGuard>Guard</ControlFlowGuard>"))
+        # Projects that compile nothing (ALL_BUILD, custom targets) are skipped.
+        self.write("ALL_BUILD.vcxproj", project("", compiles=False))
+        self.assertEqual(hardening.vcxproj(str(self.dir)), [])
+
+    def test_an_unguarded_project_or_gs_off_fails(self):
+        self.write("util.vcxproj", project(""))
+        self.write("api.vcxproj", project(
+            "<ControlFlowGuard>Guard</ControlFlowGuard><BufferSecurityCheck>false</BufferSecurityCheck>"
+        ))
+        errors = hardening.vcxproj(str(self.dir))
+        self.assertEqual(sorted(errors), [
+            "src/api.vcxproj: compiled with /GS off",
+            "src/util.vcxproj: compiled without Control Flow Guard (unset)",
+        ])
+
+    def test_no_compiling_project_fails(self):
+        self.write("ALL_BUILD.vcxproj", project("", compiles=False))
+        self.assertIn("no project compiles", hardening.vcxproj(str(self.dir))[0])
 
 
 class Symbols(unittest.TestCase):

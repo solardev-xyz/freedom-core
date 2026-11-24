@@ -9,6 +9,17 @@ _FORTIFY_SOURCE=3 and control-flow protection where the target has it
       every C and C++ source CMake compiled under <build dir> (its
       compile_commands.json, exactly one) carries each of <flags>;
 
+  colibrid-hardening-check.py blst <build dir> <flags>
+      blst, which its own build script compiles outside CMake's compile
+      commands, was built with each of <flags>: its blst-build-flags.txt
+      (exactly one), which colibri-stateless's CMake records;
+
+  colibrid-hardening-check.py vcxproj <build dir>
+      on Windows, every Visual Studio project CMake generated that compiles
+      C or C++ does so in its Release configuration with Control Flow Guard
+      (ControlFlowGuard: Guard) and without turning /GS off
+      (BufferSecurityCheck: false);
+
   colibrid-hardening-check.py symbols <symbol listing>
       the binary calls the stack protector's check (__stack_chk_fail) and
       _FORTIFY_SOURCE's (a __*_chk function): the listing is `objdump -T`'s
@@ -20,8 +31,8 @@ _FORTIFY_SOURCE=3 and control-flow protection where the target has it
       /GS, the stack protector, is MSVC's default; Windows has no
       _FORTIFY_SOURCE.
 
-blst is built by its own build script, outside CMake's compile commands, with
-its own flags; its objects are in the binary the symbol checks read.
+The image-level checks (symbols, pe) can't tell which objects were
+hardened; compile-commands, blst and vcxproj check each compile's flags.
 """
 
 import glob
@@ -30,6 +41,7 @@ import os
 import re
 import struct
 import sys
+import xml.etree.ElementTree as ET
 
 IMAGE_DLLCHARACTERISTICS_GUARD_CF = 0x4000
 IMAGE_GUARD_CF_INSTRUMENTED = 0x100
@@ -53,6 +65,52 @@ def compile_commands(build_dir, flags):
         missing = [flag for flag in flags if flag not in words]
         if missing:
             errors.append(f"{entry['file']}: compiled without {' '.join(missing)}")
+    return errors
+
+
+def blst(build_dir, flags):
+    """Errors: blst built without one of `flags`."""
+    files = glob.glob(os.path.join(build_dir, "**", "blst-build-flags.txt"), recursive=True)
+    if len(files) != 1:
+        return [f"{build_dir}: expected one blst-build-flags.txt, found {len(files)}"]
+    with open(files[0], encoding="utf-8") as f:
+        words = f.read().split()
+    missing = [flag for flag in flags if flag not in words]
+    return [f"blst: built without {' '.join(missing)}"] if missing else []
+
+
+MSBUILD = "{http://schemas.microsoft.com/developer/msbuild/2003}"
+
+
+def vcxproj(build_dir):
+    """Errors: Visual Studio projects compiling without Control Flow Guard,
+    or with /GS off, in their Release configuration."""
+    projects = glob.glob(os.path.join(build_dir, "**", "*.vcxproj"), recursive=True)
+    errors = []
+    compiling = 0
+    for path in sorted(projects):
+        root = ET.parse(path).getroot()
+        if not root.findall(f".//{MSBUILD}ItemGroup/{MSBUILD}ClCompile"):
+            continue
+        compiling += 1
+        releases = [
+            group.find(f"{MSBUILD}ClCompile")
+            for group in root.findall(f"{MSBUILD}ItemDefinitionGroup")
+            if "'Release|" in (group.get("Condition") or "")
+        ]
+        releases = [r for r in releases if r is not None]
+        name = os.path.relpath(path, build_dir)
+        if not releases:
+            errors.append(f"{name}: no Release compile settings")
+            continue
+        for settings in releases:
+            guard = settings.findtext(f"{MSBUILD}ControlFlowGuard")
+            if guard != "Guard":
+                errors.append(f"{name}: compiled without Control Flow Guard ({guard or 'unset'})")
+            if (settings.findtext(f"{MSBUILD}BufferSecurityCheck") or "").lower() == "false":
+                errors.append(f"{name}: compiled with /GS off")
+    if not compiling:
+        errors.append(f"{build_dir}: no project compiles C or C++")
     return errors
 
 
@@ -109,6 +167,10 @@ def pe(data):
 def main(argv):
     if len(argv) == 3 and argv[0] == "compile-commands":
         errors = compile_commands(argv[1], argv[2].split())
+    elif len(argv) == 3 and argv[0] == "blst":
+        errors = blst(argv[1], argv[2].split())
+    elif len(argv) == 2 and argv[0] == "vcxproj":
+        errors = vcxproj(argv[1])
     elif len(argv) == 2 and argv[0] == "symbols":
         with open(argv[1], encoding="utf-8", errors="replace") as f:
             errors = symbols(f.read())

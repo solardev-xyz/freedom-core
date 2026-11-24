@@ -192,9 +192,11 @@ jobs:
           RUSTFLAGS: ${{ contains(matrix.target, 'windows') && '-C target-feature=+crt-static -C control-flow-guard' || '' }}
           GLIBC: ${{ matrix.glibc }}
           # The C core's hardening: colibri-stateless's build script passes
-          # these to CMake through the cmake crate.
+          # these to CMake through the cmake crate, and COLIBRI_BLST_CFLAGS
+          # to blst's own build script, which takes neither.
           CFLAGS: ${{ matrix.cflags }}
           CXXFLAGS: ${{ matrix.cflags }}
+          COLIBRI_BLST_CFLAGS: ${{ matrix.cflags }}
           # For the "Hardened build" step (Makefile generators only: not
           # Windows' Visual Studio one).
           CMAKE_EXPORT_COMPILE_COMMANDS: "ON"
@@ -267,13 +269,22 @@ jobs:
           check=../../scripts/colibrid-hardening-check.py
           case "${{ matrix.target }}" in
             *windows*)
+              # On Windows the build is in the Cargo git checkout of the
+              # pin (colibri-stateless's build.rs), by Visual Studio's
+              # generator: every project that compiles has Control Flow
+              # Guard and /GS on, blst's build.bat had /guard:cf, and the
+              # linked image is guarded.
+              pin=$(grep -o 'rev = "[0-9a-f]*"' Cargo.toml | cut -d'"' -f2)
+              build=$(cygpath -w "$(ls -d "$HOME"/.cargo/git/checkouts/colibri-stateless-*/"${pin:0:7}"/build-rust/${{ matrix.target }})")
+              python3 "$check" vcxproj "$build"
+              python3 "$check" blst "$build" "$CFLAGS_WANT"
               python3 "$check" pe "$bin.exe"
               ;;
             *)
-              # Every source CMake compiled carries the flags (blst is built
-              # by its own script, with its own; its objects are in the
-              # binary the symbol check reads).
+              # Every source CMake compiled, and blst, which its own script
+              # builds, carries the flags.
               python3 "$check" compile-commands target/${{ matrix.target }}/release/build "$CFLAGS_WANT"
+              python3 "$check" blst target/${{ matrix.target }}/release/build "$CFLAGS_WANT"
               case "${{ matrix.target }}" in
                 *linux*) objdump -T "$bin" > "$RUNNER_TEMP/symbols.txt" ;;
                 *) nm -u "$bin" > "$RUNNER_TEMP/symbols.txt" ;;

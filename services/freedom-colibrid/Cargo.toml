@@ -37,11 +37,12 @@ resolver = "3"
 # responses zero-terminated, as json_parse needs (#451); and the
 # checkpointz validation error freed (#452). On MSVC its build script
 # builds the C core with the static runtime when Rust links it statically
-# (the release's +crt-static). The crate version is 3.0.3,
+# (the release's +crt-static), and it passes COLIBRI_BLST_CFLAGS to blst's
+# own build script (the release's hardening). The crate version is 3.0.3,
 # so the C core reports 196611, the version the COL-1 traces were recorded
 # with. No default features: no HTTP client (tokio, reqwest), no download
 # of a prebuilt archive, no prover (PROVER=OFF), no OP-Stack.
-colibri-stateless = { git = "https://github.com/solardev-xyz/colibri-stateless", rev = "90c72ebf5d0d85a66395f03a49006f39cd37ad55", default-features = false }
+colibri-stateless = { git = "https://github.com/solardev-xyz/colibri-stateless", rev = "24d095198005e74bf3ed0a97d12d8fc7645aa93a", default-features = false }
 
 # The service's skeleton and protocol, shared with the core and the other
 # services by path (0007, 0014).

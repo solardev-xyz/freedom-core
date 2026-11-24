@@ -152,7 +152,7 @@ def zig_glibc_runtime(startup_notice):
 
 # The solardev-xyz/colibri-stateless commit freedom-colibrid's notices were
 # checked at (services/freedom-colibrid/Cargo.toml's pin).
-COLIBRI_PIN = "90c72ebf5d0d85a66395f03a49006f39cd37ad55"
+COLIBRI_PIN = "24d095198005e74bf3ed0a97d12d8fc7645aa93a"
 
 
 NATIVE = {
