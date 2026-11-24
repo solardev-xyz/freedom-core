@@ -49,8 +49,8 @@
     "node_url": "the node is a recording fake on loopback; every text names it http://127.0.0.1:1633.",
     "typed": "params and non-JSON answers: { string }, { string_json } (a string with a lone surrogate, as its JSON text), { string_repeat, count }, { number: String(n) } (\"-0\", \"NaN\", \"Infinity\"), { bigint }, { boolean }, { null }, { undefined }, { array } ({ hole } for a hole), { object: [[key, value], …] } in key order; where a method reads data, { bytes, kind, base64 } or { string_bytes, base64 } (a string's UTF-8), past 64 KiB { …, part: i } with parts[i] = { seed | repeat+count, length, sha256 }; { bytes_elsewhere, kind, base64 } for bytes where no method reads them; in answers, { string_digest: units, sha256 } for a string past 8,192 units. An answer is `result` or `error` when JSON keeps it exactly, else `result_typed` or `error_typed`; a JSON result past 16 KiB is `result_digest` { json_length, sha256 }.",
     "methods": "a case: its world (origin, the attested key; grants, the Swarm grants by key; feeds, swarm-feeds.json's text before or null; vault; readiness, getPublishReadiness()'s answer or \"throws\"; approval, how main approved (user or auto, meta.page.soc.approval); node, the fake node's declarative state; clock) and its steps, each executeSwarmMethod(method, params, origin, meta.page as main's dispatcher builds it): the answer, every node request (via fetch or http; method, path, query pairs, the headers the caller set, the body as { bytes, base64 } up to 8 KiB else { bytes, sha256 }, the status, feed { owner, index } for a feed update's address, and the grammar's verdict: form, ready or deviation), and the events (sign_soc: the identity core's request; readiness, after_requests node requests in; vault_timer_reset; delivered). `after`: swarm-feeds.json's text, its backups, and the publish history (getEntries()). A case marked deviation records the reference's outcome, and `core` the design's.",
-    "node": "stamps, addresses, tags, node: JSON answers (stamps_label_bytes: the usable batch with a label of that many bytes of l); data: blobs stored as their whole ChunkSplitter tree and joined from /bytes; chunks: raw bytes at an address; entries: feed updates, SOCs signed under the named test key ({ key, topic (the topic string), index, data, wrap }); latest: GET /feeds/<o>/<t>'s reply; probes: the feeds whose updates 0 to head exist (a hit answers 105 zero bytes); probeFail: one index's status; rules: replies tried first, { match: { method, path | prefix }, reply: { status, statusText, headers, json | body_utf8 | body_hex | body_base64 | body_data, chunked + pieces_data, cutAfterPieces, declare (a Content-Length longer than the body, then the connection cut), hangUp, delayMs } }. Unmatched, the node answers from what it stores: 404 { code, message } for what it lacks, /bzz with SHA-256 of the body as its reference.",
-    "bodies": "write-side.json's shapes: tar (page-upload.js's, for window.swarm, each equal to bee-js's collection upload of the same entries; tar-paths cases are bee-js's publishCollection, as freedom://publish uses it), file (publishData's request; the body is the data), soc (core-sdk), chunk (POST /chunks: span ‖ payload and the address), pss (the request; the body is the message).",
+    "node": "stamps, addresses, tags, node: JSON answers (stamps_label_bytes: the usable batch with a label of that many bytes of l); data: blobs stored as their whole ChunkSplitter tree and joined from /bytes; chunks: raw bytes at an address; entries: feed updates, SOCs signed under the named test key ({ key, topic (the topic string), index, data, wrap }); latest: GET /feeds/<o>/<t>'s reply; probes: the feeds whose updates 0 to head exist (a hit answers 105 zero bytes); probeFail: one index's status; rules: replies tried first, { match: { method, path | prefix }, reply: { status, statusText, headers, json | body_utf8 | body_hex | body_base64 | body_data, chunked + pieces_data, cutAfterPieces, declare (a Content-Length longer than the body, then the connection cut), hangUp, delayMs, abortPage (the page gives up as this request arrives: meta.page.signal aborts) } }. Unmatched, the node answers from what it stores: 404 { code, message } for what it lacks, /bzz with SHA-256 of the body as its reference.",
+    "bodies": "write-side.json's shapes: tar (page-upload.js's, for window.swarm, each equal to bee-js's collection upload of the same entries; tar-paths cases are bee-js's publishCollection, as freedom://publish uses it), file (publishData's request; the body is the data), bytes (a large feed entry's POST /bytes body, ChunkSplitter's root of it and the SOC upload body that wraps that root), soc (core-sdk), chunk (POST /chunks: span ‖ payload and the address), pss (the request; the body is the message).",
     "trees": "core-sdk's ChunkSplitter: root, span, root payload, and every chunk's count and SHA-256 over address ‖ u64_le(span) ‖ payload by address.",
     "stamps": "mapped: bee-js's stamp.getAll over one raw batch (the fields Freedom reads, or the error), and swarm-service.js's classification; select: selectBestBatch(size, options) over a /stamps answer, its batch or error, and how many /stamps reads it made.",
     "feeds": "topic and identifier (bee-js), update (feed-service.js's updateFeed and writeFeedPayload, write-side.json's shape), index_run and entry_exists (from the methods that ran them), metered_read (readFeedPayload over a recording meter: each charge and reserve, refused or not).",
@@ -27291,6 +27291,7 @@
               "prefix": "/chunks/"
             },
             "reply": {
+              "abortPage": true,
               "delayMs": 300,
               "status": 200,
               "body_hex": "0b0000000000000068656c6c6f20737761726d"
@@ -27302,7 +27303,6 @@
       "steps": [
         {
           "method": "swarm_readChunk",
-          "abort_after_ms": 50,
           "params": {
             "object": [
               [
@@ -56299,6 +56299,155 @@
       }
     },
     {
+      "id": "write-feed-explicit-index-timeout",
+      "origin": "https://app.example",
+      "grants": {
+        "https://app.example": {
+          "origin": "https://app.example",
+          "connectedAt": 1767225540123,
+          "lastUsed": 1767225540123,
+          "autoApprove": {
+            "publish": false,
+            "feeds": false,
+            "signing": false,
+            "messaging": false
+          }
+        }
+      },
+      "feeds": "{\n  \"version\": 2,\n  \"nextPublisherKeyIndex\": 0,\n  \"origins\": {\n    \"https://app.example\": {\n      \"activeIdentityId\": \"bee-wallet\",\n      \"identities\": {\n        \"bee-wallet\": {\n          \"id\": \"bee-wallet\",\n          \"mode\": \"bee-wallet\",\n          \"publisherKeyIndex\": null,\n          \"walletIndex\": null,\n          \"label\": \"Bee wallet identity\",\n          \"createdAt\": 1767225550123,\n          \"lastUsedAt\": null\n        }\n      },\n      \"feedGranted\": true,\n      \"grantedAt\": 1767225550123,\n      \"feeds\": {\n        \"blog\": {\n          \"topic\": \"2d8b6efca0db6410add40ecd6bda25b3ee2d614a8e6c12933931d91cca63c3e4\",\n          \"owner\": \"0x6Fac4D18c912343BF86fa7049364Dd4E424Ab9C0\",\n          \"manifestReference\": \"cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd\",\n          \"identityId\": \"bee-wallet\",\n          \"createdAt\": 1767225560123,\n          \"lastUpdated\": null,\n          \"lastReference\": null\n        }\n      }\n    }\n  }\n}",
+      "vault": "unlocked",
+      "readiness": {
+        "ok": true
+      },
+      "approval": "user",
+      "node": {
+        "stamps": {
+          "stamps": [
+            {
+              "batchID": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+              "utilization": 0,
+              "usable": true,
+              "label": "freedom",
+              "depth": 22,
+              "amount": "100000000000",
+              "bucketDepth": 16,
+              "blockNumber": 1000,
+              "immutableFlag": true,
+              "exists": true,
+              "batchTTL": 864000
+            }
+          ]
+        },
+        "rules": [
+          {
+            "match": {
+              "prefix": "/chunks/"
+            },
+            "reply": {
+              "abortPage": true,
+              "delayMs": 300,
+              "status": 404,
+              "json": {
+                "code": 404,
+                "message": "Not Found"
+              }
+            }
+          }
+        ]
+      },
+      "clock": 1767225600123,
+      "steps": [
+        {
+          "method": "swarm_writeFeedEntry",
+          "params": {
+            "object": [
+              [
+                "name",
+                {
+                  "string": "blog"
+                }
+              ],
+              [
+                "data",
+                {
+                  "string_bytes": 1,
+                  "base64": "eA=="
+                }
+              ],
+              [
+                "index",
+                {
+                  "number": "3"
+                }
+              ]
+            ]
+          },
+          "error": {
+            "code": -32603,
+            "message": "Request aborted"
+          },
+          "requests": [
+            {
+              "via": "fetch",
+              "method": "GET",
+              "path": "/stamps",
+              "headers": [
+                [
+                  "accept",
+                  "application/json, text/plain, */*"
+                ]
+              ],
+              "status": 200,
+              "form": "stamps"
+            },
+            {
+              "via": "fetch",
+              "method": "GET",
+              "path": "/chunks/5f88b46c7a1fadd0255bbcdaaff962390c75d14406161940c13650c7329062f1",
+              "headers": [
+                [
+                  "accept",
+                  "application/json, text/plain, */*"
+                ]
+              ],
+              "status": null,
+              "form": "chunk",
+              "feed": {
+                "owner": "6fac4d18c912343bf86fa7049364dd4e424ab9c0",
+                "index": 3
+              }
+            }
+          ],
+          "events": [
+            {
+              "readiness": "publish",
+              "after_requests": 0
+            }
+          ]
+        }
+      ],
+      "after": {
+        "feeds": "{\n  \"version\": 2,\n  \"nextPublisherKeyIndex\": 0,\n  \"origins\": {\n    \"https://app.example\": {\n      \"activeIdentityId\": \"bee-wallet\",\n      \"identities\": {\n        \"bee-wallet\": {\n          \"id\": \"bee-wallet\",\n          \"mode\": \"bee-wallet\",\n          \"publisherKeyIndex\": null,\n          \"walletIndex\": null,\n          \"label\": \"Bee wallet identity\",\n          \"createdAt\": 1767225550123,\n          \"lastUsedAt\": null\n        }\n      },\n      \"feedGranted\": true,\n      \"grantedAt\": 1767225550123,\n      \"feeds\": {\n        \"blog\": {\n          \"topic\": \"2d8b6efca0db6410add40ecd6bda25b3ee2d614a8e6c12933931d91cca63c3e4\",\n          \"owner\": \"0x6Fac4D18c912343BF86fa7049364Dd4E424Ab9C0\",\n          \"manifestReference\": \"cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd\",\n          \"identityId\": \"bee-wallet\",\n          \"createdAt\": 1767225560123,\n          \"lastUpdated\": null,\n          \"lastReference\": null\n        }\n      }\n    }\n  }\n}",
+        "history": [
+          {
+            "id": 1,
+            "type": "feed-entry",
+            "name": "blog",
+            "status": "failed",
+            "reference": null,
+            "bzzUrl": null,
+            "tagUid": null,
+            "batchIdUsed": null,
+            "origin": "https://app.example",
+            "bytesSize": 1,
+            "timestamp": "2026-01-01T00:00:00.123Z",
+            "completedAt": "2026-01-01T00:00:00.123Z",
+            "errorMessage": "Request aborted"
+          }
+        ]
+      }
+    },
+    {
       "id": "write-feed-explicit-index-4097",
       "deviation": "feed-wrap-root",
       "origin": "https://app.example",
@@ -76984,6 +77133,63 @@
         },
         "status": 201
       }
+    },
+    {
+      "id": "bytes-wrapped-4097",
+      "kind": "bytes",
+      "from": "feeds/update-wrapped-4097",
+      "data": {
+        "seed": "swarm-update/4097",
+        "length": 4097
+      },
+      "bytes_upload": {
+        "length": 4097,
+        "sha256": "14ff8de3e87252f5c52c973652547941827ff5a79a67776d482a379200a9d2bb"
+      },
+      "root": {
+        "address": "8c8e383ed8ff2ba0ff1acf50b50d47244e0b04b7067aa6a19a7294abc9ccca32",
+        "span": "4097",
+        "payload": "1a733d39430401e31c422882fb7e1658779402c29bc55f3e75e055a310c38c7e265c39d4f5b70b02137cff628fa5a67ea59141664bbb3fa782f9586994e27b44"
+      },
+      "soc_body": "01100000000000001a733d39430401e31c422882fb7e1658779402c29bc55f3e75e055a310c38c7e265c39d4f5b70b02137cff628fa5a67ea59141664bbb3fa782f9586994e27b44"
+    },
+    {
+      "id": "bytes-wrapped-524289",
+      "kind": "bytes",
+      "from": "feeds/update-wrapped-524289",
+      "data": {
+        "seed": "swarm-update/524289",
+        "length": 524289
+      },
+      "bytes_upload": {
+        "length": 524289,
+        "sha256": "0ed506df8050932b7cb63b9ca48e5b7b1dbe84fc8a83672f4f989ed04710ad3d"
+      },
+      "root": {
+        "address": "82acfafb850c99eadcc8512cbdad236e070e344f6849a43508a7f7eaa6c36aad",
+        "span": "524289",
+        "payload": "5e783cb34a32704e2f4aca32d35755c2969b2b362daf116ddc57201ba4ed863c014a20f3b7972f5bfdbe2342d0a95dba16ebfef679703f8d92f8fa64a3d593f5"
+      },
+      "soc_body": "01000800000000005e783cb34a32704e2f4aca32d35755c2969b2b362daf116ddc57201ba4ed863c014a20f3b7972f5bfdbe2342d0a95dba16ebfef679703f8d92f8fa64a3d593f5"
+    },
+    {
+      "id": "bytes-wrapped-10mib",
+      "kind": "bytes",
+      "from": "feeds/update-wrapped-10mib",
+      "data": {
+        "seed": "write-feed/10mib",
+        "length": 10485760
+      },
+      "bytes_upload": {
+        "length": 10485760,
+        "sha256": "33ee65f089788e50ceda6204ae46d0b3c7ecd0e0d15efd847b208f017470ab87"
+      },
+      "root": {
+        "address": "f9d8c44bdb41e4f27ac41487e25bee04cc4095d60bb0d459909ba77e3b4aa8c4",
+        "span": "10485760",
+        "payload": "8dfb23888209162d5e770f4b3d0fdd502d5f26285f9f14f844ff31c3a841e8c579a930d74903479f7575cd08f073937cbe7a3f2e2bbddbe9dfa2ebc0fa65d911ca18de8c74a4d8e6c5bedfb09cda03a38c75b6cf1ec85481acdc896092afca3d929e84047738e376bc28e7055ebf448d2129ff4d70b9eaf958b507295dd7f35ee2b0eac54fdc6761a77d64b2ff4775106fac440c9dbb3ac8f378474a532644afb33ddf4a0c8c4fa4eac5c7d325aa9fae49ee9a8b43a0eecd10c4296d6210266d31fbc2bc5b3331940a962ae271561af0b42211055a7752e98126440f564b9a336fc814805a171e207da69ca910c267971b931831e5260dc12260504ca311e4235cd9493602056adccba03b7af6de4c0920b397b21c8e69c162d09894f28731db11ebcfb951700159c6ad3ea9c59d6c3bba4bdd4eff27bc72f4c27b3efa032add4d4ca72b83a0216ac06c038464e9490ce170f20a9be255f1ba097bd93e02d6ba7baa4a350f55bbdbddc2681f20d1d928b4477f81025ef3e60306cc94e39dd1f38b489adcf4c040a895ad084009b1caea7d73a460e6055e4d461e9471e0c8d03dce889019642e136314b5f3f59e919c43de694912d73f687be756b12ba58b79b7849c966b775573e0c88c0dd63d4048f0725e46dcbb91f88f44e9048f2ac3b2442546d0afebaca9907f2cb88e05a41ba71866fc23ed3d1233aaf591598aaf812dedd51cfa367b605cb84559fd28392b54c604f93ca46f699fae455a740525c8f3883bf4aff735541e2fd32acef263c5e8c6690902e803797f7dc0d6a9adb9c186f72de89dde4c8c604439a650b66465b718a1dc5c97bf83d4d2f65bf8c719c874d5d55832dfd124e321a26a0919d018bd63ba3960a0dcb43be04a589aa56cd851"
+      },
+      "soc_body": "0000a000000000008dfb23888209162d5e770f4b3d0fdd502d5f26285f9f14f844ff31c3a841e8c579a930d74903479f7575cd08f073937cbe7a3f2e2bbddbe9dfa2ebc0fa65d911ca18de8c74a4d8e6c5bedfb09cda03a38c75b6cf1ec85481acdc896092afca3d929e84047738e376bc28e7055ebf448d2129ff4d70b9eaf958b507295dd7f35ee2b0eac54fdc6761a77d64b2ff4775106fac440c9dbb3ac8f378474a532644afb33ddf4a0c8c4fa4eac5c7d325aa9fae49ee9a8b43a0eecd10c4296d6210266d31fbc2bc5b3331940a962ae271561af0b42211055a7752e98126440f564b9a336fc814805a171e207da69ca910c267971b931831e5260dc12260504ca311e4235cd9493602056adccba03b7af6de4c0920b397b21c8e69c162d09894f28731db11ebcfb951700159c6ad3ea9c59d6c3bba4bdd4eff27bc72f4c27b3efa032add4d4ca72b83a0216ac06c038464e9490ce170f20a9be255f1ba097bd93e02d6ba7baa4a350f55bbdbddc2681f20d1d928b4477f81025ef3e60306cc94e39dd1f38b489adcf4c040a895ad084009b1caea7d73a460e6055e4d461e9471e0c8d03dce889019642e136314b5f3f59e919c43de694912d73f687be756b12ba58b79b7849c966b775573e0c88c0dd63d4048f0725e46dcbb91f88f44e9048f2ac3b2442546d0afebaca9907f2cb88e05a41ba71866fc23ed3d1233aaf591598aaf812dedd51cfa367b605cb84559fd28392b54c604f93ca46f699fae455a740525c8f3883bf4aff735541e2fd32acef263c5e8c6690902e803797f7dc0d6a9adb9c186f72de89dde4c8c604439a650b66465b718a1dc5c97bf83d4d2f65bf8c719c874d5d55832dfd124e321a26a0919d018bd63ba3960a0dcb43be04a589aa56cd851"
     }
   ],
   "trees": [
@@ -80748,6 +80954,16 @@
         "data": {
           "reason": "payload_too_large"
         }
+      }
+    },
+    {
+      "id": "entry-exists-timeout",
+      "kind": "entry_exists",
+      "method_case": "write-feed-explicit-index-timeout",
+      "chunk_status": null,
+      "error": {
+        "code": -32603,
+        "message": "Request aborted"
       }
     },
     {

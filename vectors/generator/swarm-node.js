@@ -189,6 +189,13 @@ class FakeNode {
   }
 
   send(res, reply, request) {
+    // The page gives up (its timer, its document gone) as this request
+    // arrives: its signal aborts, and the reply, if any, comes after.
+    if (reply.abortPage) {
+      this.abortPage?.();
+      const { abortPage, ...rest } = reply;
+      reply = rest;
+    }
     if (reply.delayMs) {
       const { delayMs, ...rest } = reply;
       setTimeout(() => this.send(res, rest, request), delayMs).unref?.();

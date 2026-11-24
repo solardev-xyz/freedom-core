@@ -246,6 +246,18 @@ async function buildSwarm(checkout, meta, keysJson, dwebVerify) {
     errors: await timed('errors', () => sections.buildErrors(env, methods)),
     stores: await timed('stores', () => sections.buildStores(env)),
   };
+  // The /bytes path of a large feed entry, as `bodies` writes it: the upload's
+  // body (the data), ChunkSplitter's root of it, and the SOC that wraps it.
+  for (const update of swarm.feeds) {
+    if (update.kind !== 'update' || !update.bytes_upload) continue;
+    const tree = env.trees.get(update.bytes_upload.sha256);
+    swarm.bodies.push({
+      id: `bytes-${update.id.replace(/^update-/, '')}`, kind: 'bytes', from: `feeds/${update.id}`, data: update.data,
+      bytes_upload: update.bytes_upload,
+      root: { address: tree.root.address, span: tree.root.span.toString(), payload: tree.root.payload.toString('hex') },
+      soc_body: update.soc.body,
+    });
+  }
   swarm.deviations = deviationsOf(swarm);
   const ordered = { meta: swarm.meta, formats: SWARM_FORMATS, deviations: swarm.deviations };
   for (const key of ['methods', 'bodies', 'trees', 'stamps', 'feeds', 'gsoc', 'errors', 'stores']) ordered[key] = swarm[key];
@@ -307,10 +319,11 @@ const SWARM_FORMATS = {
     + 'GET /feeds/<o>/<t>\'s reply; probes: the feeds whose updates 0 to head exist (a hit answers 105 zero bytes); probeFail: one index\'s status; '
     + 'rules: replies tried first, { match: { method, path | prefix }, reply: { status, statusText, headers, json | body_utf8 | body_hex | '
     + 'body_base64 | body_data, chunked + pieces_data, cutAfterPieces, declare (a Content-Length longer than the body, then the connection cut), '
-    + 'hangUp, delayMs } }. Unmatched, the node answers from what it stores: 404 { code, message } for what it lacks, /bzz with SHA-256 of the '
+    + 'hangUp, delayMs, abortPage (the page gives up as this request arrives: meta.page.signal aborts) } }. Unmatched, the node answers from what it stores: 404 { code, message } for what it lacks, /bzz with SHA-256 of the '
     + 'body as its reference.',
   bodies: 'write-side.json\'s shapes: tar (page-upload.js\'s, for window.swarm, each equal to bee-js\'s collection upload of the same entries; '
-    + 'tar-paths cases are bee-js\'s publishCollection, as freedom://publish uses it), file (publishData\'s request; the body is the data), soc '
+    + 'tar-paths cases are bee-js\'s publishCollection, as freedom://publish uses it), file (publishData\'s request; the body is the data), '
+    + 'bytes (a large feed entry\'s POST /bytes body, ChunkSplitter\'s root of it and the SOC upload body that wraps that root), soc '
     + '(core-sdk), chunk (POST /chunks: span ‖ payload and the address), pss (the request; the body is the message).',
   trees: 'core-sdk\'s ChunkSplitter: root, span, root payload, and every chunk\'s count and SHA-256 over address ‖ u64_le(span) ‖ payload by address.',
   stamps: 'mapped: bee-js\'s stamp.getAll over one raw batch (the fields Freedom reads, or the error), and swarm-service.js\'s classification; '

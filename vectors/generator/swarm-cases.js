@@ -396,9 +396,10 @@ function methodCases(env) {
   rc('node-stopped', () => ({ reference: helloAddress }), { nodeStopped: true });
   // The page gives up 50 ms in; the node answers at 300 ms. A read takes no
   // signal at the reference, so it answers anyway.
-  rc('page-gives-up', () => null, { node: { data: stored, rules: [
-    { match: { prefix: '/chunks/' }, reply: { delayMs: 300, status: 200, body_hex: Buffer.concat([Buffer.from('0b00000000000000', 'hex'), Buffer.from('hello swarm')]).toString('hex') } },
-  ] }, steps: [{ method: 'swarm_readChunk', params: () => ({ reference: helloAddress }), abortAfterMs: 50 }],
+  rc('page-gives-up', () => ({ reference: helloAddress }), { node: { data: stored, rules: [
+    { match: { prefix: '/chunks/' }, reply: { abortPage: true, delayMs: 300, status: 200,
+      body_hex: Buffer.concat([Buffer.from('0b00000000000000', 'hex'), Buffer.from('hello swarm')]).toString('hex') } },
+  ] },
   deviation: { id: 'deadlines', core: 'cancelled at the page\'s timer: the core answers cancelled and nothing more is sent' } });
   // The request budget: 120 a minute for a site with no grant.
   add({ id: 'read-chunk-request-budget', grants: {}, node: { data: stored }, steps: [
@@ -725,6 +726,11 @@ function methodCases(env) {
     { match: { prefix: '/chunks/' }, reply: { hangUp: true } },
   ] }, deviation: { id: 'transport-error-text', core: 'one text for the failure class (error)' } });
   wf('explicit-index-empty', () => ({ name: 'blog', data: '', index: 3 }), { node: { stamps: STAMPS.usable }, deviation: undefined });
+  // The page gives up while the node holds the existence check: the write's
+  // signal aborts it.
+  wf('explicit-index-timeout', () => ({ name: 'blog', data: 'x', index: 3 }), { node: { stamps: STAMPS.usable, rules: [
+    { match: { prefix: '/chunks/' }, reply: { abortPage: true, delayMs: 300, status: 404, json: { code: 404, message: 'Not Found' } } },
+  ] }, deviation: undefined });
   wf('explicit-index-4097', () => ({ name: 'blog', data: bytes('write-feed/4097', 4097), index: 9 }), { node: { stamps: STAMPS.usable },
     deviation: { id: 'feed-wrap-root', core: 'the SOC wraps the core\'s own root, with no GET /chunks' } });
   wf('app-scoped', () => ({ name: 'blog', data: 'x' }), { feeds: storeApp(blogApp), node: { stamps: STAMPS.usable,

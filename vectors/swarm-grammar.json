@@ -1041,9 +1041,9 @@
       "form soc_up": 16
     },
     "writeFeedEntry": {
-      "form stamps": 27,
+      "form stamps": 28,
       "deviation index-probe": 17,
-      "form chunk": 37,
+      "form chunk": 38,
       "form soc_up": 16,
       "form bytes_up": 8,
       "deviation feed-wrap-root": 7
@@ -24085,6 +24085,81 @@
             "body": {
               "base64": "eyJjb2RlIjo0MDQsIm1lc3NhZ2UiOiJOb3QgRm91bmQifQ=="
             }
+          }
+        }
+      ]
+    },
+    {
+      "id": "write-feed-explicit-index-timeout",
+      "row": "writeFeedEntry",
+      "from": "methods/write-feed-explicit-index-timeout",
+      "key": "https://app.example",
+      "params": {
+        "object": [
+          [
+            "name",
+            {
+              "string": "blog"
+            }
+          ],
+          [
+            "data",
+            {
+              "string_bytes": 1,
+              "base64": "eA=="
+            }
+          ],
+          [
+            "index",
+            {
+              "number": "3"
+            }
+          ]
+        ]
+      },
+      "ready": {
+        "check": "publish",
+        "ok": true
+      },
+      "calls": [
+        {
+          "form": "stamps",
+          "method": "GET",
+          "path": "/stamps",
+          "headers": [
+            [
+              "accept",
+              "application/json, text/plain, */*"
+            ],
+            [
+              "accept-encoding",
+              "identity"
+            ]
+          ],
+          "reply": {
+            "status": 200
+          }
+        },
+        {
+          "form": "chunk",
+          "method": "GET",
+          "path": "/chunks/5f88b46c7a1fadd0255bbcdaaff962390c75d14406161940c13650c7329062f1",
+          "headers": [
+            [
+              "accept",
+              "application/json, text/plain, */*"
+            ],
+            [
+              "accept-encoding",
+              "identity"
+            ]
+          ],
+          "feed": {
+            "owner": "6fac4d18c912343bf86fa7049364dd4e424ab9c0",
+            "index": 3
+          },
+          "reply": {
+            "status": null
           }
         }
       ]

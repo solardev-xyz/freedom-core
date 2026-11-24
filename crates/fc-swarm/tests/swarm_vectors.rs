@@ -356,6 +356,30 @@ fn soc_chunk_file_and_pss_bodies() {
             .map_or_else(Vec::new, |b| b64(b["base64"].as_str().unwrap()));
         assert_eq!(body, message, "{id}");
     }
+    // A large feed entry's /bytes path: the upload's body is the data, the
+    // core's own root of it is ChunkSplitter's, and the SOC wraps that root.
+    let wrapped = section(&all, "bodies", "bytes");
+    assert!(wrapped.len() >= 3);
+    for case in wrapped {
+        let id = case["id"].as_str().unwrap();
+        let input = data(&case["data"]);
+        assert_eq!(sha(&input), case["bytes_upload"]["sha256"], "{id}");
+        let (_, root) = stream(&input, 65_536);
+        let want = &case["root"];
+        assert_eq!(hex::encode(root.address()), want["address"], "{id}");
+        assert_eq!(
+            root.span().to_string(),
+            want["span"].as_str().unwrap(),
+            "{id}"
+        );
+        assert_eq!(hex::encode(root.payload()), want["payload"], "{id}");
+        assert_eq!(
+            Update::wrap(&root).unwrap().payload(),
+            root.payload(),
+            "{id}"
+        );
+        assert_eq!(hex::encode(root.wire()), case["soc_body"], "{id}");
+    }
 }
 
 #[test]

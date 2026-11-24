@@ -205,10 +205,10 @@ function counterCrypto() {
 }
 
 /** The page's `meta.page`, as main's dispatcher builds it (page/page-swarm.js). */
-function pageMeta(approval, events, abortAfterMs) {
+function pageMeta(approval, events, node) {
   const controller = new AbortController();
-  // The page gives up (its timer, its document gone) this long after the call.
-  if (abortAfterMs !== undefined) setTimeout(() => controller.abort(), abortAfterMs).unref?.();
+  // A reply marked abortPage makes the page give up as its request arrives.
+  if (node) node.abortPage = () => controller.abort();
   return {
     page: {
       document: 'document-1',
@@ -322,14 +322,13 @@ async function runMethodCase(env, spec) {
       const before = node.requests.length;
       const eventsBefore = events.length;
       if (step.clock !== undefined) clock.now = step.clock;
-      const meta = step.page === false ? undefined : pageMeta(step.approval ?? spec.approval ?? 'user', events, step.abortAfterMs);
+      const meta = step.page === false ? undefined : pageMeta(step.approval ?? spec.approval ?? 'user', events, node);
       const value = await ref.provider.executeSwarmMethod(step.method, params, step.origin ?? spec.origin ?? env.ORIGIN, meta);
       const entry = typeof step.method === 'string' ? { method: step.method } : { method_typed: encode(step.method) };
       if (step.origin && step.origin !== (spec.origin ?? env.ORIGIN)) entry.origin = step.origin;
       if (step.approval) entry.approval = step.approval;
       if (step.page === false) entry.page = false;
       if (step.clock !== undefined) entry.clock = step.clock;
-      if (step.abortAfterMs !== undefined) entry.abort_after_ms = step.abortAfterMs;
       entry.params = typed;
       if (parts.length) entry.parts = parts;
       Object.assign(entry, outcomeOf(value, node));
