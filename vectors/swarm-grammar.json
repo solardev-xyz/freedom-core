@@ -18,7 +18,8 @@
     "deviation_requests": "the reference's requests the core drops, by deviation id; vectors/swarm.json marks each such request `deviation`.",
     "checked": "the requests of every vectors/swarm.json methods case, by row: each matched its row as `form <name>`, was its ready probe, or was one of a named deviation's requests.",
     "scenarios": "honest and forbidden: { id, row, from, key (the page key), params (swarm.json's typed form, or main's own params), ready, calls }. A call: form, method, path, query, headers (as main sends them, main_headers included), body ({ bytes, base64 } or { bytes, sha256 }), max_bytes, feed { owner, index }, tree { length, depth }, and reply (status, headers, body { base64 } or body_ref naming the chunk store it comes from, such as dweb-verify.json swarm.chunks). Every call of an honest scenario is admitted in order; a forbidden scenario's calls before its last are admitted and its last is refused before any dial with `rule`.",
-    "gaps": "the design's honest and forbidden tree cases at depths 6 to 8 (and a zero-length child) can't occur under readData: with n at most B = 5 MiB, 0009's geometry puts every leaf at depth 2 or less, so they are left out here (see the PR's questions)."
+    "scenarios_checked": "the readData scenarios played against the design's admission rules (Values main derives: the root at params.reference, one ranged bytes, and each later chunk an unfetched slot of an occurrence, address, logical length and depth, that an intermediate main returned names, by 0009's geometry): honest ones admitted whole, forbidden ones refused at their last call by their rule. A tree whose chunks carry a redundancy level is skipped (its parities aren't modelled here): `skipped` names those scenarios.",
+    "deep_trees": "readData-one-chunk-at-depths-6-and-7, readData-leaf-at-depth-8-fetched-again, readData-over-full-intermediate and their forbidden alternatives: chains of lone-reference wrappers (one reference, the child's span, as Ant writes one), each giving its child its whole length one level deeper, and a root with more references than its length needs, every chunk core-sdk's makeContentAddressedChunk. No honest splitter writes them inside readData's 5 MiB; a node can serve them."
   },
   "values": {
     "<a>": "64 lowercase hex",
@@ -675,7 +676,7 @@
           ],
           "count": [
             0,
-            82
+            81
           ],
           "when": "after feed_head's 404 or 500",
           "binds": "with feed: each at the SOC address of the index the head probe asks next"
@@ -733,7 +734,7 @@
           ],
           "count": [
             0,
-            82
+            81
           ],
           "when": "without index, after feed_head's 404 or 500",
           "binds": "with feed: the probe's next index"
@@ -939,7 +940,7 @@
           ],
           "count": [
             0,
-            82
+            81
           ],
           "when": "after feed_head's 404 or 500",
           "binds": "the probe's next index"
@@ -992,29 +993,28 @@
     "stamps-one-read": "the second GET /stamps of a write (selectBestBatch's look for a propagating batch)",
     "index-probe": "the whole GET /feeds/<o>/<t> download of an index lookup (the core asks feed_head, swarm-only-root-chunk: true)",
     "feed-wrap-root": "GET /chunks/<root> after a feed entry's POST /bytes (the core wraps its own root)",
-    "read-data-verified": "readData's whole, unranged GET /bytes/<reference> (the core walks the tree and streams the leaves ranged)",
-    "pss-recipient": "sendPss's 128-hex recipient (F-9); not made at this reference, which has #1062: it sends the compressed key"
+    "read-data-verified": "readData's whole, unranged GET /bytes/<reference> (the core walks the tree and streams the leaves ranged)"
   },
   "checked": {
     "publishData": {
-      "form stamps": 33,
-      "form bzz_file": 27,
+      "form stamps": 41,
+      "form bzz_file": 32,
       "deviation stamps-one-read": 2
     },
     "publishFiles": {
-      "form stamps": 26,
-      "form bzz_tar": 24
+      "form stamps": 27,
+      "form bzz_tar": 25
     },
     "getUploadStatus": {
       "form tag": 6
     },
     "publishChunk": {
-      "form stamps": 10,
-      "form chunk_up": 9
+      "form stamps": 11,
+      "form chunk_up": 10
     },
     "readChunk": {
-      "ready reachable": 14,
-      "form chunk": 13
+      "ready reachable": 16,
+      "form chunk": 15
     },
     "readData": {
       "ready reachable": 24,
@@ -1022,29 +1022,29 @@
       "deviation read-data-verified": 14
     },
     "writeSingleOwnerChunk": {
-      "form stamps": 16,
-      "form soc_up": 15
+      "form stamps": 26,
+      "form soc_up": 23
     },
     "readSingleOwnerChunk": {
       "ready reachable": 12,
       "form chunk": 12
     },
     "createFeed": {
-      "form stamps": 10,
-      "form feed_manifest": 8,
+      "form stamps": 16,
+      "form feed_manifest": 14,
       "deviation stamps-one-read": 1
     },
     "updateFeed": {
-      "form stamps": 21,
-      "deviation index-probe": 20,
-      "form chunk": 214,
-      "form soc_up": 16
+      "form stamps": 22,
+      "deviation index-probe": 21,
+      "form chunk": 215,
+      "form soc_up": 17
     },
     "writeFeedEntry": {
-      "form stamps": 28,
-      "deviation index-probe": 17,
-      "form chunk": 38,
-      "form soc_up": 16,
+      "form stamps": 35,
+      "deviation index-probe": 22,
+      "form chunk": 45,
+      "form soc_up": 21,
       "form bytes_up": 8,
       "deviation feed-wrap-root": 7
     },
@@ -1058,19 +1058,41 @@
       "form bytes": 7
     },
     "getMessagingIdentity": {
-      "ready reachable": 5,
-      "form addresses": 4
+      "ready reachable": 6,
+      "form addresses": 5
     },
     "sendPss": {
-      "form stamps": 10,
-      "form pss_send": 8
+      "form stamps": 14,
+      "form pss_send": 12
     },
     "sendGsoc": {
-      "form stamps": 24,
-      "form soc_up": 23
+      "form stamps": 25,
+      "form soc_up": 24
     },
     "subscribe": {
-      "ready subscribe": 7
+      "ready subscribe": 11
+    }
+  },
+  "scenarios_checked": {
+    "readData": {
+      "honest": 32,
+      "forbidden": 16,
+      "skipped": [
+        "read-data-redundancy-level-span",
+        "readData-walk-file-4097-rs1",
+        "readData-walk-file-4097-rs2",
+        "readData-walk-file-4097-rs3",
+        "readData-walk-file-4097-rs4",
+        "readData-walk-file-524288-rs1",
+        "readData-walk-file-524288-rs2",
+        "readData-walk-file-524288-rs3",
+        "readData-walk-file-524288-rs4",
+        "readData-walk-file-524289-rs1",
+        "readData-walk-file-524289-rs2",
+        "readData-walk-file-524289-rs3",
+        "readData-walk-file-524289-rs4",
+        "readData-parity-address"
+      ]
     }
   },
   "honest": [
@@ -3856,6 +3878,602 @@
           "body": {
             "bytes": 1,
             "base64": "eA=="
+          },
+          "reply": {
+            "status": 201
+          }
+        }
+      ]
+    },
+    {
+      "id": "publish-data-rule",
+      "row": "publishData",
+      "from": "methods/publish-data-rule",
+      "key": "https://app.example",
+      "params": {
+        "object": [
+          [
+            "data",
+            {
+              "string_bytes": 1,
+              "base64": "eA=="
+            }
+          ],
+          [
+            "contentType",
+            {
+              "string": "text/plain"
+            }
+          ]
+        ]
+      },
+      "ready": {
+        "check": "publish",
+        "ok": true
+      },
+      "calls": [
+        {
+          "form": "stamps",
+          "method": "GET",
+          "path": "/stamps",
+          "headers": [
+            [
+              "accept",
+              "application/json, text/plain, */*"
+            ],
+            [
+              "accept-encoding",
+              "identity"
+            ]
+          ],
+          "reply": {
+            "status": 200
+          }
+        },
+        {
+          "form": "bzz_file",
+          "method": "POST",
+          "path": "/bzz",
+          "query": [
+            [
+              "name",
+              "data"
+            ]
+          ],
+          "headers": [
+            [
+              "accept",
+              "application/json, text/plain, */*"
+            ],
+            [
+              "accept-encoding",
+              "identity"
+            ],
+            [
+              "content-type",
+              "text/plain"
+            ],
+            [
+              "swarm-postage-batch-id",
+              "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
+            ],
+            [
+              "swarm-pin",
+              "true"
+            ],
+            [
+              "swarm-deferred-upload",
+              "false"
+            ]
+          ],
+          "body": {
+            "bytes": 1,
+            "base64": "eA=="
+          },
+          "reply": {
+            "status": 201
+          }
+        }
+      ]
+    },
+    {
+      "id": "publish-data-rule-in-custody",
+      "row": "publishData",
+      "from": "methods/publish-data-rule-in-custody",
+      "key": "https://app.example",
+      "params": {
+        "object": [
+          [
+            "data",
+            {
+              "string_bytes": 1,
+              "base64": "eA=="
+            }
+          ],
+          [
+            "contentType",
+            {
+              "string": "text/plain"
+            }
+          ]
+        ]
+      },
+      "ready": {
+        "check": "publish",
+        "ok": true
+      },
+      "calls": [
+        {
+          "form": "stamps",
+          "method": "GET",
+          "path": "/stamps",
+          "headers": [
+            [
+              "accept",
+              "application/json, text/plain, */*"
+            ],
+            [
+              "accept-encoding",
+              "identity"
+            ]
+          ],
+          "reply": {
+            "status": 200
+          }
+        },
+        {
+          "form": "bzz_file",
+          "method": "POST",
+          "path": "/bzz",
+          "query": [
+            [
+              "name",
+              "data"
+            ]
+          ],
+          "headers": [
+            [
+              "accept",
+              "application/json, text/plain, */*"
+            ],
+            [
+              "accept-encoding",
+              "identity"
+            ],
+            [
+              "content-type",
+              "text/plain"
+            ],
+            [
+              "swarm-postage-batch-id",
+              "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
+            ],
+            [
+              "swarm-pin",
+              "true"
+            ],
+            [
+              "swarm-deferred-upload",
+              "false"
+            ]
+          ],
+          "body": {
+            "bytes": 1,
+            "base64": "eA=="
+          },
+          "reply": {
+            "status": 201
+          }
+        }
+      ]
+    },
+    {
+      "id": "publish-data-rule-custody-before-upload",
+      "row": "publishData",
+      "from": "methods/publish-data-rule-custody-before-upload",
+      "key": "https://app.example",
+      "params": {
+        "object": [
+          [
+            "data",
+            {
+              "string_bytes": 1,
+              "base64": "eA=="
+            }
+          ],
+          [
+            "contentType",
+            {
+              "string": "text/plain"
+            }
+          ]
+        ]
+      },
+      "ready": {
+        "check": "publish",
+        "ok": true
+      },
+      "calls": [
+        {
+          "form": "stamps",
+          "method": "GET",
+          "path": "/stamps",
+          "headers": [
+            [
+              "accept",
+              "application/json, text/plain, */*"
+            ],
+            [
+              "accept-encoding",
+              "identity"
+            ]
+          ],
+          "reply": {
+            "status": 200
+          }
+        }
+      ]
+    },
+    {
+      "id": "publish-data-rule-off-before-upload",
+      "row": "publishData",
+      "from": "methods/publish-data-rule-off-before-upload",
+      "key": "https://app.example",
+      "params": {
+        "object": [
+          [
+            "data",
+            {
+              "string_bytes": 1,
+              "base64": "eA=="
+            }
+          ],
+          [
+            "contentType",
+            {
+              "string": "text/plain"
+            }
+          ]
+        ]
+      },
+      "ready": {
+        "check": "publish",
+        "ok": true
+      },
+      "calls": [
+        {
+          "form": "stamps",
+          "method": "GET",
+          "path": "/stamps",
+          "headers": [
+            [
+              "accept",
+              "application/json, text/plain, */*"
+            ],
+            [
+              "accept-encoding",
+              "identity"
+            ]
+          ],
+          "reply": {
+            "status": 200
+          }
+        }
+      ]
+    },
+    {
+      "id": "publish-data-prompt-custody-before-upload",
+      "row": "publishData",
+      "from": "methods/publish-data-prompt-custody-before-upload",
+      "key": "https://app.example",
+      "params": {
+        "object": [
+          [
+            "data",
+            {
+              "string_bytes": 1,
+              "base64": "eA=="
+            }
+          ],
+          [
+            "contentType",
+            {
+              "string": "text/plain"
+            }
+          ]
+        ]
+      },
+      "ready": {
+        "check": "publish",
+        "ok": true
+      },
+      "calls": [
+        {
+          "form": "stamps",
+          "method": "GET",
+          "path": "/stamps",
+          "headers": [
+            [
+              "accept",
+              "application/json, text/plain, */*"
+            ],
+            [
+              "accept-encoding",
+              "identity"
+            ]
+          ],
+          "reply": {
+            "status": 200
+          }
+        },
+        {
+          "form": "bzz_file",
+          "method": "POST",
+          "path": "/bzz",
+          "query": [
+            [
+              "name",
+              "data"
+            ]
+          ],
+          "headers": [
+            [
+              "accept",
+              "application/json, text/plain, */*"
+            ],
+            [
+              "accept-encoding",
+              "identity"
+            ],
+            [
+              "content-type",
+              "text/plain"
+            ],
+            [
+              "swarm-postage-batch-id",
+              "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
+            ],
+            [
+              "swarm-pin",
+              "true"
+            ],
+            [
+              "swarm-deferred-upload",
+              "false"
+            ]
+          ],
+          "body": {
+            "bytes": 1,
+            "base64": "eA=="
+          },
+          "reply": {
+            "status": 201
+          }
+        }
+      ]
+    },
+    {
+      "id": "publish-data-name-moved-before-upload",
+      "row": "publishData",
+      "from": "methods/publish-data-name-moved-before-upload",
+      "key": "myapp.eth",
+      "params": {
+        "object": [
+          [
+            "data",
+            {
+              "string_bytes": 1,
+              "base64": "eA=="
+            }
+          ],
+          [
+            "contentType",
+            {
+              "string": "text/plain"
+            }
+          ]
+        ]
+      },
+      "ready": {
+        "check": "publish",
+        "ok": true
+      },
+      "calls": [
+        {
+          "form": "stamps",
+          "method": "GET",
+          "path": "/stamps",
+          "headers": [
+            [
+              "accept",
+              "application/json, text/plain, */*"
+            ],
+            [
+              "accept-encoding",
+              "identity"
+            ]
+          ],
+          "reply": {
+            "status": 200
+          }
+        }
+      ]
+    },
+    {
+      "id": "publish-data-always-allow/0",
+      "row": "publishData",
+      "from": "methods/publish-data-always-allow",
+      "key": "https://app.example",
+      "params": {
+        "object": [
+          [
+            "data",
+            {
+              "string_bytes": 1,
+              "base64": "eA=="
+            }
+          ],
+          [
+            "contentType",
+            {
+              "string": "text/plain"
+            }
+          ]
+        ]
+      },
+      "ready": {
+        "check": "publish",
+        "ok": true
+      },
+      "calls": [
+        {
+          "form": "stamps",
+          "method": "GET",
+          "path": "/stamps",
+          "headers": [
+            [
+              "accept",
+              "application/json, text/plain, */*"
+            ],
+            [
+              "accept-encoding",
+              "identity"
+            ]
+          ],
+          "reply": {
+            "status": 200
+          }
+        },
+        {
+          "form": "bzz_file",
+          "method": "POST",
+          "path": "/bzz",
+          "query": [
+            [
+              "name",
+              "data"
+            ]
+          ],
+          "headers": [
+            [
+              "accept",
+              "application/json, text/plain, */*"
+            ],
+            [
+              "accept-encoding",
+              "identity"
+            ],
+            [
+              "content-type",
+              "text/plain"
+            ],
+            [
+              "swarm-postage-batch-id",
+              "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
+            ],
+            [
+              "swarm-pin",
+              "true"
+            ],
+            [
+              "swarm-deferred-upload",
+              "false"
+            ]
+          ],
+          "body": {
+            "bytes": 1,
+            "base64": "eA=="
+          },
+          "reply": {
+            "status": 201
+          }
+        }
+      ]
+    },
+    {
+      "id": "publish-data-always-allow/1",
+      "row": "publishData",
+      "from": "methods/publish-data-always-allow",
+      "key": "https://app.example",
+      "params": {
+        "object": [
+          [
+            "data",
+            {
+              "string_bytes": 1,
+              "base64": "eQ=="
+            }
+          ],
+          [
+            "contentType",
+            {
+              "string": "text/plain"
+            }
+          ]
+        ]
+      },
+      "ready": {
+        "check": "publish",
+        "ok": true
+      },
+      "calls": [
+        {
+          "form": "stamps",
+          "method": "GET",
+          "path": "/stamps",
+          "headers": [
+            [
+              "accept",
+              "application/json, text/plain, */*"
+            ],
+            [
+              "accept-encoding",
+              "identity"
+            ]
+          ],
+          "reply": {
+            "status": 200
+          }
+        },
+        {
+          "form": "bzz_file",
+          "method": "POST",
+          "path": "/bzz",
+          "query": [
+            [
+              "name",
+              "data"
+            ]
+          ],
+          "headers": [
+            [
+              "accept",
+              "application/json, text/plain, */*"
+            ],
+            [
+              "accept-encoding",
+              "identity"
+            ],
+            [
+              "content-type",
+              "text/plain"
+            ],
+            [
+              "swarm-postage-batch-id",
+              "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
+            ],
+            [
+              "swarm-pin",
+              "true"
+            ],
+            [
+              "swarm-deferred-upload",
+              "false"
+            ]
+          ],
+          "body": {
+            "bytes": 1,
+            "base64": "eQ=="
           },
           "reply": {
             "status": 201
@@ -7775,6 +8393,107 @@
       ]
     },
     {
+      "id": "publish-files-rule",
+      "row": "publishFiles",
+      "from": "methods/publish-files-rule",
+      "key": "https://app.example",
+      "params": {
+        "object": [
+          [
+            "files",
+            {
+              "array": [
+                {
+                  "object": [
+                    [
+                      "path",
+                      {
+                        "string": "a.txt"
+                      }
+                    ],
+                    [
+                      "bytes",
+                      {
+                        "bytes": 1,
+                        "kind": "Uint8Array",
+                        "base64": "YQ=="
+                      }
+                    ]
+                  ]
+                }
+              ]
+            }
+          ]
+        ]
+      },
+      "ready": {
+        "check": "publish",
+        "ok": true
+      },
+      "calls": [
+        {
+          "form": "stamps",
+          "method": "GET",
+          "path": "/stamps",
+          "headers": [
+            [
+              "accept",
+              "application/json, text/plain, */*"
+            ],
+            [
+              "accept-encoding",
+              "identity"
+            ]
+          ],
+          "reply": {
+            "status": 200
+          }
+        },
+        {
+          "form": "bzz_tar",
+          "method": "POST",
+          "path": "/bzz",
+          "headers": [
+            [
+              "accept",
+              "application/json, text/plain, */*"
+            ],
+            [
+              "accept-encoding",
+              "identity"
+            ],
+            [
+              "content-type",
+              "application/x-tar"
+            ],
+            [
+              "swarm-collection",
+              "true"
+            ],
+            [
+              "swarm-postage-batch-id",
+              "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
+            ],
+            [
+              "swarm-pin",
+              "true"
+            ],
+            [
+              "swarm-deferred-upload",
+              "true"
+            ]
+          ],
+          "body": {
+            "bytes": 2048,
+            "base64": "YS50eHQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAADAwMDA3NzcAMDAwMTc1MAAwMDAxNzUwADAwMDAwMDAwMDAxADE1MTI1MzM0NDAwADAwNjY1MgAgMAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAB1c3RhcgAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABhAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+          },
+          "reply": {
+            "status": 201
+          }
+        }
+      ]
+    },
+    {
       "id": "upload-status-in-progress/0",
       "row": "publishFiles",
       "from": "methods/upload-status-in-progress",
@@ -9406,6 +10125,85 @@
       ]
     },
     {
+      "id": "publish-chunk-rule",
+      "row": "publishChunk",
+      "from": "methods/publish-chunk-rule",
+      "key": "https://app.example",
+      "params": {
+        "object": [
+          [
+            "data",
+            {
+              "string_bytes": 1,
+              "base64": "eA=="
+            }
+          ]
+        ]
+      },
+      "ready": {
+        "check": "publish",
+        "ok": true
+      },
+      "calls": [
+        {
+          "form": "stamps",
+          "method": "GET",
+          "path": "/stamps",
+          "headers": [
+            [
+              "accept",
+              "application/json, text/plain, */*"
+            ],
+            [
+              "accept-encoding",
+              "identity"
+            ]
+          ],
+          "reply": {
+            "status": 200
+          }
+        },
+        {
+          "form": "chunk_up",
+          "method": "POST",
+          "path": "/chunks",
+          "headers": [
+            [
+              "accept",
+              "application/json, text/plain, */*"
+            ],
+            [
+              "accept-encoding",
+              "identity"
+            ],
+            [
+              "content-type",
+              "application/octet-stream"
+            ],
+            [
+              "swarm-postage-batch-id",
+              "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
+            ],
+            [
+              "swarm-pin",
+              "true"
+            ],
+            [
+              "swarm-deferred-upload",
+              "false"
+            ]
+          ],
+          "body": {
+            "bytes": 9,
+            "base64": "AQAAAAAAAAB4"
+          },
+          "reply": {
+            "status": 201
+          }
+        }
+      ]
+    },
+    {
       "id": "publish-chunk-node-other-reference",
       "row": "publishChunk",
       "from": "methods/publish-chunk-node-other-reference",
@@ -9531,6 +10329,92 @@
       "id": "read-chunk-found-anonymous",
       "row": "readChunk",
       "from": "methods/read-chunk-found-anonymous",
+      "key": "https://app.example",
+      "params": {
+        "object": [
+          [
+            "reference",
+            {
+              "string": "f9335c1f06d729ae3e725352a445fa01a1e9dc20e937f0ef19ab199b1fb2827b"
+            }
+          ]
+        ]
+      },
+      "ready": {
+        "check": "reachable",
+        "ok": true
+      },
+      "calls": [
+        {
+          "form": "chunk",
+          "method": "GET",
+          "path": "/chunks/f9335c1f06d729ae3e725352a445fa01a1e9dc20e937f0ef19ab199b1fb2827b",
+          "headers": [
+            [
+              "accept",
+              "application/json, text/plain, */*"
+            ],
+            [
+              "accept-encoding",
+              "identity"
+            ]
+          ],
+          "reply": {
+            "status": 200,
+            "body": {
+              "base64": "CwAAAAAAAABoZWxsbyBzd2FybQ=="
+            }
+          }
+        }
+      ]
+    },
+    {
+      "id": "read-chunk-found-keyless",
+      "row": "readChunk",
+      "from": "methods/read-chunk-found-keyless",
+      "key": "https://app.example",
+      "params": {
+        "object": [
+          [
+            "reference",
+            {
+              "string": "f9335c1f06d729ae3e725352a445fa01a1e9dc20e937f0ef19ab199b1fb2827b"
+            }
+          ]
+        ]
+      },
+      "ready": {
+        "check": "reachable",
+        "ok": true
+      },
+      "calls": [
+        {
+          "form": "chunk",
+          "method": "GET",
+          "path": "/chunks/f9335c1f06d729ae3e725352a445fa01a1e9dc20e937f0ef19ab199b1fb2827b",
+          "headers": [
+            [
+              "accept",
+              "application/json, text/plain, */*"
+            ],
+            [
+              "accept-encoding",
+              "identity"
+            ]
+          ],
+          "reply": {
+            "status": 200,
+            "body": {
+              "base64": "CwAAAAAAAABoZWxsbyBzd2FybQ=="
+            }
+          }
+        }
+      ]
+    },
+    {
+      "id": "read-chunk-grants-unavailable",
+      "row": "readChunk",
+      "from": "methods/read-chunk-grants-unavailable",
       "key": "https://app.example",
       "params": {
         "object": [
@@ -11625,6 +12509,188 @@
       ]
     },
     {
+      "id": "write-soc-no-feed-grant",
+      "row": "writeSingleOwnerChunk",
+      "from": "methods/write-soc-no-feed-grant",
+      "key": "https://app.example",
+      "params": {
+        "object": [
+          [
+            "identifier",
+            {
+              "string": "4242424242424242424242424242424242424242424242424242424242424242"
+            }
+          ],
+          [
+            "data",
+            {
+              "string_bytes": 1,
+              "base64": "eA=="
+            }
+          ]
+        ]
+      },
+      "ready": {
+        "check": "publish",
+        "ok": true
+      },
+      "calls": [
+        {
+          "form": "stamps",
+          "method": "GET",
+          "path": "/stamps",
+          "headers": [
+            [
+              "accept",
+              "application/json, text/plain, */*"
+            ],
+            [
+              "accept-encoding",
+              "identity"
+            ]
+          ],
+          "reply": {
+            "status": 200
+          }
+        },
+        {
+          "form": "soc_up",
+          "method": "POST",
+          "path": "/soc/a274614c1d3425568fd100b30322287c86085220/4242424242424242424242424242424242424242424242424242424242424242",
+          "query": [
+            [
+              "sig",
+              "5fa3e7d1f3337b04bae5f71fe219360ff73dcb19b4ce7733de72ff7ff755d2aa2afcd7de6820a1f0dc48d6e1beb171895491b00d160800ef5e33d9f1401fb6db1c"
+            ]
+          ],
+          "headers": [
+            [
+              "accept",
+              "application/json, text/plain, */*"
+            ],
+            [
+              "accept-encoding",
+              "identity"
+            ],
+            [
+              "content-type",
+              "application/octet-stream"
+            ],
+            [
+              "swarm-postage-batch-id",
+              "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
+            ],
+            [
+              "swarm-pin",
+              "true"
+            ],
+            [
+              "swarm-deferred-upload",
+              "false"
+            ]
+          ],
+          "body": {
+            "bytes": 9,
+            "base64": "AQAAAAAAAAB4"
+          },
+          "reply": {
+            "status": 201
+          }
+        }
+      ]
+    },
+    {
+      "id": "write-soc-no-store",
+      "row": "writeSingleOwnerChunk",
+      "from": "methods/write-soc-no-store",
+      "key": "https://app.example",
+      "params": {
+        "object": [
+          [
+            "identifier",
+            {
+              "string": "4242424242424242424242424242424242424242424242424242424242424242"
+            }
+          ],
+          [
+            "data",
+            {
+              "string_bytes": 1,
+              "base64": "eA=="
+            }
+          ]
+        ]
+      },
+      "ready": {
+        "check": "publish",
+        "ok": true
+      },
+      "calls": [
+        {
+          "form": "stamps",
+          "method": "GET",
+          "path": "/stamps",
+          "headers": [
+            [
+              "accept",
+              "application/json, text/plain, */*"
+            ],
+            [
+              "accept-encoding",
+              "identity"
+            ]
+          ],
+          "reply": {
+            "status": 200
+          }
+        },
+        {
+          "form": "soc_up",
+          "method": "POST",
+          "path": "/soc/a274614c1d3425568fd100b30322287c86085220/4242424242424242424242424242424242424242424242424242424242424242",
+          "query": [
+            [
+              "sig",
+              "5fa3e7d1f3337b04bae5f71fe219360ff73dcb19b4ce7733de72ff7ff755d2aa2afcd7de6820a1f0dc48d6e1beb171895491b00d160800ef5e33d9f1401fb6db1c"
+            ]
+          ],
+          "headers": [
+            [
+              "accept",
+              "application/json, text/plain, */*"
+            ],
+            [
+              "accept-encoding",
+              "identity"
+            ],
+            [
+              "content-type",
+              "application/octet-stream"
+            ],
+            [
+              "swarm-postage-batch-id",
+              "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
+            ],
+            [
+              "swarm-pin",
+              "true"
+            ],
+            [
+              "swarm-deferred-upload",
+              "false"
+            ]
+          ],
+          "body": {
+            "bytes": 9,
+            "base64": "AQAAAAAAAAB4"
+          },
+          "reply": {
+            "status": 201
+          }
+        }
+      ]
+    },
+    {
       "id": "write-soc-app-scoped-other-site-other-index",
       "row": "writeSingleOwnerChunk",
       "from": "methods/write-soc-app-scoped-other-site-other-index",
@@ -11799,6 +12865,646 @@
           "body": {
             "bytes": 9,
             "base64": "AQAAAAAAAAB4"
+          },
+          "reply": {
+            "status": 201
+          }
+        }
+      ]
+    },
+    {
+      "id": "write-soc-bee-wallet-shared-prompt",
+      "row": "writeSingleOwnerChunk",
+      "from": "methods/write-soc-bee-wallet-shared-prompt",
+      "key": "https://app.example",
+      "params": {
+        "object": [
+          [
+            "identifier",
+            {
+              "string": "4242424242424242424242424242424242424242424242424242424242424242"
+            }
+          ],
+          [
+            "data",
+            {
+              "string_bytes": 1,
+              "base64": "eA=="
+            }
+          ]
+        ]
+      },
+      "ready": {
+        "check": "publish",
+        "ok": true
+      },
+      "calls": [
+        {
+          "form": "stamps",
+          "method": "GET",
+          "path": "/stamps",
+          "headers": [
+            [
+              "accept",
+              "application/json, text/plain, */*"
+            ],
+            [
+              "accept-encoding",
+              "identity"
+            ]
+          ],
+          "reply": {
+            "status": 200
+          }
+        },
+        {
+          "form": "soc_up",
+          "method": "POST",
+          "path": "/soc/a274614c1d3425568fd100b30322287c86085220/4242424242424242424242424242424242424242424242424242424242424242",
+          "query": [
+            [
+              "sig",
+              "5fa3e7d1f3337b04bae5f71fe219360ff73dcb19b4ce7733de72ff7ff755d2aa2afcd7de6820a1f0dc48d6e1beb171895491b00d160800ef5e33d9f1401fb6db1c"
+            ]
+          ],
+          "headers": [
+            [
+              "accept",
+              "application/json, text/plain, */*"
+            ],
+            [
+              "accept-encoding",
+              "identity"
+            ],
+            [
+              "content-type",
+              "application/octet-stream"
+            ],
+            [
+              "swarm-postage-batch-id",
+              "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
+            ],
+            [
+              "swarm-pin",
+              "true"
+            ],
+            [
+              "swarm-deferred-upload",
+              "false"
+            ]
+          ],
+          "body": {
+            "bytes": 9,
+            "base64": "AQAAAAAAAAB4"
+          },
+          "reply": {
+            "status": 201
+          }
+        }
+      ]
+    },
+    {
+      "id": "write-soc-unlock-prompt",
+      "row": "writeSingleOwnerChunk",
+      "from": "methods/write-soc-unlock-prompt",
+      "key": "https://app.example",
+      "params": {
+        "object": [
+          [
+            "identifier",
+            {
+              "string": "4242424242424242424242424242424242424242424242424242424242424242"
+            }
+          ],
+          [
+            "data",
+            {
+              "string_bytes": 1,
+              "base64": "eA=="
+            }
+          ]
+        ]
+      },
+      "ready": {
+        "check": "publish",
+        "ok": true
+      },
+      "calls": [
+        {
+          "form": "stamps",
+          "method": "GET",
+          "path": "/stamps",
+          "headers": [
+            [
+              "accept",
+              "application/json, text/plain, */*"
+            ],
+            [
+              "accept-encoding",
+              "identity"
+            ]
+          ],
+          "reply": {
+            "status": 200
+          }
+        },
+        {
+          "form": "soc_up",
+          "method": "POST",
+          "path": "/soc/a274614c1d3425568fd100b30322287c86085220/4242424242424242424242424242424242424242424242424242424242424242",
+          "query": [
+            [
+              "sig",
+              "5fa3e7d1f3337b04bae5f71fe219360ff73dcb19b4ce7733de72ff7ff755d2aa2afcd7de6820a1f0dc48d6e1beb171895491b00d160800ef5e33d9f1401fb6db1c"
+            ]
+          ],
+          "headers": [
+            [
+              "accept",
+              "application/json, text/plain, */*"
+            ],
+            [
+              "accept-encoding",
+              "identity"
+            ],
+            [
+              "content-type",
+              "application/octet-stream"
+            ],
+            [
+              "swarm-postage-batch-id",
+              "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
+            ],
+            [
+              "swarm-pin",
+              "true"
+            ],
+            [
+              "swarm-deferred-upload",
+              "false"
+            ]
+          ],
+          "body": {
+            "bytes": 9,
+            "base64": "AQAAAAAAAAB4"
+          },
+          "reply": {
+            "status": 201
+          }
+        }
+      ]
+    },
+    {
+      "id": "write-soc-rule",
+      "row": "writeSingleOwnerChunk",
+      "from": "methods/write-soc-rule",
+      "key": "https://app.example",
+      "params": {
+        "object": [
+          [
+            "identifier",
+            {
+              "string": "4242424242424242424242424242424242424242424242424242424242424242"
+            }
+          ],
+          [
+            "data",
+            {
+              "string_bytes": 1,
+              "base64": "eA=="
+            }
+          ]
+        ]
+      },
+      "ready": {
+        "check": "publish",
+        "ok": true
+      },
+      "calls": [
+        {
+          "form": "stamps",
+          "method": "GET",
+          "path": "/stamps",
+          "headers": [
+            [
+              "accept",
+              "application/json, text/plain, */*"
+            ],
+            [
+              "accept-encoding",
+              "identity"
+            ]
+          ],
+          "reply": {
+            "status": 200
+          }
+        },
+        {
+          "form": "soc_up",
+          "method": "POST",
+          "path": "/soc/a274614c1d3425568fd100b30322287c86085220/4242424242424242424242424242424242424242424242424242424242424242",
+          "query": [
+            [
+              "sig",
+              "5fa3e7d1f3337b04bae5f71fe219360ff73dcb19b4ce7733de72ff7ff755d2aa2afcd7de6820a1f0dc48d6e1beb171895491b00d160800ef5e33d9f1401fb6db1c"
+            ]
+          ],
+          "headers": [
+            [
+              "accept",
+              "application/json, text/plain, */*"
+            ],
+            [
+              "accept-encoding",
+              "identity"
+            ],
+            [
+              "content-type",
+              "application/octet-stream"
+            ],
+            [
+              "swarm-postage-batch-id",
+              "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
+            ],
+            [
+              "swarm-pin",
+              "true"
+            ],
+            [
+              "swarm-deferred-upload",
+              "false"
+            ]
+          ],
+          "body": {
+            "bytes": 9,
+            "base64": "AQAAAAAAAAB4"
+          },
+          "reply": {
+            "status": 201
+          }
+        }
+      ]
+    },
+    {
+      "id": "write-soc-rule-in-custody",
+      "row": "writeSingleOwnerChunk",
+      "from": "methods/write-soc-rule-in-custody",
+      "key": "https://app.example",
+      "params": {
+        "object": [
+          [
+            "identifier",
+            {
+              "string": "4242424242424242424242424242424242424242424242424242424242424242"
+            }
+          ],
+          [
+            "data",
+            {
+              "string_bytes": 1,
+              "base64": "eA=="
+            }
+          ]
+        ]
+      },
+      "ready": {
+        "check": "publish",
+        "ok": true
+      },
+      "calls": [
+        {
+          "form": "stamps",
+          "method": "GET",
+          "path": "/stamps",
+          "headers": [
+            [
+              "accept",
+              "application/json, text/plain, */*"
+            ],
+            [
+              "accept-encoding",
+              "identity"
+            ]
+          ],
+          "reply": {
+            "status": 200
+          }
+        },
+        {
+          "form": "soc_up",
+          "method": "POST",
+          "path": "/soc/a274614c1d3425568fd100b30322287c86085220/4242424242424242424242424242424242424242424242424242424242424242",
+          "query": [
+            [
+              "sig",
+              "5fa3e7d1f3337b04bae5f71fe219360ff73dcb19b4ce7733de72ff7ff755d2aa2afcd7de6820a1f0dc48d6e1beb171895491b00d160800ef5e33d9f1401fb6db1c"
+            ]
+          ],
+          "headers": [
+            [
+              "accept",
+              "application/json, text/plain, */*"
+            ],
+            [
+              "accept-encoding",
+              "identity"
+            ],
+            [
+              "content-type",
+              "application/octet-stream"
+            ],
+            [
+              "swarm-postage-batch-id",
+              "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
+            ],
+            [
+              "swarm-pin",
+              "true"
+            ],
+            [
+              "swarm-deferred-upload",
+              "false"
+            ]
+          ],
+          "body": {
+            "bytes": 9,
+            "base64": "AQAAAAAAAAB4"
+          },
+          "reply": {
+            "status": 201
+          }
+        }
+      ]
+    },
+    {
+      "id": "write-soc-rule-custody-before-write",
+      "row": "writeSingleOwnerChunk",
+      "from": "methods/write-soc-rule-custody-before-write",
+      "key": "https://app.example",
+      "params": {
+        "object": [
+          [
+            "identifier",
+            {
+              "string": "4242424242424242424242424242424242424242424242424242424242424242"
+            }
+          ],
+          [
+            "data",
+            {
+              "string_bytes": 1,
+              "base64": "eA=="
+            }
+          ]
+        ]
+      },
+      "ready": {
+        "check": "publish",
+        "ok": true
+      },
+      "calls": [
+        {
+          "form": "stamps",
+          "method": "GET",
+          "path": "/stamps",
+          "headers": [
+            [
+              "accept",
+              "application/json, text/plain, */*"
+            ],
+            [
+              "accept-encoding",
+              "identity"
+            ]
+          ],
+          "reply": {
+            "status": 200
+          }
+        }
+      ]
+    },
+    {
+      "id": "write-soc-rule-off-before-write",
+      "row": "writeSingleOwnerChunk",
+      "from": "methods/write-soc-rule-off-before-write",
+      "key": "https://app.example",
+      "params": {
+        "object": [
+          [
+            "identifier",
+            {
+              "string": "4242424242424242424242424242424242424242424242424242424242424242"
+            }
+          ],
+          [
+            "data",
+            {
+              "string_bytes": 1,
+              "base64": "eA=="
+            }
+          ]
+        ]
+      },
+      "ready": {
+        "check": "publish",
+        "ok": true
+      },
+      "calls": [
+        {
+          "form": "stamps",
+          "method": "GET",
+          "path": "/stamps",
+          "headers": [
+            [
+              "accept",
+              "application/json, text/plain, */*"
+            ],
+            [
+              "accept-encoding",
+              "identity"
+            ]
+          ],
+          "reply": {
+            "status": 200
+          }
+        }
+      ]
+    },
+    {
+      "id": "write-soc-always-allow/0",
+      "row": "writeSingleOwnerChunk",
+      "from": "methods/write-soc-always-allow",
+      "key": "https://app.example",
+      "params": {
+        "object": [
+          [
+            "identifier",
+            {
+              "string": "4242424242424242424242424242424242424242424242424242424242424242"
+            }
+          ],
+          [
+            "data",
+            {
+              "string_bytes": 3,
+              "base64": "b25l"
+            }
+          ]
+        ]
+      },
+      "ready": {
+        "check": "publish",
+        "ok": true
+      },
+      "calls": [
+        {
+          "form": "stamps",
+          "method": "GET",
+          "path": "/stamps",
+          "headers": [
+            [
+              "accept",
+              "application/json, text/plain, */*"
+            ],
+            [
+              "accept-encoding",
+              "identity"
+            ]
+          ],
+          "reply": {
+            "status": 200
+          }
+        },
+        {
+          "form": "soc_up",
+          "method": "POST",
+          "path": "/soc/a274614c1d3425568fd100b30322287c86085220/4242424242424242424242424242424242424242424242424242424242424242",
+          "query": [
+            [
+              "sig",
+              "159bf29df4b6622f5cef62a7e0b2b73f5fe804a44801e5d6fd50a87688e780d065b800b8f33bd0d86cd03246e9e4dbfa6feba188810cdc6d5ef572dabf42335b1b"
+            ]
+          ],
+          "headers": [
+            [
+              "accept",
+              "application/json, text/plain, */*"
+            ],
+            [
+              "accept-encoding",
+              "identity"
+            ],
+            [
+              "content-type",
+              "application/octet-stream"
+            ],
+            [
+              "swarm-postage-batch-id",
+              "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
+            ],
+            [
+              "swarm-pin",
+              "true"
+            ],
+            [
+              "swarm-deferred-upload",
+              "false"
+            ]
+          ],
+          "body": {
+            "bytes": 11,
+            "base64": "AwAAAAAAAABvbmU="
+          },
+          "reply": {
+            "status": 201
+          }
+        }
+      ]
+    },
+    {
+      "id": "write-soc-always-allow/1",
+      "row": "writeSingleOwnerChunk",
+      "from": "methods/write-soc-always-allow",
+      "key": "https://app.example",
+      "params": {
+        "object": [
+          [
+            "identifier",
+            {
+              "string": "4343434343434343434343434343434343434343434343434343434343434343"
+            }
+          ],
+          [
+            "data",
+            {
+              "string_bytes": 3,
+              "base64": "dHdv"
+            }
+          ]
+        ]
+      },
+      "ready": {
+        "check": "publish",
+        "ok": true
+      },
+      "calls": [
+        {
+          "form": "stamps",
+          "method": "GET",
+          "path": "/stamps",
+          "headers": [
+            [
+              "accept",
+              "application/json, text/plain, */*"
+            ],
+            [
+              "accept-encoding",
+              "identity"
+            ]
+          ],
+          "reply": {
+            "status": 200
+          }
+        },
+        {
+          "form": "soc_up",
+          "method": "POST",
+          "path": "/soc/a274614c1d3425568fd100b30322287c86085220/4343434343434343434343434343434343434343434343434343434343434343",
+          "query": [
+            [
+              "sig",
+              "82037feb441c091b5833518d15c08c04dc3c7a53d2479f016491644d50cf7e167750dd981459da15a3d3e8456c8ecdbc325898f3d56b311d1fd8860a46485b0e1c"
+            ]
+          ],
+          "headers": [
+            [
+              "accept",
+              "application/json, text/plain, */*"
+            ],
+            [
+              "accept-encoding",
+              "identity"
+            ],
+            [
+              "content-type",
+              "application/octet-stream"
+            ],
+            [
+              "swarm-postage-batch-id",
+              "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
+            ],
+            [
+              "swarm-pin",
+              "true"
+            ],
+            [
+              "swarm-deferred-upload",
+              "false"
+            ]
+          ],
+          "body": {
+            "bytes": 11,
+            "base64": "AwAAAAAAAAB0d28="
           },
           "reply": {
             "status": 201
@@ -13779,6 +15485,68 @@
       ]
     },
     {
+      "id": "create-feed-no-store",
+      "row": "createFeed",
+      "from": "methods/create-feed-no-store",
+      "key": "https://app.example",
+      "params": {
+        "object": [
+          [
+            "name",
+            {
+              "string": "blog"
+            }
+          ]
+        ]
+      },
+      "ready": {
+        "check": "publish",
+        "ok": true
+      },
+      "calls": [
+        {
+          "form": "stamps",
+          "method": "GET",
+          "path": "/stamps",
+          "headers": [
+            [
+              "accept",
+              "application/json, text/plain, */*"
+            ],
+            [
+              "accept-encoding",
+              "identity"
+            ]
+          ],
+          "reply": {
+            "status": 200
+          }
+        },
+        {
+          "form": "feed_manifest",
+          "method": "POST",
+          "path": "/feeds/a274614c1d3425568fd100b30322287c86085220/2d8b6efca0db6410add40ecd6bda25b3ee2d614a8e6c12933931d91cca63c3e4",
+          "headers": [
+            [
+              "accept",
+              "application/json, text/plain, */*"
+            ],
+            [
+              "accept-encoding",
+              "identity"
+            ],
+            [
+              "swarm-postage-batch-id",
+              "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
+            ]
+          ],
+          "reply": {
+            "status": 201
+          }
+        }
+      ]
+    },
+    {
       "id": "create-feed-bee-wallet",
       "row": "createFeed",
       "from": "methods/create-feed-bee-wallet",
@@ -13944,6 +15712,316 @@
           "form": "feed_manifest",
           "method": "POST",
           "path": "/feeds/6fac4d18c912343bf86fa7049364dd4e424ab9c0/9a129e4b5b4d06f5ab06dbc940f087c4ba4c6f3b9cff84e680a3a35be4adf41c",
+          "headers": [
+            [
+              "accept",
+              "application/json, text/plain, */*"
+            ],
+            [
+              "accept-encoding",
+              "identity"
+            ],
+            [
+              "swarm-postage-batch-id",
+              "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
+            ]
+          ],
+          "reply": {
+            "status": 201
+          }
+        }
+      ]
+    },
+    {
+      "id": "create-feed-unlock-prompt",
+      "row": "createFeed",
+      "from": "methods/create-feed-unlock-prompt",
+      "key": "https://app.example",
+      "params": {
+        "object": [
+          [
+            "name",
+            {
+              "string": "blog"
+            }
+          ]
+        ]
+      },
+      "ready": {
+        "check": "publish",
+        "ok": true
+      },
+      "calls": [
+        {
+          "form": "stamps",
+          "method": "GET",
+          "path": "/stamps",
+          "headers": [
+            [
+              "accept",
+              "application/json, text/plain, */*"
+            ],
+            [
+              "accept-encoding",
+              "identity"
+            ]
+          ],
+          "reply": {
+            "status": 200
+          }
+        },
+        {
+          "form": "feed_manifest",
+          "method": "POST",
+          "path": "/feeds/6fac4d18c912343bf86fa7049364dd4e424ab9c0/2d8b6efca0db6410add40ecd6bda25b3ee2d614a8e6c12933931d91cca63c3e4",
+          "headers": [
+            [
+              "accept",
+              "application/json, text/plain, */*"
+            ],
+            [
+              "accept-encoding",
+              "identity"
+            ],
+            [
+              "swarm-postage-batch-id",
+              "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
+            ]
+          ],
+          "reply": {
+            "status": 201
+          }
+        }
+      ]
+    },
+    {
+      "id": "create-feed-prompt-new-identity",
+      "row": "createFeed",
+      "from": "methods/create-feed-prompt-new-identity",
+      "key": "https://app.example",
+      "params": {
+        "object": [
+          [
+            "name",
+            {
+              "string": "blog"
+            }
+          ]
+        ]
+      },
+      "ready": {
+        "check": "publish",
+        "ok": true
+      },
+      "calls": [
+        {
+          "form": "stamps",
+          "method": "GET",
+          "path": "/stamps",
+          "headers": [
+            [
+              "accept",
+              "application/json, text/plain, */*"
+            ],
+            [
+              "accept-encoding",
+              "identity"
+            ]
+          ],
+          "reply": {
+            "status": 200
+          }
+        },
+        {
+          "form": "feed_manifest",
+          "method": "POST",
+          "path": "/feeds/a274614c1d3425568fd100b30322287c86085220/2d8b6efca0db6410add40ecd6bda25b3ee2d614a8e6c12933931d91cca63c3e4",
+          "headers": [
+            [
+              "accept",
+              "application/json, text/plain, */*"
+            ],
+            [
+              "accept-encoding",
+              "identity"
+            ],
+            [
+              "swarm-postage-batch-id",
+              "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
+            ]
+          ],
+          "reply": {
+            "status": 201
+          }
+        }
+      ]
+    },
+    {
+      "id": "create-feed-prompt-ant-wallet",
+      "row": "createFeed",
+      "from": "methods/create-feed-prompt-ant-wallet",
+      "key": "https://app.example",
+      "params": {
+        "object": [
+          [
+            "name",
+            {
+              "string": "blog"
+            }
+          ]
+        ]
+      },
+      "ready": {
+        "check": "publish",
+        "ok": true
+      },
+      "calls": [
+        {
+          "form": "stamps",
+          "method": "GET",
+          "path": "/stamps",
+          "headers": [
+            [
+              "accept",
+              "application/json, text/plain, */*"
+            ],
+            [
+              "accept-encoding",
+              "identity"
+            ]
+          ],
+          "reply": {
+            "status": 200
+          }
+        },
+        {
+          "form": "feed_manifest",
+          "method": "POST",
+          "path": "/feeds/6fac4d18c912343bf86fa7049364dd4e424ab9c0/2d8b6efca0db6410add40ecd6bda25b3ee2d614a8e6c12933931d91cca63c3e4",
+          "headers": [
+            [
+              "accept",
+              "application/json, text/plain, */*"
+            ],
+            [
+              "accept-encoding",
+              "identity"
+            ],
+            [
+              "swarm-postage-batch-id",
+              "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
+            ]
+          ],
+          "reply": {
+            "status": 201
+          }
+        }
+      ]
+    },
+    {
+      "id": "create-feed-rule",
+      "row": "createFeed",
+      "from": "methods/create-feed-rule",
+      "key": "https://app.example",
+      "params": {
+        "object": [
+          [
+            "name",
+            {
+              "string": "blog"
+            }
+          ]
+        ]
+      },
+      "ready": {
+        "check": "publish",
+        "ok": true
+      },
+      "calls": [
+        {
+          "form": "stamps",
+          "method": "GET",
+          "path": "/stamps",
+          "headers": [
+            [
+              "accept",
+              "application/json, text/plain, */*"
+            ],
+            [
+              "accept-encoding",
+              "identity"
+            ]
+          ],
+          "reply": {
+            "status": 200
+          }
+        },
+        {
+          "form": "feed_manifest",
+          "method": "POST",
+          "path": "/feeds/6fac4d18c912343bf86fa7049364dd4e424ab9c0/2d8b6efca0db6410add40ecd6bda25b3ee2d614a8e6c12933931d91cca63c3e4",
+          "headers": [
+            [
+              "accept",
+              "application/json, text/plain, */*"
+            ],
+            [
+              "accept-encoding",
+              "identity"
+            ],
+            [
+              "swarm-postage-batch-id",
+              "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
+            ]
+          ],
+          "reply": {
+            "status": 201
+          }
+        }
+      ]
+    },
+    {
+      "id": "create-feed-rule-without-feed-grant",
+      "row": "createFeed",
+      "from": "methods/create-feed-rule-without-feed-grant",
+      "key": "https://app.example",
+      "params": {
+        "object": [
+          [
+            "name",
+            {
+              "string": "blog"
+            }
+          ]
+        ]
+      },
+      "ready": {
+        "check": "publish",
+        "ok": true
+      },
+      "calls": [
+        {
+          "form": "stamps",
+          "method": "GET",
+          "path": "/stamps",
+          "headers": [
+            [
+              "accept",
+              "application/json, text/plain, */*"
+            ],
+            [
+              "accept-encoding",
+              "identity"
+            ]
+          ],
+          "reply": {
+            "status": 200
+          }
+        },
+        {
+          "form": "feed_manifest",
+          "method": "POST",
+          "path": "/feeds/6fac4d18c912343bf86fa7049364dd4e424ab9c0/2d8b6efca0db6410add40ecd6bda25b3ee2d614a8e6c12933931d91cca63c3e4",
           "headers": [
             [
               "accept",
@@ -14162,6 +16240,135 @@
               "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
             ]
           ],
+          "reply": {
+            "status": 201
+          }
+        }
+      ]
+    },
+    {
+      "id": "update-feed-no-feed-grant",
+      "row": "updateFeed",
+      "from": "methods/update-feed-no-feed-grant",
+      "key": "https://app.example",
+      "params": {
+        "object": [
+          [
+            "feedId",
+            {
+              "string": "blog"
+            }
+          ],
+          [
+            "reference",
+            {
+              "string": "efefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefef"
+            }
+          ]
+        ]
+      },
+      "ready": {
+        "check": "publish",
+        "ok": true
+      },
+      "calls": [
+        {
+          "form": "stamps",
+          "method": "GET",
+          "path": "/stamps",
+          "headers": [
+            [
+              "accept",
+              "application/json, text/plain, */*"
+            ],
+            [
+              "accept-encoding",
+              "identity"
+            ]
+          ],
+          "reply": {
+            "status": 200
+          }
+        },
+        {
+          "form": "feed_head",
+          "method": "GET",
+          "path": "/feeds/6fac4d18c912343bf86fa7049364dd4e424ab9c0/2d8b6efca0db6410add40ecd6bda25b3ee2d614a8e6c12933931d91cca63c3e4",
+          "headers": [
+            [
+              "accept",
+              "application/json, text/plain, */*"
+            ],
+            [
+              "accept-encoding",
+              "identity"
+            ],
+            [
+              "swarm-only-root-chunk",
+              "true"
+            ]
+          ],
+          "reply": {
+            "status": 404
+          }
+        },
+        {
+          "form": "chunk",
+          "method": "GET",
+          "path": "/chunks/a9cd4c4142bc7409cb2cd9340a7c91fb4be5a0b30b61dca86acd7e696e06acb6",
+          "headers": [
+            [
+              "accept",
+              "application/json, text/plain, */*"
+            ],
+            [
+              "accept-encoding",
+              "identity"
+            ]
+          ],
+          "feed": {
+            "owner": "6fac4d18c912343bf86fa7049364dd4e424ab9c0",
+            "index": 0
+          },
+          "reply": {
+            "status": 404,
+            "body": {
+              "base64": "eyJjb2RlIjo0MDQsIm1lc3NhZ2UiOiJOb3QgRm91bmQifQ=="
+            }
+          }
+        },
+        {
+          "form": "soc_up",
+          "method": "POST",
+          "path": "/soc/6fac4d18c912343bf86fa7049364dd4e424ab9c0/ce6733d2ca4b9ce62d2329a67de04db7804ddb5b3d82911da0e1ada19186a710",
+          "query": [
+            [
+              "sig",
+              "e77e636a0c4310f79e6d108ef5f5d28573bce12c381739ad4385a1b96e9c050368ca4127aebb774a054bafe5e19640de9dd0b61067700eb59138385cd25f3b321b"
+            ]
+          ],
+          "headers": [
+            [
+              "accept",
+              "application/json, text/plain, */*"
+            ],
+            [
+              "accept-encoding",
+              "identity"
+            ],
+            [
+              "content-type",
+              "application/octet-stream"
+            ],
+            [
+              "swarm-postage-batch-id",
+              "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
+            ]
+          ],
+          "body": {
+            "bytes": 48,
+            "base64": "KAAAAAAAAAAAAAAAaVW5AO/v7+/v7+/v7+/v7+/v7+/v7+/v7+/v7+/v7+/v7+/v"
+          },
           "reply": {
             "status": 201
           }
@@ -21508,6 +23715,812 @@
       ]
     },
     {
+      "id": "write-feed-no-feed-grant",
+      "row": "writeFeedEntry",
+      "from": "methods/write-feed-no-feed-grant",
+      "key": "https://app.example",
+      "params": {
+        "object": [
+          [
+            "name",
+            {
+              "string": "blog"
+            }
+          ],
+          [
+            "data",
+            {
+              "string_bytes": 1,
+              "base64": "eA=="
+            }
+          ]
+        ]
+      },
+      "ready": {
+        "check": "publish",
+        "ok": true
+      },
+      "calls": [
+        {
+          "form": "stamps",
+          "method": "GET",
+          "path": "/stamps",
+          "headers": [
+            [
+              "accept",
+              "application/json, text/plain, */*"
+            ],
+            [
+              "accept-encoding",
+              "identity"
+            ]
+          ],
+          "reply": {
+            "status": 200
+          }
+        },
+        {
+          "form": "feed_head",
+          "method": "GET",
+          "path": "/feeds/6fac4d18c912343bf86fa7049364dd4e424ab9c0/2d8b6efca0db6410add40ecd6bda25b3ee2d614a8e6c12933931d91cca63c3e4",
+          "headers": [
+            [
+              "accept",
+              "application/json, text/plain, */*"
+            ],
+            [
+              "accept-encoding",
+              "identity"
+            ],
+            [
+              "swarm-only-root-chunk",
+              "true"
+            ]
+          ],
+          "reply": {
+            "status": 404
+          }
+        },
+        {
+          "form": "chunk",
+          "method": "GET",
+          "path": "/chunks/a9cd4c4142bc7409cb2cd9340a7c91fb4be5a0b30b61dca86acd7e696e06acb6",
+          "headers": [
+            [
+              "accept",
+              "application/json, text/plain, */*"
+            ],
+            [
+              "accept-encoding",
+              "identity"
+            ]
+          ],
+          "feed": {
+            "owner": "6fac4d18c912343bf86fa7049364dd4e424ab9c0",
+            "index": 0
+          },
+          "reply": {
+            "status": 404,
+            "body": {
+              "base64": "eyJjb2RlIjo0MDQsIm1lc3NhZ2UiOiJOb3QgRm91bmQifQ=="
+            }
+          }
+        },
+        {
+          "form": "soc_up",
+          "method": "POST",
+          "path": "/soc/6fac4d18c912343bf86fa7049364dd4e424ab9c0/ce6733d2ca4b9ce62d2329a67de04db7804ddb5b3d82911da0e1ada19186a710",
+          "query": [
+            [
+              "sig",
+              "47f67c097aa5cfbc62847872745122a3f41936463e0d765040f735e73fa01446160bc31b59ce7499d2beb92d11839483049198db3a7dcac9b3abd4abe87cd4f01c"
+            ]
+          ],
+          "headers": [
+            [
+              "accept",
+              "application/json, text/plain, */*"
+            ],
+            [
+              "accept-encoding",
+              "identity"
+            ],
+            [
+              "content-type",
+              "application/octet-stream"
+            ],
+            [
+              "swarm-postage-batch-id",
+              "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
+            ]
+          ],
+          "body": {
+            "bytes": 9,
+            "base64": "AQAAAAAAAAB4"
+          },
+          "reply": {
+            "status": 201
+          }
+        }
+      ]
+    },
+    {
+      "id": "write-feed-rule",
+      "row": "writeFeedEntry",
+      "from": "methods/write-feed-rule",
+      "key": "https://app.example",
+      "params": {
+        "object": [
+          [
+            "name",
+            {
+              "string": "blog"
+            }
+          ],
+          [
+            "data",
+            {
+              "string_bytes": 1,
+              "base64": "eA=="
+            }
+          ]
+        ]
+      },
+      "ready": {
+        "check": "publish",
+        "ok": true
+      },
+      "calls": [
+        {
+          "form": "stamps",
+          "method": "GET",
+          "path": "/stamps",
+          "headers": [
+            [
+              "accept",
+              "application/json, text/plain, */*"
+            ],
+            [
+              "accept-encoding",
+              "identity"
+            ]
+          ],
+          "reply": {
+            "status": 200
+          }
+        },
+        {
+          "form": "feed_head",
+          "method": "GET",
+          "path": "/feeds/6fac4d18c912343bf86fa7049364dd4e424ab9c0/2d8b6efca0db6410add40ecd6bda25b3ee2d614a8e6c12933931d91cca63c3e4",
+          "headers": [
+            [
+              "accept",
+              "application/json, text/plain, */*"
+            ],
+            [
+              "accept-encoding",
+              "identity"
+            ],
+            [
+              "swarm-only-root-chunk",
+              "true"
+            ]
+          ],
+          "reply": {
+            "status": 404
+          }
+        },
+        {
+          "form": "chunk",
+          "method": "GET",
+          "path": "/chunks/a9cd4c4142bc7409cb2cd9340a7c91fb4be5a0b30b61dca86acd7e696e06acb6",
+          "headers": [
+            [
+              "accept",
+              "application/json, text/plain, */*"
+            ],
+            [
+              "accept-encoding",
+              "identity"
+            ]
+          ],
+          "feed": {
+            "owner": "6fac4d18c912343bf86fa7049364dd4e424ab9c0",
+            "index": 0
+          },
+          "reply": {
+            "status": 404,
+            "body": {
+              "base64": "eyJjb2RlIjo0MDQsIm1lc3NhZ2UiOiJOb3QgRm91bmQifQ=="
+            }
+          }
+        },
+        {
+          "form": "soc_up",
+          "method": "POST",
+          "path": "/soc/6fac4d18c912343bf86fa7049364dd4e424ab9c0/ce6733d2ca4b9ce62d2329a67de04db7804ddb5b3d82911da0e1ada19186a710",
+          "query": [
+            [
+              "sig",
+              "47f67c097aa5cfbc62847872745122a3f41936463e0d765040f735e73fa01446160bc31b59ce7499d2beb92d11839483049198db3a7dcac9b3abd4abe87cd4f01c"
+            ]
+          ],
+          "headers": [
+            [
+              "accept",
+              "application/json, text/plain, */*"
+            ],
+            [
+              "accept-encoding",
+              "identity"
+            ],
+            [
+              "content-type",
+              "application/octet-stream"
+            ],
+            [
+              "swarm-postage-batch-id",
+              "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
+            ]
+          ],
+          "body": {
+            "bytes": 9,
+            "base64": "AQAAAAAAAAB4"
+          },
+          "reply": {
+            "status": 201
+          }
+        }
+      ]
+    },
+    {
+      "id": "write-feed-rule-in-custody",
+      "row": "writeFeedEntry",
+      "from": "methods/write-feed-rule-in-custody",
+      "key": "https://app.example",
+      "params": {
+        "object": [
+          [
+            "name",
+            {
+              "string": "blog"
+            }
+          ],
+          [
+            "data",
+            {
+              "string_bytes": 1,
+              "base64": "eA=="
+            }
+          ]
+        ]
+      },
+      "ready": {
+        "check": "publish",
+        "ok": true
+      },
+      "calls": [
+        {
+          "form": "stamps",
+          "method": "GET",
+          "path": "/stamps",
+          "headers": [
+            [
+              "accept",
+              "application/json, text/plain, */*"
+            ],
+            [
+              "accept-encoding",
+              "identity"
+            ]
+          ],
+          "reply": {
+            "status": 200
+          }
+        },
+        {
+          "form": "feed_head",
+          "method": "GET",
+          "path": "/feeds/6fac4d18c912343bf86fa7049364dd4e424ab9c0/2d8b6efca0db6410add40ecd6bda25b3ee2d614a8e6c12933931d91cca63c3e4",
+          "headers": [
+            [
+              "accept",
+              "application/json, text/plain, */*"
+            ],
+            [
+              "accept-encoding",
+              "identity"
+            ],
+            [
+              "swarm-only-root-chunk",
+              "true"
+            ]
+          ],
+          "reply": {
+            "status": 404
+          }
+        },
+        {
+          "form": "chunk",
+          "method": "GET",
+          "path": "/chunks/a9cd4c4142bc7409cb2cd9340a7c91fb4be5a0b30b61dca86acd7e696e06acb6",
+          "headers": [
+            [
+              "accept",
+              "application/json, text/plain, */*"
+            ],
+            [
+              "accept-encoding",
+              "identity"
+            ]
+          ],
+          "feed": {
+            "owner": "6fac4d18c912343bf86fa7049364dd4e424ab9c0",
+            "index": 0
+          },
+          "reply": {
+            "status": 404,
+            "body": {
+              "base64": "eyJjb2RlIjo0MDQsIm1lc3NhZ2UiOiJOb3QgRm91bmQifQ=="
+            }
+          }
+        },
+        {
+          "form": "soc_up",
+          "method": "POST",
+          "path": "/soc/6fac4d18c912343bf86fa7049364dd4e424ab9c0/ce6733d2ca4b9ce62d2329a67de04db7804ddb5b3d82911da0e1ada19186a710",
+          "query": [
+            [
+              "sig",
+              "47f67c097aa5cfbc62847872745122a3f41936463e0d765040f735e73fa01446160bc31b59ce7499d2beb92d11839483049198db3a7dcac9b3abd4abe87cd4f01c"
+            ]
+          ],
+          "headers": [
+            [
+              "accept",
+              "application/json, text/plain, */*"
+            ],
+            [
+              "accept-encoding",
+              "identity"
+            ],
+            [
+              "content-type",
+              "application/octet-stream"
+            ],
+            [
+              "swarm-postage-batch-id",
+              "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
+            ]
+          ],
+          "body": {
+            "bytes": 9,
+            "base64": "AQAAAAAAAAB4"
+          },
+          "reply": {
+            "status": 201
+          }
+        }
+      ]
+    },
+    {
+      "id": "write-feed-rule-custody-before-write",
+      "row": "writeFeedEntry",
+      "from": "methods/write-feed-rule-custody-before-write",
+      "key": "https://app.example",
+      "params": {
+        "object": [
+          [
+            "name",
+            {
+              "string": "blog"
+            }
+          ],
+          [
+            "data",
+            {
+              "string_bytes": 1,
+              "base64": "eA=="
+            }
+          ]
+        ]
+      },
+      "ready": {
+        "check": "publish",
+        "ok": true
+      },
+      "calls": [
+        {
+          "form": "stamps",
+          "method": "GET",
+          "path": "/stamps",
+          "headers": [
+            [
+              "accept",
+              "application/json, text/plain, */*"
+            ],
+            [
+              "accept-encoding",
+              "identity"
+            ]
+          ],
+          "reply": {
+            "status": 200
+          }
+        },
+        {
+          "form": "feed_head",
+          "method": "GET",
+          "path": "/feeds/6fac4d18c912343bf86fa7049364dd4e424ab9c0/2d8b6efca0db6410add40ecd6bda25b3ee2d614a8e6c12933931d91cca63c3e4",
+          "headers": [
+            [
+              "accept",
+              "application/json, text/plain, */*"
+            ],
+            [
+              "accept-encoding",
+              "identity"
+            ],
+            [
+              "swarm-only-root-chunk",
+              "true"
+            ]
+          ],
+          "reply": {
+            "status": 404
+          }
+        },
+        {
+          "form": "chunk",
+          "method": "GET",
+          "path": "/chunks/a9cd4c4142bc7409cb2cd9340a7c91fb4be5a0b30b61dca86acd7e696e06acb6",
+          "headers": [
+            [
+              "accept",
+              "application/json, text/plain, */*"
+            ],
+            [
+              "accept-encoding",
+              "identity"
+            ]
+          ],
+          "feed": {
+            "owner": "6fac4d18c912343bf86fa7049364dd4e424ab9c0",
+            "index": 0
+          },
+          "reply": {
+            "status": 404,
+            "body": {
+              "base64": "eyJjb2RlIjo0MDQsIm1lc3NhZ2UiOiJOb3QgRm91bmQifQ=="
+            }
+          }
+        }
+      ]
+    },
+    {
+      "id": "write-feed-rule-off-before-write",
+      "row": "writeFeedEntry",
+      "from": "methods/write-feed-rule-off-before-write",
+      "key": "https://app.example",
+      "params": {
+        "object": [
+          [
+            "name",
+            {
+              "string": "blog"
+            }
+          ],
+          [
+            "data",
+            {
+              "string_bytes": 1,
+              "base64": "eA=="
+            }
+          ]
+        ]
+      },
+      "ready": {
+        "check": "publish",
+        "ok": true
+      },
+      "calls": [
+        {
+          "form": "stamps",
+          "method": "GET",
+          "path": "/stamps",
+          "headers": [
+            [
+              "accept",
+              "application/json, text/plain, */*"
+            ],
+            [
+              "accept-encoding",
+              "identity"
+            ]
+          ],
+          "reply": {
+            "status": 200
+          }
+        },
+        {
+          "form": "feed_head",
+          "method": "GET",
+          "path": "/feeds/6fac4d18c912343bf86fa7049364dd4e424ab9c0/2d8b6efca0db6410add40ecd6bda25b3ee2d614a8e6c12933931d91cca63c3e4",
+          "headers": [
+            [
+              "accept",
+              "application/json, text/plain, */*"
+            ],
+            [
+              "accept-encoding",
+              "identity"
+            ],
+            [
+              "swarm-only-root-chunk",
+              "true"
+            ]
+          ],
+          "reply": {
+            "status": 404
+          }
+        },
+        {
+          "form": "chunk",
+          "method": "GET",
+          "path": "/chunks/a9cd4c4142bc7409cb2cd9340a7c91fb4be5a0b30b61dca86acd7e696e06acb6",
+          "headers": [
+            [
+              "accept",
+              "application/json, text/plain, */*"
+            ],
+            [
+              "accept-encoding",
+              "identity"
+            ]
+          ],
+          "feed": {
+            "owner": "6fac4d18c912343bf86fa7049364dd4e424ab9c0",
+            "index": 0
+          },
+          "reply": {
+            "status": 404,
+            "body": {
+              "base64": "eyJjb2RlIjo0MDQsIm1lc3NhZ2UiOiJOb3QgRm91bmQifQ=="
+            }
+          }
+        }
+      ]
+    },
+    {
+      "id": "write-feed-always-allow/0",
+      "row": "writeFeedEntry",
+      "from": "methods/write-feed-always-allow",
+      "key": "https://app.example",
+      "params": {
+        "object": [
+          [
+            "name",
+            {
+              "string": "blog"
+            }
+          ],
+          [
+            "data",
+            {
+              "string_bytes": 3,
+              "base64": "b25l"
+            }
+          ],
+          [
+            "index",
+            {
+              "number": "0"
+            }
+          ]
+        ]
+      },
+      "ready": {
+        "check": "publish",
+        "ok": true
+      },
+      "calls": [
+        {
+          "form": "stamps",
+          "method": "GET",
+          "path": "/stamps",
+          "headers": [
+            [
+              "accept",
+              "application/json, text/plain, */*"
+            ],
+            [
+              "accept-encoding",
+              "identity"
+            ]
+          ],
+          "reply": {
+            "status": 200
+          }
+        },
+        {
+          "form": "chunk",
+          "method": "GET",
+          "path": "/chunks/a9cd4c4142bc7409cb2cd9340a7c91fb4be5a0b30b61dca86acd7e696e06acb6",
+          "headers": [
+            [
+              "accept",
+              "application/json, text/plain, */*"
+            ],
+            [
+              "accept-encoding",
+              "identity"
+            ]
+          ],
+          "feed": {
+            "owner": "6fac4d18c912343bf86fa7049364dd4e424ab9c0",
+            "index": 0
+          },
+          "reply": {
+            "status": 404,
+            "body": {
+              "base64": "eyJjb2RlIjo0MDQsIm1lc3NhZ2UiOiJOb3QgRm91bmQifQ=="
+            }
+          }
+        },
+        {
+          "form": "soc_up",
+          "method": "POST",
+          "path": "/soc/6fac4d18c912343bf86fa7049364dd4e424ab9c0/ce6733d2ca4b9ce62d2329a67de04db7804ddb5b3d82911da0e1ada19186a710",
+          "query": [
+            [
+              "sig",
+              "cdf218d5eda0f482cf4b996e8d937f753050770ad6a81f2a657888f4066322053a7cbd40db5a825517924448fc8a01ca92a091dc2a0d550bfed8bad0f7f129a41c"
+            ]
+          ],
+          "headers": [
+            [
+              "accept",
+              "application/json, text/plain, */*"
+            ],
+            [
+              "accept-encoding",
+              "identity"
+            ],
+            [
+              "content-type",
+              "application/octet-stream"
+            ],
+            [
+              "swarm-postage-batch-id",
+              "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
+            ]
+          ],
+          "body": {
+            "bytes": 11,
+            "base64": "AwAAAAAAAABvbmU="
+          },
+          "reply": {
+            "status": 201
+          }
+        }
+      ]
+    },
+    {
+      "id": "write-feed-always-allow/1",
+      "row": "writeFeedEntry",
+      "from": "methods/write-feed-always-allow",
+      "key": "https://app.example",
+      "params": {
+        "object": [
+          [
+            "name",
+            {
+              "string": "blog"
+            }
+          ],
+          [
+            "data",
+            {
+              "string_bytes": 3,
+              "base64": "dHdv"
+            }
+          ],
+          [
+            "index",
+            {
+              "number": "1"
+            }
+          ]
+        ]
+      },
+      "ready": {
+        "check": "publish",
+        "ok": true
+      },
+      "calls": [
+        {
+          "form": "stamps",
+          "method": "GET",
+          "path": "/stamps",
+          "headers": [
+            [
+              "accept",
+              "application/json, text/plain, */*"
+            ],
+            [
+              "accept-encoding",
+              "identity"
+            ]
+          ],
+          "reply": {
+            "status": 200
+          }
+        },
+        {
+          "form": "chunk",
+          "method": "GET",
+          "path": "/chunks/7c04decb2db56b5aea2b998185feff50877775e22068b7cbcd88c774fea1eb3c",
+          "headers": [
+            [
+              "accept",
+              "application/json, text/plain, */*"
+            ],
+            [
+              "accept-encoding",
+              "identity"
+            ]
+          ],
+          "feed": {
+            "owner": "6fac4d18c912343bf86fa7049364dd4e424ab9c0",
+            "index": 1
+          },
+          "reply": {
+            "status": 404,
+            "body": {
+              "base64": "eyJjb2RlIjo0MDQsIm1lc3NhZ2UiOiJOb3QgRm91bmQifQ=="
+            }
+          }
+        },
+        {
+          "form": "soc_up",
+          "method": "POST",
+          "path": "/soc/6fac4d18c912343bf86fa7049364dd4e424ab9c0/c2840d68f739e75680764b0c30d431944130854e39775f4c4408766ad9a74d02",
+          "query": [
+            [
+              "sig",
+              "8aa890156a350ffc575a57774256755eccea99d60a88d6b16368016c98cead497f7eae495831fa6505f53394ed27e29694d49a27d50af171264856b9ac828c551c"
+            ]
+          ],
+          "headers": [
+            [
+              "accept",
+              "application/json, text/plain, */*"
+            ],
+            [
+              "accept-encoding",
+              "identity"
+            ],
+            [
+              "content-type",
+              "application/octet-stream"
+            ],
+            [
+              "swarm-postage-batch-id",
+              "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
+            ]
+          ],
+          "body": {
+            "bytes": 11,
+            "base64": "AwAAAAAAAAB0d28="
+          },
+          "reply": {
+            "status": 201
+          }
+        }
+      ]
+    },
+    {
       "id": "write-feed-string",
       "row": "writeFeedEntry",
       "from": "methods/write-feed-string",
@@ -27401,6 +30414,39 @@
       ]
     },
     {
+      "id": "messaging-identity-no-messaging-grant",
+      "row": "getMessagingIdentity",
+      "from": "methods/messaging-identity-no-messaging-grant",
+      "key": "https://app.example",
+      "params": {
+        "undefined": true
+      },
+      "ready": {
+        "check": "reachable",
+        "ok": true
+      },
+      "calls": [
+        {
+          "form": "addresses",
+          "method": "GET",
+          "path": "/addresses",
+          "headers": [
+            [
+              "accept",
+              "application/json, text/plain, */*"
+            ],
+            [
+              "accept-encoding",
+              "identity"
+            ]
+          ],
+          "reply": {
+            "status": 200
+          }
+        }
+      ]
+    },
+    {
       "id": "messaging-identity-unreachable",
       "row": "getMessagingIdentity",
       "from": "methods/messaging-identity-unreachable",
@@ -28385,6 +31431,386 @@
           },
           "reply": {
             "status": null
+          }
+        }
+      ]
+    },
+    {
+      "id": "send-pss-rule",
+      "row": "sendPss",
+      "from": "methods/send-pss-rule",
+      "key": "https://app.example",
+      "params": {
+        "object": [
+          [
+            "topic",
+            {
+              "string": "chat"
+            }
+          ],
+          [
+            "recipient",
+            {
+              "string": "023263e186e68d31581a2ac1bec6ca730ba9b9e6b4a194dd78798a36271d0a4a0b"
+            }
+          ],
+          [
+            "targets",
+            {
+              "string": "abcd"
+            }
+          ],
+          [
+            "data",
+            {
+              "string_bytes": 2,
+              "base64": "aGk="
+            }
+          ]
+        ]
+      },
+      "ready": {
+        "check": "publish",
+        "ok": true
+      },
+      "calls": [
+        {
+          "form": "stamps",
+          "method": "GET",
+          "path": "/stamps",
+          "headers": [
+            [
+              "accept",
+              "application/json, text/plain, */*"
+            ],
+            [
+              "accept-encoding",
+              "identity"
+            ]
+          ],
+          "reply": {
+            "status": 200
+          }
+        },
+        {
+          "form": "pss_send",
+          "method": "POST",
+          "path": "/pss/send/7d37ee8427bc4ef7fa6c30bba155020c46b01043618747ed07cb611ab74a11ee/abcd",
+          "query": [
+            [
+              "recipient",
+              "023263e186e68d31581a2ac1bec6ca730ba9b9e6b4a194dd78798a36271d0a4a0b"
+            ]
+          ],
+          "headers": [
+            [
+              "accept",
+              "application/json, text/plain, */*"
+            ],
+            [
+              "accept-encoding",
+              "identity"
+            ],
+            [
+              "content-type",
+              "application/octet-stream"
+            ],
+            [
+              "swarm-postage-batch-id",
+              "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
+            ]
+          ],
+          "body": {
+            "bytes": 2,
+            "base64": "aGk="
+          },
+          "reply": {
+            "status": 201
+          }
+        }
+      ]
+    },
+    {
+      "id": "send-pss-rule-in-custody",
+      "row": "sendPss",
+      "from": "methods/send-pss-rule-in-custody",
+      "key": "https://app.example",
+      "params": {
+        "object": [
+          [
+            "topic",
+            {
+              "string": "chat"
+            }
+          ],
+          [
+            "recipient",
+            {
+              "string": "023263e186e68d31581a2ac1bec6ca730ba9b9e6b4a194dd78798a36271d0a4a0b"
+            }
+          ],
+          [
+            "targets",
+            {
+              "string": "abcd"
+            }
+          ],
+          [
+            "data",
+            {
+              "string_bytes": 2,
+              "base64": "aGk="
+            }
+          ]
+        ]
+      },
+      "ready": {
+        "check": "publish",
+        "ok": true
+      },
+      "calls": [
+        {
+          "form": "stamps",
+          "method": "GET",
+          "path": "/stamps",
+          "headers": [
+            [
+              "accept",
+              "application/json, text/plain, */*"
+            ],
+            [
+              "accept-encoding",
+              "identity"
+            ]
+          ],
+          "reply": {
+            "status": 200
+          }
+        },
+        {
+          "form": "pss_send",
+          "method": "POST",
+          "path": "/pss/send/7d37ee8427bc4ef7fa6c30bba155020c46b01043618747ed07cb611ab74a11ee/abcd",
+          "query": [
+            [
+              "recipient",
+              "023263e186e68d31581a2ac1bec6ca730ba9b9e6b4a194dd78798a36271d0a4a0b"
+            ]
+          ],
+          "headers": [
+            [
+              "accept",
+              "application/json, text/plain, */*"
+            ],
+            [
+              "accept-encoding",
+              "identity"
+            ],
+            [
+              "content-type",
+              "application/octet-stream"
+            ],
+            [
+              "swarm-postage-batch-id",
+              "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
+            ]
+          ],
+          "body": {
+            "bytes": 2,
+            "base64": "aGk="
+          },
+          "reply": {
+            "status": 201
+          }
+        }
+      ]
+    },
+    {
+      "id": "send-pss-always-allow/0",
+      "row": "sendPss",
+      "from": "methods/send-pss-always-allow",
+      "key": "https://app.example",
+      "params": {
+        "object": [
+          [
+            "topic",
+            {
+              "string": "chat"
+            }
+          ],
+          [
+            "recipient",
+            {
+              "string": "023263e186e68d31581a2ac1bec6ca730ba9b9e6b4a194dd78798a36271d0a4a0b"
+            }
+          ],
+          [
+            "targets",
+            {
+              "string": "abcd"
+            }
+          ],
+          [
+            "data",
+            {
+              "string_bytes": 2,
+              "base64": "aGk="
+            }
+          ]
+        ]
+      },
+      "ready": {
+        "check": "publish",
+        "ok": true
+      },
+      "calls": [
+        {
+          "form": "stamps",
+          "method": "GET",
+          "path": "/stamps",
+          "headers": [
+            [
+              "accept",
+              "application/json, text/plain, */*"
+            ],
+            [
+              "accept-encoding",
+              "identity"
+            ]
+          ],
+          "reply": {
+            "status": 200
+          }
+        },
+        {
+          "form": "pss_send",
+          "method": "POST",
+          "path": "/pss/send/7d37ee8427bc4ef7fa6c30bba155020c46b01043618747ed07cb611ab74a11ee/abcd",
+          "query": [
+            [
+              "recipient",
+              "023263e186e68d31581a2ac1bec6ca730ba9b9e6b4a194dd78798a36271d0a4a0b"
+            ]
+          ],
+          "headers": [
+            [
+              "accept",
+              "application/json, text/plain, */*"
+            ],
+            [
+              "accept-encoding",
+              "identity"
+            ],
+            [
+              "content-type",
+              "application/octet-stream"
+            ],
+            [
+              "swarm-postage-batch-id",
+              "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
+            ]
+          ],
+          "body": {
+            "bytes": 2,
+            "base64": "aGk="
+          },
+          "reply": {
+            "status": 201
+          }
+        }
+      ]
+    },
+    {
+      "id": "send-pss-always-allow/1",
+      "row": "sendPss",
+      "from": "methods/send-pss-always-allow",
+      "key": "https://app.example",
+      "params": {
+        "object": [
+          [
+            "topic",
+            {
+              "string": "chat"
+            }
+          ],
+          [
+            "recipient",
+            {
+              "string": "023263e186e68d31581a2ac1bec6ca730ba9b9e6b4a194dd78798a36271d0a4a0b"
+            }
+          ],
+          [
+            "targets",
+            {
+              "string": "abcd"
+            }
+          ],
+          [
+            "data",
+            {
+              "string_bytes": 5,
+              "base64": "YWdhaW4="
+            }
+          ]
+        ]
+      },
+      "ready": {
+        "check": "publish",
+        "ok": true
+      },
+      "calls": [
+        {
+          "form": "stamps",
+          "method": "GET",
+          "path": "/stamps",
+          "headers": [
+            [
+              "accept",
+              "application/json, text/plain, */*"
+            ],
+            [
+              "accept-encoding",
+              "identity"
+            ]
+          ],
+          "reply": {
+            "status": 200
+          }
+        },
+        {
+          "form": "pss_send",
+          "method": "POST",
+          "path": "/pss/send/7d37ee8427bc4ef7fa6c30bba155020c46b01043618747ed07cb611ab74a11ee/abcd",
+          "query": [
+            [
+              "recipient",
+              "023263e186e68d31581a2ac1bec6ca730ba9b9e6b4a194dd78798a36271d0a4a0b"
+            ]
+          ],
+          "headers": [
+            [
+              "accept",
+              "application/json, text/plain, */*"
+            ],
+            [
+              "accept-encoding",
+              "identity"
+            ],
+            [
+              "content-type",
+              "application/octet-stream"
+            ],
+            [
+              "swarm-postage-batch-id",
+              "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
+            ]
+          ],
+          "body": {
+            "bytes": 5,
+            "base64": "YWdhaW4="
+          },
+          "reply": {
+            "status": 201
           }
         }
       ]
@@ -30348,6 +33774,116 @@
       ]
     },
     {
+      "id": "send-gsoc-rule",
+      "row": "sendGsoc",
+      "from": "methods/send-gsoc-rule",
+      "key": "https://app.example",
+      "params": {
+        "object": [
+          [
+            "topic",
+            {
+              "string": "chat"
+            }
+          ],
+          [
+            "data",
+            {
+              "string_bytes": 2,
+              "base64": "aGk="
+            }
+          ]
+        ]
+      },
+      "ready": {
+        "check": "publish",
+        "ok": true
+      },
+      "calls": [
+        {
+          "form": "stamps",
+          "method": "GET",
+          "path": "/stamps",
+          "headers": [
+            [
+              "accept",
+              "application/json, text/plain, */*"
+            ],
+            [
+              "accept-encoding",
+              "identity"
+            ]
+          ],
+          "reply": {
+            "status": 200
+          }
+        },
+        {
+          "form": "soc_up",
+          "method": "POST",
+          "path": "/soc/6620b69328c5d52a787bac965a0c090432872639/7d37ee8427bc4ef7fa6c30bba155020c46b01043618747ed07cb611ab74a11ee",
+          "query": [
+            [
+              "sig",
+              "8d8085b09146fa55e17b4f8d0b55314c844c1ccfb70fec29c5e570e278303ded51f5462c41e874ef6ee0e074785bd1191aa6df7baac7bd304a1a7a7337a0d5871b"
+            ]
+          ],
+          "headers": [
+            [
+              "accept",
+              "application/json, text/plain, */*"
+            ],
+            [
+              "accept-encoding",
+              "identity"
+            ],
+            [
+              "content-type",
+              "application/octet-stream"
+            ],
+            [
+              "swarm-postage-batch-id",
+              "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
+            ]
+          ],
+          "body": {
+            "bytes": 10,
+            "base64": "AgAAAAAAAABoaQ=="
+          },
+          "reply": {
+            "status": 201
+          }
+        }
+      ]
+    },
+    {
+      "id": "subscribe-no-messaging-grant",
+      "row": "subscribe",
+      "from": "methods/subscribe-no-messaging-grant",
+      "key": "https://app.example",
+      "params": {
+        "object": [
+          [
+            "kind",
+            {
+              "string": "pss"
+            }
+          ],
+          [
+            "topic",
+            {
+              "string": "chat"
+            }
+          ]
+        ]
+      },
+      "ready": {
+        "check": "subscribe",
+        "ok": true
+      },
+      "calls": []
+    },
+    {
       "id": "subscribe-unreachable",
       "row": "subscribe",
       "from": "methods/subscribe-unreachable",
@@ -30478,7 +34014,8 @@
       },
       "ready": {
         "check": "subscribe",
-        "ok": true
+        "ok": false,
+        "reason": "proxy-or-tor"
       },
       "calls": []
     },
@@ -30493,6 +34030,88 @@
             "kind",
             {
               "string": "gsoc"
+            }
+          ],
+          [
+            "topic",
+            {
+              "string": "chat"
+            }
+          ]
+        ]
+      },
+      "ready": {
+        "check": "subscribe",
+        "ok": false,
+        "reason": "proxy-or-tor"
+      },
+      "calls": []
+    },
+    {
+      "id": "subscribe-pss-topic-loopback-node-proxy",
+      "row": "subscribe",
+      "from": "methods/subscribe-pss-topic-loopback-node-proxy",
+      "key": "https://app.example",
+      "params": {
+        "object": [
+          [
+            "kind",
+            {
+              "string": "pss"
+            }
+          ],
+          [
+            "topic",
+            {
+              "string": "chat"
+            }
+          ]
+        ]
+      },
+      "ready": {
+        "check": "subscribe",
+        "ok": true
+      },
+      "calls": []
+    },
+    {
+      "id": "subscribe-gsoc-topic-loopback-node-tor",
+      "row": "subscribe",
+      "from": "methods/subscribe-gsoc-topic-loopback-node-tor",
+      "key": "https://app.example",
+      "params": {
+        "object": [
+          [
+            "kind",
+            {
+              "string": "gsoc"
+            }
+          ],
+          [
+            "topic",
+            {
+              "string": "chat"
+            }
+          ]
+        ]
+      },
+      "ready": {
+        "check": "subscribe",
+        "ok": true
+      },
+      "calls": []
+    },
+    {
+      "id": "subscribe-pss-topic-remote-node-direct",
+      "row": "subscribe",
+      "from": "methods/subscribe-pss-topic-remote-node-direct",
+      "key": "https://app.example",
+      "params": {
+        "object": [
+          [
+            "kind",
+            {
+              "string": "pss"
             }
           ],
           [
@@ -32752,6 +36371,759 @@
       ]
     },
     {
+      "id": "readData-one-chunk-at-depths-6-and-7",
+      "row": "readData",
+      "from": "design 0015, the honest calls and forbidden alternatives (deep trees)",
+      "key": "https://app.example",
+      "params": {
+        "object": [
+          [
+            "reference",
+            {
+              "string": "52245b1db88bc7ecf35206a4e99a1124e84d780a9424cfa652ff0f0afcb16364"
+            }
+          ]
+        ]
+      },
+      "ready": {
+        "check": "reachable",
+        "ok": true
+      },
+      "note": "Y fetched at depths 6 and 7, Z (the depth-6 copy's intermediate child) at 7; the walk ends unverifiable at Z's depth-8 occurrence",
+      "calls": [
+        {
+          "form": "chunk",
+          "method": "GET",
+          "path": "/chunks/52245b1db88bc7ecf35206a4e99a1124e84d780a9424cfa652ff0f0afcb16364",
+          "headers": [
+            [
+              "accept",
+              "application/json, text/plain, */*"
+            ],
+            [
+              "accept-encoding",
+              "identity"
+            ]
+          ],
+          "reply": {
+            "status": 200,
+            "body": {
+              "base64": "AAAQAAAAAACCdkvIJ3UaGY0CwsPqpNyywE9MR0OIwD68IaWFfGkGKWEVfV1BZwgYp0sfsCQ334mf4xa2l2TH3g6KrjnlIefc"
+            }
+          }
+        },
+        {
+          "form": "chunk",
+          "method": "GET",
+          "path": "/chunks/82764bc827751a198d02c2c3eaa4dcb2c04f4c474388c03ebc21a5857c690629",
+          "headers": [
+            [
+              "accept",
+              "application/json, text/plain, */*"
+            ],
+            [
+              "accept-encoding",
+              "identity"
+            ]
+          ],
+          "tree": {
+            "length": 524288,
+            "depth": 1
+          },
+          "reply": {
+            "status": 200,
+            "body": {
+              "base64": "AAAIAAAAAABtgrksX/y1Nto0+rgFptEXRshuF/0Z2IBWsOcfdz58FQ=="
+            }
+          }
+        },
+        {
+          "form": "chunk",
+          "method": "GET",
+          "path": "/chunks/61157d5d41670818a74b1fb02437df899fe316b69764c7de0e8aae39e521e7dc",
+          "headers": [
+            [
+              "accept",
+              "application/json, text/plain, */*"
+            ],
+            [
+              "accept-encoding",
+              "identity"
+            ]
+          ],
+          "tree": {
+            "length": 524288,
+            "depth": 1
+          },
+          "reply": {
+            "status": 200,
+            "body": {
+              "base64": "AAAIAAAAAACCdkvIJ3UaGY0CwsPqpNyywE9MR0OIwD68IaWFfGkGKQ=="
+            }
+          }
+        },
+        {
+          "form": "chunk",
+          "method": "GET",
+          "path": "/chunks/6d82b92c5ffcb536da34fab805a6d11746c86e17fd19d88056b0e71f773e7c15",
+          "headers": [
+            [
+              "accept",
+              "application/json, text/plain, */*"
+            ],
+            [
+              "accept-encoding",
+              "identity"
+            ]
+          ],
+          "tree": {
+            "length": 524288,
+            "depth": 2
+          },
+          "reply": {
+            "status": 200,
+            "body": {
+              "base64": "AAAIAAAAAABRxJ4p/+TFKfAECyqHIMSj1nYWdaK9fJkWaCBVDtBx/w=="
+            }
+          }
+        },
+        {
+          "form": "chunk",
+          "method": "GET",
+          "path": "/chunks/82764bc827751a198d02c2c3eaa4dcb2c04f4c474388c03ebc21a5857c690629",
+          "headers": [
+            [
+              "accept",
+              "application/json, text/plain, */*"
+            ],
+            [
+              "accept-encoding",
+              "identity"
+            ]
+          ],
+          "tree": {
+            "length": 524288,
+            "depth": 2
+          },
+          "reply": {
+            "status": 200,
+            "body": {
+              "base64": "AAAIAAAAAABtgrksX/y1Nto0+rgFptEXRshuF/0Z2IBWsOcfdz58FQ=="
+            }
+          }
+        },
+        {
+          "form": "chunk",
+          "method": "GET",
+          "path": "/chunks/51c49e29ffe4c529f0040b2a8720c4a3d6761675a2bd7c99166820550ed071ff",
+          "headers": [
+            [
+              "accept",
+              "application/json, text/plain, */*"
+            ],
+            [
+              "accept-encoding",
+              "identity"
+            ]
+          ],
+          "tree": {
+            "length": 524288,
+            "depth": 3
+          },
+          "reply": {
+            "status": 200,
+            "body": {
+              "base64": "AAAIAAAAAACxc4vB3EiDLoaTq0I2FzLH3CgmE7VUF5AseRPCVicDsw=="
+            }
+          }
+        },
+        {
+          "form": "chunk",
+          "method": "GET",
+          "path": "/chunks/6d82b92c5ffcb536da34fab805a6d11746c86e17fd19d88056b0e71f773e7c15",
+          "headers": [
+            [
+              "accept",
+              "application/json, text/plain, */*"
+            ],
+            [
+              "accept-encoding",
+              "identity"
+            ]
+          ],
+          "tree": {
+            "length": 524288,
+            "depth": 3
+          },
+          "reply": {
+            "status": 200,
+            "body": {
+              "base64": "AAAIAAAAAABRxJ4p/+TFKfAECyqHIMSj1nYWdaK9fJkWaCBVDtBx/w=="
+            }
+          }
+        },
+        {
+          "form": "chunk",
+          "method": "GET",
+          "path": "/chunks/b1738bc1dc48832e8693ab42361732c7dc282613b55417902c7913c2562703b3",
+          "headers": [
+            [
+              "accept",
+              "application/json, text/plain, */*"
+            ],
+            [
+              "accept-encoding",
+              "identity"
+            ]
+          ],
+          "tree": {
+            "length": 524288,
+            "depth": 4
+          },
+          "reply": {
+            "status": 200,
+            "body": {
+              "base64": "AAAIAAAAAACsjwl8henBjVD4snMliY4/TjEr5iICGHzWEGO6OC8GYw=="
+            }
+          }
+        },
+        {
+          "form": "chunk",
+          "method": "GET",
+          "path": "/chunks/51c49e29ffe4c529f0040b2a8720c4a3d6761675a2bd7c99166820550ed071ff",
+          "headers": [
+            [
+              "accept",
+              "application/json, text/plain, */*"
+            ],
+            [
+              "accept-encoding",
+              "identity"
+            ]
+          ],
+          "tree": {
+            "length": 524288,
+            "depth": 4
+          },
+          "reply": {
+            "status": 200,
+            "body": {
+              "base64": "AAAIAAAAAACxc4vB3EiDLoaTq0I2FzLH3CgmE7VUF5AseRPCVicDsw=="
+            }
+          }
+        },
+        {
+          "form": "chunk",
+          "method": "GET",
+          "path": "/chunks/ac8f097c85e9c18d50f8b27325898e3f4e312be62202187cd61063ba382f0663",
+          "headers": [
+            [
+              "accept",
+              "application/json, text/plain, */*"
+            ],
+            [
+              "accept-encoding",
+              "identity"
+            ]
+          ],
+          "tree": {
+            "length": 524288,
+            "depth": 5
+          },
+          "reply": {
+            "status": 200,
+            "body": {
+              "base64": "AAAIAAAAAADwV1RXBtFeiFTdG6ck5Gevb7AlwExt6jUQGN+rs2qxMw=="
+            }
+          }
+        },
+        {
+          "form": "chunk",
+          "method": "GET",
+          "path": "/chunks/b1738bc1dc48832e8693ab42361732c7dc282613b55417902c7913c2562703b3",
+          "headers": [
+            [
+              "accept",
+              "application/json, text/plain, */*"
+            ],
+            [
+              "accept-encoding",
+              "identity"
+            ]
+          ],
+          "tree": {
+            "length": 524288,
+            "depth": 5
+          },
+          "reply": {
+            "status": 200,
+            "body": {
+              "base64": "AAAIAAAAAACsjwl8henBjVD4snMliY4/TjEr5iICGHzWEGO6OC8GYw=="
+            }
+          }
+        },
+        {
+          "form": "chunk",
+          "method": "GET",
+          "path": "/chunks/f057545706d15e8854dd1ba724e467af6fb025c04c6dea351018dfabb36ab133",
+          "headers": [
+            [
+              "accept",
+              "application/json, text/plain, */*"
+            ],
+            [
+              "accept-encoding",
+              "identity"
+            ]
+          ],
+          "tree": {
+            "length": 524288,
+            "depth": 6
+          },
+          "reply": {
+            "status": 200,
+            "body": {
+              "base64": "AAAIAAAAAADQpfji2C5sNFRaMcHSTXqDKmHjiB403okFiaOD0afLYQ=="
+            }
+          }
+        },
+        {
+          "form": "chunk",
+          "method": "GET",
+          "path": "/chunks/ac8f097c85e9c18d50f8b27325898e3f4e312be62202187cd61063ba382f0663",
+          "headers": [
+            [
+              "accept",
+              "application/json, text/plain, */*"
+            ],
+            [
+              "accept-encoding",
+              "identity"
+            ]
+          ],
+          "tree": {
+            "length": 524288,
+            "depth": 6
+          },
+          "reply": {
+            "status": 200,
+            "body": {
+              "base64": "AAAIAAAAAADwV1RXBtFeiFTdG6ck5Gevb7AlwExt6jUQGN+rs2qxMw=="
+            }
+          }
+        },
+        {
+          "form": "chunk",
+          "method": "GET",
+          "path": "/chunks/d0a5f8e2d82e6c34545a31c1d24d7a832a61e3881e34de890589a383d1a7cb61",
+          "headers": [
+            [
+              "accept",
+              "application/json, text/plain, */*"
+            ],
+            [
+              "accept-encoding",
+              "identity"
+            ]
+          ],
+          "tree": {
+            "length": 524288,
+            "depth": 7
+          },
+          "reply": {
+            "status": 200,
+            "body": {
+              "base64": "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"
+            }
+          }
+        },
+        {
+          "form": "chunk",
+          "method": "GET",
+          "path": "/chunks/f057545706d15e8854dd1ba724e467af6fb025c04c6dea351018dfabb36ab133",
+          "headers": [
+            [
+              "accept",
+              "application/json, text/plain, */*"
+            ],
+            [
+              "accept-encoding",
+              "identity"
+            ]
+          ],
+          "tree": {
+            "length": 524288,
+            "depth": 7
+          },
+          "reply": {
+            "status": 200,
+            "body": {
+              "base64": "AAAIAAAAAADQpfji2C5sNFRaMcHSTXqDKmHjiB403okFiaOD0afLYQ=="
+            }
+          }
+        }
+      ]
+    },
+    {
+      "id": "readData-leaf-at-depth-8-fetched-again",
+      "row": "readData",
+      "from": "design 0015, the honest calls and forbidden alternatives (deep trees)",
+      "key": "https://app.example",
+      "params": {
+        "object": [
+          [
+            "reference",
+            {
+              "string": "be020d4b601a387af68d3c48c6229d8298f6ebf3b53e11fcb5740f5726c73c85"
+            }
+          ]
+        ]
+      },
+      "ready": {
+        "check": "reachable",
+        "ok": true
+      },
+      "note": "seven wrappers, X at depth 7, its first leaf fetched again at depth 8",
+      "calls": [
+        {
+          "form": "chunk",
+          "method": "GET",
+          "path": "/chunks/be020d4b601a387af68d3c48c6229d8298f6ebf3b53e11fcb5740f5726c73c85",
+          "headers": [
+            [
+              "accept",
+              "application/json, text/plain, */*"
+            ],
+            [
+              "accept-encoding",
+              "identity"
+            ]
+          ],
+          "reply": {
+            "status": 200,
+            "body": {
+              "base64": "AAAIAAAAAADoLZFlWGjb50qdQtZaVBktSZd4NVaETdgs/bWrAKtBwA=="
+            }
+          }
+        },
+        {
+          "form": "chunk",
+          "method": "GET",
+          "path": "/chunks/e82d91655868dbe74a9d42d65a54192d4997783556844dd82cfdb5ab00ab41c0",
+          "headers": [
+            [
+              "accept",
+              "application/json, text/plain, */*"
+            ],
+            [
+              "accept-encoding",
+              "identity"
+            ]
+          ],
+          "tree": {
+            "length": 524288,
+            "depth": 1
+          },
+          "reply": {
+            "status": 200,
+            "body": {
+              "base64": "AAAIAAAAAACT5k5c5iIuoVZEBTCN91z1JnyDObYQ1vAAPsWVVCAYNg=="
+            }
+          }
+        },
+        {
+          "form": "chunk",
+          "method": "GET",
+          "path": "/chunks/93e64e5ce6222ea1564405308df75cf5267c8339b610d6f0003ec59554201836",
+          "headers": [
+            [
+              "accept",
+              "application/json, text/plain, */*"
+            ],
+            [
+              "accept-encoding",
+              "identity"
+            ]
+          ],
+          "tree": {
+            "length": 524288,
+            "depth": 2
+          },
+          "reply": {
+            "status": 200,
+            "body": {
+              "base64": "AAAIAAAAAAAWX8cfq8jNRokqYmVZ635RZvpTRsBlOpD81DEWUI46Gw=="
+            }
+          }
+        },
+        {
+          "form": "chunk",
+          "method": "GET",
+          "path": "/chunks/165fc71fabc8cd46892a626559eb7e5166fa5346c0653a90fcd43116508e3a1b",
+          "headers": [
+            [
+              "accept",
+              "application/json, text/plain, */*"
+            ],
+            [
+              "accept-encoding",
+              "identity"
+            ]
+          ],
+          "tree": {
+            "length": 524288,
+            "depth": 3
+          },
+          "reply": {
+            "status": 200,
+            "body": {
+              "base64": "AAAIAAAAAABN+j94533aDAhhIK6ZqFwIcFciM75SpBz6zL8eZOwmsA=="
+            }
+          }
+        },
+        {
+          "form": "chunk",
+          "method": "GET",
+          "path": "/chunks/4dfa3f78e77dda0c086120ae99a85c0870572233be52a41cfaccbf1e64ec26b0",
+          "headers": [
+            [
+              "accept",
+              "application/json, text/plain, */*"
+            ],
+            [
+              "accept-encoding",
+              "identity"
+            ]
+          ],
+          "tree": {
+            "length": 524288,
+            "depth": 4
+          },
+          "reply": {
+            "status": 200,
+            "body": {
+              "base64": "AAAIAAAAAAB+d3DOcuC6shmtsjq7nJEdOazv9aJmQ+oFKSahGcHQtg=="
+            }
+          }
+        },
+        {
+          "form": "chunk",
+          "method": "GET",
+          "path": "/chunks/7e7770ce72e0bab219adb23abb9c911d39aceff5a26643ea052926a119c1d0b6",
+          "headers": [
+            [
+              "accept",
+              "application/json, text/plain, */*"
+            ],
+            [
+              "accept-encoding",
+              "identity"
+            ]
+          ],
+          "tree": {
+            "length": 524288,
+            "depth": 5
+          },
+          "reply": {
+            "status": 200,
+            "body": {
+              "base64": "AAAIAAAAAAC1UmFeW4FGAVYZLMFTvQgOkdeLLuBNfpNHfQ4PZpjYYA=="
+            }
+          }
+        },
+        {
+          "form": "chunk",
+          "method": "GET",
+          "path": "/chunks/b552615e5b81460156192cc153bd080e91d78b2ee04d7e93477d0e0f6698d860",
+          "headers": [
+            [
+              "accept",
+              "application/json, text/plain, */*"
+            ],
+            [
+              "accept-encoding",
+              "identity"
+            ]
+          ],
+          "tree": {
+            "length": 524288,
+            "depth": 6
+          },
+          "reply": {
+            "status": 200,
+            "body": {
+              "base64": "AAAIAAAAAABJ34roXHg49BI4Sb69nyrkf8RmkvRVPS8mz+Rtoc2I9g=="
+            }
+          }
+        },
+        {
+          "form": "chunk",
+          "method": "GET",
+          "path": "/chunks/49df8ae85c7838f4123849bebd9f2ae47fc46692f4553d2f26cfe46da1cd88f6",
+          "headers": [
+            [
+              "accept",
+              "application/json, text/plain, */*"
+            ],
+            [
+              "accept-encoding",
+              "identity"
+            ]
+          ],
+          "tree": {
+            "length": 524288,
+            "depth": 7
+          },
+          "reply": {
+            "status": 200,
+            "body": {
+              "base64": "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"
+            }
+          }
+        },
+        {
+          "form": "bytes",
+          "method": "GET",
+          "path": "/bytes/be020d4b601a387af68d3c48c6229d8298f6ebf3b53e11fcb5740f5726c73c85",
+          "headers": [
+            [
+              "accept",
+              "application/json, text/plain, */*"
+            ],
+            [
+              "accept-encoding",
+              "identity"
+            ],
+            [
+              "range",
+              "bytes=0-524287"
+            ]
+          ],
+          "max_bytes": 524288,
+          "reply": {
+            "status": 206
+          }
+        },
+        {
+          "form": "chunk",
+          "method": "GET",
+          "path": "/chunks/b2581c8fd0e5a06695c36fa34a49e287869d40d8143c12bb5fabadb317b061ae",
+          "headers": [
+            [
+              "accept",
+              "application/json, text/plain, */*"
+            ],
+            [
+              "accept-encoding",
+              "identity"
+            ]
+          ],
+          "tree": {
+            "length": 4096,
+            "depth": 8
+          },
+          "reply": {
+            "status": 200,
+            "body": {
+              "base64": "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"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "id": "readData-over-full-intermediate",
+      "row": "readData",
+      "from": "design 0015, the honest calls and forbidden alternatives (deep trees)",
+      "key": "https://app.example",
+      "params": {
+        "object": [
+          [
+            "reference",
+            {
+              "string": "88ad687df8469fade881fc4ea82d271a83eafa7f89ee82306137271e9b6b4c90"
+            }
+          ]
+        ]
+      },
+      "ready": {
+        "check": "reachable",
+        "ok": true
+      },
+      "note": "a root of four references over 8,192 bytes: two leaves, then two zero-length children",
+      "calls": [
+        {
+          "form": "chunk",
+          "method": "GET",
+          "path": "/chunks/88ad687df8469fade881fc4ea82d271a83eafa7f89ee82306137271e9b6b4c90",
+          "headers": [
+            [
+              "accept",
+              "application/json, text/plain, */*"
+            ],
+            [
+              "accept-encoding",
+              "identity"
+            ]
+          ],
+          "reply": {
+            "status": 200,
+            "body": {
+              "base64": "ACAAAAAAAAD9wQWRkS9Jay3Iodw44Vw4bb0VjVL7yqVBSC3BGgbormi3N3P5e/iDr52xzAt3jEyvi+urZrDh+BeVjiw+5ZX/5hGa1iAcKKdkE4zU/412i6/AFlJWlQ9XoFjU/wQX1jrUgkxX5joCTv7VyZFXKbAgmyHVIbgtS3clxUaOw9gYgw=="
+            }
+          }
+        },
+        {
+          "form": "bytes",
+          "method": "GET",
+          "path": "/bytes/88ad687df8469fade881fc4ea82d271a83eafa7f89ee82306137271e9b6b4c90",
+          "headers": [
+            [
+              "accept",
+              "application/json, text/plain, */*"
+            ],
+            [
+              "accept-encoding",
+              "identity"
+            ],
+            [
+              "range",
+              "bytes=0-8191"
+            ]
+          ],
+          "max_bytes": 8192,
+          "reply": {
+            "status": 206
+          }
+        },
+        {
+          "form": "chunk",
+          "method": "GET",
+          "path": "/chunks/68b73773f97bf883af9db1cc0b778c4caf8bebab66b0e1f817958e2c3ee595ff",
+          "headers": [
+            [
+              "accept",
+              "application/json, text/plain, */*"
+            ],
+            [
+              "accept-encoding",
+              "identity"
+            ]
+          ],
+          "tree": {
+            "length": 4096,
+            "depth": 1
+          },
+          "reply": {
+            "status": 200,
+            "body": {
+              "base64": "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"
+            }
+          }
+        }
+      ]
+    },
+    {
       "id": "swarm.publish-data-default",
       "row": "swarm.publish:data,file",
       "from": "publish-service.js / feed-service.js at the swarm reference",
@@ -34259,31 +38631,6 @@
             "status": 200,
             "body": {
               "base64": "AQAIAAAAAADn6pWseLmFSgTU1Cc5XmxxhHeipESI/jMJTNQugQBM+Ttxf8lbL2TemA6c2RIe0/s3xDMLyb6/ikC2Bi7lpI+E"
-            }
-          }
-        },
-        {
-          "form": "chunk",
-          "method": "GET",
-          "path": "/chunks/e7ea95ac78b9854a04d4d427395e6c718477a2a44488fe33094cd42e81004cf9",
-          "headers": [
-            [
-              "accept",
-              "application/json, text/plain, */*"
-            ],
-            [
-              "accept-encoding",
-              "identity"
-            ]
-          ],
-          "tree": {
-            "length": 524288,
-            "depth": 1
-          },
-          "reply": {
-            "status": 200,
-            "body": {
-              "base64": "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"
             }
           }
         },
@@ -37210,7 +41557,7 @@
       ]
     },
     {
-      "id": "updateFeed-83rd-probe",
+      "id": "updateFeed-82nd-probe",
       "row": "updateFeed",
       "from": "honest/update-feed-head-81-reads",
       "key": "https://app.example",
@@ -37235,7 +41582,7 @@
         "ok": true
       },
       "rule": "count",
-      "note": "an 83rd probe chunk",
+      "note": "an 82nd head-probe read",
       "calls": [
         {
           "form": "stamps",
@@ -39319,31 +43666,6 @@
           "feed": {
             "owner": "6fac4d18c912343bf86fa7049364dd4e424ab9c0",
             "index": 1099511627775
-          },
-          "reply": {
-            "status": 200,
-            "body": {
-              "base64": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
-            }
-          }
-        },
-        {
-          "form": "chunk",
-          "method": "GET",
-          "path": "/chunks/fe61db02ce4ed5a6b13df6edacae03255e7f75f30e27632e87aeebddf5b9676a",
-          "headers": [
-            [
-              "accept",
-              "application/json, text/plain, */*"
-            ],
-            [
-              "accept-encoding",
-              "identity"
-            ]
-          ],
-          "feed": {
-            "owner": "6fac4d18c912343bf86fa7049364dd4e424ab9c0",
-            "index": 1099511627775
           }
         }
       ]
@@ -39387,7 +43709,7 @@
         "ok": true
       },
       "rule": "query",
-      "note": "the 128-hex PSS recipient (F-9)",
+      "note": "the 128-hex PSS recipient, bee-js's form before #1062",
       "calls": [
         {
           "form": "stamps",
@@ -40511,6 +44833,723 @@
         }
       ],
       "note": "a slot inside a logical leaf whose own span is large"
+    },
+    {
+      "id": "readData-depth-7-copy-child-at-depth-8",
+      "row": "readData",
+      "from": "design 0015, the honest calls and forbidden alternatives (deep trees)",
+      "key": "https://app.example",
+      "params": {
+        "object": [
+          [
+            "reference",
+            {
+              "string": "52245b1db88bc7ecf35206a4e99a1124e84d780a9424cfa652ff0f0afcb16364"
+            }
+          ]
+        ]
+      },
+      "ready": {
+        "check": "reachable",
+        "ok": true
+      },
+      "note": "the depth-7 copy's intermediate child, at depth 8",
+      "rule": "value",
+      "calls": [
+        {
+          "form": "chunk",
+          "method": "GET",
+          "path": "/chunks/52245b1db88bc7ecf35206a4e99a1124e84d780a9424cfa652ff0f0afcb16364",
+          "headers": [
+            [
+              "accept",
+              "application/json, text/plain, */*"
+            ],
+            [
+              "accept-encoding",
+              "identity"
+            ]
+          ],
+          "reply": {
+            "status": 200,
+            "body": {
+              "base64": "AAAQAAAAAACCdkvIJ3UaGY0CwsPqpNyywE9MR0OIwD68IaWFfGkGKWEVfV1BZwgYp0sfsCQ334mf4xa2l2TH3g6KrjnlIefc"
+            }
+          }
+        },
+        {
+          "form": "chunk",
+          "method": "GET",
+          "path": "/chunks/82764bc827751a198d02c2c3eaa4dcb2c04f4c474388c03ebc21a5857c690629",
+          "headers": [
+            [
+              "accept",
+              "application/json, text/plain, */*"
+            ],
+            [
+              "accept-encoding",
+              "identity"
+            ]
+          ],
+          "tree": {
+            "length": 524288,
+            "depth": 1
+          },
+          "reply": {
+            "status": 200,
+            "body": {
+              "base64": "AAAIAAAAAABtgrksX/y1Nto0+rgFptEXRshuF/0Z2IBWsOcfdz58FQ=="
+            }
+          }
+        },
+        {
+          "form": "chunk",
+          "method": "GET",
+          "path": "/chunks/61157d5d41670818a74b1fb02437df899fe316b69764c7de0e8aae39e521e7dc",
+          "headers": [
+            [
+              "accept",
+              "application/json, text/plain, */*"
+            ],
+            [
+              "accept-encoding",
+              "identity"
+            ]
+          ],
+          "tree": {
+            "length": 524288,
+            "depth": 1
+          },
+          "reply": {
+            "status": 200,
+            "body": {
+              "base64": "AAAIAAAAAACCdkvIJ3UaGY0CwsPqpNyywE9MR0OIwD68IaWFfGkGKQ=="
+            }
+          }
+        },
+        {
+          "form": "chunk",
+          "method": "GET",
+          "path": "/chunks/6d82b92c5ffcb536da34fab805a6d11746c86e17fd19d88056b0e71f773e7c15",
+          "headers": [
+            [
+              "accept",
+              "application/json, text/plain, */*"
+            ],
+            [
+              "accept-encoding",
+              "identity"
+            ]
+          ],
+          "tree": {
+            "length": 524288,
+            "depth": 2
+          },
+          "reply": {
+            "status": 200,
+            "body": {
+              "base64": "AAAIAAAAAABRxJ4p/+TFKfAECyqHIMSj1nYWdaK9fJkWaCBVDtBx/w=="
+            }
+          }
+        },
+        {
+          "form": "chunk",
+          "method": "GET",
+          "path": "/chunks/82764bc827751a198d02c2c3eaa4dcb2c04f4c474388c03ebc21a5857c690629",
+          "headers": [
+            [
+              "accept",
+              "application/json, text/plain, */*"
+            ],
+            [
+              "accept-encoding",
+              "identity"
+            ]
+          ],
+          "tree": {
+            "length": 524288,
+            "depth": 2
+          },
+          "reply": {
+            "status": 200,
+            "body": {
+              "base64": "AAAIAAAAAABtgrksX/y1Nto0+rgFptEXRshuF/0Z2IBWsOcfdz58FQ=="
+            }
+          }
+        },
+        {
+          "form": "chunk",
+          "method": "GET",
+          "path": "/chunks/51c49e29ffe4c529f0040b2a8720c4a3d6761675a2bd7c99166820550ed071ff",
+          "headers": [
+            [
+              "accept",
+              "application/json, text/plain, */*"
+            ],
+            [
+              "accept-encoding",
+              "identity"
+            ]
+          ],
+          "tree": {
+            "length": 524288,
+            "depth": 3
+          },
+          "reply": {
+            "status": 200,
+            "body": {
+              "base64": "AAAIAAAAAACxc4vB3EiDLoaTq0I2FzLH3CgmE7VUF5AseRPCVicDsw=="
+            }
+          }
+        },
+        {
+          "form": "chunk",
+          "method": "GET",
+          "path": "/chunks/6d82b92c5ffcb536da34fab805a6d11746c86e17fd19d88056b0e71f773e7c15",
+          "headers": [
+            [
+              "accept",
+              "application/json, text/plain, */*"
+            ],
+            [
+              "accept-encoding",
+              "identity"
+            ]
+          ],
+          "tree": {
+            "length": 524288,
+            "depth": 3
+          },
+          "reply": {
+            "status": 200,
+            "body": {
+              "base64": "AAAIAAAAAABRxJ4p/+TFKfAECyqHIMSj1nYWdaK9fJkWaCBVDtBx/w=="
+            }
+          }
+        },
+        {
+          "form": "chunk",
+          "method": "GET",
+          "path": "/chunks/b1738bc1dc48832e8693ab42361732c7dc282613b55417902c7913c2562703b3",
+          "headers": [
+            [
+              "accept",
+              "application/json, text/plain, */*"
+            ],
+            [
+              "accept-encoding",
+              "identity"
+            ]
+          ],
+          "tree": {
+            "length": 524288,
+            "depth": 4
+          },
+          "reply": {
+            "status": 200,
+            "body": {
+              "base64": "AAAIAAAAAACsjwl8henBjVD4snMliY4/TjEr5iICGHzWEGO6OC8GYw=="
+            }
+          }
+        },
+        {
+          "form": "chunk",
+          "method": "GET",
+          "path": "/chunks/51c49e29ffe4c529f0040b2a8720c4a3d6761675a2bd7c99166820550ed071ff",
+          "headers": [
+            [
+              "accept",
+              "application/json, text/plain, */*"
+            ],
+            [
+              "accept-encoding",
+              "identity"
+            ]
+          ],
+          "tree": {
+            "length": 524288,
+            "depth": 4
+          },
+          "reply": {
+            "status": 200,
+            "body": {
+              "base64": "AAAIAAAAAACxc4vB3EiDLoaTq0I2FzLH3CgmE7VUF5AseRPCVicDsw=="
+            }
+          }
+        },
+        {
+          "form": "chunk",
+          "method": "GET",
+          "path": "/chunks/ac8f097c85e9c18d50f8b27325898e3f4e312be62202187cd61063ba382f0663",
+          "headers": [
+            [
+              "accept",
+              "application/json, text/plain, */*"
+            ],
+            [
+              "accept-encoding",
+              "identity"
+            ]
+          ],
+          "tree": {
+            "length": 524288,
+            "depth": 5
+          },
+          "reply": {
+            "status": 200,
+            "body": {
+              "base64": "AAAIAAAAAADwV1RXBtFeiFTdG6ck5Gevb7AlwExt6jUQGN+rs2qxMw=="
+            }
+          }
+        },
+        {
+          "form": "chunk",
+          "method": "GET",
+          "path": "/chunks/b1738bc1dc48832e8693ab42361732c7dc282613b55417902c7913c2562703b3",
+          "headers": [
+            [
+              "accept",
+              "application/json, text/plain, */*"
+            ],
+            [
+              "accept-encoding",
+              "identity"
+            ]
+          ],
+          "tree": {
+            "length": 524288,
+            "depth": 5
+          },
+          "reply": {
+            "status": 200,
+            "body": {
+              "base64": "AAAIAAAAAACsjwl8henBjVD4snMliY4/TjEr5iICGHzWEGO6OC8GYw=="
+            }
+          }
+        },
+        {
+          "form": "chunk",
+          "method": "GET",
+          "path": "/chunks/f057545706d15e8854dd1ba724e467af6fb025c04c6dea351018dfabb36ab133",
+          "headers": [
+            [
+              "accept",
+              "application/json, text/plain, */*"
+            ],
+            [
+              "accept-encoding",
+              "identity"
+            ]
+          ],
+          "tree": {
+            "length": 524288,
+            "depth": 6
+          },
+          "reply": {
+            "status": 200,
+            "body": {
+              "base64": "AAAIAAAAAADQpfji2C5sNFRaMcHSTXqDKmHjiB403okFiaOD0afLYQ=="
+            }
+          }
+        },
+        {
+          "form": "chunk",
+          "method": "GET",
+          "path": "/chunks/ac8f097c85e9c18d50f8b27325898e3f4e312be62202187cd61063ba382f0663",
+          "headers": [
+            [
+              "accept",
+              "application/json, text/plain, */*"
+            ],
+            [
+              "accept-encoding",
+              "identity"
+            ]
+          ],
+          "tree": {
+            "length": 524288,
+            "depth": 6
+          },
+          "reply": {
+            "status": 200,
+            "body": {
+              "base64": "AAAIAAAAAADwV1RXBtFeiFTdG6ck5Gevb7AlwExt6jUQGN+rs2qxMw=="
+            }
+          }
+        },
+        {
+          "form": "chunk",
+          "method": "GET",
+          "path": "/chunks/d0a5f8e2d82e6c34545a31c1d24d7a832a61e3881e34de890589a383d1a7cb61",
+          "headers": [
+            [
+              "accept",
+              "application/json, text/plain, */*"
+            ],
+            [
+              "accept-encoding",
+              "identity"
+            ]
+          ],
+          "tree": {
+            "length": 524288,
+            "depth": 7
+          },
+          "reply": {
+            "status": 200,
+            "body": {
+              "base64": "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"
+            }
+          }
+        },
+        {
+          "form": "chunk",
+          "method": "GET",
+          "path": "/chunks/f057545706d15e8854dd1ba724e467af6fb025c04c6dea351018dfabb36ab133",
+          "headers": [
+            [
+              "accept",
+              "application/json, text/plain, */*"
+            ],
+            [
+              "accept-encoding",
+              "identity"
+            ]
+          ],
+          "tree": {
+            "length": 524288,
+            "depth": 7
+          },
+          "reply": {
+            "status": 200,
+            "body": {
+              "base64": "AAAIAAAAAADQpfji2C5sNFRaMcHSTXqDKmHjiB403okFiaOD0afLYQ=="
+            }
+          }
+        },
+        {
+          "form": "chunk",
+          "method": "GET",
+          "path": "/chunks/d0a5f8e2d82e6c34545a31c1d24d7a832a61e3881e34de890589a383d1a7cb61",
+          "headers": [
+            [
+              "accept",
+              "application/json, text/plain, */*"
+            ],
+            [
+              "accept-encoding",
+              "identity"
+            ]
+          ],
+          "tree": {
+            "length": 524288,
+            "depth": 8
+          }
+        }
+      ]
+    },
+    {
+      "id": "readData-intermediate-at-depth-8",
+      "row": "readData",
+      "from": "design 0015, the honest calls and forbidden alternatives (deep trees)",
+      "key": "https://app.example",
+      "params": {
+        "object": [
+          [
+            "reference",
+            {
+              "string": "8f592b436a1d4df61779d77fc0a34f48c247d0780be1add5b1a1eb38ed3d8372"
+            }
+          ]
+        ]
+      },
+      "ready": {
+        "check": "reachable",
+        "ok": true
+      },
+      "note": "an intermediate at depth 8 (eight wrappers above it)",
+      "rule": "value",
+      "calls": [
+        {
+          "form": "chunk",
+          "method": "GET",
+          "path": "/chunks/8f592b436a1d4df61779d77fc0a34f48c247d0780be1add5b1a1eb38ed3d8372",
+          "headers": [
+            [
+              "accept",
+              "application/json, text/plain, */*"
+            ],
+            [
+              "accept-encoding",
+              "identity"
+            ]
+          ],
+          "reply": {
+            "status": 200,
+            "body": {
+              "base64": "AAAIAAAAAAC+Ag1LYBo4evaNPEjGIp2CmPbr87U+Efy1dA9XJsc8hQ=="
+            }
+          }
+        },
+        {
+          "form": "chunk",
+          "method": "GET",
+          "path": "/chunks/be020d4b601a387af68d3c48c6229d8298f6ebf3b53e11fcb5740f5726c73c85",
+          "headers": [
+            [
+              "accept",
+              "application/json, text/plain, */*"
+            ],
+            [
+              "accept-encoding",
+              "identity"
+            ]
+          ],
+          "tree": {
+            "length": 524288,
+            "depth": 1
+          },
+          "reply": {
+            "status": 200,
+            "body": {
+              "base64": "AAAIAAAAAADoLZFlWGjb50qdQtZaVBktSZd4NVaETdgs/bWrAKtBwA=="
+            }
+          }
+        },
+        {
+          "form": "chunk",
+          "method": "GET",
+          "path": "/chunks/e82d91655868dbe74a9d42d65a54192d4997783556844dd82cfdb5ab00ab41c0",
+          "headers": [
+            [
+              "accept",
+              "application/json, text/plain, */*"
+            ],
+            [
+              "accept-encoding",
+              "identity"
+            ]
+          ],
+          "tree": {
+            "length": 524288,
+            "depth": 2
+          },
+          "reply": {
+            "status": 200,
+            "body": {
+              "base64": "AAAIAAAAAACT5k5c5iIuoVZEBTCN91z1JnyDObYQ1vAAPsWVVCAYNg=="
+            }
+          }
+        },
+        {
+          "form": "chunk",
+          "method": "GET",
+          "path": "/chunks/93e64e5ce6222ea1564405308df75cf5267c8339b610d6f0003ec59554201836",
+          "headers": [
+            [
+              "accept",
+              "application/json, text/plain, */*"
+            ],
+            [
+              "accept-encoding",
+              "identity"
+            ]
+          ],
+          "tree": {
+            "length": 524288,
+            "depth": 3
+          },
+          "reply": {
+            "status": 200,
+            "body": {
+              "base64": "AAAIAAAAAAAWX8cfq8jNRokqYmVZ635RZvpTRsBlOpD81DEWUI46Gw=="
+            }
+          }
+        },
+        {
+          "form": "chunk",
+          "method": "GET",
+          "path": "/chunks/165fc71fabc8cd46892a626559eb7e5166fa5346c0653a90fcd43116508e3a1b",
+          "headers": [
+            [
+              "accept",
+              "application/json, text/plain, */*"
+            ],
+            [
+              "accept-encoding",
+              "identity"
+            ]
+          ],
+          "tree": {
+            "length": 524288,
+            "depth": 4
+          },
+          "reply": {
+            "status": 200,
+            "body": {
+              "base64": "AAAIAAAAAABN+j94533aDAhhIK6ZqFwIcFciM75SpBz6zL8eZOwmsA=="
+            }
+          }
+        },
+        {
+          "form": "chunk",
+          "method": "GET",
+          "path": "/chunks/4dfa3f78e77dda0c086120ae99a85c0870572233be52a41cfaccbf1e64ec26b0",
+          "headers": [
+            [
+              "accept",
+              "application/json, text/plain, */*"
+            ],
+            [
+              "accept-encoding",
+              "identity"
+            ]
+          ],
+          "tree": {
+            "length": 524288,
+            "depth": 5
+          },
+          "reply": {
+            "status": 200,
+            "body": {
+              "base64": "AAAIAAAAAAB+d3DOcuC6shmtsjq7nJEdOazv9aJmQ+oFKSahGcHQtg=="
+            }
+          }
+        },
+        {
+          "form": "chunk",
+          "method": "GET",
+          "path": "/chunks/7e7770ce72e0bab219adb23abb9c911d39aceff5a26643ea052926a119c1d0b6",
+          "headers": [
+            [
+              "accept",
+              "application/json, text/plain, */*"
+            ],
+            [
+              "accept-encoding",
+              "identity"
+            ]
+          ],
+          "tree": {
+            "length": 524288,
+            "depth": 6
+          },
+          "reply": {
+            "status": 200,
+            "body": {
+              "base64": "AAAIAAAAAAC1UmFeW4FGAVYZLMFTvQgOkdeLLuBNfpNHfQ4PZpjYYA=="
+            }
+          }
+        },
+        {
+          "form": "chunk",
+          "method": "GET",
+          "path": "/chunks/b552615e5b81460156192cc153bd080e91d78b2ee04d7e93477d0e0f6698d860",
+          "headers": [
+            [
+              "accept",
+              "application/json, text/plain, */*"
+            ],
+            [
+              "accept-encoding",
+              "identity"
+            ]
+          ],
+          "tree": {
+            "length": 524288,
+            "depth": 7
+          },
+          "reply": {
+            "status": 200,
+            "body": {
+              "base64": "AAAIAAAAAABJ34roXHg49BI4Sb69nyrkf8RmkvRVPS8mz+Rtoc2I9g=="
+            }
+          }
+        },
+        {
+          "form": "chunk",
+          "method": "GET",
+          "path": "/chunks/49df8ae85c7838f4123849bebd9f2ae47fc46692f4553d2f26cfe46da1cd88f6",
+          "headers": [
+            [
+              "accept",
+              "application/json, text/plain, */*"
+            ],
+            [
+              "accept-encoding",
+              "identity"
+            ]
+          ],
+          "tree": {
+            "length": 524288,
+            "depth": 8
+          }
+        }
+      ]
+    },
+    {
+      "id": "readData-zero-length-child",
+      "row": "readData",
+      "from": "design 0015, the honest calls and forbidden alternatives (deep trees)",
+      "key": "https://app.example",
+      "params": {
+        "object": [
+          [
+            "reference",
+            {
+              "string": "88ad687df8469fade881fc4ea82d271a83eafa7f89ee82306137271e9b6b4c90"
+            }
+          ]
+        ]
+      },
+      "ready": {
+        "check": "reachable",
+        "ok": true
+      },
+      "note": "a zero-length child: an intermediate with more references than its length needs",
+      "rule": "value",
+      "calls": [
+        {
+          "form": "chunk",
+          "method": "GET",
+          "path": "/chunks/88ad687df8469fade881fc4ea82d271a83eafa7f89ee82306137271e9b6b4c90",
+          "headers": [
+            [
+              "accept",
+              "application/json, text/plain, */*"
+            ],
+            [
+              "accept-encoding",
+              "identity"
+            ]
+          ],
+          "reply": {
+            "status": 200,
+            "body": {
+              "base64": "ACAAAAAAAAD9wQWRkS9Jay3Iodw44Vw4bb0VjVL7yqVBSC3BGgbormi3N3P5e/iDr52xzAt3jEyvi+urZrDh+BeVjiw+5ZX/5hGa1iAcKKdkE4zU/412i6/AFlJWlQ9XoFjU/wQX1jrUgkxX5joCTv7VyZFXKbAgmyHVIbgtS3clxUaOw9gYgw=="
+            }
+          }
+        },
+        {
+          "form": "chunk",
+          "method": "GET",
+          "path": "/chunks/e6119ad6201c28a764138cd4ff8d768bafc0165256950f57a058d4ff0417d63a",
+          "headers": [
+            [
+              "accept",
+              "application/json, text/plain, */*"
+            ],
+            [
+              "accept-encoding",
+              "identity"
+            ]
+          ],
+          "tree": {
+            "length": 0,
+            "depth": 1
+          }
+        }
+      ]
     }
   ]
 }
