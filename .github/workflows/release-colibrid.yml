@@ -167,7 +167,9 @@ jobs:
             "$env:ProgramFiles\PowerShell\7",
             "$env:ProgramFiles\CMake\bin",
             "$env:ProgramFiles\Git\cmd",
-            "$env:ProgramFiles\Git\usr\bin"
+            "$env:ProgramFiles\Git\usr\bin",
+            # The Package step's 7z.
+            "$env:ProgramFiles\7-Zip"
           )
           $dynamic = ($env:PATH -split ';') | Where-Object { $_ -match 'MSBuild|Visual Studio|Python' }
           $newPath = (($keep + $dynamic) | Where-Object { $_ -and (Test-Path $_) } | Select-Object -Unique) -join ';'
