@@ -477,11 +477,13 @@ publish job that runs no repository code.
      Linux, Control Flow Guard on Windows (Rust's side too). macOS's arm64
      ABI leaves pointer authentication to arm64e, and it has no CET;
      Windows' `/GS` is MSVC's default, and it has no `_FORTIFY_SOURCE`.
-     `scripts/colibrid-hardening-check.py` then checks that every source
-     CMake compiled carries the flags and that the binary calls the stack
-     protector's and `_FORTIFY_SOURCE`'s checks (Linux, macOS), or that
-     the PE image has Control Flow Guard (Windows). blst builds with its
-     own script and flags;
+     blst, which its own build script compiles, gets them through
+     `COLIBRI_BLST_CFLAGS`. `scripts/colibrid-hardening-check.py` then
+     checks each compile: every source CMake compiled (Linux, macOS: its
+     compile commands; Windows: its Visual Studio projects, Control Flow
+     Guard on and `/GS` not off) and blst (the flags its build recorded);
+     and the binary: the stack protector's and `_FORTIFY_SOURCE`'s calls
+     (Linux, macOS), or the PE image's Control Flow Guard (Windows);
    - checks that the binary names no `FREEDOM_COLIBRID_TEST_*` variable, and
      that the release build's own command refuses the `testhooks` feature,
      with and without release debug assertions;
