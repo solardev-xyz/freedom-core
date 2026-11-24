@@ -51,6 +51,12 @@ pub fn bmt_root_of(payload: &[u8]) -> Option<[u8; 32]> {
     }
     let mut level = [0u8; CHUNK_SIZE];
     level[..payload.len()].copy_from_slice(payload);
+    Some(bmt_in_place(&mut level))
+}
+
+/// The BMT root of a payload already zero-padded to 4096 bytes, hashed in
+/// place: the buffer is scratch afterwards.
+pub(crate) fn bmt_in_place(level: &mut [u8; CHUNK_SIZE]) -> [u8; 32] {
     let mut len = CHUNK_SIZE;
     while len > 32 {
         for i in 0..len / 64 {
@@ -61,7 +67,7 @@ pub fn bmt_root_of(payload: &[u8]) -> Option<[u8; 32]> {
     }
     let mut root = [0u8; 32];
     root.copy_from_slice(&level[..32]);
-    Some(root)
+    root
 }
 
 /// A content-addressed chunk's address: keccak256(span ‖ BMT root).
