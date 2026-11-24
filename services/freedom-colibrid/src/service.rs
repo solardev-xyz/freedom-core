@@ -87,6 +87,9 @@ impl ColibriService {
 impl Service for ColibriService {
     fn hello(&self, _hello: &Hello) -> Result<Map<String, Value>, ErrorBody> {
         let mut result = Map::new();
+        // The service's own release, which main pins (0014, "Methods main
+        // calls"); the C core's is `colibri_version`.
+        result.insert("service_version".into(), json!(env!("CARGO_PKG_VERSION")));
         result.insert("colibri_version".into(), json!(COLIBRI_VERSION));
         // main.rs checked at start that the linked C core reports it.
         result.insert("client_version".into(), json!(CLIENT_VERSION));
@@ -175,7 +178,14 @@ impl Service for ColibriService {
                         "the open requests are at their bound",
                     ),
                     Err(NotTaken::Recycling) => {
-                        Self::refuse(conn, request.id, ErrorCode::Busy, "recycling")
+                        // `data` says so for main, which sends the request
+                        // to the process's successor (0014, "Crashes,
+                        // overruns and restarts").
+                        let _ = conn.reply_error(
+                            request.id,
+                            &ErrorBody::new(ErrorCode::Busy, "recycling")
+                                .with_data(json!({ "recycling": true })),
+                        );
                     }
                 }
             }

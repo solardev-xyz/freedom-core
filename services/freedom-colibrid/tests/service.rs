@@ -65,6 +65,7 @@ fn hello_reports_the_build_and_a_private_process_writes_nothing() {
     let mut colibrid = Colibrid::serve(1, None);
     let hello = colibrid.hello();
     assert_eq!(hello["protocol"], 1);
+    assert_eq!(hello["service_version"], env!("CARGO_PKG_VERSION"));
     assert_eq!(hello["colibri_version"], "3.0.3");
     assert_eq!(hello["client_version"], 196_611);
     assert_eq!(hello["chain_id"], 1);

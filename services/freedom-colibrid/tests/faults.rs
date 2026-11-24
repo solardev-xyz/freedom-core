@@ -137,7 +137,9 @@ fn a_recycle_finishes_its_requests_and_exits_0() {
                 refused = Some(m);
             }
         }
-        assert_eq!(refused.unwrap()["error"]["code"], "busy");
+        let refused = refused.unwrap();
+        assert_eq!(refused["error"]["code"], "busy");
+        assert_eq!(refused["error"]["data"]["recycling"], true, "{refused}");
     }
     colibrid.respond(ask, json!({ "error": "HTTP error! Status: 500" }));
     let mut replied = false;
