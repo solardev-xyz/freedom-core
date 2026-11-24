@@ -23,7 +23,7 @@ on:
   push:
     tags: ["colibrid-v*"]
   pull_request:
-    paths: [".github/workflows/release-colibrid.yml"]
+    paths: [".github/workflows/release-colibrid.yml", "scripts/colibrid-hardening-check.py"]
   workflow_dispatch:
 
 permissions:
@@ -84,17 +84,25 @@ jobs:
     strategy:
       fail-fast: true
       matrix:
+        # `cflags`: design 0014's hardened build of Colibri's C core: a
+        # stack protector, _FORTIFY_SOURCE=3, and control-flow protection
+        # where the target has it (x86_64 Linux: CET; arm64 Linux: BTI and
+        # pointer authentication; Windows: Control Flow Guard). macOS gets
+        # none: its arm64 ABI leaves pointer authentication to arm64e, and
+        # it has no CET. On Windows MSVC's /GS, the stack protector, is the
+        # default, and there is no _FORTIFY_SOURCE. The "Hardened build"
+        # step checks that they took.
         include:
-          - { runner: macos-latest, target: aarch64-apple-darwin, asset: darwin-arm64, native: true }
-          - { runner: macos-latest, target: x86_64-apple-darwin, asset: darwin-amd64, native: false }
+          - { runner: macos-latest, target: aarch64-apple-darwin, asset: darwin-arm64, native: true, cflags: "-fstack-protector-strong -D_FORTIFY_SOURCE=3" }
+          - { runner: macos-latest, target: x86_64-apple-darwin, asset: darwin-amd64, native: false, cflags: "-fstack-protector-strong -D_FORTIFY_SOURCE=3" }
           # Linked dynamically against glibc 2.17, Rust's own floor for these
           # targets, so they run wherever Electron does (it needs 2.25), with
           # the OS's allocator: static musl's cost a quarter of the
           # throughput (0007, open question 6). cargo-zigbuild links them,
           # with Zig's copy of glibc 2.17's symbols and startup code.
-          - { runner: ubuntu-latest, target: x86_64-unknown-linux-gnu, glibc: "2.17", asset: linux-amd64, native: true }
-          - { runner: ubuntu-24.04-arm, target: aarch64-unknown-linux-gnu, glibc: "2.17", asset: linux-arm64, native: true }
-          - { runner: windows-latest, target: x86_64-pc-windows-msvc, asset: windows-amd64, native: true }
+          - { runner: ubuntu-latest, target: x86_64-unknown-linux-gnu, glibc: "2.17", asset: linux-amd64, native: true, cflags: "-fstack-protector-strong -D_FORTIFY_SOURCE=3 -fcf-protection=full" }
+          - { runner: ubuntu-24.04-arm, target: aarch64-unknown-linux-gnu, glibc: "2.17", asset: linux-arm64, native: true, cflags: "-fstack-protector-strong -D_FORTIFY_SOURCE=3 -mbranch-protection=standard" }
+          - { runner: windows-latest, target: x86_64-pc-windows-msvc, asset: windows-amd64, native: true, cflags: "/guard:cf" }
     runs-on: ${{ matrix.runner }}
     defaults:
       run:
@@ -178,9 +186,18 @@ jobs:
       - run: cmake --version
       - name: Build
         env:
-          # Windows: link the C runtime statically (no VC++ redistributable).
-          RUSTFLAGS: ${{ contains(matrix.target, 'windows') && '-C target-feature=+crt-static' || '' }}
+          # Windows: link the C runtime statically (no VC++ redistributable),
+          # and Control Flow Guard on the Rust side too (rustc then links
+          # with /guard:cf).
+          RUSTFLAGS: ${{ contains(matrix.target, 'windows') && '-C target-feature=+crt-static -C control-flow-guard' || '' }}
           GLIBC: ${{ matrix.glibc }}
+          # The C core's hardening: colibri-stateless's build script passes
+          # these to CMake through the cmake crate.
+          CFLAGS: ${{ matrix.cflags }}
+          CXXFLAGS: ${{ matrix.cflags }}
+          # For the "Hardened build" step (Makefile generators only: not
+          # Windows' Visual Studio one).
+          CMAKE_EXPORT_COMPILE_COMMANDS: "ON"
         run: |
           if [ -n "$GLIBC" ]; then
             # The glibc version as a suffix of the target; the binary still
@@ -227,20 +244,43 @@ jobs:
             echo "$bin's interpreter is ${interp:-(none)}, not $want" >&2
             exit 1
           fi
-          # The libraries it needs are glibc's and libgcc_s, and nothing else.
+          # The libraries it needs are glibc's, and nothing else: Zig links
+          # LLVM's libunwind in place of libgcc_s (THIRD-PARTY-NOTICES).
           needed="$(readelf -d "$bin" | sed -n 's/.*(NEEDED).*\[\(.*\)\]$/\1/p')"
           echo "needed: $(echo $needed)"
           echo "$needed" | grep -qx 'libc.so.6' || { echo "$bin doesn't need libc.so.6" >&2; exit 1; }
           for lib in $needed; do
             case "$lib" in
               libc.so.6 | libm.so.6 | libpthread.so.0 | libdl.so.2 | librt.so.1 | libutil.so.1 \
-                | ld-linux-x86-64.so.2 | ld-linux-aarch64.so.1 | libgcc_s.so.1) ;;
+                | ld-linux-x86-64.so.2 | ld-linux-aarch64.so.1) ;;
               *)
-                echo "$bin needs $lib, which is neither glibc's nor libgcc_s" >&2
+                echo "$bin needs $lib, which isn't glibc's" >&2
                 exit 1
                 ;;
             esac
           done
+      - name: Hardened build
+        env:
+          CFLAGS_WANT: ${{ matrix.cflags }}
+        run: |
+          bin=target/${{ matrix.target }}/release/freedom-colibrid
+          check=../../scripts/colibrid-hardening-check.py
+          case "${{ matrix.target }}" in
+            *windows*)
+              python3 "$check" pe "$bin.exe"
+              ;;
+            *)
+              # Every source CMake compiled carries the flags (blst is built
+              # by its own script, with its own; its objects are in the
+              # binary the symbol check reads).
+              python3 "$check" compile-commands target/${{ matrix.target }}/release/build "$CFLAGS_WANT"
+              case "${{ matrix.target }}" in
+                *linux*) objdump -T "$bin" > "$RUNNER_TEMP/symbols.txt" ;;
+                *) nm -u "$bin" > "$RUNNER_TEMP/symbols.txt" ;;
+              esac
+              python3 "$check" symbols "$RUNNER_TEMP/symbols.txt"
+              ;;
+          esac
       - name: No test hooks in the binary
         run: |
           bin=target/${{ matrix.target }}/release/freedom-colibrid

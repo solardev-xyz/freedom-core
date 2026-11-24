@@ -41,7 +41,7 @@ resolver = "3"
 # so the C core reports 196611, the version the COL-1 traces were recorded
 # with. No default features: no HTTP client (tokio, reqwest), no download
 # of a prebuilt archive, no prover (PROVER=OFF), no OP-Stack.
-colibri-stateless = { git = "https://github.com/solardev-xyz/colibri-stateless", rev = "6feb0287c05bda29c2093038c701317de7d4b9f5", default-features = false }
+colibri-stateless = { git = "https://github.com/solardev-xyz/colibri-stateless", rev = "90c72ebf5d0d85a66395f03a49006f39cd37ad55", default-features = false }
 
 # The service's skeleton and protocol, shared with the core and the other
 # services by path (0007, 0014).

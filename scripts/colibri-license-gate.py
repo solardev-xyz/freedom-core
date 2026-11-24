@@ -16,6 +16,9 @@ its compile_commands.json, and every header the compiler's dependency files
   one its tree's entry lists, or names PolyForm anywhere, except the files
   the notices name with the reason (src/util/version.c prints the server's
   license; 0014, Licenses), which must stay MIT;
+- Colibri's checkout isn't the revision the notices were reviewed at (their
+  `colibri` entry's `revision`; a Cargo git checkout is named by its first
+  seven hex digits), so a new pin fails until its trees are re-checked;
 - a third party's tree's LICENSE file isn't the license the notices give it. blst is compiled
   by its own build script, outside CMake's compile commands, so its tree's
   license is what the gate checks for it.
@@ -81,6 +84,7 @@ def check(out_dir, notices_path=NOTICES):
     allowed = {c["tree"]: set(c["spdx"]) for c in notices["components"]}
     polyform_ok = {e["path"] for e in notices.get("polyform_mentions", [])}
     third_parties = {c["tree"]: c["license"] for c in notices["components"] if c["tree"].startswith("_deps/")}
+    revision = next((c.get("revision", "") for c in notices["components"] if c["tree"] == "colibri"), "")
     out_dir = os.path.realpath(out_dir)
 
     dbs = glob.glob(os.path.join(out_dir, "**", "compile_commands.json"), recursive=True)
@@ -110,6 +114,14 @@ def check(out_dir, notices_path=NOTICES):
             errors.append(f"{db}: can't tell Colibri's checkout from {sorted(roots)}")
             continue
         root = roots.pop()
+        if not re.fullmatch(r"[0-9a-f]{40}", revision):
+            errors.append(f"{notices_path}: Colibri's entry names no reviewed revision")
+        elif os.path.basename(root) != revision[:7]:
+            errors.append(
+                f"{db}: Colibri's checkout {os.path.basename(root)} isn't the reviewed "
+                f"revision {revision[:7]}: re-check its trees and their licenses, then "
+                "update the notices"
+            )
         deps = os.path.join(build_dir, "_deps")
         included = set()
         for d in glob.glob(os.path.join(build_dir, "**", "*.d"), recursive=True):

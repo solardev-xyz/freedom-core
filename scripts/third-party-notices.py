@@ -150,6 +150,11 @@ def zig_glibc_runtime(startup_notice):
     ]
 
 
+# The solardev-xyz/colibri-stateless commit freedom-colibrid's notices were
+# checked at (services/freedom-colibrid/Cargo.toml's pin).
+COLIBRI_PIN = "90c72ebf5d0d85a66395f03a49006f39cd37ad55"
+
+
 NATIVE = {
     BINARY: [
         (
@@ -260,41 +265,43 @@ NATIVE = {
         # target (design 0014, "The verifier-only build"): its own sources,
         # libs/crypto, and what its CMake fetches at pinned commits, blst,
         # evmone (with EVMC) and intx. Its license gate checks each tree's
-        # SPDX identifiers against notices/c-sources.json.
+        # SPDX identifiers against notices/c-sources.json. Each entry names
+        # the reviewed pin (COLIBRI_PIN), as c-sources.json does: a new pin,
+        # even of the same version, fails until both are re-checked.
         Native(
             "Colibri 3.0.3's C core (C library), built from colibri-stateless "
             "3.0.3's source",
             "MIT",
             "services/freedom-colibrid/notices/colibri-3.0.3-LICENSE",
-            "colibri-stateless 3.0.3",
+            f"colibri-stateless 3.0.3 git:{COLIBRI_PIN}",
         ),
         Native(
             "trezor-crypto and Mbed TLS's RIPEMD-160 (C library), Colibri "
             "3.0.3's libs/crypto",
             "MIT AND Apache-2.0",
             "services/freedom-colibrid/notices/colibri-libs-crypto-NOTICE",
-            "colibri-stateless 3.0.3",
+            f"colibri-stateless 3.0.3 git:{COLIBRI_PIN}",
         ),
         Native(
             "blst 0.3.13 (C library), as colibri-stateless 3.0.3's CMake "
             "fetches it",
             "Apache-2.0",
             "services/freedom-colibrid/notices/blst-0.3.13-LICENSE",
-            "colibri-stateless 3.0.3",
+            f"colibri-stateless 3.0.3 git:{COLIBRI_PIN}",
         ),
         Native(
             "evmone 0.23.0 with EVMC (C++ library), as colibri-stateless "
             "3.0.3's CMake fetches it",
             "Apache-2.0",
             "services/freedom-colibrid/notices/evmone-0.23.0-LICENSE",
-            "colibri-stateless 3.0.3",
+            f"colibri-stateless 3.0.3 git:{COLIBRI_PIN}",
         ),
         Native(
             "intx 0.15.0 (C++ library), as colibri-stateless 3.0.3's CMake "
             "fetches it",
             "Apache-2.0",
             "services/freedom-colibrid/notices/intx-0.15.0-LICENSE",
-            "colibri-stateless 3.0.3",
+            f"colibri-stateless 3.0.3 git:{COLIBRI_PIN}",
         ),
     ],
 }
@@ -578,9 +585,10 @@ def vendored_notices(binary):
 
 def bundling_crate(entry, crates):
     """The shipped crate a NATIVE entry's library comes from: exactly the
-    `bundled_by` version, so that a new version fails until it is
-    re-checked."""
-    name, _, version = entry.bundled_by.partition(" ")
+    `bundled_by` version, and for a git dependency exactly its reviewed
+    revision (`name version git:<rev>`), so that a new version or a new pin
+    of the same version fails until it is re-checked."""
+    name, version, *pinned = entry.bundled_by.split(" ")
     package = crates.get((name, version))
     if package is None:
         shipped = ", ".join(sorted(v for (n, v) in crates if n == name))
@@ -589,6 +597,15 @@ def bundling_crate(entry, crates):
             f"{entry.label}: the binary {found}, not {version}: re-check what "
             "it bundles, then update its NATIVE entry"
         )
+    for pin in pinned:
+        revision = pin.removeprefix("git:")
+        source = package.get("source") or ""
+        if not source.startswith("git+") or not source.endswith("#" + revision):
+            raise NoticeError(
+                f"{entry.label}: the binary builds {name} {version} from "
+                f"{source or 'no git source'}, not the reviewed revision {revision}: "
+                "re-check what it bundles at its pin, then update its NATIVE entry"
+            )
     return package
 
 
@@ -610,6 +627,15 @@ def native_text(entry, crates, rust_src):
     return path
 
 
+def check_bundlers(natives, crates):
+    """Every NATIVE entry with a `bundled_by` names a crate the binary ships,
+    at that version and pin, whatever its text's kind: a vendored text is
+    held to the release it was checked at as much as a crate's own."""
+    for entry in natives:
+        if entry.bundled_by:
+            bundling_crate(entry, crates)
+
+
 def check_links(binary, crates, natives):
     """For a binary in LINKS_CHECKED: every shipped crate that declares
     `links` bundles a NATIVE entry's library, or is listed there; and every
@@ -617,7 +643,7 @@ def check_links(binary, crates, natives):
     if binary not in LINKS_CHECKED:
         return
     covered = LINKS_CHECKED[binary]
-    bundlers = {entry.bundled_by for entry in natives if entry.bundled_by}
+    bundlers = {" ".join(entry.bundled_by.split(" ")[:2]) for entry in natives if entry.bundled_by}
     for (name, version) in sorted(crates):
         links = crates[(name, version)].get("links")
         if links and f"{name} {version}" not in bundlers and name not in covered:
@@ -690,6 +716,7 @@ def generate(binary=BINARY):
             "notices/crates.json vendors texts for crates the binary doesn't ship: "
             + ", ".join(sorted(vendored))
         )
+    check_bundlers(natives, crates)
     check_links(binary, crates, natives)
     offered = [
         crates[key] for key in sorted(crates) if needs_source_offer(crates[key].get("license"))

@@ -437,8 +437,11 @@ publish job that runs no repository code.
    `(cd services/freedom-colibrid && cargo fetch --locked) && python3 scripts/third-party-notices.py --binary freedom-colibrid`.
    CI (`colibrid.yml`'s deny job) and the release workflow's first job fail
    when it is stale. Besides the crates and the runtime, it lists the C code
-   `colibri-stateless` 3.0.3 builds in, each entry tied to that version, so a
-   new pin fails until its entries (`NATIVE` in the script) are re-checked:
+   `colibri-stateless` 3.0.3 builds in, each entry tied to that version and
+   to the reviewed commit (`COLIBRI_PIN` in the script), so a new pin, even
+   of the same version, fails until its entries (`NATIVE`) are re-checked.
+   The license gate holds `notices/c-sources.json` to the same commit (its
+   `colibri` entry's `revision`):
    - **Colibri's C core** (MIT), and its `libs/crypto`: trezor-crypto (MIT)
      and Mbed TLS's `ripemd160.c` (Apache-2.0);
    - **blst 0.3.13**, **evmone 0.23.0** (with EVMC) and **intx 0.15.0**, all
@@ -468,6 +471,17 @@ publish job that runs no repository code.
      cargo-zigbuild 0.23.4, pinned by sha256);
    - on Linux, checks that the binary needs glibc 2.17 at most, the
      standard loader, and no library but glibc's (libc++ is linked in);
+   - builds Colibri's C core hardened (design 0014): a stack protector,
+     `_FORTIFY_SOURCE=3`, and control-flow protection where the target has
+     it: CET on x86_64 Linux, BTI and pointer authentication on arm64
+     Linux, Control Flow Guard on Windows (Rust's side too). macOS's arm64
+     ABI leaves pointer authentication to arm64e, and it has no CET;
+     Windows' `/GS` is MSVC's default, and it has no `_FORTIFY_SOURCE`.
+     `scripts/colibrid-hardening-check.py` then checks that every source
+     CMake compiled carries the flags and that the binary calls the stack
+     protector's and `_FORTIFY_SOURCE`'s checks (Linux, macOS), or that
+     the PE image has Control Flow Guard (Windows). blst builds with its
+     own script and flags;
    - checks that the binary names no `FREEDOM_COLIBRID_TEST_*` variable, and
      that the release build's own command refuses the `testhooks` feature,
      with and without release debug assertions;

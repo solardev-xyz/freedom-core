@@ -25,6 +25,8 @@ on:
       - "vectors/fixtures/colibri/**"
       - "scripts/colibri-license-gate.py"
       - "scripts/test_colibri_license_gate.py"
+      - "scripts/colibrid-hardening-check.py"
+      - "scripts/test_colibrid_hardening_check.py"
       - "scripts/third-party-notices.py"
       - "notices/**"
       - "rust-toolchain.toml"
@@ -48,6 +50,8 @@ on:
       - "vectors/fixtures/colibri/**"
       - "scripts/colibri-license-gate.py"
       - "scripts/test_colibri_license_gate.py"
+      - "scripts/colibrid-hardening-check.py"
+      - "scripts/test_colibrid_hardening_check.py"
       - "scripts/third-party-notices.py"
       - "notices/**"
       - "rust-toolchain.toml"
@@ -167,6 +171,7 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           python3 -m unittest discover -s ../../scripts -p 'test_colibri_license_gate.py'
+          python3 -m unittest discover -s ../../scripts -p 'test_colibrid_hardening_check.py'
           python3 ../../scripts/colibri-license-gate.py "$(cat out-dir.txt)" --manifest compiled-sources.json
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         if: runner.os == 'Linux' && always()

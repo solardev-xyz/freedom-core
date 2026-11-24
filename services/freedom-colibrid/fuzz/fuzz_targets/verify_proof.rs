@@ -3,18 +3,18 @@
 //! ["latest",false]` on a memory store. The input is a proof (its length
 //! first, 4 bytes, little-endian), then each answer the same way, given in
 //! order to the requests the verifier makes, for at most a few steps.
+//!
+//! Each input starts cold: a fresh memory store and the C core's in-process
+//! caches cleared, so what an input does never depends on the inputs before
+//! it, and an artifact reproduces on its own.
 
 #![no_main]
-
-use std::sync::Once;
 
 use colibri_stateless::{MemoryStorage, Step, Verifier};
 use libfuzzer_sys::fuzz_target;
 
 /// The most steps one input runs.
 const STEPS: usize = 8;
-
-static STORE: Once = Once::new();
 
 /// The next length-prefixed piece of `input`.
 fn piece<'a>(input: &mut &'a [u8]) -> Option<&'a [u8]> {
@@ -28,7 +28,8 @@ fn piece<'a>(input: &mut &'a [u8]) -> Option<&'a [u8]> {
 }
 
 fuzz_target!(|data: &[u8]| {
-    STORE.call_once(|| colibri_stateless::register_storage(MemoryStorage::new()));
+    colibri_stateless::register_storage(MemoryStorage::new());
+    colibri_stateless::reset_caches();
     let mut input = data;
     let Some(proof) = piece(&mut input) else {
         return;
