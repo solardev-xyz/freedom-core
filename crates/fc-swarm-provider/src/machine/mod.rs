@@ -857,13 +857,6 @@ impl Running {
 
 /// A method's last write after the request's outcome.
 pub(crate) enum Closing {
-    /// The write, now, with no retry: a store's write other than a history
-    /// row's end (which is [`Closing::Row`]).
-    #[allow(
-        dead_code,
-        reason = "the feed and SOC writes' closing writes (part 3c)"
-    )]
-    Write(StoreWrite),
     /// The history insert `id` is in flight: its rowid is awaited, then
     /// the row is trimmed around and ended `failed` with `text`, at `now`.
     AfterInsert(AfterInsert),
@@ -1074,11 +1067,6 @@ impl Request {
         }
         self.asks.cancel_all();
         match running.and_then(|m| m.closing(&outcome)) {
-            // The one ask after the outcome: a write isn't called back, and
-            // its answer is dropped.
-            Some(Closing::Write(write)) => {
-                self.asks.push(Need::Write(write), 0);
-            }
             Some(Closing::AfterInsert(after)) => self.after = Some(After::Insert(after)),
             Some(Closing::Row(end)) => self.end_row(end, false),
             None => {}

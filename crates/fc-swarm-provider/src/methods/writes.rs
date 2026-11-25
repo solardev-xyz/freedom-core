@@ -31,7 +31,7 @@ use crate::json::{ReadError, Reader, Token};
 use crate::machine::node::{Failed, JSON_REPLY_CAP, transport_text};
 use crate::machine::{
     AfterInsert, Approval, AskId, Body, Closing, Cx, Event, Failure, Form, NodeCall, Outcome,
-    SignKey, StoreWrite, World,
+    RowEnd, SignKey, StoreWrite, World,
 };
 use crate::stamps::{BatchId, SelectOptions, read_stamps, select_best_batch};
 use crate::stores::feeds::{
@@ -701,7 +701,7 @@ pub(crate) fn inserted<W: World>(
 /// What a write still writes when the request ends without its machine
 /// (a cancel, the deadline, `busy`, a protocol error): its row `failed`,
 /// with the request's end as its text, unless the row's last update is
-/// already asked.
+/// already asked; an insert still in flight, once it answers.
 pub(crate) fn closing(
     row: Option<i64>,
     inserting: Option<AskId>,
@@ -718,23 +718,14 @@ pub(crate) fn closing(
         Outcome::Cancelled => JsString::from("cancelled"),
         Outcome::Protocol(_) => Failure::internal_error().message,
     };
-    let Some(row) = row else {
+    match row {
+        // The row ends `failed`, its write retried once if it fails
+        // (`history-retry`).
+        Some(row) => Some(Closing::Row(RowEnd { row, text, now })),
         // The insert is in flight: its row is trimmed around and ended once
-        // it answers (part 3b's `after_insert`).
-        return inserting.map(|id| Closing::AfterInsert(AfterInsert { id, text, now }));
-    };
-    #[expect(
-        clippy::cast_precision_loss,
-        reason = "better-sqlite3 answers lastInsertRowid as a JavaScript number"
-    )]
-    let id = JsValue::Number(row as f64);
-    let updates = row_fields(&[
-        ("status", s("failed")),
-        ("errorMessage", JsValue::String(text)),
-    ]);
-    history::update_entry(&id, &updates, now)
-        .ok()
-        .map(|statement| Closing::Write(StoreWrite::History(vec![statement])))
+        // it answers.
+        None => inserting.map(|id| Closing::AfterInsert(AfterInsert { id, text, now })),
+    }
 }
 
 /// A store write's answer.

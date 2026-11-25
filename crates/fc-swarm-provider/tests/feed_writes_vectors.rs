@@ -2689,3 +2689,43 @@ fn two_node_calls_at_once_fail_the_check() {
     );
     assert_one_call_at_a_time("together", most);
 }
+
+/// A request that ends without its machine ends its row `failed` after the
+/// outcome; a failed write of that update is followed once by the failed
+/// update with the write's error (`history-retry`), and a second failure
+/// is dropped, leaving the row `uploading`.
+#[test]
+fn a_failed_post_outcome_write_is_retried_once() {
+    let text = text_of("keys.json");
+    let index = Index::new(&text).unwrap();
+    let keys = keys(&index);
+    for failing in [0, 1, 2] {
+        let mut thread = gate_thread(&keys);
+        raw_soc(&mut thread);
+        let sign = thread.run_until(is_sign).expect("paused at the signature");
+        thread.failing_history = failing;
+        thread.cancel();
+        thread.answer(sign);
+        assert_eq!(thread.run(), Outcome::Cancelled, "{failing}");
+        assert_eq!(thread.failing_history, 0, "{failing}: every failure taken");
+        let rows = thread.history();
+        let row = &rows.as_array().unwrap()[0];
+        let (status, message) = match failing {
+            0 => ("failed", Some("cancelled")),
+            // The retry carries the failed write's error.
+            1 => ("failed", Some("SQLITE_FULL: database or disk is full")),
+            _ => ("uploading", None),
+        };
+        assert_eq!(
+            row.get("status").and_then(JsValue::as_str),
+            Some(status),
+            "{failing}"
+        );
+        assert_eq!(
+            row.get("errorMessage").and_then(JsValue::as_str),
+            message,
+            "{failing}"
+        );
+        assert!(thread.node.soc_posts == 0, "{failing}: nothing uploaded");
+    }
+}
