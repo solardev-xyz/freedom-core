@@ -29,6 +29,10 @@
 //! - **Its waker** is the chain thread's: room in its shares of the
 //!   writer, or a free slot at main, marks its mailbox through a weak
 //!   reference, so dropping the event loop's [`Handle`] ends the thread.
+//! - **Its mining lane** ([`super::lane`]) is a thread of its own, started
+//!   with the first batch: it sends each batch's answer to this thread's
+//!   mailbox through a weak reference, as the waker does. A stuck batch's
+//!   thread is left, and the next batch goes to a fresh one.
 //! - **Stopping:** when the event loop has gone (shutdown, EOF or a
 //!   protocol error), the thread hands the writer the frames it had made.
 //!   A panic is reported ([`transport::DeathNotice`]).
@@ -49,8 +53,10 @@ use fc_protocol::message::{self, PageContext};
 use serde_json::value::RawValue;
 use zeroize::Zeroizing;
 
+use fc_swarm_provider::mining::{Batch, Ran};
+
 use super::engine::{Answer, Bounds, Engine, Fault, Io, Ms, NAME_TAG, Outgoing, Sent, Shared};
-use super::wire;
+use super::{lane, wire};
 use crate::eip1193::Verdict;
 use crate::naming;
 use crate::requests::{self, Dispatch, Expect, Owner, Requests, Start};
@@ -96,6 +102,11 @@ pub enum In {
     Written(u64),
     /// Room in the writer, or a free slot at main.
     Drained,
+    /// Mining lane thread `lane`'s answer for a batch.
+    Mined {
+        lane: u64,
+        ran: Ran,
+    },
     /// `test.swarm_world` (D11).
     #[cfg(feature = "testhooks")]
     World {
@@ -202,6 +213,7 @@ pub fn spawn(start: Spawn) -> std::io::Result<Handle> {
                 large: VecDeque::new(),
                 clock: None,
                 stop: None,
+                lane: None,
             };
             let thread = Thread {
                 engine: Engine::new(
@@ -316,6 +328,7 @@ impl Thread {
             In::Name { tag, verdict } => self.engine.named(&mut self.wire, now, tag, verdict),
             In::Written(id) => self.engine.written(&mut self.wire, now, id),
             In::Drained => self.engine.room(&mut self.wire, now),
+            In::Mined { lane, ran } => self.engine.mined(&mut self.wire, now, lane, ran),
             #[cfg(feature = "testhooks")]
             In::World { id, params } => {
                 self.world(id, params.as_deref().map(RawValue::get));
@@ -326,13 +339,17 @@ impl Thread {
         self.wire.flush()
     }
 
-    /// `test.swarm_world { reset?, clock?, grants?, tags? }` (D11): one core
-    /// plays every case, its world set between them. `reset` starts the
-    /// read budgets and the tags' owners afresh; `clock` fixes the
-    /// machines' `Date.now()`; `grants` replaces the Swarm grants in memory
-    /// (the file's form); `tags` sets tags' owners (`[[uid, key], …]`). It
-    /// answers `{ memory, requests }`: the pool's charges and the requests
-    /// the thread holds, as they stand.
+    /// `test.swarm_world { reset?, clock?, grants?, tags?, mining? }`
+    /// (D11): one core plays every case, its world set between them.
+    /// `reset` starts the read budgets, the tags' owners and the mining
+    /// lane's cache and budgets afresh (the lane's only while it is idle,
+    /// and never once mining is off); `clock` fixes the machines'
+    /// `Date.now()`, which the lane's new-topic budget reads too; `grants`
+    /// replaces the Swarm grants in memory (the file's form); `tags` sets
+    /// tags' owners (`[[uid, key], …]`). It answers `{ memory, requests }`:
+    /// the pool's charges and the requests the thread holds, as they stand;
+    /// with `mining: true`, also `mining: { waiting, running, off, lane }`,
+    /// the lane's.
     #[cfg(feature = "testhooks")]
     fn world(&mut self, id: u64, params: Option<&str>) {
         use fc_swarm_provider::budgets::ReadBudgets;
@@ -346,6 +363,8 @@ impl Thread {
             clock: Option<u64>,
             grants: Option<Box<RawValue>>,
             tags: Option<Vec<(u64, String)>>,
+            #[serde(default)]
+            mining: bool,
         }
         let parsed = params.and_then(|p| serde_json::from_str::<WorldParams>(p).ok());
         let Some(world) = parsed else {
@@ -358,6 +377,9 @@ impl Thread {
             );
             return;
         };
+        if world.reset {
+            self.engine.mining_mut().reset();
+        }
         let shared = self.engine.shared_mut();
         if world.reset {
             shared.budgets = ReadBudgets::new();
@@ -377,10 +399,13 @@ impl Thread {
             self.wire.clock = world.clock;
         }
         // What the thread holds now, so a test sees every charge freed.
-        let held = serde_json::json!({
+        let mut held = serde_json::json!({
             "memory": self.engine.memory_used(),
             "requests": self.engine.requests(),
         });
+        if world.mining {
+            held["mining"] = self.engine.mining_mut().state();
+        }
         self.wire.answer(id, Answer::Result(held.to_string()));
     }
 }
@@ -395,7 +420,8 @@ struct Wire {
     /// The share for requests, cancels and small answers.
     control: Arc<Allowance>,
     naming: naming::Handle,
-    /// The thread's own mailbox, for the answers' written notices.
+    /// The thread's own mailbox, for the answers' written notices and the
+    /// mining lane's answers.
     written: Weak<Sender<Mail>>,
     /// Control frames that wait for room, with the answer each one is, if
     /// it is one.
@@ -406,6 +432,8 @@ struct Wire {
     clock: Option<u64>,
     /// Why the thread must stop, found while acting for the engine.
     stop: Option<Stop>,
+    /// The mining lane's thread, once a batch has gone.
+    lane: Option<lane::Thread>,
 }
 
 /// An answer this size or under (its frame) goes with the control frames.
@@ -568,6 +596,34 @@ impl Io for Wire {
                 .duration_since(UNIX_EPOCH)
                 .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
         })
+    }
+
+    fn mine(&mut self, lane: u64, batch: Batch) {
+        if self
+            .lane
+            .as_ref()
+            .is_none_or(|thread| thread.generation() != lane)
+        {
+            // A stuck thread's handle goes with it: the thread ends once
+            // its batch returns, its answer dropped.
+            let mailbox = self.written.clone();
+            let started = lane::spawn(lane, move |lane, ran| {
+                mailbox
+                    .upgrade()
+                    .is_some_and(|tx| tx.send((In::Mined { lane, ran }, None)).is_ok())
+            });
+            self.lane = match started {
+                Ok(thread) => Some(thread),
+                Err(_) => {
+                    // The watchdog ends the job, as a stuck batch's.
+                    crate::log::warn("swarm mining lane didn't start", serde_json::json!({}));
+                    None
+                }
+            };
+        }
+        if let Some(thread) = &self.lane {
+            let _ = thread.run(batch);
+        }
     }
 }
 

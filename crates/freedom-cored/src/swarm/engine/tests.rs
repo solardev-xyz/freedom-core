@@ -22,6 +22,8 @@ struct Fake {
     answers: Vec<(u64, Answer)>,
     /// The gate is full: nothing goes.
     full: bool,
+    /// The mining batches handed out, with their lane thread.
+    batches: Vec<(u64, fc_swarm_provider::mining::Batch)>,
 }
 
 impl Io for Fake {
@@ -50,6 +52,9 @@ impl Io for Fake {
     }
     fn wall_ms(&self) -> u64 {
         1_767_225_600_123
+    }
+    fn mine(&mut self, lane: u64, batch: fc_swarm_provider::mining::Batch) {
+        self.batches.push((lane, batch));
     }
 }
 
@@ -1099,9 +1104,106 @@ fn a_topic_and_an_upload_turn_go_in_order() {
     let _ = call;
 }
 
+// The mining lane under the engine (SWM-4 PR 8).
+
+use fc_swarm_provider::mining::{JOB_CHARGE, STUCK_MS};
+
+/// A GSOC subscription by `topic`, request `id`, to its search: main's
+/// readiness answered.
+fn subscribe_gsoc(engine: &mut Engine, io: &mut Fake, id: u64, topic: &str, now: Ms) {
+    engine
+        .request(
+            io,
+            now,
+            id,
+            params(
+                "swarm_subscribe",
+                Value::object([("kind", Value::str("gsoc")), ("topic", Value::str(topic))]),
+                None,
+            ),
+            Some(page(None)),
+        )
+        .unwrap();
+    let (ready, method, params) = io.last();
+    assert_eq!(method, "shell.swarm_ready");
+    assert_eq!(params["check"], "subscribe");
+    engine.response(io, now, ready, Ok(ok_ready())).unwrap();
+}
+
+/// The lane thread's work, done here: each batch handed out run and
+/// answered at `now`, until none is out.
+fn run_batches(engine: &mut Engine, io: &mut Fake, now: Ms) -> usize {
+    let mut ran = 0;
+    while !io.batches.is_empty() {
+        let (lane, batch) = io.batches.remove(0);
+        engine.mined(io, now, lane, batch.run()).unwrap();
+        ran += 1;
+    }
+    ran
+}
+
+/// The SOC address of bee-js's signer for `topic`.
+fn gsoc_address(topic: &str) -> String {
+    let job = fc_swarm_provider::methods::messaging::gsoc_job(topic);
+    let signer = fc_swarm::gsoc::mine(&job.target, &job.identifier, job.proximity).unwrap();
+    signer
+        .soc_address()
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
+}
+
+/// A search's charge is reserved before it runs, one batch goes at a
+/// time, the charge goes with its answer, and the subscription opens at
+/// the mined signer's address.
 #[test]
-fn a_gsoc_search_finds_mining_off_until_the_lane() {
+fn a_gsoc_search_runs_on_the_lane_with_its_charge() {
     let mut engine = engine(Bounds::default());
+    let mut io = Fake::default();
+    subscribe_gsoc(&mut engine, &mut io, 1, "room", 0);
+    assert_eq!(engine.memory_used(), BASE + JOB_CHARGE);
+    assert_eq!(io.batches.len(), 1, "one batch out");
+    assert_eq!(io.batches[0].0, 0, "on the first lane thread");
+    assert_eq!(engine.next_due(), Some(STUCK_MS), "its watchdog");
+    let sent = io.sent.len();
+    // "room"'s signer is the 6,478th candidate: its 26th batch.
+    assert_eq!(run_batches(&mut engine, &mut io, 5), 26);
+    assert_eq!(engine.memory_used(), BASE);
+    let (recheck, method, _) = io.last();
+    assert_eq!((method, io.sent.len()), ("approval.recheck", sent + 1));
+    engine
+        .response(&mut io, 5, recheck, Ok(r#"{"live":true,"agent":false}"#))
+        .unwrap();
+    let (open, method, params) = io.last();
+    assert_eq!(method, "shell.swarm_subscribe");
+    assert_eq!(params["key"], gsoc_address("room"));
+    engine
+        .response(&mut io, 5, open, Ok(r#"{"id":"s1"}"#))
+        .unwrap();
+    let (recheck, _, _) = io.last();
+    engine
+        .response(&mut io, 5, recheck, Ok(r#"{"live":true,"agent":false}"#))
+        .unwrap();
+    let Answer::Result(text) = io.answer_of(1) else {
+        panic!("a result")
+    };
+    assert!(text.contains(&gsoc_address("room")), "{text}");
+    engine.written(&mut io, 5, 1).unwrap();
+    assert_eq!((engine.memory_used(), engine.requests()), (0, 0));
+    // A second search of the topic is the cache's: no batch.
+    subscribe_gsoc(&mut engine, &mut io, 2, "room", 6);
+    assert!(io.batches.is_empty());
+    assert_eq!(io.last().1, "approval.recheck");
+}
+
+/// No room for the search's charge: nothing runs, and at the deadline the
+/// request is `busy`.
+#[test]
+fn a_search_waits_for_its_charge() {
+    let mut engine = engine(Bounds {
+        memory: BASE + JOB_CHARGE - 1,
+        ..Bounds::default()
+    });
     let mut io = Fake::default();
     engine
         .request(
@@ -1111,16 +1213,110 @@ fn a_gsoc_search_finds_mining_off_until_the_lane() {
             params(
                 "swarm_subscribe",
                 Value::object([("kind", Value::str("gsoc")), ("topic", Value::str("chat"))]),
-                None,
+                Some(1_000),
             ),
             Some(page(None)),
         )
         .unwrap();
     let (ready, _, _) = io.last();
     engine.response(&mut io, 0, ready, Ok(ok_ready())).unwrap();
+    assert!(io.batches.is_empty(), "nothing mined without its charge");
+    assert_eq!(engine.memory_used(), BASE);
+    engine.tick(&mut io, 1_000).unwrap();
     let Answer::Result(text) = io.answer_of(1) else {
-        panic!()
+        panic!("a result")
+    };
+    assert!(text.contains(r#"["reason",{"string":"busy"}]"#), "{text}");
+}
+
+/// A waiter's cancel ends only its own wait and frees its charge: a join's
+/// other waiter still gets its signer; the last waiter's cancel stops the
+/// job at its batch's answer, and the next job's batch goes at once.
+#[test]
+fn a_cancel_ends_its_own_wait_and_the_last_stops_the_job() {
+    let mut engine = engine(Bounds::default());
+    let mut io = Fake::default();
+    subscribe_gsoc(&mut engine, &mut io, 1, "room", 0);
+    subscribe_gsoc(&mut engine, &mut io, 2, "room", 0);
+    subscribe_gsoc(&mut engine, &mut io, 3, "chat", 0);
+    assert_eq!(engine.memory_used(), 3 * (BASE + JOB_CHARGE));
+    engine.cancel(&mut io, 0, 1).unwrap();
+    assert_eq!(io.answer_of(1), cancelled());
+    assert_eq!(engine.memory_used(), 2 * (BASE + JOB_CHARGE) + BASE);
+    // The join's other waiter: the job runs on to its signer.
+    assert_eq!(run_batches(&mut engine, &mut io, 0), 26 + 1);
+    let opened: Vec<serde_json::Value> = io
+        .sent
+        .iter()
+        .filter(|(_, method, _, _)| *method == "approval.recheck")
+        .map(|(_, _, params, _)| params["request"].clone())
+        .collect();
+    assert_eq!(opened, [2, 3], "room's waiter, then chat's");
+    // A lone waiter's cancel while its batch is out: the job ends at the
+    // batch's answer, and the next job's batch goes then.
+    subscribe_gsoc(&mut engine, &mut io, 4, "long-608", 0);
+    subscribe_gsoc(&mut engine, &mut io, 5, "fast-29", 0);
+    assert_eq!(io.batches.len(), 1);
+    engine.cancel(&mut io, 0, 4).unwrap();
+    assert_eq!(io.answer_of(4), cancelled());
+    assert_eq!(io.batches.len(), 1, "the batch out is left to its answer");
+    let (lane, batch) = io.batches.remove(0);
+    engine.mined(&mut io, 0, lane, batch.run()).unwrap();
+    assert_eq!(io.batches.len(), 1, "fast-29's batch, at once");
+    assert_eq!(run_batches(&mut engine, &mut io, 0), 1);
+    assert_eq!(io.last().2["request"], 5);
+}
+
+/// The watchdog is one of the engine's deadlines: a batch out for 1 s ends
+/// its search `gsoc_mining_failed` and the next batch goes to lane thread
+/// 1; lane 0's late answer is dropped. A second stuck lane turns mining
+/// off for the search waiting and every later one.
+#[test]
+fn a_stuck_batch_is_watched_and_the_second_turns_mining_off() {
+    let mut engine = engine(Bounds::default());
+    let mut io = Fake::default();
+    subscribe_gsoc(&mut engine, &mut io, 1, "room", 0);
+    subscribe_gsoc(&mut engine, &mut io, 2, "chat", 0);
+    let (stuck_lane, stuck) = io.batches.remove(0);
+    assert_eq!(engine.next_due(), Some(STUCK_MS));
+    engine.tick(&mut io, STUCK_MS).unwrap();
+    let Answer::Result(text) = io.answer_of(1) else {
+        panic!("a result")
+    };
+    assert!(
+        text.contains("GSOC mining failed: mining lane stuck"),
+        "{text}"
+    );
+    assert_eq!(io.batches.len(), 1);
+    assert_eq!((stuck_lane, io.batches[0].0), (0, 1), "a fresh lane");
+    // Lane 0's answer comes late: dropped.
+    engine.mined(&mut io, STUCK_MS, 0, stuck.run()).unwrap();
+    assert_eq!(io.batches.len(), 1);
+    assert_eq!(run_batches(&mut engine, &mut io, STUCK_MS), 1);
+    assert_eq!(io.last().2["request"], 2);
+    // The second stuck lane.
+    subscribe_gsoc(&mut engine, &mut io, 3, "long-608", 2_000);
+    subscribe_gsoc(&mut engine, &mut io, 4, "fast-29", 2_000);
+    io.batches.clear();
+    engine.tick(&mut io, 2_000 + STUCK_MS).unwrap();
+    for id in [3, 4] {
+        let Answer::Result(text) = io.answer_of(id) else {
+            panic!("a result")
+        };
+        let want = if id == 3 {
+            "mining lane stuck"
+        } else {
+            "mining is off until the core restarts"
+        };
+        assert!(text.contains(want), "{id}: {text}");
+    }
+    assert!(io.batches.is_empty());
+    assert_eq!(engine.next_due().map(|due| due > 3_000), Some(true));
+    subscribe_gsoc(&mut engine, &mut io, 5, "chat", 3_000);
+    let Answer::Result(text) = io.answer_of(5) else {
+        panic!("a result")
     };
     assert!(text.contains("mining is off"), "{text}");
+    assert!(io.batches.is_empty());
     let _ = KIB;
 }
