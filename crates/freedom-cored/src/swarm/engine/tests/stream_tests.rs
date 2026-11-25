@@ -442,6 +442,9 @@ fn open_body(engine: &mut Engine, io: &mut Fake, call: u64, n: u64) -> u64 {
         .response(io, 0, part, Ok(&format!(r#"{{"bytes":{n}}}"#)))
         .unwrap();
     assert_eq!(io.replied, [(part, Some(Some(n)))]);
+    // The part holds a stream's slot; the call, whose reply opens none,
+    // doesn't.
+    assert_eq!(engine.streams_held(), 1);
     part
 }
 

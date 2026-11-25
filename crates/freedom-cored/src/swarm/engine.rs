@@ -49,8 +49,9 @@
 //!   it until main's terminal for the stream; a node reply's also holds its
 //!   call's slot. A `swarm.body` main asks for one of the thread's calls
 //!   whose body streams is answered from its machine's [`Effect::Body`],
-//!   within main's credit; its route goes once main has answered the call,
-//!   or cancelled the body (D4). An upload's part and body that make no
+//!   within main's credit; its route closes once main has answered the
+//!   call, or cancelled the body, and a credit for it after that is a
+//!   protocol error (D4). An upload's part and body that make no
 //!   progress for [`IDLE_MS`] end the upload (D13), and a stream the
 //!   thread cancelled that main hasn't ended [`IDLE_MS`] later ends the
 //!   connection.
