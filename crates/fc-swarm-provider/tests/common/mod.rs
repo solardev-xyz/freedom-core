@@ -29,7 +29,7 @@ use fc_swarm_provider::budgets::ReadBudgets;
 use fc_swarm_provider::machine::node::WINDOW;
 use fc_swarm_provider::machine::{
     Abort, AskId, Call, Effect, Event, Failed, Failure, Form, Head, Need, NodeCall, Outcome, Reads,
-    ReadyCheck, Reply, Request, World, whole_charge,
+    ReadyCheck, Reply, Request, TagOwners, World, whole_charge,
 };
 use fc_swarm_provider::stores::feeds::FeedStore;
 use fc_swarm_provider::stores::manifests::Capability;
@@ -338,6 +338,13 @@ pub struct TestWorld {
     pub grants: BTreeSet<JsString>,
     pub feeds: FeedStore,
     pub budgets: ReadBudgets,
+    /// The sites' standing rules on: (key, the capability's key).
+    pub rules: BTreeSet<(JsString, &'static str)>,
+    /// Agent custody of the page's tab (the case's `custody`).
+    pub custody: bool,
+    /// The document still holds its key (a `name: moved` change clears it).
+    pub key_holds: bool,
+    pub tags: TagOwners,
 }
 
 impl TestWorld {
@@ -350,6 +357,10 @@ impl TestWorld {
             grants: BTreeSet::new(),
             feeds: FeedStore::empty(),
             budgets: ReadBudgets::new(),
+            rules: BTreeSet::new(),
+            custody: false,
+            key_holds: true,
+            tags: TagOwners::new(),
         }
     }
 
@@ -360,7 +371,23 @@ impl TestWorld {
             .get("feeds")
             .filter(|f| f.kind() == Kind::String)
             .map(string);
+        let mut rules = BTreeSet::new();
+        for (key, grant) in get(case, "grants").members() {
+            for (capability, on) in grant
+                .get("autoApprove")
+                .map(|a| a.members())
+                .into_iter()
+                .flatten()
+            {
+                if on.kind() == Kind::True {
+                    let capability = Capability::from_key(&string(capability)).unwrap();
+                    rules.insert((js(key), capability.key()));
+                }
+            }
+        }
         TestWorld {
+            rules,
+            custody: case.get("custody").is_some_and(|c| c.kind() == Kind::True),
             grants: get(case, "grants").members().map(|(k, _)| js(k)).collect(),
             feeds: match &feeds {
                 Some(text) => FeedStore::load(Some(text.as_bytes()), 0, |_| false).store,
@@ -378,8 +405,8 @@ impl Reads for TestWorld {
     fn messaging(&self, _key: &JsString) -> bool {
         false
     }
-    fn auto_approve(&self, _key: &JsString, _capability: Capability) -> bool {
-        false
+    fn auto_approve(&self, key: &JsString, capability: Capability) -> bool {
+        self.rules.contains(&(key.clone(), capability.key()))
     }
     fn feeds(&self) -> &FeedStore {
         &self.feeds
@@ -392,6 +419,43 @@ impl World for TestWorld {
     }
     fn budgets(&mut self) -> &mut ReadBudgets {
         &mut self.budgets
+    }
+    fn key_holds(&self, _key: &JsString) -> bool {
+        self.key_holds
+    }
+    fn agent(&self, _key: &JsString) -> bool {
+        self.custody
+    }
+    fn tags(&mut self) -> &mut TagOwners {
+        &mut self.tags
+    }
+}
+
+impl TestWorld {
+    /// A change to the case's world (`at_execute`, or a node rule's `world`
+    /// as its request arrives), as swarm-run.js's `world.change` makes it
+    /// for the case's key.
+    pub fn change(&mut self, key: &JsString, change: V<'_, '_>) {
+        for (what, value) in change.members() {
+            self.apply(key, &string(what), &text_value(value));
+        }
+    }
+
+    /// One change: (what, its value's text).
+    pub fn apply(&mut self, key: &JsString, what: &str, value: &str) {
+        match what {
+            "custody" => self.custody = value == "true",
+            "name" => self.key_holds = value != "moved",
+            "rule_off" => {
+                let capability = Capability::from_key(value).unwrap();
+                self.rules.remove(&(key.clone(), capability.key()));
+            }
+            "connection" => {
+                assert_eq!(value, "revoked");
+                self.grants.remove(key);
+            }
+            other => panic!("a world change this harness doesn't make: {other}"),
+        }
     }
 }
 
@@ -423,6 +487,7 @@ pub fn reason_phrase(status: u16) -> &'static str {
         402 => "Payment Required",
         404 => "Not Found",
         500 => "Internal Server Error",
+        307 => "Temporary Redirect",
         502 => "Bad Gateway",
         503 => "Service Unavailable",
         other => panic!("no reason phrase for {other}"),
@@ -538,6 +603,9 @@ pub struct Rule {
     pub path: Option<String>,
     pub prefix: Option<String>,
     pub reply: ReplySpec,
+    /// The change to the case's world as this rule's request arrives:
+    /// (what, value), a value as its text (`true`, `moved`, `publish`).
+    pub world: Vec<(String, String)>,
 }
 
 pub struct Node {
@@ -547,6 +615,14 @@ pub struct Node {
     /// `(owner, topic)` → GET /feeds' reply.
     pub feeds: BTreeMap<(String, String), ReplySpec>,
     pub stopped: bool,
+    /// GET /stamps' JSON (`{ stamps: [] }` when the case gives none).
+    pub stamps: Option<Vec<u8>>,
+    /// GET /tags/<uid>'s JSON, by uid.
+    pub tags: BTreeMap<String, Vec<u8>>,
+    /// The next `swarm-tag` of a `/bzz` or `/bytes` upload.
+    pub bzz_tag: std::cell::Cell<u64>,
+    /// Chunks uploaded with `POST /chunks`, by address.
+    pub uploaded: std::cell::RefCell<BTreeMap<String, Vec<u8>>>,
 }
 
 pub struct Keys {
@@ -606,6 +682,10 @@ impl Node {
             blobs: BTreeMap::new(),
             feeds: BTreeMap::new(),
             stopped: false,
+            stamps: None,
+            tags: BTreeMap::new(),
+            bzz_tag: std::cell::Cell::new(101),
+            uploaded: std::cell::RefCell::new(BTreeMap::new()),
         }
     }
 
@@ -666,14 +746,41 @@ impl Node {
                 }
                 "rules" => {
                     for r in v.children() {
-                        assert!(r.get("times").is_none() && r.get("world").is_none());
+                        assert!(r.get("times").is_none());
                         let m = get(r, "match");
                         node.rules.push(Rule {
                             method: m.get("method").map(string),
                             path: m.get("path").map(string),
                             prefix: m.get("prefix").map(string),
                             reply: ReplySpec::of(get(r, "reply")),
+                            world: r
+                                .get("world")
+                                .map(|w| {
+                                    w.members()
+                                        .map(|(k, v)| (string(k), text_value(v)))
+                                        .collect()
+                                })
+                                .unwrap_or_default(),
                         });
+                    }
+                }
+                "stamps" => node.stamps = Some(v.stringify(KeyOrder::Property).into_bytes()),
+                // The usable batch, its label that many bytes of `l`
+                // (swarm-run.js's nodeWorld).
+                "stamps_label_bytes" => {
+                    let label = "l".repeat(number(v) as usize);
+                    node.stamps = Some(
+                        format!(
+                            r#"{{"stamps":[{{"batchID":"{}","utilization":0,"usable":true,"label":"{label}","depth":22,"amount":"100000000000","bucketDepth":16,"blockNumber":1000,"immutableFlag":true,"exists":true,"batchTTL":864000}}]}}"#,
+                            "a1".repeat(32)
+                        )
+                        .into_bytes(),
+                    );
+                }
+                "tags" => {
+                    for (uid, tag) in v.members() {
+                        node.tags
+                            .insert(string(uid), tag.stringify(KeyOrder::Property).into_bytes());
                     }
                 }
                 other => panic!("node spec {other:?}"),
@@ -683,14 +790,56 @@ impl Node {
     }
 
     pub fn rule(&self, method: &str, path: &str) -> Option<&ReplySpec> {
-        self.rules
-            .iter()
-            .find(|r| {
-                r.method.as_deref().is_none_or(|m| m == method)
-                    && r.path.as_deref().is_none_or(|p| p == path)
-                    && r.prefix.as_deref().is_none_or(|p| path.starts_with(p))
-            })
-            .map(|r| &r.reply)
+        self.matching(method, path).map(|r| &r.reply)
+    }
+
+    /// The first rule a request matches.
+    pub fn matching(&self, method: &str, path: &str) -> Option<&Rule> {
+        self.rules.iter().find(|r| {
+            r.method.as_deref().is_none_or(|m| m == method)
+                && r.path.as_deref().is_none_or(|p| p == path)
+                && r.prefix.as_deref().is_none_or(|p| path.starts_with(p))
+        })
+    }
+
+    /// The node's reply to an upload with `body`: the rules first, then
+    /// what the generator's node answers (swarm-node.js's `own()`): `/bzz`
+    /// with SHA-256 of the body as its reference and the next tag;
+    /// `/chunks` with the chunk's address, which it stores.
+    pub fn upload(&self, method: &str, path: &str, body: &[u8]) -> ReplySpec {
+        if let Some(rule) = self.rule(method, path) {
+            return rule.clone();
+        }
+        let created = |headers: Vec<(String, String)>, reference: String| ReplySpec {
+            status: 201,
+            status_text: "Created".to_owned(),
+            headers: [
+                headers,
+                vec![(
+                    "content-type".to_owned(),
+                    "application/json; charset=utf-8".to_owned(),
+                )],
+            ]
+            .concat(),
+            body: format!(r#"{{"reference":"{reference}"}}"#).into_bytes(),
+            ..ReplySpec::ok(Vec::new(), "")
+        };
+        match (method, path) {
+            ("POST", "/bzz") => {
+                let tag = self.bzz_tag.get();
+                self.bzz_tag.set(tag + 1);
+                created(vec![("swarm-tag".to_owned(), tag.to_string())], sha(body))
+            }
+            ("POST", "/chunks") => {
+                let span: [u8; 8] = body[..8].try_into().unwrap();
+                let address = hex(&verify::address_of(&span, &body[8..]).unwrap());
+                self.uploaded
+                    .borrow_mut()
+                    .insert(address.clone(), body.to_vec());
+                created(vec![("swarm-tag".to_owned(), "0".to_owned())], address)
+            }
+            _ => panic!("the fake node has no answer for {method} {path}"),
+        }
     }
 
     /// The node's reply to a request, as the generator's node gives it.
@@ -706,6 +855,18 @@ impl Node {
         if let Some(a) = path.strip_prefix("/bytes/") {
             return self.blobs.get(a).map_or_else(ReplySpec::not_found, |b| {
                 ReplySpec::ok(b.clone(), "application/octet-stream")
+            });
+        }
+        if method == "GET" && path == "/stamps" {
+            let body = self
+                .stamps
+                .clone()
+                .unwrap_or_else(|| br#"{"stamps":[]}"#.to_vec());
+            return ReplySpec::ok(body, "application/json; charset=utf-8");
+        }
+        if let Some(uid) = path.strip_prefix("/tags/") {
+            return self.tags.get(uid).map_or_else(ReplySpec::not_found, |t| {
+                ReplySpec::ok(t.clone(), "application/json; charset=utf-8")
             });
         }
         if let Some(rest) = path.strip_prefix("/feeds/") {
@@ -959,7 +1120,7 @@ pub fn run(world: &mut TestWorld, node: &Node, call: &Call) -> Ran {
                     });
                 }
             }
-            Effect::Credit { .. } => {}
+            Effect::Credit { .. } | Effect::Body { .. } => {}
         }
     }
     ran.outcome = request.outcome().unwrap().clone();
@@ -1249,4 +1410,14 @@ pub fn check_row_shape(id: &str, grammar: V<'_, '_>, row: &str, ran: &Ran) {
         ran.calls.len(),
         "{id}: a call outside {row}'s forms or counts"
     );
+}
+
+/// A world change's value as its text: a string as it is, `true` or
+/// `false`.
+fn text_value(v: V<'_, '_>) -> String {
+    match v.kind() {
+        Kind::True => "true".to_owned(),
+        Kind::False => "false".to_owned(),
+        _ => string(v),
+    }
 }
