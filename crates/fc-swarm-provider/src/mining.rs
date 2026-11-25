@@ -28,7 +28,10 @@
 //! - the lane runs a job [`BATCH`] candidates at a time and checks the
 //!   job's deadline and its waiters between batches. A waiter's cancel or
 //!   deadline ends only its own wait; the job stops at the next batch when
-//!   its last waiter has gone, and a job that hasn't started is dropped;
+//!   its last waiter has gone, and a job that hasn't started is dropped. A
+//!   site whose last waiter on a job not yet started goes leaves the job's
+//!   owners and its own queue, so the job no longer counts there or takes
+//!   that site's turns;
 //! - a batch out for [`STUCK_MS`] marks the lane stuck: its job ends
 //!   `gsoc_mining_failed`, and a new lane thread takes the queue
 //!   ([`Watched::new_lane`]); the stuck thread's answer, if any, is
@@ -146,7 +149,9 @@ pub struct Watched<T> {
 struct Job<T> {
     key: Key,
     owners: Vec<JsString>,
-    waiters: Vec<T>,
+    /// Each waiter with its site, so a site whose last waiter goes stops
+    /// owning a job that hasn't started.
+    waiters: Vec<(JsString, T)>,
     dispatched: bool,
 }
 
@@ -253,7 +258,7 @@ impl<T: Clone + PartialEq> Lane<T> {
                 self.enqueue(site, id);
             }
             if let Some(j) = self.jobs.get_mut(&id) {
-                j.waiters.push(waiter);
+                j.waiters.push((site.clone(), waiter));
             }
             return Submitted::Waiting;
         }
@@ -270,7 +275,7 @@ impl<T: Clone + PartialEq> Lane<T> {
             Job {
                 key,
                 owners: vec![site.clone()],
-                waiters: vec![waiter],
+                waiters: vec![(site.clone(), waiter)],
                 dispatched: false,
             },
         );
@@ -351,23 +356,35 @@ impl<T: Clone + PartialEq> Lane<T> {
     fn settle(&mut self, id: u64, mined: Mined, answers: &mut Vec<(T, Mined)>) {
         self.unqueue(id);
         if let Some(job) = self.jobs.remove(&id) {
-            answers.extend(job.waiters.into_iter().map(|w| (w, mined)));
+            answers.extend(job.waiters.into_iter().map(|(_, w)| (w, mined)));
         }
     }
 
     /// The waiter went (its request's cancel or deadline): only its own
-    /// wait ends. A job left with no waiter is dropped if it hasn't
-    /// started, ends now between two batches, or at its batch's answer.
+    /// wait ends. A job that hasn't started leaves the queue of a site
+    /// whose last waiter that was, and stays for its other waiters' sites.
+    /// A job left with no waiter is dropped if it hasn't started, ends now
+    /// between two batches, or at its batch's answer.
     pub fn cancel(&mut self, waiter: &T) {
         let Some((&id, job)) = self
             .jobs
             .iter_mut()
-            .find(|(_, j)| j.waiters.contains(waiter))
+            .find(|(_, j)| j.waiters.iter().any(|(_, w)| w == waiter))
         else {
             return;
         };
-        job.waiters.retain(|w| w != waiter);
+        let Some(at) = job.waiters.iter().position(|(_, w)| w == waiter) else {
+            return;
+        };
+        let (site, _) = job.waiters.remove(at);
         if !job.waiters.is_empty() {
+            if !job.dispatched && !job.waiters.iter().any(|(s, _)| *s == site) {
+                job.owners.retain(|o| *o != site);
+                if let Some(q) = self.queues.iter_mut().find(|(o, _)| *o == site) {
+                    q.1.retain(|j| *j != id);
+                }
+                self.queues.retain(|(_, q)| !q.is_empty());
+            }
             return;
         }
         if !job.dispatched {
@@ -798,6 +815,50 @@ mod tests {
         lane.cancel(&5);
         assert!(lane.ran(0, out.run()).is_empty());
         assert!(lane.work(0).batch.is_none());
+    }
+
+    /// A co-owner's cancel: a site that joined sixteen queued jobs and
+    /// cancelled every request leaves each job's owners and its own queue,
+    /// so its next topic isn't `busy`; the jobs stay for their own sites
+    /// and run at their turns, each answering its first waiter alone.
+    #[test]
+    fn a_co_owners_cancel_leaves_its_queue() {
+        let mut lane = Lane::new();
+        let a = site(A);
+        lane.submit(0, &site(B), endless(0), 0);
+        let out = lane.work(0).batch.unwrap();
+        for i in 1..=16u8 {
+            let owner = site(&format!("https://s{i}.example"));
+            assert_eq!(
+                lane.submit(0, &owner, instant(i), u32::from(i)),
+                Submitted::Waiting
+            );
+            assert_eq!(
+                lane.submit(0, &a, instant(i), 100 + u32::from(i)),
+                Submitted::Waiting
+            );
+        }
+        assert_eq!(lane.waiting_for(&a), 16);
+        // A second waiter of A on one job: A stays an owner until its last
+        // waiter there goes.
+        assert_eq!(lane.submit(0, &a, instant(1), 200), Submitted::Waiting);
+        for i in 1..=16u8 {
+            lane.cancel(&(100 + u32::from(i)));
+        }
+        assert_eq!(lane.waiting_for(&a), 1);
+        lane.cancel(&200);
+        assert_eq!(lane.waiting_for(&a), 0);
+        assert_eq!(lane.waiting(), 16, "the jobs stay for their own sites");
+        assert_eq!(lane.submit(0, &a, instant(99), 99), Submitted::Waiting);
+        lane.cancel(&0);
+        assert!(lane.ran(0, out.run()).is_empty());
+        let answers = drain(&mut lane, 0);
+        let mut waiters: Vec<u32> = answers.iter().map(|(w, _)| *w).collect();
+        // A's own job runs once, at its own turn; each other job answers its
+        // first waiter alone.
+        assert_eq!(waiters.iter().filter(|w| **w == 99).count(), 1);
+        waiters.sort_unstable();
+        assert_eq!(waiters, (1..=16).chain([99]).collect::<Vec<_>>());
     }
 
     /// A job past its 15 s ends `gsoc_mining_timeout` within one batch,
