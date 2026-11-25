@@ -1,5 +1,5 @@
 //! `window.swarm`'s backend in the core (design 0015): the logic crate the
-//! swarm thread's method machines will live in, sans-I/O. This first part
+//! swarm thread's method machines live in, sans-I/O. The first part
 //! (SWM-3, part 1) holds:
 //!
 //! - **Batch choice** ([`stamps`]): the node's `/stamps` reply through its
@@ -26,15 +26,35 @@
 //!   the statements to write (deviations `index-allocation`,
 //!   `history-bound`, `store-writes`).
 //!
+//! The third part (SWM-3, part 3a) adds the method machines:
+//!
+//! - **The framework** ([`machine`]): one [`machine::Request`] per
+//!   `swarm.request`, which asks for what it needs (a readiness answer, a
+//!   node call with its charge, hashing, and for the pieces to come a
+//!   part, a signature, a store write, a GSOC search) and is handed the
+//!   answers; the world it reads between them (the clock, the grants, the
+//!   feed store, the read budgets); a page's errors; the typed params
+//!   ([`value`]).
+//! - **Access and Reads** ([`methods`]): `requestAccess`,
+//!   `getCapabilities`, `listFeeds`, `readChunk`,
+//!   `readSingleOwnerChunk`, `readData` through 0009's verified walk
+//!   (deviation `read-data-verified`), and `readFeedEntry` with #1057's
+//!   metered reads; the read budgets ([`budgets`]); chunks as bee-js reads
+//!   them ([`chunks`]); and the feed index lookup the feed writes will use
+//!   ([`methods::feed_index`], deviation `index-probe`).
+//!
 //! The reference is freedom-browser's `src/main/swarm/` at the swarm
 //! reference commit over bee-js 13.2.0 and core-sdk 0.2.2;
 //! `vectors/swarm.json` is the contract (AGENTS rule 5). The crate does no
 //! I/O: replies come in as bytes.
 
+pub mod budgets;
 pub mod chunks;
 pub mod errors;
 mod js;
 pub mod json;
+pub mod machine;
+pub mod methods;
 pub mod stamps;
 pub mod stores;
 pub mod value;
