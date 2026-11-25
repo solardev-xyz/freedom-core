@@ -563,20 +563,38 @@ impl FeedStore {
     }
 
     /// [`FeedStore::ethereum_wallet_identity_references`], and what it
-    /// held: at its peak, and at its end (the answer's own).
+    /// held: at its peak, and at its end (the answer's own, or the
+    /// refusal's text, made only once the work has all been let go of).
     fn references_held(&self, wallet_index: &JsValue) -> (Result<Value, Thrown>, Held) {
         let mut held = Held::default();
-        let answer = self.references_within(wallet_index, &mut held);
-        (answer, held)
-    }
-
-    fn references_within(&self, wallet_index: &JsValue, held: &mut Held) -> Result<Value, Thrown> {
         match wallet_index {
             JsValue::Number(n) if crate::js::is_integer(*n) && *n >= 0.0 => {}
             _ => {
-                return Err(Thrown::error("Wallet index must be a non-negative integer"));
+                let thrown = Thrown::error("Wallet index must be a non-negative integer");
+                return (Err(thrown), held);
             }
         }
+        match self.references_within(wallet_index, &mut held) {
+            Ok(answer) => (Ok(answer), held),
+            Err(TooLarge) => {
+                // Everything the work held is freed as it returns; only
+                // then is the refusal's text made.
+                held.now = 0;
+                let thrown = Thrown::error(REFERENCES_TOO_LARGE);
+                held.now = fc_json::allocation(thrown.message.capacity());
+                held.peak = held.peak.max(held.now);
+                (Err(thrown), held)
+            }
+        }
+    }
+
+    /// The references, or [`TooLarge`] (which allocates nothing) at the
+    /// first charge past the bound.
+    fn references_within(
+        &self,
+        wallet_index: &JsValue,
+        held: &mut Held,
+    ) -> Result<Value, TooLarge> {
         let mut references: Vec<(&JsString, bool, Option<Value>)> = Vec::new();
         for (origin, entry) in props(self.origins()) {
             let identities = field_or_undefined(entry, "identities");
@@ -1053,12 +1071,17 @@ struct Held {
     peak: usize,
 }
 
+/// A charge past [`MAX_REFERENCES_HELD`]: no allocation, so nothing is made
+/// on top of the work at its bound.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct TooLarge;
+
 impl Held {
     /// `bytes` more, refused past [`MAX_REFERENCES_HELD`].
-    fn charge(&mut self, bytes: usize) -> Result<(), Thrown> {
+    fn charge(&mut self, bytes: usize) -> Result<(), TooLarge> {
         let next = self.now.saturating_add(bytes);
         if next > MAX_REFERENCES_HELD {
-            return Err(Thrown::error(REFERENCES_TOO_LARGE));
+            return Err(TooLarge);
         }
         self.now = next;
         self.peak = self.peak.max(next);
@@ -1085,7 +1108,7 @@ fn string_held(text: &JsString) -> usize {
 /// `item` pushed onto `items`: where the buffer is full, the larger one is
 /// charged before it is made (while the old one still lives), and the old
 /// one let go of once it is freed.
-fn push_held<T>(held: &mut Held, items: &mut Vec<T>, item: T) -> Result<(), Thrown> {
+fn push_held<T>(held: &mut Held, items: &mut Vec<T>, item: T) -> Result<(), TooLarge> {
     if items.len() == items.capacity() {
         let old = vec_held::<T>(items.capacity());
         let wanted = items.capacity().saturating_mul(2).max(4);
@@ -1112,7 +1135,7 @@ fn sort_held<T: Copy>(
     held: &mut Held,
     items: &mut [T],
     compare: impl FnMut(T, T) -> f64,
-) -> Result<(), Thrown> {
+) -> Result<(), TooLarge> {
     let scratch = vec_held::<T>(items.len()).saturating_add(fc_json::allocation(SORT_RUNS_HELD));
     held.charge(scratch)?;
     crate::js::sort(items, compare);
@@ -2251,12 +2274,34 @@ mod tests {
             feeds.join(",")
         );
         let named = FeedStore::load(Some(text.as_bytes()), NOW, |_| false).store;
-        for store in [codex, short, named] {
+        // Codex's edge: a first site whose key brings the work to exactly
+        // the bound, and a second whose reference is one byte too many.
+        let site = |key: &str| {
+            format!(
+                r#""{key}":{{"activeIdentityId":"bee-wallet","identities":{{"bee-wallet":{{"id":"bee-wallet","mode":"bee-wallet"}},"ethereum-wallet:0":{{"id":"ethereum-wallet:0","mode":"ethereum-wallet","walletIndex":0}}}},"feeds":{{"f":{{"identityId":"ethereum-wallet:0"}}}}}}"#
+            )
+        };
+        let text = format!(
+            r#"{{"version":2,"nextPublisherKeyIndex":0,"origins":{{{},{}}}}}"#,
+            site(&"k".repeat(1_047_548)),
+            site("z")
+        );
+        let edge = FeedStore::load(Some(text.as_bytes()), NOW, |_| false).store;
+        let mut peaks = Vec::new();
+        for store in [codex, short, named, edge] {
             let (answer, held) = store.references_held(&wallet_zero());
             assert_eq!(answer, Err(Thrown::error(REFERENCES_TOO_LARGE)));
-            // Refused at the bound, or before a reference past it is made.
+            // Refused at the bound, or before a reference past it is
+            // made; the refusal's text made only once the work is freed.
             assert!(held.peak <= MAX_REFERENCES_HELD, "{held:?}");
+            assert_eq!(
+                held.now,
+                fc_json::allocation(REFERENCES_TOO_LARGE.len()),
+                "{held:?}"
+            );
+            peaks.push(held.peak);
         }
+        assert_eq!(peaks[3], MAX_REFERENCES_HELD, "the edge reaches the bound");
     }
 
     /// What the answer holds is what was counted: once made, the count is
