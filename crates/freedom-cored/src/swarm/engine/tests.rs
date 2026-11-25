@@ -11,6 +11,9 @@ use fc_swarm_provider::machine::{UPLOAD_CHARGE, whole_charge};
 const SITE: &str = "https://a.example";
 const KIB: usize = 1024;
 
+/// The streams' own tests (SWM-4 PR 6).
+mod stream_tests;
+
 #[derive(Default)]
 struct Fake {
     next: u64,

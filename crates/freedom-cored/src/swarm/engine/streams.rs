@@ -13,7 +13,8 @@
 //!   bytes go out on the upload's body ("credit goes in only when it can go
 //!   out"). A streamed read's charge, whose bytes are now the result's,
 //!   stays until the request's answer has been written ("The swarm
-//!   thread's memory").
+//!   thread's memory"), and, if they are on the hashing pool, until they
+//!   are back.
 //! - **Cancelled,** a stream retires: its frames are dropped as they come,
 //!   and its slots and charge stay until main's terminal, which must come
 //!   within the idle bound, or the connection ends.
@@ -394,11 +395,13 @@ impl Engine {
         }
     }
 
-    /// A read's charge, kept until its request's answer has been written.
+    /// A read's charge, kept until its request has ended with nothing of
+    /// it open (a job on the hashing pool holds the bytes) and its answer
+    /// has been written.
     pub(super) fn keep_for_answer(&mut self, id: u64, amount: usize) {
         match self.slots.get_mut(&id) {
-            Some(slot) if !(slot.answered && slot.written) => slot.base += amount,
-            _ => self.release(amount),
+            Some(slot) => slot.kept = slot.kept.saturating_add(amount),
+            None => self.release(amount),
         }
     }
 

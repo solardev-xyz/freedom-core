@@ -461,6 +461,10 @@ struct Slot {
     idle: Option<Ms>,
     /// Its jobs on the hashing pool, not yet back.
     hashing: usize,
+    /// Its streamed reads' charges, whose bytes are its result's (or on
+    /// the hashing pool): they go once it has ended, nothing of it is
+    /// open, and its answer has been written.
+    kept: usize,
 }
 
 /// One write to a topic at a time (feed-service.js's `withWriteLock`):
@@ -748,6 +752,7 @@ impl Engine {
                 written: false,
                 idle: None,
                 hashing: 0,
+                kept: 0,
             },
         );
         self.admission.push_back(id);
@@ -1273,13 +1278,14 @@ impl Engine {
             return;
         };
         self.forget_bodies(io, id);
-        if slot.base == 0 {
+        let held = slot.base.saturating_add(slot.kept);
+        if held == 0 {
             return;
         }
         if slot.written {
-            self.release(slot.base);
+            self.release(held);
         } else {
-            self.unwritten.insert(id, slot.base);
+            self.unwritten.insert(id, held);
         }
     }
 
