@@ -131,8 +131,9 @@ impl ReadBudgets {
         Ok(())
     }
 
-    /// What is left of the key's bytes in this window: what a latest feed
-    /// entry may still hold (design 0015, "The swarm thread's memory").
+    /// What is left of the key's bytes in this window. (It doesn't bound
+    /// what a latest feed entry holds: the window can roll during the
+    /// read.)
     pub fn room(&self, origin: &JsString, connected: bool, now: u64) -> u64 {
         let budget = budget(connected);
         budget

@@ -415,7 +415,16 @@ impl Asks {
     fn admit(&mut self, id: AskId, event: &Event) -> Result<bool, Protocol> {
         let open = self.open.get_mut(&id).ok_or(Protocol::UnknownAsk)?;
         let terminal = match (&mut open.kind, event) {
-            (_, Event::Refused(_)) => true,
+            // Main refuses a call before any reply (`invalid_argument`): a
+            // node call by its grammar, before its reply or its head; a
+            // part request before the part's head. Main answers no other
+            // ask that way.
+            (
+                Kind::Whole { .. }
+                | Kind::Stream { head: false, .. }
+                | Kind::Part { head: false, .. },
+                Event::Refused(_),
+            ) => true,
             (Kind::Ready, Event::Ready(_)) => true,
             (Kind::Whole { max }, Event::Reply(reply)) => {
                 let cap = if reply.ok() { *max } else { node::ERROR_BODY };
@@ -569,13 +578,6 @@ impl<W: World> Cx<'_, W> {
             .reserve(self.origin, connected, now, bytes)
     }
 
-    /// What is left of the site's bytes in this window.
-    pub fn room(&mut self) -> u64 {
-        let connected = self.connected();
-        let now = self.world.now();
-        self.world.budgets().room(self.origin, connected, now)
-    }
-
     pub fn ready(&mut self, check: ReadyCheck) -> AskId {
         self.asks.push(Need::Ready(check), 0)
     }
@@ -684,8 +686,13 @@ impl Request {
     /// Hands the request main's answer (or a part of it) to ask `id`.
     pub fn answer<W: World>(&mut self, world: &mut W, id: AskId, event: Event) {
         if self.outcome.is_some() {
-            // Taken and dropped: the request has its answer.
-            self.asks.open.remove(&id);
+            // Taken and dropped: the request has its answer. An ask stays
+            // open until its own terminal answer (a reply, a stream's end
+            // or abort, a failure), since what main holds for it is held
+            // until then; heads and data before it are taken, never handed
+            // to the method. An answer that breaks the protocol now
+            // changes nothing.
+            let _ = self.asks.admit(id, &event);
             return;
         }
         let cancelled = match self.asks.admit(id, &event) {
@@ -777,6 +784,7 @@ mod tests {
     use crate::stores::manifests::Capability;
 
     struct Plain {
+        now: u64,
         budgets: ReadBudgets,
         feeds: FeedStore,
     }
@@ -798,7 +806,7 @@ mod tests {
 
     impl World for Plain {
         fn now(&self) -> u64 {
-            1000
+            self.now
         }
         fn budgets(&mut self) -> &mut ReadBudgets {
             &mut self.budgets
@@ -807,6 +815,7 @@ mod tests {
 
     fn world() -> Plain {
         Plain {
+            now: 1000,
             budgets: ReadBudgets::new(),
             feeds: FeedStore::empty(),
         }
@@ -824,6 +833,12 @@ mod tests {
     /// `readFeedEntry` of the latest entry, past its readiness check: the
     /// request and its `feed_latest` ask.
     fn latest(w: &mut Plain) -> (Request, AskId) {
+        let (r, id, _) = latest_charged(w);
+        (r, id)
+    }
+
+    /// [`latest`], and what its ask charged.
+    fn latest_charged(w: &mut Plain) -> (Request, AskId, usize) {
         let params = Value::object([
             ("topic", Value::str(&"ab".repeat(32))),
             ("owner", Value::str(&"cd".repeat(20))),
@@ -842,8 +857,7 @@ mod tests {
         };
         assert_eq!(node.form, Form::FeedLatest);
         assert_eq!(node.max_bytes, 5 * 1024 * 1024);
-        assert_eq!(ask.charge, stream_charge(5 * 1024 * 1024));
-        (r, ask.id)
+        (r, ask.id, ask.charge)
     }
 
     fn head() -> Event {
@@ -907,20 +921,134 @@ mod tests {
     #[test]
     fn a_cancel_ends_it_and_drops_what_comes_after() {
         let mut w = world();
+        for terminal in [Event::End, Event::Abort(Abort::Cancelled)] {
+            let (mut r, id) = latest(&mut w);
+            r.cancel();
+            assert_eq!(r.take_effects(), vec![Effect::Cancel(id)]);
+            assert_eq!(r.outcome(), Some(&Outcome::Cancelled));
+            // What was in flight is taken, and the ask stays open, until
+            // its terminal answer.
+            assert_eq!(r.open_asks(), 1);
+            r.answer(&mut w, id, head());
+            assert_eq!(r.open_asks(), 1);
+            r.answer(&mut w, id, Event::Data(vec![1; 10]));
+            assert_eq!(r.open_asks(), 1);
+            assert!(r.take_effects().is_empty(), "no credit after the outcome");
+            r.answer(&mut w, id, terminal);
+            assert_eq!(r.open_asks(), 0);
+            assert_eq!(r.outcome(), Some(&Outcome::Cancelled));
+            r.busy();
+            assert_eq!(r.outcome(), Some(&Outcome::Cancelled));
+        }
+        // A whole call cancelled before its reply closes on the reply.
         let (mut r, id) = latest(&mut w);
         r.cancel();
-        assert_eq!(r.take_effects(), vec![Effect::Cancel(id)]);
-        assert_eq!(r.outcome(), Some(&Outcome::Cancelled));
-        r.answer(&mut w, id, head());
-        r.answer(&mut w, id, Event::End);
-        assert_eq!(r.outcome(), Some(&Outcome::Cancelled));
-        assert!(r.take_effects().is_empty());
-        r.busy();
-        assert_eq!(r.outcome(), Some(&Outcome::Cancelled));
+        r.answer(&mut w, id, Event::Failed(Failed::Error));
+        assert_eq!(r.open_asks(), 0);
 
         let (mut r, _) = latest(&mut w);
         r.busy();
         assert_eq!(r.outcome(), Some(&Outcome::Error(Failure::busy())));
+    }
+
+    #[test]
+    fn main_refuses_only_a_call_before_its_reply() {
+        let mut w = world();
+        // A ready check is never refused by a grammar rule.
+        let params = Value::object([("reference", Value::str(&"ab".repeat(32)))]);
+        let mut r = Request::start(&call("swarm_readChunk", params), &mut w).unwrap();
+        let Some(Effect::Ask(ready)) = r.take_effects().pop() else {
+            panic!("the ready check")
+        };
+        r.answer(&mut w, ready.id, Event::Refused(Rule::Value));
+        assert_eq!(r.outcome(), Some(&Outcome::Protocol(Protocol::WrongKind)));
+        // A stream past its head is no call main can refuse any more.
+        let (mut r, id) = latest(&mut w);
+        r.answer(&mut w, id, head());
+        r.answer(&mut w, id, Event::Refused(Rule::Value));
+        assert_eq!(r.outcome(), Some(&Outcome::Protocol(Protocol::WrongKind)));
+    }
+
+    /// A latest read's frames are reserved in the budget's window as they
+    /// come, and the window can roll between the ask and its frames: the
+    /// bytes it holds never pass what its ask charged.
+    #[test]
+    fn a_latest_read_holds_no_more_than_its_charge_across_windows() {
+        let mut w = world();
+        let key = JsString::from("https://a.example");
+        let max = 5 * 1024 * 1024;
+        w.budgets.consume(&key, true, 0, 0, max as u64 - 1).unwrap();
+        w.now = 59_999;
+        let (mut r, id, charge) = latest_charged(&mut w);
+        w.now = 60_000;
+        r.answer(&mut w, id, head());
+        let mut held = 0usize;
+        while held < max {
+            r.answer(&mut w, id, Event::Data(vec![3; MAX_FRAME]));
+            assert_eq!(r.outcome(), None);
+            assert_eq!(
+                r.take_effects(),
+                vec![Effect::Credit {
+                    id,
+                    bytes: MAX_FRAME
+                }]
+            );
+            held += MAX_FRAME;
+            assert!(stream_charge(held) <= charge, "{held} bytes under {charge}");
+        }
+        r.answer(&mut w, id, Event::End);
+        assert!(matches!(r.outcome(), Some(Outcome::Result(_))));
+    }
+
+    /// `validateEmptyOptions` over bytes: a `Buffer`'s and a
+    /// `Uint8Array`'s own keys are their indices; an `ArrayBuffer` has none.
+    #[test]
+    fn options_that_are_bytes_have_javascripts_keys() {
+        use crate::value::{Bytes, BytesKind, Source};
+
+        let mut w = world();
+        for (kind, len, refused) in [
+            (BytesKind::Buffer, 1, true),
+            (BytesKind::Uint8Array, 1, true),
+            (BytesKind::ArrayBuffer, 1, false),
+            (BytesKind::Buffer, 0, false),
+        ] {
+            let options = Value::Bytes(Bytes {
+                len,
+                kind,
+                source: Source::Inline(vec![1; len as usize]),
+                data: false,
+            });
+            let params = Value::object([
+                ("reference", Value::str(&"ab".repeat(32))),
+                ("options", options),
+            ]);
+            let mut r = Request::start(&call("swarm_readChunk", params), &mut w).unwrap();
+            if refused {
+                assert_eq!(
+                    r.outcome(),
+                    Some(&Outcome::Error(Failure::invalid_params_with(
+                        "Unsupported option: 0",
+                        "unsupported_option",
+                        vec![("option", Value::str("0"))],
+                    ))),
+                    "{kind:?}"
+                );
+            } else {
+                assert_eq!(r.outcome(), None, "{kind:?}");
+                let effects = r.take_effects();
+                assert!(
+                    matches!(
+                        &effects[..],
+                        [Effect::Ask(Ask {
+                            need: Need::Ready(ReadyCheck::Reachable),
+                            ..
+                        })]
+                    ),
+                    "{kind:?}: {effects:?}"
+                );
+            }
+        }
     }
 
     #[test]
