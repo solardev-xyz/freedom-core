@@ -613,7 +613,7 @@ The core never parses a node's reply into a generic JSON value: a dense array of
 | Main's Swarm I/O pool | 64 MiB, reserved before the dial ([Main's Swarm I/O pool](#mains-swarm-io-pool)) |
 | `swarm-feeds.json` | 16 MiB; a write past it refused (`store_full`); a file past it at load is kept aside as one that doesn't parse |
 | `swarm-manifest-grants.json` | 1 MiB, the same way; a file past it at load is unreadable, and the `.bak` copy is read instead |
-| `publish-history.sqlite` | 10,000 rows, trimmed after each insert and at open: finished rows first, oldest first, then the oldest others, so the table never holds more |
+| `publish-history.sqlite` | 10,000 rows, trimmed after each insert and at open: finished rows first, oldest first, then the oldest others, never the row just inserted (a clock set back would make it the oldest), so the table never holds more |
 | Mining | one lane; batches of 256 candidates; 16 jobs waiting per site and 256 in all, then `busy`; a stuck batch's watchdog at 1 s |
 
 Today's code has none of these. Its own budgets stay as they are: the read budgets, the 16 new topics a minute, the 128-topic cache, the 32 subscriptions per site and 15 s per mining job. SWM-4 measures the uploads, the reads and the mining, and replaces the numbers if needed.
@@ -664,7 +664,8 @@ Against the reference pin, which has #1057. F-1's and F-5's first deviations (`f
 | `session-transport` | Node's `fetch` for every HTTP call (F-6) | the node's transport |
 | `transport-error-text` | undici's message for each failure | one text per failure class |
 | `subscribe-proxy` (question 4) | a subscription to a remote node goes around the proxy and Tor | refused while a proxy or Tor is on: 4900 `Node not available: proxy-or-tor`; open ones end; the user is told |
-| `history-bound` | no bound | 10,000 rows, trimmed after each insert and at open (finished rows first, oldest first) |
+| `history-bound` | no bound | 10,000 rows, trimmed after each insert and at open (finished rows first, oldest first), never the row just inserted |
+| `history-blobs` | a BLOB cell, which no writer makes, is answered as a `Buffer` (a BLOB timestamp throws, as any bad one does) | a row with a BLOB cell fails the read, as a bad timestamp does |
 | `store-shapes` | a store file it loads but then fails on (a manifest record of the wrong shape, a string `revision` concatenated), or a v2 feed map that isn't an object of objects kept as it is | read as a file that doesn't parse (manifests: the `.bak` copy, else unreadable); the feed map rebuilt as the reference's sanitizer does |
 | `store-refusal` | a refused change can leave the in-memory store changed (a refused label keeps its publisher index taken) | a refused change changes nothing (0013: memory changes only after the durable write) |
 | `own-keys` | a feed name that is a key of `Object.prototype` reads the inherited property: `toString` gives an empty "existing" feed (`createFeed` answers `bzz://undefined`), and a `__proto__` feed is never saved ([freedom-browser#1327](https://github.com/solardev-xyz/freedom-browser/issues/1327)) | every name is an own key: an ordinary feed |
@@ -722,12 +723,13 @@ Once decided:
 - **The manifest check is two steps:** the legacy and backoff checks, then main's fetch of a `bzz:` manifest, then the decision, so the backoff still saves fetches.
 - **A file that doesn't parse** is copied aside, and its empty replacement written at the next change, as the reference does.
 - **Reads have the stores' bounds too:** a feed store past 16 MiB is kept aside; a manifest store past 1 MiB falls back to its `.bak`.
-- **`history-bound` trims** after each insert and at open, finished rows first.
+- **`history-bound` trims** after each insert and at open, finished rows first, and never takes the row just inserted.
 - **New deviations:**
   - `store-shapes`: files the reference loads and then fails on;
   - `store-refusal`: a refused change changes nothing;
   - `own-keys`: feed names like `toString` and `__proto__`, a reference bug filed as freedom-browser#1327;
-  - `legacy-dates`: only ECMAScript's date-time format with an offset is a date.
+  - `legacy-dates`: only ECMAScript's date-time format with an offset is a date;
+  - `history-blobs`: a row with a BLOB cell fails the read.
 - **The manifest check's committed-URL guard** computes a permission key from a URL with the reference's `getPermissionKey` rules. That is the only key the core derives; every grant key is still 0011's, as main gives it (0012).
 - **`getEthereumWalletIdentityReferences`** sorts with ICU's `localeCompare`; it stays with part 3, which must port that order or name a deviation.
 - **Vector gaps:** the new deviations have no case yet; they follow with part 3's vectors change.
