@@ -665,10 +665,7 @@ impl Engine {
         let Some((id, ask_id)) = self.sent.remove(&core) else {
             return Err(Fault("swarm_unsolicited"));
         };
-        let slot = self
-            .slots
-            .get_mut(&id)
-            .ok_or(Fault("swarm_unsolicited"))?;
+        let slot = self.slots.get_mut(&id).ok_or(Fault("swarm_unsolicited"))?;
         let ask = slot
             .asks
             .remove(&ask_id)
@@ -786,11 +783,7 @@ impl Engine {
                     self.settle(io, now, id)?;
                 }
                 Phase::Waiting(_) | Phase::Base(_) | Phase::Done => {
-                    self.end_unstarted(
-                        io,
-                        id,
-                        Answer::Result(wire::error_typed(&Failure::busy())),
-                    );
+                    self.end_unstarted(io, id, Answer::Result(wire::error_typed(&Failure::busy())));
                 }
             }
         }
@@ -1074,7 +1067,15 @@ impl Engine {
         }
     }
 
-    fn ask(&mut self, io: &mut impl Io, now: Ms, id: u64, ask_id: AskId, need: Need, charge: usize) {
+    fn ask(
+        &mut self,
+        io: &mut impl Io,
+        now: Ms,
+        id: u64,
+        ask_id: AskId,
+        need: Need,
+        charge: usize,
+    ) {
         let Some(slot) = self.slots.get_mut(&id) else {
             return;
         };
@@ -1137,14 +1138,10 @@ impl Engine {
                 cancelled: false,
             },
         );
-        match stage {
-            Stage::Outbox => self.outbox.push_back((id, ask_id)),
-            Stage::Memory => {
-                if self.memory.reserve(Waiter::Ask(id, ask_id), charge) {
-                    self.charged(id, ask_id);
-                }
-            }
-            _ => {}
+        if stage == Stage::Outbox {
+            self.outbox.push_back((id, ask_id));
+        } else if stage == Stage::Memory && self.memory.reserve(Waiter::Ask(id, ask_id), charge) {
+            self.charged(id, ask_id);
         }
     }
 
@@ -1318,7 +1315,9 @@ impl Engine {
                 params: wire::subscribe_params(id, subscription),
                 reply_bound: SMALL_REPLY,
             },
-            Need::Unsubscribe { id: subscription, .. } => Outgoing {
+            Need::Unsubscribe {
+                id: subscription, ..
+            } => Outgoing {
                 method: "shell.swarm_unsubscribe",
                 params: wire::unsubscribe_params(subscription),
                 reply_bound: SMALL_REPLY,

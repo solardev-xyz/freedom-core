@@ -91,7 +91,10 @@ fn approval_of(method: &str, step: fc_json::index::Value<'_, '_>) -> Option<&'st
 
 /// A GSOC subscription by topic: its signer is mined (PR 8).
 fn mines(step: fc_json::index::Value<'_, '_>) -> bool {
-    if !step.get("method").is_some_and(|m| m.is_str("swarm_subscribe")) {
+    if !step
+        .get("method")
+        .is_some_and(|m| m.is_str("swarm_subscribe"))
+    {
         return false;
     }
     let Some(members) = step.get("params").and_then(|p| p.get("object")) else {
@@ -107,9 +110,8 @@ fn mines(step: fc_json::index::Value<'_, '_>) -> bool {
     let gsoc = member("kind")
         .and_then(|kind| kind.get("string"))
         .is_some_and(|kind| kind.is_str("gsoc"));
-    let topic = member("topic").is_some_and(|topic| {
-        topic.get("null").is_none() && topic.get("undefined").is_none()
-    });
+    let topic = member("topic")
+        .is_some_and(|topic| topic.get("null").is_none() && topic.get("undefined").is_none());
     gsoc && topic
 }
 
@@ -279,7 +281,9 @@ fn whole_calls_play_every_case() {
             };
             // A subscription the page got is the one main opened; one that
             // didn't reach it is closed.
-            if name == "swarm_subscribe" && matches!(ran.outcome, fc_swarm_provider::machine::Outcome::Result(_)) {
+            if name == "swarm_subscribe"
+                && matches!(ran.outcome, fc_swarm_provider::machine::Outcome::Result(_))
+            {
                 assert_eq!(ran.opened.len(), 1, "{sid}: one subscription opened");
                 assert!(ran.closed.is_empty(), "{sid}: and kept");
                 let result = logic::get(*step, "result");
@@ -307,7 +311,11 @@ fn whole_calls_play_every_case() {
             }
         }
     }
-    assert_eq!(left_out_seen.len(), LEFT_OUT.len(), "every case left out exists");
+    assert_eq!(
+        left_out_seen.len(),
+        LEFT_OUT.len(),
+        "every case left out exists"
+    );
     // Every honest scenario of the rows played, but a skipped case's.
     for (sid, scenario) in &scenarios {
         let from = logic::string(logic::get(*scenario, "from"));
@@ -348,14 +356,10 @@ fn connected(main: &mut Main) {
 
 /// The next request the core makes of main.
 fn asked(main: &mut Main, method: &str) -> serde_json::Value {
-    loop {
-        let message = main.core.recv();
-        if message["type"] == "request" {
-            assert_eq!(message["method"], method, "{message}");
-            return message;
-        }
-        panic!("expected {method}: {message}");
-    }
+    let message = main.core.recv();
+    assert_eq!(message["type"], "request", "expected {method}: {message}");
+    assert_eq!(message["method"], method, "{message}");
+    message
 }
 
 #[test]
@@ -384,7 +388,10 @@ fn the_door_answers_before_any_machine_runs() {
             r#"{"method":{"string":"swarm_readData"},"params":{"undefined":true}}"#,
             "internal",
         ),
-        (r#"{"method":"swarm_readChunk","params":{"undefined":true}}"#, "invalid_argument"),
+        (
+            r#"{"method":"swarm_readChunk","params":{"undefined":true}}"#,
+            "invalid_argument",
+        ),
     ] {
         let id = main.request(&page(SITE), request);
         let answer = main.core.response(id);
@@ -429,7 +436,10 @@ fn admission_busy_and_the_deadline_through_the_pipe() {
         &READ_CHUNK.replace(r#""params""#, r#""deadline_ms":300,"params""#),
     );
     let ready = asked(&mut main, "shell.swarm_ready");
-    assert_eq!(ready["params"], json!({ "for": first, "check": "reachable" }));
+    assert_eq!(
+        ready["params"],
+        json!({ "for": first, "check": "reachable" })
+    );
     // The second finds no place and no room to wait: 4900 busy, typed.
     let second = main.request(&page(SITE), READ_CHUNK);
     let answer = main.core.response(second);
@@ -459,7 +469,10 @@ fn admission_busy_and_the_deadline_through_the_pipe() {
 #[test]
 fn a_malformed_answer_ends_the_core() {
     for (what, answer) in [
-        ("a readiness of another shape", json!({ "result": { "ok": "yes" } })),
+        (
+            "a readiness of another shape",
+            json!({ "result": { "ok": "yes" } }),
+        ),
         (
             "a refusal of a check never cancelled",
             json!({ "error": { "code": "cancelled", "message": "Cancelled" } }),
@@ -487,12 +500,18 @@ fn a_malformed_answer_ends_the_core() {
             Some(call) => {
                 main.answer(id, json!({ "ok": true }));
                 let call_id = asked(&mut main, "shell.swarm_api")["id"].as_u64().unwrap();
-                json!({ "type": "response", "id": call_id }).as_object().unwrap().clone()
+                json!({ "type": "response", "id": call_id })
+                    .as_object()
+                    .unwrap()
+                    .clone()
                     .into_iter()
                     .chain(call.as_object().unwrap().clone())
                     .collect::<serde_json::Map<_, _>>()
             }
-            None => json!({ "type": "response", "id": id }).as_object().unwrap().clone()
+            None => json!({ "type": "response", "id": id })
+                .as_object()
+                .unwrap()
+                .clone()
                 .into_iter()
                 .chain(answer.as_object().unwrap().clone())
                 .collect(),

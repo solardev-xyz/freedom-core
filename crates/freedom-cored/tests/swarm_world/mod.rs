@@ -15,8 +15,8 @@
 use std::collections::BTreeSet;
 
 use base64::Engine as _;
-use fc_json::index::Value as V;
 use fc_json::JsString;
+use fc_json::index::Value as V;
 use fc_swarm_provider::machine::{
     Body, Event, Failed, Failure, FeedRef, Form, NodeCall, Outcome, ReadyCheck, Subscription,
     SubscriptionKind, TreeRef,
@@ -153,7 +153,8 @@ impl Main {
         let frame = format!(
             r#"{{"type":"request","id":{id},"method":"swarm.request","params":{params},"context":{{"caller":"page","page":{page}}}}}"#
         );
-        self.core.send_raw(&crate::common::raw_frame(0x01, frame.as_bytes()));
+        self.core
+            .send_raw(&crate::common::raw_frame(0x01, frame.as_bytes()));
         id
     }
 
@@ -309,8 +310,7 @@ impl Main {
                 let (abort_page, events) = logic::forward(&spec, &call);
                 if abort_page {
                     // The page gives up as the request reaches the node.
-                    self.core
-                        .send(&json!({ "type": "cancel", "id": request }));
+                    self.core.send(&json!({ "type": "cancel", "id": request }));
                 }
                 assert_eq!(events.len(), 1, "a whole call's one answer");
                 let body = match &events[0] {

@@ -63,12 +63,12 @@ use serde_json::value::RawValue;
 use zeroize::Zeroizing;
 
 use crate::dweb::thread as dweb;
-use crate::swarm::thread as swarm;
 use crate::eip1193::Connects;
 use crate::exit::Exit;
 use crate::keystore::client::DesktopKeyStore;
 use crate::requests::{self, Owner, Requests};
 use crate::secrets::Secrets;
+use crate::swarm::thread as swarm;
 use crate::transport::{self, Allowance, Credits, Link, Pending};
 use crate::vault::{FileSnapshot, Finished, NodeRecovery, Out, Vault};
 use crate::worker::Worker;
@@ -735,7 +735,9 @@ pub fn run(options: &Options) -> Exit {
             }
             // The swarm thread's own checks (design 0015's D1), by their
             // tag's bit.
-            Ok(Event::NameChecked { tag, verdict }) if tag & crate::swarm::engine::NAME_TAG != 0 => {
+            Ok(Event::NameChecked { tag, verdict })
+                if tag & crate::swarm::engine::NAME_TAG != 0 =>
+            {
                 let sent = core
                     .swarm
                     .as_ref()

@@ -5,8 +5,8 @@
 #![allow(clippy::unwrap_used, clippy::panic)]
 
 use super::*;
-use fc_swarm_provider::machine::{UPLOAD_CHARGE, whole_charge};
 use fc_swarm_provider::machine::Form;
+use fc_swarm_provider::machine::{UPLOAD_CHARGE, whole_charge};
 
 const SITE: &str = "https://a.example";
 const KIB: usize = 1024;
@@ -39,7 +39,8 @@ impl Io for Fake {
         self.cancels.push(core);
     }
     fn name_check(&mut self, tag: u64, binding: Binding, deadline_ms: u64) {
-        self.checks.push((tag, binding.name().to_owned(), deadline_ms));
+        self.checks
+            .push((tag, binding.name().to_owned(), deadline_ms));
     }
     fn name_cancel(&mut self, tag: u64) {
         self.name_cancels.push(tag);
@@ -139,11 +140,20 @@ fn whole(status: u16, body: &[u8]) -> String {
 fn to_node_call(engine: &mut Engine, io: &mut Fake, id: u64, deadline_ms: Option<u64>) -> u64 {
     let (_, reference) = chunk();
     engine
-        .request(io, 0, id, read_chunk(&reference, deadline_ms), Some(page(None)))
+        .request(
+            io,
+            0,
+            id,
+            read_chunk(&reference, deadline_ms),
+            Some(page(None)),
+        )
         .unwrap();
     let (ready, method, params) = io.last();
     assert_eq!(method, "shell.swarm_ready");
-    assert_eq!(params, serde_json::json!({ "for": id, "check": "reachable" }));
+    assert_eq!(
+        params,
+        serde_json::json!({ "for": id, "check": "reachable" })
+    );
     engine.response(io, 0, ready, Ok(ok_ready())).unwrap();
     let (call, method, params) = io.last();
     assert_eq!(method, "shell.swarm_api");
@@ -175,7 +185,10 @@ fn a_read_runs_and_frees_each_charge_at_its_point() {
         panic!("a result")
     };
     assert!(text.starts_with(r#"{"result_typed":{"object":["#), "{text}");
-    assert!(text.contains(r#"["data",{"string":"aGVsbG8gc3dhcm0="}]"#), "{text}");
+    assert!(
+        text.contains(r#"["data",{"string":"aGVsbG8gc3dhcm0="}]"#),
+        "{text}"
+    );
     // The call's charge went with the step that consumed its reply; the
     // base waits for the answer to be written.
     assert_eq!(engine.memory_used(), BASE);
@@ -191,7 +204,13 @@ fn the_door_answers_what_the_core_doesnt_run() {
     let mut unmoved = Engine::new(Bounds::default(), Shared::new(grants()), false);
     let (_, reference) = chunk();
     unmoved
-        .request(&mut io, 0, 1, read_chunk(&reference, None), Some(page(None)))
+        .request(
+            &mut io,
+            0,
+            1,
+            read_chunk(&reference, None),
+            Some(page(None)),
+        )
         .unwrap();
     let Answer::Error(error) = io.answer_of(1) else {
         panic!()
@@ -273,13 +292,25 @@ fn admission_queues_then_answers_busy() {
     let call = to_node_call(&mut engine, &mut io, 1, None);
     // The second waits for a place: nothing of it goes.
     engine
-        .request(&mut io, 0, 2, read_chunk(&reference, None), Some(page(None)))
+        .request(
+            &mut io,
+            0,
+            2,
+            read_chunk(&reference, None),
+            Some(page(None)),
+        )
         .unwrap();
     assert_eq!(io.sent.len(), 2);
     assert_eq!(engine.memory_used(), BASE + call_charge());
     // The third finds the queue full: 4900 busy inside `{ error_typed }`.
     engine
-        .request(&mut io, 0, 3, read_chunk(&reference, None), Some(page(None)))
+        .request(
+            &mut io,
+            0,
+            3,
+            read_chunk(&reference, None),
+            Some(page(None)),
+        )
         .unwrap();
     assert_eq!(
         io.answer_of(3),
@@ -298,7 +329,13 @@ fn admission_queues_then_answers_busy() {
     let mut other = Fake::default();
     to_node_call(&mut direct, &mut other, 1, None);
     direct
-        .request(&mut other, 0, 2, read_chunk(&reference, None), Some(page(None)))
+        .request(
+            &mut other,
+            0,
+            2,
+            read_chunk(&reference, None),
+            Some(page(None)),
+        )
         .unwrap();
     assert_eq!(
         other.answer_of(2),
@@ -335,7 +372,10 @@ fn the_deadline_cancels_and_main_s_answer_frees_the_call() {
         engine.written(&mut io, 1000, 1).unwrap();
         assert_eq!(engine.memory_used(), BASE + call_charge());
         assert_eq!(engine.requests(), 1);
-        let terminal = terminal.as_ref().map(String::as_str).map_err(String::as_str);
+        let terminal = terminal
+            .as_ref()
+            .map(String::as_str)
+            .map_err(String::as_str);
         engine.response(&mut io, 1001, call, terminal).unwrap();
         assert_eq!((engine.memory_used(), engine.requests()), (0, 0));
         assert!(io.answers.is_empty(), "one answer");
@@ -411,7 +451,13 @@ fn a_cancel_at_each_stage_leaves_no_ask_open_and_no_charge_held() {
         let mut io = Fake::default();
         let call = to_node_call(&mut engine, &mut io, 1, None);
         engine
-            .request(&mut io, 0, 2, read_chunk(&reference, None), Some(page(None)))
+            .request(
+                &mut io,
+                0,
+                2,
+                read_chunk(&reference, None),
+                Some(page(None)),
+            )
             .unwrap();
         engine.cancel(&mut io, 0, 2).unwrap();
         assert_eq!(io.answer_of(2), cancelled());
@@ -437,7 +483,13 @@ fn a_cancel_at_each_stage_leaves_no_ask_open_and_no_charge_held() {
         let call = to_node_call(&mut engine, &mut io, 1, None);
         // No room for the second's base.
         engine
-            .request(&mut io, 0, 2, read_chunk(&reference, None), Some(page(None)))
+            .request(
+                &mut io,
+                0,
+                2,
+                read_chunk(&reference, None),
+                Some(page(None)),
+            )
             .unwrap();
         assert_eq!(io.sent.len(), 2);
         engine.cancel(&mut io, 0, 2).unwrap();
@@ -460,7 +512,13 @@ fn a_cancel_at_each_stage_leaves_no_ask_open_and_no_charge_held() {
         let mut io = Fake::default();
         let first = to_node_call(&mut engine, &mut io, 1, None);
         engine
-            .request(&mut io, 0, 2, read_chunk(&reference, None), Some(page(None)))
+            .request(
+                &mut io,
+                0,
+                2,
+                read_chunk(&reference, None),
+                Some(page(None)),
+            )
             .unwrap();
         let (ready, _, _) = io.last();
         let mut open = vec![first];
@@ -535,7 +593,10 @@ fn a_cancel_at_each_stage_leaves_no_ask_open_and_no_charge_held() {
             (0, 0, 0),
             "{stage}"
         );
-        assert!(engine.sent.is_empty() && engine.outbox.is_empty(), "{stage}");
+        assert!(
+            engine.sent.is_empty() && engine.outbox.is_empty(),
+            "{stage}"
+        );
     }
 }
 
@@ -651,7 +712,10 @@ fn subscribed(engine: &mut Engine, io: &mut Fake, id: u64) -> u64 {
         )
         .unwrap();
     let (ready, method, params) = io.last();
-    assert_eq!((method, &params["check"]), ("shell.swarm_ready", &"subscribe".into()));
+    assert_eq!(
+        (method, &params["check"]),
+        ("shell.swarm_ready", &"subscribe".into())
+    );
     engine.response(io, 0, ready, Ok(ok_ready())).unwrap();
     let (recheck, method, _) = io.last();
     assert_eq!(method, "approval.recheck");
@@ -683,7 +747,10 @@ fn a_subscription_opens_inside_the_request_and_its_close_is_bounded() {
     assert_eq!(method, "shell.swarm_unsubscribe");
     assert_eq!(params, serde_json::json!({ "id": "sub-1" }));
     assert!(io.answers.is_empty());
-    assert_eq!(engine.next_due(), Some(fc_swarm_provider::machine::CLOSE_BOUND_MS));
+    assert_eq!(
+        engine.next_due(),
+        Some(fc_swarm_provider::machine::CLOSE_BOUND_MS)
+    );
     engine.response(&mut io, 5, close, Ok("{}")).unwrap();
     let Answer::Result(text) = io.answer_of(1) else {
         panic!()
@@ -794,13 +861,23 @@ fn a_topic_and_an_upload_turn_go_in_order() {
     let call = to_node_call(&mut engine, &mut io, 1, None);
     let (_, reference) = chunk();
     engine
-        .request(&mut io, 0, 2, read_chunk(&reference, None), Some(page(None)))
+        .request(
+            &mut io,
+            0,
+            2,
+            read_chunk(&reference, None),
+            Some(page(None)),
+        )
         .unwrap();
     engine.ask(&mut io, 0, 1, AskId(50), Need::Lock(topic), 0);
     engine.ask(&mut io, 0, 2, AskId(50), Need::Lock(topic), 0);
     engine.ask(&mut io, 0, 1, AskId(51), Need::Upload, UPLOAD_CHARGE);
     engine.ask(&mut io, 0, 2, AskId(51), Need::Upload, UPLOAD_CHARGE);
-    let ready: Vec<_> = engine.ready.drain(..).map(|(id, ask, _)| (id, ask)).collect();
+    let ready: Vec<_> = engine
+        .ready
+        .drain(..)
+        .map(|(id, ask, _)| (id, ask))
+        .collect();
     assert_eq!(ready, vec![(1, AskId(50)), (1, AskId(51))]);
     assert_eq!(engine.topics_held(), 1);
     assert_eq!(
@@ -811,7 +888,11 @@ fn a_topic_and_an_upload_turn_go_in_order() {
     // The first's answer hands both on to the second, and frees its
     // upload's charge.
     engine.end_holdings(1);
-    let ready: Vec<_> = engine.ready.iter().map(|(id, ask, _)| (*id, *ask)).collect();
+    let ready: Vec<_> = engine
+        .ready
+        .iter()
+        .map(|(id, ask, _)| (*id, *ask))
+        .collect();
     assert_eq!(ready, vec![(2, AskId(51)), (2, AskId(50))]);
     assert_eq!(
         engine.memory_used(),

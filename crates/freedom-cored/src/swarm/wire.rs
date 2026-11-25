@@ -367,7 +367,10 @@ pub fn result_typed(value: &Value) -> String {
 /// admission's `busy` among them.
 pub fn error_typed(failure: &Failure) -> String {
     let mut members = vec![
-        (JsString::from("code"), Value::Number(f64::from(failure.code))),
+        (
+            JsString::from("code"),
+            Value::Number(f64::from(failure.code)),
+        ),
         (
             JsString::from("message"),
             Value::String(failure.message.clone()),
@@ -558,9 +561,10 @@ mod tests {
         assert_eq!(ok.params, Value::Object(Vec::new()));
         assert_eq!(ok.approval, Some(Approval::Auto));
         assert_eq!(ok.deadline_ms, Some(60_000));
-        let bare =
-            request_params(Some(r#"{"method":{"number":"1"},"params":{"undefined":true}}"#))
-                .unwrap();
+        let bare = request_params(Some(
+            r#"{"method":{"number":"1"},"params":{"undefined":true}}"#,
+        ))
+        .unwrap();
         assert_eq!(bare.approval, None);
         assert_eq!(bare.deadline_ms, None);
         for bad in [

@@ -86,7 +86,10 @@ pub enum In {
         outcome: Result<Range<usize>, Range<usize>>,
     },
     /// The naming thread's verdict on a name check (D1).
-    Name { tag: u64, verdict: Verdict },
+    Name {
+        tag: u64,
+        verdict: Verdict,
+    },
     /// The writer has written `swarm.request` `id`'s answer, or dropped it.
     Written(u64),
     /// Room in the writer, or a free slot at main.
