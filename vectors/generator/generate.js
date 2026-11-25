@@ -78,6 +78,14 @@ const STORES_REFERENCE_COMMIT = '9d4ea62516034731dea082c6d81765e355f1182f';
 // (c4w.wasm checked by digest) and its ethers. Like the Radicle reference, it
 // moves on its own.
 const COLIBRI_REFERENCE_COMMIT = '7cf6a0c299b50b64944d5d246a911bdb25dc5c82';
+// The window.swarm vectors' reference (design 0015, SWM-1): freedom-browser's
+// integration/rust-core, with #1057 (the metered feed reads, feedEntryExists,
+// publishFiles through publishCollection) and #1062 (the PSS recipient as the
+// compressed key). Its generator (swarm.js) loads src/main/swarm/ whole over
+// the checkout's installed @ethersphere/bee-js 13.2.0 and core-sdk 0.2.2,
+// refusing any other version, with every package file the run loads checked by
+// digest. Like the Radicle reference, it moves on its own.
+const SWARM_REFERENCE_COMMIT = 'dea09d2f58c18c5ffe5baef464fdf70af1ef40ef';
 const OUTPUT = path.resolve(__dirname, '..');
 const INDICES = [0, 1, 2, 1000, 2147483647];
 const MNEMONICS = [
@@ -108,6 +116,21 @@ const BEE_CASES = [
 ];
 
 const json = (value) => JSON.stringify(value, null, 2) + '\n';
+
+// A failed check names the first line that differs, with its neighbours, so a
+// mismatch seen only on another machine (CI) can be read from its log.
+function byteMismatch(filename, committed, generated) {
+  const a = committed.split('\n');
+  const b = generated.split('\n');
+  let i = 0;
+  while (i < a.length && i < b.length && a[i] === b[i]) i++;
+  const clip = (line) => (line === undefined ? '(end of file)' : line.length > 400 ? `${line.slice(0, 400)}…` : line);
+  const lines = [`Byte mismatch: ${filename}`, `first difference at line ${i + 1} (committed ${a.length} lines, generated ${b.length})`];
+  for (let j = Math.max(0, i - 3); j < i; j++) lines.push(`  ${j + 1}  ${clip(a[j])}`);
+  for (let j = i; j < i + 4; j++) lines.push(`- ${j + 1}  ${clip(a[j])}`);
+  for (let j = i; j < i + 4; j++) lines.push(`+ ${j + 1}  ${clip(b[j])}`);
+  return lines.join('\n');
+}
 const hex = (bytes) => Buffer.from(bytes).toString('hex');
 const mnemonicFor = (id) => MNEMONICS.find((entry) => entry.id === id).mnemonic;
 
@@ -181,6 +204,33 @@ function loadColibriCheckout(checkout) {
   const packages = Object.fromEntries(['@corpus-core/colibri-stateless', 'ethers']
     .map((name) => [name, packageVersion(referenceRequire, name)]));
   return { checkout, meta: { freedomBrowserCommit: commit, packages, nodeVersion: process.version, generator: 'vectors/generator/generate.js' } };
+}
+
+/** The window.swarm vectors' reference: swarm.js loads its src/main/swarm/
+ * modules over its installed bee-js and core-sdk, which meta names. */
+function loadSwarmReference(checkout) {
+  const commit = checkedCommit(checkout, SWARM_REFERENCE_COMMIT, 'swarm reference');
+  return { checkout, meta: { freedomBrowserCommit: commit, nodeVersion: process.version, generator: 'vectors/generator/generate.js' } };
+}
+
+let swarmWorker = null;
+
+/** swarm.json and swarm-grammar.json, built in a worker thread beside the other files. */
+function startSwarm(swarm) {
+  const { Worker } = require('node:worker_threads');
+  return new Promise((resolve, reject) => {
+    const worker = swarmWorker = new Worker(path.join(__dirname, 'swarm-worker.js'), {
+      workerData: { checkout: swarm.checkout, meta: swarm.meta, keysPath: path.join(OUTPUT, 'keys.json'),
+        dwebVerifyPath: path.join(OUTPUT, 'dweb-verify.json') },
+    });
+    worker.once('message', (message) => {
+      worker.terminate();
+      if (message.error) reject(new Error(message.error));
+      else resolve(message);
+    });
+    worker.once('error', reject);
+    worker.once('exit', (code) => reject(new Error(`the swarm vectors' worker exited (${code}) without an answer`)));
+  });
 }
 
 function loadReference(checkout) {
@@ -601,16 +651,21 @@ function buildRadicle({ meta, derivation: d, formats: f }, existing) {
 
 async function main() {
   const args = process.argv.slice(2);
-  assert.ok(args.length === 11 && ['generate', 'check'].includes(args[0]) && args[1] === '--freedom-browser'
+  assert.ok(args.length === 13 && ['generate', 'check'].includes(args[0]) && args[1] === '--freedom-browser'
     && args[3] === '--radicle-browser' && args[5] === '--approvals-browser' && args[7] === '--stores-browser'
-    && args[9] === '--colibri-browser',
-    'Usage: node vectors/generator/generate.js <generate|check> --freedom-browser <checkout> --radicle-browser <checkout> --approvals-browser <checkout> --stores-browser <checkout> --colibri-browser <checkout>');
-  const [mode, , checkout, , radicleCheckout, , approvalsCheckout, , storesCheckout, , colibriCheckout] = args;
+    && args[9] === '--colibri-browser' && args[11] === '--swarm-browser',
+    'Usage: node vectors/generator/generate.js <generate|check> --freedom-browser <checkout> --radicle-browser <checkout> --approvals-browser <checkout> --stores-browser <checkout> --colibri-browser <checkout> --swarm-browser <checkout>');
+  const [mode, , checkout, , radicleCheckout, , approvalsCheckout, , storesCheckout, , colibriCheckout, , swarmCheckout] = args;
   const reference = loadReference(path.resolve(checkout));
   const radicle = loadRadicleReference(path.resolve(radicleCheckout));
   const approvals = loadApprovalsReference(path.resolve(approvalsCheckout));
   const stores = loadStoresReference(path.resolve(storesCheckout));
   const colibri = loadColibriCheckout(path.resolve(colibriCheckout));
+  const swarmReference = loadSwarmReference(path.resolve(swarmCheckout));
+  // The swarm vectors run in their own thread from the start; their files
+  // join the others at the end.
+  const swarmJob = startSwarm(swarmReference);
+  swarmJob.catch(() => {});
   const deterministic = {
     'keys.json': buildKeys(reference),
     'mnemonic-validation.json': buildValidation(reference),
@@ -717,11 +772,21 @@ async function main() {
     // it recorded, in worlds scripted from vectors/fixtures/colibri/.
     'colibri.json': await buildColibri(colibri.checkout, colibri.meta),
   };
+  // Design 0015's window.swarm backend (SWM-1): the swarm reference's
+  // src/main/swarm/ over a recording fake node, at bee-js 13.2.0 and
+  // core-sdk 0.2.2, and the operation grammar its requests are checked against.
+  const swarmFiles = await swarmJob;
+  deterministic['swarm.json'] = swarmFiles.swarm;
+  deterministic['swarm-grammar.json'] = swarmFiles.grammar;
   // Check every deterministic file before doing the more expensive fixture checks.
   for (const [filename, contents] of Object.entries(deterministic)) {
     const destination = path.join(OUTPUT, filename);
     if (mode === 'generate') fs.writeFileSync(destination, json(contents));
-    else assert.equal(fs.readFileSync(destination, 'utf8'), json(contents), `Byte mismatch: ${filename}`);
+    else {
+      const committed = fs.readFileSync(destination, 'utf8');
+      const generated = json(contents);
+      if (committed !== generated) throw new assert.AssertionError({ message: byteMismatch(filename, committed, generated) });
+    }
     console.log(`${mode}: ${filename}`);
   }
   for (const [filename, builder] of [
@@ -758,4 +823,6 @@ async function main() {
 main().catch((error) => {
   console.error(error.stack || error);
   process.exitCode = 1;
+  // A failed check doesn't wait for the swarm vectors' thread.
+  swarmWorker?.terminate();
 });
