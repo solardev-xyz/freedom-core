@@ -201,7 +201,11 @@ fn a_read_runs_and_frees_each_charge_at_its_point() {
 fn the_door_answers_what_the_core_doesnt_run() {
     let mut io = Fake::default();
     // The Swarm grants haven't moved.
-    let mut unmoved = Engine::new(Bounds::default(), Shared::new(grants(), Bindings::default()), false);
+    let mut unmoved = Engine::new(
+        Bounds::default(),
+        Shared::new(grants(), Bindings::default()),
+        false,
+    );
     let (_, reference) = chunk();
     unmoved
         .request(
@@ -414,7 +418,10 @@ fn an_ended_request_s_base_goes_before_its_cancelled_call_s_answer() {
     // starts before main's late answer to the cancelled call.
     engine.written(&mut io, 1001, 1).unwrap();
     let (ready, method, params) = io.last();
-    assert_eq!((method, params["for"].as_u64()), ("shell.swarm_ready", Some(2)));
+    assert_eq!(
+        (method, params["for"].as_u64()),
+        ("shell.swarm_ready", Some(2))
+    );
     assert_eq!(engine.memory_used(), BASE + call_charge());
     assert_eq!(engine.requests(), 2);
     // The late answer frees the call's charge and the first's record.

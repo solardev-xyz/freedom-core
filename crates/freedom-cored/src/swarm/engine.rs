@@ -73,8 +73,8 @@ use fc_swarm_provider::stores::feeds::FeedStore;
 use fc_swarm_provider::value::Value;
 
 use super::memory::{self, Pool};
-use crate::eip1193::Bindings;
 use super::wire::{self, Params, Refusal};
+use crate::eip1193::Bindings;
 
 /// Milliseconds on the thread's monotonic clock.
 pub type Ms = u64;
