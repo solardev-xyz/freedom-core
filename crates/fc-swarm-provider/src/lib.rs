@@ -17,6 +17,15 @@
 //!   once and keeps nothing, which every typed reader is built on, with the
 //!   design's nesting bound; and zod's refusals as the page reads them.
 //!
+//! The second part (SWM-3, part 2) adds:
+//!
+//! - **The stores** ([`stores`]): `swarm-feeds.json`,
+//!   `swarm-manifest-grants.json` and `publish-history.sqlite` as codecs and
+//!   rules: each parses the text or rows it is handed, applies an
+//!   operation as the reference module does, and answers the exact text or
+//!   the statements to write (deviations `index-allocation`,
+//!   `history-bound`, `store-writes`).
+//!
 //! The reference is freedom-browser's `src/main/swarm/` at the swarm
 //! reference commit over bee-js 13.2.0 and core-sdk 0.2.2;
 //! `vectors/swarm.json` is the contract (AGENTS rule 5). The crate does no
@@ -26,6 +35,7 @@ pub mod errors;
 mod js;
 pub mod json;
 pub mod stamps;
+pub mod stores;
 pub mod zod;
 
 /// Why a node's reply isn't read (design 0015, "JSON replies").
