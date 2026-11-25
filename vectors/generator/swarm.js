@@ -369,7 +369,7 @@ const SWARM_FORMATS = {
     + 'at an address; entries: feed updates, SOCs signed under the named test key ({ key, topic (the topic string), index, data, wrap }); latest: '
     + 'GET /feeds/<o>/<t>\'s reply; probes: the feeds whose updates 0 to head exist (a hit answers 105 zero bytes); probeFail: one index\'s status; '
     + 'rules: replies tried first, { match: { method, path | prefix }, reply: { status, statusText, headers, json | body_utf8 | body_hex | '
-    + 'body_base64 | body_data, chunked + pieces_data, cutAfterPieces, declare (a Content-Length longer than the body, then the connection cut), '
+    + 'body_base64 | body_data, chunked + pieces_data (each piece reaches the reader as one frame, whatever the socket\'s reads), cutAfterPieces, declare (a Content-Length longer than the body, then the connection cut), '
     + 'hangUp, delayMs, abortPage (the page gives up as this request arrives: the request\'s signal aborts) }, world (a change to the case\'s world '
     + 'as the request arrives: custody, rule_off, name) }. Unmatched, the node answers from what it stores: 404 { code, message } for what it lacks, /bzz with SHA-256 of the '
     + 'body as its reference.',

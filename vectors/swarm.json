@@ -450,7 +450,7 @@
     "typed": "params and non-JSON answers: { string }, { string_json } (a string with a lone surrogate, as its JSON text), { string_repeat, count }, { number: String(n) } (\"-0\", \"NaN\", \"Infinity\"), { bigint }, { boolean }, { null }, { undefined }, { array } ({ hole } for a hole), { object: [[key, value], …] } in key order; where a method reads data, { bytes, kind, base64 } or { string_bytes, base64 } (a string's UTF-8), past 64 KiB { …, part: i } with parts[i] = { seed | repeat+count, length, sha256 }; { bytes_elsewhere, kind, base64 } for bytes where no method reads them; in answers, { string_digest: units, sha256 } for a string past 8,192 units. An answer is `result` or `error` when JSON keeps it exactly, else `result_typed` or `error_typed`; a JSON result past 16 KiB is `result_digest` { json_length, sha256 }.",
     "methods": "a case: its world (origin, the page key; grants, the Swarm grants by key, their autoApprove the site's rules; feeds, swarm-feeds.json's text before or null; vault, the identity core's, which an approved vault.unlock prompt opens; at_execute, the world's changes as the dispatcher hands the request to the service, after its checks (vault: locked, the auto-lock firing; custody; rule_off; name: moved; messaging, connection or feed_access: revoked, the user's Settings meanwhile); readiness, getPublishReadiness()'s answer or \"throws\"; custody, whether the agent holds the tab (Agent custody, read live); prompts, the scripted answers in order ({ kind, approve, choices } or { kind, closed }), a prompt with none approved with its default choices (a feed prompt's active identity, or its new one where the prompt doesn't offer the active one; \"always allow\" off); keyless, a document with no key; identity_wallet: false, the Identity & Wallet switch off (settings.json); grants_unavailable, the grant mirror unloaded; manifest, a bzz: document's freedom-manifest.json, which main's manifest check fetches through the bzz: handler (an https: or ens: document's check answers legacy, with no fetch); session, a subscribe-proxy case's; node, the fake node's declarative state; clock) and its steps. A step goes through main's page dispatcher (src/main/page/page-swarm.js, createSwarmDispatchers, loaded whole) with page-requests.js's context scripted: the requester attested (one guest, window, frame and navigation, so a case's steps are one document's), its PageContext, the prompts, the name holding unless the world moves it. Only the dispatcher's UI and core boundaries are injected: the guest's webContents (live, on the default session), Agent custody (the world's) and the setup screen; its hand-off to executeSwarmMethod is observed, never changed. Everything else (the grants through swarm-permissions.js, the manifest check, the feed store, the origin lock, the vault's state through identity-manager.js, settings) is main's own. A step with page: false calls executeSwarmMethod(method, params, origin) directly, with no meta: a method page-requests.js has no row for (it answers those itself, design 0011) and the service's own no-page guards. Each step records the answer, every node request (via fetch or http; method, path, query pairs, the headers the caller set, the body as { bytes, base64 } up to 8 KiB else { bytes, sha256 }, the status, feed { owner, index } for a feed update's address, and the grammar's verdict: form, ready or deviation), and its events in order: the approval path (custody, each read of Agent custody when a rule could answer; prompt { kind, view, answer }; service { key, page, approval }, what the dispatcher handed executeSwarmMethod: the key, a page's meta, how main approved a SOC, auto for the site's rule or user for its prompt; effect { custody, outcome: ran | refused }, the guard just before the effect, with its custody reads when a rule answered; world, a change the case scripts), the identity core's calls (grant, revoke, touch: the grant mirror's writes; sign_soc: the request, its PageContext and authorization), readiness (after_requests node requests in), vault_timer_reset, route_to_setup, page_event (connect) and delivered (a subscription's message), manifest_fetch. `after`: swarm-feeds.json's text, its backups, the publish history (getEntries()), and for a manifest case swarm-manifest-grants.json's text. A case marked deviation records the reference's outcome, and `core` the design's.",
     "session": "subscribe-proxy's world (design 0015, question 4): proxy and tor (on or off), node_kind, node_url (the node main's service registry names; a remote one's calls reach the fake node), node_loopback (main's own isLoopbackGatewayUrl over it, as bzz:'s transport classifies the Ant node) and subscribe_check, main's answer to the core's subscribe check (shell.swarm_ready), the core's input: { ok: false, reason: proxy-or-tor } while a proxy or Tor is on and the node isn't on loopback, else { ok: true }. The reference reads none of it and opens the socket either way (`websockets`), which is the deviation; where the check answers ok it is parity.",
-    "node": "stamps, addresses, tags, node: JSON answers (stamps_label_bytes: the usable batch with a label of that many bytes of l); data: blobs stored as their whole ChunkSplitter tree and joined from /bytes; chunks: raw bytes at an address; entries: feed updates, SOCs signed under the named test key ({ key, topic (the topic string), index, data, wrap }); latest: GET /feeds/<o>/<t>'s reply; probes: the feeds whose updates 0 to head exist (a hit answers 105 zero bytes); probeFail: one index's status; rules: replies tried first, { match: { method, path | prefix }, reply: { status, statusText, headers, json | body_utf8 | body_hex | body_base64 | body_data, chunked + pieces_data, cutAfterPieces, declare (a Content-Length longer than the body, then the connection cut), hangUp, delayMs, abortPage (the page gives up as this request arrives: the request's signal aborts) }, world (a change to the case's world as the request arrives: custody, rule_off, name) }. Unmatched, the node answers from what it stores: 404 { code, message } for what it lacks, /bzz with SHA-256 of the body as its reference.",
+    "node": "stamps, addresses, tags, node: JSON answers (stamps_label_bytes: the usable batch with a label of that many bytes of l); data: blobs stored as their whole ChunkSplitter tree and joined from /bytes; chunks: raw bytes at an address; entries: feed updates, SOCs signed under the named test key ({ key, topic (the topic string), index, data, wrap }); latest: GET /feeds/<o>/<t>'s reply; probes: the feeds whose updates 0 to head exist (a hit answers 105 zero bytes); probeFail: one index's status; rules: replies tried first, { match: { method, path | prefix }, reply: { status, statusText, headers, json | body_utf8 | body_hex | body_base64 | body_data, chunked + pieces_data (each piece reaches the reader as one frame, whatever the socket's reads), cutAfterPieces, declare (a Content-Length longer than the body, then the connection cut), hangUp, delayMs, abortPage (the page gives up as this request arrives: the request's signal aborts) }, world (a change to the case's world as the request arrives: custody, rule_off, name) }. Unmatched, the node answers from what it stores: 404 { code, message } for what it lacks, /bzz with SHA-256 of the body as its reference.",
     "bodies": "write-side.json's shapes: tar (page-upload.js's, for window.swarm, each equal to bee-js's collection upload of the same entries; tar-paths cases are bee-js's publishCollection, as freedom://publish uses it), file (publishData's request; the body is the data), bytes (a large feed entry's POST /bytes body, ChunkSplitter's root of it and the SOC upload body that wraps that root), soc (core-sdk), chunk (POST /chunks: span ‖ payload and the address), pss (the request; the body is the message).",
     "trees": "core-sdk's ChunkSplitter: root, span, root payload, and every chunk's count and SHA-256 over address ‖ u64_le(span) ‖ payload by address.",
     "stamps": "mapped: bee-js's stamp.getAll over one raw batch (the fields Freedom reads, or the error), and swarm-service.js's classification; select: selectBestBatch(size, options) over a /stamps answer, its batch or error, and how many /stamps reads it made.",
@@ -112974,7 +112974,11 @@
       },
       "calls": [
         {
-          "reserve": 40003,
+          "reserve": 40000,
+          "refused": false
+        },
+        {
+          "reserve": 3,
           "refused": false
         }
       ],
@@ -113072,35 +113076,7 @@
       },
       "calls": [
         {
-          "reserve": 65321,
-          "refused": false
-        },
-        {
-          "reserve": 65536,
-          "refused": false
-        },
-        {
-          "reserve": 65536,
-          "refused": false
-        },
-        {
-          "reserve": 65536,
-          "refused": false
-        },
-        {
-          "reserve": 65527,
-          "refused": false
-        },
-        {
-          "reserve": 65536,
-          "refused": false
-        },
-        {
-          "reserve": 65536,
-          "refused": false
-        },
-        {
-          "reserve": 65536,
+          "reserve": 300000,
           "refused": false
         }
       ],
@@ -113198,7 +113174,11 @@
       },
       "calls": [
         {
-          "reserve": 65314,
+          "reserve": 40000,
+          "refused": false
+        },
+        {
+          "reserve": 40000,
           "refused": true
         }
       ],

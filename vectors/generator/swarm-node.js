@@ -83,6 +83,8 @@ class FakeNode {
     this.feedIndex = new Map(Object.entries(world.feedIndex || {}));
     this.requests = [];
     this.client = new Map();
+    // A chunked reply's piece lengths, by sequence number (see reframe).
+    this.frames = new Map();
     this.seq = 0;
     this.sockets = new Set();
     this.websockets = [];
@@ -134,7 +136,7 @@ class FakeNode {
       const method = (init.method || 'GET').toUpperCase();
       const seq = node.noteClient('fetch', method, url, init.headers);
       const headers = [...headerPairs(init.headers), [SEQ_HEADER, String(seq)]];
-      return realFetch(url, { ...init, headers });
+      return realFetch(url, { ...init, headers }).then((response) => node.reframe(seq, response));
     };
     http.request = function request(url, options, callback) {
       assert.ok(typeof options === 'object' && options !== null, 'page-upload passes (url, options, callback)');
@@ -160,6 +162,58 @@ class FakeNode {
       http.request = realRequest;
       globalThis.WebSocket = realWebSocket;
     };
+  }
+
+  /**
+   * A chunked reply's body as the caller reads it: one frame per piece the
+   * case scripted. Over a real socket the frames are whatever each read
+   * returns, which differs between machines (65,536 bytes here, 64,512 on
+   * CI's runners), and readBodyAdmitted reserves frame by frame, so the
+   * recorded reserves would too. A cut or a failed read still reaches the
+   * reader, after the bytes that arrived before it.
+   */
+  reframe(seq, response) {
+    const lengths = (this.frames.get(seq) || []).filter((n) => n > 0);
+    if (!lengths.length || !response.body) return response;
+    const reader = response.body.getReader();
+    let held = Buffer.alloc(0);
+    let failure = null;
+    const body = new ReadableStream({
+      async pull(controller) {
+        if (failure) return controller.error(failure.err);
+        for (;;) {
+          if (lengths.length && held.length >= lengths[0]) {
+            const n = lengths.shift();
+            controller.enqueue(new Uint8Array(held.subarray(0, n)));
+            held = held.subarray(n);
+            return;
+          }
+          let read;
+          try {
+            read = await reader.read();
+          } catch (err) {
+            if (!held.length) return controller.error(err);
+            failure = { err };
+            controller.enqueue(new Uint8Array(held));
+            held = Buffer.alloc(0);
+            return;
+          }
+          if (read.done) {
+            if (held.length) {
+              controller.enqueue(new Uint8Array(held));
+              held = Buffer.alloc(0);
+              return;
+            }
+            return controller.close();
+          }
+          held = Buffer.concat([held, Buffer.from(read.value)]);
+        }
+      },
+      cancel(reason) {
+        return reader.cancel(reason);
+      },
+    }, { highWaterMark: 0 });
+    return new Response(body, { status: response.status, statusText: response.statusText, headers: response.headers });
   }
 
   handle(req, res) {
@@ -218,6 +272,7 @@ class FakeNode {
     if (reply.chunked) {
       request.replyBody = Buffer.concat(reply.pieces || [body]);
       request.replyHeaders = headers;
+      this.frames.set(request.seq, (reply.pieces || [body]).map((piece) => piece.length));
       res.writeHead(reply.status, reply.statusText || http.STATUS_CODES[reply.status] || '', headers);
       for (const piece of reply.pieces || [body]) res.write(piece);
       if (reply.cutAfterPieces) {
