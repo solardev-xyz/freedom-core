@@ -36,6 +36,13 @@
 //!   (the reference then keeps the file's sites as they are): the core
 //!   never holds a feed map it can't read as one. No reference writer makes
 //!   one (deviation `store-shapes`, `feeds-load-feed-maps-kept`).
+//! - An identity kept under a key other than its own `id` is left out at
+//!   load (deviation `store-shapes`), so no two of a site's identities
+//!   share an id, and no answer grows past the store's size (pairing
+//!   10,000 identities of one id with 10,000 feeds of it would make 10^8
+//!   names). A site whose active identity is left out is dropped, as the
+//!   reference drops one whose active identity is missing. No reference
+//!   writer makes one.
 //! - `getEthereumWalletIdentityReferences` orders its sites with
 //!   `localeCompare`: ICU's root collation for printable ASCII, the text
 //!   permission keys are written in, and UTF-16 code-unit order for a key
@@ -1252,8 +1259,9 @@ fn migrate_v1_entry(entry: &JsValue, now_ms: u64) -> Result<JsValue, Thrown> {
     Ok(out)
 }
 
-/// `validateV2Store`, and the core's rebuild of a site's feed map that
-/// isn't an object of objects.
+/// `validateV2Store`, and the core's rebuilds (deviation `store-shapes`): a
+/// site's feed map that isn't an object of objects, and its identities
+/// kept under a key other than their own `id`, which are left out.
 fn validate_v2(mut store: JsValue) -> Result<JsValue, Unloadable> {
     if !is_plain_object(store.get("origins").unwrap_or(&UNDEFINED)) {
         return Err(Unloadable::Corrupt);
@@ -1263,17 +1271,18 @@ fn validate_v2(mut store: JsValue) -> Result<JsValue, Unloadable> {
         _ => return Err(Unloadable::Corrupt),
     }
     let entries = props(store.get("origins").unwrap_or(&UNDEFINED));
-    let sanitized: Vec<Option<JsValue>> = entries
+    let sanitized: Vec<Option<Sanitized>> = entries
         .iter()
         .map(|(_, entry)| sanitize_v2_entry(entry))
         .collect();
     // The reference replaces `origins` only when a site was dropped.
     let changed = sanitized.iter().any(Option::is_none);
     let unreadable = |entry: &JsValue| !feeds_readable(entry.get("feeds"));
-    let rebuild = entries
-        .iter()
-        .zip(&sanitized)
-        .any(|((_, entry), clean)| clean.is_some() && unreadable(entry));
+    let rebuild = entries.iter().zip(&sanitized).any(|((_, entry), clean)| {
+        clean
+            .as_ref()
+            .is_some_and(|clean| unreadable(entry) || clean.identities.is_some())
+    });
     if changed || rebuild {
         let mut origins = object();
         for ((origin, entry), clean) in entries.iter().zip(sanitized) {
@@ -1281,7 +1290,12 @@ fn validate_v2(mut store: JsValue) -> Result<JsValue, Unloadable> {
                 continue;
             };
             if changed || unreadable(entry) {
-                origins.set(origin.clone(), clean);
+                origins.set(origin.clone(), clean.entry);
+            } else if let Some(identities) = clean.identities {
+                // Only the identities left out: the rest as it was.
+                let mut kept = entry.clone();
+                kept.set("identities", identities);
+                origins.set(origin.clone(), kept);
             } else {
                 origins.set(origin.clone(), entry.clone());
             }
@@ -1300,15 +1314,46 @@ fn feeds_readable(feeds: Option<&JsValue>) -> bool {
     }
 }
 
-/// `sanitizeV2OriginEntry`: `None` for a site it throws on (dropped).
-fn sanitize_v2_entry(entry: &JsValue) -> Option<JsValue> {
+/// A site's entry as `sanitizeV2OriginEntry` returns it, and its
+/// identities where the core left one out.
+struct Sanitized {
+    entry: JsValue,
+    identities: Option<JsValue>,
+}
+
+/// The site's identities each kept under its own `id` (a string equal to
+/// its key), where one isn't: `None` when every one is. So no two of a
+/// site's identities share an id, and no answer that pairs identities with
+/// feeds by id (`getEthereumWalletIdentityReferences`) grows past the
+/// store's own size (deviation `store-shapes`). No reference writer keeps
+/// an identity under another key.
+fn own_identities(entry: &JsValue) -> Option<JsValue> {
+    let identities = props(field_or_undefined(entry, "identities"));
+    let own = |(key, identity): &(JsString, JsValue)| matches!(identity.get("id"), Some(JsValue::String(id)) if id == key);
+    if identities.iter().all(own) {
+        return None;
+    }
+    Some(JsValue::Object(
+        identities.iter().filter(|p| own(p)).cloned().collect(),
+    ))
+}
+
+/// `sanitizeV2OriginEntry`: `None` for a site it throws on (dropped). The
+/// active identity is looked up among the identities the core keeps, so
+/// one left out reads as the reference's missing active identity.
+fn sanitize_v2_entry(entry: &JsValue) -> Option<Sanitized> {
     if !is_plain_object(entry)
         || !truthy(entry.get("activeIdentityId"))
         || !is_plain_object(field_or_undefined(entry, "identities"))
     {
         return None;
     }
-    let active = active_identity(entry)?;
+    let identities = own_identities(entry);
+    let mut checked = spread(entry);
+    if let Some(identities) = &identities {
+        checked.set("identities", identities.clone());
+    }
+    let active = active_identity(&checked)?;
     let mode = active.get("mode");
     if !(is_str(mode, BEE_WALLET) || is_str(mode, APP_SCOPED) || is_str(mode, ETHEREUM_WALLET)) {
         return None;
@@ -1324,9 +1369,11 @@ fn sanitize_v2_entry(entry: &JsValue) -> Option<JsValue> {
             }
         }
     }
-    let mut out = spread(entry);
-    out.set("feeds", feeds);
-    Some(out)
+    checked.set("feeds", feeds);
+    Some(Sanitized {
+        entry: checked,
+        identities,
+    })
 }
 
 // --- identities ------------------------------------------------------------------
@@ -1854,7 +1901,7 @@ mod tests {
 
     #[test]
     fn a_feed_map_the_core_cant_hold_is_rebuilt() {
-        let text = "{\"version\":2,\"nextPublisherKeyIndex\":0,\"origins\":{\"a\":{\"activeIdentityId\":\"bee-wallet\",\"identities\":{\"bee-wallet\":{\"mode\":\"bee-wallet\"}},\"feeds\":[{\"topic\":\"t\"}]},\"b\":{\"activeIdentityId\":\"bee-wallet\",\"identities\":{\"bee-wallet\":{\"mode\":\"bee-wallet\"}}}}}";
+        let text = "{\"version\":2,\"nextPublisherKeyIndex\":0,\"origins\":{\"a\":{\"activeIdentityId\":\"bee-wallet\",\"identities\":{\"bee-wallet\":{\"id\":\"bee-wallet\",\"mode\":\"bee-wallet\"}},\"feeds\":[{\"topic\":\"t\"}]},\"b\":{\"activeIdentityId\":\"bee-wallet\",\"identities\":{\"bee-wallet\":{\"id\":\"bee-wallet\",\"mode\":\"bee-wallet\"}}}}}";
         let loaded = FeedStore::load(Some(text.as_bytes()), NOW, |_| false);
         assert!(loaded.writes.is_empty());
         let saved = loaded.store.text().unwrap();
@@ -1873,6 +1920,74 @@ mod tests {
                 .and_then(|b| b.get("feeds"))
                 .is_none()
         );
+    }
+
+    /// An identity kept under another key than its own `id` is left out at
+    /// load (deviation `store-shapes`): 10,000 such identities of one id,
+    /// with 10,000 feeds of that id, load as one identity, and the
+    /// references answer each feed once, not 10^8 names.
+    #[test]
+    fn identities_under_another_key_are_left_out() {
+        let n = 10_000;
+        let mut identities =
+            String::from(r#""x":{"id":"x","mode":"ethereum-wallet","walletIndex":0}"#);
+        let mut feeds = String::new();
+        for i in 0..n {
+            identities.push_str(&format!(
+                r#","k{i}":{{"id":"x","mode":"ethereum-wallet","walletIndex":0}}"#
+            ));
+            if i > 0 {
+                feeds.push(',');
+            }
+            feeds.push_str(&format!(r#""f{i}":{{"identityId":"x"}}"#));
+        }
+        let text = format!(
+            r#"{{"version":2,"nextPublisherKeyIndex":0,"origins":{{"a":{{"activeIdentityId":"x","identities":{{{identities}}},"feeds":{{{feeds}}}}},"b":{{"activeIdentityId":"app-scoped:0","identities":{{"app-scoped:0":{{"id":"app-scoped:1","mode":"app-scoped","publisherKeyIndex":0}}}}}},"c":{{"activeIdentityId":"bee-wallet","identities":{{"bee-wallet":{{"id":"bee-wallet","mode":"bee-wallet"}},"n":null,"m":{{"mode":"app-scoped","publisherKeyIndex":3}}}},"grantedAt":1}}}}}}"#
+        );
+        assert!(text.len() < 1024 * 1024);
+        let loaded = FeedStore::load(Some(text.as_bytes()), NOW, |_| false);
+        assert!(loaded.writes.is_empty());
+        let store = loaded.store;
+        let origins = store.root.get("origins").unwrap();
+        // `a` keeps the identity under its own id; `b`, whose active one
+        // is under another key, is dropped as one missing its active
+        // identity, so every site is the sanitizer's (`feeds` added).
+        assert_eq!(
+            props(origins)
+                .iter()
+                .map(|(k, _)| k.as_str())
+                .collect::<Vec<_>>(),
+            ["a", "c"]
+        );
+        let a = origins.get("a").unwrap();
+        assert_eq!(key_count(a.get("identities").unwrap()), 1);
+        assert_eq!(
+            origins.get("c").unwrap().stringify(),
+            r#"{"activeIdentityId":"bee-wallet","identities":{"bee-wallet":{"id":"bee-wallet","mode":"bee-wallet"}},"grantedAt":1,"feeds":{}}"#
+        );
+        // With no site dropped, only the identities change.
+        let only = r#"{"version":2,"nextPublisherKeyIndex":0,"origins":{"c":{"activeIdentityId":"bee-wallet","identities":{"n":null,"bee-wallet":{"id":"bee-wallet","mode":"bee-wallet"},"m":{"id":"n","mode":"app-scoped","publisherKeyIndex":3}},"grantedAt":1}}}"#;
+        let kept = FeedStore::load(Some(only.as_bytes()), NOW, |_| false).store;
+        assert_eq!(
+            kept.text().unwrap(),
+            js(r#"{"version":2,"nextPublisherKeyIndex":0,"origins":{"c":{"activeIdentityId":"bee-wallet","identities":{"bee-wallet":{"id":"bee-wallet","mode":"bee-wallet"}},"grantedAt":1}}}"#)
+                .stringify_pretty()
+        );
+        // The counter past index 3 isn't held: the identity is gone.
+        assert_eq!(kept.next_publisher_key_index(), 0.0);
+        let references = store
+            .ethereum_wallet_identity_references(&JsValue::Number(0.0))
+            .unwrap();
+        let references = references.as_array().unwrap();
+        assert_eq!(references.len(), 1);
+        assert_eq!(
+            references[0].get("feedCount"),
+            Some(&JsValue::Number(f64::from(n)))
+        );
+        // And the store answers the same once written and read again.
+        let again = FeedStore::load(Some(store.text().unwrap().as_bytes()), NOW, |_| false);
+        assert!(again.writes.is_empty());
+        assert_eq!(again.store, store);
     }
 
     #[test]
