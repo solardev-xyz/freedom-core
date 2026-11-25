@@ -236,6 +236,9 @@ fn play(world: &mut TestWorld, main: &MainSide<'_>, call: &Call, sid: &str) -> P
     let mut cancelled: HashSet<AskId> = HashSet::new();
     let mut body_out = 0usize;
     let mut part_credit = 0usize;
+    // The row just inserted, until the bound's trim keeping it runs
+    // (deviation `history-bound`).
+    let mut untrimmed: Option<i64> = None;
 
     macro_rules! give {
         ($id:expr, $event:expr) => {{
@@ -255,7 +258,16 @@ fn play(world: &mut TestWorld, main: &MainSide<'_>, call: &Call, sid: &str) -> P
                         give!(ask.id, Event::Ready(main.readiness.clone()));
                     }
                     Need::Node(node_call) => {
+                        assert_eq!(untrimmed, None, "{sid}: no trim after the insert");
                         assert_eq!(ask.charge, whole_charge(node_call.form), "{sid}");
+                        // The design's charges: /stamps' 1 MiB as JSON with
+                        // its 4,096 batches (7.7 MiB), every other JSON reply
+                        // the 512 KiB floor.
+                        let design = match node_call.form {
+                            Form::Stamps => 8_055_472,
+                            _ => 512 * 1024,
+                        };
+                        assert_eq!(ask.charge, design, "{sid}: {:?}'s charge", node_call.form);
                         assert!(
                             !node_call.stream(),
                             "{sid}: no publish call streams its reply"
@@ -342,13 +354,25 @@ fn play(world: &mut TestWorld, main: &MainSide<'_>, call: &Call, sid: &str) -> P
                     Need::Write(StoreWrite::History(statements)) => {
                         assert_eq!(ask.charge, 0, "{sid}");
                         for statement in &statements {
+                            if statement.sql == history::TRIM_SQL {
+                                let kept = untrimmed.take();
+                                assert_eq!(
+                                    statement.params,
+                                    vec![Bind::Integer(kept.expect("a trim with no insert"))],
+                                    "{sid}: the trim keeps the row just inserted"
+                                );
+                            } else {
+                                assert_eq!(untrimmed, None, "{sid}: no trim after the insert");
+                            }
                             main.db.run(statement);
                         }
                         give!(ask.id, Event::Written(Ok(())));
                     }
                     Need::Write(StoreWrite::HistoryInsert(statement)) => {
                         assert_eq!(ask.charge, 0, "{sid}");
+                        assert_eq!(untrimmed, None, "{sid}");
                         let rowid = main.db.insert(&statement);
+                        untrimmed = Some(rowid);
                         give!(ask.id, Event::Inserted(Ok(rowid)));
                     }
                     other => panic!("{sid}: an ask this piece's machines don't make: {other:?}"),
@@ -917,10 +941,18 @@ fn publish_methods() {
             if uploaded {
                 uploads += 1;
             }
-            if played.turns > 0 {
-                streamed += 1;
-                assert_eq!(played.turns, 1, "{sid}: one turn");
-            }
+            // A turn for a streamed body, and only for one.
+            let streams = played
+                .ran
+                .calls
+                .iter()
+                .any(|c| matches!(c.call.body, Some(Body::Stream { .. })));
+            assert_eq!(
+                played.turns,
+                usize::from(streams),
+                "{sid}: the upload's turn"
+            );
+            streamed += usize::from(streams);
             // Whether the effect ran, as the reference's guard recorded it.
             let effect = step
                 .get("events")
@@ -1546,5 +1578,68 @@ fn parts_are_read_strictly() {
                 );
             }
         }
+    }
+}
+
+/// `history-bound`: with the table full, an upload's row is inserted and
+/// the oldest finished row goes, so the table holds 10,000 rows, the new
+/// one among them, even when the clock was set back (the new row would
+/// then be the oldest).
+#[test]
+fn an_upload_keeps_the_history_bound() {
+    for set_back in [false, true] {
+        let db = HistoryDb::open(CLOCK);
+        db.conn.execute_batch("BEGIN").unwrap();
+        for i in 0..history::MAX_ROWS {
+            db.conn
+                .execute(
+                    "INSERT INTO publishes (type, status, started_at) VALUES ('data', 'completed', ?)",
+                    [CLOCK as i64 - 1_000_000 + i as i64],
+                )
+                .unwrap();
+        }
+        db.conn.execute_batch("COMMIT").unwrap();
+        let node = Node {
+            stamps: Some(usable_stamps()),
+            ..Node::new()
+        };
+        let mut world = site_world();
+        if set_back {
+            world.now = CLOCK - 2_000_000;
+        }
+        let key = JsString::from(KEY);
+        let main = MainSide {
+            node: &node,
+            db: &db,
+            readiness: Ok(()),
+            parts: &BTreeMap::new(),
+            case_key: &key,
+        };
+        let call = Call {
+            method: Value::str("swarm_publishChunk"),
+            params: Value::object([("data", bytes_value(b"x".to_vec()))]),
+            key: key.clone(),
+            approval: Some(Approval::User),
+        };
+        let played = play(&mut world, &main, &call, "history-bound");
+        assert!(
+            matches!(played.ran.outcome, Outcome::Result(_)),
+            "{set_back}"
+        );
+        assert_eq!(db.rows(), history::MAX_ROWS, "{set_back}");
+        let kept: i64 = db
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM publishes WHERE name = 'CAC chunk'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(kept, 1, "{set_back}: the new row stays");
+        let first: i64 = db
+            .conn
+            .query_row("SELECT MIN(id) FROM publishes", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(first, 2, "{set_back}: the oldest row went");
     }
 }
