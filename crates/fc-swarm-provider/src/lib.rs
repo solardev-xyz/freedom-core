@@ -8,6 +8,11 @@
 //!   swarm-service.js's classification of a raw batch, and
 //!   `selectBestBatch`, with one `/stamps` read (deviation
 //!   `stamps-one-read`).
+//! - **Node errors** ([`errors`]): each call site's error for a node's
+//!   error answer (class, message, body, `isChunkNotFoundError`), from at
+//!   most 8 KiB of its body (deviation `error-body-bound`); and the
+//!   provider's mappings, `nodeWriteError`, `mapChunkReadError` and
+//!   `isBatchNotYetKnownError`.
 //! - **The readers** ([`json`], [`zod`]): a pull reader that reads a reply
 //!   once and keeps nothing, which every typed reader is built on, with the
 //!   design's nesting bound; and zod's refusals as the page reads them.
@@ -17,7 +22,7 @@
 //! `vectors/swarm.json` is the contract (AGENTS rule 5). The crate does no
 //! I/O: replies come in as bytes.
 
-#[allow(dead_code)] // the error texts' helpers arrive with node errors
+pub mod errors;
 mod js;
 pub mod json;
 pub mod stamps;
