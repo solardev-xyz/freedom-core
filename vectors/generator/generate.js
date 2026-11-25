@@ -666,129 +666,142 @@ async function main() {
   // join the others at the end.
   const swarmJob = startSwarm(swarmReference);
   swarmJob.catch(() => {});
-  const deterministic = {
-    'keys.json': buildKeys(reference),
-    'mnemonic-validation.json': buildValidation(reference),
-    'identity-formats.json': buildIdentities(reference),
+  // Built in this order; a check compares each file as soon as it is built,
+  // so a mismatch stops the run there.
+  const builders = [
+    ['keys.json', () => buildKeys(reference)],
+    ['mnemonic-validation.json', () => buildValidation(reference)],
+    ['identity-formats.json', () => buildIdentities(reference)],
     // Its own meta: the shared one is frozen into the existing fixtures.
-    'signing.json': await buildSigning(reference, mnemonicFor, {
+    ['signing.json', () => buildSigning(reference, mnemonicFor, {
       ...reference.meta,
       packages: { ...reference.meta.packages, ...reference.signingPackages },
-    }),
-    'naming-replay.json': await buildNamingReplay(reference.checkout, reference.ethers, {
+    })],
+    ['naming-replay.json', () => buildNamingReplay(reference.checkout, reference.ethers, {
       ...reference.meta,
       packages: { ...reference.meta.packages, '@sinonjs/fake-timers': packageVersion(createRequire(path.join(reference.checkout, 'package.json')), '@sinonjs/fake-timers') },
-    }),
-    'naming.json': await buildNaming(reference.checkout, reference.ethers, {
+    })],
+    ['naming.json', () => buildNaming(reference.checkout, reference.ethers, {
       ...reference.meta,
       packages: { ...reference.meta.packages, '@adraffy/ens-normalize': packageVersion(createRequire(path.join(reference.checkout, 'package.json')), '@adraffy/ens-normalize') },
-    }),
+    })],
     // Signed with the first test wallet; ethers only hashes them.
-    'chain.json': await buildChain(reference.checkout, reference.ethers,
-      reference.derivation.deriveUserWallet(mnemonicFor('abandon-12'), 0).privateKey, reference.meta),
+    ['chain.json', () => buildChain(reference.checkout, reference.ethers,
+      reference.derivation.deriveUserWallet(mnemonicFor('abandon-12'), 0).privateKey, reference.meta)],
     // Its broadcasts are signed with the same wallet.
-    'chain-replay.json': await buildChainReplay(reference.checkout, reference.ethers,
+    ['chain-replay.json', () => buildChainReplay(reference.checkout, reference.ethers,
       reference.derivation.deriveUserWallet(mnemonicFor('abandon-12'), 0).privateKey, {
         ...reference.meta,
         packages: { ...reference.meta.packages, '@sinonjs/fake-timers': packageVersion(createRequire(path.join(reference.checkout, 'package.json')), '@sinonjs/fake-timers') },
-      }),
-    'dweb.json': await buildDweb(reference.checkout, reference.ethers, reference.meta),
+      })],
+    ['dweb.json', () => buildDweb(reference.checkout, reference.ethers, reference.meta)],
     // Design 0009's verify plans, from the same cases on external backends.
-    'dweb-verify-plans.json': await buildVerifyPlans(reference.checkout, reference.meta),
+    ['dweb-verify-plans.json', () => buildVerifyPlans(reference.checkout, reference.meta)],
     // The design's, with no reference: its meta is the shared one.
-    'streams.json': buildStreams(reference.meta),
+    ['streams.json', () => buildStreams(reference.meta)],
     // Design 0013's secrets file (PRF-1a): the design's, with no reference;
     // its meta is the shared one.
-    'secrets.json': buildSecrets(reference.meta),
+    ['secrets.json', () => buildSecrets(reference.meta)],
     // Design 0013's key-store helper's answers (PRF-1b): the design's, with
     // no reference; its meta is the shared one.
-    'keystore.json': buildKeystore(reference.meta),
+    ['keystore.json', () => buildKeystore(reference.meta)],
     // Design 0013's Freedom directory move (PRF-9a): the list, the journal
     // and its recovery, and the start's preconditions; the design's, with
     // no reference; its meta is the shared one.
-    'layout.json': buildLayout(reference.meta),
+    ['layout.json', () => buildLayout(reference.meta)],
     // Design 0008's composed reads, from main's radapi handlers over a
     // scripted add-on.
-    'radicle-reads.json': await buildRadicleReads(radicle.checkout, radicle.meta),
+    ['radicle-reads.json', () => buildRadicleReads(radicle.checkout, radicle.meta)],
     // Design 0008's rad.blob: its ranges are the design's; main's /blob/
     // route over the same files.
-    'radicle-blob.json': await buildRadicleBlob(radicle.checkout, radicle.meta),
+    ['radicle-blob.json', () => buildRadicleBlob(radicle.checkout, radicle.meta)],
     // Design 0008's network operations, from main's manager and seed
     // status over a scripted add-on, and the design's progress queue.
-    'radicle-network.json': await buildRadicleNetwork(radicle.checkout, radicle.meta),
+    ['radicle-network.json', () => buildRadicleNetwork(radicle.checkout, radicle.meta)],
     // Design 0008's `rad.stats`: the design's result, with main's peer
     // count today.
-    'radicle-stats.json': await buildRadicleStats(radicle.checkout, radicle.meta),
+    ['radicle-stats.json', () => buildRadicleStats(radicle.checkout, radicle.meta)],
     // Design 0008's import, from main's GitHub bridge over a scripted
     // add-on, and the service's answers.
-    'radicle-import.json': await buildRadicleImport(radicle.checkout, radicle.meta),
+    ['radicle-import.json', () => buildRadicleImport(radicle.checkout, radicle.meta)],
     // Design 0012's tokens, from main's signing-confirmation.js, and its
     // grant files, from main's four stores.
     // x402's payloads come from its code over the main reference's
     // installed SDK (@x402/core and @x402/evm 2.28.0), which meta names.
-    'approvals.json': await buildApprovals(approvals.checkout, {
+    ['approvals.json', () => buildApprovals(approvals.checkout, {
       ...approvals.meta,
       packages: require('./approval-x402').x402Packages(reference.checkout, packageVersion),
-    }, reference.checkout),
+    }, reference.checkout)],
     // Design 0013's profile catalog, from main's profile-catalog.js and
     // profile-resolver.js.
-    'profiles.json': buildProfiles(approvals.checkout, reference.checkout, {
+    ['profiles.json', () => buildProfiles(approvals.checkout, reference.checkout, {
       freedomBrowserCommit: checkedCommit(approvals.checkout, PROFILES_REFERENCE_COMMIT, 'profiles reference'),
       packages: { 'proper-lockfile': packageVersion(createRequire(path.join(reference.checkout, 'package.json')), 'proper-lockfile') },
       nodeVersion: process.version,
       generator: 'vectors/generator/generate.js',
-    }),
+    })],
     // Design 0012's Ethereum dispatcher (APR-5a), from main's
     // page-ethereum.js, page-signing.js and page-sends.js.
-    'eip1193.json': await buildEip1193(approvals.checkout, reference.checkout, {
+    ['eip1193.json', () => buildEip1193(approvals.checkout, reference.checkout, {
       freedomBrowserCommit: checkedCommit(approvals.checkout, EIP1193_REFERENCE_COMMIT, 'eip1193 reference'),
       packages: { ethers: packageVersion(createRequire(path.join(reference.checkout, 'package.json')), 'ethers') },
       nodeVersion: process.version,
       generator: 'vectors/generator/generate.js',
-    }),
+    })],
     // Design 0013's JSON Lines journal (PRF-5d), from main's
     // durable-journal.js.
-    'journal.json': await buildJournal(approvals.checkout, {
+    ['journal.json', () => buildJournal(approvals.checkout, {
       freedomBrowserCommit: checkedCommit(approvals.checkout, JOURNAL_REFERENCE_COMMIT, 'journal reference'),
       nodeVersion: process.version,
       generator: 'vectors/generator/generate.js',
-    }),
+    })],
     // Design 0013's set-A stores (PRF-5a): vault-meta.json, from main's
     // identity-manager.js, over the main reference's ethers and fake timers.
-    'stores.json': await buildStores(stores.checkout, reference.checkout, {
+    ['stores.json', () => buildStores(stores.checkout, reference.checkout, {
       ...stores.meta,
       packages: Object.fromEntries(['ethers', '@sinonjs/fake-timers']
         .map((name) => [name, packageVersion(createRequire(path.join(reference.checkout, 'package.json')), name)])),
-    }),
+    })],
     // Design 0013's SQLite stores (PRF-5g-1): each database's schema, from
     // the stores reference's own modules over the main reference's
     // better-sqlite3, which meta names with the SQLite it bundles.
-    'sqlite.json': buildSqlite(stores.checkout, reference.checkout, {
+    ['sqlite.json', () => buildSqlite(stores.checkout, reference.checkout, {
       ...stores.meta,
       packages: { 'better-sqlite3': packageVersion(createRequire(path.join(reference.checkout, 'package.json')), 'better-sqlite3') },
-    }),
+    })],
     // Design 0014's Colibri adapter (COL-1): the colibri reference's worker
     // service and checkpoint check over the real c4w.wasm, every call into
     // it recorded, in worlds scripted from vectors/fixtures/colibri/.
-    'colibri.json': await buildColibri(colibri.checkout, colibri.meta),
+    ['colibri.json', () => buildColibri(colibri.checkout, colibri.meta)],
+  ];
+  const deterministic = {};
+  const checkFile = (filename) => {
+    const committed = fs.readFileSync(path.join(OUTPUT, filename), 'utf8');
+    const generated = json(deterministic[filename]);
+    if (committed !== generated) throw new assert.AssertionError({ message: byteMismatch(filename, committed, generated) });
+    console.log(`check: ${filename}`);
   };
+  for (const [filename, build] of builders) {
+    deterministic[filename] = await build();
+    if (mode === 'check') checkFile(filename);
+  }
   // Design 0015's window.swarm backend (SWM-1): the swarm reference's
   // src/main/swarm/ over a recording fake node, at bee-js 13.2.0 and
   // core-sdk 0.2.2, and the operation grammar its requests are checked against.
   const swarmFiles = await swarmJob;
   deterministic['swarm.json'] = swarmFiles.swarm;
   deterministic['swarm-grammar.json'] = swarmFiles.grammar;
-  // Check every deterministic file before doing the more expensive fixture checks.
-  for (const [filename, contents] of Object.entries(deterministic)) {
-    const destination = path.join(OUTPUT, filename);
-    if (mode === 'generate') fs.writeFileSync(destination, json(contents));
-    else {
-      const committed = fs.readFileSync(destination, 'utf8');
-      const generated = json(contents);
-      if (committed !== generated) throw new assert.AssertionError({ message: byteMismatch(filename, committed, generated) });
+  if (mode === 'check') {
+    checkFile('swarm.json');
+    checkFile('swarm-grammar.json');
+  } else {
+    // Nothing is written until every file is built.
+    for (const [filename, contents] of Object.entries(deterministic)) {
+      fs.writeFileSync(path.join(OUTPUT, filename), json(contents));
+      console.log(`generate: ${filename}`);
     }
-    console.log(`${mode}: ${filename}`);
   }
+  // Every deterministic file is checked before the more expensive fixture checks.
   for (const [filename, builder] of [
     ['fixtures/vaults.json', buildVaults],
     ['fixtures/bee-keystores.json', buildBee],
