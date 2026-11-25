@@ -314,7 +314,7 @@ const NO_CASE = {
   'store-writes': 'no case: the files\' bytes are the same; the durable write (0001, 0013) is the core\'s',
 };
 const DEVIATION_IDS = ['feed-entry-bound', 'tar-paths', 'feed-wrap-root', 'reference-check', 'read-data-verified', 'read-pieces',
-  'index-probe', 'index-allocation', 'stamps-one-read', 'deadlines', 'busy', 'reply-bounds', 'error-body-bound', 'session-transport',
+  'index-probe', 'index-allocation', 'stamps-one-read', 'deadlines', 'busy', 'reply-bounds', 'reply-syntax', 'batch-depth', 'error-body-bound', 'session-transport',
   'transport-error-text', 'subscribe-proxy', 'history-bound', 'store-writes'];
 
 function deviationsOf(swarm) {
@@ -323,6 +323,9 @@ function deviationsOf(swarm) {
     for (const entry of swarm[section]) {
       for (const id of [entry.deviation, ...(entry.also || [])]) if (id) where[id].push(`${section}/${entry.id}`);
     }
+  }
+  for (const part of ['mapped', 'select']) {
+    for (const entry of swarm.stamps[part]) if (entry.deviation) where[entry.deviation].push(`stamps/${part}/${entry.id}`);
   }
   for (const c of swarm.methods) {
     for (const step of c.steps) for (const r of step.requests) if (r.deviation && !where[r.deviation].includes(`methods/${c.id}`)) where[r.deviation].push(`methods/${c.id}`);
@@ -397,12 +400,15 @@ const SWARM_FORMATS = {
     + '(core-sdk), chunk (POST /chunks: span ‖ payload and the address), pss (the request; the body is the message).',
   trees: 'core-sdk\'s ChunkSplitter: root, span, root payload, and every chunk\'s count and SHA-256 over address ‖ u64_le(span) ‖ payload by address.',
   stamps: 'mapped: bee-js\'s stamp.getAll over one raw batch (the fields Freedom reads, or the error), and swarm-service.js\'s classification; '
-    + 'select: selectBestBatch(size, options) over a /stamps answer, its batch or error, and how many /stamps reads it made.',
+    + 'select: selectBestBatch(size, options) over a /stamps answer, its batch or error, and how many /stamps reads it made; where it made '
+    + 'two, deviation stamps-one-read, and `core` gives the core\'s one read, with the same batch or error. A mapped batch with a fractional depth '
+    + 'or bucketDepth is deviation batch-depth: `core` is the core\'s refusal.',
   feeds: 'topic and identifier (bee-js), update (feed-service.js\'s updateFeed and writeFeedPayload, write-side.json\'s shape), index_run and '
     + 'entry_exists (from the methods that ran them), metered_read (readFeedPayload over a recording meter: each charge and reserve, refused or not).',
   gsoc: 'bee-js\'s gsocMine (write-side.json\'s shape): the signer\'s index, key, owner and SOC address, or its error.',
   errors: 'http_error: a node error at each call site (bee-js\'s JSON and array-buffer calls, #1057\'s fetchNode, the SOC upload, page-upload.js): '
-    + 'the error\'s class, message and data, and isChunkNotFoundError; past 8 KiB, `core` is the same reader over the first 8,192 bytes '
+    + 'the error\'s class, message and data, and isChunkNotFoundError (fetchNode at 500, which readFeedPayload reads as an empty feed, and at '
+    + '503, which reaches its own text); past 8 KiB, `core` is the same reader over the first 8,192 bytes '
     + '(error-body-bound). mapping: the method cases that show nodeWriteError\'s and mapChunkReadError\'s mappings.',
   stores: 'feeds: feed-store.js\'s operations from a file\'s text, each result or error, and the files after (backups included); manifests: '
     + 'permission-manifests.js\'s check, decide, useIndividual, disconnect and get over scripted manifests, the grants and files after; history: '

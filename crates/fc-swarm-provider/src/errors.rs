@@ -447,6 +447,22 @@ pub fn reply_too_large() -> PageError {
     }
 }
 
+/// The page's text for a JSON reply that doesn't parse, where the reference
+/// shows V8's `SyntaxError` text (design 0015, JSON replies; deviation
+/// `reply-syntax`).
+pub const REPLY_SYNTAX_MESSAGE: &str = "Swarm node reply is not valid JSON";
+
+/// A JSON reply that doesn't parse (bee-js's reads, and the SOC upload's
+/// success reply): -32603 [`REPLY_SYNTAX_MESSAGE`]. A page's upload result
+/// keeps page-upload.js's own text.
+pub fn reply_not_json() -> PageError {
+    PageError {
+        code: INTERNAL_ERROR,
+        message: JsString::from(REPLY_SYNTAX_MESSAGE),
+        reason: None,
+    }
+}
+
 /// ant-storage-api.js's text for a batch the network doesn't know yet.
 pub const BATCH_NOT_YET_KNOWN_MESSAGE: &str =
     "Your storage is still reaching the Swarm network. Try again in a minute.";
