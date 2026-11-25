@@ -814,6 +814,7 @@ dependencies = [
  "fc-vault",
  "fc-wallet-state",
  "getrandom",
+ "k256",
  "rand_core 0.10.1",
  "rusqlite",
  "rustix",
