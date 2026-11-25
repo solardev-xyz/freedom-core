@@ -1,6 +1,6 @@
 //! fc-swarm-provider's stores against vectors/swarm.json's `stores`
 //! (design 0015, SWM-3's done-when: "`stores` pass"): every case of the
-//! closed set of kinds, `feeds` (23), `manifests` (15) and `history` (6),
+//! closed set of kinds, `feeds` (27), `manifests` (17) and `history` (10),
 //! replayed through the codecs over a directory the test keeps, with the
 //! reference's clock and the world the generator scripted
 //! (vectors/generator/swarm-sections.js, `buildStores`).
@@ -12,13 +12,16 @@
 //!   step through `ManifestStore`, its effects applied as the world applies
 //!   them; the results, the grants after and the files after.
 //! - **history:** the statements run through SQLite (rusqlite, bundled, as
-//!   freedom-cored links it): the open's import, sweep and bound, each
-//!   operation's answer, and the schema, pragmas, rows and legacy files
-//!   after.
+//!   freedom-cored links it): a first session's rows and the BLOB cell
+//!   written into one, the open's import, sweep and bound, each operation's
+//!   answer, and the schema, pragmas, rows and legacy files after.
 //!
 //! The deviation cases are asserted on the core's side (`core`):
-//! `index-allocation` (the counter behind a held index) and `history-bound`
-//! (10,001 rows).
+//! `index-allocation` (the counter behind a held index), `history-bound`
+//! (10,001 rows), and for `store-shapes`, `store-refusal`, `own-keys`,
+//! `legacy-dates` and `history-blobs` the core's answers, files or rows,
+//! and grants as the case gives them, where it gives them; the rest of
+//! such a case is the reference's.
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
 use std::collections::BTreeMap;
@@ -204,7 +207,7 @@ fn every_stores_case() {
         .iter()
         .map(|(k, ids)| (k.as_str(), ids.len()))
         .collect();
-    assert_eq!(counts, [("feeds", 23), ("history", 6), ("manifests", 15)]);
+    assert_eq!(counts, [("feeds", 27), ("history", 10), ("manifests", 17)]);
     let keys = feeds_keys();
     let mut played = 0;
     for case in &cases {
@@ -217,7 +220,7 @@ fn every_stores_case() {
         }
         played += 1;
     }
-    assert_eq!(played, 44);
+    assert_eq!(played, 54);
     // The deviations the stores mark, and only those.
     let marked: Vec<(String, String)> = cases
         .iter()
@@ -226,21 +229,51 @@ fn every_stores_case() {
                 .map(|d| (str_of(d).to_owned(), str_of(field(case, "id")).to_owned()))
         })
         .collect();
-    assert_eq!(
-        marked,
-        [
-            (
-                "index-allocation".to_owned(),
-                "feeds-create-app-scoped-counter-behind".to_owned()
-            ),
-            ("history-bound".to_owned(), "history-10001-rows".to_owned()),
-        ]
-    );
+    let want: [(&str, &str); 12] = [
+        ("index-allocation", "feeds-create-app-scoped-counter-behind"),
+        ("store-refusal", "feeds-refused-label-keeps-index"),
+        ("store-shapes", "feeds-load-feed-maps-kept"),
+        ("own-keys", "feeds-own-key-read"),
+        ("own-keys", "feeds-own-key-proto-write"),
+        ("store-shapes", "manifest-load-record-shape"),
+        ("store-shapes", "manifest-load-string-revision"),
+        ("history-bound", "history-10001-rows"),
+        ("legacy-dates", "history-json-legacy-dates"),
+        ("history-blobs", "history-blob-name"),
+        ("history-blobs", "history-blob-started-at-date"),
+        ("history-blobs", "history-blob-started-at-throws"),
+    ];
+    let marked_str: Vec<(&str, &str)> = marked
+        .iter()
+        .map(|(d, id)| (d.as_str(), id.as_str()))
+        .collect();
+    assert_eq!(marked_str, want);
+    // The deviation index lists exactly these for each: the stores mark no
+    // case of another section's deviations, and no section marks these.
+    let mut by_deviation: BTreeMap<&str, Vec<String>> = BTreeMap::new();
     for (deviation, id) in &marked {
-        let listed = field(field(&deviations, deviation), "cases");
-        assert_eq!(listed.stringify(), format!("[\"stores/{id}\"]"));
+        by_deviation
+            .entry(deviation.as_str())
+            .or_default()
+            .push(format!("stores/{id}"));
+    }
+    for (deviation, ids) in &by_deviation {
+        let listed: Vec<&str> = field(field(&deviations, deviation), "cases")
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(str_of)
+            .collect();
+        assert_eq!(listed, *ids, "{deviation}");
     }
     assert!(field(&deviations, "store-writes").get("note").is_some());
+}
+
+/// A deviation case's `core`, where it gives the core's answers (an
+/// object; `index-allocation`'s is text).
+fn core_of(case: &JsValue) -> Option<&JsValue> {
+    case.get("core")
+        .filter(|core| matches!(core, JsValue::Object(_)))
 }
 
 // --- feeds ---------------------------------------------------------------------
@@ -336,6 +369,12 @@ fn play_feeds(case: &JsValue, keys: &VaultKeys) {
     let mut store = loaded.store;
     let index_allocation =
         case.get("deviation").and_then(JsValue::as_str) == Some("index-allocation");
+    // store-shapes: the store as the core holds it, its feed maps rebuilt.
+    if let Some(before) = case.get("core_before") {
+        assert_eq!(store.text().unwrap(), str_of(before), "{id}: core_before");
+    }
+    let core = core_of(case);
+    let core_ops = core.map(|core| field(core, "ops").as_array().unwrap());
     for (n, op) in field(case, "ops").as_array().unwrap().iter().enumerate() {
         let args = typed(field(op, "args"));
         let args = args.as_array().unwrap();
@@ -431,18 +470,30 @@ fn play_feeds(case: &JsValue, keys: &VaultKeys) {
                 store.preview_app_scoped_identity(&key(), &arg(1), T0, &mut vault)
             }
             "getAllOriginEntries" => store.all_origin_entries().map(JsValue::Array),
+            "getFeed" => Ok(store.feed(&key(), &name()).unwrap_or(JsValue::Null)),
+            "getAllFeeds" => Ok(store.all_feeds(&key())),
             "isIdentitySharedWithOtherOrigins" => Ok(JsValue::Bool(
                 store.is_identity_shared_with_other_origins(&key(), &arg(1)),
             )),
             other => panic!("{id}: feed-store operation {other}"),
         };
-        let mut want = expected(op);
+        let mut want = match core_ops {
+            Some(answers) => expected(&answers[n]),
+            None => expected(op),
+        };
         if index_allocation {
             want = core_allocation(id, case, want);
         }
         assert_answer(id, n, got, &want);
     }
-    let mut want_files = text_map(field(case, "files"));
+    if let Some(answers) = core_ops {
+        assert_eq!(
+            answers.len(),
+            field(case, "ops").as_array().unwrap().len(),
+            "{id}"
+        );
+    }
+    let mut want_files = text_map(field(core.unwrap_or(case), "files"));
     if index_allocation {
         let file = want_files.get_mut(feeds::FILE_NAME).unwrap();
         *file = core_allocation_file(file);
@@ -660,11 +711,20 @@ fn play_manifests(case: &JsValue) {
     let mut store = ManifestStore::new();
     let file = world.dir.get(manifests::FILE_NAME).cloned();
     let backup = world.dir.get(manifests::BACKUP_NAME).cloned();
-    store
-        .load(file.as_deref().map(str::as_bytes), || {
-            backup.map(String::into_bytes)
-        })
-        .unwrap();
+    let loaded = store.load(file.as_deref().map(str::as_bytes), || {
+        backup.map(String::into_bytes)
+    });
+    // store-shapes: the core's answers, grants and files (read from the
+    // .bak copy), or a store it can't read at all.
+    let core = core_of(case);
+    if let Some(load) = core.and_then(|core| core.get("load")) {
+        assert_eq!(str_of(load), "unreadable", "{id}");
+        assert_eq!(loaded, Err(manifests::Unreadable), "{id}");
+        assert!(!store.is_loaded(), "{id}");
+        return;
+    }
+    loaded.unwrap();
+    let core_steps = core.map(|core| field(core, "steps").as_array().unwrap());
     let mut token: Option<String> = None;
     let mut counter = 0u8;
     for (n, step) in field(case, "steps").as_array().unwrap().iter().enumerate() {
@@ -743,17 +803,29 @@ fn play_manifests(case: &JsValue) {
             "get" => store.get_record(&site, &mut world).map_err(manifest_thrown),
             other => panic!("{id}: manifest operation {other}"),
         };
-        assert_answer(id, n, got, &expected(step));
+        let want = match core_steps {
+            Some(answers) => expected(&answers[n]),
+            None => expected(step),
+        };
+        assert_answer(id, n, got, &want);
     }
+    if let Some(answers) = core_steps {
+        assert_eq!(
+            answers.len(),
+            field(case, "steps").as_array().unwrap().len(),
+            "{id}"
+        );
+    }
+    let side = core.unwrap_or(case);
     assert_eq!(
         world.grants.stringify(),
-        field(case, "grants_after").stringify(),
+        field(side, "grants_after").stringify(),
         "{id}: grants"
     );
     assert_eq!(
         files_with(&world.dir, |n| n.starts_with("swarm-manifest-grants")
             || n == feeds::FILE_NAME),
-        text_map(field(case, "files")),
+        text_map(field(side, "files")),
         "{id}: files"
     );
 }
@@ -823,14 +895,28 @@ fn query(conn: &rusqlite::Connection, statement: &Statement) -> Vec<Vec<Cell>> {
     rows.collect::<Result<_, _>>().unwrap()
 }
 
+/// A cell as the vectors write it: a BLOB as `{ blob: hex }`.
 fn cell_value(cell: &Cell) -> JsValue {
     match cell {
         Cell::Null => JsValue::Null,
         Cell::Integer(n) => JsValue::Number(*n as f64),
         Cell::Real(n) => JsValue::Number(*n),
         Cell::Text(t) => JsValue::string(t.as_str()),
-        Cell::Blob(_) => panic!("a BLOB"),
+        Cell::Blob(bytes) => {
+            let hex: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
+            let mut out = JsValue::Object(Vec::new());
+            out.set("blob", JsValue::string(hex.as_str()));
+            out
+        }
     }
+}
+
+fn hex_bytes(hex: &str) -> Vec<u8> {
+    assert!(hex.len().is_multiple_of(2), "hex {hex}");
+    (0..hex.len())
+        .step_by(2)
+        .map(|at| u8::from_str_radix(&hex[at..at + 2], 16).unwrap())
+        .collect()
 }
 
 /// `getDb()`: WAL, the schema on a new database, then the import, the
@@ -891,34 +977,99 @@ fn add_entry(conn: &rusqlite::Connection, entry: &JsValue, now_ms: u64) -> Resul
     Ok(history::entry(&rows[0]).unwrap())
 }
 
+/// A history operation's answer: the reference's own (a value, or what it
+/// throws), or the core's refusal of a row it reads (`history-blobs`).
+#[derive(Debug)]
+enum HistoryAnswer {
+    Value(JsValue),
+    Thrown(Thrown),
+    Refused(&'static str),
+}
+
+impl From<Result<JsValue, Thrown>> for HistoryAnswer {
+    fn from(answer: Result<JsValue, Thrown>) -> Self {
+        match answer {
+            Ok(value) => HistoryAnswer::Value(value),
+            Err(thrown) => HistoryAnswer::Thrown(thrown),
+        }
+    }
+}
+
+/// `rowToEntry`'s answer over rows: a bad timestamp throws as the
+/// reference does; a BLOB cell is the core's refusal.
+fn row_answer(read: Result<JsValue, history::RowError>) -> HistoryAnswer {
+    match read {
+        Ok(value) => HistoryAnswer::Value(value),
+        Err(history::RowError::Thrown(thrown)) => HistoryAnswer::Thrown(thrown),
+        Err(history::RowError::Blob(column)) => HistoryAnswer::Refused(column),
+        Err(other) => panic!("a row the statements can't answer: {other:?}"),
+    }
+}
+
 fn history_op(
     conn: &rusqlite::Connection,
     op: &str,
     args: &[JsValue],
     now_ms: u64,
-) -> Result<JsValue, Thrown> {
+) -> HistoryAnswer {
     let arg = |i: usize| args.get(i).cloned().unwrap_or(JsValue::Undefined);
     match op {
-        "addEntry" => add_entry(conn, &arg(0), now_ms),
+        "addEntry" => add_entry(conn, &arg(0), now_ms).into(),
         "updateEntry" => {
-            history::update_entry_checks(&arg(1))?;
-            let update = history::update_entry(&arg(0), &arg(1), now_ms)?;
+            let update = history::update_entry_checks(&arg(1))
+                .and_then(|()| history::update_entry(&arg(0), &arg(1), now_ms));
+            let update = match update {
+                Ok(update) => update,
+                Err(thrown) => return HistoryAnswer::Thrown(thrown),
+            };
             if execute(conn, &update) == 0 {
-                return Ok(JsValue::Null);
+                return HistoryAnswer::Value(JsValue::Null);
             }
-            let rows = query(conn, &history::by_id(&arg(0))?);
-            Ok(history::entry(&rows[0]).unwrap())
+            let by_id = match history::by_id(&arg(0)) {
+                Ok(statement) => statement,
+                Err(thrown) => return HistoryAnswer::Thrown(thrown),
+            };
+            row_answer(history::entry(&query(conn, &by_id)[0]))
         }
-        "getEntries" => Ok(history::entries(&query(conn, &history::get_entries())).unwrap()),
-        "removeEntry" => Ok(JsValue::Bool(
-            execute(conn, &history::remove_entry(&arg(0))?) > 0,
-        )),
+        "getEntries" => row_answer(history::entries(&query(conn, &history::get_entries()))),
+        "removeEntry" => history::remove_entry(&arg(0))
+            .map(|statement| JsValue::Bool(execute(conn, &statement) > 0))
+            .into(),
         "clearEntries" => {
             execute(conn, &history::clear_entries());
-            Ok(JsValue::Undefined)
+            HistoryAnswer::Value(JsValue::Undefined)
         }
         other => panic!("publish-history operation {other}"),
     }
+}
+
+/// An answer against what a case's step (or its `core`'s) gives: a value,
+/// an error, or the core's refusal (`refused` { reason: blob, column }).
+fn assert_history_answer(case: &str, step: usize, got: HistoryAnswer, want: &JsValue) {
+    if let Some(refused) = want.get("refused") {
+        assert_eq!(
+            str_of(field(refused, "reason")),
+            "blob",
+            "{case} step {step}"
+        );
+        match got {
+            HistoryAnswer::Refused(column) => {
+                assert_eq!(
+                    column,
+                    str_of(field(refused, "column")),
+                    "{case} step {step}"
+                );
+            }
+            other => panic!("{case} step {step}: got {other:?}, want the BLOB refused"),
+        }
+        return;
+    }
+    let got = match got {
+        HistoryAnswer::Value(value) => Ok(value),
+        HistoryAnswer::Thrown(thrown) => Err(thrown),
+        HistoryAnswer::Refused(column) => panic!("{case} step {step}: refused a BLOB in {column}"),
+    };
+    assert_answer(case, step, got, &expected(want));
 }
 
 fn play_history(case: &JsValue) {
@@ -929,14 +1080,39 @@ fn play_history(case: &JsValue) {
     }
     if let Some(seed) = case.get("seeded") {
         // A first session at the clock's start, closed with rows left
-        // `uploading`.
+        // `uploading`, and a BLOB cell written into one of its rows.
         let conn = open_history(&dir.0, T0);
         for step in seed.as_array().unwrap() {
             let step = step.as_array().unwrap();
-            history_op(&conn, str_of(&step[0]), &step[1..], T0).unwrap();
+            let answer = history_op(&conn, str_of(&step[0]), &step[1..], T0);
+            assert!(
+                matches!(answer, HistoryAnswer::Value(_)),
+                "{id}: {answer:?}"
+            );
+        }
+        if let Some(blob) = case.get("blob") {
+            let column = str_of(field(blob, "column"));
+            assert!(history::COLUMNS.contains(&column), "{id}: {column}");
+            let JsValue::Number(row) = field(blob, "id") else {
+                panic!("{id}: a row id");
+            };
+            let changed = conn
+                .execute(
+                    &format!("UPDATE publishes SET {column} = ?1 WHERE id = ?2"),
+                    rusqlite::params![hex_bytes(str_of(field(blob, "hex"))), *row as i64],
+                )
+                .unwrap();
+            assert_eq!(changed, 1, "{id}");
         }
         drop(conn);
     }
+    assert!(
+        case.get("blob").is_none() || case.get("seeded").is_some(),
+        "{id}"
+    );
+    // A deviation's side: the core's answers and rows.
+    let core = core_of(case);
+    let core_ops = core.map(|core| field(core, "ops").as_array().unwrap());
     for (name, text) in text_map(case.get("user_data_before").unwrap_or(&JsValue::Null)) {
         std::fs::write(dir.0.join(name), text).unwrap();
     }
@@ -945,7 +1121,14 @@ fn play_history(case: &JsValue) {
     for (n, op) in field(case, "ops").as_array().unwrap().iter().enumerate() {
         let args = field(op, "args").as_array().unwrap().to_vec();
         let got = history_op(&conn, str_of(field(op, "op")), &args, now);
-        assert_answer(id, n, got, &expected(op));
+        assert_history_answer(id, n, got, core_ops.map_or(op, |answers| &answers[n]));
+    }
+    if let Some(answers) = core_ops {
+        assert_eq!(
+            answers.len(),
+            field(case, "ops").as_array().unwrap().len(),
+            "{id}"
+        );
     }
     let schema: Vec<JsValue> = query(
         &conn,
@@ -1003,7 +1186,7 @@ fn play_history(case: &JsValue) {
     .collect();
     assert_eq!(
         JsValue::Array(rows).stringify(),
-        field(case, "rows").stringify(),
+        field(core.unwrap_or(case), "rows").stringify(),
         "{id}: rows"
     );
     drop(conn);
