@@ -348,6 +348,8 @@ pub struct TestWorld {
     /// it, as it does the key: the generator reads one flag for both).
     pub name_holds: bool,
     pub tags: TagOwners,
+    /// The sites with the messaging grant (a grant's `messaging`).
+    pub messaging: BTreeSet<JsString>,
 }
 
 impl TestWorld {
@@ -365,6 +367,7 @@ impl TestWorld {
             key_holds: true,
             name_holds: true,
             tags: TagOwners::new(),
+            messaging: BTreeSet::new(),
         }
     }
 
@@ -389,8 +392,14 @@ impl TestWorld {
                 }
             }
         }
+        let messaging = get(case, "grants")
+            .members()
+            .filter(|(_, g)| g.get("messaging").is_some_and(|m| m.kind() == Kind::True))
+            .map(|(k, _)| js(k))
+            .collect();
         TestWorld {
             rules,
+            messaging,
             custody: case.get("custody").is_some_and(|c| c.kind() == Kind::True),
             grants: get(case, "grants").members().map(|(k, _)| js(k)).collect(),
             feeds: match &feeds {
@@ -406,8 +415,10 @@ impl Reads for TestWorld {
     fn connected(&self, key: &JsString) -> bool {
         self.grants.contains(key)
     }
-    fn messaging(&self, _key: &JsString) -> bool {
-        false
+    fn messaging(&self, key: &JsString) -> bool {
+        // `getPermission(origin)?.messaging`: the grant needs the
+        // connection.
+        self.grants.contains(key) && self.messaging.contains(key)
     }
     fn auto_approve(&self, key: &JsString, capability: Capability) -> bool {
         self.rules.contains(&(key.clone(), capability.key()))
@@ -463,6 +474,10 @@ impl TestWorld {
             "connection" => {
                 assert_eq!(value, "revoked");
                 self.grants.remove(key);
+            }
+            "messaging" => {
+                assert_eq!(value, "revoked");
+                self.messaging.remove(key);
             }
             other => panic!("a world change this harness doesn't make: {other}"),
         }
@@ -633,6 +648,8 @@ pub struct Node {
     pub bzz_tag: std::cell::Cell<u64>,
     /// Chunks uploaded with `POST /chunks`, by address.
     pub uploaded: std::cell::RefCell<BTreeMap<String, Vec<u8>>>,
+    /// GET /addresses' JSON, when the case gives it.
+    pub addresses: Option<Vec<u8>>,
 }
 
 pub struct Keys {
@@ -696,6 +713,7 @@ impl Node {
             tags: BTreeMap::new(),
             bzz_tag: std::cell::Cell::new(101),
             uploaded: std::cell::RefCell::new(BTreeMap::new()),
+            addresses: None,
         }
     }
 
@@ -775,6 +793,9 @@ impl Node {
                     }
                 }
                 "stamps" => node.stamps = Some(v.stringify(KeyOrder::Property).into_bytes()),
+                "addresses" => {
+                    node.addresses = Some(v.stringify(KeyOrder::Property).into_bytes());
+                }
                 // The usable batch, its label that many bytes of `l`
                 // (swarm-run.js's nodeWorld).
                 "stamps_label_bytes" => {
@@ -848,6 +869,20 @@ impl Node {
                     .insert(address.clone(), body.to_vec());
                 created(vec![("swarm-tag".to_owned(), "0".to_owned())], address)
             }
+            // `{ reference }`, the SOC's address.
+            ("POST", p) if p.starts_with("/soc/") => {
+                let mut segments = p.split('/').skip(2);
+                let owner: [u8; 20] = unhex(segments.next().unwrap()).try_into().unwrap();
+                let id: [u8; 32] = unhex(segments.next().unwrap()).try_into().unwrap();
+                created(Vec::new(), hex(&verify::soc_address(&id, &owner)))
+            }
+            // Ant answers 201 with no body.
+            ("POST", p) if p.starts_with("/pss/send/") => ReplySpec {
+                status: 201,
+                status_text: "Created".to_owned(),
+                headers: Vec::new(),
+                ..ReplySpec::ok(Vec::new(), "")
+            },
             _ => panic!("the fake node has no answer for {method} {path}"),
         }
     }
@@ -866,6 +901,12 @@ impl Node {
             return self.blobs.get(a).map_or_else(ReplySpec::not_found, |b| {
                 ReplySpec::ok(b.clone(), "application/octet-stream")
             });
+        }
+        if method == "GET"
+            && path == "/addresses"
+            && let Some(body) = &self.addresses
+        {
+            return ReplySpec::ok(body.clone(), "application/json; charset=utf-8");
         }
         if method == "GET" && path == "/stamps" {
             let body = self
@@ -1359,6 +1400,8 @@ pub fn handoff(step: V<'_, '_>, origin: &JsString, world: &mut TestWorld) -> Opt
             let key = change.get("key").map_or_else(|| origin.clone(), js);
             if get(change, "op").is_str("connect") {
                 world.grants.insert(key);
+            } else if get(change, "op").is_str("messaging") {
+                world.messaging.insert(key);
             } else if get(change, "op").is_str("flag") {
                 // "Always allow": the site's rule for the flag's type.
                 let flag = Capability::from_key(&string(get(change, "flag"))).unwrap();
