@@ -131,8 +131,9 @@ pub fn gsoc_job(topic: &str) -> MineJob {
 }
 
 /// `validateBoundedPayload(data, 4000, 'message', …)`: the message's bytes
-/// (a string's UTF-8), empty only where `allow_empty`, else with the empty
-/// text and reason given.
+/// (a string's UTF-8). An empty one passes unless `empty` names the
+/// reason its refusal gives (`allowEmpty` for PSS; `invalid_payload` for
+/// GSOC, whose SOC can't be empty).
 fn message(data: &Value, empty: Option<&str>) -> Result<Vec<u8>, Failure> {
     let data = if data.is_nullish() {
         None
