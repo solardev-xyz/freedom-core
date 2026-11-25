@@ -1,8 +1,12 @@
 //! The mining lane through the binary (design 0015, "Messaging and GSOC
 //! mining" > "Mining, in the core", SWM-4's tests; SWM-4 PR 8): the real
 //! core, the test as main answering the swarm thread's requests, and the
-//! lane's test hooks: a delay before each batch, and a block file a batch
-//! consumes (a stuck batch).
+//! lane's test hooks: a delay before each batch, a block file a batch
+//! consumes (a stuck batch), and the test clock, which drives the swarm
+//! thread's monotonic clock as well as `Date.now()` (D14), so a job's 15 s
+//! and the watchdog's second pass when the test moves the clock on. One
+//! smoke test watches a stuck batch on the real clock, and `vault.lock`'s
+//! gate is real time.
 //!
 //! Each search here is a GSOC subscription by topic, which asks main
 //! nothing between its readiness and its search, so the order in which the
@@ -15,10 +19,11 @@
 //! read).
 //!
 //! - a forced-slow job ends `gsoc_mining_timeout` within one batch of its
-//!   15 s, and the next job succeeds; then recovery: a cancel, a stuck
-//!   batch (the next job on a fresh lane gives bee-js's signer, the stuck
-//!   thread's late answer dropped), and a second stuck batch turning
-//!   mining off;
+//!   15 s on the test clock, and the next job succeeds; then recovery: a
+//!   cancel, a stuck batch at its second on the test clock (the next job on
+//!   a fresh lane gives bee-js's signer, the stuck thread's late answer
+//!   dropped), and a second stuck batch turning mining off; and a stuck
+//!   batch watched on the real clock;
 //! - a cancel: a lone waiter's stops its job within one batch and the next
 //!   starts; a join's leaves the job running for the other waiter;
 //! - saturation: a site's 17th waiting job and the 257th in all are
@@ -57,6 +62,10 @@ const CLOCK: u64 = 1_767_225_600_123;
 
 /// A job's time from its dispatch (`MINE_TIMEOUT_MS`).
 const JOB: Duration = Duration::from_millis(fc_swarm_provider::mining::JOB_MS);
+
+/// How far the test clock moves at a time while a batch is out: under the
+/// watchdog's second.
+const STEP: Duration = Duration::from_millis(500);
 
 /// 64 topics `long-<n>` whose signer lies past candidate 10,000 (some 50
 /// batches each), with the candidate it is.
@@ -167,6 +176,8 @@ struct Lane {
     requests: BTreeSet<u64>,
     /// Main's other requests' answers, with when each was read.
     responses: BTreeMap<u64, (Value, Instant)>,
+    /// The test clock, as last set.
+    clock: u64,
 }
 
 impl Lane {
@@ -189,6 +200,7 @@ impl Lane {
             answers: BTreeMap::new(),
             requests: BTreeSet::new(),
             responses: BTreeMap::new(),
+            clock: CLOCK,
         };
         lane.world(json!({ "reset": true, "clock": CLOCK, "grants": grants(sites) }));
         lane
@@ -226,9 +238,53 @@ impl Lane {
         answer["result"].clone()
     }
 
-    /// The lane's state: `{ waiting, running, off, lane }`.
+    /// The lane's state: `{ waiting, running, off, lane, batches }`.
     fn state(&mut self) -> Value {
         self.world(json!({ "mining": true }))["mining"].clone()
+    }
+
+    /// Moves the test clock on by `by`: `Date.now()` and the swarm thread's
+    /// monotonic clock, what falls due handled before the hook answers.
+    fn advance(&mut self, by: Duration) {
+        self.clock += u64::try_from(by.as_millis()).unwrap();
+        self.world(json!({ "clock": self.clock }));
+    }
+
+    /// The batches the lane has handed out.
+    fn batches(&mut self) -> u64 {
+        self.state()["batches"].as_u64().unwrap()
+    }
+
+    /// Moves the test clock on by [`STEP`] each time the lane hands out a
+    /// new batch, until request `id` is answered: how far it moved. A step
+    /// comes only after a new batch, so no batch is out for a second on the
+    /// core's clock; each new batch of the job went out after every step so
+    /// far, so before its 15 s on that clock.
+    fn advance_until_answered(&mut self, id: u64) -> Duration {
+        let mut advanced = Duration::ZERO;
+        let mut seen = self.batches();
+        loop {
+            let deadline = Instant::now() + Duration::from_secs(10);
+            loop {
+                if self.answers.contains_key(&id) {
+                    return advanced;
+                }
+                let batches = self.batches();
+                // The answer is written before what follows it.
+                if self.answers.contains_key(&id) {
+                    return advanced;
+                }
+                if batches > seen {
+                    seen = batches;
+                    break;
+                }
+                assert!(Instant::now() < deadline, "no new batch");
+                self.step(Duration::from_millis(5));
+            }
+            assert!(advanced < JOB, "a batch past the job's 15 s: {advanced:?}");
+            self.advance(STEP);
+            advanced += STEP;
+        }
     }
 
     fn cancel(&mut self, id: u64) {
@@ -353,33 +409,35 @@ fn busy() -> Got {
     Got::Error("busy".into(), "busy".into())
 }
 
-/// A forced-slow job (300 ms before each batch, so `long-608`'s 120
-/// batches would take 36 s) ends `gsoc_mining_timeout` within one batch
-/// of its 15 s, and the next job then runs and gives bee-js's signer.
+/// A forced-slow job (100 ms before each batch, so `long-608`'s 120
+/// batches would take 12 s, and the test clock moved on half a second at
+/// each batch) ends `gsoc_mining_timeout` within one batch of its 15 s on
+/// the core's clock, and the next job then runs and gives bee-js's signer.
 /// Then recovery, each followed by a job that runs and gives bee-js's
 /// signer: a lone waiter's cancel; a stuck batch, whose job ends
-/// `gsoc_mining_failed` and whose late answer, once the test lets the
-/// stuck thread go, is dropped; and a second stuck batch, which turns
-/// mining off for the job waiting and for every later one.
+/// `gsoc_mining_failed` as the test clock passes its second, and whose
+/// late answer, once the test lets the stuck thread go, is dropped; and a
+/// second stuck batch, which turns mining off for the job waiting and for
+/// every later one.
 #[test]
 fn a_slow_job_times_out_and_the_lane_recovers() {
-    const DELAY: Duration = Duration::from_millis(300);
     let mut lane = Lane::new(
-        &[("FREEDOM_CORED_TEST_SWARM_MINE_DELAY_MS", "300")],
+        &[("FREEDOM_CORED_TEST_SWARM_MINE_DELAY_MS", "100")],
         &[A, B],
     );
-    assert!(index("long-608") > 64 * 256, "past 15 s at 300 ms a batch");
+    assert!(index("long-608") > 120 * 256 - 256, "120 batches");
 
     // The slow job, and one behind it.
     let slow = lane.send(A, "long-608");
     let next = lane.send(B, "chat");
-    assert_eq!(lane.answer(slow, Duration::from_secs(30)), timed_out());
-    let took = lane.answered_at(slow) - lane.ready_at[&slow];
-    eprintln!("[mining] the slow job ended after {took:?}");
-    assert!(
-        took >= JOB && took < JOB + DELAY + Duration::from_millis(700),
-        "within one batch of 15 s: {took:?}"
-    );
+    let advanced = lane.advance_until_answered(slow);
+    assert_eq!(got(&lane.answers[&slow].0), timed_out());
+    // Its clock is the real time since its dispatch and the test clock's
+    // steps: at least 15 s when it ended.
+    let real = lane.answered_at(slow) - lane.ready_at[&slow];
+    eprintln!("[mining] the slow job ended after {advanced:?} on the test clock and {real:?}");
+    assert!(advanced + real >= JOB, "{advanced:?} + {real:?}");
+    assert!(real < Duration::from_secs(12), "not its own end: {real:?}");
     assert_eq!(
         lane.answer(next, Duration::from_secs(10)),
         Got::Key(address("chat"))
@@ -401,20 +459,21 @@ fn a_slow_job_times_out_and_the_lane_recovers() {
     );
     let stopped = lane.mined_at[&after] - at;
     eprintln!("[mining] the next job's search ended {stopped:?} after the cancel");
-    assert!(
-        stopped < 2 * DELAY + Duration::from_millis(700),
-        "{stopped:?}"
-    );
+    assert!(stopped < Duration::from_secs(5), "{stopped:?}");
 
-    // A stuck batch: its job fails, and the next runs on a fresh lane.
+    // A stuck batch: under its second on the core's clock it is out; past
+    // it, its job fails as the clock moves, and the next runs on a fresh
+    // lane.
     std::fs::write(&lane.block, b"").unwrap();
     let blocked = lane.send(A, "room");
     let behind = lane.send(B, "fast-31");
     lane.blocked();
-    assert_eq!(lane.answer(blocked, Duration::from_secs(10)), stuck());
-    let took = lane.answered_at(blocked) - lane.ready_at[&blocked];
-    eprintln!("[mining] the stuck batch's job ended after {took:?}");
-    assert!(took >= Duration::from_secs(1), "{took:?}");
+    lane.advance(Duration::from_millis(400));
+    assert!(!lane.answers.contains_key(&blocked), "under its second");
+    assert_eq!(lane.state()["running"], true);
+    lane.advance(Duration::from_millis(600));
+    assert!(lane.answers.contains_key(&blocked), "at its second");
+    assert_eq!(got(&lane.answers[&blocked].0), stuck());
     assert_eq!(
         lane.answer(behind, Duration::from_secs(10)),
         Got::Key(address("fast-31"))
@@ -422,7 +481,7 @@ fn a_slow_job_times_out_and_the_lane_recovers() {
     assert_eq!(lane.state()["lane"], 1, "a fresh lane thread");
     // The stuck thread goes on: its answer is dropped, and the lane works.
     std::fs::write(lane.block.with_extension("release"), b"").unwrap();
-    std::thread::sleep(DELAY);
+    std::thread::sleep(Duration::from_millis(300));
     let fine = lane.send(A, "fast-46");
     assert_eq!(
         lane.answer(fine, Duration::from_secs(10)),
@@ -435,8 +494,10 @@ fn a_slow_job_times_out_and_the_lane_recovers() {
     let blocked = lane.send(A, "fast-69");
     let waiting = lane.send(B, "fast-81");
     lane.blocked();
-    assert_eq!(lane.answer(blocked, Duration::from_secs(10)), stuck());
-    assert_eq!(lane.answer(waiting, Duration::from_secs(10)), off());
+    lane.advance(Duration::from_millis(400));
+    lane.advance(Duration::from_millis(600));
+    assert_eq!(got(&lane.answers[&blocked].0), stuck());
+    assert_eq!(got(&lane.answers[&waiting].0), off());
     let state = lane.state();
     assert_eq!(
         (&state["off"], &state["waiting"]),
@@ -454,6 +515,30 @@ fn a_slow_job_times_out_and_the_lane_recovers() {
     lane.world(json!({ "reset": true }));
     let later = lane.send(B, "fast-102");
     assert_eq!(lane.answer(later, Duration::from_secs(10)), off());
+    lane.settled();
+    std::fs::write(lane.block.with_extension("release"), b"").unwrap();
+}
+
+/// The smoke test on the real clock: with the test clock still, a stuck
+/// batch's job ends `gsoc_mining_failed` once its second has passed in real
+/// time, and the next job runs on a fresh lane thread and gives bee-js's
+/// signer.
+#[test]
+fn a_stuck_batch_is_watched_in_real_time() {
+    let mut lane = Lane::new(&[], &[A, B]);
+    std::fs::write(&lane.block, b"").unwrap();
+    let blocked = lane.send(A, "room");
+    let behind = lane.send(B, "chat");
+    lane.blocked();
+    assert_eq!(lane.answer(blocked, Duration::from_secs(10)), stuck());
+    let took = lane.answered_at(blocked) - lane.ready_at[&blocked];
+    eprintln!("[mining] on the real clock, the stuck batch's job ended after {took:?}");
+    assert!(took >= Duration::from_secs(1), "{took:?}");
+    assert_eq!(
+        lane.answer(behind, Duration::from_secs(10)),
+        Got::Key(address("chat"))
+    );
+    assert_eq!(lane.state()["lane"], 1);
     lane.settled();
     std::fs::write(lane.block.with_extension("release"), b"").unwrap();
 }
@@ -487,10 +572,8 @@ fn a_cancel_ends_only_its_own_wait() {
     );
     let stopped = lane.mined_at[&next] - at;
     eprintln!("[mining] after a lone waiter's cancel, the next search ended in {stopped:?}");
-    assert!(
-        stopped < 2 * DELAY + Duration::from_millis(700),
-        "{stopped:?}"
-    );
+    // Two batches, at most; long-608 had some 11 s to run.
+    assert!(stopped < Duration::from_secs(5), "{stopped:?}");
     assert_eq!(lane.mined, [next]);
 
     // A join: room's 26 batches run on for B, and C's job waits behind.
@@ -522,9 +605,11 @@ fn a_cancel_ends_only_its_own_wait() {
 /// 300 requests may run): one site's 17th waiting job is `busy`, a join
 /// from a site whose queue is full is `busy`, another site is still
 /// admitted within its own 16, and the 257th waiting job in all is
-/// `busy`; nothing is mined for them. The 17th comes a minute later on the
-/// test clock, past the site's new-topic budget, which a busy refusal
-/// still spends.
+/// `busy`; nothing is mined for them. The site's first 16 come a minute
+/// earlier on the test clock (`Date.now()` set back, which leaves the
+/// monotonic clock and the running job be), so its 17th, back at the
+/// clock's furthest point, is past its new-topic budget, which a busy
+/// refusal still spends.
 #[test]
 fn a_full_queue_is_busy() {
     let sites: Vec<String> = (0..14).map(|n| format!("https://s{n}.example")).collect();
@@ -541,12 +626,19 @@ fn a_full_queue_is_busy() {
     let start = Instant::now();
     let running = lane.send(r, "long-608");
     let mut waiting = Vec::new();
+    lane.world(json!({ "clock": CLOCK - 60_000 }));
     for n in 0..16 {
         waiting.push(lane.send(A, &format!("sat-a-{n}")));
     }
     assert_eq!(lane.state()["waiting"], 16);
     // A's 17th, a minute on: its budget has room, its queue none.
-    lane.world(json!({ "clock": CLOCK + 60_000 }));
+    lane.world(json!({ "clock": CLOCK }));
+    let state = lane.state();
+    assert_eq!(
+        (&state["running"], &state["lane"]),
+        (&json!(true), &json!(0)),
+        "the running job runs on"
+    );
     let full = lane.send(A, "sat-a-16");
     assert_eq!(lane.answer(full, Duration::from_secs(10)), busy());
     // B's own job is admitted; A's join of it is busy.
@@ -590,9 +682,14 @@ fn a_full_queue_is_busy() {
     lane.settled();
     // The running job stops at its batch's answer, and none follows it.
     let at = Instant::now();
-    let idle = json!({ "waiting": 0, "running": false, "off": false, "lane": 0 });
-    while lane.state() != idle {
-        assert!(at.elapsed() < Duration::from_secs(2), "{}", lane.state());
+    let idle =
+        |state: &Value| state["waiting"] == 0 && state["running"] == false && state["lane"] == 0;
+    loop {
+        let state = lane.state();
+        if idle(&state) {
+            break;
+        }
+        assert!(at.elapsed() < Duration::from_secs(2), "{state}");
         lane.step(Duration::from_millis(20));
     }
     assert!(lane.mined.is_empty());

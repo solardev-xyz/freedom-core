@@ -36,9 +36,14 @@
 //! - **Stopping:** when the event loop has gone (shutdown, EOF or a
 //!   protocol error), the thread hands the writer the frames it had made.
 //!   A panic is reported ([`transport::DeathNotice`]).
-//! - **The clocks** (D14): deadlines run on the thread's monotonic clock;
-//!   the machines' `Date.now()` is the wall clock, which the test hooks fix
-//!   (`test.swarm_world`, D11).
+//! - **The clocks** (D14): deadlines, a mining job's 15 s and the lane's
+//!   watchdog run on the thread's monotonic clock; the machines'
+//!   `Date.now()` (and the lane's new-topic budget) is the wall clock. The
+//!   test hooks' clock (`test.swarm_world`, D11) drives both: it fixes
+//!   `Date.now()`, and moving it past the furthest point it has reached
+//!   moves the monotonic clock as far, the work that falls due done before
+//!   the hook's answer. Without the hooks the monotonic clock is the
+//!   thread's `Instant` alone.
 
 use std::collections::VecDeque;
 use std::ops::Range;
@@ -222,6 +227,8 @@ pub fn spawn(start: Spawn) -> std::io::Result<Handle> {
                 ),
                 wire,
                 started: Instant::now(),
+                #[cfg(feature = "testhooks")]
+                skew: Skew::default(),
             };
             let event = match run(&rx, thread) {
                 Stop::Protocol(category) => Event::ProtocolError(category),
@@ -281,12 +288,51 @@ struct Thread {
     engine: Engine,
     wire: Wire,
     started: Instant,
+    /// How far the test hooks' clock has moved the monotonic clock (D14).
+    #[cfg(feature = "testhooks")]
+    skew: Skew,
+}
+
+/// The test hooks' hold on the monotonic clock (D14): the furthest the
+/// fixed `Date.now()` has reached, and how far moving past it has moved
+/// the monotonic clock.
+#[cfg(feature = "testhooks")]
+#[derive(Debug, Default, Clone, Copy)]
+struct Skew {
+    furthest: Option<u64>,
+    by: Ms,
+}
+
+#[cfg(feature = "testhooks")]
+impl Skew {
+    /// The test clock is set to `clock`: past its furthest point, the
+    /// monotonic clock moves as far; back, or forward again up to that
+    /// point, it stays (a monotonic clock doesn't follow a wall clock set
+    /// back). The first setting only pins it.
+    fn set(&mut self, clock: u64) {
+        if let Some(furthest) = self.furthest {
+            self.by = self.by.saturating_add(clock.saturating_sub(furthest));
+        }
+        self.furthest = Some(self.furthest.map_or(clock, |f| f.max(clock)));
+    }
 }
 
 impl Thread {
     /// Milliseconds on the thread's monotonic clock.
     fn now(&self) -> Ms {
-        u64::try_from(self.started.elapsed().as_millis()).unwrap_or(u64::MAX)
+        let elapsed = u64::try_from(self.started.elapsed().as_millis()).unwrap_or(u64::MAX);
+        elapsed.saturating_add(self.skew())
+    }
+
+    /// How far the test hooks' clock has moved the monotonic clock.
+    #[cfg(feature = "testhooks")]
+    fn skew(&self) -> Ms {
+        self.skew.by
+    }
+
+    #[cfg(not(feature = "testhooks"))]
+    fn skew(&self) -> Ms {
+        0
     }
 
     /// The deadlines due, and what can be written; then whatever stopped
@@ -329,10 +375,7 @@ impl Thread {
             In::Drained => self.engine.room(&mut self.wire, now),
             In::Mined { lane, ran } => self.engine.mined(&mut self.wire, now, lane, *ran),
             #[cfg(feature = "testhooks")]
-            In::World { id, params } => {
-                self.world(id, params.as_deref().map(RawValue::get));
-                Ok(())
-            }
+            In::World { id, params } => self.world(id, params.as_deref().map(RawValue::get)),
         };
         flow.map_err(fault)?;
         self.wire.flush()
@@ -343,14 +386,16 @@ impl Thread {
     /// `reset` starts the read budgets, the tags' owners and the mining
     /// lane's cache and budgets afresh (the lane's only while it is idle,
     /// and never once mining is off); `clock` fixes the machines'
-    /// `Date.now()`, which the lane's new-topic budget reads too; `grants`
-    /// replaces the Swarm grants in memory (the file's form); `tags` sets
-    /// tags' owners (`[[uid, key], …]`). It answers `{ memory, requests }`:
-    /// the pool's charges and the requests the thread holds, as they stand;
-    /// with `mining: true`, also `mining: { waiting, running, off, lane }`,
-    /// the lane's.
+    /// `Date.now()`, which the lane's new-topic budget reads too, and moving
+    /// it past the furthest point it has reached moves the monotonic clock
+    /// as far (D14), the deadlines, jobs' 15 s and watchdog that fall due
+    /// handled before the answer; `grants` replaces the Swarm grants in
+    /// memory (the file's form); `tags` sets tags' owners (`[[uid, key],
+    /// …]`). It answers `{ memory, requests }`: the pool's charges and the
+    /// requests the thread holds, as they stand; with `mining: true`, also
+    /// `mining: { waiting, running, off, lane, batches }`, the lane's.
     #[cfg(feature = "testhooks")]
-    fn world(&mut self, id: u64, params: Option<&str>) {
+    fn world(&mut self, id: u64, params: Option<&str>) -> Result<(), Fault> {
         use fc_swarm_provider::budgets::ReadBudgets;
         use fc_swarm_provider::machine::TagOwners;
 
@@ -374,7 +419,7 @@ impl Thread {
                     "test.swarm_world's params",
                 )),
             );
-            return;
+            return Ok(());
         };
         if world.reset {
             self.engine.mining_mut().reset();
@@ -394,8 +439,14 @@ impl Thread {
         for (uid, key) in world.tags.unwrap_or_default() {
             shared.tags.set(uid, fc_json::JsString::from(key));
         }
-        if world.clock.is_some() {
-            self.wire.clock = world.clock;
+        if let Some(clock) = world.clock {
+            self.wire.clock = Some(clock);
+            self.skew.set(clock);
+        }
+        // What fell due as the clock moved, before the answer.
+        let now = self.now();
+        if self.engine.next_due().is_some_and(|at| at <= now) {
+            self.engine.tick(&mut self.wire, now)?;
         }
         // What the thread holds now, so a test sees every charge freed.
         let mut held = serde_json::json!({
@@ -406,6 +457,7 @@ impl Thread {
             held["mining"] = self.engine.mining_mut().state();
         }
         self.wire.answer(id, Answer::Result(held.to_string()));
+        Ok(())
     }
 }
 
@@ -631,3 +683,25 @@ impl Io for Wire {
 // checks (their request's id, below 2^53) and the chain reads' bit.
 const _: () = assert!(NAME_TAG & crate::eip1193::SEND_TAG == 0);
 const _: () = assert!(NAME_TAG > fc_protocol::message::MAX_ID);
+
+#[cfg(all(test, feature = "testhooks"))]
+mod tests {
+    use super::Skew;
+
+    /// The test clock moves the monotonic clock only past its furthest
+    /// point: the first setting pins it, and a clock set back, then forward
+    /// again up to that point, leaves it.
+    #[test]
+    fn the_test_clock_moves_the_monotonic_clock_past_its_furthest() {
+        let mut skew = Skew::default();
+        skew.set(1_000_000);
+        assert_eq!(skew.by, 0);
+        skew.set(1_000_500);
+        assert_eq!(skew.by, 500);
+        skew.set(940_500);
+        skew.set(1_000_500);
+        assert_eq!(skew.by, 500, "back, then forward to the furthest");
+        skew.set(1_001_500);
+        assert_eq!(skew.by, 1_500);
+    }
+}

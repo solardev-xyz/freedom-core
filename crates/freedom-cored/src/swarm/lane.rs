@@ -26,8 +26,8 @@
 //!   `gsoc_mining_failed` (`mining is off until the core restarts`).
 //! - **The clocks** (D14): a job's 15 s and the watchdog run on the swarm
 //!   thread's monotonic clock; the new-topic budget, a budget, reads
-//!   `Date.now()`, as the reference's `consumeNewTopicBudget` does, so the
-//!   test hooks' clock fixes it.
+//!   `Date.now()`, as the reference's `consumeNewTopicBudget` does. The
+//!   test hooks' clock drives both (see the swarm thread's).
 //!
 //! [`STUCK_MS`]: fc_swarm_provider::mining::STUCK_MS
 
@@ -62,6 +62,9 @@ pub struct Mining {
     generation: u64,
     /// A batch is out on the lane thread.
     out: bool,
+    /// Batches handed out, for the test hooks.
+    #[cfg(any(test, feature = "testhooks"))]
+    batches: u64,
 }
 
 impl Mining {
@@ -103,6 +106,10 @@ impl Mining {
         let work = self.lane.work(now);
         let batch = work.batch.map(|batch| {
             self.out = true;
+            #[cfg(any(test, feature = "testhooks"))]
+            {
+                self.batches += 1;
+            }
             (self.generation, batch)
         });
         Next {
@@ -154,7 +161,8 @@ impl Mining {
     }
 
     /// The lane as it stands, for the test hooks: jobs waiting, whether a
-    /// batch is out, mining off, and the lane threads replaced.
+    /// batch is out, mining off, the lane threads replaced, and the batches
+    /// handed out.
     #[cfg(any(test, feature = "testhooks"))]
     pub fn state(&self) -> serde_json::Value {
         serde_json::json!({
@@ -162,6 +170,7 @@ impl Mining {
             "running": self.out,
             "off": self.lane.off(),
             "lane": self.generation,
+            "batches": self.batches,
         })
     }
 }
