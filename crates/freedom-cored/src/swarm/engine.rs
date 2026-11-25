@@ -548,6 +548,7 @@ impl Engine {
         params: Result<Params, &'static str>,
         page: Option<PageContext>,
     ) -> Result<(), Fault> {
+        self.deadlines(io, now)?;
         if !self.grants_moved {
             io.answer(
                 id,
@@ -657,6 +658,7 @@ impl Engine {
     /// Main cancelled `swarm.request` `id`. One the thread doesn't hold, or
     /// has answered, changes nothing.
     pub fn cancel(&mut self, io: &mut impl Io, now: Ms, id: u64) -> Result<(), Fault> {
+        self.deadlines(io, now)?;
         let Some(slot) = self.slots.get_mut(&id) else {
             return Ok(());
         };
@@ -684,6 +686,7 @@ impl Engine {
         core: u64,
         outcome: Result<&str, &str>,
     ) -> Result<(), Fault> {
+        self.deadlines(io, now)?;
         let Some((id, ask_id)) = self.sent.remove(&core) else {
             return Err(Fault("swarm_unsolicited"));
         };
@@ -744,6 +747,9 @@ impl Engine {
         verdict: crate::eip1193::Verdict,
     ) -> Result<(), Fault> {
         use crate::eip1193::Verdict;
+        // At or after its request's deadline, a verdict is the deadline's:
+        // the request ends there, and its check, withdrawn, ends no binding.
+        self.deadlines(io, now)?;
         let Some((id, ask_id)) = self.names.remove(&tag) else {
             return Ok(());
         };
@@ -789,6 +795,7 @@ impl Engine {
 
     /// The gate or the thread's share of the writer has room again.
     pub fn room(&mut self, io: &mut impl Io, now: Ms) -> Result<(), Fault> {
+        self.deadlines(io, now)?;
         self.blocked = false;
         self.drive(io, now)
     }
@@ -796,6 +803,7 @@ impl Engine {
     /// `swarm.request` `id`'s answer has been written (or dropped at the
     /// end): its base goes once its request has ended.
     pub fn written(&mut self, io: &mut impl Io, now: Ms, id: u64) -> Result<(), Fault> {
+        self.deadlines(io, now)?;
         if let Some(slot) = self.slots.get_mut(&id) {
             slot.written = true;
             // Answered and written: its base goes, though a cancelled ask
@@ -816,12 +824,24 @@ impl Engine {
         if self.closes.values().any(|due| *due <= now) {
             return Err(Fault("swarm_close_unanswered"));
         }
+        self.deadlines(io, now)?;
+        self.drive(io, now)
+    }
+
+    /// The requests whose deadline has come by `now` end at it, before
+    /// anything else is handled at `now`: an answer that comes at or after
+    /// a request's deadline (a naming verdict, main's recheck, a node's
+    /// reply) finds it cancelled, as the thread's own tick would have left
+    /// it had it turned first. So a name check that fails then ends no
+    /// binding: a deadline ends nothing.
+    fn deadlines(&mut self, io: &mut impl Io, now: Ms) -> Result<(), Fault> {
         let due: Vec<u64> = self
             .slots
             .iter()
             .filter(|(_, slot)| !slot.answered && slot.deadline <= now)
             .map(|(id, _)| *id)
             .collect();
+        let ended = !due.is_empty();
         for id in due {
             let Some(slot) = self.slots.get_mut(&id) else {
                 continue;
@@ -842,7 +862,10 @@ impl Engine {
                 }
             }
         }
-        self.drive(io, now)
+        if ended {
+            self.drive(io, now)?;
+        }
+        Ok(())
     }
 
     /// When the next deadline or close bound falls due.

@@ -893,6 +893,55 @@ fn a_failed_name_check_ends_the_binding_for_every_family() {
     assert!(!bindings.has(&Document::new(SITE, "ipns://k5_1", 1, 1)));
 }
 
+/// An answer handled at or after its request's deadline is the deadline's
+/// (Codex round 2 on #498): a naming verdict that fails then answers
+/// `cancelled` and ends no binding, as a deadline ends nothing, and main's
+/// recheck then lets no effect go.
+#[test]
+fn an_answer_at_the_deadline_is_the_deadline_s() {
+    let bindings = Bindings::default();
+    let mut engine = Engine::new(
+        Bounds::default(),
+        Shared::new(grants(), bindings.clone()),
+        true,
+    );
+    let mut io = Fake::default();
+    // A 60,000 ms request whose name check is out when its deadline comes,
+    // and whose verdict the thread handles at it, before any tick.
+    upload_status(&mut engine, &mut io, 1, Some("ipns://k51abc"));
+    let (tag, _, _) = io.checks.pop().unwrap();
+    engine
+        .named(&mut io, 60_000, tag, crate::eip1193::Verdict::Fails)
+        .unwrap();
+    assert_eq!(io.answer_of(1), cancelled());
+    assert!(!bindings.has(&document()), "a deadline ends no binding");
+    assert_eq!(io.name_cancels, vec![tag]);
+
+    // Main's recheck answered at the deadline: `cancelled`, not the
+    // effect's answer.
+    upload_status(&mut engine, &mut io, 2, Some("ipns://k51abc"));
+    let (tag, _, _) = io.checks.pop().unwrap();
+    engine
+        .named(&mut io, 20, tag, crate::eip1193::Verdict::Holds)
+        .unwrap();
+    let (recheck, method, _) = io.last();
+    assert_eq!(method, "approval.recheck");
+    engine
+        .response(
+            &mut io,
+            60_000,
+            recheck,
+            Ok(r#"{"live":true,"agent":false}"#),
+        )
+        .unwrap();
+    assert_eq!(io.answer_of(2), cancelled());
+    assert!(io.answers.is_empty(), "one answer");
+    for id in [1, 2] {
+        engine.written(&mut io, 60_001, id).unwrap();
+    }
+    assert_eq!((engine.memory_used(), engine.requests()), (0, 0));
+}
+
 /// A PSS subscription to its open: the subscribe check, the guard's live
 /// facts, then main's open.
 fn subscribed(engine: &mut Engine, io: &mut Fake, id: u64) -> u64 {
