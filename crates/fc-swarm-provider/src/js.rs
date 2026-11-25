@@ -116,14 +116,15 @@ pub fn math_round(x: f64) -> f64 {
     }
 }
 
-/// `2 ** e`, as V8 computes it. An integer exponent's power of two is exact
-/// (built from its bits; past the doubles' range it is Infinity or 0, as the
-/// rounded value is). Another exponent goes to the platform's `pow`, which
-/// may differ from V8's in the last place: a node sends whole depths, and
-/// no vector holds another.
+/// `2 ** e` for an integer `e`, exactly as V8 computes it (built from its
+/// bits; past the doubles' range it is Infinity or 0, as the rounded value
+/// is). A fractional exponent would need V8's own `pow`, which the platform's
+/// can differ from in the last place, so it is never computed: callers
+/// refuse a fractional batch depth first (deviation `batch-depth`), and one
+/// that reached here gives NaN.
 pub fn pow2(e: f64) -> f64 {
     if !is_integer(e) {
-        return 2f64.powf(e);
+        return f64::NAN;
     }
     if e > 1023.0 {
         f64::INFINITY
@@ -198,7 +199,7 @@ mod tests {
         assert_eq!(pow2(1024.0), f64::INFINITY);
         assert_eq!(pow2(-1075.0), 0.0);
         assert_eq!(pow2(-5000.0), 0.0);
-        assert_eq!(pow2(0.5), 2f64.sqrt());
+        assert!(pow2(0.5).is_nan(), "no fractional power is computed");
     }
 
     #[test]

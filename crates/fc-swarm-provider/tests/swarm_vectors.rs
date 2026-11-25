@@ -438,6 +438,27 @@ fn body_bytes(body: Value<'_, '_>) -> Vec<u8> {
     bytes
 }
 
+/// Every `errors` entry is one of the kinds the tests below play, so a new
+/// or misspelt kind fails here instead of being skipped by both.
+#[test]
+fn errors_are_all_played() {
+    let text = vectors_text();
+    let index = Index::new(&text).unwrap();
+    let mut http = 0;
+    let mut mapping = 0;
+    for case in get(index.root(), "errors").children() {
+        let kind = get(case, "kind");
+        if kind.is_str("http_error") {
+            http += 1;
+        } else if kind.is_str("mapping") {
+            mapping += 1;
+        } else {
+            panic!("{}: an errors kind no test plays", string(get(case, "id")));
+        }
+    }
+    assert_eq!((http, mapping), (180, 2));
+}
+
 #[test]
 fn errors_http() {
     let text = vectors_text();

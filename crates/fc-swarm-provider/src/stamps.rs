@@ -402,6 +402,13 @@ impl Stamps {
             // zod refused it, and get_all answered that first.
             return Err(JsError::error("unreachable: a batch zod refused"));
         };
+        // zod's `number` admits a fractional depth, which bee-js raises 2 to
+        // with V8's own pow. The core computes no fractional power, so such
+        // a batch is refused (deviation `batch-depth`); a node sends whole
+        // depths.
+        if !is_integer(depth) || !is_integer(bucket_depth) {
+            return Err(JsError::error(NON_INTEGER_DEPTH_MESSAGE));
+        }
         let duration = normalize_batch_ttl(batch_ttl);
         let effective = effective_bytes(depth);
         let usage = match b.utilization_ratio {
@@ -577,6 +584,10 @@ impl BatchId {
         out
     }
 }
+
+/// The core's refusal of a batch whose `depth` or `bucketDepth` isn't an
+/// integer (design 0015, deviation `batch-depth`).
+pub const NON_INTEGER_DEPTH_MESSAGE: &str = "Swarm node reply has a non-integer batch depth";
 
 /// The class of an error the reference throws.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -950,5 +961,31 @@ mod tests {
         assert_eq!(key(&u("0x0xAB")), "0xab");
         let lone = key(&[0x41, 0xd800, 0x42]);
         assert_eq!(lone.units().collect::<Vec<_>>(), vec![0x61, 0xd800, 0x62]);
+    }
+
+    #[test]
+    fn a_fractional_depth_is_refused() {
+        // zod's number admits these; the core computes no fractional power
+        // (deviation `batch-depth`), so the batch is refused, and with it
+        // the read and any write's batch choice.
+        let reply = |depth: &str, bucket: &str| {
+            format!(
+                r#"{{"stamps":[{{"batchID":"{id}","utilization":0,"usable":true,"label":"","depth":{depth},"amount":"100000000000","bucketDepth":{bucket},"blockNumber":1,"immutableFlag":true,"exists":true,"batchTTL":86400}}]}}"#,
+                id = "ab".repeat(32)
+            )
+        };
+        let whole = read_stamps(reply("22", "16").as_bytes()).unwrap();
+        assert!(whole.get_all().is_ok());
+        for (depth, bucket) in [("22.5", "16"), ("22", "16.5"), ("2.2e1", "1.65e1")] {
+            let stamps = read_stamps(reply(depth, bucket).as_bytes()).unwrap();
+            let err = stamps.get_all().unwrap_err();
+            assert_eq!(err.name, ErrorName::Error, "{depth} {bucket}");
+            assert_eq!(err.message, NON_INTEGER_DEPTH_MESSAGE, "{depth} {bucket}");
+            let chosen = select_best_batch(&stamps, 4096, SelectOptions::default());
+            assert_eq!(chosen.unwrap_err().message, NON_INTEGER_DEPTH_MESSAGE);
+        }
+        // An integer written with an exponent is an integer.
+        let exponent = read_stamps(reply("2.2e1", "1.6e1").as_bytes()).unwrap();
+        assert!(exponent.get_all().is_ok());
     }
 }

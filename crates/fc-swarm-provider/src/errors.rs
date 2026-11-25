@@ -26,7 +26,7 @@
 //! value; nesting past [`crate::json::MAX_NESTING`] fails as
 //! [`ReadError::TooDeep`].
 
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 
 use fc_json::{JsString, number_to_string};
 
@@ -266,7 +266,7 @@ enum Frame {
     },
     Object {
         members: Vec<(JsString, String)>,
-        index: HashMap<JsString, usize>,
+        index: BTreeMap<JsString, usize>,
         key: Option<JsString>,
     },
 }
@@ -292,7 +292,7 @@ pub fn transcode(text: &[u8]) -> Result<Parsed, ReadError> {
             Token::Object => {
                 stack.push(Frame::Object {
                     members: Vec::new(),
-                    index: HashMap::new(),
+                    index: BTreeMap::new(),
                     key: None,
                 });
                 None
