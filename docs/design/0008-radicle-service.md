@@ -1,6 +1,6 @@
 # 0008: The libradicle service process
 
-**Status:** proposed. Roadmap Phase 4 (item 4.4). Builds on [0001](0001-freedom-cored.md) (process model, lifetime lock, node identity writes, process hardening), [0006](0006-dweb-transports.md) (the outline in *Service processes*) and 0007 (#68: the IPFS service, whose process model, stream frames, ring buffers, `ServiceClient` and SOCKS contract this design reuses).
+**Status:** proposed. Roadmap Phase 4 (item 4.4). Builds on [0001](0001-freedom-cored.md) (process model, lifetime lock, node identity writes, process hardening), [0006](0006-dweb-transports.md) (the outline in *Service processes*) and 0007 (#68: the IPFS service, whose process model, stream frames, ring buffers, `ServiceClient` and SOCKS contract this design reuses). The user decided questions 8, 10, 11 and 12 on 2026-11-25 ([Amendments](#amendments)).
 
 **The references:**
 - **freedom-browser** at `c5bd66d5` (#704):
@@ -59,7 +59,7 @@ This design moves it into **its own supervised process, `freedom-radicled`**. It
   - Names are resolved, checked and pinned, as in 0007's SOCKS contract.
   - An address policy covers addresses learned from peers.
   - The node listens on nothing: no inbound port, and, after an upstream change, no control socket.
-- **Private windows** read the profile's node, as today. A private read sends nothing, signs nothing, writes nothing and records nothing. Private partitions can't seed, sync or write.
+- **Private windows** read the profile's node, as today. A private read sends nothing, signs nothing, writes nothing and records nothing. Private partitions can't sync or write, and seed only what the user explicitly seeds there with **Allow seeding from private windows** on, a setting off by default.
 - **The code goes beside 0007's,** as `services/freedom-radicled` in its own Cargo workspace (the user's decision, 2026-10-22). Moving it to a new repository later would be a new decision.
 - **Tests come first:**
   - a contract suite over the add-on's 30 exports;
@@ -546,6 +546,7 @@ Every other text can name one: libgit2's `Os`, `Filesystem`, `Repository`, `Conf
 Exit codes:
 - 0001's: 64, 74, 75 and 76;
 - 70 for `node_down`, a panic outside a request, or, in the import process, `rad.import_repo` past its 300 s (`import_deadline`);
+- 71 for `out_of_memory`: a native library's out-of-memory error under the memory cap ([0010](0010-service-confinement.md#the-memory-cap)). It is a crash, and main restarts the service;
 - 0 after a start step the service answered with an error (`rad.identity`, `rad.reconcile`, `rad.start`): main has read the error, and doesn't restart;
 - 77 for `confinement` ([0010](0010-service-confinement.md)), before `rad.hello`. As in 0007, it is an error, not a crash: main doesn't restart it.
 
@@ -599,9 +600,9 @@ All bounds are process-wide. The service hosts one node.
   - its reactor queues and per-peer write buffers;
   - a packed delta's base: an object's header gives the size of what the delta makes, and loading it inflates the delta chain's base, whose size the header doesn't show. The packs' delta-base cache (up to 16 MiB a pack, of bases up to 1 MiB) isn't the object cache, and stays on;
   - a commit's extra `encoding` headers: libgit2's commit parse keeps each one's copy over the last without freeing it, so a commit of many leaks an allocation for each but the last every time it is parsed;
-  - its maps of pack files: on a 64-bit build, windows of up to 1 GiB of a pack, up to a soft limit of 8 GiB mapped in all, and each pack's index mapped whole. These are file-backed and clean, so the OS can reclaim their pages, and a pack's maps go when no repository handle holds it any longer, though another handle on the same pack can keep them past a walk. They are outside the output budget, unlike the anonymous allocations above (a delta's base, the leaked headers), which only the process's memory holds.
+  - its maps of pack files: on a 64-bit build, windows of up to 1 GiB of a pack, up to a soft limit of 8 GiB mapped in all, and each pack's index mapped whole. These are file-backed and read-only, so the OS can reclaim their pages, and a pack's maps go when no repository handle holds it any longer, though another handle on the same pack can keep them past a walk. They are outside the output budget, unlike the anonymous allocations above (a delta's base, the leaked headers), which only the process's memory holds.
 
-  The service doesn't promise a total memory bound for the process. Whether to add an OS-level limit is an [open question](#open-questions).
+  The service doesn't promise a total memory bound for the process. **A safety cap** ([question 10](#open-questions), decided 2026-11-25) catches a runaway instead: about 2 GiB of the process's private memory, where the operating system enforces one: a Windows job memory limit, and Linux's `RLIMIT_DATA`. `RLIMIT_DATA` counts private writable mappings, file-backed or not, and not read-only or shared maps such as the pack maps above, which libgit2 maps read-only, so it is no cap on the process's whole resident memory (`RLIMIT_AS` would count those, and isn't used). macOS has no reliable per-process cap, so it gets none. [0010](0010-service-confinement.md#the-memory-cap) sets it in the service's confinement step, before `rad.hello`, and in the import process's. **Out of memory is then fatal, from any allocation:** Rust's allocator aborts, and an out-of-memory error from libgit2 (`GIT_ERROR_NOMEMORY`), SQLite (`SQLITE_NOMEM`) or any other native library the service links ends the process with exit 71 (`out_of_memory`), never a request's error. Main restarts it as it does a crash; in the import process, once the import has started, it is `outcome_unknown`, as any crash there is. Setting it is a later implementation step, with 0010's confinement.
 
 ### JSON results
 
@@ -923,8 +924,8 @@ Main sees the recipient, `enc` and the ciphertext, and never the key.
     - the last `rad.stats` says `node_alive` and is under 15 s old.
   - `rad.stats` runs every 5 s while the node is `RUNNING`. Today there's no probe.
   - There is one node and no partition instances, so 0007's lease and per-partition readiness have no counterpart here.
-- **Private partitions are read-only:**
-  - main refuses `seed`, `sync`, COB writes and `importRepo` for a private partition before anything is sent;
+- **Private partitions are read-only,** but for a seed the user starts there with **Allow seeding from private windows** on ([Private windows](#private-windows)):
+  - main refuses `sync`, any clone but such a seed's own fetch, COB writes and `importRepo` for a private partition before anything is sent, and `seed` too while the setting is off;
   - reads go to the profile's node as today.
 - **The start brings the key** ([Keys](#keys)):
   - after `rad.hello`, main asks the core for `nodes.seal_radicle_key` and passes the reply on in `rad.identity`. On the core's `no_vault` it sends `{ ephemeral: true }` instead;
@@ -970,7 +971,12 @@ One owner holds the home gate at each step, and no step waits on a gate that its
   - no visit record;
   - no identifying log line. The service logs no RID or path for any read, and main keeps its private-window redaction.
 - **Outside the guarantee:** the profile's node and files are shared. Read caches (SQLite's page cache, the OS's file cache) and the timing effects of reads are therefore shared with other windows. Isolating them would need partition-aware read state, which this design doesn't add.
-- **Read-only:** private partitions can't seed, sync or write ([Main's side](#mains-side)). `window.radicle` isn't injected in private windows today, and that stays.
+- **Read-only, but for an explicit seed** ([question 11](#open-questions), decided 2026-11-25): a setting, **Allow seeding from private windows**, off by default ([Main's side](#mains-side)):
+  - **off:** private partitions stay read-only: they can't seed, sync or write;
+  - **on:** a seed the user explicitly starts from a private window works as a normal window's seed. The repository stays in the profile after the window closes, and is announced unless the [inventory setting](#seeding-and-serving) turned announcing off. The seed confirmation says so;
+  - **either way,** sync, any clone but that seed's own fetch, COB writes and `importRepo` stay refused in private windows, and a private window never seeds anything on its own.
+
+  The setting and the seed confirmation are main's (the browser's settings), a later implementation step. `window.radicle` isn't injected in private windows today, and that stays.
 
 ## Network policy
 
@@ -1051,7 +1057,7 @@ The service sets these through an [upstream](#upstream-changes) `Options` change
   - on DNS names, on every resolved address, locally in `direct` mode and through `RESOLVE` in `socks5` mode, before the connection. The connection goes to a checked address.
 
   That needs resolution moved off the reactor thread ([upstream](#upstream-changes)).
-- **Configured targets** are exempt, by exact address, so a user's LAN seed keeps working.
+- **Configured targets** are exempt, by exact address, so a user's LAN seed keeps working. There is no LAN setting: the rule stays as it is ([question 8](#open-questions), decided 2026-11-25), as 0007's local providers have none.
 - **Onion targets** are classified as in 0007: a host whose last label is `onion`, case-insensitive, with any trailing dot removed. In `direct` mode they are refused before any socket exists, as heartwood's `Drop` does.
 
 ### Privacy findings (R-12)
@@ -1061,21 +1067,21 @@ The source research for this design found four ways the node gives away more tha
 | Part | What | Where it stands |
 |---|---|---|
 | 1 | An onion `Forward` without a proxy leaks onion names to DNS | **Covered.** The service sets `onion` in memory, never `Forward` ([Network policy](#network-policy)), and the dial gate refuses an onion name before any socket in `direct` mode (heartwood change 11). It stays open in the shipped add-on until libradicle `main` moves to these changes |
-| 2 | Each connection gets the node's signed inventory, tied to its node ID | **The user's decision** ([Open questions](#open-questions), 12) |
+| 2 | Each connection gets the node's signed inventory, tied to its node ID | **Decided** ([Open questions](#open-questions), 12, 2026-11-25): a setting that announces none, off by default, so announcing stays on, as Radicle works. With it on, the node sends no signed inventory and still serves repositories to peers that ask for them by name ([Seeding and serving](#seeding-and-serving)). The setting is a later implementation step |
 | 3 | A node meant to reach no one still takes Iris and Rosa, and dials gossip peers | **Built upstream:** the `isolated` mode ([Modes](#modes)). Heartwood change 15 (solardev-xyz/heartwood#17) and libradicle's `Options::isolated` (solardev-xyz/libradicle#18) are both merged. The service's use of it is still to come |
 | 4 | SOCKS has no stream isolation, so every peer shares Arti's circuits | **Decided, and partly built:** isolation per remote node ([Modes](#modes)). Heartwood change 16 is built upstream (solardev-xyz/heartwood#19, merged). The Arti isolation check (solardev-xyz/freedom-browser#964, merged into the browser's integration branch) qualified the pinned Arti live. libradicle's routing gate under `socks5` is built (solardev-xyz/libradicle#20, merged), and the service's node runs with it from `rad.start` |
 
 ### Seeding and serving
 
 - **This is Radicle's model, unchanged:**
-  - a seeded repository is announced in the node's signed inventory and served to peers that ask for it;
+  - a seeded repository is announced in the node's signed inventory, unless the setting below turns that off, and served to peers that ask for it;
   - seeding happens only on an explicit seed, clone or sync, and on the default repository at start.
 - **The default seeding policy is `block`** (decided 2026-11-04).
   - heartwood's default is `block`, but `config.json` can change it: `node.seedingPolicy.default` can be `allow`, and the deprecated `node.policy` and `node.scope` override it.
   - So the service forces `block` in memory, as it does the routing fields, through a new libradicle `Options` field ([Upstream changes](#upstream-changes), libradicle item 9b). That field is solardev-xyz/libradicle#28, merged, and `rad.start` passes it, the first step to start the node.
   - With it, no repository is seeded but by an explicit seed, clone or sync, and a repository that is unseeded, or removed from quarantine, stays unseeded until one.
 - **Browsing through `rad:`** reads local storage and announces nothing.
-- **What peers learn:** each connection receives the node's signed inventory of the repositories it seeds, tied to its node ID, which is derived from the vault. Whether to offer a setting that announces none, while still serving on request, is the user's decision ([Open questions](#open-questions), 12).
+- **What peers learn:** each connection receives the node's signed inventory of the repositories it seeds, tied to its node ID, which is derived from the vault. **A setting announces none** ([question 12](#open-questions), decided 2026-11-25), off by default, so announcing stays on, as Radicle works. With it on, the node sends no signed inventory, so peers no longer find its repositories through it, and it still serves a repository to a peer that asks for it by name. The setting is main's (the browser's settings); it, and how the service has the node announce none, are a later implementation step.
 - **No listening socket:**
   - no inbound port;
   - after the upstream change, no control socket.
@@ -1222,7 +1228,7 @@ The source research for this design found four ways the node gives away more tha
     - the inert-type headers;
   - cancel mid-body, a paused reader, and admission's 503;
   - the service exiting mid-body;
-  - private partitions refused for writes.
+  - private partitions refused for writes, sync, and seeds while Allow seeding from private windows is off; with it on (its later step), an explicit seed from a private window works as a normal window's and stays after the window closes, while sync, other clones, COB writes and `importRepo` stay refused.
 - **Composed outputs:** `readme_at`, `repo_meta`, `repos_meta`, `issues_page` and `patches_page` (with each `status` and page bound), `node_info`, and the re-serialized `issue`, `patch`, `remotes` and `repo_stats`, each recorded from main's code at the reference and matched byte for byte.
 - **`node_info`'s three contracts,** with vectors from `serveNodeApi` and `getConnections` at the reference:
   - `status` succeeds and enumeration fails: `/` answers 200 with its `version` and `mode`; `/api/v1/stats` answers 503 with the error; the manager reports `reposCount: null`;
@@ -1319,7 +1325,8 @@ The source research for this design found four ways the node gives away more tha
   - a panic in a read (`internal`, others unaffected, no payload in the log);
   - a killed node thread (exit 70);
   - the 5 s shutdown;
-  - 0007's stream cases.
+  - 0007's stream cases;
+  - the memory cap's fail-stop, as [0010's tests](0010-service-confinement.md#tests) list it: with the cap lowered, a Rust allocation and a libgit2 one past it each end the process, the libgit2 one with exit 71, and no request is answered with an out-of-memory error.
 - **Network:**
   - a SOCKS recorder and canary, as 0007: in `socks5` mode no direct peer socket;
   - 0007's SOCKS fixture with `RESOLVE`:
@@ -1393,7 +1400,7 @@ Measured against the add-on on linux-x64, macOS arm64 and win-x64:
 | admission in main | shared with dweb fetches: 256 active, 512 waiting | 503 |
 | health | `rad.stats` every 5 s; main's watchdog at 20 s | kill |
 | `rad.stats` | inline; one reply of at most 4 KiB; NAT64's prefixes and failures at most 16 each; the peers counted once a second | the lists are cut |
-| heartwood internals | not bounded by the service ([Pools and budgets](#pools-and-budgets)) | an [open question](#open-questions) |
+| heartwood internals | not bounded by the service ([Pools and budgets](#pools-and-budgets)) | the process's safety cap on private memory, not on read-only or shared maps: about 2 GiB on Windows (the job's limit) and Linux (`RLIMIT_DATA`), none on macOS (question 10); past it any allocation's failure ends the process (an abort, or exit 71), and main restarts it as after a crash |
 
 ## Deviations
 
@@ -1421,9 +1428,11 @@ Measured against the add-on on linux-x64, macOS arm64 and win-x64:
 | `stop-budget` | no Radicle budget | 10 s, then kill | quit can't wait on Radicle |
 | `env` | the add-on inherits main's environment | cleared; `HOME` an empty directory; no git configuration | `RAD_*`, `SSH_AUTH_SOCK` and git configuration no longer apply |
 | `proxy` | none | an optional SOCKS5 policy, names resolved through the proxy and checked, failing closed | new: Route Radicle through Tor |
+| `inventory-setting` | the node's signed inventory goes to every connection | the same by default; a setting, off by default, announces none (question 12) | new: with it on, peers no longer find the node's repositories through it, and it still serves them by name |
 | `address-policy` | none | untrusted targets refused unless globally reachable unicast, with IPv6 forms that embed IPv4 judged by their IPv4 address (0007) | configured local seeds still work |
 | `address-families` | as `config.json` and the default features allow | IPv4, IPv6, DNS and onion dialled; I2P decoded, never dialled; every routing field set in memory | a conflicting `config.json` can't change routing |
 | `health` | none | `rad.stats` every 5 s | a dead node is noticed and restarted |
+| `memory-cap` | none: the add-on's memory is main's | about 2 GiB of private memory for the process on Windows and Linux, none on macOS; any out-of-memory ends the process (question 10) | a runaway ends the service, which restarts, before it exhausts the machine's memory |
 | `path-depth` | any path is walked, a tree loaded for each component | a path of more than 4096 components (libradicle's `MAX_TREE_DEPTH`, git's default `core.maxTreeDepth`) is `invalid_argument` before the repository is opened ([Pools and budgets](#pools-and-budgets)) | a path no repository nests that deep in practice gets 400 |
 | `identity-cap` | heartwood parses a repository's identity document whatever its size | a read that parses one whose blob is over 64 KiB refuses it before the parse, from the blob's header: `too_large`, with a fixed text; a listing is refused while such a repository is seeded ([Pools and budgets](#pools-and-budgets)) | real documents, a few KB, are read as today; a repository whose document is over 64 KiB gets 413, and so does the listing |
 | `pathless-errors` | a read's error is the add-on's text, which for a repository the node doesn't have names its storage path under the profile, and can name other files for storage, git and node errors | libradicle's text only where it can't name a filesystem path; a missing repository is `repository not found`; any other `not found` or `the read failed`, by today's message test ([Errors](#errors)) | pages never see the profile's paths; the same 404 and 500 |
@@ -1464,7 +1473,7 @@ What the service doesn't close, by name:
    - `radicle-embedded.js` on the service, behind `FREEDOM_RADICLE_BACKEND` in dev, with `callStream` and `callScoped`;
    - admission and cancel for `rad:` and `radapi:`;
    - the limits for other callers;
-   - private partitions read-only;
+   - private partitions read-only; later, the Allow seeding from private windows setting and its seed confirmation, and the setting that announces no inventory;
    - the start with the sealed key, the wait for an unlock, the throwaway key on `no_vault`, and the switch on `key_file_present`;
    - the active identity bound to the generation, writes refused while it is a throwaway one, and no more reads of `keys/`;
    - the identity change through the core, and `hold-lock` for the alias and profile removal;
@@ -1474,6 +1483,15 @@ What the service doesn't close, by name:
 8. **The raw endpoint** and the viewer's images and downloads.
 9. **Network policy:** the setting, Arti's endpoint and its `RESOLVE` qualification, and the SOCKS, canary, address-policy and family tests.
 10. **Removal,** one stable release later.
+
+## Amendments
+
+**2026-11-25, the user's answers to questions 8, 10, 11 and 12:** the text above states each:
+- **Question 8, the address policy: the rule stays as it is.** Untrusted targets must be public unicast, by 0007's table and classifier; configured seeds are exempt by exact address; there is no LAN setting. *The address policy* says so.
+- **Question 10, heartwood's memory: a safety cap of about 2 GiB** for the process where the operating system enforces one: a Windows job memory limit and Linux's `RLIMIT_DATA`; none on macOS, which has no reliable per-process cap. Hitting it ends the process, which main restarts as it does a crash. That every out-of-memory is fatal, a native library's with exit 71, is the coordinator's call (from Codex's review of #503), which the user may veto. [0010](0010-service-confinement.md#the-memory-cap) sets it in the confinement step, the import process's too, a later implementation step. *Pools and budgets*, *Errors*' exit codes, *Bounds*, `memory-cap` and the Rust tests follow. 0007's question 9 has the same answer for `freedom-ipfsd`.
+- **Question 11, private windows: a setting, Allow seeding from private windows, off by default.** Off, private partitions stay read-only. On, a seed the user explicitly starts from a private window works as a normal window's seed (it stays in the profile and is announced unless question 12's setting is on), and the seed confirmation says so; sync, COB writes, `importRepo` and every standalone clone stay refused, except the fetch performed as part of the explicitly approved seed, and a private window never seeds on its own. The Summary, *Main's side*, *Private windows*, the handler tests and step 7 follow; the setting and the confirmation are main's, a later step.
+- **Question 12, the signed inventory: a setting that announces none, off by default.** Announcing stays on by default, as Radicle works; with the setting on, the node sends no signed inventory and still serves repositories to peers that ask for them by name. R-12's part 2, *Seeding and serving*, `inventory-setting` and step 7 follow.
+- **0010,** amended in this PR: [The memory cap](0010-service-confinement.md#the-memory-cap) specifies the cap for every service process, the import process included, with its read-back, its report, its fail-stop and its tests, and *Windows*' job object takes the limit.
 
 ## Open questions
 
@@ -1489,9 +1507,12 @@ What the service doesn't close, by name:
 6. **The raw endpoint for pages:** is the inert-type allowlist right? Should pages get `/raw/` at all, or only the viewer?
 7. **Caps:** are 64 MiB per blob, 32 MiB per JSON result and 64 MiB of built data per read right?
 8. **The address policy:** are these the right ranges, and is the exact-address exemption for configured seeds enough for LAN setups?
+   - **Decided (the user, 2026-11-25): keep the rule as is.** Untrusted targets must be public unicast, by 0007's table and classifier; configured seeds are exempt by exact address; no LAN setting ([The address policy](#the-address-policy)).
 9. **One Tor switch:** should Route Radicle through Tor and 0007's Route IPFS through Tor be one setting?
    - **Decided (the user, 2026-10-22): separate switches now, and a future "everything through Tor" mode turns both on.** The two protocols pay different costs under Tor, so a user can take one without the other.
 10. **heartwood's memory:** should the service run under an OS-level limit (`RLIMIT_AS`, or a Windows job memory limit), given that heartwood's own buffers aren't bounded by the service?
-    - **Still open:** [0010](0010-service-confinement.md)'s job object (D4, decided) is where a Windows limit would go. Whether to set one, and `RLIMIT_AS` on Linux and macOS, aren't decided there.
+    - **Decided (the user, 2026-11-25): yes, a safety cap of about 2 GiB** where the operating system enforces one: a Windows job memory limit (on [0010](0010-service-confinement.md)'s job object, D4) and Linux's `RLIMIT_DATA`, not `RLIMIT_AS`; none on macOS, which has no reliable per-process cap. Hitting it stops the service, which main restarts as it does a crash. [0010](0010-service-confinement.md#the-memory-cap) sets it in the confinement step and makes every out-of-memory fatal, a later implementation step ([Pools and budgets](#pools-and-budgets)).
 11. **Private windows:** is read-only the right rule for private partitions, or should an explicit, user-initiated seed be allowed there?
+    - **Decided (the user, 2026-11-25): a setting, "Allow seeding from private windows", off by default.** Off, private partitions stay read-only. On, a seed the user explicitly starts from a private window works as a normal window's seed: the repository stays in the profile after the window closes, and is announced unless question 12's setting turned announcing off. The seed confirmation says so. Sync, COB writes, `importRepo` and every standalone clone stay refused in private windows, except the fetch performed as part of the explicitly approved seed, and a private window never seeds anything on its own ([Private windows](#private-windows)).
 12. **The signed inventory** (R-12, part 2): each connection receives the node's signed inventory of the repositories it seeds, under a node ID derived from the vault. Should a setting announce none, while still serving repositories to peers that ask, at the cost that peers no longer find them through this node? (The user's decision.)
+    - **Decided (the user, 2026-11-25): offer the setting, off by default.** Announcing stays on by default, as Radicle works. With the setting on, the node sends no signed inventory, and still serves repositories to peers that ask for them by name ([Seeding and serving](#seeding-and-serving)).
