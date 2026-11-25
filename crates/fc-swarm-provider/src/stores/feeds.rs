@@ -539,9 +539,7 @@ impl FeedStore {
         match wallet_index {
             JsValue::Number(n) if crate::js::is_integer(*n) && *n >= 0.0 => {}
             _ => {
-                return Err(Thrown::error(
-                    "Wallet index must be a non-negative integer",
-                ));
+                return Err(Thrown::error("Wallet index must be a non-negative integer"));
             }
         }
         let mut references: Vec<(JsString, bool, JsValue)> = Vec::new();
@@ -566,7 +564,9 @@ impl FeedStore {
                     .map(props)
                     .unwrap_or(&[])
                     .iter()
-                    .filter(|(_, feed)| strict_equals(feed.get("identityId").unwrap_or(&UNDEFINED), id))
+                    .filter(|(_, feed)| {
+                        strict_equals(feed.get("identityId").unwrap_or(&UNDEFINED), id)
+                    })
                     .map(|(name, _)| name)
                     .collect();
                 crate::js::sort(&mut feed_names, |a, b| match a.cmp(b) {
@@ -574,10 +574,7 @@ impl FeedStore {
                     std::cmp::Ordering::Equal => 0.0,
                     std::cmp::Ordering::Greater => 1.0,
                 });
-                let active = strict_equals(
-                    entry.get("activeIdentityId").unwrap_or(&UNDEFINED),
-                    id,
-                );
+                let active = strict_equals(entry.get("activeIdentityId").unwrap_or(&UNDEFINED), id);
                 if !active && feed_names.is_empty() {
                     continue;
                 }

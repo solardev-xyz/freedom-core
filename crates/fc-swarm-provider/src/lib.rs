@@ -98,6 +98,16 @@
 //!   256 candidates, the job's 15 s and the stuck-batch watchdog, sans-I/O
 //!   for the swarm thread to drive.
 //!
+//! SWM-4 adds the store ops main calls:
+//!
+//! - **`swarm.identities`, `swarm.history`, `swarm.manifest`** ([`ops`]):
+//!   each op read from its wire form strictly, applied through the stores'
+//!   codecs (feed-store changes through SW-1's keeper, a manifest's
+//!   projections onto the Swarm grants and the feed store), and answered
+//!   in today's shape; owners and the manifest fetch asked of the vault and
+//!   main (D6, D7); `getEthereumWalletIdentityReferences` in ICU's root
+//!   order for printable ASCII (D8, deviation `collation`).
+//!
 //! The reference is freedom-browser's `src/main/swarm/` at the swarm
 //! reference commit over bee-js 13.2.0 and core-sdk 0.2.2;
 //! `vectors/swarm.json` is the contract (AGENTS rule 5). The crate does no
@@ -111,6 +121,7 @@ pub mod json;
 pub mod machine;
 pub mod methods;
 pub mod mining;
+pub mod ops;
 pub mod replies;
 pub mod stamps;
 pub mod stores;

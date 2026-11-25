@@ -126,7 +126,10 @@ mod tests {
         assert_eq!(cmp("", " "), Ordering::Less);
         assert_eq!(cmp("ab", "ab"), Ordering::Equal);
         // Where code units put a capital first, ICU puts the small one.
-        assert_eq!(cmp("https://b.example", "https://A.example"), Ordering::Greater);
+        assert_eq!(
+            cmp("https://b.example", "https://A.example"),
+            Ordering::Greater
+        );
     }
 
     fn strings(value: &fc_json::JsValue) -> Vec<JsString> {
@@ -177,7 +180,10 @@ mod tests {
         assert_eq!(compared.len(), 1500);
         for row in compared {
             let row = row.as_array().unwrap();
-            let (a, b) = (row[0].as_js_string().unwrap(), row[1].as_js_string().unwrap());
+            let (a, b) = (
+                row[0].as_js_string().unwrap(),
+                row[1].as_js_string().unwrap(),
+            );
             assert_eq!(
                 fc_json::JsValue::Number(sign(locale_compare(a, b))),
                 row[2],
@@ -198,7 +204,10 @@ mod tests {
         let mut differs = 0;
         for row in root.get("outside").unwrap().as_array().unwrap() {
             let row = row.as_array().unwrap();
-            let (a, b) = (row[0].as_js_string().unwrap(), row[1].as_js_string().unwrap());
+            let (a, b) = (
+                row[0].as_js_string().unwrap(),
+                row[1].as_js_string().unwrap(),
+            );
             assert!(printable(a).is_none() || printable(b).is_none());
             assert_eq!(locale_compare(a, b), a.cmp(b));
             if fc_json::JsValue::Number(sign(a.cmp(b))) != row[2] {
@@ -216,6 +225,9 @@ mod tests {
         assert_eq!(cmp("a\tb", "a"), Ordering::Greater);
         assert_eq!(cmp("B", "aé"), Ordering::Less);
         let lone = JsString::from_units(&[0xd800]);
-        assert_eq!(locale_compare(&lone, &JsString::from("a")), Ordering::Greater);
+        assert_eq!(
+            locale_compare(&lone, &JsString::from("a")),
+            Ordering::Greater
+        );
     }
 }
