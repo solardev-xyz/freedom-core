@@ -1,7 +1,8 @@
 //! Replays vectors/streams.json: design 0007's stream frames, their order,
 //! credit and coalescing, design 0009's two directions on the core's
-//! connection, and design 0014's on a service connection that takes main's
-//! bodies. Every outcome there is the design's, written by
+//! connection, design 0014's on a service connection that takes main's
+//! bodies, and design 0015's Swarm thread's streams on the core's
+//! connection. Every outcome there is the design's, written by
 //! hand in vectors/generator/streams.js; main's frame.js runs the same
 //! cases. The formats are in the file's `formats` member.
 
@@ -12,9 +13,10 @@ use std::collections::BTreeMap;
 use fc_protocol::frame::{Decoder, Frame, KIND_JSON, Kinds, MAX_PAYLOAD};
 use fc_protocol::message::Message;
 use fc_protocol::stream::{
-    Abort, AbortCode, Arrived, CREDIT_LEN, Cancel, Credited, Delivery, Duplex, ID_LEN, Inbound,
-    InboundState, MAX_ABORT, MAX_DATA, MAX_PULL, Received, Receiver, Replied, Retire, SMALL_FRAME,
-    Sender, Side, StreamFrame, StreamState, WINDOW, WRITER_DATA_CAP, Wrote, credit_frame,
+    Abort, AbortCode, Arrived, CREDIT_LEN, Cancel, Codes, Credited, Delivery, Duplex, ID_LEN,
+    Inbound, InboundState, MAX_ABORT, MAX_DATA, MAX_PULL, Received, Receiver, Replied, Retire,
+    SMALL_FRAME, Sender, Side, StreamFrame, StreamState, WINDOW, WRITER_DATA_CAP, Wrote,
+    credit_frame,
 };
 use serde_json::{Value as Json, json};
 
@@ -237,6 +239,9 @@ enum On {
     ServiceTwoWay,
     /// The core's at protocol 2 (0009).
     Core,
+    /// The core's at protocol 2, as its Swarm thread holds its streams
+    /// (0015).
+    Swarm,
 }
 
 impl On {
@@ -245,7 +250,7 @@ impl On {
         match self {
             On::Service => Kinds::service(Side::Sender),
             On::ServiceTwoWay => Kinds::service(Side::Both),
-            On::Core => Kinds::CORE_STREAMS,
+            On::Core | On::Swarm => Kinds::CORE_STREAMS,
         }
     }
 
@@ -254,7 +259,7 @@ impl On {
         match self {
             On::Service => Kinds::service(Side::Receiver),
             On::ServiceTwoWay => Kinds::service(Side::Both),
-            On::Core => Kinds::CORE_STREAMS,
+            On::Core | On::Swarm => Kinds::CORE_STREAMS,
         }
     }
 }
@@ -346,6 +351,38 @@ fn on_core(code: AbortCode) -> AbortCode {
     }
 }
 
+/// A `sender` case's code on the Swarm thread's streams, whose uploads end
+/// only with `cancelled`, `internal` or `body_stream_error` (0015): each of
+/// 0007's stands for one of them (`formats.swarm_duplex`).
+fn on_swarm(code: AbortCode) -> AbortCode {
+    match code {
+        AbortCode::Stopped => AbortCode::BodyStreamError,
+        AbortCode::Busy => AbortCode::Internal,
+        other => other,
+    }
+}
+
+/// How a `sender` case's codes are written on the side that plays it.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Mapped {
+    /// As they are.
+    No,
+    /// As the core's verified bodies ([`on_core`]).
+    Core,
+    /// As the Swarm thread's uploads ([`on_swarm`]).
+    Swarm,
+}
+
+/// The codes `["ask", id, codes]` names (`formats.swarm_duplex`).
+fn ask_codes(name: &Json) -> Codes {
+    match name.as_str() {
+        None => Codes::Piece,
+        Some("piece") => Codes::Piece,
+        Some("swarm_piece") => Codes::SwarmPiece,
+        Some(other) => panic!("codes {other}"),
+    }
+}
+
 /// Plays the side that sends bodies: the service against a sender (the
 /// `sender` cases), or the core against both its directions (the `duplex`
 /// cases). The producers offer the body bytes of `formats.body_bytes`,
@@ -354,8 +391,8 @@ fn on_core(code: AbortCode) -> AbortCode {
 struct Service {
     d: Conn,
     /// A `sender` case on the core's connection: its codes as [`on_core`]
-    /// maps them.
-    mapped: bool,
+    /// or [`on_swarm`] maps them.
+    mapped: Mapped,
     on: On,
     /// The next body byte main sends on each of the core's own streams.
     inbound: BTreeMap<u64, u64>,
@@ -420,12 +457,17 @@ impl Service {
     /// A case's code, as this side writes it.
     fn code(&self, name: &Json) -> AbortCode {
         let code = code(name);
-        if self.mapped { on_core(code) } else { code }
+        match self.mapped {
+            Mapped::No => code,
+            Mapped::Core => on_core(code),
+            Mapped::Swarm => on_swarm(code),
+        }
     }
 
-    fn new(on: On, mapped: bool, data_cap: usize) -> Self {
+    fn new(on: On, mapped: Mapped, data_cap: usize) -> Self {
         let d = match on {
             On::Core => Conn::Core(Duplex::with_data_cap(data_cap)),
+            On::Swarm => Conn::Core(Duplex::swarm(data_cap)),
             On::ServiceTwoWay => Conn::Core(Duplex::service(data_cap)),
             On::Service => Conn::Service(Sender::with_data_cap(data_cap), Inbound::new()),
         };
@@ -469,7 +511,10 @@ impl Service {
                 })
             }
             // The core's own requests, which main answers.
-            "ask" => protocol(self.d.core().ask(id), |()| json!("ok")),
+            "ask" => {
+                let codes = ask_codes(action.get(2).unwrap_or(&Json::Null));
+                protocol(self.d.core().ask_with(id, codes), |()| json!("ok"))
+            }
             "answered" => protocol(
                 self.d.core().answered(id, action[2].as_bool().unwrap()),
                 |replied| match replied {
@@ -727,7 +772,7 @@ impl Service {
 }
 
 /// Runs a `sender`, `duplex` or `service_duplex` case.
-fn play(case: &Json, on: On, mapped: bool) {
+fn play(case: &Json, on: On, mapped: Mapped) {
     let id = case["id"].as_str().unwrap();
     let cap = case["config"]["data_cap"]
         .as_u64()
@@ -772,7 +817,7 @@ fn play(case: &Json, on: On, mapped: bool) {
 fn sender() {
     let v = vectors();
     for case in cases(&v, "sender") {
-        play(case, On::Service, false);
+        play(case, On::Service, Mapped::No);
     }
 }
 
@@ -784,10 +829,10 @@ fn service_duplex() {
     let duplex = cases(&v, "service_duplex");
     assert!(duplex.len() >= 14);
     for case in duplex {
-        play(case, On::ServiceTwoWay, false);
+        play(case, On::ServiceTwoWay, Mapped::No);
     }
     for case in cases(&v, "sender") {
-        play(case, On::ServiceTwoWay, false);
+        play(case, On::ServiceTwoWay, Mapped::No);
     }
 }
 
@@ -797,7 +842,7 @@ fn duplex() {
     let duplex = cases(&v, "duplex");
     assert!(duplex.len() >= 18);
     for case in duplex {
-        play(case, On::Core, false);
+        play(case, On::Core, Mapped::No);
     }
     // The sender's cases hold on the core's connection too, each of 0007's
     // codes standing for one of the verified body's; but for the service's
@@ -810,7 +855,31 @@ fn duplex() {
         {
             continue;
         }
-        play(case, On::Core, true);
+        play(case, On::Core, Mapped::Core);
+    }
+}
+
+/// Design 0015: the Swarm thread's streams, its uploads with an upload's
+/// codes and main's bodies each with its request's. The sender's cases
+/// hold there too, each of 0007's codes standing for one of an upload's;
+/// but for the service's own code rule.
+#[test]
+fn swarm_duplex() {
+    let v = vectors();
+    let duplex = cases(&v, "swarm_duplex");
+    assert!(duplex.len() >= 40);
+    for case in duplex {
+        play(case, On::Swarm, Mapped::No);
+    }
+    for case in cases(&v, "sender") {
+        if case["id"]
+            .as_str()
+            .unwrap()
+            .starts_with("service-never-sends-")
+        {
+            continue;
+        }
+        play(case, On::Swarm, Mapped::Swarm);
     }
 }
 

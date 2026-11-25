@@ -16,17 +16,29 @@
 //!     claims it. A response read whole retires its request too, and a
 //!     whole response for the request in reassembly is a duplicate: either
 //!     way each request gets one response, as 0001 requires.
+//!   - **Each request's bound** (design 0015, "The swarm thread's memory";
+//!     SWM-4, D4): the request's entry in [`Pending`] carries the most
+//!     bytes its reply may take, which its owner reserved before sending
+//!     it. A begin past it is a protocol error before anything is reserved
+//!     (`begin_over_bound`), and so is a whole reply past it
+//!     (`reply_over_bound`). The bound stays until the reply is read, also
+//!     after the core cancels the request: a cancel doesn't recall a reply
+//!     already sent (0001). Every request but the Swarm thread's has the
+//!     message cap.
 //!   - **Stream frames** (design 0009, Streams in the core) are decoded on
 //!     every connection (`Kinds::CORE_STREAMS`), and taken only once the
 //!     hello, which settles protocol 2, has set the link's streams flag
 //!     ([`Link::streams`]); before that, one is `unknown_frame_kind`. The
 //!     core speaks no other version: protocol 1, which took none, is gone.
-//!     They go on in the order read, with the whole messages, to the dweb
-//!     thread, outside the frame credits: the reader never waits on dweb
-//!     data. Main's credit bounds the data in flight at 16 MiB, not the
-//!     frames that carry it, so the reader coalesces them, one entry per
-//!     stream ([`StreamMark`]), under a hard memory cap that holds the most
-//!     a peer within credit can send, whatever its framing: past
+//!     They go on in the order read, with the whole messages, to the event
+//!     loop, which hands each stream's entry to its owner ([`StreamRoutes`]:
+//!     the dweb thread unless a route says otherwise, design 0015's D4),
+//!     outside the frame credits: the reader never waits on a stream's
+//!     data. Main's credit bounds the data in flight (16 MiB for the dweb
+//!     thread's streams, 4 MiB for the Swarm thread's), not the frames that
+//!     carry it, so the reader coalesces them, one entry per stream
+//!     ([`StreamMark`]), under a hard memory cap that holds the most a peer
+//!     within credit can send, whatever its framing: past
 //!     [`MAX_QUEUED_STREAM_BYTES`] (or [`MAX_QUEUED_STREAM_ENTRIES`], a
 //!     defence) not yet handled, the connection ends (`stream_backlog`).
 //! - **Writer thread:** one serialized writer for stdout. Each producer has
@@ -67,6 +79,10 @@
 //!     bulk reply;
 //!   - the `0x13` credit is queued from the consumer's drop, never waited
 //!     on.
+//! - **A hold's guard** ([`Hold::guard`]): a producer may hang what its
+//!   reply keeps alive (the Swarm thread's memory charge for a read, design
+//!   0015) on the reply's hold, so it goes when the writer has written the
+//!   reply, its last fragment for a fragmented one, or drops it unwritten.
 //!
 //! Lifecycle events (EOF, framing errors, writer failure, a thread dying) go
 //! through an unbounded channel that frames can't fill.
@@ -83,7 +99,7 @@
 //! credit, and a `password_b64` mustn't wait in the chunk meanwhile, nor
 //! for a later read to cover it.
 
-use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::collections::{BTreeMap, VecDeque};
 use std::fs::File;
 use std::io::{Read, Write};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -121,13 +137,16 @@ pub const MAX_QUEUED_CHAIN_CONTROL_BYTES: usize = 4 * 1024 * 1024;
 /// The most whole frames the writer writes between two fragments of a
 /// response, so a steady stream of small frames can't stall it.
 const MAX_WHOLE_BETWEEN_FRAGMENTS: usize = 64;
-/// Stream frames read and not yet handled by the dweb thread (design 0009,
-/// Streams in the core), as the memory they hold. They wait coalesced, one
-/// entry per stream ([`StreamMark`]): a piece's data joined in the order
-/// read, with its terminal, or main's credit for one of the core's bodies,
-/// summed. Each entry is charged [`STREAM_ENTRY_COST`] and its buffers, so
-/// the cap is the most a peer within credit can make them hold, whatever
-/// its framing:
+/// Stream frames read and not yet handled by their owners (design 0009,
+/// Streams in the core; design 0015, D4), as the memory they hold. They
+/// wait coalesced, one entry per stream ([`StreamMark`]): a piece's data
+/// joined in the order read, with its terminal, or main's credit for one
+/// of the core's bodies, summed. Each entry is charged
+/// [`STREAM_ENTRY_COST`] and its buffers, so the cap is the most a peer
+/// within credit can make them hold, whatever its framing: the dweb
+/// thread's share and the Swarm thread's.
+pub const MAX_QUEUED_STREAM_BYTES: usize = DWEB_STREAM_SHARE + SWARM_STREAM_SHARE;
+/// The dweb thread's share of [`MAX_QUEUED_STREAM_BYTES`]:
 /// - each of the 128 incoming streams ([`STREAMS`]) a whole 128 KiB window
 ///   of data (its buffer grows by powers of two, so to the window at most)
 ///   and its terminal at its largest, an abort with all of its 1 KiB of
@@ -138,10 +157,31 @@ const MAX_WHOLE_BETWEEN_FRAGMENTS: usize = 64;
 ///
 /// 129 × (131,072 + 1,032 + 2,048) + 256 × 2,048 = 17,829,896 bytes,
 /// 16 MiB and 1,052,680 (design 0009, Bounds).
-pub const MAX_QUEUED_STREAM_BYTES: usize =
+pub const DWEB_STREAM_SHARE: usize =
     (STREAMS + 1) * PIECE_ENTRY_MOST + MAIN_FETCHES * STREAM_ENTRY_COST;
+/// The Swarm thread's share of [`MAX_QUEUED_STREAM_BYTES`] (design 0015,
+/// D4), counted as the dweb thread's is:
+/// - each of its [`SWARM_STREAMS`] incoming streams a whole window and its
+///   largest terminal, and one more such stream's worth for the entry it
+///   is handling;
+/// - a credit entry for each of its uploads ([`SWARM_BODIES`]).
+///
+/// 33 × 134,152 + 4 × 2,048 = 4,435,208 bytes, about 4.23 MiB.
+pub const SWARM_STREAM_SHARE: usize =
+    (SWARM_STREAMS + 1) * PIECE_ENTRY_MOST + SWARM_BODIES * STREAM_ENTRY_COST;
 /// The incoming streams with credit at once (the engine's bound).
 const STREAMS: usize = crate::dweb::engine::STREAMS;
+/// The Swarm thread's incoming streams with credit at once (design 0015,
+/// D4): its 4 MiB allowance of stream credit ([`SWARM_STREAM_ALLOWANCE`])
+/// in windows of 128 KiB, since every stream starts with one. Its driver
+/// keeps to them.
+pub const SWARM_STREAMS: usize = 32;
+/// The stream credit the Swarm thread's incoming streams take, apart from
+/// the dweb thread's 16 MiB (design 0015, Streams).
+pub const SWARM_STREAM_ALLOWANCE: usize = 4 << 20;
+/// The `swarm.body` uploads streaming at once (design 0015, Streams and
+/// Budgets): main credits each.
+pub const SWARM_BODIES: usize = 4;
 /// The bodies main can credit at once: only one whose fetch it holds, and
 /// it holds at most 256 fetches (design 0009, Bounds: fetch admission).
 /// A credit past a body's end is late, and main sends none after reading
@@ -188,8 +228,16 @@ const _: () =
 // entry per stream and body, and one being handled) is within the entry
 // bound.
 const _: () = assert!(fc_protocol::stream::WINDOW.is_power_of_two());
-const _: () = assert!(MAX_QUEUED_STREAM_BYTES == 16 * 1024 * 1024 + 1_052_680);
-const _: () = assert!(STREAMS + 1 + MAIN_FETCHES <= MAX_QUEUED_STREAM_ENTRIES);
+const _: () = assert!(DWEB_STREAM_SHARE == 16 * 1024 * 1024 + 1_052_680);
+const _: () = assert!(SWARM_STREAM_SHARE == 4_435_208);
+const _: () = assert!(MAX_QUEUED_STREAM_BYTES == 17_829_896 + 4_435_208);
+const _: () = assert!(
+    STREAMS + 1 + MAIN_FETCHES + SWARM_STREAMS + 1 + SWARM_BODIES <= MAX_QUEUED_STREAM_ENTRIES
+);
+// The Swarm thread's slots are its allowance in windows (design 0015, D4),
+// and its uploads' windows are 0015's 512 KiB.
+const _: () = assert!(SWARM_STREAMS * fc_protocol::stream::WINDOW == SWARM_STREAM_ALLOWANCE);
+const _: () = assert!(SWARM_BODIES * fc_protocol::stream::WINDOW == 512 * 1024);
 
 /// Whether a channel message of `size` bytes that carries a stream mark is
 /// within [`STREAM_SLOT`], with the state word std's channels keep beside
@@ -303,6 +351,7 @@ impl Allowance {
         Some(Hold {
             allowance: Arc::clone(self),
             len,
+            guard: None,
         })
     }
 
@@ -321,6 +370,7 @@ impl Allowance {
         Hold {
             allowance: Arc::clone(self),
             len,
+            guard: None,
         }
     }
 
@@ -340,13 +390,27 @@ impl Allowance {
 }
 
 /// A queued frame's place in its producer's [`Allowance`], freed once the
-/// writer has written it.
+/// writer has written it, with whatever its producer hung on it
+/// ([`Hold::guard`]).
 pub struct Hold {
     allowance: Arc<Allowance>,
     len: usize,
+    /// Dropped with the hold, after its place is freed.
+    guard: Option<Box<dyn Send>>,
 }
 
 impl Hold {
+    /// Hangs `guard` on the hold: it is dropped when the hold is, once the
+    /// writer has written the frame (a fragmented reply's last fragment),
+    /// or drops it unwritten at its end. The Swarm thread's memory charge
+    /// for a read goes this way, as its reply is written (design 0015,
+    /// "The swarm thread's memory").
+    #[allow(dead_code)] // the Swarm thread's (SWM-4 PR 5)
+    pub fn guard(mut self, guard: impl Send + 'static) -> Self {
+        self.guard = Some(Box::new(guard));
+        self
+    }
+
     /// Frees `len` of the held bytes, as a fragmented response's fragments
     /// are written. Its place goes when the hold is dropped.
     fn release(&mut self, len: usize) {
@@ -359,6 +423,7 @@ impl Hold {
 impl Drop for Hold {
     fn drop(&mut self) {
         self.allowance.release(1, self.len);
+        drop(self.guard.take());
     }
 }
 
@@ -623,12 +688,14 @@ impl Link {
 /// The protocol error past the stream cap.
 const BACKLOG: &str = "stream_backlog";
 
-/// A stream's place in the backlog: main's frames for the core's pieces
-/// (data and terminals) and its credit for the core's bodies name two sets
-/// of streams.
+/// A stream, as the reader and the routes know it: main's frames for the
+/// core's pieces (data and terminals) and its credit for the core's bodies
+/// name two sets of streams, each in its requester's ID space.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
-enum StreamKey {
+pub enum StreamKey {
+    /// A body main sends in answer to the core's request: its ID.
     Piece(u64),
+    /// A body the core sends in answer to main's request: its ID.
     Body(u64),
 }
 
@@ -643,6 +710,16 @@ pub enum StreamEntry {
     },
     /// Main's credit for one of the core's bodies, summed.
     Credit { id: u64, bytes: u64 },
+}
+
+impl StreamEntry {
+    /// Its stream.
+    fn key(&self) -> StreamKey {
+        match self {
+            StreamEntry::Piece { id, .. } => StreamKey::Piece(*id),
+            StreamEntry::Credit { id, .. } => StreamKey::Body(*id),
+        }
+    }
 }
 
 /// The stream frames read and not yet handled ([`MAX_QUEUED_STREAM_BYTES`]).
@@ -705,6 +782,7 @@ impl Backlog {
     ) -> StreamMark {
         let seq = self.next;
         self.next += 1;
+        let key = entry.key();
         self.pending.insert(seq, (entry, charge));
         if let Some(key) = open {
             self.open.insert(key, seq);
@@ -712,6 +790,7 @@ impl Backlog {
         StreamMark {
             link: Arc::clone(link),
             seq,
+            key,
         }
     }
 
@@ -809,10 +888,7 @@ impl Backlog {
     /// new one.
     fn take(&mut self, seq: u64) -> Option<(StreamEntry, usize)> {
         let (entry, charge) = self.pending.remove(&seq)?;
-        let key = match &entry {
-            StreamEntry::Piece { id, .. } => StreamKey::Piece(*id),
-            StreamEntry::Credit { id, .. } => StreamKey::Body(*id),
-        };
+        let key = entry.key();
         if self.open.get(&key) == Some(&seq) {
             self.open.remove(&key);
         }
@@ -820,16 +896,23 @@ impl Backlog {
     }
 }
 
-/// An entry's mark, on its way to the dweb thread with the whole messages.
-/// Dropped untaken (the thread gone), it frees its entry.
+/// An entry's mark, on its way to its stream's owner with the whole
+/// messages ([`StreamRoutes`]). Dropped untaken (the owner gone), it frees
+/// its entry.
 pub struct StreamMark {
     link: Arc<Link>,
     seq: u64,
+    key: StreamKey,
 }
 
 impl StreamMark {
-    /// The dweb thread takes the entry. Its charge stays until the
-    /// [`Taken`] is dropped, once the thread has handled it.
+    /// Its stream, which the event loop routes it by.
+    pub fn key(&self) -> StreamKey {
+        self.key
+    }
+
+    /// The owner takes the entry. Its charge stays until the [`Taken`] is
+    /// dropped, once the owner has handled it.
     pub fn take(self) -> Option<Taken> {
         let (entry, charge) = self.link.stream_backlog.lock().ok()?.take(self.seq)?;
         Some(Taken {
@@ -850,7 +933,7 @@ impl Drop for StreamMark {
     }
 }
 
-/// An entry the dweb thread has taken, still charged while it handles it.
+/// An entry its owner has taken, still charged while it handles it.
 pub struct Taken {
     link: Arc<Link>,
     entry: StreamEntry,
@@ -877,40 +960,108 @@ fn is_stream_kind(kind: u8) -> bool {
     matches!(kind, KIND_DATA | KIND_END | KIND_ABORT | KIND_STREAM_CREDIT)
 }
 
-/// The core's own requests to main whose response hasn't started arriving:
-/// a begin must name one (design 0005, Frames). The reader retires an ID as
-/// soon as its response appears, whole or begun; its producer retires it
-/// once the response is consumed, which covers producers tested without a
-/// reader.
+/// The core's own requests to main whose response hasn't started arriving,
+/// each with its reply's bound: a begin must name one (design 0005,
+/// Frames), and keep to its bound (design 0015, D4). The reader retires an
+/// ID as soon as its response appears, whole or begun; its producer retires
+/// it once the response is consumed, which covers producers tested without
+/// a reader. A cancel leaves it: the reply may already be on its way, and
+/// is read within its bound all the same.
 #[derive(Default)]
 pub struct Pending {
-    ids: Mutex<BTreeSet<u64>>,
+    ids: Mutex<BTreeMap<u64, usize>>,
 }
 
 impl Pending {
     /// Before the request goes to the writer, so its response can't come
-    /// first.
+    /// first: its reply may take up to the message cap.
     pub fn insert(&self, id: u64) {
+        self.insert_bounded(id, MAX_MESSAGE);
+    }
+
+    /// As [`Pending::insert`], its reply taking at most `bound` bytes
+    /// serialized, the room its owner reserved for it: past it, whole or
+    /// fragmented, the reply is a protocol error.
+    pub fn insert_bounded(&self, id: u64, bound: usize) {
         if let Ok(mut ids) = self.ids.lock() {
-            ids.insert(id);
+            ids.insert(id, bound.min(MAX_MESSAGE));
         }
     }
 
-    /// Once its response has been read, or consumed.
-    pub fn remove(&self, id: u64) {
-        if let Ok(mut ids) = self.ids.lock() {
-            ids.remove(&id);
-        }
+    /// Once its response has been read, or consumed: its bound, if it was
+    /// pending.
+    pub fn remove(&self, id: u64) -> Option<usize> {
+        self.ids.lock().ok()?.remove(&id)
     }
 
-    /// Retires `id` for a response that begins: true if it was pending.
-    fn take(&self, id: u64) -> bool {
-        self.ids.lock().is_ok_and(|mut ids| ids.remove(&id))
+    /// Retires `id` for a response that begins: its bound, if it was
+    /// pending.
+    fn take(&self, id: u64) -> Option<usize> {
+        self.remove(id)
     }
 
-    #[cfg(test)]
+    /// Whether `id`'s response has yet to appear.
     pub fn contains(&self, id: u64) -> bool {
-        self.ids.lock().is_ok_and(|ids| ids.contains(&id))
+        self.ids.lock().is_ok_and(|ids| ids.contains_key(&id))
+    }
+}
+
+/// Which thread each stream's entries go to (design 0015, D4): the dweb
+/// thread's by default, the only owner of streams before the Swarm thread.
+/// The event loop routes every [`StreamMark`] by its key here.
+///
+/// - **A piece's route** (a body main sends in answer to the core's
+///   request) is registered by the requests gate under its lock, before
+///   the writer has the request ([`crate::requests::Requests::send_with`]),
+///   so no frame of main's answer can find it missing.
+/// - **A body's route** (the core's answer to main's request, which main
+///   credits) is registered by the event loop as it forwards the request
+///   to its owner, before the owner can open the body.
+/// - **A route goes** when its owner says no frame of the stream can come
+///   any more ([`StreamRoutes::forget`]). For a piece that is once its
+///   terminal, or a reply that opens no stream, has been handled. A body
+///   is credited late, past its end, until main has read the end, so its
+///   route must outlast that: a late credit routed to the dweb thread is a
+///   protocol error there if the ID is above every request it was given.
+#[derive(Default)]
+pub struct StreamRoutes {
+    routes: Mutex<BTreeMap<StreamKey, crate::requests::Owner>>,
+}
+
+impl StreamRoutes {
+    /// The owner of `key`'s stream: the dweb thread unless a route says
+    /// otherwise.
+    pub fn owner(&self, key: StreamKey) -> crate::requests::Owner {
+        self.routes
+            .lock()
+            .ok()
+            .and_then(|routes| routes.get(&key).copied())
+            .unwrap_or(crate::requests::Owner::Dweb)
+    }
+
+    /// Routes `key`'s stream to `owner`: before main can send a frame of
+    /// it. The dweb thread's need none.
+    pub fn register(&self, key: StreamKey, owner: crate::requests::Owner) {
+        if owner == crate::requests::Owner::Dweb {
+            return;
+        }
+        if let Ok(mut routes) = self.routes.lock() {
+            routes.insert(key, owner);
+        }
+    }
+
+    /// `key`'s stream can take no frame any more: its route goes.
+    #[allow(dead_code)] // the Swarm thread's (SWM-4 PR 5)
+    pub fn forget(&self, key: StreamKey) {
+        if let Ok(mut routes) = self.routes.lock() {
+            routes.remove(&key);
+        }
+    }
+
+    /// The routes held.
+    #[cfg(test)]
+    pub fn len(&self) -> usize {
+        self.routes.lock().map_or(0, |routes| routes.len())
     }
 }
 
@@ -1102,11 +1253,16 @@ impl Reader {
             return self.deliver_stream(frame);
         }
         let pending = &self.pending;
-        match self.reassembler.push(frame, |id| pending.take(id)) {
+        match self.reassembler.push_bounded(frame, |id| pending.take(id)) {
             Ok(Delivery::Message { frame, answers }) => {
-                // Answered: no begin may follow for that request.
-                if let Some(id) = answers {
-                    self.pending.remove(id);
+                // Answered: no begin may follow for that request, and the
+                // reply keeps to its bound, as a fragmented one does.
+                if let Some(id) = answers
+                    && let Some(bound) = self.pending.remove(id)
+                    && frame.payload.len() > bound
+                {
+                    let _ = self.events.send(Event::ProtocolError("reply_over_bound"));
+                    return false;
                 }
                 let credit = self.credits.acquire(frame.payload.len());
                 self.events.send(Event::Frame(frame, credit)).is_ok()
@@ -1176,6 +1332,7 @@ fn fragment_category(error: &FragmentError) -> &'static str {
         FragmentError::UnknownId(_) => "begin_unknown_id",
         FragmentError::DuplicateResponse(_) => "duplicate_response",
         FragmentError::BadSize(_) => "begin_size",
+        FragmentError::OverBound { .. } => "begin_over_bound",
         FragmentError::BadHeader => "begin_header",
         FragmentError::EmptyFragment => "empty_fragment",
         FragmentError::NoResponse => "fragment_without_begin",
@@ -1709,10 +1866,16 @@ mod tests {
     }
 
     fn reader(link: Arc<Link>, pending: &[u64]) -> (Reader, Receiver<Event>) {
+        let bounds: Vec<(u64, usize)> = pending.iter().map(|id| (*id, MAX_MESSAGE)).collect();
+        bounded_reader(link, &bounds)
+    }
+
+    /// A reader whose pending requests have these bounds.
+    fn bounded_reader(link: Arc<Link>, pending: &[(u64, usize)]) -> (Reader, Receiver<Event>) {
         let (events, received) = mpsc::channel();
         let ids = Arc::new(Pending::default());
-        for id in pending {
-            ids.insert(*id);
+        for (id, bound) in pending {
+            ids.insert_bounded(*id, *bound);
         }
         let reader = Reader {
             events,
@@ -1981,8 +2144,9 @@ mod tests {
     /// Past the cap the connection ends. One stream's full data frames join
     /// one entry: 256 fit (16 MiB), and the 257th would grow its buffer
     /// past the cap. Each on its own stream, they stop at the cap's share
-    /// of entries. Before, 272 frames were taken (data only, under 16 MiB
-    /// and a 1 MiB frame's slack).
+    /// of entries: 329 with the Swarm thread's share (design 0015, D4),
+    /// 263 before it. Before that, 272 frames were taken (data only, under
+    /// 16 MiB and a 1 MiB frame's slack).
     #[test]
     fn stream_frames_past_the_cap_end_the_connection() {
         use fc_protocol::frame::KIND_DATA;
@@ -2003,7 +2167,7 @@ mod tests {
         let fits = MAX_QUEUED_STREAM_BYTES / (MAX_DATA + STREAM_ENTRY_COST);
         assert_eq!(
             (marks.len(), error, fits),
-            (fits, Some("stream_backlog"), 263)
+            (fits, Some("stream_backlog"), 329)
         );
         within_bounds(&link);
     }
@@ -2515,5 +2679,254 @@ mod tests {
         assert!(second.feed(&mut fragment::credit_frame()));
         assert!(link.holds_credit());
         assert!(matches!(frames.try_recv(), Ok(Out::Credit)));
+    }
+
+    /// Design 0015, D4: a stream's owner is the dweb thread unless a route
+    /// says otherwise; a route is per stream, a piece's apart from a body's
+    /// of the same number, and goes when forgotten. The dweb thread's own
+    /// need none.
+    #[test]
+    fn streams_go_to_the_dweb_thread_unless_routed() {
+        use crate::requests::Owner;
+        let routes = StreamRoutes::default();
+        for key in [StreamKey::Piece(5), StreamKey::Body(5), StreamKey::Piece(1)] {
+            assert_eq!(routes.owner(key), Owner::Dweb, "{key:?}");
+        }
+        routes.register(StreamKey::Piece(5), Owner::Swarm);
+        assert_eq!(routes.owner(StreamKey::Piece(5)), Owner::Swarm);
+        assert_eq!(routes.owner(StreamKey::Body(5)), Owner::Dweb);
+        routes.register(StreamKey::Body(9), Owner::Swarm);
+        assert_eq!(routes.owner(StreamKey::Body(9)), Owner::Swarm);
+        routes.register(StreamKey::Piece(6), Owner::Dweb);
+        assert_eq!(routes.len(), 2);
+        routes.forget(StreamKey::Piece(5));
+        assert_eq!(routes.owner(StreamKey::Piece(5)), Owner::Dweb);
+        assert_eq!(routes.owner(StreamKey::Body(9)), Owner::Swarm);
+        assert_eq!(routes.len(), 1);
+    }
+
+    /// Each mark carries its stream's key, which the event loop routes it
+    /// by: a piece's data and terminal by the core's request ID, main's
+    /// credit by its own.
+    #[test]
+    fn a_mark_carries_its_streams_key() {
+        use fc_protocol::frame::{KIND_DATA, KIND_END, KIND_STREAM_CREDIT};
+        let (_link, mut reader, received) = streaming();
+        let mut input = stream(KIND_DATA, 3, &[7; 10]);
+        input.extend_from_slice(&stream(KIND_STREAM_CREDIT, 3, &[0, 0, 0, 1]));
+        input.extend_from_slice(&stream(KIND_END, 4, &[]));
+        assert!(reader.feed(&mut input));
+        let (marks, error) = drain(&received);
+        assert_eq!(error, None);
+        let keys: Vec<StreamKey> = marks.iter().map(StreamMark::key).collect();
+        assert_eq!(
+            keys,
+            [StreamKey::Piece(3), StreamKey::Body(3), StreamKey::Piece(4)]
+        );
+        for mark in marks {
+            let key = mark.key();
+            assert_eq!(mark.take().unwrap().entry().key(), key);
+        }
+    }
+
+    /// The most main can send within credit to both owners at once (design
+    /// 0015, D4): every dweb stream and every one of the Swarm thread's 32
+    /// a whole window and its largest abort, each owner handling one
+    /// stream's entry while its next gathers, and every body's credit,
+    /// the dweb thread's and the Swarm thread's uploads'. All of it is
+    /// taken, within the cap, which is both shares.
+    #[test]
+    fn the_most_main_can_send_to_both_owners_fits() {
+        use fc_protocol::frame::{KIND_ABORT, KIND_DATA, KIND_STREAM_CREDIT};
+        use fc_protocol::stream::{ID_LEN, MAX_ABORT, MAX_DATA, WINDOW};
+        let abort = abort_json(MAX_ABORT);
+        let (link, mut reader, received) = streaming();
+        // The two streams each owner is handling: their first entries.
+        let handled = [1u64, 2 * (STREAMS + SWARM_STREAMS) as u64 + 1];
+        let mut input = Vec::new();
+        for id in handled {
+            input.extend_from_slice(&stream(KIND_DATA, id, &[0; MAX_DATA]));
+            input.extend_from_slice(&stream(KIND_DATA, id, &[0; 1]));
+        }
+        assert!(reader.feed(&mut input));
+        let taken: Vec<Taken> = drain(&received)
+            .0
+            .into_iter()
+            .map(|mark| mark.take().unwrap())
+            .collect();
+        assert_eq!(taken.len(), 2);
+
+        let mut input = Vec::new();
+        for id in handled {
+            input.extend_from_slice(&stream(KIND_DATA, id, &[0; MAX_DATA - 1]));
+            input.extend_from_slice(&stream(KIND_ABORT, id, &abort));
+        }
+        let others =
+            (1..STREAMS as u64).chain(STREAMS as u64 + 1..(STREAMS + SWARM_STREAMS) as u64);
+        for n in others {
+            let size = [MAX_DATA, 4096, 1000, 333][n as usize % 4];
+            let mut left = WINDOW;
+            while left > 0 {
+                let len = size.min(left);
+                input.extend_from_slice(&stream(KIND_DATA, 2 * n + 1, &vec![0; len]));
+                left -= len;
+            }
+            input.extend_from_slice(&stream(KIND_ABORT, 2 * n + 1, &abort));
+        }
+        for body in 0..(MAIN_FETCHES + SWARM_BODIES) as u64 {
+            input.extend_from_slice(&stream(
+                KIND_STREAM_CREDIT,
+                2 * body + 2,
+                &7u32.to_be_bytes(),
+            ));
+        }
+        assert!(reader.feed(&mut input));
+        let (marks, error) = drain(&received);
+        let streams = STREAMS + SWARM_STREAMS;
+        let bodies = MAIN_FETCHES + SWARM_BODIES;
+        assert_eq!((marks.len(), error), (streams + bodies, None));
+        let terminal = ID_LEN + MAX_ABORT;
+        let expected = 2 * (WINDOW + STREAM_ENTRY_COST)
+            + 2 * (MAX_DATA + terminal + STREAM_ENTRY_COST)
+            + (streams - 2) * (WINDOW + terminal + STREAM_ENTRY_COST)
+            + bodies * STREAM_ENTRY_COST;
+        assert_eq!(link.stream_backlog(), (expected, streams + 2 + bodies));
+        assert!(expected <= MAX_QUEUED_STREAM_BYTES, "{expected}");
+        // Past the dweb thread's share alone: the Swarm thread's is needed.
+        assert!(expected > DWEB_STREAM_SHARE, "{expected}");
+        within_bounds(&link);
+        drop((taken, marks));
+        assert_eq!(link.stream_backlog(), (0, 0));
+    }
+
+    /// A whole response for `id` of exactly `len` bytes.
+    fn response_of(id: u64, len: usize) -> Vec<u8> {
+        let mut json = format!(r#"{{"type":"response","id":{id},"result":""#).into_bytes();
+        assert!(len >= json.len() + 2);
+        json.resize(len - 2, b'x');
+        json.extend_from_slice(br#""}"#);
+        json
+    }
+
+    /// Design 0015, D4: a reply keeps to its request's bound, the room its
+    /// owner reserved. A fragmented one's begin past it is a protocol error
+    /// before anything is reserved; a whole one past it is too. At the
+    /// bound it is taken. A request with no bound of its own takes up to
+    /// the message cap.
+    #[test]
+    fn a_reply_keeps_to_its_requests_bound() {
+        let len = MAX_PAYLOAD + 100;
+        let (mut reader, received) = bounded_reader(offered(), &[(4, len), (5, len - 1)]);
+        assert!(reader.feed(&mut fragmented(4, &response_of(4, len))));
+        let Ok(Event::Response { id: 4, credit, .. }) = received.try_recv() else {
+            panic!("the reply at its bound");
+        };
+        drop(credit);
+        assert!(!reader.feed(&mut fragmented(5, &response_of(5, len))));
+        assert!(matches!(
+            received.try_recv(),
+            Ok(Event::ProtocolError("begin_over_bound"))
+        ));
+        assert!(!reader.reassembler.in_progress());
+        assert_eq!(reader.reassembler.reserved(), 0);
+
+        let whole = |id: u64, len: usize| {
+            let mut frame = Vec::new();
+            fc_protocol::frame::encode_json(&response_of(id, len), &mut frame).unwrap();
+            frame
+        };
+        let (mut reader, received) =
+            bounded_reader(offered(), &[(6, 100), (7, 99), (8, MAX_MESSAGE)]);
+        assert!(reader.feed(&mut whole(6, 100)));
+        assert!(matches!(received.try_recv(), Ok(Event::Frame(..))));
+        assert!(reader.feed(&mut whole(8, MAX_PAYLOAD)));
+        assert!(matches!(received.try_recv(), Ok(Event::Frame(..))));
+        assert!(!reader.feed(&mut whole(7, 100)));
+        assert!(matches!(
+            received.try_recv(),
+            Ok(Event::ProtocolError("reply_over_bound"))
+        ));
+        // Unbounded: the message cap, as before.
+        let pending = Pending::default();
+        pending.insert(9);
+        assert_eq!(pending.remove(9), Some(MAX_MESSAGE));
+        pending.insert_bounded(10, usize::MAX);
+        assert_eq!(pending.take(10), Some(MAX_MESSAGE));
+        assert_eq!(pending.take(10), None);
+    }
+
+    /// The output of a writer, shared with a guard that notes how much of
+    /// it was written when the guard went.
+    #[derive(Clone, Default)]
+    struct Shared(Arc<Mutex<Vec<u8>>>);
+
+    impl Write for Shared {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    struct Noted {
+        out: Shared,
+        at: Arc<Mutex<Option<usize>>>,
+    }
+
+    impl Drop for Noted {
+        fn drop(&mut self) {
+            *self.at.lock().unwrap() = Some(self.out.0.lock().unwrap().len());
+        }
+    }
+
+    /// Design 0015: what a producer hangs on a reply's hold goes once the
+    /// writer has written the reply: a whole frame, or a fragmented reply's
+    /// last fragment; one that never goes (no credit to begin with) drops
+    /// it with the writer.
+    #[test]
+    fn a_holds_guard_goes_once_its_reply_is_written() {
+        let link = offered();
+        let producer = Allowance::new(usize::MAX, usize::MAX);
+        let out = Shared::default();
+        let (queue, frames) = mpsc::channel();
+        let noted = || Arc::new(Mutex::new(None));
+        let (first, second, third) = (noted(), noted(), noted());
+        // A whole frame.
+        let frame = frame(br#"{"n":1}"#).unwrap();
+        let whole_len = frame.len();
+        let hold = producer.take(frame.len()).unwrap().guard(Noted {
+            out: out.clone(),
+            at: Arc::clone(&first),
+        });
+        queue.send(Out::Frame { frame, hold }).unwrap();
+        // A fragmented reply, which spends main's credit...
+        let payload = Zeroizing::new(vec![b'y'; 2 * MAX_PAYLOAD + 7]);
+        let reply = Reply::new(&link, 5, payload).unwrap();
+        let hold = producer.take(reply.len()).unwrap().guard(Noted {
+            out: out.clone(),
+            at: Arc::clone(&second),
+        });
+        queue.send(reply.into_out(hold)).unwrap();
+        // ...so this one never begins.
+        let payload = Zeroizing::new(vec![b'z'; MAX_PAYLOAD + 1]);
+        let reply = Reply::new(&link, 6, payload).unwrap();
+        let hold = producer.take(reply.len()).unwrap().guard(Noted {
+            out: out.clone(),
+            at: Arc::clone(&third),
+        });
+        queue.send(reply.into_out(hold)).unwrap();
+        drop(queue);
+        let mut sink = out.clone();
+        write_frames(&mut sink, &frames, &link).unwrap();
+        let written = out.0.lock().unwrap().len();
+        assert_eq!(*first.lock().unwrap(), Some(whole_len));
+        // Every fragment of the second was written before its guard went.
+        assert_eq!(*second.lock().unwrap(), Some(written));
+        assert!(written > whole_len + 2 * MAX_PAYLOAD + 7);
+        assert_eq!(*third.lock().unwrap(), Some(written));
+        assert_eq!(producer.held_bytes(), 0);
     }
 }

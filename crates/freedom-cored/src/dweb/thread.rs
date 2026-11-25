@@ -3,7 +3,9 @@
 //! with the hashing pool and the core's streams. The event loop starts it
 //! once a hello settles protocol 2, and forwards it `dweb.verify` and
 //! `dweb.forget`, their cancels, main's answers to its `shell.dweb_get`
-//! requests, and every stream frame, in the order the reader read them.
+//! requests, and every stream frame no route gives another owner (design
+//! 0015, D4: [`transport::StreamRoutes`]), in the order the reader read
+//! them.
 //!
 //! - **Its streams are one [`Duplex`]:** the verified bodies it sends main,
 //!   under main's request IDs, and the pieces main streams to it, under the
