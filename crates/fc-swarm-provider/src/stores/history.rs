@@ -420,9 +420,11 @@ pub enum RowError {
     /// refuses (`RangeError: Invalid time value`).
     #[error(transparent)]
     Thrown(Thrown),
-    /// A BLOB cell, which the reference would answer as a `Buffer` and no
-    /// JSON answer holds (deviation `history-blobs`): the read fails, as a
-    /// bad timestamp's does. No statement here writes one.
+    /// A BLOB cell (deviation `history-blobs`). The reference gets a
+    /// `Buffer`: a pass-through column answers it as is, and a timestamp
+    /// reads its text through `new Date`, an ISO time or a throw by its
+    /// bytes. The core refuses every one, and the read fails, as a bad
+    /// timestamp's does. No statement here writes one.
     #[error("column {0} holds a BLOB")]
     Blob(&'static str),
     /// Fewer cells than columns.
@@ -475,7 +477,8 @@ pub fn entry(row: &[Cell]) -> Result<JsValue, RowError> {
 
 /// `getEntries()`'s answer over [`get_entries`]'s rows: each row's record,
 /// or the first row's refusal, which fails the whole read as the
-/// reference's throw does (a bad timestamp; a BLOB cell, `history-blobs`).
+/// reference's throw for a bad timestamp does (and, the core's own, for
+/// any BLOB cell: `history-blobs`).
 pub fn entries(rows: &[Vec<Cell>]) -> Result<JsValue, RowError> {
     rows.iter()
         .map(|row| entry(row))

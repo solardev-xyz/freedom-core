@@ -1109,7 +1109,8 @@ fn history_bound_keeps_the_inserted_row() {
 }
 
 /// A BLOB cell, which no writer makes, fails the read that meets it
-/// (deviation `history-blobs`), where the reference would answer a Buffer.
+/// (deviation `history-blobs`), where the reference answers a pass-through
+/// column's Buffer as is (and coerces a timestamp's by its text).
 #[test]
 fn history_blob_cell_fails_the_read() {
     let dir = TempDir::new("blob-cell");
