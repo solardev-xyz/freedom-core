@@ -2005,9 +2005,13 @@ fn sw1_cases() {
     let text = text_of("keys.json");
     let index = Index::new(&text).unwrap();
     let keys = keys(&index);
+    // Each identity under its own id: one under another key is left out
+    // at load (deviation `store-shapes`).
     let store = |a_identity: &str, a_active: &str, b_identity: &str| {
+        let b_active = fc_json::parse(b_identity).unwrap();
+        let b_active = b_active.get("id").and_then(JsValue::as_str).unwrap();
         let text = format!(
-            r#"{{"version":2,"nextPublisherKeyIndex":5,"origins":{{"{A}":{{"activeIdentityId":"{a_active}","identities":{{"{a_active}":{a_identity}}},"feedGranted":true,"grantedAt":1,"feeds":{{}}}},"{B}":{{"activeIdentityId":"x","identities":{{"x":{b_identity}}},"feedGranted":true,"grantedAt":1,"feeds":{{}}}}}}}}"#
+            r#"{{"version":2,"nextPublisherKeyIndex":5,"origins":{{"{A}":{{"activeIdentityId":"{a_active}","identities":{{"{a_active}":{a_identity}}},"feedGranted":true,"grantedAt":1,"feeds":{{}}}},"{B}":{{"activeIdentityId":"{b_active}","identities":{{"{b_active}":{b_identity}}},"feedGranted":true,"grantedAt":1,"feeds":{{}}}}}}}}"#
         );
         FeedStore::load(Some(text.as_bytes()), 0, |_| false).store
     };
