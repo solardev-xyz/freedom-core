@@ -554,15 +554,15 @@ node ◀──POST (transport)─────┤◀───────swarm.bo
 ### Crates
 
 - **`fc-swarm`** (logic, exists) gains the write side: the chunk tree, the tar writer, feed topics and identifiers, update payloads, SOC bodies, and GSOC mining: `gsoc::Miner` with `step(n)`, and `gsoc::mine(target, identifier, proximity)`, both within the fixed bound.
-- **`fc-swarm-provider`** (logic, new): the method machines, sans-I/O. Each machine asks for what it needs (a node call, a part, a readiness answer, a store read or write, a signature, the clock) and is handed the answer. It holds validation and texts, the rules and SW-1 (with the re-check and the hold), batch choice (`selectBestBatch`, `swarm-service.js:140–213`, over bee-js's `mapPostageBatch` arithmetic, IEEE doubles included; powers of two with an integer exponent are exact, and a non-integer `depth` or `bucketDepth`, which no node sends, uses the platform's `pow`, which can differ from V8's in the last digit), tag and error mapping (`nodeWriteError`, `mapChunkReadError`, `isBatchNotYetKnownError`), the three stores' codecs and rules, and the charge each call needs ([below](#the-swarm-threads-memory)). 0012's `fc-approval` supplies the connection grant. It builds for iOS and Android, as AGENTS rule 2 requires.
+- **`fc-swarm-provider`** (logic, new): the method machines, sans-I/O. Each machine asks for what it needs (a node call, a part, a readiness answer, a store read or write, a signature, the clock) and is handed the answer. It holds validation and texts, the rules and SW-1 (with the re-check and the hold), batch choice (`selectBestBatch`, `swarm-service.js:140–213`, over bee-js's `mapPostageBatch` arithmetic, IEEE doubles included; powers of two with an integer exponent are exact, and a batch whose `depth` or `bucketDepth` isn't an integer, which zod's `number` admits but no node sends, is refused, so no fractional power is computed (deviation `batch-depth`)), tag and error mapping (`nodeWriteError`, `mapChunkReadError`, `isBatchNotYetKnownError`), the three stores' codecs and rules, and the charge each call needs ([below](#the-swarm-threads-memory)). 0012's `fc-approval` supplies the connection grant. It builds for iOS and Android, as AGENTS rule 2 requires.
 - **`freedom-cored`** runs them on a **swarm thread** beside naming's, chain's and dweb's, with the **mining lane** beside it. Chunk-tree hashing goes to 0009's hashing pool. The stores go through 0013's `fc-store` (durable writes, today's text byte for byte, SQLite through `rusqlite` with the schema kept, one writer).
 
 ### The swarm thread's memory
 
 The swarm thread's 64 MiB is reserved before use: when a request is admitted, and before each call that brings bytes in. `b64(m)` is 4⌈m / 3⌉.
 - **A request:** 64 KiB when it is admitted (its params, state and texts); for an upload, 300 KiB more when it starts ([Bounds](#bounds)); for a mining job, 4 KiB.
-- **A whole call,** reserved before its `shell.swarm_api` goes:
-  - a binary body (`chunk`, `feed_head`): `m + 2 × b64(m) + 16 KiB`, `m` the form's cap, at least 512 KiB for an error body and [its transcoding](#json-replies);
+- **A whole call,** reserved before its `shell.swarm_api` goes, and never less than 512 KiB, since any call can bring an error body and [its transcoding](#json-replies):
+  - a binary body (`chunk`, `feed_head`): `m + 2 × b64(m) + 16 KiB`, `m` the form's cap;
   - a JSON body (`stamps`, `stamp`, `tag`, `addresses`, an upload's result): `4m + 2 × b64(m) + 16 KiB + E × 256 B`, `E` the reply type's element cap below, the fourth `m` for a schema refusal's text ([JSON replies](#json-replies));
   - the parts: the reply as it is reassembled (`b64(m) + 16 KiB`), its parsed base64 text (`b64(m)`), the decoded bytes (`m`) and, for JSON, what the [typed reader](#json-replies) keeps (`2m + E × 256 B`). Each copy is dropped as the next is made. The charge counts them all at once.
 - **A streamed read for a page:** `n + 2 × b64(n) + 16 KiB`, where `n` is what the read may hold, and at least 512 KiB for an error: the size reserved from the site's budget for an explicit index, or the room left in its window for the latest entry. That covers the bytes as they come, the result's base64 and the serialized reply.
@@ -590,10 +590,10 @@ The core never parses a node's reply into a generic JSON value: a dense array of
   | Reply | Kept | `E` | Its charge at the form's cap |
   |---|---|---|---|
   | `/stamps` (1 MiB) | per batch, the fields `mapPostageBatch` reads, its label as it came, and `exists` and `propagating` (the batch choice reads both); for a reply bee-js's schema refuses, each field's type, for the refusal's text | 4,096 batches | 7.7 MiB |
-  | `/stamps/<b>` (64 KiB) | one batch, the same fields | 1 | 0.4 MiB |
-  | `/tags/<uid>` (64 KiB) | `normalizeTag`'s fields | 1 | 0.4 MiB |
-  | `/addresses` (64 KiB) | `overlay` and `pssPublicKey`; the underlays skipped | 1 | 0.4 MiB |
-  | an upload's result (64 KiB) | `reference` | 1 | 0.4 MiB |
+  | `/stamps/<b>` (64 KiB) | one batch, the same fields | 1 | 0.5 MiB (the floor) |
+  | `/tags/<uid>` (64 KiB) | `normalizeTag`'s fields | 1 | 0.5 MiB (the floor) |
+  | `/addresses` (64 KiB) | `overlay` and `pssPublicKey`; the underlays skipped | 1 | 0.5 MiB (the floor) |
+  | an upload's result (64 KiB) | `reference` | 1 | 0.5 MiB (the floor) |
 
 - **Skipped values** cost nothing kept: the reader counts their nesting, at most 64 deep, past which the call fails `error`, and keeps no element of them.
 - **A repeated key** keeps the last value, as `JSON.parse` does, overwriting in place.
@@ -660,6 +660,7 @@ Against the reference pin, which has #1057. F-1's and F-5's first deviations (`f
 | `reply-bounds` | bee-js reads any reply whole | each form's cap, reply headers and the reason phrase bounded; past a cap, `too_large` |
 | `error-body-bound` | bee-js reads a whole error body for its text | the text from the first 8 KiB |
 | `reply-syntax` | V8's `SyntaxError` text for a JSON reply that doesn't parse | -32603 `Swarm node reply is not valid JSON` |
+| `batch-depth` | a batch's sizes from a fractional `depth` or `bucketDepth` (`2 ** depth`, V8's `pow`) | the batch refused: -32603 `Swarm node reply has a non-integer batch depth` |
 | `session-transport` | Node's `fetch` for every HTTP call (F-6) | the node's transport |
 | `transport-error-text` | undici's message for each failure | one text per failure class |
 | `subscribe-proxy` (question 4) | a subscription to a remote node goes around the proxy and Tor | refused while a proxy or Tor is on: 4900 `Node not available: proxy-or-tor`; open ones end; the user is told |
@@ -715,12 +716,13 @@ Once decided:
 
 **2026-11-25, SWM-3's first findings:** the coordinator's technical calls, proposed, which the user may veto. Building the batch choice, the node errors and the `/stamps` reader against SWM-1's vectors found:
 - **bee-js's schema refusal reaches the page:** the `/stamps` reader also keeps each field's type, and the refusal's text is held to the form's cap (`reply-bounds`). `/stamps`' charge is 7.7 MiB.
-- **The error transcoder can write 5.25 times its body,** not four times, and holds each open object's members. The floor for an error body is 512 KiB, not 32 KiB.
+- **The error transcoder can write 5.25 times its body,** not four times, and holds each open object's members. The floor for an error body is 512 KiB, not 32 KiB, for every call.
 - **`page-upload.js` is a fourth error-text site,** and error bodies share the 64-level nesting bound.
 - **A reply that isn't JSON** gets one fixed text (`reply-syntax`).
 - **The reader keeps `exists` and `propagating`,** which the batch choice reads.
-- **A non-integer batch depth** uses the platform's `pow`; no node sends one.
-- **Two vector gaps,** for a later vectors change: `stamps.select`'s nine cases where the reference reads `/stamps` twice don't carry `stamps-one-read`, and no `errors` case reaches `fetchNode`'s own text (every one is a 500, which `readFeedPayload` reads as an empty feed).
+- **A non-integer batch depth** is refused (`batch-depth`): zod admits one, and computing `2 ** depth` for it as V8 does would need V8's own `pow`. No node sends one.
+- **Every whole call reserves at least 512 KiB,** the error floor, so the 64 KiB JSON forms' charges are 0.5 MiB.
+- **Vector gaps,** for a later vectors change: `stamps.select`'s nine cases where the reference reads `/stamps` twice don't carry `stamps-one-read`; no `errors` case reaches `fetchNode`'s own text (every one is a 500, which `readFeedPayload` reads as an empty feed); and the two new deviations, `reply-syntax` and `batch-depth`, have no case yet.
 
 **2026-11-24, SWM-1's findings:** the coordinator's technical calls, proposed, which the user may veto. Building the vectors against the reference (`integration/rust-core` at `dea09d2f`) found:
 - **#1062 is in the reference:** `sendPss` sends the compressed key, so `pss-recipient` is parity, not a deviation. The 128-hex form stays a forbidden call.
