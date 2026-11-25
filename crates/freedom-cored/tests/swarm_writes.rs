@@ -38,7 +38,7 @@ use std::path::{Path, PathBuf};
 
 use fc_json::JsValue;
 use fc_json::index::{Index, KeyOrder, Kind, Value as V};
-use fc_swarm_provider::machine::Body;
+use fc_swarm_provider::machine::{Body, Outcome};
 use fc_swarm_provider::stores::history::{self, Cell};
 use serde_json::json;
 use swarm_world::logic::write_node::WriteNode;
@@ -416,6 +416,57 @@ fn signing_main(marker: &Path, env: &[(&str, &str)]) -> Main {
     main
 }
 
+/// A case's world, set in the core afresh (D11): its clock, grants and
+/// `swarm-feeds.json`, a new history, the vault as the case has it; and
+/// main's script for it (the feed writes' node for `feeds`).
+fn set_up(
+    main: &mut Main,
+    vault: &mut Vault,
+    case: V<'_, '_>,
+    keys: &logic::Keys,
+    feeds: bool,
+) -> Script {
+    let script = Script {
+        world: logic::TestWorld::of(case),
+        node: if feeds {
+            logic::Node::new()
+        } else {
+            logic::Node::of(case, keys)
+        },
+        readiness: logic::publish_readiness(case),
+        subscribe_check: None,
+        key: logic::js(get(case, "origin")),
+        naming: None,
+        parts: BTreeMap::new(),
+        write_node: feeds.then(|| WriteNode::of(case, keys)),
+    };
+    let mut world = json!({
+        "reset": true,
+        "clock": script.world.now,
+        "grants": grants_json(&script.world),
+    });
+    if let Some(feeds) = case.get("feeds").filter(|f| f.kind() == Kind::String) {
+        world["feeds"] = json!(string(feeds));
+    }
+    main.world(world);
+    vault.set(main, get(case, "vault").is_str("unlocked"));
+    script
+}
+
+/// A step's `swarm.request` params, its parts in the script.
+fn prepare(script: &mut Script, step: V<'_, '_>, handoff: &logic::Handoff) -> String {
+    let name = handoff.name.clone().unwrap();
+    script.key = handoff.key.clone();
+    script.parts = parts_of(step);
+    let approval =
+        approval_of(&name, step).map_or(String::new(), |a| format!(r#","approval":"{a}""#));
+    format!(
+        r#"{{"method":{{"string":{}}},"params":{}{approval}}}"#,
+        serde_json::to_string(&name).unwrap(),
+        wire_typed(get(step, "params"))
+    )
+}
+
 /// What a group's run counted.
 #[derive(Debug, Default, PartialEq, Eq)]
 struct Counts {
@@ -471,30 +522,7 @@ fn play_group(main: &mut Main, marker: &Path, group: &[&str]) -> Counts {
         };
         let origin = logic::js(get(case, "origin"));
         let feeds = group == FEEDS;
-        let mut script = Script {
-            world: logic::TestWorld::of(case),
-            node: if feeds {
-                logic::Node::new()
-            } else {
-                logic::Node::of(case, &keys)
-            },
-            readiness: logic::publish_readiness(case),
-            subscribe_check: None,
-            key: origin.clone(),
-            naming: None,
-            parts: BTreeMap::new(),
-            write_node: feeds.then(|| WriteNode::of(case, &keys)),
-        };
-        let mut world = json!({
-            "reset": true,
-            "clock": script.world.now,
-            "grants": grants_json(&script.world),
-        });
-        if let Some(feeds) = case.get("feeds").filter(|f| f.kind() == Kind::String) {
-            world["feeds"] = json!(string(feeds));
-        }
-        main.world(world);
-        vault.set(main, get(case, "vault").is_str("unlocked"));
+        let mut script = set_up(main, &mut vault, case, &keys, feeds);
         let mut first = true;
         for (k, step) in steps.iter().enumerate() {
             let sid = if steps.len() > 1 {
@@ -522,15 +550,7 @@ fn play_group(main: &mut Main, marker: &Path, group: &[&str]) -> Counts {
                 first,
             );
             first = false;
-            script.key = handoff.key.clone();
-            script.parts = parts_of(*step);
-            let approval = approval_of(&name, *step)
-                .map_or(String::new(), |a| format!(r#","approval":"{a}""#));
-            let request = format!(
-                r#"{{"method":{{"string":{}}},"params":{}{approval}}}"#,
-                serde_json::to_string(&name).unwrap(),
-                wire_typed(get(*step, "params"))
-            );
+            let request = prepare(&mut script, *step, &handoff);
             let signed_before = lines(marker);
             let played = main.play(&mut script, &page(handoff.key.as_str()), &request);
             counts.played += 1;
@@ -655,4 +675,359 @@ fn every_feed_and_soc_case_plays_through_the_pipe() {
         }
     );
     assert!(lines(&marker) > 50, "{}", lines(&marker));
+}
+
+// ---------------------------------------------------------------------------
+// The stores' own paths through the core.
+
+/// The vectors, read once for a test.
+struct Vectors {
+    text: String,
+    keys: String,
+}
+
+impl Vectors {
+    fn read() -> Vectors {
+        Vectors {
+            text: logic::text_of("swarm.json"),
+            keys: logic::text_of("keys.json"),
+        }
+    }
+}
+
+fn case_of<'i, 't>(index: &'i Index<'t>, id: &str) -> V<'i, 't> {
+    get(index.root(), "methods")
+        .children()
+        .find(|c| get(*c, "id").is_str(id))
+        .unwrap_or_else(|| panic!("no case {id}"))
+}
+
+/// A one-step case staged as `play_group` stages it, up to its request:
+/// main's script, the request's params and the page's key.
+fn staged(
+    main: &mut Main,
+    vault: &mut Vault,
+    case: V<'_, '_>,
+    keys: &logic::Keys,
+    feeds: bool,
+) -> (Script, String, String) {
+    let mut script = set_up(main, vault, case, keys, feeds);
+    let step = get(case, "steps").children().next().unwrap();
+    let origin = logic::js(get(case, "origin"));
+    let handoff = logic::handoff(step, &origin, &mut script.world).unwrap();
+    main_writes(
+        main,
+        vault,
+        &mut script,
+        case,
+        step,
+        handoff.key.as_str(),
+        true,
+    );
+    let request = prepare(&mut script, step, &handoff);
+    (script, request, handoff.key.as_str().to_owned())
+}
+
+fn failure(outcome: &Outcome) -> (i32, String) {
+    match outcome {
+        Outcome::Error(f) => (f.code, f.message.as_str().to_owned()),
+        other => panic!("{other:?}"),
+    }
+}
+
+/// Before `core.hello` names `swarm_stores` (D3), every method that touches
+/// the stores answers `not_moved`, and the core reads and writes none of
+/// them: a `swarm-feeds.json` that doesn't parse stays as it is, nothing is
+/// kept aside, and no history or manifest file appears.
+#[test]
+fn not_moved_before_the_move_writes_nothing() {
+    let mut main = swarm_world::main_stores(&["swarm"], &[], &[]);
+    let root = main.core.grant_root.clone();
+    std::fs::write(root.join("swarm-feeds.json"), "{not json").unwrap();
+    main.world(json!({
+        "reset": true,
+        "grants": { "https://app.example": {
+            "origin": "https://app.example", "connectedAt": 1, "lastUsed": 1,
+            "autoApprove": { "publish": false, "feeds": false, "signing": false, "messaging": false },
+        } },
+    }));
+    for method in [
+        "swarm_listFeeds",
+        "swarm_readFeedEntry",
+        "swarm_publishData",
+        "swarm_publishFiles",
+        "swarm_publishChunk",
+        "swarm_createFeed",
+        "swarm_updateFeed",
+        "swarm_writeFeedEntry",
+        "swarm_writeSingleOwnerChunk",
+        "swarm_getSigningIdentity",
+    ] {
+        let request = format!(
+            r#"{{"method":{{"string":"{method}"}},"params":{{"object":[["name",{{"string":"blog"}}]]}},"approval":"user"}}"#
+        );
+        let id = main.request(&page("https://app.example"), &request);
+        let answer = main.core.response(id);
+        assert_eq!(answer["error"]["code"], "not_moved", "{method}: {answer}");
+        assert_eq!(answer["error"]["data"], json!({ "store": "swarm_stores" }));
+    }
+    let mut names: Vec<String> = std::fs::read_dir(&root)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().into_string().unwrap())
+        .filter(|n| n.starts_with("swarm-") || n.starts_with("publish-history"))
+        .collect();
+    names.sort();
+    assert_eq!(names, ["swarm-feeds.json"]);
+    assert_eq!(
+        std::fs::read_to_string(root.join("swarm-feeds.json")).unwrap(),
+        "{not json"
+    );
+    // The hello's echo leaves the name out.
+    let mut main = swarm_world::main_stores(&["swarm"], &["swarm_stores"], &[]);
+    assert!(main.world(json!({}))["memory"].is_number());
+}
+
+/// A failure at each step of `swarm-feeds.json`'s durable write: before
+/// the rename (`write`, `fsync`, `rename`) the change fails for its caller
+/// with the store's text and the file and the store stay as they were;
+/// at the directory's flush the change is in place, not durable, and made.
+/// A history statement that fails fails its request with its own text,
+/// and its row isn't there.
+#[test]
+fn a_failure_at_each_write_step() {
+    let dir = tempfile::tempdir().unwrap();
+    let marker = marker_in(&dir);
+    let hooks = dir.path().join("fail");
+    let mut main = signing_main(
+        &marker,
+        &[(
+            "FREEDOM_CORED_TEST_GRANT_WRITE_FAIL",
+            hooks.to_str().unwrap(),
+        )],
+    );
+    let root = main.core.grant_root.clone();
+    let vectors = Vectors::read();
+    let index = Index::new(&vectors.text).unwrap();
+    let keys_index = Index::new(&vectors.keys).unwrap();
+    let keys = logic::keys(&keys_index);
+    let mut vault = Vault { unlocked: true };
+    let case = case_of(&index, "create-feed-bee-wallet");
+    let after = string(get(get(case, "after"), "feeds"));
+    for step in ["write", "fsync", "rename", "flush"] {
+        let (mut script, request, key) = staged(&mut main, &mut vault, case, &keys, true);
+        let before = std::fs::read_to_string(root.join("swarm-feeds.json")).unwrap();
+        std::fs::write(&hooks, format!("swarm_feeds:{step}\n")).unwrap();
+        let played = main.play(&mut script, &page(&key), &request);
+        std::fs::remove_file(&hooks).unwrap();
+        let text = std::fs::read_to_string(root.join("swarm-feeds.json")).unwrap();
+        if step == "flush" {
+            assert!(matches!(played.outcome, Outcome::Result(_)), "{step}");
+            assert_eq!(text, after, "{step}");
+        } else {
+            assert_eq!(
+                failure(&played.outcome),
+                (
+                    -32603,
+                    "The Swarm feed store could not be written".to_owned()
+                ),
+                "{step}"
+            );
+            assert_eq!(text, before, "{step}: the file as it was");
+            // ...and the store too: the same request, the write working,
+            // makes the reference's change.
+            let (mut script, request, key) = staged(&mut main, &mut vault, case, &keys, true);
+            let played = main.play(&mut script, &page(&key), &request);
+            assert!(matches!(played.outcome, Outcome::Result(_)), "{step}");
+            assert_eq!(
+                std::fs::read_to_string(root.join("swarm-feeds.json")).unwrap(),
+                after,
+                "{step}"
+            );
+        }
+    }
+
+    // The history: its insert fails, so the upload doesn't start.
+    let case = case_of(&index, "publish-chunk-one-byte");
+    let (mut script, request, key) = staged(&mut main, &mut vault, case, &keys, false);
+    std::fs::write(&hooks, "swarm_history:write\n").unwrap();
+    let played = main.play(&mut script, &page(&key), &request);
+    std::fs::remove_file(&hooks).unwrap();
+    assert_eq!(
+        failure(&played.outcome),
+        (
+            -32603,
+            "The publish history could not be read or written".to_owned()
+        )
+    );
+    assert!(
+        played.calls.iter().all(|c| c.call.method() == "GET"),
+        "nothing uploaded"
+    );
+    assert_eq!(history_of(&root), "[]");
+}
+
+/// A feed store near its 16 MiB: a change that would pass it is refused,
+/// `store_full`, -32603 `Swarm feed store is full`, and the file and the
+/// store stay as they were (design 0015, Budgets).
+#[test]
+fn a_full_feed_store_refuses_the_record() {
+    use fc_swarm_provider::stores::feeds::{FeedStore, MAX_FILE_BYTES};
+    let dir = tempfile::tempdir().unwrap();
+    let marker = marker_in(&dir);
+    let mut main = signing_main(&marker, &[]);
+    let root = main.core.grant_root.clone();
+    let vectors = Vectors::read();
+    let index = Index::new(&vectors.text).unwrap();
+    let keys_index = Index::new(&vectors.keys).unwrap();
+    let keys = logic::keys(&keys_index);
+    let mut vault = Vault { unlocked: true };
+    let case = case_of(&index, "create-feed-bee-wallet");
+    let (mut script, request, key) = staged(&mut main, &mut vault, case, &keys, true);
+    // Another site's feed padded to leave the store 150 bytes below its
+    // bound: less than the new feed's record.
+    let file = root.join("swarm-feeds.json");
+    let padded = |pad: usize| {
+        let mut store = fc_json::parse(&std::fs::read_to_string(&file).unwrap()).unwrap();
+        let entry = fc_json::parse(&format!(
+            r#"{{"activeIdentityId":"bee-wallet","identities":{{"bee-wallet":{{"id":"bee-wallet","mode":"bee-wallet","publisherKeyIndex":null}}}},"feedGranted":false,"grantedAt":1,"feeds":{{"pad":{{"topic":"{}"}}}}}}"#,
+            "a".repeat(pad)
+        ))
+        .unwrap();
+        let mut origins = store.get("origins").unwrap().clone();
+        origins.set("https://pad.example", entry);
+        store.set("origins", origins);
+        FeedStore::load(Some(store.stringify().as_bytes()), 0, |_| false)
+            .store
+            .text()
+            .unwrap()
+    };
+    let base = padded(0).len();
+    let text = padded(MAX_FILE_BYTES - base - 150);
+    assert_eq!(text.len(), MAX_FILE_BYTES - 150);
+    std::fs::write(&file, &text).unwrap();
+    main.world(json!({ "reload": true }));
+    let played = main.play(&mut script, &page(&key), &request);
+    assert_eq!(
+        failure(&played.outcome),
+        (-32603, "Swarm feed store is full".to_owned())
+    );
+    assert_eq!(std::fs::read_to_string(&file).unwrap(), text);
+}
+
+/// A row left `uploading` when the core goes mid-upload is `failed` with
+/// `interrupted by app exit` once the next core opens the history (the
+/// reference's `sweepOrphans`).
+#[test]
+fn a_restart_sweeps_a_row_left_uploading() {
+    let mut main = swarm_world::main();
+    let root = main.core.grant_root.clone();
+    main.world(json!({
+        "reset": true,
+        "grants": { "https://app.example": {
+            "origin": "https://app.example", "connectedAt": 1, "lastUsed": 1,
+            "autoApprove": { "publish": false, "feeds": false, "signing": false, "messaging": false },
+        } },
+    }));
+    // An upload whose node never answers.
+    main.request(
+        &page("https://app.example"),
+        r#"{"method":{"string":"swarm_publishData"},"params":{"object":[["data",{"string":"hello"}],["contentType",{"string":"text/plain"}]]},"approval":"user"}"#,
+    );
+    loop {
+        let message = main.recv();
+        let id = message["id"].as_u64().unwrap();
+        match message["method"].as_str() {
+            Some("shell.swarm_ready") => main.answer(id, json!({ "ok": true })),
+            Some("approval.recheck") => main.answer(id, json!({ "live": true, "agent": false })),
+            Some("shell.swarm_api") if message["params"]["form"] == "stamps" => main.answer(
+                id,
+                json!({ "status": 200, "status_text": "OK", "headers": [],
+                    "body_base64": base64_of(STAMPS.as_bytes()) }),
+            ),
+            Some("shell.swarm_api") => break,
+            _ => panic!("{message}"),
+        }
+    }
+    let rows = history_of(&root);
+    assert!(rows.contains(r#""status":"uploading""#), "{rows}");
+    let mut main = main.restart(&[]);
+    // The thread has loaded the stores once it answers.
+    main.world(json!({}));
+    let rows = history_of(&root);
+    assert!(rows.contains(r#""status":"failed""#), "{rows}");
+    assert!(
+        rows.contains(r#""errorMessage":"interrupted by app exit""#),
+        "{rows}"
+    );
+}
+
+/// One usable batch, as the node lists it.
+const STAMPS: &str = r#"{"stamps":[{"batchID":"a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1","utilization":0,"usable":true,"label":"freedom","depth":22,"amount":"100000000000","bucketDepth":16,"blockNumber":1000,"immutableFlag":true,"exists":true,"batchTTL":864000}]}"#;
+
+fn base64_of(bytes: &[u8]) -> String {
+    use base64::Engine as _;
+    base64::engine::general_purpose::STANDARD.encode(bytes)
+}
+
+/// A moved profile (design 0015, D10; 0017, C5): the legacy
+/// `publish-history.json` at the profile's root is copied into the Freedom
+/// root before `confine`, imported from the copy into the history there,
+/// and the copy renamed `.migrated`; the next start drops the original.
+#[test]
+fn a_moved_profile_imports_its_publish_history_from_a_copy() {
+    let (_root, data, locks) = common::dirs();
+    let user_data = common::default_grant_root(&data);
+    let grant_root = user_data.join("freedom");
+    std::fs::create_dir_all(&grant_root).unwrap();
+    let legacy = r#"{"entries":[{"type":"file","name":"a.txt","status":"completed","reference":"aa","timestamp":"2026-01-01T00:00:00.000Z"}]}"#;
+    std::fs::write(user_data.join("publish-history.json"), legacy).unwrap();
+    let start = || {
+        let mut core = common::spawn_env(
+            "serve",
+            &data,
+            &locks,
+            &[
+                "--grant-root",
+                grant_root.to_str().unwrap(),
+                "--user-data-dir",
+                user_data.to_str().unwrap(),
+            ],
+            &[("FREEDOM_CORED_TEST_METHODS", "1")],
+        );
+        let hello = core.call_shell(
+            1,
+            "core.hello",
+            json!({
+                "protocol": 2, "shell_version": "test", "auto_lock_ms": 900_000,
+                "frames": ["stream"], "grant_root": grant_root,
+                "user_data_dir": user_data, "store_moved": ["swarm_stores"],
+            }),
+        );
+        assert_eq!(
+            hello["result"]["store_moved"],
+            json!(["swarm_stores"]),
+            "{hello}"
+        );
+        // The swarm thread has loaded the stores once it answers.
+        let world = core.call_shell(2, "test.swarm_world", json!({}));
+        assert!(world["result"].is_object(), "{world}");
+        core
+    };
+    let core = start();
+    let rows = history_of(&grant_root);
+    assert!(rows.contains(r#""name":"a.txt""#), "{rows}");
+    assert!(!user_data.join("publish-history.sqlite").exists());
+    assert_eq!(
+        std::fs::read_to_string(user_data.join("publish-history.json")).unwrap(),
+        legacy
+    );
+    assert!(!grant_root.join("publish-history.json").exists());
+    assert_eq!(
+        std::fs::read_to_string(grant_root.join("publish-history.json.migrated")).unwrap(),
+        legacy
+    );
+    drop(core);
+    let _core = start();
+    assert!(!user_data.join("publish-history.json").exists());
+    assert_eq!(history_of(&grant_root).matches("a.txt").count(), 1);
 }

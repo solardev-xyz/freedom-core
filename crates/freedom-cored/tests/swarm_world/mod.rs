@@ -229,6 +229,19 @@ pub fn main_in(
     }
 }
 
+impl Main {
+    /// The core killed, as a crash leaves it, and another started in the
+    /// same directories with `env`'s hooks: its grants and stores moved.
+    pub fn restart(self, env: &[(&str, &str)]) -> Main {
+        let Main { core, _dir, .. } = self;
+        let (grant_moved, store_moved) = (core.grant_moved.clone(), core.store_moved.clone());
+        drop(core);
+        let data = _dir.path().join("identity");
+        let locks = _dir.path().join("locks");
+        main_in(_dir, data, locks, &grant_moved, &store_moved, env)
+    }
+}
+
 /// A page's `PageContext` for key `key`.
 pub fn page(key: &str) -> Value {
     json!({ "origin": key, "top_origin": key, "frame": 1, "navigation": 1 })
