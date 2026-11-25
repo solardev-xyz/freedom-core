@@ -696,3 +696,50 @@ fn a_cancelled_check_lets_its_fetch_go_at_main_s_answer() {
         .unwrap();
     assert_eq!((engine.memory_used(), engine.requests()), (0, 0));
 }
+
+/// SW-1's hold defers an identity op's change: the op answers nothing until
+/// the hold ends, then its change is made and answered to it (its owners
+/// read after), and the file written once.
+#[test]
+fn a_held_change_is_answered_to_its_op() {
+    use fc_swarm_provider::machine::keeper::{HoldId, Keeper};
+    use fc_swarm_provider::stores::feeds::FeedStore;
+    let mut engine = moved(Bounds::default());
+    let mut io = Fake::default();
+    let text = r#"{"version":2,"nextPublisherKeyIndex":1,"origins":{"a":{"activeIdentityId":"app-scoped:0","identities":{"app-scoped:0":{"id":"app-scoped:0","mode":"app-scoped","publisherKeyIndex":0,"walletIndex":null,"label":"A","createdAt":1,"lastUsedAt":null},"bee-wallet":{"id":"bee-wallet","mode":"bee-wallet","publisherKeyIndex":null,"walletIndex":null,"label":"Bee","createdAt":1,"lastUsedAt":null}},"feedGranted":true,"grantedAt":1,"feeds":{}}}}"#;
+    let shared = engine.shared_mut();
+    shared.keeper = Keeper::new(FeedStore::load(Some(text.as_bytes()), 0, |_| false).store);
+    shared.keeper.hold(HoldId(99), JsString::from("a"));
+    engine
+        .op(
+            &mut io,
+            0,
+            1,
+            ops::IDENTITIES,
+            Some(r#"{"op":"activateIdentity","key":{"string":"a"},"identity_id":{"string":"bee-wallet"}}"#),
+            ops::Caller::Shell,
+        )
+        .unwrap();
+    assert!(io.answers.is_empty());
+    assert!(io.feed_texts.is_empty());
+    assert_eq!(engine.requests(), 1);
+    engine.release_hold(&mut io, HoldId(99));
+    engine.room(&mut io, 0).unwrap();
+    assert_eq!(io.feed_texts.len(), 1);
+    // The state with owners: the vault's owners asked, then the answer.
+    while let Some((tag, ask)) = io.vaults.pop() {
+        let answer = match ask {
+            VaultAsk::Owner(_) => VaultAnswer::Event(Event::Owner(Ok(Some([0x22; 20])))),
+            VaultAsk::Accounts => VaultAnswer::Accounts(Ok(Vec::new())),
+            other => panic!("{other:?}"),
+        };
+        engine.vaulted(&mut io, 0, tag, answer).unwrap();
+    }
+    let text = result_of(io.answer_of(1));
+    assert!(
+        text.contains(r#"["activeIdentityId",{"string":"bee-wallet"}]"#),
+        "{text}"
+    );
+    engine.written(&mut io, 0, 1).unwrap();
+    assert_eq!((engine.memory_used(), engine.requests()), (0, 0));
+}
