@@ -30,8 +30,8 @@ use crate::js::{is_integer, strip_bom, to_lower};
 use crate::json::{ReadError, Reader, Token};
 use crate::machine::node::{Failed, JSON_REPLY_CAP, transport_text};
 use crate::machine::{
-    AfterInsert, Approval, AskId, Body, Closing, Cx, Event, Failure, Form, NodeCall, Outcome,
-    RowEnd, SignKey, StoreWrite, World,
+    AfterInsert, Approval, AskId, Body, Closing, Cx, Event, Failure, Form, InFlight, NodeCall,
+    Outcome, RowEnd, SignKey, StoreWrite, World,
 };
 use crate::stamps::{BatchId, SelectOptions, read_stamps, select_best_batch};
 use crate::stores::feeds::{
@@ -701,15 +701,29 @@ pub(crate) fn inserted<W: World>(
 /// What a write still writes when the request ends without its machine
 /// (a cancel, the deadline, `busy`, a protocol error): its row `failed`,
 /// with the request's end as its text, unless the row's last update is
-/// already asked; an insert still in flight, once it answers.
+/// already asked, which is then reported in flight, with the one retry
+/// left unless it is the retry; an insert still in flight, once it
+/// answers.
 pub(crate) fn closing(
     row: Option<i64>,
     inserting: Option<AskId>,
     closed: bool,
+    last: Option<&Ending>,
     outcome: &Outcome,
     now: u64,
 ) -> Option<Closing> {
+    if let Some(ending) = last {
+        return row.map(|row| {
+            Closing::InFlight(InFlight {
+                id: ending.id,
+                row,
+                now,
+                retry: !matches!(ending.last, Last::Retry { .. }),
+            })
+        });
+    }
     if closed {
+        // The machine ended the row itself, and answered.
         return None;
     }
     let text = match outcome {

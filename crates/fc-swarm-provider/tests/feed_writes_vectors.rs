@@ -567,6 +567,8 @@ struct Thread<'k> {
     /// as the request emits them, and the most at once.
     open_calls: BTreeSet<AskId>,
     most_open: usize,
+    /// Writes the request asked after its outcome.
+    post_outcome_writes: usize,
 }
 
 impl<'k> Thread<'k> {
@@ -600,6 +602,7 @@ impl<'k> Thread<'k> {
             cancels_after_outcome: 0,
             open_calls: BTreeSet::new(),
             most_open: 0,
+            post_outcome_writes: 0,
         }
     }
 
@@ -614,6 +617,7 @@ impl<'k> Thread<'k> {
         self.cancels_after_outcome = 0;
         self.open_calls.clear();
         self.most_open = 0;
+        self.post_outcome_writes = 0;
         self.cancelled.clear();
         self.parts.clear();
         self.uploads.clear();
@@ -713,7 +717,10 @@ impl<'k> Thread<'k> {
                                 need: Need::Write(_),
                                 ..
                             },
-                        ) => self.answer(ask),
+                        ) => {
+                            self.post_outcome_writes += 1;
+                            self.answer(ask);
+                        }
                         _ => {}
                     }
                 }
@@ -2727,5 +2734,64 @@ fn a_failed_post_outcome_write_is_retried_once() {
             "{failing}"
         );
         assert!(thread.node.soc_posts == 0, "{failing}: nothing uploaded");
+    }
+}
+
+/// The request ends while the row's own last write is in flight: nothing
+/// more is asked unless it fails, and then the failed update with the
+/// write's error once (`history-retry`); with the machine's own retry in
+/// flight, nothing more at all.
+#[test]
+fn an_end_racing_the_rows_last_write_keeps_its_retry() {
+    let text = text_of("keys.json");
+    let index = Index::new(&text).unwrap();
+    let keys = keys(&index);
+    let is_history = |need: &Need| matches!(need, Need::Write(StoreWrite::History(_)));
+    let full = "SQLITE_FULL: database or disk is full";
+    // (failures of the completed update before the cancel, failures after
+    // it, post-outcome asks, the row's status and text)
+    let cases: [(usize, usize, usize, &str, Option<&str>); 5] = [
+        (0, 0, 0, "completed", None),
+        (0, 1, 1, "failed", Some(full)),
+        (0, 2, 1, "uploading", None),
+        // The machine's own retry is in flight at the end.
+        (1, 0, 0, "failed", Some(full)),
+        (1, 1, 0, "uploading", None),
+    ];
+    for (before, after, asked, status, message) in cases {
+        let what = format!("{before} then {after}");
+        let mut thread = gate_thread(&keys);
+        raw_soc(&mut thread);
+        // The bound's trim after the insert, then the completed update.
+        let trim = thread.run_until(is_history).expect("the trim");
+        thread.answer(trim);
+        let mut last = thread.run_until(is_history).expect("the completed update");
+        assert_eq!(thread.node.soc_posts, 1, "{what}: the SOC went up");
+        if before > 0 {
+            thread.failing_history = before;
+            thread.answer(last);
+            last = thread.run_until(is_history).expect("the machine's retry");
+        }
+        thread.failing_history = after;
+        thread.cancel();
+        thread.answer(last);
+        assert_eq!(thread.run(), Outcome::Cancelled, "{what}");
+        assert_eq!(thread.failing_history, 0, "{what}: every failure taken");
+        assert_eq!(
+            thread.post_outcome_writes, asked,
+            "{what}: asked after the end"
+        );
+        let rows = thread.history();
+        let row = &rows.as_array().unwrap()[0];
+        assert_eq!(
+            row.get("status").and_then(JsValue::as_str),
+            Some(status),
+            "{what}"
+        );
+        assert_eq!(
+            row.get("errorMessage").and_then(JsValue::as_str),
+            message,
+            "{what}"
+        );
     }
 }

@@ -343,11 +343,12 @@ impl SocWrite {
 
     /// What the request still writes when it ends without its machine.
     pub(crate) fn closing(&self, outcome: &Outcome) -> Option<Closing> {
-        let inserting = match self.stage {
-            Stage::Insert(id) => Some(id),
-            _ => None,
+        let (inserting, last) = match &self.stage {
+            Stage::Insert(id) => (Some(*id), None),
+            Stage::Ending(ending) => (None, Some(ending)),
+            _ => (None, None),
         };
-        closing(self.row, inserting, self.closed, outcome, self.now)
+        closing(self.row, inserting, self.closed, last, outcome, self.now)
     }
 
     fn end<W: World>(
