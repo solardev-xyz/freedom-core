@@ -455,6 +455,8 @@ impl FeedWrite {
                     }
                     Next::Error(message) => self.end(cx, Err(Fail::text(message))),
                     Next::Failed(failed) => self.end(cx, Err(Fail::transport(failed))),
+                    // A write's lookup never answers a read's head.
+                    Next::Head(_) => self.end(cx, Err(Fail::internal())),
                 }
             }
             Stage::Exists { id: asked, address } if asked == id => {

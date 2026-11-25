@@ -18,6 +18,12 @@
 //!   vault and checked as `createSwarmSigner` checks it; `POST
 //!   /soc/<o>/<id>` checked against the SOC's own address; answered `{
 //!   index }`.
+//! - **read** (`readFeedState`, after the signer's owner, with no batch and
+//!   no topic's turn): `feed_head` (deviation `index-probe`), whose
+//!   `swarm-feed-index` answers `{ exists: true, index }`; a 404 alone
+//!   falls back to the head probe, whose head answers the same and whose
+//!   missing index 0 answers `{ exists: false }`; any other error answer
+//!   is thrown with its text.
 //!
 //! The `topic` is the 32 bytes main computes (`Topic.fromString(…)`), as
 //! the grammar binds `<t> = topic`.
@@ -53,6 +59,11 @@ enum Stage {
     Manifest(AskId),
     Lock(AskId),
     Lookup {
+        id: AskId,
+        next: NextIndex,
+    },
+    /// A read's lookup of the latest index.
+    Read {
         id: AskId,
         next: NextIndex,
     },
@@ -96,6 +107,14 @@ impl ShellFeed {
             Stage::Owner(asked) if asked == id => match owner(SignKey::BeeWallet, event) {
                 Ok(owner) => {
                     self.owner = owner;
+                    if self.op == FeedOp::Read {
+                        let (next, call) = NextIndex::head(self.owner, self.topic);
+                        self.stage = Stage::Read {
+                            id: cx.whole(call),
+                            next,
+                        };
+                        return ShellStep::Wait;
+                    }
                     if self.batch.is_some() {
                         return self.write(cx);
                     }
@@ -143,6 +162,30 @@ impl ShellFeed {
                     Next::Index(index) => self.sign(cx, index),
                     Next::Error(message) => ShellStep::Done(shell::error(message)),
                     Next::Failed(class) => ShellStep::Done(shell::failed(class)),
+                    Next::Head(_) => ShellStep::Done(shell::internal()),
+                }
+            }
+            Stage::Read {
+                id: asked,
+                mut next,
+            } if asked == id => {
+                let step = match event {
+                    Event::Reply(reply) => next.reply(&reply),
+                    Event::Failed(class) => next.failed(class),
+                    _ => return ShellStep::Done(shell::internal()),
+                };
+                match step {
+                    Next::Call(call) => {
+                        self.stage = Stage::Read {
+                            id: cx.whole(call),
+                            next,
+                        };
+                        ShellStep::Wait
+                    }
+                    Next::Head(head) => ShellStep::Done(ShellOutcome::Result(feed_state(head))),
+                    Next::Error(message) => ShellStep::Done(shell::error(message)),
+                    Next::Failed(class) => ShellStep::Done(shell::failed(class)),
+                    Next::Index(_) => ShellStep::Done(shell::internal()),
                 }
             }
             Stage::Sign(signing) if signing.id == id => {
@@ -195,6 +238,7 @@ impl ShellFeed {
                 Stage::Manifest(cx.whole(feed_manifest(&self.owner, &self.topic, batch)))
             }
             FeedOp::Update { .. } => Stage::Lock(cx.lock(self.topic)),
+            FeedOp::Read => return ShellStep::Done(shell::internal()),
         };
         ShellStep::Wait
     }
@@ -258,6 +302,22 @@ impl ShellFeed {
             payload,
         }));
         ShellStep::Wait
+    }
+}
+
+/// `readFeedState`'s answer: `{ exists: true, index }`, the index as
+/// `feedIndexToNumber` makes it (a double), or `{ exists: false }`.
+fn feed_state(head: Option<u64>) -> Value {
+    match head {
+        #[expect(
+            clippy::cast_precision_loss,
+            reason = "Number(feedIndex.toBigInt()), as the reference reads it"
+        )]
+        Some(index) => Value::object([
+            ("exists", Value::Bool(true)),
+            ("index", Value::Number(index as f64)),
+        ]),
+        None => Value::object([("exists", Value::Bool(false))]),
     }
 }
 
