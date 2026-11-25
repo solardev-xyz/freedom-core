@@ -264,7 +264,8 @@ pub enum Effect {
     /// The next part of a node call's streamed body (`swarm.body`'s answer
     /// to main, for call `id`): its head once main asked for it
     /// ([`Event::BodyOpen`]), then its bytes within main's window, then
-    /// one terminal. A cancel of the call also ends its body `cancelled`.
+    /// exactly one terminal, which the request sends itself, before it
+    /// cancels the call when it ends.
     Body {
         id: AskId,
         out: BodyOut,
@@ -761,16 +762,43 @@ enum Running {
 }
 
 impl Running {
+    /// The terminal a stream the method writes still needs when the request
+    /// ends without its machine: an opened upload body that hasn't ended
+    /// ends `cancelled` (`internal` at a protocol error), exactly once
+    /// (design 0015, "Streams").
+    fn end(&mut self, outcome: &Outcome) -> Option<Effect> {
+        match self {
+            Running::Publish(m) => m.end(outcome),
+            _ => None,
+        }
+    }
+
     /// What a method still writes when the request ends without its
     /// machine (a cancel, the deadline, `busy`, a protocol error): an
     /// upload's history row ends `failed` (design 0015, "Deadlines and
-    /// cancel").
-    fn closing(&self, outcome: &Outcome) -> Option<StoreWrite> {
+    /// cancel"), at once, or once an insert in flight answers its rowid.
+    fn closing(&self, outcome: &Outcome) -> Option<Closing> {
         match self {
             Running::Publish(m) => m.closing(outcome),
             _ => None,
         }
     }
+}
+
+/// A method's last write after the request's outcome.
+pub(crate) enum Closing {
+    /// The write, now.
+    Write(StoreWrite),
+    /// The history insert `id` is in flight: its rowid is awaited, then
+    /// the row is trimmed around and ended `failed` with `text`, at `now`.
+    AfterInsert(AfterInsert),
+}
+
+/// The row an in-flight history insert makes, to end once it answers.
+pub(crate) struct AfterInsert {
+    pub id: AskId,
+    pub text: JsString,
+    pub now: u64,
 }
 
 /// One `swarm.request`.
@@ -779,6 +807,9 @@ pub struct Request {
     running: Option<Running>,
     asks: Asks,
     outcome: Option<Outcome>,
+    /// After the outcome, a history insert still in flight whose row must
+    /// end `failed` when it answers.
+    after: Option<AfterInsert>,
 }
 
 impl Request {
@@ -791,6 +822,7 @@ impl Request {
             running: None,
             asks: Asks::default(),
             outcome: None,
+            after: None,
         };
         let method = match &call.method {
             Value::String(s) if !s.is_empty() => s.clone(),
@@ -852,8 +884,15 @@ impl Request {
     /// Hands the request main's answer (or a part of it) to ask `id`.
     pub fn answer<W: World>(&mut self, world: &mut W, id: AskId, event: Event) {
         if self.outcome.is_some() {
-            // Taken and dropped: the request has its answer.
+            // Taken and dropped: the request has its answer. An insert that
+            // was in flight still gets its row trimmed around and ended.
             self.asks.open.remove(&id);
+            if let Some(after) = self.after.take_if(|a| a.id == id)
+                && let Event::Inserted(Ok(rowid)) = event
+                && let Some(write) = methods::publish::after_insert(rowid, &after.text, after.now)
+            {
+                self.asks.push(Need::Write(write), 0);
+            }
             return;
         }
         let cancelled = match self.asks.admit(id, &event) {
@@ -902,11 +941,19 @@ impl Request {
     }
 
     fn finish(&mut self, outcome: Outcome) {
+        let mut running = self.running.take();
+        if let Some(terminal) = running.as_mut().and_then(|m| m.end(&outcome)) {
+            self.asks.effects.push(terminal);
+        }
         self.asks.cancel_all();
-        if let Some(write) = self.running.take().and_then(|m| m.closing(&outcome)) {
+        match running.and_then(|m| m.closing(&outcome)) {
             // The one ask after the outcome: a write isn't called back, and
             // its answer is dropped.
-            self.asks.push(Need::Write(write), 0);
+            Some(Closing::Write(write)) => {
+                self.asks.push(Need::Write(write), 0);
+            }
+            Some(Closing::AfterInsert(after)) => self.after = Some(after),
+            None => {}
         }
         self.outcome = Some(outcome);
     }

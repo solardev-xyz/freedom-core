@@ -208,6 +208,20 @@ impl BodyWriter {
         }
     }
 
+    /// The terminal of a body that is open and not yet ended, now ended:
+    /// what the request sends when it ends without the machine. The part
+    /// it was copying is cancelled with the request's other asks.
+    pub(crate) fn terminal(&mut self, why: BodyAbort) -> Option<(AskId, BodyOut)> {
+        self.copy = None;
+        self.pending.clear();
+        self.queue.clear();
+        if !self.opened || self.ended {
+            return None;
+        }
+        self.ended = true;
+        Some((self.call, BodyOut::Abort(why)))
+    }
+
     /// Sends what the window allows, and takes the next piece once the
     /// last has gone.
     fn pump<W: World>(&mut self, cx: &mut Cx<'_, W>) -> Result<(), Fault> {
