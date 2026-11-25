@@ -523,7 +523,10 @@ async function buildStamps(env) {
           return { error: errorRecord(err), stamps_reads: node.requests.length };
         }
       });
-      select.push({ id: `${setId}/${callId}`, stamps, size, options, ...record });
+      // The core reads /stamps once per write (stamps-one-read): where the
+      // reference reads it twice, the core gives the same answer from one.
+      const once = record.stamps_reads > 1 ? { deviation: 'stamps-one-read', core: { stamps_reads: 1 } } : {};
+      select.push({ id: `${setId}/${callId}`, stamps, size, options, ...record, ...once });
     }
   }
   return { mapped, select };
@@ -582,7 +585,10 @@ async function buildErrors(env, methods) {
   ];
   for (const [site, method, fixedPath, call] of sites) {
     for (const [bodyId, body] of ERROR_BODIES) {
-      for (const [status, statusText] of site === 'bee-js-json' ? ERROR_STATUSES : [ERROR_STATUSES[0]]) {
+      // fetchNode's own text needs a status readFeedPayload doesn't read as
+      // an empty feed (it reads a 404 or a 500 so): a 503 too.
+      const statuses = site === 'bee-js-json' ? ERROR_STATUSES : site === 'fetch-node' ? [ERROR_STATUSES[0], ERROR_STATUSES[3]] : [ERROR_STATUSES[0]];
+      for (const [status, statusText] of statuses) {
         const match = fixedPath ? { method, path: fixedPath } : { method, prefix: method === 'GET' ? '/feeds/' : '/soc/' };
         const reply = { status, statusText, ...body };
         const record = await withReference(env, { node: { rules: [{ match, reply }] } }, async (ref, node, world) => {
