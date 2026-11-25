@@ -31,11 +31,13 @@
 //! `vectors/swarm.json` is the contract (AGENTS rule 5). The crate does no
 //! I/O: replies come in as bytes.
 
+pub mod chunks;
 pub mod errors;
 mod js;
 pub mod json;
 pub mod stamps;
 pub mod stores;
+pub mod value;
 pub mod zod;
 
 /// Why a node's reply isn't read (design 0015, "JSON replies").
