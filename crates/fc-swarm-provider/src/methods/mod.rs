@@ -9,9 +9,14 @@ use crate::machine::{Failure, Outcome};
 
 pub mod access;
 pub mod chunk_reads;
+pub mod create_feed;
 pub mod feed_index;
 pub mod feed_read;
+pub mod feed_write;
 pub mod read_data;
+pub mod signing;
+pub mod soc_write;
+pub(crate) mod writes;
 
 /// `LIMITS` (swarm-provider-ipc.js), as `getCapabilities` reports them.
 pub mod limits {

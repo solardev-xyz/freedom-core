@@ -19,6 +19,10 @@ pub const JSON_REPLY_CAP: usize = 64 * KIB;
 pub const CHARGE_FLOOR: usize = 512 * KIB;
 /// The serialized reply's room beside its body.
 const ENVELOPE: usize = 16 * KIB;
+/// What an upload reserves when it starts, beside its reply's charge: one
+/// incoming and one outgoing window, the chunker's leaf buffer and its
+/// references, and a tar header (design 0015, Bounds: "about 300 KiB").
+pub const UPLOAD_STATE: usize = 300 * KIB;
 
 /// Reply headers: at most this many, names and values and the reason
 /// phrase within their bounds (design 0015, `shell.swarm_api`).

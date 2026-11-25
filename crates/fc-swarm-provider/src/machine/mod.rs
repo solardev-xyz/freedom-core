@@ -36,6 +36,7 @@ use std::collections::BTreeMap;
 
 use fc_json::JsString;
 
+pub mod keeper;
 pub mod node;
 pub mod page;
 pub(crate) mod params;
@@ -49,6 +50,7 @@ pub use page::Failure;
 use crate::budgets::{self, ReadBudgets};
 use crate::errors::INVALID_PARAMS;
 use crate::methods;
+use crate::stores::feeds::FeedChange;
 use crate::stores::history::Statement;
 pub use crate::stores::manifests::Reads;
 use crate::stores::manifests::Save;
@@ -163,6 +165,19 @@ pub enum Need {
     Write(StoreWrite),
     /// A GSOC signer search on the mining lane (the Messaging piece).
     Mine(MineJob),
+    /// The vault: a signing key's owner address (swarm-signer.js's
+    /// `resolveSwarmSigner`), which needs the unlocked vault. Answered
+    /// [`Event::Owner`].
+    Owner(SignKey),
+    /// Main's checks just before an effect (an upload, an owner disclosed):
+    /// whether the page's name still answers and its document holds its
+    /// key, and Agent custody, read live (`meta.page.effect`'s guard, as
+    /// 0012's `approval.recheck`). Answered [`Event::Rechecked`].
+    Recheck,
+    /// Writes to one topic go one at a time (feed-service.js's
+    /// `withWriteLock`): answered [`Event::Locked`] once no other request
+    /// holds `topic`, which this request then holds until it ends.
+    Lock([u8; 32]),
 }
 
 /// What the vault signs: a SOC over `span ‖ payload` with `identifier`,
@@ -176,6 +191,24 @@ pub struct SignSoc {
     pub span: u64,
     pub payload: Vec<u8>,
     pub hold: Option<JsString>,
+    /// What the SOC is, the authorization's `soc` (0012, "A page's SOC").
+    pub kind: SocKind,
+}
+
+/// A page's SOC: a feed write's update, or a raw single-owner chunk.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SocKind {
+    Feed,
+    Raw,
+}
+
+impl SocKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            SocKind::Feed => "feed",
+            SocKind::Raw => "raw",
+        }
+    }
 }
 
 /// A signing key reference (design 0002): never key bytes.
@@ -188,10 +221,16 @@ pub enum SignKey {
 /// A store write.
 #[derive(Debug, Clone, PartialEq)]
 pub enum StoreWrite {
-    /// `swarm-feeds.json`'s text.
-    Feeds(String),
+    /// A change to `swarm-feeds.json`, made through SW-1's keeper
+    /// ([`keeper::Keeper::change`]) and written durably before it is
+    /// answered.
+    Feeds(FeedChange),
     /// `publish-history.sqlite`'s statements, in order.
     History(Vec<Statement>),
+    /// `addEntry`'s insert: the thread runs it, then the bound with the new
+    /// row kept (`history::trim(Some(rowid))`), and answers
+    /// [`Event::RowAdded`] with the rowid.
+    HistoryAdd(Statement),
     /// `swarm-manifest-grants.json`.
     Manifests(Save),
 }
@@ -217,6 +256,15 @@ pub enum Effect {
         id: AskId,
         bytes: usize,
     },
+    /// The next bytes of an upload's body, on the `swarm.body` stream main
+    /// opened for node call `id` (frames of 1 to 65,536 bytes, within main's
+    /// credit).
+    Body {
+        id: AskId,
+        bytes: Vec<u8>,
+    },
+    /// The upload's body is whole.
+    BodyEnd(AskId),
 }
 
 /// Main's answer to an ask, or a part of it.
@@ -247,6 +295,29 @@ pub enum Event {
     Written(Result<(), JsString>),
     /// The mining lane's answer.
     Mined(Mined),
+    /// The vault's answer to [`Need::Owner`]: the owner, `None` while the
+    /// vault is locked, or the vault's failure.
+    Owner(Result<Option<[u8; 20]>, JsString>),
+    /// Main's answer to [`Need::Recheck`].
+    Rechecked(Recheck),
+    /// The topic is this request's ([`Need::Lock`]).
+    Locked,
+    /// Main asked for an upload's body (`swarm.body { for }`): its stream
+    /// opens with 0007's window.
+    BodyOpen,
+    /// Main's credit for more of an upload's body.
+    BodyCredit(usize),
+    /// [`StoreWrite::HistoryAdd`]'s rowid, or the write's failure.
+    RowAdded(Result<i64, JsString>),
+}
+
+/// Main's checks just before an effect.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Recheck {
+    /// The page's name still answers and its document holds its key.
+    pub live: bool,
+    /// The tab is in Agent custody.
+    pub agent: bool,
 }
 
 /// A SOC signature.
@@ -338,6 +409,15 @@ enum Kind {
     Sign,
     Write,
     Mine,
+    Owner,
+    Recheck,
+    Lock,
+    /// A whole reply to a call whose body streams out (`swarm.body`).
+    Upload {
+        max: usize,
+        open: bool,
+    },
+    AddRow,
 }
 
 #[derive(Debug)]
@@ -365,6 +445,14 @@ impl Asks {
                 received: 0,
                 window: node::WINDOW,
             },
+            Need::Node(NodeCall {
+                body: Some(Body::Stream { .. }),
+                max_bytes,
+                ..
+            }) => Kind::Upload {
+                max: *max_bytes,
+                open: false,
+            },
             Need::Node(call) => Kind::Whole {
                 max: call.max_bytes,
             },
@@ -375,8 +463,12 @@ impl Asks {
                 window: node::WINDOW,
             },
             Need::Sign(_) => Kind::Sign,
+            Need::Write(StoreWrite::HistoryAdd(_)) => Kind::AddRow,
             Need::Write(_) => Kind::Write,
             Need::Mine(_) => Kind::Mine,
+            Need::Owner(_) => Kind::Owner,
+            Need::Recheck => Kind::Recheck,
+            Need::Lock(_) => Kind::Lock,
         };
         self.open.insert(
             id,
@@ -417,7 +509,7 @@ impl Asks {
         let terminal = match (&mut open.kind, event) {
             (_, Event::Refused(_)) => true,
             (Kind::Ready, Event::Ready(_)) => true,
-            (Kind::Whole { max }, Event::Reply(reply)) => {
+            (Kind::Whole { max } | Kind::Upload { max, .. }, Event::Reply(reply)) => {
                 let cap = if reply.ok() { *max } else { node::ERROR_BODY };
                 if !node::reply_in_bounds(reply.status, &reply.status_text, &reply.headers)
                     || reply.body.len() > cap
@@ -426,7 +518,23 @@ impl Asks {
                 }
                 true
             }
-            (Kind::Whole { .. }, Event::Failed(_)) => true,
+            (Kind::Whole { .. } | Kind::Upload { .. }, Event::Failed(_)) => true,
+            (Kind::Upload { open, .. }, Event::BodyOpen) => {
+                if *open {
+                    return Err(Protocol::SecondHead);
+                }
+                *open = true;
+                false
+            }
+            (Kind::Upload { open, .. }, Event::BodyCredit(bytes)) => {
+                if !*open {
+                    return Err(Protocol::BeforeHead);
+                }
+                if *bytes == 0 {
+                    return Err(Protocol::Frame);
+                }
+                false
+            }
             (Kind::Stream { head: false, .. }, Event::Reply(reply)) => {
                 if reply.ok()
                     || !node::reply_in_bounds(reply.status, &reply.status_text, &reply.headers)
@@ -498,7 +606,11 @@ impl Asks {
             (Kind::Hash, Event::Hashed(_))
             | (Kind::Sign, Event::Signed(_))
             | (Kind::Write, Event::Written(_))
-            | (Kind::Mine, Event::Mined(_)) => true,
+            | (Kind::Mine, Event::Mined(_))
+            | (Kind::Owner, Event::Owner(_))
+            | (Kind::Recheck, Event::Rechecked(_))
+            | (Kind::Lock, Event::Locked)
+            | (Kind::AddRow, Event::RowAdded(_)) => true,
             _ => return Err(Protocol::WrongKind),
         };
         let cancelled = open.cancelled;
@@ -537,6 +649,8 @@ pub(crate) struct Cx<'a, W> {
     pub world: &'a mut W,
     /// `normalizeOrigin(key)`: the key the request reads and charges under.
     pub origin: &'a JsString,
+    /// How main approved the request.
+    pub approval: Option<Approval>,
     asks: &'a mut Asks,
 }
 
@@ -601,6 +715,56 @@ impl<W: World> Cx<'_, W> {
     pub fn credit(&mut self, id: AskId, bytes: usize) {
         self.asks.credit(id, bytes);
     }
+
+    /// A whole call whose body streams out (`swarm.body`): its reply's
+    /// charge, and the upload's state (two windows, the chunker), which an
+    /// upload reserves when it starts (design 0015, "The swarm thread's
+    /// memory", Bounds).
+    pub fn upload(&mut self, call: NodeCall) -> AskId {
+        let charge = whole_charge(call.form).saturating_add(node::UPLOAD_STATE);
+        self.asks.push(Need::Node(call), charge)
+    }
+
+    /// The next bytes of upload `id`'s body.
+    pub fn body(&mut self, id: AskId, bytes: Vec<u8>) {
+        self.asks.effects.push(Effect::Body { id, bytes });
+    }
+
+    /// Upload `id`'s body is whole.
+    pub fn body_end(&mut self, id: AskId) {
+        self.asks.effects.push(Effect::BodyEnd(id));
+    }
+
+    /// A payload part (`shell.swarm_part`). Its bytes land in the upload's
+    /// state, reserved with the upload.
+    pub fn part(&mut self, part: u32) -> AskId {
+        self.asks.push(Need::Part(part), 0)
+    }
+
+    pub fn owner(&mut self, key: SignKey) -> AskId {
+        self.asks.push(Need::Owner(key), 0)
+    }
+
+    pub fn recheck(&mut self) -> AskId {
+        self.asks.push(Need::Recheck, 0)
+    }
+
+    pub fn lock(&mut self, topic: [u8; 32]) -> AskId {
+        self.asks.push(Need::Lock(topic), 0)
+    }
+
+    pub fn sign(&mut self, soc: SignSoc) -> AskId {
+        self.asks.push(Need::Sign(soc), 0)
+    }
+
+    pub fn write(&mut self, write: StoreWrite) -> AskId {
+        self.asks.push(Need::Write(write), 0)
+    }
+
+    /// Stops waiting for ask `id`.
+    pub fn cancel(&mut self, id: AskId) {
+        self.asks.cancel(id);
+    }
 }
 
 /// The request's method, running.
@@ -610,11 +774,16 @@ enum Running {
     ReadSoc(methods::chunk_reads::ReadSoc),
     ReadData(methods::read_data::ReadData),
     ReadFeed(methods::feed_read::ReadFeed),
+    Signing(methods::signing::Signing),
+    CreateFeed(methods::create_feed::CreateFeed),
+    FeedWrite(methods::feed_write::FeedWrite),
+    SocWrite(methods::soc_write::SocWrite),
 }
 
 /// One `swarm.request`.
 pub struct Request {
     origin: JsString,
+    approval: Option<Approval>,
     running: Option<Running>,
     asks: Asks,
     outcome: Option<Outcome>,
@@ -627,6 +796,7 @@ impl Request {
     pub fn start<W: World>(call: &Call, world: &mut W) -> Result<Request, NotBuilt> {
         let mut request = Request {
             origin: JsString::from(normalize_origin(call.key.as_str())),
+            approval: call.approval,
             running: None,
             asks: Asks::default(),
             outcome: None,
@@ -652,10 +822,24 @@ impl Request {
         let mut cx = Cx {
             world,
             origin: &origin,
+            approval: call.approval,
             asks: &mut request.asks,
         };
         let params = &call.params;
-        use methods::{access, chunk_reads, feed_read, read_data};
+        use methods::{access, chunk_reads, create_feed, feed_read, feed_write, read_data};
+        use methods::{signing, soc_write};
+        // "All other methods require permission" (executeSwarmMethod).
+        let writes = [
+            "swarm_createFeed",
+            "swarm_updateFeed",
+            "swarm_writeFeedEntry",
+            "swarm_writeSingleOwnerChunk",
+            "swarm_getSigningIdentity",
+        ];
+        if writes.iter().any(|m| method == *m) && !cx.connected() {
+            request.finish(Outcome::Error(Failure::not_connected()));
+            return Ok(request);
+        }
         let started = match method.as_str() {
             "swarm_requestAccess" => Err(access::request_access(&mut cx)),
             "swarm_getCapabilities" => {
@@ -671,6 +855,19 @@ impl Request {
             "swarm_readData" => read_data::ReadData::start(&mut cx, params).map(Running::ReadData),
             "swarm_readFeedEntry" => {
                 feed_read::ReadFeed::start(&mut cx, params).map(Running::ReadFeed)
+            }
+            "swarm_getSigningIdentity" => signing::Signing::start(&mut cx).map(Running::Signing),
+            "swarm_createFeed" => {
+                create_feed::CreateFeed::start(&mut cx, params).map(Running::CreateFeed)
+            }
+            "swarm_updateFeed" => {
+                feed_write::FeedWrite::update(&mut cx, params).map(Running::FeedWrite)
+            }
+            "swarm_writeFeedEntry" => {
+                feed_write::FeedWrite::entry(&mut cx, params).map(Running::FeedWrite)
+            }
+            "swarm_writeSingleOwnerChunk" => {
+                soc_write::SocWrite::start(&mut cx, params).map(Running::SocWrite)
             }
             other => return Err(NotBuilt(other.to_owned())),
         };
@@ -701,6 +898,7 @@ impl Request {
         let mut cx = Cx {
             world,
             origin: &self.origin,
+            approval: self.approval,
             asks: &mut self.asks,
         };
         let step = match running {
@@ -709,6 +907,10 @@ impl Request {
             Running::ReadSoc(m) => m.on(&mut cx, id, event),
             Running::ReadData(m) => m.on(&mut cx, id, event),
             Running::ReadFeed(m) => m.on(&mut cx, id, event),
+            Running::Signing(m) => m.on(&mut cx, id, event),
+            Running::CreateFeed(m) => m.on(&mut cx, id, event),
+            Running::FeedWrite(m) => m.on(&mut cx, id, event),
+            Running::SocWrite(m) => m.on(&mut cx, id, event),
         };
         if let Step::Done(outcome) = step {
             self.finish(outcome);
