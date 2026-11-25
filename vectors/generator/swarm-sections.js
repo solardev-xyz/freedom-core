@@ -718,27 +718,84 @@ async function buildStores(env) {
       'bzz://eth': originEntry(eth),
     } }), ops: [['getAllOriginEntries'], ['grantFeedAccess', ORIGIN, {}]] },
     { id: 'feeds-load-two-backups', before: '{', files: { 'swarm-feeds.corrupt.json': 'an older backup' }, ops: [['ensureAntWalletIdentity', ORIGIN, {}]] },
+    // store-refusal: the refused label is checked after the index was taken,
+    // and the reference's cache keeps it taken, so the preview and the next
+    // identity are index 1. A refused change changes nothing in the core:
+    // its answers are the reference's over the other operations.
+    { id: 'feeds-refused-label-keeps-index', before: null, deviation: 'store-refusal', coreRefuses: [0],
+      ops: [['createAppScopedIdentity', ORIGIN, { label: 'é'.repeat(40) + 'x' }], ['previewAppScopedIdentity', ORIGIN, {}],
+        ['createAppScopedIdentity', ORIGIN, {}]] },
+    // store-shapes: every site valid, so the reference keeps each feed map as
+    // the file has it (a feed that isn't an object, a map that is an array);
+    // the core holds them rebuilt as sanitizeV2OriginEntry rebuilds them
+    // (core_before): its answers are the reference's over that file.
+    { id: 'feeds-load-feed-maps-kept', deviation: 'store-shapes',
+      before: json(feedStore({ [ORIGIN]: originEntry(app0, { feeds: { good: feed, bad: 'x' } }), [OTHER]: originEntry(bee, { feeds: ['x'] }) }, 1)),
+      coreBefore: json(feedStore({ [ORIGIN]: originEntry(app0, { feeds: { good: feed } }), [OTHER]: originEntry(bee, { feeds: {} }) }, 1)),
+      ops: [['getAllOriginEntries'], ['getAllFeeds', ORIGIN], ['getAllFeeds', OTHER], ['grantFeedAccess', OTHER, {}]] },
+    // own-keys (freedom-browser#1327): a name on Object.prototype reads the
+    // inherited property, an empty "existing" feed (what swarm_createFeed
+    // answers bzz://undefined from); the core has no such feed.
+    { id: 'feeds-own-key-read', deviation: 'own-keys', before: json(feedStore({ [ORIGIN]: originEntry(bee) })),
+      ops: [['getFeed', ORIGIN, 'toString'], ['getFeed', ORIGIN, '__proto__']],
+      core: (record) => ({ ops: [{ result: null }, { result: null }], files: record.files }) },
+    // ... and a __proto__ feed sets the feed map's prototype, so it is never
+    // saved; in the core it is an own key like any other.
+    { id: 'feeds-own-key-proto-write', deviation: 'own-keys', before: json(feedStore({ [ORIGIN]: originEntry(bee) })),
+      ops: [['setFeed', ORIGIN, '__proto__', feed], ['getAllFeeds', ORIGIN]],
+      core: (record) => {
+        const saved = { ...feed, identityId: bee.id, createdAt: T0, lastUpdated: null, lastReference: null };
+        assert.deepEqual(record.ops[0].result, saved, 'setFeed answers the feed it stored');
+        return { ops: [{ result: saved }, { result: { ['__proto__']: saved } }],
+          files: { 'swarm-feeds.json': json(feedStore({ [ORIGIN]: originEntry(bee, { feeds: { ['__proto__']: saved } }) })) } };
+      } },
   ];
-  for (const run of FEED_RUNS) {
-    const record = await withReference(env, { feeds: run.before, vault: run.vault, files: run.files }, async (ref, node, world) => {
-      const ops = [];
-      for (const [op, ...args] of run.ops) {
-        const entry = { op, args: encode(args) };
-        try {
-          Object.assign(entry, answer('result', await ref.feedStore[op](...args)));
-        } catch (err) {
-          entry.error = errorRecord(err);
-        }
-        ops.push(entry);
+  const runFeeds = (spec) => withReference(env, { feeds: spec.before, vault: spec.vault, files: spec.files }, async (ref, node, world) => {
+    const ops = [];
+    for (const [op, ...args] of spec.ops) {
+      const entry = { op, args: encode(args) };
+      try {
+        Object.assign(entry, answer('result', await ref.feedStore[op](...args)));
+      } catch (err) {
+        entry.error = errorRecord(err);
       }
-      return { ops, files: dirFiles(world.dir, (name) => name.startsWith('swarm-feeds')) };
-    });
-    out.push({ id: run.id, kind: 'feeds', ...(run.deviation ? { deviation: run.deviation, core: run.core } : {}), before: run.before,
+      ops.push(entry);
+    }
+    return { ops, files: dirFiles(world.dir, (name) => name.startsWith('swarm-feeds')) };
+  });
+  // A deviation's `core`: the design's text, or the core's answer to each
+  // operation and the files after (`ops`, `files`), computed one of three
+  // ways: the reference over the file the core holds (`coreBefore`), the
+  // reference over the operations the core doesn't refuse (`coreRefuses`, each
+  // answering the reference's own refusal), or as the run states it.
+  const coreOf = async (run, record) => {
+    if (typeof run.core === 'function') return run.core(record);
+    if (run.coreBefore !== undefined) {
+      const core = await runFeeds({ ...run, before: run.coreBefore });
+      return { ops: core.ops.map(answerOf), files: core.files };
+    }
+    if (run.coreRefuses) {
+      for (const at of run.coreRefuses) assert.ok(record.ops[at].error, `${run.id}: operation ${at} is refused`);
+      const core = await runFeeds({ ...run, ops: run.ops.filter((_, at) => !run.coreRefuses.includes(at)) });
+      const answers = core.ops.map(answerOf);
+      return { ops: record.ops.map((entry, at) => (run.coreRefuses.includes(at) ? answerOf(entry) : answers.shift())), files: core.files };
+    }
+    return run.core;
+  };
+  for (const run of FEED_RUNS) {
+    const record = await runFeeds(run);
+    const deviation = run.deviation ? { deviation: run.deviation, core: await coreOf(run, record) } : {};
+    out.push({ id: run.id, kind: 'feeds', ...deviation, before: run.before, ...(run.coreBefore !== undefined ? { core_before: run.coreBefore } : {}),
       ...(run.files ? { before_files: run.files } : {}), ...(run.vault ? { vault: run.vault } : {}), ...record });
   }
   out.push(...await manifestRuns(env));
   out.push(...await historyRuns(env));
   return out;
+}
+
+/** An operation's answer alone: its result or error, as the vectors write it. */
+function answerOf(step) {
+  return Object.fromEntries(Object.entries(step).filter(([key]) => /^(result|error)(_typed)?$/.test(key)));
 }
 
 function dirFiles(dir, keep) {
@@ -777,51 +834,77 @@ async function manifestRuns(env) {
     { id: 'manifest-load-from-backup', manifests: '{', files: { 'swarm-manifest-grants.json.bak': JSON.stringify({ version: 1, records: { [site]: {
       managed: {}, acknowledged: { publish: { decision: 'individual', source: 'existing-grant', decidedAt: 1 } }, revision: 1 } } }) },
     steps: [['get'], ['disconnect']] },
+    // store-shapes: a record the reference loads and then fails on, one with
+    // no `acknowledged` (its decision throws). The core reads the file as one
+    // that doesn't parse, so it reads the .bak copy: its answers are the
+    // reference's over a file that doesn't parse beside the same copy.
+    { id: 'manifest-load-record-shape', deviation: 'store-shapes', coreReads: '{',
+      manifests: JSON.stringify({ version: 1, records: { [site]: { managed: {}, revision: 1 } } }, null, 2),
+      files: { 'swarm-manifest-grants.json.bak': JSON.stringify({ version: 1, records: { [site]: { managed: {}, acknowledged: {}, revision: 1 } } }, null, 2) },
+      steps: [['get'], ['check', { eager: true }, manifest(['publish'])], ['decide', 'allow']] },
+    // ... and a string revision, which the reference concatenates ('1' + 1).
+    // With no .bak copy, the core can't read the store (its load answers
+    // Unreadable): no step reads it, and nothing is written.
+    { id: 'manifest-load-string-revision', deviation: 'store-shapes', core: { load: 'unreadable' },
+      manifests: JSON.stringify({ version: 1, records: { [site]: {
+        managed: {}, acknowledged: { publish: { decision: 'individual', source: 'existing-grant', decidedAt: 1 } }, revision: '1' } } }, null, 2),
+      steps: [['useIndividual', 'publish'], ['get']] },
   ];
   const out = [];
-  for (const run of RUNS) {
-    const record = await withReference(env, { grants: run.grants ?? {}, feeds: run.feeds, manifests: run.manifests, files: run.files },
-      async (ref, node, world) => {
-        const steps = [];
-        let token = null;
-        for (const [op, ...args] of run.steps) {
-          const step = { op };
-          try {
-            let value;
-            if (op === 'check') {
-              const [options, text, status] = args;
-              step.manifest = text;
-              if (status) step.status = status;
-              value = await ref.manifests.checkManifest({ origin: site, committedUrl: url, ...options }, { fetchManifest: fetchWith(text, status) });
-              if (value.token) {
-                token = value.token;
-                value = { ...value, token: '(the consent token)' };
-              }
-              step.options = options;
-            } else if (op === 'decide') {
-              step.outcome = args[0];
-              value = await ref.manifests.decideManifest(token, args[0]);
-            } else if (op === 'useIndividual') {
-              step.capability = args[0];
-              value = await ref.manifests.useIndividual(site, args[0]);
-            } else if (op === 'disconnect') {
-              value = await ref.manifests.disconnect(site);
-            } else if (op === 'get') {
-              value = await ref.manifests.getRecord(site);
+  const runManifest = (run) => withReference(env, { grants: run.grants ?? {}, feeds: run.feeds, manifests: run.manifests, files: run.files },
+    async (ref, node, world) => {
+      const steps = [];
+      let token = null;
+      for (const [op, ...args] of run.steps) {
+        const step = { op };
+        try {
+          let value;
+          if (op === 'check') {
+            const [options, text, status] = args;
+            step.manifest = text;
+            if (status) step.status = status;
+            value = await ref.manifests.checkManifest({ origin: site, committedUrl: url, ...options }, { fetchManifest: fetchWith(text, status) });
+            if (value.token) {
+              token = value.token;
+              value = { ...value, token: '(the consent token)' };
             }
-            Object.assign(step, answer('result', value));
-          } catch (err) {
-            step.error = errorRecord(err);
+            step.options = options;
+          } else if (op === 'decide') {
+            step.outcome = args[0];
+            value = await ref.manifests.decideManifest(token, args[0]);
+          } else if (op === 'useIndividual') {
+            step.capability = args[0];
+            value = await ref.manifests.useIndividual(site, args[0]);
+          } else if (op === 'disconnect') {
+            value = await ref.manifests.disconnect(site);
+          } else if (op === 'get') {
+            value = await ref.manifests.getRecord(site);
           }
-          steps.push(step);
+          Object.assign(step, answer('result', value));
+        } catch (err) {
+          step.error = errorRecord(err);
         }
-        return {
-          steps,
-          grants_after: world.grants,
-          files: dirFiles(world.dir, (name) => name.startsWith('swarm-manifest-grants') || name === 'swarm-feeds.json'),
-        };
-      });
-    out.push({ id: run.id, kind: 'manifests', site, before: run.manifests ?? null, ...(run.files ? { before_files: run.files } : {}),
+        steps.push(step);
+      }
+      return {
+        steps,
+        grants_after: world.grants,
+        files: dirFiles(world.dir, (name) => name.startsWith('swarm-manifest-grants') || name === 'swarm-feeds.json'),
+      };
+    });
+  // A store-shapes case's `core`: unreadable, or the reference's run with the
+  // file as the core reads it (`coreReads`, a text that doesn't parse), which
+  // must write the file, so nothing of that text is left.
+  const coreOf = async (run) => {
+    if (run.coreReads === undefined) return run.core;
+    const core = await runManifest({ ...run, manifests: run.coreReads });
+    assert.notEqual(core.files['swarm-manifest-grants.json'], run.coreReads, `${run.id}: the core's run writes the file`);
+    return { steps: core.steps.map(answerOf), grants_after: core.grants_after, files: core.files };
+  };
+  for (const run of RUNS) {
+    const record = await runManifest(run);
+    const deviation = run.deviation ? { deviation: run.deviation, core: await coreOf(run) } : {};
+    out.push({ id: run.id, kind: 'manifests', ...deviation, site, before: run.manifests ?? null, ...(run.files ? { before_files: run.files } : {}),
       grants: run.grants ?? {}, feeds: run.feeds ? JSON.stringify(run.feeds, null, 2) : null, ...record });
   }
   return out;
@@ -829,6 +912,29 @@ async function manifestRuns(env) {
 
 async function historyRuns(env) {
   const out = [];
+  // Local time is UTC (generate.js sets TZ before any thread starts), so the
+  // cases that read a time without an offset as local time are the same on
+  // every machine.
+  assert.equal(Date.parse('2000-01-01T00:00:00'), Date.UTC(2000, 0, 1), 'the swarm vectors run with TZ=UTC');
+  // legacy-dates: legacy timestamps Date.parse takes in V8's own formats or in
+  // local time. The core takes only ECMAScript's date-time format with an
+  // offset, or a date alone (UTC as for the reference): `date: false` marks
+  // the others, which it imports at the open's time.
+  const LEGACY = [
+    { date: false, entry: { type: 'data', name: 'toUTCString', timestamp: 'Sun, 01 Jun 2025 10:00:00 GMT' } },
+    { date: false, entry: { type: 'file', name: 'toString', timestamp: 'Sun Jun 01 2025 13:00:00 GMT+0200 (Central European Summer Time)' } },
+    { date: false, entry: { type: 'data', name: 'a space for the T', status: 'failed', timestamp: '2025-06-01 12:00:00Z' } },
+    { date: false, entry: { type: 'directory', name: 'local time', timestamp: '2025-06-01T13:00:00' } },
+    { date: false, entry: { type: 'data', name: 'a local date', timestamp: 'June 2, 2025' } },
+    { date: false, entry: { type: 'data', name: 'a number', timestamp: '5' } },
+    { date: true, entry: { type: 'data', name: 'an offset', timestamp: '2025-06-01T16:00:00+02:00' } },
+    { date: true, entry: { type: 'data', name: 'a date alone', timestamp: '2025-06-03' } },
+  ];
+  const legacyFile = (entries) => ({ 'publish-history.json': JSON.stringify({ entries }) });
+  // history-blobs: a BLOB cell, which no writer of the reference makes,
+  // written into a first session's row; the core refuses the read that meets it.
+  const blobSeed = [['addEntry', { type: 'data', name: 'a', status: 'completed', origin: C.ORIGIN }]];
+  const blobRefused = (run) => (record) => ({ ops: record.ops.map(() => ({ refused: { reason: 'blob', column: run.blob.column } })), rows: record.rows });
   const RUNS = [
     { id: 'history-schema-and-rows', ops: [
       ['addEntry', { type: 'data', name: 'Published data', status: 'uploading', origin: C.ORIGIN, bytesSize: 5 }],
@@ -847,7 +953,16 @@ async function historyRuns(env) {
     ] }) }, ops: [['getEntries']] },
     { id: 'history-json-already-migrated', userData: { 'publish-history.json': '{"entries":[{"type":"data"}]}', 'publish-history.json.migrated': '{}' }, ops: [['getEntries']] },
     { id: 'history-json-unparseable', userData: { 'publish-history.json': '{' }, ops: [['getEntries']] },
+    // legacy-dates: the core's answers are the reference's over the same file
+    // with each timestamp the core doesn't take removed (Date.parse of none is
+    // NaN, so the import takes the open's time).
+    { id: 'history-json-legacy-dates', deviation: 'legacy-dates', userData: legacyFile(LEGACY.map((l) => l.entry)),
+      coreUserData: legacyFile(LEGACY.map(({ date, entry: { timestamp, ...rest } }) => (date ? { ...rest, timestamp } : rest))), ops: [['getEntries']] },
+    { id: 'history-blob-name', deviation: 'history-blobs', seed: blobSeed, blob: { id: 1, column: 'name', hex: '61' }, ops: [['getEntries']] },
+    { id: 'history-blob-started-at-date', deviation: 'history-blobs', seed: blobSeed, blob: { id: 1, column: 'started_at', hex: '30' }, ops: [['getEntries']] },
+    { id: 'history-blob-started-at-throws', deviation: 'history-blobs', seed: blobSeed, blob: { id: 1, column: 'started_at', hex: '61' }, ops: [['getEntries']] },
   ];
+  for (const run of RUNS) if (run.blob) run.core = blobRefused(run);
   // history-bound: the reference keeps every row; the core keeps 10,000, the oldest finished rows going first.
   {
     const record = await withReference(env, {}, async (ref) => {
@@ -859,37 +974,57 @@ async function historyRuns(env) {
       args: [{ type: 'chunk', status: 'completed', origin: C.ORIGIN, bytesSize: '<i>' }] }], ...record,
     core: { rows: { n: 10000, first: 2, last: 10001 } } });
   }
+  // A BLOB cell as the vectors write it: { blob: hex }.
+  const cells = (row) => Object.fromEntries(Object.entries(row).map(([key, value]) => [key, Buffer.isBuffer(value) ? { blob: value.toString('hex') } : value]));
+  const runHistory = (run) => withReference(env, { files: run.userData, clock: C.T0 + 1000 }, async (ref, node, world) => {
+    if (run.seedFile) {
+      ref.history.closeDb();
+      fs.writeFileSync(path.join(world.dir, 'publish-history.sqlite'), Buffer.from(run.seedFile, 'base64'));
+    }
+    const ops = [];
+    for (const [op, ...args] of run.ops) {
+      const entry = { op, args };
+      try {
+        Object.assign(entry, answer('result', ref.history[op](...args)));
+      } catch (err) {
+        entry.error = errorRecord(err);
+      }
+      ops.push(entry);
+    }
+    const db = ref.history.getDb();
+    const schema = db.prepare("SELECT type, name, tbl_name, sql FROM sqlite_master WHERE name NOT LIKE 'sqlite_%' ORDER BY type, name").all();
+    const pragmas = { user_version: db.pragma('user_version', { simple: true }), journal_mode: db.pragma('journal_mode', { simple: true }) };
+    const rows = db.prepare('SELECT * FROM publishes ORDER BY id').all().map(cells);
+    return { ops, schema, pragmas, rows, user_data: dirFiles(world.dir, (name) => name.startsWith('publish-history.json')) };
+  });
+  // A deviation's `core`: the core's answer to each operation and the rows
+  // after (`ops`, `rows`), from the reference over the legacy file as the core
+  // imports it (`coreUserData`), or as the run states it.
+  const coreOf = async (run, record) => {
+    if (typeof run.core === 'function') return run.core(record);
+    const core = await runHistory({ ...run, userData: run.coreUserData });
+    return { ops: core.ops.map(answerOf), rows: core.rows };
+  };
   for (const run of RUNS) {
     if (run.seed) {
-      // A first session's rows, left `uploading` when it ended.
+      // A first session's rows, left `uploading` when it ended (swept at the
+      // next open), and a BLOB cell written into one through the reference's
+      // own connection.
       run.seedFile = await withReference(env, {}, async (ref, node, world) => {
         for (const [op, arg] of run.seed) ref.history[op](arg);
+        if (run.blob) {
+          const { id, column, hex } = run.blob;
+          assert.ok(['name', 'started_at'].includes(column));
+          ref.history.getDb().prepare(`UPDATE publishes SET ${column} = ? WHERE id = ?`).run(Buffer.from(hex, 'hex'), id);
+        }
         ref.history.closeDb();
         return fs.readFileSync(path.join(world.dir, 'publish-history.sqlite')).toString('base64');
       });
     }
-    const record = await withReference(env, { files: run.userData, clock: C.T0 + 1000 }, async (ref, node, world) => {
-      if (run.seedFile) {
-        ref.history.closeDb();
-        fs.writeFileSync(path.join(world.dir, 'publish-history.sqlite'), Buffer.from(run.seedFile, 'base64'));
-      }
-      const ops = [];
-      for (const [op, ...args] of run.ops) {
-        const entry = { op, args };
-        try {
-          Object.assign(entry, answer('result', ref.history[op](...args)));
-        } catch (err) {
-          entry.error = errorRecord(err);
-        }
-        ops.push(entry);
-      }
-      const db = ref.history.getDb();
-      const schema = db.prepare("SELECT type, name, tbl_name, sql FROM sqlite_master WHERE name NOT LIKE 'sqlite_%' ORDER BY type, name").all();
-      const pragmas = { user_version: db.pragma('user_version', { simple: true }), journal_mode: db.pragma('journal_mode', { simple: true }) };
-      const rows = db.prepare('SELECT * FROM publishes ORDER BY id').all();
-      return { ops, schema, pragmas, rows, user_data: dirFiles(world.dir, (name) => name.startsWith('publish-history.json')) };
-    });
-    out.push({ id: run.id, kind: 'history', ...(run.seed ? { seeded: run.seed } : {}), ...(run.userData ? { user_data_before: run.userData } : {}), ...record });
+    const record = await runHistory(run);
+    const deviation = run.deviation ? { deviation: run.deviation, core: await coreOf(run, record) } : {};
+    out.push({ id: run.id, kind: 'history', ...deviation, ...(run.seed ? { seeded: run.seed } : {}), ...(run.blob ? { blob: run.blob } : {}),
+      ...(run.userData ? { user_data_before: run.userData } : {}), ...record });
   }
   return out;
 }

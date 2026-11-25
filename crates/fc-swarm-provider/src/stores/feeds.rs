@@ -35,7 +35,7 @@
 //!   `sanitizeV2OriginEntry` rebuilds it, even when every site is valid
 //!   (the reference then keeps the file's sites as they are): the core
 //!   never holds a feed map it can't read as one. No reference writer makes
-//!   one.
+//!   one (deviation `store-shapes`, `feeds-load-feed-maps-kept`).
 //! - `getEthereumWalletIdentityReferences` isn't here: it orders origins
 //!   with `localeCompare`, ICU's collation, and its caller is the account
 //!   removal's wiring.

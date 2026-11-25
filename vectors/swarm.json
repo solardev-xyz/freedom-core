@@ -465,7 +465,7 @@
     "feeds": "topic and identifier (bee-js), update (feed-service.js's updateFeed and writeFeedPayload, write-side.json's shape), index_run and entry_exists (from the methods that ran them), metered_read (readFeedPayload over a recording meter: each charge and reserve, refused or not).",
     "gsoc": "bee-js's gsocMine (write-side.json's shape): the signer's index, key, owner and SOC address, or its error.",
     "errors": "http_error: a node error at each call site (bee-js's JSON and array-buffer calls, #1057's fetchNode, the SOC upload, page-upload.js): the error's class, message and data, and isChunkNotFoundError (fetchNode at 500, which readFeedPayload reads as an empty feed, and at 503, which reaches its own text); past 8 KiB, `core` is the same reader over the first 8,192 bytes (error-body-bound). mapping: the method cases that show nodeWriteError's and mapChunkReadError's mappings.",
-    "stores": "feeds: feed-store.js's operations from a file's text, each result or error, and the files after (backups included); manifests: permission-manifests.js's check, decide, useIndividual, disconnect and get over scripted manifests, the grants and files after; history: publish-history.js's operations, the schema, pragmas and rows."
+    "stores": "feeds: feed-store.js's operations from a file's text, each result or error, and the files after (backups included); manifests: permission-manifests.js's check, decide, useIndividual, disconnect and get over scripted manifests, the grants and files after; history: publish-history.js's operations (after a first session's, `seeded`, with a BLOB cell written into one of its rows where `blob` says), the schema, pragmas and rows (a BLOB cell as { blob: hex }). Local time is UTC (generate.js sets TZ). A case marked deviation records the reference's outcome, and `core` the core's: index-allocation's as text, history-bound's row count, and for the others what the case records, each answer in the form the case's own take: feeds `ops` (each operation's answer) and `files`; manifests `steps`, `grants_after` and `files`, or `load: unreadable` (the core reads neither the file nor a .bak copy: no step reads the store, and nothing is written); history `ops` and `rows`, with `refused` { reason: blob, column } for a read the core refuses (history-blobs). Where the core's answers are the reference's own over another input, that input is: for store-refusal, the operations but the refused one, whose answer is the reference's refusal; for store-shapes, the feed store as the core holds it (`core_before`, each feed map rebuilt as sanitizeV2OriginEntry does) or a manifest file that doesn't parse, beside the same .bak copy; for legacy-dates, the legacy file with each timestamp the core doesn't take removed."
   },
   "deviations": {
     "feed-entry-bound": {
@@ -664,6 +664,36 @@
     "history-bound": {
       "cases": [
         "stores/history-10001-rows"
+      ]
+    },
+    "history-blobs": {
+      "cases": [
+        "stores/history-blob-name",
+        "stores/history-blob-started-at-date",
+        "stores/history-blob-started-at-throws"
+      ]
+    },
+    "store-shapes": {
+      "cases": [
+        "stores/feeds-load-feed-maps-kept",
+        "stores/manifest-load-record-shape",
+        "stores/manifest-load-string-revision"
+      ]
+    },
+    "store-refusal": {
+      "cases": [
+        "stores/feeds-refused-label-keeps-index"
+      ]
+    },
+    "own-keys": {
+      "cases": [
+        "stores/feeds-own-key-read",
+        "stores/feeds-own-key-proto-write"
+      ]
+    },
+    "legacy-dates": {
+      "cases": [
+        "stores/history-json-legacy-dates"
       ]
     },
     "store-writes": {
@@ -120201,6 +120231,444 @@
       }
     },
     {
+      "id": "feeds-refused-label-keeps-index",
+      "kind": "feeds",
+      "deviation": "store-refusal",
+      "core": {
+        "ops": [
+          {
+            "error": {
+              "name": "Error",
+              "message": "Publisher identity label must be 80 bytes or less"
+            }
+          },
+          {
+            "result": {
+              "id": "app-scoped:0",
+              "mode": "app-scoped",
+              "publisherKeyIndex": 0,
+              "walletIndex": null,
+              "label": "App-scoped identity 1",
+              "createdAt": 1767225600123,
+              "lastUsedAt": null,
+              "owner": "0xA274614c1D3425568Fd100B30322287c86085220",
+              "stored": false,
+              "preview": true,
+              "shared": false,
+              "origin": "https://app.example"
+            }
+          },
+          {
+            "result": {
+              "activeIdentityId": "app-scoped:0",
+              "feedGranted": false,
+              "grantedAt": 1767225600123,
+              "identities": {
+                "app-scoped:0": {
+                  "id": "app-scoped:0",
+                  "mode": "app-scoped",
+                  "publisherKeyIndex": 0,
+                  "walletIndex": null,
+                  "label": "App-scoped identity 1",
+                  "createdAt": 1767225600123,
+                  "lastUsedAt": 1767225600123
+                }
+              },
+              "feeds": {},
+              "identityMode": "app-scoped",
+              "publisherKeyIndex": 0,
+              "walletIndex": null
+            }
+          }
+        ],
+        "files": {
+          "swarm-feeds.json": "{\n  \"version\": 2,\n  \"nextPublisherKeyIndex\": 1,\n  \"origins\": {\n    \"https://app.example\": {\n      \"activeIdentityId\": \"app-scoped:0\",\n      \"feedGranted\": false,\n      \"grantedAt\": 1767225600123,\n      \"identities\": {\n        \"app-scoped:0\": {\n          \"id\": \"app-scoped:0\",\n          \"mode\": \"app-scoped\",\n          \"publisherKeyIndex\": 0,\n          \"walletIndex\": null,\n          \"label\": \"App-scoped identity 1\",\n          \"createdAt\": 1767225600123,\n          \"lastUsedAt\": 1767225600123\n        }\n      },\n      \"feeds\": {}\n    }\n  }\n}"
+        }
+      },
+      "before": null,
+      "ops": [
+        {
+          "op": "createAppScopedIdentity",
+          "args": {
+            "array": [
+              {
+                "string": "https://app.example"
+              },
+              {
+                "object": [
+                  [
+                    "label",
+                    {
+                      "string": "ééééééééééééééééééééééééééééééééééééééééx"
+                    }
+                  ]
+                ]
+              }
+            ]
+          },
+          "error": {
+            "name": "Error",
+            "message": "Publisher identity label must be 80 bytes or less"
+          }
+        },
+        {
+          "op": "previewAppScopedIdentity",
+          "args": {
+            "array": [
+              {
+                "string": "https://app.example"
+              },
+              {
+                "object": []
+              }
+            ]
+          },
+          "result": {
+            "id": "app-scoped:1",
+            "mode": "app-scoped",
+            "publisherKeyIndex": 1,
+            "walletIndex": null,
+            "label": "App-scoped identity 2",
+            "createdAt": 1767225600123,
+            "lastUsedAt": null,
+            "owner": "0xd2e7208e8026bf96945d56CBCae2f509cC6e4748",
+            "stored": false,
+            "preview": true,
+            "shared": false,
+            "origin": "https://app.example"
+          }
+        },
+        {
+          "op": "createAppScopedIdentity",
+          "args": {
+            "array": [
+              {
+                "string": "https://app.example"
+              },
+              {
+                "object": []
+              }
+            ]
+          },
+          "result": {
+            "activeIdentityId": "app-scoped:1",
+            "feedGranted": false,
+            "grantedAt": 1767225600123,
+            "identities": {
+              "app-scoped:1": {
+                "id": "app-scoped:1",
+                "mode": "app-scoped",
+                "publisherKeyIndex": 1,
+                "walletIndex": null,
+                "label": "App-scoped identity 2",
+                "createdAt": 1767225600123,
+                "lastUsedAt": 1767225600123
+              }
+            },
+            "feeds": {},
+            "identityMode": "app-scoped",
+            "publisherKeyIndex": 1,
+            "walletIndex": null
+          }
+        }
+      ],
+      "files": {
+        "swarm-feeds.json": "{\n  \"version\": 2,\n  \"nextPublisherKeyIndex\": 2,\n  \"origins\": {\n    \"https://app.example\": {\n      \"activeIdentityId\": \"app-scoped:1\",\n      \"feedGranted\": false,\n      \"grantedAt\": 1767225600123,\n      \"identities\": {\n        \"app-scoped:1\": {\n          \"id\": \"app-scoped:1\",\n          \"mode\": \"app-scoped\",\n          \"publisherKeyIndex\": 1,\n          \"walletIndex\": null,\n          \"label\": \"App-scoped identity 2\",\n          \"createdAt\": 1767225600123,\n          \"lastUsedAt\": 1767225600123\n        }\n      },\n      \"feeds\": {}\n    }\n  }\n}"
+      }
+    },
+    {
+      "id": "feeds-load-feed-maps-kept",
+      "kind": "feeds",
+      "deviation": "store-shapes",
+      "core": {
+        "ops": [
+          {
+            "result": [
+              {
+                "origin": "https://app.example",
+                "identityMode": "app-scoped",
+                "publisherKeyIndex": 0,
+                "walletIndex": null,
+                "activeIdentityId": "app-scoped:0",
+                "identityCount": 1,
+                "feedGranted": true,
+                "grantedAt": 1767225550123,
+                "feedCount": 1
+              },
+              {
+                "origin": "https://other.example",
+                "identityMode": "bee-wallet",
+                "publisherKeyIndex": null,
+                "walletIndex": null,
+                "activeIdentityId": "bee-wallet",
+                "identityCount": 1,
+                "feedGranted": true,
+                "grantedAt": 1767225550123,
+                "feedCount": 0
+              }
+            ]
+          },
+          {
+            "result": {
+              "good": {
+                "topic": "2d8b6efca0db6410add40ecd6bda25b3ee2d614a8e6c12933931d91cca63c3e4",
+                "owner": "0x6Fac4D18c912343BF86fa7049364Dd4E424Ab9C0",
+                "manifestReference": "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd"
+              }
+            }
+          },
+          {
+            "result": {}
+          },
+          {
+            "result_typed": {
+              "undefined": true
+            }
+          }
+        ],
+        "files": {
+          "swarm-feeds.json": "{\n  \"version\": 2,\n  \"nextPublisherKeyIndex\": 1,\n  \"origins\": {\n    \"https://app.example\": {\n      \"activeIdentityId\": \"app-scoped:0\",\n      \"identities\": {\n        \"app-scoped:0\": {\n          \"id\": \"app-scoped:0\",\n          \"mode\": \"app-scoped\",\n          \"publisherKeyIndex\": 0,\n          \"walletIndex\": null,\n          \"label\": \"App-scoped identity 1\",\n          \"createdAt\": 1767225550123,\n          \"lastUsedAt\": null\n        }\n      },\n      \"feedGranted\": true,\n      \"grantedAt\": 1767225550123,\n      \"feeds\": {\n        \"good\": {\n          \"topic\": \"2d8b6efca0db6410add40ecd6bda25b3ee2d614a8e6c12933931d91cca63c3e4\",\n          \"owner\": \"0x6Fac4D18c912343BF86fa7049364Dd4E424Ab9C0\",\n          \"manifestReference\": \"cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd\"\n        }\n      }\n    },\n    \"https://other.example\": {\n      \"activeIdentityId\": \"bee-wallet\",\n      \"identities\": {\n        \"bee-wallet\": {\n          \"id\": \"bee-wallet\",\n          \"mode\": \"bee-wallet\",\n          \"publisherKeyIndex\": null,\n          \"walletIndex\": null,\n          \"label\": \"Bee wallet identity\",\n          \"createdAt\": 1767225550123,\n          \"lastUsedAt\": null\n        }\n      },\n      \"feedGranted\": true,\n      \"grantedAt\": 1767225550123,\n      \"feeds\": {}\n    }\n  }\n}"
+        }
+      },
+      "before": "{\n  \"version\": 2,\n  \"nextPublisherKeyIndex\": 1,\n  \"origins\": {\n    \"https://app.example\": {\n      \"activeIdentityId\": \"app-scoped:0\",\n      \"identities\": {\n        \"app-scoped:0\": {\n          \"id\": \"app-scoped:0\",\n          \"mode\": \"app-scoped\",\n          \"publisherKeyIndex\": 0,\n          \"walletIndex\": null,\n          \"label\": \"App-scoped identity 1\",\n          \"createdAt\": 1767225550123,\n          \"lastUsedAt\": null\n        }\n      },\n      \"feedGranted\": true,\n      \"grantedAt\": 1767225550123,\n      \"feeds\": {\n        \"good\": {\n          \"topic\": \"2d8b6efca0db6410add40ecd6bda25b3ee2d614a8e6c12933931d91cca63c3e4\",\n          \"owner\": \"0x6Fac4D18c912343BF86fa7049364Dd4E424Ab9C0\",\n          \"manifestReference\": \"cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd\"\n        },\n        \"bad\": \"x\"\n      }\n    },\n    \"https://other.example\": {\n      \"activeIdentityId\": \"bee-wallet\",\n      \"identities\": {\n        \"bee-wallet\": {\n          \"id\": \"bee-wallet\",\n          \"mode\": \"bee-wallet\",\n          \"publisherKeyIndex\": null,\n          \"walletIndex\": null,\n          \"label\": \"Bee wallet identity\",\n          \"createdAt\": 1767225550123,\n          \"lastUsedAt\": null\n        }\n      },\n      \"feedGranted\": true,\n      \"grantedAt\": 1767225550123,\n      \"feeds\": [\n        \"x\"\n      ]\n    }\n  }\n}",
+      "core_before": "{\n  \"version\": 2,\n  \"nextPublisherKeyIndex\": 1,\n  \"origins\": {\n    \"https://app.example\": {\n      \"activeIdentityId\": \"app-scoped:0\",\n      \"identities\": {\n        \"app-scoped:0\": {\n          \"id\": \"app-scoped:0\",\n          \"mode\": \"app-scoped\",\n          \"publisherKeyIndex\": 0,\n          \"walletIndex\": null,\n          \"label\": \"App-scoped identity 1\",\n          \"createdAt\": 1767225550123,\n          \"lastUsedAt\": null\n        }\n      },\n      \"feedGranted\": true,\n      \"grantedAt\": 1767225550123,\n      \"feeds\": {\n        \"good\": {\n          \"topic\": \"2d8b6efca0db6410add40ecd6bda25b3ee2d614a8e6c12933931d91cca63c3e4\",\n          \"owner\": \"0x6Fac4D18c912343BF86fa7049364Dd4E424Ab9C0\",\n          \"manifestReference\": \"cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd\"\n        }\n      }\n    },\n    \"https://other.example\": {\n      \"activeIdentityId\": \"bee-wallet\",\n      \"identities\": {\n        \"bee-wallet\": {\n          \"id\": \"bee-wallet\",\n          \"mode\": \"bee-wallet\",\n          \"publisherKeyIndex\": null,\n          \"walletIndex\": null,\n          \"label\": \"Bee wallet identity\",\n          \"createdAt\": 1767225550123,\n          \"lastUsedAt\": null\n        }\n      },\n      \"feedGranted\": true,\n      \"grantedAt\": 1767225550123,\n      \"feeds\": {}\n    }\n  }\n}",
+      "ops": [
+        {
+          "op": "getAllOriginEntries",
+          "args": {
+            "array": []
+          },
+          "result": [
+            {
+              "origin": "https://app.example",
+              "identityMode": "app-scoped",
+              "publisherKeyIndex": 0,
+              "walletIndex": null,
+              "activeIdentityId": "app-scoped:0",
+              "identityCount": 1,
+              "feedGranted": true,
+              "grantedAt": 1767225550123,
+              "feedCount": 2
+            },
+            {
+              "origin": "https://other.example",
+              "identityMode": "bee-wallet",
+              "publisherKeyIndex": null,
+              "walletIndex": null,
+              "activeIdentityId": "bee-wallet",
+              "identityCount": 1,
+              "feedGranted": true,
+              "grantedAt": 1767225550123,
+              "feedCount": 1
+            }
+          ]
+        },
+        {
+          "op": "getAllFeeds",
+          "args": {
+            "array": [
+              {
+                "string": "https://app.example"
+              }
+            ]
+          },
+          "result": {
+            "good": {
+              "topic": "2d8b6efca0db6410add40ecd6bda25b3ee2d614a8e6c12933931d91cca63c3e4",
+              "owner": "0x6Fac4D18c912343BF86fa7049364Dd4E424Ab9C0",
+              "manifestReference": "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd"
+            },
+            "bad": {
+              "0": "x"
+            }
+          }
+        },
+        {
+          "op": "getAllFeeds",
+          "args": {
+            "array": [
+              {
+                "string": "https://other.example"
+              }
+            ]
+          },
+          "result": {
+            "0": {
+              "0": "x"
+            }
+          }
+        },
+        {
+          "op": "grantFeedAccess",
+          "args": {
+            "array": [
+              {
+                "string": "https://other.example"
+              },
+              {
+                "object": []
+              }
+            ]
+          },
+          "result_typed": {
+            "undefined": true
+          }
+        }
+      ],
+      "files": {
+        "swarm-feeds.json": "{\n  \"version\": 2,\n  \"nextPublisherKeyIndex\": 1,\n  \"origins\": {\n    \"https://app.example\": {\n      \"activeIdentityId\": \"app-scoped:0\",\n      \"identities\": {\n        \"app-scoped:0\": {\n          \"id\": \"app-scoped:0\",\n          \"mode\": \"app-scoped\",\n          \"publisherKeyIndex\": 0,\n          \"walletIndex\": null,\n          \"label\": \"App-scoped identity 1\",\n          \"createdAt\": 1767225550123,\n          \"lastUsedAt\": null\n        }\n      },\n      \"feedGranted\": true,\n      \"grantedAt\": 1767225550123,\n      \"feeds\": {\n        \"good\": {\n          \"topic\": \"2d8b6efca0db6410add40ecd6bda25b3ee2d614a8e6c12933931d91cca63c3e4\",\n          \"owner\": \"0x6Fac4D18c912343BF86fa7049364Dd4E424Ab9C0\",\n          \"manifestReference\": \"cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd\"\n        },\n        \"bad\": \"x\"\n      }\n    },\n    \"https://other.example\": {\n      \"activeIdentityId\": \"bee-wallet\",\n      \"identities\": {\n        \"bee-wallet\": {\n          \"id\": \"bee-wallet\",\n          \"mode\": \"bee-wallet\",\n          \"publisherKeyIndex\": null,\n          \"walletIndex\": null,\n          \"label\": \"Bee wallet identity\",\n          \"createdAt\": 1767225550123,\n          \"lastUsedAt\": null\n        }\n      },\n      \"feedGranted\": true,\n      \"grantedAt\": 1767225550123,\n      \"feeds\": [\n        \"x\"\n      ]\n    }\n  }\n}"
+      }
+    },
+    {
+      "id": "feeds-own-key-read",
+      "kind": "feeds",
+      "deviation": "own-keys",
+      "core": {
+        "ops": [
+          {
+            "result": null
+          },
+          {
+            "result": null
+          }
+        ],
+        "files": {
+          "swarm-feeds.json": "{\n  \"version\": 2,\n  \"nextPublisherKeyIndex\": 0,\n  \"origins\": {\n    \"https://app.example\": {\n      \"activeIdentityId\": \"bee-wallet\",\n      \"identities\": {\n        \"bee-wallet\": {\n          \"id\": \"bee-wallet\",\n          \"mode\": \"bee-wallet\",\n          \"publisherKeyIndex\": null,\n          \"walletIndex\": null,\n          \"label\": \"Bee wallet identity\",\n          \"createdAt\": 1767225550123,\n          \"lastUsedAt\": null\n        }\n      },\n      \"feedGranted\": true,\n      \"grantedAt\": 1767225550123,\n      \"feeds\": {}\n    }\n  }\n}"
+        }
+      },
+      "before": "{\n  \"version\": 2,\n  \"nextPublisherKeyIndex\": 0,\n  \"origins\": {\n    \"https://app.example\": {\n      \"activeIdentityId\": \"bee-wallet\",\n      \"identities\": {\n        \"bee-wallet\": {\n          \"id\": \"bee-wallet\",\n          \"mode\": \"bee-wallet\",\n          \"publisherKeyIndex\": null,\n          \"walletIndex\": null,\n          \"label\": \"Bee wallet identity\",\n          \"createdAt\": 1767225550123,\n          \"lastUsedAt\": null\n        }\n      },\n      \"feedGranted\": true,\n      \"grantedAt\": 1767225550123,\n      \"feeds\": {}\n    }\n  }\n}",
+      "ops": [
+        {
+          "op": "getFeed",
+          "args": {
+            "array": [
+              {
+                "string": "https://app.example"
+              },
+              {
+                "string": "toString"
+              }
+            ]
+          },
+          "result": {}
+        },
+        {
+          "op": "getFeed",
+          "args": {
+            "array": [
+              {
+                "string": "https://app.example"
+              },
+              {
+                "string": "__proto__"
+              }
+            ]
+          },
+          "result": {}
+        }
+      ],
+      "files": {
+        "swarm-feeds.json": "{\n  \"version\": 2,\n  \"nextPublisherKeyIndex\": 0,\n  \"origins\": {\n    \"https://app.example\": {\n      \"activeIdentityId\": \"bee-wallet\",\n      \"identities\": {\n        \"bee-wallet\": {\n          \"id\": \"bee-wallet\",\n          \"mode\": \"bee-wallet\",\n          \"publisherKeyIndex\": null,\n          \"walletIndex\": null,\n          \"label\": \"Bee wallet identity\",\n          \"createdAt\": 1767225550123,\n          \"lastUsedAt\": null\n        }\n      },\n      \"feedGranted\": true,\n      \"grantedAt\": 1767225550123,\n      \"feeds\": {}\n    }\n  }\n}"
+      }
+    },
+    {
+      "id": "feeds-own-key-proto-write",
+      "kind": "feeds",
+      "deviation": "own-keys",
+      "core": {
+        "ops": [
+          {
+            "result": {
+              "topic": "2d8b6efca0db6410add40ecd6bda25b3ee2d614a8e6c12933931d91cca63c3e4",
+              "owner": "0x6Fac4D18c912343BF86fa7049364Dd4E424Ab9C0",
+              "manifestReference": "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd",
+              "identityId": "bee-wallet",
+              "createdAt": 1767225600123,
+              "lastUpdated": null,
+              "lastReference": null
+            }
+          },
+          {
+            "result": {
+              "__proto__": {
+                "topic": "2d8b6efca0db6410add40ecd6bda25b3ee2d614a8e6c12933931d91cca63c3e4",
+                "owner": "0x6Fac4D18c912343BF86fa7049364Dd4E424Ab9C0",
+                "manifestReference": "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd",
+                "identityId": "bee-wallet",
+                "createdAt": 1767225600123,
+                "lastUpdated": null,
+                "lastReference": null
+              }
+            }
+          }
+        ],
+        "files": {
+          "swarm-feeds.json": "{\n  \"version\": 2,\n  \"nextPublisherKeyIndex\": 0,\n  \"origins\": {\n    \"https://app.example\": {\n      \"activeIdentityId\": \"bee-wallet\",\n      \"identities\": {\n        \"bee-wallet\": {\n          \"id\": \"bee-wallet\",\n          \"mode\": \"bee-wallet\",\n          \"publisherKeyIndex\": null,\n          \"walletIndex\": null,\n          \"label\": \"Bee wallet identity\",\n          \"createdAt\": 1767225550123,\n          \"lastUsedAt\": null\n        }\n      },\n      \"feedGranted\": true,\n      \"grantedAt\": 1767225550123,\n      \"feeds\": {\n        \"__proto__\": {\n          \"topic\": \"2d8b6efca0db6410add40ecd6bda25b3ee2d614a8e6c12933931d91cca63c3e4\",\n          \"owner\": \"0x6Fac4D18c912343BF86fa7049364Dd4E424Ab9C0\",\n          \"manifestReference\": \"cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd\",\n          \"identityId\": \"bee-wallet\",\n          \"createdAt\": 1767225600123,\n          \"lastUpdated\": null,\n          \"lastReference\": null\n        }\n      }\n    }\n  }\n}"
+        }
+      },
+      "before": "{\n  \"version\": 2,\n  \"nextPublisherKeyIndex\": 0,\n  \"origins\": {\n    \"https://app.example\": {\n      \"activeIdentityId\": \"bee-wallet\",\n      \"identities\": {\n        \"bee-wallet\": {\n          \"id\": \"bee-wallet\",\n          \"mode\": \"bee-wallet\",\n          \"publisherKeyIndex\": null,\n          \"walletIndex\": null,\n          \"label\": \"Bee wallet identity\",\n          \"createdAt\": 1767225550123,\n          \"lastUsedAt\": null\n        }\n      },\n      \"feedGranted\": true,\n      \"grantedAt\": 1767225550123,\n      \"feeds\": {}\n    }\n  }\n}",
+      "ops": [
+        {
+          "op": "setFeed",
+          "args": {
+            "array": [
+              {
+                "string": "https://app.example"
+              },
+              {
+                "string": "__proto__"
+              },
+              {
+                "object": [
+                  [
+                    "topic",
+                    {
+                      "string": "2d8b6efca0db6410add40ecd6bda25b3ee2d614a8e6c12933931d91cca63c3e4"
+                    }
+                  ],
+                  [
+                    "owner",
+                    {
+                      "string": "0x6Fac4D18c912343BF86fa7049364Dd4E424Ab9C0"
+                    }
+                  ],
+                  [
+                    "manifestReference",
+                    {
+                      "string": "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd"
+                    }
+                  ]
+                ]
+              }
+            ]
+          },
+          "result": {
+            "topic": "2d8b6efca0db6410add40ecd6bda25b3ee2d614a8e6c12933931d91cca63c3e4",
+            "owner": "0x6Fac4D18c912343BF86fa7049364Dd4E424Ab9C0",
+            "manifestReference": "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd",
+            "identityId": "bee-wallet",
+            "createdAt": 1767225600123,
+            "lastUpdated": null,
+            "lastReference": null
+          }
+        },
+        {
+          "op": "getAllFeeds",
+          "args": {
+            "array": [
+              {
+                "string": "https://app.example"
+              }
+            ]
+          },
+          "result": {}
+        }
+      ],
+      "files": {
+        "swarm-feeds.json": "{\n  \"version\": 2,\n  \"nextPublisherKeyIndex\": 0,\n  \"origins\": {\n    \"https://app.example\": {\n      \"activeIdentityId\": \"bee-wallet\",\n      \"identities\": {\n        \"bee-wallet\": {\n          \"id\": \"bee-wallet\",\n          \"mode\": \"bee-wallet\",\n          \"publisherKeyIndex\": null,\n          \"walletIndex\": null,\n          \"label\": \"Bee wallet identity\",\n          \"createdAt\": 1767225550123,\n          \"lastUsedAt\": null\n        }\n      },\n      \"feedGranted\": true,\n      \"grantedAt\": 1767225550123,\n      \"feeds\": {}\n    }\n  }\n}"
+      }
+    },
+    {
       "id": "manifest-legacy-not-eager",
       "kind": "manifests",
       "site": "bzz://5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a",
@@ -121146,6 +121614,166 @@
       }
     },
     {
+      "id": "manifest-load-record-shape",
+      "kind": "manifests",
+      "deviation": "store-shapes",
+      "core": {
+        "steps": [
+          {
+            "result": {
+              "managed": {},
+              "acknowledged": {},
+              "revision": 1
+            }
+          },
+          {
+            "result": {
+              "kind": "consent",
+              "token": "(the consent token)",
+              "model": {
+                "origin": "bzz://5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a",
+                "name": "Freedom Notes",
+                "description": "Notes on Swarm",
+                "changed": [
+                  {
+                    "key": "publish",
+                    "label": "Publish content",
+                    "detail": "Use your postage stamps and bandwidth.",
+                    "why": "To publish your notes"
+                  }
+                ],
+                "removed": [],
+                "createsIdentity": false,
+                "preservedIdentity": false,
+                "isUpdate": true
+              }
+            }
+          },
+          {
+            "result": {
+              "allowed": true,
+              "mode": "allow"
+            }
+          }
+        ],
+        "grants_after": {
+          "bzz://5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a": {
+            "origin": "bzz://5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a",
+            "connectedAt": 1767225600123,
+            "lastUsed": 1767225600123,
+            "autoApprove": {
+              "publish": true,
+              "feeds": false,
+              "signing": false,
+              "messaging": false
+            }
+          }
+        },
+        "files": {
+          "swarm-manifest-grants.json": "{\n  \"version\": 1,\n  \"records\": {\n    \"bzz://5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a\": {\n      \"managed\": {\n        \"connection\": [\n          \"publish\"\n        ],\n        \"autoApprove.publish\": [\n          \"publish\"\n        ]\n      },\n      \"acknowledged\": {\n        \"publish\": {\n          \"decision\": \"managed\",\n          \"source\": \"sheet\",\n          \"whyShown\": \"To publish your notes\",\n          \"decidedAt\": 1767225600123\n        }\n      },\n      \"revision\": 2,\n      \"observed\": {\n        \"fingerprint\": \"fa8a2c4c946b5b2bb65fad95823de6240c1fbf5307c582bf0566391e7149d7d2\",\n        \"rawHash\": \"79b4574028492d9c6f2ce089fb80ed428a20b512f9e0cd06ef9e35a096d1f08f\",\n        \"capabilities\": {\n          \"publish\": {\n            \"why\": \"To publish your notes\"\n          }\n        },\n        \"checkedAt\": 1767225600123\n      },\n      \"app\": {\n        \"name\": \"Freedom Notes\",\n        \"description\": \"Notes on Swarm\"\n      },\n      \"receipts\": [\n        {\n          \"decidedAt\": 1767225600123,\n          \"outcome\": \"managed\",\n          \"originShown\": \"bzz://5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a\",\n          \"manifestNameShown\": \"Freedom Notes\",\n          \"manifestDescriptionShown\": \"Notes on Swarm\",\n          \"rows\": [\n            {\n              \"capability\": \"publish\",\n              \"browserLabelVersion\": 1,\n              \"whyShown\": \"To publish your notes\"\n            }\n          ],\n          \"rawHash\": \"79b4574028492d9c6f2ce089fb80ed428a20b512f9e0cd06ef9e35a096d1f08f\"\n        }\n      ]\n    }\n  }\n}",
+          "swarm-manifest-grants.json.bak": "{\n  \"version\": 1,\n  \"records\": {\n    \"bzz://5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a\": {\n      \"managed\": {},\n      \"acknowledged\": {},\n      \"revision\": 1,\n      \"observed\": {\n        \"fingerprint\": \"fa8a2c4c946b5b2bb65fad95823de6240c1fbf5307c582bf0566391e7149d7d2\",\n        \"rawHash\": \"79b4574028492d9c6f2ce089fb80ed428a20b512f9e0cd06ef9e35a096d1f08f\",\n        \"capabilities\": {\n          \"publish\": {\n            \"why\": \"To publish your notes\"\n          }\n        },\n        \"checkedAt\": 1767225600123\n      },\n      \"app\": {\n        \"name\": \"Freedom Notes\",\n        \"description\": \"Notes on Swarm\"\n      }\n    }\n  },\n  \"pending\": {\n    \"origin\": \"bzz://5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a\",\n    \"record\": {\n      \"managed\": {\n        \"connection\": [\n          \"publish\"\n        ],\n        \"autoApprove.publish\": [\n          \"publish\"\n        ]\n      },\n      \"acknowledged\": {\n        \"publish\": {\n          \"decision\": \"managed\",\n          \"source\": \"sheet\",\n          \"whyShown\": \"To publish your notes\",\n          \"decidedAt\": 1767225600123\n        }\n      },\n      \"revision\": 2,\n      \"observed\": {\n        \"fingerprint\": \"fa8a2c4c946b5b2bb65fad95823de6240c1fbf5307c582bf0566391e7149d7d2\",\n        \"rawHash\": \"79b4574028492d9c6f2ce089fb80ed428a20b512f9e0cd06ef9e35a096d1f08f\",\n        \"capabilities\": {\n          \"publish\": {\n            \"why\": \"To publish your notes\"\n          }\n        },\n        \"checkedAt\": 1767225600123\n      },\n      \"app\": {\n        \"name\": \"Freedom Notes\",\n        \"description\": \"Notes on Swarm\"\n      },\n      \"receipts\": [\n        {\n          \"decidedAt\": 1767225600123,\n          \"outcome\": \"managed\",\n          \"originShown\": \"bzz://5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a\",\n          \"manifestNameShown\": \"Freedom Notes\",\n          \"manifestDescriptionShown\": \"Notes on Swarm\",\n          \"rows\": [\n            {\n              \"capability\": \"publish\",\n              \"browserLabelVersion\": 1,\n              \"whyShown\": \"To publish your notes\"\n            }\n          ],\n          \"rawHash\": \"79b4574028492d9c6f2ce089fb80ed428a20b512f9e0cd06ef9e35a096d1f08f\"\n        }\n      ]\n    },\n    \"operations\": [\n      {\n        \"projection\": \"connection\",\n        \"enabled\": true\n      },\n      {\n        \"projection\": \"autoApprove.publish\",\n        \"enabled\": true\n      }\n    ]\n  }\n}"
+        }
+      },
+      "site": "bzz://5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a",
+      "before": "{\n  \"version\": 1,\n  \"records\": {\n    \"bzz://5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a\": {\n      \"managed\": {},\n      \"revision\": 1\n    }\n  }\n}",
+      "before_files": {
+        "swarm-manifest-grants.json.bak": "{\n  \"version\": 1,\n  \"records\": {\n    \"bzz://5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a\": {\n      \"managed\": {},\n      \"acknowledged\": {},\n      \"revision\": 1\n    }\n  }\n}"
+      },
+      "grants": {},
+      "feeds": null,
+      "steps": [
+        {
+          "op": "get",
+          "result": {
+            "managed": {},
+            "revision": 1
+          }
+        },
+        {
+          "op": "check",
+          "manifest": "{\"schema\":\"freedom-manifest/1\",\"name\":\"Freedom Notes\",\"description\":\"Notes on Swarm\",\"capabilities\":{\"swarm\":{\"publish\":{\"why\":\"To publish your notes\"}}}}",
+          "options": {
+            "eager": true
+          },
+          "result": {
+            "kind": "consent",
+            "token": "(the consent token)",
+            "model": {
+              "origin": "bzz://5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a",
+              "name": "Freedom Notes",
+              "description": "Notes on Swarm",
+              "changed": [
+                {
+                  "key": "publish",
+                  "label": "Publish content",
+                  "detail": "Use your postage stamps and bandwidth.",
+                  "why": "To publish your notes"
+                }
+              ],
+              "removed": [],
+              "createsIdentity": false,
+              "preservedIdentity": false,
+              "isUpdate": true
+            }
+          }
+        },
+        {
+          "op": "decide",
+          "outcome": "allow",
+          "error": {
+            "name": "TypeError",
+            "message": "Cannot set properties of undefined (setting 'publish')"
+          }
+        }
+      ],
+      "grants_after": {},
+      "files": {
+        "swarm-manifest-grants.json": "{\n  \"version\": 1,\n  \"records\": {\n    \"bzz://5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a\": {\n      \"managed\": {},\n      \"revision\": 1,\n      \"observed\": {\n        \"fingerprint\": \"fa8a2c4c946b5b2bb65fad95823de6240c1fbf5307c582bf0566391e7149d7d2\",\n        \"rawHash\": \"79b4574028492d9c6f2ce089fb80ed428a20b512f9e0cd06ef9e35a096d1f08f\",\n        \"capabilities\": {\n          \"publish\": {\n            \"why\": \"To publish your notes\"\n          }\n        },\n        \"checkedAt\": 1767225600123\n      },\n      \"app\": {\n        \"name\": \"Freedom Notes\",\n        \"description\": \"Notes on Swarm\"\n      }\n    }\n  }\n}",
+        "swarm-manifest-grants.json.bak": "{\n  \"version\": 1,\n  \"records\": {\n    \"bzz://5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a\": {\n      \"managed\": {},\n      \"revision\": 1\n    }\n  }\n}"
+      }
+    },
+    {
+      "id": "manifest-load-string-revision",
+      "kind": "manifests",
+      "deviation": "store-shapes",
+      "core": {
+        "load": "unreadable"
+      },
+      "site": "bzz://5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a",
+      "before": "{\n  \"version\": 1,\n  \"records\": {\n    \"bzz://5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a\": {\n      \"managed\": {},\n      \"acknowledged\": {\n        \"publish\": {\n          \"decision\": \"individual\",\n          \"source\": \"existing-grant\",\n          \"decidedAt\": 1\n        }\n      },\n      \"revision\": \"1\"\n    }\n  }\n}",
+      "grants": {},
+      "feeds": null,
+      "steps": [
+        {
+          "op": "useIndividual",
+          "capability": "publish",
+          "result": true
+        },
+        {
+          "op": "get",
+          "result": {
+            "managed": {},
+            "acknowledged": {
+              "publish": {
+                "decision": "individual",
+                "source": "existing-grant",
+                "decidedAt": 1767225600123
+              }
+            },
+            "revision": "11",
+            "detached": {
+              "connection": true
+            }
+          }
+        }
+      ],
+      "grants_after": {},
+      "files": {
+        "swarm-manifest-grants.json": "{\n  \"version\": 1,\n  \"records\": {\n    \"bzz://5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a\": {\n      \"managed\": {},\n      \"acknowledged\": {\n        \"publish\": {\n          \"decision\": \"individual\",\n          \"source\": \"existing-grant\",\n          \"decidedAt\": 1767225600123\n        }\n      },\n      \"revision\": \"11\",\n      \"detached\": {\n        \"connection\": true\n      }\n    }\n  }\n}",
+        "swarm-manifest-grants.json.bak": "{\n  \"version\": 1,\n  \"records\": {\n    \"bzz://5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a\": {\n      \"managed\": {},\n      \"acknowledged\": {\n        \"publish\": {\n          \"decision\": \"individual\",\n          \"source\": \"existing-grant\",\n          \"decidedAt\": 1\n        }\n      },\n      \"revision\": \"1\"\n    }\n  },\n  \"pending\": {\n    \"origin\": \"bzz://5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a\",\n    \"record\": {\n      \"managed\": {},\n      \"acknowledged\": {\n        \"publish\": {\n          \"decision\": \"individual\",\n          \"source\": \"existing-grant\",\n          \"decidedAt\": 1767225600123\n        }\n      },\n      \"revision\": \"11\",\n      \"detached\": {\n        \"connection\": true\n      }\n    },\n    \"operations\": []\n  }\n}"
+      }
+    },
+    {
       "id": "history-10001-rows",
       "kind": "history",
       "deviation": "history-bound",
@@ -121882,6 +122510,1022 @@
       "user_data": {
         "publish-history.json": "{"
       }
+    },
+    {
+      "id": "history-json-legacy-dates",
+      "kind": "history",
+      "deviation": "legacy-dates",
+      "core": {
+        "ops": [
+          {
+            "result": [
+              {
+                "id": 1,
+                "type": "data",
+                "name": "toUTCString",
+                "status": "completed",
+                "reference": null,
+                "bzzUrl": null,
+                "tagUid": null,
+                "batchIdUsed": null,
+                "origin": null,
+                "bytesSize": null,
+                "timestamp": "2026-01-01T00:00:01.123Z",
+                "completedAt": "2026-01-01T00:00:01.123Z",
+                "errorMessage": null
+              },
+              {
+                "id": 2,
+                "type": "file",
+                "name": "toString",
+                "status": "completed",
+                "reference": null,
+                "bzzUrl": null,
+                "tagUid": null,
+                "batchIdUsed": null,
+                "origin": null,
+                "bytesSize": null,
+                "timestamp": "2026-01-01T00:00:01.123Z",
+                "completedAt": "2026-01-01T00:00:01.123Z",
+                "errorMessage": null
+              },
+              {
+                "id": 3,
+                "type": "data",
+                "name": "a space for the T",
+                "status": "failed",
+                "reference": null,
+                "bzzUrl": null,
+                "tagUid": null,
+                "batchIdUsed": null,
+                "origin": null,
+                "bytesSize": null,
+                "timestamp": "2026-01-01T00:00:01.123Z",
+                "completedAt": "2026-01-01T00:00:01.123Z",
+                "errorMessage": null
+              },
+              {
+                "id": 4,
+                "type": "directory",
+                "name": "local time",
+                "status": "completed",
+                "reference": null,
+                "bzzUrl": null,
+                "tagUid": null,
+                "batchIdUsed": null,
+                "origin": null,
+                "bytesSize": null,
+                "timestamp": "2026-01-01T00:00:01.123Z",
+                "completedAt": "2026-01-01T00:00:01.123Z",
+                "errorMessage": null
+              },
+              {
+                "id": 5,
+                "type": "data",
+                "name": "a local date",
+                "status": "completed",
+                "reference": null,
+                "bzzUrl": null,
+                "tagUid": null,
+                "batchIdUsed": null,
+                "origin": null,
+                "bytesSize": null,
+                "timestamp": "2026-01-01T00:00:01.123Z",
+                "completedAt": "2026-01-01T00:00:01.123Z",
+                "errorMessage": null
+              },
+              {
+                "id": 6,
+                "type": "data",
+                "name": "a number",
+                "status": "completed",
+                "reference": null,
+                "bzzUrl": null,
+                "tagUid": null,
+                "batchIdUsed": null,
+                "origin": null,
+                "bytesSize": null,
+                "timestamp": "2026-01-01T00:00:01.123Z",
+                "completedAt": "2026-01-01T00:00:01.123Z",
+                "errorMessage": null
+              },
+              {
+                "id": 8,
+                "type": "data",
+                "name": "a date alone",
+                "status": "completed",
+                "reference": null,
+                "bzzUrl": null,
+                "tagUid": null,
+                "batchIdUsed": null,
+                "origin": null,
+                "bytesSize": null,
+                "timestamp": "2025-06-03T00:00:00.000Z",
+                "completedAt": "2025-06-03T00:00:00.000Z",
+                "errorMessage": null
+              },
+              {
+                "id": 7,
+                "type": "data",
+                "name": "an offset",
+                "status": "completed",
+                "reference": null,
+                "bzzUrl": null,
+                "tagUid": null,
+                "batchIdUsed": null,
+                "origin": null,
+                "bytesSize": null,
+                "timestamp": "2025-06-01T14:00:00.000Z",
+                "completedAt": "2025-06-01T14:00:00.000Z",
+                "errorMessage": null
+              }
+            ]
+          }
+        ],
+        "rows": [
+          {
+            "id": 1,
+            "type": "data",
+            "name": "toUTCString",
+            "status": "completed",
+            "reference": null,
+            "bzz_url": null,
+            "tag_uid": null,
+            "batch_id": null,
+            "origin": null,
+            "bytes_size": null,
+            "started_at": 1767225601123,
+            "completed_at": 1767225601123,
+            "error_message": null
+          },
+          {
+            "id": 2,
+            "type": "file",
+            "name": "toString",
+            "status": "completed",
+            "reference": null,
+            "bzz_url": null,
+            "tag_uid": null,
+            "batch_id": null,
+            "origin": null,
+            "bytes_size": null,
+            "started_at": 1767225601123,
+            "completed_at": 1767225601123,
+            "error_message": null
+          },
+          {
+            "id": 3,
+            "type": "data",
+            "name": "a space for the T",
+            "status": "failed",
+            "reference": null,
+            "bzz_url": null,
+            "tag_uid": null,
+            "batch_id": null,
+            "origin": null,
+            "bytes_size": null,
+            "started_at": 1767225601123,
+            "completed_at": 1767225601123,
+            "error_message": null
+          },
+          {
+            "id": 4,
+            "type": "directory",
+            "name": "local time",
+            "status": "completed",
+            "reference": null,
+            "bzz_url": null,
+            "tag_uid": null,
+            "batch_id": null,
+            "origin": null,
+            "bytes_size": null,
+            "started_at": 1767225601123,
+            "completed_at": 1767225601123,
+            "error_message": null
+          },
+          {
+            "id": 5,
+            "type": "data",
+            "name": "a local date",
+            "status": "completed",
+            "reference": null,
+            "bzz_url": null,
+            "tag_uid": null,
+            "batch_id": null,
+            "origin": null,
+            "bytes_size": null,
+            "started_at": 1767225601123,
+            "completed_at": 1767225601123,
+            "error_message": null
+          },
+          {
+            "id": 6,
+            "type": "data",
+            "name": "a number",
+            "status": "completed",
+            "reference": null,
+            "bzz_url": null,
+            "tag_uid": null,
+            "batch_id": null,
+            "origin": null,
+            "bytes_size": null,
+            "started_at": 1767225601123,
+            "completed_at": 1767225601123,
+            "error_message": null
+          },
+          {
+            "id": 7,
+            "type": "data",
+            "name": "an offset",
+            "status": "completed",
+            "reference": null,
+            "bzz_url": null,
+            "tag_uid": null,
+            "batch_id": null,
+            "origin": null,
+            "bytes_size": null,
+            "started_at": 1748786400000,
+            "completed_at": 1748786400000,
+            "error_message": null
+          },
+          {
+            "id": 8,
+            "type": "data",
+            "name": "a date alone",
+            "status": "completed",
+            "reference": null,
+            "bzz_url": null,
+            "tag_uid": null,
+            "batch_id": null,
+            "origin": null,
+            "bytes_size": null,
+            "started_at": 1748908800000,
+            "completed_at": 1748908800000,
+            "error_message": null
+          }
+        ]
+      },
+      "user_data_before": {
+        "publish-history.json": "{\"entries\":[{\"type\":\"data\",\"name\":\"toUTCString\",\"timestamp\":\"Sun, 01 Jun 2025 10:00:00 GMT\"},{\"type\":\"file\",\"name\":\"toString\",\"timestamp\":\"Sun Jun 01 2025 13:00:00 GMT+0200 (Central European Summer Time)\"},{\"type\":\"data\",\"name\":\"a space for the T\",\"status\":\"failed\",\"timestamp\":\"2025-06-01 12:00:00Z\"},{\"type\":\"directory\",\"name\":\"local time\",\"timestamp\":\"2025-06-01T13:00:00\"},{\"type\":\"data\",\"name\":\"a local date\",\"timestamp\":\"June 2, 2025\"},{\"type\":\"data\",\"name\":\"a number\",\"timestamp\":\"5\"},{\"type\":\"data\",\"name\":\"an offset\",\"timestamp\":\"2025-06-01T16:00:00+02:00\"},{\"type\":\"data\",\"name\":\"a date alone\",\"timestamp\":\"2025-06-03\"}]}"
+      },
+      "ops": [
+        {
+          "op": "getEntries",
+          "args": [],
+          "result": [
+            {
+              "id": 8,
+              "type": "data",
+              "name": "a date alone",
+              "status": "completed",
+              "reference": null,
+              "bzzUrl": null,
+              "tagUid": null,
+              "batchIdUsed": null,
+              "origin": null,
+              "bytesSize": null,
+              "timestamp": "2025-06-03T00:00:00.000Z",
+              "completedAt": "2025-06-03T00:00:00.000Z",
+              "errorMessage": null
+            },
+            {
+              "id": 5,
+              "type": "data",
+              "name": "a local date",
+              "status": "completed",
+              "reference": null,
+              "bzzUrl": null,
+              "tagUid": null,
+              "batchIdUsed": null,
+              "origin": null,
+              "bytesSize": null,
+              "timestamp": "2025-06-02T00:00:00.000Z",
+              "completedAt": "2025-06-02T00:00:00.000Z",
+              "errorMessage": null
+            },
+            {
+              "id": 7,
+              "type": "data",
+              "name": "an offset",
+              "status": "completed",
+              "reference": null,
+              "bzzUrl": null,
+              "tagUid": null,
+              "batchIdUsed": null,
+              "origin": null,
+              "bytesSize": null,
+              "timestamp": "2025-06-01T14:00:00.000Z",
+              "completedAt": "2025-06-01T14:00:00.000Z",
+              "errorMessage": null
+            },
+            {
+              "id": 4,
+              "type": "directory",
+              "name": "local time",
+              "status": "completed",
+              "reference": null,
+              "bzzUrl": null,
+              "tagUid": null,
+              "batchIdUsed": null,
+              "origin": null,
+              "bytesSize": null,
+              "timestamp": "2025-06-01T13:00:00.000Z",
+              "completedAt": "2025-06-01T13:00:00.000Z",
+              "errorMessage": null
+            },
+            {
+              "id": 3,
+              "type": "data",
+              "name": "a space for the T",
+              "status": "failed",
+              "reference": null,
+              "bzzUrl": null,
+              "tagUid": null,
+              "batchIdUsed": null,
+              "origin": null,
+              "bytesSize": null,
+              "timestamp": "2025-06-01T12:00:00.000Z",
+              "completedAt": "2025-06-01T12:00:00.000Z",
+              "errorMessage": null
+            },
+            {
+              "id": 2,
+              "type": "file",
+              "name": "toString",
+              "status": "completed",
+              "reference": null,
+              "bzzUrl": null,
+              "tagUid": null,
+              "batchIdUsed": null,
+              "origin": null,
+              "bytesSize": null,
+              "timestamp": "2025-06-01T11:00:00.000Z",
+              "completedAt": "2025-06-01T11:00:00.000Z",
+              "errorMessage": null
+            },
+            {
+              "id": 1,
+              "type": "data",
+              "name": "toUTCString",
+              "status": "completed",
+              "reference": null,
+              "bzzUrl": null,
+              "tagUid": null,
+              "batchIdUsed": null,
+              "origin": null,
+              "bytesSize": null,
+              "timestamp": "2025-06-01T10:00:00.000Z",
+              "completedAt": "2025-06-01T10:00:00.000Z",
+              "errorMessage": null
+            },
+            {
+              "id": 6,
+              "type": "data",
+              "name": "a number",
+              "status": "completed",
+              "reference": null,
+              "bzzUrl": null,
+              "tagUid": null,
+              "batchIdUsed": null,
+              "origin": null,
+              "bytesSize": null,
+              "timestamp": "2001-05-01T00:00:00.000Z",
+              "completedAt": "2001-05-01T00:00:00.000Z",
+              "errorMessage": null
+            }
+          ]
+        }
+      ],
+      "schema": [
+        {
+          "type": "index",
+          "name": "idx_publishes_origin",
+          "tbl_name": "publishes",
+          "sql": "CREATE INDEX idx_publishes_origin    ON publishes(origin)"
+        },
+        {
+          "type": "index",
+          "name": "idx_publishes_reference",
+          "tbl_name": "publishes",
+          "sql": "CREATE INDEX idx_publishes_reference ON publishes(reference)"
+        },
+        {
+          "type": "index",
+          "name": "idx_publishes_started",
+          "tbl_name": "publishes",
+          "sql": "CREATE INDEX idx_publishes_started   ON publishes(started_at DESC)"
+        },
+        {
+          "type": "index",
+          "name": "idx_publishes_status",
+          "tbl_name": "publishes",
+          "sql": "CREATE INDEX idx_publishes_status    ON publishes(status)"
+        },
+        {
+          "type": "index",
+          "name": "idx_publishes_type",
+          "tbl_name": "publishes",
+          "sql": "CREATE INDEX idx_publishes_type      ON publishes(type)"
+        },
+        {
+          "type": "table",
+          "name": "publishes",
+          "tbl_name": "publishes",
+          "sql": "CREATE TABLE publishes (\n        id            INTEGER PRIMARY KEY AUTOINCREMENT,\n        type          TEXT NOT NULL,\n        name          TEXT,\n        status        TEXT NOT NULL,\n        reference     TEXT,\n        bzz_url       TEXT,\n        tag_uid       INTEGER,\n        batch_id      TEXT,\n        origin        TEXT,\n        bytes_size    INTEGER,\n        started_at    INTEGER NOT NULL,\n        completed_at  INTEGER,\n        error_message TEXT\n      )"
+        }
+      ],
+      "pragmas": {
+        "user_version": 1,
+        "journal_mode": "wal"
+      },
+      "rows": [
+        {
+          "id": 1,
+          "type": "data",
+          "name": "toUTCString",
+          "status": "completed",
+          "reference": null,
+          "bzz_url": null,
+          "tag_uid": null,
+          "batch_id": null,
+          "origin": null,
+          "bytes_size": null,
+          "started_at": 1748772000000,
+          "completed_at": 1748772000000,
+          "error_message": null
+        },
+        {
+          "id": 2,
+          "type": "file",
+          "name": "toString",
+          "status": "completed",
+          "reference": null,
+          "bzz_url": null,
+          "tag_uid": null,
+          "batch_id": null,
+          "origin": null,
+          "bytes_size": null,
+          "started_at": 1748775600000,
+          "completed_at": 1748775600000,
+          "error_message": null
+        },
+        {
+          "id": 3,
+          "type": "data",
+          "name": "a space for the T",
+          "status": "failed",
+          "reference": null,
+          "bzz_url": null,
+          "tag_uid": null,
+          "batch_id": null,
+          "origin": null,
+          "bytes_size": null,
+          "started_at": 1748779200000,
+          "completed_at": 1748779200000,
+          "error_message": null
+        },
+        {
+          "id": 4,
+          "type": "directory",
+          "name": "local time",
+          "status": "completed",
+          "reference": null,
+          "bzz_url": null,
+          "tag_uid": null,
+          "batch_id": null,
+          "origin": null,
+          "bytes_size": null,
+          "started_at": 1748782800000,
+          "completed_at": 1748782800000,
+          "error_message": null
+        },
+        {
+          "id": 5,
+          "type": "data",
+          "name": "a local date",
+          "status": "completed",
+          "reference": null,
+          "bzz_url": null,
+          "tag_uid": null,
+          "batch_id": null,
+          "origin": null,
+          "bytes_size": null,
+          "started_at": 1748822400000,
+          "completed_at": 1748822400000,
+          "error_message": null
+        },
+        {
+          "id": 6,
+          "type": "data",
+          "name": "a number",
+          "status": "completed",
+          "reference": null,
+          "bzz_url": null,
+          "tag_uid": null,
+          "batch_id": null,
+          "origin": null,
+          "bytes_size": null,
+          "started_at": 988675200000,
+          "completed_at": 988675200000,
+          "error_message": null
+        },
+        {
+          "id": 7,
+          "type": "data",
+          "name": "an offset",
+          "status": "completed",
+          "reference": null,
+          "bzz_url": null,
+          "tag_uid": null,
+          "batch_id": null,
+          "origin": null,
+          "bytes_size": null,
+          "started_at": 1748786400000,
+          "completed_at": 1748786400000,
+          "error_message": null
+        },
+        {
+          "id": 8,
+          "type": "data",
+          "name": "a date alone",
+          "status": "completed",
+          "reference": null,
+          "bzz_url": null,
+          "tag_uid": null,
+          "batch_id": null,
+          "origin": null,
+          "bytes_size": null,
+          "started_at": 1748908800000,
+          "completed_at": 1748908800000,
+          "error_message": null
+        }
+      ],
+      "user_data": {
+        "publish-history.json.migrated": "{\"entries\":[{\"type\":\"data\",\"name\":\"toUTCString\",\"timestamp\":\"Sun, 01 Jun 2025 10:00:00 GMT\"},{\"type\":\"file\",\"name\":\"toString\",\"timestamp\":\"Sun Jun 01 2025 13:00:00 GMT+0200 (Central European Summer Time)\"},{\"type\":\"data\",\"name\":\"a space for the T\",\"status\":\"failed\",\"timestamp\":\"2025-06-01 12:00:00Z\"},{\"type\":\"directory\",\"name\":\"local time\",\"timestamp\":\"2025-06-01T13:00:00\"},{\"type\":\"data\",\"name\":\"a local date\",\"timestamp\":\"June 2, 2025\"},{\"type\":\"data\",\"name\":\"a number\",\"timestamp\":\"5\"},{\"type\":\"data\",\"name\":\"an offset\",\"timestamp\":\"2025-06-01T16:00:00+02:00\"},{\"type\":\"data\",\"name\":\"a date alone\",\"timestamp\":\"2025-06-03\"}]}"
+      }
+    },
+    {
+      "id": "history-blob-name",
+      "kind": "history",
+      "deviation": "history-blobs",
+      "core": {
+        "ops": [
+          {
+            "refused": {
+              "reason": "blob",
+              "column": "name"
+            }
+          }
+        ],
+        "rows": [
+          {
+            "id": 1,
+            "type": "data",
+            "name": {
+              "blob": "61"
+            },
+            "status": "completed",
+            "reference": null,
+            "bzz_url": null,
+            "tag_uid": null,
+            "batch_id": null,
+            "origin": "https://app.example",
+            "bytes_size": null,
+            "started_at": 1767225600123,
+            "completed_at": 1767225600123,
+            "error_message": null
+          }
+        ]
+      },
+      "seeded": [
+        [
+          "addEntry",
+          {
+            "type": "data",
+            "name": "a",
+            "status": "completed",
+            "origin": "https://app.example"
+          }
+        ]
+      ],
+      "blob": {
+        "id": 1,
+        "column": "name",
+        "hex": "61"
+      },
+      "ops": [
+        {
+          "op": "getEntries",
+          "args": [],
+          "result_typed": {
+            "array": [
+              {
+                "object": [
+                  [
+                    "id",
+                    {
+                      "number": "1"
+                    }
+                  ],
+                  [
+                    "type",
+                    {
+                      "string": "data"
+                    }
+                  ],
+                  [
+                    "name",
+                    {
+                      "bytes_elsewhere": 1,
+                      "kind": "Buffer",
+                      "base64": "YQ=="
+                    }
+                  ],
+                  [
+                    "status",
+                    {
+                      "string": "completed"
+                    }
+                  ],
+                  [
+                    "reference",
+                    {
+                      "null": true
+                    }
+                  ],
+                  [
+                    "bzzUrl",
+                    {
+                      "null": true
+                    }
+                  ],
+                  [
+                    "tagUid",
+                    {
+                      "null": true
+                    }
+                  ],
+                  [
+                    "batchIdUsed",
+                    {
+                      "null": true
+                    }
+                  ],
+                  [
+                    "origin",
+                    {
+                      "string": "https://app.example"
+                    }
+                  ],
+                  [
+                    "bytesSize",
+                    {
+                      "null": true
+                    }
+                  ],
+                  [
+                    "timestamp",
+                    {
+                      "string": "2026-01-01T00:00:00.123Z"
+                    }
+                  ],
+                  [
+                    "completedAt",
+                    {
+                      "string": "2026-01-01T00:00:00.123Z"
+                    }
+                  ],
+                  [
+                    "errorMessage",
+                    {
+                      "null": true
+                    }
+                  ]
+                ]
+              }
+            ]
+          }
+        }
+      ],
+      "schema": [
+        {
+          "type": "index",
+          "name": "idx_publishes_origin",
+          "tbl_name": "publishes",
+          "sql": "CREATE INDEX idx_publishes_origin    ON publishes(origin)"
+        },
+        {
+          "type": "index",
+          "name": "idx_publishes_reference",
+          "tbl_name": "publishes",
+          "sql": "CREATE INDEX idx_publishes_reference ON publishes(reference)"
+        },
+        {
+          "type": "index",
+          "name": "idx_publishes_started",
+          "tbl_name": "publishes",
+          "sql": "CREATE INDEX idx_publishes_started   ON publishes(started_at DESC)"
+        },
+        {
+          "type": "index",
+          "name": "idx_publishes_status",
+          "tbl_name": "publishes",
+          "sql": "CREATE INDEX idx_publishes_status    ON publishes(status)"
+        },
+        {
+          "type": "index",
+          "name": "idx_publishes_type",
+          "tbl_name": "publishes",
+          "sql": "CREATE INDEX idx_publishes_type      ON publishes(type)"
+        },
+        {
+          "type": "table",
+          "name": "publishes",
+          "tbl_name": "publishes",
+          "sql": "CREATE TABLE publishes (\n        id            INTEGER PRIMARY KEY AUTOINCREMENT,\n        type          TEXT NOT NULL,\n        name          TEXT,\n        status        TEXT NOT NULL,\n        reference     TEXT,\n        bzz_url       TEXT,\n        tag_uid       INTEGER,\n        batch_id      TEXT,\n        origin        TEXT,\n        bytes_size    INTEGER,\n        started_at    INTEGER NOT NULL,\n        completed_at  INTEGER,\n        error_message TEXT\n      )"
+        }
+      ],
+      "pragmas": {
+        "user_version": 1,
+        "journal_mode": "wal"
+      },
+      "rows": [
+        {
+          "id": 1,
+          "type": "data",
+          "name": {
+            "blob": "61"
+          },
+          "status": "completed",
+          "reference": null,
+          "bzz_url": null,
+          "tag_uid": null,
+          "batch_id": null,
+          "origin": "https://app.example",
+          "bytes_size": null,
+          "started_at": 1767225600123,
+          "completed_at": 1767225600123,
+          "error_message": null
+        }
+      ],
+      "user_data": {}
+    },
+    {
+      "id": "history-blob-started-at-date",
+      "kind": "history",
+      "deviation": "history-blobs",
+      "core": {
+        "ops": [
+          {
+            "refused": {
+              "reason": "blob",
+              "column": "started_at"
+            }
+          }
+        ],
+        "rows": [
+          {
+            "id": 1,
+            "type": "data",
+            "name": "a",
+            "status": "completed",
+            "reference": null,
+            "bzz_url": null,
+            "tag_uid": null,
+            "batch_id": null,
+            "origin": "https://app.example",
+            "bytes_size": null,
+            "started_at": {
+              "blob": "30"
+            },
+            "completed_at": 1767225600123,
+            "error_message": null
+          }
+        ]
+      },
+      "seeded": [
+        [
+          "addEntry",
+          {
+            "type": "data",
+            "name": "a",
+            "status": "completed",
+            "origin": "https://app.example"
+          }
+        ]
+      ],
+      "blob": {
+        "id": 1,
+        "column": "started_at",
+        "hex": "30"
+      },
+      "ops": [
+        {
+          "op": "getEntries",
+          "args": [],
+          "result": [
+            {
+              "id": 1,
+              "type": "data",
+              "name": "a",
+              "status": "completed",
+              "reference": null,
+              "bzzUrl": null,
+              "tagUid": null,
+              "batchIdUsed": null,
+              "origin": "https://app.example",
+              "bytesSize": null,
+              "timestamp": "2000-01-01T00:00:00.000Z",
+              "completedAt": "2026-01-01T00:00:00.123Z",
+              "errorMessage": null
+            }
+          ]
+        }
+      ],
+      "schema": [
+        {
+          "type": "index",
+          "name": "idx_publishes_origin",
+          "tbl_name": "publishes",
+          "sql": "CREATE INDEX idx_publishes_origin    ON publishes(origin)"
+        },
+        {
+          "type": "index",
+          "name": "idx_publishes_reference",
+          "tbl_name": "publishes",
+          "sql": "CREATE INDEX idx_publishes_reference ON publishes(reference)"
+        },
+        {
+          "type": "index",
+          "name": "idx_publishes_started",
+          "tbl_name": "publishes",
+          "sql": "CREATE INDEX idx_publishes_started   ON publishes(started_at DESC)"
+        },
+        {
+          "type": "index",
+          "name": "idx_publishes_status",
+          "tbl_name": "publishes",
+          "sql": "CREATE INDEX idx_publishes_status    ON publishes(status)"
+        },
+        {
+          "type": "index",
+          "name": "idx_publishes_type",
+          "tbl_name": "publishes",
+          "sql": "CREATE INDEX idx_publishes_type      ON publishes(type)"
+        },
+        {
+          "type": "table",
+          "name": "publishes",
+          "tbl_name": "publishes",
+          "sql": "CREATE TABLE publishes (\n        id            INTEGER PRIMARY KEY AUTOINCREMENT,\n        type          TEXT NOT NULL,\n        name          TEXT,\n        status        TEXT NOT NULL,\n        reference     TEXT,\n        bzz_url       TEXT,\n        tag_uid       INTEGER,\n        batch_id      TEXT,\n        origin        TEXT,\n        bytes_size    INTEGER,\n        started_at    INTEGER NOT NULL,\n        completed_at  INTEGER,\n        error_message TEXT\n      )"
+        }
+      ],
+      "pragmas": {
+        "user_version": 1,
+        "journal_mode": "wal"
+      },
+      "rows": [
+        {
+          "id": 1,
+          "type": "data",
+          "name": "a",
+          "status": "completed",
+          "reference": null,
+          "bzz_url": null,
+          "tag_uid": null,
+          "batch_id": null,
+          "origin": "https://app.example",
+          "bytes_size": null,
+          "started_at": {
+            "blob": "30"
+          },
+          "completed_at": 1767225600123,
+          "error_message": null
+        }
+      ],
+      "user_data": {}
+    },
+    {
+      "id": "history-blob-started-at-throws",
+      "kind": "history",
+      "deviation": "history-blobs",
+      "core": {
+        "ops": [
+          {
+            "refused": {
+              "reason": "blob",
+              "column": "started_at"
+            }
+          }
+        ],
+        "rows": [
+          {
+            "id": 1,
+            "type": "data",
+            "name": "a",
+            "status": "completed",
+            "reference": null,
+            "bzz_url": null,
+            "tag_uid": null,
+            "batch_id": null,
+            "origin": "https://app.example",
+            "bytes_size": null,
+            "started_at": {
+              "blob": "61"
+            },
+            "completed_at": 1767225600123,
+            "error_message": null
+          }
+        ]
+      },
+      "seeded": [
+        [
+          "addEntry",
+          {
+            "type": "data",
+            "name": "a",
+            "status": "completed",
+            "origin": "https://app.example"
+          }
+        ]
+      ],
+      "blob": {
+        "id": 1,
+        "column": "started_at",
+        "hex": "61"
+      },
+      "ops": [
+        {
+          "op": "getEntries",
+          "args": [],
+          "error": {
+            "name": "RangeError",
+            "message": "Invalid time value"
+          }
+        }
+      ],
+      "schema": [
+        {
+          "type": "index",
+          "name": "idx_publishes_origin",
+          "tbl_name": "publishes",
+          "sql": "CREATE INDEX idx_publishes_origin    ON publishes(origin)"
+        },
+        {
+          "type": "index",
+          "name": "idx_publishes_reference",
+          "tbl_name": "publishes",
+          "sql": "CREATE INDEX idx_publishes_reference ON publishes(reference)"
+        },
+        {
+          "type": "index",
+          "name": "idx_publishes_started",
+          "tbl_name": "publishes",
+          "sql": "CREATE INDEX idx_publishes_started   ON publishes(started_at DESC)"
+        },
+        {
+          "type": "index",
+          "name": "idx_publishes_status",
+          "tbl_name": "publishes",
+          "sql": "CREATE INDEX idx_publishes_status    ON publishes(status)"
+        },
+        {
+          "type": "index",
+          "name": "idx_publishes_type",
+          "tbl_name": "publishes",
+          "sql": "CREATE INDEX idx_publishes_type      ON publishes(type)"
+        },
+        {
+          "type": "table",
+          "name": "publishes",
+          "tbl_name": "publishes",
+          "sql": "CREATE TABLE publishes (\n        id            INTEGER PRIMARY KEY AUTOINCREMENT,\n        type          TEXT NOT NULL,\n        name          TEXT,\n        status        TEXT NOT NULL,\n        reference     TEXT,\n        bzz_url       TEXT,\n        tag_uid       INTEGER,\n        batch_id      TEXT,\n        origin        TEXT,\n        bytes_size    INTEGER,\n        started_at    INTEGER NOT NULL,\n        completed_at  INTEGER,\n        error_message TEXT\n      )"
+        }
+      ],
+      "pragmas": {
+        "user_version": 1,
+        "journal_mode": "wal"
+      },
+      "rows": [
+        {
+          "id": 1,
+          "type": "data",
+          "name": "a",
+          "status": "completed",
+          "reference": null,
+          "bzz_url": null,
+          "tag_uid": null,
+          "batch_id": null,
+          "origin": "https://app.example",
+          "bytes_size": null,
+          "started_at": {
+            "blob": "61"
+          },
+          "completed_at": 1767225600123,
+          "error_message": null
+        }
+      ],
+      "user_data": {}
     }
   ]
 }

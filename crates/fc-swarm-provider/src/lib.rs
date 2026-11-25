@@ -24,7 +24,8 @@
 //!   rules: each parses the text or rows it is handed, applies an
 //!   operation as the reference module does, and answers the exact text or
 //!   the statements to write (deviations `index-allocation`,
-//!   `history-bound`, `store-writes`).
+//!   `history-bound`, `history-blobs`, `store-shapes`, `store-refusal`,
+//!   `own-keys`, `legacy-dates`, `store-writes`).
 //!
 //! The third part (SWM-3, part 3a) adds the method machines:
 //!
