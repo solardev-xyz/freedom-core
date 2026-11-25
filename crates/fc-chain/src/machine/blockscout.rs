@@ -18,7 +18,7 @@ use super::config::{ms, number_text};
 use super::ctx::{Ctx, Req, started};
 use super::ctx::{Over, reserve, within};
 use super::error::Thrown;
-use super::exchange::{ResultText, exchange, indexed};
+use super::exchange::{ResultText, exchange_within, indexed};
 use super::io::{Answer, Delivered, Request, Transport};
 use super::logs::{Keeper, LogRange};
 use super::quorum::{QuorumOptions, request_quorum};
@@ -143,8 +143,10 @@ pub(crate) async fn log_index(
     let pair = async {
         let mut last: Option<Thrown> = None;
         for url in &pair_urls {
+            // What is left of the budget: the wait for the endpoint's slot
+            // counts against it.
             let timeout = remaining()?;
-            let result = match exchange(req, url, method, &pair_params, timeout).await {
+            let result = match exchange_within(req, url, method, &pair_params, timeout).await {
                 Ok(result) => result,
                 Err(error) => {
                     let now = req.now();

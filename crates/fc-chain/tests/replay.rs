@@ -1679,6 +1679,22 @@ fn tables_json(tables: &StateTables) -> Json {
             ),
         );
     }
+    // The core's own table (`endpoint-slots`): the reference has none, so
+    // a slot still held or waited for after a step is a mismatch.
+    if !tables.endpoint_slots.is_empty() {
+        out.insert(
+            "endpoint_slots".into(),
+            Json::Array(
+                tables
+                    .endpoint_slots
+                    .iter()
+                    .map(|(endpoint, at_main, waiting)| {
+                        serde_json::json!([endpoint, { "at_main": at_main, "waiting": waiting }])
+                    })
+                    .collect(),
+            ),
+        );
+    }
     if tables.colibri_in_flight > 0 {
         out.insert("colibri_in_flight".into(), tables.colibri_in_flight.into());
     }

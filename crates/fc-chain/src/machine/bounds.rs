@@ -40,6 +40,11 @@ pub struct Bounds {
     /// Colibri's verifier-fault records kept; past it the oldest is
     /// evicted (`memory-budgets`).
     pub colibri_fault_records: usize,
+    /// One endpoint's exchanges at main at once (`endpoint-slots`): below
+    /// the six HTTP/1.1 connections Electron's network stack opens to one
+    /// host and port, which naming's exchanges share. The next waits in
+    /// the core, its exchange's own timer not yet started.
+    pub endpoint_exchanges: usize,
 }
 
 impl Default for Bounds {
@@ -59,6 +64,7 @@ impl Default for Bounds {
             adaptive_routes: 1024,
             retired_endpoints: 64,
             colibri_fault_records: 1024,
+            endpoint_exchanges: 4,
         }
     }
 }

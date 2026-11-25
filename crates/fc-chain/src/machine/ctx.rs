@@ -28,13 +28,60 @@ pub(crate) const COLIBRI_PER_ROUTE: usize = 2;
 
 pub(crate) type Executor = Rt<Request, Delivered>;
 
-/// A chain's Myotis slots (`myotisSlots`): one read in flight, and the
-/// waiters, in order. A waiter holds the slot once granted.
+/// Slots and their waiters, in order: a chain's Myotis slots
+/// (`myotisSlots`: one read in flight), or an endpoint's exchanges (design
+/// 0005, Transport: per endpoint). A waiter holds a slot once granted.
 #[derive(Debug, Default)]
 pub(crate) struct Slots {
     pub in_flight: usize,
     pub waiters: VecDeque<u64>,
     pub granted: BTreeSet<u64>,
+}
+
+impl Slots {
+    /// Takes a slot if fewer than `limit` are taken.
+    fn take(&mut self, limit: usize) -> bool {
+        let free = self.in_flight < limit;
+        if free {
+            self.in_flight += 1;
+        }
+        free
+    }
+
+    /// Whether `waiter` has been handed a slot, which is now its own.
+    fn grant(&mut self, waiter: u64) -> bool {
+        self.granted.remove(&waiter)
+    }
+
+    /// A slot given back: handed straight to the next waiter, or freed.
+    fn release(&mut self) {
+        match self.waiters.pop_front() {
+            Some(next) => {
+                self.granted.insert(next);
+            }
+            None => self.in_flight = self.in_flight.saturating_sub(1),
+        }
+    }
+
+    /// The waiter gave up. True when it had been granted a slot at that
+    /// moment, which the caller must pass on ([`Slots::release`]); a waiter
+    /// still queued just leaves the queue.
+    fn leave(&mut self, waiter: u64) -> bool {
+        match self.waiters.iter().position(|w| *w == waiter) {
+            Some(at) => {
+                self.waiters.remove(at);
+                false
+            }
+            None => {
+                self.granted.remove(&waiter);
+                true
+            }
+        }
+    }
+
+    fn idle(&self) -> bool {
+        self.in_flight == 0 && self.waiters.is_empty() && self.granted.is_empty()
+    }
 }
 
 /// Colibri's work in flight: in all, and per route (a `Map`, in order).
@@ -82,6 +129,10 @@ pub(crate) struct State {
     pub ready: BTreeMap<u64, bool>,
     pub adaptive: Adaptive,
     pub myotis: BTreeMap<u64, Slots>,
+    /// Each endpoint's exchanges at main, and those waiting for one of its
+    /// slots (design 0005, Transport: per endpoint). Only endpoints with
+    /// either are kept.
+    pub endpoints: BTreeMap<String, Slots>,
     pub colibri: ColibriWork,
     /// Colibri's verifier-fault records (design 0005, Colibri).
     pub colibri_faults: ColibriFaults,
@@ -221,8 +272,7 @@ impl Ctx {
         let mut state = self.state.borrow_mut();
         let waiter = state.next_waiter + 1;
         let slots = state.myotis.entry(chain_id).or_default();
-        if slots.in_flight < MYOTIS_IN_FLIGHT {
-            slots.in_flight += 1;
+        if slots.take(MYOTIS_IN_FLIGHT) {
             return Ok(None);
         }
         if !queue || slots.waiters.len() >= MYOTIS_QUEUED {
@@ -236,30 +286,20 @@ impl Ctx {
     /// Whether `waiter` has been handed the slot.
     pub(crate) fn granted(&self, chain_id: u64, waiter: u64) -> bool {
         let mut state = self.state.borrow_mut();
-        let Some(slots) = state.myotis.get_mut(&chain_id) else {
-            return false;
-        };
-        slots.granted.remove(&waiter)
+        state
+            .myotis
+            .get_mut(&chain_id)
+            .is_some_and(|slots| slots.grant(waiter))
     }
 
     /// The waiter gave up: out of the queue, or, when it was granted the
     /// slot at that moment, the slot passed along.
     pub(crate) fn abandon_myotis(&self, chain_id: u64, waiter: u64) {
-        let queued = {
+        let granted = {
             let mut state = self.state.borrow_mut();
-            let slots = state.myotis.entry(chain_id).or_default();
-            match slots.waiters.iter().position(|w| *w == waiter) {
-                Some(at) => {
-                    slots.waiters.remove(at);
-                    true
-                }
-                None => {
-                    slots.granted.remove(&waiter);
-                    false
-                }
-            }
+            state.myotis.entry(chain_id).or_default().leave(waiter)
         };
-        if !queued {
+        if granted {
             self.release_myotis(chain_id);
         }
     }
@@ -269,14 +309,59 @@ impl Ctx {
         let mut state = self.state.borrow_mut();
         state.progress += 1;
         let slots = state.myotis.entry(chain_id).or_default();
-        match slots.waiters.pop_front() {
-            Some(next) => {
-                slots.granted.insert(next);
-            }
-            None => slots.in_flight = slots.in_flight.saturating_sub(1),
-        }
-        if slots.in_flight == 0 && slots.waiters.is_empty() && slots.granted.is_empty() {
+        slots.release();
+        if slots.idle() {
             state.myotis.remove(&chain_id);
+        }
+    }
+
+    /// One of `endpoint`'s slots for an exchange, or a place in its queue,
+    /// first come first served (design 0005, Transport: per endpoint). The
+    /// claim gives its place up when dropped ([`EndpointSlot`]).
+    pub(crate) fn claim_endpoint<'a>(&'a self, endpoint: &'a str) -> EndpointSlot<'a> {
+        let mut state = self.state.borrow_mut();
+        let waiter = state.next_waiter + 1;
+        let limit = self.bounds.endpoint_exchanges;
+        let slots = state.endpoints.entry(endpoint.to_owned()).or_default();
+        let waiter = if slots.take(limit) {
+            None
+        } else {
+            slots.waiters.push_back(waiter);
+            state.next_waiter = waiter;
+            Some(waiter)
+        };
+        EndpointSlot {
+            ctx: self,
+            endpoint,
+            waiter,
+        }
+    }
+
+    /// Whether `waiter` has been handed one of `endpoint`'s slots.
+    fn endpoint_granted(&self, endpoint: &str, waiter: u64) -> bool {
+        let mut state = self.state.borrow_mut();
+        state
+            .endpoints
+            .get_mut(endpoint)
+            .is_some_and(|slots| slots.grant(waiter))
+    }
+
+    /// An exchange gave its slot back, or a waiter its place: the slot is
+    /// handed straight to the next waiter, and the machine polls again.
+    fn release_endpoint(&self, endpoint: &str, waiter: Option<u64>) {
+        let mut state = self.state.borrow_mut();
+        let Some(slots) = state.endpoints.get_mut(endpoint) else {
+            return;
+        };
+        let release = waiter.is_none_or(|waiter| slots.leave(waiter));
+        if release {
+            slots.release();
+        }
+        if slots.idle() {
+            state.endpoints.remove(endpoint);
+        }
+        if release {
+            state.progress += 1;
         }
     }
 
@@ -448,6 +533,55 @@ impl Drop for MyotisClaim {
             Claim::Held => self.ctx.release_myotis(self.chain_id),
             Claim::Dispatched => {}
         }
+    }
+}
+
+/// An exchange's claim on one of its endpoint's slots (design 0005,
+/// Transport: per endpoint): queued, or holding the slot while its
+/// `shell.rpc` is at main. Dropped, it gives its place up at once: a
+/// waiter leaves the queue, never sent; a slot, granted or held, passes to
+/// the next waiter. That covers every way an exchange ends: main's reply,
+/// its own timer, and its future dropped (a quorum that settled, a source's
+/// budget, a cancel, a configuration change, the request's deadline or
+/// budget).
+pub(crate) struct EndpointSlot<'a> {
+    ctx: &'a Ctx,
+    endpoint: &'a str,
+    /// Its place in the queue, until it is granted a slot.
+    waiter: Option<u64>,
+}
+
+impl EndpointSlot<'_> {
+    /// Whether it is queued, not yet granted a slot.
+    pub(crate) fn waiting(&self) -> bool {
+        self.waiter.is_some()
+    }
+
+    pub(crate) fn endpoint(&self) -> &str {
+        self.endpoint
+    }
+
+    /// Waits until a slot is this claim's: at once when one was free.
+    pub(crate) async fn granted(&mut self) {
+        let Some(waiter) = self.waiter else {
+            return;
+        };
+        let (ctx, endpoint) = (self.ctx, self.endpoint);
+        std::future::poll_fn(|_| {
+            if ctx.endpoint_granted(endpoint, waiter) {
+                Poll::Ready(())
+            } else {
+                Poll::Pending
+            }
+        })
+        .await;
+        self.waiter = None;
+    }
+}
+
+impl Drop for EndpointSlot<'_> {
+    fn drop(&mut self) {
+        self.ctx.release_endpoint(self.endpoint, self.waiter);
     }
 }
 
