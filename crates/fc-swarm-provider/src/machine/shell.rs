@@ -33,6 +33,8 @@
 //! `cancelled`; the protocol error `busy`; or main broke the protocol,
 //! which ends the connection (D5).
 
+use std::collections::BTreeSet;
+
 use fc_json::{JsString, JsValue};
 
 use super::node::{Failed, transport_text};
@@ -524,6 +526,22 @@ impl<'v> Members<'v> {
     }
 }
 
+/// Keys met so far, each once: a set, so `n` keys cost `O(n log n)`
+/// comparisons, and a part table as large as main's frame holds is read
+/// in time the swarm thread can spare (it runs before any bound applies).
+struct Seen<K>(BTreeSet<K>);
+
+impl<K: Ord> Seen<K> {
+    fn new() -> Self {
+        Seen(BTreeSet::new())
+    }
+
+    /// Whether `key` is met for the first time.
+    fn first(&mut self, key: K) -> bool {
+        self.0.insert(key)
+    }
+}
+
 /// A safe non-negative integer.
 fn safe_integer(value: &JsValue) -> Option<u64> {
     match value {
@@ -622,10 +640,11 @@ fn parse_publish(params: &JsValue) -> Result<PublishCall, Invalid> {
         return Err(m.bad("parts", "one part for data or a file"));
     }
     let mut parts = Vec::with_capacity(items.len());
+    let mut named = Seen::new();
     for item in items {
         let part = parse_part(item, collection)?;
         if let Source::Part(k) = part.source
-            && parts.iter().any(|p: &PartSpec| p.source == Source::Part(k))
+            && !named.first(k)
         {
             return Err(invalid("params.parts", "a part named twice"));
         }
@@ -1177,6 +1196,74 @@ mod tests {
                 topic: [0xab; 32],
                 batch: None,
             })
+        );
+    }
+
+    /// A key that counts the comparisons made of it.
+    #[derive(Debug)]
+    struct Counted<'c>(u32, &'c std::cell::Cell<u64>);
+
+    impl PartialEq for Counted<'_> {
+        fn eq(&self, other: &Self) -> bool {
+            self.cmp(other).is_eq()
+        }
+    }
+    impl Eq for Counted<'_> {}
+    impl PartialOrd for Counted<'_> {
+        fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+            Some(self.cmp(other))
+        }
+    }
+    impl Ord for Counted<'_> {
+        fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+            self.1.set(self.1.get() + 1);
+            self.0.cmp(&other.0)
+        }
+    }
+
+    /// The part table's check makes `O(n log n)` comparisons: 100,000
+    /// parts in a scrambled order cost a few dozen comparisons each, where
+    /// a scan of every earlier part would cost tens of thousands.
+    #[test]
+    fn a_large_part_table_is_checked_in_n_log_n() {
+        let n: u32 = 100_000;
+        let compared = std::cell::Cell::new(0u64);
+        let mut seen = Seen::new();
+        for i in 0..n {
+            // Scrambled, and distinct: reversing the bits is a bijection.
+            assert!(seen.first(Counted(i.reverse_bits(), &compared)));
+        }
+        assert!(!seen.first(Counted(7u32.reverse_bits(), &compared)));
+        let bound = 16 * u64::from(n) * u64::from(n.ilog2() + 1);
+        assert!(
+            compared.get() <= bound,
+            "{} comparisons for {n} parts, past {bound}",
+            compared.get()
+        );
+        // The whole params, through the parser: a collection of 100,000
+        // streamed parts is read, and a part named twice at its end is
+        // refused.
+        let items: Vec<String> = (0..n)
+            .map(|k| format!(r#"{{"path":"f/{k}","bytes":1,"part":{k}}}"#))
+            .collect();
+        let params = |extra: &str| {
+            format!(
+                r#"{{"kind":"collection","parts":[{}{extra}],"pin":true,"deferred":true}}"#,
+                items.join(",")
+            )
+        };
+        let ShellCall::Publish(call) = parse(ShellMethod::Publish, &params("")).unwrap() else {
+            panic!("a publish")
+        };
+        assert_eq!(call.parts.len(), n as usize);
+        assert_eq!(
+            parse(
+                ShellMethod::Publish,
+                &params(r#",{"path":"g","bytes":1,"part":99999}"#)
+            )
+            .unwrap_err()
+            .0,
+            "params.parts: a part named twice"
         );
     }
 
