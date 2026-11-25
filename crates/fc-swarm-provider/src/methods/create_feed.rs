@@ -12,16 +12,16 @@ use fc_json::{JsString, JsValue};
 
 use super::permitted;
 use super::writes::{
-    Ending, Fail, add_row, admit, batch, bee_upload, closing, feed_manifest, feed_not_granted,
-    guard, holds_key, inserted, owner, row as fields, s, signer_key, stamps_call, unavailable,
-    written,
+    Ended, Ending, Fail, add_row, admit, batch, bee_upload, closing, feed_manifest,
+    feed_not_granted, guard, holds_key, inserted, owner, row as fields, s, signer_key, stamps_call,
+    unavailable, written,
 };
 use crate::chunks::hex;
 use crate::js::concat;
 use crate::machine::params::{feed_name, require_params};
 use crate::machine::{
-    Approval, AskId, Cx, Event, Failure, Outcome, ReadyCheck, SignKey, Step, StoreWrite, World,
-    fail,
+    Approval, AskId, Closing, Cx, Event, Failure, Outcome, ReadyCheck, SignKey, Step, StoreWrite,
+    World, fail,
 };
 use crate::stores::feeds::{FeedChange, identity_mode};
 use crate::stores::manifests::Capability;
@@ -174,7 +174,7 @@ impl CreateFeed {
                     Err(failure) => return self.end(cx, Err(failure)),
                 };
                 if let Err(refused) = guard(cx, self.approval, Capability::Feeds) {
-                    return self.end(cx, Err(Fail::answer(refused)));
+                    return self.end(cx, Err(Fail::refused(refused)));
                 }
                 self.stage =
                     Stage::Manifest(cx.whole(feed_manifest(&self.owner, &self.topic, &batch)));
@@ -236,14 +236,24 @@ impl CreateFeed {
                 }
                 Err(text) => self.end(cx, Err(Fail::text(text))),
             },
-            Stage::Ending(ending) if ending.id == id => ending.on(event),
+            Stage::Ending(ending) if ending.id == id => match ending.on(cx, event) {
+                Ended::Again(again) => {
+                    self.stage = Stage::Ending(again);
+                    Step::Wait
+                }
+                Ended::Step(step) => step,
+            },
             _ => self.end(cx, Err(Fail::internal())),
         }
     }
 
     /// What the request still writes when it ends without its machine.
-    pub(crate) fn closing(&self, outcome: &Outcome) -> Option<StoreWrite> {
-        closing(self.row, self.closed, outcome, self.now)
+    pub(crate) fn closing(&self, outcome: &Outcome) -> Option<Closing> {
+        let inserting = match self.stage {
+            Stage::Insert(id) => Some(id),
+            _ => None,
+        };
+        closing(self.row, inserting, self.closed, outcome, self.now)
     }
 
     /// The row's last update, then the answer; at once with no row.

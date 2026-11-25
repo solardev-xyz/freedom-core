@@ -30,7 +30,8 @@ use crate::js::{is_integer, strip_bom, to_lower};
 use crate::json::{ReadError, Reader, Token};
 use crate::machine::node::{Failed, JSON_REPLY_CAP, transport_text};
 use crate::machine::{
-    Approval, AskId, Body, Cx, Event, Failure, Form, NodeCall, Outcome, SignKey, StoreWrite, World,
+    AfterInsert, Approval, AskId, Body, Closing, Cx, Event, Failure, Form, NodeCall, Outcome,
+    SignKey, StoreWrite, World,
 };
 use crate::stamps::{BatchId, SelectOptions, read_stamps, select_best_batch};
 use crate::stores::feeds::{
@@ -46,6 +47,10 @@ use crate::zod::{Expected, Issue, Issues, Received, Segment};
 pub(crate) struct Fail {
     pub message: JsString,
     pub page: Failure,
+    /// A refusal the handler answers inside its `try` (a guard's, a
+    /// re-check's), rather than an error its `catch` maps: where the row's
+    /// last update sits, which decides what follows if that write fails.
+    pub refused: bool,
 }
 
 impl Fail {
@@ -54,6 +59,7 @@ impl Fail {
         Fail {
             message: err.message.clone(),
             page: node_write_error(err).into(),
+            refused: false,
         }
     }
 
@@ -68,6 +74,26 @@ impl Fail {
         Fail {
             message: page.message.clone(),
             page,
+            refused: false,
+        }
+    }
+
+    /// A refusal the handler answers as it is, inside its `try` (a guard's,
+    /// a re-check's); the row takes its message.
+    pub fn refused(page: Failure) -> Fail {
+        Fail {
+            refused: true,
+            ..Fail::answer(page)
+        }
+    }
+
+    /// A service's error with its own page answer (`index_already_exists`,
+    /// the empty entry's `payload_too_large`), which the `catch` maps.
+    pub fn mapped(message: impl Into<JsString>, page: Failure) -> Fail {
+        Fail {
+            message: message.into(),
+            page,
+            refused: false,
         }
     }
 
@@ -678,16 +704,24 @@ pub(crate) fn inserted<W: World>(
 /// already asked.
 pub(crate) fn closing(
     row: Option<i64>,
+    inserting: Option<AskId>,
     closed: bool,
     outcome: &Outcome,
     now: u64,
-) -> Option<StoreWrite> {
-    let row = row.filter(|_| !closed)?;
+) -> Option<Closing> {
+    if closed {
+        return None;
+    }
     let text = match outcome {
         Outcome::Result(_) => return None,
         Outcome::Error(failure) => failure.message.clone(),
         Outcome::Cancelled => JsString::from("cancelled"),
         Outcome::Protocol(_) => Failure::internal_error().message,
+    };
+    let Some(row) = row else {
+        // The insert is in flight: its row is trimmed around and ended once
+        // it answers (part 3b's `after_insert`).
+        return inserting.map(|id| Closing::AfterInsert(AfterInsert { id, text, now }));
     };
     #[expect(
         clippy::cast_precision_loss,
@@ -700,7 +734,7 @@ pub(crate) fn closing(
     ]);
     history::update_entry(&id, &updates, now)
         .ok()
-        .map(|statement| StoreWrite::History(vec![statement]))
+        .map(|statement| Closing::Write(StoreWrite::History(vec![statement])))
 }
 
 /// A store write's answer.
@@ -713,11 +747,38 @@ pub(crate) fn written(event: Event) -> Result<(), JsString> {
 
 /// A write's last step once its history row exists: the row's update
 /// (`updateEntry`: completed with the write's fields, or failed with the
-/// failure's text), then the answer.
+/// failure's text), then the answer. Where that write fails, what follows
+/// is the reference's for where the update sits in its handler, as part
+/// 3b reads it: after an update inside the `try` (the completed one, a
+/// refusal's), the `catch` ends the row failed with the write's message
+/// and answers `nodeWriteError` of it; after the `catch`'s own update, the
+/// provider's catch answers the write's message, and the core still ends
+/// the row failed with it once.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct Ending {
     pub id: AskId,
+    row: i64,
     outcome: Result<crate::value::Value, Failure>,
+    last: Last,
+}
+
+/// Where the row's last update sits.
+#[derive(Debug, Clone, PartialEq)]
+enum Last {
+    Try,
+    Catch,
+    /// The one retry after the last update failed with `first`.
+    Retry {
+        first: JsString,
+        in_try: bool,
+    },
+}
+
+/// What a row's update answer leads to.
+pub(crate) enum Ended {
+    Step(crate::machine::Step),
+    /// The retry, asked.
+    Again(Ending),
 }
 
 impl Ending {
@@ -726,25 +787,61 @@ impl Ending {
         row: i64,
         result: Result<(crate::value::Value, JsValue), Fail>,
     ) -> Result<Ending, Failure> {
-        let (updates, outcome) = match result {
-            Ok((value, updates)) => (updates, Ok(value)),
-            Err(fail) => (failed_row(&fail), Err(fail.page)),
+        let (updates, outcome, last) = match result {
+            Ok((value, updates)) => (updates, Ok(value), Last::Try),
+            Err(fail) => {
+                let last = if fail.refused { Last::Try } else { Last::Catch };
+                (failed_row(&fail), Err(fail.page), last)
+            }
         };
         Ok(Ending {
             id: update_row(cx, row, &updates)?,
+            row,
             outcome,
+            last,
         })
     }
 
-    /// The row's update answered: the write's answer, or the update's
-    /// failure.
-    pub fn on(self, event: Event) -> crate::machine::Step {
-        match written(event) {
-            Ok(()) => match self.outcome {
-                Ok(value) => crate::machine::done(value),
-                Err(page) => crate::machine::fail(page),
-            },
-            Err(text) => crate::machine::fail(Failure::internal(text)),
+    /// The row's update answered: the write's answer, the retry, or the
+    /// answer after the retry.
+    pub fn on<W: World>(self, cx: &mut Cx<'_, W>, event: Event) -> Ended {
+        let text = match written(event) {
+            Ok(()) => {
+                return Ended::Step(match self.outcome {
+                    Ok(value) => crate::machine::done(value),
+                    Err(page) => crate::machine::fail(page),
+                });
+            }
+            Err(text) => text,
+        };
+        let (first, in_try) = match self.last {
+            Last::Retry { first, in_try } => {
+                return Ended::Step(crate::machine::fail(Failure::internal(if in_try {
+                    text
+                } else {
+                    first
+                })));
+            }
+            Last::Try => (text, true),
+            Last::Catch => (text, false),
+        };
+        let outcome = Err(if in_try {
+            Fail::text(first.clone()).page
+        } else {
+            Failure::internal(first.clone())
+        });
+        let updates = row_fields(&[
+            ("status", s("failed")),
+            ("errorMessage", JsValue::String(first.clone())),
+        ]);
+        match update_row(cx, self.row, &updates) {
+            Ok(id) => Ended::Again(Ending {
+                id,
+                row: self.row,
+                outcome,
+                last: Last::Retry { first, in_try },
+            }),
+            Err(failure) => Ended::Step(crate::machine::fail(failure)),
         }
     }
 }

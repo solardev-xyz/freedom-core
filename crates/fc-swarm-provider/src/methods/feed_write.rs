@@ -37,16 +37,16 @@ use super::body::{BodyWriter, Fault, Piece};
 use super::feed_index::{Next, NextIndex, wrapping_index};
 use super::permitted;
 use super::writes::{
-    Ending, Fail, add_row, admit, batch, bytes_up, bytes_uploaded, closing, feed_not_granted,
-    guard, holds_key, inserted, owner, row, s, signature, signer_key, soc_up, soc_uploaded,
-    stamps_call, still_here, unavailable, written,
+    Ended, Ending, Fail, add_row, admit, batch, bytes_up, bytes_uploaded, closing,
+    feed_not_granted, guard, holds_key, inserted, owner, row, s, signature, signer_key, soc_up,
+    soc_uploaded, stamps_call, still_here, unavailable, written,
 };
 use crate::chunks::single_owner;
 use crate::machine::node::BodyAbort;
 use crate::machine::params::{feed_name, is_hex, require_params};
 use crate::machine::{
-    Approval, AskId, Cx, Event, Failure, NodeCall, Outcome, Protocol, ReadyCheck, SignKey, SignSoc,
-    SocKind, Step, StoreWrite, World, fail,
+    Approval, AskId, Closing, Cx, Effect, Event, Failure, NodeCall, Outcome, Protocol, ReadyCheck,
+    SignKey, SignSoc, SocKind, Step, StoreWrite, World, fail,
 };
 use crate::methods::limits::MAX_DATA_BYTES;
 use crate::stamps::BatchId;
@@ -447,13 +447,7 @@ impl FeedWrite {
                         );
                         let page =
                             Failure::invalid_params(message.as_str(), "index_already_exists");
-                        self.end(
-                            cx,
-                            Err(Fail {
-                                message: JsString::from(message),
-                                page,
-                            }),
-                        )
+                        self.end(cx, Err(Fail::mapped(message, page)))
                     }
                     Err(failure) => self.end(cx, Err(failure)),
                 }
@@ -463,7 +457,7 @@ impl FeedWrite {
                     return self.end(cx, Err(Fail::internal()));
                 }
                 if let Err(refused) = guard(cx, self.approval, Capability::Feeds) {
-                    return self.end(cx, Err(Fail::answer(refused)));
+                    return self.end(cx, Err(Fail::refused(refused)));
                 }
                 let (Kind::Entry { data, .. }, Some(batch)) = (&self.kind, &self.batch) else {
                     return self.end(cx, Err(Fail::internal()));
@@ -491,7 +485,7 @@ impl FeedWrite {
                 };
                 // After the vault's wait, the guard owns the upload.
                 if let Err(refused) = guard(cx, self.approval, Capability::Feeds) {
-                    return self.end(cx, Err(Fail::answer(refused)));
+                    return self.end(cx, Err(Fail::refused(refused)));
                 }
                 let Some(batch) = &self.batch else {
                     return self.end(cx, Err(Fail::internal()));
@@ -540,7 +534,13 @@ impl FeedWrite {
                 }
                 self.updated(cx)
             }
-            Stage::Ending(ending) if ending.id == id => ending.on(event),
+            Stage::Ending(ending) if ending.id == id => match ending.on(cx, event) {
+                Ended::Again(again) => {
+                    self.stage = Stage::Ending(again);
+                    Step::Wait
+                }
+                Ended::Step(step) => step,
+            },
             _ => self.end(cx, Err(Fail::internal())),
         }
     }
@@ -585,13 +585,13 @@ impl FeedWrite {
                 if data.len() == 0 {
                     return self.end(
                         cx,
-                        Err(Fail {
-                            message: JsString::from("A feed entry needs at least 1 byte of data"),
-                            page: Failure::invalid_params(
+                        Err(Fail::mapped(
+                            "A feed entry needs at least 1 byte of data",
+                            Failure::invalid_params(
                                 "Payload exceeds maximum SOC size",
                                 "payload_too_large",
                             ),
-                        }),
+                        )),
                     );
                 }
                 match data {
@@ -613,7 +613,7 @@ impl FeedWrite {
 
     fn sign<W: World>(&mut self, cx: &mut Cx<'_, W>, span: u64, payload: Vec<u8>) -> Step {
         if let Err(moved) = still_here(cx) {
-            return self.end(cx, Err(Fail::answer(moved)));
+            return self.end(cx, Err(Fail::refused(moved)));
         }
         let identifier = feed_update_id(&self.topic, self.index);
         let prepared = match fc_swarm::prepare_soc(&identifier, Some(span), &payload) {
@@ -704,9 +704,28 @@ impl FeedWrite {
         }
     }
 
+    /// The terminal a large entry's opened body still needs when the
+    /// request ends without its machine: `cancelled`, or `internal` at a
+    /// protocol error, exactly once.
+    pub(crate) fn terminal(&mut self, outcome: &Outcome) -> Option<Effect> {
+        let why = match outcome {
+            Outcome::Protocol(_) => BodyAbort::Internal,
+            _ => BodyAbort::Cancelled,
+        };
+        let Stage::Upload { body, .. } = &mut self.stage else {
+            return None;
+        };
+        let (id, out) = body.terminal(why)?;
+        Some(Effect::Body { id, out })
+    }
+
     /// What the request still writes when it ends without its machine.
-    pub(crate) fn closing(&self, outcome: &Outcome) -> Option<StoreWrite> {
-        closing(self.row, self.closed, outcome, self.now)
+    pub(crate) fn closing(&self, outcome: &Outcome) -> Option<Closing> {
+        let inserting = match self.stage {
+            Stage::Insert(id) => Some(id),
+            _ => None,
+        };
+        closing(self.row, inserting, self.closed, outcome, self.now)
     }
 
     fn end<W: World>(

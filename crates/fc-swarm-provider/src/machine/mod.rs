@@ -835,6 +835,7 @@ impl Running {
     fn end(&mut self, outcome: &Outcome) -> Option<Effect> {
         match self {
             Running::Publish(m) => m.end(outcome),
+            Running::FeedWrite(m) => m.terminal(outcome),
             _ => None,
         }
     }

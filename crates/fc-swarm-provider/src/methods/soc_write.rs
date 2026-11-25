@@ -32,14 +32,15 @@ use fc_swarm::verify::soc_address;
 
 use super::permitted;
 use super::writes::{
-    Ending, Fail, add_row, admit, batch, closing, feed_not_granted, guard, inserted, owner, row, s,
-    signature, signer_key, soc_up, soc_uploaded, stamps_call, still_here, unavailable, written,
+    Ended, Ending, Fail, add_row, admit, batch, closing, feed_not_granted, guard, inserted, owner,
+    row, s, signature, signer_key, soc_up, soc_uploaded, stamps_call, still_here, unavailable,
+    written,
 };
 use crate::chunks::hex;
 use crate::machine::params::{bytes32, empty_options, hex_string, require_params};
 use crate::machine::{
-    Approval, AskId, Cx, Event, Failure, Outcome, ReadyCheck, SignKey, SignSoc, SocKind, Step,
-    StoreWrite, World, fail,
+    Approval, AskId, Closing, Cx, Event, Failure, Outcome, ReadyCheck, SignKey, SignSoc, SocKind,
+    Step, World, fail,
 };
 use crate::methods::feed_write::{Data, data_of};
 use crate::methods::limits::MAX_CHUNK_PAYLOAD_BYTES;
@@ -258,7 +259,7 @@ impl SocWrite {
                 };
                 // After the batch's wait, the guard owns the upload.
                 if let Err(refused) = guard(cx, self.approval, Capability::Signing) {
-                    return self.end(cx, Err(Fail::answer(refused)));
+                    return self.end(cx, Err(Fail::refused(refused)));
                 }
                 let call = soc_up(
                     &self.owner,
@@ -296,7 +297,13 @@ impl SocWrite {
                 }
                 Err(failure) => self.end(cx, Err(failure)),
             },
-            Stage::Ending(ending) if ending.id == id => ending.on(event),
+            Stage::Ending(ending) if ending.id == id => match ending.on(cx, event) {
+                Ended::Again(again) => {
+                    self.stage = Stage::Ending(again);
+                    Step::Wait
+                }
+                Ended::Step(step) => step,
+            },
             _ => self.end(cx, Err(Fail::internal())),
         }
     }
@@ -306,7 +313,7 @@ impl SocWrite {
     fn sign<W: World>(&mut self, cx: &mut Cx<'_, W>) -> Step {
         let key = match check(cx).and_then(|key| still_here(cx).map(|()| key)) {
             Ok(key) => key,
-            Err(failure) => return self.end(cx, Err(Fail::answer(failure))),
+            Err(failure) => return self.end(cx, Err(Fail::refused(failure))),
         };
         if key != self.key {
             // Another exclusive identity is active now: its owner first.
@@ -335,8 +342,12 @@ impl SocWrite {
     }
 
     /// What the request still writes when it ends without its machine.
-    pub(crate) fn closing(&self, outcome: &Outcome) -> Option<StoreWrite> {
-        closing(self.row, self.closed, outcome, self.now)
+    pub(crate) fn closing(&self, outcome: &Outcome) -> Option<Closing> {
+        let inserting = match self.stage {
+            Stage::Insert(id) => Some(id),
+            _ => None,
+        };
+        closing(self.row, inserting, self.closed, outcome, self.now)
     }
 
     fn end<W: World>(
