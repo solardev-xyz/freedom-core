@@ -25,8 +25,7 @@ use fc_swarm_provider::value::Value as Typed;
 use serde_json::{Value, json};
 
 use crate::common::{
-    Core, KIND_ABORT, KIND_DATA, KIND_END, KIND_STREAM_CREDIT, Wire, dirs, spawn_env,
-    stream_frame,
+    Core, KIND_ABORT, KIND_DATA, KIND_END, KIND_STREAM_CREDIT, Wire, dirs, spawn_env, stream_frame,
 };
 
 #[path = "../../../fc-swarm-provider/tests/common/mod.rs"]

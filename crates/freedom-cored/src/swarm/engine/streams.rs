@@ -339,19 +339,33 @@ impl Engine {
         io.body(body, out);
     }
 
+    /// Main has answered request `id`'s call `ask_id`: the route of the
+    /// body it asked for, if any, goes (D4). Its credits came first.
+    pub(super) fn answered_call(&mut self, io: &mut impl Io, id: u64, ask_id: AskId) {
+        let body = self
+            .bodies
+            .iter()
+            .find(|(_, call)| **call == (id, ask_id))
+            .map(|(body, _)| *body);
+        if let Some(body) = body {
+            self.bodies.remove(&body);
+            io.forget(StreamKey::Body(body));
+        }
+    }
+
     /// Request `id` has gone: its bodies' records with it, and the routes
     /// of those main hasn't let go of.
     pub(super) fn forget_bodies(&mut self, io: &mut impl Io, id: u64) {
-        let calls: Vec<((u64, AskId), u64)> = self
-            .body_of
-            .range((id, AskId(0))..=(id, AskId(u64::MAX)))
-            .map(|(call, body)| (*call, *body))
+        self.body_of.retain(|(request, _), _| *request != id);
+        let bodies: Vec<u64> = self
+            .bodies
+            .iter()
+            .filter(|(_, (request, _))| *request == id)
+            .map(|(body, _)| *body)
             .collect();
-        for (call, body) in calls {
-            self.body_of.remove(&call);
-            if self.bodies.remove(&body).is_some() {
-                io.forget(StreamKey::Body(body));
-            }
+        for body in bodies {
+            self.bodies.remove(&body);
+            io.forget(StreamKey::Body(body));
         }
     }
 

@@ -7,12 +7,13 @@
 //!
 //! - **Into the core:** a part (`shell.swarm_part { for, part }`) answers a
 //!   head `{ bytes }`, then exactly that many bytes, ended by `end` or an
-//!   abort with a part's codes ([`Codes::SwarmPart`]): `cancelled`,
+//!   abort with a part's codes ([`fc_protocol::stream::Codes::SwarmPart`]): `cancelled`,
 //!   `stalled`, or `body_stream_error`, which alone may name the error code
 //!   the part's file failed with (an errno name). A node body
 //!   (`shell.swarm_api` with `stream: true`) answers its head (see
 //!   [`super::wire::api_reply`]) and its bytes, ended by `end` or an abort
-//!   with a piece's codes and `too_large` ([`Codes::SwarmPiece`]).
+//!   with a piece's codes and `too_large`
+//!   ([`fc_protocol::stream::Codes::SwarmPiece`]).
 //! - **Out of the core:** `swarm.body { for }` names one of the thread's
 //!   own `shell.swarm_api` calls whose body streams; the core answers a
 //!   head `{ bytes }` and the body, ended by `end` or an abort with an
@@ -20,7 +21,7 @@
 
 use fc_protocol::error::{ErrorBody, ErrorCode};
 use fc_protocol::message;
-use fc_protocol::stream::{Abort as WireAbort, AbortCode, Codes};
+use fc_protocol::stream::{Abort as WireAbort, AbortCode};
 use fc_swarm_provider::machine::{Abort, BodyAbort};
 use serde::Deserialize;
 
@@ -114,6 +115,7 @@ mod tests {
     #![allow(clippy::unwrap_used)]
 
     use super::*;
+    use fc_protocol::stream::Codes;
 
     #[test]
     fn a_parts_head_is_its_length() {

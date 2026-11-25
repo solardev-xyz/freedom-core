@@ -573,7 +573,8 @@ pub struct Engine {
     /// overdue.
     retiring: BTreeMap<u64, Ms>,
     /// Main's `swarm.body` requests, by ID, and the call each is the body
-    /// of, until main has answered the call or cancelled the body.
+    /// of, until main has answered the call or cancelled the body: at most
+    /// one per upload's turn, and those whose call main hasn't answered.
     bodies: BTreeMap<u64, (u64, AskId)>,
     /// Each call whose body main asked for, and that `swarm.body`, until
     /// the body has had its terminal.
@@ -842,11 +843,7 @@ impl Engine {
         }
         // Main has answered the call: no credit for its body can follow
         // (D4), so the body's route goes.
-        if let Some(body) = self.body_of.get(&(id, ask_id)).copied()
-            && self.bodies.remove(&body).is_some()
-        {
-            io.forget(StreamKey::Body(body));
-        }
+        self.answered_call(io, id, ask_id);
         if let Some(event) = event.filter(|_| deliver && !closed) {
             self.deliver(io, now, id, ask_id, event)?;
         }
