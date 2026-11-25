@@ -915,7 +915,12 @@ fn publish_chunk(params: &Value) -> Result<(Method, JsValue, u64, Upload), Outco
             "invalid_span",
         )
     })?;
-    let span = span.unwrap_or(payload.len() as u64).to_le_bytes();
+    // core-sdk's `span ? Span.fromBigInt(span) : <the payload's length>`:
+    // a span of 0n is falsy, so it is the payload's length too.
+    let span = span
+        .filter(|s| *s != 0)
+        .unwrap_or(payload.len() as u64)
+        .to_le_bytes();
     let address =
         fc_swarm::verify::address_of(&span, &payload).ok_or_else(Failure::internal_error)?;
     let size = payload.len() as u64;

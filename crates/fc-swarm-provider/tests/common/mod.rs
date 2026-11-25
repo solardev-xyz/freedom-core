@@ -904,7 +904,13 @@ pub const READ_HEADERS: [&str; 5] = [
 /// Main's answer to a call: what it sends the core, in order, and whether
 /// the page gave up as the request reached the node.
 pub fn main_answer(node: &Node, call: &NodeCall) -> (bool, Vec<Event>) {
-    let spec = node.reply(call.method(), &call.path);
+    forward(&node.reply(call.method(), &call.path), call)
+}
+
+/// What main sends the core for the node's reply `spec` to `call`, under
+/// main's rules, and whether the page gave up as the request reached the
+/// node.
+pub fn forward(spec: &ReplySpec, call: &NodeCall) -> (bool, Vec<Event>) {
     if spec.hang_up {
         return (spec.abort_page, vec![Event::Failed(Failed::Error)]);
     }
@@ -1294,9 +1300,13 @@ pub fn handoff(step: V<'_, '_>, origin: &JsString, world: &mut TestWorld) -> Opt
     for event in &events {
         if let Some(g) = event.get("grant") {
             let change = get(g, "change");
+            let key = change.get("key").map_or_else(|| origin.clone(), js);
             if get(change, "op").is_str("connect") {
-                let key = change.get("key").map_or_else(|| origin.clone(), js);
                 world.grants.insert(key);
+            } else if get(change, "op").is_str("flag") {
+                // "Always allow": the site's rule for the flag's type.
+                let flag = Capability::from_key(&string(get(change, "flag"))).unwrap();
+                world.rules.insert((key, flag.key()));
             }
         }
         if let Some(s) = event.get("service") {
