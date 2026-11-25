@@ -157,6 +157,9 @@ pub struct Main {
     pub bodies: BTreeMap<u64, BodyIn>,
     /// Bodies whose end came, for main to answer their calls.
     pub ended: VecDeque<BodyIn>,
+    /// Bodies the core aborted (a part's read failing), their calls left
+    /// to the core's cancel.
+    pub aborted: VecDeque<BodyIn>,
     /// Parts main streams, by the core's request ID: the bytes and how
     /// many went.
     pub parts_out: BTreeMap<u64, (Vec<u8>, usize)>,
@@ -229,6 +232,7 @@ pub fn main_in(
         credit: BTreeMap::new(),
         bodies: BTreeMap::new(),
         ended: VecDeque::new(),
+        aborted: VecDeque::new(),
         parts_out: BTreeMap::new(),
         open_calls: BTreeMap::new(),
         expected: BTreeSet::new(),
@@ -433,7 +437,9 @@ impl Main {
                         self.ended.push_back(body);
                     }
                     KIND_ABORT => {
-                        self.bodies.remove(&id);
+                        if let Some(body) = self.bodies.remove(&id) {
+                            self.aborted.push_back(body);
+                        }
                     }
                     other => panic!("a body frame of kind {other}"),
                 }
@@ -1125,6 +1131,7 @@ impl Main {
                 own.calls.push((call, body.bytes));
                 self.answer(body.call, reply_json(&event));
             }
+            self.aborted.clear();
             let message = match self.backlog.pop_front() {
                 Some(message) => Some(message),
                 None => match self
@@ -1200,11 +1207,15 @@ impl Main {
                 "cancel" => {
                     own.cancels += 1;
                     let id = message["id"].as_u64().unwrap();
-                    // A call main hasn't answered ends `cancelled`; its
-                    // body, if it streams one, still gets its terminal
-                    // from the core, after this (the duplex's frames
-                    // follow the control frames).
-                    if self.open_calls.remove(&id).is_some() {
+                    // A call main hasn't answered (one whose body streams,
+                    // or a fetch it holds) ends `cancelled`, made all the
+                    // same; its body, if it streams one, still gets its
+                    // terminal from the core, after this (the duplex's
+                    // frames follow the control frames).
+                    if let Some(call) = self.open_calls.remove(&id) {
+                        if let Some(body) = self.bodies.values().find(|b| b.call == id) {
+                            own.calls.push((call, body.bytes.clone()));
+                        }
                         self.refuse(id, json!({ "code": "cancelled", "message": "Cancelled" }));
                     }
                     if self.parts_out.remove(&id).is_some() {

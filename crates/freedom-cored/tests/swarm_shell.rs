@@ -1597,3 +1597,579 @@ fn a_projection_sends_approval_changed_after_its_answer() {
     let read = grants_read(&mut main);
     assert_eq!(read[SITE]["autoApprove"]["publish"], true);
 }
+
+// --- D12's recorded cases: the `shell` section ---------------------------------------
+
+fn shell_section() -> Vec<JsValue> {
+    let text = std::fs::read_to_string(vectors_root().join("swarm.json")).unwrap();
+    let index = Index::new(&text).unwrap();
+    let shell = fc_json::parse(index.root().get("shell").unwrap().raw()).unwrap();
+    shell.as_array().unwrap().to_vec()
+}
+
+fn num(value: &JsValue) -> f64 {
+    match value {
+        JsValue::Number(n) => *n,
+        other => panic!("not a number: {}", short(other)),
+    }
+}
+
+/// A typed answer as the core writes it, read back.
+fn typed_answer(message: &Value) -> Result<Typed, Typed> {
+    let read = |v: &Value| {
+        Typed::from_typed(&fc_json::parse(&v.to_string()).unwrap())
+            .unwrap_or_else(|e| panic!("{e}: {v}"))
+    };
+    let result = &message["result"];
+    assert!(message.get("error").is_none(), "{message}");
+    match (result.get("result_typed"), result.get("error_typed")) {
+        (Some(v), None) => Ok(read(v)),
+        (None, Some(e)) => Err(read(e)),
+        _ => panic!("no typed answer: {message}"),
+    }
+}
+
+/// A recorded answer: `{ result_typed }` or `{ error_typed }`.
+fn recorded_answer(answer: &JsValue) -> Result<Typed, Typed> {
+    match (answer.get("result_typed"), answer.get("error_typed")) {
+        (Some(v), None) => Ok(Typed::from_typed(v).unwrap()),
+        (None, Some(e)) => Err(Typed::from_typed(e).unwrap()),
+        _ => panic!("no typed answer in {}", short(answer)),
+    }
+}
+
+/// A recorded reply as main forwards it: the headers the core reads.
+fn recorded_reply(reply: &JsValue, keep: &[&str]) -> Event {
+    let headers = field(reply, "headers")
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|pair| {
+            let pair = pair.as_array().unwrap();
+            (str_of(&pair[0]).to_owned(), str_of(&pair[1]).to_owned())
+        })
+        .filter(|(k, _)| keep.contains(&k.as_str()))
+        .collect();
+    Event::Reply(Reply {
+        status: num(field(reply, "status")) as u16,
+        status_text: str_of(field(reply, "status_text")).to_owned(),
+        headers,
+        body: logic::b64(str_of(field(field(reply, "body"), "base64"))),
+    })
+}
+
+fn string_pairs(value: Option<&JsValue>) -> Vec<(String, String)> {
+    value
+        .map(|list| {
+            list.as_array()
+                .unwrap()
+                .iter()
+                .map(|pair| {
+                    let pair = pair.as_array().unwrap();
+                    (str_of(&pair[0]).to_owned(), str_of(&pair[1]).to_owned())
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// A call the reference made, as the core makes it, and main's reply.
+struct WantCall {
+    form: String,
+    method: String,
+    path: String,
+    query: Vec<(String, String)>,
+    headers: Vec<(String, String)>,
+    /// The body's bytes, or its length and SHA-256.
+    body: Option<(usize, Result<Vec<u8>, String>)>,
+    feed: Option<(String, u64)>,
+    reply: Event,
+}
+
+/// The calls the core makes for a step's recorded requests: the
+/// reference's own, its second `/stamps` dropped (`stamps-one-read`) and
+/// its whole `GET /feeds` index lookup asked as `feed_head` (`index-probe`).
+fn want_calls(step: &JsValue) -> Vec<WantCall> {
+    let mut out = Vec::new();
+    for r in field(step, "requests").as_array().unwrap() {
+        let reply = field(r, "reply");
+        match r.get("deviation").map(str_of) {
+            Some("stamps-one-read") => continue,
+            Some("index-probe") => out.push(WantCall {
+                form: "feed_head".to_owned(),
+                method: "GET".to_owned(),
+                path: str_of(field(r, "path")).to_owned(),
+                query: Vec::new(),
+                headers: vec![("swarm-only-root-chunk".to_owned(), "true".to_owned())],
+                body: None,
+                feed: None,
+                reply: recorded_reply(reply, &["swarm-feed-index", "swarm-feed-index-next"]),
+            }),
+            Some(other) => panic!("a shell request of deviation {other}"),
+            // swarm.feed's read learns the latest index by bee-js's whole
+            // download (`feed_latest`, unmarked while the read has no
+            // grammar row): the core asks feed_head, as for the update.
+            None if r.get("form").map(str_of) == Some("feed_latest") => out.push(WantCall {
+                form: "feed_head".to_owned(),
+                method: "GET".to_owned(),
+                path: str_of(field(r, "path")).to_owned(),
+                query: Vec::new(),
+                headers: vec![("swarm-only-root-chunk".to_owned(), "true".to_owned())],
+                body: None,
+                feed: None,
+                reply: recorded_reply(reply, &["swarm-feed-index", "swarm-feed-index-next"]),
+            }),
+            None => out.push(WantCall {
+                form: str_of(field(r, "form")).to_owned(),
+                method: str_of(field(r, "method")).to_owned(),
+                path: str_of(field(r, "path")).to_owned(),
+                query: string_pairs(r.get("query")),
+                headers: string_pairs(r.get("headers"))
+                    .into_iter()
+                    .filter(|(k, _)| k != "accept" && k != "accept-encoding")
+                    .collect(),
+                body: r.get("body").map(|b| {
+                    let n = num(field(b, "bytes")) as usize;
+                    match b.get("base64") {
+                        Some(t) => (n, Ok(logic::b64(str_of(t)))),
+                        None => (n, Err(str_of(field(b, "sha256")).to_owned())),
+                    }
+                }),
+                feed: r.get("feed").map(|f| {
+                    (
+                        str_of(field(f, "owner")).to_owned(),
+                        num(field(f, "index")) as u64,
+                    )
+                }),
+                reply: recorded_reply(reply, &logic::READ_HEADERS),
+            }),
+        }
+    }
+    out
+}
+
+fn check_call(id: &str, k: usize, (call, body): &(NodeCall, Vec<u8>), want: &WantCall) {
+    let at = format!("{id}: call {k}");
+    assert_eq!(call.form.as_str(), want.form, "{at}");
+    assert_eq!(call.method(), want.method, "{at}");
+    assert_eq!(call.path, want.path, "{at}");
+    assert_eq!(call.query, want.query, "{at}");
+    assert_eq!(call.headers, want.headers, "{at}");
+    match &want.body {
+        None => assert!(body.is_empty(), "{at}: a body where none"),
+        Some((n, Ok(bytes))) => {
+            assert_eq!(body.len(), *n, "{at}");
+            assert!(body == bytes, "{at}: the body's bytes");
+        }
+        Some((n, Err(digest))) => {
+            assert_eq!(body.len(), *n, "{at}");
+            assert_eq!(logic::sha(body), *digest, "{at}");
+        }
+    }
+    if let Some((owner, index)) = &want.feed {
+        let feed = call
+            .feed
+            .as_ref()
+            .unwrap_or_else(|| panic!("{at}: no feed"));
+        assert_eq!(
+            (logic::hex(&feed.owner), feed.index),
+            (owner.clone(), *index),
+            "{at}"
+        );
+    }
+}
+
+/// Every `shell` case of `vectors/swarm.json` (D12's, recorded from the
+/// reference's services, IPC handlers and functions) through the core, one
+/// core playing each group (D11):
+///
+/// - **main's node methods** (`swarm.publish`, `swarm.feed`, `swarm.stamps`,
+///   `swarm.upload_status`): main's params as the case gives them; each of
+///   the core's node calls against the reference's (form, method, path,
+///   query, headers, body, a probe's feed update), answered with the
+///   node's recorded reply; parts streamed through `shell.swarm_part`, and
+///   a picked file's read failing with its errno's name; the answer
+///   (typed), and the history `swarm.history` reads after;
+/// - **the store ops** (`swarm.identities`, `swarm.history`,
+///   `swarm.manifest`): each step's params and caller, the vault's owners
+///   from the core's own vault and the user's accounts from the core's
+///   `vault-meta.json`, a check's fetch answered as main answered it (D6);
+///   each answer (typed; a consent's token, the core's own randomness, read
+///   as the recorded one, and handed back in its place), the files as each
+///   step answered, and the files, grants and history rows after.
+///
+/// Deviation cases are held to their `core` answers. The case whose steps
+/// run at once (`owner-read-order`) runs on a core that holds the vault's
+/// owners until its second step has answered.
+#[test]
+fn every_shell_case_through_the_pipe() {
+    let cases = shell_section();
+    let mut main = store_main();
+    let mut played: BTreeMap<String, usize> = BTreeMap::new();
+    for case in &cases {
+        let method = str_of(field(case, "method"));
+        if case.get("concurrent").is_some() {
+            play_concurrent(case);
+        } else if ["swarm.identities", "swarm.history", "swarm.manifest"].contains(&method) {
+            play_shell_op(&mut main, case);
+        } else {
+            play_shell_node(&mut main, case);
+        }
+        *played.entry(method.to_owned()).or_default() += 1;
+    }
+    let counts: Vec<(&str, usize)> = played.iter().map(|(k, n)| (k.as_str(), *n)).collect();
+    assert_eq!(
+        counts,
+        [
+            ("swarm.feed", 16),
+            ("swarm.history", 2),
+            ("swarm.identities", 21),
+            ("swarm.manifest", 15),
+            ("swarm.publish", 20),
+            ("swarm.stamps", 5),
+            ("swarm.upload_status", 4),
+        ]
+    );
+}
+
+fn play_shell_node(main: &mut Main, case: &JsValue) {
+    let id = str_of(field(case, "id"));
+    let world = field(case, "world");
+    let clock = num(field(world, "clock")) as u64;
+    let deviation = case.get("deviation").map(str_of);
+    let picked_read = deviation == Some("picked-read-text");
+    match deviation {
+        None => assert!(case.get("core").is_none(), "{id}"),
+        Some("picked-read-text" | "index-probe") => {}
+        Some(other) => panic!("{id}: deviation {other}"),
+    }
+    main.world(json!({ "reset": true, "clock": clock }));
+    let locked = str_of(field(world, "vault")) == "locked";
+    if locked {
+        main.set_vault(false);
+    }
+    let steps = field(case, "steps").as_array().unwrap();
+    assert_eq!(steps.len(), 1, "{id}");
+    let step = &steps[0];
+    let wants = want_calls(step);
+    let replies: Vec<Event> = wants.iter().map(|w| w.reply.clone()).collect();
+    let mut n = 0usize;
+    let mut own = OwnMain::new(move |call: &NodeCall, _: &[u8]| {
+        let reply = replies
+            .get(n)
+            .unwrap_or_else(|| panic!("an unrecorded call {} {}", call.method(), call.path))
+            .clone();
+        n += 1;
+        reply
+    });
+    if let Some(parts) = step.get("parts") {
+        for (k, part) in parts.as_array().unwrap().iter().enumerate() {
+            own.parts
+                .insert(k as u32, logic::b64(str_of(field(part, "base64"))));
+        }
+    }
+    if let Some(abort) = step.get("part_abort") {
+        let part = num(field(abort, "part")) as u32;
+        let code: &'static str = Box::leak(str_of(field(abort, "error_code")).into());
+        own.parts.entry(part).or_default();
+        own.abort_part = Some((part, code));
+    }
+    let params = json_of(field(step, "params"));
+    let answer = main.play_own(&mut own, str_of(field(case, "method")), &params, "shell");
+    let extra = usize::from(picked_read);
+    assert_eq!(own.calls.len(), wants.len() + extra, "{id}");
+    for (k, (got, want)) in own.calls.iter().zip(&wants).enumerate() {
+        check_call(id, k, got, want);
+    }
+    let core = case.get("core").filter(|_| picked_read);
+    let want = match core {
+        Some(core) => &field(core, "answers").as_array().unwrap()[0],
+        None => field(step, "answer"),
+    };
+    assert_eq!(typed_answer(&answer), recorded_answer(want), "{id}");
+    let rows = match core {
+        Some(core) => field(core, "history"),
+        None => field(field(case, "after"), "history"),
+    };
+    assert_eq!(
+        JsValue::Array(history_rows(main)).stringify(),
+        rows.stringify(),
+        "{id}: the history"
+    );
+    if locked {
+        main.set_vault(true);
+    }
+}
+
+/// A consent's token in an answer: the core's own, read as the recorded
+/// one (`tokens` maps the recorded to the core's, for the steps after).
+fn with_tokens(
+    value: &mut Typed,
+    want: &Result<Typed, Typed>,
+    tokens: &mut BTreeMap<String, String>,
+) {
+    let (Typed::Object(members), Ok(Typed::Object(wanted))) = (value, want) else {
+        return;
+    };
+    let recorded = wanted.iter().find_map(|(k, v)| match v {
+        Typed::String(s) if k == "token" => Some(s.as_str().to_owned()),
+        _ => None,
+    });
+    for (k, v) in members.iter_mut() {
+        if k == "token"
+            && let (Typed::String(core), Some(recorded)) = (&*v, &recorded)
+        {
+            tokens.insert(recorded.clone(), core.as_str().to_owned());
+            *v = Typed::str(recorded);
+        }
+    }
+}
+
+/// The recorded tokens in a step's params replaced by the core's.
+fn tokens_in(params: Value, tokens: &BTreeMap<String, String>) -> Value {
+    let mut text = params.to_string();
+    for (recorded, core) in tokens {
+        text = text.replace(recorded, core);
+    }
+    serde_json::from_str(&text).unwrap()
+}
+
+/// The world a store-op case starts from: the files, the grants, the
+/// accounts, the history's rows, the clock and the vault.
+fn set_up_shell_op(main: &mut Main, id: &str, case: &JsValue) -> bool {
+    let world = field(case, "world");
+    let clock = num(field(world, "clock")) as u64;
+    let mut files = Dir::new();
+    if let Some(text) = field(world, "feeds").as_str() {
+        files.insert(feeds::FILE_NAME.to_owned(), text.to_owned());
+    }
+    if let Some(text) = field(world, "manifests").as_str() {
+        files.insert(manifests::FILE_NAME.to_owned(), text.to_owned());
+    }
+    // accounts.list's wallets, as the core reads them from main's
+    // vault-meta.json: kept as recorded (not derived from the vault's
+    // mnemonic), so each is stored as a device's.
+    let meta = main.data_dir().join(fc_wallet_state::vault_meta::FILE_NAME);
+    let _ = std::fs::remove_file(&meta);
+    if let Some(accounts) = world.get("accounts") {
+        let wallets: Vec<Value> = accounts
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|a| {
+                let mut w = json_of(a);
+                w["type"] = json!("ledger");
+                w
+            })
+            .collect();
+        std::fs::write(&meta, json!({ "derivedWallets": wallets }).to_string()).unwrap();
+    }
+    set_up(main, &files, field(world, "grants"), clock);
+    if let Some(rows) = world.get("history") {
+        let conn = history_db(&main.core.grant_root);
+        for row in rows.as_array().unwrap() {
+            let JsValue::Object(cells) = row else {
+                panic!("{id}: a row")
+            };
+            let names: Vec<&str> = cells.iter().map(|(k, _)| k.as_str()).collect();
+            let values: Vec<rusqlite::types::Value> = cells
+                .iter()
+                .map(|(_, v)| match v {
+                    JsValue::Null => rusqlite::types::Value::Null,
+                    JsValue::Number(n) if n.fract() == 0.0 => {
+                        rusqlite::types::Value::Integer(*n as i64)
+                    }
+                    JsValue::Number(n) => rusqlite::types::Value::Real(*n),
+                    JsValue::String(t) => rusqlite::types::Value::Text(t.as_str().to_owned()),
+                    blob => rusqlite::types::Value::Blob(hex_bytes(str_of(field(blob, "blob")))),
+                })
+                .collect();
+            let sql = format!(
+                "INSERT INTO publishes ({}) VALUES ({})",
+                names.join(", "),
+                vec!["?"; names.len()].join(", ")
+            );
+            conn.execute(&sql, rusqlite::params_from_iter(values))
+                .unwrap();
+        }
+    }
+    let locked = str_of(field(world, "vault")) == "locked";
+    if locked {
+        main.set_vault(false);
+    }
+    locked
+}
+
+/// The files as a step answered, or as the case leaves them.
+fn check_shell_files(main: &Main, at: &str, want: &JsValue) {
+    let root = &main.core.grant_root;
+    for (name, file) in [
+        ("feeds", feeds::FILE_NAME),
+        ("manifests", manifests::FILE_NAME),
+    ] {
+        assert_eq!(
+            std::fs::read_to_string(root.join(file)).ok().as_deref(),
+            field(want, name).as_str(),
+            "{at}: {name}"
+        );
+    }
+}
+
+/// The history's rows, each cell as stored.
+fn stored_rows(root: &Path) -> JsValue {
+    let conn = history_db(root);
+    JsValue::Array(
+        query(
+            &conn,
+            &Statement {
+                sql: "SELECT * FROM publishes ORDER BY id",
+                params: Vec::new(),
+            },
+        )
+        .iter()
+        .map(|row| {
+            let mut out = JsValue::Object(Vec::new());
+            for (column, cell) in history::COLUMNS.iter().zip(row) {
+                out.set(*column, cell_value(cell));
+            }
+            out
+        })
+        .collect(),
+    )
+}
+
+/// One store-op step through the pipe: its fetch answered as main answered
+/// it.
+fn shell_op_step(main: &mut Main, method: &str, step: &JsValue, params: &Value) -> Value {
+    let fetch = step
+        .get("fetch")
+        .filter(|f| !matches!(f, JsValue::Null))
+        .cloned();
+    let mut own = OwnMain::new(|call, _| panic!("a store op called the node: {call:?}"));
+    own.manifest = Box::new(move |url: &str| {
+        let fetch = fetch
+            .clone()
+            .unwrap_or_else(|| panic!("an unrecorded fetch of {url}"));
+        assert_eq!(url, str_of(field(&fetch, "url")));
+        Some(json_of(field(&fetch, "answer")))
+    });
+    main.play_own(&mut own, method, params, str_of(field(step, "caller")))
+}
+
+fn play_shell_op(main: &mut Main, case: &JsValue) {
+    let id = str_of(field(case, "id"));
+    let method = str_of(field(case, "method"));
+    let deviation = case.get("deviation").map(str_of);
+    let core = case.get("core");
+    let mut locked = set_up_shell_op(main, id, case);
+    let mut tokens = BTreeMap::new();
+    let steps = field(case, "steps").as_array().unwrap();
+    for (k, step) in steps.iter().enumerate() {
+        if let Some(clock) = step.get("clock") {
+            main.world(json!({ "clock": num(clock) as u64 }));
+        }
+        if let Some(vault) = step.get("vault") {
+            let unlocked = str_of(vault) == "unlocked";
+            if unlocked == locked {
+                main.set_vault(unlocked);
+                locked = !unlocked;
+            }
+        }
+        let want = match deviation {
+            Some("collation" | "history-blobs") => {
+                recorded_answer(&field(core.unwrap(), "answers").as_array().unwrap()[k])
+            }
+            _ => recorded_answer(field(step, "answer")),
+        };
+        let params = tokens_in(json_of(field(step, "params")), &tokens);
+        let message = shell_op_step(main, method, step, &params);
+        let mut got = typed_answer(&message);
+        if let Ok(value) = &mut got {
+            with_tokens(value, &want, &mut tokens);
+        }
+        assert_eq!(got, want, "{id} step {k}");
+        if let Some(files) = step.get("files") {
+            let want = match deviation {
+                Some("detach-timing") => &field(core.unwrap(), "files").as_array().unwrap()[k],
+                _ => files,
+            };
+            check_shell_files(main, &format!("{id} step {k}"), want);
+        }
+    }
+    if locked {
+        main.set_vault(true);
+    }
+    let after = field(case, "after");
+    check_shell_files(main, &format!("{id}: after"), after);
+    let want_grants: BTreeMap<String, Value> = match json_of(field(after, "grants")) {
+        Value::Object(map) => map.iter().map(|(k, v)| (k.clone(), reads(v))).collect(),
+        other => panic!("{id}: grants {other}"),
+    };
+    assert_eq!(grants_read(main), want_grants, "{id}: grants");
+    if let Some(rows) = after.get("history") {
+        assert_eq!(
+            stored_rows(&main.core.grant_root).stringify(),
+            rows.stringify(),
+            "{id}: the rows"
+        );
+    }
+    let _ = std::fs::remove_file(main.data_dir().join(fc_wallet_state::vault_meta::FILE_NAME));
+}
+
+/// `owner-read-order`: step 1 runs while step 0's owners are read, on a
+/// core that holds the vault's owners (`FREEDOM_CORED_TEST_SWARM_HOLD`)
+/// until step 1 has answered; step 0's answer is read when its last owner
+/// arrives, step 1's change in it.
+fn play_concurrent(case: &JsValue) {
+    let id = str_of(field(case, "id"));
+    assert_eq!(
+        case.get("deviation").map(str_of),
+        Some("owner-read-order"),
+        "{id}"
+    );
+    let dir = tempfile::tempdir().unwrap();
+    let marker = dir.path().join("parked");
+    let release = dir.path().join("release");
+    let hold = format!("owner={}={}", marker.display(), release.display());
+    let mut main = swarm_world::main_with(
+        &["swarm"],
+        &[("FREEDOM_CORED_TEST_SWARM_HOLD", hold.as_str())],
+    );
+    main.import_vault();
+    set_up_shell_op(&mut main, id, case);
+    let method = str_of(field(case, "method"));
+    let steps = field(case, "steps").as_array().unwrap();
+    let answers = field(field(case, "core"), "answers").as_array().unwrap();
+    let first = main.own_request(
+        method,
+        &json_of(field(&steps[0], "params")),
+        str_of(field(&steps[0], "caller")),
+    );
+    while std::fs::read_to_string(&marker)
+        .unwrap_or_default()
+        .is_empty()
+    {
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    let second = main.own_request(
+        method,
+        &json_of(field(&steps[1], "params")),
+        str_of(field(&steps[1], "caller")),
+    );
+    let message = main.core.response(second);
+    assert_eq!(
+        typed_answer(&message),
+        recorded_answer(&answers[1]),
+        "{id} step 1"
+    );
+    std::fs::write(&release, "").unwrap();
+    let message = main.core.response(first);
+    assert_eq!(
+        typed_answer(&message),
+        recorded_answer(&answers[0]),
+        "{id} step 0"
+    );
+    main.settled();
+    let after = field(case, "after");
+    check_shell_files(&main, &format!("{id}: after"), after);
+}

@@ -92,8 +92,8 @@ use fc_protocol::stream::{
 };
 use fc_swarm_provider::machine::shell::ShellMethod;
 use fc_swarm_provider::machine::{AskId, BodyOut, Job};
-use fc_swarm_provider::ops::Caller;
 use fc_swarm_provider::mining::{Batch, Ran};
+use fc_swarm_provider::ops::Caller;
 use serde_json::value::RawValue;
 use zeroize::Zeroizing;
 
