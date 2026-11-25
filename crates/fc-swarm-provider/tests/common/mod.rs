@@ -344,6 +344,9 @@ pub struct TestWorld {
     pub custody: bool,
     /// The document still holds its key (a `name: moved` change clears it).
     pub key_holds: bool,
+    /// The page's name still binds its key (a `name: moved` change clears
+    /// it, as it does the key: the generator reads one flag for both).
+    pub name_holds: bool,
     pub tags: TagOwners,
 }
 
@@ -360,6 +363,7 @@ impl TestWorld {
             rules: BTreeSet::new(),
             custody: false,
             key_holds: true,
+            name_holds: true,
             tags: TagOwners::new(),
         }
     }
@@ -420,6 +424,9 @@ impl World for TestWorld {
     fn budgets(&mut self) -> &mut ReadBudgets {
         &mut self.budgets
     }
+    fn name_holds(&self, _key: &JsString) -> bool {
+        self.name_holds
+    }
     fn key_holds(&self, _key: &JsString) -> bool {
         self.key_holds
     }
@@ -445,7 +452,10 @@ impl TestWorld {
     pub fn apply(&mut self, key: &JsString, what: &str, value: &str) {
         match what {
             "custody" => self.custody = value == "true",
-            "name" => self.key_holds = value != "moved",
+            "name" => {
+                self.name_holds = value != "moved";
+                self.key_holds = self.name_holds;
+            }
             "rule_off" => {
                 let capability = Capability::from_key(value).unwrap();
                 self.rules.remove(&(key.clone(), capability.key()));
@@ -904,6 +914,10 @@ pub const READ_HEADERS: [&str; 5] = [
 /// Main's answer to a call: what it sends the core, in order, and whether
 /// the page gave up as the request reached the node.
 pub fn main_answer(node: &Node, call: &NodeCall) -> (bool, Vec<Event>) {
+    if node.stopped {
+        // Main has no node to dial (`node_stopped`): `{ failed: "stopped" }`.
+        return (false, vec![Event::Failed(Failed::Stopped)]);
+    }
     forward(&node.reply(call.method(), &call.path), call)
 }
 
