@@ -703,19 +703,17 @@ impl<'k> Thread<'k> {
     fn run_until(&mut self, stop: impl Fn(&Need) -> bool) -> Option<Ask> {
         loop {
             if self.outcome().is_some() {
-                for effect in std::mem::take(&mut self.queue) {
+                while let Some(effect) = self.queue.pop_front() {
                     match effect {
                         Effect::Cancel(_) => self.cancels_after_outcome += 1,
-                        // The write a request still makes as it ends
-                        // (its history row's), which isn't called back.
-                        Effect::Ask(Ask {
-                            need: Need::Write(StoreWrite::History(statements)),
-                            ..
-                        }) => {
-                            for statement in &statements {
-                                execute(&self.db, statement);
-                            }
-                        }
+                        // The writes a request still makes as it ends (its
+                        // history row's), answered as any write is.
+                        Effect::Ask(
+                            ask @ Ask {
+                                need: Need::Write(_),
+                                ..
+                            },
+                        ) => self.answer(ask),
                         _ => {}
                     }
                 }
