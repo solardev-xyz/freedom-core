@@ -47,8 +47,8 @@ use fc_swarm::verify::{self, Chunk};
 use fc_swarm_provider::budgets::ReadBudgets;
 use fc_swarm_provider::machine::node::{ERROR_TEXT, WINDOW};
 use fc_swarm_provider::machine::{
-    Abort, AskId, Call, Effect, Event, Failed, Failure, Form, Head, Need, NodeCall, Outcome, Reads,
-    ReadyCheck, Reply, Request, World, stream_charge, whole_charge,
+    Abort, Ask, AskId, Call, Effect, Event, Failed, Failure, Form, Head, Need, NodeCall, Outcome,
+    Reads, ReadyCheck, Reply, Request, World, stream_charge, whole_charge,
 };
 use fc_swarm_provider::stores::feeds::FeedStore;
 use fc_swarm_provider::stores::manifests::Capability;
@@ -887,16 +887,43 @@ struct Ran {
     ready: Vec<(ReadyCheck, usize)>,
     calls: Vec<Logged>,
     cancels_after_outcome: usize,
+    /// The most node calls asked and not yet answered at once.
+    most_open: usize,
+}
+
+/// The request's effects, each node call it asks counted as open until
+/// main has answered it.
+fn take_effects(
+    request: &mut Request,
+    open: &mut BTreeSet<AskId>,
+    most: &mut usize,
+) -> Vec<Effect> {
+    let effects = request.take_effects();
+    for effect in &effects {
+        if let Effect::Ask(Ask {
+            id,
+            need: Need::Node(_),
+            ..
+        }) = effect
+        {
+            open.insert(*id);
+            *most = (*most).max(open.len());
+        }
+    }
+    effects
 }
 
 fn run(world: &mut TestWorld, node: &Node, call: &Call) -> Ran {
     let mut request = Request::start(call, world).expect("a method this part brings");
-    let mut queue: VecDeque<Effect> = request.take_effects().into();
+    let mut open = BTreeSet::new();
+    let mut most_open = 0usize;
+    let mut queue: VecDeque<Effect> = take_effects(&mut request, &mut open, &mut most_open).into();
     let mut ran = Ran {
         outcome: Outcome::Cancelled,
         ready: Vec::new(),
         calls: Vec::new(),
         cancels_after_outcome: 0,
+        most_open: 0,
     };
     let mut cancelled: HashSet<AskId> = HashSet::new();
     while request.outcome().is_none() {
@@ -918,7 +945,7 @@ fn run(world: &mut TestWorld, node: &Node, call: &Call) -> Ran {
                     other => panic!("main's {other:?} check is the case's readiness"),
                 };
                 request.answer(world, ask.id, Event::Ready(answer));
-                queue.extend(request.take_effects());
+                queue.extend(take_effects(&mut request, &mut open, &mut most_open));
             }
             Need::Node(node_call) => {
                 let expected = if node_call.stream() {
@@ -956,8 +983,19 @@ fn run(world: &mut TestWorld, node: &Node, call: &Call) -> Ran {
                             "main waits for credit the core never gives"
                         );
                     }
+                    let terminal = matches!(
+                        event,
+                        Event::Reply(_)
+                            | Event::Failed(_)
+                            | Event::End
+                            | Event::Abort(_)
+                            | Event::Refused(_)
+                    );
                     request.answer(world, ask.id, event);
-                    for effect in request.take_effects() {
+                    if terminal {
+                        open.remove(&ask.id);
+                    }
+                    for effect in take_effects(&mut request, &mut open, &mut most_open) {
                         match effect {
                             Effect::Credit { id, bytes } if id == ask.id => window += bytes,
                             Effect::Cancel(id) => {
@@ -967,17 +1005,19 @@ fn run(world: &mut TestWorld, node: &Node, call: &Call) -> Ran {
                         }
                     }
                 }
+                open.remove(&ask.id);
             }
             Need::Hash(job) => {
                 assert_eq!(ask.charge, 0);
                 request.answer(world, ask.id, Event::Hashed(job.run()));
-                queue.extend(request.take_effects());
+                queue.extend(take_effects(&mut request, &mut open, &mut most_open));
             }
             other => panic!("an ask this part's machines don't make: {other:?}"),
         }
     }
     // Taken after the outcome: only cancels of what was open.
-    for effect in queue.into_iter().chain(request.take_effects()) {
+    let rest = take_effects(&mut request, &mut open, &mut most_open);
+    for effect in queue.into_iter().chain(rest) {
         match effect {
             Effect::Cancel(_) => ran.cancels_after_outcome += 1,
             Effect::Ask(ask) => {
@@ -995,6 +1035,7 @@ fn run(world: &mut TestWorld, node: &Node, call: &Call) -> Ran {
         }
     }
     ran.outcome = request.outcome().unwrap().clone();
+    ran.most_open = most_open;
     ran
 }
 
@@ -1022,6 +1063,7 @@ fn run_with_readiness(world: &mut TestWorld, node: &Node, call: &Call, case: V<'
         ready: Vec::new(),
         calls: Vec::new(),
         cancels_after_outcome: 0,
+        most_open: 0,
     };
     let effects = request.take_effects();
     for effect in effects {
@@ -1112,6 +1154,13 @@ fn check_row(id: &str, grammar: V<'_, '_>, row: &str, ran: &Ran, step: &StepView
         at,
         ran.calls.len(),
         "{id}: a call outside {row}'s forms or counts"
+    );
+    // One call at a time, but readData's eight.
+    let most = if row == "readData" { 8 } else { 1 };
+    assert!(
+        ran.most_open <= most,
+        "{id}: {} calls open at once",
+        ran.most_open
     );
     for logged in &ran.calls {
         let call = &logged.call;
