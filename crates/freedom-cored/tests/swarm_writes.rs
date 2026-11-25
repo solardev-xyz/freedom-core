@@ -237,8 +237,18 @@ fn main_writes(
 /// The core's calls against the grammar's honest scenario, exactly (a
 /// prefix of it where the core's own error ends the request earlier).
 fn check_calls(sid: &str, scenario: V<'_, '_>, played: &swarm_world::Played, earlier: bool) {
+    check_call_list(
+        sid,
+        get(scenario, "calls").children().collect(),
+        played,
+        earlier,
+    );
+}
+
+/// The core's calls against `wants`, each a scenario's call or a recorded
+/// request (own-keys' `core.requests`).
+fn check_call_list(sid: &str, wants: Vec<V<'_, '_>>, played: &swarm_world::Played, earlier: bool) {
     let main_headers = ["accept", "accept-encoding"];
-    let wants: Vec<_> = get(scenario, "calls").children().collect();
     let paths: Vec<&str> = played.calls.iter().map(|c| c.call.path.as_str()).collect();
     if earlier {
         assert!(played.calls.len() <= wants.len(), "{sid}: {paths:?}");
@@ -522,6 +532,11 @@ fn play_group(main: &mut Main, marker: &Path, group: &[&str]) -> Counts {
         };
         let origin = logic::js(get(case, "origin"));
         let feeds = group == FEEDS;
+        // own-keys (`create-feed-own-key-to-string`): the reference answers
+        // an inherited property as an existing feed and makes no call; the
+        // core's name is an own key, an ordinary new feed: its calls, store
+        // and history are `core`'s, as `feed_writes_vectors.rs` reads them.
+        let own_key = deviation.as_deref() == Some("own-keys");
         let mut script = set_up(main, &mut vault, case, &keys, feeds);
         let mut first = true;
         for (k, step) in steps.iter().enumerate() {
@@ -572,6 +587,12 @@ fn play_group(main: &mut Main, marker: &Path, group: &[&str]) -> Counts {
                     check_calls(&sid, *scenario, &played, earlier);
                     scenarios_used.insert(sid.clone());
                 }
+                None if own_key => check_call_list(
+                    &sid,
+                    get(get(case, "core"), "requests").children().collect(),
+                    &played,
+                    false,
+                ),
                 // A call main answered `stopped` never reached the node.
                 None => assert!(
                     played.calls.is_empty() || script.node.stopped,
@@ -594,10 +615,12 @@ fn play_group(main: &mut Main, marker: &Path, group: &[&str]) -> Counts {
         }
         // The stores after, as the core left them on disk.
         let feeds_file = root.join("swarm-feeds.json");
-        match get(case, "after")
-            .get("feeds")
-            .filter(|f| f.kind() == Kind::String)
-        {
+        let after = if own_key {
+            get(get(case, "core"), "after")
+        } else {
+            get(case, "after")
+        };
+        match after.get("feeds").filter(|f| f.kind() == Kind::String) {
             Some(want) => assert_eq!(
                 std::fs::read_to_string(&feeds_file).unwrap(),
                 string(want),
@@ -605,7 +628,11 @@ fn play_group(main: &mut Main, marker: &Path, group: &[&str]) -> Counts {
             ),
             None => assert!(!feeds_file.exists(), "{id}: no swarm-feeds.json"),
         }
-        let expected = if feeds {
+        let expected = if own_key {
+            fc_json::parse(&get(after, "history").stringify(KeyOrder::Property))
+                .unwrap()
+                .stringify()
+        } else if feeds {
             expected_feed_history(case, want)
         } else {
             expected_publish_history(case, want)
@@ -668,8 +695,8 @@ fn every_feed_and_soc_case_plays_through_the_pipe() {
     assert_eq!(
         counts,
         Counts {
-            cases: 191,
-            played: 182,
+            cases: 192,
+            played: 183,
             main_answered: 11,
             scenarios: 100,
         }
