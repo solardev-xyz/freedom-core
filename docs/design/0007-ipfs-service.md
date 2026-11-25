@@ -1,6 +1,6 @@
 # 0007: The freedom-ipfs service process
 
-**Status:** proposed. Roadmap Phase 4 (item 4.2). Builds on [0001](0001-freedom-cored.md) (process model, lifetime lock, framing, hardening), [0005](0005-chain-data.md) (credit) and [0006](0006-dweb-transports.md) (plans, and the outline in *Service processes*).
+**Status:** proposed. Roadmap Phase 4 (item 4.2). Builds on [0001](0001-freedom-cored.md) (process model, lifetime lock, framing, hardening), [0005](0005-chain-data.md) (credit) and [0006](0006-dweb-transports.md) (plans, and the outline in *Service processes*). The user decided question 9 on 2026-11-25 ([Amendments](#amendments)).
 
 **The references:**
 - **freedom-browser** at `c5bd66d5` (#704, `claude/dweb-plans`), and at `485819a9` (`integration/rust-core`) for the delegated routers (#724):
@@ -561,6 +561,7 @@ Aborting a task doesn't stop work that is blocked in `block_in_place`, and work 
 - **Exit codes:**
   - 0001's: 64, 74, 75 and 76;
   - 70 for `teardown_unproven`, and for a panic or unexpected end outside a request;
+  - 71 for `out_of_memory`: a native library's out-of-memory error under the memory cap ([0010](0010-service-confinement.md#the-memory-cap)), a crash;
   - 77 for `confinement` ([0010](0010-service-confinement.md)), before `ipfs.hello`.
 
 ### Stats
@@ -682,7 +683,7 @@ Upstream's constants are per instance, and some limit bookkeeping rather than wo
   2. idle private instances are evicted first ([Private windows](#private-windows));
   3. admitted work waits, or ends, as above.
 
-  The process doesn't promise a bound on memory it can't account for. An OS-level limit is an [open question](#open-questions).
+  The process doesn't promise a bound on memory it can't account for. **A safety cap** ([question 9](#open-questions), decided 2026-11-25) catches a runaway instead: about 2 GiB of private memory for each process, the persistent one and the ephemeral one, far above its memory budget, where the operating system enforces one: a Windows job memory limit, and Linux's `RLIMIT_DATA`. `RLIMIT_DATA` counts private writable mappings, file-backed or not, and not read-only or shared maps or address space only reserved, so it is no cap on the process's whole resident memory (`RLIMIT_AS` would count those, and isn't used). macOS has no reliable per-process cap, so it gets none. [0010](0010-service-confinement.md#the-memory-cap) sets it in each process's confinement step, before `ipfs.hello`. **Out of memory is then fatal, from any allocation:** Rust's allocator aborts, and an out-of-memory error from SQLite (`SQLITE_NOMEM`) or any other native library the service links ends the process with exit 71 (`out_of_memory`), never a request's error. Main restarts it as it does a crash. Setting it is a later implementation step, with 0010's confinement.
 - **Stopping instances** keep their reservations until their teardown is complete.
 
 ## Main's side
@@ -1333,6 +1334,7 @@ As 0006's 4.7 did, before anything moves:
   - **The lock:** contention gives 75, a network filesystem gives 74, and `hold-lock`.
   - **Parent death,** the 5 s exit watchdog, and parent death while the writer is backed up.
   - **The stall:** exit 76.
+  - **The memory cap's fail-stop,** as [0010's tests](0010-service-confinement.md#tests) list it: with the cap lowered, a Rust allocation and an SQLite one past it each end the process, the SQLite one with exit 71, and no request is answered with an out-of-memory error.
 - **Network policy tests:**
   - **A SOCKS5 test proxy** records every connection, and a canary TCP and UDP listener is advertised in provider records and is the target of a configured router's redirect. In `socks5` mode the canary must see nothing, and the proxy everything.
   - **Expansion and redirects:**
@@ -1457,6 +1459,7 @@ Every body already passes through main today, so the pipe adds one copy into the
 | retrieval admission, per process | 256 block fetches, 16 HTTP provider requests, 32 Bitswap connections, 4 DHT queries | work waits under its deadline |
 | background queue | 64 items per instance | new background work is dropped |
 | memory budget | persistent 192 MiB; ephemeral 448 MiB, by reservation ([Budgets](#budgets)) | new work `busy`; admitted work waits as below; evict idle private instances |
+| the process's private memory, a safety cap (not read-only or shared maps) | about 2 GiB per process on Windows (the job's limit) and Linux (`RLIMIT_DATA`); none on macOS ([Budgets](#budgets)) | any allocation's failure ends the process (an abort, or exit 71), and main restarts it as after a crash |
 | a reservation for admitted work | before the head: the rest of `headers_ms`; after it: 10 s per block | `busy` (`deadline` if queued after `headers_ms`); a stream aborts with `busy` |
 | `ipfs.stats` | 5 s from when the reader handles it; main's watchdog at 20 s | `deadline`; on the watchdog, kill |
 | stats calls, per process | 4 outstanding, each until its reply is written, or its job is dropped without one | `busy` |
@@ -1480,6 +1483,7 @@ Every body already passes through main today, so the pipe adds one copy into the
 | `onion-targets` | no rule for them | refused before any socket in `direct`; through the proxy in `socks5` | a refusal proves nothing was sent |
 | `address-policy` | none | untrusted targets refused unless globally reachable unicast, with IPv6 forms that embed IPv4 judged by their IPv4 address; configured endpoints exempt; IPv6 outside the fixed forms refused while NAT64 discovery is unknown, and every IPv6 target but IPv4-mapped while it is incomplete | providers on local networks are unreachable unless configured; translation the service can't read is [not covered](#what-the-gate-cant-see) |
 | `redirect-gate` | redirects follow each client's policy | the same acceptance, with every hop through the gate | a redirect to a refused target fails the attempt |
+| `memory-cap` | none: the add-on's memory is main's | about 2 GiB of private memory per process on Windows and Linux, none on macOS; any out-of-memory ends the process (question 9) | a runaway ends the process, which restarts, before it exhausts the machine's memory |
 | `read-ahead` | one 64 KiB read in main, plus a two-chunk channel | a 128 KiB window per stream | about the same buffering, now bounded by credit |
 | `exit-text` | `Native event dispatcher exited with code N`, `Native gateway stopped unexpectedly` | `freedom-ipfs service exited` | in 502 bodies and logs only |
 | `stats-fields` | the event-queue fields in the diagnostics | dropped, with the queue; budget use added | the panel shows the rest |
@@ -1523,6 +1527,11 @@ Every body already passes through main today, so the pipe adds one copy into the
    - Then NAT64 discovery in the service, which brings the address table to `direct` ([Modes](#modes)).
 9. **Removal,** one stable release later: the add-on, the event worker and their scripts.
 
+## Amendments
+
+**2026-11-25, the user's answer to question 9:** a safety cap of about 2 GiB per process, the persistent one and the ephemeral one, where the operating system enforces one: a Windows job memory limit and Linux's `RLIMIT_DATA`; none on macOS, which has no reliable per-process cap. Hitting it ends the process, which main restarts as it does a crash. That every out-of-memory is fatal, a native library's with exit 71, is the coordinator's call (from Codex's review of #503), which the user may veto. [0010](0010-service-confinement.md#the-memory-cap) sets it in the confinement step, a later implementation step. *Budgets*, *Errors*' exit codes, *Bounds*, `memory-cap` and the Rust tests follow. 0008's question 10 has the same answer for `freedom-radicled`.
+- **0010,** amended in this PR: [The memory cap](0010-service-confinement.md#the-memory-cap) specifies the cap for every service process, with its read-back, its report, its fail-stop and its tests, and *Windows*' job object takes the limit.
+
 ## Open questions
 
 1. **Where the code lives:** a separate workspace in this repository (recommended), a member of the core's workspace, upstream, or a new repository (the user's decision).
@@ -1553,7 +1562,7 @@ Every body already passes through main today, so the pipe adds one copy into the
 7. **Upstream timing:** will freedom-ipfs take items 1–8? Until a release carries them, does the service pin a commit on a branch?
 8. **Streams in the core:** should 4.5's protocol version 2 for `freedom-cored` adopt these four frames as they are, with an explicit global credit added?
 9. **An OS memory limit:** should each service run under `RLIMIT_AS`, or a Windows job memory limit, as a backstop for what its budget can't see?
-   - **Still open:** [0010](0010-service-confinement.md)'s job object (D4, decided) is where a Windows limit would go. Whether to set one, and `RLIMIT_AS` on Linux and macOS, aren't decided there.
+   - **Decided (the user, 2026-11-25): yes, a safety cap of about 2 GiB per process** where the operating system enforces one: a Windows job memory limit (on [0010](0010-service-confinement.md)'s job object, D4) and Linux's `RLIMIT_DATA`, not `RLIMIT_AS`; none on macOS, which has no reliable per-process cap. Hitting it stops the service, which main restarts as it does a crash. [0010](0010-service-confinement.md#the-memory-cap) sets it in the confinement step and makes every out-of-memory fatal, a later implementation step ([Budgets](#budgets)).
 10. **If Arti can't `RESOLVE`:** should the Tor setting wait until it can, or ship with the proxy's own policy (option (b)) as an explicit deviation? This design waits (the user's decision).
     - **Moot for now:** the pinned Arti 2.7.0 qualifies (freedom-browser #771). It answers `RESOLVE` with one address, with credentials and without. The qualification runs again whenever the pin moves.
 11. **Stream isolation under Tor:** should each instance (the profile's, and each private window's) send SOCKS credentials of its own, so Arti keeps their streams on separate circuits?
