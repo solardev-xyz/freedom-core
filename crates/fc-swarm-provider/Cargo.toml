@@ -1,0 +1,24 @@
+[package]
+name = "fc-swarm-provider"
+description = "window.swarm's backend in the core (design 0015): batch choice, node error texts and the node's JSON replies, with the behavior of freedom-browser's swarm services over bee-js 13.2.0"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+# Strings as JavaScript holds them (lone surrogates kept, compared by UTF-16
+# unit) and ECMAScript's number text, for the node's replies and the texts a
+# page reads (design 0015, "JSON replies": "fc-json's rules").
+fc-json = { path = "../fc-json" }
+thiserror = "2"
+
+[dev-dependencies]
+# vectors/swarm.json's bodies (base64) and digests (SHA-256), as fc-swarm's
+# vector tests read them.
+base64 = "0.22"
+sha2 = "0.11"
