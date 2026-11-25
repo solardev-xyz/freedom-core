@@ -945,6 +945,7 @@ fn only_protocol_2_is_spoken() {
         "dweb.open",
         "dweb.verify",
         "dweb.forget",
+        "swarm.request",
         "fragments",
         "myotis_refusal_codes",
         "exclude_sources",

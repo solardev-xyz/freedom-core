@@ -679,6 +679,24 @@ fn the_live_facts_check_the_name_then_ask_main() {
     };
     assert!(text.contains("no_address"), "{text}");
 
+    // Main refusing the recheck itself refuses the effect, as APR-5 does;
+    // an answer of no known shape ends the connection.
+    upload_status(&mut engine, &mut io, 5, None);
+    let (recheck, _, _) = io.last();
+    engine
+        .response(
+            &mut io,
+            21,
+            recheck,
+            Err(r#"{"code":"not_authorized","message":"no such request"}"#),
+        )
+        .unwrap();
+    let Answer::Result(text) = io.answer_of(5) else {
+        panic!()
+    };
+    assert!(text.contains("no_address"), "{text}");
+    engine.written(&mut io, 22, 5).unwrap();
+
     // Cancelled while its name is checked: the check is withdrawn.
     upload_status(&mut engine, &mut io, 4, Some("ipns://k51abc"));
     let (tag, _, _) = io.checks.pop().unwrap();

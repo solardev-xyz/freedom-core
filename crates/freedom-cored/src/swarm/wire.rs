@@ -337,6 +337,13 @@ pub fn refusal(text: &str) -> Option<Refusal> {
     }
 }
 
+/// Whether `text` is an error member of 0001's shape at all.
+pub fn is_error(text: &str) -> bool {
+    serde_json::from_str::<&serde_json::value::RawValue>(text)
+        .ok()
+        .is_some_and(|raw| ErrorBody::from_raw(raw).is_ok())
+}
+
 /// The grammar's rule names (design 0015, "The operation grammar").
 fn rule(name: &str) -> Option<Rule> {
     Some(match name {

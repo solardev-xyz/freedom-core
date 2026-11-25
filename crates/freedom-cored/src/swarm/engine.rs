@@ -679,6 +679,14 @@ impl Engine {
             Err(text) => match (wire::refusal(text), &ask.need) {
                 (Some(Refusal::Cancelled), _) if ask.cancelled => None,
                 (Some(Refusal::Rule(rule)), Need::Node(_)) => Some(Event::Refused(rule)),
+                // Main refused the recheck itself: as 0012's APR-5 reads a
+                // recheck that isn't one, the effect doesn't go. Here the
+                // document isn't confirmed under its key.
+                (_, Need::Live) if wire::is_error(text) => Some(Event::Live(Live {
+                    name: true,
+                    live: false,
+                    agent: false,
+                })),
                 _ => return Err(Fault("swarm_reply")),
             },
         };
