@@ -565,7 +565,7 @@ The swarm thread's 64 MiB is reserved before use: when a request is admitted, an
   - a binary body (`chunk`, `feed_head`): `m + 2 × b64(m) + 16 KiB`, `m` the form's cap;
   - a JSON body (`stamps`, `stamp`, `tag`, `addresses`, an upload's result): `4m + 2 × b64(m) + 16 KiB + E × 256 B`, `E` the reply type's element cap below, the fourth `m` for a schema refusal's text ([JSON replies](#json-replies));
   - the parts: the reply as it is reassembled (`b64(m) + 16 KiB`), its parsed base64 text (`b64(m)`), the decoded bytes (`m`) and, for JSON, what the [typed reader](#json-replies) keeps (`2m + E × 256 B`). Each copy is dropped as the next is made. The charge counts them all at once.
-- **A streamed read for a page:** `n + 2 × b64(n) + 16 KiB`, where `n` is what the read may hold, and at least 512 KiB for an error: the size reserved from the site's budget for an explicit index, or the room left in its window for the latest entry. That covers the bytes as they come, the result's base64 and the serialized reply.
+- **A streamed read for a page:** `n + 2 × b64(n) + 16 KiB`, where `n` is what the read may hold, and at least 512 KiB for an error: the size reserved from the site's budget for an explicit index, or its `max_bytes` (the site's `maxBytes`) for the latest entry. Not the room left in the budget's window: the window can roll between the ask and the frames, which are then reserved in the next one, so a latest read charges about 18.4 MiB for a connected site and about 1.9 MiB for another. That covers the bytes as they come, the result's base64 and the serialized reply.
 - **The reader** takes the reply's bound from the request's entry, `b64(m) + 16 KiB`, so a fragmented reply never grows past its reservation. A longer one is a protocol error; main sends none.
 - **Released:**
   - a call's charge when the step that consumes its reply ends;
@@ -783,6 +783,7 @@ Once decided:
 - **Transport texts** (`transport-error-text`): `unreachable` is `fetch failed`, `error` is `fetch failed: other side closed`, and `aborted` is `This operation was aborted`, undici's own.
 - **The walk's own chunk reads aren't charged to the site's read budget,** so `readData`'s budget results are the reference's, which charges the joined bytes. A short stream keeps the reference's length text.
 - **Chunk checks follow the reference** (*Reads*), not 0009's stricter rules, which would refuse chunks the reference returns. The core recovers a SOC's owner with `k256`, at fc-evm's version.
+- **A latest feed read is charged for its `max_bytes`,** not the room left in the budget's window, which can roll between the ask and the frames (*The swarm thread's memory*); its frames are still reserved one by one, as #1057 does.
 - **Main's side, as the tests script it:** a pre-flight that throws is answered `node-stopped`; the core reads its own grants, so `read-chunk-grants-unavailable` reads on the connected budget with the same answer; a keyless document's key is `""`; `feed_latest`'s `max_bytes` is the site's `maxBytes`.
 - **`read-data-redundancy-level-span`'s root was wrong:** a plain two-leaf root with level 1 written into its span, which no Bee writes and the walk refuses. It is now design 0009's `file-4097-rs1`, Bee's own level-1 split, and the core reads it through the walk as the reference does.
 
