@@ -1115,3 +1115,66 @@ fn a_cancel_while_mining_ends_only_its_wait() {
     assert!(matches!(&stamps.need, Need::Node(c) if c.form == Form::Stamps));
     assert!(a.take_effects().is_empty(), "nothing more for A");
 }
+
+/// A GSOC send's upload must answer the SOC's own address (deviation
+/// `reference-check`, which bee-js doesn't make): the node's own answer
+/// passes, in either case or with `0x`; another reference, an encrypted
+/// one or the wrapped chunk's address refuses the send with -32603 `The
+/// Swarm node returned another reference`, after the one upload.
+#[test]
+fn a_gsoc_sends_reference_is_its_soc_address() {
+    let job = gsoc_job_of(&JsString::from("chat"));
+    let signer = fc_swarm::gsoc::mine(&job.target, &job.identifier, 12).unwrap();
+    let address = hex(&signer.soc_address());
+    let wrapped = hex(&fc_swarm::verify::address_of(&2u64.to_le_bytes(), b"hi").unwrap());
+    let cases: [(Option<String>, bool); 6] = [
+        (None, true),
+        (Some(address.to_uppercase()), true),
+        (Some(format!("0x{address}")), true),
+        (Some("ab".repeat(32)), false),
+        (Some(format!("{address}{address}")), false),
+        (Some(wrapped), false),
+    ];
+    for (reference, passes) in cases {
+        let mut thread = site_thread(STAMPS);
+        if let Some(reference) = &reference {
+            thread.node.rules.push(Rule {
+                method: Some("POST".to_owned()),
+                path: None,
+                prefix: Some("/soc/".to_owned()),
+                reply: ReplySpec {
+                    status: 201,
+                    status_text: "Created".to_owned(),
+                    headers: vec![(
+                        "content-type".to_owned(),
+                        "application/json; charset=utf-8".to_owned(),
+                    )],
+                    body: format!(r#"{{"reference":"{reference}"}}"#).into_bytes(),
+                    ..ReplySpec::ok(Vec::new(), "")
+                },
+                world: Vec::new(),
+            });
+        }
+        let outcome = thread.run(&gsoc_call("chat"));
+        let forms: Vec<Form> = thread.calls.iter().map(|c| c.call.form).collect();
+        assert_eq!(forms, [Form::Stamps, Form::SocUp], "{reference:?}");
+        if passes {
+            assert_eq!(
+                outcome,
+                Outcome::Result(Value::object([
+                    ("sent", Value::Bool(true)),
+                    ("address", Value::str(&address)),
+                ])),
+                "{reference:?}"
+            );
+        } else {
+            assert_eq!(
+                outcome,
+                Outcome::Error(fc_swarm_provider::machine::Failure::internal(
+                    "The Swarm node returned another reference"
+                )),
+                "{reference:?}"
+            );
+        }
+    }
+}

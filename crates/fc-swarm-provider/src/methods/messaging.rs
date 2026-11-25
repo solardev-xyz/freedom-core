@@ -22,8 +22,9 @@
 //!   and target `keccak256("freedom-gsoc-v1:" + topic)`, proximity 12),
 //!   the batch, the guard again, the SOC signed with the mined key (public
 //!   by construction, nothing of the vault), and `POST /soc/<o>/<id>`
-//!   through bee-js's `uploadSingleOwnerChunk`. The page gets the address,
-//!   never the key.
+//!   through bee-js's `uploadSingleOwnerChunk`, the node's reference
+//!   checked against the SOC's address (deviation `reference-check`, which
+//!   bee-js doesn't make). The page gets the address, never the key.
 //! - **`subscribe`:** the params, the grant, `shell.swarm_ready { check:
 //!   "subscribe" }` (main's probe after question 4's proxy check:
 //!   `proxy-or-tor` refuses, deviation `subscribe-proxy`), the key (the
@@ -48,6 +49,7 @@ use fc_swarm::gsoc;
 use super::chunk_reads::ready;
 use super::feed_write::{Data, data_of};
 use super::limits::{MAX_MESSAGE_BYTES, MAX_TARGET_DEPTH};
+use super::publish::OTHER_REFERENCE_MESSAGE;
 use super::writes::{Fail, batch_with, bytes_uploaded, soc_up};
 use super::{no_address, permitted};
 use crate::ReplyError;
@@ -967,9 +969,15 @@ impl SendGsoc {
             }
             GsocStage::Upload { id: call, address } if id == *call => {
                 // bee-js's `uploadSingleOwnerChunk`: `UploadResultBody` and
-                // the tag, its errors through `nodeWriteError`.
-                if let Err(failed) = bytes_uploaded(event) {
-                    return fail(failed.page);
+                // the tag, its errors through `nodeWriteError`; then the
+                // node's reference must be the SOC's own address, which
+                // bee-js doesn't check (deviation `reference-check`).
+                let reference = match bytes_uploaded(event) {
+                    Ok(reference) => reference,
+                    Err(failed) => return fail(failed.page),
+                };
+                if reference != address.as_slice() {
+                    return fail(Fail::text(OTHER_REFERENCE_MESSAGE).page);
                 }
                 done(Value::object([
                     ("sent", Value::Bool(true)),
