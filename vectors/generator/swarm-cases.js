@@ -730,6 +730,15 @@ function methodCases(env) {
   cf('node-no-reference', () => ({ name: 'blog' }), { node: { stamps: STAMPS.usable, rules: [
     { match: { method: 'POST', prefix: '/feeds/' }, reply: { status: 201, json: { reference: 'xyz' } } },
   ] } });
+  // own-keys (freedom-browser#1327): a feed named after a key of
+  // Object.prototype reads the inherited property as an existing feed, and
+  // createFeed answers its empty fields (bzz://undefined) with nothing
+  // uploaded. The core's name is an own key: an ordinary new feed, whose
+  // `core` is the reference's own new-feed path for the name (swarm-shell.js),
+  // from the store as the reference left it (its existing-feed answer writes
+  // nothing after the prompt's changes).
+  cf('own-key-to-string', () => ({ name: 'toString' }), { deviation: { id: 'own-keys',
+    core: (env, spec, record) => require('./swarm-shell').ownKeyCreateFeedCore(env, { feeds: record.after.feeds, node: spec.node, origin: spec.origin }) } });
 
   // -------------------------------------------------------------------------
   // updateFeed: the index from the node's answers.

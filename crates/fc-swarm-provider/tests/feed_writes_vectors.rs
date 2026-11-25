@@ -1169,8 +1169,18 @@ fn row_of(method: &str) -> &'static str {
 /// The core's calls against the honest scenario's, exactly: form, method,
 /// path, query, the row's headers (main adds its own), the body, `feed`.
 fn check_calls(id: &str, scenario: V<'_, '_>, thread: &Thread<'_>, earlier: bool) {
+    check_call_list(
+        id,
+        get(scenario, "calls").children().collect(),
+        thread,
+        earlier,
+    );
+}
+
+/// The core's calls against `wants`, each a scenario's call or a recorded
+/// request (own-keys' `core.requests`).
+fn check_call_list(id: &str, wants: Vec<V<'_, '_>>, thread: &Thread<'_>, earlier: bool) {
     let main_headers = ["accept", "accept-encoding"];
-    let wants: Vec<_> = get(scenario, "calls").children().collect();
     let paths = || {
         thread
             .calls
@@ -1522,6 +1532,11 @@ fn feed_and_soc_writes() {
         }
 
         let deviation = case.get("deviation").map(string);
+        // own-keys (`create-feed-own-key-to-string`): the reference answers
+        // an inherited property as an existing feed and makes no call; the
+        // core's name is an own key, an ordinary new feed: its readiness
+        // check, calls, store and history are `core`'s.
+        let own_key = deviation.as_deref() == Some("own-keys");
         let want = match &deviation {
             Some(d) => {
                 deviations.insert(d.clone());
@@ -1614,6 +1629,12 @@ fn feed_and_soc_writes() {
                     check_calls(&sid, *scenario, &thread, earlier);
                     scenarios_used.insert(sid.clone());
                 }
+                None if own_key => check_call_list(
+                    &sid,
+                    get(get(case, "core"), "requests").children().collect(),
+                    &thread,
+                    false,
+                ),
                 None => assert!(
                     thread.calls.is_empty(),
                     "{sid}: calls, and no honest scenario"
@@ -1637,7 +1658,7 @@ fn feed_and_soc_writes() {
                 assert_eq!(thread.world.guards.get(), checks, "{sid}: name checks");
                 assert_eq!(
                     thread.ready.len(),
-                    count(*step, "readiness"),
+                    count(*step, "readiness") + usize::from(own_key),
                     "{sid}: readiness"
                 );
             }
@@ -1653,7 +1674,11 @@ fn feed_and_soc_writes() {
         }
 
         // The stores after.
-        let after = get(case, "after");
+        let after = if own_key {
+            get(get(case, "core"), "after")
+        } else {
+            get(case, "after")
+        };
         let feeds_after = after
             .get("feeds")
             .filter(|f| f.kind() == Kind::String)
@@ -1670,7 +1695,13 @@ fn feed_and_soc_writes() {
         let history = thread.history();
         assert_eq!(
             history.stringify(),
-            expected_history(case, want).stringify(),
+            if own_key {
+                fc_json::parse(&get(after, "history").stringify(fc_json::index::KeyOrder::Property))
+                    .unwrap()
+            } else {
+                expected_history(case, want)
+            }
+            .stringify(),
             "{id}: history"
         );
     }
@@ -1700,12 +1731,13 @@ fn feed_and_soc_writes() {
         "stamps-one-read",
         "reply-syntax",
         "transport-error-text",
+        "own-keys",
     ] {
         assert!(deviations.contains(d), "{d}: no case played");
     }
     assert_eq!(
         (played, main_answered),
-        (182, 11),
+        (183, 11),
         "steps played and main's own"
     );
     assert_eq!(scenarios_used.len(), 100);

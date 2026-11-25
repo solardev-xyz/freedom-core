@@ -50,7 +50,7 @@ FILES.push('colibri.json', 'generator/colibri.js', 'generator/colibri-cases.js',
 
 FILES.push('swarm.json', 'swarm-grammar.json', 'dweb-verify.json', 'generator/swarm.js', 'generator/swarm-cases.js', 'generator/swarm-run.js',
   'generator/swarm-node.js', 'generator/swarm-world.js', 'generator/swarm-typed.js', 'generator/swarm-sections.js', 'generator/swarm-grammar.js',
-  'generator/swarm-grammar-file.js', 'generator/swarm-worker.js', 'generator/swarm-gsoc-worker.js');
+  'generator/swarm-grammar-file.js', 'generator/swarm-worker.js', 'generator/swarm-gsoc-worker.js', 'generator/swarm-shell.js');
 
 function checkArgs(generator, overrides = {}) {
   const refs = { freedom: REFERENCE, radicle: RADICLE_REFERENCE, approvals: APPROVALS_REFERENCE, stores: STORES_REFERENCE,
@@ -1092,6 +1092,12 @@ const SWARM_DAMAGES = [
   }],
   ['swarm.json', 'a changed window.swarm deviation mark', (contents) => {
     delete contents.methods.find((item) => item.deviation === 'feed-entry-bound').deviation;
+  }],
+  ['swarm.json', 'a changed answer of main\'s own Swarm method', (contents) => {
+    contents.shell.find((item) => item.id === 'publish-data-default').steps[0].answer.result_typed.object[1][1].number = '102';
+  }],
+  ['swarm.json', 'a changed deviation core of main\'s own Swarm method', (contents) => {
+    contents.shell.find((item) => item.id === 'identities-references-collation').core.answers[0].result_typed.array.reverse();
   }],
   ['swarm.json', 'a changed window.swarm package digest', (contents) => {
     contents.meta.files['@ethersphere/bee-js@13.2.0/dist/cjs/api/pss.js'] = '00'.repeat(32);

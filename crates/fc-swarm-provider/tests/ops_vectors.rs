@@ -439,6 +439,9 @@ struct Disk {
     dir: Dir,
     db: Option<rusqlite::Connection>,
     random: u8,
+    /// The tokens' randomness a case recorded, each taken once before the
+    /// counter's.
+    tokens: std::collections::VecDeque<[u8; 24]>,
     /// A write that fails, by file name.
     fail: Option<&'static str>,
 }
@@ -449,6 +452,7 @@ impl Disk {
             dir,
             db: None,
             random: 0,
+            tokens: std::collections::VecDeque::new(),
             fail: None,
         }
     }
@@ -491,6 +495,9 @@ impl Io for Disk {
     }
 
     fn random(&mut self) -> [u8; 24] {
+        if let Some(token) = self.tokens.pop_front() {
+            return token;
+        }
         self.random += 1;
         [self.random; 24]
     }
@@ -2574,4 +2581,364 @@ fn references_past_the_bound_are_refused_through_the_op() {
     );
     let got = world.play(ops::IDENTITIES, &other, Caller::Shell, vault, no_fetch);
     assert_eq!(got, Outcome::Result(Value::Array(Vec::new())));
+}
+
+// --- D12's recorded cases: vectors/swarm.json's `shell` section --------------------
+
+fn num(value: &JsValue) -> f64 {
+    match value {
+        JsValue::Number(n) => *n,
+        other => panic!("not a number: {}", short(other)),
+    }
+}
+
+fn shell_section() -> Vec<JsValue> {
+    let text = std::fs::read_to_string(vectors_root().join("swarm.json")).unwrap();
+    let index = Index::new(&text).unwrap();
+    let shell = fc_json::parse(index.root().get("shell").unwrap().raw()).unwrap();
+    shell.as_array().unwrap().to_vec()
+}
+
+/// A consent token's 24 random bytes, from its base64url text.
+fn token_bytes(token: &str) -> [u8; 24] {
+    let mut text: String = token
+        .chars()
+        .map(|c| match c {
+            '-' => '+',
+            '_' => '/',
+            other => other,
+        })
+        .collect();
+    while !text.len().is_multiple_of(4) {
+        text.push('=');
+    }
+    fc_swarm_provider::value::decode_base64(&text)
+        .unwrap()
+        .try_into()
+        .unwrap()
+}
+
+/// A recorded answer: the core's typed answer as a value, or what it throws.
+fn shell_expected(answer: &JsValue) -> Result<Value, Value> {
+    match (answer.get("result_typed"), answer.get("error_typed")) {
+        (Some(v), None) => Ok(Value::from_typed(v).unwrap()),
+        (None, Some(e)) => Err(Value::from_typed(e).unwrap()),
+        _ => panic!("no typed answer in {}", short(answer)),
+    }
+}
+
+fn thrown_value(thrown: &Thrown) -> Value {
+    let mut members = vec![
+        (JsString::from("name"), Value::str(thrown.name.as_str())),
+        (
+            JsString::from("message"),
+            Value::String(JsString::from(thrown.message.as_str())),
+        ),
+    ];
+    if let Some(code) = thrown.code {
+        members.push((JsString::from("code"), Value::str(code)));
+    }
+    Value::Object(members)
+}
+
+fn shell_outcome(outcome: Outcome) -> Result<Value, Value> {
+    match outcome {
+        Outcome::Result(value) => Ok(value),
+        Outcome::Thrown(thrown) => Err(thrown_value(&thrown)),
+        Outcome::Cancelled => panic!("cancelled"),
+    }
+}
+
+/// The world a `shell` store-op case starts from.
+struct ShellWorld {
+    world: World,
+    accounts: Vec<JsValue>,
+    _history: Option<TempDir>,
+}
+
+fn shell_world(id: &str, case: &JsValue) -> ShellWorld {
+    let w = field(case, "world");
+    let clock = num(field(w, "clock")) as u64;
+    let mut dir = Dir::new();
+    let feeds_text = field(w, "feeds").as_str().map(str::to_owned);
+    if let Some(text) = &feeds_text {
+        dir.insert(feeds::FILE_NAME.to_owned(), text.clone());
+    }
+    if let Some(text) = field(w, "manifests").as_str() {
+        dir.insert(manifests::FILE_NAME.to_owned(), text.to_owned());
+    }
+    let loaded = FeedStore::load(feeds_text.as_deref().map(str::as_bytes), clock, |_| false);
+    assert!(loaded.writes.is_empty(), "{id}");
+    let mut world = World::new(loaded.store, field(w, "grants").clone(), dir);
+    let accounts = w
+        .get("accounts")
+        .map(|a| a.as_array().unwrap().to_vec())
+        .unwrap_or_default();
+    // publish-history.sqlite with the case's rows, each cell as stored.
+    let history = w.get("history").map(|rows| {
+        let tmp = TempDir::new(id);
+        let conn = open_history(&tmp.0, clock);
+        for row in rows.as_array().unwrap() {
+            let JsValue::Object(cells) = row else {
+                panic!("{id}: a row")
+            };
+            let names: Vec<&str> = cells.iter().map(|(k, _)| k.as_str()).collect();
+            let values: Vec<rusqlite::types::Value> = cells
+                .iter()
+                .map(|(_, v)| match v {
+                    JsValue::Null => rusqlite::types::Value::Null,
+                    JsValue::Number(n) if n.fract() == 0.0 => {
+                        rusqlite::types::Value::Integer(*n as i64)
+                    }
+                    JsValue::Number(n) => rusqlite::types::Value::Real(*n),
+                    JsValue::String(t) => rusqlite::types::Value::Text(t.as_str().to_owned()),
+                    blob => rusqlite::types::Value::Blob(hex_bytes(str_of(field(blob, "blob")))),
+                })
+                .collect();
+            let sql = format!(
+                "INSERT INTO publishes ({}) VALUES ({})",
+                names.join(", "),
+                vec!["?"; names.len()].join(", ")
+            );
+            conn.execute(&sql, rusqlite::params_from_iter(values))
+                .unwrap();
+        }
+        world.disk.db = Some(conn);
+        tmp
+    });
+    ShellWorld {
+        world,
+        accounts,
+        _history: history,
+    }
+}
+
+/// An op played to its end at `now`: owners and accounts from the vault,
+/// a check's fetch answered as main answered it (D6).
+fn shell_play(
+    sw: &mut ShellWorld,
+    op: &mut Op,
+    mut step: Step,
+    now: u64,
+    vault: Vault<'_>,
+    fetch: Option<&JsValue>,
+) -> Outcome {
+    loop {
+        match step {
+            Step::Done(outcome) => return outcome,
+            Step::Asks(asks) => {
+                let mut last = Step::Ended;
+                for ask in asks {
+                    let event = shell_event(sw, &ask.need, vault, fetch);
+                    last = op.answer(ask.id, event, &mut sw.world.stores(now));
+                }
+                step = last;
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+}
+
+fn shell_event(sw: &ShellWorld, need: &Need, vault: Vault<'_>, fetch: Option<&JsValue>) -> Event {
+    match need {
+        Need::Accounts => Event::Accounts(Ok(sw.accounts.clone())),
+        Need::Manifest { url } => {
+            let fetch = fetch.unwrap_or_else(|| panic!("an unrecorded fetch of {url}"));
+            assert_eq!(url, str_of(field(fetch, "url")));
+            let answer = field(fetch, "answer");
+            Event::Manifest(if answer.get("failed").is_some() {
+                Fetch::Failed
+            } else {
+                Fetch::Answered {
+                    status: num(field(answer, "status")) as u16,
+                    body: fc_swarm_provider::value::decode_base64(str_of(field(
+                        answer,
+                        "body_base64",
+                    )))
+                    .unwrap(),
+                }
+            })
+        }
+        need => vault.event(need),
+    }
+}
+
+fn shell_caller(step: &JsValue) -> Caller {
+    match str_of(field(step, "caller")) {
+        "chrome" => Caller::Chrome,
+        "shell" => Caller::Shell,
+        other => panic!("caller {other}"),
+    }
+}
+
+/// The step's files as the core answers: the recorded ones, or a
+/// deviation's core files.
+fn check_files(id: &str, k: usize, disk: &Disk, want: &JsValue) {
+    for (name, file) in [
+        ("feeds", feeds::FILE_NAME),
+        ("manifests", manifests::FILE_NAME),
+    ] {
+        assert_eq!(
+            disk.dir.get(file).map(String::as_str),
+            field(want, name).as_str(),
+            "{id} step {k}: {name}"
+        );
+    }
+}
+
+/// Every `shell` case of `swarm.identities`, `swarm.history` and
+/// `swarm.manifest` (D12's, recorded from feed-store.js's IPC handlers and
+/// functions, page-swarm.js's prompt ops, publish-history.js and
+/// permission-manifests.js's page path and handlers) through the ops: each
+/// step's params as the case gives them, its caller, owners and accounts
+/// from the vault, a check's fetch as main answered it, its token's
+/// randomness; each answer (typed), the files as the step answered, and the
+/// files, grants and history rows after. Deviation cases are held to their
+/// `core` answers: `collation`, `owner-read-order`, `detach-timing`,
+/// `history-blobs`.
+#[test]
+fn every_shell_case_through_the_ops() {
+    let keys = vault_keys();
+    let mut played: BTreeMap<String, usize> = BTreeMap::new();
+    let mut deviations = std::collections::BTreeSet::new();
+    for case in &shell_section() {
+        let method = str_of(field(case, "method"));
+        if ![ops::IDENTITIES, ops::HISTORY, ops::MANIFEST].contains(&method) {
+            continue;
+        }
+        let id = str_of(field(case, "id")).to_owned();
+        let deviation = case.get("deviation").map(|d| str_of(d).to_owned());
+        if let Some(d) = &deviation {
+            deviations.insert(d.clone());
+        }
+        let core = case.get("core");
+        let core_answer = |k: usize| {
+            core.and_then(|c| c.get("answers"))
+                .map(|a| &a.as_array().unwrap()[k])
+        };
+        let mut sw = shell_world(&id, case);
+        let mut now = num(field(field(case, "world"), "clock")) as u64;
+        let mut unlocked = str_of(field(field(case, "world"), "vault")) == "unlocked";
+        let steps = field(case, "steps").as_array().unwrap();
+        if case.get("concurrent").is_some() {
+            // Step 1 runs while step 0's owners are being read.
+            assert_eq!(deviation.as_deref(), Some("owner-read-order"), "{id}");
+            let vault = Vault {
+                keys: &keys,
+                unlocked,
+            };
+            let mut first =
+                sw.world
+                    .op(method, field(&steps[0], "params"), shell_caller(&steps[0]));
+            let held = first.start(&mut sw.world.stores(now));
+            assert!(matches!(held, Step::Asks(_)), "{id}: {held:?}");
+            let mut second =
+                sw.world
+                    .op(method, field(&steps[1], "params"), shell_caller(&steps[1]));
+            let step = second.start(&mut sw.world.stores(now));
+            let got = shell_outcome(shell_play(&mut sw, &mut second, step, now, vault, None));
+            assert_eq!(got, shell_expected(core_answer(1).unwrap()), "{id} step 1");
+            let got = shell_outcome(shell_play(&mut sw, &mut first, held, now, vault, None));
+            assert_eq!(got, shell_expected(core_answer(0).unwrap()), "{id} step 0");
+        } else {
+            for (k, step) in steps.iter().enumerate() {
+                if let Some(clock) = step.get("clock") {
+                    now = num(clock) as u64;
+                }
+                if let Some(vault) = step.get("vault") {
+                    unlocked = str_of(vault) == "unlocked";
+                }
+                let answer = field(step, "answer");
+                let want = match deviation.as_deref() {
+                    Some("collation" | "history-blobs") => shell_expected(core_answer(k).unwrap()),
+                    _ => shell_expected(answer),
+                };
+                // A consent's token: the randomness the reference drew for it.
+                if let Ok(Value::Object(members)) = &want
+                    && let Some((_, Value::String(token))) =
+                        members.iter().find(|(n, _)| n == "token")
+                {
+                    sw.world.disk.tokens.push_back(token_bytes(token.as_str()));
+                }
+                let vault = Vault {
+                    keys: &keys,
+                    unlocked,
+                };
+                let mut op = sw
+                    .world
+                    .op(method, field(step, "params"), shell_caller(step));
+                let started = op.start(&mut sw.world.stores(now));
+                let got = shell_outcome(shell_play(
+                    &mut sw,
+                    &mut op,
+                    started,
+                    now,
+                    vault,
+                    step.get("fetch"),
+                ));
+                assert_eq!(got, want, "{id} step {k}");
+                sw.world.disk.tokens.clear();
+                if let Some(files) = step.get("files") {
+                    let want = match deviation.as_deref() {
+                        Some("detach-timing") => {
+                            &field(core.unwrap(), "files").as_array().unwrap()[k]
+                        }
+                        _ => files,
+                    };
+                    check_files(&id, k, &sw.world.disk, want);
+                }
+            }
+        }
+        let after = field(case, "after");
+        check_files(&id, steps.len(), &sw.world.disk, after);
+        assert_eq!(
+            sw.world.grants.grants.stringify(),
+            field(after, "grants").stringify(),
+            "{id}: the grants"
+        );
+        if let Some(rows) = after.get("history") {
+            let conn = sw.world.disk.db.as_ref().unwrap();
+            let got: Vec<JsValue> = query(
+                conn,
+                &Statement {
+                    sql: "SELECT * FROM publishes ORDER BY id",
+                    params: Vec::new(),
+                },
+            )
+            .iter()
+            .map(|row| {
+                let mut out = JsValue::Object(Vec::new());
+                for (name, cell) in history::COLUMNS.iter().zip(row) {
+                    out.set(*name, cell_value(cell));
+                }
+                out
+            })
+            .collect();
+            assert_eq!(
+                JsValue::Array(got).stringify(),
+                rows.stringify(),
+                "{id}: the rows"
+            );
+        }
+        *played.entry(method.to_owned()).or_default() += 1;
+    }
+    let counts: Vec<(&str, usize)> = played.iter().map(|(k, n)| (k.as_str(), *n)).collect();
+    assert_eq!(
+        counts,
+        [
+            ("swarm.history", 2),
+            ("swarm.identities", 21),
+            ("swarm.manifest", 15)
+        ]
+    );
+    let deviations: Vec<&str> = deviations.iter().map(String::as_str).collect();
+    assert_eq!(
+        deviations,
+        [
+            "collation",
+            "detach-timing",
+            "history-blobs",
+            "owner-read-order"
+        ]
+    );
 }

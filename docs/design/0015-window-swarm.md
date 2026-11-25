@@ -676,6 +676,7 @@ Against the reference pin, which has #1057. F-1's and F-5's first deviations (`f
 | `collation` | `getEthereumWalletIdentityReferences` sorts with `localeCompare` in Electron's app locale | ICU root order for printable ASCII, code-unit order for anything else, in every locale |
 | `owner-read-order` | an identities answer that reads owners holds the site's `withOriginLock`, so a change waits for it | the answer is read when its last owner arrives; a change made meanwhile shows in it |
 | `detach-timing` | after a user's identity switch or revoke, detach runs later and its failure is only logged | detach runs right after the change; its failure is ignored, as the reference logs it |
+| `picked-read-text` | a picked file whose read fails once its upload has started fails the fetch: the handler and its history row say `fetch failed: <Node's error text>` (for a directory, `fetch failed: EISDIR: illegal operation on a directory, read`) | main ends the part with the error's code name (SWM-4's #497) and the core answers `describePickedPathError`'s form, `Could not read "<name>" (<code>)`, in the answer and the row, the same text the reference gives a read that fails before the upload |
 | `tag-owners-bound` | an upload's tag owner is forgotten only when a page polls the tag done, so a page that never polls grows the map | at most 4,096, the oldest forgotten first; a forgotten tag answers `tag_ownership_mismatch`, as another site's does |
 | `store-writes` | temp file and rename, no fsync | 0001's durable write (0013) |
 
