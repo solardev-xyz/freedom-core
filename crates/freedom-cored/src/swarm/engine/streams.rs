@@ -24,6 +24,9 @@
 //!   answered the call (its credits come first on the one connection), or
 //!   cancelled the body: then its route goes (D4), and a credit after it
 //!   isn't the thread's.
+//! - **Each input first ends the requests whose deadline has come**, as
+//!   the engine's others do: a frame or a result that comes at or after a
+//!   request's deadline finds it cancelled.
 //! - **The idle bound** (D13): while a request has a part or a call whose
 //!   body streams out, each of main's frames for them (a part's head,
 //!   bytes or end, the body's ask, its credit) moves its bound on. Past it,
@@ -76,6 +79,7 @@ impl Engine {
         core: u64,
         bytes: Vec<u8>,
     ) -> Result<(), Fault> {
+        self.deadlines(io, now)?;
         // The duplex takes data only for an open stream it holds, and drops
         // a retiring one's: the engine holds every one it hands on.
         let (id, ask_id) = *self.open.get(&core).ok_or(Fault("swarm_stream"))?;
@@ -93,6 +97,7 @@ impl Engine {
         core: u64,
         abort: Option<Abort>,
     ) -> Result<(), Fault> {
+        self.deadlines(io, now)?;
         let (id, ask_id) = *self.open.get(&core).ok_or(Fault("swarm_stream"))?;
         let ask = self.take_ask(id, ask_id).ok_or(Fault("swarm_stream"))?;
         io.forget(StreamKey::Piece(core));
@@ -119,6 +124,7 @@ impl Engine {
     /// Main's terminal for a stream the thread had cancelled: dropped, and
     /// what it held goes.
     pub fn stream_retired(&mut self, io: &mut impl Io, now: Ms, core: u64) -> Result<(), Fault> {
+        self.deadlines(io, now)?;
         let Some((id, ask_id)) = self.open.get(&core).copied() else {
             return Err(Fault("swarm_stream"));
         };
@@ -141,6 +147,7 @@ impl Engine {
         body: u64,
         params: Option<&str>,
     ) -> Result<(), Fault> {
+        self.deadlines(io, now)?;
         let call = match stream::body_params(params) {
             Ok(parent) => self
                 .sent
@@ -186,6 +193,7 @@ impl Engine {
         body: u64,
         bytes: usize,
     ) -> Result<(), Fault> {
+        self.deadlines(io, now)?;
         let Some((id, ask_id)) = self.bodies.get(&body).copied() else {
             return Ok(());
         };
@@ -206,6 +214,7 @@ impl Engine {
     /// `cancelled`): no credit for it follows, so its route goes (D4). The
     /// machine's later parts of it are dropped; main answers the call.
     pub fn body_cancelled(&mut self, io: &mut impl Io, now: Ms, body: u64) -> Result<(), Fault> {
+        self.deadlines(io, now)?;
         self.bodies.remove(&body);
         io.forget(StreamKey::Body(body));
         self.drive(io, now)
@@ -220,6 +229,7 @@ impl Engine {
         ask: AskId,
         done: JobDone,
     ) -> Result<(), Fault> {
+        self.deadlines(io, now)?;
         let Some(slot) = self.slots.get_mut(&id) else {
             return Ok(());
         };
