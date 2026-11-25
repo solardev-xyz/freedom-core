@@ -327,6 +327,15 @@ const CAPABILITIES: &[&str] = &[
     // and main's ask for the body of one of its calls.
     "swarm.request",
     "swarm.body",
+    // Design 0015 (SWM-4, D5): main's own Swarm methods, on the swarm
+    // thread: its node calls, then the stores' ops.
+    "swarm.publish",
+    "swarm.feed",
+    "swarm.stamps",
+    "swarm.upload_status",
+    "swarm.identities",
+    "swarm.history",
+    "swarm.manifest",
 ];
 
 /// The features in `core.hello`'s capabilities, after the methods (design
