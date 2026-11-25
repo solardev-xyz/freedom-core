@@ -42,6 +42,17 @@ use super::engine::Ms;
 /// Who waits for a search: a request and its ask.
 pub type Waiter = (u64, AskId);
 
+/// The lane's answers, each to its waiter.
+pub type Answers = Vec<(Waiter, Mined)>;
+
+/// What [`Mining::work`] gives: the answers for jobs whose time ran out
+/// between batches, and the next batch, with the lane thread it goes to.
+#[derive(Debug)]
+pub struct Next {
+    pub answers: Answers,
+    pub batch: Option<(u64, Batch)>,
+}
+
 /// The swarm thread's side of the mining lane. See the module
 /// documentation.
 #[derive(Debug, Default)]
@@ -80,24 +91,29 @@ impl Mining {
         self.lane.cancel(waiter);
     }
 
-    /// While no batch is out: the answers for jobs whose time ran out
-    /// between batches, and the next batch, with the lane thread it goes
-    /// to.
-    pub fn work(&mut self, now: Ms) -> (Vec<(Waiter, Mined)>, Option<(u64, Batch)>) {
+    /// While no batch is out: the jobs whose time ran out between batches,
+    /// and the next batch.
+    pub fn work(&mut self, now: Ms) -> Next {
         if self.out {
-            return (Vec::new(), None);
+            return Next {
+                answers: Vec::new(),
+                batch: None,
+            };
         }
         let work = self.lane.work(now);
         let batch = work.batch.map(|batch| {
             self.out = true;
             (self.generation, batch)
         });
-        (work.answers, batch)
+        Next {
+            answers: work.answers,
+            batch,
+        }
     }
 
     /// Lane thread `generation`'s answer for a batch. An answer from a
     /// thread that isn't the current one, a stuck one's, is dropped.
-    pub fn ran(&mut self, now: Ms, generation: u64, ran: Ran) -> Vec<(Waiter, Mined)> {
+    pub fn ran(&mut self, now: Ms, generation: u64, ran: Ran) -> Answers {
         if generation != self.generation || !self.out {
             return Vec::new();
         }
@@ -113,7 +129,7 @@ impl Mining {
     /// The watchdog at `now`: a batch out for its second ends its job, and
     /// the next batch goes to a fresh lane thread (none, once mining is
     /// off).
-    pub fn watch(&mut self, now: Ms) -> Vec<(Waiter, Mined)> {
+    pub fn watch(&mut self, now: Ms) -> Answers {
         if !self.due().is_some_and(|due| due <= now) {
             return Vec::new();
         }
@@ -224,10 +240,10 @@ mod tests {
 
     /// The lane thread's work, done here: each batch run at once at `now`
     /// until the lane idles, every answer in order.
-    fn drain(mining: &mut Mining, now: Ms) -> Vec<(Waiter, Mined)> {
+    fn drain(mining: &mut Mining, now: Ms) -> Answers {
         let mut out = Vec::new();
         loop {
-            let (answers, batch) = mining.work(now);
+            let Next { answers, batch } = mining.work(now);
             out.extend(answers);
             let Some((lane, batch)) = batch else {
                 return out;
@@ -242,18 +258,18 @@ mod tests {
     fn one_batch_at_a_time_finds_bee_js_signer() {
         let mut mining = Mining::new();
         assert_eq!(mining.submit(0, &site(A), job("chat"), waiter(1)), None);
-        let (answers, batch) = mining.work(0);
+        let Next { answers, batch } = mining.work(0);
         assert!(answers.is_empty());
         let (lane, batch) = batch.unwrap();
         assert_eq!(lane, 0);
         // While it is out, nothing else goes.
-        assert!(mining.work(0).1.is_none());
+        assert!(mining.work(0).batch.is_none());
         assert_eq!(mining.due(), Some(STUCK_MS));
         assert_eq!(
             mining.ran(5, lane, batch.run()),
             [(waiter(1), Mined::Found(143))]
         );
-        assert!(mining.work(5).1.is_none());
+        assert!(mining.work(5).batch.is_none());
         assert_eq!(mining.due(), None);
         // The cache answers it again at once.
         assert_eq!(
@@ -271,14 +287,12 @@ mod tests {
         let mut mining = Mining::new();
         mining.submit(0, &site(A), job("room"), waiter(1));
         mining.submit(0, &site(B), job("chat"), waiter(2));
-        let (_, stuck) = mining.work(0);
-        let (lane, stuck) = stuck.unwrap();
+        let (lane, stuck) = mining.work(0).batch.unwrap();
         assert!(mining.watch(STUCK_MS - 1).is_empty());
         assert_eq!(mining.watch(STUCK_MS), [(waiter(1), Mined::Stuck)]);
         // The next job goes to lane 1; lane 0's answer is dropped, though it
         // came first.
-        let (_, next) = mining.work(STUCK_MS);
-        let (fresh, next) = next.unwrap();
+        let (fresh, next) = mining.work(STUCK_MS).batch.unwrap();
         assert_eq!((lane, fresh), (0, 1));
         assert!(mining.ran(STUCK_MS, lane, stuck.run()).is_empty());
         assert_eq!(
@@ -288,13 +302,12 @@ mod tests {
         // The second.
         mining.submit(2_000, &site(A), job("room"), waiter(3));
         mining.submit(2_000, &site(B), job("fast-29"), waiter(4));
-        let (_, out) = mining.work(2_000);
-        assert_eq!(out.unwrap().0, 1);
+        assert_eq!(mining.work(2_000).batch.unwrap().0, 1);
         assert_eq!(
             mining.watch(3_000),
             [(waiter(3), Mined::Stuck), (waiter(4), Mined::Off)]
         );
-        assert!(mining.work(3_000).1.is_none());
+        assert!(mining.work(3_000).batch.is_none());
         assert_eq!(
             mining.submit(3_000, &site(A), job("chat"), waiter(5)),
             Some(Mined::Off)
@@ -317,8 +330,7 @@ mod tests {
         let mut now = 0;
         let mut answers = Vec::new();
         while answers.is_empty() {
-            let (_, batch) = mining.work(now);
-            let (lane, batch) = batch.unwrap();
+            let (lane, batch) = mining.work(now).batch.unwrap();
             now += 300;
             answers = mining.ran(now, lane, batch.run());
         }
@@ -358,7 +370,7 @@ mod tests {
         mining.submit(0, &site(A), job("chat"), waiter(1));
         drain(&mut mining, 0);
         mining.submit(0, &site(A), job("room"), waiter(2));
-        let (_, out) = mining.work(0);
+        let out = mining.work(0).batch;
         mining.reset();
         assert_eq!(
             mining.submit(0, &site(B), job("chat"), waiter(3)),
@@ -383,8 +395,7 @@ mod tests {
         let mut mining = Mining::new();
         mining.generation = 7;
         mining.submit(0, &site(A), job("chat"), waiter(1));
-        let (_, batch) = mining.work(0);
-        let (lane, batch) = batch.unwrap();
+        let (lane, batch) = mining.work(0).batch.unwrap();
         assert_eq!(lane, 7);
         assert!(thread.run(batch));
         let (lane, ran) = rx.recv_timeout(Duration::from_secs(10)).unwrap();

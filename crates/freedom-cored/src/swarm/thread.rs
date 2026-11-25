@@ -50,10 +50,9 @@ use fc_approval::stores::SwarmStore;
 use fc_eip1193::names::Binding;
 use fc_protocol::error::{ErrorBody, ErrorCode};
 use fc_protocol::message::{self, PageContext};
+use fc_swarm_provider::mining::{Batch, Ran};
 use serde_json::value::RawValue;
 use zeroize::Zeroizing;
-
-use fc_swarm_provider::mining::{Batch, Ran};
 
 use super::engine::{Answer, Bounds, Engine, Fault, Io, Ms, NAME_TAG, Outgoing, Sent, Shared};
 use super::{lane, wire};
@@ -105,7 +104,7 @@ pub enum In {
     /// Mining lane thread `lane`'s answer for a batch.
     Mined {
         lane: u64,
-        ran: Ran,
+        ran: Box<Ran>,
     },
     /// `test.swarm_world` (D11).
     #[cfg(feature = "testhooks")]
@@ -328,7 +327,7 @@ impl Thread {
             In::Name { tag, verdict } => self.engine.named(&mut self.wire, now, tag, verdict),
             In::Written(id) => self.engine.written(&mut self.wire, now, id),
             In::Drained => self.engine.room(&mut self.wire, now),
-            In::Mined { lane, ran } => self.engine.mined(&mut self.wire, now, lane, ran),
+            In::Mined { lane, ran } => self.engine.mined(&mut self.wire, now, lane, *ran),
             #[cfg(feature = "testhooks")]
             In::World { id, params } => {
                 self.world(id, params.as_deref().map(RawValue::get));
@@ -608,9 +607,10 @@ impl Io for Wire {
             // its batch returns, its answer dropped.
             let mailbox = self.written.clone();
             let started = lane::spawn(lane, move |lane, ran| {
-                mailbox
-                    .upgrade()
-                    .is_some_and(|tx| tx.send((In::Mined { lane, ran }, None)).is_ok())
+                mailbox.upgrade().is_some_and(|tx| {
+                    let ran = Box::new(ran);
+                    tx.send((In::Mined { lane, ran }, None)).is_ok()
+                })
             });
             self.lane = match started {
                 Ok(thread) => Some(thread),

@@ -70,9 +70,9 @@ use fc_swarm_provider::budgets::ReadBudgets;
 use fc_swarm_provider::machine::node::{ERROR_BODY, b64};
 use fc_swarm_provider::machine::shell::Deadline;
 use fc_swarm_provider::machine::{
-    AskId, Call, Capability, Effect, Event, Failed, Failure, KNOWN_METHODS, Live, Mined, Need,
-    NotBuilt, Outcome, Protocol, REQUEST_CHARGE, RUNNING_REQUESTS, Reads, Request,
-    STREAMING_UPLOADS, TagOwners, WAITING_REQUESTS, World,
+    AskId, Call, Capability, Effect, Event, Failed, Failure, KNOWN_METHODS, Live, Need, NotBuilt,
+    Outcome, Protocol, REQUEST_CHARGE, RUNNING_REQUESTS, Reads, Request, STREAMING_UPLOADS,
+    TagOwners, WAITING_REQUESTS, World,
 };
 use fc_swarm_provider::mining::{Batch, Ran};
 use fc_swarm_provider::stores::feeds::FeedStore;
@@ -1388,7 +1388,7 @@ impl Engine {
             }
             moved = true;
         }
-        let (answers, batch) = self.mining.work(now);
+        let lane::Next { answers, batch } = self.mining.work(now);
         moved |= !answers.is_empty();
         self.answer_mined(answers);
         if let Some((lane, batch)) = batch {
@@ -1400,7 +1400,7 @@ impl Engine {
 
     /// The lane's answers: each search's ask ends, its charge goes, and its
     /// request has its answer.
-    fn answer_mined(&mut self, answers: Vec<(lane::Waiter, Mined)>) {
+    fn answer_mined(&mut self, answers: lane::Answers) {
         for ((id, ask_id), mined) in answers {
             let held = self
                 .slots
