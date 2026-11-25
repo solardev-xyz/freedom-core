@@ -113,7 +113,9 @@ use fc_swarm_provider::machine::{
     Request, STREAMING_UPLOADS, SignKey, SignSoc, StoreWrite, TagOwners, WAITING_REQUESTS, World,
 };
 use fc_swarm_provider::ops;
-use fc_swarm_provider::stores::feeds::{FeedChange, FeedStore};
+#[cfg(feature = "testhooks")]
+use fc_swarm_provider::stores::feeds::FeedChange;
+use fc_swarm_provider::stores::feeds::FeedStore;
 use fc_swarm_provider::stores::history::{Row, Statement};
 use fc_swarm_provider::stores::manifests::{ManifestStore, Save};
 use fc_swarm_provider::value::Value;
@@ -888,7 +890,7 @@ enum Asker {
     /// back ([`ops::Op::changed`]).
     Op(u64),
     /// `test.swarm_feed_change` `id` (D11).
-    #[cfg(any(test, feature = "testhooks"))]
+    #[cfg(feature = "testhooks")]
     Test(u64),
 }
 
@@ -1352,7 +1354,7 @@ impl Engine {
                         .push_back((id, ask_id, Event::Written(written(result))));
                 }
                 Some(Asker::Op(id)) => self.op_ready.push_back((id, OpInput::Changed(result))),
-                #[cfg(any(test, feature = "testhooks"))]
+                #[cfg(feature = "testhooks")]
                 Some(Asker::Test(id)) => io.answer(id, changed(result)),
                 None => {}
             }
@@ -1365,7 +1367,7 @@ impl Engine {
     /// `test.swarm_feed_change` `id` (D11): a change to the feed store
     /// through SW-1's keeper, as `swarm.identities` will make one (PR 9),
     /// answered once made, or once the hold that defers it ends.
-    #[cfg(any(test, feature = "testhooks"))]
+    #[cfg(feature = "testhooks")]
     pub fn feed_change(
         &mut self,
         io: &mut impl Io,
@@ -2296,7 +2298,7 @@ fn written(result: Result<ChangeAnswer, ChangeError>) -> Result<(), JsString> {
 
 /// `test.swarm_feed_change`'s answer: `{ value }`, the change's own (`null`
 /// for `undefined`), or `{ error }`, the text its caller reads.
-#[cfg(any(test, feature = "testhooks"))]
+#[cfg(feature = "testhooks")]
 fn changed(result: Result<ChangeAnswer, ChangeError>) -> Answer {
     let json = match result {
         Ok(answer) => {
