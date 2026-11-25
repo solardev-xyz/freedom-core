@@ -387,9 +387,13 @@ impl Op {
         }
     }
 
-    /// The answer read from the store alone.
-    fn read(&self, store: &FeedStore) -> Option<Result<JsValue, Thrown>> {
-        Some(match self {
+    /// The answer read from the store alone. The references come as the
+    /// typed value the op answers with, made once within their bound.
+    fn read(&self, store: &FeedStore) -> Option<Result<Value, Thrown>> {
+        if let Op::EthereumWalletReferences { wallet_index } = self {
+            return Some(store.ethereum_wallet_identity_references(wallet_index));
+        }
+        let read = match self {
             Op::GetAllOrigins => store.all_origin_entries().map(JsValue::Array),
             Op::HasFeedIdentity { origin } => Ok(JsValue::Bool(store.has_identity_mode(origin))),
             Op::GetIdentityMode { origin } => Ok(store
@@ -401,11 +405,9 @@ impl Op {
             Op::AssertFeedGrantable { key } => store
                 .assert_feed_grantable(key)
                 .map(|()| JsValue::Undefined),
-            Op::EthereumWalletReferences { wallet_index } => {
-                store.ethereum_wallet_identity_references(wallet_index)
-            }
             _ => return None,
-        })
+        };
+        Some(read.map(|value| Value::from_js(&value)))
     }
 }
 
@@ -478,7 +480,10 @@ impl Run {
             return Step::Ended;
         }
         if let Some(answer) = self.op.read(stores.keeper.store()) {
-            return done(answer);
+            return Step::Done(match answer {
+                Ok(value) => Outcome::Result(value),
+                Err(thrown) => Outcome::Thrown(thrown),
+            });
         }
         if let Some(change) = self.op.change() {
             let io = &mut *stores.io;

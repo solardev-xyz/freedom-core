@@ -41,8 +41,9 @@
 //!   share an id, and each feed names at most one of them. A site whose
 //!   active identity is left out is dropped, as the reference drops one
 //!   whose active identity is missing. No reference writer makes one.
-//! - `getEthereumWalletIdentityReferences` is built in one pass over each
-//!   site's feeds and refused past 1 MiB (deviation
+//! - `getEthereumWalletIdentityReferences` is built once, as the typed
+//!   answer, from each site's matching identities and one pass over its
+//!   feeds, and refused once what it holds would pass 1 MiB (deviation
 //!   `identity-references-bound`): the reference repeats a site's key in
 //!   every reference, so a store well within its own bound could make an
 //!   answer of any size.
@@ -52,8 +53,6 @@
 //!   with anything else (design 0015, SWM-4's D8; deviation `collation`,
 //!   [`crate::js::locale_compare`]).
 
-use std::collections::BTreeMap;
-
 use fc_json::{JsString, JsValue};
 
 use super::manifests::Projection;
@@ -62,6 +61,7 @@ use super::{
     object, or_falsy, or_nullish, parse_file, property_key, props, spread, strict_equals, template,
     text, time, truthy,
 };
+use crate::value::Value;
 
 /// The file's name at the Freedom root.
 pub const FILE_NAME: &str = "swarm-feeds.json";
@@ -545,98 +545,119 @@ impl FeedStore {
     /// order (deviation `collation` outside printable ASCII). The account
     /// removal's references (`accounts.remove`'s `swarm_references`).
     ///
-    /// The answer is built in one pass over each site's feeds, indexed by
-    /// their identity's id, and counted as it grows ([`references_size`]):
-    /// past [`MAX_REFERENCES_BYTES`] it is refused,
-    /// [`REFERENCES_TOO_LARGE`], before anything past the bound is made
-    /// (deviation `identity-references-bound`; the reference builds any
-    /// size, a site's key once per matching identity). No store Freedom
-    /// writes comes near it.
+    /// The answer is built once, as the typed value the op answers with,
+    /// and bounded (deviation `identity-references-bound`; the reference
+    /// builds any size, a site's key once per matching identity): each
+    /// site's matching identities are found first, then its feeds are taken
+    /// in one pass, keeping only those that name one of them. Everything
+    /// the work holds (the matches and their lookup, each identity's feed
+    /// names, a sort's scratch, the references, their order and the answer)
+    /// is charged at its allocation, as [`fc_json::allocation`] lays it out,
+    /// before it is made: past [`MAX_REFERENCES_HELD`] it is refused,
+    /// [`REFERENCES_TOO_LARGE`]. No store Freedom writes comes near it.
     pub fn ethereum_wallet_identity_references(
         &self,
         wallet_index: &JsValue,
-    ) -> Result<JsValue, Thrown> {
+    ) -> Result<Value, Thrown> {
+        self.references_held(wallet_index).0
+    }
+
+    /// [`FeedStore::ethereum_wallet_identity_references`], and what it
+    /// held: at its peak, and at its end (the answer's own).
+    fn references_held(&self, wallet_index: &JsValue) -> (Result<Value, Thrown>, Held) {
+        let mut held = Held::default();
+        let answer = self.references_within(wallet_index, &mut held);
+        (answer, held)
+    }
+
+    fn references_within(&self, wallet_index: &JsValue, held: &mut Held) -> Result<Value, Thrown> {
         match wallet_index {
             JsValue::Number(n) if crate::js::is_integer(*n) && *n >= 0.0 => {}
             _ => {
                 return Err(Thrown::error("Wallet index must be a non-negative integer"));
             }
         }
-        let mut size = 0usize;
-        let mut references: Vec<(&JsString, bool, Option<JsValue>)> = Vec::new();
+        let mut references: Vec<(&JsString, bool, Option<Value>)> = Vec::new();
         for (origin, entry) in props(self.origins()) {
             let identities = field_or_undefined(entry, "identities");
             if !is_plain_object(identities) {
                 continue;
             }
-            let feeds = entry.get("feeds").filter(|feeds| is_plain_object(feeds));
-            // Built at the site's first matching identity.
-            let mut by_id: Option<BTreeMap<&JsString, Vec<&JsString>>> = None;
+            // The site's identities on the account, in their order.
+            let mut matched: Vec<&JsValue> = Vec::new();
             for (_, identity) in props(identities) {
-                let id = identity.get("id").unwrap_or(&UNDEFINED);
-                if !is_str(identity.get("mode"), ETHEREUM_WALLET)
-                    || !strict_equals(
+                if is_str(identity.get("mode"), ETHEREUM_WALLET)
+                    && strict_equals(
                         identity.get("walletIndex").unwrap_or(&UNDEFINED),
                         wallet_index,
                     )
                 {
-                    continue;
+                    push_held(held, &mut matched, identity)?;
                 }
-                // `feed?.identityId === identity.id`: every id the store
-                // keeps is a string, its key's (the loader's rule), so a
-                // feed names an identity by a string, and each feed names
-                // at most one of the site's identities.
-                let by_id = by_id.get_or_insert_with(|| feeds_by_identity(feeds));
-                let mut feed_names = match id {
-                    JsValue::String(id) => by_id.remove(id).unwrap_or_default(),
-                    _ => Vec::new(),
-                };
-                let active = strict_equals(entry.get("activeIdentityId").unwrap_or(&UNDEFINED), id);
-                if !active && feed_names.is_empty() {
-                    continue;
-                }
-                size = size.saturating_add(references_size(origin, id, &feed_names));
-                if size > MAX_REFERENCES_BYTES {
-                    return Err(Thrown::error(REFERENCES_TOO_LARGE));
-                }
-                // `.sort()`: by UTF-16 code unit, the names being strings.
-                crate::js::sort(&mut feed_names, |a, b| ordering_sign(a.cmp(b)));
-                #[expect(
-                    clippy::cast_precision_loss,
-                    reason = "a count of a file's keys, far below 2^53"
-                )]
-                let count = feed_names.len() as f64;
-                let mut reference = object();
-                reference.set("origin", JsValue::String(origin.clone()));
-                reference.set("identityId", id.clone());
-                reference.set("active", JsValue::Bool(active));
-                reference.set(
-                    "feedNames",
-                    JsValue::Array(
-                        feed_names
-                            .into_iter()
-                            .map(|name| JsValue::String(name.clone()))
-                            .collect(),
-                    ),
-                );
-                reference.set("feedCount", JsValue::Number(count));
-                references.push((origin, active, Some(reference)));
             }
+            if matched.is_empty() {
+                continue;
+            }
+            // `feed?.identityId === identity.id`: every id the store keeps
+            // is a string, its key's (the loader's rule), so a feed names
+            // an identity by a string, and at most one of the site's.
+            held.charge(vec_held::<(&JsString, usize)>(matched.len()))?;
+            let mut lookup: Vec<(&JsString, usize)> = Vec::with_capacity(matched.len());
+            for (at, identity) in matched.iter().enumerate() {
+                if let Some(JsValue::String(id)) = identity.get("id") {
+                    lookup.push((id, at));
+                }
+            }
+            lookup.sort_unstable_by(|a, b| a.0.cmp(b.0));
+            held.charge(vec_held::<Vec<&JsString>>(matched.len()))?;
+            let mut names: Vec<Vec<&JsString>> = Vec::with_capacity(matched.len());
+            names.resize_with(matched.len(), Vec::new);
+            let feeds = entry.get("feeds").filter(|feeds| is_plain_object(feeds));
+            for (name, feed) in feeds.map(props).unwrap_or(&[]) {
+                let Some(JsValue::String(id)) = feed.get("identityId") else {
+                    continue;
+                };
+                if let Ok(found) = lookup.binary_search_by(|(key, _)| (*key).cmp(id)) {
+                    push_held(held, &mut names[lookup[found].1], name)?;
+                }
+            }
+            for (identity, mut feed_names) in
+                matched.iter().zip(names.iter_mut().map(std::mem::take))
+            {
+                let id = identity.get("id").unwrap_or(&UNDEFINED);
+                let active = strict_equals(entry.get("activeIdentityId").unwrap_or(&UNDEFINED), id);
+                let names_held = vec_held::<&JsString>(feed_names.capacity());
+                if active || !feed_names.is_empty() {
+                    // `.sort()`: by UTF-16 code unit, the names being
+                    // strings.
+                    sort_held(held, &mut feed_names, |a, b| ordering_sign(a.cmp(b)))?;
+                    held.charge(reference_held(origin, id, &feed_names))?;
+                    let reference = reference_value(origin, id, active, &feed_names);
+                    push_held(held, &mut references, (origin, active, Some(reference)))?;
+                }
+                drop(feed_names);
+                held.release(names_held);
+            }
+            held.release(vec_held::<Vec<&JsString>>(names.capacity()));
+            held.release(vec_held::<(&JsString, usize)>(lookup.capacity()));
+            held.release(vec_held::<&JsValue>(matched.capacity()));
         }
+        held.charge(vec_held::<usize>(references.len()))?;
         let mut order: Vec<usize> = (0..references.len()).collect();
-        crate::js::sort(&mut order, |a, b| {
+        sort_held(held, &mut order, |a, b| {
             let (a, b) = (&references[a], &references[b]);
             if a.1 != b.1 {
                 return if a.1 { -1.0 } else { 1.0 };
             }
             ordering_sign(crate::js::locale_compare(a.0, b.0))
-        });
-        Ok(JsValue::Array(
-            order
-                .into_iter()
-                .filter_map(|at| references[at].2.take())
-                .collect(),
-        ))
+        })?;
+        held.charge(vec_held::<Option<Value>>(order.len()))?;
+        let answer: Vec<Option<Value>> = order.iter().map(|&at| references[at].2.take()).collect();
+        held.release(vec_held::<usize>(order.capacity()));
+        held.release(vec_held::<(&JsString, bool, Option<Value>)>(
+            references.capacity(),
+        ));
+        Ok(Value::Array(answer))
     }
 
     // --- changes -------------------------------------------------------------
@@ -1015,50 +1036,142 @@ impl FeedStore {
     }
 }
 
-/// The most [`FeedStore::ethereum_wallet_identity_references`] answers, in
-/// [`references_size`]'s bytes (deviation `identity-references-bound`).
-pub const MAX_REFERENCES_BYTES: usize = 1024 * 1024;
+/// The most [`FeedStore::ethereum_wallet_identity_references`] holds while
+/// it works, in [`fc_json::allocation`]'s bytes (deviation
+/// `identity-references-bound`).
+pub const MAX_REFERENCES_HELD: usize = 1024 * 1024;
 
-/// What a references answer past [`MAX_REFERENCES_BYTES`] throws; a page
+/// What a references answer past [`MAX_REFERENCES_HELD`] throws; a page
 /// would read it as -32603.
 pub const REFERENCES_TOO_LARGE: &str = "Swarm identity references are too large";
 
-/// A reference's members and punctuation, apart from its strings.
-const REFERENCE_OVERHEAD: usize = 64;
+/// The bytes a references answer holds, charged before each allocation is
+/// made and let go of once it is freed; the most it reached.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct Held {
+    now: usize,
+    peak: usize,
+}
 
-/// A feed name's quotes and comma.
-const NAME_OVERHEAD: usize = 8;
+impl Held {
+    /// `bytes` more, refused past [`MAX_REFERENCES_HELD`].
+    fn charge(&mut self, bytes: usize) -> Result<(), Thrown> {
+        let next = self.now.saturating_add(bytes);
+        if next > MAX_REFERENCES_HELD {
+            return Err(Thrown::error(REFERENCES_TOO_LARGE));
+        }
+        self.now = next;
+        self.peak = self.peak.max(next);
+        Ok(())
+    }
 
-/// What one reference adds to the answer: its site key, its identity id and
-/// its feed names, each string's UTF-8 bytes (a lone surrogate U+FFFD's
-/// three), and their structure. The answer is about its JSON text's size,
-/// and so is the typed copy the op answers with (`Value::from_js`).
-fn references_size(origin: &JsString, id: &JsValue, feed_names: &[&JsString]) -> usize {
+    fn release(&mut self, bytes: usize) {
+        self.now = self.now.saturating_sub(bytes);
+    }
+}
+
+/// What a vector's buffer of `capacity` items holds.
+fn vec_held<T>(capacity: usize) -> usize {
+    fc_json::allocation(capacity.saturating_mul(std::mem::size_of::<T>()))
+}
+
+/// What a string holds: its text, and its lone surrogates' list.
+fn string_held(text: &JsString) -> usize {
+    text.allocations().iter().fold(0usize, |held, &size| {
+        held.saturating_add(fc_json::allocation(size))
+    })
+}
+
+/// `item` pushed onto `items`: where the buffer is full, the larger one is
+/// charged before it is made (while the old one still lives), and the old
+/// one let go of once it is freed.
+fn push_held<T>(held: &mut Held, items: &mut Vec<T>, item: T) -> Result<(), Thrown> {
+    if items.len() == items.capacity() {
+        let old = vec_held::<T>(items.capacity());
+        let wanted = items.capacity().saturating_mul(2).max(4);
+        held.charge(vec_held::<T>(wanted))?;
+        items.reserve_exact(wanted - items.len());
+        // A buffer larger than asked for is charged too.
+        let made = vec_held::<T>(items.capacity());
+        if made > vec_held::<T>(wanted) {
+            held.charge(made - vec_held::<T>(wanted))?;
+        }
+        held.release(old);
+    }
+    items.push(item);
+    Ok(())
+}
+
+/// The most V8's sort port holds beside its items: its pending runs (fewer
+/// than 64 for any length a `usize` counts, two words each).
+const SORT_RUNS_HELD: usize = 64 * 16;
+
+/// [`crate::js::sort`], its scratch charged while it runs: a merge's copy
+/// of at most every item, and the pending runs.
+fn sort_held<T: Copy>(
+    held: &mut Held,
+    items: &mut [T],
+    compare: impl FnMut(T, T) -> f64,
+) -> Result<(), Thrown> {
+    let scratch = vec_held::<T>(items.len()).saturating_add(fc_json::allocation(SORT_RUNS_HELD));
+    held.charge(scratch)?;
+    crate::js::sort(items, compare);
+    held.release(scratch);
+    Ok(())
+}
+
+/// The members of a reference, in its order.
+const REFERENCE_KEYS: [&str; 5] = ["origin", "identityId", "active", "feedNames", "feedCount"];
+
+/// What one reference holds once made ([`reference_value`]): its object's
+/// buffer and keys, its site key, its id, and its feed names' array and
+/// strings.
+fn reference_held(origin: &JsString, id: &JsValue, feed_names: &[&JsString]) -> usize {
+    let keys = REFERENCE_KEYS.iter().fold(0usize, |held, key| {
+        held.saturating_add(fc_json::allocation(key.len()))
+    });
     let id = match id {
-        JsValue::String(id) => id.as_str().len(),
+        JsValue::String(id) => string_held(id),
         _ => 0,
     };
     feed_names.iter().fold(
-        REFERENCE_OVERHEAD
-            .saturating_add(origin.as_str().len())
-            .saturating_add(id),
-        |size, name| {
-            size.saturating_add(name.as_str().len())
-                .saturating_add(NAME_OVERHEAD)
-        },
+        vec_held::<(JsString, Value)>(REFERENCE_KEYS.len())
+            .saturating_add(keys)
+            .saturating_add(string_held(origin))
+            .saturating_add(id)
+            .saturating_add(vec_held::<Option<Value>>(feed_names.len())),
+        |held, name| held.saturating_add(string_held(name)),
     )
 }
 
-/// A site's feed names by the identity id each names (`identityId`, a
-/// string), in the map's order: one pass over the feeds.
-fn feeds_by_identity(feeds: Option<&JsValue>) -> BTreeMap<&JsString, Vec<&JsString>> {
-    let mut by_id: BTreeMap<&JsString, Vec<&JsString>> = BTreeMap::new();
-    for (name, feed) in feeds.map(props).unwrap_or(&[]) {
-        if let Some(JsValue::String(id)) = feed.get("identityId") {
-            by_id.entry(id).or_default().push(name);
-        }
-    }
-    by_id
+/// `{ origin, identityId, active, feedNames, feedCount }`.
+fn reference_value(
+    origin: &JsString,
+    id: &JsValue,
+    active: bool,
+    feed_names: &[&JsString],
+) -> Value {
+    #[expect(
+        clippy::cast_precision_loss,
+        reason = "a count of a file's keys, far below 2^53"
+    )]
+    let count = feed_names.len() as f64;
+    let [origin_key, id_key, active_key, names_key, count_key] = REFERENCE_KEYS;
+    Value::Object(vec![
+        (JsString::from(origin_key), Value::String(origin.clone())),
+        (JsString::from(id_key), Value::from_js(id)),
+        (JsString::from(active_key), Value::Bool(active)),
+        (
+            JsString::from(names_key),
+            Value::Array(
+                feed_names
+                    .iter()
+                    .map(|name| Some(Value::String((*name).clone())))
+                    .collect(),
+            ),
+        ),
+        (JsString::from(count_key), Value::Number(count)),
+    ])
 }
 
 /// A comparator's number for an ordering.
@@ -2046,27 +2159,34 @@ mod tests {
         let references = store
             .ethereum_wallet_identity_references(&JsValue::Number(0.0))
             .unwrap();
-        let references = references.as_array().unwrap();
+        let references = items(&references);
         assert_eq!(references.len(), 1);
-        assert_eq!(
-            references[0].get("feedCount"),
-            Some(&JsValue::Number(f64::from(n)))
-        );
+        assert_eq!(references[0].get("feedCount"), &Value::Number(f64::from(n)));
         // And the store answers the same once written and read again.
         let again = FeedStore::load(Some(store.text().unwrap().as_bytes()), NOW, |_| false);
         assert!(again.writes.is_empty());
         assert_eq!(again.store, store);
     }
 
-    /// A site whose identities are each under their own id, `n` of them on
-    /// wallet 0 (the first `with_feed` naming one feed each), a key of
-    /// `key_len` bytes, and `other_feeds` feeds of its Bee wallet.
-    fn many_identities(
+    /// An array answer's items.
+    fn items(value: &Value) -> Vec<&Value> {
+        match value {
+            Value::Array(items) => items.iter().flatten().collect(),
+            other => panic!("not an array: {other:?}"),
+        }
+    }
+
+    /// A store's text: a site whose identities are each under their own
+    /// id, `n` of them on wallet 0 (the first `with_feed` naming one feed
+    /// each), a key of `key_len` bytes, and `other_feeds` feeds naming
+    /// `other` (its Bee wallet, or ids no identity has).
+    fn many_identities_text(
         key_len: usize,
         n: usize,
         with_feed: usize,
         other_feeds: usize,
-    ) -> FeedStore {
+        other: impl Fn(usize) -> String,
+    ) -> String {
         let key = "k".repeat(key_len);
         let mut identities =
             String::from(r#""bee-wallet":{"id":"bee-wallet","mode":"bee-wallet"}"#);
@@ -2080,30 +2200,44 @@ mod tests {
             }
         }
         for i in 0..other_feeds {
-            feeds.push(format!(r#""b{i}":{{"identityId":"bee-wallet"}}"#));
+            feeds.push(format!(r#""b{i}":{{"identityId":"{}"}}"#, other(i)));
         }
-        let text = format!(
+        format!(
             r#"{{"version":2,"nextPublisherKeyIndex":0,"origins":{{"{key}":{{"activeIdentityId":"bee-wallet","identities":{{{identities}}},"feeds":{{{}}}}}}}}}"#,
             feeds.join(",")
-        );
+        )
+    }
+
+    fn many_identities(
+        key_len: usize,
+        n: usize,
+        with_feed: usize,
+        other_feeds: usize,
+    ) -> FeedStore {
+        let text = many_identities_text(key_len, n, with_feed, other_feeds, |_| {
+            "bee-wallet".to_owned()
+        });
         let loaded = FeedStore::load(Some(text.as_bytes()), NOW, |_| false);
         assert!(loaded.writes.is_empty());
         loaded.store
     }
 
-    /// The references past 1 MiB are refused (deviation
-    /// `identity-references-bound`): a 100,000-byte site key with 5,000
-    /// identities of wallet 0, each naming one feed, is under 800 KB of
-    /// store but would repeat the key 5,000 times.
+    fn wallet_zero() -> JsValue {
+        JsValue::Number(0.0)
+    }
+
+    /// The references past 1 MiB held are refused (deviation
+    /// `identity-references-bound`), and the work holds no more than the
+    /// bound on the way: Codex's shape (a 100,000-byte key, 5,000
+    /// identities of wallet 0 each naming a feed, under 800 KB of store,
+    /// which would repeat the key 5,000 times); 10,000 short ones (1 MB of
+    /// JSON, but 8 MB held as a structured value); one identity whose feed
+    /// names alone pass the bound.
     #[test]
     fn references_past_the_bound_are_refused() {
-        let store = many_identities(100_000, 5_000, 5_000, 0);
-        assert!(store.root.stringify().len() < 800_000);
-        assert_eq!(
-            store.ethereum_wallet_identity_references(&JsValue::Number(0.0)),
-            Err(Thrown::error(REFERENCES_TOO_LARGE))
-        );
-        // One identity whose feed names alone pass the bound.
+        let codex = many_identities(100_000, 5_000, 5_000, 0);
+        assert!(codex.root.stringify().len() < 800_000);
+        let short = many_identities(1, 10_000, 10_000, 0);
         let feeds: Vec<String> = (0..2_000)
             .map(|i| {
                 format!(
@@ -2117,45 +2251,76 @@ mod tests {
             feeds.join(",")
         );
         let named = FeedStore::load(Some(text.as_bytes()), NOW, |_| false).store;
-        assert_eq!(
-            named.ethereum_wallet_identity_references(&JsValue::Number(0.0)),
-            Err(Thrown::error(REFERENCES_TOO_LARGE))
-        );
-        // Ten of them fit.
-        let store = many_identities(100_000, 10, 10, 0);
-        let references = store
-            .ethereum_wallet_identity_references(&JsValue::Number(0.0))
-            .unwrap();
-        assert_eq!(references.as_array().unwrap().len(), 10);
+        for store in [codex, short, named] {
+            let (answer, held) = store.references_held(&wallet_zero());
+            assert_eq!(answer, Err(Thrown::error(REFERENCES_TOO_LARGE)));
+            // Refused at the bound, or before a reference past it is made.
+            assert!(held.peak <= MAX_REFERENCES_HELD, "{held:?}");
+        }
     }
 
-    /// Many identities under their own ids, with short keys and a long feed
-    /// map: answered within the bound, with work linear in the store. A
-    /// scan of every feed for each of the 10,000 identities (10^9
-    /// comparisons) doesn't finish within the test's limit.
+    /// What the answer holds is what was counted: once made, the count is
+    /// exactly the answer's own held size (everything else let go of), and
+    /// it never passed the bound on the way. No slack: every allocation is
+    /// charged from its real capacity before it is made, and the sort's
+    /// run stack at its bound.
     #[test]
-    fn references_take_one_pass_over_the_feeds() {
-        let store = many_identities(1, 10_000, 5_000, 100_000);
+    fn references_hold_what_they_count() {
+        for store in [
+            many_identities(100_000, 7, 7, 0),
+            many_identities(1, 1_000, 1_000, 0),
+            many_identities(10, 3_000, 400, 1_000),
+        ] {
+            let (answer, held) = store.references_held(&wallet_zero());
+            let answer = answer.unwrap();
+            assert_eq!(held.now, answer.held(), "{held:?}");
+            assert!(held.peak <= MAX_REFERENCES_HELD, "{held:?}");
+        }
+        let store = many_identities(1, 1_000, 1_000, 0);
+        let (answer, _) = store.references_held(&wallet_zero());
+        let answer = answer.unwrap();
+        assert_eq!(items(&answer).len(), 1_000);
+        assert_eq!(
+            items(&answer)[0].stringify().as_deref(),
+            Some(
+                r#"{"origin":"k","identityId":"ethereum-wallet:0","active":false,"feedNames":["f0"],"feedCount":1}"#
+            )
+        );
+    }
+
+    /// One identity on the account, and 100,000 feeds naming ids no
+    /// identity has: none of them is indexed or kept, so the work holds a
+    /// few hundred bytes.
+    #[test]
+    fn unrelated_feeds_take_nothing() {
+        let text = many_identities_text(1, 1, 1, 100_000, |i| format!("u{i}"));
+        let store = FeedStore::load(Some(text.as_bytes()), NOW, |_| false).store;
+        let (answer, held) = store.references_held(&wallet_zero());
+        assert_eq!(items(&answer.unwrap()).len(), 1);
+        assert!(held.peak < 4096, "{held:?}");
+    }
+
+    /// A long feed map loads, and the references are answered, in work
+    /// linear in the store: 200,000 feeds and 10,000 identities on the
+    /// account, loaded and read on a thread that must finish within 60 s.
+    /// Building the sanitized feed map one key at a time (a lookup each),
+    /// or scanning every feed for each identity (2 x 10^9 comparisons),
+    /// doesn't.
+    #[test]
+    fn a_long_feed_map_loads_and_answers_in_one_pass() {
+        let text = many_identities_text(1, 10_000, 100, 200_000, |_| "bee-wallet".to_owned());
+        assert!(text.len() < MAX_FILE_BYTES);
         let (done, answer) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
-            let _ = done.send(store.ethereum_wallet_identity_references(&JsValue::Number(0.0)));
+            let loaded = FeedStore::load(Some(text.as_bytes()), NOW, |_| false);
+            let _ = done.send(loaded.store.references_held(&wallet_zero()));
         });
-        let references = answer
-            .recv_timeout(std::time::Duration::from_secs(20))
-            .expect("the references within 20 s")
-            .unwrap();
-        let references = references.as_array().unwrap();
+        let (references, held) = answer
+            .recv_timeout(std::time::Duration::from_secs(60))
+            .expect("loaded and answered within 60 s");
         // The identities without a feed are neither active nor named.
-        assert_eq!(references.len(), 5_000);
-        assert!(
-            references
-                .iter()
-                .all(|r| r.get("feedCount") == Some(&JsValue::Number(1.0)))
-        );
-        assert_eq!(
-            references[0].stringify(),
-            r#"{"origin":"k","identityId":"ethereum-wallet:0","active":false,"feedNames":["f0"],"feedCount":1}"#
-        );
+        assert_eq!(items(&references.unwrap()).len(), 100);
+        assert!(held.peak <= MAX_REFERENCES_HELD, "{held:?}");
     }
 
     #[test]
