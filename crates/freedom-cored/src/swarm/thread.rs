@@ -2,14 +2,20 @@
 //! its own thread, beside naming's, chain's and dweb's. The event loop
 //! starts it once a hello settles protocol 2, and forwards it, in the
 //! order the reader read them, `swarm.request` with its `PageContext`,
-//! `swarm.body`, main's cancels, main's answers to the thread's own
+//! `swarm.body`, main's own Swarm methods and the chrome's with their
+//! caller ([`In::Own`]: `swarm.publish`, `swarm.feed`, `swarm.stamps`,
+//! `swarm.upload_status`, `swarm.identities`, `swarm.history`,
+//! `swarm.manifest`), main's cancels, main's answers to the thread's own
 //! requests ([`Owner::Swarm`]'s), the stream frames routed to it (D4), and
 //! the naming thread's verdicts on its name checks (tagged [`NAME_TAG`]).
 //!
 //! - **Its requests to main** (`shell.swarm_ready`, `shell.swarm_api`,
 //!   `shell.swarm_part`, `shell.swarm_subscribe`, `shell.swarm_unsubscribe`,
-//!   `approval.recheck`) go through the core's one gate, each with its
-//!   reply's bound (D4).
+//!   `shell.swarm_manifest`, `approval.recheck`) go through the core's one
+//!   gate, each with its reply's bound (D4).
+//! - **Its events:** `approval.changed { store: "swarm", key }` after the
+//!   answer of a store op whose manifest projection widened or narrowed a
+//!   site's Swarm grant (D2), which it writes itself ([`GrantsFile`]).
 //! - **Its streams are one [`Duplex`]** ([`Duplex::swarm`]), as the dweb
 //!   thread's are: the `swarm.body` answers it sends main, under main's
 //!   request IDs, ending only with an upload's codes; and the parts and
