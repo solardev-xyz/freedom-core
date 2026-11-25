@@ -669,7 +669,7 @@ Against the reference pin, which has #1057. F-1's and F-5's first deviations (`f
 | `store-shapes` | a store file it loads but then fails on (a manifest record of the wrong shape, a string `revision` concatenated), or a v2 feed map that isn't an object of objects kept as it is | read as a file that doesn't parse (manifests: the `.bak` copy, else unreadable); the feed map rebuilt as the reference's sanitizer does |
 | `store-refusal` | a refused change can leave the in-memory store changed (a refused label keeps its publisher index taken) | a refused change changes nothing (0013: memory changes only after the durable write) |
 | `own-keys` | a feed name that is a key of `Object.prototype` reads the inherited property: `toString` gives an empty "existing" feed (`createFeed` answers `bzz://undefined`), and a `__proto__` feed is never saved ([freedom-browser#1327](https://github.com/solardev-xyz/freedom-browser/issues/1327)) | every name is an own key: an ordinary feed |
-| `legacy-dates` | `Date.parse` of a legacy timestamp, V8's own formats and local time included | ECMAScript's date-time format with an offset; anything else is no date, so the import takes the open's time |
+| `legacy-dates` | `Date.parse` of a legacy timestamp, V8's own formats and local time included | ECMAScript's date-time string format as V8 reads it: a date alone as UTC, or a date and time with `Z` or an offset (`T` and `Z` in either case, `±HH:mm` or `±HHmm`, any fraction, a day up to 31 running into the next month, as V8 does); a time without an offset, V8's own formats and anything else are no date, so the import takes the open's time |
 | `tag-owners-bound` | an upload's tag owner is forgotten only when a page polls the tag done, so a page that never polls grows the map | at most 4,096, the oldest forgotten first; a forgotten tag answers `tag_ownership_mismatch`, as another site's does |
 | `store-writes` | temp file and rename, no fsync | 0001's durable write (0013) |
 
@@ -751,11 +751,11 @@ Once decided:
   - `store-shapes`: files the reference loads and then fails on;
   - `store-refusal`: a refused change changes nothing;
   - `own-keys`: feed names like `toString` and `__proto__`, a reference bug filed as freedom-browser#1327;
-  - `legacy-dates`: only ECMAScript's date-time format with an offset is a date;
+  - `legacy-dates`: only ECMAScript's date-time string format is a date, a date alone or a time with an offset;
   - `history-blobs`: a row with a BLOB cell fails the read.
 - **The manifest check's committed-URL guard** computes a permission key from a URL with the reference's `getPermissionKey` rules. That is the only key the core derives; every grant key is still 0011's, as main gives it (0012).
 - **`getEthereumWalletIdentityReferences`** sorts with ICU's `localeCompare`; it stays with part 3, which must port that order or name a deviation.
-- **Vector gaps:** the new deviations have no case yet; they follow with part 3's vectors change.
+- **Vector gaps:** closed by the `stores` cases for the five new deviations (`feeds-refused-label-keeps-index`, `feeds-load-feed-maps-kept`, `manifest-load-record-shape`, `manifest-load-string-revision`, `feeds-own-key-read`, `feeds-own-key-proto-write`, `history-json-legacy-dates`, and three `history-blob-*`), each with the core's answer as a value. `generate.js` runs with `TZ=UTC`, so the reference's local-time readings are the same on every machine. `createFeed`'s `bzz://undefined` for a `toString` feed (`own-keys`) still has no methods case.
 
 **2026-11-25, SWM-3's first findings:** the coordinator's technical calls, proposed, which the user may veto. Building the batch choice, the node errors and the `/stamps` reader against SWM-1's vectors found:
 - **bee-js's schema refusal reaches the page:** the `/stamps` reader also keeps each field's type, and the refusal's text is held to the form's cap (`reply-bounds`). `/stamps`' charge is 7.7 MiB.
