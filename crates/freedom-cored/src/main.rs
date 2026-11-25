@@ -49,6 +49,7 @@ mod nodes;
 mod payments;
 mod payments_store;
 mod phone;
+mod pool;
 mod profile;
 mod requests;
 mod rng;
