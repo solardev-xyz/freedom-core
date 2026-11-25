@@ -401,13 +401,19 @@ impl Requests {
     }
 
     /// A watched cancel main hasn't answered within the bound at `now`, if
-    /// one: main broke the protocol, and the connection ends.
+    /// one: main broke the protocol, and the connection ends. An answer the
+    /// reader has read counts, though the event loop hasn't handled it yet
+    /// (the reader retires its ID from [`Pending`] as it reads it), so a
+    /// busy loop doesn't end the connection over an answer that came.
     pub fn overdue(&self, now: Instant) -> Option<u64> {
         let state = self.state.lock().ok()?;
         state
             .cancelled
             .iter()
-            .find(|(_, at)| now.saturating_duration_since(**at) >= CANCEL_ANSWER_BOUND)
+            .find(|(id, at)| {
+                now.saturating_duration_since(**at) >= CANCEL_ANSWER_BOUND
+                    && self.pending.contains(**id)
+            })
             .map(|(id, _)| *id)
     }
 
@@ -910,12 +916,14 @@ mod tests {
     /// answer within 60 s of the cancel is overdue, and the event loop then
     /// ends the connection. A bound per request, from its own cancel; the
     /// first due is the loop's timer; an answer before the bound ends the
-    /// watch. A request already answered, or never sent, isn't watched, and
+    /// watch, and so does one the reader has read and the loop not yet
+    /// handled. A request already answered, or never sent, isn't watched, and
     /// a second cancel keeps the first's time. Each new watch wakes the
     /// loop.
     #[test]
     fn a_cancel_main_leaves_unanswered_for_60_s_is_overdue() {
-        let requests = Requests::new(usize::MAX, Arc::new(Pending::default()));
+        let pending = Arc::new(Pending::default());
+        let requests = Requests::new(usize::MAX, Arc::clone(&pending));
         let (out, _rx) = mpsc::channel();
         let allowance = Allowance::new(usize::MAX, usize::MAX);
         let watched = Arc::new(Mutex::new(0));
@@ -943,6 +951,10 @@ mod tests {
         assert_eq!(requests.overdue(t0 + 70 * second), None);
         assert_eq!(requests.next_overdue(), Some(t0 + 80 * second));
         assert_eq!(requests.overdue(t0 + 80 * second), Some(1));
+        // Its answer read by the reader, not yet handled by the loop: it
+        // came, and nothing is overdue.
+        assert_eq!(pending.remove(1), Some(fc_protocol::frame::MAX_MESSAGE));
+        assert_eq!(requests.overdue(t0 + 80 * second), None);
         // Nothing to watch for an answered request or one never sent.
         assert!(!requests.cancelled(2, t0));
         assert!(!requests.cancelled(9, t0));

@@ -1000,7 +1000,7 @@ impl Pending {
         self.remove(id)
     }
 
-    #[cfg(test)]
+    /// Whether `id`'s response has yet to appear.
     pub fn contains(&self, id: u64) -> bool {
         self.ids.lock().is_ok_and(|ids| ids.contains_key(&id))
     }
