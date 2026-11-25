@@ -162,6 +162,11 @@ pub struct Main {
     pub parts_out: BTreeMap<u64, (Vec<u8>, usize)>,
     /// Calls main hasn't answered yet (a streamed body's), by ID.
     pub open_calls: BTreeMap<u64, NodeCall>,
+    /// Main's own requests sent while it played a step, whose answers it
+    /// expects, and the answers that came.
+    pub expected: BTreeSet<u64>,
+    pub answers: BTreeMap<u64, Value>,
+    last_request: u64,
 }
 
 /// A body the core streams for one of its calls.
@@ -226,6 +231,9 @@ pub fn main_in(
         ended: VecDeque::new(),
         parts_out: BTreeMap::new(),
         open_calls: BTreeMap::new(),
+        expected: BTreeSet::new(),
+        answers: BTreeMap::new(),
+        last_request: 0,
     }
 }
 
@@ -564,10 +572,16 @@ impl Main {
             .send_raw(&stream_frame(KIND_ABORT, id, json.as_bytes()));
     }
 
+    /// The last `swarm.request` main sent.
+    pub fn last_request(&self) -> u64 {
+        self.last_request
+    }
+
     /// Sends `swarm.request` from `page` with `params` (the wire's JSON):
     /// its ID.
     pub fn request(&mut self, page: &Value, params: &str) -> u64 {
         let id = self.id();
+        self.last_request = id;
         let frame = format!(
             r#"{{"type":"request","id":{id},"method":"swarm.request","params":{params},"context":{{"caller":"page","page":{page}}}}}"#
         );
@@ -644,6 +658,19 @@ impl Main {
     /// requests from `script` until its answer, then asks the thread what
     /// it holds, answering what it still asks meanwhile.
     pub fn play(&mut self, script: &mut Script, page: &Value, params: &str) -> Played {
+        self.play_with(script, page, params, &mut |_| None)
+    }
+
+    /// [`Main::play`], calling `idle` whenever nothing has come from the
+    /// core for 20 ms: it may send something of its own, and name a request
+    /// whose answer main then expects ([`Main::answers`]).
+    pub fn play_with(
+        &mut self,
+        script: &mut Script,
+        page: &Value,
+        params: &str,
+        idle: &mut dyn FnMut(&mut Main) -> Option<u64>,
+    ) -> Played {
         let request = self.request(page, params);
         let mut played = Played {
             outcome: Outcome::Cancelled,
@@ -664,7 +691,22 @@ impl Main {
             while let Some(body) = self.ended.pop_front() {
                 self.body_ended(script, body, &mut played, &mut pushes);
             }
-            let Some(message) = self.next_message() else {
+            let message = match self.backlog.pop_front() {
+                Some(message) => Some(message),
+                None => match self
+                    .core
+                    .recv_wire_within(std::time::Duration::from_millis(20))
+                {
+                    Some(wire) => self.take(wire),
+                    None => {
+                        if let Some(id) = idle(self) {
+                            self.expected.insert(id);
+                        }
+                        continue;
+                    }
+                },
+            };
+            let Some(message) = message else {
                 continue;
             };
             match message["type"].as_str().unwrap() {
@@ -698,6 +740,8 @@ impl Main {
                     } else if Some(id) == probe {
                         assert!(pushes.is_empty(), "the world pushed before it");
                         break message["result"].clone();
+                    } else if self.expected.remove(&id) {
+                        self.answers.insert(id, message);
                     } else {
                         assert!(pushes.remove(&id), "an answer to nothing: {message}");
                     }

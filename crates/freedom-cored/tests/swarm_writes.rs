@@ -1031,3 +1031,359 @@ fn a_moved_profile_imports_its_publish_history_from_a_copy() {
     assert!(!user_data.join("publish-history.json").exists());
     assert_eq!(history_of(&grant_root).matches("a.txt").count(), 1);
 }
+
+// ---------------------------------------------------------------------------
+// SW-1's interleaving gate through the pipe (design 0015, "SW-1 in the
+// core"): a raw SOC paused at the vault by the test hooks
+// (`FREEDOM_CORED_TEST_SWARM_HOLD`), a change made meanwhile through the
+// keeper (`test.swarm_feed_change`, D11), the vault's signatures counted
+// and the node's `POST /soc` logged.
+
+/// Site A at app-scoped index 0, connected with its `signing` rule; site B
+/// at index 1.
+const GATE_CASE: &str = "write-soc-app-scoped-other-site-other-index";
+const SITE_A: &str = "https://app.example";
+const SITE_B: &str = "https://other.example";
+
+/// B takes A's index (a set with an explicit index, which no method makes).
+fn take_index() -> serde_json::Value {
+    json!({ "op": "setOriginEntry", "key": SITE_B,
+        "data": { "identityMode": "app-scoped", "publisherKeyIndex": 0 } })
+}
+
+/// A core whose vault answers of `kind` park until `release` exists.
+struct Gate {
+    main: Main,
+    _dir: tempfile::TempDir,
+    marker: PathBuf,
+    parked: PathBuf,
+    release: PathBuf,
+    fail: PathBuf,
+}
+
+impl Gate {
+    fn new(kind: &str) -> Gate {
+        let dir = tempfile::tempdir().unwrap();
+        let marker = dir.path().join("signed");
+        let parked = dir.path().join("parked");
+        let release = dir.path().join("release");
+        let fail = dir.path().join("fail");
+        let hold = format!("{kind}={}={}", parked.display(), release.display());
+        let main = signing_main(
+            &marker,
+            &[
+                ("FREEDOM_CORED_TEST_SWARM_HOLD", &hold),
+                (
+                    "FREEDOM_CORED_TEST_GRANT_WRITE_FAIL",
+                    fail.to_str().unwrap(),
+                ),
+            ],
+        );
+        Gate {
+            main,
+            _dir: dir,
+            marker,
+            parked,
+            release,
+            fail,
+        }
+    }
+
+    /// The case's world afresh, the hold armed: main's script and the raw
+    /// SOC's params.
+    fn arm(&mut self) -> (Script, String) {
+        let _ = std::fs::remove_file(&self.parked);
+        let _ = std::fs::remove_file(&self.release);
+        let vectors = Vectors::read();
+        let index = Index::new(&vectors.text).unwrap();
+        let keys_index = Index::new(&vectors.keys).unwrap();
+        let keys = logic::keys(&keys_index);
+        let mut vault = Vault { unlocked: true };
+        let case = case_of(&index, GATE_CASE);
+        let (script, request, key) = staged(&mut self.main, &mut vault, case, &keys, true);
+        assert_eq!(key, SITE_A);
+        (script, request)
+    }
+
+    fn signed(&self) -> usize {
+        lines(&self.marker)
+    }
+
+    /// A raw SOC with the hold released: its outcome.
+    fn next_soc(&mut self, script: &mut Script, request: &str) -> swarm_world::Played {
+        std::fs::write(&self.release, "").unwrap();
+        self.main.play(script, &page(SITE_A), request)
+    }
+}
+
+fn reason(outcome: &Outcome) -> String {
+    let Outcome::Error(failure) = outcome else {
+        panic!("{outcome:?}")
+    };
+    failure
+        .data
+        .as_ref()
+        .and_then(|d| d.get("reason").as_js_string())
+        .map(|r| r.as_str().to_owned())
+        .unwrap_or_default()
+}
+
+/// What a step of the gate does when nothing came from the core: `steps`
+/// in turn, each once its condition holds.
+type Idle<'a> = Box<dyn FnMut(&mut Main) -> Option<u64> + 'a>;
+
+/// The change waits: with the signature held back, another site's taking
+/// of the index, and a revoke, are deferred, writing nothing; an
+/// allocation takes a fresh index at once. Released, the held changes land
+/// as the signature ends the hold: the signed SOC is uploaded (index), or
+/// refused at the upload's guard (revoke); the site's next raw SOC is
+/// refused `shared_identity`.
+#[test]
+fn gate_the_change_waits() {
+    let mut gate = Gate::new("sign");
+    let feeds_file = gate.main.core.grant_root.join("swarm-feeds.json");
+    // B takes the index during the hold.
+    let (mut script, request) = gate.arm();
+    let (parked, release) = (gate.parked.clone(), gate.release.clone());
+    let feeds = feeds_file.clone();
+    let mut stage = 0;
+    let mut taken = 0;
+    let mut allocated = 0;
+    let mut written = String::new();
+    let mut idle: Idle<'_> = Box::new(|main: &mut Main| match stage {
+        0 if parked.exists() => {
+            stage = 1;
+            // An allocation goes on: past every stored index.
+            let made = main.feed_change(json!({ "op": "allocatePublisherKeyIndex" }));
+            assert_eq!(made, json!({ "value": 2 }));
+            allocated += 1;
+            written = std::fs::read_to_string(&feeds).unwrap();
+            taken = main.send_feed_change(take_index());
+            Some(taken)
+        }
+        // Deferred: no answer, nothing written, while the vault's answer
+        // waits.
+        n @ 1..=10 => {
+            assert!(!main.answers.contains_key(&taken), "deferred");
+            std::thread::sleep(std::time::Duration::from_millis(20));
+            stage = n + 1;
+            None
+        }
+        11 => {
+            assert_eq!(std::fs::read_to_string(&feeds).unwrap(), written);
+            std::fs::write(&release, "").unwrap();
+            stage = 12;
+            None
+        }
+        _ => None,
+    });
+    let played = gate
+        .main
+        .play_with(&mut script, &page(SITE_A), &request, &mut *idle);
+    drop(idle);
+    assert_eq!(allocated, 1);
+    assert!(
+        matches!(played.outcome, Outcome::Result(_)),
+        "{:?}",
+        played.outcome
+    );
+    assert_eq!(
+        (gate.signed(), played.soc_posts),
+        (1, 1),
+        "signed, uploaded"
+    );
+    assert!(gate.main.answers[&taken]["result"]["value"].is_object());
+    let after = std::fs::read_to_string(&feeds_file).unwrap();
+    assert!(after.contains("\"publisherKeyIndex\": 0") && after.contains(SITE_B));
+    // The site's next raw SOC: shared.
+    let played = gate.next_soc(&mut script, &request);
+    assert_eq!(reason(&played.outcome), "shared_identity");
+    assert_eq!((gate.signed(), played.soc_posts), (1, 0));
+
+    // A revoke held during the hold makes the upload's guard refuse the
+    // signed SOC.
+    let (mut script, request) = gate.arm();
+    let parked = gate.parked.clone();
+    let release = gate.release.clone();
+    let mut stage = 0;
+    let mut revoke = 0;
+    let mut idle: Idle<'_> = Box::new(|main: &mut Main| match stage {
+        0 if parked.exists() => {
+            stage = 1;
+            revoke = main.send_feed_change(json!({ "op": "revokeFeedAccess", "key": SITE_A }));
+            Some(revoke)
+        }
+        1 => {
+            assert!(!main.answers.contains_key(&revoke), "deferred");
+            std::fs::write(&release, "").unwrap();
+            stage = 2;
+            None
+        }
+        _ => None,
+    });
+    let played = gate
+        .main
+        .play_with(&mut script, &page(SITE_A), &request, &mut *idle);
+    drop(idle);
+    assert_eq!(reason(&played.outcome), "feed_not_granted");
+    assert_eq!(
+        (gate.signed(), played.soc_posts),
+        (2, 0),
+        "signed, not uploaded"
+    );
+    assert!(gate.main.answers[&revoke]["result"].get("value").is_some());
+}
+
+/// The change wins: paused after the first SW-1 check (the vault's owner
+/// held back), another site takes the index at once; resumed, the re-check
+/// refuses `shared_identity`, with nothing signed or uploaded.
+#[test]
+fn gate_the_change_wins() {
+    let mut gate = Gate::new("owner");
+    let (mut script, request) = gate.arm();
+    let (parked, release) = (gate.parked.clone(), gate.release.clone());
+    let mut done = false;
+    let mut idle: Idle<'_> = Box::new(|main: &mut Main| {
+        if !done && parked.exists() {
+            done = true;
+            // No hold yet: made at once.
+            let made = main.feed_change(take_index());
+            assert!(made["value"].is_object(), "{made}");
+            std::fs::write(&release, "").unwrap();
+        }
+        None
+    });
+    let played = gate
+        .main
+        .play_with(&mut script, &page(SITE_A), &request, &mut *idle);
+    drop(idle);
+    assert_eq!(reason(&played.outcome), "shared_identity");
+    assert_eq!((gate.signed(), played.soc_posts), (0, 0));
+}
+
+/// A cancel during the hold, or the request's deadline: the deferred change
+/// completes at once, the late signature is dropped, and nothing is
+/// uploaded. A deferred change whose write fails fails for its own caller,
+/// the store unchanged, and the next raw SOC passes.
+#[test]
+fn gate_cancel_deadline_and_a_failed_write_during_the_hold() {
+    let mut gate = Gate::new("sign");
+    let feeds_file = gate.main.core.grant_root.join("swarm-feeds.json");
+    for how in ["cancel", "deadline"] {
+        let (mut script, mut request) = gate.arm();
+        if how == "deadline" {
+            request = request.replacen(r#""params""#, r#""deadline_ms":1500,"params""#, 1);
+        }
+        let parked = gate.parked.clone();
+        let mut stage = 0;
+        let mut taken = 0;
+        let mut idle: Idle<'_> = Box::new(|main: &mut Main| match stage {
+            0 if parked.exists() => {
+                stage = 1;
+                taken = main.send_feed_change(take_index());
+                Some(taken)
+            }
+            1 if how == "cancel" => {
+                stage = 2;
+                // The page gives up: main's cancel of its request.
+                let id = main.last_request();
+                main.core.send(&json!({ "type": "cancel", "id": id }));
+                None
+            }
+            _ => None,
+        });
+        let played = gate
+            .main
+            .play_with(&mut script, &page(SITE_A), &request, &mut *idle);
+        drop(idle);
+        assert_eq!(played.outcome, Outcome::Cancelled, "{how}");
+        assert!(
+            gate.main.answers[&taken]["result"]["value"].is_object(),
+            "{how}: the change made at the hold's end"
+        );
+        assert_eq!(played.soc_posts, 0, "{how}: nothing uploaded");
+        // The vault's signature, parked, is dropped once it goes.
+        std::fs::write(&gate.release, "").unwrap();
+        assert!(gate.main.world(json!({}))["requests"] == 0);
+    }
+
+    // A deferred change whose write fails.
+    let (mut script, request) = gate.arm();
+    let (parked, release, fail) = (gate.parked.clone(), gate.release.clone(), gate.fail.clone());
+    let mut stage = 0;
+    let mut taken = 0;
+    let mut written = String::new();
+    let feeds = feeds_file.clone();
+    let mut idle: Idle<'_> = Box::new(|main: &mut Main| match stage {
+        0 if parked.exists() => {
+            stage = 1;
+            written = std::fs::read_to_string(&feeds).unwrap();
+            taken = main.send_feed_change(take_index());
+            Some(taken)
+        }
+        1 => {
+            stage = 2;
+            std::fs::write(&fail, "swarm_feeds:rename\n").unwrap();
+            std::fs::write(&release, "").unwrap();
+            None
+        }
+        _ => None,
+    });
+    let played = gate
+        .main
+        .play_with(&mut script, &page(SITE_A), &request, &mut *idle);
+    drop(idle);
+    std::fs::remove_file(&gate.fail).unwrap();
+    assert!(
+        matches!(played.outcome, Outcome::Result(_)),
+        "{:?}",
+        played.outcome
+    );
+    assert_eq!(
+        gate.main.answers[&taken]["result"],
+        json!({ "error": "The Swarm feed store could not be written" })
+    );
+    assert_eq!(std::fs::read_to_string(&feeds_file).unwrap(), written);
+    let signed = gate.signed();
+    let played = gate.next_soc(&mut script, &request);
+    assert!(
+        matches!(played.outcome, Outcome::Result(_)),
+        "{:?}",
+        played.outcome
+    );
+    assert_eq!((gate.signed(), played.soc_posts), (signed + 1, 1));
+}
+
+/// D15: the vault decides a page's SOC again before it signs. With the
+/// connection revoked after the guard (the vault's owner held back), the
+/// machine's re-check before the signature, which doesn't read the
+/// connection, passes; the vault refuses, and nothing is signed or
+/// uploaded. (The reference would sign and refuse at the upload's guard;
+/// no vector case takes this interleaving.)
+#[test]
+fn the_vault_decides_a_page_soc_again() {
+    let mut gate = Gate::new("owner");
+    let (mut script, request) = gate.arm();
+    let (parked, release) = (gate.parked.clone(), gate.release.clone());
+    let mut done = false;
+    let mut idle: Idle<'_> = Box::new(|main: &mut Main| {
+        if !done && parked.exists() {
+            done = true;
+            assert!(main.world(json!({ "grants": {} }))["memory"].is_number());
+            std::fs::write(&release, "").unwrap();
+        }
+        None
+    });
+    let played = gate
+        .main
+        .play_with(&mut script, &page(SITE_A), &request, &mut *idle);
+    drop(idle);
+    assert_eq!(
+        failure(&played.outcome),
+        (
+            -32603,
+            "the page's Swarm grant doesn't cover this SOC".to_owned()
+        )
+    );
+    assert_eq!((gate.signed(), played.soc_posts), (0, 0));
+}
