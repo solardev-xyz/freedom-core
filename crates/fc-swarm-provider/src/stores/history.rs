@@ -30,8 +30,8 @@
 //!   alone, as V8 does; V8's other formats, a date-time without an offset
 //!   (local time: the core has no time zone) among them, are not a date,
 //!   so the import takes the open's time for one, as the reference does for
-//!   a string it can't parse. The browser wrote `toISOString()`'s form. The
-//!   design says nothing of this.
+//!   a string it can't parse. The browser wrote `toISOString()`'s form
+//!   (deviation `legacy-dates`, `history-json-legacy-dates`).
 
 use fc_json::{JsString, JsValue};
 

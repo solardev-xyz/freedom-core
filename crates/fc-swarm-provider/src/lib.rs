@@ -24,7 +24,8 @@
 //!   rules: each parses the text or rows it is handed, applies an
 //!   operation as the reference module does, and answers the exact text or
 //!   the statements to write (deviations `index-allocation`,
-//!   `history-bound`, `store-writes`).
+//!   `history-bound`, `history-blobs`, `store-shapes`, `store-refusal`,
+//!   `own-keys`, `legacy-dates`, `store-writes`).
 //!
 //! The reference is freedom-browser's `src/main/swarm/` at the swarm
 //! reference commit over bee-js 13.2.0 and core-sdk 0.2.2;

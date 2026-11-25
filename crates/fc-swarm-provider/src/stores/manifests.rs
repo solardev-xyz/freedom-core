@@ -27,8 +27,9 @@
 //!   [`MAX_FILE_BYTES`] is refused (`store_full`), and the store reads its
 //!   file again, as after a failed write.
 //! - A file the reference reads but can't use is read as one that doesn't
-//!   parse (the backup, else [`Unreadable`]); the design says nothing of
-//!   these, and no reference writer makes one: past [`MAX_FILE_BYTES`];
+//!   parse (the backup, else [`Unreadable`]: deviation `store-shapes`,
+//!   `manifest-load-record-shape` and `manifest-load-string-revision`),
+//!   and no reference writer makes one: past [`MAX_FILE_BYTES`];
 //!   not an object; `records` not an object of records; a record whose
 //!   `managed` isn't an object of arrays under known projections, whose
 //!   `acknowledged` isn't an object under known capabilities, whose
