@@ -285,6 +285,25 @@ fn admission_queues_then_answers_busy() {
         io.answer_of(3),
         Answer::Result(wire::error_typed(&Failure::busy()))
     );
+    // With no room to wait, a request still runs while a place is free.
+    let mut direct = super::Engine::new(
+        Bounds {
+            running: 1,
+            waiting: 0,
+            ..Bounds::default()
+        },
+        Shared::new(grants()),
+        true,
+    );
+    let mut other = Fake::default();
+    to_node_call(&mut direct, &mut other, 1, None);
+    direct
+        .request(&mut other, 0, 2, read_chunk(&reference, None), Some(page(None)))
+        .unwrap();
+    assert_eq!(
+        other.answer_of(2),
+        Answer::Result(wire::error_typed(&Failure::busy()))
+    );
     // The first's answer frees its place: the second starts.
     let (wire, _) = chunk();
     engine
