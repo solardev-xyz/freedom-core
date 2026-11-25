@@ -1,8 +1,11 @@
 //! The method machines, by group (design 0015, "The methods"): Access
 //! (`requestAccess`, `getCapabilities`), the Reads (`readChunk`,
 //! `readData`, `readSingleOwnerChunk`, `readFeedEntry`, `listFeeds`), the
-//! feed index lookup the feed writes will use, and the Publish group
-//! (`publishData`, `publishFiles`, `publishChunk`, `getUploadStatus`).
+//! feed index lookup the feed writes use, the Publish group
+//! (`publishData`, `publishFiles`, `publishChunk`, `getUploadStatus`), the
+//! feed and SOC writes (`createFeed`, `updateFeed`, `writeFeedEntry`,
+//! `writeSingleOwnerChunk`, `getSigningIdentity`) and Messaging
+//! (`getMessagingIdentity`, `sendPss`, `sendGsoc`, `subscribe`).
 
 use fc_json::JsString;
 
@@ -18,6 +21,7 @@ pub mod create_feed;
 pub mod feed_index;
 pub mod feed_read;
 pub mod feed_write;
+pub mod messaging;
 pub mod publish;
 pub mod read_data;
 pub mod signing;

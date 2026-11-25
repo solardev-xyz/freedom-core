@@ -83,6 +83,21 @@
 //!   key, a signature with its kind, the topic's turn, and a feed-store
 //!   change.
 //!
+//! The part's last piece (SWM-3, part 3d) adds Messaging and the mining
+//! lane:
+//!
+//! - **`getMessagingIdentity`, `sendPss`, `sendGsoc`, `subscribe`**
+//!   ([`methods::messaging`]): the node's compressed PSS key through bee-js's
+//!   `/addresses` schema; a PSS message under `selectMessageBatch`'s batch
+//!   (a full mutable batch allowed) to the page's compressed recipient; a
+//!   GSOC message signed with the signer mined from its topic; and a
+//!   subscription's `{ subscribe: { kind, key } }` for main to open, after
+//!   question 4's subscribe check (deviation `subscribe-proxy`).
+//! - **The mining lane** ([`mining`]): its cache, the new-topic budget,
+//!   joins, fair turns, the queue's bounds (deviation `busy`), batches of
+//!   256 candidates, the job's 15 s and the stuck-batch watchdog, sans-I/O
+//!   for the swarm thread to drive.
+//!
 //! The reference is freedom-browser's `src/main/swarm/` at the swarm
 //! reference commit over bee-js 13.2.0 and core-sdk 0.2.2;
 //! `vectors/swarm.json` is the contract (AGENTS rule 5). The crate does no
@@ -95,6 +110,7 @@ mod js;
 pub mod json;
 pub mod machine;
 pub mod methods;
+pub mod mining;
 pub mod replies;
 pub mod stamps;
 pub mod stores;

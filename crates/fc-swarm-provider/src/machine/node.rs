@@ -295,6 +295,11 @@ impl NodeCall {
         NodeCall::get(Form::Stamps, "/stamps".to_owned(), STAMPS_REPLY_CAP)
     }
 
+    /// `GET /addresses`, whole, at most 64 KiB.
+    pub fn addresses() -> NodeCall {
+        NodeCall::get(Form::Addresses, "/addresses".to_owned(), JSON_REPLY_CAP)
+    }
+
     /// `GET /tags/<uid>`, whole.
     pub fn tag(uid: u64) -> NodeCall {
         NodeCall::get(Form::Tag, format!("/tags/{uid}"), JSON_REPLY_CAP)
