@@ -9,7 +9,7 @@
 - **D6:** the `landlock` and `seccompiler` crates, pinned exactly.
 - **D7:** `freedom-cored` is confined too, in a later design.
 
-[Decisions](#decisions) records each, and the options weighed are kept throughout as the decisions' rationale.
+[Decisions](#decisions) records each, and the options weighed are kept throughout as the decisions' rationale. The memory cap was decided by the user on 2026-11-25, as 0007's question 9 and 0008's question 10 ([The memory cap](#the-memory-cap)).
 
 ## Summary
 
@@ -29,6 +29,7 @@
   - **Linux:** Landlock for files, and for TCP ports where the kernel has them, plus a seccomp filter that refuses process creation, local sockets, the file calls Landlock doesn't check, and other syscalls the service never makes;
   - **macOS:** a Seatbelt profile with the same paths;
   - **Windows:** a job object that allows no child process, plus process mitigation policies. Confining file reads needs a relaunch under a restricted token, the next step once a spike qualifies it, or AppContainer if that fails (D4).
+- **A memory cap,** decided 2026-11-25 (0007's question 9, 0008's question 10): 2 GiB of private memory per service process, set in the same step: `RLIMIT_DATA` on Linux, the job's memory limit on Windows, none on macOS. Any out-of-memory then ends the process, which main restarts as after a crash ([The memory cap](#the-memory-cap)).
 - **The network policy becomes fixed per process:** main passes it at spawn, and a change starts a new process. 0007 and 0008 change to match ([The network policy and the lifecycle](#the-network-policy-and-the-lifecycle)).
 - **What it protects,** on Linux and macOS: the node secrets of other components, the user's other files, and the user's local services, from a compromised service. On Windows the first step only refuses child processes (D4).
 - **What it can't protect:**
@@ -236,7 +237,8 @@ The rest of this section is about glibc's resolver, `confine::Resolver::System`.
 
 **Always:**
 - `PR_SET_NO_NEW_PRIVS`, which both mechanisms need anyway;
-- 0001's `PR_SET_DUMPABLE=0`.
+- 0001's `PR_SET_DUMPABLE=0`;
+- `RLIMIT_DATA` at the memory cap, soft and hard ([The memory cap](#the-memory-cap)).
 
 `RLIMIT_NPROC` counts all of the user's processes, so it can't be used.
 
@@ -302,7 +304,7 @@ The rest of this section is about glibc's resolver, `confine::Resolver::System`.
 
 - **A job object, applied by the service itself** (`CreateJobObject`, then `AssignProcessToJobObject` on itself):
   - an active-process limit of 1 refuses every child process;
-  - a memory limit would answer 0007's and 0008's open question on an OS memory limit.
+  - a memory limit of 2 GiB, `JOB_OBJECT_LIMIT_JOB_MEMORY` ([The memory cap](#the-memory-cap)): 0007's question 9 and 0008's question 10, decided 2026-11-25 ([0007's](0007-ipfs-service.md#amendments) and [0008's](0008-radicle-service.md#amendments) amendments). It is set with the active-process limit, in the same `JOBOBJECT_EXTENDED_LIMIT_INFORMATION`, and read back with it.
   - **No UI restrictions:** libuv already places the service in main's job (0007), and Windows (8 and later) nests a second job only if neither job sets UI limits. A job with them would fail to be assigned.
   - **No breakaway:** libuv's job lets its children break away, silently too, but a child breaks away only from jobs that allow it, starting with the innermost. The service's job allows none, so its limit holds.
   - **Its handle closed** once it reads back: the process then holds no handle to its job, so it can't raise the limit. The job, unnamed, lives while the process is in it.
@@ -397,6 +399,7 @@ The rest of this section is about glibc's resolver, `confine::Resolver::System`.
      - **A list it can't read proves nothing:** if `confine` can't open or read the thread list or the descriptor table, or finds an entry that isn't a number (an outer Landlock layer may hide `/proc/self/fd`), the service exits 77.
 2. **Linux:**
    - No-new-privileges.
+   - `RLIMIT_DATA` at the memory cap, soft and hard, read back ([The memory cap](#the-memory-cap)).
    - Landlock at the best ABI available, with every right that ABI knows handled:
      - read and write on the data directory, with no execute and no special files (sockets, FIFOs, devices); `refer` on it for `freedom-radicled`; nothing at all for the ephemeral IPFS process;
      - read only on `/proc/self`, the cgroup files, the random devices, and the files of the service's resolver:
@@ -409,8 +412,8 @@ The rest of this section is about glibc's resolver, `confine::Resolver::System`.
      - From ABI 6: both scopes. From ABI 9: `resolve_unix`, with no rule.
      - **Minimum ABIs:** `freedom-ipfsd` uses ABI 1 and up. `freedom-radicled` needs ABI 2: below it, it applies no Landlock rules and reports `files` as `unavailable`, with the reason.
    - The seccomp denylist above, answering `EPERM` (`ENOSYS` for `clone3`), behind the ABI guard.
-3. **macOS:** a Seatbelt profile with the same paths and rules, self-applied through FFI (D3), so all three OSes work the same way. It passes the qualification gate before each release.
-4. **Windows:** the job object and the mitigation policies, self-applied, each detected on its own ([Windows](#windows)). `files` and `ipc` are `unavailable`, and so is `network` in `socks5` mode: nothing in this step names a port. File confinement follows with a restricted token, once its spike qualifies (D4).
+3. **macOS:** a Seatbelt profile with the same paths and rules, self-applied through FFI (D3), so all three OSes work the same way. It passes the qualification gate before each release. No memory cap: macOS has no reliable per-process one ([The memory cap](#the-memory-cap)).
+4. **Windows:** the job object, with its memory limit ([The memory cap](#the-memory-cap)), and the mitigation policies, self-applied, each detected on its own ([Windows](#windows)). `files` and `ipc` are `unavailable`, and so is `network` in `socks5` mode: nothing in this step names a port. File confinement follows with a restricted token, once its spike qualifies (D4).
 5. **Reporting:** `ipfs.hello` and `rad.hello` gain `confinement`, one status per property:
 
    ```jsonc
@@ -420,7 +423,8 @@ The rest of this section is about glibc's resolver, `confine::Resolver::System`.
      "gaps": ["signals"],                 // what "partial" leaves open
      "reasons": {},                       // per property: why it is "unavailable" or "blocked"
      "resolution": "system",              // `direct` mode. Through glibc (Linux): "system", or "files_only" with its reason. A service's own resolver (Linux, macOS): "resolv_conf", or "fallback" with its reason
-     "mitigations": { "dynamic_code": "set" }  // Windows alone: each mitigation, "set" or "missing" (its reason in `reasons`)
+     "mitigations": { "dynamic_code": "set" },  // Windows alone: each mitigation, "set" or "missing" (its reason in `reasons`)
+     "memory_cap": 2147483648             // bytes, as read back; null on macOS ("unsupported" in `reasons`), or where something outside refused it
    }
    ```
 
@@ -430,6 +434,7 @@ The rest of this section is about glibc's resolver, `confine::Resolver::System`.
      - `ipc`: no local IPC reaches another process beyond the authorized channels ([Goals](#goals-and-non-goals)): main's connection on stdio, and on macOS mDNSResponder and `configd`. No other local socket connects, no signal is sent to another process, and no other process's arguments or environment are read. `enforced` means exactly this, and `partial` names what is left open (`gaps`): on macOS, `process_args` ([macOS](#macos));
      - `network`: in `socks5` mode, TCP reaches only the proxy's port (on macOS, at the proxy's loopback host where it is one).
    - **The statuses:** `enforced`, `partial`, `unavailable` or `blocked` (step 6), or, for `network` in `direct` mode, `none`.
+   - **`memory_cap`:** the [memory cap](#the-memory-cap) in bytes, as read back, or null with its reason in `reasons`.
    - **Derived, not assumed:** each status comes from what was installed: the ABI the kernel reports and the rights handled at it, the `landlock` crate's `RestrictionStatus`, each mitigation read back. A best-effort call that returned success is not evidence: the crate drops unsupported rights silently.
 
    Main logs it, and shows it in the nodes panel's diagnostics.
@@ -478,6 +483,25 @@ The rest of this section is about glibc's resolver, `confine::Resolver::System`.
 - on Windows, a restricted token with a relaunch, once a spike qualifies DNS, Winsock, NAT64 discovery and the desktop; AppContainer only if that fails (D4);
 - confining `freedom-cored` to its own directories, in a later design (D7).
 
+## The memory cap
+
+**Decided** (the user, 2026-11-25, as [0007](0007-ipfs-service.md#amendments)'s question 9 and [0008](0008-radicle-service.md#amendments)'s question 10): a safety cap of 2 GiB on each service process's memory, where the operating system enforces one. 0007's and 0008's budgets bound what they account for; the cap catches what they can't see, such as heartwood's buffers and the libraries' own allocations, before it exhausts the machine.
+
+- **Which processes:** every one that confines itself: the persistent and the ephemeral IPFS processes, `freedom-radicled`, and the one-shot import process ([D5](#the-radicle-import-d5)).
+- **When:** in `confine`, before `hello`, with the other rules ([The recommendation](#the-recommendation), steps 2 to 4). A limit is process-wide, so the thread order doesn't touch it.
+- **Linux:** `RLIMIT_DATA`, its soft and its hard limit both at 2 GiB (`setrlimit`), read back with `getrlimit`. Lowering both needs no privilege, and an unprivileged process can't raise a hard limit again, so a compromised service can't lift it. An inherited limit already lower is kept.
+  - **What it counts:** the process's private writable memory: the heap, anonymous maps and thread stacks. It doesn't count clean file-backed maps, such as libgit2's pack windows (0008, up to 8 GiB mapped), nor address space only reserved, so it is no cap on the process's whole resident memory. `RLIMIT_AS` would count both, and isn't used.
+- **Windows:** the job's memory limit: `JOB_OBJECT_LIMIT_JOB_MEMORY`, with `JobMemoryLimit` at 2 GiB, set with the active-process limit in the job's `JOBOBJECT_EXTENDED_LIMIT_INFORMATION` and read back with it ([Windows](#windows)). It limits the memory the job's processes commit, and the job holds the service alone.
+- **macOS:** none. macOS has no reliable per-process memory cap, so none is set, and `hello` says so.
+- **Read back and reported:** `confinement.memory_cap` is the limit in bytes as read back ([Reporting](#the-recommendation), step 5). A limit that was set but reads back otherwise is an invalid policy (exit 77), as is the job's own limit refused ([Windows](#windows)). On Linux, a `setrlimit` that something outside refuses is reported null with its reason, and the service runs (D2).
+- **Out of memory is fatal, from any allocation.** The cap only refuses: past it an allocation fails (`brk` or `mmap` with `ENOMEM` on Linux, a commit on Windows), and nothing ends the process by itself. So every allocation domain fails stop:
+  - **Rust's allocator** aborts the process on a failed allocation, as it does by default;
+  - **a native library's out-of-memory error** ends the process with exit 71 (`out_of_memory`), never answered as a request's error: SQLite's `SQLITE_NOMEM`, libgit2's `GIT_ERROR_NOMEMORY`, or any other library's the service links. The upstream crates that call them (freedom-ipfs's store; heartwood and libradicle) pass such an error up as its own kind, and the service exits when one reaches it. A library that could keep one to itself routes its allocations through a hook that exits the same way instead (SQLite's `SQLITE_CONFIG_MALLOC`, libgit2's `GIT_OPT_SET_ALLOCATOR`);
+  - **on Windows,** a commit refused under the job's limit takes the same paths.
+
+  Main treats either end as a crash, and restarts the service with 0007's and 0008's back-off. In the import process it is the import's `outcome_unknown` once the import has started, as any crash there is ([D5](#the-radicle-import-d5)).
+- **A later implementation step,** with the services' confinement: `confine` sets it, through `fc-sys` on Windows, and the upstream crates' changes above come with it.
+
 ## The network policy and the lifecycle
 
 - **The conflict:** Landlock and Seatbelt fix their network rules when they are applied, before `hello`. But 0007 sent the policy later, in `ipfs.start`, and changed it by restarting instances inside the process. A rule fixed to Arti's port P can't later allow port Q or `direct` mode. A rule left open for later would break `socks5` mode's promise.
@@ -522,6 +546,7 @@ The rest of this section is about glibc's resolver, `confine::Resolver::System`.
    - **The files the roots are found from** (a `.git` file, `commondir`, an alternates file) are read before confinement and before any watchdog, so none may block: each must be a regular file as `symlink_metadata` shows it (a final symlink isn't followed), is opened with `O_NOFOLLOW` and `O_NONBLOCK` (on Windows, a reparse point is opened itself), must still be a regular file as the handle shows it, and is read to 64 KiB at most. A FIFO, a symlink or any other entry there is `unsupported_layout`. A `.git` may still be a symlink to a directory, as libgit2 follows it.
    - **Every root passes main's check** ([step 7](#the-recommendation)): none is, contains, or lies inside a protected root. So a repository at the user's home is refused, since it contains Freedom's data.
    - **The grant:** read only on exactly those roots, read and write on the home, and no network: no TCP rule (ABI 4), and seccomp refuses every socket family.
+   - **The memory cap:** the service's, set in the same step, with the same fail-stop ([The memory cap](#the-memory-cap)).
    - **Unsupported layouts are refused** with `unsupported_layout`, before anything changes: a root that fails the check, or more roots or depth than the bound. Anything libgit2 then reads outside the roots, such as a configuration `include`, fails the source's open, which comes before the import starts.
      - **The bounds:** at most 16 roots; a `.git` file, `commondir` or alternates file of at most 64 KiB; alternates listed by an objects directory past depth 5 (which libgit2 would silently ignore) are refused, as is an alternate relative without a leading `.`, which libgit2 reads from the process's working directory. A path that isn't valid Unicode is refused too: main names it in JSON, and libgit2's local transport takes a string.
      - **The refusal is an answer:** a layout that can't be granted confines the process with no root, and `rad.import_repo` answers `unsupported_layout`, after its params, `needs_vault` and the path check.
@@ -597,6 +622,11 @@ Through the binary, in CI's job for each OS:
   - **policy changes:** `direct` → `socks5` → `direct`, and Arti's port P → Q. Each runs in a new generation with the new `--network`; the old generation's process has exited; and a private instance, recreated after each change, gets the new rules;
   - **NAT64 discovery:** a fake resolver on a loopback address, listed in a fixture resolver file, sees one AAAA query for `ipv4only.arpa` per refresh. From `freedom-ipfsd` it sees no other DNS. `freedom-radicled`'s ordinary lookups use the system resolver in `direct` mode (0008), so for it the check is that discovery sends nothing else.
   - **NAT64's named zones,** confined with `freedom-ipfsd`'s `direct` policy: `fe80::1%lo` is looked up through `SIOCGIFINDEX`, a numeric zone needs no lookup, and an unknown name stays unaskable. Without the `ioctl` rule, the control, the named zone is unaskable, and so it is under the `socks5` policy, which has no rule;
+- **The memory cap:**
+  - each process, both IPFS processes, `freedom-radicled` and the import process, reports `memory_cap` as 2 GiB, read back, on Linux and Windows, and null with `unsupported` on macOS;
+  - on Linux, a test hook's `setrlimit` that raises the hard limit fails, and an inherited lower limit is kept; on Windows, the job reads back `JOB_OBJECT_LIMIT_JOB_MEMORY` with its value beside the active-process limit;
+  - **fail-stop,** with the cap lowered by a test hook to a few MiB above the process's baseline, on Linux and Windows: a Rust allocation past it aborts the process; in `freedom-ipfsd` an SQLite allocation past it (a memory store a test hook fills, its page cap lifted), and in `freedom-radicled` a libgit2 one (a large object inflated), each end it with exit 71, and no request is answered with an out-of-memory error. Main restarts it as after a crash;
+  - on Linux, a clean file mapped larger than the cap (a pack through libgit2) doesn't trip it.
 - **Reporting:**
   - `hello` reports the mechanism and each property's status;
   - where CI's kernel offers Landlock, the test requires the ABI it offers, so a silent downgrade fails CI.
@@ -672,5 +702,7 @@ Each is decided (the user, 2026-10-23), as recommended. The options weighed stay
   - **Decided: the `landlock` and `seccompiler` crates, pinned to exact versions,** with `cargo deny` checking them.
 - **D7. `freedom-cored`:** confine it too, in a later design, or not.
   - **Decided: confine it too, in a later design.**
+
+- **The memory cap,** decided by the user on 2026-11-25 as 0007's question 9 and 0008's question 10, which their amendments record: 2 GiB where the operating system enforces one, set here ([The memory cap](#the-memory-cap)). Its fail-stop, every out-of-memory ending the process, is the coordinator's call (from Codex's review of #503), which the user may veto.
 
 Radicle key custody, with the AGENTS.md rules around it, is 0008's, decided there (open questions 2 and 3, #98).
