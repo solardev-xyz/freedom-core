@@ -2306,3 +2306,53 @@ fn a_refused_change_changes_nothing_a_request_reads() {
     raw_soc(&mut thread);
     assert!(matches!(thread.run(), Outcome::Result(_)));
 }
+
+/// Writes to one topic go one at a time (`withWriteLock`): a feed write
+/// asks for its topic's turn once its batch is chosen, and asks nothing
+/// more until the turn is its own; the index lookup comes after.
+#[test]
+fn a_feed_write_waits_for_its_topics_turn() {
+    let text = text_of("keys.json");
+    let index = Index::new(&text).unwrap();
+    let keys = keys(&index);
+    let (key, mut store) = feed_site();
+    let record = fc_json::parse(&format!(
+        r#"{{"topic":"t","owner":"o","manifestReference":"{}","identityId":"bee-wallet"}}"#,
+        "cd".repeat(32)
+    ))
+    .unwrap();
+    store
+        .set_feed(&key, &JsString::from("blog"), &record, 1)
+        .unwrap();
+    let mut thread = Thread::new(site_world(&key, store), &keys, WriteNode::new());
+    thread.node.stamps = Some(
+        r#"{"stamps":[{"batchID":"a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1","utilization":0,"usable":true,"label":"freedom","depth":22,"amount":"100000000000","bucketDepth":16,"blockNumber":1000,"immutableFlag":true,"exists":true,"batchTTL":864000}]}"#
+            .to_owned(),
+    );
+    thread.start(&Call {
+        method: Value::str("swarm_updateFeed"),
+        params: Value::object([
+            ("feedId", Value::str("blog")),
+            ("reference", Value::str(&"ef".repeat(32))),
+        ]),
+        key: key.clone(),
+        approval: Some(Approval::User),
+    });
+    let lock = thread
+        .run_until(|need| matches!(need, Need::Lock(_)))
+        .expect("the topic's turn");
+    assert_eq!(
+        lock.need,
+        Need::Lock(fc_swarm::feed::topic("https://app.example/blog"))
+    );
+    let forms =
+        |thread: &Thread<'_>| -> Vec<Form> { thread.calls.iter().map(|c| c.call.form).collect() };
+    assert_eq!(forms(&thread), [Form::Stamps]);
+    assert!(thread.queue.is_empty(), "nothing more asked meanwhile");
+    thread.answer(lock);
+    assert!(matches!(thread.run(), Outcome::Result(_)));
+    assert_eq!(
+        forms(&thread),
+        [Form::Stamps, Form::FeedHead, Form::Chunk, Form::SocUp]
+    );
+}
